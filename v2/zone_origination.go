@@ -75,10 +75,31 @@ var originationRuleAppTypes = map[AppType]bool{AppTypeAuth: true}
 // zone the app goes on to sign. For a registered app the gates act where the
 // content would be written instead.
 //
+// One thing a registered app's relayed zone does that tdns-auth's does not:
+// it keeps a record of the serial it serves (relayedZoneRecordsItsSerial).
+//
 // Call it from the derived package's init, beside its other registrations:
 // the map is read without a lock, and the rule has to hold before the first
 // zone is loaded.
 func RegisterOriginationRuleAppType(t AppType) { originationRuleAppTypes[t] = true }
+
+// relayedZoneRecordsItsSerial says whether a zone that may not originate
+// content keeps a record of the serial it serves, in OutgoingSerials.
+//
+// A tdns-auth secondary keeps none, and the record it had is deleted
+// (MUST-NOT-MODIFY, Fix A). A registered derived app's relayed zone keeps one:
+// such an app turns a zone from relayed to signed by itself, from what the
+// zone says, and the turn can fall across a restart. The first load of the
+// zone it now signs starts from its new upstream's serial, which may be far
+// below the one it was serving, and the servers downstream of it hold that
+// one and would not transfer. With the record the first load lands past it,
+// as it does for any zone that originates (#655).
+//
+// The record of a relayed zone is the serial it serves, set at every publish,
+// so a serial the zone counted before it became a relay does not stay in it.
+func relayedZoneRecordsItsSerial() bool {
+	return Globals.App.Type != AppTypeAuth && originationRuleAppTypes[Globals.App.Type]
+}
 
 // originationAPICommands are the /zone and /zone/childsync API commands that make
 // the server ORIGINATE content: they either write into the zone or advance its

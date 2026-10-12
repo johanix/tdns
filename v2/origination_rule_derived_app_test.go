@@ -342,8 +342,10 @@ func TestRegisteredAppRelaysTheUpstreamSerial(t *testing.T) {
 			z.notified(t)
 			z.wantServed(t, 44, "after a refresh that followed the re-fetches")
 
-			if _, err := kdb.LoadOutgoingSerial(ovZone); err == nil {
-				t.Fatal("a relayed zone recorded a published serial")
+			// The record of a relayed zone is the serial it serves, so that
+			// a zone the app starts to sign across a restart can land past it.
+			if got, err := kdb.LoadOutgoingSerial(ovZone); err != nil || got != 44 {
+				t.Fatalf("the relayed zone's recorded serial is %d (err %v), want the 44 it serves", got, err)
 			}
 
 			// The rest of the rule holds too. Nothing of the daemon's own
@@ -373,8 +375,8 @@ func TestRegisteredAppRelaysTheUpstreamSerial(t *testing.T) {
 
 // The upgrade: the keystore of a relayed zone that counted its own serial
 // holds the highest serial it published, ahead of the upstream's. The first
-// load does not land past it, and the record is deleted, so no later start
-// finds it either.
+// load does not land past it, and the record becomes the serial the zone
+// serves, so no later start finds the counted one either.
 func TestRegisteredAppRelayDropsTheSerialItCountedBefore(t *testing.T) {
 	kdb := asDerivedApp(t, derivedSignerApp)
 	registerTestOriginationRuleApp(t, derivedSignerApp)
@@ -387,8 +389,61 @@ func TestRegisteredAppRelayDropsTheSerialItCountedBefore(t *testing.T) {
 	up := startRelayUpstream(t, 44)
 	z := startRelayedZone(t, kdb, up, nil, nil)
 	z.wantServed(t, 44, "after the first load over a record of 47")
-	if got, err := kdb.LoadOutgoingSerial(ovZone); err == nil {
-		t.Fatalf("the record of the counted serial is still there: %d", got)
+	if got, err := kdb.LoadOutgoingSerial(ovZone); err != nil || got != 44 {
+		t.Fatalf("the recorded serial is %d (err %v), want the 44 the zone serves: the 47 it counted before is gone", got, err)
+	}
+	z.halt()
+	again := startRelayedZone(t, kdb, up, nil, nil)
+	again.wantServed(t, 44, "after a restart")
+}
+
+// A relayed zone the app starts to sign across a restart goes on from one past
+// the serial it was serving. Its upstream is another one from then on, with a
+// serial of its own, here far below; the servers downstream of the zone hold
+// the serial it relayed and would not transfer a lower one. The record of the
+// relayed serial is what the first load lands past.
+func TestRegisteredAppZoneThatStartsToSignAcrossARestartGoesOnPastWhatItRelayed(t *testing.T) {
+	kdb := asDerivedApp(t, derivedSignerApp)
+	registerTestOriginationRuleApp(t, derivedSignerApp)
+
+	var signs atomic.Bool
+	prepare := func(zd *ZoneData) {
+		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(_, incoming *ZoneData) {
+			if on := signs.Load(); incoming.Options[OptInlineSigning] != on {
+				incoming.Options[OptInlineSigning] = on
+			}
+		})
+	}
+	up := startRelayUpstream(t, 40)
+	z := startRelayedZone(t, kdb, up, nil, prepare)
+	up.publish(t, 43)
+	z.notified(t)
+	z.wantServed(t, 43, "relayed, after a refresh")
+
+	z.halt()
+	signs.Store(true)
+	up.publish(t, 7)
+	again := startRelayedZone(t, kdb, up, nil, prepare)
+	if got := again.served(t); got != 44 {
+		t.Fatalf("the zone the app started to sign across a restart serves %d, want 44: one past the 43 it relayed, not its new upstream's 7", got)
+	}
+	up.publish(t, 8)
+	again.notified(t)
+	if got := again.served(t); got != 45 {
+		t.Fatalf("after a refresh the signed zone serves %d, want 45: its own count", got)
+	}
+
+	// And back: the app stops signing the zone across another restart. It
+	// relays again, at its upstream's serial, and the record follows it down,
+	// so the count it kept while it signed is not what a later start lands
+	// past.
+	again.halt()
+	signs.Store(false)
+	up.publish(t, 20)
+	relay := startRelayedZone(t, kdb, up, nil, prepare)
+	relay.wantServed(t, 20, "relayed again, after a restart")
+	if got, err := kdb.LoadOutgoingSerial(ovZone); err != nil || got != 20 {
+		t.Fatalf("the recorded serial is %d (err %v), want the 20 the zone relays", got, err)
 	}
 }
 

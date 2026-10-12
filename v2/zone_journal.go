@@ -132,7 +132,10 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 		return nil, err
 	}
 	info.PublishedSerial, info.HavePublished = published, havePublished
-	info.RestartLifts = havePublished && serialNewer(published, fileSerial)
+	// A zone that may not originate content is never lifted: it comes back at
+	// its upstream's serial. A registered derived app's relayed zone has a
+	// record all the same (relayedZoneRecordsItsSerial).
+	info.RestartLifts = havePublished && serialNewer(published, fileSerial) && zoneMayOriginateContent(zd)
 
 	for _, d := range deltas {
 		info.Records += len(d.RRs)

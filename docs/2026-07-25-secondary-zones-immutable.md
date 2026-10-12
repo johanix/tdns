@@ -1010,8 +1010,8 @@ applying it gives the right answer zone by zone: a zone the app signs keeps
 a serial of its own, a zone it relays mirrors the upstream.
 
 What a registered app gets is the whole rule, not the serial alone. Fix A
-(the mirror at a refresh and at the first load, no outbound serial mode, no
-recorded published serial), Fix C (the API refuses `bump` and the other
+(the mirror at a refresh and at the first load, no outbound serial mode; the
+serial record differs, see below), Fix C (the API refuses `bump` and the other
 origination commands), Fix D (the updater refuses a zone change) and Fix E
 (no SOA re-sign) all engage for a zone of its that is neither a primary nor
 inline-signing, and so do the later gates built on the predicate: the
@@ -1027,13 +1027,30 @@ would be written. The cost is that a misplaced option on a relayed zone is
 not reported as a config warning there; the write it asks for is refused
 and logged when it is tried.
 
-Two consequences of the rule a registered app must know:
+The serial record is the second exception. A tdns-auth secondary that may
+not originate records no published serial, and the record it had is deleted
+(§3, Fix A). The relayed zone of a registered app keeps a record: the serial
+it serves, set at every publish. Such an app turns a zone from relayed to
+signed by itself, from what the zone says, and the turn can fall across a
+restart. The zone it now signs is then loaded from a new upstream, whose
+serial may be far below the one the zone was serving; the servers downstream
+of it hold that one and do not transfer a lower one. With the record, the
+first load of the zone lands one past the serial it relayed, as the first
+load of any zone that originates lands past its published serial (#655).
+While the app runs through the turn, the zone goes on from one past the
+serial it was serving, with or without the record.
 
-- A relayed zone records no published serial, and the record it had is
-  deleted (§3, Fix A). A zone that turns from relayed to signed while the
-  app runs goes on from one past the serial it was serving. A zone that makes
-  that turn across a restart has no record to land past: its first load as a
-  signed zone starts from the serial its upstream has then.
+The record is set, not raised: a relayed zone's serial is its upstream's and
+may be below one the zone counted for itself earlier, as a signed zone or
+under a build that counted for relayed zones too. That earlier count does not
+stay in the record, which is what "clear them out" (§12, item 3) asks for.
+A relayed zone is never lifted past its record; it serves its upstream's
+serial.
+
+One consequence of the rule a registered app must know:
+
 - §8 applies as written: a relayed zone that had counted its serial ahead
   drops to the upstream's serial, and a downstream that holds the higher one
   does not transfer until it is forced to, or until the upstream passes it.
+  That is so after an upgrade, and each time a zone turns from signed to
+  relayed.

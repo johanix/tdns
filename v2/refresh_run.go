@@ -112,10 +112,16 @@ func applyOutboundSerialAfterRefresh(zd *ZoneData, zone string) {
 	// config reload never passes through initialLoadZone, so a row persisted
 	// before that would survive, and a later flip back would let
 	// LoadOutgoingSerial resurrect an inflated serial.
+	//
+	// Not for the relayed zone of a registered derived app: its row is the
+	// serial it serves, written by the publish (relayedZoneRecordsItsSerial),
+	// so there is no inflated value in it to clear.
 	if !zoneMayOriginateContent(zd) {
-		if err := zd.KeyDB.DeleteOutgoingSerial(zone); err != nil {
-			lgEngine.Warn("failed to clear persisted outgoing serial for mirroring secondary",
-				"zone", zone, "err", err)
+		if !relayedZoneRecordsItsSerial() {
+			if err := zd.KeyDB.DeleteOutgoingSerial(zone); err != nil {
+				lgEngine.Warn("failed to clear persisted outgoing serial for mirroring secondary",
+					"zone", zone, "err", err)
+			}
 		}
 		return
 	}

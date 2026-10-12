@@ -236,11 +236,16 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		// MUST-NOT-MODIFY: neither outbound mode may rewrite the serial of a
 		// tdns-auth secondary that did not originate this content. Clear any
 		// serial persisted before the zone became a mirror, so the inflated
-		// legacy value cannot be resurrected by a later change here.
+		// legacy value cannot be resurrected by a later change here. The
+		// relayed zone of a registered derived app keeps its row: the publish
+		// of this load has just set it to the serial the zone serves
+		// (relayedZoneRecordsItsSerial).
 		if zd.KeyDB != nil && !zoneMayOriginateContent(zd) {
-			if err := zd.KeyDB.DeleteOutgoingSerial(zone); err != nil {
-				lgEngine.Warn("failed to clear persisted outgoing serial for mirroring secondary",
-					"zone", zone, "err", err)
+			if !relayedZoneRecordsItsSerial() {
+				if err := zd.KeyDB.DeleteOutgoingSerial(zone); err != nil {
+					lgEngine.Warn("failed to clear persisted outgoing serial for mirroring secondary",
+						"zone", zone, "err", err)
+				}
 			}
 		} else if zd.KeyDB != nil {
 			serialChanged := false
