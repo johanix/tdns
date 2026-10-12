@@ -1054,3 +1054,27 @@ One consequence of the rule a registered app must know:
   does not transfer until it is forced to, or until the upstream passes it.
   That is so after an upgrade, and each time a zone turns from signed to
   relayed.
+
+### Options the daemon sets at run time
+
+A registered app decides at a refresh, from what the zone says, whether it
+signs the zone, and switches `inline-signing` on or off accordingly. That
+option is in no configuration. A config update (`config reload-zones`, a zone
+reload) replaces a zone's options with the configured ones, in two places:
+where the configuration is parsed for a zone that is already loaded, and
+where the refresh engine takes the options a config-bearing refresher
+carries. Both took the switch away, until the app set it again at the next
+transfer. `config reload-zones` forces that transfer, so the gap was short
+there; any other config update left the zone, by its options, one the daemon
+does not sign until its upstream next changed.
+
+Before the rule applied to such an app that had little effect. With it, every
+gate of this design reads the switch: in the gap a zone the daemon signs
+refuses a change of the daemon's own, and a refresh that was under way when
+the options were replaced takes the upstream's serial for it.
+
+`SetRuntimeOption` records an option the daemon set by itself beside the
+configured ones, and both places lay the record over what the configuration
+gives. For that option the daemon's word replaces the configuration's, on or
+off, until the daemon says otherwise. Nothing changes for a zone with no such
+option, which is every zone of tdns-auth.

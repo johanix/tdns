@@ -937,7 +937,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							newOpts := zd.Options
 							if zr.Options != nil {
-								newOpts = zr.Options
+								// The configured options, with the ones the
+								// daemon set by itself laid over them: those
+								// are in no configuration, and a reload must
+								// not take them away (SetRuntimeOption).
+								newOpts = zd.withRuntimeOptionsLocked(zr.Options)
 							}
 							newSerial := zd.OutboundSoaSerial
 							if zr.ConfigUpdate {

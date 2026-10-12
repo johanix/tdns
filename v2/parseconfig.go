@@ -1421,7 +1421,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// Likewise whether the resolver's source for the zone changes: what it
 		// holds about the zone came from the source it no longer uses.
 		sourceChanged := zdp.Options[OptModifiedDownstream] != newOpts[OptModifiedDownstream]
-		zdp.Options = newOpts
+		// An option the daemon set by itself is not in the file; a reload
+		// must not take it away (SetRuntimeOption).
+		zdp.Options = zdp.withRuntimeOptionsLocked(newOpts)
 		zdp.publishCadence = publishCadence
 		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
 		zdp.zonemdScheme = zonemdSet.Scheme

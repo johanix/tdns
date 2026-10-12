@@ -603,3 +603,132 @@ func TestOriginationRuleAppliesToARegisteredAppType(t *testing.T) {
 		t.Errorf("the normalizer stripped a registered app's options: suppressed %v, mode %q, %q", suppressed, mode, msg)
 	}
 }
+
+// An option the daemon set by itself (SetRuntimeOption) is in no
+// configuration, and a config update replaces a zone's options with the
+// configured ones. The update must not take the option away: until the daemon
+// set it again, at the next transfer and not before, the zone would be one it
+// does not sign, and under the origination rule that is a zone that mirrors
+// its upstream's serial and refuses a change of the daemon's own.
+func TestRuntimeOptionSurvivesAConfigUpdate(t *testing.T) {
+	kdb := asDerivedApp(t, derivedSignerApp)
+	registerTestOriginationRuleApp(t, derivedSignerApp)
+
+	var signs atomic.Bool
+	signs.Store(true)
+	prepare := func(zd *ZoneData) {
+		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(served, _ *ZoneData) {
+			served.SetRuntimeOption(OptInlineSigning, signs.Load())
+		})
+	}
+	inline := func(z *relayedZone) bool {
+		z.zd.mu.Lock()
+		defer z.zd.mu.Unlock()
+		return z.zd.Options[OptInlineSigning]
+	}
+	up := startRelayUpstream(t, 40)
+	z := startRelayedZone(t, kdb, up, nil, prepare)
+	if !inline(z) {
+		t.Fatal("the option the daemon set at the first load is not on")
+	}
+	up.publish(t, 50)
+	z.notified(t)
+	if got := z.served(t); got != 41 {
+		t.Fatalf("the zone the daemon signs serves %d, want 41: its own count, not the upstream's 50", got)
+	}
+
+	// A config update with nothing new upstream: no transfer follows, so
+	// nothing sets the option again.
+	z.run(t, z.configRefresher())
+	if !inline(z) {
+		t.Fatal("a config update took away the option the daemon set by itself")
+	}
+	if msg := zoneOriginationRefusal(z.zd, "bump"); msg != "" {
+		t.Fatalf("after a config update the zone the daemon signs refuses a bump: %s", msg)
+	}
+	if got := z.served(t); got != 41 {
+		t.Fatalf("after a config update the zone serves %d, want the 41 it served", got)
+	}
+
+	// The same through `config reload-zones`, which fetches the zone again:
+	// the zone counts on, it does not drop to its upstream's serial.
+	z.reloaded(t)
+	if got := z.served(t); got != 42 {
+		t.Fatalf("after a forced re-fetch the zone serves %d, want 42: its own count", got)
+	}
+
+	// The daemon's word, not the option's history: once it says the zone is
+	// not its to sign, a config update does not bring the option back.
+	signs.Store(false)
+	up.publish(t, 51)
+	z.notified(t)
+	if inline(z) {
+		t.Fatal("the option is still on after the daemon switched it off")
+	}
+	z.run(t, z.configRefresher())
+	if inline(z) {
+		t.Fatal("a config update switched on an option the daemon had switched off")
+	}
+}
+
+// The overlay itself: the configured options are the caller's and are not
+// changed, and a zone with no run-time option gets them back as they are.
+func TestRuntimeOptionsAreLaidOverTheConfiguredOnes(t *testing.T) {
+	zd := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{}}
+	configured := map[ZoneOption]bool{OptAllowUpdates: true}
+
+	zd.mu.Lock()
+	got := zd.withRuntimeOptionsLocked(configured)
+	zd.mu.Unlock()
+	if len(got) != 1 || !got[OptAllowUpdates] {
+		t.Fatalf("with no run-time option: %v, want the configured options", got)
+	}
+
+	zd.SetRuntimeOption(OptInlineSigning, true)
+	zd.mu.Lock()
+	got = zd.withRuntimeOptionsLocked(configured)
+	zd.mu.Unlock()
+	if !got[OptInlineSigning] || !got[OptAllowUpdates] {
+		t.Fatalf("with inline-signing set at run time: %v, want it beside the configured option", got)
+	}
+	if configured[OptInlineSigning] || len(configured) != 1 {
+		t.Fatalf("the configured options were changed: %v", configured)
+	}
+
+	// Off is the daemon's word too: it replaces a configured on.
+	zd.SetRuntimeOption(OptInlineSigning, false)
+	zd.mu.Lock()
+	got = zd.withRuntimeOptionsLocked(map[ZoneOption]bool{OptInlineSigning: true})
+	zd.mu.Unlock()
+	if got[OptInlineSigning] {
+		t.Fatal("a configured inline-signing won over the daemon switching it off")
+	}
+}
+
+// The other place a reload replaces a zone's options: ParseZones, when it
+// reads the configuration of a zone that is already loaded. The option the
+// daemon set by itself stays there too, and an option the reload adds to the
+// configuration arrives beside it.
+func TestRuntimeOptionSurvivesAReparseOfTheZoneConfiguration(t *testing.T) {
+	withAppType(t, derivedSignerApp)
+	registerTestOriginationRuleApp(t, derivedSignerApp)
+	zd := testSnapshotZone(t, ovZone, ovUpstreamZone(40))
+	zd.Options = map[ZoneOption]bool{}
+	zd.SetRuntimeOption(OptInlineSigning, true)
+
+	conf := &Config{Zones: []ZoneConf{{Name: ovZone, Type: "primary", Store: "map",
+		Zonefile: "/nonexistent", OptionsStrs: []string{"fold-case"}}}}
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	if _, _, err := conf.ParseZones(context.Background(), true); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	zd.mu.Lock()
+	inline, fold := zd.Options[OptInlineSigning], zd.Options[OptFoldCase]
+	zd.mu.Unlock()
+	if !inline {
+		t.Fatal("the reload took away the option the daemon set by itself")
+	}
+	if !fold {
+		t.Fatal("the reload did not install the option the configuration added")
+	}
+}
