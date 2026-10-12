@@ -81,8 +81,11 @@ var originationOptions = []ZoneOption{
 // (empty if nothing was suppressed).
 //
 // It is a no-op unless the zone is a tdns-auth secondary that may not originate
-// content — the same predicate every other gate uses, so off tdns-auth this
-// changes nothing at all and the derived apps keep their own rules (§1.1).
+// content, so off tdns-auth this changes nothing at all and the derived apps
+// keep their own rules (§1.1). That includes a derived app that registered for
+// the origination rule (RegisterOriginationRuleAppType): the other gates engage
+// for its zones, this one does not, because such an app may switch
+// inline-signing on after the configuration is parsed.
 //
 // The caller owns the maps it passes in; this function does not mutate them.
 //
@@ -94,7 +97,8 @@ func normalizeOptionsForRole(appType AppType, ztype ZoneType, opts map[ZoneOptio
 	effective map[ZoneOption]bool, effectiveSerialMode string, suppressed map[ZoneOption]bool, msg string) {
 
 	// Mirrors zoneMayOriginateContent, but on loose values: this runs during
-	// config parsing, before a ZoneData necessarily exists.
+	// config parsing, before a ZoneData necessarily exists. For tdns-auth
+	// alone, deliberately: see RegisterOriginationRuleAppType.
 	mayOriginate := appType != AppTypeAuth || ztype == Primary || opts[OptInlineSigning]
 	if mayOriginate {
 		return opts, serialMode, nil, ""

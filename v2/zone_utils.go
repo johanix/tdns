@@ -1920,7 +1920,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 
 		// A childsync-proxy publishes nothing into its OWN copy of the zone.
 		// That copy is replaced by the next transfer, and
-		// zoneMayOriginateContent is true off tdns-auth by design, so no
+		// zoneMayOriginateContent is true for tdns-agent by design, so no
 		// gate below would stop the update: it would be applied and silently
 		// lost (design §3.1). The advertisement, receiver key included,
 		// reaches the parent primary through the proxy reconciler (§5.3).
@@ -1934,8 +1934,8 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		} else {
 			// An agent secondary with childsync but not childsync-proxy
 			// publishes the advertisement into a copy the next transfer
-			// replaces (design §3.1), and no origination gate stops it off
-			// tdns-auth. The option gate cannot see this case; say it here.
+			// replaces (design §3.1), and no origination gate stops it on
+			// tdns-agent. The option gate cannot see this case; say it here.
 			// Multi-provider zones are tdns-mp's and excluded, as in the
 			// parentsync branch below.
 			if Globals.App.Type == AppTypeAgent && zd.ZoneType == Secondary && !zd.Options[OptMultiProvider] {
