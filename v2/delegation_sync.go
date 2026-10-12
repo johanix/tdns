@@ -98,9 +98,15 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 
 			case "SYNC-DS":
 				// The KSK rollover engine's DS push (delsync_ds.go). The
-				// engine waits for the answer with a deadline, so this runs
-				// now and is never deferred.
-				handleDSSync(ctx, kdb, notifyq, imr(), ds)
+				// engine waits for the answer with a deadline, so this
+				// starts now and is never deferred; and it runs on its own
+				// goroutine, because a delivery is a parent round trip, a
+				// NOTIFY path a CDS publish through the zone updater first,
+				// and this loop is the queue's only reader: the updater
+				// enqueues every delegation change here from afterPublish,
+				// so a loop that waited here while the queue filled would
+				// hold the updater, which the CDS publish needs.
+				go handleDSSync(ctx, kdb, notifyq, imr(), ds)
 				continue
 
 			case "SIGNALS-EDITED":

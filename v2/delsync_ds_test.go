@@ -354,6 +354,83 @@ func TestTheSyncDSArmAnswersWhatItCannotRun(t *testing.T) {
 	}
 }
 
+// The syncher starts a SYNC-DS and goes on reading its queue: a delivery
+// is a parent round trip, and the loop is the queue's only reader. Two
+// requests whose zone has no IMR to find a target are both answered, the
+// second not after the first.
+func TestTheSyncherKeepsReadingWhileASyncDSRuns(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := dsSyncTestZone(t)
+	zd.KeyDB = kdb
+	seedKeyWithIndex(t, kdb, zd.ZoneName, DnskeyStateActive, pubA, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := make(chan DelegationSyncRequest, 1)
+	conf := &Config{}
+	conf.Internal.ImrReady = NewImrReadiness()
+	go func() { _ = kdb.DelegationSyncher(ctx, q, nil, conf) }()
+
+	// a delivery that waits: its deadline is far, and SyncDSWithParent
+	// returns at once for a zone without an IMR, so the answer is what is
+	// read; two of them, back to back
+	resps := [2]chan DSSyncResponse{make(chan DSSyncResponse, 1), make(chan DSSyncResponse, 1)}
+	for i := range resps {
+		select {
+		case q <- DelegationSyncRequest{Command: "SYNC-DS", ZoneName: zd.ZoneName, ZoneData: zd,
+			DSSync: &DSSyncRequest{Deadline: time.Now().Add(time.Minute)}, DSResponse: resps[i]}:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("request %d: the syncher did not take it", i)
+		}
+	}
+	for i := range resps {
+		select {
+		case r := <-resps[i]:
+			if r.Err == nil || r.Result.Category != SoftfailChildConfigLocalError {
+				t.Errorf("request %d answered %+v, want a local error (no IMR)", i, r)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("request %d was not answered", i)
+		}
+	}
+}
+
+// The DS set the API path sends is the UPDATE path's: from the same
+// snapshot, with the same policy. A TTL the key's record carries is kept
+// by both; for a record without one the policy's ttls.ds applies, and
+// without the policy, as the API path used to build its set, the DS goes
+// out with TTL 0 and the parent stores that.
+func TestTheApiDSSetCarriesThePolicyTTL(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := dsSyncTestZone(t)
+	zd.KeyDB = kdb
+	seedKeyWithIndex(t, kdb, zd.ZoneName, DnskeyStateActive, pubA, 0)
+	snap, err := loadRolloverTargetSnapshot(kdb, zd.ZoneName)
+	if err != nil {
+		t.Fatalf("target snapshot: %v", err)
+	}
+	pol := dsSyncPolicy(DsyncSchemePreferenceAuto)
+	pol.TTLS.DS = 300
+	child := dns.Fqdn(zd.ZoneName)
+	for _, p := range []*DnssecPolicy{pol, nil} {
+		set, err := dsSetFromSnapshot(snap, child, uint8(dns.SHA256), p)
+		if err != nil || len(set) != 1 || set[0].Header().Ttl != 3600 {
+			t.Errorf("policy %v: DS set %v err %v, want one DS with the record's TTL 3600", p != nil, set, err)
+		}
+	}
+
+	bare := &RolloverTargetKeySnapshot{Rows: []kskForDSRow{{keyid: 1, flags: 257,
+		keyrr: child + " 0 IN DNSKEY 257 3 15 " + pubA}}}
+	set, err := dsSetFromSnapshot(bare, child, uint8(dns.SHA256), pol)
+	if err != nil || len(set) != 1 || set[0].Header().Ttl != 300 {
+		t.Errorf("no TTL on the record, with the policy: DS set %v err %v, want one DS with the policy's 300", set, err)
+	}
+	set, err = dsSetFromSnapshot(bare, child, uint8(dns.SHA256), nil)
+	if err != nil || len(set) != 1 || set[0].Header().Ttl != 0 {
+		t.Errorf("no TTL on the record, no policy: DS set %v err %v, want one DS with TTL 0", set, err)
+	}
+}
+
 // The blocker line names the config when parentsync.schemes is empty (the
 // parent was never asked), and the parent otherwise.
 func TestRolloverBlockerTextNamesTheConfigWhenNoSchemeIsConfigured(t *testing.T) {

@@ -212,7 +212,7 @@ func (zd *ZoneData) SyncDSWithParent(ctx context.Context, kdb *KeyDB, notifyq ch
 			res, perr := zd.sendDSViaNotify(ctx, kdb, notifyq, snap, pol, ch.Target)
 			return pathResultLite{scheme: "NOTIFY", res: res, err: perr}
 		case core.SchemeAPI:
-			res, perr := zd.sendDSViaApi(ctx, kdb, imr, snap, ch.Target)
+			res, perr := zd.sendDSViaApi(ctx, kdb, imr, snap, pol, ch.Target)
 			return pathResultLite{scheme: "API", res: res, err: perr}
 		}
 		return pathResultLite{
@@ -783,7 +783,7 @@ func notifyTimeoutFromPolicy(pol *DnssecPolicy) time.Duration {
 // The target is the one the plan resolved; nothing is rediscovered. An API
 // target carries no addresses by design: the URI published at it names the
 // host that resolves.
-func (zd *ZoneData) sendDSViaApi(ctx context.Context, kdb *KeyDB, imr *Imr, snap *RolloverTargetKeySnapshot,
+func (zd *ZoneData) sendDSViaApi(ctx context.Context, kdb *KeyDB, imr *Imr, snap *RolloverTargetKeySnapshot, pol *DnssecPolicy,
 	target *DsyncTarget) (KSKDSPushResult, error) {
 
 	var out KSKDSPushResult
@@ -802,10 +802,11 @@ func (zd *ZoneData) sendDSViaApi(ctx context.Context, kdb *KeyDB, imr *Imr, snap
 		return out, fmt.Errorf("sendDSViaApi: parent zone: %w", err)
 	}
 
-	// The same set the UPDATE path sends, from the same snapshot, so the
-	// transports never disagree about what is being published. The DS TTL
-	// is the parent's to choose over this scheme, as it is for NS and glue.
-	dsSet, err := dsSetFromSnapshot(snap, child, uint8(dns.SHA256), nil)
+	// The same set the UPDATE path sends, from the same snapshot and with
+	// the same TTL (the policy's ttls.ds), so the transports never disagree
+	// about what is being published: the parent stores the RRset as sent,
+	// TTL included, and reads nothing back of it.
+	dsSet, err := dsSetFromSnapshot(snap, child, uint8(dns.SHA256), pol)
 	if err != nil {
 		out.Category = SoftfailChildConfigLocalError
 		return out, err
