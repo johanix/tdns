@@ -76,7 +76,8 @@ const (
 type dsEngineCmd uint8
 
 const (
-	// dsCmdPublishRolloverCDS: the rollover engine's NOTIFY push.
+	// dsCmdPublishRolloverCDS: the NOTIFY path of the rollover's DS delivery
+	// (delsync_ds.go).
 	dsCmdPublishRolloverCDS dsEngineCmd = iota + 1
 	// dsCmdReleaseRolloverCDS: the rollover engine's cleanup triggers.
 	dsCmdReleaseRolloverCDS

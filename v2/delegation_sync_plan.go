@@ -56,6 +56,8 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -96,6 +98,12 @@ type SkippedScheme struct {
 	Scheme string
 	Reason string
 }
+
+// reasonNoSchemesConfigured is the "all" skip of a plan built with an empty
+// parentsync.schemes: the config names no scheme, so the parent was never
+// asked. The rollover's blocker line reads it to say the config, not the
+// parent (rolloverBlockerText).
+const reasonNoSchemesConfigured = "no schemes configured in parentsync.schemes"
 
 // ParentSyncPlan is the result of ONE DSYNC discovery: everything the caller
 // needs to get a delegation change to the parent, or to explain why it cannot.
@@ -255,7 +263,7 @@ func (zd *ZoneData) evaluateSchemes(ctx context.Context, kdb *KeyDB, imr *Imr,
 	}
 	if len(schemes) == 0 {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{
-			Scheme: "all", Reason: "no schemes configured in parentsync.schemes"})
+			Scheme: "all", Reason: reasonNoSchemesConfigured})
 		return
 	}
 
@@ -490,14 +498,48 @@ func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncR
 	plan.use(SyncCandidate{Scheme: "NOTIFY", Target: target})
 }
 
-// Address resolution for the DNS-carrying schemes reuses resolveDsyncTarget
-// (ksk_rollover_schemes.go), which was factored out of LookupDSYNCTarget for
-// exactly this reason: to let a caller that already holds the DSYNC RR resolve
-// its target without a second discovery query. It goes through the IMR rather
-// than net.LookupHost -- the stdlib resolver consults /etc/resolv.conf, which
-// in a DNS training lab is not the view of the namespace the rest of this code
-// is working in. BestSyncScheme, which resolved with net.LookupHost, was the
+// resolveDsyncTarget resolves a DSYNC RR's Target FQDN to A/AAAA addresses
+// through the IMR: the address-resolution loop of LookupDSYNCTarget, factored
+// out so a caller that already holds the DSYNC RR resolves its target without
+// a second discovery query. It goes through the IMR rather than
+// net.LookupHost: the stdlib resolver consults /etc/resolv.conf, which in a
+// DNS training lab is not the view of the namespace the rest of this code is
+// working in. BestSyncScheme, which resolved with net.LookupHost, was the
 // last caller doing that and is gone.
+func resolveDsyncTarget(ctx context.Context, imr *Imr, rr *core.DSYNC) (*DsyncTarget, error) {
+	target := dns.Fqdn(rr.Target)
+	var addrs []string
+	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		resp, qerr := imr.ImrQuery(ctx, target, qtype, dns.ClassINET, nil)
+		if qerr != nil {
+			continue
+		}
+		if resp.Error || resp.RRset == nil {
+			continue
+		}
+		for _, r := range resp.RRset.RRs {
+			switch v := r.(type) {
+			case *dns.A:
+				addrs = append(addrs, v.A.String())
+			case *dns.AAAA:
+				addrs = append(addrs, v.AAAA.String())
+			}
+		}
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no A or AAAA for %s via IMR", target)
+	}
+	dt := &DsyncTarget{
+		Name:   target,
+		Scheme: rr.Scheme,
+		Port:   rr.Port,
+		RR:     rr,
+	}
+	for _, a := range addrs {
+		dt.Addresses = append(dt.Addresses, net.JoinHostPort(a, strconv.Itoa(int(rr.Port))))
+	}
+	return dt, nil
+}
 
 // SyncWithParent walks the plan, trying each usable transport until one gets
 // the change to the parent.

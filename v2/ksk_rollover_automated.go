@@ -21,12 +21,13 @@ const (
 	rolloverPhasePendingChildWithdraw = "pending-child-withdraw"
 )
 
-// The two wire operations the tick performs, as package variables so the
-// engine tests can drive a full rollover sequence against a fake parent.
-// Production never reassigns them.
+// The two operations the tick performs towards the parent, as package
+// variables so the engine tests can drive a full rollover sequence against a
+// fake parent. Production never reassigns them. The push is a request to the
+// delegation syncher, which does the sending; the engine waits for its answer.
 var (
 	queryParentAgentDS     = QueryParentAgentDS
-	pushDSRRsetForRollover = PushDSRRsetForRollover
+	pushDSRRsetForRollover = requestDSSyncForRollover
 )
 
 // jitterUpTo returns a random duration in [-d, +d]. Used to spread
@@ -2240,6 +2241,7 @@ func rolloverAutomatedForAllZones(ctx context.Context, conf *Config, kdb *KeyDB,
 			Imr:              imr,
 			NotifyQ:          notifyq,
 			InternalUpdateQ:  updateq,
+			DelegationSyncQ:  conf.Internal.DelegationSyncQ,
 			Policy:           zd.DnssecPolicy,
 			AcquireLock:      defaultAcquireRolloverLock,
 			Logger:           lgSigner,

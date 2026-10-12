@@ -151,12 +151,12 @@ func newKeystoreDnssecDsPushCmd(_ string) *cobra.Command {
 and pushes the whole DS RRset to the parent. Requires imrengine in config.
 
 Offline mode: this CLI invocation builds a stub *ZoneData with no rollover policy
-attached, so PushDSRRsetForRollover falls through to the legacy single-scheme
-UPDATE path (whole-DS replacement, signed with the zone's active SIG(0) key).
-The auto / prefer-* / force-* dsync-scheme-preference values are honored only
-inside the daemon's rollover engine, where the policy is loaded from
-dnssecpolicies. To exercise NOTIFY pushes, run the daemon and let
-RolloverAutomatedTick drive the push.
+attached, so the DS delivery (SyncDSWithParent, the delegation syncher's) takes
+its single-scheme UPDATE path (whole-DS replacement, signed with the zone's
+active SIG(0) key). The auto / prefer-* / force-* dsync-scheme-preference values
+are honored only inside the daemon, where the rollover engine asks the syncher
+with the policy loaded from dnssecpolicies. To exercise NOTIFY pushes, run the
+daemon and let RolloverAutomatedTick drive the push.
 
 Use --dry-run to print the DS set and the UPDATE without sending.`,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -191,11 +191,10 @@ Use --dry-run to print the DS set and the UPDATE without sending.`,
 
 			z := dns.Fqdn(tdns.Globals.Zonename)
 			zd := &tdns.ZoneData{ZoneName: z}
-			// Intentionally leave zd.DnssecPolicy nil. The dispatcher
-			// (PushDSRRsetForRollover) gates DSYNC scheme selection on
-			// a non-nil policy and falls through to the legacy
-			// UPDATE-only path when policy is nil. Attaching the policy
-			// here would let an operator running the offline CLI on
+			// Intentionally no policy. The DS delivery gates DSYNC
+			// scheme selection on a non-nil policy and takes the
+			// UPDATE-only path without one. Passing the policy here
+			// would let an operator running the offline CLI on
 			// auto/prefer-notify silently take the NOTIFY path,
 			// contradicting the "UPDATE-only offline mode" contract
 			// documented above.
@@ -221,16 +220,9 @@ Use --dry-run to print the DS set and the UPDATE without sending.`,
 				return
 			}
 
-			deps := tdns.RolloverEngineDeps{
-				Conf: &Conf,
-				KDB:  kdb,
-				Zone: zd,
-				Imr:  imr,
-				// Policy: nil is deliberate — see comment above where
-				// zd is constructed. Forces the dispatcher onto the
-				// legacy UPDATE-only path.
-			}
-			res, err := tdns.PushDSRRsetForRollover(ctx, deps)
+			// No policy, on purpose: see the comment above where zd is
+			// constructed. That keeps the delivery on the UPDATE-only path.
+			res, err := zd.SyncDSWithParent(ctx, kdb, nil, imr, tdns.DSSyncRequest{})
 			if err != nil {
 				log.Fatalf("ds-push: %v", err)
 			}

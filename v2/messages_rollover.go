@@ -74,7 +74,7 @@ type RolloverStatus struct {
 
 	// ParentAdvertisesUpdate / ParentAdvertisesNotify reflect the
 	// most recent observation of the parent's DSYNC RRset, captured
-	// by pickRolloverSchemes on every push attempt. Tri-state via
+	// by the DS delivery on every push attempt. Tri-state via
 	// the *Known fields: when *Known is false, the engine has not
 	// yet observed the parent's DSYNC RRset (zone never had a push
 	// attempt); when true, the bool reflects whether that scheme is
