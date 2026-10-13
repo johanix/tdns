@@ -73,14 +73,17 @@ type Scanner struct {
 	pendingEvents  sync.Map         // canonical child name -> SyncLogEvent of the change still queued
 	poll           scannerPollState // scanner_poll.go
 
-	// queryChild, validateRRset and validateDenial stand in, in tests, for the
-	// network behind the CDS and CSYNC paths: asking every child nameserver
-	// (queryAllNSAndCompareWithDenial) and the IMR's validator. Nil in
-	// production; see askChildWithDenial, validateChildData and
+	// queryChild, queryChildServers, validateRRset and validateDenial stand in,
+	// in tests, for the network behind the CDS and CSYNC paths: asking every
+	// child nameserver, for the one answer they agree on
+	// (queryAllNSAndCompareWithDenial) or for what each of them answers
+	// (queryAllNS), and the IMR's validator. Nil in production; see
+	// askChildWithDenial, askChildServers, validateChildData and
 	// validateChildDenial.
-	queryChild     func(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset) (*core.RRset, []*core.RRset, bool, error)
-	validateRRset  func(ctx context.Context, rrset *core.RRset) (cache.ValidationState, error)
-	validateDenial func(ctx context.Context, qname string, qtype uint16, proof []*core.RRset) (cache.ValidationState, error)
+	queryChild        func(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset) (*core.RRset, []*core.RRset, bool, error)
+	queryChildServers func(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset) ([]childAnswer, error)
+	validateRRset     func(ctx context.Context, rrset *core.RRset) (cache.ValidationState, error)
+	validateDenial    func(ctx context.Context, qname string, qtype uint16, proof []*core.RRset) (cache.ValidationState, error)
 }
 
 // imr resolves the IMR at the point of use.
@@ -489,6 +492,35 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 // with it. It goes with the first answer, as the RRSIGs of a non-empty RRset
 // do.
 func (scanner *Scanner) queryAllNSAndCompareWithDenial(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, imr *Imr, lg *log.Logger) (*core.RRset, []*core.RRset, bool, error) {
+	answers, queryErrors, err := scanner.queryAllNS(ctx, qname, qtype, nsRRset, imr, lg)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	rrsets := make([]*core.RRset, len(answers))
+	for i, a := range answers {
+		rrsets[i] = a.RRset
+	}
+	base, inSync, err := compareChildAnswers(qname, qtype, rrsets, queryErrors, lg, scanner.Verbose, scanner.Debug)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	// compareChildAnswers returns the first answer as the representative one.
+	return base, answers[0].Denial, inSync, nil
+}
+
+// childAnswer is what one of a child's nameservers answered for a query: the
+// RRset, with the RRSIGs it sent, empty when it answered with authority that
+// there is none; and the authority section of its answer (authQueryWithDenial).
+type childAnswer struct {
+	NS     string
+	RRset  *core.RRset
+	Denial []*core.RRset
+}
+
+// queryAllNS queries all nameservers in an NS RRset for a given qname/qtype
+// and returns what each one that answered said, in the order of the NS RRset,
+// and why each of the others gave no answer.
+func (scanner *Scanner) queryAllNS(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, imr *Imr, lg *log.Logger) ([]childAnswer, []string, error) {
 	// IMR may be disabled or the generalized-NOTIFY path may have
 	// reached the scanner before the IMR singleton was initialized;
 	// without this guard the subsequent imr.ImrQuery(...) call
@@ -496,7 +528,7 @@ func (scanner *Scanner) queryAllNSAndCompareWithDenial(ctx context.Context, qnam
 	// from inside a server handler goroutine, killing the daemon on
 	// otherwise-accepted NOTIFY(CDS/CSYNC) traffic.
 	if imr == nil {
-		return nil, nil, false, fmt.Errorf("queryAllNSAndCompare: no IMR available yet; cannot compare child NS data")
+		return nil, nil, fmt.Errorf("queryAllNSAndCompare: no IMR available yet; cannot compare child NS data")
 	}
 	// Extract nameserver names from NS RRset
 	var nsNames []string
@@ -507,7 +539,7 @@ func (scanner *Scanner) queryAllNSAndCompareWithDenial(ctx context.Context, qnam
 	}
 
 	if len(nsNames) == 0 {
-		return nil, nil, false, fmt.Errorf("no nameservers found in NS RRset")
+		return nil, nil, fmt.Errorf("no nameservers found in NS RRset")
 	}
 
 	if lg != nil {
@@ -520,8 +552,7 @@ func (scanner *Scanner) queryAllNSAndCompareWithDenial(ctx context.Context, qnam
 	// empty only when every nameserver that answered agrees it is. One that
 	// cannot be reached, or answers with an error or without authority, is left
 	// out, and named in the error when no nameserver answered.
-	var answers []*core.RRset
-	var denials [][]*core.RRset // denials[i] goes with answers[i]
+	var answers []childAnswer
 	var queryErrors []string
 
 	for _, nsName := range nsNames {
@@ -571,16 +602,15 @@ func (scanner *Scanner) queryAllNSAndCompareWithDenial(ctx context.Context, qnam
 		if len(rrset.RRs) == 0 && lg != nil {
 			lg.Printf("queryAllNSAndCompare: %s serves no %s %s", nsName, qname, dns.TypeToString[qtype])
 		}
-		answers = append(answers, rrset)
-		denials = append(denials, denial)
+		answers = append(answers, childAnswer{NS: nsName, RRset: rrset, Denial: denial})
 	}
+	return answers, queryErrors, nil
+}
 
-	base, inSync, err := compareChildAnswers(qname, qtype, answers, queryErrors, lg, scanner.Verbose, scanner.Debug)
-	if err != nil {
-		return nil, nil, false, err
-	}
-	// compareChildAnswers returns the first answer as the representative one.
-	return base, denials[0], inSync, nil
+// errNoChildAnswers says that no nameserver answered, and why each gave no
+// answer.
+func errNoChildAnswers(qtype uint16, queryErrors []string) error {
+	return fmt.Errorf("no %s RRsets retrieved from any nameserver: %s", dns.TypeToString[qtype], strings.Join(queryErrors, "; "))
 }
 
 // compareChildAnswers is the verdict half of queryAllNSAndCompare: the first
@@ -595,7 +625,7 @@ func compareChildAnswers(qname string, qtype uint16, answers []*core.RRset, quer
 	typeStr := dns.TypeToString[qtype]
 
 	if len(answers) == 0 {
-		return nil, false, fmt.Errorf("no %s RRsets retrieved from any nameserver: %s", typeStr, strings.Join(queryErrors, "; "))
+		return nil, false, errNoChildAnswers(qtype, queryErrors)
 	}
 
 	// If only one response, we can't compare but return it
@@ -809,7 +839,9 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 
 	// The parent zone's delegation policy decides what the child's data has to
 	// show before any of it is copied (#637, scanner_trust.go). Under
-	// require-dnssec every RRset below comes through securedChildRRsetFetcher.
+	// require-dnssec the NS and glue below come through
+	// securedChildRRsetFetcher, and each nameserver's SOA and CSYNC is
+	// validated as that nameserver served it (requireSecureAnswers).
 	pol := parentZD.boundDelegationPolicy()
 	scanner.noteIgnoredOptions(pol, parentZD.ZoneName, childZone)
 	fetch := scanner.childRRsetFetcher(nsRRset, scanLog)
@@ -829,86 +861,106 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		}
 		responseCh <- response
 	}
+	// inconsistent reports that the child's nameservers do not show one CSYNC
+	// state, and nothing is processed (RFC 9975 §3.2).
+	inconsistent := func(reason string) {
+		scanLog.Printf("ProcessCSYNCNotify: %s: %s, aborting", childZone, reason)
+		response.Error = true
+		response.ErrorMsg = reason
+		responseCh <- response
+	}
 
-	// 2. Query SOA from child (start serial) — RFC 7477 step 1
-	soaRRs, soaInSync, err := fetch(ctx, childZone, dns.TypeSOA)
+	// 2. Query SOA from every nameserver of the child (start serials) — RFC
+	// 7477 step 1. The serials are not compared with each other: the
+	// nameservers of a zone that several providers sign each count their own.
+	// A nameserver's serial is held against its own CSYNC (step 6) and against
+	// its own serial after the analysis (step 8), as RFC 9975 §3.2 has it.
+	startSerials, err := scanner.childSOASerials(ctx, childZone, nsRRset, pol, scanLog)
 	if err != nil {
 		fail("error querying SOA", err)
 		return
 	}
-	if !soaInSync {
-		scanLog.Printf("ProcessCSYNCNotify: %s: child NS not in sync for SOA, aborting", childZone)
-		response.Error = true
-		response.ErrorMsg = "child nameservers not in sync for SOA"
-		responseCh <- response
-		return
-	}
-	if len(soaRRs) == 0 {
-		fail("error querying SOA", fmt.Errorf("the child's nameservers serve no SOA for %s", childZone))
-		return
-	}
-	var startSerial uint32
-	if soa, ok := soaRRs[0].(*dns.SOA); ok {
-		startSerial = soa.Serial
-	}
 
-	// 3. Query CSYNC from child — RFC 7477 step 2. Asked outside the trust
-	// gate: a child that publishes no CSYNC asks for nothing, and a no-op needs
-	// no authentication (like the CDS removal sentinel for a child without a
-	// DS). Through the secured fetcher, a missing CSYNC under require-dnssec
+	// 3. Query CSYNC from every nameserver — RFC 7477 step 2. Asked outside the
+	// trust gate: a child that publishes no CSYNC asks for nothing, and a no-op
+	// needs no authentication (like the CDS removal sentinel for a child without
+	// a DS). Through the secured fetcher, a missing CSYNC under require-dnssec
 	// was an error, which a poll would log for every such child on every round.
 	// A CSYNC that is there is validated before anything is read from it.
-	csyncRRset, csyncInSync, err := scanner.askChild(ctx, childZone, dns.TypeCSYNC, nsRRset, scanLog)
+	csyncAnswers, err := scanner.askChildServers(ctx, childZone, dns.TypeCSYNC, nsRRset, scanLog)
 	if err != nil {
 		fail("error querying CSYNC", err)
 		return
 	}
-	if !csyncInSync {
-		scanLog.Printf("ProcessCSYNCNotify: %s: child NS not in sync for CSYNC, aborting", childZone)
-		response.Error = true
-		response.ErrorMsg = "child nameservers not in sync for CSYNC"
-		responseCh <- response
-		return
+	var with, without []string
+	for _, a := range csyncAnswers {
+		if len(a.RRset.RRs) == 0 {
+			without = append(without, a.NS)
+		} else {
+			with = append(with, a.NS)
+		}
 	}
-	if csyncRRset == nil || len(csyncRRset.RRs) == 0 {
+	if len(with) == 0 {
 		scanLog.Printf("ProcessCSYNCNotify: %s: no CSYNC records found", childZone)
 		response.DataChanged = false
 		responseCh <- response
 		return
 	}
+	if len(without) > 0 {
+		inconsistent(fmt.Sprintf("CSYNC is served by %s and not by %s", strings.Join(with, ", "), strings.Join(without, ", ")))
+		return
+	}
 	if pol.RequireDnssec {
-		if err := scanner.requireSecure(ctx, csyncRRset, pol); err != nil {
+		if err := scanner.requireSecureAnswers(ctx, csyncAnswers, pol); err != nil {
 			fail("", err)
 			return
 		}
 	}
-	csyncRRs := csyncRRset.RRs
 
-	// Extract the CSYNC RR
-	var csyncrr *dns.CSYNC
-	for _, rr := range csyncRRs {
-		if c, ok := rr.(*dns.CSYNC); ok {
-			csyncrr = c
-			break
+	// Extract the CSYNC RR each nameserver serves
+	var csyncs []nsCsync
+	for _, a := range csyncAnswers {
+		var c *dns.CSYNC
+		for _, rr := range a.RRset.RRs {
+			if csync, ok := rr.(*dns.CSYNC); ok {
+				c = csync
+				break
+			}
+		}
+		if c == nil {
+			scanLog.Printf("ProcessCSYNCNotify: %s: no CSYNC RR in response from %s", childZone, a.NS)
+			response.Error = true
+			response.ErrorMsg = "no CSYNC RR in response"
+			responseCh <- response
+			return
+		}
+		csyncs = append(csyncs, nsCsync{NS: a.NS, CSYNC: c})
+	}
+
+	// 3b. What the CSYNC asks for must be the same at every nameserver — RFC
+	// 9975 §3.2: the immediate flag and the type bitmap. The serial field and
+	// the soaminimum flag may differ, and are judged per nameserver in step 6.
+	for _, c := range csyncs[1:] {
+		if !csyncSameRequest(csyncs[0].CSYNC, c.CSYNC) {
+			inconsistent(fmt.Sprintf("CSYNC immediate flag or type bitmap differs between nameservers (%s: %s; %s: %s)",
+				csyncs[0].NS, csyncRequestString(csyncs[0].CSYNC), c.NS, csyncRequestString(c.CSYNC)))
+			return
 		}
 	}
-	if csyncrr == nil {
-		scanLog.Printf("ProcessCSYNCNotify: %s: no CSYNC RR in response", childZone)
-		response.Error = true
-		response.ErrorMsg = "no CSYNC RR in response"
-		responseCh <- response
-		return
-	}
+	// The flag and the bitmap read below are the same in every one of them.
+	csyncrr := csyncs[0].CSYNC
 
 	// 4. Validate flags — RFC 7477: reject if unknown flags set
-	immediate, usesoamin, err := csyncFlags(csyncrr)
-	if err != nil {
-		scanLog.Printf("ProcessCSYNCNotify: %s: unknown CSYNC flags set (0x%04x), aborting", childZone, csyncrr.Flags)
-		response.Error = true
-		response.ErrorMsg = err.Error()
-		responseCh <- response
-		return
+	for _, c := range csyncs {
+		if _, _, err := csyncFlags(c.CSYNC); err != nil {
+			scanLog.Printf("ProcessCSYNCNotify: %s: unknown CSYNC flags set (0x%04x) at %s, aborting", childZone, c.CSYNC.Flags, c.NS)
+			response.Error = true
+			response.ErrorMsg = err.Error()
+			responseCh <- response
+			return
+		}
 	}
+	immediate := csyncrr.Flags&csyncFlagImmediate != 0
 
 	// 4b. Type bitmap — RFC 7477 §2.1.1.2.1: a type this parent does not
 	// process means the record is not acted on.
@@ -929,19 +981,37 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		return
 	}
 
-	// 5. Serial dedup — skip if already processed
-	if scanner.ZoneCSYNCKnown(childZone, csyncrr) {
-		scanLog.Printf("ProcessCSYNCNotify: %s: CSYNC serial %d already processed", childZone, csyncrr.Serial)
+	// 5. Serial dedup, and 6. soaminimum check — per nameserver, each CSYNC
+	// against the state of the nameserver that serves it (RFC 9975 §3.2): the
+	// serial of the last CSYNC processed from it, and with soaminimum set its
+	// own SOA serial. The nameservers must all come to the same answer.
+	var verdicts []string
+	held := 0
+	for _, c := range csyncs {
+		_, usesoamin, _ := csyncFlags(c.CSYNC)
+		soaSerial, haveSOA := serialAt(startSerials, c.NS)
+		switch {
+		case scanner.ZoneCSYNCKnown(childZone, c.NS, c.CSYNC):
+			verdicts = append(verdicts, fmt.Sprintf("%s: no, CSYNC serial %d already processed", c.NS, c.CSYNC.Serial))
+			held++
+		case usesoamin && !haveSOA:
+			inconsistent(fmt.Sprintf("nameserver %s: its CSYNC sets soaminimum, and it gave no SOA to hold the serial against", c.NS))
+			return
+		case csyncSuppressedBySoaMinimum(usesoamin, c.CSYNC, soaSerial):
+			verdicts = append(verdicts, fmt.Sprintf("%s: no, CSYNC serial %d > SOA serial %d", c.NS, c.CSYNC.Serial, soaSerial))
+			held++
+		default:
+			verdicts = append(verdicts, c.NS+": yes")
+		}
+	}
+	if held == len(csyncs) {
+		scanLog.Printf("ProcessCSYNCNotify: %s: skipping (%s)", childZone, strings.Join(verdicts, "; "))
 		response.DataChanged = false
 		responseCh <- response
 		return
 	}
-
-	// 6. soaminimum check
-	if csyncSuppressedBySoaMinimum(usesoamin, csyncrr, startSerial) {
-		scanLog.Printf("ProcessCSYNCNotify: %s: CSYNC serial %d > SOA serial %d, skipping", childZone, csyncrr.Serial, startSerial)
-		response.DataChanged = false
-		responseCh <- response
+	if held > 0 {
+		inconsistent(fmt.Sprintf("nameservers disagree on whether the CSYNC may be processed (%s)", strings.Join(verdicts, "; ")))
 		return
 	}
 
@@ -975,7 +1045,7 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	// step 3. The rules live in delegation_csync.go (computeCsyncDelta), fed by
 	// queryAllNSAndCompare for what the child serves and by the delegation
 	// backend for what the parent holds.
-	scanLog.Printf("ProcessCSYNCNotify: %s: CSYNC bitmap types: %v, immediate=%v, usesoamin=%v", childZone, csynctypes, immediate, usesoamin)
+	scanLog.Printf("ProcessCSYNCNotify: %s: CSYNC bitmap types: %v, immediate=%v", childZone, csynctypes, immediate)
 
 	// Extract current NS from delegation data
 	var currentNSRRs []dns.RR
@@ -1013,41 +1083,51 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	glueAdds, glueRemoves := delta.GlueAdds, delta.GlueRemoves
 	dataChanged := delta.Changed
 
-	// 8. Query SOA again (end serial) — RFC 7477 step 4. Through fetch, like
-	// the start SOA: RFC 7477 §3 refuses a CSYNC unless all the data from these
-	// queries validates, and an end serial nobody authenticated, or one the
-	// nameservers disagree on, could hide a change made during the analysis.
-	endSOARRs, endInSync, err := fetch(ctx, childZone, dns.TypeSOA)
+	// 8. Query SOA again from every nameserver (end serials) — RFC 7477 step
+	// 4. Fetched like the start SOA: RFC 7477 §3 refuses a CSYNC unless all the
+	// data from these queries validates, and an end serial nobody authenticated
+	// could hide a change made during the analysis. Each nameserver's end
+	// serial is compared with its own start serial. One that answered only one
+	// of the two queries is left out, as a nameserver that answers neither is;
+	// at least one must have answered both.
+	endSerials, err := scanner.childSOASerials(ctx, childZone, nsRRset, pol, scanLog)
 	if err != nil {
 		fail("error querying end SOA", err)
 		return
 	}
-	if !endInSync {
-		scanLog.Printf("ProcessCSYNCNotify: %s: child NS not in sync for end SOA, aborting", childZone)
-		response.Error = true
-		response.ErrorMsg = "child nameservers not in sync for end SOA"
-		responseCh <- response
+	stable := 0
+	for _, start := range startSerials {
+		endSerial, ok := serialAt(endSerials, start.NS)
+		if !ok {
+			scanLog.Printf("ProcessCSYNCNotify: %s: no end SOA from %s, its serial is not compared", childZone, start.NS)
+			continue
+		}
+		if start.Serial != endSerial {
+			inconsistent(fmt.Sprintf("nameserver %s: SOA serial changed during the scan (%d to %d)", start.NS, start.Serial, endSerial))
+			return
+		}
+		stable++
+	}
+	if stable == 0 {
+		inconsistent("no nameserver answered both the SOA query before the scan and the one after it")
 		return
 	}
-	if len(endSOARRs) == 0 {
-		fail("error querying end SOA", fmt.Errorf("the child's nameservers serve no SOA for %s", childZone))
-		return
-	}
-	var endSerial uint32
-	if soa, ok := endSOARRs[0].(*dns.SOA); ok {
-		endSerial = soa.Serial
-	}
-	if startSerial != endSerial {
-		scanLog.Printf("ProcessCSYNCNotify: %s: SOA serial changed during analysis (%d → %d), aborting", childZone, startSerial, endSerial)
-		response.Error = true
-		response.ErrorMsg = "SOA serial changed during CSYNC analysis"
-		responseCh <- response
-		return
-	}
-	scanLog.Printf("ProcessCSYNCNotify: %s: SOA serial stable (%d)", childZone, startSerial)
+	scanLog.Printf("ProcessCSYNCNotify: %s: SOA serial stable at %d nameserver(s)", childZone, stable)
 
-	// 9. Update serial tracking
-	recordCsyncProcessed(childZone, csyncrr.Serial)
+	// 9. Update serial tracking, per nameserver. A nameserver of the
+	// delegation that did not answer this scan keeps what was remembered for
+	// it; one the delegation no longer names is forgotten.
+	processed := make(map[string]uint32, len(csyncs))
+	for _, c := range csyncs {
+		processed[c.NS] = c.CSYNC.Serial
+	}
+	delegated := make([]string, 0, len(nsRRset.RRs))
+	for _, rr := range nsRRset.RRs {
+		if ns, ok := rr.(*dns.NS); ok {
+			delegated = append(delegated, ns.Ns)
+		}
+	}
+	recordCsyncProcessed(childZone, processed, delegated)
 
 	// 10. Report results
 	response.DataChanged = dataChanged

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strings"
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
@@ -130,6 +131,99 @@ func (scanner *Scanner) askChildWithDenial(ctx context.Context, qname string, qt
 		return scanner.queryChild(ctx, qname, qtype, nsRRset)
 	}
 	return scanner.queryAllNSAndCompareWithDenial(ctx, qname, qtype, nsRRset, scanner.imr(), lg)
+}
+
+// askChildServers asks every nameserver in nsRRset for (qname, qtype) and
+// returns what each one that answered said, in the order of nsRRset, without
+// comparing the answers. A nameserver that gives no answer is left out, as
+// askChild leaves it out; no answer from any of them is an error.
+func (scanner *Scanner) askChildServers(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, lg *log.Logger) ([]childAnswer, error) {
+	var answers []childAnswer
+	var queryErrors []string
+	var err error
+	if scanner.queryChildServers != nil {
+		answers, err = scanner.queryChildServers(ctx, qname, qtype, nsRRset)
+	} else {
+		answers, queryErrors, err = scanner.queryAllNS(ctx, qname, qtype, nsRRset, scanner.imr(), lg)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(answers) == 0 {
+		return nil, errNoChildAnswers(qtype, queryErrors)
+	}
+	for i := range answers {
+		if answers[i].RRset == nil {
+			answers[i].RRset = &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype}
+		}
+	}
+	return answers, nil
+}
+
+// nsSerial is the SOA serial one nameserver of the child serves.
+type nsSerial struct {
+	NS     string
+	Serial uint32
+}
+
+// serialAt returns the serial ns serves, and whether serials has one for it.
+func serialAt(serials []nsSerial, ns string) (uint32, bool) {
+	for _, s := range serials {
+		if core.EqualNames(s.NS, ns) {
+			return s.Serial, true
+		}
+	}
+	return 0, false
+}
+
+// childSOASerials asks every nameserver in nsRRset for childZone's SOA and
+// returns the serial each one that answered serves. The serials are not
+// compared: the nameservers of a zone that several providers sign each count
+// their own (RFC 9975 §3.2). A nameserver that answers that there is no SOA is
+// an error.
+//
+// Under a policy that requires DNSSEC every nameserver's SOA validates Secure
+// or the result is a refusal (requireSecureAnswers), as the one SOA the
+// nameservers had to agree on did through securedChildRRsetFetcher. A missing
+// SOA is an absenceNotProven error unless its absence is proven, as there.
+func (scanner *Scanner) childSOASerials(ctx context.Context, childZone string, nsRRset *core.RRset, pol DelegationPolicy, lg *log.Logger) ([]nsSerial, error) {
+	answers, err := scanner.askChildServers(ctx, childZone, dns.TypeSOA, nsRRset, lg)
+	if err != nil {
+		return nil, err
+	}
+	var serials []nsSerial
+	var none []string
+	for _, a := range answers {
+		var soa *dns.SOA
+		for _, rr := range a.RRset.RRs {
+			if s, ok := rr.(*dns.SOA); ok {
+				soa = s
+				break
+			}
+		}
+		if soa == nil {
+			if pol.RequireDnssec {
+				if err := scanner.proveAbsent(ctx, childZone, childZone, dns.TypeSOA, a.Denial); err != nil {
+					return nil, err
+				}
+			}
+			none = append(none, a.NS)
+			continue
+		}
+		serials = append(serials, nsSerial{NS: a.NS, Serial: soa.Serial})
+	}
+	if len(none) == len(answers) {
+		return nil, fmt.Errorf("the child's nameservers serve no SOA for %s", childZone)
+	}
+	if len(none) > 0 {
+		return nil, fmt.Errorf("the child's nameservers do not all serve an SOA for %s: none at %s", childZone, strings.Join(none, ", "))
+	}
+	if pol.RequireDnssec {
+		if err := scanner.requireSecureAnswers(ctx, answers, pol); err != nil {
+			return nil, err
+		}
+	}
+	return serials, nil
 }
 
 // validateChildData runs the IMR's validator over an RRset fetched from the
@@ -276,6 +370,37 @@ func (scanner *Scanner) requireSecureBecause(ctx context.Context, rrset *core.RR
 	}
 	if state != cache.ValidationStateSecure {
 		return refusef("%s, and %s is %s", why, what, validationStateName(state))
+	}
+	return nil
+}
+
+// requireSecureAnswers is requireSecureAnswer for what each nameserver
+// answered, where the answers are not required to be the same: every one of
+// them validates Secure, with the RRSIGs and the authority section its
+// nameserver sent, or the result is a refusal.
+//
+// Answers that carry the same records are one copy, validated once, through
+// the first nameserver that served it, as an RRset the nameservers agree on
+// is (askChild). Where the nameservers serve different copies, the refusal
+// names the nameserver whose copy it is.
+func (scanner *Scanner) requireSecureAnswers(ctx context.Context, answers []childAnswer, pol DelegationPolicy) error {
+	var copies []childAnswer
+	for _, a := range answers {
+		same := func(c childAnswer) bool {
+			differ, _, _ := core.RRsetDiffer(a.RRset.Name, a.RRset.RRs, c.RRset.RRs, a.RRset.RRtype, discardLog, false, false)
+			return !differ
+		}
+		if !slices.ContainsFunc(copies, same) {
+			copies = append(copies, a)
+		}
+	}
+	for _, c := range copies {
+		if err := scanner.requireSecureAnswer(ctx, c.RRset, c.Denial, pol); err != nil {
+			if len(copies) > 1 {
+				return refusef("%v (as served by %s)", err, c.NS)
+			}
+			return err
+		}
 	}
 	return nil
 }

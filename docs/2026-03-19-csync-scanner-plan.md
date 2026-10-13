@@ -705,3 +705,20 @@ a child that already has a DS the DNSKEY RRset must validate. The
 DNSKEYs are asked of the child's nameservers, as the CDS is, and
 they must agree on them. A DNSKEY lookup that fails refuses the
 change; the next poll, or the child's next NOTIFY, tries again.
+
+## Amendment, 2026-10-12 (h): the SOA and the CSYNC are judged per nameserver (RFC 9975 §3.2)
+
+Steps 2, 3, 5 and 8 above compare the SOA and the whole CSYNC RRset across
+the child's nameservers. That refused every CSYNC of a zone that several
+providers sign (RFC 8901), where each signer counts its own SOA serial. The
+SOA is no longer compared between nameservers: each nameserver's serial after
+the analysis must equal its own serial before it. Of the CSYNC, the immediate
+flag and the type bitmap must be equal at every nameserver. The serial field
+and the soaminimum flag may differ, and each nameserver's are held against
+that nameserver's own SOA serial and against the serial of the last CSYNC
+processed from it. The nameservers must come to the same answer on whether
+the CSYNC may be processed. The NS RRset and the glue must still be the same
+at every nameserver. A nameserver that gives no answer is left out, as
+before. Under `require-dnssec: true` every distinct SOA and CSYNC the
+nameservers serve is validated. See `ProcessCSYNCNotify` (`v2/scanner.go`) and
+`childSOASerials` (`v2/scanner_trust.go`).

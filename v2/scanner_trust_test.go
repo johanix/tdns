@@ -27,15 +27,30 @@ type trustNet struct {
 	verdict   map[string]cache.ValidationState // absent: insecure
 	validated []string                         // keys handed to the validator
 
-	// laterVerdict and laterDisagree apply from the second validation or
-	// query of a key on: what differs between the start and the end SOA.
-	laterVerdict  map[string]cache.ValidationState
-	laterDisagree map[string]bool
-	queried       map[string]int
+	// laterVerdict applies from the second validation of a key on: what
+	// differs between the start and the end SOA.
+	laterVerdict map[string]cache.ValidationState
+	queried      map[string]int
 
 	// disagree: the nameservers do not agree on the key, from the first
 	// query on.
 	disagree map[string]bool
+
+	// servedBy: what one nameserver serves instead of served, keyed by its
+	// name and then like served. laterServedBy applies from the second query
+	// of the key on: what a nameserver changes between the start and the end
+	// SOA.
+	servedBy      map[string]map[string][]dns.RR
+	laterServedBy map[string]map[string][]dns.RR
+
+	// dead: nameservers that answer nothing. silent: whether a nameserver
+	// gives no answer to the nth query of a key (1: the first).
+	dead   map[string]bool
+	silent func(ns, key string, nth int) bool
+
+	// copyVerdict: the verdict on one copy of an RRset, keyed by the text of
+	// its first record, for nameservers that serve different copies.
+	copyVerdict map[string]cache.ValidationState
 
 	// denial: the verdict on the proof that comes with an empty answer for
 	// the key. Absent: the empty answer comes with no proof. denialsJudged
@@ -47,33 +62,83 @@ type trustNet struct {
 
 func trustKey(name string, qtype uint16) string { return name + "/" + dns.TypeToString[qtype] }
 
-func (n *trustNet) query(_ context.Context, qname string, qtype uint16, _ *core.RRset) (*core.RRset, []*core.RRset, bool, error) {
+// answers is what each nameserver in ns answers for (qname, qtype), in the
+// order of ns: what served holds for the key, unless servedBy holds something
+// for that nameserver. Without ns, as one nameserver.
+func (n *trustNet) answers(qname string, qtype uint16, ns *core.RRset) []childAnswer {
 	k := trustKey(qname, qtype)
 	if n.queried == nil {
 		n.queried = map[string]int{}
 	}
 	n.queried[k]++
-	// Data nobody serves comes back the way queryAllNSAndCompare reports every
-	// nameserver answering that there is none: an empty RRset, in sync.
-	inSync := !n.disagree[k] && !(n.queried[k] > 1 && n.laterDisagree[k])
-	var proof []*core.RRset
-	if _, ok := n.denial[k]; ok && len(n.served[k]) == 0 {
-		// Shaped like the child's own NODATA (childNodataProof): its SOA, and
-		// its signed NSEC at qname without the type. validateDenial judges it
-		// by key; the signature is never checked.
-		proof = []*core.RRset{
-			{Name: n.zone, Class: dns.ClassINET, RRtype: dns.TypeSOA, RRs: []dns.RR{
-				&dns.SOA{Hdr: dns.RR_Header{Name: n.zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 300}},
-			}},
-			{Name: qname, Class: dns.ClassINET, RRtype: dns.TypeNSEC,
-				RRs: []dns.RR{&dns.NSEC{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 300},
-					NextDomain: n.zone, TypeBitMap: []uint16{dns.TypeRRSIG, dns.TypeNSEC}}},
-				RRSIGs: []dns.RR{&dns.RRSIG{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 300},
-					TypeCovered: dns.TypeNSEC, SignerName: n.zone}},
-			},
+	var servers []string
+	if ns != nil {
+		for _, rr := range ns.RRs {
+			if nsrr, ok := rr.(*dns.NS); ok {
+				servers = append(servers, nsrr.Ns)
+			}
 		}
 	}
-	return &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: n.served[k]}, proof, inSync, nil
+	if len(servers) == 0 {
+		servers = []string{"ns.invalid."}
+	}
+	var answers []childAnswer
+	for _, server := range servers {
+		if n.dead[server] || (n.silent != nil && n.silent(server, k, n.queried[k])) {
+			continue
+		}
+		data := n.served[k]
+		if by, ok := n.servedBy[server][k]; ok {
+			data = by
+		}
+		if by, ok := n.laterServedBy[server][k]; ok && n.queried[k] > 1 {
+			data = by
+		}
+		var proof []*core.RRset
+		if _, ok := n.denial[k]; ok && len(data) == 0 {
+			// Shaped like the child's own NODATA (childNodataProof): its SOA, and
+			// its signed NSEC at qname without the type. validateDenial judges it
+			// by key; the signature is never checked.
+			proof = []*core.RRset{
+				{Name: n.zone, Class: dns.ClassINET, RRtype: dns.TypeSOA, RRs: []dns.RR{
+					&dns.SOA{Hdr: dns.RR_Header{Name: n.zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 300}},
+				}},
+				{Name: qname, Class: dns.ClassINET, RRtype: dns.TypeNSEC,
+					RRs: []dns.RR{&dns.NSEC{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 300},
+						NextDomain: n.zone, TypeBitMap: []uint16{dns.TypeRRSIG, dns.TypeNSEC}}},
+					RRSIGs: []dns.RR{&dns.RRSIG{Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 300},
+						TypeCovered: dns.TypeNSEC, SignerName: n.zone}},
+				},
+			}
+		}
+		answers = append(answers, childAnswer{NS: server,
+			RRset: &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: data}, Denial: proof})
+	}
+	return answers
+}
+
+// queryServers stands in for asking every nameserver and keeping what each
+// one answered (Scanner.queryChildServers).
+func (n *trustNet) queryServers(_ context.Context, qname string, qtype uint16, ns *core.RRset) ([]childAnswer, error) {
+	return n.answers(qname, qtype, ns), nil
+}
+
+// query stands in for asking every nameserver for the one answer they agree
+// on (Scanner.queryChild): the answers of queryServers, compared as
+// queryAllNSAndCompare compares them.
+func (n *trustNet) query(_ context.Context, qname string, qtype uint16, ns *core.RRset) (*core.RRset, []*core.RRset, bool, error) {
+	answers := n.answers(qname, qtype, ns)
+	rrsets := make([]*core.RRset, len(answers))
+	for i, a := range answers {
+		rrsets[i] = a.RRset
+	}
+	// Data nobody serves comes back the way queryAllNSAndCompare reports every
+	// nameserver answering that there is none: an empty RRset, in sync.
+	base, inSync, err := compareChildAnswers(qname, qtype, rrsets, nil, nil, false, false)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return base, answers[0].Denial, inSync && !n.disagree[trustKey(qname, qtype)], nil
 }
 
 // validateDenial stands in for the IMR's cache.ValidateNegativeResponse,
@@ -91,6 +156,11 @@ func (n *trustNet) validate(_ context.Context, rrset *core.RRset) (cache.Validat
 	k := trustKey(rrset.Name, rrset.RRtype)
 	seen := n.validations(k)
 	n.validated = append(n.validated, k)
+	if len(rrset.RRs) > 0 {
+		if v, ok := n.copyVerdict[rrset.RRs[0].String()]; ok {
+			return v, nil
+		}
+	}
 	if v, ok := n.laterVerdict[k]; ok && seen > 0 {
 		return v, nil
 	}
@@ -170,6 +240,7 @@ func trustScanner(n *trustNet) *Scanner {
 	quiet := log.New(io.Discard, "", 0)
 	sc.Log["CDS"], sc.Log["CSYNC"] = quiet, quiet
 	sc.queryChild = n.query
+	sc.queryChildServers = n.queryServers
 	sc.validateRRset = n.validate
 	sc.validateDenial = n.validateDenial
 	return sc
@@ -265,7 +336,7 @@ func TestScanCSYNCUnderRequireDnssecRefusesDataThatIsNotSecure(t *testing.T) {
 			if !strings.Contains(resp.ValidationReason, `"strict"`) {
 				t.Errorf("reason %q does not name the policy", resp.ValidationReason)
 			}
-			if _, marked := csyncProcessedSerial(child); marked {
+			if csyncMarkedProcessed(child) {
 				t.Error("a refused CSYNC was recorded as processed, so it would never be retried")
 			}
 		})
@@ -297,22 +368,26 @@ func TestScanCSYNCUnderRequireDnssecAppliesSecureData(t *testing.T) {
 	}
 }
 
-// The end SOA goes through the same fetch as the start SOA. An end serial that
-// does not validate, or that the nameservers disagree on, could hide a change
-// made during the analysis, so it stops the CSYNC before anything is recorded.
-func TestScanCSYNCEndSOAIsValidatedAndAgreedOn(t *testing.T) {
+// The end SOA is fetched and validated like the start SOA. An end serial that
+// does not validate, or that differs from the start serial of the nameserver
+// that serves it, could hide a change made during the analysis, so it stops
+// the CSYNC before anything is recorded.
+func TestScanCSYNCEndSOAIsValidatedAndUnchanged(t *testing.T) {
 	for i, tc := range []struct {
 		name    string
-		prepare func(n *trustNet, soa string)
+		prepare func(t *testing.T, n *trustNet, child, soa string)
 		refused bool
 		want    string
 	}{
-		{name: "the end SOA is bogus", refused: true, want: "SOA is bogus", prepare: func(n *trustNet, soa string) {
+		{name: "the end SOA is bogus", refused: true, want: "SOA is bogus", prepare: func(t *testing.T, n *trustNet, child, soa string) {
 			n.laterVerdict = map[string]cache.ValidationState{soa: cache.ValidationStateBogus}
 		}},
-		{name: "the nameservers disagree on the end SOA", want: "not in sync for end SOA", prepare: func(n *trustNet, soa string) {
-			n.laterDisagree = map[string]bool{soa: true}
-		}},
+		{name: "one nameserver's serial changes during the scan", want: "nameserver ns.provider.net.: SOA serial changed during the scan (7 to 8)",
+			prepare: func(t *testing.T, n *trustNet, child, soa string) {
+				n.laterServedBy = map[string]map[string][]dns.RR{"ns.provider.net.": {
+					soa: rrs(t, child+" 3600 IN SOA ns1."+child+" h."+child+" 8 3600 600 604800 300"),
+				}}
+			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			child := fmt.Sprintf("endsoa%d.example.", i)
@@ -320,7 +395,7 @@ func TestScanCSYNCEndSOAIsValidatedAndAgreedOn(t *testing.T) {
 			soa := trustKey(child, dns.TypeSOA)
 			n.set(cache.ValidationStateSecure, soa, trustKey(child, dns.TypeCSYNC),
 				trustKey(child, dns.TypeNS), trustKey("ns1."+child, dns.TypeA))
-			tc.prepare(n, soa)
+			tc.prepare(t, n, child, soa)
 
 			resp := runCSYNC(t, trustScanner(n), trustParent(t, child, trustStrict()), child)
 
@@ -334,7 +409,7 @@ func TestScanCSYNCEndSOAIsValidatedAndAgreedOn(t *testing.T) {
 					t.Error("a CSYNC stopped at the end SOA would be applied")
 				}
 			}
-			if _, marked := csyncProcessedSerial(child); marked {
+			if csyncMarkedProcessed(child) {
 				t.Error("a CSYNC stopped at the end SOA was recorded as processed")
 			}
 		})

@@ -29,8 +29,11 @@ func NSInBailiwick(zone string, ns *dns.NS) bool {
 	return dns.IsSubDomain(zone, ns.Ns)
 }
 
-// csyncProcessed holds, per child, the serial of the last CSYNC processed, so
-// that an older one is not processed again (RFC 7477 §3.1).
+// csyncProcessed holds, per child and per nameserver of the child, the serial
+// of the last CSYNC processed from that nameserver, so that an older one is
+// not processed again (RFC 7477 §3.1). Per nameserver, because the serial
+// field may differ between the nameservers of one child (RFC 9975 §3.2): the
+// serial one of them serves says nothing about the serial of another.
 //
 // Every scan runs in its own goroutine, so every access holds the lock.
 // Concurrent writes to a Go map are a fatal runtime error that recover() does
@@ -39,31 +42,56 @@ func NSInBailiwick(zone string, ns *dns.NS) bool {
 // overlapping scans of the same child from both processing one CSYNC.
 var csyncProcessed = struct {
 	sync.Mutex
-	serials map[string]uint32
-}{serials: map[string]uint32{}}
+	serials map[string]map[string]uint32 // child, then nameserver
+}{serials: map[string]map[string]uint32{}}
 
 func csyncProcessedKey(zone string) string { return core.CanonicalizeName(dns.Fqdn(zone)) }
 
-// csyncProcessedSerial returns the serial of the last CSYNC processed for zone.
-func csyncProcessedSerial(zone string) (uint32, bool) {
+// csyncProcessedSerial returns the serial of the last CSYNC processed for zone
+// from nameserver ns.
+func csyncProcessedSerial(zone, ns string) (uint32, bool) {
 	csyncProcessed.Lock()
 	defer csyncProcessed.Unlock()
-	serial, ok := csyncProcessed.serials[csyncProcessedKey(zone)]
+	serial, ok := csyncProcessed.serials[csyncProcessedKey(zone)][csyncProcessedKey(ns)]
 	return serial, ok
 }
 
-// recordCsyncProcessed remembers that the CSYNC with serial was processed for
-// zone.
-func recordCsyncProcessed(zone string, serial uint32) {
+// recordCsyncProcessed remembers the serials of the CSYNC processed for zone,
+// by the nameserver each came from. delegated names the nameservers the
+// parent delegated zone to when the scan began.
+//
+// What is remembered for a delegated nameserver that did not answer this time
+// is kept. Forgetting it let that nameserver serve an older CSYNC at the next
+// scan and have it judged as its first: the replay RFC 7477 §3.1 rules out,
+// by a nameserver that was only out of reach for one scan.
+//
+// What is remembered for a nameserver that is no longer delegated to is
+// dropped. If the zone is delegated to it again it starts over, and a serial
+// it counted long ago is not held against it.
+func recordCsyncProcessed(zone string, serials map[string]uint32, delegated []string) {
+	keep := make(map[string]bool, len(delegated)+len(serials))
+	for _, ns := range delegated {
+		keep[csyncProcessedKey(ns)] = true
+	}
 	csyncProcessed.Lock()
 	defer csyncProcessed.Unlock()
-	csyncProcessed.serials[csyncProcessedKey(zone)] = serial
+	byNS := make(map[string]uint32, len(keep))
+	for ns, serial := range csyncProcessed.serials[csyncProcessedKey(zone)] {
+		if keep[ns] {
+			byNS[ns] = serial
+		}
+	}
+	for ns, serial := range serials {
+		byNS[csyncProcessedKey(ns)] = serial
+	}
+	csyncProcessed.serials[csyncProcessedKey(zone)] = byNS
 }
 
 // ZoneCSYNCKnown reports whether a CSYNC with a higher serial than csyncrr's
-// has already been processed for zone. The same serial is processed again.
-func (scanner *Scanner) ZoneCSYNCKnown(zone string, csyncrr *dns.CSYNC) bool {
-	lg.Debug("ZoneCSYNCKnown: checking if CSYNC is known", "zone", zone)
-	last, ok := csyncProcessedSerial(zone)
+// has already been processed for zone from nameserver ns. The same serial is
+// processed again.
+func (scanner *Scanner) ZoneCSYNCKnown(zone, ns string, csyncrr *dns.CSYNC) bool {
+	lg.Debug("ZoneCSYNCKnown: checking if CSYNC is known", "zone", zone, "nameserver", ns)
+	last, ok := csyncProcessedSerial(zone, ns)
 	return ok && last > csyncrr.Serial
 }

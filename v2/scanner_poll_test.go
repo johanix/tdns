@@ -123,6 +123,11 @@ func pollScanner(n *trustNet) (*Scanner, *appliedChanges) {
 		defer mu.Unlock()
 		return n.query(ctx, qname, qtype, ns)
 	}
+	sc.queryChildServers = func(ctx context.Context, qname string, qtype uint16, ns *core.RRset) ([]childAnswer, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return n.queryServers(ctx, qname, qtype, ns)
+	}
 	sc.validateRRset = func(ctx context.Context, rrset *core.RRset) (cache.ValidationState, error) {
 		mu.Lock()
 		defer mu.Unlock()
