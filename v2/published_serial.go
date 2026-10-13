@@ -37,13 +37,23 @@ const serialRecordWarning = "the published serial could not be recorded"
 // visible on `zone status`, and leaves Ready alone. The next publish records
 // its own serial, so one failed write corrects itself, and clears the warning.
 //
-// A zone that may not originate content records nothing: its serial is
-// upstream's, and its row is deleted elsewhere (MUST-NOT-MODIFY).
+// A tdns-auth zone that may not originate content records nothing: its serial
+// is upstream's, and its row is deleted elsewhere (MUST-NOT-MODIFY). The
+// relayed zone of a registered derived app records the serial it serves
+// (relayedZoneRecordsItsSerial): set, not raised, because that serial is the
+// upstream's and may be below one the zone counted for itself before.
 func (zd *ZoneData) recordPublishedSerialLocked(serial uint32) {
-	if zd.KeyDB == nil || zd.KeyDB.DB == nil || !zoneMayOriginateContent(zd) {
+	if zd.KeyDB == nil || zd.KeyDB.DB == nil {
 		return
 	}
-	if err := zd.KeyDB.RaiseOutgoingSerial(zd.ZoneName, serial); err != nil {
+	record := zd.KeyDB.RaiseOutgoingSerial
+	if !zoneMayOriginateContent(zd) {
+		if !relayedZoneRecordsItsSerial() {
+			return
+		}
+		record = zd.KeyDB.SaveOutgoingSerial
+	}
+	if err := record(zd.ZoneName, serial); err != nil {
 		lg.Error("publish: could not record the published serial; a restart may publish"+
 			" serials this zone has already served",
 			"zone", zd.ZoneName, "serial", serial, "err", err)

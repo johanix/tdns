@@ -26,8 +26,9 @@ import (
 // lifecycle owner decide the CDS (ownedZoneCDS), and the journal could hold an
 // older one.
 //
-// Not zoneMayOriginateContent: that is true for every app other than
-// tdns-auth, and a derived app's secondary must not get an overlay.
+// Not zoneMayOriginateContent: that is true for every app the origination
+// rule does not apply to, and a derived app's secondary must not get an
+// overlay, whether or not the app registered for the rule.
 func overlayZonePredicate(app AppType, zoneType ZoneType, opts map[ZoneOption]bool) bool {
 	return app == AppTypeAuth && zoneType == Secondary && opts[OptInlineSigning] && !opts[OptMultiProvider]
 }

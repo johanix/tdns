@@ -1051,7 +1051,8 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 
 	case !zoneMayOriginateContent(zd):
 		// MUST-NOT-MODIFY: a tdns-auth secondary that did not originate this
-		// content mirrors the upstream serial verbatim. The historical
+		// content mirrors the upstream serial verbatim (and so does a zone
+		// that a derived app registered for the rule only relays). The historical
 		// unconditional ++ below made every such secondary drift +1 per
 		// refresh, so two masters downstream of one signer (say BIND9 and
 		// tdns-auth) advertised different serials for identical content and
@@ -1094,7 +1095,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		// A TRANSFERRED zone is excluded deliberately. Its serial is its own,
 		// not upstream's -- an inline-signing secondary re-signs what it
 		// receives and advances in its own space (see the MUST-NOT-MODIFY
-		// design), and off tdns-auth the whole gate stands down. Its journal
+		// design), and for an app outside the rule the gate stands down. Its journal
 		// needs no floor either: an overlay zone journals from the serial it
 		// serves (publishWorkingSetLocked, journal_overlay.go). A journalling
 		// secondary outside the overlay -- multi-provider, or a derived app's --

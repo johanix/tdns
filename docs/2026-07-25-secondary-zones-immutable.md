@@ -988,3 +988,93 @@ happens: the signal pass (`createTransportSignalSVCB`) stores a signal only
 when `zoneMayOriginateContent` holds, the same predicate as every other gate
 of this design; otherwise it keeps the fallback. The invariant is unchanged: a
 non-originating secondary still serves exactly what it received.
+
+
+## Amendment 2 (2026-10-12): a derived app can register for the rule
+
+§1.1 scoped the invariant to tdns-auth alone and made every fix a no-op on
+any other app type. That default stays. What changes is that a derived app
+can now ask for the rule: `RegisterOriginationRuleAppType(t)` adds its app
+type to the ones `zoneMayOriginateContent` applies the predicate to. For an
+app that does not register, nothing changes: the combiner, the agents and
+every other derived app keep originating in every zone, as §1.1 says.
+
+The reason is a derived app that relays some zones and signs others.
+tdns-mpsigner switches `inline-signing` on for exactly the zones its provider
+signs, and serves the rest as it received them from another provider's
+signer. With the predicate true for every zone it counted its own serial for
+a relayed zone too, at every refresh, and served an SOA with that serial
+under the upstream's RRSIG, which was made over the upstream's serial. The SOA
+did not validate (johanix/tdns-mp#144). The predicate is per zone already, so
+applying it gives the right answer zone by zone: a zone the app signs keeps
+a serial of its own, a zone it relays mirrors the upstream.
+
+What a registered app gets is the whole rule, not the serial alone. Fix A
+(the mirror at a refresh and at the first load, no outbound serial mode; the
+serial record differs, see below), Fix C (the API refuses `bump` and the other
+origination commands), Fix D (the updater refuses a zone change) and Fix E
+(no SOA re-sign) all engage for a zone of its that is neither a primary nor
+inline-signing, and so do the later gates built on the predicate: the
+transport signal is kept beside the snapshot and not stored (Amendment 1), a
+ZONEMD is not managed, and a transaction is not opened.
+
+Fix B, the option normalizer, is the exception: it stays tdns-auth's. It
+decides while the configuration is parsed. Such an app decides later, at a
+refresh, which zones it signs, so stripping an origination option at the
+parse would take it from a zone the app goes on to sign. For a registered
+app the options stay as configured and the gates act where the content
+would be written. The cost is that a misplaced option on a relayed zone is
+not reported as a config warning there; the write it asks for is refused
+and logged when it is tried.
+
+The serial record is the second exception. A tdns-auth secondary that may
+not originate records no published serial, and the record it had is deleted
+(§3, Fix A). The relayed zone of a registered app keeps a record: the serial
+it serves, set at every publish. Such an app turns a zone from relayed to
+signed by itself, from what the zone says, and the turn can fall across a
+restart. The zone it now signs is then loaded from a new upstream, whose
+serial may be far below the one the zone was serving; the servers downstream
+of it hold that one and do not transfer a lower one. With the record, the
+first load of the zone lands one past the serial it relayed, as the first
+load of any zone that originates lands past its published serial (#655).
+While the app runs through the turn, the zone goes on from one past the
+serial it was serving, with or without the record.
+
+The record is set, not raised: a relayed zone's serial is its upstream's and
+may be below one the zone counted for itself earlier, as a signed zone or
+under a build that counted for relayed zones too. That earlier count does not
+stay in the record, which is what "clear them out" (§12, item 3) asks for.
+A relayed zone is never lifted past its record; it serves its upstream's
+serial.
+
+One consequence of the rule a registered app must know:
+
+- §8 applies as written: a relayed zone that had counted its serial ahead
+  drops to the upstream's serial, and a downstream that holds the higher one
+  does not transfer until it is forced to, or until the upstream passes it.
+  That is so after an upgrade, and each time a zone turns from signed to
+  relayed.
+
+### Options the daemon sets at run time
+
+A registered app decides at a refresh, from what the zone says, whether it
+signs the zone, and switches `inline-signing` on or off accordingly. That
+option is in no configuration. A config update (`config reload-zones`, a zone
+reload) replaces a zone's options with the configured ones, in two places:
+where the configuration is parsed for a zone that is already loaded, and
+where the refresh engine takes the options a config-bearing refresher
+carries. Both took the switch away, until the app set it again at the next
+transfer. `config reload-zones` forces that transfer, so the gap was short
+there; any other config update left the zone, by its options, one the daemon
+does not sign until its upstream next changed.
+
+Before the rule applied to such an app that had little effect. With it, every
+gate of this design reads the switch: in the gap a zone the daemon signs
+refuses a change of the daemon's own, and a refresh that was under way when
+the options were replaced takes the upstream's serial for it.
+
+`SetRuntimeOption` records an option the daemon set by itself beside the
+configured ones, and both places lay the record over what the configuration
+gives. For that option the daemon's word replaces the configuration's, on or
+off, until the daemon says otherwise. Nothing changes for a zone with no such
+option, which is every zone of tdns-auth.
