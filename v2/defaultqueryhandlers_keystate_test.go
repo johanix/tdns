@@ -86,8 +86,8 @@ func TestAgentAnswersAKeyStateInquiryForAChildsyncZone(t *testing.T) {
 
 // keyStateReceiver gives the server an UPDATE Receiver for its childsync
 // zones, named updates.<zone>, with an active SIG(0) key for parent's
-// receiver, and returns the receiver's name.
-func keyStateReceiver(t *testing.T, kdb *KeyDB, parent string) string {
+// receiver, and returns the receiver's name and its published KEY.
+func keyStateReceiver(t *testing.T, kdb *KeyDB, parent string) (string, *dns.KEY) {
 	t.Helper()
 	prevCS, prevPS := *ChildSyncConfig(), *ParentSyncConfig()
 	t.Cleanup(func() { _ = SetDelegationSyncConfig(prevCS, prevPS) })
@@ -105,8 +105,7 @@ func keyStateReceiver(t *testing.T, kdb *KeyDB, parent string) string {
 		t.Fatal(err)
 	}
 	receiver := DsyncUpdateTargetName(parent)
-	genProxySig0Key(t, kdb, receiver)
-	return receiver
+	return receiver, genProxySig0Key(t, kdb, receiver)
 }
 
 // wantKeyStateAnswer checks that resp is the parent's answer to an inquiry
@@ -149,7 +148,7 @@ func TestAKeyStateInquiryIsAnsweredWhenTheChildZoneIsHostedToo(t *testing.T) {
 	authApp(t)
 	kdb := Conf.Internal.KeyDB
 	parent := adoptParent(t, kdb)
-	receiver := keyStateReceiver(t, kdb, parent.ZoneName)
+	receiver, _ := keyStateReceiver(t, kdb, parent.ZoneName)
 
 	// The parent alone: the case that worked.
 	wantKeyStateAnswer(t, askKeyState(t, "alpha.parent.example.", 4242), 4242, receiver)
@@ -179,7 +178,7 @@ func TestAKeyStateInquiryForAHostedChildsyncChildIsItsParents(t *testing.T) {
 	authApp(t)
 	kdb := Conf.Internal.KeyDB
 	parent := adoptParent(t, kdb)
-	receiver := keyStateReceiver(t, kdb, parent.ZoneName)
+	receiver, _ := keyStateReceiver(t, kdb, parent.ZoneName)
 
 	child := testZone(t, "alpha.parent.example.", keyStateChildZone)
 	child.KeyDB = kdb
@@ -188,4 +187,61 @@ func TestAKeyStateInquiryForAHostedChildsyncChildIsItsParents(t *testing.T) {
 	genProxySig0Key(t, kdb, DsyncUpdateTargetName(child.ZoneName))
 
 	wantKeyStateAnswer(t, askKeyState(t, "alpha.parent.example.", 4242), 4242, receiver)
+}
+
+// The whole exchange, over TCP, as a child runs it: its own inquiry
+// (queryKeyState) against the real handler on a server that hosts the parent
+// and the child zone. The answer carries the KeyState option, and its SIG(0)
+// verifies, over the bytes the child read off the socket, with the KEY of
+// the parent's UPDATE Receiver. Signer name and presence alone would also
+// pass for a reply signed with another key.
+func TestAKeyStateInquiryAuthenticatesWhenTheChildZoneIsHostedToo(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	parent := adoptParent(t, kdb)
+	receiver, receiverKey := keyStateReceiver(t, kdb, parent.ZoneName)
+	const childName = "alpha.parent.example."
+	registerZones(t, testZone(t, childName, keyStateChildZone))
+
+	addr := startKeyStateResponder(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		msgo, err := edns0.ExtractFlagsAndEDNS0Options(r)
+		if err != nil {
+			t.Errorf("ExtractFlagsAndEDNS0Options: %v", err)
+			return
+		}
+		if err := DefaultQueryHandler(context.Background(), &DnsQueryRequest{
+			ResponseWriter: w,
+			Msg:            r,
+			Qname:          r.Question[0].Name,
+			Qtype:          r.Question[0].Qtype,
+			Options:        msgo,
+		}); err != nil {
+			t.Errorf("DefaultQueryHandler: %v", err)
+		}
+	})
+
+	childKdb := newTestKeyDB(t)
+	_, childKey := genSig0Key(t, childKdb, childName)
+	keyid := childKey.KeyTag()
+	target := &DsyncTarget{Name: receiver, Addresses: []string{addr}, Validated: true}
+
+	ks, authenticated, err := queryKeyState(context.Background(), childKdb, childName, keyid, target,
+		childKdb.receiverKeyTrust(), fetchKeys([]dns.RR{receiverKey}, true, nil), false)
+	if err != nil {
+		t.Fatalf("the child's inquiry failed: %v", err)
+	}
+	if !authenticated {
+		t.Error("the answer was not authenticated with the receiver's published KEY")
+	}
+	if ks.KeyID != keyid || ks.KeyState != edns0.KeyStateUnknown {
+		t.Errorf("the answer says key %d is in state %d, want key %d in state %d (unknown)",
+			ks.KeyID, ks.KeyState, keyid, edns0.KeyStateUnknown)
+	}
+
+	// A KEY that is not the receiver's does not verify the answer.
+	_, otherKey := genSig0Key(t, newTestKeyDB(t), receiver)
+	if _, _, err := queryKeyState(context.Background(), childKdb, childName, keyid, target,
+		childKdb.receiverKeyTrust(), fetchKeys([]dns.RR{otherKey}, true, nil), false); err == nil {
+		t.Error("the answer verified with a KEY that is not the receiver's")
+	}
 }
