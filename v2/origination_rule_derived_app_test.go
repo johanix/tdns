@@ -705,6 +705,49 @@ func TestRuntimeOptionsAreLaidOverTheConfiguredOnes(t *testing.T) {
 	}
 }
 
+// Setting a run-time option gives the zone a new options map; the map it had
+// is not written to. That map is read without the zone's lock by the query
+// and refresh paths, and the incoming zone of a refresh in progress holds it
+// as well, so a write into it could meet a read of it and stop the process.
+func TestSettingARuntimeOptionDoesNotWriteTheMapTheZoneHad(t *testing.T) {
+	had := map[ZoneOption]bool{OptAllowUpdates: true}
+	zd := &ZoneData{ZoneName: "example.", Options: had}
+	incoming := &ZoneData{ZoneName: "example.", Options: zd.Options} // as a refresh builds it
+
+	zd.SetRuntimeOption(OptInlineSigning, true)
+	if !zd.Options[OptInlineSigning] || !zd.Options[OptAllowUpdates] {
+		t.Fatalf("the zone's options after the set: %v, want inline-signing beside what it had", zd.Options)
+	}
+	if had[OptInlineSigning] || len(had) != 1 {
+		t.Fatalf("the map the zone had was written to: %v", had)
+	}
+	if incoming.Options[OptInlineSigning] {
+		t.Fatal("the incoming zone's map, shared with the served zone's old one, was written to")
+	}
+
+	// An option that already reads as asked for is no change: the same map.
+	is := zd.Options
+	zd.SetRuntimeOption(OptInlineSigning, true)
+	zd.SetRuntimeOption(OptMultiProvider, false)
+	if len(zd.Options) != len(is) || zd.Options[OptMultiProvider] {
+		t.Fatalf("a set that changes nothing changed the options: %v", zd.Options)
+	}
+	zd.mu.Lock()
+	if on, set := zd.runtimeOptions[OptMultiProvider]; !set || on {
+		t.Error("the daemon's \"off\" for an option that was not on is not recorded: a later config that sets it would win")
+	}
+	zd.mu.Unlock()
+
+	// Off replaces the map too.
+	zd.SetRuntimeOption(OptInlineSigning, false)
+	if zd.Options[OptInlineSigning] {
+		t.Fatal("inline-signing still reads on after the daemon switched it off")
+	}
+	if !is[OptInlineSigning] {
+		t.Fatal("switching the option off wrote the map the zone had before")
+	}
+}
+
 // The other place a reload replaces a zone's options: ParseZones, when it
 // reads the configuration of a zone that is already loaded. The option the
 // daemon set by itself stays there too, and an option the reload adds to the

@@ -31,6 +31,12 @@ package tdns
 // For a derived app's refresh callbacks (OnZonePreRefresh), on the zone that
 // is served, not on the incoming one. It takes the zone's lock, which those
 // callbacks run without.
+//
+// The zone gets a new options map with the option set; the map it had is not
+// written to. That map is read without the zone's lock all over the query
+// and refresh paths, and the incoming zone of a refresh in progress holds it
+// too, so a write into it could meet a read of it. An option that already
+// reads as asked for leaves the map alone.
 func (zd *ZoneData) SetRuntimeOption(opt ZoneOption, on bool) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
@@ -38,10 +44,15 @@ func (zd *ZoneData) SetRuntimeOption(opt ZoneOption, on bool) {
 		zd.runtimeOptions = map[ZoneOption]bool{}
 	}
 	zd.runtimeOptions[opt] = on
-	if zd.Options == nil {
-		zd.Options = map[ZoneOption]bool{}
+	if zd.Options[opt] == on {
+		return
 	}
-	zd.Options[opt] = on
+	next := make(map[ZoneOption]bool, len(zd.Options)+1)
+	for o, v := range zd.Options {
+		next[o] = v
+	}
+	next[opt] = on
+	zd.Options = next
 }
 
 // withRuntimeOptionsLocked is opts with the zone's run-time options laid over
