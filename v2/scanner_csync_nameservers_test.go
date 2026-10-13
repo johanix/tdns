@@ -310,6 +310,54 @@ func TestScanCSYNCProcessedSerialIsRememberedPerNameserver(t *testing.T) {
 		assertNSMoveApplied(t, runCSYNC(t, sc, zd, child))
 	})
 
+	// A nameserver that is out of reach for one scan keeps what was
+	// remembered for it. Were it forgotten, the older CSYNC it serves when it
+	// is back would be judged as its first, and processed (RFC 7477 §3.1).
+	t.Run("a nameserver that missed a scan serves an older CSYNC than it did", func(t *testing.T) {
+		const child = "missedone.example."
+		n := twoSigners(t, child)
+		zd := trustParent(t, child, trustLax())
+		sc := trustScanner(n)
+		assertNSMoveApplied(t, runCSYNC(t, sc, zd, child))
+
+		// providerNS does not answer the next scan: ns1's CSYNC is processed.
+		n.dead = map[string]bool{providerNS: true}
+		assertNSMoveApplied(t, runCSYNC(t, sc, zd, child))
+		if serial, ok := csyncProcessedSerial(child, providerNS); !ok || serial != 5000 {
+			t.Fatalf("CSYNC serial remembered for %s after a scan it missed is %d (remembered: %v), want it kept at 5000",
+				providerNS, serial, ok)
+		}
+
+		// It is back, with an older CSYNC than the one processed from it.
+		n.dead = nil
+		serve(t, n, child, 100, 4999)
+		resp := runCSYNC(t, sc, zd, child)
+		if !resp.Error || !strings.Contains(resp.ErrorMsg, "nameservers disagree on whether the CSYNC may be processed") ||
+			!strings.Contains(resp.ErrorMsg, providerNS+": no, CSYNC serial 4999 already processed") {
+			t.Fatalf("error %v %q; want %s refused with an older CSYNC than the one processed from it",
+				resp.Error, resp.ErrorMsg, providerNS)
+		}
+	})
+
+	// A nameserver the delegation no longer names is forgotten: delegated to
+	// again, it starts over.
+	t.Run("a nameserver that is no longer delegated to", func(t *testing.T) {
+		const child = "leftset.example."
+		t.Cleanup(func() {
+			csyncProcessed.Lock()
+			delete(csyncProcessed.serials, csyncProcessedKey(child))
+			csyncProcessed.Unlock()
+		})
+		recordCsyncProcessed(child, map[string]uint32{"ns1." + child: 100, providerNS: 5000}, []string{"ns1." + child, providerNS})
+		recordCsyncProcessed(child, map[string]uint32{"ns1." + child: 101}, []string{"ns1." + child})
+		if serial, ok := csyncProcessedSerial(child, providerNS); ok {
+			t.Errorf("serial %d is still remembered for %s, which the delegation no longer names", serial, providerNS)
+		}
+		if serial, _ := csyncProcessedSerial(child, "ns1."+child); serial != 101 {
+			t.Errorf("serial remembered for ns1 is %d, want 101", serial)
+		}
+	})
+
 	t.Run("one nameserver serves an older CSYNC than it did, the other a newer", func(t *testing.T) {
 		const child = "wentback.example."
 		n := twoSigners(t, child)

@@ -1114,12 +1114,20 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	}
 	scanLog.Printf("ProcessCSYNCNotify: %s: SOA serial stable at %d nameserver(s)", childZone, stable)
 
-	// 9. Update serial tracking, per nameserver
+	// 9. Update serial tracking, per nameserver. A nameserver of the
+	// delegation that did not answer this scan keeps what was remembered for
+	// it; one the delegation no longer names is forgotten.
 	processed := make(map[string]uint32, len(csyncs))
 	for _, c := range csyncs {
 		processed[c.NS] = c.CSYNC.Serial
 	}
-	recordCsyncProcessed(childZone, processed)
+	delegated := make([]string, 0, len(nsRRset.RRs))
+	for _, rr := range nsRRset.RRs {
+		if ns, ok := rr.(*dns.NS); ok {
+			delegated = append(delegated, ns.Ns)
+		}
+	}
+	recordCsyncProcessed(childZone, processed, delegated)
 
 	// 10. Report results
 	response.DataChanged = dataChanged

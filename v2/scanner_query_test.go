@@ -251,7 +251,7 @@ func TestCsyncProcessedSerialsAreSafeForConcurrentScans(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			zone := zones[i%len(zones)]
-			recordCsyncProcessed(zone, map[string]uint32{ns: uint32(i)})
+			recordCsyncProcessed(zone, map[string]uint32{ns: uint32(i)}, []string{ns})
 			sc.ZoneCSYNCKnown(zone, ns, &dns.CSYNC{Serial: uint32(i)})
 		}(i)
 	}
@@ -262,7 +262,7 @@ func TestCsyncProcessedSerialsAreSafeForConcurrentScans(t *testing.T) {
 		}
 	}
 
-	recordCsyncProcessed("Race0.Example", map[string]uint32{"NS.Provider.Net": 100})
+	recordCsyncProcessed("Race0.Example", map[string]uint32{"NS.Provider.Net": 100}, []string{"NS.Provider.Net"})
 	if serial, ok := csyncProcessedSerial("race0.example.", ns); !ok || serial != 100 {
 		t.Errorf("serial %d, recorded %v; names are compared canonically", serial, ok)
 	}
