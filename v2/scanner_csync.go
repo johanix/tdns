@@ -57,16 +57,33 @@ func csyncProcessedSerial(zone, ns string) (uint32, bool) {
 }
 
 // recordCsyncProcessed remembers the serials of the CSYNC processed for zone,
-// by the nameserver each came from. It replaces what was remembered for zone:
-// a nameserver the CSYNC did not come from this time is forgotten, and the
-// next CSYNC it serves is judged as its first.
-func recordCsyncProcessed(zone string, serials map[string]uint32) {
-	byNS := make(map[string]uint32, len(serials))
-	for ns, serial := range serials {
-		byNS[csyncProcessedKey(ns)] = serial
+// by the nameserver each came from. delegated names the nameservers the
+// parent delegated zone to when the scan began.
+//
+// What is remembered for a delegated nameserver that did not answer this time
+// is kept. Forgetting it let that nameserver serve an older CSYNC at the next
+// scan and have it judged as its first: the replay RFC 7477 §3.1 rules out,
+// by a nameserver that was only out of reach for one scan.
+//
+// What is remembered for a nameserver that is no longer delegated to is
+// dropped. If the zone is delegated to it again it starts over, and a serial
+// it counted long ago is not held against it.
+func recordCsyncProcessed(zone string, serials map[string]uint32, delegated []string) {
+	keep := make(map[string]bool, len(delegated)+len(serials))
+	for _, ns := range delegated {
+		keep[csyncProcessedKey(ns)] = true
 	}
 	csyncProcessed.Lock()
 	defer csyncProcessed.Unlock()
+	byNS := make(map[string]uint32, len(keep))
+	for ns, serial := range csyncProcessed.serials[csyncProcessedKey(zone)] {
+		if keep[ns] {
+			byNS[ns] = serial
+		}
+	}
+	for ns, serial := range serials {
+		byNS[csyncProcessedKey(ns)] = serial
+	}
 	csyncProcessed.serials[csyncProcessedKey(zone)] = byNS
 }
 
