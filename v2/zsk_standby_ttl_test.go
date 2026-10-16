@@ -53,7 +53,7 @@ type standbyStep struct {
 func runStandbySteps(t *testing.T, kdb *KeyDB, k uint16, t0 time.Time, delay time.Duration, steps []standbyStep) {
 	t.Helper()
 	for _, s := range steps {
-		transitionPublishedToStandby(&Conf, kdb, t0.Add(s.after), delay)
+		transitionPublishedToStandby(kdb, t0.Add(s.after), delay)
 		if got := ktKeyState(t, kdb, zskTTLZone, k); got != s.want {
 			t.Fatalf("%s after publication: ZSK is %s, want %s", s.after, got, s.want)
 		}
