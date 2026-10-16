@@ -122,6 +122,14 @@ func republishSigningKeysForZone(kdb *KeyDB, zone string) error {
 	}
 	defer kdb.KeysChanged(zd)
 	if err := zd.republishSigningKeys(kdb); err != nil {
+		// The write is committed, and its error cannot undo it, but without a
+		// snapshot nothing can tell whether it changed the served keys. So
+		// re-sign. The pass cannot sign with the old key set: a failed
+		// republish leaves the snapshot unbuilt, and the pass reads the keys
+		// from the keystore, or fails and stays owed until it can.
+		if zd.signedDnskeys() != nil {
+			triggerResign(&Conf, zd.ZoneName)
+		}
 		return err
 	}
 	if zd.dnskeysBehindKeystore(kdb) {
@@ -131,17 +139,27 @@ func republishSigningKeysForZone(kdb *KeyDB, zone string) error {
 	return nil
 }
 
-// dnskeysBehindKeystore reports whether the zone serves a signed DNSKEY RRset
-// that is not the one its keystore asks for: the pub=1 rows and the signing
-// keys, as publishDnskeyRRsLocked builds it. A zone that is not signed here,
-// or not signed yet, serves no such RRset, and its first signing builds it
-// from the keystore.
-func (zd *ZoneData) dnskeysBehindKeystore(kdb *KeyDB) bool {
+// signedDnskeys is the DNSKEY RRset the zone serves when it is signed here and
+// that RRset carries a signature; nil otherwise. A zone that is not signed
+// here, or not signed yet, has no such RRset to bring into line: its first
+// signing builds it from the keystore.
+func (zd *ZoneData) signedDnskeys() []dns.RR {
 	if !zd.signsItsOwnContent() {
-		return false
+		return nil
 	}
 	served := getRRsetFrom(zd.publishedSnapshot(), zd.ZoneName, dns.TypeDNSKEY)
 	if served == nil || len(served.RRSIGs) == 0 {
+		return nil
+	}
+	return served.RRs
+}
+
+// dnskeysBehindKeystore reports whether the zone serves a signed DNSKEY RRset
+// that is not the one its keystore asks for: the pub=1 rows and the signing
+// keys, as publishDnskeyRRsLocked builds it.
+func (zd *ZoneData) dnskeysBehindKeystore(kdb *KeyDB) bool {
+	served := zd.signedDnskeys()
+	if served == nil {
 		return false
 	}
 	want, err := servedDnskeyRRs(kdb, zd.ZoneName, zd.ActiveDnssecKeys())
@@ -152,7 +170,7 @@ func (zd *ZoneData) dnskeysBehindKeystore(kdb *KeyDB) bool {
 			"zone", zd.ZoneName, "err", err)
 		return true
 	}
-	return !sameKeyIdentities(keyIdentities(served.RRs), keyIdentities(want))
+	return !sameKeyIdentities(keyIdentities(served), keyIdentities(want))
 }
 
 // activeKeysCAS returns the active key set, building from DB with CAS-if-unbuilt

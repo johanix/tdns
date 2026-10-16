@@ -141,6 +141,35 @@ func TestAKeyWriteThatLeavesTheServedKeysAloneDoesNotResign(t *testing.T) {
 	}
 }
 
+// A write can commit and its republish then fail. The error cannot undo the
+// write, and without a snapshot nothing can tell whether the served keys
+// changed, so the re-sign is asked for anyway: it reads the keys from the
+// keystore, or fails and stays owed until it can.
+func TestAKeyWriteWhoseRepublishFailsStillResigns(t *testing.T) {
+	zd, kdb, q := keyedZone(t, true)
+
+	pkc, _, err := kdb.GenerateKeypair(zd.ZoneName, "test", DnskeyStateCreated,
+		dns.TypeDNSKEY, dns.ED25519, "ZSK", nil)
+	if err != nil {
+		t.Fatalf("generate ZSK: %v", err)
+	}
+	// A signing row whose private key does not parse fails every build.
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET privatekey='not a key' WHERE zonename=? AND keyid=?`,
+		zd.ZoneName, int(pkc.KeyId)); err != nil {
+		t.Fatalf("corrupt the private key: %v", err)
+	}
+
+	err = UpdateKeyRowFrom(kdb, zd.ZoneName, pkc.KeyId, DnskeyStateActive,
+		DnskeyStateCreated, KeyRowFlags{Pub: true, Sign: true})
+	if err == nil {
+		t.Fatal("test setup: the republish after the write did not fail")
+	}
+	if len(q) != 1 {
+		t.Errorf("%d re-signs queued after a committed write whose republish failed, want 1;"+
+			" the served DNSKEY RRset stays behind the keystore with nothing to retry it", len(q))
+	}
+}
+
 // A zone not signed yet serves no DNSKEY RRset to bring into line; its first
 // signing builds one from the keystore. An owned zone at cold start publishes
 // its keys before it can sign, and a re-sign then would fail until the owner
