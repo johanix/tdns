@@ -579,9 +579,11 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		// consumed by the local-tx defer above; resp.BulkRepublishZones carries
 		// the same names out for the external-tx caller (APIkeystore).
 		//
-		// NOTE for a future in-process caller: what the local-tx path does NOT
-		// do is trigger a RE-SIGN. That needs the ResignQ, which lives on
-		// *Config, which this function does not take — and threading conf
+		// NOTE for a future in-process caller: the local-tx path re-signs a
+		// zone whose served keys the import changed (the republish asks,
+		// #918), but not one whose signing keys alone changed. That needs
+		// triggerResign, which takes the
+		// *Config this function does not take — and threading conf
 		// through DnssecKeyMgmt for one subcommand with no in-process caller
 		// today is not worth the churn. The consequence is bounded and not a
 		// correctness hole: the signing-key set is republished immediately, so

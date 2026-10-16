@@ -105,6 +105,12 @@ func (zd *ZoneData) republishSigningKeys(kdb *KeyDB) error {
 // does not show in the served DNSKEY RRset -- published -> standby, a manual
 // roll -- and nothing else would tell the engine until the next tick. A hint,
 // not a result: the engine publishes only when the CDS differs from the keys.
+//
+// It is also where the zone is re-signed when the write changed the keys it
+// serves (#918). The served DNSKEY RRset is rebuilt from the keystore only by
+// a signing pass, so a key whose pub column changed stays out of it, or in
+// it, until something re-signs. Leaving that to the caller meant an owner's
+// publish and removal writes waited for its next promotion.
 func republishSigningKeysForZone(kdb *KeyDB, zone string) error {
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	if zone == "." {
@@ -115,7 +121,38 @@ func republishSigningKeysForZone(kdb *KeyDB, zone string) error {
 		return nil
 	}
 	defer kdb.KeysChanged(zd)
-	return zd.republishSigningKeys(kdb)
+	if err := zd.republishSigningKeys(kdb); err != nil {
+		return err
+	}
+	if zd.dnskeysBehindKeystore(kdb) {
+		lgSigner.Info("the served DNSKEY RRset is behind the keystore; re-signing", "zone", zd.ZoneName)
+		triggerResign(&Conf, zd.ZoneName)
+	}
+	return nil
+}
+
+// dnskeysBehindKeystore reports whether the zone serves a signed DNSKEY RRset
+// that is not the one its keystore asks for: the pub=1 rows and the signing
+// keys, as publishDnskeyRRsLocked builds it. A zone that is not signed here,
+// or not signed yet, serves no such RRset, and its first signing builds it
+// from the keystore.
+func (zd *ZoneData) dnskeysBehindKeystore(kdb *KeyDB) bool {
+	if !zd.signsItsOwnContent() {
+		return false
+	}
+	served := getRRsetFrom(zd.publishedSnapshot(), zd.ZoneName, dns.TypeDNSKEY)
+	if served == nil || len(served.RRSIGs) == 0 {
+		return false
+	}
+	want, err := servedDnskeyRRs(kdb, zd.ZoneName, zd.ActiveDnssecKeys())
+	if err != nil {
+		// The re-sign builds the RRset from the same keystore, and a failed
+		// one stays owed until it succeeds.
+		lgSigner.Error("cannot compare the served DNSKEY RRset with the keystore; re-signing",
+			"zone", zd.ZoneName, "err", err)
+		return true
+	}
+	return !sameKeyIdentities(keyIdentities(served.RRs), keyIdentities(want))
 }
 
 // activeKeysCAS returns the active key set, building from DB with CAS-if-unbuilt
