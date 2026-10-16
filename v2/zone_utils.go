@@ -1271,123 +1271,149 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 	}
 	_, wroteSerial, err := zd.WriteFileWithSerial(fname)
 	if err == nil {
-		zd.mu.Lock()
-		// The same question the dirty flag asks, captured once under the lock
-		// and reused for the identity record below: is the file still what the
-		// zone is serving?
-		fileIsCurrent := zd.CurrentSerial == wroteSerial
-		overlay := zd.isOverlayZoneLocked()
-		// Clean only if the file caught up with what the zone is serving. A
-		// publish can land WHILE this write runs: we then wrote serial 11 while
-		// the zone moved to 12, and clearing the flag unconditionally would
-		// report the zone as written out when the file is a serial behind.
-		// The next `zone write` would answer "not modified, writing to disk not
-		// needed" and decline to fix it. (No content is lost -- serial 12's
-		// delta is bounded by serial, so it survives the drop below and replays
-		// -- but the operator is told the file is current when it is not.)
-		if fileIsCurrent {
-			zd.Options[OptDirty] = false
-		}
-		// The file now carries this serial, so that is what a future journal
-		// anchors to. Without this the next change would chain from the serial
-		// the file had BEFORE this write, and the load after that would refuse
-		// the journal.
-		if wroteSerial != 0 {
-			zd.fileSerial = wroteSerial
-		}
-		zd.mu.Unlock()
-
-		// The file we have just written is a file we have looked at, so the
-		// next refresh can skip it. Without this every write-out would cost one
-		// full parse and digest at the following refresh.
-		if wst, werr := os.Stat(fname); werr == nil {
-			zd.recordZoneFileStat(fname, wst)
-		}
-
-		// Record the file's new identity: this is the other end of the
-		// comparison the next load makes. The digest is of the published
-		// snapshot, which is exactly what WriteZoneToFile just serialised, so
-		// reading this file back must reproduce it.
-		//
-		// Best-effort, and deliberately not fatal: the file is written and
-		// being served, and the cost of a missing record is that the next load
-		// reports "no basis for comparison" instead of "unchanged". Failing the
-		// write here would turn a bookkeeping problem into an operational one.
-		// Gated on the same condition, and for the same reason. ZoneDigestOfPublished
-		// digests the snapshot published NOW, not the one WriteFileWithSerial
-		// serialised, so it only describes this file while the two serials
-		// agree. Recording it after a publish landed mid-write would store a
-		// digest of serial 12 as the identity of a file holding serial 11 --
-		// and the next load, finding a mismatch, would report the file as
-		// CHANGED and merge the journal over a file nobody edited, lifting the
-		// serial and possibly writing a .rejected artefact.
-		//
-		// wroteSerial != 0 for the same reason the fileSerial assignment above
-		// refuses zero: recording serial 0 as the file's identity is worse than
-		// recording nothing, which merely reads as "no basis for comparison".
-		if zd.KeyDB != nil && fileIsCurrent && wroteSerial != 0 {
-			if digest, derr := zd.ZoneDigestOfPublished(); derr != nil {
-				lg.Warn("zone written but its digest could not be computed;"+
-					" the next load will have no basis for comparison",
-					"zone", zd.ZoneName, "error", derr)
-			} else if !zd.serialStillIs(wroteSerial) {
-				// fileIsCurrent was decided before the lock was dropped, and
-				// ZoneDigestOfPublished digests whatever is published when it
-				// runs. A publish landing in between leaves a digest of the
-				// newer zone about to be recorded as the identity of the file
-				// we wrote -- the very mismatch the gate above exists to
-				// prevent, one step later. Recording nothing is safe: the next
-				// load reads "no basis for comparison" and re-establishes it.
-				lg.Warn("zone written but a publish landed before its identity could be"+
-					" recorded; leaving the file unidentified rather than recording a"+
-					" digest of different content",
-					"zone", zd.ZoneName, "wrote_serial", wroteSerial)
-			} else if rerr := zd.RecordZoneFileState(wroteSerial, digest); rerr != nil {
-				lg.Warn("zone written but its file identity could not be recorded;"+
-					" the next load will have no basis for comparison",
-					"zone", zd.ZoneName, "error", rerr)
-			}
-		}
-
-		// Phase 2: the changes are now IN the file, which is the source of
-		// truth. The persisted deltas exist only to carry changes the file
-		// does not yet have, so replaying them over this file on the next load
-		// would apply everything a second time. Drop them.
-		//
-		// Order matters and is deliberate: the file write must succeed first.
-		// Dropping the deltas before a failed write would lose the changes
-		// entirely -- they would be neither in the file nor in the database.
-		// This is also why freeze/sync/write-zone need no delta handling of
-		// their own; they all reach the file through here.
-		//
-		// A failure to drop them is not fatal. The file is correct and being
-		// served; the cost is that a restart replays changes the file already
-		// contains. Adds are idempotent, deletes of absent records are
-		// no-ops, so the replayed result matches -- but it is still wrong
-		// enough to log loudly.
-		//
-		// Not on an overlay zone (journal_overlay.go). Its journal is not
-		// relative to a file: it holds the zone's own records, applied to every
-		// full transfer, and a load of this file applies it again. Dropping it
-		// would take those records out at the next full transfer.
-		if zd.KeyDB != nil && !overlay {
-			// Bound the drop by the serial actually WRITTEN, not by a ceiling
-			// read beforehand. A ceiling has a window: a publish can land in
-			// the file after the ceiling is read, and its delta row then
-			// survives the drop and fails the chain check on the next load.
-			// "Is this change already in the file?" is answered by the file's
-			// serial, and that has no window at all.
-			if n, derr := zd.KeyDB.DeleteZoneDeltasThroughSerial(zd.ZoneName, wroteSerial); derr != nil {
-				lg.Error("zone written to file but its persisted deltas could not be dropped;"+
-					" a restart will replay changes the file already contains",
-					"zone", zd.ZoneName, "file", fname, "error", derr)
-			} else if n > 0 {
-				lg.Info("zone written to file; persisted deltas dropped",
-					"zone", zd.ZoneName, "file", fname, "rows", n)
-			}
-		}
+		zd.recordZoneFileWritten(fname, wroteSerial)
 	}
 	return fmt.Sprintf("Zone %s written to %s", zd.ZoneName, fname), err
+}
+
+// recordZoneFileWritten is what follows a successful write of the published
+// snapshot to the zone's file, at wroteSerial: the file is the zone's file
+// now. Its serial anchors the journal, its stat and identity are recorded for
+// the next refresh and the next load, and the deltas it holds are dropped.
+//
+// One function for both writers, WriteZone and the write that follows a
+// refresh (persistRefreshedZone). The refresh's write used to do none of it,
+// so a secondary that restarted from that file found its journal anchored to
+// a serial the file did not have, and refused it as an edited file (#919).
+//
+// The caller has written the file with WriteFileWithSerial, whose success
+// means the file is on disk: the deltas dropped here have no other copy.
+func (zd *ZoneData) recordZoneFileWritten(fname string, wroteSerial uint32) {
+	zd.mu.Lock()
+	// The same question the dirty flag asks, captured once under the lock
+	// and reused for the identity record below: is the file still what the
+	// zone is serving?
+	fileIsCurrent := zd.CurrentSerial == wroteSerial
+	overlay := zd.isOverlayZoneLocked()
+	// Clean only if the file caught up with what the zone is serving. A
+	// publish can land WHILE this write runs: we then wrote serial 11 while
+	// the zone moved to 12, and clearing the flag unconditionally would
+	// report the zone as written out when the file is a serial behind.
+	// The next `zone write` would answer "not modified, writing to disk not
+	// needed" and decline to fix it. (No content is lost -- serial 12's
+	// delta is bounded by serial, so it survives the drop below and replays
+	// -- but the operator is told the file is current when it is not.)
+	if fileIsCurrent && zd.Options[OptDirty] {
+		zd.Options[OptDirty] = false
+	}
+	// The file now carries this serial, so that is what a future journal
+	// anchors to. Without this the next change would chain from the serial
+	// the file had BEFORE this write, and the load after that would refuse
+	// the journal.
+	if wroteSerial != 0 {
+		zd.fileSerial = wroteSerial
+	}
+	zd.mu.Unlock()
+
+	// The file we have just written is a file we have looked at, so the
+	// next refresh can skip it. Without this every write-out would cost one
+	// full parse and digest at the following refresh.
+	if wst, werr := os.Stat(fname); werr == nil {
+		zd.recordZoneFileStat(fname, wst)
+	}
+
+	// Record the file's new identity: this is the other end of the
+	// comparison the next load makes. The digest is of the published
+	// snapshot, which is exactly what WriteZoneToFile just serialised, so
+	// reading this file back must reproduce it.
+	//
+	// Best-effort, and deliberately not fatal: the file is written and
+	// being served, and the cost of a missing record is that the next load
+	// reports "no basis for comparison" instead of "unchanged". Failing the
+	// write here would turn a bookkeeping problem into an operational one.
+	// Gated on the same condition, and for the same reason. ZoneDigestOfPublished
+	// digests the snapshot published NOW, not the one WriteFileWithSerial
+	// serialised, so it only describes this file while the two serials
+	// agree. Recording it after a publish landed mid-write would store a
+	// digest of serial 12 as the identity of a file holding serial 11 --
+	// and the next load, finding a mismatch, would report the file as
+	// CHANGED and merge the journal over a file nobody edited, lifting the
+	// serial and possibly writing a .rejected artefact.
+	//
+	// wroteSerial != 0 for the same reason the fileSerial assignment above
+	// refuses zero: recording serial 0 as the file's identity is worse than
+	// recording nothing, which merely reads as "no basis for comparison".
+	if zd.KeyDB != nil && fileIsCurrent && wroteSerial != 0 {
+		if digest, derr := zd.ZoneDigestOfPublished(); derr != nil {
+			lg.Warn("zone written but its digest could not be computed;"+
+				" the next load will have no basis for comparison",
+				"zone", zd.ZoneName, "error", derr)
+		} else if !zd.serialStillIs(wroteSerial) {
+			// fileIsCurrent was decided before the lock was dropped, and
+			// ZoneDigestOfPublished digests whatever is published when it
+			// runs. A publish landing in between leaves a digest of the
+			// newer zone about to be recorded as the identity of the file
+			// we wrote -- the very mismatch the gate above exists to
+			// prevent, one step later. Recording nothing is safe: the next
+			// load reads "no basis for comparison" and re-establishes it.
+			lg.Warn("zone written but a publish landed before its identity could be"+
+				" recorded; leaving the file unidentified rather than recording a"+
+				" digest of different content",
+				"zone", zd.ZoneName, "wrote_serial", wroteSerial)
+		} else if rerr := zd.RecordZoneFileState(wroteSerial, digest); rerr != nil {
+			lg.Warn("zone written but its file identity could not be recorded;"+
+				" the next load will have no basis for comparison",
+				"zone", zd.ZoneName, "error", rerr)
+		}
+	}
+
+	// Phase 2: the changes are now IN the file, which is the source of
+	// truth. The persisted deltas exist only to carry changes the file
+	// does not yet have, so replaying them over this file on the next load
+	// would apply everything a second time. Drop them.
+	//
+	// Order matters and is deliberate: the file write must succeed first.
+	// Dropping the deltas before a failed write would lose the changes
+	// entirely -- they would be neither in the file nor in the database.
+	// This is also why freeze/sync/write-zone need no delta handling of
+	// their own; they all reach the file through here.
+	//
+	// A failure to drop them is not fatal. The file is correct and being
+	// served; the cost is that a restart replays changes the file already
+	// contains. Adds are idempotent, deletes of absent records are
+	// no-ops, so the replayed result matches -- but it is still wrong
+	// enough to log loudly.
+	//
+	// Not on an overlay zone (journal_overlay.go). Its journal is not
+	// relative to a file: it holds the zone's own records, applied to every
+	// full transfer, and a load of this file applies it again. Dropping it
+	// would take those records out at the next full transfer.
+	if zd.KeyDB != nil && !overlay {
+		// Bound the drop by the serial actually WRITTEN, not by a ceiling
+		// read beforehand. A ceiling has a window: a publish can land in
+		// the file after the ceiling is read, and its delta row then
+		// survives the drop and fails the chain check on the next load.
+		// "Is this change already in the file?" is answered by the file's
+		// serial, and that has no window at all.
+		n, derr := zd.KeyDB.DeleteZoneDeltasThroughSerial(zd.ZoneName, wroteSerial)
+		if derr != nil {
+			lg.Error("zone written to file but its persisted deltas could not be dropped;"+
+				" a restart will replay changes the file already contains",
+				"zone", zd.ZoneName, "file", fname, "error", derr)
+			return
+		}
+		if n > 0 {
+			lg.Info("zone written to file; persisted deltas dropped",
+				"zone", zd.ZoneName, "file", fname, "rows", n)
+		}
+		// What is left was published by this process, after the snapshot
+		// written, so it is in the content: nothing an earlier process left
+		// is owed any more. While it is owed only WriteZone gets here; the
+		// write after a refresh stops short of this (persistRefreshedZone).
+		zd.mu.Lock()
+		zd.journalReplayOwed = false
+		zd.mu.Unlock()
+	}
 }
 
 func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
