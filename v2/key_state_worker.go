@@ -534,10 +534,19 @@ func triggerResign(conf *Config, zoneName string) {
 	// clears this only when a replace has actually succeeded.
 	zd.markResignPending()
 
+	// A key-row write that changes the served keys asks from the write path
+	// (#918), and most callers ask again after it. One queued request covers
+	// both: it is taken after both commits.
+	if !zd.resignQueued.CompareAndSwap(false, true) {
+		lgSigner.Debug("KeyStateWorker: re-sign already queued", "zone", zoneName)
+		return
+	}
+
 	select {
 	case conf.Internal.ResignQ <- ResignRequest{Zd: zd, Reason: ResignKeyStateChanged}:
 		lgSigner.Debug("KeyStateWorker: triggered re-sign", "zone", zoneName)
 	default:
+		zd.resignQueued.Store(false)
 		// Dropping used to lose the request outright. The log said it would
 		// happen on the next cycle; that stopped being true when the ticker
 		// moved from a full rebuild to renewal, because renewal only looks at

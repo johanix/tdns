@@ -267,6 +267,12 @@ type ZoneData struct {
 	// wrong key, so NeedsResigning short-circuits and renewal finds nothing
 	// due. Set by triggerResign, cleared only by a replace that succeeded.
 	resignPending atomic.Bool
+	// resignQueued records that triggerResign has a request for this zone in
+	// the ResignQ that the resigner has not taken yet. The resigner reads the
+	// keystore when it takes it, so a second request would only replace every
+	// signature again. Cleared when the resigner takes it, or when the send
+	// is dropped.
+	resignQueued atomic.Bool
 	// dsFirstRunDone records that the DS engine has had its first run for this
 	// ZoneData, the one that compares the parent's DS with the keys once per
 	// zone load (followKeysWithCDS). Per ZoneData, not per process: a zone

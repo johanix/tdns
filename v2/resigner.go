@@ -180,6 +180,9 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 			// anything is due.
 			switch req.Reason {
 			case ResignKeyStateChanged:
+				// Before the pass reads the keystore: a trigger from here
+				// on is for a change this pass may not see.
+				zd.resignQueued.Store(false)
 				zd.replaceSignaturesNow(ctx)
 			case ResignPeriodic:
 				// Registration only; the watchlist add below is the whole effect.
