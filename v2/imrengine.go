@@ -139,6 +139,11 @@ type ImrRequest struct {
 	Qtype      uint16
 	Qclass     uint16
 	ResponseCh chan ImrResponse
+	// AsClient asks the question as a DNS client's query (asClientQuery): a
+	// DS or DNSKEY question at a CNAME owner follows the CNAME, as it does
+	// for dig. The "imr query" command in tdns-imr's own shell sets it. The
+	// embedded users leave it false and ask as the resolver does.
+	AsClient bool
 }
 
 type ImrResponse struct {
@@ -632,7 +637,11 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 	}
 
 	lgImr.Debug("not in cache, querying", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
-	resp, err := imr.ImrQuery(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
+	qctx := ctx
+	if rrq.AsClient {
+		qctx = asClientQuery(ctx)
+	}
+	resp, err := imr.ImrQuery(qctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
 	if err != nil {
 		lgImr.Error("ImrQuery failed",
 			"qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "err", err)
