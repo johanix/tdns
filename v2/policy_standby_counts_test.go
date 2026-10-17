@@ -157,7 +157,7 @@ func TestStandbyMaintenanceReadsTheZonesPolicy(t *testing.T) {
 	standbyZone(t, kdb, "sbmore.example.", more)
 	standbyZone(t, kdb, "sbnone.example.", none)
 
-	maintainStandbyKeys(context.Background(), noResignQ(), kdb, time.Minute, 1, 0)
+	maintainStandbyKeys(context.Background(), kdb, time.Minute, 1, 0)
 
 	for _, tc := range []struct {
 		zone       string
@@ -298,7 +298,7 @@ func TestZeroStandbyZsksMintTheReplacementAheadOfTheRoll(t *testing.T) {
 	stamp("sbsoon.example.", "active_at", DnskeyStateActive, 256, 50*time.Minute)
 	stamp("sbearly.example.", "active_at", DnskeyStateActive, 256, 40*time.Minute)
 
-	maintainStandbyKeys(context.Background(), conf, kdb, propagation, 1, 0)
+	maintainStandbyKeys(context.Background(), kdb, propagation, 1, 0)
 	if z := zsks("sbsoon.example.", DnskeyStatePublished); z != 1 {
 		t.Errorf("the zone whose roll is inside the window: minted %d ZSKs, want 1", z)
 	}
@@ -312,7 +312,7 @@ func TestZeroStandbyZsksMintTheReplacementAheadOfTheRoll(t *testing.T) {
 	if err := SetZskManualRolloverRequest(kdb, "sbmanual.example.", time.Now(), time.Now()); err != nil {
 		t.Fatalf("manual request: %v", err)
 	}
-	maintainStandbyKeys(context.Background(), conf, kdb, propagation, 1, 0)
+	maintainStandbyKeys(context.Background(), kdb, propagation, 1, 0)
 	if z := zsks("sbmanual.example.", DnskeyStatePublished); z != 1 {
 		t.Errorf("the manual request: minted %d ZSKs, want 1", z)
 	}
@@ -320,11 +320,11 @@ func TestZeroStandbyZsksMintTheReplacementAheadOfTheRoll(t *testing.T) {
 	// the window passes: the key is standby before the lifetime ends, and
 	// nothing more is minted while the roll waits for it
 	stamp("sbsoon.example.", "published_at", DnskeyStatePublished, 256, propagation+10*time.Minute+time.Second)
-	transitionPublishedToStandby(conf, kdb, time.Now(), propagation)
+	transitionPublishedToStandby(kdb, time.Now(), propagation)
 	if s, p := zsks("sbsoon.example.", DnskeyStateStandby), zsks("sbsoon.example.", DnskeyStatePublished); s != 1 || p != 0 {
 		t.Fatalf("after the window: %d standby and %d published ZSKs, want 1 and 0", s, p)
 	}
-	maintainStandbyKeys(context.Background(), conf, kdb, propagation, 1, 0)
+	maintainStandbyKeys(context.Background(), kdb, propagation, 1, 0)
 	if p := zsks("sbsoon.example.", DnskeyStatePublished); p != 0 {
 		t.Errorf("with the replacement standing by: minted %d more, want 0", p)
 	}
@@ -344,7 +344,7 @@ func TestZeroStandbyZsksMintTheReplacementAheadOfTheRoll(t *testing.T) {
 	if zskReplacementDue(kdb, "sbsoon.example.", pol, time.Now(), propagation) {
 		t.Error("after the roll the replacement is reported due")
 	}
-	maintainStandbyKeys(context.Background(), conf, kdb, propagation, 1, 0)
+	maintainStandbyKeys(context.Background(), kdb, propagation, 1, 0)
 	if p := zsks("sbsoon.example.", DnskeyStatePublished); p != 0 {
 		t.Errorf("after the roll: minted %d ZSKs, want 0", p)
 	}

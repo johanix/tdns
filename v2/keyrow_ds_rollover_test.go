@@ -87,7 +87,7 @@ func TestDsTimelineNoneModel(t *testing.T) {
 	}
 
 	// The key state worker's timer: propagated, standby.
-	transitionPublishedToStandby(&Conf, kdb, time.Now().Add(2*time.Hour), time.Hour)
+	transitionPublishedToStandby(kdb, time.Now().Add(2*time.Hour), time.Hour)
 	if st := ktKeyState(t, kdb, zone, b); st != DnskeyStateStandby {
 		t.Fatalf("after the propagation delay: B is %s, want standby", st)
 	}
@@ -114,7 +114,7 @@ func TestDsTimelineNoneModel(t *testing.T) {
 		t.Errorf("rolled: the parent is asked for %v, want {%d}", tags, b)
 	}
 
-	transitionRetiredToRemoved(context.Background(), &Conf, kdb, time.Now().Add(48*time.Hour), time.Hour)
+	transitionRetiredToRemoved(context.Background(), kdb, time.Now().Add(48*time.Hour), time.Hour)
 	if st := ktKeyState(t, kdb, zone, a); st != DnskeyStateRemoved {
 		t.Fatalf("after the margin: A is %s, want removed", st)
 	}

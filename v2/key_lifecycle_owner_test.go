@@ -108,14 +108,14 @@ func lifecyclePaths() []lifecyclePath {
 			backdate(t, kdb, zd.ZoneName, k, "published_at", long)
 			return func(t *testing.T) bool { return keyStateOf(t, kdb, zd.ZoneName, k) == DnskeyStateStandby }
 		}, func(t *testing.T, kdb *KeyDB, zd *ZoneData) {
-			transitionPublishedToStandby(&Conf, kdb, time.Now(), time.Minute)
+			transitionPublishedToStandby(kdb, time.Now(), time.Minute)
 		}},
 		{"worker retired->removed", func(t *testing.T, kdb *KeyDB, zd *ZoneData) func(*testing.T) bool {
 			k := ktGenZSK(t, kdb, zd.ZoneName, DnskeyStateRetired, dns.ED25519)
 			backdate(t, kdb, zd.ZoneName, k, "retired_at", long)
 			return func(t *testing.T) bool { return keyStateOf(t, kdb, zd.ZoneName, k) == DnskeyStateRemoved }
 		}, func(t *testing.T, kdb *KeyDB, zd *ZoneData) {
-			transitionRetiredToRemoved(context.Background(), &Conf, kdb, time.Now(), time.Minute)
+			transitionRetiredToRemoved(context.Background(), kdb, time.Now(), time.Minute)
 		}},
 		{"worker standby maintenance", func(t *testing.T, kdb *KeyDB, zd *ZoneData) func(*testing.T) bool {
 			return func(t *testing.T) bool {
@@ -123,7 +123,7 @@ func lifecyclePaths() []lifecyclePath {
 				return len(ks) > 0
 			}
 		}, func(t *testing.T, kdb *KeyDB, zd *ZoneData) {
-			maintainStandbyKeys(context.Background(), &Conf, kdb, time.Minute, 1, 0)
+			maintainStandbyKeys(context.Background(), kdb, time.Minute, 1, 0)
 		}},
 		{"rollover walk ds-published->published", func(t *testing.T, kdb *KeyDB, zd *ZoneData) func(*testing.T) bool {
 			// the active KSK's lifetime is long past: the successor's DNSKEY is due

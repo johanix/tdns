@@ -3,6 +3,7 @@ package tdns
 import (
 	"context"
 	"testing"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -44,8 +45,8 @@ func TestSignRRsetRefusesAnEmptyRRsetRatherThanPanicking(t *testing.T) {
 // stale signature but a bogus zone, and everything delegated beneath it fails to
 // validate too (#566).
 //
-// The two state transitions either side of this in KeyStateWorker both call
-// triggerResign. Adding a key to the RRset needs it exactly as much.
+// The write that stages the key asks for the re-sign (#918), through Conf's
+// ResignQ. Adding a key to the RRset needs it as much as removing one does.
 func TestGeneratingAStandbyKeyTriggersAResign(t *testing.T) {
 	zd, kdb, _ := rolledZone(t)
 
@@ -53,14 +54,12 @@ func TestGeneratingAStandbyKeyTriggersAResign(t *testing.T) {
 	q := make(chan ResignRequest, 4)
 	Conf.Internal.ResignQ = q
 	t.Cleanup(func() { Conf.Internal.ResignQ = prev })
-	conf := &Config{}
-	conf.Internal.ResignQ = q
 
 	Zones.Set(zd.ZoneName, zd)
 	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
 
 	// No standby ZSK exists, so this generates one.
-	maintainStandbyKeysForType(context.Background(), conf, kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 1, false)
+	maintainStandbyKeysForType(context.Background(), kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 1, false)
 
 	select {
 	case req := <-q:
@@ -87,20 +86,83 @@ func TestNoStandbyKeyGeneratedMeansNoResign(t *testing.T) {
 	q := make(chan ResignRequest, 4)
 	Conf.Internal.ResignQ = q
 	t.Cleanup(func() { Conf.Internal.ResignQ = prev })
-	conf := &Config{}
-	conf.Internal.ResignQ = q
 
 	Zones.Set(zd.ZoneName, zd)
 	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
 
 	// Ask for zero standbys: the count is already satisfied, nothing is
 	// generated, and the served RRset does not change.
-	maintainStandbyKeysForType(context.Background(), conf, kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 0, false)
+	maintainStandbyKeysForType(context.Background(), kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 0, false)
 
 	select {
 	case req := <-q:
 		t.Fatalf("queued a re-sign for %s with no key generated", req.Zd.ZoneName)
 	default:
+	}
+}
+
+// A retired key that reaches removed leaves the served DNSKEY RRset, which
+// then needs a new RRSIG. The worker no longer asks for it itself; the write
+// does (#918).
+func TestRetiredToRemovedResignsTheZone(t *testing.T) {
+	zd, kdb, oldTag := rolledZone(t)
+	// Serve what the keystore asks for, and only then watch the queue, so it
+	// holds only what the transition causes.
+	if _, err := zd.ResignZone(context.Background(), kdb); err != nil {
+		t.Fatalf("ResignZone: %v", err)
+	}
+	prev := Conf.Internal.ResignQ
+	q := make(chan ResignRequest, 4)
+	Conf.Internal.ResignQ = q
+	t.Cleanup(func() { Conf.Internal.ResignQ = prev })
+
+	transitionRetiredToRemoved(context.Background(), kdb, time.Now().Add(48*time.Hour), time.Hour)
+
+	removed, err := GetDnssecKeysByState(kdb, zd.ZoneName, DnskeyStateRemoved)
+	if err != nil {
+		t.Fatalf("GetDnssecKeysByState: %v", err)
+	}
+	if len(removed) != 1 || removed[0].KeyTag != oldTag {
+		t.Fatalf("test setup: removed keys %v, want the retired ZSK %d", removed, oldTag)
+	}
+	select {
+	case req := <-q:
+		if req.Zd == nil || req.Zd.ZoneName != zd.ZoneName || req.Reason != ResignKeyStateChanged {
+			t.Errorf("queued %+v, want a key-state re-sign of %s", req, zd.ZoneName)
+		}
+	default:
+		t.Fatal("no re-sign was queued, so the zone goes on serving the removed key")
+	}
+}
+
+// published -> standby changes neither the keys the zone serves nor the keys
+// it signs with, so it asks for nothing. The worker used to ask, and the
+// resigner replaced every signature in the zone for it.
+func TestPublishedToStandbyDoesNotResign(t *testing.T) {
+	zd, kdb, _ := rolledZone(t)
+	if _, _, err := kdb.GenerateKeypair(zd.ZoneName, "test", DnskeyStatePublished,
+		dns.TypeDNSKEY, dns.ED25519, "ZSK", nil); err != nil {
+		t.Fatalf("generate published ZSK: %v", err)
+	}
+	if _, err := zd.ResignZone(context.Background(), kdb); err != nil {
+		t.Fatalf("ResignZone: %v", err)
+	}
+	prev := Conf.Internal.ResignQ
+	q := make(chan ResignRequest, 4)
+	Conf.Internal.ResignQ = q
+	t.Cleanup(func() { Conf.Internal.ResignQ = prev })
+
+	transitionPublishedToStandby(kdb, time.Now().Add(30*24*time.Hour), time.Hour)
+
+	standby, err := GetDnssecKeysByState(kdb, zd.ZoneName, DnskeyStateStandby)
+	if err != nil {
+		t.Fatalf("GetDnssecKeysByState: %v", err)
+	}
+	if len(standby) != 1 {
+		t.Fatalf("test setup: %d standby keys, want the published ZSK moved to standby", len(standby))
+	}
+	if len(q) != 0 {
+		t.Error("published -> standby queued a re-sign; nothing the zone serves or signs with changed")
 	}
 }
 
