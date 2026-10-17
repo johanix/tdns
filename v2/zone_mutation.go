@@ -1048,6 +1048,10 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 			zd.CurrentSerial = restoreSerial + 1
 		}
 		zd.FirstZoneLoad = false
+		// The journal an earlier process left is brought in by the first-load
+		// completion, after the DNSSEC policy binds, not here. Until then its
+		// deltas are in neither this content nor the file.
+		zd.journalReplayOwed = zd.KeyDB != nil
 
 	case !zoneMayOriginateContent(zd):
 		// MUST-NOT-MODIFY: a tdns-auth secondary that did not originate this

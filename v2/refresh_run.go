@@ -219,10 +219,36 @@ func persistRefreshedZone(zd *ZoneData, zone string, gen uint64, conf *Config) {
 
 	case refreshWritesZoneToSourceFile(zd):
 		lgEngine.Info("writing updated zone to file", "zone", zone, "file", zd.Zonefile)
-		if _, err := zd.WriteFile(zd.Zonefile); err != nil {
+		_, wrote, err := zd.WriteFileWithSerial(zd.Zonefile)
+		if err != nil {
 			lgEngine.Warn("failed to write zone file", "zone", zone, "error", err)
+			return
 		}
+		// The file is the zone's file now, and the next load starts from it,
+		// so it gets what WriteZone's file gets: the journal anchored to it
+		// and the deltas it holds dropped (#919).
+		//
+		// Not while the first load still owes the journal an earlier process
+		// left (journalReplayOwed). Its deltas are in neither the content nor
+		// this file, so dropping the ones the serial covers would lose them,
+		// and moving the anchor would refuse the rest when they are replayed.
+		// A first-load completion that failed before its replay leaves the
+		// zone in exactly this state while a NOTIFY still refreshes it.
+		if zd.journalReplayIsOwed() {
+			lgEngine.Info("zone file written; the journal is left as it is until the first load"+
+				" has replayed it", "zone", zone, "file", zd.Zonefile, "serial", wrote)
+			return
+		}
+		zd.recordZoneFileWritten(zd.Zonefile, wrote)
 	}
+}
+
+// journalReplayIsOwed reports whether the zone's first load has yet to bring
+// in the journal an earlier process left. See ZoneData.journalReplayOwed.
+func (zd *ZoneData) journalReplayIsOwed() bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.journalReplayOwed
 }
 
 // reparseCatalogZone re-reads a catalog zone's membership and hands any
