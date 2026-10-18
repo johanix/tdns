@@ -534,6 +534,10 @@ func (s *HSYNCPARAMNSmgmt) unpack(b []byte) error {
 	if len(b) != 1 {
 		return errors.New("dns: hsyncparam nsmgmt: value length is not 1")
 	}
+	// Only the values parse accepts, so that what String prints loads again.
+	if b[0] != HsyncNSmgmtOWNER && b[0] != HsyncNSmgmtAGENT {
+		return fmt.Errorf("dns: hsyncparam nsmgmt: unknown value %d", b[0])
+	}
 	s.Value = b[0]
 	return nil
 }
@@ -575,6 +579,10 @@ func (s *HSYNCPARAMParentSync) pack() ([]byte, error) {
 func (s *HSYNCPARAMParentSync) unpack(b []byte) error {
 	if len(b) != 1 {
 		return errors.New("dns: hsyncparam parentsync: value length is not 1")
+	}
+	// Only the values parse accepts, so that what String prints loads again.
+	if _, ok := HsyncParentSyncToString[b[0]]; !ok {
+		return fmt.Errorf("dns: hsyncparam parentsync: unknown value %d", b[0])
 	}
 	s.Value = b[0]
 	return nil

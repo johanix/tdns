@@ -302,6 +302,8 @@ func TestHsyncparamGenericFormOfRegisteredKey(t *testing.T) {
 		{"key8"},                  // no octets
 		{"key6=x"},                // a flag with a value
 		{"key3=", `\001\001`},     // nsmgmt is one octet
+		{"key3=", `\000`},         // nsmgmt is 1 (owner) or 2 (agent)
+		{"key4=", `\002`},         // parentsync is 0 (owner) or 1 (agent)
 		{"key5=", "-ns"},          // not a DNS label
 		{"key8=", `\00`},          // a broken escape
 	} {
@@ -377,6 +379,44 @@ func TestHsyncparamSerialPresentationValues(t *testing.T) {
 	} {
 		if _, err := dns.NewRR(text); err == nil {
 			t.Errorf("NewRR accepted %q", text)
+		}
+	}
+}
+
+// nsmgmt and parentsync are refused on the wire with a value parse would not
+// accept: String prints such a value as a number, and that text does not
+// load again. The two keys number owner and agent differently.
+func TestHsyncparamUnpackRefusesUnknownPolicyValues(t *testing.T) {
+	if err := RegisterHsyncparamRR(); err != nil {
+		t.Fatalf("RegisterHsyncparamRR: %v", err)
+	}
+	for _, tc := range []struct {
+		wire []byte
+		ok   bool
+	}{
+		{[]byte{0, 3, 0, 1, HsyncNSmgmtOWNER}, true},
+		{[]byte{0, 3, 0, 1, HsyncNSmgmtAGENT}, true},
+		{[]byte{0, 3, 0, 1, 0}, false},
+		{[]byte{0, 3, 0, 1, 3}, false},
+		{[]byte{0, 4, 0, 1, HsyncParentSyncOwner}, true},
+		{[]byte{0, 4, 0, 1, HsyncParentSyncAgent}, true},
+		{[]byte{0, 4, 0, 1, 2}, false},
+		{[]byte{0, 4, 0, 1, 255}, false},
+	} {
+		var rr HSYNCPARAM
+		_, err := rr.Unpack(tc.wire)
+		if !tc.ok {
+			if err == nil {
+				t.Errorf("%v accepted as %s", tc.wire, rr.String())
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%v refused: %v", tc.wire, err)
+			continue
+		}
+		if _, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + rr.String()); err != nil {
+			t.Errorf("%v prints as %s, which does not load: %v", tc.wire, rr.String(), err)
 		}
 	}
 }
