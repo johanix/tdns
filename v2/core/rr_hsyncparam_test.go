@@ -244,11 +244,78 @@ func TestHsyncparamUnknownKeyIsPreserved(t *testing.T) {
 	if string(buf[:n]) != string(wire) {
 		t.Errorf("re-packed %v, want %v", buf[:n], wire)
 	}
+}
 
-	// A registered key's number may not be spelled keyN -- there is exactly
-	// one presentation form per key.
-	if got := hsyncparamStringToKey("key0"); got != hsyncparam_RESERVED {
-		t.Errorf("key0 parsed to %d; a registered key must be written by name", got)
+// keyN for a registered key is what code that did not know the key wrote.
+// The draft has unknown keys written as keyN so that tools updated with the
+// key's definition can read them, and RFC 9460 lets any SVCB key be written
+// so, with the decoded value used as its wire form. So it is read here as
+// that key, its value checked as that key's wire form, and written back by
+// name.
+func TestHsyncparamGenericFormOfRegisteredKey(t *testing.T) {
+	if err := RegisterHsyncparamRR(); err != nil {
+		t.Fatalf("RegisterHsyncparamRR: %v", err)
+	}
+
+	// What code from before serial was registered prints for serial=7: key 8
+	// had no name there, so it went out as keyN with its bytes escaped.
+	older := `key8="` + hsyncparamParamToStr([]byte{0, 0, 0, 7}) + `"`
+	if older != `key8="\000\000\000\007"` {
+		t.Fatalf("the escaping changed: %s", older)
+	}
+
+	for _, tc := range []struct {
+		rdata string
+		want  string // String() of the result
+	}{
+		{older, `serial="7"`},
+		{`key0="fox,hare"`, `servers="fox,hare"`},
+		{`key3="\002"`, `nsmgmt="agent"`},
+		{`key5="ns"`, `suffix="ns"`},
+		{`key6`, `pubkey`},
+		{`key7=""`, `pubcds`},
+	} {
+		rr, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + tc.rdata)
+		if err != nil {
+			t.Errorf("%s refused: %v", tc.rdata, err)
+			continue
+		}
+		hp := rr.(*dns.PrivateRR).Data.(*HSYNCPARAM)
+		if got := hp.String(); got != tc.want {
+			t.Errorf("%s reads back as %s, want %s", tc.rdata, got, tc.want)
+		}
+		if _, ok := hp.Value[0].(*HSYNCPARAMLocal); ok {
+			t.Errorf("%s was kept as an unknown key", tc.rdata)
+		}
+	}
+	if rr, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + older); err == nil {
+		if got, ok := rr.(*dns.PrivateRR).Data.(*HSYNCPARAM).GetSerial(); !ok || got != 7 {
+			t.Errorf("GetSerial() = (%d, %v), want (7, true)", got, ok)
+		}
+	}
+
+	// The value must be valid wire form for the key: the key's own unpack
+	// decides, so a serial is four octets and a flag none.
+	for _, tokens := range [][]string{
+		{"key8=", `\000\000\007`}, // three octets
+		{"key8=7"},                // one octet, the character '7'
+		{"key8"},                  // no octets
+		{"key6=x"},                // a flag with a value
+		{"key3=", `\001\001`},     // nsmgmt is one octet
+		{"key5=", "-ns"},          // not a DNS label
+		{"key8=", `\00`},          // a broken escape
+	} {
+		var rr HSYNCPARAM
+		if err := rr.Parse(tokens); err == nil {
+			t.Errorf("%v accepted as %s", tokens, rr.String())
+		}
+	}
+
+	// Leading zeros and the reserved number are not keyN spellings.
+	for _, key := range []string{"key08", "key00", "key65535", "key", "key-1", "key+8"} {
+		if _, ok := hsyncparamRegisteredKeyN(key); ok {
+			t.Errorf("%q taken as a registered key", key)
+		}
 	}
 }
 
@@ -347,6 +414,8 @@ func TestHsyncparamParseRefusesRepeatedKey(t *testing.T) {
 		{[]string{"serial=1", "serial=2"}, "serial=1"},
 		{[]string{"serial=1", "serial=", "1"}, "serial=1"}, // serial="1"
 		{[]string{"key32768=a", "key32768=b"}, "key32768=a"},
+		{[]string{"serial=1", "key8=", `\000\000\000\001`}, "serial=1"}, // two spellings of key 8
+		{[]string{"key6", "pubkey"}, "pubkey"},
 	} {
 		var rr HSYNCPARAM
 		err := rr.Parse(tc.tokens)

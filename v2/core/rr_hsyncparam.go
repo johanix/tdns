@@ -36,6 +36,11 @@ import (
 // An unregistered key number is decoded into an HSYNCPARAMLocal, preserved on
 // read-back, and never acted on, as the draft requires. In presentation format
 // it is written as keyN.
+//
+// keyN is also read for a registered key, with the key's wire form as its
+// value, so that a record written by code from before the key was registered
+// (key8="\000\000\000\007") loads as the key it is. Output always uses the
+// name.
 
 func init() {
 	RegisterHsyncparamRR()
@@ -112,6 +117,20 @@ func hsyncparamStringToKey(s string) HSYNCPARAMKey {
 		return key
 	}
 	return hsyncparam_RESERVED
+}
+
+// hsyncparamRegisteredKeyN reports whether s is the generic keyN spelling of
+// a registered key ("key8" for serial), and returns that key. The number has
+// no leading zeros.
+func hsyncparamRegisteredKeyN(s string) (HSYNCPARAMKey, bool) {
+	if !strings.HasPrefix(s, "key") || len(s) == 3 || (len(s) > 4 && s[3] == '0') {
+		return hsyncparam_RESERVED, false
+	}
+	a, err := strconv.ParseUint(s[3:], 10, 16)
+	if err != nil || hsyncparamKeyToStringMap[HSYNCPARAMKey(a)] == "" {
+		return hsyncparam_RESERVED, false
+	}
+	return HSYNCPARAMKey(a), true
 }
 
 // ParentSync constants: who handles parent synchronisation.
@@ -279,7 +298,14 @@ func (rr *HSYNCPARAM) Parse(s []string) error {
 			key, value = tok[:idx], tok[idx+1:]
 		}
 
-		kv := makeHSYNCPARAMKeyValue(hsyncparamStringToKey(key))
+		// keyN for a registered key is the form code that did not know the
+		// key wrote it in. Its value is the key's wire form, as for SVCB
+		// (RFC 9460, section 2.1), and must be valid wire form for that key.
+		code, generic := hsyncparamRegisteredKeyN(key)
+		if !generic {
+			code = hsyncparamStringToKey(key)
+		}
+		kv := makeHSYNCPARAMKeyValue(code)
 		if kv == nil {
 			return fmt.Errorf("HSYNCPARAM: unknown key %q", key)
 		}
@@ -287,7 +313,15 @@ func (rr *HSYNCPARAM) Parse(s []string) error {
 			return fmt.Errorf("HSYNCPARAM: repeated key %q", key)
 		}
 		seen[kv.Key()] = true
-		if err := kv.parse(value); err != nil {
+		if generic {
+			data, err := hsyncparamParseParam(value)
+			if err != nil {
+				return fmt.Errorf("HSYNCPARAM: %s: %w", key, err)
+			}
+			if err := kv.unpack(data); err != nil {
+				return fmt.Errorf("HSYNCPARAM: %s: %w", key, err)
+			}
+		} else if err := kv.parse(value); err != nil {
 			return err
 		}
 		xs = append(xs, kv)

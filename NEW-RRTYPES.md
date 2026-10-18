@@ -64,7 +64,10 @@ draft-leon-dnsop-signaling-zone-owner-intent assigns them:
 
 0-32767 is the IANA-registered range and 32768-65534 is Private Use; an
 unregistered number is preserved on read-back, never acted on, and written
-as keyN in presentation format. 65535 is reserved.
+as keyN in presentation format. 65535 is reserved. keyN is also read for a
+registered key, with the key's wire form as its value (as for SVCB), so
+that a record written by code that did not know the key yet loads as that
+key; it is written back by name.
 
 Example:
 
