@@ -274,6 +274,7 @@ func TestHsyncparamGenericFormOfRegisteredKey(t *testing.T) {
 		{`key5="ns"`, `suffix="ns"`},
 		{`key6`, `pubkey`},
 		{`key7=""`, `pubcds`},
+		{`key4="\002"`, `key4="\002"`}, // no name for this value: stays generic
 	} {
 		rr, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + tc.rdata)
 		if err != nil {
@@ -302,8 +303,6 @@ func TestHsyncparamGenericFormOfRegisteredKey(t *testing.T) {
 		{"key8"},                  // no octets
 		{"key6=x"},                // a flag with a value
 		{"key3=", `\001\001`},     // nsmgmt is one octet
-		{"key3=", `\000`},         // nsmgmt is 1 (owner) or 2 (agent)
-		{"key4=", `\002`},         // parentsync is 0 (owner) or 1 (agent)
 		{"key5=", "-ns"},          // not a DNS label
 		{"key8=", `\00`},          // a broken escape
 	} {
@@ -383,40 +382,65 @@ func TestHsyncparamSerialPresentationValues(t *testing.T) {
 	}
 }
 
-// nsmgmt and parentsync are refused on the wire with a value parse would not
-// accept: String prints such a value as a number, and that text does not
-// load again. The two keys number owner and agent differently.
-func TestHsyncparamUnpackRefusesUnknownPolicyValues(t *testing.T) {
+// An nsmgmt or parentsync value this code does not define is kept, as an
+// unknown key is, rather than failing the whole record: a later draft may
+// define it, and a zone transfer must not stop over it. It is neither owner
+// nor agent, so nothing acts on it, and it is written in the generic keyN
+// form, which loads again as the same value. The two keys number owner and
+// agent differently.
+func TestHsyncparamUndefinedPolicyValuesAreKept(t *testing.T) {
 	if err := RegisterHsyncparamRR(); err != nil {
 		t.Fatalf("RegisterHsyncparamRR: %v", err)
 	}
 	for _, tc := range []struct {
 		wire []byte
-		ok   bool
+		text string
 	}{
-		{[]byte{0, 3, 0, 1, HsyncNSmgmtOWNER}, true},
-		{[]byte{0, 3, 0, 1, HsyncNSmgmtAGENT}, true},
-		{[]byte{0, 3, 0, 1, 0}, false},
-		{[]byte{0, 3, 0, 1, 3}, false},
-		{[]byte{0, 4, 0, 1, HsyncParentSyncOwner}, true},
-		{[]byte{0, 4, 0, 1, HsyncParentSyncAgent}, true},
-		{[]byte{0, 4, 0, 1, 2}, false},
-		{[]byte{0, 4, 0, 1, 255}, false},
+		{[]byte{0, 3, 0, 1, HsyncNSmgmtOWNER}, `nsmgmt="owner"`},
+		{[]byte{0, 3, 0, 1, HsyncNSmgmtAGENT}, `nsmgmt="agent"`},
+		{[]byte{0, 3, 0, 1, 0}, `key3="\000"`},
+		{[]byte{0, 3, 0, 1, 3}, `key3="\003"`},
+		{[]byte{0, 4, 0, 1, HsyncParentSyncOwner}, `parentsync="owner"`},
+		{[]byte{0, 4, 0, 1, HsyncParentSyncAgent}, `parentsync="agent"`},
+		{[]byte{0, 4, 0, 1, 2}, `key4="\002"`},
+		{[]byte{0, 4, 0, 1, 255}, `key4="\255"`},
 	} {
 		var rr HSYNCPARAM
-		_, err := rr.Unpack(tc.wire)
-		if !tc.ok {
-			if err == nil {
-				t.Errorf("%v accepted as %s", tc.wire, rr.String())
-			}
-			continue
-		}
-		if err != nil {
+		if _, err := rr.Unpack(tc.wire); err != nil {
 			t.Errorf("%v refused: %v", tc.wire, err)
 			continue
 		}
-		if _, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + rr.String()); err != nil {
-			t.Errorf("%v prints as %s, which does not load: %v", tc.wire, rr.String(), err)
+		if got := rr.String(); got != tc.text {
+			t.Errorf("%v prints as %s, want %s", tc.wire, got, tc.text)
+		}
+		again, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + rr.String())
+		if err != nil {
+			t.Errorf("%s does not load: %v", rr.String(), err)
+			continue
+		}
+		buf := make([]byte, 16)
+		n, err := again.(*dns.PrivateRR).Data.(*HSYNCPARAM).Pack(buf)
+		if err != nil || string(buf[:n]) != string(tc.wire) {
+			t.Errorf("%s packs to %v (err %v), want %v", tc.text, buf[:n], err, tc.wire)
+		}
+	}
+
+	// Not acted on: an undefined value is neither of the defined ones.
+	var rr HSYNCPARAM
+	if _, err := rr.Unpack([]byte{0, 3, 0, 1, 7, 0, 4, 0, 1, 7}); err != nil {
+		t.Fatalf("Unpack: %v", err)
+	}
+	if v := rr.GetNSmgmt(); v == HsyncNSmgmtAGENT || v == HsyncNSmgmtOWNER {
+		t.Errorf("an undefined nsmgmt reads as %d", v)
+	}
+	if v := rr.GetParentSync(); v == HsyncParentSyncAgent || v == HsyncParentSyncOwner {
+		t.Errorf("an undefined parentsync reads as %d", v)
+	}
+
+	// The named form takes names only; a number is not a name.
+	for _, text := range []string{`nsmgmt="3"`, `parentsync="2"`} {
+		if _, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + text); err == nil {
+			t.Errorf("%s accepted", text)
 		}
 	}
 }

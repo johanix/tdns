@@ -331,11 +331,25 @@ func (rr *HSYNCPARAM) Parse(s []string) error {
 	return nil
 }
 
+// hsyncparamValueNamer is implemented by key types whose values are written
+// by name. A value without a name, such as a policy value a later draft
+// defines, is written in the generic keyN form with its wire bytes, which
+// Parse reads back as the same key and value.
+type hsyncparamValueNamer interface {
+	named() bool
+}
+
 func (rr *HSYNCPARAM) String() string {
 	var s string
 	for i, e := range rr.Value {
 		if i > 0 {
 			s += " "
+		}
+		if n, ok := e.(hsyncparamValueNamer); ok && !n.named() {
+			if b, err := e.pack(); err == nil {
+				s += "key" + strconv.FormatUint(uint64(e.Key()), 10) + "=\"" + hsyncparamParamToStr(b) + "\""
+				continue
+			}
 		}
 		if val := e.String(); val != "" {
 			s += e.Key().String() + "=\"" + val + "\""
@@ -534,10 +548,9 @@ func (s *HSYNCPARAMNSmgmt) unpack(b []byte) error {
 	if len(b) != 1 {
 		return errors.New("dns: hsyncparam nsmgmt: value length is not 1")
 	}
-	// Only the values parse accepts, so that what String prints loads again.
-	if b[0] != HsyncNSmgmtOWNER && b[0] != HsyncNSmgmtAGENT {
-		return fmt.Errorf("dns: hsyncparam nsmgmt: unknown value %d", b[0])
-	}
+	// Any octet is kept, as an unknown key is: a value this code does not
+	// define is neither owner nor agent, so it is not acted on, and String
+	// writes it back in the generic keyN form.
 	s.Value = b[0]
 	return nil
 }
@@ -552,6 +565,10 @@ func (s *HSYNCPARAMNSmgmt) parse(b string) error {
 		return fmt.Errorf("dns: hsyncparam nsmgmt: unknown value %q (expected \"owner\" or \"agent\")", b)
 	}
 	return nil
+}
+
+func (s *HSYNCPARAMNSmgmt) named() bool {
+	return s.Value == HsyncNSmgmtOWNER || s.Value == HsyncNSmgmtAGENT
 }
 
 func (s *HSYNCPARAMNSmgmt) len() int                 { return 1 }
@@ -580,10 +597,7 @@ func (s *HSYNCPARAMParentSync) unpack(b []byte) error {
 	if len(b) != 1 {
 		return errors.New("dns: hsyncparam parentsync: value length is not 1")
 	}
-	// Only the values parse accepts, so that what String prints loads again.
-	if _, ok := HsyncParentSyncToString[b[0]]; !ok {
-		return fmt.Errorf("dns: hsyncparam parentsync: unknown value %d", b[0])
-	}
+	// Any octet is kept, as for nsmgmt.
 	s.Value = b[0]
 	return nil
 }
@@ -595,6 +609,11 @@ func (s *HSYNCPARAMParentSync) parse(b string) error {
 	}
 	s.Value = v
 	return nil
+}
+
+func (s *HSYNCPARAMParentSync) named() bool {
+	_, ok := HsyncParentSyncToString[s.Value]
+	return ok
 }
 
 func (s *HSYNCPARAMParentSync) len() int { return 1 }

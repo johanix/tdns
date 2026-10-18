@@ -67,7 +67,9 @@ unregistered number is preserved on read-back, never acted on, and written
 as keyN in presentation format. 65535 is reserved. keyN is also read for a
 registered key, with the key's wire form as its value (as for SVCB), so
 that a record written by code that did not know the key yet loads as that
-key; it is written back by name.
+key; it is written back by name. An nsmgmt or parentsync value with no
+name (one a later draft may define) is kept, is neither owner nor agent,
+and is written in that keyN form too.
 
 Example:
 
