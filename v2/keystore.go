@@ -66,6 +66,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 						out.ErrorMsg = cerr.Error()
 						out.BulkDispositions = nil
 						out.BulkSig0InvalidateZones = nil
+						out.GeneratedSig0Key = nil
 					}
 					// Nothing was written, so nothing is stale: skipping the
 					// invalidation keeps the cache consistent with the DB.
@@ -287,6 +288,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		}
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+kp.State)
 		resp.Msg += fmt.Sprintf("\nAdded public key of newly generated keypair to TrustStore: %s", tsresp.Msg)
+		resp.GeneratedSig0Key = pkc
 		txSuccess = true
 		return &resp, err
 

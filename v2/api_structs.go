@@ -126,6 +126,10 @@ type KeystoreResponse struct {
 	// change the zone's active signing-key set. External-tx callers (APIkeystore)
 	// must call republishSigningKeysForZone after their Commit (R1).
 	NeedsSigningKeysRepublish bool `json:"-"`
+	// GeneratedSig0Key is the keypair a sig0-mgmt "generate" made, for an
+	// in-process caller that goes on to use it. Never on the wire: it holds the
+	// private key.
+	GeneratedSig0Key *PrivateKeyCache `json:"-"`
 }
 
 // TsigKeyExport carries a TSIG key's secret back to the caller for the explicit
