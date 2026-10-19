@@ -445,6 +445,58 @@ func TestHsyncparamUndefinedPolicyValuesAreKept(t *testing.T) {
 	}
 }
 
+// A list key keeps its items as the wire has them, but the named form drops
+// an empty item and trims spaces, and cannot carry a quote or a control byte.
+// Such a list is written in the generic keyN form, so that a record saved as
+// text and loaded again has the same RDATA it was received with -- which a
+// signed zone needs.
+func TestHsyncparamListValuesSurviveText(t *testing.T) {
+	if err := RegisterHsyncparamRR(); err != nil {
+		t.Fatalf("RegisterHsyncparamRR: %v", err)
+	}
+	for _, tc := range []struct {
+		value string
+		named bool
+	}{
+		{"fox,hare", true},
+		{"", true}, // the empty list, written as the bare key
+		{"fox,,hare", false},
+		{",fox", false},
+		{"fox,", false},
+		{" fox", false},
+		{"a b", false},
+		{`a"b`, false},
+		{`a\b`, false},
+		{"a;b", false},
+		{"a\x00b", false},
+		{"a\xffb", false},
+	} {
+		for _, code := range []byte{0, 1, 2} {
+			wire := append([]byte{0, code, 0, byte(len(tc.value))}, tc.value...)
+			var rr HSYNCPARAM
+			if _, err := rr.Unpack(wire); err != nil {
+				t.Errorf("%v refused: %v", wire, err)
+				continue
+			}
+			text := rr.String()
+			generic := strings.HasPrefix(text, "key")
+			if generic == tc.named {
+				t.Errorf("key %d %q printed as %s", code, tc.value, text)
+			}
+			again, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + text)
+			if err != nil {
+				t.Errorf("%s does not load: %v", text, err)
+				continue
+			}
+			buf := make([]byte, 64)
+			n, err := again.(*dns.PrivateRR).Data.(*HSYNCPARAM).Pack(buf)
+			if err != nil || string(buf[:n]) != string(wire) {
+				t.Errorf("%s packs to %q (err %v), want %q", text, buf[:n], err, wire)
+			}
+		}
+	}
+}
+
 // On the wire serial is exactly four octets; any other length is refused.
 func TestHsyncparamSerialRefusesBadWireLength(t *testing.T) {
 	for _, value := range [][]byte{

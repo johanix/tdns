@@ -663,12 +663,33 @@ func (s *HSYNCPARAMServers) parse(b string) error {
 	return nil
 }
 
+func (s *HSYNCPARAMServers) named() bool { return hsyncparamListNamed(s.Servers) }
+
 func (s *HSYNCPARAMServers) len() int {
 	return len(strings.Join(s.Servers, ","))
 }
 
 func (s *HSYNCPARAMServers) copy() HSYNCPARAMKeyValue {
 	return &HSYNCPARAMServers{Servers: cloneSlice(s.Servers)}
+}
+
+// hsyncparamListNamed reports whether a list key's items can be written by
+// name and read back unchanged. Unpack keeps every item as the wire has it,
+// but parse drops an empty item and trims spaces, and a quote or a control
+// byte would break the presentation form. Such a list is written in the
+// generic keyN form instead, which carries its bytes exactly.
+func hsyncparamListNamed(items []string) bool {
+	for _, it := range items {
+		if it == "" {
+			return false
+		}
+		for i := 0; i < len(it); i++ {
+			if c := it[i]; c <= ' ' || c > '~' || c == '"' || c == '\\' || c == ';' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // --- HSYNCPARAMSigners: comma-separated list of signer labels ---
@@ -712,6 +733,8 @@ func (s *HSYNCPARAMSigners) parse(b string) error {
 	s.Signers = signers
 	return nil
 }
+
+func (s *HSYNCPARAMSigners) named() bool { return hsyncparamListNamed(s.Signers) }
 
 func (s *HSYNCPARAMSigners) len() int {
 	return len(strings.Join(s.Signers, ","))
@@ -816,6 +839,8 @@ func (s *HSYNCPARAMAuditors) parse(b string) error {
 	s.Auditors = auditors
 	return nil
 }
+
+func (s *HSYNCPARAMAuditors) named() bool { return hsyncparamListNamed(s.Auditors) }
 
 func (s *HSYNCPARAMAuditors) len() int {
 	return len(strings.Join(s.Auditors, ","))
