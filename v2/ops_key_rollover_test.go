@@ -247,7 +247,9 @@ func TestRolloverSig0KeyAdd(t *testing.T) {
 }
 
 // When the parent does not accept the roll the old key stays active here. A
-// new key the parent refused is removed; one it may hold is kept.
+// new key the parent refused is removed; one it may hold is kept. A REMOVE
+// with no answer may have left the parent trusting only the new key, so that
+// error names the setstate commands that finish the roll.
 func TestRolloverSig0KeyParentFailures(t *testing.T) {
 	ok := rolloverAnswer{rcode: dns.RcodeSuccess}
 	refused := rolloverAnswer{rcode: dns.RcodeRefused}
@@ -256,11 +258,12 @@ func TestRolloverSig0KeyParentFailures(t *testing.T) {
 		name     string
 		answers  []rolloverAnswer
 		newState string // "" = the new key is gone
+		recovery bool   // the parent may trust only the new key: the error names setstate
 	}{
-		{"ADD refused", []rolloverAnswer{refused}, ""},
-		{"ADD unanswered", []rolloverAnswer{unanswered}, Sig0StateCreated},
-		{"REMOVE refused", []rolloverAnswer{ok, refused}, Sig0StateCreated},
-		{"REMOVE unanswered", []rolloverAnswer{ok, unanswered}, Sig0StateCreated},
+		{"ADD refused", []rolloverAnswer{refused}, "", false},
+		{"ADD unanswered", []rolloverAnswer{unanswered}, Sig0StateCreated, false},
+		{"REMOVE refused", []rolloverAnswer{ok, refused}, Sig0StateCreated, false},
+		{"REMOVE unanswered", []rolloverAnswer{ok, unanswered}, Sig0StateCreated, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -289,8 +292,27 @@ func TestRolloverSig0KeyParentFailures(t *testing.T) {
 			if id := activeSig0KeyTag(t, kdb, zd.ZoneName); id != oldid {
 				t.Errorf("GetSig0Keys returns active key %d, want %d", id, oldid)
 			}
+			if tc.recovery {
+				assertNamesRecovery(t, err, zd.ZoneName, newid, oldid)
+			} else if strings.Contains(err.Error(), "keystore sig0 setstate") {
+				t.Errorf("error names a setstate recovery the parent's answer does not call for: %v", err)
+			}
 			assertRolloverReleased(t, kdb, zd.ZoneName)
 		})
+	}
+}
+
+// assertNamesRecovery fails unless err names the setstate commands that make
+// newid active and retire oldid.
+func assertNamesRecovery(t *testing.T, err error, zone string, newid, oldid uint16) {
+	t.Helper()
+	for _, want := range []string{
+		fmt.Sprintf("keystore sig0 setstate -z %s --keyid %d --state active", zone, newid),
+		fmt.Sprintf("keystore sig0 setstate -z %s --keyid %d --state retired", zone, oldid),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not name %q: %v", want, err)
+		}
 	}
 }
 
@@ -399,14 +421,7 @@ func TestRolloverSig0KeyActivationFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("RolloverSig0KeyWithParent succeeded with the new key gone")
 	}
-	for _, want := range []string{
-		fmt.Sprintf("keystore sig0 setstate -z %s --keyid %d --state active", zd.ZoneName, gotNew),
-		fmt.Sprintf("keystore sig0 setstate -z %s --keyid %d --state retired", zd.ZoneName, oldid),
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error does not name %q: %v", want, err)
-		}
-	}
+	assertNamesRecovery(t, err, zd.ZoneName, gotNew, oldid)
 	assertKeystoreFree(t, kdb)
 	if states := rolloverKeyStates(t, kdb, zd.ZoneName); states[oldid] != Sig0StateActive {
 		t.Errorf("old key %d is %q after the failed state change, want active", oldid, states[oldid])

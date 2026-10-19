@@ -468,8 +468,15 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	// 7. Send the REMOVE message to the parent
 	rcode, ur, err = rolloverSendUpdate(ctx, m, zd.GetParent(), dsyncTarget.Addresses)
 	if err != nil {
-		return "", oldkeyid, newkeyid, ur, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to send update message: %v",
-			zd.ZoneName, err)
+		// No answer, so the parent may have dropped the old key: then it
+		// trusts only the new one, as after a failed activation below. It
+		// accepted the new key either way, so making that one active is safe.
+		return "", oldkeyid, newkeyid, ur, fmt.Errorf("RolloverSig0KeyWithParent(%q): the REMOVE of key %d got no answer: %v. "+
+			"The parent accepted key %d and may or may not have dropped key %d. "+
+			"Do not run roll-key again: if the parent dropped key %d, its ADD would be signed by a key the parent no longer trusts. "+
+			"The parent trusts key %d either way, so finish the roll with this daemon's CLI: %s",
+			zd.ZoneName, oldkeyid, err, newkeyid, oldkeyid, oldkeyid, newkeyid,
+			sig0SetstateRecovery(zd.ZoneName, newkeyid, oldkeyid))
 	}
 
 	if rcode != dns.RcodeSuccess {
@@ -490,9 +497,8 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 		// too, so name the way out instead.
 		msg := fmt.Sprintf("RolloverSig0KeyWithParent(%q): the parent accepted the roll and now trusts only key %d, but the local key state change failed: %v. "+
 			"Do not run roll-key again: its ADD would be signed by key %d, which the parent has dropped. "+
-			"Set the states with this daemon's CLI: \"keystore sig0 setstate -z %s --keyid %d --state %s\", then \"keystore sig0 setstate -z %s --keyid %d --state %s\"",
-			zd.ZoneName, newkeyid, err, oldkeyid,
-			zd.ZoneName, newkeyid, Sig0StateActive, zd.ZoneName, oldkeyid, Sig0StateRetired)
+			"Set the states with this daemon's CLI: %s",
+			zd.ZoneName, newkeyid, err, oldkeyid, sig0SetstateRecovery(zd.ZoneName, newkeyid, oldkeyid))
 		zd.Logger.Print(msg)
 		return "", oldkeyid, newkeyid, ur, errors.New(msg)
 	}
@@ -509,6 +515,14 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 
 	return fmt.Sprintf("RolloverSig0KeyWithParent(%q) successfully rolled from SIG(0) key %d to SIG(0) key %d",
 		zd.ZoneName, oldkeyid, newkeyid), oldkeyid, newkeyid, ur, nil
+}
+
+// sig0SetstateRecovery names the CLI commands that finish a SIG(0) roll by
+// hand: newkeyid active, then oldkeyid retired. Without the CLI's own prefix,
+// which differs between the daemons that serve roll-key.
+func sig0SetstateRecovery(zone string, newkeyid, oldkeyid uint16) string {
+	return fmt.Sprintf("\"keystore sig0 setstate -z %s --keyid %d --state %s\", then \"keystore sig0 setstate -z %s --keyid %d --state %s\"",
+		zone, newkeyid, Sig0StateActive, zone, oldkeyid, Sig0StateRetired)
 }
 
 // discardRolloverKey removes a new rollover key that the parent cannot hold:
