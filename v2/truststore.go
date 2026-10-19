@@ -538,6 +538,11 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 			return err
 		}
 
+		// The cache entry is set whether or not the keystore write below
+		// succeeds, on purpose: the configured file is the authority for
+		// these keys and is read again at every start, and the keystore row
+		// is only a copy of it. A failed write leaves the copy behind, not
+		// the trust.
 		for _, ck := range keys {
 			k, keyrr := ck.name, ck.keyrr
 			lgSigner.Debug("loading child SIG(0) key from file", "key", k)

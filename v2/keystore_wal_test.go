@@ -323,3 +323,16 @@ func TestLoadSig0ChildKeysRefusesAnEmptyConfiguredKey(t *testing.T) {
 	}
 	tx.Rollback()
 }
+
+// SQLite before 3.51.3 has the WAL-reset bug: two connections that write or
+// checkpoint at the same instant can make a later checkpoint skip part of a
+// transaction and corrupt the file (https://sqlite.org/wal.html, section 11).
+// The keystore runs in WAL mode with a pool of connections, so the SQLite
+// that go-sqlite3 bundles must have the fix.
+func TestKeystoreSQLiteHasTheWALResetFix(t *testing.T) {
+	const fixed = 3051003 // 3.51.3
+	version, number, _ := sqlite3.Version()
+	if number < fixed {
+		t.Fatalf("go-sqlite3 bundles SQLite %s, which has the WAL-reset bug; the keystore needs 3.51.3 or later", version)
+	}
+}
