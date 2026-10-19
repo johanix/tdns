@@ -18,15 +18,9 @@ import (
 // another connection holds before it fails with "database is locked".
 const keystoreBusyTimeoutMs = 5000
 
-// keystoreDSN is the DSN NewKeyDB opens the sqlite keystore at path with:
+// keystoreDSN is the DSN NewKeyDB opens the sqlite keystore at path with.
+// The options apply to every connection the pool opens:
 //
-//   - _journal_mode=WAL: readers do not hold off a writer's commit, and a
-//     writer does not block readers. In the rollback journal a commit waits
-//     for every reader to finish, and every key-row write is followed by a
-//     keystore read (republishSigningKeysForZone). The mode is stored in the
-//     file, so an older keystore switches on its first open here. Recent
-//     commits live in the -wal file next to the keystore until a checkpoint
-//     moves them in: a copy of the keystore file alone can miss them.
 //   - _busy_timeout: a statement that meets a lock waits this long for it.
 //     The driver's default is the same 5 s; it is named here so that a
 //     driver change cannot lower it.
@@ -45,7 +39,7 @@ func keystoreDSN(path string) string {
 	if strings.HasPrefix(p, "/") {
 		p = "//" + p
 	}
-	return fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=%d&_txlock=immediate", p, keystoreBusyTimeoutMs)
+	return fmt.Sprintf("file:%s?_busy_timeout=%d&_txlock=immediate", p, keystoreBusyTimeoutMs)
 }
 
 func (tx *Tx) Commit() error {
@@ -429,10 +423,19 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 	if err != nil {
 		return nil, fmt.Errorf("NewKeyDB: TDNS Error from sql.Open: %v", err)
 	}
-	// The first statement opens the file and applies the DSN options. SQLite
-	// keeps the old journal mode, without an error, where it cannot use WAL.
+	// WAL: readers do not hold off a writer's commit, and a writer does not
+	// block readers. In the rollback journal a commit waits for every reader
+	// to finish, and every key-row write is followed by a keystore read
+	// (republishSigningKeysForZone). The mode is stored in the file, so it is
+	// set once here rather than in the DSN, where every new pooled connection
+	// would set it again; an older keystore switches on its first open. Recent
+	// commits live in the -wal file next to the keystore until a checkpoint
+	// moves them in: a copy of the keystore file alone can miss them. The
+	// first statement also opens the file and applies the DSN options. SQLite
+	// keeps the old journal mode, without an error, where it cannot use WAL,
+	// and the pragma answers with the mode it kept.
 	var journalMode string
-	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+	if err := db.QueryRow("PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("NewKeyDB: opening %s: %v", dbfile, err)
 	}

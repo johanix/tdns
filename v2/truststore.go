@@ -506,39 +506,54 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 			return fmt.Errorf("error from yaml.Unmarshal(Sig0config): %v", err)
 		}
 
-		// Every return below ends the transaction: one left open holds the
-		// keystore's write lock and refuses every later Begin.
+		// Parse every configured key before the cache or the keystore sees
+		// any of them. A bad entry then leaves both as they were, and the
+		// transaction below has no return that could leave it open: one left
+		// open holds the keystore's write lock and refuses every later Begin.
+		type configKey struct {
+			name  string
+			keyrr *dns.KEY
+		}
+		var keys []configKey
+		for k, v := range sig0tmp {
+			k = dns.Fqdn(k)
+			rr, err := dns.NewRR(v.Key)
+			if err != nil {
+				return fmt.Errorf("error from dns.NewRR(%s): %v", v.Key, err)
+			}
+			// dns.NewRR yields (nil, nil) for text that holds no record.
+			if rr == nil {
+				return fmt.Errorf("SIG(0) key for %s in %s holds no record", k, sig0file)
+			}
+			keyrr, ok := rr.(*dns.KEY)
+			if !ok {
+				lgSigner.Warn("key is not a KEY RR", "rr", rr.String())
+				continue
+			}
+			keys = append(keys, configKey{name: k, keyrr: keyrr})
+		}
+
 		tx, err := kdb.Begin("LoadSig0ChildKeys (again)")
 		if err != nil {
 			return err
 		}
 
-		for k, v := range sig0tmp {
-			k = dns.Fqdn(k)
-			rr, err := dns.NewRR(v.Key)
+		for _, ck := range keys {
+			k, keyrr := ck.name, ck.keyrr
+			lgSigner.Debug("loading child SIG(0) key from file", "key", k)
+			mapkey := fmt.Sprintf("%s::%d", k, keyrr.KeyTag())
+			kdb.TruststoreSig0Cache.Map.Set(mapkey, Sig0Key{
+				Name:      k,
+				Keyid:     keyrr.KeyTag(),
+				Validated: true, // always trust config
+				Trusted:   true, // always trust config
+				Source:    "file",
+				Key:       *keyrr,
+			})
+			_, err = tx.Exec(insertchildsig0key, k, keyrr.KeyTag(), true, true, "file", keyrr.String())
 			if err != nil {
-				tx.Rollback()
-				return fmt.Errorf("error from dns.NewRR(%s): %v", v.Key, err)
-			}
-
-			if keyrr, ok := rr.(*dns.KEY); ok {
-				lgSigner.Debug("loading child SIG(0) key from file", "key", k)
-				mapkey := fmt.Sprintf("%s::%d", k, keyrr.KeyTag())
-				kdb.TruststoreSig0Cache.Map.Set(mapkey, Sig0Key{
-					Name:      k,
-					Keyid:     keyrr.KeyTag(),
-					Validated: true, // always trust config
-					Trusted:   true, // always trust config
-					Source:    "file",
-					Key:       *keyrr,
-				})
-				_, err = tx.Exec(insertchildsig0key, k, keyrr.KeyTag(), true, true, "file", keyrr.String())
-				if err != nil {
-					lgSigner.Error("failed to insert child SIG(0) key", "sql", insertchildsig0key, "err", err)
-					continue
-				}
-			} else {
-				lgSigner.Warn("key is not a KEY RR", "rr", rr.String())
+				lgSigner.Error("failed to insert child SIG(0) key", "sql", insertchildsig0key, "err", err)
+				continue
 			}
 		}
 		err1 := tx.Commit()

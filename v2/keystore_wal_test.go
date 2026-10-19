@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
+	"github.com/spf13/viper"
 )
 
 // openKeystoreLikeDaemon creates the keystore file and opens it the way
@@ -291,4 +292,34 @@ func TestKeystoreConcurrentKeyRowWritesAreNotLocked(t *testing.T) {
 	if total != txWriters*txPerWriter {
 		t.Errorf("the read-then-write transactions counted to %d, want %d", total, txWriters*txPerWriter)
 	}
+}
+
+// A configured SIG(0) key file with one entry that holds no record is refused
+// before anything is loaded: the good entry next to it is not in the cache,
+// and no keystore transaction is left open to hold the write lock.
+func TestLoadSig0ChildKeysRefusesAnEmptyConfiguredKey(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	good := testBulkSig0Key(t, "good.dnslab.")
+	cfg := filepath.Join(t.TempDir(), "sig0-trusted.yaml")
+	yamlText := fmt.Sprintf("good.dnslab:\n  name: good.dnslab\n  key: %q\nempty.dnslab:\n  name: empty.dnslab\n  key: %q\n",
+		good.KeyRR, "; nothing but a comment")
+	if err := os.WriteFile(cfg, []byte(yamlText), 0644); err != nil {
+		t.Fatal(err)
+	}
+	prev := viper.GetString("validator.sig0.trusted.file")
+	viper.Set("validator.sig0.trusted.file", cfg)
+	t.Cleanup(func() { viper.Set("validator.sig0.trusted.file", prev) })
+
+	if err := kdb.LoadSig0ChildKeys(); err == nil {
+		t.Fatal("LoadSig0ChildKeys accepted a configured key that holds no record")
+	}
+	if _, ok := kdb.TruststoreSig0Cache.Map.Get(fmt.Sprintf("good.dnslab.::%d", good.Keyid)); ok {
+		t.Error("the good key is in the cache although the load was refused")
+	}
+	tx, err := kdb.Begin("after the refused load")
+	if err != nil {
+		t.Fatalf("a transaction was left open by the refused load: %v", err)
+	}
+	tx.Rollback()
 }
