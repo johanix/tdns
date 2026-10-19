@@ -17,7 +17,7 @@ require (
 	github.com/johanix/tdns/v2/cache v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/core v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000
-	github.com/mattn/go-sqlite3 v1.14.16
+	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/miekg/dns v1.1.70
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/quic-go/quic-go v0.59.1
