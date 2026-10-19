@@ -55,10 +55,27 @@ draft-leon-dnsop-signaling-zone-owner-intent assigns them:
                                      _sig0key.<zone>._signal.<ns>
   7  pubcds                        - flag: publish the zone's CDS/CDNSKEY at
                                      _dsboot.<zone>._signal.<ns>
+  8  serial="N"                    - number of the owner's instructions; the
+                                     owner raises it at every change of the
+                                     zone's HSYNC3 or HSYNCPARAM records.
+                                     Unsigned 32-bit, decimal in presentation
+                                     format, compared by serial-number
+                                     arithmetic (RFC 1982)
 
 0-32767 is the IANA-registered range and 32768-65534 is Private Use; an
 unregistered number is preserved on read-back, never acted on, and written
-as keyN in presentation format. 65535 is reserved.
+as keyN in presentation format. 65535 is reserved. keyN is also read for a
+registered key, with the key's wire form as its value (as for SVCB), so
+that a record written by code that did not know the key yet loads as that
+key; it is written back by name. An nsmgmt or parentsync value with no
+name (one a later draft may define) is kept, is neither owner nor agent,
+and is written in that keyN form too.
+
+Each label in servers, signers and auditors is an HSYNC Label: 1 to 16
+characters, each a lowercase ASCII letter, a digit or a hyphen, so Labels
+compare octet by octet with no case folding. A list is Labels separated by
+commas and nothing else; an empty item ("fox,,hare"), a space or any other
+character is refused, on the wire and in presentation format.
 
 Example:
 

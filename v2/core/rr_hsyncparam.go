@@ -5,6 +5,7 @@
 package core
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -30,10 +31,19 @@ import (
 //   5  suffix="label"                - DNS label under which providers may add NS+glue
 //   6  pubkey                        - flag: publish the zone's SIG(0) KEY at _sig0key.<zone>._signal.<ns>
 //   7  pubcds                        - flag: publish the zone's CDS/CDNSKEY at _dsboot.<zone>._signal.<ns>
+//   8  serial="N"                    - number of the owner's instructions, raised at every change
+//
+// Each label in servers, signers and auditors is an HSYNC Label: 1 to 16
+// characters, each a lowercase ASCII letter, a digit or a hyphen.
 //
 // An unregistered key number is decoded into an HSYNCPARAMLocal, preserved on
 // read-back, and never acted on, as the draft requires. In presentation format
 // it is written as keyN.
+//
+// keyN is also read for a registered key, with the key's wire form as its
+// value, so that a record written by code from before the key was registered
+// (key8="\000\000\000\007") loads as the key it is. Output always uses the
+// name.
 
 func init() {
 	RegisterHsyncparamRR()
@@ -62,6 +72,7 @@ const (
 	HSYNCPARAM_SUFFIX     HSYNCPARAMKey = 5
 	HSYNCPARAM_PUBKEY     HSYNCPARAMKey = 6
 	HSYNCPARAM_PUBCDS     HSYNCPARAMKey = 7
+	HSYNCPARAM_SERIAL     HSYNCPARAMKey = 8
 	hsyncparam_RESERVED   HSYNCPARAMKey = 65535
 )
 
@@ -74,6 +85,7 @@ var hsyncparamKeyToStringMap = map[HSYNCPARAMKey]string{
 	HSYNCPARAM_SUFFIX:     "suffix",
 	HSYNCPARAM_PUBKEY:     "pubkey",
 	HSYNCPARAM_PUBCDS:     "pubcds",
+	HSYNCPARAM_SERIAL:     "serial",
 }
 
 var hsyncparamStringToKeyMap = reverseHSYNCPARAMKeyMap(hsyncparamKeyToStringMap)
@@ -108,6 +120,20 @@ func hsyncparamStringToKey(s string) HSYNCPARAMKey {
 		return key
 	}
 	return hsyncparam_RESERVED
+}
+
+// hsyncparamRegisteredKeyN reports whether s is the generic keyN spelling of
+// a registered key ("key8" for serial), and returns that key. The number has
+// no leading zeros.
+func hsyncparamRegisteredKeyN(s string) (HSYNCPARAMKey, bool) {
+	if !strings.HasPrefix(s, "key") || len(s) == 3 || (len(s) > 4 && s[3] == '0') {
+		return hsyncparam_RESERVED, false
+	}
+	a, err := strconv.ParseUint(s[3:], 10, 16)
+	if err != nil || hsyncparamKeyToStringMap[HSYNCPARAMKey(a)] == "" {
+		return hsyncparam_RESERVED, false
+	}
+	return HSYNCPARAMKey(a), true
 }
 
 // ParentSync constants: who handles parent synchronisation.
@@ -171,6 +197,8 @@ func makeHSYNCPARAMKeyValue(key HSYNCPARAMKey) HSYNCPARAMKeyValue {
 		return &HSYNCPARAMFlag{code: HSYNCPARAM_PUBKEY}
 	case HSYNCPARAM_PUBCDS:
 		return &HSYNCPARAMFlag{code: HSYNCPARAM_PUBCDS}
+	case HSYNCPARAM_SERIAL:
+		return new(HSYNCPARAMSerial)
 	case hsyncparam_RESERVED:
 		return nil
 	default:
@@ -258,7 +286,10 @@ func (rr *HSYNCPARAM) Parse(s []string) error {
 		tokens = append(tokens, tok)
 	}
 
+	// A repeated key is refused here, as Pack refuses it: accepting it would
+	// let a zone file load that then fails at its first outgoing transfer.
 	var xs []HSYNCPARAMKeyValue
+	seen := make(map[HSYNCPARAMKey]bool)
 	for _, tok := range tokens {
 		idx := strings.IndexByte(tok, '=')
 		var key, value string
@@ -270,11 +301,30 @@ func (rr *HSYNCPARAM) Parse(s []string) error {
 			key, value = tok[:idx], tok[idx+1:]
 		}
 
-		kv := makeHSYNCPARAMKeyValue(hsyncparamStringToKey(key))
+		// keyN for a registered key is the form code that did not know the
+		// key wrote it in. Its value is the key's wire form, as for SVCB
+		// (RFC 9460, section 2.1), and must be valid wire form for that key.
+		code, generic := hsyncparamRegisteredKeyN(key)
+		if !generic {
+			code = hsyncparamStringToKey(key)
+		}
+		kv := makeHSYNCPARAMKeyValue(code)
 		if kv == nil {
 			return fmt.Errorf("HSYNCPARAM: unknown key %q", key)
 		}
-		if err := kv.parse(value); err != nil {
+		if seen[kv.Key()] {
+			return fmt.Errorf("HSYNCPARAM: repeated key %q", key)
+		}
+		seen[kv.Key()] = true
+		if generic {
+			data, err := hsyncparamParseParam(value)
+			if err != nil {
+				return fmt.Errorf("HSYNCPARAM: %s: %w", key, err)
+			}
+			if err := kv.unpack(data); err != nil {
+				return fmt.Errorf("HSYNCPARAM: %s: %w", key, err)
+			}
+		} else if err := kv.parse(value); err != nil {
 			return err
 		}
 		xs = append(xs, kv)
@@ -284,11 +334,25 @@ func (rr *HSYNCPARAM) Parse(s []string) error {
 	return nil
 }
 
+// hsyncparamValueNamer is implemented by key types whose values are written
+// by name. A value without a name, such as a policy value a later draft
+// defines, is written in the generic keyN form with its wire bytes, which
+// Parse reads back as the same key and value.
+type hsyncparamValueNamer interface {
+	named() bool
+}
+
 func (rr *HSYNCPARAM) String() string {
 	var s string
 	for i, e := range rr.Value {
 		if i > 0 {
 			s += " "
+		}
+		if n, ok := e.(hsyncparamValueNamer); ok && !n.named() {
+			if b, err := e.pack(); err == nil {
+				s += "key" + strconv.FormatUint(uint64(e.Key()), 10) + "=\"" + hsyncparamParamToStr(b) + "\""
+				continue
+			}
 		}
 		if val := e.String(); val != "" {
 			s += e.Key().String() + "=\"" + val + "\""
@@ -449,6 +513,17 @@ func (h *HSYNCPARAM) IsAuditorLabel(label string) bool {
 	return false
 }
 
+// GetSerial returns the serial value and whether the key is present. Callers
+// read an absent key as 0.
+func (h *HSYNCPARAM) GetSerial() (uint32, bool) {
+	for _, kv := range h.Value {
+		if v, ok := kv.(*HSYNCPARAMSerial); ok {
+			return v.Value, true
+		}
+	}
+	return 0, false
+}
+
 // --- HSYNCPARAMNSmgmt: uint8 key=value for NS management mode ---
 
 type HSYNCPARAMNSmgmt struct {
@@ -476,6 +551,9 @@ func (s *HSYNCPARAMNSmgmt) unpack(b []byte) error {
 	if len(b) != 1 {
 		return errors.New("dns: hsyncparam nsmgmt: value length is not 1")
 	}
+	// Any octet is kept, as an unknown key is: a value this code does not
+	// define is neither owner nor agent, so it is not acted on, and String
+	// writes it back in the generic keyN form.
 	s.Value = b[0]
 	return nil
 }
@@ -490,6 +568,10 @@ func (s *HSYNCPARAMNSmgmt) parse(b string) error {
 		return fmt.Errorf("dns: hsyncparam nsmgmt: unknown value %q (expected \"owner\" or \"agent\")", b)
 	}
 	return nil
+}
+
+func (s *HSYNCPARAMNSmgmt) named() bool {
+	return s.Value == HsyncNSmgmtOWNER || s.Value == HsyncNSmgmtAGENT
 }
 
 func (s *HSYNCPARAMNSmgmt) len() int                 { return 1 }
@@ -518,6 +600,7 @@ func (s *HSYNCPARAMParentSync) unpack(b []byte) error {
 	if len(b) != 1 {
 		return errors.New("dns: hsyncparam parentsync: value length is not 1")
 	}
+	// Any octet is kept, as for nsmgmt.
 	s.Value = b[0]
 	return nil
 }
@@ -531,9 +614,60 @@ func (s *HSYNCPARAMParentSync) parse(b string) error {
 	return nil
 }
 
+func (s *HSYNCPARAMParentSync) named() bool {
+	_, ok := HsyncParentSyncToString[s.Value]
+	return ok
+}
+
 func (s *HSYNCPARAMParentSync) len() int { return 1 }
 func (s *HSYNCPARAMParentSync) copy() HSYNCPARAMKeyValue {
 	return &HSYNCPARAMParentSync{Value: s.Value}
+}
+
+// --- Labels: the list keys servers, signers and auditors hold HSYNC Labels ---
+
+// isValidHsyncLabel reports whether s is a Label as the draft defines it: 1 to
+// 16 characters, each a lowercase ASCII letter, a digit or a hyphen. With no
+// uppercase allowed, Labels compare octet by octet, with no case folding.
+func isValidHsyncLabel(s string) bool {
+	if len(s) == 0 || len(s) > 16 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// parseHsyncLabelList reads a list key's value, the same on the wire and in
+// presentation format: Labels separated by commas, with nothing else. An
+// empty value is the empty list. An empty item ("fox,,hare"), a space or
+// anything else that is not a Label is refused, so a list reads one way only
+// and a record saved as text loads with the RDATA it had.
+func parseHsyncLabelList(key, b string) ([]string, error) {
+	if b == "" {
+		return []string{}, nil
+	}
+	items := strings.Split(b, ",")
+	for _, it := range items {
+		if !isValidHsyncLabel(it) {
+			return nil, fmt.Errorf("dns: hsyncparam %s: %q is not a Label (1-16 of a-z, 0-9, -)", key, it)
+		}
+	}
+	return items, nil
+}
+
+// packHsyncLabelList refuses to send what parseHsyncLabelList would refuse.
+func packHsyncLabelList(key string, items []string) ([]byte, error) {
+	for _, it := range items {
+		if !isValidHsyncLabel(it) {
+			return nil, fmt.Errorf("dns: hsyncparam %s: %q is not a Label (1-16 of a-z, 0-9, -)", key, it)
+		}
+	}
+	return []byte(strings.Join(items, ",")), nil
 }
 
 // --- HSYNCPARAMServers: comma-separated list of data-contributing provider labels ---
@@ -549,32 +683,19 @@ func (s *HSYNCPARAMServers) String() string {
 }
 
 func (s *HSYNCPARAMServers) pack() ([]byte, error) {
-	return []byte(strings.Join(s.Servers, ",")), nil
+	return packHsyncLabelList("servers", s.Servers)
 }
 
 func (s *HSYNCPARAMServers) unpack(b []byte) error {
-	if len(b) == 0 {
-		s.Servers = []string{}
-		return nil
-	}
-	s.Servers = strings.Split(string(b), ",")
-	return nil
+	return s.parse(string(b))
 }
 
 func (s *HSYNCPARAMServers) parse(b string) error {
-	if b == "" {
-		s.Servers = []string{}
-		return nil
+	items, err := parseHsyncLabelList("servers", b)
+	if err != nil {
+		return err
 	}
-	parts := strings.Split(b, ",")
-	servers := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			servers = append(servers, p)
-		}
-	}
-	s.Servers = servers
+	s.Servers = items
 	return nil
 }
 
@@ -599,32 +720,19 @@ func (s *HSYNCPARAMSigners) String() string {
 }
 
 func (s *HSYNCPARAMSigners) pack() ([]byte, error) {
-	return []byte(strings.Join(s.Signers, ",")), nil
+	return packHsyncLabelList("signers", s.Signers)
 }
 
 func (s *HSYNCPARAMSigners) unpack(b []byte) error {
-	if len(b) == 0 {
-		s.Signers = []string{}
-		return nil
-	}
-	s.Signers = strings.Split(string(b), ",")
-	return nil
+	return s.parse(string(b))
 }
 
 func (s *HSYNCPARAMSigners) parse(b string) error {
-	if b == "" {
-		s.Signers = []string{}
-		return nil
+	items, err := parseHsyncLabelList("signers", b)
+	if err != nil {
+		return err
 	}
-	parts := strings.Split(b, ",")
-	signers := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			signers = append(signers, p)
-		}
-	}
-	s.Signers = signers
+	s.Signers = items
 	return nil
 }
 
@@ -703,32 +811,19 @@ func (s *HSYNCPARAMAuditors) String() string {
 }
 
 func (s *HSYNCPARAMAuditors) pack() ([]byte, error) {
-	return []byte(strings.Join(s.Auditors, ",")), nil
+	return packHsyncLabelList("auditors", s.Auditors)
 }
 
 func (s *HSYNCPARAMAuditors) unpack(b []byte) error {
-	if len(b) == 0 {
-		s.Auditors = []string{}
-		return nil
-	}
-	s.Auditors = strings.Split(string(b), ",")
-	return nil
+	return s.parse(string(b))
 }
 
 func (s *HSYNCPARAMAuditors) parse(b string) error {
-	if b == "" {
-		s.Auditors = []string{}
-		return nil
+	items, err := parseHsyncLabelList("auditors", b)
+	if err != nil {
+		return err
 	}
-	parts := strings.Split(b, ",")
-	auditors := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			auditors = append(auditors, p)
-		}
-	}
-	s.Auditors = auditors
+	s.Auditors = items
 	return nil
 }
 
@@ -778,6 +873,62 @@ func (s *HSYNCPARAMFlag) copy() HSYNCPARAMKeyValue {
 func NewHsyncparamPubkeyFlag() HSYNCPARAMKeyValue {
 	return &HSYNCPARAMFlag{code: HSYNCPARAM_PUBKEY}
 }
+
+// --- HSYNCPARAMSerial: the owner-set number of the owner's instructions ---
+// The zone owner raises it at every change of the zone's HSYNC3 or HSYNCPARAM
+// records, so that a receiver can tell one version of the owner's
+// instructions from the next. On the wire it is an unsigned 32-bit number in
+// network byte order; in presentation format it is decimal digits only, 0 to
+// 4294967295.
+//
+// Like a SOA serial it wraps, so wherever it is compared it is compared by
+// serial-number arithmetic (RFC 1982), never as a plain integer. tdns itself
+// compares nothing: it parses, carries and prints the value, and acting on it
+// is the caller's business.
+
+type HSYNCPARAMSerial struct {
+	Value uint32
+}
+
+func (*HSYNCPARAMSerial) Key() HSYNCPARAMKey { return HSYNCPARAM_SERIAL }
+
+func (s *HSYNCPARAMSerial) String() string {
+	return strconv.FormatUint(uint64(s.Value), 10)
+}
+
+func (s *HSYNCPARAMSerial) pack() ([]byte, error) {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, s.Value)
+	return b, nil
+}
+
+func (s *HSYNCPARAMSerial) unpack(b []byte) error {
+	if len(b) != 4 {
+		return errors.New("dns: hsyncparam serial: value length is not 4")
+	}
+	s.Value = binary.BigEndian.Uint32(b)
+	return nil
+}
+
+func (s *HSYNCPARAMSerial) parse(b string) error {
+	if b == "" {
+		return errors.New("dns: hsyncparam serial: value is required")
+	}
+	for i := 0; i < len(b); i++ {
+		if !isDigit(b[i]) {
+			return fmt.Errorf("dns: hsyncparam serial: %q is not a decimal number", b)
+		}
+	}
+	v, err := strconv.ParseUint(b, 10, 32)
+	if err != nil {
+		return fmt.Errorf("dns: hsyncparam serial: %q is out of range (0 to 4294967295)", b)
+	}
+	s.Value = uint32(v)
+	return nil
+}
+
+func (s *HSYNCPARAMSerial) len() int                 { return 4 }
+func (s *HSYNCPARAMSerial) copy() HSYNCPARAMKeyValue { return &HSYNCPARAMSerial{Value: s.Value} }
 
 // --- HSYNCPARAMLocal: catch-all for unknown keys ---
 
