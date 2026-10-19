@@ -210,3 +210,47 @@ func TestInsertKeyRowWithoutReplaceRefusesUsedKeyTag(t *testing.T) {
 		t.Errorf("key %d changed:\n before %+v\n after  %+v", old.KeyId, before, after)
 	}
 }
+
+// tdns#930: key tag 0 is valid, but the dns library refuses to sign with it,
+// so the mint draws again on tag 0, for DNSKEY and KEY alike.
+func TestGenerateKeypairRedrawsKeyTagZero(t *testing.T) {
+	for _, rrtype := range []uint16{dns.TypeDNSKEY, dns.TypeKEY} {
+		t.Run(dns.TypeToString[rrtype], func(t *testing.T) {
+			kdb := newTestKeyDB(t)
+			zone := "tagzero.example."
+			keytype, table := "ZSK", "DnssecKeyStore"
+			if rrtype == dns.TypeKEY {
+				keytype, table = "", "Sig0KeyStore"
+			}
+			zero, err := GenerateKeyMaterial(zone, rrtype, dns.ED25519, keytype)
+			if err != nil {
+				t.Fatal(err)
+			}
+			zero.KeyId = 0
+
+			logbuf := captureDnsLog(t)
+			calls := stubKeyMaterial(t, func(call int) *PrivateKeyCache {
+				if call == 1 {
+					return zero
+				}
+				return nil
+			})
+			pkc, _, err := kdb.GenerateKeypair(zone, "test", "created", rrtype, dns.ED25519, keytype, nil)
+			if err != nil {
+				t.Fatalf("GenerateKeypair: %v", err)
+			}
+			if pkc.KeyId == 0 {
+				t.Fatal("new key has key tag 0")
+			}
+			if *calls < 2 {
+				t.Errorf("generator called %d times, want a second draw", *calls)
+			}
+			if n := countKeyStoreRows(t, kdb, table, zone); n != 1 {
+				t.Errorf("%d rows for %s, want 1", n, zone)
+			}
+			if log := logbuf.String(); !strings.Contains(log, "key tag is 0") {
+				t.Errorf("no info line for key tag 0; log:\n%s", log)
+			}
+		})
+	}
+}
