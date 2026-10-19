@@ -54,7 +54,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	// response option to whatever DNS reply is sent. Per draft-berra-dnsop-keystate-03,
 	// the response is also signed with the UPDATE Receiver's SIG(0) key.
 	if msgoptions.KeyState != nil && kdb != nil {
-		if zd := FindZoneOrRoot(qname); zd != nil && zd.Options[OptChildSync] {
+		if zd := keyStateInquiryZone(qname); zd != nil && zd.Options[OptChildSync] {
 			lgHandler.Debug("processing KeyState option from query", "qname", qname, "keyid", msgoptions.KeyState.KeyID, "state", msgoptions.KeyState.KeyState)
 			ksResponse, err := kdb.ProcessKeyState(msgoptions.KeyState, qname)
 			if err != nil {
@@ -210,6 +210,26 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		lgHandler.Error("QueryResponder failed", "error", err)
 	}
 	return nil
+}
+
+// keyStateInquiryZone is the zone whose UPDATE Receiver answers a KeyState
+// inquiry for qname, or nil when this server hosts none.
+//
+// The inquiry names the child: qname is the name of the key it asks about.
+// What it asks about is held on the parent side of that name, as a DS is, and
+// the reply is signed by the parent's UPDATE Receiver. So the zone is the
+// nearest hosted zone strictly above qname (FindParentZone, as for a DS query
+// and for a NOTIFY(CDS/CSYNC)), and not the longest match for qname.
+//
+// The longest match was used here, and it is the child itself on a server
+// that hosts the child zone as well as its parent: the owner's primary of a
+// zone that is also the primary of that zone's parent. The child zone offers
+// no childsync, so the inquiry was answered as an ordinary KEY query, with no
+// KeyState option and no signature, and the child could never learn what the
+// parent holds its key as. For a name that is not the apex of a hosted zone
+// the two lookups find the same zone.
+func keyStateInquiryZone(qname string) *ZoneData {
+	return FindParentZone(qname)
 }
 
 // agentAnswersKeyStateInquiry is the one carve-out from "an agent answers no
