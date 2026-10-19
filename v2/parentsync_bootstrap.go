@@ -26,7 +26,8 @@ import (
 //     poll stops when the zone's owner has taken the sync over
 //  2. Query parent via KeyState EDNS(0) inquiry
 //  3. KeyStateTrusted → done
-//  4. KeyStateUnknown → bootstrap
+//  4. KeyStateUnknown → bootstrap, once the zone's nameservers serve the
+//     key (#917)
 //  5. KeyStateBootstrapAutoOngoing → poll
 //  6. Query failure → retry with backoff
 func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone ZoneName, keyName string, keyid uint16, algorithm uint8) {
@@ -90,9 +91,32 @@ func agentKeyStatePoll(kdb *KeyDB, imr *Imr, zone ZoneName, keyName string, keyi
 		bootstrap: func(ctx context.Context) error {
 			return BootstrapWithParent(ctx, zone, keyName, algorithm)
 		},
+		served:           sig0KeyServed(kdb, imr, keyName, keyid),
 		pollDelay:        delegationSyncInitialDelay,
 		wait:             waitOrDone,
 		reBootstrapDelay: childReBootstrapDelay,
+	}
+}
+
+// sig0KeyServed is the look at the zone's nameservers for its SIG(0) key
+// keyid (keyServedCheck), the key read from the keystore when it looks. A key
+// the keystore does not hold as active cannot be looked for, and does not
+// hold the bootstrap. Without a keystore or a resolver there is no look.
+func sig0KeyServed(kdb *KeyDB, imr *Imr, zone string, keyid uint16) func(context.Context) (keyServedState, string) {
+	if kdb == nil || imr == nil {
+		return nil
+	}
+	return func(ctx context.Context) (keyServedState, string) {
+		sak, err := kdb.GetSig0Keys(zone, Sig0StateActive)
+		if err != nil || sak == nil {
+			return keyServedUnknown, fmt.Sprintf("the keystore cannot be read: %v", err)
+		}
+		for _, pkc := range sak.Keys {
+			if pkc.KeyRR.KeyTag() == keyid {
+				return imrKeyServedCheck(imr, zone, pkc.KeyRR.String()).look(ctx)
+			}
+		}
+		return keyServedUnknown, fmt.Sprintf("no active SIG(0) key %d in the keystore", keyid)
 	}
 }
 
@@ -157,6 +181,7 @@ func (conf *Config) pollAfterAcceptedBootstrap(ctx context.Context, kdb *KeyDB, 
 			bootstrap: func(ctx context.Context) error {
 				return BootstrapWithParent(ctx, ZoneName(keyName), keyName, algorithm)
 			},
+			served:           sig0KeyServed(kdb, imr, keyName, keyid),
 			pollDelay:        delegationSyncInitialDelay,
 			wait:             waitOrDone,
 			reBootstrapDelay: childReBootstrapDelay,
@@ -196,6 +221,9 @@ type parentKeyStatePoll struct {
 	record func(state uint8)
 	// bootstrap sends the bootstrap ceremony to the parent.
 	bootstrap func(ctx context.Context) error
+	// served looks at what the zone's nameservers serve of the key; a
+	// bootstrap waits until they serve it (keyIsServed). Nil: no look.
+	served func(ctx context.Context) (keyServedState, string)
 	// pollDelay is the first wait between inquiries; it doubles.
 	pollDelay time.Duration
 	// wait sleeps for d, or returns false when ctx is cancelled.
@@ -214,6 +242,15 @@ func (p parentKeyStatePoll) ownerTookOver(next string) bool {
 	lgElect.Info("ParentSyncAfterKeyPublication: the zone no longer says parentsync=agent: its owner syncs its delegation, and the poll stops",
 		"zone", p.zone, "keyid", p.keyid, "withheld", next)
 	return true
+}
+
+// keyIsServed holds a bootstrap until the zone's nameservers serve the key
+// (waitUntilKeyServed, #917). It returns false only when ctx ends first.
+func (p parentKeyStatePoll) keyIsServed(ctx context.Context) bool {
+	if p.served == nil {
+		return true
+	}
+	return waitUntilKeyServed(ctx, p.zone, p.keyid, p.served, p.wait, keyServedWait)
 }
 
 // pollParentKeyState polls the parent's KeyState with the shared
@@ -238,6 +275,9 @@ func (conf *Config) pollParentKeyState(ctx context.Context, p parentKeyStatePoll
 		}
 		if !p.wait(ctx, p.reBootstrapDelay(round)) {
 			return fmt.Errorf("shut down while waiting to re-bootstrap: %w", ctx.Err())
+		}
+		if !p.keyIsServed(ctx) {
+			return fmt.Errorf("shut down while waiting for the key to be served: %w", ctx.Err())
 		}
 		if p.ownerTookOver("the re-bootstrap") {
 			return nil
@@ -317,7 +357,11 @@ func (conf *Config) onParentKeyState(ctx context.Context, p parentKeyStatePoll, 
 			return false, nil // retry
 		}
 		p.record(keyState)
-		// The inquiry took its time; the owner may have taken over meanwhile.
+		if !p.keyIsServed(ctx) {
+			return true, fmt.Errorf("shut down while waiting for the key to be served: %w", ctx.Err())
+		}
+		// The inquiry, and the wait for the key to be served, took their
+		// time; the owner may have taken over meanwhile.
 		if p.ownerTookOver("the bootstrap") {
 			return true, nil // done
 		}
