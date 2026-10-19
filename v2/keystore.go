@@ -330,20 +330,21 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		if err != nil {
 			lgSigner.Error("failed to set SIG(0) key state", "err", err)
 			return &resp, err
-		} else {
-			rows, _ := res.RowsAffected()
-			if rows > 0 {
-				resp.Msg = fmt.Sprintf("Updated %d rows", rows)
-			} else {
-				resp.Msg = fmt.Sprintf("Key with name \"%s\" and keyid %d not found.", kp.Keyname, kp.Keyid)
-			}
 		}
+		rows, _ := res.RowsAffected()
 
 		// We don't know the old state, so we delete all entries for this key.
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateCreated)
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StatePublished)
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateActive)
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateRetired)
+
+		// An error, not only a message: a caller changing several states in
+		// one transaction (a rollover) must not commit the rest without this.
+		if rows == 0 {
+			return &resp, fmt.Errorf("SIG(0) key with name %q and keyid %d not found", kp.Keyname, kp.Keyid)
+		}
+		resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 
 	case "setparentstate":
 		const setParentStateSql = "UPDATE Sig0KeyStore SET parent_state=? WHERE zonename=? AND keyid=?"

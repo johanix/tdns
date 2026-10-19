@@ -328,13 +328,42 @@ var rolloverLookupDSYNCTarget = func(ctx context.Context, zone string) (*DsyncTa
 }
 var rolloverSendUpdate = SendUpdate
 
+// beginSig0Rollover claims zone for one SIG(0) rollover, and the func it
+// returns gives the claim back. A second claim while one is held is refused,
+// not queued: two rollovers of one zone would each get a new key accepted by
+// the parent and each make its own key active.
+func (kdb *KeyDB) beginSig0Rollover(zone string) (func(), error) {
+	zone = dns.CanonicalName(zone)
+	kdb.sig0RolloverMu.Lock()
+	defer kdb.sig0RolloverMu.Unlock()
+	if kdb.sig0Rollovers[zone] {
+		return nil, fmt.Errorf("a SIG(0) rollover for %s is already running", zone)
+	}
+	if kdb.sig0Rollovers == nil {
+		kdb.sig0Rollovers = map[string]bool{}
+	}
+	kdb.sig0Rollovers[zone] = true
+	return func() {
+		kdb.sig0RolloverMu.Lock()
+		delete(kdb.sig0Rollovers, zone)
+		kdb.sig0RolloverMu.Unlock()
+	}, nil
+}
+
 // Returns msg, old keyid, new keyid, error, UpdateResult
 //
 // No keystore transaction is held across an UPDATE to the parent, or every
 // other keystore writer would wait for the parent. The new key is committed
 // before the parent is asked to trust it, and the local state changes are a
-// second short transaction once the parent has accepted the roll.
+// second short transaction once the parent has accepted the roll. One
+// rollover per zone at a time (beginSig0Rollover).
 func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, action string) (string, uint16, uint16, UpdateResult, error) {
+	release, err := zd.KeyDB.beginSig0Rollover(zd.ZoneName)
+	if err != nil {
+		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): %w", zd.ZoneName, err)
+	}
+	defer release()
+
 	// 1. Get the parent zone
 	if err := zd.resolveParentZone(); err != nil {
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): %w", zd.ZoneName, err)
@@ -456,7 +485,14 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	//	if action == "complete" || action == "update-local" {
 	// 8. Change state of the new key from "created" to "active". Change state of the old key from "active" to "retired".
 	if err := zd.activateRolledSig0Key(pkc, oldkey); err != nil {
-		msg := fmt.Sprintf("RolloverSig0KeyWithParent(%q): %v", zd.ZoneName, err)
+		// The parent trusts only the new key now, and this zone still signs
+		// with the old one. A new roll-key would sign its ADD with the old key
+		// too, so name the way out instead.
+		msg := fmt.Sprintf("RolloverSig0KeyWithParent(%q): the parent accepted the roll and now trusts only key %d, but the local key state change failed: %v. "+
+			"Do not run roll-key again: its ADD would be signed by key %d, which the parent has dropped. "+
+			"Set the states with this daemon's CLI: \"keystore sig0 setstate -z %s --keyid %d --state %s\", then \"keystore sig0 setstate -z %s --keyid %d --state %s\"",
+			zd.ZoneName, newkeyid, err, oldkeyid,
+			zd.ZoneName, newkeyid, Sig0StateActive, zd.ZoneName, oldkeyid, Sig0StateRetired)
 		zd.Logger.Print(msg)
 		return "", oldkeyid, newkeyid, ur, errors.New(msg)
 	}

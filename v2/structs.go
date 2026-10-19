@@ -1433,6 +1433,11 @@ type KeyDB struct {
 	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
+	// sig0Rollovers holds the zones (canonical names) with a SIG(0) rollover
+	// running, so a second one is refused. On the KeyDB, not the ZoneData: a
+	// dynamic zone change replaces the ZoneData but keeps the keystore.
+	sig0RolloverMu sync.Mutex
+	sig0Rollovers  map[string]bool
 	// DSEngineQ is the DS engine's request queue (ds_engine.go). The engine owns
 	// the CDS RRset of the zones whose keys this keystore holds.
 	DSEngineQ chan DSEngineRequest

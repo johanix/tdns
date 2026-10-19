@@ -3,6 +3,8 @@ package tdns
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -19,6 +21,11 @@ child.example.	3600	IN	NS	ns.child.example.
 ns.child.example.	3600	IN	A	192.0.2.1
 `
 
+const otherRolloverZone = `other.example.	3600	IN	SOA	ns.other.example. hostmaster.other.example. 1 7200 1800 604800 7200
+other.example.	3600	IN	NS	ns.other.example.
+ns.other.example.	3600	IN	A	192.0.2.2
+`
+
 type rolloverAnswer struct {
 	rcode int
 	err   error
@@ -26,12 +33,14 @@ type rolloverAnswer struct {
 
 // rolloverParent plays the parent: it answers each UPDATE with the next scripted
 // answer, keeps what it was sent, and checks that no keystore transaction is
-// open while the child waits for it.
+// open while the child waits for it. during, if set, runs while an UPDATE
+// waits for its answer.
 type rolloverParent struct {
 	t       *testing.T
 	kdb     *KeyDB
 	answers []rolloverAnswer
 	sent    []*dns.Msg
+	during  func(m *dns.Msg)
 }
 
 func (fp *rolloverParent) send(ctx context.Context, m *dns.Msg, zone string, addrs []string) (int, UpdateResult, error) {
@@ -40,6 +49,9 @@ func (fp *rolloverParent) send(ctx context.Context, m *dns.Msg, zone string, add
 		fp.t.Errorf("keystore transaction held across UPDATE %d: %v", len(fp.sent)+1, err)
 	} else {
 		tx.Rollback()
+	}
+	if fp.during != nil {
+		fp.during(m)
 	}
 	fp.sent = append(fp.sent, m.Copy())
 	if len(fp.answers) == 0 {
@@ -277,6 +289,127 @@ func TestRolloverSig0KeyParentFailures(t *testing.T) {
 			if id := activeSig0KeyTag(t, kdb, zd.ZoneName); id != oldid {
 				t.Errorf("GetSig0Keys returns active key %d, want %d", id, oldid)
 			}
+			assertRolloverReleased(t, kdb, zd.ZoneName)
 		})
 	}
+}
+
+// assertRolloverReleased fails unless a new rollover of zone may start.
+func assertRolloverReleased(t *testing.T, kdb *KeyDB, zone string) {
+	t.Helper()
+	release, err := kdb.beginSig0Rollover(zone)
+	if err != nil {
+		t.Fatalf("rollover of %s not released: %v", zone, err)
+	}
+	release()
+}
+
+// Two rollovers of one zone must not run at once: each would get its new key
+// accepted by the parent and make it active. A rollover of another zone is not
+// held up.
+func TestRolloverSig0KeyOneAtATimePerZone(t *testing.T) {
+	ok := rolloverAnswer{rcode: dns.RcodeSuccess}
+	zd, kdb, fp := newRolloverZone(t, ok, ok, ok)
+	other := testZone(t, "other.example.", otherRolloverZone)
+	other.SetParent("example.")
+	other.KeyDB = kdb
+	generateSig0Key(t, kdb, other.ZoneName, Sig0StateActive)
+
+	var refused []error
+	var otherErr error
+	ranOther := false
+	fp.during = func(m *dns.Msg) {
+		if m.Ns[0].Header().Name != zd.ZoneName {
+			return
+		}
+		_, _, _, _, err := zd.RolloverSig0KeyWithParent(context.Background(), dns.ED25519, "complete")
+		refused = append(refused, err)
+		if release, err := kdb.beginSig0Rollover("CHILD.Example"); err == nil {
+			release()
+			t.Error("the rollover guard is not keyed on the canonical zone name")
+		}
+		if !ranOther {
+			ranOther = true
+			_, _, _, _, otherErr = other.RolloverSig0KeyWithParent(context.Background(), dns.ED25519, "add")
+		}
+	}
+
+	if _, _, _, _, err := zd.RolloverSig0KeyWithParent(context.Background(), dns.ED25519, "complete"); err != nil {
+		t.Fatalf("RolloverSig0KeyWithParent: %v", err)
+	}
+	if len(refused) != 2 {
+		t.Fatalf("second rollovers tried = %d, want one during each UPDATE", len(refused))
+	}
+	for i, err := range refused {
+		if err == nil || !strings.Contains(err.Error(), "a SIG(0) rollover for child.example. is already running") {
+			t.Errorf("second rollover during UPDATE %d: err = %v, want it refused", i+1, err)
+		}
+	}
+	if otherErr != nil {
+		t.Errorf("rollover of another zone was held up: %v", otherErr)
+	}
+	if states := rolloverKeyStates(t, kdb, zd.ZoneName); len(states) != 2 {
+		t.Errorf("keys after one rollover = %v, want the old and the new key only", states)
+	}
+	assertRolloverReleased(t, kdb, zd.ZoneName)
+}
+
+// setstate on a key that is not there is an error, not only a message, so a
+// caller changing several states in one transaction can roll back.
+func TestSig0SetstateMissingKeyIsAnError(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zone := "child.example."
+	id := generateSig0Key(t, kdb, zone, Sig0StateCreated)
+	setstate := func(keyid uint16) error {
+		_, err := kdb.Sig0KeyMgmt(nil, KeystorePost{Command: "sig0-mgmt", SubCommand: "setstate",
+			Keyname: zone, Keyid: keyid, State: Sig0StateActive})
+		return err
+	}
+	if err := setstate(id + 1); err == nil {
+		t.Error("setstate on a missing key returned no error")
+	}
+	if err := setstate(id); err != nil {
+		t.Fatalf("setstate on key %d: %v", id, err)
+	}
+	if states := rolloverKeyStates(t, kdb, zone); states[id] != Sig0StateActive {
+		t.Errorf("key %d is %q, want active", id, states[id])
+	}
+}
+
+// Both UPDATEs accepted, then the local state change fails. It rolls back
+// whole, so the old key is not left retired with nothing active, and since
+// the parent trusts only the new key the error names the setstate commands
+// that finish the roll.
+func TestRolloverSig0KeyActivationFailure(t *testing.T) {
+	ok := rolloverAnswer{rcode: dns.RcodeSuccess}
+	zd, kdb, fp := newRolloverZone(t, ok, ok)
+	oldid := activeSig0KeyTag(t, kdb, zd.ZoneName)
+	fp.during = func(m *dns.Msg) {
+		if len(fp.sent) != 1 {
+			return
+		}
+		// During the REMOVE: the new key's row goes away.
+		newid, _, _ := updateKey(t, fp.sent[0])
+		if _, err := kdb.DB.Exec("DELETE FROM Sig0KeyStore WHERE zonename=? AND keyid=?", zd.ZoneName, newid); err != nil {
+			t.Fatalf("delete new key: %v", err)
+		}
+	}
+
+	_, _, gotNew, _, err := zd.RolloverSig0KeyWithParent(context.Background(), dns.ED25519, "complete")
+	if err == nil {
+		t.Fatal("RolloverSig0KeyWithParent succeeded with the new key gone")
+	}
+	for _, want := range []string{
+		fmt.Sprintf("keystore sig0 setstate -z %s --keyid %d --state active", zd.ZoneName, gotNew),
+		fmt.Sprintf("keystore sig0 setstate -z %s --keyid %d --state retired", zd.ZoneName, oldid),
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not name %q: %v", want, err)
+		}
+	}
+	assertKeystoreFree(t, kdb)
+	if states := rolloverKeyStates(t, kdb, zd.ZoneName); states[oldid] != Sig0StateActive {
+		t.Errorf("old key %d is %q after the failed state change, want active", oldid, states[oldid])
+	}
+	assertRolloverReleased(t, kdb, zd.ZoneName)
 }
