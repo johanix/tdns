@@ -33,6 +33,9 @@ import (
 //   7  pubcds                        - flag: publish the zone's CDS/CDNSKEY at _dsboot.<zone>._signal.<ns>
 //   8  serial="N"                    - number of the owner's instructions, raised at every change
 //
+// Each label in servers, signers and auditors is an HSYNC Label: 1 to 16
+// characters, each a lowercase ASCII letter, a digit or a hyphen.
+//
 // An unregistered key number is decoded into an HSYNCPARAMLocal, preserved on
 // read-back, and never acted on, as the draft requires. In presentation format
 // it is written as keyN.
@@ -621,6 +624,52 @@ func (s *HSYNCPARAMParentSync) copy() HSYNCPARAMKeyValue {
 	return &HSYNCPARAMParentSync{Value: s.Value}
 }
 
+// --- Labels: the list keys servers, signers and auditors hold HSYNC Labels ---
+
+// isValidHsyncLabel reports whether s is a Label as the draft defines it: 1 to
+// 16 characters, each a lowercase ASCII letter, a digit or a hyphen. With no
+// uppercase allowed, Labels compare octet by octet, with no case folding.
+func isValidHsyncLabel(s string) bool {
+	if len(s) == 0 || len(s) > 16 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// parseHsyncLabelList reads a list key's value, the same on the wire and in
+// presentation format: Labels separated by commas, with nothing else. An
+// empty value is the empty list. An empty item ("fox,,hare"), a space or
+// anything else that is not a Label is refused, so a list reads one way only
+// and a record saved as text loads with the RDATA it had.
+func parseHsyncLabelList(key, b string) ([]string, error) {
+	if b == "" {
+		return []string{}, nil
+	}
+	items := strings.Split(b, ",")
+	for _, it := range items {
+		if !isValidHsyncLabel(it) {
+			return nil, fmt.Errorf("dns: hsyncparam %s: %q is not a Label (1-16 of a-z, 0-9, -)", key, it)
+		}
+	}
+	return items, nil
+}
+
+// packHsyncLabelList refuses to send what parseHsyncLabelList would refuse.
+func packHsyncLabelList(key string, items []string) ([]byte, error) {
+	for _, it := range items {
+		if !isValidHsyncLabel(it) {
+			return nil, fmt.Errorf("dns: hsyncparam %s: %q is not a Label (1-16 of a-z, 0-9, -)", key, it)
+		}
+	}
+	return []byte(strings.Join(items, ",")), nil
+}
+
 // --- HSYNCPARAMServers: comma-separated list of data-contributing provider labels ---
 
 type HSYNCPARAMServers struct {
@@ -634,36 +683,21 @@ func (s *HSYNCPARAMServers) String() string {
 }
 
 func (s *HSYNCPARAMServers) pack() ([]byte, error) {
-	return []byte(strings.Join(s.Servers, ",")), nil
+	return packHsyncLabelList("servers", s.Servers)
 }
 
 func (s *HSYNCPARAMServers) unpack(b []byte) error {
-	if len(b) == 0 {
-		s.Servers = []string{}
-		return nil
-	}
-	s.Servers = strings.Split(string(b), ",")
-	return nil
+	return s.parse(string(b))
 }
 
 func (s *HSYNCPARAMServers) parse(b string) error {
-	if b == "" {
-		s.Servers = []string{}
-		return nil
+	items, err := parseHsyncLabelList("servers", b)
+	if err != nil {
+		return err
 	}
-	parts := strings.Split(b, ",")
-	servers := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			servers = append(servers, p)
-		}
-	}
-	s.Servers = servers
+	s.Servers = items
 	return nil
 }
-
-func (s *HSYNCPARAMServers) named() bool { return hsyncparamListNamed(s.Servers) }
 
 func (s *HSYNCPARAMServers) len() int {
 	return len(strings.Join(s.Servers, ","))
@@ -671,25 +705,6 @@ func (s *HSYNCPARAMServers) len() int {
 
 func (s *HSYNCPARAMServers) copy() HSYNCPARAMKeyValue {
 	return &HSYNCPARAMServers{Servers: cloneSlice(s.Servers)}
-}
-
-// hsyncparamListNamed reports whether a list key's items can be written by
-// name and read back unchanged. Unpack keeps every item as the wire has it,
-// but parse drops an empty item and trims spaces, and a quote or a control
-// byte would break the presentation form. Such a list is written in the
-// generic keyN form instead, which carries its bytes exactly.
-func hsyncparamListNamed(items []string) bool {
-	for _, it := range items {
-		if it == "" {
-			return false
-		}
-		for i := 0; i < len(it); i++ {
-			if c := it[i]; c <= ' ' || c > '~' || c == '"' || c == '\\' || c == ';' {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // --- HSYNCPARAMSigners: comma-separated list of signer labels ---
@@ -705,36 +720,21 @@ func (s *HSYNCPARAMSigners) String() string {
 }
 
 func (s *HSYNCPARAMSigners) pack() ([]byte, error) {
-	return []byte(strings.Join(s.Signers, ",")), nil
+	return packHsyncLabelList("signers", s.Signers)
 }
 
 func (s *HSYNCPARAMSigners) unpack(b []byte) error {
-	if len(b) == 0 {
-		s.Signers = []string{}
-		return nil
-	}
-	s.Signers = strings.Split(string(b), ",")
-	return nil
+	return s.parse(string(b))
 }
 
 func (s *HSYNCPARAMSigners) parse(b string) error {
-	if b == "" {
-		s.Signers = []string{}
-		return nil
+	items, err := parseHsyncLabelList("signers", b)
+	if err != nil {
+		return err
 	}
-	parts := strings.Split(b, ",")
-	signers := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			signers = append(signers, p)
-		}
-	}
-	s.Signers = signers
+	s.Signers = items
 	return nil
 }
-
-func (s *HSYNCPARAMSigners) named() bool { return hsyncparamListNamed(s.Signers) }
 
 func (s *HSYNCPARAMSigners) len() int {
 	return len(strings.Join(s.Signers, ","))
@@ -811,36 +811,21 @@ func (s *HSYNCPARAMAuditors) String() string {
 }
 
 func (s *HSYNCPARAMAuditors) pack() ([]byte, error) {
-	return []byte(strings.Join(s.Auditors, ",")), nil
+	return packHsyncLabelList("auditors", s.Auditors)
 }
 
 func (s *HSYNCPARAMAuditors) unpack(b []byte) error {
-	if len(b) == 0 {
-		s.Auditors = []string{}
-		return nil
-	}
-	s.Auditors = strings.Split(string(b), ",")
-	return nil
+	return s.parse(string(b))
 }
 
 func (s *HSYNCPARAMAuditors) parse(b string) error {
-	if b == "" {
-		s.Auditors = []string{}
-		return nil
+	items, err := parseHsyncLabelList("auditors", b)
+	if err != nil {
+		return err
 	}
-	parts := strings.Split(b, ",")
-	auditors := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			auditors = append(auditors, p)
-		}
-	}
-	s.Auditors = auditors
+	s.Auditors = items
 	return nil
 }
-
-func (s *HSYNCPARAMAuditors) named() bool { return hsyncparamListNamed(s.Auditors) }
 
 func (s *HSYNCPARAMAuditors) len() int {
 	return len(strings.Join(s.Auditors, ","))

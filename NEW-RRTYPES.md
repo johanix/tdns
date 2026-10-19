@@ -69,10 +69,13 @@ registered key, with the key's wire form as its value (as for SVCB), so
 that a record written by code that did not know the key yet loads as that
 key; it is written back by name. An nsmgmt or parentsync value with no
 name (one a later draft may define) is kept, is neither owner nor agent,
-and is written in that keyN form too. So is a list value that the named
-form would not carry unchanged (an empty item, a space, a quote or a
-control byte), so that a record saved as text loads with the RDATA it was
-received with.
+and is written in that keyN form too.
+
+Each label in servers, signers and auditors is an HSYNC Label: 1 to 16
+characters, each a lowercase ASCII letter, a digit or a hyphen, so Labels
+compare octet by octet with no case folding. A list is Labels separated by
+commas and nothing else; an empty item ("fox,,hare"), a space or any other
+character is refused, on the wire and in presentation format.
 
 Example:
 

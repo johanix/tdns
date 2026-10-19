@@ -445,53 +445,74 @@ func TestHsyncparamUndefinedPolicyValuesAreKept(t *testing.T) {
 	}
 }
 
-// A list key keeps its items as the wire has them, but the named form drops
-// an empty item and trims spaces, and cannot carry a quote or a control byte.
-// Such a list is written in the generic keyN form, so that a record saved as
-// text and loaded again has the same RDATA it was received with -- which a
-// signed zone needs.
-func TestHsyncparamListValuesSurviveText(t *testing.T) {
+// servers, signers and auditors hold HSYNC Labels: 1 to 16 characters, each
+// a lowercase ASCII letter, a digit or a hyphen, so that Labels compare octet
+// by octet with no case folding. A list is Labels separated by commas and
+// nothing else, the same on the wire and in presentation format. Anything
+// else is refused on unpack, on parse and on pack, so a list reads one way
+// only and a record saved as text loads with the RDATA it had.
+func TestHsyncparamListItemsAreLabels(t *testing.T) {
 	if err := RegisterHsyncparamRR(); err != nil {
 		t.Fatalf("RegisterHsyncparamRR: %v", err)
 	}
-	for _, tc := range []struct {
-		value string
-		named bool
+	keys := []struct {
+		code byte
+		name string
+		make func([]string) HSYNCPARAMKeyValue
 	}{
-		{"fox,hare", true},
-		{"", true}, // the empty list, written as the bare key
-		{"fox,,hare", false},
-		{",fox", false},
-		{"fox,", false},
-		{" fox", false},
-		{"a b", false},
-		{`a"b`, false},
-		{`a\b`, false},
-		{"a;b", false},
-		{"a\x00b", false},
-		{"a\xffb", false},
-	} {
-		for _, code := range []byte{0, 1, 2} {
-			wire := append([]byte{0, code, 0, byte(len(tc.value))}, tc.value...)
+		{0, "servers", func(l []string) HSYNCPARAMKeyValue { return &HSYNCPARAMServers{Servers: l} }},
+		{1, "signers", func(l []string) HSYNCPARAMKeyValue { return &HSYNCPARAMSigners{Signers: l} }},
+		{2, "auditors", func(l []string) HSYNCPARAMKeyValue { return &HSYNCPARAMAuditors{Auditors: l} }},
+	}
+
+	good := []string{
+		"fox", "fox,hare", "a", "p1", "0", "a-b", "-",
+		"abcdefghijklmnop", // 16 characters
+		"",                 // the empty list, written as the bare key
+	}
+	bad := []string{
+		"fox,,hare", ",fox", "fox,", // an empty item
+		" fox", "fox, hare", "a b", // a space
+		"Fox", "FOX", // uppercase
+		"abcdefghijklmnopq", // 17 characters
+		"fox_1", "a.b", "fox.example.",
+		`a"b`, `a\b`, "a;b", "a\x00b", "a\xffb",
+	}
+
+	for _, k := range keys {
+		for _, v := range good {
+			wire := append([]byte{0, k.code, 0, byte(len(v))}, v...)
 			var rr HSYNCPARAM
 			if _, err := rr.Unpack(wire); err != nil {
-				t.Errorf("%v refused: %v", wire, err)
+				t.Errorf("%s %q refused on the wire: %v", k.name, v, err)
 				continue
 			}
-			text := rr.String()
-			generic := strings.HasPrefix(text, "key")
-			if generic == tc.named {
-				t.Errorf("key %d %q printed as %s", code, tc.value, text)
-			}
-			again, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + text)
+			again, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + rr.String())
 			if err != nil {
-				t.Errorf("%s does not load: %v", text, err)
+				t.Errorf("%s does not load: %v", rr.String(), err)
 				continue
 			}
 			buf := make([]byte, 64)
 			n, err := again.(*dns.PrivateRR).Data.(*HSYNCPARAM).Pack(buf)
 			if err != nil || string(buf[:n]) != string(wire) {
-				t.Errorf("%s packs to %q (err %v), want %q", text, buf[:n], err, wire)
+				t.Errorf("%s packs to %q (err %v), want %q", rr.String(), buf[:n], err, wire)
+			}
+		}
+
+		for _, v := range bad {
+			wire := append([]byte{0, k.code, 0, byte(len(v))}, v...)
+			var rr HSYNCPARAM
+			if _, err := rr.Unpack(wire); err == nil {
+				t.Errorf("%s %q accepted on the wire", k.name, v)
+			}
+			var parsed HSYNCPARAM
+			if err := parsed.Parse([]string{k.name + "=", v}); err == nil {
+				t.Errorf("%s=%q accepted in presentation format", k.name, v)
+			}
+			items := strings.Split(v, ",")
+			out := &HSYNCPARAM{Value: []HSYNCPARAMKeyValue{k.make(items)}}
+			if _, err := out.Pack(make([]byte, 64)); err == nil {
+				t.Errorf("%s %q packed", k.name, items)
 			}
 		}
 	}
