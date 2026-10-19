@@ -19,9 +19,11 @@ owner TTL CLASS HSYNC3 {state} {label} {identity} {upstream}
 ```
 
 state:       ON or OFF
-label:       unqualified provider tag (e.g. "netnod"), NOT an FQDN
+label:       the provider's Label (e.g. "netnod"): 1 to 16 characters,
+             each a lowercase ASCII letter, a digit or a hyphen. NOT an
+             FQDN, and no trailing dot
 identity:    FQDN for agent discovery (e.g. "agent.netnod.se.")
-upstream:    label of upstream provider, or "." if none (NOT an FQDN)
+upstream:    the upstream provider's Label, or "." if none
 
 Example:
 
