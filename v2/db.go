@@ -8,10 +8,45 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+// keystoreBusyTimeoutMs is how long a keystore statement waits for a lock that
+// another connection holds before it fails with "database is locked".
+const keystoreBusyTimeoutMs = 5000
+
+// keystoreDSN is the DSN NewKeyDB opens the sqlite keystore at path with:
+//
+//   - _journal_mode=WAL: readers do not hold off a writer's commit, and a
+//     writer does not block readers. In the rollback journal a commit waits
+//     for every reader to finish, and every key-row write is followed by a
+//     keystore read (republishSigningKeysForZone). The mode is stored in the
+//     file, so an older keystore switches on its first open here. Recent
+//     commits live in the -wal file next to the keystore until a checkpoint
+//     moves them in: a copy of the keystore file alone can miss them.
+//   - _busy_timeout: a statement that meets a lock waits this long for it.
+//     The driver's default is the same 5 s; it is named here so that a
+//     driver change cannot lower it.
+//   - _txlock=immediate: Begin takes the write lock at BEGIN, where the busy
+//     timeout covers the wait. A deferred transaction that reads and then
+//     writes must upgrade its lock half way, and when another connection
+//     writes at that moment SQLite fails the write at once, without waiting:
+//     the busy timeout cannot help there.
+//
+// The path goes into a URI, so the characters that SQLite's URI parser or the
+// driver's option split would read as syntax are escaped. An absolute path
+// gets an empty authority (file:///...), so a path that starts with "//" is
+// not read as a host.
+func keystoreDSN(path string) string {
+	p := strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23").Replace(path)
+	if strings.HasPrefix(p, "/") {
+		p = "//" + p
+	}
+	return fmt.Sprintf("file:%s?_journal_mode=WAL&_busy_timeout=%d&_txlock=immediate", p, keystoreBusyTimeoutMs)
+}
 
 func (tx *Tx) Commit() error {
 	// log.Printf("---> Committing KeyDB transaction: %s", tx.context)
@@ -390,9 +425,20 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 	if err := os.Chmod(dbfile, 0664); err != nil {
 		return nil, fmt.Errorf("NewKeyDB: TDNS Error trying to ensure that db %s is writable: %v", dbfile, err)
 	}
-	db, err := sql.Open("sqlite3", dbfile)
+	db, err := sql.Open("sqlite3", keystoreDSN(dbfile))
 	if err != nil {
 		return nil, fmt.Errorf("NewKeyDB: TDNS Error from sql.Open: %v", err)
+	}
+	// The first statement opens the file and applies the DSN options. SQLite
+	// keeps the old journal mode, without an error, where it cannot use WAL.
+	var journalMode string
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("NewKeyDB: opening %s: %v", dbfile, err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		lgConfig.Warn("keystore is not in WAL mode; concurrent writes may fail with \"database is locked\"",
+			"file", dbfile, "journal_mode", journalMode)
 	}
 
 	if force {

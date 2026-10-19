@@ -501,20 +501,23 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 
 		var sig0tmp Sig0tmp
 
-		tx, err := kdb.Begin("LoadSig0ChildKeys (again)")
-		if err != nil {
-			return err
-		}
-
 		err = yaml.Unmarshal(cfgdata, &sig0tmp)
 		if err != nil {
 			return fmt.Errorf("error from yaml.Unmarshal(Sig0config): %v", err)
+		}
+
+		// Every return below ends the transaction: one left open holds the
+		// keystore's write lock and refuses every later Begin.
+		tx, err := kdb.Begin("LoadSig0ChildKeys (again)")
+		if err != nil {
+			return err
 		}
 
 		for k, v := range sig0tmp {
 			k = dns.Fqdn(k)
 			rr, err := dns.NewRR(v.Key)
 			if err != nil {
+				tx.Rollback()
 				return fmt.Errorf("error from dns.NewRR(%s): %v", v.Key, err)
 			}
 
