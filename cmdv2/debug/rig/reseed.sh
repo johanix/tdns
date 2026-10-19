@@ -10,7 +10,11 @@ sleep 2
 
 mkdir -p /var/tmp/ixfrtest-preseed
 cp $R/zones/rig.example /var/tmp/ixfrtest-preseed/ 2>/dev/null || true
-cp $R/tdns.db /var/tmp/ixfrtest-preseed/ 2>/dev/null || true
+# The keystore runs in WAL mode, and the daemon exits without closing it, so
+# commits since the last checkpoint are still in tdns.db-wal: copy it along,
+# and clear the old copy first so a stale -wal never pairs with a new .db.
+rm -f /var/tmp/ixfrtest-preseed/tdns.db /var/tmp/ixfrtest-preseed/tdns.db-wal /var/tmp/ixfrtest-preseed/tdns.db-shm
+cp $R/tdns.db $R/tdns.db-wal /var/tmp/ixfrtest-preseed/ 2>/dev/null || true
 
 cat > $R/zones/rig.example <<'ZONE'
 ; The IXFR/journal rig zone. Deliberately tiny, and UNSIGNED: the zone runs with
@@ -25,7 +29,7 @@ ZONE
 
 # A fresh database: no stale journal anchored to the old file, no recorded file
 # identity, and new signing keys minted from the `rig` policy at load.
-rm -f $R/tdns.db
+rm -f $R/tdns.db $R/tdns.db-wal $R/tdns.db-shm
 rm -f $R/zones/rig.example.*.rejected
 rm -f $R/named/rig.example.db $R/named/rig.example.db.jnl
 

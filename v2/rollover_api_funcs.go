@@ -12,9 +12,9 @@ import (
 // ComputeRolloverStatus reads the rollover state for one zone and
 // returns the operator-facing status struct. Pure read, no DB writes.
 // Side-effect free; safe to call from API handlers without taking
-// the per-zone lock (sqlite WAL gives snapshot reads while writers
-// are in flight, and the response is "best-effort current state at
-// response time" by API contract).
+// the per-zone lock (NewKeyDB opens the keystore in WAL mode, so
+// the reads neither wait for nor hold up writers, and the response
+// is "best-effort current state at response time" by API contract).
 //
 // pol may be nil for zones that don't have a DNSSEC policy attached;
 // the function still returns a valid struct (Headline=OK, no policy
