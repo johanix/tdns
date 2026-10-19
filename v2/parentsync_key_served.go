@@ -152,6 +152,11 @@ func waitUntilKeyServed(ctx context.Context, zone ZoneName, keyid uint16, look f
 	delay, waited := pace.first, time.Duration(0)
 	for {
 		state, why := look(ctx)
+		if ctx.Err() != nil {
+			// A look cut short by the shutdown finds nothing to look at; that
+			// is not "nothing to look at".
+			return false
+		}
 		switch {
 		case state == keyServed:
 			lgElect.Info("ParentSyncAfterKeyPublication: the zone's nameservers serve our key; bootstrapping",

@@ -249,3 +249,18 @@ func TestAskServerForKeyTakesOnlyAnAuthoritativeAnswer(t *testing.T) {
 		t.Error("a SERVFAIL was taken as an answer")
 	}
 }
+
+// A shutdown while the nameservers are being asked sends nothing either. The
+// look that is cut short answers nothing, and that is not a zone with nothing
+// to look at, which would let the bootstrap go ahead.
+func TestAShutdownDuringALookSendsNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	look := func(context.Context) (keyServedState, string) {
+		cancel()
+		return keyServedUnknown, "no nameserver of the zone answered"
+	}
+	if waitUntilKeyServed(ctx, servedZone, 4711, look,
+		func(context.Context, time.Duration) bool { return true }, keyServedWait) {
+		t.Error("a look cut short by the shutdown let the bootstrap go ahead")
+	}
+}
