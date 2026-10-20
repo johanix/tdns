@@ -44,11 +44,15 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 		return fmt.Errorf("PublishTlsaRR: KeyDB.UpdateQ is nil")
 	}
 
-	// A set that already is this record alone is left as it is: replacing
-	// it would only re-sign it, and a signing failure then would leave it
-	// unsigned.
+	// A set that already is this record alone, with this TTL, and signed
+	// where the zone signs, is left as it is: replacing it would only
+	// re-sign it, and a signing failure then would leave it unsigned. One
+	// served unsigned in a signing zone is replaced, which signs it again.
+	// core.IsDuplicate: the stored record may spell its hex in another case.
+	signs := zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
 	if cur, err := zd.GetRRset(tlsa.Hdr.Name, dns.TypeTLSA); err == nil && cur != nil &&
-		len(cur.RRs) == 1 && dns.IsDuplicate(cur.RRs[0], tlsa) && cur.RRs[0].Header().Ttl == tlsa.Hdr.Ttl {
+		len(cur.RRs) == 1 && core.IsDuplicate(cur.RRs[0], tlsa) && cur.RRs[0].Header().Ttl == tlsa.Hdr.Ttl &&
+		(!signs || len(cur.RRSIGs) > 0) {
 		lgHandler.Debug("PublishTlsaRR: the TLSA RRset already is this record", "rr", tlsa.String())
 		return nil
 	}

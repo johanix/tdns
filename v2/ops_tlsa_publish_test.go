@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,5 +77,55 @@ func TestPublishTlsaRRLeavesAnUnchangedSet(t *testing.T) {
 	case ur := <-kdb.UpdateQ:
 		t.Errorf("publishing the record the set already holds sent an update: %v", ur.Actions)
 	default:
+	}
+}
+
+// The set already holding the record with its hex in upper case, as one
+// read from a zone file may, is unchanged too.
+func TestPublishTlsaRRLeavesASetSpelledInAnotherCase(t *testing.T) {
+	zd, kdb := signalsRig(t)
+	cert := tlsaTestCertPEM(t)
+	if err := zd.PublishTlsaRR("api.example.", 443, cert); err != nil {
+		t.Fatal(err)
+	}
+	ur := <-kdb.UpdateQ
+	if res := runUpdaterForResult(t, kdb, ur); res.Err != nil {
+		t.Fatalf("applying the first publication: %v", res.Err)
+	}
+	upper := dns.Copy(ur.Actions[1]).(*dns.TLSA)
+	upper.Certificate = strings.ToUpper(upper.Certificate)
+	if res := runUpdaterForResult(t, kdb, UpdateRequest{Cmd: "ZONE-UPDATE", ZoneName: zd.ZoneName,
+		Actions: []dns.RR{tlsaDeleteRR(upper.Hdr.Name), upper}, InternalUpdate: true}); res.Err != nil {
+		t.Fatalf("serving the record in upper case: %v", res.Err)
+	}
+	if err := zd.PublishTlsaRR("api.example.", 443, cert); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case ur := <-kdb.UpdateQ:
+		t.Errorf("publishing the record the set holds in upper case sent an update: %v", ur.Actions)
+	default:
+	}
+}
+
+// In a zone that signs, a set served unsigned is published again, which
+// signs it: an unchanged record does not keep it unsigned.
+func TestPublishTlsaRRRepublishesAnUnsignedSetInASigningZone(t *testing.T) {
+	zd, kdb := signalsRig(t)
+	cert := tlsaTestCertPEM(t)
+	if err := zd.PublishTlsaRR("api.example.", 443, cert); err != nil {
+		t.Fatal(err)
+	}
+	if res := runUpdaterForResult(t, kdb, <-kdb.UpdateQ); res.Err != nil {
+		t.Fatalf("applying the first publication: %v", res.Err)
+	}
+	zd.Options[OptOnlineSigning] = true
+	if err := zd.PublishTlsaRR("api.example.", 443, cert); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-kdb.UpdateQ:
+	default:
+		t.Error("an unsigned set in a signing zone was left unsigned")
 	}
 }
