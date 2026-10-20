@@ -178,9 +178,12 @@ TDNS_ROOT := $(UTILS_DIR)..
 # allowlist is the staging API itself (zone_mutation.go) and the two builders of
 # a zone that is not live yet, whose result the refresh publish takes whole:
 # SortFunc in dnsutils.go (zone file or AXFR into new_zd) and ixfr_in.go (an
-# inbound delta applied to a private deep copy of the snapshot). ixfr_in.go
-# cannot stage instead: cloneOwner writes the live zone's working set, and a
-# delta that fails halfway must leave nothing behind but an AXFR fallback. See
+# inbound delta applied to a copy of the snapshot). ixfr_in.go cannot stage
+# instead: cloneOwner writes the live zone's working set, and a delta that fails
+# halfway must leave nothing behind but an AXFR fallback. Its copy is deep only
+# for the owners the delta touches; the rest share the published store, so every
+# write in ixfr_in.go must stay on a touched owner. The exemption covers the
+# whole file and cannot check that (#940). See
 # docs/2026-07-02-DONE-zone-mutation-snapshot-correctness.md and
 # docs/2026-07-25-inbound-ixfr-plan.md section 4.4.
 check-no-mutators:
