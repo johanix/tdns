@@ -129,3 +129,27 @@ func TestPublishTlsaRRRepublishesAnUnsignedSetInASigningZone(t *testing.T) {
 		t.Error("an unsigned set in a signing zone was left unsigned")
 	}
 }
+
+// The signing flags are read under zd.mu, which a reload and SetOption
+// write them under: a publication while the options change is no race.
+func TestPublishTlsaRRReadsTheOptionsUnderTheLock(t *testing.T) {
+	zd, kdb := signalsRig(t)
+	cert := tlsaTestCertPEM(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			zd.SetOption(OptOnlineSigning, i%2 == 0)
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if err := zd.PublishTlsaRR("api.example.", 443, cert); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-kdb.UpdateQ:
+		default:
+		}
+	}
+	<-done
+}

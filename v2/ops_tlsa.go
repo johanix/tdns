@@ -49,7 +49,11 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 	// re-sign it, and a signing failure then would leave it unsigned. One
 	// served unsigned in a signing zone is replaced, which signs it again.
 	// core.IsDuplicate: the stored record may spell its hex in another case.
+	// zd.Options is replaced under zd.mu on a reload; read it there, and
+	// let go before the zone is read.
+	zd.mu.Lock()
 	signs := zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
+	zd.mu.Unlock()
 	if cur, err := zd.GetRRset(tlsa.Hdr.Name, dns.TypeTLSA); err == nil && cur != nil &&
 		len(cur.RRs) == 1 && core.IsDuplicate(cur.RRs[0], tlsa) && cur.RRs[0].Header().Ttl == tlsa.Hdr.Ttl &&
 		(!signs || len(cur.RRSIGs) > 0) {
