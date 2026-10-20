@@ -275,13 +275,24 @@ func (rr *HSYNCPARAM) Parse(s []string) error {
 	// miekg/dns PrivateRR.parse() strips quotes and splits tokens, so
 	// key="value" arrives as ["key=", "value"]. We rejoin those before
 	// parsing key=value pairs.
+	//
+	// An empty value (key="" or key=) arrives as "key=" with no token for
+	// the value, so "key=" must not take the next key's token. A named key's
+	// value never holds "=", so after a named key a token with "=" in it is
+	// the next key. A keyN value may hold "=", so keyN= always takes the next
+	// token; String writes an empty value as the bare key. A token without
+	// "=" is always the value: servers="pubkey" and servers="" pubkey arrive
+	// as the same tokens, and String writes the first.
 	var tokens []string
 	for i := 0; i < len(s); i++ {
 		tok := s[i]
-		if strings.HasSuffix(tok, "=") && i+1 < len(s) {
-			// "key=" + "value" → "key=value"
-			tok += s[i+1]
-			i++
+		if name, ok := strings.CutSuffix(tok, "="); ok && i+1 < len(s) {
+			_, named := hsyncparamStringToKeyMap[name]
+			if !named || !strings.Contains(s[i+1], "=") {
+				// "key=" + "value" → "key=value"
+				tok += s[i+1]
+				i++
+			}
 		}
 		tokens = append(tokens, tok)
 	}
