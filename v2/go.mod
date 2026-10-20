@@ -54,13 +54,17 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-// Pinned at johanix/dns v1.1.72-johanix.3 — provides the pluggable
+// Pinned at johanix/dns v1.1.72-johanix.4 — provides the pluggable
 // Algorithm interface and the registered oots SvcParamKey (12) /
 // dns.SVCBOots. The algorithms it does not implement are registered
 // through that interface: ED448 and ML-DSA-44 by v2/algorithms in every
 // binary, the rest by each binary's generated registration code.
 // .3 over .2: KeyTag() (and ToDS() through it) no longer panics on an
 // RSAMD5 DNSKEY whose public key is shorter than 3 bytes; it returns 0.
+// .4 over .3: a parse error from a private RR type's Parse (and from
+// IPSECKEY, AMTRELAY, APL and SVCB values) keeps its reason through the
+// zone parser instead of reading `dns: : "\n" at line: ...`; errors.Is
+// reaches it.
 // Every module that requires miekg/dns carries this same replace, which
 // TestEveryLiveModuleUsesTheDNSFork (v2) checks.
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.3
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4
