@@ -172,12 +172,24 @@ UTILS_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
 TDNS_ROOT := $(UTILS_DIR)..
 
 # Reject direct zone mutation outside the staging allowlist (B3).
+#
+# What it protects is served data: a published snapshot is never written, and
+# a live zone changes only by staging into its working set and publishing. The
+# allowlist is the staging API itself (zone_mutation.go) and the two builders of
+# a zone that is not live yet, whose result the refresh publish takes whole:
+# SortFunc in dnsutils.go (zone file or AXFR into new_zd) and ixfr_in.go (an
+# inbound delta applied to a private deep copy of the snapshot). ixfr_in.go
+# cannot stage instead: cloneOwner writes the live zone's working set, and a
+# delta that fails halfway must leave nothing behind but an AXFR fallback. See
+# docs/2026-07-02-DONE-zone-mutation-snapshot-correctness.md and
+# docs/2026-07-25-inbound-ixfr-plan.md section 4.4.
 check-no-mutators:
 	@violations=$$(grep -RnE '\.(RRtypes\.Set|Data\.Set)\(' \
 		$(TDNS_ROOT)/v2 $(TDNS_ROOT)/cmdv2 --include='*.go' \
 		| grep -v zone_mutation.go \
 		| grep -v '_test\.go' \
-		| grep -v 'dnsutils\.go' || true); \
+		| grep -v 'dnsutils\.go' \
+		| grep -v '/v2/ixfr_in\.go:' || true); \
 	if [ -n "$$violations" ]; then \
 		echo "mutator Set() calls outside allowlist:"; \
 		echo "$$violations"; \
