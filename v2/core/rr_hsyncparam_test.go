@@ -518,6 +518,74 @@ func TestHsyncparamListItemsAreLabels(t *testing.T) {
 	}
 }
 
+// An empty value reaches Parse as "key=" with no token after it for the
+// value, so it must not swallow the next key's token: an empty value is the
+// empty list wherever the key stands, not only last.
+func TestHsyncparamEmptyValueBeforeAnotherKey(t *testing.T) {
+	if err := RegisterHsyncparamRR(); err != nil {
+		t.Fatalf("RegisterHsyncparamRR: %v", err)
+	}
+	for _, tc := range []struct {
+		rdata string
+		want  string // String() of the parsed record
+	}{
+		{`servers="" nsmgmt="agent" parentsync="agent"`, `servers nsmgmt="agent" parentsync="agent"`},
+		{`servers= nsmgmt="agent" parentsync="agent"`, `servers nsmgmt="agent" parentsync="agent"`},
+		{`signers="" servers="p1"`, `signers servers="p1"`},
+		{`nsmgmt="agent" parentsync="agent" servers=""`, `nsmgmt="agent" parentsync="agent" servers`},
+		{`servers="" signers="" auditors=""`, `servers signers auditors`},
+		{`auditors="" serial=7`, `auditors serial="7"`},
+		{`servers=fox signers= serial="7"`, `servers="fox" signers serial="7"`},
+		{`pubkey="" servers="fox"`, `pubkey servers="fox"`},
+		{`servers="" key32768="blah"`, `servers key32768="blah"`},
+		// A keyN value may hold "=", so keyN= takes the next token whatever
+		// it holds.
+		{`key32768="nsmgmt=agent"`, `key32768="nsmgmt=agent"`},
+		// servers="" pubkey reaches Parse as the same tokens as this record,
+		// which String writes for the one-Label list "pubkey". It keeps that
+		// reading; an empty list before a bare key is written bare.
+		{`servers="pubkey"`, `servers="pubkey"`},
+		{`servers pubkey`, `servers pubkey`},
+	} {
+		rr, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + tc.rdata)
+		if err != nil {
+			t.Errorf("%s does not load: %v", tc.rdata, err)
+			continue
+		}
+		got := rr.(*dns.PrivateRR).Data.(*HSYNCPARAM).String()
+		if got != tc.want {
+			t.Errorf("%s reads as %s, want %s", tc.rdata, got, tc.want)
+			continue
+		}
+		again, err := dns.NewRR("example.com. 3600 IN HSYNCPARAM " + got)
+		if err != nil {
+			t.Errorf("%s (from %s) does not load: %v", got, tc.rdata, err)
+		} else if s := again.(*dns.PrivateRR).Data.(*HSYNCPARAM).String(); s != got {
+			t.Errorf("presentation is not stable:\nfirst  %s\nsecond %s", got, s)
+		}
+	}
+
+	// A bad value after an empty one is refused, and the error names its key.
+	// (The zone-file parser drops the reason, so this calls Parse directly.)
+	for _, tc := range []struct {
+		tokens []string
+		want   string // in the error
+	}{
+		{[]string{"servers=", "nsmgmt=", "bogus"}, "hsyncparam nsmgmt:"},       // servers="" nsmgmt="bogus"
+		{[]string{"signers=", "servers=", "Fox"}, `hsyncparam servers: "Fox"`}, // signers="" servers="Fox"
+		{[]string{"servers=", "bogus=", "x"}, `unknown key "bogus"`},           // servers="" bogus="x"
+		{[]string{"servers=", "serial=", "x"}, "hsyncparam serial:"},           // servers="" serial="x"
+	} {
+		var rr HSYNCPARAM
+		err := rr.Parse(tc.tokens)
+		if err == nil {
+			t.Errorf("%v accepted", tc.tokens)
+		} else if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%v: error %q does not say %q", tc.tokens, err, tc.want)
+		}
+	}
+}
+
 // On the wire serial is exactly four octets; any other length is refused.
 func TestHsyncparamSerialRefusesBadWireLength(t *testing.T) {
 	for _, value := range [][]byte{
