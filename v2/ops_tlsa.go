@@ -158,6 +158,17 @@ func (zd *ZoneData) UnpublishTlsaRR(port uint16) error {
 		return fmt.Errorf("UnpublishTlsaRR: KeyDB.UpdateQ is nil")
 	}
 
+	// A withdrawal is a request too, noted under the publication lock until
+	// it is queued: a publication asked for after it is not skipped while
+	// it waits (PublishTlsaRR).
+	owner := dns.CanonicalName(anti_tlsa_rr.Header().Name)
+	zd.tlsaPublishMu.Lock()
+	defer zd.tlsaPublishMu.Unlock()
+	if zd.tlsaRequested == nil {
+		zd.tlsaRequested = make(map[string]dns.RR)
+	}
+	zd.tlsaRequested[owner] = dns.Copy(anti_tlsa_rr)
+
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,

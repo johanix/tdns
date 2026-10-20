@@ -239,3 +239,29 @@ func TestPublishTlsaRRQueuesInTheOrderAskedFor(t *testing.T) {
 		}
 	}
 }
+
+// A publication asked for while a withdrawal is queued is sent, though the
+// zone still serves the record: the withdrawal would otherwise land after
+// it and leave no record.
+func TestPublishTlsaRRSendsARecordAskedForWhileAWithdrawalIsQueued(t *testing.T) {
+	zd, kdb := signalsRig(t)
+	cert := tlsaTestCertPEM(t)
+	if err := zd.PublishTlsaRR(zd.ZoneName, 443, cert); err != nil {
+		t.Fatal(err)
+	}
+	if res := runUpdaterForResult(t, kdb, <-kdb.UpdateQ); res.Err != nil {
+		t.Fatalf("applying the publication: %v", res.Err)
+	}
+	if err := zd.UnpublishTlsaRR(443); err != nil {
+		t.Fatal(err)
+	}
+	<-kdb.UpdateQ // the withdrawal, not yet applied
+	if err := zd.PublishTlsaRR(zd.ZoneName, 443, cert); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-kdb.UpdateQ:
+	default:
+		t.Error("a publication asked for while a withdrawal is queued was skipped")
+	}
+}
