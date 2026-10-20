@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"sync"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -50,11 +51,15 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 	// served unsigned in a signing zone is replaced, which signs it again.
 	// core.IsDuplicate: the stored record may spell its hex in another case.
 	// zd.Options is replaced under zd.mu on a reload; read it there, and
-	// let go before the zone is read.
+	// let go before the zone is read. Only if no other record was asked for
+	// since: one queued and not yet served would otherwise land after this
+	// request was skipped, and the record last asked for would be gone.
+	prev, asked := tlsaRequested.Swap(tlsaRequestKey{zd, dns.CanonicalName(tlsa.Hdr.Name)}, dns.Copy(tlsa))
+	lastAsked := !asked || (core.IsDuplicate(prev.(dns.RR), tlsa) && prev.(dns.RR).Header().Ttl == tlsa.Hdr.Ttl)
 	zd.mu.Lock()
 	signs := zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
 	zd.mu.Unlock()
-	if cur, err := zd.GetRRset(tlsa.Hdr.Name, dns.TypeTLSA); err == nil && cur != nil &&
+	if cur, err := zd.GetRRset(tlsa.Hdr.Name, dns.TypeTLSA); err == nil && cur != nil && lastAsked &&
 		len(cur.RRs) == 1 && core.IsDuplicate(cur.RRs[0], tlsa) && cur.RRs[0].Header().Ttl == tlsa.Hdr.Ttl &&
 		(!signs || len(cur.RRSIGs) > 0) {
 		lgHandler.Debug("PublishTlsaRR: the TLSA RRset already is this record", "rr", tlsa.String())
@@ -72,6 +77,16 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 	}
 
 	return nil
+}
+
+// tlsaRequested holds, per zone and TLSA name, the record last asked for
+// (PublishTlsaRR): an unchanged set is left alone only if no other record
+// was asked for since.
+var tlsaRequested sync.Map // tlsaRequestKey → dns.RR
+
+type tlsaRequestKey struct {
+	zd    *ZoneData
+	owner string
 }
 
 // tlsaDeleteRR is the update-section delete of the whole TLSA RRset at

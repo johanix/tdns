@@ -153,3 +153,40 @@ func TestPublishTlsaRRReadsTheOptionsUnderTheLock(t *testing.T) {
 	}
 	<-done
 }
+
+// A record asked for while another, asked for before it, is still queued is
+// published, though the zone serves it now: the queued one would otherwise
+// land after it and the record last asked for would be gone.
+func TestPublishTlsaRRSendsARecordAskedForWhileAnotherIsQueued(t *testing.T) {
+	zd, kdb := signalsRig(t)
+	a, b := tlsaTestCertPEM(t), tlsaTestCertPEM(t)
+	if err := zd.PublishTlsaRR("api.example.", 443, a); err != nil {
+		t.Fatal(err)
+	}
+	first := <-kdb.UpdateQ
+	if res := runUpdaterForResult(t, kdb, first); res.Err != nil {
+		t.Fatalf("applying a: %v", res.Err)
+	}
+	if err := zd.PublishTlsaRR("api.example.", 443, b); err != nil {
+		t.Fatal(err)
+	}
+	queued := <-kdb.UpdateQ // b, not yet applied
+	if err := zd.PublishTlsaRR("api.example.", 443, a); err != nil {
+		t.Fatal(err)
+	}
+	var again UpdateRequest
+	select {
+	case again = <-kdb.UpdateQ:
+	default:
+		t.Fatal("a, asked for again while b is queued, was not published")
+	}
+	for _, ur := range []UpdateRequest{queued, again} {
+		if res := runUpdaterForResult(t, kdb, ur); res.Err != nil {
+			t.Fatalf("applying: %v", res.Err)
+		}
+	}
+	served := ovServed(t, zd, "_443._tcp.api.example.", dns.TypeTLSA)
+	if len(served) != 1 || !ovHas(served, first.Actions[1]) {
+		t.Errorf("the zone serves %v, want only a, the record last asked for", served)
+	}
+}
