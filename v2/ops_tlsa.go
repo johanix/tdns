@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
-	"sync"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -54,8 +53,17 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 	// let go before the zone is read. Only if no other record was asked for
 	// since: one queued and not yet served would otherwise land after this
 	// request was skipped, and the record last asked for would be gone.
-	prev, asked := tlsaRequested.Swap(tlsaRequestKey{zd, dns.CanonicalName(tlsa.Hdr.Name)}, dns.Copy(tlsa))
-	lastAsked := !asked || (core.IsDuplicate(prev.(dns.RR), tlsa) && prev.(dns.RR).Header().Ttl == tlsa.Hdr.Ttl)
+	// The lock is held until the update is queued: the queue then holds
+	// publications in the order they were asked for.
+	owner := dns.CanonicalName(tlsa.Hdr.Name)
+	zd.tlsaPublishMu.Lock()
+	defer zd.tlsaPublishMu.Unlock()
+	prev, asked := zd.tlsaRequested[owner]
+	if zd.tlsaRequested == nil {
+		zd.tlsaRequested = make(map[string]dns.RR)
+	}
+	zd.tlsaRequested[owner] = dns.Copy(tlsa)
+	lastAsked := !asked || (core.IsDuplicate(prev, tlsa) && prev.Header().Ttl == tlsa.Hdr.Ttl)
 	zd.mu.Lock()
 	signs := zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
 	zd.mu.Unlock()
@@ -77,16 +85,6 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 	}
 
 	return nil
-}
-
-// tlsaRequested holds, per zone and TLSA name, the record last asked for
-// (PublishTlsaRR): an unchanged set is left alone only if no other record
-// was asked for since.
-var tlsaRequested sync.Map // tlsaRequestKey → dns.RR
-
-type tlsaRequestKey struct {
-	zd    *ZoneData
-	owner string
 }
 
 // tlsaDeleteRR is the update-section delete of the whole TLSA RRset at

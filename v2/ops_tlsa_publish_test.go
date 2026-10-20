@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -188,5 +189,53 @@ func TestPublishTlsaRRSendsARecordAskedForWhileAnotherIsQueued(t *testing.T) {
 	served := ovServed(t, zd, "_443._tcp.api.example.", dns.TypeTLSA)
 	if len(served) != 1 || !ovHas(served, first.Actions[1]) {
 		t.Errorf("the zone serves %v, want only a, the record last asked for", served)
+	}
+}
+
+// Publications reach the queue in the order they were asked for: the
+// publication lock is held from noting the record asked for until its
+// update is queued, so a later request waits while an earlier one waits on
+// a full queue.
+func TestPublishTlsaRRQueuesInTheOrderAskedFor(t *testing.T) {
+	zd, kdb := signalsRig(t)
+	for len(kdb.UpdateQ) < cap(kdb.UpdateQ) {
+		kdb.UpdateQ <- UpdateRequest{}
+	}
+	a, b := tlsaTestCertPEM(t), tlsaTestCertPEM(t)
+	errs := make(chan error, 2)
+	go func() { errs <- zd.PublishTlsaRR("api.example.", 443, a) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for zd.tlsaPublishMu.TryLock() {
+		zd.tlsaPublishMu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("a publication waiting on a full queue does not hold the publication lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	go func() { errs <- zd.PublishTlsaRR("api.example.", 443, b) }()
+	for i := 0; i < cap(kdb.UpdateQ); i++ {
+		<-kdb.UpdateQ
+	}
+	want := func(certPEM string) *dns.TLSA {
+		cert, err := parseCertificate(certPEM)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rr, err := NewTlsaRR("api.example.", 443, cert)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rr
+	}
+	for _, w := range []*dns.TLSA{want(a), want(b)} {
+		ur := <-kdb.UpdateQ
+		if len(ur.Actions) != 2 || !core.IsDuplicate(ur.Actions[1], w) {
+			t.Fatalf("queued %v, want the publication of %v next", ur.Actions, w)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
 	}
 }
