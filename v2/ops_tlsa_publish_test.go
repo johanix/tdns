@@ -57,3 +57,24 @@ func TestPublishTlsaRRReplacesTheRRset(t *testing.T) {
 		}
 	}
 }
+
+// Publishing the record the set already holds, alone, sends no update: the
+// signed RRset stays as it is.
+func TestPublishTlsaRRLeavesAnUnchangedSet(t *testing.T) {
+	zd, kdb := signalsRig(t)
+	cert := tlsaTestCertPEM(t)
+	if err := zd.PublishTlsaRR("api.example.", 443, cert); err != nil {
+		t.Fatal(err)
+	}
+	if res := runUpdaterForResult(t, kdb, <-kdb.UpdateQ); res.Err != nil {
+		t.Fatalf("applying the first publication: %v", res.Err)
+	}
+	if err := zd.PublishTlsaRR("api.example.", 443, cert); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case ur := <-kdb.UpdateQ:
+		t.Errorf("publishing the record the set already holds sent an update: %v", ur.Actions)
+	default:
+	}
+}

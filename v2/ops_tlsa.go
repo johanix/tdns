@@ -44,6 +44,15 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 		return fmt.Errorf("PublishTlsaRR: KeyDB.UpdateQ is nil")
 	}
 
+	// A set that already is this record alone is left as it is: replacing
+	// it would only re-sign it, and a signing failure then would leave it
+	// unsigned.
+	if cur, err := zd.GetRRset(tlsa.Hdr.Name, dns.TypeTLSA); err == nil && cur != nil &&
+		len(cur.RRs) == 1 && dns.IsDuplicate(cur.RRs[0], tlsa) && cur.RRs[0].Header().Ttl == tlsa.Hdr.Ttl {
+		lgHandler.Debug("PublishTlsaRR: the TLSA RRset already is this record", "rr", tlsa.String())
+		return nil
+	}
+
 	// Replace the RRset, not add to it: a certificate passes when it
 	// matches any record of the set, so a record left from the last
 	// certificate would stay trusted after a rollover.
