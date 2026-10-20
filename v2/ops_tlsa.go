@@ -44,14 +44,23 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 		return fmt.Errorf("PublishTlsaRR: KeyDB.UpdateQ is nil")
 	}
 
+	// Replace the RRset, not add to it: a certificate passes when it
+	// matches any record of the set, so a record left from the last
+	// certificate would stay trusted after a rollover.
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
-		Actions:        []dns.RR{tlsa},
+		Actions:        []dns.RR{tlsaDeleteRR(tlsa.Hdr.Name), tlsa},
 		InternalUpdate: true,
 	}
 
 	return nil
+}
+
+// tlsaDeleteRR is the update-section delete of the whole TLSA RRset at
+// owner (RFC 2136 2.5.2).
+func tlsaDeleteRR(owner string) dns.RR {
+	return &dns.ANY{Hdr: dns.RR_Header{Name: dns.Fqdn(owner), Rrtype: dns.TypeTLSA, Class: dns.ClassANY, Ttl: 0}}
 }
 
 // NewTlsaRR builds a DANE-EE / SPKI / SHA-256 ("3 1 1") TLSA record for the
