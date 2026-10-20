@@ -9,7 +9,7 @@ replace (
 	github.com/johanix/tdns/v2/edns0 => ../edns0
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.3
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4
 
 require (
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
