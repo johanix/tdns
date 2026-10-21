@@ -155,10 +155,37 @@ type ImrResponse struct {
 	// cache.ContextNXDOMAIN (no such name) or cache.ContextNoErrNoAns (the
 	// name exists, the type does not). Zero otherwise. A denial has no RRset:
 	// the SOA that proves it is not an answer to the question.
-	Denial   cache.CacheContext
-	Error    bool
-	ErrorMsg string
-	Msg      string
+	Denial cache.CacheContext
+	// Expiration is when the cache stops serving what this response carries:
+	// the expiration of the cache entry that holds the answer or the denial.
+	// An entry held Secure lives no longer than its signatures allow, so a
+	// caller that keeps what it was given, rather than asking again, knows
+	// when to ask again. Zero when it is not known: an error, or an answer
+	// not cached under the question.
+	Expiration time.Time
+	Error      bool
+	ErrorMsg   string
+	Msg        string
+}
+
+// expiresWith sets resp.Expiration from entry, the cache entry for the
+// question, when entry holds what resp says: an answer for an answer, the
+// same kind of denial for a denial.
+func (resp *ImrResponse) expiresWith(entry *cache.CachedRRset) {
+	if resp == nil || entry == nil || resp.Error {
+		return
+	}
+	switch {
+	case resp.Denial != 0:
+		if entry.Context != resp.Denial {
+			return
+		}
+	case resp.RRset == nil || entry.RRset == nil:
+		return
+	case entry.Context == cache.ContextNXDOMAIN || entry.Context == cache.ContextNoErrNoAns:
+		return
+	}
+	resp.Expiration = entry.Expiration
 }
 
 // denied makes resp the answer "no such data": no RRset, the kind of denial,
@@ -605,6 +632,7 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 				// The SOA that proves a denial is not the answer (#698).
 				resp.denied(crrset.Context, crrset.State)
 			}
+			resp.expiresWith(crrset)
 			sendResp(*resp)
 			return
 		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint:
@@ -614,6 +642,7 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 					RRset:     crrset.RRset,
 					Validated: crrset.State == cache.ValidationStateSecure,
 				}
+				resp.expiresWith(crrset)
 				sendResp(*resp)
 				return
 			}
@@ -770,6 +799,15 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			}
 		}()
 	}
+
+	// Every return below says when what it carries expires: the entry the
+	// answer or the denial is cached in, read after validation, which can
+	// shorten its life to its signatures'. Peek, not Get: an entry with TTL 0
+	// is stored already expired and still says when. Deferred after the send
+	// above, so it runs before it.
+	defer func() {
+		resp.expiresWith(imr.Cache.Peek(qname, qtype))
+	}()
 
 	//	dump.P(imr)
 
