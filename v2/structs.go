@@ -113,6 +113,13 @@ type ZoneData struct {
 	// holds it across its clear+re-sign via the *Locked variant. Never held
 	// while mu is held, so there is no lock-order inversion with SignZone.
 	policyApplyMu sync.Mutex
+	// tlsaPublishMu serializes PublishTlsaRR from noting the record asked
+	// for to queuing its update, so the queue holds publications in the
+	// order they were asked for. tlsaRequested, guarded by it, holds the
+	// record last asked for per canonical TLSA name. Taken before mu, never
+	// while mu is held.
+	tlsaPublishMu sync.Mutex
+	tlsaRequested map[string]dns.RR
 	// generation is bumped on every removal/replacement of this zone
 	// (RemoveDynamicZone, ModifyDynamicZone, config-reload Zones.Remove). A
 	// refresh goroutine snapshots it at dispatch; the pre-persist guard (B5b)

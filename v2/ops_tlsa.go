@@ -44,14 +44,53 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 		return fmt.Errorf("PublishTlsaRR: KeyDB.UpdateQ is nil")
 	}
 
+	// A set that already is this record alone, with this TTL, and signed
+	// where the zone signs, is left as it is: replacing it would only
+	// re-sign it, and a signing failure then would leave it unsigned. One
+	// served unsigned in a signing zone is replaced, which signs it again.
+	// core.IsDuplicate: the stored record may spell its hex in another case.
+	// zd.Options is replaced under zd.mu on a reload; read it there, and
+	// let go before the zone is read. Only if no other record was asked for
+	// since: one queued and not yet served would otherwise land after this
+	// request was skipped, and the record last asked for would be gone.
+	// The lock is held until the update is queued: the queue then holds
+	// publications in the order they were asked for.
+	owner := dns.CanonicalName(tlsa.Hdr.Name)
+	zd.tlsaPublishMu.Lock()
+	defer zd.tlsaPublishMu.Unlock()
+	prev, asked := zd.tlsaRequested[owner]
+	if zd.tlsaRequested == nil {
+		zd.tlsaRequested = make(map[string]dns.RR)
+	}
+	zd.tlsaRequested[owner] = dns.Copy(tlsa)
+	lastAsked := !asked || (core.IsDuplicate(prev, tlsa) && prev.Header().Ttl == tlsa.Hdr.Ttl)
+	zd.mu.Lock()
+	signs := zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
+	zd.mu.Unlock()
+	if cur, err := zd.GetRRset(tlsa.Hdr.Name, dns.TypeTLSA); err == nil && cur != nil && lastAsked &&
+		len(cur.RRs) == 1 && core.IsDuplicate(cur.RRs[0], tlsa) && cur.RRs[0].Header().Ttl == tlsa.Hdr.Ttl &&
+		(!signs || len(cur.RRSIGs) > 0) {
+		lgHandler.Debug("PublishTlsaRR: the TLSA RRset already is this record", "rr", tlsa.String())
+		return nil
+	}
+
+	// Replace the RRset, not add to it: a certificate passes when it
+	// matches any record of the set, so a record left from the last
+	// certificate would stay trusted after a rollover.
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
-		Actions:        []dns.RR{tlsa},
+		Actions:        []dns.RR{tlsaDeleteRR(tlsa.Hdr.Name), tlsa},
 		InternalUpdate: true,
 	}
 
 	return nil
+}
+
+// tlsaDeleteRR is the update-section delete of the whole TLSA RRset at
+// owner (RFC 2136 2.5.2).
+func tlsaDeleteRR(owner string) dns.RR {
+	return &dns.ANY{Hdr: dns.RR_Header{Name: dns.Fqdn(owner), Rrtype: dns.TypeTLSA, Class: dns.ClassANY, Ttl: 0}}
 }
 
 // NewTlsaRR builds a DANE-EE / SPKI / SHA-256 ("3 1 1") TLSA record for the
@@ -118,6 +157,17 @@ func (zd *ZoneData) UnpublishTlsaRR(port uint16) error {
 	if zd.KeyDB.UpdateQ == nil {
 		return fmt.Errorf("UnpublishTlsaRR: KeyDB.UpdateQ is nil")
 	}
+
+	// A withdrawal is a request too, noted under the publication lock until
+	// it is queued: a publication asked for after it is not skipped while
+	// it waits (PublishTlsaRR).
+	owner := dns.CanonicalName(anti_tlsa_rr.Header().Name)
+	zd.tlsaPublishMu.Lock()
+	defer zd.tlsaPublishMu.Unlock()
+	if zd.tlsaRequested == nil {
+		zd.tlsaRequested = make(map[string]dns.RR)
+	}
+	zd.tlsaRequested[owner] = dns.Copy(anti_tlsa_rr)
 
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
