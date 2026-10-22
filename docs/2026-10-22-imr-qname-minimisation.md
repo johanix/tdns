@@ -1,8 +1,8 @@
 # IMR: QNAME minimisation (RFC 9156)
 
 **Date:** 2026-10-22
-**Status:** accepted design, not implemented. Scoped against main at `51eb0988`.
-**Revision:** 5.
+**Status:** implemented. Scoped against main at `51eb0988`.
+**Revision:** 6.
 
 | Rev | Date | Change |
 |---|---|---|
@@ -11,6 +11,7 @@
 | 3 | 2026-10-22 | Off by default, permanently; an operator opts in (§2). The five Deckard scenarios that ask for minimisation set the option themselves, apart from the default (§11). |
 | 4 | 2026-10-22 | The four `iter_minim_*` Deckard scenarios script Knot Resolver's `NS` probes and stay skipped with that reason. Scenarios of our own with `A` probes are optional (§11). |
 | 5 | 2026-10-22 | A probe that no server completes no longer fails the lookup: the original query goes to the current ancestor and its answer stands, as at the caps. A probe error still books no lameness. The forced downgrade and the timeout cost are stated (§2, §4, §7, §9). |
+| 6 | 2026-10-22 | Implemented. The default stays off because the resolver is also embedded and the tests pin the query stream; qmin is for standalone tdns-imr (§2). `val_ta_sentinel_insecure` stays skipped (§11). |
 
 RFC 9156 is the specification. It obsoletes RFC 7816. This design follows
 9156 and does not keep the 7816 behaviour (NS as the hiding type, one
@@ -53,7 +54,7 @@ the probes.
 
 | Question | Decision |
 |---|---|
-| Default | Off, permanently. An operator opts in with `qname-minimisation` in `imrengine.options`. There is no plan to turn it on by default. Most users of this resolver gain little from it and pay in extra queries and delay (§9): applications that embed it to look up their own peers, and test setups that need a predictable query stream. Existing test doubles match the full name and the original type, and the 95 Deckard scenarios that pin `query-minimization: off` need no template change. |
+| Default | Off, permanently. An operator of standalone tdns-imr opts in with `qname-minimisation` in `imrengine.options`. The library default stays off: the same resolver is embedded in other programs, and the iterative tests pin the query stream. The sample leaves the option commented out, so a copied config matches those tests. There is no plan to turn it on by default. Existing test doubles match the full name and the original type, and the 95 Deckard scenarios that pin `query-minimization: off` need no template change. |
 | Hiding QTYPE | `A`, fixed. RFC 9156 allows any type whose authority lies below the zone cut, as long as it has no relation to the client's type. `A` and `AAAA` are the types it names as least likely to raise issues. Not a setting. |
 | Original QTYPE | Sent only to a server known to hold the name: the ancestor is the name itself (for `DS`, its parent). Before that the full name goes out as `A` (RFC 9156 §3 step 3). This costs one extra query, on a cold lookup of a type other than `A` at a name that is not a zone cut. It costs nothing when the name is a cut. |
 | Query cap | `tuning.qmin-max-iterations` default 10 (`MAX_MINIMISE_COUNT`). `tuning.qmin-one-label` default 4 (`MINIMISE_ONE_LAB`). Per walk: one name and type being resolved, across its referrals (§6). A second cap counts the probes of one client request (§6). |
@@ -431,9 +432,11 @@ refuse `NS`.
      probes of this design (§2) cannot pass them. Their reason in
      `skip.txt` becomes "scripts `NS` probes; tdns-imr probes with `A`
      (RFC 9156)".
-   - `val_ta_sentinel_insecure` tests trust-anchor sentinels and only sets
-     the switch. It runs with the option on, and comes off the skip list
-     if it passes.
+   - `val_ta_sentinel_insecure` stays skipped. It sets the switch, and its
+     scripted delegation is `unsigned. IN NS` and `unsigned. IN DS`. The
+     first probe this design sends is `unsigned. IN A`, which the scenario
+     does not script. Deckard fails a scenario on any query it did not
+     script, even when the final answer is right.
 
    Deckard scenarios of our own with `A` probes are optional. The §7 tests
    cover the behaviour either way.

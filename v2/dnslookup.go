@@ -1613,10 +1613,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		serversZone = imr.zoneOfServers(qname, qtype, serverMap)
 	}
 
-	return imr.askServers(ctx, qname, qtype, serverMap, serversZone, privacy, true,
-		func(server *cache.AuthServer, addr, nsname string, wire core.Transport, r *dns.Msg) serverReply {
-			return imr.dispatchClientQuery(ctx, qname, qtype, force, visitedZones, serversZone, privacy, server, addr, nsname, wire, r)
-		})
+	return imr.resolveMinimised(ctx, qname, qtype, serverMap, serversZone, force, visitedZones, privacy)
 }
 
 // walkErr wraps the underlying error with the diagnostic state of the
@@ -2771,7 +2768,7 @@ func zoneHasVerdict(z *cache.Zone) bool {
 // ("" when that is not known), and caches what it carries: the delegated zone's
 // NS RRset, its DS, and the glue and transport signals that may be used
 // (ParseAdditionalForNSAddrs).
-func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, serversZone string, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
+func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, serversZone string, transport core.Transport, privacy edns0.PrivacyLevel, adopt *referralAdopt) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	if Globals.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
 	}
@@ -3039,10 +3036,21 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	}
 
 	if len(serverMap) == 0 {
+		if adopt != nil {
+			adopt.zone = zonename
+		}
 		return nil, r.MsgHdr.Rcode, cache.ContextReferral, transport, nil
 	}
 	// rrcache.Logger.Printf("*** handleReferral: calling revalidateReferralNS for zone %s, serverMap: %+v", zonename, serverMap)
 	imr.scheduleReferralNSRevalidation(zonename, serverMap)
+	// A probe caches the delegation and keeps walking from the referred zone.
+	// Following the name that was sent would reveal labels the plan had not
+	// yet meant to send.
+	if adopt != nil {
+		adopt.zone = zonename
+		adopt.servers = serverMap
+		return nil, dns.RcodeSuccess, cache.ContextReferral, transport, nil
+	}
 	//rrcache.Logger.Printf("*** handleReferral: revalidateReferralNS returned, calling IterativeDNSQuery for zone %s, serverMap: %+v", zonename, serverMap)
 	rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, zonename, force, visitedZones, privacy)
 	return rrset, rcode, cacheCtx, transport, err

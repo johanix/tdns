@@ -59,6 +59,10 @@ imrengine:
    # - always-query-for-transport: Always query for new auth servers
    # - query-for-transport-tlsa: Query for TLSA records for encrypted transports
    # - transport-signal-type: Specify "svcb" (default) or "tsync"
+   # - qname-minimisation: Hide the full query name from servers above the
+   #   zone that holds it (RFC 9156). Off when absent. For a standalone
+   #   tdns-imr; leave it off in a copied config so the query stream matches
+   #   the resolver tests.
    # - allow-loopback-nameservers: Also query nameserver addresses on this host
    #   (127.0.0.0/8, ::1, 0.0.0.0, ::) that come from referrals, glue or address
    #   lookups. Off by default: a delegation cannot point the resolver at
@@ -176,6 +180,8 @@ imrengine:
    #    cache-min-ttl:            0  # seconds, as in Unbound; floor (0 = none)
    #    zone-state-recheck:     30s  # how long an insecure or indeterminate zone verdict stands
    #    nsec3-max-iterations:    10  # NSEC3 proofs above this are not judged (RFC 9276)
+   #    qmin-max-iterations:     10  # probe rounds for one name (RFC 9156); at least 1
+   #    qmin-one-label:           4  # of those rounds, how many add a single label; 0 up to the maximum-1
 
 # DNSSEC algorithms whose DNSKEY/RRSIG payloads are large for UDP. When a
 # referral DS RRset uses one, the IMR fetches the child zone's DNSKEY over TCP

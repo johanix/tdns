@@ -297,7 +297,7 @@ func (imr *Imr) dispatchClientQuery(ctx context.Context, qname string, qtype uin
 					"aa", r.Authoritative)
 				return replyNext()
 			}
-			rrset, rcode, cacheCtx, transport, err := imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, serversZone, wire, privacy)
+			rrset, rcode, cacheCtx, transport, err := imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, serversZone, wire, privacy, nil)
 			return replyDone(rrset, rcode, cacheCtx, transport, err)
 		case responseKindError:
 			lgDns.Debug("IterativeDNSQuery: treating response as error",
