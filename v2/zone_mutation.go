@@ -1018,6 +1018,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// of 0 and the journal anchors to nothing.
 	zd.fileSerial = new_zd.fileSerial
 	zd.fileDigest = new_zd.fileDigest
+	zd.contentFromTransfer = !fromZoneFile
 	zd.IncomingSerial = new_zd.IncomingSerial
 	switch {
 	case firstLoad:

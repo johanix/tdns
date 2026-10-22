@@ -398,6 +398,12 @@ type ZoneData struct {
 	// says, and the delta journal has to be anchored to the file, because the
 	// file is what the next load starts from. Guarded by zd.mu.
 	fileSerial uint32
+	// contentFromTransfer records that the content loaded last came by
+	// transfer from an upstream, not from the zone's own file. fileSerial is
+	// then the serial received, and the journal's base is the upstream's copy
+	// at that serial, which is gone once the upstream moves on. Set by
+	// applyRefreshReplacementLocked. Guarded by zd.mu.
+	contentFromTransfer bool
 	// deltasReplayed records that the persisted deltas have already been
 	// applied on top of the zone file CURRENTLY loaded. Set by
 	// ReplayPersistedDeltas on success and cleared by
