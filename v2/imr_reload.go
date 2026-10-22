@@ -558,6 +558,12 @@ func imrTuningEqual(a, b ImrTuningConf) bool {
 	if i, j := a.NSEC3MaxIterations, b.NSEC3MaxIterations; (i == nil) != (j == nil) || (i != nil && *i != *j) {
 		return false
 	}
+	if i, j := a.QminMaxIterations, b.QminMaxIterations; (i == nil) != (j == nil) || (i != nil && *i != *j) {
+		return false
+	}
+	if i, j := a.QminOneLabel, b.QminOneLabel; (i == nil) != (j == nil) || (i != nil && *i != *j) {
+		return false
+	}
 	x, y := a.UpgradeIndirectCacheHits, b.UpgradeIndirectCacheHits
 	if x == nil || y == nil {
 		return x == y
