@@ -2,13 +2,14 @@
 
 **Date:** 2026-10-22
 **Status:** accepted design, not implemented. Scoped against main at `51eb0988`.
-**Revision:** 3.
+**Revision:** 4.
 
 | Rev | Date | Change |
 |---|---|---|
 | 1 | 2026-10-22 | First version. |
 | 2 | 2026-10-22 | After review. The original type goes only to a server known to hold the name (§4). A probe name is looked up in the cache first (§4). The ancestor is the zone of the servers asked (§4). DNAME, a failed probe, the counter's scope and a per-request cap are settled (§4, §6). The walk moves out of the tuple loop in a commit of its own (§3). Config spelling and limits (§5). |
 | 3 | 2026-10-22 | Off by default, permanently; an operator opts in (§2). The five Deckard scenarios that ask for minimisation set the option themselves, apart from the default (§11). |
+| 4 | 2026-10-22 | The four `iter_minim_*` Deckard scenarios script Knot Resolver's `NS` probes and stay skipped with that reason. Scenarios of our own with `A` probes are optional (§11). |
 
 RFC 9156 is the specification. It obsoletes RFC 7816. This design follows
 9156 and does not keep the 7816 behaviour (NS as the hiding type, one
@@ -397,10 +398,26 @@ refuse `NS`.
 1. Implement §3–§7 on this design, as the two commits of §3. Update the
    sample and the guide in the same change.
 2. Run the new tests, then `make check-all` from `tdns/`.
-3. When those are green, wire the five Deckard scenarios that set
-   `query-minimization: on`. They are skipped today because tdns-imr has
-   no minimisation (`docs/2026-09-28-imr-deckard-test-clock-and-switches.md`
-   §7). The template turns that scenario key into `qname-minimisation` in
-   the scenario's own `imrengine.options`. The other 95 keep the default.
-   A scenario that passes comes off the skip list. The default does not
-   change.
+3. When those are green, wire the Deckard switch. The template turns a
+   scenario's `query-minimization: on` into `qname-minimisation` in that
+   scenario's own `imrengine.options`. The other 95 keep the default,
+   which does not change.
+
+   Five scenarios set the switch. All five are skipped today because
+   tdns-imr has no minimisation (`tests/deckard/skip.txt`;
+   `docs/2026-09-28-imr-deckard-test-clock-and-switches.md` §7).
+
+   - `iter_minim_a`, `iter_minim_a_nxdomain`, `iter_minim_nonempty` and
+     `iter_minim_ns` stay skipped. They were written for Knot Resolver,
+     whose probes hide the type with `NS` (`com. IN NS`,
+     `example.com. IN NS`). Their entries match on name and type, and
+     Deckard fails a scenario on any query it did not script, so the `A`
+     probes of this design (§2) cannot pass them. Their reason in
+     `skip.txt` becomes "scripts `NS` probes; tdns-imr probes with `A`
+     (RFC 9156)".
+   - `val_ta_sentinel_insecure` tests trust-anchor sentinels and only sets
+     the switch. It runs with the option on, and comes off the skip list
+     if it passes.
+
+   Deckard scenarios of our own with `A` probes are optional. The §7 tests
+   cover the behaviour either way.
