@@ -2,12 +2,13 @@
 
 **Date:** 2026-10-22
 **Status:** accepted design, not implemented. Scoped against main at `51eb0988`.
-**Revision:** 2.
+**Revision:** 3.
 
 | Rev | Date | Change |
 |---|---|---|
 | 1 | 2026-10-22 | First version. |
 | 2 | 2026-10-22 | After review. The original type goes only to a server known to hold the name (§4). A probe name is looked up in the cache first (§4). The ancestor is the zone of the servers asked (§4). DNAME, a failed probe, the counter's scope and a per-request cap are settled (§4, §6). The walk moves out of the tuple loop in a commit of its own (§3). Config spelling and limits (§5). |
+| 3 | 2026-10-22 | Off by default, permanently; an operator opts in (§2). The five Deckard scenarios that ask for minimisation set the option themselves, apart from the default (§11). |
 
 RFC 9156 is the specification. It obsoletes RFC 7816. This design follows
 9156 and does not keep the 7816 behaviour (NS as the hiding type, one
@@ -50,7 +51,7 @@ the probes.
 
 | Question | Decision |
 |---|---|
-| Default | Off. `qname-minimisation` is absent from `imrengine.options`. Existing test doubles match the full name and the original type, and the 95 Deckard scenarios that pin `query-minimization: off` need no template change. Default on is a follow-up (§11). |
+| Default | Off, permanently. An operator opts in with `qname-minimisation` in `imrengine.options`. There is no plan to turn it on by default. Most users of this resolver gain little from it and pay in queries and in failed lookups (§9): applications that embed it to look up their own peers, and test setups that need a predictable query stream. Existing test doubles match the full name and the original type, and the 95 Deckard scenarios that pin `query-minimization: off` need no template change. |
 | Hiding QTYPE | `A`, fixed. RFC 9156 allows any type whose authority lies below the zone cut, as long as it has no relation to the client's type. `A` and `AAAA` are the types it names as least likely to raise issues. Not a setting. |
 | Original QTYPE | Sent only to a server known to hold the name: the ancestor is the name itself (for `DS`, its parent). Before that the full name goes out as `A` (RFC 9156 §3 step 3). This costs one extra query, on a cold lookup of a type other than `A` at a name that is not a zone cut. It costs nothing when the name is a cut. |
 | Query cap | `tuning.qmin-max-iterations` default 10 (`MAX_MINIMISE_COUNT`). `tuning.qmin-one-label` default 4 (`MINIMISE_ONE_LAB`). Per walk: one name and type being resolved, across its referrals (§6). A second cap counts the probes of one client request (§6). |
@@ -360,8 +361,8 @@ retry that would paper over it is declined in §2.
 **Failed probes.** A zone whose servers all fail a type-`A` query at a
 name above the client's name now fails the client's lookup, where today
 it succeeds. RFC 9156 §5 cites up to 5% more failed lookups with
-minimisation. There is no fallback, by §2. This weighs on the default-on
-decision (§11), not on the first implementation.
+minimisation. There is no fallback, by §2. An operator who opts in accepts
+that. It is one reason the default stays off (§2).
 
 **The 8s budget.** Ten probe rounds plus a final query is the added
 upstream work per name, and the per-request cap bounds the sum. Validating
@@ -370,7 +371,7 @@ are extra and already part of ordinary resolution. `ip6.arpa` is the deep
 name the cap is there for. A cold signed name can still spend the budget
 on validation rather than on probes.
 
-**Existing tests.** Low, while the default is off. Doubles that answer
+**Existing tests.** Low, since the default is off. Doubles that answer
 only the full name and the original type (denial, DS parent, glue,
 forward) keep seeing today's questions.
 
@@ -389,17 +390,17 @@ type would undo the hiding. `NS` is legal under RFC 9156 and has no value
 over `A`: the parent returns a referral for any type, and some servers
 refuse `NS`.
 
-**Default on, and the Deckard skip list.** Five Deckard scenarios set
-`query-minimization: on` and are skipped because tdns-imr has no
-minimisation (`docs/2026-09-28-imr-deckard-test-clock-and-switches.md`
-§7). They come off that list when the template maps Knot's key onto
-`qname-minimisation` and the scenarios pass. That is the same change as
-flipping the default, and it waits until §7 is green.
+**Default on.** Declined in §2.
 
 ## 11. Follow-up
 
 1. Implement §3–§7 on this design, as the two commits of §3. Update the
    sample and the guide in the same change.
 2. Run the new tests, then `make check-all` from `tdns/`.
-3. When those are green, decide default on. Wiring the five Deckard
-   scenarios is part of that decision, not part of the first implementation.
+3. When those are green, wire the five Deckard scenarios that set
+   `query-minimization: on`. They are skipped today because tdns-imr has
+   no minimisation (`docs/2026-09-28-imr-deckard-test-clock-and-switches.md`
+   §7). The template turns that scenario key into `qname-minimisation` in
+   the scenario's own `imrengine.options`. The other 95 keep the default.
+   A scenario that passes comes off the skip list. The default does not
+   change.
