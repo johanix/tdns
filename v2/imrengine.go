@@ -188,6 +188,33 @@ func (resp *ImrResponse) expiresWith(entry *cache.CachedRRset) {
 	resp.Expiration = entry.Expiration
 }
 
+// lookupEntry is the cache entry a lookup's response carries the expiration
+// of, or nil when there is none to trust. hit is the entry the lookup read
+// (a cache hit), entry the one now under the question, started when the
+// lookup began. A hit is what was read: the entry under the question when it
+// is the same RRset stored again (validation can shorten its life), the hit
+// otherwise. Without a hit, the entry under the question counts only when it
+// was stored since the lookup began. One stored before was left there by
+// another lookup: a fresh denial that a CNAME gives is not cached under
+// <qname, qtype> (cnameDeniesType), and an older denial of the same kind may
+// still be.
+func lookupEntry(entry, hit *cache.CachedRRset, started time.Time) *cache.CachedRRset {
+	if hit != nil {
+		if entry != nil && entry.RRset == hit.RRset {
+			return entry
+		}
+		return hit
+	}
+	if entry == nil {
+		return nil
+	}
+	// Set keeps an entry's lifetime as Ttl seconds up to Expiration
+	if entry.Expiration.Add(-time.Duration(entry.Ttl) * time.Second).Before(started) {
+		return nil
+	}
+	return entry
+}
+
 // denied makes resp the answer "no such data": no RRset, the kind of denial,
 // and the verdict on its proof. A fresh denial and a cached one both come
 // here, so the first ask and every later one within the negative TTL get the
@@ -802,11 +829,13 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 
 	// Every return below says when what it carries expires: the entry the
 	// answer or the denial is cached in, read after validation, which can
-	// shorten its life to its signatures'. Peek, not Get: an entry with TTL 0
-	// is stored already expired and still says when. Deferred after the send
-	// above, so it runs before it.
+	// shorten its life to its signatures' (lookupEntry). Peek, not Get: an
+	// entry with TTL 0 is stored already expired and still says when.
+	// Deferred after the send above, so it runs before it.
+	started := cache.Now()
+	var hit *cache.CachedRRset
 	defer func() {
-		resp.expiresWith(imr.Cache.Peek(qname, qtype))
+		resp.expiresWith(lookupEntry(imr.Cache.Peek(qname, qtype), hit, started))
 	}()
 
 	//	dump.P(imr)
@@ -828,10 +857,12 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			// SOA's own verdict: a Bogus denial in a signed zone came back
 			// Secure.
 			lgImr.Debug("ImrQuery: cache hit", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+			hit = crrset
 			resp.denied(crrset.Context, crrset.State)
 			return &resp, nil
 		case cache.ContextAnswer:
 			lgImr.Debug("ImrQuery: cache hit", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+			hit = crrset
 			resp.RRset = crrset.RRset
 			resp.ValidationState = crrset.State
 			if crrset.State == cache.ValidationStateSecure {
@@ -847,6 +878,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			// cached glue/referral already answers the question.
 			if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == qtype {
 				lgImr.Debug("ImrQuery: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+				hit = crrset
 				resp.RRset = crrset.RRset
 				// Every path that yields an RRset reports its verdict; here it is
 				// whatever the cache holds for the indirect data (usually none).

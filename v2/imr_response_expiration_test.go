@@ -146,3 +146,33 @@ func TestImrResponseExpiresWith(t *testing.T) {
 		})
 	}
 }
+
+// The expiration comes from this lookup's entry only (CodeRabbit on #947): the
+// one a cache hit read, or one stored since the lookup began. An entry left
+// under the question from before, as an older denial is when a fresh denial
+// comes from a CNAME and is not cached there, gives none.
+func TestLookupEntryIsThisLookups(t *testing.T) {
+	started := time.Now()
+	rrA, rrB := &core.RRset{Name: "a."}, &core.RRset{Name: "b."}
+	fresh := &cache.CachedRRset{RRset: rrA, Ttl: 60, Expiration: started.Add(61 * time.Second)}
+	before := &cache.CachedRRset{RRset: rrA, Ttl: 600, Expiration: started.Add(500 * time.Second)}
+	shortened := &cache.CachedRRset{RRset: rrA, Ttl: 30, Expiration: started.Add(30 * time.Second)}
+	other := &cache.CachedRRset{RRset: rrB, Ttl: 60, Expiration: started.Add(61 * time.Second)}
+	for _, tc := range []struct {
+		name       string
+		entry, hit *cache.CachedRRset
+		want       *cache.CachedRRset
+	}{
+		{"stored by this lookup", fresh, nil, fresh},
+		{"stored before it, left there", before, nil, nil},
+		{"nothing", nil, nil, nil},
+		{"a hit", before, before, before},
+		{"a hit, stored again shorter", shortened, before, shortened},
+		{"a hit, replaced since", other, before, before},
+		{"a hit, gone since", nil, before, before},
+	} {
+		if got := lookupEntry(tc.entry, tc.hit, started); got != tc.want {
+			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
+		}
+	}
+}
