@@ -989,8 +989,8 @@ func (zd *ZoneData) WriteTmpFile(lg *log.Logger) (string, error) {
 }
 
 // WriteFile writes the zone and returns the filename. Callers that need the
-// serial written -- WriteZone, to bound its delta drop -- use
-// WriteFileWithSerial.
+// serial written -- WriteZone and the write after a refresh, to bound their
+// delta drop -- use WriteFileWithSerial.
 func (zd *ZoneData) WriteFile(filename string) (string, error) {
 	fname, _, err := zd.WriteFileWithSerial(filename)
 	return fname, err
@@ -1002,8 +1002,9 @@ func (zd *ZoneData) WriteFile(filename string) (string, error) {
 // into place, and every step -- flush, sync, close, rename -- is checked. Both
 // properties are load-bearing for Phase 2, not general tidiness.
 //
-// WriteZone treats a successful return here as "the file now contains
-// everything the zone has" and DELETES the journal deltas up to that serial.
+// WriteZone and the write after a refresh treat a successful return here as
+// "the file now contains everything the zone has" and DELETE the journal
+// deltas up to that serial (recordZoneFileWritten).
 // The journal is the only replayable copy of those changes. So a write that
 // half-succeeded and reported success would take the file AND the journal in
 // one move: os.Create truncates first, and the buffered tail can fail to flush
