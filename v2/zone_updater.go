@@ -827,6 +827,11 @@ func (zd *ZoneData) applyChildUpdate(ur UpdateRequest, kdb *KeyDB, after func())
 			}
 		}
 	}
+	clamp, err := zd.updateClamp(kdb, dak)
+	if err != nil {
+		lg.Error("ApplyChildUpdateToZoneData: failed to resolve the TTL clamp", "zone", zd.ZoneName, "error", err)
+		return false, false, err
+	}
 
 	zd.mu.Lock()
 	// A defer of its own, so that the lock is released however this ends, a
@@ -845,7 +850,7 @@ func (zd *ZoneData) applyChildUpdate(ur UpdateRequest, kdb *KeyDB, after func())
 		if absent = zd.absentChildDeletesLocked(ur.Actions); len(absent) > 0 {
 			return false
 		}
-		return zd.stageChildUpdateLocked(ur, dak)
+		return zd.stageChildUpdateLocked(ur, dak, clamp)
 	}, zd.followsPublish(ur, after))
 	if len(absent) > 0 {
 		err = &ChildDeleteNotInZoneError{Zone: zd.ZoneName, Records: absent}
@@ -861,6 +866,27 @@ func (zd *ZoneData) applyChildUpdate(ur UpdateRequest, kdb *KeyDB, after func())
 			zd.ZoneName, persistErr)
 	}
 	return updated, deferred, err
+}
+
+// updateClamp is the TTL clamp an update signs the RRsets it changes with: the
+// one the zone's re-signing uses (ClampParamsForZone), so the policy's
+// ttls.max-served ceiling and the rollover clamp hold for an update too. nil
+// for a zone that does not sign here, has no keys or has no policy.
+//
+// Updates used to sign with no clamp, and an RRset an update wrote was served
+// at the TTL the update carried until the next re-sign. A DS a child posted
+// with TTL 3600 was served, and cached by validating resolvers, for an hour
+// under a policy that serves nothing for longer than five minutes, and its
+// withdrawal went unseen by them for as long.
+func (zd *ZoneData) updateClamp(kdb *KeyDB, dak *DnssecKeys) (*ClampParams, error) {
+	if !zd.signsHere() || dak == nil || zd.DnssecPolicy == nil {
+		return nil, nil
+	}
+	clamp, err := ClampParamsForZone(kdb, zd.ZoneName, zd.DnssecPolicy, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("zone %s: resolving the TTL clamp: %w", zd.ZoneName, err)
+	}
+	return clamp, nil
 }
 
 // ChildDeleteNotInZoneError refuses a child update that deletes a record the
@@ -924,7 +950,7 @@ func (zd *ZoneData) absentChildDeletesLocked(actions []dns.RR) []dns.RR {
 // stageChildUpdateLocked stages the actions of a child update in the working
 // set, and reports whether it changed anything. The caller holds zd.mu, and
 // publishes what it staged (stageAndPublishLocked).
-func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (updated bool) {
+func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys, clamp *ClampParams) (updated bool) {
 	zd.ensureWorkingSet()
 
 	// A CSYNC/DSYNC-driven child update can create or remove a delegation, and
@@ -1022,7 +1048,7 @@ func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (u
 				// at a delegation point only the DS is authoritative parent
 				// data. NS and glue are the child's, signed in the child.
 				if dak != nil && zd.signableLocked(ownerName, rrtype) {
-					_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
+					_, err := zd.SignRRset(&rrset, ownerName, dak, true, clamp)
 					if err != nil {
 						lg.Error("ApplyChildUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 					}
@@ -1078,7 +1104,7 @@ func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (u
 			// See the removal branch above: only the DS at a delegation
 			// point is ours to sign.
 			if dak != nil && zd.signableLocked(ownerName, rrtype) {
-				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
+				_, err := zd.SignRRset(&rrset, ownerName, dak, true, clamp)
 				if err != nil {
 					lg.Error("ApplyChildUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 				}
@@ -1090,7 +1116,7 @@ func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (u
 		continue
 	}
 
-	zd.reconcileDelegationChangesLocked(childNsBefore, dak)
+	zd.reconcileDelegationChangesLocked(childNsBefore, dak, clamp)
 
 	lg.Debug("ApplyChildUpdateToZoneData done", "updated", updated)
 
@@ -1145,6 +1171,12 @@ func (zd *ZoneData) applyZoneUpdate(ur UpdateRequest, kdb *KeyDB, after func()) 
 		}
 	}
 
+	clamp, err := zd.updateClamp(kdb, dak)
+	if err != nil {
+		lg.Error("ApplyZoneUpdateToZoneData: failed to resolve the TTL clamp", "zone", zd.ZoneName, "error", err)
+		return false, false, err
+	}
+
 	// Refuse (or, on replay, drop) any attempt to write the apex ZONEMD of a
 	// zone that maintains its own. Done BEFORE the lock and before anything is
 	// staged, so the update is rejected whole rather than half-applied.
@@ -1165,7 +1197,7 @@ func (zd *ZoneData) applyZoneUpdate(ur UpdateRequest, kdb *KeyDB, after func()) 
 		return false, false, err
 	}
 	var persistErr error
-	updated, deferred, persistErr, err = zd.stageAndPublishLocked(ur, func() bool { return zd.stageZoneUpdateLocked(ur, dak) },
+	updated, deferred, persistErr, err = zd.stageAndPublishLocked(ur, func() bool { return zd.stageZoneUpdateLocked(ur, dak, clamp) },
 		zd.followsPublish(ur, after))
 	if persistErr != nil {
 		// Phase 2: the publish writes the delta durably BEFORE making the
@@ -1182,7 +1214,7 @@ func (zd *ZoneData) applyZoneUpdate(ur UpdateRequest, kdb *KeyDB, after func()) 
 // stageZoneUpdateLocked stages the actions of a zone update in the working
 // set, and reports whether it changed anything. The caller holds zd.mu, and
 // publishes what it staged (stageAndPublishLocked).
-func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (updated bool) {
+func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys, clamp *ClampParams) (updated bool) {
 	zd.ensureWorkingSet()
 
 	lg.Debug("ApplyZoneUpdateToZoneData: processing actions", "zone", zd.ZoneName, "count", len(ur.Actions))
@@ -1384,7 +1416,7 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (up
 			if len(rrset.RRs) == 0 {
 				zd.stageDeleteLocked(ownerName, rrtype)
 			} else if zd.signsHere() && zd.signableLocked(ownerName, rrtype) {
-				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
+				_, err := zd.SignRRset(&rrset, ownerName, dak, true, clamp)
 				if err != nil {
 					lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 					// Continue anyway - the record is still added, just not signed
@@ -1490,7 +1522,7 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (up
 			// An unsigned zone has nothing to sign with: asking SignRRset
 			// only logged an ERROR for every update to it.
 			if zd.signsHere() && zd.signableLocked(ownerName, rrtype) {
-				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
+				_, err := zd.SignRRset(&rrset, ownerName, dak, true, clamp)
 				if err != nil {
 					lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 					// Continue anyway - the record is still added, just not signed
@@ -1512,7 +1544,7 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys) (up
 		continue
 	}
 
-	zd.reconcileDelegationChangesLocked(nsBefore, dak)
+	zd.reconcileDelegationChangesLocked(nsBefore, dak, clamp)
 
 	lg.Debug("ApplyZoneUpdateToZoneData done", "updated", updated)
 
@@ -1723,7 +1755,7 @@ func unifyRRsetTTL(rrs []dns.RR, ttl uint32) bool {
 // zone is a SERVFAIL for anyone validating. The NSEC chain is already repaired
 // for both directions by restitchNsecLocked, which walks every name for exactly
 // this reason -- this is the signature half of the same reconciliation.
-func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, dak *DnssecKeys) {
+func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, dak *DnssecKeys, clamp *ClampParams) {
 	var flipped []string
 	for name, had := range nsBefore {
 		if had != zd.ownerIsDelegationLocked(name) {
@@ -1774,7 +1806,7 @@ func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, d
 				rrset.RRtype = rrt
 				// rrset's RRs are borrowed from the published snapshot;
 				// SignRRset's storage contract keeps them unwritten (#797).
-				if _, serr := zd.SignRRset(&rrset, name, dak, true, nil); serr != nil {
+				if _, serr := zd.SignRRset(&rrset, name, dak, true, clamp); serr != nil {
 					lg.Error("reconcileDelegationChangesLocked: signing a name the moved delegation uncovered failed",
 						"zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[rrt], "error", serr)
 					continue
