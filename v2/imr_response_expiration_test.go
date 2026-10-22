@@ -163,6 +163,8 @@ func TestLookupEntryIsThisLookups(t *testing.T) {
 	shortened := &cache.CachedRRset{RRset: rrA, Ttl: 30, Expiration: started.Add(30 * time.Second)}
 	denialNow := &cache.CachedRRset{RRset: soa, Ttl: 60, Expiration: started.Add(61 * time.Second)}
 	denialBefore := &cache.CachedRRset{RRset: soa, Ttl: 600, Expiration: started.Add(500 * time.Second)}
+	bareBefore := &cache.CachedRRset{Ttl: 600, Expiration: started.Add(500 * time.Second)}
+	bareNow := &cache.CachedRRset{Ttl: 60, Expiration: started.Add(61 * time.Second)}
 	for _, tc := range []struct {
 		name       string
 		entry, hit *cache.CachedRRset
@@ -178,6 +180,7 @@ func TestLookupEntryIsThisLookups(t *testing.T) {
 		{"a hit, stored again shorter", shortened, before, rrA, shortened},
 		{"a hit, replaced since", freshB, before, rrA, before},
 		{"a hit, gone since", nil, before, rrA, before},
+		{"a bare denial hit, replaced since", bareNow, bareBefore, nil, bareBefore},
 	} {
 		if got := lookupEntry(tc.entry, tc.hit, tc.answer, started); got != tc.want {
 			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
