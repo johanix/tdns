@@ -190,15 +190,17 @@ func (resp *ImrResponse) expiresWith(entry *cache.CachedRRset) {
 
 // lookupEntry is the cache entry a lookup's response carries the expiration
 // of, or nil when there is none to trust. hit is the entry the lookup read
-// (a cache hit), entry the one now under the question, started when the
-// lookup began. A hit is what was read: the entry under the question when it
-// is the same RRset stored again (validation can shorten its life), the hit
-// otherwise. Without a hit, the entry under the question counts only when it
-// was stored since the lookup began. One stored before was left there by
-// another lookup: a fresh denial that a CNAME gives is not cached under
-// <qname, qtype> (cnameDeniesType), and an older denial of the same kind may
-// still be.
-func lookupEntry(entry, hit *cache.CachedRRset, started time.Time) *cache.CachedRRset {
+// (a cache hit), entry the one now under the question, answer the RRset the
+// response carries (nil for a denial), started when the lookup began. A hit
+// is what was read: the entry under the question when it is the same RRset
+// stored again (validation can shorten its life), the hit otherwise. Without
+// a hit, the entry under the question counts only when it is this lookup's:
+// for an answer, the entry that holds its RRset; for a denial, one stored
+// since the lookup began. Another is another lookup's: a fresh lookup that
+// overlaps this one stores an answer of its own, and a fresh denial that a
+// CNAME gives is not cached under <qname, qtype> (cnameDeniesType), where an
+// older denial of the same kind may still be.
+func lookupEntry(entry, hit *cache.CachedRRset, answer *core.RRset, started time.Time) *cache.CachedRRset {
 	if hit != nil {
 		if entry != nil && entry.RRset == hit.RRset {
 			return entry
@@ -207,6 +209,12 @@ func lookupEntry(entry, hit *cache.CachedRRset, started time.Time) *cache.Cached
 	}
 	if entry == nil {
 		return nil
+	}
+	if answer != nil {
+		if entry.RRset != answer {
+			return nil
+		}
+		return entry
 	}
 	// Set keeps an entry's lifetime as Ttl seconds up to Expiration
 	if entry.Expiration.Add(-time.Duration(entry.Ttl) * time.Second).Before(started) {
@@ -835,7 +843,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 	started := cache.Now()
 	var hit *cache.CachedRRset
 	defer func() {
-		resp.expiresWith(lookupEntry(imr.Cache.Peek(qname, qtype), hit, started))
+		resp.expiresWith(lookupEntry(imr.Cache.Peek(qname, qtype), hit, resp.RRset, started))
 	}()
 
 	//	dump.P(imr)

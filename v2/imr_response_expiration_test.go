@@ -148,30 +148,38 @@ func TestImrResponseExpiresWith(t *testing.T) {
 }
 
 // The expiration comes from this lookup's entry only (CodeRabbit on #947): the
-// one a cache hit read, or one stored since the lookup began. An entry left
-// under the question from before, as an older denial is when a fresh denial
-// comes from a CNAME and is not cached there, gives none.
+// one a cache hit read; for a fresh answer, the entry that holds its RRset;
+// for a fresh denial, one stored since the lookup began. An entry another
+// lookup left under the question gives none: an older denial, when a fresh
+// denial comes from a CNAME and is not cached there, or the answer of a fresh
+// lookup that overlaps this one.
 func TestLookupEntryIsThisLookups(t *testing.T) {
 	started := time.Now()
 	rrA, rrB := &core.RRset{Name: "a."}, &core.RRset{Name: "b."}
-	fresh := &cache.CachedRRset{RRset: rrA, Ttl: 60, Expiration: started.Add(61 * time.Second)}
+	soa := &core.RRset{Name: "soa."}
+	freshA := &cache.CachedRRset{RRset: rrA, Ttl: 60, Expiration: started.Add(61 * time.Second)}
+	freshB := &cache.CachedRRset{RRset: rrB, Ttl: 60, Expiration: started.Add(61 * time.Second)}
 	before := &cache.CachedRRset{RRset: rrA, Ttl: 600, Expiration: started.Add(500 * time.Second)}
 	shortened := &cache.CachedRRset{RRset: rrA, Ttl: 30, Expiration: started.Add(30 * time.Second)}
-	other := &cache.CachedRRset{RRset: rrB, Ttl: 60, Expiration: started.Add(61 * time.Second)}
+	denialNow := &cache.CachedRRset{RRset: soa, Ttl: 60, Expiration: started.Add(61 * time.Second)}
+	denialBefore := &cache.CachedRRset{RRset: soa, Ttl: 600, Expiration: started.Add(500 * time.Second)}
 	for _, tc := range []struct {
 		name       string
 		entry, hit *cache.CachedRRset
+		answer     *core.RRset
 		want       *cache.CachedRRset
 	}{
-		{"stored by this lookup", fresh, nil, fresh},
-		{"stored before it, left there", before, nil, nil},
-		{"nothing", nil, nil, nil},
-		{"a hit", before, before, before},
-		{"a hit, stored again shorter", shortened, before, shortened},
-		{"a hit, replaced since", other, before, before},
-		{"a hit, gone since", nil, before, before},
+		{"a fresh answer, its entry", freshA, nil, rrA, freshA},
+		{"a fresh answer, another lookup's entry", freshB, nil, rrA, nil},
+		{"a fresh answer, no entry", nil, nil, rrA, nil},
+		{"a fresh denial, stored by this lookup", denialNow, nil, nil, denialNow},
+		{"a fresh denial, an entry from before", denialBefore, nil, nil, nil},
+		{"a hit", before, before, rrA, before},
+		{"a hit, stored again shorter", shortened, before, rrA, shortened},
+		{"a hit, replaced since", freshB, before, rrA, before},
+		{"a hit, gone since", nil, before, rrA, before},
 	} {
-		if got := lookupEntry(tc.entry, tc.hit, started); got != tc.want {
+		if got := lookupEntry(tc.entry, tc.hit, tc.answer, started); got != tc.want {
 			t.Errorf("%s: %+v, want %+v", tc.name, got, tc.want)
 		}
 	}
