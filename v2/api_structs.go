@@ -283,7 +283,7 @@ type CommandResponse struct {
 	Msg          string
 	ApiEndpoints []string
 	// Warnings are shown before the status: what the operator must not
-	// overlook, such as DNSSEC validation being off.
+	// overlook, such as DNSSEC validation not being enforced.
 	Warnings []string
 	Error    bool
 	ErrorMsg string

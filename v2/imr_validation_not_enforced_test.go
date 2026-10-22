@@ -5,7 +5,7 @@ package tdns
 
 import "testing"
 
-func TestDnssecValidationOff(t *testing.T) {
+func TestDnssecValidationNotEnforced(t *testing.T) {
 	yes, no := true, false
 	for _, tc := range []struct {
 		name    string
@@ -16,10 +16,10 @@ func TestDnssecValidationOff(t *testing.T) {
 	}{
 		{"default", nil, nil, nil, false},
 		{"required", nil, &yes, nil, false},
-		{"configured off", nil, &no, nil, true},
-		{"configured off, no resolver", &no, &no, nil, false},
+		{"configured not enforced", nil, &no, nil, true},
+		{"configured not enforced, no resolver", &no, &no, nil, false},
 		{"running, required", nil, &no, &Imr{RequireDnssecValidation: true}, false},
-		{"running, off", nil, nil, &Imr{RequireDnssecValidation: false}, true},
+		{"running, not enforced", nil, nil, &Imr{RequireDnssecValidation: false}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conf := &Config{}
@@ -30,13 +30,13 @@ func TestDnssecValidationOff(t *testing.T) {
 				conf.Internal.ImrEngine = tc.running
 				conf.Internal.ImrReady.Publish()
 			}
-			if got := conf.DnssecValidationOff(); got != tc.want {
-				t.Errorf("DnssecValidationOff() = %v, want %v", got, tc.want)
+			if got := conf.DnssecValidationNotEnforced(); got != tc.want {
+				t.Errorf("DnssecValidationNotEnforced() = %v, want %v", got, tc.want)
 			}
 		})
 	}
 	var none *Config
-	if none.DnssecValidationOff() {
-		t.Error("a nil config reports validation off")
+	if none.DnssecValidationNotEnforced() {
+		t.Error("a nil config reports validation not enforced")
 	}
 }

@@ -377,8 +377,8 @@ func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *ht
 			lgApi.Debug("daemon status inquiry")
 			resp.Status = "ok" // only status we know, so far
 			resp.Msg = fmt.Sprintf("%s: I'm happy, but send more cookies", Globals.App.Name)
-			if conf.DnssecValidationOff() {
-				resp.Warnings = append(resp.Warnings, DnssecValidationOffWarning)
+			if conf.DnssecValidationNotEnforced() {
+				resp.Warnings = append(resp.Warnings, DnssecValidationNotEnforcedWarning)
 			}
 
 		case "stop":
