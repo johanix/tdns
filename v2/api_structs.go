@@ -282,8 +282,11 @@ type CommandResponse struct {
 	Zones        map[string]ZoneConf
 	Msg          string
 	ApiEndpoints []string
-	Error        bool
-	ErrorMsg     string
+	// Warnings are shown before the status: what the operator must not
+	// overlook, such as DNSSEC validation not being enforced.
+	Warnings []string
+	Error    bool
+	ErrorMsg string
 }
 
 type ZonePost struct {
