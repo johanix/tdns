@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-22
 **Status:** accepted design, not implemented. Scoped against main at `51eb0988`.
-**Revision:** 4.
+**Revision:** 5.
 
 | Rev | Date | Change |
 |---|---|---|
@@ -10,6 +10,7 @@
 | 2 | 2026-10-22 | After review. The original type goes only to a server known to hold the name (§4). A probe name is looked up in the cache first (§4). The ancestor is the zone of the servers asked (§4). DNAME, a failed probe, the counter's scope and a per-request cap are settled (§4, §6). The walk moves out of the tuple loop in a commit of its own (§3). Config spelling and limits (§5). |
 | 3 | 2026-10-22 | Off by default, permanently; an operator opts in (§2). The five Deckard scenarios that ask for minimisation set the option themselves, apart from the default (§11). |
 | 4 | 2026-10-22 | The four `iter_minim_*` Deckard scenarios script Knot Resolver's `NS` probes and stay skipped with that reason. Scenarios of our own with `A` probes are optional (§11). |
+| 5 | 2026-10-22 | A probe that no server completes no longer fails the lookup: the original query goes to the current ancestor and its answer stands, as at the caps. A probe error still books no lameness. The forced downgrade and the timeout cost are stated (§2, §4, §7, §9). |
 
 RFC 9156 is the specification. It obsoletes RFC 7816. This design follows
 9156 and does not keep the 7816 behaviour (NS as the hiding type, one
@@ -52,14 +53,14 @@ the probes.
 
 | Question | Decision |
 |---|---|
-| Default | Off, permanently. An operator opts in with `qname-minimisation` in `imrengine.options`. There is no plan to turn it on by default. Most users of this resolver gain little from it and pay in queries and in failed lookups (§9): applications that embed it to look up their own peers, and test setups that need a predictable query stream. Existing test doubles match the full name and the original type, and the 95 Deckard scenarios that pin `query-minimization: off` need no template change. |
+| Default | Off, permanently. An operator opts in with `qname-minimisation` in `imrengine.options`. There is no plan to turn it on by default. Most users of this resolver gain little from it and pay in extra queries and delay (§9): applications that embed it to look up their own peers, and test setups that need a predictable query stream. Existing test doubles match the full name and the original type, and the 95 Deckard scenarios that pin `query-minimization: off` need no template change. |
 | Hiding QTYPE | `A`, fixed. RFC 9156 allows any type whose authority lies below the zone cut, as long as it has no relation to the client's type. `A` and `AAAA` are the types it names as least likely to raise issues. Not a setting. |
 | Original QTYPE | Sent only to a server known to hold the name: the ancestor is the name itself (for `DS`, its parent). Before that the full name goes out as `A` (RFC 9156 §3 step 3). This costs one extra query, on a cold lookup of a type other than `A` at a name that is not a zone cut. It costs nothing when the name is a cut. |
 | Query cap | `tuning.qmin-max-iterations` default 10 (`MAX_MINIMISE_COUNT`). `tuning.qmin-one-label` default 4 (`MINIMISE_ONE_LAB`). Per walk: one name and type being resolved, across its referrals (§6). A second cap counts the probes of one client request (§6). |
 | Probe cache | A cached answer, NODATA or NXDOMAIN for the probe name and type `A` skips that probe (RFC 9156 §3 step 5). A cached referral, glue or hint entry does not. |
 | Underscore labels | Collapsed. A run of labels that start with `_` counts as one label in the plan (§4), so it goes out in one query once the name above it is exposed (`_25._tcp.mail.example.org`). |
 | NXDOMAIN below a probe | Continue the walk. tdns does not implement RFC 8020, and RFC 9156 says a resolver without 8020 does not stop the original query on a probe NXDOMAIN. |
-| Full-name retry | None. Some deployed resolvers resend the original QNAME after NXDOMAIN or a strange RCODE. That sends the name this feature exists to hide, and RFC 9156 does not ask for it. A probe that every server fails fails the lookup (§4). |
+| Full-name retry | None after NXDOMAIN. Some deployed resolvers resend the original QNAME after a probe NXDOMAIN. That sends the name this feature exists to hide, RFC 9156 does not ask for it, and the walk can step past an NXDOMAIN (§4). A probe that no server completes is different: the walk has nothing to continue from. The original query goes to the current ancestor and its answer stands (§4), as when a cap stops the probing (§4, §6). |
 | Forward zones | Excluded. The upstream resolver sees the full query on the final hop anyway (RFC 9156 §2.4). Minimising toward it only multiplies queries. |
 | Own zones | Excluded. Answered in process, as today (`answerFromOwnZone`). |
 | Stub zones | Included. A stub still iterates below its cut (RD=0, referrals followed). The stub's servers are the ancestor; the first probe is one label below the stub zone. |
@@ -157,12 +158,12 @@ While ANCESTOR is not TARGET:
 | CNAME owned by CHILD | Cache the link, validated. Do not chase it (`answerViaCNAME` would). Keep building the original name. |
 | DNAME above CHILD | Cache the DNAME, validated. Synthesise the target from the **original** name, not from CHILD (RFC 9156 §3 step 6b, RFC 6672 §2.2). Cache that link for the original name (`SynthesizedFrom` the DNAME) and chase it as `answerViaCNAME` does. New code: today's DNAME handling (`cacheCNAMELink`) synthesises only for the name that was asked. |
 | NXDOMAIN | Cache it for CHILD and type `A`. Continue the walk. Do not fail the client's query. |
-| Timeout, another RCODE, or a referral that does not lead below ANCESTOR | Try the next server of ANCESTOR, as the walk does today. A probe's error does not book lameness; the original query to the same servers still does. When every server has failed, the lookup fails as an unanswered lookup does today. No full-name retry (§2). |
+| Timeout, another RCODE, or a referral that does not lead below ANCESTOR | Try the next server of ANCESTOR, as the walk does today. A probe's error does not book lameness; the original query to the same servers still does. When no server has completed the probe, the probing ends: the original query goes to ANCESTOR's servers and its answer stands, as when a cap is reached (§2, §9). |
 
 After an answer, a NODATA, a CNAME or an NXDOMAIN, from the wire or the
 cache: if CHILD is TARGET, the probing ends here; otherwise go to step 1.
-After a referral, go to step 1 from the new ancestor. A DNAME and a failed
-probe end the walk, as their rows say.
+After a referral, go to step 1 from the new ancestor. A DNAME ends the
+walk, and a probe no server completes ends the probing, as their rows say.
 
 A referral is not followed under the probe name. Batching can put several
 labels on one probe. Following that name into the child would show the
@@ -296,8 +297,10 @@ Walk, option on:
 - A wildcard answer to a probe is not the client's answer.
 - NXDOMAIN for an intermediate probe does not fail the client query.
   NXDOMAIN for the final name does.
-- Every server fails a probe. The lookup fails, no full-name query is
-  sent, and no lameness is booked for the probe.
+- No server completes a probe (SERVFAIL from one, REFUSED from another,
+  a timeout from a third). The original query goes to the same servers,
+  and its answer is the client's. No lameness is booked for the probe; a
+  failure of the original query books it as today.
 - `DS` is sent only to the parent.
 - A 100-label name under a wildcard stops at 10 rounds and then sends the
   original name.
@@ -359,11 +362,24 @@ succeed. The NXDOMAIN is cached for that name and type `A`, and a later
 query for exactly that name and type will hit it. Accepted. The full-name
 retry that would paper over it is declined in §2.
 
-**Failed probes.** A zone whose servers all fail a type-`A` query at a
-name above the client's name now fails the client's lookup, where today
-it succeeds. RFC 9156 §5 cites up to 5% more failed lookups with
-minimisation. There is no fallback, by §2. An operator who opts in accepts
-that. It is one reason the default stays off (§2).
+**A probe no server completes.** The original query goes to ANCESTOR's
+servers, which are not known to hold the name, so the remaining labels and
+the type are exposed there. That is what keeps the lookup working: a
+server can fail an intermediate `A` and still answer the client's query,
+and that is where most of the extra failures RFC 9156 §5 cites (up to 5%)
+come from. Two costs come with it:
+
+- An attacker on the path can force the fallback by dropping the probes
+  or answering them with SERVFAIL, and then sees the full query.
+  Minimisation was never a defence against an observer on the path;
+  encryption is (RFC 9156 §6).
+- When every server timed out, the original query will most likely time
+  out too, so a lookup that fails anyway spends a second round of
+  timeouts first. `tuning.query-budget` bounds it. Timeouts stay in the
+  rule because some broken middleboxes drop a query rather than answer it.
+
+What remains of the extra failures is a zone whose servers fail both the
+probe and the original query.
 
 **The 8s budget.** Ten probe rounds plus a final query is the added
 upstream work per name, and the per-request cap bounds the sum. Validating
