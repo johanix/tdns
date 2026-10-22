@@ -939,3 +939,86 @@ func TestQminForwardAndOwnZoneSendTheFullName(t *testing.T) {
 	}
 	requireUpstreamNotAsked(t, rig.upLog, ownParent)
 }
+
+// A glueless referral carries the NS name and no address. The probe must not
+// mark that delegation seen for the original question, and it must not ask
+// every parent server for the same referral.
+func TestQminGluelessReferralDoesNotLoop(t *testing.T) {
+	const (
+		qname = "www.example.com."
+		com1  = "127.0.0.2"
+		com2  = "127.0.0.3"
+		netNS = "127.0.0.4"
+		child = "127.0.0.5"
+		ns    = "ns.example.net."
+	)
+	g := newQminRig(t)
+	parent := func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Ns = []dns.RR{mustRR(t, "example.com. 300 IN NS "+ns)}
+		_ = w.WriteMsg(m)
+	}
+	p1 := g.listen(t, net.ParseIP(com1), parent)
+	p2 := g.listen(t, net.ParseIP(com2), parent)
+	g.listen(t, net.ParseIP(netNS), func(w dns.ResponseWriter, r *dns.Msg) {
+		q := r.Question[0]
+		if q.Qtype == dns.TypeA && dns.CanonicalName(q.Name) == ns {
+			_ = w.WriteMsg(answerA(t, r, ns, child))
+			return
+		}
+		_ = w.WriteMsg(nodata(t, r, "example.net."))
+	})
+	childLog := g.listen(t, net.ParseIP(child), func(w dns.ResponseWriter, r *dns.Msg) {
+		_ = w.WriteMsg(answerA(t, r, qname, "192.0.2.80"))
+	})
+	g.ready(t)
+	g.stub(t, "com.", []cache.AuthServer{
+		{Name: "a.ns.com.", Addrs: []string{com1}, Alpn: []string{"do53"}},
+		{Name: "b.ns.com.", Addrs: []string{com2}, Alpn: []string{"do53"}},
+	})
+	g.stub(t, "example.net.", []cache.AuthServer{
+		{Name: "ns.net.", Addrs: []string{netNS}, Alpn: []string{"do53"}},
+	})
+
+	rrset, _, _, err := g.query(t, qname, dns.TypeA)
+	if err != nil {
+		t.Fatalf("first lookup: %v", err)
+	}
+	var probes, originals int
+	for _, q := range append(p1.list(), p2.list()...) {
+		switch q {
+		case "example.com. A":
+			probes++
+		case qname + " A":
+			originals++
+		}
+	}
+	if probes != 1 || originals != 1 {
+		t.Fatalf("parents saw probe %d times and the original query %d times, want 1 and 1: %v | %v",
+			probes, originals, p1.list(), p2.list())
+	}
+	if rrset == nil {
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			zone, servers, _ := g.imr.Cache.FindClosestKnownZone(qname)
+			if core.EqualNames(zone, "example.com.") && len(servers) > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("example.com never got a server (closest %s)", zone)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		rrset, _, _, err = g.query(t, qname, dns.TypeA)
+		if err != nil {
+			t.Fatalf("retry: %v", err)
+		}
+	}
+	if rrset == nil || len(rrset.RRs) != 1 || rrset.RRs[0].Header().Rrtype != dns.TypeA || rrset.RRs[0].(*dns.A).A.String() != "192.0.2.80" {
+		t.Fatalf("client answer: %v", rrset)
+	}
+	if got := childLog.list(); len(got) != 1 || got[0] != qname+" A" {
+		t.Errorf("child saw %v, want [%s A]", got, qname)
+	}
+}

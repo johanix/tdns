@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 
@@ -408,9 +409,22 @@ func (imr *Imr) dispatchProbe(ctx context.Context, qname string, qtype uint16, c
 
 func (imr *Imr) adoptReferral(ctx context.Context, qname string, r *dns.Msg, force bool, visitedZones map[string]bool, serversZone string, wire core.Transport, privacy edns0.PrivacyLevel, step *probeResult) serverReply {
 	var adopt referralAdopt
-	_, _, _, _, err := imr.handleReferral(ctx, qname, dns.TypeA, r, force, visitedZones, serversZone, wire, privacy, &adopt)
-	if err != nil || adopt.zone == "" || len(adopt.servers) == 0 || !referralLeavesZone(adopt.zone, serversZone) {
+	// The probe must not mark the original question's referral as already
+	// seen. The original query meets the same cut, and for a glueless
+	// delegation that is how the child's addresses get looked up.
+	probeVisited := maps.Clone(visitedZones)
+	if probeVisited == nil {
+		probeVisited = map[string]bool{}
+	}
+	_, _, _, _, err := imr.handleReferral(ctx, qname, dns.TypeA, r, force, probeVisited, serversZone, wire, privacy, &adopt)
+	if err != nil || adopt.zone == "" || !referralLeavesZone(adopt.zone, serversZone) {
 		return replyNext()
+	}
+	if len(adopt.servers) == 0 {
+		// No addresses yet. Every server of this parent returns the same
+		// referral, so the probe stops and the original query follows it.
+		step.kind = probeFailed
+		return replyDone(nil, dns.RcodeSuccess, cache.ContextReferral, wire, nil)
 	}
 	step.kind = probeReferred
 	step.zone = adopt.zone
