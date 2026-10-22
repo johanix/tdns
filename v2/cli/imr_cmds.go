@@ -76,22 +76,33 @@ var ImrQueryCmd = &cobra.Command{
 		}
 
 		resp := make(chan tdns.ImrResponse, 1)
+		// Asked as a DNS client asks, as "tdns-cli imr query" over the API is:
+		// a DS or DNSKEY question at a CNAME owner follows the CNAME.
 		Conf.Internal.RecursorCh <- tdns.ImrRequest{
 			Qname:      qname,
 			Qclass:     dns.ClassINET,
 			Qtype:      qtype,
 			ResponseCh: resp,
+			AsClient:   true,
 		}
 
 		select {
 		case r := <-resp:
-			// Check cache entry to determine if this is a negative response
+			// Check cache entry to determine if this is a negative response.
+			// A question that followed a CNAME has nothing cached under
+			// <qname, qtype>; the response then says what it is.
 			var cached *cache.CachedRRset
 			if Conf.Internal.RRsetCache != nil {
 				cached = Conf.Internal.RRsetCache.Get(qname, qtype)
 			}
+			respState := r.ValidationState
+			if respState == 0 {
+				respState = cache.ValidationStateNone
+			}
 
-			if cached != nil && (cached.Context == cache.ContextNXDOMAIN || cached.Context == cache.ContextNoErrNoAns) {
+			if cached == nil && r.RRset == nil && (r.Denial == cache.ContextNXDOMAIN || r.Denial == cache.ContextNoErrNoAns) {
+				fmt.Printf("%s %s (state: %s)\n", qname, cache.CacheContextToString[r.Denial], cache.ValidationStateToString[respState])
+			} else if cached != nil && (cached.Context == cache.ContextNXDOMAIN || cached.Context == cache.ContextNoErrNoAns) {
 				// This is a negative response
 				vstate := cached.State
 				stateStr := cache.ValidationStateToString[vstate]
@@ -130,7 +141,7 @@ var ImrQueryCmd = &cobra.Command{
 				}
 			} else if r.RRset != nil {
 				// Positive response
-				vstate := cache.ValidationStateNone
+				vstate := respState
 				if cached != nil {
 					vstate = cached.State
 				}
