@@ -161,11 +161,15 @@ func (zd *ZoneData) verifyPublishedKeyRRs(name string) (bool, error) {
 // error to retry or to log as such.
 var errBootstrapManual = errors.New("manual SIG(0) bootstrap required by the parent")
 
+// errBootstrapNoActiveKey: a path that may only re-upload an existing SIG(0)
+// key (BADKEY recovery, #944) found none. It must not generate one.
+var errBootstrapNoActiveKey = errors.New("no active SIG(0) key to bootstrap")
+
 func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (string, UpdateResult, error) {
-	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods())
+	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods(), true)
 }
 
-func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, willing []string) (string, UpdateResult, error) {
+func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, willing []string, allowGenerate bool) (string, UpdateResult, error) {
 	if err := zd.resolveParentZone(); err != nil {
 		return "", UpdateResult{}, fmt.Errorf("BootstrapSig0KeyWithParent(%q): %w", zd.ZoneName, err)
 	}
@@ -175,16 +179,12 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to get SIG(0) active keys: %v", zd.ZoneName, err), UpdateResult{}, err
 	}
 	if len(sak.Keys) == 0 {
-		// XXX: Should we generate new keys or return an error?
-		//		log.Printf("No active SIG(0) key found for zone %s. Generating new key with algorithm %s", zd.ZoneName, dns.AlgorithmToString[alg])
-		//		pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "bootstrap-sig0", "created", dns.TypeKEY, alg, "", nil) // nil = no tx
-		//		if err != nil {
-		//			msg := fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to generate keypair: %v", zd.ZoneName, err)
-		//			log.Printf(msg)
-		//			return msg, err
-		//		}
-		//		sak.Keys = append(sak.Keys, pkc)
-		//		zd.Logger.Printf(msg)
+		if !allowGenerate {
+			// Explicit: BADKEY re-bootstrap and other upload-only callers must
+			// not invent a key. Do not rely on algorithm 0 being rejected.
+			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): no active SIG(0) key to upload", zd.ZoneName),
+				UpdateResult{}, fmt.Errorf("%w for zone %q", errBootstrapNoActiveKey, zd.ZoneName)
+		}
 
 		kp := KeystorePost{
 			Command:     "sig0-mgmt",
