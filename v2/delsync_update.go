@@ -152,7 +152,7 @@ func (zd *ZoneData) bootstrapSig0Key(ctx context.Context, alg uint8, apex apexKE
 	if err := apex.EnsureApexKEY(); err != nil {
 		return "", UpdateResult{}, err
 	}
-	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods())
+	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods(), true)
 }
 
 // resolveParentZone fills the zone's parent when unset or still the old "."
