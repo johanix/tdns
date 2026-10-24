@@ -481,8 +481,8 @@ func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (di
 // SIG(0) write path drops the affected entries — without this a bulk import on
 // a RUNNING daemon would leave it signing UPDATEs with the superseded key until
 // the next restart. (Pre-load runs before anything populates the cache, so this
-// matters only on the live API path.) The plain map delete matches what the
-// other write paths do; the cache has never been mutex-guarded.
+// matters only on the live API path.) Invalidation goes through
+// invalidateSig0Cache, which holds sig0CacheMu.
 func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispositions []BulkKeyDisposition, err error) {
 	// Whether WE own the transaction decides who invalidates the SIG(0) cache.
 	// If we do, we can only safely do it after our own commit (below). If the
@@ -576,11 +576,14 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispos
 }
 
 // invalidateSig0Cache drops every cached state entry for one zone, mirroring
-// what Sig0KeyMgmt does after add/generate/delete/setstate.
+// what Sig0KeyMgmt schedules after add/generate/delete/setstate (applied after
+// the owning transaction commits). Safe for concurrent GetSig0Keys.
 func (kdb *KeyDB) invalidateSig0Cache(zone string) {
 	if kdb.KeystoreSig0Cache == nil {
 		return
 	}
+	kdb.sig0CacheMu.Lock()
+	defer kdb.sig0CacheMu.Unlock()
 	for _, state := range []string{Sig0StateCreated, Sig0StatePublished, Sig0StateActive, Sig0StateRetired} {
 		delete(kdb.KeystoreSig0Cache, zone+"+"+state)
 	}

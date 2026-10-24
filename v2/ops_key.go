@@ -287,11 +287,17 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 		if err != nil {
 			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to begin transaction: %v", zd.ZoneName, err), UpdateResult{}, err
 		}
+		var sig0InvalidateZones []string
 		defer func() {
 			if err != nil {
 				tx.Rollback()
-			} else {
-				tx.Commit()
+				return
+			}
+			if cerr := tx.Commit(); cerr != nil {
+				return
+			}
+			for _, zone := range sig0InvalidateZones {
+				zd.KeyDB.invalidateSig0Cache(zone)
 			}
 		}()
 
@@ -315,6 +321,7 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to change state of key %d to active: %v",
 				zd.ZoneName, pkc.KeyRR.KeyTag(), resp.ErrorMsg), UpdateResult{}, fmt.Errorf("%s", resp.ErrorMsg)
 		}
+		sig0InvalidateZones = resp.BulkSig0InvalidateZones
 		zd.Logger.Printf("%s", resp.Msg)
 	}
 
@@ -574,8 +581,8 @@ func (zd *ZoneData) activateRolledSig0Key(newkey, oldkey *PrivateKeyCache) error
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit the key state changes: %v", err)
 	}
-	// setstate cleared the cache before the commit, so a read in between can
-	// have put the old active key back.
+	// setstate only schedules the drop (BulkSig0InvalidateZones); apply it
+	// after OUR commit so a read-through cannot repopulate from pre-commit rows.
 	zd.KeyDB.invalidateSig0Cache(newkey.KeyRR.Header().Name)
 	return nil
 }
