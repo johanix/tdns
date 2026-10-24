@@ -1435,8 +1435,15 @@ type KeyDB struct {
 	DB     *sql.DB
 	DBFile string // sqlite file path, recorded by NewKeyDB
 	mu     sync.Mutex
+	// txCond wakes Begin waiters when Commit/Rollback clears Ctx. Initialized
+	// in NewKeyDB; L is &mu.
+	txCond *sync.Cond
 	// Sig0Cache   map[string]*Sig0KeyCache
-	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
+	KeystoreSig0Cache map[string]*Sig0ActiveKeys
+	// sig0CacheMu guards every read/write/delete of KeystoreSig0Cache. The cache
+	// is filled by GetSig0Keys and dropped by invalidateSig0Cache (and the
+	// Sig0KeyMgmt / bulk / API post-commit paths that call it).
+	sig0CacheMu         sync.RWMutex
 	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT
 	Ctx                 string
 	UpdateQ             chan UpdateRequest

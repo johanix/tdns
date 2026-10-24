@@ -60,8 +60,13 @@ func truststoreTestKEY(t *testing.T, owner string) *dns.KEY {
 
 // A Begin failure used to fall through to tx.Commit() on a nil tx and panic.
 // The RFC 2136 waiter would then sit out UpdateApplyTimeout. Fail closed.
+// Begin now waits (then times out) when Ctx is held; shorten the wait so the
+// failure still arrives inside the test's reply deadline (#927).
 func TestTruststoreUpdateBeginFailureAnswersAndDoesNotPanic(t *testing.T) {
 	zd, kdb := updaterTestZone(t, Primary, map[ZoneOption]bool{})
+	prev := keystoreBeginWait
+	keystoreBeginWait = 20 * time.Millisecond
+	t.Cleanup(func() { keystoreBeginWait = prev })
 	kdb.Ctx = "already-busy"
 
 	res := runTruststoreUpdate(t, kdb, UpdateRequest{

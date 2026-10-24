@@ -105,14 +105,14 @@ type KeystoreResponse struct {
 	// Like NeedsSigningKeysRepublish it is an instruction to the external-tx
 	// caller, not wire data — but plural, because one bulk import spans zones.
 	BulkRepublishZones []string `json:"-"`
-	// BulkSig0InvalidateZones names the zones a SIG(0) bulk import actually
-	// changed, for the external-tx caller to drop from KeystoreSig0Cache after
-	// ITS commit. Same shape and same reason as BulkRepublishZones: the
-	// invalidation cannot happen where the rows are written, because the commit
-	// that makes them visible has not happened yet, and invalidating early
-	// leaves a window for a read-through GetSig0Keys to repopulate the cache
-	// from pre-commit state — pinning the superseded key until restart, which is
-	// the exact failure the invalidation exists to prevent.
+	// BulkSig0InvalidateZones names the zones whose SIG(0) cache entries must
+	// be dropped after the external-tx caller's commit (bulk-import, and also
+	// add/generate/setstate/delete). Same shape and same reason as
+	// BulkRepublishZones: the invalidation cannot happen where the rows are
+	// written, because the commit that makes them visible has not happened yet,
+	// and invalidating early leaves a window for a read-through GetSig0Keys to
+	// repopulate the cache from pre-commit state — pinning a stale key until
+	// restart, which is the exact failure the invalidation exists to prevent.
 	BulkSig0InvalidateZones []string                   `json:"-"`
 	Algorithms              []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
 	// KeyViolations is what "keystore dnssec check" found (CheckKeyInvariants).
