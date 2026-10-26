@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/johanix/tdns/v2/edns0"
@@ -158,11 +159,13 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 					// parent's manual bootstrap.
 					return true, fmt.Errorf("delegation UPDATE got BADKEY and the parent requires manual SIG(0) bootstrap; complete it and retry: %w", berr)
 				}
-				if errors.Is(berr, errBootstrapAdvertisementLookup) || errors.Is(berr, errBootstrapDeferredToPoll) {
+				if errors.Is(berr, errBootstrapAdvertisementLookup) || errors.Is(berr, errBootstrapDeferredToPoll) ||
+					errors.Is(berr, errBootstrapKeyNotServed) {
 					// The re-bootstrap never ran: advertisement lookup failed,
-					// or a key-state poll for this key is already owning the
-					// bootstrap. Leave the one re-bootstrap unspent and let
-					// the next attempt try again, within the same bound.
+					// a key-state poll for this key is about to send it, or
+					// the zone's nameservers do not all serve it yet. Leave
+					// the one re-bootstrap unspent and let the next attempt
+					// try again, within the same bound.
 					lgDns.Warn("sendUpdateWithRetry: re-bootstrap deferred", "attempt", attempt, "err", berr)
 					return false, fmt.Errorf("re-bootstrap after BADKEY deferred: %w", berr)
 				}
@@ -200,23 +203,50 @@ func (zd *ZoneData) sendUpdateAttempts(ctx context.Context, msg *dns.Msg, parent
 		})
 }
 
-// errBootstrapDeferredToPoll: a BADKEY re-bootstrap found a key-state poll
-// already running for this key. That poll owns the wait-for-served and the
-// bootstrap (#917); this path must not race it.
+// errBootstrapDeferredToPoll: a BADKEY re-bootstrap found a key-state poll for
+// this key that has not sent its bootstrap yet. That poll waits for the key to
+// be served and then sends it (#917); this path must not race it.
 var errBootstrapDeferredToPoll = errors.New("SIG(0) key poll already running; leaving bootstrap to it")
 
+// errBootstrapKeyNotServed: a BADKEY re-bootstrap found the key not yet served
+// by all of the zone's nameservers. The UPDATE's retry backoff is the wait:
+// waiting here would hold the delegation-sync loop, the only reader of its
+// queue, for as long as the poll's wait (keyServedWait.limit).
+var errBootstrapKeyNotServed = errors.New("SIG(0) key not yet served by all of the zone's nameservers")
+
+// badkeyNotServedSince holds, per key, when a BADKEY re-bootstrap first found
+// it not served. Once keyServedWait.limit has passed the re-bootstrap uploads
+// all the same, as the poll does: a nameserver that never takes the key
+// delays the bootstrap and does not stop it. Keyed like childKeyStatePolls.
+var badkeyNotServedSince sync.Map
+
+// sig0KeyLook is the look at the zone's nameservers for key keyid
+// (sig0KeyServed); nil when there is nothing to look with.
+type sig0KeyLook func(zone string, keyid uint16) func(context.Context) (keyServedState, string)
+
 // reBootstrapSig0KeyAfterBADKEY re-uploads the zone's existing active SIG(0)
-// key after a BADKEY (#944). It never generates a key. It waits until the
-// zone's nameservers serve the key (same wait as the key poll, #917) before
-// uploading. When a key-state poll for this key is already running, it leaves
-// the bootstrap to that poll.
+// key after a BADKEY (#944). It never generates a key. It uploads only once
+// the zone's nameservers serve the key (#917), and leaves the upload to a
+// key-state poll that is about to send it.
 func (zd *ZoneData) reBootstrapSig0KeyAfterBADKEY(ctx context.Context) error {
-	return zd.reBootstrapSig0KeyAfterBADKEYWith(ctx, Globals.ImrEngine, waitOrDone, keyServedWait)
+	return zd.reBootstrapSig0KeyAfterBADKEYWith(ctx,
+		func(zone string, keyid uint16) func(context.Context) (keyServedState, string) {
+			return sig0KeyServed(zd.KeyDB, Globals.ImrEngine, zone, keyid)
+		},
+		func(ctx context.Context) error {
+			// allowGenerate=false: never invent a key on BADKEY. Bootstrap never
+			// calls SendUpdateWithRetry, so this cannot recurse.
+			_, _, berr := zd.bootstrapSig0KeyWithParent(ctx, 0, zd.zoneChildBootstrapMethods(), false)
+			return berr
+		})
 }
 
-// reBootstrapSig0KeyAfterBADKEYWith is the injectable form used by tests.
-func (zd *ZoneData) reBootstrapSig0KeyAfterBADKEYWith(ctx context.Context, imr *Imr,
-	wait func(context.Context, time.Duration) bool, pace keyServedPace) error {
+// reBootstrapSig0KeyAfterBADKEYWith is reBootstrapSig0KeyAfterBADKEY with the
+// look at the zone's nameservers and the upload given, so a test can play
+// both. It looks once: a key not served yet is errBootstrapKeyNotServed, and
+// the next UPDATE attempt looks again.
+func (zd *ZoneData) reBootstrapSig0KeyAfterBADKEYWith(ctx context.Context, served sig0KeyLook,
+	upload func(context.Context) error) error {
 	if zd == nil || zd.KeyDB == nil {
 		return fmt.Errorf("%w: no keystore", errBootstrapNoActiveKey)
 	}
@@ -229,31 +259,30 @@ func (zd *ZoneData) reBootstrapSig0KeyAfterBADKEYWith(ctx context.Context, imr *
 	}
 	keyid := sak.Keys[0].KeyRR.KeyTag()
 	id := childKeyVerificationID(zd.ZoneName, keyid)
-	if _, running := childKeyStatePolls.Load(id); running {
-		return fmt.Errorf("%w for %s key %d", errBootstrapDeferredToPoll, zd.ZoneName, keyid)
+	if v, running := childKeyStatePolls.Load(id); running {
+		if st, ok := v.(*childKeyPoll); !ok || !st.bootstrapped.Load() {
+			return fmt.Errorf("%w for %s key %d", errBootstrapDeferredToPoll, zd.ZoneName, keyid)
+		}
+		// That poll has sent the key and only polls now: a parent that does
+		// not know the key, which is what BADKEY says, is polled again by it,
+		// not sent the key again. So the upload is ours.
 	}
-	look := sig0KeyServed(zd.KeyDB, imr, zd.ZoneName, keyid)
-	return waitThenBootstrapSig0(ctx, ZoneName(zd.ZoneName), keyid, look, wait, pace, func(ctx context.Context) error {
-		// allowGenerate=false: never invent a key on BADKEY. Bootstrap never
-		// calls SendUpdateWithRetry, so this cannot recurse.
-		_, _, berr := zd.bootstrapSig0KeyWithParent(ctx, 0, zd.zoneChildBootstrapMethods(), false)
-		return berr
-	})
-}
-
-// waitThenBootstrapSig0 holds until look finds the key served (or unknown /
-// the pace limit), then calls bootstrap. Same pattern as the key poll's
-// keyIsServed before bootstrap (#917). look nil means no wait. Returns false
-// from wait (ctx done) as an error; otherwise bootstrap's error.
-func waitThenBootstrapSig0(ctx context.Context, zone ZoneName, keyid uint16,
-	look func(context.Context) (keyServedState, string),
-	wait func(context.Context, time.Duration) bool,
-	pace keyServedPace,
-	bootstrap func(context.Context) error) error {
-	if look != nil {
-		if !waitUntilKeyServed(ctx, zone, keyid, look, wait, pace) {
-			return fmt.Errorf("shut down while waiting for the key to be served: %w", ctx.Err())
+	if look := served(zd.ZoneName, keyid); look != nil {
+		state, why := look(ctx)
+		if ctx.Err() != nil {
+			return fmt.Errorf("shut down while looking at what the zone's nameservers serve: %w", ctx.Err())
+		}
+		if state == keyNotServedYet {
+			now := time.Now()
+			first, _ := badkeyNotServedSince.LoadOrStore(id, now)
+			waited := now.Sub(first.(time.Time))
+			if waited < keyServedWait.limit {
+				return fmt.Errorf("%w: %s key %d: %s", errBootstrapKeyNotServed, zd.ZoneName, keyid, why)
+			}
+			lgDns.Warn("BADKEY re-bootstrap: the zone's nameservers still do not all serve our key; uploading all the same",
+				"zone", zd.ZoneName, "keyid", keyid, "waited", waited, "detail", why)
 		}
 	}
-	return bootstrap(ctx)
+	badkeyNotServedSince.Delete(id)
+	return upload(ctx)
 }
