@@ -160,7 +160,8 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			return nil, err
 		}
 		// After commit only — see sig0InvalidateZones / BulkSig0InvalidateZones.
-		sig0InvalidateZones = appendSig0InvalidateZone(sig0InvalidateZones, kp.Keyname)
+		// The row's owner, not kp.Keyname: the CLI's add does not set Keyname.
+		sig0InvalidateZones = appendSig0InvalidateZone(sig0InvalidateZones, pkc.KeyRR.Header().Name)
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
 
 	case "bulk-export":

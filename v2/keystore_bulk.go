@@ -579,12 +579,12 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispos
 // what Sig0KeyMgmt schedules after add/generate/delete/setstate (applied after
 // the owning transaction commits). Safe for concurrent GetSig0Keys.
 func (kdb *KeyDB) invalidateSig0Cache(zone string) {
-	if kdb.KeystoreSig0Cache == nil {
-		return
-	}
 	kdb.sig0CacheMu.Lock()
 	defer kdb.sig0CacheMu.Unlock()
 	kdb.sig0CacheGen++
+	if kdb.KeystoreSig0Cache == nil {
+		return
+	}
 	for _, state := range []string{Sig0StateCreated, Sig0StatePublished, Sig0StateActive, Sig0StateRetired} {
 		delete(kdb.KeystoreSig0Cache, zone+"+"+state)
 	}

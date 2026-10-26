@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // TestKeyDBBeginWaitsForPriorCommit: a second Begin must wait for the first
@@ -174,6 +176,38 @@ func TestSig0KeyMgmtOwnTxInvalidatesAfterCommit(t *testing.T) {
 			}
 			assertNoActiveSig0Key(t, kdb, zone)
 		})
+	}
+}
+
+// The CLI's add sends Zone and the key, not Keyname. The entry dropped is the
+// stored row's owner's.
+func TestSig0KeyMgmtAddInvalidatesTheKeysOwner(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	const zone = "add.example."
+	generateSig0Key(t, kdb, zone, Sig0StateCreated)
+	cacheKey := zone + "+" + Sig0StateCreated
+	cached := func() bool {
+		kdb.sig0CacheMu.RLock()
+		defer kdb.sig0CacheMu.RUnlock()
+		_, ok := kdb.KeystoreSig0Cache[cacheKey]
+		return ok
+	}
+	if _, err := kdb.GetSig0Keys(zone, Sig0StateCreated); err != nil || !cached() {
+		t.Fatalf("priming the cache: err=%v cached=%v", err, cached())
+	}
+
+	pkc, err := GenerateKeyMaterial(zone, dns.TypeKEY, dns.ED25519, "")
+	if err != nil {
+		t.Fatalf("GenerateKeyMaterial: %v", err)
+	}
+	if _, err := kdb.Sig0KeyMgmt(nil, KeystorePost{
+		Command: "sig0-mgmt", SubCommand: "add",
+		Zone: zone, PrivateKeyCache: pkc, State: Sig0StateCreated,
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if cached() {
+		t.Fatal("add left the cached created keys of the key's owner in place")
 	}
 }
 
