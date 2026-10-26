@@ -1094,7 +1094,7 @@ func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys, cl
 		// One TTL per RRset (RFC 2181 §5.2): the child-policy TTL the new RR
 		// was given applies to the whole RRset. Also on a duplicate add, since
 		// dns.IsDuplicate ignores the TTL. #767
-		if unifyRRsetTTL(rrset.RRs, rrcopy.Header().Ttl) {
+		if setRRsetTTL(&rrset, rrcopy.Header().Ttl) {
 			lg.Debug("ApplyChildUpdateToZoneData: normalised RRset TTL", "owner", ownerName,
 				"rrtype", rrtypestr, "ttl", rrcopy.Header().Ttl)
 			changed = true
@@ -1511,7 +1511,7 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys, cla
 		// when the add was a duplicate: dns.IsDuplicate ignores the TTL, so
 		// re-adding an existing RR is how a mixed-TTL RRset gets repaired.
 		// The RRs are safe to mutate: cloneRRset above deep-copies them. #767
-		if unifyRRsetTTL(rrset.RRs, rrcopy.Header().Ttl) {
+		if setRRsetTTL(&rrset, rrcopy.Header().Ttl) {
 			lg.Debug("ApplyZoneUpdateToZoneData: normalised RRset TTL", "owner", ownerName,
 				"rrtype", rrtypestr, "ttl", rrcopy.Header().Ttl)
 			changed = true
@@ -1724,6 +1724,26 @@ func (zd *ZoneData) withLockPublishing(fn func() error) error {
 	err := fn()
 	done = true
 	return err
+}
+
+// setRRsetTTL gives rrset the TTL an update carries, and reports whether that
+// changed it. An RRset the signer has clamped is served below its own TTL,
+// which UnclampedTTL holds: that is the TTL compared and set, and signing
+// clamps the records again (applyClampToRRset). Compared with the records'
+// TTL, an update re-adding an RRset at its own TTL changed it every time, and
+// one lowering the TTL was signed at the clamp of the TTL it replaced.
+func setRRsetTTL(rrset *core.RRset, ttl uint32) bool {
+	if rrset.UnclampedTTL == 0 || len(rrset.RRs) == 0 {
+		return unifyRRsetTTL(rrset.RRs, ttl)
+	}
+	if rrset.UnclampedTTL == ttl {
+		// A record just added carries ttl, the others the clamped TTL. They
+		// are one RRset, and signing brings all of them to the clamp.
+		return unifyRRsetTTL(rrset.RRs, rrset.RRs[0].Header().Ttl)
+	}
+	rrset.UnclampedTTL = ttl
+	unifyRRsetTTL(rrset.RRs, ttl)
+	return true
 }
 
 // unifyRRsetTTL sets the TTL of every RR in rrs to ttl, so the RRset obeys

@@ -143,9 +143,9 @@ func TestAWithdrawnDSMakesTheChildInsecure(t *testing.T) {
 	for i, after := range []time.Duration{301 * time.Second, 602 * time.Second, 903 * time.Second} {
 		writeFaketimeFile(t, path, start.Add(after))
 		resp := ask(fmt.Sprintf("round %d", i))
-		if resp.Validated {
-			t.Errorf("%s after the DS was withdrawn: validated=true (state %s, child %s); want not validated, the child is insecure",
-				after, cache.ValidationStateToString[resp.ValidationState], childState())
+		if resp.Error || resp.RRset == nil || resp.ValidationState != cache.ValidationStateInsecure {
+			t.Errorf("%s after the DS was withdrawn: error=%v (%s), answer=%v, state %s, child %s; want an insecure answer",
+				after, resp.Error, resp.ErrorMsg, resp.RRset != nil, cache.ValidationStateToString[resp.ValidationState], childState())
 		}
 	}
 	if st := childState(); st != cache.ValidationStateToString[cache.ValidationStateInsecure] {

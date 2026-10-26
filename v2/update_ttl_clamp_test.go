@@ -79,6 +79,38 @@ func TestUpdatesSignUnderTheMaxServedCeiling(t *testing.T) {
 		assertServedTTL(t, zd, "zone update", "alpha.cut.example.", dns.TypeA, 300)
 	})
 
+	// An RRset the zone already serves clamped: its own TTL is the one an
+	// update compares and replaces, not the TTL it is served at. Through the
+	// API, whose updates keep the TTL they carry (PreAuthorized).
+	t.Run("zone update of a clamped RRset", func(t *testing.T) {
+		zd, kdb := setup(t)
+		const fileDS = "child.cut.example. 3600 IN DS 12345 15 2 " +
+			"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+		apply := func(rr string) bool {
+			t.Helper()
+			actions, err := BuildZoneUpdateActions(zd.ZoneName, ZoneUpdateSpec{Verb: VerbAddRR, RRs: []string{rr}})
+			if err != nil {
+				t.Fatalf("building the update of %s: %v", rr, err)
+			}
+			updated, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
+				Cmd: "ZONE-UPDATE", ZoneName: zd.ZoneName, Actions: actions, PreAuthorized: true,
+			}, kdb)
+			if err != nil {
+				t.Fatalf("applying %s: %v", rr, err)
+			}
+			return updated
+		}
+		if apply(fileDS) {
+			t.Error("re-adding the DS at the TTL it has changed the zone")
+		}
+		assertServedTTL(t, zd, "re-added at its TTL", "child.cut.example.", dns.TypeDS, 300)
+		if !apply("child.cut.example. 60 IN DS 12345 15 2 " +
+			"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20") {
+			t.Error("lowering the DS's TTL to 60 changed nothing")
+		}
+		assertServedTTL(t, zd, "lowered to 60", "child.cut.example.", dns.TypeDS, 60)
+	})
+
 	// A child's DS replaced through the direct delegation backend, as a DSYNC
 	// API or RFC 2136 child update arrives.
 	t.Run("child update", func(t *testing.T) {
@@ -92,5 +124,12 @@ func TestUpdatesSignUnderTheMaxServedCeiling(t *testing.T) {
 			t.Fatalf("child update: updated=%v err=%v", updated, err)
 		}
 		assertServedTTL(t, zd, "child update", dsdChild, dns.TypeDS, 300, fwdSecRR(t, dsdNewDS))
+
+		// The child posting the same DS again, at the TTL it has, as its
+		// delegation sync does, changes nothing.
+		if updated, err := dsdApply(t, zd, kdb, dsdReceived(t, []string{dsdNewDS}, nil)); err != nil || updated {
+			t.Errorf("re-posting the DS: updated=%v err=%v; want no change", updated, err)
+		}
+		assertServedTTL(t, zd, "child re-post", dsdChild, dns.TypeDS, 300, fwdSecRR(t, dsdNewDS))
 	})
 }
