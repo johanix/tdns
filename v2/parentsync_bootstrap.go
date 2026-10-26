@@ -316,18 +316,25 @@ func (conf *Config) pollParentKeyState(ctx context.Context, p parentKeyStatePoll
 		}
 		lgElect.Info("ParentSyncAfterKeyPublication: re-bootstrapping after the parent reported our key's validation failed",
 			"zone", zone, "keyid", keyid, "round", round+1, "of", childReBootstrapRounds)
+		sent := true
 		if err := p.bootstrap(ctx); err != nil {
 			if errors.Is(err, errBootstrapManual) {
 				lgElect.Info("ParentSyncAfterKeyPublication: parent requires manual SIG(0) bootstrap; waiting for the operator",
 					"zone", zone, "keyid", keyid)
 				return nil
 			}
+			// Sent only if it failed after the parent accepted it. One that
+			// never went out leaves the poll free to bootstrap when the
+			// parent reports the key unknown.
+			sent = errors.Is(err, errBootstrapAfterSend)
 			// The poll that follows reports where the parent stands.
 			lgElect.Warn("ParentSyncAfterKeyPublication: re-bootstrap failed; polling the parent anyway",
-				"zone", zone, "keyid", keyid, "err", err)
+				"zone", zone, "keyid", keyid, "sent", sent, "err", err)
 		}
-		bootstrapped = true
-		p.state.markBootstrapped()
+		if sent {
+			bootstrapped = true
+			p.state.markBootstrapped()
+		}
 	}
 }
 

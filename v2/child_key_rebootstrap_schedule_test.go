@@ -158,3 +158,54 @@ func TestTheSetupArmReBootstrapsAfterAFailedValidationWithinItsRounds(t *testing
 		t.Fatal("fixture: the setup error is not errBootstrapValidationFailed")
 	}
 }
+
+// A re-bootstrap that never reached the parent does not count as sent: when
+// the parent then reports the key unknown, the poll sends the key rather than
+// only polling. One the parent accepted counts as sent even if the local state
+// change after it failed.
+func TestAReBootstrapCountsAsSentOnlyIfItReachedTheParent(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		failure        error
+		wantBootstraps int
+	}{
+		{"failed before the UPDATE", errors.New("DSYNC lookup failed"), 2},
+		{"failed after the parent accepted it", fmt.Errorf("%w: KeyDB busy", errBootstrapAfterSend), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			answers := []uint8{edns0.KeyStateValidationFail, edns0.KeyStateUnknown, edns0.KeyStateTrusted}
+			asked, bootstraps := 0, 0
+			st := &childKeyPoll{}
+			poll := parentKeyStatePoll{
+				zone:  "child.example.",
+				keyid: 4711,
+				state: st,
+				query: func(context.Context) (*edns0.KeyStateOption, bool, error) {
+					s := answers[min(asked, len(answers)-1)]
+					asked++
+					return &edns0.KeyStateOption{KeyState: s}, true, nil
+				},
+				record: func(uint8) {},
+				bootstrap: func(context.Context) error {
+					bootstraps++
+					if bootstraps == 1 {
+						return tc.failure
+					}
+					return nil
+				},
+				pollDelay:        time.Millisecond,
+				wait:             func(context.Context, time.Duration) bool { return true },
+				reBootstrapDelay: childReBootstrapDelay,
+			}
+			if err := (&Config{}).pollParentKeyState(context.Background(), poll); err != nil {
+				t.Fatalf("poll ended with %v", err)
+			}
+			if bootstraps != tc.wantBootstraps {
+				t.Errorf("%d bootstraps, want %d", bootstraps, tc.wantBootstraps)
+			}
+			if !st.bootstrapped.Load() {
+				t.Error("the poll ended without reading as bootstrapped")
+			}
+		})
+	}
+}

@@ -165,6 +165,11 @@ var errBootstrapManual = errors.New("manual SIG(0) bootstrap required by the par
 // key (BADKEY recovery, #944) found none. It must not generate one.
 var errBootstrapNoActiveKey = errors.New("no active SIG(0) key to bootstrap")
 
+// errBootstrapAfterSend wraps a bootstrap failure that came after the parent
+// accepted the UPDATE: the ceremony went out, only the local key state change
+// failed. A poll counts such a bootstrap as sent (pollParentKeyState).
+var errBootstrapAfterSend = errors.New("SIG(0) bootstrap UPDATE accepted, but the local key state was not updated")
+
 func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (string, UpdateResult, error) {
 	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods(), true)
 }
@@ -285,7 +290,7 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 	if rcode == dns.RcodeSuccess {
 		tx, err := zd.KeyDB.Begin("BootstrapSig0KeyWithParent")
 		if err != nil {
-			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to begin transaction: %v", zd.ZoneName, err), UpdateResult{}, err
+			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to begin transaction: %v", zd.ZoneName, err), UpdateResult{}, fmt.Errorf("%w: %v", errBootstrapAfterSend, err)
 		}
 		defer func() {
 			if err != nil {
@@ -309,11 +314,11 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 			str := fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to change state of key %d to active: %v",
 				zd.ZoneName, pkc.KeyRR.KeyTag(), err)
 			zd.Logger.Print(str)
-			return str, UpdateResult{}, errors.New(str)
+			return str, UpdateResult{}, fmt.Errorf("%w: %s", errBootstrapAfterSend, str)
 		}
 		if resp.Error {
 			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to change state of key %d to active: %v",
-				zd.ZoneName, pkc.KeyRR.KeyTag(), resp.ErrorMsg), UpdateResult{}, fmt.Errorf("%s", resp.ErrorMsg)
+				zd.ZoneName, pkc.KeyRR.KeyTag(), resp.ErrorMsg), UpdateResult{}, fmt.Errorf("%w: %s", errBootstrapAfterSend, resp.ErrorMsg)
 		}
 		zd.Logger.Printf("%s", resp.Msg)
 	}
