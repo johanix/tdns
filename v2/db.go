@@ -9,14 +9,21 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 // keystoreBusyTimeoutMs is how long a keystore statement waits for a lock that
-// another connection holds before it fails with "database is locked".
+// another connection holds before it fails with "database is locked". The same
+// bound is how long KeyDB.Begin waits for another transaction's Ctx to clear.
 const keystoreBusyTimeoutMs = 5000
+
+// keystoreBeginWait is how long Begin waits for an in-progress transaction.
+// Tests may shorten it; production keeps the busy-timeout bound.
+var keystoreBeginWait = time.Duration(keystoreBusyTimeoutMs) * time.Millisecond
 
 // keystoreDSN is the DSN NewKeyDB opens the sqlite keystore at path with.
 // The options apply to every connection the pool opens:
@@ -44,10 +51,14 @@ func keystoreDSN(path string) string {
 
 func (tx *Tx) Commit() error {
 	// log.Printf("---> Committing KeyDB transaction: %s", tx.context)
+	// Claimed before the end itself: database/sql marks the tx done before
+	// the driver call, so a racing second end could otherwise return first
+	// and clear Ctx while this one still runs.
+	if !tx.ended.CompareAndSwap(false, true) {
+		return sql.ErrTxDone
+	}
 	err := tx.Tx.Commit()
-	tx.KeyDB.mu.Lock()
-	tx.KeyDB.Ctx = ""
-	tx.KeyDB.mu.Unlock()
+	tx.KeyDB.clearTxCtx()
 	if err != nil {
 		lgConfig.Error("error committing KeyDB transaction", "context", tx.context, "err", err)
 	}
@@ -56,14 +67,25 @@ func (tx *Tx) Commit() error {
 
 func (tx *Tx) Rollback() error {
 	// log.Printf("<--- Rolling back KeyDB transaction: %s", tx.context)
+	if !tx.ended.CompareAndSwap(false, true) {
+		return sql.ErrTxDone
+	}
 	err := tx.Tx.Rollback()
-	tx.KeyDB.mu.Lock()
-	tx.KeyDB.Ctx = ""
-	tx.KeyDB.mu.Unlock()
+	tx.KeyDB.clearTxCtx()
 	if err != nil {
 		lgConfig.Error("error rolling back KeyDB transaction", "context", tx.context, "err", err)
 	}
 	return err
+}
+
+// clearTxCtx drops the in-progress Begin context and wakes any waiter.
+func (db *KeyDB) clearTxCtx() {
+	db.mu.Lock()
+	db.Ctx = ""
+	if db.txCond != nil {
+		db.txCond.Broadcast()
+	}
+	db.mu.Unlock()
 }
 
 func (tx *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
@@ -95,20 +117,39 @@ func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
 
 func (db *KeyDB) Begin(context string) (*Tx, error) {
 	// log.Printf("---> Beginning KeyDB transaction: %s", context)
+	deadline := time.Now().Add(keystoreBeginWait)
+
 	db.mu.Lock()
-	if db.Ctx != "" {
-		ctx := db.Ctx
-		db.mu.Unlock()
-		lgConfig.Error("KeyDB transaction already in progress", "context", ctx) // captured under lock; don't re-read db.Ctx unlocked
-		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", ctx)
+	if db.txCond == nil {
+		db.txCond = sync.NewCond(&db.mu)
+	}
+	for db.Ctx != "" {
+		holder := db.Ctx
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			db.mu.Unlock()
+			lgConfig.Error("KeyDB.Begin timed out waiting for in-progress transaction",
+				"holder", holder, "waiter", context)
+			return nil, fmt.Errorf("KeyDB.Begin timed out waiting for transaction %q (waiter %q)", holder, context)
+		}
+		lgConfig.Info("KeyDB.Begin waiting for in-progress transaction",
+			"holder", holder, "waiter", context)
+		// Wake Wait when the bound elapses so we can return a clear timeout
+		// naming both the holder and this waiter. Commit/Rollback Broadcast too.
+		timer := time.AfterFunc(remaining, func() {
+			db.mu.Lock()
+			db.txCond.Broadcast()
+			db.mu.Unlock()
+		})
+		db.txCond.Wait()
+		timer.Stop()
 	}
 	db.Ctx = context
 	db.mu.Unlock()
+
 	tx, err := db.DB.Begin()
 	if err != nil {
-		db.mu.Lock()
-		db.Ctx = ""
-		db.mu.Unlock()
+		db.clearTxCtx()
 		lgConfig.Error("error beginning transaction", "context", context, "err", err)
 		return nil, err
 	}
@@ -464,6 +505,7 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 		TruststoreSig0Cache: NewSig0StoreT(),
 		UpdateQ:             make(chan UpdateRequest),
 	}
+	kdb.txCond = sync.NewCond(&kdb.mu)
 	kdb.SetOptions(options)
 	// Prime the empty-ledger fast path the signal-name reconciler consults on
 	// every zone refresh (db_signal_publication.go).

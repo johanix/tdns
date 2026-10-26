@@ -1435,8 +1435,20 @@ type KeyDB struct {
 	DB     *sql.DB
 	DBFile string // sqlite file path, recorded by NewKeyDB
 	mu     sync.Mutex
+	// txCond wakes Begin waiters when Commit/Rollback clears Ctx. Initialized
+	// in NewKeyDB; L is &mu.
+	txCond *sync.Cond
 	// Sig0Cache   map[string]*Sig0KeyCache
-	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
+	KeystoreSig0Cache map[string]*Sig0ActiveKeys
+	// sig0CacheMu guards every read/write/delete of KeystoreSig0Cache. The cache
+	// is filled by GetSig0Keys and dropped by invalidateSig0Cache (and the
+	// Sig0KeyMgmt / bulk / API post-commit paths that call it).
+	sig0CacheMu sync.RWMutex
+	// sig0CacheGen counts invalidations; guarded by sig0CacheMu. GetSig0Keys
+	// stores what it read only if no invalidation ran while it read: a read
+	// that saw the rows before a commit would otherwise put them back after
+	// that commit's invalidation, and keep a retired key active until restart.
+	sig0CacheGen        uint64
 	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
@@ -1549,6 +1561,9 @@ type Tx struct {
 	*sql.Tx
 	KeyDB   *KeyDB
 	context string
+	// ended is claimed by the first Commit or Rollback. Only that one clears
+	// KeyDB.Ctx: by the time a second end runs, a waiting Begin may hold Ctx.
+	ended atomic.Bool
 }
 
 // String-based versions of RRset for JSON marshaling

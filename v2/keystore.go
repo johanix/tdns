@@ -159,7 +159,9 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		if err != nil {
 			return nil, err
 		}
-		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+kp.State)
+		// After commit only — see sig0InvalidateZones / BulkSig0InvalidateZones.
+		// The row's owner, not kp.Keyname: the CLI's add does not set Keyname.
+		sig0InvalidateZones = appendSig0InvalidateZone(sig0InvalidateZones, pkc.KeyRR.Header().Name)
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
 
 	case "bulk-export":
@@ -286,7 +288,9 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		if err != nil {
 			return nil, err
 		}
-		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+kp.State)
+		// After commit only — see sig0InvalidateZones / BulkSig0InvalidateZones.
+		sig0InvalidateZones = appendSig0InvalidateZone(sig0InvalidateZones, kp.Keyname)
+		resp.BulkSig0InvalidateZones = sig0InvalidateZones
 		resp.Msg += fmt.Sprintf("\nAdded public key of newly generated keypair to TrustStore: %s", tsresp.Msg)
 		resp.GeneratedSig0Key = pkc
 		txSuccess = true
@@ -333,17 +337,14 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		}
 		rows, _ := res.RowsAffected()
 
-		// We don't know the old state, so we delete all entries for this key.
-		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateCreated)
-		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StatePublished)
-		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateActive)
-		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateRetired)
-
 		// An error, not only a message: a caller changing several states in
 		// one transaction (a rollover) must not commit the rest without this.
 		if rows == 0 {
 			return &resp, fmt.Errorf("SIG(0) key with name %q and keyid %d not found", kp.Keyname, kp.Keyid)
 		}
+		// We don't know the old state, so invalidate every cached state for this
+		// name — but only after commit (sig0InvalidateZones / BulkSig0InvalidateZones).
+		sig0InvalidateZones = appendSig0InvalidateZone(sig0InvalidateZones, kp.Keyname)
 		resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 
 	case "setparentstate":
@@ -362,14 +363,14 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 	case "delete":
 		const getSig0KeySql = `
-SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
+SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
 
 		// 1. Find key, if not --> error
 		row := tx.QueryRow(getSig0KeySql, kp.Zone, kp.Keyid)
 
-		var zone, state, algorithm, privatekey, keyrr string
+		var zone, algorithm, privatekey, keyrr string
 		var keyid int
-		err := row.Scan(&zone, &state, &keyid, &algorithm, &privatekey, &keyrr)
+		err := row.Scan(&zone, &keyid, &algorithm, &privatekey, &keyrr)
 		if err != nil {
 			lgSigner.Error("failed to scan SIG(0) key for delete", "err", err)
 			if err == sql.ErrNoRows {
@@ -404,15 +405,32 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 			return &resp, err
 		}
 		resp.Msg += fmt.Sprintf("\nAlso deleted the public key from TrustStore:\n%s", tsresp.Msg)
-		// Also delete from the cache
-		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+state)
+		// After commit only — see sig0InvalidateZones / BulkSig0InvalidateZones.
+		sig0InvalidateZones = appendSig0InvalidateZone(sig0InvalidateZones, kp.Keyname)
 
 	default:
 		lgSigner.Warn("unknown Sig0KeyMgmt subcommand", "subcommand", kp.SubCommand)
 	}
 
 	txSuccess = true
+	if len(sig0InvalidateZones) > 0 {
+		resp.BulkSig0InvalidateZones = sig0InvalidateZones
+	}
 	return &resp, nil
+}
+
+// appendSig0InvalidateZone adds zone to the post-commit SIG(0) cache drop list
+// once. Zones are compared as stored (callers pass the keystore name/keyname).
+func appendSig0InvalidateZone(zones []string, zone string) []string {
+	if zone == "" {
+		return zones
+	}
+	for _, z := range zones {
+		if z == zone {
+			return zones
+		}
+	}
+	return append(zones, zone)
 }
 
 func (kdb *KeyDB) DnssecKeyMgmt(ctx context.Context, tx *Tx, kp KeystorePost) (out *KeystoreResponse, err error) {
@@ -1207,9 +1225,14 @@ func (kdb *KeyDB) GetSig0Keys(zonename, state string) (*Sig0ActiveKeys, error) {
 SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state=?`
 	)
 
-	if sak, ok := kdb.KeystoreSig0Cache[zonename+"+"+state]; ok {
+	cacheKey := zonename + "+" + state
+	kdb.sig0CacheMu.RLock()
+	if sak, ok := kdb.KeystoreSig0Cache[cacheKey]; ok {
+		kdb.sig0CacheMu.RUnlock()
 		return sak, nil
 	}
+	gen := kdb.sig0CacheGen
+	kdb.sig0CacheMu.RUnlock()
 
 	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename, state)
 	if err != nil {
@@ -1272,10 +1295,23 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 
 	lgSigner.Debug("GetSig0Keys returned keys", "zone", zonename, "state", state, "keys", sak)
 
-	kdb.KeystoreSig0Cache[zonename+"+"+state] = &sak
+	if getSig0KeysBeforeStore != nil {
+		getSig0KeysBeforeStore()
+	}
+	kdb.sig0CacheMu.Lock()
+	// An invalidation since the read means a commit may have changed these
+	// rows; caching them would undo it. The caller still gets what was read.
+	if kdb.sig0CacheGen == gen {
+		kdb.KeystoreSig0Cache[cacheKey] = &sak
+	}
+	kdb.sig0CacheMu.Unlock()
 
 	return &sak, err
 }
+
+// getSig0KeysBeforeStore runs in GetSig0Keys between the read and the cache
+// store; a test commits a key change there. Nil in production.
+var getSig0KeysBeforeStore func()
 
 // GetSig0KeyRaw returns the raw database column values for a SIG(0) key.
 // Used for transferring key material between agents via RFI CONFIG.
