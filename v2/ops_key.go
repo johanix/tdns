@@ -161,11 +161,20 @@ func (zd *ZoneData) verifyPublishedKeyRRs(name string) (bool, error) {
 // error to retry or to log as such.
 var errBootstrapManual = errors.New("manual SIG(0) bootstrap required by the parent")
 
+// errBootstrapNoActiveKey: a path that may only re-upload an existing SIG(0)
+// key (BADKEY recovery, #944) found none. It must not generate one.
+var errBootstrapNoActiveKey = errors.New("no active SIG(0) key to bootstrap")
+
+// errBootstrapAfterSend wraps a bootstrap failure that came after the parent
+// accepted the UPDATE: the ceremony went out, only the local key state change
+// failed. A poll counts such a bootstrap as sent (pollParentKeyState).
+var errBootstrapAfterSend = errors.New("SIG(0) bootstrap UPDATE accepted, but the local key state was not updated")
+
 func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (string, UpdateResult, error) {
-	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods())
+	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods(), true)
 }
 
-func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, willing []string) (string, UpdateResult, error) {
+func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, willing []string, allowGenerate bool) (string, UpdateResult, error) {
 	if err := zd.resolveParentZone(); err != nil {
 		return "", UpdateResult{}, fmt.Errorf("BootstrapSig0KeyWithParent(%q): %w", zd.ZoneName, err)
 	}
@@ -175,16 +184,12 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to get SIG(0) active keys: %v", zd.ZoneName, err), UpdateResult{}, err
 	}
 	if len(sak.Keys) == 0 {
-		// XXX: Should we generate new keys or return an error?
-		//		log.Printf("No active SIG(0) key found for zone %s. Generating new key with algorithm %s", zd.ZoneName, dns.AlgorithmToString[alg])
-		//		pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "bootstrap-sig0", "created", dns.TypeKEY, alg, "", nil) // nil = no tx
-		//		if err != nil {
-		//			msg := fmt.Sprintf("RolloverSig0KeyWithParent(%s) failed to generate keypair: %v", zd.ZoneName, err)
-		//			log.Printf(msg)
-		//			return msg, err
-		//		}
-		//		sak.Keys = append(sak.Keys, pkc)
-		//		zd.Logger.Printf(msg)
+		if !allowGenerate {
+			// Explicit: BADKEY re-bootstrap and other upload-only callers must
+			// not invent a key. Do not rely on algorithm 0 being rejected.
+			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): no active SIG(0) key to upload", zd.ZoneName),
+				UpdateResult{}, fmt.Errorf("%w for zone %q", errBootstrapNoActiveKey, zd.ZoneName)
+		}
 
 		kp := KeystorePost{
 			Command:     "sig0-mgmt",
@@ -285,7 +290,7 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 	if rcode == dns.RcodeSuccess {
 		tx, err := zd.KeyDB.Begin("BootstrapSig0KeyWithParent")
 		if err != nil {
-			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to begin transaction: %v", zd.ZoneName, err), UpdateResult{}, err
+			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to begin transaction: %v", zd.ZoneName, err), UpdateResult{}, fmt.Errorf("%w: %v", errBootstrapAfterSend, err)
 		}
 		var sig0InvalidateZones []string
 		defer func() {
@@ -315,11 +320,11 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 			str := fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to change state of key %d to active: %v",
 				zd.ZoneName, pkc.KeyRR.KeyTag(), err)
 			zd.Logger.Print(str)
-			return str, UpdateResult{}, errors.New(str)
+			return str, UpdateResult{}, fmt.Errorf("%w: %s", errBootstrapAfterSend, str)
 		}
 		if resp.Error {
 			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to change state of key %d to active: %v",
-				zd.ZoneName, pkc.KeyRR.KeyTag(), resp.ErrorMsg), UpdateResult{}, fmt.Errorf("%s", resp.ErrorMsg)
+				zd.ZoneName, pkc.KeyRR.KeyTag(), resp.ErrorMsg), UpdateResult{}, fmt.Errorf("%w: %s", errBootstrapAfterSend, resp.ErrorMsg)
 		}
 		sig0InvalidateZones = resp.BulkSig0InvalidateZones
 		zd.Logger.Printf("%s", resp.Msg)
