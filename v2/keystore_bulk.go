@@ -584,6 +584,7 @@ func (kdb *KeyDB) invalidateSig0Cache(zone string) {
 	}
 	kdb.sig0CacheMu.Lock()
 	defer kdb.sig0CacheMu.Unlock()
+	kdb.sig0CacheGen++
 	for _, state := range []string{Sig0StateCreated, Sig0StatePublished, Sig0StateActive, Sig0StateRetired} {
 		delete(kdb.KeystoreSig0Cache, zone+"+"+state)
 	}

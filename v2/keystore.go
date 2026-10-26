@@ -1230,6 +1230,7 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		kdb.sig0CacheMu.RUnlock()
 		return sak, nil
 	}
+	gen := kdb.sig0CacheGen
 	kdb.sig0CacheMu.RUnlock()
 
 	rows, err := kdb.Query(fetchSig0PrivKeySql, zonename, state)
@@ -1293,12 +1294,23 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 
 	lgSigner.Debug("GetSig0Keys returned keys", "zone", zonename, "state", state, "keys", sak)
 
+	if getSig0KeysBeforeStore != nil {
+		getSig0KeysBeforeStore()
+	}
 	kdb.sig0CacheMu.Lock()
-	kdb.KeystoreSig0Cache[cacheKey] = &sak
+	// An invalidation since the read means a commit may have changed these
+	// rows; caching them would undo it. The caller still gets what was read.
+	if kdb.sig0CacheGen == gen {
+		kdb.KeystoreSig0Cache[cacheKey] = &sak
+	}
 	kdb.sig0CacheMu.Unlock()
 
 	return &sak, err
 }
+
+// getSig0KeysBeforeStore runs in GetSig0Keys between the read and the cache
+// store; a test commits a key change there. Nil in production.
+var getSig0KeysBeforeStore func()
 
 // GetSig0KeyRaw returns the raw database column values for a SIG(0) key.
 // Used for transferring key material between agents via RFI CONFIG.

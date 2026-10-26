@@ -51,6 +51,12 @@ func keystoreDSN(path string) string {
 
 func (tx *Tx) Commit() error {
 	// log.Printf("---> Committing KeyDB transaction: %s", tx.context)
+	// Claimed before the end itself: database/sql marks the tx done before
+	// the driver call, so a racing second end could otherwise return first
+	// and clear Ctx while this one still runs.
+	if !tx.ended.CompareAndSwap(false, true) {
+		return sql.ErrTxDone
+	}
 	err := tx.Tx.Commit()
 	tx.KeyDB.clearTxCtx()
 	if err != nil {
@@ -61,6 +67,9 @@ func (tx *Tx) Commit() error {
 
 func (tx *Tx) Rollback() error {
 	// log.Printf("<--- Rolling back KeyDB transaction: %s", tx.context)
+	if !tx.ended.CompareAndSwap(false, true) {
+		return sql.ErrTxDone
+	}
 	err := tx.Tx.Rollback()
 	tx.KeyDB.clearTxCtx()
 	if err != nil {
