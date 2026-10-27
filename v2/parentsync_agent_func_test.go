@@ -23,11 +23,21 @@ func parentSyncZone(t *testing.T, zone, who string) {
 	registerZones(t, newMapZone(zone, Secondary, owners))
 }
 
+// keepParentSyncAgentFunc restores, when the test ends, the function that
+// was registered when it began.
+func keepParentSyncAgentFunc(t *testing.T) {
+	t.Helper()
+	prior := currentParentSyncAgentFunc()
+	t.Cleanup(func() { RegisterParentSyncAgentFunc(prior) })
+}
+
+// With a function registered, its answer wins over the zone's copy, at both
+// readers; cleared, the copy is read again.
 func TestTheParentSyncHookOverridesTheCopy(t *testing.T) {
 	const agents, owners = "agents.hook.example.", "owner.hook.example."
 	parentSyncZone(t, agents, "agent")
 	parentSyncZone(t, owners, "owner")
-	t.Cleanup(func() { RegisterParentSyncAgentFunc(nil) })
+	keepParentSyncAgentFunc(t)
 
 	var asked []ZoneName
 	RegisterParentSyncAgentFunc(func(zone ZoneName) bool {
@@ -54,8 +64,11 @@ func TestTheParentSyncHookOverridesTheCopy(t *testing.T) {
 	}
 }
 
+// With no function registered, the zone's copy decides, as before the hook.
 func TestNoHookReadsTheCopy(t *testing.T) {
 	const agents, owners, none = "agents.nohook.example.", "owner.nohook.example.", "none.nohook.example."
+	keepParentSyncAgentFunc(t)
+	RegisterParentSyncAgentFunc(nil)
 	parentSyncZone(t, agents, "agent")
 	parentSyncZone(t, owners, "owner")
 	parentSyncZone(t, none, "")

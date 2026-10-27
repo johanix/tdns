@@ -584,15 +584,18 @@ func RegisterParentSyncAgentFunc(f ParentSyncAgentFunc) {
 	parentSyncAgentFunc = f
 }
 
+func currentParentSyncAgentFunc() ParentSyncAgentFunc {
+	parentSyncAgentMu.RLock()
+	defer parentSyncAgentMu.RUnlock()
+	return parentSyncAgentFunc
+}
+
 // ZoneHasParentSyncAgent reports whether the agents sync the zone's
 // delegation with its parent. With a ParentSyncAgentFunc registered, its
 // answer is the answer. Without one, the zone's HSYNCPARAM record says so with
 // parentsync=agent; an absent HSYNCPARAM, or parentsync=owner, is false.
 func ZoneHasParentSyncAgent(zone ZoneName) bool {
-	parentSyncAgentMu.RLock()
-	f := parentSyncAgentFunc
-	parentSyncAgentMu.RUnlock()
-	if f != nil {
+	if f := currentParentSyncAgentFunc(); f != nil {
 		return f(zone)
 	}
 	zd, ok := Zones.Get(string(zone))
