@@ -46,6 +46,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -117,6 +118,9 @@ func (childZD *ZoneData) RepublishAtSignalNames() {
 	// signalOptions reads this under zd.mu, together with the option the
 	// withdrawal half needs; see there for why the read is locked.
 	if useHsyncparam, _ := childZD.signalOptions(); !useHsyncparam {
+		return
+	}
+	if childZD.leavesSignalsToItsAgents() {
 		return
 	}
 
@@ -373,6 +377,37 @@ func (zd *ZoneData) apexRRs(rrtype uint16) []dns.RR {
 		return nil
 	}
 	return rrset.RRs
+}
+
+// multiProviderCopy reports whether the zone's copy carries HSYNC3 records: it
+// is a multi-provider zone. Its providers' agents publish its KEY and its CDS
+// and CDNSKEY at the _signal names, through their combiners, by the steps of
+// the owner's instructions and not by what one copy of the zone says. The
+// use-hsyncparam reconciler therefore publishes nothing for it, and what it
+// published before is no longer warranted (warrantedSignalOwners). A stale CDS
+// left at a _dsboot name would give a parent a DS for a key the zone may since
+// have rolled.
+func (zd *ZoneData) multiProviderCopy() bool {
+	return len(zd.apexRRs(core.TypeHSYNC3)) > 0
+}
+
+// signalSkipsLogged holds the multi-provider zones whose skip has been logged,
+// so each says it once and not at every refresh. A zone whose copy no longer
+// carries HSYNC3 is dropped, and says it again if it becomes one once more.
+var signalSkipsLogged sync.Map
+
+// leavesSignalsToItsAgents is multiProviderCopy for the publish half, which
+// logs the skip.
+func (zd *ZoneData) leavesSignalsToItsAgents() bool {
+	if !zd.multiProviderCopy() {
+		signalSkipsLogged.Delete(zd.ZoneName)
+		return false
+	}
+	if _, logged := signalSkipsLogged.LoadOrStore(zd.ZoneName, true); !logged {
+		lgSignal.Info("a multi-provider zone: its agents publish at the _signal names, so use-hsyncparam publishes nothing for it",
+			"zone", zd.ZoneName)
+	}
+	return true
 }
 
 // apexHsyncparam returns the typed apex HSYNCPARAM record, or nil if absent.

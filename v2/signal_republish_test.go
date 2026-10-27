@@ -434,6 +434,60 @@ func TestRepublish_WithoutUseHsyncparamIsNoOp(t *testing.T) {
 	}
 }
 
+// pubkeyPubcdsApex is a customer zone's apex that asks for both publications
+// and has what they need, with HSYNC3 records added if given.
+func pubkeyPubcdsApex(t *testing.T, hsync3 ...string) map[string][]dns.RR {
+	t.Helper()
+	apex := []dns.RR{
+		mustRR(t, "example. 3600 IN HSYNCPARAM pubkey pubcds"),
+		mustRR(t, "example. 3600 IN NS ns.foobar.com."),
+		mustRR(t, "example. 3600 IN KEY 256 3 15 dGVzdGtleQ=="),
+		mustRR(t, "example. 3600 IN CDS 12345 15 2 0102"),
+	}
+	for _, rdata := range hsync3 {
+		apex = append(apex, mustRR(t, "example. 3600 IN HSYNC3 "+rdata))
+	}
+	return map[string][]dns.RR{"example.": apex}
+}
+
+// A multi-provider zone: its copy carries HSYNC3. Its providers' agents
+// publish its KEY and its CDS at the _signal names, by the owner's steps, so
+// use-hsyncparam publishes nothing for it, whatever its HSYNCPARAM asks.
+func TestTheSignalReconcilerSkipsAMultiProviderZone(t *testing.T) {
+	child := newOptedInChild("example.", pubkeyPubcdsApex(t,
+		"ON p1 agent.p1.example. .", "ON p2 agent.p2.example. p1"))
+	target, q := signalTarget("foobar.com.", nil)
+	registerZones(t, child, target)
+
+	child.RepublishAtSignalNames()
+
+	if urs := drainUpdateQ(q); len(urs) != 0 {
+		t.Fatalf("published %d updates for a multi-provider zone: %+v", len(urs), urs)
+	}
+}
+
+// The same zone without HSYNC3 publishes as it always has: its KEY at the
+// _sig0key name and its CDS at the _dsboot name.
+func TestAZoneWithoutHSYNC3IsAsBefore(t *testing.T) {
+	child := newOptedInChild("example.", pubkeyPubcdsApex(t))
+	target, q := signalTarget("foobar.com.", nil)
+	registerZones(t, child, target)
+
+	child.RepublishAtSignalNames()
+
+	owners := map[string]bool{}
+	for _, ur := range drainUpdateQ(q) {
+		for _, rr := range ur.Actions {
+			owners[rr.Header().Name] = true
+		}
+	}
+	for _, want := range []string{"_sig0key.example._signal.ns.foobar.com.", "_dsboot.example._signal.ns.foobar.com."} {
+		if !owners[want] {
+			t.Errorf("nothing published at %s; published at %v", want, owners)
+		}
+	}
+}
+
 func TestSignalOwnerName(t *testing.T) {
 	if got := signalOwnerName(signalPrefixSig0Key, "child.example.", "ns.provider.example."); got != "_sig0key.child.example._signal.ns.provider.example." {
 		t.Fatalf("sig0key: %q", got)
