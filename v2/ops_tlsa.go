@@ -55,7 +55,7 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 	// request was skipped, and the record last asked for would be gone.
 	// The lock is held until the update is queued: the queue then holds
 	// publications in the order they were asked for.
-	owner := dns.CanonicalName(tlsa.Hdr.Name)
+	owner := core.CanonicalizeName(dns.Fqdn(tlsa.Hdr.Name))
 	zd.tlsaPublishMu.Lock()
 	defer zd.tlsaPublishMu.Unlock()
 	prev, asked := zd.tlsaRequested[owner]
@@ -161,7 +161,7 @@ func (zd *ZoneData) UnpublishTlsaRR(port uint16) error {
 	// A withdrawal is a request too, noted under the publication lock until
 	// it is queued: a publication asked for after it is not skipped while
 	// it waits (PublishTlsaRR).
-	owner := dns.CanonicalName(anti_tlsa_rr.Header().Name)
+	owner := core.CanonicalizeName(dns.Fqdn(anti_tlsa_rr.Header().Name))
 	zd.tlsaPublishMu.Lock()
 	defer zd.tlsaPublishMu.Unlock()
 	if zd.tlsaRequested == nil {

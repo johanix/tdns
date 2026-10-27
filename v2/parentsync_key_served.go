@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -269,7 +270,7 @@ func askServerForKey(ctx context.Context, qname, addr string) ([]dns.RR, error) 
 	}
 	var out []dns.RR
 	for _, rr := range r.Answer {
-		if rr.Header().Rrtype == dns.TypeKEY && strings.EqualFold(rr.Header().Name, qname) {
+		if rr.Header().Rrtype == dns.TypeKEY && core.EqualNames(rr.Header().Name, qname) {
 			out = append(out, rr)
 		}
 	}
