@@ -376,6 +376,28 @@ func TestRolloverSig0KeyOneAtATimePerZone(t *testing.T) {
 	assertRolloverReleased(t, kdb, zd.ZoneName)
 }
 
+// The rollover guard folds a zone name as RFC 4343 does, US-ASCII only. Two
+// names that differ only in an octet outside it are two zones, and a rollover
+// of one does not hold up the other's. dns.CanonicalName rewrote both octets to
+// U+FFFD, and the two zones shared one claim.
+func TestRolloverClaimKeepsNonASCIIOctetsApart(t *testing.T) {
+	kdb := &KeyDB{}
+	release, err := kdb.beginSig0Rollover("a\xff.example.")
+	if err != nil {
+		t.Fatalf("claiming a\\xff.example.: %v", err)
+	}
+	defer release()
+	if other, err := kdb.beginSig0Rollover("a\xfe.example."); err != nil {
+		t.Errorf("a rollover of a\\xfe.example. was refused while one of a\\xff.example. ran: %v", err)
+	} else {
+		other()
+	}
+	if same, err := kdb.beginSig0Rollover("A\xff.Example"); err == nil {
+		same()
+		t.Error("A\\xff.Example got a claim of its own; it is a\\xff.example., which holds one")
+	}
+}
+
 // setstate on a key that is not there is an error, not only a message, so a
 // caller changing several states in one transaction can roll back.
 func TestSig0SetstateMissingKeyIsAnError(t *testing.T) {

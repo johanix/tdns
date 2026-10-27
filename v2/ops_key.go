@@ -345,7 +345,7 @@ var rolloverSendUpdate = SendUpdate
 // not queued: two rollovers of one zone would each get a new key accepted by
 // the parent and each make its own key active.
 func (kdb *KeyDB) beginSig0Rollover(zone string) (func(), error) {
-	zone = dns.CanonicalName(zone)
+	zone = core.CanonicalizeName(dns.Fqdn(zone))
 	kdb.sig0RolloverMu.Lock()
 	defer kdb.sig0RolloverMu.Unlock()
 	if kdb.sig0Rollovers[zone] {
