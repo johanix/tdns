@@ -839,9 +839,15 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		// and the read can time out before the context's timer has marked it
 		// done. Counted as a transport failure, that attempt reset the run of
 		// slice timeouts it belongs to and marked the upstream failing.
+		//
+		// The attempt is read before the caller. A caller's cancel is set on
+		// the caller before it reaches the attempt, so an attempt that a
+		// cancel ended always finds the caller ended too. Read the other way
+		// round, a cancel between the two reads was booked as a slice timeout.
 		now := time.Now()
+		attemptDone := ctxEnded(attemptCtx, now)
 		callerDone := ctxEnded(ctx, now)
-		truncated := ctxEnded(attemptCtx, now) && !callerDone
+		truncated := attemptDone && !callerDone
 		cancelAttempt()
 		if err == nil && r == nil {
 			err = fmt.Errorf("nil response from upstream %s", up.Label)
