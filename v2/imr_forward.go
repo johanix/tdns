@@ -701,6 +701,18 @@ func (imr *Imr) forwarded(qname string, qtype uint16) bool {
 	return imr.forwardZoneForQuestion(qname, qtype) != nil
 }
 
+// ctxEnded reports whether ctx was done at now: cancelled, or past its
+// deadline. A context is marked done by a timer of its own, which can fire
+// after a socket deadline set from the same instant, so Err() alone can say a
+// context whose deadline has passed is still running.
+func ctxEnded(ctx context.Context, now time.Time) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	dl, ok := ctx.Deadline()
+	return ok && !now.Before(dl)
+}
+
 // forwardQuery resolves <qname, qtype> by sending a recursive query to the
 // forward zone's upstreams, in configured order, until one produces a usable
 // response. The return signature matches IterativeDNSQueryWithLoopDetection,
@@ -822,8 +834,14 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		// rather than only when the caller gives up (#470).
 		r, _, err := core.ExchangeCtx(attemptCtx, up.Client, m, up.Addr, Globals.Debug && !imr.Quiet)
 		// Truncated by its own slice, with the caller still waiting: the
-		// upstream ran out of TIME, it did not fail.
-		truncated := attemptCtx.Err() != nil && ctx.Err() == nil
+		// upstream ran out of TIME, it did not fail. Told from the clock as
+		// well as from Err(): the exchange's read deadline is the slice's end,
+		// and the read can time out before the context's timer has marked it
+		// done. Counted as a transport failure, that attempt reset the run of
+		// slice timeouts it belongs to and marked the upstream failing.
+		now := time.Now()
+		callerDone := ctxEnded(ctx, now)
+		truncated := ctxEnded(attemptCtx, now) && !callerDone
 		cancelAttempt()
 		if err == nil && r == nil {
 			err = fmt.Errorf("nil response from upstream %s", up.Label)
@@ -845,13 +863,17 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			}
 			continue
 		}
-		if cerr := ctx.Err(); cerr != nil && err != nil {
+		if cerr := ctx.Err(); err != nil && (cerr != nil || callerDone) {
 			// Abandoned, not failed. The ctx.Done() check at the top of the
 			// loop stops us between upstreams; this one is needed because a
 			// cancel now reaches the exchange itself, and recording it would
 			// mark a healthy upstream unreachable — and set a DEGRADED that
 			// outlives the shutdown that caused it. Same guard, same reason,
-			// as probeForwardUpstream and tryServer.
+			// as probeForwardUpstream and tryServer. callerDone: the caller's
+			// deadline has passed, though its timer has not yet fired.
+			if cerr == nil {
+				cerr = context.DeadlineExceeded
+			}
 			return nil, 0, cache.ContextFailure, up.Transport,
 				fmt.Errorf("forward zone %s: %w (attempts=%d, last error: %v)", fz.Zone, cerr, attempts, lastErr)
 		}
