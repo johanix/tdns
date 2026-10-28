@@ -280,6 +280,11 @@ type ZoneData struct {
 	// signature again. Cleared when the resigner takes it, or when the send
 	// is dropped.
 	resignQueued atomic.Bool
+	// signalSkipLogged records that RepublishAtSignalNames has said, once,
+	// that it publishes nothing for this zone because its copy carries HSYNC3
+	// (leavesSignalsToItsAgents). Cleared when the copy no longer does. Per
+	// ZoneData, so a zone that is removed takes it with it.
+	signalSkipLogged atomic.Bool
 	// dsFirstRunDone records that the DS engine has had its first run for this
 	// ZoneData, the one that compares the parent's DS with the keys once per
 	// zone load (followKeysWithCDS). Per ZoneData, not per process: a zone
@@ -336,7 +341,8 @@ type ZoneData struct {
 
 	// ixfrTouched is the owner set that delta reached, carried from the IXFR
 	// apply to applyRefreshReplacementLocked so it can stage wsSignOwners.
-	// Set only alongside ixfrDerived.
+	// Set only alongside ixfrDerived. A pre-refresh write into the draft adds
+	// the owner it writes (ownDraftOwnerLocked).
 	ixfrTouched map[string]bool
 
 	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale

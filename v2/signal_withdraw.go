@@ -72,11 +72,12 @@ func (childZD *ZoneData) recordSignalPublication(tgt signalPublishTarget, source
 // withdrawUnwarrantedSignalPublications is the zone acting as the zone
 // PUBLISHED FOR: it withdraws every record the ledger says we put somewhere on
 // this zone's behalf that the zone's current configuration and current content
-// no longer justify. That is one function for four situations --
+// no longer justify. That is one function for five situations --
 // use-hsyncparam removed, a pubkey/pubcds flag dropped from the apex
-// HSYNCPARAM, a nameserver dropped from the apex NS RRset, and parentsync
-// turned off for a zone whose at-ns bootstrap published a _sig0key -- because
-// all four are the same question asked of current state.
+// HSYNCPARAM, a nameserver dropped from the apex NS RRset, HSYNC3 appearing in
+// the zone's copy (its agents publish for it now), and parentsync turned off
+// for a zone whose at-ns bootstrap published a _sig0key -- because all five
+// are the same question asked of current state.
 func (zd *ZoneData) withdrawUnwarrantedSignalPublications() {
 	if signalLedgerEmpty.Load() || !SignalLedgerReadable(zd.KeyDB) {
 		return
@@ -151,7 +152,10 @@ func (zd *ZoneData) warrantedSignalOwners(nsNames []string) (keepHsync, keepAtNs
 	keepAtNs = map[string]bool{}
 	useHsyncparam, delSyncChild := zd.signalOptions()
 
-	if useHsyncparam {
+	// A multi-provider zone warrants nothing under use-hsyncparam: its agents
+	// publish for it (multiProviderCopy). The at-ns half below is the zone's
+	// own bootstrap, and stays.
+	if useHsyncparam && !zd.multiProviderCopy() {
 		if hp := zd.apexHsyncparam(); hp != nil {
 			for _, spec := range signalSpecs {
 				if !spec.active(hp) {
