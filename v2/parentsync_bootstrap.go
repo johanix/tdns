@@ -564,9 +564,40 @@ func BootstrapWithParent(ctx context.Context, zone ZoneName, keyName string, alg
 	return nil
 }
 
-// ZoneHasParentSyncAgent checks whether the zone's HSYNCPARAM record has
-// parentsync=agent. Returns false if HSYNCPARAM is absent or parentsync=owner.
+// ParentSyncAgentFunc answers whether the agents sync zone's delegation with
+// its parent (parentsync=agent). An application that reads the zone owner's
+// instructions by its own rules registers one, so that tdns asks it rather
+// than reading its own copy of the zone (johanix/tdns-mp#211, step P3).
+type ParentSyncAgentFunc func(zone ZoneName) bool
+
+var (
+	parentSyncAgentMu   sync.RWMutex
+	parentSyncAgentFunc ParentSyncAgentFunc
+)
+
+// RegisterParentSyncAgentFunc installs f, replacing whatever was registered
+// before; nil clears it, and ZoneHasParentSyncAgent reads the zone's copy
+// again.
+func RegisterParentSyncAgentFunc(f ParentSyncAgentFunc) {
+	parentSyncAgentMu.Lock()
+	defer parentSyncAgentMu.Unlock()
+	parentSyncAgentFunc = f
+}
+
+func currentParentSyncAgentFunc() ParentSyncAgentFunc {
+	parentSyncAgentMu.RLock()
+	defer parentSyncAgentMu.RUnlock()
+	return parentSyncAgentFunc
+}
+
+// ZoneHasParentSyncAgent reports whether the agents sync the zone's
+// delegation with its parent. With a ParentSyncAgentFunc registered, its
+// answer is the answer. Without one, the zone's HSYNCPARAM record says so with
+// parentsync=agent; an absent HSYNCPARAM, or parentsync=owner, is false.
 func ZoneHasParentSyncAgent(zone ZoneName) bool {
+	if f := currentParentSyncAgentFunc(); f != nil {
+		return f(zone)
+	}
 	zd, ok := Zones.Get(string(zone))
 	if !ok || zd == nil {
 		return false
