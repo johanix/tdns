@@ -280,6 +280,11 @@ type ZoneData struct {
 	// signature again. Cleared when the resigner takes it, or when the send
 	// is dropped.
 	resignQueued atomic.Bool
+	// signalSkipLogged records that RepublishAtSignalNames has said, once,
+	// that it publishes nothing for this zone because its copy carries HSYNC3
+	// (leavesSignalsToItsAgents). Cleared when the copy no longer does. Per
+	// ZoneData, so a zone that is removed takes it with it.
+	signalSkipLogged atomic.Bool
 	// dsFirstRunDone records that the DS engine has had its first run for this
 	// ZoneData, the one that compares the parent's DS with the keys once per
 	// zone load (followKeysWithCDS). Per ZoneData, not per process: a zone
