@@ -674,16 +674,21 @@ func TestRefreshSig0KeyAtSignalNamesFollowsTheLedger(t *testing.T) {
 	if n := child.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")}); n != 2 {
 		t.Fatalf("refresh satisfied = %d, want 2 (the two names in the ledger)", n)
 	}
-	added := map[string]bool{}
+	added, touched := map[string]bool{}, map[string]bool{}
 	for _, ur := range *seen {
 		for _, rr := range ur.Actions {
+			touched[rr.Header().Name] = true
 			if k, ok := rr.(*dns.KEY); ok && rr.Header().Class == dns.ClassINET && k.PublicKey == "bmV3" {
 				added[rr.Header().Name] = true
 			}
 		}
 	}
-	if !added[kept] || !added[gone] || added[another] || added[never] || len(added) != 2 {
+	if !added[kept] || !added[gone] || len(added) != 2 {
 		t.Fatalf("new key added at %v, want exactly %s and %s", added, kept, gone)
+	}
+	// Not even a delete may reach a name without a row.
+	if touched[another] || touched[never] || len(touched) != 2 {
+		t.Fatalf("the refresh wrote at %v; only %s and %s are the bootstrap's", touched, kept, gone)
 	}
 
 	fresh, q2 := signalTarget("fresh.example.", nil)

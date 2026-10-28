@@ -271,19 +271,43 @@ func TestWithdraw_QueuesTheDeleteWhenTheAddHasNotLanded(t *testing.T) {
 			mustRR(t, "example. 3600 IN KEY "+sigKeyRdata),
 		},
 	})
-	child.Options = map[ZoneOption]bool{} // use-hsyncparam removed
+	child.Options = map[ZoneOption]bool{OptUseHsyncparam: true}
 	child.KeyDB = kdb
 	registerZones(t, child, target)
-	if err := kdb.RecordSignalPublication(SignalPublication{
-		Target: "foobar.com.", Owner: sigOwnerFoo, Zone: "example.",
-		NS: "ns.foobar.com.", Prefix: signalPrefixSig0Key, Source: signalSourceHsyncparam,
-	}); err != nil {
-		t.Fatalf("RecordSignalPublication: %v", err)
+
+	// The publication is queued and its row recorded. Nothing applies the
+	// queue here, so the add never lands in the served zone.
+	child.ReconcileSignalPublications()
+	assertLedgerRow(t, kdb, "foobar.com.", sigOwnerFoo)
+	if signalRRsPresent(target, sigOwnerFoo, []uint16{dns.TypeKEY}) {
+		t.Fatal("the add has landed; the case under test is one that has not")
 	}
 
+	// use-hsyncparam is removed before the updater gets to the add.
+	child.Options = map[ZoneOption]bool{}
 	child.ReconcileSignalPublications()
 
-	assertWithdrawn(t, &withdrawFixture{child: child, target: target, q: q, kdb: kdb}, sigOwnerFoo, dns.TypeKEY)
+	urs := drainUpdateQ(q)
+	if len(urs) != 2 {
+		t.Fatalf("expected the publication and then its withdrawal in the queue, got %d: %+v", len(urs), urs)
+	}
+	var added bool
+	for _, rr := range urs[0].Actions {
+		if rr.Header().Name == sigOwnerFoo && rr.Header().Class == dns.ClassINET && rr.Header().Rrtype == dns.TypeKEY {
+			added = true
+		}
+	}
+	if !added {
+		t.Fatalf("the first update is not the publication's add: %v", urs[0].Actions)
+	}
+	for _, rr := range urs[1].Actions {
+		if rr.Header().Name != sigOwnerFoo || rr.Header().Class != dns.ClassANY || rr.Header().Rrtype != dns.TypeKEY {
+			t.Errorf("the second update must only delete the KEY at %s; got %s", sigOwnerFoo, rr)
+		}
+	}
+	if len(urs[1].Actions) == 0 {
+		t.Error("the withdrawal queued an empty update")
+	}
 	assertNoLedgerRow(t, kdb, "foobar.com.", sigOwnerFoo)
 }
 
