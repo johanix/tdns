@@ -475,15 +475,26 @@ func TestAZoneWithoutHSYNC3IsAsBefore(t *testing.T) {
 
 	child.RepublishAtSignalNames()
 
-	owners := map[string]bool{}
+	// Additions only: a publication also deletes the RRset it replaces
+	// (ClassANY), and a withdrawal is nothing but such deletes.
+	type at struct {
+		owner  string
+		rrtype uint16
+	}
+	added := map[at]bool{}
 	for _, ur := range drainUpdateQ(q) {
 		for _, rr := range ur.Actions {
-			owners[rr.Header().Name] = true
+			if rr.Header().Class == dns.ClassINET {
+				added[at{rr.Header().Name, rr.Header().Rrtype}] = true
+			}
 		}
 	}
-	for _, want := range []string{"_sig0key.example._signal.ns.foobar.com.", "_dsboot.example._signal.ns.foobar.com."} {
-		if !owners[want] {
-			t.Errorf("nothing published at %s; published at %v", want, owners)
+	for _, want := range []at{
+		{"_sig0key.example._signal.ns.foobar.com.", dns.TypeKEY},
+		{"_dsboot.example._signal.ns.foobar.com.", dns.TypeCDS},
+	} {
+		if !added[want] {
+			t.Errorf("no %s added at %s; added %v", dns.TypeToString[want.rrtype], want.owner, added)
 		}
 	}
 }

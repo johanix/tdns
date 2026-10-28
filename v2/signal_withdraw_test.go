@@ -352,6 +352,66 @@ func TestWithdraw_AMultiProviderZoneWithdrawsWhatItPublished(t *testing.T) {
 	assertWithdrawn(t, f, sigOwnerFoo, dns.TypeKEY)
 }
 
+// The record P6 withdraws for: a CDS at a _dsboot name. Left in place, it
+// would outlive the zone's next key roll and give a parent a DS for a key the
+// zone no longer publishes.
+func TestWithdraw_AMultiProviderZoneWithdrawsItsDsbootCDS(t *testing.T) {
+	apex := func(hsync3 ...dns.RR) map[string][]dns.RR {
+		rrs := []dns.RR{
+			mustRR(t, "example. 3600 IN HSYNCPARAM pubcds"),
+			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
+			mustRR(t, "example. 3600 IN CDS 12345 15 2 ABCDEF"),
+		}
+		return map[string][]dns.RR{"example.": append(rrs, hsync3...)}
+	}
+	f := newWithdrawFixture(t, apex(),
+		map[ZoneOption]bool{OptUseHsyncparam: true},
+		map[string][]dns.RR{dsbootOwnFoo: {mustRR(t, dsbootOwnFoo+" 3600 IN CDS 12345 15 2 ABCDEF")}},
+	)
+
+	reloadChild(t, f, apex(mustRR(t, "example. 3600 IN HSYNC3 ON p1 agent.p1.example. .")))
+	f.child.ReconcileSignalPublications()
+
+	assertWithdrawn(t, f, dsbootOwnFoo, dns.TypeCDS, dns.TypeCDNSKEY)
+}
+
+// A secondary can carry both use-hsyncparam and parentsync, and then both
+// publish at the same _sig0key name, which has one ledger row: the last
+// writer's. When that is the zone's own at-ns bootstrap, a multi-provider
+// zone keeps it: use-hsyncparam neither withdraws it nor writes over it.
+func TestWithdraw_AMultiProviderZoneWithBothOptionsKeepsItsAtNsRow(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	target, q := signalTarget("foobar.com.", map[string][]dns.RR{
+		sigOwnerFoo: {mustRR(t, sigOwnerFoo+" 3600 IN KEY "+sigKeyRdata)},
+	})
+	target.KeyDB = kdb
+	kdb.UpdateQ = q
+	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+		"example.": {
+			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey"),
+			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
+			mustRR(t, "example. 3600 IN KEY 256 3 15 b3RoZXJrZXk="),
+			mustRR(t, "example. 3600 IN HSYNC3 ON p1 agent.p1.example. ."),
+		},
+	})
+	child.Options = map[ZoneOption]bool{OptUseHsyncparam: true, OptParentSync: true}
+	child.KeyDB = kdb
+	registerZones(t, child, target)
+	if err := kdb.RecordSignalPublication(SignalPublication{
+		Target: "foobar.com.", Owner: sigOwnerFoo, Zone: "example.",
+		NS: "ns.foobar.com.", Prefix: signalPrefixSig0Key, Source: signalSourceAtNs,
+	}); err != nil {
+		t.Fatalf("RecordSignalPublication: %v", err)
+	}
+
+	child.ReconcileSignalPublications()
+
+	if urs := drainUpdateQ(q); len(urs) != 0 {
+		t.Fatalf("the bootstrap's _sig0key must be left alone: %+v", urs)
+	}
+	assertLedgerRow(t, kdb, "foobar.com.", sigOwnerFoo)
+}
+
 // A multi-provider zone's own bootstrap is not use-hsyncparam's: a zone
 // primary here, with parentsync, keeps the _sig0key its at-ns bootstrap
 // published.

@@ -46,7 +46,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -391,19 +390,15 @@ func (zd *ZoneData) multiProviderCopy() bool {
 	return len(zd.apexRRs(core.TypeHSYNC3)) > 0
 }
 
-// signalSkipsLogged holds the multi-provider zones whose skip has been logged,
-// so each says it once and not at every refresh. A zone whose copy no longer
-// carries HSYNC3 is dropped, and says it again if it becomes one once more.
-var signalSkipsLogged sync.Map
-
 // leavesSignalsToItsAgents is multiProviderCopy for the publish half, which
-// logs the skip.
+// logs the skip once and not at every refresh (signalSkipLogged). A zone whose
+// copy loses HSYNC3 says it again if its copy carries HSYNC3 once more.
 func (zd *ZoneData) leavesSignalsToItsAgents() bool {
 	if !zd.multiProviderCopy() {
-		signalSkipsLogged.Delete(zd.ZoneName)
+		zd.signalSkipLogged.Store(false)
 		return false
 	}
-	if _, logged := signalSkipsLogged.LoadOrStore(zd.ZoneName, true); !logged {
+	if zd.signalSkipLogged.CompareAndSwap(false, true) {
 		lgSignal.Info("a multi-provider zone: its agents publish at the _signal names, so use-hsyncparam publishes nothing for it",
 			"zone", zd.ZoneName)
 	}
