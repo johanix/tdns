@@ -255,6 +255,38 @@ func TestWithdraw_PubcdsWithdrawsBothTypes(t *testing.T) {
 	assertWithdrawn(t, f, dsbootOwnFoo, dns.TypeCDS, dns.TypeCDNSKEY)
 }
 
+// A publication whose add is still queued: the ledger has its row, but the
+// served zone does not have the RRset yet. A withdrawal must still queue the
+// delete, which the updater applies after the add. Forgetting the row alone
+// would let the add land with nothing left to withdraw it (#969).
+func TestWithdraw_QueuesTheDeleteWhenTheAddHasNotLanded(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	target, q := signalTarget("foobar.com.", nil)
+	target.KeyDB = kdb
+	kdb.UpdateQ = q
+	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+		"example.": {
+			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey"),
+			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
+			mustRR(t, "example. 3600 IN KEY "+sigKeyRdata),
+		},
+	})
+	child.Options = map[ZoneOption]bool{} // use-hsyncparam removed
+	child.KeyDB = kdb
+	registerZones(t, child, target)
+	if err := kdb.RecordSignalPublication(SignalPublication{
+		Target: "foobar.com.", Owner: sigOwnerFoo, Zone: "example.",
+		NS: "ns.foobar.com.", Prefix: signalPrefixSig0Key, Source: signalSourceHsyncparam,
+	}); err != nil {
+		t.Fatalf("RecordSignalPublication: %v", err)
+	}
+
+	child.ReconcileSignalPublications()
+
+	assertWithdrawn(t, &withdrawFixture{child: child, target: target, q: q, kdb: kdb}, sigOwnerFoo, dns.TypeKEY)
+	assertNoLedgerRow(t, kdb, "foobar.com.", sigOwnerFoo)
+}
+
 // Case 3b: the customer zone is no longer served here at all, so its own
 // reconciler will never run again. The target zone withdraws on its behalf --
 // but only once the sweep is armed, because an unarmed sweep has no configured
