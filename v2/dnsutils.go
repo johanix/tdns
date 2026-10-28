@@ -930,7 +930,7 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 			if ztype == MapZone {
 				tmp = omap.RRtypes.GetOnlyRRSet(rrtype)
 				tmp.RRs = append(tmp.RRs, rr)
-				omap.RRtypes.Set(rrtype, tmp)
+				omap.RRtypes.Set(rrtype, tmp) // mutator-ok: SortFunc: the apex SOA, into a zone being built and not yet published
 			}
 		}
 
@@ -958,7 +958,7 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 			}
 			tmp = omap.RRtypes.GetOnlyRRSet(rrt)
 			tmp.RRSIGs = append(tmp.RRSIGs, rr)
-			omap.RRtypes.Set(rrt, tmp)
+			omap.RRtypes.Set(rrt, tmp) // mutator-ok: SortFunc: an RRSIG, into a zone being built and not yet published
 		}
 
 	default:
@@ -966,11 +966,11 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 		case MapZone:
 			tmp = omap.RRtypes.GetOnlyRRSet(rrtype)
 			tmp.RRs = append(tmp.RRs, rr)
-			omap.RRtypes.Set(rrtype, tmp)
+			omap.RRtypes.Set(rrtype, tmp) // mutator-ok: SortFunc: an RRset, into a zone being built and not yet published
 		}
 	}
 	if ztype == MapZone {
-		zd.Data.Set(owner, omap)
+		zd.Data.Set(owner, omap) // mutator-ok: SortFunc: the owner, into the Data of a zone being built
 	}
 	return firstSoaSeen
 }

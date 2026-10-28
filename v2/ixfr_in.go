@@ -280,7 +280,7 @@ func materializeForIxfr(snap *zoneSnapshot, touched map[string]bool) (*core.Name
 			if len(rs.RRSIGs) > 0 {
 				signed[signedKey{owner: core.CanonicalizeName(src.Name), rrtype: t}] = true
 			}
-			nod.RRtypes.Set(t, cloneRRset(rs))
+			nod.RRtypes.Set(t, cloneRRset(rs)) // mutator-ok: the fresh store of a touched owner's deep copy
 		}
 		nod.NSEC = cloneRRset(src.NSEC)
 		// The denial record is signed like any other RRset, and stripping its
@@ -382,7 +382,7 @@ func applyIxfrRemove(data *core.NameMap[OwnerData], rr dns.RR) error {
 			return fmt.Errorf("delete of %s: not present", rr.String())
 		}
 		rs.RRSIGs = out
-		nod.RRtypes.Set(v.TypeCovered, rs)
+		nod.RRtypes.Set(v.TypeCovered, rs) // mutator-ok: a delta name, so a touched owner, deep-copied by materializeForIxfr
 
 	default:
 		rrtype := rr.Header().Rrtype
@@ -400,9 +400,9 @@ func applyIxfrRemove(data *core.NameMap[OwnerData], rr dns.RR) error {
 			// The RRset is gone, and so are the signatures over it. Dropping
 			// the type is what keeps a name from lingering with nothing but
 			// its own signatures.
-			nod.RRtypes.Delete(rrtype)
+			nod.RRtypes.Delete(rrtype) // mutator-ok: a delta name, so a touched owner, deep-copied by materializeForIxfr
 		} else {
-			nod.RRtypes.Set(rrtype, rs)
+			nod.RRtypes.Set(rrtype, rs) // mutator-ok: a delta name, so a touched owner, deep-copied by materializeForIxfr
 		}
 	}
 
@@ -462,7 +462,7 @@ func applyIxfrAdd(data *core.NameMap[OwnerData], rr dns.RR) error {
 			return fmt.Errorf("add of %s: already present", rr.String())
 		}
 		rs.RRSIGs = append(rs.RRSIGs, rr)
-		nod.RRtypes.Set(v.TypeCovered, rs)
+		nod.RRtypes.Set(v.TypeCovered, rs) // mutator-ok: a delta name: a touched owner's deep copy, or a new owner's fresh store
 
 	default:
 		rrtype := rr.Header().Rrtype
@@ -472,7 +472,7 @@ func applyIxfrAdd(data *core.NameMap[OwnerData], rr dns.RR) error {
 		}
 		rs.Name, rs.RRtype, rs.Class = owner, rrtype, rr.Header().Class
 		rs.RRs = append(rs.RRs, rr)
-		nod.RRtypes.Set(rrtype, rs)
+		nod.RRtypes.Set(rrtype, rs) // mutator-ok: a delta name: a touched owner's deep copy, or a new owner's fresh store
 	}
 	data.Set(owner, nod)
 	return nil
@@ -568,7 +568,7 @@ func replaceApexSOA(zoneName string, data *core.NameMap[OwnerData], bookend *dns
 	// being adopted here.
 	soa.Hdr = *rs.RRs[0].Header()
 	rs.RRs = []dns.RR{soa}
-	nod.RRtypes.Set(dns.TypeSOA, rs)
+	nod.RRtypes.Set(dns.TypeSOA, rs) // mutator-ok: the apex, which ixfrTouchedOwners always includes
 	data.Set(zoneName, nod)
 	return nil
 }
