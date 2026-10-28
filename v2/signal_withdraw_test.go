@@ -475,6 +475,89 @@ func TestWithdraw_AMultiProviderZoneKeepsItsOwnBootstrap(t *testing.T) {
 	assertLedgerRow(t, kdb, "child.example.", sigOwnerInBai)
 }
 
+// With use-hsyncparam and parentsync both on, the _sig0key name is the
+// bootstrap's: use-hsyncparam does not write its apex KEY over the bootstrap's
+// KEY, nor take its ledger row. It still publishes the CDS at the _dsboot
+// name, which the bootstrap never writes (#968).
+func TestBothOptions_TheBootstrapKeepsItsSig0Key(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	target, q := signalTarget("foobar.com.", map[string][]dns.RR{
+		sigOwnerFoo: {mustRR(t, sigOwnerFoo+" 3600 IN KEY "+sigKeyRdata)},
+	})
+	target.KeyDB = kdb
+	kdb.UpdateQ = q
+	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+		"example.": {
+			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey pubcds"),
+			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
+			mustRR(t, "example. 3600 IN KEY 256 3 15 b3RoZXJrZXk="),
+			mustRR(t, "example. 3600 IN CDS 12345 15 2 ABCDEF"),
+		},
+	})
+	child.Options = map[ZoneOption]bool{OptUseHsyncparam: true, OptParentSync: true}
+	child.KeyDB = kdb
+	registerZones(t, child, target)
+	if err := kdb.RecordSignalPublication(SignalPublication{
+		Target: "foobar.com.", Owner: sigOwnerFoo, Zone: "example.",
+		NS: "ns.foobar.com.", Prefix: signalPrefixSig0Key, Source: signalSourceAtNs,
+	}); err != nil {
+		t.Fatalf("RecordSignalPublication: %v", err)
+	}
+
+	child.ReconcileSignalPublications()
+
+	owners := map[string]bool{}
+	for _, ur := range drainUpdateQ(q) {
+		for _, rr := range ur.Actions {
+			owners[rr.Header().Name] = true
+		}
+	}
+	if owners[sigOwnerFoo] {
+		t.Errorf("use-hsyncparam wrote at the bootstrap's %s", sigOwnerFoo)
+	}
+	if !owners[dsbootOwnFoo] {
+		t.Errorf("pubcds published nothing at %s; wrote at %v", dsbootOwnFoo, owners)
+	}
+	rows, err := kdb.SignalPublicationsForTarget("foobar.com.")
+	if err != nil {
+		t.Fatalf("SignalPublicationsForTarget: %v", err)
+	}
+	for _, p := range rows {
+		if p.Owner == sigOwnerFoo && p.Source != signalSourceAtNs {
+			t.Errorf("the ledger row at %s is now %q's, want the bootstrap's", sigOwnerFoo, p.Source)
+		}
+	}
+	assertLedgerRow(t, kdb, "foobar.com.", sigOwnerFoo)
+}
+
+// parentsync turned on for a zone whose use-hsyncparam published both
+// records. The _sig0key name is the bootstrap's now, so use-hsyncparam's KEY
+// there is withdrawn; its CDS at the _dsboot name stays (#968).
+func TestWithdraw_ParentSyncTurnedOnWithdrawsUseHsyncparamsSig0Key(t *testing.T) {
+	f := newWithdrawFixture(t,
+		map[string][]dns.RR{
+			"example.": {
+				mustRR(t, "example. 3600 IN HSYNCPARAM pubkey pubcds"),
+				mustRR(t, "example. 3600 IN NS ns.foobar.com."),
+				mustRR(t, "example. 3600 IN KEY "+sigKeyRdata),
+				mustRR(t, "example. 3600 IN CDS 12345 15 2 ABCDEF"),
+			},
+		},
+		map[ZoneOption]bool{OptUseHsyncparam: true},
+		map[string][]dns.RR{
+			sigOwnerFoo:  {mustRR(t, sigOwnerFoo+" 3600 IN KEY "+sigKeyRdata)},
+			dsbootOwnFoo: {mustRR(t, dsbootOwnFoo+" 3600 IN CDS 12345 15 2 ABCDEF")},
+		},
+	)
+	assertLedgerRow(t, f.kdb, "foobar.com.", dsbootOwnFoo)
+
+	f.child.Options = map[ZoneOption]bool{OptUseHsyncparam: true, OptParentSync: true}
+	f.child.ReconcileSignalPublications()
+
+	assertWithdrawn(t, f, sigOwnerFoo, dns.TypeKEY)
+	assertLedgerRow(t, f.kdb, "foobar.com.", dsbootOwnFoo)
+}
+
 // The authority rule, stated as a test: a signal RRset this server did not
 // publish is never touched, however little the current configuration wants it
 // there. The zone here is set up exactly like TestWithdraw_UseHsyncparamRemoved
