@@ -1056,6 +1056,26 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zr:    &zrCopy,
 						})
 					}
+				} else if !zr.ConfigUpdate || zr.ZoneType == 0 {
+					// A refresh of a name Zones does not hold, with nothing to
+					// build a zone from: a NOTIFY or a reload that raced the
+					// zone's removal, or a caller asking for a zone this server
+					// does not have. Building one here made a zone of type 0
+					// that could never load, retried by the ticker every minute
+					// and answering queries from no data (#970). Only a
+					// config-bearing refresher with a zone type (the dynamic
+					// zones LoadDynamicZoneFiles enqueues) creates a zone here.
+					if zr.ConfigUpdate {
+						lgEngine.Error("config-bearing refresh without a zone type; no zone created", "zone", zone)
+					} else {
+						lgEngine.Debug("refresh of a zone this server does not hold; no zone created", "zone", zone)
+					}
+					if zr.Response != nil {
+						resp.Error = true
+						resp.ErrorMsg = fmt.Sprintf("zone %s is not a zone this server holds", zone)
+						zr.Response <- resp
+					}
+					continue
 				} else {
 					// DYNAMIC ZONE: not from config (catalog member, API-created).
 					// Config-defined zones are always pre-registered by ParseZones.
