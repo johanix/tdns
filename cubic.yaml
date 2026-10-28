@@ -5,10 +5,15 @@ version: 1
 reviews:
   enabled: true
   sensitivity: high  # matches the "assertive" CodeRabbit profile
-  incremental_commits: true
+  incremental_commits: false  # no re-review on each push
   check_drafts: false
 
   ignore:
+    # Review only on request: "@cubic-dev-ai review this PR" still
+    # starts a review on a PR these rules skip
+    head_branches:
+      - "*"
+      - "**"
     files:
       - "docs/**"
       - "**/*.md"
@@ -20,8 +25,6 @@ reviews:
       - "tdns/**"
       - "music/**"
       - "obe/**"
-    pr_labels:
-      - "skip-review"
 
 # Keep the PR descriptions we write
 pr_descriptions:
