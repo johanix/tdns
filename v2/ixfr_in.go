@@ -382,7 +382,7 @@ func applyIxfrRemove(data *core.NameMap[OwnerData], rr dns.RR) error {
 			return fmt.Errorf("delete of %s: not present", rr.String())
 		}
 		rs.RRSIGs = out
-		nod.RRtypes.Set(v.TypeCovered, rs) // mutator-ok: a delta name, so a touched owner, deep-copied by materializeForIxfr
+		nod.RRtypes.Set(v.TypeCovered, rs) // mutator-ok: a delta name: a touched owner's deep copy, or the fresh store of an owner an earlier delta added
 
 	default:
 		rrtype := rr.Header().Rrtype
@@ -400,9 +400,9 @@ func applyIxfrRemove(data *core.NameMap[OwnerData], rr dns.RR) error {
 			// The RRset is gone, and so are the signatures over it. Dropping
 			// the type is what keeps a name from lingering with nothing but
 			// its own signatures.
-			nod.RRtypes.Delete(rrtype) // mutator-ok: a delta name, so a touched owner, deep-copied by materializeForIxfr
+			nod.RRtypes.Delete(rrtype) // mutator-ok: a delta name: a touched owner's deep copy, or the fresh store of an owner an earlier delta added
 		} else {
-			nod.RRtypes.Set(rrtype, rs) // mutator-ok: a delta name, so a touched owner, deep-copied by materializeForIxfr
+			nod.RRtypes.Set(rrtype, rs) // mutator-ok: a delta name: a touched owner's deep copy, or the fresh store of an owner an earlier delta added
 		}
 	}
 
