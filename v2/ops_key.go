@@ -522,7 +522,12 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 		return "", oldkeyid, newkeyid, ur, errors.New(msg)
 	}
 	// And wherever an at-ns bootstrap put the old one.
-	zd.refreshSig0KeyAtSignalNames(ctx, []dns.RR{&pkc.KeyRR})
+	if _, err := zd.refreshSig0KeyAtSignalNames(ctx, []dns.RR{&pkc.KeyRR}); err != nil {
+		msg := fmt.Sprintf("RolloverSig0KeyWithParent(%q) rolled to SIG(0) key %d, but could not tell where its at-ns bootstrap published key %d, so those signal names may still hold it: %v",
+			zd.ZoneName, newkeyid, oldkeyid, err)
+		zd.Logger.Print(msg)
+		return "", oldkeyid, newkeyid, ur, errors.New(msg)
+	}
 	//	} // end of phase 3
 
 	return fmt.Sprintf("RolloverSig0KeyWithParent(%q) successfully rolled from SIG(0) key %d to SIG(0) key %d",

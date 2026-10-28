@@ -313,33 +313,40 @@ func (childZD *ZoneData) publishSig0KeyAtSignalNames(ctx context.Context, keys [
 // not the zone, says which names those are: one whose KEY has gone since is
 // published again, and a KEY that another publisher put at a name is left
 // alone (#968). Signal names never recorded are left alone.
-func (childZD *ZoneData) refreshSig0KeyAtSignalNames(ctx context.Context, keys []dns.RR) int {
+//
+// A ledger that cannot be read is an error for the caller: the rollover would
+// otherwise report success while every recorded name still holds the retired
+// key.
+func (childZD *ZoneData) refreshSig0KeyAtSignalNames(ctx context.Context, keys []dns.RR) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return childZD.publishAtSignalNames(ctx, "SIG(0) rollover", signalSourceAtNs, signalPrefixSig0Key, []uint16{dns.TypeKEY}, keys, childZD.apexNSNames(), childZD.bootstrapSig0KeyOwners())
+	owners, err := childZD.bootstrapSig0KeyOwners()
+	if err != nil {
+		return 0, err
+	}
+	return childZD.publishAtSignalNames(ctx, "SIG(0) rollover", signalSourceAtNs, signalPrefixSig0Key, []uint16{dns.TypeKEY}, keys, childZD.apexNSNames(), owners), nil
 }
 
 // bootstrapSig0KeyOwners returns the _sig0key signal names the ledger records
-// for this zone's own at-ns bootstrap. Never nil: no ledger, or one that cannot
-// be read, means no names.
-func (childZD *ZoneData) bootstrapSig0KeyOwners() map[string]bool {
+// for this zone's own at-ns bootstrap. With no ledger at all, nothing was ever
+// recorded, and the answer is no names. A ledger that is there and cannot be
+// read is an error, not an empty answer.
+func (childZD *ZoneData) bootstrapSig0KeyOwners() (map[string]bool, error) {
 	owners := map[string]bool{}
 	if !SignalLedgerReadable(childZD.KeyDB) {
-		return owners
+		return owners, nil
 	}
 	rows, err := childZD.KeyDB.SignalPublicationsForZone(childZD.ZoneName)
 	if err != nil {
-		lgSignal.Error("failed to read the signal publication ledger; refreshing no signal names",
-			"zone", childZD.ZoneName, "err", err)
-		return owners
+		return nil, fmt.Errorf("reading the signal publication ledger: %w", err)
 	}
 	for _, p := range rows {
 		if p.Source == signalSourceAtNs && p.Prefix == signalPrefixSig0Key {
 			owners[p.Owner] = true
 		}
 	}
-	return owners
+	return owners, nil
 }
 
 // signalRRsPresent reports whether the target zone holds any RRset of the

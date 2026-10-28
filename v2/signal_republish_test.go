@@ -671,8 +671,8 @@ func TestRefreshSig0KeyAtSignalNamesFollowsTheLedger(t *testing.T) {
 	}
 	seen := ackUpdates(t, q, ZoneUpdateResult{Applied: true})
 
-	if n := child.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")}); n != 2 {
-		t.Fatalf("refresh satisfied = %d, want 2 (the two names in the ledger)", n)
+	if n, err := child.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")}); err != nil || n != 2 {
+		t.Fatalf("refresh satisfied = %d (err %v), want 2 (the two names in the ledger)", n, err)
 	}
 	added, touched := map[string]bool{}, map[string]bool{}
 	for _, ur := range *seen {
@@ -696,11 +696,48 @@ func TestRefreshSig0KeyAtSignalNamesFollowsTheLedger(t *testing.T) {
 	fresh.KeyDB.UpdateQ = q2
 	registerZones(t, fresh)
 	seen2 := ackUpdates(t, q2, ZoneUpdateResult{Applied: true})
-	if n := fresh.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "fresh.example. 3600 IN KEY 256 3 15 bmV3")}); n != 0 {
-		t.Fatalf("refresh of a never-populated zone satisfied %d, want 0", n)
+	if n, err := fresh.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "fresh.example. 3600 IN KEY 256 3 15 bmV3")}); err != nil || n != 0 {
+		t.Fatalf("refresh of a never-populated zone satisfied %d (err %v), want 0 and no error", n, err)
 	}
 	if len(*seen2) != 0 {
 		t.Fatal("refresh must not start populating a signal name a bootstrap never used")
+	}
+}
+
+// A ledger that is there and cannot be read is an error for the rollover, not
+// an empty answer: the rollover would otherwise report success while the
+// recorded names still hold the retired key.
+func TestRefreshSig0KeyAtSignalNamesReportsAnUnreadableLedger(t *testing.T) {
+	owner := "_sig0key.child.example._signal.ns.child.example."
+	kdb := newTestKeyDB(t)
+	child, q := signalTarget("child.example.", map[string][]dns.RR{
+		owner: {mustRR(t, owner+" 3600 IN KEY 256 3 15 b2xk")},
+	})
+	child.KeyDB = kdb
+	kdb.UpdateQ = q
+	registerZones(t, child)
+	if err := kdb.RecordSignalPublication(SignalPublication{
+		Target: "child.example.", Owner: owner, Zone: "child.example.",
+		NS: "ns.child.example.", Prefix: signalPrefixSig0Key, Source: signalSourceAtNs,
+	}); err != nil {
+		t.Fatalf("RecordSignalPublication: %v", err)
+	}
+	if _, err := kdb.DB.Exec(`DROP TABLE SignalPublication`); err != nil {
+		t.Fatalf("drop the ledger: %v", err)
+	}
+
+	n, err := child.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")})
+	if err == nil {
+		t.Fatalf("an unreadable ledger was taken for an empty one (satisfied %d)", n)
+	}
+	if urs := drainUpdateQ(q); len(urs) != 0 {
+		t.Fatalf("published %d updates without knowing where: %+v", len(urs), urs)
+	}
+
+	// No ledger at all is no names, and no error: nothing was ever recorded.
+	child.KeyDB = &KeyDB{UpdateQ: q}
+	if n, err := child.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")}); err != nil || n != 0 {
+		t.Fatalf("without a ledger: satisfied %d, err %v; want 0 and no error", n, err)
 	}
 }
 
