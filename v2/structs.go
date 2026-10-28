@@ -336,7 +336,8 @@ type ZoneData struct {
 
 	// ixfrTouched is the owner set that delta reached, carried from the IXFR
 	// apply to applyRefreshReplacementLocked so it can stage wsSignOwners.
-	// Set only alongside ixfrDerived.
+	// Set only alongside ixfrDerived. A pre-refresh write into the draft adds
+	// the owner it writes (ownDraftOwnerLocked).
 	ixfrTouched map[string]bool
 
 	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale

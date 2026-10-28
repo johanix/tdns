@@ -1739,7 +1739,7 @@ func (zd *ZoneData) stageDraftRRsetLocked(name string, rs core.RRset) {
 	if zd.Data == nil {
 		zd.Data = core.NewNameMap[OwnerData]()
 	}
-	od, ok := zd.Data.Get(name)
+	od, ok := zd.ownDraftOwnerLocked(name)
 	if !ok {
 		od = OwnerData{Name: name, RRtypes: NewRRTypeStore()}
 	} else if od.RRtypes == nil {
@@ -1749,6 +1749,48 @@ func (zd *ZoneData) stageDraftRRsetLocked(name string, rs core.RRset) {
 	zd.Data.Set(name, od)
 }
 
+// ownDraftOwnerLocked makes one owner of a draft the draft's own before a write
+// reaches it, and returns the owner as Data then holds it.
+//
+// A draft built by an inbound IXFR (applyIxfrToScratch) deep-copied only the
+// owners the delta touched. Every other owner shares its store and its NSEC
+// with the snapshot being served (materializeForIxfr), so a write through it
+// would change the served zone in place, at the old serial, and the outbound
+// delta would never carry the change, because computeZoneDelta takes a shared
+// store for an untouched one (#965). Such an owner is deep-copied here, once,
+// as materializeForIxfr would have, and joins ixfrTouched, so the publish
+// signs it (wsSignOwners). A name the draft does not hold joins too: a new
+// owner needs signing as much as a changed one.
+//
+// Any other draft -- a zone file, an AXFR, an IXFR whose touched set is nil
+// because it copied everything -- shares nothing with the snapshot, and its
+// owners are returned as they are.
+func (zd *ZoneData) ownDraftOwnerLocked(name string) (OwnerData, bool) {
+	od, ok := zd.Data.Get(name)
+	if !zd.ixfrDerived || zd.ixfrTouched == nil {
+		return od, ok
+	}
+	key := core.CanonicalizeName(name)
+	if zd.ixfrTouched[key] {
+		return od, ok
+	}
+	zd.ixfrTouched[key] = true
+	if !ok {
+		return od, false
+	}
+	nod := OwnerData{Name: od.Name, RRtypes: NewRRTypeStore()}
+	if od.RRtypes != nil {
+		for _, t := range od.RRtypes.Keys() {
+			if rs, ok := od.RRtypes.Get(t); ok {
+				nod.RRtypes.Set(t, cloneRRset(rs))
+			}
+		}
+	}
+	nod.NSEC = cloneRRset(od.NSEC)
+	zd.Data.Set(name, nod)
+	return nod, true
+}
+
 // stageDraftDeleteLocked removes one RRset of one owner from a draft's Data.
 // An absent owner is left absent: deleting a type from a name that is not
 // there must not bring the name into existence.
@@ -1756,10 +1798,10 @@ func (zd *ZoneData) stageDraftDeleteLocked(name string, rrtype uint16) {
 	if zd.Data == nil {
 		return
 	}
-	od, ok := zd.Data.Get(name)
-	if !ok || od.RRtypes == nil {
+	if od, ok := zd.Data.Get(name); !ok || od.RRtypes == nil {
 		return
 	}
+	od, _ := zd.ownDraftOwnerLocked(name)
 	// RRtypes is a pointer shared with the stored value, so the delete lands
 	// in Data without a Set.
 	od.RRtypes.Delete(rrtype)
