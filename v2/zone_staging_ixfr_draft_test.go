@@ -77,6 +77,8 @@ func deltaA(sets []core.RRset, owner string) []string {
 	return out
 }
 
+// sameStrings reports whether two lists hold the same strings in the same
+// order.
 func sameStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -89,6 +91,8 @@ func sameStrings(a, b []string) bool {
 	return true
 }
 
+// A draft write to an untouched owner, and to a new one, changes the draft
+// only, and both owners join the touched set.
 func TestStageOnAnIxfrDraftLeavesTheServedZoneAlone(t *testing.T) {
 	zd, newZd := ixfrDraft(t)
 
@@ -109,6 +113,7 @@ func TestStageOnAnIxfrDraftLeavesTheServedZoneAlone(t *testing.T) {
 	}
 }
 
+// A draft delete on an untouched owner removes the RRset from the draft only.
 func TestDeleteOnAnIxfrDraftLeavesTheServedZoneAlone(t *testing.T) {
 	zd, newZd := ixfrDraft(t)
 
@@ -119,6 +124,25 @@ func TestDeleteOnAnIxfrDraftLeavesTheServedZoneAlone(t *testing.T) {
 	}
 	if got := draftA(newZd, "ns.example."); len(got) != 0 {
 		t.Fatalf("the draft's ns.example. A is %v after the delete, want none", got)
+	}
+}
+
+// Deleting a type the owner does not have writes nothing, so the owner stays
+// shared and out of the touched set: a signing secondary must not re-sign it.
+func TestDeleteOfAnAbsentTypeLeavesAnIxfrDraftOwnerShared(t *testing.T) {
+	zd, newZd := ixfrDraft(t)
+
+	newZd.StageDelete("ns.example.", dns.TypeAAAA)
+
+	if newZd.ixfrTouched["ns.example."] {
+		t.Error("deleting an absent type put ns.example. in ixfrTouched")
+	}
+	od, ok := newZd.Data.Get("ns.example.")
+	if !ok {
+		t.Fatal("ns.example. is gone from the draft")
+	}
+	if !sharesOwnerStorage(zd.publishedSnapshot().Data["ns.example."], &od) {
+		t.Error("deleting an absent type copied ns.example. out of the snapshot's store")
 	}
 }
 
@@ -135,6 +159,12 @@ func TestStageBatchOnAnIxfrDraftLeavesTheServedZoneAlone(t *testing.T) {
 	}
 	if got := snapshotA(zd.publishedSnapshot(), "ns.example."); !sameStrings(got, []string{"10.0.0.1"}) {
 		t.Fatalf("the served ns.example. A is %v after a batch on the draft, want [10.0.0.1]", got)
+	}
+	if got := draftA(newZd, "ns.example."); !sameStrings(got, []string{"10.0.0.99"}) {
+		t.Fatalf("the draft's ns.example. A is %v after the batch, want [10.0.0.99]", got)
+	}
+	if !newZd.ixfrTouched["ns.example."] {
+		t.Fatal("ns.example. is not in ixfrTouched after the batch")
 	}
 }
 

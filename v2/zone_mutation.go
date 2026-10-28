@@ -1798,10 +1798,16 @@ func (zd *ZoneData) stageDraftDeleteLocked(name string, rrtype uint16) {
 	if zd.Data == nil {
 		return
 	}
-	if od, ok := zd.Data.Get(name); !ok || od.RRtypes == nil {
+	od, ok := zd.Data.Get(name)
+	if !ok || od.RRtypes == nil {
 		return
 	}
-	od, _ := zd.ownDraftOwnerLocked(name)
+	// Nothing to delete is no write: the owner stays shared and untouched,
+	// so a signing secondary does not re-sign what did not change.
+	if _, ok := od.RRtypes.Get(rrtype); !ok {
+		return
+	}
+	od, _ = zd.ownDraftOwnerLocked(name)
 	// RRtypes is a pointer shared with the stored value, so the delete lands
 	// in Data without a Set.
 	od.RRtypes.Delete(rrtype)
