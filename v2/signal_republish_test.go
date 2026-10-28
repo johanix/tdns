@@ -584,9 +584,9 @@ func TestPublishSig0KeyAtSignalNames(t *testing.T) {
 		t.Errorf("expected delete-RRset + add (delete=%v add=%v)", sawDelete, sawAdd)
 	}
 
-	// The fake updater acknowledged without applying anything to the zone,
-	// so the change gate (which reads zone data) still sees no KEY and a
-	// second publish enqueues again. The gate itself is exercised by
+	// A confirmed publish always goes through the updater, so a second one
+	// enqueues again. The change gate, which only a fire-and-forget
+	// publication uses, is exercised by
 	// TestRepublish_ChangeGateNoOpWhenAlreadyPublished, whose zone is seeded
 	// with the record.
 	if n := child.publishSig0KeyAtSignalNames(context.Background(), []dns.RR{key}); n != 1 {

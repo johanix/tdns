@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -580,6 +581,58 @@ func TestWithdraw_ParentSyncTurnedOnWithdrawsUseHsyncparamsSig0Key(t *testing.T)
 
 	assertWithdrawn(t, f, sigOwnerFoo, dns.TypeKEY)
 	assertLedgerRow(t, f.kdb, "foobar.com.", dsbootOwnFoo)
+}
+
+// The bootstrap publishes at a _sig0key name while use-hsyncparam's
+// withdrawal of that name is still queued. The served zone still holds the
+// KEY, the same one, but the bootstrap must queue its add anyway, behind the
+// delete: trusting the snapshot would record the name as published and let
+// the delete remove the KEY the parent is about to look for.
+func TestABootstrapPublishIsQueuedBehindAPendingWithdrawal(t *testing.T) {
+	f := pubkeyFixture(t)
+	f.child.Options = map[ZoneOption]bool{OptUseHsyncparam: true, OptParentSync: true}
+	f.child.ReconcileSignalPublications() // queues the withdrawal; nothing applies it
+	if !signalRRsPresent(f.target, sigOwnerFoo, []uint16{dns.TypeKEY}) {
+		t.Fatal("the delete has landed; the case under test is one that has not")
+	}
+	seen := ackUpdates(t, f.q, ZoneUpdateResult{Applied: true})
+
+	key := mustRR(t, "example. 3600 IN KEY "+sigKeyRdata)
+	if n := f.child.publishSig0KeyAtSignalNames(context.Background(), []dns.RR{key}); n != 1 {
+		t.Fatalf("satisfied = %d, want 1", n)
+	}
+
+	urs := *seen
+	if len(urs) != 2 {
+		t.Fatalf("expected the withdrawal and then the bootstrap's publication, got %d: %+v", len(urs), urs)
+	}
+	for _, rr := range urs[0].Actions {
+		if rr.Header().Class != dns.ClassANY {
+			t.Errorf("the first update must be the withdrawal's delete; got %s", rr)
+		}
+	}
+	var added bool
+	for _, rr := range urs[1].Actions {
+		if rr.Header().Name == sigOwnerFoo && rr.Header().Class == dns.ClassINET && rr.Header().Rrtype == dns.TypeKEY {
+			added = true
+		}
+	}
+	if !added {
+		t.Fatalf("the bootstrap queued no add behind the delete: %v", urs[1].Actions)
+	}
+	rows, err := f.kdb.SignalPublicationsForTarget("foobar.com.")
+	if err != nil {
+		t.Fatalf("SignalPublicationsForTarget: %v", err)
+	}
+	var source string
+	for _, p := range rows {
+		if p.Owner == sigOwnerFoo {
+			source = p.Source
+		}
+	}
+	if source != signalSourceAtNs {
+		t.Fatalf("the ledger row at %s is %q's, want the bootstrap's", sigOwnerFoo, source)
+	}
 }
 
 // The authority rule, stated as a test: a signal RRset this server did not

@@ -220,8 +220,9 @@ func (childZD *ZoneData) signalPublishTargets(prefix string, nsNames []string) [
 
 // publishAtSignalNames publishes srcRRs, re-owned to <prefix>.<child>._signal.<ns>,
 // into the local primary zone owning each of those names, for every NS in
-// nsNames this server can publish for. Change-gated per target: a signal
-// RRset that already matches is left alone. With a non-nil only, targets whose
+// nsNames this server can publish for. A fire-and-forget publication is
+// change-gated per target: a signal RRset that already matches is left alone.
+// A confirmed one is not (see the loop). With a non-nil only, targets whose
 // signal name is not in it are skipped -- that is the SIG(0) rollover refresh,
 // which must update the signal names a bootstrap recorded without starting to
 // populate ones it never did.
@@ -250,7 +251,17 @@ func (childZD *ZoneData) publishAtSignalNames(ctx context.Context, what, source,
 		}
 		attempted++
 		desired := reownRRs(srcRRs, tgt.Owner)
-		if signalRRsEqual(tgt.Zone, tgt.Owner, rrtypes, desired) {
+		// The change gate reads the published snapshot, which an update still
+		// in the queue may be about to change. A fire-and-forget publication
+		// can live with that: it runs again after the zone's next refresh. A
+		// confirmed one cannot. Its caller acts on the result at once (the
+		// parent looks for the KEY), and a withdrawal's delete still queued
+		// would remove a record the gate took for published, under a ledger
+		// row that says it is there. So a confirmed publication always goes
+		// through the updater, which applies the queue in order: its add lands
+		// after any delete queued before it. The cost is one serial bump when
+		// the record was already served.
+		if ctx == nil && signalRRsEqual(tgt.Zone, tgt.Owner, rrtypes, desired) {
 			satisfied++
 			childZD.recordSignalPublication(tgt, source, prefix)
 			continue // already published, change-gated no-op
