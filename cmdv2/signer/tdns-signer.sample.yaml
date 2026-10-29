@@ -163,6 +163,9 @@ db:
 log:
    file:   /var/log/tdns/tdns-signer.log
    level:  info
+   # max-size:     20    # MB before the file is rotated (default 20)
+   # max-backups:  3     # rotated files kept (default 3)
+   # max-age:      14    # days a rotated file is kept (default 14)
 
    # The subsystems worth turning up while bringing a signer into service:
    #   zones     zone load and AXFR/IXFR in and out

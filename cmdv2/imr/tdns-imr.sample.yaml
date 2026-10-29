@@ -221,6 +221,9 @@ apiserver:
 log:
    file:                /var/log/tdns/tdns-imr.log
    level:               info    # default level: debug|info|warn|error
+   # max-size:          20      # MB before the file is rotated (default 20)
+   # max-backups:       3       # rotated files kept (default 3)
+   # max-age:           14      # days a rotated file is kept (default 14)
 
 # Optional second config file, merged on top of this one. This is the only
 # `imr.`-prefixed key; it is read directly and is not part of `imrengine:`.
