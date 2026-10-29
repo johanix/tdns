@@ -86,6 +86,11 @@ func (s *stagedStrip) finish(committed bool) {
 		if err := zd.CommitTx(s.hold); err != nil {
 			lgSigner.Error("the publish after the keystore transaction was refused; the change stays staged",
 				"zone", zd.ZoneName, "err", err)
+			// A hold that ran out is no longer open, and its release published
+			// the strip. What a rollback put back needs a publish of its own.
+			if !committed && len(s.took) > 0 {
+				zd.requestPublish(false)
+			}
 		}
 	case len(s.took) > 0:
 		zd.requestPublish(false)

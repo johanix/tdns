@@ -48,6 +48,14 @@ func stagedRRSIGTags(zd *ZoneData) map[uint16]int {
 	return rrsigTags(zd.workingSet)
 }
 
+func countRRSIGs(tags map[uint16]int) int {
+	n := 0
+	for _, c := range tags {
+		n += c
+	}
+	return n
+}
+
 func servesNoneOf(zd *ZoneData, tags map[uint16]int) bool {
 	served := servedRRSIGTags(zd)
 	for tag := range tags {
@@ -291,4 +299,53 @@ func TestAStripIsPutBackWhenItsKeyChangeRollsBack(t *testing.T) {
 			t.Errorf("key %d: %d RRSIGs served after the rollback, the zone had %d", tag, served[tag], n)
 		}
 	}
+}
+
+// TestARolledBackStripIsPublishedAfterItsHoldRanOut: when the zone's hold runs
+// out before the keystore transaction ends, its release publishes the strip.
+// If the transaction then rolls back, the RRSIGs put back must be published
+// too, not left staged: the hold is gone, and closing it publishes nothing.
+func TestARolledBackStripIsPublishedAfterItsHoldRanOut(t *testing.T) {
+	withTxHoldLimit(t, 20*time.Millisecond)
+	kdb := newTestKeyDB(t)
+	zd := signingTestZone(t, kdb)
+	old := servedRRSIGTags(zd)
+	// A cadence, so that the release's publish waits until the transaction has
+	// rolled back instead of meeting it.
+	zd.mu.Lock()
+	zd.publishCadence = 300 * time.Millisecond
+	zd.lastPublish = time.Now()
+	zd.mu.Unlock()
+
+	tx, err := kdb.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := kdb.DnssecKeyMgmt(context.Background(), tx, clearPost(zd.ZoneName))
+	if err != nil || resp.Error {
+		t.Fatalf("clear: %v %s", err, resp.ErrorMsg)
+	}
+	waitFor(t, 5*time.Second, "the hold to run out", func() bool { return zd.txOpenCount() == 0 })
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	// The release's publish re-signs the SOA with the keys still in the
+	// keystore, the old ones: the strip shows as fewer RRSIGs.
+	waitFor(t, 5*time.Second, "the release to publish the strip", func() bool { return countRRSIGs(servedRRSIGTags(zd)) < countRRSIGs(old) })
+
+	resp.stagedStrip.finish(false)
+	defer func() {
+		if t.Failed() {
+			t.Logf("served %v, the zone had %v", servedRRSIGTags(zd), old)
+		}
+	}()
+	waitFor(t, 5*time.Second, "the RRSIGs put back to be published", func() bool {
+		served := servedRRSIGTags(zd)
+		for tag, n := range old {
+			if served[tag] != n {
+				return false
+			}
+		}
+		return true
+	})
 }
