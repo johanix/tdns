@@ -11,6 +11,7 @@ package edns0
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 
@@ -74,11 +75,25 @@ type EnrollmentConfirmation struct {
 	ErrorMessage  string `json:"error_message,omitempty"` // Error message if status is "error"
 }
 
+// ErrChunkOptionTooLarge is returned by CreateChunkOption for data and an
+// HMAC that one EDNS(0) option cannot hold. Test for it with errors.Is.
+var ErrChunkOptionTooLarge = errors.New("CHUNK option too large")
+
+// maxChunkOptionLen is the most an EDNS(0) option can hold: an OPT RR's
+// RDATA is at most 65535 bytes, the option's code and length included.
+const maxChunkOptionLen = 65535 - 4
+
 // CreateChunkOption creates a CHUNK EDNS(0) option
 // format: Format identifier (e.g., core.FormatJSON)
 // hmac: HMAC bytes (nil if no HMAC)
 // data: The data payload (will be JSON encoded if format is FormatJSON)
-func CreateChunkOption(format uint8, hmac []byte, data []byte) *dns.EDNS0_LOCAL {
+// Data and HMAC that do not fit one option get an error that wraps
+// ErrChunkOptionTooLarge, never a shortened option.
+func CreateChunkOption(format uint8, hmac []byte, data []byte) (*dns.EDNS0_LOCAL, error) {
+	if n := 1 + 2 + len(hmac) + 2 + len(data); n > maxChunkOptionLen {
+		return nil, fmt.Errorf("%w: %d bytes of data and %d of HMAC make %d bytes, more than the %d that fit",
+			ErrChunkOptionTooLarge, len(data), len(hmac), n, maxChunkOptionLen)
+	}
 	option := &ChunkOption{
 		Format:     format,
 		HMACLen:    uint16(len(hmac)),
@@ -93,7 +108,7 @@ func CreateChunkOption(format uint8, hmac []byte, data []byte) *dns.EDNS0_LOCAL 
 	return &dns.EDNS0_LOCAL{
 		Code: EDNS0_CHUNK_OPTION_CODE,
 		Data: optionData,
-	}
+	}, nil
 }
 
 // CreateKeyStatusChunkOption creates a CHUNK EDNS(0) option with key status report content
@@ -115,7 +130,7 @@ func CreateKeyStatusChunkOption(successfulKeys, failedKeys []KeyStatusEntry) (*d
 	copy(data[1:], jsonData)
 
 	// Create option with no HMAC (key status reports don't need HMAC)
-	return CreateChunkOption(core.FormatJSON, nil, data), nil
+	return CreateChunkOption(core.FormatJSON, nil, data)
 }
 
 // CreateComponentStatusChunkOption creates a CHUNK EDNS(0) option with component status report content
@@ -137,7 +152,7 @@ func CreateComponentStatusChunkOption(successfulComponents, failedComponents []C
 	copy(data[1:], jsonData)
 
 	// Create option with no HMAC (component status reports don't need HMAC)
-	return CreateChunkOption(core.FormatJSON, nil, data), nil
+	return CreateChunkOption(core.FormatJSON, nil, data)
 }
 
 // CreateEnrollmentConfirmationOption creates a CHUNK EDNS(0) option with enrollment confirmation content
@@ -155,10 +170,11 @@ func CreateEnrollmentConfirmationOption(encryptedConfirmation []byte) (*dns.EDNS
 	copy(data[1:], encryptedConfirmation)
 
 	// Create option with no HMAC (enrollment confirmation is already encrypted)
-	return CreateChunkOption(core.FormatJSON, nil, data), nil
+	return CreateChunkOption(core.FormatJSON, nil, data)
 }
 
-// Pack packs the ChunkOption into wire format
+// Pack packs the ChunkOption into wire format. HMACLen and DataLength
+// must be the lengths of HMAC and Data, as CreateChunkOption sets them.
 func (opt *ChunkOption) Pack() []byte {
 	// Calculate total length: Format(1) + HMACLen(2) + HMAC(variable) + DataLength(2) + Data(variable)
 	totalLen := 1 + 2 + int(opt.HMACLen) + 2 + int(opt.DataLength)
