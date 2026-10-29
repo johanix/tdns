@@ -979,6 +979,7 @@ type InternalDnsConf struct {
 	StopCh              chan struct{}
 	APIStopCh           chan struct{}
 	StopOnce            sync.Once
+	stopFailed          atomic.Bool // set by Shutdowner: MainLoop exits 1, not 0 (#977)
 	RefreshZoneCh       chan ZoneRefresher
 	BumpZoneCh          chan BumperData
 	ValidatorCh         chan ValidatorRequest
