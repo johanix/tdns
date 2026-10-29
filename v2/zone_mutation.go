@@ -79,7 +79,7 @@ func (zd *ZoneData) cloneOwner(name string) *OwnerData {
 	if src != nil {
 		for _, t := range src.RRtypes.Keys() {
 			rs, _ := src.RRtypes.Get(t)
-			nod.RRtypes.Set(t, rs)
+			nod.RRtypes.Set(t, rs) // mutator-ok: cloneOwner: into the fresh store it has just made
 		}
 		// The NSEC property travels with the owner. Rebuilding an owner from
 		// its RRtypes alone would drop the chain entry silently, and the name
@@ -100,12 +100,12 @@ func (zd *ZoneData) cloneOwner(name string) *OwnerData {
 
 func (zd *ZoneData) stageRRset(name string, rs core.RRset) {
 	zd.ensureWorkingSet()
-	zd.cloneOwner(name).RRtypes.Set(rs.RRtype, cloneRRset(rs))
+	zd.cloneOwner(name).RRtypes.Set(rs.RRtype, cloneRRset(rs)) // mutator-ok: the working set's own copy of the owner (cloneOwner)
 }
 
 func (zd *ZoneData) stageDelete(name string, rrtype uint16) {
 	zd.ensureWorkingSet()
-	zd.cloneOwner(name).RRtypes.Delete(rrtype)
+	zd.cloneOwner(name).RRtypes.Delete(rrtype) // mutator-ok: the working set's own copy of the owner (cloneOwner)
 }
 
 func (zd *ZoneData) stageOwnerReplace(name string, od *OwnerData) {
@@ -379,7 +379,7 @@ func (zd *ZoneData) resignWorkingSetSOAIfSigned(sm *signingMaterial) {
 		lg.Error("publish: failed to re-sign SOA", "zone", zd.ZoneName, "err", err)
 		return
 	}
-	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, cloneRRset(rs))
+	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, cloneRRset(rs)) // mutator-ok: the re-signed SOA, into the working set's own apex (cloneOwner)
 }
 
 func (zd *ZoneData) publishSync() (BumperResponse, error) {
@@ -449,7 +449,7 @@ func (zd *ZoneData) stageRRsetLocked(name string, rs core.RRset) {
 	}
 	rs.RRtype = rrtype
 	zd.ensureWorkingSet()
-	zd.cloneOwner(name).RRtypes.Set(rrtype, cloneRRset(rs))
+	zd.cloneOwner(name).RRtypes.Set(rrtype, cloneRRset(rs)) // mutator-ok: the working set's own copy of the owner (cloneOwner)
 }
 
 // stageNsecLocked sets an owner's NSEC property. Unlike stageRRsetLocked it
@@ -478,7 +478,7 @@ func (zd *ZoneData) stageNsecDeleteLocked(name string) {
 
 func (zd *ZoneData) stageDeleteLocked(name string, rrtype uint16) {
 	zd.ensureWorkingSet()
-	zd.cloneOwner(name).RRtypes.Delete(rrtype)
+	zd.cloneOwner(name).RRtypes.Delete(rrtype) // mutator-ok: the working set's own copy of the owner (cloneOwner)
 }
 
 func (zd *ZoneData) stageOwnerReplaceLocked(name string, od *OwnerData) {
@@ -1451,7 +1451,7 @@ func (zd *ZoneData) setWorkingSetSOASerial(serial uint32) bool {
 	soa.Serial = serial
 	// Stage into a cloned apex owner rather than writing through the shared
 	// snapshot store — the previous in-place Set tore concurrent readers.
-	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, rs)
+	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, rs) // mutator-ok: the new serial, into the working set's own apex (cloneOwner)
 	return changed
 }
 
@@ -1470,7 +1470,7 @@ func (zd *ZoneData) dropWorkingSetSOASignaturesLocked() {
 		return
 	}
 	rs.RRSIGs = nil
-	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, rs)
+	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, rs) // mutator-ok: the unsigned SOA, into the working set's own apex (cloneOwner)
 }
 
 func (zd *ZoneData) publishNow(gen uint64) {
@@ -1745,8 +1745,8 @@ func (zd *ZoneData) stageDraftRRsetLocked(name string, rs core.RRset) {
 	} else if od.RRtypes == nil {
 		od.RRtypes = NewRRTypeStore()
 	}
-	od.RRtypes.Set(rrtype, cloneRRset(rs))
-	zd.Data.Set(name, od)
+	od.RRtypes.Set(rrtype, cloneRRset(rs)) // mutator-ok: an owner the draft owns (ownDraftOwnerLocked), or a new owner's fresh store
+	zd.Data.Set(name, od)                  // mutator-ok: the draft's own owner map, which no snapshot shares
 }
 
 // ownDraftOwnerLocked makes one owner of a draft the draft's own before a write
@@ -1782,12 +1782,12 @@ func (zd *ZoneData) ownDraftOwnerLocked(name string) (OwnerData, bool) {
 	if od.RRtypes != nil {
 		for _, t := range od.RRtypes.Keys() {
 			if rs, ok := od.RRtypes.Get(t); ok {
-				nod.RRtypes.Set(t, cloneRRset(rs))
+				nod.RRtypes.Set(t, cloneRRset(rs)) // mutator-ok: the fresh store of the owner's deep copy
 			}
 		}
 	}
 	nod.NSEC = cloneRRset(od.NSEC)
-	zd.Data.Set(name, nod)
+	zd.Data.Set(name, nod) // mutator-ok: the draft's own owner map, which no snapshot shares
 	return nod, true
 }
 
@@ -1810,7 +1810,7 @@ func (zd *ZoneData) stageDraftDeleteLocked(name string, rrtype uint16) {
 	od, _ = zd.ownDraftOwnerLocked(name)
 	// RRtypes is a pointer shared with the stored value, so the delete lands
 	// in Data without a Set.
-	od.RRtypes.Delete(rrtype)
+	od.RRtypes.Delete(rrtype) // mutator-ok: an owner the draft owns (ownDraftOwnerLocked)
 }
 
 // stageDraftOwnerDeleteLocked removes an owner from a draft's Data.
