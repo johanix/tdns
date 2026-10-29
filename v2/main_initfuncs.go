@@ -395,6 +395,9 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	return nil
 }
 
+// Shutdowner stops a daemon that cannot go on: a failed start, or a stop the
+// daemon itself decides on. It exits 1, so a supervisor sees a failure
+// (#977). A normal stop, by signal or the API, ends in MainLoop instead.
 func Shutdowner(conf *Config, msg string) {
 	lgConfig.Info("shutting down", "app", Globals.App.Name, "reason", msg)
 	fmt.Printf("%s: shutting down: %s\n", Globals.App.Name, msg)
@@ -409,5 +412,5 @@ func Shutdowner(conf *Config, msg string) {
 	engineWg.Wait() // Wait for all engines to finish (let's see if this works
 	lgConfig.Info("all engines finished", "app", Globals.App.Name)
 	time.Sleep(200 * time.Millisecond)
-	os.Exit(0)
+	os.Exit(1)
 }
