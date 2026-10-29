@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -627,8 +628,8 @@ func TestPublishSig0KeyAtSignalNamesRequiresApply(t *testing.T) {
 	t.Run("nil ctx only enqueues", func(t *testing.T) {
 		child, q := signalTarget("child.example.", nil)
 		registerZones(t, child)
-		if n := child.publishAtSignalNames(nil, "test", signalSourceAtNs, signalPrefixSig0Key, []uint16{dns.TypeKEY}, []dns.RR{key}, child.apexNSNames(), nil); n != 1 {
-			t.Fatalf("fire-and-forget satisfied = %d, want 1", n)
+		if n, err := child.publishAtSignalNames(nil, "test", signalSourceAtNs, signalPrefixSig0Key, []uint16{dns.TypeKEY}, []dns.RR{key}, child.apexNSNames(), nil); n != 1 || err != nil {
+			t.Fatalf("fire-and-forget satisfied = %d (err %v), want 1", n, err)
 		}
 		urs := drainUpdateQ(q)
 		if len(urs) != 1 || urs[0].Resp != nil {
@@ -738,6 +739,133 @@ func TestRefreshSig0KeyAtSignalNamesReportsAnUnreadableLedger(t *testing.T) {
 	child.KeyDB = &KeyDB{UpdateQ: q}
 	if n, err := child.refreshSig0KeyAtSignalNames(context.Background(), []dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")}); err != nil || n != 0 {
 		t.Fatalf("without a ledger: satisfied %d, err %v; want 0 and no error", n, err)
+	}
+}
+
+// A recorded name the new key could not be published at is an error for the
+// rollover, even when the other names took it: that name may still hold the
+// retired key. A timed-out update is such a name, since it may land or not.
+func TestRefreshSig0KeyAtSignalNamesReportsAFailedPublish(t *testing.T) {
+	const (
+		applied = "_sig0key.child.example._signal.ns.child.example."
+		refused = "_sig0key.child.example._signal.ns2.child.example."
+	)
+	setup := func(t *testing.T) (*ZoneData, chan UpdateRequest) {
+		t.Helper()
+		kdb := newTestKeyDB(t)
+		child, q := signalTarget("child.example.", map[string][]dns.RR{
+			"child.example.": {mustRR(t, "child.example. 3600 IN NS ns2.child.example.")},
+		})
+		child.KeyDB = kdb
+		kdb.UpdateQ = q
+		registerZones(t, child)
+		for owner, ns := range map[string]string{applied: "ns.child.example.", refused: "ns2.child.example."} {
+			if err := kdb.RecordSignalPublication(SignalPublication{
+				Target: "child.example.", Owner: owner, Zone: "child.example.",
+				NS: ns, Prefix: signalPrefixSig0Key, Source: signalSourceAtNs,
+			}); err != nil {
+				t.Fatalf("RecordSignalPublication: %v", err)
+			}
+		}
+		return child, q
+	}
+	newKey := []dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")}
+
+	t.Run("refused apply", func(t *testing.T) {
+		child, q := setup(t)
+		stop := make(chan struct{})
+		t.Cleanup(func() { close(stop) })
+		go func() {
+			for {
+				select {
+				case <-stop:
+					return
+				case ur := <-q:
+					res := ZoneUpdateResult{Applied: true}
+					if ur.Actions[0].Header().Name == refused {
+						res = ZoneUpdateResult{Err: errors.New("zone updater says no")}
+					}
+					if ur.Resp != nil {
+						ur.Resp <- res
+					}
+				}
+			}
+		}()
+		n, err := child.refreshSig0KeyAtSignalNames(context.Background(), newKey)
+		if err == nil {
+			t.Fatalf("a refused publish at %s was reported as success (satisfied %d)", refused, n)
+		}
+		if n != 1 {
+			t.Errorf("satisfied = %d, want 1 (%s)", n, applied)
+		}
+		if msg := err.Error(); !strings.Contains(msg, refused) || strings.Contains(msg, applied) || !strings.Contains(msg, "zone updater says no") {
+			t.Errorf("error %q should name %s and its reason, and not %s", msg, refused, applied)
+		}
+	})
+
+	t.Run("updater never answers", func(t *testing.T) {
+		prev := signalPublishApplyTimeout
+		signalPublishApplyTimeout = 50 * time.Millisecond
+		t.Cleanup(func() { signalPublishApplyTimeout = prev })
+		child, q := setup(t)
+		go func() {
+			for range 2 {
+				<-q // take the request, never respond
+			}
+		}()
+		n, err := child.refreshSig0KeyAtSignalNames(context.Background(), newKey)
+		if err == nil || n != 0 {
+			t.Fatalf("satisfied %d, err %v; want 0 and an error on apply timeout", n, err)
+		}
+		if msg := err.Error(); !strings.Contains(msg, applied) || !strings.Contains(msg, refused) || !strings.Contains(msg, "timed out") {
+			t.Errorf("error %q should name both signal names and the timeout", msg)
+		}
+	})
+}
+
+// The ledger says in which zone the bootstrap published a name. When another
+// zone holds that name now, the refresh leaves it alone: the bootstrap never
+// published there. A row for the zone that holds it now is refreshed there.
+func TestRefreshSig0KeyAtSignalNamesStaysInTheRecordedZone(t *testing.T) {
+	const owner = "_sig0key.child.example._signal.ns.child.example."
+	kdb := newTestKeyDB(t)
+	child, q := signalTarget("child.example.", nil)
+	child.KeyDB = kdb
+	kdb.UpdateQ = q
+	// A zone for the signal names, added after the bootstrap published in
+	// child.example.: it, not child.example., now holds the name.
+	signals, q2 := signalTarget("_signal.ns.child.example.", nil)
+	registerZones(t, child, signals)
+	if got := FindZone(owner); got != signals {
+		t.Fatalf("FindZone(%s) = %v, want the signals zone", owner, got)
+	}
+	record := func(target string) {
+		t.Helper()
+		if err := kdb.RecordSignalPublication(SignalPublication{
+			Target: target, Owner: owner, Zone: "child.example.",
+			NS: "ns.child.example.", Prefix: signalPrefixSig0Key, Source: signalSourceAtNs,
+		}); err != nil {
+			t.Fatalf("RecordSignalPublication: %v", err)
+		}
+	}
+	record("child.example.")
+	seen := ackUpdates(t, q, ZoneUpdateResult{Applied: true})
+	seen2 := ackUpdates(t, q2, ZoneUpdateResult{Applied: true})
+	newKey := []dns.RR{mustRR(t, "child.example. 3600 IN KEY 256 3 15 bmV3")}
+
+	if n, err := child.refreshSig0KeyAtSignalNames(context.Background(), newKey); err != nil || n != 0 {
+		t.Fatalf("satisfied %d, err %v; want 0 and no error for a name recorded in another zone", n, err)
+	}
+	if len(*seen) != 0 || len(*seen2) != 0 {
+		t.Fatalf("the refresh published where the bootstrap never did: %d updates to child.example., %d to the signals zone", len(*seen), len(*seen2))
+	}
+
+	record("_signal.ns.child.example.")
+	if n, err := child.refreshSig0KeyAtSignalNames(context.Background(), newKey); err != nil || n != 1 {
+		t.Fatalf("satisfied %d, err %v; want 1 for the row in the zone that holds the name", n, err)
+	}
+	if len(*seen) != 0 || len(*seen2) != 1 {
+		t.Fatalf("want one update, to the signals zone; got %d to child.example., %d to the signals zone", len(*seen), len(*seen2))
 	}
 }
 
