@@ -26,16 +26,17 @@ import (
 type stagedStrip struct {
 	zd   *ZoneData
 	hold TxID // the zone's publish hold; "" when the zone could not be held
-	took []strippedSig
+	took []strippedRRset
 	done bool
 }
 
-// strippedSig is one RRSIG a strip took, with its owner and the type of its
-// RRset.
-type strippedSig struct {
+// strippedRRset is one RRset a strip took RRSIGs from: its owner, its type, its
+// records as they were, and the RRSIGs taken.
+type strippedRRset struct {
 	name   string
 	rrtype uint16
-	sig    dns.RR
+	rrs    []dns.RR
+	sigs   []dns.RR
 }
 
 // stageStripUnderKeystoreTx stages the strip of the RRSIGs remove selects, and
@@ -49,8 +50,8 @@ func (zd *ZoneData) stageStripUnderKeystoreTx(ctx context.Context, remove func(*
 		s.hold = id
 	}
 	zd.mu.Lock()
-	n, err := zd.stripZoneRRSIGsLocked(ctx, remove, func(name string, rrtype uint16, sig dns.RR) {
-		s.took = append(s.took, strippedSig{name: name, rrtype: rrtype, sig: sig})
+	n, err := zd.stripZoneRRSIGsLocked(ctx, remove, func(name string, rrtype uint16, rrs, sigs []dns.RR) {
+		s.took = append(s.took, strippedRRset{name: name, rrtype: rrtype, rrs: rrs, sigs: sigs})
 	})
 	zd.mu.Unlock()
 	if err != nil {
@@ -78,7 +79,7 @@ func (s *stagedStrip) finish(committed bool) {
 		zd.unstripLocked(s.took)
 		zd.mu.Unlock()
 		lgSigner.Info("the keystore transaction did not commit; the RRSIGs its strip took are staged again",
-			"zone", zd.ZoneName, "count", len(s.took))
+			"zone", zd.ZoneName, "rrsets", len(s.took))
 	}
 	switch {
 	case s.hold != "":
@@ -86,9 +87,11 @@ func (s *stagedStrip) finish(committed bool) {
 		if err := zd.CommitTx(s.hold); err != nil {
 			lgSigner.Error("the publish after the keystore transaction was refused; the change stays staged",
 				"zone", zd.ZoneName, "err", err)
-			// A hold that ran out is no longer open, and its release published
-			// the strip. What a rollback put back needs a publish of its own.
-			if !committed && len(s.took) > 0 {
+			// A hold that ran out is no longer open. Its release published what
+			// was staged then: the strip, if it ran out after the strip was
+			// staged, or none of it, if before. What is staged now, the strip or
+			// what a rollback put back, needs a publish of its own.
+			if len(s.took) > 0 {
 				zd.requestPublish(false)
 			}
 		}
@@ -98,34 +101,28 @@ func (s *stagedStrip) finish(committed bool) {
 }
 
 // unstripLocked puts the RRSIGs a strip took back into their RRsets in the
-// working set, except into an RRset that is gone or holds them already. Caller
-// holds zd.mu.
-func (zd *ZoneData) unstripLocked(took []strippedSig) {
+// working set. Not into an RRset that is gone, nor into one whose records have
+// changed since: the RRSIGs do not cover those, and signing the new records is
+// the job of whoever changed them. An RRSIG the RRset holds already is not
+// added twice. Caller holds zd.mu.
+func (zd *ZoneData) unstripLocked(took []strippedRRset) {
 	zd.ensureWorkingSet()
-	type rrsetKey struct {
-		name   string
-		rrtype uint16
-	}
-	var order []rrsetKey
-	sigs := map[rrsetKey][]dns.RR{}
 	for _, t := range took {
-		k := rrsetKey{t.name, t.rrtype}
-		if _, seen := sigs[k]; !seen {
-			order = append(order, k)
-		}
-		sigs[k] = append(sigs[k], t.sig)
-	}
-	for _, k := range order {
-		owner := zd.workingSet[k.name]
+		owner := zd.workingSet[t.name]
 		if owner == nil {
 			continue
 		}
-		rrset := owner.RRtypes.GetOnlyRRSet(k.rrtype)
+		rrset := owner.RRtypes.GetOnlyRRSet(t.rrtype)
 		if len(rrset.RRs) == 0 {
 			continue
 		}
+		if !sameRecords(rrset.RRs, t.rrs) {
+			lgSigner.Debug("an RRset changed after the strip; its RRSIGs are not put back",
+				"zone", zd.ZoneName, "owner", t.name, "rrtype", dns.TypeToString[t.rrtype])
+			continue
+		}
 		back := slices.Clip(rrset.RRSIGs)
-		for _, sig := range sigs[k] {
+		for _, sig := range t.sigs {
 			if !slices.ContainsFunc(back, func(have dns.RR) bool { return dns.IsDuplicate(have, sig) }) {
 				back = append(back, sig)
 			}
@@ -133,8 +130,8 @@ func (zd *ZoneData) unstripLocked(took []strippedSig) {
 		if len(back) == len(rrset.RRSIGs) {
 			continue
 		}
-		rrset.RRtype = k.rrtype
+		rrset.RRtype = t.rrtype
 		rrset.RRSIGs = back
-		zd.stageRRsetLocked(k.name, rrset)
+		zd.stageRRsetLocked(t.name, rrset)
 	}
 }

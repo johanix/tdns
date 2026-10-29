@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -90,6 +91,18 @@ func checkSerialRecorded(t *testing.T, kdb *KeyDB, zd *ZoneData) {
 	if err != nil || rec != cur {
 		t.Errorf("recorded serial %d (err %v), want the published %d", rec, err, cur)
 	}
+}
+
+// expireHold makes the zone's open transactions run out now, as if their limit
+// had passed: the hold's release runs at once, in the timer's goroutine.
+func expireHold(zd *ZoneData) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	for _, tx := range zd.tx.open {
+		tx.start = time.Now().Add(-tx.limit)
+	}
+	zd.txStopTimerLocked()
+	zd.txArmTimerLocked()
 }
 
 func clearPost(zone string) KeystorePost {
@@ -306,7 +319,6 @@ func TestAStripIsPutBackWhenItsKeyChangeRollsBack(t *testing.T) {
 // If the transaction then rolls back, the RRSIGs put back must be published
 // too, not left staged: the hold is gone, and closing it publishes nothing.
 func TestARolledBackStripIsPublishedAfterItsHoldRanOut(t *testing.T) {
-	withTxHoldLimit(t, 20*time.Millisecond)
 	kdb := newTestKeyDB(t)
 	zd := signingTestZone(t, kdb)
 	old := servedRRSIGTags(zd)
@@ -325,6 +337,8 @@ func TestARolledBackStripIsPublishedAfterItsHoldRanOut(t *testing.T) {
 	if err != nil || resp.Error {
 		t.Fatalf("clear: %v %s", err, resp.ErrorMsg)
 	}
+	// The hold runs out now that the strip is staged.
+	expireHold(zd)
 	waitFor(t, 5*time.Second, "the hold to run out", func() bool { return zd.txOpenCount() == 0 })
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
@@ -348,4 +362,65 @@ func TestARolledBackStripIsPublishedAfterItsHoldRanOut(t *testing.T) {
 		}
 		return true
 	})
+}
+
+// TestARollbackPutsNoRRSIGBackOverChangedRecords: a writer that changes an
+// RRset between the strip and the rollback leaves records that the RRSIGs the
+// strip took do not cover. Those are not put back; an RRset left as it was
+// gets its RRSIGs back.
+func TestARollbackPutsNoRRSIGBackOverChangedRecords(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := signingTestZone(t, kdb)
+	// A cadence, so that nothing publishes the working set while the test
+	// reads it.
+	zd.mu.Lock()
+	zd.publishCadence = time.Hour
+	zd.lastPublish = time.Now()
+	zd.mu.Unlock()
+	const changed, kept = "alpha.inv.example.", "charlie.inv.example."
+	sigsOf := func(name string) int {
+		zd.mu.Lock()
+		defer zd.mu.Unlock()
+		owner := zd.workingSet[name]
+		if owner == nil {
+			owner = zd.snapshot.Load().Data[name]
+		}
+		return len(owner.RRtypes.GetOnlyRRSet(dns.TypeA).RRSIGs)
+	}
+	keptBefore := sigsOf(kept)
+	if keptBefore == 0 || sigsOf(changed) == 0 {
+		t.Fatal("the test zone's A RRsets are not signed")
+	}
+
+	tx, err := kdb.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := kdb.DnssecKeyMgmt(context.Background(), tx, clearPost(zd.ZoneName))
+	if err != nil || resp.Error {
+		t.Fatalf("clear: %v %s", err, resp.ErrorMsg)
+	}
+
+	// Another writer adds a record to one RRset while the zone is held.
+	extra, err := dns.NewRR(changed + " 3600 IN A 10.0.0.9")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zd.mu.Lock()
+	rrset := zd.workingSet[changed].RRtypes.GetOnlyRRSet(dns.TypeA)
+	rrset.RRs = append(slices.Clip(rrset.RRs), extra)
+	zd.stageRRsetLocked(changed, rrset)
+	zd.mu.Unlock()
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	resp.stagedStrip.finish(false)
+
+	if n := sigsOf(changed); n != 0 {
+		t.Errorf("%s A: %d RRSIGs put back over records they do not cover", changed, n)
+	}
+	if n := sigsOf(kept); n != keptBefore {
+		t.Errorf("%s A: %d RRSIGs after the rollback, it had %d", kept, n, keptBefore)
+	}
 }

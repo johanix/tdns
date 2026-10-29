@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -886,10 +887,10 @@ func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG)
 
 // stripZoneRRSIGsLocked is StripZoneRRSIGs without the publish: it stages the
 // stripped RRsets in the working set and returns the number of RRSIGs removed.
-// took, when not nil, is told each RRSIG removed, with its owner and the type
-// of its RRset. On a cancelled ctx what was stripped so far stays staged.
-// Caller holds zd.mu.
-func (zd *ZoneData) stripZoneRRSIGsLocked(ctx context.Context, remove func(*dns.RRSIG) bool, took func(name string, rrtype uint16, sig dns.RR)) (int, error) {
+// took, when not nil, is told each RRset stripped: its owner, its type, its
+// records and the RRSIGs removed from it. On a cancelled ctx what was stripped
+// so far stays staged. Caller holds zd.mu.
+func (zd *ZoneData) stripZoneRRSIGsLocked(ctx context.Context, remove func(*dns.RRSIG) bool, took func(name string, rrtype uint16, rrs, sigs []dns.RR)) (int, error) {
 	zd.ensureWorkingSet()
 
 	names := make([]string, 0, len(zd.workingSet))
@@ -913,19 +914,19 @@ func (zd *ZoneData) stripZoneRRSIGsLocked(ctx context.Context, remove func(*dns.
 				continue
 			}
 			kept := rrset.RRSIGs[:0:0]
-			changed := false
+			var gone []dns.RR
 			for _, sig := range rrset.RRSIGs {
 				if rrsig, ok := sig.(*dns.RRSIG); ok && remove(rrsig) {
-					removed++
-					changed = true
-					if took != nil {
-						took(name, rrt, sig)
-					}
+					gone = append(gone, sig)
 					continue
 				}
 				kept = append(kept, sig)
 			}
-			if changed {
+			if len(gone) > 0 {
+				removed += len(gone)
+				if took != nil {
+					took(name, rrt, slices.Clone(rrset.RRs), gone)
+				}
 				// GetOnlyRRSet returns an RRset whose RRtype field is unset
 				// (the store keys by type); set it to the actual type so
 				// stageRRsetLocked keys the stripped RRset correctly rather
