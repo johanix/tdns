@@ -20,7 +20,9 @@ import (
 func ktRollToConfirm(t *testing.T) (zd *ZoneData, kdb *KeyDB, parent *ktFakeParent, a, b uint16, tick func(string, time.Time), tConfirm time.Time) {
 	t.Helper()
 	parent = ktInstallFakeParent(t)
-	kdb = newTestKeyDB(t)
+	// A file keystore: the DS confirm's advanceCreatedKeysInRangeTx reads the
+	// created keys through the pool while it holds its transaction.
+	kdb = newFileTestKeyDB(t)
 	pol := ktSequencePolicy(RolloverMethodMultiDS)
 	zd = ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	a = ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)

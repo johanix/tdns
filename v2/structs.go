@@ -1439,7 +1439,7 @@ type DnssecKeys struct {
 
 type KeyDB struct {
 	DB     *sql.DB
-	DBFile string // sqlite file path, recorded by NewKeyDB
+	DBFile string // sqlite file path, recorded by NewKeyDB; empty in memory
 	mu     sync.Mutex
 	// txCond wakes Begin waiters when Commit/Rollback clears Ctx. Initialized
 	// in NewKeyDB; L is &mu.

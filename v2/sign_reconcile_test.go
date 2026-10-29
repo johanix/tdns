@@ -92,6 +92,23 @@ func (zd *ZoneData) mustRRSIGKeytags(t *testing.T, name string, rrtype uint16) [
 
 func newTestKeyDB(t *testing.T) *KeyDB {
 	t.Helper()
+	kdb, err := NewKeyDBInMemory(t.Name())
+	if err != nil {
+		t.Fatalf("NewKeyDBInMemory: %v", err)
+	}
+	t.Cleanup(func() { kdb.Close() })
+	installTestKeystoreGuards(t, kdb)
+	return kdb
+}
+
+// newFileTestKeyDB is newTestKeyDB on a keystore file, for a test that
+// reaches production code which reads through the pool while the same code
+// holds a keystore transaction. A WAL file lets that read through. An
+// in-memory keystore refuses a new read while another connection holds the
+// write lock, so the read waits for the transaction, which waits for the
+// read, until the busy timeout fails it (#983). Each caller names the read.
+func newFileTestKeyDB(t *testing.T) *KeyDB {
+	t.Helper()
 	f := filepath.Join(t.TempDir(), "test.db")
 	if err := os.WriteFile(f, nil, 0664); err != nil {
 		t.Fatalf("create db file: %v", err)
@@ -100,6 +117,7 @@ func newTestKeyDB(t *testing.T) *KeyDB {
 	if err != nil {
 		t.Fatalf("NewKeyDB: %v", err)
 	}
+	t.Cleanup(func() { kdb.Close() })
 	installTestKeystoreGuards(t, kdb)
 	return kdb
 }
