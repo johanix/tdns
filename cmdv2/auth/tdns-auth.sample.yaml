@@ -773,6 +773,15 @@ log:
    # One of: debug | info | warn | error   (empty defaults to info)
    level:  info
 
+   # Rotation. The file is rotated when it reaches max-size MB, and the
+   # max-backups newest rotated files are kept, for at most max-age days.
+   # Each key is optional and must be a positive number; the defaults are
+   # shown. A long run at debug level may want a larger max-size, so that
+   # the log does not rotate mid-run.
+   # max-size:     20
+   # max-backups:  3
+   # max-age:      14
+
    # Per-subsystem level overrides. A subsystem uses the global 'level' above
    # unless listed here. The subsystem name is the tag shown after the level in
    # each log line, e.g. a line tagged "[INFO/zones]" is the "zones" subsystem.
