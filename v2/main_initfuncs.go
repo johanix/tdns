@@ -50,6 +50,11 @@ func (conf *Config) MainLoop(ctx context.Context, cancel context.CancelFunc) {
 		select {
 		case <-ctx.Done():
 			lgConfig.Info("mainloop: context cancelled, cleaning up")
+			// A signal can land while Shutdowner waits to close APIStopCh;
+			// the stop is still a failed one.
+			if conf.Internal.stopFailed.Load() {
+				exitAfterFailedStop()
+			}
 			return
 		case <-conf.Internal.APIStopCh:
 			lgConfig.Info("mainloop: stop command received, cleaning up")

@@ -34,11 +34,35 @@ func TestAFailedStopDuringMainLoopExitsWithAFailureStatus(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		go Shutdowner(conf, "a reload that failed")
 		conf.MainLoop(ctx, cancel)
-		return // as main returns after MainLoop
+		os.Exit(0) // as when main returns after MainLoop
 	}
 
 	if code, out := runShutdownerProbe(t, "TestAFailedStopDuringMainLoopExitsWithAFailureStatus", "running"); code != 1 {
 		t.Fatalf("a failed stop during MainLoop exited %d, want 1\n%s", code, out)
+	}
+}
+
+// A signal that cancels the context after Shutdowner has marked the stop as
+// failed, but before it closes APIStopCh, does not turn the stop into exit 0.
+func TestASignalDuringAFailedStopStillExitsWithAFailureStatus(t *testing.T) {
+	if os.Getenv(shutdownerProbeEnv) == "signal" {
+		conf := &Config{}
+		conf.Internal.APIStopCh = make(chan struct{})
+		ctx, cancel := context.WithCancel(context.Background())
+		go Shutdowner(conf, "a reload that failed")
+		go func() {
+			// Shutdowner sleeps 200 ms between the mark and the close.
+			for !conf.Internal.stopFailed.Load() {
+				time.Sleep(time.Millisecond)
+			}
+			cancel() // the signal
+		}()
+		conf.MainLoop(ctx, cancel)
+		os.Exit(0) // as when main returns after MainLoop
+	}
+
+	if code, out := runShutdownerProbe(t, "TestASignalDuringAFailedStopStillExitsWithAFailureStatus", "signal"); code != 1 {
+		t.Fatalf("a signal during a failed stop exited %d, want 1\n%s", code, out)
 	}
 }
 
@@ -56,7 +80,13 @@ func TestAFailedStopDoesNotWaitForAStuckEngine(t *testing.T) {
 		return
 	}
 
+	// The child shortens the limit. Taking the default limit or longer means
+	// it waited for the stuck engine all the same.
+	start := time.Now()
 	code, out := runShutdownerProbe(t, "TestAFailedStopDoesNotWaitForAStuckEngine", "stuck")
+	if elapsed := time.Since(start); elapsed >= failedStopDrainLimit {
+		t.Fatalf("a failed stop with a stuck engine took %v, want less than %v\n%s", elapsed, failedStopDrainLimit, out)
+	}
 	if code != 1 {
 		t.Fatalf("a failed stop with a stuck engine exited %d, want 1\n%s", code, out)
 	}
