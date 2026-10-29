@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -210,13 +211,15 @@ func TestInMemoryKeyDBCloseFreesIt(t *testing.T) {
 }
 
 // An in-memory keystore writes no files: not in the temporary directory, where
-// SQLite puts its temporary files, and not in the working directory.
+// SQLite puts its temporary files, and not in the working directory. The
+// database is named after a path in the temporary directory, so that a
+// keystore that became a file would be written where the test looks.
 func TestInMemoryKeyDBWritesNoFiles(t *testing.T) {
 	tmp, cwd := t.TempDir(), t.TempDir()
 	t.Setenv("TMPDIR", tmp)
 	t.Chdir(cwd)
 
-	kdb, err := NewKeyDBInMemory(t.Name())
+	kdb, err := newKeyDBInMemoryAt(filepath.Join(tmp, "keystore"))
 	if err != nil {
 		t.Fatal(err)
 	}
