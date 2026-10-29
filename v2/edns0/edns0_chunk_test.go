@@ -35,6 +35,29 @@ func TestChunkOptionRefusesDataItCannotHold(t *testing.T) {
 	}
 }
 
+// TestChunkOptionRefusesAnHMACTheParserRefuses: ParseChunkOption refuses
+// an HMAC over MaxHMACLen, so CreateChunkOption does too, and not as data
+// too large for one option. MaxHMACLen bytes come back whole.
+func TestChunkOptionRefusesAnHMACTheParserRefuses(t *testing.T) {
+	data := chunkTestData(100)
+	if _, err := CreateChunkOption(2, make([]byte, MaxHMACLen+1), data); err == nil || errors.Is(err, ErrChunkOptionTooLarge) {
+		t.Errorf("an HMAC of %d bytes: err %v; want an error that is not ErrChunkOptionTooLarge", MaxHMACLen+1, err)
+	}
+
+	hmac := bytes.Repeat([]byte{0xab}, MaxHMACLen)
+	opt, err := CreateChunkOption(2, hmac, data)
+	if err != nil {
+		t.Fatalf("an HMAC of %d bytes: %v", MaxHMACLen, err)
+	}
+	got, err := ParseChunkOption(opt)
+	if err != nil {
+		t.Fatalf("an HMAC of %d bytes: parse: %v", MaxHMACLen, err)
+	}
+	if !bytes.Equal(got.HMAC, hmac) || !bytes.Equal(got.Data, data) {
+		t.Errorf("an HMAC of %d bytes: got %d bytes of HMAC, %d of data", MaxHMACLen, len(got.HMAC), len(got.Data))
+	}
+}
+
 // TestChunkOptionCarriesAllItsData: data up to the limit comes back whole,
 // with and without an HMAC.
 func TestChunkOptionCarriesAllItsData(t *testing.T) {

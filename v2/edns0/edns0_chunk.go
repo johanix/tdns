@@ -88,8 +88,12 @@ const maxChunkOptionLen = 65535 - 4
 // hmac: HMAC bytes (nil if no HMAC)
 // data: The data payload (will be JSON encoded if format is FormatJSON)
 // Data and HMAC that do not fit one option get an error that wraps
-// ErrChunkOptionTooLarge, never a shortened option.
+// ErrChunkOptionTooLarge, never a shortened option. An HMAC longer than
+// MaxHMACLen, which ParseChunkOption refuses, gets an error too.
 func CreateChunkOption(format uint8, hmac []byte, data []byte) (*dns.EDNS0_LOCAL, error) {
+	if len(hmac) > MaxHMACLen {
+		return nil, fmt.Errorf("CHUNK option HMAC length %d exceeds maximum %d", len(hmac), MaxHMACLen)
+	}
 	if n := 1 + 2 + len(hmac) + 2 + len(data); n > maxChunkOptionLen {
 		return nil, fmt.Errorf("%w: %d bytes of data and %d of HMAC make %d bytes, more than the %d that fit",
 			ErrChunkOptionTooLarge, len(data), len(hmac), n, maxChunkOptionLen)
