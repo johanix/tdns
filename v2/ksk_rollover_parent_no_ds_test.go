@@ -34,7 +34,9 @@ func newNoDSRig(t *testing.T, numDS int) *ndRig {
 	t.Helper()
 	withCompleteness(t, CompletenessRelaxed)
 	parent := ktInstallFakeParent(t)
-	kdb := newTestKeyDB(t)
+	// A file keystore: the DS confirm's advanceCreatedKeysInRangeTx reads the
+	// created keys through the pool while it holds its transaction.
+	kdb := newFileTestKeyDB(t)
 	base := ktSequencePolicy(RolloverMethodMultiDS)
 	base.Name = "base"
 	base.Rollover.NumDS = numDS

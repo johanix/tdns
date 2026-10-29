@@ -272,7 +272,9 @@ func TestSigningKeysFreshnessForceRoles(t *testing.T) {
 // Commit alone must leave the snapshot stale; the external caller must republish
 // when NeedsSigningKeysRepublish is set (apihandler_funcs.go post-commit).
 func TestSigningKeysFreshnessDnssecKeyMgmtExternalTx(t *testing.T) {
-	kdb := newTestKeyDB(t)
+	// A file keystore: RolloverKey reads the active and standby keys through
+	// the pool while the caller's transaction is open.
+	kdb := newFileTestKeyDB(t)
 	zd := algTestZone(dns.ED25519, dns.ED25519)
 	zd.KeyDB = kdb
 	registerAlgZone(t, zd)

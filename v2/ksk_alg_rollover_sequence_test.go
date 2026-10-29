@@ -199,7 +199,9 @@ func ktAssertDNSKEYSigs(t *testing.T, zd *ZoneData, kdb *KeyDB, step string, wan
 // through the drain) asserted along the way.
 func TestKT6FullKskAlgRolloverSequence(t *testing.T) {
 	parent := ktInstallFakeParent(t)
-	kdb := newTestKeyDB(t)
+	// A file keystore: the DS confirm's advanceCreatedKeysInRangeTx reads the
+	// created keys through the pool while it holds its transaction.
+	kdb := newFileTestKeyDB(t)
 	pol := ktSequencePolicy(RolloverMethodMultiDS)
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
@@ -582,7 +584,9 @@ func TestKT7EffectiveMarginForRoll(t *testing.T) {
 // range bookkeeping and the drain starts.
 func TestKT19ConfirmWithoutIndexRangeStillStartsDrain(t *testing.T) {
 	parent := ktInstallFakeParent(t)
-	kdb := newTestKeyDB(t)
+	// A file keystore: the DS confirm's advanceCreatedKeysInRangeTx reads the
+	// created keys through the pool while it holds its transaction.
+	kdb := newFileTestKeyDB(t)
 	pol := ktSequencePolicy(RolloverMethodMultiDS)
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)
@@ -661,7 +665,9 @@ func TestPipelineFillCountsCreatedKeys(t *testing.T) {
 // after propagation, and the request fires.
 func TestManualAsapPublishesDsPublishedNextUp(t *testing.T) {
 	parent := ktInstallFakeParent(t)
-	kdb := newTestKeyDB(t)
+	// A file keystore: the DS confirm's advanceCreatedKeysInRangeTx reads the
+	// created keys through the pool while it holds its transaction.
+	kdb := newFileTestKeyDB(t)
 	pol := ktSequencePolicy(RolloverMethodMultiDS)
 	pol.Rollover.NumDS = 2
 	pol.KSK.Lifetime = 1000 * 3600 // scheduled; 10000h is the forever sentinel

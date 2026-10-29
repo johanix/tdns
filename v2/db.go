@@ -497,6 +497,12 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 			}
 		}
 	}
+	return openKeyDB(db, dbfile, options)
+}
+
+// openKeyDB sets up the tables in db and returns the KeyDB on it; dbfile is
+// what the KeyDB records as its file. On an error it closes db.
+func openKeyDB(db *sql.DB, dbfile string, options map[AuthOption]string) (*KeyDB, error) {
 	dbSetupTables(db)
 	kdb := &KeyDB{
 		DB:                  db,
