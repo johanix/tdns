@@ -54,9 +54,38 @@ func (conf *Config) MainLoop(ctx context.Context, cancel context.CancelFunc) {
 		case <-conf.Internal.APIStopCh:
 			lgConfig.Info("mainloop: stop command received, cleaning up")
 			cancel()
+			if conf.Internal.stopFailed.Load() {
+				exitAfterFailedStop()
+			}
 			return
 		}
 	}
+}
+
+// failedStopDrainLimit bounds how long MainLoop waits for the engines when
+// the daemon stops because it failed. A variable so a test can shorten it.
+var failedStopDrainLimit = 10 * time.Second
+
+// exitAfterFailedStop ends a daemon that Shutdowner stopped while MainLoop was
+// running, such as a stop decided on after a zone reload. Returning from
+// MainLoop would let main return, and the process exit 0, before Shutdowner on
+// its own goroutine reached os.Exit(1) (#977). So MainLoop exits 1 here, once
+// the engines have finished, or after failedStopDrainLimit if one of them is
+// stuck: a daemon that has already failed should not hang on it.
+func exitAfterFailedStop() {
+	drained := make(chan struct{})
+	go func() {
+		engineWg.Wait()
+		close(drained)
+	}()
+	select {
+	case <-drained:
+		lgConfig.Info("mainloop: all engines finished after a failed stop", "app", Globals.App.Name)
+	case <-time.After(failedStopDrainLimit):
+		lgConfig.Warn("mainloop: engines still running after a failed stop; exiting anyway",
+			"app", Globals.App.Name, "waited", failedStopDrainLimit)
+	}
+	os.Exit(1)
 }
 func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if ctx == nil {
@@ -397,12 +426,16 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 
 // Shutdowner stops a daemon that cannot go on: a failed start, or a stop the
 // daemon itself decides on. It exits 1, so a supervisor sees a failure
-// (#977). A normal stop, by signal or the API, ends in MainLoop instead.
+// (#977). If MainLoop is running, MainLoop sees the stop and exits 1 itself;
+// see exitAfterFailedStop. A normal stop, by signal or the API, ends in
+// MainLoop instead and exits 0.
 func Shutdowner(conf *Config, msg string) {
 	lgConfig.Info("shutting down", "app", Globals.App.Name, "reason", msg)
 	fmt.Printf("%s: shutting down: %s\n", Globals.App.Name, msg)
 	// Prefer closing APIStopCh once as a broadcast to MainLoop and all listeners
 	if conf.Internal.APIStopCh != nil {
+		// Mark the stop as a failure before MainLoop can see APIStopCh close.
+		conf.Internal.stopFailed.Store(true)
 		conf.Internal.StopOnce.Do(func() {
 			// small delay can help in-flight API responses complete before close is observed
 			time.Sleep(200 * time.Millisecond)
