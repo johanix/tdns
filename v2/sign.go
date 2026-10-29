@@ -873,6 +873,23 @@ func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG) bool) (int, error) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	removed, err := zd.stripZoneRRSIGsLocked(ctx, remove, nil)
+	if err != nil {
+		return removed, err
+	}
+	if removed > 0 {
+		zd.publishOrQueueLocked(zd.generation.Load(), false) // the gate: a busy zone's pass goes out with the next publish
+		lgSigner.Info("stripped orphan RRSIGs from zone", "zone", zd.ZoneName, "count", removed)
+	}
+	return removed, nil
+}
+
+// stripZoneRRSIGsLocked is StripZoneRRSIGs without the publish: it stages the
+// stripped RRsets in the working set and returns the number of RRSIGs removed.
+// took, when not nil, is told each RRSIG removed, with its owner and the type
+// of its RRset. On a cancelled ctx what was stripped so far stays staged.
+// Caller holds zd.mu.
+func (zd *ZoneData) stripZoneRRSIGsLocked(ctx context.Context, remove func(*dns.RRSIG) bool, took func(name string, rrtype uint16, sig dns.RR)) (int, error) {
 	zd.ensureWorkingSet()
 
 	names := make([]string, 0, len(zd.workingSet))
@@ -901,6 +918,9 @@ func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG)
 				if rrsig, ok := sig.(*dns.RRSIG); ok && remove(rrsig) {
 					removed++
 					changed = true
+					if took != nil {
+						took(name, rrt, sig)
+					}
 					continue
 				}
 				kept = append(kept, sig)
@@ -915,10 +935,6 @@ func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG)
 				zd.stageRRsetLocked(name, rrset)
 			}
 		}
-	}
-	if removed > 0 {
-		zd.publishOrQueueLocked(zd.generation.Load(), false) // the gate: a busy zone's pass goes out with the next publish
-		lgSigner.Info("stripped orphan RRSIGs from zone", "zone", zd.ZoneName, "count", removed)
 	}
 	return removed, nil
 }

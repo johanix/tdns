@@ -130,6 +130,12 @@ type KeystoreResponse struct {
 	// in-process caller that goes on to use it. Never on the wire: it holds the
 	// private key.
 	GeneratedSig0Key *PrivateKeyCache `json:"-"`
+	// stagedStrip is a strip of the zone's RRSIGs that DnssecKeyMgmt staged
+	// under an external tx (clear, policy-cleanup). The caller finishes it
+	// after its Commit and its republishSigningKeysForZone, or after its
+	// Rollback (#985). Left unfinished, the zone's hold runs out at
+	// txHoldLimit and the strip is published then.
+	stagedStrip *stagedStrip
 }
 
 // TsigKeyExport carries a TSIG key's secret back to the caller for the explicit

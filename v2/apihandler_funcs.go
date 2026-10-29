@@ -57,6 +57,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		var dnssecResignZone string
 		var dnssecBulkRepublishZones []string
 		var sig0InvalidateZones []string
+		var dnssecStrip *stagedStrip
 
 		tx, err := kdb.Begin("APIkeystore")
 
@@ -64,6 +65,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			if tx != nil {
 				if err != nil {
 					tx.Rollback()
+					dnssecStrip.finish(false)
 				} else {
 					if commitErr := tx.Commit(); commitErr != nil {
 						err = commitErr
@@ -71,6 +73,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 							resp.Error = true
 							resp.ErrorMsg = commitErr.Error()
 						}
+						dnssecStrip.finish(false)
 					} else {
 						// R1: DnssecKeyMgmt always receives this external tx, so its
 						// localtx republish path never runs. Republish here after
@@ -81,6 +84,10 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 									"zone", dnssecRepublishZone, "err", rerr)
 							}
 						}
+						// The strip clear and policy-cleanup staged goes out
+						// now, after the republish, so the publish signs with
+						// the new keys (#985).
+						dnssecStrip.finish(true)
 						// A bulk import touches many zones at once, so it gets
 						// its own plural republish rather than trying to squeeze
 						// through the single-zone field above. Re-sign each one
@@ -195,6 +202,9 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 				}
 			} else if resp != nil && resp.NeedsSigningKeysRepublish {
 				dnssecRepublishZone = kp.Zone
+			}
+			if err == nil && resp != nil {
+				dnssecStrip = resp.stagedStrip
 			}
 			if err == nil && resp != nil && len(resp.BulkRepublishZones) > 0 {
 				dnssecBulkRepublishZones = resp.BulkRepublishZones

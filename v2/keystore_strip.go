@@ -1,0 +1,135 @@
+/*
+ * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
+ */
+
+package tdns
+
+import (
+	"context"
+	"slices"
+
+	"github.com/miekg/dns"
+)
+
+// stagedStrip is a strip of a zone's RRSIGs made under a keystore transaction,
+// for the key change that transaction writes: DnssecKeyMgmt's clear and
+// policy-cleanup (#985). The strip is staged, and the zone held, so that
+// nothing publishes it before the transaction ends. A publish under the
+// transaction waited for it: the publish records its serial in the keystore
+// through the pool (recordPublishedSerialLocked), and that write waited the
+// busy timeout for the transaction's lock, then failed.
+//
+// finish ends it. After a commit it releases the hold, and the gate publishes
+// the strip; a publish that is refused leaves it staged for the next one. After
+// a rollback it puts back what the strip took, since the key change it was for
+// did not happen, and then releases the hold.
+type stagedStrip struct {
+	zd   *ZoneData
+	hold TxID // the zone's publish hold; "" when the zone could not be held
+	took []strippedSig
+	done bool
+}
+
+// strippedSig is one RRSIG a strip took, with its owner and the type of its
+// RRset.
+type strippedSig struct {
+	name   string
+	rrtype uint16
+	sig    dns.RR
+}
+
+// stageStripUnderKeystoreTx stages the strip of the RRSIGs remove selects, and
+// holds the zone until finish. A zone that may not originate content cannot be
+// held (BeginTx); its strip is staged without a hold, and finish publishes it
+// all the same. A strip that fails is put back, and the hold released, before
+// this returns: the caller's error rolls the key change back.
+func (zd *ZoneData) stageStripUnderKeystoreTx(ctx context.Context, remove func(*dns.RRSIG) bool) (*stagedStrip, error) {
+	s := &stagedStrip{zd: zd}
+	if id, err := zd.BeginTx(0); err == nil {
+		s.hold = id
+	}
+	zd.mu.Lock()
+	n, err := zd.stripZoneRRSIGsLocked(ctx, remove, func(name string, rrtype uint16, sig dns.RR) {
+		s.took = append(s.took, strippedSig{name: name, rrtype: rrtype, sig: sig})
+	})
+	zd.mu.Unlock()
+	if err != nil {
+		s.finish(false)
+		return nil, err
+	}
+	if n > 0 {
+		lgSigner.Info("staged the strip of RRSIGs; it is published after the keystore commit",
+			"zone", zd.ZoneName, "count", n)
+	}
+	return s, nil
+}
+
+// finish ends the strip once its keystore transaction has ended; committed
+// says whether it committed. A nil strip, or one already finished, does
+// nothing.
+func (s *stagedStrip) finish(committed bool) {
+	if s == nil || s.done {
+		return
+	}
+	s.done = true
+	zd := s.zd
+	if !committed && len(s.took) > 0 {
+		zd.mu.Lock()
+		zd.unstripLocked(s.took)
+		zd.mu.Unlock()
+		lgSigner.Info("the keystore transaction did not commit; the RRSIGs its strip took are staged again",
+			"zone", zd.ZoneName, "count", len(s.took))
+	}
+	switch {
+	case s.hold != "":
+		// Closing the hold publishes what is staged, through the gate.
+		if err := zd.CommitTx(s.hold); err != nil {
+			lgSigner.Error("the publish after the keystore transaction was refused; the change stays staged",
+				"zone", zd.ZoneName, "err", err)
+		}
+	case len(s.took) > 0:
+		zd.requestPublish(false)
+	}
+}
+
+// unstripLocked puts the RRSIGs a strip took back into their RRsets in the
+// working set, except into an RRset that is gone or holds them already. Caller
+// holds zd.mu.
+func (zd *ZoneData) unstripLocked(took []strippedSig) {
+	zd.ensureWorkingSet()
+	type rrsetKey struct {
+		name   string
+		rrtype uint16
+	}
+	var order []rrsetKey
+	sigs := map[rrsetKey][]dns.RR{}
+	for _, t := range took {
+		k := rrsetKey{t.name, t.rrtype}
+		if _, seen := sigs[k]; !seen {
+			order = append(order, k)
+		}
+		sigs[k] = append(sigs[k], t.sig)
+	}
+	for _, k := range order {
+		owner := zd.workingSet[k.name]
+		if owner == nil {
+			continue
+		}
+		rrset := owner.RRtypes.GetOnlyRRSet(k.rrtype)
+		if len(rrset.RRs) == 0 {
+			continue
+		}
+		back := slices.Clip(rrset.RRSIGs)
+		for _, sig := range sigs[k] {
+			if !slices.ContainsFunc(back, func(have dns.RR) bool { return dns.IsDuplicate(have, sig) }) {
+				back = append(back, sig)
+			}
+		}
+		if len(back) == len(rrset.RRSIGs) {
+			continue
+		}
+		rrset.RRtype = k.rrtype
+		rrset.RRSIGs = back
+		zd.stageRRsetLocked(k.name, rrset)
+	}
+}
