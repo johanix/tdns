@@ -275,6 +275,9 @@ imrengine:
 log:
    file:		/var/log/tdns/tdns-agent.log
    level:		info		# default level: debug|info|warn|error
+   # max-size:		20		# MB before the file is rotated (default 20)
+   # max-backups:	3		# rotated files kept (default 3)
+   # max-age:		14		# days a rotated file is kept (default 14)
    # subsystems:				# per-subsystem level overrides
    #    transport:	debug
    #    engine:		debug

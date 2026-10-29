@@ -126,6 +126,21 @@ file, early, before includes are resolved. It must therefore appear at the top
 level of the file named by `--config`; putting it in an included file makes
 startup fail. `log.file` is required.
 
+The log file is rotated by size. Three optional keys in `log:` set the
+rotation; each must be a positive number, and one left out takes its default:
+
+```yaml
+log:
+   file:         /var/log/tdns/tdns-auth.log
+   max-size:     20    # MB before the file is rotated
+   max-backups:  3     # rotated files kept
+   max-age:      14    # days a rotated file is kept
+```
+
+A 0 or a negative number is refused, at startup and by `config check`. A
+daemon logging at debug, or a long test run that reads its log by position,
+may want a larger `max-size`, so that the log does not rotate mid-run.
+
 **Unknown keys are warned about, not rejected.** The loader decodes the config
 into Go structs and then logs every key it did not consume:
 

@@ -19,7 +19,6 @@ import (
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 type ScanRequest struct {
@@ -62,6 +61,7 @@ type Scanner struct {
 	OnDelegationChange func(parentZone string, zd *ZoneData, resp ScanTupleResponse) delegationApplyResult
 	LogFile            string
 	LogTemplate        string
+	LogConf            LogConf // the log: section, for the rotation of the files AddLogger opens (#974)
 	Log                map[string]*log.Logger
 	Verbose            bool
 	Debug              bool
@@ -149,12 +149,8 @@ func GenerateJobID() (string, error) {
 }
 
 func (scanner *Scanner) AddLogger(rrtype string) error {
-	lg := log.New(&lumberjack.Logger{
-		Filename:   fmt.Sprintf(scanner.LogTemplate, rrtype),
-		MaxSize:    20,
-		MaxBackups: 3,
-		MaxAge:     7,
-	}, fmt.Sprintf("%s scanner: ", rrtype), log.Lshortfile)
+	lg := log.New(scanner.LogConf.rotatingWriter(fmt.Sprintf(scanner.LogTemplate, rrtype)),
+		fmt.Sprintf("%s scanner: ", rrtype), log.Lshortfile)
 	scanner.Log[rrtype] = lg
 	scanner.Log[rrtype] = log.Default()
 	return nil
@@ -188,6 +184,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 	}
 	scanner.AtApexInterval = time.Duration(atApexIntervalSec) * time.Second
 	scanner.logTrustConfig()
+	scanner.LogConf = conf.Log
 	scanner.AddLogger("CDS")
 	scanner.AddLogger("CSYNC")
 	scanner.AddLogger("DNSKEY")

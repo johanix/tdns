@@ -210,6 +210,12 @@ type LogConf struct {
 	File       string            `yaml:"file" validate:"required"`
 	Level      string            `yaml:"level"`      // "debug"|"info"|"warn"|"error"; default "info"
 	Subsystems map[string]string `yaml:"subsystems"` // per-subsystem level overrides
+	// Log rotation (#974). Each is optional; one not set takes its default
+	// (defaultLogMaxSize and its neighbours in logging.go). A pointer, so a 0
+	// that is written is refused rather than read as "not set".
+	MaxSize    *int `yaml:"max-size" mapstructure:"max-size"`       // MB before the file is rotated
+	MaxBackups *int `yaml:"max-backups" mapstructure:"max-backups"` // rotated files kept
+	MaxAge     *int `yaml:"max-age" mapstructure:"max-age"`         // days a rotated file is kept
 }
 
 type ServiceConf struct {
