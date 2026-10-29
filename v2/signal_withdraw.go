@@ -72,12 +72,13 @@ func (childZD *ZoneData) recordSignalPublication(tgt signalPublishTarget, source
 // withdrawUnwarrantedSignalPublications is the zone acting as the zone
 // PUBLISHED FOR: it withdraws every record the ledger says we put somewhere on
 // this zone's behalf that the zone's current configuration and current content
-// no longer justify. That is one function for five situations --
+// no longer justify. That is one function for six situations --
 // use-hsyncparam removed, a pubkey/pubcds flag dropped from the apex
 // HSYNCPARAM, a nameserver dropped from the apex NS RRset, HSYNC3 appearing in
-// the zone's copy (its agents publish for it now), and parentsync turned off
-// for a zone whose at-ns bootstrap published a _sig0key -- because all five
-// are the same question asked of current state.
+// the zone's copy (its agents publish for it now), parentsync turned off for a
+// zone whose at-ns bootstrap published a _sig0key, and parentsync turned on
+// for a zone whose use-hsyncparam published one (the bootstrap owns those
+// names then) -- because all six are the same question asked of current state.
 func (zd *ZoneData) withdrawUnwarrantedSignalPublications() {
 	if signalLedgerEmpty.Load() || !SignalLedgerReadable(zd.KeyDB) {
 		return
@@ -141,7 +142,10 @@ func (zd *ZoneData) withdrawUnwarrantedSignalPublications() {
 // justifies, split by which publisher's rows they justify. The two are kept
 // apart on purpose: a zone can carry parentsync (OptParentSync) without
 // carrying use-hsyncparam, and a shared set would then let one option's
-// warrant retain the other option's records.
+// warrant retain the other option's records. With both options on, the
+// _sig0key names are the bootstrap's alone (signalSpec.leftToTheBootstrap), so
+// a use-hsyncparam row at one is withdrawn: its RRset holds the apex KEY, which
+// need not be the key the bootstrap signs with.
 //
 // The at-ns set is a RETENTION set, not a publication set. Putting a _sig0key
 // at a signal name for our own zone is the bootstrap ceremony's decision
@@ -158,7 +162,7 @@ func (zd *ZoneData) warrantedSignalOwners(nsNames []string) (keepHsync, keepAtNs
 	if useHsyncparam && !zd.multiProviderCopy() {
 		if hp := zd.apexHsyncparam(); hp != nil {
 			for _, spec := range signalSpecs {
-				if !spec.active(hp) {
+				if !spec.active(hp) || spec.leftToTheBootstrap(delSyncChild) {
 					continue
 				}
 				// A flag whose apex RRset is empty asks us to mirror nothing.
@@ -374,22 +378,28 @@ func withdrawSignalPublication(p SignalPublication, why string) {
 		return
 	}
 
-	// An absent RRset is not an error: the updater treats a ClassANY delete of
-	// one as a no-op (no serial bump, no re-sign), so the check is only here to
-	// keep a withdrawal that has nothing to do out of the log and off the queue.
-	if signalRRsPresent(target, p.Owner, rrtypes) {
-		// Fire-and-forget (nil ctx): this runs inside a post-refresh hook,
-		// which must not block on the zone updater.
-		if err := target.publishSignalRRs(nil, p.Owner, rrtypes, nil); err != nil {
-			lgSignal.Error("failed to withdraw signal RRset",
-				"zone", p.Zone, "signal", p.Owner, "target", p.Target, "err", err)
-			return
-		}
+	// The delete is queued whether or not the published snapshot holds the
+	// RRset. A publication is queued too, and its row is recorded before the
+	// updater applies it (publishAtSignalNames), so a snapshot without the
+	// RRset may only mean that the add has not landed yet. Forgetting the row
+	// without a delete would let that add land with no row left to withdraw
+	// it (#969). One updater takes the queue in order, so the delete removes
+	// a pending add, and a ClassANY delete of an absent RRset is a no-op for
+	// it (no serial bump, no re-sign). The snapshot is read for the log only.
+	served := signalRRsPresent(target, p.Owner, rrtypes)
+	// Fire-and-forget (nil ctx): this runs inside a post-refresh hook, which
+	// must not block on the zone updater.
+	if err := target.publishSignalRRs(nil, p.Owner, rrtypes, nil); err != nil {
+		lgSignal.Error("failed to withdraw signal RRset",
+			"zone", p.Zone, "signal", p.Owner, "target", p.Target, "err", err)
+		return
+	}
+	if served {
 		lgSignal.Info("withdrew RRset at signal name",
 			"zone", p.Zone, "signal", p.Owner, "target", p.Target,
 			"source", p.Source, "reason", why)
 	} else {
-		lgSignal.Debug("signal RRset was already gone; forgetting the publication",
+		lgSignal.Debug("signal RRset not served; queued its delete anyway, in case its add is still queued",
 			"zone", p.Zone, "signal", p.Owner, "target", p.Target)
 	}
 

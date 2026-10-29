@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -255,6 +256,62 @@ func TestWithdraw_PubcdsWithdrawsBothTypes(t *testing.T) {
 	assertWithdrawn(t, f, dsbootOwnFoo, dns.TypeCDS, dns.TypeCDNSKEY)
 }
 
+// A publication whose add is still queued: the ledger has its row, but the
+// served zone does not have the RRset yet. A withdrawal must still queue the
+// delete, which the updater applies after the add. Forgetting the row alone
+// would let the add land with nothing left to withdraw it (#969).
+func TestWithdraw_QueuesTheDeleteWhenTheAddHasNotLanded(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	target, q := signalTarget("foobar.com.", nil)
+	target.KeyDB = kdb
+	kdb.UpdateQ = q
+	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+		"example.": {
+			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey"),
+			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
+			mustRR(t, "example. 3600 IN KEY "+sigKeyRdata),
+		},
+	})
+	child.Options = map[ZoneOption]bool{OptUseHsyncparam: true}
+	child.KeyDB = kdb
+	registerZones(t, child, target)
+
+	// The publication is queued and its row recorded. Nothing applies the
+	// queue here, so the add never lands in the served zone.
+	child.ReconcileSignalPublications()
+	assertLedgerRow(t, kdb, "foobar.com.", sigOwnerFoo)
+	if signalRRsPresent(target, sigOwnerFoo, []uint16{dns.TypeKEY}) {
+		t.Fatal("the add has landed; the case under test is one that has not")
+	}
+
+	// use-hsyncparam is removed before the updater gets to the add.
+	child.Options = map[ZoneOption]bool{}
+	child.ReconcileSignalPublications()
+
+	urs := drainUpdateQ(q)
+	if len(urs) != 2 {
+		t.Fatalf("expected the publication and then its withdrawal in the queue, got %d: %+v", len(urs), urs)
+	}
+	var added bool
+	for _, rr := range urs[0].Actions {
+		if rr.Header().Name == sigOwnerFoo && rr.Header().Class == dns.ClassINET && rr.Header().Rrtype == dns.TypeKEY {
+			added = true
+		}
+	}
+	if !added {
+		t.Fatalf("the first update is not the publication's add: %v", urs[0].Actions)
+	}
+	for _, rr := range urs[1].Actions {
+		if rr.Header().Name != sigOwnerFoo || rr.Header().Class != dns.ClassANY || rr.Header().Rrtype != dns.TypeKEY {
+			t.Errorf("the second update must only delete the KEY at %s; got %s", sigOwnerFoo, rr)
+		}
+	}
+	if len(urs[1].Actions) == 0 {
+		t.Error("the withdrawal queued an empty update")
+	}
+	assertNoLedgerRow(t, kdb, "foobar.com.", sigOwnerFoo)
+}
+
 // Case 3b: the customer zone is no longer served here at all, so its own
 // reconciler will never run again. The target zone withdraws on its behalf --
 // but only once the sweep is armed, because an unarmed sweep has no configured
@@ -441,6 +498,141 @@ func TestWithdraw_AMultiProviderZoneKeepsItsOwnBootstrap(t *testing.T) {
 		t.Fatalf("the zone's own at-ns publication must be left alone: %+v", urs)
 	}
 	assertLedgerRow(t, kdb, "child.example.", sigOwnerInBai)
+}
+
+// With use-hsyncparam and parentsync both on, the _sig0key name is the
+// bootstrap's: use-hsyncparam does not write its apex KEY over the bootstrap's
+// KEY, nor take its ledger row. It still publishes the CDS at the _dsboot
+// name, which the bootstrap never writes (#968).
+func TestBothOptions_TheBootstrapKeepsItsSig0Key(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	target, q := signalTarget("foobar.com.", map[string][]dns.RR{
+		sigOwnerFoo: {mustRR(t, sigOwnerFoo+" 3600 IN KEY "+sigKeyRdata)},
+	})
+	target.KeyDB = kdb
+	kdb.UpdateQ = q
+	child := newMapZone("example.", Secondary, map[string][]dns.RR{
+		"example.": {
+			mustRR(t, "example. 3600 IN HSYNCPARAM pubkey pubcds"),
+			mustRR(t, "example. 3600 IN NS ns.foobar.com."),
+			mustRR(t, "example. 3600 IN KEY 256 3 15 b3RoZXJrZXk="),
+			mustRR(t, "example. 3600 IN CDS 12345 15 2 ABCDEF"),
+		},
+	})
+	child.Options = map[ZoneOption]bool{OptUseHsyncparam: true, OptParentSync: true}
+	child.KeyDB = kdb
+	registerZones(t, child, target)
+	if err := kdb.RecordSignalPublication(SignalPublication{
+		Target: "foobar.com.", Owner: sigOwnerFoo, Zone: "example.",
+		NS: "ns.foobar.com.", Prefix: signalPrefixSig0Key, Source: signalSourceAtNs,
+	}); err != nil {
+		t.Fatalf("RecordSignalPublication: %v", err)
+	}
+
+	child.ReconcileSignalPublications()
+
+	owners := map[string]bool{}
+	for _, ur := range drainUpdateQ(q) {
+		for _, rr := range ur.Actions {
+			owners[rr.Header().Name] = true
+		}
+	}
+	if owners[sigOwnerFoo] {
+		t.Errorf("use-hsyncparam wrote at the bootstrap's %s", sigOwnerFoo)
+	}
+	if !owners[dsbootOwnFoo] {
+		t.Errorf("pubcds published nothing at %s; wrote at %v", dsbootOwnFoo, owners)
+	}
+	rows, err := kdb.SignalPublicationsForTarget("foobar.com.")
+	if err != nil {
+		t.Fatalf("SignalPublicationsForTarget: %v", err)
+	}
+	for _, p := range rows {
+		if p.Owner == sigOwnerFoo && p.Source != signalSourceAtNs {
+			t.Errorf("the ledger row at %s is now %q's, want the bootstrap's", sigOwnerFoo, p.Source)
+		}
+	}
+	assertLedgerRow(t, kdb, "foobar.com.", sigOwnerFoo)
+}
+
+// parentsync turned on for a zone whose use-hsyncparam published both
+// records. The _sig0key name is the bootstrap's now, so use-hsyncparam's KEY
+// there is withdrawn; its CDS at the _dsboot name stays (#968).
+func TestWithdraw_ParentSyncTurnedOnWithdrawsUseHsyncparamsSig0Key(t *testing.T) {
+	f := newWithdrawFixture(t,
+		map[string][]dns.RR{
+			"example.": {
+				mustRR(t, "example. 3600 IN HSYNCPARAM pubkey pubcds"),
+				mustRR(t, "example. 3600 IN NS ns.foobar.com."),
+				mustRR(t, "example. 3600 IN KEY "+sigKeyRdata),
+				mustRR(t, "example. 3600 IN CDS 12345 15 2 ABCDEF"),
+			},
+		},
+		map[ZoneOption]bool{OptUseHsyncparam: true},
+		map[string][]dns.RR{
+			sigOwnerFoo:  {mustRR(t, sigOwnerFoo+" 3600 IN KEY "+sigKeyRdata)},
+			dsbootOwnFoo: {mustRR(t, dsbootOwnFoo+" 3600 IN CDS 12345 15 2 ABCDEF")},
+		},
+	)
+	assertLedgerRow(t, f.kdb, "foobar.com.", dsbootOwnFoo)
+
+	f.child.Options = map[ZoneOption]bool{OptUseHsyncparam: true, OptParentSync: true}
+	f.child.ReconcileSignalPublications()
+
+	assertWithdrawn(t, f, sigOwnerFoo, dns.TypeKEY)
+	assertLedgerRow(t, f.kdb, "foobar.com.", dsbootOwnFoo)
+}
+
+// The bootstrap publishes at a _sig0key name while use-hsyncparam's
+// withdrawal of that name is still queued. The served zone still holds the
+// KEY, the same one, but the bootstrap must queue its add anyway, behind the
+// delete: trusting the snapshot would record the name as published and let
+// the delete remove the KEY the parent is about to look for.
+func TestABootstrapPublishIsQueuedBehindAPendingWithdrawal(t *testing.T) {
+	f := pubkeyFixture(t)
+	f.child.Options = map[ZoneOption]bool{OptUseHsyncparam: true, OptParentSync: true}
+	f.child.ReconcileSignalPublications() // queues the withdrawal; nothing applies it
+	if !signalRRsPresent(f.target, sigOwnerFoo, []uint16{dns.TypeKEY}) {
+		t.Fatal("the delete has landed; the case under test is one that has not")
+	}
+	seen := ackUpdates(t, f.q, ZoneUpdateResult{Applied: true})
+
+	key := mustRR(t, "example. 3600 IN KEY "+sigKeyRdata)
+	if n := f.child.publishSig0KeyAtSignalNames(context.Background(), []dns.RR{key}); n != 1 {
+		t.Fatalf("satisfied = %d, want 1", n)
+	}
+
+	urs := *seen
+	if len(urs) != 2 {
+		t.Fatalf("expected the withdrawal and then the bootstrap's publication, got %d: %+v", len(urs), urs)
+	}
+	for _, rr := range urs[0].Actions {
+		if rr.Header().Class != dns.ClassANY {
+			t.Errorf("the first update must be the withdrawal's delete; got %s", rr)
+		}
+	}
+	var added bool
+	for _, rr := range urs[1].Actions {
+		if rr.Header().Name == sigOwnerFoo && rr.Header().Class == dns.ClassINET && rr.Header().Rrtype == dns.TypeKEY {
+			added = true
+		}
+	}
+	if !added {
+		t.Fatalf("the bootstrap queued no add behind the delete: %v", urs[1].Actions)
+	}
+	rows, err := f.kdb.SignalPublicationsForTarget("foobar.com.")
+	if err != nil {
+		t.Fatalf("SignalPublicationsForTarget: %v", err)
+	}
+	var source string
+	for _, p := range rows {
+		if p.Owner == sigOwnerFoo {
+			source = p.Source
+		}
+	}
+	if source != signalSourceAtNs {
+		t.Fatalf("the ledger row at %s is %q's, want the bootstrap's", sigOwnerFoo, source)
+	}
 }
 
 // The authority rule, stated as a test: a signal RRset this server did not
