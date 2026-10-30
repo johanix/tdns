@@ -45,7 +45,7 @@ func TestKeystoreReadsUnderATransactionGoThroughIt(t *testing.T) {
 		return pkc.KeyId
 	}
 	gen(DnskeyStateActive, "KSK")
-	gen(DnskeyStateActive, "ZSK")
+	activeZSK := gen(DnskeyStateActive, "ZSK")
 	gen(DnskeyStateStandby, "ZSK")
 	gen(DnskeyStateCreated, "KSK")
 	if err := UpdateDnssecKeyState(kdb, zone, gen(DnskeyStateActive, "ZSK"), DnskeyStateRetired); err != nil {
@@ -97,6 +97,34 @@ func TestKeystoreReadsUnderATransactionGoThroughIt(t *testing.T) {
 	underTx("policy-cleanup", func(tx *Tx) error {
 		_, err := mgmt(tx, "policy-cleanup")
 		return err
+	})
+	// What the transaction wrote is what it reads: a key retired earlier in
+	// the transaction is retired to policy-cleanup, which removes it. Read
+	// through the pool, on a keystore that lets it through, the retire is not
+	// there yet, and the key would stay.
+	underTx("a read sees the transaction's earlier write", func(tx *Tx) error {
+		if err := UpdateDnssecKeyStateTx(tx, kdb, zone, activeZSK, DnskeyStateRetired); err != nil {
+			return err
+		}
+		hasKey := func(state string) (bool, error) {
+			keys, err := GetDnssecKeysByStateTx(tx, zone, state)
+			for _, k := range keys {
+				if k.KeyTag == activeZSK {
+					return true, err
+				}
+			}
+			return false, err
+		}
+		if retired, err := hasKey(DnskeyStateRetired); err != nil || !retired {
+			return fmt.Errorf("key %d retired in the transaction does not read as retired (err %v)", activeZSK, err)
+		}
+		if _, err := mgmt(tx, "policy-cleanup"); err != nil {
+			return err
+		}
+		if removed, err := hasKey(DnskeyStateRemoved); err != nil || !removed {
+			return fmt.Errorf("policy-cleanup did not remove key %d, retired earlier in its transaction (err %v)", activeZSK, err)
+		}
+		return nil
 	})
 	underTx("check", func(tx *Tx) error {
 		resp, err := kdb.DnssecKeyMgmt(ctx, tx, KeystorePost{Command: "dnssec-mgmt", SubCommand: "check"})
