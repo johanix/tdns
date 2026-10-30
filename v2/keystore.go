@@ -450,6 +450,9 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	// one subcommand that spans zones. Kept separate because needsRepublish is
 	// hardwired to kp.Zone, which a bulk import does not have.
 	var bulkRepublishZones []string
+	// strip: clear's and policy-cleanup's strip of the served RRSIGs, staged
+	// under the transaction and published after it commits (#985).
+	var strip *stagedStrip
 
 	if tx == nil {
 		tx, err = kdb.Begin("DnssecKeyMgmt")
@@ -466,6 +469,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			if txSuccess {
 				if cerr := tx.Commit(); cerr != nil {
 					lgSigner.Error("DnssecKeyMgmt commit failed", "err", cerr)
+					strip.finish(false)
 					err = cerr
 					return
 				}
@@ -475,6 +479,9 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 							"zone", kp.Zone, "err", rerr)
 					}
 				}
+				// After the republish: the publish re-signs the SOA, with the
+				// signing keys it finds published.
+				strip.finish(true)
 				// A bulk import on the local-tx path used to commit the rows and
 				// republish nothing, leaving every affected zone serving the
 				// pre-import signing-key set with no indication anything was
@@ -489,11 +496,21 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			} else {
 				lgSigner.Debug("DnssecKeyMgmt rollback")
 				tx.Rollback()
+				strip.finish(false)
 			}
-		} else if txSuccess && needsRepublish {
-			// External tx (APIkeystore): caller must republish after Commit (R1).
-			lgSigner.Debug("DnssecKeyMgmt: external tx; APIkeystore must republishSigningKeysForZone post-commit",
-				"zone", kp.Zone)
+		} else {
+			if txSuccess && needsRepublish {
+				// External tx (APIkeystore): caller must republish after Commit (R1).
+				lgSigner.Debug("DnssecKeyMgmt: external tx; APIkeystore must republishSigningKeysForZone post-commit",
+					"zone", kp.Zone)
+			}
+			// External tx: the caller finishes the strip after its commit and
+			// republish, or after its rollback on a failure here (APIkeystore).
+			if out != nil {
+				out.stagedStrip = strip
+			} else {
+				strip.finish(false)
+			}
 		}
 	}()
 
@@ -847,7 +864,9 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		// Strip the served RRSIGs left behind by the just-deleted keys: any
 		// RRSIG whose keytag is not one of the regenerated keys is an orphan
 		// (its DNSKEY is gone) and can no longer validate. The post-commit
-		// re-sign (triggerResign) is additive and would not remove them.
+		// re-sign (triggerResign) is additive and would not remove them. The
+		// strip is staged under the transaction and published after its commit
+		// (stagedStrip).
 		keep := map[uint16]bool{}
 		if zskPkc != nil {
 			keep[zskPkc.KeyId] = true
@@ -855,13 +874,14 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		if kskPkc != nil {
 			keep[kskPkc.KeyId] = true
 		}
-		if _, err := zd.StripZoneRRSIGs(ctx, func(rrsig *dns.RRSIG) bool {
+		strip, err = zd.stageStripUnderKeystoreTx(ctx, func(rrsig *dns.RRSIG) bool {
 			return !keep[rrsig.KeyTag]
-		}); err != nil {
+		})
+		if err != nil {
 			// Fail the whole operation: returning rolls back the keystore tx
-			// (key delete+regenerate), so the operator can re-run cleanly
-			// rather than be left with un-stripped orphan RRSIGs and a
-			// "success" message.
+			// (key delete+regenerate), and the strip was put back, so the
+			// operator can re-run cleanly rather than be left with un-stripped
+			// orphan RRSIGs and a "success" message.
 			lgSigner.Error("clear: failed to strip orphan RRSIGs", "zone", kp.Zone, "err", err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("clear: failed to strip orphan RRSIGs for zone %s: %v", kp.Zone, err)
@@ -899,20 +919,6 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		zd, zoneExists := Zones.Get(kp.Zone)
 		var removedTags []uint16
 		for _, k := range retired {
-			// Strip the key's RRSIGs from the served zone BEFORE the state
-			// change, and fail the whole operation (rolling back the tx) on
-			// error — so we never report success while orphan RRSIGs remain.
-			if zoneExists {
-				tag := k.KeyTag
-				if _, err := zd.StripZoneRRSIGs(ctx, func(rrsig *dns.RRSIG) bool {
-					return rrsig.KeyTag == tag
-				}); err != nil {
-					lgSigner.Error("policy-cleanup: failed to strip removed key's RRSIGs", "zone", kp.Zone, "keyid", tag, "err", err)
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("policy-cleanup: failed to strip RRSIGs for key %d in zone %s: %v", tag, kp.Zone, err)
-					return &resp, err
-				}
-			}
 			if err := UpdateDnssecKeyStateTx(tx, kdb, kp.Zone, k.KeyTag, DnskeyStateRemoved); err != nil {
 				lgSigner.Error("policy-cleanup: retired→removed failed", "zone", kp.Zone, "keyid", k.KeyTag, "err", err)
 				resp.Error = true
@@ -920,6 +926,26 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 				return &resp, err
 			}
 			removedTags = append(removedTags, k.KeyTag)
+		}
+		// Strip the removed keys' RRSIGs from the served zone, in one strip
+		// staged under the transaction and published after its commit
+		// (stagedStrip). A failed strip fails the whole operation, rolling the
+		// state changes back, so we never report success while orphan RRSIGs
+		// remain.
+		if zoneExists && len(removedTags) > 0 {
+			gone := make(map[uint16]bool, len(removedTags))
+			for _, tag := range removedTags {
+				gone[tag] = true
+			}
+			strip, err = zd.stageStripUnderKeystoreTx(ctx, func(rrsig *dns.RRSIG) bool {
+				return gone[rrsig.KeyTag]
+			})
+			if err != nil {
+				lgSigner.Error("policy-cleanup: failed to strip the removed keys' RRSIGs", "zone", kp.Zone, "keyids", removedTags, "err", err)
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("policy-cleanup: failed to strip RRSIGs for keys %v in zone %s: %v", removedTags, kp.Zone, err)
+				return &resp, err
+			}
 		}
 		if len(removedTags) == 0 {
 			resp.Msg = fmt.Sprintf("Zone %s: no retired keys to clean up.", kp.Zone)
