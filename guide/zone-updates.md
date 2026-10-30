@@ -533,6 +533,18 @@ actually changed.
 It means the deltas are in the database but *not* in what the
 zone is currently answering with.
 
+A secondary whose content came by transfer shows `transferred:
+serial N` in place of the `zone file` line, and the chain must
+start at that serial instead. When the upstream has moved on since
+the journal was recorded, `will replay` says `NO`, and a load by
+transfer discards the journal rather than refusing it: a full
+transfer does not keep a secondary's local changes. The discarded
+instructions go to `{zonefile}.{serial}.purged` when the zone has
+a file, and to the log when it has none. No warning is recorded,
+since nothing needs fixing. An inline-signing secondary on
+tdns-auth is different: its own CDS, CDNSKEY and CSYNC are applied
+to every full transfer, and `status` says so.
+
 ### list
 
 The deltas and the records in them. `--instructions` prints the

@@ -188,8 +188,12 @@ func printJournalInfo(info *tdns.ZoneJournalInfo, detail bool) {
 	}
 
 	if info.Deltas == 0 {
-		fmt.Printf("Zone %s: journal is empty (zone file serial %d, serving %d)\n",
-			info.Zone, info.FileSerial, info.ServedSerial)
+		source := "zone file"
+		if info.FromTransfer {
+			source = "transferred at"
+		}
+		fmt.Printf("Zone %s: journal is empty (%s serial %d, serving %d)\n",
+			info.Zone, source, info.FileSerial, info.ServedSerial)
 		printPublishedSerial(info)
 		return
 	}
@@ -210,7 +214,11 @@ func printJournalInfo(info *tdns.ZoneJournalInfo, detail bool) {
 		return
 	}
 	fmt.Printf("  chain:         %d -> %d\n", info.AnchorSerial, info.HeadSerial)
-	fmt.Printf("  zone file:     %s (serial %d)\n", info.Zonefile, info.FileSerial)
+	if info.FromTransfer {
+		fmt.Printf("  transferred:   serial %d\n", info.FileSerial)
+	} else {
+		fmt.Printf("  zone file:     %s (serial %d)\n", info.Zonefile, info.FileSerial)
+	}
 	fmt.Printf("  serving:       %d\n", info.ServedSerial)
 	printPublishedSerial(info)
 
