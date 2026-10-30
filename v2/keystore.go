@@ -86,10 +86,9 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 	switch kp.SubCommand {
 	case "list":
-		rows, err := kdb.Query(getAllSig0KeysSql)
+		rows, err := tx.Query(getAllSig0KeysSql)
 		if err != nil {
-			lgSigner.Error("kdb.Query failed", "sql", getAllSig0KeysSql, "err", err)
-			return &resp, fmt.Errorf("error from kdb.Query(%s): %v", getAllSig0KeysSql, err)
+			return &resp, fmt.Errorf("error from tx.Query(%s): %v", getAllSig0KeysSql, err)
 		}
 		defer rows.Close()
 
@@ -910,7 +909,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 			resp.ErrorMsg = err.Error()
 			return &resp, err
 		}
-		retired, err := GetDnssecKeysByState(kdb, kp.Zone, DnskeyStateRetired)
+		retired, err := GetDnssecKeysByStateTx(tx, kp.Zone, DnskeyStateRetired)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
@@ -966,7 +965,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 	case "check":
 		// The key invariants (keyrow_check.go) for one zone, or for every
 		// zone in the keystore. Read-only.
-		violations, n, err := kdb.checkKeystoreZones(ctx, kp.Zone)
+		violations, n, err := checkKeystoreZones(ctx, tx, kp.Zone)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
@@ -1515,10 +1514,21 @@ type DnssecKeyWithTimestamps struct {
 // GetDnssecKeysByState returns all DNSSEC keys in a given state, with lifecycle timestamps.
 // If zone is empty, returns keys across all zones.
 func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWithTimestamps, error) {
+	return dnssecKeysByState(kdb, zone, state)
+}
+
+// GetDnssecKeysByStateTx is GetDnssecKeysByState read through tx, for code
+// that holds a keystore transaction: it reads what the transaction has
+// written, and does not wait for the transaction's lock (#986).
+func GetDnssecKeysByStateTx(tx *Tx, zone string, state string) ([]DnssecKeyWithTimestamps, error) {
+	return dnssecKeysByState(tx, zone, state)
+}
+
+func dnssecKeysByState(q rowsQuerier, zone string, state string) ([]DnssecKeyWithTimestamps, error) {
 	if zone == "" {
-		return queryKeyRows(kdb, `state=?`, state)
+		return queryKeyRows(q, `state=?`, state)
 	}
-	return queryKeyRows(kdb, `zonename=? AND state=?`, zone, state)
+	return queryKeyRows(q, `zonename=? AND state=?`, zone, state)
 }
 
 // GetSigningKeyRows returns the zone's rows with sign set: the keys that
@@ -1530,7 +1540,7 @@ func GetSigningKeyRows(kdb *KeyDB, zone string) ([]DnssecKeyWithTimestamps, erro
 
 // queryKeyRows reads DnssecKeyStore rows matching where, with their lifecycle
 // timestamps.
-func queryKeyRows(kdb *KeyDB, where string, args ...interface{}) ([]DnssecKeyWithTimestamps, error) {
+func queryKeyRows(q rowsQuerier, where string, args ...interface{}) ([]DnssecKeyWithTimestamps, error) {
 	// ORDER BY published_at ASC, keyid ASC makes the result deterministic and
 	// FIFO by propagation age (oldest-published first). This is REQUIRED for
 	// correct ZSK rollover: RolloverKey promotes the first standby returned
@@ -1541,9 +1551,9 @@ func queryKeyRows(kdb *KeyDB, where string, args ...interface{}) ([]DnssecKeyWit
 	// always have published_at, so the promotion pick is unaffected.
 	query := `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, ''), active_seq FROM DnssecKeyStore WHERE ` + where + ` ORDER BY published_at ASC, keyid ASC`
 
-	rows, err := kdb.Query(query, args...)
+	rows, err := q.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("GetDnssecKeysByState: query failed: %w", err)
+		return nil, fmt.Errorf("key rows: query failed: %w", err)
 	}
 	defer rows.Close()
 
@@ -1553,12 +1563,12 @@ func queryKeyRows(kdb *KeyDB, where string, args ...interface{}) ([]DnssecKeyWit
 		var keyid, flags int
 		var activeSeq sql.NullInt64
 		if err := rows.Scan(&zonename, &keyid, &flags, &algorithm, &st, &keyrr, &publishedAtStr, &activeAtStr, &retiredAtStr, &activeSeq); err != nil {
-			return nil, fmt.Errorf("GetDnssecKeysByState: scan failed: %w", err)
+			return nil, fmt.Errorf("key rows: scan failed: %w", err)
 		}
 
 		alg, ok := dns.StringToAlgorithm[algorithm]
 		if !ok {
-			lgSigner.Warn("GetDnssecKeysByState: unknown algorithm, skipping key", "zone", zonename, "keyid", keyid, "algorithm", algorithm)
+			lgSigner.Warn("key rows: unknown algorithm, skipping key", "zone", zonename, "keyid", keyid, "algorithm", algorithm)
 			continue
 		}
 		entry := DnssecKeyWithTimestamps{
@@ -1593,7 +1603,7 @@ func queryKeyRows(kdb *KeyDB, where string, args ...interface{}) ([]DnssecKeyWit
 		entries = append(entries, entry)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("GetDnssecKeysByState: rows iteration failed: %w", err)
+		return nil, fmt.Errorf("key rows: rows iteration failed: %w", err)
 	}
 
 	return entries, nil
@@ -1667,8 +1677,30 @@ func (kdb *KeyDB) RolloverKey(zonename string, keytype string, tx *Tx) (uint16, 
 		return 0, 0, fmt.Errorf("invalid keytype %q, must be ZSK or KSK", keytype)
 	}
 
+	// Use existing transaction or begin a new one. The keys are read through
+	// it, so that the roll acts on what the transaction holds (#986).
+	// When tx != nil (external), the caller must republishSigningKeysForZone
+	// after their Commit (R1). When tx == nil we own the commit and republish.
+	var err error
+	localtx := false
+	if tx == nil {
+		tx, err = kdb.Begin("RolloverKey")
+		if err != nil {
+			return 0, 0, fmt.Errorf("error beginning transaction: %w", err)
+		}
+		localtx = true
+	}
+
+	var txErr error
+	committed := false
+	defer func() {
+		if localtx && !committed {
+			tx.Rollback()
+		}
+	}()
+
 	// Get active keys of this type
-	activeKeys, err := GetDnssecKeysByState(kdb, zonename, DnskeyStateActive)
+	activeKeys, err := GetDnssecKeysByStateTx(tx, zonename, DnskeyStateActive)
 	if err != nil {
 		return 0, 0, fmt.Errorf("error getting active keys: %w", err)
 	}
@@ -1705,7 +1737,7 @@ func (kdb *KeyDB) RolloverKey(zonename string, keytype string, tx *Tx) (uint16, 
 	}
 
 	// Get standby keys of this type
-	standbyKeys, err := GetDnssecKeysByState(kdb, zonename, DnskeyStateStandby)
+	standbyKeys, err := GetDnssecKeysByStateTx(tx, zonename, DnskeyStateStandby)
 	if err != nil {
 		return 0, 0, fmt.Errorf("error getting standby keys: %w", err)
 	}
@@ -1720,26 +1752,6 @@ func (kdb *KeyDB) RolloverKey(zonename string, keytype string, tx *Tx) (uint16, 
 	if standbyKey == nil {
 		return 0, 0, fmt.Errorf("no standby %s available for rollover in zone %s", keytype, zonename)
 	}
-
-	// Use existing transaction or begin a new one.
-	// When tx != nil (external), the caller must republishSigningKeysForZone
-	// after their Commit (R1). When tx == nil we own the commit and republish.
-	localtx := false
-	if tx == nil {
-		tx, err = kdb.Begin("RolloverKey")
-		if err != nil {
-			return 0, 0, fmt.Errorf("error beginning transaction: %w", err)
-		}
-		localtx = true
-	}
-
-	var txErr error
-	committed := false
-	defer func() {
-		if localtx && !committed {
-			tx.Rollback()
-		}
-	}()
 
 	// standby → active
 	activeFlags, _ := keyFlagsForState(DnskeyStateActive)

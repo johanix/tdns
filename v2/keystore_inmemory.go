@@ -33,7 +33,12 @@ func NewKeyDBInMemory(name string) (*KeyDB, error) {
 // newKeyDBInMemoryAt opens the in-memory keystore named path, which starts
 // with "/" so that every connection opens the same database.
 func newKeyDBInMemoryAt(path string) (*KeyDB, error) {
-	dsn := keystoreDSN(path) + "&vfs=memdb"
+	return newKeyDBInMemoryDSN(keystoreDSN(path) + "&vfs=memdb")
+}
+
+// newKeyDBInMemoryDSN opens the in-memory keystore that dsn names; the dsn
+// selects the memdb VFS.
+func newKeyDBInMemoryDSN(dsn string) (*KeyDB, error) {
 	drv := &sqlite3.SQLiteDriver{}
 	keep, err := drv.Open(dsn)
 	if err != nil {

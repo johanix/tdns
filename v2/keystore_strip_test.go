@@ -141,10 +141,7 @@ func TestClearPublishesItsStripAfterTheCommit(t *testing.T) {
 // its publish waited there too (#985). Now one strip, published after the
 // commit, takes all of them.
 func TestPolicyCleanupStripsEveryRetiredKeyInOnePublish(t *testing.T) {
-	// A file keystore: policy-cleanup reads the retired keys through the pool
-	// while its transaction is open (#986), which the in-memory keystore
-	// refuses.
-	kdb := newFileTestKeyDB(t)
+	kdb := newTestKeyDB(t)
 	zd := signingTestZone(t, kdb)
 	// Enough signature validity that the zone may be signed again.
 	zd.DnssecPolicy.SigValidity = PolicySigValidity{Default: 14 * 86400, DNSKEY: 14 * 86400, DS: 14 * 86400}

@@ -11,7 +11,7 @@ import (
 // KT-11 (F2): the pending-child-withdraw phase strips a retired KSK's RRSIGs
 // from the served zone before marking it removed, and a strip failure leaves
 // the key retired for retry. Drives RolloverAutomatedTick against a real
-// on-disk KeyDB and a real signed zone.
+// KeyDB (newTestKeyDB, in memory) and a real signed zone.
 
 const ktWithdrawZone = "withdraw.example."
 
