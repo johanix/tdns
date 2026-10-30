@@ -13,8 +13,9 @@ import (
 
 // Step 2 (relaxed-mode ZSK algorithm rollover) test matrix, §8.4:
 // T1, T2, T2b, T2c, T2d, T-timing, T3, T3b, T4, T4b, T4c, T5, T6, T7, T8, T9.
-// Driven against a real on-disk KeyDB via newTestKeyDB (sign_reconcile_test.go)
-// and the package-global Conf (withCompleteness sets the mode per test).
+// Driven against a real KeyDB, in memory, via newTestKeyDB
+// (sign_reconcile_test.go), and the package-global Conf (withCompleteness
+// sets the mode per test).
 
 const algZone = "zsk-alg.example."
 

@@ -1442,7 +1442,8 @@ type KeyDB struct {
 	DBFile string // sqlite file path, recorded by NewKeyDB; empty in memory
 	mu     sync.Mutex
 	// txCond wakes Begin waiters when Commit/Rollback clears Ctx. Initialized
-	// in NewKeyDB; L is &mu.
+	// in openKeyDB, which NewKeyDB and NewKeyDBInMemory both call, and by
+	// Begin on a KeyDB made without them; L is &mu.
 	txCond *sync.Cond
 	// Sig0Cache   map[string]*Sig0KeyCache
 	KeystoreSig0Cache map[string]*Sig0ActiveKeys

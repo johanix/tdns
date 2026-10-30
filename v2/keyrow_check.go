@@ -71,8 +71,8 @@ func (r keyRowView) role() string {
 	return "ZSK"
 }
 
-func loadKeyRowViews(kdb *KeyDB, zone string) ([]keyRowView, error) {
-	rows, err := kdb.DB.Query(`SELECT keyid, flags, algorithm, state, COALESCE(privatekey, ''), COALESCE(keyrr, ''), pub, sign, ds
+func loadKeyRowViews(q rowsQuerier, zone string) ([]keyRowView, error) {
+	rows, err := q.Query(`SELECT keyid, flags, algorithm, state, COALESCE(privatekey, ''), COALESCE(keyrr, ''), pub, sign, ds
 FROM DnssecKeyStore WHERE zonename=? ORDER BY keyid`, zone)
 	if err != nil {
 		return nil, err
@@ -104,8 +104,14 @@ FROM DnssecKeyStore WHERE zonename=? ORDER BY keyid`, zone)
 // CheckKeyRowInvariants checks the row-level invariants (I1-I4, I8, I9) of a
 // zone's keystore rows: for a zone that is not loaded, or before it is.
 func CheckKeyRowInvariants(kdb *KeyDB, zone string) []KeyInvariantViolation {
+	return checkKeyRowInvariants(kdb, zone)
+}
+
+// checkKeyRowInvariants is CheckKeyRowInvariants reading through q: the KeyDB,
+// or the transaction of a caller that holds one.
+func checkKeyRowInvariants(q rowsQuerier, zone string) []KeyInvariantViolation {
 	zone = dns.Fqdn(zone)
-	rows, err := loadKeyRowViews(kdb, zone)
+	rows, err := loadKeyRowViews(q, zone)
 	if err != nil {
 		return []KeyInvariantViolation{{Invariant: "error", Zone: zone, Detail: fmt.Sprintf("reading the keystore: %v", err)}}
 	}
@@ -116,11 +122,17 @@ func CheckKeyRowInvariants(kdb *KeyDB, zone string) []KeyInvariantViolation {
 // against the keystore, and the served-zone ones (I5, I6, I7) against zd's
 // snapshot when the zone holds one.
 func CheckKeyInvariants(kdb *KeyDB, zd *ZoneData) []KeyInvariantViolation {
+	return checkKeyInvariants(kdb, zd)
+}
+
+// checkKeyInvariants is CheckKeyInvariants reading through q: the KeyDB, or
+// the transaction of a caller that holds one.
+func checkKeyInvariants(q rowsQuerier, zd *ZoneData) []KeyInvariantViolation {
 	if zd == nil {
 		return nil
 	}
 	zone := dns.Fqdn(zd.ZoneName)
-	rows, err := loadKeyRowViews(kdb, zone)
+	rows, err := loadKeyRowViews(q, zone)
 	if err != nil {
 		return []KeyInvariantViolation{{Invariant: "error", Zone: zone, Detail: fmt.Sprintf("reading the keystore: %v", err)}}
 	}
@@ -346,15 +358,16 @@ func checkServedCds(zd *ZoneData, zone string, rows []keyRowView) []KeyInvariant
 }
 
 // checkKeystoreZones runs the checker over the named zone, or over every zone
-// in the keystore, using the loaded zone where there is one. A cancelled
+// in the keystore, using the loaded zone where there is one. It reads through
+// q: the KeyDB, or the transaction of a caller that holds one. A cancelled
 // context stops it between zones.
-func (kdb *KeyDB) checkKeystoreZones(ctx context.Context, zone string) ([]KeyInvariantViolation, int, error) {
+func checkKeystoreZones(ctx context.Context, q rowsQuerier, zone string) ([]KeyInvariantViolation, int, error) {
 	var zones []string
 	if strings.TrimSpace(zone) != "" {
 		zones = []string{dns.Fqdn(zone)}
 	} else {
 		var err error
-		if zones, err = kdb.keystoreZones(); err != nil {
+		if zones, err = keystoreZones(q); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -364,9 +377,9 @@ func (kdb *KeyDB) checkKeystoreZones(ctx context.Context, zone string) ([]KeyInv
 			return out, len(zones), err
 		}
 		if zd, ok := Zones.Get(z); ok && zd != nil {
-			out = append(out, CheckKeyInvariants(kdb, zd)...)
+			out = append(out, checkKeyInvariants(q, zd)...)
 		} else {
-			out = append(out, CheckKeyRowInvariants(kdb, z)...)
+			out = append(out, checkKeyRowInvariants(q, z)...)
 		}
 	}
 	return out, len(zones), nil

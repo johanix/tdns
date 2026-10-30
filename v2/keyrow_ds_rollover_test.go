@@ -131,9 +131,7 @@ func TestDsTimelineNoneModel(t *testing.T) {
 // at that moment.
 func TestDsTimelineMultiDS(t *testing.T) {
 	parent := ktInstallFakeParent(t)
-	// A file keystore: the DS confirm's advanceCreatedKeysInRangeTx reads the
-	// created keys through the pool while it holds its transaction.
-	kdb := newFileTestKeyDB(t)
+	kdb := newTestKeyDB(t)
 	const zone = "multids-timeline.example."
 	pol := ktSequencePolicy(RolloverMethodMultiDS)
 	zd := ktEngineZone(t, kdb, zone, fmt.Sprintf("%s 3600 IN SOA ns.%s hostmaster.%s 1 7200 1800 604800 7200\n%s 3600 IN NS ns.%s\nns.%s 3600 IN A 192.0.2.1\n", zone, zone, zone, zone, zone, zone), pol)
@@ -254,9 +252,7 @@ func TestDsTimelineMultiDS(t *testing.T) {
 // invariants hold at every tick.
 func TestDsTimelineAlgRollover(t *testing.T) {
 	parent := ktInstallFakeParent(t)
-	// A file keystore: the DS confirm's advanceCreatedKeysInRangeTx reads the
-	// created keys through the pool while it holds its transaction.
-	kdb := newFileTestKeyDB(t)
+	kdb := newTestKeyDB(t)
 	pol := ktSequencePolicy(RolloverMethodMultiDS)
 	zd := ktEngineZone(t, kdb, ktAlgZone, ktAlgZoneText, pol)
 	a := ktGenKSK(t, kdb, ktAlgZone, DnskeyStateActive, dns.ED25519)

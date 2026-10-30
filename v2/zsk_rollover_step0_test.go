@@ -9,7 +9,8 @@ import (
 
 // Step 0 (ZSK rollover robustness parity) tests: manual asap/cancel request,
 // roll-due manual override, active_at self-heal, and the active_seq counter.
-// Driven against a real on-disk KeyDB via newTestKeyDB (sign_reconcile_test.go).
+// Driven against a real KeyDB, in memory, via newTestKeyDB
+// (sign_reconcile_test.go).
 
 const zskTestZone = "zsk-step0.example."
 
