@@ -42,8 +42,10 @@ type strippedRRset struct {
 // stageStripUnderKeystoreTx stages the strip of the RRSIGs remove selects, and
 // holds the zone until finish. A zone that may not originate content cannot be
 // held (BeginTx); its strip is staged without a hold, and finish publishes it
-// all the same. A strip that fails is put back, and the hold released, before
-// this returns: the caller's error rolls the key change back.
+// all the same. A strip that fails is returned unfinished, with the error:
+// the caller rolls the key change back and then finishes it, which puts it
+// back and releases the hold. Releasing it here, with the transaction still
+// open, would publish while the transaction holds the keystore.
 func (zd *ZoneData) stageStripUnderKeystoreTx(ctx context.Context, remove func(*dns.RRSIG) bool) (*stagedStrip, error) {
 	s := &stagedStrip{zd: zd}
 	if id, err := zd.BeginTx(0); err == nil {
@@ -55,8 +57,7 @@ func (zd *ZoneData) stageStripUnderKeystoreTx(ctx context.Context, remove func(*
 	})
 	zd.mu.Unlock()
 	if err != nil {
-		s.finish(false)
-		return nil, err
+		return s, err
 	}
 	if n > 0 {
 		lgSigner.Info("staged the strip of RRSIGs; it is published after the keystore commit",

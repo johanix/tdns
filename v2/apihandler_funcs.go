@@ -194,6 +194,11 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 
 		case "dnssec-mgmt":
 			resp, err = kdb.DnssecKeyMgmt(r.Context(), tx, kp)
+			// Kept on a failure too, before resp is replaced: the rollback
+			// in the defer puts the strip back after it.
+			if resp != nil {
+				dnssecStrip = resp.stagedStrip
+			}
 			if err != nil {
 				lgApi.Error("DnssecKeyMgmt failed", "err", err)
 				resp = &KeystoreResponse{
@@ -202,9 +207,6 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 				}
 			} else if resp != nil && resp.NeedsSigningKeysRepublish {
 				dnssecRepublishZone = kp.Zone
-			}
-			if err == nil && resp != nil {
-				dnssecStrip = resp.stagedStrip
 			}
 			if err == nil && resp != nil && len(resp.BulkRepublishZones) > 0 {
 				dnssecBulkRepublishZones = resp.BulkRepublishZones

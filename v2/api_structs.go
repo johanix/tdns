@@ -133,8 +133,10 @@ type KeystoreResponse struct {
 	// stagedStrip is a strip of the zone's RRSIGs that DnssecKeyMgmt staged
 	// under an external tx (clear, policy-cleanup). The caller finishes it
 	// after its Commit and its republishSigningKeysForZone, or after its
-	// Rollback (#985). Left unfinished, the zone's hold runs out at
-	// txHoldLimit and the strip is published then.
+	// Rollback (#985), on a failure too. Left unfinished on a zone it holds,
+	// the hold runs out at txHoldLimit and the strip is published then; a
+	// zone that could not be held has no hold to run out, and its next
+	// publish carries the strip.
 	stagedStrip *stagedStrip
 }
 
