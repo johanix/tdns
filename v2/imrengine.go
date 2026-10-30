@@ -305,6 +305,9 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		requireDnssec = *conf.Imr.RequireDnssecValidation
 	}
 	LoadImrTuningDefaults(&conf.Imr.Tuning)
+	if err := validateQminTuning(&conf.Imr.Tuning); err != nil {
+		return err
+	}
 	cache.SetBackoffPolicy(cache.BackoffPolicy{
 		FirstFailure:   conf.Imr.Tuning.Backoff.FirstFailure,
 		MaxFailure:     conf.Imr.Tuning.Backoff.MaxFailure,

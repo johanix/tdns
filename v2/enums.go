@@ -240,6 +240,7 @@ const (
 	ImrOptQueryForTransportTLSA
 	ImrOptUseTransportSignals
 	ImrOptAllowLoopbackNameservers
+	ImrOptQnameMinimisation
 )
 
 var ImrOptionToString = map[ImrOption]string{
@@ -250,6 +251,7 @@ var ImrOptionToString = map[ImrOption]string{
 	ImrOptQueryForTransportTLSA:    "query-for-transport-tlsa",
 	ImrOptUseTransportSignals:      "use-transport-signals",
 	ImrOptAllowLoopbackNameservers: "allow-loopback-nameservers",
+	ImrOptQnameMinimisation:        "qname-minimisation",
 }
 
 var StringToImrOption = map[string]ImrOption{
@@ -260,6 +262,7 @@ var StringToImrOption = map[string]ImrOption{
 	"query-for-transport-tlsa":   ImrOptQueryForTransportTLSA,
 	"use-transport-signals":      ImrOptUseTransportSignals,
 	"allow-loopback-nameservers": ImrOptAllowLoopbackNameservers,
+	"qname-minimisation":         ImrOptQnameMinimisation,
 }
 
 type AuthOption uint8
