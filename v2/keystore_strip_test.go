@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -422,5 +423,60 @@ func TestARollbackPutsNoRRSIGBackOverChangedRecords(t *testing.T) {
 	}
 	if n := sigsOf(kept); n != keptBefore {
 		t.Errorf("%s A: %d RRSIGs after the rollback, it had %d", kept, n, keptBefore)
+	}
+}
+
+// failingAfter is a context whose Err is nil for its first n calls and
+// context.Canceled from then on: a strip cancelled part way through.
+type failingAfter struct {
+	context.Context
+	n atomic.Int32
+}
+
+func (c *failingAfter) Err() error {
+	if c.n.Add(-1) < 0 {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestAStripThatFailsIsPutBackAfterTheRollback: a strip cancelled part way
+// fails clear, which rolls its key change back. The strip is put back, and
+// its hold released, after the rollback. Released before it, on a zone that
+// is not Ready, the publish ran in the caller and its serial write waited
+// for the caller's own transaction.
+func TestAStripThatFailsIsPutBackAfterTheRollback(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := signingTestZone(t, kdb)
+	old := servedRRSIGTags(zd)
+	zd.mu.Lock()
+	zd.Ready = false
+	zd.mu.Unlock()
+
+	ctx := &failingAfter{Context: context.Background()}
+	ctx.n.Store(2)
+	start := time.Now()
+	_, err := kdb.DnssecKeyMgmt(ctx, nil, clearPost(zd.ZoneName))
+	took := time.Since(start)
+	if err == nil {
+		t.Fatal("a strip cancelled part way did not fail clear")
+	}
+	if took > 2*time.Second {
+		t.Errorf("clear took %v to fail: the strip's release waited for its own keystore transaction", took)
+	}
+	if n := zd.txOpenCount(); n != 0 {
+		t.Errorf("%d transactions still hold the zone", n)
+	}
+	served := servedRRSIGTags(zd)
+	for tag, n := range old {
+		if served[tag] != n {
+			t.Errorf("key %d: %d RRSIGs served after the failed clear, the zone had %d", tag, served[tag], n)
+		}
+	}
+	zd.mu.Lock()
+	warn, warned := zd.Errors[ConfigWarning]
+	zd.mu.Unlock()
+	if warned && strings.HasPrefix(warn.Msg, serialRecordWarning) {
+		t.Errorf("the published serial was not recorded: %s", warn.Msg)
 	}
 }

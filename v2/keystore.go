@@ -505,12 +505,11 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 					"zone", kp.Zone)
 			}
 			// External tx: the caller finishes the strip after its commit and
-			// republish (APIkeystore). On a failure here the caller rolls
-			// back, so the strip is put back now.
-			if !txSuccess {
-				strip.finish(false)
-			} else if out != nil {
+			// republish, or after its rollback on a failure here (APIkeystore).
+			if out != nil {
 				out.stagedStrip = strip
+			} else {
+				strip.finish(false)
 			}
 		}
 	}()
