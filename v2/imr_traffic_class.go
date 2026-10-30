@@ -20,8 +20,9 @@ import (
 // (ImrResponder), and the own lookups that run inside a client's query mark
 // theirs back. A context without a mark is not a DNS client's: the transport
 // signal and TLSA lookups start from a context of their own, and the embedded
-// users (the scanner, the DSYNC lookups) never had one. "imr query" over the
-// API is asked as a client's (asClientQuery, #875).
+// users (the scanner, the DSYNC lookups) never had one. "imr query", over the
+// API (#875) and in tdns-imr's own shell, is asked as a client's
+// (asClientQuery).
 //
 // The mark also decides one thing about the answer: whether a DS or DNSKEY
 // question follows a CNAME at the query name (followsCNAME, #875). A client's
@@ -75,8 +76,9 @@ type imrQueryAsClientKey struct{}
 // the answers are counted under the client classes. Lookups nested inside
 // that query are the resolver's own again (imrQueryContext).
 //
-// The API's "imr query" uses it (#875): a DS or DNSKEY question asked there
-// at a CNAME owner is answered as a DNS client's is, through the CNAME. The
+// "imr query" uses it, over the API (#875) and in tdns-imr's own shell
+// (ImrRequest.AsClient): a DS or DNSKEY question asked there at a CNAME owner
+// is answered as a DNS client's is, through the CNAME. The
 // embedded users -- the scanner, the delegation checks, the DSYNC lookups --
 // do not: they ask about the name itself, and a CNAME there is "none there",
 // with the CNAME's verdict.
