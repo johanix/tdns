@@ -524,9 +524,19 @@ func (zd *ZoneData) reconcileZoneFileWithJournal(verdict ZoneFileVerdict, prev *
 	// or a replay that failed leaves the zone serving its file without the
 	// journal's changes, and says so in a ConfigWarning of its own. The zone
 	// then still disagrees with its journal, and PublishError stays.
+	//
+	// So does journalReplayOwed. A journal that could not be brought in is left
+	// for the operator to reconcile, and the write after a refresh must not
+	// drop it on their behalf (persistRefreshedZone).
 	reconciled := true
 	defer func() {
-		if reconciled && zd.HasError(PublishError) {
+		if !reconciled {
+			return
+		}
+		zd.mu.Lock()
+		zd.journalReplayOwed = false
+		zd.mu.Unlock()
+		if zd.HasError(PublishError) {
 			zd.ClearError(PublishError)
 		}
 	}()

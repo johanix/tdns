@@ -329,6 +329,10 @@ func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
 	// claim otherwise either way.
 	zd.mu.Lock()
 	zd.deltasReplayed = false
+	// Nor is anything an earlier process left still owed: it went to the
+	// artefact. A delta that arrived mid-purge was published here, so it is in
+	// the content already.
+	zd.journalReplayOwed = false
 	zd.mu.Unlock()
 
 	lg.Info("zone journal purged", "zone", zd.ZoneName, "deltas", info.Deltas,
