@@ -1553,7 +1553,7 @@ func queryKeyRows(q rowsQuerier, where string, args ...interface{}) ([]DnssecKey
 
 	rows, err := q.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("GetDnssecKeysByState: query failed: %w", err)
+		return nil, fmt.Errorf("key rows: query failed: %w", err)
 	}
 	defer rows.Close()
 
@@ -1563,12 +1563,12 @@ func queryKeyRows(q rowsQuerier, where string, args ...interface{}) ([]DnssecKey
 		var keyid, flags int
 		var activeSeq sql.NullInt64
 		if err := rows.Scan(&zonename, &keyid, &flags, &algorithm, &st, &keyrr, &publishedAtStr, &activeAtStr, &retiredAtStr, &activeSeq); err != nil {
-			return nil, fmt.Errorf("GetDnssecKeysByState: scan failed: %w", err)
+			return nil, fmt.Errorf("key rows: scan failed: %w", err)
 		}
 
 		alg, ok := dns.StringToAlgorithm[algorithm]
 		if !ok {
-			lgSigner.Warn("GetDnssecKeysByState: unknown algorithm, skipping key", "zone", zonename, "keyid", keyid, "algorithm", algorithm)
+			lgSigner.Warn("key rows: unknown algorithm, skipping key", "zone", zonename, "keyid", keyid, "algorithm", algorithm)
 			continue
 		}
 		entry := DnssecKeyWithTimestamps{
@@ -1603,7 +1603,7 @@ func queryKeyRows(q rowsQuerier, where string, args ...interface{}) ([]DnssecKey
 		entries = append(entries, entry)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("GetDnssecKeysByState: rows iteration failed: %w", err)
+		return nil, fmt.Errorf("key rows: rows iteration failed: %w", err)
 	}
 
 	return entries, nil

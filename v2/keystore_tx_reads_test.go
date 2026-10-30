@@ -53,6 +53,8 @@ func TestKeystoreReadsUnderATransactionGoThroughIt(t *testing.T) {
 	}
 	ctx := context.Background()
 
+	// underTx runs f in a transaction of its own, rolled back at the end:
+	// the subtests share the keystore's keys, not each other's writes.
 	underTx := func(name string, f func(tx *Tx) error) {
 		t.Run(name, func(t *testing.T) {
 			tx, err := kdb.Begin(t.Name())
@@ -79,6 +81,9 @@ func TestKeystoreReadsUnderATransactionGoThroughIt(t *testing.T) {
 		_, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
 		if err == nil {
 			return errors.New("the pool read the keystore beside an open transaction")
+		}
+		if !strings.Contains(err.Error(), "database is locked") {
+			return fmt.Errorf("the pool's read failed, but not on the lock: %v", err)
 		}
 		if took := time.Since(start); took > time.Second {
 			return fmt.Errorf("the pool's read took %v to fail", took)
