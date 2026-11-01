@@ -117,6 +117,28 @@ func TestCollectSignalRRsets_DisabledOption(t *testing.T) {
 	}
 }
 
+// Several SVCB records are one signal: a different port on each. Injection
+// keeps every RR. Treating a second RR with the same owner and type as a
+// duplicate would publish only the first port.
+func TestAddTransportSignal_KeepsEverySVCBInTheRRset(t *testing.T) {
+	zd := &ZoneData{}
+	sigs := []core.RRset{{
+		Name:   "_dns.ns.example.",
+		RRtype: dns.TypeSVCB,
+		RRs: []dns.RR{
+			mustSVCB(t, `_dns.ns.example. 10800 IN SVCB 1 . alpn="dot"`),
+			mustSVCB(t, `_dns.ns.example. 10800 IN SVCB 1 . alpn="doq"`),
+		},
+	}}
+	m := new(dns.Msg)
+	if !zd.addTransportSignal(m, sigs, &edns0.MsgOptions{OotsOptIn: true}) {
+		t.Fatal("expected the signal to be added")
+	}
+	if len(m.Extra) != 2 {
+		t.Fatalf("Extra has %d RRs, want both SVCB records", len(m.Extra))
+	}
+}
+
 func TestAddTransportSignal_DedupAgainstAnswer(t *testing.T) {
 	zd := mapZoneWithSignal("example.com.", "ns.example.com.",
 		[]dns.RR{mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 1 . alpn="dot"`)})

@@ -15,7 +15,10 @@ their weights. "none" means it gave none. "alpn:" is an SVCB with an ALPN list
 and no weights (each counts as 100), and "set:" an operator's override (imr set
 server transport). A stub's row shows its configured signal. A weight of 1 is
 marked (ignored): selection uses only weights above 1. Nor is the do53 weight
-a share: Do53 gets what the encrypted weights leave of 100.
+a share: Do53 gets what the encrypted weights leave of 100. A port the signal
+assigns follows that transport (dot:30 port:1234). Do53 never has one:
+cleartext stays on port 53. DoH is given a port only when the record names
+DoH and nothing else.
 
 --pct shows each transport's share of the row's answers instead of a count,
 and adds EXPECTED: the shares selection gives a query without PRIVACY (with

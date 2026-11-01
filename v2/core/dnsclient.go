@@ -369,13 +369,31 @@ func (c *DNSClient) exchange(ctx context.Context, msg *dns.Msg, server string, d
 	return r, rtt, res, err
 }
 
+// dialAddr is the host:port an exchange dials. server may already be
+// host:port, which is how a signal port is passed in; that form is used
+// as-is so the client's default port is not joined on again. A bare host,
+// including a bare IPv6 address, is joined with port. SplitHostPort rejects
+// a bare IPv4 (no port) and a bare IPv6 (too many colons), and accepts
+// "ip:port" and "[ipv6]:port".
+func dialAddr(server, port string) string {
+	if _, _, err := net.SplitHostPort(server); err == nil {
+		return server
+	}
+	return net.JoinHostPort(server, port)
+}
+
 func (c *DNSClient) exchangeInner(ctx context.Context, msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, ExchangeResult{WireTransport: c.Transport}, err
 	}
+	port := c.Port
+	if c.Transport == TransportDoH && port == "" {
+		port = "443"
+	}
+	addr := dialAddr(server, port)
 	if debug {
-		fmt.Printf("*** Exchange: sending %s message to %s:%s opcode: %s qname: %s rrtype: %s\n",
-			TransportToString[c.Transport], server, c.Port,
+		fmt.Printf("*** Exchange: sending %s message to %s opcode: %s qname: %s rrtype: %s\n",
+			TransportToString[c.Transport], addr,
 			dns.OpcodeToString[msg.Opcode],
 			msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
@@ -383,12 +401,11 @@ func (c *DNSClient) exchangeInner(ctx context.Context, msg *dns.Msg, server stri
 	switch c.Transport {
 	case TransportDo53, TransportDo53TCP:
 		if debug {
-			log.Printf("*** Do53 sending message to %s:%s opcode: %s qname: %s rrtype: %s",
-				server, c.Port,
+			log.Printf("*** Do53 sending message to %s opcode: %s qname: %s rrtype: %s",
+				addr,
 				dns.OpcodeToString[msg.Opcode],
 				msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 		}
-		addr := net.JoinHostPort(server, c.Port)
 		if c.ForceTCP {
 			r, rtt, err := exchangeCancellable(ctx, c.DNSClientTCP, msg, addr)
 			return r, rtt, ExchangeResult{WireTransport: TransportDo53TCP}, err
@@ -418,13 +435,13 @@ func (c *DNSClient) exchangeInner(ctx context.Context, msg *dns.Msg, server stri
 		}
 		return r, rtt, ExchangeResult{WireTransport: TransportDo53}, err
 	case TransportDoT:
-		r, rtt, err := exchangeCancellable(ctx, c.DNSClientTLS, msg, net.JoinHostPort(server, c.Port))
+		r, rtt, err := exchangeCancellable(ctx, c.DNSClientTLS, msg, addr)
 		return r, rtt, ExchangeResult{WireTransport: TransportDoT}, err
 	case TransportDoH:
-		r, rtt, err := c.exchangeDoH(ctx, msg, server, debug)
+		r, rtt, err := c.exchangeDoH(ctx, msg, addr, debug)
 		return r, rtt, ExchangeResult{WireTransport: TransportDoH}, err
 	case TransportDoQ:
-		r, rtt, err := c.exchangeDoQ(ctx, msg, net.JoinHostPort(server, c.Port), debug)
+		r, rtt, err := c.exchangeDoQ(ctx, msg, addr, debug)
 		return r, rtt, ExchangeResult{WireTransport: TransportDoQ}, err
 	default:
 		return nil, 0, ExchangeResult{WireTransport: c.Transport}, fmt.Errorf("unsupported transport protocol: %d", c.Transport)
@@ -449,15 +466,9 @@ func (c *DNSClient) exchangeDoH(ctx context.Context, msg *dns.Msg, server string
 		return nil, 0, fmt.Errorf("failed to pack DNS message: %v", err)
 	}
 
-	// Determine port (default to 443 for HTTPS if not specified)
-	port := c.Port
-	if port == "" {
-		port = "443"
-	}
-
-	// Use net.JoinHostPort to properly handle IPv6 addresses (adds brackets if needed)
-	// This returns format like "[::1]:8443" which is correct for URLs
-	hostPort := net.JoinHostPort(server, port)
+	// server is already host:port: exchangeInner ran it through dialAddr,
+	// which leaves a signal port alone and otherwise joins the DoH default.
+	hostPort := server
 
 	// Create HTTP request
 	url := fmt.Sprintf("https://%s/dns-query", hostPort)
