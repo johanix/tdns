@@ -54,6 +54,23 @@ service:
    transport:
       type:    svcb               # svcb | tsync | none; default is none
       signal:  "doq:20,dot:10"    # comma-sep list of doq,dot,doh,do53 with traffic share
+      # port:  1234               # optional SVCB port= on that one record.
+      #                            # It applies to dot and doq named in the signal.
+      #                            # DoH takes it only when DoH is the only
+      #                            # transport named. Do53 stays on port 53:
+      #                            # port= never moves cleartext, and it does
+      #                            # not advertise another cleartext listener.
+      #                            # Publishing the port does not listen on it;
+      #                            # listen separately under listeners.ports.
+      #                            # A non-standard port is also how a test
+      #                            # listener stays off the port 853 that
+      #                            # resolvers probe on their own.
+      # Different ports are several SVCB records. Do not also set signal or port.
+      # records:
+      #   - signal: "dot:30"
+      #     port: 1234
+      #   - signal: "doq:20"
+      #     port: 1235
 
 # The listeners: block is the SAME schema in every tdns app (#446): where
 # this daemon's DNS service listens. Authoritative-serving BEHAVIOR lives

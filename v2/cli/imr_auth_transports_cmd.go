@@ -47,7 +47,10 @@ their weights. "none" means it gave none. "alpn:" is an SVCB with an ALPN list
 and no weights (each counts as 100), and "set:" an operator's override (imr set
 server transport). A stub's row shows its configured signal. A weight of 1 is
 marked (ignored): selection uses only weights above 1. Nor is the do53 weight
-a share: Do53 gets what the encrypted weights leave of 100.
+a share: Do53 gets what the encrypted weights leave of 100. A port the signal
+assigns follows that transport (dot:30 port:1234). Do53 never has one:
+cleartext stays on port 53. DoH is given a port only when the record names
+DoH and nothing else.
 
 --pct shows each transport's share of the row's answers instead of a count,
 and adds EXPECTED: the shares selection gives a query without PRIVACY (with
@@ -207,7 +210,7 @@ func formatAuthTransports(rep tdns.ImrAuthTransportsReport, sortBy string, pct, 
 				cols = append(cols, formatExpected(r.Expected, cr.level))
 			}
 			if first {
-				cols = append(cols, formatOOTSSignal(r.Signal, r.SignalSource))
+				cols = append(cols, formatOOTSSignal(r.Signal, r.SignalPorts, r.SignalSource))
 			}
 			fmt.Fprintln(tw, joinCells(cols, len(header)))
 		}
@@ -259,7 +262,7 @@ func authServerLabel(r tdns.ImrAuthTransportsRow) string {
 // included. An encrypted transport's weight of 1 is marked: selection uses only
 // weights above 1. "none" when there was no signal, and "empty" when there was
 // one that named no transport (an oots SvcParam without entries).
-func formatOOTSSignal(signal map[string]uint8, source string) string {
+func formatOOTSSignal(signal map[string]uint8, ports map[string]uint16, source string) string {
 	if len(signal) == 0 {
 		if source != "" {
 			return "empty"
@@ -273,6 +276,9 @@ func formatOOTSSignal(signal map[string]uint8, source string) string {
 	for _, t := range orderedTransports(signal) {
 		w := signal[t]
 		part := fmt.Sprintf("%s:%d", t, w)
+		if ports[t] != 0 {
+			part += fmt.Sprintf(" port:%d", ports[t])
+		}
 		if t != "do53" && w == 1 {
 			part += " (ignored)"
 		}
