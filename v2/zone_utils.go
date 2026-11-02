@@ -834,6 +834,12 @@ func (zd *ZoneData) runPostRefreshCallbacks(firstLoad bool) {
 		return
 	}
 	zd.mu.Lock()
+	// A withheld zone is not Ready at any refresh: the same debt.
+	if zd.withheld {
+		zd.postRefreshOwed = true
+		zd.mu.Unlock()
+		return
+	}
 	zd.postRefreshOwed = false
 	zd.mu.Unlock()
 	for _, cb := range zd.OnZonePostRefresh {

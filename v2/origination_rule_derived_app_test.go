@@ -55,8 +55,9 @@ func registerTestOriginationRuleApp(t *testing.T, app AppType) {
 // relayUpstream is an upstream whose zone the test replaces while it is
 // served: one address, a new version at each publish, as a signer's zone is.
 type relayUpstream struct {
-	addr string
-	cur  atomic.Pointer[ZoneData]
+	addr  string
+	cur   atomic.Pointer[ZoneData]
+	extra []string // records every later publish adds to the zone
 }
 
 // publish makes the upstream serve example. at serial.
@@ -71,7 +72,7 @@ func (u *relayUpstream) publish(t *testing.T, serial uint32) {
 		Status:      ZoneStatusReady,
 		Downstreams: []AclEntry{{Prefix: "127.0.0.0/8", Key: NOKEY}},
 	}
-	if _, _, err := pzd.ReadZoneData(ovUpstreamZone(serial), true); err != nil {
+	if _, _, err := pzd.ReadZoneData(ovUpstreamZone(serial, u.extra...), true); err != nil {
 		t.Fatalf("upstream ReadZoneData: %v", err)
 	}
 	pzd.InstallInitialSnapshot()
@@ -131,11 +132,13 @@ func startRelayUpstream(t *testing.T, serial uint32) *relayUpstream {
 // relayUpstream, pre-registered the way ParseZones leaves a zone and loaded by
 // the config refresher.
 type relayedZone struct {
-	zd   *ZoneData
-	conf *Config
-	up   *relayUpstream
-	opts map[ZoneOption]bool
-	halt func()
+	zd     *ZoneData
+	conf   *Config
+	up     *relayUpstream
+	opts   map[ZoneOption]bool
+	policy string
+	notify []PeerConf
+	halt   func()
 }
 
 // startRelayedZone starts an engine on kdb and loads the zone through it.
@@ -143,6 +146,14 @@ type relayedZone struct {
 // on the pre-registered zone before the load, where a derived app attaches
 // its refresh callbacks.
 func startRelayedZone(t *testing.T, kdb *KeyDB, up *relayUpstream, opts map[ZoneOption]bool,
+	prepare func(*ZoneData)) *relayedZone {
+	t.Helper()
+	return startRelayedZoneWith(t, kdb, up, &relayedZone{opts: opts}, prepare)
+}
+
+// startRelayedZoneWith is startRelayedZone for a zone whose configuration also
+// names a policy or downstreams: cfg's opts, policy and notify.
+func startRelayedZoneWith(t *testing.T, kdb *KeyDB, up *relayUpstream, cfg *relayedZone,
 	prepare func(*ZoneData)) *relayedZone {
 	t.Helper()
 	conf := &Config{}
@@ -175,7 +186,7 @@ func startRelayedZone(t *testing.T, kdb *KeyDB, up *relayUpstream, opts map[Zone
 	}
 	t.Cleanup(halt)
 
-	z := &relayedZone{zd: zd, conf: conf, up: up, opts: opts, halt: halt}
+	z := &relayedZone{zd: zd, conf: conf, up: up, opts: cfg.opts, policy: cfg.policy, notify: cfg.notify, halt: halt}
 	conf.Internal.RefreshZoneCh <- z.configRefresher()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -213,6 +224,8 @@ func (z *relayedZone) configRefresher() ZoneRefresher {
 		PrimariesConf: []PeerConf{{Addr: z.up.addr}},
 		Primaries:     []PeerConf{{Addr: z.up.addr}},
 		Options:       opts,
+		DnssecPolicy:  z.policy,
+		Notify:        z.notify,
 		ConfigUpdate:  true,
 	}
 }

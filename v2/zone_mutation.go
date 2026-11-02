@@ -924,13 +924,15 @@ func (zd *ZoneData) snapshotIsServableLocked(snap *zoneSnapshot) bool {
 
 // snapshotContentIsServableLocked is the CONTENT half of that test: would this
 // snapshot be servable if the zone were Ready? A zone that does not sign its own
-// content always qualifies; one that does must not offer an unsigned apex SOA.
+// content qualifies; one that does must not offer an unsigned apex SOA; and a
+// withheld zone offers nothing, since its daemon does not know yet which of the
+// two it is.
 //
 // Separate from the test above because this one decides whether to SET Ready,
 // and a predicate that reads Ready cannot do that -- it would answer false for
 // every zone forever. Same content rule, no Ready in it.
 func (zd *ZoneData) snapshotContentIsServableLocked(snap *zoneSnapshot) bool {
-	if snap == nil {
+	if snap == nil || zd.withheld {
 		return false
 	}
 	if !zd.signsItsOwnContent() {
