@@ -240,11 +240,26 @@ func TestAFirstLoadWithNoRoleKnownIsOfferedToNobodyUntilItsRelease(t *testing.T)
 	}
 	check("after the first load")
 
-	r := new(dns.Msg)
-	r.SetAxfr(ovZone)
-	rw := &fakeRW{remote: udpAddr("127.0.0.1")}
-	if _, err := z.zd.ZoneTransferOut(context.Background(), rw, r, nil); err == nil && rw.written != nil && rw.written.Rcode == dns.RcodeSuccess {
-		t.Error("a withheld zone was transferred out")
+	// With a downstream the zone would serve: this refusal is the withholding's,
+	// and the same transfer below goes through once it is released.
+	z.zd.mu.Lock()
+	z.zd.Downstreams = []AclEntry{{Prefix: "127.0.0.0/8", Key: NOKEY}}
+	z.zd.mu.Unlock()
+	transfer := func() *dns.Msg {
+		t.Helper()
+		r := new(dns.Msg)
+		r.SetAxfr(ovZone)
+		rw := &fakeRW{remote: udpAddr("127.0.0.1")}
+		if _, err := z.zd.ZoneTransferOut(context.Background(), rw, r, nil); err != nil {
+			t.Fatalf("ZoneTransferOut: %v", err)
+		}
+		if rw.written == nil {
+			t.Fatal("ZoneTransferOut wrote nothing")
+		}
+		return rw.written
+	}
+	if m := transfer(); m.Rcode != dns.RcodeRefused {
+		t.Errorf("a transfer of the withheld zone: rcode %s, want REFUSED", dns.RcodeToString[m.Rcode])
 	}
 
 	up.publish(t, 41)
@@ -268,6 +283,9 @@ func TestAFirstLoadWithNoRoleKnownIsOfferedToNobodyUntilItsRelease(t *testing.T)
 	}
 	if owner, err := z.zd.GetOwner(ovZone); err != nil || owner == nil {
 		t.Errorf("GetOwner after the release: %v", err)
+	}
+	if m := transfer(); m.Rcode != dns.RcodeSuccess || len(m.Answer) == 0 {
+		t.Errorf("a transfer after the release: rcode %s, %d records", dns.RcodeToString[m.Rcode], len(m.Answer))
 	}
 
 	z.zd.ReleaseWithheld() // nothing more
@@ -788,4 +806,138 @@ func TestStartSigningPutsTheZoneOnTheRenewalList(t *testing.T) {
 		}
 	}
 	t.Fatal("the zone was not registered for periodic re-signing")
+}
+
+// Nothing that takes the zone's lock sees a start half way, or the publish of a
+// refresh arriving then would be made by a zone that is about to go back to
+// relaying: signed, at a serial of its own, and past taking back. The start fails
+// here, every time, on a KSK of the wrong algorithm.
+func TestNothingSeesAFailedStartHalfWay(t *testing.T) {
+	kdb, _ := roleSetup(t)
+	z := startRoleZone(t, kdb, signedUpstream(t, 40), nil, nil)
+	if _, _, err := kdb.GenerateKeypair(ovZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.RSASHA256, "KSK", nil); err != nil {
+		t.Fatalf("KSK: %v", err)
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	var sawSigning, sawPolicy atomic.Bool
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			z.zd.mu.Lock()
+			if z.zd.Options[OptInlineSigning] {
+				sawSigning.Store(true)
+			}
+			if z.zd.DnssecPolicy != nil {
+				sawPolicy.Store(true)
+			}
+			z.zd.mu.Unlock()
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if err := z.zd.StartSigning(context.Background(), 5000); err == nil {
+			t.Fatal("StartSigning signed with a KSK of the wrong algorithm")
+		}
+	}
+	close(stop)
+	<-done
+	if sawSigning.Load() {
+		t.Error("something holding the zone's lock saw inline-signing on during a start that failed")
+	}
+	if sawPolicy.Load() {
+		t.Error("something holding the zone's lock saw the policy bound during a start that failed")
+	}
+	wantRelayedCopy(t, z, 40, "after the failed starts")
+}
+
+// An open transaction would keep the signed copy from going out until its commit,
+// and StartSigning promises it is out when it returns. So does anything staged
+// and waiting for the gate, which the role change would sign into its own version.
+// Refused, with nothing changed, and it goes through when tried again.
+func TestAStartIsRefusedWhileTheZoneHasChangesOnTheirWayOut(t *testing.T) {
+	check := func(t *testing.T, z *relayedZone, when string) {
+		t.Helper()
+		before := z.served(t)
+		err := z.zd.StartSigning(context.Background(), 5000)
+		if !errors.Is(err, ErrSigningHeld) {
+			t.Fatalf("%s: StartSigning: %v, want ErrSigningHeld", when, err)
+		}
+		if z.zd.signsItsOwnContent() || z.zd.DnssecPolicy != nil {
+			t.Fatalf("%s: the refused start changed the zone", when)
+		}
+		if got := z.served(t); got != before {
+			t.Fatalf("%s: serial %d, was %d", when, got, before)
+		}
+	}
+	t.Run("an open transaction", func(t *testing.T) {
+		// An app outside the origination rule: a zone under it that only relays
+		// cannot have a transaction open.
+		kdb := asDerivedApp(t, derivedEditorApp)
+		withLivePolicies(t, map[string]DnssecPolicy{"base": kskzsk(dns.ED25519, dns.ED25519)})
+		withNotifyQ(t, 16)
+		z := startRoleZone(t, kdb, signedUpstream(t, 40), nil, nil)
+		tx, err := z.zd.BeginTx(0)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		check(t, z, "with the transaction open")
+		if err := z.zd.CommitTx(tx); err != nil {
+			t.Fatalf("CommitTx: %v", err)
+		}
+		if err := z.zd.StartSigning(context.Background(), 0); err != nil {
+			t.Fatalf("StartSigning after the commit: %v", err)
+		}
+		if !z.zd.signsItsOwnContent() {
+			t.Fatal("the zone does not sign after the commit")
+		}
+	})
+	t.Run("a staged change", func(t *testing.T) {
+		kdb, _ := roleSetup(t)
+		z := startRoleZone(t, kdb, signedUpstream(t, 40), nil, nil)
+		z.zd.mu.Lock()
+		z.zd.ensureWorkingSet()
+		z.zd.mu.Unlock()
+		check(t, z, "with a change staged")
+		z.zd.mu.Lock()
+		z.zd.workingSet, z.zd.wsSignalSynth = nil, nil
+		z.zd.mu.Unlock()
+		if err := z.zd.StartSigning(context.Background(), 0); err != nil {
+			t.Fatalf("StartSigning once it had gone: %v", err)
+		}
+	})
+}
+
+// "Is it signed yet" and "may it be offered" are two questions. A withheld zone
+// with signing on and its signatures in place is signed, and signing it again
+// would spend a serial and, with no key in the keystore, mint one.
+func TestAWithheldZoneWithItsSignaturesIsNotSignedAgainAfterItsPolicyBinds(t *testing.T) {
+	kdb, _ := roleSetup(t)
+	withheld := withheldAtFirstLoad(t)
+	z := startRoleZone(t, kdb, signedUpstream(t, 40), nil, withheld)
+	zd := z.zd
+	zd.SetRuntimeOption(OptInlineSigning, true)
+	pol := kskzsk(dns.ED25519, dns.ED25519)
+	zd.mu.Lock()
+	zd.DnssecPolicy = &pol
+	serial := zd.CurrentSerial
+	zd.mu.Unlock()
+	if !zd.Withheld() || !snapshotApexIsSigned(zd.publishedSnapshot()) {
+		t.Fatal("fixture: the zone should be withheld with a signed apex")
+	}
+
+	if err := signOnceAfterPolicyBind(context.Background(), zd); err != nil {
+		t.Fatalf("signOnceAfterPolicyBind: %v", err)
+	}
+	if got := zd.publishedSnapshot().Serial; got != serial {
+		t.Errorf("serial %d, was %d: the zone was signed again", got, serial)
+	}
+	if tags := zoneActiveKeytags(t, kdb); len(tags) != 0 {
+		t.Errorf("keys were made: %v", tags)
+	}
 }

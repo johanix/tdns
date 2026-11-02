@@ -736,6 +736,23 @@ func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	newrrsigs, err := zd.resignWorkingSetLocked(ctx, dak, clamp)
+	if err != nil {
+		return newrrsigs, err
+	}
+
+	zd.publishOrQueueLocked(zd.generation.Load(), false) // the gate: a busy zone's pass goes out with the next publish
+
+	lgSigner.Info("ResignZone completed",
+		"zone", zd.ZoneName, "rrsigs_written", newrrsigs)
+	return newrrsigs, nil
+}
+
+// resignWorkingSetLocked is ResignZone's pass, without its lock and its publish:
+// it stages the zone with every RRset's RRSIGs replaced, the NSEC chain and the
+// DNSKEY RRset built from dak. Caller holds zd.mu and publishes. On an error what
+// it staged so far stays staged.
+func (zd *ZoneData) resignWorkingSetLocked(ctx context.Context, dak *DnssecKeys, clamp *ClampParams) (int, error) {
 	zd.ensureWorkingSet()
 
 	if !zd.Options[OptBlackLies] {
@@ -850,11 +867,6 @@ func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 			}
 		}
 	}
-
-	zd.publishOrQueueLocked(zd.generation.Load(), false) // the gate: a busy zone's pass goes out with the next publish
-
-	lgSigner.Info("ResignZone completed",
-		"zone", zd.ZoneName, "rrsigs_written", newrrsigs)
 	return newrrsigs, nil
 }
 

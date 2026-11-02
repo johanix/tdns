@@ -404,10 +404,7 @@ func signOnceAfterPolicyBind(ctx context.Context, zd *ZoneData) error {
 	// signatures came in with the file. Signing again would republish and bump
 	// the serial for nothing, and finishFirstLoadPolicy is explicitly a
 	// retry-only path that must not re-publish.
-	zd.mu.Lock()
-	signed := zd.snapshotContentIsServableLocked(zd.snapshot.Load())
-	zd.mu.Unlock()
-	if signed {
+	if snapshotApexIsSigned(zd.snapshot.Load()) {
 		return nil
 	}
 	newrrsigs, err := zd.SignZone(ctx, zd.KeyDB, false)

@@ -938,7 +938,14 @@ func (zd *ZoneData) snapshotContentIsServableLocked(snap *zoneSnapshot) bool {
 	if !zd.signsItsOwnContent() {
 		return true
 	}
-	if snap.Apex == nil {
+	return snapshotApexIsSigned(snap)
+}
+
+// snapshotApexIsSigned reports whether the snapshot's apex SOA carries an RRSIG:
+// what "signed" means to the servable test, and nothing about whether the zone
+// is to be offered.
+func snapshotApexIsSigned(snap *zoneSnapshot) bool {
+	if snap == nil || snap.Apex == nil {
 		return false
 	}
 	soa := snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)

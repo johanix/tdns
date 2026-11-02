@@ -23,7 +23,9 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 )
 
 // Withhold keeps a zone that is not yet served from being served: it stays not
@@ -32,6 +34,10 @@ import (
 // else about the zone changes: its refreshes go on, so a release serves the
 // upstream's current copy. A zone already served is refused, since taking a zone
 // off the air is not what this is for.
+//
+// It does not decide what the zone signs. The promise of no policy and no keys is
+// inline-signing's being off: a zone with a signing option on binds and signs at
+// its first load as ever, and stays not Ready.
 //
 // For a derived app that does not know yet what the zone is to it, from its
 // first load's OnZonePreRefresh, before the first publish.
@@ -138,10 +144,17 @@ func (zd *ZoneData) BindPolicyWithoutSigning() error {
 	return nil
 }
 
+// ErrSigningHeld: StartSigning found an open transaction on the zone, or changes
+// staged and waiting to be published. They are not signed into the role change
+// and it does not wait for them: nothing has changed, and the caller tries again
+// shortly.
+var ErrSigningHeld = errors.New("the zone has an open transaction or staged changes")
+
 // StartSigning has a running zone serve its own signatures: inline-signing on,
 // the policy bound if it is not yet, and the zone signed and published before it
-// returns. That needs no restart, and the zone serves either what it served
-// before or the signed copy, nothing in between.
+// returns. That needs no restart. It is one step under the zone's lock: a refresh
+// or a publish comes before it, on the copy as it was, or after it, signing, and
+// the zone serves either what it served before or the signed copy.
 //
 // The copy's signatures are replaced, not added to. A relayed copy can carry its
 // upstream's, and by every "is it signed yet" test in tdns that is a signed zone:
@@ -151,21 +164,23 @@ func (zd *ZoneData) BindPolicyWithoutSigning() error {
 // signed copy lands above it, and above what the zone served, or they would not
 // take it. 0 says there is none.
 //
-// A zone nobody owns gets its first keys here, as at a first load. An owned zone
-// without an active key of every role is refused with ErrKeyGenerationDeferred:
-// the owner makes its keys, and this waits for them. On any refusal or failure
-// the zone goes on exactly as before, relaying or withheld. A zone that signs
-// already, with its policy bound, is left alone.
+// A zone nobody owns gets its first keys here, as at a first load. Two refusals
+// are for the caller to try again: an owned zone without an active key of every
+// role, ErrKeyGenerationDeferred, since the owner makes its keys and this waits
+// for them; and ErrSigningHeld. On those and on any failure the zone goes on as
+// it was, relaying or withheld. A zone that signs already, with its policy bound,
+// is left alone.
 //
-// It takes the zone's lock and can sign a whole zone, so a caller holds no lock
-// of its own across it. A derived app switches inline-signing on through this,
-// not through SetRuntimeOption: with the option on and no policy bound, the next
-// publish is unsigned over the copy the zone was serving.
+// It holds the zone's lock across a whole zone's signing, as ResignZone does, so
+// a caller holds no lock of its own across it. A derived app switches
+// inline-signing on through this, not through SetRuntimeOption: with the option
+// on and no policy bound, the next publish is unsigned over the copy the zone was
+// serving.
 func (zd *ZoneData) StartSigning(ctx context.Context, minSerial uint32) error {
 	if err := zd.startSigning(ctx, minSerial); err != nil {
 		return err
 	}
-	// After the lock of startSigning: the release runs the zone's callbacks.
+	// After the locks of startSigning: the release runs the zone's callbacks.
 	// The signed copy is what it goes Ready on.
 	zd.ReleaseWithheld()
 	return nil
@@ -179,63 +194,16 @@ func (zd *ZoneData) startSigning(ctx context.Context, minSerial uint32) error {
 	defer zd.policyApplyMu.Unlock()
 
 	zd.mu.Lock()
-	oldPol, oldName, oldSerial := zd.DnssecPolicy, zd.DnssecPolicyName, zd.CurrentSerial
-	oldErrs := zd.snapshotErrorsLocked(DnssecError, DnssecPolicyWarning)
-	zd.mu.Unlock()
-	if oldPol != nil && zd.signsItsOwnContent() {
+	if zd.DnssecPolicy != nil && zd.signsItsOwnContent() {
+		zd.mu.Unlock()
 		return nil
 	}
-
-	pol, name := oldPol, oldName
-	if pol == nil {
-		var err error
-		if pol, name, err = zd.intendedPolicy(); err != nil {
-			return fmt.Errorf("start signing: %w", err)
-		}
-	}
-	if zoneOwned(zd) {
-		dak, err := zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-		if err != nil {
-			return fmt.Errorf("start signing: zone %s: %w", zd.ZoneName, err)
-		}
-		if len(dak.KSKs) == 0 || len(dak.ZSKs) == 0 {
-			return fmt.Errorf("start signing: zone %s: %w", zd.ZoneName, ErrKeyGenerationDeferred)
-		}
-	}
-
-	wasOn := zd.Options[OptInlineSigning]
-	before := zd.snapshot.Load()
-	// The policy before the option: the publish of a refresh that arrives
-	// between them signs, rather than going out unsigned.
-	zd.mu.Lock()
-	zd.DnssecPolicy, zd.DnssecPolicyName = pol, name
-	if minSerial != 0 && serialNewer(minSerial, zd.CurrentSerial) {
-		zd.CurrentSerial = minSerial
-	}
+	oldPol := zd.DnssecPolicy
+	name, newRRSIGs, err := zd.switchToSigningLocked(ctx, minSerial)
+	serial := zd.CurrentSerial
 	zd.mu.Unlock()
-	zd.SetRuntimeOption(OptInlineSigning, true)
-	UpdateSigValidityFloor(zd, pol, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm, false)
-
-	newRRSIGs, err := zd.ResignZone(ctx, zd.KeyDB)
-	if err == nil {
-		err = zd.publishStagedSignatures(before)
-	}
 	if err != nil {
-		zd.mu.Lock()
-		// What the pass staged is signed by keys the zone is not going to
-		// serve, and an open transaction's commit is not this to take back.
-		if !zd.txHeldLocked() {
-			zd.workingSet, zd.wsSignalSynth = nil, nil
-			zd.publishWorkingSetLocked(zd.generation.Load(), false) // clears the staging flags, answers any waiter
-		}
-		zd.DnssecPolicy, zd.DnssecPolicyName = oldPol, oldName
-		zd.CurrentSerial = oldSerial
-		zd.restoreErrorsLocked(oldErrs, DnssecError, DnssecPolicyWarning)
-		zd.mu.Unlock()
-		if !wasOn {
-			zd.SetRuntimeOption(OptInlineSigning, false)
-		}
-		return fmt.Errorf("start signing: zone %s under policy %q: %w", zd.ZoneName, name, err)
+		return fmt.Errorf("start signing: zone %s: %w", zd.ZoneName, err)
 	}
 
 	reconcileDsAfterBind(zd.KeyDB, zd, oldPol)
@@ -245,39 +213,89 @@ func (zd *ZoneData) startSigning(ctx context.Context, minSerial uint32) error {
 		lgSigner.Error("the zone is signed but persisting its applied DNSSEC policy failed", "zone", zd.ZoneName, "policy", name, "err", perr)
 	}
 	// Only a first load registers a zone for renewal, and this zone's first load
-	// did not sign.
+	// did not sign. Not under the zone's lock: the send can wait on a full queue.
 	if q := Conf.Internal.ResignQ; q != nil {
 		if rerr := zd.registerForPeriodicResign(ctx, q); rerr != nil {
 			lgSigner.Error("the zone is signed but not registered for renewal", "zone", zd.ZoneName, "err", rerr)
 		}
 	}
-	lgSigner.Info("the zone now serves its own signatures", "zone", zd.ZoneName, "policy", name, "new_rrsigs", newRRSIGs, "serial", zd.publishedSerial())
+	lgSigner.Info("the zone now serves its own signatures", "zone", zd.ZoneName, "policy", name, "new_rrsigs", newRRSIGs, "serial", serial)
 	return nil
 }
 
-// publishStagedSignatures publishes what a signing pass left staged, now: the
-// pass goes through the publish gate, which queues the work of a busy zone. A
-// publish that was refused is an error, and before is the snapshot that shows it.
-// Under an open transaction the commit carries the signatures.
-func (zd *ZoneData) publishStagedSignatures(before *zoneSnapshot) error {
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	if zd.txHeldLocked() {
-		return nil
+// switchToSigningLocked is the step itself: nothing that takes the zone's lock
+// sees it half way, and a failure puts back everything it changed. It returns
+// the policy's name and the RRSIGs written. Caller holds zd.mu.
+func (zd *ZoneData) switchToSigningLocked(ctx context.Context, minSerial uint32) (string, int, error) {
+	if zd.txHeldLocked() || zd.workingSet != nil {
+		return "", 0, ErrSigningHeld
 	}
-	if zd.workingSet != nil {
+	pol, name := zd.DnssecPolicy, zd.DnssecPolicyName
+	if pol == nil {
+		var err error
+		if pol, name, err = zd.intendedPolicy(); err != nil {
+			return "", 0, err
+		}
+	}
+	if zoneOwned(zd) {
+		dak, err := zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+		if err != nil {
+			return "", 0, err
+		}
+		if len(dak.KSKs) == 0 || len(dak.ZSKs) == 0 {
+			return "", 0, ErrKeyGenerationDeferred
+		}
+	}
+
+	oldPol, oldName, oldSerial := zd.DnssecPolicy, zd.DnssecPolicyName, zd.CurrentSerial
+	oldErrs := zd.snapshotErrorsLocked(DnssecError, DnssecPolicyWarning)
+	wasOn := zd.Options[OptInlineSigning]
+	before := zd.snapshot.Load()
+
+	zd.DnssecPolicy, zd.DnssecPolicyName = pol, name
+	if minSerial != 0 && serialNewer(minSerial, zd.CurrentSerial) {
+		zd.CurrentSerial = minSerial
+	}
+	zd.setRuntimeOptionLocked(OptInlineSigning, true)
+	UpdateSigValidityFloor(zd, pol, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm, true)
+
+	newRRSIGs, err := zd.signWholeCopyLocked(ctx)
+	if err == nil {
+		// Not through the publish gate, which queues the work of a busy zone:
+		// the caller goes on to say that the zone has switched.
 		zd.publishLocked(zd.generation.Load())
+		if zd.snapshot.Load() == before {
+			err = errors.New("the signed copy was not published")
+		}
 	}
-	if zd.snapshot.Load() == before {
-		return fmt.Errorf("the signed copy was not published")
+	if err != nil {
+		// What the pass staged is signed by keys the zone is not going to serve.
+		zd.workingSet, zd.wsSignalSynth = nil, nil
+		zd.publishWorkingSetLocked(zd.generation.Load(), false) // nothing staged: clears the staging flags, answers any waiter
+		zd.DnssecPolicy, zd.DnssecPolicyName = oldPol, oldName
+		zd.CurrentSerial = oldSerial
+		zd.restoreErrorsLocked(oldErrs, DnssecError, DnssecPolicyWarning)
+		if !wasOn {
+			zd.setRuntimeOptionLocked(OptInlineSigning, false)
+		}
+		return "", 0, fmt.Errorf("under policy %q: %w", name, err)
 	}
-	return nil
+	return name, newRRSIGs, nil
 }
 
-// publishedSerial is the serial of the snapshot served, for a log line.
-func (zd *ZoneData) publishedSerial() uint32 {
-	if snap := zd.snapshot.Load(); snap != nil {
-		return snap.Serial
+// signWholeCopyLocked stages the zone signed by its own keys and by no others:
+// ResignZone's pass, with its checks, with zd.mu already held.
+func (zd *ZoneData) signWholeCopyLocked(ctx context.Context) (int, error) {
+	if _, bad := zd.Errors[DnssecError]; bad {
+		return 0, fmt.Errorf("the zone has a DNSSEC error: %s", zd.ErrorMsg)
 	}
-	return 0
+	dak, err := zd.EnsureActiveDnssecKeys(zd.KeyDB, true)
+	if err != nil {
+		return 0, err
+	}
+	clamp, err := ClampParamsForZone(zd.KeyDB, zd.ZoneName, zd.DnssecPolicy, time.Now())
+	if err != nil {
+		return 0, fmt.Errorf("resolving the TTL clamp: %w", err)
+	}
+	return zd.resignWorkingSetLocked(ctx, dak, clamp)
 }
