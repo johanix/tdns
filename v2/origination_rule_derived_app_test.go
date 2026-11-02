@@ -6,8 +6,6 @@ package tdns
 
 import (
 	"context"
-	"net"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -86,17 +84,7 @@ func startRelayUpstream(t *testing.T, serial uint32) *relayUpstream {
 	u := &relayUpstream{}
 	u.publish(t, serial)
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen tcp: %v", err)
-	}
-	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
-	port, _ := strconv.Atoi(portStr)
-	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
-	if err != nil {
-		ln.Close()
-		t.Fatalf("listen udp on the tcp port: %v", err)
-	}
+	ln, pc := listenTCPAndUDP(t, "127.0.0.1:0")
 	u.addr = ln.Addr().String()
 
 	srvCtx, srvCancel := context.WithCancel(t.Context())
