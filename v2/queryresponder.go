@@ -287,6 +287,15 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		return nil
 	}
 
+	// A withheld parent answers this no more than it answers for its own names:
+	// the query handler's guard was on the zone of qname, not on this one.
+	if pzd.Withheld() {
+		lgHandler.Debug("DS query: parent-side zone is withheld", "zone", pzd.ZoneName, "qname", qname)
+		m.MsgHdr.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(m)
+		return nil
+	}
+
 	// Switch to the parent-side zone: pin ITS snapshot, apex, and signer.
 	psnap := pzd.publishedSnapshot()
 	if psnap == nil {

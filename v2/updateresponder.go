@@ -230,6 +230,13 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		w.WriteMsg(m)
 		return nil // didn't find any zone for that qname
 	}
+	// The same withheld guard as the query path.
+	if zd.Withheld() {
+		lgHandler.Warn("zone is withheld", "qname", qname, "zone", zd.ZoneName)
+		m.SetRcode(r, dns.RcodeServerFailure)
+		w.WriteMsg(m)
+		return nil
+	}
 	// And the same expire guard as the query path: a zone we may no longer
 	// answer for is not one we may accept updates to either.
 	if zd.HasExpired() {

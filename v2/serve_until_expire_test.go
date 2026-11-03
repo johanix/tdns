@@ -80,6 +80,31 @@ func ask(t *testing.T, qname string, qtype uint16) *dns.Msg {
 	return rw.written
 }
 
+// askUpdate drives the full UpdateResponder with an empty UPDATE for qname.
+func askUpdate(t *testing.T, qname string) *dns.Msg {
+	t.Helper()
+	r := new(dns.Msg)
+	r.SetUpdate(qname)
+	msgo, err := edns0.ExtractFlagsAndEDNS0Options(r)
+	if err != nil {
+		t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
+	}
+	rw := &fakeRW{remote: udpAddr("127.0.0.1")}
+	if err := UpdateResponder(context.Background(), &DnsUpdateRequest{
+		ResponseWriter: rw,
+		Msg:            r,
+		Qname:          qname,
+		Options:        msgo,
+		Status:         &UpdateStatus{},
+	}, nil); err != nil {
+		t.Fatalf("UpdateResponder(%s): %v", qname, err)
+	}
+	if rw.written == nil {
+		t.Fatalf("UpdateResponder(%s): no response written", qname)
+	}
+	return rw.written
+}
+
 // TestHasPublishedDataIsNotGetSOA covers the trap the brief calls out: GetSOA
 // synthesizes an SOA for a never-transferred secondary so the refresh engine
 // has something to probe with. Using it as the have-data test would let a zone
@@ -206,29 +231,7 @@ func TestQueryServfailsWithoutPublishedData(t *testing.T) {
 func TestUpdateSharesTheQueryPredicate(t *testing.T) {
 	authApp(t)
 
-	update := func(t *testing.T, qname string) *dns.Msg {
-		t.Helper()
-		r := new(dns.Msg)
-		r.SetUpdate(qname)
-		msgo, err := edns0.ExtractFlagsAndEDNS0Options(r)
-		if err != nil {
-			t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
-		}
-		rw := &fakeRW{remote: udpAddr("127.0.0.1")}
-		if err := UpdateResponder(context.Background(), &DnsUpdateRequest{
-			ResponseWriter: rw,
-			Msg:            r,
-			Qname:          qname,
-			Options:        msgo,
-			Status:         &UpdateStatus{},
-		}, nil); err != nil {
-			t.Fatalf("UpdateResponder(%s): %v", qname, err)
-		}
-		if rw.written == nil {
-			t.Fatalf("UpdateResponder(%s): no response written", qname)
-		}
-		return rw.written
-	}
+	update := askUpdate
 
 	t.Run("no published data is refused", func(t *testing.T) {
 		zd := &ZoneData{ZoneName: "empty.example.", ZoneStore: MapZone, ZoneType: Secondary, Logger: discardLogger()}

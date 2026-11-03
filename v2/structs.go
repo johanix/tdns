@@ -308,8 +308,9 @@ type ZoneData struct {
 	// once the zone is Ready (runOwedPostRefreshCallbacks), and the flag clears
 	// only when they run. Guarded by mu.
 	postRefreshOwed bool
-	// withheld keeps the zone from going Ready until its daemon knows what the
-	// zone is to it (Withhold, signing_role.go). Guarded by mu.
+	// withheld keeps the zone from answering and from going Ready until its
+	// daemon knows what the zone is to it (Withhold, signing_role.go). Guarded
+	// by mu.
 	withheld bool
 	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
 	// next publish (see zoneSnapshot.signalSynth). Seeded from the published

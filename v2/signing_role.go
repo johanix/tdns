@@ -9,8 +9,9 @@
  * calls such an app makes instead, for the four things it can know about a zone:
  *
  *   - nothing yet: Withhold, at the zone's first load. The zone is kept up to
- *     date and offered to nobody. Going Ready on an unsigned copy would be
- *     bogus for as long as the parent holds a DS for the zone.
+ *     date and offered to nobody: no answers, no transfers, no NOTIFY. Serving
+ *     an unsigned copy would be bogus for as long as the parent holds a DS for
+ *     the zone.
  *   - it does not sign: ReleaseWithheld. The zone relays its copy.
  *   - it will sign, but not yet: BindPolicyWithoutSigning. The app can run the
  *     zone's keys and have them published by the other signers, while the zone
@@ -25,15 +26,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
-// Withhold keeps a zone that is not yet served from being served: it stays not
-// Ready, whatever its copy holds, until ReleaseWithheld or StartSigning. Not
-// Ready is what refuses queries and transfers and holds back NOTIFYs. Nothing
-// else about the zone changes: its refreshes go on, so a release serves the
-// upstream's current copy. A zone already served is refused, since taking a zone
-// off the air is not what this is for.
+// Withhold keeps a zone that is not yet served from being served, whatever its
+// copy holds, until ReleaseWithheld or StartSigning. A query, or an UPDATE, gets
+// SERVFAIL, as from a zone with nothing to answer from. And it stays not Ready,
+// which is what refuses transfers and holds back NOTIFYs; Ready is not what
+// answers queries, a published copy is. Nothing else about the zone changes: its
+// refreshes go on, so a release serves the upstream's current copy. A zone
+// already served, Ready or with a copy published, is refused, since taking a zone
+// off the air is not what this is for. One withheld already stays so, and that is
+// no refusal.
 //
 // It does not decide what the zone signs. The promise of no policy and no keys is
 // inline-signing's being off: a zone with a signing option on binds and signs at
@@ -47,12 +54,13 @@ func (zd *ZoneData) Withhold() error {
 	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	if zd.Ready {
+	if zd.withheld {
+		return nil
+	}
+	if zd.Ready || zd.snapshot.Load() != nil {
 		return fmt.Errorf("withhold: zone %s is already served", zd.ZoneName)
 	}
-	if !zd.withheld {
-		lg.Info("the zone is withheld until its daemon knows its role", "zone", zd.ZoneName)
-	}
+	lg.Info("the zone is withheld until its daemon knows its role", "zone", zd.ZoneName)
 	zd.withheld = true
 	return nil
 }
@@ -168,8 +176,9 @@ var ErrSigningHeld = errors.New("the zone has an open transaction or staged chan
 // are for the caller to try again: an owned zone without an active key of every
 // role, ErrKeyGenerationDeferred, since the owner makes its keys and this waits
 // for them; and ErrSigningHeld. On those and on any failure the zone goes on as
-// it was, relaying or withheld. A zone that signs already, with its policy bound,
-// is left alone.
+// it was, relaying or withheld. A zone that serves its own signatures, with its
+// policy bound, is left alone. The option and the binding do not say that it does:
+// a copy from upstream can arrive with them on, and it gets signed here.
 //
 // It holds the zone's lock across a whole zone's signing, as ResignZone does, so
 // a caller holds no lock of its own across it. A derived app switches
@@ -194,7 +203,7 @@ func (zd *ZoneData) startSigning(ctx context.Context, minSerial uint32) error {
 	defer zd.policyApplyMu.Unlock()
 
 	zd.mu.Lock()
-	if zd.DnssecPolicy != nil && zd.signsItsOwnContent() {
+	if zd.servesItsOwnSignaturesLocked() {
 		zd.mu.Unlock()
 		return nil
 	}
@@ -221,6 +230,30 @@ func (zd *ZoneData) startSigning(ctx context.Context, minSerial uint32) error {
 	}
 	lgSigner.Info("the zone now serves its own signatures", "zone", zd.ZoneName, "policy", name, "new_rrsigs", newRRSIGs, "serial", serial)
 	return nil
+}
+
+// servesItsOwnSignaturesLocked reports whether the zone has started signing: it
+// signs, its policy is bound, and the SOA it serves carries a signature by one of
+// its keys. A key that has rolled since reads as no, and a start signs again, which
+// is what it would be asked to do. Caller holds zd.mu.
+func (zd *ZoneData) servesItsOwnSignaturesLocked() bool {
+	if zd.DnssecPolicy == nil || !zd.signsItsOwnContent() {
+		return false
+	}
+	snap := zd.snapshot.Load()
+	if snap == nil || snap.Apex == nil {
+		return false
+	}
+	dak, err := zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+	if err != nil {
+		return false // the start meets it too, and says so
+	}
+	for _, rr := range snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs {
+		if sig, ok := rr.(*dns.RRSIG); ok && slices.ContainsFunc(dak.ZSKs, func(k *PrivateKeyCache) bool { return k.KeyId == sig.KeyTag }) {
+			return true
+		}
+	}
+	return false
 }
 
 // switchToSigningLocked is the step itself: nothing that takes the zone's lock

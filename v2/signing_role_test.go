@@ -196,9 +196,49 @@ func wantReady(t *testing.T, zd *ZoneData, when string) {
 	}
 }
 
+// wantNoAnswers: nothing gets anything out of the zone. The handler reaches a zone
+// by two paths, for a query at its apex and for one below it, and its resolver and
+// its UPDATE path each ask the same question.
+func wantNoAnswers(t *testing.T, when string) {
+	t.Helper()
+	for _, q := range roleQuestions {
+		if m := ask(t, q.name, q.rrtype); m.Rcode != dns.RcodeServerFailure || len(m.Answer)+len(m.Ns) != 0 {
+			t.Errorf("%s: %s %s: rcode %s, %d answers, %d authority: the zone answered", when, q.name, dns.TypeToString[q.rrtype],
+				dns.RcodeToString[m.Rcode], len(m.Answer), len(m.Ns))
+		}
+	}
+	if zd := (&Imr{}).ownZoneForQuestion(ovZone, dns.TypeSOA); zd != nil {
+		t.Errorf("%s: the zone's own resolver would answer from it", when)
+	}
+	if m := askUpdate(t, ovZone); m.Rcode != dns.RcodeServerFailure {
+		t.Errorf("%s: an UPDATE: rcode %s, want SERVFAIL", when, dns.RcodeToString[m.Rcode])
+	}
+}
+
+// wantAnswers: the same questions, answered.
+func wantAnswers(t *testing.T, zd *ZoneData, when string) {
+	t.Helper()
+	for _, q := range roleQuestions {
+		if m := ask(t, q.name, q.rrtype); m.Rcode != dns.RcodeSuccess || len(m.Answer) == 0 {
+			t.Errorf("%s: %s %s: rcode %s, %d answers", when, q.name, dns.TypeToString[q.rrtype], dns.RcodeToString[m.Rcode], len(m.Answer))
+		}
+	}
+	if got := (&Imr{}).ownZoneForQuestion(ovZone, dns.TypeSOA); got != zd {
+		t.Errorf("%s: the zone's own resolver would not answer from it", when)
+	}
+	if m := askUpdate(t, ovZone); m.Rcode == dns.RcodeServerFailure {
+		t.Errorf("%s: an UPDATE: rcode %s", when, dns.RcodeToString[m.Rcode])
+	}
+}
+
+var roleQuestions = []struct {
+	name   string
+	rrtype uint16
+}{{ovZone, dns.TypeSOA}, {ovZone, dns.TypeNS}, {"www.example.", dns.TypeA}}
+
 // A zone's first load with nothing known about its role offers nothing to anyone.
 // With a DS at the parent an unsigned copy going out would be bogus, so this is
-// the whole of what keeps it from going out: refused to a query and to a
+// the whole of what keeps it from going out: no answer to a query, refused to a
 // transfer, no NOTIFY, no key, no policy. Its refreshes go on underneath, and
 // the release serves the current copy, with its one NOTIFY, and runs what the
 // withholding held back, once.
@@ -237,8 +277,14 @@ func TestAFirstLoadWithNoRoleKnownIsOfferedToNobodyUntilItsRelease(t *testing.T)
 		if tags := zoneActiveKeytags(t, kdb); len(tags) != 0 {
 			t.Errorf("%s: keys were made: %v", when, tags)
 		}
+		wantNoAnswers(t, when)
 	}
 	check("after the first load")
+
+	// A derived app asks at every refresh while it does not know.
+	if err := z.zd.Withhold(); err != nil {
+		t.Errorf("Withhold on a zone withheld already: %v", err)
+	}
 
 	// With a downstream the zone would serve: this refusal is the withholding's,
 	// and the same transfer below goes through once it is released.
@@ -287,6 +333,7 @@ func TestAFirstLoadWithNoRoleKnownIsOfferedToNobodyUntilItsRelease(t *testing.T)
 	if m := transfer(); m.Rcode != dns.RcodeSuccess || len(m.Answer) == 0 {
 		t.Errorf("a transfer after the release: rcode %s, %d records", dns.RcodeToString[m.Rcode], len(m.Answer))
 	}
+	wantAnswers(t, z.zd, "after the release")
 
 	z.zd.ReleaseWithheld() // nothing more
 	if got := len(notifies); got != 1 {
@@ -326,6 +373,41 @@ func TestWithholdRefusesAZoneAlreadyServed(t *testing.T) {
 		t.Fatal("Withheld() after the refusal")
 	}
 	wantReady(t, z.zd, "after the refusal")
+
+	// Not Ready is not "not served": a published copy answers queries.
+	published := &ZoneData{ZoneName: "published.example."}
+	published.snapshot.Store(&zoneSnapshot{})
+	if err := published.Withhold(); err == nil {
+		t.Fatal("a zone answering from a published copy, not yet Ready, was withheld")
+	}
+	if published.Withheld() {
+		t.Fatal("Withheld() after that refusal")
+	}
+}
+
+// A DS is the parent's data, so a query for one reaches the parent by a path that
+// does not start from the parent's name. A withheld parent answers it no more than
+// it answers for its own names.
+func TestADSAskedOfAWithheldParentIsNotAnswered(t *testing.T) {
+	kdb, _ := roleSetup(t)
+	z := startRoleZone(t, kdb, startRelayUpstream(t, 40), nil, withheldAtFirstLoad(t))
+	const child = "child.example."
+	registerZones(t, testSnapshotZone(t, child, child+` 3600 IN SOA ns.`+child+` hostmaster.`+child+` 1 7200 1800 604800 300
+`+child+` 3600 IN NS ns.`+child+`
+ns.`+child+` 3600 IN A 192.0.2.1
+`))
+
+	if m := ask(t, child, dns.TypeDS); m.Rcode != dns.RcodeServerFailure {
+		t.Errorf("a DS asked of the withheld parent: rcode %s, want SERVFAIL", dns.RcodeToString[m.Rcode])
+	}
+	if (&Imr{}).ownZoneForQuestion(child, dns.TypeDS) != nil {
+		t.Error("the resolver would answer a DS from the withheld parent")
+	}
+
+	z.zd.ReleaseWithheld()
+	if m := ask(t, child, dns.TypeDS); m.Rcode == dns.RcodeServerFailure {
+		t.Errorf("a DS after the release: rcode %s", dns.RcodeToString[m.Rcode])
+	}
 }
 
 // The mode #160 asks for: the policy is bound, so an owner can run the zone's
@@ -713,6 +795,7 @@ func TestAWithheldZoneThatStartsSigningGoesReadyOnTheSignedCopy(t *testing.T) {
 			zd.OnFirstLoad = append(zd.OnFirstLoad, func(*ZoneData) { firstLoads.Add(1) })
 		})
 		wantNotReady(t, z.zd, "before the start")
+		wantNoAnswers(t, "before the start")
 
 		if err := z.zd.StartSigning(context.Background(), 0); err != nil {
 			t.Fatalf("StartSigning: %v", err)
@@ -722,6 +805,7 @@ func TestAWithheldZoneThatStartsSigningGoesReadyOnTheSignedCopy(t *testing.T) {
 			t.Fatal("still withheld")
 		}
 		wantOnlyOwnSignatures(t, z.zd, zoneActiveKeytags(t, kdb), "after the start")
+		wantAnswers(t, z.zd, "after the start")
 		if got := len(notifies); got != 1 {
 			t.Fatalf("%d NOTIFYs, want one: nothing unsigned is announced", got)
 		}
@@ -741,6 +825,7 @@ func TestAWithheldZoneThatStartsSigningGoesReadyOnTheSignedCopy(t *testing.T) {
 		if !z.zd.Withheld() {
 			t.Fatal("the refused start ended the withholding")
 		}
+		wantNoAnswers(t, "after the refusal")
 		if got := len(notifies); got != 0 {
 			t.Fatalf("%d NOTIFYs", got)
 		}
@@ -785,6 +870,89 @@ func TestStartSigningASecondTimeChangesNothing(t *testing.T) {
 	if got := len(notifies); got != sent {
 		t.Fatalf("%d NOTIFYs, was %d", got, sent)
 	}
+}
+
+// An option and a bound policy do not make a zone signed. Serving its upstream's
+// signatures with both in place it has not started: a start replaces them. The
+// option is the one a config can set, or a call other than this one.
+func TestStartSigningLooksAtWhatTheZoneServes(t *testing.T) {
+	t.Run("a relayed copy with the option on", func(t *testing.T) {
+		kdb, _ := roleSetup(t)
+		z := startRoleZone(t, kdb, signedUpstream(t, 40), nil, nil)
+		own := genActiveKeys(t, kdb)
+		if err := z.zd.BindPolicyWithoutSigning(); err != nil {
+			t.Fatalf("BindPolicyWithoutSigning: %v", err)
+		}
+		z.zd.SetRuntimeOption(OptInlineSigning, true)
+		if keytagsOf(servedRRset(t, z.zd, ovZone, dns.TypeSOA).RRSIGs)[upstreamKeytag] != true {
+			t.Fatal("fixture: the zone should serve its upstream's signatures")
+		}
+
+		if err := z.zd.StartSigning(context.Background(), 0); err != nil {
+			t.Fatalf("StartSigning: %v", err)
+		}
+		wantOnlyOwnSignatures(t, z.zd, own, "after the start")
+		serial := z.served(t)
+		if serial <= 40 {
+			t.Fatalf("serial %d: nothing was signed and published", serial)
+		}
+		if err := z.zd.StartSigning(context.Background(), 0); err != nil {
+			t.Fatalf("StartSigning again: %v", err)
+		}
+		if got := z.served(t); got != serial {
+			t.Fatalf("a second start moved the serial from %d to %d", serial, got)
+		}
+	})
+	t.Run("its own signatures, with the option or the policy gone", func(t *testing.T) {
+		kdb, _ := roleSetup(t)
+		z := startRoleZone(t, kdb, signedUpstream(t, 40), nil, nil)
+		if err := z.zd.StartSigning(context.Background(), 0); err != nil {
+			t.Fatalf("StartSigning: %v", err)
+		}
+		z.zd.SetRuntimeOption(OptInlineSigning, false)
+		if err := z.zd.StartSigning(context.Background(), 0); err != nil {
+			t.Fatalf("StartSigning with the option off: %v", err)
+		}
+		if !z.zd.signsItsOwnContent() {
+			t.Error("the option stayed off: signatures in the copy passed for a start")
+		}
+		z.zd.mu.Lock()
+		z.zd.DnssecPolicy = nil
+		z.zd.mu.Unlock()
+		if err := z.zd.StartSigning(context.Background(), 0); err != nil {
+			t.Fatalf("StartSigning with no policy bound: %v", err)
+		}
+		if z.zd.DnssecPolicy == nil {
+			t.Error("no policy bound: signatures in the copy passed for a start")
+		}
+	})
+	t.Run("withheld, with the keys still to come", func(t *testing.T) {
+		kdb, notifies := roleSetup(t)
+		installOwner(t, &testOwner{owns: map[string]bool{ovZone: true}})
+		z := startRoleZone(t, kdb, signedUpstream(t, 40), map[ZoneOption]bool{OptMultiProvider: true}, withheldAtFirstLoad(t))
+		if err := z.zd.BindPolicyWithoutSigning(); err != nil {
+			t.Fatalf("BindPolicyWithoutSigning: %v", err)
+		}
+		z.zd.SetRuntimeOption(OptInlineSigning, true)
+
+		// Not "signing already", or its release would put the upstream's on offer.
+		if err := z.zd.StartSigning(context.Background(), 0); !errors.Is(err, ErrKeyGenerationDeferred) {
+			t.Fatalf("StartSigning: %v, want ErrKeyGenerationDeferred", err)
+		}
+		if !z.zd.Withheld() || z.zd.Ready {
+			t.Fatalf("withheld %v, Ready %v: the refused start released the zone", z.zd.Withheld(), z.zd.Ready)
+		}
+		if got := len(notifies); got != 0 {
+			t.Fatalf("%d NOTIFYs", got)
+		}
+
+		own := genActiveKeys(t, kdb)
+		if err := z.zd.StartSigning(context.Background(), 0); err != nil {
+			t.Fatalf("StartSigning with the keys there: %v", err)
+		}
+		wantOnlyOwnSignatures(t, z.zd, own, "after the start")
+		wantReady(t, z.zd, "after the start")
+	})
 }
 
 // Only a first load puts a zone on the renewal list, and this one's first load
