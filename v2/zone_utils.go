@@ -2340,7 +2340,7 @@ func (zd *ZoneData) registerForPeriodicResign(ctx context.Context, resignq chan<
 		// SetupZoneSigning's sign-and-enqueue look necessary. Returning nil
 		// here told every caller the zone was registered when it was not.
 		//
-		// No retry: all three callers log it, and none of them can do better --
+		// No retry: every caller logs it, and none of them can do better --
 		// a ResignQ still full after two seconds is a wedged resigner, not
 		// congestion to wait out.
 		return fmt.Errorf("registering %s for periodic re-signing: timed out sending to the resign queue"+

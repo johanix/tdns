@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -28,11 +29,16 @@ const upstreamKeytag = 4711
 const upstreamSigRDATA = "example. AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
 
 func upstreamSig(owner, covered string) string {
+	return upstreamSigBy(upstreamKeytag, owner, covered)
+}
+
+func upstreamSigBy(keytag uint16, owner, covered string) string {
 	labels := "1"
 	if owner != ovZone {
 		labels = "2"
 	}
-	return owner + " 3600 IN RRSIG " + covered + " 15 " + labels + " 3600 20351231000000 20250101000000 4711 " + upstreamSigRDATA
+	return owner + " 3600 IN RRSIG " + covered + " 15 " + labels + " 3600 20351231000000 20250101000000 " +
+		strconv.Itoa(int(keytag)) + " " + upstreamSigRDATA
 }
 
 // signedUpstream serves the zone at serial as a signer does, its signatures on it.
@@ -404,9 +410,89 @@ ns.`+child+` 3600 IN A 192.0.2.1
 		t.Error("the resolver would answer a DS from the withheld parent")
 	}
 
+	wantOPT(t, askWithOPT(t, child, dns.TypeDS), "a DS asked of the withheld parent")
+
 	z.zd.ReleaseWithheld()
 	if m := ask(t, child, dns.TypeDS); m.Rcode == dns.RcodeServerFailure {
 		t.Errorf("a DS after the release: rcode %s", dns.RcodeToString[m.Rcode])
+	}
+}
+
+func askWithOPT(t *testing.T, qname string, qtype uint16) *dns.Msg {
+	t.Helper()
+	req := new(dns.Msg)
+	req.SetQuestion(qname, qtype)
+	req.SetEdns0(dns.DefaultMsgSize, true)
+	return askMsg(t, req)
+}
+
+func wantOPT(t *testing.T, m *dns.Msg, when string) {
+	t.Helper()
+	if m.Rcode != dns.RcodeServerFailure {
+		t.Errorf("%s: rcode %s, want SERVFAIL", when, dns.RcodeToString[m.Rcode])
+	}
+	if m.IsEdns0() == nil {
+		t.Errorf("%s: asked with an OPT and answered without one", when)
+	}
+}
+
+// A client that sent an OPT gets one back whatever the answer (RFC 6891 section
+// 6.1.1), and one that sent none gets none.
+func TestAWithheldZonesSERVFAILCarriesAnOPTIfItWasAskedWithOne(t *testing.T) {
+	kdb, _ := roleSetup(t)
+	startRoleZone(t, kdb, startRelayUpstream(t, 40), nil, withheldAtFirstLoad(t))
+	for _, q := range roleQuestions {
+		when := q.name + " " + dns.TypeToString[q.rrtype]
+		wantOPT(t, askWithOPT(t, q.name, q.rrtype), when)
+		if m := ask(t, q.name, q.rrtype); m.IsEdns0() != nil {
+			t.Errorf("%s: asked without an OPT and answered with one", when)
+		}
+	}
+	r := new(dns.Msg)
+	r.SetUpdate(ovZone)
+	r.SetEdns0(dns.DefaultMsgSize, false)
+	wantOPT(t, askUpdateMsg(t, r, ovZone), "an UPDATE")
+	if m := askUpdate(t, ovZone); m.IsEdns0() != nil {
+		t.Error("an UPDATE asked without an OPT and answered with one")
+	}
+}
+
+// A modify replaces the ZoneData. A zone withheld has to be still, or the first
+// publish of the replacement puts on offer what the withholding kept back; and one
+// not withheld has not become so.
+func TestAModifyLeavesAWithheldZoneWithheld(t *testing.T) {
+	withAppType(t, AppTypeAuth)
+	resetZonesForTest()
+	conf, _ := newTestConfigForCores(t)
+	modified := func(name string) *ZoneData {
+		t.Helper()
+		if _, err := conf.ProvisionDynamicZone(context.Background(), DynamicZoneInput{
+			Name: name, Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
+		}, true); err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		before, _ := Zones.Get(name + ".")
+		if name == "withheld.example" {
+			if err := before.Withhold(); err != nil {
+				t.Fatalf("Withhold: %v", err)
+			}
+		}
+		if _, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{
+			Name: name, Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.9:53", Key: NOKEY}},
+		}); err != nil {
+			t.Fatalf("modify: %v", err)
+		}
+		after, _ := Zones.Get(name + ".")
+		if after == before {
+			t.Fatal("setup: the modify did not replace the ZoneData")
+		}
+		return after
+	}
+	if zd := modified("withheld.example"); !zd.Withheld() {
+		t.Error("the modify ended the withholding")
+	}
+	if zd := modified("relayed.example"); zd.Withheld() {
+		t.Error("the modify withheld a zone that was not")
 	}
 }
 
@@ -740,6 +826,69 @@ func TestAStartThatCannotSignLeavesTheZoneAsItWas(t *testing.T) {
 	}
 }
 
+// A failed start has said nothing of its own about the option: whatever the daemon
+// had said stands, and where it had said nothing the configuration still decides,
+// at every config update from here on. A word left behind would overrule it.
+func TestAFailedStartLeavesNoWordOnTheOptionBehind(t *testing.T) {
+	failing := func(t *testing.T) *relayedZone {
+		t.Helper()
+		kdb, _ := roleSetup(t)
+		return startRoleZone(t, kdb, signedUpstream(t, 40), nil, nil)
+	}
+	// Stopped part way, which leaves nothing against the reload after it.
+	start := func(t *testing.T, z *relayedZone) {
+		t.Helper()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := z.zd.StartSigning(ctx, 0); err == nil {
+			t.Fatal("StartSigning signed on a cancelled context")
+		}
+	}
+	word := func(z *relayedZone) (bool, bool) {
+		z.zd.mu.Lock()
+		defer z.zd.mu.Unlock()
+		on, said := z.zd.runtimeOptions[OptInlineSigning]
+		return on, said
+	}
+	t.Run("off, by the configuration", func(t *testing.T) {
+		z := failing(t)
+		start(t, z)
+		if on, said := word(z); said {
+			t.Fatalf("a word was left behind: %v", on)
+		}
+		z.opts = map[ZoneOption]bool{OptInlineSigning: true}
+		z.reloaded(t)
+		if !z.zd.Options[OptInlineSigning] {
+			t.Error("the configuration turned the option on and a failed start overruled it")
+		}
+	})
+	t.Run("on, by the configuration", func(t *testing.T) {
+		z := failing(t)
+		z.zd.mu.Lock()
+		z.zd.Options = map[ZoneOption]bool{OptInlineSigning: true}
+		z.zd.mu.Unlock()
+		start(t, z)
+		if on, said := word(z); said {
+			t.Fatalf("a word was left behind: %v", on)
+		}
+		if !z.zd.Options[OptInlineSigning] {
+			t.Fatal("the failed start turned off an option the configuration had on")
+		}
+		z.reloaded(t) // the configuration no longer has it
+		if z.zd.Options[OptInlineSigning] {
+			t.Error("the configuration took the option away and a failed start overruled it")
+		}
+	})
+	t.Run("off, by the daemon", func(t *testing.T) {
+		z := failing(t)
+		z.zd.SetRuntimeOption(OptInlineSigning, false)
+		start(t, z)
+		if on, said := word(z); !said || on {
+			t.Fatalf("the daemon's word is on=%v, said=%v; it had said off", on, said)
+		}
+	})
+}
+
 // The policy's own floor check fails the start by setting DnssecError, which
 // SignZone and ResignZone refuse on. Left behind, that error would stop the zone
 // from ever signing under a good policy.
@@ -924,6 +1073,31 @@ func TestStartSigningLooksAtWhatTheZoneServes(t *testing.T) {
 		}
 		if z.zd.DnssecPolicy == nil {
 			t.Error("no policy bound: signatures in the copy passed for a start")
+		}
+	})
+	t.Run("an upstream's signature with the tag of its own key", func(t *testing.T) {
+		kdb, _ := roleSetup(t)
+		up := signedUpstream(t, 40)
+		z := startRoleZone(t, kdb, up, nil, nil)
+		genActiveKeys(t, kdb)
+		dak, err := kdb.GetDnssecKeys(ovZone, DnskeyStateActive)
+		if err != nil || len(dak.ZSKs) == 0 {
+			t.Fatalf("fixture: no ZSK: %v", err)
+		}
+		up.extra = []string{upstreamSigBy(dak.ZSKs[0].KeyId, ovZone, "SOA")}
+		up.publish(t, 41)
+		z.notified(t)
+		z.wantServed(t, 41, "before the start")
+		if err := z.zd.BindPolicyWithoutSigning(); err != nil {
+			t.Fatalf("BindPolicyWithoutSigning: %v", err)
+		}
+		z.zd.SetRuntimeOption(OptInlineSigning, true)
+
+		if err := z.zd.StartSigning(context.Background(), 0); err != nil {
+			t.Fatalf("StartSigning: %v", err)
+		}
+		if got := z.served(t); got <= 41 {
+			t.Fatalf("serial %d: a signature with the tag of its key passed for its own, and nothing was signed", got)
 		}
 	})
 	t.Run("withheld, with the keys still to come", func(t *testing.T) {

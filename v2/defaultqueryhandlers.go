@@ -127,6 +127,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 			lgHandler.Debug("zone is withheld", "qname", qname, "zone", zd.ZoneName)
 			m := new(dns.Msg)
 			m.SetRcode(r, dns.RcodeServerFailure)
+			respondEDNS(m, r, msgoptions)
 			w.WriteMsg(m)
 			return nil
 		}
@@ -210,6 +211,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		lgHandler.Debug("zone is withheld", "qname", qname, "zone", zd.ZoneName)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
+		respondEDNS(m, r, msgoptions)
 		w.WriteMsg(m)
 		return nil
 	}

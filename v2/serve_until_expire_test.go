@@ -60,6 +60,13 @@ func ask(t *testing.T, qname string, qtype uint16) *dns.Msg {
 	t.Helper()
 	req := new(dns.Msg)
 	req.SetQuestion(qname, qtype)
+	return askMsg(t, req)
+}
+
+// askMsg is ask with the query as the caller built it.
+func askMsg(t *testing.T, req *dns.Msg) *dns.Msg {
+	t.Helper()
+	qname, qtype := req.Question[0].Name, req.Question[0].Qtype
 	msgo, err := edns0.ExtractFlagsAndEDNS0Options(req)
 	if err != nil {
 		t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
@@ -85,6 +92,12 @@ func askUpdate(t *testing.T, qname string) *dns.Msg {
 	t.Helper()
 	r := new(dns.Msg)
 	r.SetUpdate(qname)
+	return askUpdateMsg(t, r, qname)
+}
+
+// askUpdateMsg is askUpdate with the UPDATE as the caller built it.
+func askUpdateMsg(t *testing.T, r *dns.Msg, qname string) *dns.Msg {
+	t.Helper()
 	msgo, err := edns0.ExtractFlagsAndEDNS0Options(r)
 	if err != nil {
 		t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)

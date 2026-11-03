@@ -26,7 +26,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/miekg/dns"
@@ -233,9 +232,10 @@ func (zd *ZoneData) startSigning(ctx context.Context, minSerial uint32) error {
 }
 
 // servesItsOwnSignaturesLocked reports whether the zone has started signing: it
-// signs, its policy is bound, and the SOA it serves carries a signature by one of
-// its keys. A key that has rolled since reads as no, and a start signs again, which
-// is what it would be asked to do. Caller holds zd.mu.
+// signs, its policy is bound, and the SOA it serves carries a signature that
+// verifies under one of its keys. A key tag says less: 16 bits, and an upstream's
+// can be the same. A key that has rolled since reads as no, and a start signs
+// again, which is what it would be asked to do. Caller holds zd.mu.
 func (zd *ZoneData) servesItsOwnSignaturesLocked() bool {
 	if zd.DnssecPolicy == nil || !zd.signsItsOwnContent() {
 		return false
@@ -248,9 +248,16 @@ func (zd *ZoneData) servesItsOwnSignaturesLocked() bool {
 	if err != nil {
 		return false // the start meets it too, and says so
 	}
-	for _, rr := range snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs {
-		if sig, ok := rr.(*dns.RRSIG); ok && slices.ContainsFunc(dak.ZSKs, func(k *PrivateKeyCache) bool { return k.KeyId == sig.KeyTag }) {
-			return true
+	soa := zd.soaForResponseFrom(snap, snap.Apex)
+	for _, rr := range soa.RRSIGs {
+		sig, ok := rr.(*dns.RRSIG)
+		if !ok {
+			continue
+		}
+		for _, k := range dak.ZSKs {
+			if sig.Verify(&k.DnskeyRR, soa.RRs) == nil {
+				return true
+			}
 		}
 	}
 	return false
@@ -282,7 +289,8 @@ func (zd *ZoneData) switchToSigningLocked(ctx context.Context, minSerial uint32)
 
 	oldPol, oldName, oldSerial := zd.DnssecPolicy, zd.DnssecPolicyName, zd.CurrentSerial
 	oldErrs := zd.snapshotErrorsLocked(DnssecError, DnssecPolicyWarning)
-	wasOn := zd.Options[OptInlineSigning]
+	oldOptions := zd.Options
+	oldWord, hadWord := zd.runtimeOptions[OptInlineSigning]
 	before := zd.snapshot.Load()
 
 	zd.DnssecPolicy, zd.DnssecPolicyName = pol, name
@@ -308,8 +316,13 @@ func (zd *ZoneData) switchToSigningLocked(ctx context.Context, minSerial uint32)
 		zd.DnssecPolicy, zd.DnssecPolicyName = oldPol, oldName
 		zd.CurrentSerial = oldSerial
 		zd.restoreErrorsLocked(oldErrs, DnssecError, DnssecPolicyWarning)
-		if !wasOn {
-			zd.setRuntimeOptionLocked(OptInlineSigning, false)
+		// The daemon's word as it stood, or none. A word left behind would overrule
+		// the configuration at every config update from here on.
+		zd.Options = oldOptions
+		if hadWord {
+			zd.runtimeOptions[OptInlineSigning] = oldWord
+		} else {
+			delete(zd.runtimeOptions, OptInlineSigning)
 		}
 		return "", 0, fmt.Errorf("under policy %q: %w", name, err)
 	}
