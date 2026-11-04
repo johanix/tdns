@@ -418,6 +418,77 @@ ns.`+child+` 3600 IN A 192.0.2.1
 	}
 }
 
+// The other way round: a DS at a withheld zone's apex is its parent's data, so a
+// parent hosted here answers it, on the wire as in the resolver. Without one there
+// is only the withheld copy to answer from, so it does not, and nothing else at or
+// below that apex is answered either way.
+func TestADSAtAWithheldZonesApexIsItsParentsToAnswer(t *testing.T) {
+	kdb, _ := roleSetup(t)
+	z := startRoleZone(t, kdb, startRelayUpstream(t, 40), nil, withheldAtFirstLoad(t))
+	if !z.zd.Withheld() {
+		t.Fatal("setup: the zone is not withheld")
+	}
+
+	if m := ask(t, ovZone, dns.TypeDS); m.Rcode != dns.RcodeServerFailure || len(m.Answer)+len(m.Ns) != 0 {
+		t.Errorf("no parent here: rcode %s, %d answers, %d authority: the withheld copy answered",
+			dns.RcodeToString[m.Rcode], len(m.Answer), len(m.Ns))
+	}
+	wantOPT(t, askWithOPT(t, ovZone, dns.TypeDS), "no parent here")
+	if (&Imr{}).ownZoneForQuestion(ovZone, dns.TypeDS) != nil {
+		t.Error("no parent here: the resolver would answer from something")
+	}
+
+	const delegation = `. 3600 IN SOA a.root. hostmaster.root. 7 7200 1800 604800 300
+. 3600 IN NS a.root.
+a.root. 3600 IN A 192.0.2.53
+` + ovZone + ` 3600 IN NS ns.` + ovZone + `
+ns.` + ovZone + ` 3600 IN A 192.0.2.54
+`
+	wantOnlyTheDS := func(t *testing.T) {
+		t.Helper()
+		for _, q := range []struct {
+			name   string
+			rrtype uint16
+		}{
+			{ovZone, dns.TypeSOA}, {ovZone, dns.TypeNS}, {ovZone, dns.TypeDNSKEY},
+			{"www." + ovZone, dns.TypeA}, {"www." + ovZone, dns.TypeDS},
+		} {
+			if m := ask(t, q.name, q.rrtype); m.Rcode != dns.RcodeServerFailure {
+				t.Errorf("%s %s with a parent here: rcode %s, want SERVFAIL", q.name, dns.TypeToString[q.rrtype], dns.RcodeToString[m.Rcode])
+			}
+		}
+	}
+
+	t.Run("a signed delegation", func(t *testing.T) {
+		root := testSnapshotZone(t, ".", delegation+ovZone+` 3600 IN DS 12345 15 2 `+strings.Repeat("ab", 32)+"\n")
+		m := ask(t, ovZone, dns.TypeDS)
+		if m.Rcode != dns.RcodeSuccess || len(m.Answer) != 1 || m.Answer[0].Header().Rrtype != dns.TypeDS {
+			t.Errorf("rcode %s, answer %v: want the parent's DS", dns.RcodeToString[m.Rcode], m.Answer)
+		}
+		if got := (&Imr{}).ownZoneForQuestion(ovZone, dns.TypeDS); got != root {
+			t.Errorf("the resolver answers from %v, not the parent", got)
+		}
+		wantOnlyTheDS(t)
+
+		// Withheld as well, the parent does not answer it either.
+		root.mu.Lock()
+		root.withheld = true
+		root.mu.Unlock()
+		if m := ask(t, ovZone, dns.TypeDS); m.Rcode != dns.RcodeServerFailure {
+			t.Errorf("both withheld: rcode %s, want SERVFAIL", dns.RcodeToString[m.Rcode])
+		}
+	})
+
+	t.Run("an unsigned delegation", func(t *testing.T) {
+		testSnapshotZone(t, ".", delegation)
+		m := ask(t, ovZone, dns.TypeDS)
+		if m.Rcode != dns.RcodeSuccess || len(m.Answer) != 0 || len(m.Ns) == 0 || m.Ns[0].Header().Name != "." {
+			t.Errorf("rcode %s, answer %v, authority %v: want the parent's NODATA", dns.RcodeToString[m.Rcode], m.Answer, m.Ns)
+		}
+		wantOnlyTheDS(t)
+	})
+}
+
 func askWithOPT(t *testing.T, qname string, qtype uint16) *dns.Msg {
 	t.Helper()
 	req := new(dns.Msg)
