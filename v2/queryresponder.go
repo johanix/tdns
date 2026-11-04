@@ -275,6 +275,14 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 	pzd := FindParentZone(qname)
 	if pzd == nil {
 		if core.EqualNames(qname, zd.ZoneName) {
+			// That NODATA comes from the zone's copy, which a withheld zone
+			// offers to nobody.
+			if zd.Withheld() {
+				lgHandler.Debug("DS query at a withheld zone's apex, parent not hosted", "zone", zd.ZoneName, "qname", qname)
+				m.MsgHdr.Rcode = dns.RcodeServerFailure
+				w.WriteMsg(m)
+				return nil
+			}
 			return zd.sendChildApexDSNodata(m, w, qname, msgoptions, kdb)
 		}
 		// We host nothing above qname, and qname is not our apex. Nothing to
@@ -283,6 +291,15 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 			"qname", qname)
 		m.MsgHdr.Authoritative = false
 		m.MsgHdr.Rcode = dns.RcodeRefused
+		w.WriteMsg(m)
+		return nil
+	}
+
+	// A withheld parent answers this no more than it answers for its own names:
+	// the query handler's guard was on the zone of qname, not on this one.
+	if pzd.Withheld() {
+		lgHandler.Debug("DS query: parent-side zone is withheld", "zone", pzd.ZoneName, "qname", qname)
+		m.MsgHdr.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(m)
 		return nil
 	}

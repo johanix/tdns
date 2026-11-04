@@ -40,6 +40,11 @@ package tdns
 func (zd *ZoneData) SetRuntimeOption(opt ZoneOption, on bool) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	zd.setRuntimeOptionLocked(opt, on)
+}
+
+// setRuntimeOptionLocked is SetRuntimeOption for a caller that holds zd.mu.
+func (zd *ZoneData) setRuntimeOptionLocked(opt ZoneOption, on bool) {
 	if zd.runtimeOptions == nil {
 		zd.runtimeOptions = map[ZoneOption]bool{}
 	}
