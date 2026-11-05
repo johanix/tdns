@@ -126,6 +126,12 @@ const (
 	//
 	// Terminal for the upload: retrying it cannot succeed.
 	EDESig0UnvalidatedUploadNotAccepted
+
+	// The key in the upload is one this child retired: its own trusted UPDATE
+	// deleted it, and the parent keeps a tombstone so that whoever still
+	// holds the private half cannot bootstrap it back. Terminal: the child
+	// bootstraps a new key, or the parent's operator clears the tombstone.
+	EDESig0KeyRetired
 )
 
 // NOTE for anyone adding codes above: append at the END of the const block.
@@ -176,6 +182,7 @@ var EDECodeToString = map[uint16]string{
 	EDESig0UnvalidatedUploadNotAccepted: "unvalidated SIG(0) key upload not accepted by policy; publish the KEY at the zone apex or the RFC 9615 signal name so it can be fetched and validated",
 	EDEDelegationIncoherent:             "the resulting delegation is not what the child's nameservers serve",
 	EDEDelegationUnverifiable:           "the parent could not verify the delegation against the child's nameservers; try again later",
+	EDESig0KeyRetired:                   "SIG(0) key was deleted by the child's own trusted UPDATE and will not be accepted again; bootstrap a new key",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response
