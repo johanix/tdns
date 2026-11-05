@@ -98,6 +98,14 @@ func sig0TombstoneKey(zone string, key *dns.KEY) (string, uint8, string, error) 
 	return dns.CanonicalName(zone), key.Algorithm, base64.StdEncoding.EncodeToString(raw), nil
 }
 
+// sameSig0Key reports whether a and b are the same key: the comparison a
+// tombstone matches on, without the owner name.
+func sameSig0Key(a, b *dns.KEY) bool {
+	_, aalg, apub, aerr := sig0TombstoneKey(a.Hdr.Name, a)
+	_, balg, bpub, berr := sig0TombstoneKey(b.Hdr.Name, b)
+	return aerr == nil && berr == nil && aalg == balg && apub == bpub
+}
+
 func parseSig0KeyRR(s string) (*dns.KEY, error) {
 	rr, err := parseKeyRR(s)
 	if err != nil {

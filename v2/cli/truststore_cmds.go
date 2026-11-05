@@ -112,7 +112,13 @@ removes one deliberately, after which the key can be added like any new key.`,
 		Use:   "clear",
 		Short: "Clear the tombstone of a child SIG(0) key, so that it can be added again",
 		Run: func(cmd *cobra.Command, args []string) {
-			PrepArgs("keyid", "child")
+			// Not PrepArgs("keyid"), which reads 0 as "not given": 0 is a key
+			// tag like any other.
+			if !cmd.Flags().Changed("keyid") {
+				fmt.Printf("Error: key id not specified using --keyid flag\n")
+				os.Exit(1)
+			}
+			PrepArgs("child")
 			sig0TombstoneMgmt(role, "tombstone-clear")
 		},
 	}

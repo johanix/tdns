@@ -1234,6 +1234,10 @@ type ValidatorResponse struct {
 
 type Sig0StoreT struct {
 	Map *core.ConcurrentMap[string, Sig0Key]
+	// mu and gen order a cache fill against a truststore change that commits
+	// while the fill's database read is in flight: see fillIfCurrent.
+	mu  sync.Mutex
+	gen uint64
 }
 
 type Sig0Key struct {
@@ -1571,6 +1575,9 @@ type Tx struct {
 	// ended is claimed by the first Commit or Rollback. Only that one clears
 	// KeyDB.Ctx: by the time a second end runs, a waiting Begin may hold Ctx.
 	ended atomic.Bool
+	// afterCommit runs, in order, once Commit has succeeded; never after a
+	// rollback. See OnCommit.
+	afterCommit []func()
 }
 
 // String-based versions of RRset for JSON marshaling

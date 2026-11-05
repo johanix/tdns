@@ -4,9 +4,14 @@
 package tdns
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -323,5 +328,204 @@ func TestAnOperatorDeleteLeavesNoTombstone(t *testing.T) {
 	}
 	if _, err := kdb.Sig0TrustMgmt(nil, post); err != nil {
 		t.Errorf("the key could not be added again after an operator's delete: %v", err)
+	}
+}
+
+// The row is found by tag alone. A trusted delete that names a different key
+// under the same tag must not remove -- and tombstone -- the key that is
+// stored, which the child may still be using.
+func TestATrustedDeleteOfADifferentKeyUnderTheSameTagIsRefused(t *testing.T) {
+	zd, kdb := tombstoneParent(t)
+	named := discoveredTestKey(t).Key
+	stored := sameTagOtherKey(t, &named)
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "add", Src: "child-update",
+		Keyname: stored.Hdr.Name, Keyid: int(stored.KeyTag()), KeyRR: stored.String(),
+		Validated: true, Trusted: true,
+	}); err != nil {
+		t.Fatalf("storing the child's key: %v", err)
+	}
+	del := dns.Copy(&named)
+	del.Header().Class = dns.ClassNONE
+	del.Header().Ttl = 0
+	res := runTruststoreUpdate(t, kdb, UpdateRequest{
+		Cmd: "TRUSTSTORE-UPDATE", ZoneName: zd.ZoneName, Actions: []dns.RR{del},
+		Validated: true, Trusted: true,
+	})
+	if res.Applied {
+		t.Error("a delete of one key was applied to another key with the same tag")
+	}
+	sk, ok := trustStoreEntry(t, kdb, stored.Hdr.Name, stored.KeyTag())
+	if !ok || sk.Keystr != stored.String() {
+		t.Error("the stored key was deleted by a delete that named a different key")
+	}
+	if resp, _ := kdb.Sig0TrustMgmt(nil, TruststorePost{Command: "child-sig0-mgmt", SubCommand: "tombstone-list"}); len(resp.Sig0Tombstones) != 0 {
+		t.Errorf("a tombstone was written for a key the child did not delete: %+v", resp.Sig0Tombstones)
+	}
+}
+
+// Through the management API a delete is an operator's, whatever Src the
+// client sends, and leaves no tombstone.
+func TestAnAPIDeleteLeavesNoTombstoneWhateverItsSrc(t *testing.T) {
+	_, kdb := tombstoneParent(t)
+	key := discoveredTestKey(t).Key
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "add", Src: "child-update",
+		Keyname: key.Hdr.Name, Keyid: int(key.KeyTag()), KeyRR: key.String(), Validated: true, Trusted: true,
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	body, _ := json.Marshal(TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "delete", Src: "child-update",
+		Keyname: key.Hdr.Name, Keyid: int(key.KeyTag()),
+	})
+	w := httptest.NewRecorder()
+	kdb.APItruststore()(w, httptest.NewRequest("POST", "/truststore", bytes.NewReader(body)))
+	var resp TruststoreResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Error {
+		t.Fatalf("API delete: %v %s", err, resp.ErrorMsg)
+	}
+	if _, ok := trustStoreEntry(t, kdb, key.Hdr.Name, key.KeyTag()); ok {
+		t.Fatal("the API delete did not delete")
+	}
+	if r, _ := kdb.Sig0TrustMgmt(nil, TruststorePost{Command: "child-sig0-mgmt", SubCommand: "tombstone-list"}); len(r.Sig0Tombstones) != 0 {
+		t.Errorf("an API delete claiming src=child-update wrote a tombstone: %+v", r.Sig0Tombstones)
+	}
+}
+
+// Keyid 0 is a key tag like any other; its tombstone can be cleared.
+func TestATombstoneWithKeyidZeroCanBeCleared(t *testing.T) {
+	_, kdb := tombstoneParent(t)
+	if _, err := kdb.Exec(`INSERT INTO Sig0TrustStoreTombstone (zonename, keyid, algorithm, publickey, keyrr, deleted_at, source)
+VALUES ('child.example.', 0, 15, 'AAAA', 'child.example. 3600 IN KEY 256 3 15 AAAA', '2026-11-05T00:00:00Z', 'child-update')`); err != nil {
+		t.Fatalf("inserting the tombstone: %v", err)
+	}
+	resp, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "tombstone-clear", Keyname: "child.example.", Keyid: 0,
+	})
+	if err != nil || resp.Error {
+		t.Fatalf("clearing keyid 0 refused: %v %s", err, resp.ErrorMsg)
+	}
+}
+
+// The tombstone and the delete land together or not at all.
+func TestAFailedChildDeleteLeavesNoTombstone(t *testing.T) {
+	zd, kdb := tombstoneParent(t)
+	key := discoveredTestKey(t).Key
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "add", Src: "child-update",
+		Keyname: key.Hdr.Name, Keyid: int(key.KeyTag()), KeyRR: key.String(), Validated: true, Trusted: true,
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := kdb.Exec(`CREATE TRIGGER fail_delete BEFORE DELETE ON Sig0TrustStore BEGIN SELECT RAISE(ABORT, 'delete refused by test'); END`); err != nil {
+		t.Fatalf("creating the trigger: %v", err)
+	}
+	del := dns.Copy(&key)
+	del.Header().Class = dns.ClassNONE
+	del.Header().Ttl = 0
+	res := runTruststoreUpdate(t, kdb, UpdateRequest{
+		Cmd: "TRUSTSTORE-UPDATE", ZoneName: zd.ZoneName, Actions: []dns.RR{del},
+		Validated: true, Trusted: true,
+	})
+	if res.Applied {
+		t.Error("a delete that failed was reported as applied")
+	}
+	if _, ok := trustStoreEntry(t, kdb, key.Hdr.Name, key.KeyTag()); !ok {
+		t.Error("the key's row is gone although its delete failed")
+	}
+	if r, _ := kdb.Sig0TrustMgmt(nil, TruststorePost{Command: "child-sig0-mgmt", SubCommand: "tombstone-list"}); len(r.Sig0Tombstones) != 0 {
+		t.Errorf("a tombstone outlived the delete that failed: %+v", r.Sig0Tombstones)
+	}
+}
+
+// THE RACE. The keystore runs in WAL mode, so while a child's delete is still
+// uncommitted, a cache miss on another connection reads the row as it was --
+// trusted -- and cached it. Nothing dropped that entry after the commit, and
+// the retired key went on verifying UPDATEs from the cache.
+func TestACacheFillDuringAChildsDeleteDoesNotOutliveTheCommit(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "keys.db")
+	if err := os.WriteFile(f, nil, 0664); err != nil {
+		t.Fatal(err)
+	}
+	kdb, err := NewKeyDB(f, false, nil)
+	if err != nil {
+		t.Fatalf("NewKeyDB: %v", err)
+	}
+	t.Cleanup(func() { kdb.Close() })
+	key := discoveredTestKey(t).Key
+	if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "add", Src: "child-update",
+		Keyname: key.Hdr.Name, Keyid: int(key.KeyTag()), KeyRR: key.String(), Validated: true, Trusted: true,
+	}); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	tx, err := kdb.Begin("test child delete")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	del := dns.Copy(&key)
+	del.Header().Class = dns.ClassNONE
+	if resp, err := kdb.Sig0TrustMgmt(tx, TruststorePost{
+		Command: "child-sig0-mgmt", SubCommand: "delete", Src: "child-update",
+		Keyname: key.Hdr.Name, Keyid: int(key.KeyTag()), KeyRR: del.String(),
+	}); err != nil || resp.Error {
+		tx.Rollback()
+		t.Fatalf("delete: %v %s", err, resp.ErrorMsg)
+	}
+	// A validation elsewhere, before the commit: it sees the committed row.
+	if sk, err := kdb.FindSig0TrustedKey(key.Hdr.Name, key.KeyTag()); err != nil || !sk.Trusted {
+		tx.Rollback()
+		t.Fatalf("the read before the commit did not see the committed row (err=%v); the test does not reach the race", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if sk, err := kdb.FindSig0TrustedKey(key.Hdr.Name, key.KeyTag()); err == nil {
+		t.Fatalf("the deleted key is still found after the commit (trusted=%v): a cache fill made before the commit survived it", sk.Trusted)
+	}
+}
+
+// A fill whose read began before a change committed must not store what it
+// read, even when it gets to the cache after the change has dropped the entry.
+func TestACacheFillStartedBeforeACommitIsNotStored(t *testing.T) {
+	s := NewSig0StoreT()
+	gen := s.generation()
+	s.invalidate("child.example.::1")
+	s.fillIfCurrent(gen, "child.example.::1", Sig0Key{Name: "child.example.", Trusted: true})
+	if _, ok := s.Map.Get("child.example.::1"); ok {
+		t.Error("a fill read before the change committed was cached after it")
+	}
+	s.fillIfCurrent(s.generation(), "child.example.::1", Sig0Key{Name: "child.example."})
+	if _, ok := s.Map.Get("child.example.::1"); !ok {
+		t.Error("a fill with no change since its read was not cached")
+	}
+}
+
+// OnCommit work runs after a commit and never after a rollback.
+func TestOnCommitRunsOnlyAfterACommit(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	ran := 0
+	tx, err := kdb.Begin("rollback")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	tx.OnCommit(func() { ran++ })
+	tx.Rollback()
+	if ran != 0 {
+		t.Fatal("OnCommit work ran after a rollback")
+	}
+	tx, err = kdb.Begin("commit")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	tx.OnCommit(func() { ran++ })
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if ran != 1 {
+		t.Errorf("OnCommit work ran %d times after a commit, want 1", ran)
 	}
 }

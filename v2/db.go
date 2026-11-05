@@ -61,8 +61,20 @@ func (tx *Tx) Commit() error {
 	tx.KeyDB.clearTxCtx()
 	if err != nil {
 		lgConfig.Error("error committing KeyDB transaction", "context", tx.context, "err", err)
+		return err
 	}
-	return err
+	for _, f := range tx.afterCommit {
+		f()
+	}
+	return nil
+}
+
+// OnCommit registers f to run once tx has committed, and not at all if it is
+// rolled back: for work that must not happen before the change is visible to
+// other connections, such as dropping a cache entry that a reader could
+// otherwise refill from the old row.
+func (tx *Tx) OnCommit(f func()) {
+	tx.afterCommit = append(tx.afterCommit, f)
 }
 
 func (tx *Tx) Rollback() error {
@@ -528,4 +540,46 @@ func NewSig0StoreT() *Sig0StoreT {
 	return &Sig0StoreT{
 		Map: core.NewCmap[Sig0Key](),
 	}
+}
+
+// The truststore cache is filled on a miss from a read made outside any
+// transaction. In WAL mode that read sees the last committed row, so while a
+// change to the row is still uncommitted -- a child's key being deleted, say
+// -- a miss elsewhere reads the row as it was and can cache it. Removing the
+// entry inside the transaction does not stop that, and removing it again after
+// the commit does not either: a read that began before the commit can store
+// its result after that removal. So a change drops the entry once more after
+// its commit and moves a generation on, and a fill stores its result only if
+// the generation it read before its query is still current.
+
+// generation is read by a cache fill before its database query.
+func (s *Sig0StoreT) generation() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gen
+}
+
+// fillIfCurrent caches what a miss read, unless a truststore change has
+// committed since gen was read: the read may predate it.
+func (s *Sig0StoreT) fillIfCurrent(gen uint64, key string, sk Sig0Key) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen == gen {
+		s.Map.Set(key, sk)
+	}
+}
+
+// invalidate drops key and moves the generation on. Called after a commit.
+func (s *Sig0StoreT) invalidate(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Map.Remove(key)
+	s.gen++
+}
+
+// dropSig0CacheEntry removes the cache entry of a truststore row that tx
+// changes: now, and again once tx has committed (see fillIfCurrent).
+func (kdb *KeyDB) dropSig0CacheEntry(tx *Tx, key string) {
+	kdb.TruststoreSig0Cache.Map.Remove(key)
+	tx.OnCommit(func() { kdb.TruststoreSig0Cache.invalidate(key) })
 }

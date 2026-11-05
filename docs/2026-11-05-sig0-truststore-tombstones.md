@@ -41,9 +41,19 @@ tombstone for the key in the same transaction as the delete.
   approval refuses the upload first, with REFUSED and the new private EDE
   546, `EDESig0KeyRetired`, so the child is told why. A key found in DNS is
   not recorded, and no verification starts for it.
+- **The right key.** The row is found by tag. If the stored key under that
+  tag is not the key the child's delete names, nothing is deleted and no
+  tombstone is written; the delete fails as for a key that is not there.
+- **The cache.** A change to a truststore row now drops the row's cache
+  entry again after its transaction commits, and a cache fill whose read
+  began before that commit does not store what it read. Before this, a
+  validation that missed the cache while a delete was still uncommitted
+  read the old, trusted row (WAL mode) and cached it, and the deleted key
+  kept verifying UPDATEs from the cache.
 - **Unchanged.** The `Sig0TrustStore` row is still deleted, so no reader of
   that table can take a retired key for a trusted one. Only a child's
-  trusted UPDATE writes a tombstone. An operator's `truststore sig0 delete`,
+  trusted UPDATE writes a tombstone; a delete through the management API
+  never does, whatever source the client claims. An operator's `truststore sig0 delete`,
   the keystore's own delete and the bootstrap ceremony's deferred
   DEL-ANY-KEY cleanup remove the row as before. Keys in the
   `validator.sig0.trusted.file` config are the operator's own authority and
