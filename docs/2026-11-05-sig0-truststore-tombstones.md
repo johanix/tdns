@@ -77,7 +77,8 @@ parent's rcode and EDE still in the `UpdateResult`. EDE 546 is
   re-bootstrap round.
 - No answer, SERVFAIL, or a parent still verifying the key (EDE 514) is not
   a verdict, and the poll asks again.
-- An UPDATE whose BADKEY re-bootstrap is refused ends with the reason.
+- An UPDATE whose BADKEY re-bootstrap is refused ends with the reason. One
+  whose re-bootstrap answer is not final is retried, within the same bound.
 - The API's `bootstrap` reports the refusal as an error.
 
 tdns does not make the new key itself. A plain child meets 546 only if it
