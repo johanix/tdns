@@ -169,7 +169,7 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 					lgDns.Warn("sendUpdateWithRetry: re-bootstrap deferred", "attempt", attempt, "err", berr)
 					return false, fmt.Errorf("re-bootstrap after BADKEY deferred: %w", berr)
 				}
-				return true, fmt.Errorf("re-bootstrap after BADKEY failed: %v", berr)
+				return true, fmt.Errorf("re-bootstrap after BADKEY failed: %w", berr)
 			}
 			reBootstrapped = true
 			return false, fmt.Errorf("re-bootstrapped after BADKEY, retrying UPDATE")
