@@ -476,8 +476,18 @@ func TestParentSyncStatusSaysWhichParentItWaitsFor(t *testing.T) {
 	if dss != nil {
 		t.Fatalf("the status was answered (%+v) while its parent's queue was stuck", dss)
 	}
-	if want := "its request waits in the queue for parent down.example., 1 ahead"; !strings.Contains(msg, want) {
+	if want := "the zone's delegation syncs wait in the queue for parent down.example., 1 ahead"; !strings.Contains(msg, want) {
 		t.Errorf("the status says %q, want it to contain %q", msg, want)
+	}
+
+	// Behind a slow sync of the same zone the status request waits too. The
+	// sync running is not the status request, and the note does not say it
+	// is: it speaks of the zone's syncs.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel2()
+	_, msg = stuck.requestDelegationStatus(ctx2, q)()
+	if want := "a delegation sync of the zone is running, in the queue for parent down.example.; 2 of its syncs in the queue"; !strings.Contains(msg, want) {
+		t.Errorf("behind the zone's own slow sync the status says %q, want it to contain %q", msg, want)
 	}
 }
 

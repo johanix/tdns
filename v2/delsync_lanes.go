@@ -43,9 +43,12 @@ var activeDelegationSyncLanes atomic.Pointer[delegationSyncLanes]
 // requests. What does not change:
 //
 //   - A parent's requests run one at a time, in the order they arrived. A
-//     zone's requests all go to one queue and never run at the same time: the
-//     zone stays in the queue it was put in while it has requests waiting or
-//     running there, even if its parent changes meanwhile.
+//     zone's requests all go to one queue and their handlers never run at the
+//     same time: the zone stays in the queue it was put in while it has
+//     requests waiting or running there, even if its parent changes
+//     meanwhile. A handler that starts work of its own and returns, as
+//     SYNC-DS starts its delivery, is done as far as the queue is concerned,
+//     as it was for the single loop.
 //   - Nothing gets a timeout it did not have. A handler runs to its own end,
 //     and its failure path, retries and backoff are what they were. A delayed
 //     re-enqueue (deferForImr, requeueSetupAfter, deferUntilHoldEnds) sends to
@@ -253,17 +256,19 @@ func DelegationSyncWaiting(zone string) (DelegationSyncPosition, bool) {
 
 // delegationSyncQueueNote says where zone's requests stand, for a message
 // about an answer from the syncher that did not come: behind a parent that
-// does not answer, the request waits in that parent's queue. "" when the zone
-// has nothing queued.
+// does not answer, they wait in that parent's queue. It speaks of the zone's
+// syncs, not of the request that waited for the answer: the one running may
+// be another of the zone's. "" when the zone has nothing queued.
 func delegationSyncQueueNote(zone string) string {
 	pos, ok := DelegationSyncWaiting(zone)
 	switch {
 	case !ok:
 		return ""
 	case pos.Running:
-		return fmt.Sprintf(" (its request is running, in the queue for parent %s)", pos.Parent)
+		return fmt.Sprintf(" (a delegation sync of the zone is running, in the queue for parent %s; %d of its syncs in the queue)",
+			pos.Parent, pos.Waiting)
 	default:
-		return fmt.Sprintf(" (its request waits in the queue for parent %s, %d ahead)", pos.Parent, pos.Ahead)
+		return fmt.Sprintf(" (the zone's delegation syncs wait in the queue for parent %s, %d ahead)", pos.Parent, pos.Ahead)
 	}
 }
 
