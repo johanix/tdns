@@ -1062,6 +1062,9 @@ var errBootstrapValidationFailed = errors.New("the parent's validation of the SI
 //   - a failed validation (EDE KeyValidationFailed): errBootstrapValidationFailed.
 //     Final now; the setup arm re-bootstraps later, when what the parent could
 //     not find may have appeared.
+//   - a retired key (EDE Sig0KeyRetired): ErrSig0KeyTombstoned. A trusted
+//     UPDATE from the zone deleted this key at the parent, which will not
+//     take it again. Final; only a new key can bootstrap.
 //   - anything else, any other refusal: a plain error. Retrying a verdict only
 //     repeats it.
 func bootstrapOutcome(ur UpdateResult, err error) error {
@@ -1086,6 +1089,8 @@ func bootstrapOutcome(ur UpdateResult, err error) error {
 				return fmt.Errorf("%w (EDE %d)", errBootstrapManual, ur.EDECode)
 			case edns0.EDESig0KeyValidationFailed:
 				return fmt.Errorf("%w (EDE %d %q)", errBootstrapValidationFailed, ur.EDECode, ur.EDEMessage)
+			case edns0.EDESig0KeyRetired:
+				return fmt.Errorf("%w (EDE %d %q); make a new SIG(0) key", ErrSig0KeyTombstoned, ur.EDECode, ur.EDEMessage)
 			}
 		}
 	}

@@ -342,6 +342,12 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 					"zone", tp.Keyname, "keyid", tp.Keyid, "src", tp.Src, "from", r.RemoteAddr)
 				tp.Trusted = false
 			}
+			// A tombstone is the child's own word, given in a trusted UPDATE
+			// (truststore_tombstone.go). An operator's delete through here
+			// leaves none, whatever Src the client sent.
+			if tp.SubCommand == "delete" {
+				tp.Src = ""
+			}
 			resp, err = kdb.Sig0TrustMgmt(tx, tp)
 			if err != nil {
 				lgApi.Error("Sig0TrustMgmt failed", "err", err)

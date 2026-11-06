@@ -92,8 +92,78 @@ func newTruststoreSig0Cmd(role string) *cobra.Command {
 	}
 	untrust.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
 
-	c.AddCommand(add, del, list, trust, untrust)
+	tombstone := &cobra.Command{
+		Use:   "tombstone",
+		Short: "List or clear the child SIG(0) keys their children have retired",
+		Long: `A child SIG(0) key that the child's own trusted UPDATE deletes is kept as a
+tombstone, and the same key is refused if anything tries to add it again: a
+self-signed upload, a key found in DNS, an operator's add. A new key is not
+affected, even one with the same keyid. Tombstones do not expire; "clear"
+removes one deliberately, after which the key can be added like any new key.`,
+	}
+	tsList := &cobra.Command{
+		Use:   "list",
+		Short: "List the tombstoned child SIG(0) keys",
+		Run: func(cmd *cobra.Command, args []string) {
+			sig0TombstoneMgmt(role, "tombstone-list")
+		},
+	}
+	tsClear := &cobra.Command{
+		Use:   "clear",
+		Short: "Clear the tombstone of a child SIG(0) key, so that it can be added again",
+		Run: func(cmd *cobra.Command, args []string) {
+			// Not PrepArgs("keyid"), which reads 0 as "not given": 0 is a key
+			// tag like any other.
+			if !cmd.Flags().Changed("keyid") {
+				fmt.Printf("Error: key id not specified using --keyid flag\n")
+				os.Exit(1)
+			}
+			PrepArgs("child")
+			sig0TombstoneMgmt(role, "tombstone-clear")
+		},
+	}
+	tsClear.Flags().IntVarP(&keyid, "keyid", "", 0, "Keyid of the tombstoned child SIG(0) key")
+	tombstone.AddCommand(tsList, tsClear)
+
+	c.AddCommand(add, del, list, trust, untrust, tombstone)
 	return c
+}
+
+func sig0TombstoneMgmt(role, subcommand string) {
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		fmt.Printf("Error creating API client: %v\n", err)
+		os.Exit(1)
+	}
+
+	tr, err := SendTruststore(api, tdns.TruststorePost{
+		Command:    "child-sig0-mgmt",
+		SubCommand: subcommand,
+		Keyname:    tdns.Globals.Zonename,
+		Keyid:      keyid,
+	})
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if subcommand == "tombstone-list" {
+		if len(tr.Sig0Tombstones) == 0 {
+			fmt.Printf("No tombstoned child SIG(0) keys\n")
+			return
+		}
+		var out []string
+		if tdns.Globals.ShowHeaders {
+			out = append(out, "Signer|KeyID|Algorithm|Deleted|Source|Record")
+		}
+		for _, ts := range tr.Sig0Tombstones {
+			out = append(out, fmt.Sprintf("%s|%d|%s|%s|%s|%.55s...",
+				ts.Name, ts.Keyid, dns.AlgorithmToString[ts.Algorithm], ts.DeletedAt, ts.Source, ts.KeyRR))
+		}
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
+		return
+	}
+	fmt.Printf("%s\n", tr.Msg)
 }
 
 func sig0TrustMgmt(role, subcommand string) {

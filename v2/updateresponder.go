@@ -1008,6 +1008,28 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	// 4. Name of key must be == existing delegation
 	lgHandler.Debug("ApproveTrustUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "delegationpolicy", zd.boundDelegationPolicy().Name, "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
 
+	// A key this child retired with a trusted UPDATE is not taken back: not
+	// as a self-signed upload, not as the bootstrap ceremony, not from the
+	// child's trusted key (truststore_tombstone.go). Asked before the upload
+	// allowances below, so that the child is told why instead of being left
+	// to wait for a verification that would never start.
+	if key, isKey := rr.(*dns.KEY); isKey && rrclass == dns.ClassINET && zd.KeyDB != nil {
+		dead, deletedAt, terr := zd.KeyDB.Sig0KeyTombstoned(key.Hdr.Name, key)
+		if terr != nil {
+			us.Approved = false
+			return false, false, fmt.Errorf("ApproveTrustUpdate: looking for a tombstone of %s keyid %d: %v",
+				key.Hdr.Name, key.KeyTag(), terr)
+		}
+		if dead {
+			us.Approved = false
+			us.RejectionEDE = edns0.EDESig0KeyRetired
+			lgHandler.Warn("trust update rejected: the key was retired by its child's trusted UPDATE",
+				"zone", zone, "child", key.Hdr.Name, "keyid", key.KeyTag(), "deleted", deletedAt,
+				"signer", us.SignerName)
+			return false, false, nil
+		}
+	}
+
 	if !us.ValidatedByTrustedKey {
 		// If the update is not trusted (i.e. validated against a trusted key) it should be
 		// rejected, except in the special case of unvalidated key uploads.

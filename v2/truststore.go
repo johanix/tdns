@@ -154,6 +154,16 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 				return &resp, err
 			}
 			tp.KeyRR = canon
+
+			// A key its child retired stays retired, whoever asks for it
+			// back (truststore_tombstone.go).
+			if err = refuseTombstonedSig0Key(tx, tp.Keyname, tp.KeyRR); err != nil {
+				lgSigner.Warn("refusing to add a SIG(0) key its child retired",
+					"zone", tp.Keyname, "keyid", tp.Keyid, "src", tp.Src, "err", err)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return &resp, err
+			}
 		}
 
 		// 1. If src=file and key is supplied then add it (but as untrusted)
@@ -252,7 +262,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		}
 
 		// Must also delete from the cache
-		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+		kdb.dropSig0CacheEntry(tx, fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
 	case "delete":
 
@@ -264,10 +274,10 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		var keyid int
 		var trusted, validated, dnssecvalidated bool
 
-		err := row.Scan(&zone, &keyid, &validated, &dnssecvalidated, &trusted, &source, &keyrr)
-		if err != nil {
-			lgSigner.Error("failed to scan TrustStore key for delete", "err", err)
-			if err == sql.ErrNoRows {
+		serr := row.Scan(&zone, &keyid, &validated, &dnssecvalidated, &trusted, &source, &keyrr)
+		if serr != nil {
+			lgSigner.Error("failed to scan TrustStore key for delete", "err", serr)
+			if serr == sql.ErrNoRows {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("key %s (keyid %d) not found", tp.Keyname, tp.Keyid)
 				// return &resp, fmt.Errorf("key %s (keyid %d) not found", tp.Keyname, tp.Keyid)
@@ -281,6 +291,50 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			// return &resp, nil
 		}
 
+		// The child's own trusted UPDATE retiring its key -- zone_updater.go
+		// is the caller that deletes with src=child-update -- leaves a
+		// tombstone, in this transaction, so that the key cannot be
+		// bootstrapped back (truststore_tombstone.go). The stored record is
+		// the key being removed; the UPDATE's own record stands in if the
+		// stored one does not parse.
+		if serr == nil && tp.Src == "child-update" {
+			stored, perr := parseSig0KeyRR(keyrr)
+			var asked *dns.KEY
+			if tp.KeyRR != "" {
+				asked, _ = parseSig0KeyRR(tp.KeyRR)
+			}
+			// The row was found by tag alone. A different key under that tag
+			// is not the one the child asked to retire, and deleting it would
+			// remove, and tombstone, a key the child may still use. Answered
+			// as the missing key it is.
+			if perr == nil && asked != nil && !sameSig0Key(stored, asked) {
+				err = fmt.Errorf("key %s (keyid %d) not found: the stored key with that keyid is a different key",
+					tp.Keyname, tp.Keyid)
+				lgSigner.Warn("not deleting a SIG(0) key: the child's UPDATE names a different key under the same keyid",
+					"zone", tp.Keyname, "keyid", tp.Keyid)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return &resp, err
+			}
+			dead := stored
+			if perr != nil {
+				dead = asked
+			}
+			if dead != nil {
+				err = tombstoneSig0Key(tx, tp.Keyname, dead, tp.Src)
+			} else {
+				err = perr
+			}
+			if err != nil {
+				lgSigner.Error("failed to tombstone the SIG(0) key the child deleted; not deleting it",
+					"zone", tp.Keyname, "keyid", tp.Keyid, "err", err)
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("SIG(0) key %s (keyid %d) not deleted: its tombstone could not be written: %v",
+					tp.Keyname, tp.Keyid, err)
+				return &resp, err
+			}
+		}
+
 		res, err = tx.Exec(deleteSig0KeySql, tp.Keyname, tp.Keyid)
 		if err != nil {
 			lgSigner.Error("failed to delete SIG(0) key from TrustStore", "err", err)
@@ -290,10 +344,12 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		}
 
 		// Must also delete from the cache
-		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+		kdb.dropSig0CacheEntry(tx, fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
-		rows, _ := res.RowsAffected()
-		resp.Msg = fmt.Sprintf("SIG(0) key %s (keyid %d) deleted from TrustStore (%d rows)", tp.Keyname, tp.Keyid, rows)
+		if err == nil {
+			rows, _ := res.RowsAffected()
+			resp.Msg = fmt.Sprintf("SIG(0) key %s (keyid %d) deleted from TrustStore (%d rows)", tp.Keyname, tp.Keyid, rows)
+		}
 
 	case "trust":
 		// 1. Find key, if not --> error
@@ -309,7 +365,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
 		// Must also delete from the cache
-		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+		kdb.dropSig0CacheEntry(tx, fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
 	case "verify":
 		// Set key as validated + trusted after DNS verification.
@@ -326,7 +382,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 				tp.Keyname, tp.Keyid, tp.DnssecValidated, rows)
 		}
 		// Must also delete from the cache
-		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+		kdb.dropSig0CacheEntry(tx, fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
 	case "validation-failed":
 		// The parent's automatic verification of this child key exhausted its
@@ -347,7 +403,7 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 				tp.Keyname, tp.Keyid, tp.ValidationError, rows)
 		}
 		// Must also delete from the cache
-		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+		kdb.dropSig0CacheEntry(tx, fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
 
 	case "untrust":
 		// 1. Find key, if not --> error
@@ -364,7 +420,46 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
 		// Must also delete from the cache
-		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+		kdb.dropSig0CacheEntry(tx, fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+
+	case "tombstone-list":
+		ts, lerr := listSig0Tombstones(tx)
+		if lerr != nil {
+			err = lerr
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		resp.Sig0Tombstones = ts
+		resp.Msg = fmt.Sprintf("%d child SIG(0) keys retired by their child's trusted UPDATE", len(ts))
+
+	case "tombstone-clear":
+		// The operator's deliberate undo of a tombstone; nothing else removes
+		// one (truststore_tombstone.go). The key itself is not restored: it
+		// can be added again like any new key.
+		// Keyid 0 is a key tag like any other, so only the name is checked.
+		if tp.Keyname == "" {
+			err = fmt.Errorf("tombstone-clear needs the child's name")
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		res, err = tx.Exec(clearSig0TombstoneSql, dns.CanonicalName(tp.Keyname), tp.Keyid)
+		if err != nil {
+			lgSigner.Error("failed to clear SIG(0) key tombstone", "err", err)
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		rows, _ := res.RowsAffected()
+		if rows == 0 {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("no tombstone for SIG(0) key %s (keyid %d)", tp.Keyname, tp.Keyid)
+		} else {
+			lgSigner.Info("operator cleared a SIG(0) key tombstone", "zone", tp.Keyname, "keyid", tp.Keyid, "rows", rows)
+			resp.Msg = fmt.Sprintf("Tombstone of SIG(0) key %s (keyid %d) cleared (%d rows); the key can be added again",
+				tp.Keyname, tp.Keyid, rows)
+		}
 
 	default:
 		lgSigner.Warn("unknown Sig0TrustMgmt subcommand", "subcommand", tp.SubCommand)
@@ -592,7 +687,10 @@ func (kdb *KeyDB) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, err
 		fetchsig0trustanchor = "SELECT validated, dnssecvalidated, trusted, keyrr, validation_failed, validation_error FROM Sig0TrustStore WHERE zonename=? AND keyid=?"
 	)
 
-	// 2. Try to fetch the key from the Sig0TrustStore database
+	// 2. Try to fetch the key from the Sig0TrustStore database. The generation
+	// is read first: the row may change and commit while this read is in
+	// flight, and then what it found must not be cached (fillIfCurrent).
+	gen := kdb.TruststoreSig0Cache.generation()
 	rows, err := kdb.Query(fetchsig0trustanchor, signer, keyid)
 	if err != nil {
 		return nil, err
@@ -625,7 +723,7 @@ func (kdb *KeyDB) FindSig0TrustedKey(signer string, keyid uint16) (*Sig0Key, err
 			ValidationFailed: validationFailed,
 			ValidationError:  validationError,
 		}
-		kdb.TruststoreSig0Cache.Map.Set(mapkey, sk)
+		kdb.TruststoreSig0Cache.fillIfCurrent(gen, mapkey, sk)
 		return &sk, nil
 	}
 
