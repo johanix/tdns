@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -380,6 +381,46 @@ func TestDelegationSyncLanesStop(t *testing.T) {
 			t.Errorf("%d of 5 requests ran before the runner returned", n)
 		}
 	})
+}
+
+// A parent's lane lives only while it has requests: 100 parents with one
+// request each make 100 short-lived goroutines, not 100 resident ones. Once
+// every request has run there is no goroutine, no lane entry and no pin
+// left, without the context ending -- l.wg counts the lanes' goroutines, so
+// its Wait returns only when every one has exited. A parent's next request
+// makes its lane again, and it goes again.
+func TestDelegationSyncLaneExitsWhenIdle(t *testing.T) {
+	var handled atomic.Int32
+	l := newDelegationSyncLanes(func(context.Context, DelegationSyncRequest) { handled.Add(1) })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	idle := func(what string) {
+		t.Helper()
+		exited := make(chan struct{})
+		go func() { l.wg.Wait(); close(exited) }()
+		receive(t, exited, what+": every lane goroutine to exit")
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if len(l.lanes) != 0 || len(l.zones) != 0 {
+			t.Errorf("%s: %d lanes and %d pins left, want none", what, len(l.lanes), len(l.zones))
+		}
+	}
+
+	const parents = 100
+	for i := range parents {
+		parent := fmt.Sprintf("p%d.example.", i)
+		l.dispatch(ctx, laneRequest(laneZone("child."+parent, parent), "SYNC-DELEGATION"))
+	}
+	waitFor(t, 2*time.Second, "every request to run", func() bool { return handled.Load() == parents })
+	idle("after one request per parent")
+
+	l.dispatch(ctx, laneRequest(laneZone("child.p7.example.", "p7.example."), "SYNC-DELEGATION"))
+	waitFor(t, 2*time.Second, "the next request to run", func() bool { return handled.Load() == parents+1 })
+	idle("after a parent's next request")
+	if ctx.Err() != nil {
+		t.Fatal("the lanes were idle only because the context ended")
+	}
 }
 
 // (f) The queue a zone goes to, and what DelegationSyncWaiting reports for a
