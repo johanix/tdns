@@ -355,7 +355,7 @@ func TestTheSyncDSArmAnswersWhatItCannotRun(t *testing.T) {
 }
 
 // The syncher starts a SYNC-DS and goes on reading its queue: a delivery
-// is a parent round trip, and the loop is the queue's only reader. Two
+// is a parent round trip, and the parent's queue need not wait for it. Two
 // requests whose zone has no IMR to find a target are both answered, the
 // second not after the first.
 func TestTheSyncherKeepsReadingWhileASyncDSRuns(t *testing.T) {
