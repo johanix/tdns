@@ -427,7 +427,7 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 			// content (the mirror of the CHILD-UPDATE 'direct' backend
 			// persist); internal updates are included, since they change
 			// zone data too but never set OptDirty, so they need force.
-			// Then the delegation sync, cancellable: the only reader of that
+			// Then the delegation sync, cancellable: the syncher reading that
 			// queue exits on the same cancellation, so a plain send at
 			// shutdown would block this engine forever; dropping it costs a
 			// round of parent sync, not correctness. The operator's signal

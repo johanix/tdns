@@ -145,7 +145,7 @@ func (zd *ZoneData) requestDelegationStatus(ctx context.Context,
 			dss.ToStrings()
 			return &dss, ""
 		case <-ctx.Done():
-			return nil, fmt.Sprintf("no answer from the delegation syncher: %v", ctx.Err())
+			return nil, fmt.Sprintf("no answer from the delegation syncher: %v%s", ctx.Err(), delegationSyncQueueNote(zd.ZoneName))
 		}
 	}
 }
