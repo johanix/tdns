@@ -232,3 +232,35 @@ func TestABADKEYReBootstrapOfARetiredKeyEndsTheUpdate(t *testing.T) {
 		t.Errorf("%d sends and %d re-bootstraps, want 1 and 1", sends, reboots)
 	}
 }
+
+// A BADKEY re-bootstrap whose answer is not final (here the parent is still
+// verifying the key, EDE 514) does not end the UPDATE. The next attempt
+// re-bootstraps again, within the same bound.
+func TestABADKEYReBootstrapThatIsNotFinalIsRetried(t *testing.T) {
+	zd, sak := ceremonyChild(t)
+	parents := []string{
+		startRcodeEDEResponder(t, dns.RcodeRefused, edns0.EDESig0KeyKnownButNotTrusted),
+		startRcodeResponder(t, dns.RcodeSuccess),
+	}
+	sends, reboots := 0, 0
+	rcode, _, err := sendUpdateWithRetry(context.Background(), 5, time.Millisecond,
+		func() (int, UpdateResult, error) {
+			sends++
+			if sends < 3 {
+				return dns.RcodeBadKey, UpdateResult{}, nil
+			}
+			return dns.RcodeSuccess, UpdateResult{}, nil
+		},
+		func() error {
+			parent := parents[min(reboots, len(parents)-1)]
+			reboots++
+			_, _, err := zd.sendSig0BootstrapCeremony(context.Background(), sak, []string{parent})
+			return err
+		})
+	if err != nil || rcode != dns.RcodeSuccess {
+		t.Fatalf("UPDATE ended with rcode %s, err %v; want NOERROR", dns.RcodeToString[rcode], err)
+	}
+	if sends != 3 || reboots != 2 {
+		t.Errorf("%d sends and %d re-bootstraps, want 3 and 2", sends, reboots)
+	}
+}
