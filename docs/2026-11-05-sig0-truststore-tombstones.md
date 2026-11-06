@@ -59,7 +59,33 @@ tombstone for the key in the same transaction as the delete.
   `validator.sig0.trusted.file` config are the operator's own authority and
   are not checked.
 
-## 3. Clearing a tombstone
+## 3. The child, told no
+
+A child that sends a retired key gets REFUSED with EDE 546. Before this
+change it could not tell: the bootstrap ceremony handed every refusal back
+with a nil error, and three of its callers read only the error. They were
+`BootstrapWithParent` (the agent's KeyState poll and the post-bootstrap
+poll), the re-bootstrap after BADKEY, and the management API's
+`bootstrap`. They took a REFUSED for a success, so a poll logged success and
+then polled a parent that would never take the key.
+
+The ceremony now returns `bootstrapOutcome`'s verdict as its error, with the
+parent's rcode and EDE still in the `UpdateResult`. EDE 546 is
+`ErrSig0KeyTombstoned`, final, and its message says to make a new key.
+
+- A poll ends at the first such refusal, in the first bootstrap or in a
+  re-bootstrap round.
+- No answer, SERVFAIL, or a parent still verifying the key (EDE 514) is not
+  a verdict, and the poll asks again.
+- An UPDATE whose BADKEY re-bootstrap is refused ends with the reason.
+- The API's `bootstrap` reports the refusal as an error.
+
+tdns does not make the new key itself. A plain child meets 546 only if it
+re-sends a key it deleted, which is a fault to see. An application that
+hands keys between parties, as tdns-mp does at an owner's take-over, decides
+when a new key is due.
+
+## 4. Clearing a tombstone
 
 An operator clears one deliberately, through the management API and the
 CLI:
@@ -73,14 +99,14 @@ The API's `/truststore` endpoint takes `child-sig0-mgmt` with the
 subcommands `tombstone-list` and `tombstone-clear`. Clearing removes the
 tombstone and nothing else; the key can then be added like any new key.
 
-## 4. No expiry
+## 5. No expiry
 
 Tombstones do not expire. The parent cannot know when the private half is
 gone, or when the last copy of the KEY has left caches, secondaries and
 signal names. A tombstone blocks only that one key, so keeping it costs a
 child nothing: a new key is never affected.
 
-## 5. Open points
+## 6. Open points
 
 - The bootstrap ceremony's deferred DEL-ANY-KEY also removes keys, once the
   new key is trusted. It leaves no tombstone here, since it is not a trusted
