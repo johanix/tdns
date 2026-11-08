@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -77,6 +78,16 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 		return
 	}
 	if _, err := os.Stat(fname); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			// A copy we cannot reach -- a directory we may not search, a path
+			// through a file -- is a fault in this server's own storage, not a
+			// missing copy, and ERROR like a copy that cannot be read (below).
+			// At DEBUG it would go unreported whenever the transfer after it
+			// backs off quietly.
+			lg.Error("could not reach persisted zone copy at first bind, continuing to transfer",
+				"zone", zd.ZoneName, "file", fname, "err", err)
+			return
+		}
 		// No copy yet: a zone added through the API in this process has not
 		// written one, and a config-declared secondary may never have
 		// transferred. Nothing to adopt, and not an error.

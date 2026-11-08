@@ -608,6 +608,65 @@ func TestAnUnreadablePersistedCopyLogsOneError(t *testing.T) {
 	}
 }
 
+// A persisted copy that cannot be reached is a storage fault and logs one
+// ERROR, from the adoption; a copy that is simply not there logs none. The
+// primary answers REFUSED, a quiet back-off with no error, so the adoption's
+// line is the only ERROR there can be.
+func TestAnUnreachablePersistedCopyLogsOneError(t *testing.T) {
+	const unreachable = "could not reach persisted zone copy at first bind, continuing to transfer"
+	for _, c := range []struct {
+		what   string
+		break_ func(t *testing.T, conf *Config, dir string)
+		want   int
+	}{
+		{"no copy on disk", func(t *testing.T, _ *Config, dir string) {
+			if err := os.Remove(filepath.Join(dir, "example.zone")); err != nil {
+				t.Fatalf("remove: %v", err)
+			}
+		}, 0},
+		{"a directory that may not be searched", func(t *testing.T, _ *Config, dir string) {
+			if os.Geteuid() == 0 {
+				t.Skip("root searches a mode-000 directory")
+			}
+			if err := os.Chmod(dir, 0); err != nil {
+				t.Fatalf("chmod: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(dir, 0755) })
+		}, 1},
+		{"a path through a regular file", func(t *testing.T, conf *Config, dir string) {
+			file := filepath.Join(dir, "not-a-directory")
+			if err := os.WriteFile(file, nil, 0644); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			conf.DynamicZones.ZoneDirectory = file
+		}, 1},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			kdb := newTestKeyDB(t)
+			conf, dir := persistentConf(t, kdb)
+			refusing, stop := startTestSOAServer(t, "example.", 7, dns.RcodeRefused)
+			defer stop()
+			zd := persistedSecondary(t, kdb, dir, refusing)
+			c.break_(t, conf, dir)
+			logs := captureRefreshLogs(t)
+
+			if _, err := runZoneRefresh(context.Background(),
+				refreshJob{zd: zd, zone: "example.", gen: zd.generation.Load()}, conf); err != nil {
+				t.Fatalf("an all-REFUSED refresh is a quiet back-off, not an error: %v", err)
+			}
+			errs := logs.mentioning("example.", slog.LevelError)
+			if len(errs) != c.want {
+				t.Fatalf("logged %d ERRORs, want %d: %+v", len(errs), c.want, errs)
+			}
+			for _, rec := range errs {
+				if rec.msg != unreachable || rec.attrs["file"] == "" || rec.attrs["err"] == "" {
+					t.Errorf("the ERROR is %q with %v, want the adoption's, naming the file and the error", rec.msg, rec.attrs)
+				}
+			}
+		})
+	}
+}
+
 // A primary that read its zone file and then could not apply it -- here the
 // published serial cannot be read -- fails at stage other, not file. Through
 // the engine, as the first load runs it.
