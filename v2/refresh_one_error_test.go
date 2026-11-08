@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -582,6 +583,31 @@ func TestARefreshThatProvesNothingStillEndsADeferral(t *testing.T) {
 	}
 }
 
+// A secondary whose persisted copy cannot be read at first bind logs one
+// ERROR for it, from the adoption: the refresh path's summary does not see a
+// failure the transfer may yet make good. Its primary answers REFUSED, a quiet
+// back-off with no error, so that ERROR is the only one.
+func TestAnUnreadablePersistedCopyLogsOneError(t *testing.T) {
+	logs := captureRefreshLogs(t)
+	kdb := newTestKeyDB(t)
+	conf, dir := persistentConf(t, kdb)
+	refusing, stop := startTestSOAServer(t, "example.", 7, dns.RcodeRefused)
+	defer stop()
+	zd := persistedSecondary(t, kdb, dir, refusing)
+	if err := os.WriteFile(filepath.Join(dir, "example.zone"), []byte("not a zone file\n"), 0644); err != nil {
+		t.Fatalf("corrupt the copy: %v", err)
+	}
+
+	if _, err := runZoneRefresh(context.Background(),
+		refreshJob{zd: zd, zone: "example.", gen: zd.generation.Load()}, conf); err != nil {
+		t.Fatalf("an all-REFUSED refresh is a quiet back-off, not an error: %v", err)
+	}
+	errs := logs.mentioning("example.", slog.LevelError)
+	if len(errs) != 1 || errs[0].msg != "could not read persisted zone copy at first bind, continuing to transfer" {
+		t.Errorf("an unreadable persisted copy logged %+v, want exactly one ERROR, from the adoption", errs)
+	}
+}
+
 // A primary that read its zone file and then could not apply it -- here the
 // published serial cannot be read -- fails at stage other, not file. Through
 // the engine, as the first load runs it.
@@ -653,9 +679,14 @@ func TestTheStageComesWithTheError(t *testing.T) {
 		refreshJob{zd: zd, zone: zone, gen: zd.generation.Load()}, &Config{}); err == nil {
 		t.Fatal("a primary with no zone file refreshed")
 	}
-	errs := logs.withMsg(zone, slog.LevelError, "zone refresh failed")
-	if len(errs) != 1 || errs[0].attrs["stage"] != refreshStageFile {
-		t.Errorf("an unreadable zone file logged %+v, want one failure at stage file", errs)
+	// Every ERROR that names the zone, not only the summary: the read failure
+	// itself is DEBUG.
+	errs := logs.mentioning(zone, slog.LevelError)
+	if len(errs) != 1 || errs[0].msg != "zone refresh failed" || errs[0].attrs["stage"] != refreshStageFile {
+		t.Errorf("an unreadable zone file logged %+v, want exactly one ERROR, the summary, at stage file", errs)
+	}
+	if n := len(logs.withMsg(zone, slog.LevelDebug, "ReadZoneFile failed")); n != 1 {
+		t.Errorf("the read failure was logged %d times at DEBUG, want 1", n)
 	}
 
 	stageOf := func(err error) string {

@@ -96,6 +96,17 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 		// below is still the zone's primary route to data, and it may well
 		// succeed. A zone that can neither load nor transfer surfaces through
 		// the transfer's own error.
+		//
+		// Except a copy that cannot be read: that is a fault in this server's
+		// own storage, whatever the transfer does next, and ERROR. FetchFromFile
+		// leaves a read failure to its caller to log, and on the refresh path
+		// that is noteRefreshFailure; here it is this line.
+		var se *refreshStageError
+		if errors.As(err, &se) && se.stage == refreshStageFile {
+			lg.Error("could not read persisted zone copy at first bind, continuing to transfer",
+				"zone", zd.ZoneName, "file", fname, "err", err)
+			return
+		}
 		lg.Warn("could not adopt persisted zone copy at first bind, continuing to transfer",
 			"zone", zd.ZoneName, "file", fname, "err", err)
 		return
@@ -660,7 +671,9 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	// parse was thrown away.
 	serialMoved, _, err := new_zd.ReadZoneFile(ctx, zd.Zonefile, true)
 	if err != nil {
-		lg.Error("ReadZoneFile failed", "zone", zd.ZoneName, "err", err)
+		// DEBUG: the caller logs the one ERROR -- noteRefreshFailure on the
+		// refresh path, the first-bind adoption on its own.
+		lg.Debug("ReadZoneFile failed", "zone", zd.ZoneName, "err", err)
 		zd.SetStatus(prevStatus)
 		return false, &refreshStageError{stage: refreshStageFile, err: err}
 	}
