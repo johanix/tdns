@@ -37,9 +37,9 @@ package tdns
 // Tombstones do not expire. The parent cannot know when the private half is
 // gone, or when the last copy of the KEY has left caches, secondaries and
 // signal names, and a tombstone blocks only that one key. An operator clears
-// one deliberately with "truststore sig0 tombstone clear" (the truststore
-// API's "tombstone-clear" subcommand); the key can then be added again like
-// any new key.
+// tombstones deliberately, by the child's name and key tag, with "truststore
+// sig0 tombstone clear" (the truststore API's "tombstone-clear" subcommand);
+// the key can then be added again like any new key.
 
 import (
 	"database/sql"

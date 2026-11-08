@@ -457,8 +457,8 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 			resp.ErrorMsg = fmt.Sprintf("no tombstone for SIG(0) key %s (keyid %d)", tp.Keyname, tp.Keyid)
 		} else {
 			lgSigner.Info("operator cleared a SIG(0) key tombstone", "zone", tp.Keyname, "keyid", tp.Keyid, "rows", rows)
-			resp.Msg = fmt.Sprintf("Tombstone of SIG(0) key %s (keyid %d) cleared (%d rows); the key can be added again",
-				tp.Keyname, tp.Keyid, rows)
+			resp.Msg = fmt.Sprintf("%d tombstone(s) of SIG(0) keyid %d for %s cleared; the key can be added again",
+				rows, tp.Keyid, tp.Keyname)
 		}
 
 	default:

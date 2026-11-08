@@ -99,7 +99,8 @@ func newTruststoreSig0Cmd(role string) *cobra.Command {
 tombstone, and the same key is refused if anything tries to add it again: a
 self-signed upload, a key found in DNS, an operator's add. A new key is not
 affected, even one with the same keyid. Tombstones do not expire; "clear"
-removes one deliberately, after which the key can be added like any new key.`,
+removes them deliberately, by the child's name and keyid (every tombstone of
+that child with that keyid), after which the key can be added like any new key.`,
 	}
 	tsList := &cobra.Command{
 		Use:   "list",
@@ -110,7 +111,7 @@ removes one deliberately, after which the key can be added like any new key.`,
 	}
 	tsClear := &cobra.Command{
 		Use:   "clear",
-		Short: "Clear the tombstone of a child SIG(0) key, so that it can be added again",
+		Short: "Clear the tombstones of a child's SIG(0) keyid, so that the key can be added again",
 		Run: func(cmd *cobra.Command, args []string) {
 			// Not PrepArgs("keyid"), which reads 0 as "not given": 0 is a key
 			// tag like any other.

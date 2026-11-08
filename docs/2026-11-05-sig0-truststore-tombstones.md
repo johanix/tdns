@@ -34,7 +34,7 @@ tombstone for the key in the same transaction as the delete.
   table, created at start-up like any other; there is no migration.
 - **Match.** On the child, the algorithm and the public key bytes, not the
   key tag. A new key that shares a tag with a retired one is a different key
-  and bootstraps as usual.
+  and bootstraps as usual. Only the operator's clear goes by tag (section 4).
 - **Refusal.** Every truststore add of a tombstoned key is refused, whatever
   its source: `child-update` (uploads, and a trusted UPDATE's ADD), `dns`
   (discovery), `file` (an operator's add) and `keystore`. The UPDATE
@@ -88,8 +88,8 @@ when a new key is due.
 
 ## 4. Clearing a tombstone
 
-An operator clears one deliberately, through the management API and the
-CLI:
+An operator clears tombstones deliberately, through the management API and
+the CLI:
 
 ```
 truststore sig0 tombstone list
@@ -97,8 +97,15 @@ truststore sig0 tombstone clear --child <child> --keyid <keyid>
 ```
 
 The API's `/truststore` endpoint takes `child-sig0-mgmt` with the
-subcommands `tombstone-list` and `tombstone-clear`. Clearing removes the
-tombstone and nothing else; the key can then be added like any new key.
+subcommands `tombstone-list` and `tombstone-clear`.
+
+The clear names the child and the key tag, which is what an operator has in
+hand, and removes every tombstone of that child with that tag. Two retired
+keys of one child that share a tag are both cleared; `list` shows whether
+there is more than one, and the clear reports how many it removed. Clearing
+removes the tombstones and nothing else; the keys can then be added like any
+new key. Only the operator can clear: no UPDATE from a child, and no remote
+party, removes a tombstone.
 
 ## 5. No expiry
 
