@@ -280,6 +280,11 @@ type ZoneData struct {
 	// signature again. Cleared when the resigner takes it, or when the send
 	// is dropped.
 	resignQueued atomic.Bool
+	// signalSkipLogged records that RepublishAtSignalNames has said, once,
+	// that it publishes nothing for this zone because its copy carries HSYNC3
+	// (leavesSignalsToItsAgents). Cleared when the copy no longer does. Per
+	// ZoneData, so a zone that is removed takes it with it.
+	signalSkipLogged atomic.Bool
 	// dsFirstRunDone records that the DS engine has had its first run for this
 	// ZoneData, the one that compares the parent's DS with the keys once per
 	// zone load (followKeysWithCDS). Per ZoneData, not per process: a zone
@@ -336,7 +341,8 @@ type ZoneData struct {
 
 	// ixfrTouched is the owner set that delta reached, carried from the IXFR
 	// apply to applyRefreshReplacementLocked so it can stage wsSignOwners.
-	// Set only alongside ixfrDerived.
+	// Set only alongside ixfrDerived. A pre-refresh write into the draft adds
+	// the owner it writes (ownDraftOwnerLocked).
 	ixfrTouched map[string]bool
 
 	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale
@@ -1433,10 +1439,23 @@ type DnssecKeys struct {
 
 type KeyDB struct {
 	DB     *sql.DB
-	DBFile string // sqlite file path, recorded by NewKeyDB
+	DBFile string // sqlite file path, recorded by NewKeyDB; empty in memory
 	mu     sync.Mutex
+	// txCond wakes Begin waiters when Commit/Rollback clears Ctx. Initialized
+	// in openKeyDB, which NewKeyDB and NewKeyDBInMemory both call, and by
+	// Begin on a KeyDB made without them; L is &mu.
+	txCond *sync.Cond
 	// Sig0Cache   map[string]*Sig0KeyCache
-	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
+	KeystoreSig0Cache map[string]*Sig0ActiveKeys
+	// sig0CacheMu guards every read/write/delete of KeystoreSig0Cache. The cache
+	// is filled by GetSig0Keys and dropped by invalidateSig0Cache (and the
+	// Sig0KeyMgmt / bulk / API post-commit paths that call it).
+	sig0CacheMu sync.RWMutex
+	// sig0CacheGen counts invalidations; guarded by sig0CacheMu. GetSig0Keys
+	// stores what it read only if no invalidation ran while it read: a read
+	// that saw the rows before a commit would otherwise put them back after
+	// that commit's invalidation, and keep a retired key active until restart.
+	sig0CacheGen        uint64
 	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
@@ -1549,6 +1568,9 @@ type Tx struct {
 	*sql.Tx
 	KeyDB   *KeyDB
 	context string
+	// ended is claimed by the first Commit or Rollback. Only that one clears
+	// KeyDB.Ctx: by the time a second end runs, a waiting Begin may hold Ctx.
+	ended atomic.Bool
 }
 
 // String-based versions of RRset for JSON marshaling

@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -148,7 +148,7 @@ func checkParentAgentAnswer(res *dns.Msg, child, agentAddr string) error {
 	if soaOwner == "" {
 		return fmt.Errorf("QueryParentAgentDS: %s answered no DS for %s without an SOA, so it does not say which zone answered", agentAddr, child)
 	}
-	if strings.EqualFold(dns.Fqdn(soaOwner), dns.Fqdn(child)) || !dns.IsSubDomain(soaOwner, child) {
+	if core.EqualNames(dns.Fqdn(soaOwner), dns.Fqdn(child)) || !dns.IsSubDomain(soaOwner, child) {
 		return fmt.Errorf("QueryParentAgentDS: %s answered no DS for %s from zone %s, not from its parent; rollover.parent-agent must be the parent's authoritative server", agentAddr, child, soaOwner)
 	}
 	return nil

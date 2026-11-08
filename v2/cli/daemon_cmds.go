@@ -70,6 +70,9 @@ func NewDaemonCmd(role string) *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			api, _ := GetApiClient(role, true)
 			_, resp, _ := api.UpdateDaemon(tdns.CommandPost{Command: "status"}, true)
+			for _, w := range resp.Warnings {
+				fmt.Println(w)
+			}
 			fmt.Printf("Status: %s Message: %s\n", resp.Status, resp.Msg)
 		},
 	}

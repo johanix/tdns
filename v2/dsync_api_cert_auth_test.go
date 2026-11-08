@@ -545,7 +545,12 @@ func TestDsyncApiListenerClientAuthHandshake(t *testing.T) {
 		for i := 0; i < 50; i++ {
 			var saw bool
 			var conn *tls.Conn
-			conn, last = tls.DialWithDialer(&net.Dialer{Timeout: 200 * time.Millisecond}, "tcp", addr, &tls.Config{
+			// The dialer's timeout covers the TLS handshake as well as the
+			// connect, and a handshake on a loaded machine can take far
+			// longer than a connect. Only a refused connect, a listener not up
+			// yet, is retried, and that one fails at once whatever the timeout
+			// (#960).
+			conn, last = tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr, &tls.Config{
 				RootCAs:    roots,
 				ServerName: "localhost",
 				MinVersion: tls.VersionTLS12,

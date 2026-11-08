@@ -1,8 +1,6 @@
 package tdns
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -10,14 +8,11 @@ import (
 
 func gateTestKeyDB(t *testing.T) *KeyDB {
 	t.Helper()
-	f := filepath.Join(t.TempDir(), "gate.db")
-	if err := os.WriteFile(f, nil, 0664); err != nil {
-		t.Fatalf("create db file: %v", err)
-	}
-	kdb, err := NewKeyDB(f, false, nil)
+	kdb, err := NewKeyDBInMemory(t.Name())
 	if err != nil {
-		t.Fatalf("NewKeyDB: %v", err)
+		t.Fatalf("NewKeyDBInMemory: %v", err)
 	}
+	t.Cleanup(func() { kdb.Close() })
 	return kdb
 }
 

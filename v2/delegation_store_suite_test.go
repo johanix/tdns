@@ -4,8 +4,6 @@
 package tdns_test
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -18,14 +16,11 @@ import (
 func TestSqliteDelegationStoreSuite(t *testing.T) {
 	delegationtest.RunStoreSuite(t, func(t *testing.T) tdns.DelegationStore {
 		t.Helper()
-		f := filepath.Join(t.TempDir(), "test.db")
-		if err := os.WriteFile(f, nil, 0664); err != nil {
-			t.Fatalf("create db file: %v", err)
-		}
-		kdb, err := tdns.NewKeyDB(f, false, nil)
+		kdb, err := tdns.NewKeyDBInMemory(t.Name())
 		if err != nil {
-			t.Fatalf("NewKeyDB: %v", err)
+			t.Fatalf("NewKeyDBInMemory: %v", err)
 		}
+		t.Cleanup(func() { kdb.Close() })
 		b, err := tdns.LookupDelegationBackend("db", kdb, nil)
 		if err != nil {
 			t.Fatalf("LookupDelegationBackend(db): %v", err)

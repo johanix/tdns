@@ -1631,3 +1631,41 @@ func TestForwardRepeatedSliceTimeoutsMarkTheUpstreamFailing(t *testing.T) {
 			failing, timeouts)
 	}
 }
+
+// pastDeadlineCtx is a context whose deadline has passed and whose timer has
+// not fired yet, so Err() still says it is running: the moment at which a read
+// given the same deadline has already timed out.
+type pastDeadlineCtx struct {
+	context.Context
+	deadline time.Time
+}
+
+func (c pastDeadlineCtx) Deadline() (time.Time, bool) { return c.deadline, true }
+
+// A context past its deadline has ended, whether its timer has fired or not.
+// The forwarder told a slice timeout from a transport failure by Err() alone,
+// and an attempt whose read timed out just before its context's timer fired
+// counted as a failure: the blackhole's run of slice timeouts was reset, and
+// TestForwardRepeatedSliceTimeoutsMarkTheUpstreamFailing failed now and then.
+func TestCtxEndedReadsTheDeadlineNotOnlyErr(t *testing.T) {
+	now := time.Now()
+	running, cancelRunning := context.WithTimeout(context.Background(), time.Hour)
+	defer cancelRunning()
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, c := range []struct {
+		name string
+		ctx  context.Context
+		want bool
+	}{
+		{"no deadline", context.Background(), false},
+		{"deadline ahead", running, false},
+		{"cancelled", cancelled, true},
+		{"deadline passed, timer not fired", pastDeadlineCtx{context.Background(), now.Add(-time.Millisecond)}, true},
+		{"deadline now, timer not fired", pastDeadlineCtx{context.Background(), now}, true},
+	} {
+		if got := ctxEnded(c.ctx, now); got != c.want {
+			t.Errorf("%s: ctxEnded=%v, want %v", c.name, got, c.want)
+		}
+	}
+}
