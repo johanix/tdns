@@ -106,16 +106,34 @@ func captureRefreshLogs(t *testing.T) *recordCapture {
 	return c
 }
 
-// closedUDPPort is a loopback address with nothing bound on it.
-func closedUDPPort(t *testing.T) string {
+// closedUDPPorts returns n distinct loopback addresses with nothing bound on
+// them. All n are held until the last is chosen, so none is handed out twice.
+func closedUDPPorts(t *testing.T, n int) []string {
 	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	var addrs []string
+	var held []net.PacketConn
+	for range n {
+		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		held = append(held, pc)
+		addrs = append(addrs, pc.LocalAddr().String())
 	}
-	addr := pc.LocalAddr().String()
-	_ = pc.Close()
-	return addr
+	for _, pc := range held {
+		_ = pc.Close()
+	}
+	return addrs
+}
+
+// upstreamErrorFor is the entry upstream_errors holds for addr.
+func upstreamErrorFor(rec capturedRecord, addr string) string {
+	for _, entry := range strings.Split(rec.attrs["upstream_errors"], " | ") {
+		if strings.HasPrefix(entry, addr+": ") {
+			return entry
+		}
+	}
+	return ""
 }
 
 // startRefusingPrimary answers the SOA probe over UDP with serial and every
@@ -190,7 +208,7 @@ func wantOneError(t *testing.T, rec capturedRecord, stage string, upstreams map[
 		if !okKind {
 			t.Errorf("upstream %s has kind %q, want one of %v", addr, kind, allowed)
 		}
-		if !strings.Contains(rec.attrs["upstream_errors"], addr+": ") {
+		if upstreamErrorFor(rec, addr) == "" {
 			t.Errorf("upstream %s has no error in upstream_errors=%q", addr, rec.attrs["upstream_errors"])
 		}
 	}
@@ -213,7 +231,7 @@ func TestAFailedProbeOnTheTickerPathLogsOneError(t *testing.T) {
 	logs := captureRefreshLogs(t)
 	quiet, stop := startBlackholeUDP(t)
 	defer stop()
-	closed := closedUDPPort(t)
+	closed := closedUDPPorts(t, 1)[0]
 
 	const zone = "probe.one-error.test."
 	zd := &ZoneData{
@@ -290,8 +308,12 @@ func TestAFailedTransferOnTheTickerPathLogsOneError(t *testing.T) {
 	if got := errs[0].attrs["kind"]; got != refreshKindMixed {
 		t.Errorf("kind=%q for two upstreams failing differently, want %q", got, refreshKindMixed)
 	}
-	if !strings.Contains(errs[0].attrs["upstream_errors"], "REFUSED") {
-		t.Errorf("upstream_errors=%q lost the rcode text", errs[0].attrs["upstream_errors"])
+	// Each error under its own upstream, not merely somewhere on the line.
+	if e := upstreamErrorFor(errs[0], refusing); !strings.Contains(e, "REFUSED") {
+		t.Errorf("the refusing upstream's entry %q lost the rcode text", e)
+	}
+	if e := upstreamErrorFor(errs[0], soaOnly); !strings.Contains(e, "connection refused") || strings.Contains(e, "REFUSED") {
+		t.Errorf("the TCP-less upstream's entry is %q, want its own connection refusal", e)
 	}
 	for _, msg := range []string{"FetchFromUpstream: AXFR failed on all upstreams", "FetchZone failed"} {
 		if n := len(logs.withMsg(zone, slog.LevelDebug, msg)); n != 1 {
@@ -313,7 +335,8 @@ func TestAFailedFirstLoadAndItsRetryLogOneErrorEach(t *testing.T) {
 	logs := captureRefreshLogs(t)
 
 	const zone = "first.one-error.test."
-	up1, up2 := closedUDPPort(t), closedUDPPort(t)
+	ups := closedUDPPorts(t, 2)
+	up1, up2 := ups[0], ups[1]
 	zd := &ZoneData{
 		ZoneName:      zone,
 		ZoneType:      Secondary,
@@ -372,6 +395,117 @@ func TestAFailedFirstLoadAndItsRetryLogOneErrorEach(t *testing.T) {
 		if rec.attrs["since"] != errs[0].attrs["since"] {
 			t.Errorf("ERROR %d: since=%s, want the first failure's %s", i, rec.attrs["since"], errs[0].attrs["since"])
 		}
+	}
+}
+
+// A refresh that sees a usable SOA ends the run of failures: the next failure
+// is attempts=1 with a new since. One whose primaries all answer REFUSED
+// proves nothing, so the run goes on through it.
+func TestOnlyAUsableSOAEndsARunOfFailures(t *testing.T) {
+	withRefreshBudgets(t, 1, 5)
+	logs := captureRefreshLogs(t)
+	const zone = "run.one-error.test."
+	down := closedUDPPorts(t, 1)[0]
+	usable, stopUsable := startTestSOAServer(t, zone, 42, dns.RcodeSuccess)
+	defer stopUsable()
+	refusing, stopRefusing := startTestSOAServer(t, zone, 42, dns.RcodeRefused)
+	defer stopRefusing()
+
+	zd := &ZoneData{
+		ZoneName:       zone,
+		ZoneType:       Secondary,
+		IncomingSerial: 42, // what the usable primary offers: no transfer
+		Logger:         discardLogger(),
+	}
+	refreshFrom := func(addr string) error {
+		zd.Upstreams = []PeerConf{{Addr: addr}}
+		_, err := runZoneRefresh(context.Background(),
+			refreshJob{zd: zd, zone: zone, gen: zd.generation.Load()}, &Config{})
+		return err
+	}
+	lastError := func() capturedRecord {
+		errs := logs.withMsg(zone, slog.LevelError, "zone refresh failed")
+		if len(errs) == 0 {
+			t.Fatal("no refresh failure logged")
+		}
+		return errs[len(errs)-1]
+	}
+
+	if refreshFrom(down) == nil {
+		t.Fatal("refresh from a down primary succeeded")
+	}
+	// Back-date the run, so a since that carried over is told from a new one.
+	zd.refreshRun.mu.Lock()
+	zd.refreshRun.failingSince = time.Now().Add(-time.Hour)
+	zd.refreshRun.mu.Unlock()
+	old := zd.refreshRun.failingSince.UTC().Format(time.RFC3339)
+
+	if err := refreshFrom(refusing); err != nil {
+		t.Fatalf("an all-REFUSED refresh is a quiet back-off, not an error: %v", err)
+	}
+	if refreshFrom(down) == nil {
+		t.Fatal("refresh from a down primary succeeded")
+	}
+	if rec := lastError(); rec.attrs["attempts"] != "2" || rec.attrs["since"] != old {
+		t.Errorf("after an all-REFUSED refresh: attempts=%s since=%s, want 2 and %s: it proved nothing",
+			rec.attrs["attempts"], rec.attrs["since"], old)
+	}
+	if n := len(logs.withMsg(zone, slog.LevelInfo, "zone refresh recovered")); n != 0 {
+		t.Errorf("an all-REFUSED refresh logged a recovery (%d)", n)
+	}
+
+	if err := refreshFrom(usable); err != nil {
+		t.Fatalf("refresh from a usable primary: %v", err)
+	}
+	rec := logs.withMsg(zone, slog.LevelInfo, "zone refresh recovered")
+	if len(rec) != 1 || rec[0].attrs["failed_attempts"] != "2" {
+		t.Errorf("the recovery was logged as %+v, want once with failed_attempts=2", rec)
+	}
+	if refreshFrom(down) == nil {
+		t.Fatal("refresh from a down primary succeeded")
+	}
+	if rec := lastError(); rec.attrs["attempts"] != "1" || rec.attrs["since"] == old {
+		t.Errorf("after a usable SOA: attempts=%s since=%s, want 1 and a new since",
+			rec.attrs["attempts"], rec.attrs["since"])
+	}
+}
+
+// The stage comes with the error. A primary whose zone file cannot be read
+// fails at stage file; anything else not an upstream's is other, a primary's
+// included.
+func TestTheStageComesWithTheError(t *testing.T) {
+	logs := captureRefreshLogs(t)
+	const zone = "file.one-error.test."
+	zd := &ZoneData{
+		ZoneName:  zone,
+		ZoneType:  Primary,
+		ZoneStore: MapZone,
+		Zonefile:  t.TempDir() + "/missing.zone",
+		Logger:    discardLogger(),
+	}
+	if _, err := runZoneRefresh(context.Background(),
+		refreshJob{zd: zd, zone: zone, gen: zd.generation.Load()}, &Config{}); err == nil {
+		t.Fatal("a primary with no zone file refreshed")
+	}
+	errs := logs.withMsg(zone, slog.LevelError, "zone refresh failed")
+	if len(errs) != 1 || errs[0].attrs["stage"] != refreshStageFile {
+		t.Errorf("an unreadable zone file logged %+v, want one failure at stage file", errs)
+	}
+
+	stageOf := func(err error) string {
+		attrs := refreshFailureAttrs(zone, err, 1, time.Now())
+		for i := 0; i+1 < len(attrs); i += 2 {
+			if attrs[i] == "stage" {
+				return attrs[i+1].(string)
+			}
+		}
+		return ""
+	}
+	if got := stageOf(fmt.Errorf("x: %w", &refreshStageError{stage: refreshStageFile, err: io.EOF})); got != refreshStageFile {
+		t.Errorf("a wrapped file failure has stage %q", got)
+	}
+	if got := stageOf(errors.New("read the published serial: database is locked")); got != refreshStageOther {
+		t.Errorf("a failure after the file was read has stage %q, want other", got)
 	}
 }
 
@@ -469,6 +603,7 @@ func TestRefreshErrorKind(t *testing.T) {
 		{&xfrRcodeError{zone: "z.", upstream: "u", rcode: dns.RcodeNotAuth}, "notauth"},
 		{fmt.Errorf("x: %w", dns.ErrSig), "tsig"},
 		{fmt.Errorf("x: %w", dns.ErrTime), "tsig"},
+		{fmt.Errorf("x: %w", &peerConfigError{err: fmt.Errorf("TLS setup: %w", &os.PathError{Op: "open", Path: "/ca.pem", Err: syscall.ENOENT})}), "config"},
 		{errors.New("something else"), "other"},
 	} {
 		if got := refreshErrorKind(c.err); got != c.want {

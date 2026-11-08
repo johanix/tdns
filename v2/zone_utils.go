@@ -320,7 +320,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		// XoT peer: probe the SOA over the same verified-TLS channel the
 		// transfer itself will use (same pin/dane/pkix gate).
 		if tlsCfg, terr := conf.ClientTLSConfigForPeer(up); terr != nil {
-			p.err = terr
+			p.err = &peerConfigError{err: terr}
 			plans = append(plans, p)
 			continue
 		} else if tlsCfg != nil {
@@ -329,7 +329,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		}
 		provider, algo, serr := TsigMaterialForPeer(up.Key, conf)
 		if serr != nil {
-			p.err = serr
+			p.err = &peerConfigError{err: serr}
 			plans = append(plans, p)
 			continue
 		}
@@ -358,7 +358,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		if p.err != nil {
 			lg.Error("DoTransfer: peer config setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", p.err)
 			lastErr = fmt.Errorf("%s: %w", upstream, p.err)
-			failures = append(failures, upstreamFailure{addr: upstream, err: p.err, kind: refreshKindConfig})
+			failures = append(failures, newUpstreamFailure(upstream, p.err))
 			continue
 		}
 		// Nobody is waiting for this result any more; stop walking upstreams.
@@ -662,7 +662,7 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	if err != nil {
 		lg.Error("ReadZoneFile failed", "zone", zd.ZoneName, "err", err)
 		zd.SetStatus(prevStatus)
-		return false, err
+		return false, &refreshStageError{stage: refreshStageFile, err: err}
 	}
 
 	// zd.Logger.Printf("FetchFromFile: Zone %s: zone file read, updated=%v delegation sync=%v", zd.ZoneName, updated, zd.Optoins["delegationsync"])

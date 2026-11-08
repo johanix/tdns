@@ -69,6 +69,24 @@ type upstreamsFailedError struct {
 func (e *upstreamsFailedError) Error() string { return e.err.Error() }
 func (e *upstreamsFailedError) Unwrap() error { return e.err }
 
+// refreshStageError carries the stage of a failure that is not an upstream's:
+// a primary's zone file that could not be read. Same text and chain as err.
+type refreshStageError struct {
+	stage string
+	err   error
+}
+
+func (e *refreshStageError) Error() string { return e.err.Error() }
+func (e *refreshStageError) Unwrap() error { return e.err }
+
+// peerConfigError is a peer whose TLS or TSIG configuration could not be
+// resolved, at the probe or at the transfer. Same text and chain as err; the
+// type is what makes its kind config.
+type peerConfigError struct{ err error }
+
+func (e *peerConfigError) Error() string { return e.err.Error() }
+func (e *peerConfigError) Unwrap() error { return e.err }
+
 // kind is the upstreams' common kind, or mixed.
 func (e *upstreamsFailedError) kind() string {
 	kind := ""
@@ -104,17 +122,20 @@ func (e *upstreamsFailedError) upstreamErrors() string {
 }
 
 // refreshErrorKind names what kind of failure err is, from its type and never
-// from its text: timeout, connrefused, unreachable, closed, reset, eof, tls,
-// tsig, the rcode an upstream answered a transfer with in lower case
+// from its text: config, timeout, connrefused, unreachable, closed, reset,
+// eof, tls, tsig, the rcode an upstream answered a transfer with in lower case
 // (servfail, refused, notauth, ...), and other.
 //
 // No mapping of a closed connection to a timeout: exchangeCancellable closes
 // the connection when a probe's deadline passes, so some timeouts read as
 // closed. That mapping belongs to the rate-limit that needs a stable kind.
 func refreshErrorKind(err error) string {
+	var cfgErr *peerConfigError
 	var rcErr *xfrRcodeError
 	var netErr net.Error
 	switch {
+	case errors.As(err, &cfgErr):
+		return refreshKindConfig
 	case errors.As(err, &rcErr):
 		if name := dns.RcodeToString[rcErr.rcode]; name != "" {
 			return strings.ToLower(name)
@@ -163,16 +184,19 @@ func isTLSError(err error) bool {
 
 // refreshFailureAttrs are the fields of the one ERROR a failed refresh logs.
 // zone first, the fields a matcher keys on next, and the two free-text fields
-// last, since the log format does not quote values.
-func refreshFailureAttrs(zd *ZoneData, zone string, err error, attempts int, since time.Time) []any {
+// last, since the log format does not quote values. The stage comes with the
+// error, never from the zone's type: a primary that read its file and then
+// failed to apply it did not fail at the file.
+func refreshFailureAttrs(zone string, err error, attempts int, since time.Time) []any {
 	stage, kind := refreshStageOther, refreshErrorKind(err)
 	var upstreams, upstreamErrors string
 	var uf *upstreamsFailedError
+	var se *refreshStageError
 	if errors.As(err, &uf) {
 		stage, kind = uf.stage, uf.kind()
 		upstreams, upstreamErrors = uf.upstreams(), uf.upstreamErrors()
-	} else if zd.ZoneType == Primary {
-		stage = refreshStageFile
+	} else if errors.As(err, &se) {
+		stage = se.stage
 	}
 	attrs := []any{"zone", zone, "stage", stage, "kind", kind}
 	if upstreams != "" {
@@ -286,6 +310,16 @@ func (r *refreshRunState) noteFailed(now time.Time) (attempts int, since time.Ti
 	}
 	r.failures++
 	return r.failures, r.failingSince
+}
+
+// refreshConfirmed reports whether a refresh that returned no error proves the
+// zone healthy, which is what may end its runs. A primary's does: it read its
+// file. A secondary's only if it saw a usable SOA. When every primary answers
+// REFUSED or SERVFAIL the refresh returns no error either (DoTransfer's quiet
+// back-off), and that proves nothing. noteSuccessfulRefresh stamps
+// LatestRefresh on exactly the usable SOAs, so a stamp that moved is the proof.
+func refreshConfirmed(zd *ZoneData, stampBefore time.Time) bool {
+	return zd.ZoneType != Secondary || !zd.lastRefresh().Equal(stampBefore)
 }
 
 // noteRefreshSuccess closes both runs after a refresh that succeeded.

@@ -177,14 +177,14 @@ func (zd *ZoneData) openTransferStream(ctx context.Context, up PeerConf, msg *dn
 	// fork's Transfer.In dials tcp-tls with it. nil => plain TCP (Do53).
 	tlsCfg, terr := conf.ClientTLSConfigForPeer(up)
 	if terr != nil {
-		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)
+		return nil, nil, &peerConfigError{err: fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)}
 	}
 	transfer.TLS = tlsCfg
 	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
 	// The provider also verifies the TSIG on the inbound envelopes.
 	provider, serr := SignForPeer(msg, up.Key, conf)
 	if serr != nil {
-		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
+		return nil, nil, &peerConfigError{err: fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)}
 	}
 	transfer.TsigProvider = provider
 

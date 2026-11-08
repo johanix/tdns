@@ -101,7 +101,7 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 	}
 	endRefreshDeferral(zd, zone)
 	attempts, since := zd.refreshRun.noteFailed(time.Now())
-	lgEngine.Error(msg, refreshFailureAttrs(zd, zone, err, attempts, since)...)
+	lgEngine.Error(msg, refreshFailureAttrs(zone, err, attempts, since)...)
 	zd.SetError(RefreshError, "refresh error: %v", err)
 	zd.LatestError = time.Now()
 	return true
@@ -114,6 +114,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	refreshCounters *core.ConcurrentMap[string, *RefreshCounter],
 	tryPostpass func(string)) (bool, error) {
 
+	stamp := zd.lastRefresh()
 	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
 	if err != nil {
 		// A failed refresh no longer implies an empty zone. A secondary that
@@ -161,7 +162,9 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		}
 		return false, err
 	}
-	noteRefreshSuccess(zd, zone)
+	if refreshConfirmed(zd, stamp) {
+		noteRefreshSuccess(zd, zone)
+	}
 
 	refresh, err := FindSoaRefresh(zd)
 	if err != nil {
