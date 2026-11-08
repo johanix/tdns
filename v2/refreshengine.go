@@ -162,9 +162,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		}
 		return false, err
 	}
-	if refreshConfirmed(zd, seen) {
-		noteRefreshSuccess(zd, zone)
-	}
+	noteRefreshSuccess(zd, zone, refreshConfirmed(zd, seen))
 
 	refresh, err := FindSoaRefresh(zd)
 	if err != nil {

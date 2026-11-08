@@ -507,44 +507,78 @@ func TestARestoredStampIsNoConfirmation(t *testing.T) {
 
 // A primary's forced reload that cannot read its zone file opens a run of
 // failures, and the unforced refresh after it, which skips the file because
-// its stat has not moved, does not close it. Only a read does.
+// its stat has not moved, does not close it. Only a read does. The bad file
+// has the good one's length and mtime, so the skip sees nothing new; no chmod,
+// so it holds for root too.
 func TestASkippedFileReadIsNoConfirmation(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root reads a mode-000 file")
-	}
 	logs := captureRefreshLogs(t)
 	zd, _ := firstLoadFileZone(t, newTestKeyDB(t), s2Zone)
 	firstLoadFromFile(t, zd)
+	st, err := os.Stat(zd.Zonefile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	writeKeepingStat := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(zd.Zonefile, []byte(content), 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		if err := os.Chtimes(zd.Zonefile, st.ModTime(), st.ModTime()); err != nil {
+			t.Fatalf("chtimes: %v", err)
+		}
+	}
 	refresh := func(force bool) error {
 		_, err := runZoneRefresh(context.Background(),
 			refreshJob{zd: zd, zone: "example.", gen: zd.generation.Load(), force: force}, &Config{})
 		return err
 	}
 
-	// chmod moves the ctime only: the size and mtime the skip compares stay.
-	if err := os.Chmod(zd.Zonefile, 0); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(zd.Zonefile, 0644) })
+	writeKeepingStat(strings.Repeat("x", len(s2Zone)-1) + "\n")
 	if refresh(true) == nil {
-		t.Fatal("a forced reload read a mode-000 zone file")
+		t.Fatal("a forced reload read a zone file that does not parse")
 	}
 	if err := refresh(false); err != nil {
 		t.Fatalf("test setup: the unforced refresh read the file instead of skipping it: %v", err)
 	}
 	if n := len(logs.withMsg("example.", slog.LevelInfo, "zone refresh recovered")); n != 0 {
-		t.Error("a refresh that skipped the unreadable file logged a recovery")
+		t.Error("a refresh that skipped the bad file logged a recovery")
 	}
 
-	if err := os.Chmod(zd.Zonefile, 0644); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
+	writeKeepingStat(s2Zone)
 	if err := refresh(true); err != nil {
 		t.Fatalf("a forced reload of the readable file: %v", err)
 	}
 	rec := logs.withMsg("example.", slog.LevelInfo, "zone refresh recovered")
 	if len(rec) != 1 || rec[0].attrs["failed_attempts"] != "1" {
 		t.Errorf("the recovery was logged as %+v, want once, after the read, with failed_attempts=1", rec)
+	}
+}
+
+// A refresh that was not deferred ends a deferral run even when it proves
+// nothing, and leaves the run of failures as it was. Left open, the deferral
+// run would measure a later hold from this one and reach ERROR at once.
+func TestARefreshThatProvesNothingStillEndsADeferral(t *testing.T) {
+	captureRefreshLogs(t)
+	const zone = "defer.one-error.test."
+	refusing, stop := startTestSOAServer(t, zone, 42, dns.RcodeRefused)
+	defer stop()
+	zd := &ZoneData{ZoneName: zone, ZoneType: Secondary, Upstreams: []PeerConf{{Addr: refusing}},
+		Logger: discardLogger()}
+
+	noteRefreshFailure(zd, zone, errors.New("the primary was down"), "zone refresh failed")
+	noteRefreshFailure(zd, zone, fmt.Errorf("zone %s: %w", zone, ErrRefreshHeld), "zone refresh failed")
+	if _, err := runZoneRefresh(context.Background(),
+		refreshJob{zd: zd, zone: zone, gen: zd.generation.Load()}, &Config{}); err != nil {
+		t.Fatalf("an all-REFUSED refresh is a quiet back-off, not an error: %v", err)
+	}
+	zd.refreshRun.mu.Lock()
+	deferrals, failures := zd.refreshRun.deferrals, zd.refreshRun.failures
+	zd.refreshRun.mu.Unlock()
+	if deferrals != 0 {
+		t.Errorf("the deferral run is still open (%d) after a refresh that was not deferred", deferrals)
+	}
+	if failures != 1 {
+		t.Errorf("the run of failures is %d, want it kept at 1: the refresh proved nothing", failures)
 	}
 }
 
@@ -678,7 +712,7 @@ func TestAStagedDeferralReachesError(t *testing.T) {
 		t.Errorf("%d ERRORs after the reminder interval, want 2", n)
 	}
 
-	noteRefreshSuccess(zd, zone)
+	noteRefreshSuccess(zd, zone, true)
 	if n := len(logs.withMsg(zone, slog.LevelWarn, "zone refresh no longer deferred")); n != 1 {
 		t.Errorf("the end of an escalated deferral run was logged %d times, want 1", n)
 	}

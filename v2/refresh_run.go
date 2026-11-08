@@ -63,9 +63,7 @@ func runZoneRefresh(ctx context.Context, job refreshJob, conf *Config) (bool, er
 		respondToRefresher(job.zr, RefresherResponse{Error: true, ErrorMsg: err.Error()})
 		return false, err
 	}
-	if refreshConfirmed(zd, seen) {
-		noteRefreshSuccess(zd, zone)
-	}
+	noteRefreshSuccess(zd, zone, refreshConfirmed(zd, seen))
 
 	// Refresh-specific error state only. The other categories -- rollover
 	// policy, parent DSYNC, config -- are independent and survive a successful

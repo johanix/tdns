@@ -331,9 +331,16 @@ func refreshConfirmed(zd *ZoneData, seenBefore uint64) bool {
 	return zd.refreshRun.confirmations.Load() != seenBefore
 }
 
-// noteRefreshSuccess closes both runs after a refresh that succeeded.
-func noteRefreshSuccess(zd *ZoneData, zone string) {
+// noteRefreshSuccess is a refresh that returned no error. It was not
+// deferred, so it ends a deferral run whatever it proved: left open, a later
+// hold would be measured from a deferral long past and reach ERROR at once. It
+// ends the run of failures only if confirmed (refreshConfirmed), since a
+// refresh that proved nothing must not say the zone recovered.
+func noteRefreshSuccess(zd *ZoneData, zone string, confirmed bool) {
 	endRefreshDeferral(zd, zone)
+	if !confirmed {
+		return
+	}
 	r := &zd.refreshRun
 	r.mu.Lock()
 	n, since := r.failures, r.failingSince
