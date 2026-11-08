@@ -664,6 +664,11 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 		zd.SetStatus(prevStatus)
 		return false, &refreshStageError{stage: refreshStageFile, err: err}
 	}
+	// A primary's proof of health (refreshConfirmed). Not a secondary's: this
+	// is also how a secondary adopts its own copy off disk at first bind.
+	if zd.ZoneType == Primary {
+		zd.refreshRun.confirmations.Add(1)
+	}
 
 	// zd.Logger.Printf("FetchFromFile: Zone %s: zone file read, updated=%v delegation sync=%v", zd.ZoneName, updated, zd.Optoins["delegationsync"])
 

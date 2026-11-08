@@ -505,6 +505,49 @@ func TestARestoredStampIsNoConfirmation(t *testing.T) {
 	}
 }
 
+// A primary's forced reload that cannot read its zone file opens a run of
+// failures, and the unforced refresh after it, which skips the file because
+// its stat has not moved, does not close it. Only a read does.
+func TestASkippedFileReadIsNoConfirmation(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 file")
+	}
+	logs := captureRefreshLogs(t)
+	zd, _ := firstLoadFileZone(t, newTestKeyDB(t), s2Zone)
+	firstLoadFromFile(t, zd)
+	refresh := func(force bool) error {
+		_, err := runZoneRefresh(context.Background(),
+			refreshJob{zd: zd, zone: "example.", gen: zd.generation.Load(), force: force}, &Config{})
+		return err
+	}
+
+	// chmod moves the ctime only: the size and mtime the skip compares stay.
+	if err := os.Chmod(zd.Zonefile, 0); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(zd.Zonefile, 0644) })
+	if refresh(true) == nil {
+		t.Fatal("a forced reload read a mode-000 zone file")
+	}
+	if err := refresh(false); err != nil {
+		t.Fatalf("test setup: the unforced refresh read the file instead of skipping it: %v", err)
+	}
+	if n := len(logs.withMsg("example.", slog.LevelInfo, "zone refresh recovered")); n != 0 {
+		t.Error("a refresh that skipped the unreadable file logged a recovery")
+	}
+
+	if err := os.Chmod(zd.Zonefile, 0644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if err := refresh(true); err != nil {
+		t.Fatalf("a forced reload of the readable file: %v", err)
+	}
+	rec := logs.withMsg("example.", slog.LevelInfo, "zone refresh recovered")
+	if len(rec) != 1 || rec[0].attrs["failed_attempts"] != "1" {
+		t.Errorf("the recovery was logged as %+v, want once, after the read, with failed_attempts=1", rec)
+	}
+}
+
 // A primary that read its zone file and then could not apply it -- here the
 // published serial cannot be read -- fails at stage other, not file. Through
 // the engine, as the first load runs it.

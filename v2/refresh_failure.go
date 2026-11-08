@@ -228,9 +228,12 @@ type refreshRunState struct {
 	// escalated: this deferral run has logged at ERROR, at escalatedAt last.
 	escalated   bool
 	escalatedAt time.Time
-	// confirmations counts the usable SOAs this zone has seen, and nothing
-	// else: noteSuccessfulRefresh is its only writer. Not LatestRefresh, which
-	// a first bind also sets, from a stamp restored off disk.
+	// confirmations counts the proofs that this zone is healthy, and nothing
+	// else: for a secondary a usable SOA (noteSuccessfulRefresh), for a
+	// primary its zone file read whole (FetchFromFile). Not LatestRefresh,
+	// which a first bind also sets, from a stamp restored off disk; and not a
+	// primary's refresh that returned no error, which may have skipped a file
+	// it last failed to read because its stat had not changed.
 	confirmations atomic.Uint64
 }
 
@@ -318,13 +321,14 @@ func (r *refreshRunState) noteFailed(now time.Time) (attempts int, since time.Ti
 }
 
 // refreshConfirmed reports whether a refresh that returned no error proves the
-// zone healthy, which is what may end its runs. A primary's does: it read its
-// file. A secondary's only if it saw a usable SOA. When every primary answers
-// REFUSED or SERVFAIL the refresh returns no error either (DoTransfer's quiet
-// back-off), and that proves nothing. seenBefore is the zone's count of usable
-// SOAs (refreshRunState.confirmations) taken before the refresh.
+// zone healthy, which is what may end its runs: a secondary's if it saw a
+// usable SOA, a primary's if it read its zone file. No error proves neither.
+// A secondary whose primaries all answer REFUSED or SERVFAIL gets none
+// (DoTransfer's quiet back-off), and a primary skips a file whose stat has not
+// moved, though its last read of it failed. seenBefore is the zone's count of
+// proofs (refreshRunState.confirmations) taken before the refresh.
 func refreshConfirmed(zd *ZoneData, seenBefore uint64) bool {
-	return zd.ZoneType != Secondary || zd.refreshRun.confirmations.Load() != seenBefore
+	return zd.refreshRun.confirmations.Load() != seenBefore
 }
 
 // noteRefreshSuccess closes both runs after a refresh that succeeded.
