@@ -235,7 +235,9 @@ func TestABADKEYReBootstrapOfARetiredKeyEndsTheUpdate(t *testing.T) {
 
 // A BADKEY re-bootstrap whose answer is not final (here the parent is still
 // verifying the key, EDE 514) does not end the UPDATE. The next attempt
-// re-bootstraps again, within the same bound.
+// re-bootstraps again, within the same bound. The answer goes through the
+// production callback's reBootstrapSig0KeyAfterBADKEYWith, so a layer that
+// lost the verdict would end the UPDATE here.
 func TestABADKEYReBootstrapThatIsNotFinalIsRetried(t *testing.T) {
 	zd, sak := ceremonyChild(t)
 	parents := []string{
@@ -252,10 +254,14 @@ func TestABADKEYReBootstrapThatIsNotFinalIsRetried(t *testing.T) {
 			return dns.RcodeSuccess, UpdateResult{}, nil
 		},
 		func() error {
-			parent := parents[min(reboots, len(parents)-1)]
-			reboots++
-			_, _, err := zd.sendSig0BootstrapCeremony(context.Background(), sak, []string{parent})
-			return err
+			return zd.reBootstrapSig0KeyAfterBADKEYWith(context.Background(),
+				func(string, uint16) func(context.Context) (keyServedState, string) { return nil },
+				func(ctx context.Context) error {
+					parent := parents[min(reboots, len(parents)-1)]
+					reboots++
+					_, _, err := zd.sendSig0BootstrapCeremony(ctx, sak, []string{parent})
+					return err
+				})
 		})
 	if err != nil || rcode != dns.RcodeSuccess {
 		t.Fatalf("UPDATE ended with rcode %s, err %v; want NOERROR", dns.RcodeToString[rcode], err)
