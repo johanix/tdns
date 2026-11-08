@@ -56,14 +56,14 @@ type refreshJob struct {
 func runZoneRefresh(ctx context.Context, job refreshJob, conf *Config) (bool, error) {
 	zd, zone := job.zd, job.zone
 
-	stamp := zd.lastRefresh()
+	seen := zd.refreshRun.confirmations.Load()
 	updated, err := zd.refresh(ctx, Globals.Verbose, Globals.Debug, job.force, conf, job.gate)
 	if err != nil {
 		noteRefreshFailure(zd, zone, err, "zone refresh failed")
 		respondToRefresher(job.zr, RefresherResponse{Error: true, ErrorMsg: err.Error()})
 		return false, err
 	}
-	if refreshConfirmed(zd, stamp) {
+	if refreshConfirmed(zd, seen) {
 		noteRefreshSuccess(zd, zone)
 	}
 

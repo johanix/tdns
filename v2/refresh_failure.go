@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -227,6 +228,10 @@ type refreshRunState struct {
 	// escalated: this deferral run has logged at ERROR, at escalatedAt last.
 	escalated   bool
 	escalatedAt time.Time
+	// confirmations counts the usable SOAs this zone has seen, and nothing
+	// else: noteSuccessfulRefresh is its only writer. Not LatestRefresh, which
+	// a first bind also sets, from a stamp restored off disk.
+	confirmations atomic.Uint64
 }
 
 // refreshStagedErrorAfter is how many deferrals in a row a staged change may
@@ -316,10 +321,10 @@ func (r *refreshRunState) noteFailed(now time.Time) (attempts int, since time.Ti
 // zone healthy, which is what may end its runs. A primary's does: it read its
 // file. A secondary's only if it saw a usable SOA. When every primary answers
 // REFUSED or SERVFAIL the refresh returns no error either (DoTransfer's quiet
-// back-off), and that proves nothing. noteSuccessfulRefresh stamps
-// LatestRefresh on exactly the usable SOAs, so a stamp that moved is the proof.
-func refreshConfirmed(zd *ZoneData, stampBefore time.Time) bool {
-	return zd.ZoneType != Secondary || !zd.lastRefresh().Equal(stampBefore)
+// back-off), and that proves nothing. seenBefore is the zone's count of usable
+// SOAs (refreshRunState.confirmations) taken before the refresh.
+func refreshConfirmed(zd *ZoneData, seenBefore uint64) bool {
+	return zd.ZoneType != Secondary || zd.refreshRun.confirmations.Load() != seenBefore
 }
 
 // noteRefreshSuccess closes both runs after a refresh that succeeded.

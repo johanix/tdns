@@ -114,7 +114,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	refreshCounters *core.ConcurrentMap[string, *RefreshCounter],
 	tryPostpass func(string)) (bool, error) {
 
-	stamp := zd.lastRefresh()
+	seen := zd.refreshRun.confirmations.Load()
 	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
 	if err != nil {
 		// A failed refresh no longer implies an empty zone. A secondary that
@@ -162,7 +162,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		}
 		return false, err
 	}
-	if refreshConfirmed(zd, stamp) {
+	if refreshConfirmed(zd, seen) {
 		noteRefreshSuccess(zd, zone)
 	}
 

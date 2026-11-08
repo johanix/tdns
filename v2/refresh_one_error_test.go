@@ -470,6 +470,95 @@ func TestOnlyAUsableSOAEndsARunOfFailures(t *testing.T) {
 	}
 }
 
+// A first bind that restores a confirmation stamp off disk has not seen a
+// usable SOA, so a refresh that does that and then gets only REFUSED leaves
+// the run of failures open. Keyed on LatestRefresh, the restore read as a
+// confirmation and logged a false recovery.
+func TestARestoredStampIsNoConfirmation(t *testing.T) {
+	logs := captureRefreshLogs(t)
+	kdb := newTestKeyDB(t)
+	conf, dir := persistentConf(t, kdb)
+	hourAgo := time.Now().Add(-time.Hour).UTC().Truncate(time.Millisecond)
+	if err := kdb.SetZoneRefreshState("example.", 7, hourAgo); err != nil {
+		t.Fatalf("seed the stamp: %v", err)
+	}
+	refusing, stop := startTestSOAServer(t, "example.", 7, dns.RcodeRefused)
+	defer stop()
+	zd := persistedSecondary(t, kdb, dir, refusing)
+
+	noteRefreshFailure(zd, "example.", errors.New("the primary was down"), "zone refresh failed")
+	if _, err := runZoneRefresh(context.Background(),
+		refreshJob{zd: zd, zone: "example.", gen: zd.generation.Load()}, conf); err != nil {
+		t.Fatalf("an all-REFUSED refresh is a quiet back-off, not an error: %v", err)
+	}
+	if !zd.lastRefresh().Equal(hourAgo) {
+		t.Fatalf("test setup: the stamp was not restored (LatestRefresh %v, want %v)", zd.lastRefresh(), hourAgo)
+	}
+	if n := len(logs.withMsg("example.", slog.LevelInfo, "zone refresh recovered")); n != 0 {
+		t.Error("a restored stamp and an all-REFUSED refresh logged a recovery")
+	}
+	zd.refreshRun.mu.Lock()
+	failures := zd.refreshRun.failures
+	zd.refreshRun.mu.Unlock()
+	if failures != 1 {
+		t.Errorf("the run of failures is %d after a refresh that proved nothing, want it kept at 1", failures)
+	}
+}
+
+// A primary that read its zone file and then could not apply it -- here the
+// published serial cannot be read -- fails at stage other, not file. Through
+// the engine, as the first load runs it.
+func TestAnApplyFailureOnAPrimaryIsStageOther(t *testing.T) {
+	zd, _, load := persistPrimary(t, s2Zone, 1000)
+	kdb := Conf.Internal.KeyDB
+	if _, err := kdb.DB.Exec(`ALTER TABLE OutgoingSerials RENAME TO OutgoingSerialsAway`); err != nil {
+		t.Fatalf("hide the table: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := kdb.DB.Exec(`ALTER TABLE OutgoingSerialsAway RENAME TO OutgoingSerials`); err != nil {
+			t.Errorf("restore the table: %v", err)
+		}
+	})
+	logs := captureRefreshLogs(t)
+	load()
+	deadline := time.Now().Add(5 * time.Second)
+	for !zd.HasError(RefreshError) {
+		if time.Now().After(deadline) {
+			t.Fatal("the first load did not fail with the published serial unreadable")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	errs := logs.withMsg("example.", slog.LevelError, "zone refresh failed")
+	if len(errs) != 1 || errs[0].attrs["stage"] != refreshStageOther {
+		t.Errorf("an apply failure logged %+v, want one failure at stage other", errs)
+	}
+}
+
+// A peer whose TLS or TSIG setup fails at the transfer is kind config, read
+// off the error ZoneTransferIn returns. Neither case reaches the network.
+func TestPeerSetupFailuresAtTheTransferAreConfig(t *testing.T) {
+	zd := &ZoneData{ZoneName: "cfg.one-error.test.", ZoneStore: MapZone, Logger: discardLogger()}
+	conf := &Config{}
+	conf.Internal.TsigKeyStore = NewTsigKeyStore()
+	for _, c := range []struct {
+		what string
+		up   PeerConf
+	}{
+		{"TLS, a ca-file that is gone", PeerConf{Addr: "127.0.0.1:853", Transport: TransportDoT,
+			TLSAuth: TLSAuthPKIX, CAFile: t.TempDir() + "/gone.pem"}},
+		{"TSIG, a key not in the store", PeerConf{Addr: closedUDPPorts(t, 1)[0], Key: "no-such-key."}},
+	} {
+		_, err := zd.ZoneTransferIn(context.Background(), c.up, 0, "axfr", conf)
+		if err == nil {
+			t.Errorf("%s: the transfer was set up", c.what)
+			continue
+		}
+		if got := refreshErrorKind(err); got != refreshKindConfig {
+			t.Errorf("%s: kind %q, want %q (err: %v)", c.what, got, refreshKindConfig, err)
+		}
+	}
+}
+
 // The stage comes with the error. A primary whose zone file cannot be read
 // fails at stage file; anything else not an upstream's is other, a primary's
 // included.
