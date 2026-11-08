@@ -106,3 +106,13 @@ what avoids serving changed records under an old signature.
 its own PR), and
 the changed `TestReloadOfAFileWhoseSerialJumpedAhead`, which now expects the
 file's own serial.
+
+## Amendment, 2026-11-08: part D as implemented
+
+- The NSEC records are not carried when the SOA's negative TTL changed: the
+  restitch would keep the old TTL on every NSEC it did not rewrite.
+- A one-record edit's link also carries the apex DNSKEY's new signature and the
+  NSEC signatures around the apex, not only around the edit. The file carries
+  no DNSKEY, so the signer puts it back, and the apex counts as changed for the
+  restitch. Carrying the DNSKEY RRset too was not done: whether the signer then
+  notices a changed key set has not been checked.
