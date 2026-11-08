@@ -176,7 +176,9 @@ func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, con
 			}
 			updated, err = zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, gate)
 			if err != nil {
-				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
+				// DEBUG: the caller's noteRefreshFailure logs the one ERROR
+				// for this refresh, with every upstream and its error.
+				lg.Debug("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
 			}
 			// Re-stamp, now that IncomingSerial names the copy we actually
@@ -346,6 +348,9 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	// RefreshError needs to know WHICH primaries were tried, not just how
 	// many (#502).
 	var tried []string
+	// Each upstream's own error, for the one ERROR the refresh logs. lastErr
+	// keeps only the last one.
+	var failures []upstreamFailure
 	for i := range plans {
 		p := &plans[i]
 		up, upstream := p.up, p.upstream
@@ -353,6 +358,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		if p.err != nil {
 			lg.Error("DoTransfer: peer config setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", p.err)
 			lastErr = fmt.Errorf("%s: %w", upstream, p.err)
+			failures = append(failures, upstreamFailure{addr: upstream, err: p.err, kind: refreshKindConfig})
 			continue
 		}
 		// Nobody is waiting for this result any more; stop walking upstreams.
@@ -423,6 +429,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 			// RefreshError, and "i/o timeout" on its own tells an operator
 			// nothing about WHICH primary is unreachable (#502).
 			lastErr = fmt.Errorf("%s: %w", upstream, err)
+			failures = append(failures, newUpstreamFailure(upstream, err))
 			continue
 		}
 		sawResponse = true
@@ -476,10 +483,14 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	// zd.Upstreams: the engine rewrites that slice in place on every refresh
 	// that re-resolves a hostname primary, so reading it here races -- and would
 	// report a count that does not match the addresses actually tried.
-	lg.Error("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName,
+	//
+	// DEBUG: the caller's noteRefreshFailure logs the one ERROR for this
+	// refresh, and it names every upstream with its own error.
+	lg.Debug("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName,
 		"count", len(upstreams), "upstreams", strings.Join(tried, ", "), "err", lastErr)
-	return false, 0, fmt.Errorf("SOA probe of %s failed: no response from any of %d upstream(s) [%s]: %w",
-		zd.ZoneName, len(upstreams), strings.Join(tried, ", "), lastErr)
+	return false, 0, &upstreamsFailedError{stage: refreshStageProbe, failures: failures,
+		err: fmt.Errorf("SOA probe of %s failed: no response from any of %d upstream(s) [%s]: %w",
+			zd.ZoneName, len(upstreams), strings.Join(tried, ", "), lastErr)}
 }
 
 // newTransferScratchZone builds the throwaway ZoneData an inbound AXFR is
@@ -1056,6 +1067,7 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 	var new_zd ZoneData
 	transferred := false
 	var lastErr error
+	var failures []upstreamFailure // each upstream's own error; lastErr keeps one
 	// zd.Upstreams is mutated in place under zd.mu by the refresh engine, so
 	// walk a copy rather than the live slice -- the same race DoTransfer and
 	// ProbeUpstreamSerials already copy to avoid.
@@ -1106,6 +1118,7 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 		if err != nil {
 			lg.Warn("FetchFromUpstream: transfer from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
+			failures = append(failures, newUpstreamFailure(upstream, err))
 			continue
 		}
 		if upToDate {
@@ -1139,11 +1152,14 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 			addrs = append(addrs, u.Addr)
 		}
 		tried := strings.Join(addrs, ", ")
-		lg.Error("FetchFromUpstream: AXFR failed on all upstreams",
+		// DEBUG: the caller's noteRefreshFailure logs the one ERROR for this
+		// refresh, and it names every upstream with its own error.
+		lg.Debug("FetchFromUpstream: AXFR failed on all upstreams",
 			"zone", zd.ZoneName, "upstreams", tried, "err", lastErr)
 		zd.SetStatus(prevStatus) // still serving prior data; failure surfaces as RefreshError
-		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s) [%s]: %w",
-			zd.ZoneName, len(upstreams), tried, lastErr)
+		return false, &upstreamsFailedError{stage: refreshStageTransfer, failures: failures,
+			err: fmt.Errorf("AXFR of %s failed: tried all %d upstream(s) [%s]: %w",
+				zd.ZoneName, len(upstreams), tried, lastErr)}
 	}
 
 	// A forced transfer MUST apply whatever upstream has, including a serial
