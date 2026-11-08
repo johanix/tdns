@@ -30,10 +30,15 @@ child.resign.example.	3600	IN	NS	ns1.child.resign.example.
 ns1.child.resign.example.	3600	IN	A	192.0.2.54
 `
 
-// reloadSigned replaces the zone with text as a reload of its file does.
+// reloadSigned reloads the zone with the given serial and bravo TXT.
 func reloadSigned(t *testing.T, zd *ZoneData, serial, bravo string) {
 	t.Helper()
-	text := strings.Replace(strings.Replace(resignZoneText, "SERIAL", serial, 1), "BRAVO", bravo, 1)
+	reloadSignedText(t, zd, strings.Replace(strings.Replace(resignZoneText, "SERIAL", serial, 1), "BRAVO", bravo, 1))
+}
+
+// reloadSignedText replaces the zone with text as a reload of its file does.
+func reloadSignedText(t *testing.T, zd *ZoneData, text string) {
+	t.Helper()
 	newZd := &ZoneData{ZoneName: zd.ZoneName, ZoneStore: MapZone, ZoneType: Primary, Logger: log.New(os.Stderr, "", 0)}
 	if _, _, err := newZd.ReadZoneData(text, true); err != nil {
 		t.Fatalf("ReadZoneData: %v", err)
@@ -96,6 +101,52 @@ func TestSignedReloadKeepsTheSignaturesOfWhatDidNotChange(t *testing.T) {
 			}
 		}
 	}
+	checkReplay(t, zd, before.Serial, base)
+}
+
+// Every NSEC takes the SOA's negative TTL, so when that changes no NSEC may be
+// carried across the reload: the whole chain is rebuilt and re-signed at the
+// new TTL. Checked on the served snapshot itself, since a link and a snapshot
+// built from the same stale NSECs would agree with each other.
+func TestSignedReloadRebuildsTheNsecChainWhenTheNegativeTTLChanges(t *testing.T) {
+	zd := resignTestZone(t, newTestKeyDB(t))
+	zd.SetOption(OptIxfrFromDifferences, true)
+	before := zd.publishedSnapshot()
+	base := servedRRs(before, zd.ZoneName)
+
+	nsecTTLs := func(snap *zoneSnapshot, want uint32) {
+		t.Helper()
+		n := 0
+		for name, od := range snap.Data {
+			if od == nil {
+				continue
+			}
+			for _, rr := range od.NSEC.RRs {
+				n++
+				if rr.Header().Ttl != want {
+					t.Errorf("%s: NSEC TTL %d, want %d", name, rr.Header().Ttl, want)
+				}
+			}
+			for _, rr := range od.NSEC.RRSIGs {
+				if sig, ok := rr.(*dns.RRSIG); ok && sig.OrigTtl != want {
+					t.Errorf("%s: NSEC signed over TTL %d, want %d", name, sig.OrigTtl, want)
+				}
+			}
+		}
+		if n == 0 {
+			t.Fatalf("serial %d serves no NSEC", snap.Serial)
+		}
+	}
+	// The negative TTL is the lower of the SOA's TTL (3600) and its minimum.
+	nsecTTLs(before, 3600)
+
+	text := strings.Replace(resignZoneText, "SERIAL 7200 1800 604800 7200", itoa(int(before.Serial)+1)+" 7200 1800 604800 600", 1)
+	reloadSignedText(t, zd, strings.Replace(text, "BRAVO", "bravo", 1))
+	after := zd.publishedSnapshot()
+	if after.Serial == before.Serial {
+		t.Fatal("the change was not published")
+	}
+	nsecTTLs(after, 600)
 	checkReplay(t, zd, before.Serial, base)
 }
 
