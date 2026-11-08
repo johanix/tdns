@@ -165,6 +165,21 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 		// remove SOA, add ntype
 		m.Question = []dns.Question{dns.Question{Name: zd.ZoneName, Qtype: ntype, Qclass: dns.ClassINET}}
 
+		// A NOTIFY(SOA) carries the SOA being served (RFC 1996 §3.7). It is
+		// optional in the RFC and required here: without it the receiver cannot
+		// tell whether it already holds that serial, so it always queries back,
+		// and BIND logs "no serial" for every NOTIFY. Read per target, so it is
+		// never older than the publish that queued this request. Before the TSIG
+		// stamp, so the signature covers it. The other NOTIFY types carry
+		// nothing: their receiver fetches and validates the RRset itself.
+		if ntype == dns.TypeSOA {
+			if soa := zd.notifySOA(); soa != nil {
+				m.Answer = []dns.RR{soa}
+			} else {
+				lgDns.Debug("NOTIFY: no published SOA to include", "zone", zd.ZoneName)
+			}
+		}
+
 		// Sign the NOTIFY with the matching notify-peer's key (NOKEY => unsigned).
 		// c is reused across targets, so the per-target provider (nil for NOKEY)
 		// is reset every iteration.
@@ -225,6 +240,16 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 	}
 	lgDns.Info("NOTIFY: successfully sent", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "succeeded", successCount, "total", len(targets))
 	return dns.RcodeSuccess, firstSuccessEDE, nil
+}
+
+// notifySOA returns a copy of the SOA the zone is serving, or nil when nothing
+// is published. A copy, because the snapshot's SOA is shared with every reader.
+func (zd *ZoneData) notifySOA() dns.RR {
+	snap := zd.publishedSnapshot()
+	if snap == nil || snap.SOA == nil {
+		return nil
+	}
+	return dns.Copy(snap.SOA)
 }
 
 // extractEDEFromMsg pulls every EDNS0_EDE option out of a DNS message's
