@@ -375,6 +375,8 @@ templates:
           key:  NOKEY
         - addr: "192.0.2.2:53"
           key:  NOKEY
+     # notify-retries:        5           # resends of an unanswered NOTIFY (default
+     # notify-retry-interval: 10s         # authengine's, then 5 and 10s, doubling)
      downstreams:                        # ...and let them transfer
         - prefix: "192.0.2.1/32"         # single host — explicit mask required
           key:    NOKEY

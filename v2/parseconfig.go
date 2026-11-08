@@ -1426,6 +1426,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zdp.Options = zdp.withRuntimeOptionsLocked(newOpts)
 		zdp.publishCadence = publishCadence
 		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
+		zdp.notifyRetries = zconf.NotifyRetries
+		zdp.notifyRetryInterval, _ = parseNotifyRetryInterval("zone "+zname, zconf.NotifyRetryInterval)
 		zdp.zonemdScheme = zonemdSet.Scheme
 		zdp.zonemdAlgs = zonemdSet.Algorithms
 		zdp.zonemdOnVerifyFailure = zonemdSet.OnVerifyFailure

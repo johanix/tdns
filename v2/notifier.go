@@ -5,7 +5,9 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -35,16 +37,56 @@ type NotifyResponse struct {
 	EDE []dns.EDNS0_EDE
 }
 
-// XXX: The whole point with the NotifierEngine is to be able to control the max rate of send notifications per
-// zone. This is not yet implemented, but this is where to do it.
+// notifyTimeout bounds one NOTIFY exchange. A variable so a test can shorten
+// it; nothing else changes it.
+var notifyTimeout = 5 * time.Second
+
+// notifyMaxInFlight bounds the NOTIFY exchanges on the wire at once.
+const notifyMaxInFlight = 16
+
 // Notifier drains the NOTIFY queue and sends outbound NOTIFYs, signing each with
 // the matching notify-peer's TSIG key (Improvement 2). conf is threaded for the
 // key store. NOTE: tdns-mp pins a published tdns/v2 and calls Notifier at four
 // sites (start_signer/agent/auditor/combiner) — when it bumps the dependency,
 // pass its conf.Config: Notifier(ctx, conf.Config, conf.Config.Internal.NotifyQ).
+//
+// It resends a NOTIFY that gets no answer (#1007, RFC 1996 §3.6), with a
+// growing interval and a bounded number of tries, per target. The sends run
+// beside the loop rather than in it: one exchange can wait out notifyTimeout,
+// and a loop that waited on each in turn held every other zone's NOTIFY behind
+// one unreachable downstream. See notifier_tracker.go for the per-target state.
+//
+// Requests come from two places. Downstream NOTIFY(SOA) for a publish arrives
+// through the tracker's pending set (NotifyTracker.Mark), which coalesces a
+// burst per zone and never drops one. Everything else -- NOTIFY(CDS/CSYNC) to a
+// parent, NOTIFY(DNSKEY) to a multi-signer controller -- arrives on the queue.
+//
+// A request with a Response channel is sent once per target and answered with
+// the any-success-wins aggregate, exactly as before. Its caller -- the KSK
+// rollover's DS push -- waits on that answer with a deadline and retries on its
+// own schedule, so resending here as well would retry twice and outlive the
+// caller's deadline. A request without one has nobody to retry it, and is
+// resent here.
 func Notifier(ctx context.Context, conf *Config, notifyreqQ chan NotifyRequest) error {
 
 	lgDns.Info("NotifierEngine: starting")
+	tracker := conf.Internal.NotifyTracker
+	if tracker == nil {
+		// A daemon that did not create one still resends; it only has no
+		// pending set (its publishes use the queue) and no state to show.
+		tracker = NewNotifyTracker()
+	}
+	tracker.setDefaults(conf.AuthEngine.NotifyRetries, conf.AuthEngine.NotifyRetryInterval)
+	n := &notifier{
+		ctx:     ctx,
+		conf:    conf,
+		tracker: tracker,
+		results: make(chan notifyResult, notifyMaxInFlight),
+		sem:     make(chan struct{}, notifyMaxInFlight),
+	}
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -55,33 +97,187 @@ func Notifier(ctx context.Context, conf *Config, notifyreqQ chan NotifyRequest) 
 				lgDns.Info("NotifierEngine: terminating due to notifyreqQ closed")
 				return nil
 			}
-
-			zd := nr.ZoneData
-
-			lgDns.Info("NotifierEngine: will notify downstreams", "zone", zd.ZoneName)
-
-			rcode, ede, sendErr := zd.SendNotify(ctx, conf, nr.RRtype, nr.Targets)
-
-			if nr.Response != nil {
-				resp := NotifyResponse{
-					Rcode: rcode,
-					EDE:   ede,
-				}
-				if sendErr != nil {
-					resp.Error = true
-					resp.ErrorMsg = sendErr.Error()
-				} else {
-					resp.Msg = "OK"
-				}
-				select {
-				case nr.Response <- resp:
-				case <-ctx.Done():
-					lgDns.Warn("NotifierEngine: context cancelled while sending NOTIFY response", "zone", zd.ZoneName)
-					return nil
-				}
+			n.handle(nr)
+		case <-tracker.wake:
+			for _, nr := range tracker.takePending() {
+				n.handle(nr)
 			}
+		case r := <-n.results:
+			n.finish(r)
+		case <-timer.C:
+			n.resendDue()
+		}
+		n.armTimer(timer)
+	}
+}
+
+// notifier is the Notifier loop's own state. Only the loop goroutine touches
+// it; the tracker it points at has its own lock.
+type notifier struct {
+	ctx     context.Context
+	conf    *Config
+	tracker *NotifyTracker
+	results chan notifyResult
+	sem     chan struct{}
+}
+
+// notifyJob is one NOTIFY to one target. batch is set for a request whose
+// caller waits for the aggregate answer; nil for a tracked, resent one.
+type notifyJob struct {
+	zd     *ZoneData
+	rrtype uint16
+	target string
+	batch  *notifyBatch
+}
+
+type notifyResult struct {
+	job     notifyJob
+	attempt notifyAttempt
+}
+
+// notifyBatch collects the per-target outcomes of one request whose caller is
+// waiting for the aggregate.
+type notifyBatch struct {
+	req  NotifyRequest
+	left int
+	agg  notifyAggregate
+}
+
+func (n *notifier) handle(nr NotifyRequest) {
+	zd := nr.ZoneData
+	if zd == nil {
+		return
+	}
+	lgDns.Info("NotifierEngine: will notify", "zone", zd.ZoneName, "type", dns.TypeToString[nr.RRtype], "targets", len(nr.Targets))
+
+	if rcode, err := zd.notifyPrecheck(nr.RRtype, nr.Targets); err != nil {
+		if nr.Response != nil {
+			n.respond(nr, rcode, nil, err)
+		} else {
+			lgDns.Warn("NotifierEngine: not sending", "zone", zd.ZoneName, "err", err)
+		}
+		return
+	}
+
+	if nr.Response != nil {
+		b := &notifyBatch{req: nr, left: len(nr.Targets)}
+		for _, dst := range nr.Targets {
+			n.launch(notifyJob{zd: zd, rrtype: nr.RRtype, target: dst, batch: b})
+		}
+		return
+	}
+	for _, dst := range nr.Targets {
+		if n.tracker.begin(notifyKey{zone: zd.ZoneName, target: dst, rrtype: nr.RRtype}, zd) {
+			n.launch(notifyJob{zd: zd, rrtype: nr.RRtype, target: dst})
 		}
 	}
+}
+
+// launch sends one NOTIFY beside the loop, at most notifyMaxInFlight at once,
+// and hands the outcome back on n.results.
+func (n *notifier) launch(job notifyJob) {
+	go func() {
+		select {
+		case n.sem <- struct{}{}:
+		case <-n.ctx.Done():
+			return
+		}
+		lgDns.Debug("NOTIFY: sending", "type", dns.TypeToString[job.rrtype], "zone", job.zd.ZoneName, "target", job.target)
+		a := job.zd.notifyOne(n.ctx, n.conf, job.rrtype, job.target)
+		<-n.sem
+		select {
+		case n.results <- notifyResult{job: job, attempt: a}:
+		case <-n.ctx.Done():
+		}
+	}()
+}
+
+func (n *notifier) finish(r notifyResult) {
+	job := r.job
+	if b := job.batch; b != nil {
+		b.agg.add(job.zd.ZoneName, job.target, job.rrtype, r.attempt)
+		b.left--
+		if b.left == 0 {
+			rcode, ede, err := b.agg.result(job.zd.ZoneName, job.rrtype, len(b.req.Targets))
+			n.respond(b.req, rcode, ede, err)
+		}
+		return
+	}
+	retries, interval := notifyRetryPolicy(job.zd, n.tracker)
+	key := notifyKey{zone: job.zd.ZoneName, target: job.target, rrtype: job.rrtype}
+	if n.tracker.done(key, r.attempt, retries, interval, time.Now()) {
+		n.launch(notifyJob{zd: job.zd, rrtype: job.rrtype, target: job.target})
+	}
+}
+
+// respond hands a waiting caller its answer. From its own goroutine: the caller
+// may have stopped listening (its deadline passed), and the loop must not wait
+// on it.
+func (n *notifier) respond(nr NotifyRequest, rcode int, ede []dns.EDNS0_EDE, err error) {
+	resp := NotifyResponse{Rcode: rcode, EDE: ede}
+	if err != nil {
+		resp.Error = true
+		resp.ErrorMsg = err.Error()
+	} else {
+		resp.Msg = "OK"
+	}
+	go func() {
+		select {
+		case nr.Response <- resp:
+		case <-n.ctx.Done():
+			lgDns.Warn("NotifierEngine: context cancelled while sending NOTIFY response", "zone", nr.ZoneName)
+		}
+	}()
+}
+
+func (n *notifier) resendDue() {
+	for _, job := range n.tracker.due(time.Now()) {
+		n.launch(notifyJob{zd: job.zd, rrtype: job.key.rrtype, target: job.key.target})
+	}
+}
+
+func (n *notifier) armTimer(timer *time.Timer) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	if next, ok := n.tracker.nextDue(); ok {
+		timer.Reset(max(time.Until(next), 0))
+	}
+}
+
+// notifyPrecheck refuses a request that cannot be sent at all, with the rcode
+// and error SendNotify has always returned for it.
+func (zd *ZoneData) notifyPrecheck(ntype uint16, targets []string) (int, error) {
+	if zd.ZoneName == "." {
+		return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: zone name not specified. Ignoring notify request", zd.ZoneName)
+	}
+
+	switch ntype {
+	case dns.TypeSOA:
+		// We send to the targets passed in by the caller (derived from the
+		// zone's notify peers), so validate that slice — not zd.Notify, which
+		// can diverge from the actual targets for this request.
+		if len(targets) == 0 {
+			return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: no downstreams. Ignoring notify request", zd.ZoneName)
+		}
+
+	case dns.TypeCSYNC, dns.TypeCDS:
+		// Here we need the parent notify receiver addresses
+		if _, err := zd.ResolveParent(); err != nil {
+			return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: failure locating parent zone name (%v). Ignoring notify request", zd.ZoneName, err)
+		}
+
+	case dns.TypeDNSKEY:
+	//		lookupzone = zonename
+	//		lookupserver = childpri
+
+	default:
+		lgDns.Error("unsupported notify type", "type", dns.TypeToString[ntype])
+	}
+	return dns.RcodeSuccess, nil
 }
 
 // SendNotify sends NOTIFY to every target and aggregates with
@@ -94,6 +290,10 @@ func Notifier(ctx context.Context, conf *Config, notifyreqQ chan NotifyRequest) 
 // response. err is non-nil only when no target produced a usable
 // response at all (transport-level failure across the board).
 //
+// One attempt per target, in turn, and no resend: the Notifier does that, for
+// the requests it owns. This is the synchronous form, for a caller that wants
+// the answer in hand.
+//
 // ctx bounds the per-target loop, but does NOT interrupt a send already on the
 // wire. On daemon shutdown the loop stops at the next iteration boundary --
 // each target is preceded by a ctx.Err() check -- while whichever send is in
@@ -103,53 +303,17 @@ func Notifier(ctx context.Context, conf *Config, notifyreqQ chan NotifyRequest) 
 // claiming the loop also exits "via ExchangeContext returning early".
 // ExchangeContext hands the context to the dial and then uses only
 // ctx.Deadline() to tighten the socket deadlines; it never watches ctx.Done().
-// This client sets no Timeout either, so the fork's 2s default applies: a
-// shutdown during an unanswered NOTIFY waits those two seconds out.
+// The client's Timeout (notifyTimeout) bounds the wait instead.
 //
 // Bounded and short, so it is a known cost rather than a hang. Interrupting it
 // would mean closing the connection on cancellation, as SendUpdate does via
 // exchangeCancellable in childsync_utils.go.
 func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, targets []string) (int, []dns.EDNS0_EDE, error) {
-	if zd.ZoneName == "." {
-		return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: zone name not specified. Ignoring notify request", zd.ZoneName)
+	if rcode, err := zd.notifyPrecheck(ntype, targets); err != nil {
+		return rcode, nil, err
 	}
 
-	var err error
-
-	switch ntype {
-	case dns.TypeSOA:
-		// We send to the targets passed in by the caller (derived from the
-		// zone's notify peers), so validate that slice — not zd.Notify, which
-		// can diverge from the actual targets for this request.
-		if len(targets) == 0 {
-			return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: no downstreams. Ignoring notify request", zd.ZoneName)
-		}
-
-	case dns.TypeCSYNC, dns.TypeCDS:
-		// Here we need the parent notify receiver addresses
-		if _, err = zd.ResolveParent(); err != nil {
-			return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: failure locating parent zone name (%v). Ignoring notify request", zd.ZoneName, err)
-		}
-
-	case dns.TypeDNSKEY:
-	//		lookupzone = zonename
-	//		lookupserver = childpri
-
-	default:
-		lgDns.Error("unsupported notify type", "type", dns.TypeToString[ntype])
-	}
-
-	c := new(dns.Client)
-	c.Timeout = 5 * time.Second
-
-	successCount := 0
-	var firstSuccessEDE []dns.EDNS0_EDE
-	var lastFailRcode int
-	var lastFailEDE []dns.EDNS0_EDE
-	haveLastFailRcode := false
-	var lastSetupErr error
-	attemptedTargets := 0
-
+	var agg notifyAggregate
 	for i, dst := range targets {
 		// Honor cancellation between targets so daemon shutdown
 		// doesn't block for len(targets)*Timeout.
@@ -158,66 +322,119 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 			break
 		}
 		lgDns.Info("NOTIFY: sending", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "target", dst)
+		agg.add(zd.ZoneName, dst, ntype, zd.notifyOne(ctx, conf, ntype, dst))
+	}
+	return agg.result(zd.ZoneName, ntype, len(targets))
+}
 
-		m := new(dns.Msg)
-		m.SetNotify(zd.ZoneName)
+// notifyAttempt is the outcome of one NOTIFY to one target.
+type notifyAttempt struct {
+	rcode int
+	ede   []dns.EDNS0_EDE
+	// err: no usable reply -- a timeout or a network error. Worth resending.
+	err error
+	// setupErr: the message could not be signed, so nothing was sent. A
+	// configuration error; resending changes nothing.
+	setupErr error
+	overTCP  bool
+}
 
-		// remove SOA, add ntype
-		m.Question = []dns.Question{dns.Question{Name: zd.ZoneName, Qtype: ntype, Qclass: dns.ClassINET}}
+// notifyOne sends one NOTIFY to one target. An ICMP port unreachable on UDP
+// (ECONNREFUSED on the connected socket) is answered with one immediate try over
+// TCP, as BIND does: the receiver may listen on TCP alone, and a refusal is not
+// a lost packet that waiting would cure.
+func (zd *ZoneData) notifyOne(ctx context.Context, conf *Config, ntype uint16, dst string) notifyAttempt {
+	a := zd.notifyOneOver(ctx, conf, ntype, dst, "udp")
+	if a.err != nil && errors.Is(a.err, syscall.ECONNREFUSED) {
+		lgDns.Debug("NOTIFY: refused over UDP; retrying over TCP", "zone", zd.ZoneName, "target", dst)
+		a = zd.notifyOneOver(ctx, conf, ntype, dst, "tcp")
+		a.overTCP = true
+	}
+	return a
+}
 
-		// A NOTIFY(SOA) carries the SOA being served (RFC 1996 §3.7). It is
-		// optional in the RFC and required here: without it the receiver cannot
-		// tell whether it already holds that serial, so it always queries back,
-		// and BIND logs "no serial" for every NOTIFY. Read per target, so it is
-		// never older than the publish that queued this request. Before the TSIG
-		// stamp, so the signature covers it. The other NOTIFY types carry
-		// nothing: their receiver fetches and validates the RRset itself.
-		if ntype == dns.TypeSOA {
-			if soa := zd.notifySOA(); soa != nil {
-				m.Answer = []dns.RR{soa}
-			} else {
-				lgDns.Debug("NOTIFY: no published SOA to include", "zone", zd.ZoneName)
-			}
-		}
+// notifyOneOver builds, signs and sends one NOTIFY over network. Built afresh
+// for every attempt: a resend needs a new TSIG time stamp (a reused one goes
+// stale and is refused as BADTIME) and the SOA as served now.
+func (zd *ZoneData) notifyOneOver(ctx context.Context, conf *Config, ntype uint16, dst, network string) notifyAttempt {
+	m := new(dns.Msg)
+	m.SetNotify(zd.ZoneName)
 
-		// Sign the NOTIFY with the matching notify-peer's key (NOKEY => unsigned).
-		// c is reused across targets, so the per-target provider (nil for NOKEY)
-		// is reset every iteration.
-		provider, serr := SignForPeer(m, zd.notifyKeyFor(dst), conf)
-		if serr != nil {
-			lgDns.Error("NOTIFY: TSIG sign setup failed, skipping target", "zone", zd.ZoneName, "target", dst, "err", serr)
-			lastSetupErr = serr
-			continue
-		}
-		attemptedTargets++
-		c.TsigProvider = provider
+	// remove SOA, add ntype
+	m.Question = []dns.Question{dns.Question{Name: zd.ZoneName, Qtype: ntype, Qclass: dns.ClassINET}}
 
-		lgDns.Debug("sending NOTIFY message", "msg", m.String())
-
-		res, _, exErr := c.ExchangeContext(ctx, m, dst)
-		if exErr != nil {
-			lgDns.Warn("NOTIFY: dns.Exchange failed, trying next target", "target", dst, "type", dns.TypeToString[ntype], "err", exErr)
-			continue
-		}
-
-		ede := extractEDEFromMsg(res)
-
-		if res.Rcode != dns.RcodeSuccess {
-			lgDns.Warn("NOTIFY: bad rcode from target", "target", dst, "rcode", dns.RcodeToString[res.Rcode])
-			lastFailRcode = res.Rcode
-			lastFailEDE = ede
-			haveLastFailRcode = true
+	// A NOTIFY(SOA) carries the SOA being served (RFC 1996 §3.7). It is
+	// optional in the RFC and required here: without it the receiver cannot
+	// tell whether it already holds that serial, so it always queries back,
+	// and BIND logs "no serial" for every NOTIFY. Read per attempt, so it is
+	// never older than the publish that queued this request. Before the TSIG
+	// stamp, so the signature covers it. The other NOTIFY types carry
+	// nothing: their receiver fetches and validates the RRset itself.
+	if ntype == dns.TypeSOA {
+		if soa := zd.notifySOA(); soa != nil {
+			m.Answer = []dns.RR{soa}
 		} else {
-			lgDns.Debug("NOTIFY: got NOERROR back", "target", dst)
-			if successCount == 0 {
-				firstSuccessEDE = ede
-			}
-			successCount++
-			// Continue to send NOTIFYs to all targets, don't return early
+			lgDns.Debug("NOTIFY: no published SOA to include", "zone", zd.ZoneName)
 		}
 	}
-	if successCount == 0 {
-		if haveLastFailRcode {
+
+	// Sign the NOTIFY with the matching notify-peer's key (NOKEY => unsigned).
+	provider, serr := SignForPeer(m, zd.notifyKeyFor(dst), conf)
+	if serr != nil {
+		return notifyAttempt{setupErr: serr}
+	}
+	c := &dns.Client{Net: network, Timeout: notifyTimeout, TsigProvider: provider}
+
+	lgDns.Debug("sending NOTIFY message", "msg", m.String())
+
+	res, _, err := c.ExchangeContext(ctx, m, dst)
+	if err != nil {
+		return notifyAttempt{err: err}
+	}
+	return notifyAttempt{rcode: res.Rcode, ede: extractEDEFromMsg(res)}
+}
+
+// notifyAggregate folds per-target outcomes into SendNotify's any-success-wins
+// answer. See SendNotify for the contract.
+type notifyAggregate struct {
+	successCount      int
+	firstSuccessEDE   []dns.EDNS0_EDE
+	lastFailRcode     int
+	lastFailEDE       []dns.EDNS0_EDE
+	haveLastFailRcode bool
+	lastSetupErr      error
+	attemptedTargets  int
+}
+
+func (g *notifyAggregate) add(zone, dst string, ntype uint16, a notifyAttempt) {
+	switch {
+	case a.setupErr != nil:
+		lgDns.Error("NOTIFY: TSIG sign setup failed, skipping target", "zone", zone, "target", dst, "err", a.setupErr)
+		g.lastSetupErr = a.setupErr
+		return
+	case a.err != nil:
+		g.attemptedTargets++
+		lgDns.Warn("NOTIFY: dns.Exchange failed, trying next target", "target", dst, "type", dns.TypeToString[ntype], "err", a.err)
+		return
+	}
+	g.attemptedTargets++
+	if a.rcode != dns.RcodeSuccess {
+		lgDns.Warn("NOTIFY: bad rcode from target", "target", dst, "rcode", dns.RcodeToString[a.rcode])
+		g.lastFailRcode = a.rcode
+		g.lastFailEDE = a.ede
+		g.haveLastFailRcode = true
+		return
+	}
+	lgDns.Debug("NOTIFY: got NOERROR back", "target", dst)
+	if g.successCount == 0 {
+		g.firstSuccessEDE = a.ede
+	}
+	g.successCount++
+}
+
+func (g *notifyAggregate) result(zone string, ntype uint16, total int) (int, []dns.EDNS0_EDE, error) {
+	if g.successCount == 0 {
+		if g.haveLastFailRcode {
 			// Parent replied — just with a non-NOERROR rcode. Return
 			// the rcode/EDE without an error: this is "parent
 			// rejected" (parent-rejected category), not "transport
@@ -225,21 +442,21 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 			// EDE; making this an error would force the rollover
 			// engine into the transport bucket and lose the EDE
 			// context that's the whole point of Phase 4 plumbing.
-			return lastFailRcode, lastFailEDE, nil
+			return g.lastFailRcode, g.lastFailEDE, nil
 		}
 		// No target was attempted at all because every one's TSIG sign setup failed
 		// (e.g. an unknown key): surface that real cause rather than a generic "no
 		// response". If at least one target WAS attempted (signed) but failed
 		// transport, fall through to the no-response error below.
-		if attemptedTargets == 0 && lastSetupErr != nil {
-			return dns.RcodeServerFailure, nil, fmt.Errorf("TSIG setup failed for NOTIFY target(s): %w", lastSetupErr)
+		if g.attemptedTargets == 0 && g.lastSetupErr != nil {
+			return dns.RcodeServerFailure, nil, fmt.Errorf("TSIG setup failed for NOTIFY target(s): %w", g.lastSetupErr)
 		}
 		// No response from any target at all → genuine transport
 		// failure. err is non-nil only on this branch.
 		return dns.RcodeServerFailure, nil, fmt.Errorf("error: no response from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
 	}
-	lgDns.Info("NOTIFY: successfully sent", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "succeeded", successCount, "total", len(targets))
-	return dns.RcodeSuccess, firstSuccessEDE, nil
+	lgDns.Info("NOTIFY: successfully sent", "type", dns.TypeToString[ntype], "zone", zone, "succeeded", g.successCount, "total", total)
+	return dns.RcodeSuccess, g.firstSuccessEDE, nil
 }
 
 // notifySOA returns a copy of the SOA the zone is serving, or nil when nothing

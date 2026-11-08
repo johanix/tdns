@@ -881,11 +881,15 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 // network I/O to every downstream, blocking every reader of that zone for as
 // long as it took.
 //
-// A full queue drops and says so. NOTIFY is best-effort by design -- a
-// downstream that misses one refreshes on its SOA timer -- and blocking a
-// publish on a queue whose consumer is serial and 2s-per-target is how the stall
-// comes back somewhere new. The send cannot block, which is what makes it safe
-// to do while holding zd.mu.
+// The hand-off goes to the NotifyTracker's pending set (#1007): it coalesces a
+// burst of publishes into one NOTIFY per zone carrying the latest SOA, never
+// blocks and never drops. A NOTIFY is not best-effort any more -- one that gets
+// no answer is sent again -- and a NOTIFY dropped here on a full queue would be
+// one that is never sent at all. Neither path can block, which is what makes
+// the hand-off safe to do while holding zd.mu.
+//
+// The queue remains for a daemon that runs no tracker. There a full queue still
+// drops, and says so.
 func (zd *ZoneData) notifyIfServableLocked(snap *zoneSnapshot) {
 	if len(zd.Notify) == 0 {
 		return
@@ -895,17 +899,22 @@ func (zd *ZoneData) notifyIfServableLocked(snap *zoneSnapshot) {
 			"zone", zd.ZoneName, "ready", zd.Ready)
 		return
 	}
+	req := NotifyRequest{
+		ZoneName: zd.ZoneName,
+		ZoneData: zd,
+		RRtype:   dns.TypeSOA,
+		Targets:  peerAddrs(zd.Notify),
+	}
+	if t := Conf.Internal.NotifyTracker; t != nil {
+		t.Mark(req)
+		return
+	}
 	q := Conf.Internal.NotifyQ
 	if q == nil {
 		return
 	}
 	select {
-	case q <- NotifyRequest{
-		ZoneName: zd.ZoneName,
-		ZoneData: zd,
-		RRtype:   dns.TypeSOA,
-		Targets:  peerAddrs(zd.Notify),
-	}:
+	case q <- req:
 	default:
 		lg.Warn("publish: NOTIFY queue is full, dropping a downstream notification;"+
 			" the downstream picks this up on its own SOA timer instead",
