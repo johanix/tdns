@@ -107,10 +107,13 @@ UNIQUE (keyname)
 
 	// OutgoingSerials persists the outgoing SOA serial per zone.
 	// Prevents serial regression on restart (which causes signers to ignore NOTIFYs).
+	// content_digest (#1006) is the digest of the content published at serial,
+	// NULL when not known; dbMigrateSchema adds it to an existing database.
 	"OutgoingSerials": `CREATE TABLE IF NOT EXISTS 'OutgoingSerials' (
-		zone       TEXT NOT NULL PRIMARY KEY,
-		serial     INTEGER NOT NULL,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		zone           TEXT NOT NULL PRIMARY KEY,
+		serial         INTEGER NOT NULL,
+		updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+		content_digest TEXT
 	)`,
 
 	"RolloverKeyState": `CREATE TABLE IF NOT EXISTS 'RolloverKeyState' (

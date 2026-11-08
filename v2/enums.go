@@ -137,6 +137,14 @@ const (
 	// primary behind a signer -- so the server's resolver never answers a
 	// question about the zone from it, and resolves it as any other (#863).
 	OptModifiedDownstream
+	// OptIxfrFromDifferences: a wholesale replacement of the zone -- a reload of
+	// its file, or an inbound AXFR -- is diffed against the version it replaces
+	// and the difference kept in the outbound IXFR history, so downstreams get
+	// an IXFR instead of the whole zone (#1006). BIND's option of the same name.
+	// Off by default, as in BIND: the diff compares the whole zone, which costs
+	// CPU on every replacement. Off, a replacement starts a new IXFR epoch as
+	// before.
+	OptIxfrFromDifferences
 	optZoneOptionTdnsSentinel
 )
 
@@ -180,6 +188,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptUseHsyncparam:           "use-hsyncparam",
 	OptChildSyncProxy:          "childsync-proxy",
 	OptModifiedDownstream:      "modified-downstream",
+	OptIxfrFromDifferences:     "ixfr-from-differences",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -218,6 +227,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"use-hsyncparam":             OptUseHsyncparam,
 	"childsync-proxy":            OptChildSyncProxy,
 	"modified-downstream":        OptModifiedDownstream,
+	"ixfr-from-differences":      OptIxfrFromDifferences,
 }
 
 // deprecatedZoneOptionNames maps old option spellings to the canonical name

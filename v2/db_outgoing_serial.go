@@ -1,6 +1,10 @@
 package tdns
 
-import "fmt"
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+)
 
 func (kdb *KeyDB) SaveOutgoingSerial(zone string, serial uint32) error {
 	_, err := kdb.DB.Exec(`INSERT OR REPLACE INTO OutgoingSerials (zone, serial, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)`, zone, serial)
@@ -20,16 +24,52 @@ func (kdb *KeyDB) SaveOutgoingSerial(zone string, serial uint32) error {
 // One statement, so the comparison and the write cannot interleave with
 // another writer. The WHERE clause is serialNewer: (new - old) mod 2^32 in
 // [1, 2^31).
+//
+// A raise clears the content digest: it described the content at the old
+// serial. SetPublishedContentDigest puts one back for the new serial when the
+// publish computed one.
 func (kdb *KeyDB) RaiseOutgoingSerial(zone string, serial uint32) error {
 	_, err := kdb.DB.Exec(`
 INSERT INTO OutgoingSerials (zone, serial, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-ON CONFLICT(zone) DO UPDATE SET serial = excluded.serial, updated_at = CURRENT_TIMESTAMP
+ON CONFLICT(zone) DO UPDATE SET serial = excluded.serial, content_digest = NULL, updated_at = CURRENT_TIMESTAMP
 WHERE ((excluded.serial - OutgoingSerials.serial) % 4294967296 + 4294967296) % 4294967296
       BETWEEN 1 AND 2147483647`, zone, serial)
 	if err != nil {
 		return fmt.Errorf("RaiseOutgoingSerial: %w", err)
 	}
 	return nil
+}
+
+// SetPublishedContentDigest records digest as the content published at
+// serial, provided serial is still the zone's recorded one. A digest that
+// arrives after a newer serial was recorded describes nothing current and is
+// dropped by the WHERE clause.
+func (kdb *KeyDB) SetPublishedContentDigest(zone string, serial uint32, digest string) error {
+	_, err := kdb.DB.Exec(`UPDATE OutgoingSerials SET content_digest = ? WHERE zone = ? AND serial = ?`,
+		digest, zone, serial)
+	if err != nil {
+		return fmt.Errorf("SetPublishedContentDigest: %w", err)
+	}
+	return nil
+}
+
+// PublishedContentDigest returns the recorded serial and the digest of the
+// content published at it, and whether there is a digest at all. No row, or a
+// row without a digest, is not an error.
+func (kdb *KeyDB) PublishedContentDigest(zone string) (uint32, string, bool, error) {
+	var serial uint32
+	var digest sql.NullString
+	err := kdb.DB.QueryRow(`SELECT serial, content_digest FROM OutgoingSerials WHERE zone = ?`, zone).Scan(&serial, &digest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", false, nil
+	}
+	if err != nil {
+		return 0, "", false, fmt.Errorf("PublishedContentDigest: %w", err)
+	}
+	if !digest.Valid || digest.String == "" {
+		return serial, "", false, nil
+	}
+	return serial, digest.String, true, nil
 }
 
 func (kdb *KeyDB) LoadOutgoingSerial(zone string) (uint32, error) {
