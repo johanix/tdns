@@ -1224,6 +1224,14 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 			"zone", zd.ZoneName, "serial", restoreSerial)
 		zd.CurrentSerial = restoreSerial
 	}
+	// A reload of a zone that signs its own content keeps the signatures and
+	// NSEC records of whatever did not change, so it re-signs and re-chains
+	// only the edit, and its IXFR link holds only the edit (#1006).
+	if !firstLoad && fromZoneFile && overlay == nil && zd.signsItsOwnContent() {
+		if n := zd.carrySignaturesLocked(zd.snapshot.Load()); n > 0 {
+			lg.Debug("reload: kept the signatures of unchanged RRsets", "zone", zd.ZoneName, "rrsets", n)
+		}
+	}
 	zd.wsSkipIfUnchanged = skipIfUnchanged && overlay == nil
 	zd.wsRecordContentDigest = fromZoneFile && overlay == nil &&
 		zoneMayOriginateContent(zd) && !zd.signsItsOwnContent()
