@@ -89,10 +89,10 @@ func TestNotifySOACarriesTheServedSOA(t *testing.T) {
 		t.Fatalf("SendNotify: rcode %s, err %v", dns.RcodeToString[rcode], err)
 	}
 	served := zd.publishedSnapshot().SOA
-	// The NOTIFY gets a copy: the message is built and signed per target, and
-	// must never write into the snapshot every reader shares.
-	if own, ok := zd.notifySOA().(*dns.SOA); !ok || own == served {
-		t.Fatal("notifySOA does not return its own copy of the served SOA")
+	// The message gets a copy: it is built and signed per target, and must
+	// never write into the snapshot every reader shares.
+	if m := zd.notifyMsg(dns.TypeSOA); len(m.Answer) != 1 || m.Answer[0] == dns.RR(served) {
+		t.Fatal("the NOTIFY message does not carry its own copy of the served SOA")
 	}
 	if got := notifiedSOA(t, nextNotify(t, seen).msg); got.String() != served.String() {
 		t.Errorf("NOTIFY carries\n  %s\nwant the served\n  %s", got, served)
@@ -137,20 +137,58 @@ func TestNotifySOAIsCoveredByTSIG(t *testing.T) {
 // A UDP NOTIFY without EDNS must fit in 512 octets. An SOA whose names would
 // take it past that is left out, and the NOTIFY is still sent.
 func TestNotifySOAIsLeftOutOfAnOversizedNotify(t *testing.T) {
-	// Two distinct names of 247 octets each put the SOA alone past 500.
-	long := strings.Repeat(strings.Repeat("a", 63)+".", 3) + strings.Repeat("b", 40) + ".example.test."
-	text := strings.Replace(basicZone, "ns.example.test. hostmaster.example.test.", "ns."+long[3:]+" hm."+long[3:], 1)
-	if text == basicZone {
-		t.Fatal("setup: the SOA names were not replaced")
-	}
 	addr, seen := startNotifySink(t, nil)
-	zd := loadIxfrTestZone(t, text)
+	zd := loadIxfrTestZone(t, oversizedSOAZone(t))
 	if _, _, err := zd.SendNotify(context.Background(), &Config{}, dns.TypeSOA, []string{addr}); err != nil {
 		t.Fatalf("SendNotify: %v", err)
 	}
 	if m := nextNotify(t, seen).msg; len(m.Answer) != 0 || m.Len() > dns.MinMsgSize {
 		t.Errorf("an oversized NOTIFY was sent (%d octets, %d answer RRs)", m.Len(), len(m.Answer))
 	}
+}
+
+// The same, signed: the SOA is left out before the MAC is computed, so the
+// receiver still verifies the signature.
+func TestNotifySOAIsLeftOutOfAnOversizedSignedNotify(t *testing.T) {
+	const keyName = "notify-key."
+	addr, seen := startNotifySink(t, map[string]string{keyName: b64Secret16})
+	zd := loadIxfrTestZone(t, oversizedSOAZone(t))
+	zd.Notify = []PeerConf{{Addr: addr, Key: keyName}}
+	conf := &Config{}
+	conf.Internal.TsigKeyStore = NewTsigKeyStore()
+	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: keyName, Algorithm: "hmac-sha256", Secret: b64Secret16})
+	if _, _, err := zd.SendNotify(context.Background(), conf, dns.TypeSOA, []string{addr}); err != nil {
+		t.Fatalf("SendNotify: %v", err)
+	}
+	sn := nextNotify(t, seen)
+	if !sn.signed || sn.tsigErr != nil {
+		t.Errorf("signed %v, TSIG error %v; want a verified signature", sn.signed, sn.tsigErr)
+	}
+	if len(sn.msg.Answer) != 0 {
+		t.Errorf("an oversized signed NOTIFY kept its SOA")
+	}
+}
+
+// An unsigned NOTIFY needs no room for a MAC: one that fits keeps its SOA,
+// even in the band only that room would push past 512 octets.
+func TestNotifySOAKeptWhenTheUnsignedNotifyFits(t *testing.T) {
+	mname := strings.Repeat(strings.Repeat("a", 63)+".", 3) + "example."
+	for n := 1; n <= 63; n++ {
+		rname := strings.Repeat(strings.Repeat("b", 63)+".", 2) + strings.Repeat("c", n) + ".example."
+		m := new(dns.Msg)
+		m.SetNotify("example.")
+		m.Answer = []dns.RR{mustRR(t, "example. 3600 IN SOA "+mname+" "+rname+" 1 2 3 4 5")}
+		size := m.Len()
+		if size <= dns.MinMsgSize-notifyTsigMACRoom || size > dns.MinMsgSize {
+			continue
+		}
+		dropOversizedNotifySOA(m, "example.")
+		if len(m.Answer) == 0 {
+			t.Errorf("an unsigned NOTIFY of %d octets, which fits, lost its SOA", size)
+		}
+		return
+	}
+	t.Fatal("setup: no SOA put the NOTIFY between 449 and 512 octets")
 }
 
 // Only NOTIFY(SOA) carries a record; the others ask the receiver to look.
@@ -163,4 +201,16 @@ func TestNotifyOtherTypesCarryNothing(t *testing.T) {
 	if m := nextNotify(t, seen).msg; len(m.Answer) != 0 {
 		t.Errorf("NOTIFY(DNSKEY) carries %d answer RRs, want none:\n%s", len(m.Answer), m)
 	}
+}
+
+// oversizedSOAZone is basicZone with SOA names long enough -- two distinct
+// names of 247 octets -- that the SOA alone takes a NOTIFY past 500 octets.
+func oversizedSOAZone(t *testing.T) string {
+	t.Helper()
+	long := strings.Repeat(strings.Repeat("a", 63)+".", 3) + strings.Repeat("b", 40) + ".example.test."
+	text := strings.Replace(basicZone, "ns.example.test. hostmaster.example.test.", "ns."+long[3:]+" hm."+long[3:], 1)
+	if text == basicZone {
+		t.Fatal("setup: the SOA names were not replaced")
+	}
+	return text
 }
