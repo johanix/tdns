@@ -383,6 +383,9 @@ func (zd *ZoneData) notifyOneOver(ctx context.Context, conf *Config, ntype uint1
 	if serr != nil {
 		return notifyAttempt{setupErr: serr}
 	}
+	if network == "udp" {
+		dropOversizedNotifySOA(m, zd.ZoneName)
+	}
 	c := &dns.Client{Net: network, Timeout: notifyTimeout, TsigProvider: provider}
 
 	lgDns.Debug("sending NOTIFY message", "msg", m.String())
@@ -467,6 +470,26 @@ func (zd *ZoneData) notifySOA() dns.RR {
 		return nil
 	}
 	return dns.Copy(snap.SOA)
+}
+
+// notifyTsigMACRoom is the room left for a TSIG MAC when sizing a NOTIFY: the
+// TSIG record is attached before sending but its MAC is computed as the
+// message is packed, and SHA-512's is the largest.
+const notifyTsigMACRoom = 64
+
+// dropOversizedNotifySOA leaves the SOA out of a NOTIFY that would not fit in
+// the 512 octets a UDP message without EDNS may use (RFC 1035 §4.2.1). The SOA
+// is only a hint, and a NOTIFY without it is still a NOTIFY. Called after the
+// TSIG record is attached, so its size is counted.
+func dropOversizedNotifySOA(m *dns.Msg, zone string) {
+	if len(m.Answer) == 0 {
+		return
+	}
+	if size := m.Len() + notifyTsigMACRoom; size > dns.MinMsgSize {
+		lgDns.Info("NOTIFY: leaving out the SOA, which would take the message past 512 octets",
+			"zone", zone, "size", size)
+		m.Answer = nil
+	}
 }
 
 // extractEDEFromMsg pulls every EDNS0_EDE option out of a DNS message's
