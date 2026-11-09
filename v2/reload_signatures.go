@@ -5,6 +5,8 @@
 package tdns
 
 import (
+	"time"
+
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -46,8 +48,13 @@ func (zd *ZoneData) carrySignaturesLocked(old *zoneSnapshot) int {
 	}
 	// NSEC TTLs follow the SOA's negative TTL. If that changed, every NSEC in
 	// the zone has to be rewritten, and carrying them would keep the old TTL.
-	carryNsec := negativeTTLOf(apexFromSnapshotData(zd, old.Data)) ==
-		negativeTTLOf(apexFromSnapshotData(zd, zd.workingSet))
+	// The publish can still lower it after this point: it signs the SOA under
+	// the zone's TTL clamp, and a ceiling below the negative TTL lowers the
+	// SOA's TTL and with it the negative TTL. So no NSEC is carried then
+	// either.
+	newNegTTL := negativeTTLOf(apexFromSnapshotData(zd, zd.workingSet))
+	carryNsec := negativeTTLOf(apexFromSnapshotData(zd, old.Data)) == newNegTTL &&
+		!zd.clampMayLowerLocked(newNegTTL)
 
 	carried := 0
 	for name, nod := range zd.workingSet {
@@ -56,6 +63,12 @@ func (zd *ZoneData) carrySignaturesLocked(old *zoneSnapshot) int {
 			continue
 		}
 		for _, t := range nod.RRtypes.Keys() {
+			// The SOA is signed afresh by every publish, which moves its
+			// serial. A carried signature would cover the old serial, and
+			// would stand if that re-sign failed.
+			if t == dns.TypeSOA {
+				continue
+			}
 			nrs := nod.RRtypes.GetOnlyRRSet(t)
 			if len(nrs.RRs) == 0 || len(nrs.RRSIGs) > 0 {
 				continue
@@ -107,4 +120,19 @@ func negativeTTLOf(apex *OwnerData) uint32 {
 		return negativeTTL(s)
 	}
 	return 0
+}
+
+// clampMayLowerLocked reports whether the TTL clamp the publish will sign
+// under has a ceiling below ttl. A clamp that cannot be read counts as one
+// that may.
+func (zd *ZoneData) clampMayLowerLocked(ttl uint32) bool {
+	if zd.DnssecPolicy == nil {
+		return false
+	}
+	clamp, err := ClampParamsForZone(zd.KeyDB, zd.ZoneName, zd.DnssecPolicy, time.Now())
+	if err != nil {
+		return true
+	}
+	ceiling, ok := clamp.ceiling()
+	return ok && ceiling < ttl
 }

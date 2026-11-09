@@ -165,3 +165,31 @@ func TestIdenticalRecordsComparesTTLs(t *testing.T) {
 		t.Error("a record fewer compares as identical")
 	}
 }
+
+// A TTL clamp the publish applies can lower the SOA's TTL, and with it the
+// negative TTL, after the carry has compared the SOAs. Then no NSEC is
+// carried: the whole chain is rebuilt at the clamped negative TTL.
+func TestSignedReloadUnderALoweringClampRebuildsTheNsecChain(t *testing.T) {
+	zd := resignTestZone(t, newTestKeyDB(t))
+	zd.SetOption(OptIxfrFromDifferences, true)
+	before := zd.publishedSnapshot()
+	zd.DnssecPolicy.TTLS.MaxServed = 300
+
+	reloadSigned(t, zd, itoa(int(before.Serial)+1), "bravo-edited")
+	after := zd.publishedSnapshot()
+	n := 0
+	for name, od := range after.Data {
+		if od == nil {
+			continue
+		}
+		for _, rr := range od.NSEC.RRs {
+			n++
+			if rr.Header().Ttl != 300 {
+				t.Errorf("%s: NSEC TTL %d, want the clamped 300", name, rr.Header().Ttl)
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatal("no NSEC served after the reload")
+	}
+}
