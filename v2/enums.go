@@ -137,6 +137,11 @@ const (
 	// primary behind a signer -- so the server's resolver never answers a
 	// question about the zone from it, and resolves it as any other (#863).
 	OptModifiedDownstream
+	// OptAllowDoubledSuffix: the zone file means its names that end in the
+	// zone's name (or a name under it) twice, such as test.test. in zone test.,
+	// so the loader does not refuse them as a missing trailing dot (#1009).
+	// Off by default: almost every such name is that mistake.
+	OptAllowDoubledSuffix
 	optZoneOptionTdnsSentinel
 )
 
@@ -180,6 +185,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptUseHsyncparam:           "use-hsyncparam",
 	OptChildSyncProxy:          "childsync-proxy",
 	OptModifiedDownstream:      "modified-downstream",
+	OptAllowDoubledSuffix:      "allow-doubled-suffix",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -218,6 +224,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"use-hsyncparam":             OptUseHsyncparam,
 	"childsync-proxy":            OptChildSyncProxy,
 	"modified-downstream":        OptModifiedDownstream,
+	"allow-doubled-suffix":       OptAllowDoubledSuffix,
 }
 
 // deprecatedZoneOptionNames maps old option spellings to the canonical name
