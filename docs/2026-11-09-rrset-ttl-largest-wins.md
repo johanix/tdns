@@ -88,6 +88,13 @@ RRSIGs stay as they came, except for their own TTL, which follows the RRset
 in a relayed signed zone, such as a delegation's NS RRset or glue, takes the
 largest TTL with no cap.
 
+An RRset whose records already share one TTL is left as it came, even when
+that TTL is above the original TTL of its RRSIGs. Nothing is rewritten, so
+rule 3 does not apply. The upstream serves it that way, and a validator caps
+it at the original TTL anyway. Pulling it down would change the content of
+zones that already keep RFC 2181 §5.2, and a ZONEMD over that content would
+stop matching.
+
 ### The order: unify, then clamp
 
 The served-TTL clamp (`ttls.max-served`, #949, and the KSK rollover K-step
