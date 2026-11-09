@@ -534,7 +534,7 @@ func serveKeyAndCDS(t *testing.T, n *trustNet, child string) (*dns.DNSKEY, *dns.
 	t.Helper()
 	key := &dns.DNSKEY{Hdr: dns.RR_Header{Name: child, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
 		Flags: 257, Protocol: 3, Algorithm: dns.ECDSAP256SHA256}
-	if _, err := key.Generate(256); err != nil {
+	if _, err := generateSigningKey(key, 256); err != nil {
 		t.Fatalf("generating a key for %s: %v", child, err)
 	}
 	cds := key.ToDS(dns.SHA256).ToCDS()
@@ -678,7 +678,7 @@ func TestScannerValidatesChildDataWithTheImrValidator(t *testing.T) {
 		Protocol:  3,
 		Algorithm: dns.ECDSAP256SHA256,
 	}
-	priv, err := key.Generate(256)
+	priv, err := generateSigningKey(key, 256)
 	if err != nil {
 		t.Fatal(err)
 	}

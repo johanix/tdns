@@ -19,7 +19,7 @@ import (
 func dsSignedInTheNameOf(ds dns.RR, signer string) []dns.RR {
 	k := &dns.DNSKEY{Hdr: dns.RR_Header{Name: signer, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 257, Protocol: 3, Algorithm: dns.ED25519}
-	p, err := k.Generate(256)
+	p, err := generateSigningKey(k, 256)
 	if err != nil {
 		panic(err)
 	}
