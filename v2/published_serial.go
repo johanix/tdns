@@ -86,7 +86,7 @@ func (zd *ZoneData) recordPublishedContentDigestLocked(serial uint32, data map[s
 	if zd.KeyDB == nil || zd.KeyDB.DB == nil {
 		return
 	}
-	digest := authoredContentDigest(zd.ZoneName, data, zd.zoneManagesZonemd())
+	digest := authoredContentDigest(zd.ZoneName, data, zd.contentTerms())
 	if err := zd.KeyDB.SetPublishedContentDigest(zd.ZoneName, serial, digest); err != nil {
 		lg.Warn("publish: could not record the published content digest; the next restart"+
 			" will publish this content under a new serial",

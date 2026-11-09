@@ -92,6 +92,9 @@ func (zd *ZoneData) updateIxfrChainLocked(old *zoneSnapshot, newSerial uint32, n
 		if newSerial == old.Serial {
 			lg.Error("ixfr: zone content changed without a serial bump; resetting IXFR history",
 				"zone", zd.ZoneName, "serial", newSerial)
+		} else if !serialNewer(newSerial, old.Serial) {
+			lg.Error("ixfr: outbound serial did not advance (RFC 1982); resetting IXFR history",
+				"zone", zd.ZoneName, "old", old.Serial, "new", newSerial)
 		} else {
 			lg.Warn("ixfr: single delta exceeds ixfr-chain-max-bytes; resetting IXFR history",
 				"zone", zd.ZoneName, "delta_bytes_at_least", est, "budget", budget)
