@@ -793,6 +793,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							if zr.PublishCadence != 0 {
 								zd.publishCadence = zr.PublishCadence
 							}
+							// Only a config-bearing refresher carries them; a
+							// stub that came with its own (an API-provisioned
+							// primary) keeps those.
+							if zr.ConfigUpdate {
+								zd.notifyRetries, zd.notifyRetryInterval = zr.NotifyRetries, zr.NotifyRetryInterval
+							}
 							zd.ZoneType = zr.ZoneType
 							// Normalize AFTER ZoneType is assigned — the
 							// predicate depends on it (Fix B chokepoint).
