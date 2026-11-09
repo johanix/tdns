@@ -44,6 +44,14 @@ var notifyTimeout = 5 * time.Second
 // notifyMaxInFlight bounds the NOTIFY exchanges on the wire at once.
 const notifyMaxInFlight = 16
 
+// notifyPruneInterval is how often the Notifier releases the state of zones it
+// no longer serves.
+const notifyPruneInterval = 10 * time.Minute
+
+// notifyResponseWait bounds how long an answer waits for a caller that has
+// stopped listening; after that it is dropped.
+var notifyResponseWait = time.Minute
+
 // Notifier drains the NOTIFY queue and sends outbound NOTIFYs, signing each with
 // the matching notify-peer's TSIG key (Improvement 2). conf is threaded for the
 // key store. NOTE: tdns-mp pins a published tdns/v2 and calls Notifier at four
@@ -82,10 +90,11 @@ func Notifier(ctx context.Context, conf *Config, notifyreqQ chan NotifyRequest) 
 		conf:    conf,
 		tracker: tracker,
 		results: make(chan notifyResult, notifyMaxInFlight),
-		sem:     make(chan struct{}, notifyMaxInFlight),
 	}
 	timer := time.NewTimer(time.Hour)
 	timer.Stop()
+	prune := time.NewTicker(notifyPruneInterval)
+	defer prune.Stop()
 
 	for {
 		select {
@@ -106,6 +115,10 @@ func Notifier(ctx context.Context, conf *Config, notifyreqQ chan NotifyRequest) 
 			n.finish(r)
 		case <-timer.C:
 			n.resendDue()
+		case <-prune.C:
+			if gone := tracker.prune(Zones.Get); gone > 0 {
+				lgDns.Debug("NotifierEngine: released the NOTIFY state of zones no longer served", "targets", gone)
+			}
 		}
 		n.armTimer(timer)
 	}
@@ -118,7 +131,15 @@ type notifier struct {
 	conf    *Config
 	tracker *NotifyTracker
 	results chan notifyResult
-	sem     chan struct{}
+	// running counts the sends on the wire. The rest wait in the two queues,
+	// as jobs rather than goroutines, so a burst costs memory per job and no
+	// more than notifyMaxInFlight goroutines. urgent holds the jobs a caller
+	// waits on, which go first: that caller has a deadline. A tracked target
+	// has at most one job queued or running (begin and due see to that), so
+	// waiting never holds more jobs than there are targets.
+	running int
+	urgent  []notifyJob
+	waiting []notifyJob
 }
 
 // notifyJob is one NOTIFY to one target. batch is set for a request whose
@@ -161,11 +182,21 @@ func (n *notifier) handle(nr NotifyRequest) {
 
 	if nr.Response != nil {
 		b := &notifyBatch{req: nr, left: len(nr.Targets)}
+		if b.left == 0 {
+			// No target, so no job will finish the batch: answer now, as
+			// SendNotify does, rather than leave the caller to its deadline.
+			rcode, ede, err := b.agg.result(zd.ZoneName, nr.RRtype, 0)
+			n.respond(nr, rcode, ede, err)
+			return
+		}
 		for _, dst := range nr.Targets {
 			n.launch(notifyJob{zd: zd, rrtype: nr.RRtype, target: dst, batch: b})
 		}
 		return
 	}
+	// A tracked request carries the zone's whole downstream set for the type,
+	// so a target missing from it has been removed: no more resends to it.
+	n.tracker.retire(zd.ZoneName, nr.RRtype, nr.Targets)
 	for _, dst := range nr.Targets {
 		if n.tracker.begin(notifyKey{zone: zd.ZoneName, target: dst, rrtype: nr.RRtype}, zd) {
 			n.launch(notifyJob{zd: zd, rrtype: nr.RRtype, target: dst})
@@ -173,26 +204,44 @@ func (n *notifier) handle(nr NotifyRequest) {
 	}
 }
 
-// launch sends one NOTIFY beside the loop, at most notifyMaxInFlight at once,
-// and hands the outcome back on n.results.
+// launch queues one NOTIFY to send beside the loop; see notifier.running.
 func (n *notifier) launch(job notifyJob) {
-	go func() {
-		select {
-		case n.sem <- struct{}{}:
-		case <-n.ctx.Done():
+	if job.batch != nil {
+		n.urgent = append(n.urgent, job)
+	} else {
+		n.waiting = append(n.waiting, job)
+	}
+	n.pump()
+}
+
+// pump starts queued sends while there is room on the wire. Each hands its
+// outcome back on n.results.
+func (n *notifier) pump() {
+	for n.running < notifyMaxInFlight {
+		var job notifyJob
+		switch {
+		case len(n.urgent) > 0:
+			job, n.urgent = n.urgent[0], n.urgent[1:]
+		case len(n.waiting) > 0:
+			job, n.waiting = n.waiting[0], n.waiting[1:]
+		default:
 			return
 		}
-		lgDns.Debug("NOTIFY: sending", "type", dns.TypeToString[job.rrtype], "zone", job.zd.ZoneName, "target", job.target)
-		a := job.zd.notifyOne(n.ctx, n.conf, job.rrtype, job.target)
-		<-n.sem
-		select {
-		case n.results <- notifyResult{job: job, attempt: a}:
-		case <-n.ctx.Done():
-		}
-	}()
+		n.running++
+		go func() {
+			lgDns.Debug("NOTIFY: sending", "type", dns.TypeToString[job.rrtype], "zone", job.zd.ZoneName, "target", job.target)
+			a := job.zd.notifyOne(n.ctx, n.conf, job.rrtype, job.target)
+			select {
+			case n.results <- notifyResult{job: job, attempt: a}:
+			case <-n.ctx.Done():
+			}
+		}()
+	}
 }
 
 func (n *notifier) finish(r notifyResult) {
+	n.running--
+	defer n.pump()
 	job := r.job
 	if b := job.batch; b != nil {
 		b.agg.add(job.zd.ZoneName, job.target, job.rrtype, r.attempt)
@@ -205,14 +254,17 @@ func (n *notifier) finish(r notifyResult) {
 	}
 	retries, interval := notifyRetryPolicy(job.zd, n.tracker)
 	key := notifyKey{zone: job.zd.ZoneName, target: job.target, rrtype: job.rrtype}
-	if n.tracker.done(key, r.attempt, retries, interval, time.Now()) {
-		n.launch(notifyJob{zd: job.zd, rrtype: job.rrtype, target: job.target})
+	// The newer version goes out with the ZoneData it came with, not the one
+	// this send used: the zone may have been replaced in between.
+	if again, zd := n.tracker.done(key, r.attempt, retries, interval, time.Now()); again {
+		n.launch(notifyJob{zd: zd, rrtype: job.rrtype, target: job.target})
 	}
 }
 
-// respond hands a waiting caller its answer. From its own goroutine: the caller
-// may have stopped listening (its deadline passed), and the loop must not wait
-// on it.
+// respond hands a waiting caller its answer. At once when the caller's channel
+// has room; otherwise from its own goroutine, for at most notifyResponseWait:
+// the caller may have stopped listening (its deadline passed), and neither the
+// loop nor that goroutine may wait on it for ever.
 func (n *notifier) respond(nr NotifyRequest, rcode int, ede []dns.EDNS0_EDE, err error) {
 	resp := NotifyResponse{Rcode: rcode, EDE: ede}
 	if err != nil {
@@ -221,9 +273,18 @@ func (n *notifier) respond(nr NotifyRequest, rcode int, ede []dns.EDNS0_EDE, err
 	} else {
 		resp.Msg = "OK"
 	}
+	select {
+	case nr.Response <- resp:
+		return
+	default:
+	}
 	go func() {
+		wait := time.NewTimer(notifyResponseWait)
+		defer wait.Stop()
 		select {
 		case nr.Response <- resp:
+		case <-wait.C:
+			lgDns.Warn("NotifierEngine: nobody took the NOTIFY response; dropped", "zone", nr.ZoneName)
 		case <-n.ctx.Done():
 			lgDns.Warn("NotifierEngine: context cancelled while sending NOTIFY response", "zone", nr.ZoneName)
 		}

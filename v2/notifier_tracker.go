@@ -5,10 +5,12 @@
 package tdns
 
 import (
+	"container/heap"
 	"sort"
 	"sync"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -62,6 +64,12 @@ type notifyTargetState struct {
 	// While set, a new version is still tried in full, but giving up again is
 	// not logged again: the log gets the edges, not the steady state (#528).
 	givenUp bool
+	// setupFailed: the last try could not even be signed, so nothing was sent.
+	setupFailed bool
+	// retired: the target is no longer one of the zone's downstreams, or the
+	// zone is gone. Set on one with a send in flight; the state is dropped when
+	// that send returns.
+	retired bool
 }
 
 // NotifyTracker holds the per-target NOTIFY state and the pending set of
@@ -70,6 +78,14 @@ type notifyTargetState struct {
 type NotifyTracker struct {
 	mu      sync.Mutex
 	targets map[notifyKey]*notifyTargetState
+	// byZone indexes targets by canonical zone name, so a zone's own state is
+	// found without scanning every zone's.
+	byZone map[string]map[notifyKey]struct{}
+	// schedule orders the scheduled resends by time, so the next one is found
+	// without scanning every target. An entry is not removed when its resend
+	// is taken, moved or cancelled; one that no longer matches its target's
+	// due time is dropped when it reaches the top.
+	schedule notifySchedule
 	// pending holds the latest downstream NOTIFY per zone, not yet taken by
 	// the Notifier. Mark replaces; the Notifier takes them all on wake.
 	pending map[string]NotifyRequest
@@ -84,6 +100,7 @@ type NotifyTracker struct {
 func NewNotifyTracker() *NotifyTracker {
 	return &NotifyTracker{
 		targets:  map[notifyKey]*notifyTargetState{},
+		byZone:   map[string]map[notifyKey]struct{}{},
 		pending:  map[string]NotifyRequest{},
 		wake:     make(chan struct{}, 1),
 		retries:  DefaultNotifyRetries,
@@ -95,12 +112,35 @@ func NewNotifyTracker() *NotifyTracker {
 func (t *NotifyTracker) setDefaults(retries *int, interval string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if retries != nil && *retries >= 0 {
-		t.retries = *retries
+	if r := validNotifyRetries("authengine", retries); r != nil {
+		t.retries = *r
 	}
 	if d, ok := parseNotifyRetryInterval("authengine", interval); ok {
 		t.interval = d
 	}
+}
+
+// validNotifyRetries returns a notify-retries setting, or nil when it is unset
+// or negative. A negative count is logged and ignored, so the next level's
+// setting applies, rather than read as "give up after one send".
+func validNotifyRetries(where string, retries *int) *int {
+	if retries == nil {
+		return nil
+	}
+	if *retries < 0 {
+		lgConfig.Error("notify-retries is negative; ignored", "where", where, "value", *retries)
+		return nil
+	}
+	return retries
+}
+
+// zoneNotifyRetrySettings resolves a zone's own resend settings from its
+// config, for ZoneData's notifyRetries and notifyRetryInterval. Every path
+// that builds a zone from config uses it, static and dynamic alike.
+func zoneNotifyRetrySettings(zname string, zc *ZoneConf) (*int, time.Duration) {
+	where := "zone " + zname
+	interval, _ := parseNotifyRetryInterval(where, zc.NotifyRetryInterval)
+	return validNotifyRetries(where, zc.NotifyRetries), interval
 }
 
 // parseNotifyRetryInterval parses a notify-retry-interval setting. Empty is not
@@ -173,9 +213,10 @@ func (t *NotifyTracker) begin(key notifyKey, zd *ZoneData) bool {
 	st := t.targets[key]
 	if st == nil {
 		st = &notifyTargetState{}
-		t.targets[key] = st
+		t.addLocked(key, st)
 	}
 	st.zd = zd
+	st.retired = false
 	if st.inFlight {
 		st.again = true
 		return false
@@ -187,22 +228,30 @@ func (t *NotifyTracker) begin(key notifyKey, zd *ZoneData) bool {
 }
 
 // done records the outcome of one send and reports whether to send again at
-// once (a newer version arrived while it was in flight). A resend after no
-// answer is scheduled instead, and goes out through due.
-func (t *NotifyTracker) done(key notifyKey, a notifyAttempt, retries int, interval time.Duration, now time.Time) bool {
+// once (a newer version arrived while it was in flight), and with which
+// ZoneData: the one the newer version came with, which may have replaced the
+// one this send used. A resend after no answer is scheduled instead, and goes
+// out through due.
+func (t *NotifyTracker) done(key notifyKey, a notifyAttempt, retries int, interval time.Duration, now time.Time) (bool, *ZoneData) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	st := t.targets[key]
 	if st == nil {
-		return false
+		return false, nil
 	}
 	st.inFlight = false
+	if st.retired {
+		t.deleteLocked(key)
+		return false, nil
+	}
 	st.lastAttempt = now
+	st.setupFailed = false
 	zone, target, rrtype := key.zone, key.target, dns.TypeToString[key.rrtype]
 
 	switch {
 	case a.setupErr != nil:
 		// Nothing was sent, and resending would fail the same way.
+		st.setupFailed = true
 		st.lastError = a.setupErr.Error()
 		st.due = time.Time{}
 		lgDns.Error("NOTIFY: TSIG sign setup failed, not sending", "zone", zone, "target", target, "err", a.setupErr)
@@ -211,11 +260,8 @@ func (t *NotifyTracker) done(key notifyKey, a notifyAttempt, retries int, interv
 		st.failures++
 		st.lastError = a.err.Error()
 		if st.attempts <= retries {
-			wait := interval << (st.attempts - 1)
-			if wait <= 0 || wait > time.Hour {
-				wait = time.Hour // a long retry list must not overflow the shift
-			}
-			st.due = now.Add(wait)
+			wait := notifyRetryWait(interval, st.attempts)
+			t.scheduleLocked(key, st, now.Add(wait))
 			lgDns.Debug("NOTIFY: no answer; sending again later", "zone", zone, "type", rrtype, "target", target,
 				"attempt", st.attempts, "of", retries+1, "in", wait, "err", a.err)
 		} else {
@@ -251,9 +297,25 @@ func (t *NotifyTracker) done(key notifyKey, a notifyAttempt, retries int, interv
 		st.attempts = 1
 		st.due = time.Time{}
 		st.inFlight = true
-		return true
+		return true, st.zd
 	}
-	return false
+	return false, nil
+}
+
+// notifyRetryWait is the wait before the resend that follows send number
+// attempt: interval after the first, doubled after each later one, up to an
+// hour -- or up to interval itself, when that is set longer than an hour.
+// Doubling stops at that ceiling, so a long retry list cannot overflow.
+func notifyRetryWait(interval time.Duration, attempt int) time.Duration {
+	if interval <= 0 {
+		interval = DefaultNotifyRetryInterval
+	}
+	ceiling := max(interval, time.Hour)
+	wait := interval
+	for i := 1; i < attempt && wait < ceiling; i++ {
+		wait *= 2
+	}
+	return min(wait, ceiling)
 }
 
 type notifyDueJob struct {
@@ -266,14 +328,20 @@ func (t *NotifyTracker) due(now time.Time) []notifyDueJob {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var out []notifyDueJob
-	for key, st := range t.targets {
-		if st.inFlight || st.due.IsZero() || now.Before(st.due) {
+	for t.schedule.Len() > 0 {
+		e := t.schedule[0]
+		st, live := t.scheduledLocked(e)
+		if live && now.Before(e.due) {
+			break
+		}
+		heap.Pop(&t.schedule)
+		if !live {
 			continue
 		}
 		st.due = time.Time{}
 		st.attempts++
 		st.inFlight = true
-		out = append(out, notifyDueJob{key: key, zd: st.zd})
+		out = append(out, notifyDueJob{key: e.key, zd: st.zd})
 	}
 	return out
 }
@@ -282,17 +350,133 @@ func (t *NotifyTracker) due(now time.Time) []notifyDueJob {
 func (t *NotifyTracker) nextDue() (time.Time, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	var next time.Time
-	found := false
-	for _, st := range t.targets {
-		if st.inFlight || st.due.IsZero() {
+	for t.schedule.Len() > 0 {
+		e := t.schedule[0]
+		if _, live := t.scheduledLocked(e); live {
+			return e.due, true
+		}
+		heap.Pop(&t.schedule)
+	}
+	return time.Time{}, false
+}
+
+// notifyScheduled is one scheduled resend.
+type notifyScheduled struct {
+	due time.Time
+	key notifyKey
+}
+
+// notifySchedule is a min-heap of scheduled resends, earliest first.
+type notifySchedule []notifyScheduled
+
+func (s notifySchedule) Len() int           { return len(s) }
+func (s notifySchedule) Less(i, j int) bool { return s[i].due.Before(s[j].due) }
+func (s notifySchedule) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+func (s *notifySchedule) Push(x any)        { *s = append(*s, x.(notifyScheduled)) }
+func (s *notifySchedule) Pop() any {
+	old := *s
+	e := old[len(old)-1]
+	*s = old[:len(old)-1]
+	return e
+}
+
+// scheduleLocked sets a target's next resend and enters it in the schedule.
+func (t *NotifyTracker) scheduleLocked(key notifyKey, st *notifyTargetState, due time.Time) {
+	st.due = due
+	heap.Push(&t.schedule, notifyScheduled{due: due, key: key})
+}
+
+// scheduledLocked reports whether a schedule entry still stands: its target is
+// still tracked, not in flight, and due at exactly that time.
+func (t *NotifyTracker) scheduledLocked(e notifyScheduled) (*notifyTargetState, bool) {
+	st := t.targets[e.key]
+	if st == nil || st.inFlight || !st.due.Equal(e.due) {
+		return nil, false
+	}
+	return st, true
+}
+
+func (t *NotifyTracker) addLocked(key notifyKey, st *notifyTargetState) {
+	t.targets[key] = st
+	z := core.CanonicalizeName(key.zone)
+	if t.byZone[z] == nil {
+		t.byZone[z] = map[notifyKey]struct{}{}
+	}
+	t.byZone[z][key] = struct{}{}
+}
+
+func (t *NotifyTracker) deleteLocked(key notifyKey) {
+	delete(t.targets, key)
+	z := core.CanonicalizeName(key.zone)
+	delete(t.byZone[z], key)
+	if len(t.byZone[z]) == 0 {
+		delete(t.byZone, z)
+	}
+}
+
+// retire drops the zone's state for targets of this NOTIFY type that are no
+// longer among its downstreams, so a removed peer is neither resent to nor
+// remembered. One with a send in flight is dropped when that send returns.
+// targets is the zone's full downstream set for the type, as every tracked
+// request carries it.
+func (t *NotifyTracker) retire(zone string, rrtype uint16, targets []string) {
+	keep := make(map[string]bool, len(targets))
+	for _, dst := range targets {
+		keep[dst] = true
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for key := range t.byZone[core.CanonicalizeName(zone)] {
+		if key.rrtype != rrtype || keep[key.target] {
 			continue
 		}
-		if !found || st.due.Before(next) {
-			next, found = st.due, true
+		if st := t.targets[key]; st.inFlight {
+			st.retired = true
+		} else {
+			t.deleteLocked(key)
 		}
 	}
-	return next, found
+}
+
+// prune drops the state of zones that are no longer served, or are served by
+// another ZoneData (deleted and added again), so the state and the zone data
+// it holds are released. Only state at rest goes: a send in flight or a resend
+// still scheduled is left to run its course, which the retry limit bounds.
+// current looks a zone up; Zones.Get, but a test may pass its own. Called
+// without the tracker's lock held for the lookups.
+func (t *NotifyTracker) prune(current func(zone string) (*ZoneData, bool)) int {
+	type cand struct {
+		key notifyKey
+		zd  *ZoneData
+	}
+	t.mu.Lock()
+	var cands []cand
+	for key, st := range t.targets {
+		if !st.inFlight && st.due.IsZero() {
+			cands = append(cands, cand{key, st.zd})
+		}
+	}
+	t.mu.Unlock()
+
+	var gone []cand
+	for _, c := range cands {
+		if zd, ok := current(c.key.zone); !ok || zd != c.zd {
+			gone = append(gone, c)
+		}
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := 0
+	for _, c := range gone {
+		// Still at rest, and still the same zone data: nothing began a new
+		// version for it while the lock was released.
+		if st := t.targets[c.key]; st != nil && st.zd == c.zd && !st.inFlight && st.due.IsZero() {
+			t.deleteLocked(c.key)
+			n++
+		}
+	}
+	return n
 }
 
 // NotifyTargetStatus is one row of `zone desc`'s "Downstream notifies" block
@@ -300,7 +484,7 @@ func (t *NotifyTracker) nextDue() (time.Time, bool) {
 type NotifyTargetStatus struct {
 	Target      string
 	RRtype      string
-	State       string // "ok", "sending", "retrying", "given up"
+	State       string // "ok", "sending", "retrying", "given up", "cannot sign"
 	Attempts    int    // sends for the version being notified
 	Failures    int    // consecutive sends without an answer
 	LastAttempt time.Time
@@ -314,14 +498,11 @@ func (t *NotifyTracker) Status(zone string) []NotifyTargetStatus {
 	if t == nil {
 		return nil
 	}
-	zone = dns.Fqdn(zone)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var out []NotifyTargetStatus
-	for key, st := range t.targets {
-		if !equalFoldFqdn(key.zone, zone) {
-			continue
-		}
+	for key := range t.byZone[core.CanonicalizeName(zone)] {
+		st := t.targets[key]
 		s := NotifyTargetStatus{
 			Target:      key.target,
 			RRtype:      dns.TypeToString[key.rrtype],
@@ -332,13 +513,17 @@ func (t *NotifyTracker) Status(zone string) []NotifyTargetStatus {
 			NextAttempt: st.due,
 			LastError:   st.lastError,
 		}
+		// A retry scheduled for a new version outranks giving up on an old
+		// one: the latch is for the log, and stays set until an answer comes.
 		switch {
 		case st.inFlight:
 			s.State = "sending"
-		case st.givenUp:
-			s.State = "given up"
+		case st.setupFailed:
+			s.State = "cannot sign"
 		case !st.due.IsZero():
 			s.State = "retrying"
+		case st.givenUp:
+			s.State = "given up"
 		default:
 			s.State = "ok"
 		}
@@ -351,8 +536,4 @@ func (t *NotifyTracker) Status(zone string) []NotifyTargetStatus {
 		return out[i].Target < out[j].Target
 	})
 	return out
-}
-
-func equalFoldFqdn(a, b string) bool {
-	return len(a) == len(b) && dns.CanonicalName(a) == dns.CanonicalName(b)
 }

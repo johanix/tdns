@@ -421,6 +421,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		FirstZoneLoad:     true,
 		publishCadence:    spec.PublishCadence,
 	}
+	zd.notifyRetries, zd.notifyRetryInterval = zoneNotifyRetrySettings(zd.ZoneName, &spec.Zconf)
 
 	// First-load callbacks, mirroring what ParseZones registers for static
 	// zones (the engine's stub branch drains OnFirstLoad post-Ready).

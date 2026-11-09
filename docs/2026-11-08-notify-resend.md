@@ -86,3 +86,36 @@ retries, REFUSED not resent, TCP after refused UDP, a waiting caller's request
 sent once, the pending set coalescing per zone, a publish handing its NOTIFY to
 the tracker, and the zone's settings winning. `v2/cli/zone_notify_display_test.go`
 covers the `zone desc` block.
+
+## Changes from the first review (2026-11-09)
+
+CodeRabbit's first round led to these changes:
+
+- **Bounded dispatch.** At most `notifyMaxInFlight` (16) sends run at once.
+  The rest wait in the Notifier's own queues as jobs, not as goroutines. A job
+  whose caller waits for the answer goes ahead of the tracked ones, since that
+  caller has a deadline. A tracked target has at most one job queued or
+  running, so the queue never holds more jobs than there are targets.
+- **Resends in time order.** The tracker keeps its scheduled resends in a
+  min-heap, so finding the next one no longer scans every target after each
+  event. An entry is not removed when its resend is taken or cancelled; one
+  that no longer matches its target's due time is dropped when it reaches the
+  top. A per-zone index serves `zone desc` and `retire`.
+- **State is released.** Each tracked request carries the zone's whole
+  downstream set, so a target missing from it is dropped. Every ten minutes
+  the Notifier drops the resting state of zones it no longer serves, or that
+  are served by a new ZoneData. A send in flight, or a resend already
+  scheduled, is left to run its course; the retry limit bounds it.
+- **A superseding NOTIFY uses the new ZoneData,** the one the newer version
+  came with, not the one the finished send used.
+- **Smaller fixes:**
+  - a request with a waiting caller and no target is answered at once;
+  - an answer nobody takes is dropped after a minute instead of waiting until
+    shutdown;
+  - a negative `notify-retries` is logged and ignored;
+  - a retry interval set longer than an hour is honoured;
+  - `zone desc` shows "cannot sign" when the TSIG setup fails, and "retrying"
+    ahead of an old "given up";
+  - an API-provisioned primary gets its template's resend settings.
+
+`v2/notifier_tracker_test.go` covers these.
