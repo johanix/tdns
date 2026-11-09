@@ -50,3 +50,12 @@ was in an `$INCLUDE`d one.
   which files `$INCLUDE` may name. A zone file is operator-written
   configuration, as trusted as the config that names it, and BIND and NSD put
   no limit on `$INCLUDE` either.
+- **One refusal lists every doubled name** (Johan, 2026-11-09: "can we say
+  anything about exactly which record is failing?"). The loader collects
+  them through the whole parse and refuses once, listing up to 20 and saying
+  how many more. The parser can't say which file or line a record came from,
+  so each entry quotes the record and the name as it most likely appears in
+  the file: written out in full, without its trailing dot (`look for
+  "ns1.customer.mp.axfr.net" without a trailing dot`). A plain search of the
+  zone file and its includes finds it. `config check` lists them the same
+  way.
