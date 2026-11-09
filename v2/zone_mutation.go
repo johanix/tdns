@@ -896,8 +896,8 @@ func (zd *ZoneData) notifyIfServableLocked(snap *zoneSnapshot) {
 		// tells the tracker to forget the zone's targets (and to resend to
 		// none). Only when it holds some, so a zone that never had a
 		// downstream costs nothing here.
-		if t := Conf.Internal.NotifyTracker; t != nil && t.tracks(zd.ZoneName) {
-			t.Mark(NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeSOA})
+		if t := Conf.Internal.NotifyTracker; t != nil && t.tracksDownstreams(zd.ZoneName) {
+			t.Mark(NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeSOA, Downstream: true})
 		}
 		return
 	}
@@ -907,10 +907,11 @@ func (zd *ZoneData) notifyIfServableLocked(snap *zoneSnapshot) {
 		return
 	}
 	req := NotifyRequest{
-		ZoneName: zd.ZoneName,
-		ZoneData: zd,
-		RRtype:   dns.TypeSOA,
-		Targets:  peerAddrs(zd.Notify),
+		ZoneName:   zd.ZoneName,
+		ZoneData:   zd,
+		RRtype:     dns.TypeSOA,
+		Targets:    peerAddrs(zd.Notify),
+		Downstream: true,
 	}
 	if t := Conf.Internal.NotifyTracker; t != nil {
 		t.Mark(req)

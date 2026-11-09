@@ -173,6 +173,11 @@ func TestNotifyStatusStates(t *testing.T) {
 	if st := tr.Status("a.example.")[0].State; st != "cannot sign" {
 		t.Errorf("a NOTIFY that could not be signed shows %q", st)
 	}
+	tr.begin(key, zd, true)
+	tr.done(key, notifyAttempt{rcode: dns.RcodeRefused}, 5, time.Second, time.Now())
+	if s := tr.Status("a.example.")[0]; s.State != "rejected" || s.LastError != "REFUSED" || !s.NextAttempt.IsZero() {
+		t.Errorf("a refused NOTIFY shows %q (%q, next %v), want rejected, REFUSED, no resend", s.State, s.LastError, s.NextAttempt)
+	}
 }
 
 // A negative notify-retries is ignored, so the next level's setting applies.
@@ -273,6 +278,11 @@ func TestPublishWithNoDownstreamsTellsTheTracker(t *testing.T) {
 	stageAndPublish(t, zd, stageAddA(t, zd, "one.example.test.", "192.0.2.11"))
 	if got := tr.takePending(); len(got) != 0 {
 		t.Fatalf("a zone the tracker does not know marked %d requests", len(got))
+	}
+	tr.begin(notifyKey{zone: zd.ZoneName, target: "192.0.2.53:53", rrtype: dns.TypeCDS}, zd, false)
+	stageAndPublish(t, zd, stageAddA(t, zd, "parent.example.test.", "192.0.2.13"))
+	if got := tr.takePending(); len(got) != 0 {
+		t.Fatalf("state from a CDS NOTIFY to the parent marked %d requests", len(got))
 	}
 	tr.begin(soaKey(zd.ZoneName, aDownstream), zd, true)
 	stageAndPublish(t, zd, stageAddA(t, zd, "two.example.test.", "192.0.2.12"))

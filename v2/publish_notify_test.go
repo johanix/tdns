@@ -43,6 +43,10 @@ func TestPublishNotifiesOnceWhenServable(t *testing.T) {
 	if len(req.Targets) != 1 || req.Targets[0] != aDownstream {
 		t.Errorf("NOTIFY targets %v, want [%s]", req.Targets, aDownstream)
 	}
+	// So a daemon without a tracker still retires a removed downstream.
+	if !req.Downstream {
+		t.Error("a publish's NOTIFY on the queue is not marked as the downstream set")
+	}
 }
 
 // A publish that cannot make the zone servable leaves it not Ready and silent.

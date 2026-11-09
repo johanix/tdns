@@ -23,6 +23,11 @@ type NotifyRequest struct {
 	// Ctx, when set, is the waiting caller's context. A send for the request
 	// still queued when it is done is not made: nobody is listening for it.
 	Ctx context.Context
+	// Downstream marks a publish's NOTIFY to the zone's downstreams, naming
+	// the whole downstream set. The pending set holds only those; on the
+	// queue, which a daemon without a tracker uses for them, it tells them
+	// apart from the rest.
+	Downstream bool
 }
 
 type NotifyResponse struct {
@@ -109,7 +114,7 @@ func Notifier(ctx context.Context, conf *Config, notifyreqQ chan NotifyRequest) 
 				lgDns.Info("NotifierEngine: terminating due to notifyreqQ closed")
 				return nil
 			}
-			n.handle(nr, false)
+			n.handle(nr, nr.Downstream)
 		case <-tracker.wake:
 			for _, nr := range tracker.takePending() {
 				n.handle(nr, true)

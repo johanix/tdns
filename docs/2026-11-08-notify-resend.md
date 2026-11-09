@@ -119,3 +119,41 @@ CodeRabbit's first round led to these changes:
   - an API-provisioned primary gets its template's resend settings.
 
 `v2/notifier_tracker_test.go` covers these.
+
+## Changes from the later reviews (2026-11-09)
+
+CodeRabbit's second and third rounds, and the project owner's rulings on them:
+
+- **A removed downstream stops getting NOTIFYs.** State from a publish's
+  NOTIFY is tagged as downstream state. When a publish finds no downstreams
+  left, it hands the tracker an empty request, which retires them all. It
+  does so only if the tracker holds downstream state for the zone or has a
+  request for it not yet taken (the project owner asked for that last part:
+  cheap, and it closes the window). State from CDS and CSYNC NOTIFYs to the
+  parent does not count, since an empty request cannot retire it. The ten-minute
+  prune also drops downstream state for targets the zone no longer lists,
+  which covers a configuration reload with no publish since.
+- **A daemon without a tracker** sends a publish's NOTIFY through the queue,
+  and the request says it names the downstream set, so the same retiring
+  applies.
+- **A caller's deadline cancels its queued sends.** `NotifyRequest.Ctx`
+  carries the waiting caller's context; a send still queued when it is done
+  is not made, and the batch is answered as failed. The KSK rollover's DS
+  push sets it.
+- **Declined: a cap on the queue of jobs whose caller waits.** It holds one
+  job per target of each waiting request, and those callers are the
+  rollover's DS pushes, one per zone in flight. The caller's deadline is the
+  better refusal (accepted by the project owner, 2026-11-09).
+- **`zone desc` shows "rejected"** for a target that answered with anything
+  but NOERROR. It is still not resent: a refusal is not a lost packet.
+- **A dynamic zone keeps its resend settings across a restart.** The
+  refresher that brings a persisted dynamic zone back carries them, and so
+  does every config-bearing reload.
+- **Declined: resolving the parent outside the Notifier loop.** A CDS or
+  CSYNC NOTIFY with no cached parent looks it up in the loop. That is not new
+  (before this change the Notifier did everything in order), the answer is
+  cached, and such NOTIFYs are rare. Moving it out while keeping requests in
+  order is a change of its own.
+- **Declined: stopping resends on a reply that fails TSIG.** Such a reply does
+  not show the target got the NOTIFY, and stopping on it would let a forged
+  reply suppress the resends. The target's last error shows the TSIG failure.

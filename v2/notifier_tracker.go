@@ -458,16 +458,24 @@ func (t *NotifyTracker) dropIfRetired(key notifyKey) bool {
 	return true
 }
 
-// tracks reports whether the tracker holds any state for the zone, or a
-// request for it the Notifier has not taken yet: one marked just before the
-// last downstream was removed would otherwise still be sent.
-func (t *NotifyTracker) tracks(zone string) bool {
+// tracksDownstreams reports whether the tracker holds state from the zone's
+// downstream NOTIFYs, or a request for them the Notifier has not taken yet: one
+// marked just before the last downstream was removed would otherwise still be
+// sent. State from other NOTIFYs (CDS, CSYNC to the parent) does not count:
+// an empty request cannot retire it, so it would only be handed over again on
+// every publish.
+func (t *NotifyTracker) tracksDownstreams(zone string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if _, ok := t.pending[zone]; ok {
 		return true
 	}
-	return len(t.byZone[core.CanonicalizeName(zone)]) > 0
+	for key := range t.byZone[core.CanonicalizeName(zone)] {
+		if st := t.targets[key]; st != nil && st.downstream {
+			return true
+		}
+	}
+	return false
 }
 
 // prune releases state nobody needs any more. Two kinds:
@@ -588,6 +596,10 @@ func (t *NotifyTracker) Status(zone string) []NotifyTargetStatus {
 			s.State = "retrying"
 		case st.givenUp:
 			s.State = "given up"
+		case !st.lastSuccess.IsZero() && st.lastRcode != dns.RcodeSuccess:
+			// It answered and said no (LastError has the rcode). Not resent:
+			// a refusal is not a lost packet.
+			s.State = "rejected"
 		default:
 			s.State = "ok"
 		}

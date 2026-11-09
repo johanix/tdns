@@ -893,6 +893,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.AllowNotify = zr.AllowNotify
 							zd.Downstreams = zr.Downstreams
 							zd.DownstreamAuth = zr.DownstreamAuth
+							zd.notifyRetries, zd.notifyRetryInterval = zr.NotifyRetries, zr.NotifyRetryInterval
 						} else if zr.Notify != nil {
 							zd.Notify = normalizePeerAddrs(zr.Notify)
 						}
@@ -1114,6 +1115,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						FirstZoneLoad:     true,
 						Status:            ZoneStatusPending, // registered + enqueued, no data yet (B6)
 						publishCadence:    zr.PublishCadence,
+
+						notifyRetries:       zr.NotifyRetries,
+						notifyRetryInterval: zr.NotifyRetryInterval,
 					}
 
 					// Strip origination settings this zone may not act on. The

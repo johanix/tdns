@@ -1225,8 +1225,13 @@ type ZoneRefresher struct {
 	// TransferSrc carries the per-zone outbound-transfer source to the
 	// RefreshEngine (copied to zd.TransferSrc on merge). Empty inherits.
 	TransferSrc []string
-	MultiSigner string
-	Force       bool // force refresh, ignoring SOA serial
+	// NotifyRetries and NotifyRetryInterval carry the zone's own NOTIFY
+	// resend settings (zoneNotifyRetrySettings), copied to the ZoneData by a
+	// config-bearing refresher. nil and zero inherit the server's.
+	NotifyRetries       *int
+	NotifyRetryInterval time.Duration
+	MultiSigner         string
+	Force               bool // force refresh, ignoring SOA serial
 	Wait        bool // wait for refresh to complete before responding
 	Response    chan RefresherResponse
 }

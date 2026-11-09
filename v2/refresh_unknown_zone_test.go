@@ -96,3 +96,36 @@ func TestAConfigBearingRefreshStillCreatesItsDynamicZone(t *testing.T) {
 		}
 	}
 }
+
+// A persisted dynamic zone keeps its own NOTIFY resend settings across a
+// restart: the refresher LoadDynamicZoneFiles enqueues carries them to the
+// ZoneData the engine creates (#1007). notify-retries: 0 must stay 0, not
+// become the server's default.
+func TestARestoredDynamicZoneKeepsItsNotifyRetrySettings(t *testing.T) {
+	authApp(t)
+	conf := &Config{}
+	conf.Internal.KeyDB = Conf.Internal.KeyDB
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 1)
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	runRefreshEngine(t, conf)
+
+	const zone = "retries.refresh.example."
+	t.Cleanup(func() { Zones.Remove(zone) })
+	zero := 0
+	conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: zone, ZoneType: Primary, ZoneStore: MapZone,
+		Zonefile: t.TempDir() + "/absent.zone", ConfigUpdate: true,
+		NotifyRetries: &zero, NotifyRetryInterval: 7 * time.Second}
+
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if zd, ok := Zones.Get(zone); ok {
+			retries, interval := notifyRetryPolicy(zd, NewNotifyTracker())
+			if retries != 0 || interval != 7*time.Second {
+				t.Errorf("restored zone resends %d times every %v, want 0 times every 7s", retries, interval)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the config-bearing refresh created no zone")
+		}
+	}
+}

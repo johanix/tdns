@@ -133,7 +133,7 @@ func TestNotifyRefusedIsNotResent(t *testing.T) {
 	zd := loadIxfrTestZone(t, basicZone)
 
 	conf.Internal.NotifyTracker.Mark(soaRequest(zd, addr))
-	waitFor(t, 5*time.Second, "the REFUSED reply", stateIs(conf, zd, "ok"))
+	waitFor(t, 5*time.Second, "the REFUSED reply", stateIs(conf, zd, "rejected"))
 	time.Sleep(200 * time.Millisecond)
 	if got := seen.Load(); got != 1 {
 		t.Errorf("a refused NOTIFY was sent %d times, want once", got)
