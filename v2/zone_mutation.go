@@ -1087,6 +1087,11 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	keepRestoreSerial := false
 	skipIfUnchanged := false
 	refuseIfChanged := false
+	// What the file it replaces left, put back if the reload is refused: the
+	// journal anchors to fileSerial, and a refused file must not move it.
+	prevFileSerial, prevFileDigest, prevIncoming, prevReplayed, prevServed :=
+		zd.fileSerial, zd.fileDigest, zd.IncomingSerial, zd.deltasReplayed, zd.CurrentSerial
+	prevApexLen, prevStore, prevType := zd.ApexLen, zd.ZoneStore, zd.ZoneType
 	// The zone has just been re-read; whatever was replayed on top of the
 	// PREVIOUS file no longer applies to this one, so a replay for the new file
 	// is due again.
@@ -1274,6 +1279,9 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		if old := zd.snapshot.Load(); old != nil &&
 			!authoredContentEqual(zd.ZoneName, old.Data, zd.workingSet, zd.contentTerms()) {
 			zd.workingSet, zd.wsFromReplacement, zd.wsSignalSynth = nil, false, nil
+			zd.fileSerial, zd.fileDigest, zd.IncomingSerial, zd.deltasReplayed, zd.CurrentSerial =
+				prevFileSerial, prevFileDigest, prevIncoming, prevReplayed, prevServed
+			zd.ApexLen, zd.ZoneStore, zd.ZoneType = prevApexLen, prevStore, prevType
 			return fmt.Errorf("zone %s: serial %d: %w", zd.ZoneName, old.Serial, ErrSignedFileChangedUnderServedSerial)
 		}
 	}

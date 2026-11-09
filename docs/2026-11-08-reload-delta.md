@@ -173,6 +173,9 @@ CodeRabbit's first round led to these changes:
   set, before anything is published. This is the rule tdns already keeps for
   unsigned zones: no new content under an old serial. A file whose serial is
   behind the served one is still served, with a warning, as before.
+  The refusal also puts back what the replaced file left (its serial, which
+  the journal anchors to, its digest and the incoming serial), so the next
+  update is journalled from the file that is actually on disk.
 - **An owner holding only an NSEC counts as content** where NSEC records are
   content, in a zone that does not sign itself.
 - **The ZONEMD parameters are resolved, defaults included,** before they go

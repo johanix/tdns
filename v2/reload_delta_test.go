@@ -392,6 +392,35 @@ func TestReloadOfAZoneSignedElsewhere(t *testing.T) {
 	}
 }
 
+// A refused reload leaves the file state as the file it replaces left it. The
+// journal anchors to fileSerial: had the refused file's serial stayed there,
+// the next update would be journalled from a serial no file on disk has.
+func TestARefusedReloadLeavesTheFileState(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, signedElsewhere("100", 'a'))
+	if err := apiUpdate(t, zd, kdb, "new.example. 3600 IN A 192.0.2.9"); err != nil {
+		t.Fatalf("the API update failed: %v", err)
+	}
+	served := servedSerial(zd)
+	if served == 100 {
+		t.Fatal("the update did not move the served serial past the file's")
+	}
+	zd.mu.Lock()
+	fileSerial, incoming := zd.fileSerial, zd.IncomingSerial
+	zd.mu.Unlock()
+
+	operatorEdit(t, zd, signedElsewhere(itoa(int(served)), 'b'))
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); !errors.Is(err, ErrSignedFileChangedUnderServedSerial) {
+		t.Fatalf("a signed file changed under the served serial: reload error %v", err)
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.fileSerial != fileSerial || zd.IncomingSerial != incoming || zd.CurrentSerial != served {
+		t.Errorf("after the refusal: file serial %d, incoming %d, served %d; want %d, %d, %d",
+			zd.fileSerial, zd.IncomingSerial, zd.CurrentSerial, fileSerial, incoming, served)
+	}
+}
+
 func sigOf(b byte) string { return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{b}, 64)) }
 
 // assertSignedSOAServedAt checks that the zone serves its SOA at serial with
