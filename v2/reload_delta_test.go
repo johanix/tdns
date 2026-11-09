@@ -419,3 +419,67 @@ func TestAuthoredContentEqualComparesZonemdParameters(t *testing.T) {
 		t.Error("a new hash algorithm did not count as a change")
 	}
 }
+
+// An SOA that came with a signature is compared serial and all: the signature
+// covers the serial, so two such SOAs that differ only there are different.
+// An unsigned SOA's serial is still left out.
+func TestAuthoredContentEqualCountsASignedSOAsSerial(t *testing.T) {
+	build := func(text string) map[string]*OwnerData {
+		t.Helper()
+		zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+		if _, _, err := zd.ReadZoneData(text, true); err != nil {
+			t.Fatalf("ReadZoneData: %v", err)
+		}
+		return snapshotMapFromData(zd.Data)
+	}
+	foreign := contentTerms{withSigs: true}
+	signedAt := func(serial string) map[string]*OwnerData {
+		return build(strings.Replace(signedElsewhere("100", 'a'), "hostmaster.example. 100 ", "hostmaster.example. "+serial+" ", 1))
+	}
+	if authoredContentEqual("example.", signedAt("100"), signedAt("101"), foreign) {
+		t.Error("two signed SOAs that differ in their serial compared equal")
+	}
+	if !authoredContentEqual("example.", build(reloadText("100", "")), build(reloadText("101", "")), foreign) {
+		t.Error("two unsigned SOAs that differ only in their serial compared different")
+	}
+	if authoredContentDigest("example.", signedAt("100"), foreign) == authoredContentDigest("example.", signedAt("101"), foreign) {
+		t.Error("the restart digest ignores a signed SOA's serial")
+	}
+}
+
+// A zone that makes its own ZONEMD records its restart digest after the
+// publish made the record and compares it before the next one has: the
+// configured parameters stand in for the record, so both digests agree.
+func TestRestartDigestOfAZoneThatMakesItsZonemd(t *testing.T) {
+	build := func(extra string) map[string]*OwnerData {
+		t.Helper()
+		zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+		if _, _, err := zd.ReadZoneData(reloadText("1", extra), true); err != nil {
+			t.Fatalf("ReadZoneData: %v", err)
+		}
+		return snapshotMapFromData(zd.Data)
+	}
+	made := contentTerms{skipZonemd: true, zonemd: []string{"1/1"}}
+	published := build("example.\t3600\tIN\tZONEMD\t1 1 1 " + strings.Repeat("a", 96) + "\n")
+	loaded := build("")
+	if authoredContentDigest("example.", published, made) != authoredContentDigest("example.", loaded, made) {
+		t.Error("the digest of the published zone and of the file it came from differ only by the ZONEMD")
+	}
+	if authoredContentDigest("example.", loaded, made) == authoredContentDigest("example.", loaded, contentTerms{skipZonemd: true, zonemd: []string{"1/2"}}) {
+		t.Error("a change to the configured ZONEMD algorithm did not change the digest")
+	}
+}
+
+// A file signed elsewhere keeps its own serial at a start, even when the zone
+// has published a higher one: a lifted serial would not be covered by the
+// file's SOA signature.
+func TestRestartOfAZoneSignedElsewhereKeepsTheFilesSerial(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, signedElsewhere("100", 'a'))
+	if err := kdb.RaiseOutgoingSerial("example.", 200); err != nil {
+		t.Fatalf("RaiseOutgoingSerial: %v", err)
+	}
+	if got := servedSerial(restartZone(t, zd, kdb)); got != 100 {
+		t.Errorf("after a start the signed file is served at %d; its SOA signature covers 100", got)
+	}
+}

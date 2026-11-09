@@ -1692,6 +1692,8 @@ func (zd *ZoneData) publishPanickedLocked() {
 	zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
 	zd.wsPersistDelta = false
 	zd.wsPersistErr = nil
+	zd.wsSkipIfUnchanged = false
+	zd.wsRecordContentDigest = false
 	zd.setErrorLocked(PublishError, "a publish of the zone failed part-way (internal error);"+
 		" it serves its last published content, which may disagree with its journal until the zone is reloaded")
 }

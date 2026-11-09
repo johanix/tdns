@@ -1115,7 +1115,18 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		// (#1006): then a downstream holding it has this content already, and
 		// the extra transfer buys nothing. That is decided once the working set
 		// is built, below, by restoreDigest.
-		if haveRestoreSerial && serialNewer(restoreSerial, zd.CurrentSerial) {
+		//
+		// Except a file signed elsewhere, which keeps its own serial whatever
+		// it is: its SOA signature covers that serial, and a lifted one would
+		// leave the served SOA failing validation. A downstream that already
+		// holds a higher serial will not fetch it; that is the operator's to
+		// fix, in the file, under a new signature.
+		switch {
+		case !haveRestoreSerial || !serialNewer(restoreSerial, zd.CurrentSerial):
+		case fromZoneFile && !zd.signsItsOwnContent() && fileSOASigned(new_zd):
+			lg.Warn("first load: the zone file is signed elsewhere, so its own serial is served although this zone has published a higher one; downstreams that hold that serial will not transfer this one",
+				"zone", zd.ZoneName, "file", zd.CurrentSerial, "published", restoreSerial)
+		default:
 			lg.Info("first load; lifting the serial past the highest one this zone has published",
 				"zone", zd.ZoneName, "loaded", zd.CurrentSerial, "published", restoreSerial, "serving", restoreSerial+1)
 			zd.CurrentSerial = restoreSerial + 1
