@@ -458,10 +458,15 @@ func (t *NotifyTracker) dropIfRetired(key notifyKey) bool {
 	return true
 }
 
-// tracks reports whether the tracker holds any state for the zone.
+// tracks reports whether the tracker holds any state for the zone, or a
+// request for it the Notifier has not taken yet: one marked just before the
+// last downstream was removed would otherwise still be sent.
 func (t *NotifyTracker) tracks(zone string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if _, ok := t.pending[zone]; ok {
+		return true
+	}
 	return len(t.byZone[core.CanonicalizeName(zone)]) > 0
 }
 

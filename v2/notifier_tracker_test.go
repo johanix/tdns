@@ -282,6 +282,24 @@ func TestPublishWithNoDownstreamsTellsTheTracker(t *testing.T) {
 	}
 }
 
+// A request marked but not yet taken counts too: a publish that removes the
+// last downstream replaces it with the empty one, so the removed target is
+// not sent to.
+func TestPublishWithNoDownstreamsReplacesAPendingRequest(t *testing.T) {
+	prev := Conf.Internal.NotifyTracker
+	tr := NewNotifyTracker()
+	Conf.Internal.NotifyTracker = tr
+	t.Cleanup(func() { Conf.Internal.NotifyTracker = prev })
+
+	zd := loadIxfrTestZone(t, basicZone)
+	tr.Mark(soaRequest(zd, aDownstream))
+	stageAndPublish(t, zd, stageAddA(t, zd, "one.example.test.", "192.0.2.11"))
+	got := tr.takePending()
+	if len(got) != 1 || len(got[0].Targets) != 0 {
+		t.Errorf("want the pending request replaced by an empty one, got %+v", got)
+	}
+}
+
 // prune drops a downstream target the zone no longer has, scheduled resend
 // included, and leaves state that did not come from the downstream set.
 func TestNotifyPruneDropsRemovedDownstreams(t *testing.T) {
