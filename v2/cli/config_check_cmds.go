@@ -1063,7 +1063,7 @@ func checkPrimaryZone(rep *ccReport, g, zname string, eff tdns.ZoneConf) {
 			"create the zone file or fix the path")
 		return
 	}
-	if err := parseZonefile(zf, zname); err != nil {
+	if err := parseZonefile(zf, zname, zoneOptionsEnabled(eff.OptionsStrs)[tdns.OptAllowDoubledSuffix]); err != nil {
 		rep.fail(g, zname, fmt.Sprintf("zonefile %s failed to parse: %v", zf, err),
 			"fix the zone file so the miekg/dns parser accepts it (apex SOA, valid RRs)")
 		return
@@ -1617,21 +1617,32 @@ func checkFileExists(rep *ccReport, g, check, path string) {
 	rep.pass(g, check, fmt.Sprintf("%s exists: %s", check, path))
 }
 
-func parseZonefile(path, origin string) error {
+// parseZonefile parses a zone file as the server's loader does, refusing a
+// doubled suffix as it does unless the zone allows one, so config check never
+// passes a file the server will not load.
+func parseZonefile(path, origin string, allowDoubledSuffix bool) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	zp := dns.NewZoneParser(f, origin, path)
+	zp := dns.NewZoneParser(f, dns.Fqdn(origin), path)
 	zp.SetIncludeAllowed(true)
+	var doubled *tdns.DoubledSuffixReport
+	if !allowDoubledSuffix {
+		doubled = tdns.NewDoubledSuffixReport(origin)
+	}
 	sawSOA := false
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
 		if rr != nil && rr.Header().Rrtype == dns.TypeSOA {
 			sawSOA = true
 		}
+		doubled.Check(rr)
 	}
 	if err := zp.Err(); err != nil {
+		return err
+	}
+	if err := doubled.Err(); err != nil {
 		return err
 	}
 	if !sawSOA {
