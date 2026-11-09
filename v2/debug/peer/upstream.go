@@ -155,10 +155,9 @@ func (u *Upstream) Publish(z *Zone) (*Version, error) {
 }
 
 // Notify sends one NOTIFY(SOA) to the SUT and records the response. The
-// message carries no SOA in the answer section — that is what miekg's
-// SetNotify builds and what tdns itself sends, and the rig deliberately
-// behaves the same rather than sending something the SUT will never see in
-// production.
+// message carries no SOA in the answer section, as miekg's SetNotify builds
+// it. tdns now sends the served SOA there (#1008), but as a receiver it never
+// reads that hint, so leaving it out changes nothing the SUT does.
 func (u *Upstream) Notify(ctx context.Context, target string) (int, error) {
 	u.mu.Lock()
 	serial := u.hist.Current().Serial
