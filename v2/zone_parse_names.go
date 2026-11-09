@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -74,15 +75,18 @@ func doubledZoneSuffix(zoneLabels []string, name string) (string, bool) {
 	if zl == 0 || n < 2*zl {
 		return "", false
 	}
+	// Labels are compared as DNS compares them, folding A-Z only
+	// (core.EqualNames). strings.EqualFold folds Unicode as well, and would
+	// read a label holding U+017F (long s) as one holding "s".
 	for i := 0; i < zl; i++ {
-		if !strings.EqualFold(labels[n-zl+i], zoneLabels[i]) {
+		if !core.EqualNames(labels[n-zl+i], zoneLabels[i]) {
 			return "", false // not in the zone at all
 		}
 	}
 	for k := zl; 2*k <= n; k++ {
 		doubled := true
 		for i := 0; i < k; i++ {
-			if !strings.EqualFold(labels[n-k+i], labels[n-2*k+i]) {
+			if !core.EqualNames(labels[n-k+i], labels[n-2*k+i]) {
 				doubled = false
 				break
 			}

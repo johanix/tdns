@@ -108,6 +108,18 @@ func TestZoneFileLoadsADoubledSuffixWhenTheZoneAllowsIt(t *testing.T) {
 	}
 }
 
+// Labels fold as DNS folds them, A-Z only. U+017F (long s) is not "s", so in
+// zone s.example. this name is not ns.s.example. twice.
+func TestDoubledZoneSuffixFoldsASCIIOnly(t *testing.T) {
+	zone := dns.SplitDomainName("s.example.")
+	if suffix, ok := doubledZoneSuffix(zone, "n\u017f.s.example.ns.s.example."); ok {
+		t.Errorf("a label with U+017F was read as ASCII: doubled %q", suffix)
+	}
+	if _, ok := doubledZoneSuffix(zone, "NS.S.example.ns.s.EXAMPLE."); !ok {
+		t.Error("an ASCII case difference hid a doubled suffix")
+	}
+}
+
 // Names that contain the zone's name but don't end in it twice load as before.
 func TestZoneFileAcceptsNamesThatOnlyContainTheZone(t *testing.T) {
 	zd := originTestZone("r1.test.")
