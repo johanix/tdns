@@ -84,6 +84,11 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 
 				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, ds.SyncStatus, imr())
+				if errors.Is(err, ErrNoUsableDsync) {
+					// Not a failure: warned about once (planUsable)
+					lgDns.Debug("DelegationSyncher: nothing sent", "zone", ds.ZoneName, "reason", err)
+					continue
+				}
 				if err != nil {
 					lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					continue
@@ -473,11 +478,10 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 			"zone", zd.ZoneName, "err", err)
 		return "", 0, UpdateResult{}, err
 	}
-	if !plan.Usable() {
-		lgDns.Warn("DelegationSyncEngine: no usable sync scheme", "zone", zd.ZoneName,
-			"parent", plan.Parent, "plan", plan.Summary())
-		return "", 0, UpdateResult{}, fmt.Errorf("zone %s: no usable delegation sync scheme: %s",
-			zd.ZoneName, plan.Summary())
+	// A parent that offers nothing this child can use is ErrNoUsableDsync:
+	// one warning per zone, not an error (planUsable).
+	if err := zd.planUsable(plan); err != nil {
+		return "", 0, UpdateResult{}, err
 	}
 
 	// rcode and ur are captured from whichever attempt succeeds; on total
@@ -1105,7 +1109,15 @@ func bootstrapOutcome(ur UpdateResult, err error) error {
 // applies bootstrapOutcome left every test green.
 func (zd *ZoneData) finishDelegationSyncSetup(msg string, ur UpdateResult, err error) error {
 	err = bootstrapOutcome(ur, err)
+	if errors.Is(err, ErrNoUsableDsync) {
+		// The parent advertises no UPDATE target: there is nobody to
+		// bootstrap the key with. The common case, not an error: warned
+		// about once per zone, and the setup is done.
+		zd.noteNoUpdateTarget(err)
+		return nil
+	}
 	if errors.Is(err, errBootstrapManual) {
+		zd.noteUpdateTargetFound()
 		// The parent's bootstrap is manual by design; this is the state
 		// MANUAL-BOOTSTRAP-REQUIRED exists for, and it recurs on every load
 		// until the operator acts. Not an error.
@@ -1120,6 +1132,7 @@ func (zd *ZoneData) finishDelegationSyncSetup(msg string, ur UpdateResult, err e
 		}
 		return err
 	}
+	zd.noteUpdateTargetFound()
 	lgDns.Info("DelegationSyncSetup: SIG(0) key bootstrap complete", "zone", zd.ZoneName, "msg", msg)
 	return nil
 }
@@ -1147,6 +1160,13 @@ func (zd *ZoneData) runExplicitSync(ctx context.Context, kdb *KeyDB, notifyq cha
 
 	// Not in sync, let's fix that.
 	msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
+	if errors.Is(err, ErrNoUsableDsync) {
+		// Not a failure: the answer says why nothing was sent, with no
+		// error (planUsable warned once)
+		lgDns.Debug("DelegationSyncher: nothing sent", "zone", zd.ZoneName, "reason", err)
+		syncstate.Msg = err.Error()
+		return syncstate
+	}
 	if err != nil {
 		lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", zd.ZoneName, "err", err)
 		syncstate.Error = true
