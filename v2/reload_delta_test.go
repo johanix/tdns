@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"log"
 	"os"
 	"strings"
@@ -370,14 +371,140 @@ func TestReloadOfAZoneSignedElsewhere(t *testing.T) {
 		t.Error("an unchanged signed file was published again")
 	}
 
+	assertSignedSOAServedAt(t, zd, 100, 'a', "after an unchanged reload")
+
+	// Re-signed under the same serial: downstreams holding 100 would never
+	// transfer it, so the reload is refused and 100 stays as it was.
 	operatorEdit(t, zd, signedElsewhere("100", 'b'))
-	mustReload(t, zd, false)
-	if got := servedSerial(zd); got != 100 {
-		t.Errorf("the re-signed file is served at %d; its SOA signature covers 100", got)
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); !errors.Is(err, ErrSignedFileChangedUnderServedSerial) {
+		t.Errorf("a signed file changed under the served serial: reload error %v", err)
 	}
-	want := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'b'}, 64))
-	if got := wwwSignature(t, zd); got != want {
+	if zd.publishedSnapshot() != before {
+		t.Error("a signed file changed under the served serial was published")
+	}
+
+	// Re-signed under a newer serial, it is published, signatures and all.
+	operatorEdit(t, zd, signedElsewhere("101", 'b'))
+	mustReload(t, zd, false)
+	assertSignedSOAServedAt(t, zd, 101, 'b', "after the file was re-signed")
+	if got := wwwSignature(t, zd); got != sigOf('b') {
 		t.Error("the old signatures are still served after the file was re-signed")
+	}
+}
+
+func sigOf(b byte) string { return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{b}, 64)) }
+
+// assertSignedSOAServedAt checks that the zone serves its SOA at serial with
+// the file's own signature over it.
+func assertSignedSOAServedAt(t *testing.T, zd *ZoneData, serial uint32, sig byte, when string) {
+	t.Helper()
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		t.Fatalf("%s: nothing is served", when)
+	}
+	sigs := snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs
+	if snap.Serial != serial || len(sigs) != 1 || sigs[0].(*dns.RRSIG).Signature != sigOf(sig) {
+		t.Errorf("%s: the SOA is served at %d with %d signatures; want %d with the file's own", when, snap.Serial, len(sigs), serial)
+	}
+}
+
+// Neither outbound-soa-serial mode moves the serial of a zone signed
+// elsewhere, at a start or after a refresh: its SOA signature covers that
+// serial and no other (#1006).
+func TestOutboundSerialModesLeaveAZoneSignedElsewhereAlone(t *testing.T) {
+	for _, mode := range []string{OutboundSoaSerialPersist, OutboundSoaSerialUnixtime} {
+		t.Run(mode, func(t *testing.T) {
+			kdb := newTestKeyDB(t)
+			zd := reloadZone(t, kdb, signedElsewhere("100", 'a'))
+			if err := kdb.RaiseOutgoingSerial("example.", 200); err != nil {
+				t.Fatalf("RaiseOutgoingSerial: %v", err)
+			}
+			zd.OutboundSoaSerial = mode
+			applyOutboundSerialAfterRefresh(zd, "example.")
+			assertSignedSOAServedAt(t, zd, 100, 'a', "after a refresh")
+
+			fresh := &ZoneData{
+				ZoneName:          "example.",
+				ZoneStore:         MapZone,
+				ZoneType:          Primary,
+				Zonefile:          zd.Zonefile,
+				Logger:            log.New(os.Stderr, "", 0),
+				Options:           map[ZoneOption]bool{},
+				KeyDB:             kdb,
+				FirstZoneLoad:     true,
+				Data:              core.NewNameMap[OwnerData](),
+				OutboundSoaSerial: mode,
+			}
+			zd.stopPublisher()
+			Zones.Set("example.", fresh)
+			t.Cleanup(func() { Zones.Remove("example.") })
+			t.Cleanup(fresh.stopPublisher)
+			if _, err := initialLoadZone(context.Background(), fresh, "example.", ZoneRefresher{Name: "example."},
+				&Config{}, core.NewCmap[*RefreshCounter](), func(string) {}); err != nil {
+				t.Fatalf("initialLoadZone: %v", err)
+			}
+			assertSignedSOAServedAt(t, fresh, 100, 'a', "at a start")
+		})
+	}
+}
+
+// Where NSEC records are content -- a zone that does not sign itself -- an
+// owner holding only an NSEC is content too.
+func TestAuthoredContentEqualCountsAnNsecOnlyOwner(t *testing.T) {
+	zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+	if _, _, err := zd.ReadZoneData(signedElsewhere("100", 'a'), true); err != nil {
+		t.Fatalf("ReadZoneData: %v", err)
+	}
+	base := snapshotMapFromData(zd.Data)
+	other := snapshotMapFromData(zd.Data)
+	other["x.example."] = &OwnerData{Name: "x.example.", RRtypes: NewRRTypeStore(),
+		NSEC: core.RRset{Name: "x.example.", RRtype: dns.TypeNSEC, RRs: []dns.RR{mustRR(t, "x.example. 7200 IN NSEC www.example. NSEC RRSIG")}}}
+	if authoredContentEqual("example.", base, other, contentTerms{withSigs: true}) {
+		t.Error("a new owner holding only an NSEC compares as no change")
+	}
+	if !authoredContentEqual("example.", base, other, contentTerms{}) {
+		t.Error("in a zone that makes its own chain, an NSEC-only owner counts as a change")
+	}
+}
+
+// The terms a zone compares in are its configuration's, resolved as the
+// publish resolves it: unset ZONEMD parameters and the defaults spelled out
+// compare and digest alike; a different algorithm does not, and a zone that
+// does not make its ZONEMD leaves one in its file as content.
+func TestContentTermsResolveTheZonemdDefaults(t *testing.T) {
+	zone := func(publish bool, scheme uint8, algs ...uint8) *ZoneData {
+		return &ZoneData{ZoneName: "example.", ZoneType: Primary,
+			Options: map[ZoneOption]bool{OptPublishZonemd: publish}, zonemdScheme: scheme, zonemdAlgs: algs}
+	}
+	unset, spelled, other, off := zone(true, 0), zone(true, ZonemdSchemeSimple, ZonemdAlgSHA384),
+		zone(true, ZonemdSchemeSimple, ZonemdAlgSHA512), zone(false, 0)
+	data := func(extra string) map[string]*OwnerData {
+		t.Helper()
+		zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+		if _, _, err := zd.ReadZoneData(reloadText("1", extra), true); err != nil {
+			t.Fatalf("ReadZoneData: %v", err)
+		}
+		return snapshotMapFromData(zd.Data)
+	}
+	loaded := data("")
+	published := data("example.\t3600\tIN\tZONEMD\t1 1 1 " + strings.Repeat("a", 96) + "\n")
+	digest := func(zd *ZoneData, d map[string]*OwnerData) string {
+		return authoredContentDigest("example.", d, zd.contentTerms())
+	}
+	if !unset.contentTerms().skipZonemd || off.contentTerms().skipZonemd {
+		t.Fatal("contentTerms does not follow publish-zonemd")
+	}
+	if digest(unset, loaded) != digest(spelled, loaded) {
+		t.Error("unset ZONEMD parameters and the defaults spelled out digest differently")
+	}
+	if digest(unset, loaded) != digest(unset, published) {
+		t.Error("a zone that makes its ZONEMD digests its own record as content")
+	}
+	if digest(unset, loaded) == digest(other, loaded) {
+		t.Error("a different ZONEMD algorithm digests the same")
+	}
+	if digest(off, loaded) == digest(off, published) {
+		t.Error("a zone that does not make its ZONEMD ignores one in its file")
 	}
 }
 
@@ -479,7 +606,5 @@ func TestRestartOfAZoneSignedElsewhereKeepsTheFilesSerial(t *testing.T) {
 	if err := kdb.RaiseOutgoingSerial("example.", 200); err != nil {
 		t.Fatalf("RaiseOutgoingSerial: %v", err)
 	}
-	if got := servedSerial(restartZone(t, zd, kdb)); got != 100 {
-		t.Errorf("after a start the signed file is served at %d; its SOA signature covers 100", got)
-	}
+	assertSignedSOAServedAt(t, restartZone(t, zd, kdb), 100, 'a', "after a start")
 }

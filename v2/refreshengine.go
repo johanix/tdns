@@ -247,7 +247,9 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 						"zone", zone, "err", err)
 				}
 			}
-		} else if zd.KeyDB != nil {
+		} else if zd.KeyDB != nil && !zd.servesSignedElsewhereSOA() {
+			// Not for a zone signed elsewhere, which serves the signer's
+			// serial (#1006): neither mode may move it.
 			serialChanged := false
 			switch zd.EffectiveOutboundSoaSerial() {
 			case OutboundSoaSerialUnixtime:
