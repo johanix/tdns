@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 func (kdb *KeyDB) SaveOutgoingSerial(zone string, serial uint32) error {
@@ -28,16 +29,28 @@ func (kdb *KeyDB) SaveOutgoingSerial(zone string, serial uint32) error {
 // A raise clears the content digest: it described the content at the old
 // serial. SetPublishedContentDigest puts one back for the new serial when the
 // publish computed one.
+//
+// The floor must be recorded even when the schema migration that adds the
+// digest column failed (db.go logs that and carries on). Without the column
+// no digest was ever stored, so there is none to clear, and the raise is
+// retried without clearing one.
 func (kdb *KeyDB) RaiseOutgoingSerial(zone string, serial uint32) error {
-	_, err := kdb.DB.Exec(`
-INSERT INTO OutgoingSerials (zone, serial, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
-ON CONFLICT(zone) DO UPDATE SET serial = excluded.serial, content_digest = NULL, updated_at = CURRENT_TIMESTAMP
-WHERE ((excluded.serial - OutgoingSerials.serial) % 4294967296 + 4294967296) % 4294967296
-      BETWEEN 1 AND 2147483647`, zone, serial)
+	_, err := kdb.DB.Exec(raiseOutgoingSerialSQL("content_digest = NULL, "), zone, serial)
+	if err != nil && strings.Contains(err.Error(), "no such column: content_digest") {
+		_, err = kdb.DB.Exec(raiseOutgoingSerialSQL(""), zone, serial)
+	}
 	if err != nil {
 		return fmt.Errorf("RaiseOutgoingSerial: %w", err)
 	}
 	return nil
+}
+
+func raiseOutgoingSerialSQL(clearDigest string) string {
+	return `
+INSERT INTO OutgoingSerials (zone, serial, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(zone) DO UPDATE SET serial = excluded.serial, ` + clearDigest + `updated_at = CURRENT_TIMESTAMP
+WHERE ((excluded.serial - OutgoingSerials.serial) % 4294967296 + 4294967296) % 4294967296
+      BETWEEN 1 AND 2147483647`
 }
 
 // SetPublishedContentDigest records digest as the content published at

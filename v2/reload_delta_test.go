@@ -5,7 +5,9 @@
 package tdns
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"log"
 	"os"
 	"strings"
@@ -200,6 +202,10 @@ func TestReloadOfAJournalFoldedIntoTheFile(t *testing.T) {
 	if _, have, err := kdb.LastZoneDeltaSerial(zd.ZoneName); err != nil || have {
 		t.Errorf("the journal was not emptied (have=%v, err=%v)", have, err)
 	}
+	// The file now holds what that serial serves, so a restart serves it again.
+	if got := servedSerial(restartZone(t, zd, kdb)); got != served {
+		t.Errorf("after the journal was folded in, a restart serves %d, want %d", got, served)
+	}
 }
 
 // restartZone stands up a second ZoneData over the same file and database, as
@@ -297,10 +303,10 @@ func TestAuthoredContentEqual(t *testing.T) {
 	}
 	for _, c := range cases {
 		other := build(t, c.text)
-		if got := authoredContentEqual("example.", base, other, false); got != c.equal {
+		if got := authoredContentEqual("example.", base, other, contentTerms{}); got != c.equal {
 			t.Errorf("%s: equal = %v, want %v", c.name, got, c.equal)
 		}
-		digestsEqual := authoredContentDigest("example.", base, false) == authoredContentDigest("example.", other, false)
+		digestsEqual := authoredContentDigest("example.", base, contentTerms{}) == authoredContentDigest("example.", other, contentTerms{})
 		if digestsEqual != c.equal {
 			t.Errorf("%s: digests equal = %v, want %v", c.name, digestsEqual, c.equal)
 		}
@@ -322,11 +328,94 @@ func TestComputeZoneDeltaBoundedStopsEarly(t *testing.T) {
 		return snapshotMapFromData(zd.Data)
 	}
 	oldData, newData := build(a.String()), build(b.String())
-	if _, _, est, complete := computeZoneDeltaBounded("example.", oldData, newData, 500); complete || est > 1000 {
+	if _, _, est, complete := computeZoneDeltaBounded("example.", oldData, newData, 500); complete || est <= 500 || est > 1000 {
 		t.Errorf("bounded diff: complete=%v est=%d, want an early stop just past 500", complete, est)
 	}
 	rem, add, _, complete := computeZoneDeltaBounded("example.", oldData, newData, -1)
 	if !complete || len(rem) != 200 || len(add) != 200 {
 		t.Errorf("unbounded diff: complete=%v removed=%d added=%d", complete, len(rem), len(add))
+	}
+}
+
+// signedElsewhere is a zone file signed before it reached this server: its SOA
+// and its www A RRset carry signatures, here made of the byte sig.
+func signedElsewhere(serial string, sig byte) string {
+	b64 := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{sig}, 64))
+	return reloadText(serial, "www.example.\t3600\tIN\tA\t192.0.2.1\n") +
+		"example.\t3600\tIN\tRRSIG\tSOA 15 1 3600 20991231000000 20260101000000 12345 example. " + b64 + "\n" +
+		"www.example.\t3600\tIN\tRRSIG\tA 15 2 3600 20991231000000 20260101000000 12345 example. " + b64 + "\n"
+}
+
+func wwwSignature(t *testing.T, zd *ZoneData) string {
+	t.Helper()
+	od := zd.publishedSnapshot().Data["www.example."]
+	if od == nil {
+		t.Fatal("www.example. is not served")
+	}
+	sigs := od.RRtypes.GetOnlyRRSet(dns.TypeA).RRSIGs
+	if len(sigs) != 1 {
+		t.Fatalf("www.example. A carries %d signatures, want 1", len(sigs))
+	}
+	return sigs[0].(*dns.RRSIG).Signature
+}
+
+// A zone signed elsewhere keeps its file's serial, which its SOA signature
+// covers, and its signatures are content: re-signed under the same serial, it
+// is published with the new signatures; reloaded unchanged, it is not.
+func TestReloadOfAZoneSignedElsewhere(t *testing.T) {
+	zd := reloadZone(t, newTestKeyDB(t), signedElsewhere("100", 'a'))
+	before := zd.publishedSnapshot()
+	mustReload(t, zd, true)
+	if zd.publishedSnapshot() != before {
+		t.Error("an unchanged signed file was published again")
+	}
+
+	operatorEdit(t, zd, signedElsewhere("100", 'b'))
+	mustReload(t, zd, false)
+	if got := servedSerial(zd); got != 100 {
+		t.Errorf("the re-signed file is served at %d; its SOA signature covers 100", got)
+	}
+	want := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'b'}, 64))
+	if got := wwwSignature(t, zd); got != want {
+		t.Error("the old signatures are still served after the file was re-signed")
+	}
+}
+
+// If the migration that adds content_digest failed, the floor is still
+// recorded: without the column there is no digest to clear.
+func TestRaiseOutgoingSerialWithoutTheDigestColumn(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	if _, err := kdb.DB.Exec(`ALTER TABLE OutgoingSerials DROP COLUMN content_digest`); err != nil {
+		t.Fatalf("setup: dropping the column: %v", err)
+	}
+	for _, serial := range []uint32{100, 101, 50} {
+		if err := kdb.RaiseOutgoingSerial("example.", serial); err != nil {
+			t.Fatalf("RaiseOutgoingSerial(%d): %v", serial, err)
+		}
+	}
+	if got, err := kdb.LoadOutgoingSerial("example."); err != nil || got != 101 {
+		t.Errorf("the floor is %d (err %v), want 101", got, err)
+	}
+}
+
+// A ZONEMD the zone makes is compared on its parameters, not its digest: a
+// new digest is no change, a new hash algorithm is.
+func TestAuthoredContentEqualComparesZonemdParameters(t *testing.T) {
+	build := func(zonemd string) map[string]*OwnerData {
+		t.Helper()
+		zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+		if _, _, err := zd.ReadZoneData(reloadText("1", "example.\t3600\tIN\tZONEMD\t"+zonemd+"\n"), true); err != nil {
+			t.Fatalf("ReadZoneData: %v", err)
+		}
+		return snapshotMapFromData(zd.Data)
+	}
+	sha384 := func(c string) string { return "1 1 1 " + strings.Repeat(c, 96) }
+	sha512 := "1 1 2 " + strings.Repeat("c", 128)
+	made := contentTerms{skipZonemd: true}
+	if !authoredContentEqual("example.", build(sha384("a")), build(sha384("b")), made) {
+		t.Error("a new digest under the same parameters counted as a change")
+	}
+	if authoredContentEqual("example.", build(sha384("a")), build(sha512), made) {
+		t.Error("a new hash algorithm did not count as a change")
 	}
 }

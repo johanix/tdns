@@ -116,3 +116,33 @@ file's own serial.
   no DNSKEY, so the signer puts it back, and the apex counts as changed for the
   restitch. Carrying the DNSKEY RRset too was not done: whether the signer then
   notices a changed key set has not been checked.
+
+## Changes from the first review (2026-11-09)
+
+CodeRabbit's first round led to these changes:
+
+- **A zone signed elsewhere.** When a zone does not sign its own content,
+  any RRSIGs and NSEC records in its file came with the content, so the
+  unchanged-content check and the restart digest now compare them
+  (`contentTerms.withSigs`). A file re-signed under the same serial is
+  published, and the old signatures are not served until they expire. A
+  file whose SOA carries a signature also keeps its own serial on a reload,
+  whatever it is, because that signature covers it. A first load still
+  lifts such a zone past the published-serial floor, as it did before this
+  change.
+- **The floor does not depend on the new column.** If the migration that
+  adds `content_digest` failed, `RaiseOutgoingSerial` retries without
+  clearing the digest, so the floor is still recorded. No digest can have
+  been stored without the column.
+- **ZONEMD parameters count.** A ZONEMD the zone makes is compared on its
+  scheme and hash pairs, not its digest. Turning it on, or changing its
+  algorithms, before a reload therefore publishes.
+- **An unchanged reload records its digest,** at the serial it keeps. A
+  journal folded into the file by hand then survives a restart without a
+  new serial.
+- **A refused publish keeps its flags.** When signing fails and the working
+  set stays staged, the retry still skips an unchanged reload and still
+  records the digest.
+- **Smaller:** a serial regression is reported as one even when the delta
+  is also over budget, and the bounded-delta test checks the estimate's
+  lower bound.

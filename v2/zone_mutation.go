@@ -499,14 +499,22 @@ func (zd *ZoneData) publishLocked(gen uint64) {
 // false the caller has already set zd.CurrentSerial (refresh flips, transport
 // signal synthesis without a content serial change).
 func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
-	// Consumed here, before any exit, so a dropped publish cannot carry it into
-	// a later, unrelated one. A publish refused below and retried later loses
-	// it, and then publishes even if unchanged: a spare serial, never a lost
-	// change.
+	// Consumed here, before any exit, so a dropped publish cannot carry them
+	// into a later, unrelated one. A publish refused below -- signing failed,
+	// say -- leaves the working set staged for a retry, and the flags go back
+	// with it: the retry still skips a reload that changed nothing, and still
+	// records its digest. A publish that goes out, is skipped or drops the
+	// working set leaves them cleared.
 	skipIfUnchanged := zd.wsSkipIfUnchanged
 	zd.wsSkipIfUnchanged = false
 	recordContentDigest := zd.wsRecordContentDigest
 	zd.wsRecordContentDigest = false
+	defer func() {
+		if zd.workingSet != nil {
+			zd.wsSkipIfUnchanged = skipIfUnchanged
+			zd.wsRecordContentDigest = recordContentDigest
+		}
+	}()
 
 	// The changes waiting to be published (updates the gate deferred, commits
 	// waiting for their transaction: zone_tx.go) are answered by this publish,
@@ -707,9 +715,15 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// before them would find a difference in every signed zone. The comparison
 	// leaves out what those steps regenerate anyway (authoredContentEqual).
 	if skipIfUnchanged && oldSnap != nil &&
-		authoredContentEqual(zd.ZoneName, oldSnap.Data, data, zd.zoneManagesZonemd()) {
+		authoredContentEqual(zd.ZoneName, oldSnap.Data, data, zd.contentTerms()) {
 		lg.Info("reload: the zone's content is unchanged; keeping its serial and not notifying",
 			"zone", zd.ZoneName, "serial", oldSnap.Serial)
+		// The file now holds what that serial serves -- a journalled change
+		// folded into it, say -- so record that, and a restart that loads
+		// the file serves the serial again instead of the next one.
+		if recordContentDigest {
+			zd.recordPublishedContentDigestLocked(oldSnap.Serial, data)
+		}
 		zd.CurrentSerial = oldSnap.Serial
 		zd.workingSet = nil
 		zd.wsFromReplacement = false
@@ -1176,9 +1190,22 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		// outbound-soa-serial mode -- unless its content turns out to be what
 		// the zone already serves, in which case nothing is published at all
 		// (wsSkipIfUnchanged, decided after signing in publishWorkingSetLocked).
+		//
+		// A file signed elsewhere keeps its own serial in every case: the
+		// SOA's signature covers it, and a serial of ours would leave the SOA
+		// failing validation. Its signatures count as content, so a file
+		// re-signed under the same serial is published -- at that serial -- and
+		// one that did not change is not (contentTerms).
 		switch {
 		case fromZoneFile && serialNewer(zd.fileSerial, zd.CurrentSerial):
 			zd.CurrentSerial = zd.fileSerial
+		case fromZoneFile && !zd.signsItsOwnContent() && fileSOASigned(new_zd):
+			if zd.fileSerial != zd.CurrentSerial {
+				lg.Warn("reload: the zone file is signed elsewhere and its serial is behind the served one; serving it anyway, since its SOA signature covers that serial",
+					"zone", zd.ZoneName, "file", zd.fileSerial, "served", zd.CurrentSerial)
+			}
+			zd.CurrentSerial = zd.fileSerial
+			skipIfUnchanged = true
 		case fromZoneFile:
 			zd.CurrentSerial = nextOutboundSerial(zd)
 			skipIfUnchanged = true
@@ -1219,7 +1246,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		zd.wsSignalSynth = nil
 	}
 	zd.repopulateWorkingSetLocked(dynamicRRs)
-	if keepRestoreSerial && authoredContentDigest(zd.ZoneName, zd.workingSet, zd.zoneManagesZonemd()) == restoreDigest {
+	if keepRestoreSerial && authoredContentDigest(zd.ZoneName, zd.workingSet, zd.contentTerms()) == restoreDigest {
 		lg.Info("first load; the content is what this zone published at its last serial, so that serial is served again",
 			"zone", zd.ZoneName, "serial", restoreSerial)
 		zd.CurrentSerial = restoreSerial
