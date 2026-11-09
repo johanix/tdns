@@ -146,3 +146,22 @@ CodeRabbit's first round led to these changes:
 - **Smaller:** a serial regression is reported as one even when the delta
   is also over budget, and the bounded-delta test checks the estimate's
   lower bound.
+
+## Changes from the external review (2026-11-09)
+
+- **A file signed elsewhere keeps its own serial, on a first load too.** The
+  first round's change still let a first load lift such a zone past the
+  published-serial floor. The served SOA then carried a serial its
+  signature did not cover. The unchanged check ignored the serial, so
+  reloading the same file never put the file's serial back. Now a first
+  load serves the file's serial, with a warning when the zone has published
+  a higher one: a downstream holding that higher serial will not fetch it,
+  and only a re-signed file with a newer serial fixes that. When the SOA
+  came with a signature, the unchanged check and the restart digest also
+  compare it serial and all (`serialCovered`).
+- **A zone that makes its own ZONEMD restores its serial at a restart.** The
+  restart digest takes the zone's configured ZONEMD parameters instead of
+  the record. The record exists when the digest is recorded but not yet
+  when it is compared.
+- **A publish that panics clears the two staged flags,** as it does the
+  others.

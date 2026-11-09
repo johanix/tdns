@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -28,16 +29,35 @@ import (
 // In a zone that does not sign its own content, any RRSIGs and NSEC records
 // came with the content -- a zone signed elsewhere -- and are compared like
 // the rest: a file re-signed under the same serial has changed, and serving
-// the old signatures until they expire would be wrong.
+// the old signatures until they expire would be wrong. An SOA that came with
+// a signature is compared serial and all: the signature covers the serial, so
+// a different serial is a different SOA, and not one the server may replace.
 
 // contentTerms says what a content comparison leaves out.
 type contentTerms struct {
 	skipZonemd bool // the zone makes its own ZONEMD
 	withSigs   bool // RRSIGs and NSEC are content: the zone does not sign itself
+	// zonemd is the zone's configured ZONEMD parameters, when it makes its
+	// own. The restart digest uses these, not the records: it is recorded
+	// after the publish made the ZONEMD and compared before the next one has.
+	zonemd []string
 }
 
 func (zd *ZoneData) contentTerms() contentTerms {
-	return contentTerms{skipZonemd: zd.zoneManagesZonemd(), withSigs: !zd.signsItsOwnContent()}
+	terms := contentTerms{skipZonemd: zd.zoneManagesZonemd(), withSigs: !zd.signsItsOwnContent()}
+	if terms.skipZonemd {
+		for _, alg := range zd.zonemdAlgs {
+			terms.zonemd = append(terms.zonemd, fmt.Sprintf("%d/%d", zd.zonemdScheme, alg))
+		}
+		sort.Strings(terms.zonemd)
+	}
+	return terms
+}
+
+// serialCovered reports whether an SOA comparison must include the serial: the
+// zone does not sign itself and an SOA came with a signature.
+func serialCovered(terms contentTerms, a, b core.RRset) bool {
+	return terms.withSigs && (len(a.RRSIGs) > 0 || len(b.RRSIGs) > 0)
 }
 
 // authoredContentEqual reports whether two owner maps carry the same content,
@@ -84,7 +104,7 @@ func authoredOwnerEqual(zoneName, name string, a, b *OwnerData, terms contentTer
 			continue
 		}
 		ars, brs := ownerRRset(a, t).RRs, ownerRRset(b, t).RRs
-		if apex && t == dns.TypeSOA {
+		if apex && t == dns.TypeSOA && !serialCovered(terms, ownerRRset(a, t), ownerRRset(b, t)) {
 			ars, brs = soaWithoutSerial(ars), soaWithoutSerial(brs)
 		}
 		if !sameRRs(ars, brs) {
@@ -165,13 +185,10 @@ func authoredContentDigest(zoneName string, data map[string]*OwnerData, terms co
 		apex := name == zoneName
 		for _, t := range types {
 			if terms.skipZonemd && apex && t == dns.TypeZONEMD {
-				for _, p := range zonemdParams(ownerRRset(od, t).RRs) {
-					h.Write([]byte("ZONEMD " + p + "\n"))
-				}
-				continue
+				continue // the configured parameters stand in for it, below
 			}
 			rrs := ownerRRset(od, t).RRs
-			if apex && t == dns.TypeSOA {
+			if apex && t == dns.TypeSOA && !serialCovered(terms, ownerRRset(od, t), core.RRset{}) {
 				rrs = soaWithoutSerial(rrs)
 			}
 			digestRRs(h, rrs)
@@ -184,6 +201,9 @@ func authoredContentDigest(zoneName string, data map[string]*OwnerData, terms co
 			digestRRs(h, nsec.RRs)
 			digestRRs(h, nsec.RRSIGs)
 		}
+	}
+	for _, p := range terms.zonemd {
+		h.Write([]byte("ZONEMD " + p + "\n"))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
