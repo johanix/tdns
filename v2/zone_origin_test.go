@@ -109,6 +109,22 @@ func TestZoneFileLoadsADoubledSuffixWhenTheZoneAllowsIt(t *testing.T) {
 	}
 }
 
+// Labels compare as octets: an escape is decoded first, so a doubled suffix
+// written with one is still found, and an escaped dot does not split a label.
+func TestDoubledZoneSuffixDecodesEscapes(t *testing.T) {
+	zone := dns.SplitDomainName("s.example.")
+	suffix, ok := doubledZoneSuffix(zone, `ns.s.example.ns.\115.example.`)
+	if !ok {
+		t.Fatal(`"ns.s.example.ns.\115.example." was not read as a doubled suffix`)
+	}
+	if got := asWritten(`ns.s.example.ns.\115.example.`, suffix); got != "ns.s.example" {
+		t.Errorf("as written: %q, want ns.s.example", got)
+	}
+	if _, ok := doubledZoneSuffix(zone, `s\.example.s.example.`); ok {
+		t.Error("an escaped dot was read as a label boundary")
+	}
+}
+
 // One refusal lists every doubled name, each with the name as it is most
 // likely written in the file, so the operator fixes them all from one error.
 func TestZoneFileRefusalListsEveryDoubledName(t *testing.T) {

@@ -59,3 +59,6 @@ was in an `$INCLUDE`d one.
   "ns1.customer.mp.axfr.net" without a trailing dot`). A plain search of the
   zone file and its includes finds it. `config check` lists them the same
   way.
+- **Labels compare as octets, escapes decoded,** so a doubled suffix written
+  with an escape (`ns.\115.example.` for `ns.s.example.`) is found, and an
+  escaped dot does not split a label.

@@ -122,25 +122,28 @@ func asWritten(name, suffix string) string {
 
 // doubledZoneSuffix reports whether name ends in the same run of labels twice,
 // where that run is the zone (zoneLabels) or a name below it, and returns the
-// doubled suffix. Labels compare case-insensitively.
+// doubled suffix, in name's own presentation form.
+//
+// Labels are compared as DNS compares them: as octets, escapes decoded, so
+// "\115" is "s" (wireLabels), and folding A-Z only (core.EqualNames).
+// strings.EqualFold folds Unicode as well, and would read a label holding
+// U+017F (long s) as one holding "s".
 func doubledZoneSuffix(zoneLabels []string, name string) (string, bool) {
 	labels := dns.SplitDomainName(dns.Fqdn(name))
-	n, zl := len(labels), len(zoneLabels)
-	if zl == 0 || n < 2*zl {
+	wire, zone := wireLabels(name), wireLabels(strings.Join(zoneLabels, ".")+".")
+	n, zl := len(wire), len(zone)
+	if zl == 0 || n < 2*zl || len(labels) != n {
 		return "", false
 	}
-	// Labels are compared as DNS compares them, folding A-Z only
-	// (core.EqualNames). strings.EqualFold folds Unicode as well, and would
-	// read a label holding U+017F (long s) as one holding "s".
 	for i := 0; i < zl; i++ {
-		if !core.EqualNames(labels[n-zl+i], zoneLabels[i]) {
+		if !core.EqualNames(wire[n-zl+i], zone[i]) {
 			return "", false // not in the zone at all
 		}
 	}
 	for k := zl; 2*k <= n; k++ {
 		doubled := true
 		for i := 0; i < k; i++ {
-			if !core.EqualNames(labels[n-k+i], labels[n-2*k+i]) {
+			if !core.EqualNames(wire[n-k+i], wire[n-2*k+i]) {
 				doubled = false
 				break
 			}
@@ -217,4 +220,19 @@ func domainNameFields(t reflect.Type) [][]int {
 	walk(t, nil)
 	domainNameFieldCache.Store(t, paths)
 	return paths
+}
+
+// wireLabels returns name's labels as octets, escapes (\DDD and \X) decoded,
+// or nil when name is not a valid domain name. The root has none.
+func wireLabels(name string) []string {
+	buf := make([]byte, 256) // a domain name is at most 255 octets on the wire
+	end, err := dns.PackDomainName(dns.Fqdn(name), buf, 0, nil, false)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for i := 0; i < end && buf[i] != 0; i += 1 + int(buf[i]) {
+		out = append(out, string(buf[i+1:i+1+int(buf[i])]))
+	}
+	return out
 }
