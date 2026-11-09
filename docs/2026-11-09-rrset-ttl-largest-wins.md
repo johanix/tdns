@@ -50,13 +50,15 @@ Where in that function it runs, and why:
   that carries a correct ZONEMD over mixed TTLs would fail verification.
 - **After the journal overlay**, whose records join the RRsets of the
   replacement.
-- **Before the working set is built from the replacement.** Three later steps
+- **Before the working set is built from the replacement.** Four later steps
   compare the new content with what is already served, and that content is
   now unified: carrying the signatures of unchanged RRsets across a reload
-  (#1015, `identicalRecords` compares TTLs), the restart digest (#1011), and
-  the IXFR diff under `ixfr-from-differences`. If the unification came after
-  them, every mixed-TTL RRset would count as changed on every reload, be
-  re-signed, and go into the IXFR link.
+  (#1015, `identicalRecords` compares TTLs), the restart digest (#1011), the
+  refusal of a file signed elsewhere that changed under the served serial
+  (#1011, `ErrSignedFileChangedUnderServedSerial`), and the IXFR diff under
+  `ixfr-from-differences`. If the unification came after them, every
+  mixed-TTL RRset would count as changed on every reload: re-signed and put
+  into the IXFR link, or, in an unchanged file signed elsewhere, refused.
 
 An applied IXFR delta shares its untouched owners with the published snapshot,
 so only the owners the delta touched are walked. The rest were unified when
@@ -161,8 +163,9 @@ In `v2/rrset_ttl_test.go`:
   received over AXFR with records at 300 and 3600. Under an RRSIG with an
   original TTL of 1800 it is served at 1800. Under one of 7200 it is served at
   3600. The signature is unchanged, and its own TTL follows the RRset.
-- `TestReloadOfAnUnchangedSignedFileWithMixedTTLsPublishesNothing`: the
-  content compare of a file signed elsewhere sees unified content on both
+- `TestReloadOfAnUnchangedSignedFileWithMixedTTLsPublishesNothing`: a file
+  signed elsewhere, reloaded unchanged at the served serial, is neither
+  published nor refused. The content compare sees unified content on both
   sides.
 - `TestSignedZoneUnifiesThenClamps`: records 300 and 7200 in a zone signed
   here are served and signed at 7200. Under a max-served of 600 they are served
