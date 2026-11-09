@@ -24,15 +24,21 @@ import (
 // origin instead: ns1.sub.example.test.sub.example.test.
 //
 // So a name that ends in the same suffix twice, where that suffix is the zone
-// or a name inside it, is refused, owner or RDATA alike. Nobody writes such a
-// name on purpose. A name that merely contains the zone's name somewhere, such
-// as the CDN-style target www.example.test.edgekey.net., is not refused: it
-// does not end in the zone, so it cannot be a doubled suffix of it.
+// or a name inside it, is refused, owner or RDATA alike. A name that merely
+// contains the zone's name somewhere, such as the CDN-style target
+// www.example.test.edgekey.net., is not refused: it does not end in the zone,
+// so it cannot be a doubled suffix of it.
+//
+// The check runs on parsed names, where a name written with its trailing dot
+// and one completed by the origin look the same. So in zone test. a name such
+// as test.test. is refused even when written out in full on purpose. Such
+// names are rare; a zone that needs one sets the zone option
+// allow-doubled-suffix, which turns the check off for that zone.
 
-// checkDoubledZoneSuffix returns an error naming the first name in rr -- its
+// CheckDoubledZoneSuffix returns an error naming the first name in rr -- its
 // owner, then each domain name in its RDATA -- that ends in a doubled suffix of
 // zone.
-func checkDoubledZoneSuffix(zone string, rr dns.RR) error {
+func CheckDoubledZoneSuffix(zone string, rr dns.RR) error {
 	if rr == nil {
 		return nil
 	}
@@ -43,7 +49,7 @@ func checkDoubledZoneSuffix(zone string, rr dns.RR) error {
 	}
 	check := func(name string) error {
 		if suffix, ok := doubledZoneSuffix(zoneLabels, name); ok {
-			return fmt.Errorf("%q ends in %q twice; a trailing dot is probably missing (record: %s)",
+			return fmt.Errorf("%q ends in %q twice; a trailing dot is probably missing (record: %s; if the name is meant, set the zone option allow-doubled-suffix)",
 				name, suffix, rr.String())
 		}
 		return nil

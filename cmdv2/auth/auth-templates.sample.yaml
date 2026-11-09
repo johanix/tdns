@@ -250,6 +250,13 @@
 #                           like any other, and are validated through the
 #                           parent's DS. Serving is unchanged.
 #
+# ZONE FILE OPTIONS:
+#   allow-doubled-suffix:    Load names that end in the zone's name, or a
+#                           name under it, twice (test.test. in zone test.).
+#                           By default the loader refuses them: almost every
+#                           such name is a name written out in full whose
+#                           trailing dot is missing. OFF by default.
+#
 # CATALOG ZONE OPTIONS (RFC 9432):
 #   catalog-zone:            Mark zone as RFC 9432 catalog zone
 #                           (REQUIRED: catalog: configuration section must exist)

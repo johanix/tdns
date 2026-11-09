@@ -91,6 +91,23 @@ func TestZoneFileRefusesADoubledSuffix(t *testing.T) {
 	}
 }
 
+// The check cannot tell a name written out in full from one completed by the
+// origin, so a zone that means its doubled names opts out of it.
+func TestZoneFileLoadsADoubledSuffixWhenTheZoneAllowsIt(t *testing.T) {
+	text := "$TTL 300\ntest.\tIN SOA\tns.test. hostmaster.test. 1 600 600 604800 600\ntest.\tIN NS\tns.test.\nns.test.\tIN A\t192.0.2.53\ntest.test.\tIN A\t192.0.2.1\n"
+	if _, _, err := originTestZone("test.").ReadZoneData(text, false); err == nil {
+		t.Fatal("test.test. loaded in zone test. without the option")
+	}
+	zd := originTestZone("test.")
+	zd.Options = map[ZoneOption]bool{OptAllowDoubledSuffix: true}
+	if _, _, err := zd.ReadZoneData(text, false); err != nil {
+		t.Fatalf("with allow-doubled-suffix: %v", err)
+	}
+	if len(originTestRRs(t, zd, "test.test.", dns.TypeA)) != 1 {
+		t.Error("test.test. A not loaded")
+	}
+}
+
 // Names that contain the zone's name but don't end in it twice load as before.
 func TestZoneFileAcceptsNamesThatOnlyContainTheZone(t *testing.T) {
 	zd := originTestZone("r1.test.")
@@ -128,7 +145,7 @@ func TestDoubledZoneSuffix(t *testing.T) {
 			t.Errorf("doubledZoneSuffix(%s, %s) = %q, %v; want %q", c.zone, c.name, got, ok, c.want)
 		}
 	}
-	if err := checkDoubledZoneSuffix(".", mustRR(t, "com.com. 300 IN NS a.com.com.")); err != nil {
+	if err := CheckDoubledZoneSuffix(".", mustRR(t, "com.com. 300 IN NS a.com.com.")); err != nil {
 		t.Errorf("the root zone has no suffix to double, but: %v", err)
 	}
 }

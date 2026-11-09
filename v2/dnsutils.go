@@ -771,7 +771,7 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 	// It used to start empty, which refused "@" and any relative name outright
 	// -- so the commonest shape of zone file did not load -- and refused a
 	// relative NS target missing its trailing dot only as a side effect.
-	// checkDoubledZoneSuffix below refuses that mistake on purpose now.
+	// CheckDoubledZoneSuffix below refuses that mistake on purpose now.
 	zp := dns.NewZoneParser(r, dns.Fqdn(zd.ZoneName), filename)
 	zp.SetIncludeAllowed(true)
 
@@ -799,7 +799,9 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 		if Globals.Debug {
 			//  zd.Logger.Printf("ReadZoneData: parsed RR: %s", rr.String())
 		}
-		if err := checkDoubledZoneSuffix(zd.ZoneName, rr); err != nil {
+		if zd.Options[OptAllowDoubledSuffix] {
+			// The zone means its doubled names; see zone_parse_names.go.
+		} else if err := CheckDoubledZoneSuffix(zd.ZoneName, rr); err != nil {
 			where := filename
 			if where == "" {
 				where = "zone data"
