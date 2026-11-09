@@ -165,3 +165,20 @@ CodeRabbit's first round led to these changes:
   when it is compared.
 - **A publish that panics clears the two staged flags,** as it does the
   others.
+
+## Part D, changes from the external review (2026-11-09)
+
+- **No NSEC is carried under a TTL clamp that can lower the negative TTL.**
+  The carry compares the SOAs before the publish signs, and the publish
+  signs the SOA under the zone's TTL clamp. A ceiling below the negative
+  TTL lowers the SOA's TTL, and with it the TTL every NSEC must take, after
+  that comparison. The carry now also asks the zone's clamp
+  (`ClampParamsForZone`). When its ceiling is below the negative TTL, no
+  NSEC is carried and the chain is rebuilt. That costs a full chain rebuild
+  on a reload inside a clamp window. In the test zone the whole chain was
+  re-signed under such a clamp with or without this guard, so the test
+  checks the outcome but does not show the guard is needed. The guard makes
+  the outcome independent of whatever re-signed it there.
+- **The SOA's signatures are never carried.** Every publish signs the SOA
+  afresh, since its serial moves. A carried signature over the old serial
+  would stand if that re-sign failed.
