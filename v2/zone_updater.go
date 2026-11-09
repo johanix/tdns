@@ -1091,12 +1091,12 @@ func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys, cl
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			changed = true
 		}
-		// One TTL per RRset (RFC 2181 §5.2): the child-policy TTL the new RR
-		// was given applies to the whole RRset. Also on a duplicate add, since
-		// dns.IsDuplicate ignores the TTL. #767
+		// One TTL per RRset (RFC 2181 §5.2), the largest: the child-policy TTL
+		// the new RR was given, or the RRset's own if that is larger. Also on a
+		// duplicate add, since dns.IsDuplicate ignores the TTL. #767, #996
 		if setRRsetTTL(&rrset, rrcopy.Header().Ttl) {
 			lg.Debug("ApplyChildUpdateToZoneData: normalised RRset TTL", "owner", ownerName,
-				"rrtype", rrtypestr, "ttl", rrcopy.Header().Ttl)
+				"rrtype", rrtypestr, "added", rrcopy.Header().Ttl, "ttl", rrset.RRs[0].Header().Ttl)
 			changed = true
 		}
 		if changed {
@@ -1504,16 +1504,20 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys, cla
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			changed = true
 		}
-		// All RRs in an RRset must share one TTL (RFC 2181 §5.2). The added
-		// RR's TTL wins: over DDNS that is the update-policy TTL (the parent
-		// decides how long child data is cached), on the API and internal
-		// channels it is the TTL the caller chose deliberately. Also applied
-		// when the add was a duplicate: dns.IsDuplicate ignores the TTL, so
-		// re-adding an existing RR is how a mixed-TTL RRset gets repaired.
-		// The RRs are safe to mutate: cloneRRset above deep-copies them. #767
+		// All RRs in an RRset must share one TTL (RFC 2181 §5.2), and the
+		// largest wins: the added RR's TTL (over DDNS the update-policy TTL,
+		// on the API and internal channels the caller's) when it is above the
+		// RRset's, the RRset's own otherwise. The same rule as on load and
+		// transfer (rrset_ttl.go); it replaces #767's "the added RR's TTL
+		// wins". An add can therefore raise an RRset's TTL but not lower it:
+		// that takes a replacement, the RRset deleted and its records added
+		// in the same update. Also applied when the add was a duplicate:
+		// dns.IsDuplicate ignores the TTL, so re-adding an existing RR at a
+		// higher TTL raises the RRset to it. The RRs are safe to mutate:
+		// cloneRRset above deep-copies them. #767, #996
 		if setRRsetTTL(&rrset, rrcopy.Header().Ttl) {
 			lg.Debug("ApplyZoneUpdateToZoneData: normalised RRset TTL", "owner", ownerName,
-				"rrtype", rrtypestr, "ttl", rrcopy.Header().Ttl)
+				"rrtype", rrtypestr, "added", rrcopy.Header().Ttl, "ttl", rrset.RRs[0].Header().Ttl)
 			changed = true
 		}
 
@@ -1728,19 +1732,31 @@ func (zd *ZoneData) withLockPublishing(fn func() error) error {
 	return err
 }
 
-// setRRsetTTL gives rrset the TTL an update carries, and reports whether that
-// changed it. An RRset the signer has clamped is served below its own TTL,
-// which UnclampedTTL holds: that is the TTL compared and set, and signing
-// clamps the records again (applyClampToRRset). Compared with the records'
-// TTL, an update re-adding an RRset at its own TTL changed it every time, and
-// one lowering the TTL was signed at the clamp of the TTL it replaced.
+// setRRsetTTL brings rrset to one TTL after an update added an RR at ttl --
+// the largest of ttl and the RRset's own -- and reports whether that changed
+// it. The added RR is in rrset.RRs, or, for a duplicate add, is not, so ttl is
+// compared as well as the records. An RRset the signer has clamped is served
+// below its own TTL, which UnclampedTTL holds: that is the TTL compared and
+// raised, and signing clamps the records again (applyClampToRRset). Compared
+// with the records' TTL, an update re-adding an RRset at its own TTL changed
+// it every time, and one raising the TTL was signed at the clamp of the TTL
+// it replaced.
 func setRRsetTTL(rrset *core.RRset, ttl uint32) bool {
-	if rrset.UnclampedTTL == 0 || len(rrset.RRs) == 0 {
-		return unifyRRsetTTL(rrset.RRs, ttl)
+	if len(rrset.RRs) == 0 {
+		return false
 	}
-	if rrset.UnclampedTTL == ttl {
-		// A record just added carries ttl, the others the clamped TTL. They
-		// are one RRset, and signing brings all of them to the clamp.
+	if rrset.UnclampedTTL == 0 {
+		largest := ttl
+		for _, rr := range rrset.RRs {
+			largest = max(largest, rr.Header().Ttl)
+		}
+		return unifyRRsetTTL(rrset.RRs, largest)
+	}
+	if ttl <= rrset.UnclampedTTL {
+		// The RRset keeps its TTL. A record just added carries ttl, the
+		// others the clamped TTL, and an add only appends, so RRs[0] is one
+		// of the others: they are one RRset, and signing brings all of them
+		// to the clamp.
 		return unifyRRsetTTL(rrset.RRs, rrset.RRs[0].Header().Ttl)
 	}
 	rrset.UnclampedTTL = ttl

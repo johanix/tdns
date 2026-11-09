@@ -1239,6 +1239,26 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		overlay = zd.applyJournalOverlayLocked(new_zd)
 	}
 
+	// One TTL per RRset, the largest of those that arrived (#996). Here, after
+	// the inbound ZONEMD gate, which digests the TTLs as they arrived, and
+	// after the overlay, whose records join the replacement's RRsets. Before
+	// the working set is built from it, so the signatures carried across a
+	// reload, the restart digest and the IXFR diff all compare unified
+	// content with the unified content already served. An applied delta
+	// shares its untouched owners with the published snapshot: only the ones
+	// it touched are walked.
+	var ttlOwners map[string]bool
+	if new_zd.ixfrDerived {
+		ttlOwners = new_zd.ixfrTouched
+		if ttlOwners == nil {
+			ttlOwners = map[string]bool{}
+		}
+	}
+	if n := unifyAdoptedTTLs(new_zd.Data, ttlOwners, zd.signsItsOwnContent()); n > 0 {
+		lg.Info("RRsets with differing TTLs were brought to the largest of them",
+			"zone", zd.ZoneName, "rrsets", n)
+	}
+
 	zd.workingSet = snapshotMapFromData(new_zd.Data)
 	zd.wsFromReplacement = true
 	// Whatever was staged before is gone with the working set it was staged
