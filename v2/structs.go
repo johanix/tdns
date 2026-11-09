@@ -1116,7 +1116,13 @@ type DelegationSyncStatus struct {
 	// "withdraw the DS" when this is set and "no opinion about DS" when it is
 	// not; the two are opposite instructions that look identical as a nil
 	// slice, so the flag travels with the field and must be read first.
-	NewDSKnown   bool `json:"-"`
+	NewDSKnown bool `json:"-"`
+	// Unread names what the analysis asked the parent (or the keystore) and
+	// got no answer to: "<ns> A", "<ns> AAAA", "DS", "DS intent". InSync says
+	// nothing about those, so an analysis with Unread set must not be taken as
+	// the parent in step. Deliberate absences of opinion -- a rollover owning
+	// the DS, keys tdns does not manage -- are not reads and are not listed.
+	Unread       []string `json:",omitempty"`
 	Error        bool
 	ErrorMsg     string
 	UpdateResult UpdateResult // Experimental
@@ -1134,6 +1140,14 @@ type DelegationSyncStatus struct {
 	AAAARemovesStr []string `json:"AAAARemoves,omitempty"`
 	DSAddsStr      []string `json:"DSAdds,omitempty"`
 	DSRemovesStr   []string `json:"DSRemoves,omitempty"`
+}
+
+// Complete reports whether the analysis read everything it asked for. An
+// incomplete analysis may report InSync while the parent holds what it could
+// not read, so a caller that acts on InSync -- ending a retry, clearing an owed
+// sync -- must check this first.
+func (dss DelegationSyncStatus) Complete() bool {
+	return len(dss.Unread) == 0
 }
 
 func (dss *DelegationSyncStatus) ToStrings() {

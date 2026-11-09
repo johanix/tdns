@@ -144,10 +144,11 @@ var errParentGlueUnread = errors.New("could not read the parent's glue")
 // only compareParentDS fills in that dimension. It also returns the parent
 // server that answered and the served apex, for the DS step.
 //
-// A glue query to the parent that fails is passed over, and reported after the
-// loop as errParentGlueUnread with the status filled in as far as it got.
-// AnalyseZoneDelegation carries on past it, as it always has; the refresh sync
-// treats it as a comparison that failed.
+// A glue query to the parent that fails is passed over, named in resp.Unread,
+// and reported after the loop as errParentGlueUnread with the status filled in
+// as far as it got. AnalyseZoneDelegation carries on past it, as it always has,
+// and leaves Unread for its callers to read; the refresh sync treats it as a
+// comparison that failed.
 func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserver string, apex *OwnerData, err error) {
 	resp = DelegationSyncStatus{
 		ZoneName: zd.ZoneName,
@@ -202,19 +203,22 @@ func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserv
 			lgDns.Warn("AnalyseZoneDelegation: owner data is nil for NS", "zone", zd.ZoneName, "ns", ns)
 			continue
 		}
+		// A failed A query does not skip the AAAA one: each is compared, or
+		// named in resp.Unread, on its own.
 		child_a_glue := owner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs
 		parent_a_glue, err := AuthQuery(ns, pserver, dns.TypeA)
 		if err != nil {
 			lgDns.Warn("error from AuthQuery for A glue", "server", pserver, "ns", ns, "err", err)
 			glueErrs = errors.Join(glueErrs, fmt.Errorf("%s A: %w", ns, err))
-			continue
-		}
-		gluediff, adds, removes := core.RRsetDiffer(ns, child_a_glue, parent_a_glue,
-			dns.TypeA, zd.Logger, Globals.Verbose, Globals.Debug)
-		if gluediff {
-			resp.InSync = false
-			resp.AAdds = append(resp.AAdds, adds...)
-			resp.ARemoves = append(resp.ARemoves, removes...)
+			resp.Unread = append(resp.Unread, ns+" A")
+		} else {
+			gluediff, adds, removes := core.RRsetDiffer(ns, child_a_glue, parent_a_glue,
+				dns.TypeA, zd.Logger, Globals.Verbose, Globals.Debug)
+			if gluediff {
+				resp.InSync = false
+				resp.AAdds = append(resp.AAdds, adds...)
+				resp.ARemoves = append(resp.ARemoves, removes...)
+			}
 		}
 
 		child_aaaa_glue := owner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs
@@ -222,11 +226,12 @@ func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserv
 		if err != nil {
 			lgDns.Warn("error from AuthQuery for AAAA glue", "server", pserver, "ns", ns, "err", err)
 			glueErrs = errors.Join(glueErrs, fmt.Errorf("%s AAAA: %w", ns, err))
+			resp.Unread = append(resp.Unread, ns+" AAAA")
 			continue
 		}
-		differ, adds, removes = core.RRsetDiffer(ns, child_aaaa_glue, parent_aaaa_glue,
+		gluediff, adds, removes := core.RRsetDiffer(ns, child_aaaa_glue, parent_aaaa_glue,
 			dns.TypeAAAA, zd.Logger, Globals.Verbose, Globals.Debug)
-		if differ {
+		if gluediff {
 			resp.InSync = false
 			resp.AAAAAdds = append(resp.AAAAAdds, adds...)
 			resp.AAAARemoves = append(resp.AAAARemoves, removes...)
@@ -244,7 +249,8 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 	resp, pserver, apex, err := zd.analyseNSAndGlue(imr)
 	// A glue query that failed has been logged and passed over, as it always
 	// was here: the explicit sync, the status command and tdns-mp all read
-	// this analysis.
+	// this analysis. It is named in resp.Unread, so a caller that must not
+	// take an incomplete InSync as the parent in step can tell (Complete).
 	if err != nil && !errors.Is(err, errParentGlueUnread) {
 		return resp, err
 	}
@@ -321,7 +327,8 @@ func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, 
 	p_dsrrs, err := AuthQuery(zd.ZoneName, pserver, dns.TypeDS)
 	if err != nil {
 		lgDns.Warn("error from AuthQuery for DS", "server", pserver, "zone", zd.ZoneName, "err", err)
-		// DS query failure — skip DS comparison entirely
+		// DS query failure: skip the DS comparison, and say it was not read.
+		resp.Unread = append(resp.Unread, "DS")
 	} else if len(p_dsrrs) > 0 || len(apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs) > 0 {
 		// What the parent should hold comes from the keystore, not from the
 		// published DNSKEY RRset. Under multi-DS the new DS is placed at the
@@ -335,6 +342,9 @@ func (zd *ZoneData) compareParentDS(resp *DelegationSyncStatus, pserver string, 
 		if ierr != nil {
 			lgDns.Warn("AnalyseZoneDelegation: could not determine the DS intent; leaving the parent DS alone",
 				"zone", zd.ZoneName, "err", ierr)
+			// A keystore read that failed, unlike an intent that is not known:
+			// the DS may well be ours to judge, so this is not "no opinion".
+			resp.Unread = append(resp.Unread, "DS intent")
 			return nil
 		}
 		if !intent.Known {
