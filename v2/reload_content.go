@@ -46,8 +46,11 @@ type contentTerms struct {
 func (zd *ZoneData) contentTerms() contentTerms {
 	terms := contentTerms{skipZonemd: zd.zoneManagesZonemd(), withSigs: !zd.signsItsOwnContent()}
 	if terms.skipZonemd {
-		for _, alg := range zd.zonemdAlgs {
-			terms.zonemd = append(terms.zonemd, fmt.Sprintf("%d/%d", zd.zonemdScheme, alg))
+		// Resolved, defaults included, as the publish makes them: a config
+		// that spells out the default must not read as a change.
+		scheme := zd.zonemdSchemeLocked()
+		for _, alg := range zd.zonemdAlgsLocked() {
+			terms.zonemd = append(terms.zonemd, fmt.Sprintf("%d/%d", scheme, alg))
 		}
 		sort.Strings(terms.zonemd)
 	}
@@ -65,8 +68,9 @@ func serialCovered(terms contentTerms, a, b core.RRset) bool {
 // change something costs little; the whole zone is compared only when nothing
 // differs.
 //
-// An owner holding no data counts as absent on either side: a name can linger
-// in one map with nothing but an emptied RRset, and it serves nothing.
+// An owner holding nothing the comparison counts is absent on either side: a
+// name can linger in one map with nothing but an emptied RRset, and it serves
+// nothing.
 func authoredContentEqual(zoneName string, a, b map[string]*OwnerData, terms contentTerms) bool {
 	for name, aod := range a {
 		bod := b[name]
@@ -78,11 +82,17 @@ func authoredContentEqual(zoneName string, a, b map[string]*OwnerData, terms con
 		}
 	}
 	for name, bod := range b {
-		if _, ok := a[name]; !ok && ownerHasData(bod) {
+		if _, ok := a[name]; !ok && ownerHasContent(bod, terms) {
 			return false
 		}
 	}
 	return true
+}
+
+// ownerHasContent reports whether an owner holds anything the comparison
+// counts: data, or an NSEC where NSEC records are content.
+func ownerHasContent(od *OwnerData, terms contentTerms) bool {
+	return ownerHasData(od) || (terms.withSigs && od != nil && len(od.NSEC.RRs) > 0)
 }
 
 func authoredOwnerEqual(zoneName, name string, a, b *OwnerData, terms contentTerms) bool {
@@ -223,6 +233,21 @@ func digestRRs(h io.Writer, rrs []dns.RR) {
 
 // fileSOASigned reports whether a parsed zone's apex SOA came with signatures:
 // the zone was signed before it reached this server.
+// servesSignedElsewhereSOA reports whether the zone serves an SOA signed
+// elsewhere: it does not sign its own content, and the published SOA came with
+// signatures. That signature covers the SOA's serial and no other, so nothing
+// here may move the serial.
+func (zd *ZoneData) servesSignedElsewhereSOA() bool {
+	if zd.signsItsOwnContent() {
+		return false
+	}
+	snap := zd.snapshot.Load()
+	if snap == nil || snap.Apex == nil || snap.Apex.RRtypes == nil {
+		return false
+	}
+	return len(snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs) > 0
+}
+
 func fileSOASigned(zd *ZoneData) bool {
 	if zd == nil || zd.Data == nil {
 		return false

@@ -155,3 +155,26 @@ CodeRabbit's first round led to these changes:
   when it is compared.
 - **A publish that panics clears the two staged flags,** as it does the
   others.
+
+## Changes from the third review (2026-11-09)
+
+- **No later step moves the serial of a zone signed elsewhere.** The first
+  load kept the file's serial, but `outbound-soa-serial` has two later paths,
+  after the initial load and after each refresh. In `persist` mode they put
+  back a higher stored serial; in `unixtime` mode they set the time. Either
+  left the served SOA with a serial its signature did not cover. Both now
+  leave alone a zone that serves an SOA signed elsewhere.
+- **A file signed elsewhere that changed under the served serial is
+  refused** (accepted by the project owner, 2026-11-09). Downstreams that hold
+  that serial would never transfer the change, and could go on serving its
+  old signatures until they expired. The reload fails with
+  `ErrSignedFileChangedUnderServedSerial`, which says to re-sign with a newer
+  serial, and the published version stays. The check runs on the built working
+  set, before anything is published. This is the rule tdns already keeps for
+  unsigned zones: no new content under an old serial. A file whose serial is
+  behind the served one is still served, with a warning, as before.
+- **An owner holding only an NSEC counts as content** where NSEC records are
+  content, in a zone that does not sign itself.
+- **The ZONEMD parameters are resolved, defaults included,** before they go
+  into the comparison, as the publish resolves them. A config that spells out
+  the default no longer reads as a change.
