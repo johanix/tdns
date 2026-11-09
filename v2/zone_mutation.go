@@ -1014,6 +1014,15 @@ var ErrRefreshHeld = errors.New("the zone has an open transaction; the refresh i
 // replacement take that change. The refresh engine tries again shortly.
 var ErrRefreshStaged = errors.New("the zone has a staged change it could not publish; the refresh is refused and retried")
 
+// ErrSignedFileChangedUnderServedSerial: a zone file signed elsewhere changed
+// but kept the serial the zone serves (#1006). Downstreams that hold that
+// serial would never transfer the change, while this server served it, so the
+// reload is refused and the published version stays. A failure of the zone,
+// not a deferral: it holds until the file is re-signed under a newer serial.
+var ErrSignedFileChangedUnderServedSerial = errors.New("the zone file is signed elsewhere and its content changed but its serial did not;" +
+	" downstreams that hold that serial would never transfer the change, so the published version is still served;" +
+	" re-sign the file with a newer serial")
+
 // refreshDeferred reports whether err is one of the two refusals that are not
 // a failure of the zone and are retried shortly.
 func refreshDeferred(err error) bool {
@@ -1077,6 +1086,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	}
 	keepRestoreSerial := false
 	skipIfUnchanged := false
+	refuseIfChanged := false
 	// The zone has just been re-read; whatever was replayed on top of the
 	// PREVIOUS file no longer applies to this one, so a replay for the new file
 	// is due again.
@@ -1204,14 +1214,17 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		//
 		// A file signed elsewhere keeps its own serial in every case: the
 		// SOA's signature covers it, and a serial of ours would leave the SOA
-		// failing validation. Its signatures count as content, so a file
-		// re-signed under the same serial is published -- at that serial -- and
-		// one that did not change is not (contentTerms).
+		// failing validation. Its signatures count as content (contentTerms).
+		// One that did not change is not published. One that changed under
+		// the served serial is refused (ErrSignedFileChangedUnderServedSerial),
+		// decided once the working set is built, below.
 		switch {
 		case fromZoneFile && serialNewer(zd.fileSerial, zd.CurrentSerial):
 			zd.CurrentSerial = zd.fileSerial
 		case fromZoneFile && !zd.signsItsOwnContent() && fileSOASigned(new_zd):
-			if zd.fileSerial != zd.CurrentSerial {
+			if zd.fileSerial == zd.CurrentSerial {
+				refuseIfChanged = true
+			} else {
 				lg.Warn("reload: the zone file is signed elsewhere and its serial is behind the served one; serving it anyway, since its SOA signature covers that serial",
 					"zone", zd.ZoneName, "file", zd.fileSerial, "served", zd.CurrentSerial)
 			}
@@ -1277,6 +1290,13 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		zd.wsSignalSynth = nil
 	}
 	zd.repopulateWorkingSetLocked(dynamicRRs)
+	if refuseIfChanged && overlay == nil {
+		if old := zd.snapshot.Load(); old != nil &&
+			!authoredContentEqual(zd.ZoneName, old.Data, zd.workingSet, zd.contentTerms()) {
+			zd.workingSet, zd.wsFromReplacement, zd.wsSignalSynth = nil, false, nil
+			return fmt.Errorf("zone %s: serial %d: %w", zd.ZoneName, old.Serial, ErrSignedFileChangedUnderServedSerial)
+		}
+	}
 	if keepRestoreSerial && authoredContentDigest(zd.ZoneName, zd.workingSet, zd.contentTerms()) == restoreDigest {
 		lg.Info("first load; the content is what this zone published at its last serial, so that serial is served again",
 			"zone", zd.ZoneName, "serial", restoreSerial)
