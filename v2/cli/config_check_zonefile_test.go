@@ -42,6 +42,29 @@ func TestConfigCheckRefusesADoubledSuffixAsTheLoaderDoes(t *testing.T) {
 	}
 }
 
+// config check lists every doubled name, as the loader does.
+func TestConfigCheckListsEveryDoubledName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "r1.test.zone")
+	if err := os.WriteFile(path, []byte(`$TTL 300
+@	IN SOA	ns hostmaster 1 600 600 604800 600
+@	IN NS	ns
+ns	IN A	192.0.2.53
+sub	IN NS	ns1.sub.r1.test
+www	IN CNAME	host.r1.test
+`), 0644); err != nil {
+		t.Fatalf("write zone: %v", err)
+	}
+	err := parseZonefile(path, "r1.test", false)
+	if err == nil {
+		t.Fatal("config check passed doubled names")
+	}
+	for _, want := range []string{"2 names end", `"ns1.sub.r1.test"`, `"host.r1.test"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("config check's refusal does not say %q: %v", want, err)
+		}
+	}
+}
+
 // The option reaches the zone file check through checkZones, set on the zone
 // or inherited from its template.
 func TestCheckZonesHonoursAllowDoubledSuffix(t *testing.T) {

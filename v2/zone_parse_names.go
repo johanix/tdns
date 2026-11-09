@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -36,34 +37,87 @@ import (
 // names are rare; a zone that needs one sets the zone option
 // allow-doubled-suffix, which turns the check off for that zone.
 
-// CheckDoubledZoneSuffix returns an error naming the first name in rr -- its
-// owner, then each domain name in its RDATA -- that ends in a doubled suffix of
-// zone.
+// One refusal lists every such record, up to doubledSuffixListLimit, so the
+// operator fixes them all from one error rather than one per reload. The
+// parser does not say which file or line a record came from, so each entry
+// quotes the record and the name as it most likely appears in the file -- the
+// name written out in full, without its trailing dot -- which a search of the
+// zone file and its includes finds.
+
+// doubledSuffixListLimit bounds how many records one refusal lists.
+const doubledSuffixListLimit = 20
+
+// DoubledSuffixReport collects the records of a zone whose names end in a
+// doubled suffix of the zone, for one refusal that lists them all.
+type DoubledSuffixReport struct {
+	zoneLabels []string
+	lines      []string
+	total      int
+}
+
+// NewDoubledSuffixReport starts a report for zone. The root zone has no
+// suffix to double, so its report never finds anything.
+func NewDoubledSuffixReport(zone string) *DoubledSuffixReport {
+	return &DoubledSuffixReport{zoneLabels: dns.SplitDomainName(dns.Fqdn(zone))}
+}
+
+// Check reports whether one of rr's names -- its owner, then each domain name
+// in its RDATA -- ends in a doubled suffix of the zone, and records the first
+// such name.
+func (r *DoubledSuffixReport) Check(rr dns.RR) bool {
+	if r == nil || rr == nil || len(r.zoneLabels) == 0 {
+		return false
+	}
+	for _, name := range append([]string{rr.Header().Name}, rdataDomainNames(rr)...) {
+		suffix, ok := doubledZoneSuffix(r.zoneLabels, name)
+		if !ok {
+			continue
+		}
+		r.total++
+		if len(r.lines) < doubledSuffixListLimit {
+			r.lines = append(r.lines, fmt.Sprintf("%q ends in %q twice: look for %q without a trailing dot (record: %s)",
+				name, suffix, asWritten(name, suffix), rr.String()))
+		}
+		return true
+	}
+	return false
+}
+
+// Err returns the refusal listing what Check found, or nil when it found
+// nothing.
+func (r *DoubledSuffixReport) Err() error {
+	if r == nil || r.total == 0 {
+		return nil
+	}
+	var b strings.Builder
+	what := "a name ends"
+	if r.total > 1 {
+		what = fmt.Sprintf("%d names end", r.total)
+	}
+	fmt.Fprintf(&b, "%s in a suffix twice, so a trailing dot is probably missing; if a name is meant, set the zone option allow-doubled-suffix", what)
+	for _, line := range r.lines {
+		b.WriteString("\n  ")
+		b.WriteString(line)
+	}
+	if more := r.total - len(r.lines); more > 0 {
+		fmt.Fprintf(&b, "\n  and %d more", more)
+	}
+	return errors.New(b.String())
+}
+
+// CheckDoubledZoneSuffix returns the refusal for rr alone, or nil.
 func CheckDoubledZoneSuffix(zone string, rr dns.RR) error {
-	if rr == nil {
-		return nil
-	}
-	zone = dns.Fqdn(zone)
-	zoneLabels := dns.SplitDomainName(zone)
-	if len(zoneLabels) == 0 {
-		return nil // the root zone: no suffix to double
-	}
-	check := func(name string) error {
-		if suffix, ok := doubledZoneSuffix(zoneLabels, name); ok {
-			return fmt.Errorf("%q ends in %q twice; a trailing dot is probably missing (record: %s; if the name is meant, set the zone option allow-doubled-suffix)",
-				name, suffix, rr.String())
-		}
-		return nil
-	}
-	if err := check(rr.Header().Name); err != nil {
-		return err
-	}
-	for _, name := range rdataDomainNames(rr) {
-		if err := check(name); err != nil {
-			return err
-		}
-	}
-	return nil
+	r := NewDoubledSuffixReport(zone)
+	r.Check(rr)
+	return r.Err()
+}
+
+// asWritten is how a doubled name most likely appears in the zone file: one
+// copy of the suffix fewer, without the trailing dot whose absence let the
+// origin double it. suffix comes from name's own labels, so it is a literal
+// suffix of it.
+func asWritten(name, suffix string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(dns.Fqdn(name), suffix), ".")
 }
 
 // doubledZoneSuffix reports whether name ends in the same run of labels twice,

@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -105,6 +106,46 @@ func TestZoneFileLoadsADoubledSuffixWhenTheZoneAllowsIt(t *testing.T) {
 	}
 	if len(originTestRRs(t, zd, "test.test.", dns.TypeA)) != 1 {
 		t.Error("test.test. A not loaded")
+	}
+}
+
+// One refusal lists every doubled name, each with the name as it is most
+// likely written in the file, so the operator fixes them all from one error.
+func TestZoneFileRefusalListsEveryDoubledName(t *testing.T) {
+	const head = "$TTL 300\nr1.test.\tIN SOA\tns.r1.test. hostmaster.r1.test. 1 600 600 604800 600\nr1.test.\tIN NS\tns.r1.test.\nns.r1.test.\tIN A\t192.0.2.53\n"
+	body := "sub.r1.test.\tIN NS\tns1.sub.r1.test\n" +
+		"www.r1.test.\tIN CNAME\thost.r1.test\n" +
+		"$ORIGIN deep.r1.test.\n@\tIN NS\tns1.deep.r1.test\n"
+	_, _, err := originTestZone("r1.test.").ReadZoneData(head+body, false)
+	if err == nil {
+		t.Fatal("names missing their trailing dot were accepted")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"3 names end in a suffix twice",
+		`look for "ns1.sub.r1.test" without a trailing dot`,
+		`look for "host.r1.test" without a trailing dot`,
+		`look for "ns1.deep.r1.test" without a trailing dot`,
+		"allow-doubled-suffix",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the refusal does not say %q:\n%s", want, msg)
+		}
+	}
+}
+
+// A long list is cut at doubledSuffixListLimit, and says how many more.
+func TestDoubledSuffixReportIsBounded(t *testing.T) {
+	r := NewDoubledSuffixReport("r1.test.")
+	for i := 0; i < doubledSuffixListLimit+5; i++ {
+		r.Check(mustRR(t, fmt.Sprintf("h%d.r1.test.r1.test. 300 IN A 192.0.2.1", i)))
+	}
+	msg := r.Err().Error()
+	if got := strings.Count(msg, "look for"); got != doubledSuffixListLimit {
+		t.Errorf("the refusal lists %d names, want %d", got, doubledSuffixListLimit)
+	}
+	if !strings.Contains(msg, "and 5 more") {
+		t.Errorf("the refusal does not say how many more:\n%s", msg)
 	}
 }
 

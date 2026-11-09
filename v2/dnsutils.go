@@ -775,6 +775,13 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 	zp := dns.NewZoneParser(r, dns.Fqdn(zd.ZoneName), filename)
 	zp.SetIncludeAllowed(true)
 
+	// nil when the zone means its doubled names (allow-doubled-suffix), and a
+	// nil report checks nothing.
+	var doubled *DoubledSuffixReport
+	if !zd.Options[OptAllowDoubledSuffix] {
+		doubled = NewDoubledSuffixReport(zd.ZoneName)
+	}
+
 	firstSoaSeen := false
 	checkedForUnchanged := false
 	serialChanged := false // Track whether serial actually changed
@@ -799,14 +806,10 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 		if Globals.Debug {
 			//  zd.Logger.Printf("ReadZoneData: parsed RR: %s", rr.String())
 		}
-		if zd.Options[OptAllowDoubledSuffix] {
-			// The zone means its doubled names; see zone_parse_names.go.
-		} else if err := CheckDoubledZoneSuffix(zd.ZoneName, rr); err != nil {
-			where := filename
-			if where == "" {
-				where = "zone data"
-			}
-			return false, 0, fmt.Errorf("zone %s: %s: %w", zd.ZoneName, where, err)
+		// Collected, not returned at the first: the refusal after the parse
+		// lists every doubled name (zone_parse_names.go).
+		if doubled.Check(rr) {
+			continue
 		}
 		firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
 
@@ -845,6 +848,13 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 			return false, 0, formatZoneParseError(err, filename)
 		}
 		return false, 0, err
+	}
+	if err := doubled.Err(); err != nil {
+		where := filename
+		if where == "" {
+			where = "zone data"
+		}
+		return false, 0, fmt.Errorf("zone %s: %s: %w", zd.ZoneName, where, err)
 	}
 
 	apex, ok := zd.Data.Get(zd.ZoneName)

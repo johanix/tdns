@@ -1628,18 +1628,21 @@ func parseZonefile(path, origin string, allowDoubledSuffix bool) error {
 	defer f.Close()
 	zp := dns.NewZoneParser(f, dns.Fqdn(origin), path)
 	zp.SetIncludeAllowed(true)
+	var doubled *tdns.DoubledSuffixReport
+	if !allowDoubledSuffix {
+		doubled = tdns.NewDoubledSuffixReport(origin)
+	}
 	sawSOA := false
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
 		if rr != nil && rr.Header().Rrtype == dns.TypeSOA {
 			sawSOA = true
 		}
-		if !allowDoubledSuffix {
-			if err := tdns.CheckDoubledZoneSuffix(origin, rr); err != nil {
-				return err
-			}
-		}
+		doubled.Check(rr)
 	}
 	if err := zp.Err(); err != nil {
+		return err
+	}
+	if err := doubled.Err(); err != nil {
 		return err
 	}
 	if !sawSOA {
