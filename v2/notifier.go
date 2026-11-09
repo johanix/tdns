@@ -159,11 +159,9 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 		}
 		lgDns.Info("NOTIFY: sending", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "target", dst)
 
-		m := new(dns.Msg)
-		m.SetNotify(zd.ZoneName)
-
-		// remove SOA, add ntype
-		m.Question = []dns.Question{dns.Question{Name: zd.ZoneName, Qtype: ntype, Qclass: dns.ClassINET}}
+		// Built per target, so the SOA is never older than the publish that
+		// queued this request.
+		m := zd.notifyMsg(ntype)
 
 		// Sign the NOTIFY with the matching notify-peer's key (NOKEY => unsigned).
 		// c is reused across targets, so the per-target provider (nil for NOKEY)
@@ -174,6 +172,7 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 			lastSetupErr = serr
 			continue
 		}
+		dropOversizedNotifySOA(m, zd.ZoneName)
 		attemptedTargets++
 		c.TsigProvider = provider
 
@@ -225,6 +224,63 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 	}
 	lgDns.Info("NOTIFY: successfully sent", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "succeeded", successCount, "total", len(targets))
 	return dns.RcodeSuccess, firstSuccessEDE, nil
+}
+
+// notifySOA returns a copy of the SOA the zone is serving, or nil when nothing
+// is published. A copy, because the snapshot's SOA is shared with every reader.
+func (zd *ZoneData) notifySOA() dns.RR {
+	snap := zd.publishedSnapshot()
+	if snap == nil || snap.SOA == nil {
+		return nil
+	}
+	return dns.Copy(snap.SOA)
+}
+
+// notifyMsg builds the NOTIFY for ntype, unsigned.
+//
+// A NOTIFY(SOA) carries the SOA being served (RFC 1996 §3.7). It is optional
+// in the RFC and required here: without it the receiver cannot tell whether it
+// already holds that serial, so it always queries back, and BIND logs "no
+// serial" for every NOTIFY. It is a copy (notifySOA), and goes in before the
+// TSIG stamp, so the signature covers it. The other NOTIFY types carry
+// nothing: their receiver fetches and validates the RRset itself.
+func (zd *ZoneData) notifyMsg(ntype uint16) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetNotify(zd.ZoneName)
+	m.Question = []dns.Question{{Name: zd.ZoneName, Qtype: ntype, Qclass: dns.ClassINET}}
+	if ntype == dns.TypeSOA {
+		if soa := zd.notifySOA(); soa != nil {
+			m.Answer = []dns.RR{soa}
+		} else {
+			lgDns.Debug("NOTIFY: no published SOA to include", "zone", zd.ZoneName)
+		}
+	}
+	return m
+}
+
+// notifyTsigMACRoom is the room left for a TSIG MAC when sizing a signed
+// NOTIFY: the TSIG record is attached before sending but its MAC is computed
+// as the message is packed, and SHA-512's is the largest.
+const notifyTsigMACRoom = 64
+
+// dropOversizedNotifySOA leaves the SOA out of a NOTIFY that would not fit in
+// the 512 octets a UDP message without EDNS may use (RFC 1035 §4.2.1). The SOA
+// is only a hint, and a NOTIFY without it is still a NOTIFY. Called after the
+// TSIG record is attached, so its size is counted; room for its MAC is added
+// only when there is one.
+func dropOversizedNotifySOA(m *dns.Msg, zone string) {
+	if len(m.Answer) == 0 {
+		return
+	}
+	size := m.Len()
+	if m.IsTsig() != nil {
+		size += notifyTsigMACRoom
+	}
+	if size > dns.MinMsgSize {
+		lgDns.Info("NOTIFY: leaving out the SOA, which would take the message past 512 octets",
+			"zone", zone, "size", size)
+		m.Answer = nil
+	}
 }
 
 // extractEDEFromMsg pulls every EDNS0_EDE option out of a DNS message's
