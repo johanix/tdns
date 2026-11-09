@@ -33,6 +33,14 @@ import (
 // same set of RDATA at the same TTLs, compared as text. A changed RRset never
 // keeps a signature over its old contents -- the defect signStagedScopeLocked
 // warns about, which no later pass would repair before the signature expired.
+//
+// An NSEC needs one check more. The signing pass skips NSEC records, and the
+// restitch rewrites only the names around a change, so nothing in the publish
+// looks at a carried NSEC's signatures again. It is carried only while every
+// active ZSK has a signature on it that is not due for renewal, the test the
+// signing pass applies to an RRset before it stands down. Otherwise it is
+// left out, and the restitch, which gives every chained name without one an
+// NSEC, rebuilds and signs it.
 
 // carrySignaturesLocked gives the reloaded working set the signatures and NSEC
 // records the published snapshot holds for whatever did not change, and
@@ -55,6 +63,7 @@ func (zd *ZoneData) carrySignaturesLocked(old *zoneSnapshot) int {
 	newNegTTL := negativeTTLOf(apexFromSnapshotData(zd, zd.workingSet))
 	carryNsec := negativeTTLOf(apexFromSnapshotData(zd, old.Data)) == newNegTTL &&
 		!zd.clampMayLowerLocked(newNegTTL)
+	dak := zd.ActiveDnssecKeys()
 
 	carried := 0
 	for name, nod := range zd.workingSet {
@@ -81,7 +90,7 @@ func (zd *ZoneData) carrySignaturesLocked(old *zoneSnapshot) int {
 			nod.RRtypes.Set(t, nrs) // mutator-ok: the reload's own parsed store, not yet published or shared
 			carried++
 		}
-		if carryNsec && len(nod.NSEC.RRs) == 0 && len(ood.NSEC.RRs) > 0 {
+		if carryNsec && len(nod.NSEC.RRs) == 0 && len(ood.NSEC.RRs) > 0 && signaturesCurrent(ood.NSEC, dak) {
 			nod.NSEC = core.RRset{
 				Name:   ood.NSEC.Name,
 				Class:  ood.NSEC.Class,
@@ -92,6 +101,34 @@ func (zd *ZoneData) carrySignaturesLocked(old *zoneSnapshot) int {
 		}
 	}
 	return carried
+}
+
+// signaturesCurrent reports whether every active ZSK has signed rrset and none
+// of its signatures is due for renewal: what SignRRset checks before it stands
+// down on an RRset.
+func signaturesCurrent(rrset core.RRset, dak *DnssecKeys) bool {
+	if dak == nil || len(dak.ZSKs) == 0 || len(rrset.RRs) == 0 {
+		return false
+	}
+	ttl := rrset.RRs[0].Header().Ttl
+	for _, key := range dak.ZSKs {
+		tag, alg := key.DnskeyRR.KeyTag(), key.DnskeyRR.Algorithm
+		have := false
+		for _, rr := range rrset.RRSIGs {
+			sig, ok := rr.(*dns.RRSIG)
+			if !ok || sig.KeyTag != tag || sig.Algorithm != alg {
+				continue
+			}
+			if NeedsResigning(sig, ttl) {
+				return false
+			}
+			have = true
+		}
+		if !have {
+			return false
+		}
+	}
+	return true
 }
 
 // identicalRecords reports whether two RR slices hold the same records, in any

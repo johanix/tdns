@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -188,8 +189,89 @@ func TestSignedReloadUnderALoweringClampRebuildsTheNsecChain(t *testing.T) {
 				t.Errorf("%s: NSEC TTL %d, want the clamped 300", name, rr.Header().Ttl)
 			}
 		}
+		if len(od.NSEC.RRs) > 0 && len(od.NSEC.RRSIGs) == 0 {
+			t.Errorf("%s: NSEC served unsigned", name)
+		}
+		for _, rr := range od.NSEC.RRSIGs {
+			if sig, ok := rr.(*dns.RRSIG); ok && sig.OrigTtl != 300 {
+				t.Errorf("%s: NSEC signed over TTL %d, want the clamped 300", name, sig.OrigTtl)
+			}
+		}
 	}
 	if n == 0 {
 		t.Fatal("no NSEC served after the reload")
+	}
+}
+
+// The clamp guard at the carry itself: under a clamp whose ceiling is below
+// the negative TTL, no NSEC record or signature is carried. Without that clamp
+// they are, which shows the guard is what stops them.
+func TestCarryTakesNoNsecUnderALoweringClamp(t *testing.T) {
+	zd := resignTestZone(t, newTestKeyDB(t))
+	old := zd.publishedSnapshot()
+	carried := func() int {
+		t.Helper()
+		zd.mu.Lock()
+		defer zd.mu.Unlock()
+		// The working set a reload of the same file builds: every RRset
+		// unsigned, no NSEC.
+		ws := map[string]*OwnerData{}
+		for name, od := range old.Data {
+			if od == nil || od.RRtypes == nil {
+				continue
+			}
+			c := &OwnerData{Name: od.Name, RRtypes: NewRRTypeStore()}
+			for _, rt := range od.RRtypes.Keys() {
+				rs := od.RRtypes.GetOnlyRRSet(rt)
+				c.RRtypes.Set(rt, core.RRset{Name: rs.Name, Class: rs.Class, RRtype: rs.RRtype, RRs: rs.RRs})
+			}
+			ws[name] = c
+		}
+		zd.workingSet = ws
+		defer func() { zd.workingSet = nil }()
+		zd.carrySignaturesLocked(old)
+		n := 0
+		for _, od := range zd.workingSet {
+			if len(od.NSEC.RRs) > 0 || len(od.NSEC.RRSIGs) > 0 {
+				n++
+			}
+		}
+		return n
+	}
+	if carried() == 0 {
+		t.Fatal("with no clamp below the negative TTL no NSEC was carried")
+	}
+	zd.DnssecPolicy.TTLS.MaxServed = 300
+	if n := carried(); n != 0 {
+		t.Errorf("under a clamp below the negative TTL %d owners kept their NSEC", n)
+	}
+}
+
+// An NSEC whose signature is due for renewal is not carried: the restitch
+// rebuilds and signs it, as the signing pass re-signs an RRset whose signature
+// is due. Checked at a name the edit does not reach, which the restitch would
+// otherwise leave alone.
+func TestSignedReloadRenewsAnNsecSignatureThatIsDue(t *testing.T) {
+	zd := resignTestZone(t, newTestKeyDB(t))
+	before := zd.publishedSnapshot()
+	const name = "child.resign.example."
+	od := before.Data[name]
+	if od == nil || len(od.NSEC.RRSIGs) == 0 {
+		t.Fatalf("%s has no signed NSEC", name)
+	}
+	// Test-only: age the served signature into the renewal window.
+	aged := dns.Copy(od.NSEC.RRSIGs[0]).(*dns.RRSIG)
+	aged.Expiration = uint32(time.Now().Add(time.Minute).Unix())
+	od.NSEC.RRSIGs = []dns.RR{aged}
+
+	reloadSigned(t, zd, itoa(int(before.Serial)+1), "bravo-edited")
+	after := zd.publishedSnapshot().Data[name]
+	if after == nil || len(after.NSEC.RRSIGs) == 0 {
+		t.Fatalf("%s: no signed NSEC after the reload", name)
+	}
+	for _, rr := range after.NSEC.RRSIGs {
+		if sig := rr.(*dns.RRSIG); sig.Expiration == aged.Expiration {
+			t.Errorf("%s: the NSEC kept a signature due for renewal", name)
+		}
 	}
 }
