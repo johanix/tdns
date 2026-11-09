@@ -50,10 +50,10 @@ func TestSupersedingNotifyUsesTheNewZoneData(t *testing.T) {
 	tr := NewNotifyTracker()
 	key := soaKey("a.example.", "192.0.2.1:53")
 	old, replacement := &ZoneData{ZoneName: "a.example."}, &ZoneData{ZoneName: "a.example."}
-	if !tr.begin(key, old) {
+	if !tr.begin(key, old, true) {
 		t.Fatal("the first version was not sent")
 	}
-	if tr.begin(key, replacement) {
+	if tr.begin(key, replacement, true) {
 		t.Fatal("a second send started while one was in flight")
 	}
 	again, zd := tr.done(key, notifyAttempt{rcode: dns.RcodeSuccess}, 5, time.Second, time.Now())
@@ -68,7 +68,7 @@ func TestNotifyScheduleFindsTheEarliestResend(t *testing.T) {
 	now := time.Now()
 	for i, target := range []string{"192.0.2.1:53", "192.0.2.2:53", "192.0.2.3:53"} {
 		key := soaKey("a.example.", target)
-		tr.begin(key, &ZoneData{ZoneName: "a.example."})
+		tr.begin(key, &ZoneData{ZoneName: "a.example."}, true)
 		// 1 is due last, 2 first.
 		tr.done(key, notifyAttempt{err: errNoAnswer}, 5, time.Duration(3-i)*time.Second, now)
 	}
@@ -99,7 +99,7 @@ func TestNotifyRetireForgetsRemovedTargets(t *testing.T) {
 	zd := &ZoneData{ZoneName: "a.example."}
 	kept, removed, busy := soaKey("a.example.", "192.0.2.1:53"), soaKey("a.example.", "192.0.2.2:53"), soaKey("a.example.", "192.0.2.3:53")
 	for _, key := range []notifyKey{kept, removed, busy} {
-		tr.begin(key, zd)
+		tr.begin(key, zd, true)
 	}
 	tr.done(kept, notifyAttempt{rcode: dns.RcodeSuccess}, 5, time.Second, time.Now())
 	tr.done(removed, notifyAttempt{err: errNoAnswer}, 5, time.Second, time.Now())
@@ -125,7 +125,7 @@ func TestNotifyPruneReleasesZonesNoLongerServed(t *testing.T) {
 	retrying := &ZoneData{ZoneName: "d.example."}
 	for _, zd := range []*ZoneData{served, gone, readded, retrying} {
 		key := soaKey(zd.ZoneName, "192.0.2.1:53")
-		tr.begin(key, zd)
+		tr.begin(key, zd, true)
 		a := notifyAttempt{rcode: dns.RcodeSuccess}
 		if zd == retrying {
 			a = notifyAttempt{err: errNoAnswer}
@@ -141,7 +141,7 @@ func TestNotifyPruneReleasesZonesNoLongerServed(t *testing.T) {
 		}
 		return nil, false
 	}
-	if n := tr.prune(current); n != 2 {
+	if n := tr.prune(current, func(*ZoneData) []string { return []string{"192.0.2.1:53"} }); n != 2 {
 		t.Errorf("pruned %d targets, want 2 (the deleted zone and the re-added one)", n)
 	}
 	for zone, want := range map[string]int{"a.example.": 1, "b.example.": 0, "c.example.": 0, "d.example.": 1} {
@@ -158,17 +158,17 @@ func TestNotifyStatusStates(t *testing.T) {
 	tr := NewNotifyTracker()
 	zd := &ZoneData{ZoneName: "a.example."}
 	key := soaKey("a.example.", "192.0.2.1:53")
-	tr.begin(key, zd)
+	tr.begin(key, zd, true)
 	tr.done(key, notifyAttempt{err: errNoAnswer}, 0, time.Second, time.Now())
 	if st := tr.Status("a.example.")[0].State; st != "given up" {
 		t.Fatalf("after the only try: %q", st)
 	}
-	tr.begin(key, zd)
+	tr.begin(key, zd, true)
 	tr.done(key, notifyAttempt{err: errNoAnswer}, 5, time.Second, time.Now())
 	if st := tr.Status("a.example.")[0].State; st != "retrying" {
 		t.Errorf("a new version with a resend scheduled shows %q, want retrying", st)
 	}
-	tr.begin(key, zd)
+	tr.begin(key, zd, true)
 	tr.done(key, notifyAttempt{setupErr: errors.New("no such key")}, 5, time.Second, time.Now())
 	if st := tr.Status("a.example.")[0].State; st != "cannot sign" {
 		t.Errorf("a NOTIFY that could not be signed shows %q", st)
@@ -240,5 +240,108 @@ func TestNotifyDispatchIsBounded(t *testing.T) {
 	}
 	if n.running != 0 || len(n.waiting) != 0 {
 		t.Errorf("after the burst: running %d, waiting %d", n.running, len(n.waiting))
+	}
+}
+
+// The last downstream removed: the publish's empty request retires the zone's
+// downstream state, a scheduled resend included, and sends nothing.
+func TestNotifyLastDownstreamRemovedRetiresTheTargets(t *testing.T) {
+	tr := NewNotifyTracker()
+	zd := &ZoneData{ZoneName: "a.example."}
+	key := soaKey("a.example.", "192.0.2.1:53")
+	tr.begin(key, zd, true)
+	tr.done(key, notifyAttempt{err: errNoAnswer}, 5, time.Minute, time.Now())
+	n := &notifier{ctx: context.Background(), conf: &Config{}, tracker: tr, results: make(chan notifyResult, 1)}
+	n.handle(NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeSOA}, true)
+	if st := tr.Status("a.example."); len(st) != 0 {
+		t.Errorf("after the last downstream was removed: %+v", st)
+	}
+	if n.running != 0 || len(n.waiting) != 0 {
+		t.Errorf("an empty request started sends: running %d, waiting %d", n.running, len(n.waiting))
+	}
+}
+
+// A publish with no downstreams left tells the tracker, if it holds state for
+// the zone; a zone that never had downstreams costs nothing.
+func TestPublishWithNoDownstreamsTellsTheTracker(t *testing.T) {
+	prev := Conf.Internal.NotifyTracker
+	tr := NewNotifyTracker()
+	Conf.Internal.NotifyTracker = tr
+	t.Cleanup(func() { Conf.Internal.NotifyTracker = prev })
+
+	zd := loadIxfrTestZone(t, basicZone)
+	stageAndPublish(t, zd, stageAddA(t, zd, "one.example.test.", "192.0.2.11"))
+	if got := tr.takePending(); len(got) != 0 {
+		t.Fatalf("a zone the tracker does not know marked %d requests", len(got))
+	}
+	tr.begin(soaKey(zd.ZoneName, aDownstream), zd, true)
+	stageAndPublish(t, zd, stageAddA(t, zd, "two.example.test.", "192.0.2.12"))
+	got := tr.takePending()
+	if len(got) != 1 || len(got[0].Targets) != 0 {
+		t.Errorf("want one empty request, got %+v", got)
+	}
+}
+
+// prune drops a downstream target the zone no longer has, scheduled resend
+// included, and leaves state that did not come from the downstream set.
+func TestNotifyPruneDropsRemovedDownstreams(t *testing.T) {
+	tr := NewNotifyTracker()
+	zd := &ZoneData{ZoneName: "a.example."}
+	kept, removed, other := soaKey("a.example.", "192.0.2.1:53"), soaKey("a.example.", "192.0.2.2:53"), soaKey("a.example.", "192.0.2.9:53")
+	tr.begin(kept, zd, true)
+	tr.begin(removed, zd, true)
+	tr.begin(other, zd, false)
+	for _, key := range []notifyKey{kept, removed, other} {
+		tr.done(key, notifyAttempt{err: errNoAnswer}, 5, time.Minute, time.Now())
+	}
+	current := func(string) (*ZoneData, bool) { return zd, true }
+	if n := tr.prune(current, func(*ZoneData) []string { return []string{kept.target} }); n != 1 {
+		t.Errorf("pruned %d targets, want the removed downstream only", n)
+	}
+	targets := map[string]bool{}
+	for _, st := range tr.Status("a.example.") {
+		targets[st.Target] = true
+	}
+	if !targets[kept.target] || targets[removed.target] || !targets[other.target] {
+		t.Errorf("after pruning: %v", targets)
+	}
+}
+
+// A job queued for a target that was retired while it waited is not sent.
+func TestNotifyQueuedJobForARetiredTargetIsDropped(t *testing.T) {
+	tr := NewNotifyTracker()
+	zd := &ZoneData{ZoneName: "a.example."}
+	key := soaKey("a.example.", "192.0.2.2:53")
+	tr.begin(key, zd, true)
+	tr.retire("a.example.", dns.TypeSOA, nil)
+	n := &notifier{ctx: context.Background(), conf: &Config{}, tracker: tr, results: make(chan notifyResult, 1)}
+	if !n.dropStale(notifyJob{zd: zd, rrtype: dns.TypeSOA, target: key.target}) {
+		t.Fatal("a queued job for a retired target was not dropped")
+	}
+	if len(tr.Status("a.example.")) != 0 {
+		t.Error("the retired target's state was kept")
+	}
+}
+
+// A job whose waiting caller has gone is not sent, and the batch is still
+// answered, as a failure.
+func TestNotifyJobForAGoneCallerIsDropped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	zd := &ZoneData{ZoneName: "a.example."}
+	resp := make(chan NotifyResponse, 1)
+	b := &notifyBatch{req: NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeCDS, Targets: []string{"192.0.2.1:53"}, Response: resp, Ctx: ctx}, left: 1}
+	n := &notifier{ctx: context.Background(), conf: &Config{}, tracker: NewNotifyTracker(), results: make(chan notifyResult, 1)}
+	n.launch(notifyJob{zd: zd, rrtype: dns.TypeCDS, target: "192.0.2.1:53", batch: b})
+	if n.running != 0 {
+		t.Errorf("a job for a gone caller was sent")
+	}
+	select {
+	case r := <-resp:
+		if !r.Error {
+			t.Errorf("the batch reported success: %+v", r)
+		}
+	case <-time.After(time.Second):
+		t.Error("the batch was not answered")
 	}
 }

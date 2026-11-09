@@ -20,6 +20,9 @@ type NotifyRequest struct {
 	Targets  []string // []addr:port
 	Urgent   bool
 	Response chan NotifyResponse
+	// Ctx, when set, is the waiting caller's context. A send for the request
+	// still queued when it is done is not made: nobody is listening for it.
+	Ctx context.Context
 }
 
 type NotifyResponse struct {
@@ -106,17 +109,17 @@ func Notifier(ctx context.Context, conf *Config, notifyreqQ chan NotifyRequest) 
 				lgDns.Info("NotifierEngine: terminating due to notifyreqQ closed")
 				return nil
 			}
-			n.handle(nr)
+			n.handle(nr, false)
 		case <-tracker.wake:
 			for _, nr := range tracker.takePending() {
-				n.handle(nr)
+				n.handle(nr, true)
 			}
 		case r := <-n.results:
 			n.finish(r)
 		case <-timer.C:
 			n.resendDue()
 		case <-prune.C:
-			if gone := tracker.prune(Zones.Get); gone > 0 {
+			if gone := tracker.prune(Zones.Get, zoneDownstreams); gone > 0 {
 				lgDns.Debug("NotifierEngine: released the NOTIFY state of zones no longer served", "targets", gone)
 			}
 		}
@@ -164,10 +167,22 @@ type notifyBatch struct {
 	agg  notifyAggregate
 }
 
-func (n *notifier) handle(nr NotifyRequest) {
+// handle starts a request's sends. downstream: it is a publish's NOTIFY to the
+// zone's downstreams, from the pending set, naming the whole downstream set.
+func (n *notifier) handle(nr NotifyRequest, downstream bool) {
 	zd := nr.ZoneData
 	if zd == nil {
 		return
+	}
+	// A publish's request carries the zone's whole downstream set, so a
+	// target missing from it has been removed: no more resends to it. An empty
+	// set -- the last downstream removed -- retires them all, and there is
+	// nothing to send.
+	if downstream {
+		n.tracker.retire(zd.ZoneName, nr.RRtype, nr.Targets)
+		if len(nr.Targets) == 0 {
+			return
+		}
 	}
 	lgDns.Info("NotifierEngine: will notify", "zone", zd.ZoneName, "type", dns.TypeToString[nr.RRtype], "targets", len(nr.Targets))
 
@@ -194,11 +209,8 @@ func (n *notifier) handle(nr NotifyRequest) {
 		}
 		return
 	}
-	// A tracked request carries the zone's whole downstream set for the type,
-	// so a target missing from it has been removed: no more resends to it.
-	n.tracker.retire(zd.ZoneName, nr.RRtype, nr.Targets)
 	for _, dst := range nr.Targets {
-		if n.tracker.begin(notifyKey{zone: zd.ZoneName, target: dst, rrtype: nr.RRtype}, zd) {
+		if n.tracker.begin(notifyKey{zone: zd.ZoneName, target: dst, rrtype: nr.RRtype}, zd, downstream) {
 			n.launch(notifyJob{zd: zd, rrtype: nr.RRtype, target: dst})
 		}
 	}
@@ -227,6 +239,9 @@ func (n *notifier) pump() {
 		default:
 			return
 		}
+		if n.dropStale(job) {
+			continue
+		}
 		n.running++
 		go func() {
 			lgDns.Debug("NOTIFY: sending", "type", dns.TypeToString[job.rrtype], "zone", job.zd.ZoneName, "target", job.target)
@@ -239,12 +254,32 @@ func (n *notifier) pump() {
 	}
 }
 
+// dropStale reports whether a queued job is no longer wanted, and settles it:
+// a tracked target retired while its job waited (its state is dropped), or a
+// waiting caller that has gone (its slot in the batch counts as failed, so the
+// batch still completes).
+func (n *notifier) dropStale(job notifyJob) bool {
+	if b := job.batch; b != nil {
+		ctx := b.req.Ctx
+		if ctx == nil || ctx.Err() == nil {
+			return false
+		}
+		n.settle(job, notifyAttempt{err: fmt.Errorf("not sent: the caller stopped waiting: %w", ctx.Err())})
+		return true
+	}
+	return n.tracker.dropIfRetired(notifyKey{zone: job.zd.ZoneName, target: job.target, rrtype: job.rrtype})
+}
+
 func (n *notifier) finish(r notifyResult) {
 	n.running--
 	defer n.pump()
-	job := r.job
+	n.settle(r.job, r.attempt)
+}
+
+// settle records one job's outcome: in its batch, or in the tracker.
+func (n *notifier) settle(job notifyJob, attempt notifyAttempt) {
 	if b := job.batch; b != nil {
-		b.agg.add(job.zd.ZoneName, job.target, job.rrtype, r.attempt)
+		b.agg.add(job.zd.ZoneName, job.target, job.rrtype, attempt)
 		b.left--
 		if b.left == 0 {
 			rcode, ede, err := b.agg.result(job.zd.ZoneName, job.rrtype, len(b.req.Targets))
@@ -256,7 +291,7 @@ func (n *notifier) finish(r notifyResult) {
 	key := notifyKey{zone: job.zd.ZoneName, target: job.target, rrtype: job.rrtype}
 	// The newer version goes out with the ZoneData it came with, not the one
 	// this send used: the zone may have been replaced in between.
-	if again, zd := n.tracker.done(key, r.attempt, retries, interval, time.Now()); again {
+	if again, zd := n.tracker.done(key, attempt, retries, interval, time.Now()); again {
 		n.launch(notifyJob{zd: zd, rrtype: job.rrtype, target: job.target})
 	}
 }
@@ -579,4 +614,12 @@ func extractEDEFromMsg(msg *dns.Msg) []dns.EDNS0_EDE {
 		}
 	}
 	return out
+}
+
+// zoneDownstreams returns the zone's downstream NOTIFY targets, as a publish
+// computes them.
+func zoneDownstreams(zd *ZoneData) []string {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return peerAddrs(zd.Notify)
 }

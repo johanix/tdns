@@ -70,6 +70,11 @@ type notifyTargetState struct {
 	// zone is gone. Set on one with a send in flight; the state is dropped when
 	// that send returns.
 	retired bool
+	// downstream: the state comes from a publish's NOTIFY to the zone's
+	// downstreams (Mark), whose request names the whole downstream set. Only
+	// such state is retired when a target leaves that set; a NOTIFY an app
+	// sent through the queue to a target of its own choosing is not.
+	downstream bool
 }
 
 // NotifyTracker holds the per-target NOTIFY state and the pending set of
@@ -207,7 +212,7 @@ func (t *NotifyTracker) takePending() []NotifyRequest {
 // begin starts a new version's sends to one target, and reports whether to
 // send now. A send already in flight is left to finish; the new version goes
 // out when it returns.
-func (t *NotifyTracker) begin(key notifyKey, zd *ZoneData) bool {
+func (t *NotifyTracker) begin(key notifyKey, zd *ZoneData, downstream bool) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	st := t.targets[key]
@@ -217,6 +222,7 @@ func (t *NotifyTracker) begin(key notifyKey, zd *ZoneData) bool {
 	}
 	st.zd = zd
 	st.retired = false
+	st.downstream = downstream
 	if st.inFlight {
 		st.again = true
 		return false
@@ -414,11 +420,11 @@ func (t *NotifyTracker) deleteLocked(key notifyKey) {
 	}
 }
 
-// retire drops the zone's state for targets of this NOTIFY type that are no
-// longer among its downstreams, so a removed peer is neither resent to nor
-// remembered. One with a send in flight is dropped when that send returns.
-// targets is the zone's full downstream set for the type, as every tracked
-// request carries it.
+// retire drops the zone's downstream state for targets of this NOTIFY type
+// that are no longer among its downstreams, so a removed peer is neither resent
+// to nor remembered. One with a send in flight is dropped when that send
+// returns. targets is the zone's full downstream set, as a publish's request
+// carries it; empty when the last downstream was removed.
 func (t *NotifyTracker) retire(zone string, rrtype uint16, targets []string) {
 	keep := make(map[string]bool, len(targets))
 	for _, dst := range targets {
@@ -427,10 +433,11 @@ func (t *NotifyTracker) retire(zone string, rrtype uint16, targets []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for key := range t.byZone[core.CanonicalizeName(zone)] {
-		if key.rrtype != rrtype || keep[key.target] {
+		st := t.targets[key]
+		if key.rrtype != rrtype || keep[key.target] || !st.downstream {
 			continue
 		}
-		if st := t.targets[key]; st.inFlight {
+		if st.inFlight {
 			st.retired = true
 		} else {
 			t.deleteLocked(key)
@@ -438,41 +445,93 @@ func (t *NotifyTracker) retire(zone string, rrtype uint16, targets []string) {
 	}
 }
 
-// prune drops the state of zones that are no longer served, or are served by
-// another ZoneData (deleted and added again), so the state and the zone data
-// it holds are released. Only state at rest goes: a send in flight or a resend
-// still scheduled is left to run its course, which the retry limit bounds.
-// current looks a zone up; Zones.Get, but a test may pass its own. Called
-// without the tracker's lock held for the lookups.
-func (t *NotifyTracker) prune(current func(zone string) (*ZoneData, bool)) int {
+// dropIfRetired reports whether a queued job's target was retired while the
+// job waited, and if so drops the target's state: the job is not sent.
+func (t *NotifyTracker) dropIfRetired(key notifyKey) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st := t.targets[key]
+	if st == nil || !st.retired {
+		return false
+	}
+	t.deleteLocked(key)
+	return true
+}
+
+// tracks reports whether the tracker holds any state for the zone.
+func (t *NotifyTracker) tracks(zone string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.byZone[core.CanonicalizeName(zone)]) > 0
+}
+
+// prune releases state nobody needs any more. Two kinds:
+//
+//   - A zone no longer served, or served by another ZoneData (deleted and
+//     added again). Only state at rest goes: a send in flight or a resend
+//     still scheduled runs its course, which the retry limit bounds.
+//   - A downstream target no longer among the zone's downstreams, as after a
+//     reload of its configuration with no publish since. That one goes at
+//     once, scheduled resend included; one in flight is retired.
+//
+// current looks a zone up (Zones.Get; a test may pass its own), and
+// downstreams returns a zone's downstream targets. Both are called without
+// the tracker's lock held.
+func (t *NotifyTracker) prune(current func(zone string) (*ZoneData, bool), downstreams func(zd *ZoneData) []string) int {
 	type cand struct {
-		key notifyKey
-		zd  *ZoneData
+		key        notifyKey
+		zd         *ZoneData
+		downstream bool
 	}
 	t.mu.Lock()
-	var cands []cand
+	cands := make([]cand, 0, len(t.targets))
 	for key, st := range t.targets {
-		if !st.inFlight && st.due.IsZero() {
-			cands = append(cands, cand{key, st.zd})
-		}
+		cands = append(cands, cand{key, st.zd, st.downstream})
 	}
 	t.mu.Unlock()
 
-	var gone []cand
+	type verdict struct {
+		cand
+		removedTarget bool // the zone is current, this target is not
+	}
+	var gone []verdict
+	keep := map[*ZoneData]map[string]bool{}
 	for _, c := range cands {
 		if zd, ok := current(c.key.zone); !ok || zd != c.zd {
-			gone = append(gone, c)
+			gone = append(gone, verdict{c, false})
+			continue
+		}
+		if !c.downstream {
+			continue
+		}
+		targets, seen := keep[c.zd]
+		if !seen {
+			targets = map[string]bool{}
+			for _, dst := range downstreams(c.zd) {
+				targets[dst] = true
+			}
+			keep[c.zd] = targets
+		}
+		if !targets[c.key.target] {
+			gone = append(gone, verdict{c, true})
 		}
 	}
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	n := 0
-	for _, c := range gone {
-		// Still at rest, and still the same zone data: nothing began a new
-		// version for it while the lock was released.
-		if st := t.targets[c.key]; st != nil && st.zd == c.zd && !st.inFlight && st.due.IsZero() {
-			t.deleteLocked(c.key)
+	for _, v := range gone {
+		st := t.targets[v.key]
+		// Still the same zone data: nothing began a new version for it while
+		// the lock was released.
+		if st == nil || st.zd != v.zd {
+			continue
+		}
+		switch {
+		case v.removedTarget && st.inFlight:
+			st.retired = true
+		case v.removedTarget, !st.inFlight && st.due.IsZero():
+			t.deleteLocked(v.key)
 			n++
 		}
 	}

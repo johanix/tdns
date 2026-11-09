@@ -892,6 +892,13 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 // drops, and says so.
 func (zd *ZoneData) notifyIfServableLocked(snap *zoneSnapshot) {
 	if len(zd.Notify) == 0 {
+		// The last downstream may just have been removed: an empty request
+		// tells the tracker to forget the zone's targets (and to resend to
+		// none). Only when it holds some, so a zone that never had a
+		// downstream costs nothing here.
+		if t := Conf.Internal.NotifyTracker; t != nil && t.tracks(zd.ZoneName) {
+			t.Mark(NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeSOA})
+		}
 		return
 	}
 	if !zd.snapshotIsServableLocked(snap) {
