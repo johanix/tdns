@@ -175,3 +175,31 @@ func TestActivateUpdatePolicy_TsigGrants(t *testing.T) {
 		t.Error("a grant for \"*\" was accepted")
 	}
 }
+
+// A config reload replaces the zone's update policy even when the new policy
+// is empty. The case that went wrong: a zone whose only policy is its TSIG
+// grants (no SIG(0) type) has its last grant removed from the config. Every
+// field of the reloaded policy is then empty, and the old condition, which
+// copied the policy only when some field was set, kept the removed grants in
+// effect. A refresher that is not a reload still must not wipe a policy it
+// does not carry.
+func TestRefresherReplacesUpdatePolicy(t *testing.T) {
+	grants := mustGrants(t, "example.", TsigGrantConf{Key: "k.", NameType: "zonesub", RRtypes: []string{"A"}})
+	cases := []struct {
+		name string
+		zr   ZoneRefresher
+		want bool
+	}{
+		{"reload removing the last TSIG grants", ZoneRefresher{ConfigUpdate: true}, true},
+		{"reload with grants", ZoneRefresher{ConfigUpdate: true, UpdatePolicy: UpdatePolicy{TsigGrants: grants}}, true},
+		{"reload with a SIG(0) type", ZoneRefresher{ConfigUpdate: true, UpdatePolicy: UpdatePolicy{Zone: UpdatePolicyDetail{Type: "selfsub"}}}, true},
+		{"not a reload, no policy", ZoneRefresher{}, false},
+		{"not a reload, grants", ZoneRefresher{UpdatePolicy: UpdatePolicy{TsigGrants: grants}}, true},
+		{"not a reload, a SIG(0) type", ZoneRefresher{UpdatePolicy: UpdatePolicy{Zone: UpdatePolicyDetail{Type: "self"}}}, true},
+	}
+	for _, c := range cases {
+		if got := refresherReplacesUpdatePolicy(c.zr); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}

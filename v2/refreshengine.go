@@ -964,12 +964,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								zd.TransferSrc = zr.TransferSrc
 							}
 						}
-						// Update UpdatePolicy only if provided (check if it has meaningful content)
-						// UpdatePolicy is a struct, so we check if any fields are set
-						// TSIG grants count as content too: a zone whose only
-						// policy is its grants has no SIG(0) type to trip this.
-						if zr.UpdatePolicy.Child.Type != "" || zr.UpdatePolicy.Zone.Type != "" || zr.UpdatePolicy.Validate ||
-							len(zr.UpdatePolicy.TsigGrants) > 0 {
+						if refresherReplacesUpdatePolicy(zr) {
 							zd.UpdatePolicy = zr.UpdatePolicy
 						}
 						if zr.DelegationPolicy != nil {
@@ -1607,4 +1602,23 @@ func setRefreshRetry(refreshCounters *core.ConcurrentMap[string, *RefreshCounter
 		return
 	}
 	live.CurRefresh = secs
+}
+
+// refresherReplacesUpdatePolicy decides whether a refresher's UpdatePolicy
+// replaces the zone's.
+//
+// A config-bearing refresher (a reload) always does: it carries the zone's
+// whole parsed policy, so a policy that is now empty is what the config says.
+// Without that, a reload that removed a zone's last TSIG grants -- a zone with
+// no SIG(0) type, which is a configuration TSIG grants make ordinary -- left
+// every field below empty, and the removed grants stayed in effect.
+//
+// Any other refresher carries a policy only when it means to; one with nothing
+// set must not wipe the zone's.
+func refresherReplacesUpdatePolicy(zr ZoneRefresher) bool {
+	if zr.ConfigUpdate {
+		return true
+	}
+	p := zr.UpdatePolicy
+	return p.Child.Type != "" || p.Zone.Type != "" || p.Validate || len(p.TsigGrants) > 0
 }
