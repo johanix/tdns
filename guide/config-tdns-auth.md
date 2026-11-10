@@ -772,6 +772,12 @@ This is separate from `multi-provider`. The full HSYNC role model -- `servers`,
 `signers`, `auditors`, delegated NS management, agent-to-agent synchronization
 -- lives in `tdns-mp`; `tdns-auth` reads exactly these two flags.
 
+**Zone files**
+
+| Option | Effect |
+|--------|--------|
+| `allow-doubled-suffix` | Load names that end in the zone's name, or a name under it, twice, such as `test.test.` in zone `test.`. **Off by default**: the loader and `config check` refuse such a name, since almost every one is a name written out in full whose trailing dot is missing |
+
 **Multi-provider and catalog**
 
 | Option | Effect |
