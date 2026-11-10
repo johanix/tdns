@@ -107,6 +107,16 @@ its own PR), and
 the changed `TestReloadOfAFileWhoseSerialJumpedAhead`, which now expects the
 file's own serial.
 
+## Amendment, 2026-11-08: part D as implemented
+
+- The NSEC records are not carried when the SOA's negative TTL changed: the
+  restitch would keep the old TTL on every NSEC it did not rewrite.
+- A one-record edit's link also carries the apex DNSKEY's new signature and the
+  NSEC signatures around the apex, not only around the edit. The file carries
+  no DNSKEY, so the signer puts it back, and the apex counts as changed for the
+  restitch. Carrying the DNSKEY RRset too was not done: whether the signer then
+  notices a changed key set has not been checked.
+
 ## Changes from the first review (2026-11-09)
 
 CodeRabbit's first round led to these changes:
@@ -181,3 +191,54 @@ CodeRabbit's first round led to these changes:
 - **The ZONEMD parameters are resolved, defaults included,** before they go
   into the comparison, as the publish resolves them. A config that spells out
   the default no longer reads as a change.
+
+## Part D, changes from the external review (2026-11-09)
+
+- **No NSEC is carried under a TTL clamp that can lower the negative TTL.**
+  The carry compares the SOAs before the publish signs, and the publish
+  signs the SOA under the zone's TTL clamp. A ceiling below the negative
+  TTL lowers the SOA's TTL, and with it the TTL every NSEC must take, after
+  that comparison. The carry now also asks the zone's clamp
+  (`ClampParamsForZone`). When its ceiling is below the negative TTL, no
+  NSEC is carried and the chain is rebuilt. That costs a full chain rebuild
+  on a reload inside a clamp window. In the test zone the whole chain was
+  re-signed under such a clamp with or without this guard, so the test
+  checks the outcome but does not show the guard is needed. The guard makes
+  the outcome independent of whatever re-signed it there.
+- **The SOA's signatures are never carried.** Every publish signs the SOA
+  afresh, since its serial moves. A carried signature over the old serial
+  would stand if that re-sign failed.
+
+## Part D, changes from the third review (2026-11-09)
+
+- **A carried NSEC's signatures are checked.** The signing pass skips NSEC
+  records, and the restitch rewrites only the names around a change, so
+  nothing in the publish looked at a carried NSEC's signatures again. A
+  carried RRset's signatures, by contrast, go through `SignRRset`, which
+  re-signs any that are due. A carried signature is no older than the one
+  already served, and the resigner renews NSEC signatures at the same
+  threshold, so this never introduced an expired signature. What the carry
+  lost was the repair a full re-sign used to make on the way. Now an NSEC is
+  carried only while every active ZSK has a signature on it that is not due
+  for renewal. Otherwise it is left out, and the restitch rebuilds and signs
+  it.
+- **The clamp guard is tested at the carry,** where it acts. Under a clamp
+  below the negative TTL no NSEC record or signature is carried; without the
+  clamp they are. Unlike the end-to-end test above, this one fails without
+  the guard.
+
+## Part D, changes from the fourth review (2026-11-10)
+
+- **A zone in compact denial carries no NSEC.** With black-lies the zone
+  keeps no chain: no full sign generates one, and the restitch leaves the
+  zone alone. If black-lies came on after the published snapshot was
+  chained, a reload carried the old chain into the new working set, and
+  nothing rewrote it. Direct NSEC queries and zone transfers then served
+  stale signed NSECs, where a reload without the carry dropped them.
+- **A carried NSEC is checked at its own TTL.** The clamp writes a lowered
+  TTL into the records it signs. When it lifts, the SOA, re-signed by every
+  publish, goes back to its own TTL. An NSEC whose signature is still
+  current keeps the clamped one. The old snapshot can then pass the
+  negative-TTL comparison and still hold NSECs at the clamped TTL, and the
+  carry kept them across the reload. Now an NSEC is carried only at the
+  negative TTL. Otherwise the restitch rebuilds it at that TTL.
