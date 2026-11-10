@@ -40,6 +40,13 @@ type UpdateRequest struct {
 	// touches every InternalUpdate site in the tree and that is a separate
 	// change from adding a channel.
 	PreAuthorized bool
+	// Authz, when non-nil, is how a DNS UPDATE that did not come through the
+	// SIG(0) path was authorized: today a TSIG key and the zone's grants
+	// (tsig_update_policy.go). The applier's per-type checks ask it, through
+	// typeAllowed, instead of the SIG(0) type list. Set only by the UPDATE
+	// responder, after the key's MAC verified and every record passed the
+	// grants.
+	Authz *UpdateAuthz
 	// Replay marks the re-application of already-persisted deltas over a
 	// freshly loaded zone file. It suppresses persistence for that apply:
 	// these changes are already in the ZoneDelta table, and recording them
@@ -398,10 +405,12 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 		zd.mu.Lock()
 		allowUpdates := zd.Options[OptAllowUpdates]
 		allowApiUpdates := zd.Options[OptAllowApiUpdates]
+		allowTsigUpdates := zd.Options[OptAllowTsigUpdates]
 		zd.mu.Unlock()
 
 		if allowUpdates || ur.InternalUpdate ||
-			(ur.PreAuthorized && allowApiUpdates) {
+			(ur.PreAuthorized && allowApiUpdates) ||
+			(ur.Authz.isTsig() && allowTsigUpdates) {
 			// Compute delegation sync status before apply (needs pre-state),
 			// but only enqueue after successful apply.
 			var dss DelegationSyncStatus
@@ -1325,8 +1334,7 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys, cla
 					retained++
 					continue
 				}
-				if _, allowed := zd.UpdatePolicy.Zone.RRtypes[t]; !allowed &&
-					!ur.InternalUpdate && !ur.PreAuthorized {
+				if !ur.typeAllowed(zd, ownerName, t) {
 					denied++
 					continue
 				}
@@ -1358,8 +1366,7 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys, cla
 		// API-channel requests bypass it: the API's authorization is the API
 		// key, already checked by the handler that set PreAuthorized. Zone
 		// self-service therefore stays on DDNS, where the policy applies.
-		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
-		if !ok && !ur.InternalUpdate && !ur.PreAuthorized {
+		if !ur.typeAllowed(zd, ownerName, rrtype) {
 			lg.Error("ApplyZoneUpdateToZoneData: RR type denied by policy", "rrtype", rrtypestr)
 			continue
 		}
@@ -1910,7 +1917,12 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		// XXX: This is the wrong place for this check. These things should be already sorted out during the approval phase.
 		// XXX: But we keep it here until the approval code is updated.
 		// First check whether this update is allowed by the update-policy.
-		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
+		var ok bool
+		if ur.Authz != nil {
+			ok = ur.typeAllowed(zd, ownerName, rrtype)
+		} else {
+			_, ok = zd.UpdatePolicy.Zone.RRtypes[rrtype]
+		}
 		if !ok && !ur.InternalUpdate {
 			// log.Printf("ZUCDDNG: Error: request to add %s RR, which is denied by policy", rrtypestr)
 			continue
