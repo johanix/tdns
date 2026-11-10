@@ -793,6 +793,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							if zr.PublishCadence != 0 {
 								zd.publishCadence = zr.PublishCadence
 							}
+							// Only a config-bearing refresher carries them; a
+							// stub that came with its own (an API-provisioned
+							// primary) keeps those.
+							if zr.ConfigUpdate {
+								zd.notifyRetries, zd.notifyRetryInterval = zr.NotifyRetries, zr.NotifyRetryInterval
+							}
 							zd.ZoneType = zr.ZoneType
 							// Normalize AFTER ZoneType is assigned — the
 							// predicate depends on it (Fix B chokepoint).
@@ -893,6 +899,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.AllowNotify = zr.AllowNotify
 							zd.Downstreams = zr.Downstreams
 							zd.DownstreamAuth = zr.DownstreamAuth
+							zd.notifyRetries, zd.notifyRetryInterval = zr.NotifyRetries, zr.NotifyRetryInterval
 						} else if zr.Notify != nil {
 							zd.Notify = normalizePeerAddrs(zr.Notify)
 						}
@@ -1114,6 +1121,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						FirstZoneLoad:     true,
 						Status:            ZoneStatusPending, // registered + enqueued, no data yet (B6)
 						publishCadence:    zr.PublishCadence,
+
+						notifyRetries:       zr.NotifyRetries,
+						notifyRetryInterval: zr.NotifyRetryInterval,
 					}
 
 					// Strip origination settings this zone may not act on. The

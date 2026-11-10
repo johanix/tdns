@@ -1426,6 +1426,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zdp.Options = zdp.withRuntimeOptionsLocked(newOpts)
 		zdp.publishCadence = publishCadence
 		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
+		retries, retryInterval := zoneNotifyRetrySettings(zname, zconf)
+		zdp.notifyRetries, zdp.notifyRetryInterval = retries, retryInterval
 		zdp.zonemdScheme = zonemdSet.Scheme
 		zdp.zonemdAlgs = zonemdSet.Algorithms
 		zdp.zonemdOnVerifyFailure = zonemdSet.OnVerifyFailure
@@ -1627,7 +1629,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				// Always carried (empty == inherit the global), so a config
 				// edit that REMOVES a per-zone mode actually reverts the zone
 				// to the global on reload instead of keeping the stale value.
-				OutboundSoaSerial: zconf.OutboundSoaSerial,
+				OutboundSoaSerial:   zconf.OutboundSoaSerial,
+				NotifyRetries:       retries,
+				NotifyRetryInterval: retryInterval,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:

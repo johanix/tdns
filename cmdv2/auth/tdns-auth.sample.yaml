@@ -95,6 +95,11 @@ authengine:
    #               BIND/Knot/etc. secondaries where serial-regression on
    #               restart would otherwise cause sync confusion.
    # outbound-soa-serial:  persist
+   # An unanswered NOTIFY is sent again (RFC 1996 §3.6): notify-retries times,
+   # the first after notify-retry-interval, each later one twice as long. Any
+   # reply ends the tries. A zone's own settings override these.
+   # notify-retries:        5
+   # notify-retry-interval: 10s
    # options is a list of server-wide auth options. Recognized:
    #   minimal-responses        — omit authority NS RRset and apex glue from
    #                              positive answers (BIND-style). Referrals

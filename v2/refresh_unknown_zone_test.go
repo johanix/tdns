@@ -5,9 +5,12 @@ package tdns
 
 import (
 	"context"
+	"log"
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // runRefreshEngine starts the refresh engine on conf, and stops it when the
@@ -93,6 +96,70 @@ func TestAConfigBearingRefreshStillCreatesItsDynamicZone(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("the config-bearing refresh created no zone")
+		}
+	}
+}
+
+// A persisted dynamic zone keeps its own NOTIFY resend settings across a
+// restart: the refresher LoadDynamicZoneFiles enqueues carries them to the
+// ZoneData the engine creates (#1007). notify-retries: 0 must stay 0, not
+// become the server's default.
+func TestARestoredDynamicZoneKeepsItsNotifyRetrySettings(t *testing.T) {
+	authApp(t)
+	conf := &Config{}
+	conf.Internal.KeyDB = Conf.Internal.KeyDB
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 1)
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	runRefreshEngine(t, conf)
+
+	const zone = "retries.refresh.example."
+	t.Cleanup(func() { Zones.Remove(zone) })
+	zero := 0
+	conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: zone, ZoneType: Primary, ZoneStore: MapZone,
+		Zonefile: t.TempDir() + "/absent.zone", ConfigUpdate: true,
+		NotifyRetries: &zero, NotifyRetryInterval: 7 * time.Second}
+
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if zd, ok := Zones.Get(zone); ok {
+			retries, interval := notifyRetryPolicy(zd, NewNotifyTracker())
+			if retries != 0 || interval != 7*time.Second {
+				t.Errorf("restored zone resends %d times every %v, want 0 times every 7s", retries, interval)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the config-bearing refresh created no zone")
+		}
+	}
+}
+
+// So does a pre-registered zone that has not been configured yet: the merge
+// into the stub copies the config-bearing refresher's resend settings.
+func TestAStubMergeTakesTheNotifyRetrySettings(t *testing.T) {
+	authApp(t)
+	conf := &Config{}
+	conf.Internal.KeyDB = Conf.Internal.KeyDB
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 1)
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	runRefreshEngine(t, conf)
+
+	const zone = "stub.refresh.example."
+	stub := &ZoneData{ZoneName: zone, FirstZoneLoad: true, Data: core.NewNameMap[OwnerData](), Logger: log.Default()}
+	Zones.Set(zone, stub)
+	t.Cleanup(func() { Zones.Remove(zone) })
+	zero := 0
+	conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: zone, ZoneType: Primary, ZoneStore: MapZone,
+		Zonefile: t.TempDir() + "/absent.zone", ConfigUpdate: true,
+		NotifyRetries: &zero, NotifyRetryInterval: 7 * time.Second}
+
+	tr := NewNotifyTracker()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if retries, interval := notifyRetryPolicy(stub, tr); retries == 0 && interval == 7*time.Second {
+			return
+		}
+		if time.Now().After(deadline) {
+			retries, interval := notifyRetryPolicy(stub, tr)
+			t.Fatalf("the stub resends %d times every %v, want 0 times every 7s", retries, interval)
 		}
 	}
 }

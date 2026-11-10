@@ -443,6 +443,13 @@ type ZoneData struct {
 	// disabled (IXFR queries are answered with full transfers). From zone
 	// config ixfr-chain-max-bytes; written at parse time under zd.mu.
 	ixfrChainMaxBytes int
+	// notifyRetries and notifyRetryInterval are the zone's own NOTIFY resend
+	// settings (#1007): nil and 0 inherit authengine's, then the defaults
+	// (notifier_tracker.go). From zone config notify-retries and
+	// notify-retry-interval; written at parse time under zd.mu, like
+	// ixfrChainMaxBytes above.
+	notifyRetries       *int
+	notifyRetryInterval time.Duration
 	// zonemdAlgs and zonemdScheme are the resolved RFC 8976 parameters for
 	// this zone's published ZONEMD, from the zone config's `zonemd` block.
 	// Meaningful only when OptPublishZonemd is set. Written at parse time
@@ -641,6 +648,9 @@ type ZoneConf struct {
 	CurrentSerial   uint32           `yaml:"-"`
 	IncomingSerial  uint32           `yaml:"-"`
 	UpstreamSerials []UpstreamSerial `yaml:"-"`
+	// DownstreamNotifies is the per-target NOTIFY delivery state (#528, #1007),
+	// populated by the single-zone `zone desc` path from the NotifyTracker.
+	DownstreamNotifies []NotifyTargetStatus `yaml:"-"`
 	// EffectiveOutboundSoaSerial is the resolved outbound serial mode and where
 	// it came from ("zone", "global" or "default"), so an operator can see both
 	// the value and why it applies.
@@ -680,6 +690,14 @@ type ZoneConf struct {
 	// this zone (estimated wire bytes). 0/unset => 1 MiB default; negative =>
 	// disable retention (IXFR clients always get a full transfer).
 	IxfrChainMaxBytes int `yaml:"ixfr-chain-max-bytes" mapstructure:"ixfr-chain-max-bytes"`
+	// NotifyRetries is how many times an unanswered NOTIFY is sent again
+	// (#1007, RFC 1996 §3.6). Unset inherits authengine.notify-retries, then 5;
+	// 0 sends once.
+	NotifyRetries *int `yaml:"notify-retries,omitempty" mapstructure:"notify-retries"`
+	// NotifyRetryInterval is the wait before the first resend, as a duration
+	// ("10s"); each later resend waits twice as long. Unset inherits
+	// authengine.notify-retry-interval, then 10s.
+	NotifyRetryInterval string `yaml:"notify-retry-interval,omitempty" mapstructure:"notify-retry-interval"`
 	// Provisioning is a display-only derived lifecycle string
 	// ("pending"|"loading"|"ready"|"error") populated by the list handlers from
 	// ZoneStatus + the error registry. Not config; not serialized to YAML.
@@ -1207,8 +1225,13 @@ type ZoneRefresher struct {
 	// TransferSrc carries the per-zone outbound-transfer source to the
 	// RefreshEngine (copied to zd.TransferSrc on merge). Empty inherits.
 	TransferSrc []string
-	MultiSigner string
-	Force       bool // force refresh, ignoring SOA serial
+	// NotifyRetries and NotifyRetryInterval carry the zone's own NOTIFY
+	// resend settings (zoneNotifyRetrySettings), copied to the ZoneData by a
+	// config-bearing refresher. nil and zero inherit the server's.
+	NotifyRetries       *int
+	NotifyRetryInterval time.Duration
+	MultiSigner         string
+	Force               bool // force refresh, ignoring SOA serial
 	Wait        bool // wait for refresh to complete before responding
 	Response    chan RefresherResponse
 }
