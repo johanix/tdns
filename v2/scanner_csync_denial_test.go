@@ -278,7 +278,7 @@ func validatorScanner(t *testing.T, zones ...string) (*Scanner, *Imr, func(zone 
 			Protocol:  3,
 			Algorithm: dns.ECDSAP256SHA256,
 		}
-		priv, err := key.Generate(256)
+		priv, err := generateSigningKey(key, 256)
 		if err != nil {
 			t.Fatal(err)
 		}

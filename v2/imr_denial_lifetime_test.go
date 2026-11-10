@@ -23,7 +23,7 @@ func lifetimeSigner(t *testing.T, imr *Imr, zone string) func(set []dns.RR, unti
 	t.Helper()
 	key := &dns.DNSKEY{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
 		Flags: 257, Protocol: 3, Algorithm: dns.ED25519}
-	priv, err := key.Generate(256)
+	priv, err := generateSigningKey(key, 256)
 	if err != nil {
 		t.Fatal(err)
 	}

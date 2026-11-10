@@ -46,7 +46,7 @@ func newNegSigner(t *testing.T, rrcache *RRsetCacheT) *negSigner {
 	t.Helper()
 	k := &dns.DNSKEY{Hdr: dns.RR_Header{Name: negZone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 256, Protocol: 3, Algorithm: dns.ED25519}
-	p, err := k.Generate(256)
+	p, err := generateSigningKey(k, 256)
 	if err != nil {
 		t.Fatal(err)
 	}

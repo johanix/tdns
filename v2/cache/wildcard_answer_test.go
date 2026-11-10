@@ -340,13 +340,13 @@ func TestValidateAnswerDNSKEYIsNotAWildcard(t *testing.T) {
 	const zone = secZone
 	ksk := &dns.DNSKEY{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 257, Protocol: 3, Algorithm: dns.ED25519}
-	priv, err := ksk.Generate(256)
+	priv, err := generateSigningKey(ksk, 256)
 	if err != nil {
 		t.Fatal(err)
 	}
 	zsk := &dns.DNSKEY{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 256, Protocol: 3, Algorithm: dns.ED25519}
-	if _, err := zsk.Generate(256); err != nil {
+	if _, err := generateSigningKey(zsk, 256); err != nil {
 		t.Fatal(err)
 	}
 	rrcache.DnskeyCache.Set(zone, ksk.KeyTag(), &CachedDnskeyRRset{Name: zone, Keyid: ksk.KeyTag(),
