@@ -226,3 +226,19 @@ CodeRabbit's first round led to these changes:
   below the negative TTL no NSEC record or signature is carried; without the
   clamp they are. Unlike the end-to-end test above, this one fails without
   the guard.
+
+## Part D, changes from the fourth review (2026-11-10)
+
+- **A zone in compact denial carries no NSEC.** With black-lies the zone
+  keeps no chain: no full sign generates one, and the restitch leaves the
+  zone alone. If black-lies came on after the published snapshot was
+  chained, a reload carried the old chain into the new working set, and
+  nothing rewrote it. Direct NSEC queries and zone transfers then served
+  stale signed NSECs, where a reload without the carry dropped them.
+- **A carried NSEC is checked at its own TTL.** The clamp writes a lowered
+  TTL into the records it signs. When it lifts, the SOA, re-signed by every
+  publish, goes back to its own TTL. An NSEC whose signature is still
+  current keeps the clamped one. The old snapshot can then pass the
+  negative-TTL comparison and still hold NSECs at the clamped TTL, and the
+  carry kept them across the reload. Now an NSEC is carried only at the
+  negative TTL. Otherwise the restitch rebuilds it at that TTL.

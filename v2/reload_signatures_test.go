@@ -209,41 +209,104 @@ func TestSignedReloadUnderALoweringClampRebuildsTheNsecChain(t *testing.T) {
 func TestCarryTakesNoNsecUnderALoweringClamp(t *testing.T) {
 	zd := resignTestZone(t, newTestKeyDB(t))
 	old := zd.publishedSnapshot()
-	carried := func() int {
-		t.Helper()
-		zd.mu.Lock()
-		defer zd.mu.Unlock()
-		// The working set a reload of the same file builds: every RRset
-		// unsigned, no NSEC.
-		ws := map[string]*OwnerData{}
-		for name, od := range old.Data {
-			if od == nil || od.RRtypes == nil {
-				continue
-			}
-			c := &OwnerData{Name: od.Name, RRtypes: NewRRTypeStore()}
-			for _, rt := range od.RRtypes.Keys() {
-				rs := od.RRtypes.GetOnlyRRSet(rt)
-				c.RRtypes.Set(rt, core.RRset{Name: rs.Name, Class: rs.Class, RRtype: rs.RRtype, RRs: rs.RRs})
-			}
-			ws[name] = c
-		}
-		zd.workingSet = ws
-		defer func() { zd.workingSet = nil }()
-		zd.carrySignaturesLocked(old)
-		n := 0
-		for _, od := range zd.workingSet {
-			if len(od.NSEC.RRs) > 0 || len(od.NSEC.RRSIGs) > 0 {
-				n++
-			}
-		}
-		return n
-	}
-	if carried() == 0 {
+	if nsecOwners(carryOnto(t, zd, old)) == 0 {
 		t.Fatal("with no clamp below the negative TTL no NSEC was carried")
 	}
 	zd.DnssecPolicy.TTLS.MaxServed = 300
-	if n := carried(); n != 0 {
+	if n := nsecOwners(carryOnto(t, zd, old)); n != 0 {
 		t.Errorf("under a clamp below the negative TTL %d owners kept their NSEC", n)
+	}
+}
+
+// carryOnto runs the carry from old onto the working set a reload of the same
+// file builds -- every RRset unsigned, no NSEC -- and returns that set.
+func carryOnto(t *testing.T, zd *ZoneData, old *zoneSnapshot) map[string]*OwnerData {
+	t.Helper()
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	ws := map[string]*OwnerData{}
+	for name, od := range old.Data {
+		if od == nil || od.RRtypes == nil {
+			continue
+		}
+		c := &OwnerData{Name: od.Name, RRtypes: NewRRTypeStore()}
+		for _, rt := range od.RRtypes.Keys() {
+			rs := od.RRtypes.GetOnlyRRSet(rt)
+			c.RRtypes.Set(rt, core.RRset{Name: rs.Name, Class: rs.Class, RRtype: rs.RRtype, RRs: rs.RRs})
+		}
+		ws[name] = c
+	}
+	zd.workingSet = ws
+	defer func() { zd.workingSet = nil }()
+	zd.carrySignaturesLocked(old)
+	return ws
+}
+
+// nsecOwners counts the owners in ws that hold an NSEC record or signature.
+func nsecOwners(ws map[string]*OwnerData) int {
+	n := 0
+	for _, od := range ws {
+		if len(od.NSEC.RRs) > 0 || len(od.NSEC.RRSIGs) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// A zone in compact denial (black-lies) keeps no NSEC chain, and the restitch
+// leaves it alone, so a reload carries no NSEC into it: one carried after
+// black-lies came on would be served as it was, stale.
+func TestCarryTakesNoNsecUnderBlackLies(t *testing.T) {
+	zd := resignTestZone(t, newTestKeyDB(t))
+	old := zd.publishedSnapshot()
+	if nsecOwners(carryOnto(t, zd, old)) == 0 {
+		t.Fatal("without black-lies no NSEC was carried")
+	}
+	zd.SetOption(OptBlackLies, true)
+	if n := nsecOwners(carryOnto(t, zd, old)); n != 0 {
+		t.Errorf("with black-lies %d owners kept their NSEC", n)
+	}
+}
+
+// An NSEC is carried only at the negative TTL. A clamp that has since lifted
+// leaves an NSEC at the clamped TTL for as long as its signature is current,
+// while the SOA, re-signed by every publish, is back at its own. Carried, the
+// NSEC would keep the clamped TTL across the reload. Left out, the restitch
+// rebuilds it at the negative TTL. Checked at a name the edit does not reach.
+func TestCarryTakesNoNsecAtAnotherTTL(t *testing.T) {
+	zd := resignTestZone(t, newTestKeyDB(t))
+	before := zd.publishedSnapshot()
+	const name = "child.resign.example."
+	od := before.Data[name]
+	if od == nil || len(od.NSEC.RRs) == 0 || len(od.NSEC.RRSIGs) == 0 {
+		t.Fatalf("%s has no signed NSEC", name)
+	}
+	negTTL := negativeTTLOf(apexFromSnapshotData(zd, before.Data))
+	if negTTL <= 300 || od.NSEC.RRs[0].Header().Ttl != negTTL {
+		t.Fatalf("%s: NSEC TTL %d, negative TTL %d; want a negative TTL above 300 and the NSEC at it",
+			name, od.NSEC.RRs[0].Header().Ttl, negTTL)
+	}
+	// Test-only: the NSEC as a lifted clamp leaves it, at the clamped TTL
+	// with its signature current.
+	low := dns.Copy(od.NSEC.RRs[0])
+	low.Header().Ttl = 300
+	od.NSEC.RRs = []dns.RR{low}
+
+	ws := carryOnto(t, zd, before)
+	if got := ws[name]; got != nil && len(got.NSEC.RRs) > 0 {
+		t.Errorf("%s: an NSEC at TTL 300 was carried under a negative TTL of %d", name, negTTL)
+	}
+	if nsecOwners(ws) == 0 {
+		t.Error("no NSEC at the negative TTL was carried")
+	}
+
+	reloadSigned(t, zd, itoa(int(before.Serial)+1), "bravo-edited")
+	after := zd.publishedSnapshot().Data[name]
+	if after == nil || len(after.NSEC.RRs) == 0 || len(after.NSEC.RRSIGs) == 0 {
+		t.Fatalf("%s: no signed NSEC after the reload", name)
+	}
+	if ttl := after.NSEC.RRs[0].Header().Ttl; ttl != negTTL {
+		t.Errorf("%s: NSEC served at TTL %d after the reload, want the negative TTL %d", name, ttl, negTTL)
 	}
 }
 
