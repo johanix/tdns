@@ -966,7 +966,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						// Update UpdatePolicy only if provided (check if it has meaningful content)
 						// UpdatePolicy is a struct, so we check if any fields are set
-						if zr.UpdatePolicy.Child.Type != "" || zr.UpdatePolicy.Zone.Type != "" || zr.UpdatePolicy.Validate {
+						// TSIG grants count as content too: a zone whose only
+						// policy is its grants has no SIG(0) type to trip this.
+						if zr.UpdatePolicy.Child.Type != "" || zr.UpdatePolicy.Zone.Type != "" || zr.UpdatePolicy.Validate ||
+							len(zr.UpdatePolicy.TsigGrants) > 0 {
 							zd.UpdatePolicy = zr.UpdatePolicy
 						}
 						if zr.DelegationPolicy != nil {

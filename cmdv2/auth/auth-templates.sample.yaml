@@ -91,6 +91,17 @@
 #                           opening one channel never opens the other. A frozen
 #                           zone refuses both.
 #
+#   allow-tsig-updates:      Allow zone modifications via DNS UPDATE signed with
+#                           TSIG. A SEPARATE gate from allow-updates, which
+#                           admits SIG(0). What each TSIG key may change is the
+#                           zone's updatepolicy.zone.tsig grants, e.g.
+#                             tsig:
+#                               - { key: ddns-key., nametype: zonesub, rrtypes: [ ANY ] }
+#                           nametype is zonesub, subdomain (with name:), name
+#                           (with name:) or self; ANY leaves out SOA, the DNSSEC
+#                           types, CDS/CDNSKEY/CSYNC and ZONEMD, which must be
+#                           named. No grant, no update.
+#
 #   allow-child-updates:     Allow updates to child delegation data via DNS UPDATE
 #                           (only child NS, DS, A, AAAA records).
 #                           Forced off if the child update policy type is

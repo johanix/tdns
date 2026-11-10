@@ -821,9 +821,12 @@ type UpdatePolicyConf struct {
 		TTL     uint32 `yaml:"ttl"`
 	}
 	Zone struct {
-		Type    string // "selfsub" | "self" | "sub" | ...
+		Type    string // "selfsub" | "self" | "none" (SIG(0) principals)
 		RRtypes []string
 		TTL     uint32 `yaml:"ttl"`
+		// Tsig is the zone's TSIG grants: what each TSIG key may change in
+		// this zone over RFC 2136 UPDATE. See tsig_update_policy.go.
+		Tsig []TsigGrantConf `yaml:"tsig" mapstructure:"tsig"`
 	}
 	Validate bool
 }
@@ -831,6 +834,9 @@ type UpdatePolicy struct {
 	Child    UpdatePolicyDetail
 	Zone     UpdatePolicyDetail
 	Validate bool
+	// TsigGrants is updatepolicy.zone.tsig, parsed. Empty means no TSIG key
+	// may change the zone.
+	TsigGrants []TsigGrant
 }
 
 type UpdatePolicyDetail struct {
