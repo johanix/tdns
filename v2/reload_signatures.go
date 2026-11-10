@@ -34,13 +34,20 @@ import (
 // keeps a signature over its old contents -- the defect signStagedScopeLocked
 // warns about, which no later pass would repair before the signature expired.
 //
-// An NSEC needs one check more. The signing pass skips NSEC records, and the
+// An NSEC needs more checks. The signing pass skips NSEC records, and the
 // restitch rewrites only the names around a change, so nothing in the publish
-// looks at a carried NSEC's signatures again. It is carried only while every
-// active ZSK has a signature on it that is not due for renewal, the test the
-// signing pass applies to an RRset before it stands down. Otherwise it is
-// left out, and the restitch, which gives every chained name without one an
-// NSEC, rebuilds and signs it.
+// looks at a carried NSEC again. It is carried only at the negative TTL, and
+// only while every active ZSK has a signature on it that is not due for
+// renewal, the test the signing pass applies to an RRset before it stands
+// down. Its own TTL is checked, not only the SOA's: a clamp that has lifted
+// leaves an NSEC at the clamped TTL for as long as its signature is current,
+// while the SOA, re-signed by every publish, is back at its own. An NSEC that
+// fails a check is left out, and the restitch, which gives every chained name
+// without one an NSEC, rebuilds and signs it.
+//
+// A zone in compact denial (black-lies) carries none. It keeps no chain and
+// the restitch leaves it alone (zoneMaintainsItsOwnChain), so an NSEC carried
+// after black-lies came on would be served as it was, stale.
 
 // carrySignaturesLocked gives the reloaded working set the signatures and NSEC
 // records the published snapshot holds for whatever did not change, and
@@ -61,7 +68,8 @@ func (zd *ZoneData) carrySignaturesLocked(old *zoneSnapshot) int {
 	// SOA's TTL and with it the negative TTL. So no NSEC is carried then
 	// either.
 	newNegTTL := negativeTTLOf(apexFromSnapshotData(zd, zd.workingSet))
-	carryNsec := negativeTTLOf(apexFromSnapshotData(zd, old.Data)) == newNegTTL &&
+	carryNsec := !zd.Options[OptBlackLies] &&
+		negativeTTLOf(apexFromSnapshotData(zd, old.Data)) == newNegTTL &&
 		!zd.clampMayLowerLocked(newNegTTL)
 	dak := zd.ActiveDnssecKeys()
 
@@ -90,7 +98,8 @@ func (zd *ZoneData) carrySignaturesLocked(old *zoneSnapshot) int {
 			nod.RRtypes.Set(t, nrs) // mutator-ok: the reload's own parsed store, not yet published or shared
 			carried++
 		}
-		if carryNsec && len(nod.NSEC.RRs) == 0 && len(ood.NSEC.RRs) > 0 && signaturesCurrent(ood.NSEC, dak) {
+		if carryNsec && len(nod.NSEC.RRs) == 0 && len(ood.NSEC.RRs) > 0 &&
+			ood.NSEC.RRs[0].Header().Ttl == newNegTTL && signaturesCurrent(ood.NSEC, dak) {
 			nod.NSEC = core.RRset{
 				Name:   ood.NSEC.Name,
 				Class:  ood.NSEC.Class,

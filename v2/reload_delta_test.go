@@ -407,6 +407,7 @@ func TestARefusedReloadLeavesTheFileState(t *testing.T) {
 	}
 	zd.mu.Lock()
 	fileSerial, incoming := zd.fileSerial, zd.IncomingSerial
+	digest, replayed := zd.fileDigest, zd.deltasReplayed
 	zd.mu.Unlock()
 
 	operatorEdit(t, zd, signedElsewhere(itoa(int(served)), 'b'))
@@ -414,10 +415,46 @@ func TestARefusedReloadLeavesTheFileState(t *testing.T) {
 		t.Fatalf("a signed file changed under the served serial: reload error %v", err)
 	}
 	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	if zd.fileSerial != fileSerial || zd.IncomingSerial != incoming || zd.CurrentSerial != served {
+	gotFile, gotIncoming, gotServed := zd.fileSerial, zd.IncomingSerial, zd.CurrentSerial
+	gotDigest, gotReplayed := zd.fileDigest, zd.deltasReplayed
+	zd.mu.Unlock()
+	if gotFile != fileSerial || gotIncoming != incoming || gotServed != served {
 		t.Errorf("after the refusal: file serial %d, incoming %d, served %d; want %d, %d, %d",
-			zd.fileSerial, zd.IncomingSerial, zd.CurrentSerial, fileSerial, incoming, served)
+			gotFile, gotIncoming, gotServed, fileSerial, incoming, served)
+	}
+	if gotDigest != digest || gotReplayed != replayed {
+		t.Errorf("after the refusal: file digest %q, deltas replayed %v; want %q, %v",
+			gotDigest, gotReplayed, digest, replayed)
+	}
+
+	// The next update journals as if the refused file had never been read.
+	// The journal keeps the first update's row, so the new row chains from
+	// that row's end; the chain as a whole still starts at the old file's
+	// serial and ends at what is now served.
+	if err := apiUpdate(t, zd, kdb, "next.example. 3600 IN A 192.0.2.10"); err != nil {
+		t.Fatalf("an update after the refused reload failed: %v", err)
+	}
+	now := servedSerial(zd)
+	if now == served {
+		t.Fatal("the update after the refusal did not move the served serial")
+	}
+	rows, err := kdb.LoadZoneDeltas(zd.ZoneName)
+	if err != nil {
+		t.Fatalf("LoadZoneDeltas: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("the journal is empty after two updates")
+	}
+	if rows[0].FromSerial != fileSerial {
+		t.Errorf("the journal starts at %d, want the old file's serial %d", rows[0].FromSerial, fileSerial)
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i].FromSerial != rows[i-1].ToSerial {
+			t.Errorf("journal row %d starts at %d, want the previous row's end %d", i, rows[i].FromSerial, rows[i-1].ToSerial)
+		}
+	}
+	if last := rows[len(rows)-1]; last.ToSerial != now {
+		t.Errorf("the journal ends at %d, want the served serial %d", last.ToSerial, now)
 	}
 }
 
