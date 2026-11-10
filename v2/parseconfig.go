@@ -1624,6 +1624,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Zonefile:         zconf.Zonefile,
 				Options:          options,
 				UpdatePolicy:     policy,
+				UpdatePolicySet:  true,
 				DelegationPolicy: dpol,
 				DnssecPolicy:     zconf.DnssecPolicy,
 				// Always carried (empty == inherit the global), so a config

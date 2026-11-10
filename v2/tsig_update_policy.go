@@ -100,8 +100,10 @@ func canonicalFqdn(name string) string {
 	return core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(name)))
 }
 
+// keyMatches reports whether the grant names key.
 func (g TsigGrant) keyMatches(key string) bool { return g.Key == canonicalFqdn(key) }
 
+// coversOwner reports whether the grant's name type allows owner.
 func (g TsigGrant) coversOwner(owner string) bool {
 	o := canonicalFqdn(owner)
 	switch g.NameType {

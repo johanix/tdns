@@ -18,6 +18,7 @@ type tsigRW struct {
 	ch     chan *dns.Msg
 }
 
+// newTsigRW returns a writer whose TsigStatus is status.
 func newTsigRW(status error) *tsigRW { return &tsigRW{status: status, ch: make(chan *dns.Msg, 4)} }
 
 func (w *tsigRW) LocalAddr() net.Addr {
@@ -33,6 +34,7 @@ func (w *tsigRW) TsigStatus() error           { return w.status }
 func (w *tsigRW) TsigTimersOnly(bool)         {}
 func (w *tsigRW) Hijack()                     {}
 
+// answer returns the next answer written, failing the test after 5s.
 func (w *tsigRW) answer(t *testing.T) *dns.Msg {
 	t.Helper()
 	select {
@@ -70,6 +72,8 @@ ns.child.dyn.example.	3600	IN	A	192.0.2.54
 	return zd
 }
 
+// tsigUpdateMsg builds an UPDATE of the test zone adding rrs, TSIG-stamped
+// with key unless key is empty.
 func tsigUpdateMsg(t *testing.T, key string, rrs ...string) *dns.Msg {
 	t.Helper()
 	m := new(dns.Msg)
@@ -115,6 +119,7 @@ func runTsigUpdate(t *testing.T, w *tsigRW, m *dns.Msg) (*dns.Msg, *UpdateReques
 	}
 }
 
+// wantRefused checks an answer's rcode and EDE, and that nothing was queued.
 func wantRefused(t *testing.T, name string, ans *dns.Msg, ur *UpdateRequest, rcode int, ede uint16) {
 	t.Helper()
 	if ans.Rcode != rcode {
@@ -129,6 +134,7 @@ func wantRefused(t *testing.T, name string, ans *dns.Msg, ur *UpdateRequest, rco
 	}
 }
 
+// Each name type approves, and the hand-over carries the TSIG Authz.
 func TestTsigUpdateApproved(t *testing.T) {
 	tsigTestZone(t, nil)
 	cases := []struct {
@@ -161,6 +167,7 @@ func TestTsigUpdateApproved(t *testing.T) {
 	}
 }
 
+// Each kind of grant miss is refused with its EDE, and nothing is queued.
 func TestTsigUpdateRefused(t *testing.T) {
 	tsigTestZone(t, nil)
 	cases := []struct {
@@ -236,6 +243,8 @@ func TestSig0AndTsigTakesTheSig0Path(t *testing.T) {
 	}
 }
 
+// typeAllowed: the grants for TSIG, the SIG(0) list otherwise, a bypass for
+// internal and API requests.
 func TestUpdateRequestTypeAllowed(t *testing.T) {
 	zd := &ZoneData{ZoneName: tsigTestZoneName}
 	zd.UpdatePolicy.Zone.RRtypes = map[uint16]bool{dns.TypeA: true}
@@ -262,5 +271,40 @@ func TestUpdateRequestTypeAllowed(t *testing.T) {
 		if got := c.ur.typeAllowed(zd, c.owner, c.t); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TSIG may not change delegation data, however the message is shaped. The
+// classifier alone is not enough: a zone section naming a name inside the
+// zone skips it, and an update mixing zone data with a child's records is
+// classified as an update of the zone's own data. Each case would pass the
+// zonesub/ANY grant (ANY covers NS and DS) without the per-record check.
+func TestTsigUpdateRefusesDelegationDataInAnyShape(t *testing.T) {
+	tsigTestZone(t, nil)
+	const ds = "child.dyn.example. 60 IN DS 12345 13 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	cases := []struct {
+		name  string
+		qname string
+		rrs   []string
+	}{
+		{"zone section inside the zone, child DS", "x.dyn.example.", []string{ds}},
+		{"zone data mixed with a child DS", tsigTestZoneName, []string{"host.dyn.example. 60 IN A 192.0.2.10", ds}},
+		{"zone data mixed with glue below the child", tsigTestZoneName, []string{"host.dyn.example. 60 IN A 192.0.2.10", "ns.child.dyn.example. 60 IN A 192.0.2.99"}},
+		{"NS that would make a new cut", tsigTestZoneName, []string{"newcut.dyn.example. 60 IN NS ns.elsewhere.example."}},
+		{"DS where there is no cut", tsigTestZoneName, []string{"host.dyn.example. 60 IN DS 1 13 2 00"}},
+	}
+	for _, c := range cases {
+		m := new(dns.Msg)
+		m.SetUpdate(c.qname)
+		for _, s := range c.rrs {
+			rr, err := dns.NewRR(s)
+			if err != nil {
+				t.Fatalf("NewRR %q: %v", s, err)
+			}
+			m.Insert([]dns.RR{rr})
+		}
+		m.SetTsig("ddns.", dns.HmacSHA256, 300, time.Now().Unix())
+		ans, ur, _ := runTsigUpdate(t, newTsigRW(nil), m)
+		wantRefused(t, c.name, ans, ur, dns.RcodeRefused, edns0.EDEZoneUpdatesNotAllowed)
 	}
 }

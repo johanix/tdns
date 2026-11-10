@@ -8,6 +8,7 @@ import (
 	"github.com/miekg/dns"
 )
 
+// mustGrants parses grants for zone, failing the test on an error.
 func mustGrants(t *testing.T, zone string, confs ...TsigGrantConf) []TsigGrant {
 	t.Helper()
 	g, err := parseTsigGrants(zone, confs)
@@ -17,6 +18,7 @@ func mustGrants(t *testing.T, zone string, confs ...TsigGrantConf) []TsigGrant {
 	return g
 }
 
+// A grant that cannot mean what it says is refused at load, with a reason.
 func TestParseTsigGrants_Refusals(t *testing.T) {
 	cases := []struct {
 		conf TsigGrantConf
@@ -44,6 +46,7 @@ func TestParseTsigGrants_Refusals(t *testing.T) {
 	}
 }
 
+// Keys and names are canonicalised, name types and types are case-insensitive.
 func TestParseTsigGrants_Normalises(t *testing.T) {
 	g := mustGrants(t, "Example.",
 		TsigGrantConf{Key: " DDNS-Key ", NameType: "ZoneSub", RRtypes: []string{"any"}},
@@ -61,6 +64,8 @@ func TestParseTsigGrants_Normalises(t *testing.T) {
 	}
 }
 
+// The grant check over every name type, case, label boundaries, narrow ANY
+// and a TYPE ANY delete.
 func TestTsigGrantsAllow(t *testing.T) {
 	grants := mustGrants(t, "example.",
 		TsigGrantConf{Key: "ddns.", NameType: "zonesub", RRtypes: []string{"ANY"}},
@@ -120,6 +125,7 @@ func TestTsigGrantsAllow(t *testing.T) {
 	}
 }
 
+// A refusal says why: no grant for the key, the type, or the owner.
 func TestEvalTsigGrants_RefusalReasons(t *testing.T) {
 	grants := mustGrants(t, "example.",
 		TsigGrantConf{Key: "acme.", NameType: "subdomain", Name: "_acme-challenge.example.", RRtypes: []string{"TXT"}},
@@ -150,6 +156,7 @@ func TestEvalTsigGrants_RefusalReasons(t *testing.T) {
 	}
 }
 
+// Activation carries the grants into the policy and leaves allow-updates alone.
 func TestActivateUpdatePolicy_TsigGrants(t *testing.T) {
 	zconf := &ZoneConf{Name: "example."}
 	zconf.UpdatePolicy.Zone.Tsig = []TsigGrantConf{{Key: "k.", NameType: "zonesub", RRtypes: []string{"A"}}}
@@ -190,9 +197,11 @@ func TestRefresherReplacesUpdatePolicy(t *testing.T) {
 		zr   ZoneRefresher
 		want bool
 	}{
-		{"reload removing the last TSIG grants", ZoneRefresher{ConfigUpdate: true}, true},
-		{"reload with grants", ZoneRefresher{ConfigUpdate: true, UpdatePolicy: UpdatePolicy{TsigGrants: grants}}, true},
-		{"reload with a SIG(0) type", ZoneRefresher{ConfigUpdate: true, UpdatePolicy: UpdatePolicy{Zone: UpdatePolicyDetail{Type: "selfsub"}}}, true},
+		{"reload removing the last TSIG grants", ZoneRefresher{ConfigUpdate: true, UpdatePolicySet: true}, true},
+		{"reload with grants", ZoneRefresher{ConfigUpdate: true, UpdatePolicySet: true, UpdatePolicy: UpdatePolicy{TsigGrants: grants}}, true},
+		{"reload with a SIG(0) type", ZoneRefresher{ConfigUpdate: true, UpdatePolicySet: true, UpdatePolicy: UpdatePolicy{Zone: UpdatePolicyDetail{Type: "selfsub"}}}, true},
+		// config-bearing but carrying no policy (a persisted dynamic secondary)
+		{"config-bearing, no policy carried", ZoneRefresher{ConfigUpdate: true}, false},
 		{"not a reload, no policy", ZoneRefresher{}, false},
 		{"not a reload, grants", ZoneRefresher{UpdatePolicy: UpdatePolicy{TsigGrants: grants}}, true},
 		{"not a reload, a SIG(0) type", ZoneRefresher{UpdatePolicy: UpdatePolicy{Zone: UpdatePolicyDetail{Type: "self"}}}, true},

@@ -35,6 +35,7 @@ type tsigE2E struct {
 
 const e2eSecret = "MTIzNDU2Nzg5MDEyMzQ1Ng=="
 
+// startTsigE2E builds the server, engines and zone described above.
 func startTsigE2E(t *testing.T) *tsigE2E {
 	t.Helper()
 	withAppType(t, AppTypeAuth)
@@ -87,6 +88,7 @@ func startTsigE2E(t *testing.T) *tsigE2E {
 		secrets: map[string]string{"ddns.": e2eSecret, "h1.example.test.": e2eSecret, "nogrant.": e2eSecret}}
 }
 
+// e2eRRs parses records, failing the test on an error.
 func e2eRRs(t *testing.T, ss ...string) []dns.RR {
 	t.Helper()
 	var out []dns.RR
@@ -118,6 +120,7 @@ func (e *tsigE2E) send(t *testing.T, net, key, secret string, m *dns.Msg) (*dns.
 	return resp, err
 }
 
+// mustSend sends m and requires rcode want on a TSIG-signed answer.
 func (e *tsigE2E) mustSend(t *testing.T, net, key string, m *dns.Msg, want int) {
 	t.Helper()
 	resp, err := e.send(t, net, key, "", m)
@@ -159,12 +162,14 @@ func (e *tsigE2E) published(owner string, rrtype uint16) ([]string, uint32) {
 	return out, ttl
 }
 
+// upd returns an empty UPDATE of zone.
 func upd(zone string) *dns.Msg {
 	m := new(dns.Msg)
 	m.SetUpdate(zone)
 	return m
 }
 
+// The client shapes above, end to end, against the published zone.
 func TestTsigUpdateEndToEnd(t *testing.T) {
 	e := startTsigE2E(t)
 	zone := e.zd.ZoneName

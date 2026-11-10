@@ -99,9 +99,14 @@ then (§5) the prerequisite check. After that it splits by mechanism:
    answered NOTAUTH for a bad MAC, an unknown key, the wrong algorithm or a bad time, so
    the update path is never reached. The responder still requires
    `w.TsigStatus() == nil`, because DoH and DoQ cannot verify a TSIG and report so.
-3. **ZONE-UPDATE only.** Delegation data for a child, and child key material, stay
+3. **No delegation data.** Delegation data for a child, and child key material, stay
    SIG(0): those updates cross an administrative boundary, where asymmetric keys are the
-   right tool. TSIG on them is REFUSED.
+   right tool. TSIG on them is REFUSED. The message's classification is not enough on its
+   own: a zone section naming a name inside the zone skips the delegation classifier,
+   and an update mixing zone data with a child's records is classified as an update of
+   the zone's own data. So every record is checked as well. An NS or DS anywhere below
+   the apex, or any record at or below an existing delegation point, refuses the
+   message.
 4. **Admission** reads `allow-tsig-updates` instead of `allow-updates`.
 5. **The grants** are checked against every record. The first refusal refuses the whole
    message.

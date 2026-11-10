@@ -7,7 +7,9 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -26,6 +28,7 @@ type UpdateAuthz struct {
 	Grants []TsigGrant
 }
 
+// isTsig reports whether the update was authorized by a TSIG key. Nil-safe.
 func (a *UpdateAuthz) isTsig() bool { return a != nil && a.Mech == AuthzTsig }
 
 // typeAllowed is the applier's per-record type check. Internal and API
@@ -106,6 +109,19 @@ func (zd *ZoneData) respondTsigUpdate(ctx context.Context, w dns.ResponseWriter,
 		return refuse(edns0.EDEZoneUpdatesNotAllowed,
 			"delegation data and child keys can only be updated with SIG(0)")
 	}
+	// The classification above is not enough on its own: a zone section that
+	// names a name inside the zone skips the delegation classifier, and an
+	// update that mixes zone data with a child's records, or spans two
+	// children, is classified as ZONE-UPDATE. So every record is checked.
+	for _, rr := range r.Ns {
+		if zd.tsigTouchesDelegation(rr) {
+			lgHandler.Warn("TSIG update refused: it carries delegation data",
+				"zone", zd.ZoneName, "key", key, "owner", rr.Header().Name,
+				"rrtype", dns.TypeToString[rr.Header().Rrtype])
+			return refuse(edns0.EDEZoneUpdatesNotAllowed,
+				"delegation data and child keys can only be updated with SIG(0)")
+		}
+	}
 
 	us.SignerName = key
 	us.SignatureType = "tsig"
@@ -140,4 +156,30 @@ func (zd *ZoneData) respondTsigUpdate(ctx context.Context, w dns.ResponseWriter,
 		return nil
 	}
 	return answerWhenApplied(ctx, w, m, req, updateq, dns.RcodeSuccess)
+}
+
+// tsigTouchesDelegation reports whether one update record is delegation data,
+// which TSIG may not change: an NS or DS anywhere below the apex (an NS there
+// makes a zone cut, and a DS belongs only at one), or any record at or below
+// an existing delegation point (the cut itself, its glue, a child's KEY). The
+// apex is the zone's own.
+func (zd *ZoneData) tsigTouchesDelegation(rr dns.RR) bool {
+	owner := rr.Header().Name
+	if core.EqualNames(owner, zd.ZoneName) {
+		return false
+	}
+	if t := rr.Header().Rrtype; t == dns.TypeNS || t == dns.TypeDS {
+		return true
+	}
+	labels := dns.SplitDomainName(owner)
+	for i := range labels {
+		ancestor := dns.Fqdn(strings.Join(labels[i:], "."))
+		if core.EqualNames(ancestor, zd.ZoneName) {
+			break
+		}
+		if zd.IsChildDelegation(ancestor) {
+			return true
+		}
+	}
+	return false
 }

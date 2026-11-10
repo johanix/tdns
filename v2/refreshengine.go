@@ -1607,16 +1607,18 @@ func setRefreshRetry(refreshCounters *core.ConcurrentMap[string, *RefreshCounter
 // refresherReplacesUpdatePolicy decides whether a refresher's UpdatePolicy
 // replaces the zone's.
 //
-// A config-bearing refresher (a reload) always does: it carries the zone's
-// whole parsed policy, so a policy that is now empty is what the config says.
-// Without that, a reload that removed a zone's last TSIG grants -- a zone with
-// no SIG(0) type, which is a configuration TSIG grants make ordinary -- left
-// every field below empty, and the removed grants stayed in effect.
+// A refresher that carries the zone's activated policy (UpdatePolicySet: a
+// reload, a persisted dynamic primary) always does, so a policy that is now
+// empty is what the config says. Without that, a reload that removed a zone's
+// last TSIG grants -- a zone with no SIG(0) type, which is a configuration
+// TSIG grants make ordinary -- left every field below empty, and the removed
+// grants stayed in effect.
 //
-// Any other refresher carries a policy only when it means to; one with nothing
-// set must not wipe the zone's.
+// ConfigUpdate is not the marker: a config-bearing refresher can carry no
+// policy at all (LoadDynamicZoneFiles' secondary refresher), and must not wipe
+// the zone's. Neither may any other refresher with nothing set.
 func refresherReplacesUpdatePolicy(zr ZoneRefresher) bool {
-	if zr.ConfigUpdate {
+	if zr.UpdatePolicySet {
 		return true
 	}
 	p := zr.UpdatePolicy
