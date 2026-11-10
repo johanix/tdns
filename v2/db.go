@@ -306,6 +306,11 @@ func dbMigrateSchema(db *sql.DB) {
 		// on the next write instead of accusing the operator of editing a file
 		// they never touched.
 		{"ZoneFileState", "digest_variant", "ALTER TABLE ZoneFileState ADD COLUMN digest_variant INTEGER NOT NULL DEFAULT 0"},
+		// A digest of the content published at the recorded serial, so a
+		// restart that loads the same content can serve that serial again
+		// (#1006). NULL, "not known", for every row an older tdns wrote, which
+		// is exactly right: the restart then lifts past it as before.
+		{"OutgoingSerials", "content_digest", "ALTER TABLE OutgoingSerials ADD COLUMN content_digest TEXT"},
 		// Rollover overhaul phase 2: softfail-state columns on RolloverZoneState.
 		// All NULL/0-default so existing testbed rows remain valid post-migration.
 		{"RolloverZoneState", "hardfail_count", "ALTER TABLE RolloverZoneState ADD COLUMN hardfail_count INTEGER NOT NULL DEFAULT 0"},

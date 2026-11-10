@@ -1,0 +1,676 @@
+/*
+ * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
+ */
+
+package tdns
+
+import (
+	"bytes"
+	"context"
+	"encoding/base64"
+	"errors"
+	"log"
+	"os"
+	"strings"
+	"testing"
+
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
+)
+
+// #1006: a reload computes the difference from what it replaces.
+
+func reloadText(serial, body string) string {
+	return "example.\t3600\tIN\tSOA\tns.example. hostmaster.example. " + serial + " 7200 1800 604800 7200\n" +
+		"example.\t3600\tIN\tNS\tns.example.\n" + body
+}
+
+func mustReload(t *testing.T, zd *ZoneData, force bool) {
+	t.Helper()
+	if _, err := zd.Refresh(context.Background(), false, false, force, &Config{}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+}
+
+func servedSerial(zd *ZoneData) uint32 {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.CurrentSerial
+}
+
+// rrsetsHold reports whether some RRset in sets holds an RR whose text has all
+// of the given substrings.
+func rrsetsHold(sets []core.RRset, parts ...string) bool {
+	for _, rs := range sets {
+		for _, rr := range rs.RRs {
+			s, all := rr.String(), true
+			for _, p := range parts {
+				if !strings.Contains(s, p) {
+					all = false
+					break
+				}
+			}
+			if all {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// With ixfr-from-differences, an edit-and-reload becomes one IXFR link holding
+// exactly what the edit changed.
+func TestReloadWithIxfrFromDifferencesAppendsALink(t *testing.T) {
+	zd := reloadZone(t, newTestKeyDB(t), reloadBase)
+	zd.SetOption(OptIxfrFromDifferences, true)
+
+	operatorEdit(t, zd, reloadText("101", "www.example.\t3600\tIN\tA\t192.0.2.9\nnew.example.\t300\tIN\tA\t192.0.2.5\n"))
+	mustReload(t, zd, false)
+
+	chain := chainOf(zd)
+	if len(chain) != 1 {
+		t.Fatalf("got %d IXFR links after a reload, want 1", len(chain))
+	}
+	link := chain[0]
+	if link.FromSerial != 100 || link.ToSerial != 101 {
+		t.Errorf("link runs %d -> %d, want 100 -> 101", link.FromSerial, link.ToSerial)
+	}
+	if !rrsetsHold(link.Removed, "www.example.", "192.0.2.1") {
+		t.Errorf("the link does not remove the old www A: %v", link.Removed)
+	}
+	if !rrsetsHold(link.Added, "www.example.", "192.0.2.9") || !rrsetsHold(link.Added, "new.example.", "192.0.2.5") {
+		t.Errorf("the link does not add the new records: %v", link.Added)
+	}
+	if len(link.Removed) != 1 || len(link.Added) != 2 {
+		t.Errorf("the link carries more than the edit: removed %v, added %v", link.Removed, link.Added)
+	}
+	if steps, ok := ixfrDeltaSteps(zd.publishedSnapshot(), 100); !ok || len(steps) != 1 {
+		t.Errorf("no IXFR path from 100: ok=%v steps=%d", ok, len(steps))
+	}
+
+	// A second edit: a downstream two versions back gets both steps.
+	operatorEdit(t, zd, reloadText("102", "www.example.\t3600\tIN\tA\t192.0.2.9\n"))
+	mustReload(t, zd, false)
+	if steps, ok := ixfrDeltaSteps(zd.publishedSnapshot(), 100); !ok || len(steps) != 2 {
+		t.Errorf("no two-step IXFR path from 100: ok=%v steps=%d", ok, len(steps))
+	}
+}
+
+// Without the option a reload starts a new IXFR epoch, as before.
+func TestReloadWithoutTheOptionResetsTheChain(t *testing.T) {
+	zd := reloadZone(t, newTestKeyDB(t), reloadBase)
+	stageAndPublish(t, zd, stageAddA(t, zd, "one.example.", "192.0.2.11"))
+	if len(chainOf(zd)) != 1 {
+		t.Fatal("setup: expected 1 link")
+	}
+	operatorEdit(t, zd, reloadText("500", "www.example.\t3600\tIN\tA\t192.0.2.9\n"))
+	mustReload(t, zd, false)
+	if got := len(chainOf(zd)); got != 0 {
+		t.Errorf("a reload without ixfr-from-differences kept %d links", got)
+	}
+}
+
+// A file whose serial is ahead is served at that serial; one that is not gets
+// the zone's next serial.
+func TestReloadServesTheFilesOwnSerial(t *testing.T) {
+	zd := reloadZone(t, newTestKeyDB(t), reloadBase)
+
+	operatorEdit(t, zd, reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.9\n"))
+	mustReload(t, zd, false)
+	if got := servedSerial(zd); got != 101 {
+		t.Errorf("an edit that kept the file's serial is served at %d, want 101", got)
+	}
+
+	operatorEdit(t, zd, reloadText("500", "www.example.\t3600\tIN\tA\t192.0.2.10\n"))
+	mustReload(t, zd, false)
+	if got := servedSerial(zd); got != 500 {
+		t.Errorf("a file at serial 500 is served at %d, want 500", got)
+	}
+}
+
+// A reload whose content is what the zone serves publishes nothing: no new
+// serial and no NOTIFY, forced or not.
+func TestReloadOfUnchangedContentKeepsTheSerial(t *testing.T) {
+	q := withNotifyQ(t, 4)
+	zd := reloadZone(t, newTestKeyDB(t), reloadBase)
+	zd.Notify = []PeerConf{{Addr: aDownstream}}
+	before := zd.publishedSnapshot()
+
+	mustReload(t, zd, true)
+	if got := servedSerial(zd); got != 100 {
+		t.Errorf("a forced reload of an unchanged file moved the serial to %d", got)
+	}
+	if zd.publishedSnapshot() != before {
+		t.Error("a forced reload of an unchanged file published a new version")
+	}
+
+	// Reformatted, reordered and with a TTL style change: the same zone.
+	operatorEdit(t, zd, "$TTL 3600\nwww.example.\tIN A 192.0.2.1\n; a comment\n"+
+		"example.\tIN SOA ns.example. hostmaster.example. 100 7200 1800 604800 7200\nexample. IN NS ns.example.\n")
+	mustReload(t, zd, true)
+	if got := servedSerial(zd); got != 100 {
+		t.Errorf("a reformatted file moved the serial to %d", got)
+	}
+	if got := len(q); got != 0 {
+		t.Errorf("%d NOTIFYs for reloads that changed nothing", got)
+	}
+
+	// And a real change does publish and notify.
+	operatorEdit(t, zd, reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.7\n"))
+	mustReload(t, zd, false)
+	if got := servedSerial(zd); got != 101 {
+		t.Errorf("a real edit is served at %d, want 101", got)
+	}
+	if got := len(q); got != 1 {
+		t.Errorf("%d NOTIFYs for one real edit, want 1", got)
+	}
+}
+
+// A file whose only change is a serial ahead of the served one is served at
+// that serial: the operator asked for it, and it is a legal empty IXFR step.
+func TestReloadOfASerialOnlyBump(t *testing.T) {
+	zd := reloadZone(t, newTestKeyDB(t), reloadBase)
+	zd.SetOption(OptIxfrFromDifferences, true)
+	operatorEdit(t, zd, strings.Replace(reloadBase, " 100 ", " 200 ", 1))
+	mustReload(t, zd, false)
+	if got := servedSerial(zd); got != 200 {
+		t.Fatalf("a serial-only bump is served at %d, want 200", got)
+	}
+	chain := chainOf(zd)
+	if len(chain) != 1 || len(chain[0].Removed) != 0 || len(chain[0].Added) != 0 {
+		t.Errorf("want one empty link, got %+v", chain)
+	}
+}
+
+// The operator folds the journalled change into the file by hand: the content
+// is what is served, so nothing is published, and the journal is emptied.
+func TestReloadOfAJournalFoldedIntoTheFile(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, reloadBase)
+	if err := apiUpdate(t, zd, kdb, "journal.example. 3600 IN A 10.1.1.1"); err != nil {
+		t.Fatalf("the API update failed: %v", err)
+	}
+	served := servedSerial(zd)
+
+	operatorEdit(t, zd, reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.1\njournal.example.\t3600\tIN\tA\t10.1.1.1\n"))
+	mustReload(t, zd, false)
+	if got := servedSerial(zd); got != served {
+		t.Errorf("folding the journal into the file moved the serial from %d to %d", served, got)
+	}
+	if !hasARRset(t, zd, "journal.example.") {
+		t.Error("the folded record is not served")
+	}
+	if _, have, err := kdb.LastZoneDeltaSerial(zd.ZoneName); err != nil || have {
+		t.Errorf("the journal was not emptied (have=%v, err=%v)", have, err)
+	}
+	// The file now holds what that serial serves, so a restart serves it again.
+	if got := servedSerial(restartZone(t, zd, kdb)); got != served {
+		t.Errorf("after the journal was folded in, a restart serves %d, want %d", got, served)
+	}
+}
+
+// restartZone stands up a second ZoneData over the same file and database, as
+// a restart does, and loads it.
+func restartZone(t *testing.T, zd *ZoneData, kdb *KeyDB) *ZoneData {
+	t.Helper()
+	fresh := &ZoneData{
+		ZoneName:      "example.",
+		ZoneStore:     MapZone,
+		ZoneType:      Primary,
+		Zonefile:      zd.Zonefile,
+		Logger:        log.New(os.Stderr, "", 0),
+		Options:       map[ZoneOption]bool{OptAllowUpdates: true},
+		KeyDB:         kdb,
+		UpdatePolicy:  policyAllowing(dns.TypeA, dns.TypeTXT),
+		FirstZoneLoad: true,
+		Data:          core.NewNameMap[OwnerData](),
+	}
+	zd.stopPublisher()
+	Zones.Set("example.", fresh)
+	t.Cleanup(func() { Zones.Remove("example.") })
+	t.Cleanup(fresh.stopPublisher)
+	if _, err := fresh.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
+		t.Fatalf("Refresh after the restart: %v", err)
+	}
+	fresh.InstallInitialSnapshot()
+	return fresh
+}
+
+// A restart that loads exactly what was last published serves that serial
+// again, even when it is past the file's own.
+func TestRestartWithUnchangedContentKeepsTheSerial(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, reloadBase)
+	operatorEdit(t, zd, reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.9\n"))
+	mustReload(t, zd, false)
+	if got := servedSerial(zd); got != 101 {
+		t.Fatalf("setup: served %d, want 101", got)
+	}
+
+	fresh := restartZone(t, zd, kdb)
+	if got := servedSerial(fresh); got != 101 {
+		t.Errorf("a restart with nothing changed serves %d, want 101", got)
+	}
+}
+
+// Anything published after the content the digest describes, or any change
+// while the server was down, still lifts the serial past what was published.
+func TestRestartAfterAChangeLiftsTheSerial(t *testing.T) {
+	t.Run("file changed while down", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		zd := reloadZone(t, kdb, reloadBase)
+		operatorEdit(t, zd, reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.9\n"))
+		mustReload(t, zd, false)
+		operatorEdit(t, zd, reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.8\n"))
+		fresh := restartZone(t, zd, kdb)
+		if got := servedSerial(fresh); got != 102 {
+			t.Errorf("a restart over a changed file serves %d, want 102", got)
+		}
+	})
+	t.Run("published after the reload", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		zd := reloadZone(t, kdb, reloadBase)
+		operatorEdit(t, zd, reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.9\n"))
+		mustReload(t, zd, false)
+		stageAndPublish(t, zd, nil) // a serial bump with no change, as a re-sign makes
+		last := servedSerial(zd)
+		fresh := restartZone(t, zd, kdb)
+		if got := servedSerial(fresh); !serialNewer(got, last) {
+			t.Errorf("a restart after a later publish serves %d, not past %d", got, last)
+		}
+	})
+}
+
+func TestAuthoredContentEqual(t *testing.T) {
+	build := func(t *testing.T, text string) map[string]*OwnerData {
+		t.Helper()
+		zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+		if _, _, err := zd.ReadZoneData(text, true); err != nil {
+			t.Fatalf("ReadZoneData: %v", err)
+		}
+		return snapshotMapFromData(zd.Data)
+	}
+	base := build(t, reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.1\nwww.example.\t3600\tIN\tA\t192.0.2.2\n"))
+	cases := []struct {
+		name, text string
+		equal      bool
+	}{
+		{"serial only", reloadText("999", "www.example.\t3600\tIN\tA\t192.0.2.1\nwww.example.\t3600\tIN\tA\t192.0.2.2\n"), true},
+		{"order", reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.2\nwww.example.\t3600\tIN\tA\t192.0.2.1\n"), true},
+		{"TTL", reloadText("100", "www.example.\t300\tIN\tA\t192.0.2.1\nwww.example.\t300\tIN\tA\t192.0.2.2\n"), false},
+		{"one record fewer", reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.1\n"), false},
+		{"new owner", reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.1\nwww.example.\t3600\tIN\tA\t192.0.2.2\nx.example.\t3600\tIN\tTXT\t\"x\"\n"), false},
+		{"SOA timer", strings.Replace(reloadText("100", "www.example.\t3600\tIN\tA\t192.0.2.1\nwww.example.\t3600\tIN\tA\t192.0.2.2\n"), " 7200 1800 ", " 3600 1800 ", 1), false},
+	}
+	for _, c := range cases {
+		other := build(t, c.text)
+		if got := authoredContentEqual("example.", base, other, contentTerms{}); got != c.equal {
+			t.Errorf("%s: equal = %v, want %v", c.name, got, c.equal)
+		}
+		digestsEqual := authoredContentDigest("example.", base, contentTerms{}) == authoredContentDigest("example.", other, contentTerms{})
+		if digestsEqual != c.equal {
+			t.Errorf("%s: digests equal = %v, want %v", c.name, digestsEqual, c.equal)
+		}
+	}
+}
+
+// The diff stops as soon as it passes its limit.
+func TestComputeZoneDeltaBoundedStopsEarly(t *testing.T) {
+	var a, b strings.Builder
+	for i := 0; i < 200; i++ {
+		a.WriteString("h" + itoa(i) + ".example.\t3600\tIN\tA\t192.0.2.1\n")
+		b.WriteString("h" + itoa(i) + ".example.\t3600\tIN\tA\t192.0.2.2\n")
+	}
+	build := func(text string) map[string]*OwnerData {
+		zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+		if _, _, err := zd.ReadZoneData(reloadText("1", text), true); err != nil {
+			t.Fatalf("ReadZoneData: %v", err)
+		}
+		return snapshotMapFromData(zd.Data)
+	}
+	oldData, newData := build(a.String()), build(b.String())
+	if _, _, est, complete := computeZoneDeltaBounded("example.", oldData, newData, 500); complete || est <= 500 || est > 1000 {
+		t.Errorf("bounded diff: complete=%v est=%d, want an early stop just past 500", complete, est)
+	}
+	rem, add, _, complete := computeZoneDeltaBounded("example.", oldData, newData, -1)
+	if !complete || len(rem) != 200 || len(add) != 200 {
+		t.Errorf("unbounded diff: complete=%v removed=%d added=%d", complete, len(rem), len(add))
+	}
+}
+
+// signedElsewhere is a zone file signed before it reached this server: its SOA
+// and its www A RRset carry signatures, here made of the byte sig.
+func signedElsewhere(serial string, sig byte) string {
+	b64 := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{sig}, 64))
+	return reloadText(serial, "www.example.\t3600\tIN\tA\t192.0.2.1\n") +
+		"example.\t3600\tIN\tRRSIG\tSOA 15 1 3600 20991231000000 20260101000000 12345 example. " + b64 + "\n" +
+		"www.example.\t3600\tIN\tRRSIG\tA 15 2 3600 20991231000000 20260101000000 12345 example. " + b64 + "\n"
+}
+
+func wwwSignature(t *testing.T, zd *ZoneData) string {
+	t.Helper()
+	od := zd.publishedSnapshot().Data["www.example."]
+	if od == nil {
+		t.Fatal("www.example. is not served")
+	}
+	sigs := od.RRtypes.GetOnlyRRSet(dns.TypeA).RRSIGs
+	if len(sigs) != 1 {
+		t.Fatalf("www.example. A carries %d signatures, want 1", len(sigs))
+	}
+	return sigs[0].(*dns.RRSIG).Signature
+}
+
+// A zone signed elsewhere keeps its file's serial, which its SOA signature
+// covers, and its signatures are content: re-signed under the same serial, it
+// is published with the new signatures; reloaded unchanged, it is not.
+func TestReloadOfAZoneSignedElsewhere(t *testing.T) {
+	zd := reloadZone(t, newTestKeyDB(t), signedElsewhere("100", 'a'))
+	before := zd.publishedSnapshot()
+	mustReload(t, zd, true)
+	if zd.publishedSnapshot() != before {
+		t.Error("an unchanged signed file was published again")
+	}
+
+	assertSignedSOAServedAt(t, zd, 100, 'a', "after an unchanged reload")
+
+	// Re-signed under the same serial: downstreams holding 100 would never
+	// transfer it, so the reload is refused and 100 stays as it was.
+	operatorEdit(t, zd, signedElsewhere("100", 'b'))
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); !errors.Is(err, ErrSignedFileChangedUnderServedSerial) {
+		t.Errorf("a signed file changed under the served serial: reload error %v", err)
+	}
+	if zd.publishedSnapshot() != before {
+		t.Error("a signed file changed under the served serial was published")
+	}
+
+	// Re-signed under a newer serial, it is published, signatures and all.
+	operatorEdit(t, zd, signedElsewhere("101", 'b'))
+	mustReload(t, zd, false)
+	assertSignedSOAServedAt(t, zd, 101, 'b', "after the file was re-signed")
+	if got := wwwSignature(t, zd); got != sigOf('b') {
+		t.Error("the old signatures are still served after the file was re-signed")
+	}
+}
+
+// A refused reload leaves the file state as the file it replaces left it. The
+// journal anchors to fileSerial: had the refused file's serial stayed there,
+// the next update would be journalled from a serial no file on disk has.
+func TestARefusedReloadLeavesTheFileState(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, signedElsewhere("100", 'a'))
+	if err := apiUpdate(t, zd, kdb, "new.example. 3600 IN A 192.0.2.9"); err != nil {
+		t.Fatalf("the API update failed: %v", err)
+	}
+	served := servedSerial(zd)
+	if served == 100 {
+		t.Fatal("the update did not move the served serial past the file's")
+	}
+	zd.mu.Lock()
+	fileSerial, incoming := zd.fileSerial, zd.IncomingSerial
+	digest, replayed := zd.fileDigest, zd.deltasReplayed
+	zd.mu.Unlock()
+
+	operatorEdit(t, zd, signedElsewhere(itoa(int(served)), 'b'))
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); !errors.Is(err, ErrSignedFileChangedUnderServedSerial) {
+		t.Fatalf("a signed file changed under the served serial: reload error %v", err)
+	}
+	zd.mu.Lock()
+	gotFile, gotIncoming, gotServed := zd.fileSerial, zd.IncomingSerial, zd.CurrentSerial
+	gotDigest, gotReplayed := zd.fileDigest, zd.deltasReplayed
+	zd.mu.Unlock()
+	if gotFile != fileSerial || gotIncoming != incoming || gotServed != served {
+		t.Errorf("after the refusal: file serial %d, incoming %d, served %d; want %d, %d, %d",
+			gotFile, gotIncoming, gotServed, fileSerial, incoming, served)
+	}
+	if gotDigest != digest || gotReplayed != replayed {
+		t.Errorf("after the refusal: file digest %q, deltas replayed %v; want %q, %v",
+			gotDigest, gotReplayed, digest, replayed)
+	}
+
+	// The next update journals as if the refused file had never been read.
+	// The journal keeps the first update's row, so the new row chains from
+	// that row's end; the chain as a whole still starts at the old file's
+	// serial and ends at what is now served.
+	if err := apiUpdate(t, zd, kdb, "next.example. 3600 IN A 192.0.2.10"); err != nil {
+		t.Fatalf("an update after the refused reload failed: %v", err)
+	}
+	now := servedSerial(zd)
+	if now == served {
+		t.Fatal("the update after the refusal did not move the served serial")
+	}
+	rows, err := kdb.LoadZoneDeltas(zd.ZoneName)
+	if err != nil {
+		t.Fatalf("LoadZoneDeltas: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("the journal is empty after two updates")
+	}
+	if rows[0].FromSerial != fileSerial {
+		t.Errorf("the journal starts at %d, want the old file's serial %d", rows[0].FromSerial, fileSerial)
+	}
+	for i := 1; i < len(rows); i++ {
+		if rows[i].FromSerial != rows[i-1].ToSerial {
+			t.Errorf("journal row %d starts at %d, want the previous row's end %d", i, rows[i].FromSerial, rows[i-1].ToSerial)
+		}
+	}
+	if last := rows[len(rows)-1]; last.ToSerial != now {
+		t.Errorf("the journal ends at %d, want the served serial %d", last.ToSerial, now)
+	}
+}
+
+func sigOf(b byte) string { return base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{b}, 64)) }
+
+// assertSignedSOAServedAt checks that the zone serves its SOA at serial with
+// the file's own signature over it.
+func assertSignedSOAServedAt(t *testing.T, zd *ZoneData, serial uint32, sig byte, when string) {
+	t.Helper()
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		t.Fatalf("%s: nothing is served", when)
+	}
+	sigs := snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs
+	if snap.Serial != serial || len(sigs) != 1 || sigs[0].(*dns.RRSIG).Signature != sigOf(sig) {
+		t.Errorf("%s: the SOA is served at %d with %d signatures; want %d with the file's own", when, snap.Serial, len(sigs), serial)
+	}
+}
+
+// Neither outbound-soa-serial mode moves the serial of a zone signed
+// elsewhere, at a start or after a refresh: its SOA signature covers that
+// serial and no other (#1006).
+func TestOutboundSerialModesLeaveAZoneSignedElsewhereAlone(t *testing.T) {
+	for _, mode := range []string{OutboundSoaSerialPersist, OutboundSoaSerialUnixtime} {
+		t.Run(mode, func(t *testing.T) {
+			kdb := newTestKeyDB(t)
+			zd := reloadZone(t, kdb, signedElsewhere("100", 'a'))
+			if err := kdb.RaiseOutgoingSerial("example.", 200); err != nil {
+				t.Fatalf("RaiseOutgoingSerial: %v", err)
+			}
+			zd.OutboundSoaSerial = mode
+			applyOutboundSerialAfterRefresh(zd, "example.")
+			assertSignedSOAServedAt(t, zd, 100, 'a', "after a refresh")
+
+			fresh := &ZoneData{
+				ZoneName:          "example.",
+				ZoneStore:         MapZone,
+				ZoneType:          Primary,
+				Zonefile:          zd.Zonefile,
+				Logger:            log.New(os.Stderr, "", 0),
+				Options:           map[ZoneOption]bool{},
+				KeyDB:             kdb,
+				FirstZoneLoad:     true,
+				Data:              core.NewNameMap[OwnerData](),
+				OutboundSoaSerial: mode,
+			}
+			zd.stopPublisher()
+			Zones.Set("example.", fresh)
+			t.Cleanup(func() { Zones.Remove("example.") })
+			t.Cleanup(fresh.stopPublisher)
+			if _, err := initialLoadZone(context.Background(), fresh, "example.", ZoneRefresher{Name: "example."},
+				&Config{}, core.NewCmap[*RefreshCounter](), func(string) {}); err != nil {
+				t.Fatalf("initialLoadZone: %v", err)
+			}
+			assertSignedSOAServedAt(t, fresh, 100, 'a', "at a start")
+		})
+	}
+}
+
+// Where NSEC records are content -- a zone that does not sign itself -- an
+// owner holding only an NSEC is content too.
+func TestAuthoredContentEqualCountsAnNsecOnlyOwner(t *testing.T) {
+	zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+	if _, _, err := zd.ReadZoneData(signedElsewhere("100", 'a'), true); err != nil {
+		t.Fatalf("ReadZoneData: %v", err)
+	}
+	base := snapshotMapFromData(zd.Data)
+	other := snapshotMapFromData(zd.Data)
+	other["x.example."] = &OwnerData{Name: "x.example.", RRtypes: NewRRTypeStore(),
+		NSEC: core.RRset{Name: "x.example.", RRtype: dns.TypeNSEC, RRs: []dns.RR{mustRR(t, "x.example. 7200 IN NSEC www.example. NSEC RRSIG")}}}
+	if authoredContentEqual("example.", base, other, contentTerms{withSigs: true}) {
+		t.Error("a new owner holding only an NSEC compares as no change")
+	}
+	if !authoredContentEqual("example.", base, other, contentTerms{}) {
+		t.Error("in a zone that makes its own chain, an NSEC-only owner counts as a change")
+	}
+}
+
+// The terms a zone compares in are its configuration's, resolved as the
+// publish resolves it: unset ZONEMD parameters and the defaults spelled out
+// compare and digest alike; a different algorithm does not, and a zone that
+// does not make its ZONEMD leaves one in its file as content.
+func TestContentTermsResolveTheZonemdDefaults(t *testing.T) {
+	zone := func(publish bool, scheme uint8, algs ...uint8) *ZoneData {
+		return &ZoneData{ZoneName: "example.", ZoneType: Primary,
+			Options: map[ZoneOption]bool{OptPublishZonemd: publish}, zonemdScheme: scheme, zonemdAlgs: algs}
+	}
+	unset, spelled, other, off := zone(true, 0), zone(true, ZonemdSchemeSimple, ZonemdAlgSHA384),
+		zone(true, ZonemdSchemeSimple, ZonemdAlgSHA512), zone(false, 0)
+	data := func(extra string) map[string]*OwnerData {
+		t.Helper()
+		zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+		if _, _, err := zd.ReadZoneData(reloadText("1", extra), true); err != nil {
+			t.Fatalf("ReadZoneData: %v", err)
+		}
+		return snapshotMapFromData(zd.Data)
+	}
+	loaded := data("")
+	published := data("example.\t3600\tIN\tZONEMD\t1 1 1 " + strings.Repeat("a", 96) + "\n")
+	digest := func(zd *ZoneData, d map[string]*OwnerData) string {
+		return authoredContentDigest("example.", d, zd.contentTerms())
+	}
+	if !unset.contentTerms().skipZonemd || off.contentTerms().skipZonemd {
+		t.Fatal("contentTerms does not follow publish-zonemd")
+	}
+	if digest(unset, loaded) != digest(spelled, loaded) {
+		t.Error("unset ZONEMD parameters and the defaults spelled out digest differently")
+	}
+	if digest(unset, loaded) != digest(unset, published) {
+		t.Error("a zone that makes its ZONEMD digests its own record as content")
+	}
+	if digest(unset, loaded) == digest(other, loaded) {
+		t.Error("a different ZONEMD algorithm digests the same")
+	}
+	if digest(off, loaded) == digest(off, published) {
+		t.Error("a zone that does not make its ZONEMD ignores one in its file")
+	}
+}
+
+// If the migration that adds content_digest failed, the floor is still
+// recorded: without the column there is no digest to clear.
+func TestRaiseOutgoingSerialWithoutTheDigestColumn(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	if _, err := kdb.DB.Exec(`ALTER TABLE OutgoingSerials DROP COLUMN content_digest`); err != nil {
+		t.Fatalf("setup: dropping the column: %v", err)
+	}
+	for _, serial := range []uint32{100, 101, 50} {
+		if err := kdb.RaiseOutgoingSerial("example.", serial); err != nil {
+			t.Fatalf("RaiseOutgoingSerial(%d): %v", serial, err)
+		}
+	}
+	if got, err := kdb.LoadOutgoingSerial("example."); err != nil || got != 101 {
+		t.Errorf("the floor is %d (err %v), want 101", got, err)
+	}
+}
+
+// A ZONEMD the zone makes is compared on its parameters, not its digest: a
+// new digest is no change, a new hash algorithm is.
+func TestAuthoredContentEqualComparesZonemdParameters(t *testing.T) {
+	build := func(zonemd string) map[string]*OwnerData {
+		t.Helper()
+		zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+		if _, _, err := zd.ReadZoneData(reloadText("1", "example.\t3600\tIN\tZONEMD\t"+zonemd+"\n"), true); err != nil {
+			t.Fatalf("ReadZoneData: %v", err)
+		}
+		return snapshotMapFromData(zd.Data)
+	}
+	sha384 := func(c string) string { return "1 1 1 " + strings.Repeat(c, 96) }
+	sha512 := "1 1 2 " + strings.Repeat("c", 128)
+	made := contentTerms{skipZonemd: true}
+	if !authoredContentEqual("example.", build(sha384("a")), build(sha384("b")), made) {
+		t.Error("a new digest under the same parameters counted as a change")
+	}
+	if authoredContentEqual("example.", build(sha384("a")), build(sha512), made) {
+		t.Error("a new hash algorithm did not count as a change")
+	}
+}
+
+// An SOA that came with a signature is compared serial and all: the signature
+// covers the serial, so two such SOAs that differ only there are different.
+// An unsigned SOA's serial is still left out.
+func TestAuthoredContentEqualCountsASignedSOAsSerial(t *testing.T) {
+	build := func(text string) map[string]*OwnerData {
+		t.Helper()
+		zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+		if _, _, err := zd.ReadZoneData(text, true); err != nil {
+			t.Fatalf("ReadZoneData: %v", err)
+		}
+		return snapshotMapFromData(zd.Data)
+	}
+	foreign := contentTerms{withSigs: true}
+	signedAt := func(serial string) map[string]*OwnerData {
+		return build(strings.Replace(signedElsewhere("100", 'a'), "hostmaster.example. 100 ", "hostmaster.example. "+serial+" ", 1))
+	}
+	if authoredContentEqual("example.", signedAt("100"), signedAt("101"), foreign) {
+		t.Error("two signed SOAs that differ in their serial compared equal")
+	}
+	if !authoredContentEqual("example.", build(reloadText("100", "")), build(reloadText("101", "")), foreign) {
+		t.Error("two unsigned SOAs that differ only in their serial compared different")
+	}
+	if authoredContentDigest("example.", signedAt("100"), foreign) == authoredContentDigest("example.", signedAt("101"), foreign) {
+		t.Error("the restart digest ignores a signed SOA's serial")
+	}
+}
+
+// A zone that makes its own ZONEMD records its restart digest after the
+// publish made the record and compares it before the next one has: the
+// configured parameters stand in for the record, so both digests agree.
+func TestRestartDigestOfAZoneThatMakesItsZonemd(t *testing.T) {
+	build := func(extra string) map[string]*OwnerData {
+		t.Helper()
+		zd := &ZoneData{ZoneName: "example.", ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+		if _, _, err := zd.ReadZoneData(reloadText("1", extra), true); err != nil {
+			t.Fatalf("ReadZoneData: %v", err)
+		}
+		return snapshotMapFromData(zd.Data)
+	}
+	made := contentTerms{skipZonemd: true, zonemd: []string{"1/1"}}
+	published := build("example.\t3600\tIN\tZONEMD\t1 1 1 " + strings.Repeat("a", 96) + "\n")
+	loaded := build("")
+	if authoredContentDigest("example.", published, made) != authoredContentDigest("example.", loaded, made) {
+		t.Error("the digest of the published zone and of the file it came from differ only by the ZONEMD")
+	}
+	if authoredContentDigest("example.", loaded, made) == authoredContentDigest("example.", loaded, contentTerms{skipZonemd: true, zonemd: []string{"1/2"}}) {
+		t.Error("a change to the configured ZONEMD algorithm did not change the digest")
+	}
+}
+
+// A file signed elsewhere keeps its own serial at a start, even when the zone
+// has published a higher one: a lifted serial would not be covered by the
+// file's SOA signature.
+func TestRestartOfAZoneSignedElsewhereKeepsTheFilesSerial(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, signedElsewhere("100", 'a'))
+	if err := kdb.RaiseOutgoingSerial("example.", 200); err != nil {
+		t.Fatalf("RaiseOutgoingSerial: %v", err)
+	}
+	assertSignedSOAServedAt(t, restartZone(t, zd, kdb), 100, 'a', "after a start")
+}

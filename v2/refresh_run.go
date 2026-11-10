@@ -154,6 +154,12 @@ func applyOutboundSerialAfterRefresh(zd *ZoneData, zone string) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
+	// A zone signed elsewhere serves the signer's serial (#1006): neither mode
+	// may move it.
+	if zd.servesSignedElsewhereSOA() {
+		return
+	}
+
 	serialChanged := false
 	switch mode {
 	case OutboundSoaSerialUnixtime:

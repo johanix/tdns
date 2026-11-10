@@ -151,8 +151,10 @@ operator.example.	3600	IN	A	10.9.9.9
 	zd.mu.Lock()
 	served, fileSerial := zd.CurrentSerial, zd.fileSerial
 	zd.mu.Unlock()
-	if !serialNewer(served, fileSerial) {
-		t.Errorf("after the reload the zone serves %d, which does not advance past the file's %d",
+	// The file's own serial, which is ahead of what was served (#1006). The
+	// journal anchor then equals the served serial, which is all #362 needs.
+	if served != fileSerial || served != 500 {
+		t.Errorf("after the reload the zone serves %d, want the file's own serial %d",
 			served, fileSerial)
 	}
 

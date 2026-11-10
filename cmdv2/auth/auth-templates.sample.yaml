@@ -233,6 +233,17 @@
 #                           it is the operator's decision. It does not affect
 #                           parsing or serving HSYNCPARAM, which is always on.
 #
+# OUTBOUND IXFR OPTIONS:
+#   ixfr-from-differences:   Diff a wholesale replacement of the zone -- a
+#                           reload of its file, or a full AXFR in -- against the
+#                           version it replaces, and keep the difference in the
+#                           outbound IXFR history, so downstreams get an IXFR
+#                           instead of the whole zone. BIND's option of the
+#                           same name. OFF by default, as in BIND: the diff
+#                           compares the whole zone on every replacement.
+#                           Without it a replacement starts a new IXFR history
+#                           and downstreams get a full transfer.
+#
 # MULTI-PROVIDER OPTIONS:
 #   multi-provider:          Zone is served by several providers (RFC 8901).
 #                           Changes signing and rollover behaviour; the

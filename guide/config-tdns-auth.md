@@ -667,6 +667,17 @@ which also exits non-zero on a zone that fails. `+zonemd` needs an AXFR: an
 IXFR returns a difference rather than a zone, and `dog` refuses instead of
 digesting one.
 
+**Outbound IXFR**
+
+| Option | Effect |
+|--------|--------|
+| `ixfr-from-differences` | Diff a wholesale replacement of the zone (a reload of its file, or a full AXFR in) against the version it replaces, and keep the difference in the outbound IXFR history, so downstreams get an IXFR instead of the whole zone. BIND's option of the same name. **Off by default**, as in BIND |
+
+Off is the default because the diff compares the whole zone on every
+replacement. Without the option, a replacement starts a new IXFR history and
+downstreams get a full transfer. Either way a reload whose content is what the
+zone already serves publishes nothing: no new serial, no NOTIFY.
+
 **Zone transfer (secondary zones only)**
 
 | Option | Effect |

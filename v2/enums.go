@@ -142,6 +142,14 @@ const (
 	// so the loader does not refuse them as a missing trailing dot (#1009).
 	// Off by default: almost every such name is that mistake.
 	OptAllowDoubledSuffix
+	// OptIxfrFromDifferences: a wholesale replacement of the zone -- a reload of
+	// its file, or an inbound AXFR -- is diffed against the version it replaces
+	// and the difference kept in the outbound IXFR history, so downstreams get
+	// an IXFR instead of the whole zone (#1006). BIND's option of the same name.
+	// Off by default, as in BIND: the diff compares the whole zone, which costs
+	// CPU on every replacement. Off, a replacement starts a new IXFR epoch as
+	// before.
+	OptIxfrFromDifferences
 	optZoneOptionTdnsSentinel
 )
 
@@ -186,6 +194,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptChildSyncProxy:          "childsync-proxy",
 	OptModifiedDownstream:      "modified-downstream",
 	OptAllowDoubledSuffix:      "allow-doubled-suffix",
+	OptIxfrFromDifferences:     "ixfr-from-differences",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -225,6 +234,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"childsync-proxy":            OptChildSyncProxy,
 	"modified-downstream":        OptModifiedDownstream,
 	"allow-doubled-suffix":       OptAllowDoubledSuffix,
+	"ixfr-from-differences":      OptIxfrFromDifferences,
 }
 
 // deprecatedZoneOptionNames maps old option spellings to the canonical name

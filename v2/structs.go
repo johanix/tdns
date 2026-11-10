@@ -347,8 +347,20 @@ type ZoneData struct {
 
 	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale
 	// zone replacement): updateIxfrChainLocked clears the delta history
-	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked.
+	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked,
+	// unless the zone has ixfr-from-differences.
 	wsIxfrEpochReset bool
+	// wsSkipIfUnchanged marks the next publish as a reload of the zone's file
+	// that must not publish at all when the content it carries is what the
+	// zone already serves (#1006): no new serial, no NOTIFY. Consumed at the
+	// top of publishWorkingSetLocked. Guarded by mu.
+	wsSkipIfUnchanged bool
+	// wsRecordContentDigest asks the next publish to store a digest of the
+	// content it publishes beside its serial, so a restart that loads the same
+	// content can serve that serial again instead of the next one (#1006).
+	// Set only where the digest is worth its cost: a file-backed zone that
+	// originates its content and does not sign it. Guarded by mu.
+	wsRecordContentDigest bool
 	// wsNeedsFullSign marks a working set as carrying WHOLESALE-REPLACEMENT
 	// content that this server has not signed yet -- an AXFR, or a file reload
 	// of a zone that signs its own content. publishWorkingSetLocked signs it
