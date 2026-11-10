@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -151,5 +152,45 @@ func TestAnswerSignalWriter(t *testing.T) {
 		default:
 			t.Errorf("viaMsg=%v: not signalled after the answer", viaMsg)
 		}
+	}
+}
+
+// The backstop covers the hand-over too. With the queue full for the whole
+// backstop, the UPDATE was never handed over and nobody else will answer it,
+// so the handler answers SERVFAIL itself and returns, instead of holding the
+// connection until queue space appears.
+func TestUpdateQueueFullAnsweredAtBackstop(t *testing.T) {
+	prev := updateAnswerBackstop
+	updateAnswerBackstop = func(string) time.Duration { return 200 * time.Millisecond }
+	t.Cleanup(func() { updateAnswerBackstop = prev })
+
+	conf := tsigTestConf(t)
+	conf.Internal.DnsUpdateQ = make(chan DnsUpdateRequest) // nobody reads: always full
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := createAuthDnsHandler(ctx, conf)
+
+	upd := new(dns.Msg)
+	upd.SetUpdate("example.test.")
+	cw := &captureWriter{}
+	returned := make(chan struct{})
+	go func() {
+		handler(cw, upd)
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler is still blocked on a full queue past the backstop")
+	}
+	if cw.got == nil {
+		t.Fatal("no answer: an UPDATE that was never queued must be answered by the handler")
+	}
+	if cw.got.Rcode != dns.RcodeServerFailure {
+		t.Errorf("rcode = %s, want SERVFAIL", dns.RcodeToString[cw.got.Rcode])
+	}
+	if found, code, _ := edns0.ExtractEDEFromMsg(cw.got); !found || code != edns0.EDEZoneUpdateNotApplied {
+		t.Errorf("EDE = %d (found %v), want EDEZoneUpdateNotApplied", code, found)
 	}
 }

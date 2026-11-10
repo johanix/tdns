@@ -488,15 +488,10 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 				// TCP/DoT server starts its idle timer and closes the
 				// connection when it runs out, and DoH sends whatever its
 				// buffer holds. Returning at once lost every answer later than
-				// the idle timeout. See waitForUpdateAnswer.
+				// the idle timeout. See handOverAndWaitForAnswer.
 				aw := newAnswerSignalWriter(dur.ResponseWriter)
 				dur.ResponseWriter = aw
-				select {
-				case dnsupdateq <- dur:
-				case <-ctx.Done():
-					return
-				}
-				waitForUpdateAnswer(ctx, aw, qname)
+				handOverAndWaitForAnswer(ctx, dnsupdateq, dur, aw, qname)
 				return
 			}
 
