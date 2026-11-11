@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -265,6 +266,45 @@ func TestADSAtAHostedChildsApexIsItsParentsToAnswerWhateverTheChildsState(t *tes
 				if state != dsHealthy {
 					wantEmptyServfail(t, askWay(t, dsSecure, dns.TypeSOA, way, "the child's SOA"), "the child's SOA, "+way.name)
 				}
+			}
+		})
+	}
+}
+
+// The handler skips the child's guards because it found the parent, and the
+// answer comes from that parent: dsResponder is handed it and does not look
+// again. Removed from Zones in between (RemoveDynamicZone), the parent still
+// answers, as the zone of any query in flight does. A second lookup would find
+// no parent and answer from the child's own copy: an authoritative NODATA from
+// a zone in error, withheld or expired.
+func TestADSIsAnsweredByTheParentTheHandlerFoundEvenIfItIsRemovedBeforeTheAnswer(t *testing.T) {
+	for _, state := range dsNotServing {
+		t.Run(string(state), func(t *testing.T) {
+			authApp(t)
+			parent := dsZone(t, apexParent, dsParentText, dsHealthy)
+			child := dsZone(t, dsSecure, dsChildText(dsSecure), state)
+			if got := FindParentZone(dsSecure); got != parent {
+				t.Fatalf("setup: FindParentZone(%s) is %v, want the parent", dsSecure, got)
+			}
+			Zones.Remove(apexParent)
+			for _, way := range dsWays {
+				req := new(dns.Msg)
+				req.SetQuestion(dsSecure, dns.TypeDS)
+				if way.edns {
+					req.SetEdns0(dns.DefaultMsgSize, way.do)
+				}
+				msgo, err := edns0.ExtractFlagsAndEDNS0Options(req)
+				if err != nil {
+					t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
+				}
+				rw := &fakeRW{remote: udpAddr("127.0.0.1")}
+				if err := child.dsResponder(context.Background(), rw, req, dsSecure, parent, msgo, nil); err != nil {
+					t.Fatalf("dsResponder: %v", err)
+				}
+				if rw.written == nil {
+					t.Fatalf("%s: no reply written", way.name)
+				}
+				wantParentsDS(t, rw.written, way, "the parent removed before the answer, "+way.name)
 			}
 		})
 	}

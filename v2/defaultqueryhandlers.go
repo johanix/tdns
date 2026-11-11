@@ -97,22 +97,27 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		// qname is this zone's apex, so a DS is not this zone's data but its
 		// parent's (RFC 4035 section 3.1.4.1). With the parent hosted here, the
 		// parent's state decides the answer and this zone's does not:
-		// handleDSQuery answers from the parent if it serves, and SERVFAILs if
+		// dsResponder answers from the parent if it serves, and SERVFAILs if
 		// it does not. So the guards below, which are about this zone, are not
 		// asked, and a child with no copy, in error, withheld or expired leaves
 		// its parent's answer alone. For "." FindParentZone returns the root
-		// itself, so there the root's own state decides.
+		// itself, so there the root's own state decides. dsResponder gets the
+		// parent found here and does not look again: a parent removed in
+		// between must not leave the answer to this zone's copy, which these
+		// guards did not check.
 		//
 		// With no parent hosted, the answer is this zone's own NODATA, from its
 		// copy (sendChildApexDSNodata), and the guards below apply to it as to
 		// any other answer from that copy.
-		if qtype == dns.TypeDS && FindParentZone(qname) != nil {
-			lgHandler.Debug("DS at a zone's apex, parent hosted: the parent answers", "qname", qname, "zone", zd.ZoneName)
-			if err := zd.QueryResponder(ctx, w, r, qname, qtype, msgoptions, kdb, conf.Internal.ImrEngine); err != nil {
-				lgHandler.Error("QueryResponder failed", "error", err)
-				replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
+		if qtype == dns.TypeDS {
+			if pzd := FindParentZone(qname); pzd != nil {
+				lgHandler.Debug("DS at a zone's apex, parent hosted: the parent answers", "qname", qname, "zone", zd.ZoneName, "parent", pzd.ZoneName)
+				if err := zd.dsResponder(ctx, w, r, qname, pzd, msgoptions, kdb); err != nil {
+					lgHandler.Error("dsResponder failed", "error", err)
+					replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
+				}
+				return nil
 			}
-			return nil
 		}
 
 		// SERVFAIL when the zone has a service-impacting error

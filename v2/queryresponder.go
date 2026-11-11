@@ -268,6 +268,8 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 // (servesQueries), and zd's is never looked at: zd may have no copy at all, so
 // nothing here reads its snapshot. Without one, the answer is zd's own NODATA
 // from its copy, and DefaultQueryHandler has already applied zd's guards to it.
+// When DefaultQueryHandler skips zd's guards because it found a parent, it
+// hands that parent to answerDS (dsResponder), and this lookup is not made.
 func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
 
@@ -278,7 +280,14 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 	// TLD as the root: FindZone("") tries nothing, and a server hosting both
 	// "." and a TLD answered the TLD's DS with the TLD's own NODATA. For "."
 	// itself it returns the root, which has no parent and answers NODATA.
-	pzd := FindParentZone(qname)
+	return zd.answerDS(m, w, qname, FindParentZone(qname), msgoptions, kdb)
+}
+
+// answerDS is handleDSQuery with the parent side already found: pzd, or nil
+// when none is hosted.
+func (zd *ZoneData) answerDS(m *dns.Msg, w dns.ResponseWriter, qname string, pzd *ZoneData,
+	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
+
 	if pzd == nil {
 		if core.EqualNames(qname, zd.ZoneName) {
 			// That NODATA comes from the zone's copy, so the query handler's
@@ -1142,8 +1151,11 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname, or
 	return true, nil
 }
 
-func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
-	qname string, qtype uint16, msgoptions *edns0.MsgOptions, kdb *KeyDB, imr *Imr) error {
+// newResponse starts a reply to r, for QueryResponder and dsResponder. If ctx
+// is done it writes a SERVFAIL and returns ctx's error. Otherwise it returns an
+// authoritative reply with the OPT the query asks for.
+func newResponse(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
+	msgoptions *edns0.MsgOptions) (*dns.Msg, error) {
 
 	select {
 	case <-ctx.Done():
@@ -1153,21 +1165,48 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		respondEDNS(m, r, msgoptions)
 		m.MsgHdr.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(m)
-		return ctx.Err()
+		return nil, ctx.Err()
 	default:
 	}
 
-	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.MsgHdr.Authoritative = true
 	// RFC 6891 §6.1.1: an EDNS query MUST get an OPT in the response. Attach it
-	// once here, up front, so every exit path below (positive answers,
-	// referrals, NXDOMAIN/NODATA, DS, CNAME, SOA, REFUSED — all of which reuse
-	// this m) carries it. No-op for non-EDNS queries. Later EDE/CDE error paths
-	// find and reuse this OPT rather than adding a second one. Downstream UDP
-	// truncation preserves the OPT and re-appends it after trimming.
+	// once here, up front, so every exit path of the responders (positive
+	// answers, referrals, NXDOMAIN/NODATA, DS, CNAME, SOA, REFUSED — all of
+	// which reuse this m) carries it. No-op for non-EDNS queries. Later EDE/CDE
+	// error paths find and reuse this OPT rather than adding a second one.
+	// Downstream UDP truncation preserves the OPT and re-appends it after
+	// trimming.
 	respondEDNS(m, r, msgoptions)
+	return m, nil
+}
+
+// dsResponder answers a DS at zd's apex from pzd, the hosted parent that
+// DefaultQueryHandler found when it decided to skip zd's guards. It takes that
+// parent and does not look again, so the decision and the answer rest on one
+// lookup. A parent removed in between (RemoveDynamicZone) still answers, as
+// the zone of any query in flight does. A second lookup would find no parent
+// there and fall back to zd's own copy, which zd's guards were never asked
+// about.
+func (zd *ZoneData) dsResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
+	qname string, pzd *ZoneData, msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
+
+	m, err := newResponse(ctx, w, r, msgoptions)
+	if err != nil {
+		return err
+	}
+	return zd.answerDS(m, w, qname, pzd, msgoptions, kdb)
+}
+
+func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
+	qname string, qtype uint16, msgoptions *edns0.MsgOptions, kdb *KeyDB, imr *Imr) error {
+
+	m, err := newResponse(ctx, w, r, msgoptions)
+	if err != nil {
+		return err
+	}
 
 	// 0. Is this a DS query? If so, trap it ASAP: DS is parent-side data, so it
 	// is answered from the nearest hosted ancestor of qname, resolved from the
@@ -1196,7 +1235,6 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 	// Get DNSSEC keys if KeyDB is available and zone has DNSSEC enabled
 	var dak *DnssecKeys
-	var err error
 	if kdb != nil {
 		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil {
