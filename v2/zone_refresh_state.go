@@ -142,6 +142,7 @@ func (zd *ZoneData) noteSuccessfulRefresh(serial uint32) {
 	if zd == nil {
 		return
 	}
+	zd.refreshRun.confirmations.Add(1) // see refreshConfirmed
 	now := time.Now()
 	serial = zd.servedSerial(serial)
 

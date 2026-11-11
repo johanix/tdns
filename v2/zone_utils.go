@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -77,6 +78,16 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 		return
 	}
 	if _, err := os.Stat(fname); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			// A copy we cannot reach -- a directory we may not search, a path
+			// through a file -- is a fault in this server's own storage, not a
+			// missing copy, and ERROR like a copy that cannot be read (below).
+			// At DEBUG it would go unreported whenever the transfer after it
+			// backs off quietly.
+			lg.Error("could not reach persisted zone copy at first bind, continuing to transfer",
+				"zone", zd.ZoneName, "file", fname, "err", err)
+			return
+		}
 		// No copy yet: a zone added through the API in this process has not
 		// written one, and a config-declared secondary may never have
 		// transferred. Nothing to adopt, and not an error.
@@ -96,6 +107,17 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 		// below is still the zone's primary route to data, and it may well
 		// succeed. A zone that can neither load nor transfer surfaces through
 		// the transfer's own error.
+		//
+		// Except a copy that cannot be read: that is a fault in this server's
+		// own storage, whatever the transfer does next, and ERROR. FetchFromFile
+		// leaves a read failure to its caller to log, and on the refresh path
+		// that is noteRefreshFailure; here it is this line.
+		var se *refreshStageError
+		if errors.As(err, &se) && se.stage == refreshStageFile {
+			lg.Error("could not read persisted zone copy at first bind, continuing to transfer",
+				"zone", zd.ZoneName, "file", fname, "err", err)
+			return
+		}
 		lg.Warn("could not adopt persisted zone copy at first bind, continuing to transfer",
 			"zone", zd.ZoneName, "file", fname, "err", err)
 		return
@@ -176,7 +198,9 @@ func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, con
 			}
 			updated, err = zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, gate)
 			if err != nil {
-				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
+				// DEBUG: the caller's noteRefreshFailure logs the one ERROR
+				// for this refresh, with every upstream and its error.
+				lg.Debug("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
 			}
 			// Re-stamp, now that IncomingSerial names the copy we actually
@@ -318,7 +342,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		// XoT peer: probe the SOA over the same verified-TLS channel the
 		// transfer itself will use (same pin/dane/pkix gate).
 		if tlsCfg, terr := conf.ClientTLSConfigForPeer(up); terr != nil {
-			p.err = terr
+			p.err = &peerConfigError{err: terr}
 			plans = append(plans, p)
 			continue
 		} else if tlsCfg != nil {
@@ -327,7 +351,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		}
 		provider, algo, serr := TsigMaterialForPeer(up.Key, conf)
 		if serr != nil {
-			p.err = serr
+			p.err = &peerConfigError{err: serr}
 			plans = append(plans, p)
 			continue
 		}
@@ -346,6 +370,9 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	// RefreshError needs to know WHICH primaries were tried, not just how
 	// many (#502).
 	var tried []string
+	// Each upstream's own error, for the one ERROR the refresh logs. lastErr
+	// keeps only the last one.
+	var failures []upstreamFailure
 	for i := range plans {
 		p := &plans[i]
 		up, upstream := p.up, p.upstream
@@ -353,6 +380,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		if p.err != nil {
 			lg.Error("DoTransfer: peer config setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", p.err)
 			lastErr = fmt.Errorf("%s: %w", upstream, p.err)
+			failures = append(failures, newUpstreamFailure(upstream, p.err))
 			continue
 		}
 		// Nobody is waiting for this result any more; stop walking upstreams.
@@ -423,6 +451,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 			// RefreshError, and "i/o timeout" on its own tells an operator
 			// nothing about WHICH primary is unreachable (#502).
 			lastErr = fmt.Errorf("%s: %w", upstream, err)
+			failures = append(failures, newUpstreamFailure(upstream, err))
 			continue
 		}
 		sawResponse = true
@@ -476,10 +505,14 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	// zd.Upstreams: the engine rewrites that slice in place on every refresh
 	// that re-resolves a hostname primary, so reading it here races -- and would
 	// report a count that does not match the addresses actually tried.
-	lg.Error("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName,
+	//
+	// DEBUG: the caller's noteRefreshFailure logs the one ERROR for this
+	// refresh, and it names every upstream with its own error.
+	lg.Debug("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName,
 		"count", len(upstreams), "upstreams", strings.Join(tried, ", "), "err", lastErr)
-	return false, 0, fmt.Errorf("SOA probe of %s failed: no response from any of %d upstream(s) [%s]: %w",
-		zd.ZoneName, len(upstreams), strings.Join(tried, ", "), lastErr)
+	return false, 0, &upstreamsFailedError{stage: refreshStageProbe, failures: failures,
+		err: fmt.Errorf("SOA probe of %s failed: no response from any of %d upstream(s) [%s]: %w",
+			zd.ZoneName, len(upstreams), strings.Join(tried, ", "), lastErr)}
 }
 
 // newTransferScratchZone builds the throwaway ZoneData an inbound AXFR is
@@ -649,9 +682,16 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	// parse was thrown away.
 	serialMoved, _, err := new_zd.ReadZoneFile(ctx, zd.Zonefile, true)
 	if err != nil {
-		lg.Error("ReadZoneFile failed", "zone", zd.ZoneName, "err", err)
+		// DEBUG: the caller logs the one ERROR -- noteRefreshFailure on the
+		// refresh path, the first-bind adoption on its own.
+		lg.Debug("ReadZoneFile failed", "zone", zd.ZoneName, "err", err)
 		zd.SetStatus(prevStatus)
-		return false, err
+		return false, &refreshStageError{stage: refreshStageFile, err: err}
+	}
+	// A primary's proof of health (refreshConfirmed). Not a secondary's: this
+	// is also how a secondary adopts its own copy off disk at first bind.
+	if zd.ZoneType == Primary {
+		zd.refreshRun.confirmations.Add(1)
 	}
 
 	// zd.Logger.Printf("FetchFromFile: Zone %s: zone file read, updated=%v delegation sync=%v", zd.ZoneName, updated, zd.Optoins["delegationsync"])
@@ -1062,6 +1102,7 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 	var new_zd ZoneData
 	transferred := false
 	var lastErr error
+	var failures []upstreamFailure // each upstream's own error; lastErr keeps one
 	// zd.Upstreams is mutated in place under zd.mu by the refresh engine, so
 	// walk a copy rather than the live slice -- the same race DoTransfer and
 	// ProbeUpstreamSerials already copy to avoid.
@@ -1112,6 +1153,7 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 		if err != nil {
 			lg.Warn("FetchFromUpstream: transfer from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
+			failures = append(failures, newUpstreamFailure(upstream, err))
 			continue
 		}
 		if upToDate {
@@ -1145,11 +1187,14 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 			addrs = append(addrs, u.Addr)
 		}
 		tried := strings.Join(addrs, ", ")
-		lg.Error("FetchFromUpstream: AXFR failed on all upstreams",
+		// DEBUG: the caller's noteRefreshFailure logs the one ERROR for this
+		// refresh, and it names every upstream with its own error.
+		lg.Debug("FetchFromUpstream: AXFR failed on all upstreams",
 			"zone", zd.ZoneName, "upstreams", tried, "err", lastErr)
 		zd.SetStatus(prevStatus) // still serving prior data; failure surfaces as RefreshError
-		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s) [%s]: %w",
-			zd.ZoneName, len(upstreams), tried, lastErr)
+		return false, &upstreamsFailedError{stage: refreshStageTransfer, failures: failures,
+			err: fmt.Errorf("AXFR of %s failed: tried all %d upstream(s) [%s]: %w",
+				zd.ZoneName, len(upstreams), tried, lastErr)}
 	}
 
 	// A forced transfer MUST apply whatever upstream has, including a serial

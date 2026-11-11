@@ -83,6 +83,9 @@ type RefreshCounter struct {
 //
 // One helper rather than an errors.Is at each of the five call sites: they all
 // want the same rule, and the next one added should get it for free.
+//
+// It logs the ONE ERROR of a failed refresh: the lines below it in the call
+// are DEBUG, and its fields carry what they said (refreshFailureAttrs).
 func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 	if errors.Is(err, context.Canceled) {
 		lgEngine.Info("zone refresh cancelled", "zone", zone)
@@ -91,11 +94,14 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 	if refreshDeferred(err) {
 		// Not a failure of the zone: a local writer holds it, for its limit at
 		// most, or a change of its own waits for the pass that can publish
-		// it. The next attempt comes soon (nextRefreshAfterFailure).
-		lgEngine.Info("zone refresh deferred", "zone", zone, "reason", err)
+		// it. The next attempt comes soon (nextRefreshAfterFailure). Counted,
+		// so that one that does not end reaches ERROR.
+		noteRefreshDeferral(zd, zone, err)
 		return false
 	}
-	lgEngine.Error(msg, "zone", zone, "error", err)
+	endRefreshDeferral(zd, zone)
+	attempts, since := zd.refreshRun.noteFailed(time.Now())
+	lgEngine.Error(msg, refreshFailureAttrs(zone, err, attempts, since)...)
 	zd.SetError(RefreshError, "refresh error: %v", err)
 	zd.LatestError = time.Now()
 	return true
@@ -108,6 +114,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	refreshCounters *core.ConcurrentMap[string, *RefreshCounter],
 	tryPostpass func(string)) (bool, error) {
 
+	seen := zd.refreshRun.confirmations.Load()
 	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
 	if err != nil {
 		// A failed refresh no longer implies an empty zone. A secondary that
@@ -155,6 +162,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		}
 		return false, err
 	}
+	noteRefreshSuccess(zd, zone, refreshConfirmed(zd, seen))
 
 	refresh, err := FindSoaRefresh(zd)
 	if err != nil {
@@ -837,9 +845,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							if _, exists := refreshCounters.Get(zone); !exists {
 								refreshCounters.Set(zone, &RefreshCounter{
 									Name:       zone,
-									SOARefresh: 300, // 5 min fallback
-									SOARetry:   300, // no SOA to read a real RETRY from
-									CurRefresh: 30,  // retry sooner on initial failure
+									SOARefresh: 300,                   // 5 min fallback
+									SOARetry:   300,                   // no SOA to read a real RETRY from
+									CurRefresh: firstLoadRetrySeconds, // retry sooner on initial failure
 								})
 							}
 
@@ -1459,6 +1467,11 @@ func nextRefreshAfterFailure(rc *RefreshCounter, err error) uint32 {
 	}
 	return refreshCounterRetry(rc)
 }
+
+// firstLoadRetrySeconds is how soon the ticker retries a pre-registered zone
+// whose first load failed. A variable only so that a test does not have to
+// wait thirty seconds.
+var firstLoadRetrySeconds uint32 = 30
 
 func refreshCounterRetry(rc *RefreshCounter) uint32 {
 	if rc.SOARetry > 0 {

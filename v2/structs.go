@@ -245,6 +245,9 @@ type ZoneData struct {
 	// docs/2026-08-28-secondary-serve-until-expire.md.
 	RefreshCount  int       // times initialLoadZone loaded the zone (0 or 1), reported over the API
 	LatestRefresh time.Time // when a usable SOA was last seen; what SOA EXPIRE is measured from
+	// refreshRun counts the zone's failed and deferred refreshes in a row, for
+	// the one line each logs (refresh_failure.go).
+	refreshRun refreshRunState
 	// expireClampLoggedSerial is the serial the EXPIRE-clamp warning was last
 	// emitted for, so a primary publishing a nonsensical EXPIRE is reported
 	// once per copy rather than once per query. See effectiveExpire.
