@@ -1162,12 +1162,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// still retries without signing.
 					zd.mu.Lock()
 					if Globals.App.Type != AppTypeAgent {
-						resignQ := conf.Internal.ResignQ
-						zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
-							if err := z.registerForPeriodicResign(ctx, resignQ); err != nil {
-								lgEngine.Error("registerForPeriodicResign failed", "zone", z.ZoneName, "error", err)
-							}
-						})
+						zd.OnFirstLoad = append(zd.OnFirstLoad, (*ZoneData).registerForPeriodicResign)
 					} else if len(zd.OnFirstLoad) == 0 {
 						zd.OnFirstLoad = append(zd.OnFirstLoad, func(*ZoneData) {})
 					}

@@ -280,6 +280,12 @@ type ZoneData struct {
 	// signature again. Cleared when the resigner takes it, or when the send
 	// is dropped.
 	resignQueued atomic.Bool
+	// keepSigned records that this zone signs here and is on the resigner's
+	// renewal watchlist (KeepRenewed). The resigner's pass walks Zones and
+	// renews the zones that carry it, so a zone removed from Zones, or replaced
+	// by a new ZoneData, leaves the watchlist with it. Never cleared: a zone
+	// that stops signing is skipped by its options, as before.
+	keepSigned atomic.Bool
 	// signalSkipLogged records that RepublishAtSignalNames has said, once,
 	// that it publishes nothing for this zone because its copy carries HSYNC3
 	// (leavesSignalsToItsAgents). Cleared when the copy no longer does. Per

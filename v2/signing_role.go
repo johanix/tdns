@@ -222,12 +222,8 @@ func (zd *ZoneData) startSigning(ctx context.Context, minSerial uint32) error {
 		lgSigner.Error("the zone is signed but persisting its applied DNSSEC policy failed", "zone", zd.ZoneName, "policy", name, "err", perr)
 	}
 	// Only a first load registers a zone for renewal, and this zone's first load
-	// did not sign. Not under the zone's lock: the send can wait on a full queue.
-	if q := Conf.Internal.ResignQ; q != nil {
-		if rerr := zd.registerForPeriodicResign(ctx, q); rerr != nil {
-			lgSigner.Error("the zone is signed but not registered for renewal", "zone", zd.ZoneName, "err", rerr)
-		}
-	}
+	// did not sign.
+	zd.KeepRenewed()
 	lgSigner.Info("the zone now serves its own signatures", "zone", zd.ZoneName, "policy", name, "new_rrsigs", newRRSIGs, "serial", serial)
 	return nil
 }

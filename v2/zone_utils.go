@@ -2288,7 +2288,8 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 }
 
 // registerForPeriodicResign puts a zone on the resigner's watchlist, so its
-// signatures are renewed before they age out.
+// signatures are renewed before they age out -- when the zone signs here at all.
+// The checks are the whole of it: KeepRenewed cannot fail and does not wait.
 //
 // It used to be SetupZoneSigning, and it used to SIGN -- a full pass, inline,
 // wherever it was called -- and then enqueue the zone, which the resigner could
@@ -2304,51 +2305,20 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 // into five-minute signatures, because sigValiditySeconds of a nil policy is
 // zero and sigLifetime substitutes five minutes for it.) What was missing was
 // never the signing -- it was a zone quietly falling off the renewal list.
-// resignRegisterTimeout bounds the registration send. Long enough that a
-// briefly busy resigner is waited out, short enough that zone loading is not
-// held up by one that is wedged.
-const resignRegisterTimeout = 2 * time.Second
-
-func (zd *ZoneData) registerForPeriodicResign(ctx context.Context, resignq chan<- ResignRequest) error {
+func (zd *ZoneData) registerForPeriodicResign() {
 	if Globals.App.Type == AppTypeAgent {
-		return nil // agents never sign
+		return // agents never sign
 	}
 
 	if !zd.signsItsOwnContent() {
-		return nil // this zone should not be signed (at least not by us)
+		return // this zone should not be signed (at least not by us)
 	}
 
 	if zd.ZoneType != Primary && !zd.Options[OptInlineSigning] {
-		return nil // non-primary zones require inline-signing to be signed
+		return // non-primary zones require inline-signing to be signed
 	}
 
-	// Derived from the caller's context, not Background(). This runs in the
-	// synchronous OnFirstLoad callback, so a full ResignQ used to hold the
-	// caller here for the whole resignRegisterTimeout with no way to notice
-	// that the engine it belongs to had already been told to stop -- two
-	// seconds of shutdown latency per zone, for a registration nobody would
-	// read.
-	ctx, cancel := context.WithTimeout(ctx, resignRegisterTimeout)
-	defer cancel()
-
-	select {
-	case resignq <- ResignRequest{Zd: zd, Reason: ResignPeriodic}:
-	case <-ctx.Done():
-		// Reported, not swallowed. A send that times out means the zone is not
-		// on the watchlist, so nothing will ever renew its signatures -- the
-		// exact failure this function exists to prevent, and the one that made
-		// SetupZoneSigning's sign-and-enqueue look necessary. Returning nil
-		// here told every caller the zone was registered when it was not.
-		//
-		// No retry: every caller logs it, and none of them can do better --
-		// a ResignQ still full after two seconds is a wedged resigner, not
-		// congestion to wait out.
-		return fmt.Errorf("registering %s for periodic re-signing: timed out sending to the resign queue"+
-			" after %s; the zone is NOT on the renewal watchlist and its signatures will expire",
-			zd.ZoneName, resignRegisterTimeout)
-	}
-
-	return nil
+	zd.KeepRenewed()
 }
 
 // reloadWouldLoseChanges reports whether re-reading the zone file would discard
