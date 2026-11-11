@@ -262,6 +262,12 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 //
 //   - We host only a grandparent (it delegates to qname's real parent, which we
 //     do NOT host): referral to that parent — the DS is its to answer. Rarest.
+//
+// Whose state decides follows from that. With a hosted ancestor it is the
+// ancestor's, by the test the query handler applies to a zone it answers from
+// (servesQueries), and zd's is never looked at: zd may have no copy at all, so
+// nothing here reads its snapshot. Without one, the answer is zd's own NODATA
+// from its copy, and DefaultQueryHandler has already applied zd's guards to it.
 func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
 
@@ -275,14 +281,9 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 	pzd := FindParentZone(qname)
 	if pzd == nil {
 		if core.EqualNames(qname, zd.ZoneName) {
-			// That NODATA comes from the zone's copy, which a withheld zone
-			// offers to nobody.
-			if zd.Withheld() {
-				lgHandler.Debug("DS query at a withheld zone's apex, parent not hosted", "zone", zd.ZoneName, "qname", qname)
-				m.MsgHdr.Rcode = dns.RcodeServerFailure
-				w.WriteMsg(m)
-				return nil
-			}
+			// That NODATA comes from the zone's copy, so the query handler's
+			// guards on this zone (withheld, expired, no copy, in error) have
+			// already decided whether it may be given.
 			return zd.sendChildApexDSNodata(m, w, qname, msgoptions, kdb)
 		}
 		// We host nothing above qname, and qname is not our apex. Nothing to
@@ -295,24 +296,20 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		return nil
 	}
 
-	// A withheld parent answers this no more than it answers for its own names:
-	// the query handler's guard was on the zone of qname, not on this one.
-	if pzd.Withheld() {
-		lgHandler.Debug("DS query: parent-side zone is withheld", "zone", pzd.ZoneName, "qname", qname)
+	// The parent answers this no more than it answers for its own names: with
+	// no copy, in error, withheld, past SOA EXPIRE, held only for transfer, or
+	// on an agent, it SERVFAILs. The query handler's guards, if any ran, were
+	// on the zone of qname, not on this one.
+	if !pzd.servesQueries() {
+		lgHandler.Debug("DS query: parent-side zone does not answer queries", "zone", pzd.ZoneName, "qname", qname)
 		m.MsgHdr.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(m)
 		return nil
 	}
 
-	// Switch to the parent-side zone: pin ITS snapshot, apex, and signer.
+	// Switch to the parent-side zone: pin ITS snapshot, apex, and signer. A
+	// snapshot gone since servesQueries looked has no apex either.
 	psnap := pzd.publishedSnapshot()
-	if psnap == nil {
-		lgHandler.Error("DS query: parent-side zone has no published snapshot",
-			"zone", pzd.ZoneName, "qname", qname)
-		m.MsgHdr.Rcode = dns.RcodeServerFailure
-		w.WriteMsg(m)
-		return nil
-	}
 	papex := getOwnerFrom(psnap, pzd.ZoneName)
 	if papex == nil {
 		lgHandler.Error("DS query: parent-side zone snapshot missing apex",
@@ -1159,6 +1156,28 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		return ctx.Err()
 	default:
 	}
+
+	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.MsgHdr.Authoritative = true
+	// RFC 6891 §6.1.1: an EDNS query MUST get an OPT in the response. Attach it
+	// once here, up front, so every exit path below (positive answers,
+	// referrals, NXDOMAIN/NODATA, DS, CNAME, SOA, REFUSED — all of which reuse
+	// this m) carries it. No-op for non-EDNS queries. Later EDE/CDE error paths
+	// find and reuse this OPT rather than adding a second one. Downstream UDP
+	// truncation preserves the OPT and re-appends it after trimming.
+	respondEDNS(m, r, msgoptions)
+
+	// 0. Is this a DS query? If so, trap it ASAP: DS is parent-side data, so it
+	// is answered from the nearest hosted ancestor of qname, resolved from the
+	// local Zones map (never the resolver). See handleDSQuery. Ahead of the
+	// key lookup and the snapshot pin below, which are this zone's: at its apex
+	// the parent answers, and this zone may have no copy to pin.
+	if qtype == dns.TypeDS {
+		return zd.handleDSQuery(m, w, qname, msgoptions, kdb)
+	}
+
 	// minimal-responses: BIND-style suppression of authority NS RRset and
 	// apex glue on positive answers. Referrals and NXDOMAIN/NODATA paths are
 	// unaffected (their authority/additional sections are still required).
@@ -1195,18 +1214,6 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		return zd.signRRsetForZone(rrset, qname, msgoptions, kdb, dak)
 	}
 
-	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.MsgHdr.Authoritative = true
-	// RFC 6891 §6.1.1: an EDNS query MUST get an OPT in the response. Attach it
-	// once here, up front, so every exit path below (positive answers,
-	// referrals, NXDOMAIN/NODATA, DS, CNAME, SOA, REFUSED — all of which reuse
-	// this m) carries it. No-op for non-EDNS queries. Later EDE/CDE error paths
-	// find and reuse this OPT rather than adding a second one. Downstream UDP
-	// truncation preserves the OPT and re-appends it after trimming.
-	respondEDNS(m, r, msgoptions)
-
 	// Pin ONE snapshot for the whole response so the answer, authority SOA, NS,
 	// and glue all come from the same serial — no intra-response tearing (C1).
 	snap := zd.publishedSnapshot()
@@ -1240,10 +1247,9 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	}
 
 	// Meta-TYPEs and reserved types (RFC 6895 section 3.1) name nothing a zone
-	// can hold. They are refused here, ahead of the DS trap and the name
-	// lookup, so the answer is the same at a name that exists, one that does
-	// not, a zone cut and a CNAME. ANY, AXFR and IXFR are meta too, and have
-	// paths of their own below.
+	// can hold. They are refused here, ahead of the name lookup, so the answer
+	// is the same at a name that exists, one that does not, a zone cut and a
+	// CNAME. ANY, AXFR and IXFR are meta too, and have paths of their own below.
 	if (core.IsMetaType(qtype) || core.IsReservedType(qtype)) &&
 		qtype != dns.TypeANY && qtype != dns.TypeAXFR && qtype != dns.TypeIXFR {
 		lgHandler.Debug("refusing a meta or reserved qtype", "qname", qname, "qtype", qtype, "zone", zd.ZoneName)
@@ -1254,13 +1260,6 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 	var wildqname string
 	origqname := qname
-
-	// 0. Is this a DS query? If so, trap it ASAP: DS is parent-side data, so it
-	// is answered from the nearest hosted ancestor of qname, resolved from the
-	// local Zones map (never the resolver). See handleDSQuery.
-	if qtype == dns.TypeDS {
-		return zd.handleDSQuery(m, w, qname, msgoptions, kdb)
-	}
 
 	// log.Printf("---> Checking for existence of qname %s", qname)
 	if !nameExistsFrom(snap, qname) {
