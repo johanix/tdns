@@ -496,6 +496,15 @@ file. If any part of it fails, the deltas are **not** dropped:
 the journal is the only other copy of those changes, and a write
 that half-succeeded is exactly when you still need it.
 
+A secondary with a `zonefile:` has its file rewritten after every
+refresh that changed the zone, and that write is treated the same
+way: the journal is anchored to the file, and the deltas the file
+holds are dropped, so a restart from the file replays the rest.
+Two exceptions. An inline-signing secondary on tdns-auth keeps its
+journal, which holds its own CDS, CDNSKEY and CSYNC. And while a
+load has not yet replayed the journal it found — its DNSSEC policy
+did not bind, say — the write leaves the journal as it is.
+
 
 ## 8. Working with the journal
 
