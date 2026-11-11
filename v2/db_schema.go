@@ -50,6 +50,22 @@ validation_failed_at TEXT NOT NULL DEFAULT '',
 UNIQUE (zonename, keyid)
 )`,
 
+	// Child SIG(0) keys the child itself retired: a trusted UPDATE deleted
+	// them from Sig0TrustStore, and no later add of the same key (matched on
+	// algorithm and public key, not the tag) is accepted for that child. See
+	// truststore_tombstone.go. zonename is the canonical (lower-case) name.
+	"Sig0TrustStoreTombstone": `CREATE TABLE IF NOT EXISTS 'Sig0TrustStoreTombstone' (
+id		  INTEGER PRIMARY KEY,
+zonename	  TEXT NOT NULL,
+keyid		  INTEGER NOT NULL,
+algorithm	  INTEGER NOT NULL,
+publickey	  TEXT NOT NULL,
+keyrr		  TEXT NOT NULL,
+deleted_at	  TEXT NOT NULL,
+source		  TEXT NOT NULL DEFAULT '',
+UNIQUE (zonename, algorithm, publickey)
+)`,
+
 	// The Sig0KeyStore should contain both the private and public SIG(0) keys for
 	// each zone that we're managing parent sync for.
 	"Sig0KeyStore": `CREATE TABLE IF NOT EXISTS 'Sig0KeyStore' (

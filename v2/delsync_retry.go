@@ -160,16 +160,19 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 					return true, fmt.Errorf("delegation UPDATE got BADKEY and the parent requires manual SIG(0) bootstrap; complete it and retry: %w", berr)
 				}
 				if errors.Is(berr, errBootstrapAdvertisementLookup) || errors.Is(berr, errBootstrapDeferredToPoll) ||
-					errors.Is(berr, errBootstrapKeyNotServed) {
-					// The re-bootstrap never ran: advertisement lookup failed,
-					// a key-state poll for this key is about to send it, or
-					// the zone's nameservers do not all serve it yet. Leave
-					// the one re-bootstrap unspent and let the next attempt
-					// try again, within the same bound.
+					errors.Is(berr, errBootstrapKeyNotServed) || errors.Is(berr, errBootstrapTransient) {
+					// The re-bootstrap never ran, or the parent's answer to it
+					// is not final: advertisement lookup failed, a key-state
+					// poll for this key is about to send it, the zone's
+					// nameservers do not all serve it yet, or the ceremony
+					// went unanswered, got SERVFAIL, or found the parent still
+					// verifying the key (EDE 514). Leave the one re-bootstrap
+					// unspent and let the next attempt try again, within the
+					// same bound.
 					lgDns.Warn("sendUpdateWithRetry: re-bootstrap deferred", "attempt", attempt, "err", berr)
 					return false, fmt.Errorf("re-bootstrap after BADKEY deferred: %w", berr)
 				}
-				return true, fmt.Errorf("re-bootstrap after BADKEY failed: %v", berr)
+				return true, fmt.Errorf("re-bootstrap after BADKEY failed: %w", berr)
 			}
 			reBootstrapped = true
 			return false, fmt.Errorf("re-bootstrapped after BADKEY, retrying UPDATE")
