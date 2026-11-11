@@ -24,6 +24,7 @@ tdns-cli auth debug sig0 generate [flags]
       --qtype string       qtype of rrset to examine
   -r, --rrtype string      rrtype to use for SIG(0)
   -v, --verbose            verbose output
+      --version            print version and supported algorithms, then exit
   -z, --zone string        zone name
 ```
 
