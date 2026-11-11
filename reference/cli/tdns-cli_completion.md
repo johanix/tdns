@@ -22,12 +22,13 @@ See each sub-command's help for details on how to use the generated script.
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
 ### SEE ALSO
 
-* [tdns-cli](tdns-cli.md)	 - tdns-cli is a tool used to interact with the tdnsd nameserver via API
+* [tdns-cli](tdns-cli.md)	 - tdns-cli is a tool used to interact with the TDNS applications via a mgmt API
 * [tdns-cli completion bash](tdns-cli_completion_bash.md)	 - Generate the autocompletion script for bash
 * [tdns-cli completion fish](tdns-cli_completion_fish.md)	 - Generate the autocompletion script for fish
 * [tdns-cli completion powershell](tdns-cli_completion_powershell.md)	 - Generate the autocompletion script for powershell

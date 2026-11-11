@@ -9,7 +9,8 @@ tdns-cli auth config reload [flags]
 ### Options
 
 ```
-  -h, --help   help for reload
+      --confirm   apply even if the reload would strand a signed zone by a same-name DNSSEC policy algorithm change
+  -h, --help      help for reload
 ```
 
 ### Options inherited from parent commands
@@ -20,6 +21,7 @@ tdns-cli auth config reload [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 

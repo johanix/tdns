@@ -17,6 +17,7 @@ Agent zone management commands
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
@@ -25,6 +26,7 @@ Agent zone management commands
 * [tdns-cli agent](tdns-cli_agent.md)	 - TDNS Agent commands
 * [tdns-cli agent zone dsync](tdns-cli_agent_zone_dsync.md)	 - Prefix command, not useable by itself
 * [tdns-cli agent zone list](tdns-cli_agent_zone_list.md)	 - List configured zones
+* [tdns-cli agent zone parentsync](tdns-cli_agent_zone_parentsync.md)	 - Child-side parent delegation sync commands
 * [tdns-cli agent zone readfake](tdns-cli_agent_zone_readfake.md)	 - Create a fake zone from a compiled in string
 * [tdns-cli agent zone reload](tdns-cli_agent_zone_reload.md)	 - Request re-loading a zone
 * [tdns-cli agent zone update](tdns-cli_agent_zone_update.md)	 - Create and ultimately send a DNS UPDATE msg for zone auth data

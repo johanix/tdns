@@ -1,6 +1,6 @@
 ## tdns-cli agent config reload-zones
 
-Send reload-zones command to tdns-auth
+Send reload-zones command to tdns-agent
 
 ```
 tdns-cli agent config reload-zones [flags]
@@ -9,7 +9,8 @@ tdns-cli agent config reload-zones [flags]
 ### Options
 
 ```
-  -h, --help   help for reload-zones
+      --confirm   apply even if the reload would strand a signed zone by a same-name DNSSEC policy algorithm change
+  -h, --help      help for reload-zones
 ```
 
 ### Options inherited from parent commands
@@ -20,6 +21,7 @@ tdns-cli agent config reload-zones [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
