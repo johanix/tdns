@@ -28,6 +28,7 @@ import (
 //     draft-schlyter-dnssec-jwk Appendix A.4, whose JWK "priv" is the
 //     same seed.
 
+// readRFCKey returns the DER of testdata/rfc9881-mldsa44-<name>.pem.
 func readRFCKey(t *testing.T, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", "rfc9881-mldsa44-"+name+".pem"))
@@ -41,6 +42,7 @@ func readRFCKey(t *testing.T, name string) []byte {
 	return block.Bytes
 }
 
+// rfcSeed returns the seed of RFC 9881's example keys: bytes 0x00..0x1f.
 func rfcSeed() []byte {
 	s := make([]byte, mldsa44.SeedSize)
 	for i := range s {
@@ -49,6 +51,8 @@ func rfcSeed() []byte {
 	return s
 }
 
+// parse decodes der through the PKCS#8 registry and fails the test
+// unless the result is an ML-DSA-44 private key.
 func parse(t *testing.T, der []byte) *mldsa44.PrivateKey {
 	t.Helper()
 	priv, err := dnsalgpkcs8.Parse(der)
@@ -97,6 +101,8 @@ func signs(t *testing.T, sk *mldsa44.PrivateKey) {
 	}
 }
 
+// TestPKCS8RoundTrip: a generated key survives marshal and parse, and
+// marshals to the same bytes again.
 func TestPKCS8RoundTrip(t *testing.T) {
 	priv, err := New().Generate(0)
 	if err != nil {
@@ -321,6 +327,8 @@ func TestJWKDraftVector(t *testing.T) {
 	}
 }
 
+// TestPKCS8MarshalRejectsWrongType: the codec declines a value that is
+// not an ML-DSA-44 key, so the registry can try other codecs.
 func TestPKCS8MarshalRejectsWrongType(t *testing.T) {
 	c := pkcs8Codec{}
 	_, err := c.MarshalPKCS8("not a key")
@@ -329,6 +337,8 @@ func TestPKCS8MarshalRejectsWrongType(t *testing.T) {
 	}
 }
 
+// TestPKCS8ParseRejectsWrongOID: the codec declines a PKCS#8 key whose
+// algorithm OID is not ML-DSA-44.
 func TestPKCS8ParseRejectsWrongOID(t *testing.T) {
 	c := pkcs8Codec{}
 	// Valid ASN.1 PrivateKeyInfo shape with a different OID. The

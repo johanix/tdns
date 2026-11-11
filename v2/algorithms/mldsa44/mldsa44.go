@@ -39,6 +39,9 @@ func New() *Impl { return &Impl{} }
 func (*Impl) Name() string      { return "MLDSA44" }
 func (*Impl) Hash() crypto.Hash { return 0 }
 
+// Generate returns a new ML-DSA-44 private key made from a fresh
+// 32-byte seed, which the key keeps. bits must be 0: the parameter set
+// fixes the key size.
 func (*Impl) Generate(bits int) (crypto.PrivateKey, error) {
 	if bits != 0 {
 		return nil, dns.ErrKeySize
