@@ -414,10 +414,11 @@ The manifest is written either way, but a `--format bind` directory is not one
   v1.3, converted to PEM on the way in. That is how you bring in a single key
   from `dnssec-keygen` or another tool. PKCS#1 (`RSA PRIVATE KEY`), SEC1
   (`EC PRIVATE KEY`) and encrypted PKCS#8 (`ENCRYPTED PRIVATE KEY`) are
-  refused, with an unhelpful "no private key seen"; `openssl pkey` rewrites any
+  refused with an error naming the PEM block type; `openssl pkey` rewrites any
   of them as plain PKCS#8.
 - **`bulk-import`** and pre-load accept PEM only, and refuse anything else with
-  a message pointing at the single-key command. They store the blob verbatim,
+  a message pointing at `bulk-convert` for a directory of BIND-format keys, or
+  the single-key `import` for one key. They store the blob verbatim,
   so accepting a BIND-format key would mean writing a non-PEM value into the
   PEM column — a mistake that would surface only later, as an unsignable zone.
 - **`bulk-convert`** turns a directory of bind9 or Cascade key files into PEM
