@@ -1204,21 +1204,17 @@ func TestStartSigningLooksAtWhatTheZoneServes(t *testing.T) {
 // did not sign: its signatures would run out with nothing to renew them.
 func TestStartSigningPutsTheZoneOnTheRenewalList(t *testing.T) {
 	kdb, _ := roleSetup(t)
-	prev := Conf.Internal.ResignQ
-	q := make(chan ResignRequest, 4)
-	Conf.Internal.ResignQ = q
-	t.Cleanup(func() { Conf.Internal.ResignQ = prev })
 	z := startRoleZone(t, kdb, signedUpstream(t, 40), nil, nil)
+	if z.zd.keepSigned.Load() {
+		t.Fatal("test setup: the relayed zone is on the renewal list before it starts signing")
+	}
 
 	if err := z.zd.StartSigning(context.Background(), 0); err != nil {
 		t.Fatalf("StartSigning: %v", err)
 	}
-	for len(q) > 0 {
-		if req := <-q; req.Zd == z.zd && req.Reason == ResignPeriodic {
-			return
-		}
+	if !z.zd.keepSigned.Load() {
+		t.Fatal("the zone was not registered for periodic re-signing")
 	}
-	t.Fatal("the zone was not registered for periodic re-signing")
 }
 
 // Nothing that takes the zone's lock sees a start half way, or the publish of a
