@@ -811,6 +811,46 @@ func TestAStagedDeferralReachesError(t *testing.T) {
 	}
 }
 
+// An escalated staged run that ends on a refresh proving nothing still logs
+// its end: the WARN does not wait for a confirmation. The run of failures is
+// left as it was, with no recovery line.
+func TestAnUnconfirmedRefreshEndsAnEscalatedStagedDeferral(t *testing.T) {
+	logs := captureRefreshLogs(t)
+	const zone = "staged-unconfirmed.one-error.test."
+	zd := &ZoneData{ZoneName: zone, ZoneType: Secondary}
+	staged := fmt.Errorf("zone %s: %w", zone, ErrRefreshStaged)
+
+	noteRefreshFailure(zd, zone, errors.New("the primary was down"), "zone refresh failed")
+	for i := 1; i <= refreshStagedErrorAfter; i++ {
+		noteRefreshFailure(zd, zone, staged, "zone refresh failed")
+	}
+	escalation := "zone refresh deferred too long; the zone is taking no refreshes"
+	if n := len(logs.withMsg(zone, slog.LevelError, escalation)); n != 1 {
+		t.Fatalf("%d deferrals escalated %d times, want 1", refreshStagedErrorAfter, n)
+	}
+
+	noteRefreshSuccess(zd, zone, false)
+	ends := logs.withMsg(zone, slog.LevelWarn, "zone refresh no longer deferred")
+	if len(ends) != 1 {
+		t.Fatalf("an unconfirmed refresh logged the end of an escalated staged run %d times, want 1", len(ends))
+	}
+	if got, want := ends[0].attrs["deferrals"], fmt.Sprint(refreshStagedErrorAfter); got != want {
+		t.Errorf("the end gave deferrals=%s, want %s", got, want)
+	}
+	if n := len(logs.withMsg(zone, slog.LevelInfo, "zone refresh recovered")); n != 0 {
+		t.Errorf("an unconfirmed refresh logged a recovery %d times", n)
+	}
+	zd.refreshRun.mu.Lock()
+	deferrals, escalated, failures := zd.refreshRun.deferrals, zd.refreshRun.escalated, zd.refreshRun.failures
+	zd.refreshRun.mu.Unlock()
+	if deferrals != 0 || escalated {
+		t.Errorf("the deferral run is still open: deferrals=%d escalated=%v", deferrals, escalated)
+	}
+	if failures != 1 {
+		t.Errorf("the run of failures is %d, want it kept at 1: the refresh proved nothing", failures)
+	}
+}
+
 // A staged deferral is overdue past txHoldLimit whatever its count; an open
 // transaction's only past txHoldAgeCap, never by count.
 func TestDeferralOverdueBounds(t *testing.T) {
