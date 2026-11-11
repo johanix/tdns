@@ -1283,6 +1283,38 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		overlay = zd.applyJournalOverlayLocked(new_zd)
 	}
 
+	// One TTL per RRset, the largest of those that arrived (#996), in a zone
+	// this server is told to modify; a secondary, or a ZONEMD this server does
+	// not compute, is served as received (adoptedTTLsUnify). Here, after the
+	// inbound ZONEMD gate, which digests the TTLs as they arrived, and after
+	// the overlay, whose records join the replacement's RRsets. Before the
+	// working set is built from it, so the signatures carried across a reload,
+	// the restart digest, the refusal of a signed file changed under the
+	// served serial and the IXFR diff all compare unified content with the
+	// unified content already served. An applied delta shares its untouched
+	// owners with the published snapshot: only the ones it touched are walked.
+	var ttlOwners map[string]bool
+	if new_zd.ixfrDerived {
+		ttlOwners = new_zd.ixfrTouched
+		if ttlOwners == nil {
+			ttlOwners = map[string]bool{}
+		}
+	}
+	signsHere := zd.signsItsOwnContent()
+	if unify, why := zd.adoptedTTLsUnify(new_zd.Data); unify {
+		if n := unifyAdoptedTTLs(new_zd.Data, ttlOwners, signsHere); n > 0 {
+			lg.Info("RRsets with differing TTLs were brought to the largest of them",
+				"zone", zd.ZoneName, "rrsets", n)
+		}
+	} else if mixed := mixedTTLRRsets(new_zd.Data, ttlOwners, signsHere); len(mixed) > 0 {
+		n := len(mixed)
+		if n > 10 {
+			mixed = append(mixed[:10:10], "...")
+		}
+		lg.Warn("RRsets with differing TTLs are served as they arrived, against RFC 2181 §5.2",
+			"zone", zd.ZoneName, "why", why, "count", n, "rrsets", mixed)
+	}
+
 	zd.workingSet = snapshotMapFromData(new_zd.Data)
 	zd.wsFromReplacement = true
 	// Whatever was staged before is gone with the working set it was staged
