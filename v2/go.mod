@@ -54,7 +54,7 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-// Pinned at johanix/dns v1.1.72-johanix.4 — provides the pluggable
+// Pinned at johanix/dns v1.1.72-johanix.5 — provides the pluggable
 // Algorithm interface and the registered oots SvcParamKey (12) /
 // dns.SVCBOots. The algorithms it does not implement are registered
 // through that interface: ED448 and ML-DSA-44 by v2/algorithms in every
@@ -65,6 +65,9 @@ require (
 // IPSECKEY, AMTRELAY, APL and SVCB values) keeps its reason through the
 // zone parser instead of reading `dns: : "\n" at line: ...`; errors.Is
 // reaches it.
+// .5 over .4: the server hands a handler a SIG(0)-signed request as
+// received (dns.RawRequester), so SIG(0) is verified over the bytes the
+// sender signed, not over a re-pack (tdns #1028).
 // Every module that requires miekg/dns carries this same replace, which
 // TestEveryLiveModuleUsesTheDNSFork (v2) checks.
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.5
