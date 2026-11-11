@@ -83,8 +83,15 @@ interactive shell.
 | `imrengine.require-dnssec-validation` | `true` | — |
 
 `imrengine.options:` accepts `query-for-transport`,
-`always-query-for-transport`, `query-for-transport-tlsa` and
-`transport-signal-type`. Transport-signal *processing* is always on: signals
+`always-query-for-transport`, `query-for-transport-tlsa`,
+`transport-signal-type` and `qname-minimisation`. `qname-minimisation` takes
+no value. When it is set, a server above the zone that holds the name is asked for a
+shortened form of the name, type A. The original name and type go only to a
+server known to hold the name (RFC 9156). Absent, the resolver
+sends the query as asked. It is left unset in the sample: a copied config then
+matches the resolver tests, and an operator of a standalone tdns-imr opts in.
+
+Transport-signal *processing* is always on: signals
 that arrive in the Additional section are applied whether or not these options
 are set; the options control whether the resolver goes looking for them. A
 strict-privacy query goes looking regardless, for the servers it knows nothing
@@ -280,6 +287,8 @@ imrengine:
       cache-min-ttl:             0      # seconds; floor on cached lifetimes (0 = none)
       zone-state-recheck:        30s    # how long an insecure or indeterminate zone verdict stands
       nsec3-max-iterations:      10     # NSEC3 proofs above this are not judged (RFC 9276)
+      qmin-max-iterations:       10     # probe rounds for one name (RFC 9156); at least 1
+      qmin-one-label:            4      # of those rounds, how many add a single label
 ```
 
 The `address-family` group is what demotes a broken IPv6 (or IPv4) path: once
