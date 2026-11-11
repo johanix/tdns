@@ -29,7 +29,7 @@ require (
 	github.com/gookit/goutil v0.6.15 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/dnssec-algorithms v0.0.0-20261111124215-492ee38c456f // indirect
+	github.com/johanix/dnssec-algorithms v0.0.0-20261111143226-7198849ded4b // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/core v0.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
