@@ -20,7 +20,12 @@ import (
 // successfully validates the update.
 
 // XXX: This should perhaps not be a method of ZoneData, but rather of KeyDB.
-func (zd *ZoneData) ValidateUpdate(ctx context.Context, r *dns.Msg, us *UpdateStatus) error {
+
+// ValidateUpdate verifies the update's SIG(0) signatures. wire is r as the
+// transport received it (DnsUpdateRequest.Wire); the signatures are verified
+// over it. nil means the transport kept nothing, and r is packed again
+// instead, which fails for any sender that compressed names differently.
+func (zd *ZoneData) ValidateUpdate(ctx context.Context, r *dns.Msg, wire []byte, us *UpdateStatus) error {
 	// Fail closed by default. Each branch that successfully verifies a
 	// signature lifts ValidationRcode to RcodeSuccess (or another specific
 	// rcode such as RcodeBadTime for "verified but outside validity
@@ -39,10 +44,13 @@ func (zd *ZoneData) ValidateUpdate(ctx context.Context, r *dns.Msg, us *UpdateSt
 	lgDns.Info("ValidateUpdate: message details", "compress", r.Compress, "id", r.Id, "extra_count", len(r.Extra), "extra_types", extraTypes, "ns_count", len(r.Ns), "question", len(r.Question), "answer", len(r.Answer))
 
 	// SIG(0) verification has to run over the wire bytes of the message
-	// as it was signed. miekg/dns gives us the parsed *dns.Msg and we
-	// re-pack it to obtain those bytes. This round-trip is supposed to
-	// be the identity, but it isn't for §2.5.2 delete-RRset records
-	// (RFC 2136): an Update RR with class ANY and rdlength 0.
+	// as it was signed. The transport hands those over as wire
+	// (requestWire), and they are used as they are. Without them the
+	// parsed message is packed again. That fallback fails for any sender
+	// that compressed names differently from miekg, such as BIND's
+	// nsupdate (tdns #1028). Even for a miekg sender the round-trip is
+	// not the identity for §2.5.2 delete-RRset records (RFC 2136): an
+	// Update RR with class ANY and rdlength 0.
 	//
 	// On unpack, miekg looks at the type byte and constructs the typed
 	// RR (e.g. *dns.DS, *dns.A, *dns.RRSIG) with all rdata fields at
@@ -90,14 +98,18 @@ func (zd *ZoneData) ValidateUpdate(ctx context.Context, r *dns.Msg, us *UpdateSt
 		}
 	}
 
-	msgbuf, err := r.Pack()
-	if err != nil {
-		lgDns.Error("ValidateUpdate: error from msg.Pack()", "err", err)
-		us.ValidationRcode = dns.RcodeFormatError
-		us.RejectionEDE = edns0.EDESig0FormatError
-		return err
+	var err error
+	msgbuf, source := wire, "as received"
+	if msgbuf == nil {
+		if msgbuf, err = r.Pack(); err != nil {
+			lgDns.Error("ValidateUpdate: error from msg.Pack()", "err", err)
+			us.ValidationRcode = dns.RcodeFormatError
+			us.RejectionEDE = edns0.EDESig0FormatError
+			return err
+		}
+		source = "re-packed"
 	}
-	lgDns.Info("ValidateUpdate: packed message", "buflen", len(msgbuf), "first32", fmt.Sprintf("%x", msgbuf[:min(32, len(msgbuf))]))
+	lgDns.Info("ValidateUpdate: message to verify", "source", source, "buflen", len(msgbuf), "first32", fmt.Sprintf("%x", msgbuf[:min(32, len(msgbuf))]))
 
 	if len(r.Extra) == 0 { // there is no signature on the update
 		us.ValidationRcode = dns.RcodeFormatError

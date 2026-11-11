@@ -26,6 +26,7 @@ type DnsHandlerRequest struct {
 type DnsUpdateRequest struct {
 	ResponseWriter dns.ResponseWriter
 	Msg            *dns.Msg
+	Wire           []byte // Msg as received, when the transport kept it (requestWire); SIG(0) is verified over it
 	Qname          string
 	Options        *edns0.MsgOptions
 	Status         *UpdateStatus
@@ -369,7 +370,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	// known" for what is actually FORMERR + a format error — mislabelling a
 	// malformed request as a server-side fault and directing the child at
 	// bootstrapping a key, which does not fix a malformed message.
-	err := zd.ValidateUpdate(ctx, r, dur.Status)
+	err := zd.ValidateUpdate(ctx, r, dur.Wire, dur.Status)
 	if err != nil {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
 		applyValidationFailure(m, dur.Status)

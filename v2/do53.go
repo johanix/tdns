@@ -442,6 +442,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 			dur := DnsUpdateRequest{
 				ResponseWriter: w,
 				Msg:            r,
+				Wire:           requestWire(w),
 				Qname:          qname,
 				Options:        msgoptions,
 				Status:         &UpdateStatus{},

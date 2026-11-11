@@ -279,7 +279,7 @@ func TestAReBootstrapWithinTheCooldownIsRefused(t *testing.T) {
 	reBootstrap := func() (*UpdateStatus, error) {
 		r := ceremonyUpdateFrom(t, zd.ZoneName, key)
 		us := &UpdateStatus{Type: "TRUSTSTORE-UPDATE"}
-		if err := zd.ValidateUpdate(context.Background(), r, us); err != nil {
+		if err := zd.ValidateUpdate(context.Background(), r, nil, us); err != nil {
 			t.Fatalf("ValidateUpdate: %v", err)
 		}
 		return us, zd.TrustUpdate(r, us)

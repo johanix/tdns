@@ -153,7 +153,7 @@ func handleDoQStream(ctx context.Context, stream *quic.Stream, conn *quic.Conn, 
 	}
 
 	// Create a response writer for DoQ with both stream and connection
-	rw := &doqResponseWriter{stream: stream, conn: conn, tsig: msg.IsTsig() != nil}
+	rw := &doqResponseWriter{stream: stream, conn: conn, tsig: msg.IsTsig() != nil, wire: msgBuf}
 
 	lgDns.Debug("DoQ: received message", "opcode", dns.OpcodeToString[msg.Opcode], "qname", msg.Question[0].Name, "rrtype", dns.TypeToString[msg.Question[0].Qtype])
 
@@ -201,9 +201,14 @@ func readExactWithContext(ctx context.Context, s *quic.Stream, buf []byte) error
 type doqResponseWriter struct {
 	stream *quic.Stream
 	conn   *quic.Conn
-	wrote  bool // Add this field to track if we've written
-	tsig   bool // the request carried a TSIG RR; see TsigStatus
+	wrote  bool   // Add this field to track if we've written
+	tsig   bool   // the request carried a TSIG RR; see TsigStatus
+	wire   []byte // the request as received (requestWire)
 }
+
+// RawRequest returns the request as received, for SIG(0) verification
+// (requestWire).
+func (w *doqResponseWriter) RawRequest() []byte { return w.wire }
 
 func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
 	if w.wrote {
