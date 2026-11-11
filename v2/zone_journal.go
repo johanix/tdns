@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -72,6 +73,12 @@ type ZoneJournalInfo struct {
 	// restart, and Replayed does not apply.
 	Overlay bool
 
+	// FromTransfer is true when the zone's content came by transfer rather
+	// than from its file. FileSerial is then the serial received, and a
+	// journal that does not start there is discarded by a load by transfer
+	// (#919).
+	FromTransfer bool
+
 	// PersistenceActive is false when the deployment-wide kill-switch
 	// (journal: active: false) is set. A server quietly not persisting is the
 	// thing this whole subsystem exists to prevent, so it is reported rather
@@ -113,6 +120,7 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 	served := zd.CurrentSerial
 	replayed := zd.deltasReplayed
 	overlay := zd.isOverlayZoneLocked()
+	fromTransfer := zd.contentFromTransfer
 	zd.mu.Unlock()
 
 	info := &ZoneJournalInfo{
@@ -124,6 +132,7 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 		Replayed:          replayed,
 		Replayable:        true,
 		Overlay:           overlay,
+		FromTransfer:      fromTransfer,
 		PersistenceActive: JournalActive(),
 	}
 
@@ -161,7 +170,16 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 		// answer here cannot drift away from what actually happens at startup.
 		// An overlay zone's load does not run it: its journal is applied to
 		// every full transfer instead, so it stays in effect across a restart.
-		if !overlay {
+		// A transferred zone whose journal predates the copy it received has
+		// it discarded at a load by transfer, not refused
+		// (discardJournalBehindTransfer).
+		switch {
+		case overlay:
+			// Applied to every full transfer; there is no chain to check.
+		case journalBehindTransfer(fromTransfer, deltas, fileSerial):
+			info.Replayable = false
+			info.Diagnosis = journalBehindTransferDiagnosis(zd.ZoneName, deltas, fileSerial)
+		default:
 			if err := validateDeltaChain(zd.ZoneName, deltas, fileSerial); err != nil {
 				info.Replayable = false
 				info.Diagnosis = err.Error()
@@ -336,6 +354,85 @@ func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
 		"remaining", res.Remaining)
 
 	return res, nil
+}
+
+// journalBehindTransfer reports whether a zone whose content came by transfer
+// holds a journal that does not chain from the serial it received (#919).
+//
+// Such a journal was recorded against the upstream's copy at an older serial,
+// and that copy is gone. A load by transfer is a full transfer: it replaces
+// the zone, and a secondary's local changes do not survive one. Only an
+// overlay zone's own records do (journal_overlay.go), and an overlay zone
+// never gets here. Replaying the journal applies changes to content they were
+// not computed against. Refusing it, as a file-backed zone's journal is
+// refused, reports an edited zone file that may not exist.
+func journalBehindTransfer(fromTransfer bool, deltas []ZoneDeltaRecord, received uint32) bool {
+	return fromTransfer && len(deltas) > 0 && deltas[0].FromSerial != received
+}
+
+// journalBehindTransferDiagnosis says why such a journal will not replay.
+func journalBehindTransferDiagnosis(zone string, deltas []ZoneDeltaRecord, received uint32) string {
+	return fmt.Sprintf("zone %s: the zone was transferred at serial %d, and its persisted deltas"+
+		" start at serial %d: they were recorded against an older copy from the upstream."+
+		" A full transfer does not keep this server's local changes, so a load by"+
+		" transfer discards them", zone, received, deltas[0].FromSerial)
+}
+
+// discardJournalBehindTransfer discards the journal of a zone whose content
+// came by transfer when the journal does not chain from the serial received.
+// It reports whether the journal was such a journal, and an error if it could
+// not be discarded.
+//
+// Discarded, not kept with a warning. A journal that does not start at the
+// received serial can never replay, since the upstream's serial only moves
+// forward. Every change recorded after it chains from its tail, so keeping it
+// would lose those changes at the next restart too, even with an upstream
+// that has not moved. The warning would also come back at every restart until
+// someone purged the journal by hand.
+//
+// Through JournalPurge, so nothing is dropped silently: a zone with a file
+// gets the .purged artefact beside it, and a zone without one gets the
+// discarded instructions in the log.
+func (zd *ZoneData) discardJournalBehindTransfer() (bool, error) {
+	if zd == nil || zd.KeyDB == nil || zd.KeyDB.DB == nil {
+		return false, nil
+	}
+	zd.mu.Lock()
+	fromTransfer, received := zd.contentFromTransfer, zd.fileSerial
+	zd.mu.Unlock()
+	if !fromTransfer {
+		return false, nil
+	}
+
+	deltas, err := zd.KeyDB.LoadZoneDeltas(zd.ZoneName)
+	if err != nil {
+		// The replay reads the same journal and reports the error.
+		return false, nil
+	}
+	if !journalBehindTransfer(fromTransfer, deltas, received) {
+		return false, nil
+	}
+
+	res, err := zd.JournalPurge(true)
+	if err != nil {
+		return true, err
+	}
+
+	logArgs := []any{"zone", zd.ZoneName, "received_serial", received,
+		"journal_from_serial", deltas[0].FromSerial, "deltas", res.Deltas,
+		"records", len(res.Instructions)}
+	if res.Artefact != "" {
+		logArgs = append(logArgs, "saved_to", res.Artefact)
+	} else {
+		var buf bytes.Buffer
+		if werr := WriteUpdateInstructions(&buf, nil, res.Instructions); werr == nil {
+			logArgs = append(logArgs, "discarded", strings.TrimSpace(buf.String()))
+		}
+	}
+	lg.Warn("the zone was transferred from an upstream that has moved on since its persisted"+
+		" deltas were recorded; a full transfer does not keep this server's local changes,"+
+		" so the deltas were discarded", logArgs...)
+	return true, nil
 }
 
 // JournalTruncate drops the journal's tail, keeping the chain through serial.
