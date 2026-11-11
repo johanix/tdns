@@ -210,3 +210,82 @@ func TestAZoneIsNotRenewedOnItsOptionsAlone(t *testing.T) {
 		t.Error("a zone that never registered and owes nothing is on the watchlist")
 	}
 }
+
+// A reload that turns signing on for a zone that is already loaded signs it
+// through a policy apply, and no first load runs to register it. The apply
+// registers it.
+func TestAReloadThatTurnsOnSigningPutsTheZoneOnTheWatchlist(t *testing.T) {
+	withAppType(t, AppTypeAuth)
+	kdb := newTestKeyDB(t)
+	withLivePolicies(t, map[string]DnssecPolicy{"base": kskzsk(dns.ED25519, dns.ED25519)})
+	zone := algZone + "\t3600\tIN\tSOA\tns." + algZone + " hostmaster." + algZone + " 1 7200 1800 604800 7200\n" +
+		algZone + "\t3600\tIN\tNS\tns." + algZone + "\n"
+	zd := testZone(t, algZone, zone) // loaded, unsigned, not on the watchlist
+	zd.ZoneType = Primary
+	zd.KeyDB = kdb
+	registerZones(t, zd)
+
+	// The reload: signing on in the zone's options, then the policy sync the
+	// config-bearing refresh of an existing zone runs (refreshengine.go).
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	if err := syncZoneDnssecPolicyFromConfig(context.Background(), zd, kdb, &Config{}, "base"); err != nil {
+		t.Fatalf("policy sync: %v", err)
+	}
+	if zd.DnssecPolicyName != "base" {
+		t.Fatal("test setup: the policy did not bind")
+	}
+	if resignCandidates(Zones.Items())[zd.ZoneName] != zd {
+		t.Error("the reload signed the zone and left it off the watchlist; nothing would renew its signatures")
+	}
+}
+
+// ModifyDynamicZone leaves a new ZoneData that has no first load of its own.
+// When a later policy apply signs it, the apply registers it; nothing else
+// does.
+func TestAPolicyApplyPutsAModifiedZoneOnTheWatchlist(t *testing.T) {
+	withAppType(t, AppTypeAuth)
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, ch := newTestConfigForCores(t)
+	const name = "modsig.example."
+	in := DynamicZoneInput{Name: name, Type: Secondary,
+		Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
+		Options:   map[ZoneOption]bool{OptInlineSigning: true}}
+	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	<-ch
+	mod := in
+	mod.Primaries = []PeerConf{{Addr: "192.0.2.9:53", Key: NOKEY}}
+	if _, err := conf.ModifyDynamicZone(context.Background(), mod); err != nil {
+		t.Fatalf("modify: %v", err)
+	}
+	<-ch
+	repl, _ := Zones.Get(name)
+	if !repl.Options[OptInlineSigning] {
+		t.Fatal("test setup: the replacement does not carry inline-signing")
+	}
+	if _, ok := resignCandidates(Zones.Items())[name]; ok {
+		t.Fatal("test setup: the replacement is on the watchlist before anything signed it")
+	}
+
+	// What the forced refresh after the modify transfers.
+	zone := name + "\t3600\tIN\tSOA\tns." + name + " hostmaster." + name + " 1 7200 1800 604800 7200\n" +
+		name + "\t3600\tIN\tNS\tns." + name + "\n"
+	if _, _, err := repl.ReadZoneData(zone, true); err != nil {
+		t.Fatalf("ReadZoneData: %v", err)
+	}
+	repl.Ready = true
+	repl.InstallInitialSnapshot()
+	t.Cleanup(repl.stopPublisher)
+	kdb := newTestKeyDB(t)
+	repl.KeyDB = kdb
+
+	pol := kskzsk(dns.ED25519, dns.ED25519)
+	if _, err := applyZonePolicyTransactional(context.Background(), repl, kdb, &pol, "base", PolicyApplySourceCommand); err != nil {
+		t.Fatalf("policy apply: %v", err)
+	}
+	if resignCandidates(Zones.Items())[name] != repl {
+		t.Error("a policy apply signed the modified zone and left it off the watchlist; nothing would renew its signatures")
+	}
+}

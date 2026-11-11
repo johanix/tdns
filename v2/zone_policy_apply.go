@@ -235,6 +235,11 @@ func applyZonePolicyTransactionalLocked(
 		zd.mu.Unlock()
 		return 0, fmt.Errorf("re-sign zone %s under policy %q: %w", zd.ZoneName, newName, err)
 	}
+	// Signed here, so it needs renewing. This is how a zone that is already
+	// loaded starts signing -- a reload that turns signing on, or an apply to
+	// the new ZoneData a modify leaves -- and no first load registers it then
+	// (#1033). Before the writes below: their failure does not undo the signing.
+	zd.registerForPeriodicResign()
 	// Bound and signed under newPol: rows written under the old policy's DS
 	// model carry its ds; re-resolve them if the model changed.
 	reconcileDsAfterBind(kdb, zd, oldPol)

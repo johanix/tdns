@@ -104,6 +104,7 @@ What B changes:
   goes away, and so do the error branches at R1–R4.
 - An exported setter without the gates (e.g. `zd.KeepRenewed()`) is for tdns-mp's identity zone (R5).
   `registerForPeriodicResign` becomes "gates, then `KeepRenewed()`".
+- A policy apply that signs the zone (`applyZonePolicyTransactionalLocked`) registers it too, in the checked form. That is how a zone already loaded starts signing: a reload that turns signing on, or a later apply to the new ZoneData a `ModifyDynamicZone` leaves. No first load registers either of them (added in review).
 - `ResignPeriodic` and its `case` go away. The `ResignKeyStateChanged` branch sets `keepSigned`, which
   keeps today's add-to-watchlist. `ResignQ` then carries only key-state requests. Those are deduplicated
   per zone (`resignQueued`), and when one is dropped `resignPending` covers it, so 10 slots are enough.
