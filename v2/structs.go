@@ -821,9 +821,12 @@ type UpdatePolicyConf struct {
 		TTL     uint32 `yaml:"ttl"`
 	}
 	Zone struct {
-		Type    string // "selfsub" | "self" | "sub" | ...
+		Type    string // "selfsub" | "self" | "none" (SIG(0) principals)
 		RRtypes []string
 		TTL     uint32 `yaml:"ttl"`
+		// Tsig is the zone's TSIG grants: what each TSIG key may change in
+		// this zone over RFC 2136 UPDATE. See tsig_update_policy.go.
+		Tsig []TsigGrantConf `yaml:"tsig" mapstructure:"tsig"`
 	}
 	Validate bool
 }
@@ -831,6 +834,9 @@ type UpdatePolicy struct {
 	Child    UpdatePolicyDetail
 	Zone     UpdatePolicyDetail
 	Validate bool
+	// TsigGrants is updatepolicy.zone.tsig, parsed. Empty means no TSIG key
+	// may change the zone.
+	TsigGrants []TsigGrant
 }
 
 type UpdatePolicyDetail struct {
@@ -1214,8 +1220,13 @@ type ZoneRefresher struct {
 	// downstreams => deny, empty allow-notify => primaries) instead of keeping
 	// stale permissions.
 	ConfigUpdate bool
-	ZoneStore    ZoneStore // 1=xfr, 2=map
-	Zonefile     string
+	// UpdatePolicySet marks a refresher whose UpdatePolicy is the zone's
+	// activated policy (ParseZones, a persisted dynamic primary), which then
+	// replaces the zone's even when it is empty. ConfigUpdate cannot mean
+	// this: a refresher can be config-bearing and carry no policy at all.
+	UpdatePolicySet bool
+	ZoneStore       ZoneStore // 1=xfr, 2=map
+	Zonefile        string
 	// Template propagates the config-template name of a dynamic zone to the
 	// ZoneData built by the RefreshEngine (copied to zd.Template), so a later
 	// persist re-serializes it. Empty for template-less zones.
@@ -1244,8 +1255,8 @@ type ZoneRefresher struct {
 	NotifyRetryInterval time.Duration
 	MultiSigner         string
 	Force               bool // force refresh, ignoring SOA serial
-	Wait        bool // wait for refresh to complete before responding
-	Response    chan RefresherResponse
+	Wait                bool // wait for refresh to complete before responding
+	Response            chan RefresherResponse
 }
 
 type RefresherResponse struct {

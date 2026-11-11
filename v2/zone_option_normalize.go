@@ -55,6 +55,10 @@ var originationOptions = []ZoneOption{
 	// around the MUST-NOT-MODIFY invariant that allow-updates already enforces
 	// for the DDNS channel.
 	OptAllowApiUpdates,
+	// allow-tsig-updates admits TSIG-authorized DDNS, the same channel as
+	// allow-updates with another credential, and is origination for the same
+	// reason.
+	OptAllowTsigUpdates,
 	// add-transport-signal is NOT here (Amendment 1 of this design, 2026-10-04):
 	// on a secondary that may not originate content it means "serve a signal
 	// for this zone's NS names", never "store one". The storing is gated in

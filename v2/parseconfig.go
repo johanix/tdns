@@ -1624,6 +1624,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Zonefile:         zconf.Zonefile,
 				Options:          options,
 				UpdatePolicy:     policy,
+				UpdatePolicySet:  true,
 				DelegationPolicy: dpol,
 				DnssecPolicy:     zconf.DnssecPolicy,
 				// Always carried (empty == inherit the global), so a config
@@ -1823,6 +1824,24 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 	if zoneTTL == 0 {
 		zoneTTL = 120
 	}
+
+	tsigGrants, err := parseTsigGrants(zconf.Name, zconf.UpdatePolicy.Zone.Tsig)
+	if err != nil {
+		return UpdatePolicy{}, err
+	}
+	// Grants and the admission switch each do nothing without the other. Say
+	// so, without changing either: refusing to load the zone over it would be
+	// worse than a zone that refuses TSIG updates, which is what both halves
+	// alone amount to.
+	switch {
+	case len(tsigGrants) > 0 && !options[OptAllowTsigUpdates]:
+		lgConfig.Warn("updatepolicy.zone.tsig has grants but allow-tsig-updates is not set: no TSIG update is accepted",
+			"zone", zconf.Name, "grants", len(tsigGrants))
+	case len(tsigGrants) == 0 && options[OptAllowTsigUpdates]:
+		lgConfig.Warn("allow-tsig-updates is set but updatepolicy.zone.tsig has no grants: every TSIG update is refused",
+			"zone", zconf.Name)
+	}
+
 	return UpdatePolicy{
 		Child: UpdatePolicyDetail{
 			Type:    zconf.UpdatePolicy.Child.Type,
@@ -1834,6 +1853,7 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 			RRtypes: zonerrtypes,
 			TTL:     zoneTTL,
 		},
+		TsigGrants: tsigGrants,
 	}, nil
 }
 

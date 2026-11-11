@@ -482,9 +482,17 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 			// Backward compatibility: If DnsUpdateQ channel is provided, route UPDATEs there
 			// (This is the old way, kept for backward compatibility)
 			if dnsupdateq != nil {
-				// A DNS Update may trigger time consuming outbound queries
-				dnsupdateq <- dur
-				// Not waiting for a result
+				// The UPDATE is processed and answered by UpdateResponder, on
+				// another goroutine and often after the change has been
+				// published. This handler waits for that answer before it
+				// returns, because the transport acts on its return: a
+				// TCP/DoT server starts its idle timer and closes the
+				// connection when it runs out, and DoH sends whatever its
+				// buffer holds. Returning at once lost every answer later than
+				// the idle timeout. See handOverAndWaitForAnswer.
+				aw := newAnswerSignalWriter(dur.ResponseWriter)
+				dur.ResponseWriter = aw
+				handOverAndWaitForAnswer(ctx, dnsupdateq, dur, aw, qname)
 				return
 			}
 
