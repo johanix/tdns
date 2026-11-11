@@ -11,7 +11,7 @@ replace (
 )
 
 require (
-	github.com/johanix/dnssec-algorithms v0.0.0-20261111124107-4de822e351e8
+	github.com/johanix/dnssec-algorithms v0.0.0-20261111124215-492ee38c456f
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/externaldb v0.0.0-00010101000000-000000000000
 	github.com/mattn/go-sqlite3 v1.14.52

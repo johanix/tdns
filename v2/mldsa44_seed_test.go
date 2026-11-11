@@ -7,11 +7,14 @@
 package tdns
 
 import (
+	"bytes"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/johanix/dnssec-algorithms/mldsakey"
 	"github.com/miekg/dns"
 )
 
@@ -44,6 +47,10 @@ func TestMLDSA44RFC9881KeysLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rfcSeed := make([]byte, mldsakey.SeedSize)
+	for i := range rfcSeed {
+		rfcSeed[i] = byte(i)
+	}
 
 	for _, form := range []string{"seed", "expanded", "both"} {
 		t.Run(form, func(t *testing.T) {
@@ -70,11 +77,57 @@ func TestMLDSA44RFC9881KeysLoad(t *testing.T) {
 			if err := sig.Verify(key, []dns.RR{txt}); err != nil {
 				t.Fatalf("signature does not verify against the A.4 DNSKEY: %v", err)
 			}
+
+			// The read path re-encodes the key (PrepareKeyCache). A key
+			// that came with its seed must still have it.
+			block, _ := pem.Decode([]byte(pkc.PrivateKeyPEM))
+			if block == nil {
+				t.Fatal("key cache has no PEM")
+			}
+			seed, ok, err := mldsakey.Seed(block.Bytes)
+			if err != nil {
+				t.Fatalf("mldsakey.Seed on the re-encoded key: %v", err)
+			}
+			if wantSeed := form != "expanded"; ok != wantSeed {
+				t.Errorf("re-encoded key has a seed: %v, want %v", ok, wantSeed)
+			}
+			if ok && !bytes.Equal(seed, rfcSeed) {
+				t.Errorf("re-encoded key has seed %x, want %x", seed, rfcSeed)
+			}
 		})
 	}
 
 	// RFC 9881 Appendix C.4's first key: both form, halves disagree.
 	if _, _, err := PrivateKeyCacheFromDB(mldsa44Testdata(t, "rfc9881-mldsa44-inconsistent-1.pem"), "MLDSA44", dnskeyStr); err == nil {
 		t.Error("a both-form key whose seed and expanded key disagree was loaded")
+	}
+}
+
+// TestMLDSA44KeystoreGenerateKeepsSeed: a key tdns generates into its
+// keystore is stored with its seed, so it can later be exported in a
+// seed-only format such as JWK.
+func TestMLDSA44KeystoreGenerateKeepsSeed(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	const zone = "mldsa44.example."
+	if _, _, err := kdb.GenerateKeypair(zone, "test", DnskeyStateActive, dns.TypeDNSKEY, 18, "KSK", nil); err != nil {
+		t.Fatalf("GenerateKeypair: %v", err)
+	}
+	dak, err := kdb.GetDnssecKeys(zone, DnskeyStateActive)
+	if err != nil {
+		t.Fatalf("GetDnssecKeys: %v", err)
+	}
+	if len(dak.KSKs) != 1 {
+		t.Fatalf("got %d KSKs, want 1", len(dak.KSKs))
+	}
+	block, _ := pem.Decode([]byte(dak.KSKs[0].PrivateKeyPEM))
+	if block == nil {
+		t.Fatal("stored key is not PEM")
+	}
+	k, err := mldsakey.Parse(block.Bytes)
+	if err != nil {
+		t.Fatalf("mldsakey.Parse: %v", err)
+	}
+	if k.Form != mldsakey.FormSeed {
+		t.Errorf("generated key is stored in %s form, want seed", k.Form)
 	}
 }

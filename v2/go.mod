@@ -13,7 +13,7 @@ require (
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
-	github.com/johanix/dnssec-algorithms v0.0.0-20261111124107-4de822e351e8
+	github.com/johanix/dnssec-algorithms v0.0.0-20261111124215-492ee38c456f
 	github.com/johanix/tdns/v2/cache v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/core v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000

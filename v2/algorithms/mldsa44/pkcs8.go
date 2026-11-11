@@ -3,7 +3,6 @@ package mldsa44
 import (
 	"crypto"
 	"crypto/subtle"
-	"encoding/asn1"
 	"fmt"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
@@ -14,36 +13,22 @@ import (
 
 var params = mldsakey.MLDSA44
 
-// privateKeyInfo is the pre-RFC 9881 layout this codec still writes:
-// CIRCL's 2560-byte packed expanded key straight in the privateKey
-// OCTET STRING, no inner wrapping.
-type privateKeyInfo struct {
-	Version    int
-	Algo       algorithmIdentifier
-	PrivateKey []byte
-}
-
-type algorithmIdentifier struct {
-	Algorithm  asn1.ObjectIdentifier
-	Parameters asn1.RawValue `asn1:"optional"`
-}
-
 type pkcs8Codec struct{}
 
+// MarshalPKCS8 writes RFC 9881's seed form when the key still has its
+// seed: every key Generate makes, and every key read from the seed or
+// both form. A key read from the expandedKey form, the legacy layout
+// or the BIND private-key format has no seed, and is written in the
+// expandedKey form.
 func (pkcs8Codec) MarshalPKCS8(priv crypto.PrivateKey) ([]byte, error) {
 	sk, ok := priv.(*mldsa44.PrivateKey)
 	if !ok {
 		return nil, dnsalgpkcs8.ErrUnsupported
 	}
-	skBytes, err := sk.MarshalBinary()
-	if err != nil {
-		return nil, err
+	if seed := sk.Seed(); seed != nil {
+		return mldsakey.MarshalSeed(params, seed)
 	}
-	return asn1.Marshal(privateKeyInfo{
-		Version:    0,
-		Algo:       algorithmIdentifier{Algorithm: params.OID},
-		PrivateKey: skBytes,
-	})
+	return mldsakey.MarshalExpanded(params, sk.Bytes())
 }
 
 // ParsePKCS8 reads all three RFC 9881 forms (seed, expandedKey, both)

@@ -62,10 +62,18 @@ func parse(t *testing.T, der []byte) *mldsa44.PrivateKey {
 	return sk
 }
 
-// legacyDER is the pre-RFC 9881 layout: the raw expanded key in the
-// privateKey OCTET STRING.
+// legacyDER is the pre-RFC 9881 layout earlier releases wrote: the raw
+// expanded key in the privateKey OCTET STRING.
 func legacyDER(t *testing.T, sk *mldsa44.PrivateKey) []byte {
 	t.Helper()
+	type algorithmIdentifier struct {
+		Algorithm asn1.ObjectIdentifier
+	}
+	type privateKeyInfo struct {
+		Version    int
+		Algo       algorithmIdentifier
+		PrivateKey []byte
+	}
 	der, err := asn1.Marshal(privateKeyInfo{
 		Algo:       algorithmIdentifier{Algorithm: params.OID},
 		PrivateKey: sk.Bytes(),
@@ -113,6 +121,66 @@ func TestPKCS8RoundTrip(t *testing.T) {
 	}
 	if !bytes.Equal(der, der2) {
 		t.Error("re-marshaled DER differs from original")
+	}
+}
+
+// TestGenerateKeepsSeed: a generated key keeps its seed, and is
+// stored in RFC 9881's seed form.
+func TestGenerateKeepsSeed(t *testing.T) {
+	priv, err := New().Generate(0)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	sk := priv.(*mldsa44.PrivateKey)
+	if len(sk.Seed()) != mldsa44.SeedSize {
+		t.Fatalf("generated key has no seed")
+	}
+	der, err := dnsalgpkcs8.Marshal(sk)
+	if err != nil {
+		t.Fatalf("pkcs8.Marshal: %v", err)
+	}
+	k, err := mldsakey.Parse(der)
+	if err != nil {
+		t.Fatalf("mldsakey.Parse: %v", err)
+	}
+	if k.Form != mldsakey.FormSeed {
+		t.Errorf("stored in %s form, want seed", k.Form)
+	}
+	seed, ok, err := mldsakey.Seed(der)
+	if err != nil || !ok || !bytes.Equal(seed, sk.Seed()) {
+		t.Errorf("mldsakey.Seed: %x, %v, %v; want the generated seed", seed, ok, err)
+	}
+	signs(t, parse(t, der))
+}
+
+// TestMarshalForms: what each kind of loaded key is written as. RFC
+// 9881's example keys are re-marshaled byte for byte.
+func TestMarshalForms(t *testing.T) {
+	for _, tc := range []struct {
+		in, out string
+	}{
+		{"seed", "seed"},
+		{"both", "seed"},
+		{"expanded", "expanded"},
+	} {
+		der, err := dnsalgpkcs8.Marshal(parse(t, readRFCKey(t, tc.in)))
+		if err != nil {
+			t.Fatalf("%s: pkcs8.Marshal: %v", tc.in, err)
+		}
+		if !bytes.Equal(der, readRFCKey(t, tc.out)) {
+			t.Errorf("a key read from the %s form is not written as the RFC's %s form", tc.in, tc.out)
+		}
+	}
+
+	// A legacy key has no seed: it is written in the standard
+	// expandedKey form, not in the legacy layout.
+	legacy := parse(t, legacyDER(t, parse(t, readRFCKey(t, "expanded"))))
+	der, err := dnsalgpkcs8.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("legacy: pkcs8.Marshal: %v", err)
+	}
+	if !bytes.Equal(der, readRFCKey(t, "expanded")) {
+		t.Error("a legacy key is not written in the RFC's expandedKey form")
 	}
 }
 
