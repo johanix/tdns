@@ -269,15 +269,7 @@ func TestAPolicyApplyPutsAModifiedZoneOnTheWatchlist(t *testing.T) {
 		t.Fatal("test setup: the replacement is on the watchlist before anything signed it")
 	}
 
-	// What the forced refresh after the modify transfers.
-	zone := name + "\t3600\tIN\tSOA\tns." + name + " hostmaster." + name + " 1 7200 1800 604800 7200\n" +
-		name + "\t3600\tIN\tNS\tns." + name + "\n"
-	if _, _, err := repl.ReadZoneData(zone, true); err != nil {
-		t.Fatalf("ReadZoneData: %v", err)
-	}
-	repl.Ready = true
-	repl.InstallInitialSnapshot()
-	t.Cleanup(repl.stopPublisher)
+	loadAsTransferred(t, repl) // what the forced refresh after the modify transfers
 	kdb := newTestKeyDB(t)
 	repl.KeyDB = kdb
 
@@ -287,5 +279,106 @@ func TestAPolicyApplyPutsAModifiedZoneOnTheWatchlist(t *testing.T) {
 	}
 	if resignCandidates(Zones.Items())[name] != repl {
 		t.Error("a policy apply signed the modified zone and left it off the watchlist; nothing would renew its signatures")
+	}
+}
+
+// loadAsTransferred gives a dynamic secondary the content its first transfer
+// would: an unsigned SOA and NS, published.
+func loadAsTransferred(t *testing.T, zd *ZoneData) {
+	t.Helper()
+	name := zd.ZoneName
+	zone := name + "\t3600\tIN\tSOA\tns." + name + " hostmaster." + name + " 1 7200 1800 604800 7200\n" +
+		name + "\t3600\tIN\tNS\tns." + name + "\n"
+	if _, _, err := zd.ReadZoneData(zone, true); err != nil {
+		t.Fatalf("ReadZoneData: %v", err)
+	}
+	zd.Ready = true
+	zd.InstallInitialSnapshot()
+	t.Cleanup(zd.stopPublisher)
+}
+
+// A ModifyDynamicZone replacement keeps the zone's applied-policy row, which is
+// keyed by name. The next config-bearing sync finds it matching intent and only
+// rebinds the policy onto the new ZoneData (Branch 1): no re-sign, and no first
+// load to register the zone. The publish after it signs, so the rebind has to
+// register it.
+func TestASyncThatRebindsAModifiedZonePutsItOnTheWatchlist(t *testing.T) {
+	withAppType(t, AppTypeAuth)
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	kdb := newTestKeyDB(t)
+	withLivePolicies(t, map[string]DnssecPolicy{"base": kskzsk(dns.ED25519, dns.ED25519)})
+	conf, ch := newTestConfigForCores(t)
+	const name = "rebind.example."
+	in := DynamicZoneInput{Name: name, Type: Secondary,
+		Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
+		Options:   map[ZoneOption]bool{OptInlineSigning: true}}
+	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	<-ch
+	old, _ := Zones.Get(name)
+	loadAsTransferred(t, old)
+	old.KeyDB = kdb
+	// Signed under "base" before the modify, which writes the applied row.
+	if err := syncZoneDnssecPolicyFromConfig(context.Background(), old, kdb, conf, "base"); err != nil {
+		t.Fatalf("policy sync before the modify: %v", err)
+	}
+
+	mod := in
+	mod.Primaries = []PeerConf{{Addr: "192.0.2.9:53", Key: NOKEY}}
+	if _, err := conf.ModifyDynamicZone(context.Background(), mod); err != nil {
+		t.Fatalf("modify: %v", err)
+	}
+	<-ch
+	repl, _ := Zones.Get(name)
+	if repl == old {
+		t.Fatal("test setup: the modify did not replace the ZoneData")
+	}
+	if _, ok := resignCandidates(Zones.Items())[name]; ok {
+		t.Fatal("test setup: the replacement is on the watchlist before its policy sync")
+	}
+	loadAsTransferred(t, repl)
+	repl.KeyDB = kdb
+
+	if err := syncZoneDnssecPolicyFromConfig(context.Background(), repl, kdb, conf, "base"); err != nil {
+		t.Fatalf("policy sync after the modify: %v", err)
+	}
+	if repl.DnssecPolicyName != "base" {
+		t.Fatal("test setup: the sync did not bind the policy")
+	}
+	if soa := getRRsetFrom(repl.publishedSnapshot(), name, dns.TypeSOA); soa != nil && len(soa.RRSIGs) > 0 {
+		t.Fatal("test setup: the sync signed the replacement; this test is for the rebind that does not")
+	}
+	if resignCandidates(Zones.Items())[name] != repl {
+		t.Error("the sync bound a policy to the modified zone, whose next publish signs it, and left it off the watchlist")
+	}
+}
+
+// A reload that finds a zone already signed under intent, with no applied row,
+// backfills: it binds without a re-sign. At a first load OnFirstLoad registers
+// the zone afterwards. A reload has no first load, so the backfill must.
+func TestAReloadThatBackfillsPutsTheZoneOnTheWatchlist(t *testing.T) {
+	withAppType(t, AppTypeAuth)
+	kdb := newTestKeyDB(t)
+	withLivePolicies(t, map[string]DnssecPolicy{"base": kskzsk(dns.ED25519, dns.ED25519)})
+	zd := readySignedApexZone(t, algZone, dns.ED25519)
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	zd.ZoneType = Primary
+	zd.KeyDB = kdb
+	if _, _, err := kdb.GenerateKeypair(algZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
+		t.Fatalf("KSK: %v", err)
+	}
+	genZSK(t, kdb, DnskeyStateActive, dns.ED25519)
+	registerZones(t, zd)
+
+	if err := syncZoneDnssecPolicyFromConfig(context.Background(), zd, kdb, &Config{}, "base"); err != nil {
+		t.Fatalf("policy sync: %v", err)
+	}
+	if name, _, ok, err := GetZoneAppliedPolicy(kdb, algZone); err != nil || !ok || name != "base" {
+		t.Fatalf("test setup: applied (%q,%v,%v), want a backfill of base", name, ok, err)
+	}
+	if resignCandidates(Zones.Items())[algZone] != zd {
+		t.Error("the reload backfilled a zone that signs here and left it off the watchlist")
 	}
 }

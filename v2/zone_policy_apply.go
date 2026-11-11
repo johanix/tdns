@@ -441,6 +441,10 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 			zd.mu.Unlock()
 			UpdateSigValidityFloor(zd, intentPol, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
 			reconcileDsAfterBind(kdb, zd, nil)
+			// Bound without a re-sign, but it signs here: the zone is already
+			// signed under intent and every publish re-signs its content. A
+			// first load registers it afterwards; a reload has no first load.
+			zd.registerForPeriodicResign()
 			lgEngine.Info("backfilled applied DNSSEC policy without re-sign",
 				"zone", zd.ZoneName, "policy", intentName)
 			return nil
@@ -491,6 +495,10 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 		// DS model: the rows keep the old model's ds until re-resolved.
 		reconcileDsAfterBind(kdb, zd, oldPol)
 		zd.ClearError(DnssecPolicyWarning)
+		// A rebind, not a re-sign, and the next publish signs under it. The
+		// ZoneData can be new: a ModifyDynamicZone replacement keeps the zone's
+		// applied row, lands here, and has no first load to register it.
+		zd.registerForPeriodicResign()
 		return nil
 	}
 
