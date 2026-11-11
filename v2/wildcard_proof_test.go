@@ -301,6 +301,31 @@ func TestCoverNextCloser(t *testing.T) {
 	}
 }
 
+// The cover's owner is built from octets -- for b.wild.example. it is a
+// followed by 62 octets of \255 -- and the zone may write the same octets
+// another way: \097 for the a, raw bytes for the \255s. The check that the
+// owner is not a name the zone holds has to find it however it is written, or
+// the cover hides a name that exists.
+func TestCoverNextCloserFindsAHeldNameInAnySpelling(t *testing.T) {
+	for _, held := range []struct{ what, label string }{
+		{"spelled as the cover spells it", "a" + strings.Repeat(`\255`, 62)},
+		{`spelled with \097`, `\097` + strings.Repeat(`\255`, 62)},
+		{"spelled with raw octets", "a" + strings.Repeat("\xff", 62)},
+	} {
+		for _, shape := range []struct{ what, owner string }{
+			{"an empty non-terminal", "x." + held.label + ".wild.example."},
+			{"an owner", held.label + ".wild.example."},
+		} {
+			t.Run(shape.what+" "+held.what, func(t *testing.T) {
+				zd := testSnapshotZone(t, "example.", proofZone+shape.owner+"\t3600\tIN\tA\t10.0.0.20\n")
+				if nsec := coverNextCloser(zd.publishedSnapshot(), "b.wild.example.", "wild.example.", 3600); nsec != nil {
+					t.Errorf("got %s, which hides %q", nsec, shape.owner)
+				}
+			})
+		}
+	}
+}
+
 // A closest encloser that is not a proper ancestor of the query name has no
 // next closer name, and gets no cover rather than a panic.
 func TestCoverNextCloserNeedsAProperAncestor(t *testing.T) {

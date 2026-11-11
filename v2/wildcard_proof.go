@@ -329,33 +329,10 @@ func labelString(l []byte) string {
 }
 
 // canonicalCompare orders two names in canonical order (RFC 4034 section
-// 6.1) by their octets, as a validator does. canonicalSortKey works on the
-// presentation form, where an octet written \255 compares as the four
-// characters that spell it; the names coverNextCloser builds are made of such
-// octets. A name that does not pack sorts first.
+// 6.1) by their octets, as a validator does: the order of canonicalSortKey,
+// which the chain coverNextCloser stands in for is sorted by. The names
+// coverNextCloser builds are made of octets such as \255, and the key reads
+// them as octets rather than as the characters that spell them.
 func canonicalCompare(a, b string) int {
-	al, _, errA := nameLabels(a)
-	bl, _, errB := nameLabels(b)
-	if errA != nil || errB != nil {
-		switch {
-		case errA != nil && errB != nil:
-			return 0
-		case errA != nil:
-			return -1
-		default:
-			return 1
-		}
-	}
-	for i, j := len(al)-1, len(bl)-1; i >= 0 && j >= 0; i, j = i-1, j-1 {
-		if c := bytes.Compare(foldLabel(al[i]), foldLabel(bl[j])); c != 0 {
-			return c
-		}
-	}
-	switch {
-	case len(al) < len(bl):
-		return -1
-	case len(al) > len(bl):
-		return 1
-	}
-	return 0
+	return bytes.Compare(canonicalSortKey(a), canonicalSortKey(b))
 }

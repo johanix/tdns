@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"hash"
 	"sort"
-	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -63,52 +62,76 @@ func zonemdHasher(alg uint8) (hash.Hash, error) {
 // left and the apex is a suffix, not a prefix. Canonical order puts the apex
 // first, where the NSEC chain needs it.
 //
-// For a bulk sort use canonicalSortKey instead: this allocates on every
+// Defined by canonicalSortKey rather than beside it. The NSEC chain is sorted
+// by key and chainPredecessor binary-searches that chain with this comparator,
+// so the two have to be one order on every input -- escapes and raw octets
+// included -- and sharing the decoding is what makes that so.
+//
+// For a bulk sort use canonicalSortKey instead: this builds two keys on every
 // comparison, which an O(n log n) sort over a large zone feels.
 func canonicalOwnerLess(a, b string) bool {
-	// core.CanonicalizeName, NOT strings.ToLower. RFC 4034 6.1 orders names as
-	// OCTET strings with US-ASCII A-Z folded and nothing else; strings.ToLower
-	// folds by Unicode, and gets this wrong twice over. See canonicalSortKey.
-	al := dns.SplitDomainName(core.CanonicalizeName(dns.Fqdn(a)))
-	bl := dns.SplitDomainName(core.CanonicalizeName(dns.Fqdn(b)))
-
-	for i, j := len(al)-1, len(bl)-1; i >= 0 && j >= 0; i, j = i-1, j-1 {
-		if c := strings.Compare(al[i], bl[j]); c != 0 {
-			return c < 0
-		}
-	}
-	// One is a suffix of the other; the shorter (fewer labels) sorts first.
-	return len(al) < len(bl)
+	return bytes.Compare(canonicalSortKey(a), canonicalSortKey(b)) < 0
 }
 
 // canonicalSortKey renders a name as a byte string whose plain bytewise order
 // IS canonical name order, so a bulk sort can compare precomputed keys with
-// bytes.Compare instead of re-splitting both names on every comparison.
+// bytes.Compare instead of re-reading both names on every comparison.
 //
-// canonicalOwnerLess costs two Fqdn calls, two ToLower calls and two
-// SplitDomainName allocations per comparison, and it is called O(n log n)
-// times -- by the NSEC chain sort on every publish of a signed zone, and by
-// the digest sort on every publish of a zonemd zone. Over a large zone that is
-// the dominant cost of both.
+// The NSEC chain sort makes O(n log n) comparisons on every publish of a
+// signed zone, and the digest sort on every publish of a zonemd zone. Over a
+// large zone that is the dominant cost of both, so a key costs two passes over
+// the name and one allocation, and comparing keys allocates nothing.
 //
-// The encoding: labels lowercased and emitted right-to-left, each terminated
-// by 0x00 0x00, with any 0x00 INSIDE a label escaped to 0x00 0x01. The escape
-// is what makes the order exact rather than merely usual. A label may legally
-// contain a zero octet, and without the escape such a label would collide with
-// the separator and sort as though it were two labels -- a name ordering that
-// is wrong in a way no test zone would ever show, and that would put the NSEC
-// chain in an order no validator accepts.
+// The key holds the name's OCTETS, not the presentation text it arrives in:
+// `\255` is the single octet 0xff and `\.` a dot inside a label. Compared as
+// the text that spells them, escapes sort by their backslash (0x5C), and
+// RFC 4034's own example shows the damage: \001.z.example. belongs before
+// *.z.example. and its text puts it after. Escapes are read as miekg/dns packs
+// them, so names order as they go on the wire.
+//
+// The encoding: labels emitted right-to-left, each terminated by 0x00 0x00,
+// with any 0x00 INSIDE a label escaped to 0x00 0x01. The escape is what makes
+// the order exact rather than merely usual. A label may legally contain a zero
+// octet -- written \000, or raw in a name built in code -- and without the
+// escape such a label would collide with the separator and sort as though it
+// were two labels -- a name ordering that is wrong in a way no test zone would
+// ever show, and that would put the NSEC chain in an order no validator
+// accepts.
 //
 // The terminator gives the "shorter name first" rule for free: `example.` is
 // "example\x00\x00", `a.example.` is "example\x00\x00a\x00\x00", and a prefix
 // sorts before what extends it.
 func canonicalSortKey(name string) []byte {
-	// core.CanonicalizeName, NOT strings.ToLower. This key IS the canonical
-	// order: it decides the NSEC chain and the order records are fed to the
-	// ZONEMD digest, so getting it wrong produces a chain no validator accepts
-	// and a digest that matches no other implementation. RFC 4034 6.1 folds
-	// US-ASCII A-Z and leaves every other octet alone. strings.ToLower breaks
-	// that in two separate ways:
+	// Find the dots that separate labels. An escaped character is never a
+	// separator, and the later digits of \DDD are not dots either, so skipping
+	// the one character after a backslash is enough. Forty entries hold an
+	// ip6.arpa owner (34 labels) without leaving the stack.
+	var dotBuf [40]int
+	dots := dotBuf[:0]
+	for i := 0; i < len(name); i++ {
+		switch name[i] {
+		case '\\':
+			i++
+		case '.':
+			dots = append(dots, i)
+		}
+	}
+	// A trailing dot ends the name rather than starting an empty label, so
+	// "a.example" and "a.example." are one name and "." has no labels.
+	end := len(name)
+	if n := len(dots); n > 0 && dots[n-1] == end-1 {
+		end, dots = dots[n-1], dots[:n-1]
+	}
+	if end == 0 && len(dots) == 0 {
+		return []byte{}
+	}
+
+	// This key IS the canonical order: it decides the NSEC chain and the order
+	// records are fed to the ZONEMD digest. RFC 4034 6.1 folds US-ASCII A-Z
+	// and leaves every other octet alone, and the fold applies to the decoded
+	// octet: \065 is an A. core.CanonicalizeName reads escapes the same way, so
+	// two names share a key here exactly when they share an owner-map key.
+	// strings.ToLower breaks the rule in two separate ways:
 	//
 	//   U+212A KELVIN SIGN folds onto "k", so \u212a.example. and k.example. --
 	//   two different names -- produce the SAME key and occupy one position.
@@ -116,24 +139,52 @@ func canonicalSortKey(name string) []byte {
 	//   A byte that is not valid UTF-8 is rewritten to U+FFFD, so ns\xff1. is
 	//   ordered by three bytes it does not contain.
 	//
-	// The comment below is right that this is "wrong in a way no test zone
-	// would ever show"; it was describing the zero-octet case and the folding
-	// had the same property.
-	labels := dns.SplitDomainName(core.CanonicalizeName(dns.Fqdn(name)))
-	// One byte per character plus a two-byte terminator per label, which is
-	// exact for the overwhelmingly common case of no zero octets.
-	key := make([]byte, 0, len(name)+2*len(labels)+2)
-	for i := len(labels) - 1; i >= 0; i-- {
-		for j := 0; j < len(labels[i]); j++ {
-			if c := labels[i][j]; c == 0x00 {
-				key = append(key, 0x00, 0x01)
+	// Sized for one byte per character plus a two-byte terminator per label,
+	// which is exact for a name with no escapes and no zero octets.
+	key := make([]byte, 0, end+len(dots)+2)
+	for k := len(dots); k >= 0; k-- {
+		start := 0
+		if k > 0 {
+			start = dots[k-1] + 1
+		}
+		for i := start; i < end; {
+			c := name[i]
+			if c == '\\' {
+				c, i = unescapeOctet(name, i)
 			} else {
+				i++
+			}
+			switch {
+			case c == 0x00:
+				key = append(key, 0x00, 0x01)
+			case c >= 'A' && c <= 'Z':
+				key = append(key, c+'a'-'A')
+			default:
 				key = append(key, c)
 			}
 		}
 		key = append(key, 0x00, 0x00)
+		end = start - 1
 	}
 	return key
+}
+
+// unescapeOctet decodes the presentation escape whose backslash is at name[i]
+// and returns its octet with the index after the escape, reading escapes as
+// miekg/dns's packer does: \DDD is one octet (wrapping above 255, as there)
+// and \X is X. A backslash that ends the string stands for itself.
+func unescapeOctet(name string, i int) (byte, int) {
+	switch {
+	case i+1 == len(name):
+		return '\\', i + 1
+	case i+3 < len(name) &&
+		'0' <= name[i+1] && name[i+1] <= '9' &&
+		'0' <= name[i+2] && name[i+2] <= '9' &&
+		'0' <= name[i+3] && name[i+3] <= '9':
+		return (name[i+1]-'0')*100 + (name[i+2]-'0')*10 + (name[i+3] - '0'), i + 4
+	default:
+		return name[i+1], i + 2
+	}
 }
 
 // canonicalRRWire renders one RR in RFC 4034 §6.2 canonical form: the owner
@@ -417,7 +468,14 @@ func canonicalOwnerOrder(names []string) {
 		tmp[i] = keyed{canonicalSortKey(n), n}
 	}
 	sort.Slice(tmp, func(i, j int) bool {
-		return bytes.Compare(tmp[i].key, tmp[j].key) < 0
+		if c := bytes.Compare(tmp[i].key, tmp[j].key); c != 0 {
+			return c < 0
+		}
+		// One name spelled two ways -- \065 and A. Owner keys are canonical and
+		// never tie; a caller holding names that are not could hand over both.
+		// Order by spelling, so neither this order nor a digest fed in it
+		// depends on the order the names arrived in.
+		return tmp[i].name < tmp[j].name
 	})
 	for i := range tmp {
 		names[i] = tmp[i].name
