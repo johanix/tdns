@@ -298,8 +298,15 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 // paths so the callbacks registered by ParseZones see a Ready zone with the
 // correct policy binding. Preserves the #286 one-shot deferral: callbacks
 // still run once, just post-Ready rather than mid-load.
+//
+// A withheld zone keeps them, as it keeps the zone off the air: its release
+// drains them (ReleaseWithheld).
 func drainAndRunOnFirstLoad(zd *ZoneData) {
 	zd.mu.Lock()
+	if zd.withheld {
+		zd.mu.Unlock()
+		return
+	}
 	callbacks := zd.OnFirstLoad
 	zd.OnFirstLoad = nil
 	zd.mu.Unlock()
@@ -310,14 +317,16 @@ func drainAndRunOnFirstLoad(zd *ZoneData) {
 }
 
 // hasPendingOnFirstLoad reports whether OnFirstLoad callbacks are still waiting
-// to run (e.g. after a first-load policy sync failure). Reads under zd.mu.
+// to run (e.g. after a first-load policy sync failure). Reads under zd.mu. A
+// withheld zone's are not waiting for a retry: the ticker's retry would take the
+// place of the zone's refreshes for as long as it is withheld.
 func hasPendingOnFirstLoad(zd *ZoneData) bool {
 	if zd == nil {
 		return false
 	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return len(zd.OnFirstLoad) > 0
+	return len(zd.OnFirstLoad) > 0 && !zd.withheld
 }
 
 // finishFirstLoadPolicy is the post-Ready tail of first-bind completion: sync
@@ -397,10 +406,7 @@ func signOnceAfterPolicyBind(ctx context.Context, zd *ZoneData) error {
 	// signatures came in with the file. Signing again would republish and bump
 	// the serial for nothing, and finishFirstLoadPolicy is explicitly a
 	// retry-only path that must not re-publish.
-	zd.mu.Lock()
-	signed := zd.snapshotContentIsServableLocked(zd.snapshot.Load())
-	zd.mu.Unlock()
-	if signed {
+	if snapshotApexIsSigned(zd.snapshot.Load()) {
 		return nil
 	}
 	newrrsigs, err := zd.SignZone(ctx, zd.KeyDB, false)

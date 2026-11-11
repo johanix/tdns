@@ -121,6 +121,19 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 			return nil
 		}
 
+		// Withheld: we hold the copy, and its daemon does not know yet what the
+		// zone is to it, so an answer from it could be bogus (Withhold). qname is
+		// this zone's apex here, so a DS is its parent's data, not the copy's:
+		// handleDSQuery asks the parent, and does not answer from the copy.
+		if zd.Withheld() && qtype != dns.TypeDS {
+			lgHandler.Debug("zone is withheld", "qname", qname, "zone", zd.ZoneName)
+			m := new(dns.Msg)
+			m.SetRcode(r, dns.RcodeServerFailure)
+			respondEDNS(m, r, msgoptions)
+			w.WriteMsg(m)
+			return nil
+		}
+
 		// Past SOA EXPIRE: we still hold the copy, but RFC 1034 §4.3.5 says
 		// we are no longer entitled to answer from it. The refresh ticker
 		// keeps trying -- expire is not a service-impacting error -- so the
@@ -191,6 +204,17 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		lgHandler.Warn("zone holds no published data", "qname", qname, "zone", zd.ZoneName)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)
+		w.WriteMsg(m)
+		return nil
+	}
+
+	// Same withheld guard as the Zones.Get path above. qname is below this zone's
+	// apex here, so a DS is this zone's own to answer, and it does not.
+	if zd.Withheld() {
+		lgHandler.Debug("zone is withheld", "qname", qname, "zone", zd.ZoneName)
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeServerFailure)
+		respondEDNS(m, r, msgoptions)
 		w.WriteMsg(m)
 		return nil
 	}

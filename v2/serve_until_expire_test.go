@@ -60,6 +60,13 @@ func ask(t *testing.T, qname string, qtype uint16) *dns.Msg {
 	t.Helper()
 	req := new(dns.Msg)
 	req.SetQuestion(qname, qtype)
+	return askMsg(t, req)
+}
+
+// askMsg is ask with the query as the caller built it.
+func askMsg(t *testing.T, req *dns.Msg) *dns.Msg {
+	t.Helper()
+	qname, qtype := req.Question[0].Name, req.Question[0].Qtype
 	msgo, err := edns0.ExtractFlagsAndEDNS0Options(req)
 	if err != nil {
 		t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
@@ -76,6 +83,37 @@ func ask(t *testing.T, qname string, qtype uint16) *dns.Msg {
 	}
 	if rw.written == nil {
 		t.Fatalf("DefaultQueryHandler(%s): no response written", qname)
+	}
+	return rw.written
+}
+
+// askUpdate drives the full UpdateResponder with an empty UPDATE for qname.
+func askUpdate(t *testing.T, qname string) *dns.Msg {
+	t.Helper()
+	r := new(dns.Msg)
+	r.SetUpdate(qname)
+	return askUpdateMsg(t, r, qname)
+}
+
+// askUpdateMsg is askUpdate with the UPDATE as the caller built it.
+func askUpdateMsg(t *testing.T, r *dns.Msg, qname string) *dns.Msg {
+	t.Helper()
+	msgo, err := edns0.ExtractFlagsAndEDNS0Options(r)
+	if err != nil {
+		t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
+	}
+	rw := &fakeRW{remote: udpAddr("127.0.0.1")}
+	if err := UpdateResponder(context.Background(), &DnsUpdateRequest{
+		ResponseWriter: rw,
+		Msg:            r,
+		Qname:          qname,
+		Options:        msgo,
+		Status:         &UpdateStatus{},
+	}, nil); err != nil {
+		t.Fatalf("UpdateResponder(%s): %v", qname, err)
+	}
+	if rw.written == nil {
+		t.Fatalf("UpdateResponder(%s): no response written", qname)
 	}
 	return rw.written
 }
@@ -206,29 +244,7 @@ func TestQueryServfailsWithoutPublishedData(t *testing.T) {
 func TestUpdateSharesTheQueryPredicate(t *testing.T) {
 	authApp(t)
 
-	update := func(t *testing.T, qname string) *dns.Msg {
-		t.Helper()
-		r := new(dns.Msg)
-		r.SetUpdate(qname)
-		msgo, err := edns0.ExtractFlagsAndEDNS0Options(r)
-		if err != nil {
-			t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
-		}
-		rw := &fakeRW{remote: udpAddr("127.0.0.1")}
-		if err := UpdateResponder(context.Background(), &DnsUpdateRequest{
-			ResponseWriter: rw,
-			Msg:            r,
-			Qname:          qname,
-			Options:        msgo,
-			Status:         &UpdateStatus{},
-		}, nil); err != nil {
-			t.Fatalf("UpdateResponder(%s): %v", qname, err)
-		}
-		if rw.written == nil {
-			t.Fatalf("UpdateResponder(%s): no response written", qname)
-		}
-		return rw.written
-	}
+	update := askUpdate
 
 	t.Run("no published data is refused", func(t *testing.T) {
 		zd := &ZoneData{ZoneName: "empty.example.", ZoneStore: MapZone, ZoneType: Secondary, Logger: discardLogger()}
