@@ -185,9 +185,17 @@ func TestFormatOOTSSignal(t *testing.T) {
 		{map[string]uint8{"doq": 100, "dot": 100}, "alpn", "alpn:dot,doq"},
 		{map[string]uint8{"dot": 50}, "operator", "set: dot:50"},
 	} {
-		if got := formatOOTSSignal(tc.signal, tc.source); got != tc.want {
+		if got := formatOOTSSignal(tc.signal, nil, tc.source); got != tc.want {
 			t.Errorf("formatOOTSSignal(%v, %q) = %q, want %q", tc.signal, tc.source, got, tc.want)
 		}
+	}
+	got := formatOOTSSignal(
+		map[string]uint8{"dot": 30, "doq": 20},
+		map[string]uint16{"dot": 1234, "doq": 1235},
+		"oots",
+	)
+	if got != "dot:30 port:1234 doq:20 port:1235" {
+		t.Errorf("formatOOTSSignal with ports = %q", got)
 	}
 }
 

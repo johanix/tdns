@@ -672,6 +672,9 @@ func (conf *Config) ParseConfig(reload bool) error {
 			conf.Service.Transport.Type = "none"
 		}
 	}
+	if err := conf.checkTransportSignal(); err != nil {
+		return err
+	}
 
 	lgConfig.Debug("templates defined", "count", len(conf.Templates))
 
@@ -820,6 +823,25 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
+	return nil
+}
+
+// checkTransportSignal rejects a config that sets both the single-record form
+// (signal and its optional port) and the records list, so the operator does
+// not think both apply. port and records are published only on an SVCB
+// signal; a tsync or none transport keeps the signal string and is warned.
+func (conf *Config) checkTransportSignal() error {
+	if conf == nil {
+		return nil
+	}
+	t := conf.Service.Transport
+	if len(t.Records) > 0 && (t.Signal != "" || t.Port != 0) {
+		return fmt.Errorf("service.transport: set either signal and port, or records, not both")
+	}
+	if t.Type != "svcb" && (t.Port != 0 || len(t.Records) > 0) {
+		lgConfig.Warn("service.transport port and records are published only when type is svcb",
+			"type", t.Type)
+	}
 	return nil
 }
 

@@ -777,19 +777,23 @@ func (zd *ZoneData) addTransportSignal(m *dns.Msg, sigs []core.RRset, msgoptions
 	}
 	addedAny := false
 	for _, ts := range sigs {
-		rrsAdded := false
-		for _, trr := range ts.RRs {
-			h := trr.Header()
-			key := h.Name + "|" + dns.TypeToString[h.Rrtype]
-			if present[key] {
-				continue
-			}
-			present[key] = true // guard against duplicates across signal RRsets
-			m.Extra = append(m.Extra, trr)
-			rrsAdded = true
-			addedAny = true
+		if len(ts.RRs) == 0 {
+			continue
 		}
-		if rrsAdded && msgoptions.DO && len(ts.RRSIGs) > 0 {
+		// One signal RRset is one owner and type. Skip it when the answer
+		// already carries that name (a direct query) or an earlier signal
+		// RRset did. Every RR is added together: several SVCB records are one
+		// signal — a different port on each — and are not duplicates of each
+		// other. Marking the name after the first RR used to drop the rest.
+		h := ts.RRs[0].Header()
+		key := h.Name + "|" + dns.TypeToString[h.Rrtype]
+		if present[key] {
+			continue
+		}
+		present[key] = true
+		m.Extra = append(m.Extra, ts.RRs...)
+		addedAny = true
+		if msgoptions.DO && len(ts.RRSIGs) > 0 {
 			m.Extra = append(m.Extra, ts.RRSIGs...)
 		}
 	}
