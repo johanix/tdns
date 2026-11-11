@@ -119,6 +119,12 @@ type ParentSyncPlan struct {
 	// records, nothing configured) has none; its reason is in Skipped as "all".
 	Outcomes []SchemeOutcome
 
+	// discovered: the DSYNC discovery was made and answered, whatever it
+	// found. An unusable plan that was discovered is the parent offering
+	// nothing this child can use (ErrNoUsableDsync); one that was not (no
+	// IMR) could not ask.
+	discovered bool
+
 	// report: built for the status command, which must not change the zone.
 	// The proxy UPDATE gate then leaves the zone's warning and bootstrap flag
 	// alone (proxySig0PublicationStateFor).
@@ -229,6 +235,7 @@ func (zd *ZoneData) buildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 		return nil, fmt.Errorf("BuildParentSyncPlan: DsyncDiscovery(%s): %w", zd.ZoneName, err)
 	}
 	plan.Validated = dsyncRes.Validated
+	plan.discovered = true
 	if plan.Parent == "" {
 		plan.Parent = dsyncRes.Parent
 	}

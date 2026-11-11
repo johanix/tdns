@@ -220,8 +220,11 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 		}
 	}
 	if !found {
-		return nil, fmt.Errorf("no DSYNC type %s scheme %d destination found for for zone %s",
-			dns.TypeToString[dtype], scheme, childzone)
+		// The discovery answered, and the parent offers no such target:
+		// ErrNoUsableDsync, which a caller may take as the common case it
+		// is rather than as a failure.
+		return nil, fmt.Errorf("no DSYNC type %s scheme %d destination found for zone %s (parent %s): %w",
+			dns.TypeToString[dtype], scheme, childzone, dsync_res.Parent, ErrNoUsableDsync)
 	}
 
 	lgDns.Debug("looked up published DSYNC update target", "zone", childzone, "qname", dsync_res.Qname, "dsync", dsync.String())
