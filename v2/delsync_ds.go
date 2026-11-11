@@ -604,7 +604,7 @@ func (zd *ZoneData) sendDSViaUpdate(ctx context.Context, kdb *KeyDB, imr *Imr, s
 		out.Category = SoftfailChildConfigLocalError
 		return out, err
 	}
-	smsg, err := zd.signDelegationUpdate(kdb, msg)
+	smsg, sak, err := zd.signDelegationUpdate(kdb, msg)
 	if err != nil {
 		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("sendDSViaUpdate: %w", err)
@@ -623,6 +623,7 @@ func (zd *ZoneData) sendDSViaUpdate(ctx context.Context, kdb *KeyDB, imr *Imr, s
 		out.Category = SoftfailParentRejected
 		return out, nil
 	}
+	recordUpdateAccepted(kdb, zd.ZoneName, sak)
 	if err := recordDSSubmitted(kdb, child, snap); err != nil {
 		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("sendDSViaUpdate: %w", err)
