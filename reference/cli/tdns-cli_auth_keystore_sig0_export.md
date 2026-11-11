@@ -5,9 +5,10 @@ Export a SIG(0) key pair from the keystore as BIND-style .private/.key files
 ### Synopsis
 
 Write the SIG(0) key pair for (zone, keyid) to two files in BIND filename
-convention: K<zone>+<alg-num>+<keyid>.private (PKCS#8 PEM) and .key (zone-file
-KEY RR). The resulting pair is directly consumable by commands accepting
---key <basename.private>.
+convention: K<zone>+<alg-num>+<keyid>.private and .key (zone-file KEY RR).
+The private half is written as PKCS#8 PEM, or as bind's Private-key-format
+v1.3 with --format bind. The resulting pair is directly consumable by commands
+accepting --key <basename.private>.
 
 ```
 tdns-cli auth keystore sig0 export [flags]
@@ -16,6 +17,7 @@ tdns-cli auth keystore sig0 export [flags]
 ### Options
 
 ```
+      --format string   Private key format to write: pem (PKCS#8, as stored) or bind (Private-key-format v1.3) (default "pem")
   -h, --help            help for export
       --keyid int       Key ID of key to export
   -o, --outdir string   Directory to write .private and .key files to (default ".")
@@ -30,6 +32,7 @@ tdns-cli auth keystore sig0 export [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
 ```
 
 ### SEE ALSO

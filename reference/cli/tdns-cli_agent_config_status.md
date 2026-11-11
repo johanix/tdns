@@ -1,6 +1,6 @@
 ## tdns-cli agent config status
 
-Send config status command to tdns-auth
+Send config status command to tdns-agent
 
 ```
 tdns-cli agent config status [flags]
@@ -20,6 +20,7 @@ tdns-cli agent config status [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 

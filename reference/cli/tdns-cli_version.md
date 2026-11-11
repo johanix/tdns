@@ -20,10 +20,11 @@ tdns-cli version [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
 ### SEE ALSO
 
-* [tdns-cli](tdns-cli.md)	 - tdns-cli is a tool used to interact with the tdnsd nameserver via API
+* [tdns-cli](tdns-cli.md)	 - tdns-cli is a tool used to interact with the TDNS applications via a mgmt API
 

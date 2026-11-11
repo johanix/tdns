@@ -1,10 +1,10 @@
 ## tdns-cli scanner daemon start
 
-Start the axfr-statusd daemon
+Start the tdns-scanner daemon
 
 ### Synopsis
 
-Start the axfr-statusd daemon. If it was already running, then this is a no-op.
+Start the tdns-scanner daemon. If it was already running, then this is a no-op.
 
 ```
 tdns-cli scanner daemon start [flags]
@@ -26,6 +26,7 @@ tdns-cli scanner daemon start [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 

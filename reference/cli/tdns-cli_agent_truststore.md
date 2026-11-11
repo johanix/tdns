@@ -22,6 +22,7 @@ deleting child keys as well as changing the trust state of individual keys.
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 

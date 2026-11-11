@@ -16,16 +16,18 @@ Interact with tdns-scanner via API
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
 ### SEE ALSO
 
-* [tdns-cli](tdns-cli.md)	 - tdns-cli is a tool used to interact with the tdnsd nameserver via API
+* [tdns-cli](tdns-cli.md)	 - tdns-cli is a tool used to interact with the TDNS applications via a mgmt API
 * [tdns-cli scanner daemon](tdns-cli_scanner_daemon.md)	 - Only useful via sub-commands
 * [tdns-cli scanner delete](tdns-cli_scanner_delete.md)	 - Delete scan job(s)
 * [tdns-cli scanner ping](tdns-cli_scanner_ping.md)	 - Send an API ping request and present the response
 * [tdns-cli scanner results](tdns-cli_scanner_results.md)	 - Get results of a completed scan job
 * [tdns-cli scanner scan](tdns-cli_scanner_scan.md)	 - Send scan requests to tdns-scanner
+* [tdns-cli scanner show-cmds](tdns-cli_scanner_show-cmds.md)	 - List the whole command tree below this command, one line per command
 * [tdns-cli scanner status](tdns-cli_scanner_status.md)	 - Get status of scan job(s)
 

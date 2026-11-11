@@ -23,6 +23,7 @@ tdns-cli auth ddns roll [flags]
   -p, --primary string    Address:port of child primary namserver
   -Z, --pzone string      parent zone name
   -v, --verbose           verbose output
+      --version           print version and supported algorithms, then exit
   -z, --zone string       zone name
 ```
 

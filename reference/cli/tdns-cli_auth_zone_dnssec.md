@@ -26,7 +26,8 @@ Zone DNSSEC operations: signing, policy, and automated rollover
 * [tdns-cli auth zone](tdns-cli_auth_zone.md)	 - Prefix command, not usable by itself
 * [tdns-cli auth zone dnssec auto-rollover](tdns-cli_auth_zone_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
 * [tdns-cli auth zone dnssec nsec](tdns-cli_auth_zone_dnssec_nsec.md)	 - Prefix command, not usable by itself
-* [tdns-cli auth zone dnssec policy-change](tdns-cli_auth_zone_dnssec_policy-change.md)	 - Bind a zone to a new DNSSEC policy for a gradual ZSK algorithm rollover
+* [tdns-cli auth zone dnssec policy-change](tdns-cli_auth_zone_dnssec_policy-change.md)	 - Bind a zone to a new DNSSEC policy for a gradual ZSK or KSK algorithm rollover
+* [tdns-cli auth zone dnssec policy-reset](tdns-cli_auth_zone_dnssec_policy-reset.md)	 - Reset a zone's DNSSEC keys to its config policy, per role (dry-run without --confirm)
 * [tdns-cli auth zone dnssec policy-set](tdns-cli_auth_zone_dnssec_policy-set.md)	 - Set a zone's DNSSEC policy at runtime (persists as an override, not in YAML)
 * [tdns-cli auth zone dnssec resign](tdns-cli_auth_zone_dnssec_resign.md)	 - Re-sign zone from scratch with currently-active keys (drops all existing RRSIGs)
 * [tdns-cli auth zone dnssec sign](tdns-cli_auth_zone_dnssec_sign.md)	 - Request signing of a zone (additive: cover gaps with active keys)

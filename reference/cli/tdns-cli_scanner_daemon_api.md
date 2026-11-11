@@ -1,10 +1,10 @@
 ## tdns-cli scanner daemon api
 
-request a statusd api summary
+request an API summary from the tdns-scanner daemon
 
 ### Synopsis
 
-The daemon api queries the statusd for the provided API
+The daemon api command queries tdns-scanner for the provided API
 and prints that out in a (hopefully) comprehensible fashion.
 
 ```
@@ -25,6 +25,7 @@ tdns-cli scanner daemon api [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
