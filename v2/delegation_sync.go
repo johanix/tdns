@@ -21,169 +21,172 @@ const (
 	UpdateModeDelta   = "delta"   // Use incremental adds/removes (delta updates)
 )
 
+// DelegationSyncher runs tdns's delegation syncher: every request on delsyncq
+// is run by handleDelegationSyncRequest, on its parent's queue
+// (RunDelegationSyncLanes), so a parent that does not answer holds up only the
+// syncs to that parent (#1002).
 func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest, conf *Config) error {
 
 	lgDns.Info("DelegationSyncher: starting")
+	return RunDelegationSyncLanes(ctx, delsyncq, func(ctx context.Context, ds DelegationSyncRequest) {
+		kdb.handleDelegationSyncRequest(ctx, delsyncq, notifyq, conf, ds)
+	})
+}
+
+// handleDelegationSyncRequest runs one request: the syncher's body. Requests
+// for zones under different parents run concurrently; a zone's own requests
+// run one at a time, in order.
+func (kdb *KeyDB) handleDelegationSyncRequest(ctx context.Context, delsyncq chan DelegationSyncRequest,
+	notifyq chan NotifyRequest, conf *Config, ds DelegationSyncRequest) {
+
 	imr := func() *Imr { return conf.Internal.ImrEngine }
-	var err error
-	for {
-		select {
-		case <-ctx.Done():
-			lgDns.Info("DelegationSyncher: terminating due to context cancelled")
-			return nil
-		case ds, ok := <-delsyncq:
-			if !ok {
-				lgDns.Info("DelegationSyncher: delsyncq closed, terminating")
-				return nil
-			}
-			zd := ds.ZoneData
-			dss := ds.SyncStatus
 
-			switch ds.Command {
+	zd := ds.ZoneData
+	dss := ds.SyncStatus
 
-			case "DELEGATION-SYNC-SETUP":
-				handleDelegationSyncSetup(ctx, conf, delsyncq, kdb, zd, ds)
-				continue
+	switch ds.Command {
 
-			case "INITIAL-KEY-UPLOAD":
-				// This case is not yet used, intended for automating the initial key upload to parent
-				lgDns.Info("DelegationSyncher: request for initial key upload", "zone", zd.ZoneName)
-				// err := zd.UploadKeyToParent(kdb)
-				// if err != nil {
-				// 	log.Printf("DelegationSyncher: Zone %s: Error from UploadKeyToParent(): %v. Ignoring sync request.", ds.ZoneName, err)
-				// 	continue
-				// }
-				lgDns.Info("DelegationSyncher: initial key upload complete", "zone", ds.ZoneName)
-				continue
+	case "DELEGATION-SYNC-SETUP":
+		handleDelegationSyncSetup(ctx, conf, delsyncq, kdb, zd, ds)
+		return
 
-			case "DELEGATION-STATUS":
-				lgDns.Info("DelegationSyncher: request for delegation status", "zone", zd.ZoneName)
+	case "INITIAL-KEY-UPLOAD":
+		// This case is not yet used, intended for automating the initial key upload to parent
+		lgDns.Info("DelegationSyncher: request for initial key upload", "zone", zd.ZoneName)
+		// err := zd.UploadKeyToParent(kdb)
+		// if err != nil {
+		// 	log.Printf("DelegationSyncher: Zone %s: Error from UploadKeyToParent(): %v. Ignoring sync request.", ds.ZoneName, err)
+		// 	continue
+		// }
+		lgDns.Info("DelegationSyncher: initial key upload complete", "zone", ds.ZoneName)
+		return
 
-				syncstate, err := zd.AnalyseZoneDelegation(imr())
-				if err != nil {
-					lgDns.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
-					syncstate.Error = true
-					syncstate.ErrorMsg = err.Error()
-				}
-				if ds.Response != nil {
-					ds.Response <- syncstate
-				}
-				continue
+	case "DELEGATION-STATUS":
+		lgDns.Info("DelegationSyncher: request for delegation status", "zone", zd.ZoneName)
 
-			case "SYNC-DELEGATION":
-				lgDns.Info("DelegationSyncher: request for delegation sync",
-					"zone", ds.ZoneName,
-					"ns_removes", len(dss.NsRemoves), "ns_adds", len(dss.NsAdds),
-					"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
-					"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
+		syncstate, err := zd.AnalyseZoneDelegation(imr())
+		if err != nil {
+			lgDns.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
+			syncstate.Error = true
+			syncstate.ErrorMsg = err.Error()
+		}
+		if ds.Response != nil {
+			ds.Response <- syncstate
+		}
+		return
 
-				zd := ds.ZoneData
-				if _, err = zd.ResolveParentVia(imr()); err != nil {
-					lgDns.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", err)
-					continue
-				}
+	case "SYNC-DELEGATION":
+		lgDns.Info("DelegationSyncher: request for delegation sync",
+			"zone", ds.ZoneName,
+			"ns_removes", len(dss.NsRemoves), "ns_adds", len(dss.NsAdds),
+			"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
+			"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
 
-				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, ds.SyncStatus, imr())
-				if err != nil {
-					lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
-					continue
-				}
-				ds.SyncStatus.UpdateResult = ur
-				lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
+		zd := ds.ZoneData
+		if _, err := zd.ResolveParentVia(imr()); err != nil {
+			lgDns.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", err)
+			return
+		}
 
-			case "EXPLICIT-SYNC-DELEGATION":
-				_ = handleExplicitSyncWith(ctx, conf.Internal.ImrReady, delsyncq, ds,
-					func() DelegationSyncStatus { return zd.runExplicitSync(ctx, kdb, notifyq, imr()) })
-				continue
+		msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, ds.SyncStatus, imr())
+		if err != nil {
+			lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
+			return
+		}
+		ds.SyncStatus.UpdateResult = ur
+		lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
 
-			case "SYNC-DS":
-				// The KSK rollover engine's DS push (delsync_ds.go). The
-				// engine waits for the answer with a deadline, so this
-				// starts now and is never deferred; and it runs on its own
-				// goroutine, because a delivery is a parent round trip, a
-				// NOTIFY path a CDS publish through the zone updater first,
-				// and this loop is the queue's only reader: the updater
-				// enqueues every delegation change here from afterPublish,
-				// so a loop that waited here while the queue filled would
-				// hold the updater, which the CDS publish needs.
-				go handleDSSync(ctx, kdb, notifyq, imr(), ds)
-				continue
+	case "EXPLICIT-SYNC-DELEGATION":
+		_ = handleExplicitSyncWith(ctx, conf.Internal.ImrReady, delsyncq, ds,
+			func() DelegationSyncStatus { return zd.runExplicitSync(ctx, kdb, notifyq, imr()) })
+		return
 
-			case "SIGNALS-EDITED":
-				_ = handleSignalsEditedArm(ctx, conf.Internal.ImrReady, delsyncq, zd, ds,
-					func() {
-						handleSignalsEditedWith(zd, ds.SignalTypes, signalsEditedStepsFor(ctx, kdb, notifyq, imr(), zd))
-					})
-				continue
+	case "SYNC-DS":
+		// The KSK rollover engine's DS push (delsync_ds.go). The
+		// engine waits for the answer with a deadline, so this
+		// starts now and is never deferred; and it runs on its own
+		// goroutine, because a delivery is a parent round trip, a
+		// NOTIFY path a CDS publish through the zone updater first,
+		// and the requests behind it in the parent's queue need not
+		// wait for that. When one loop was the queue's only reader,
+		// waiting here could also hold the updater, which enqueues
+		// every delegation change here from afterPublish and which
+		// the CDS publish needs.
+		go handleDSSync(ctx, kdb, notifyq, imr(), ds)
+		return
 
-			case "SYNC-DNSKEY-RRSET":
-				lgDns.Info("DelegationSyncher: request for DNSKEY RRset sync", "zone", ds.ZoneName)
-				if zd.Options[OptMultiProvider] {
-					lgDns.Info("DelegationSyncher: multisigner zone, notifying controller", "zone", ds.ZoneName)
-					if !sendNotifyRequest(ctx, notifyq, NotifyRequest{
-						ZoneName: zd.ZoneName,
-						ZoneData: zd,
-						RRtype:   dns.TypeDNSKEY, // this is only about syncing delegation data, not about rolling DNSSEC keys.
-						// Targets:  dsynctarget.Addresses, // already in addr:port format
-						Targets: zd.MultiSigner.Controller.Notify.Targets,
-						Urgent:  true,
-					}) {
-						lgDns.Info("DelegationSyncher: terminating")
-						return nil
-					}
-				}
+	case "SIGNALS-EDITED":
+		_ = handleSignalsEditedArm(ctx, conf.Internal.ImrReady, delsyncq, zd, ds,
+			func() {
+				handleSignalsEditedWith(zd, ds.SignalTypes, signalsEditedStepsFor(ctx, kdb, notifyq, imr(), zd))
+			})
+		return
 
-				// Publish the CDS if the zone has delegation sync. The DS engine owns
-				// the CDS RRset and asks the zone's DS model what goes in it. For a
-				// multi-provider zone it writes none: that DS set is the
-				// multi-provider agent's to coordinate.
-				if zd.Options[OptParentSync] {
-					res := kdb.askDSEngine(ctx, DSEngineRequest{cmd: dsCmdEnsureCDS, zd: zd})
-					switch {
-					case res.err != nil:
-						lgDns.Error("DelegationSyncher: error publishing CDS", "zone", zd.ZoneName, "err", res.err)
-					case res.deferred != "":
-						lgDns.Info("DelegationSyncher: CDS left to its owner", "zone", zd.ZoneName, "reason", res.deferred)
-					default:
-						lgDns.Info("DelegationSyncher: published CDS", "zone", zd.ZoneName, "keyids", cdsKeyids(res.cds))
-					}
-				}
-
-			case "REFRESH-SYNC-DELEGATION":
-				// A parentsync child's compare with the parent, queued after a
-				// refresh changed its NS or glue, and once at load
-				// (delsync_refresh.go).
-				handleRefreshSyncDelegation(ctx, conf, delsyncq, kdb, notifyq, zd, ds)
-
-			case "PROXY-SYNC", "PROXY-UPDATE-SETUP", "PROXY-UPDATE-GATE":
-				// Both need an IMR: the parent's DSYNC records are discovered,
-				// not configured. At startup the zone's first transfer routinely
-				// arrives before InitImrEngine has finished priming, and the
-				// plan then skips every scheme with "no IMR available" and
-				// nothing retries -- so a restarted proxy forwarded nothing at
-				// all until the child zone happened to change again.
-				//
-				// Put the request back rather than running it against a nil
-				// IMR, and let it return exactly when the IMR is announced.
-				if !conf.Internal.ImrReady.Published() {
-					_ = deferForImr(ctx, delsyncq, conf.Internal.ImrReady, ds)
-					continue
-				}
-				switch ds.Command {
-				case "PROXY-SYNC":
-					proxySync(ctx, zd, kdb, notifyq, delsyncq, imr(), ds)
-				case "PROXY-UPDATE-SETUP":
-					proxyStartupReconcile(ctx, zd, kdb, notifyq, imr(), ds)
-				case "PROXY-UPDATE-GATE":
-					proxyUpdateGate(ds.ZoneName, func() (ProxyUpdateState, error) {
-						return zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr())
-					})
-				}
-
-			default:
-				lgDns.Warn("DelegationSyncher: unknown command, ignoring", "zone", ds.ZoneName, "command", ds.Command)
+	case "SYNC-DNSKEY-RRSET":
+		lgDns.Info("DelegationSyncher: request for DNSKEY RRset sync", "zone", ds.ZoneName)
+		if zd.Options[OptMultiProvider] {
+			lgDns.Info("DelegationSyncher: multisigner zone, notifying controller", "zone", ds.ZoneName)
+			if !sendNotifyRequest(ctx, notifyq, NotifyRequest{
+				ZoneName: zd.ZoneName,
+				ZoneData: zd,
+				RRtype:   dns.TypeDNSKEY, // this is only about syncing delegation data, not about rolling DNSSEC keys.
+				// Targets:  dsynctarget.Addresses, // already in addr:port format
+				Targets: zd.MultiSigner.Controller.Notify.Targets,
+				Urgent:  true,
+			}) {
+				return // ctx ended; sendNotifyRequest said so
 			}
 		}
+
+		// Publish the CDS if the zone has delegation sync. The DS engine owns
+		// the CDS RRset and asks the zone's DS model what goes in it. For a
+		// multi-provider zone it writes none: that DS set is the
+		// multi-provider agent's to coordinate.
+		if zd.Options[OptParentSync] {
+			res := kdb.askDSEngine(ctx, DSEngineRequest{cmd: dsCmdEnsureCDS, zd: zd})
+			switch {
+			case res.err != nil:
+				lgDns.Error("DelegationSyncher: error publishing CDS", "zone", zd.ZoneName, "err", res.err)
+			case res.deferred != "":
+				lgDns.Info("DelegationSyncher: CDS left to its owner", "zone", zd.ZoneName, "reason", res.deferred)
+			default:
+				lgDns.Info("DelegationSyncher: published CDS", "zone", zd.ZoneName, "keyids", cdsKeyids(res.cds))
+			}
+		}
+
+	case "REFRESH-SYNC-DELEGATION":
+		// A parentsync child's compare with the parent, queued after a
+		// refresh changed its NS or glue, and once at load
+		// (delsync_refresh.go).
+		handleRefreshSyncDelegation(ctx, conf, delsyncq, kdb, notifyq, zd, ds)
+
+	case "PROXY-SYNC", "PROXY-UPDATE-SETUP", "PROXY-UPDATE-GATE":
+		// Both need an IMR: the parent's DSYNC records are discovered,
+		// not configured. At startup the zone's first transfer routinely
+		// arrives before InitImrEngine has finished priming, and the
+		// plan then skips every scheme with "no IMR available" and
+		// nothing retries -- so a restarted proxy forwarded nothing at
+		// all until the child zone happened to change again.
+		//
+		// Put the request back rather than running it against a nil
+		// IMR, and let it return exactly when the IMR is announced.
+		if !conf.Internal.ImrReady.Published() {
+			_ = deferForImr(ctx, delsyncq, conf.Internal.ImrReady, ds)
+			return
+		}
+		switch ds.Command {
+		case "PROXY-SYNC":
+			proxySync(ctx, zd, kdb, notifyq, delsyncq, imr(), ds)
+		case "PROXY-UPDATE-SETUP":
+			proxyStartupReconcile(ctx, zd, kdb, notifyq, imr(), ds)
+		case "PROXY-UPDATE-GATE":
+			proxyUpdateGate(ds.ZoneName, func() (ProxyUpdateState, error) {
+				return zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr())
+			})
+		}
+
+	default:
+		lgDns.Warn("DelegationSyncher: unknown command, ignoring", "zone", ds.ZoneName, "command", ds.Command)
 	}
 }
 
@@ -742,8 +745,8 @@ func setupRetryDelay(attempt int) time.Duration {
 }
 
 // deferSetupRetry re-enqueues a DELEGATION-SYNC-SETUP after the backoff for
-// its attempt, with the attempt count advanced. Off the syncher goroutine so a
-// waiting zone does not stall the others; cancelled with ctx. The returned
+// its attempt, with the attempt count advanced. Off the parent's queue so a
+// waiting zone does not stall the parent's other zones; cancelled with ctx. The returned
 // channel closes when the worker exits, for tests.
 func deferSetupRetry(ctx context.Context, delsyncq chan DelegationSyncRequest, ds DelegationSyncRequest, reason string) <-chan struct{} {
 	return deferSetupRetryAfter(ctx, delsyncq, ds, setupRetryDelay(ds.Attempt), reason)
@@ -773,7 +776,7 @@ func nextReBootstrap(ds DelegationSyncRequest) (next DelegationSyncRequest, dela
 	return next, childReBootstrapDelay(ds.ReBootstrapRound), true
 }
 
-// requeueSetupAfter enqueues next after delay, off the syncher goroutine and
+// requeueSetupAfter enqueues next after delay, off the parent's queue and
 // cancelled with ctx. The returned channel closes when the worker exits.
 func requeueSetupAfter(ctx context.Context, delsyncq chan DelegationSyncRequest, next DelegationSyncRequest, delay time.Duration) <-chan struct{} {
 	done := make(chan struct{})
@@ -973,8 +976,8 @@ func handleDelegationSyncSetupWith(ctx context.Context, conf *Config, delsyncq c
 	case errors.Is(err, ErrNoImrEngine):
 		// Published, and STILL not usable from here. This must not go back to
 		// deferForImr: that waits on ImrReady, which is already closed, so the
-		// request would come straight back and the single syncher goroutine
-		// would spin on this one zone and starve every other. Whatever the
+		// request would come straight back and the parent's queue would spin
+		// on this one zone and starve the parent's other zones. Whatever the
 		// cause, it is a condition to wait out, so it takes the same bounded
 		// backoff as any other non-final failure.
 		if ds.Attempt+1 >= delegationSyncMaxRetries {

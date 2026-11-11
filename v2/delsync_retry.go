@@ -210,8 +210,9 @@ var errBootstrapDeferredToPoll = errors.New("SIG(0) key poll already running; le
 
 // errBootstrapKeyNotServed: a BADKEY re-bootstrap found the key not yet served
 // by all of the zone's nameservers. The UPDATE's retry backoff is the wait:
-// waiting here would hold the delegation-sync loop, the only reader of its
-// queue, for as long as the poll's wait (keyServedWait.limit).
+// waiting here would hold the zone's parent queue in the delegation syncher,
+// and every sync to that parent behind it, for as long as the poll's wait
+// (keyServedWait.limit).
 var errBootstrapKeyNotServed = errors.New("SIG(0) key not yet served by all of the zone's nameservers")
 
 // badkeyNotServedSince holds, per key, when a BADKEY re-bootstrap first found
