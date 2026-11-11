@@ -266,6 +266,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				ConfigUpdate:     true, // config-bearing (persisted dynamic zone)
 				Options:          specOptions,
 				UpdatePolicy:     spec.Policy,
+				UpdatePolicySet:  true,
 				DelegationPolicy: spec.DelegationPolicy,
 				DnssecPolicy:     spec.Zconf.DnssecPolicy,
 

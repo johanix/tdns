@@ -150,6 +150,15 @@ const (
 	// CPU on every replacement. Off, a replacement starts a new IXFR epoch as
 	// before.
 	OptIxfrFromDifferences
+	// OptAllowTsigUpdates admits RFC 2136 UPDATEs authorized by TSIG, separately
+	// from allow-updates (which admits SIG(0)) and allow-api-updates (the
+	// management API). What each TSIG key may change is the zone's
+	// updatepolicy.zone.tsig grants; with no grant nothing is allowed.
+	//
+	// Appended at the end for the same reason every option above it was:
+	// ZoneOption values are positional, so inserting mid-list renumbers
+	// everything after.
+	OptAllowTsigUpdates
 	optZoneOptionTdnsSentinel
 )
 
@@ -195,6 +204,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptModifiedDownstream:      "modified-downstream",
 	OptAllowDoubledSuffix:      "allow-doubled-suffix",
 	OptIxfrFromDifferences:     "ixfr-from-differences",
+	OptAllowTsigUpdates:        "allow-tsig-updates",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -235,6 +245,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"modified-downstream":        OptModifiedDownstream,
 	"allow-doubled-suffix":       OptAllowDoubledSuffix,
 	"ixfr-from-differences":      OptIxfrFromDifferences,
+	"allow-tsig-updates":         OptAllowTsigUpdates,
 }
 
 // deprecatedZoneOptionNames maps old option spellings to the canonical name
