@@ -81,7 +81,7 @@ func TestAReBootstrapAfterAFailedVerificationStartsOver(t *testing.T) {
 
 	r := ceremonyUpdateFrom(t, zd.ZoneName, key)
 	us := &UpdateStatus{Type: "TRUSTSTORE-UPDATE"}
-	if err := zd.ValidateUpdate(context.Background(), r, us); err != nil {
+	if err := zd.ValidateUpdate(context.Background(), r, nil, us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
 	}
 	if err := zd.TrustUpdate(r, us); err != nil {
@@ -108,7 +108,7 @@ func TestAReBootstrapOfARowLeftInProgressStartsOver(t *testing.T) {
 
 	r := ceremonyUpdateFrom(t, zd.ZoneName, key)
 	us := &UpdateStatus{Type: "TRUSTSTORE-UPDATE"}
-	if err := zd.ValidateUpdate(context.Background(), r, us); err != nil {
+	if err := zd.ValidateUpdate(context.Background(), r, nil, us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
 	}
 	if err := zd.TrustUpdate(r, us); err != nil {
@@ -127,7 +127,7 @@ func TestAReBootstrapWhileVerifyingIsStillKnownButNotTrusted(t *testing.T) {
 
 	r := ceremonyUpdateFrom(t, zd.ZoneName, key)
 	us := &UpdateStatus{Type: "TRUSTSTORE-UPDATE"}
-	if err := zd.ValidateUpdate(context.Background(), r, us); err != nil {
+	if err := zd.ValidateUpdate(context.Background(), r, nil, us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
 	}
 	if err := zd.TrustUpdate(r, us); err == nil {

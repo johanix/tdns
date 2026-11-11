@@ -19,6 +19,9 @@ type truncatingResponseWriter struct {
 	bufsize uint16
 }
 
+// Unwrap exposes the wrapped writer, for connectionState and requestWire.
+func (w *truncatingResponseWriter) Unwrap() dns.ResponseWriter { return w.ResponseWriter }
+
 func (w *truncatingResponseWriter) WriteMsg(m *dns.Msg) error {
 	if w.udp && m.Len() > int(w.bufsize) {
 		m.Truncate(int(w.bufsize))
