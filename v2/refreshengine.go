@@ -1121,6 +1121,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						DownstreamAuth:    zr.DownstreamAuth,
 						Zonefile:          zr.Zonefile,
 						Template:          zr.Template,
+						InlineTsigKey:     zr.InlineTsigKey,
 						ZoneType:          zr.ZoneType,
 						Options:           zr.Options,
 						OutboundSoaSerial: zr.OutboundSoaSerial,
@@ -1207,6 +1208,14 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
 
 					Zones.Set(zone, zd)
+
+					// A persisted template-driven zone whose template did not
+					// expand at boot: loaded without the template's outbound
+					// settings, and says why. After Zones.Set, because
+					// SetError republishes the zone.
+					if zr.TemplateWarning != "" {
+						zd.SetError(TemplateWarning, "%s", zr.TemplateWarning)
+					}
 
 					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
 						tryPostpass); err != nil {

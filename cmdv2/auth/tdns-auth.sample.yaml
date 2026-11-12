@@ -731,6 +731,13 @@ dynamiczones:
    dynamic:
       allowed:  [ ]              # e.g. [ secondary ] or [ secondary, primary ]
       storage:  memory           # "memory" or "persistent" - default: "memory"
+      # The template a zone add uses when the request names none, per zone
+      # type. Must be a template blessed with dynamiczones: true, of that
+      # type (see auth-templates.sample.yaml). The name is recorded with the
+      # zone, so changing the default later does not move existing zones.
+      # default-template:
+      #    secondary:  hub-secondary
+      #    primary:    dynamic-primary
 
 db:
    file:  /var/lib/tdns/tdns-auth.db

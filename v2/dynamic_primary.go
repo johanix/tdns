@@ -34,6 +34,14 @@ type dynamicPrimarySpec struct {
 	Policy           UpdatePolicy        // activated update policy
 	DelegationPolicy *DelegationPolicy   // bound named policy; omit → default
 	PublishCadence   time.Duration       // parsed publish-cadence (0 = default)
+	// InlineTsigKey is the key the template's keyless downstreams were bound
+	// to ("" for none): the staged key on an add, the persisted one at boot.
+	InlineTsigKey string
+	// LegacyEntry is set when the persisted entry carried materialized
+	// outbound settings (written before the template owned them). They were
+	// dropped in favour of the template, and InlineTsigKey was recovered from
+	// them; the caller re-persists the entry in the current form.
+	LegacyEntry bool
 }
 
 // dynamicPrimaryDisallowedOptions are template options that name machinery a
@@ -65,12 +73,21 @@ func lookupZoneTemplate(name string) (ZoneConf, bool) {
 // prepareDynamicPrimary expands zconf (Name + Template, plus any persisted
 // fields, which win over the template by gap-fill) against its template and
 // runs the same validation/activation sequence ParseZones applies to static
-// zones. staged, when non-nil, is an inline TSIG key being added with the
-// zone: keyless (""/NOKEY) downstreams entries are rewired to it (BLOCKED and
-// explicitly-keyed entries are never touched) BEFORE ACL validation, and the
-// ACL check accepts the staged name. fromAPI enforces the per-template
-// dynamiczones: blessing (gate 2) — the boot path only warns, mirroring how
-// dynamiczones.dynamic.allowed gates new adds but not already-persisted zones.
+// zones.
+//
+// The outbound settings (notify, allow-notify, downstreams, downstream-auth,
+// the NOTIFY resend settings) are the template's alone: whatever zconf
+// carries for them is dropped before the expansion (dynamic_template.go).
+// The inline TSIG key a zone was added with is re-applied after it: keyless
+// (""/NOKEY) downstreams entries are bound to it (BLOCKED and
+// explicitly-keyed entries are never touched) BEFORE ACL validation. The key
+// is staged.Name on an add, zconf.InlineTsigKey after that, and for an entry
+// persisted before this rule it is recovered from the materialized
+// downstreams (legacyInlineTsigKey). The ACL check accepts the staged name.
+//
+// fromAPI enforces the per-template dynamiczones: blessing (gate 2) — the
+// boot path only warns, mirroring how dynamiczones.dynamic.allowed gates new
+// adds but not already-persisted zones.
 //
 // A non-nil error means the config is invalid: the add path refuses the
 // request, the boot path registers an error-state zone.
@@ -85,15 +102,19 @@ func (conf *Config) prepareDynamicPrimary(zconf ZoneConf, staged *TsigDetails, f
 	if !ok {
 		return nil, fmt.Errorf("template %q does not exist", zconf.Template)
 	}
-	if fromAPI && !tmpl.DynamicZones {
-		return nil, fmt.Errorf("template %q is not blessed for dynamic zones (set dynamiczones: true on the template)", zconf.Template)
+	if err := dynamicTemplateGate(zconf.Template, &tmpl, Primary, fromAPI); err != nil {
+		return nil, err
 	}
 	if !fromAPI && !tmpl.DynamicZones {
 		lg.Warn("dynamic primary: template no longer blessed for dynamic zones; loading persisted zone anyway (blessing gates new adds)", "zone", zconf.Name, "template", zconf.Template)
 	}
-	if tmpl.Type != "" && strings.ToLower(tmpl.Type) != "primary" {
-		return nil, fmt.Errorf("template %q is type %s, not primary", zconf.Template, tmpl.Type)
-	}
+
+	// The template owns the outbound settings. An entry persisted before
+	// that carries them materialized: keep its downstreams to recover the
+	// inline key from, then drop them all.
+	legacy := !fromAPI && staged == nil && zconf.InlineTsigKey == "" && hasTemplateOwned(&zconf)
+	persistedDownstreams := zconf.Downstreams
+	clearTemplateOwned(&zconf)
 
 	// A conflicted template (primaries:+upstreams: etc.) would silently hand
 	// the zone its broader canonical ACL — same quarantine rule as ParseZones.
@@ -123,15 +144,26 @@ func (conf *Config) prepareDynamicPrimary(zconf ZoneConf, staged *TsigDetails, f
 		return nil, fmt.Errorf("dynamic zones are map-only (template %q sets store: %s)", zconf.Template, expanded.Store)
 	}
 
-	// Inline TSIG: rewire keyless (""/NOKEY) downstreams entries to the staged
-	// key — gating outbound transfers by it, the mirror image of the secondary
-	// case. BLOCKED and explicitly-keyed entries are never rewired (rewiring
-	// only ever tightens access). Done before ACL validation so the validation
-	// sees the final ACL.
+	// Inline TSIG: rewire keyless (""/NOKEY) downstreams entries to the
+	// zone's inline key — gating outbound transfers by it, the mirror image
+	// of the secondary case. BLOCKED and explicitly-keyed entries are never
+	// rewired (rewiring only ever tightens access). Done before ACL
+	// validation so the validation sees the final ACL.
+	inlineKey := zconf.InlineTsigKey
 	if staged != nil {
+		inlineKey = staged.Name
+	}
+	if legacy {
+		k, err := legacyInlineTsigKey(expanded.Downstreams, persistedDownstreams)
+		if err != nil {
+			return nil, err
+		}
+		inlineKey = k
+	}
+	if inlineKey != "" {
 		for i := range expanded.Downstreams {
 			if expanded.Downstreams[i].Key == "" || expanded.Downstreams[i].Key == NOKEY {
-				expanded.Downstreams[i].Key = staged.Name
+				expanded.Downstreams[i].Key = inlineKey
 			}
 		}
 	}
@@ -139,26 +171,8 @@ func (conf *Config) prepareDynamicPrimary(zconf ZoneConf, staged *TsigDetails, f
 	// The same per-list validation ParseZones applies. The ACL key check
 	// accepts the staged inline key (it is committed with the zone).
 	keyOK := func(name string) bool { return conf.tsigKeyAcceptable(name, staged) }
-	if err := validateDownstreamAuth(expanded.DownstreamAuth); err != nil {
-		return nil, fmt.Errorf("downstream-auth: %v", err)
-	}
-	crossCheckDownstreamAuth(expanded.Name, expanded.DownstreamAuth, expanded.Downstreams, conf.Internal.ImrEngine != nil)
-	for _, n := range expanded.Notify {
-		if n.Legacy != "" {
-			return nil, fmt.Errorf("notify now requires {addr, key} (got bare string %q)", n.Legacy)
-		}
-		if n.Transport != "" || n.TLSAuth != "" || n.TLSName != "" || len(n.Pins) > 0 || n.CAFile != "" {
-			return nil, fmt.Errorf("notify %s: transport/tls-* not supported for notify targets", n.Addr)
-		}
-		if n.Key != "" && n.Key != NOKEY && !keyOK(n.Key) {
-			return nil, fmt.Errorf("notify %s references unknown key %q", n.Addr, n.Key)
-		}
-	}
-	if err := ValidateACL(expanded.AllowNotify, keyOK); err != nil {
-		return nil, fmt.Errorf("allow-notify: %v", err)
-	}
-	if err := ValidateACL(expanded.Downstreams, keyOK); err != nil {
-		return nil, fmt.Errorf("downstreams: %v", err)
+	if err := conf.validateTemplateOutbound(&expanded, keyOK); err != nil {
+		return nil, err
 	}
 
 	publishCadence, err := parsePublishCadence(expanded.PublishCadence)
@@ -223,6 +237,8 @@ func (conf *Config) prepareDynamicPrimary(zconf ZoneConf, staged *TsigDetails, f
 		Policy:           policy,
 		DelegationPolicy: dpol,
 		PublishCadence:   publishCadence,
+		InlineTsigKey:    inlineKey,
+		LegacyEntry:      legacy,
 	}, nil
 }
 
@@ -404,6 +420,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		ZoneStore:         MapZone,
 		Zonefile:          spec.Zconf.Zonefile,
 		Template:          in.Template,
+		InlineTsigKey:     spec.InlineTsigKey,
 		Notify:            normalizePeerAddrs(spec.Zconf.Notify),
 		AllowNotify:       spec.Zconf.AllowNotify,
 		Downstreams:       spec.Zconf.Downstreams,
@@ -476,6 +493,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		ZoneStore:        MapZone,
 		Zonefile:         spec.Zconf.Zonefile,
 		Template:         in.Template,
+		InlineTsigKey:    spec.InlineTsigKey,
 		PublishCadence:   spec.PublishCadence,
 		Notify:           zd.Notify,
 		AllowNotify:      spec.Zconf.AllowNotify,

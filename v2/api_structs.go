@@ -316,10 +316,18 @@ type ZonePost struct {
 	Options   []string
 	// ZoneType selects what `zone add` creates: "secondary" (the default) or
 	// "primary" (template-provisioned). Template names the operator-blessed
-	// (dynamiczones: true) template a primary is expanded from — REQUIRED for
-	// primaries, unused for secondaries.
-	ZoneType string
-	Template string
+	// (dynamiczones: true) template the zone is expanded from. With none,
+	// dynamiczones.dynamic.default-template for the zone type applies. A
+	// primary takes its whole configuration from the template and cannot be
+	// added without one; a secondary takes only its outbound settings
+	// (downstreams, downstream-auth, notify, allow-notify, NOTIFY resend).
+	//
+	// On modify (secondaries), Template sets or replaces the zone's template,
+	// ClearTemplate removes it (and the outbound settings it gave), and
+	// neither keeps it.
+	ZoneType      string
+	Template      string
+	ClearTemplate bool `json:"cleartemplate,omitempty"`
 	// Zone content updates ("zone update <verb>"). UpdateRRs carries
 	// presentation-form records for addrr/delrr/replacerrset; UpdateName and
 	// UpdateRrtype address an RRset or a name for delrrset/delname. See
@@ -359,8 +367,8 @@ type ZonePost struct {
 	//
 	// It has to be settable here rather than only in the config file, because
 	// the zones that most need it are dynamic: a secondary provisioned over
-	// this API has no config-file stanza to carry it, and no template either
-	// (templates are a primary-only mechanism). Without this field the value
+	// this API has no config-file stanza to carry it, and its template (if
+	// any) gives it only its outbound settings. Without this field the value
 	// could be persisted and reloaded but never set in the first place.
 	//
 	// On modify, a nil slice leaves the current value alone; an explicitly

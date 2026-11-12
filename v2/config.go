@@ -938,6 +938,26 @@ type ZoneTypeList []string
 type DynamicApiZoneConf struct {
 	Allowed ZoneTypeList `yaml:"allowed" mapstructure:"allowed"`                                              // Zone types the API may create: primary, secondary
 	Storage string       `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
+	// DefaultTemplate names, per zone type ("primary", "secondary"), the
+	// template a zone add uses when the request names none. Each must be a
+	// template blessed with dynamiczones: true, of that type. The point is an
+	// operator guarantee: on a server whose API zones must all reach the same
+	// downstreams, a caller that forgets the template still gets them. The
+	// resolved name is persisted with the zone, so changing the default later
+	// does not move zones that were added under the old one.
+	DefaultTemplate map[string]string `yaml:"default-template" mapstructure:"default-template"`
+}
+
+// DefaultTemplateFor returns the operator's default template for zone type
+// zt, or "" when none is configured.
+func (c DynamicApiZoneConf) DefaultTemplateFor(zt ZoneType) string {
+	want := ZoneTypeToString[zt]
+	for t, name := range c.DefaultTemplate {
+		if strings.EqualFold(strings.TrimSpace(t), want) {
+			return strings.TrimSpace(name)
+		}
+	}
+	return ""
 }
 
 // Allows reports whether the API may create zones of type zt.
@@ -960,6 +980,55 @@ func (d *DynamicZonesConf) Validate() error {
 		case "primary", "secondary":
 		default:
 			return fmt.Errorf("dynamiczones.dynamic.allowed: unknown zone type %q (valid values: primary, secondary)", t)
+		}
+	}
+	for t := range d.Dynamic.DefaultTemplate {
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "primary", "secondary":
+		default:
+			return fmt.Errorf("dynamiczones.dynamic.default-template: unknown zone type %q (valid values: primary, secondary)", t)
+		}
+	}
+	return nil
+}
+
+// ValidateDefaultTemplates checks that every dynamiczones.dynamic.default-template
+// entry names a template that exists, is blessed with dynamiczones: true, and
+// is of the zone type it is the default for -- the same gates a zone add
+// applies (dynamicTemplateGate), so a default that every add would refuse is
+// refused at load instead. Separate from Validate because it needs the
+// templates. Called from both ParseConfig and ValidateConfig.
+func (d *DynamicZonesConf) ValidateDefaultTemplates(templates []ZoneConf) error {
+	byName := make(map[string]ZoneConf, len(templates))
+	for _, t := range templates {
+		byName[t.Name] = t
+	}
+	for t, name := range d.Dynamic.DefaultTemplate {
+		zt := Secondary
+		if strings.EqualFold(strings.TrimSpace(t), "primary") {
+			zt = Primary
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: empty template name", t)
+		}
+		tmpl, ok := byName[name]
+		if !ok {
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q does not exist", t, name)
+		}
+		// A template may take its type from a parent template (the daemon
+		// expands the chain in buildTemplateMap); follow it here too, so this
+		// check and the daemon agree. dynamiczones: is never inherited.
+		for seen, p := map[string]bool{name: true}, tmpl.Template; tmpl.Type == "" && p != "" && !seen[p]; {
+			seen[p] = true
+			parent, ok := byName[p]
+			if !ok {
+				break
+			}
+			tmpl.Type, p = parent.Type, parent.Template
+		}
+		if err := dynamicTemplateGate(name, &tmpl, zt, true); err != nil {
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: %v", t, err)
 		}
 	}
 	return nil
@@ -1193,12 +1262,24 @@ func standbyKeyCount(pol *DnssecPolicy, sep bool, global int) int {
 // DNSSEC policy-algorithm guardrail (checkReloadPolicyGuardrail) holds a dangerous
 // same-name algorithm change rather than applying it. Use ReloadConfigConfirm to
 // carry an operator's explicit confirm.
-func (conf *Config) ReloadConfig() (string, error) { return conf.reloadConfig(false) }
+func (conf *Config) ReloadConfig() (string, error) { return conf.reloadConfigAndTemplates(false) }
 
 // ReloadConfigConfirm is ReloadConfig with the operator's confirm flag: confirm
 // lets a guarded DNSSEC policy-algorithm change through the reload gate.
 func (conf *Config) ReloadConfigConfirm(confirm bool) (string, error) {
-	return conf.reloadConfig(confirm)
+	return conf.reloadConfigAndTemplates(confirm)
+}
+
+// reloadConfigAndTemplates is reloadConfig, then the re-expansion of every
+// template-driven dynamic zone against the templates the reload just
+// rebuilt. The re-expansion runs after reloadConfig has released confMu: the
+// template lookup takes it.
+func (conf *Config) reloadConfigAndTemplates(confirm bool) (string, error) {
+	msg, err := conf.reloadConfig(confirm)
+	if err == nil {
+		msg += conf.ReapplyDynamicZoneTemplates().summary()
+	}
+	return msg, err
 }
 
 func (conf *Config) reloadConfig(confirm bool) (string, error) {
@@ -1435,5 +1516,10 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		WithdrawSignalPublicationsForZone(conf.Internal.KeyDB, zname)
 	}
 
-	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s", prezones, zonelist, imrReloadMsg), err
+	// The templates were rebuilt above: re-expand every template-driven
+	// dynamic zone against them, so an edited template reaches its zones on
+	// this reload. Off confMu: the template lookup takes it.
+	templateMsg := conf.ReapplyDynamicZoneTemplates().summary()
+
+	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s%s", prezones, zonelist, imrReloadMsg, templateMsg), err
 }

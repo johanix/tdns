@@ -678,6 +678,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := conf.buildTemplateMap(); err != nil {
 		return err
 	}
+	// Needs the templates, so it runs here rather than with
+	// DynamicZones.Validate above.
+	if err := conf.DynamicZones.ValidateDefaultTemplates(conf.Templates); err != nil {
+		return err
+	}
 
 	// log.Printf("*** ParseConfig: 1")
 	// Set up viper with the same config for compatibility
@@ -1923,6 +1928,9 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		// DynamicZones is a property of the TEMPLATE (API-instantiable), not
 		// of the zones stamped out from it — never copied.
 		"DynamicZones": true,
+		// A dynamic zone's own inline TSIG key (persisted by the daemon),
+		// never a template's to hand out.
+		"InlineTsigKey": true,
 	}
 	gapFillStruct(reflect.ValueOf(&zconf).Elem(), reflect.ValueOf(tmpl).Elem(), bespoke, false)
 	return zconf, nil
