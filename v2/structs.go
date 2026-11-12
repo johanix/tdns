@@ -203,7 +203,11 @@ type ZoneData struct {
 	// own zone file (regenerateCatalogZone). Atomic: ParseZones sets it on a
 	// live zone when the config takes one over, and readers hold no lock.
 	fromStaticConfig atomic.Bool
-	DelegationSyncQ  chan DelegationSyncRequest
+	// catalogWriteMu serializes a configured catalog's write-backs to its own
+	// zone file (writeBackCatalogZone). Never taken with zd.mu held: WriteZone
+	// takes zd.mu itself.
+	catalogWriteMu  sync.Mutex
+	DelegationSyncQ chan DelegationSyncRequest
 	// parent is the zone's parent name, resolved lazily on first use and
 	// cached. UNEXPORTED ON PURPOSE: parentMu owns it, and going through
 	// ResolveParent/GetParent/SetParent is what makes that ownership

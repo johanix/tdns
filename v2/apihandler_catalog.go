@@ -645,7 +645,15 @@ func regenerateCatalogZone(catalogZoneName string) error {
 
 // writeBackCatalogZone writes a configured catalog's published content to its
 // own zone file. Must be called without zd.mu held.
+//
+// One write-back at a time per zone (zd.catalogWriteMu): two in flight could
+// otherwise finish out of order, the one holding the older snapshot renaming
+// its file last and leaving the file a serial behind the zone. With the lock,
+// each write takes its snapshot inside the critical section, so the file ends
+// at the newest snapshot any of them saw.
 func writeBackCatalogZone(zd *ZoneData) {
+	zd.catalogWriteMu.Lock()
+	defer zd.catalogWriteMu.Unlock()
 	if msg, err := zd.WriteZone(true, true); err != nil {
 		lgApi.Warn("failed to write the catalog back to its zone file", "zone", zd.ZoneName, "file", zd.Zonefile, "err", err)
 	} else {

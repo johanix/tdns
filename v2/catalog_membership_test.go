@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -324,4 +325,56 @@ func TestAutoConfigureLeavesAReadOnlyCatalogAlone(t *testing.T) {
 	if !zd.HasError(ConfigError) {
 		t.Error("a catalog that auto-creates must still be refused a member group it has no config for")
 	}
+}
+
+func TestCatalogGroupDeleteRefusedWhileInUse(t *testing.T) {
+	const zone = "catalog.groups.example."
+	zd := newTestCatalog(t, zone)
+	if err := handleCatalogGroupAdd(zone, "blue", &CatalogResponse{}); err != nil {
+		t.Fatalf("group add: %v", err)
+	}
+	if err := handleCatalogZoneAdd(zone, "m1.example.", []string{"blue"}, &CatalogResponse{}); err != nil {
+		t.Fatalf("zone add: %v", err)
+	}
+	waitForMembers(t, zd, 1)
+	if err := handleCatalogGroupDelete(zone, "blue", &CatalogResponse{}); err == nil ||
+		!strings.Contains(err.Error(), "still used") {
+		t.Errorf("deleting a group a member still carries must be refused: %v", err)
+	}
+	if err := handleCatalogZoneGroupDelete(zone, "m1.example.", "blue", &CatalogResponse{}); err != nil {
+		t.Fatalf("zone group delete: %v", err)
+	}
+	if err := handleCatalogGroupDelete(zone, "blue", &CatalogResponse{}); err != nil {
+		t.Errorf("deleting a group no member carries: %v", err)
+	}
+}
+
+func TestConfiguredCatalogWriteBacksEndAtTheNewestSerial(t *testing.T) {
+	const zone = "catalog.writeback.example."
+	dir := t.TempDir()
+	zd := newTestCatalog(t, zone)
+	own := filepath.Join(dir, "catalog.writeback.example.zone")
+	zd.mu.Lock()
+	zd.fromStaticConfig.Store(true)
+	zd.Zonefile = own
+	zd.mu.Unlock()
+	for _, m := range []string{"m1.example.", "m2.example.", "m3.example."} {
+		if err := handleCatalogZoneAdd(zone, m, nil, &CatalogResponse{}); err != nil {
+			t.Fatalf("zone add %s: %v", m, err)
+		}
+	}
+	waitForMembers(t, zd, 3)
+	// Several write-backs at once, as quick successive edits start them.
+	done := make(chan struct{})
+	for i := 0; i < 8; i++ {
+		go func() { writeBackCatalogZone(zd); done <- struct{}{} }()
+	}
+	for i := 0; i < 8; i++ {
+		<-done
+	}
+	want := zd.publishedSnapshot().Serial
+	waitFor(t, 3*time.Second, "the file at the newest serial", func() bool {
+		b, err := os.ReadFile(own)
+		return err == nil && strings.Contains(string(b), fmt.Sprintf(" %d ", want))
+	})
 }

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -762,6 +763,24 @@ func (cm *CatalogMembership) RemoveGroup(group string) error {
 
 	if !found {
 		return fmt.Errorf("group %s not found in catalog %s", group, cm.CatalogZoneName)
+	}
+
+	// A group a member still carries is in the catalog's published records
+	// (the member's group TXT), and the member list is rebuilt from those at
+	// the next load (rebuildCatalogMembership), which would bring the group
+	// back. Refused rather than half-done: remove it from the members first.
+	var users []string
+	for name, m := range cm.MemberZones {
+		for _, g := range m.Groups {
+			if g == group {
+				users = append(users, name)
+				break
+			}
+		}
+	}
+	if len(users) > 0 {
+		sort.Strings(users)
+		return fmt.Errorf("group %s is still used by %d member zone(s) of catalog %s (%s); remove it from them first (catalog zone group delete)", group, len(users), cm.CatalogZoneName, strings.Join(users, ", "))
 	}
 
 	cm.AvailableGroups = newGroups
