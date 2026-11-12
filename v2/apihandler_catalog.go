@@ -574,7 +574,26 @@ func regenerateCatalogZone(catalogZoneName string) error {
 	// when the publish was here, else registered for the publisher, which runs
 	// them outside zd.mu once that publish has installed its snapshot.
 	outcome := zd.publishOrQueueLocked(zd.generation.Load(), false)
-	if Conf.ShouldPersistZone(zd) {
+	dropped := outcome == publishRefused && zd.workingSet == nil
+	switch {
+	case dropped:
+		// Refused and dropped (the journal, a zone no longer live): nothing
+		// will carry the change, so nothing follows it.
+	case zd.fromStaticConfig && zd.Zonefile != "":
+		// A catalog the config file defines: its zone file is where its
+		// content lives, so the change goes there, as `zone write` would put
+		// it. A copy under dynamiczones.zonedirectory was never read back,
+		// and a restart or a zone reload served the catalog from its own file
+		// without the change. WriteZone takes zd.mu, so it runs once this
+		// function has released it (published here), or after the publish
+		// that carries the change (the publisher runs afterPublish outside
+		// zd.mu).
+		if outcome == publishedHere {
+			go writeBackCatalogZone(zd)
+		} else {
+			zd.afterPublish = append(zd.afterPublish, func() { writeBackCatalogZone(zd) })
+		}
+	case Conf.ShouldPersistZone(zd):
 		persist := func() {
 			if _, err := zd.WriteDynamicZoneFile(Conf.DynamicZones.ZoneDirectory); err != nil {
 				lgApi.Warn("failed to write catalog zone file", "zone", catalogZoneName, "err", err)
@@ -585,13 +604,9 @@ func regenerateCatalogZone(catalogZoneName string) error {
 				// Don't fail the operation, just log the warning
 			}
 		}
-		switch {
-		case outcome == publishedHere:
+		if outcome == publishedHere {
 			persist()
-		case outcome == publishRefused && zd.workingSet == nil:
-			// Refused and dropped (the journal, a zone no longer live):
-			// nothing will carry the change, so nothing follows it.
-		default:
+		} else {
 			// Queued, held, or refused with the change kept staged: the
 			// file and the config follow the publish that carries it.
 			zd.afterPublish = append(zd.afterPublish, func() {
@@ -604,6 +619,16 @@ func regenerateCatalogZone(catalogZoneName string) error {
 
 	lgApi.Info("regenerated catalog zone", "zone", catalogZoneName, "members", len(cm.MemberZones))
 	return nil
+}
+
+// writeBackCatalogZone writes a configured catalog's published content to its
+// own zone file. Must be called without zd.mu held.
+func writeBackCatalogZone(zd *ZoneData) {
+	if msg, err := zd.WriteZone(true, true); err != nil {
+		lgApi.Warn("failed to write the catalog back to its zone file", "zone", zd.ZoneName, "file", zd.Zonefile, "err", err)
+	} else {
+		lgApi.Info("wrote the catalog back to its zone file", "zone", zd.ZoneName, "file", zd.Zonefile, "detail", msg)
+	}
 }
 
 // handleCatalogNotifyAdd adds a notify address to a catalog zone

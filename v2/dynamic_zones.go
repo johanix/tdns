@@ -86,6 +86,13 @@ func (conf *Config) ShouldPersistZone(zd *ZoneData) bool {
 		return false
 	}
 
+	// A zone the config file defines is the config file's. Writing it into
+	// the dynamic config as well would make it outlive its removal from the
+	// config file: the next boot would load it back as a dynamic zone.
+	if zd.fromStaticConfig {
+		return false
+	}
+
 	// Check zone type and storage setting
 	if zd.Options[OptCatalogZone] {
 		// Catalog zone
@@ -342,7 +349,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				clearTemplateOwned(&cf.Zones[i])
 				needsRepersist = true
 			}
-			out, terr := conf.prepareSecondaryTemplate(zoneName, zconf.Template, false)
+			out, terr := conf.prepareSecondaryTemplate(zoneName, zconf.Template, false, inboundKeys(zconf.Primaries, ""))
 			if terr != nil {
 				lg.Error("dynamic secondary: template did not expand; loading the zone without its outbound settings", "zone", zoneName, "template", zconf.Template, "err", terr)
 				templateWarning = fmt.Sprintf("template %q: %v; loaded without the template's outbound settings (no transfers out, no NOTIFYs)", zconf.Template, terr)
@@ -977,18 +984,6 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		}
 	}
 
-	// A template gives the zone its outbound settings: downstreams, NOTIFY
-	// targets and the rest (dynamic_template.go). Nothing else comes from
-	// it, so the primaries, key and options above stay the caller's.
-	var outbound templateOutbound
-	if in.Template != "" {
-		out, terr := conf.prepareSecondaryTemplate(name, in.Template, fromAPI)
-		if terr != nil {
-			return "", fmt.Errorf("zone %s: %w", name, terr)
-		}
-		outbound = out
-	}
-
 	options := in.Options
 	if options == nil {
 		options = map[ZoneOption]bool{}
@@ -1014,6 +1009,26 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	}
 	primariesConf := clonePeerConfs(in.Primaries)
 	upstreams := res.Resolved
+
+	// A template gives the zone its outbound settings: downstreams, NOTIFY
+	// targets and the rest (dynamic_template.go). Nothing else comes from
+	// it, so the primaries, key and options above stay the caller's. From
+	// the expansion until the zone is in Zones, templateApplyMu keeps a
+	// reload's re-expansion from landing in between.
+	templateApplyMu.Lock()
+	defer templateApplyMu.Unlock()
+	var outbound templateOutbound
+	if in.Template != "" {
+		stagedName := ""
+		if staged != nil {
+			stagedName = staged.Name
+		}
+		out, terr := conf.prepareSecondaryTemplate(name, in.Template, fromAPI, inboundKeys(in.Primaries, stagedName))
+		if terr != nil {
+			return "", fmt.Errorf("zone %s: %w", name, terr)
+		}
+		outbound = out
+	}
 
 	// Store is always map for dynamic zones — single chokepoint for the map-only
 	// rule (also covers the catalog re-point).
@@ -1256,38 +1271,6 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		return "", fmt.Errorf("zone %s: %v", name, err)
 	}
 
-	// The template: kept unless the request names a new one or clears it.
-	// Expanded before anything is mutated, so a refused template leaves the
-	// zone as it was. A newly named template is gated like an add's; one the
-	// zone already has is gated like at boot, and if it no longer expands the
-	// zone keeps its outbound settings with a TemplateWarning rather than
-	// having an unrelated modify (a key, a primary) refused over it.
-	if in.ClearTemplate && in.Template != "" {
-		return "", fmt.Errorf("zone %s: set a template or clear it, not both", name)
-	}
-	oldZd.mu.Lock()
-	template := oldZd.Template
-	oldZd.mu.Unlock()
-	switch {
-	case in.ClearTemplate:
-		template = ""
-	case in.Template != "":
-		template = in.Template
-	}
-	var outbound templateOutbound
-	templateWarning := ""
-	if template != "" {
-		out, terr := conf.prepareSecondaryTemplate(name, template, in.Template != "")
-		switch {
-		case terr == nil:
-			outbound = out
-		case in.Template != "":
-			return "", fmt.Errorf("zone %s: %w", name, terr)
-		default:
-			templateWarning = fmt.Sprintf("template %q: %v; keeping the zone's previous outbound settings", template, terr)
-		}
-	}
-
 	// Resolve any new primaries up front, before mutating state, so a
 	// zero-resolution modify is rejected cleanly with no side effects. When no
 	// new primaries are supplied, carry the old as-written + resolved forward.
@@ -1301,6 +1284,46 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		}
 		primariesConf = clonePeerConfs(in.Primaries)
 		upstreams = modRes.Resolved
+	}
+
+	// The template: kept unless the request names a new one or clears it.
+	// Expanded before anything is mutated, so a refused template leaves the
+	// zone as it was, and under templateApplyMu until the replacement is in
+	// Zones, so a reload's re-expansion cannot land in between. A newly named
+	// template is gated like an add's; one the zone already has is gated like
+	// at boot, and if it no longer expands the zone keeps its outbound
+	// settings with a TemplateWarning rather than having an unrelated modify
+	// (a key, a primary) refused over it.
+	if in.ClearTemplate && in.Template != "" {
+		return "", fmt.Errorf("zone %s: set a template or clear it, not both", name)
+	}
+	templateApplyMu.Lock()
+	defer templateApplyMu.Unlock()
+	oldZd.mu.Lock()
+	template := oldZd.Template
+	oldZd.mu.Unlock()
+	switch {
+	case in.ClearTemplate:
+		template = ""
+	case in.Template != "":
+		template = in.Template
+	}
+	var outbound templateOutbound
+	templateWarning := ""
+	if template != "" {
+		stagedName := ""
+		if staged != nil {
+			stagedName = staged.Name
+		}
+		out, terr := conf.prepareSecondaryTemplate(name, template, in.Template != "", inboundKeys(primariesConf, stagedName))
+		switch {
+		case terr == nil:
+			outbound = out
+		case in.Template != "":
+			return "", fmt.Errorf("zone %s: %w", name, terr)
+		default:
+			templateWarning = fmt.Sprintf("template %q: %v; keeping the zone's previous outbound settings", template, terr)
+		}
 	}
 
 	// (1) Bump the old generation so any in-flight refresh on the captured

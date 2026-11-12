@@ -24,10 +24,21 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
 )
+
+// templateApplyMu orders the installs of template expansions on live zones.
+// A reload's re-expansion (ReapplyDynamicZoneTemplates) holds it for its whole
+// run, and an add or a modify holds it from its expansion until the zone is in
+// Zones. Without it an expansion made before a reload rebuilt the template map
+// could be installed after the reload's own, and the zone would keep a
+// downstream the operator had just removed until the next reload. Taken with
+// no other lock held; confMu (the template lookup) and zd.mu are taken inside
+// it, never the other way round.
+var templateApplyMu sync.Mutex
 
 // templateOutbound is the outbound half of a zone's configuration, the part
 // a dynamic zone's template owns.
@@ -160,15 +171,74 @@ func (conf *Config) validateTemplateOutbound(expanded *ZoneConf, keyOK func(stri
 	return nil
 }
 
+// inboundKeys returns the TSIG key names a secondary's primaries use, plus a
+// staged inline key ("" for none): the keys that authenticate where the zone
+// comes from.
+func inboundKeys(primaries []PeerConf, staged string) []string {
+	var keys []string
+	for _, p := range primaries {
+		if p.Key != "" && !tsigNameIsReserved(p.Key) {
+			keys = append(keys, p.Key)
+		}
+	}
+	if staged != "" {
+		keys = append(keys, staged)
+	}
+	return keys
+}
+
+// refuseInboundKeyInTemplate refuses an expanded template that names one of
+// the zone's own inbound keys. Such a key authenticates the zone's primaries
+// (typically the zone owner's key, given with the add), and the template is
+// shared by every zone stamped from it: naming it in the template's
+// downstreams would let its holder transfer every such zone. A key the
+// operator declares in keys.tsig is the operator's own and is exempt: one
+// operator key may well serve both directions.
+func (conf *Config) refuseInboundKeyInTemplate(template string, zc *ZoneConf, inbound []string) error {
+	if len(inbound) == 0 {
+		return nil
+	}
+	own := map[string]string{}
+	confMu.RLock()
+	for _, k := range inbound {
+		if !conf.tsigKeyDeclaredInConfig(k) {
+			own[tsigKeyKey(k)] = k
+		}
+	}
+	confMu.RUnlock()
+	check := func(list, key string) error {
+		if k, hit := own[tsigKeyKey(key)]; hit && key != "" {
+			return fmt.Errorf("template %q names the zone's own inbound TSIG key %q in %s; that key authenticates the zone's primaries, and a template is shared by every zone stamped from it", template, k, list)
+		}
+		return nil
+	}
+	for _, n := range zc.Notify {
+		if err := check("notify", n.Key); err != nil {
+			return err
+		}
+	}
+	for _, e := range zc.Downstreams {
+		if err := check("downstreams", e.Key); err != nil {
+			return err
+		}
+	}
+	for _, e := range zc.AllowNotify {
+		if err := check("allow-notify", e.Key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // prepareSecondaryTemplate expands template for the API secondary zname and
 // returns the outbound settings it gives the zone. Nothing else is taken from
 // the template: the zone's primaries, TSIG key, options and transfer source
 // are the caller's, so a template cannot redirect where a zone comes from.
 //
-// The secondary's own inline TSIG key is not acceptable here: it
-// authenticates the zone's primaries, and a template is shared by every zone
-// stamped from it. Every key the template names must be in the keystore.
-func (conf *Config) prepareSecondaryTemplate(zname, template string, fromAPI bool) (templateOutbound, error) {
+// inbound holds the zone's own inbound keys (inboundKeys): the template may
+// not name them (refuseInboundKeyInTemplate). Every key the template names
+// must be in the keystore.
+func (conf *Config) prepareSecondaryTemplate(zname, template string, fromAPI bool, inbound []string) (templateOutbound, error) {
 	zname = dns.Fqdn(zname)
 	tmpl, ok := lookupZoneTemplate(template)
 	if !ok {
@@ -182,7 +252,11 @@ func (conf *Config) prepareSecondaryTemplate(zname, template string, fromAPI boo
 	}
 	// A conflicted template (downstreams: plus provide-xfr: etc.) would hand
 	// the zone the surviving broad list -- same quarantine rule as ParseZones.
-	if conflict := zoneOrTemplateAliasConflict(conf.Internal.XfrAliasConflicts, zname, template); conflict != "" {
+	// Under confMu: a reload replaces the conflict map.
+	confMu.RLock()
+	conflict := zoneOrTemplateAliasConflict(conf.Internal.XfrAliasConflicts, zname, template)
+	confMu.RUnlock()
+	if conflict != "" {
 		return templateOutbound{}, fmt.Errorf("conflicting transfer-list spellings: %s", conflict)
 	}
 
@@ -202,6 +276,9 @@ func (conf *Config) prepareSecondaryTemplate(zname, template string, fromAPI boo
 	if err := conf.expandPeerRefs(&zc, conf.Internal.BrokenPeers); err != nil {
 		return templateOutbound{}, fmt.Errorf("peers: %v", err)
 	}
+	if err := conf.refuseInboundKeyInTemplate(template, &zc, inbound); err != nil {
+		return templateOutbound{}, err
+	}
 	if err := conf.validateTemplateOutbound(&zc, conf.tsigKeyDefined); err != nil {
 		return templateOutbound{}, err
 	}
@@ -213,10 +290,10 @@ func (conf *Config) prepareSecondaryTemplate(zname, template string, fromAPI boo
 // primary it runs the whole primary expansion (prepareDynamicPrimary), so a
 // template that no longer validates is reported here too; only the outbound
 // side of the result is used.
-func (conf *Config) expandTemplateOutbound(zname string, zt ZoneType, template, zonefile, inlineKey string) (templateOutbound, error) {
+func (conf *Config) expandTemplateOutbound(zname string, zt ZoneType, template, zonefile, inlineKey string, primaries []PeerConf) (templateOutbound, error) {
 	switch zt {
 	case Secondary:
-		return conf.prepareSecondaryTemplate(zname, template, false)
+		return conf.prepareSecondaryTemplate(zname, template, false, inboundKeys(primaries, ""))
 	case Primary:
 		spec, err := conf.prepareDynamicPrimary(ZoneConf{
 			Name:          zname,
@@ -246,23 +323,53 @@ func (conf *Config) expandTemplateOutbound(zname string, zt ZoneType, template, 
 // binding would open the zone to keyless transfers.
 func legacyInlineTsigKey(templateDownstreams, persisted []AclEntry) (string, error) {
 	keyless := map[string]bool{}
+	inTemplate := map[string]bool{}
 	for _, e := range templateDownstreams {
+		p := strings.TrimSpace(e.Prefix)
+		inTemplate[p] = true
 		if e.Key == "" || e.Key == NOKEY {
-			keyless[strings.TrimSpace(e.Prefix)] = true
+			keyless[p] = true
 		}
 	}
 	found := map[string]string{} // canonical key -> key as written
+	covered := map[string]bool{} // keyless template prefixes the entry has an entry for
+	noKeyEvidence := false       // the entry left a keyless template prefix keyless
+	var dropped []string         // keyed persisted prefixes the template no longer has
 	for _, e := range persisted {
-		if !keyless[strings.TrimSpace(e.Prefix)] {
+		p := strings.TrimSpace(e.Prefix)
+		keyed := e.Key != "" && !tsigNameIsReserved(e.Key)
+		if !inTemplate[p] && keyed {
+			dropped = append(dropped, p)
+		}
+		if !keyless[p] {
 			continue
 		}
-		if e.Key == "" || tsigNameIsReserved(e.Key) {
+		covered[p] = true
+		if !keyed {
+			if e.Key == "" || e.Key == NOKEY {
+				noKeyEvidence = true
+			}
 			continue
 		}
 		found[tsigKeyKey(e.Key)] = e.Key
 	}
 	switch len(found) {
 	case 0:
+		// Nothing bound on the prefixes the template leaves keyless. That
+		// proves there was no inline key only if the entry shows one of them
+		// keyless, or there is no keyed entry the template has dropped.
+		// Otherwise the inline key may have sat on a prefix the template no
+		// longer has, and the template's new keyless prefixes would be left
+		// open to keyless transfers.
+		if noKeyEvidence || len(dropped) == 0 {
+			return "", nil
+		}
+		for p := range keyless {
+			if !covered[p] {
+				return "", fmt.Errorf("cannot tell whether this zone was added with an inline TSIG key: the persisted downstreams bind %v, which the template no longer has, and the template's keyless %s has no persisted entry; "+
+					"set inline-tsig-key on the zone's entry in the dynamic config, or delete and re-add the zone", dropped, p)
+			}
+		}
 		return "", nil
 	case 1:
 		for _, k := range found {
@@ -322,6 +429,8 @@ func (r reapplyResult) summary() string {
 //
 // Must be called WITHOUT confMu held: the template lookup takes it.
 func (conf *Config) ReapplyDynamicZoneTemplates() reapplyResult {
+	templateApplyMu.Lock()
+	defer templateApplyMu.Unlock()
 	var res reapplyResult
 	for item := range Zones.IterBuffered() {
 		zd := item.Val
@@ -331,12 +440,18 @@ func (conf *Config) ReapplyDynamicZoneTemplates() reapplyResult {
 		zd.mu.Lock()
 		apiManaged := zd.Options[OptApiManagedZone]
 		template, zt, zonefile, inlineKey := zd.Template, zd.ZoneType, zd.Zonefile, zd.InlineTsigKey
+		primaries := clonePeerConfs(zd.PrimariesConf)
+		legacyShell := zd.keepPersistedOutbound
 		zd.mu.Unlock()
-		if !apiManaged || template == "" {
+		// An error-state shell of an entry from before the template owned the
+		// outbound settings keeps its persisted lists, the only record of its
+		// inline key; an expansion here would replace them with the
+		// template's unbound ones. It is only ever loaded at boot.
+		if !apiManaged || template == "" || legacyShell {
 			continue
 		}
 		res.Zones++
-		out, err := conf.expandTemplateOutbound(item.Key, zt, template, zonefile, inlineKey)
+		out, err := conf.expandTemplateOutbound(item.Key, zt, template, zonefile, inlineKey, primaries)
 		zd.mu.Lock()
 		if cur, live := Zones.Get(item.Key); !live || cur != zd {
 			// Deleted or replaced while we expanded: the replacement got

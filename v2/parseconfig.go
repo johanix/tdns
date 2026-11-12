@@ -1017,9 +1017,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zd, exists := Zones.Get(zname)
 		if !exists {
 			zd = &ZoneData{
-				ZoneName:      core.CanonicalizeName(zname),
-				Logger:        log.Default(),
-				FirstZoneLoad: true,
+				ZoneName:         core.CanonicalizeName(zname),
+				Logger:           log.Default(),
+				FirstZoneLoad:    true,
+				fromStaticConfig: true,
 			}
 			// Before Zones.Set, while the zone is still private to this
 			// goroutine -- the contract registerStandardRefreshHooks states
@@ -2046,8 +2047,14 @@ func (conf *Config) reloadTemplatesFromFile() error {
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
+	// The transfer-list aliases (provide-xfr: and the rest), rewritten and
+	// conflict-checked as the startup parse does (ParseConfig). Without it a
+	// template spelled with an alias lost its downstreams on this reload.
+	conf.Internal.XfrAliasConflicts = NormalizeXfrAliases(configMap)
 
-	// Decode only the templates from the config
+	// Decode only the templates from the config, with the same hooks as the
+	// zones (reloadZonesFromFile), so a peer or ACL entry written as a bare
+	// string decodes as it does at startup.
 	// Note: TagName:"yaml" means mapstructure reads yaml struct tags
 	var partial struct {
 		Templates []ZoneConf `yaml:"templates"`
@@ -2055,6 +2062,10 @@ func (conf *Config) reloadTemplatesFromFile() error {
 	decoderConfig := &mapstructure.DecoderConfig{
 		TagName: "yaml",
 		Result:  &partial,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			stringToPeerConfHook(),
+			stringToAclEntryHook(),
+		),
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
 	if err != nil {
@@ -2177,6 +2188,9 @@ func (conf *Config) reloadZonesFromFile() error {
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
+	// The transfer-list aliases, as at startup: a zone spelled with
+	// provide-xfr: (or another alias) lost that list on this reload.
+	conf.Internal.XfrAliasConflicts = NormalizeXfrAliases(configMap)
 
 	var partial struct {
 		Zones []ZoneConf `yaml:"zones"`

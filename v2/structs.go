@@ -197,7 +197,12 @@ type ZoneData struct {
 	// instead of dropping them: they are the only record of which TSIG key
 	// the zone's downstreams were bound to.
 	keepPersistedOutbound bool
-	DelegationSyncQ       chan DelegationSyncRequest
+	// fromStaticConfig marks a zone the configuration file defines (set where
+	// ParseZones creates it). Such a zone is never written into the dynamic
+	// config file, and a catalog among them writes its changes back to its
+	// own zone file (regenerateCatalogZone).
+	fromStaticConfig bool
+	DelegationSyncQ  chan DelegationSyncRequest
 	// parent is the zone's parent name, resolved lazily on first use and
 	// cached. UNEXPORTED ON PURPOSE: parentMu owns it, and going through
 	// ResolveParent/GetParent/SetParent is what makes that ownership

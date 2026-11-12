@@ -167,16 +167,72 @@ func TestProvisionDynamicSecondary_TemplateGates(t *testing.T) {
 	}
 
 	// The secondary's own inline key authenticates its primaries. It is not
-	// a key the template may bind its downstreams to.
+	// a key the template may bind its downstreams to -- also when an earlier
+	// add has already put it in the keystore, which is the usual case.
 	resetZonesForTest()
+	const custSecret = "Y3VzdC1rZXktc2VjcmV0"
+	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: "cust-key.", Algorithm: "hmac-sha256", Secret: custSecret})
 	inlineBound := hubTemplate()
 	inlineBound.Downstreams = []AclEntry{{Prefix: "192.0.2.0/24", Key: "cust-key."}}
 	Templates["inline-bound"] = inlineBound
 	in := secondaryIn("inline.example")
 	in.Template = "inline-bound"
-	in.TsigName, in.TsigSecret = "cust-key.", "Y3VzdC1rZXktc2VjcmV0"
-	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err == nil {
-		t.Error("a template's downstreams must not accept the zone's own inbound inline key")
+	in.TsigName, in.TsigSecret = "cust-key.", custSecret
+	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err == nil ||
+		!strings.Contains(err.Error(), "own inbound TSIG key") {
+		t.Errorf("a template naming the zone's own inbound key (already in the store) must be refused for that reason: %v", err)
+	}
+	// The same through the zone's primaries rather than an inline key.
+	in = secondaryIn("inline2.example")
+	in.Primaries[0].Key = "cust-key."
+	in.Template = "inline-bound"
+	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err == nil ||
+		!strings.Contains(err.Error(), "own inbound TSIG key") {
+		t.Errorf("a template naming the key the zone's primaries use must be refused: %v", err)
+	}
+	// An operator key declared in keys.tsig may serve both directions.
+	conf.Keys.Tsig = []TsigDetails{{Name: opKey}}
+	t.Cleanup(func() { conf.Keys.Tsig = nil })
+	in = secondaryIn("opkey.example")
+	in.Primaries[0].Key = opKey
+	in.Template = "hub-out"
+	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err != nil {
+		t.Errorf("an operator key from keys.tsig, used both inbound and in the template, must be accepted: %v", err)
+	}
+}
+
+func TestInboundKeyInTemplateOnModifyAndReload(t *testing.T) {
+	resetZonesForTest()
+	conf, _ := newTestConfigForCores(t)
+	withOpKey(t, conf)
+	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: "cust-key.", Algorithm: "hmac-sha256", Secret: "Y3VzdC1rZXktc2VjcmV0"})
+	bad := hubTemplate()
+	bad.Notify = []PeerConf{{Addr: "192.0.2.10", Key: "cust-key."}}
+	withTestTemplates(t, map[string]ZoneConf{"hub-out": hubTemplate(), "bad": bad})
+	ctx := context.Background()
+
+	in := secondaryIn("k.example")
+	in.Primaries[0].Key = "cust-key."
+	in.Template = "hub-out"
+	if _, err := conf.ProvisionDynamicZone(ctx, in, true); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if _, err := conf.ModifyDynamicZone(ctx, DynamicZoneInput{Name: "k.example", Template: "bad"}); err == nil ||
+		!strings.Contains(err.Error(), "own inbound TSIG key") {
+		t.Errorf("modify onto a template naming the zone's inbound key must be refused: %v", err)
+	}
+	// The zone's template is edited to name its inbound key: the reload
+	// keeps what the zone had and warns.
+	Templates["hub-out"] = bad
+	if res := conf.ReapplyDynamicZoneTemplates(); res.Failed != 1 {
+		t.Errorf("reload with a template naming the zone's inbound key: %+v", res)
+	}
+	zd, _ := Zones.Get("k.example.")
+	if _, has := zd.Errors[TemplateWarning]; !has {
+		t.Error("expected a TemplateWarning")
+	}
+	if len(zd.Notify) != 2 || zd.Notify[0].Key != opKey {
+		t.Errorf("the zone must keep its previous NOTIFY targets: %+v", zd.Notify)
 	}
 }
 
@@ -240,7 +296,14 @@ func TestDynamicZonesConf_DefaultTemplateValidation(t *testing.T) {
 	child := hubTemplate()
 	child.Name, child.Type, child.Template = "child", "", "base"
 	prim := ZoneConf{Name: "prim", Type: "primary", DynamicZones: true}
-	templates := []ZoneConf{good, unblessed, parent, child, prim}
+	// Declares its own type, but its parent is missing: buildTemplateMap
+	// drops it, so a default naming it would fail every add.
+	orphan := hubTemplate()
+	orphan.Name, orphan.Template = "orphan", "no-such-parent"
+	loopA := hubTemplate()
+	loopA.Name, loopA.Template = "loop-a", "loop-b"
+	loopB := ZoneConf{Name: "loop-b", Type: "secondary", Template: "loop-a"}
+	templates := []ZoneConf{good, unblessed, parent, child, prim, orphan, loopA, loopB}
 
 	cases := []struct {
 		dflt map[string]string
@@ -254,6 +317,8 @@ func TestDynamicZonesConf_DefaultTemplateValidation(t *testing.T) {
 		{map[string]string{"secondary": "prim"}, "not secondary"},
 		{map[string]string{"primary": "hub-out"}, "not primary"},
 		{map[string]string{"secondary": " "}, "empty template name"},
+		{map[string]string{"secondary": "orphan"}, "does not exist"},
+		{map[string]string{"secondary": "loop-a"}, "cycle"},
 	}
 	for _, c := range cases {
 		d := DynamicZonesConf{Dynamic: DynamicApiZoneConf{DefaultTemplate: c.dflt}}
@@ -566,6 +631,12 @@ func TestLegacyInlineTsigKey(t *testing.T) {
 		{"template key changed", []AclEntry{{Prefix: "127.0.0.1/32", Key: "zone-key."}, {Prefix: "192.0.2.0/24", Key: "old-key."}}, "zone-key.", false},
 		{"ambiguous", []AclEntry{{Prefix: "127.0.0.1/32", Key: "zone-key."}, {Prefix: "127.0.0.1/32", Key: "other-key."}}, "", true},
 		{"nothing persisted", nil, "", false},
+		// The inline key sat on a prefix the template has since dropped,
+		// and the template's keyless prefix is new: no evidence either way.
+		{"keyed prefix dropped, keyless prefix new", []AclEntry{{Prefix: "203.0.113.0/24", Key: "zone-key."}, {Prefix: "192.0.2.0/24", Key: "fixed-key."}}, "", true},
+		// The same, but the entry shows the keyless prefix left keyless:
+		// there was no inline key.
+		{"keyed prefix dropped, keyless prefix shown keyless", []AclEntry{{Prefix: "203.0.113.0/24", Key: "gone-key."}, {Prefix: "127.0.0.1/32", Key: NOKEY}}, "", false},
 	}
 	for _, c := range cases {
 		got, err := legacyInlineTsigKey(tmpl, c.persisted)
@@ -712,5 +783,67 @@ func TestLoadDynamicZoneFiles_LegacyPrimaryEntry(t *testing.T) {
 	data, _ = os.ReadFile(dynCfg)
 	if !strings.Contains(string(data), "second-key.") {
 		t.Errorf("a rewrite from live state lost the error shell's lists:\n%s", data)
+	}
+}
+
+func TestReapplySkipsLegacyErrorShell(t *testing.T) {
+	resetZonesForTest()
+	conf, _ := newTestConfigForCores(t)
+	withOpKey(t, conf)
+	dir := t.TempDir()
+	withTestTemplates(t, map[string]ZoneConf{"dyn-test": dynPrimaryTestTemplate(dir)})
+	kept := []AclEntry{{Prefix: "127.0.0.1/32", Key: opKey}}
+	shell := &ZoneData{
+		ZoneName: "shell.example.", ZoneType: Primary, Template: "dyn-test",
+		Options:               map[ZoneOption]bool{OptApiManagedZone: true},
+		Downstreams:           kept,
+		keepPersistedOutbound: true,
+	}
+	Zones.Set("shell.example.", shell)
+	if res := conf.ReapplyDynamicZoneTemplates(); res.Zones != 0 {
+		t.Errorf("a legacy error shell must not be re-expanded: %+v", res)
+	}
+	if len(shell.Downstreams) != 1 || shell.Downstreams[0].Key != opKey {
+		t.Errorf("the shell's kept downstreams were replaced: %+v", shell.Downstreams)
+	}
+}
+
+func TestTemplateWarningDoesNotBlockSerialBump(t *testing.T) {
+	zd := &ZoneData{ZoneName: "bump.example."}
+	Zones.Set("bump.example.", zd)
+	t.Cleanup(func() { Zones.Remove("bump.example.") })
+	zd.SetError(TemplateWarning, "template gone")
+	if zd.blocksSerialBump() {
+		t.Error("a TemplateWarning alone must not block a serial bump")
+	}
+	zd.SetError(ConfigWarning, "something else")
+	if !zd.blocksSerialBump() {
+		t.Error("any other error must still block a serial bump")
+	}
+}
+
+func TestReloadTemplatesNormalizesTransferAliases(t *testing.T) {
+	savedTemplates, savedApp := Templates, Globals.App.Type
+	t.Cleanup(func() { Templates, Globals.App.Type = savedTemplates, savedApp })
+	Globals.App.Type = AppTypeAuth
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "tdns-auth.yaml")
+	if err := os.WriteFile(cfg, []byte(`templates:
+   - name: hub-out
+     type: secondary
+     dynamiczones: true
+     provide-xfr:
+        - prefix: "192.0.2.0/24"
+          key: op-key.
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	conf := &Config{}
+	conf.Internal.CfgFile = cfg
+	if err := conf.reloadTemplatesFromFile(); err != nil {
+		t.Fatalf("reloadTemplatesFromFile: %v", err)
+	}
+	if got := Templates["hub-out"].Downstreams; len(got) != 1 || got[0].Prefix != "192.0.2.0/24" {
+		t.Errorf("a template's provide-xfr: must decode as its downstreams on reload: %+v", got)
 	}
 }

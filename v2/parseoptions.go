@@ -199,12 +199,17 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 	// This allows catalog-member-auto-create/auto-delete validation to work
 	// regardless of YAML option order
 	isCatalogZone := false
+	// Config groups are what auto-create configures member zones from, so
+	// only a catalog that auto-creates needs them. A catalog this server
+	// produces, or one it only reads, does not.
+	catalogAutoCreate := false
 	for _, option := range zconf.OptionsStrs {
-		option = strings.ToLower(strings.TrimSpace(option))
-		if option == "catalog-zone" {
+		switch strings.ToLower(strings.TrimSpace(option)) {
+		case "catalog-zone":
 			isCatalogZone = true
 			options[OptCatalogZone] = true
-			break
+		case "catalog-member-auto-create":
+			catalogAutoCreate = true
 		}
 	}
 
@@ -381,8 +386,9 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 				continue
 			}
 
-			// Check for config-groups (or legacy meta-groups)
-			if conf.Catalog == nil || (conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil) {
+			// Check for config-groups (or legacy meta-groups), which only
+			// a catalog that auto-creates its member zones needs.
+			if catalogAutoCreate && (conf.Catalog == nil || (conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil)) {
 				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.config-groups is missing or incorrectly structured. Please ensure your config has:\n"+
 					"catalog:\n"+
 					"  group-prefixes:\n"+

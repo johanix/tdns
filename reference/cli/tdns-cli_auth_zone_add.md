@@ -19,7 +19,7 @@ tdns-cli auth zone add [flags]
       --tsig-name string          Inline TSIG key name; created in keystore if absent and applied to keyless primaries (secondary) or keyless downstreams (primary)
       --tsig-secret string        Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file
       --tsig-secret-file string   File containing the inline TSIG secret (base64); preferred over --tsig-secret
-      --type string               Zone type: secondary (default) or primary (requires --template) (default "secondary")
+      --type string               Zone type: secondary (default) or primary (needs a template: --template, or the server's default-template for primaries) (default "secondary")
   -z, --zone string               Zone to add
 ```
 

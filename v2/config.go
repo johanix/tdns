@@ -1016,16 +1016,32 @@ func (d *DynamicZonesConf) ValidateDefaultTemplates(templates []ZoneConf) error 
 		if !ok {
 			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q does not exist", t, name)
 		}
-		// A template may take its type from a parent template (the daemon
-		// expands the chain in buildTemplateMap); follow it here too, so this
-		// check and the daemon agree. dynamiczones: is never inherited.
-		for seen, p := map[string]bool{name: true}, tmpl.Template; tmpl.Type == "" && p != "" && !seen[p]; {
+		// Walk the parent chain as buildTemplateMap does. A template whose
+		// chain names a missing parent, or loops, is dropped from the template
+		// map at load, so a default naming it would fail every add; refuse it
+		// here instead, whatever the template itself declares. A type unset on
+		// the template comes from the first parent that sets one;
+		// dynamiczones: is never inherited.
+		// (A template naming itself is ignored by buildTemplateMap, as here;
+		// coming back to it through another template is a cycle.)
+		seen := map[string]bool{name: true}
+		p := tmpl.Template
+		if p == name {
+			p = ""
+		}
+		for p != "" {
+			if seen[p] {
+				return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q is in a template cycle (through %q)", t, name, p)
+			}
 			seen[p] = true
 			parent, ok := byName[p]
 			if !ok {
-				break
+				return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q inherits from template %q, which does not exist", t, name, p)
 			}
-			tmpl.Type, p = parent.Type, parent.Template
+			if tmpl.Type == "" {
+				tmpl.Type = parent.Type
+			}
+			p = parent.Template
 		}
 		if err := dynamicTemplateGate(name, &tmpl, zt, true); err != nil {
 			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: %v", t, err)

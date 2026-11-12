@@ -277,7 +277,7 @@ would roll, whether the parent DS would break) and changes nothing; add
 		},
 	}
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add")
-	add.Flags().StringVar(&dzZoneType, "type", "secondary", "Zone type: secondary (default) or primary (requires --template)")
+	add.Flags().StringVar(&dzZoneType, "type", "secondary", "Zone type: secondary (default) or primary (needs a template: --template, or the server's default-template for primaries)")
 	add.Flags().StringVar(&dzTemplate, "template", "", "Config template (must carry dynamiczones: true): a primary's whole config, a secondary's outbound settings (downstreams, notify). Default: the server's default-template for the zone type")
 	add.Flags().StringSliceVar(&dzPrimaries, "primaries", nil, "Primary (upstream) addresses [host:port], comma-separated (secondary zones)")
 	add.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "Primary TSIG key name applied to all primaries (NOKEY for none)")

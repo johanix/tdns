@@ -188,6 +188,11 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 
 	// Check if this is a catalog zone and parse it
 	if zd.Options[OptCatalogZone] {
+		// A catalog this server originates: its member list is rebuilt from
+		// what it was loaded with (rebuildCatalogMembership).
+		if _, err := rebuildCatalogMembership(zd); err != nil {
+			lgEngine.Error("failed to rebuild the catalog's member list", "zone", zone, "error", err)
+		}
 		lgEngine.Info("parsing catalog zone member zones", "zone", zone)
 		catalogUpdate, err := ParseCatalogZone(zd)
 		if err != nil {
@@ -1396,7 +1401,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			var err error
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
-					if zd.Error {
+					if zd.blocksSerialBump() {
 						lgEngine.Warn("zone in error state, not bumping serial", "zone", zone, "error", zd.ErrorMsg)
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("Zone %s is in error state: %s. Not bumping serial.", zone, zd.ErrorMsg)

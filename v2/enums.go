@@ -716,6 +716,21 @@ outer:
 	return false
 }
 
+// blocksSerialBump reports whether the zone's errors refuse a serial bump.
+// Any error does, as before, except a TemplateWarning: that one says only
+// that the template did not expand on a reload, the zone keeping its outbound
+// settings and serving as before.
+func (zd *ZoneData) blocksSerialBump() bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	for t := range zd.Errors {
+		if t != TemplateWarning {
+			return true
+		}
+	}
+	return false
+}
+
 // HasServiceImpactingError reports whether the zone is in a state that
 // makes it incapable of serving correctly. Today: ConfigError,
 // AgentError, DnssecError. RefreshError and the rollover-* categories
