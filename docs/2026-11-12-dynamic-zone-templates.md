@@ -3,9 +3,9 @@
 **Written 2026-11-12.** For #1040. Line references are to main at `405f40b6`.
 
 **Status:** implemented on `feat/api-secondary-template`, draft PR #1041,
-including the catalog fixes (the last section). Revised the same day for two
-review rounds (CodeRabbit twice, and an external review); the changes are in
-place below.
+including the catalog fixes (the last section). Revised the same day for the
+review rounds (CodeRabbit, and an external review); the changes are in place
+below.
 
 ## The problem
 
@@ -134,7 +134,11 @@ template counts), and its parent chain has no missing parent and no cycle
 (a template naming itself included), since the template map drops such a
 template at load. Two keys for one zone type (`primary` and `Primary`) are
 refused. On a full reload the check runs before the template map is
-rebuilt, so a refused reload leaves the running templates as they were. A
+rebuilt, so a refused reload leaves the running templates as they were.
+More generally, the template map is built on the side and installed only
+once complete, and a `config reload` that fails at any later point puts the
+previous map back; `config reload-zones` keeps the templates in use when the
+template part of its re-read fails. A
 primary added without a template is still refused when no primary default
 is set.
 
@@ -301,10 +305,17 @@ older version wrote there drops out at the next rewrite.
 `catalog.config-groups` check now applies to a catalog with
 `catalog-member-auto-create`. A catalog the server produces, or only reads,
 needs no `catalog:` block at all: without one, or with no
-`group-prefixes` in it, every group is an ordinary group. Member
-auto-configuration leaves a produced catalog that does not auto-create
-alone: its groups are labels for its consumers, not references to this
-server's config groups.
+`group-prefixes` in it, every group is an ordinary group. And member
+auto-configuration checks a member's config group against the local config
+groups only for a catalog that auto-creates: a catalog that only reads no
+longer goes to ConfigError, and stops being served, over a member group not
+defined locally, and a produced catalog's groups are labels for its
+consumers. A ConfigError such a check left earlier (with auto-create on) is
+cleared at the next pass.
+
+The ruling as given covered a catalog the server produces. The maintainer
+widened it to every catalog that does not auto-create, consumers included,
+in the second review round ("Fix both", 2026-11-12).
 
 The loopback rerun, with the hub's config holding no `catalog:` block:
 

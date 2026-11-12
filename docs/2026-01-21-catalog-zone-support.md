@@ -1480,4 +1480,6 @@ Changes against the text above:
   `catalog-member-auto-create`. A catalog the server produces, or only reads,
   needs no `catalog:` block; without one, every group is ordinary. (The check
   quoted in "2. Validate Catalog Zone Option" above required config groups for every
-  catalog zone.)
+  catalog zone.) Member auto-configuration likewise checks a member's config
+  group against the local config groups only for a catalog that auto-creates;
+  a catalog that only reads is no longer put in ConfigError over one.
