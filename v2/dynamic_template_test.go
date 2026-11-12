@@ -854,3 +854,41 @@ func TestReloadTemplatesNormalizesTransferAliases(t *testing.T) {
 		t.Errorf("a template's provide-xfr: must decode as its downstreams on reload: %+v", got)
 	}
 }
+
+func TestRefusedTemplateReloadKeepsTheRunningTemplates(t *testing.T) {
+	savedTemplates, savedApp := Templates, Globals.App.Type
+	t.Cleanup(func() { Templates, Globals.App.Type = savedTemplates, savedApp })
+	Globals.App.Type = AppTypeAuth
+
+	conf := &Config{Templates: []ZoneConf{hubTemplate()}}
+	if err := conf.buildTemplateMap(); err != nil {
+		t.Fatalf("buildTemplateMap: %v", err)
+	}
+	running := Templates
+
+	// A duplicate name: refused, and the running map is untouched.
+	bad := &Config{Templates: []ZoneConf{{Name: "other"}, {Name: "other"}}}
+	if err := bad.buildTemplateMap(); err == nil {
+		t.Fatal("a duplicate template name must be refused")
+	}
+	if _, ok := Templates["hub-out"]; !ok || len(Templates) != len(running) {
+		t.Errorf("a refused template map replaced the running one: %v", Templates)
+	}
+
+	// The same through reload-zones' template reload: the list stays too.
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "tdns-auth.yaml")
+	if err := os.WriteFile(cfg, []byte("templates:\n   - name: dup\n   - name: dup\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	conf.Internal.CfgFile = cfg
+	if err := conf.reloadTemplatesFromFile(); err == nil {
+		t.Fatal("a template file with a duplicate name must be refused")
+	}
+	if _, ok := Templates["hub-out"]; !ok {
+		t.Error("a refused template reload replaced the running map")
+	}
+	if len(conf.Templates) != 1 || conf.Templates[0].Name != "hub-out" {
+		t.Errorf("a refused template reload replaced the template list: %+v", conf.Templates)
+	}
+}

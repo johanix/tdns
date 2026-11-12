@@ -1322,9 +1322,15 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	// apply below then refuses the new block and keeps the running table,
 	// conf.Imr would otherwise go on describing zones that were rejected.
 	runningStubs, runningForward := conf.Imr.Stubs, conf.Imr.Forward
+	// The template map in use, put back if the parse fails: ParseConfig
+	// installs a new map part-way through, and a check after that point
+	// can still refuse the reload. Adds and template re-expansion must not
+	// go on with templates from a config that was refused.
+	runningTemplates, runningTemplateList := Templates, conf.Templates
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
+		Templates, conf.Templates = runningTemplates, runningTemplateList
 	}
 	// Rebuild the TSIG store ONLY after a successful parse. With KeyDB, reconcile
 	// config keys in place (§6).

@@ -271,13 +271,6 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		return fmt.Errorf("AutoConfigureZonesFromCatalog: catalog zone %s not found in Zones map", update.CatalogZone)
 	}
 
-	// A catalog this server produces and does not auto-create from: its
-	// groups are labels for its consumers, not references to this server's
-	// config groups, so there is nothing to configure or check here.
-	if !catalogZd.Options[OptCatalogMemberAutoCreate] && catalogZd.ZoneType == Primary {
-		return nil
-	}
-
 	if conf.Catalog == nil {
 		// No catalog: block. A catalog that does not auto-create its members
 		// (one this server produces, or only reads) needs none, and has
@@ -304,9 +297,14 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			errorCount++
 			continue
 		}
-		// VALIDATION (a): Check if zone references a group that doesn't exist in config
-		// This validation applies regardless of auto-config policy
-		if member.MetaGroup != "" {
+		// VALIDATION (a): Check if zone references a group that doesn't exist
+		// in config. Only for a catalog that auto-creates its members: the
+		// local config groups are what auto-create configures them from. A
+		// catalog that does not -- one this server produces, or one it only
+		// reads -- has nothing to configure from them, and a group label it
+		// carries for others is not this server's business (a ruling of the
+		// maintainer, 2026-11-12).
+		if member.MetaGroup != "" && autoConfigureEnabled {
 			configGroupConfig, exists := conf.Catalog.ConfigGroups[member.MetaGroup]
 			if !exists {
 				errorMsg := fmt.Sprintf("Member zone %s in catalog %s references group '%s' which does not exist in local config. Available groups: %v",

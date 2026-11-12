@@ -289,3 +289,39 @@ func TestParseCatalogZoneEmptyPrefixesMeanNone(t *testing.T) {
 		t.Errorf("with no prefixes every group is ordinary: %+v", m)
 	}
 }
+
+func TestAutoConfigureLeavesAReadOnlyCatalogAlone(t *testing.T) {
+	// A secondary catalog that only reads: group prefixes configured, no
+	// config groups, no auto-create. A member's config-type group that is
+	// not defined locally is not this server's business.
+	const zone = "catalog.readonly.example."
+	zd := newTestCatalog(t, zone)
+	zd.mu.Lock()
+	zd.ZoneType = Secondary
+	zd.mu.Unlock()
+	// A ConfigError from an earlier pass (auto-create on before a reload)
+	// is cleared now that nothing is wrong.
+	zd.SetError(ConfigError, "Member zone m1.example. in catalog %s references group 'config-blue' which does not exist in local config", zone)
+	conf := &Config{Catalog: &CatalogConf{GroupPrefixes: GroupPrefixesConf{Config: "config", Signing: "sign"}}}
+	update := &CatalogZoneUpdate{
+		CatalogZone: zone,
+		MemberZones: map[string]*MemberZone{
+			"m1.example.": {ZoneName: "m1.example.", MetaGroup: "config-blue"},
+		},
+	}
+	if err := AutoConfigureZonesFromCatalog(context.Background(), update, conf); err != nil {
+		t.Errorf("a read-only catalog needs no local config groups: %v", err)
+	}
+	if zd.HasError(ConfigError) {
+		t.Errorf("a read-only catalog is in error state over a member's group: %q", zd.ErrorMsg)
+	}
+
+	// With auto-create the check still applies.
+	zd.mu.Lock()
+	zd.Options[OptCatalogMemberAutoCreate] = true
+	zd.mu.Unlock()
+	_ = AutoConfigureZonesFromCatalog(context.Background(), update, conf)
+	if !zd.HasError(ConfigError) {
+		t.Error("a catalog that auto-creates must still be refused a member group it has no config for")
+	}
+}
