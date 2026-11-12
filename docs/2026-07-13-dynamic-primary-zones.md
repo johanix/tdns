@@ -6,6 +6,8 @@ pending). §2 was re-verified against main @ `7885f23` before implementation;
 claims that had drifted are corrected in place and every design fork resolved
 during the (owner-AFK) implementation is recorded in §11. The §8 sequencing
 precondition (snapshot-correctness merge) was satisfied 2026-07-15 (`965df6f`).
+**Amended 2026-11-12** (#1040): the outbound settings now follow the template;
+see §12 at the end.
 **Companion:** `2026-07-13-tdns-debug-test-tool.md` — whose provisioning stage
 (§6.3 there) is the immediate consumer; this feature turns its
 "operator installs zone + config" step into a fully automated
@@ -473,3 +475,28 @@ Implemented as ONE branch/PR (`feature/dynamic-primary-zones`) with commits
 sequenced per §10.4's PR1→PR4 stages, because the owner asked for a single
 reviewable PR end-to-end. The §10.4 split remains the right review order —
 the commits follow it.
+
+## 12. Amendment 2026-11-12: the template owns the outbound settings (#1040)
+
+Supersedes the persistence half of §5 and §11.1, and the persistence note in
+§4 and §11.8. Design: `2026-11-12-dynamic-zone-templates.md`.
+
+- A dynamic primary's notify, allow-notify, downstreams, downstream-auth and
+  NOTIFY resend settings are no longer persisted. They are expanded from the
+  template at the add, at every boot and on every `config reload` /
+  `config reload-zones`, so a template change reaches the zone. Before, the
+  lists expanded at add time were persisted and won over the template at boot
+  by gap-fill (§11.1), and no reload re-expanded a dynamic zone.
+- The inline TSIG key that keyless downstreams entries are bound to (§4,
+  §11.8) is persisted in their place, as `inline-tsig-key:` in the dynamic
+  config entry, and re-applied after every expansion.
+- An entry written before this change has the key recovered from its
+  persisted downstreams at the next boot and is rewritten once. When the
+  recovery cannot tell the key, the zone is registered in error state and
+  keeps its persisted lists until the operator sets `inline-tsig-key` or
+  re-adds the zone.
+- The template gate is shared with API secondaries, which can now take a
+  template for their outbound settings; `dynamiczones.dynamic.default-template`
+  names a default per zone type.
+- Unchanged: the rest of the template (update policy, options, DNSSEC policy)
+  is applied at boot only, as before.
