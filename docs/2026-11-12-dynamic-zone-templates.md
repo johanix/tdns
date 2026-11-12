@@ -2,8 +2,10 @@
 
 **Written 2026-11-12.** For #1040. Line references are to main at `405f40b6`.
 
-**Status:** implemented on `feat/api-secondary-template`, draft PR #1041.
-Catalog zones (the last section) are not covered by the PR.
+**Status:** implemented on `feat/api-secondary-template`, draft PR #1041,
+including the catalog fixes (the last section). Revised the same day for the
+first review round (CodeRabbit and an external review); the changes are in
+place below.
 
 ## The problem
 
@@ -38,7 +40,9 @@ Taken with the maintainer on 2026-11-12:
 2. A template change reaches existing zones on `config reload`, not only on
    a restart. If reload cannot do it today, that is in scope.
 3. For catalog zones, first test a catalog zone defined in the config, and
-   build anything new only if that fails (the last section).
+   build anything new only if that fails. It failed; the maintainer then
+   ruled to keep the configured catalog, with no new catalog API, and fix
+   what the test found (the last section).
 
 ## The design
 
@@ -60,9 +64,17 @@ the primaries are simply not read. The expanded lists go through the same
 checks as a static zone's (`validateTemplateOutbound`, shared with the
 primary path): downstream-auth mechanisms, NOTIFY targets as `{addr, key}`
 with no TLS fields, both ACLs through `ValidateACL`, every key known.
-`peers:` references are expanded first. The zone's own inline key is not
-acceptable on this side: it authenticates the zone's primaries, and a
-template is shared by every zone stamped from it.
+`peers:` references are expanded first.
+
+The template may not name **the zone's own inbound keys**: the keys its
+primaries use, and the inline key of the add or modify. Such a key
+authenticates where the zone comes from, typically the zone owner's key, and
+a template is shared by every zone stamped from it, so in its downstreams
+it would let that key's holder transfer every such zone. The check compares
+key names, so it also holds when an earlier add has already put the key in
+the keystore. A key the operator declares in `keys.tsig` is exempt: one
+operator key may serve both directions, for instance between two
+distribution servers.
 
 **The template owns those settings.** For a template-driven API zone, of
 either type, they are never persisted. The dynamic config entry carries the
@@ -76,17 +88,27 @@ template's name, and the lists are expanded from the template:
 
 So editing the template and reloading is how a new downstream gets every
 zone. The reload replies with a count: zones re-expanded, how many changed,
-how many failed.
+how many failed. Both reload paths now read templates (and zones) the way
+the startup parse does: transfer-list aliases such as `provide-xfr:` are
+normalized, and bare-string peer and ACL entries decode, so an alias does not
+lose its list on a reload.
+
+The installs are ordered. A reload's re-expansion holds one lock for its
+whole run, and an add or a modify holds it from its expansion until the zone
+is in the zone map. Otherwise an expansion made before a reload rebuilt the
+template map could be installed after the reload's own, and the zone would
+keep a downstream the operator had just removed.
 
 **A template that no longer expands.** On a reload, the zone keeps the
 outbound settings it had and gets a `TemplateWarning`, a new
 visibility-only error category. A typo in a template must not cut live
 zones off from their downstreams. The warning clears on the next expansion
 that succeeds. It is its own category so that clearing it cannot remove an
-unrelated `ConfigWarning`, or the other way round. At boot there is nothing
-to keep: a secondary loads without the outbound settings, so it allows no
-transfers out and sends no NOTIFYs, and carries the warning. A primary keeps
-its earlier rule and becomes an error-state zone.
+unrelated `ConfigWarning`, or the other way round, and it does not block a
+serial bump the way other errors do. At boot there is nothing to keep: a
+secondary loads without the outbound settings, so it allows no transfers out
+and sends no NOTIFYs, and carries the warning. A primary keeps its earlier
+rule and becomes an error-state zone.
 
 **The operator default.** `dynamiczones.dynamic.default-template` maps a
 zone type to a template:
@@ -106,8 +128,9 @@ not move zones added under the old one. To move them, run `zone modify`.
 Catalog-provisioned zones never take the default. Each entry is checked at
 load and by `config check` against the same gates as an add: the template
 exists, is blessed and has the right type (a type inherited from a parent
-template counts). A primary added without a template is still refused when
-no primary default is set.
+template counts), and its parent chain has no missing parent and no cycle,
+since the template map drops such a template at load. A primary added
+without a template is still refused when no primary default is set.
 
 **`zone modify`** (secondaries) keeps the zone's template unless told
 otherwise. `--template X` sets or replaces it. `--clear-template`
@@ -135,10 +158,15 @@ inline key is recovered from them: it is the key the persisted entries use
 on the prefixes that the template leaves keyless (`legacyInlineTsigKey`).
 The entry is then rewritten once in the current form. Recovery errs towards
 binding, never away from it, because a binding the recovery missed would
-open the zone to keyless transfers. So when the entries show more than one
-such key, the recovery refuses to guess. The zone becomes an error-state
-zone that keeps its persisted lists, and later rewrites of the file keep
-them too, until the operator sets `inline-tsig-key` or re-adds the zone.
+open the zone to keyless transfers. So the recovery refuses to guess when
+the entries show more than one such key, and when they show none but a keyed
+prefix the template has since dropped sits beside a keyless template prefix
+the entry has no entry for (the key may have been on the dropped prefix).
+Entries that leave a keyless template prefix keyless prove there was no
+inline key. A refused zone becomes an error-state zone that keeps its
+persisted lists. Later rewrites of the file keep them too, and a reload
+does not re-expand it, until the operator sets `inline-tsig-key` or re-adds
+the zone.
 
 **Visibility.** `zone list-dynamic` shows each zone's template and live
 NOTIFY targets. The live lists are filled in from the zone, since the
@@ -177,8 +205,17 @@ Unit tests in `v2/dynamic_template_test.go`:
   key binding), reports changes, keeps settings and warns on a broken
   template, and clears the warning once fixed;
 - modify keeps, sets and clears the template, and refuses what it should;
-- legacy primary entries: key recovery, the ambiguous case, and the
-  one-shot rewrite at boot.
+- legacy primary entries: key recovery, the ambiguous cases, the one-shot
+  rewrite at boot, and a reload leaving an error-state shell alone;
+- the zone's own inbound key refused in a template on add (also when it is
+  already in the keystore), on modify and on reload, and an operator key
+  from `keys.tsig` accepted in both directions;
+- a template's `provide-xfr:` decodes as its downstreams on a reload;
+  a `TemplateWarning` alone does not block a serial bump;
+- the default template's parent chain: a missing parent, a cycle.
+
+Unit tests in `v2/catalog_membership_test.go` cover the catalog fixes (the
+last section).
 
 A loopback run (all on 127.0.0.1): a BIND 9.20 primary with three zones,
 transfers authorised by a customer TSIG key; a tdns-auth distribution
@@ -204,20 +241,62 @@ SOA refresh was 3600 s, so a change within seconds came by NOTIFY.
 
 Decision 3 asked for a test of a catalog zone defined in the config (a
 primary with `options: [catalog-zone]`, plus downstreams and NOTIFY in the
-config). It works with `catalog zone add`: NSD is notified with the key,
-transfers the catalog and the member zones. It does not survive a restart,
-nor `config reload-zones`:
+config). It worked with `catalog zone add`: NSD was notified with the key,
+and transferred the catalog and the member zones. It did not survive a
+restart, nor `config reload-zones`:
 
-- The member list (`catalogMemberships`, `v2/catalog.go:546`) is kept only
+- The member list (`catalogMemberships`, `v2/catalog.go:546`) was kept only
   in memory and never rebuilt from the catalog's records. A catalog created
-  with `catalog create` has the same flaw: its content survives a restart,
-  but the next `catalog zone add` rewrites it with the new member only.
-- A configured catalog's changes are written to a copy under
+  with `catalog create` had the same flaw: its content survived a restart,
+  but the next `catalog zone add` rewrote it with the new member only.
+- A configured catalog's changes were written to a copy under
   `dynamiczones.zonedirectory`, not to its own zone file. A restart or
-  `config reload-zones` serves it from its file again, without members, and
-  a consumer that takes that empty catalog drops every member zone.
-- A configured catalog the server produces must also have
-  `catalog.config-groups` present (it may be empty), or it goes to
-  ConfigError (`v2/parseoptions.go:384`). Only a consumer needs config groups.
+  `config reload-zones` served it from its file again, without members, and
+  a consumer that took that empty catalog dropped every member zone.
+- A configured catalog the server produces had to have
+  `catalog.config-groups` present, even empty, or it went to ConfigError
+  (`v2/parseoptions.go:384`). Only a consumer needs config groups.
 
-These are open questions for the maintainer, and not part of this PR.
+The maintainer ruled (2026-11-12): keep the configured catalog, managed
+through the existing `catalog zone add` and `delete`, with no new catalog
+API, and fix all three.
+
+**The member list comes from the catalog's records.** When a catalog this
+server originates is loaded, the member list is rebuilt from its own PTR
+records under `zones.<catalog>`, with the groups of each member's
+`group.<id>.zones.<catalog>` TXT (`rebuildCatalogMembership`). The `<id>`
+labels are kept, so a later rewrite does not move a member. This holds for
+API-created catalogs too. It runs at the first load, and after a refresh
+that changed the zone (an edited zone file reloaded), but not after every
+refresh: a change the API has staged but not yet published is in the list
+and not yet in the zone, and a rebuild then would lose it. A secondary's
+catalog mirrors its upstream and gets no member list. A group that is
+defined but on no member is not in the zone, so it does not survive a
+restart.
+
+**A configured catalog writes its own zone file.** Zones the config file
+defines are now marked as such when ParseZones creates them. For such a
+catalog, a change is written to its own `zonefile` once the publish that
+carries it is done, as `zone write` would (`WriteZone`, which also records
+the file's identity, so the next refresh does not take the write for an
+outside edit). Such a zone is also no longer copied into the dynamic config
+file, where it would have outlived its removal from the config; a copy an
+older version wrote there drops out at the next rewrite.
+
+**Only a catalog that auto-creates needs config groups.** The
+`catalog.config-groups` check now applies to a catalog with
+`catalog-member-auto-create`. A catalog the server produces, or only reads,
+needs no `catalog:` block at all: without one, every group is an ordinary
+group, and member auto-configuration has nothing to do.
+
+The loopback rerun, with the hub's config holding no `catalog:` block:
+
+| Step | Result |
+|---|---|
+| Hub start | The configured catalog loads (no ConfigError), and is not listed among the dynamic zones. |
+| `catalog zone add` of three zones | The hub serves 3 PTRs; the catalog's own zone file holds them; NSD transfers all three member zones. |
+| Hub restart | The catalog still has its 3 members ("member list rebuilt ... members=3"); `catalog zone list` shows them; NSD keeps every member. |
+| `catalog zone delete` of one member, then add it back | NSD drops that member only, then takes it back; the other two stay. |
+| `config reload-zones` | The catalog keeps its 3 members; NSD keeps every member. |
+| An API catalog: add a member, restart, add another, restart, add a third | All three are in the catalog after the last add. |
+| The dynamic config | The copy of the configured catalog an older version wrote there is gone after the next rewrite. |
