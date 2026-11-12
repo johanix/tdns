@@ -2,7 +2,7 @@
 
 **Written 2026-11-12.** For #1040. Line references are to main at `405f40b6`.
 
-**Status:** implemented on `feat/api-secondary-template` (draft PR, refs #1040).
+**Status:** implemented on `feat/api-secondary-template`, draft PR #1041.
 Catalog zones (the last section) are not covered by the PR.
 
 ## The problem
