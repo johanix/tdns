@@ -8,9 +8,9 @@
 // themselves.
 //
 // The package came from github.com/johanix/dnssec-algorithms/mldsa44
-// (at 4d74f08). The key encodings are unchanged: the private key string
-// and the PKCS#8 codec (pkcs8.go) are byte for byte the same, so keys
-// minted there load here.
+// (at 4d74f08), and keys minted there load here. The private key string
+// is unchanged. The PKCS#8 codec (pkcs8.go) writes RFC 9881's seed form
+// and still reads the old layout.
 //
 // All [dns.Algorithm] interface methods are implemented on top of
 // github.com/cloudflare/circl/sign/mldsa/mldsa44.
@@ -39,14 +39,20 @@ func New() *Impl { return &Impl{} }
 func (*Impl) Name() string      { return "MLDSA44" }
 func (*Impl) Hash() crypto.Hash { return 0 }
 
+// Generate returns a new ML-DSA-44 private key made from a fresh
+// 32-byte seed, which the key keeps. bits must be 0: the parameter set
+// fixes the key size.
 func (*Impl) Generate(bits int) (crypto.PrivateKey, error) {
 	if bits != 0 {
 		return nil, dns.ErrKeySize
 	}
-	_, priv, err := mldsa44.GenerateKey(rand.Reader)
-	if err != nil {
+	// Generate from an explicit seed: the key keeps it (Seed()), and
+	// the PKCS#8 codec stores the seed rather than the expanded key.
+	var seed [mldsa44.SeedSize]byte
+	if _, err := rand.Read(seed[:]); err != nil {
 		return nil, err
 	}
+	_, priv := mldsa44.NewKeyFromSeed(&seed)
 	return priv, nil
 }
 
