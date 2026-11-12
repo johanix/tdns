@@ -189,7 +189,10 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	// Check if this is a catalog zone and parse it
 	if zd.Options[OptCatalogZone] {
 		// A catalog this server originates: its member list is rebuilt from
-		// what it was loaded with (rebuildCatalogMembership).
+		// what it was loaded with (rebuildCatalogMembership), and again once
+		// the journal has been replayed (completeFirstZonePolicyAndLoad).
+		// This first one keeps the list from being empty if the load stops
+		// before the replay.
 		if _, err := rebuildCatalogMembership(zd); err != nil {
 			lgEngine.Error("failed to rebuild the catalog's member list", "zone", zone, "error", err)
 		}
@@ -475,6 +478,16 @@ func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Con
 	// deltas hold everything that has happened since. Serving the file alone
 	// would silently roll the zone back to that point.
 	replayZoneDeltasOnLoad(zd)
+
+	// A catalog this server originates: its member list again, now from the
+	// replayed content. The rebuild at the start of the load read the file
+	// alone, and a member added since the last write of the file is only in
+	// the journal; left out of the list, the next catalog edit would drop it.
+	if zd.Options[OptCatalogZone] {
+		if _, err := rebuildCatalogMembership(zd); err != nil {
+			lgEngine.Error("failed to rebuild the catalog's member list after the journal replay", "zone", zd.ZoneName, "error", err)
+		}
+	}
 
 	// The post-refresh callbacks the first load deferred (see
 	// runPostRefreshCallbacks). After the replay, so that they see the zone's

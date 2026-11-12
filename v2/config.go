@@ -982,12 +982,21 @@ func (d *DynamicZonesConf) Validate() error {
 			return fmt.Errorf("dynamiczones.dynamic.allowed: unknown zone type %q (valid values: primary, secondary)", t)
 		}
 	}
+	// Keys are matched without regard to case or surrounding space
+	// (DefaultTemplateFor), so two keys for one zone type would leave the
+	// choice to map iteration order.
+	seen := map[string]string{}
 	for t := range d.Dynamic.DefaultTemplate {
-		switch strings.ToLower(strings.TrimSpace(t)) {
+		norm := strings.ToLower(strings.TrimSpace(t))
+		switch norm {
 		case "primary", "secondary":
 		default:
 			return fmt.Errorf("dynamiczones.dynamic.default-template: unknown zone type %q (valid values: primary, secondary)", t)
 		}
+		if prev, dup := seen[norm]; dup {
+			return fmt.Errorf("dynamiczones.dynamic.default-template: zone type %s is set more than once (%q and %q)", norm, prev, t)
+		}
+		seen[norm] = t
 	}
 	return nil
 }
@@ -1022,12 +1031,11 @@ func (d *DynamicZonesConf) ValidateDefaultTemplates(templates []ZoneConf) error 
 		// here instead, whatever the template itself declares. A type unset on
 		// the template comes from the first parent that sets one;
 		// dynamiczones: is never inherited.
-		// (A template naming itself is ignored by buildTemplateMap, as here;
-		// coming back to it through another template is a cycle.)
+		// A template naming itself is a cycle too: buildTemplateMap removes it.
 		seen := map[string]bool{name: true}
 		p := tmpl.Template
 		if p == name {
-			p = ""
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q names itself as its parent template", t, name)
 		}
 		for p != "" {
 			if seen[p] {

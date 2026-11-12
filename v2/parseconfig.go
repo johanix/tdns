@@ -675,12 +675,14 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	lgConfig.Debug("templates defined", "count", len(conf.Templates))
 
-	if err := conf.buildTemplateMap(); err != nil {
+	// Before buildTemplateMap, which replaces the live template map: a
+	// reload refused here must leave the running map as it was, or adds
+	// would use templates from a config that was rejected. (It reads the
+	// decoded template list, not the map.)
+	if err := conf.DynamicZones.ValidateDefaultTemplates(conf.Templates); err != nil {
 		return err
 	}
-	// Needs the templates, so it runs here rather than with
-	// DynamicZones.Validate above.
-	if err := conf.DynamicZones.ValidateDefaultTemplates(conf.Templates); err != nil {
+	if err := conf.buildTemplateMap(); err != nil {
 		return err
 	}
 
@@ -1017,11 +1019,11 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zd, exists := Zones.Get(zname)
 		if !exists {
 			zd = &ZoneData{
-				ZoneName:         core.CanonicalizeName(zname),
-				Logger:           log.Default(),
-				FirstZoneLoad:    true,
-				fromStaticConfig: true,
+				ZoneName:      core.CanonicalizeName(zname),
+				Logger:        log.Default(),
+				FirstZoneLoad: true,
 			}
+			zd.fromStaticConfig.Store(true)
 			// Before Zones.Set, while the zone is still private to this
 			// goroutine -- the contract registerStandardRefreshHooks states
 			// and the other three creation paths already keep. This zone is
@@ -1038,6 +1040,12 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			// this registration is documented as avoiding.
 			zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
 			Zones.Set(zname, zd)
+		} else {
+			// A zone that was dynamic (an API catalog, say) and is now
+			// defined in the config file belongs to the config file from
+			// here on: no longer copied into the dynamic config, and a
+			// catalog among them writes its own zonefile.
+			zd.fromStaticConfig.Store(true)
 		}
 
 		// A zone defined more than once is served under NEITHER definition.

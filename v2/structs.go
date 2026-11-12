@@ -200,8 +200,9 @@ type ZoneData struct {
 	// fromStaticConfig marks a zone the configuration file defines (set where
 	// ParseZones creates it). Such a zone is never written into the dynamic
 	// config file, and a catalog among them writes its changes back to its
-	// own zone file (regenerateCatalogZone).
-	fromStaticConfig bool
+	// own zone file (regenerateCatalogZone). Atomic: ParseZones sets it on a
+	// live zone when the config takes one over, and readers hold no lock.
+	fromStaticConfig atomic.Bool
 	DelegationSyncQ  chan DelegationSyncRequest
 	// parent is the zone's parent name, resolved lazily on first use and
 	// cached. UNEXPORTED ON PURPOSE: parentMu owns it, and going through

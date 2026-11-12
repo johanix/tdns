@@ -303,7 +303,9 @@ func TestDynamicZonesConf_DefaultTemplateValidation(t *testing.T) {
 	loopA := hubTemplate()
 	loopA.Name, loopA.Template = "loop-a", "loop-b"
 	loopB := ZoneConf{Name: "loop-b", Type: "secondary", Template: "loop-a"}
-	templates := []ZoneConf{good, unblessed, parent, child, prim, orphan, loopA, loopB}
+	selfish := hubTemplate()
+	selfish.Name, selfish.Template = "selfish", "selfish"
+	templates := []ZoneConf{good, unblessed, parent, child, prim, orphan, loopA, loopB, selfish}
 
 	cases := []struct {
 		dflt map[string]string
@@ -319,6 +321,7 @@ func TestDynamicZonesConf_DefaultTemplateValidation(t *testing.T) {
 		{map[string]string{"secondary": " "}, "empty template name"},
 		{map[string]string{"secondary": "orphan"}, "does not exist"},
 		{map[string]string{"secondary": "loop-a"}, "cycle"},
+		{map[string]string{"secondary": "selfish"}, "names itself"},
 	}
 	for _, c := range cases {
 		d := DynamicZonesConf{Dynamic: DynamicApiZoneConf{DefaultTemplate: c.dflt}}
@@ -334,6 +337,10 @@ func TestDynamicZonesConf_DefaultTemplateValidation(t *testing.T) {
 	d := DynamicZonesConf{Dynamic: DynamicApiZoneConf{DefaultTemplate: map[string]string{"forwarder": "hub-out"}}}
 	if err := d.Validate(); err == nil || !strings.Contains(err.Error(), "unknown zone type") {
 		t.Errorf("an unknown zone type key must be refused: %v", err)
+	}
+	d = DynamicZonesConf{Dynamic: DynamicApiZoneConf{DefaultTemplate: map[string]string{"primary": "a", " Primary": "b"}}}
+	if err := d.Validate(); err == nil || !strings.Contains(err.Error(), "more than once") {
+		t.Errorf("two keys for one zone type must be refused: %v", err)
 	}
 }
 

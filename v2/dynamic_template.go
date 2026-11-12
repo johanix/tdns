@@ -32,8 +32,9 @@ import (
 
 // templateApplyMu orders the installs of template expansions on live zones.
 // A reload's re-expansion (ReapplyDynamicZoneTemplates) holds it for its whole
-// run, and an add or a modify holds it from its expansion until the zone is in
-// Zones. Without it an expansion made before a reload rebuilt the template map
+// run, an add holds it from its expansion until the zone is in Zones, and a
+// modify from reading the zone until its replacement is in Zones (which also
+// keeps two modifies of one zone from undoing each other). Without it an expansion made before a reload rebuilt the template map
 // could be installed after the reload's own, and the zone would keep a
 // downstream the operator had just removed until the next reload. Taken with
 // no other lock held; confMu (the template lookup) and zd.mu are taken inside

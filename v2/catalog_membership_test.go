@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,7 +146,7 @@ func TestConfiguredCatalogWritesItsOwnZoneFile(t *testing.T) {
 	zd := newTestCatalog(t, zone)
 	own := filepath.Join(dir, "catalog.configured.example.zone")
 	zd.mu.Lock()
-	zd.fromStaticConfig = true // as ParseZones leaves a zone the config defines
+	zd.fromStaticConfig.Store(true) // as ParseZones leaves a zone the config defines
 	zd.Zonefile = own
 	zd.mu.Unlock()
 	if Conf.ShouldPersistZone(zd) {
@@ -202,5 +203,89 @@ func TestProducerCatalogNeedsNoConfigGroups(t *testing.T) {
 		if !c.wantErr && !opts[OptCatalogZone] {
 			t.Errorf("%s: catalog-zone option lost", c.name)
 		}
+	}
+}
+
+func TestRebuildKeepsAMemberNotYetPublished(t *testing.T) {
+	const zone = "catalog.busy.example."
+	zd := newTestCatalog(t, zone)
+	if err := handleCatalogZoneAdd(zone, "m1.example.", nil, &CatalogResponse{}); err != nil {
+		t.Fatalf("zone add m1: %v", err)
+	}
+	waitForMembers(t, zd, 1)
+
+	// A busy zone: the next change waits for the publish cadence.
+	zd.mu.Lock()
+	zd.publishCadence = 700 * time.Millisecond
+	zd.lastPublish = time.Now()
+	zd.mu.Unlock()
+	if err := handleCatalogZoneAdd(zone, "m2.example.", nil, &CatalogResponse{}); err != nil {
+		t.Fatalf("zone add m2: %v", err)
+	}
+	if got := len(catalogPTRs(zd)); got != 1 {
+		t.Fatalf("m2 was published before the cadence: %d members", got)
+	}
+	// A rebuild now (an edited zone file reloaded, say) reads a zone without
+	// m2. The list is ahead of the zone, so it must be kept.
+	if _, err := rebuildCatalogMembership(zd); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	if _, ok := catalogMembershipOf(zone).MemberZones["m2.example."]; !ok {
+		t.Fatal("a rebuild dropped a member whose publish had not landed yet")
+	}
+	// Once the publish has landed the list and the zone agree, and a rebuild
+	// runs again.
+	waitForMembers(t, zd, 2)
+	waitFor(t, 3*time.Second, "the publish bookkeeping", func() bool {
+		cm := catalogMembershipOf(zone)
+		cm.mu.RLock()
+		defer cm.mu.RUnlock()
+		return cm.edits == cm.publishedEdits
+	})
+	forgetCatalogMembership(zone)
+	if n, err := rebuildCatalogMembership(zd); n != 2 || err != nil {
+		t.Errorf("rebuild after the publish: %d members, %v", n, err)
+	}
+}
+
+func TestAutoConfigureLeavesAProducedCatalogAlone(t *testing.T) {
+	const zone = "catalog.produced.example."
+	zd := newTestCatalog(t, zone)
+	conf := &Config{Catalog: &CatalogConf{GroupPrefixes: GroupPrefixesConf{Config: "config", Signing: "sign"}}}
+	update := &CatalogZoneUpdate{
+		CatalogZone: zone,
+		MemberZones: map[string]*MemberZone{
+			"m1.example.": {ZoneName: "m1.example.", MetaGroup: "config-blue"},
+		},
+	}
+	if err := AutoConfigureZonesFromCatalog(context.Background(), update, conf); err != nil {
+		t.Errorf("a produced catalog that does not auto-create needs no local config groups: %v", err)
+	}
+	if zd.HasError(ConfigError) {
+		t.Errorf("a produced catalog was put in error state over its members' groups: %q", zd.ErrorMsg)
+	}
+}
+
+func TestParseCatalogZoneEmptyPrefixesMeanNone(t *testing.T) {
+	const zone = "catalog.prefixes.example."
+	zd := newTestCatalog(t, zone)
+	saved := Conf.Catalog
+	t.Cleanup(func() { Conf.Catalog = saved })
+	Conf.Catalog = &CatalogConf{} // a catalog: block without group-prefixes
+
+	if err := handleCatalogGroupAdd(zone, "blue", &CatalogResponse{}); err != nil {
+		t.Fatalf("group add: %v", err)
+	}
+	if err := handleCatalogZoneAdd(zone, "m1.example.", []string{"blue"}, &CatalogResponse{}); err != nil {
+		t.Fatalf("zone add: %v", err)
+	}
+	waitForMembers(t, zd, 1)
+	update, err := ParseCatalogZone(zd)
+	if err != nil {
+		t.Fatalf("ParseCatalogZone: %v", err)
+	}
+	m := update.MemberZones["m1.example."]
+	if m == nil || m.SigningGroup != "" || m.MetaGroup != "" || len(m.ServiceGroups) != 1 {
+		t.Errorf("with no prefixes every group is ordinary: %+v", m)
 	}
 }

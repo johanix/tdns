@@ -89,7 +89,7 @@ func (conf *Config) ShouldPersistZone(zd *ZoneData) bool {
 	// A zone the config file defines is the config file's. Writing it into
 	// the dynamic config as well would make it outlive its removal from the
 	// config file: the next boot would load it back as a dynamic zone.
-	if zd.fromStaticConfig {
+	if zd.fromStaticConfig.Load() {
 		return false
 	}
 
@@ -1233,6 +1233,13 @@ func resolveTransferSrcUpdate(old, in []string) []string {
 
 func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) (string, error) {
 	name := dns.Fqdn(in.Name)
+	// From reading the zone until its replacement is in Zones: two modifies
+	// of one zone would otherwise both start from the same old ZoneData, and
+	// the second would undo the first (its template, say). The same lock
+	// orders a reload's template re-expansion against this (templateApplyMu).
+	// Nothing called below takes it again.
+	templateApplyMu.Lock()
+	defer templateApplyMu.Unlock()
 	oldZd, exists := Zones.Get(name)
 	if !exists {
 		return "", fmt.Errorf("zone %s not found", name)
@@ -1288,8 +1295,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 
 	// The template: kept unless the request names a new one or clears it.
 	// Expanded before anything is mutated, so a refused template leaves the
-	// zone as it was, and under templateApplyMu until the replacement is in
-	// Zones, so a reload's re-expansion cannot land in between. A newly named
+	// zone as it was (templateApplyMu is held from the top). A newly named
 	// template is gated like an add's; one the zone already has is gated like
 	// at boot, and if it no longer expands the zone keeps its outbound
 	// settings with a TemplateWarning rather than having an unrelated modify
@@ -1297,8 +1303,6 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	if in.ClearTemplate && in.Template != "" {
 		return "", fmt.Errorf("zone %s: set a template or clear it, not both", name)
 	}
-	templateApplyMu.Lock()
-	defer templateApplyMu.Unlock()
 	oldZd.mu.Lock()
 	template := oldZd.Template
 	oldZd.mu.Unlock()

@@ -177,6 +177,14 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 			configPrefix = Conf.Catalog.GroupPrefixes.Config
 			signingPrefix = Conf.Catalog.GroupPrefixes.Signing
 		}
+		// An unset prefix is no group type, as "none" is: an empty prefix
+		// would match every group (strings.HasPrefix(g, "") is true).
+		if configPrefix == "" {
+			configPrefix = "none"
+		}
+		if signingPrefix == "" {
+			signingPrefix = "none"
+		}
 
 		for _, group := range info.groups {
 			// Check if this is a signing group (only if prefix != "none")
@@ -261,6 +269,13 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 	if !catalogExists {
 		lg.Warn("CATALOG: catalog zone not found in Zones map", "zone", update.CatalogZone)
 		return fmt.Errorf("AutoConfigureZonesFromCatalog: catalog zone %s not found in Zones map", update.CatalogZone)
+	}
+
+	// A catalog this server produces and does not auto-create from: its
+	// groups are labels for its consumers, not references to this server's
+	// config groups, so there is nothing to configure or check here.
+	if !catalogZd.Options[OptCatalogMemberAutoCreate] && catalogZd.ZoneType == Primary {
+		return nil
 	}
 
 	if conf.Catalog == nil {
@@ -540,6 +555,13 @@ type CatalogMembership struct {
 	CatalogZoneName string
 	MemberZones     map[string]*CatalogMemberZone // zonename -> member data
 	AvailableGroups []string                      // List of all defined groups (RFC 9432 terminology)
+	// edits counts the member changes (members and their groups) made
+	// through the API; publishedEdits is the edits value the catalog's
+	// published content reflects, set once the publish carrying a
+	// regeneration has landed. While the two differ the list is ahead of
+	// the zone, and rebuildCatalogMembership leaves it alone.
+	edits          uint64
+	publishedEdits uint64
 }
 
 // CatalogMemberZone represents a member zone in the catalog
@@ -581,6 +603,20 @@ func rebuildCatalogMembership(zd *ZoneData) (int, error) {
 	if zd == nil || !zd.Options[OptCatalogZone] || !zoneMayOriginateContent(zd) {
 		return 0, nil
 	}
+	// The list may be ahead of the zone: a member change made through the
+	// API whose publish has not landed yet. The zone does not have it, so a
+	// rebuild from the zone would lose it; the list is kept. The same check
+	// again before the list is replaced catches a change made while the
+	// zone was being read.
+	cm := GetOrCreateCatalogMembership(zd.ZoneName)
+	cm.mu.RLock()
+	before, ahead := cm.edits, cm.edits != cm.publishedEdits
+	kept := len(cm.MemberZones)
+	cm.mu.RUnlock()
+	if ahead {
+		lg.Info("CATALOG: member list ahead of the catalog's published content; not rebuilt", "catalog", zd.ZoneName)
+		return kept, nil
+	}
 	snap := zd.publishedSnapshot()
 	if snap == nil {
 		return 0, fmt.Errorf("catalog zone %s has no published content", zd.ZoneName)
@@ -621,8 +657,13 @@ func rebuildCatalogMembership(zd *ZoneData) (int, error) {
 		members[zname] = &CatalogMemberZone{ZoneName: zname, Hash: id, Groups: g, DiscoveredAt: now}
 	}
 
-	cm := GetOrCreateCatalogMembership(catalog)
 	cm.mu.Lock()
+	if cm.edits != before || cm.edits != cm.publishedEdits {
+		kept = len(cm.MemberZones)
+		cm.mu.Unlock()
+		lg.Info("CATALOG: member list changed while the catalog was read; not rebuilt", "catalog", catalog)
+		return kept, nil
+	}
 	cm.MemberZones = members
 	for _, grp := range cm.AvailableGroups {
 		delete(seenGroup, grp)
@@ -668,6 +709,7 @@ func (cm *CatalogMembership) AddMemberZone(zoneName string) error {
 		Groups:       []string{},
 		DiscoveredAt: time.Now(),
 	}
+	cm.edits++
 
 	lg.Info("CATALOG: added zone to catalog", "zone", zoneName, "catalog", cm.CatalogZoneName, "hash", cm.MemberZones[zoneName].Hash)
 	return nil
@@ -683,6 +725,7 @@ func (cm *CatalogMembership) RemoveMemberZone(zoneName string) error {
 	}
 
 	delete(cm.MemberZones, zoneName)
+	cm.edits++
 	lg.Info("CATALOG: removed zone from catalog", "zone", zoneName, "catalog", cm.CatalogZoneName)
 	return nil
 }
@@ -773,6 +816,7 @@ func (cm *CatalogMembership) AddZoneGroup(zoneName, group string) error {
 	}
 
 	member.Groups = append(member.Groups, group)
+	cm.edits++
 	lg.Info("CATALOG: added group to zone", "group", group, "zone", zoneName, "catalog", cm.CatalogZoneName)
 	return nil
 }
@@ -802,6 +846,7 @@ func (cm *CatalogMembership) RemoveZoneGroup(zoneName, group string) error {
 	}
 
 	member.Groups = newGroups
+	cm.edits++
 	lg.Info("CATALOG: removed group from zone", "group", group, "zone", zoneName, "catalog", cm.CatalogZoneName)
 	return nil
 }
