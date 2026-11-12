@@ -34,7 +34,8 @@ import (
 // Withhold keeps a zone that is not yet served from being served, whatever its
 // copy holds, until ReleaseWithheld or StartSigning. A query, or an UPDATE, gets
 // SERVFAIL, as from a zone with nothing to answer from, except a DS at its apex,
-// which is its parent's data and which a parent hosted here answers. And it stays
+// which is its parent's data: a parent hosted here answers it as it would for
+// any child, by the parent's own state and not this zone's. And it stays
 // not Ready, which is what refuses transfers and holds back NOTIFYs; Ready is not
 // what answers queries, a published copy is. Nothing else about the zone changes: its
 // refreshes go on, so a release serves the upstream's current copy. A zone

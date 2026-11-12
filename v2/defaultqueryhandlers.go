@@ -89,22 +89,44 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 			return nil
 		}
 		lgHandler.Warn("bad error channel query format, expected '_er.' prefix", "qname", qname)
-		m := new(dns.Msg)
-		m.SetRcode(r, dns.RcodeRefused)
-		w.WriteMsg(m)
+		replyRcode(w, r, msgoptions, dns.RcodeRefused)
 		return nil
 	}
 
 	if zd, ok := Zones.Get(qname); ok {
+		// qname is this zone's apex, so a DS is not this zone's data but its
+		// parent's (RFC 4035 section 3.1.4.1). With the parent hosted here, the
+		// parent's state decides the answer and this zone's does not:
+		// dsResponder answers from the parent if it serves, and SERVFAILs if
+		// it does not. So the guards below, which are about this zone, are not
+		// asked, and a child with no copy, in error, withheld or expired leaves
+		// its parent's answer alone. For "." FindParentZone returns the root
+		// itself, so there the root's own state decides. dsResponder gets the
+		// parent found here and does not look again: a parent removed in
+		// between must not leave the answer to this zone's copy, which these
+		// guards did not check.
+		//
+		// With no parent hosted, the answer is this zone's own NODATA, from its
+		// copy (sendChildApexDSNodata), and the guards below apply to it as to
+		// any other answer from that copy.
+		if qtype == dns.TypeDS {
+			if pzd := FindParentZone(qname); pzd != nil {
+				lgHandler.Debug("DS at a zone's apex, parent hosted: the parent answers", "qname", qname, "zone", zd.ZoneName, "parent", pzd.ZoneName)
+				if err := zd.dsResponder(ctx, w, r, qname, pzd, msgoptions, kdb); err != nil {
+					lgHandler.Error("dsResponder failed", "error", err)
+					replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
+				}
+				return nil
+			}
+		}
+
 		// SERVFAIL when the zone has a service-impacting error
 		// (config / agent / DNSSEC). Rollover-* errors do NOT trigger
 		// SERVFAIL: an unsafe upcoming rollover doesn't invalidate the
 		// currently served zone contents.
 		if zd.HasServiceImpactingError() {
 			lgHandler.Warn("zone in error state", "qname", qname, "errorType", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
-			m := new(dns.Msg)
-			m.SetRcode(r, dns.RcodeServerFailure)
-			w.WriteMsg(m)
+			replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
 			return nil
 		}
 
@@ -115,22 +137,17 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		// enforces.
 		if !zd.HasPublishedData() {
 			lgHandler.Warn("zone holds no published data", "qname", qname, "zone", zd.ZoneName)
-			m := new(dns.Msg)
-			m.SetRcode(r, dns.RcodeServerFailure)
-			w.WriteMsg(m)
+			replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
 			return nil
 		}
 
 		// Withheld: we hold the copy, and its daemon does not know yet what the
-		// zone is to it, so an answer from it could be bogus (Withhold). qname is
-		// this zone's apex here, so a DS is its parent's data, not the copy's:
-		// handleDSQuery asks the parent, and does not answer from the copy.
-		if zd.Withheld() && qtype != dns.TypeDS {
+		// zone is to it, so an answer from it could be bogus (Withhold). A DS
+		// that gets here has no parent hosted, so its NODATA would come from
+		// that copy too.
+		if zd.Withheld() {
 			lgHandler.Debug("zone is withheld", "qname", qname, "zone", zd.ZoneName)
-			m := new(dns.Msg)
-			m.SetRcode(r, dns.RcodeServerFailure)
-			respondEDNS(m, r, msgoptions)
-			w.WriteMsg(m)
+			replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
 			return nil
 		}
 
@@ -141,9 +158,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		if zd.HasExpired() {
 			lgHandler.Warn("zone has passed SOA EXPIRE since its last confirmed refresh",
 				"qname", qname, "zone", zd.ZoneName, "lastRefresh", zd.lastRefresh())
-			m := new(dns.Msg)
-			m.SetRcode(r, dns.RcodeServerFailure)
-			w.WriteMsg(m)
+			replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
 			return nil
 		}
 
@@ -151,9 +166,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		err := zd.QueryResponder(ctx, w, r, qname, qtype, msgoptions, kdb, conf.Internal.ImrEngine)
 		if err != nil {
 			lgHandler.Error("QueryResponder failed", "error", err)
-			m := new(dns.Msg)
-			m.SetRcode(r, dns.RcodeServerFailure)
-			w.WriteMsg(m)
+			replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
 		}
 		return nil
 	}
@@ -165,9 +178,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	zd := FindZoneOrRoot(qname)
 	if zd == nil {
 		// No zone found - return REFUSED
-		m := new(dns.Msg)
-		m.SetRcode(r, dns.RcodeRefused)
-		w.WriteMsg(m)
+		replyRcode(w, r, msgoptions, dns.RcodeRefused)
 		return nil
 	}
 
@@ -176,24 +187,18 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	lgHandler.Debug("app mode check", "appMode", AppTypeToString[Globals.App.Type])
 	if Globals.App.Type == AppTypeAgent && !agentAnswersKeyStateInquiry(zd, qtype, msgoptions) {
 		lgHandler.Debug("agent mode, refusing ordinary query", "qname", qname)
-		m := new(dns.Msg)
-		m.SetRcode(r, dns.RcodeRefused)
-		w.WriteMsg(m)
+		replyRcode(w, r, msgoptions, dns.RcodeRefused)
 		return nil
 	}
 
 	if zd.ZoneStore == XfrZone {
-		m := new(dns.Msg)
-		m.SetRcode(r, dns.RcodeRefused)
-		w.WriteMsg(m)
+		replyRcode(w, r, msgoptions, dns.RcodeRefused)
 		return nil
 	}
 
 	if zd.HasServiceImpactingError() {
 		lgHandler.Warn("zone in error state", "qname", qname, "zone", zd.ZoneName, "errorType", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
-		m := new(dns.Msg)
-		m.SetRcode(r, dns.RcodeServerFailure)
-		w.WriteMsg(m)
+		replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
 		return nil
 	}
 
@@ -202,9 +207,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	// API-provisioned zone -- unconditionally, with no error present.
 	if !zd.HasPublishedData() {
 		lgHandler.Warn("zone holds no published data", "qname", qname, "zone", zd.ZoneName)
-		m := new(dns.Msg)
-		m.SetRcode(r, dns.RcodeServerFailure)
-		w.WriteMsg(m)
+		replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
 		return nil
 	}
 
@@ -212,10 +215,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	// apex here, so a DS is this zone's own to answer, and it does not.
 	if zd.Withheld() {
 		lgHandler.Debug("zone is withheld", "qname", qname, "zone", zd.ZoneName)
-		m := new(dns.Msg)
-		m.SetRcode(r, dns.RcodeServerFailure)
-		respondEDNS(m, r, msgoptions)
-		w.WriteMsg(m)
+		replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
 		return nil
 	}
 
@@ -223,9 +223,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	if zd.HasExpired() {
 		lgHandler.Warn("zone has passed SOA EXPIRE since its last confirmed refresh",
 			"qname", qname, "zone", zd.ZoneName, "lastRefresh", zd.lastRefresh())
-		m := new(dns.Msg)
-		m.SetRcode(r, dns.RcodeServerFailure)
-		w.WriteMsg(m)
+		replyRcode(w, r, msgoptions, dns.RcodeServerFailure)
 		return nil
 	}
 
@@ -234,6 +232,18 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		lgHandler.Error("QueryResponder failed", "error", err)
 	}
 	return nil
+}
+
+// replyRcode writes the handler's own reply to r: no data, just rcode, with the
+// response OPT when r carried one (RFC 6891 section 6.1.1: an EDNS query MUST
+// get an OPT in the response). Every reply DefaultQueryHandler builds itself
+// goes through here; the ones QueryResponder builds get theirs from
+// respondEDNS on its own message.
+func replyRcode(w dns.ResponseWriter, r *dns.Msg, msgoptions *edns0.MsgOptions, rcode int) {
+	m := new(dns.Msg)
+	m.SetRcode(r, rcode)
+	respondEDNS(m, r, msgoptions)
+	w.WriteMsg(m)
 }
 
 // keyStateInquiryZone is the zone whose UPDATE Receiver answers a KeyState

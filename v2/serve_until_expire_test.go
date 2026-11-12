@@ -66,13 +66,19 @@ func ask(t *testing.T, qname string, qtype uint16) *dns.Msg {
 // askMsg is ask with the query as the caller built it.
 func askMsg(t *testing.T, req *dns.Msg) *dns.Msg {
 	t.Helper()
+	return askMsgCtx(t, context.Background(), req)
+}
+
+// askMsgCtx is askMsg under ctx. It returns the last reply written.
+func askMsgCtx(t *testing.T, ctx context.Context, req *dns.Msg) *dns.Msg {
+	t.Helper()
 	qname, qtype := req.Question[0].Name, req.Question[0].Qtype
 	msgo, err := edns0.ExtractFlagsAndEDNS0Options(req)
 	if err != nil {
 		t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
 	}
 	rw := &fakeRW{remote: udpAddr("127.0.0.1")}
-	if err := DefaultQueryHandler(context.Background(), &DnsQueryRequest{
+	if err := DefaultQueryHandler(ctx, &DnsQueryRequest{
 		ResponseWriter: rw,
 		Msg:            req,
 		Qname:          qname,
