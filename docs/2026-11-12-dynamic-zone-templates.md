@@ -328,3 +328,20 @@ The loopback rerun, with the hub's config holding no `catalog:` block:
 | `config reload-zones` | The catalog keeps its 3 members; NSD keeps every member. |
 | An API catalog: add a member, restart, add another, restart, add a third | All three are in the catalog after the last add. |
 | The dynamic config | The copy of the configured catalog an older version wrote there is gone after the next rewrite. |
+
+**Later the same day (review round 3 and the live test).** Two more catalog
+changes:
+
+- One write-back at a time per zone. Two write-backs in flight could finish
+  out of order, leaving a configured catalog's file a serial behind the
+  zone. Each write now takes its snapshot under a per-zone lock, so the file
+  ends at the newest one.
+- A group delete is refused while a member still carries the group. The
+  group stays in the member's published TXT, and the member list is rebuilt
+  from the records at the next load, so such a delete came back after a
+  restart.
+
+The live test also showed `GetMemberZones` logging a warning on every
+`catalog zone list` for a catalog with no `catalog:` block. That block is
+optional now, so the message is debug. This last change was not run live:
+it changes only a log level.

@@ -877,7 +877,9 @@ func (cm *CatalogMembership) GetMemberZones() map[string]*MemberZone {
 
 	// Get configured group prefixes
 	if Conf.Catalog == nil {
-		lg.Warn("GetMemberZones: Conf.Catalog is nil, returning members without group categorization")
+		// Normal for a catalog that does not auto-create: it needs no catalog
+		// block (#1040), so this is not worth a warning.
+		lg.Debug("GetMemberZones: no catalog block in the config, returning members without group categorization")
 		for zoneName, member := range cm.MemberZones {
 			discoveredAt := member.DiscoveredAt
 			if discoveredAt.IsZero() {
