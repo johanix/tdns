@@ -3,8 +3,8 @@
 **Written 2026-11-12.** For #1040. Line references are to main at `405f40b6`.
 
 **Status:** implemented on `feat/api-secondary-template`, draft PR #1041,
-including the catalog fixes (the last section). Revised the same day for the
-first review round (CodeRabbit and an external review); the changes are in
+including the catalog fixes (the last section). Revised the same day for two
+review rounds (CodeRabbit twice, and an external review); the changes are in
 place below.
 
 ## The problem
@@ -94,10 +94,12 @@ normalized, and bare-string peer and ACL entries decode, so an alias does not
 lose its list on a reload.
 
 The installs are ordered. A reload's re-expansion holds one lock for its
-whole run, and an add or a modify holds it from its expansion until the zone
-is in the zone map. Otherwise an expansion made before a reload rebuilt the
-template map could be installed after the reload's own, and the zone would
-keep a downstream the operator had just removed.
+whole run, an add holds it from its expansion until the zone is in the zone
+map, and a modify from reading the zone until its replacement is in the map.
+Otherwise an expansion made before a reload rebuilt the template map could
+be installed after the reload's own, and the zone would keep a downstream
+the operator had just removed; and two modifies of one zone could both start
+from the same old zone, the second undoing the first.
 
 **A template that no longer expands.** On a reload, the zone keeps the
 outbound settings it had and gets a `TemplateWarning`, a new
@@ -128,9 +130,13 @@ not move zones added under the old one. To move them, run `zone modify`.
 Catalog-provisioned zones never take the default. Each entry is checked at
 load and by `config check` against the same gates as an add: the template
 exists, is blessed and has the right type (a type inherited from a parent
-template counts), and its parent chain has no missing parent and no cycle,
-since the template map drops such a template at load. A primary added
-without a template is still refused when no primary default is set.
+template counts), and its parent chain has no missing parent and no cycle
+(a template naming itself included), since the template map drops such a
+template at load. Two keys for one zone type (`primary` and `Primary`) are
+refused. On a full reload the check runs before the template map is
+rebuilt, so a refused reload leaves the running templates as they were. A
+primary added without a template is still refused when no primary default
+is set.
 
 **`zone modify`** (secondaries) keeps the zone's template unless told
 otherwise. `--template X` sets or replaces it. `--clear-template`
@@ -212,10 +218,13 @@ Unit tests in `v2/dynamic_template_test.go`:
   from `keys.tsig` accepted in both directions;
 - a template's `provide-xfr:` decodes as its downstreams on a reload;
   a `TemplateWarning` alone does not block a serial bump;
-- the default template's parent chain: a missing parent, a cycle.
+- the default template's parent chain: a missing parent, a cycle, a
+  template naming itself; two keys for one zone type.
 
 Unit tests in `v2/catalog_membership_test.go` cover the catalog fixes (the
-last section).
+last section), including a rebuild that keeps a member whose publish has not
+landed, auto-configuration leaving a produced catalog alone, and empty group
+prefixes.
 
 A loopback run (all on 127.0.0.1): a BIND 9.20 primary with three zones,
 transfers authorised by a customer TSIG key; a tdns-auth distribution
@@ -266,16 +275,21 @@ server originates is loaded, the member list is rebuilt from its own PTR
 records under `zones.<catalog>`, with the groups of each member's
 `group.<id>.zones.<catalog>` TXT (`rebuildCatalogMembership`). The `<id>`
 labels are kept, so a later rewrite does not move a member. This holds for
-API-created catalogs too. It runs at the first load, and after a refresh
-that changed the zone (an edited zone file reloaded), but not after every
-refresh: a change the API has staged but not yet published is in the list
-and not yet in the zone, and a rebuild then would lose it. A secondary's
+API-created catalogs too. It runs at the first load, again once the
+journal has been replayed (a member added since the file was last written is
+only in the journal), and after a refresh that changed the zone (an edited
+zone file reloaded). It steps aside while the list is ahead of the zone: the
+list counts the member changes made through the API and the ones the
+published content reflects, the latter advanced when the publish carrying a
+regeneration lands, and a rebuild that finds them different, before or
+after reading the zone, keeps the list as it is. A secondary's
 catalog mirrors its upstream and gets no member list. A group that is
 defined but on no member is not in the zone, so it does not survive a
 restart.
 
 **A configured catalog writes its own zone file.** Zones the config file
-defines are now marked as such when ParseZones creates them. For such a
+defines are now marked as such when ParseZones creates them, or takes over
+one that was dynamic. For such a
 catalog, a change is written to its own `zonefile` once the publish that
 carries it is done, as `zone write` would (`WriteZone`, which also records
 the file's identity, so the next refresh does not take the write for an
@@ -286,8 +300,11 @@ older version wrote there drops out at the next rewrite.
 **Only a catalog that auto-creates needs config groups.** The
 `catalog.config-groups` check now applies to a catalog with
 `catalog-member-auto-create`. A catalog the server produces, or only reads,
-needs no `catalog:` block at all: without one, every group is an ordinary
-group, and member auto-configuration has nothing to do.
+needs no `catalog:` block at all: without one, or with no
+`group-prefixes` in it, every group is an ordinary group. Member
+auto-configuration leaves a produced catalog that does not auto-create
+alone: its groups are labels for its consumers, not references to this
+server's config groups.
 
 The loopback rerun, with the hub's config holding no `catalog:` block:
 
