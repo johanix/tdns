@@ -13,7 +13,7 @@ tdns-cli auth zone add [flags]
       --options strings           Zone options (comma-separated; secondary zones — primaries take options from the template)
       --primaries strings         Primary (upstream) addresses [host:port], comma-separated (secondary zones)
       --primary-key string        Primary TSIG key name applied to all primaries (NOKEY for none) (default "NOKEY")
-      --template string           Config template for a primary zone (must carry dynamiczones: true)
+      --template string           Config template (must carry dynamiczones: true): a primary's whole config, a secondary's outbound settings (downstreams, notify). Default: the server's default-template for the zone type
       --transfer-src strings      Source address(es) to bind for this zone's outbound transfers (IP only, one per family)
       --tsig-algo string          Inline TSIG algorithm (default hmac-sha256)
       --tsig-name string          Inline TSIG key name; created in keystore if absent and applied to keyless primaries (secondary) or keyless downstreams (primary)
