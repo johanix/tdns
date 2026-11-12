@@ -86,6 +86,13 @@ func (conf *Config) ShouldPersistZone(zd *ZoneData) bool {
 		return false
 	}
 
+	// A zone the config file defines is the config file's. Writing it into
+	// the dynamic config as well would make it outlive its removal from the
+	// config file: the next boot would load it back as a dynamic zone.
+	if zd.fromStaticConfig.Load() {
+		return false
+	}
+
 	// Check zone type and storage setting
 	if zd.Options[OptCatalogZone] {
 		// Catalog zone
@@ -226,16 +233,29 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			if perr != nil {
 				lg.Error("dynamic primary: config invalid, zone in error state", "zone", zoneName, "template", zconf.Template, "err", perr)
 				zd := &ZoneData{
-					ZoneName:  core.CanonicalizeName(zoneName),
-					ZoneType:  Primary,
-					ZoneStore: MapZone,
-					Zonefile:  zconf.Zonefile,
-					Template:  zconf.Template,
-					Logger:    log.Default(),
-					Options:   options,
-					Status:    ZoneStatusPending,
-					Data:      core.NewNameMap[OwnerData](),
-					KeyDB:     conf.Internal.KeyDB,
+					ZoneName:      core.CanonicalizeName(zoneName),
+					ZoneType:      Primary,
+					ZoneStore:     MapZone,
+					Zonefile:      zconf.Zonefile,
+					Template:      zconf.Template,
+					InlineTsigKey: zconf.InlineTsigKey,
+					Logger:        log.Default(),
+					Options:       options,
+					Status:        ZoneStatusPending,
+					Data:          core.NewNameMap[OwnerData](),
+					KeyDB:         conf.Internal.KeyDB,
+				}
+				// An entry from before the template owned the outbound
+				// settings keeps them, as persisted, until it can be
+				// expanded: they are the only record of the key its
+				// downstreams were bound to. The shell never loads, so it
+				// serves and notifies nothing from them.
+				if zconf.InlineTsigKey == "" && hasTemplateOwned(&zconf) {
+					zd.Notify = zconf.Notify
+					zd.AllowNotify = zconf.AllowNotify
+					zd.Downstreams = zconf.Downstreams
+					zd.DownstreamAuth = zconf.DownstreamAuth
+					zd.keepPersistedOutbound = true
 				}
 				// no-refresh-hooks: an error-state shell registered only to
 				// carry the ConfigError. It never refreshes, so a hook would
@@ -250,6 +270,15 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			if zconf.ApiManaged {
 				specOptions[OptApiManagedZone] = true
 			}
+			// An entry written before the template owned the outbound
+			// settings: rewrite it once in the current form (template name
+			// and inline key, no outbound lists).
+			if spec.LegacyEntry {
+				lg.Info("dynamic primary: outbound settings now follow the template; re-persisting the entry without them", "zone", zoneName, "template", zconf.Template, "inline_key", spec.InlineTsigKey)
+				clearTemplateOwned(&cf.Zones[i])
+				cf.Zones[i].InlineTsigKey = spec.InlineTsigKey
+				needsRepersist = true
+			}
 			retries, retryInterval := zoneNotifyRetrySettings(zoneName, &spec.Zconf)
 			zr := ZoneRefresher{
 				Name:             zoneName,
@@ -258,6 +287,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				ZoneStore:        MapZone,
 				Zonefile:         spec.Zconf.Zonefile,
 				Template:         zconf.Template,
+				InlineTsigKey:    spec.InlineTsigKey,
 				PublishCadence:   spec.PublishCadence,
 				Notify:           spec.Zconf.Notify,
 				AllowNotify:      spec.Zconf.AllowNotify,
@@ -306,6 +336,30 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			lg.Warn("dynamic zone: some primaries unavailable, serving from the rest", "zone", zoneName, "unresolved", res.Unresolved, "key_collisions", res.KeyCollisions, "serving", len(res.Resolved))
 		}
 
+		// A template-driven secondary: the template owns the outbound
+		// settings, so whatever the entry carries for them is replaced by
+		// the expansion. A template that does not expand leaves the zone
+		// without them (no transfers out, no NOTIFYs) and with a
+		// TemplateWarning; the zone itself still loads and serves.
+		var templateWarning string
+		templated := zoneType == Secondary && zconf.Template != "" && zconf.ApiManaged
+		var outbound templateOutbound
+		if templated {
+			if hasTemplateOwned(&zconf) {
+				clearTemplateOwned(&cf.Zones[i])
+				needsRepersist = true
+			}
+			out, terr := conf.prepareSecondaryTemplate(zoneName, zconf.Template, false, inboundKeys(zconf.Primaries, ""))
+			if terr != nil {
+				lg.Error("dynamic secondary: template did not expand; loading the zone without its outbound settings", "zone", zoneName, "template", zconf.Template, "err", terr)
+				templateWarning = fmt.Sprintf("template %q: %v; loaded without the template's outbound settings (no transfers out, no NOTIFYs)", zconf.Template, terr)
+			} else {
+				outbound = out
+			}
+			zconf.Notify, zconf.AllowNotify = outbound.Notify, outbound.AllowNotify
+			zconf.Downstreams, zconf.DownstreamAuth = outbound.Downstreams, outbound.DownstreamAuth
+		}
+
 		// Validate the persisted ACLs before installing them (ParseZones validates
 		// the config path; this load path must too). A malformed prefix never
 		// matches, so an unvalidated typo in a BLOCKED entry would be silently
@@ -344,6 +398,9 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 
 		// Create ZoneRefresher and enqueue to RefreshEngine (same as ParseZones does)
 		retries, retryInterval := zoneNotifyRetrySettings(zoneName, &zconf)
+		if templated {
+			retries, retryInterval = outbound.NotifyRetries, outbound.NotifyRetryInterval
+		}
 		zr := ZoneRefresher{
 			Name:             zoneName,
 			Force:            true, // Force refresh on startup to load from disk
@@ -364,6 +421,9 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			TransferSrc:         zconf.TransferSrc,
 			NotifyRetries:       retries,
 			NotifyRetryInterval: retryInterval,
+
+			Template:        zconf.Template,
+			TemplateWarning: templateWarning,
 		}
 
 		// Blocking send, exactly like the static-zone enqueue in ParseZones.
@@ -486,6 +546,17 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 	}
 	if zd.DelegationPolicy != nil {
 		zconf.DelegationPolicy = zd.DelegationPolicy.Name
+	}
+
+	// A template-driven API zone: the template owns the outbound settings,
+	// so they are not persisted -- boot and reload re-expand them, which is
+	// what lets a template change reach the zone. The inline key a primary's
+	// keyless downstreams are bound to is persisted in their place. (An
+	// error-state shell of an entry from before this rule keeps what it was
+	// loaded with; see keepPersistedOutbound.)
+	if zd.Template != "" && zd.Options[OptApiManagedZone] && !zd.keepPersistedOutbound {
+		clearTemplateOwned(&zconf)
+		zconf.InlineTsigKey = zd.InlineTsigKey
 	}
 
 	return zconf
@@ -706,11 +777,17 @@ type DynamicZoneInput struct {
 	Name      string
 	Type      ZoneType
 	Primaries []PeerConf
-	// Template names the operator-blessed config template a primary zone is
-	// expanded from. REQUIRED for Type == Primary (API path); unused for
-	// secondaries. The template must carry dynamiczones: true (gate 2).
+	// Template names the operator-blessed config template the zone is
+	// expanded from; the template must carry dynamiczones: true (gate 2). On
+	// an API add with no template, dynamiczones.dynamic.default-template for
+	// the zone type applies. A primary takes its whole configuration from it
+	// and cannot be added without one; a secondary takes only the outbound
+	// side (dynamic_template.go). On modify, empty keeps the zone's template.
 	Template string
-	Options  map[ZoneOption]bool
+	// ClearTemplate (modify only) removes the zone's template, and with it
+	// the outbound settings the template gave the zone.
+	ClearTemplate bool
+	Options       map[ZoneOption]bool
 	// Inline TSIG key (API/CLI add/modify). When TsigName is set it is validated
 	// and upserted into the keys: store, then applied to every keyless primary
 	// (NOKEY/empty). The secret is persisted with the zone (the dynamic config
@@ -822,6 +899,13 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 			ZoneTypeToString[in.Type], ZoneTypeToString[in.Type])
 	}
 
+	// The operator's default template for the zone type, when the request
+	// names none. Resolved here and persisted with the zone, so a later
+	// change of the default does not move zones added under the old one.
+	if fromAPI && in.Template == "" {
+		in.Template = conf.DynamicZones.Dynamic.DefaultTemplateFor(in.Type)
+	}
+
 	// The API creates secondary zones (transfer-provisioned) and primary
 	// zones (template-provisioned; a template is REQUIRED for primaries —
 	// the operator curates the policy space, the API caller picks a point
@@ -830,7 +914,7 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	case Secondary:
 	case Primary:
 		if fromAPI && in.Template == "" {
-			return "", fmt.Errorf("zone add for a primary zone requires a template (operator-blessed with dynamiczones: true)")
+			return "", fmt.Errorf("zone add for a primary zone requires a template (operator-blessed with dynamiczones: true; or set dynamiczones.dynamic.default-template.primary)")
 		}
 	default:
 		return "", fmt.Errorf("zone add supports primary and secondary zones only (got %s)", ZoneTypeToString[in.Type])
@@ -926,6 +1010,26 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	primariesConf := clonePeerConfs(in.Primaries)
 	upstreams := res.Resolved
 
+	// A template gives the zone its outbound settings: downstreams, NOTIFY
+	// targets and the rest (dynamic_template.go). Nothing else comes from
+	// it, so the primaries, key and options above stay the caller's. From
+	// the expansion until the zone is in Zones, templateApplyMu keeps a
+	// reload's re-expansion from landing in between.
+	templateApplyMu.Lock()
+	defer templateApplyMu.Unlock()
+	var outbound templateOutbound
+	if in.Template != "" {
+		stagedName := ""
+		if staged != nil {
+			stagedName = staged.Name
+		}
+		out, terr := conf.prepareSecondaryTemplate(name, in.Template, fromAPI, inboundKeys(in.Primaries, stagedName))
+		if terr != nil {
+			return "", fmt.Errorf("zone %s: %w", name, terr)
+		}
+		outbound = out
+	}
+
 	// Store is always map for dynamic zones — single chokepoint for the map-only
 	// rule (also covers the catalog re-point).
 	zd := &ZoneData{
@@ -946,9 +1050,11 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		// setting silently. The modify path already carries it onto its newZd
 		// for the same reason.
 		TransferSrc: in.TransferSrc,
+		Template:    in.Template,
 
 		SuppressedOptions: suppressedOptions,
 	}
+	zd.setOutboundLocked(outbound) // zd is still private to this goroutine
 	if normMsg != "" {
 		lg.Warn("zone option normalization", "zone", name, "detail", normMsg)
 		zd.SetError(ConfigWarning, "%s", normMsg)
@@ -994,11 +1100,15 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		ZoneStore:     MapZone,
 		Options:       options,
 		TransferSrc:   in.TransferSrc,
+		Template:      in.Template,
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
 		return "", fmt.Errorf("zone %s registered but failed to schedule initial transfer: %w", name, err)
 	}
 
+	if in.Template != "" {
+		return fmt.Sprintf("zone %s provisioning (outbound settings from template %s); poll list-dynamic for state", name, in.Template), nil
+	}
 	return fmt.Sprintf("zone %s provisioning; poll list-dynamic for state", name), nil
 }
 
@@ -1123,6 +1233,13 @@ func resolveTransferSrcUpdate(old, in []string) []string {
 
 func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) (string, error) {
 	name := dns.Fqdn(in.Name)
+	// From reading the zone until its replacement is in Zones: two modifies
+	// of one zone would otherwise both start from the same old ZoneData, and
+	// the second would undo the first (its template, say). The same lock
+	// orders a reload's template re-expansion against this (templateApplyMu).
+	// Nothing called below takes it again.
+	templateApplyMu.Lock()
+	defer templateApplyMu.Unlock()
 	oldZd, exists := Zones.Get(name)
 	if !exists {
 		return "", fmt.Errorf("zone %s not found", name)
@@ -1176,6 +1293,43 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		upstreams = modRes.Resolved
 	}
 
+	// The template: kept unless the request names a new one or clears it.
+	// Expanded before anything is mutated, so a refused template leaves the
+	// zone as it was (templateApplyMu is held from the top). A newly named
+	// template is gated like an add's; one the zone already has is gated like
+	// at boot, and if it no longer expands the zone keeps its outbound
+	// settings with a TemplateWarning rather than having an unrelated modify
+	// (a key, a primary) refused over it.
+	if in.ClearTemplate && in.Template != "" {
+		return "", fmt.Errorf("zone %s: set a template or clear it, not both", name)
+	}
+	oldZd.mu.Lock()
+	template := oldZd.Template
+	oldZd.mu.Unlock()
+	switch {
+	case in.ClearTemplate:
+		template = ""
+	case in.Template != "":
+		template = in.Template
+	}
+	var outbound templateOutbound
+	templateWarning := ""
+	if template != "" {
+		stagedName := ""
+		if staged != nil {
+			stagedName = staged.Name
+		}
+		out, terr := conf.prepareSecondaryTemplate(name, template, in.Template != "", inboundKeys(primariesConf, stagedName))
+		switch {
+		case terr == nil:
+			outbound = out
+		case in.Template != "":
+			return "", fmt.Errorf("zone %s: %w", name, terr)
+		default:
+			templateWarning = fmt.Sprintf("template %q: %v; keeping the zone's previous outbound settings", template, terr)
+		}
+	}
+
 	// (1) Bump the old generation so any in-flight refresh on the captured
 	// pointer self-aborts at its pre-persist guard (B5b).
 	oldZd.generation.Add(1)
@@ -1207,11 +1361,23 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// the old zone (copied under its lock into fresh slices — newZd must not share
 	// mutable state with oldZd). Otherwise a TSIG-only modify, which doesn't supply
 	// these, would erase persisted NOTIFY/transfer authorization policy.
+	//
+	// With a template the outbound settings are the template's (expanded
+	// above); clearing the template clears them, since they were its.
 	oldZd.mu.Lock()
 	notify := append([]PeerConf(nil), oldZd.Notify...)
 	allowNotify := append([]AclEntry(nil), oldZd.AllowNotify...)
 	downstreams := append([]AclEntry(nil), oldZd.Downstreams...)
 	downstreamAuth := append([]string(nil), oldZd.DownstreamAuth...)
+	notifyRetries, notifyRetryInterval := oldZd.notifyRetries, oldZd.notifyRetryInterval
+	switch {
+	case template != "" && templateWarning == "":
+		notify, allowNotify, downstreams, downstreamAuth = outbound.Notify, outbound.AllowNotify, outbound.Downstreams, outbound.DownstreamAuth
+		notifyRetries, notifyRetryInterval = outbound.NotifyRetries, outbound.NotifyRetryInterval
+	case in.ClearTemplate && oldZd.Template != "":
+		notify, allowNotify, downstreams, downstreamAuth = nil, nil, nil, nil
+		notifyRetries, notifyRetryInterval = nil, 0
+	}
 	// Same reason as the ACLs above: modify does not carry an outbound serial
 	// mode (there is deliberately no API knob for it), so without this a
 	// TSIG-only modify would silently reset a zone that has one to the global
@@ -1269,6 +1435,10 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		TransferSrc:       transferSrc,
 		SuppressedOptions: suppressedOptions,
 		withheld:          withheld,
+		Template:          template,
+
+		notifyRetries:       notifyRetries,
+		notifyRetryInterval: notifyRetryInterval,
 	}
 	// Commit the staged inline key just before persistence so the rewritten file
 	// includes it; roll it back if persistence fails.
@@ -1308,6 +1478,10 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// a visibility-only ConfigWarning naming the rest.
 	if len(modRes.Unresolved) > 0 || len(modRes.KeyCollisions) > 0 {
 		newZd.SetError(ConfigWarning, "serving from %d resolved upstream(s) of %d configured primaries (unresolved: %v, key-collisions: %v)", len(modRes.Resolved), len(in.Primaries), modRes.Unresolved, modRes.KeyCollisions)
+	}
+	if templateWarning != "" {
+		lg.Warn("dynamic secondary: template did not expand on modify; keeping the zone's outbound settings", "zone", name, "detail", templateWarning)
+		newZd.SetError(TemplateWarning, "%s", templateWarning)
 	}
 	// (5) Force a re-pull from the new upstream.
 	zr := ZoneRefresher{

@@ -176,7 +176,37 @@ type ZoneData struct {
 	// from (zone add --template). Persisted in the dynamic config entry so a
 	// restart re-expands it; the update policy is deliberately NOT persisted —
 	// it re-derives from the template at boot (one source of truth).
-	Template        string
+	//
+	// For an API zone the template owns the zone's outbound settings
+	// (Notify, AllowNotify, Downstreams, DownstreamAuth and the NOTIFY resend
+	// settings): they are not persisted, and are re-expanded from the
+	// template at boot and on every config reload, so a template change
+	// reaches every zone stamped from it (dynamic_template.go).
+	Template string
+	// InlineTsigKey is the inline TSIG key a template-driven dynamic PRIMARY
+	// was added with. Keyless (""/NOKEY) downstreams entries of the template
+	// are bound to it after every expansion. Persisted, because the
+	// downstreams themselves are not. Empty for secondaries, whose inline key
+	// lives in their (persisted) primaries.
+	InlineTsigKey string
+	// keepPersistedOutbound marks the error-state shell of a template-driven
+	// dynamic primary whose persisted entry still carries materialized
+	// outbound settings (written before the template owned them) that could
+	// not be replaced by an expansion. The shell holds them as persisted, and
+	// the next rewrite of the dynamic config writes them back unchanged
+	// instead of dropping them: they are the only record of which TSIG key
+	// the zone's downstreams were bound to.
+	keepPersistedOutbound bool
+	// fromStaticConfig marks a zone the configuration file defines (set where
+	// ParseZones creates it). Such a zone is never written into the dynamic
+	// config file, and a catalog among them writes its changes back to its
+	// own zone file (regenerateCatalogZone). Atomic: ParseZones sets it on a
+	// live zone when the config takes one over, and readers hold no lock.
+	fromStaticConfig atomic.Bool
+	// catalogWriteMu serializes a configured catalog's write-backs to its own
+	// zone file (writeBackCatalogZone). Never taken with zd.mu held: WriteZone
+	// takes zd.mu itself.
+	catalogWriteMu  sync.Mutex
 	DelegationSyncQ chan DelegationSyncRequest
 	// parent is the zone's parent name, resolved lazily on first use and
 	// cached. UNEXPORTED ON PURPOSE: parentMu owns it, and going through
@@ -687,6 +717,12 @@ type ZoneConf struct {
 	// options, so this is how a listing shows it.
 	AddTransportSignalSource string `yaml:"-"`
 	Template                 string `yaml:"template" mapstructure:"template"`
+	// InlineTsigKey is written by the daemon in the dynamic config file only:
+	// the inline TSIG key a template-driven dynamic primary was added with,
+	// re-applied to the template's keyless downstreams at every expansion
+	// (see ZoneData.InlineTsigKey). Never copied from a template, and
+	// meaningless in the static config.
+	InlineTsigKey string `yaml:"inline-tsig-key,omitempty" mapstructure:"inline-tsig-key"`
 	// DynamicZones marks a TEMPLATE as instantiable via the dynamic-zones API
 	// (zone add --type primary --template <name>). It is the per-template
 	// opt-in gate: an API client can only pick among operator-blessed
@@ -1258,6 +1294,14 @@ type ZoneRefresher struct {
 	// ZoneData built by the RefreshEngine (copied to zd.Template), so a later
 	// persist re-serializes it. Empty for template-less zones.
 	Template string
+	// InlineTsigKey propagates a template-driven dynamic primary's inline
+	// TSIG key name to the ZoneData built by the RefreshEngine.
+	InlineTsigKey string
+	// TemplateWarning, when set, is recorded on the zone the RefreshEngine
+	// builds as a TemplateWarning: a persisted template-driven zone whose
+	// template could not be expanded at boot still loads (without the
+	// template's outbound settings), and this is how that reaches its status.
+	TemplateWarning string
 	// PublishCadence, when non-zero, sets the zone's minimum snapshot publish
 	// interval (zd.publishCadence). Carried parsed so the RefreshEngine does
 	// not re-parse; zero means "leave the zone's default".

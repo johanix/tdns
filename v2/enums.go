@@ -468,6 +468,14 @@ const (
 	// the zone file with the journal (reconcileZoneFileWithJournal), and not
 	// when that reconcile fails to bring the journal's changes in.
 	PublishError
+	// TemplateWarning: a template-driven dynamic zone's template could not be
+	// expanded (missing, no longer blessed, wrong type, or its outbound lists
+	// do not validate). The zone keeps serving with the outbound settings it
+	// had (on a reload) or with none (at boot: no downstreams means no
+	// transfers out). Visibility-only. Cleared by the next expansion that
+	// succeeds. Its own category, not ConfigWarning, so that clearing it
+	// cannot wipe an unrelated config warning, nor the other way round.
+	TemplateWarning
 )
 
 var ErrorTypeToString = map[ErrorType]string{
@@ -483,6 +491,7 @@ var ErrorTypeToString = map[ErrorType]string{
 	ConfigWarning:           "config-warning",
 	FirstPublishError:       "first-publish",
 	PublishError:            "publish",
+	TemplateWarning:         "template-warning",
 }
 
 // errorTypeReportOrder defines the deterministic order in which the
@@ -502,6 +511,7 @@ var errorTypeReportOrder = []ErrorType{
 	DnssecPolicyWarning,
 	RolloverPolicyWarning,
 	DelegationSyncWarning,
+	TemplateWarning,
 	ConfigWarning,
 }
 
@@ -702,6 +712,21 @@ outer:
 			}
 		}
 		return true
+	}
+	return false
+}
+
+// blocksSerialBump reports whether the zone's errors refuse a serial bump.
+// Any error does, as before, except a TemplateWarning: that one says only
+// that the template did not expand on a reload, the zone keeping its outbound
+// settings and serving as before.
+func (zd *ZoneData) blocksSerialBump() bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	for t := range zd.Errors {
+		if t != TemplateWarning {
+			return true
+		}
 	}
 	return false
 }

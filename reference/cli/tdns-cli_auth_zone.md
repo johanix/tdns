@@ -35,7 +35,7 @@ Prefix command, not usable by itself
 * [tdns-cli auth zone journal](tdns-cli_auth_zone_journal.md)	 - Inspect and manage a zone's delta journal
 * [tdns-cli auth zone list](tdns-cli_auth_zone_list.md)	 - List configured zones
 * [tdns-cli auth zone list-dynamic](tdns-cli_auth_zone_list-dynamic.md)	 - List dynamic zones (catalog members + API-managed) and their provisioning state
-* [tdns-cli auth zone modify](tdns-cli_auth_zone_modify.md)	 - Modify a dynamic (API-managed) zone's primary or options
+* [tdns-cli auth zone modify](tdns-cli_auth_zone_modify.md)	 - Modify a dynamic (API-managed) zone's primary, options or template
 * [tdns-cli auth zone name](tdns-cli_auth_zone_name.md)	 - Inspect what a zone publishes at a single owner name
 * [tdns-cli auth zone parentsync](tdns-cli_auth_zone_parentsync.md)	 - Child-side parent delegation sync commands
 * [tdns-cli auth zone readfake](tdns-cli_auth_zone_readfake.md)	 - Create a fake zone from a compiled in string

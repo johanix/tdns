@@ -938,6 +938,26 @@ type ZoneTypeList []string
 type DynamicApiZoneConf struct {
 	Allowed ZoneTypeList `yaml:"allowed" mapstructure:"allowed"`                                              // Zone types the API may create: primary, secondary
 	Storage string       `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
+	// DefaultTemplate names, per zone type ("primary", "secondary"), the
+	// template a zone add uses when the request names none. Each must be a
+	// template blessed with dynamiczones: true, of that type. The point is an
+	// operator guarantee: on a server whose API zones must all reach the same
+	// downstreams, a caller that forgets the template still gets them. The
+	// resolved name is persisted with the zone, so changing the default later
+	// does not move zones that were added under the old one.
+	DefaultTemplate map[string]string `yaml:"default-template" mapstructure:"default-template"`
+}
+
+// DefaultTemplateFor returns the operator's default template for zone type
+// zt, or "" when none is configured.
+func (c DynamicApiZoneConf) DefaultTemplateFor(zt ZoneType) string {
+	want := ZoneTypeToString[zt]
+	for t, name := range c.DefaultTemplate {
+		if strings.EqualFold(strings.TrimSpace(t), want) {
+			return strings.TrimSpace(name)
+		}
+	}
+	return ""
 }
 
 // Allows reports whether the API may create zones of type zt.
@@ -960,6 +980,79 @@ func (d *DynamicZonesConf) Validate() error {
 		case "primary", "secondary":
 		default:
 			return fmt.Errorf("dynamiczones.dynamic.allowed: unknown zone type %q (valid values: primary, secondary)", t)
+		}
+	}
+	// Keys are matched without regard to case or surrounding space
+	// (DefaultTemplateFor), so two keys for one zone type would leave the
+	// choice to map iteration order.
+	seen := map[string]string{}
+	for t := range d.Dynamic.DefaultTemplate {
+		norm := strings.ToLower(strings.TrimSpace(t))
+		switch norm {
+		case "primary", "secondary":
+		default:
+			return fmt.Errorf("dynamiczones.dynamic.default-template: unknown zone type %q (valid values: primary, secondary)", t)
+		}
+		if prev, dup := seen[norm]; dup {
+			return fmt.Errorf("dynamiczones.dynamic.default-template: zone type %s is set more than once (%q and %q)", norm, prev, t)
+		}
+		seen[norm] = t
+	}
+	return nil
+}
+
+// ValidateDefaultTemplates checks that every dynamiczones.dynamic.default-template
+// entry names a template that exists, is blessed with dynamiczones: true, and
+// is of the zone type it is the default for -- the same gates a zone add
+// applies (dynamicTemplateGate), so a default that every add would refuse is
+// refused at load instead. Separate from Validate because it needs the
+// templates. Called from both ParseConfig and ValidateConfig.
+func (d *DynamicZonesConf) ValidateDefaultTemplates(templates []ZoneConf) error {
+	byName := make(map[string]ZoneConf, len(templates))
+	for _, t := range templates {
+		byName[t.Name] = t
+	}
+	for t, name := range d.Dynamic.DefaultTemplate {
+		zt := Secondary
+		if strings.EqualFold(strings.TrimSpace(t), "primary") {
+			zt = Primary
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: empty template name", t)
+		}
+		tmpl, ok := byName[name]
+		if !ok {
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q does not exist", t, name)
+		}
+		// Walk the parent chain as buildTemplateMap does. A template whose
+		// chain names a missing parent, or loops, is dropped from the template
+		// map at load, so a default naming it would fail every add; refuse it
+		// here instead, whatever the template itself declares. A type unset on
+		// the template comes from the first parent that sets one;
+		// dynamiczones: is never inherited.
+		// A template naming itself is a cycle too: buildTemplateMap removes it.
+		seen := map[string]bool{name: true}
+		p := tmpl.Template
+		if p == name {
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q names itself as its parent template", t, name)
+		}
+		for p != "" {
+			if seen[p] {
+				return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q is in a template cycle (through %q)", t, name, p)
+			}
+			seen[p] = true
+			parent, ok := byName[p]
+			if !ok {
+				return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q inherits from template %q, which does not exist", t, name, p)
+			}
+			if tmpl.Type == "" {
+				tmpl.Type = parent.Type
+			}
+			p = parent.Template
+		}
+		if err := dynamicTemplateGate(name, &tmpl, zt, true); err != nil {
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: %v", t, err)
 		}
 	}
 	return nil
@@ -1193,12 +1286,24 @@ func standbyKeyCount(pol *DnssecPolicy, sep bool, global int) int {
 // DNSSEC policy-algorithm guardrail (checkReloadPolicyGuardrail) holds a dangerous
 // same-name algorithm change rather than applying it. Use ReloadConfigConfirm to
 // carry an operator's explicit confirm.
-func (conf *Config) ReloadConfig() (string, error) { return conf.reloadConfig(false) }
+func (conf *Config) ReloadConfig() (string, error) { return conf.reloadConfigAndTemplates(false) }
 
 // ReloadConfigConfirm is ReloadConfig with the operator's confirm flag: confirm
 // lets a guarded DNSSEC policy-algorithm change through the reload gate.
 func (conf *Config) ReloadConfigConfirm(confirm bool) (string, error) {
-	return conf.reloadConfig(confirm)
+	return conf.reloadConfigAndTemplates(confirm)
+}
+
+// reloadConfigAndTemplates is reloadConfig, then the re-expansion of every
+// template-driven dynamic zone against the templates the reload just
+// rebuilt. The re-expansion runs after reloadConfig has released confMu: the
+// template lookup takes it.
+func (conf *Config) reloadConfigAndTemplates(confirm bool) (string, error) {
+	msg, err := conf.reloadConfig(confirm)
+	if err == nil {
+		msg += conf.ReapplyDynamicZoneTemplates().summary()
+	}
+	return msg, err
 }
 
 func (conf *Config) reloadConfig(confirm bool) (string, error) {
@@ -1217,9 +1322,15 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	// apply below then refuses the new block and keeps the running table,
 	// conf.Imr would otherwise go on describing zones that were rejected.
 	runningStubs, runningForward := conf.Imr.Stubs, conf.Imr.Forward
+	// The template map in use, put back if the parse fails: ParseConfig
+	// installs a new map part-way through, and a check after that point
+	// can still refuse the reload. Adds and template re-expansion must not
+	// go on with templates from a config that was refused.
+	runningTemplates, runningTemplateList := Templates, conf.Templates
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
+		Templates, conf.Templates = runningTemplates, runningTemplateList
 	}
 	// Rebuild the TSIG store ONLY after a successful parse. With KeyDB, reconcile
 	// config keys in place (§6).
@@ -1435,5 +1546,10 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		WithdrawSignalPublicationsForZone(conf.Internal.KeyDB, zname)
 	}
 
-	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s", prezones, zonelist, imrReloadMsg), err
+	// The templates were rebuilt above: re-expand every template-driven
+	// dynamic zone against them, so an edited template reaches its zones on
+	// this reload. Off confMu: the template lookup takes it.
+	templateMsg := conf.ReapplyDynamicZoneTemplates().summary()
+
+	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s%s", prezones, zonelist, imrReloadMsg, templateMsg), err
 }
