@@ -1,6 +1,6 @@
 # The transport signal's alternative endpoint: a ServiceMode TargetName
 
-**Date:** 2026-11-14. **Status:** proposal, r3.1, not implemented. Points marked
+**Date:** 2026-11-14. **Status:** proposal, r4, not implemented. Points marked
 **Decided** were settled on 2026-11-14; everything else is proposed.
 
 **Revisions:**
@@ -23,6 +23,22 @@
     falls back to the nameserver's name on port 53 (section 3).
 - **r3.1**, 2026-11-14: the old `do53` token survives as a receive-only
   shorthand, and is not retired (section 2).
+- **r4**, 2026-11-14, after the path to an implementation was worked through:
+  - a record's `port` and target apply to every transport it names, and the
+    DoH-alone exception is dropped (section 2);
+  - a record that loses the tie-break is inert for that transport only, and `.`
+    wins an equal-priority conflict (section 2);
+  - ports are sockets: which transports may share one (section 2);
+  - TCP the resolver initiates goes to the `tcp` endpoint, a truncation retry to
+    the address and port that truncated, and forced TCP without a `tcp` endpoint
+    to the nameserver on port 53 (section 3);
+  - backoff and RTT are keyed by address, port and transport, and the lookup of a
+    target's addresses never uses a redirected endpoint (section 3);
+  - the fallback to the nameserver's name on port 53 is decided (section 3);
+  - configuration: `ports:` and later `targets:` maps replace `records:` and the
+    proposed `target:` key (section 5);
+  - mixed versions: a lossless codec is a precondition for publishing the new
+    tokens (section 8, new).
 
 Builds on `2026-10-04-transport-signal-publication-and-serving.md` (the
 authoritative side), `2026-09-26-imr-refresh-engine.md` (the resolver side, itself
@@ -56,9 +72,10 @@ _dns.foo.example. IN SVCB 1 tcp-foo.example. oots="tcp:30"
 _dns.foo.example. IN SVCB 1 .                oots="doh:20"
 ```
 
-Here DoT and DoQ go to their own hosts on their own ports, discretionary TCP
-(at most 30%) goes to `tcp-foo.example` on port 53, DoH stays on `foo.example`,
-and UDP is not mentioned, so it stays on `foo.example` at weight 100.
+Here DoT and DoQ go to their own hosts on their own ports, TCP the resolver
+initiates goes to `tcp-foo.example` on port 53 (and at most 30% of optional
+TCP, if the resolver chooses any), DoH stays on `foo.example`, and UDP is not
+mentioned, so it stays on `foo.example` at weight 100.
 
 **The tokens. Decided.** `udp` and `tcp` (cleartext DNS over UDP or TCP, default
 port 53), `dot`, `doq`, `doh`. `udp` and `tcp` replace the earlier `do53`, which
@@ -82,22 +99,37 @@ old signals' `do53:0` ("send me none") being read as 100.
   alternative host. A record without `port` uses each named transport's default
   port at that name: 53, 853 or 443.
 - **The record's `oots` names the transports offered at that endpoint.** The
-  TargetName and `port` apply to every transport the record names, with one
-  exception inherited from #994: `port` applies to `doh` only when `doh` is the
-  only transport the record names. Writing one transport per record is the clear
-  way to give transports different endpoints.
+  TargetName and `port` apply to every transport the record names, as RFC 9461
+  has it for `port`. A record that wants different endpoints for different
+  transports is written as several records, one transport each; tdns-auth does
+  that itself (section 5). #994's exception, that `port` applies to `doh` only
+  when `doh` is alone in its record, is dropped.
 - **Cleartext is not special. Decided.** `udp` and `tcp` take a TargetName and a
   `port` like any other transport. The delegation guarantees only that the
   nameserver's own name answers on port 53, and that stays true whatever the
   signal says.
+- **A truncation retry needs TCP where UDP is.** A `udp` entry with a port or a
+  target sends the TCP retry after truncation to the same address and port, so
+  the operator serves TCP there. If it does not, the retry fails and the resolver
+  falls back (section 3).
 - **One endpoint per transport. Decided.** A transport named in two records with
   different endpoints is a misconfiguration. The resolver uses one of the two and
   never neither: ignoring both would take a working setup down. The rule for
   choosing is proposed: the lowest SvcPriority, then the lowest RDATA in DNSSEC
   canonical order (RFC 4034 section 6.3), so that the outcome does not depend on
-  the order an RRset happens to arrive in. The other record is inert. It is not a
-  standby. A warning when such an RRset is loaded would help the operator
+  the order an RRset happens to arrive in. The priority bytes come first in the
+  RDATA and the root name sorts before any label, so on equal priority `.` wins:
+  the nameserver itself beats an alternative host. The losing record is inert for
+  that transport only; it still supplies the other transports it names. It is not
+  a standby. A warning when such an RRset is loaded would help the operator
   (proposed).
+- **Ports are sockets.** A publisher refuses an endpoint whose transports clash
+  on one socket: DoQ and `udp` on one UDP port; DoT, DoH and `tcp` on one TCP
+  port. A `udp` entry with a port also needs TCP at that port for the retry, so
+  it takes the port on TCP as well, and DoT or DoH there is refused. `udp` and
+  `tcp` sharing one port is the natural case and is allowed. A resolver takes the
+  records as given. A warning at load when no listen address of the server uses
+  the published port (a front end may legitimately publish one).
 - **A name can have many addresses. Decided.** One endpoint does not mean one
   host. The target is a name: it may have several A and AAAA records, or be
   anycast, and the resolver chooses among its addresses as it does for any
@@ -118,6 +150,12 @@ old signals' `do53:0` ("send me none") being read as 100.
   looks up an SVCB, or any signal, at the target. A second place that can state
   weights and ports is a second source of truth, and the design allows none. If
   the target has an SVCB of its own, it is not read.
+- **Looking up the target's addresses never uses a redirected endpoint.** A
+  target may be served by the very nameserver whose transport is redirected to it:
+  `dot-foo.example` may be served by `foo.example`, whose DoT is redirected to
+  `dot-foo.example`. So those lookups go to the nameserver's name on its default
+  ports, and run off the query path, as the TLSA follow-up does. Until the
+  addresses are known, the transport uses its default endpoint.
 - **Delegating the whole signal is AliasMode, and only that.** `_dns.<ns>` holds
   one AliasMode record whose TargetName, written with its `_dns.` label (RFC 9460
   section 3 queries it as written), leads to an RRset that may itself hold
@@ -127,19 +165,30 @@ old signals' `do53:0` ("send me none") being read as 100.
 
 **With the weights and endpoints. Decided** (the model as confirmed):
 
-- **The weight caps discretionary use.** A `udp` or `tcp` weight limits the share
-  of queries the resolver chooses to send over that transport, so "only 30% TCP"
-  is `tcp:30`. Truncation retries and any other protocol-required TCP are never
-  gated by it. Neither `udp:0` nor `tcp:0` is a hard gate: cleartext on port 53 is
-  mandatory, so it stays the last resort.
-- **A signalled endpoint receives that share.** With no signalled endpoint for a
-  transport, the resolver uses the nameserver's name at the transport's default
-  port.
-- **A truncation retry goes to the address that truncated.** If UDP went to
-  `serverZ` and `serverZ` truncates, the TCP retry goes to `serverZ`.
-- **A failing endpoint falls back.** An address that fails is backed off on, and
-  the target's other addresses are tried. When none works, the resolver falls
-  back to the nameserver's name on port 53 (proposed).
+- **The weight caps optional use.** A `udp` or `tcp` weight limits the share of
+  queries the resolver chooses on its own to send over that transport, so "only
+  30% TCP" is `tcp:30`. It never gates TCP that the protocol or a policy
+  requires: truncation retries and forced TCP, such as the escalation for large
+  responses, ignore it, `tcp:0` included. A resolver that chooses no optional
+  TCP satisfies any cap, and a received weight does not by itself make a
+  resolver choose TCP. Neither `udp:0` nor `tcp:0` is a hard gate: cleartext on
+  port 53 is mandatory, so it stays the last resort.
+- **A signalled endpoint receives its transport's traffic.** With no signalled
+  endpoint for a transport, the resolver uses the nameserver's name at the
+  transport's default port.
+- **Which TCP goes where.** TCP the resolver initiates, forced or optional,
+  goes to the `tcp` endpoint. A truncation retry goes to the address and port
+  that truncated: if UDP went to `serverZ` on port 5353 and truncated, the TCP
+  retry goes to `serverZ` on 5353. Forced TCP with no signalled `tcp` endpoint
+  goes to the nameserver's name on port 53, never to the port of a `udp`
+  endpoint.
+- **A failing endpoint falls back. Decided.** An address that fails is backed off
+  on, and the target's other addresses are tried. When none works, the resolver
+  falls back to the nameserver's name on port 53.
+- **Backoff and RTT follow the endpoint, down to the port.** They are keyed by
+  address, port and transport. A same-host `udp` endpoint on port 5353 that
+  fails must not back off the fallback on port 53, the one endpoint that has to
+  keep working, and a changed port starts with a clean slate.
 - **The operator asserts that the alternative endpoint serves the nameserver's
   zones.** Nothing checks it before connecting. An endpoint that refuses, times
   out or fails the handshake is a failure like any other, handled as above.
@@ -221,8 +270,22 @@ does not verify certificates to authoritative servers, by design.
   TargetName is zone content, served and injected like any stored signal. Not
   settled there, and to settle with the plan: whether the start-up pass leaves an
   operator-authored ServiceMode record at `_dns.<ns>` alone, as it does an
-  alias. Records synthesized from configuration (#994's `records:`) would gain
-  an optional `target:` beside `signal` and `port` (proposed).
+  alias.
+- **Configuration (proposed).** `service.transport` keeps `signal` and gains a
+  map from transport to port, `ports:`, and later one from transport to target,
+  `targets:`. They replace #994's `records:` list and the `target:` key this
+  note proposed in r3. The maps are keyed by transport because the model is one
+  endpoint per transport, and their values are scalars, not lists, for the same
+  reason. tdns-auth works out the records: one record per transport that has a
+  port or a target, and one record with neither carrying the rest, so that every
+  transport appears in exactly one record and a record never carries a transport
+  it was not asked to move. Checks at load, each an error unless marked:
+  `signal` parses; a key of a map is a transport the signal gives a weight; a
+  port is 1 to 65535, and the transport's standard port counts as absent without
+  a word; transports that clash on one socket are refused (section 2); a map with
+  `type: tsync` or `none` is refused; and a warning when no listen address uses a
+  published port. Until the token split lands `do53` is not a key, and after it
+  `udp` and `tcp` are.
 - **No target addresses in the response. Decided.** The server does not add the
   target's A and AAAA to the Additional section, even when it hosts the target's
   zone. Resolvers distrust out-of-bailiwick additional data, responses that carry
@@ -238,15 +301,16 @@ does not verify certificates to authoritative servers, by design.
     records with TargetName `.` only;
   - an equal harvest renews as before, since it is equal to a copy that was
     validated when it was applied.
-- **#994.** The port is stored with the signal and joined at dial time, and
-  backoff and RTT are keyed by the bare address. With an alternative endpoint
-  the address is the target's, so backoff, RTT and the per-transport counters
-  follow the endpoint and the alternative host is measured on its own, while the
-  signal itself stays under the nameserver's name. #994's rule that `do53` never
-  takes a port flips: `udp` and `tcp` take a port and a TargetName. #994 keeps
-  the last record read when a transport appears twice; section 2 replaces that
-  rule. The selection treats `udp` and `tcp` as two transports, where it now has
-  one `Do53`, and the `auth-transports` view would show them separately.
+- **#994.** The port is stored with the signal and joined at dial time. With an
+  alternative endpoint the address is the target's, so the counters follow the
+  endpoint, and backoff and RTT are keyed as section 3 says, while the signal
+  itself stays under the nameserver's name. Four of #994's rules change: `do53`
+  never takes a port flips, because `udp` and `tcp` take a port and a TargetName;
+  the DoH-alone exception is dropped; the last record read no longer wins when a
+  transport appears twice, and section 2 replaces that rule; and `records:` gives
+  way to `ports:`. The selection treats `udp` and `tcp` as two transports, where
+  it now has one `Do53`, and the `auth-transports` view would show them
+  separately.
 - **The OOTS draft text.** `draft-johani-dnsop-transport-signaling-03` fixes the
   SVCB target at `.` and tells resolvers to ignore other parameters, and the
   companion SvcParam draft names a single `do53` token. tdns would be ahead of
@@ -261,15 +325,15 @@ does not verify certificates to authoritative servers, by design.
   different ports for different hosts of one transport. A transport is spread
   over several hosts by giving its target several addresses or by anycast;
   nothing has asked for more.
-- A plan: steps, where each rule lands in the code, mixed versions, tests. It is
-  written when implementation is assigned.
+- Steps, where each rule lands in the code, and their status. That is a plan, and
+  it is written beside this note by whoever implements it.
 - Signer-authored signals for the whole NS set (2026-10-04, section 8).
 
 ## 7. Questions and their outcomes
 
 | # | Question | Outcome |
 |---|---|---|
-| 1 | A cleartext entry in a record with a non-`.` TargetName | Decided in r2: ignored. Reversed in r3: `udp` and `tcp` take a TargetName and a `port` like any transport. The deprecated `do53` shorthand, if kept, does not |
+| 1 | A cleartext entry in a record with a non-`.` TargetName | Decided in r2: ignored. Reversed in r3: `udp` and `tcp` take a TargetName and a `port` like any transport. The deprecated `do53` shorthand does not |
 | 2 | An unvalidated record with a non-`.` TargetName | Decided: ignored in whole (R2) |
 | 3 | Must every RRset on an alias path validate | Decided: yes (R5) |
 | 4 | A transport named in two records | Decided: use one. The tie-break is proposed (section 2) |
@@ -277,10 +341,47 @@ does not verify certificates to authoritative servers, by design.
 | 6 | Nameserver zone signed, target zone not | Decided: operator guidance (section 4) |
 | 7 | The cleartext token | Decided: `udp` and `tcp` replace `do53`; both default to 100. `do53` survives as a receive-only shorthand (section 2) |
 | 8 | One transport spread over several hosts | Decided: a name with many addresses, or anycast (section 2) |
+| 9 | Which TCP goes to the `tcp` endpoint | Decided: TCP the resolver initiates; a truncation retry goes to the address and port that truncated (section 3) |
 
-Proposed and not yet confirmed: the tie-break for one transport named twice,
-and a warning at load for it (section 2); the fallback to the nameserver's name
-on port 53 (section 3); the optional `target:` configuration key (section 5); the
-log and counter for an ignored redirect (section 4). To settle with the plan:
-whether the start-up pass leaves an operator-authored ServiceMode record alone
-(section 5).
+Proposed and not yet confirmed: the tie-break for one transport named twice and
+the warning at load for it (section 2); dropping the DoH-alone exception
+(section 2); the socket-clash rules and the warning for an unused port
+(section 2); the `ports:` and `targets:` maps in place of `records:` (section 5);
+the log and counter for an ignored redirect (section 4). To settle with the
+plan: whether the start-up pass leaves an operator-authored ServiceMode record
+alone (section 5).
+
+## 8. Mixed versions
+
+The `oots` value is read by tdns nodes that also re-pack it: a secondary after a
+transfer, a signer, the zone loader, the injection into the Additional section,
+a resolver answering from its cache. Today the codec drops a token it does not
+know when it decodes, so such a node serves different bytes than it received.
+The RRSIG over the original no longer matches, and the RRset goes Bogus. A
+record that holds only new tokens, such as `oots="tcp:30"`, re-packs to an empty
+value, which every decoder rejects, and a single such record makes the whole
+message unreadable. The new tokens cannot be published until this is fixed.
+
+Rules:
+
+- **The codec keeps every entry.** It carries each entry through decode, parse
+  and encode, whether it knows the token or not, and never encodes an empty
+  value. Duplicates are still refused, weights are still clamped to 100, and an
+  empty value is still refused on decode.
+- **Ignoring is for using the signal, never for re-encoding.** The companion
+  draft says an unrecognized identifier is skipped and the rest processed. That
+  is read as "do not act on it", not as "drop it when the record is written
+  out again".
+- **The tokens selection acts on are fixed by what the resolver implements.**
+  Until the token split is built they are `do53`, `dot`, `doh` and `doq`, on every
+  path a signal can arrive by, including received strings and the private TSYNC
+  record. A received `udp` or `tcp` weight does not make a resolver choose TCP.
+- **A publisher emits a new token, a `port` or a TargetName only when every tdns
+  node that can re-pack the record is lossless and every resolver ignores, rather
+  than misapplies, a record it cannot honor.** The second part means a resolver
+  skips a record with SvcPriority 0 or a non-`.` TargetName, and the ServiceMode
+  records of an RRset that holds an AliasMode one, before any publisher writes
+  one.
+- **Other software is unaffected.** BIND, Knot and NSD hold key 12 as opaque
+  data. A resolver that predates the new tokens skips them and applies the
+  default of 100 for `do53`, so it degrades without failing.
