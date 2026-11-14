@@ -232,80 +232,120 @@ func tsyncHasAlias(rrset core.RRset) bool {
 
 // buildServerSVCB constructs a synthesized ServiceMode "_dns.<ns> SVCB" RRset
 // carrying the registered oots SvcParam (draft-johani-dnsop-svcb-oots / -03)
-// and, when the operator set one, the standard SVCB port key on the same RR.
-// Address hints and the private tlsa SvcParam are not included. One SVCB has
-// one port, so records with different ports are several RRs of this RRset.
-// Publishing the port does not open the listen socket.
+// and, on the record of a transport the operator gave a port, the standard
+// SVCB port key. Address hints and the private tlsa SvcParam are not
+// included. transportSignalLayout decides the records. Publishing a port
+// does not open the listen socket.
 func (zd *ZoneData) buildServerSVCB(conf *Config, nsName string, ipv4s, ipv6s []net.IP) (*core.RRset, error) {
 	_ = ipv4s
 	_ = ipv6s
 	if Globals.ServerSVCB == nil {
 		return nil, fmt.Errorf("buildServerSVCB: no server SVCB configured")
 	}
-	recs := transportSignalRecords(conf.Service.Transport)
-	if len(recs) == 0 {
-		// No signal configured: one empty SVCB, as before.
-		recs = []TransportSignalRecord{{}}
+	recs, err := transportSignalLayout(conf.Service.Transport)
+	if err != nil {
+		return nil, fmt.Errorf("buildServerSVCB: %w", err)
 	}
 	owner := "_dns." + nsName
 	rrs := make([]dns.RR, 0, len(recs))
 	for _, rec := range recs {
-		values, err := svcbValuesForSignal(rec)
-		if err != nil {
-			return nil, fmt.Errorf("buildServerSVCB: %w", err)
-		}
 		rrs = append(rrs, &dns.SVCB{
 			Hdr:      dns.RR_Header{Name: owner, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 			Priority: 1,
 			Target:   ".",
-			Value:    values,
+			Value:    svcbValuesForSignal(rec.weights, rec.port),
 		})
 	}
 	return &core.RRset{Name: owner, RRtype: dns.TypeSVCB, RRs: rrs}, nil
 }
 
-// transportSignalRecords is the SVCB records to publish. The records list is
-// one RR each. Otherwise the single signal string, with its optional port, is
-// one record. Neither set means nothing to say.
-func transportSignalRecords(t TransportConf) []TransportSignalRecord {
-	if len(t.Records) > 0 {
-		return t.Records
-	}
-	if t.Signal == "" && t.Port == 0 {
-		return nil
-	}
-	return []TransportSignalRecord{{Signal: t.Signal, Port: t.Port}}
+// signalRecord is one SVCB of the published signal: the weights it states
+// and its port key (0 for none).
+type signalRecord struct {
+	weights map[string]uint8
+	port    uint16
 }
 
-// svcbValuesForSignal is the SvcParams of one published record, in key order:
-// port (3) then oots (12). A zero port is omitted. Hints, alpn and tlsa are
-// not added.
-func svcbValuesForSignal(rec TransportSignalRecord) ([]dns.SVCBKeyValue, error) {
-	var values []dns.SVCBKeyValue
-	if rec.Port != 0 {
-		values = append(values, &dns.SVCBPort{Port: rec.Port})
+// signalStandardPorts is the standard port of each transport that can take a
+// port in service.transport.ports. A configured port equal to it counts as
+// absent. do53 is not a key: it listens on the ports in listeners.addresses.
+var signalStandardPorts = map[string]uint16{"dot": 853, "doq": 853, "doh": 443}
+
+// signalPortOrder is the order the records with a port go out in, after the
+// record without one. RRset order means nothing on the wire; a fixed order
+// keeps zone diffs and tests stable.
+var signalPortOrder = []string{"dot", "doq", "doh"}
+
+// publishedSignalPort is the port published for transport t: the configured
+// one, or 0 when there is none or it is t's standard port.
+func publishedSignalPort(ports map[string]uint16, t string) uint16 {
+	p := ports[t]
+	if p == signalStandardPorts[t] {
+		return 0
 	}
-	if rec.Signal == "" {
-		return values, nil
+	return p
+}
+
+// transportSignalLayout lays out the published SVCB RRset from
+// service.transport:
+//   - No signal: one record with no weights and no port, an empty SVCB, as
+//     before.
+//   - No published port: one record with the signal's weights and the do53
+//     default written out, built as before, so the RR is byte-identical.
+//   - Published ports: first one record without a port that carries every
+//     transport without one and do53 once (the operator's weight, or 100),
+//     then one record per transport with a port that carries that transport
+//     alone, in the order dot, doq, doh. Every transport is in exactly one
+//     record, so a resolver never meets one named twice.
+func transportSignalLayout(t TransportConf) ([]signalRecord, error) {
+	if t.Signal == "" {
+		return []signalRecord{{}}, nil
 	}
-	oots, err := transportSignalToSVCBOots(rec.Signal)
+	weights, err := core.ParseTransportString(t.Signal)
 	if err != nil {
 		return nil, err
 	}
-	if oots != nil {
-		values = append(values, oots)
+	recs := []signalRecord{{weights: weights}}
+	for _, tr := range signalPortOrder {
+		p := publishedSignalPort(t.Ports, tr)
+		if p == 0 || weights[tr] == 0 {
+			continue
+		}
+		recs = append(recs, signalRecord{weights: map[string]uint8{tr: weights[tr]}, port: p})
+		delete(weights, tr)
 	}
-	return values, nil
+	return recs, nil
 }
 
-// transportSignalToSVCBOots builds a dns.SVCBOots from a config signal string.
-// Zero-weight entries other than do53 are omitted (absence means 0); do53:0 is
-// kept so "no Do53" is expressible on the wire.
+// svcbValuesForSignal is the SvcParams of one published record, in key order:
+// port (3) then oots (12). A zero port is omitted, and so is oots when no
+// weight is left to state. Hints, alpn and tlsa are not added.
+func svcbValuesForSignal(weights map[string]uint8, port uint16) []dns.SVCBKeyValue {
+	var values []dns.SVCBKeyValue
+	if port != 0 {
+		values = append(values, &dns.SVCBPort{Port: port})
+	}
+	if oots := svcbOotsFromWeights(weights); oots != nil {
+		values = append(values, oots)
+	}
+	return values
+}
+
+// transportSignalToSVCBOots builds a dns.SVCBOots from a config signal string,
+// with the absence defaults applied (see svcbOotsFromWeights).
 func transportSignalToSVCBOots(sig string) (*dns.SVCBOots, error) {
 	m, err := core.ParseTransportString(sig)
 	if err != nil {
 		return nil, err
 	}
+	return svcbOotsFromWeights(m), nil
+}
+
+// svcbOotsFromWeights builds a dns.SVCBOots from a weight map, entries in
+// key order. Zero-weight entries other than do53 are omitted (absence means
+// 0); do53:0 is kept so "no Do53" is expressible on the wire. nil when no
+// entry is left.
+func svcbOotsFromWeights(m map[string]uint8) *dns.SVCBOots {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -320,9 +360,9 @@ func transportSignalToSVCBOots(sig string) (*dns.SVCBOots, error) {
 		entries = append(entries, dns.SVCBOotsEntry{Proto: k, Weight: v})
 	}
 	if len(entries) == 0 {
-		return nil, nil
+		return nil
 	}
-	return &dns.SVCBOots{Oots: entries}, nil
+	return &dns.SVCBOots{Oots: entries}
 }
 
 // SVCB path. See CreateTransportSignalRRs for the storage/injection model and
