@@ -5,6 +5,7 @@ package core
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -72,4 +73,80 @@ func ApplyTransportDefaults(m map[string]uint8) {
 			m[p] = 0
 		}
 	}
+}
+
+// signalTokens are the oots tokens that transport selection acts on when a
+// signal is RECEIVED, whatever path it arrives by: the oots SvcParam of a
+// _dns SVCB, or the transport= string of a TSYNC. They are the transports the
+// resolver implements. A received signal may name others -- `udp` and `tcp`
+// from the token split, or a token not yet defined -- and the dns codec keeps
+// those on the wire, but they never reach selection. Until the token split is
+// built these four are the whole set.
+//
+// This is deliberately not StringToTransport, which also accepts aliases for
+// operator input: its `tcp` maps to TransportDo53TCP, so a received `tcp:30`
+// would install a Do53TCP weight. Operator input (imr set, config stubs) keeps
+// using StringToTransport.
+var signalTokens = map[string]bool{
+	"do53": true,
+	"dot":  true,
+	"doh":  true,
+	"doq":  true,
+}
+
+// IsSignalToken reports whether tok, lower-cased, is an oots token that
+// selection acts on in a received signal. See signalTokens.
+func IsSignalToken(tok string) bool {
+	return signalTokens[tok]
+}
+
+// FilterSignalTokens returns a new map holding only the entries of m whose key
+// is a signal token (IsSignalToken). The result may be empty: a signal that
+// names no token selection acts on says nothing to act on, and the caller
+// treats it as no signal rather than as one that gets the absence defaults.
+func FilterSignalTokens(m map[string]uint8) map[string]uint8 {
+	out := make(map[string]uint8, len(m))
+	for k, v := range m {
+		if IsSignalToken(k) {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// ParseReceivedTransportString parses a transport string that was RECEIVED
+// (the transport= value of a TSYNC) into the weights selection acts on: as
+// ParseTransportStringRaw, then FilterSignalTokens. Malformed strings are still
+// refused as a whole; a well-formed entry with another token is dropped.
+func ParseReceivedTransportString(s string) (map[string]uint8, error) {
+	raw, err := ParseTransportStringRaw(s)
+	if err != nil {
+		return nil, err
+	}
+	return FilterSignalTokens(raw), nil
+}
+
+// ValidatePublishedTransportSignal checks a transport signal this server is
+// about to PUBLISH (service.transport.signal): it must parse, and name only
+// signal tokens. A tdns publisher may not emit another token until every node
+// that can re-pack the record keeps it and every resolver ignores, rather than
+// misapplies, what it cannot honor (the alternative-endpoint design, tdns
+// #1043, section 8).
+func ValidatePublishedTransportSignal(s string) error {
+	raw, err := ParseTransportStringRaw(s)
+	if err != nil {
+		return err
+	}
+	var bad []string
+	for k := range raw {
+		if !IsSignalToken(k) {
+			bad = append(bad, k)
+		}
+	}
+	if len(bad) > 0 {
+		sort.Strings(bad)
+		return fmt.Errorf("transport: %s not publishable (only do53, dot, doh and doq until the token split)",
+			strings.Join(bad, ", "))
+	}
+	return nil
 }

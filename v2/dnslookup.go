@@ -2618,13 +2618,16 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	return r, rtt, eff, nil
 }
 
-// applyTransportSignalToServer parses a colon-separated transport string and applies it to the given server.
-// Returns true if at least one transport entry was applied.
+// applyTransportSignalToServer parses a received transport string (the
+// transport= value of a TSYNC) and applies it to the given server. Only signal
+// tokens count (core.ParseReceivedTransportString); a string naming none of
+// them is not applied. Returns true if at least one transport entry was
+// applied.
 func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string) bool {
 	if server == nil || s == "" {
 		return false
 	}
-	kvMap, err := core.ParseTransportStringRaw(s)
+	kvMap, err := core.ParseReceivedTransportString(s)
 	if err != nil {
 		lgDns.Debug("applyTransportSignalToServer: invalid transport string for :", "name", server.Name, "s", s, "q", err)
 		return false
@@ -2641,8 +2644,19 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 // defaults (do53 100, the others 0) are applied here, to a copy, for
 // selection; the signal itself is kept beside the weights, so that the stats
 // can show what the server said rather than what the defaults made of it.
+//
+// Every received path reaches selection through here, so the signal-token
+// filter is applied here too, whatever the caller did: a key that is not a
+// signal token (core.IsSignalToken) is dropped before it can be mapped by
+// core.StringToTransport, whose `tcp` alias would install a Do53TCP weight.
+// A map with no signal token left is not applied: it is no signal, not one
+// that gets the absence defaults.
 func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8) bool {
 	if server == nil || kvMap == nil {
+		return false
+	}
+	kvMap = core.FilterSignalTokens(kvMap)
+	if len(kvMap) == 0 {
 		return false
 	}
 	received := &cache.ReceivedSignal{Source: "oots", Weights: map[core.Transport]uint8{}}
