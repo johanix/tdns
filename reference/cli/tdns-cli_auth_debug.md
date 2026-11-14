@@ -22,6 +22,7 @@ tdns-cli auth debug [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
@@ -34,4 +35,5 @@ tdns-cli auth debug [flags]
 * [tdns-cli auth debug show-ta](tdns-cli_auth_debug_show-ta.md)	 - List known DNSSEC trust anchors
 * [tdns-cli auth debug sig0](tdns-cli_auth_debug_sig0.md)	 - SIG(0) key helper commands (local)
 * [tdns-cli auth debug validate-rrset](tdns-cli_auth_debug_validate-rrset.md)	 - 
+* [tdns-cli auth debug zone-txlog](tdns-cli_auth_debug_zone-txlog.md)	 - Show staged-but-unpublished zone changes
 

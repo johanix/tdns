@@ -235,6 +235,11 @@ func applyZonePolicyTransactionalLocked(
 		zd.mu.Unlock()
 		return 0, fmt.Errorf("re-sign zone %s under policy %q: %w", zd.ZoneName, newName, err)
 	}
+	// Signed here, so it needs renewing. This is how a zone that is already
+	// loaded starts signing -- a reload that turns signing on, or an apply to
+	// the new ZoneData a modify leaves -- and no first load registers it then
+	// (#1033). Before the writes below: their failure does not undo the signing.
+	zd.registerForPeriodicResign()
 	// Bound and signed under newPol: rows written under the old policy's DS
 	// model carry its ds; re-resolve them if the model changed.
 	reconcileDsAfterBind(kdb, zd, oldPol)
@@ -436,6 +441,10 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 			zd.mu.Unlock()
 			UpdateSigValidityFloor(zd, intentPol, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
 			reconcileDsAfterBind(kdb, zd, nil)
+			// Bound without a re-sign, but it signs here: the zone is already
+			// signed under intent and every publish re-signs its content. A
+			// first load registers it afterwards; a reload has no first load.
+			zd.registerForPeriodicResign()
 			lgEngine.Info("backfilled applied DNSSEC policy without re-sign",
 				"zone", zd.ZoneName, "policy", intentName)
 			return nil
@@ -486,6 +495,10 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 		// DS model: the rows keep the old model's ds until re-resolved.
 		reconcileDsAfterBind(kdb, zd, oldPol)
 		zd.ClearError(DnssecPolicyWarning)
+		// A rebind, not a re-sign, and the next publish signs under it. The
+		// ZoneData can be new: a ModifyDynamicZone replacement keeps the zone's
+		// applied row, lands here, and has no first load to register it.
+		zd.registerForPeriodicResign()
 		return nil
 	}
 

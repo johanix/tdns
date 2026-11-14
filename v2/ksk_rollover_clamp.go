@@ -309,21 +309,30 @@ func ClampMetrics() (steps, clamped, unclamped, violations uint64) {
 // new TTL, in a new slice assigned to rrset.RRs; records already at the
 // target keep their pointers. When nothing changes rrset.RRs is left alone.
 // Only the fields of *rrset, the caller's own struct, are written.
+// ceiling returns the TTL ceiling the clamp imposes -- the lower of its
+// active sources -- and whether it imposes one at all.
+func (c *ClampParams) ceiling() (uint32, bool) {
+	if c == nil {
+		return 0, false
+	}
+	var ceiling uint32 = ^uint32(0) // "no ceiling" sentinel
+	if v := c.CeilingTTL(); v > 0 && v < ceiling {
+		ceiling = v
+	}
+	if c.MaxServedTTL > 0 && c.MaxServedTTL < ceiling {
+		ceiling = c.MaxServedTTL
+	}
+	return ceiling, ceiling != ^uint32(0)
+}
+
 func applyClampToRRset(rrset *core.RRset, clamp *ClampParams) {
 	if clamp == nil || len(rrset.RRs) == 0 {
 		atomic.AddUint64(&clampDecisionsUnclamped, 1)
 		return
 	}
 
-	// Compute the effective ceiling from whichever clamp sources are active.
-	var ceiling uint32 = ^uint32(0) // "no ceiling" sentinel
-	if c := clamp.CeilingTTL(); c > 0 && c < ceiling {
-		ceiling = c
-	}
-	if clamp.MaxServedTTL > 0 && clamp.MaxServedTTL < ceiling {
-		ceiling = clamp.MaxServedTTL
-	}
-	if ceiling == ^uint32(0) {
+	ceiling, ok := clamp.ceiling()
+	if !ok {
 		atomic.AddUint64(&clampDecisionsUnclamped, 1)
 		return
 	}
