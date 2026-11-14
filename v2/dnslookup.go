@@ -4,6 +4,8 @@
 package tdns
 
 import (
+	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -1981,20 +1983,58 @@ func parseOwnerName(owner string) (baseName string, isOOTSOwner bool, originalOw
 	return baseName, isOOTSOwner, originalOwner
 }
 
-// ootsRecord is one SVCB that carries an oots SvcParam, plus the port key on
-// that same RR (0 when the key is absent).
+// ootsRecord is one SVCB the resolver acts on: the weights its oots SvcParam
+// names (for an ALPN-only record, 100 for each ALPN it lists, kept in order),
+// the port key on the same RR (0 when the key is absent), and what the
+// tie-break compares, its SvcPriority and its RDATA in wire form.
 type ootsRecord struct {
-	raw  map[string]uint8
-	port uint16
+	raw      map[string]uint8
+	alpn     []string
+	port     uint16
+	priority uint16
+	rdata    []byte
 }
 
-// svcbSignalSet collects the SVCB transport signals for one nameserver in one
-// message, in section order. oots records are combined into one signal. An
-// ALPN list is kept only for a message that has no oots param; a port on an
-// ALPN-only SVCB is ignored.
+// svcbSignalSet collects the SVCB transport signals for one nameserver, from
+// one message's Additional section or from one answer RRset. Its oots records
+// are combined into one signal. Its ALPN-only records are combined the same
+// way and used only when no record carried oots. alias records that the set
+// held an AliasMode record, and then the whole set is ignored: RFC 9460
+// section 2.4.1 has a client ignore the ServiceMode records of an RRset that
+// holds an AliasMode one.
 type svcbSignalSet struct {
-	recs []ootsRecord
-	alpn string
+	recs  []ootsRecord
+	alpn  []ootsRecord
+	alias bool
+}
+
+// add collects one SVCB of the set's RRset. All three paths a signal arrives
+// by (two Additional parsers and the answer path) collect through here.
+func (set *svcbSignalSet) add(rr *dns.SVCB) {
+	if set == nil || rr == nil {
+		return
+	}
+	if rr.Priority == 0 {
+		set.alias = true
+		return
+	}
+	if rec, ok := ootsRecordFromSVCB(rr); ok {
+		set.recs = append(set.recs, rec)
+		return
+	}
+	if rec, ok := alpnRecordFromSVCB(rr); ok {
+		set.alpn = append(set.alpn, rec)
+	}
+}
+
+// svcbUsable reports whether the resolver may act on rr's SvcParams: rr is
+// in ServiceMode (SvcPriority above 0) and its TargetName is ".", the
+// nameserver itself. SvcParams in AliasMode are to be ignored (RFC 9460
+// section 2.4.2). A record with another TargetName names an endpoint
+// elsewhere, which this resolver does not use, and its port must never be
+// joined onto the nameserver's own address.
+func svcbUsable(rr *dns.SVCB) bool {
+	return rr != nil && rr.Priority != 0 && rr.Target == "."
 }
 
 func svcbPortValue(rr *dns.SVCB) uint16 {
@@ -2009,8 +2049,10 @@ func svcbPortValue(rr *dns.SVCB) uint16 {
 	return 0
 }
 
+// svcbAlpnCSV is rr's ALPN list, comma-separated. "" when rr has none or is
+// not usable (svcbUsable).
 func svcbAlpnCSV(rr *dns.SVCB) string {
-	if rr == nil {
+	if !svcbUsable(rr) {
 		return ""
 	}
 	for _, kv := range rr.Value {
@@ -2021,83 +2063,161 @@ func svcbAlpnCSV(rr *dns.SVCB) string {
 	return ""
 }
 
+// ootsRecordFromSVCB is rr's oots SvcParam as a record, when rr carries one
+// and is usable (svcbUsable).
 func ootsRecordFromSVCB(rr *dns.SVCB) (ootsRecord, bool) {
+	if !svcbUsable(rr) {
+		return ootsRecord{}, false
+	}
 	m, ok, err := GetTransportParamRaw(rr)
 	if !ok || err != nil {
 		return ootsRecord{}, false
 	}
-	return ootsRecord{raw: m, port: svcbPortValue(rr)}, true
+	return newOOTSRecord(rr, m, nil), true
 }
 
-// portsFromOOTSRecord applies the port key of one oots SVCB.
-//
-// do53 never takes it. Cleartext stays on UDP/53 and TCP/53, and the key does
-// not advertise another cleartext listener. oots="do53:100" port=553 assigns
-// the port to nothing.
-// When the record names dot and/or doq, the port applies to whichever of those
-// two are present (TCP for DoT, UDP for DoQ). doh on that same record keeps
-// its default even when it is also named.
-// doh takes the port only when it is the only transport the record names.
-// do53 counts as named, so doh:10,do53:100 does not give doh the port, and
-// doh:100 alone does. A port of 0 means the key is absent.
-func portsFromOOTSRecord(raw map[string]uint8, port uint16) map[core.Transport]uint16 {
-	if port == 0 || len(raw) == 0 {
+// alpnRecordFromSVCB is an ALPN-only SVCB as a record. Its port applies to
+// the transports it lists: RFC 9461 section 4.2 makes the port key
+// automatically mandatory for SVCB-DNS, so a client may not use the record
+// and drop the port.
+func alpnRecordFromSVCB(rr *dns.SVCB) (ootsRecord, bool) {
+	csv := svcbAlpnCSV(rr)
+	if csv == "" {
+		return ootsRecord{}, false
+	}
+	raw := map[string]uint8{}
+	var order []string
+	for _, tok := range strings.Split(csv, ",") {
+		tok = strings.ToLower(strings.TrimSpace(tok))
+		if _, dup := raw[tok]; tok == "" || dup {
+			continue
+		}
+		raw[tok] = 100
+		order = append(order, tok)
+	}
+	if len(order) == 0 {
+		return ootsRecord{}, false
+	}
+	return newOOTSRecord(rr, raw, order), true
+}
+
+func newOOTSRecord(rr *dns.SVCB, raw map[string]uint8, alpn []string) ootsRecord {
+	return ootsRecord{raw: raw, alpn: alpn, port: svcbPortValue(rr), priority: rr.Priority, rdata: svcbRdata(rr)}
+}
+
+// svcbRdata is rr's RDATA in wire form, which is also its canonical form:
+// RFC 4034 section 6.2 lowercases no SVCB field, and the SvcParams are packed
+// in key order. nil when rr does not pack.
+func svcbRdata(rr *dns.SVCB) []byte {
+	bare := &dns.SVCB{
+		Hdr:      dns.RR_Header{Name: ".", Rrtype: dns.TypeSVCB, Class: dns.ClassINET},
+		Priority: rr.Priority,
+		Target:   rr.Target,
+		Value:    rr.Value,
+	}
+	buf := make([]byte, dns.Len(bare))
+	off, err := dns.PackRR(bare, buf, 0, nil, false)
+	if err != nil {
 		return nil
 	}
-	named := make(map[string]struct{}, len(raw))
-	for k := range raw {
-		named[strings.ToLower(k)] = struct{}{}
-	}
-	_, dot := named["dot"]
-	_, doq := named["doq"]
-	_, doh := named["doh"]
-	out := map[core.Transport]uint16{}
-	if dot || doq {
-		if dot {
-			out[core.TransportDoT] = port
-		}
-		if doq {
-			out[core.TransportDoQ] = port
-		}
-		return out
-	}
-	if doh && len(named) == 1 {
-		out[core.TransportDoH] = port
-		return out
-	}
-	return nil
+	// The root owner is one octet; type, class, TTL and RDLENGTH are ten.
+	return buf[11:off]
 }
 
-// combineOOTSRecords merges one server's oots SVCB RRs into the raw weights
-// they named and the ports the rule above assigns. Records are applied in
-// order. A transport named in two of them takes the later record's weight and
-// port: the last record in the RRset wins, and a later record that names the
-// transport without assigning a port clears one a previous record assigned.
-// Absence defaults are not applied here; the caller applies them once to the
-// combined set.
+// compareOOTSRecords orders records for the tie-break: the lower SvcPriority
+// first, then the lower RDATA in DNSSEC canonical order (RFC 4034 section
+// 6.3). The priority octets lead the RDATA and the root name sorts before any
+// label, so on equal priority a record with TargetName "." comes before one
+// that names another host. A record whose RDATA did not pack comes last.
+func compareOOTSRecords(a, b ootsRecord) int {
+	if a.priority != b.priority {
+		return cmp.Compare(a.priority, b.priority)
+	}
+	if (a.rdata == nil) != (b.rdata == nil) {
+		if a.rdata == nil {
+			return 1
+		}
+		return -1
+	}
+	return bytes.Compare(a.rdata, b.rdata)
+}
+
+// rankOOTSRecords returns a copy of recs, the tie-break's winner first.
+func rankOOTSRecords(recs []ootsRecord) []ootsRecord {
+	ranked := slices.Clone(recs)
+	slices.SortStableFunc(ranked, compareOOTSRecords)
+	return ranked
+}
+
+// portsFromOOTSRecord applies the port key of one record. The port applies to
+// every transport the record names, as RFC 9461 has it for SVCB-DNS, except
+// do53: cleartext stays on UDP/53 and TCP/53 until it gets transports of its
+// own, so oots="do53:100" port=553 assigns the port to nothing. A port of 0
+// means the key is absent.
+func portsFromOOTSRecord(raw map[string]uint8, port uint16) map[core.Transport]uint16 {
+	if port == 0 {
+		return nil
+	}
+	var out map[core.Transport]uint16
+	for k := range raw {
+		t, err := core.StringToTransport(k)
+		if err != nil || !core.IsEncryptedTransport(t) {
+			continue
+		}
+		if out == nil {
+			out = map[core.Transport]uint16{}
+		}
+		out[t] = port
+	}
+	return out
+}
+
+// combineOOTSRecords merges one server's records into one signal: the raw
+// weights they name and the ports their port keys assign. A transport named
+// in several records takes its weight and port from the one that wins the
+// tie-break (compareOOTSRecords). A record that loses a transport still
+// supplies the others it names. The result does not depend on the order the
+// records arrived in. Absence defaults are not applied here; the caller
+// applies them once to the combined set.
 func combineOOTSRecords(recs []ootsRecord) (map[string]uint8, map[core.Transport]uint16) {
 	raw := map[string]uint8{}
-	ports := map[core.Transport]uint16{}
-	for _, rec := range recs {
+	var ports map[core.Transport]uint16
+	for _, rec := range rankOOTSRecords(recs) {
 		assigned := portsFromOOTSRecord(rec.raw, rec.port)
-		for k, v := range rec.raw {
-			k = strings.ToLower(k)
-			raw[k] = v
+		for k, w := range rec.raw {
+			if _, taken := raw[k]; taken {
+				continue
+			}
+			raw[k] = w
 			t, err := core.StringToTransport(k)
 			if err != nil {
 				continue
 			}
-			if p, ok := assigned[t]; ok && p != 0 {
+			if p := assigned[t]; p != 0 {
+				if ports == nil {
+					ports = map[core.Transport]uint16{}
+				}
 				ports[t] = p
-			} else {
-				delete(ports, t)
 			}
 		}
 	}
-	if len(ports) == 0 {
-		return raw, nil
-	}
 	return raw, ports
+}
+
+// alpnOrder lists the ALPN tokens of recs once each: the tie-break's winner
+// first, each record's tokens as written.
+func alpnOrder(recs []ootsRecord) []string {
+	seen := map[string]bool{}
+	var order []string
+	for _, rec := range rankOOTSRecords(recs) {
+		for _, tok := range rec.alpn {
+			if !seen[tok] {
+				seen[tok] = true
+				order = append(order, tok)
+			}
+		}
+	}
+	return order
 }
 
 func (imr *Imr) collectSVCBSignal(pending map[string]*svcbSignalSet, serverName string, rr *dns.SVCB) {
@@ -2110,46 +2230,58 @@ func (imr *Imr) collectSVCBSignal(pending map[string]*svcbSignalSet, serverName 
 		set = &svcbSignalSet{}
 		pending[key] = set
 	}
-	if rec, ok := ootsRecordFromSVCB(rr); ok {
-		set.recs = append(set.recs, rec)
-		return
-	}
-	if csv := svcbAlpnCSV(rr); csv != "" {
-		set.alpn = csv
-	}
+	set.add(rr)
 }
 
-// applySVCBSignalSet installs one server's collected SVCB signals. oots
-// records are combined and applied once, which replaces the whole previous
-// signal, ports included. An ALPN list is applied only when no record carried
-// oots, and its port key is not read. followUp repeats the observation
-// lookups the additional-section path does after an oots signal.
-func (imr *Imr) applySVCBSignalSet(ctx context.Context, server *cache.AuthServer, set *svcbSignalSet, followUp bool) {
+// installSVCBSignal installs one server's collected SVCB signal, which
+// replaces the whole previous signal, ports included: the combined oots
+// records, or the combined ALPN-only records when no record carried oots. A
+// set that held an AliasMode record installs nothing. It reports whether a
+// signal was installed and whether the set had oots records. Promotion and
+// the follow-up lookups are the caller's.
+func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) (installed, oots bool) {
 	if server == nil || set == nil {
-		return
+		return false, false
+	}
+	if set.alias {
+		if !imr.Quiet {
+			lgDns.Debug("SVCB signal ignored: the RRset holds an AliasMode record", "servername", server.Name)
+		}
+		return false, false
 	}
 	if len(set.recs) > 0 {
 		raw, ports := combineOOTSRecords(set.recs)
 		if !imr.Quiet {
-			lgDns.Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw))
+			lgDns.Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports)
 		}
-		if applyTransportMapWithPorts(server, raw, ports) {
-			server.PromoteConnMode(cache.ConnModeOpportunistic)
+		return applyTransportMapWithPorts(server, raw, ports), true
+	}
+	if len(set.alpn) > 0 {
+		_, ports := combineOOTSRecords(set.alpn)
+		order := alpnOrder(set.alpn)
+		if !imr.Quiet {
+			lgDns.Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports)
 		}
-		if followUp {
-			if owner := transportOwnerForNS(server.Name); owner != "" {
-				imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
-			}
-			imr.maybeQueryTLSA(ctx, server.Name)
-		}
+		return applyAlpnSignalWithPorts(server, order, ports), false
+	}
+	return false, false
+}
+
+// applySVCBSignalSet installs one server's SVCB signal from an Additional
+// section. After an oots signal it promotes the server to opportunistic and
+// repeats the observation lookups.
+func (imr *Imr) applySVCBSignalSet(ctx context.Context, server *cache.AuthServer, set *svcbSignalSet) {
+	installed, oots := imr.installSVCBSignal(server, set)
+	if !oots {
 		return
 	}
-	if set.alpn != "" {
-		if !imr.Quiet {
-			lgDns.Debug("SVCB ALPN for", "servername", server.Name, "alpn", set.alpn)
-		}
-		applyAlpnSignalToServer(server, set.alpn)
+	if installed {
+		server.PromoteConnMode(cache.ConnModeOpportunistic)
 	}
+	if owner := transportOwnerForNS(server.Name); owner != "" {
+		imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
+	}
+	imr.maybeQueryTLSA(ctx, server.Name)
 }
 
 // parseTSYNCTransportSignal extracts and applies transport signals from a TSYNC record.
@@ -2377,7 +2509,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	}
 
 	for key, set := range pendingSVCB {
-		imr.applySVCBSignalSet(ctx, serverMap[key], set, true)
+		imr.applySVCBSignalSet(ctx, serverMap[key], set)
 	}
 
 	for nsname, rrset := range glue4Map {
@@ -2799,7 +2931,7 @@ func applyTransportMapWithPorts(server *cache.AuthServer, kvMap map[string]uint8
 	if server == nil || kvMap == nil {
 		return false
 	}
-	received := &cache.ReceivedSignal{Source: "oots", Weights: map[core.Transport]uint8{}, Ports: signalPorts(ports)}
+	received := &cache.ReceivedSignal{Source: "oots", Weights: map[core.Transport]uint8{}, Ports: cache.DialPorts(ports)}
 	full := make(map[string]uint8, len(kvMap)+4)
 	for k, v := range kvMap {
 		full[k] = v
@@ -2828,25 +2960,6 @@ func applyTransportMapWithPorts(server *cache.AuthServer, kvMap map[string]uint8
 	return true
 }
 
-// signalPorts copies the ports a signal assigns, dropping a zero and Do53.
-// Nil when nothing remains, which is what clears the previous ports.
-func signalPorts(ports map[core.Transport]uint16) map[core.Transport]uint16 {
-	if len(ports) == 0 {
-		return nil
-	}
-	out := make(map[core.Transport]uint16, len(ports))
-	for t, p := range ports {
-		if p == 0 || t == core.TransportDo53 || t == core.TransportDo53TCP {
-			continue
-		}
-		out[t] = p
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 func transportOwnerForNS(nsname string) string {
 	base := strings.TrimSpace(nsname)
 	if base == "" {
@@ -2856,15 +2969,23 @@ func transportOwnerForNS(nsname string) string {
 	return dns.Fqdn("_dns." + base)
 }
 
-// applyAlpnSignalToServer applies 100-weight transports from a comma-separated ALPN list to a specific server pointer
-func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
+// applyAlpnSignalToServer applies 100-weight transports from a comma-separated
+// ALPN list to a specific server pointer.
+func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) bool {
+	return applyAlpnSignalWithPorts(server, strings.Split(alpnCSV, ","), nil)
+}
+
+// applyAlpnSignalWithPorts is applyAlpnSignalToServer for a list already
+// split, with the ports the ALPN records assigned. It reports whether the
+// list named a transport.
+func applyAlpnSignalWithPorts(server *cache.AuthServer, tokens []string, ports map[core.Transport]uint16) bool {
 	if server == nil {
-		return
+		return false
 	}
 
 	weights := map[core.Transport]uint8{}
 	var order []string
-	tokens := strings.Split(alpnCSV, ",")
+	var transports []core.Transport
 	for _, tok := range tokens {
 		k := strings.TrimSpace(tok)
 		if k == "" {
@@ -2876,21 +2997,17 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 		}
 		weights[t] = 100
 		order = append(order, k)
+		transports = append(transports, t)
 	}
 	if len(order) == 0 {
-		return
+		return false
 	}
-	var transports []core.Transport
-	for _, k := range order {
-		if t, err := core.StringToTransport(k); err == nil {
-			transports = append(transports, t)
-		}
-	}
-	received := &cache.ReceivedSignal{Source: "alpn", Weights: make(map[core.Transport]uint8, len(weights))}
+	received := &cache.ReceivedSignal{Source: "alpn", Weights: make(map[core.Transport]uint8, len(weights)), Ports: cache.DialPorts(ports)}
 	for t, w := range weights {
 		received.Weights[t] = w
 	}
 	server.SetTransportSignal(transports, order, weights, received)
+	return true
 }
 
 // parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section.
@@ -2932,13 +3049,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 		switch x := rr.(type) {
 		case *dns.SVCB:
 			lgDns.Debug("**** parseTransportForServerFromAdditional: x", "x", x)
-			if rec, ok := ootsRecordFromSVCB(x); ok {
-				set.recs = append(set.recs, rec)
-				continue
-			}
-			if csv := svcbAlpnCSV(x); csv != "" {
-				set.alpn = csv
-			}
+			set.add(x)
 		case *dns.PrivateRR:
 			lgDns.Debug("parseTransportForServerFromAdditional: TSYNC RR", "rr", x)
 			if ts, ok := x.Data.(*core.TSYNC); ok && ts != nil {
@@ -2958,9 +3069,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 			}
 		}
 	}
-	if len(set.recs) > 0 || set.alpn != "" {
-		imr.applySVCBSignalSet(ctx, server, set, true)
-	}
+	imr.applySVCBSignalSet(ctx, server, set)
 }
 
 func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, vstate cache.ValidationState) {
@@ -2980,6 +3089,14 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 	if vstate == cache.ValidationStateSecure {
 		targetMode = cache.ConnModeValidated
 	}
+	set := &svcbSignalSet{}
+	if rrset.RRtype == dns.TypeSVCB {
+		for _, rr := range rrset.RRs {
+			if svcb, ok := rr.(*dns.SVCB); ok {
+				set.add(svcb)
+			}
+		}
+	}
 	for _, sm := range imr.Cache.ServerMap.Items() {
 		server, ok := sm[cache.ServerKey(base)]
 		if !ok {
@@ -2988,62 +3105,17 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 		applied := false
 		switch rrset.RRtype {
 		case dns.TypeSVCB:
-			var recs []ootsRecord
-			var alpn string
-			for _, rr := range rrset.RRs {
-				svcb, ok := rr.(*dns.SVCB)
-				if !ok {
-					continue
-				}
-				if rec, ok := ootsRecordFromSVCB(svcb); ok {
-					recs = append(recs, rec)
-				} else if csv := svcbAlpnCSV(svcb); csv != "" {
-					alpn = csv
-				}
-				owners := tlsaOwnersForServer(base, server)
-				if len(owners) > 0 {
-					for _, kv := range svcb.Value {
-						local, ok := kv.(*dns.SVCBLocal)
-						if !ok || uint16(local.Key()) != SvcbTLSAKey {
-							continue
-						}
-						tlsaRR, err := ParseTLSAString(string(local.Data))
-						if err != nil {
-							lgDns.Error("applyTransportRRsetFromAnswer: failed to parse TLSA from SVCB", "svcb", err)
-							continue
-						}
-						for _, ownerName := range owners {
-							tlsa := &dns.TLSA{
-								Hdr: dns.RR_Header{
-									Name:   ownerName,
-									Rrtype: dns.TypeTLSA,
-									Class:  dns.ClassINET,
-									Ttl:    svcb.Hdr.Ttl,
-								},
-								Usage:        tlsaRR.Usage,
-								Selector:     tlsaRR.Selector,
-								MatchingType: tlsaRR.MatchingType,
-								Certificate:  tlsaRR.Certificate,
-							}
-							imr.Cache.StoreTLSAForServer(base, ownerName, &core.RRset{
-								Name:   ownerName,
-								Class:  dns.ClassINET,
-								RRtype: dns.TypeTLSA,
-								RRs:    []dns.RR{tlsa},
-							}, vstate)
-						}
+			// The TLSA SvcParam follows the same rule as the signal: only
+			// from a record the resolver acts on, and from none in an RRset
+			// that holds an AliasMode record.
+			if owners := tlsaOwnersForServer(base, server); len(owners) > 0 && !set.alias {
+				for _, rr := range rrset.RRs {
+					if svcb, ok := rr.(*dns.SVCB); ok && svcbUsable(svcb) {
+						imr.storeTLSAFromSVCB(base, owners, svcb, vstate)
 					}
 				}
 			}
-			if len(recs) > 0 {
-				raw, ports := combineOOTSRecords(recs)
-				if applyTransportMapWithPorts(server, raw, ports) {
-					applied = true
-				}
-			} else if alpn != "" {
-				applyAlpnSignalToServer(server, alpn)
-				applied = true
-			}
+			applied, _ = imr.installSVCBSignal(server, set)
 		case core.TypeTSYNC:
 			for _, rr := range rrset.RRs {
 				if priv, ok := rr.(*dns.PrivateRR); ok {
@@ -3063,6 +3135,42 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 			// again changed nothing, and could put back a map another writer
 			// had just replaced.
 			server.PromoteConnMode(targetMode)
+		}
+	}
+}
+
+// storeTLSAFromSVCB stores the TLSA SvcParam of one SVCB, if it has one, for
+// each of the server's TLSA owners.
+func (imr *Imr) storeTLSAFromSVCB(base string, owners []string, svcb *dns.SVCB, vstate cache.ValidationState) {
+	for _, kv := range svcb.Value {
+		local, ok := kv.(*dns.SVCBLocal)
+		if !ok || uint16(local.Key()) != SvcbTLSAKey {
+			continue
+		}
+		tlsaRR, err := ParseTLSAString(string(local.Data))
+		if err != nil {
+			lgDns.Error("applyTransportRRsetFromAnswer: failed to parse TLSA from SVCB", "svcb", err)
+			continue
+		}
+		for _, ownerName := range owners {
+			tlsa := &dns.TLSA{
+				Hdr: dns.RR_Header{
+					Name:   ownerName,
+					Rrtype: dns.TypeTLSA,
+					Class:  dns.ClassINET,
+					Ttl:    svcb.Hdr.Ttl,
+				},
+				Usage:        tlsaRR.Usage,
+				Selector:     tlsaRR.Selector,
+				MatchingType: tlsaRR.MatchingType,
+				Certificate:  tlsaRR.Certificate,
+			}
+			imr.Cache.StoreTLSAForServer(base, ownerName, &core.RRset{
+				Name:   ownerName,
+				Class:  dns.ClassINET,
+				RRtype: dns.TypeTLSA,
+				RRs:    []dns.RR{tlsa},
+			}, vstate)
 		}
 	}
 }

@@ -50,13 +50,14 @@ func TestPortsFromOOTSRecord(t *testing.T) {
 		port uint16
 		want map[core.Transport]uint16
 	}{
-		{"dot and doq share it, doh on the same record does not",
+		{"every transport the record names takes it",
 			map[string]uint8{"dot": 30, "doq": 20, "doh": 10}, 1234,
-			map[core.Transport]uint16{core.TransportDoT: 1234, core.TransportDoQ: 1234}},
+			map[core.Transport]uint16{core.TransportDoT: 1234, core.TransportDoQ: 1234, core.TransportDoH: 1234}},
 		{"dot alone", map[string]uint8{"dot": 30}, 1234, map[core.Transport]uint16{core.TransportDoT: 1234}},
 		{"doq alone", map[string]uint8{"doq": 20}, 1235, map[core.Transport]uint16{core.TransportDoQ: 1235}},
 		{"doh alone", map[string]uint8{"doh": 100}, 8443, map[core.Transport]uint16{core.TransportDoH: 8443}},
-		{"doh beside do53 does not", map[string]uint8{"doh": 10, "do53": 100}, 8443, nil},
+		{"doh beside do53 takes it, do53 does not", map[string]uint8{"doh": 10, "do53": 100}, 8443,
+			map[core.Transport]uint16{core.TransportDoH: 8443}},
 		{"do53 never takes it", map[string]uint8{"do53": 100}, 553, nil},
 		{"no port key", map[string]uint8{"dot": 30}, 0, nil},
 	} {
@@ -68,12 +69,22 @@ func TestPortsFromOOTSRecord(t *testing.T) {
 	}
 }
 
+func ootsRecordOf(t *testing.T, text string) ootsRecord {
+	t.Helper()
+	rec, ok := ootsRecordFromSVCB(mustRR(t, text).(*dns.SVCB))
+	if !ok {
+		t.Fatalf("%s: not an oots record", text)
+	}
+	return rec
+}
+
 // Two SVCB records are one signal. Defaults are applied once to the combined
-// weights, and a transport named twice keeps the later record.
+// weights. A transport named twice takes the tie-break winner's weight and
+// port, whichever order the records come in.
 func TestCombineOOTSRecords(t *testing.T) {
 	raw, ports := combineOOTSRecords([]ootsRecord{
-		{raw: map[string]uint8{"dot": 30}, port: 1234},
-		{raw: map[string]uint8{"doq": 20}, port: 1235},
+		ootsRecordOf(t, `_dns.ns.example. 3600 IN SVCB 1 . port=1234 oots="dot:30"`),
+		ootsRecordOf(t, `_dns.ns.example. 3600 IN SVCB 1 . port=1235 oots="doq:20"`),
 	})
 	if raw["dot"] != 30 || raw["doq"] != 20 || len(raw) != 2 {
 		t.Errorf("combined weights %v, want dot:30 doq:20", raw)
@@ -82,21 +93,13 @@ func TestCombineOOTSRecords(t *testing.T) {
 		t.Errorf("combined ports %v", ports)
 	}
 
-	raw, ports = combineOOTSRecords([]ootsRecord{
-		{raw: map[string]uint8{"dot": 30}, port: 1111},
-		{raw: map[string]uint8{"dot": 40}, port: 2222},
-	})
-	if raw["dot"] != 40 || ports[core.TransportDoT] != 2222 {
-		t.Errorf("last record: weight %d port %d, want 40 and 2222", raw["dot"], ports[core.TransportDoT])
-	}
-
-	// The later record names DoT and assigns no port, so the earlier port goes.
-	_, ports = combineOOTSRecords([]ootsRecord{
-		{raw: map[string]uint8{"dot": 30}, port: 1111},
-		{raw: map[string]uint8{"dot": 40}, port: 0},
-	})
-	if ports[core.TransportDoT] != 0 {
-		t.Errorf("later record without a port left port %d", ports[core.TransportDoT])
+	low := ootsRecordOf(t, `_dns.ns.example. 3600 IN SVCB 1 . port=1111 oots="dot:30"`)
+	high := ootsRecordOf(t, `_dns.ns.example. 3600 IN SVCB 1 . port=2222 oots="dot:40"`)
+	for _, recs := range [][]ootsRecord{{low, high}, {high, low}} {
+		raw, ports := combineOOTSRecords(recs)
+		if raw["dot"] != 30 || ports[core.TransportDoT] != 1111 {
+			t.Errorf("tie-break: weight %d port %d, want 30 and 1111", raw["dot"], ports[core.TransportDoT])
+		}
 	}
 }
 
@@ -192,9 +195,9 @@ func TestAnswerOOTSPortsAreCombined(t *testing.T) {
 	assertCombinedPorts(t, server)
 }
 
-// One record names dot, doq and doh. The port is for dot and doq. DoH stays
-// on 443, and its weight is still recorded.
-func TestSharedPortSkipsDoH(t *testing.T) {
+// One record names dot, doq and doh. The port is for all three, and their
+// weights are recorded.
+func TestSharedPortAppliesToEveryTransport(t *testing.T) {
 	server := cache.NewAuthServer("ns.example.")
 	raw, ports := combineOOTSRecords([]ootsRecord{{
 		raw:  map[string]uint8{"dot": 30, "doq": 20, "doh": 10},
@@ -203,30 +206,13 @@ func TestSharedPortSkipsDoH(t *testing.T) {
 	if !applyTransportMapWithPorts(server, raw, ports) {
 		t.Fatal("signal was not applied")
 	}
-	if server.GetTransportPort(core.TransportDoT) != 1234 || server.GetTransportPort(core.TransportDoQ) != 1234 {
-		t.Errorf("dot/doq ports %d %d, want 1234", server.GetTransportPort(core.TransportDoT), server.GetTransportPort(core.TransportDoQ))
-	}
-	if server.GetTransportPort(core.TransportDoH) != 0 {
-		t.Errorf("DoH took port %d", server.GetTransportPort(core.TransportDoH))
+	for _, tr := range []core.Transport{core.TransportDoT, core.TransportDoQ, core.TransportDoH} {
+		if got := server.GetTransportPort(tr); got != 1234 {
+			t.Errorf("%s port %d, want 1234", core.TransportToString[tr], got)
+		}
 	}
 	if w := server.GetTransportWeights(); w[core.TransportDoH] != 10 {
 		t.Errorf("DoH weight %d, want 10", w[core.TransportDoH])
-	}
-}
-
-func TestDoHTakesPortOnlyWhenAlone(t *testing.T) {
-	alone := cache.NewAuthServer("alone.example.")
-	raw, ports := combineOOTSRecords([]ootsRecord{{raw: map[string]uint8{"doh": 100}, port: 8443}})
-	applyTransportMapWithPorts(alone, raw, ports)
-	if alone.GetTransportPort(core.TransportDoH) != 8443 {
-		t.Errorf("DoH alone port %d, want 8443", alone.GetTransportPort(core.TransportDoH))
-	}
-
-	withDo53 := cache.NewAuthServer("with.example.")
-	raw, ports = combineOOTSRecords([]ootsRecord{{raw: map[string]uint8{"doh": 10, "do53": 100}, port: 8443}})
-	applyTransportMapWithPorts(withDo53, raw, ports)
-	if withDo53.GetTransportPort(core.TransportDoH) != 0 {
-		t.Errorf("DoH beside Do53 took port %d", withDo53.GetTransportPort(core.TransportDoH))
 	}
 }
 
@@ -245,9 +231,10 @@ func TestDo53PortIsNotDialed(t *testing.T) {
 	}
 }
 
-// ALPN-only SVCB still means DoT at weight 100, and its port key is ignored.
-// An oots record in the same message wins, and the ALPN list is not applied.
-func TestAlpnPortIsIgnoredUnlessOotsIsPresent(t *testing.T) {
+// An ALPN-only SVCB still means DoT at weight 100, and its port key applies
+// to DoT (RFC 9461 section 4.2). An oots record in the same message wins, and
+// the ALPN list is not applied.
+func TestAlpnPortIsApplied(t *testing.T) {
 	imr := newTestImr(t)
 	imr.Quiet = true
 	server := cache.NewAuthServer("ns.example.")
@@ -260,20 +247,20 @@ func TestAlpnPortIsIgnoredUnlessOotsIsPresent(t *testing.T) {
 		Value:    []dns.SVCBKeyValue{&dns.SVCBAlpn{Alpn: []string{"dot"}}, &dns.SVCBPort{Port: 1234}},
 	}}
 	imr.parseTransportForServerFromAdditional(context.Background(), server, r)
-	if server.GetTransportPort(core.TransportDoT) != 0 {
-		t.Errorf("ALPN-only signal stored port %d", server.GetTransportPort(core.TransportDoT))
+	if server.GetTransportPort(core.TransportDoT) != 1234 {
+		t.Errorf("ALPN-only signal stored DoT port %d, want 1234", server.GetTransportPort(core.TransportDoT))
 	}
-	if got := server.GetReceivedSignal(); got == nil || got.Source != "alpn" {
-		t.Errorf("received %+v, want an alpn signal", got)
+	if got := server.GetReceivedSignal(); got == nil || got.Source != "alpn" || got.Ports[core.TransportDoT] != 1234 {
+		t.Errorf("received %+v, want an alpn signal with DoT on 1234", got)
 	}
 
-	r.Extra = append(r.Extra, ootsSVCB("_dns.ns.example.", 1234, dns.SVCBOotsEntry{Proto: "dot", Weight: 30}))
+	r.Extra = append(r.Extra, ootsSVCB("_dns.ns.example.", 1235, dns.SVCBOotsEntry{Proto: "dot", Weight: 30}))
 	imr.parseTransportForServerFromAdditional(context.Background(), server, r)
 	if got := server.GetReceivedSignal(); got == nil || got.Source != "oots" || got.Weights[core.TransportDoT] != 30 {
 		t.Errorf("mixed message received %+v, want the oots record", got)
 	}
-	if server.GetTransportPort(core.TransportDoT) != 1234 {
-		t.Errorf("oots port %d, want 1234", server.GetTransportPort(core.TransportDoT))
+	if server.GetTransportPort(core.TransportDoT) != 1235 {
+		t.Errorf("oots port %d, want 1235", server.GetTransportPort(core.TransportDoT))
 	}
 }
 

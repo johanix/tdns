@@ -506,14 +506,23 @@ func (as *AuthServer) SetReceivedSignal(received *ReceivedSignal) {
 }
 
 // portsFromReceived is the dial ports of a signal. Nil when the signal
-// assigns none, so installing it clears the previous ports. Do53 is dropped:
-// the port key never moves cleartext off 53.
+// assigns none, so installing it clears the previous ports.
 func portsFromReceived(received *ReceivedSignal) map[core.Transport]uint16 {
-	if received == nil || len(received.Ports) == 0 {
+	if received == nil {
 		return nil
 	}
-	out := make(map[core.Transport]uint16, len(received.Ports))
-	for t, p := range received.Ports {
+	return DialPorts(received.Ports)
+}
+
+// DialPorts copies the ports a signal assigns, dropping a zero and Do53: the
+// port key never moves cleartext off 53. Nil when nothing remains, which is
+// what clears the previous ports.
+func DialPorts(ports map[core.Transport]uint16) map[core.Transport]uint16 {
+	if len(ports) == 0 {
+		return nil
+	}
+	out := make(map[core.Transport]uint16, len(ports))
+	for t, p := range ports {
 		if p == 0 || t == core.TransportDo53 || t == core.TransportDo53TCP {
 			continue
 		}

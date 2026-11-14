@@ -55,9 +55,8 @@ service:
       type:    svcb               # svcb | tsync | none; default is none
       signal:  "doq:20,dot:10"    # comma-sep list of doq,dot,doh,do53 with traffic share
       # port:  1234               # optional SVCB port= on that one record.
-      #                            # It applies to dot and doq named in the signal.
-      #                            # DoH takes it only when DoH is the only
-      #                            # transport named. Do53 stays on port 53:
+      #                            # It applies to every encrypted transport
+      #                            # named in the signal. Do53 stays on port 53:
       #                            # port= never moves cleartext, and it does
       #                            # not advertise another cleartext listener.
       #                            # Publishing the port does not listen on it;
