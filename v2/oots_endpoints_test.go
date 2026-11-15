@@ -546,8 +546,7 @@ func TestEndpointAddrTrackerPrunes(t *testing.T) {
 }
 
 // Addresses found through a CNAME chain are kept no longer than the chain's
-// first link to run out; when the chain is no longer cached whole, for
-// endpointAddrRetry.
+// first link to run out; when the chain is no longer cached whole, not at all.
 func TestEndpointAddrsExpireWithTheChain(t *testing.T) {
 	imr := newTestImr(t)
 	const alias, final = "dot-alias." + stateZone, "dot-host.example.net."
@@ -568,8 +567,18 @@ func TestEndpointAddrsExpireWithTheChain(t *testing.T) {
 	if exp := imr.addrsExpiry(final, dns.TypeA, resp); exp.Before(time.Now().Add(59 * time.Minute)) {
 		t.Errorf("no chain: expires in %v, want the address TTL", time.Until(exp))
 	}
-	if exp := imr.addrsExpiry("gone."+stateZone, dns.TypeA, resp); exp.After(time.Now().Add(endpointAddrRetry)) {
-		t.Errorf("chain not cached: expires in %v, want at most endpointAddrRetry", time.Until(exp))
+	if exp := imr.addrsExpiry("gone."+stateZone, dns.TypeA, resp); exp.After(time.Now()) {
+		t.Errorf("chain not cached: expires in %v, want now", time.Until(exp))
+	}
+
+	// The lookup found the address through a short-lived link that has left
+	// the cache before its lifetime was read: the address is not kept.
+	if got, _ := imr.endpointAddrsOf(alias, dns.TypeA, resp, time.Now()); len(got) != 1 {
+		t.Errorf("chain cached: kept %v, want the address", got)
+	}
+	const short = "short-alias." + stateZone
+	if got, exp := imr.endpointAddrsOf(short, dns.TypeA, resp, time.Now()); len(got) != 0 {
+		t.Errorf("link gone: kept %v until %v, want nothing", got, exp)
 	}
 }
 

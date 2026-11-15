@@ -381,31 +381,47 @@ func (imr *Imr) lookupEndpointAddrs(target string) ([]string, time.Time) {
 		if err != nil || resp == nil || resp.RRset == nil || resp.ValidationState == cache.ValidationStateBogus {
 			continue
 		}
-		found := false
-		for _, rr := range resp.RRset.RRs {
-			switch a := rr.(type) {
-			case *dns.A:
-				addrs = append(addrs, a.A.String())
-				found = true
-			case *dns.AAAA:
-				addrs = append(addrs, a.AAAA.String())
-				found = true
-			}
-		}
-		if !found {
+		found, exp := imr.endpointAddrsOf(target, qtype, resp, time.Now())
+		if len(found) == 0 {
 			continue
 		}
-		if exp := imr.addrsExpiry(target, qtype, resp); expire.IsZero() || exp.Before(expire) {
+		addrs = append(addrs, found...)
+		if expire.IsZero() || exp.Before(expire) {
 			expire = exp
 		}
 	}
 	return addrs, expire
 }
 
+// endpointAddrsOf returns the addresses resp carries for <target, qtype> and
+// when they run out (addrsExpiry). It returns none when that is already past,
+// as it is when a link of the CNAME chain that led to them has left the cache:
+// an address is kept only while every record that led to it is.
+func (imr *Imr) endpointAddrsOf(target string, qtype uint16, resp *ImrResponse, now time.Time) ([]string, time.Time) {
+	var addrs []string
+	for _, rr := range resp.RRset.RRs {
+		switch a := rr.(type) {
+		case *dns.A:
+			addrs = append(addrs, a.A.String())
+		case *dns.AAAA:
+			addrs = append(addrs, a.AAAA.String())
+		}
+	}
+	if len(addrs) == 0 {
+		return nil, time.Time{}
+	}
+	exp := imr.addrsExpiry(target, qtype, resp)
+	if !now.Before(exp) {
+		return nil, time.Time{}
+	}
+	return addrs, exp
+}
+
 // addrsExpiry is when the addresses resp carries for <target, qtype> run out:
 // the expiration of the cache entry that holds them, or their TTL from now
 // when that is not known, and no later than the first link of the CNAME chain
-// that led to them, when one did.
+// that led to them, when one did. The zero time when that chain's lifetime is
+// not known.
 func (imr *Imr) addrsExpiry(target string, qtype uint16, resp *ImrResponse) time.Time {
 	exp := resp.Expiration
 	if exp.IsZero() {
@@ -422,12 +438,13 @@ func (imr *Imr) addrsExpiry(target string, qtype uint16, resp *ImrResponse) time
 // chainExpiry is when the first link of the CNAME chain from name to its
 // <qtype> data runs out, read from the cache the lookup just filled. An
 // address found through the chain is kept no longer than that: a link that
-// changes may lead elsewhere. A chain the cache no longer holds whole is good
-// for endpointAddrRetry.
+// changes may lead elsewhere. A chain the cache no longer holds whole has an
+// unknown lifetime, given as the zero time: a link that left the cache may
+// already have expired.
 func (imr *Imr) chainExpiry(name string, qtype uint16) time.Time {
 	links, final, _, err := imr.chainAt(name, qtype, edns0.PrivacyNone, imr.freshChainGrace())
 	if err != nil || final == nil || len(links) == 0 {
-		return time.Now().Add(endpointAddrRetry)
+		return time.Time{}
 	}
 	first := links[0].Expiration
 	for _, l := range links[1:] {
