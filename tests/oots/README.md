@@ -81,6 +81,7 @@ observed, and the negative case.
 | `published` | K1, M3 | what `service.transport` publishes: one record per ported transport; a default config byte-identical to the base build | a publisher that ignores `ports`, or changes the default |
 | `ignore` | P3, P4 | a record with a target, and the ServiceMode siblings of an AliasMode record, are not applied | a resolver that applies them (trap) |
 | `tiebreak` | P5 | a transport named twice takes the same record in both RR orders | a resolver where the last record wins |
+| `lossless` | C1 | a tdns secondary re-serves every oots value byte for byte: unknown tokens, only-unknown values, odd identifiers, a weight octet above 100; the resolver validates each | a secondary or resolver whose codec drops or clamps |
 
 Scenario ids keep verdict tables narrow: C codec, K config, M versions, P ports
 and records.

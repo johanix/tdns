@@ -39,6 +39,8 @@ ign2.test.   ns.ign2.test.    127.0.0.22  -
 ign3.test.   ns.ign3.test.    127.0.0.23  -
 tb1.test.    ns.tb1.test.     127.0.0.31  -
 tb2.test.    ns.tb2.test.     127.0.0.32  -
+cs.test.     ns.cs.test.      127.0.0.41  cs-pri:127.0.0.40
+csu.test.    ns.csu.test.     127.0.0.42  -
 pub.test.    ns1.pub.test.    127.0.0.51  -
 "
 
