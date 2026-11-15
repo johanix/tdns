@@ -666,7 +666,7 @@ type ConfigPost struct {
 	Force         bool     // reload-tsig: overwrite secret conflicts
 	Confirm       bool     `json:"confirm,omitempty"`       // reload / reload-zones: acknowledge a guarded DNSSEC policy algorithm change
 	TsigOverwrite []string `json:"tsigoverwrite,omitempty"` // reload-tsig --interactive: per-key overwrite
-	Name          string   `json:"name,omitempty"`          // transport-signal: one name instead of every identity
+	Name          string   `json:"name,omitempty"`          // transport-signal: one name instead of every identity; transport-signal-release: the name to release
 }
 
 type ConfigResponse struct {

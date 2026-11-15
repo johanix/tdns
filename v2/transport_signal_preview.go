@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -18,8 +19,10 @@ import (
 // in the zones. tdns-cli's "config transport-signal" asks the daemon for
 // what synthesis writes at _dns.<name> from the current service.transport,
 // for every identity or for one name, so an operator can paste the records
-// into the zone. Synthesis then stops there: it never writes where records
-// exist.
+// into the zone. Where the pass has synthesized a signal already, the
+// operator then releases the name ("config transport-signal --release"),
+// and the RRset there is the operator's: synthesis never writes where the
+// operator's records are.
 
 // TransportSignalPreview is the signal service.transport gives one name,
 // and where things stand at that name on this server.
@@ -50,8 +53,8 @@ const (
 // service.identities when name is empty.
 func transportSignalPreview(conf *Config, name string) ([]TransportSignalPreview, error) {
 	t := conf.Service.Transport
-	if t.Type != "svcb" {
-		return nil, fmt.Errorf("service.transport.type is %q; only svcb gives an SVCB signal", t.Type)
+	if err := checkSignalTransportType(t); err != nil {
+		return nil, err
 	}
 	names := conf.Service.Identities
 	if strings.TrimSpace(name) != "" {
@@ -62,9 +65,9 @@ func transportSignalPreview(conf *Config, name string) ([]TransportSignalPreview
 	}
 	var out []TransportSignalPreview
 	for _, n := range names {
-		n = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(n)))
-		if _, ok := dns.IsDomainName(n); !ok || n == "." || strings.Contains(n, "..") {
-			return nil, fmt.Errorf("%q is not a nameserver name", n)
+		n, err := signalNameserverName(n)
+		if err != nil {
+			return nil, err
 		}
 		rs, err := signalRRsetFor(t, n)
 		if err != nil {
@@ -88,6 +91,25 @@ func transportSignalPreview(conf *Config, name string) ([]TransportSignalPreview
 	return out, nil
 }
 
+// checkSignalTransportType refuses a service.transport that gives no SVCB
+// signal: the bridge is about SVCB signals only.
+func checkSignalTransportType(t TransportConf) error {
+	if t.Type != "svcb" {
+		return fmt.Errorf("service.transport.type is %q; only svcb gives an SVCB signal", t.Type)
+	}
+	return nil
+}
+
+// signalNameserverName is name canonical and fully qualified, or an error
+// when it is not a nameserver name.
+func signalNameserverName(name string) (string, error) {
+	n := core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(name)))
+	if _, ok := dns.IsDomainName(n); !ok || n == "." || strings.Contains(n, "..") {
+		return "", fmt.Errorf("%q is not a nameserver name", n)
+	}
+	return n, nil
+}
+
 // signalStateAt reads the owner in the zone's published snapshot: the pass's
 // own signal, provisioned records, or nothing. matches says whether the SVCB
 // RRset there is want, TTL aside.
@@ -101,4 +123,70 @@ func (zd *ZoneData) signalStateAt(owner string, want []dns.RR) (state string, ma
 		return SignalStateSynthesized, false
 	}
 	return SignalStateProvisioned, len(svcb.RRs) > 0 && signalDigest(svcb.RRs) == signalDigest(want)
+}
+
+// The release. An operator who pastes what the bridge printed over a signal
+// the pass synthesized puts the pass's own bytes at the owner, and the
+// pass's record of what it stored (signalDigest, TTL aside) still matches:
+// the pass would go on taking the RRset for its own, rewrite it when
+// service.transport changes, and withdraw it once the name leaves
+// service.identities. Nothing in the zone tells the two apart: a zone write
+// leaves the pass's signal in the zone file too. Only the operator can say,
+// and the release is how. It drops the record, in memory and in the KeyDB,
+// and from then on the pass treats whatever RRset is at the owner as the
+// operator's: it leaves it alone, never rewrites it and never withdraws it.
+
+// transportSignalRelease releases _dns.<name> in the name's home zone. It
+// returns the state there after the release, and a line saying what it did.
+func transportSignalRelease(conf *Config, name string) ([]TransportSignalPreview, string, error) {
+	if err := checkSignalTransportType(conf.Service.Transport); err != nil {
+		return nil, "", err
+	}
+	if strings.TrimSpace(name) == "" {
+		return nil, "", fmt.Errorf("give the name to release")
+	}
+	n, err := signalNameserverName(name)
+	if err != nil {
+		return nil, "", err
+	}
+	home := FindZone(n)
+	if home == nil {
+		return nil, "", fmt.Errorf("no zone served here holds %s; nothing to release", n)
+	}
+	owner := "_dns." + n
+	released, err := home.releaseSignal(owner)
+	if err != nil {
+		return nil, "", err
+	}
+	after, err := transportSignalPreview(conf, n)
+	if err != nil {
+		return nil, "", err
+	}
+	msg := fmt.Sprintf("released %s in %s: the RRset there is the operator's from now on", owner, home.ZoneName)
+	if !released {
+		msg = fmt.Sprintf("%s in %s was not the transport signal pass's; nothing to release", owner, home.ZoneName)
+	}
+	return after, msg, nil
+}
+
+// releaseSignal drops the pass's record of what it stored at owner. It runs
+// under zd.mu, which the pass holds from its first look at an owner to its
+// record of what it stored, so a pass in progress cannot record the owner
+// again after the release. It refuses an owner that holds nothing: a release
+// then would only let synthesis start over. released is false when the pass
+// had no record of the owner.
+func (zd *ZoneData) releaseSignal(owner string) (released bool, err error) {
+	owner = core.CanonicalizeName(owner)
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if od := getOwnerFrom(zd.publishedSnapshot(), owner); od == nil || ownerRRsetCount(od) == 0 {
+		return false, fmt.Errorf("%s holds nothing in %s; put the records there first (a release with nothing there would only let synthesis start over)", owner, zd.ZoneName)
+	}
+	if !slices.Contains(zd.signalStoredOwners(), owner) {
+		return false, nil
+	}
+	zd.forgetSignalStored(owner)
+	lgDns.Info("transport signal released: the RRset at the owner is the operator's from now on",
+		"zone", zd.ZoneName, "owner", owner)
+	return true, nil
 }

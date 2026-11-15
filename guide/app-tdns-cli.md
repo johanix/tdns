@@ -29,7 +29,9 @@ features of **tdnsd**. The sub-commands are grouped under different prefixes:
 - "**tdns-cli auth config**": reload the configuration, the zones or the
   TSIG keys, show the daemon's status, and `transport-signal`: print the
   `_dns` SVCB records tdns-auth synthesizes from `service.transport`, in
-  zone-file format, to provision in the zone instead (see
+  zone-file format, to provision in the zone instead, and
+  `transport-signal --release <name>`: hand the name's records over once
+  they are in the zone (see
   [the transport signal](config-tdns-auth.md#the-transport-signal-servicetransport)).
 
 - "**tdns-cli notify**": commands to issue various types of generalized

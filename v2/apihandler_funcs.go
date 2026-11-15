@@ -489,6 +489,15 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				resp.ErrorMsg = err.Error()
 			}
 
+		case "transport-signal-release":
+			// The pass hands _dns.<name> over to the operator: it drops its
+			// record of what it stored there, and returns the state after.
+			resp.TransportSignal, resp.Msg, err = transportSignalRelease(conf, cp.Name)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
 		case "status":
 			lgApi.Debug("config status inquiry")
 			resp.Listeners = conf.Listeners

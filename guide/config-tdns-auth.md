@@ -1156,7 +1156,7 @@ synthesizes from its current `service.transport`, for every name in
 `service.identities`, in zone-file format:
 
 ```
-; _dns.ns1.example.net.: synthesized in example.net. now; provision these records there to replace it
+; _dns.ns1.example.net.: synthesized in example.net. now; paste these records into the zone, then run transport-signal --release ns1.example.net.; the name may then leave service.identities
 _dns.ns1.example.net.	10800	IN	SVCB	1 . oots="doq:20"
 _dns.ns1.example.net.	10800	IN	SVCB	1 . port="1234" oots="dot:10"
 ```
@@ -1165,12 +1165,33 @@ _dns.ns1.example.net.	10800	IN	SVCB	1 . port="1234" oots="dot:10"
 
 The records are exactly what synthesis writes, ports and targets included.
 Give a name (`tdns-cli auth config transport-signal ns3.example.net.`) for
-that name alone, an identity or not. Paste the records into the zone that
-holds the name. They are then provisioned: tdns-auth serves them as they
-are and synthesizes nothing there (rule 2), and the comment line says
-"provisioned ... as below". Once every name is provisioned, the names can
-leave `service.identities`. A later change to `service.transport` does not
-reach provisioned records: run the command again and replace them.
+that name alone, an identity or not.
+
+The loop is: print the records, paste them into the zone that holds the
+name, release the name, and then the name may leave `service.identities`:
+
+```
+tdns-cli auth config transport-signal --release ns1.example.net.
+```
+
+tdns-auth keeps a record of the signal it stored at each name, in its KeyDB
+so that it outlasts a restart. The pasted records are the same bytes, so
+until the release tdns-auth still takes them for its own: it would rewrite
+them when `service.transport` changes and withdraw them once the name leaves
+`service.identities`. The release drops that record. From then on the
+records are provisioned: tdns-auth serves them as they are, synthesizes
+nothing there (rule 2), never rewrites them and never withdraws them. The
+release prints the state after it, and the comment line says "provisioned
+... as below".
+
+Release only once the records are in the zone's source, its zone file. A
+signal tdns-auth no longer owns is not carried over a reload, so released
+records that are only in memory are gone at the next reload. A release with
+nothing at the name is refused, since synthesis would only start over. A
+name tdns-auth never synthesized a signal for needs no release.
+
+A later change to `service.transport` does not reach provisioned records:
+run the command again and replace them.
 
 When the zone loads, tdns-auth warns about a transport named in two records
 of one RRset (a resolver uses one endpoint per transport) and about an `oots`

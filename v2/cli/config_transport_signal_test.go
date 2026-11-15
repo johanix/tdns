@@ -66,7 +66,7 @@ func TestTransportSignalStateLines(t *testing.T) {
 		p    tdns.TransportSignalPreview
 		want string
 	}{
-		{tdns.TransportSignalPreview{Owner: "_dns.a.", Home: "z.", State: tdns.SignalStateSynthesized, Identity: true}, "synthesized in z. now"},
+		{tdns.TransportSignalPreview{Name: "a.", Owner: "_dns.a.", Home: "z.", State: tdns.SignalStateSynthesized, Identity: true}, "synthesized in z. now; paste these records into the zone, then run transport-signal --release a."},
 		{tdns.TransportSignalPreview{Owner: "_dns.a.", Home: "z.", State: tdns.SignalStateProvisioned, Matches: true, Identity: true}, "provisioned in z. as below"},
 		{tdns.TransportSignalPreview{Owner: "_dns.a.", Home: "z.", State: tdns.SignalStateProvisioned, Identity: true}, "differing from below"},
 		{tdns.TransportSignalPreview{Owner: "_dns.a.", Home: "z.", State: tdns.SignalStateNone, Identity: true}, "nothing there in z. yet"},
