@@ -2005,6 +2005,11 @@ func (imr *Imr) parseSVCBTransportSignal(rr *dns.SVCB, serverName string, server
 		imr.maybeQueryTLSA(ctx, serverName)
 		return true
 	}
+	// An oots that names no signal token: the record is ignored, and its
+	// alpn is not read in its place (hasOotsParam).
+	if hasOotsParam(rr) {
+		return false
+	}
 	for _, kv := range rr.Value {
 		if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
 			if !imr.Quiet {
@@ -2645,12 +2650,13 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 // selection; the signal itself is kept beside the weights, so that the stats
 // can show what the server said rather than what the defaults made of it.
 //
-// Every received path reaches selection through here, so the signal-token
-// filter is applied here too, whatever the caller did: a key that is not a
-// signal token (core.IsSignalToken) is dropped before it can be mapped by
-// core.StringToTransport, whose `tcp` alias would install a Do53TCP weight.
+// Every oots and TSYNC path reaches selection through here, so the
+// signal-token filter is applied here too, whatever the caller did: a key that
+// is not a signal token (core.IsSignalToken) is dropped before it can be mapped
+// by core.StringToTransport, whose `tcp` alias would install a Do53TCP weight.
 // A map with no signal token left is not applied: it is no signal, not one
-// that gets the absence defaults.
+// that gets the absence defaults. The ALPN fallback does not come through
+// here; applyAlpnSignalToServer applies the same filter itself.
 func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8) bool {
 	if server == nil || kvMap == nil {
 		return false
@@ -2709,18 +2715,23 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 	applyAlpnSignalToServer(server, alpnCSV)
 }
 
-// applyAlpnSignalToServer applies 100-weight transports from a comma-separated ALPN list to a specific server pointer
-func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
+// applyAlpnSignalToServer applies 100-weight transports from a comma-separated
+// ALPN list to a specific server pointer. A received ALPN list is a received
+// signal too, so only signal tokens count (core.IsSignalToken, after
+// lower-casing): an `alpn=tcp` or `alpn=do53-tcp` must not install a Do53TCP
+// weight through core.StringToTransport's operator aliases. Returns true if a
+// signal was applied.
+func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) bool {
 	if server == nil {
-		return
+		return false
 	}
 
 	weights := map[core.Transport]uint8{}
 	var order []string
 	tokens := strings.Split(alpnCSV, ",")
 	for _, tok := range tokens {
-		k := strings.TrimSpace(tok)
-		if k == "" {
+		k := strings.ToLower(strings.TrimSpace(tok))
+		if !core.IsSignalToken(k) {
 			continue
 		}
 		t, err := core.StringToTransport(k)
@@ -2731,7 +2742,7 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 		order = append(order, k)
 	}
 	if len(order) == 0 {
-		return
+		return false
 	}
 	var transports []core.Transport
 	for _, k := range order {
@@ -2744,6 +2755,7 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 		received.Weights[t] = w
 	}
 	server.SetTransportSignal(transports, order, weights, received)
+	return true
 }
 
 // parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section.
@@ -2789,6 +2801,11 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 					imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
 				}
 				imr.maybeQueryTLSA(ctx, server.Name)
+				continue
+			}
+			// An oots that names no signal token: ignore the record, alpn
+			// included (hasOotsParam).
+			if hasOotsParam(x) {
 				continue
 			}
 			for _, kv := range x.Value {
@@ -2853,11 +2870,14 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 					if applyTransportMapToServer(server, m) {
 						applied = true
 					}
-				} else {
+				} else if !hasOotsParam(svcb) {
+					// An oots that names no signal token ignores the
+					// record, alpn included (hasOotsParam).
 					for _, kv := range svcb.Value {
 						if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
-							applyAlpnSignalToServer(server, strings.Join(a.Alpn, ","))
-							applied = true
+							if applyAlpnSignalToServer(server, strings.Join(a.Alpn, ",")) {
+								applied = true
+							}
 							break
 						}
 					}

@@ -13,6 +13,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -449,9 +451,20 @@ func TestOOTSOnlyOtherTokensInAdditional(t *testing.T) {
 		t.Errorf("Additional holds %q, want %q", got, want)
 	}
 	var extra []dns.RR
+	signed := map[string]bool{}
 	for _, rr := range served.Extra {
 		if rr.Header().Rrtype != dns.TypeOPT {
 			extra = append(extra, rr)
+		}
+		if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeSVCB {
+			signed[strings.ToLower(sig.Hdr.Name)] = true
+		}
+	}
+	// verifySection insists on signatures for NSEC and SOA only; an SVCB in
+	// Additional that lost its RRSIG would pass it, so require one here.
+	for _, rr := range served.Extra {
+		if _, ok := rr.(*dns.SVCB); ok && !signed[strings.ToLower(rr.Header().Name)] {
+			t.Errorf("Additional SVCB %s has no RRSIG", rr.Header().Name)
 		}
 	}
 	verifySection(t, extra, keys)
@@ -470,5 +483,99 @@ func TestOOTSOnlyOtherTokensInAdditional(t *testing.T) {
 	assertNoDo53TCP(t, "ns from Additional", got)
 	if !reflect.DeepEqual(got, stateOf(want)) {
 		t.Errorf("ns from Additional: selection %+v, want do53:100,dot:50 alone: %+v", got, stateOf(want))
+	}
+}
+
+// The ALPN fallback is a received path too: alpn tokens that are not signal
+// tokens (tcp, do53-tcp, h2) are skipped, so they install no Do53TCP weight,
+// and an ALPN list naming none is not applied. Case does not matter.
+func TestReceivedALPNSignalIgnoresOtherTokens(t *testing.T) {
+	run := func(alpn string) signalState {
+		s := cache.NewAuthServer(ootsTestNS)
+		applyAlpnSignalToServer(s, alpn)
+		return stateOf(s)
+	}
+	base := run("dot,doq")
+	if base.Source != "alpn" || base.Weights[core.TransportDoT] != 100 {
+		t.Fatalf("the plain ALPN signal was not applied: %+v", base)
+	}
+	for _, alpn := range []string{"dot,tcp,doq", "do53-tcp,dot,doq,h2", "DoT,DoQ", "dot, TCP ,doq"} {
+		got := run(alpn)
+		assertNoDo53TCP(t, "alpn "+alpn, got)
+		if !reflect.DeepEqual(got, base) {
+			t.Errorf("alpn %q: selection %+v, want the same as dot,doq: %+v", alpn, got, base)
+		}
+	}
+	if got := run("tcp,do53-tcp,h2"); got.Source != "" || len(got.Weights) != 0 {
+		t.Errorf("an ALPN list naming no signal token was applied: %+v", got)
+	}
+}
+
+// config check refuses the signal too (ValidateConfig), and the message names
+// the signal tokens from the filter's own set.
+func TestValidateConfigRefusesOtherTokensInSignal(t *testing.T) {
+	cfg := writeCfg(t, "service:\n   transport:\n      type: svcb\n      signal: \"dot:10,tcp:30\"\n")
+	err := ValidateConfig(nil, cfg)
+	if err == nil || !strings.Contains(err.Error(), "service.transport.signal") || !strings.Contains(err.Error(), "tcp") {
+		t.Fatalf("ValidateConfig = %v, want a service.transport.signal error naming tcp", err)
+	}
+	if !strings.Contains(err.Error(), "do53, doh, doq, dot") {
+		t.Errorf("ValidateConfig = %v, want the signal tokens named from the filter's set", err)
+	}
+}
+
+// An SVCB whose oots names no signal token is ignored whole: its alpn is not
+// read in place of the oots, on any of the three paths an SVCB arrives by
+// (direct answer, Additional, an answer RRset). An oots has always taken
+// precedence over alpn in the same record. A record without oots still gets
+// the alpn fallback.
+func TestOOTSWithoutSignalTokenIgnoresALPN(t *testing.T) {
+	ctx := context.Background()
+	newImr := func() *Imr {
+		return &Imr{Cache: cache.NewRRsetCache(log.New(os.Stderr, "test ", 0), false, false), Quiet: true}
+	}
+	paths := []struct {
+		name  string
+		apply func(*Imr, *cache.AuthServer, *dns.SVCB)
+	}{
+		{"answer", func(imr *Imr, s *cache.AuthServer, rr *dns.SVCB) {
+			imr.parseSVCBTransportSignal(rr, ootsTestNS, map[string]*cache.AuthServer{cache.ServerKey(ootsTestNS): s}, ctx)
+		}},
+		{"additional", func(imr *Imr, s *cache.AuthServer, rr *dns.SVCB) {
+			r := new(dns.Msg)
+			r.SetQuestion("www.example.", dns.TypeA)
+			r.Extra = []dns.RR{rr}
+			imr.parseTransportForServerFromAdditional(ctx, s, r)
+		}},
+		{"rrset", func(imr *Imr, s *cache.AuthServer, rr *dns.SVCB) {
+			imr.Cache.ServerMap.Set("example.", map[string]*cache.AuthServer{cache.ServerKey(ootsTestNS): s})
+			imr.applyTransportRRsetFromAnswer("_dns."+ootsTestNS,
+				&core.RRset{Name: "_dns." + ootsTestNS, RRtype: dns.TypeSVCB, RRs: []dns.RR{rr}},
+				cache.ValidationStateInsecure)
+		}},
+	}
+	svcb := func(params string) *dns.SVCB {
+		return mustSVCB(t, fmt.Sprintf("_dns.%s 10800 IN SVCB 1 . %s", ootsTestNS, params)).(*dns.SVCB)
+	}
+	for _, path := range paths {
+		for _, params := range []string{`alpn="dot" oots="tcp:30"`, `alpn="tcp" oots="tcp:30,udp:100"`} {
+			imr := newImr()
+			s := cache.NewAuthServer(ootsTestNS)
+			applyTransportMapToServer(s, map[string]uint8{"do53": 100, "doq": 40})
+			before := stateOf(s)
+			path.apply(imr, s, svcb(params))
+			got := stateOf(s)
+			assertNoDo53TCP(t, path.name+" "+params, got)
+			if !reflect.DeepEqual(got, before) {
+				t.Errorf("%s %s: the server's signal changed to %+v, want it kept: %+v", path.name, params, got, before)
+			}
+		}
+		// Without oots the alpn fallback still applies.
+		imr := newImr()
+		s := cache.NewAuthServer(ootsTestNS)
+		path.apply(imr, s, svcb(`alpn="dot"`))
+		if got := stateOf(s); got.Source != "alpn" || got.Weights[core.TransportDoT] != 100 {
+			t.Errorf("%s: an alpn-only record was not applied: %+v", path.name, got)
+		}
 	}
 }

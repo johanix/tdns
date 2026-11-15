@@ -85,6 +85,26 @@ func GetTransportParamRaw(svcb *dns.SVCB) (map[string]uint8, bool, error) {
 	return nil, false, nil
 }
 
+// hasOotsParam reports whether svcb carries an oots SvcParam at all, whether
+// or not it names a signal token. A record with oots is an OOTS signal, and
+// its oots takes precedence over its alpn, as it always has: when the oots
+// names nothing selection acts on (GetTransportParamRaw reports it absent),
+// the record is ignored whole, and its alpn is not read in its place. Ignoring
+// a record it cannot honor, rather than applying something else from it, is
+// what a resolver must do before new tokens are published (tdns #1043,
+// section 8).
+func hasOotsParam(svcb *dns.SVCB) bool {
+	if svcb == nil {
+		return false
+	}
+	for _, kv := range svcb.Value {
+		if _, ok := kv.(*dns.SVCBOots); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // svcbOotsToRawMap converts a parsed SVCBOots value into a weight map of the
 // signal tokens it names, weights clamped to 100. It is the only reader of
 // SVCBOots.Oots. The dns codec keeps every entry, known or not, and the weight

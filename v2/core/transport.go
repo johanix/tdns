@@ -145,8 +145,19 @@ func ValidatePublishedTransportSignal(s string) error {
 	}
 	if len(bad) > 0 {
 		sort.Strings(bad)
-		return fmt.Errorf("transport: %s not publishable (only do53, dot, doh and doq until the token split)",
-			strings.Join(bad, ", "))
+		return fmt.Errorf("transport: %s not publishable (only %s until the token split)",
+			strings.Join(bad, ", "), signalTokenList())
 	}
 	return nil
+}
+
+// signalTokenList names the signal tokens, sorted, for messages: built from
+// signalTokens so that a message cannot name another set than the filter uses.
+func signalTokenList() string {
+	toks := make([]string, 0, len(signalTokens))
+	for k := range signalTokens {
+		toks = append(toks, k)
+	}
+	sort.Strings(toks)
+	return strings.Join(toks, ", ")
 }
