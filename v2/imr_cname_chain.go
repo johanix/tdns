@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
@@ -111,6 +112,65 @@ func (imr *Imr) cachedLink(qname string, privacy edns0.PrivacyLevel) (*cache.Cac
 	return link, target, true
 }
 
+// chainRecorderKey carries, on the context of one ImrQuery, the recorder of
+// the CNAME chain the lookup follows from its question (withChainRecorder).
+type chainRecorderKey struct{}
+
+// chainRecorder is the CNAME chain one lookup followed from its question: the
+// name the chain has reached, and the earliest expiration among the links
+// that led there. The response carries it (ImrResponse.ChainExpiration), so a
+// caller that keeps an answer reached through the chain need not read the
+// chain from the cache again, where it may since have changed.
+type chainRecorder struct {
+	mu       sync.Mutex
+	last     string // canonical name the chain has reached; the question to begin with
+	earliest time.Time
+}
+
+// withChainRecorder returns ctx with a new recorder for the chain followed
+// from qname. A lookup nested in this one (an ImrQuery of its own) gets its
+// own recorder.
+func withChainRecorder(ctx context.Context, qname string) (context.Context, *chainRecorder) {
+	rec := &chainRecorder{last: core.CanonicalizeName(qname)}
+	return context.WithValue(ctx, chainRecorderKey{}, rec), rec
+}
+
+// recordChainLink records the link owner -> target, live until expire, on the
+// recorder ctx carries, when it continues the chain from the question: owner
+// is the name the chain has reached. A CNAME met on another lookup made along
+// the way (a nameserver's address, say) starts from another name and is not
+// part of it.
+func recordChainLink(ctx context.Context, owner, target string, expire time.Time) {
+	rec, _ := ctx.Value(chainRecorderKey{}).(*chainRecorder)
+	if rec == nil {
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.last != core.CanonicalizeName(owner) {
+		return
+	}
+	rec.last = core.CanonicalizeName(target)
+	if rec.earliest.IsZero() || expire.Before(rec.earliest) {
+		rec.earliest = expire
+	}
+}
+
+// expiryTo is the earliest expiration among the links recorded, when the
+// chain reached name; the zero time when it did not, or no link was recorded:
+// an answer owned by name was not reached through this chain.
+func (rec *chainRecorder) expiryTo(name string) time.Time {
+	if rec == nil {
+		return time.Time{}
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.last != core.CanonicalizeName(name) {
+		return time.Time{}
+	}
+	return rec.earliest
+}
+
 // cnameTarget returns the target of the CNAME in rrset, if it holds one.
 func cnameTarget(rrset *core.RRset) (string, bool) {
 	if rrset == nil {
@@ -185,7 +245,7 @@ func synthesizeFromDNAME(qname, owner, target string) string {
 
 // cacheCNAMELink validates the CNAME that qname owns in r, caches it as an
 // RRset of its own with its RRSIGs and its verdict, and returns the target the
-// chain goes on to.
+// chain goes on to and when the link it cached expires.
 //
 // A CNAME synthesized from a DNAME is unsigned: the DNAME carries the RRSIG
 // (RFC 6672 §5.3.1). So the DNAME is validated and cached instead, and the
@@ -196,7 +256,7 @@ func synthesizeFromDNAME(qname, owner, target string) string {
 // The link is validated with qname on the context as a link being validated
 // (cnameValidationKey): the resolver's own DS or DNSKEY question at qname,
 // asked by that validation, is answered without being sent.
-func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn *dns.CNAME, transport core.Transport) (string, error) {
+func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn *dns.CNAME, transport core.Transport) (string, time.Time, error) {
 	ctx = withCNAMEValidation(ctx, qname)
 	now := cache.Now()
 	link := &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: dns.TypeCNAME}
@@ -209,7 +269,7 @@ func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn
 		d := dname.RRs[0].(*dns.DNAME)
 		v, err := imr.Cache.ValidateAnswer(ctx, dname, authority, imr.IterativeDNSQueryFetcher())
 		if err != nil {
-			return "", fmt.Errorf("DNAME %s: %w", dname.Name, err)
+			return "", time.Time{}, fmt.Errorf("DNAME %s: %w", dname.Name, err)
 		}
 		imr.Cache.Set(dname.Name, dns.TypeDNAME, &cache.CachedRRset{
 			Name: dname.Name, RRtype: dns.TypeDNAME, Rcode: uint8(dns.RcodeSuccess), RRset: dname,
@@ -232,19 +292,20 @@ func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn
 		link.RRSIGs = sigsFor(r.Answer, qname, dns.TypeCNAME)
 		v, err := imr.Cache.ValidateAnswer(ctx, link, authority, imr.IterativeDNSQueryFetcher())
 		if err != nil {
-			return "", fmt.Errorf("CNAME %s: %w", qname, err)
+			return "", time.Time{}, fmt.Errorf("CNAME %s: %w", qname, err)
 		}
 		verdict = v
 	}
+	expire := now.Add(cache.GetMinTTL(link.RRs))
 	imr.Cache.Set(qname, dns.TypeCNAME, &cache.CachedRRset{
 		Name: qname, RRtype: dns.TypeCNAME, Rcode: uint8(dns.RcodeSuccess), RRset: link,
 		Context: cache.ContextAnswer, State: verdict.State, EDECode: verdict.EDECode, EDEText: verdict.EDEText,
 		WildcardProof: verdict.Proof,
-		Expiration:    now.Add(cache.GetMinTTL(link.RRs)), Transport: transport,
+		Expiration:    expire, Transport: transport,
 		SynthesizedFrom: synthesizedFrom,
 	})
 	target, _ := cnameTarget(link)
-	return target, nil
+	return target, expire, nil
 }
 
 // answerViaCNAME handles an answer in which qname is a CNAME: it caches the
@@ -253,11 +314,12 @@ func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn
 // for a denial. The responder builds the client's answer from the cached
 // links (serveChain); internal callers want the data at the end.
 func (imr *Imr) answerViaCNAME(ctx context.Context, qname string, qtype uint16, r *dns.Msg, cn *dns.CNAME, force bool, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
-	target, err := imr.cacheCNAMELink(ctx, qname, r, cn, transport)
+	target, expire, err := imr.cacheCNAMELink(ctx, qname, r, cn, transport)
 	if err != nil {
 		lgDns.Error("handleAnswer: failed to validate a CNAME link", "qname", qname, "err", err)
 		return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err, false
 	}
+	recordChainLink(ctx, qname, target, expire)
 	final, rcode, context, chaseTransport, err := imr.chaseCNAME(ctx, qname, target, qtype, force, privacy)
 	if err != nil {
 		return nil, rcode, context, transport, err, true
@@ -280,7 +342,7 @@ func (imr *Imr) answerViaCNAME(ctx context.Context, qname string, qtype uint16, 
 // cached, the next question did the same (#875). The next question is now
 // answered from the link (IterativeDNSQueryWithLoopDetection).
 func (imr *Imr) cnameAsNoData(ctx context.Context, qname string, qtype uint16, r *dns.Msg, cn *dns.CNAME, transport core.Transport) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
-	if _, err := imr.cacheCNAMELink(ctx, qname, r, cn, transport); err != nil {
+	if _, _, err := imr.cacheCNAMELink(ctx, qname, r, cn, transport); err != nil {
 		lgDns.Error("handleAnswer: failed to validate a CNAME link", "qname", qname, "err", err)
 		return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err, false
 	}

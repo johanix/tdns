@@ -546,19 +546,14 @@ func TestEndpointAddrTrackerPrunes(t *testing.T) {
 }
 
 // Addresses found through a CNAME chain are kept no longer than the chain's
-// first link to run out; when the chain is no longer cached whole, not at all.
+// first link to run out, as the lookup carried it with its answer
+// (ImrResponse.ChainExpiration); when it carried none, not at all.
 func TestEndpointAddrsExpireWithTheChain(t *testing.T) {
 	imr := newTestImr(t)
 	const alias, final = "dot-alias." + stateZone, "dot-host.example.net."
-	put := func(name string, rr dns.RR, ttl time.Duration) *core.RRset {
-		rrset := &core.RRset{Name: name, Class: dns.ClassINET, RRtype: rr.Header().Rrtype, RRs: []dns.RR{rr}}
-		imr.Cache.Set(name, rr.Header().Rrtype, &cache.CachedRRset{Name: name, RRtype: rr.Header().Rrtype,
-			Context: cache.ContextAnswer, RRset: rrset, Ttl: uint32(ttl / time.Second), Expiration: time.Now().Add(ttl)})
-		return rrset
-	}
-	put(alias, mustRR(t, alias+` 60 IN CNAME `+final), time.Minute)
-	addrs := put(final, mustRR(t, final+` 3600 IN A 192.0.2.53`), time.Hour)
-	resp := &ImrResponse{RRset: addrs}
+	addrs := &core.RRset{Name: final, Class: dns.ClassINET, RRtype: dns.TypeA,
+		RRs: []dns.RR{mustRR(t, final+` 3600 IN A 192.0.2.53`)}}
+	resp := &ImrResponse{RRset: addrs, Expiration: time.Now().Add(time.Hour), ChainExpiration: time.Now().Add(time.Minute)}
 
 	exp := imr.addrsExpiry(alias, dns.TypeA, resp)
 	if exp.After(time.Now().Add(time.Minute)) || exp.Before(time.Now().Add(50*time.Second)) {
@@ -567,18 +562,68 @@ func TestEndpointAddrsExpireWithTheChain(t *testing.T) {
 	if exp := imr.addrsExpiry(final, dns.TypeA, resp); exp.Before(time.Now().Add(59 * time.Minute)) {
 		t.Errorf("no chain: expires in %v, want the address TTL", time.Until(exp))
 	}
-	if exp := imr.addrsExpiry("gone."+stateZone, dns.TypeA, resp); exp.After(time.Now()) {
-		t.Errorf("chain not cached: expires in %v, want now", time.Until(exp))
+	if got, _ := imr.endpointAddrsOf(alias, dns.TypeA, resp, time.Now()); len(got) != 1 {
+		t.Errorf("chain expiry carried: kept %v, want the address", got)
 	}
 
-	// The lookup found the address through a short-lived link that has left
-	// the cache before its lifetime was read: the address is not kept.
-	if got, _ := imr.endpointAddrsOf(alias, dns.TypeA, resp, time.Now()); len(got) != 1 {
-		t.Errorf("chain cached: kept %v, want the address", got)
+	// An answer reached through a chain the lookup carried no expiry for: the
+	// address is not kept.
+	unknown := &ImrResponse{RRset: addrs, Expiration: time.Now().Add(time.Hour)}
+	if exp := imr.addrsExpiry(alias, dns.TypeA, unknown); !exp.IsZero() {
+		t.Errorf("chain expiry unknown: expires in %v, want the zero time", time.Until(exp))
 	}
-	const short = "short-alias." + stateZone
-	if got, exp := imr.endpointAddrsOf(short, dns.TypeA, resp, time.Now()); len(got) != 0 {
-		t.Errorf("link gone: kept %v until %v, want nothing", got, exp)
+	if got, exp := imr.endpointAddrsOf(alias, dns.TypeA, unknown, time.Now()); len(got) != 0 {
+		t.Errorf("chain expiry unknown: kept %v until %v, want nothing", got, exp)
+	}
+}
+
+// ImrQuery carries the expiry of the chain it followed with its answer: the
+// earliest link's, on the wire path and from the cache. Once the lookup has
+// returned, a link that changes target does not change it: the address the old
+// chain led to is kept no longer than the old link (CodeRabbit on #1055: the
+// expiry read back from the cache after the lookup could be the new chain's).
+func TestImrQueryCarriesTheChainExpiry(t *testing.T) {
+	imr, _ := sigChainImr(t)
+	ctx := context.Background()
+
+	// The wire path: s1 -> s2 -> s3 A, every record 300 s.
+	resp, err := imr.ImrQuery(ctx, "s1."+sigChainZone, dns.TypeA, dns.ClassINET, nil)
+	if err != nil || resp == nil || resp.RRset == nil {
+		t.Fatalf("s1 A: %v, %v", resp, err)
+	}
+	if left := time.Until(resp.ChainExpiration); left <= 0 || left > 300*time.Second {
+		t.Errorf("s1 A over the wire: chain expires in %v, want within the links' 300 s", left)
+	}
+	// Asked for the data's own name, no chain is followed.
+	if direct, err := imr.ImrQuery(ctx, "s3."+sigChainZone, dns.TypeA, dns.ClassINET, nil); err != nil || direct == nil || !direct.ChainExpiration.IsZero() {
+		t.Errorf("s3 A: chain expiry %v, err %v; want none", direct.ChainExpiration, err)
+	}
+
+	// The cache path: c1 -> c2 A, the link for a minute, the data for an hour.
+	c1, c2, c3 := "c1."+sigChainZone, "c2."+sigChainZone, "c3."+sigChainZone
+	put := func(name string, rr dns.RR, ttl time.Duration) {
+		imr.Cache.Set(name, rr.Header().Rrtype, &cache.CachedRRset{Name: name, RRtype: rr.Header().Rrtype,
+			Context: cache.ContextAnswer, State: cache.ValidationStateSecure, Ttl: uint32(ttl / time.Second),
+			Expiration: time.Now().Add(ttl), RRset: &core.RRset{Name: name, Class: dns.ClassINET,
+				RRtype: rr.Header().Rrtype, RRs: []dns.RR{rr}}})
+	}
+	put(c1, mustRR(t, c1+` 60 IN CNAME `+c2), time.Minute)
+	put(c2, mustRR(t, c2+` 3600 IN A 192.0.2.62`), time.Hour)
+	resp, err = imr.ImrQuery(ctx, c1, dns.TypeA, dns.ClassINET, nil)
+	if err != nil || resp == nil || resp.RRset == nil || !core.EqualNames(resp.RRset.Name, c2) {
+		t.Fatalf("c1 A: %v, %v", resp, err)
+	}
+	if left := time.Until(resp.ChainExpiration); left <= 50*time.Second || left > time.Minute {
+		t.Errorf("c1 A from the cache: chain expires in %v, want the link's minute", left)
+	}
+
+	// The link now leads elsewhere, for an hour. The address c1 led to still
+	// runs out with the old link.
+	put(c1, mustRR(t, c1+` 3600 IN CNAME `+c3), time.Hour)
+	put(c3, mustRR(t, c3+` 3600 IN A 192.0.2.63`), time.Hour)
+	exp := imr.addrsExpiry(c1, dns.TypeA, resp)
+	if left := time.Until(exp); left <= 50*time.Second || left > time.Minute {
+		t.Errorf("after the link changed target: the old address expires in %v, want the old link's minute", left)
 	}
 }
 

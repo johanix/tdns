@@ -13,7 +13,6 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -369,7 +368,7 @@ func (imr *Imr) startEndpointLookup(target string) {
 // any nameserver name, through the servers' default endpoints. An answer held
 // Bogus is not used; Insecure is, as a nameserver's address is (section 4).
 // It returns the addresses and when the first of their records expires, the
-// links of a CNAME chain included (chainExpiry).
+// links of a CNAME chain included (addrsExpiry).
 func (imr *Imr) lookupEndpointAddrs(target string) ([]string, time.Time) {
 	ctx, cancel := detachedContext(5 * time.Second)
 	defer cancel()
@@ -395,8 +394,9 @@ func (imr *Imr) lookupEndpointAddrs(target string) ([]string, time.Time) {
 
 // endpointAddrsOf returns the addresses resp carries for <target, qtype> and
 // when they run out (addrsExpiry). It returns none when that is already past,
-// as it is when a link of the CNAME chain that led to them has left the cache:
-// an address is kept only while every record that led to it is.
+// or not known, as for an answer reached through a CNAME chain the lookup
+// carried no expiry for: an address is kept only while every record that led
+// to it is.
 func (imr *Imr) endpointAddrsOf(target string, qtype uint16, resp *ImrResponse, now time.Time) ([]string, time.Time) {
 	var addrs []string
 	for _, rr := range resp.RRset.RRs {
@@ -419,38 +419,20 @@ func (imr *Imr) endpointAddrsOf(target string, qtype uint16, resp *ImrResponse, 
 
 // addrsExpiry is when the addresses resp carries for <target, qtype> run out:
 // the expiration of the cache entry that holds them, or their TTL from now
-// when that is not known, and no later than the first link of the CNAME chain
-// that led to them, when one did. The zero time when that chain's lifetime is
-// not known.
+// when that is not known, and, when a CNAME chain led to them, no later than
+// its first link to run out (ImrResponse.ChainExpiration): a link that changes
+// may lead elsewhere. The lookup carries the chain's expiry with its answer,
+// so a link that changed or left the cache since does not count. The zero
+// time when the chain's expiry is not known.
 func (imr *Imr) addrsExpiry(target string, qtype uint16, resp *ImrResponse) time.Time {
 	exp := resp.Expiration
 	if exp.IsZero() {
 		exp = time.Now().Add(cache.GetMinTTL(resp.RRset.RRs))
 	}
 	if !core.EqualNames(resp.RRset.Name, target) {
-		if link := imr.chainExpiry(target, qtype); link.Before(exp) {
+		if link := resp.ChainExpiration; link.Before(exp) {
 			exp = link
 		}
 	}
 	return exp
-}
-
-// chainExpiry is when the first link of the CNAME chain from name to its
-// <qtype> data runs out, read from the cache the lookup just filled. An
-// address found through the chain is kept no longer than that: a link that
-// changes may lead elsewhere. A chain the cache no longer holds whole has an
-// unknown lifetime, given as the zero time: a link that left the cache may
-// already have expired.
-func (imr *Imr) chainExpiry(name string, qtype uint16) time.Time {
-	links, final, _, err := imr.chainAt(name, qtype, edns0.PrivacyNone, imr.freshChainGrace())
-	if err != nil || final == nil || len(links) == 0 {
-		return time.Time{}
-	}
-	first := links[0].Expiration
-	for _, l := range links[1:] {
-		if l.Expiration.Before(first) {
-			first = l.Expiration
-		}
-	}
-	return first
 }
