@@ -864,24 +864,25 @@ func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
 
 // signalIsAboutThisServer decides whether the signal at an NS name's owner is
 // injected: a server speaks only about itself and never asks anyone
-// (docs/2026-10-04-transport-signal-publication-and-serving.md). A stored
-// ServiceMode signal, a co-hosted zone's signal and the synthesized fallback
-// exist only because the pass found the name to be this server's, so they
-// are. An operator alias is the operator's statement and is injected only
-// when the server can know it is about itself: it holds the target's signal
-// (a co-hosted zone's, or its own fallback), which is injected with it, or the
-// NS name's own addresses in this zone are its listeners (the alias goes
-// alone; the resolver chases it).
+// (docs/2026-10-04-transport-signal-publication-and-serving.md). The pass
+// leaves an operator's RRset at _dns.<ns> alone whatever its mode (design
+// 2026-11-14 section 5), so a stored ServiceMode RRset is no longer the
+// pass's word that the name is this server's; the name is tested instead
+// (nsNameIsThisServer). That holds for the pass's own signal and for the
+// fallback, which exist only because the pass found the name to be this
+// server's. An operator ServiceMode RRset for another name, with a target or
+// without, still answers a direct query and is not injected.
+//
+// An operator alias is injected when the name is this server's (the alias
+// goes alone; the resolver chases it), or when the server holds the target's
+// signal (a co-hosted zone's, or its own fallback), which is injected with it.
 func (zd *ZoneData) signalIsAboutThisServer(snap *zoneSnapshot, nsName, owner string) bool {
 	rrsets := zd.lookupSignalRRsets(snap, owner)
-	alias := false
-	for _, rs := range rrsets {
-		if svcbHasAlias(rs) {
-			alias = true
-		}
+	if len(rrsets) == 0 {
+		return false
 	}
-	if !alias {
-		return len(rrsets) > 0
+	if zd.nsNameIsThisServer(snap, nsName) {
+		return true
 	}
 	for _, rs := range rrsets {
 		for _, tgt := range signalChaseTargets(rs) {
@@ -892,14 +893,30 @@ func (zd *ZoneData) signalIsAboutThisServer(snap *zoneSnapshot, nsName, owner st
 			}
 		}
 	}
-	if od := getOwnerFrom(snap, nsName); od != nil {
-		a := od.RRtypes.GetOnlyRRSet(dns.TypeA)
-		aaaa := od.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
-		if matchesConfiguredAddrs(Conf.Listeners.Addresses, &a) || matchesConfiguredAddrs(Conf.Listeners.Addresses, &aaaa) {
-			return true
-		}
-	}
 	return false
+}
+
+// nsNameIsThisServer reports whether a nameserver name is this server's own:
+// one of its configured identities, or a name whose A or AAAA records, read
+// from the name's home, are this server's listener addresses. The home is
+// the pinned snapshot for a name in this zone, and a co-hosted zone's
+// current snapshot otherwise. Nothing is looked up recursively.
+func (zd *ZoneData) nsNameIsThisServer(snap *zoneSnapshot, nsName string) bool {
+	if CaseFoldContains(Conf.Service.Identities, nsName) {
+		return true
+	}
+	var od *OwnerData
+	if dns.IsSubDomain(zd.ZoneName, nsName) {
+		od = getOwnerFrom(snap, nsName)
+	} else if tz := FindZone(nsName); tz != nil && tz != zd {
+		od = getOwnerFrom(tz.publishedSnapshot(), nsName)
+	}
+	if od == nil {
+		return false
+	}
+	a := od.RRtypes.GetOnlyRRSet(dns.TypeA)
+	aaaa := od.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
+	return matchesConfiguredAddrs(Conf.Listeners.Addresses, &a) || matchesConfiguredAddrs(Conf.Listeners.Addresses, &aaaa)
 }
 
 // lookupSignalRRsets returns the SVCB/TSYNC RRsets stored at a transport-signal
@@ -949,14 +966,17 @@ func signalRRsetsFromOwner(od *OwnerData) []core.RRset {
 	return out
 }
 
-// signalChaseTargets returns the alias/target hostnames referenced by a signal
-// RRset (SVCB AliasMode Target, TSYNC Alias), for injection-time chasing.
+// signalChaseTargets returns the alias targets referenced by a signal RRset
+// (SVCB AliasMode Target, TSYNC Alias), for injection-time chasing. Only
+// AliasMode records (SvcPriority 0) are chased: the TargetName of a
+// ServiceMode record is an endpoint host, whose addresses the resolver looks
+// up, not a signal.
 func signalChaseTargets(rs core.RRset) []string {
 	var out []string
 	for _, rr := range rs.RRs {
 		switch r := rr.(type) {
 		case *dns.SVCB:
-			if r.Target != "." && r.Target != "" {
+			if r.Priority == 0 && r.Target != "." && r.Target != "" {
 				out = append(out, r.Target)
 			}
 		case *dns.PrivateRR:

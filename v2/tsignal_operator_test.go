@@ -1,0 +1,300 @@
+package tdns
+
+import (
+	"log"
+	"log/slog"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
+)
+
+// The operator-authored transport signal (design 2026-11-14, section 5; plan
+// step S2): the start-up pass leaves an operator's _dns.<ns> RRset alone
+// whatever its mode, injection tests the name, only AliasMode records are
+// chased, and the zone loader warns about what a resolver will read
+// differently from what the operator wrote.
+
+func captureSignalLog(t *testing.T) *syncBuffer {
+	t.Helper()
+	var logs syncBuffer
+	prev := lgDns
+	lgDns = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { lgDns = prev })
+	return &logs
+}
+
+func mustRRs(t *testing.T, lines ...string) []dns.RR {
+	t.Helper()
+	var out []dns.RR
+	for _, l := range lines {
+		rr, err := dns.NewRR(l)
+		if err != nil {
+			t.Fatalf("%s: %v", l, err)
+		}
+		out = append(out, rr)
+	}
+	return out
+}
+
+// An operator's ServiceMode RRset at an NS name that is this server's
+// survives the start-up pass as written, with a target and without one, and
+// the pass says it left it alone. The configuration still gives the server's
+// other name its signal: the walk goes on.
+func TestAnOperatorServiceModeRRsetSurvivesTheSignalPass(t *testing.T) {
+	cases := []struct {
+		name, zone string
+		records    []string
+	}{
+		{"without a target", "svc.sig.example.", []string{
+			`_dns.ns1.svc.sig.example. 300 IN SVCB 1 . oots="dot:30"`,
+		}},
+		{"with a target", "tgt.sig.example.", []string{
+			`_dns.ns1.tgt.sig.example. 300 IN SVCB 1 dot.provider.example. oots="dot:30" port=1234`,
+			`_dns.ns1.tgt.sig.example. 300 IN SVCB 1 . oots="doq:10"`,
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			z := c.zone
+			logs := captureSignalLog(t)
+			zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+`+z+`	3600	IN	NS	ns2.`+z+`
+ns1.`+z+`	3600	IN	A	127.0.0.1
+ns2.`+z+`	3600	IN	A	127.0.0.1
+`+strings.Join(c.records, "\n")+"\n", "127.0.0.1:53")
+			conf.Service.Transport.Signal = "dot:50"
+			if err := zd.CreateTransportSignalRRs(conf); err != nil {
+				t.Fatal(err)
+			}
+			want := mustRRs(t, c.records...)
+			if got := svcbRecords(zd, "_dns.ns1."+z); !sameRecords(got, want) {
+				t.Fatalf("the operator's RRset was not left alone:\n got %v\nwant %v", got, want)
+			}
+			if !strings.Contains(logs.String(), "leaving the operator's SVCB RRset alone") {
+				t.Fatalf("the pass did not say it left the operator's RRset alone:\n%s", logs.String())
+			}
+			own := svcbRecords(zd, "_dns.ns2."+z)
+			if len(own) != 1 || !strings.Contains(own[0].String(), "dot:50") {
+				t.Fatalf("the server's other name did not get the configured signal: %v", own)
+			}
+		})
+	}
+}
+
+// The pass's own stored signal is zone content too, so a later run must not
+// take it for an operator's: a run after the configuration changed rewrites
+// it. A signal identical to what the configuration gives, as one that came
+// back as content after a restart, counts as the pass's own and is not
+// reported as the operator's.
+func TestTheSignalPassTellsItsOwnSignalFromTheOperators(t *testing.T) {
+	const z = "rerun.sig.example."
+	logs := captureSignalLog(t)
+	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+ns1.`+z+`	3600	IN	A	127.0.0.1
+`, "127.0.0.1:53")
+	conf.Service.Transport.Signal = "dot:50"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	conf.Service.Transport.Signal = "dot:20"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	got := svcbRecords(zd, "_dns.ns1."+z)
+	if len(got) != 1 || !strings.Contains(got[0].String(), "dot:20") {
+		t.Fatalf("the second run took the pass's own signal for the operator's: %v", got)
+	}
+	if strings.Contains(logs.String(), "leaving the operator's") {
+		t.Fatalf("the pass's own signal was reported as the operator's:\n%s", logs.String())
+	}
+
+	// As after a restart: the zone holds exactly what the configuration
+	// gives, and this process never stored it.
+	const z2 = "restart.sig.example."
+	logs2 := captureSignalLog(t)
+	// What the configuration gives, written into the zone as content. The
+	// server SVCB signalTestZone sets is in place here (zd's).
+	fresh, err := zd.buildServerSVCB(conf, "ns1."+z2, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, rr := range fresh.RRs {
+		lines = append(lines, rr.String())
+	}
+	zd2, conf2 := signalTestZone(t, z2, z2+`	3600	IN	NS	ns1.`+z2+`
+ns1.`+z2+`	3600	IN	A	127.0.0.1
+`+strings.Join(lines, "\n")+"\n", "127.0.0.1:53")
+	conf2.Service.Transport.Signal = conf.Service.Transport.Signal
+	if err := zd2.CreateTransportSignalRRs(conf2); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logs2.String(), "leaving the operator's") {
+		t.Fatalf("a signal identical to the configuration's was reported as the operator's:\n%s", logs2.String())
+	}
+	if !zd2.signalStoredByPass("_dns.ns1."+z2, svcbRecords(zd2, "_dns.ns1."+z2)) {
+		t.Fatal("the pass did not take the signal back as its own")
+	}
+}
+
+// A refresh carries over the signal the pass stored, and only that: an
+// operator's RRset at _dns.<ns> comes with the fresh data, and an old copy
+// carried over would be merged back over the operator's edit.
+func TestARefreshCarriesOnlyThePassOwnSignal(t *testing.T) {
+	const z = "carry.sig.example."
+	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+`+z+`	3600	IN	NS	ns2.`+z+`
+ns1.`+z+`	3600	IN	A	127.0.0.1
+ns2.`+z+`	3600	IN	A	127.0.0.1
+_dns.ns1.`+z+`	300	IN	SVCB	1 . oots="dot:30"
+`, "127.0.0.1:53")
+	conf.Service.Transport.Signal = "dot:50"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	zd.KeyDB = newTestKeyDB(t) // CollectDynamicRRs collects nothing without one
+	carried := map[string]bool{}
+	for _, rs := range zd.CollectDynamicRRs(conf) {
+		if rs.RRtype == dns.TypeSVCB {
+			carried[core.CanonicalizeName(rs.Name)] = true
+		}
+	}
+	if !carried["_dns.ns2."+z] {
+		t.Fatal("the pass's own stored signal is not carried across a refresh")
+	}
+	if carried["_dns.ns1."+z] {
+		t.Fatal("the operator's RRset is carried across a refresh, over the fresh data")
+	}
+}
+
+// Injection tests the name: an operator's ServiceMode RRset is injected when
+// the NS name is this server's (its addresses are the listeners, or it is
+// one of the server's identities), and otherwise only answers a direct
+// query.
+func TestAnOperatorServiceModeRRsetIsInjectedOnlyForThisServersName(t *testing.T) {
+	const z = "theirs-svc.sig.example."
+	zd, _ := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+ns1.`+z+`	3600	IN	A	192.0.2.1
+_dns.ns1.`+z+`	300	IN	SVCB	1 . oots="dot:30"
+_dns.ns1.`+z+`	300	IN	SVCB	1 dot.elsewhere.example. oots="doq:30"
+`, "127.0.0.1:53")
+	if got := zd.collectSignalRRsets(zd.publishedSnapshot()); len(got) != 0 {
+		t.Fatalf("an operator ServiceMode RRset for a name that is not this server's was injected: %d", len(got))
+	}
+	if !served(zd, "_dns.ns1."+z, dns.TypeSVCB) {
+		t.Fatal("the operator's RRset is zone content and must still answer a direct query")
+	}
+
+	const z2 = "ours-svc.sig.example."
+	zd2, _ := signalTestZone(t, z2, z2+`	3600	IN	NS	ns1.`+z2+`
+ns1.`+z2+`	3600	IN	A	127.0.0.1
+_dns.ns1.`+z2+`	300	IN	SVCB	1 dot.elsewhere.example. oots="dot:30"
+`, "127.0.0.1:53")
+	if got := zd2.collectSignalRRsets(zd2.publishedSnapshot()); len(got) != 1 {
+		t.Fatalf("an operator ServiceMode RRset with a target at this server's name was not injected: %d", len(got))
+	}
+
+	const z3 = "ident-svc.sig.example."
+	zd3, _ := signalTestZone(t, z3, z3+`	3600	IN	NS	ns1.`+z3+`
+ns1.`+z3+`	3600	IN	A	192.0.2.1
+_dns.ns1.`+z3+`	300	IN	SVCB	1 . oots="dot:30"
+`, "127.0.0.1:53")
+	prev := Conf.Service.Identities
+	Conf.Service.Identities = []string{"ns1." + z3}
+	t.Cleanup(func() { Conf.Service.Identities = prev })
+	if got := zd3.collectSignalRRsets(zd3.publishedSnapshot()); len(got) != 1 {
+		t.Fatalf("an operator ServiceMode RRset at one of this server's identities was not injected: %d", len(got))
+	}
+}
+
+// Only AliasMode records are chased. The TargetName of a ServiceMode record
+// names an endpoint host, so a signal the server holds at that name is not
+// injected with it.
+func TestAServiceModeTargetIsNotChased(t *testing.T) {
+	const z = "nochase.sig.example."
+	const pz = "chase-provider.example."
+	zd, _ := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+ns1.`+z+`	3600	IN	A	127.0.0.1
+_dns.ns1.`+z+`	300	IN	SVCB	1 _dns.ns.`+pz+` oots="dot:30"
+`, "127.0.0.1:53")
+	provider := testZone(t, pz, pz+`	3600	IN	SOA	ns.`+pz+` hostmaster.`+pz+` 1 7200 1800 604800 7200
+`+pz+`	3600	IN	NS	ns.`+pz+`
+ns.`+pz+`	3600	IN	A	127.0.0.1
+_dns.ns.`+pz+`	300	IN	SVCB	1 . alpn=dot
+`)
+	registerZones(t, provider)
+	got := zd.collectSignalRRsets(zd.publishedSnapshot())
+	if len(got) != 1 || got[0].RRs[0].Header().Name != "_dns.ns1."+z {
+		names := []string{}
+		for _, rs := range got {
+			names = append(names, rs.Name)
+		}
+		t.Fatalf("a ServiceMode target was chased: %v", names)
+	}
+	if svcbHasAlias(got[0]) || len(signalChaseTargets(got[0])) != 0 {
+		t.Fatal("a ServiceMode record with a target was read as an alias")
+	}
+}
+
+// The zone loader warns, and refuses nothing, when a transport is named in
+// two records of one RRset or an oots weight is above 100.
+func TestZoneLoadWarnsAboutTheTransportSignal(t *testing.T) {
+	const z = "warn.sig.example."
+	logs := captureSignalLog(t)
+	zd := &ZoneData{ZoneName: z, ZoneStore: MapZone, Logger: log.New(os.Stderr, "", 0)}
+	_, _, err := zd.ReadZoneData(z+`	3600	IN	SOA	ns1.`+z+` hostmaster.`+z+` 1 7200 1800 604800 7200
+`+z+`	3600	IN	NS	ns1.`+z+`
+ns1.`+z+`	3600	IN	A	127.0.0.1
+_dns.ns1.`+z+`	300	IN	SVCB	1 . oots="dot:30,doh:20"
+_dns.ns1.`+z+`	300	IN	SVCB	1 dot.provider.example. oots="dot:20,doq:10" port=1234
+`, false)
+	if err != nil {
+		t.Fatalf("the zone was refused: %v", err)
+	}
+	out := logs.String()
+	if !strings.Contains(out, `transport \"dot\" is named in 2 records`) {
+		t.Fatalf("no warning for a transport named in two records:\n%s", out)
+	}
+	if strings.Contains(out, `transport \"doq\"`) || strings.Contains(out, `transport \"doh\"`) {
+		t.Fatalf("a warning for a transport named once:\n%s", out)
+	}
+}
+
+// The checks behind the zone-load warnings. A weight above 100 is built
+// here rather than parsed: the codec this module pins refuses one at parse,
+// and the lossless codec (design section 8) keeps it.
+func TestSvcbSignalWarnings(t *testing.T) {
+	rec := func(prio uint16, target string, entries ...dns.SVCBOotsEntry) dns.RR {
+		return &dns.SVCB{
+			Hdr:      dns.RR_Header{Name: "_dns.ns1.example.", Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 300},
+			Priority: prio, Target: target,
+			Value: []dns.SVCBKeyValue{&dns.SVCBOots{Oots: entries}},
+		}
+	}
+	set := func(rrs ...dns.RR) core.RRset {
+		return core.RRset{Name: "_dns.ns1.example.", RRtype: dns.TypeSVCB, RRs: rrs}
+	}
+	dot := func(w uint8) dns.SVCBOotsEntry { return dns.SVCBOotsEntry{Proto: "dot", Weight: w} }
+	doq := func(w uint8) dns.SVCBOotsEntry { return dns.SVCBOotsEntry{Proto: "doq", Weight: w} }
+
+	if w := svcbSignalWarnings(set(rec(1, ".", dot(30), doq(10)))); len(w) != 0 {
+		t.Fatalf("warnings for a clean record: %v", w)
+	}
+	if w := svcbSignalWarnings(set(rec(1, ".", dot(150)))); len(w) != 1 || !strings.Contains(w[0], "above 100") {
+		t.Fatalf("a weight above 100: %v", w)
+	}
+	if w := svcbSignalWarnings(set(rec(1, ".", dot(100)))); len(w) != 0 {
+		t.Fatalf("a weight of 100 drew a warning: %v", w)
+	}
+	w := svcbSignalWarnings(set(rec(1, ".", dot(30)), rec(2, "dot.example.", dot(20)), rec(1, "doq.example.", doq(10))))
+	if len(w) != 1 || !strings.Contains(w[0], `"dot" is named in 2 records`) {
+		t.Fatalf("a transport in two records: %v", w)
+	}
+	// An AliasMode record carries no signal (RFC 9460 section 2.4.2).
+	if w := svcbSignalWarnings(set(rec(0, "_dns.ns.example.", dot(30)), rec(1, ".", dot(30)))); len(w) != 0 {
+		t.Fatalf("an AliasMode record was counted: %v", w)
+	}
+}

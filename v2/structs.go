@@ -324,7 +324,15 @@ type ZoneData struct {
 	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
 	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
 	// snapshot in ensureWorkingSet so unrelated publishes preserve it.
-	wsSignalSynth  map[string]*core.RRset
+	wsSignalSynth map[string]*core.RRset
+	// signalStored is what the transport-signal pass itself stored as zone
+	// content: canonical "_dns.<ns>" owner -> the SVCB records it staged. A
+	// stored signal is zone content like any other, so this is how a later
+	// run of the pass tells its own output from an operator's RRset, which it
+	// leaves alone. In memory only. Guarded by signalStoredMu, not mu: a
+	// refresh reads it without mu (CollectDynamicRRs).
+	signalStoredMu sync.Mutex
+	signalStored   map[string][]dns.RR
 	publishCadence time.Duration
 	publishQueued  bool
 	publishUrgent  bool

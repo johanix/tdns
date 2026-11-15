@@ -1049,6 +1049,26 @@ as well.
 standard port, fails where nothing listens there, backs off and falls back to
 Do53. Turn `ports` on once the resolvers that matter to you read it.
 
+**A signal written in the zone.** An SVCB RRset that the operator writes at
+`_dns.<nameserver>` is left as written, whatever its mode. tdns-auth
+synthesizes nothing for that name and logs that it left the RRset alone:
+`service.transport` does not apply there. The RRset answers a direct query
+like any other zone content. It goes into the Additional section only when
+the nameserver name is this server's own, that is one of `service.identities`
+or a name whose A or AAAA records in the zone are this server's listen
+addresses. An RRset for another server's name is never added there.
+
+- An AliasMode record (SvcPriority 0) points at another name's signal, such
+  as a provider's. It is also added when the server holds the signal at its
+  target, and the target is followed, from what the server holds.
+- A ServiceMode record whose TargetName is not `.` names the host that serves
+  the transports it lists. Its target is not followed. tdns-imr does not act
+  on such a record yet.
+
+When the zone loads, tdns-auth warns about a transport named in two records
+of one RRset (a resolver uses one endpoint per transport) and about an `oots`
+weight above 100 (resolvers read it as 100).
+
 ## DNSSEC policies
 
 All DNSSEC configuration lives under one top-level `dnssec:` block with six

@@ -26,6 +26,29 @@ func mapZoneWithSignal(name, nsName string, signalRRs []dns.RR) *ZoneData {
 	return zd
 }
 
+// mapZoneWithOwnSignal is mapZoneWithSignal for an NS name that is this
+// server's: its address is a listener. Injection tests the name (an RRset
+// at _dns.<ns> is not the pass's word that the name is this server's, since
+// the pass leaves an operator's RRset alone), so a stored ServiceMode signal
+// is injected only for such a name.
+func mapZoneWithOwnSignal(t *testing.T, name, nsName string, signalRRs []dns.RR) *ZoneData {
+	t.Helper()
+	a, err := dns.NewRR(nsName + " 3600 IN A 127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zd := newMapZone(name, Primary, map[string][]dns.RR{
+		name:             {mustNS(name, nsName)},
+		nsName:           {a},
+		"_dns." + nsName: signalRRs,
+	})
+	zd.Options[OptAddTransportSignal] = true
+	prev := Conf.Listeners.Addresses
+	Conf.Listeners.Addresses = []string{"127.0.0.1:53"}
+	t.Cleanup(func() { Conf.Listeners.Addresses = prev })
+	return zd
+}
+
 func mustNS(owner, ns string) dns.RR {
 	rr, err := dns.NewRR(owner + " 3600 IN NS " + ns)
 	if err != nil {
@@ -53,7 +76,7 @@ func hasSignal(sigs []core.RRset, owner string) bool {
 }
 
 func TestCollectSignalRRsets_InBailiwick(t *testing.T) {
-	zd := mapZoneWithSignal("example.com.", "ns.example.com.",
+	zd := mapZoneWithOwnSignal(t, "example.com.", "ns.example.com.",
 		[]dns.RR{mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 1 . alpn="dot"`)})
 	registerZones(t, zd)
 
@@ -140,7 +163,7 @@ func TestAddTransportSignal_KeepsEverySVCBInTheRRset(t *testing.T) {
 }
 
 func TestAddTransportSignal_DedupAgainstAnswer(t *testing.T) {
-	zd := mapZoneWithSignal("example.com.", "ns.example.com.",
+	zd := mapZoneWithOwnSignal(t, "example.com.", "ns.example.com.",
 		[]dns.RR{mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 1 . alpn="dot"`)})
 	registerZones(t, zd)
 	sigs := zd.collectSignalRRsets(zd.publishedSnapshot())

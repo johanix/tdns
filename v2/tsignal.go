@@ -204,17 +204,108 @@ func (zd *ZoneData) publishTransportSignalLocked(bare bool, synth map[string]*co
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
 
-// svcbHasAlias reports whether the RRset contains an AliasMode SVCB (non-terminal
-// Target) — i.e. an operator-authored bridge rather than a synthesized server SVCB.
+// svcbHasAlias reports whether the RRset contains an AliasMode SVCB
+// (SvcPriority 0, RFC 9460 section 2.4.2): an operator's bridge to another
+// name's signal. The mode is the priority, not the target: a ServiceMode
+// record with a TargetName names an endpoint host, not a signal to chase.
 func svcbHasAlias(rrset core.RRset) bool {
 	for _, rr := range rrset.RRs {
-		if svcb, ok := rr.(*dns.SVCB); ok {
-			if svcb.Target != "." && svcb.Target != "" {
-				return true
-			}
+		if svcb, ok := rr.(*dns.SVCB); ok && svcb.Priority == 0 {
+			return true
 		}
 	}
 	return false
+}
+
+// noteSignalStored records that the signal pass stored rrs at owner.
+func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
+	cp := make([]dns.RR, len(rrs))
+	for i, rr := range rrs {
+		cp[i] = dns.Copy(rr)
+	}
+	zd.signalStoredMu.Lock()
+	defer zd.signalStoredMu.Unlock()
+	if zd.signalStored == nil {
+		zd.signalStored = map[string][]dns.RR{}
+	}
+	zd.signalStored[core.CanonicalizeName(owner)] = cp
+}
+
+// signalStoredByPass reports whether rrs at owner are exactly what the signal
+// pass last stored there. An RRset the operator has since replaced, by an
+// update or in the zone file, is not.
+func (zd *ZoneData) signalStoredByPass(owner string, rrs []dns.RR) bool {
+	zd.signalStoredMu.Lock()
+	defer zd.signalStoredMu.Unlock()
+	stored, ok := zd.signalStored[core.CanonicalizeName(owner)]
+	return ok && sameRecords(stored, rrs)
+}
+
+// signalIsPassOwn reports whether the SVCB RRset rs found at a signal owner
+// is the pass's own output rather than the operator's: the pass stored it in
+// this process, or it is identical to what the configuration gives now. The
+// second covers a stored signal that came back as content after a restart (a
+// journal replay, a persisted copy): restaging it changes nothing. An
+// operator who wrote exactly what the configuration gives is treated the same
+// way, and that is harmless for the same reason.
+func (zd *ZoneData) signalIsPassOwn(conf *Config, nsName, owner string, rs core.RRset) bool {
+	if zd.signalStoredByPass(owner, rs.RRs) {
+		return true
+	}
+	if svcbHasAlias(rs) || Globals.ServerSVCB == nil {
+		return false
+	}
+	fresh, err := zd.buildServerSVCB(conf, nsName, nil, nil)
+	return err == nil && sameRecords(fresh.RRs, rs.RRs)
+}
+
+// svcbSignalWarnings checks an SVCB RRset as an operator wrote it and
+// returns what the zone loader should warn about (it refuses nothing):
+//   - an oots weight above 100: resolvers read it as 100 (design 2026-11-14
+//     section 8; the codec keeps the octet as written);
+//   - a transport named in two ServiceMode records of the set: one endpoint
+//     per transport, so a resolver uses it from one record only (the lowest
+//     SvcPriority, then the lowest RDATA) and ignores it in the others
+//     (design 2026-11-14 section 2).
+//
+// AliasMode records carry no signal and are not counted.
+func svcbSignalWarnings(rs core.RRset) []string {
+	var warns []string
+	named := map[string]int{}
+	var order []string
+	for _, rr := range rs.RRs {
+		svcb, ok := rr.(*dns.SVCB)
+		if !ok || svcb.Priority == 0 {
+			continue
+		}
+		inRecord := map[string]bool{}
+		for _, kv := range svcb.Value {
+			oots, ok := kv.(*dns.SVCBOots)
+			if !ok {
+				continue
+			}
+			for _, e := range oots.Oots {
+				proto := strings.ToLower(e.Proto)
+				if e.Weight > 100 {
+					warns = append(warns, fmt.Sprintf("oots weight %d for %q is above 100; resolvers read it as 100", e.Weight, proto))
+				}
+				if inRecord[proto] {
+					continue
+				}
+				inRecord[proto] = true
+				if named[proto] == 0 {
+					order = append(order, proto)
+				}
+				named[proto]++
+			}
+		}
+	}
+	for _, proto := range order {
+		if n := named[proto]; n > 1 {
+			warns = append(warns, fmt.Sprintf("transport %q is named in %d records of the RRset; a resolver uses it from one record only (the lowest SvcPriority, then the lowest RDATA) and ignores it in the others", proto, n))
+		}
+	}
+	return warns
 }
 
 // tsyncHasAlias reports whether the RRset contains an aliased TSYNC — an
@@ -389,7 +480,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 	// its signal as an unsigned fallback beside the snapshot, injected only.
 	storeForbidden := !zoneMayOriginateContent(zd) || (dak == nil && apexIsSigned(apex))
 
-	staged, aliases := 0, 0
+	staged, kept := 0, 0
 	synth := map[string]*core.RRset{}
 	for _, rr := range nsRRset.RRs {
 		ns, ok := rr.(*dns.NS)
@@ -428,16 +519,24 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		if nsData == nil {
 			continue
 		}
-		// An operator-authored AliasMode SVCB at _dns.<ns> is the operator's
-		// statement: left as it is, served on direct query, chased literally
-		// at injection time (RFC 9460 section 3). A target that is one of
-		// this server's identities whose zone is not hosted here gets the
-		// fallback an out-of-bailiwick NS name gets. The walk goes on: an
-		// alias at one name says nothing about the server's other names.
+		// An SVCB RRset at _dns.<ns> that is not the pass's own output is the
+		// operator's statement, whatever its mode (design 2026-11-14 section
+		// 5): zone content, answered on a direct query, and left as it is,
+		// so the transport configuration does not apply to that name. The
+		// pass's own stored signal is zone content too, which is why it is
+		// told apart by signalIsPassOwn and not by its presence; the
+		// fallback beside the snapshot is not in the working set at all.
+		// Injection decides separately whether the RRset is about this
+		// server (signalIsAboutThisServer). An AliasMode one is chased
+		// literally at injection time (RFC 9460 section 3); a target that is
+		// one of this server's identities whose zone is not hosted here gets
+		// the fallback an out-of-bailiwick NS name gets. The walk goes on: an
+		// RRset at one name says nothing about the server's other names.
 		if od := zd.stagedOwner(ownerName); od != nil {
-			if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); svcbHasAlias(rs) {
-				lgDns.Debug("createTransportSignalSVCB: keeping operator SVCB alias", "owner", ownerName, "zone", zd.ZoneName)
-				aliases++
+			if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && !zd.signalIsPassOwn(conf, nsName, ownerName, rs) {
+				lgDns.Info("createTransportSignalSVCB: leaving the operator's SVCB RRset alone; the transport configuration does not apply to this name",
+					"zone", zd.ZoneName, "owner", ownerName, "alias", svcbHasAlias(rs), "records", len(rs.RRs))
+				kept++
 				for _, tgt := range signalChaseTargets(rs) {
 					id := strings.TrimPrefix(tgt, "_dns.")
 					if !CaseFoldContains(conf.Service.Identities, id) || Globals.ServerSVCB == nil || FindZone(tgt) != nil {
@@ -497,6 +596,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		lgDns.Debug("createTransportSignalSVCB: stored synthesized server SVCB",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
 		zd.stageRRsetLocked(ownerName, *stored)
+		zd.noteSignalStored(ownerName, stored.RRs)
 		staged++
 	}
 	if staged == 0 && len(synth) == 0 {
@@ -505,10 +605,10 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		// option a zone that does not name this server is ordinary and
 		// says so at debug level, or a server whose zones mostly name
 		// other servers would warn once per zone.
-		if aliases == 0 && zd.transportSignalSource() == "zone" {
+		if kept == 0 && zd.transportSignalSource() == "zone" {
 			lgDns.Warn("createTransportSignalSVCB: add-transport-signal is set, but no NS name of the zone resolves to this server's listeners and none is one of its identities; nothing to publish (a hidden primary should not carry the option)",
 				"zone", zd.ZoneName)
-		} else if aliases == 0 {
+		} else if kept == 0 {
 			lgDns.Debug("createTransportSignalSVCB: no NS name of the zone is this server; nothing to publish under the server-wide add-transport-signal",
 				"zone", zd.ZoneName)
 		}
