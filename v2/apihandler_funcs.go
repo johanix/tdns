@@ -480,6 +480,15 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				resp.ErrorMsg = err.Error()
 			}
 
+		case "transport-signal":
+			// The bridge from synthesized to provisioned signals: what the
+			// start-up pass writes at _dns.<name>, as zone-file lines.
+			resp.TransportSignal, err = transportSignalPreview(conf, cp.Name)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
 		case "status":
 			lgApi.Debug("config status inquiry")
 			resp.Listeners = conf.Listeners

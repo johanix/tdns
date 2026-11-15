@@ -1146,6 +1146,29 @@ from who the server is. Three rules:
    whose NS is one of the identities gets the signal from the identity's
    home zone, by rule 1.
 
+**From synthesized to provisioned.** Synthesis for identities is a stopgap;
+the direction is signals provisioned in the zones. `tdns-cli auth config
+transport-signal` prints the `_dns.<name>` SVCB RRset that tdns-auth
+synthesizes from its current `service.transport`, for every name in
+`service.identities`, in zone-file format:
+
+```
+; _dns.ns1.example.net.: synthesized in example.net. now; provision these records there to replace it
+_dns.ns1.example.net.	10800	IN	SVCB	1 . oots="doq:20"
+_dns.ns1.example.net.	10800	IN	SVCB	1 . port="1234" oots="dot:10"
+```
+
+(for `signal: "doq:20,dot:10"` with `dot` on port 1234)
+
+The records are exactly what synthesis writes, ports and targets included.
+Give a name (`tdns-cli auth config transport-signal ns3.example.net.`) for
+that name alone, an identity or not. Paste the records into the zone that
+holds the name. They are then provisioned: tdns-auth serves them as they
+are and synthesizes nothing there (rule 2), and the comment line says
+"provisioned ... as below". Once every name is provisioned, the names can
+leave `service.identities`. A later change to `service.transport` does not
+reach provisioned records: run the command again and replace them.
+
 When the zone loads, tdns-auth warns about a transport named in two records
 of one RRset (a resolver uses one endpoint per transport) and about an `oots`
 weight above 100 (resolvers read it as 100).
