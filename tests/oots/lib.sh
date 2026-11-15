@@ -15,7 +15,8 @@ APIKEY="oots-rig"
 #   AUTH_SEC  secondaries: servers that re-serve a zone they transferred
 #   AUTH_INFRA the rig's own root server
 #   IMR       the resolver under test
-#   CLI, DOG  the observers
+#   CLI, DOG  the observers; CLI_IMR and CLI_PUB, the CLIs that talk to the
+#             resolver and to the publishers, default to their daemons' builds
 # A run on a step's base is the same suite with one role pointed at the base
 # build, for example IMR=/path/to/main/tdns-imr.
 # ---------------------------------------------------------------------------
@@ -29,6 +30,15 @@ AUTH_SEC="${AUTH_SEC:-$AUTH}"
 AUTH_INFRA="${AUTH_INFRA:-$AUTH}"
 IMR="${IMR:-$(_bin tdns-imr)}"
 CLI="${CLI:-$(_bin tdns-cli)}"
+# The CLI that talks to a daemon comes from that daemon's build. The API
+# between them has no compatibility promise, and tdns-cli decodes a report into
+# its own types: an older CLI drops a newer daemon's fields without a word.
+# Each defaults to the tdns-cli beside the daemon's binary, else to CLI.
+_cli_of() { # daemon binary -> its tdns-cli
+	if [ -x "$(dirname "$1")/tdns-cli" ]; then echo "$(dirname "$1")/tdns-cli"; else echo "$CLI"; fi
+}
+CLI_IMR="${CLI_IMR:-$(_cli_of "$IMR")}"
+CLI_PUB="${CLI_PUB:-$(_cli_of "$AUTH_PUB")}"
 DOG="${DOG:-$(_bin dog)}"
 
 # ---------------------------------------------------------------------------
@@ -140,7 +150,7 @@ answers() { # server name type: zero when the server answers NOERROR with data
 # python3. at_get server expr prints one value, empty when absent.
 #   expr: counts.dot | failed.dot | signal.dot | signal_ports.dot | total
 # ---------------------------------------------------------------------------
-cli_imr() { "$CLI" --config "$WORK/q/tdns-cli.yaml" imr "$@"; }
+cli_imr() { "$CLI_IMR" --config "$WORK/q/tdns-cli.yaml" imr "$@"; }
 
 at_json() { cli_imr stats auth-transports --json 2>/dev/null; }
 
