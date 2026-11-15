@@ -567,3 +567,70 @@ func TestEndpointAddrsExpireWithTheChain(t *testing.T) {
 		t.Errorf("chain not cached: expires in %v, want at most endpointAddrRetry", time.Until(exp))
 	}
 }
+
+// udp and tcp go to a target like any transport, each to its own endpoint;
+// the do53 shorthand in a record with a target is dropped (section 2).
+func TestOOTSUDPAndTCPRedirected(t *testing.T) {
+	const tcpTarget = "tcp-ns." + stateZone
+	recs := []ootsRecord{
+		ootsRecordOf(t, pathOwner+` 3600 IN SVCB 1 `+dotTarget+` port=5353 oots="udp:100,do53:7"`),
+		ootsRecordOf(t, pathOwner+` 3600 IN SVCB 1 `+tcpTarget+` oots="tcp:30"`),
+	}
+	raw, ports, targets := combineOOTSEndpoints(recs)
+	if _, ok := raw["do53"]; ok {
+		t.Errorf("do53 taken from a record with a target: %v", raw)
+	}
+	if raw["udp"] != 100 || raw["tcp"] != 30 {
+		t.Errorf("weights %v, want udp:100 and tcp:30", raw)
+	}
+	if targets[core.TransportDo53] != dotTarget || targets[core.TransportDo53TCP] != tcpTarget {
+		t.Errorf("targets %v, want udp to %s and tcp to %s", targets, dotTarget, tcpTarget)
+	}
+	if ports[core.TransportDo53] != 5353 || ports[core.TransportDo53TCP] != 0 {
+		t.Errorf("ports %v, want udp:5353 only", ports)
+	}
+	server := cache.NewAuthServer(pathNS)
+	installTransportMap(server, raw, ports, targets, cache.SignalViaLookup,
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+	if ep := server.GetTransportEndpoint(core.TransportDo53); ep.Target != dotTarget || ep.Port != 5353 {
+		t.Errorf("udp endpoint %v", ep)
+	}
+	if ep := server.GetTransportEndpoint(core.TransportDo53TCP); ep.Target != tcpTarget || ep.Port != 0 {
+		t.Errorf("tcp endpoint %v", ep)
+	}
+}
+
+// A udp endpoint with no usable address gives way to the nameserver's own
+// address on port 53, the one the delegation guarantees; DoT has no such
+// fallback, and its attempt is not made.
+func TestEndpointFallsBackToPort53(t *testing.T) {
+	imr := newTestImr(t)
+	server := cache.NewAuthServer(pathNS)
+	installTransportMap(server, map[string]uint8{"udp": 100, "dot": 30},
+		map[core.Transport]uint16{core.TransportDo53: 5353, core.TransportDoT: 1234},
+		map[core.Transport]string{core.TransportDo53: dotTarget, core.TransportDoT: dotTarget}, cache.SignalViaLookup,
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
+	server.RecordEndpointAddrFailure("192.0.2.53", 5353, core.TransportDo53, nil)
+	server.RecordEndpointAddrFailure("192.0.2.53", 1234, core.TransportDoT, nil)
+	ctx := context.Background()
+
+	d, err := imr.endpointFor(ctx, server, "192.0.2.1", core.TransportDo53)
+	if err != nil || d.addr != "192.0.2.1" || d.port != 0 || d.keyPort != 0 || d.redirect {
+		t.Errorf("udp: %+v %v, want the nameserver on port 53", d, err)
+	}
+	if _, err := imr.endpointFor(ctx, server, "192.0.2.1", core.TransportDoT); err == nil {
+		t.Error("DoT: an attempt with every target address backed off")
+	}
+
+	// At the server's own name: the udp port backed off, port 53 is used.
+	self := cache.NewAuthServer(pathNS)
+	applyTransportMapWithPorts(self, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53: 5353})
+	if d, _ := imr.endpointFor(ctx, self, "192.0.2.1", core.TransportDo53); d.port != 5353 || d.keyPort != 5353 {
+		t.Errorf("udp endpoint usable: %+v, want port 5353", d)
+	}
+	self.RecordEndpointAddrFailure("192.0.2.1", 5353, core.TransportDo53, nil)
+	if d, _ := imr.endpointFor(ctx, self, "192.0.2.1", core.TransportDo53); d.port != 0 || d.keyPort != 0 {
+		t.Errorf("udp endpoint backed off: %+v, want port 53", d)
+	}
+}

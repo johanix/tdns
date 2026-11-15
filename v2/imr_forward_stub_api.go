@@ -344,12 +344,15 @@ func (imr *Imr) StubZoneStatus() []ImrStubZoneStatus {
 				if keys[i].Addr != keys[j].Addr {
 					return keys[i].Addr < keys[j].Addr
 				}
+				if keys[i].Port != keys[j].Port {
+					return keys[i].Port < keys[j].Port
+				}
 				return keys[i].Transport < keys[j].Transport
 			})
 			for _, k := range keys {
 				b := backoffs[k]
 				ss.Backoffs = append(ss.Backoffs, fmt.Sprintf("%s/%s: until %s (%d failure(s))",
-					k.Addr, core.TransportToString[k.Transport],
+					k.HostPort(), core.TransportToString[k.Transport],
 					b.NextTry.Format(TimeLayout), b.FailureCount))
 			}
 			zs.Servers = append(zs.Servers, ss)

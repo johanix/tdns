@@ -24,9 +24,11 @@ import (
 // not is ignored whole (R2), with a debug line and a counter. The target's
 // addresses are looked up off the query path and never through a redirected
 // endpoint; until they are known the transport uses its default endpoint.
-// When every address of an endpoint is backed off, the attempt fails without
-// a dial, and the query goes on to its next tuple, ending at the nameserver's
-// own name on port 53 (Do53, the last resort candidateTransports keeps).
+// When every address of an endpoint is backed off, an encrypted transport's
+// attempt fails without a dial, and the query goes on to its next tuple. udp
+// and tcp fall back to the nameserver's own address on port 53 instead: the
+// one endpoint the delegation guarantees (section 3), and the last resort
+// candidateTransports keeps.
 
 // honouredRecords is recs without the records whose target the set's path does
 // not allow: all of them unless the path validated Secure (R1, R5). Their
@@ -84,9 +86,16 @@ type endpointDial struct {
 	addr     string // the address dialed, a bare IP
 	port     uint16 // the port dialed; 0 for the transport's default
 	redirect bool   // the address is a target's, not the server's own
-	// keyPort is the port backoff and RTT are kept under: the endpoint's at
-	// a target's address, 0 at the server's own address, as it always was.
+	// keyPort is the port backoff and RTT are kept under: the port dialed,
+	// at the server's own address and at a target's alike (AddrXport).
 	keyPort uint16
+}
+
+// fallsBackToPort53 reports whether t, when its signalled endpoint is not
+// usable, is sent to the nameserver's own address on port 53: udp and tcp,
+// for which the delegation guarantees that endpoint (the design, section 3).
+func fallsBackToPort53(t core.Transport) bool {
+	return t == core.TransportDo53 || t == core.TransportDo53TCP
 }
 
 // errEndpointUnavailable is an attempt not made: every address of the
@@ -104,8 +113,10 @@ func (e errEndpointUnavailable) Error() string {
 // addr goes. At the server's own name it is addr, at the endpoint's port. At
 // a target it is the best usable address of the target, once those are known;
 // until then the default endpoint, addr at the usual port, and the lookup of
-// the target's addresses is started. A context marked withDefaultEndpoints
-// always gets the default endpoint.
+// the target's addresses is started. A udp or tcp endpoint with no usable
+// address (fallsBackToPort53) gives way to addr on port 53. A context marked
+// withDefaultEndpoints always gets the default endpoint. Forced TCP asks for
+// Do53TCP, so it goes to the tcp endpoint or port 53, never to the udp one.
 func (imr *Imr) endpointFor(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) (endpointDial, error) {
 	if defaultEndpointsOnly(ctx) {
 		return endpointDial{addr: addr}, nil
@@ -119,7 +130,10 @@ func (imr *Imr) endpointFor(ctx context.Context, server *cache.AuthServer, addr 
 func (imr *Imr) resolveEndpoint(server *cache.AuthServer, addr string, t core.Transport, lookup bool) (endpointDial, error) {
 	ep := server.GetTransportEndpoint(t)
 	if ep.Target == "" {
-		return endpointDial{addr: addr, port: ep.Port}, nil
+		if ep.Port != 0 && fallsBackToPort53(t) && !server.IsEndpointAddrAvailable(addr, ep.Port, t) {
+			return endpointDial{addr: addr}, nil
+		}
+		return endpointDial{addr: addr, port: ep.Port, keyPort: ep.Port}, nil
 	}
 	addrs, known := imr.endpointAddrs.get(ep.Target, time.Now())
 	if !known {
@@ -130,27 +144,63 @@ func (imr *Imr) resolveEndpoint(server *cache.AuthServer, addr string, t core.Tr
 	}
 	pick := imr.chooseEndpointAddr(server, addrs, ep.Port, t)
 	if pick == "" {
+		if fallsBackToPort53(t) {
+			return endpointDial{addr: addr}, nil
+		}
 		return endpointDial{}, errEndpointUnavailable{server: server.Name, target: ep.Target, transport: t}
 	}
 	return endpointDial{addr: pick, port: ep.Port, redirect: true, keyPort: ep.Port}, nil
 }
 
-// serverBackoffAllows reports whether the server's backoff lets an attempt
-// for t at its own address addr be made: the backoff of the address the
-// attempt would dial (endpointFor). At a target whose addresses are known that
-// is the target's, at the endpoint's port, and a backoff left on addr by an
-// attempt at the default endpoint does not hold the target back. Otherwise it
-// is addr's, as it always was. The zone's backoff stays on addr: lameness is
-// about the nameserver, not the endpoint.
-func (imr *Imr) serverBackoffAllows(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) bool {
-	if !defaultEndpointsOnly(ctx) {
-		if ep := server.GetTransportEndpoint(t); ep.Target != "" {
-			if addrs, known := imr.endpointAddrs.get(ep.Target, time.Now()); known {
-				return imr.chooseEndpointAddr(server, addrs, ep.Port, t) != ""
-			}
-		}
+// attemptKey is the address and port an attempt for t at the server's own
+// address addr would dial, and book its backoff and RTT under (endpointFor),
+// read without starting a lookup. ok is false when no attempt would be made.
+func (imr *Imr) attemptKey(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) (string, uint16, bool) {
+	if defaultEndpointsOnly(ctx) {
+		return addr, 0, true
 	}
-	return server.IsAddrXportAvailable(addr, t)
+	d, err := imr.resolveEndpoint(server, addr, t, false)
+	if err != nil {
+		return "", 0, false
+	}
+	return d.addr, d.keyPort, true
+}
+
+// tupleRTT is the RTT of what an attempt for tup would dial (attemptKey).
+func (imr *Imr) tupleRTT(ctx context.Context, tup ServerAddrXportTuple) (time.Duration, bool) {
+	a, p, ok := imr.attemptKey(ctx, tup.Server, tup.Addr, tup.Transport)
+	if !ok {
+		return 0, false
+	}
+	return tup.Server.GetEndpointAddrRTT(a, p, tup.Transport)
+}
+
+// lamenessPort is the port a lame answer for t at the server's own address
+// addr is kept under, in the zone's backoff or the server's: the port an
+// attempt dials at addr, which is an endpoint at the server's own name (a
+// lame endpoint on 5353 does not hold back port 53). It is 0 for a transport
+// sent to a target: lameness is the nameserver's, and stays on its tuple.
+func (imr *Imr) lamenessPort(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) uint16 {
+	if defaultEndpointsOnly(ctx) {
+		return 0
+	}
+	d, err := imr.resolveEndpoint(server, addr, t, false)
+	if err != nil || d.redirect {
+		return 0
+	}
+	return d.keyPort
+}
+
+// serverBackoffAllows reports whether the server's backoff lets an attempt
+// for t at its own address addr be made: the backoff of what the attempt
+// would dial (attemptKey). At a target whose addresses are known that is the
+// target's, at the endpoint's port, and a backoff left on addr by an attempt
+// at the default endpoint does not hold the target back. At the server's own
+// name it is addr's at the endpoint's port. The zone's backoff is read apart
+// (lamenessPort): lameness is about the nameserver, not the endpoint.
+func (imr *Imr) serverBackoffAllows(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) bool {
+	a, p, ok := imr.attemptKey(ctx, server, addr, t)
+	return ok && server.IsEndpointAddrAvailable(a, p, t)
 }
 
 // chooseEndpointAddr picks among a target's addresses as prioritizeServers

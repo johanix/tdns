@@ -10,10 +10,10 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 )
 
-// A signal's ports and targets become one endpoint per transport. Do53 gets
-// none, and a target of "." is the nameserver itself. A redirected transport
-// is dialed through its endpoint, so DialAddr leaves the server's own address
-// at the usual port for it.
+// A signal's ports and targets become one endpoint per transport, udp
+// (TransportDo53) included, and a target of "." is the nameserver itself. A
+// redirected transport is dialed through its endpoint, so DialAddr leaves the
+// server's own address at the usual port for it.
 func TestEndpointsFromReceived(t *testing.T) {
 	as := NewAuthServer("ns.example.")
 	as.SetTransportSignal(nil, nil, nil, &ReceivedSignal{
@@ -25,9 +25,10 @@ func TestEndpointsFromReceived(t *testing.T) {
 		},
 	})
 	want := map[core.Transport]Endpoint{
-		core.TransportDoT: {Target: "dot-ns.example.", Port: 1234},
-		core.TransportDoH: {Target: "doh-ns.example."},
-		core.TransportDoQ: {Port: 1235},
+		core.TransportDoT:  {Target: "dot-ns.example.", Port: 1234},
+		core.TransportDoH:  {Target: "doh-ns.example."},
+		core.TransportDoQ:  {Port: 1235},
+		core.TransportDo53: {Target: "udp-ns.example.", Port: 553},
 	}
 	got := as.GetTransportEndpoints()
 	if len(got) != len(want) {
@@ -38,8 +39,11 @@ func TestEndpointsFromReceived(t *testing.T) {
 			t.Errorf("%s: %v, want %v", core.TransportToString[tr], got[tr], ep)
 		}
 	}
-	if ep := as.GetTransportEndpoint(core.TransportDo53); !ep.IsDefault() {
-		t.Errorf("Do53 endpoint %v", ep)
+	if ep := as.GetTransportEndpoint(core.TransportDo53TCP); !ep.IsDefault() {
+		t.Errorf("tcp endpoint %v, want the default: the udp one is not tcp's", ep)
+	}
+	if got := as.DialAddr("192.0.2.1", core.TransportDo53); got != "192.0.2.1" {
+		t.Errorf("DialAddr for a redirected udp: %q, want the bare address", got)
 	}
 	if got := as.DialAddr("192.0.2.1", core.TransportDoT); got != "192.0.2.1" {
 		t.Errorf("DialAddr for a redirected DoT: %q, want the bare address", got)
@@ -91,5 +95,22 @@ func TestEndpointAddrKeys(t *testing.T) {
 	as.RecordEndpointAddrSuccess("192.0.2.1", 1234, core.TransportDoT)
 	if !as.IsEndpointAddrAvailable("192.0.2.1", 1234, core.TransportDoT) {
 		t.Error("success did not clear the backoff")
+	}
+}
+
+// A backoff key prints as dialed: the port joined on unless it is the
+// default.
+func TestAddrXportHostPort(t *testing.T) {
+	for _, tc := range []struct {
+		k    AddrXport
+		want string
+	}{
+		{AddrXport{Addr: "192.0.2.1", Transport: core.TransportDo53}, "192.0.2.1"},
+		{AddrXport{Addr: "192.0.2.1", Port: 5353, Transport: core.TransportDo53}, "192.0.2.1:5353"},
+		{AddrXport{Addr: "2001:db8::1", Port: 853, Transport: core.TransportDoT}, "[2001:db8::1]:853"},
+	} {
+		if got := tc.k.HostPort(); got != tc.want {
+			t.Errorf("%+v: %q, want %q", tc.k, got, tc.want)
+		}
 	}
 }

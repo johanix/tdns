@@ -58,8 +58,10 @@ dig's as possible; arguments are case-insensitive and may appear in any order.
   dog [@server] [name] [type] [+option ...]
 
 @server takes @host, @host:port, @[ipv6], @[ipv6]:port, or a URL form that
-selects the transport directly: dns:// tcp:// tls:// dot:// https:// doh://
-quic:// doq://. Queries are always class IN.
+selects the transport directly: dns:// udp:// tcp:// tls:// dot:// https://
+doh:// quic:// doq://. udp:// is dns://, UDP with a TCP retry after truncation:
+the oots tokens udp and tcp name the two cleartext transports. Queries are
+always class IN.
 
 Query:
   +opcode=QUERY|NOTIFY|UPDATE
@@ -1362,7 +1364,7 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	// Map scheme to transport
 	scheme := strings.ToLower(u.Scheme)
 	switch scheme {
-	case "dns", "do53":
+	case "dns", "do53", "udp":
 		transport = "Do53"
 	case "tcp":
 		transport = "Do53-TCP"
