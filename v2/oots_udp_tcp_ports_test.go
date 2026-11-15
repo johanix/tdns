@@ -12,6 +12,7 @@ package tdns
 import (
 	"context"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -61,14 +62,15 @@ func TestDo53IgnoredInARecordWithAPort(t *testing.T) {
 func TestForcedTCPNeverDialsTheUDPPort(t *testing.T) {
 	const addr = "192.0.2.1"
 	imr := &Imr{}
-	// A server that offers cleartext only, its udp on port 5353. (Built
-	// directly: an installed oots signal also lists the encrypted transports
-	// at weight 0, which preferredDNSKEYTransport takes for offered.)
+	// A server that offers cleartext only, its udp on port 5353, installed
+	// the production way: the absence defaults put dot, doh and doq in
+	// Transports at weight 0, which preferredDNSKEYTransport must not take
+	// for offered.
 	s := cache.NewAuthServer(ootsTestNS)
-	s.SetTransportSignal([]core.Transport{core.TransportDo53}, []string{"do53"},
-		map[core.Transport]uint8{core.TransportDo53: 100, core.TransportDo53TCP: 100},
-		&cache.ReceivedSignal{Source: "oots", Weights: map[core.Transport]uint8{core.TransportDo53: 100},
-			Ports: map[core.Transport]uint16{core.TransportDo53: 5353}})
+	applyTransportMapWithPorts(s, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53: 5353})
+	if !slices.Contains(s.GetTransports(), core.TransportDoQ) {
+		t.Fatalf("setup: DoQ at weight 0 is not in Transports (%v); the test no longer reaches the case", s.GetTransports())
+	}
 	if got := imr.preferredDNSKEYTransport(s); got != core.TransportDo53TCP {
 		t.Fatalf("preferredDNSKEYTransport = %v, want Do53TCP for a server with no encrypted transport", got)
 	}
@@ -110,10 +112,16 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	applyTransportMapWithPorts(s, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53: uint16(closed)})
 	m := new(dns.Msg)
 	m.SetQuestion("www.example.", dns.TypeA)
-	if _, _, _, err := imr.tryServer(context.Background(), s, addr, core.TransportDo53, m, "www.example.", dns.TypeA, false, cache.ClassNone); err == nil {
+	_, _, _, dial, err := imr.tryServer(context.Background(), s, addr, core.TransportDo53, m, "www.example.", dns.TypeA, false, cache.ClassNone)
+	if err == nil {
 		t.Fatalf("tryServer to the closed port %d succeeded", closed)
 	}
 	endpoint := net.JoinHostPort(addr, ps)
+	// The caller books the rcode outcome by the endpoint tryServer returns,
+	// the one it tried.
+	if got := dial.dialAddr(); got != endpoint || dial.lamenessPort() != uint16(closed) {
+		t.Errorf("tryServer returned %+v (dial %q), want %s", dial, got, endpoint)
+	}
 	if s.IsEndpointAddrAvailable(addr, uint16(closed), core.TransportDo53) {
 		t.Errorf("%s is not backed off after it failed", endpoint)
 	}
@@ -234,5 +242,26 @@ func TestUDPPortConfigReachesTheDial(t *testing.T) {
 	}
 	if w := s.GetTransportWeights(); w[core.TransportDo53] != 50 || w[core.TransportDo53TCP] != 50 {
 		t.Errorf("weights %v, want udp and tcp at do53's 50", w)
+	}
+}
+
+// A DNSKEY bypass attempt is deduplicated by endpoint and transport: two
+// servers on one address that signal different tcp ports are two attempts.
+func TestDNSKEYAttemptKeyIsTheEndpoint(t *testing.T) {
+	const addr = "192.0.2.1"
+	imr := newTestImr(t)
+	ctx := context.Background()
+	a := cache.NewAuthServer("ns1.example.")
+	applyTransportMapWithPorts(a, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53TCP: 5354})
+	b := cache.NewAuthServer("ns2.example.")
+	applyTransportMapWithPorts(b, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53TCP: 5355})
+	c := cache.NewAuthServer("ns3.example.")
+	applyTransportMapWithPorts(c, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53TCP: 5354})
+	ka := imr.dnskeyAttemptKey(ctx, a, addr, core.TransportDo53TCP)
+	if ka == imr.dnskeyAttemptKey(ctx, b, addr, core.TransportDo53TCP) {
+		t.Errorf("one key for two tcp endpoints: %v", ka)
+	}
+	if kc := imr.dnskeyAttemptKey(ctx, c, addr, core.TransportDo53TCP); ka != kc {
+		t.Errorf("two keys for one endpoint: %v and %v", ka, kc)
 	}
 }

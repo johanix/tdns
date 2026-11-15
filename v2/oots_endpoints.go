@@ -91,6 +91,23 @@ type endpointDial struct {
 	keyPort uint16
 }
 
+// dialAddr is d as passed to Exchange: the address, with the port joined on
+// unless it is the transport's default.
+func (d endpointDial) dialAddr() string {
+	return cache.JoinDialAddr(d.addr, d.port)
+}
+
+// lamenessPort is the port a lame answer from an attempt at d is kept under,
+// at the server's own address: d's port when d is at the server's own name (a
+// lame endpoint on 5353 does not hold back port 53), and 0 when d went to a
+// target, for lameness is the nameserver's and stays on its tuple.
+func (d endpointDial) lamenessPort() uint16 {
+	if d.redirect {
+		return 0
+	}
+	return d.keyPort
+}
+
 // fallsBackToPort53 reports whether t, when its signalled endpoint is not
 // usable, is sent to the nameserver's own address on port 53: udp and tcp,
 // for which the delegation guarantees that endpoint (the design, section 3).
@@ -175,20 +192,19 @@ func (imr *Imr) tupleRTT(ctx context.Context, tup ServerAddrXportTuple) (time.Du
 	return tup.Server.GetEndpointAddrRTT(a, p, tup.Transport)
 }
 
-// lamenessPort is the port a lame answer for t at the server's own address
-// addr is kept under, in the zone's backoff or the server's: the port an
-// attempt dials at addr, which is an endpoint at the server's own name (a
-// lame endpoint on 5353 does not hold back port 53). It is 0 for a transport
-// sent to a target: lameness is the nameserver's, and stays on its tuple.
+// lamenessPort is the port the zone's backoff for t at the server's own
+// address addr is read at before an attempt (prioritizeServersFor): that of
+// the endpoint an attempt would dial (endpointDial.lamenessPort). After an
+// attempt the caller uses the endpoint tryServer tried.
 func (imr *Imr) lamenessPort(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) uint16 {
 	if defaultEndpointsOnly(ctx) {
 		return 0
 	}
 	d, err := imr.resolveEndpoint(server, addr, t, false)
-	if err != nil || d.redirect {
+	if err != nil {
 		return 0
 	}
-	return d.keyPort
+	return d.lamenessPort()
 }
 
 // serverBackoffAllows reports whether the server's backoff lets an attempt

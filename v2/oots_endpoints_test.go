@@ -213,7 +213,7 @@ func TestTryServerRedirectWaitsForTargetAddrs(t *testing.T) {
 	t.Cleanup(func() { endpointAddrLookupHook = saved })
 	ctx := context.Background()
 
-	if _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
 		t.Fatalf("before the lookup: %v", err)
 	}
 	if got := lastDial(dot); got != "192.0.2.1" {
@@ -238,7 +238,7 @@ func TestTryServerRedirectWaitsForTargetAddrs(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
 		t.Fatalf("after the lookup: %v", err)
 	}
 	if got := lastDial(dot); got != "192.0.2.53:1234" {
@@ -265,7 +265,7 @@ func TestTryServerRedirectBackoffAndFallback(t *testing.T) {
 	ctx := context.Background()
 	server.RecordEndpointAddrRTT("192.0.2.99", 1234, core.TransportDoT, time.Millisecond) // the faster one, tried first
 
-	if _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err == nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err == nil {
 		t.Fatal("192.0.2.99 has no programmed answer; want a failure")
 	}
 	if got := lastDial(dot); got != "192.0.2.99:1234" {
@@ -277,23 +277,28 @@ func TestTryServerRedirectBackoffAndFallback(t *testing.T) {
 	if !server.IsAddrXportAvailable("192.0.2.1", core.TransportDoT) {
 		t.Errorf("a target's failure backed off the nameserver's own address")
 	}
-	if _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	_, _, _, ep, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone)
+	if err != nil {
 		t.Fatalf("second attempt: %v", err)
 	}
-	if got := lastDial(dot); got != "[2001:db8::53]:1234" {
-		t.Errorf("second dial %q, want the target's other address", got)
+	if got := lastDial(dot); got != "[2001:db8::53]:1234" || ep.dialAddr() != got {
+		t.Errorf("second dial %q (returned %q), want the target's other address", got, ep.dialAddr())
+	}
+	// A lame answer from the target is kept at the nameserver's own tuple.
+	if !ep.redirect || ep.lamenessPort() != 0 {
+		t.Errorf("returned endpoint %+v: want a redirect with lameness at port 0", ep)
 	}
 
 	server.RecordEndpointAddrFailure("2001:db8::53", 1234, core.TransportDoT, nil)
 	n := len(dot.Calls())
-	_, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone)
+	_, _, _, _, err = imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone)
 	if _, ok := err.(errEndpointUnavailable); !ok {
 		t.Errorf("every target address backed off: err %v, want errEndpointUnavailable", err)
 	}
 	if len(dot.Calls()) != n {
 		t.Errorf("an attempt was dialed with every target address backed off")
 	}
-	if _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
 		t.Fatalf("Do53 fallback: %v", err)
 	}
 	if got := lastDial(do53); got != "192.0.2.1" {
@@ -307,7 +312,7 @@ func TestTryServerDefaultEndpointsContext(t *testing.T) {
 	imr, server, dot, _, q := endpointTestRig(t)
 	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
 	ctx := withDefaultEndpoints(context.Background())
-	if _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if got := lastDial(dot); got != "192.0.2.1" {

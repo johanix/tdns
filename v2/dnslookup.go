@@ -1761,7 +1761,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				// All tuples for this (server, addr) collapse to the same
 				// preferred transport; skip the ones we've already tried.
 				eff := imr.preferredDNSKEYTransport(server)
-				key := cache.AddrXport{Addr: addr, Transport: eff}
+				key := imr.dnskeyAttemptKey(ctx, server, addr, eff)
 				if dnskeyAttempted[key] {
 					continue
 				}
@@ -1777,7 +1777,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
+			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
 			lastTransport = wireTransport
 			if err != nil {
 				lastErr = err
@@ -1835,10 +1835,13 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					lg.Printf("IterativeDNSQuery: %s response from %s@%s over %s for %s %s (likely lame delegation for zone %q)",
 						dns.RcodeToString[rcode], addr, nsname, core.TransportToString[wireTransport], qname, dns.TypeToString[qtype], zoneName)
 				}
-				// Booked at the nameserver's address and the port of an
-				// endpoint at its own name (lamenessPort): a lame
-				// endpoint on 5353 does not hold back port 53.
-				if port := imr.lamenessPort(ctx, server, addr, wireTransport); zone != nil {
+				// Booked at the nameserver's address and the port of the
+				// endpoint tryServer tried, when that was at its own name
+				// (endpointDial.lamenessPort): a lame endpoint on 5353
+				// does not hold back port 53. The port is the one tried,
+				// not a fresh reading, which a signal update during the
+				// exchange may have moved.
+				if port := ep.lamenessPort(); zone != nil {
 					zone.RecordZoneEndpointFailureForRcode(addr, port, wireTransport, uint8(rcode), Globals.Debug)
 				} else {
 					server.RecordEndpointAddrFailureForRcode(addr, port, wireTransport, uint8(rcode))
@@ -1846,11 +1849,11 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				continue
 			case dns.RcodeSuccess:
 				if zone != nil {
-					zone.RecordZoneEndpointSuccess(addr, imr.lamenessPort(ctx, server, addr, wireTransport), wireTransport)
+					zone.RecordZoneEndpointSuccess(addr, ep.lamenessPort(), wireTransport)
 				}
 			default:
 				if zone != nil {
-					zone.RecordZoneEndpointSuccess(addr, imr.lamenessPort(ctx, server, addr, wireTransport), wireTransport)
+					zone.RecordZoneEndpointSuccess(addr, ep.lamenessPort(), wireTransport)
 				}
 			}
 
@@ -2887,6 +2890,19 @@ func replyMatchesQuery(r, query *dns.Msg) error {
 	return nil
 }
 
+// dnskeyAttemptKey is what a DNSKEY bypass attempt is deduplicated by: the
+// address and port the attempt would dial (attemptKey) and the transport. Two
+// servers that share an address but signal different ports or targets for
+// the transport are two endpoints, and a failure on one must not skip the
+// other.
+func (imr *Imr) dnskeyAttemptKey(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) cache.AddrXport {
+	a, p, ok := imr.attemptKey(ctx, server, addr, t)
+	if !ok {
+		return cache.AddrXport{Addr: addr, Transport: t}
+	}
+	return cache.AddrXport{Addr: a, Port: p, Transport: t}
+}
+
 func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 	m := authQueryMsg(qname, qtype)
 	if withOOTS {
@@ -2901,8 +2917,15 @@ func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 // transport) tuple selected upstream by prioritizeServers. It records the
 // outcome against the server's per-(addr, transport) backoff map.
 //
+// It returns the transport it attempted and the endpoint it tried, whose
+// address and port its backoff and RTT went under (the zero endpointDial
+// when it never got as far as choosing one). The caller books the rcode
+// outcome by the same endpoint (endpointDial.lamenessPort), not a fresh
+// reading: a signal update during the exchange may have moved the port, and
+// the answer came from the endpoint tried.
+//
 // class is whose query it is, for the per-class answer counters.
-func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass) (*dns.Msg, time.Duration, core.Transport, error) {
+func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass) (*dns.Msg, time.Duration, core.Transport, endpointDial, error) {
 	eff := t
 	if dnskeyBypass {
 		// DNSKEY transport policy bypasses this server's probabilistic
@@ -2912,20 +2935,20 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 		// back to cleartext.
 		pref := imr.preferredDNSKEYTransport(server)
 		if pref == 0 {
-			return nil, 0, t, fmt.Errorf("dnssec.dnskey-query-transport=force_encrypted but server %s advertises no encrypted transport", server.Name)
+			return nil, 0, t, endpointDial{}, fmt.Errorf("dnssec.dnskey-query-transport=force_encrypted but server %s advertises no encrypted transport", server.Name)
 		}
 		eff = pref
 	}
 
 	select {
 	case <-ctx.Done():
-		return nil, 0, eff, ctx.Err()
+		return nil, 0, eff, endpointDial{}, ctx.Err()
 	default:
 	}
 
 	c, exist := imr.Cache.DNSClient[eff]
 	if !exist {
-		return nil, 0, eff, fmt.Errorf("no DNS client for transport %d exists", eff)
+		return nil, 0, eff, endpointDial{}, fmt.Errorf("no DNS client for transport %d exists", eff)
 	}
 	// Where the attempt goes: the server's own address, at a port the signal
 	// gave it, or an address of the target the signal sent the transport to
@@ -2937,10 +2960,10 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 		if Globals.Debug {
 			lgDns.Debug("tryServer: no attempt", "server", server.Name, "addr", addr, "transport", core.TransportToString[eff], "error", eerr)
 		}
-		return nil, 0, eff, eerr
+		return nil, 0, eff, endpointDial{}, eerr
 	}
 	server.IncrementTransportCounter(eff)
-	dial := cache.JoinDialAddr(ep.addr, ep.port)
+	dial := ep.dialAddr()
 	if Globals.Debug {
 		lgDns.Debug("*** tryServer: calling c.Exchange",
 			"transport", core.TransportToString[eff],
@@ -2966,7 +2989,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	}
 	for _, hook := range getImrOutboundQueryHooks() {
 		if err := hook(ctx, qname, qtype, server.Name, ep.addr, eff); err != nil {
-			return nil, 0, eff, err
+			return nil, 0, eff, ep, err
 		}
 	}
 
@@ -3001,7 +3024,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	// every server that happened to be mid-exchange, and the address-family
 	// tracker would read the same event as a network-level failure.
 	if cerr := ctx.Err(); cerr != nil && err != nil {
-		return nil, rtt, eff, err
+		return nil, rtt, eff, ep, err
 	}
 	// A refused connection is an answer from the host: the path to it works,
 	// whatever the server does. Counted as a family failure, a few servers
@@ -3029,7 +3052,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 		// naturally sorts to the bottom of prioritizeServers even after the
 		// backoff lifts.
 		server.RecordEndpointAddrRTT(ep.addr, ep.keyPort, eff, rtt)
-		return nil, rtt, eff, err
+		return nil, rtt, eff, ep, err
 	}
 	if r != nil {
 		// A reply to some other question, or to none, is a failed attempt at
@@ -3043,7 +3066,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 				"error", qerr)
 			server.RecordEndpointAddrFailure(ep.addr, ep.keyPort, eff, qerr)
 			server.IncrementFailedCounter(xres.WireTransport)
-			return nil, rtt, eff, qerr
+			return nil, rtt, eff, ep, qerr
 		}
 		server.RecordEndpointAddrSuccess(ep.addr, ep.keyPort, eff)
 		server.CountAnswer(xres.WireTransport, class, ep.redirect)
@@ -3055,7 +3078,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"addr", addr,
 			"transport", core.TransportToString[eff])
 	}
-	return r, rtt, eff, nil
+	return r, rtt, eff, ep, nil
 }
 
 // applyTransportSignalToServer parses a received transport string (the
