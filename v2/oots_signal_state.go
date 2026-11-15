@@ -165,7 +165,7 @@ func finalSignalSet(rrs []dns.RR, via string, path []cache.SignalHop) *svcbSigna
 // RRset and the verdict the lookup that brought it reached. It replaces the
 // set's path with the hops read, and sets set.final when the path ends at an
 // RRset with no AliasMode record. A hop the cache does not hold is looked up
-// off the query path (lookupSignalAliasHop); when that lookup ends, the
+// off the query path (lookupSignalAliasHop); when that lookup finds it, the
 // alias is followed again. A loop, a denial, or a path longer than the cap
 // installs nothing.
 func (imr *Imr) followLookupAlias(set *svcbSignalSet) {
@@ -205,8 +205,8 @@ func (imr *Imr) followLookupAlias(set *svcbSignalSet) {
 var signalAliasHopLookupHook func(imr *Imr, target string) (*ImrResponse, error)
 
 // lookupSignalAliasHop looks up the SVCB RRset at target, a hop on the alias
-// path of the signal at owner, off the query path, and then follows owner's
-// alias again from the cache. The transport-signal tracker runs one lookup
+// path of the signal at owner, off the query path, and when it is found
+// follows owner's alias again from the cache. The transport-signal tracker runs one lookup
 // per target, as it does for _dns.<ns>; without one (a resolver that does no
 // discovery) nothing is looked up.
 func (imr *Imr) lookupSignalAliasHop(owner, target string) {
@@ -226,7 +226,9 @@ func (imr *Imr) lookupSignalAliasHop(owner, target string) {
 		if !imr.Quiet {
 			lgDns.Debug("transport signal: alias hop looked up", "owner", owner, "target", target, "err", err)
 		}
-		imr.settleSignalAliasHop(target, resp, err)
+		if !imr.settleSignalAliasHop(target, resp, err) {
+			return
+		}
 		if c := imr.Cache.Get(owner, dns.TypeSVCB); c != nil && c.Context == cache.ContextAnswer && c.RRset != nil {
 			imr.applyTransportRRsetFromAnswer(owner, c.RRset, c.State)
 		}
@@ -235,15 +237,23 @@ func (imr *Imr) lookupSignalAliasHop(owner, target string) {
 
 // settleSignalAliasHop records how the lookup of an alias hop ended, as
 // settleTransportSignalLookup does for _dns.<ns>: the hop is always an SVCB.
-func (imr *Imr) settleSignalAliasHop(target string, resp *ImrResponse, err error) {
+// It reports whether the hop was found, and so whether owner's alias is worth
+// following again. After a denial it is not: the tracker has forgotten the
+// target, and a denial the cache does not hold under <target, SVCB> (TTL 0, or
+// reached through a CNAME) would start the same lookup at once, again and
+// again. The next query that brings owner's RRset looks the target up. After a
+// failure the backoff stops a new lookup, and the cache has nothing new.
+func (imr *Imr) settleSignalAliasHop(target string, resp *ImrResponse, err error) bool {
 	switch {
 	case err == nil && resp != nil && resp.RRset != nil && resp.RRset.RRtype == dns.TypeSVCB && len(resp.RRset.RRs) > 0:
 		imr.TransportSignalDiscovery.Succeed(target)
+		return true
 	case err == nil && resp != nil && resp.Denial != 0:
 		imr.TransportSignalDiscovery.Reset(target)
 	default:
 		imr.TransportSignalDiscovery.Fail(target, err)
 	}
+	return false
 }
 
 // pathCopy is set's path for one ReceivedSignal: the answer path installs one

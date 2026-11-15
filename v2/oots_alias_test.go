@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -234,5 +235,52 @@ func TestOOTSAliasLookupLoopAndCap(t *testing.T) {
 		cache.ValidationStateSecure)
 	if server.GetReceivedSignal() != nil {
 		t.Errorf("a path longer than the cap installed a signal")
+	}
+}
+
+// A hop that is denied, with the denial not cached under the question, is not
+// followed again at once: one lookup, not a loop of them. The next query that
+// brings the owner's RRset looks again.
+func TestOOTSAliasDeniedHopNotRefollowed(t *testing.T) {
+	imr := newTestImr(t)
+	imr.Quiet = true
+	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
+	alias := []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner)}
+	cacheSignal(imr, pathOwner, alias, cache.ValidationStateSecure)
+	server := cache.NewAuthServer(pathNS)
+	imr.Cache.ServerMap.Set(stateZone, map[string]*cache.AuthServer{cache.ServerKey(pathNS): server})
+
+	var calls atomic.Int32
+	first := make(chan struct{}, 1)
+	saved := signalAliasHopLookupHook
+	signalAliasHopLookupHook = func(*Imr, string) (*ImrResponse, error) {
+		if calls.Add(1) == 1 {
+			first <- struct{}{}
+		}
+		return &ImrResponse{Denial: cache.ContextNXDOMAIN}, nil
+	}
+	t.Cleanup(func() { signalAliasHopLookupHook = saved })
+
+	apply := func() {
+		imr.applyTransportRRsetFromAnswer(pathOwner, &core.RRset{Name: pathOwner, RRtype: dns.TypeSVCB, RRs: copyRRs(alias)},
+			cache.ValidationStateSecure)
+	}
+	apply()
+	select {
+	case <-first:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the hop was not looked up")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("%d lookups after one denial, want 1", n)
+	}
+	apply()
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("the next query did not look the hop up again")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
