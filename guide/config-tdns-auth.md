@@ -988,9 +988,11 @@ Three `options:` values are recognized:
 ## The transport signal: service.transport
 
 `service.transport` tells resolvers which transports the server offers, so
-that they can move off Do53. tdns-auth publishes the signal at
-`_dns.<nameserver>` for each of its identities, in every zone with the
-`add-transport-signal` option.
+that they can move off Do53. tdns-auth writes the signal at
+`_dns.<identity>` for each name in `service.identities`, in that name's home
+zone, and adds signals to the responses of every zone with the
+`add-transport-signal` option. *Where the signal comes from*, below, gives
+the rules.
 
 ```yaml
 service:
@@ -1100,30 +1102,49 @@ standard port, fails where nothing listens there, backs off and falls back to
 Do53. Turn `ports` on once the resolvers that matter to you read it.
 
 **Targets need a signed signal.** A resolver honours a target only when the
-signal validates. In a zone whose signal goes out unsigned, the start-up pass
-logs a warning, and the transports moved to a target are not offered there.
+signal validates. When the signal goes out unsigned (its home zone is not
+signed), the start-up pass logs a warning, and the transports moved to a
+target are not offered there.
 A resolver that predates targets reads a record with a target as if it were
 about the nameserver itself, so turn `targets` on only once every resolver
 that matters to you skips such records.
 
-**A signal written in the zone.** An SVCB RRset that the operator writes at
-`_dns.<nameserver>` is left as written, whatever its mode. tdns-auth
-synthesizes nothing for that name and logs that it left the RRset alone:
-`service.transport` does not apply there. That holds even for an RRset
-identical to what the configuration gives: tdns-auth replaces only a signal
-it stored itself. The RRset answers a direct query like any other zone
-content. It goes into the Additional section only when the nameserver name
-is this server's own, that is one of `service.identities` or a name whose A
-or AAAA records are this server's listen addresses. The records are read in
-the most specific zone served here that holds the name, a co-hosted child
-rather than its parent's glue. An RRset for another server's name is never added there.
+**Where the signal comes from.** A response carries signals composed from
+zone data, the zone's own and that of the zones this server serves, never
+from who the server is. Three rules:
 
-- An AliasMode record (SvcPriority 0) points at another name's signal, such
-  as a provider's. It is also added when the server holds the signal at its
-  target, and the target is followed, from what the server holds.
-- A ServiceMode record whose TargetName is not `.` names the host that serves
-  the transports it lists. Its target is not followed. tdns-imr does not act
-  on such a record yet.
+1. **A signal provisioned in a zone is served as it is.** An SVCB RRset that
+   an operator or a customer writes at `_dns.<nameserver>`, in either mode,
+   is zone content. It answers a direct query. It is added to the Additional
+   section of a zone's responses for every NS name whose `_dns` RRset is in
+   a zone served here: ns1, ns2 and ns3 alike. No identity and no address is
+   checked.
+   - An AliasMode record (SvcPriority 0) points at another name's signal,
+     such as a provider's. When the target is in a zone served here and has
+     an SVCB RRset there, that signal is added with the alias. Otherwise the
+     alias goes alone, and the resolver follows it.
+   - A ServiceMode record whose TargetName is not `.` names the host that
+     serves the transports it lists. Its target is not followed. tdns-imr
+     does not act on such a record yet.
+2. **A signal is synthesized from `service.transport` only for an
+   identity.** For each name in `service.identities`, tdns-auth writes
+   `_dns.<name>` into the name's home zone: the most specific zone served
+   here that holds the name, a co-hosted child rather than its parent.
+   - It writes only where it is that zone's primary and signer: no one else
+     signs it. An unsigned zone of its own counts.
+   - It writes only where nothing else is at that owner. Records there that
+     it did not store itself are left as they are, even when they are
+     identical to what the configuration gives, and it logs that it left
+     them alone.
+   - It withdraws a signal it stored for a name that is no longer an
+     identity.
+   - A listen address decides nothing. Behind NAT, anycast or a load
+     balancer, list the name in `service.identities`.
+3. **tdns-auth never writes into a customer zone**, whatever is or is not
+   there. Listing a name in `service.identities` says its home zone is the
+   operator's own; every other zone is a customer zone. A customer zone
+   whose NS is one of the identities gets the signal from the identity's
+   home zone, by rule 1.
 
 When the zone loads, tdns-auth warns about a transport named in two records
 of one RRset (a resolver uses one endpoint per transport) and about an `oots`

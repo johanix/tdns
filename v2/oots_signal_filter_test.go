@@ -368,12 +368,6 @@ func ootsSignedZone(t *testing.T) (*ZoneData, *KeyDB) {
 	kdb := newTestKeyDB(t)
 	zd := testZone(t, "oots.example.", ootsZone)
 	registerZones(t, zd)
-	// The NS names are this server's: a signal at _dns.<ns> is injected only
-	// for a name whose addresses are the server's listeners (or one of its
-	// identities), since the start-up pass leaves an operator's RRset alone.
-	prev := Conf.Listeners.Addresses
-	Conf.Listeners.Addresses = []string{"127.0.0.1:53", "127.0.0.2:53", "127.0.0.3:53"}
-	t.Cleanup(func() { Conf.Listeners.Addresses = prev })
 	zd.KeyDB = kdb
 	zd.Options = map[ZoneOption]bool{OptInlineSigning: true, OptAddTransportSignal: true}
 	zd.DnssecPolicy = &DnssecPolicy{

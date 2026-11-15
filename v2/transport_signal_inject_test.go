@@ -26,29 +26,6 @@ func mapZoneWithSignal(name, nsName string, signalRRs []dns.RR) *ZoneData {
 	return zd
 }
 
-// mapZoneWithOwnSignal is mapZoneWithSignal for an NS name that is this
-// server's: its address is a listener. Injection tests the name (an RRset
-// at _dns.<ns> is not the pass's word that the name is this server's, since
-// the pass leaves an operator's RRset alone), so a stored ServiceMode signal
-// is injected only for such a name.
-func mapZoneWithOwnSignal(t *testing.T, name, nsName string, signalRRs []dns.RR) *ZoneData {
-	t.Helper()
-	a, err := dns.NewRR(nsName + " 3600 IN A 127.0.0.1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	zd := newMapZone(name, Primary, map[string][]dns.RR{
-		name:             {mustNS(name, nsName)},
-		nsName:           {a},
-		"_dns." + nsName: signalRRs,
-	})
-	zd.Options[OptAddTransportSignal] = true
-	prev := Conf.Listeners.Addresses
-	Conf.Listeners.Addresses = []string{"127.0.0.1:53"}
-	t.Cleanup(func() { Conf.Listeners.Addresses = prev })
-	return zd
-}
-
 func mustNS(owner, ns string) dns.RR {
 	rr, err := dns.NewRR(owner + " 3600 IN NS " + ns)
 	if err != nil {
@@ -76,7 +53,7 @@ func hasSignal(sigs []core.RRset, owner string) bool {
 }
 
 func TestCollectSignalRRsets_InBailiwick(t *testing.T) {
-	zd := mapZoneWithOwnSignal(t, "example.com.", "ns.example.com.",
+	zd := mapZoneWithSignal("example.com.", "ns.example.com.",
 		[]dns.RR{mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 1 . alpn="dot"`)})
 	registerZones(t, zd)
 
@@ -110,22 +87,18 @@ func TestCollectSignalRRsets_AliasChasedCrossZone(t *testing.T) {
 	}
 }
 
-func TestCollectSignalRRsets_UnvouchedAliasIsNotInjected(t *testing.T) {
+func TestCollectSignalRRsets_AliasToATargetNotHereGoesAlone(t *testing.T) {
 	// provider.com is NOT registered, so the server holds no signal for the
-	// alias target, and the NS name has no addresses that are this server's:
-	// the server cannot know the alias is about itself, so it does not
-	// inject it (docs/2026-10-04-transport-signal-publication-and-serving.md).
-	// The alias is still zone content and answers a direct query.
+	// alias target. The alias is zone data and goes in alone (rule 1 of the
+	// maintainer's ruling on plan step S2, 2026-11-15); the resolver can
+	// chase it.
 	child := mapZoneWithSignal("example.com.", "ns.example.com.",
 		[]dns.RR{mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 0 _dns.ns.provider.com.`)})
 	registerZones(t, child)
 
 	sigs := child.collectSignalRRsets(child.publishedSnapshot())
-	if len(sigs) != 0 {
-		t.Fatalf("an alias the server cannot vouch for was injected: %d: %+v", len(sigs), sigs)
-	}
-	if od := getOwnerFrom(child.publishedSnapshot(), "_dns.ns.example.com."); od == nil {
-		t.Fatal("the alias is no longer zone content")
+	if len(sigs) != 1 || !hasSignal(sigs, "_dns.ns.example.com.") {
+		t.Fatalf("want the alias alone, got %d: %+v", len(sigs), sigs)
 	}
 }
 
@@ -163,7 +136,7 @@ func TestAddTransportSignal_KeepsEverySVCBInTheRRset(t *testing.T) {
 }
 
 func TestAddTransportSignal_DedupAgainstAnswer(t *testing.T) {
-	zd := mapZoneWithOwnSignal(t, "example.com.", "ns.example.com.",
+	zd := mapZoneWithSignal("example.com.", "ns.example.com.",
 		[]dns.RR{mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 1 . alpn="dot"`)})
 	registerZones(t, zd)
 	sigs := zd.collectSignalRRsets(zd.publishedSnapshot())

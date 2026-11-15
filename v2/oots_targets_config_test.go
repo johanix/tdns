@@ -162,6 +162,7 @@ func TestTheSignalPassWarnsAboutATargetInAnUnsignedZone(t *testing.T) {
 	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
 ns1.`+z+`	3600	IN	A	127.0.0.1
 `, "127.0.0.1:53")
+	conf.Service.Identities = []string{"ns1." + z}
 	conf.Service.Transport.Signal = "dot:10,doq:20"
 	conf.Service.Transport.Targets = map[string]string{"dot": "dot.provider.example."}
 	if err := zd.CreateTransportSignalRRs(conf); err != nil {
@@ -197,17 +198,22 @@ ns1.`+z+`	3600	IN	A	127.0.0.1
 	}
 }
 
-// Without a target there is nothing to warn about.
+// Without a target there is nothing to warn about, though the signal is
+// stored unsigned.
 func TestTheSignalPassDoesNotWarnWithoutATarget(t *testing.T) {
 	const z = "notarget.sig.example."
 	logs := captureSignalLog(t)
 	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
 ns1.`+z+`	3600	IN	A	127.0.0.1
 `, "127.0.0.1:53")
+	conf.Service.Identities = []string{"ns1." + z}
 	conf.Service.Transport.Signal = "dot:10"
 	conf.Service.Transport.Ports = map[string]uint16{"dot": 1234}
 	if err := zd.CreateTransportSignalRRs(conf); err != nil {
 		t.Fatal(err)
+	}
+	if len(svcbRecords(zd, "_dns.ns1."+z)) == 0 {
+		t.Fatal("no signal was stored; the test does not exercise the warning")
 	}
 	if strings.Contains(logs.String(), "names a target") {
 		t.Fatalf("a warning about a target with none configured:\n%s", logs.String())
