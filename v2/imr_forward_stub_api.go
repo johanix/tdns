@@ -245,7 +245,7 @@ type ImrStubZoneStatus struct {
 type ImrStubProbeResult struct {
 	Zone      string `json:"zone"`
 	Server    string `json:"server"`
-	Addr      string `json:"addr"`
+	Addr      string `json:"addr"` // as dialed: with the port a signal assigned, if any
 	Transport string `json:"transport"`
 	OK        bool   `json:"ok"` // response received, NOERROR, AA set
 	Rcode     string `json:"rcode,omitempty"`
@@ -406,7 +406,7 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 						res := ImrStubProbeResult{
 							Zone:      zone,
 							Server:    serverName,
-							Addr:      addr,
+							Addr:      dialAddr,
 							Transport: core.TransportToString[transport],
 							RTT:       rtt.Truncate(time.Millisecond).String(),
 						}

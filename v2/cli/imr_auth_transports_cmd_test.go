@@ -197,6 +197,14 @@ func TestFormatOOTSSignal(t *testing.T) {
 	if got != "dot:30 port:1234 doq:20 port:1235" {
 		t.Errorf("formatOOTSSignal with ports = %q", got)
 	}
+	got = formatOOTSSignal(
+		map[string]uint8{"dot": 100, "doh": 100},
+		map[string]uint16{"dot": 1234},
+		"alpn",
+	)
+	if got != "alpn:dot port:1234,doh" {
+		t.Errorf("formatOOTSSignal alpn with ports = %q", got)
+	}
 }
 
 func TestFormatAuthTransportsSort(t *testing.T) {

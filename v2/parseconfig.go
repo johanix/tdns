@@ -172,6 +172,10 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 	// instead of preserving the previously-decoded value (mapstructure leaves
 	// absent keys untouched).
 	conf.Dnssec.DNSKEYTransport = ""
+	// service.transport as a whole: its fields exclude each other (signal and
+	// port, or records), so one left over from the previous file would make
+	// the new one look like both, and a removed port would stay published.
+	conf.Service.Transport = TransportConf{}
 
 	if derr := decoder.Decode(configMap); derr != nil {
 		return fmt.Errorf("error decoding config: %v", derr)
@@ -835,12 +839,22 @@ func (conf *Config) checkTransportSignal() error {
 		return nil
 	}
 	t := conf.Service.Transport
-	if len(t.Records) > 0 && (t.Signal != "" || t.Port != 0) {
-		return fmt.Errorf("service.transport: set either signal and port, or records, not both")
+	if err := validateTransportSignal(t); err != nil {
+		return err
 	}
 	if t.Type != "svcb" && (t.Port != 0 || len(t.Records) > 0) {
 		lgConfig.Warn("service.transport port and records are published only when type is svcb",
 			"type", t.Type)
+	}
+	return nil
+}
+
+// validateTransportSignal is the part of checkTransportSignal that refuses a
+// config. ValidateConfig calls it too, so `config check` refuses what the
+// daemon refuses.
+func validateTransportSignal(t TransportConf) error {
+	if len(t.Records) > 0 && (t.Signal != "" || t.Port != 0) {
+		return fmt.Errorf("service.transport: set either signal and port, or records, not both")
 	}
 	return nil
 }
