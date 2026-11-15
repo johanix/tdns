@@ -40,6 +40,7 @@ Needs: `unshare`, `ip`, `python3` (to read the CLI's JSON), and a tdns build:
 | `AUTH_SEC` | secondaries that re-serve a transferred zone |
 | `AUTH_INFRA` | the rig's own root server |
 | `AUTH_BASE` | the base build for byte-identity checks (suite `published`) |
+| `PUB_DO53` | what the publisher does with a do53 its config does not name: `written` (default, builds before OOTS S5) or `omitted` (S5 and later) |
 | `IMR` | the resolver under test |
 | `CLI`, `DOG` | the observers |
 
@@ -78,7 +79,7 @@ observed, and the negative case.
 | Suite | Scenarios | Shows | Red on |
 |---|---|---|---|
 | `ports` | K2, P1, P2, P6 | a port on a `.` record moves the transport on the server's own address: from `ports:` config, from one record naming two transports, from an ALPN-only record | a resolver without port support; P2, P6 on #994's head |
-| `published` | K1, M3 | what `service.transport` publishes: one record per ported transport; a default config byte-identical to the base build | a publisher that ignores `ports`, or changes the default |
+| `published` | K1, M3 | what `service.transport` publishes: one record per ported transport, never do53 beside udp or tcp; a default config byte-identical to the base build, or (`PUB_DO53=omitted`) identical but for the default do53 | a publisher that ignores `ports`, changes the default, or writes the default do53 against `PUB_DO53` |
 | `ignore` | P3, P4 | a record with a target, and the ServiceMode siblings of an AliasMode record, are not applied | a resolver that applies them (trap) |
 | `tiebreak` | P5 | a transport named twice takes the same record in both RR orders | a resolver where the last record wins |
 | `lossless` | C1 | a tdns secondary re-serves every oots value byte for byte: unknown tokens, only-unknown values, odd identifiers, a weight octet above 100; the resolver validates each | a secondary or resolver whose codec drops or clamps |
