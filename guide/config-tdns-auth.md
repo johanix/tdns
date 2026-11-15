@@ -1034,7 +1034,8 @@ _dns.ns1.example. 10800 IN SVCB 1 . port=8443 oots="doh:5"
 Every transport is in at most one record. A record's port applies to every
 transport it names (RFC 9461), which is why a transport on its own port gets
 its own record. A `udp` or `tcp` with a port that the signal does not name is
-stated at its default: `port=5353 oots="udp:100"`.
+stated at its default: `port=5353 oots="udp:100"`. That holds with no
+`signal` at all, so `ports.udp: 5353` alone publishes that one record.
 
 A resolver sends the TCP retry after a truncation to the address and port
 that truncated, so serve TCP on a `udp` port too. TCP the resolver forces goes
