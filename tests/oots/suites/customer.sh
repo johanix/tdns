@@ -65,7 +65,7 @@ suite_customer() {
 }
 
 _cz_run() { # 1|2
-	local _r _ids _t0
+	local _r _ids _t0 _q1 _q2
 	_r="$1"
 	note "run $_r: $([ "$_r" = 1 ] && echo "no identity, the signal provisioned in provider.test" || echo "identity ns1.provider.test, the signal synthesized")"
 	ZDIR="$WORK/cust/zones"; mkdir -p "$ZDIR"
@@ -96,9 +96,11 @@ _cz_run() { # 1|2
 	# Z5 and Z7, through a fresh resolver: the first queries for the two
 	# customers' zones go out together, so both aliases meet one target.
 	imr_up || { fail "customer: the resolver did not start (run $_r)"; return 1; }
-	dogq 127.0.0.100 first.customer.test. A >/dev/null &
-	dogq 127.0.0.100 first.customer2.test. A >/dev/null &
-	wait
+	# Wait for these two queries only: a bare wait would also wait for the
+	# daemons this shell started in the background.
+	dogq 127.0.0.100 first.customer.test. A >/dev/null & _q1=$!
+	dogq 127.0.0.100 first.customer2.test. A >/dev/null & _q2=$!
+	wait "$_q1" "$_q2"
 	wait_signal ns1.customer.test. 15 || note "no signal learnt for ns1.customer.test. within 15 s"
 	wait_signal ns1.customer2.test. 15 || note "no signal learnt for ns1.customer2.test. within 15 s"
 	load customer.test. 60
