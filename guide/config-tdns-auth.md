@@ -1000,6 +1000,8 @@ service:
       ports:
          dot:  1234
          doh:  8443
+      targets:
+         doq:  doq.example.net.
 ```
 
 | Key | Default | Meaning |
@@ -1007,6 +1009,7 @@ service:
 | `type` | `none` | `svcb` publishes an SVCB record with the `oots` SvcParam, `tsync` a TSYNC record, `none` nothing. An unknown value is warned about and read as `none` |
 | `signal` | — | comma-separated `transport:weight` pairs, from `do53`, `dot`, `doq` and `doh`, weights 0 to 100. An absent `do53` is 100 and an absent encrypted transport 0 |
 | `ports` | — | the port published for a transport that is not on its standard port (853 for `dot` and `doq`, 443 for `doh`). Only with `type: svcb` |
+| `targets` | — | the host that serves a transport, when it is not the nameserver itself: `dot` and `doq`. Only with `type: svcb` |
 
 **What is published.** Without `ports` there is one record:
 
@@ -1027,6 +1030,20 @@ Every transport is in exactly one record. A record's port applies to every
 transport it names (RFC 9461), which is why a transport on its own port gets
 its own record.
 
+A transport with a target gets a record of its own too, with the target as
+its TargetName and its port, if it has one, beside it. With the `targets`
+above, `doq` moves to `doq.example.net` on port 853:
+
+```
+_dns.ns1.example. 10800 IN SVCB 1 . oots="do53:100"
+_dns.ns1.example. 10800 IN SVCB 1 . port=1234 oots="dot:10"
+_dns.ns1.example. 10800 IN SVCB 1 doq.example.net. oots="doq:20"
+_dns.ns1.example. 10800 IN SVCB 1 . port=8443 oots="doh:5"
+```
+
+The resolver looks the target's addresses up itself; tdns-auth does not add
+them to the response.
+
 **Checks at load.** Each of these is an error, and the daemon does not start:
 
 - `signal` does not parse;
@@ -1036,7 +1053,17 @@ its own record.
 - port 0, or a value above 65535. A transport's standard port counts as absent;
 - `dot` and `doh` on one port, including one of them on the other's standard
   port: both are TCP. `doq` is UDP and may share a port with either;
-- `ports` with `type: tsync` or `none`.
+- `ports` with `type: tsync` or `none`;
+- a key of `targets` other than `dot` or `doq`, or one whose transport has no
+  weight in `signal`. A `doh` target is refused: DoH on another host needs a
+  path, which the signal does not carry;
+- a target that is an address or not a domain name. `.` is the nameserver
+  itself and counts as absent;
+- `targets` with `type: tsync` or `none`.
+
+A transport with a target is on another host, so it shares no socket with
+this one: `dot` on another host may use port 443 beside a local `doh`, and its
+port is not checked against `listeners.ports`.
 
 A published port that is not in `listeners.ports` for its transport is a
 warning, not an error: a front end may publish a port the daemon does not
@@ -1048,6 +1075,13 @@ as well.
 **Older resolvers.** A resolver that does not read the `port` key dials the
 standard port, fails where nothing listens there, backs off and falls back to
 Do53. Turn `ports` on once the resolvers that matter to you read it.
+
+**Targets need a signed signal.** A resolver honours a target only when the
+signal validates. In a zone whose signal goes out unsigned, the start-up pass
+logs a warning, and the transports moved to a target are not offered there.
+A resolver that predates targets reads a record with a target as if it were
+about the nameserver itself, so turn `targets` on only once every resolver
+that matters to you skips such records.
 
 **A signal written in the zone.** An SVCB RRset that the operator writes at
 `_dns.<nameserver>` is left as written, whatever its mode. tdns-auth

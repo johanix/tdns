@@ -343,18 +343,53 @@ func (zd *ZoneData) buildServerSVCB(conf *Config, nsName string, ipv4s, ipv6s []
 		rrs = append(rrs, &dns.SVCB{
 			Hdr:      dns.RR_Header{Name: owner, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
 			Priority: 1,
-			Target:   ".",
+			Target:   rec.targetName(),
 			Value:    svcbValuesForSignal(rec.weights, rec.port),
 		})
 	}
 	return &core.RRset{Name: owner, RRtype: dns.TypeSVCB, RRs: rrs}, nil
 }
 
-// signalRecord is one SVCB of the published signal: the weights it states
-// and its port key (0 for none).
+// signalRecord is one SVCB of the published signal: the weights it states,
+// its port key (0 for none) and its TargetName ("" for the nameserver
+// itself, ".").
 type signalRecord struct {
 	weights map[string]uint8
 	port    uint16
+	target  string
+}
+
+// targetName is the record's TargetName on the wire.
+func (r signalRecord) targetName() string {
+	if r.target == "" {
+		return "."
+	}
+	return r.target
+}
+
+// publishedSignalTarget is the TargetName published for transport t: the
+// configured name, fully qualified, or "" when there is none or it is "."
+// (the nameserver itself).
+func publishedSignalTarget(targets map[string]string, t string) string {
+	v := strings.TrimSpace(targets[t])
+	if v == "" || v == "." {
+		return ""
+	}
+	return dns.Fqdn(v)
+}
+
+// svcbHasTarget reports whether an SVCB RRset has a ServiceMode record whose
+// TargetName is not the owner's own nameserver ("."): an alternative host.
+func svcbHasTarget(rs *core.RRset) bool {
+	if rs == nil {
+		return false
+	}
+	for _, rr := range rs.RRs {
+		if svcb, ok := rr.(*dns.SVCB); ok && svcb.Priority != 0 && svcb.Target != "." && svcb.Target != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // signalStandardPorts is the standard port of each transport that can take a
@@ -381,13 +416,17 @@ func publishedSignalPort(ports map[string]uint16, t string) uint16 {
 // service.transport:
 //   - No signal: one record with no weights and no port, an empty SVCB, as
 //     before.
-//   - No published port: one record with the signal's weights and the do53
-//     default written out, built as before, so the RR is byte-identical.
-//   - Published ports: first one record without a port that carries every
-//     transport without one and do53 once (the operator's weight, or 100),
-//     then one record per transport with a port that carries that transport
-//     alone, in the order dot, doq, doh. Every transport is in exactly one
-//     record, so a resolver never meets one named twice.
+//   - No published port or target: one record with the signal's weights and
+//     the do53 default written out, built as before, so the RR is
+//     byte-identical.
+//   - Published ports or targets: first one record at the nameserver itself
+//     (TargetName ".") without a port that carries every transport without
+//     either and do53 once (the operator's weight, or 100), then one record
+//     per transport with a port or a target that carries that transport
+//     alone, its target as TargetName and its port beside it, in the order
+//     dot, doq, doh. Every transport is in exactly one record, so a resolver
+//     never meets one named twice, and a record's endpoint applies to every
+//     transport it names (design 2026-11-14 section 2).
 func transportSignalLayout(t TransportConf) ([]signalRecord, error) {
 	if t.Signal == "" {
 		return []signalRecord{{}}, nil
@@ -399,10 +438,11 @@ func transportSignalLayout(t TransportConf) ([]signalRecord, error) {
 	recs := []signalRecord{{weights: weights}}
 	for _, tr := range signalPortOrder {
 		p := publishedSignalPort(t.Ports, tr)
-		if p == 0 || weights[tr] == 0 {
+		tg := publishedSignalTarget(t.Targets, tr)
+		if (p == 0 && tg == "") || weights[tr] == 0 {
 			continue
 		}
-		recs = append(recs, signalRecord{weights: map[string]uint8{tr: weights[tr]}, port: p})
+		recs = append(recs, signalRecord{weights: map[string]uint8{tr: weights[tr]}, port: p, target: tg})
 		delete(weights, tr)
 	}
 	return recs, nil
@@ -481,6 +521,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 	storeForbidden := !zoneMayOriginateContent(zd) || (dak == nil && apexIsSigned(apex))
 
 	staged, kept := 0, 0
+	unsignedTarget := false // a signal with a target that goes out unsigned
 	synth := map[string]*core.RRset{}
 	for _, rr := range nsRRset.RRs {
 		ns, ok := rr.(*dns.NS)
@@ -511,6 +552,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 			lgDns.Debug("createTransportSignalSVCB: synthesized fallback signal for out-of-bailiwick identity NS",
 				"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
 			synth[ownerName] = s
+			unsignedTarget = unsignedTarget || svcbHasTarget(s)
 			continue
 		}
 
@@ -547,6 +589,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 						return err
 					}
 					synth[tgt] = s
+					unsignedTarget = unsignedTarget || svcbHasTarget(s)
 				}
 				continue
 			}
@@ -579,6 +622,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 			lgDns.Info("createTransportSignalSVCB: this server stores no signal into this zone (a secondary that may not originate content, or a zone signed by someone else); the signal is kept as an unsigned fallback beside the snapshot, injected only",
 				"zone", zd.ZoneName, "owner", ownerName)
 			synth[ownerName] = stored
+			unsignedTarget = unsignedTarget || svcbHasTarget(stored)
 			continue
 		case dak != nil:
 			// Sign BEFORE staging so the snapshot freezes a signed signal; the
@@ -597,6 +641,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
 		zd.stageRRsetLocked(ownerName, *stored)
 		zd.noteSignalStored(ownerName, stored.RRs)
+		unsignedTarget = unsignedTarget || (dak == nil && svcbHasTarget(stored))
 		staged++
 	}
 	if staged == 0 && len(synth) == 0 {
@@ -613,6 +658,14 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 				"zone", zd.ZoneName)
 		}
 		return nil
+	}
+	if unsignedTarget {
+		// A resolver honours a target only after a Secure verdict for the
+		// whole path (design 2026-11-14 section 4, R1), so in an unsigned
+		// signal the targets are dead weight: the transports they move stay
+		// on the nameserver for every resolver that follows the rule.
+		lgDns.Warn("createTransportSignalSVCB: service.transport.targets names a target, but the signal in this zone is not signed; resolvers honour a target only from a validated signal, so the transports it moves are not offered there",
+			"zone", zd.ZoneName)
 	}
 	zd.publishTransportSignalLocked(bare, synth)
 	return nil

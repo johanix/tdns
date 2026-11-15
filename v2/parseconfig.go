@@ -854,9 +854,21 @@ func (conf *Config) checkTransportSignal() error {
 //   - dot and doh on one port is refused: both are TCP. doq is UDP and may
 //     share a port with either;
 //   - ports with type tsync or none is refused: only SVCB carries a port;
+//   - each key of targets is dot or doq, and the signal gives it a weight. A
+//     doh target is refused: DoH on another host needs a path, which the
+//     signal does not carry;
+//   - a target is a domain name, not an address; "." is the nameserver
+//     itself and counts as absent;
+//   - targets with type tsync or none is refused;
+//   - the dot/doh socket rule applies per endpoint: a transport moved to a
+//     target is on another host and shares no socket with this one;
 //   - a warning when a published port is not in listeners.ports for its
 //     transport. A front end may publish a port the daemon does not listen
-//     on, so it is not an error.
+//     on, so it is not an error. A transport with a target is served by the
+//     target, so its port is not checked against this daemon's listeners.
+//
+// Whether the zone's signal is signed, which a target needs, is known only
+// per zone, so the start-up pass warns about that (createTransportSignalSVCB).
 //
 // ValidateConfig calls it too, for the errors, so `config check` refuses
 // what the daemon refuses.
@@ -865,11 +877,17 @@ func validateTransportSignal(t TransportConf, listen ListenerPortsConf) ([]strin
 	if err != nil {
 		return nil, fmt.Errorf("service.transport.signal %q: %w", t.Signal, err)
 	}
-	if len(t.Ports) == 0 {
+	if len(t.Ports) == 0 && len(t.Targets) == 0 {
 		return nil, nil
 	}
 	if t.Type != "svcb" {
-		return nil, fmt.Errorf("service.transport.ports: only an SVCB signal carries a port, and type is %s", t.Type)
+		if len(t.Ports) > 0 {
+			return nil, fmt.Errorf("service.transport.ports: only an SVCB signal carries a port, and type is %s", t.Type)
+		}
+		return nil, fmt.Errorf("service.transport.targets: only an SVCB signal carries a target, and type is %s", t.Type)
+	}
+	if err := validateSignalTargets(t.Targets, weights); err != nil {
+		return nil, err
 	}
 	keys := slices.Sorted(maps.Keys(t.Ports))
 	for _, k := range keys {
@@ -889,19 +907,54 @@ func validateTransportSignal(t TransportConf, listen ListenerPortsConf) ([]strin
 		}
 		return signalStandardPorts[tr]
 	}
-	if weights["dot"] > 0 && weights["doh"] > 0 && tcpPort("dot") == tcpPort("doh") {
+	// The socket rule is per endpoint: a transport moved to a target is on
+	// another host. doh never has a target (validateSignalTargets).
+	sameHost := publishedSignalTarget(t.Targets, "dot") == publishedSignalTarget(t.Targets, "doh")
+	if weights["dot"] > 0 && weights["doh"] > 0 && sameHost && tcpPort("dot") == tcpPort("doh") {
 		return nil, fmt.Errorf("service.transport.ports: dot and doh both on port %d; both are TCP, so they cannot share it", tcpPort("dot"))
 	}
 	listening := map[string][]uint16{"dot": listen.DoT, "doq": listen.DoQ, "doh": listen.DoH}
 	var warnings []string
 	for _, k := range keys {
 		p := publishedSignalPort(t.Ports, k)
+		if publishedSignalTarget(t.Targets, k) != "" {
+			continue // served by the target, not by this daemon
+		}
 		if p != 0 && !slices.Contains(listening[k], p) {
 			warnings = append(warnings, fmt.Sprintf(
 				"service.transport.ports.%s: port %d is published but is not in listeners.ports.%s; resolvers will dial it", k, p, k))
 		}
 	}
 	return warnings, nil
+}
+
+// validateSignalTargets checks service.transport.targets against the
+// signal's weights. See validateTransportSignal.
+func validateSignalTargets(targets map[string]string, weights map[string]uint8) error {
+	for _, k := range slices.Sorted(maps.Keys(targets)) {
+		if k == "doh" {
+			return fmt.Errorf("service.transport.targets.doh: DoH on another host needs a path, which the signal does not carry; a doh target is refused")
+		}
+		if _, ok := signalStandardPorts[k]; !ok {
+			return fmt.Errorf("service.transport.targets.%s: not a transport that takes a target (dot, doq)", k)
+		}
+		if weights[k] == 0 {
+			return fmt.Errorf("service.transport.targets.%s: the signal gives %s no weight, so its target would be published for nothing", k, k)
+		}
+		v := strings.TrimSpace(targets[k])
+		switch {
+		case v == "":
+			return fmt.Errorf("service.transport.targets.%s: empty; give a host name, or leave the key out", k)
+		case v == ".":
+			continue // the nameserver itself: absent
+		case net.ParseIP(v) != nil:
+			return fmt.Errorf("service.transport.targets.%s: %q is an address; a target is a host name, whose addresses the resolver looks up", k, v)
+		}
+		if _, ok := dns.IsDomainName(v); !ok {
+			return fmt.Errorf("service.transport.targets.%s: %q is not a domain name", k, v)
+		}
+	}
+	return nil
 }
 
 // portMapRangeHook refuses a value outside 0-65535, or with a fraction, in a
