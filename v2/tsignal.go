@@ -382,8 +382,11 @@ func publishedSignalPort(ports map[string]uint16, t string) uint16 {
 
 // transportSignalLayout lays out the published SVCB RRset from
 // service.transport:
-//   - No signal: one record with no weights and no port, an empty SVCB, as
-//     before.
+//   - No signal and no published port or target: one record with no weights
+//     and no port, an empty SVCB, as before. No signal with a udp or tcp port
+//     or target: the records below, each at the default 100
+//     (validateTransportSignal refuses an encrypted port or target without a
+//     weight).
 //   - No published port or target: one record with the signal's weights as
 //     published (publishedSignalWeights): do53 is emitted as udp and tcp, and
 //     nothing the operator did not name is written out.
@@ -399,12 +402,12 @@ func publishedSignalPort(ports map[string]uint16, t string) uint16 {
 //     record's endpoint applies to every transport it names (design
 //     2026-11-14 section 2).
 func transportSignalLayout(t TransportConf) ([]signalRecord, error) {
-	if t.Signal == "" {
-		return []signalRecord{{}}, nil
-	}
-	weights, err := publishedSignalWeights(t.Signal)
-	if err != nil {
-		return nil, err
+	weights := map[string]uint8{}
+	if t.Signal != "" {
+		var err error
+		if weights, err = publishedSignalWeights(t.Signal); err != nil {
+			return nil, err
+		}
 	}
 	var ported []signalRecord
 	for _, tr := range signalPortOrder {
@@ -422,6 +425,9 @@ func transportSignalLayout(t TransportConf) ([]signalRecord, error) {
 		}
 		ported = append(ported, signalRecord{weights: map[string]uint8{tr: w}, port: p, target: tg})
 		delete(weights, tr)
+	}
+	if t.Signal == "" && len(ported) == 0 {
+		return []signalRecord{{}}, nil
 	}
 	if len(ported) > 0 && svcbOotsFromWeights(weights) == nil {
 		return ported, nil

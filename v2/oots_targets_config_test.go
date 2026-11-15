@@ -64,6 +64,14 @@ func TestTransportSignalLayoutWithTargets(t *testing.T) {
 				o + `1 dns.provider.example. oots="udp:100"`,
 				o + `1 dns.provider.example. oots="tcp:100"`,
 			}},
+		{"no signal, no port, no target: an empty SVCB", "", nil, nil,
+			[]string{o + `1 .`}},
+		{"no signal with a udp port: udp stated at its default", "", map[string]uint16{"udp": 5353}, nil,
+			[]string{o + `1 . port=5353 oots="udp:100"`}},
+		{"no signal with a udp target: the target is kept", "", nil, map[string]string{"udp": "dns.provider.example."},
+			[]string{o + `1 dns.provider.example. oots="udp:100"`}},
+		{"no signal with a tcp port and target", "", map[string]uint16{"tcp": 5353}, map[string]string{"tcp": "dns.provider.example."},
+			[]string{o + `1 dns.provider.example. port=5353 oots="tcp:100"`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := buildSignalRRs(t, TransportConf{Type: "svcb", Signal: tc.signal, Ports: tc.ports, Targets: tc.targets})
@@ -109,6 +117,8 @@ func TestTransportSignalTargetChecks(t *testing.T) {
 		{"an IPv6 address is not a name", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", "2001:db8::1")}, "is an address", 0},
 		{"not a domain name", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", "a..b")}, "not a domain name", 0},
 		{"empty", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", " ")}, "empty", 0},
+		{"no signal: a udp target is accepted", TransportConf{Type: "svcb", Targets: tg("udp", "dns.provider.example.")}, "", 0},
+		{"no signal: a dot target has no weight", TransportConf{Type: "svcb", Targets: tg("dot", "dot.provider.example.")}, "no weight", 0},
 		{"targets with type tsync", TransportConf{Type: "tsync", Signal: "dot:10", Targets: tg("dot", "dot.provider.example.")}, "type is tsync", 0},
 		{"targets with type none", TransportConf{Type: "none", Signal: "dot:10", Targets: tg("dot", "dot.provider.example.")}, "type is none", 0},
 		{"dot and doh on one port, both here", TransportConf{Type: "svcb", Signal: "dot:10,doh:5", Ports: map[string]uint16{"dot": 443}}, "both are TCP", 0},

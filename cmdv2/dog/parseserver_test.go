@@ -67,3 +67,46 @@ func TestParseServerRejectsGarbage(t *testing.T) {
 		}
 	}
 }
+
+// TestParseServerUDPSchemeWithTCPFlag: udp:// is dns://, so +tcp upgrades it
+// to Do53-TCP whichever comes first on the command line, as it does for
+// dns://. An encrypted scheme still conflicts with +tcp.
+func TestParseServerUDPSchemeWithTCPFlag(t *testing.T) {
+	for _, scheme := range []string{"dns", "udp"} {
+		server := scheme + "://192.0.2.5"
+
+		// +tcp first, then @server.
+		opts, err := ProcessOptions(map[string]string{}, "+TCP", "+tcp")
+		if err != nil {
+			t.Fatalf("+tcp: %v", err)
+		}
+		opts, err = ParseServer(server, opts)
+		if err != nil {
+			t.Fatalf("+tcp @%s: %v", server, err)
+		}
+		if opts["transport"] != "Do53-TCP" {
+			t.Errorf("+tcp @%s: transport = %q, want Do53-TCP", server, opts["transport"])
+		}
+
+		// @server first, then +tcp.
+		opts, err = ParseServer(server, map[string]string{})
+		if err != nil {
+			t.Fatalf("@%s: %v", server, err)
+		}
+		opts, err = ProcessOptions(opts, "+TCP", "+tcp")
+		if err != nil {
+			t.Fatalf("@%s +tcp: %v", server, err)
+		}
+		if opts["transport"] != "Do53-TCP" {
+			t.Errorf("@%s +tcp: transport = %q, want Do53-TCP", server, opts["transport"])
+		}
+	}
+
+	opts, err := ProcessOptions(map[string]string{}, "+TCP", "+tcp")
+	if err != nil {
+		t.Fatalf("+tcp: %v", err)
+	}
+	if _, err := ParseServer("tls://192.0.2.5", opts); err == nil {
+		t.Error("+tcp @tls://: accepted, want a conflict")
+	}
+}

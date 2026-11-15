@@ -128,7 +128,7 @@ ns2.`+z+`	3600	IN	A	127.0.0.1
 	delete(zd.Options, OptAddTransportSignal)
 	serverOptions(zd, map[AuthOption]string{AuthOptAddTransportSignal: "true"})
 
-	runTransportSignalPostpass(conf)
+	runTransportSignalPass(zd, conf)
 	if !served(zd, "_dns.ns1."+z, dns.TypeSVCB) {
 		t.Fatal("no signal for this server's identity behind a wildcard listener")
 	}
