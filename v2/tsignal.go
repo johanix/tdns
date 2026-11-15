@@ -231,35 +231,71 @@ func tsyncHasAlias(rrset core.RRset) bool {
 }
 
 // buildServerSVCB constructs a synthesized ServiceMode "_dns.<ns> SVCB" RRset
-// carrying the registered oots SvcParam (draft-johani-dnsop-svcb-oots / -03).
-// Address hints and the private tlsa SvcParam are not included on the OOTS
-// record (-03 does not use them).
+// carrying the registered oots SvcParam (draft-johani-dnsop-svcb-oots / -03)
+// and, when the operator set one, the standard SVCB port key on the same RR.
+// Address hints and the private tlsa SvcParam are not included. One SVCB has
+// one port, so records with different ports are several RRs of this RRset.
+// Publishing the port does not open the listen socket.
 func (zd *ZoneData) buildServerSVCB(conf *Config, nsName string, ipv4s, ipv6s []net.IP) (*core.RRset, error) {
 	_ = ipv4s
 	_ = ipv6s
 	if Globals.ServerSVCB == nil {
 		return nil, fmt.Errorf("buildServerSVCB: no server SVCB configured")
 	}
-	// -03 OOTS record carries only the oots SvcParam (no inherited alpn/hints/tlsa).
-	values := make([]dns.SVCBKeyValue, 0, 1)
-	if sig := conf.Service.Transport.Signal; sig != "" {
-		oots, err := transportSignalToSVCBOots(sig)
+	recs := transportSignalRecords(conf.Service.Transport)
+	if len(recs) == 0 {
+		// No signal configured: one empty SVCB, as before.
+		recs = []TransportSignalRecord{{}}
+	}
+	owner := "_dns." + nsName
+	rrs := make([]dns.RR, 0, len(recs))
+	for _, rec := range recs {
+		values, err := svcbValuesForSignal(rec)
 		if err != nil {
 			return nil, fmt.Errorf("buildServerSVCB: %w", err)
 		}
-		if oots != nil {
-			values = append(values, oots)
-		}
+		rrs = append(rrs, &dns.SVCB{
+			Hdr:      dns.RR_Header{Name: owner, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
+			Priority: 1,
+			Target:   ".",
+			Value:    values,
+		})
 	}
+	return &core.RRset{Name: owner, RRtype: dns.TypeSVCB, RRs: rrs}, nil
+}
 
-	owner := "_dns." + nsName
-	svcb := &dns.SVCB{
-		Hdr:      dns.RR_Header{Name: owner, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
-		Priority: 1,
-		Target:   ".",
-		Value:    values,
+// transportSignalRecords is the SVCB records to publish. The records list is
+// one RR each. Otherwise the single signal string, with its optional port, is
+// one record. Neither set means nothing to say.
+func transportSignalRecords(t TransportConf) []TransportSignalRecord {
+	if len(t.Records) > 0 {
+		return t.Records
 	}
-	return &core.RRset{Name: owner, RRtype: dns.TypeSVCB, RRs: []dns.RR{svcb}}, nil
+	if t.Signal == "" && t.Port == 0 {
+		return nil
+	}
+	return []TransportSignalRecord{{Signal: t.Signal, Port: t.Port}}
+}
+
+// svcbValuesForSignal is the SvcParams of one published record, in key order:
+// port (3) then oots (12). A zero port is omitted. Hints, alpn and tlsa are
+// not added.
+func svcbValuesForSignal(rec TransportSignalRecord) ([]dns.SVCBKeyValue, error) {
+	var values []dns.SVCBKeyValue
+	if rec.Port != 0 {
+		values = append(values, &dns.SVCBPort{Port: rec.Port})
+	}
+	if rec.Signal == "" {
+		return values, nil
+	}
+	oots, err := transportSignalToSVCBOots(rec.Signal)
+	if err != nil {
+		return nil, err
+	}
+	if oots != nil {
+		values = append(values, oots)
+	}
+	return values, nil
 }
 
 // transportSignalToSVCBOots builds a dns.SVCBOots from a config signal string.

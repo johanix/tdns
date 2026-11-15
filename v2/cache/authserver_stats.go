@@ -46,6 +46,11 @@ func (c TrafficClass) String() string {
 type ReceivedSignal struct {
 	Source  string                   // "oots" (SVCB oots or TSYNC weights), "alpn" (SVCB ALPN only: 100 each), "config" (a stub), "operator" (set server transport)
 	Weights map[core.Transport]uint8 // the transports named, with their weights
+	// Ports is the non-default port assigned to a transport this signal
+	// named. Absent means that transport keeps its usual port. Do53 is never
+	// entered: port= does not move cleartext off 53, and it does not advertise
+	// another cleartext listener.
+	Ports map[core.Transport]uint16
 }
 
 // clone is a copy of r that shares nothing with it; nil for nil.
@@ -53,7 +58,7 @@ func (r *ReceivedSignal) clone() *ReceivedSignal {
 	if r == nil {
 		return nil
 	}
-	return &ReceivedSignal{Source: r.Source, Weights: copyMap(r.Weights)}
+	return &ReceivedSignal{Source: r.Source, Weights: copyMap(r.Weights), Ports: copyMap(r.Ports)}
 }
 
 // AuthServerStats is one AuthServer instance's transport-usage counters, with

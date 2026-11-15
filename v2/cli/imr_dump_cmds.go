@@ -137,6 +137,9 @@ var dumpAuthServersCmd = &cobra.Command{
 					fmt.Printf("    Addresses: %s\n", addrs)
 					fmt.Printf("    ALPN: %s\n", formatList(server.Alpn))
 					fmt.Printf("    Transports: %s\n", transports)
+					if ports := formatAuthServerPorts(server); ports != "" {
+						fmt.Printf("    Signal ports: %s\n", ports)
+					}
 					fmt.Printf("    Connection mode: %s\n", conn)
 					if len(server.TransportSignal) > 0 {
 						fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)
@@ -826,6 +829,36 @@ func validationStateString(state cache.ValidationState) string {
 	return "[unset]"
 }
 
+// formatAuthServerPorts renders the non-default ports the latest signal
+// assigned, in transport order. Empty when every transport keeps its usual port.
+func formatAuthServerPorts(server *cache.AuthServer) string {
+	if server == nil {
+		return ""
+	}
+	ports := server.GetTransportPorts()
+	if len(ports) == 0 {
+		return ""
+	}
+	order := []core.Transport{core.TransportDoT, core.TransportDoQ, core.TransportDoH}
+	var parts []string
+	seen := map[core.Transport]bool{}
+	for _, t := range order {
+		if p := ports[t]; p != 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToString[t], p))
+			seen[t] = true
+		}
+	}
+	var rest []string
+	for t, p := range ports {
+		if seen[t] || p == 0 {
+			continue
+		}
+		rest = append(rest, fmt.Sprintf("%s:%d", core.TransportToString[t], p))
+	}
+	sort.Strings(rest)
+	return strings.Join(append(parts, rest...), " ")
+}
+
 // printAuthServerVerbose prints detailed information about the given auth server.
 // It emits the server name, source, addresses, ALPN values, transport weights or transports,
 // connection mode, transport counters, and an optional raw transport signal. If TLSA records are available it
@@ -837,6 +870,9 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 	fmt.Printf("    Addresses: %s\n", formatList(server.Addrs))
 	fmt.Printf("    ALPN: %s\n", formatList(server.Alpn))
 	fmt.Printf("    Transports: %s\n", formatTransportWeights(server))
+	if ports := formatAuthServerPorts(server); ports != "" {
+		fmt.Printf("    Signal ports: %s\n", ports)
+	}
 	fmt.Printf("    Connection mode: %s\n", server.ConnectionMode().String())
 	if len(server.TransportSignal) > 0 {
 		fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)

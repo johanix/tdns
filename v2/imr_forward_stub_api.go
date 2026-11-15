@@ -245,7 +245,7 @@ type ImrStubZoneStatus struct {
 type ImrStubProbeResult struct {
 	Zone      string `json:"zone"`
 	Server    string `json:"server"`
-	Addr      string `json:"addr"`
+	Addr      string `json:"addr"` // as dialed: with the port a signal assigned, if any
 	Transport string `json:"transport"`
 	OK        bool   `json:"ok"` // response received, NOERROR, AA set
 	Rcode     string `json:"rcode,omitempty"`
@@ -388,6 +388,9 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 						continue
 					}
 					wg.Add(1)
+					// The probe dials what a query would: a port the
+					// server's signal assigned to this transport, if any.
+					dialAddr := server.DialAddr(addr, transport)
 					go func(zone, serverName, addr string, transport core.Transport, client core.DNSClienter) {
 						defer wg.Done()
 						if ctx.Err() != nil {
@@ -398,12 +401,12 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 						m.RecursionDesired = false // authoritative probe, not a recursive query
 						m.SetEdns0(4096, true)
 						start := time.Now()
-						r, _, err := core.ExchangeCtx(ctx, client, m, addr, false)
+						r, _, err := core.ExchangeCtx(ctx, client, m, dialAddr, false)
 						rtt := time.Since(start)
 						res := ImrStubProbeResult{
 							Zone:      zone,
 							Server:    serverName,
-							Addr:      addr,
+							Addr:      dialAddr,
 							Transport: core.TransportToString[transport],
 							RTT:       rtt.Truncate(time.Millisecond).String(),
 						}
