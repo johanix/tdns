@@ -13,7 +13,8 @@ import (
 )
 
 // Decoding a new file into the running Config forgets the transport fields
-// the new file leaves out. mapstructure does not clear an absent key.
+// the new file leaves out. mapstructure does not clear an absent key, and it
+// would keep a ports map the new file drops.
 func TestTransportSignalReloadForgetsOldFields(t *testing.T) {
 	conf := &Config{}
 	decode := func(text string) {
@@ -35,52 +36,69 @@ func TestTransportSignalReloadForgetsOldFields(t *testing.T) {
 service:
   transport:
     type: svcb
-    signal: "dot:30"
-    port: 1234
+    signal: "dot:30,doq:20"
+    ports:
+      dot: 1234
+      doq: 1235
 `)
 	decode(`
 service:
   transport:
     type: svcb
-    records:
-      - signal: "doq:20"
-        port: 1235
+    signal: "dot:30,doq:20"
+    ports:
+      dot: 1234
 `)
-	if tr := conf.Service.Transport; tr.Signal != "" || tr.Port != 0 || len(tr.Records) != 1 {
-		t.Errorf("after switching to records: %+v", tr)
+	if p := conf.Service.Transport.Ports; len(p) != 1 || p["dot"] != 1234 {
+		t.Errorf("after removing doq from ports: %v", p)
 	}
 
 	decode(`
 service:
   transport:
     type: svcb
-    signal: "dot:30"
-    port: 1234
+    signal: "dot:30,doq:20"
 `)
+	if p := conf.Service.Transport.Ports; len(p) != 0 {
+		t.Errorf("after removing ports: %v", p)
+	}
+
 	decode(`
 service:
   transport:
     type: svcb
-    signal: "dot:30"
 `)
-	if tr := conf.Service.Transport; tr.Port != 0 || len(tr.Records) != 0 {
-		t.Errorf("after removing port: %+v", tr)
+	if tr := conf.Service.Transport; tr.Signal != "" {
+		t.Errorf("after removing signal: %+v", tr)
 	}
 }
 
-// `config check` refuses the mixed form the daemon refuses.
-func TestConfigCheckRefusesSignalWithRecords(t *testing.T) {
-	const mixed = `
+// `config check` refuses what the daemon refuses.
+func TestConfigCheckRefusesBadPorts(t *testing.T) {
+	for _, tc := range []struct {
+		yaml string
+		want string
+	}{
+		{`
+service:
+  transport:
+    type: none
+    signal: "dot:30"
+    ports:
+      dot: 1234
+`, "type is none"},
+		{`
 service:
   transport:
     type: svcb
     signal: "dot:30"
-    records:
-      - signal: "doq:20"
-        port: 1235
-`
-	err := ValidateConfig(nil, writeCfg(t, mixed))
-	if err == nil || !strings.Contains(err.Error(), "not both") {
-		t.Errorf("ValidateConfig with signal and records: err = %v, want the service.transport refusal", err)
+    ports:
+      doq: 1235
+`, "no weight"},
+	} {
+		err := ValidateConfig(nil, writeCfg(t, tc.yaml))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("ValidateConfig: err = %v, want %q in it", err, tc.want)
+		}
 	}
 }

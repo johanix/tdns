@@ -227,25 +227,15 @@ type ServiceConf struct {
 	Transport    TransportConf `yaml:"transport"`
 }
 
-// TransportSignalRecord is one SVCB in the published OOTS RRset. One SVCB
-// carries one port. A different port for a different transport is another
-// record. The port is published; it does not open a listen socket. The
-// operator listens on it separately (listeners.ports). Do53 is unaffected:
-// cleartext stays on the ports in listeners.addresses.
-type TransportSignalRecord struct {
-	Signal string `yaml:"signal"`
-	Port   uint16 `yaml:"port"`
-}
-
 type TransportConf struct {
 	Type   string `yaml:"type" validate:"omitempty,oneof=tsync svcb none"`
 	Signal string `yaml:"signal"`
-	// Port is the SVCB port key on the single record Signal describes. Zero
-	// means no port key. Ignored when Records is set.
-	Port uint16 `yaml:"port"`
-	// Records publishes one SVCB per entry. It replaces Signal and Port; set
-	// one form, not both.
-	Records []TransportSignalRecord `yaml:"records"`
+	// Ports is the port published for a transport that is not on its
+	// standard one: keys dot, doq and doh. tdns-auth gives each transport
+	// with a port an SVCB record of its own (transportSignalLayout).
+	// Publishing a port opens no socket; the listener is configured under
+	// listeners.ports. Only type svcb carries ports.
+	Ports map[string]uint16 `yaml:"ports"`
 }
 
 // ListenersConf is the listening side of an app's DNS service: addresses,

@@ -137,7 +137,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	}
 
 	// The service.transport rules the daemon loader applies (ParseConfig).
-	if err := validateTransportSignal(config.Service.Transport); err != nil {
+	if _, err := validateTransportSignal(config.Service.Transport, config.Listeners.Ports); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 

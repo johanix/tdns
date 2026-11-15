@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -152,6 +154,7 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 			stringToPeerConfHook(),
 			stringToAclEntryHook(),
 			legacyDynamicAllowedHook(),
+			portMapRangeHook(),
 		),
 	}
 	decoder, derr := mapstructure.NewDecoder(decoderConfig)
@@ -172,9 +175,8 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 	// instead of preserving the previously-decoded value (mapstructure leaves
 	// absent keys untouched).
 	conf.Dnssec.DNSKEYTransport = ""
-	// service.transport as a whole: its fields exclude each other (signal and
-	// port, or records), so one left over from the previous file would make
-	// the new one look like both, and a removed port would stay published.
+	// service.transport as a whole: a signal, or a key of ports, that the new
+	// file removes would otherwise stay published.
 	conf.Service.Transport = TransportConf{}
 
 	if derr := decoder.Decode(configMap); derr != nil {
@@ -830,33 +832,112 @@ func (conf *Config) ParseConfig(reload bool) error {
 	return nil
 }
 
-// checkTransportSignal rejects a config that sets both the single-record form
-// (signal and its optional port) and the records list, so the operator does
-// not think both apply. port and records are published only on an SVCB
-// signal; a tsync or none transport keeps the signal string and is warned.
+// checkTransportSignal checks service.transport at load and logs its
+// warnings. See validateTransportSignal.
 func (conf *Config) checkTransportSignal() error {
 	if conf == nil {
 		return nil
 	}
-	t := conf.Service.Transport
-	if err := validateTransportSignal(t); err != nil {
-		return err
+	warnings, err := validateTransportSignal(conf.Service.Transport, conf.Listeners.Ports)
+	for _, w := range warnings {
+		lgConfig.Warn(w)
 	}
-	if t.Type != "svcb" && (t.Port != 0 || len(t.Records) > 0) {
-		lgConfig.Warn("service.transport port and records are published only when type is svcb",
-			"type", t.Type)
-	}
-	return nil
+	return err
 }
 
-// validateTransportSignal is the part of checkTransportSignal that refuses a
-// config. ValidateConfig calls it too, so `config check` refuses what the
-// daemon refuses.
-func validateTransportSignal(t TransportConf) error {
-	if len(t.Records) > 0 && (t.Signal != "" || t.Port != 0) {
-		return fmt.Errorf("service.transport: set either signal and port, or records, not both")
+// validateTransportSignal checks service.transport. Each finding is an error,
+// except the warnings it returns:
+//   - signal parses;
+//   - each key of ports is dot, doq or doh, and the signal gives it a weight;
+//   - a port is 1-65535 (portMapRangeHook catches what does not fit a
+//     uint16), and a transport's standard port counts as absent;
+//   - dot and doh on one port is refused: both are TCP. doq is UDP and may
+//     share a port with either;
+//   - ports with type tsync or none is refused: only SVCB carries a port;
+//   - a warning when a published port is not in listeners.ports for its
+//     transport. A front end may publish a port the daemon does not listen
+//     on, so it is not an error.
+//
+// ValidateConfig calls it too, for the errors, so `config check` refuses
+// what the daemon refuses.
+func validateTransportSignal(t TransportConf, listen ListenerPortsConf) ([]string, error) {
+	weights, err := core.ParseTransportStringRaw(t.Signal)
+	if err != nil {
+		return nil, fmt.Errorf("service.transport.signal %q: %w", t.Signal, err)
 	}
-	return nil
+	if len(t.Ports) == 0 {
+		return nil, nil
+	}
+	if t.Type != "svcb" {
+		return nil, fmt.Errorf("service.transport.ports: only an SVCB signal carries a port, and type is %s", t.Type)
+	}
+	keys := slices.Sorted(maps.Keys(t.Ports))
+	for _, k := range keys {
+		if _, ok := signalStandardPorts[k]; !ok {
+			return nil, fmt.Errorf("service.transport.ports.%s: not a transport that takes a port (dot, doq, doh)", k)
+		}
+		if weights[k] == 0 {
+			return nil, fmt.Errorf("service.transport.ports.%s: the signal gives %s no weight, so its port would be published for nothing", k, k)
+		}
+		if t.Ports[k] == 0 {
+			return nil, fmt.Errorf("service.transport.ports.%s: 0 is not a port (1-65535)", k)
+		}
+	}
+	tcpPort := func(tr string) uint16 {
+		if p := publishedSignalPort(t.Ports, tr); p != 0 {
+			return p
+		}
+		return signalStandardPorts[tr]
+	}
+	if weights["dot"] > 0 && weights["doh"] > 0 && tcpPort("dot") == tcpPort("doh") {
+		return nil, fmt.Errorf("service.transport.ports: dot and doh both on port %d; both are TCP, so they cannot share it", tcpPort("dot"))
+	}
+	listening := map[string][]uint16{"dot": listen.DoT, "doq": listen.DoQ, "doh": listen.DoH}
+	var warnings []string
+	for _, k := range keys {
+		p := publishedSignalPort(t.Ports, k)
+		if p != 0 && !slices.Contains(listening[k], p) {
+			warnings = append(warnings, fmt.Sprintf(
+				"service.transport.ports.%s: port %d is published but is not in listeners.ports.%s; resolvers will dial it", k, p, k))
+		}
+	}
+	return warnings, nil
+}
+
+// portMapRangeHook refuses a value outside 0-65535, or with a fraction, in a
+// map of ports before the decoder narrows it: mapstructure stores an int or a
+// float into a uint16 by truncating, so 70000 or 70000.0 would publish port
+// 4464, and 1234.5 port 1234. It looks only at map[string]uint16 targets, of
+// which service.transport.ports is the one in Config.
+func portMapRangeHook() mapstructure.DecodeHookFuncType {
+	target := reflect.TypeOf(map[string]uint16(nil))
+	return func(_ reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+		if to != target {
+			return data, nil
+		}
+		m, ok := data.(map[string]interface{})
+		if !ok {
+			return data, nil
+		}
+		for k, v := range m {
+			rv := reflect.ValueOf(v)
+			switch rv.Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				if n := rv.Int(); n < 0 || n > 65535 {
+					return nil, fmt.Errorf("%s: %d is not a port (1-65535)", k, n)
+				}
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				if n := rv.Uint(); n > 65535 {
+					return nil, fmt.Errorf("%s: %d is not a port (1-65535)", k, n)
+				}
+			case reflect.Float32, reflect.Float64:
+				if f := rv.Float(); f != math.Trunc(f) || f < 0 || f > 65535 {
+					return nil, fmt.Errorf("%s: %v is not a port (1-65535)", k, v)
+				}
+			}
+		}
+		return data, nil
+	}
 }
 
 // KDC and KRS configuration parsing has been moved to tdns-nm

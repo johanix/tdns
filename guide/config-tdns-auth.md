@@ -16,6 +16,7 @@ apply to every TDNS application (config file location, `include:`, the
 - [Zone declarations](#zone-declarations)
 - [Zone templates](#zone-templates)
 - [The listeners and authengine blocks](#the-listeners-and-authengine-blocks)
+- [The transport signal: service.transport](#the-transport-signal-servicetransport)
 - [DNSSEC policies](#dnssec-policies)
 
 ## Minimal working example
@@ -983,6 +984,70 @@ Three `options:` values are recognized:
 - **`parent-update:delta`** or **`parent-update:replace`** — how delegation
   updates are applied to the parent. `delta` is the default and applies even
   when no `options:` block is present.
+
+## The transport signal: service.transport
+
+`service.transport` tells resolvers which transports the server offers, so
+that they can move off Do53. tdns-auth publishes the signal at
+`_dns.<nameserver>` for each of its identities, in every zone with the
+`add-transport-signal` option.
+
+```yaml
+service:
+   transport:
+      type:    svcb
+      signal:  "doq:20,dot:10,doh:5"
+      ports:
+         dot:  1234
+         doh:  8443
+```
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `type` | `none` | `svcb` publishes an SVCB record with the `oots` SvcParam, `tsync` a TSYNC record, `none` nothing. An unknown value is warned about and read as `none` |
+| `signal` | — | comma-separated `transport:weight` pairs, from `do53`, `dot`, `doq` and `doh`, weights 0 to 100. An absent `do53` is 100 and an absent encrypted transport 0 |
+| `ports` | — | the port published for a transport that is not on its standard port (853 for `dot` and `doq`, 443 for `doh`). Only with `type: svcb` |
+
+**What is published.** Without `ports` there is one record:
+
+```
+_dns.ns1.example. 10800 IN SVCB 1 . oots="do53:100,doq:20,dot:10"
+```
+
+With the `ports` above, each transport that has a port gets a record of its
+own. One record without a port carries the rest, and `do53` once:
+
+```
+_dns.ns1.example. 10800 IN SVCB 1 . oots="do53:100,doq:20"
+_dns.ns1.example. 10800 IN SVCB 1 . port=1234 oots="dot:10"
+_dns.ns1.example. 10800 IN SVCB 1 . port=8443 oots="doh:5"
+```
+
+Every transport is in exactly one record. A record's port applies to every
+transport it names (RFC 9461), which is why a transport on its own port gets
+its own record.
+
+**Checks at load.** Each of these is an error, and the daemon does not start:
+
+- `signal` does not parse;
+- a key of `ports` other than `dot`, `doq` or `doh`. Do53 listens on the ports
+  in `listeners.addresses`;
+- a key whose transport has no weight in `signal`;
+- port 0, or a value above 65535. A transport's standard port counts as absent;
+- `dot` and `doh` on one port, including one of them on the other's standard
+  port: both are TCP. `doq` is UDP and may share a port with either;
+- `ports` with `type: tsync` or `none`.
+
+A published port that is not in `listeners.ports` for its transport is a
+warning, not an error: a front end may publish a port the daemon does not
+listen on itself.
+
+**Publishing a port opens no socket.** List the port under `listeners.ports`
+as well.
+
+**Older resolvers.** A resolver that does not read the `port` key dials the
+standard port, fails where nothing listens there, backs off and falls back to
+Do53. Turn `ports` on once the resolvers that matter to you read it.
 
 ## DNSSEC policies
 
