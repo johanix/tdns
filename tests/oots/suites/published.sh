@@ -10,6 +10,8 @@
 #                         standard port, which counts as absent
 #   pub-d     127.0.0.55  AUTH_PUB, signal "do53:100,tcp:30,dot:10", no ports
 #                         (PUB_DO53=omitted only: the build knows udp and tcp)
+#   pub-e     127.0.0.56  AUTH_PUB, an empty signal, ports udp 5353
+#                         (PUB_DO53=omitted only)
 #   pub-base  127.0.0.54  AUTH_BASE (when set), pub-a's config
 #
 # PUB_DO53 says what the publisher under test does with a do53 its config
@@ -26,7 +28,8 @@
 #       a port for the rest; every transport is in exactly one record. pub-c
 #       publishes exactly what pub-a does. With PUB_DO53=written the record
 #       without a port states do53:100; with omitted it has no do53, and pub-d
-#       publishes udp:100 and tcp:30 (the named tcp wins over do53's 100). No
+#       publishes udp:100 and tcp:30 (the named tcp wins over do53's 100).
+#       pub-e publishes one record, udp at its default 100 with its port. No
 #       record names do53 beside udp or tcp.
 #   M3  pub-a publishes what the same config publishes on AUTH_BASE (the base
 #       build, e.g. main): byte for byte with PUB_DO53=written; with omitted,
@@ -74,7 +77,13 @@ suite_published() {
 		note "pub-d: $(echo "$d" | tr '\n' '|')"
 		check K1 "do53:100 beside tcp:30 publishes udp:100 and tcp:30" [ "$(_pub_tokens "$d")" = "dot:10 tcp:30 udp:100" ]
 	fi
-	check K1 "no record names do53 beside udp or tcp" _pub_no_do53_beside "$a" "$b" "$c" "$d"
+	e=""
+	if [ "$PUB_DO53" = omitted ] && _pub_up pub-e 127.0.0.56 "$AUTH_PUB" "" "udp:5353"; then
+		e=$(rdata 127.0.0.56 _dns.ns1.pub.test. SVCB)
+		note "pub-e: $(echo "$e" | tr '\n' '|')"
+		check K1 "an empty signal with ports udp 5353 publishes udp at 100 with its port" [ "$e" = '1 . port="5353" oots="udp:100"' ]
+	fi
+	check K1 "no record names do53 beside udp or tcp" _pub_no_do53_beside "$a" "$b" "$c" "$d" "$e"
 
 	if [ -n "$AUTH_BASE" ]; then
 		_pub_up pub-base 127.0.0.54 "$AUTH_BASE" "doq:20,dot:10" "" || return
@@ -94,8 +103,10 @@ suite_published() {
 _pub_up() { # name address binary signal ports
 	ZDIR="$WORK/$1/zones"; mkdir -p "$ZDIR"
 	zonefile pub.test. "ns1.pub.test.=$2" </dev/null > "$ZDIR/pub.test.zone"
+	# A udp or tcp port is published only: Do53 listens on the ports of
+	# listeners.addresses, and listeners.ports has no udp or tcp key.
 	{ y_service "$1" "ns1.pub.test." svcb "$4" "$5"
-	  y_listeners "$2" "dot doq doh" "$5"
+	  y_listeners "$2" "dot doq doh" "$(echo "$5" | tr ' ' '\n' | grep -E '^(dot|doq|doh):' | tr '\n' ' ')"
 	  y_common "$1" "$2"
 	  y_zones; y_primary pub.test. add-transport-signal
 	} | auth_up "$1" "$3" "$2" pub.test. || { fail "published: $1 did not start"; return 1; }
