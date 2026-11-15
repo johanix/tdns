@@ -230,7 +230,7 @@ zone reload.
 | `show config` | Listen addresses, cache-primed flag, trust anchors, stub zones |
 | `show options` | The configured `imrengine.options` |
 | `set linewidth <n>` | Output truncation width |
-| `set server transport --server <ns> --signal "doq:20,dot:100,do53:3"` | Override a server's transport signal at runtime (debug). `--reset` clears it |
+| `set server transport --server <ns> --signal "doq:20,dot:100,udp:3,tcp:0"` | Override a server's transport signal at runtime (debug). `do53:N` is `udp:N` and `tcp:N`; absent `udp` and `tcp` are 100. `--reset` clears it |
 
 **Zones**
 

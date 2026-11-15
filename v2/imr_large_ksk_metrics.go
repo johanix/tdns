@@ -202,7 +202,11 @@ func (imr *Imr) preferredDNSKEYTransport(server *cache.AuthServer) core.Transpor
 		return 0
 	}
 
-	// Non-encrypted fallback: plain TCP, never UDP.
+	// Non-encrypted fallback: plain TCP, never UDP. This is forced TCP, which
+	// no tcp weight gates (tcp:0 included). tryServer dials it at the tcp
+	// endpoint the signal gave (server.DialAddr with Do53TCP), or at the
+	// nameserver on port 53 when none was given, never at the port of the udp
+	// endpoint: the signal's ports are kept per transport.
 	return core.TransportDo53TCP
 }
 

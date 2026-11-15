@@ -727,13 +727,17 @@ func formatList(items []string) string {
 	return fmt.Sprintf("[%s]", strings.Join(items, " "))
 }
 
+// signalWeightOrder is the order a server's weights are shown in, the
+// cleartext ones by their oots tokens (core.TransportToSignalToken): udp
+// (TransportDo53) and tcp (TransportDo53TCP), apart.
+var signalWeightOrder = []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH, core.TransportDo53, core.TransportDo53TCP}
+
 func formatTransportWeights(server *cache.AuthServer) string {
 	if len(server.TransportWeights) > 0 {
-		order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH, core.TransportDo53}
 		var parts []string
-		for _, t := range order {
+		for _, t := range signalWeightOrder {
 			if w, ok := server.TransportWeights[t]; ok && w > 0 {
-				parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToString[t], w))
+				parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToSignalToken[t], w))
 			}
 		}
 		if len(parts) > 0 {
@@ -839,12 +843,12 @@ func formatAuthServerPorts(server *cache.AuthServer) string {
 	if len(ports) == 0 {
 		return ""
 	}
-	order := []core.Transport{core.TransportDoT, core.TransportDoQ, core.TransportDoH}
+	order := []core.Transport{core.TransportDo53, core.TransportDo53TCP, core.TransportDoT, core.TransportDoQ, core.TransportDoH}
 	var parts []string
 	seen := map[core.Transport]bool{}
 	for _, t := range order {
 		if p := ports[t]; p != 0 {
-			parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToString[t], p))
+			parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToSignalToken[t], p))
 			seen[t] = true
 		}
 	}
@@ -853,7 +857,7 @@ func formatAuthServerPorts(server *cache.AuthServer) string {
 		if seen[t] || p == 0 {
 			continue
 		}
-		rest = append(rest, fmt.Sprintf("%s:%d", core.TransportToString[t], p))
+		rest = append(rest, fmt.Sprintf("%s:%d", formatTransport(t), p))
 	}
 	sort.Strings(rest)
 	return strings.Join(append(parts, rest...), " ")

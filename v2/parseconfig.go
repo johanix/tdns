@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -678,6 +679,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 			conf.Service.Transport.Type = "none"
 		}
 	}
+	// A published signal may name only the tokens every tdns node can carry
+	// (TransportConf.Validate). Refused here, before anything below reaches
+	// the KeyDB or the zones, so a refused signal never takes effect, on a
+	// reload either; ValidateConfig checks it again for `config check`.
+	if err := conf.Service.Transport.Validate(); err != nil {
+		return err
+	}
 	if err := conf.checkTransportSignal(); err != nil {
 		return err
 	}
@@ -838,7 +846,7 @@ func (conf *Config) checkTransportSignal() error {
 	if conf == nil {
 		return nil
 	}
-	warnings, err := validateTransportSignal(conf.Service.Transport, conf.Listeners.Ports)
+	warnings, err := validateTransportSignal(conf.Service.Transport, conf.Listeners.Ports, conf.Listeners.Addresses)
 	for _, w := range warnings {
 		lgConfig.Warn(w)
 	}
@@ -848,32 +856,41 @@ func (conf *Config) checkTransportSignal() error {
 // validateTransportSignal checks service.transport. Each finding is an error,
 // except the warnings it returns:
 //   - signal parses;
-//   - each key of ports is dot, doq or doh, and the signal gives it a weight;
+//   - each key of ports is udp, tcp, dot, doq or doh. An encrypted transport
+//     needs a weight in the signal; udp and tcp do not, since absent they
+//     weigh 100, and cleartext is used whatever its weight (the last resort,
+//     and forced TCP);
 //   - a port is 1-65535 (portMapRangeHook catches what does not fit a
 //     uint16), and a transport's standard port counts as absent;
-//   - dot and doh on one port is refused: both are TCP. doq is UDP and may
-//     share a port with either;
-//   - ports with type tsync or none is refused: only SVCB carries a port;
-//   - each key of targets is dot or doq, and the signal gives it a weight. A
-//     doh target is refused: DoH on another host needs a path, which the
-//     signal does not carry;
+//   - each key of targets is udp, tcp, dot or doq, with the same rule for a
+//     weight. A doh target is refused: DoH on another host needs a path,
+//     which the signal does not carry;
 //   - a target is a domain name, not an address; "." is the nameserver
 //     itself and counts as absent;
-//   - targets with type tsync or none is refused;
-//   - the dot/doh socket rule applies per endpoint: a transport moved to a
-//     target is on another host and shares no socket with this one;
-//   - a warning when a published port is not in listeners.ports for its
-//     transport. A front end may publish a port the daemon does not listen
-//     on, so it is not an error. A transport with a target is served by the
-//     target, so its port is not checked against this daemon's listeners.
+//   - ports or targets with type tsync or none is refused: only SVCB carries
+//     them;
+//   - ports are sockets (the alternative-endpoint design, section 2), and a
+//     socket is a host and a port, so these apply per endpoint: no two of
+//     tcp, dot and doh on one TCP port, and udp and doq not on one UDP port.
+//     udp takes its port on TCP too, for the retry after truncation, so dot
+//     or doh on udp's port is refused; udp and tcp on one port is the natural
+//     case. A transport on its standard port counts, so dot on 443 clashes
+//     with doh, and dot on 53 with tcp. An encrypted transport counts only
+//     when the signal gives it a weight; udp and tcp always count. Two
+//     transports at different hosts share no socket;
+//   - a warning when a published port is not listened on for its transport:
+//     listeners.ports for dot, doq and doh, the ports of listeners.addresses
+//     for udp and tcp. A front end may publish a port the daemon does not
+//     listen on, so it is not an error. A transport with a target is served
+//     by the target, so its port is not checked against this daemon.
 //
 // Whether the zone's signal is signed, which a target needs, is known only
 // per zone, so the start-up pass warns about that (createTransportSignalSVCB).
 //
 // ValidateConfig calls it too, for the errors, so `config check` refuses
 // what the daemon refuses.
-func validateTransportSignal(t TransportConf, listen ListenerPortsConf) ([]string, error) {
-	weights, err := core.ParseTransportStringRaw(t.Signal)
+func validateTransportSignal(t TransportConf, listen ListenerPortsConf, addresses []string) ([]string, error) {
+	raw, err := core.ParseTransportStringRaw(t.Signal)
 	if err != nil {
 		return nil, fmt.Errorf("service.transport.signal %q: %w", t.Signal, err)
 	}
@@ -886,59 +903,97 @@ func validateTransportSignal(t TransportConf, listen ListenerPortsConf) ([]strin
 		}
 		return nil, fmt.Errorf("service.transport.targets: only an SVCB signal carries a target, and type is %s", t.Type)
 	}
+	weights := maps.Clone(raw)
+	core.ApplyTransportDefaults(weights)
 	if err := validateSignalTargets(t.Targets, weights); err != nil {
 		return nil, err
 	}
 	keys := slices.Sorted(maps.Keys(t.Ports))
 	for _, k := range keys {
 		if _, ok := signalStandardPorts[k]; !ok {
-			return nil, fmt.Errorf("service.transport.ports.%s: not a transport that takes a port (dot, doq, doh)", k)
+			return nil, fmt.Errorf("service.transport.ports.%s: not a transport that takes a port (%s)", k, strings.Join(signalPortOrder, ", "))
 		}
-		if weights[k] == 0 {
+		if !cleartextSignalToken(k) && weights[k] == 0 {
 			return nil, fmt.Errorf("service.transport.ports.%s: the signal gives %s no weight, so its port would be published for nothing", k, k)
 		}
 		if t.Ports[k] == 0 {
 			return nil, fmt.Errorf("service.transport.ports.%s: 0 is not a port (1-65535)", k)
 		}
 	}
-	tcpPort := func(tr string) uint16 {
+	port := func(tr string) uint16 {
 		if p := publishedSignalPort(t.Ports, tr); p != 0 {
 			return p
 		}
 		return signalStandardPorts[tr]
 	}
-	// The socket rule is per endpoint: a transport moved to a target is on
-	// another host. doh never has a target (validateSignalTargets).
-	sameHost := publishedSignalTarget(t.Targets, "dot") == publishedSignalTarget(t.Targets, "doh")
-	if weights["dot"] > 0 && weights["doh"] > 0 && sameHost && tcpPort("dot") == tcpPort("doh") {
-		return nil, fmt.Errorf("service.transport.ports: dot and doh both on port %d; both are TCP, so they cannot share it", tcpPort("dot"))
+	// host is the endpoint's host: "" for the nameserver itself.
+	host := func(tr string) string { return publishedSignalTarget(t.Targets, tr) }
+	at := func(tr string) string {
+		if h := host(tr); h != "" {
+			return " at " + h
+		}
+		return ""
 	}
-	listening := map[string][]uint16{"dot": listen.DoT, "doq": listen.DoQ, "doh": listen.DoH}
+	inUse := func(tr string) bool { return cleartextSignalToken(tr) || weights[tr] > 0 }
+	clash := func(users []string, sharing func(a, b string) bool, what string) error {
+		for i, a := range users {
+			for _, b := range users[i+1:] {
+				if inUse(a) && inUse(b) && host(a) == host(b) && port(a) == port(b) && !sharing(a, b) {
+					return fmt.Errorf("service.transport.ports: %s and %s both on port %d%s; %s, so they cannot share it", a, b, port(a), at(a), what)
+				}
+			}
+		}
+		return nil
+	}
+	udpAndTCP := func(a, b string) bool { return a == "udp" && b == "tcp" }
+	if err := clash([]string{"udp", "tcp", "dot", "doh"}, udpAndTCP,
+		"both are TCP (udp takes its port on TCP too, for the retry after truncation)"); err != nil {
+		return nil, err
+	}
+	if err := clash([]string{"udp", "doq"}, func(a, b string) bool { return false }, "both are UDP"); err != nil {
+		return nil, err
+	}
+	do53 := listenerAddressPorts(addresses)
+	listening := map[string][]uint16{"udp": do53, "tcp": do53, "dot": listen.DoT, "doq": listen.DoQ, "doh": listen.DoH}
 	var warnings []string
 	for _, k := range keys {
 		p := publishedSignalPort(t.Ports, k)
-		if publishedSignalTarget(t.Targets, k) != "" {
-			continue // served by the target, not by this daemon
+		if p == 0 || host(k) != "" || slices.Contains(listening[k], p) {
+			continue // no port, served by the target, or listened on
 		}
-		if p != 0 && !slices.Contains(listening[k], p) {
-			warnings = append(warnings, fmt.Sprintf(
-				"service.transport.ports.%s: port %d is published but is not in listeners.ports.%s; resolvers will dial it", k, p, k))
+		where := "listeners.ports." + k
+		if cleartextSignalToken(k) {
+			where = "listeners.addresses"
 		}
+		warnings = append(warnings, fmt.Sprintf(
+			"service.transport.ports.%s: port %d is published but is not in %s; resolvers will dial it", k, p, where))
 	}
 	return warnings, nil
 }
 
+// signalTargetKeys is the transports that take a target: every transport
+// that takes a port except doh, whose other host would need a path.
+func signalTargetKeys() []string {
+	var out []string
+	for _, tr := range signalPortOrder {
+		if tr != "doh" {
+			out = append(out, tr)
+		}
+	}
+	return out
+}
+
 // validateSignalTargets checks service.transport.targets against the
-// signal's weights. See validateTransportSignal.
+// signal's weights, absence defaults applied. See validateTransportSignal.
 func validateSignalTargets(targets map[string]string, weights map[string]uint8) error {
 	for _, k := range slices.Sorted(maps.Keys(targets)) {
 		if k == "doh" {
 			return fmt.Errorf("service.transport.targets.doh: DoH on another host needs a path, which the signal does not carry; a doh target is refused")
 		}
-		if _, ok := signalStandardPorts[k]; !ok {
-			return fmt.Errorf("service.transport.targets.%s: not a transport that takes a target (dot, doq)", k)
+		if !slices.Contains(signalTargetKeys(), k) {
+			return fmt.Errorf("service.transport.targets.%s: not a transport that takes a target (%s)", k, strings.Join(signalTargetKeys(), ", "))
 		}
-		if weights[k] == 0 {
+		if !cleartextSignalToken(k) && weights[k] == 0 {
 			return fmt.Errorf("service.transport.targets.%s: the signal gives %s no weight, so its target would be published for nothing", k, k)
 		}
 		v := strings.TrimSpace(targets[k])
@@ -955,6 +1010,22 @@ func validateSignalTargets(targets map[string]string, weights map[string]uint8) 
 		}
 	}
 	return nil
+}
+
+// listenerAddressPorts is the ports of listeners.addresses, the Do53 listen
+// sockets ("addr:port"). An entry without a port is skipped.
+func listenerAddressPorts(addresses []string) []uint16 {
+	var out []uint16
+	for _, a := range addresses {
+		_, ps, err := net.SplitHostPort(a)
+		if err != nil {
+			continue
+		}
+		if p, err := strconv.ParseUint(ps, 10, 16); err == nil {
+			out = append(out, uint16(p))
+		}
+	}
+	return out
 }
 
 // portMapRangeHook refuses a value outside 0-65535, or with a fraction, in a

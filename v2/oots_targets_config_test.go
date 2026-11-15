@@ -29,32 +29,40 @@ func TestTransportSignalLayoutWithTargets(t *testing.T) {
 	}{
 		{"one transport on another host", "doq:20,dot:10", nil, map[string]string{"dot": "dot.provider.example."},
 			[]string{
-				o + `1 . oots="do53:100,doq:20"`,
+				o + `1 . oots="doq:20"`,
 				o + `1 dot.provider.example. oots="dot:10"`,
 			}},
-		{"a target without the final dot is made absolute", "dot:10", nil, map[string]string{"dot": "dot.provider.example"},
-			[]string{
-				o + `1 . oots="do53:100"`,
-				o + `1 dot.provider.example. oots="dot:10"`,
-			}},
+		{"a target without the final dot is made absolute; nothing left for \".\"", "dot:10", nil, map[string]string{"dot": "dot.provider.example"},
+			[]string{o + `1 dot.provider.example. oots="dot:10"`}},
 		{"a target and a port in one record", "doq:20,dot:10", map[string]uint16{"dot": 1234}, map[string]string{"dot": "dot.provider.example."},
 			[]string{
-				o + `1 . oots="do53:100,doq:20"`,
+				o + `1 . oots="doq:20"`,
 				o + `1 dot.provider.example. port=1234 oots="dot:10"`,
 			}},
 		{"one moved by target, one by port, fixed order", "doh:5,doq:20,dot:10",
 			map[string]uint16{"doh": 8443}, map[string]string{"doq": "doq.provider.example."},
 			[]string{
-				o + `1 . oots="do53:100,dot:10"`,
+				o + `1 . oots="dot:10"`,
 				o + `1 doq.provider.example. oots="doq:20"`,
 				o + `1 . port=8443 oots="doh:5"`,
 			}},
 		{"\".\" is the nameserver itself: absent", "doq:20,dot:10", nil, map[string]string{"dot": "."},
-			[]string{o + `1 . oots="do53:100,doq:20,dot:10"`}},
-		{"a target on the standard port carries no port", "dot:10", map[string]uint16{"dot": 853}, map[string]string{"dot": "dot.provider.example."},
+			[]string{o + `1 . oots="doq:20,dot:10"`}},
+		{"a target on the standard port carries no port", "dot:10,doq:20", map[string]uint16{"dot": 853}, map[string]string{"dot": "dot.provider.example."},
 			[]string{
-				o + `1 . oots="do53:100"`,
+				o + `1 . oots="doq:20"`,
 				o + `1 dot.provider.example. oots="dot:10"`,
+			}},
+		{"do53 emitted as udp and tcp beside a target", "do53:50,dot:10", nil, map[string]string{"dot": "dot.provider.example."},
+			[]string{
+				o + `1 . oots="tcp:50,udp:50"`,
+				o + `1 dot.provider.example. oots="dot:10"`,
+			}},
+		{"udp and tcp on another host, stated at their default", "dot:10", nil, map[string]string{"udp": "dns.provider.example.", "tcp": "dns.provider.example."},
+			[]string{
+				o + `1 . oots="dot:10"`,
+				o + `1 dns.provider.example. oots="udp:100"`,
+				o + `1 dns.provider.example. oots="tcp:100"`,
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,6 +99,10 @@ func TestTransportSignalTargetChecks(t *testing.T) {
 		{"\".\" is absent", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", ".")}, "", 0},
 		{"a doh target is refused", TransportConf{Type: "svcb", Signal: "doh:10", Targets: tg("doh", "doh.provider.example.")}, "needs a path", 0},
 		{"do53 takes no target", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("do53", "ns.provider.example.")}, "targets.do53", 0},
+		{"udp and tcp take a target without a weight", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("udp", "dns.provider.example.", "tcp", "dns.provider.example.")}, "", 0},
+		{"dot on tcp's port at the same other host", TransportConf{Type: "svcb", Signal: "dot:10", Ports: map[string]uint16{"dot": 53}, Targets: tg("dot", "x.provider.example.", "tcp", "x.provider.example.")}, "at x.provider.example.", 0},
+		{"dot on tcp's port, tcp elsewhere", TransportConf{Type: "svcb", Signal: "dot:10", Ports: map[string]uint16{"dot": 53}, Targets: tg("dot", "x.provider.example.")}, "", 0},
+		{"doq on udp's port at the same other host", TransportConf{Type: "svcb", Signal: "doq:10", Ports: map[string]uint16{"doq": 5353, "udp": 5353}, Targets: tg("doq", "x.provider.example.", "udp", "x.provider.example.")}, "both are UDP", 0},
 		{"an unknown key", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("tls", "ns.provider.example.")}, "targets.tls", 0},
 		{"a target for a transport with no weight", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("doq", "doq.provider.example.")}, "no weight", 0},
 		{"an address is not a name", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", "192.0.2.1")}, "is an address", 0},
@@ -105,7 +117,7 @@ func TestTransportSignalTargetChecks(t *testing.T) {
 		{"a port here still warns", TransportConf{Type: "svcb", Signal: "dot:10,doq:20", Ports: map[string]uint16{"dot": 1234}, Targets: tg("doq", "doq.provider.example.")}, "", 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			warns, err := validateTransportSignal(tc.conf, listening)
+			warns, err := validateTransportSignal(tc.conf, listening, []string{"127.0.0.1:53"})
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Fatalf("error %v", err)

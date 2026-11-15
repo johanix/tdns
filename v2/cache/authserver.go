@@ -27,6 +27,10 @@ type AddressBackoff struct {
 // AddrXport keys backoff state by both address and transport. A timeout on
 // (1.2.3.4:53, DoT) does not poison (1.2.3.4:53, Do53) or vice versa: that
 // would conflate problems with the TLS path with problems with the address.
+// The resolver books an endpoint the signal put on another port under its
+// dial address (AuthServer.DialAddr, "1.2.3.4:5353"), so Addr carries the
+// port when it is not the transport's default: an endpoint on port 5353 that
+// fails does not back off the fallback on port 53.
 type AddrXport struct {
 	Addr      string
 	Transport core.Transport
@@ -46,7 +50,7 @@ type AuthServer struct {
 	Name string
 	// Addrs holds BARE IP literals (e.g. "192.0.2.1" or "2001:db8::1"),
 	// NOT host:port. DialAddr joins a port the latest oots signal assigned
-	// to the transport being dialed; otherwise the client adds its default
+	// to the transport being dialed (udp and tcp included); otherwise the client adds its default
 	// via net.JoinHostPort(addr, c.Port). Passing a host:port string through
 	// AddAddr makes JoinHostPort produce "[1.2.3.4:53]:53" because of the
 	// embedded colon, after which Dial tries to resolve "1.2.3.4:53" as a
@@ -65,9 +69,10 @@ type AuthServer struct {
 	// Guarded by mu, and set in the same step as the weights.
 	Received *ReceivedSignal
 	// TransportPorts is the non-default port the latest signal assigned to
-	// each transport. A missing entry means the client's usual port (DoT and
-	// DoQ 853, DoH 443). Do53 is never stored: cleartext stays on 53. Replaced
-	// wholesale with the signal. Guarded by mu.
+	// each transport: TransportDo53 is the udp endpoint (its TCP retry after
+	// truncation goes to the same port) and TransportDo53TCP the tcp one. A
+	// missing entry means the client's usual port (Do53 53, DoT and DoQ 853,
+	// DoH 443). Replaced wholesale with the signal. Guarded by mu.
 	TransportPorts map[core.Transport]uint16
 	// Stats (guarded by mu)
 	mu                sync.Mutex
@@ -514,16 +519,17 @@ func portsFromReceived(received *ReceivedSignal) map[core.Transport]uint16 {
 	return DialPorts(received.Ports)
 }
 
-// DialPorts copies the ports a signal assigns, dropping a zero and Do53: the
-// port key never moves cleartext off 53. Nil when nothing remains, which is
-// what clears the previous ports.
+// DialPorts copies the ports a signal assigns, dropping a zero. udp and tcp
+// take a port like the other transports (the alternative-endpoint design,
+// section 2). Nil when nothing remains, which is what clears the previous
+// ports.
 func DialPorts(ports map[core.Transport]uint16) map[core.Transport]uint16 {
 	if len(ports) == 0 {
 		return nil
 	}
 	out := make(map[core.Transport]uint16, len(ports))
 	for t, p := range ports {
-		if p == 0 || t == core.TransportDo53 || t == core.TransportDo53TCP {
+		if p == 0 {
 			continue
 		}
 		out[t] = p
@@ -535,10 +541,10 @@ func DialPorts(ports map[core.Transport]uint16) map[core.Transport]uint16 {
 }
 
 // GetTransportPort returns the non-default port the latest signal assigned to
-// t, or 0 when t keeps its usual port. Do53 and Do53TCP are always 0.
-// Thread-safe.
+// t, or 0 when t keeps its usual port. Do53 and Do53TCP are separate: forced
+// TCP never dials the port of the udp endpoint. Thread-safe.
 func (as *AuthServer) GetTransportPort(t core.Transport) uint16 {
-	if as == nil || t == core.TransportDo53 || t == core.TransportDo53TCP {
+	if as == nil {
 		return 0
 	}
 	as.mu.Lock()
@@ -559,7 +565,10 @@ func (as *AuthServer) GetTransportPorts() map[core.Transport]uint16 {
 
 // DialAddr is the address to pass to Exchange for transport t. addr is a bare
 // IP. A port the latest signal assigned to t is joined onto it; otherwise addr
-// is returned unchanged and the client adds its default port. Do53 stays on 53.
+// is returned unchanged and the client adds its default port. The result is
+// also the key the resolver books backoff and RTT under, so that an endpoint
+// on another port never backs off the one on the default port, and a changed
+// port starts clean.
 func (as *AuthServer) DialAddr(addr string, t core.Transport) string {
 	p := as.GetTransportPort(t)
 	if p == 0 {
