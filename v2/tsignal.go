@@ -217,37 +217,14 @@ func svcbHasAlias(rrset core.RRset) bool {
 	return false
 }
 
-// noteSignalStored records that the signal pass stored rrs at owner.
-func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
-	cp := make([]dns.RR, len(rrs))
-	for i, rr := range rrs {
-		cp[i] = dns.Copy(rr)
-	}
-	zd.signalStoredMu.Lock()
-	defer zd.signalStoredMu.Unlock()
-	if zd.signalStored == nil {
-		zd.signalStored = map[string][]dns.RR{}
-	}
-	zd.signalStored[core.CanonicalizeName(owner)] = cp
-}
-
-// signalStoredByPass reports whether rrs at owner are exactly what the signal
-// pass last stored there. An RRset the operator has since replaced, by an
-// update or in the zone file, is not.
-func (zd *ZoneData) signalStoredByPass(owner string, rrs []dns.RR) bool {
-	zd.signalStoredMu.Lock()
-	defer zd.signalStoredMu.Unlock()
-	stored, ok := zd.signalStored[core.CanonicalizeName(owner)]
-	return ok && sameRecords(stored, rrs)
-}
-
 // signalIsPassOwn reports whether the SVCB RRset rs found at a signal owner
-// is the pass's own output rather than the operator's: the pass stored it in
-// this process, or it is identical to what the configuration gives now. The
-// second covers a stored signal that came back as content after a restart (a
-// journal replay, a persisted copy): restaging it changes nothing. An
-// operator who wrote exactly what the configuration gives is treated the same
-// way, and that is harmless for the same reason.
+// is the pass's own output rather than the operator's: it is what the pass
+// last stored there (signalStoredByPass: in this process, or recorded in the
+// KeyDB before a restart), or it is identical to what the configuration
+// gives now. The second covers a server without a KeyDB record of it, and
+// restaging such a signal changes nothing. An operator who wrote exactly
+// what the configuration gives is treated the same way, which is harmless
+// for the same reason.
 func (zd *ZoneData) signalIsPassOwn(conf *Config, nsName, owner string, rs core.RRset) bool {
 	if zd.signalStoredByPass(owner, rs.RRs) {
 		return true
@@ -537,6 +514,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 				lgDns.Info("createTransportSignalSVCB: leaving the operator's SVCB RRset alone; the transport configuration does not apply to this name",
 					"zone", zd.ZoneName, "owner", ownerName, "alias", svcbHasAlias(rs), "records", len(rs.RRs))
 				kept++
+				zd.forgetSignalStored(ownerName)
 				for _, tgt := range signalChaseTargets(rs) {
 					id := strings.TrimPrefix(tgt, "_dns.")
 					if !CaseFoldContains(conf.Service.Identities, id) || Globals.ServerSVCB == nil || FindZone(tgt) != nil {
