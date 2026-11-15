@@ -17,12 +17,16 @@ import (
 )
 
 // What the transport-signal start-up pass stored, per owner, so that a later
-// run tells its own signal from an operator's RRset (design 2026-11-14
-// section 5). The pass leaves an operator's RRset alone and replaces its own
-// with what the configuration gives now. Its own signal is zone content, and
-// a journal replay or a persisted copy brings it back after a restart, so
-// the record is kept in the KeyDB as well as in memory. Without a KeyDB the
-// record lasts as long as the process.
+// run tells its own signal from records provisioned in the zone (design
+// 2026-11-14 section 5; the maintainer's ruling on plan step S2,
+// 2026-11-15). The pass leaves provisioned records alone, replaces its own
+// signal with what the configuration gives now, and withdraws it from a name
+// that is no longer an identity at home in the zone. Its own signal is zone
+// content, and a journal replay or a persisted copy brings it back after a
+// restart, so the record is kept in the KeyDB as well as in memory. Without
+// a KeyDB the record lasts as long as the process. Matching what the
+// configuration gives is never taken as the pass's own: an operator may
+// write exactly that.
 
 // signalDigest is a digest of an RRset's records, TTL and order aside, and
 // names compared without case, as dns.IsDuplicate compares them.
@@ -38,6 +42,15 @@ func signalDigest(rrs []dns.RR) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// signalRecordDB is the KeyDB the record is kept in, or nil when there is
+// none behind the zone: the record then lasts as long as the process.
+func (zd *ZoneData) signalRecordDB() *KeyDB {
+	if zd.KeyDB == nil || zd.KeyDB.DB == nil {
+		return nil
+	}
+	return zd.KeyDB
+}
+
 // noteSignalStored records that the signal pass stored rrs at owner, in
 // memory and in the KeyDB. A failed write is logged and the in-memory record
 // stands: the signal is then known as the pass's own until the next restart.
@@ -50,10 +63,11 @@ func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 	}
 	zd.signalStored[owner] = digest
 	zd.signalStoredMu.Unlock()
-	if zd.KeyDB == nil {
+	kdb := zd.signalRecordDB()
+	if kdb == nil {
 		return
 	}
-	if err := zd.KeyDB.SetTransportSignalStored(zd.ZoneName, owner, digest); err != nil {
+	if err := kdb.SetTransportSignalStored(zd.ZoneName, owner, digest); err != nil {
 		lgDns.Warn("noteSignalStored: could not record the stored signal; after a restart it may be taken for the operator's",
 			"zone", zd.ZoneName, "owner", owner, "error", err)
 	}
@@ -66,10 +80,11 @@ func (zd *ZoneData) forgetSignalStored(owner string) {
 	zd.signalStoredMu.Lock()
 	delete(zd.signalStored, owner)
 	zd.signalStoredMu.Unlock()
-	if zd.KeyDB == nil {
+	kdb := zd.signalRecordDB()
+	if kdb == nil {
 		return
 	}
-	if err := zd.KeyDB.DeleteTransportSignalStoredOwner(zd.ZoneName, owner); err != nil {
+	if err := kdb.DeleteTransportSignalStoredOwner(zd.ZoneName, owner); err != nil {
 		lgDns.Warn("forgetSignalStored: could not drop the stored-signal record",
 			"zone", zd.ZoneName, "owner", owner, "error", err)
 	}
@@ -84,9 +99,9 @@ func (zd *ZoneData) signalStoredByPass(owner string, rrs []dns.RR) bool {
 	zd.signalStoredMu.Lock()
 	digest, ok := zd.signalStored[owner]
 	zd.signalStoredMu.Unlock()
-	if !ok && zd.KeyDB != nil {
+	if kdb := zd.signalRecordDB(); !ok && kdb != nil {
 		var err error
-		digest, ok, err = zd.KeyDB.GetTransportSignalStored(zd.ZoneName, owner)
+		digest, ok, err = kdb.GetTransportSignalStored(zd.ZoneName, owner)
 		if err != nil {
 			lgDns.Warn("signalStoredByPass: could not read the stored-signal record",
 				"zone", zd.ZoneName, "owner", owner, "error", err)
@@ -94,6 +109,35 @@ func (zd *ZoneData) signalStoredByPass(owner string, rrs []dns.RR) bool {
 		}
 	}
 	return ok && digest == signalDigest(rrs)
+}
+
+// signalStoredOwners lists the owners the pass has a record of storing a
+// signal at in this zone: in this process, and in the KeyDB from an earlier
+// one.
+func (zd *ZoneData) signalStoredOwners() []string {
+	seen := map[string]bool{}
+	var out []string
+	zd.signalStoredMu.Lock()
+	for owner := range zd.signalStored {
+		seen[owner] = true
+		out = append(out, owner)
+	}
+	zd.signalStoredMu.Unlock()
+	if kdb := zd.signalRecordDB(); kdb != nil {
+		owners, err := kdb.ListTransportSignalStored(zd.ZoneName)
+		if err != nil {
+			lgDns.Warn("signalStoredOwners: could not list the stored-signal records",
+				"zone", zd.ZoneName, "error", err)
+		}
+		for _, owner := range owners {
+			if !seen[owner] {
+				seen[owner] = true
+				out = append(out, owner)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // SetTransportSignalStored records the digest of the signal stored at owner.
@@ -131,6 +175,32 @@ func (kdb *KeyDB) GetTransportSignalStored(zone, owner string) (string, bool, er
 		return "", false, fmt.Errorf("GetTransportSignalStored: zone %s owner %s: %v", zone, owner, err)
 	}
 	return digest, true, nil
+}
+
+// ListTransportSignalStored returns the owners with a record in zone.
+func (kdb *KeyDB) ListTransportSignalStored(zone string) ([]string, error) {
+	if kdb == nil || kdb.DB == nil {
+		return nil, fmt.Errorf("ListTransportSignalStored: no database")
+	}
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+	rows, err := kdb.DB.Query(`SELECT owner FROM TransportSignalStored WHERE zone=?`, dns.Fqdn(zone))
+	if err != nil {
+		return nil, fmt.Errorf("ListTransportSignalStored: zone %s: %v", zone, err)
+	}
+	defer rows.Close()
+	var owners []string
+	for rows.Next() {
+		var owner string
+		if err := rows.Scan(&owner); err != nil {
+			return owners, fmt.Errorf("ListTransportSignalStored: zone %s: %v", zone, err)
+		}
+		owners = append(owners, owner)
+	}
+	if err := rows.Err(); err != nil {
+		return owners, fmt.Errorf("ListTransportSignalStored: zone %s: %v", zone, err)
+	}
+	return owners, nil
 }
 
 // DeleteTransportSignalStoredOwner drops the record for one owner.

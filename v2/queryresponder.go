@@ -807,14 +807,16 @@ func (zd *ZoneData) addTransportSignal(m *dns.Msg, sigs []core.RRset, msgoptions
 }
 
 // collectSignalRRsets resolves the transport-signal RRsets to advertise for this
-// zone, at query time, from the pinned snapshot. It derives the signal owners
-// from the apex NS RRset (the authoritative "which nameservers" source) and, for
-// each, reads the stored, resigner-maintained SVCB/TSYNC RRset from its
-// authoritative home — this zone's pinned snapshot when in-bailiwick, another
-// co-hosted zone's snapshot via FindZone otherwise, or the synthesized fallback
-// (Case A). AliasMode targets are chased the same way. A signal whose target
-// cannot be resolved is still returned (the alias is authoritative and the
-// resolver can chase it / may already hold the target); SVCB fails safe.
+// zone, at query time, from the pinned snapshot. A server composes them from
+// zone data, this zone's and its own zones', and never from who it is
+// (rule 1 of the maintainer's ruling on plan step S2, 2026-11-15). For each
+// name in the apex NS RRset, the RRset at _dns.<ns> is included when it is
+// in a zone this server serves: this zone's pinned snapshot, or the current
+// snapshot of the most specific zone hosted here that holds the name. No
+// identity and no address is tested, so every such NS name gets its signal.
+// An AliasMode record brings the signal at its target when that is in a zone
+// served here; otherwise the alias goes in alone, and the resolver can chase
+// it. Nothing is ever looked up recursively.
 func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
 	if snap == nil || snap.Apex == nil || !zd.addsTransportSignal() {
 		return nil
@@ -853,106 +855,40 @@ func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
 		if !ok {
 			continue
 		}
-		owner := "_dns." + ns.Ns
-		if !zd.signalIsAboutThisServer(snap, ns.Ns, owner) {
-			continue
-		}
-		add(owner, 0)
+		add("_dns."+ns.Ns, 0)
 	}
 	return out
 }
 
-// signalIsAboutThisServer decides whether the signal at an NS name's owner is
-// injected: a server speaks only about itself and never asks anyone
-// (docs/2026-10-04-transport-signal-publication-and-serving.md). The pass
-// leaves an operator's RRset at _dns.<ns> alone whatever its mode (design
-// 2026-11-14 section 5), so a stored ServiceMode RRset is no longer the
-// pass's word that the name is this server's; the name is tested instead
-// (nsNameIsThisServer). That holds for the pass's own signal and for the
-// fallback, which exist only because the pass found the name to be this
-// server's. An operator ServiceMode RRset for another name, with a target or
-// without, still answers a direct query and is not injected.
-//
-// An operator alias is injected when the name is this server's (the alias
-// goes alone; the resolver chases it), or when the server holds the target's
-// signal (a co-hosted zone's, or its own fallback), which is injected with it.
-func (zd *ZoneData) signalIsAboutThisServer(snap *zoneSnapshot, nsName, owner string) bool {
-	rrsets := zd.lookupSignalRRsets(snap, owner)
-	if len(rrsets) == 0 {
-		return false
-	}
-	if zd.nsNameIsThisServer(snap, nsName) {
-		return true
-	}
-	for _, rs := range rrsets {
-		for _, tgt := range signalChaseTargets(rs) {
-			// Hosting the target's signal, not merely a zone around the
-			// target's name: what is injected with the alias is that signal.
-			if len(zd.lookupSignalRRsets(snap, tgt)) > 0 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// nsNameIsThisServer reports whether a nameserver name is this server's own:
-// one of its configured identities, or a name whose A or AAAA records, read
-// from the name's home, are this server's listener addresses. The home is
-// the most specific zone hosted here that holds the name: the pinned
-// snapshot when that is this zone, and that zone's current snapshot
-// otherwise, a co-hosted child included. Nothing is looked up recursively.
-func (zd *ZoneData) nsNameIsThisServer(snap *zoneSnapshot, nsName string) bool {
-	if CaseFoldContains(Conf.Service.Identities, nsName) {
-		return true
-	}
-	// Under a co-hosted child the home is the child, not this zone's glue
-	// for it. An unregistered zone (a test's) is the home of names under it.
-	var od *OwnerData
-	switch home := FindZone(nsName); {
-	case home == zd, home == nil && dns.IsSubDomain(zd.ZoneName, nsName):
-		od = getOwnerFrom(snap, nsName)
-	case home != nil:
-		od = getOwnerFrom(home.publishedSnapshot(), nsName)
-	}
-	if od == nil {
-		return false
-	}
-	a := od.RRtypes.GetOnlyRRSet(dns.TypeA)
-	aaaa := od.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
-	return matchesConfiguredAddrs(Conf.Listeners.Addresses, &a) || matchesConfiguredAddrs(Conf.Listeners.Addresses, &aaaa)
-}
-
 // lookupSignalRRsets returns the SVCB/TSYNC RRsets stored at a transport-signal
-// owner name, read from its authoritative home. In-bailiwick names read from the
-// pinned snapshot (no intra-response tearing); out-of-bailiwick names read from
-// another co-hosted zone's current snapshot; failing both, the per-snapshot
-// synthesized fallback (Case A) is used.
+// owner name, read from its home, the most specific zone hosted here that
+// holds it (isHomeOf): this zone's pinned snapshot (no intra-response
+// tearing), or that zone's current snapshot. Under a co-hosted child the
+// child is read, not a copy below the parent's zone cut. Failing that, the
+// per-snapshot fallback beside the snapshot, which the SVCB start-up pass no
+// longer fills (a server writes signals only into its own zones, rule 2).
 func (zd *ZoneData) lookupSignalRRsets(snap *zoneSnapshot, name string) []core.RRset {
-	if dns.IsSubDomain(zd.ZoneName, name) {
-		if rrs := signalRRsetsFromOwner(getOwnerFrom(snap, name)); len(rrs) > 0 {
-			return rrs
-		}
-		// Nothing stored: the fallback a server keeps beside the snapshot
-		// for a zone it does not sign (it stores nothing into a zone signed
-		// by someone else), injected only, never content.
-		if rs, ok := snap.signalSynth[name]; ok && rs != nil {
-			return []core.RRset{*rs}
-		}
-		return nil
+	var rrs []core.RRset
+	if zd.isHomeOf(name) {
+		rrs = signalRRsetsFromOwner(getOwnerFrom(snap, name))
+	} else if home := FindZone(name); home != nil {
+		rrs = signalRRsetsFromOwner(getOwnerFrom(home.publishedSnapshot(), name))
 	}
-	if tz := FindZone(name); tz != nil {
-		if tz == zd {
-			return signalRRsetsFromOwner(getOwnerFrom(snap, name))
-		}
-		if rrs := signalRRsetsFromOwner(getOwnerFrom(tz.publishedSnapshot(), name)); len(rrs) > 0 {
-			return rrs
-		}
+	if len(rrs) > 0 {
+		return rrs
 	}
 	if rs, ok := snap.signalSynth[name]; ok && rs != nil {
 		return []core.RRset{*rs}
 	}
 	return nil
+}
+
+// isHomeOf reports whether this zone is the home of name: the most specific
+// zone hosted here that holds it. A zone not in the registry (a test's) is
+// the home of the names under it.
+func (zd *ZoneData) isHomeOf(name string) bool {
+	home := FindZone(name)
+	return home == zd || (home == nil && dns.IsSubDomain(zd.ZoneName, name))
 }
 
 // signalRRsetsFromOwner extracts the SVCB and TSYNC RRsets from an owner (if any).

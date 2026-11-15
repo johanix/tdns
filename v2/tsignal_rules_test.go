@@ -42,25 +42,26 @@ func svcbRecords(zd *ZoneData, owner string) []dns.RR {
 	return od.RRtypes.GetOnlyRRSet(dns.TypeSVCB).RRs
 }
 
-// One server with two NS names gets a signal under each: the pass visits
-// every NS name and does not stop at the first it handles.
-func TestTheSignalPassVisitsEveryNSName(t *testing.T) {
+// One server with two identities at home in the zone gets a signal under
+// each: the pass visits every identity and does not stop at the first.
+func TestTheSignalPassVisitsEveryIdentityAtHome(t *testing.T) {
 	const z = "two.sig.example."
 	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
 `+z+`	3600	IN	NS	ns2.`+z+`
 ns1.`+z+`	3600	IN	A	127.0.0.1
 ns2.`+z+`	3600	IN	A	127.0.0.2
 `, "127.0.0.1:53", "127.0.0.2:53")
+	conf.Service.Identities = []string{"ns1." + z, "ns2." + z}
 	if err := zd.CreateTransportSignalRRs(conf); err != nil {
 		t.Fatal(err)
 	}
 	if !served(zd, "_dns.ns1."+z, dns.TypeSVCB) || !served(zd, "_dns.ns2."+z, dns.TypeSVCB) {
-		t.Fatalf("one signal per NS name expected: ns1=%v ns2=%v", served(zd, "_dns.ns1."+z, dns.TypeSVCB), served(zd, "_dns.ns2."+z, dns.TypeSVCB))
+		t.Fatalf("one signal per identity expected: ns1=%v ns2=%v", served(zd, "_dns.ns1."+z, dns.TypeSVCB), served(zd, "_dns.ns2."+z, dns.TypeSVCB))
 	}
 }
 
-// An operator's alias at one NS name is left alone and does not stop the pass
-// from speaking for the server's other name.
+// An operator's alias at one identity's owner is left alone and does not stop
+// the pass from speaking for the server's other identity.
 func TestAnOperatorAliasDoesNotStopTheSignalPass(t *testing.T) {
 	const z = "alias.sig.example."
 	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
@@ -69,6 +70,7 @@ ns1.`+z+`	3600	IN	A	127.0.0.1
 ns2.`+z+`	3600	IN	A	127.0.0.1
 _dns.ns1.`+z+`	300	IN	SVCB	0 _dns.ns.provider.example.
 `, "127.0.0.1:53")
+	conf.Service.Identities = []string{"ns1." + z, "ns2." + z}
 	if err := zd.CreateTransportSignalRRs(conf); err != nil {
 		t.Fatal(err)
 	}
@@ -76,18 +78,21 @@ _dns.ns1.`+z+`	300	IN	SVCB	0 _dns.ns.provider.example.
 		t.Fatalf("the operator's alias was not left alone: %v", rrs)
 	}
 	if !served(zd, "_dns.ns2."+z, dns.TypeSVCB) {
-		t.Fatal("the pass stopped at the alias and did not speak for the server's other name")
+		t.Fatal("the pass stopped at the alias and did not speak for the server's other identity")
 	}
 }
 
-// A zone that is signed by someone else gets no stored signal from a server
-// that does not sign it: at most the unsigned fallback beside the snapshot.
+// A zone that is signed by someone else gets no signal from a server that
+// does not sign it, even as an identity's home: nothing stored, and no
+// unsigned fallback beside the snapshot either (rule 2: synthesis only where
+// this server is primary and signer).
 func TestASignedZoneThisServerDoesNotSignGetsNoStoredSignal(t *testing.T) {
 	const z = "signed.sig.example."
 	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
 `+z+`	3600	IN	DNSKEY	257 3 15 O3xbJlGx2Ol+f3mu57551r87qbeE1OrPA8j49W8JaPw=
 ns1.`+z+`	3600	IN	A	127.0.0.1
 `, "127.0.0.1:53")
+	conf.Service.Identities = []string{"ns1." + z}
 	if err := zd.CreateTransportSignalRRs(conf); err != nil {
 		t.Fatal(err)
 	}
@@ -95,16 +100,17 @@ ns1.`+z+`	3600	IN	A	127.0.0.1
 		t.Fatal("an unsigned signal was stored into a zone signed by someone else")
 	}
 	snap := zd.publishedSnapshot()
-	if snap == nil || snap.signalSynth["_dns.ns1."+z] == nil {
-		t.Fatal("the unsigned fallback beside the snapshot is missing")
+	if snap == nil || snap.signalSynth["_dns.ns1."+z] != nil {
+		t.Fatal("an unsigned fallback was kept beside the snapshot")
 	}
-	if got := zd.collectSignalRRsets(snap); len(got) != 1 {
-		t.Fatalf("the fallback is not injected: %d RRsets", len(got))
+	if got := zd.collectSignalRRsets(snap); len(got) != 0 {
+		t.Fatalf("a signal was injected from no zone data: %d RRsets", len(got))
 	}
 }
 
-// The option on a zone none of whose NS names is this server's draws a
-// warning and publishes nothing: a hidden primary should not carry it.
+// The option on a zone none of whose NS names has a signal here or is an
+// identity draws a warning and publishes nothing: a hidden primary should
+// not carry it.
 func TestTheSignalPassWarnsWhenNoNSNameIsThisServer(t *testing.T) {
 	const z = "hidden.sig.example."
 	var logs syncBuffer
@@ -165,28 +171,22 @@ _dns.ns2.`+z2+`	300	IN	SVCB	0 ns.provider.example.
 	}
 }
 
-// An alias is injected only when the server can know it is about itself: it
-// hosts the target's zone, or the vanity name's addresses are its own.
-func TestAnAliasIsInjectedOnlyWhenItIsAboutThisServer(t *testing.T) {
-	const z = "ours.sig.example."
-	zd, _ := signalTestZone(t, z, z+`	3600	IN	NS	ns2.`+z+`
-ns2.`+z+`	3600	IN	A	127.0.0.1
+// An alias is included by zone data alone (rule 1): whatever the vanity
+// name's addresses, and with its target in no zone served here, the alias
+// goes in alone.
+func TestAnAliasIsIncludedByZoneDataAlone(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1", "192.0.2.1"} {
+		z := "alias-" + strings.ReplaceAll(addr, ".", "-") + ".sig.example."
+		zd, _ := signalTestZone(t, z, z+`	3600	IN	NS	ns2.`+z+`
+ns2.`+z+`	3600	IN	A	`+addr+`
 _dns.ns2.`+z+`	300	IN	SVCB	0 _dns.ns.elsewhere.example.
 `, "127.0.0.1:53")
-	if got := zd.collectSignalRRsets(zd.publishedSnapshot()); len(got) != 1 {
-		t.Fatalf("an alias at a vanity name with our addresses was not injected alone: %d", len(got))
-	}
-
-	const z2 = "theirs.sig.example."
-	zd2, _ := signalTestZone(t, z2, z2+`	3600	IN	NS	ns2.`+z2+`
-ns2.`+z2+`	3600	IN	A	192.0.2.1
-_dns.ns2.`+z2+`	300	IN	SVCB	0 _dns.ns.elsewhere.example.
-`, "127.0.0.1:53")
-	if got := zd2.collectSignalRRsets(zd2.publishedSnapshot()); len(got) != 0 {
-		t.Fatalf("an alias the server cannot vouch for was injected: %d", len(got))
-	}
-	if !served(zd2, "_dns.ns2."+z2, dns.TypeSVCB) {
-		t.Fatal("the alias is zone content and must still answer a direct query")
+		if got := zd.collectSignalRRsets(zd.publishedSnapshot()); len(got) != 1 || !svcbHasAlias(got[0]) {
+			t.Fatalf("%s: the alias was not included alone: %v", addr, got)
+		}
+		if !served(zd, "_dns.ns2."+z, dns.TypeSVCB) {
+			t.Fatal("the alias is zone content and must answer a direct query")
+		}
 	}
 }
 
@@ -254,16 +254,22 @@ _dns.ns1.`+z2+`	300	IN	SVCB	0 _dns.ns.provider.example.
 }
 
 // The join, not the arm: a real tdns-auth secondary that may not originate
-// content, its options through the normalizer. The option is kept, nothing is
-// stored into the zone it mirrors, and the fallback is injected.
+// content, its options through the normalizer. The option is kept, and
+// nothing is stored into the zone it mirrors or kept beside it, even as an
+// identity's home (rule 2). A signal in the mirrored data is included as it
+// came (rule 1).
 func TestANonOriginatingSecondaryKeepsTheOptionAndStoresNothing(t *testing.T) {
 	const z = "mirror.sig.example."
 	prevApp := Globals.App.Type
 	Globals.App.Type = AppTypeAuth
 	t.Cleanup(func() { Globals.App.Type = prevApp })
 	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+`+z+`	3600	IN	NS	ns2.`+z+`
 ns1.`+z+`	3600	IN	A	127.0.0.1
+ns2.`+z+`	3600	IN	A	127.0.0.1
+_dns.ns2.`+z+`	300	IN	SVCB	1 . oots="dot:30"
 `, "127.0.0.1:53")
+	conf.Service.Identities = []string{"ns1." + z}
 	zd.ZoneType = Secondary
 	effective, _, suppressed, msg := normalizeOptionsForRole(AppTypeAuth, Secondary, zd.Options, "")
 	if !effective[OptAddTransportSignal] || suppressed[OptAddTransportSignal] {
@@ -281,13 +287,10 @@ ns1.`+z+`	3600	IN	A	127.0.0.1
 		t.Fatal("a signal was stored into a zone the server may not modify")
 	}
 	snap := zd.publishedSnapshot()
-	if snap == before || snap.signalSynth["_dns.ns1."+z] == nil {
-		t.Fatal("the fallback was not published beside the snapshot")
+	if snap != before {
+		t.Fatal("the pass published into a mirrored zone")
 	}
-	if snap.Serial != before.Serial {
-		t.Fatalf("the fallback's publish moved the serial of a mirrored zone: %d -> %d", before.Serial, snap.Serial)
-	}
-	if got := zd.collectSignalRRsets(snap); len(got) != 1 {
-		t.Fatalf("the fallback is not injected: %d RRsets", len(got))
+	if got := zd.collectSignalRRsets(snap); len(got) != 1 || !signalOwners(got)["_dns.ns2."+z] {
+		t.Fatalf("the signal in the mirrored data was not included as it came: %v", got)
 	}
 }

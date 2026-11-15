@@ -14,10 +14,12 @@ import (
 )
 
 // The operator-authored transport signal (design 2026-11-14, section 5; plan
-// step S2): the start-up pass leaves an operator's _dns.<ns> RRset alone
-// whatever its mode, injection tests the name, only AliasMode records are
-// chased, and the zone loader warns about what a resolver will read
-// differently from what the operator wrote.
+// step S2, as the maintainer ruled it 2026-11-15): the start-up pass leaves
+// provisioned records at an identity's _dns owner alone whatever their mode,
+// injection includes provisioned records by zone data alone, only AliasMode
+// records are chased, and the zone loader warns about what a resolver will
+// read differently from what the operator wrote. The three rules themselves
+// are tested in tsignal_zone_data_rules_test.go.
 
 func captureSignalLog(t *testing.T) *syncBuffer {
 	t.Helper()
@@ -41,10 +43,10 @@ func mustRRs(t *testing.T, lines ...string) []dns.RR {
 	return out
 }
 
-// An operator's ServiceMode RRset at an NS name that is this server's
-// survives the start-up pass as written, with a target and without one, and
-// the pass says it left it alone. The configuration still gives the server's
-// other name its signal: the walk goes on.
+// An operator's ServiceMode RRset at an identity's signal owner survives the
+// start-up pass as written, with a target and without one, and the pass
+// says it left it alone. The configuration still gives the server's other
+// identity its signal: the walk goes on.
 func TestAnOperatorServiceModeRRsetSurvivesTheSignalPass(t *testing.T) {
 	cases := []struct {
 		name, zone string
@@ -67,6 +69,7 @@ func TestAnOperatorServiceModeRRsetSurvivesTheSignalPass(t *testing.T) {
 ns1.`+z+`	3600	IN	A	127.0.0.1
 ns2.`+z+`	3600	IN	A	127.0.0.1
 `+strings.Join(c.records, "\n")+"\n", "127.0.0.1:53")
+			conf.Service.Identities = []string{"ns1." + z, "ns2." + z}
 			conf.Service.Transport.Signal = "dot:50"
 			if err := zd.CreateTransportSignalRRs(conf); err != nil {
 				t.Fatal(err)
@@ -75,12 +78,12 @@ ns2.`+z+`	3600	IN	A	127.0.0.1
 			if got := svcbRecords(zd, "_dns.ns1."+z); !sameRecords(got, want) {
 				t.Fatalf("the operator's RRset was not left alone:\n got %v\nwant %v", got, want)
 			}
-			if !strings.Contains(logs.String(), "leaving the operator's SVCB RRset alone") {
+			if !strings.Contains(logs.String(), "leaving the operator's records") {
 				t.Fatalf("the pass did not say it left the operator's RRset alone:\n%s", logs.String())
 			}
 			own := svcbRecords(zd, "_dns.ns2."+z)
 			if len(own) != 1 || !strings.Contains(own[0].String(), "dot:50") {
-				t.Fatalf("the server's other name did not get the configured signal: %v", own)
+				t.Fatalf("the server's other identity did not get the configured signal: %v", own)
 			}
 		})
 	}
@@ -97,6 +100,7 @@ func TestTheSignalPassTellsItsOwnSignalFromTheOperators(t *testing.T) {
 	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
 ns1.`+z+`	3600	IN	A	127.0.0.1
 `, "127.0.0.1:53")
+	conf.Service.Identities = []string{"ns1." + z}
 	conf.Service.Transport.Signal = "dot:50"
 	if err := zd.CreateTransportSignalRRs(conf); err != nil {
 		t.Fatal(err)
@@ -129,6 +133,7 @@ ns1.`+z+`	3600	IN	A	127.0.0.1
 	zd2, conf2 := signalTestZone(t, z2, z2+`	3600	IN	NS	ns1.`+z2+`
 ns1.`+z2+`	3600	IN	A	127.0.0.1
 `+strings.Join(lines, "\n")+"\n", "127.0.0.1:53")
+	conf2.Service.Identities = []string{"ns1." + z2}
 	conf2.Service.Transport.Signal = conf.Service.Transport.Signal
 	if err := zd2.CreateTransportSignalRRs(conf2); err != nil {
 		t.Fatal(err)
@@ -156,6 +161,7 @@ ns1.`+z+`	3600	IN	A	127.0.0.1
 ns2.`+z+`	3600	IN	A	127.0.0.1
 _dns.ns1.`+z+`	300	IN	SVCB	1 . oots="dot:30"
 `, "127.0.0.1:53")
+	conf.Service.Identities = []string{"ns1." + z, "ns2." + z}
 	conf.Service.Transport.Signal = "dot:50"
 	if err := zd.CreateTransportSignalRRs(conf); err != nil {
 		t.Fatal(err)
@@ -175,43 +181,25 @@ _dns.ns1.`+z+`	300	IN	SVCB	1 . oots="dot:30"
 	}
 }
 
-// Injection tests the name: an operator's ServiceMode RRset is injected when
-// the NS name is this server's (its addresses are the listeners, or it is
-// one of the server's identities), and otherwise only answers a direct
-// query.
-func TestAnOperatorServiceModeRRsetIsInjectedOnlyForThisServersName(t *testing.T) {
+// A provisioned ServiceMode RRset, with a target or without, is included by
+// zone data alone: no identity is configured and the NS name's address is
+// not this server's (rule 1). It also answers a direct query.
+func TestAProvisionedServiceModeRRsetIsIncludedByZoneData(t *testing.T) {
 	const z = "theirs-svc.sig.example."
-	zd, _ := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
 ns1.`+z+`	3600	IN	A	192.0.2.1
 _dns.ns1.`+z+`	300	IN	SVCB	1 . oots="dot:30"
 _dns.ns1.`+z+`	300	IN	SVCB	1 dot.elsewhere.example. oots="doq:30"
 `, "127.0.0.1:53")
-	if got := zd.collectSignalRRsets(zd.publishedSnapshot()); len(got) != 0 {
-		t.Fatalf("an operator ServiceMode RRset for a name that is not this server's was injected: %d", len(got))
+	if len(conf.Service.Identities) != 0 || len(Conf.Service.Identities) != 0 {
+		t.Fatal("the test needs no identity configured")
+	}
+	got := zd.collectSignalRRsets(zd.publishedSnapshot())
+	if len(got) != 1 || len(got[0].RRs) != 2 {
+		t.Fatalf("a provisioned ServiceMode RRset was not included whole by zone data: %v", got)
 	}
 	if !served(zd, "_dns.ns1."+z, dns.TypeSVCB) {
-		t.Fatal("the operator's RRset is zone content and must still answer a direct query")
-	}
-
-	const z2 = "ours-svc.sig.example."
-	zd2, _ := signalTestZone(t, z2, z2+`	3600	IN	NS	ns1.`+z2+`
-ns1.`+z2+`	3600	IN	A	127.0.0.1
-_dns.ns1.`+z2+`	300	IN	SVCB	1 dot.elsewhere.example. oots="dot:30"
-`, "127.0.0.1:53")
-	if got := zd2.collectSignalRRsets(zd2.publishedSnapshot()); len(got) != 1 {
-		t.Fatalf("an operator ServiceMode RRset with a target at this server's name was not injected: %d", len(got))
-	}
-
-	const z3 = "ident-svc.sig.example."
-	zd3, _ := signalTestZone(t, z3, z3+`	3600	IN	NS	ns1.`+z3+`
-ns1.`+z3+`	3600	IN	A	192.0.2.1
-_dns.ns1.`+z3+`	300	IN	SVCB	1 . oots="dot:30"
-`, "127.0.0.1:53")
-	prev := Conf.Service.Identities
-	Conf.Service.Identities = []string{"ns1." + z3}
-	t.Cleanup(func() { Conf.Service.Identities = prev })
-	if got := zd3.collectSignalRRsets(zd3.publishedSnapshot()); len(got) != 1 {
-		t.Fatalf("an operator ServiceMode RRset at one of this server's identities was not injected: %d", len(got))
+		t.Fatal("the provisioned RRset must answer a direct query")
 	}
 }
 
@@ -319,6 +307,7 @@ ns1.` + z + `	3600	IN	A	127.0.0.1
 	before := func(t *testing.T, kdb *KeyDB) []string {
 		zd, conf := signalTestZone(t, z, body, "127.0.0.1:53")
 		zd.KeyDB = kdb
+		conf.Service.Identities = []string{"ns1." + z}
 		conf.Service.Transport.Signal = "dot:50"
 		if err := zd.CreateTransportSignalRRs(conf); err != nil {
 			t.Fatal(err)
@@ -335,6 +324,7 @@ ns1.` + z + `	3600	IN	A	127.0.0.1
 		logs := captureSignalLog(t)
 		zd, conf := signalTestZone(t, z, body+strings.Join(persisted, "\n")+"\n", "127.0.0.1:53")
 		zd.KeyDB = kdb
+		conf.Service.Identities = []string{"ns1." + z}
 		conf.Service.Transport.Signal = "dot:20"
 		if err := zd.CreateTransportSignalRRs(conf); err != nil {
 			t.Fatal(err)
@@ -377,6 +367,7 @@ func TestTheSignalPassForgetsAnOwnerTheOperatorTookOver(t *testing.T) {
 ns1.`+z+`	3600	IN	A	127.0.0.1
 `, "127.0.0.1:53")
 	zd.KeyDB = kdb
+	conf.Service.Identities = []string{"ns1." + z}
 	conf.Service.Transport.Signal = "dot:50"
 	if err := zd.CreateTransportSignalRRs(conf); err != nil {
 		t.Fatal(err)
@@ -417,6 +408,7 @@ ns1.example.	3600	IN	A	127.0.0.1
 	t.Cleanup(func() { Globals.ServerSVCB, Conf.Listeners.Addresses = prevSVCB, prevListeners })
 	conf := &Config{}
 	conf.Service.Transport.Type = "svcb"
+	conf.Service.Identities = []string{"ns1.example."}
 	conf.Service.Transport.Signal = "dot:50"
 	conf.Listeners.Addresses = Conf.Listeners.Addresses
 	if err := zd.CreateTransportSignalRRs(conf); err != nil {
@@ -436,32 +428,24 @@ ns1.example.	3600	IN	A	127.0.0.1
 	}
 }
 
-// The name test reads an NS name's addresses at its home. Under a co-hosted
-// child the home is the child, not the parent's glue for it.
-func TestTheNameTestReadsACoHostedChildNotTheParentGlue(t *testing.T) {
+// A signal is read at its home, the most specific zone hosted here that
+// holds it: under a co-hosted child, the child's RRset, not a copy below the
+// parent's zone cut.
+func TestASignalIsReadAtItsHomeNotBelowTheParentsCut(t *testing.T) {
 	const parent = "cohost.sig.example."
 	const child = "child." + parent
 	const ns = "ns1." + child
-	for _, tc := range []struct {
-		name        string
-		glue, child string
-		want        bool
-	}{
-		{"glue is not this server, the child says it is", "192.0.2.1", "127.0.0.1", true},
-		{"glue is this server, the child says it is not", "127.0.0.1", "192.0.2.1", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			zp, _ := signalTestZone(t, parent, parent+`	3600	IN	NS	ns1.`+parent+`
-ns1.`+parent+`	3600	IN	A	192.0.2.53
+	zp, _ := signalTestZone(t, parent, parent+`	3600	IN	NS	`+ns+`
 `+child+`	3600	IN	NS	`+ns+`
-`+ns+`	3600	IN	A	`+tc.glue+`
+`+ns+`	3600	IN	A	192.0.2.1
+_dns.`+ns+`	300	IN	SVCB	1 . oots="dot:1"
 `, "127.0.0.1:53")
-			signalTestZone(t, child, child+`	3600	IN	NS	`+ns+`
-`+ns+`	3600	IN	A	`+tc.child+`
+	signalTestZone(t, child, child+`	3600	IN	NS	`+ns+`
+`+ns+`	3600	IN	A	192.0.2.1
+_dns.`+ns+`	300	IN	SVCB	1 . oots="dot:2"
 `, "127.0.0.1:53")
-			if got := zp.nsNameIsThisServer(zp.publishedSnapshot(), ns); got != tc.want {
-				t.Fatalf("nsNameIsThisServer(%s) from the parent = %v, want %v", ns, got, tc.want)
-			}
-		})
+	got := zp.collectSignalRRsets(zp.publishedSnapshot())
+	if len(got) != 1 || len(got[0].RRs) != 1 || !strings.Contains(got[0].RRs[0].String(), "dot:2") {
+		t.Fatalf("the parent's responses did not carry the child's signal: %v", got)
 	}
 }
