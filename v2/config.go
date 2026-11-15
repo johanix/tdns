@@ -18,6 +18,7 @@ import (
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 var Conf Config
@@ -236,6 +237,27 @@ type TransportConf struct {
 	// Publishing a port opens no socket; the listener is configured under
 	// listeners.ports. Only type svcb carries ports.
 	Ports map[string]uint16 `yaml:"ports"`
+}
+
+// Validate refuses, at config load, a signal this server would publish (type
+// svcb or tsync) that does not parse or names a token other than do53, dot, doh
+// and doq. No tdns publisher may emit a new token, such as `udp` or `tcp`,
+// before every node that can re-pack the record keeps it (the alternative-
+// endpoint design, tdns #1043, section 8). With type none the signal is not
+// published and is not checked.
+func (t TransportConf) Validate() error {
+	switch strings.ToLower(t.Type) {
+	case "svcb", "tsync":
+	default:
+		return nil
+	}
+	if t.Signal == "" {
+		return nil
+	}
+	if err := core.ValidatePublishedTransportSignal(t.Signal); err != nil {
+		return fmt.Errorf("service.transport.signal %q: %v", t.Signal, err)
+	}
+	return nil
 }
 
 // ListenersConf is the listening side of an app's DNS service: addresses,
