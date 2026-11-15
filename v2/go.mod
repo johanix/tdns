@@ -54,10 +54,8 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-// Pinned at johanix/dns v1.1.72-johanix.5 plus the lossless oots codec
-// (johanix/dns#6), as a pseudo-version of that PR's head until it is
-// merged and tagged v1.1.72-johanix.6; re-pin all 15 modules then. It
-// provides the pluggable Algorithm interface and the registered oots SvcParamKey (12) /
+// Pinned at johanix/dns v1.1.72-johanix.6 — provides the pluggable
+// Algorithm interface and the registered oots SvcParamKey (12) /
 // dns.SVCBOots. The algorithms it does not implement are registered
 // through that interface: ED448 and ML-DSA-44 by v2/algorithms in every
 // binary, the rest by each binary's generated registration code.
@@ -71,9 +69,10 @@ require (
 // received (dns.RawRequester), so SIG(0) is verified over the bytes the
 // sender signed, not over a re-pack (tdns #1028).
 // .6 over .5: the oots codec is lossless. It keeps every entry, known
-// token or not, and the weight octet as received, so a node that re-packs
+// token or not, and the weight octet as received (0-255, on the wire and
+// in zone text), so a node that re-packs
 // a _dns SVCB serves the bytes it was signed as; ignoring other tokens and
 // clamping weights are svcbOotsToRawMap's job (tdns #1043, section 8).
 // Every module that requires miekg/dns carries this same replace, which
 // TestEveryLiveModuleUsesTheDNSFork (v2) checks.
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.5.0.20261114223317-5add9c58b3d7
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.6
