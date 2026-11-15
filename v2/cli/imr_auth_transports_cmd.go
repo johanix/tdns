@@ -52,9 +52,10 @@ tcp:N, and an explicit udp or tcp wins over it. A weight of 1 is marked
 weights shares: Do53 gets what the encrypted weights leave of 100, and tcp
 only caps the TCP the resolver would choose on its own, which is none (TCP
 after truncation, or forced, ignores it). A port the signal assigns follows
-that transport (dot:30 port:1234). udp and tcp never have one: cleartext stays
-on port 53. A record's port applies to every encrypted transport the record
-names.
+that transport (dot:30 port:1234), udp and tcp included. A record's port
+applies to every transport the record names; an older signal's do53 never
+takes one. The retry over TCP after truncation goes to the address and port
+that truncated, and forced TCP to the tcp port, or 53 when there is none.
 
 --pct shows each transport's share of the row's answers instead of a count,
 and adds EXPECTED: the shares selection gives a query without PRIVACY (with

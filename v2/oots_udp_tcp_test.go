@@ -93,10 +93,11 @@ func TestDo53ShorthandAcrossRecords(t *testing.T) {
 		pathOwner + ` 3600 IN SVCB 1 . oots="do53:40,dot:10"`,
 		pathOwner + ` 3600 IN SVCB 1 . oots="tcp:5"`,
 	}, "oots w=dot:10,tcp:5,udp:40 p=")
+	// The port applies to udp as to dot (S5); the do53 record has none.
 	checkEveryPathBothOrders(t, []string{
 		pathOwner + ` 3600 IN SVCB 1 . oots="do53:40"`,
 		pathOwner + ` 3600 IN SVCB 1 . port=1234 oots="dot:10,udp:90"`,
-	}, "oots w=dot:10,tcp:40,udp:90 p=dot:1234")
+	}, "oots w=dot:10,tcp:40,udp:90 p=dot:1234,udp:1234")
 }
 
 // A stub's configured signal is read the same way, and its tcp weight is not a
@@ -132,20 +133,41 @@ func TestStatsShowUDPAndTCPApart(t *testing.T) {
 	}
 }
 
-// The publisher does not emit the new tokens yet: an unconfigured cleartext
-// weight is still written out as do53, and a signal naming udp or tcp is
-// refused at load.
-func TestPublisherStillEmitsDo53(t *testing.T) {
-	oots, err := transportSignalToSVCBOots("dot:10")
-	if err != nil {
-		t.Fatalf("transportSignalToSVCBOots: %v", err)
+// From S5 on the publisher emits udp and tcp: a do53 entry is emitted as the
+// two, an explicit one winning, and nothing cleartext the operator did not
+// name is written out. A signal naming udp or tcp is accepted at load; one
+// naming an undefined token is not.
+func TestPublisherEmitsUDPAndTCP(t *testing.T) {
+	for sig, want := range map[string]string{
+		"dot:10":         "dot:10",
+		"do53:100":       "tcp:100,udp:100",
+		"do53:0,dot:10":  "dot:10,tcp:0,udp:0",
+		"do53:40,tcp:5":  "tcp:5,udp:40",
+		"udp:0,doq:20":   "doq:20,udp:0",
+		"tcp:30,doh:0":   "tcp:30",
+		"udp:50,tcp:100": "tcp:100,udp:50",
+	} {
+		oots, err := transportSignalToSVCBOots(sig)
+		if err != nil {
+			t.Fatalf("transportSignalToSVCBOots(%q): %v", sig, err)
+		}
+		if got := oots.String(); got != want {
+			t.Errorf("%q published as %q, want %q", sig, got, want)
+		}
 	}
-	if got, want := oots.String(), "do53:100,dot:10"; got != want {
-		t.Errorf("published oots %q, want %q", got, want)
+	for _, sig := range []string{"udp:100,dot:10", "tcp:30", "do53:10,udp:20"} {
+		if err := (TransportConf{Type: "svcb", Signal: sig}).Validate(); err != nil {
+			t.Errorf("Validate(%q) = %v", sig, err)
+		}
 	}
-	for _, sig := range []string{"udp:100,dot:10", "tcp:30"} {
-		if err := (TransportConf{Type: "svcb", Signal: sig}).Validate(); err == nil {
-			t.Errorf("Validate(%q) accepted a token the publisher does not emit yet", sig)
+	// The TSYNC form carries the signal as written, unless it names do53.
+	for sig, want := range map[string]string{
+		"doq:20,dot:10": "doq:20,dot:10",
+		"udp:10,tcp:0":  "udp:10,tcp:0",
+		"do53:40,dot:5": "dot:5,tcp:40,udp:40",
+	} {
+		if got := publishedTSYNCSignal(sig); got != want {
+			t.Errorf("publishedTSYNCSignal(%q) = %q, want %q", sig, got, want)
 		}
 	}
 }

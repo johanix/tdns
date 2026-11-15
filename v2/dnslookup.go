@@ -853,14 +853,18 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 				continue
 			}
 			for rank, t := range transports {
-				if !server.IsAddrXportAvailable(addr, t) {
+				// Backoff is booked per endpoint: the address with the
+				// port the signal gave t (server.DialAddr), as tryServer
+				// books it.
+				endpoint := server.DialAddr(addr, t)
+				if !server.IsAddrXportAvailable(endpoint, t) {
 					if Globals.Debug {
 						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to server backoff",
-							"addr", addr, "transport", core.TransportToString[t], "ns", nsname)
+							"addr", endpoint, "transport", core.TransportToString[t], "ns", nsname)
 					}
 					continue
 				}
-				if zone != nil && !zone.IsZoneAddrXportAvailable(addr, t) {
+				if zone != nil && !zone.IsZoneAddrXportAvailable(endpoint, t) {
 					if Globals.Debug {
 						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to zone backoff",
 							"addr", addr, "transport", core.TransportToString[t], "ns", nsname, "zone", zoneName)
@@ -922,7 +926,7 @@ func sortTuplesByRankThenRTT(tuples []ServerAddrXportTuple) {
 	}
 	rtts := make([]time.Duration, len(tuples))
 	for i, tup := range tuples {
-		if r, ok := tup.Server.GetRTT(tup.Addr, tup.Transport); ok {
+		if r, ok := tup.Server.GetRTT(tup.Server.DialAddr(tup.Addr, tup.Transport), tup.Transport); ok {
 			rtts[i] = r
 		} else {
 			rtts[i] = unprobedRTTSentinel
@@ -983,11 +987,11 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 					hostLocal++
 					continue
 				}
-				if !server.IsAddrXportAvailable(addr, t) {
+				if !server.IsAddrXportAvailable(server.DialAddr(addr, t), t) {
 					serverBackoff++
 					continue
 				}
-				if zone != nil && !zone.IsZoneAddrXportAvailable(addr, t) {
+				if zone != nil && !zone.IsZoneAddrXportAvailable(server.DialAddr(addr, t), t) {
 					zoneBackoff++
 					continue
 				}
@@ -1793,19 +1797,21 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					lg.Printf("IterativeDNSQuery: %s response from %s@%s over %s for %s %s (likely lame delegation for zone %q)",
 						dns.RcodeToString[rcode], addr, nsname, core.TransportToString[wireTransport], qname, dns.TypeToString[qtype], zoneName)
 				}
-				if zone != nil {
-					zone.RecordZoneAddressFailureForRcode(addr, wireTransport, uint8(rcode), Globals.Debug)
+				// Booked under the endpoint tried, as tryServer books
+				// backoff and RTT (server.DialAddr).
+				if endpoint := server.DialAddr(addr, wireTransport); zone != nil {
+					zone.RecordZoneAddressFailureForRcode(endpoint, wireTransport, uint8(rcode), Globals.Debug)
 				} else {
-					server.RecordAddressFailureForRcode(addr, wireTransport, uint8(rcode))
+					server.RecordAddressFailureForRcode(endpoint, wireTransport, uint8(rcode))
 				}
 				continue
 			case dns.RcodeSuccess:
 				if zone != nil {
-					zone.RecordZoneAddressSuccess(addr, wireTransport)
+					zone.RecordZoneAddressSuccess(server.DialAddr(addr, wireTransport), wireTransport)
 				}
 			default:
 				if zone != nil {
-					zone.RecordZoneAddressSuccess(addr, wireTransport)
+					zone.RecordZoneAddressSuccess(server.DialAddr(addr, wireTransport), wireTransport)
 				}
 			}
 
@@ -2076,7 +2082,24 @@ func ootsRecordFromSVCB(rr *dns.SVCB) (ootsRecord, bool) {
 	if !ok || err != nil {
 		return ootsRecord{}, false
 	}
+	if !dropDo53WithPort(m, svcbPortValue(rr)) {
+		return ootsRecord{}, false
+	}
 	return newOOTSRecord(rr, m, nil), true
+}
+
+// dropDo53WithPort deletes do53 from the tokens of a record with a port key,
+// and reports whether any token is left; a record left with none is ignored
+// whole. do53 is the receive-only shorthand for udp and tcp on the
+// nameserver's own port 53: it carries no port and no target, and is ignored
+// in a record that has one (the alternative-endpoint design, section 2). A
+// record with a target is ignored whole already (svcbUsable). tdns-auth never
+// published do53 beside a port.
+func dropDo53WithPort(raw map[string]uint8, port uint16) bool {
+	if port != 0 {
+		delete(raw, "do53")
+	}
+	return len(raw) > 0
 }
 
 // alpnRecordFromSVCB is an ALPN-only SVCB as a record. Its port applies to
@@ -2090,9 +2113,11 @@ func alpnRecordFromSVCB(rr *dns.SVCB) (ootsRecord, bool) {
 	}
 	raw := map[string]uint8{}
 	var order []string
+	// do53 in a record with a port is skipped, as in oots (dropDo53WithPort).
+	withPort := svcbPortValue(rr) != 0
 	for _, tok := range strings.Split(csv, ",") {
 		tok = strings.ToLower(strings.TrimSpace(tok))
-		if _, dup := raw[tok]; tok == "" || dup {
+		if _, dup := raw[tok]; tok == "" || dup || (withPort && tok == "do53") {
 			continue
 		}
 		raw[tok] = 100
@@ -2153,10 +2178,10 @@ func rankOOTSRecords(recs []ootsRecord) []ootsRecord {
 }
 
 // portsFromOOTSRecord applies the port key of one record. The port applies to
-// every transport the record names, as RFC 9461 has it for SVCB-DNS, except
-// do53: cleartext stays on UDP/53 and TCP/53 until it gets transports of its
-// own, so oots="do53:100" port=553 assigns the port to nothing. A port of 0
-// means the key is absent.
+// every transport the record names, as RFC 9461 has it for SVCB-DNS, udp and
+// tcp included: cleartext is not special (the alternative-endpoint design,
+// section 2). The do53 shorthand never carries a port; a record with a port
+// has it dropped (dropDo53WithPort). A port of 0 means the key is absent.
 func portsFromOOTSRecord(raw map[string]uint8, port uint16) map[core.Transport]uint16 {
 	if port == 0 {
 		return nil
@@ -2164,7 +2189,7 @@ func portsFromOOTSRecord(raw map[string]uint8, port uint16) map[core.Transport]u
 	var out map[core.Transport]uint16
 	for k := range raw {
 		t, err := core.StringToTransport(k)
-		if err != nil || !core.IsEncryptedTransport(t) {
+		if err != nil || k == "do53" {
 			continue
 		}
 		if out == nil {
@@ -2781,8 +2806,13 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 		return nil, 0, eff, fmt.Errorf("no DNS client for transport %d exists", eff)
 	}
 	server.IncrementTransportCounter(eff)
-	// A signal port is joined only onto the dial address. Backoff, RTT and the
-	// family tracker stay on the bare IP: the port belongs to the transport.
+	// A signal port is joined onto the dial address, and backoff and RTT are
+	// booked under it: keyed by address, port and transport, so an endpoint
+	// on another port that fails never backs off the one on the default
+	// port, and a changed port starts clean. The family tracker stays on the
+	// bare IP: a family is a property of the address. Forced TCP (eff
+	// Do53TCP) dials the tcp endpoint, or the default port 53, never the
+	// port of the udp endpoint: the ports are kept per transport.
 	dial := server.DialAddr(addr, eff)
 	if Globals.Debug {
 		lgDns.Debug("*** tryServer: calling c.Exchange",
@@ -2859,17 +2889,18 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"addr", addr,
 			"transport", core.TransportToString[eff],
 			"error", err)
-		server.RecordAddressFailure(addr, eff, err)
+		server.RecordAddressFailure(dial, eff, err)
 		// Stats: key failed on the ACTUAL wire transport (symmetric with used on
 		// success). A TC=1-then-TCP failure is thus attributed to Do53TCP, and
 		// failed[Do53] stays 0 — preserving "failed[Do53]=0 => size upgrade".
 		// (RecordAddressFailure/RecordRTT stay on eff: backoff is keyed by the
-		// attempted (addr, transport) tuple, a separate concern from usage stats.)
+		// attempted (endpoint, transport) tuple, a separate concern from usage
+		// stats.)
 		server.IncrementFailedCounter(xres.WireTransport)
 		// Penalty RTT: record the full elapsed time so a slow-failing path
 		// naturally sorts to the bottom of prioritizeServers even after the
 		// backoff lifts.
-		server.RecordRTT(addr, eff, rtt)
+		server.RecordRTT(dial, eff, rtt)
 		return nil, rtt, eff, err
 	}
 	if r != nil {
@@ -2882,13 +2913,13 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 				"addr", addr,
 				"transport", core.TransportToString[eff],
 				"error", qerr)
-			server.RecordAddressFailure(addr, eff, qerr)
+			server.RecordAddressFailure(dial, eff, qerr)
 			server.IncrementFailedCounter(xres.WireTransport)
 			return nil, rtt, eff, qerr
 		}
-		server.RecordAddressSuccess(addr, eff)
+		server.RecordAddressSuccess(dial, eff)
 		server.IncrementUsedCounter(xres.WireTransport, class)
-		server.RecordRTT(addr, eff, rtt)
+		server.RecordRTT(dial, eff, rtt)
 	} else if Globals.Debug {
 		lgDns.Debug("*** tryServer: query returned no response",
 			"qname", qname,

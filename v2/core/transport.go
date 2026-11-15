@@ -125,17 +125,6 @@ var signalTokens = map[string]bool{
 	"doq":  true,
 }
 
-// publishableTokens are the tokens a tdns publisher may emit
-// (ValidatePublishedTransportSignal). udp and tcp are received but not yet
-// published: a publisher emits a new token only once every tdns node that can
-// re-pack the record keeps it (the alternative-endpoint design, section 8).
-var publishableTokens = map[string]bool{
-	"do53": true,
-	"dot":  true,
-	"doh":  true,
-	"doq":  true,
-}
-
 // IsSignalToken reports whether tok, lower-cased, is an oots token that
 // selection acts on in a received signal. See signalTokens.
 func IsSignalToken(tok string) bool {
@@ -170,10 +159,11 @@ func ParseReceivedTransportString(s string) (map[string]uint8, error) {
 
 // ValidatePublishedTransportSignal checks a transport signal this server is
 // about to PUBLISH (service.transport.signal): it must parse, and name only
-// publishable tokens (publishableTokens). A tdns publisher may not emit another
-// token until every node that can re-pack the record keeps it and every
-// resolver ignores, rather than misapplies, what it cannot honor (the
-// alternative-endpoint design, tdns #1043, section 8).
+// signal tokens, which tdns-auth publishes with do53 emitted as udp and tcp.
+// A tdns publisher may not emit another token until every node that can
+// re-pack the record keeps it and every resolver ignores, rather than
+// misapplies, what it cannot honor (the alternative-endpoint design, tdns
+// #1043, section 8).
 func ValidatePublishedTransportSignal(s string) error {
 	raw, err := ParseTransportStringRaw(s)
 	if err != nil {
@@ -181,14 +171,14 @@ func ValidatePublishedTransportSignal(s string) error {
 	}
 	var bad []string
 	for k := range raw {
-		if !publishableTokens[k] {
+		if !IsSignalToken(k) {
 			bad = append(bad, k)
 		}
 	}
 	if len(bad) > 0 {
 		sort.Strings(bad)
-		return fmt.Errorf("transport: %s not publishable (only %s until the publisher emits the token split)",
-			strings.Join(bad, ", "), tokenList(publishableTokens))
+		return fmt.Errorf("transport: %s not publishable (only %s)",
+			strings.Join(bad, ", "), tokenList(signalTokens))
 	}
 	return nil
 }
