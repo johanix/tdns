@@ -42,6 +42,10 @@ tb2.test.    ns.tb2.test.     127.0.0.32  -
 cs.test.     ns.cs.test.      127.0.0.41  cs-pri:127.0.0.40
 csu.test.    ns.csu.test.     127.0.0.42  -
 pub.test.    ns1.pub.test.    127.0.0.51  -
+provider.test. ns1.provider.test. 127.0.0.61 cust:127.0.0.61
+customer.test. ns1.customer.test. 127.0.0.61 cust:127.0.0.61
+other.test.    ns1.provider.test. 127.0.0.61 cust:127.0.0.61
+far.test.      ns1.far.test.      127.0.0.61 cust:127.0.0.61
 "
 
 suites() { sed -n 's/^suite_\([a-z0-9_]*\)().*/\1/p' "$RIG"/suites/*.sh; }
@@ -66,9 +70,9 @@ child_ds() { # zone party address
 	"$CLI" --config "$WORK/$_p/tdns-cli.yaml" auth keystore dnssec gen-ds --zone "$_z" 2>&1 |
 		awk '$0 ~ /IN[ \t]+DS[ \t]/ && $(NF-1) == "2" { sub(/^[^I]*IN/, "IN"); print; exit }
 		     $0 ~ /IN[ \t]+DS[ \t]/ { for (i = 1; i <= NF; i++) if ($i == "DS" && $(i+3) == "2") {
-		         s = "IN"; for (j = i; j <= NF; j++) s = s " " $j; print s; exit } }' > "$WORK/$_p/ds"
+		         s = "IN"; for (j = i; j <= NF; j++) s = s " " $j; print s; exit } }' > "$WORK/$_p/${_z}ds"
 	stop_daemons
-	[ -s "$WORK/$_p/ds" ] || { echo "rig: gen-ds gave no SHA-256 DS for $_z" >&2; return 1; }
+	[ -s "$WORK/$_p/${_z}ds" ] || { echo "rig: gen-ds gave no SHA-256 DS for $_z" >&2; return 1; }
 }
 
 do_setup() {
@@ -95,7 +99,7 @@ do_setup() {
 			[ -n "$z" ] || continue
 			echo "$z IN NS $ns"
 			echo "$ns IN A $a"
-			[ "$signer" = "-" ] || echo "$z $(cat "$WORK/${signer%%:*}/ds")"
+			[ "$signer" = "-" ] || echo "$z $(cat "$WORK/${signer%%:*}/${z}ds")"
 		done
 	} > "$WORK/infra/root.zone.src"
 

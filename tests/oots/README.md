@@ -83,6 +83,7 @@ observed, and the negative case.
 | `ignore` | P3, P4 | a record with a target, and the ServiceMode siblings of an AliasMode record, are not applied | a resolver that applies them (trap) |
 | `tiebreak` | P5 | a transport named twice takes the same record in both RR orders | a resolver where the last record wins |
 | `lossless` | C1 | a tdns secondary re-serves every oots value byte for byte: unknown tokens, only-unknown values, odd identifiers, a weight octet above 100; the resolver validates each | a secondary or resolver whose codec drops or clamps |
+| `customer` | Z1–Z6 | a server includes signals by zone data and writes one only into its own zone: a customer's alias to the provider's signal, an NS named in the provider's zone, an alias to a target it does not hold; nothing written into a customer zone, with or without an identity; the resolver follows the alias on a Secure path | a publisher that writes into a zone it hosts for someone else, or injects by identity; a resolver that does not follow the alias |
 
 Scenario ids keep verdict tables narrow: C codec, K config, M versions, P ports
-and records.
+and records, Z zone data.
