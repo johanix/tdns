@@ -109,18 +109,18 @@ func TestUDPAndTCPTokens(t *testing.T) {
 	}
 }
 
-// udp and tcp are received but not yet published: the publisher emits them
-// only once every node that can re-pack the record keeps them.
-func TestValidatePublishedTransportSignal_NoUDPOrTCPYet(t *testing.T) {
-	for _, s := range []string{"do53:100,dot:10", "doq:5", ""} {
+// A published signal may name every signal token: tdns-auth emits do53 as
+// udp and tcp. An undefined token is refused, and the message names the set.
+func TestValidatePublishedTransportSignal(t *testing.T) {
+	for _, s := range []string{"do53:100,dot:10", "doq:5", "", "udp:100", "tcp:30,dot:10"} {
 		if err := ValidatePublishedTransportSignal(s); err != nil {
 			t.Errorf("ValidatePublishedTransportSignal(%q) = %v", s, err)
 		}
 	}
-	for _, s := range []string{"udp:100", "tcp:30,dot:10", "xyz:1"} {
+	for _, s := range []string{"xyz:1", "dot:10,do53-tcp:5"} {
 		err := ValidatePublishedTransportSignal(s)
-		if err == nil || !strings.Contains(err.Error(), "do53, doh, doq, dot") {
-			t.Errorf("ValidatePublishedTransportSignal(%q) = %v, want a refusal naming the publishable tokens", s, err)
+		if err == nil || !strings.Contains(err.Error(), "do53, doh, doq, dot, tcp, udp") {
+			t.Errorf("ValidatePublishedTransportSignal(%q) = %v, want a refusal naming the signal tokens", s, err)
 		}
 	}
 }

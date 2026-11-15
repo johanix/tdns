@@ -290,7 +290,8 @@ func TestSignalTokenFilter(t *testing.T) {
 	}
 }
 
-// tdns-auth refuses, at config load, a published signal naming another token.
+// tdns-auth refuses, at config load, a published signal naming a token that is
+// not defined.
 func TestPublishedTransportSignalRefusesOtherTokens(t *testing.T) {
 	for _, tc := range []struct {
 		typ, signal string
@@ -300,14 +301,16 @@ func TestPublishedTransportSignalRefusesOtherTokens(t *testing.T) {
 		{"tsync", "do53:0,doh:5", true},
 		{"SVCB", "dot:10", true},
 		{"svcb", "", true},
-		{"svcb", "dot:10,tcp:30", false},
-		{"tsync", "udp:100", false},
+		// From S5 on the publisher emits udp and tcp.
+		{"svcb", "dot:10,tcp:30", true},
+		{"tsync", "udp:100", true},
+		{"svcb", "dot:10,xyz:30", false},
 		{"svcb", "xyz:1", false},
 		{"svcb", "dot:10,", false},
 		{"svcb", "dot", false},
 		// Not published: not checked.
-		{"none", "tcp:30", true},
-		{"", "tcp:30", true},
+		{"none", "xyz:30", true},
+		{"", "xyz:30", true},
 	} {
 		err := TransportConf{Type: tc.typ, Signal: tc.signal}.Validate()
 		if (err == nil) != tc.ok {
@@ -585,12 +588,12 @@ func TestReceivedALPNSignalIgnoresOtherTokens(t *testing.T) {
 // config check refuses the signal too (ValidateConfig), and the message names
 // the publishable tokens from the check's own set.
 func TestValidateConfigRefusesOtherTokensInSignal(t *testing.T) {
-	cfg := writeCfg(t, "service:\n   transport:\n      type: svcb\n      signal: \"dot:10,tcp:30\"\n")
+	cfg := writeCfg(t, "service:\n   transport:\n      type: svcb\n      signal: \"dot:10,xyz:30\"\n")
 	err := ValidateConfig(nil, cfg)
-	if err == nil || !strings.Contains(err.Error(), "service.transport.signal") || !strings.Contains(err.Error(), "tcp") {
-		t.Fatalf("ValidateConfig = %v, want a service.transport.signal error naming tcp", err)
+	if err == nil || !strings.Contains(err.Error(), "service.transport.signal") || !strings.Contains(err.Error(), "xyz") {
+		t.Fatalf("ValidateConfig = %v, want a service.transport.signal error naming xyz", err)
 	}
-	if !strings.Contains(err.Error(), "do53, doh, doq, dot") {
+	if !strings.Contains(err.Error(), "do53, doh, doq, dot, tcp, udp") {
 		t.Errorf("ValidateConfig = %v, want the publishable tokens named from the check's set", err)
 	}
 }

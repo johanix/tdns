@@ -51,32 +51,58 @@ func TestTransportSignalLayout(t *testing.T) {
 	}{
 		{"no signal: one empty SVCB, as before", "", nil,
 			[]string{o + `1 .`}},
-		{"no ports: one record, as before", "doq:20,dot:10", nil,
-			[]string{o + `1 . oots="do53:100,doq:20,dot:10"`}},
-		{"a standard port counts as absent", "doq:20,dot:10", map[string]uint16{"dot": 853, "doq": 853},
-			[]string{o + `1 . oots="do53:100,doq:20,dot:10"`}},
+		{"no signal, standard ports only: one empty SVCB", "", map[string]uint16{"udp": 53, "tcp": 53},
+			[]string{o + `1 .`}},
+		// Validation accepts a udp or tcp port with no signal (absent, each
+		// weighs 100), so the port is published, not dropped.
+		{"no signal, udp and tcp on ports: published at their default", "", map[string]uint16{"udp": 5353, "tcp": 5354},
+			[]string{
+				o + `1 . port=5353 oots="udp:100"`,
+				o + `1 . port=5354 oots="tcp:100"`,
+			}},
+		// From S5 on, udp and tcp are written out only when the operator
+		// names them (do53 is emitted as the two): absent, each weighs 100.
+		{"no ports: one record, no cleartext default", "doq:20,dot:10", nil,
+			[]string{o + `1 . oots="doq:20,dot:10"`}},
+		{"a standard port counts as absent", "doq:20,dot:10", map[string]uint16{"dot": 853, "doq": 853, "udp": 53, "tcp": 53},
+			[]string{o + `1 . oots="doq:20,dot:10"`}},
 		{"one transport moved", "doq:20,dot:10", map[string]uint16{"dot": 1234},
 			[]string{
-				o + `1 . oots="do53:100,doq:20"`,
+				o + `1 . oots="doq:20"`,
 				o + `1 . port=1234 oots="dot:10"`,
 			}},
-		{"every transport moved, fixed order", "doh:5,doq:20,dot:10",
+		{"every transport moved, fixed order, no empty record", "doh:5,doq:20,dot:10",
 			map[string]uint16{"doh": 8443, "doq": 1235, "dot": 1234},
 			[]string{
-				o + `1 . oots="do53:100"`,
 				o + `1 . port=1234 oots="dot:10"`,
 				o + `1 . port=1235 oots="doq:20"`,
 				o + `1 . port=8443 oots="doh:5"`,
 			}},
 		{"DoH on a port", "doh:20", map[string]uint16{"doh": 8443},
 			[]string{
-				o + `1 . oots="do53:100"`,
 				o + `1 . port=8443 oots="doh:20"`,
 			}},
-		{"the operator's do53 weight, stated once", "do53:0,dot:10,doq:20", map[string]uint16{"dot": 1234},
+		{"the operator's do53 weight, as udp and tcp", "do53:0,dot:10,doq:20", map[string]uint16{"dot": 1234},
 			[]string{
-				o + `1 . oots="do53:0,doq:20"`,
+				o + `1 . oots="doq:20,tcp:0,udp:0"`,
 				o + `1 . port=1234 oots="dot:10"`,
+			}},
+		{"an explicit tcp wins over do53", "do53:40,tcp:5", nil,
+			[]string{o + `1 . oots="tcp:5,udp:40"`}},
+		{"udp and tcp on a port, each its own record", "dot:10", map[string]uint16{"udp": 5353, "tcp": 5353},
+			[]string{
+				o + `1 . oots="dot:10"`,
+				o + `1 . port=5353 oots="udp:100"`,
+				o + `1 . port=5353 oots="tcp:100"`,
+			}},
+		{"tcp on a port at the operator's weight, udp left at home", "do53:30,dot:10", map[string]uint16{"tcp": 5354},
+			[]string{
+				o + `1 . oots="dot:10,udp:30"`,
+				o + `1 . port=5354 oots="tcp:30"`,
+			}},
+		{"tcp:0 on a port is still published: forced TCP goes there", "tcp:0", map[string]uint16{"tcp": 5354},
+			[]string{
+				o + `1 . port=5354 oots="tcp:0"`,
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,9 +119,10 @@ func TestTransportSignalLayout(t *testing.T) {
 	}
 }
 
-// A configuration without ports publishes the bytes it published before
-// #994: one SVCB 1 . with only oots, the do53 default written out. Built
-// here by the pre-#994 recipe, independently of transportSignalLayout.
+// A configuration without ports publishes one SVCB 1 . with only oots, as
+// before #994, built here by that recipe (transportSignalToSVCBOots),
+// independently of transportSignalLayout. From S5 on the oots states no
+// cleartext default (publishedSignalWeights).
 func TestDefaultTransportSignalIsByteIdentical(t *testing.T) {
 	for _, signal := range []string{"doq:20,dot:10", "dot:10,do53:0", "doh:5", ""} {
 		got := buildSignalRRs(t, TransportConf{Type: "svcb", Signal: signal})
@@ -151,7 +178,7 @@ func TestTransportSignalChecks(t *testing.T) {
 		{"ports with no signal", TransportConf{Type: "svcb", Ports: map[string]uint16{"dot": 1234}}, listening, "no weight", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			warns, err := validateTransportSignal(tc.conf, tc.listen)
+			warns, err := validateTransportSignal(tc.conf, tc.listen, nil)
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Fatalf("error %v", err)
@@ -265,21 +292,27 @@ func TestTransportSignalConfigRoundTrip(t *testing.T) {
 	}{
 		{"no ports",
 			TransportConf{Type: "svcb", Signal: "doq:20,dot:10"},
-			"oots w=doq:20,dot:10,tcp:100,udp:100 p="},
+			"oots w=doq:20,dot:10 p="},
 		{"every transport on a port",
 			TransportConf{Type: "svcb", Signal: "doh:5,doq:20,dot:10", Ports: map[string]uint16{"dot": 1234, "doq": 1235, "doh": 8443}},
-			"oots w=doh:5,doq:20,dot:10,tcp:100,udp:100 p=doh:8443,doq:1235,dot:1234"},
+			"oots w=doh:5,doq:20,dot:10 p=doh:8443,doq:1235,dot:1234"},
 		{"DoH alone on a port",
 			TransportConf{Type: "svcb", Signal: "dot:10,doh:5", Ports: map[string]uint16{"doh": 8443}},
-			"oots w=doh:5,dot:10,tcp:100,udp:100 p=doh:8443"},
+			"oots w=doh:5,dot:10 p=doh:8443"},
 		{"do53 at the operator's weight",
 			TransportConf{Type: "svcb", Signal: "do53:0,dot:10", Ports: map[string]uint16{"dot": 1234}},
 			"oots w=dot:10,tcp:0,udp:0 p=dot:1234"},
-		// Only the record without a port names do53, so no default in a
-		// ported record can outrank the operator's do53:0.
+		// Only the record without a port names udp and tcp, so no default in
+		// a ported record can outrank the operator's do53:0.
 		{"do53:0 with every other transport on a port",
 			TransportConf{Type: "svcb", Signal: "do53:0,dot:30,doq:20", Ports: map[string]uint16{"dot": 1234, "doq": 1235}},
 			"oots w=doq:20,dot:30,tcp:0,udp:0 p=doq:1235,dot:1234"},
+		{"udp and tcp on a port",
+			TransportConf{Type: "svcb", Signal: "dot:10", Ports: map[string]uint16{"udp": 5353, "tcp": 5353}},
+			"oots w=dot:10,tcp:100,udp:100 p=tcp:5353,udp:5353"},
+		{"tcp alone on a port",
+			TransportConf{Type: "svcb", Signal: "do53:30", Ports: map[string]uint16{"tcp": 5354}},
+			"oots w=tcp:30,udp:30 p=tcp:5354"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var texts []string

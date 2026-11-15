@@ -42,7 +42,8 @@ func TestTransportSignalToSVCBOots_RoundTrip(t *testing.T) {
 	if err != nil || !present {
 		t.Fatalf("GetTransportParam: present=%v err=%v", present, err)
 	}
-	if m["doq"] != 20 || m["dot"] != 10 || m["do53"] != 0 {
+	// do53:0 is published as udp:0 and tcp:0, and reads back so.
+	if udp, ok := m["udp"]; m["doq"] != 20 || m["dot"] != 10 || !ok || udp != 0 || m["tcp"] != 0 {
 		t.Errorf("round-trip map=%v", m)
 	}
 }
@@ -57,18 +58,12 @@ func TestTransportSignalToSVCBOots_OmitsImplicitZeros(t *testing.T) {
 			t.Errorf("should not emit implicit doh:0, got %#v", oots.Oots)
 		}
 	}
-	// Absent do53 defaults to 100 and should be emitted explicitly.
-	foundDo53 := false
+	// Absent udp and tcp mean 100, so nothing cleartext is written out,
+	// and do53 is never published (S5 of the alternative-endpoint plan).
 	for _, e := range oots.Oots {
-		if e.Proto == "do53" {
-			foundDo53 = true
-			if e.Weight != 100 {
-				t.Errorf("do53 weight=%d, want 100", e.Weight)
-			}
+		if e.Proto == "do53" || e.Proto == "udp" || e.Proto == "tcp" {
+			t.Errorf("emitted %#v, want no cleartext entry the operator did not name", oots.Oots)
 		}
-	}
-	if !foundDo53 {
-		t.Error("expected explicit do53:100 in emitted oots")
 	}
 }
 

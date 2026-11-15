@@ -32,7 +32,7 @@ type ImrAuthTransportsRow struct {
 	Zones        []string          `json:"zones,omitempty"`         // the zones that list this server
 	Signal       map[string]uint8  `json:"signal,omitempty"`        // the signal as given, in its tokens (udp, tcp, dot, doq, doh; do53 read as udp and tcp): only the transports it named. Absent: none
 	SignalSource string            `json:"signal_source,omitempty"` // "oots", "alpn", "config" (a stub), "operator" (set server transport)
-	SignalPorts  map[string]uint16 `json:"signal_ports,omitempty"`  // non-default port per transport the signal named, keyed as Signal. udp and tcp are never present
+	SignalPorts  map[string]uint16 `json:"signal_ports,omitempty"`  // non-default port per transport the signal named, keyed as Signal
 	Counts       map[string]uint64 `json:"counts"`                  // answers carried, by actual wire transport
 	// ByPrivacy splits Counts by whose query it was: a client's PRIVACY level
 	// ("none", "opportunistic", "strict") or "internal" (the resolver's own).

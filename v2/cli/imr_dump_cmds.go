@@ -859,12 +859,12 @@ func formatAuthServerPorts(server *cache.AuthServer) string {
 	if len(ports) == 0 {
 		return ""
 	}
-	order := []core.Transport{core.TransportDoT, core.TransportDoQ, core.TransportDoH}
+	order := []core.Transport{core.TransportDo53, core.TransportDo53TCP, core.TransportDoT, core.TransportDoQ, core.TransportDoH}
 	var parts []string
 	seen := map[core.Transport]bool{}
 	for _, t := range order {
 		if p := ports[t]; p != 0 {
-			parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToString[t], p))
+			parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToSignalToken[t], p))
 			seen[t] = true
 		}
 	}
@@ -873,7 +873,7 @@ func formatAuthServerPorts(server *cache.AuthServer) string {
 		if seen[t] || p == 0 {
 			continue
 		}
-		rest = append(rest, fmt.Sprintf("%s:%d", core.TransportToString[t], p))
+		rest = append(rest, fmt.Sprintf("%s:%d", formatTransport(t), p))
 	}
 	sort.Strings(rest)
 	return strings.Join(append(parts, rest...), " ")

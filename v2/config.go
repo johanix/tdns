@@ -232,19 +232,19 @@ type TransportConf struct {
 	Type   string `yaml:"type" validate:"omitempty,oneof=tsync svcb none"`
 	Signal string `yaml:"signal"`
 	// Ports is the port published for a transport that is not on its
-	// standard one: keys dot, doq and doh. tdns-auth gives each transport
-	// with a port an SVCB record of its own (transportSignalLayout).
+	// standard one: keys udp, tcp, dot, doq and doh. tdns-auth gives each
+	// transport with a port an SVCB record of its own (transportSignalLayout).
 	// Publishing a port opens no socket; the listener is configured under
 	// listeners.ports. Only type svcb carries ports.
 	Ports map[string]uint16 `yaml:"ports"`
 }
 
 // Validate refuses, at config load, a signal this server would publish (type
-// svcb or tsync) that does not parse or names a token other than do53, dot, doh
-// and doq. No tdns publisher may emit a new token, such as `udp` or `tcp`,
-// before every node that can re-pack the record keeps it (the alternative-
-// endpoint design, tdns #1043, section 8). With type none the signal is not
-// published and is not checked.
+// svcb or tsync) that does not parse or names a token other than udp, tcp,
+// dot, doh, doq and do53 (published as udp and tcp). No tdns publisher may
+// emit a token that is not defined, before every node that can re-pack the
+// record keeps it (the alternative-endpoint design, tdns #1043, section 8).
+// With type none the signal is not published and is not checked.
 func (t TransportConf) Validate() error {
 	switch strings.ToLower(t.Type) {
 	case "svcb", "tsync":
