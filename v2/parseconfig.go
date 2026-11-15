@@ -174,6 +174,9 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 	// instead of preserving the previously-decoded value (mapstructure leaves
 	// absent keys untouched).
 	conf.Dnssec.DNSKEYTransport = ""
+	// service.transport as a whole: a signal, or a key of ports, that the new
+	// file removes would otherwise stay published.
+	conf.Service.Transport = TransportConf{}
 
 	if derr := decoder.Decode(configMap); derr != nil {
 		return fmt.Errorf("error decoding config: %v", derr)
@@ -853,6 +856,9 @@ func (conf *Config) checkTransportSignal() error {
 //   - a warning when a published port is not in listeners.ports for its
 //     transport. A front end may publish a port the daemon does not listen
 //     on, so it is not an error.
+//
+// ValidateConfig calls it too, for the errors, so `config check` refuses
+// what the daemon refuses.
 func validateTransportSignal(t TransportConf, listen ListenerPortsConf) ([]string, error) {
 	weights, err := core.ParseTransportStringRaw(t.Signal)
 	if err != nil {

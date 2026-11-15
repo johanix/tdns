@@ -148,6 +148,7 @@ func TestTransportSignalChecks(t *testing.T) {
 		{"doq shares a port with dot", TransportConf{Type: "svcb", Signal: "dot:10,doq:20", Ports: map[string]uint16{"dot": 1234, "doq": 1234}}, listening, "", 1},
 		{"ports with type tsync", TransportConf{Type: "tsync", Signal: "dot:10", Ports: map[string]uint16{"dot": 1234}}, listening, "type is tsync", 0},
 		{"ports with type none", TransportConf{Type: "none", Signal: "dot:10", Ports: map[string]uint16{"dot": 1234}}, listening, "type is none", 0},
+		{"ports with no signal", TransportConf{Type: "svcb", Ports: map[string]uint16{"dot": 1234}}, listening, "no weight", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			warns, err := validateTransportSignal(tc.conf, tc.listen)
@@ -255,6 +256,11 @@ func TestTransportSignalConfigRoundTrip(t *testing.T) {
 		{"do53 at the operator's weight",
 			TransportConf{Type: "svcb", Signal: "do53:0,dot:10", Ports: map[string]uint16{"dot": 1234}},
 			"oots w=do53:0,dot:10 p=dot:1234"},
+		// Only the record without a port names do53, so no default in a
+		// ported record can outrank the operator's do53:0.
+		{"do53:0 with every other transport on a port",
+			TransportConf{Type: "svcb", Signal: "do53:0,dot:30,doq:20", Ports: map[string]uint16{"dot": 1234, "doq": 1235}},
+			"oots w=do53:0,doq:20,dot:30 p=doq:1235,dot:1234"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var texts []string

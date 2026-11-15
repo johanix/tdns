@@ -168,9 +168,9 @@ func TestOOTSTargetRecordIsIgnored(t *testing.T) {
 	}, "oots w=doq:20 p=")
 }
 
-// An RRset that holds an AliasMode record is ignored as a whole: the
-// AliasMode record's SvcParams (RFC 9460 section 2.4.2) and its ServiceMode
-// siblings (section 2.4.1).
+// The resolver ignores an RRset that holds an AliasMode record as a whole. It
+// reads neither the AliasMode record's own SvcParams (RFC 9460 section 2.4.2)
+// nor its ServiceMode siblings (section 2.4.1).
 func TestOOTSAliasSetIsIgnored(t *testing.T) {
 	checkEveryPathBothOrders(t, []string{
 		pathOwner + ` 3600 IN SVCB 0 _dns.other.example.`,
@@ -178,6 +178,12 @@ func TestOOTSAliasSetIsIgnored(t *testing.T) {
 	}, "none")
 	checkEveryPathBothOrders(t, []string{
 		pathOwner + ` 3600 IN SVCB 0 _dns.other.example.`,
+	}, "none")
+	checkEveryPathBothOrders(t, []string{
+		pathOwner + ` 3600 IN SVCB 0 _dns.other.example. port=1236 oots="dot:40"`,
+	}, "none")
+	checkEveryPathBothOrders(t, []string{
+		pathOwner + ` 3600 IN SVCB 0 _dns.other.example. alpn=dot port=1236`,
 	}, "none")
 }
 

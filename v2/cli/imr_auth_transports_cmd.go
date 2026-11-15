@@ -270,7 +270,14 @@ func formatOOTSSignal(signal map[string]uint8, ports map[string]uint16, source s
 		return "none"
 	}
 	if source == "alpn" {
-		return "alpn:" + strings.Join(orderedTransports(signal), ",")
+		var parts []string
+		for _, t := range orderedTransports(signal) {
+			if ports[t] != 0 {
+				t += fmt.Sprintf(" port:%d", ports[t])
+			}
+			parts = append(parts, t)
+		}
+		return "alpn:" + strings.Join(parts, ",")
 	}
 	var parts []string
 	for _, t := range orderedTransports(signal) {

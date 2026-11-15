@@ -334,3 +334,53 @@ func addrsOf(qs []core.FakeQuery) []string {
 	}
 	return out
 }
+
+// The stub probe dials what a query would, a port the signal assigned
+// included, and reports the address it dialed.
+func TestProbeStubServersDialsSignalPort(t *testing.T) {
+	const zone = "stubport.example."
+	imr := newTestImr(t)
+	imr.Quiet = true
+	q := new(dns.Msg)
+	q.SetQuestion(zone, dns.TypeSOA)
+	reply := new(dns.Msg)
+	reply.SetReply(q)
+	reply.Authoritative = true
+	dot := core.NewFakeDNSClient(core.TransportDoT)
+	dot.Set(zone, "192.0.2.1:1234", core.FakeResponse{Msg: reply})
+	// Only the fake DoT client: the probe skips a transport with no client,
+	// so nothing goes out on the network.
+	for tr := range imr.Cache.DNSClient {
+		delete(imr.Cache.DNSClient, tr)
+	}
+	imr.Cache.DNSClient[core.TransportDoT] = dot
+	if err := imr.Cache.AddStub(zone, []cache.AuthServer{
+		{Name: "ns." + zone, Addrs: []string{"192.0.2.1"}, Alpn: []string{"dot"}},
+	}); err != nil {
+		t.Fatalf("AddStub: %v", err)
+	}
+	imr.setZoneTable(nil, []string{zone}, nil)
+	servers := imr.stubServers(zone)
+	if len(servers) != 1 {
+		t.Fatalf("stub servers %v", servers)
+	}
+	applyTransportMapWithPorts(servers[0], map[string]uint8{"dot": 100},
+		map[core.Transport]uint16{core.TransportDoT: 1234})
+
+	results, err := imr.ProbeStubServers(context.Background(), zone)
+	if err != nil {
+		t.Fatalf("ProbeStubServers: %v", err)
+	}
+	var probed []ImrStubProbeResult
+	for _, res := range results {
+		if res.Transport == "dot" {
+			probed = append(probed, res)
+		}
+	}
+	if len(probed) != 1 || probed[0].Addr != "192.0.2.1:1234" || !probed[0].OK {
+		t.Errorf("DoT probe results %+v, want one OK result at 192.0.2.1:1234", probed)
+	}
+	if got := dot.Calls(); len(got) != 1 || got[0].Addr != "192.0.2.1:1234" {
+		t.Errorf("DoT probe dialed %v, want 192.0.2.1:1234", addrsOf(got))
+	}
+}
