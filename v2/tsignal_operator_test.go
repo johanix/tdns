@@ -1,6 +1,8 @@
 package tdns
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -86,9 +88,9 @@ ns2.`+z+`	3600	IN	A	127.0.0.1
 
 // The pass's own stored signal is zone content too, so a later run must not
 // take it for an operator's: a run after the configuration changed rewrites
-// it. A signal identical to what the configuration gives, as one that came
-// back as content after a restart, counts as the pass's own and is not
-// reported as the operator's.
+// it. An RRset the pass has no record of storing is the operator's even
+// when it is exactly what the configuration gives: a later configuration
+// must not replace it.
 func TestTheSignalPassTellsItsOwnSignalFromTheOperators(t *testing.T) {
 	const z = "rerun.sig.example."
 	logs := captureSignalLog(t)
@@ -111,12 +113,11 @@ ns1.`+z+`	3600	IN	A	127.0.0.1
 		t.Fatalf("the pass's own signal was reported as the operator's:\n%s", logs.String())
 	}
 
-	// As after a restart: the zone holds exactly what the configuration
-	// gives, and this process never stored it.
-	const z2 = "restart.sig.example."
+	// The operator wrote exactly what the configuration gives. It is left
+	// as written and not taken as the pass's own, so a configuration that
+	// later says something else does not replace it.
+	const z2 = "same.sig.example."
 	logs2 := captureSignalLog(t)
-	// What the configuration gives, written into the zone as content. The
-	// server SVCB signalTestZone sets is in place here (zd's).
 	fresh, err := zd.buildServerSVCB(conf, "ns1."+z2, nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -132,17 +133,21 @@ ns1.`+z2+`	3600	IN	A	127.0.0.1
 	if err := zd2.CreateTransportSignalRRs(conf2); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(logs2.String(), "leaving the operator's") {
-		t.Fatalf("a signal identical to the configuration's was reported as the operator's:\n%s", logs2.String())
+	if !strings.Contains(logs2.String(), "leaving the operator's") {
+		t.Fatalf("an operator's RRset identical to the configuration's was not left alone:\n%s", logs2.String())
 	}
-	if !zd2.signalStoredByPass("_dns.ns1."+z2, svcbRecords(zd2, "_dns.ns1."+z2)) {
-		t.Fatal("the pass did not take the signal back as its own")
+	if zd2.signalStoredByPass("_dns.ns1."+z2, svcbRecords(zd2, "_dns.ns1."+z2)) {
+		t.Fatal("the pass took the operator's RRset as its own because it matched the configuration")
+	}
+	conf2.Service.Transport.Signal = "dot:50"
+	if err := zd2.CreateTransportSignalRRs(conf2); err != nil {
+		t.Fatal(err)
+	}
+	if got := svcbRecords(zd2, "_dns.ns1."+z2); len(got) != 1 || !strings.Contains(got[0].String(), "dot:20") {
+		t.Fatalf("a later configuration replaced the operator's RRset: %v", got)
 	}
 }
 
-// A refresh carries over the signal the pass stored, and only that: an
-// operator's RRset at _dns.<ns> comes with the fresh data, and an old copy
-// carried over would be merged back over the operator's edit.
 func TestARefreshCarriesOnlyThePassOwnSignal(t *testing.T) {
 	const z = "carry.sig.example."
 	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
@@ -296,5 +301,167 @@ func TestSvcbSignalWarnings(t *testing.T) {
 	// An AliasMode record carries no signal (RFC 9460 section 2.4.2).
 	if w := svcbSignalWarnings(set(rec(0, "_dns.ns.example.", dot(30)), rec(1, ".", dot(30)))); len(w) != 0 {
 		t.Fatalf("an AliasMode record was counted: %v", w)
+	}
+}
+
+// The pass's record of what it stored outlives the process when the zone has
+// a KeyDB: a stored signal that comes back as content after a restart (a
+// journal replay, a persisted copy) is still the pass's own, and a changed
+// configuration replaces it. Without a KeyDB the record is gone after the
+// restart, and an old signal that differs from the configuration reads as
+// the operator's and is left alone, with the info line.
+func TestTheSignalPassKnowsItsOwnSignalAcrossARestart(t *testing.T) {
+	const z = "restart2.sig.example."
+	const body = z + `	3600	IN	NS	ns1.` + z + `
+ns1.` + z + `	3600	IN	A	127.0.0.1
+`
+	// Before the restart: the pass stores its signal for "dot:50".
+	before := func(t *testing.T, kdb *KeyDB) []string {
+		zd, conf := signalTestZone(t, z, body, "127.0.0.1:53")
+		zd.KeyDB = kdb
+		conf.Service.Transport.Signal = "dot:50"
+		if err := zd.CreateTransportSignalRRs(conf); err != nil {
+			t.Fatal(err)
+		}
+		var lines []string
+		for _, rr := range svcbRecords(zd, "_dns.ns1."+z) {
+			lines = append(lines, rr.String())
+		}
+		return lines
+	}
+	// After it: a new process loads the zone with that signal in it and a
+	// configuration that now says "dot:20".
+	after := func(t *testing.T, kdb *KeyDB, persisted []string) (*ZoneData, *syncBuffer) {
+		logs := captureSignalLog(t)
+		zd, conf := signalTestZone(t, z, body+strings.Join(persisted, "\n")+"\n", "127.0.0.1:53")
+		zd.KeyDB = kdb
+		conf.Service.Transport.Signal = "dot:20"
+		if err := zd.CreateTransportSignalRRs(conf); err != nil {
+			t.Fatal(err)
+		}
+		return zd, logs
+	}
+
+	t.Run("with a KeyDB", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		persisted := before(t, kdb)
+		zd, logs := after(t, kdb, persisted)
+		got := svcbRecords(zd, "_dns.ns1."+z)
+		if len(got) != 1 || !strings.Contains(got[0].String(), "dot:20") {
+			t.Fatalf("the pass's own signal from before the restart was not replaced: %v", got)
+		}
+		if strings.Contains(logs.String(), "leaving the operator's") {
+			t.Fatalf("the pass's own signal was taken for the operator's after a restart:\n%s", logs.String())
+		}
+	})
+
+	t.Run("without a KeyDB", func(t *testing.T) {
+		persisted := before(t, nil)
+		zd, logs := after(t, nil, persisted)
+		got := svcbRecords(zd, "_dns.ns1."+z)
+		if len(got) != 1 || !strings.Contains(got[0].String(), "dot:50") {
+			t.Fatalf("without a record the old signal should be left as it is: %v", got)
+		}
+		if !strings.Contains(logs.String(), "leaving the operator's") {
+			t.Fatalf("no info line for the RRset left alone:\n%s", logs.String())
+		}
+	})
+}
+
+// An RRset the operator now owns is forgotten: the record goes, so the pass
+// does not later take that RRset, or an identical one, for its own.
+func TestTheSignalPassForgetsAnOwnerTheOperatorTookOver(t *testing.T) {
+	const z = "takeover.sig.example."
+	kdb := newTestKeyDB(t)
+	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+ns1.`+z+`	3600	IN	A	127.0.0.1
+`, "127.0.0.1:53")
+	zd.KeyDB = kdb
+	conf.Service.Transport.Signal = "dot:50"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := kdb.GetTransportSignalStored(z, "_dns.ns1."+z); !ok {
+		t.Fatal("the stored signal was not recorded in the KeyDB")
+	}
+	// The operator replaces it.
+	op := mustRRs(t, `_dns.ns1.`+z+` 300 IN SVCB 1 . oots="doq:10"`)
+	zd.mu.Lock()
+	zd.stageRRsetLocked("_dns.ns1."+z, core.RRset{Name: "_dns.ns1." + z, RRtype: dns.TypeSVCB, RRs: op})
+	zd.publishWorkingSetLocked(zd.generation.Load(), false)
+	zd.mu.Unlock()
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if got := svcbRecords(zd, "_dns.ns1."+z); !sameRecords(got, op) {
+		t.Fatalf("the operator's RRset was not left alone: %v", got)
+	}
+	if _, ok, _ := kdb.GetTransportSignalStored(z, "_dns.ns1."+z); ok {
+		t.Fatal("the record of the pass's signal outlived the operator's takeover")
+	}
+}
+
+// A reload whose file now holds an operator's SVCB RRset at an owner where
+// the pass had stored its signal: the old signal is not carried over and
+// merged into the operator's RRset. The operator's RRset alone is served.
+func TestAReloadDoesNotMergeTheOldSignalIntoTheOperators(t *testing.T) {
+	const head = `example.	3600	IN	SOA	ns1.example. hostmaster.example. %d 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+ns1.example.	3600	IN	A	127.0.0.1
+`
+	zd := reloadZone(t, newTestKeyDB(t), fmt.Sprintf(head, 1))
+	zd.Options[OptAddTransportSignal] = true
+	prevSVCB, prevListeners := Globals.ServerSVCB, Conf.Listeners.Addresses
+	Globals.ServerSVCB = &dns.SVCB{Hdr: dns.RR_Header{Name: "_dns.server.example.", Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 300}, Priority: 1, Target: "."}
+	Conf.Listeners.Addresses = []string{"127.0.0.1:53"}
+	t.Cleanup(func() { Globals.ServerSVCB, Conf.Listeners.Addresses = prevSVCB, prevListeners })
+	conf := &Config{}
+	conf.Service.Transport.Type = "svcb"
+	conf.Service.Transport.Signal = "dot:50"
+	conf.Listeners.Addresses = Conf.Listeners.Addresses
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if got := svcbRecords(zd, "_dns.ns1.example."); len(got) != 1 || !strings.Contains(got[0].String(), "dot:50") {
+		t.Fatalf("the pass did not store its signal: %v", got)
+	}
+
+	operatorEdit(t, zd, fmt.Sprintf(head, 2)+`_dns.ns1.example.	300	IN	SVCB	1 . oots="doq:30"
+`)
+	if _, err := zd.Refresh(context.Background(), false, false, true, conf); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if got := svcbRecords(zd, "_dns.ns1.example."); len(got) != 1 || !strings.Contains(got[0].String(), "doq:30") {
+		t.Fatalf("the reload merged the old signal into the operator's RRset: %v", got)
+	}
+}
+
+// The name test reads an NS name's addresses at its home. Under a co-hosted
+// child the home is the child, not the parent's glue for it.
+func TestTheNameTestReadsACoHostedChildNotTheParentGlue(t *testing.T) {
+	const parent = "cohost.sig.example."
+	const child = "child." + parent
+	const ns = "ns1." + child
+	for _, tc := range []struct {
+		name        string
+		glue, child string
+		want        bool
+	}{
+		{"glue is not this server, the child says it is", "192.0.2.1", "127.0.0.1", true},
+		{"glue is this server, the child says it is not", "127.0.0.1", "192.0.2.1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zp, _ := signalTestZone(t, parent, parent+`	3600	IN	NS	ns1.`+parent+`
+ns1.`+parent+`	3600	IN	A	192.0.2.53
+`+child+`	3600	IN	NS	`+ns+`
+`+ns+`	3600	IN	A	`+tc.glue+`
+`, "127.0.0.1:53")
+			signalTestZone(t, child, child+`	3600	IN	NS	`+ns+`
+`+ns+`	3600	IN	A	`+tc.child+`
+`, "127.0.0.1:53")
+			if got := zp.nsNameIsThisServer(zp.publishedSnapshot(), ns); got != tc.want {
+				t.Fatalf("nsNameIsThisServer(%s) from the parent = %v, want %v", ns, got, tc.want)
+			}
+		})
 	}
 }

@@ -2276,6 +2276,16 @@ func (zd *ZoneData) repopulateWorkingSetLocked(dynamicRRs []*core.RRset) {
 		}
 
 		existing, exists := owner.RRtypes.Get(rrset.RRtype)
+		if exists && rrset.RRtype == dns.TypeSVCB && len(existing.RRs) > 0 {
+			// The only SVCB RRsets carried are the transport signal's
+			// (CollectDynamicRRs, section 3). One already in the fresh
+			// data at that owner is the operator's: the carried copy is
+			// dropped, not merged into it (design 2026-11-14 section 5),
+			// and the start-up pass leaves the operator's RRset alone.
+			lg.Debug("RepopulateDynamicRRs: the fresh data holds an SVCB RRset at the signal owner; not carrying the old signal over it",
+				"owner", rrset.Name, "zone", zd.ZoneName)
+			continue
+		}
 		if exists {
 			// Get returns an RRset whose RRs slice shares the published
 			// snapshot's backing array; copy it before appending so a

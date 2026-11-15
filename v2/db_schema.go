@@ -405,6 +405,20 @@ UNIQUE (keyname)
 		UNIQUE (target, owner)
 	)`,
 
+	// One row per transport-signal owner the start-up pass stored into a
+	// zone: a digest of the SVCB records it stored there (signalDigest). A
+	// stored signal is zone content and can come back after a restart, by a
+	// journal replay or a persisted copy; this is how the pass still knows
+	// it as its own and replaces it with what the configuration gives now,
+	// where an operator's RRset is left alone. See transport_signal_stored.go.
+	"TransportSignalStored": `CREATE TABLE IF NOT EXISTS 'TransportSignalStored' (
+		zone       VARCHAR(255) NOT NULL,
+		owner      VARCHAR(255) NOT NULL,
+		digest     VARCHAR(64)  NOT NULL,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		UNIQUE (zone, owner)
+	)`,
+
 	"DsyncApiCertCredential": `CREATE TABLE IF NOT EXISTS 'DsyncApiCertCredential' (
 		id         INTEGER PRIMARY KEY,
 		parentzone VARCHAR(255) NOT NULL,
