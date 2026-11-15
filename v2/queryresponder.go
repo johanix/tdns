@@ -864,15 +864,24 @@ func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
 // owner name, read from its home, the most specific zone hosted here that
 // holds it (isHomeOf): this zone's pinned snapshot (no intra-response
 // tearing), or that zone's current snapshot. Under a co-hosted child the
-// child is read, not a copy below the parent's zone cut. Failing that, the
-// per-snapshot fallback beside the snapshot, which the SVCB start-up pass no
-// longer fills (a server writes signals only into its own zones, rule 2).
+// child is read, not a copy below the parent's zone cut. Below a cut to a
+// child not hosted here the home holds only glue and occluded data, which is
+// not its to serve, so nothing is read there (as for a CNAME target,
+// handleCNAMEChain). Failing that, the per-snapshot fallback beside the
+// snapshot, which the SVCB start-up pass no longer fills (a server writes
+// signals only into its own zones, rule 2).
 func (zd *ZoneData) lookupSignalRRsets(snap *zoneSnapshot, name string) []core.RRset {
 	var rrs []core.RRset
+	read := func(home *ZoneData, hsnap *zoneSnapshot) {
+		if hsnap == nil || home.findDelegationFrom(hsnap, name, false) != nil {
+			return
+		}
+		rrs = signalRRsetsFromOwner(getOwnerFrom(hsnap, name))
+	}
 	if zd.isHomeOf(name) {
-		rrs = signalRRsetsFromOwner(getOwnerFrom(snap, name))
+		read(zd, snap)
 	} else if home := FindZone(name); home != nil {
-		rrs = signalRRsetsFromOwner(getOwnerFrom(home.publishedSnapshot(), name))
+		read(home, home.publishedSnapshot())
 	}
 	if len(rrs) > 0 {
 		return rrs

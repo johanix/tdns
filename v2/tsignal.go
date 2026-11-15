@@ -554,7 +554,8 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 	// someone does). An unsigned zone of this server's own counts. Anywhere
 	// else nothing is synthesized: a signal there is provisioned in the zone
 	// and served as it is (rule 1), or there is none.
-	if len(homeOf) > 0 && (!zoneMayOriginateContent(zd) || (dak == nil && apexIsSigned(apex))) {
+	mayWrite := zoneMayOriginateContent(zd) && (dak != nil || !apexIsSigned(apex))
+	if len(homeOf) > 0 && !mayWrite {
 		lgDns.Info("createTransportSignalSVCB: this zone is the home of identities, but this server is not its primary and signer; no signal is synthesized, and one provisioned in the zone is served as it is",
 			"zone", zd.ZoneName, "identities", homeOf)
 		homeOf = nil
@@ -611,7 +612,15 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 	// withdrawn: left in place, rule 1 would serve it as if it were
 	// provisioned. Only the pass's own unchanged signal goes; an RRset the
 	// operator has since replaced is theirs, and only the record goes.
-	for _, owner := range zd.signalStoredOwners() {
+	// A withdrawal writes the zone, so it too happens only where this server
+	// is primary and signer. A former primary that restarts as a secondary
+	// changes nothing and keeps its record: should the zone be its own
+	// again, the pass withdraws then.
+	var stale []string
+	if mayWrite {
+		stale = zd.signalStoredOwners()
+	}
+	for _, owner := range stale {
 		if want[owner] {
 			continue
 		}

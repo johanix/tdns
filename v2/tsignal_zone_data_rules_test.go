@@ -275,3 +275,46 @@ ns3.` + z + `	3600	IN	A	192.0.2.3
 		}
 	}
 }
+
+// A withdrawal writes the zone, so it happens only where this server is
+// primary and signer, as synthesis does. A former primary that restarts as a
+// secondary of the zone, with its signal in the zone and its record in the
+// KeyDB, and the name no longer an identity, changes nothing and keeps the
+// record.
+func TestAFormerPrimaryWithdrawsNothingAsASecondary(t *testing.T) {
+	const z = "demoted.sig.example."
+	const body = z + `	3600	IN	NS	ns1.` + z + `
+ns1.` + z + `	3600	IN	A	192.0.2.1
+`
+	kdb := newTestKeyDB(t)
+	zd, conf := signalTestZone(t, z, body, "127.0.0.1:53")
+	zd.KeyDB = kdb
+	conf.Service.Identities = []string{"ns1." + z}
+	conf.Service.Transport.Signal = "dot:50"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	stored := svcbRecords(zd, "_dns.ns1."+z)
+	var persisted []string
+	for _, rr := range stored {
+		persisted = append(persisted, rr.String())
+	}
+
+	prevApp := Globals.App.Type
+	Globals.App.Type = AppTypeAuth
+	t.Cleanup(func() { Globals.App.Type = prevApp })
+	zd2, conf2 := signalTestZone(t, z, body+strings.Join(persisted, "\n")+"\n", "127.0.0.1:53")
+	zd2.KeyDB = kdb
+	zd2.ZoneType = Secondary
+	conf2.Service.Transport.Signal = "dot:50"
+	before := zd2.publishedSnapshot()
+	if err := zd2.CreateTransportSignalRRs(conf2); err != nil {
+		t.Fatal(err)
+	}
+	if zd2.publishedSnapshot() != before || !sameRecords(svcbRecords(zd2, "_dns.ns1."+z), stored) {
+		t.Fatalf("a secondary withdrew the signal from a zone it does not originate: %v", svcbRecords(zd2, "_dns.ns1."+z))
+	}
+	if _, ok, _ := kdb.GetTransportSignalStored(z, "_dns.ns1."+z); !ok {
+		t.Fatal("a secondary dropped the record of the signal it stored as primary")
+	}
+}

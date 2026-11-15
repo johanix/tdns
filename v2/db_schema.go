@@ -415,6 +415,7 @@ UNIQUE (keyname)
 		zone       VARCHAR(255) NOT NULL,
 		owner      VARCHAR(255) NOT NULL,
 		digest     VARCHAR(64)  NOT NULL,
+		earlier    TEXT         NOT NULL DEFAULT '',
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		UNIQUE (zone, owner)
 	)`,
