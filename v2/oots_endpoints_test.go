@@ -627,6 +627,28 @@ func TestImrQueryCarriesTheChainExpiry(t *testing.T) {
 	}
 }
 
+// A link the cache keeps for less than its TTL (cache-max-ttl) carries the
+// cache's lifetime, not its TTL: the address it led to does not outlive the
+// cached link (CodeRabbit on #1055).
+func TestImrQueryChainExpiryHonoursCacheMaxTTL(t *testing.T) {
+	prev := cache.GetTTLLimits()
+	t.Cleanup(func() { cache.SetTTLLimits(prev) })
+	cache.SetTTLLimits(cache.TTLLimits{Max: 60})
+
+	imr, _ := sigChainImr(t)
+	// s1 -> s2 -> s3 A, every record 300 s, kept for 60.
+	resp, err := imr.ImrQuery(context.Background(), "s1."+sigChainZone, dns.TypeA, dns.ClassINET, nil)
+	if err != nil || resp == nil || resp.RRset == nil {
+		t.Fatalf("s1 A: %v, %v", resp, err)
+	}
+	if left := time.Until(resp.ChainExpiration); left <= 0 || left > 60*time.Second {
+		t.Errorf("chain expires in %v, want within cache-max-ttl's 60 s", left)
+	}
+	if link := imr.Cache.Peek("s1."+sigChainZone, dns.TypeCNAME); link == nil || resp.ChainExpiration.After(link.Expiration) {
+		t.Errorf("chain expiry %v outlives the cached link %+v", resp.ChainExpiration, link)
+	}
+}
+
 // udp and tcp go to a target like any transport, each to its own endpoint;
 // the do53 shorthand in a record with a target is dropped (section 2).
 func TestOOTSUDPAndTCPRedirected(t *testing.T) {

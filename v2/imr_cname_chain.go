@@ -245,7 +245,8 @@ func synthesizeFromDNAME(qname, owner, target string) string {
 
 // cacheCNAMELink validates the CNAME that qname owns in r, caches it as an
 // RRset of its own with its RRSIGs and its verdict, and returns the target the
-// chain goes on to and when the link it cached expires.
+// chain goes on to and when the link expires: its TTL from now, or sooner when
+// the cache keeps it for less.
 //
 // A CNAME synthesized from a DNAME is unsigned: the DNAME carries the RRSIG
 // (RFC 6672 §5.3.1). So the DNAME is validated and cached instead, and the
@@ -297,13 +298,20 @@ func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn
 		verdict = v
 	}
 	expire := now.Add(cache.GetMinTTL(link.RRs))
-	imr.Cache.Set(qname, dns.TypeCNAME, &cache.CachedRRset{
+	entry := &cache.CachedRRset{
 		Name: qname, RRtype: dns.TypeCNAME, Rcode: uint8(dns.RcodeSuccess), RRset: link,
 		Context: cache.ContextAnswer, State: verdict.State, EDECode: verdict.EDECode, EDEText: verdict.EDEText,
 		WildcardProof: verdict.Proof,
 		Expiration:    expire, Transport: transport,
 		SynthesizedFrom: synthesizedFrom,
-	})
+	}
+	imr.Cache.Set(qname, dns.TypeCNAME, entry)
+	// Set leaves in entry the lifetime the cache gave the link, which can be
+	// shorter than its TTL (cache-max-ttl, or signatures that expire sooner).
+	// The chain lives no longer than the cache keeps the link.
+	if !entry.Expiration.IsZero() && entry.Expiration.Before(expire) {
+		expire = entry.Expiration
+	}
 	target, _ := cnameTarget(link)
 	return target, expire, nil
 }
