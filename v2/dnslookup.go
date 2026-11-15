@@ -1615,6 +1615,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		if link, target, ok := imr.cachedLink(qname, privacy); ok {
 			switch {
 			case followsCNAME(ctx, qtype):
+				recordChainLink(ctx, qname, target, link.Expiration)
 				return imr.chaseCNAME(ctx, qname, target, qtype, force, privacy)
 			case cnameDeniesType(ctx, qtype):
 				return nil, dns.RcodeSuccess, cache.ContextNoErrNoAns, link.Transport, nil
