@@ -79,6 +79,8 @@ observed, and the negative case.
 |---|---|---|---|
 | `ports` | K2, P1, P2, P6 | a port on a `.` record moves the transport on the server's own address: from `ports:` config, from one record naming two transports, from an ALPN-only record | a resolver without port support; P2, P6 on #994's head |
 | `published` | K1, M3 | what `service.transport` publishes: one record per ported transport; a default config byte-identical to the base build | a publisher that ignores `ports`, or changes the default |
+| `ignore` | P3, P4 | a record with a target, and the ServiceMode siblings of an AliasMode record, are not applied | a resolver that applies them (trap) |
+| `tiebreak` | P5 | a transport named twice takes the same record in both RR orders | a resolver where the last record wins |
 
 Scenario ids keep verdict tables narrow: C codec, K config, M versions, P ports
 and records.

@@ -34,6 +34,11 @@ DELEGATIONS="
 ports.test.  ns1.ports.test.  127.0.0.11  -
 p2.test.     ns.p2.test.      127.0.0.12  -
 p6.test.     ns.p6.test.      127.0.0.13  -
+ign.test.    ns.ign.test.     127.0.0.21  -
+ign2.test.   ns.ign2.test.    127.0.0.22  -
+ign3.test.   ns.ign3.test.    127.0.0.23  -
+tb1.test.    ns.tb1.test.     127.0.0.31  -
+tb2.test.    ns.tb2.test.     127.0.0.32  -
 pub.test.    ns1.pub.test.    127.0.0.51  -
 "
 
