@@ -920,6 +920,15 @@ record in the Additional section, it:
    65280.
 3. Updates the server's connection preferences in the
    referral cache.
+
+   Cleartext is two tokens, `udp` and `tcp`, each 100 when
+   absent. An older signal's `do53:N` is read as `udp:N` and
+   `tcp:N`; an explicit `udp` or `tcp` wins over it. The `tcp`
+   weight only caps the TCP the resolver would choose on its
+   own, and tdns chooses none: TCP after a truncation, or
+   forced for a large DNSKEY, ignores it, `tcp:0` included.
+   tdns-auth still publishes `do53`. A token the resolver does
+   not know is kept in the record and not acted on.
 4. Promotes the server's connection mode to "opportunistic",
    meaning the resolver will attempt encrypted transports
    on subsequent queries to that server.

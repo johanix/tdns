@@ -70,7 +70,8 @@ func signalOnEachPath(t *testing.T, texts []string) map[string]*cache.AuthServer
 }
 
 // signalSnapshot renders what a server took from its signal: the source, the
-// weights as received and the dial ports. "none" when it has no signal.
+// weights as received and the dial ports, by oots token (do53 read as udp and
+// tcp). "none" when it has no signal.
 func signalSnapshot(server *cache.AuthServer) string {
 	rec := server.GetReceivedSignal()
 	if rec == nil {
@@ -78,10 +79,10 @@ func signalSnapshot(server *cache.AuthServer) string {
 	}
 	var w, p []string
 	for tr, v := range rec.Weights {
-		w = append(w, fmt.Sprintf("%s:%d", core.TransportToString[tr], v))
+		w = append(w, fmt.Sprintf("%s:%d", core.TransportToSignalToken[tr], v))
 	}
 	for tr, v := range server.GetTransportPorts() {
-		p = append(p, fmt.Sprintf("%s:%d", core.TransportToString[tr], v))
+		p = append(p, fmt.Sprintf("%s:%d", core.TransportToSignalToken[tr], v))
 	}
 	sort.Strings(w)
 	sort.Strings(p)
@@ -135,7 +136,7 @@ func TestOOTSTieBreakIsOrderFree(t *testing.T) {
 				pathOwner + ` 3600 IN SVCB 1 . port=1234 oots="dot:10"`,
 				pathOwner + ` 3600 IN SVCB 1 . port=8443 oots="doh:5"`,
 			},
-			want: "oots w=do53:100,doh:5,doq:20,dot:10 p=doh:8443,dot:1234",
+			want: "oots w=doh:5,doq:20,dot:10,tcp:100,udp:100 p=doh:8443,dot:1234",
 		},
 		{
 			name: "ALPN-only records combine the same way, ports included",

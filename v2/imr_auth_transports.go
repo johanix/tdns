@@ -30,9 +30,9 @@ type ImrAuthTransportsRow struct {
 	Src          string            `json:"src,omitempty"`           // "answer", "glue", "hint", "priming", "stub", ...
 	Shared       bool              `json:"shared"`                  // false: a stub zone's private instance, counted apart
 	Zones        []string          `json:"zones,omitempty"`         // the zones that list this server
-	Signal       map[string]uint8  `json:"signal,omitempty"`        // the signal as given: only the transports it named. Absent: none
+	Signal       map[string]uint8  `json:"signal,omitempty"`        // the signal as given, in its tokens (udp, tcp, dot, doq, doh; do53 read as udp and tcp): only the transports it named. Absent: none
 	SignalSource string            `json:"signal_source,omitempty"` // "oots", "alpn", "config" (a stub), "operator" (set server transport)
-	SignalPorts  map[string]uint16 `json:"signal_ports,omitempty"`  // non-default port per transport the signal named. Do53 is never present
+	SignalPorts  map[string]uint16 `json:"signal_ports,omitempty"`  // non-default port per transport the signal named, keyed as Signal. udp and tcp are never present
 	Counts       map[string]uint64 `json:"counts"`                  // answers carried, by actual wire transport
 	// ByPrivacy splits Counts by whose query it was: a client's PRIVACY level
 	// ("none", "opportunistic", "strict") or "internal" (the resolver's own).
@@ -105,7 +105,7 @@ func ImrAuthTransportsSnapshot(rc *cache.RRsetCacheT, filter []string, zone stri
 			Expected:  map[string]map[string]uint8{},
 		}
 		if s.Received != nil {
-			row.Signal = transportWeightsToStrings(s.Received.Weights)
+			row.Signal = signalWeightsToTokens(s.Received.Weights)
 			row.SignalSource = s.Received.Source
 			row.SignalPorts = transportPortsToStrings(s.Received.Ports)
 		}
@@ -167,8 +167,32 @@ func authTransportColumn(t core.Transport) string {
 	return transportName(t)
 }
 
-// transportPortsToStrings converts a transport-keyed port map to a name-keyed
-// one for the stats row. A zero port is omitted: it means the usual port.
+// signalTokenName names a transport by its oots token (udp, tcp, dot, doq,
+// doh), so that a signal reads as it is written and udp and tcp are told
+// apart. A transport without one falls back to transportName.
+func signalTokenName(t core.Transport) string {
+	if name, ok := core.TransportToSignalToken[t]; ok {
+		return name
+	}
+	return transportName(t)
+}
+
+// signalWeightsToTokens converts a received signal's weights to a map keyed
+// by oots token (signalTokenName) for the stats row.
+func signalWeightsToTokens(m map[core.Transport]uint8) map[string]uint8 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]uint8, len(m))
+	for t, w := range m {
+		out[signalTokenName(t)] = w
+	}
+	return out
+}
+
+// transportPortsToStrings converts a transport-keyed port map to one keyed by
+// oots token, as the row's Signal is, for the stats row. A zero port is
+// omitted: it means the usual port.
 func transportPortsToStrings(m map[core.Transport]uint16) map[string]uint16 {
 	if len(m) == 0 {
 		return nil
@@ -178,11 +202,7 @@ func transportPortsToStrings(m map[core.Transport]uint16) map[string]uint16 {
 		if p == 0 {
 			continue
 		}
-		name := transportName(t)
-		if name == "" {
-			continue
-		}
-		out[name] = p
+		out[signalTokenName(t)] = p
 	}
 	if len(out) == 0 {
 		return nil

@@ -47,6 +47,10 @@ func StringToTransport(s string) (Transport, error) {
 	switch s {
 	case "do53", "Do53":
 		return TransportDo53, nil
+	case "udp", "UDP":
+		// The oots token for TransportDo53: UDP, retried over TCP after
+		// truncation.
+		return TransportDo53, nil
 	case "do53-tcp", "Do53-TCP":
 		return TransportDo53TCP, nil
 	case "tcp", "TCP":

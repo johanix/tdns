@@ -301,7 +301,7 @@ func transportSignalLayout(t TransportConf) ([]signalRecord, error) {
 	if t.Signal == "" {
 		return []signalRecord{{}}, nil
 	}
-	weights, err := core.ParseTransportString(t.Signal)
+	weights, err := publishedSignalWeights(t.Signal)
 	if err != nil {
 		return nil, err
 	}
@@ -332,13 +332,31 @@ func svcbValuesForSignal(weights map[string]uint8, port uint16) []dns.SVCBKeyVal
 }
 
 // transportSignalToSVCBOots builds a dns.SVCBOots from a config signal string,
-// with the absence defaults applied (see svcbOotsFromWeights).
+// as published (publishedSignalWeights, svcbOotsFromWeights).
 func transportSignalToSVCBOots(sig string) (*dns.SVCBOots, error) {
-	m, err := core.ParseTransportString(sig)
+	m, err := publishedSignalWeights(sig)
 	if err != nil {
 		return nil, err
 	}
 	return svcbOotsFromWeights(m), nil
+}
+
+// publishedSignalWeights is a configured signal as tdns-auth publishes it: the
+// weights the operator named, with do53 written out at 100 when the operator
+// named none. do53 is the one cleartext token published until the publisher
+// emits udp and tcp (the alternative-endpoint plan, step S5);
+// TransportConf.Validate refuses a signal that names them. The receiving
+// side's defaults (core.ApplyTransportDefaults) are not used here: they read
+// do53 as udp and tcp.
+func publishedSignalWeights(sig string) (map[string]uint8, error) {
+	m, err := core.ParseTransportStringRaw(sig)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := m["do53"]; !ok {
+		m["do53"] = 100
+	}
+	return m, nil
 }
 
 // svcbOotsFromWeights builds a dns.SVCBOots from a weight map, entries in
