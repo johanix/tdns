@@ -44,6 +44,7 @@ csu.test.    ns.csu.test.     127.0.0.42  -
 pub.test.    ns1.pub.test.    127.0.0.51  -
 provider.test. ns1.provider.test. 127.0.0.61 cust:127.0.0.61
 customer.test. ns1.customer.test. 127.0.0.61 cust:127.0.0.61
+customer2.test. ns1.customer2.test. 127.0.0.61 cust:127.0.0.61
 other.test.    ns1.provider.test. 127.0.0.61 cust:127.0.0.61
 far.test.      ns1.far.test.      127.0.0.61 cust:127.0.0.61
 "

@@ -1,9 +1,9 @@
 # Suite customer: a server includes transport signals by zone data and writes
 # a signal only into its own zone, never into a zone it hosts for a customer.
-# Scenarios Z1-Z6 (the maintainer's three rules for plan step S2).
+# Scenarios Z1-Z7 (the maintainer's three rules for plan step S2).
 #
 # Parties
-#   cust          127.0.0.61  AUTH_PUB, signs and serves four zones, every one
+#   cust          127.0.0.61  AUTH_PUB, signs and serves five zones, every one
 #                 127.0.0.62  with add-transport-signal; DoT and DoQ on 853 on
 #                             both addresses (.62 is the DoT target's).
 #     provider.test.  our own zone. Run 1: the operator writes the signal at
@@ -13,6 +13,9 @@
 #     customer.test.  NS ns1.customer.test (a vanity name at cust's address)
 #                     and the customer's own alias:
 #                     _dns.ns1.customer.test. SVCB 0 _dns.ns1.provider.test.
+#     customer2.test. a second customer the same way: NS ns1.customer2.test
+#                     and _dns.ns1.customer2.test. SVCB 0 _dns.ns1.provider.test.,
+#                     the same target as customer.test's alias.
 #     other.test.     NS ns1.provider.test directly, no _dns of its own.
 #     far.test.       _dns.ns1.far.test. SVCB 0 _dns.ns.elsewhere.test., a
 #                     target in no zone cust holds.
@@ -23,12 +26,15 @@
 #        service.transport synthesizes the signal.
 #
 # Done: start cust; ask cust directly with the OOTS option for a name in
-# each zone; through the resolver, 60 new names in customer.test; at 60 s
-# after the start, AXFR every zone.
+# each zone; through the resolver, a fresh one each run, the first queries
+# for customer.test and customer2.test sent together, then 60 new names in
+# customer.test and 30 in customer2.test; at 60 s after the start, AXFR
+# every zone.
 #
 # Observed:
-#   Z1  customer.test, other.test and far.test hold, at 60 s, exactly what
-#       their zone files hold (DNSSEC records aside): nothing was written in.
+#   Z1  customer.test, customer2.test, other.test and far.test hold, at 60 s,
+#       exactly what their zone files hold (DNSSEC records aside): nothing
+#       was written in.
 #   Z2  a customer.test response carries the alias and, in Additional, the
 #       provider's signal it points to, with no identity configured.
 #   Z3  an other.test response carries _dns.ns1.provider.test.
@@ -40,6 +46,11 @@
 #       ignored before the path is decided (a sighting in Additional ahead of
 #       the verifying lookup) are S6's design, so they are noted, not failed.
 #   Z6  run 2: the synthesized signal is in provider.test and nowhere else.
+#   Z7  two customers' aliases to one target, first asked together on a
+#       fresh resolver: ns1.customer2.test, like ns1.customer.test, holds
+#       the provider's signal, honours the DoT target in run 1, and answers
+#       over DoT and DoQ. A resolver that tracks one alias per target loses
+#       one of the two.
 #
 # Negative: without the OOTS option no signal is added (Z2). A publisher
 # that wrote by identity into the zone it serves would fail Z1; one that
@@ -64,7 +75,7 @@ _cz_run() { # 1|2
 	  y_listeners "$CZ_A $CZ_T" "dot doq"
 	  y_common cust "$CZ_A"
 	  y_zones
-	  for z in provider.test. customer.test. other.test. far.test.; do y_primary "$z" "online-signing, add-transport-signal"; done
+	  for z in provider.test. customer.test. customer2.test. other.test. far.test.; do y_primary "$z" "online-signing, add-transport-signal"; done
 	} | auth_up cust "$AUTH_PUB" "$CZ_A" provider.test. || { fail "customer: cust did not start (run $_r)"; return 1; }
 	_t0=$(date +%s)
 
@@ -82,11 +93,16 @@ _cz_run() { # 1|2
 	check Z4 "run $_r: far.test carries its alias" _cz_has "$cz_f" _dns.ns1.far.test. "0 _dns.ns.elsewhere.test."
 	check Z4 "run $_r: far.test carries nothing else" [ "$(_cz_svcb "$cz_f" | awk '{ print $1 }' | sort -u)" = "_dns.ns1.far.test." ]
 
-	# Z5, through the resolver.
+	# Z5 and Z7, through a fresh resolver: the first queries for the two
+	# customers' zones go out together, so both aliases meet one target.
 	imr_up || { fail "customer: the resolver did not start (run $_r)"; return 1; }
-	dogq 127.0.0.100 first.customer.test. A >/dev/null
+	dogq 127.0.0.100 first.customer.test. A >/dev/null &
+	dogq 127.0.0.100 first.customer2.test. A >/dev/null &
+	wait
 	wait_signal ns1.customer.test. 15 || note "no signal learnt for ns1.customer.test. within 15 s"
+	wait_signal ns1.customer2.test. 15 || note "no signal learnt for ns1.customer2.test. within 15 s"
 	load customer.test. 60
+	load customer2.test. 30
 	note "ns1.customer.test. signal=$(at_get ns1.customer.test. signal) targets=$(at_get ns1.customer.test. signal_targets) redirected=$(at_get ns1.customer.test. redirected) ignored=$(at_get ns1.customer.test. ignored_redirects) counts=$(at_get ns1.customer.test. counts) failed=$(at_get ns1.customer.test. failed)"
 	check Z5 "run $_r: ns1.customer.test. holds the provider's signal (doq 50, dot 50)" [ "$(at_get ns1.customer.test. signal.doq)" = 50 -a "$(at_get ns1.customer.test. signal.dot)" = 50 ]
 	if [ "$_r" = 1 ]; then
@@ -97,9 +113,17 @@ _cz_run() { # 1|2
 	check Z5 "run $_r: the resolver validates the alias (AD)" _cz_ad _dns.ns1.customer.test. SVCB
 	check Z5 "run $_r: the resolver validates the provider's signal (AD)" _cz_ad _dns.ns1.provider.test. SVCB
 
+	note "ns1.customer2.test. signal=$(at_get ns1.customer2.test. signal) targets=$(at_get ns1.customer2.test. signal_targets) redirected=$(at_get ns1.customer2.test. redirected) ignored=$(at_get ns1.customer2.test. ignored_redirects) counts=$(at_get ns1.customer2.test. counts) failed=$(at_get ns1.customer2.test. failed)"
+	check Z7 "run $_r: ns1.customer2.test. holds the provider's signal too (doq 50, dot 50)" [ "$(at_get ns1.customer2.test. signal.doq)" = 50 -a "$(at_get ns1.customer2.test. signal.dot)" = 50 ]
+	if [ "$_r" = 1 ]; then
+		check Z7 "run 1: ns1.customer2.test. honours the same DoT target" [ "$(at_get ns1.customer2.test. signal_targets.dot)" = dot.provider.test. -a "$(num "$(at_get ns1.customer2.test. redirected.dot)")" -gt 0 ]
+	fi
+	check Z7 "run $_r: ns1.customer2.test. answered over DoT and DoQ" [ "$(num "$(at_get ns1.customer2.test. counts.dot)")" -gt 0 -a "$(num "$(at_get ns1.customer2.test. counts.doq)")" -gt 0 ]
+	check Z7 "run $_r: ns1.customer2.test. no failures" [ "$(num "$(at_get ns1.customer2.test. failed_total)")" -eq 0 ]
+
 	# Z1 and Z6: the zones at 60 s after the start, against their files.
 	while [ $(($(date +%s) - _t0)) -lt 60 ]; do sleep 1; done
-	for z in customer.test. other.test. far.test.; do
+	for z in customer.test. customer2.test. other.test. far.test.; do
 		_cz_norm < "$ZDIR/${z}zone" > "$WORK/cust/$z.file"
 		dogq "$CZ_A" "$z" AXFR | _cz_norm > "$WORK/cust/$z.axfr"
 		[ -s "$WORK/cust/$z.axfr" ] || note "$z: the AXFR came back empty"
@@ -136,6 +160,11 @@ EOF
 ns1.customer.test. 60 IN A $CZ_A
 _dns.ns1.customer.test. 60 IN SVCB 0 _dns.ns1.provider.test.
 *.customer.test. 60 IN A 192.0.2.1
+EOF
+	_cz_zone customer2.test. ns1.customer2.test. <<EOF
+ns1.customer2.test. 60 IN A $CZ_A
+_dns.ns1.customer2.test. 60 IN SVCB 0 _dns.ns1.provider.test.
+*.customer2.test. 60 IN A 192.0.2.1
 EOF
 	_cz_zone other.test. ns1.provider.test. <<EOF
 *.other.test. 60 IN A 192.0.2.1
