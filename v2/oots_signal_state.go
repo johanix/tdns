@@ -6,10 +6,13 @@ package tdns
 
 import (
 	"slices"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -181,16 +184,15 @@ func (imr *Imr) followLookupAlias(set *svcbSignalSet) {
 			return
 		}
 		seen[key] = true
-		cached := imr.Cache.Get(target, dns.TypeSVCB)
-		if cached == nil || cached.Context != cache.ContextAnswer || cached.RRset == nil || len(cached.RRset.RRs) == 0 {
+		rrs, state, held := imr.cachedSignalHop(target)
+		if len(rrs) == 0 {
 			set.path = append(set.path, cache.SignalHop{Owner: target, State: cache.SignalStateUnknown})
-			if cached == nil {
+			if !held {
 				imr.lookupSignalAliasHop(set.owner, target)
 			}
 			return
 		}
-		rrs := cached.RRset.RRs
-		set.path = append(set.path, cache.SignalHop{Owner: target, State: cache.SignalState(cached.State)})
+		set.path = append(set.path, cache.SignalHop{Owner: target, State: state})
 		if !hasAliasMode(rrs) {
 			set.final = finalSignalSet(rrs, set.via, set.path)
 			return
@@ -199,18 +201,116 @@ func (imr *Imr) followLookupAlias(set *svcbSignalSet) {
 	}
 }
 
+// cachedSignalHop reads the SVCB RRset at target, a hop on an alias path, from
+// the cache, with the state it is held in. A target that is a CNAME is read
+// through its chain, as a lookup of <target, SVCB> follows it and caches it
+// link by link (chainAt): the RRset at the chain's end, in the weakest state
+// of the links and that RRset, since every record that leads to a signal is a
+// hop that must be Secure for a target to be honoured (R5). held reports that
+// the cache holds an answer for target, a denial included, so that there is
+// nothing to look up.
+func (imr *Imr) cachedSignalHop(target string) (rrs []dns.RR, state cache.ValidationState, held bool) {
+	if c := imr.Cache.Get(target, dns.TypeSVCB); c != nil {
+		if c.Context == cache.ContextAnswer && c.RRset != nil && len(c.RRset.RRs) > 0 {
+			return c.RRset.RRs, cache.SignalState(c.State), true
+		}
+		return nil, cache.SignalStateUnknown, true
+	}
+	links, final, _, err := imr.chainAt(target, dns.TypeSVCB, edns0.PrivacyNone, imr.freshChainGrace())
+	if err != nil || final == nil || len(links) == 0 {
+		return nil, cache.SignalStateUnknown, false
+	}
+	if final.Context != cache.ContextAnswer || final.RRset == nil || len(final.RRset.RRs) == 0 {
+		return nil, cache.SignalStateUnknown, true
+	}
+	hops := make([]cache.SignalHop, 0, len(links)+1)
+	for _, l := range links {
+		hops = append(hops, cache.SignalHop{Owner: l.Name, State: cache.SignalState(l.State)})
+	}
+	hops = append(hops, cache.SignalHop{Owner: final.Name, State: cache.SignalState(final.State)})
+	return final.RRset.RRs, cache.SignalPathState(hops), true
+}
+
+// signalAliasHopRetry is how long an alias hop waits after its lookup has
+// ended, however it ended, before it is looked up again. It bounds the
+// lookups of a hop the cache cannot hold (a TTL of 0) to one per period, and
+// lets a hop whose cached RRset has expired be looked up again after it.
+const signalAliasHopRetry = 30 * time.Second
+
+// aliasHopTracker runs one lookup at a time of each alias hop, and holds the
+// owners waiting for it: many nameservers' aliases may lead to one provider's
+// signal, and each is to be followed again when it is found. Its zero value
+// is ready for use.
+type aliasHopTracker struct {
+	mu      sync.Mutex
+	waiting map[string]map[string]string // target -> owners waiting (canonical -> as given); present while a lookup is in flight
+	next    map[string]time.Time         // target -> when it may be looked up again
+	retry   time.Duration                // signalAliasHopRetry when zero; tests set it
+}
+
+// join enters owner among those waiting for target's lookup, and reports
+// whether the caller is to start that lookup. When a lookup is in flight,
+// owner waits for it and join reports false. When target was looked up less
+// than signalAliasHopRetry ago, owner is not entered: no lookup is coming,
+// and the next query that brings owner's RRset follows its alias again.
+func (tr *aliasHopTracker) join(target, owner string, now time.Time) bool {
+	key := core.CanonicalizeName(target)
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if w, ok := tr.waiting[key]; ok {
+		w[core.CanonicalizeName(owner)] = owner
+		return false
+	}
+	if now.Before(tr.next[key]) {
+		return false
+	}
+	for k, at := range tr.next {
+		if !now.Before(at) {
+			delete(tr.next, k)
+		}
+	}
+	if tr.waiting == nil {
+		tr.waiting = map[string]map[string]string{}
+	}
+	tr.waiting[key] = map[string]string{core.CanonicalizeName(owner): owner}
+	return true
+}
+
+// done ends target's lookup. It returns the owners that waited for it, and
+// target is not looked up again for signalAliasHopRetry.
+func (tr *aliasHopTracker) done(target string, now time.Time) []string {
+	key := core.CanonicalizeName(target)
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	owners := make([]string, 0, len(tr.waiting[key]))
+	for _, owner := range tr.waiting[key] {
+		owners = append(owners, owner)
+	}
+	delete(tr.waiting, key)
+	if tr.next == nil {
+		tr.next = map[string]time.Time{}
+	}
+	retry := tr.retry
+	if retry == 0 {
+		retry = signalAliasHopRetry
+	}
+	tr.next[key] = now.Add(retry)
+	sort.Strings(owners)
+	return owners
+}
+
 // signalAliasHopLookupHook, when set, stands in for the ImrQuery of an alias
 // hop: tests set it, so that no lookup leaves the process. It is to leave the
 // answer in the cache, as a lookup does.
 var signalAliasHopLookupHook func(imr *Imr, target string) (*ImrResponse, error)
 
 // lookupSignalAliasHop looks up the SVCB RRset at target, a hop on the alias
-// path of the signal at owner, off the query path, and when it is found
-// follows owner's alias again from the cache. The transport-signal tracker runs one lookup
-// per target, as it does for _dns.<ns>; without one (a resolver that does no
-// discovery) nothing is looked up.
+// path of the signal at owner, off the query path. One lookup of a target
+// runs at a time, and every owner whose alias reached it meanwhile waits for
+// it (aliasHopTracker); when it finds the hop, each of them is followed again
+// from the cache. A resolver that does no discovery looks nothing up.
 func (imr *Imr) lookupSignalAliasHop(owner, target string) {
-	if !imr.TransportSignalDiscovery.Begin(target) {
+	if imr.TransportSignalDiscovery == nil || !imr.signalAliasHops.join(target, owner, time.Now()) {
 		return
 	}
 	lookup := func(imr *Imr, target string) (*ImrResponse, error) {
@@ -223,37 +323,28 @@ func (imr *Imr) lookupSignalAliasHop(owner, target string) {
 	}
 	go func() {
 		resp, err := lookup(imr, target)
+		owners := imr.signalAliasHops.done(target, time.Now())
 		if !imr.Quiet {
-			lgDns.Debug("transport signal: alias hop looked up", "owner", owner, "target", target, "err", err)
+			lgDns.Debug("transport signal: alias hop looked up", "target", target, "owners", owners, "err", err)
 		}
-		if !imr.settleSignalAliasHop(target, resp, err) {
+		if !signalAliasHopFound(resp, err) {
 			return
 		}
-		if c := imr.Cache.Get(owner, dns.TypeSVCB); c != nil && c.Context == cache.ContextAnswer && c.RRset != nil {
-			imr.applyTransportRRsetFromAnswer(owner, c.RRset, c.State)
+		for _, owner := range owners {
+			if c := imr.Cache.Get(owner, dns.TypeSVCB); c != nil && c.Context == cache.ContextAnswer && c.RRset != nil {
+				imr.applyTransportRRsetFromAnswer(owner, c.RRset, c.State)
+			}
 		}
 	}()
 }
 
-// settleSignalAliasHop records how the lookup of an alias hop ended, as
-// settleTransportSignalLookup does for _dns.<ns>: the hop is always an SVCB.
-// It reports whether the hop was found, and so whether owner's alias is worth
-// following again. After a denial it is not: the tracker has forgotten the
-// target, and a denial the cache does not hold under <target, SVCB> (TTL 0, or
-// reached through a CNAME) would start the same lookup at once, again and
-// again. The next query that brings owner's RRset looks the target up. After a
-// failure the backoff stops a new lookup, and the cache has nothing new.
-func (imr *Imr) settleSignalAliasHop(target string, resp *ImrResponse, err error) bool {
-	switch {
-	case err == nil && resp != nil && resp.RRset != nil && resp.RRset.RRtype == dns.TypeSVCB && len(resp.RRset.RRs) > 0:
-		imr.TransportSignalDiscovery.Succeed(target)
-		return true
-	case err == nil && resp != nil && resp.Denial != 0:
-		imr.TransportSignalDiscovery.Reset(target)
-	default:
-		imr.TransportSignalDiscovery.Fail(target, err)
-	}
-	return false
+// signalAliasHopFound reports whether the lookup of an alias hop found an SVCB
+// RRset, and so whether the owners waiting for it are worth following again.
+// After a denial or a failure they are not: the cache has nothing new to lead
+// them to, and the next query that brings an owner's RRset follows it again
+// once signalAliasHopRetry has passed.
+func signalAliasHopFound(resp *ImrResponse, err error) bool {
+	return err == nil && resp != nil && resp.RRset != nil && resp.RRset.RRtype == dns.TypeSVCB && len(resp.RRset.RRs) > 0
 }
 
 // pathCopy is set's path for one ReceivedSignal: the answer path installs one

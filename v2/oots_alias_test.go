@@ -240,10 +240,11 @@ func TestOOTSAliasLookupLoopAndCap(t *testing.T) {
 
 // A hop that is denied, with the denial not cached under the question, is not
 // followed again at once: one lookup, not a loop of them. The next query that
-// brings the owner's RRset looks again.
+// brings the owner's RRset after signalAliasHopRetry looks again.
 func TestOOTSAliasDeniedHopNotRefollowed(t *testing.T) {
 	imr := newTestImr(t)
 	imr.Quiet = true
+	imr.signalAliasHops.retry = 300 * time.Millisecond
 	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
 	alias := []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner)}
 	cacheSignal(imr, pathOwner, alias, cache.ValidationStateSecure)
@@ -275,11 +276,177 @@ func TestOOTSAliasDeniedHopNotRefollowed(t *testing.T) {
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("%d lookups after one denial, want 1", n)
 	}
+	time.Sleep(150 * time.Millisecond)
 	apply()
 	deadline := time.Now().Add(5 * time.Second)
 	for calls.Load() < 2 {
 		if time.Now().After(deadline) {
 			t.Fatal("the next query did not look the hop up again")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// hookAliasHop stands in for the lookups of alias hops for one test: answer
+// fills the cache for the target and returns what the lookup would. It
+// returns the count of lookups made.
+func hookAliasHop(t *testing.T, answer func(imr *Imr, target string) (*ImrResponse, error)) *atomic.Int32 {
+	t.Helper()
+	var calls atomic.Int32
+	saved := signalAliasHopLookupHook
+	signalAliasHopLookupHook = func(imr *Imr, target string) (*ImrResponse, error) {
+		calls.Add(1)
+		return answer(imr, target)
+	}
+	t.Cleanup(func() { signalAliasHopLookupHook = saved })
+	return &calls
+}
+
+// waitRedirect waits until server's DoT goes to the provider's target.
+func waitRedirect(t *testing.T, server *cache.AuthServer, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for server.GetTransportEndpoint(core.TransportDoT).Target != providerDoT {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: not installed: %+v", what, server.GetReceivedSignal())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Many nameservers' aliases lead to one provider's signal. One lookup of the
+// provider's hop serves them all: an owner whose alias reaches the hop while
+// its lookup is in flight waits for it, and is followed again when it ends
+// (CodeRabbit on #1056).
+func TestOOTSAliasSharedHopServesEveryOwner(t *testing.T) {
+	imr := newTestImr(t)
+	imr.Quiet = true
+	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
+	const ns2 = "ns2.kid.p.test."
+	owner2 := "_dns." + ns2
+	alias1 := []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner)}
+	alias2 := []dns.RR{mustRR(t, owner2+` 3600 IN SVCB 0 `+providerOwner)}
+	cacheSignal(imr, pathOwner, alias1, cache.ValidationStateSecure)
+	cacheSignal(imr, owner2, alias2, cache.ValidationStateSecure)
+	s1, s2 := cache.NewAuthServer(pathNS), cache.NewAuthServer(ns2)
+	imr.Cache.ServerMap.Set(stateZone, map[string]*cache.AuthServer{cache.ServerKey(pathNS): s1, cache.ServerKey(ns2): s2})
+
+	release := make(chan struct{})
+	calls := hookAliasHop(t, func(imr *Imr, target string) (*ImrResponse, error) {
+		<-release
+		cacheSignal(imr, target, providerRecords(t), cache.ValidationStateSecure)
+		return &ImrResponse{RRset: imr.Cache.Get(target, dns.TypeSVCB).RRset, ValidationState: cache.ValidationStateSecure}, nil
+	})
+	imr.applyTransportRRsetFromAnswer(pathOwner, &core.RRset{Name: pathOwner, RRtype: dns.TypeSVCB, RRs: copyRRs(alias1)},
+		cache.ValidationStateSecure)
+	imr.applyTransportRRsetFromAnswer(owner2, &core.RRset{Name: owner2, RRtype: dns.TypeSVCB, RRs: copyRRs(alias2)},
+		cache.ValidationStateSecure)
+	close(release)
+	waitRedirect(t, s1, "the first owner")
+	waitRedirect(t, s2, "the owner that waited")
+	if n := calls.Load(); n != 1 {
+		t.Errorf("%d lookups of the shared hop, want 1", n)
+	}
+}
+
+// A hop that is a CNAME is read through its chain, as the lookup of
+// <hop, SVCB> follows and caches it: the alias is installed after one lookup,
+// not looked up again and again. The hop is held in the weakest state of the
+// link and the RRset it leads to (R5) (CodeRabbit on #1056).
+func TestOOTSAliasHopThroughACNAME(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		link     cache.ValidationState
+		redirect bool
+	}{
+		{"link secure", cache.ValidationStateSecure, true},
+		{"link insecure", cache.ValidationStateInsecure, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			imr := newTestImr(t)
+			imr.Quiet = true
+			imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
+			const elsewhere = "_dns.ns.elsewhere.example."
+			alias := []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner)}
+			cacheSignal(imr, pathOwner, alias, cache.ValidationStateSecure)
+			server := cache.NewAuthServer(pathNS)
+			imr.Cache.ServerMap.Set(stateZone, map[string]*cache.AuthServer{cache.ServerKey(pathNS): server})
+
+			calls := hookAliasHop(t, func(imr *Imr, target string) (*ImrResponse, error) {
+				link := mustRR(t, target+` 3600 IN CNAME `+elsewhere)
+				imr.Cache.Set(target, dns.TypeCNAME, &cache.CachedRRset{Name: target, RRtype: dns.TypeCNAME,
+					Context: cache.ContextAnswer, State: tc.link, Expiration: time.Now().Add(time.Hour),
+					RRset: &core.RRset{Name: target, Class: dns.ClassINET, RRtype: dns.TypeCNAME, RRs: []dns.RR{link}}})
+				recs := []dns.RR{
+					mustRR(t, elsewhere+` 3600 IN SVCB 1 `+providerDoT+` port=1234 oots="dot:30"`),
+					mustRR(t, elsewhere+` 3600 IN SVCB 1 . oots="doq:20"`),
+				}
+				cacheSignal(imr, elsewhere, recs, cache.ValidationStateSecure)
+				return &ImrResponse{RRset: imr.Cache.Get(elsewhere, dns.TypeSVCB).RRset, ValidationState: tc.link}, nil
+			})
+			imr.applyTransportRRsetFromAnswer(pathOwner, &core.RRset{Name: pathOwner, RRtype: dns.TypeSVCB, RRs: copyRRs(alias)},
+				cache.ValidationStateSecure)
+			deadline := time.Now().Add(5 * time.Second)
+			for server.GetReceivedSignal() == nil {
+				if time.Now().After(deadline) {
+					t.Fatal("nothing installed through the CNAME'd hop")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			rec := server.GetReceivedSignal()
+			if rec.Weights[core.TransportDoQ] != 20 {
+				t.Errorf("DoQ weight %d, want 20", rec.Weights[core.TransportDoQ])
+			}
+			if ep := server.GetTransportEndpoint(core.TransportDoT); tc.redirect != (ep.Target == providerDoT) {
+				t.Errorf("DoT endpoint %v, redirect wanted: %v (path %s)", ep, tc.redirect, cache.FormatSignalPath(rec.Path))
+			}
+			time.Sleep(100 * time.Millisecond)
+			if n := calls.Load(); n != 1 {
+				t.Errorf("%d lookups of the hop, want 1", n)
+			}
+		})
+	}
+}
+
+// A hop whose cached RRset has expired is looked up again: a lookup that
+// found it once does not keep it from being looked up for good (CodeRabbit on
+// #1056).
+func TestOOTSAliasExpiredHopLookedUpAgain(t *testing.T) {
+	imr := newTestImr(t)
+	imr.Quiet = true
+	imr.signalAliasHops.retry = 50 * time.Millisecond
+	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
+	alias := []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner)}
+	cacheSignal(imr, pathOwner, alias, cache.ValidationStateSecure)
+	server := cache.NewAuthServer(pathNS)
+	imr.Cache.ServerMap.Set(stateZone, map[string]*cache.AuthServer{cache.ServerKey(pathNS): server})
+	calls := hookAliasHop(t, func(imr *Imr, target string) (*ImrResponse, error) {
+		cacheSignal(imr, target, providerRecords(t), cache.ValidationStateSecure)
+		return &ImrResponse{RRset: imr.Cache.Get(target, dns.TypeSVCB).RRset, ValidationState: cache.ValidationStateSecure}, nil
+	})
+	apply := func() {
+		imr.applyTransportRRsetFromAnswer(pathOwner, &core.RRset{Name: pathOwner, RRtype: dns.TypeSVCB, RRs: copyRRs(alias)},
+			cache.ValidationStateSecure)
+	}
+	apply()
+	waitRedirect(t, server, "after the first lookup")
+
+	// The hop's RRset runs out: stored again with TTL 0, it is stored
+	// already expired.
+	expired := []dns.RR{
+		mustRR(t, providerOwner+` 0 IN SVCB 1 `+providerDoT+` port=1234 oots="dot:30"`),
+		mustRR(t, providerOwner+` 0 IN SVCB 1 . oots="doq:20"`),
+	}
+	cacheSignal(imr, providerOwner, expired, cache.ValidationStateSecure)
+	if imr.Cache.Get(providerOwner, dns.TypeSVCB) != nil {
+		t.Fatal("the hop's RRset did not expire")
+	}
+	time.Sleep(100 * time.Millisecond)
+	apply()
+	deadline := time.Now().Add(5 * time.Second)
+	for calls.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("the expired hop was not looked up again")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -64,6 +64,10 @@ type Imr struct {
 	// endpointAddrs holds the addresses of the targets transport signals
 	// redirect to, and the lookups of them in flight (oots_endpoints.go).
 	endpointAddrs endpointAddrTracker
+	// signalAliasHops runs the lookups of the hops on alias paths of
+	// transport signals, and holds the owners waiting for each
+	// (oots_signal_state.go).
+	signalAliasHops aliasHopTracker
 	// zones holds the configured forward table and stub zones as one
 	// immutable snapshot; ReloadZones swaps the pointer (#436). Read it
 	// through ForwardZones()/StubZones(), never by reaching in: a query
