@@ -328,8 +328,14 @@ func TestOOTSSignalStateAliasHops(t *testing.T) {
 			if got := cache.SignalPathState(set.path); got != tc.state {
 				t.Errorf("path state %s, want %s", cache.SignalStateString(got), cache.SignalStateString(tc.state))
 			}
-			if installed, _ := imr.installSVCBSignal(cache.NewAuthServer(pathNS), set); installed {
-				t.Errorf("an AliasMode set installed a signal")
+			// The alias delegates the signal to the RRset its path ends at,
+			// and its records with TargetName "." are inherited whatever the
+			// state (R4). A path that ends nowhere installs nothing.
+			wantInstall := !map[string]bool{
+				"target not in the section": true, "a loop ends the path": true, "the depth cap ends the path": true,
+			}[tc.name]
+			if installed, _ := imr.installSVCBSignal(cache.NewAuthServer(pathNS), set); installed != wantInstall {
+				t.Errorf("installed %v, want %v", installed, wantInstall)
 			}
 		})
 	}
@@ -350,9 +356,11 @@ func TestOOTSSignalStateLookupAlias(t *testing.T) {
 	}
 }
 
-// An AliasMode set leaves the earlier signal alone on every path, its Via and
-// path included, whatever the state of the alias's hops.
-func TestOOTSSignalStateAliasKeepsEarlierSignal(t *testing.T) {
+// An AliasMode set delegates the signal on both Additional paths: the
+// server takes the signal of the RRset the alias leads to, with the state of
+// every hop. An alias whose target the section does not hold leaves the
+// earlier signal alone.
+func TestOOTSSignalStateAliasDelegates(t *testing.T) {
 	dkc := signerTestDnskeyCache(t)
 	kid := newSignerTestKey(t, stateZone, 256)
 	kid.holdSecure(dkc)
@@ -361,7 +369,12 @@ func TestOOTSSignalStateAliasKeepsEarlierSignal(t *testing.T) {
 	earlier := []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 1 . port=1234 oots="dot:30"`)}
 	alias := mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner)
 	target := mustRR(t, providerOwner+` 3600 IN SVCB 1 . oots="doq:50"`)
-	section := []dns.RR{alias, kid.sign(t, dns.Copy(alias)).RRSIGs[0], target, provider.sign(t, dns.Copy(target)).RRSIGs[0]}
+	aliasOnly := []dns.RR{alias, kid.sign(t, dns.Copy(alias)).RRSIGs[0]}
+	section := append(copyRRs(aliasOnly), target, provider.sign(t, dns.Copy(target)).RRSIGs[0])
+	const want = "oots w=doq:50 p= sel=do53:100,doh:0,doq:50,dot:0 tr=do53,doh,doq,dot " + pathOwner + " secure -> " + providerOwner + " secure"
+	snapshot := func(server *cache.AuthServer) string {
+		return selectionSnapshot(server) + " " + cache.FormatSignalPath(server.GetReceivedSignal().Path)
+	}
 
 	ctx := context.Background()
 	imr := newTestImr(t)
@@ -371,11 +384,16 @@ func TestOOTSSignalStateAliasKeepsEarlierSignal(t *testing.T) {
 	r.SetQuestion("www."+stateZone, dns.TypeA)
 	r.Extra = copyRRs(earlier)
 	imr.parseTransportForServerFromAdditional(ctx, server, r)
-	before := selectionSnapshot(server) + " " + cache.FormatSignalPath(server.GetReceivedSignal().Path)
+	before := snapshot(server)
+	r.Extra = copyRRs(aliasOnly)
+	imr.parseTransportForServerFromAdditional(ctx, server, r)
+	if got := snapshot(server); got != before {
+		t.Errorf("response path, an alias to a target not in the section:\n got  %s\n want %s", got, before)
+	}
 	r.Extra = copyRRs(section)
 	imr.parseTransportForServerFromAdditional(ctx, server, r)
-	if after := selectionSnapshot(server) + " " + cache.FormatSignalPath(server.GetReceivedSignal().Path); after != before {
-		t.Errorf("response path, after an AliasMode set:\n got  %s\n want %s", after, before)
+	if got := snapshot(server); got != want {
+		t.Errorf("response path, through the alias:\n got  %s\n want %s", got, want)
 	}
 
 	imr = newTestImr(t)
@@ -386,19 +404,13 @@ func TestOOTSSignalStateAliasKeepsEarlierSignal(t *testing.T) {
 	ref.SetQuestion("www."+stateZone, dns.TypeA)
 	ref.Response = true
 	ref.Ns = nsrrset.RRs
-	for i, extra := range [][]dns.RR{earlier, section} {
-		ref.Extra = copyRRs(extra)
-		if _, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsrrset, stateZone, "p.test.",
-			map[string]bool{pathNS: true}, ref); err != nil {
-			t.Fatalf("ParseAdditionalForNSAddrs %d: %v", i, err)
-		}
-		if i == 0 {
-			server = imr.Cache.GetOrCreateAuthServer(pathNS)
-			before = selectionSnapshot(server) + " " + cache.FormatSignalPath(server.GetReceivedSignal().Path)
-		}
+	ref.Extra = copyRRs(section)
+	if _, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsrrset, stateZone, "p.test.",
+		map[string]bool{pathNS: true}, ref); err != nil {
+		t.Fatalf("ParseAdditionalForNSAddrs: %v", err)
 	}
-	if after := selectionSnapshot(server) + " " + cache.FormatSignalPath(server.GetReceivedSignal().Path); after != before {
-		t.Errorf("referral path, after an AliasMode set:\n got  %s\n want %s", after, before)
+	if got := snapshot(imr.Cache.GetOrCreateAuthServer(pathNS)); got != want {
+		t.Errorf("referral path, through the alias (target outside the referring zone):\n got  %s\n want %s", got, want)
 	}
 }
 

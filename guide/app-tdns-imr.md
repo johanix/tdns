@@ -46,6 +46,14 @@ Features:
   and RTT for a target are kept per address, port and transport.
   `dump zone servers` shows the targets (`Signal targets`).
 
+  An AliasMode record at `_dns.<ns>` delegates the whole signal: tdns-imr
+  takes the signal of the RRset the alias leads to, from the Additional
+  section when it was injected beside the alias, and otherwise by looking up
+  each hop in the background, at most three. A target at the end of that
+  path is honoured only when every RRset on it validated Secure; records
+  with TargetName `.` are inherited whatever the state. An alias to `.`, a
+  loop, or a longer path gives no signal.
+
   See section 2 of [TDNS Special Features](special-features.md) for the
   full picture.
 

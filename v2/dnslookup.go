@@ -2017,8 +2017,14 @@ type svcbSignalSet struct {
 	via   string
 	path  []cache.SignalHop
 	// awaitsLookup records that installing the set ignored a record with a
-	// target whose path was not decided: the verifying lookup may give it.
+	// target whose path was not decided, or that its alias path ran into a
+	// target the Additional section did not hold: the verifying lookup may
+	// give either.
 	awaitsLookup bool
+	// final is the set an AliasMode record leads to, at the end of path,
+	// when it was read (decideAdditionalPath, followLookupAlias). It is what
+	// the alias delegates the signal to.
+	final *svcbSignalSet
 }
 
 // add collects one SVCB of the set's RRset. All three paths a signal arrives
@@ -2301,8 +2307,22 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 	pathState := cache.SignalStateString(cache.SignalPathState(set.path))
 	pathText := cache.FormatSignalPath(set.path)
 	if set.alias {
+		// RFC 9460 section 2.4.1: the ServiceMode records beside an AliasMode
+		// one are ignored. The signal is the one the alias leads to, read with
+		// the whole path.
+		if set.final != nil && !set.final.alias {
+			if !imr.Quiet {
+				lgDns.Debug("SVCB signal through an AliasMode record", "servername", server.Name,
+					"via", set.via, "state", pathState, "path", pathText)
+			}
+			installed, oots = imr.installSVCBSignal(server, set.final)
+			if set.final.awaitsLookup {
+				set.awaitsLookup = true
+			}
+			return installed, oots
+		}
 		if !imr.Quiet {
-			lgDns.Debug("SVCB signal ignored: the RRset holds an AliasMode record", "servername", server.Name,
+			lgDns.Debug("SVCB signal ignored: the RRset holds an AliasMode record that leads to no signal", "servername", server.Name,
 				"via", set.via, "state", pathState, "path", pathText)
 		}
 		return false, false
@@ -3200,6 +3220,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 			}
 		}
 		set.decideLookupPath(vstate)
+		imr.followLookupAlias(set)
 	}
 	// The shared instance of a nameserver is listed under every zone it
 	// serves: it takes the signal once, and its ignored redirects count once.
