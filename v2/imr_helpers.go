@@ -19,6 +19,9 @@ const (
 	transportQueryReasonObservation   = "opportunistic-signal"
 	transportQueryReasonNewServer     = "new-auth-server"
 	transportQueryReasonStrictPrivacy = "strict-privacy"
+	// transportQueryReasonVerify is the verifying lookup for a signal record
+	// with a target, which waits for a Secure verdict (R1).
+	transportQueryReasonVerify = "verify-redirect"
 )
 
 // detachedContext returns the context for fire-and-forget background work
@@ -130,6 +133,14 @@ func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, rea
 	case transportQueryReasonNewServer:
 		// Only proceed if always-query option is enabled
 		if imr.Options[ImrOptAlwaysQueryForTransport] == "true" {
+			imr.launchTransportSignalQuery(ctx, owner, reason)
+		}
+	case transportQueryReasonVerify:
+		// A redirect is honoured only once its path validates. Where the
+		// Additional section could not tell, this lookup can, whether or not
+		// the options ask for discovery. Only use-transport-signals: false
+		// turns it off.
+		if imr.Options[ImrOptUseTransportSignals] != "false" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	case transportQueryReasonStrictPrivacy:

@@ -27,8 +27,14 @@ type AddressBackoff struct {
 // AddrXport keys backoff state by both address and transport. A timeout on
 // (1.2.3.4:53, DoT) does not poison (1.2.3.4:53, Do53) or vice versa: that
 // would conflate problems with the TLS path with problems with the address.
+//
+// Port is 0 for the server's own addresses, as it always was. An address of a
+// redirected endpoint (endpoint.go) carries the endpoint's port, 0 for the
+// transport's default, so that one host's endpoints on different ports are
+// backed off apart.
 type AddrXport struct {
 	Addr      string
+	Port      uint16
 	Transport core.Transport
 }
 
@@ -46,7 +52,8 @@ type AuthServer struct {
 	Name string
 	// Addrs holds BARE IP literals (e.g. "192.0.2.1" or "2001:db8::1"),
 	// NOT host:port. DialAddr joins a port the latest oots signal assigned
-	// to the transport being dialed; otherwise the client adds its default
+	// to the transport being dialed at the server's own name (endpoint.go);
+	// otherwise the client adds its default
 	// via net.JoinHostPort(addr, c.Port). Passing a host:port string through
 	// AddAddr makes JoinHostPort produce "[1.2.3.4:53]:53" because of the
 	// embedded colon, after which Dial tries to resolve "1.2.3.4:53" as a
@@ -64,20 +71,24 @@ type AuthServer struct {
 	// TransportWeights carries for selection; nil when there was none.
 	// Guarded by mu, and set in the same step as the weights.
 	Received *ReceivedSignal
-	// TransportPorts is the non-default port the latest signal assigned to
-	// each transport. A missing entry means the client's usual port (DoT and
-	// DoQ 853, DoH 443). Do53 is never stored: cleartext stays on 53. Replaced
-	// wholesale with the signal. Guarded by mu.
-	TransportPorts map[core.Transport]uint16
+	// TransportEndpoints is where the latest signal put each transport: a
+	// target name other than the server's own, a non-default port, or both
+	// (endpoint.go). A missing entry is the default endpoint: the server's
+	// own addresses at the client's usual port (DoT and DoQ 853, DoH 443).
+	// Do53 is never stored: cleartext stays on 53. Replaced wholesale with the
+	// signal. Guarded by mu.
+	TransportEndpoints map[core.Transport]Endpoint
 	// Stats (guarded by mu)
-	mu                sync.Mutex
-	TransportCounters map[core.Transport]uint64                    // queries ATTEMPTED per transport (transport chosen)
-	UsedCounters      map[core.Transport]uint64                    // queries whose answer was CARRIED, by actual wire transport
-	LastUsed          map[core.Transport]time.Time                 // when an answer was last CARRIED, by actual wire transport
-	UsedByClass       [NumTrafficClasses]map[core.Transport]uint64 // UsedCounters split by whose query it was
-	FailedCounters    map[core.Transport]uint64                    // attempts that ERRORED, by actual wire transport (see tryServer)
-	TruncatedCount    uint64                                       // Do53/UDP responses TC=1 truncated and retried over TCP
-	Src               string                                       // "answer", "glue", "hint", "priming", "stub", ...
+	mu                 sync.Mutex
+	TransportCounters  map[core.Transport]uint64                    // queries ATTEMPTED per transport (transport chosen)
+	UsedCounters       map[core.Transport]uint64                    // queries whose answer was CARRIED, by actual wire transport
+	LastUsed           map[core.Transport]time.Time                 // when an answer was last CARRIED, by actual wire transport
+	UsedByClass        [NumTrafficClasses]map[core.Transport]uint64 // UsedCounters split by whose query it was
+	FailedCounters     map[core.Transport]uint64                    // attempts that ERRORED, by actual wire transport (see tryServer)
+	TruncatedCount     uint64                                       // Do53/UDP responses TC=1 truncated and retried over TCP
+	RedirectedCounters map[core.Transport]uint64                    // answers carried by a redirected endpoint, by actual wire transport
+	IgnoredRedirects   uint64                                       // signal records with a target ignored for want of a Secure path
+	Src                string                                       // "answer", "glue", "hint", "priming", "stub", ...
 	// configuredAddrs holds the addresses the operator configured for this
 	// server (a stub's, via AddStub), in canonical form. Addresses added
 	// later, from glue or a lookup, are not in it.
@@ -486,10 +497,10 @@ func (as *AuthServer) SetTransportSignal(transports []core.Transport, alpn []str
 	as.Alpn = alpn
 	as.TransportWeights = weights
 	as.Received = received
-	// Ports ride with the signal. A signal that assigns none, including an
-	// ALPN list, a TSYNC string and an operator override, clears whatever
+	// Endpoints ride with the signal. A signal that assigns none, including
+	// an ALPN list, a TSYNC string and an operator override, clears whatever
 	// the previous signal had assigned: the new signal replaces the old one.
-	as.TransportPorts = portsFromReceived(received)
+	as.TransportEndpoints = endpointsFromReceived(received)
 }
 
 // SetReceivedSignal records the signal as received, for the paths that set the
@@ -502,16 +513,7 @@ func (as *AuthServer) SetReceivedSignal(received *ReceivedSignal) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	as.Received = received
-	as.TransportPorts = portsFromReceived(received)
-}
-
-// portsFromReceived is the dial ports of a signal. Nil when the signal
-// assigns none, so installing it clears the previous ports.
-func portsFromReceived(received *ReceivedSignal) map[core.Transport]uint16 {
-	if received == nil {
-		return nil
-	}
-	return DialPorts(received.Ports)
+	as.TransportEndpoints = endpointsFromReceived(received)
 }
 
 // DialPorts copies the ports a signal assigns, dropping a zero and Do53: the
@@ -535,37 +537,49 @@ func DialPorts(ports map[core.Transport]uint16) map[core.Transport]uint16 {
 }
 
 // GetTransportPort returns the non-default port the latest signal assigned to
-// t, or 0 when t keeps its usual port. Do53 and Do53TCP are always 0.
-// Thread-safe.
+// t, at the server's own name or at a target, or 0 when t keeps its usual
+// port. Do53 and Do53TCP are always 0. Thread-safe.
 func (as *AuthServer) GetTransportPort(t core.Transport) uint16 {
-	if as == nil || t == core.TransportDo53 || t == core.TransportDo53TCP {
-		return 0
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	return as.TransportPorts[t]
+	return as.GetTransportEndpoint(t).Port
 }
 
-// GetTransportPorts returns a copy of the ports the latest signal assigned.
-// Thread-safe.
+// GetTransportPorts returns the ports the latest signal assigned, by
+// transport, whatever name each is at. Thread-safe.
 func (as *AuthServer) GetTransportPorts() map[core.Transport]uint16 {
-	if as == nil {
-		return nil
+	var out map[core.Transport]uint16
+	for t, ep := range as.GetTransportEndpoints() {
+		if ep.Port == 0 {
+			continue
+		}
+		if out == nil {
+			out = map[core.Transport]uint16{}
+		}
+		out[t] = ep.Port
 	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	return copyMap(as.TransportPorts)
+	return out
 }
 
-// DialAddr is the address to pass to Exchange for transport t. addr is a bare
-// IP. A port the latest signal assigned to t is joined onto it; otherwise addr
-// is returned unchanged and the client adds its default port. Do53 stays on 53.
+// DialAddr is the address to pass to Exchange for transport t at the server's
+// own address addr, a bare IP. A port the latest signal assigned to t at the
+// server's own name is joined onto it; otherwise addr is returned unchanged
+// and the client adds its default port. A transport redirected to a target is
+// dialed through the endpoint instead (tryServer); at the server's own
+// address it is at its default port. Do53 stays on 53.
 func (as *AuthServer) DialAddr(addr string, t core.Transport) string {
-	p := as.GetTransportPort(t)
-	if p == 0 {
+	ep := as.GetTransportEndpoint(t)
+	if ep.Target != "" {
 		return addr
 	}
-	return net.JoinHostPort(addr, strconv.Itoa(int(p)))
+	return JoinDialAddr(addr, ep.Port)
+}
+
+// JoinDialAddr is addr, a bare IP, with port joined onto it; addr alone for
+// port 0, where the client adds the transport's default.
+func JoinDialAddr(addr string, port uint16) string {
+	if port == 0 {
+		return addr
+	}
+	return net.JoinHostPort(addr, strconv.Itoa(int(port)))
 }
 
 // GetSignalState returns copies of the transports, their weights and the
@@ -731,6 +745,12 @@ type TransportStats struct {
 	LastUsed    map[core.Transport]time.Time
 	Failed      map[core.Transport]uint64
 	Truncated   uint64
+	// Redirected is the part of Used carried by a redirected endpoint: a
+	// target other than the server's own name.
+	Redirected map[core.Transport]uint64
+	// IgnoredRedirects counts signal records with a target that were ignored
+	// because their path was not Secure (R1, R5).
+	IgnoredRedirects uint64
 }
 
 // SnapshotTransportStats returns a consistent copy of all per-transport usage
@@ -750,6 +770,8 @@ func (as *AuthServer) SnapshotTransportStats() TransportStats {
 	ts.LastUsed = copyMap(as.LastUsed)
 	ts.Failed = copyMap(as.FailedCounters)
 	ts.Truncated = as.TruncatedCount
+	ts.Redirected = copyMap(as.RedirectedCounters)
+	ts.IgnoredRedirects = as.IgnoredRedirects
 	return ts
 }
 
@@ -771,10 +793,14 @@ func (as *AuthServer) TakeTransportStats() TransportStats {
 		LastUsed:    as.LastUsed,
 		Failed:      as.FailedCounters,
 		Truncated:   as.TruncatedCount,
+		Redirected:  as.RedirectedCounters,
+
+		IgnoredRedirects: as.IgnoredRedirects,
 	}
 	as.TransportCounters, as.UsedCounters, as.LastUsed, as.FailedCounters = nil, nil, nil, nil
 	as.UsedByClass = [NumTrafficClasses]map[core.Transport]uint64{}
 	as.TruncatedCount = 0
+	as.RedirectedCounters, as.IgnoredRedirects = nil, 0
 	return ts
 }
 
@@ -820,6 +846,12 @@ func (as *AuthServer) PromoteConnMode(target ConnMode) {
 // IsAddrXportAvailable returns true if the (address, transport) tuple is not
 // in backoff (or its backoff has expired). Thread-safe.
 func (as *AuthServer) IsAddrXportAvailable(addr string, t core.Transport) bool {
+	return as.IsEndpointAddrAvailable(addr, 0, t)
+}
+
+// IsEndpointAddrAvailable is IsAddrXportAvailable for an address at a port:
+// an address of a redirected endpoint (AddrXport). Thread-safe.
+func (as *AuthServer) IsEndpointAddrAvailable(addr string, port uint16, t core.Transport) bool {
 	if as == nil {
 		return false
 	}
@@ -828,7 +860,7 @@ func (as *AuthServer) IsAddrXportAvailable(addr string, t core.Transport) bool {
 	if as.AddressBackoffs == nil {
 		return true
 	}
-	backoff, exists := as.AddressBackoffs[AddrXport{Addr: addr, Transport: t}]
+	backoff, exists := as.AddressBackoffs[AddrXport{Addr: addr, Port: port, Transport: t}]
 	if !exists {
 		return true
 	}
@@ -871,6 +903,12 @@ func categorizeError(err error, prev *AddressBackoff) time.Duration {
 // schedule based on the previous failure count for this tuple. If as.Debug is
 // true, the error message is stored in LastError. Thread-safe.
 func (as *AuthServer) RecordAddressFailure(addr string, t core.Transport, err error) {
+	as.RecordEndpointAddrFailure(addr, 0, t, err)
+}
+
+// RecordEndpointAddrFailure is RecordAddressFailure for an address at a port
+// (AddrXport). Thread-safe.
+func (as *AuthServer) RecordEndpointAddrFailure(addr string, port uint16, t core.Transport, err error) {
 	if as == nil {
 		return
 	}
@@ -879,7 +917,7 @@ func (as *AuthServer) RecordAddressFailure(addr string, t core.Transport, err er
 	if as.AddressBackoffs == nil {
 		as.AddressBackoffs = make(map[AddrXport]*AddressBackoff)
 	}
-	key := AddrXport{Addr: addr, Transport: t}
+	key := AddrXport{Addr: addr, Port: port, Transport: t}
 	backoff, exists := as.AddressBackoffs[key]
 	errMsg := ""
 	if as.Debug && err != nil {
@@ -952,13 +990,19 @@ func (as *AuthServer) RecordAddressFailureForRcode(addr string, t core.Transport
 // RecordAddressSuccess clears any backoff for the given (address, transport)
 // tuple. Thread-safe.
 func (as *AuthServer) RecordAddressSuccess(addr string, t core.Transport) {
+	as.RecordEndpointAddrSuccess(addr, 0, t)
+}
+
+// RecordEndpointAddrSuccess is RecordAddressSuccess for an address at a port
+// (AddrXport). Thread-safe.
+func (as *AuthServer) RecordEndpointAddrSuccess(addr string, port uint16, t core.Transport) {
 	if as == nil {
 		return
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.AddressBackoffs != nil {
-		delete(as.AddressBackoffs, AddrXport{Addr: addr, Transport: t})
+		delete(as.AddressBackoffs, AddrXport{Addr: addr, Port: port, Transport: t})
 	}
 }
 
@@ -978,6 +1022,12 @@ const rttDecayFactor = 0.98
 // RecordRTT folds a new observation into the running RTT estimate for the
 // given (address, transport). Non-positive rtts are ignored. Thread-safe.
 func (as *AuthServer) RecordRTT(addr string, t core.Transport, rtt time.Duration) {
+	as.RecordEndpointAddrRTT(addr, 0, t, rtt)
+}
+
+// RecordEndpointAddrRTT is RecordRTT for an address at a port (AddrXport).
+// Thread-safe.
+func (as *AuthServer) RecordEndpointAddrRTT(addr string, port uint16, t core.Transport, rtt time.Duration) {
 	if as == nil || rtt <= 0 {
 		return
 	}
@@ -986,7 +1036,7 @@ func (as *AuthServer) RecordRTT(addr string, t core.Transport, rtt time.Duration
 	if as.RTTEstimates == nil {
 		as.RTTEstimates = make(map[AddrXport]*RTTEstimate)
 	}
-	key := AddrXport{Addr: addr, Transport: t}
+	key := AddrXport{Addr: addr, Port: port, Transport: t}
 	r, ok := as.RTTEstimates[key]
 	if !ok {
 		r = &RTTEstimate{EMA: rtt, Samples: 1}
@@ -1025,12 +1075,18 @@ func (as *AuthServer) RecordRTT(addr string, t core.Transport, rtt time.Duration
 // active BackoffPolicy.MaxFailure are treated as expired (ok=false) so the
 // sort path re-probes them. Thread-safe.
 func (as *AuthServer) GetRTT(addr string, t core.Transport) (time.Duration, bool) {
+	return as.GetEndpointAddrRTT(addr, 0, t)
+}
+
+// GetEndpointAddrRTT is GetRTT for an address at a port (AddrXport).
+// Thread-safe.
+func (as *AuthServer) GetEndpointAddrRTT(addr string, port uint16, t core.Transport) (time.Duration, bool) {
 	if as == nil {
 		return 0, false
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	r, ok := as.RTTEstimates[AddrXport{Addr: addr, Transport: t}]
+	r, ok := as.RTTEstimates[AddrXport{Addr: addr, Port: port, Transport: t}]
 	if !ok {
 		return 0, false
 	}

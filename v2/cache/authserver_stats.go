@@ -51,6 +51,10 @@ type ReceivedSignal struct {
 	// entered: port= does not move cleartext off 53, and it does not advertise
 	// another cleartext listener.
 	Ports map[core.Transport]uint16
+	// Targets is the TargetName, other than ".", of the record each transport
+	// was taken from (endpoint.go). Only a record whose whole path validated
+	// Secure gives one; Do53 is never entered.
+	Targets map[core.Transport]string
 	// Via is where the signal arrived (SignalViaReferral, SignalViaResponse,
 	// SignalViaLookup). Empty for a signal that did not come from an SVCB
 	// RRset: a TSYNC, a stub's configuration, an operator's override.
@@ -79,7 +83,8 @@ func (r *ReceivedSignal) clone() *ReceivedSignal {
 	if r.Path != nil {
 		path = append([]SignalHop(nil), r.Path...)
 	}
-	return &ReceivedSignal{Source: r.Source, Weights: copyMap(r.Weights), Ports: copyMap(r.Ports), Via: r.Via, Path: path}
+	return &ReceivedSignal{Source: r.Source, Weights: copyMap(r.Weights), Ports: copyMap(r.Ports), Targets: copyMap(r.Targets),
+		Via: r.Via, Path: path}
 }
 
 // AuthServerStats is one AuthServer instance's transport-usage counters, with

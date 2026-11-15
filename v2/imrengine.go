@@ -61,6 +61,9 @@ type Imr struct {
 	// see W9.
 	TransportSignalDiscovery *cache.DiscoveryTracker
 	TLSADiscovery            *cache.DiscoveryTracker
+	// endpointAddrs holds the addresses of the targets transport signals
+	// redirect to, and the lookups of them in flight (oots_endpoints.go).
+	endpointAddrs endpointAddrTracker
 	// zones holds the configured forward table and stub zones as one
 	// immutable snapshot; ReloadZones swaps the pointer (#436). Read it
 	// through ForwardZones()/StubZones(), never by reaching in: a query

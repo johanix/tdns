@@ -33,7 +33,15 @@ type ImrAuthTransportsRow struct {
 	Signal       map[string]uint8  `json:"signal,omitempty"`        // the signal as given: only the transports it named. Absent: none
 	SignalSource string            `json:"signal_source,omitempty"` // "oots", "alpn", "config" (a stub), "operator" (set server transport)
 	SignalPorts  map[string]uint16 `json:"signal_ports,omitempty"`  // non-default port per transport the signal named. Do53 is never present
-	Counts       map[string]uint64 `json:"counts"`                  // answers carried, by actual wire transport
+	// SignalTargets is the host other than the server itself that a validated
+	// signal record sent each transport to. Do53 is never present.
+	SignalTargets map[string]string `json:"signal_targets,omitempty"`
+	// Redirected is the part of Counts carried by such a target.
+	Redirected map[string]uint64 `json:"redirected,omitempty"`
+	// IgnoredRedirects counts signal records with a target ignored because
+	// their path did not validate Secure.
+	IgnoredRedirects uint64            `json:"ignored_redirects,omitempty"`
+	Counts           map[string]uint64 `json:"counts"` // answers carried, by actual wire transport
 	// ByPrivacy splits Counts by whose query it was: a client's PRIVACY level
 	// ("none", "opportunistic", "strict") or "internal" (the resolver's own).
 	// Only the classes with answers are present.
@@ -108,6 +116,14 @@ func ImrAuthTransportsSnapshot(rc *cache.RRsetCacheT, filter []string, zone stri
 			row.Signal = transportWeightsToStrings(s.Received.Weights)
 			row.SignalSource = s.Received.Source
 			row.SignalPorts = transportPortsToStrings(s.Received.Ports)
+			row.SignalTargets = transportTargetsToStrings(s.Received.Targets)
+		}
+		row.IgnoredRedirects = s.IgnoredRedirects
+		for t, c := range s.Redirected {
+			if row.Redirected == nil {
+				row.Redirected = map[string]uint64{}
+			}
+			row.Redirected[authTransportColumn(t)] += c
 		}
 		for _, level := range []edns0.PrivacyLevel{edns0.PrivacyNone, edns0.PrivacyOpportunistic, edns0.PrivacyStrict} {
 			if shares := expectedShares(s.Transports, s.Weights, level); shares != nil {
@@ -169,6 +185,22 @@ func authTransportColumn(t core.Transport) string {
 
 // transportPortsToStrings converts a transport-keyed port map to a name-keyed
 // one for the stats row. A zero port is omitted: it means the usual port.
+// transportTargetsToStrings is m keyed by transport name; nil when empty.
+func transportTargetsToStrings(m map[core.Transport]string) map[string]string {
+	var out map[string]string
+	for t, target := range m {
+		name := transportName(t)
+		if name == "" || target == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[name] = target
+	}
+	return out
+}
+
 func transportPortsToStrings(m map[core.Transport]uint16) map[string]uint16 {
 	if len(m) == 0 {
 		return nil
