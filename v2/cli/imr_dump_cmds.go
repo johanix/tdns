@@ -140,6 +140,9 @@ var dumpAuthServersCmd = &cobra.Command{
 					if ports := formatAuthServerPorts(server); ports != "" {
 						fmt.Printf("    Signal ports: %s\n", ports)
 					}
+					if state := formatSignalValidation(server); state != "" {
+						fmt.Printf("    Signal validation: %s\n", state)
+					}
 					fmt.Printf("    Connection mode: %s\n", conn)
 					if len(server.TransportSignal) > 0 {
 						fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)
@@ -829,6 +832,19 @@ func validationStateString(state cache.ValidationState) string {
 	return "[unset]"
 }
 
+// formatSignalValidation renders where the server's signal arrived and the
+// validation state of the RRsets it was read from: the whole path's state,
+// then each RRset's, as in "secure (via referral: _dns.ns.example. secure)".
+// Empty when the signal did not come from an SVCB RRset (none, a TSYNC, a
+// stub's configuration, an operator's override).
+func formatSignalValidation(server *cache.AuthServer) string {
+	rec := server.GetReceivedSignal()
+	if rec == nil || rec.Via == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s (via %s: %s)", cache.SignalStateString(rec.PathState()), rec.Via, cache.FormatSignalPath(rec.Path))
+}
+
 // formatAuthServerPorts renders the non-default ports the latest signal
 // assigned, in transport order. Empty when every transport keeps its usual port.
 func formatAuthServerPorts(server *cache.AuthServer) string {
@@ -872,6 +888,9 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 	fmt.Printf("    Transports: %s\n", formatTransportWeights(server))
 	if ports := formatAuthServerPorts(server); ports != "" {
 		fmt.Printf("    Signal ports: %s\n", ports)
+	}
+	if state := formatSignalValidation(server); state != "" {
+		fmt.Printf("    Signal validation: %s\n", state)
 	}
 	fmt.Printf("    Connection mode: %s\n", server.ConnectionMode().String())
 	if len(server.TransportSignal) > 0 {
