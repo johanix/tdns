@@ -358,6 +358,52 @@ ns1.` + z + `	3600	IN	A	127.0.0.1
 	})
 }
 
+// The pass stores a signal into the working set; it reaches the zone file
+// only when the zone is next written. A restart before that loads an earlier
+// signal of the pass's, not the last one, and that is still the pass's own:
+// replaced with what the configuration gives, not kept as the operator's.
+func TestAnEarlierSignalOfThePassIsStillItsOwnAfterARestart(t *testing.T) {
+	const z = "unwritten.sig.example."
+	const body = z + `	3600	IN	NS	ns1.` + z + `
+ns1.` + z + `	3600	IN	A	127.0.0.1
+`
+	kdb := newTestKeyDB(t)
+	// run starts a process with the zone file holding persisted and the
+	// configuration giving signal, and returns the signal it serves.
+	run := func(persisted []string, signal string) ([]dns.RR, *syncBuffer) {
+		logs := captureSignalLog(t)
+		zd, conf := signalTestZone(t, z, body+strings.Join(persisted, "\n")+"\n", "127.0.0.1:53")
+		zd.KeyDB = kdb
+		conf.Service.Identities = []string{"ns1." + z}
+		conf.Service.Transport.Signal = signal
+		if err := zd.CreateTransportSignalRRs(conf); err != nil {
+			t.Fatal(err)
+		}
+		return svcbRecords(zd, "_dns.ns1."+z), logs
+	}
+	// The first process stores "dot:50", and the zone is written with it.
+	first, _ := run(nil, "dot:50")
+	var written []string
+	for _, rr := range first {
+		written = append(written, rr.String())
+	}
+	// The second stores "dot:20"; the zone is not written again.
+	if got, _ := run(written, "dot:20"); len(got) != 1 || !strings.Contains(got[0].String(), "dot:20") {
+		t.Fatalf("the second process did not replace the pass's signal: %v", got)
+	}
+	// The third loads "dot:50" from the file once more.
+	got, logs := run(written, "dot:20")
+	if len(got) != 1 || !strings.Contains(got[0].String(), "dot:20") {
+		t.Fatalf("an earlier signal of the pass's was not replaced after a restart: %v", got)
+	}
+	if strings.Contains(logs.String(), "leaving the operator's") {
+		t.Fatalf("an earlier signal of the pass's was taken for the operator's:\n%s", logs.String())
+	}
+	if d, _, _ := kdb.GetTransportSignalStored(z, "_dns.ns1."+z); len(d) != 2 {
+		t.Fatalf("the record should hold the last digest and the one before it: %v", d)
+	}
+}
+
 // An RRset the operator now owns is forgotten: the record goes, so the pass
 // does not later take that RRset, or an identical one, for its own.
 func TestTheSignalPassForgetsAnOwnerTheOperatorTookOver(t *testing.T) {
@@ -428,6 +474,43 @@ ns1.example.	3600	IN	A	127.0.0.1
 	}
 }
 
+// A reload whose file now holds an operator's CNAME at the owner where the
+// pass had stored its signal: the old signal is not carried over beside it
+// (RFC 1034 section 3.6.2). The CNAME alone is served.
+func TestAReloadDoesNotCarryTheOldSignalBesideAnOperatorsCNAME(t *testing.T) {
+	const head = `example.	3600	IN	SOA	ns1.example. hostmaster.example. %d 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+ns1.example.	3600	IN	A	127.0.0.1
+`
+	zd := reloadZone(t, newTestKeyDB(t), fmt.Sprintf(head, 1))
+	zd.Options[OptAddTransportSignal] = true
+	prevSVCB, prevListeners := Globals.ServerSVCB, Conf.Listeners.Addresses
+	Globals.ServerSVCB = &dns.SVCB{Hdr: dns.RR_Header{Name: "_dns.server.example.", Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 300}, Priority: 1, Target: "."}
+	Conf.Listeners.Addresses = []string{"127.0.0.1:53"}
+	t.Cleanup(func() { Globals.ServerSVCB, Conf.Listeners.Addresses = prevSVCB, prevListeners })
+	conf := &Config{}
+	conf.Service.Transport.Type = "svcb"
+	conf.Service.Identities = []string{"ns1.example."}
+	conf.Service.Transport.Signal = "dot:50"
+	conf.Listeners.Addresses = Conf.Listeners.Addresses
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if got := svcbRecords(zd, "_dns.ns1.example."); len(got) != 1 {
+		t.Fatalf("the pass did not store its signal: %v", got)
+	}
+
+	operatorEdit(t, zd, fmt.Sprintf(head, 2)+`_dns.ns1.example.	300	IN	CNAME	_dns.ns.provider.example.
+`)
+	if _, err := zd.Refresh(context.Background(), false, false, true, conf); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	od := getOwnerFrom(zd.publishedSnapshot(), "_dns.ns1.example.")
+	if od == nil || ownerRRsetCount(od) != 1 || len(od.RRtypes.GetOnlyRRSet(dns.TypeCNAME).RRs) != 1 {
+		t.Fatalf("the reload carried the old signal beside the operator's CNAME: %v", od)
+	}
+}
+
 // A signal is read at its home, the most specific zone hosted here that
 // holds it: under a co-hosted child, the child's RRset, not a copy below the
 // parent's zone cut.
@@ -447,5 +530,28 @@ _dns.`+ns+`	300	IN	SVCB	1 . oots="dot:2"
 	got := zp.collectSignalRRsets(zp.publishedSnapshot())
 	if len(got) != 1 || len(got[0].RRs) != 1 || !strings.Contains(got[0].RRs[0].String(), "dot:2") {
 		t.Fatalf("the parent's responses did not carry the child's signal: %v", got)
+	}
+}
+
+// Below a zone cut to a child not hosted here the parent holds only glue and
+// occluded data. A signal stored there is not served: not in the parent's
+// own responses, and not in those of another zone that names the name.
+func TestASignalBelowACutToAChildNotHostedIsNotServed(t *testing.T) {
+	noIdentities(t)
+	const parent = "cut.sig.example."
+	const child = "child." + parent
+	const ns = "ns1." + child
+	const cz = "cut-customer.sig.example."
+	zp, _ := signalTestZone(t, parent, parent+`	3600	IN	NS	`+ns+`
+`+child+`	3600	IN	NS	`+ns+`
+`+ns+`	3600	IN	A	192.0.2.1
+_dns.`+ns+`	300	IN	SVCB	1 . oots="dot:1"
+`, "127.0.0.1:53")
+	customer, _ := signalTestZone(t, cz, cz+`	3600	IN	NS	`+ns+`
+`, "127.0.0.1:53")
+	for _, zd := range []*ZoneData{zp, customer} {
+		if got := zd.collectSignalRRsets(zd.publishedSnapshot()); len(got) != 0 {
+			t.Fatalf("%s: a signal below the cut to %s was served: %v", zd.ZoneName, child, got)
+		}
 	}
 }
