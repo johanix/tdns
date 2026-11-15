@@ -1140,7 +1140,7 @@ from who the server is. Three rules:
      identical to what the configuration gives, and it logs that it left
      them alone.
    - It withdraws a signal it stored for a name that is no longer an
-     identity.
+     identity, again only where it is the zone's primary and signer.
    - A listen address decides nothing. Behind NAT, anycast or a load
      balancer, list the name in `service.identities`.
 3. **tdns-auth never writes into a customer zone**, whatever is or is not
@@ -1148,6 +1148,9 @@ from who the server is. Three rules:
    operator's own; every other zone is a customer zone. A customer zone
    whose NS is one of the identities gets the signal from the identity's
    home zone, by rule 1.
+
+An `_dns.<name>` below a zone cut to a child that is not served here is
+occluded data in the parent, and is never served.
 
 **From synthesized to provisioned.** Synthesis for identities is a stopgap;
 the direction is signals provisioned in the zones. `tdns-cli auth config

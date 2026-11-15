@@ -2276,13 +2276,15 @@ func (zd *ZoneData) repopulateWorkingSetLocked(dynamicRRs []*core.RRset) {
 		}
 
 		existing, exists := owner.RRtypes.Get(rrset.RRtype)
-		if exists && rrset.RRtype == dns.TypeSVCB && len(existing.RRs) > 0 {
+		if rrset.RRtype == dns.TypeSVCB && ownerRRsetCount(owner) > 0 {
 			// The only SVCB RRsets carried are the transport signal's
-			// (CollectDynamicRRs, section 3). One already in the fresh
-			// data at that owner is the operator's: the carried copy is
-			// dropped, not merged into it (design 2026-11-14 section 5),
-			// and the start-up pass leaves the operator's RRset alone.
-			lg.Debug("RepopulateDynamicRRs: the fresh data holds an SVCB RRset at the signal owner; not carrying the old signal over it",
+			// (CollectDynamicRRs, section 3). Records already in the fresh
+			// data at that owner, of any type, are the operator's: the
+			// carried copy is dropped, not merged into an SVCB RRset there
+			// (design 2026-11-14 section 5) nor set beside a CNAME (RFC 1034
+			// section 3.6.2), and the start-up pass leaves the operator's
+			// records alone.
+			lg.Debug("RepopulateDynamicRRs: the fresh data holds records at the signal owner; not carrying the old signal over them",
 				"owner", rrset.Name, "zone", zd.ZoneName)
 			continue
 		}

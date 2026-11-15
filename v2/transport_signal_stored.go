@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -27,6 +28,18 @@ import (
 // a KeyDB the record lasts as long as the process. Matching what the
 // configuration gives is never taken as the pass's own: an operator may
 // write exactly that.
+//
+// The record keeps the digests of the signals the pass stored before the
+// last one, too. The pass stores a signal into the working set; it reaches
+// the zone file only when the zone is next written (WriteZoneToFile writes
+// every RRset), which may be much later or never. A restart in between
+// loads whatever signal the file holds, which is then an earlier one of the
+// pass's, not the last. Known by the last digest alone, it would be taken
+// for the operator's and kept for good. Up to signalStoredKeep digests are
+// kept, newest first.
+
+// signalStoredKeep is how many digests the record keeps per owner.
+const signalStoredKeep = 8
 
 // signalDigest is a digest of an RRset's records, TTL and order aside, and
 // names compared without case, as dns.IsDuplicate compares them.
@@ -52,29 +65,36 @@ func (zd *ZoneData) signalRecordDB() *KeyDB {
 }
 
 // noteSignalStored records that the signal pass stored rrs at owner, in
-// memory and in the KeyDB. A failed write is logged and the in-memory record
-// stands: the signal is then known as the pass's own until the next restart.
+// memory and in the KeyDB, ahead of the digests of what it stored there
+// before. A failed write is logged and the in-memory record stands: the
+// signal is then known as the pass's own until the next restart.
 func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 	owner = core.CanonicalizeName(owner)
 	digest := signalDigest(rrs)
+	digests := []string{digest}
+	for _, d := range zd.signalStoredDigests(owner) {
+		if d != digest && len(digests) < signalStoredKeep {
+			digests = append(digests, d)
+		}
+	}
 	zd.signalStoredMu.Lock()
 	if zd.signalStored == nil {
-		zd.signalStored = map[string]string{}
+		zd.signalStored = map[string][]string{}
 	}
-	zd.signalStored[owner] = digest
+	zd.signalStored[owner] = digests
 	zd.signalStoredMu.Unlock()
 	kdb := zd.signalRecordDB()
 	if kdb == nil {
 		return
 	}
-	if err := kdb.SetTransportSignalStored(zd.ZoneName, owner, digest); err != nil {
+	if err := kdb.SetTransportSignalStored(zd.ZoneName, owner, digests); err != nil {
 		lgDns.Warn("noteSignalStored: could not record the stored signal; after a restart it may be taken for the operator's",
 			"zone", zd.ZoneName, "owner", owner, "error", err)
 	}
 }
 
-// forgetSignalStored drops the record for owner: the RRset there is the
-// operator's now.
+// forgetSignalStored drops the record for owner, every digest in it: the
+// RRset there is the operator's now.
 func (zd *ZoneData) forgetSignalStored(owner string) {
 	owner = core.CanonicalizeName(owner)
 	zd.signalStoredMu.Lock()
@@ -90,25 +110,35 @@ func (zd *ZoneData) forgetSignalStored(owner string) {
 	}
 }
 
-// signalStoredByPass reports whether rrs at owner are exactly what the signal
-// pass last stored there. An RRset the operator has since replaced, by an
-// update or in the zone file, is not. The in-memory record is asked first,
-// then the KeyDB, which holds what an earlier process stored.
-func (zd *ZoneData) signalStoredByPass(owner string, rrs []dns.RR) bool {
-	owner = core.CanonicalizeName(owner)
+// signalStoredDigests returns the digests the pass recorded for owner, the
+// last first: the in-memory record, or else the KeyDB's, which holds what
+// an earlier process stored. nil when there is none or it cannot be read.
+func (zd *ZoneData) signalStoredDigests(owner string) []string {
 	zd.signalStoredMu.Lock()
-	digest, ok := zd.signalStored[owner]
+	digests, ok := zd.signalStored[owner]
 	zd.signalStoredMu.Unlock()
-	if kdb := zd.signalRecordDB(); !ok && kdb != nil {
-		var err error
-		digest, ok, err = kdb.GetTransportSignalStored(zd.ZoneName, owner)
-		if err != nil {
-			lgDns.Warn("signalStoredByPass: could not read the stored-signal record",
-				"zone", zd.ZoneName, "owner", owner, "error", err)
-			return false
-		}
+	if ok {
+		return digests
 	}
-	return ok && digest == signalDigest(rrs)
+	kdb := zd.signalRecordDB()
+	if kdb == nil {
+		return nil
+	}
+	digests, _, err := kdb.GetTransportSignalStored(zd.ZoneName, owner)
+	if err != nil {
+		lgDns.Warn("signalStoredDigests: could not read the stored-signal record",
+			"zone", zd.ZoneName, "owner", owner, "error", err)
+		return nil
+	}
+	return digests
+}
+
+// signalStoredByPass reports whether rrs at owner are exactly a signal the
+// pass stored there: the last one, or one before it that a zone written in
+// between may hold. An RRset the operator has since replaced, by an update
+// or in the zone file, is not.
+func (zd *ZoneData) signalStoredByPass(owner string, rrs []dns.RR) bool {
+	return slices.Contains(zd.signalStoredDigests(core.CanonicalizeName(owner)), signalDigest(rrs))
 }
 
 // signalStoredOwners lists the owners the pass has a record of storing a
@@ -140,41 +170,46 @@ func (zd *ZoneData) signalStoredOwners() []string {
 	return out
 }
 
-// SetTransportSignalStored records the digest of the signal stored at owner.
-func (kdb *KeyDB) SetTransportSignalStored(zone, owner, digest string) error {
+// SetTransportSignalStored records the digests of the signals stored at
+// owner, the last first: the last in digest, the earlier ones in earlier,
+// separated by spaces.
+func (kdb *KeyDB) SetTransportSignalStored(zone, owner string, digests []string) error {
 	if kdb == nil || kdb.DB == nil {
 		return fmt.Errorf("SetTransportSignalStored: no database")
+	}
+	if len(digests) == 0 {
+		return fmt.Errorf("SetTransportSignalStored: zone %s owner %s: no digest", zone, owner)
 	}
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 	_, err := kdb.DB.Exec(`
-INSERT OR REPLACE INTO TransportSignalStored (zone, owner, digest, updated_at)
-VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
-		dns.Fqdn(zone), core.CanonicalizeName(owner), digest)
+INSERT OR REPLACE INTO TransportSignalStored (zone, owner, digest, earlier, updated_at)
+VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		dns.Fqdn(zone), core.CanonicalizeName(owner), digests[0], strings.Join(digests[1:], " "))
 	if err != nil {
 		return fmt.Errorf("SetTransportSignalStored: zone %s owner %s: %v", zone, owner, err)
 	}
 	return nil
 }
 
-// GetTransportSignalStored returns the recorded digest for owner, and
-// whether there is one. No record is not an error.
-func (kdb *KeyDB) GetTransportSignalStored(zone, owner string) (string, bool, error) {
+// GetTransportSignalStored returns the recorded digests for owner, the last
+// first, and whether there is a record. No record is not an error.
+func (kdb *KeyDB) GetTransportSignalStored(zone, owner string) ([]string, bool, error) {
 	if kdb == nil || kdb.DB == nil {
-		return "", false, fmt.Errorf("GetTransportSignalStored: no database")
+		return nil, false, fmt.Errorf("GetTransportSignalStored: no database")
 	}
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
-	var digest string
-	err := kdb.DB.QueryRow(`SELECT digest FROM TransportSignalStored WHERE zone=? AND owner=?`,
-		dns.Fqdn(zone), core.CanonicalizeName(owner)).Scan(&digest)
+	var digest, earlier string
+	err := kdb.DB.QueryRow(`SELECT digest, earlier FROM TransportSignalStored WHERE zone=? AND owner=?`,
+		dns.Fqdn(zone), core.CanonicalizeName(owner)).Scan(&digest, &earlier)
 	if err == sql.ErrNoRows {
-		return "", false, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("GetTransportSignalStored: zone %s owner %s: %v", zone, owner, err)
+		return nil, false, fmt.Errorf("GetTransportSignalStored: zone %s owner %s: %v", zone, owner, err)
 	}
-	return digest, true, nil
+	return append([]string{digest}, strings.Fields(earlier)...), true, nil
 }
 
 // ListTransportSignalStored returns the owners with a record in zone.
