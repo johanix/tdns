@@ -202,16 +202,35 @@ service:
 		t.Errorf("ports %v, want %v", got, want)
 	}
 
-	if _, _, err := decode(t, `
+	// A value that does not fit, or has a fraction, is refused: the decoder
+	// would truncate it into another port. A float with no fraction is the
+	// port it names.
+	for _, tc := range []struct {
+		value string
+		want  uint16 // 0: refused
+	}{
+		{"70000", 0},
+		{"70000.0", 0},
+		{"1234.5", 0},
+		{"-1", 0},
+		{"1234.0", 1234},
+	} {
+		conf, _, err := decode(t, `
 service:
   name: T
   transport:
     type: svcb
     signal: "dot:10"
     ports:
-      dot: 70000
-`); err == nil || !strings.Contains(err.Error(), "70000") {
-		t.Errorf("port 70000: err %v, want a refusal", err)
+      dot: `+tc.value+"\n")
+		switch {
+		case tc.want == 0 && (err == nil || !strings.Contains(err.Error(), "is not a port")):
+			t.Errorf("port %s: err %v, want a refusal", tc.value, err)
+		case tc.want != 0 && err != nil:
+			t.Errorf("port %s: %v", tc.value, err)
+		case tc.want != 0 && conf.Service.Transport.Ports["dot"] != tc.want:
+			t.Errorf("port %s decoded as %d, want %d", tc.value, conf.Service.Transport.Ports["dot"], tc.want)
+		}
 	}
 
 	_, md, err := decode(t, `

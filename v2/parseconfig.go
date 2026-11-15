@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -903,11 +904,11 @@ func validateTransportSignal(t TransportConf, listen ListenerPortsConf) ([]strin
 	return warnings, nil
 }
 
-// portMapRangeHook refuses a value outside 0-65535 in a map of ports before
-// the decoder narrows it: mapstructure stores an int into a uint16 by
-// truncating, so 70000 would publish port 4464. It looks only at
-// map[string]uint16 targets, of which service.transport.ports is the one in
-// Config.
+// portMapRangeHook refuses a value outside 0-65535, or with a fraction, in a
+// map of ports before the decoder narrows it: mapstructure stores an int or a
+// float into a uint16 by truncating, so 70000 or 70000.0 would publish port
+// 4464, and 1234.5 port 1234. It looks only at map[string]uint16 targets, of
+// which service.transport.ports is the one in Config.
 func portMapRangeHook() mapstructure.DecodeHookFuncType {
 	target := reflect.TypeOf(map[string]uint16(nil))
 	return func(_ reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
@@ -928,6 +929,10 @@ func portMapRangeHook() mapstructure.DecodeHookFuncType {
 			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 				if n := rv.Uint(); n > 65535 {
 					return nil, fmt.Errorf("%s: %d is not a port (1-65535)", k, n)
+				}
+			case reflect.Float32, reflect.Float64:
+				if f := rv.Float(); f != math.Trunc(f) || f < 0 || f > 65535 {
+					return nil, fmt.Errorf("%s: %v is not a port (1-65535)", k, v)
 				}
 			}
 		}
