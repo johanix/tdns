@@ -45,12 +45,16 @@ signal the server gave (OOTS), so that the two can be compared.
 OOTS is the signal as the server gave it: only the transports it named, with
 their weights. "none" means it gave none. "alpn:" is an SVCB with an ALPN list
 and no weights (each counts as 100), and "set:" an operator's override (imr set
-server transport). A stub's row shows its configured signal. A weight of 1 is
-marked (ignored): selection uses only weights above 1. Nor is the do53 weight
-a share: Do53 gets what the encrypted weights leave of 100. A port the signal
-assigns follows that transport (dot:30 port:1234). Do53 never has one:
-cleartext stays on port 53. A record's port applies to every encrypted
-transport the record names.
+server transport). A stub's row shows its configured signal. Cleartext is udp
+and tcp, apart; an older signal's do53:N is shown as what it means, udp:N
+tcp:N, and an explicit udp or tcp wins over it. A weight of 1 is marked
+(ignored): selection uses only weights above 1. Nor are the udp and tcp
+weights shares: Do53 gets what the encrypted weights leave of 100, and tcp
+only caps the TCP the resolver would choose on its own, which is none (TCP
+after truncation, or forced, ignores it). A port the signal assigns follows
+that transport (dot:30 port:1234). udp and tcp never have one: cleartext stays
+on port 53. A record's port applies to every encrypted transport the record
+names.
 
 --pct shows each transport's share of the row's answers instead of a count,
 and adds EXPECTED: the shares selection gives a query without PRIVACY (with
@@ -286,7 +290,7 @@ func formatOOTSSignal(signal map[string]uint8, ports map[string]uint16, source s
 		if ports[t] != 0 {
 			part += fmt.Sprintf(" port:%d", ports[t])
 		}
-		if t != "do53" && w == 1 {
+		if w == 1 && !cleartextToken(t) {
 			part += " (ignored)"
 		}
 		parts = append(parts, part)
@@ -303,6 +307,13 @@ func formatOOTSSignal(signal map[string]uint8, ports map[string]uint16, source s
 // "-" when the server cannot carry such a query; empty for the resolver's own
 // lookups, which follow no one client's level, and for a resolver that
 // predates EXPECTED.
+// cleartextToken reports whether t names cleartext DNS: udp, tcp, or the do53
+// transport. Their weights are not shares, so a weight of 1 is not marked
+// (ignored).
+func cleartextToken(t string) bool {
+	return t == "udp" || t == "tcp" || t == "do53"
+}
+
 func formatExpected(expected map[string]map[string]uint8, level string) string {
 	if len(expected) == 0 || level == "internal" {
 		return ""

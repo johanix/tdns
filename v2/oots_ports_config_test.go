@@ -265,21 +265,21 @@ func TestTransportSignalConfigRoundTrip(t *testing.T) {
 	}{
 		{"no ports",
 			TransportConf{Type: "svcb", Signal: "doq:20,dot:10"},
-			"oots w=do53:100,doq:20,dot:10 p="},
+			"oots w=doq:20,dot:10,tcp:100,udp:100 p="},
 		{"every transport on a port",
 			TransportConf{Type: "svcb", Signal: "doh:5,doq:20,dot:10", Ports: map[string]uint16{"dot": 1234, "doq": 1235, "doh": 8443}},
-			"oots w=do53:100,doh:5,doq:20,dot:10 p=doh:8443,doq:1235,dot:1234"},
+			"oots w=doh:5,doq:20,dot:10,tcp:100,udp:100 p=doh:8443,doq:1235,dot:1234"},
 		{"DoH alone on a port",
 			TransportConf{Type: "svcb", Signal: "dot:10,doh:5", Ports: map[string]uint16{"doh": 8443}},
-			"oots w=do53:100,doh:5,dot:10 p=doh:8443"},
+			"oots w=doh:5,dot:10,tcp:100,udp:100 p=doh:8443"},
 		{"do53 at the operator's weight",
 			TransportConf{Type: "svcb", Signal: "do53:0,dot:10", Ports: map[string]uint16{"dot": 1234}},
-			"oots w=do53:0,dot:10 p=dot:1234"},
+			"oots w=dot:10,tcp:0,udp:0 p=dot:1234"},
 		// Only the record without a port names do53, so no default in a
 		// ported record can outrank the operator's do53:0.
 		{"do53:0 with every other transport on a port",
 			TransportConf{Type: "svcb", Signal: "do53:0,dot:30,doq:20", Ports: map[string]uint16{"dot": 1234, "doq": 1235}},
-			"oots w=do53:0,doq:20,dot:30 p=doq:1235,dot:1234"},
+			"oots w=doq:20,dot:30,tcp:0,udp:0 p=doq:1235,dot:1234"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var texts []string

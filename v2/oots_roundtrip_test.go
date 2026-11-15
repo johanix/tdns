@@ -109,7 +109,7 @@ func TestTSYNCPathStillParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TSYNC-style string: %v", err)
 	}
-	if m["doq"] != 40 || m["do53"] != 100 {
+	if m["doq"] != 40 || m["udp"] != 100 || m["tcp"] != 100 {
 		t.Errorf("map=%v", m)
 	}
 }

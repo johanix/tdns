@@ -11,10 +11,11 @@ import (
 )
 
 // ParseTransportString parses a transport string like "doq:30,dot:20" into a map.
-// - Keys are lower-cased and trimmed
-// - Values are clamped to [0,100] (values >100 become 100; never rejected)
-// - Duplicate keys are rejected
-// - Absence defaults (draft-johani-dnsop-svcb-oots): do53→100, others→0
+//   - Keys are lower-cased and trimmed
+//   - Values are clamped to [0,100] (values >100 become 100; never rejected)
+//   - Duplicate keys are rejected
+//   - Absence defaults and the do53 shorthand (ApplyTransportDefaults): udp and
+//     tcp 100, the others 0
 func ParseTransportString(s string) (map[string]uint8, error) {
 	transports, err := ParseTransportStringRaw(s)
 	if err != nil {
@@ -58,15 +59,25 @@ func ParseTransportStringRaw(s string) (map[string]uint8, error) {
 	return transports, nil
 }
 
-// ApplyTransportDefaults fills absence defaults from draft-johani-dnsop-svcb-oots:
-// missing do53 → 100; missing dot/doh/doq → 0. Explicit entries (including
-// do53:0) are left unchanged.
+// ApplyTransportDefaults reads a signal's weights the way selection does:
+//   - the do53 shorthand is expanded (ExpandDo53Shorthand), so the map names
+//     udp and tcp, never do53;
+//   - missing udp or tcp → 100. TCP is mandatory for a DNS server (RFC 7766),
+//     and a default of 0 would make every signal that predates the split claim
+//     there is none;
+//   - missing dot, doh or doq → 0.
+//
+// Explicit entries, udp:0 and tcp:0 included, are left unchanged. The
+// alternative-endpoint design, section 2.
 func ApplyTransportDefaults(m map[string]uint8) {
 	if m == nil {
 		return
 	}
-	if _, ok := m["do53"]; !ok {
-		m["do53"] = 100
+	ExpandDo53Shorthand(m)
+	for _, p := range []string{"udp", "tcp"} {
+		if _, ok := m[p]; !ok {
+			m[p] = 100
+		}
 	}
 	for _, p := range []string{"dot", "doh", "doq"} {
 		if _, ok := m[p]; !ok {
@@ -75,19 +86,50 @@ func ApplyTransportDefaults(m map[string]uint8) {
 	}
 }
 
+// ExpandDo53Shorthand rewrites m in place: a do53:N entry becomes udp:N and
+// tcp:N, and an explicit udp or tcp entry wins over it. do53 is the token the
+// split replaced. It is kept as a receive-only shorthand, so that an old
+// signal's do53:0 still reads as "send me none" rather than as the default
+// of 100. No absence defaults are applied.
+func ExpandDo53Shorthand(m map[string]uint8) {
+	w, ok := m["do53"]
+	if !ok {
+		return
+	}
+	delete(m, "do53")
+	for _, p := range []string{"udp", "tcp"} {
+		if _, explicit := m[p]; !explicit {
+			m[p] = w
+		}
+	}
+}
+
 // signalTokens are the oots tokens that transport selection acts on when a
 // signal is RECEIVED, whatever path it arrives by: the oots SvcParam of a
 // _dns SVCB, or the transport= string of a TSYNC. They are the transports the
-// resolver implements. A received signal may name others -- `udp` and `tcp`
-// from the token split, or a token not yet defined -- and the dns codec keeps
-// those on the wire, but they never reach selection. Until the token split is
-// built these four are the whole set.
+// resolver implements: udp and tcp (cleartext DNS, StringToTransport maps them
+// to TransportDo53 and TransportDo53TCP), dot, doh and doq, and do53, the
+// receive-only shorthand for udp and tcp (ExpandDo53Shorthand). A received
+// signal may name others, tokens not yet defined, and the dns codec keeps
+// those on the wire, but they never reach selection.
 //
 // This is deliberately not StringToTransport, which also accepts aliases for
-// operator input: its `tcp` maps to TransportDo53TCP, so a received `tcp:30`
-// would install a Do53TCP weight. Operator input (imr set, config stubs) keeps
-// using StringToTransport.
+// operator input (do53-tcp, DoT, ...). Operator input (imr set, config stubs)
+// keeps using StringToTransport.
 var signalTokens = map[string]bool{
+	"do53": true,
+	"udp":  true,
+	"tcp":  true,
+	"dot":  true,
+	"doh":  true,
+	"doq":  true,
+}
+
+// publishableTokens are the tokens a tdns publisher may emit
+// (ValidatePublishedTransportSignal). udp and tcp are received but not yet
+// published: a publisher emits a new token only once every tdns node that can
+// re-pack the record keeps it (the alternative-endpoint design, section 8).
+var publishableTokens = map[string]bool{
 	"do53": true,
 	"dot":  true,
 	"doh":  true,
@@ -128,10 +170,10 @@ func ParseReceivedTransportString(s string) (map[string]uint8, error) {
 
 // ValidatePublishedTransportSignal checks a transport signal this server is
 // about to PUBLISH (service.transport.signal): it must parse, and name only
-// signal tokens. A tdns publisher may not emit another token until every node
-// that can re-pack the record keeps it and every resolver ignores, rather than
-// misapplies, what it cannot honor (the alternative-endpoint design, tdns
-// #1043, section 8).
+// publishable tokens (publishableTokens). A tdns publisher may not emit another
+// token until every node that can re-pack the record keeps it and every
+// resolver ignores, rather than misapplies, what it cannot honor (the
+// alternative-endpoint design, tdns #1043, section 8).
 func ValidatePublishedTransportSignal(s string) error {
 	raw, err := ParseTransportStringRaw(s)
 	if err != nil {
@@ -139,25 +181,46 @@ func ValidatePublishedTransportSignal(s string) error {
 	}
 	var bad []string
 	for k := range raw {
-		if !IsSignalToken(k) {
+		if !publishableTokens[k] {
 			bad = append(bad, k)
 		}
 	}
 	if len(bad) > 0 {
 		sort.Strings(bad)
-		return fmt.Errorf("transport: %s not publishable (only %s until the token split)",
-			strings.Join(bad, ", "), signalTokenList())
+		return fmt.Errorf("transport: %s not publishable (only %s until the publisher emits the token split)",
+			strings.Join(bad, ", "), tokenList(publishableTokens))
 	}
 	return nil
 }
 
-// signalTokenList names the signal tokens, sorted, for messages: built from
-// signalTokens so that a message cannot name another set than the filter uses.
-func signalTokenList() string {
-	toks := make([]string, 0, len(signalTokens))
-	for k := range signalTokens {
+// tokenList names a token set, sorted, for messages: built from the set itself
+// so that a message cannot name another set than the check uses.
+func tokenList(set map[string]bool) string {
+	toks := make([]string, 0, len(set))
+	for k := range set {
 		toks = append(toks, k)
 	}
 	sort.Strings(toks)
 	return strings.Join(toks, ", ")
+}
+
+// TransportToSignalToken is the oots token for each transport, for showing a
+// signal in the tokens it is written in: TransportDo53 is udp (UDP, retried
+// over TCP after truncation) and TransportDo53TCP is tcp. The transports keep
+// their names in TransportToString.
+var TransportToSignalToken = map[Transport]string{
+	TransportDo53:    "udp",
+	TransportDo53TCP: "tcp",
+	TransportDoT:     "dot",
+	TransportDoH:     "doh",
+	TransportDoQ:     "doq",
+}
+
+// SelectableTransport reports whether transport selection may choose t on its
+// own, and so whether t is entered among a server's transports. TransportDo53TCP
+// is not: a tcp weight caps only the TCP a resolver chooses on its own, and
+// tdns chooses none. Its TCP goes out after truncation or when forced, which
+// no weight gates, tcp:0 included. Its weight is kept for the stats.
+func SelectableTransport(t Transport) bool {
+	return t != TransportDo53TCP
 }

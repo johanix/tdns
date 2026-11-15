@@ -64,9 +64,10 @@ func TestImrAuthTransportsSnapshot(t *testing.T) {
 	if ns1.Total != 3 || ns1.FailedTotal != 2 || ns1.Failed["doq"] != 1 || ns1.Truncated != 1 {
 		t.Errorf("ns1 total %d failed %d (%v) truncated %d, want 3, 2 (doq 1), 1", ns1.Total, ns1.FailedTotal, ns1.Failed, ns1.Truncated)
 	}
-	// The signal as received: what the server named, not the defaults.
-	if len(ns1.Signal) != 2 || ns1.Signal["dot"] != 50 || ns1.Signal["do53"] != 100 || ns1.SignalSource != "oots" || len(ns1.Zones) != 1 || !ns1.Shared {
-		t.Errorf("ns1 signal %v (%s) zones %v shared %v, want do53:100 dot:50 as given, [example.net.], shared", ns1.Signal, ns1.SignalSource, ns1.Zones, ns1.Shared)
+	// The signal as received: what the server named, not the defaults, in
+	// its tokens: do53:100 is udp:100 and tcp:100.
+	if len(ns1.Signal) != 3 || ns1.Signal["dot"] != 50 || ns1.Signal["udp"] != 100 || ns1.Signal["tcp"] != 100 || ns1.SignalSource != "oots" || len(ns1.Zones) != 1 || !ns1.Shared {
+		t.Errorf("ns1 signal %v (%s) zones %v shared %v, want udp:100 tcp:100 dot:50 (do53:100 dot:50 as given), [example.net.], shared", ns1.Signal, ns1.SignalSource, ns1.Zones, ns1.Shared)
 	}
 	// The answers by class, under the same column names.
 	if ns1.ByPrivacy["none"]["do53/udp"] != 1 || ns1.ByPrivacy["internal"]["do53/tcp"] != 1 || ns1.ByPrivacy["strict"]["dot"] != 1 || len(ns1.ByPrivacy) != 3 {
@@ -200,9 +201,10 @@ func TestImrAuthTransportsCountsARealQuery(t *testing.T) {
 	if len(r.ByPrivacy) != 1 || r.ByPrivacy["internal"]["do53/udp"] != r.Total {
 		t.Errorf("row by privacy %v, want all %d answers internal", r.ByPrivacy, r.Total)
 	}
-	// The stub's configured ALPN, as the signal.
-	if r.SignalSource != "config" || r.Signal["do53"] != 100 {
-		t.Errorf("stub signal %v (%s), want its configured do53", r.Signal, r.SignalSource)
+	// The stub's configured ALPN, as the signal: Do53 is shown by its
+	// token, udp.
+	if r.SignalSource != "config" || r.Signal["udp"] != 100 {
+		t.Errorf("stub signal %v (%s), want its configured do53, as udp", r.Signal, r.SignalSource)
 	}
 }
 
@@ -251,28 +253,29 @@ func TestReceivedSignalIsWhatTheServerSaid(t *testing.T) {
 	if !ok || err != nil || len(raw) != 3 {
 		t.Fatalf("GetTransportParamRaw = %v, %v, %v; want the three transports named", raw, ok, err)
 	}
-	if full, _, _ := GetTransportParam(svcb); len(full) != 4 || full["dot"] != 0 {
-		t.Errorf("GetTransportParam = %v, want the absence defaults as before (dot:0 added)", full)
+	// The absence defaults, with do53 read as udp and tcp.
+	if full, _, _ := GetTransportParam(svcb); len(full) != 5 || full["dot"] != 0 || full["udp"] != 100 || full["tcp"] != 100 {
+		t.Errorf("GetTransportParam = %v, want the absence defaults (dot:0 added, do53 as udp and tcp)", full)
 	}
 	server := cache.NewAuthServer("ns.example.")
 	applyTransportMapToServer(server, raw)
 	got := server.GetReceivedSignal()
-	if got == nil || got.Source != "oots" || len(got.Weights) != 3 {
-		t.Fatalf("received %+v, want the three transports named, source oots", got)
+	if got == nil || got.Source != "oots" || len(got.Weights) != 4 {
+		t.Fatalf("received %+v, want the transports named (do53 as udp and tcp), source oots", got)
 	}
 	if _, named := got.Weights[core.TransportDoT]; named {
 		t.Errorf("received %v names DoT, which the server did not", got.Weights)
 	}
-	if w := server.GetTransportWeights(); w[core.TransportDoT] != 0 || w[core.TransportDoQ] != 50 || len(w) != 4 {
-		t.Errorf("weights %v, want the defaults filled in for selection", w)
+	if w := server.GetTransportWeights(); w[core.TransportDoT] != 0 || w[core.TransportDoQ] != 50 || w[core.TransportDo53TCP] != 100 || len(w) != 5 {
+		t.Errorf("weights %v, want the defaults filled in for selection, udp and tcp apart", w)
 	}
 
 	imr := &Imr{}
 	if !imr.applyTransportSignalToServer(server, "do53:100,dot:50") {
 		t.Fatal("applyTransportSignalToServer refused a TSYNC-style signal")
 	}
-	if got := server.GetReceivedSignal(); len(got.Weights) != 2 || got.Weights[core.TransportDoT] != 50 {
-		t.Errorf("received %+v after a TSYNC-style signal, want do53:100 dot:50", got)
+	if got := server.GetReceivedSignal(); len(got.Weights) != 3 || got.Weights[core.TransportDoT] != 50 || got.Weights[core.TransportDo53TCP] != 100 {
+		t.Errorf("received %+v after a TSYNC-style signal, want do53:100 dot:50, as udp:100 tcp:100 dot:50", got)
 	}
 
 	applyAlpnSignalToServer(server, "dot,doq")

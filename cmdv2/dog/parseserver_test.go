@@ -34,6 +34,8 @@ func TestParseServerAddressForms(t *testing.T) {
 		{arg: "tls://2001:db8::5", server: "2001:db8::5", transport: "DoT"},
 		{arg: "tls://2001:db8::beef", server: "2001:db8::beef", transport: "DoT"},
 		{arg: "quic://::1", server: "::1", transport: "DoQ"},
+		// udp:// is dns://: the oots token for UDP with a TCP retry.
+		{arg: "udp://192.0.2.5:5354", server: "192.0.2.5", port: "5354", transport: "Do53"},
 		{arg: "2001:db8::beef", server: "2001:db8::beef", transport: "Do53"},
 	}
 
