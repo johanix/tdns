@@ -72,4 +72,4 @@ require (
 	zgo.at/termtext v1.5.0 // indirect
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.5.0.20261114223317-5add9c58b3d7
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.6
