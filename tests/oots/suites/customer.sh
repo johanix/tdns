@@ -49,8 +49,10 @@
 #   Z7  two customers' aliases to one target, first asked together on a
 #       fresh resolver: ns1.customer2.test, like ns1.customer.test, holds
 #       the provider's signal, honours the DoT target in run 1, and answers
-#       over DoT and DoQ. A resolver that tracks one alias per target loses
-#       one of the two.
+#       over DoT and DoQ. This guards the main case. It does not reach the
+#       shared-hop race fixed in S6b's review (#1056 1f53f021): the target
+#       arrives in Additional, and a hop lookup on loopback ends long before
+#       the second owner gets there, so 7b1ce491 passes Z7 too.
 #
 # Negative: without the OOTS option no signal is added (Z2). A publisher
 # that wrote by identity into the zone it serves would fail Z1; one that
