@@ -2002,10 +2002,19 @@ type ootsRecord struct {
 // held an AliasMode record, and then the whole set is ignored: RFC 9460
 // section 2.4.1 has a client ignore the ServiceMode records of an RRset that
 // holds an AliasMode one.
+//
+// owner and rrs are the RRset as received, which an in-place validation
+// needs. via and path are where the set arrived and the validation state of
+// each RRset on its path (oots_signal_state.go). They are stored with the
+// signal and change nothing that is installed.
 type svcbSignalSet struct {
 	recs  []ootsRecord
 	alpn  []ootsRecord
 	alias bool
+	owner string
+	rrs   []dns.RR
+	via   string
+	path  []cache.SignalHop
 }
 
 // add collects one SVCB of the set's RRset. All three paths a signal arrives
@@ -2014,6 +2023,10 @@ func (set *svcbSignalSet) add(rr *dns.SVCB) {
 	if set == nil || rr == nil {
 		return
 	}
+	if set.owner == "" {
+		set.owner = dns.Fqdn(rr.Hdr.Name)
+	}
+	set.rrs = append(set.rrs, rr)
 	if rr.Priority == 0 {
 		set.alias = true
 		return
@@ -2245,26 +2258,31 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 	if server == nil || set == nil {
 		return false, false
 	}
+	pathState := cache.SignalStateString(cache.SignalPathState(set.path))
+	pathText := cache.FormatSignalPath(set.path)
 	if set.alias {
 		if !imr.Quiet {
-			lgDns.Debug("SVCB signal ignored: the RRset holds an AliasMode record", "servername", server.Name)
+			lgDns.Debug("SVCB signal ignored: the RRset holds an AliasMode record", "servername", server.Name,
+				"via", set.via, "state", pathState, "path", pathText)
 		}
 		return false, false
 	}
 	if len(set.recs) > 0 {
 		raw, ports := combineOOTSRecords(set.recs)
 		if !imr.Quiet {
-			lgDns.Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports)
+			lgDns.Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports,
+				"via", set.via, "state", pathState, "path", pathText)
 		}
-		return applyTransportMapWithPorts(server, raw, ports), true
+		return installTransportMap(server, raw, ports, set.via, set.pathCopy()), true
 	}
 	if len(set.alpn) > 0 {
 		_, ports := combineOOTSRecords(set.alpn)
 		order := alpnOrder(set.alpn)
 		if !imr.Quiet {
-			lgDns.Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports)
+			lgDns.Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports,
+				"via", set.via, "state", pathState, "path", pathText)
 		}
-		return applyAlpnSignalWithPorts(server, order, ports), false
+		return installAlpnSignal(server, order, ports, set.via, set.pathCopy()), false
 	}
 	return false, false
 }
@@ -2511,6 +2529,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	}
 
 	for key, set := range pendingSVCB {
+		imr.decideAdditionalPath(set, r.Extra, cache.SignalViaReferral)
 		imr.applySVCBSignalSet(ctx, serverMap[key], set)
 	}
 
@@ -2941,6 +2960,13 @@ func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8)
 // signal had stored: the new signal replaces the whole set. ports is filtered
 // so Do53 is never stored.
 func applyTransportMapWithPorts(server *cache.AuthServer, kvMap map[string]uint8, ports map[core.Transport]uint16) bool {
+	return installTransportMap(server, kvMap, ports, "", nil)
+}
+
+// installTransportMap is applyTransportMapWithPorts for a signal read from an
+// SVCB RRset, with where it arrived and the validation state of its path,
+// which are stored with it (ReceivedSignal.Via, ReceivedSignal.Path).
+func installTransportMap(server *cache.AuthServer, kvMap map[string]uint8, ports map[core.Transport]uint16, via string, path []cache.SignalHop) bool {
 	if server == nil || kvMap == nil {
 		return false
 	}
@@ -2948,7 +2974,7 @@ func applyTransportMapWithPorts(server *cache.AuthServer, kvMap map[string]uint8
 	if len(kvMap) == 0 {
 		return false
 	}
-	received := &cache.ReceivedSignal{Source: "oots", Weights: map[core.Transport]uint8{}, Ports: cache.DialPorts(ports)}
+	received := &cache.ReceivedSignal{Source: "oots", Weights: map[core.Transport]uint8{}, Ports: cache.DialPorts(ports), Via: via, Path: path}
 	full := make(map[string]uint8, len(kvMap)+4)
 	for k, v := range kvMap {
 		full[k] = v
@@ -2999,6 +3025,12 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) bool {
 // weight through core.StringToTransport's operator aliases. It reports whether
 // a signal was applied.
 func applyAlpnSignalWithPorts(server *cache.AuthServer, tokens []string, ports map[core.Transport]uint16) bool {
+	return installAlpnSignal(server, tokens, ports, "", nil)
+}
+
+// installAlpnSignal is applyAlpnSignalWithPorts with where the signal arrived
+// and the validation state of its path, as installTransportMap stores them.
+func installAlpnSignal(server *cache.AuthServer, tokens []string, ports map[core.Transport]uint16, via string, path []cache.SignalHop) bool {
 	if server == nil {
 		return false
 	}
@@ -3022,7 +3054,7 @@ func applyAlpnSignalWithPorts(server *cache.AuthServer, tokens []string, ports m
 	if len(order) == 0 {
 		return false
 	}
-	received := &cache.ReceivedSignal{Source: "alpn", Weights: make(map[core.Transport]uint8, len(weights)), Ports: cache.DialPorts(ports)}
+	received := &cache.ReceivedSignal{Source: "alpn", Weights: make(map[core.Transport]uint8, len(weights)), Ports: cache.DialPorts(ports), Via: via, Path: path}
 	for t, w := range weights {
 		received.Weights[t] = w
 	}
@@ -3089,6 +3121,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 			}
 		}
 	}
+	imr.decideAdditionalPath(set, r.Extra, cache.SignalViaResponse)
 	imr.applySVCBSignalSet(ctx, server, set)
 }
 
@@ -3116,6 +3149,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 				set.add(svcb)
 			}
 		}
+		set.decideLookupPath(vstate)
 	}
 	for _, sm := range imr.Cache.ServerMap.Items() {
 		server, ok := sm[cache.ServerKey(base)]
