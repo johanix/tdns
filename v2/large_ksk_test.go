@@ -3,6 +3,7 @@ package tdns
 import (
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -552,6 +553,41 @@ func TestPreferredDNSKEYTransport(t *testing.T) {
 	}
 	if got := imrForce.preferredDNSKEYTransport(mkServer(core.TransportDo53, core.TransportDoT)); got != core.TransportDoT {
 		t.Fatalf("force_encrypted with DoT want DoT, got %v", got)
+	}
+}
+
+// A signal installed the production way has dot, doh and doq at weight 0
+// when it leaves them out (the absence defaults), and they sit in
+// server.Transports. Weight 0 means "send none": the DNSKEY bypass must not
+// pick them. Before the fix it picked DoQ for every signalled server.
+func TestPreferredDNSKEYTransportSkipsZeroWeight(t *testing.T) {
+	imr := &Imr{dnskeyTransport: DNSKEYTransportTryEncrypted}
+	imrForce := &Imr{dnskeyTransport: DNSKEYTransportForceEncrypted}
+
+	cleartext := cache.NewAuthServer("ns1.example.")
+	applyTransportMapToServer(cleartext, map[string]uint8{"udp": 100, "tcp": 100})
+	if !slices.Contains(cleartext.GetTransports(), core.TransportDoQ) {
+		t.Fatalf("setup: DoQ at weight 0 is not in Transports (%v); the test no longer reaches the case", cleartext.GetTransports())
+	}
+	if got := imr.preferredDNSKEYTransport(cleartext); got != core.TransportDo53TCP {
+		t.Errorf("cleartext-only signal: got %v, want Do53TCP", got)
+	}
+	if got := imrForce.preferredDNSKEYTransport(cleartext); got != 0 {
+		t.Errorf("cleartext-only signal, force_encrypted: got %v, want 0 (fail)", got)
+	}
+
+	// doq:0 named explicitly is the same; a non-zero dot is picked.
+	dot := cache.NewAuthServer("ns2.example.")
+	applyTransportMapToServer(dot, map[string]uint8{"doq": 0, "dot": 20})
+	if got := imr.preferredDNSKEYTransport(dot); got != core.TransportDoT {
+		t.Errorf("doq:0,dot:20: got %v, want DoT", got)
+	}
+
+	// An ALPN-only server lists its transports at weight 100: offered.
+	alpn := cache.NewAuthServer("ns3.example.")
+	applyAlpnSignalToServer(alpn, "doq")
+	if got := imr.preferredDNSKEYTransport(alpn); got != core.TransportDoQ {
+		t.Errorf("alpn doq: got %v, want DoQ", got)
 	}
 }
 
