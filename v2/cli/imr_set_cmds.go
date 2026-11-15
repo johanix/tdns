@@ -113,11 +113,13 @@ Examples:
 		var alpnOrder []string
 		for _, p := range pairs {
 			t, err := core.StringToTransport(p.k)
-			if err != nil {
+			// tcp keeps its weight, a cap on optional TCP, but is not a
+			// transport selection chooses.
+			if err != nil || !core.SelectableTransport(t) {
 				continue
 			}
 			transports = append(transports, t)
-			alpnOrder = append(alpnOrder, p.k)
+			alpnOrder = append(alpnOrder, core.TransportToString[t])
 		}
 
 		// Apply to server (complete replacement, not merge), in one install as
@@ -140,18 +142,20 @@ func init() {
 	imrSetServerCmd.AddCommand(imrSetServerTransportCmd)
 
 	imrSetServerTransportCmd.Flags().StringVarP(&setServerName, "server", "s", "", "Server name (e.g., ns1.example.com.)")
-	imrSetServerTransportCmd.Flags().StringVarP(&setTransportSig, "signal", "t", "", "Transport signal (e.g., \"doq:20,dot:100,do53:3\")")
+	imrSetServerTransportCmd.Flags().StringVarP(&setTransportSig, "signal", "t", "", "Transport signal (e.g., \"doq:20,dot:100,udp:3,tcp:0\"; do53:N is udp:N and tcp:N)")
 	imrSetServerTransportCmd.Flags().BoolVarP(&setReset, "reset", "r", false, "Reset to default (do53 only)")
 	imrSetServerTransportCmd.MarkFlagRequired("server")
 }
 
 // receivedSignal is the signal string s as given, without the absence
-// defaults, for the transport stats to show; nil if s does not parse.
+// defaults but with the do53 shorthand read as udp and tcp, for the transport
+// stats to show; nil if s does not parse.
 func receivedSignal(source, s string) *cache.ReceivedSignal {
 	raw, err := core.ParseTransportStringRaw(s)
 	if err != nil {
 		return nil
 	}
+	core.ExpandDo53Shorthand(raw)
 	r := &cache.ReceivedSignal{Source: source, Weights: map[core.Transport]uint8{}}
 	for k, v := range raw {
 		if t, err := core.StringToTransport(k); err == nil {

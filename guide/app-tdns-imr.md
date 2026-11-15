@@ -27,8 +27,13 @@ Features:
   updates the server's transport preferences in the referral cache, and
   promotes the connection mode to "opportunistic" so subsequent queries
   attempt the preferred encrypted transport. TSYNC is supported as an
-  alternative carrier. See section 2 of
-  [TDNS Special Features](special-features.md) for the full picture.
+  alternative carrier. It records the DNSSEC validation state of each
+  SVCB RRset a signal is read from: Secure, Insecure or Bogus when the
+  RRSIG comes with it and the keys are at hand, and otherwise unknown
+  until the lookup of `_dns.<ns>`. Through an AliasMode record it records
+  every hop. Nothing acts on the state yet; `dump zone servers` shows it.
+  See section 2 of [TDNS Special Features](special-features.md) for the
+  full picture.
 
 ## Resolution modes: iteration, stubs, and forwarding
 
@@ -194,7 +199,7 @@ zone reload.
 |---------|--------|
 | `dump suffix <suffix>` | Cached RRsets whose owner name ends in `<suffix>` |
 | `dump zones` | All cached zones, with secure-delegation status |
-| `dump zone servers <zone>` | Servers known for one zone |
+| `dump zone servers <zone>` | Servers known for one zone, with each server's transport signal and the validation state of the RRsets it was read from (`Signal validation`) |
 | `dump zone backoffs <zone>` | Lame-delegation backoffs for one zone |
 | `dump servers` | Servers, grouped by zone |
 | `dump auth-servers` | Authoritative-server table |
@@ -230,7 +235,7 @@ zone reload.
 | `show config` | Listen addresses, cache-primed flag, trust anchors, stub zones |
 | `show options` | The configured `imrengine.options` |
 | `set linewidth <n>` | Output truncation width |
-| `set server transport --server <ns> --signal "doq:20,dot:100,do53:3"` | Override a server's transport signal at runtime (debug). `--reset` clears it |
+| `set server transport --server <ns> --signal "doq:20,dot:100,udp:3,tcp:0"` | Override a server's transport signal at runtime (debug). `do53:N` is `udp:N` and `tcp:N`; absent `udp` and `tcp` are 100. `--reset` clears it |
 
 **Zones**
 

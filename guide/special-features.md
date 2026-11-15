@@ -889,8 +889,9 @@ The `type` field selects the record type used for signaling:
 
 The `signal` field is a comma-separated list of
 `protocol:weight` pairs. Higher weight means the server
-prefers that transport. Supported protocols are `doq`, `dot`,
-`doh`, and `do53`.
+prefers that transport. Supported protocols are `udp`, `tcp`,
+`doq`, `dot` and `doh`; `do53:N` is the shorthand for `udp:N`
+and `tcp:N`, and is published as the two.
 
 The resulting SVCB record looks like:
 
@@ -920,6 +921,21 @@ record in the Additional section, it:
    65280.
 3. Updates the server's connection preferences in the
    referral cache.
+
+   Cleartext is two tokens, `udp` and `tcp`, each 100 when
+   absent. An older signal's `do53:N` is read as `udp:N` and
+   `tcp:N`; an explicit `udp` or `tcp` wins over it. The `tcp`
+   weight only caps the TCP the resolver would choose on its
+   own, and tdns chooses none: TCP after a truncation, or
+   forced for a large DNSKEY, ignores it, `tcp:0` included.
+   A record's `port` applies to `udp` and `tcp` as to the
+   other transports it names, but never to `do53`, which is
+   ignored in a record with a port. The retry over TCP after
+   a truncation goes to the address and port that truncated;
+   forced TCP goes to the `tcp` port, or to port 53. Backoff
+   and round-trip times are kept per address, port and
+   transport. A token the resolver does not know is kept in
+   the record and not acted on.
 4. Promotes the server's connection mode to "opportunistic",
    meaning the resolver will attempt encrypted transports
    on subsequent queries to that server.

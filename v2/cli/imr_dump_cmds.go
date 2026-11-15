@@ -140,6 +140,9 @@ var dumpAuthServersCmd = &cobra.Command{
 					if ports := formatAuthServerPorts(server); ports != "" {
 						fmt.Printf("    Signal ports: %s\n", ports)
 					}
+					if state := formatSignalValidation(server); state != "" {
+						fmt.Printf("    Signal validation: %s\n", state)
+					}
 					fmt.Printf("    Connection mode: %s\n", conn)
 					if len(server.TransportSignal) > 0 {
 						fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)
@@ -727,13 +730,17 @@ func formatList(items []string) string {
 	return fmt.Sprintf("[%s]", strings.Join(items, " "))
 }
 
+// signalWeightOrder is the order a server's weights are shown in, the
+// cleartext ones by their oots tokens (core.TransportToSignalToken): udp
+// (TransportDo53) and tcp (TransportDo53TCP), apart.
+var signalWeightOrder = []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH, core.TransportDo53, core.TransportDo53TCP}
+
 func formatTransportWeights(server *cache.AuthServer) string {
 	if len(server.TransportWeights) > 0 {
-		order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH, core.TransportDo53}
 		var parts []string
-		for _, t := range order {
+		for _, t := range signalWeightOrder {
 			if w, ok := server.TransportWeights[t]; ok && w > 0 {
-				parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToString[t], w))
+				parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToSignalToken[t], w))
 			}
 		}
 		if len(parts) > 0 {
@@ -829,6 +836,19 @@ func validationStateString(state cache.ValidationState) string {
 	return "[unset]"
 }
 
+// formatSignalValidation renders where the server's signal arrived and the
+// validation state of the RRsets it was read from: the whole path's state,
+// then each RRset's, as in "secure (via referral: _dns.ns.example. secure)".
+// Empty when the signal did not come from an SVCB RRset (none, a TSYNC, a
+// stub's configuration, an operator's override).
+func formatSignalValidation(server *cache.AuthServer) string {
+	rec := server.GetReceivedSignal()
+	if rec == nil || rec.Via == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s (via %s: %s)", cache.SignalStateString(rec.PathState()), rec.Via, cache.FormatSignalPath(rec.Path))
+}
+
 // formatAuthServerPorts renders the non-default ports the latest signal
 // assigned, in transport order. Empty when every transport keeps its usual port.
 func formatAuthServerPorts(server *cache.AuthServer) string {
@@ -839,12 +859,12 @@ func formatAuthServerPorts(server *cache.AuthServer) string {
 	if len(ports) == 0 {
 		return ""
 	}
-	order := []core.Transport{core.TransportDoT, core.TransportDoQ, core.TransportDoH}
+	order := []core.Transport{core.TransportDo53, core.TransportDo53TCP, core.TransportDoT, core.TransportDoQ, core.TransportDoH}
 	var parts []string
 	seen := map[core.Transport]bool{}
 	for _, t := range order {
 		if p := ports[t]; p != 0 {
-			parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToString[t], p))
+			parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToSignalToken[t], p))
 			seen[t] = true
 		}
 	}
@@ -853,7 +873,7 @@ func formatAuthServerPorts(server *cache.AuthServer) string {
 		if seen[t] || p == 0 {
 			continue
 		}
-		rest = append(rest, fmt.Sprintf("%s:%d", core.TransportToString[t], p))
+		rest = append(rest, fmt.Sprintf("%s:%d", formatTransport(t), p))
 	}
 	sort.Strings(rest)
 	return strings.Join(append(parts, rest...), " ")
@@ -872,6 +892,9 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 	fmt.Printf("    Transports: %s\n", formatTransportWeights(server))
 	if ports := formatAuthServerPorts(server); ports != "" {
 		fmt.Printf("    Signal ports: %s\n", ports)
+	}
+	if state := formatSignalValidation(server); state != "" {
+		fmt.Printf("    Signal validation: %s\n", state)
 	}
 	fmt.Printf("    Connection mode: %s\n", server.ConnectionMode().String())
 	if len(server.TransportSignal) > 0 {

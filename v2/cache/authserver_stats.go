@@ -47,10 +47,26 @@ type ReceivedSignal struct {
 	Source  string                   // "oots" (SVCB oots or TSYNC weights), "alpn" (SVCB ALPN only: 100 each), "config" (a stub), "operator" (set server transport)
 	Weights map[core.Transport]uint8 // the transports named, with their weights
 	// Ports is the non-default port assigned to a transport this signal
-	// named. Absent means that transport keeps its usual port. Do53 is never
-	// entered: port= does not move cleartext off 53, and it does not advertise
-	// another cleartext listener.
+	// named, udp (TransportDo53) and tcp (TransportDo53TCP) included. Absent
+	// means that transport keeps its usual port.
 	Ports map[core.Transport]uint16
+	// Via is where the signal arrived (SignalViaReferral, SignalViaResponse,
+	// SignalViaLookup). Empty for a signal that did not come from an SVCB
+	// RRset: a TSYNC, a stub's configuration, an operator's override.
+	Via string
+	// Path is the RRsets the signal was read from, each with its validation
+	// state (signal_state.go): the _dns.<ns> RRset, then each AliasMode hop's
+	// target in the order followed. Nil when Via is empty.
+	Path []SignalHop
+}
+
+// PathState is the validation state of the whole path (SignalPathState).
+// SignalStateUnknown for nil or a signal with no path.
+func (r *ReceivedSignal) PathState() ValidationState {
+	if r == nil {
+		return SignalStateUnknown
+	}
+	return SignalPathState(r.Path)
 }
 
 // clone is a copy of r that shares nothing with it; nil for nil.
@@ -58,7 +74,11 @@ func (r *ReceivedSignal) clone() *ReceivedSignal {
 	if r == nil {
 		return nil
 	}
-	return &ReceivedSignal{Source: r.Source, Weights: copyMap(r.Weights), Ports: copyMap(r.Ports)}
+	var path []SignalHop
+	if r.Path != nil {
+		path = append([]SignalHop(nil), r.Path...)
+	}
+	return &ReceivedSignal{Source: r.Source, Weights: copyMap(r.Weights), Ports: copyMap(r.Ports), Via: r.Via, Path: path}
 }
 
 // AuthServerStats is one AuthServer instance's transport-usage counters, with
