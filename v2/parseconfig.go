@@ -672,6 +672,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 			conf.Service.Transport.Type = "none"
 		}
 	}
+	// A published signal may name only the tokens every tdns node can carry
+	// (TransportConf.Validate). Refused here, before anything below reaches
+	// the KeyDB or the zones, so a refused signal never takes effect, on a
+	// reload either; ValidateConfig checks it again for `config check`.
+	if err := conf.Service.Transport.Validate(); err != nil {
+		return err
+	}
 
 	lgConfig.Debug("templates defined", "count", len(conf.Templates))
 
