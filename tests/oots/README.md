@@ -43,6 +43,7 @@ Needs: `unshare`, `ip`, `python3` (to read the CLI's JSON), and a tdns build:
 | `PUB_DO53` | what the publisher does with a do53 its config does not name: `written` (default, builds before OOTS S5) or `omitted` (S5 and later) |
 | `IMR` | the resolver under test |
 | `CLI`, `DOG` | the observers |
+| `CLI_IMR`, `CLI_PUB` | the CLIs that talk to the resolver and to the publishers; each defaults to the `tdns-cli` beside its daemon, since an older CLI drops a newer daemon's fields |
 
 Red against green, for a resolver change:
 

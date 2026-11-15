@@ -56,7 +56,7 @@ child_ds() { # zone party address
 	{ y_service "$_p" "ns.$_z"; y_listeners "$_a"; y_common "$_p" "$_a"
 	  y_zones; y_primary "$_z" online-signing; } | auth_up "$_p" "$AUTH_PUB" "$_a" "$_z" || return 1
 	wait_for 30 answers "$_a" "$_z" DNSKEY || { echo "rig: no DNSKEY for $_z" >&2; return 1; }
-	"$CLI" --config "$WORK/$_p/tdns-cli.yaml" auth keystore dnssec gen-ds --zone "$_z" 2>&1 |
+	"$CLI_PUB" --config "$WORK/$_p/tdns-cli.yaml" auth keystore dnssec gen-ds --zone "$_z" 2>&1 |
 		awk '$0 ~ /IN[ \t]+DS[ \t]/ && $(NF-1) == "2" { sub(/^[^I]*IN/, "IN"); print; exit }
 		     $0 ~ /IN[ \t]+DS[ \t]/ { for (i = 1; i <= NF; i++) if ($i == "DS" && $(i+3) == "2") {
 		         s = "IN"; for (j = i; j <= NF; j++) s = s " " $j; print s; exit } }' > "$WORK/$_p/ds"
@@ -109,7 +109,7 @@ do_suite() { # name
 	type "suite_$1" >/dev/null 2>&1 || die "no suite $1 (run.sh list)"
 	[ -s "$WORK/infra/root.ta" ] || die "run setup first"
 	NPASS=0; NFAIL=0; NSKIP=0
-	echo "==== suite $1   AUTH_PUB=$AUTH_PUB AUTH_SEC=$AUTH_SEC IMR=$IMR"
+	echo "==== suite $1   AUTH_PUB=$AUTH_PUB AUTH_SEC=$AUTH_SEC IMR=$IMR CLI_IMR=$CLI_IMR"
 	rm -f "$PIDS"
 	infra_up
 	"suite_$1"
