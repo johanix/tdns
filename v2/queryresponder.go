@@ -899,17 +899,21 @@ func (zd *ZoneData) signalIsAboutThisServer(snap *zoneSnapshot, nsName, owner st
 // nsNameIsThisServer reports whether a nameserver name is this server's own:
 // one of its configured identities, or a name whose A or AAAA records, read
 // from the name's home, are this server's listener addresses. The home is
-// the pinned snapshot for a name in this zone, and a co-hosted zone's
-// current snapshot otherwise. Nothing is looked up recursively.
+// the most specific zone hosted here that holds the name: the pinned
+// snapshot when that is this zone, and that zone's current snapshot
+// otherwise, a co-hosted child included. Nothing is looked up recursively.
 func (zd *ZoneData) nsNameIsThisServer(snap *zoneSnapshot, nsName string) bool {
 	if CaseFoldContains(Conf.Service.Identities, nsName) {
 		return true
 	}
+	// Under a co-hosted child the home is the child, not this zone's glue
+	// for it. An unregistered zone (a test's) is the home of names under it.
 	var od *OwnerData
-	if dns.IsSubDomain(zd.ZoneName, nsName) {
+	switch home := FindZone(nsName); {
+	case home == zd, home == nil && dns.IsSubDomain(zd.ZoneName, nsName):
 		od = getOwnerFrom(snap, nsName)
-	} else if tz := FindZone(nsName); tz != nil && tz != zd {
-		od = getOwnerFrom(tz.publishedSnapshot(), nsName)
+	case home != nil:
+		od = getOwnerFrom(home.publishedSnapshot(), nsName)
 	}
 	if od == nil {
 		return false

@@ -1052,11 +1052,14 @@ Do53. Turn `ports` on once the resolvers that matter to you read it.
 **A signal written in the zone.** An SVCB RRset that the operator writes at
 `_dns.<nameserver>` is left as written, whatever its mode. tdns-auth
 synthesizes nothing for that name and logs that it left the RRset alone:
-`service.transport` does not apply there. The RRset answers a direct query
-like any other zone content. It goes into the Additional section only when
-the nameserver name is this server's own, that is one of `service.identities`
-or a name whose A or AAAA records in the zone are this server's listen
-addresses. An RRset for another server's name is never added there.
+`service.transport` does not apply there. That holds even for an RRset
+identical to what the configuration gives: tdns-auth replaces only a signal
+it stored itself. The RRset answers a direct query like any other zone
+content. It goes into the Additional section only when the nameserver name
+is this server's own, that is one of `service.identities` or a name whose A
+or AAAA records are this server's listen addresses. The records are read in
+the most specific zone served here that holds the name, a co-hosted child
+rather than its parent's glue. An RRset for another server's name is never added there.
 
 - An AliasMode record (SvcPriority 0) points at another name's signal, such
   as a provider's. It is also added when the server holds the signal at its

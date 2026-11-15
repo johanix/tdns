@@ -217,25 +217,6 @@ func svcbHasAlias(rrset core.RRset) bool {
 	return false
 }
 
-// signalIsPassOwn reports whether the SVCB RRset rs found at a signal owner
-// is the pass's own output rather than the operator's: it is what the pass
-// last stored there (signalStoredByPass: in this process, or recorded in the
-// KeyDB before a restart), or it is identical to what the configuration
-// gives now. The second covers a server without a KeyDB record of it, and
-// restaging such a signal changes nothing. An operator who wrote exactly
-// what the configuration gives is treated the same way, which is harmless
-// for the same reason.
-func (zd *ZoneData) signalIsPassOwn(conf *Config, nsName, owner string, rs core.RRset) bool {
-	if zd.signalStoredByPass(owner, rs.RRs) {
-		return true
-	}
-	if svcbHasAlias(rs) || Globals.ServerSVCB == nil {
-		return false
-	}
-	fresh, err := zd.buildServerSVCB(conf, nsName, nil, nil)
-	return err == nil && sameRecords(fresh.RRs, rs.RRs)
-}
-
 // svcbSignalWarnings checks an SVCB RRset as an operator wrote it and
 // returns what the zone loader should warn about (it refuses nothing):
 //   - an oots weight above 100: resolvers read it as 100 (design 2026-11-14
@@ -501,7 +482,10 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		// 5): zone content, answered on a direct query, and left as it is,
 		// so the transport configuration does not apply to that name. The
 		// pass's own stored signal is zone content too, which is why it is
-		// told apart by signalIsPassOwn and not by its presence; the
+		// told apart by the record of what the pass stored there
+		// (signalStoredByPass), not by its presence and not by matching
+		// what the configuration gives: an operator may write exactly
+		// that, and a later configuration must not replace it. The
 		// fallback beside the snapshot is not in the working set at all.
 		// Injection decides separately whether the RRset is about this
 		// server (signalIsAboutThisServer). An AliasMode one is chased
@@ -510,7 +494,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		// the fallback an out-of-bailiwick NS name gets. The walk goes on: an
 		// RRset at one name says nothing about the server's other names.
 		if od := zd.stagedOwner(ownerName); od != nil {
-			if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && !zd.signalIsPassOwn(conf, nsName, ownerName, rs) {
+			if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && !zd.signalStoredByPass(ownerName, rs.RRs) {
 				lgDns.Info("createTransportSignalSVCB: leaving the operator's SVCB RRset alone; the transport configuration does not apply to this name",
 					"zone", zd.ZoneName, "owner", ownerName, "alias", svcbHasAlias(rs), "records", len(rs.RRs))
 				kept++
