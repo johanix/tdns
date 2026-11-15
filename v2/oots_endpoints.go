@@ -13,6 +13,7 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -109,13 +110,22 @@ func (imr *Imr) endpointFor(ctx context.Context, server *cache.AuthServer, addr 
 	if defaultEndpointsOnly(ctx) {
 		return endpointDial{addr: addr}, nil
 	}
+	return imr.resolveEndpoint(server, addr, t, true)
+}
+
+// resolveEndpoint is endpointFor's choice for a context not marked
+// withDefaultEndpoints. lookup says whether a target whose addresses are not
+// known is looked up: not for the stub probe, which only reports.
+func (imr *Imr) resolveEndpoint(server *cache.AuthServer, addr string, t core.Transport, lookup bool) (endpointDial, error) {
 	ep := server.GetTransportEndpoint(t)
 	if ep.Target == "" {
 		return endpointDial{addr: addr, port: ep.Port}, nil
 	}
 	addrs, known := imr.endpointAddrs.get(ep.Target, time.Now())
 	if !known {
-		imr.startEndpointLookup(ep.Target)
+		if lookup {
+			imr.startEndpointLookup(ep.Target)
+		}
 		return endpointDial{addr: addr}, nil
 	}
 	pick := imr.chooseEndpointAddr(server, addrs, ep.Port, t)
@@ -123,6 +133,24 @@ func (imr *Imr) endpointFor(ctx context.Context, server *cache.AuthServer, addr 
 		return endpointDial{}, errEndpointUnavailable{server: server.Name, target: ep.Target, transport: t}
 	}
 	return endpointDial{addr: pick, port: ep.Port, redirect: true, keyPort: ep.Port}, nil
+}
+
+// serverBackoffAllows reports whether the server's backoff lets an attempt
+// for t at its own address addr be made: the backoff of the address the
+// attempt would dial (endpointFor). At a target whose addresses are known that
+// is the target's, at the endpoint's port, and a backoff left on addr by an
+// attempt at the default endpoint does not hold the target back. Otherwise it
+// is addr's, as it always was. The zone's backoff stays on addr: lameness is
+// about the nameserver, not the endpoint.
+func (imr *Imr) serverBackoffAllows(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) bool {
+	if !defaultEndpointsOnly(ctx) {
+		if ep := server.GetTransportEndpoint(t); ep.Target != "" {
+			if addrs, known := imr.endpointAddrs.get(ep.Target, time.Now()); known {
+				return imr.chooseEndpointAddr(server, addrs, ep.Port, t) != ""
+			}
+		}
+	}
+	return server.IsAddrXportAvailable(addr, t)
 }
 
 // chooseEndpointAddr picks among a target's addresses as prioritizeServers
@@ -211,12 +239,24 @@ func (tr *endpointAddrTracker) begin(target string, now time.Time) bool {
 }
 
 // finish ends the lookup of target with the addresses found, live until
-// expire. No address is a failure, retried after endpointAddrRetry.
+// expire. No address is a failure, retried after endpointAddrRetry. Entries
+// and retry marks that have run out are dropped, so the tracker holds only
+// the targets that are live or waiting.
 func (tr *endpointAddrTracker) finish(target string, addrs []string, expire, now time.Time) {
 	key := core.CanonicalizeName(target)
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	delete(tr.pending, key)
+	for k, e := range tr.entries {
+		if !now.Before(e.expire) {
+			delete(tr.entries, k)
+		}
+	}
+	for k, at := range tr.retry {
+		if !now.Before(at) {
+			delete(tr.retry, k)
+		}
+	}
 	if len(addrs) == 0 || !now.Before(expire) {
 		if tr.retry == nil {
 			tr.retry = map[string]time.Time{}
@@ -262,7 +302,8 @@ func (imr *Imr) startEndpointLookup(target string) {
 // lookupEndpointAddrs looks up target's A and AAAA, CNAMEs followed, as for
 // any nameserver name, through the servers' default endpoints. An answer held
 // Bogus is not used; Insecure is, as a nameserver's address is (section 4).
-// It returns the addresses and when the first of their records expires.
+// It returns the addresses and when the first of their records expires, the
+// links of a CNAME chain included (chainExpiry).
 func (imr *Imr) lookupEndpointAddrs(target string) ([]string, time.Time) {
 	ctx, cancel := detachedContext(5 * time.Second)
 	defer cancel()
@@ -288,13 +329,45 @@ func (imr *Imr) lookupEndpointAddrs(target string) ([]string, time.Time) {
 		if !found {
 			continue
 		}
-		exp := resp.Expiration
-		if exp.IsZero() {
-			exp = time.Now().Add(cache.GetMinTTL(resp.RRset.RRs))
-		}
-		if expire.IsZero() || exp.Before(expire) {
+		if exp := imr.addrsExpiry(target, qtype, resp); expire.IsZero() || exp.Before(expire) {
 			expire = exp
 		}
 	}
 	return addrs, expire
+}
+
+// addrsExpiry is when the addresses resp carries for <target, qtype> run out:
+// the expiration of the cache entry that holds them, or their TTL from now
+// when that is not known, and no later than the first link of the CNAME chain
+// that led to them, when one did.
+func (imr *Imr) addrsExpiry(target string, qtype uint16, resp *ImrResponse) time.Time {
+	exp := resp.Expiration
+	if exp.IsZero() {
+		exp = time.Now().Add(cache.GetMinTTL(resp.RRset.RRs))
+	}
+	if !core.EqualNames(resp.RRset.Name, target) {
+		if link := imr.chainExpiry(target, qtype); link.Before(exp) {
+			exp = link
+		}
+	}
+	return exp
+}
+
+// chainExpiry is when the first link of the CNAME chain from name to its
+// <qtype> data runs out, read from the cache the lookup just filled. An
+// address found through the chain is kept no longer than that: a link that
+// changes may lead elsewhere. A chain the cache no longer holds whole is good
+// for endpointAddrRetry.
+func (imr *Imr) chainExpiry(name string, qtype uint16) time.Time {
+	links, final, _, err := imr.chainAt(name, qtype, edns0.PrivacyNone, imr.freshChainGrace())
+	if err != nil || final == nil || len(links) == 0 {
+		return time.Now().Add(endpointAddrRetry)
+	}
+	first := links[0].Expiration
+	for _, l := range links[1:] {
+		if l.Expiration.Before(first) {
+			first = l.Expiration
+		}
+	}
+	return first
 }

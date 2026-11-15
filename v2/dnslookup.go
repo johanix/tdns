@@ -810,6 +810,15 @@ func (imr *Imr) allowHostLocalServers() bool {
 // qtype picks the zone whose backoff applies: the zone holding the data, which
 // for a DS is the parent's, the zone of the servers the DS query goes to.
 func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
+	return imr.prioritizeServersFor(context.Background(), qname, qtype, serverMap, privacy)
+}
+
+// prioritizeServersFor is prioritizeServers for the query ctx belongs to. The
+// server's backoff is that of the address an attempt would dial
+// (serverBackoffAllows), which depends on ctx: a context marked
+// withDefaultEndpoints dials the server's own address whatever its signal
+// says.
+func (imr *Imr) prioritizeServersFor(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
 	zoneName, _, _ := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 	var zone *cache.Zone
 	if zoneName != "" {
@@ -852,7 +861,7 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 				continue
 			}
 			for rank, t := range transports {
-				if !server.IsAddrXportAvailable(addr, t) {
+				if !imr.serverBackoffAllows(ctx, server, addr, t) {
 					if Globals.Debug {
 						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to server backoff",
 							"addr", addr, "transport", core.TransportToString[t], "ns", nsname)
@@ -896,7 +905,10 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 	if len(tuples) == 0 && len(suspectTuples) == 0 {
 		lgDns.Warn("prioritizeServers: no usable (server, addr, transport) tuples; the query cannot be sent",
 			"qname", qname, "zone", zoneName, "servers", len(serverMap),
-			"privacy", privacy.String(), "why", explainNoTuples(serverMap, zone, imr.FamilyTracker, qname, privacy, allowHostLocal))
+			"privacy", privacy.String(), "why", explainNoTuplesWith(serverMap, zone, imr.FamilyTracker, qname, privacy, allowHostLocal,
+				func(server *cache.AuthServer, addr string, t core.Transport) bool {
+					return imr.serverBackoffAllows(ctx, server, addr, t)
+				}))
 	}
 
 	sortTuplesByRankThenRTT(tuples)
@@ -951,7 +963,21 @@ func sortTuplesByRankThenRTT(tuples []ServerAddrXportTuple) {
 // identical to having no server at all.
 func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 	ft *cache.FamilyTracker, qname string, privacy edns0.PrivacyLevel, allowHostLocal bool) string {
+	return explainNoTuplesWith(serverMap, zone, ft, qname, privacy, allowHostLocal, nil)
+}
 
+// explainNoTuplesWith is explainNoTuples with the server-backoff test
+// prioritizeServersFor applied; nil is the backoff at the server's own
+// address.
+func explainNoTuplesWith(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
+	ft *cache.FamilyTracker, qname string, privacy edns0.PrivacyLevel, allowHostLocal bool,
+	serverAllows func(*cache.AuthServer, string, core.Transport) bool) string {
+
+	if serverAllows == nil {
+		serverAllows = func(server *cache.AuthServer, addr string, t core.Transport) bool {
+			return server.IsAddrXportAvailable(addr, t)
+		}
+	}
 	if len(serverMap) == 0 {
 		return "no servers in the map for this zone"
 	}
@@ -982,7 +1008,7 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 					hostLocal++
 					continue
 				}
-				if !server.IsAddrXportAvailable(addr, t) {
+				if !serverAllows(server, addr, t) {
 					serverBackoff++
 					continue
 				}
@@ -1694,7 +1720,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		}
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		zoneName, zone, prioritized = imr.prioritizeServers(qname, qtype, serverMap, privacy)
+		zoneName, zone, prioritized = imr.prioritizeServersFor(ctx, qname, qtype, serverMap, privacy)
 		if Globals.Debug {
 			lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers) attempt=%d", len(prioritized), len(serverMap), attempt+1)
 		}
@@ -2234,10 +2260,10 @@ func combineOOTSEndpoints(recs []ootsRecord) (map[string]uint8, map[core.Transpo
 			if _, taken := raw[k]; taken {
 				continue
 			}
-			t, err := core.StringToTransport(k)
-			if rec.target != "" && (err != nil || !core.IsEncryptedTransport(t)) {
+			if rec.target != "" && !targetMayCarry(k) {
 				continue
 			}
+			t, err := core.StringToTransport(k)
 			raw[k] = w
 			if err != nil {
 				continue
@@ -2259,13 +2285,25 @@ func combineOOTSEndpoints(recs []ootsRecord) (map[string]uint8, map[core.Transpo
 	return raw, ports, targets
 }
 
+// targetMayCarry reports whether a record with a target may name transport
+// token k: only an encrypted transport is sent to another host.
+func targetMayCarry(k string) bool {
+	t, err := core.StringToTransport(strings.TrimSpace(k))
+	return err == nil && core.IsEncryptedTransport(t)
+}
+
 // alpnOrder lists the ALPN tokens of recs once each: the tie-break's winner
-// first, each record's tokens as written.
+// first, each record's tokens as written. A record with a target gives only
+// the tokens it may carry (targetMayCarry), as in combineOOTSEndpoints; do53
+// comes only from a record with TargetName ".".
 func alpnOrder(recs []ootsRecord) []string {
 	seen := map[string]bool{}
 	var order []string
 	for _, rec := range rankOOTSRecords(recs) {
 		for _, tok := range rec.alpn {
+			if rec.target != "" && !targetMayCarry(tok) {
+				continue
+			}
 			if !seen[tok] {
 				seen[tok] = true
 				order = append(order, tok)
@@ -2964,10 +3002,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			return nil, rtt, eff, qerr
 		}
 		server.RecordEndpointAddrSuccess(ep.addr, ep.keyPort, eff)
-		server.IncrementUsedCounter(xres.WireTransport, class)
-		if ep.redirect {
-			server.IncrementRedirectedCounter(xres.WireTransport)
-		}
+		server.CountAnswer(xres.WireTransport, class, ep.redirect)
 		server.RecordEndpointAddrRTT(ep.addr, ep.keyPort, eff, rtt)
 	} else if Globals.Debug {
 		lgDns.Debug("*** tryServer: query returned no response",

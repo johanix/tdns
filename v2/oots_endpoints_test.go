@@ -6,11 +6,14 @@ package tdns
 
 import (
 	"context"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -374,8 +377,8 @@ func TestAuthTransportsReportRedirects(t *testing.T) {
 	server := imr.Cache.GetOrCreateAuthServer(pathNS)
 	installTransportMap(server, map[string]uint8{"dot": 30}, nil, map[core.Transport]string{core.TransportDoT: dotTarget},
 		cache.SignalViaLookup, []cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
-	server.IncrementUsedCounter(core.TransportDoT, cache.ClassNone)
-	server.IncrementRedirectedCounter(core.TransportDoT)
+	server.CountAnswer(core.TransportDoT, cache.ClassNone, true)
+	server.CountAnswer(core.TransportDoT, cache.ClassNone, false)
 	server.AddIgnoredRedirects(3)
 	report := ImrAuthTransportsSnapshot(imr.Cache, []string{pathNS}, "", false)
 	if len(report.Rows) != 1 {
@@ -384,5 +387,183 @@ func TestAuthTransportsReportRedirects(t *testing.T) {
 	row := report.Rows[0]
 	if row.SignalTargets["dot"] != dotTarget || row.Redirected["dot"] != 1 || row.IgnoredRedirects != 3 {
 		t.Errorf("targets %v, redirected %v, ignored %d", row.SignalTargets, row.Redirected, row.IgnoredRedirects)
+	}
+	if got := server.SnapshotTransportStats().Used[core.TransportDoT]; got != 2 {
+		t.Errorf("DoT answers %d, want 2", got)
+	}
+}
+
+// A record with a target gives the ALPN order only the tokens it may carry:
+// do53 comes from a record with TargetName "." alone.
+func TestAlpnOrderTargetCarriesNoDo53(t *testing.T) {
+	targeted := ootsRecord{alpn: []string{"do53", "dot"}, target: dotTarget, priority: 1}
+	self := ootsRecord{alpn: []string{"do53"}, priority: 2}
+	if got := alpnOrder([]ootsRecord{targeted}); !reflect.DeepEqual(got, []string{"dot"}) {
+		t.Errorf("targeted record alone: %v, want [dot]", got)
+	}
+	if got := alpnOrder([]ootsRecord{targeted, self}); !reflect.DeepEqual(got, []string{"dot", "do53"}) {
+		t.Errorf("with a \".\" record: %v, want [dot do53]", got)
+	}
+
+	server := cache.NewAuthServer(pathNS)
+	_, ports, targets := combineOOTSEndpoints([]ootsRecord{targeted})
+	installAlpnSignal(server, alpnOrder([]ootsRecord{targeted}), ports, targets, cache.SignalViaLookup,
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+	if w, ok := server.GetReceivedSignal().Weights[core.TransportDo53]; ok {
+		t.Errorf("the targeted record's do53 reached the signal, weight %d", w)
+	}
+}
+
+// A backoff left on the nameserver's own address by an attempt at the default
+// endpoint does not keep a redirected transport from the target once the
+// target's addresses are known; the backoff of the target's addresses does.
+// The lookups of a target's addresses still see the own address's backoff.
+func TestPrioritizeServersRedirectBackoff(t *testing.T) {
+	imr, server, _, _, _ := endpointTestRig(t)
+	server.SetAddrs([]string{"192.0.2.1"})
+	server.RecordEndpointAddrFailure("192.0.2.1", 0, core.TransportDoT, nil)
+	serverMap := map[string]*cache.AuthServer{pathNS: server}
+	saved := endpointAddrLookupHook
+	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) { return nil, time.Time{} }
+	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	hasDoT := func(ctx context.Context) bool {
+		_, _, tuples := imr.prioritizeServersFor(ctx, "example.", dns.TypeA, serverMap, edns0.PrivacyNone)
+		for _, tup := range tuples {
+			if tup.Transport == core.TransportDoT {
+				return true
+			}
+		}
+		return false
+	}
+	ctx := context.Background()
+	if hasDoT(ctx) {
+		t.Error("the target's addresses unknown: DoT offered at the backed-off own address")
+	}
+	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
+	if !hasDoT(ctx) {
+		t.Error("the target's address usable: DoT held back by the own address's backoff")
+	}
+	if hasDoT(withDefaultEndpoints(ctx)) {
+		t.Error("a default-endpoint lookup: DoT offered at the backed-off own address")
+	}
+	server.RecordEndpointAddrFailure("192.0.2.53", 1234, core.TransportDoT, nil)
+	if hasDoT(ctx) {
+		t.Error("every target address backed off: DoT still offered")
+	}
+}
+
+// The stub probe dials the endpoint a query would: the target's address at
+// the endpoint's port once known, the nameserver's own address before. It
+// looks nothing up, and with every target address backed off it reports that
+// without a dial.
+func TestProbeStubServersFollowsRedirect(t *testing.T) {
+	const zone = "stubredirect.example."
+	imr := newTestImr(t)
+	imr.Quiet = true
+	q := new(dns.Msg)
+	q.SetQuestion(zone, dns.TypeSOA)
+	reply := new(dns.Msg)
+	reply.SetReply(q)
+	reply.Authoritative = true
+	dot := core.NewFakeDNSClient(core.TransportDoT)
+	dot.Set(zone, "192.0.2.1", core.FakeResponse{Msg: reply})
+	dot.Set(zone, "192.0.2.53:1234", core.FakeResponse{Msg: reply})
+	for tr := range imr.Cache.DNSClient {
+		delete(imr.Cache.DNSClient, tr)
+	}
+	imr.Cache.DNSClient[core.TransportDoT] = dot
+	if err := imr.Cache.AddStub(zone, []cache.AuthServer{
+		{Name: "ns." + zone, Addrs: []string{"192.0.2.1"}, Alpn: []string{"dot"}},
+	}); err != nil {
+		t.Fatalf("AddStub: %v", err)
+	}
+	imr.setZoneTable(nil, []string{zone}, nil)
+	servers := imr.stubServers(zone)
+	if len(servers) != 1 {
+		t.Fatalf("stub servers %v", servers)
+	}
+	installTransportMap(servers[0], map[string]uint8{"dot": 100}, map[core.Transport]uint16{core.TransportDoT: 1234},
+		map[core.Transport]string{core.TransportDoT: dotTarget}, cache.SignalViaLookup,
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+	saved := endpointAddrLookupHook
+	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) { return nil, time.Time{} }
+	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	probe := func() ImrStubProbeResult {
+		t.Helper()
+		results, err := imr.ProbeStubServers(context.Background(), zone)
+		if err != nil || len(results) != 1 {
+			t.Fatalf("ProbeStubServers: %v %+v", err, results)
+		}
+		return results[0]
+	}
+
+	if res := probe(); res.Addr != "192.0.2.1" || !res.OK {
+		t.Errorf("before the target is known: %+v, want the default endpoint", res)
+	}
+	// A lookup started would be in flight or have failed: either way begin
+	// could not claim it now.
+	if !imr.endpointAddrs.begin(dotTarget, time.Now()) {
+		t.Error("the probe started a lookup")
+	}
+	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
+	if res := probe(); res.Addr != "192.0.2.53:1234" || !res.OK {
+		t.Errorf("target known: %+v, want 192.0.2.53:1234", res)
+	}
+	servers[0].RecordEndpointAddrFailure("192.0.2.53", 1234, core.TransportDoT, nil)
+	n := len(dot.Calls())
+	if res := probe(); res.OK || !strings.Contains(res.Error, "no usable address") {
+		t.Errorf("every target address backed off: %+v", res)
+	}
+	if len(dot.Calls()) != n {
+		t.Error("the probe dialed with every target address backed off")
+	}
+}
+
+// finish drops the entries and retry marks that have run out, of every
+// target, not only the one it ends.
+func TestEndpointAddrTrackerPrunes(t *testing.T) {
+	var tr endpointAddrTracker
+	now := time.Now()
+	tr.finish("a.example.", []string{"192.0.2.1"}, now.Add(time.Minute), now)
+	tr.finish("b.example.", nil, time.Time{}, now)
+	tr.finish("c.example.", []string{"192.0.2.3"}, now.Add(time.Hour), now)
+	later := now.Add(2 * time.Minute)
+	tr.finish("d.example.", []string{"192.0.2.4"}, later.Add(time.Hour), later)
+	if _, ok := tr.entries["a.example."]; ok {
+		t.Error("an expired entry was kept")
+	}
+	if _, ok := tr.retry["b.example."]; ok {
+		t.Error("an elapsed retry mark was kept")
+	}
+	if len(tr.entries) != 2 {
+		t.Errorf("entries %v, want c and d", tr.entries)
+	}
+}
+
+// Addresses found through a CNAME chain are kept no longer than the chain's
+// first link to run out; when the chain is no longer cached whole, for
+// endpointAddrRetry.
+func TestEndpointAddrsExpireWithTheChain(t *testing.T) {
+	imr := newTestImr(t)
+	const alias, final = "dot-alias." + stateZone, "dot-host.example.net."
+	put := func(name string, rr dns.RR, ttl time.Duration) *core.RRset {
+		rrset := &core.RRset{Name: name, Class: dns.ClassINET, RRtype: rr.Header().Rrtype, RRs: []dns.RR{rr}}
+		imr.Cache.Set(name, rr.Header().Rrtype, &cache.CachedRRset{Name: name, RRtype: rr.Header().Rrtype,
+			Context: cache.ContextAnswer, RRset: rrset, Ttl: uint32(ttl / time.Second), Expiration: time.Now().Add(ttl)})
+		return rrset
+	}
+	put(alias, mustRR(t, alias+` 60 IN CNAME `+final), time.Minute)
+	addrs := put(final, mustRR(t, final+` 3600 IN A 192.0.2.53`), time.Hour)
+	resp := &ImrResponse{RRset: addrs}
+
+	exp := imr.addrsExpiry(alias, dns.TypeA, resp)
+	if exp.After(time.Now().Add(time.Minute)) || exp.Before(time.Now().Add(50*time.Second)) {
+		t.Errorf("through the chain: expires in %v, want the link's minute", time.Until(exp))
+	}
+	if exp := imr.addrsExpiry(final, dns.TypeA, resp); exp.Before(time.Now().Add(59 * time.Minute)) {
+		t.Errorf("no chain: expires in %v, want the address TTL", time.Until(exp))
+	}
+	if exp := imr.addrsExpiry("gone."+stateZone, dns.TypeA, resp); exp.After(time.Now().Add(endpointAddrRetry)) {
+		t.Errorf("chain not cached: expires in %v, want at most endpointAddrRetry", time.Until(exp))
 	}
 }

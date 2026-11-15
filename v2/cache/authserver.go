@@ -685,6 +685,14 @@ func (as *AuthServer) IncrementTransportCounter(t core.Transport) {
 // class says whose query it was: a client's, by the PRIVACY level it carried,
 // or the resolver's own.
 func (as *AuthServer) IncrementUsedCounter(t core.Transport, class TrafficClass) {
+	as.CountAnswer(t, class, false)
+}
+
+// CountAnswer records an answer carried over t, as IncrementUsedCounter does,
+// and, when redirected, that a redirected endpoint carried it. Both counters
+// move under one lock, so a TakeTransportStats never finds the one without
+// the other: Redirected stays a subset of Used in every period.
+func (as *AuthServer) CountAnswer(t core.Transport, class TrafficClass, redirected bool) {
 	if as == nil {
 		return
 	}
@@ -694,6 +702,9 @@ func (as *AuthServer) IncrementUsedCounter(t core.Transport, class TrafficClass)
 	now := time.Now()
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	if redirected {
+		as.incrementRedirectedLocked(t)
+	}
 	if as.UsedCounters == nil {
 		as.UsedCounters = make(map[core.Transport]uint64)
 		as.LastUsed = make(map[core.Transport]time.Time)

@@ -118,13 +118,19 @@ func (as *AuthServer) AllowsAddrFamily(addr string) bool {
 }
 
 // IncrementRedirectedCounter records that a query's answer was carried by a
-// redirected endpoint over t, the actual wire transport.
+// redirected endpoint over t, the actual wire transport. tryServer counts the
+// answer and the redirect together (CountAnswer).
 func (as *AuthServer) IncrementRedirectedCounter(t core.Transport) {
 	if as == nil {
 		return
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	as.incrementRedirectedLocked(t)
+}
+
+// incrementRedirectedLocked is IncrementRedirectedCounter with as.mu held.
+func (as *AuthServer) incrementRedirectedLocked(t core.Transport) {
 	if as.RedirectedCounters == nil {
 		as.RedirectedCounters = make(map[core.Transport]uint64)
 	}
