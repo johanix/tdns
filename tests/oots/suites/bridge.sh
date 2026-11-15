@@ -49,7 +49,11 @@ _br_conf() { # party identities signal
 
 _br_has() { [ -n "$(rdata "$BR_A" _dns.ns1.br.test. SVCB)" ]; }
 
-_br_cli() { "$CLI_PUB" --config "$WORK/$1/tdns-cli.yaml" "$@"; }
+_br_cli() { # party args... : the CLI of that party's build, with its config
+	local _p
+	_p="$1"; shift
+	"$CLI_PUB" --config "$WORK/$_p/tdns-cli.yaml" "$@"
+}
 
 _br_run() { # party release|norelease
 	local _p _printed _served _after _rel
@@ -88,9 +92,9 @@ _br_run() { # party release|norelease
 		sleep 5
 		_after=$(rdata "$BR_A" _dns.ns1.br.test. SVCB)
 		note "$_p after a changed service.transport: $(echo "$_after" | tr '\n' '|')"
-		check B3 "$_p: a changed service.transport does not reach provisioned records" [ "$_after" = "$_printed" ]
+		check B3 "$_p: a changed service.transport does not reach provisioned records" [ -n "$_after" -a "$_after" = "$_printed" ]
 	else
-		check B4 "$_p: without the release the records are withdrawn" [ -z "$_after" ]
+		check B4 "$_p: without the release the records are withdrawn" [ -n "$_served" -a -z "$_after" ]
 	fi
 	stop_daemon "$_p"
 }
