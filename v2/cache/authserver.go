@@ -28,14 +28,21 @@ type AddressBackoff struct {
 // (1.2.3.4:53, DoT) does not poison (1.2.3.4:53, Do53) or vice versa: that
 // would conflate problems with the TLS path with problems with the address.
 //
-// Port is 0 for the server's own addresses, as it always was. An address of a
-// redirected endpoint (endpoint.go) carries the endpoint's port, 0 for the
-// transport's default, so that one host's endpoints on different ports are
-// backed off apart.
+// Port is the port the attempt dialed, 0 for the transport's default, at the
+// server's own address and at a target's alike (endpoint.go): a udp endpoint
+// on port 5353 that fails does not back off the fallback on port 53, one
+// host's endpoints on different ports are backed off apart, and a changed
+// port starts clean. Addr is always a bare IP.
 type AddrXport struct {
 	Addr      string
 	Port      uint16
 	Transport core.Transport
+}
+
+// HostPort is the key's address with its port joined on, as dialed: the
+// bare address for the transport's default port.
+func (k AddrXport) HostPort() string {
+	return JoinDialAddr(k.Addr, k.Port)
 }
 
 // RTTEstimate is an exponentially-weighted moving average of observed
@@ -52,8 +59,8 @@ type AuthServer struct {
 	Name string
 	// Addrs holds BARE IP literals (e.g. "192.0.2.1" or "2001:db8::1"),
 	// NOT host:port. DialAddr joins a port the latest oots signal assigned
-	// to the transport being dialed at the server's own name (endpoint.go);
-	// otherwise the client adds its default
+	// to the transport being dialed at the server's own name (endpoint.go),
+	// udp and tcp included; otherwise the client adds its default
 	// via net.JoinHostPort(addr, c.Port). Passing a host:port string through
 	// AddAddr makes JoinHostPort produce "[1.2.3.4:53]:53" because of the
 	// embedded colon, after which Dial tries to resolve "1.2.3.4:53" as a
@@ -73,10 +80,11 @@ type AuthServer struct {
 	Received *ReceivedSignal
 	// TransportEndpoints is where the latest signal put each transport: a
 	// target name other than the server's own, a non-default port, or both
-	// (endpoint.go). A missing entry is the default endpoint: the server's
-	// own addresses at the client's usual port (DoT and DoQ 853, DoH 443).
-	// Do53 is never stored: cleartext stays on 53. Replaced wholesale with the
-	// signal. Guarded by mu.
+	// (endpoint.go). TransportDo53 is the udp endpoint (its TCP retry after
+	// truncation goes to the same address and port) and TransportDo53TCP the
+	// tcp one. A missing entry is the default endpoint: the server's own
+	// addresses at the client's usual port (Do53 53, DoT and DoQ 853, DoH
+	// 443). Replaced wholesale with the signal. Guarded by mu.
 	TransportEndpoints map[core.Transport]Endpoint
 	// Stats (guarded by mu)
 	mu                 sync.Mutex
@@ -516,16 +524,17 @@ func (as *AuthServer) SetReceivedSignal(received *ReceivedSignal) {
 	as.TransportEndpoints = endpointsFromReceived(received)
 }
 
-// DialPorts copies the ports a signal assigns, dropping a zero and Do53: the
-// port key never moves cleartext off 53. Nil when nothing remains, which is
-// what clears the previous ports.
+// DialPorts copies the ports a signal assigns, dropping a zero. udp and tcp
+// take a port like the other transports (the alternative-endpoint design,
+// section 2). Nil when nothing remains, which is what clears the previous
+// ports.
 func DialPorts(ports map[core.Transport]uint16) map[core.Transport]uint16 {
 	if len(ports) == 0 {
 		return nil
 	}
 	out := make(map[core.Transport]uint16, len(ports))
 	for t, p := range ports {
-		if p == 0 || t == core.TransportDo53 || t == core.TransportDo53TCP {
+		if p == 0 {
 			continue
 		}
 		out[t] = p
@@ -538,7 +547,8 @@ func DialPorts(ports map[core.Transport]uint16) map[core.Transport]uint16 {
 
 // GetTransportPort returns the non-default port the latest signal assigned to
 // t, at the server's own name or at a target, or 0 when t keeps its usual
-// port. Do53 and Do53TCP are always 0. Thread-safe.
+// port. Do53 and Do53TCP are separate: forced TCP never dials the port of the
+// udp endpoint. Thread-safe.
 func (as *AuthServer) GetTransportPort(t core.Transport) uint16 {
 	return as.GetTransportEndpoint(t).Port
 }
@@ -560,17 +570,13 @@ func (as *AuthServer) GetTransportPorts() map[core.Transport]uint16 {
 }
 
 // DialAddr is the address to pass to Exchange for transport t at the server's
-// own address addr, a bare IP. A port the latest signal assigned to t at the
-// server's own name is joined onto it; otherwise addr is returned unchanged
-// and the client adds its default port. A transport redirected to a target is
-// dialed through the endpoint instead (tryServer); at the server's own
-// address it is at its default port. Do53 stays on 53.
+// own address addr, a bare IP: addr with the port t is dialed at there joined
+// on (SelfPort), or addr alone, where the client adds its default port. A
+// transport redirected to a target is dialed through the endpoint instead
+// (tryServer). Backoff and RTT are keyed by address, port and transport
+// (AddrXport), not by this string.
 func (as *AuthServer) DialAddr(addr string, t core.Transport) string {
-	ep := as.GetTransportEndpoint(t)
-	if ep.Target != "" {
-		return addr
-	}
-	return JoinDialAddr(addr, ep.Port)
+	return JoinDialAddr(addr, as.SelfPort(t))
 }
 
 // JoinDialAddr is addr, a bare IP, with port joined onto it; addr alone for
@@ -685,6 +691,14 @@ func (as *AuthServer) IncrementTransportCounter(t core.Transport) {
 // class says whose query it was: a client's, by the PRIVACY level it carried,
 // or the resolver's own.
 func (as *AuthServer) IncrementUsedCounter(t core.Transport, class TrafficClass) {
+	as.CountAnswer(t, class, false)
+}
+
+// CountAnswer records an answer carried over t, as IncrementUsedCounter does,
+// and, when redirected, that a redirected endpoint carried it. Both counters
+// move under one lock, so a TakeTransportStats never finds the one without
+// the other: Redirected stays a subset of Used in every period.
+func (as *AuthServer) CountAnswer(t core.Transport, class TrafficClass, redirected bool) {
 	if as == nil {
 		return
 	}
@@ -694,6 +708,9 @@ func (as *AuthServer) IncrementUsedCounter(t core.Transport, class TrafficClass)
 	now := time.Now()
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	if redirected {
+		as.incrementRedirectedLocked(t)
+	}
 	if as.UsedCounters == nil {
 		as.UsedCounters = make(map[core.Transport]uint64)
 		as.LastUsed = make(map[core.Transport]time.Time)
@@ -944,6 +961,12 @@ func (as *AuthServer) RecordEndpointAddrFailure(addr string, port uint16, t core
 // backoff immediately. Other rcodes follow the standard exponential
 // schedule. Thread-safe.
 func (as *AuthServer) RecordAddressFailureForRcode(addr string, t core.Transport, rcode uint8) {
+	as.RecordEndpointAddrFailureForRcode(addr, 0, t, rcode)
+}
+
+// RecordEndpointAddrFailureForRcode is RecordAddressFailureForRcode for addr
+// at port (0 for the transport's default). Thread-safe.
+func (as *AuthServer) RecordEndpointAddrFailureForRcode(addr string, port uint16, t core.Transport, rcode uint8) {
 	if as == nil {
 		return
 	}
@@ -952,7 +975,7 @@ func (as *AuthServer) RecordAddressFailureForRcode(addr string, t core.Transport
 	if as.AddressBackoffs == nil {
 		as.AddressBackoffs = make(map[AddrXport]*AddressBackoff)
 	}
-	key := AddrXport{Addr: addr, Transport: t}
+	key := AddrXport{Addr: addr, Port: port, Transport: t}
 	backoff, exists := as.AddressBackoffs[key]
 
 	var backoffDuration time.Duration

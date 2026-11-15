@@ -53,12 +53,17 @@ service:
 
    transport:
       type:    svcb               # svcb | tsync | none; default is none
-      signal:  "doq:20,dot:10"    # comma-sep list of doq,dot,doh,do53 with traffic share
+      signal:  "doq:20,dot:10"    # comma-sep list of udp,tcp,doq,dot,doh with traffic share
+      #                            # (udp and tcp 100 when absent; do53:N is
+      #                            # udp:N plus tcp:N)
       # ports:                     # optional: a transport not on its standard
       #    dot:  1234              # port. Each one gets an SVCB record of its
-      #    doq:  1235              # own; the rest share one record with do53.
-      #                            # Keys: dot, doq, doh, each with a weight in
-      #                            # signal. dot and doh cannot share a port.
+      #    doq:  1235              # own; the rest share one record.
+      #    udp:  5353              # Keys: udp, tcp, dot, doq, doh; dot, doq and
+      #    tcp:  5353              # doh each with a weight in signal. Ports
+      #                            # are sockets: no two of tcp, dot, doh on one
+      #                            # port, nor udp and doq, and udp takes its
+      #                            # port on TCP too (the retry after TC).
       #                            # Only type svcb carries ports. Publishing a
       #                            # port does not listen on it: list it under
       #                            # listeners.ports too (a warning otherwise).

@@ -20,9 +20,11 @@ import (
 // (853 for DoT and DoQ, 443 for DoH).
 //
 // A Target is stored only from a record whose whole path validated Secure
-// (R1, R5); the resolver decides that before it installs the signal. Do53
-// gets no endpoint: cleartext stays at the nameserver's own name on port 53
-// until it gets transports of its own.
+// (R1, R5); the resolver decides that before it installs the signal. udp
+// (TransportDo53) and tcp (TransportDo53TCP) take an endpoint like any other
+// transport; the do53 shorthand gives neither a port nor a target. Port 53 at
+// the nameserver's own name stays the last resort for cleartext (the
+// resolver's endpointFor).
 type Endpoint struct {
 	Target string
 	Port   uint16
@@ -47,12 +49,6 @@ func (ep Endpoint) String() string {
 	return target + ":" + strconv.Itoa(int(ep.Port))
 }
 
-// endpointTransport reports whether t can be given an endpoint. Do53 cannot:
-// a signal does not move cleartext off the nameserver's own name and port 53.
-func endpointTransport(t core.Transport) bool {
-	return t != core.TransportDo53 && t != core.TransportDo53TCP
-}
-
 // endpointsFromReceived is the endpoints a signal assigns: its ports and its
 // targets, by transport. Nil when it assigns none, so installing it clears
 // the previous endpoints.
@@ -62,9 +58,6 @@ func endpointsFromReceived(received *ReceivedSignal) map[core.Transport]Endpoint
 	}
 	var out map[core.Transport]Endpoint
 	set := func(t core.Transport, f func(*Endpoint)) {
-		if !endpointTransport(t) {
-			return
-		}
 		if out == nil {
 			out = map[core.Transport]Endpoint{}
 		}
@@ -85,15 +78,27 @@ func endpointsFromReceived(received *ReceivedSignal) map[core.Transport]Endpoint
 }
 
 // GetTransportEndpoint returns the endpoint the latest signal assigned to t;
-// the zero Endpoint, the default one, when it assigned none. Do53 and Do53TCP
-// always get the default. Thread-safe.
+// the zero Endpoint, the default one, when it assigned none. Thread-safe.
 func (as *AuthServer) GetTransportEndpoint(t core.Transport) Endpoint {
-	if as == nil || !endpointTransport(t) {
+	if as == nil {
 		return Endpoint{}
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	return as.TransportEndpoints[t]
+}
+
+// SelfPort is the port t is dialed at on the server's own addresses: the
+// endpoint's port when the signal left t at the server's own name, and 0, the
+// transport's default, when it assigned none or sent t to a target (whose
+// default endpoint is then the server's own address at the usual port).
+// Thread-safe.
+func (as *AuthServer) SelfPort(t core.Transport) uint16 {
+	ep := as.GetTransportEndpoint(t)
+	if ep.Target != "" {
+		return 0
+	}
+	return ep.Port
 }
 
 // GetTransportEndpoints returns a copy of the endpoints the latest signal
@@ -118,13 +123,19 @@ func (as *AuthServer) AllowsAddrFamily(addr string) bool {
 }
 
 // IncrementRedirectedCounter records that a query's answer was carried by a
-// redirected endpoint over t, the actual wire transport.
+// redirected endpoint over t, the actual wire transport. tryServer counts the
+// answer and the redirect together (CountAnswer).
 func (as *AuthServer) IncrementRedirectedCounter(t core.Transport) {
 	if as == nil {
 		return
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	as.incrementRedirectedLocked(t)
+}
+
+// incrementRedirectedLocked is IncrementRedirectedCounter with as.mu held.
+func (as *AuthServer) incrementRedirectedLocked(t core.Transport) {
 	if as.RedirectedCounters == nil {
 		as.RedirectedCounters = make(map[core.Transport]uint64)
 	}

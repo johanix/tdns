@@ -34,7 +34,8 @@ Features:
   every hop. `dump zone servers` shows it.
 
   A record whose TargetName is not `.` sends the transports it names to
-  that host, at the record's port or theirs. Such a record is honoured only
+  that host, at the record's port or theirs; `udp` and `tcp` go there like
+  the others, and a `do53` in such a record is ignored. Such a record is honoured only
   when the RRset it came in validated Secure; otherwise it is ignored whole,
   with a debug line and the `ignored_redirects` counter of `stats
   auth-transports`, and an undecided one starts the lookup of `_dns.<ns>`.
@@ -42,8 +43,9 @@ Features:
   addresses are looked up in the background through every server's default
   endpoints; until they are known the transport stays on the nameserver
   itself. When every address of a target is backed off, the query goes on
-  to the nameserver's other transports, ending at Do53 on port 53. Backoff
-  and RTT for a target are kept per address, port and transport.
+  to the nameserver's other transports, ending at Do53 on port 53; a udp or
+  tcp endpoint that has no usable address gives way to the nameserver itself
+  on port 53. Backoff and RTT are kept per address, port and transport.
   `dump zone servers` shows the targets (`Signal targets`).
 
   An AliasMode record at `_dns.<ns>` delegates the whole signal: tdns-imr
@@ -257,7 +259,7 @@ zone reload.
 | `show config` | Listen addresses, cache-primed flag, trust anchors, stub zones |
 | `show options` | The configured `imrengine.options` |
 | `set linewidth <n>` | Output truncation width |
-| `set server transport --server <ns> --signal "doq:20,dot:100,do53:3"` | Override a server's transport signal at runtime (debug). `--reset` clears it |
+| `set server transport --server <ns> --signal "doq:20,dot:100,udp:3,tcp:0"` | Override a server's transport signal at runtime (debug). `do53:N` is `udp:N` and `tcp:N`; absent `udp` and `tcp` are 100. `--reset` clears it |
 
 **Zones**
 

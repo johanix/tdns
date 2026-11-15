@@ -1005,42 +1005,62 @@ service:
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `type` | `none` | `svcb` publishes an SVCB record with the `oots` SvcParam, `tsync` a TSYNC record, `none` nothing. An unknown value is warned about and read as `none` |
-| `signal` | — | comma-separated `transport:weight` pairs, from `do53`, `dot`, `doq` and `doh`, weights 0 to 100. An absent `do53` is 100 and an absent encrypted transport 0 |
-| `ports` | — | the port published for a transport that is not on its standard port (853 for `dot` and `doq`, 443 for `doh`). Only with `type: svcb` |
+| `signal` | — | comma-separated `transport:weight` pairs, from `udp`, `tcp`, `dot`, `doq` and `doh`, weights 0 to 100. An absent `udp` or `tcp` is 100 and an absent encrypted transport 0. `do53:N` is accepted as the shorthand for `udp:N` and `tcp:N`, and an explicit `udp` or `tcp` wins over it |
+| `ports` | — | the port published for a transport that is not on its standard port (53 for `udp` and `tcp`, 853 for `dot` and `doq`, 443 for `doh`). Only with `type: svcb` |
 
-**What is published.** Without `ports` there is one record:
+`udp` is cleartext DNS over UDP, retried over TCP after truncation; `tcp` is
+cleartext DNS over TCP. The `tcp` weight caps only the TCP a resolver would
+choose on its own: a retry after truncation, or a resolver forcing TCP (as
+tdns-imr does for a large DNSKEY), ignores it, `tcp:0` included.
+
+**What is published.** Without `ports` there is one record, with only what
+the signal names. `do53` is published as `udp` and `tcp`, and an absent `udp`
+or `tcp` is not written out, since absent means 100:
 
 ```
-_dns.ns1.example. 10800 IN SVCB 1 . oots="do53:100,doq:20,dot:10"
+_dns.ns1.example. 10800 IN SVCB 1 . oots="doh:5,doq:20,dot:10"
 ```
 
 With the `ports` above, each transport that has a port gets a record of its
-own. One record without a port carries the rest, and `do53` once:
+own. One record without a port carries the rest, and is left out when nothing
+is left for it:
 
 ```
-_dns.ns1.example. 10800 IN SVCB 1 . oots="do53:100,doq:20"
+_dns.ns1.example. 10800 IN SVCB 1 . oots="doq:20"
 _dns.ns1.example. 10800 IN SVCB 1 . port=1234 oots="dot:10"
 _dns.ns1.example. 10800 IN SVCB 1 . port=8443 oots="doh:5"
 ```
 
-Every transport is in exactly one record. A record's port applies to every
+Every transport is in at most one record. A record's port applies to every
 transport it names (RFC 9461), which is why a transport on its own port gets
-its own record.
+its own record. A `udp` or `tcp` with a port that the signal does not name is
+stated at its default: `port=5353 oots="udp:100"`. That holds with no
+`signal` at all, so `ports.udp: 5353` alone publishes that one record.
+
+A resolver sends the TCP retry after a truncation to the address and port
+that truncated, so serve TCP on a `udp` port too. TCP the resolver forces goes
+to the `tcp` port, or to port 53 when `tcp` has none.
 
 **Checks at load.** Each of these is an error, and the daemon does not start:
 
-- `signal` does not parse;
-- a key of `ports` other than `dot`, `doq` or `doh`. Do53 listens on the ports
-  in `listeners.addresses`;
-- a key whose transport has no weight in `signal`;
+- `signal` does not parse, or names a token other than `udp`, `tcp`, `dot`,
+  `doq`, `doh` and `do53`;
+- a key of `ports` other than `udp`, `tcp`, `dot`, `doq` or `doh`. `do53` is
+  not a key: it is the shorthand for the two on port 53;
+- a key for `dot`, `doq` or `doh` whose transport has no weight in `signal`.
+  `udp` and `tcp` need none: cleartext is the last resort whatever its weight;
 - port 0, or a value above 65535. A transport's standard port counts as absent;
-- `dot` and `doh` on one port, including one of them on the other's standard
-  port: both are TCP. `doq` is UDP and may share a port with either;
+- two transports on one socket: no two of `tcp`, `dot` and `doh` on one port,
+  and not `udp` and `doq`. `udp` takes its port on TCP as well, for the retry,
+  so `dot` or `doh` on `udp`'s port is refused too. A transport left on its
+  standard port counts, so `dot` on 443 clashes with `doh`, and `dot` on 53
+  with `tcp`. `udp` and `tcp` on one port is the natural case;
 - `ports` with `type: tsync` or `none`.
 
-A published port that is not in `listeners.ports` for its transport is a
-warning, not an error: a front end may publish a port the daemon does not
-listen on itself.
+A published port that is not listened on for its transport is a warning, not
+an error: `listeners.ports` for `dot`, `doq` and `doh`, the ports of
+`listeners.addresses` for `udp` and `tcp`. A front end may publish a port the
+daemon does not listen on itself.
 
 **Publishing a port opens no socket.** List the port under `listeners.ports`
 as well.
@@ -1048,6 +1068,11 @@ as well.
 **Older resolvers.** A resolver that does not read the `port` key dials the
 standard port, fails where nothing listens there, backs off and falls back to
 Do53. Turn `ports` on once the resolvers that matter to you read it.
+
+**Older tdns nodes.** `udp` and `tcp` are new tokens. A tdns node older than
+the lossless `oots` codec (the dns fork's `v1.1.72-johanix.6`) drops them when
+it re-packs the record, which breaks its RRSIG. Publish them only where every
+tdns secondary, signer and resolver runs this version or later.
 
 ## DNSSEC policies
 

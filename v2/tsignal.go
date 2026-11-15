@@ -268,13 +268,22 @@ type signalRecord struct {
 
 // signalStandardPorts is the standard port of each transport that can take a
 // port in service.transport.ports. A configured port equal to it counts as
-// absent. do53 is not a key: it listens on the ports in listeners.addresses.
-var signalStandardPorts = map[string]uint16{"dot": 853, "doq": 853, "doh": 443}
+// absent. udp and tcp are cleartext DNS on port 53; do53 is not a key, since
+// it is the shorthand for the two on their default port.
+var signalStandardPorts = map[string]uint16{"udp": 53, "tcp": 53, "dot": 853, "doq": 853, "doh": 443}
 
 // signalPortOrder is the order the records with a port go out in, after the
 // record without one. RRset order means nothing on the wire; a fixed order
 // keeps zone diffs and tests stable.
-var signalPortOrder = []string{"dot", "doq", "doh"}
+var signalPortOrder = []string{"udp", "tcp", "dot", "doq", "doh"}
+
+// cleartextSignalToken reports whether tok is udp or tcp. Absent, each weighs
+// 100, so a stated 0 means something, and a port for one is never published
+// for nothing: cleartext is the last resort whatever its weight, and forced
+// TCP goes to the tcp endpoint whatever tcp's weight.
+func cleartextSignalToken(tok string) bool {
+	return tok == "udp" || tok == "tcp"
+}
 
 // publishedSignalPort is the port published for transport t: the configured
 // one, or 0 when there is none or it is t's standard port.
@@ -288,33 +297,52 @@ func publishedSignalPort(ports map[string]uint16, t string) uint16 {
 
 // transportSignalLayout lays out the published SVCB RRset from
 // service.transport:
-//   - No signal: one record with no weights and no port, an empty SVCB, as
-//     before.
-//   - No published port: one record with the signal's weights and the do53
-//     default written out, built as before, so the RR is byte-identical.
-//   - Published ports: first one record without a port that carries every
-//     transport without one and do53 once (the operator's weight, or 100),
-//     then one record per transport with a port that carries that transport
-//     alone, in the order dot, doq, doh. Every transport is in exactly one
-//     record, so a resolver never meets one named twice.
+//   - No signal and no published port: one record with no weights and no
+//     port, an empty SVCB, as before. No signal with a udp or tcp port: the
+//     ported records below, each at the default 100 (validateTransportSignal
+//     refuses an encrypted port without a weight).
+//   - No published port: one record with the signal's weights as published
+//     (publishedSignalWeights): do53 is emitted as udp and tcp, and nothing
+//     the operator did not name is written out.
+//   - Published ports: one record per transport with a port that carries
+//     that transport alone, in the order udp, tcp, dot, doq, doh, after one
+//     record without a port that carries every other transport named. That
+//     record is left out when nothing is left for it. A udp or tcp with a
+//     port that the signal does not name is stated at its default, 100, since
+//     a record's port applies only to the transports it names. Every
+//     transport is in at most one record, so a resolver never meets one
+//     named twice.
 func transportSignalLayout(t TransportConf) ([]signalRecord, error) {
-	if t.Signal == "" {
-		return []signalRecord{{}}, nil
+	weights := map[string]uint8{}
+	if t.Signal != "" {
+		var err error
+		if weights, err = publishedSignalWeights(t.Signal); err != nil {
+			return nil, err
+		}
 	}
-	weights, err := core.ParseTransportString(t.Signal)
-	if err != nil {
-		return nil, err
-	}
-	recs := []signalRecord{{weights: weights}}
+	var ported []signalRecord
 	for _, tr := range signalPortOrder {
 		p := publishedSignalPort(t.Ports, tr)
-		if p == 0 || weights[tr] == 0 {
+		if p == 0 {
 			continue
 		}
-		recs = append(recs, signalRecord{weights: map[string]uint8{tr: weights[tr]}, port: p})
+		w, named := weights[tr]
+		switch {
+		case cleartextSignalToken(tr) && !named:
+			w = 100
+		case !cleartextSignalToken(tr) && w == 0:
+			continue
+		}
+		ported = append(ported, signalRecord{weights: map[string]uint8{tr: w}, port: p})
 		delete(weights, tr)
 	}
-	return recs, nil
+	if t.Signal == "" && len(ported) == 0 {
+		return []signalRecord{{}}, nil
+	}
+	if len(ported) > 0 && svcbOotsFromWeights(weights) == nil {
+		return ported, nil
+	}
+	return append([]signalRecord{{weights: weights}}, ported...), nil
 }
 
 // svcbValuesForSignal is the SvcParams of one published record, in key order:
@@ -332,18 +360,47 @@ func svcbValuesForSignal(weights map[string]uint8, port uint16) []dns.SVCBKeyVal
 }
 
 // transportSignalToSVCBOots builds a dns.SVCBOots from a config signal string,
-// with the absence defaults applied (see svcbOotsFromWeights).
+// as published (publishedSignalWeights, svcbOotsFromWeights).
 func transportSignalToSVCBOots(sig string) (*dns.SVCBOots, error) {
-	m, err := core.ParseTransportString(sig)
+	m, err := publishedSignalWeights(sig)
 	if err != nil {
 		return nil, err
 	}
 	return svcbOotsFromWeights(m), nil
 }
 
+// publishedSignalWeights is a configured signal as tdns-auth publishes it: the
+// weights the operator named, with do53 emitted as udp and tcp, an explicit
+// udp or tcp winning over it (core.ExpandDo53Shorthand). do53 is never
+// emitted, beside udp and tcp or alone. No absence default is written out: an
+// absent udp or tcp means 100, and an absent encrypted transport 0 (the
+// alternative-endpoint design, sections 2 and 8). A publisher emits udp and
+// tcp only where every tdns node that can re-pack the record keeps them,
+// which a deployment of this version ensures (gate G1 of the plan).
+func publishedSignalWeights(sig string) (map[string]uint8, error) {
+	m, err := core.ParseTransportStringRaw(sig)
+	if err != nil {
+		return nil, err
+	}
+	core.ExpandDo53Shorthand(m)
+	return m, nil
+}
+
+// publishedTSYNCSignal is the transport= value of a published TSYNC: the
+// configured signal as written, or, when it names do53, the signal as
+// publishedSignalWeights emits it, so that do53 is never published.
+func publishedTSYNCSignal(sig string) string {
+	raw, err := core.ParseTransportStringRaw(sig)
+	if _, named := raw["do53"]; err != nil || !named {
+		return sig
+	}
+	core.ExpandDo53Shorthand(raw)
+	return MarshalTransport(raw)
+}
+
 // svcbOotsFromWeights builds a dns.SVCBOots from a weight map, entries in
-// key order. Zero-weight entries other than do53 are omitted (absence means
-// 0); do53:0 is kept so "no Do53" is expressible on the wire. nil when no
+// key order. A zero-weight encrypted transport is omitted (absence means 0);
+// udp:0 and tcp:0 are kept, since an absent udp or tcp means 100. nil when no
 // entry is left.
 func svcbOotsFromWeights(m map[string]uint8) *dns.SVCBOots {
 	keys := make([]string, 0, len(m))
@@ -354,7 +411,7 @@ func svcbOotsFromWeights(m map[string]uint8) *dns.SVCBOots {
 	var entries []dns.SVCBOotsEntry
 	for _, k := range keys {
 		v := m[k]
-		if v == 0 && k != "do53" {
+		if v == 0 && !cleartextSignalToken(k) {
 			continue
 		}
 		entries = append(entries, dns.SVCBOotsEntry{Proto: k, Weight: v})
@@ -684,7 +741,7 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys, ba
 		}
 		tsyncStr := fmt.Sprintf("_dns.%s 10800 IN TSYNC . %q %q %q",
 			nsName,
-			fmt.Sprintf("transport=%s", conf.Service.Transport.Signal),
+			fmt.Sprintf("transport=%s", publishedTSYNCSignal(conf.Service.Transport.Signal)),
 			fmt.Sprintf("v4=%s", strings.Join(ipv4s, ",")),
 			fmt.Sprintf("v6=%s", strings.Join(ipv6s, ",")),
 		)

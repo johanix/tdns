@@ -94,8 +94,8 @@ func TestCandidateTransports_SharePoolIncludesDo53(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseTransportString: %v", err)
 	}
-	if m["do53"] != 100 {
-		t.Fatalf("setup: expected do53 decode default 100, got %d", m["do53"])
+	if m["udp"] != 100 || m["tcp"] != 100 {
+		t.Fatalf("setup: expected udp and tcp decode default 100, got %v", m)
 	}
 	if !applyTransportMapToServer(s, m) {
 		t.Fatal("applyTransportMapToServer failed")

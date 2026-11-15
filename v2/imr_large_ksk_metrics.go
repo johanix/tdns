@@ -183,8 +183,9 @@ func (imr *Imr) dnskeyDSSignalsLarge(qname string) bool {
 
 // preferredDNSKEYTransport picks the transport for a DNSKEY query that has been
 // selected to bypass probabilistic transport weights. It honors the server's
-// advertised capabilities (server.Transports) but ignores the weights. The
-// preference order is DoQ > DoT > DoH > TCP.
+// advertised capabilities (server.Transports, less any signalled at weight 0;
+// see serverAdvertises) but not the size of the weights. The preference order
+// is DoQ > DoT > DoH > TCP.
 //
 // Returns 0 (no transport) when the policy is force_encrypted and the server
 // advertises no encrypted transport; the caller must fail the query in that
@@ -202,17 +203,29 @@ func (imr *Imr) preferredDNSKEYTransport(server *cache.AuthServer) core.Transpor
 		return 0
 	}
 
-	// Non-encrypted fallback: plain TCP, never UDP.
+	// Non-encrypted fallback: plain TCP, never UDP. This is forced TCP, which
+	// no tcp weight gates (tcp:0 included). tryServer dials it at the tcp
+	// endpoint the signal gave (server.DialAddr with Do53TCP), or at the
+	// nameserver on port 53 when none was given, never at the port of the udp
+	// endpoint: the signal's ports are kept per transport.
 	return core.TransportDo53TCP
 }
 
-// serverAdvertises reports whether the server lists transport t in its
-// advertised Transports.
+// serverAdvertises reports whether the server offers transport t: listed in
+// its advertised Transports and not signalled at weight 0. Weight 0 means
+// "send none", and the absence defaults put dot, doh and doq at 0 for a
+// signal that leaves them out, so a cleartext-only signal must not send the
+// DNSKEY query to an encrypted endpoint the server never offered. A listed
+// transport with no weight at all is offered.
 func serverAdvertises(server *cache.AuthServer, t core.Transport) bool {
 	if server == nil {
 		return false
 	}
-	for _, a := range server.GetTransports() {
+	transports, weights := server.GetTransportSignal()
+	if w, ok := weights[t]; ok && w == 0 {
+		return false
+	}
+	for _, a := range transports {
 		if a == t {
 			return true
 		}

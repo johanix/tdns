@@ -13,6 +13,7 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -23,9 +24,11 @@ import (
 // not is ignored whole (R2), with a debug line and a counter. The target's
 // addresses are looked up off the query path and never through a redirected
 // endpoint; until they are known the transport uses its default endpoint.
-// When every address of an endpoint is backed off, the attempt fails without
-// a dial, and the query goes on to its next tuple, ending at the nameserver's
-// own name on port 53 (Do53, the last resort candidateTransports keeps).
+// When every address of an endpoint is backed off, an encrypted transport's
+// attempt fails without a dial, and the query goes on to its next tuple. udp
+// and tcp fall back to the nameserver's own address on port 53 instead: the
+// one endpoint the delegation guarantees (section 3), and the last resort
+// candidateTransports keeps.
 
 // honouredRecords is recs without the records whose target the set's path does
 // not allow: all of them unless the path validated Secure (R1, R5). Their
@@ -83,9 +86,33 @@ type endpointDial struct {
 	addr     string // the address dialed, a bare IP
 	port     uint16 // the port dialed; 0 for the transport's default
 	redirect bool   // the address is a target's, not the server's own
-	// keyPort is the port backoff and RTT are kept under: the endpoint's at
-	// a target's address, 0 at the server's own address, as it always was.
+	// keyPort is the port backoff and RTT are kept under: the port dialed,
+	// at the server's own address and at a target's alike (AddrXport).
 	keyPort uint16
+}
+
+// dialAddr is d as passed to Exchange: the address, with the port joined on
+// unless it is the transport's default.
+func (d endpointDial) dialAddr() string {
+	return cache.JoinDialAddr(d.addr, d.port)
+}
+
+// lamenessPort is the port a lame answer from an attempt at d is kept under,
+// at the server's own address: d's port when d is at the server's own name (a
+// lame endpoint on 5353 does not hold back port 53), and 0 when d went to a
+// target, for lameness is the nameserver's and stays on its tuple.
+func (d endpointDial) lamenessPort() uint16 {
+	if d.redirect {
+		return 0
+	}
+	return d.keyPort
+}
+
+// fallsBackToPort53 reports whether t, when its signalled endpoint is not
+// usable, is sent to the nameserver's own address on port 53: udp and tcp,
+// for which the delegation guarantees that endpoint (the design, section 3).
+func fallsBackToPort53(t core.Transport) bool {
+	return t == core.TransportDo53 || t == core.TransportDo53TCP
 }
 
 // errEndpointUnavailable is an attempt not made: every address of the
@@ -103,26 +130,93 @@ func (e errEndpointUnavailable) Error() string {
 // addr goes. At the server's own name it is addr, at the endpoint's port. At
 // a target it is the best usable address of the target, once those are known;
 // until then the default endpoint, addr at the usual port, and the lookup of
-// the target's addresses is started. A context marked withDefaultEndpoints
-// always gets the default endpoint.
+// the target's addresses is started. A udp or tcp endpoint with no usable
+// address (fallsBackToPort53) gives way to addr on port 53. A context marked
+// withDefaultEndpoints always gets the default endpoint. Forced TCP asks for
+// Do53TCP, so it goes to the tcp endpoint or port 53, never to the udp one.
 func (imr *Imr) endpointFor(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) (endpointDial, error) {
 	if defaultEndpointsOnly(ctx) {
 		return endpointDial{addr: addr}, nil
 	}
+	return imr.resolveEndpoint(server, addr, t, true)
+}
+
+// resolveEndpoint is endpointFor's choice for a context not marked
+// withDefaultEndpoints. lookup says whether a target whose addresses are not
+// known is looked up: not for the stub probe, which only reports.
+func (imr *Imr) resolveEndpoint(server *cache.AuthServer, addr string, t core.Transport, lookup bool) (endpointDial, error) {
 	ep := server.GetTransportEndpoint(t)
 	if ep.Target == "" {
-		return endpointDial{addr: addr, port: ep.Port}, nil
+		if ep.Port != 0 && fallsBackToPort53(t) && !server.IsEndpointAddrAvailable(addr, ep.Port, t) {
+			return endpointDial{addr: addr}, nil
+		}
+		return endpointDial{addr: addr, port: ep.Port, keyPort: ep.Port}, nil
 	}
 	addrs, known := imr.endpointAddrs.get(ep.Target, time.Now())
 	if !known {
-		imr.startEndpointLookup(ep.Target)
+		if lookup {
+			imr.startEndpointLookup(ep.Target)
+		}
 		return endpointDial{addr: addr}, nil
 	}
 	pick := imr.chooseEndpointAddr(server, addrs, ep.Port, t)
 	if pick == "" {
+		if fallsBackToPort53(t) {
+			return endpointDial{addr: addr}, nil
+		}
 		return endpointDial{}, errEndpointUnavailable{server: server.Name, target: ep.Target, transport: t}
 	}
 	return endpointDial{addr: pick, port: ep.Port, redirect: true, keyPort: ep.Port}, nil
+}
+
+// attemptKey is the address and port an attempt for t at the server's own
+// address addr would dial, and book its backoff and RTT under (endpointFor),
+// read without starting a lookup. ok is false when no attempt would be made.
+func (imr *Imr) attemptKey(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) (string, uint16, bool) {
+	if defaultEndpointsOnly(ctx) {
+		return addr, 0, true
+	}
+	d, err := imr.resolveEndpoint(server, addr, t, false)
+	if err != nil {
+		return "", 0, false
+	}
+	return d.addr, d.keyPort, true
+}
+
+// tupleRTT is the RTT of what an attempt for tup would dial (attemptKey).
+func (imr *Imr) tupleRTT(ctx context.Context, tup ServerAddrXportTuple) (time.Duration, bool) {
+	a, p, ok := imr.attemptKey(ctx, tup.Server, tup.Addr, tup.Transport)
+	if !ok {
+		return 0, false
+	}
+	return tup.Server.GetEndpointAddrRTT(a, p, tup.Transport)
+}
+
+// lamenessPort is the port the zone's backoff for t at the server's own
+// address addr is read at before an attempt (prioritizeServersFor): that of
+// the endpoint an attempt would dial (endpointDial.lamenessPort). After an
+// attempt the caller uses the endpoint tryServer tried.
+func (imr *Imr) lamenessPort(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) uint16 {
+	if defaultEndpointsOnly(ctx) {
+		return 0
+	}
+	d, err := imr.resolveEndpoint(server, addr, t, false)
+	if err != nil {
+		return 0
+	}
+	return d.lamenessPort()
+}
+
+// serverBackoffAllows reports whether the server's backoff lets an attempt
+// for t at its own address addr be made: the backoff of what the attempt
+// would dial (attemptKey). At a target whose addresses are known that is the
+// target's, at the endpoint's port, and a backoff left on addr by an attempt
+// at the default endpoint does not hold the target back. At the server's own
+// name it is addr's at the endpoint's port. The zone's backoff is read apart
+// (lamenessPort): lameness is about the nameserver, not the endpoint.
+func (imr *Imr) serverBackoffAllows(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) bool {
+	a, p, ok := imr.attemptKey(ctx, server, addr, t)
+	return ok && server.IsEndpointAddrAvailable(a, p, t)
 }
 
 // chooseEndpointAddr picks among a target's addresses as prioritizeServers
@@ -211,12 +305,24 @@ func (tr *endpointAddrTracker) begin(target string, now time.Time) bool {
 }
 
 // finish ends the lookup of target with the addresses found, live until
-// expire. No address is a failure, retried after endpointAddrRetry.
+// expire. No address is a failure, retried after endpointAddrRetry. Entries
+// and retry marks that have run out are dropped, so the tracker holds only
+// the targets that are live or waiting.
 func (tr *endpointAddrTracker) finish(target string, addrs []string, expire, now time.Time) {
 	key := core.CanonicalizeName(target)
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	delete(tr.pending, key)
+	for k, e := range tr.entries {
+		if !now.Before(e.expire) {
+			delete(tr.entries, k)
+		}
+	}
+	for k, at := range tr.retry {
+		if !now.Before(at) {
+			delete(tr.retry, k)
+		}
+	}
 	if len(addrs) == 0 || !now.Before(expire) {
 		if tr.retry == nil {
 			tr.retry = map[string]time.Time{}
@@ -262,7 +368,8 @@ func (imr *Imr) startEndpointLookup(target string) {
 // lookupEndpointAddrs looks up target's A and AAAA, CNAMEs followed, as for
 // any nameserver name, through the servers' default endpoints. An answer held
 // Bogus is not used; Insecure is, as a nameserver's address is (section 4).
-// It returns the addresses and when the first of their records expires.
+// It returns the addresses and when the first of their records expires, the
+// links of a CNAME chain included (chainExpiry).
 func (imr *Imr) lookupEndpointAddrs(target string) ([]string, time.Time) {
 	ctx, cancel := detachedContext(5 * time.Second)
 	defer cancel()
@@ -288,13 +395,45 @@ func (imr *Imr) lookupEndpointAddrs(target string) ([]string, time.Time) {
 		if !found {
 			continue
 		}
-		exp := resp.Expiration
-		if exp.IsZero() {
-			exp = time.Now().Add(cache.GetMinTTL(resp.RRset.RRs))
-		}
-		if expire.IsZero() || exp.Before(expire) {
+		if exp := imr.addrsExpiry(target, qtype, resp); expire.IsZero() || exp.Before(expire) {
 			expire = exp
 		}
 	}
 	return addrs, expire
+}
+
+// addrsExpiry is when the addresses resp carries for <target, qtype> run out:
+// the expiration of the cache entry that holds them, or their TTL from now
+// when that is not known, and no later than the first link of the CNAME chain
+// that led to them, when one did.
+func (imr *Imr) addrsExpiry(target string, qtype uint16, resp *ImrResponse) time.Time {
+	exp := resp.Expiration
+	if exp.IsZero() {
+		exp = time.Now().Add(cache.GetMinTTL(resp.RRset.RRs))
+	}
+	if !core.EqualNames(resp.RRset.Name, target) {
+		if link := imr.chainExpiry(target, qtype); link.Before(exp) {
+			exp = link
+		}
+	}
+	return exp
+}
+
+// chainExpiry is when the first link of the CNAME chain from name to its
+// <qtype> data runs out, read from the cache the lookup just filled. An
+// address found through the chain is kept no longer than that: a link that
+// changes may lead elsewhere. A chain the cache no longer holds whole is good
+// for endpointAddrRetry.
+func (imr *Imr) chainExpiry(name string, qtype uint16) time.Time {
+	links, final, _, err := imr.chainAt(name, qtype, edns0.PrivacyNone, imr.freshChainGrace())
+	if err != nil || final == nil || len(links) == 0 {
+		return time.Now().Add(endpointAddrRetry)
+	}
+	first := links[0].Expiration
+	for _, l := range links[1:] {
+		if l.Expiration.Before(first) {
+			first = l.Expiration
+		}
+	}
+	return first
 }

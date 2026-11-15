@@ -371,7 +371,7 @@ func TestOOTSSignalStateAliasDelegates(t *testing.T) {
 	target := mustRR(t, providerOwner+` 3600 IN SVCB 1 . oots="doq:50"`)
 	aliasOnly := []dns.RR{alias, kid.sign(t, dns.Copy(alias)).RRSIGs[0]}
 	section := append(copyRRs(aliasOnly), target, provider.sign(t, dns.Copy(target)).RRSIGs[0])
-	const want = "oots w=doq:50 p= sel=do53:100,doh:0,doq:50,dot:0 tr=do53,doh,doq,dot " + pathOwner + " secure -> " + providerOwner + " secure"
+	const want = "oots w=doq:50 p= sel=do53-tcp:100,do53:100,doh:0,doq:50,dot:0 tr=do53,doh,doq,dot " + pathOwner + " secure -> " + providerOwner + " secure"
 	snapshot := func(server *cache.AuthServer) string {
 		return selectionSnapshot(server) + " " + cache.FormatSignalPath(server.GetReceivedSignal().Path)
 	}

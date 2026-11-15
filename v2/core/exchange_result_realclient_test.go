@@ -100,3 +100,42 @@ func TestExchangeWithResult_Do53_WirePaths(t *testing.T) {
 		}
 	})
 }
+
+// The retry over TCP after truncation goes to the address and port that
+// truncated, not to the client's default port: a signal that gives udp port
+// P arrives here as "addr:P" (AuthServer.DialAddr) on a client whose port is
+// 53, and the TCP retry must reach P too (the alternative-endpoint design,
+// section 3; step S5 of its plan).
+func TestTruncationRetryGoesToTheAddressAndPortThatTruncated(t *testing.T) {
+	const qname = "tcport.example."
+	udp := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Truncated = true
+		_ = w.WriteMsg(m)
+	})
+	tcpHits := make(chan struct{}, 4)
+	tcp := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		tcpHits <- struct{}{}
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = []dns.RR{aRR(qname, "192.0.2.9")}
+		_ = w.WriteMsg(m)
+	})
+	port, cleanup := testServers(t, udp, tcp)
+	defer cleanup()
+	c := NewDNSClient(TransportDo53, "53", nil)
+	c.Timeout = 2 * time.Second
+	c.DNSClientUDP.Timeout = 2 * time.Second
+	c.DNSClientTCP.Timeout = 2 * time.Second
+	r, _, res, err := c.ExchangeWithResult(mustQuery(qname), "127.0.0.1:"+port, false)
+	if err != nil {
+		t.Fatalf("ExchangeWithResult: %v", err)
+	}
+	if res.WireTransport != TransportDo53TCP || !res.Truncated {
+		t.Fatalf("got %+v, want {Do53TCP, Truncated:true}", res)
+	}
+	if len(tcpHits) != 1 || r == nil || len(r.Answer) != 1 {
+		t.Fatalf("TCP on port %s answered %d times, reply %v; want the retry there, once", port, len(tcpHits), r)
+	}
+}

@@ -47,13 +47,12 @@ type ReceivedSignal struct {
 	Source  string                   // "oots" (SVCB oots or TSYNC weights), "alpn" (SVCB ALPN only: 100 each), "config" (a stub), "operator" (set server transport)
 	Weights map[core.Transport]uint8 // the transports named, with their weights
 	// Ports is the non-default port assigned to a transport this signal
-	// named. Absent means that transport keeps its usual port. Do53 is never
-	// entered: port= does not move cleartext off 53, and it does not advertise
-	// another cleartext listener.
+	// named, udp (TransportDo53) and tcp (TransportDo53TCP) included. Absent
+	// means that transport keeps its usual port.
 	Ports map[core.Transport]uint16
 	// Targets is the TargetName, other than ".", of the record each transport
-	// was taken from (endpoint.go). Only a record whose whole path validated
-	// Secure gives one; Do53 is never entered.
+	// was taken from (endpoint.go), udp and tcp included. Only a record whose
+	// whole path validated Secure gives one; the do53 shorthand never does.
 	Targets map[core.Transport]string
 	// Via is where the signal arrived (SignalViaReferral, SignalViaResponse,
 	// SignalViaLookup). Empty for a signal that did not come from an SVCB
