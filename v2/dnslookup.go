@@ -1723,7 +1723,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				// All tuples for this (server, addr) collapse to the same
 				// preferred transport; skip the ones we've already tried.
 				eff := imr.preferredDNSKEYTransport(server)
-				key := cache.AddrXport{Addr: addr, Transport: eff}
+				key := dnskeyAttemptKey(server, addr, eff)
 				if dnskeyAttempted[key] {
 					continue
 				}
@@ -1739,7 +1739,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
+			r, _, wireTransport, dial, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
 			lastTransport = wireTransport
 			if err != nil {
 				lastErr = err
@@ -1797,21 +1797,21 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					lg.Printf("IterativeDNSQuery: %s response from %s@%s over %s for %s %s (likely lame delegation for zone %q)",
 						dns.RcodeToString[rcode], addr, nsname, core.TransportToString[wireTransport], qname, dns.TypeToString[qtype], zoneName)
 				}
-				// Booked under the endpoint tried, as tryServer books
-				// backoff and RTT (server.DialAddr).
-				if endpoint := server.DialAddr(addr, wireTransport); zone != nil {
-					zone.RecordZoneAddressFailureForRcode(endpoint, wireTransport, uint8(rcode), Globals.Debug)
+				// Booked under the endpoint tried, the dial address
+				// tryServer booked backoff and RTT under.
+				if zone != nil {
+					zone.RecordZoneAddressFailureForRcode(dial, wireTransport, uint8(rcode), Globals.Debug)
 				} else {
-					server.RecordAddressFailureForRcode(endpoint, wireTransport, uint8(rcode))
+					server.RecordAddressFailureForRcode(dial, wireTransport, uint8(rcode))
 				}
 				continue
 			case dns.RcodeSuccess:
 				if zone != nil {
-					zone.RecordZoneAddressSuccess(server.DialAddr(addr, wireTransport), wireTransport)
+					zone.RecordZoneAddressSuccess(dial, wireTransport)
 				}
 			default:
 				if zone != nil {
-					zone.RecordZoneAddressSuccess(server.DialAddr(addr, wireTransport), wireTransport)
+					zone.RecordZoneAddressSuccess(dial, wireTransport)
 				}
 			}
 
@@ -2009,10 +2009,19 @@ type ootsRecord struct {
 // held an AliasMode record, and then the whole set is ignored: RFC 9460
 // section 2.4.1 has a client ignore the ServiceMode records of an RRset that
 // holds an AliasMode one.
+//
+// owner and rrs are the RRset as received, which an in-place validation
+// needs. via and path are where the set arrived and the validation state of
+// each RRset on its path (oots_signal_state.go). They are stored with the
+// signal and change nothing that is installed.
 type svcbSignalSet struct {
 	recs  []ootsRecord
 	alpn  []ootsRecord
 	alias bool
+	owner string
+	rrs   []dns.RR
+	via   string
+	path  []cache.SignalHop
 }
 
 // add collects one SVCB of the set's RRset. All three paths a signal arrives
@@ -2021,6 +2030,10 @@ func (set *svcbSignalSet) add(rr *dns.SVCB) {
 	if set == nil || rr == nil {
 		return
 	}
+	if set.owner == "" {
+		set.owner = dns.Fqdn(rr.Hdr.Name)
+	}
+	set.rrs = append(set.rrs, rr)
 	if rr.Priority == 0 {
 		set.alias = true
 		return
@@ -2271,26 +2284,31 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 	if server == nil || set == nil {
 		return false, false
 	}
+	pathState := cache.SignalStateString(cache.SignalPathState(set.path))
+	pathText := cache.FormatSignalPath(set.path)
 	if set.alias {
 		if !imr.Quiet {
-			lgDns.Debug("SVCB signal ignored: the RRset holds an AliasMode record", "servername", server.Name)
+			lgDns.Debug("SVCB signal ignored: the RRset holds an AliasMode record", "servername", server.Name,
+				"via", set.via, "state", pathState, "path", pathText)
 		}
 		return false, false
 	}
 	if len(set.recs) > 0 {
 		raw, ports := combineOOTSRecords(set.recs)
 		if !imr.Quiet {
-			lgDns.Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports)
+			lgDns.Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports,
+				"via", set.via, "state", pathState, "path", pathText)
 		}
-		return applyTransportMapWithPorts(server, raw, ports), true
+		return installTransportMap(server, raw, ports, set.via, set.pathCopy()), true
 	}
 	if len(set.alpn) > 0 {
 		_, ports := combineOOTSRecords(set.alpn)
 		order := alpnOrder(set.alpn)
 		if !imr.Quiet {
-			lgDns.Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports)
+			lgDns.Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports,
+				"via", set.via, "state", pathState, "path", pathText)
 		}
-		return applyAlpnSignalWithPorts(server, order, ports), false
+		return installAlpnSignal(server, order, ports, set.via, set.pathCopy()), false
 	}
 	return false, false
 }
@@ -2537,6 +2555,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	}
 
 	for key, set := range pendingSVCB {
+		imr.decideAdditionalPath(set, r.Extra, cache.SignalViaReferral)
 		imr.applySVCBSignalSet(ctx, serverMap[key], set)
 	}
 
@@ -2765,6 +2784,14 @@ func replyMatchesQuery(r, query *dns.Msg) error {
 	return nil
 }
 
+// dnskeyAttemptKey is what a DNSKEY bypass attempt is deduplicated by: the
+// endpoint dialled (server.DialAddr, address and port) and the transport. Two
+// servers that share an address but signal different ports for the transport
+// are two endpoints, and a failure on one must not skip the other.
+func dnskeyAttemptKey(server *cache.AuthServer, addr string, t core.Transport) cache.AddrXport {
+	return cache.AddrXport{Addr: server.DialAddr(addr, t), Transport: t}
+}
+
 func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 	m := authQueryMsg(qname, qtype)
 	if withOOTS {
@@ -2779,8 +2806,14 @@ func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 // transport) tuple selected upstream by prioritizeServers. It records the
 // outcome against the server's per-(addr, transport) backoff map.
 //
+// It returns the transport it attempted and the dial address it tried, the
+// key its backoff and RTT went under ("" when it never got as far as a
+// dial). The caller books the rcode outcome under the same dial address, not
+// a fresh DialAddr: a signal update during the exchange may have moved the
+// port, and the answer came from the endpoint tried.
+//
 // class is whose query it is, for the per-class answer counters.
-func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass) (*dns.Msg, time.Duration, core.Transport, error) {
+func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass) (*dns.Msg, time.Duration, core.Transport, string, error) {
 	eff := t
 	if dnskeyBypass {
 		// DNSKEY transport policy bypasses this server's probabilistic
@@ -2790,20 +2823,20 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 		// back to cleartext.
 		pref := imr.preferredDNSKEYTransport(server)
 		if pref == 0 {
-			return nil, 0, t, fmt.Errorf("dnssec.dnskey-query-transport=force_encrypted but server %s advertises no encrypted transport", server.Name)
+			return nil, 0, t, "", fmt.Errorf("dnssec.dnskey-query-transport=force_encrypted but server %s advertises no encrypted transport", server.Name)
 		}
 		eff = pref
 	}
 
 	select {
 	case <-ctx.Done():
-		return nil, 0, eff, ctx.Err()
+		return nil, 0, eff, "", ctx.Err()
 	default:
 	}
 
 	c, exist := imr.Cache.DNSClient[eff]
 	if !exist {
-		return nil, 0, eff, fmt.Errorf("no DNS client for transport %d exists", eff)
+		return nil, 0, eff, "", fmt.Errorf("no DNS client for transport %d exists", eff)
 	}
 	server.IncrementTransportCounter(eff)
 	// A signal port is joined onto the dial address, and backoff and RTT are
@@ -2838,7 +2871,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	}
 	for _, hook := range getImrOutboundQueryHooks() {
 		if err := hook(ctx, qname, qtype, server.Name, addr, eff); err != nil {
-			return nil, 0, eff, err
+			return nil, 0, eff, dial, err
 		}
 	}
 
@@ -2873,7 +2906,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	// every server that happened to be mid-exchange, and the address-family
 	// tracker would read the same event as a network-level failure.
 	if cerr := ctx.Err(); cerr != nil && err != nil {
-		return nil, rtt, eff, err
+		return nil, rtt, eff, dial, err
 	}
 	// A refused connection is an answer from the host: the path to it works,
 	// whatever the server does. Counted as a family failure, a few servers
@@ -2901,7 +2934,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 		// naturally sorts to the bottom of prioritizeServers even after the
 		// backoff lifts.
 		server.RecordRTT(dial, eff, rtt)
-		return nil, rtt, eff, err
+		return nil, rtt, eff, dial, err
 	}
 	if r != nil {
 		// A reply to some other question, or to none, is a failed attempt at
@@ -2915,7 +2948,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 				"error", qerr)
 			server.RecordAddressFailure(dial, eff, qerr)
 			server.IncrementFailedCounter(xres.WireTransport)
-			return nil, rtt, eff, qerr
+			return nil, rtt, eff, dial, qerr
 		}
 		server.RecordAddressSuccess(dial, eff)
 		server.IncrementUsedCounter(xres.WireTransport, class)
@@ -2927,7 +2960,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"addr", addr,
 			"transport", core.TransportToString[eff])
 	}
-	return r, rtt, eff, nil
+	return r, rtt, eff, dial, nil
 }
 
 // applyTransportSignalToServer parses a received transport string (the
@@ -2981,6 +3014,13 @@ func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8)
 // signal had stored: the new signal replaces the whole set. ports is filtered
 // so Do53 is never stored.
 func applyTransportMapWithPorts(server *cache.AuthServer, kvMap map[string]uint8, ports map[core.Transport]uint16) bool {
+	return installTransportMap(server, kvMap, ports, "", nil)
+}
+
+// installTransportMap is applyTransportMapWithPorts for a signal read from an
+// SVCB RRset, with where it arrived and the validation state of its path,
+// which are stored with it (ReceivedSignal.Via, ReceivedSignal.Path).
+func installTransportMap(server *cache.AuthServer, kvMap map[string]uint8, ports map[core.Transport]uint16, via string, path []cache.SignalHop) bool {
 	if server == nil || kvMap == nil {
 		return false
 	}
@@ -2989,7 +3029,7 @@ func applyTransportMapWithPorts(server *cache.AuthServer, kvMap map[string]uint8
 		return false
 	}
 	core.ExpandDo53Shorthand(named)
-	received := &cache.ReceivedSignal{Source: "oots", Weights: map[core.Transport]uint8{}, Ports: cache.DialPorts(ports)}
+	received := &cache.ReceivedSignal{Source: "oots", Weights: map[core.Transport]uint8{}, Ports: cache.DialPorts(ports), Via: via, Path: path}
 	for k, v := range named {
 		if t, err := core.StringToTransport(k); err == nil {
 			received.Weights[t] = v
@@ -3051,6 +3091,12 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) bool {
 // do53 is the shorthand for udp and tcp, as in oots. It reports whether a
 // signal was applied.
 func applyAlpnSignalWithPorts(server *cache.AuthServer, tokens []string, ports map[core.Transport]uint16) bool {
+	return installAlpnSignal(server, tokens, ports, "", nil)
+}
+
+// installAlpnSignal is applyAlpnSignalWithPorts with where the signal arrived
+// and the validation state of its path, as installTransportMap stores them.
+func installAlpnSignal(server *cache.AuthServer, tokens []string, ports map[core.Transport]uint16, via string, path []cache.SignalHop) bool {
 	if server == nil {
 		return false
 	}
@@ -3083,7 +3129,7 @@ func applyAlpnSignalWithPorts(server *cache.AuthServer, tokens []string, ports m
 	if len(weights) == 0 {
 		return false
 	}
-	received := &cache.ReceivedSignal{Source: "alpn", Weights: maps.Clone(weights), Ports: cache.DialPorts(ports)}
+	received := &cache.ReceivedSignal{Source: "alpn", Weights: maps.Clone(weights), Ports: cache.DialPorts(ports), Via: via, Path: path}
 	server.SetTransportSignal(transports, order, weights, received)
 	return true
 }
@@ -3147,6 +3193,7 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 			}
 		}
 	}
+	imr.decideAdditionalPath(set, r.Extra, cache.SignalViaResponse)
 	imr.applySVCBSignalSet(ctx, server, set)
 }
 
@@ -3174,6 +3221,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 				set.add(svcb)
 			}
 		}
+		set.decideLookupPath(vstate)
 	}
 	for _, sm := range imr.Cache.ServerMap.Items() {
 		server, ok := sm[cache.ServerKey(base)]

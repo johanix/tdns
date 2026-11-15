@@ -1255,9 +1255,15 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	// apply below then refuses the new block and keeps the running table,
 	// conf.Imr would otherwise go on describing zones that were rejected.
 	runningStubs, runningForward := conf.Imr.Stubs, conf.Imr.Forward
+	// The published transport signal, for the same reason: ParseConfig
+	// decodes service.transport into conf before it refuses a bad signal,
+	// and the zone refresh path publishes from conf.Service.Transport. A
+	// refused reload must leave the running signal in place.
+	runningTransport := conf.Service.Transport
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
+		conf.Service.Transport = runningTransport
 	}
 	// Rebuild the TSIG store ONLY after a successful parse. With KeyDB, reconcile
 	// config keys in place (§6).

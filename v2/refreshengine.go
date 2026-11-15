@@ -47,14 +47,31 @@ func refreshWritesZoneToSourceFile(zd *ZoneData) bool {
 	return zd != nil && zd.Zonefile != "" && zd.ZoneType != Primary
 }
 
-// After all zones are initialized, (re)compute transport signals across zones to resolve cross-zone dependencies.
-func runTransportSignalPostpass(conf *Config) {
-	for zname, zdz := range Zones.Items() {
-		if zdz != nil && zdz.addsTransportSignal() {
-			if err := zdz.CreateTransportSignalRRs(conf); err != nil {
-				lgEngine.Error("postpass CreateTransportSignalRRs failed", "zone", zname, "error", err)
-			}
-		}
+// runTransportSignalPass derives a zone's transport signal (its _dns.<ns>
+// RRsets). It runs once per zone, when that zone's first load has bound its
+// DNSSEC policy: in completeFirstZonePolicyAndLoad, or in
+// finishFirstLoadPolicy when the bind is retried (#1058).
+//
+// Not before the bind. The pass signs what it stores, and a signing zone with
+// no keys yet gets them from EnsureActiveDnssecKeys, which needs the policy:
+// on a first start the pass failed with ErrDnssecPolicyNotBound and nothing
+// ran it again, so the zone had no signal until a restart. On a restart the
+// keys exist, but a signature made with no policy bound gets the five-minute
+// no-policy lifetime (sigLifetime).
+//
+// Not at an all-zones barrier either, which is where it used to run: when the
+// last configured zone finished its first load, which is before that zone's
+// policy binds. The pass reads no other zone's content. Its one cross-zone
+// question, whether the zone of an out-of-bailiwick identity NS is co-hosted,
+// is asked of Zones, where ParseZones registers every configured zone before
+// the first load. A zone registered later is found at query time as well
+// (lookupSignalRRsets), and its signal is preferred to a fallback.
+func runTransportSignalPass(zd *ZoneData, conf *Config) {
+	if zd == nil || !zd.addsTransportSignal() {
+		return
+	}
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		lgEngine.Error("transport signal pass failed", "zone", zd.ZoneName, "error", err)
 	}
 }
 
@@ -111,8 +128,7 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 // post-init hooks, OnFirstLoad callbacks, and downstream notification.
 // Called for both newly-created zones and pre-registered zone stubs.
 func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefresher, conf *Config,
-	refreshCounters *core.ConcurrentMap[string, *RefreshCounter],
-	tryPostpass func(string)) (bool, error) {
+	refreshCounters *core.ConcurrentMap[string, *RefreshCounter]) (bool, error) {
 
 	seen := zd.refreshRun.confirmations.Load()
 	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
@@ -216,9 +232,10 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		}
 	}
 
-	// Defer transport signal synthesis until all zones are initialized.
-	tryPostpass(zone)
-
+	// Note: the transport signal pass is NOT run here either. It signs, and
+	// the policy that gives it keys and a signature lifetime is bound later,
+	// in completeFirstZonePolicyAndLoad, which runs it (runTransportSignalPass).
+	//
 	// Note: the OnFirstLoad callbacks and SetupZoneSync are NOT run here.
 	// Those callbacks (registration for periodic re-signing, from ParseZones) are
 	// drained by completeFirstZonePolicyAndLoad AFTER InstallInitialSnapshot
@@ -372,6 +389,9 @@ func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, conf
 	if err := signOnceAfterPolicyBind(ctx, zd); err != nil {
 		return err
 	}
+	// The transport signal, which completeFirstZonePolicyAndLoad would have
+	// derived had its policy sync not failed. Here, as there, after the bind.
+	runTransportSignalPass(zd, conf)
 	// The post-refresh callbacks the first load deferred, now that the sign
 	// has made the zone Ready. There is no journal replay on this retry-only
 	// path, so the drain follows the sign directly. Ready-guarded inside: a
@@ -470,6 +490,13 @@ func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Con
 	// deltas hold everything that has happened since. Serving the file alone
 	// would silently roll the zone back to that point.
 	replayZoneDeltasOnLoad(zd)
+
+	// The transport signal. After the bind, so that it is signed with the
+	// policy's keys and lifetime; after the replay, so that it is derived from
+	// the NS RRset the zone serves, not the one in the file; before the
+	// callbacks, which then see the zone with its signal, as they do after any
+	// later refresh, which carries the signal over.
+	runTransportSignalPass(zd, conf)
 
 	// The post-refresh callbacks the first load deferred (see
 	// runPostRefreshCallbacks). After the replay, so that they see the zone's
@@ -727,20 +754,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	// var refreshCounters = make(map[string]*RefreshCounter, 5)
 	var refreshCounters = core.NewCmap[*RefreshCounter]()
 
-	// Build expected zone set from config for a robust post-initialization barrier
-	expected := map[string]struct{}{}
-	for _, zn := range conf.Internal.AllZones {
-		expected[zn] = struct{}{}
-	}
-	tryPostpass := func(doneZone string) {
-		if doneZone != "" {
-			delete(expected, doneZone)
-		}
-		if len(expected) == 0 {
-			runTransportSignalPostpass(conf)
-		}
-	}
-
 	// Every steady-state refresh runs here, not on this goroutine. Shutdown is
 	// deferred so it covers all three ways out of the loop below; it closes the
 	// job channel, lets each worker finish what it holds, and waits -- so no
@@ -837,8 +850,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.mu.Unlock()
 						}
 
-						if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
-							tryPostpass); err != nil {
+						if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters); err != nil {
 							noteRefreshFailure(zd, zone, err, "zone refresh failed")
 
 							// Set a refresh counter so the ticker can retry.
@@ -1208,8 +1220,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 					Zones.Set(zone, zd)
 
-					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
-						tryPostpass); err != nil {
+					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters); err != nil {
 						noteRefreshFailure(zd, zone, err, "zone refresh failed")
 						continue
 					}
@@ -1309,7 +1320,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// (rollover-policy, config) are independent and survive.
 					zd.ClearError(RefreshError)
 					if _, err := initialLoadZone(ctx, zd, zone, ZoneRefresher{Name: zone, Force: true}, conf,
-						refreshCounters, tryPostpass); err != nil {
+						refreshCounters); err != nil {
 						noteRefreshFailure(zd, zone, err, "initial load retry failed")
 					} else {
 						if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); err != nil {

@@ -110,7 +110,7 @@ func TestTransportSignalSource(t *testing.T) {
 }
 
 // The join: a zone that does not set the option gets a stored signal from the
-// real start-up postpass and has it injected, under the server-wide option
+// real first-load signal pass and has it injected, under the server-wide option
 // alone, and the zone listing reports it as global without writing it into
 // the zone's options.
 func TestTheServerWideOptionReachesAZoneWithoutTheZoneOption(t *testing.T) {
@@ -122,13 +122,13 @@ ns1.`+z+`	3600	IN	A	127.0.0.1
 	conf.Service.Identities = []string{"ns1." + z}
 
 	serverOptions(zd, map[AuthOption]string{})
-	runTransportSignalPostpass(conf)
+	runTransportSignalPass(zd, conf)
 	if served(zd, "_dns.ns1."+z, dns.TypeSVCB) {
 		t.Fatal("a signal was stored with the option off on the zone and on the server")
 	}
 
 	serverOptions(zd, map[AuthOption]string{AuthOptAddTransportSignal: "true"})
-	runTransportSignalPostpass(conf)
+	runTransportSignalPass(zd, conf)
 	if !served(zd, "_dns.ns1."+z, dns.TypeSVCB) {
 		t.Fatal("the server-wide option did not reach a zone without the zone option")
 	}

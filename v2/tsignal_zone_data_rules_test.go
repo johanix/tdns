@@ -125,7 +125,9 @@ ns3.`+child+`	3600	IN	A	192.0.2.54
 	conf.Service.Identities = []string{"ns1." + pz, "ns3." + child}
 	conf.Service.Transport.Signal = "dot:50"
 	before := customer.publishedSnapshot()
-	runTransportSignalPostpass(conf)
+	for _, zd := range []*ZoneData{customer, childZd, provider} {
+		runTransportSignalPass(zd, conf)
+	}
 
 	if !served(provider, "_dns.ns1."+pz, dns.TypeSVCB) {
 		t.Fatal("no signal synthesized for an identity in its home zone")
@@ -167,7 +169,9 @@ _dns.ns2.`+cz+`	300	IN	SVCB	0 _dns.ns1.`+pz+`
 	conf.Service.Identities = []string{"ns1." + pz}
 	conf.Service.Transport.Signal = "dot:50"
 	before := customer.publishedSnapshot()
-	runTransportSignalPostpass(conf)
+	for _, zd := range []*ZoneData{customer, provider} {
+		runTransportSignalPass(zd, conf)
+	}
 
 	if customer.publishedSnapshot() != before {
 		t.Fatal("the pass published into a customer zone")

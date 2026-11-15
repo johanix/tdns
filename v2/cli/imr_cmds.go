@@ -430,19 +430,24 @@ func renderSignal(server *cache.AuthServer) string {
 }
 
 // renderSignalFromWeights formats advertised OOTS weights as
-// "doq=20,dot=10,udp=100,tcp=30" (order-stable, non-zero only, cleartext by
-// its oots tokens), falling back to noSignalRendered when absent. Shared by
-// the in-process REPL and the remote transport-stats renderer so the signal
-// looks identical either way (fixes the REPL-vs-remote drift).
+// "doq=20,dot=10,udp=100,tcp=30" (order-stable, cleartext by its oots
+// tokens), falling back to noSignalRendered when there are no weights.
+// An encrypted transport at 0 is left out, since absent it weighs 0. A
+// recorded udp or tcp 0 is shown, since absent it weighs 100: "udp=0,tcp=0"
+// is a signal, not the absence of one. Shared by the in-process REPL and the
+// remote transport-stats renderer so the signal looks identical either way
+// (fixes the REPL-vs-remote drift).
 func renderSignalFromWeights(weights map[core.Transport]uint8) string {
 	if len(weights) == 0 {
 		return noSignalRendered
 	}
 	var parts []string
 	for _, t := range signalWeightOrder {
-		if w, ok := weights[t]; ok && w > 0 {
-			parts = append(parts, fmt.Sprintf("%s=%d", core.TransportToSignalToken[t], int(w)))
+		w, ok := weights[t]
+		if !ok || (w == 0 && t != core.TransportDo53 && t != core.TransportDo53TCP) {
+			continue
 		}
+		parts = append(parts, fmt.Sprintf("%s=%d", core.TransportToSignalToken[t], int(w)))
 	}
 	if len(parts) == 0 {
 		return noSignalRendered

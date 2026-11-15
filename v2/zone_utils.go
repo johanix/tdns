@@ -2202,7 +2202,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	// 3. Preserve stored transport-signal owner RRsets across a refresh replace.
 	// A refresh rebuilds the working set from the freshly transferred zone data,
 	// which does not include server-synthesized _dns.<ns> signals; carry them
-	// over so they survive until the transport postpass regenerates them. (The
+	// over so they survive until the transport signal pass regenerates them. (The
 	// synthesized-fallback map is carried separately in applyRefreshReplacementLocked.)
 	// Only an SVCB RRset the pass itself stored is carried: an operator's RRset
 	// at _dns.<ns> is in the fresh data, and carrying the old copy would merge

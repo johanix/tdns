@@ -51,6 +51,15 @@ func TestTransportSignalLayout(t *testing.T) {
 	}{
 		{"no signal: one empty SVCB, as before", "", nil,
 			[]string{o + `1 .`}},
+		{"no signal, standard ports only: one empty SVCB", "", map[string]uint16{"udp": 53, "tcp": 53},
+			[]string{o + `1 .`}},
+		// Validation accepts a udp or tcp port with no signal (absent, each
+		// weighs 100), so the port is published, not dropped.
+		{"no signal, udp and tcp on ports: published at their default", "", map[string]uint16{"udp": 5353, "tcp": 5354},
+			[]string{
+				o + `1 . port=5353 oots="udp:100"`,
+				o + `1 . port=5354 oots="tcp:100"`,
+			}},
 		// From S5 on, udp and tcp are written out only when the operator
 		// names them (do53 is emitted as the two): absent, each weighs 100.
 		{"no ports: one record, no cleartext default", "doq:20,dot:10", nil,
