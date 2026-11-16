@@ -111,6 +111,7 @@ func TestTransportSignalTargetChecks(t *testing.T) {
 		{"dot on tcp's port at the same other host", TransportConf{Type: "svcb", Signal: "dot:10", Ports: map[string]uint16{"dot": 53}, Targets: tg("dot", "x.provider.example.", "tcp", "x.provider.example.")}, "at x.provider.example.", 0},
 		{"dot on tcp's port, tcp elsewhere", TransportConf{Type: "svcb", Signal: "dot:10", Ports: map[string]uint16{"dot": 53}, Targets: tg("dot", "x.provider.example.")}, "", 0},
 		{"doq on udp's port at the same other host", TransportConf{Type: "svcb", Signal: "doq:10", Ports: map[string]uint16{"doq": 5353, "udp": 5353}, Targets: tg("doq", "x.provider.example.", "udp", "x.provider.example.")}, "both are UDP", 0},
+		{"doq on udp's port at the same other host, spelled in another case", TransportConf{Type: "svcb", Signal: "doq:10", Ports: map[string]uint16{"udp": 853}, Targets: tg("doq", "dns.provider.example.", "udp", "DNS.provider.example.")}, "both are UDP", 0},
 		{"an unknown key", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("tls", "ns.provider.example.")}, "targets.tls", 0},
 		{"a target for a transport with no weight", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("doq", "doq.provider.example.")}, "no weight", 0},
 		{"an address is not a name", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", "192.0.2.1")}, "is an address", 0},

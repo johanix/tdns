@@ -94,20 +94,23 @@ func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 }
 
 // forgetSignalStored drops the record for owner, every digest in it: the
-// RRset there is the operator's now.
-func (zd *ZoneData) forgetSignalStored(owner string) {
+// RRset there is the operator's now. A failed KeyDB delete is logged and
+// returned: the record then outlives a restart.
+func (zd *ZoneData) forgetSignalStored(owner string) error {
 	owner = core.CanonicalizeName(owner)
 	zd.signalStoredMu.Lock()
 	delete(zd.signalStored, owner)
 	zd.signalStoredMu.Unlock()
 	kdb := zd.signalRecordDB()
 	if kdb == nil {
-		return
+		return nil
 	}
 	if err := kdb.DeleteTransportSignalStoredOwner(zd.ZoneName, owner); err != nil {
 		lgDns.Warn("forgetSignalStored: could not drop the stored-signal record",
 			"zone", zd.ZoneName, "owner", owner, "error", err)
+		return fmt.Errorf("forgetSignalStored: zone %s owner %s: %w", zd.ZoneName, owner, err)
 	}
+	return nil
 }
 
 // signalStoredDigests returns the digests the pass recorded for owner, the

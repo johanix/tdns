@@ -867,9 +867,12 @@ func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
 // child is read, not a copy below the parent's zone cut. Below a cut to a
 // child not hosted here the home holds only glue and occluded data, which is
 // not its to serve, so nothing is read there (as for a CNAME target,
-// handleCNAMEChain). Failing that, the per-snapshot fallback beside the
-// snapshot, which the SVCB start-up pass no longer fills (a server writes
-// signals only into its own zones, rule 2).
+// handleCNAMEChain). Another zone is read only while it answers queries
+// (servesQueries): a withheld or failed home keeps its snapshot, but answers
+// SERVFAIL itself, and its signal is not handed out for it. Failing that,
+// the per-snapshot fallback beside the snapshot, which the SVCB start-up
+// pass no longer fills (a server writes signals only into its own zones,
+// rule 2).
 func (zd *ZoneData) lookupSignalRRsets(snap *zoneSnapshot, name string) []core.RRset {
 	var rrs []core.RRset
 	read := func(home *ZoneData, hsnap *zoneSnapshot) {
@@ -880,7 +883,7 @@ func (zd *ZoneData) lookupSignalRRsets(snap *zoneSnapshot, name string) []core.R
 	}
 	if zd.isHomeOf(name) {
 		read(zd, snap)
-	} else if home := FindZone(name); home != nil {
+	} else if home := FindZone(name); home != nil && home.servesQueries() {
 		read(home, home.publishedSnapshot())
 	}
 	if len(rrs) > 0 {
