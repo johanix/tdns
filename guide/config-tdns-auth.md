@@ -1140,7 +1140,8 @@ from who the server is. Three rules:
      identical to what the configuration gives, and it logs that it left
      them alone.
    - It withdraws a signal it stored for a name that is no longer an
-     identity, again only where it is the zone's primary and signer. It
+     identity, again only where it is the zone's primary and signer. With
+     `service.transport.type: none` it withdraws every signal it stored. It
      remembers what it stored there, so the same records, loaded again
      from a zone file written before the withdrawal, are withdrawn again.
    - An identity below a zone cut to a child not served here gets no

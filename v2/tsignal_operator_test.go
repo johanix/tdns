@@ -438,6 +438,126 @@ ns1.`+z+`	3600	IN	A	127.0.0.1
 	}
 }
 
+// A forget whose KeyDB delete fails is not undone by the KeyDB's record
+// (CodeRabbit on #1051, 2026-11-15). The operator adds a TXT RRset beside
+// the pass's signal, so the RRset there is the operator's and the pass
+// forgets it, but the KeyDB refuses the delete. The operator then removes
+// the TXT: the SVCB alone is the same bytes the pass stored, and without
+// the revocation held in memory the KeyDB's record would make it the
+// pass's again, to be rewritten. Once the KeyDB takes the delete, the next
+// run drops the record.
+func TestAFailedForgetIsNotUndoneByTheKeyDBRecord(t *testing.T) {
+	const z = "forgetfail.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+ns1.`+z+`	3600	IN	A	127.0.0.1
+`, "127.0.0.1:53")
+	zd.KeyDB = kdb
+	conf.Service.Identities = []string{"ns1." + z}
+	conf.Service.Transport.Signal = "dot:50"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	stored := svcbRecords(zd, owner)
+	if len(stored) != 1 {
+		t.Fatalf("the pass stored %v", stored)
+	}
+
+	// The operator adds a TXT RRset at the owner; the KeyDB refuses deletes.
+	zd.mu.Lock()
+	zd.stageRRsetLocked(owner, core.RRset{Name: owner, RRtype: dns.TypeTXT, RRs: mustRRs(t, owner+` 300 IN TXT "operator"`)})
+	zd.publishWorkingSetLocked(zd.generation.Load(), false)
+	zd.mu.Unlock()
+	if _, err := kdb.DB.Exec(`CREATE TRIGGER refuse_delete BEFORE DELETE ON TransportSignalStored
+BEGIN SELECT RAISE(ABORT, 'delete refused by the test'); END`); err != nil {
+		t.Fatal(err)
+	}
+	logs := captureSignalLog(t)
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), "could not drop the stored-signal record") {
+		t.Fatalf("no warning for the failed delete:\n%s", logs.String())
+	}
+	if _, ok, _ := kdb.GetTransportSignalStored(z, owner); !ok {
+		t.Fatal("the refused delete should have left the KeyDB record")
+	}
+
+	// The operator removes the TXT. The SVCB alone is the pass's old bytes,
+	// and the configuration changes: the pass must not rewrite it.
+	zd.mu.Lock()
+	zd.stageDeleteLocked(owner, dns.TypeTXT)
+	zd.publishWorkingSetLocked(zd.generation.Load(), false)
+	zd.mu.Unlock()
+	conf.Service.Transport.Signal = "dot:60"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if got := svcbRecords(zd, owner); !sameRecords(got, stored) {
+		t.Fatalf("the KeyDB record undid the revocation: the pass rewrote the operator's SVCB to %v", got)
+	}
+	if zd.signalStoredByPass(owner, stored) {
+		t.Fatal("the revoked SVCB is known as the pass's own again")
+	}
+
+	// The KeyDB takes deletes again: the next run drops the record.
+	if _, err := kdb.DB.Exec(`DROP TRIGGER refuse_delete`); err != nil {
+		t.Fatal(err)
+	}
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := kdb.GetTransportSignalStored(z, owner); ok {
+		t.Fatal("the record outlived a run after the KeyDB took deletes again")
+	}
+	if zd.signalRevocationPending(owner) {
+		t.Fatal("the revocation is still pending after the delete succeeded")
+	}
+	if got := svcbRecords(zd, owner); !sameRecords(got, stored) {
+		t.Fatalf("the operator's SVCB changed: %v", got)
+	}
+}
+
+// service.transport.type none synthesizes nothing and withdraws what the
+// pass stored before, under svcb (CodeRabbit on #1051, 2026-11-15).
+// Records provisioned in the zone stay. The record of the withdrawn signal
+// stays too, as after any withdrawal.
+func TestTypeNoneWithdrawsThePassSignal(t *testing.T) {
+	const z = "typenone.sig.example."
+	kdb := newTestKeyDB(t)
+	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+`+z+`	3600	IN	NS	ns2.`+z+`
+ns1.`+z+`	3600	IN	A	127.0.0.1
+ns2.`+z+`	3600	IN	A	192.0.2.2
+_dns.ns2.`+z+`	300	IN	SVCB	1 . oots="doq:10"
+`, "127.0.0.1:53")
+	zd.KeyDB = kdb
+	conf.Service.Identities = []string{"ns1." + z}
+	conf.Service.Transport.Signal = "dot:50"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if len(svcbRecords(zd, "_dns.ns1."+z)) != 1 {
+		t.Fatal("the pass stored no signal under svcb")
+	}
+	provisioned := svcbRecords(zd, "_dns.ns2."+z)
+
+	conf.Service.Transport.Type = "none"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if getOwnerFrom(zd.publishedSnapshot(), "_dns.ns1."+z) != nil {
+		t.Fatalf("type none left the pass's signal in place: %v", svcbRecords(zd, "_dns.ns1."+z))
+	}
+	if got := svcbRecords(zd, "_dns.ns2."+z); !sameRecords(got, provisioned) {
+		t.Fatalf("type none touched a provisioned signal: %v", got)
+	}
+	if _, ok, _ := kdb.GetTransportSignalStored(z, "_dns.ns1."+z); !ok {
+		t.Fatal("the record of the withdrawn signal was dropped")
+	}
+}
+
 // A reload whose file now holds an operator's SVCB RRset at an owner where
 // the pass had stored its signal: the old signal is not carried over and
 // merged into the operator's RRset. The operator's RRset alone is served.
