@@ -1009,6 +1009,12 @@ func validateSignalTargets(targets map[string]string, weights map[string]uint8) 
 		if _, ok := dns.IsDomainName(v); !ok {
 			return fmt.Errorf("service.transport.targets.%s: %q is not a domain name", k, v)
 		}
+		// IsDomainName lets through names of 256 and 257 wire octets, and
+		// packing does not check the length either. RFC 1035 allows 255,
+		// the root octet counted; a longer target is one no resolver can use.
+		if n, err := dns.PackDomainName(dns.Fqdn(v), make([]byte, 512), 0, nil, false); err != nil || n > 255 {
+			return fmt.Errorf("service.transport.targets.%s: %q is longer than the 255 octets a domain name may take on the wire", k, v)
+		}
 	}
 	return nil
 }
