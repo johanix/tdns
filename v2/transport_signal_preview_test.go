@@ -347,10 +347,11 @@ _dns.ns2.`+z+`	300	IN	SVCB	1 . oots="dot:5"
 }
 
 // A release whose KeyDB delete fails reports the failure (CodeRabbit on
-// #1060, 2026-11-15). The record then outlives a restart, and the next pass
-// would still take the records at the owner for its own, so a release that
-// said it took effect would be wrong. Run again once the KeyDB takes the
-// delete, it does take effect.
+// #1060, 2026-11-15). The revocation holds in this process, but the KeyDB's
+// record outlives a restart, and the pass would then take the records at
+// the owner for its own again, so a release that reported plain success
+// would be wrong. Run again once the KeyDB takes the delete, it takes
+// effect for good.
 func TestABridgeReleaseWhoseKeyDBDeleteFailsSaysSo(t *testing.T) {
 	const owner = "_dns.ns1.example."
 	kdb := newTestKeyDB(t)
@@ -377,8 +378,8 @@ ns1.example.	3600	IN	A	127.0.0.1
 BEGIN SELECT RAISE(ABORT, 'delete refused by the test'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if _, msg, err := transportSignalRelease(conf, "ns1.example."); err == nil || !strings.Contains(err.Error(), "did not take effect") {
-		t.Fatalf("a release whose KeyDB delete failed: err=%v msg=%q, want an error saying it did not take effect", err, msg)
+	if _, msg, err := transportSignalRelease(conf, "ns1.example."); err == nil || !strings.Contains(err.Error(), "only until a restart") {
+		t.Fatalf("a release whose KeyDB delete failed: err=%v msg=%q, want an error saying it holds only until a restart", err, msg)
 	}
 	if _, ok, err := kdb.GetTransportSignalStored(zd.ZoneName, owner); err != nil || !ok {
 		t.Fatalf("the refused delete should leave the record in the KeyDB: ok=%v err=%v", ok, err)
