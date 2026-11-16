@@ -733,7 +733,14 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "show-rrsetcache":
 			lgApi.Debug("debug show-rrsetcache")
-			resp.Msg = fmt.Sprintf("RRsetCache: %v", conf.Internal.RRsetCache.RRsets.Keys())
+			// Nil until InitImrEngine has built the resolver: a priming that fails
+			// leaves it so while the engine retries.
+			if conf.Internal.RRsetCache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "the resolver is not running: it has no cache"
+				break
+			}
+			resp.Msg =fmt.Sprintf("RRsetCache: %v", conf.Internal.RRsetCache.RRsets.Keys())
 			rrsets := []cache.CachedRRset{}
 			for _, rrsetkey := range conf.Internal.RRsetCache.RRsets.Keys() {
 				rrset, ok := conf.Internal.RRsetCache.RRsets.Get(rrsetkey)
