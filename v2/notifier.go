@@ -469,6 +469,7 @@ func (zd *ZoneData) notifyOneOver(ctx context.Context, conf *Config, ntype uint1
 		dropOversizedNotifySOA(m, zd.ZoneName)
 	}
 	c := &dns.Client{Net: network, Timeout: notifyTimeout, TsigProvider: provider}
+	zd.bindNotifySrc(ctx, c, dst)
 
 	lgDns.Debug("sending NOTIFY message", "msg", m.String())
 
@@ -477,6 +478,38 @@ func (zd *ZoneData) notifyOneOver(ctx context.Context, conf *Config, ntype uint1
 		return notifyAttempt{err: err}
 	}
 	return notifyAttempt{rcode: res.Rcode, ede: extractEDEFromMsg(res)}
+}
+
+// bindNotifySrc makes c send from the zone's effective transfer source: the
+// zone's transfer-src, else authengine.transfer-src (#1062). AXFR and the SOA
+// probe bind it since #409; NOTIFY did not, so on a host with more than one
+// address it left from whichever address the kernel chose, and a downstream
+// whose allow-notify names the published address refused it. The downstream
+// then caught up only at its next SOA refresh.
+//
+// The pick is bindClientSrc's, so it is the probe's: per address family, UDP
+// or TCP as c.Net already says, and a family with no configured source leaves
+// c unbound. No transfer-src at all leaves c as it was.
+func (zd *ZoneData) bindNotifySrc(ctx context.Context, c *dns.Client, dst string) {
+	srcs, tier := zd.EffectiveTransferSrcWithSource()
+	if len(srcs) == 0 {
+		return
+	}
+	// A hostname target is resolved to learn its family. Bound that lookup by
+	// the exchange's own budget, so a slow resolver cannot hold the send longer
+	// than an unanswered NOTIFY would.
+	bctx, cancel := context.WithTimeout(ctx, notifyTimeout)
+	defer cancel()
+	if src := bindClientSrc(bctx, c, dst, srcs); src != nil {
+		lgDns.Debug("NOTIFY: binding source address", "zone", zd.ZoneName, "target", dst,
+			"src", src.String(), "net", c.Net, "from", tier)
+		return
+	}
+	// Not an error: naming only one family must not break every target in the
+	// other. But the NOTIFY then leaves from the kernel's choice, which is what
+	// transfer-src is there to prevent, so say so.
+	lgDns.Warn("NOTIFY: no configured transfer-src matches this target's family; sending unbound",
+		"zone", zd.ZoneName, "target", dst, "configured", srcs, "from", tier)
 }
 
 // notifyAggregate folds per-target outcomes into SendNotify's any-success-wins
