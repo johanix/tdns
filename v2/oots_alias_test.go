@@ -272,11 +272,12 @@ func TestOOTSAliasDeniedHopNotRefollowed(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the hop was not looked up")
 	}
-	time.Sleep(200 * time.Millisecond)
+	until := aliasHopRetryAt(t, imr, providerOwner)
+	time.Sleep(100 * time.Millisecond)
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("%d lookups after one denial, want 1", n)
 	}
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(time.Until(until) + 20*time.Millisecond)
 	apply()
 	deadline := time.Now().Add(5 * time.Second)
 	for calls.Load() < 2 {
@@ -284,6 +285,28 @@ func TestOOTSAliasDeniedHopNotRefollowed(t *testing.T) {
 			t.Fatal("the next query did not look the hop up again")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// aliasHopRetryAt waits until the lookup of target has ended, and returns when
+// target may be looked up again. The hook that answers the lookup returns
+// before the tracker records its end, so a test must not count from the hook.
+func aliasHopRetryAt(t *testing.T, imr *Imr, target string) time.Time {
+	t.Helper()
+	key := core.CanonicalizeName(target)
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		imr.signalAliasHops.mu.Lock()
+		_, inFlight := imr.signalAliasHops.waiting[key]
+		at := imr.signalAliasHops.next[key]
+		imr.signalAliasHops.mu.Unlock()
+		if !inFlight && !at.IsZero() {
+			return at
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the lookup of %s did not end", target)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
