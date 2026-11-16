@@ -1002,6 +1002,8 @@ service:
       ports:
          dot:  1234
          doh:  8443
+      targets:
+         doq:  doq.example.net.
 ```
 
 | Key | Default | Meaning |
@@ -1009,6 +1011,7 @@ service:
 | `type` | `none` | `svcb` publishes an SVCB record with the `oots` SvcParam, `tsync` a TSYNC record, `none` nothing. An unknown value is warned about and read as `none` |
 | `signal` | — | comma-separated `transport:weight` pairs, from `udp`, `tcp`, `dot`, `doq` and `doh`, weights 0 to 100. An absent `udp` or `tcp` is 100 and an absent encrypted transport 0. `do53:N` is accepted as the shorthand for `udp:N` and `tcp:N`, and an explicit `udp` or `tcp` wins over it |
 | `ports` | — | the port published for a transport that is not on its standard port (53 for `udp` and `tcp`, 853 for `dot` and `doq`, 443 for `doh`). Only with `type: svcb` |
+| `targets` | — | the host that serves a transport, when it is not the nameserver itself: `udp`, `tcp`, `dot` and `doq`. Only with `type: svcb` |
 
 `udp` is cleartext DNS over UDP, retried over TCP after truncation; `tcp` is
 cleartext DNS over TCP. The `tcp` weight caps only the TCP a resolver would
@@ -1043,6 +1046,25 @@ A resolver sends the TCP retry after a truncation to the address and port
 that truncated, so serve TCP on a `udp` port too. TCP the resolver forces goes
 to the `tcp` port, or to port 53 when `tcp` has none.
 
+A transport with a target gets a record of its own too, with the target as
+its TargetName and its port, if it has one, beside it. With the `targets`
+above, `doq` moves to `doq.example.net` on port 853. Nothing is left for a
+record at `.` without a port, so there is none:
+
+```
+_dns.ns1.example. 10800 IN SVCB 1 . port=1234 oots="dot:10"
+_dns.ns1.example. 10800 IN SVCB 1 doq.example.net. oots="doq:20"
+_dns.ns1.example. 10800 IN SVCB 1 . port=8443 oots="doh:5"
+```
+
+A `udp` or `tcp` with a target serves cleartext there, and the TCP retry after
+a truncation goes to the same host and port, so serve TCP there too. As with a
+port, no `signal` is needed: `targets.udp: dns.example.net` alone publishes
+`SVCB 1 dns.example.net. oots="udp:100"`.
+
+The resolver looks the target's addresses up itself; tdns-auth does not add
+them to the response.
+
 **Checks at load.** Each of these is an error, and the daemon does not start:
 
 - `signal` does not parse, or names a token other than `udp`, `tcp`, `dot`,
@@ -1058,6 +1080,17 @@ to the `tcp` port, or to port 53 when `tcp` has none.
   standard port counts, so `dot` on 443 clashes with `doh`, and `dot` on 53
   with `tcp`. `udp` and `tcp` on one port is the natural case;
 - `ports` with `type: tsync` or `none`.
+- a key of `targets` other than `udp`, `tcp`, `dot` or `doq`, or one for
+  `dot` or `doq` whose transport has no weight in `signal`. A `doh` target is
+  refused: DoH on another host needs a path, which the signal does not carry;
+- a target that is an address or not a domain name. `.` is the nameserver
+  itself and counts as absent;
+- `targets` with `type: tsync` or `none`.
+
+A socket is a host and a port, so the socket rules apply per endpoint: a
+transport with a target is on another host and shares no socket with this
+one. `dot` on another host may use port 443 beside a local `doh`, and a
+targeted transport's port is not checked against this daemon's listeners.
 
 A published port that is not listened on for its transport is a warning, not
 an error: `listeners.ports` for `dot`, `doq` and `doh`, the ports of
@@ -1070,6 +1103,14 @@ as well.
 **Older resolvers.** A resolver that does not read the `port` key dials the
 standard port, fails where nothing listens there, backs off and falls back to
 Do53. Turn `ports` on once the resolvers that matter to you read it.
+
+**Targets need a signed signal.** A resolver honours a target only when the
+signal validates. When the signal goes out unsigned (its home zone is not
+signed), the start-up pass logs a warning, and the transports moved to a
+target are not offered there.
+A resolver that predates targets reads a record with a target as if it were
+about the nameserver itself, so turn `targets` on only once every resolver
+that matters to you skips such records.
 
 **Where the signal comes from.** A response carries signals composed from
 zone data, the zone's own and that of the zones this server serves, never

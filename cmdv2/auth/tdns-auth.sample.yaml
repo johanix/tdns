@@ -70,6 +70,16 @@ service:
       #                            # A non-standard port also keeps a test
       #                            # listener off port 853, which resolvers
       #                            # that follow RFC 9539 try unasked.
+      # targets:                   # optional: a transport served by another
+      #    dot:  dot.example.net.  # host. Each one gets an SVCB record of its
+      #                            # own with the host as its TargetName, and
+      #                            # its port from ports: if it has one. Keys:
+      #                            # udp, tcp, dot, doq; dot and doq need a
+      #                            # weight in signal. doh is refused (it
+      #                            # would need a path).
+      #                            # Resolvers honour a target only from a
+      #                            # signed signal: a warning in an unsigned
+      #                            # zone. Only type svcb carries targets.
 
 # The listeners: block is the SAME schema in every tdns app (#446): where
 # this daemon's DNS service listens. Authoritative-serving BEHAVIOR lives
