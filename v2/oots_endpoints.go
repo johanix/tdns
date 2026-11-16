@@ -33,11 +33,13 @@ import (
 // not allow: all of them unless the path validated Secure (R1, R5). Their
 // records with TargetName "." stay, whatever the state (R2, R4). Each record
 // ignored is logged and counted on server. One ignored while the path was
-// undecided marks the set as waiting for the verifying lookup.
+// undecided marks the set as waiting for the verifying lookup. A record left
+// whose port is on the bad-port list goes to the nameserver itself on the
+// default port (withoutBadPorts).
 func (imr *Imr) honouredRecords(server *cache.AuthServer, set *svcbSignalSet, recs []ootsRecord) []ootsRecord {
 	state := cache.SignalPathState(set.path)
 	if state == cache.ValidationStateSecure {
-		return recs
+		return imr.withoutBadPorts(server, recs)
 	}
 	out := make([]ootsRecord, 0, len(recs))
 	ignored := 0
@@ -59,7 +61,7 @@ func (imr *Imr) honouredRecords(server *cache.AuthServer, set *svcbSignalSet, re
 			set.awaitsLookup = true
 		}
 	}
-	return out
+	return imr.withoutBadPorts(server, out)
 }
 
 // defaultEndpointsKey marks a context whose queries go to every server's
