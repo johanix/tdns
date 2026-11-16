@@ -971,15 +971,32 @@ func (imr *Imr) awaitUsableTuples(ctx context.Context, qname string, qtype uint1
 	return imr.prioritizeServersFor(ctx, qname, qtype, serverMap, privacy)
 }
 
-// awaitSignalsAfterPass is for a pass of the query loop that ran out of
-// tuples without an answer. If none is left now, every one it tried went into
-// backoff, and a server without a transport signal may have nothing else yet.
-// It then waits, as awaitUsableTuples does, for the signals of the servers
-// that have an address and no signal, and reports whether one came in. With
-// tuples left, the attempts failed without a backoff, and another pass would
-// only repeat them.
-func (imr *Imr) awaitSignalsAfterPass(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) bool {
+// passTuple is a (server, address, transport) a pass of the query loop has
+// tried (anotherPassAfter).
+type passTuple struct {
+	server    *cache.AuthServer
+	addr      string
+	transport core.Transport
+}
+
+// anotherPassAfter reports whether a pass of the query loop that ran out of
+// tuples without an answer is worth another, given the tuples it tried.
+//
+// It is when a tuple the pass did not try is available now. Typically a
+// server's transport signal came in during the pass, while the query's own
+// Do53 attempt to it was being refused: the server has transports the pass
+// never had (#1065). Only tried tuples left: they failed without a backoff,
+// and another pass would repeat them. No tuple left at all: every one it
+// tried went into backoff, and a server without a signal may have nothing
+// else yet. It then waits, as awaitUsableTuples does, for the signals of the
+// servers that have an address and none, and reports whether one came in.
+func (imr *Imr) anotherPassAfter(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel, tried map[passTuple]bool) bool {
 	if _, _, tuples := imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false); len(tuples) > 0 {
+		for _, tup := range tuples {
+			if !tried[passTuple{tup.Server, tup.Addr, tup.Transport}] {
+				return true
+			}
+		}
 		return false
 	}
 	unsignalled := map[string]*cache.AuthServer{}
@@ -1816,12 +1833,14 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			addresslessAtStart[key] = true
 		}
 	}
-	// Two passes, and one more when a transport signal arrives after a pass
-	// has run out (awaitSignalsAfterPass).
+	// Two passes, and one more when a pass has run out and a tuple it did
+	// not have is available, or comes with a transport signal
+	// (anotherPassAfter).
 	maxPasses := 2
-	signalPassAdded := false
+	extraPassAdded := false
 	for attempt := 0; attempt < maxPasses; attempt++ {
 		zoneName, zone, prioritized = imr.awaitUsableTuples(ctx, qname, qtype, serverMap, privacy)
+		tried := map[passTuple]bool{}
 		if Globals.Debug {
 			lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers) attempt=%d", len(prioritized), len(serverMap), attempt+1)
 		}
@@ -1854,6 +1873,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			}
 
 			lastNS, lastAddr, lastTransport = nsname, addr, transport
+			tried[passTuple{server, addr, transport}] = true
 			attempts++
 
 			if Globals.Debug {
@@ -2055,13 +2075,13 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		// The pass's own attempts may have put the servers' one transport
 		// so far in backoff: Do53 to a server that refuses it, or has
 		// nothing on port 53, before its signal is in (#1065). A server
-		// whose signal comes in has transports this pass did not: wait for
-		// it, once per query, and go again.
-		if !signalPassAdded && imr.awaitSignalsAfterPass(ctx, qname, qtype, serverMap, privacy) {
-			signalPassAdded = true
+		// whose signal came in during the pass, or comes in now, has
+		// transports this pass did not: go again, once per query.
+		if !extraPassAdded && imr.anotherPassAfter(ctx, qname, qtype, serverMap, privacy, tried) {
+			extraPassAdded = true
 			maxPasses++
 			if Globals.Debug {
-				lg.Printf("IterativeDNSQuery: a transport signal arrived after the pass ran out of tuples; retrying qname=%s", qname)
+				lg.Printf("IterativeDNSQuery: tuples the pass did not try are available after it ran out; retrying qname=%s", qname)
 			}
 			continue
 		}

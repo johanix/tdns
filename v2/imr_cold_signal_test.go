@@ -234,8 +234,9 @@ func TestColdQueryTakesTheFirstSignal(t *testing.T) {
 }
 
 // startRefusingDouble is a loopback Do53 server that refuses every query
-// with EDE 18, as tdns-auth does with debug-do53-queries-refused (#1066).
-func startRefusingDouble(t *testing.T) (host, port string) {
+// with EDE 18, as tdns-auth does with debug-do53-queries-refused (#1066),
+// after delay.
+func startRefusingDouble(t *testing.T, delay time.Duration) (host, port string) {
 	t.Helper()
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -243,6 +244,7 @@ func startRefusingDouble(t *testing.T) (host, port string) {
 	}
 	host, port, _ = net.SplitHostPort(pc.LocalAddr().String())
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		time.Sleep(delay)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)
 		if opt := r.IsEdns0(); opt != nil {
@@ -274,7 +276,42 @@ func startRefusingDouble(t *testing.T) (host, port string) {
 // the refusal (the rig's encns suite against a server that refuses queries
 // over Do53).
 func TestColdQueryWaitsAfterItsOwnDo53IsRefused(t *testing.T) {
-	host, port := startRefusingDouble(t)
+	imr, server, serverMap := newRefusedTestImr(t, 0)
+	end := startSignalLookup(t, imr, server)
+	end(300*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed >= 5*time.Second {
+		t.Errorf("waited %s, the whole bound", elapsed)
+	}
+	// Do53, refused; then DoT, which fails only for want of a client.
+	if err == nil || !strings.Contains(err.Error(), "attempts=2") || !strings.Contains(err.Error(), "/dot") {
+		t.Errorf("got %v, want a refused Do53 attempt and then one over DoT", err)
+	}
+}
+
+// The signal comes in while the query's Do53 attempt is out, and the refusal
+// arrives after it: the pass ends with DoT available, a tuple it never had.
+// The query goes again over DoT. It used to give up: tuples were left, and
+// the query took them for ones it had tried (the rig's encns suite, against
+// a server that refuses queries over Do53).
+func TestColdQueryGoesAgainWhenTheSignalCameDuringThePass(t *testing.T) {
+	imr, server, serverMap := newRefusedTestImr(t, 300*time.Millisecond)
+	end := startSignalLookup(t, imr, server)
+	end(50*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
+
+	_, err := coldQuery(context.Background(), imr, serverMap)
+	if err == nil || !strings.Contains(err.Error(), "attempts=2") || !strings.Contains(err.Error(), "/dot") {
+		t.Errorf("got %v, want a refused Do53 attempt and then one over DoT", err)
+	}
+}
+
+// newRefusedTestImr is an IMR whose one server for the child zone refuses
+// queries over Do53 after delay, and has no transport signal yet. It has no
+// client for any other transport, so a DoT attempt fails at once.
+func newRefusedTestImr(t *testing.T, delay time.Duration) (*Imr, *cache.AuthServer, map[string]*cache.AuthServer) {
+	t.Helper()
+	host, port := startRefusingDouble(t, delay)
 	imr := newTestImr(t)
 	imr.Cache.DNSClient = map[core.Transport]core.DNSClienter{
 		core.TransportDo53: core.NewDNSClient(core.TransportDo53, port, nil),
@@ -287,17 +324,7 @@ func TestColdQueryWaitsAfterItsOwnDo53IsRefused(t *testing.T) {
 	if err := imr.Cache.AddServers(strictChildZone, serverMap); err != nil {
 		t.Fatalf("setup: AddServers: %v", err)
 	}
-	end := startSignalLookup(t, imr, server)
-	end(300*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
-
-	elapsed, err := coldQuery(context.Background(), imr, serverMap)
-	if elapsed >= 5*time.Second {
-		t.Errorf("waited %s, the whole bound", elapsed)
-	}
-	// Do53, refused; then DoT, which fails only for want of a client.
-	if err == nil || !strings.Contains(err.Error(), "attempts=2") || !strings.Contains(err.Error(), "/dot") {
-		t.Errorf("got %v, want a refused Do53 attempt and then one over DoT", err)
-	}
+	return imr, server, serverMap
 }
 
 // startSignalAuthDouble is a loopback server for oobNSZone that gives
