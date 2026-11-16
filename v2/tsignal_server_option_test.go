@@ -119,6 +119,7 @@ func TestTheServerWideOptionReachesAZoneWithoutTheZoneOption(t *testing.T) {
 ns1.`+z+`	3600	IN	A	127.0.0.1
 `, "127.0.0.1:53")
 	delete(zd.Options, OptAddTransportSignal)
+	conf.Service.Identities = []string{"ns1." + z}
 
 	serverOptions(zd, map[AuthOption]string{})
 	runTransportSignalPass(zd, conf)
