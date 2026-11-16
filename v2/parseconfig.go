@@ -754,6 +754,15 @@ func (conf *Config) ParseConfig(reload bool) error {
 		if err := refuseAuthOptionsForApp(Globals.App.Type, conf.AuthEngine.Options); err != nil {
 			return err
 		}
+		if err := checkDo53QueriesRefused(conf); err != nil {
+			return err
+		}
+		if reload {
+			if want := do53QueriesRefusedConfigured(conf.AuthEngine.Options); want != conf.Internal.do53QueriesRefused.Load() {
+				lg.Warn("authengine option debug-do53-queries-refused changed; it takes effect at the next restart",
+					"configured", want, "running", conf.Internal.do53QueriesRefused.Load())
+			}
+		}
 	}
 
 	// KDC and KRS configuration parsing has been moved to tdns-nm

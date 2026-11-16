@@ -681,11 +681,12 @@ type ConfigResponse struct {
 	ErrorMsg             string
 	TsigConflicts        []string              `json:"tsigconflicts,omitempty"`
 	TsigWithheldRemovals []string              `json:"tsigwithheldremovals,omitempty"`
-	ServerErrors         []ServerError         `json:"servererrors,omitempty"`     // active server-wide error conditions
-	GuardrailBlocked     bool                  `json:"guardrailblocked,omitempty"` // reload refused by the DNSSEC policy-change guardrail
-	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`   // per-zone would-strand findings (with GuardrailBlocked)
-	Imr                  *ImrStatus            `json:"imr,omitempty"`              // IMR priming + stub/forward state, when this daemon carries one
-	Proc                 *ProcStatus           `json:"proc,omitempty"`             // process resources (open fds, goroutines), for leak visibility (#443)
+	ServerErrors         []ServerError         `json:"servererrors,omitempty"`       // active server-wide error conditions
+	Do53QueriesRefused   bool                  `json:"do53queriesrefused,omitempty"` // debug-do53-queries-refused, as the DNS engine started with it (#1066)
+	GuardrailBlocked     bool                  `json:"guardrailblocked,omitempty"`   // reload refused by the DNSSEC policy-change guardrail
+	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`     // per-zone would-strand findings (with GuardrailBlocked)
+	Imr                  *ImrStatus            `json:"imr,omitempty"`                // IMR priming + stub/forward state, when this daemon carries one
+	Proc                 *ProcStatus           `json:"proc,omitempty"`               // process resources (open fds, goroutines), for leak visibility (#443)
 }
 
 // ReloadGuardrailZone is one signed zone a config reload would strand: its bound

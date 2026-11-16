@@ -437,6 +437,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	}
 
 	checkListeners(&cfg, rep)
+	checkDo53QueriesRefused(&cfg, rep, effectiveRole(role) == "agent")
 	checkApiServer(&cfg, cfgPath, rep)
 	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
@@ -626,6 +627,27 @@ func checkListeners(cfg *tdns.Config, rep *ccReport) {
 			checkFileExists(rep, g, "certfile", cfg.Listeners.CertFile)
 			checkFileExists(rep, g, "keyfile", cfg.Listeners.KeyFile)
 		}
+	}
+}
+
+// checkDo53QueriesRefused reports debug-do53-queries-refused (#1066): a WARN
+// when it is on and the daemon would start with it, since it breaks RFC
+// requirements on purpose; a FAIL when the daemon would refuse to start with
+// it, and on tdns-agent, which refuses the option.
+func checkDo53QueriesRefused(cfg *tdns.Config, rep *ccReport, agent bool) {
+	const g, check = "Listeners", "debug-do53-queries-refused"
+	on, err := cfg.Do53QueriesRefusedCheck()
+	switch {
+	case !on:
+	case agent:
+		rep.fail(g, check, "tdns-agent refuses this authengine option at startup",
+			"remove it: it is for a tdns-auth leaf server under test")
+	case err != nil:
+		rep.fail(g, check, err.Error(),
+			"add dot or doq to listeners.transports, with a certfile and keyfile that load, or remove the option")
+	default:
+		rep.warn(g, check, "queries over Do53 will be REFUSED (EDE 18), except _dns SVCB and DNSKEY; NOTIFY and UPDATE are handled as usual. This breaks RFC requirements on purpose",
+			"use it only on a leaf server under test")
 	}
 }
 

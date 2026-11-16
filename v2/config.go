@@ -1016,6 +1016,7 @@ type InternalDnsConf struct {
 	APIStopCh           chan struct{}
 	StopOnce            sync.Once
 	stopFailed          atomic.Bool // set by Shutdowner: MainLoop exits 1, not 0 (#977)
+	do53QueriesRefused  atomic.Bool // debug-do53-queries-refused as DnsEngine started with it; a reload takes effect at the next start (#1066)
 	RefreshZoneCh       chan ZoneRefresher
 	BumpZoneCh          chan BumperData
 	ValidatorCh         chan ValidatorRequest
