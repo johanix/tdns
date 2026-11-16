@@ -988,9 +988,11 @@ Three `options:` values are recognized:
 ## The transport signal: service.transport
 
 `service.transport` tells resolvers which transports the server offers, so
-that they can move off Do53. tdns-auth publishes the signal at
-`_dns.<nameserver>` for each of its identities, in every zone with the
-`add-transport-signal` option.
+that they can move off Do53. tdns-auth writes the signal at
+`_dns.<identity>` for each name in `service.identities`, in that name's home
+zone, and adds signals to the responses of every zone with the
+`add-transport-signal` option. *Where the signal comes from*, below, gives
+the rules.
 
 ```yaml
 service:
@@ -1068,6 +1070,55 @@ as well.
 **Older resolvers.** A resolver that does not read the `port` key dials the
 standard port, fails where nothing listens there, backs off and falls back to
 Do53. Turn `ports` on once the resolvers that matter to you read it.
+
+**Where the signal comes from.** A response carries signals composed from
+zone data, the zone's own and that of the zones this server serves, never
+from who the server is. Three rules:
+
+1. **A signal provisioned in a zone is served as it is.** An SVCB RRset that
+   an operator or a customer writes at `_dns.<nameserver>`, in either mode,
+   is zone content. It answers a direct query. It is added to the Additional
+   section of a zone's responses for every NS name whose `_dns` RRset is in
+   a zone served here: ns1, ns2 and ns3 alike. No identity and no address is
+   checked.
+   - An AliasMode record (SvcPriority 0) points at another name's signal,
+     such as a provider's. When the target is in a zone served here and has
+     an SVCB RRset there, that signal is added with the alias. Otherwise the
+     alias goes alone, and the resolver follows it.
+   - A ServiceMode record whose TargetName is not `.` names the host that
+     serves the transports it lists. Its target is not followed. tdns-imr
+     does not act on such a record yet.
+2. **A signal is synthesized from `service.transport` only for an
+   identity.** For each name in `service.identities`, tdns-auth writes
+   `_dns.<name>` into the name's home zone: the most specific zone served
+   here that holds the name, a co-hosted child rather than its parent.
+   - It writes only where it is that zone's primary and signer: no one else
+     signs it. An unsigned zone of its own counts.
+   - It writes only where nothing else is at that owner. Records there that
+     it did not store itself are left as they are, even when they are
+     identical to what the configuration gives, and it logs that it left
+     them alone.
+   - It withdraws a signal it stored for a name that is no longer an
+     identity, again only where it is the zone's primary and signer. With
+     `service.transport.type: none` it withdraws every signal it stored. It
+     remembers what it stored there, so the same records, loaded again
+     from a zone file written before the withdrawal, are withdrawn again.
+   - An identity below a zone cut to a child not served here gets no
+     signal, and tdns-auth warns: its home is the child's server.
+   - A listen address decides nothing. Behind NAT, anycast or a load
+     balancer, list the name in `service.identities`.
+3. **tdns-auth never writes into a customer zone**, whatever is or is not
+   there. Listing a name in `service.identities` says its home zone is the
+   operator's own; every other zone is a customer zone. A customer zone
+   whose NS is one of the identities gets the signal from the identity's
+   home zone, by rule 1.
+
+An `_dns.<name>` below a zone cut to a child that is not served here is
+occluded data in the parent, and is never served.
+
+When the zone loads, tdns-auth warns about a transport named in two records
+of one RRset (a resolver uses one endpoint per transport) and about an `oots`
+weight above 100 (resolvers read it as 100).
 
 **Older tdns nodes.** `udp` and `tcp` are new tokens. A tdns node older than
 the lossless `oots` codec (the dns fork's `v1.1.72-johanix.6`) drops them when

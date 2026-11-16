@@ -87,22 +87,18 @@ func TestCollectSignalRRsets_AliasChasedCrossZone(t *testing.T) {
 	}
 }
 
-func TestCollectSignalRRsets_UnvouchedAliasIsNotInjected(t *testing.T) {
+func TestCollectSignalRRsets_AliasToATargetNotHereGoesAlone(t *testing.T) {
 	// provider.com is NOT registered, so the server holds no signal for the
-	// alias target, and the NS name has no addresses that are this server's:
-	// the server cannot know the alias is about itself, so it does not
-	// inject it (docs/2026-10-04-transport-signal-publication-and-serving.md).
-	// The alias is still zone content and answers a direct query.
+	// alias target. The alias is zone data and goes in alone (rule 1 of the
+	// maintainer's ruling on plan step S2, 2026-11-15); the resolver can
+	// chase it.
 	child := mapZoneWithSignal("example.com.", "ns.example.com.",
 		[]dns.RR{mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 0 _dns.ns.provider.com.`)})
 	registerZones(t, child)
 
 	sigs := child.collectSignalRRsets(child.publishedSnapshot())
-	if len(sigs) != 0 {
-		t.Fatalf("an alias the server cannot vouch for was injected: %d: %+v", len(sigs), sigs)
-	}
-	if od := getOwnerFrom(child.publishedSnapshot(), "_dns.ns.example.com."); od == nil {
-		t.Fatal("the alias is no longer zone content")
+	if len(sigs) != 1 || !hasSignal(sigs, "_dns.ns.example.com.") {
+		t.Fatalf("want the alias alone, got %d: %+v", len(sigs), sigs)
 	}
 }
 

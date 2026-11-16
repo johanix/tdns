@@ -6,6 +6,7 @@ package tdns
 import (
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -114,12 +115,12 @@ func localAddrs() []net.IP {
 }
 
 // CreateTransportSignalRRs orchestrates construction of a transport signal RRset
-// for this zone. It delegates to the chosen mechanism (svcb|tsync). In-bailiwick
-// signals are synthesized, SIGNED, and stored as real "_dns.<ns>" owner RRsets
-// (the resigner keeps their signatures fresh); they are served on direct query
-// and injected opportunistically at query time. The only materialized state is
-// the per-snapshot signalSynth fallback for an out-of-bailiwick identity NS whose
-// own zone this server does not host (Case A).
+// for this zone. It delegates to the chosen mechanism (svcb|tsync). An SVCB
+// signal is synthesized only at _dns.<identity> in the identity's home zone,
+// SIGNED where this server signs, and stored as a real owner RRset (the
+// resigner keeps its signature fresh); it is served on direct query and
+// injected at query time like any signal provisioned in a zone. See
+// createTransportSignalSVCB for the rules.
 func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 	// Resolve DNSSEC keys BEFORE taking zd.mu: signing the transport signal with
 	// a nil dak can reach PublishDnskeyRRs, which locks zd.mu, so signing under
@@ -142,8 +143,17 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 
 	switch conf.Service.Transport.Type {
 	case "none", "":
+		// Nothing is synthesized. What the pass stored under a type that
+		// did synthesize is withdrawn, as for a name no longer an identity:
+		// left in place, rule 1 would serve it as provisioned, and a refresh
+		// would carry it.
 		lgDns.Debug("CreateTransportSignalRRs: service.transport.type=none; skipping transport signal synthesis for zone",
 			"zone", zd.ZoneName)
+		if apex := zd.stagedOwner(zd.ZoneName); apex != nil && zd.signalMayWrite(apex, dak) {
+			if withdrawn, unpublished := zd.withdrawStaleSignalsLocked(nil); withdrawn+unpublished > 0 {
+				zd.publishTransportSignalLocked(bare, nil)
+			}
+		}
 		return nil
 	case "svcb":
 		return zd.createTransportSignalSVCB(conf, dak, bare)
@@ -204,17 +214,66 @@ func (zd *ZoneData) publishTransportSignalLocked(bare bool, synth map[string]*co
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
 
-// svcbHasAlias reports whether the RRset contains an AliasMode SVCB (non-terminal
-// Target) — i.e. an operator-authored bridge rather than a synthesized server SVCB.
+// svcbHasAlias reports whether the RRset contains an AliasMode SVCB
+// (SvcPriority 0, RFC 9460 section 2.4.2): an operator's bridge to another
+// name's signal. The mode is the priority, not the target: a ServiceMode
+// record with a TargetName names an endpoint host, not a signal to chase.
 func svcbHasAlias(rrset core.RRset) bool {
 	for _, rr := range rrset.RRs {
-		if svcb, ok := rr.(*dns.SVCB); ok {
-			if svcb.Target != "." && svcb.Target != "" {
-				return true
-			}
+		if svcb, ok := rr.(*dns.SVCB); ok && svcb.Priority == 0 {
+			return true
 		}
 	}
 	return false
+}
+
+// svcbSignalWarnings checks an SVCB RRset as an operator wrote it and
+// returns what the zone loader should warn about (it refuses nothing):
+//   - an oots weight above 100: resolvers read it as 100 (design 2026-11-14
+//     section 8; the codec keeps the octet as written);
+//   - a transport named in two ServiceMode records of the set: one endpoint
+//     per transport, so a resolver uses it from one record only (the lowest
+//     SvcPriority, then the lowest RDATA) and ignores it in the others
+//     (design 2026-11-14 section 2).
+//
+// AliasMode records carry no signal and are not counted.
+func svcbSignalWarnings(rs core.RRset) []string {
+	var warns []string
+	named := map[string]int{}
+	var order []string
+	for _, rr := range rs.RRs {
+		svcb, ok := rr.(*dns.SVCB)
+		if !ok || svcb.Priority == 0 {
+			continue
+		}
+		inRecord := map[string]bool{}
+		for _, kv := range svcb.Value {
+			oots, ok := kv.(*dns.SVCBOots)
+			if !ok {
+				continue
+			}
+			for _, e := range oots.Oots {
+				proto := strings.ToLower(e.Proto)
+				if e.Weight > 100 {
+					warns = append(warns, fmt.Sprintf("oots weight %d for %q is above 100; resolvers read it as 100", e.Weight, proto))
+				}
+				if inRecord[proto] {
+					continue
+				}
+				inRecord[proto] = true
+				if named[proto] == 0 {
+					order = append(order, proto)
+				}
+				named[proto]++
+			}
+		}
+	}
+	for _, proto := range order {
+		if n := named[proto]; n > 1 {
+			warns = append(warns, fmt.Sprintf("transport %q is named in %d records of the RRset; a resolver uses it from one record only (the lowest SvcPriority, then the lowest RDATA) and ignores it in the others", proto, n))
+		}
+	}
+	return warns
 }
 
 // tsyncHasAlias reports whether the RRset contains an aliased TSYNC — an
@@ -422,123 +481,91 @@ func svcbOotsFromWeights(m map[string]uint8) *dns.SVCBOots {
 	return &dns.SVCBOots{Oots: entries}
 }
 
-// SVCB path. See CreateTransportSignalRRs for the storage/injection model and
-// docs/2026-10-04-transport-signal-publication-and-serving.md for the rules:
-// the server speaks only about itself, zone content is signed by whoever signs
-// the zone, every NS name is visited, and nothing is ever looked up
-// recursively.
+// SVCB path. See CreateTransportSignalRRs for the storage model. The rules
+// are the maintainer's ruling on plan step S2 (2026-11-15):
+//
+//  1. Records provisioned in a zone, by an operator or a customer, in either
+//     mode, are included by zone data alone (collectSignalRRsets). This
+//     pass leaves them as they are.
+//  2. Synthesis from service.transport is the only place identity applies.
+//     The pass synthesizes at _dns.<name> only for a name in
+//     service.identities, only in the zone that is that name's home (the
+//     most specific zone hosted here that holds it), only where this server
+//     is that zone's primary and signer, and only where nothing is at that
+//     owner but what the pass itself stored there.
+//  3. It never writes into a customer zone, whatever is or is not there.
+//     Rule 2 implies this: the only owners it writes are _dns.<identity> in
+//     the identity's home zone, and listing a name in service.identities
+//     says that its home is this server's own zone. A customer zone whose NS
+//     is one of those names gets the signal by rule 1, from the home zone.
+//
+// Nothing is ever looked up recursively.
 func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bare bool) error {
 	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
 		return fmt.Errorf("zone apex not found")
 	}
-	nsRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeNS)
-	if len(nsRRset.RRs) == 0 {
-		return fmt.Errorf("no NS records found at zone apex")
+
+	// The identities whose home is this zone. One below a zone cut here is
+	// the child's, a child not served here (a co-hosted child would be its
+	// home): nothing is written for it, since this zone holds only glue and
+	// occluded data there, which is never served.
+	var homeOf []string
+	for _, id := range conf.Service.Identities {
+		id = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(id)))
+		if id == "." || !zd.isHomeOf(id) || slices.Contains(homeOf, id) {
+			continue
+		}
+		if zd.stagedBelowCut("_dns." + id) {
+			lgDns.Warn("createTransportSignalSVCB: an identity is below a zone cut to a child not served here; no signal is synthesized for it (service.identities should name only names whose home zone is served here)",
+				"zone", zd.ZoneName, "identity", id)
+			continue
+		}
+		homeOf = append(homeOf, id)
 	}
 
-	// Where nothing may be stored: a secondary that may not originate content
-	// (docs/2026-07-25-secondary-zones-immutable.md: it serves what it received,
-	// unmodified), and a zone that is signed but not by this server (an
-	// unsigned owner under a signed apex is bogus to a validator, and the
-	// signer's chain denies the name; dak == nil says only that THIS server
-	// does not sign, the apex says whether someone does). Such a server keeps
-	// its signal as an unsigned fallback beside the snapshot, injected only.
-	storeForbidden := !zoneMayOriginateContent(zd) || (dak == nil && apexIsSigned(apex))
+	// Primary and signer: the zone's content originates here (not a
+	// secondary that serves what it received,
+	// docs/2026-07-25-secondary-zones-immutable.md) and no one else signs it
+	// (an unsigned owner under a signed apex is bogus to a validator; dak ==
+	// nil says only that THIS server does not sign, the apex says whether
+	// someone does). An unsigned zone of this server's own counts. Anywhere
+	// else nothing is synthesized: a signal there is provisioned in the zone
+	// and served as it is (rule 1), or there is none.
+	mayWrite := zd.signalMayWrite(apex, dak)
+	if len(homeOf) > 0 && !mayWrite {
+		lgDns.Info("createTransportSignalSVCB: this zone is the home of identities, but this server is not its primary and signer; no signal is synthesized, and one provisioned in the zone is served as it is",
+			"zone", zd.ZoneName, "identities", homeOf)
+		homeOf = nil
+	}
 
-	staged, aliases := 0, 0
-	synth := map[string]*core.RRset{}
-	for _, rr := range nsRRset.RRs {
-		ns, ok := rr.(*dns.NS)
-		if !ok {
+	changed, kept := 0, 0
+	want := map[string]bool{}
+	for _, id := range homeOf {
+		owner := "_dns." + id
+		want[owner] = true
+		// Records at the owner that are not the pass's own are provisioned,
+		// whatever their type and mode: left as they are, and the transport
+		// configuration does not apply to that name. The pass's own stored
+		// signal is zone content too, which is why it is told apart by the
+		// record of what the pass stored there (signalStoredByPass), not by
+		// its presence and not by matching what the configuration gives: an
+		// operator may write exactly that, and a later configuration must
+		// not replace it.
+		if od := zd.stagedOwner(owner); od != nil && ownerRRsetCount(od) > 0 && !zd.ownerHoldsOnlyPassSignal(owner, od) {
+			lgDns.Info("createTransportSignalSVCB: leaving the operator's records at the signal owner alone; the transport configuration does not apply to this name",
+				"zone", zd.ZoneName, "owner", owner, "alias", svcbHasAlias(od.RRtypes.GetOnlyRRSet(dns.TypeSVCB)), "rrsets", ownerRRsetCount(od))
+			kept++
+			if err := zd.forgetSignalStored(owner); err != nil {
+				zd.warnSignalForgetFailed(owner, err)
+			}
 			continue
 		}
-		nsName := ns.Ns
-		ownerName := "_dns." + nsName
-
-		if !dns.IsSubDomain(zd.ZoneName, nsName) {
-			// Out of bailiwick: the signal's home is the name's own zone.
-			// Only one of this server's identities is spoken for (Case A).
-			// Co-hosted, that zone's authoritative signal is injected at
-			// query time; otherwise an unsigned fallback is kept beside the
-			// snapshot, never as content of this zone.
-			if !CaseFoldContains(conf.Service.Identities, nsName) || Globals.ServerSVCB == nil {
-				continue
-			}
-			if tz := FindZone(ownerName); tz != nil {
-				lgDns.Debug("createTransportSignalSVCB: identity NS zone is co-hosted; will inject its authoritative signal",
-					"zone", zd.ZoneName, "ns", nsName)
-				continue
-			}
-			s, err := zd.buildServerSVCB(conf, nsName, nil, nil)
-			if err != nil {
-				return err
-			}
-			lgDns.Debug("createTransportSignalSVCB: synthesized fallback signal for out-of-bailiwick identity NS",
-				"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
-			synth[ownerName] = s
-			continue
-		}
-
-		// In bailiwick.
-		nsData := zd.stagedOwner(nsName)
-		if nsData == nil {
-			continue
-		}
-		// An operator-authored AliasMode SVCB at _dns.<ns> is the operator's
-		// statement: left as it is, served on direct query, chased literally
-		// at injection time (RFC 9460 section 3). A target that is one of
-		// this server's identities whose zone is not hosted here gets the
-		// fallback an out-of-bailiwick NS name gets. The walk goes on: an
-		// alias at one name says nothing about the server's other names.
-		if od := zd.stagedOwner(ownerName); od != nil {
-			if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); svcbHasAlias(rs) {
-				lgDns.Debug("createTransportSignalSVCB: keeping operator SVCB alias", "owner", ownerName, "zone", zd.ZoneName)
-				aliases++
-				for _, tgt := range signalChaseTargets(rs) {
-					id := strings.TrimPrefix(tgt, "_dns.")
-					if !CaseFoldContains(conf.Service.Identities, id) || Globals.ServerSVCB == nil || FindZone(tgt) != nil {
-						continue
-					}
-					s, err := zd.buildServerSVCB(conf, id, nil, nil)
-					if err != nil {
-						return err
-					}
-					synth[tgt] = s
-				}
-				continue
-			}
-		}
-
-		aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
-		aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
-		if !matchesConfiguredAddrs(conf.Listeners.Addresses, &aRRset) && !matchesConfiguredAddrs(conf.Listeners.Addresses, &aaaaRRset) {
-			lgDns.Debug("createTransportSignalSVCB: NS addresses do not match configured; skipping",
-				"zone", zd.ZoneName, "ns", nsName)
-			continue
-		}
-		var ipv4s, ipv6s []net.IP
-		for _, rr := range aRRset.RRs {
-			if a, ok := rr.(*dns.A); ok {
-				ipv4s = append(ipv4s, a.A)
-			}
-		}
-		for _, rr := range aaaaRRset.RRs {
-			if aaaa, ok := rr.(*dns.AAAA); ok {
-				ipv6s = append(ipv6s, aaaa.AAAA)
-			}
-		}
-		stored, err := zd.buildServerSVCB(conf, nsName, ipv4s, ipv6s)
+		stored, err := zd.buildServerSVCB(conf, id, nil, nil)
 		if err != nil {
 			return err
 		}
-		switch {
-		case storeForbidden:
-			lgDns.Info("createTransportSignalSVCB: this server stores no signal into this zone (a secondary that may not originate content, or a zone signed by someone else); the signal is kept as an unsigned fallback beside the snapshot, injected only",
-				"zone", zd.ZoneName, "owner", ownerName)
-			synth[ownerName] = stored
-			continue
-		case dak != nil:
+		if dak != nil {
 			// Sign BEFORE staging so the snapshot freezes a signed signal; the
 			// resigner keeps its signature fresh thereafter. dak is resolved by
 			// CreateTransportSignalRRs, outside zd.mu, and for a zone this
@@ -547,32 +574,180 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 			// SignRRset under zd.mu (the PublishDnskeyRRs re-lock).
 			if _, err := zd.SignRRset(stored, "", dak, false, nil); err != nil {
 				lgDns.Error("createTransportSignalSVCB: error signing SVCB; not staging unsigned signal",
-					"owner", ownerName, "err", err)
-				return fmt.Errorf("createTransportSignalSVCB: failed to sign SVCB for %q: %w", ownerName, err)
+					"owner", owner, "err", err)
+				return fmt.Errorf("createTransportSignalSVCB: failed to sign SVCB for %q: %w", owner, err)
 			}
 		}
 		lgDns.Debug("createTransportSignalSVCB: stored synthesized server SVCB",
-			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
-		zd.stageRRsetLocked(ownerName, *stored)
-		staged++
+			"zone", zd.ZoneName, "identity", id, "owner", owner)
+		zd.stageRRsetLocked(owner, *stored)
+		zd.noteSignalStored(owner, stored.RRs)
+		changed++
 	}
-	if staged == 0 && len(synth) == 0 {
-		// A warning only when the zone set the option itself: then it is a
-		// stray option, say on a hidden primary. Under the server-wide
-		// option a zone that does not name this server is ordinary and
-		// says so at debug level, or a server whose zones mostly name
-		// other servers would warn once per zone.
-		if aliases == 0 && zd.transportSignalSource() == "zone" {
-			lgDns.Warn("createTransportSignalSVCB: add-transport-signal is set, but no NS name of the zone resolves to this server's listeners and none is one of its identities; nothing to publish (a hidden primary should not carry the option)",
-				"zone", zd.ZoneName)
-		} else if aliases == 0 {
-			lgDns.Debug("createTransportSignalSVCB: no NS name of the zone is this server; nothing to publish under the server-wide add-transport-signal",
-				"zone", zd.ZoneName)
+
+	if mayWrite {
+		withdrawn, unpublished := zd.withdrawStaleSignalsLocked(want)
+		changed += withdrawn + unpublished
+	}
+
+	if changed == 0 {
+		// A warning only when the zone set the option itself and nothing
+		// can come of it: then it is a stray option, say on a hidden
+		// primary. Under the server-wide option such a zone is ordinary and
+		// says so at debug level, or a server whose zones mostly name other
+		// servers would warn once per zone.
+		if kept == 0 && len(homeOf) == 0 && zd.nsNamesWithASignalHere(conf, apex) == 0 {
+			if zd.transportSignalSource() == "zone" {
+				lgDns.Warn("createTransportSignalSVCB: add-transport-signal is set, but no NS name of the zone has a signal in a zone served here and none is an identity of this server whose home is served here; nothing to publish (a hidden primary should not carry the option)",
+					"zone", zd.ZoneName)
+			} else {
+				lgDns.Debug("createTransportSignalSVCB: no NS name of the zone has a signal here; nothing to publish under the server-wide add-transport-signal",
+					"zone", zd.ZoneName)
+			}
 		}
 		return nil
 	}
-	zd.publishTransportSignalLocked(bare, synth)
+	zd.publishTransportSignalLocked(bare, nil)
 	return nil
+}
+
+// signalMayWrite reports whether the signal pass may write this zone:
+// primary and signer. The zone's content originates here (not a secondary
+// that serves what it received, docs/2026-07-25-secondary-zones-immutable.md)
+// and no one else signs it (an unsigned owner under a signed apex is bogus to
+// a validator; dak == nil says only that THIS server does not sign, the apex
+// says whether someone does). An unsigned zone of this server's own counts.
+func (zd *ZoneData) signalMayWrite(apex *OwnerData, dak *DnssecKeys) bool {
+	return zoneMayOriginateContent(zd) && (dak != nil || !apexIsSigned(apex))
+}
+
+// withdrawStaleSignalsLocked withdraws what the pass stored at an owner that
+// is no longer an identity at home here (not in want): one dropped from
+// service.identities, say, across a restart, or every one once
+// service.transport.type is none. Left in place, rule 1 would serve it as if
+// it were provisioned. Only the pass's own unchanged signal goes; an RRset
+// the operator has since replaced is theirs, and only the record goes. A
+// withdrawal writes the zone, so the caller runs this only where this server
+// is primary and signer (signalMayWrite). A former primary that restarts as
+// a secondary changes nothing and keeps its record: should the zone be its
+// own again, the pass withdraws then.
+//
+// After a withdrawal, or with nothing at the owner, the record stays. The
+// withdrawal reaches the zone file only when the zone is next written, and a
+// restart before then loads the signal again; with the record kept, the pass
+// knows it and withdraws it again. Only records that are not the pass's end
+// the record. A revocation whose KeyDB delete failed earlier in this process
+// is tried again, whatever is at the owner now.
+//
+// A withdrawal staged by an earlier run whose publish was refused (signing
+// or the NSEC repair failed) is published again. The publisher keeps the
+// working set and drops the queue flag, so the owner is gone from the
+// working set while the published snapshot still serves the pass's signal
+// there, and nothing else would publish it.
+//
+// It returns the number of owners withdrawn now, and the number whose
+// earlier withdrawal is still unpublished; either calls for a publish.
+// Caller holds zd.mu.
+func (zd *ZoneData) withdrawStaleSignalsLocked(want map[string]bool) (withdrawn, unpublished int) {
+	for _, owner := range zd.signalStoredOwners() {
+		if want[owner] {
+			continue
+		}
+		if zd.signalRevocationPending(owner) {
+			if err := zd.forgetSignalStored(owner); err != nil {
+				zd.warnSignalForgetFailed(owner, err)
+			}
+			continue
+		}
+		od := zd.stagedOwner(owner)
+		if od == nil || ownerRRsetCount(od) == 0 {
+			if po := getOwnerFrom(zd.publishedSnapshot(), owner); po != nil {
+				if rs := po.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs) {
+					lgDns.Info("transport signal pass: a withdrawal staged earlier is not published yet; publishing it again",
+						"zone", zd.ZoneName, "owner", owner)
+					unpublished++
+				}
+			}
+			continue
+		}
+		if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs) {
+			zd.stageDeleteLocked(owner, dns.TypeSVCB)
+			if o := zd.stagedOwner(owner); o != nil && o.RRtypes.Count() == 0 {
+				zd.stageOwnerDeleteLocked(owner)
+			}
+			lgDns.Info("transport signal pass: withdrew the signal the pass had stored for a name that is no longer an identity at home in this zone",
+				"zone", zd.ZoneName, "owner", owner)
+			withdrawn++
+			continue
+		}
+		if err := zd.forgetSignalStored(owner); err != nil {
+			zd.warnSignalForgetFailed(owner, err)
+		}
+	}
+	return withdrawn, unpublished
+}
+
+// stagedBelowCut reports whether name is at or below a zone cut in this
+// zone's working set: an owner from name up to the apex, the apex not
+// included, that holds an NS RRset.
+func (zd *ZoneData) stagedBelowCut(name string) bool {
+	n := core.CanonicalizeName(name)
+	for dns.IsSubDomain(zd.ZoneName, n) && !core.EqualNames(n, zd.ZoneName) {
+		if od := zd.stagedOwner(n); od != nil && len(od.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs) > 0 {
+			return true
+		}
+		i, end := dns.NextLabel(n, 0)
+		if end {
+			break
+		}
+		n = n[i:]
+	}
+	return false
+}
+
+// ownerRRsetCount is the number of non-empty RRsets at an owner. NSEC is a
+// property of the owner, not an RRset, and RRSIGs ride with their RRsets.
+func ownerRRsetCount(od *OwnerData) int {
+	n := 0
+	for _, t := range od.RRtypes.Keys() {
+		if rs, ok := od.RRtypes.Get(t); ok && len(rs.RRs) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// ownerHoldsOnlyPassSignal reports whether the only records at owner are the
+// SVCB RRset the signal pass last stored there.
+func (zd *ZoneData) ownerHoldsOnlyPassSignal(owner string, od *OwnerData) bool {
+	rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
+	return ownerRRsetCount(od) == 1 && len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs)
+}
+
+// nsNamesWithASignalHere counts the zone's NS names whose signal a response
+// can carry by rule 1: one at _dns.<ns> in a zone served here, or an
+// identity whose home is served here (its own pass synthesizes it there, in
+// whatever order the passes run).
+func (zd *ZoneData) nsNamesWithASignalHere(conf *Config, apex *OwnerData) int {
+	n := 0
+	for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs {
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			continue
+		}
+		owner := "_dns." + ns.Ns
+		var od *OwnerData
+		if zd.isHomeOf(owner) {
+			od = zd.stagedOwner(owner)
+		} else if home := FindZone(owner); home != nil {
+			od = getOwnerFrom(home.publishedSnapshot(), owner)
+		}
+		if len(signalRRsetsFromOwner(od)) > 0 ||
+			(CaseFoldContains(conf.Service.Identities, ns.Ns) && (zd.isHomeOf(ns.Ns) || FindZone(ns.Ns) != nil)) {
+			n++
+		}
+	}
+	return n
 }
 
 // addsTransportSignal reports whether this zone publishes and injects transport

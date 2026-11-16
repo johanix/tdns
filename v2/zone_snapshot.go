@@ -31,6 +31,9 @@ type zoneSnapshot struct {
 	// Normally empty: in-bailiwick and co-hosted signals are served from their
 	// real, resigner-maintained owner RRsets in Data (or another zone's Data),
 	// not from here. Injection prefers an authoritative copy over a synth entry.
+	// The SVCB start-up pass no longer fills it: a server synthesizes a signal
+	// only into an identity's home zone, where it signs (the maintainer's
+	// ruling on plan step S2, 2026-11-15). The TSYNC path still may.
 	signalSynth map[string]*core.RRset
 	IxfrChain   []Ixfr
 	// ents holds the zone's empty non-terminals: names that own no records

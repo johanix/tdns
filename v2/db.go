@@ -311,6 +311,10 @@ func dbMigrateSchema(db *sql.DB) {
 		// (#1006). NULL, "not known", for every row an older tdns wrote, which
 		// is exactly right: the restart then lifts past it as before.
 		{"OutgoingSerials", "content_digest", "ALTER TABLE OutgoingSerials ADD COLUMN content_digest TEXT"},
+		// The digests of the signals the transport-signal pass stored at an
+		// owner before the last one (transport_signal_stored.go). Empty, no
+		// earlier signal known, for a row written before the column.
+		{"TransportSignalStored", "earlier", "ALTER TABLE TransportSignalStored ADD COLUMN earlier TEXT NOT NULL DEFAULT ''"},
 		// Rollover overhaul phase 2: softfail-state columns on RolloverZoneState.
 		// All NULL/0-default so existing testbed rows remain valid post-migration.
 		{"RolloverZoneState", "hardfail_count", "ALTER TABLE RolloverZoneState ADD COLUMN hardfail_count INTEGER NOT NULL DEFAULT 0"},
