@@ -595,8 +595,12 @@ func TestImrQueryCarriesTheChainExpiry(t *testing.T) {
 		t.Errorf("s1 A over the wire: chain expires in %v, want within the links' 300 s", left)
 	}
 	// Asked for the data's own name, no chain is followed.
-	if direct, err := imr.ImrQuery(ctx, "s3."+sigChainZone, dns.TypeA, dns.ClassINET, nil); err != nil || direct == nil || !direct.ChainExpiration.IsZero() {
-		t.Errorf("s3 A: chain expiry %v, err %v; want none", direct.ChainExpiration, err)
+	direct, err := imr.ImrQuery(ctx, "s3."+sigChainZone, dns.TypeA, dns.ClassINET, nil)
+	if err != nil || direct == nil {
+		t.Fatalf("s3 A: %v, %v", direct, err)
+	}
+	if !direct.ChainExpiration.IsZero() {
+		t.Errorf("s3 A: chain expiry %v; want none", direct.ChainExpiration)
 	}
 
 	// The cache path: c1 -> c2 A, the link for a minute, the data for an hour.
@@ -646,6 +650,37 @@ func TestImrQueryChainExpiryHonoursCacheMaxTTL(t *testing.T) {
 	}
 	if link := imr.Cache.Peek("s1."+sigChainZone, dns.TypeCNAME); link == nil || resp.ChainExpiration.After(link.Expiration) {
 		t.Errorf("chain expiry %v outlives the cached link %+v", resp.ChainExpiration, link)
+	}
+}
+
+// On a chain read from the cache, the addresses run out with their own cache
+// entry, not a full TTL from now: here the entry is kept for 60 s
+// (cache-max-ttl) while its records say an hour, and the link lasts an hour
+// (CodeRabbit on #1055).
+func TestAddrsExpiryOnACachedChainUsesTheAddressEntry(t *testing.T) {
+	imr, _ := sigChainImr(t)
+	c1, c2 := "c1."+sigChainZone, "c2."+sigChainZone
+	put := func(name string, rr dns.RR) {
+		imr.Cache.Set(name, rr.Header().Rrtype, &cache.CachedRRset{Name: name, RRtype: rr.Header().Rrtype,
+			Context: cache.ContextAnswer, State: cache.ValidationStateSecure, RRset: &core.RRset{Name: name,
+				Class: dns.ClassINET, RRtype: rr.Header().Rrtype, RRs: []dns.RR{rr}}})
+	}
+	put(c1, mustRR(t, c1+` 3600 IN CNAME `+c2))
+	prev := cache.GetTTLLimits()
+	t.Cleanup(func() { cache.SetTTLLimits(prev) })
+	cache.SetTTLLimits(cache.TTLLimits{Max: 60})
+	put(c2, mustRR(t, c2+` 3600 IN A 192.0.2.62`))
+	cache.SetTTLLimits(prev)
+
+	resp, err := imr.ImrQuery(context.Background(), c1, dns.TypeA, dns.ClassINET, nil)
+	if err != nil || resp == nil || resp.RRset == nil || !core.EqualNames(resp.RRset.Name, c2) {
+		t.Fatalf("c1 A: %v, %v", resp, err)
+	}
+	if left := time.Until(resp.ChainExpiration); left <= 50*time.Minute {
+		t.Fatalf("chain expires in %v, want the link's hour", left)
+	}
+	if left := time.Until(imr.addrsExpiry(c1, dns.TypeA, resp)); left <= 0 || left > 60*time.Second {
+		t.Errorf("the address expires in %v, want within its entry's 60 s", left)
 	}
 }
 
