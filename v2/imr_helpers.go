@@ -22,6 +22,10 @@ const (
 	// transportQueryReasonVerify is the verifying lookup for a signal record
 	// with a target, which waits for a Secure verdict (R1).
 	transportQueryReasonVerify = "verify-redirect"
+	// transportQueryReasonNoUsableTransport is the lookup a query starts, or
+	// joins, when none of its servers has a transport it may use now
+	// (IterativeDNSQuery, #1065).
+	transportQueryReasonNoUsableTransport = "no-usable-transport"
 )
 
 // detachedContext returns the context for fire-and-forget background work
@@ -143,10 +147,12 @@ func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, rea
 		if imr.Options[ImrOptUseTransportSignals] != "false" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
-	case transportQueryReasonStrictPrivacy:
+	case transportQueryReasonStrictPrivacy, transportQueryReasonNoUsableTransport:
 		// A strict query cannot use a server whose transports it does not
-		// know, so it looks them up whether or not the options ask for
-		// discovery. Only use-transport-signals: false turns signals off.
+		// know, nor can any query whose servers have nothing else left (the
+		// server's Do53 in backoff, say), so they look the transports up
+		// whether or not the options ask for discovery. Only
+		// use-transport-signals: false turns signals off.
 		if imr.Options[ImrOptUseTransportSignals] != "false" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
@@ -171,6 +177,7 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 	go func() {
 		queryCtx, cancel := detachedContext(5 * time.Second)
 		defer cancel()
+		queryCtx = withTransportSignalLookup(queryCtx)
 		rrtype := imr.TransportSignalRRType()
 		if imr.Cache.Debug {
 			imr.Cache.Logger.Printf("Transport signal query (%s): querying %s %s", reason, owner, dns.TypeToString[rrtype])
@@ -183,30 +190,85 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 	}()
 }
 
+// transportSignalLookupKey marks the context of a transport-signal lookup
+// (launchTransportSignalQuery), and of everything that lookup asks on the way.
+type transportSignalLookupKey struct{}
+
+// withTransportSignalLookup marks ctx as a transport-signal lookup's.
+func withTransportSignalLookup(ctx context.Context) context.Context {
+	return context.WithValue(ctx, transportSignalLookupKey{}, true)
+}
+
+// inTransportSignalLookup reports whether ctx is a transport-signal lookup's.
+func inTransportSignalLookup(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	in, _ := ctx.Value(transportSignalLookupKey{}).(bool)
+	return in
+}
+
+// applyCachedTransportSignal applies the transport signal the cache holds at
+// owner to the servers named by it, and reports what the cache holds there:
+// the signal, or a denial that there is one.
+//
+// A signal reaches a server through the zone server maps it is listed in
+// (applyTransportRRsetFromAnswer). A server that was in none when the answer
+// came in, because the zone was met afterwards or its address lookup had not
+// ended, missed it, and gets it here.
+func (imr *Imr) applyCachedTransportSignal(owner string) (signal, denied bool) {
+	cached, denied := imr.cachedTransportSignal(owner)
+	if cached != nil {
+		imr.applyTransportRRsetFromAnswer(owner, cached.RRset, cached.State)
+		return true, false
+	}
+	return false, denied
+}
+
 // awaitTransportSignals learns the transports of the servers in serverMap
 // that have signalled none, for a strict-privacy query that has no server it
-// may use. It starts the _dns lookup of each such server, or joins the one
-// already running, and waits until a server can carry the query, every lookup
-// has ended, the tuning's strict-wait has passed, or ctx is done. It reports
-// whether a server can carry the query now.
+// may use. It waits as awaitTransportSignalsUntil does, until a server can
+// carry the query under strict privacy.
 //
 // Without it the first strict query to a zone just met through a referral
 // always failed (#776). With always-query-for-transport the referral started
 // the lookups, but nothing waited for them; without it nothing looked at all,
 // and a strict query, which never goes out in cleartext, could not bring the
 // signal in the Additional section either.
-//
-// The lookup itself goes out through ImrQuery, which never asks for privacy,
-// so it cannot come back here and wait on itself. A server whose signal is
-// known is not looked up again, whatever the signal says. Nor is one whose
-// signal the cache holds a denial of, until the denial expires, or one whose
-// lookup failed and is cooling down. For a zone that signals nothing, only
-// the first query after each denial expires waits.
 func (imr *Imr) awaitTransportSignals(ctx context.Context, qname string, serverMap map[string]*cache.AuthServer) bool {
-	if imr.Cache == nil || imr.Options[ImrOptUseTransportSignals] == "false" {
-		return false
+	return imr.awaitTransportSignalsUntil(ctx, serverMap, transportQueryReasonStrictPrivacy,
+		func() bool { return hasStrictCandidate(serverMap, qname) })
+}
+
+// awaitTransportSignalsUntil learns the transports of the servers in
+// serverMap that have signalled none, for a query that has no server it may
+// use. It starts the _dns lookup of each such server, or joins the one
+// already running, and waits until ready says a server can carry the query,
+// every lookup has ended, the tuning's strict-wait has passed, or ctx is
+// done. It reports what ready says then. reason is the lookup's, for
+// maybeQueryTransportSignal: either reason this is called with starts a
+// lookup whatever the discovery options say, and only
+// use-transport-signals: false turns them off.
+//
+// A server whose signal is known is not looked up again, whatever the signal
+// says. Nor is one whose signal the cache holds a denial of, until the
+// denial expires, or one whose lookup failed and is cooling down. For a zone
+// that signals nothing, only the first query after each denial expires
+// waits.
+//
+// A transport-signal lookup, and what it asks on the way, never waits here:
+// it could be waiting for itself, or for a lookup that waits for it. Strict
+// queries could not anyway: ImrQuery never asks for privacy.
+func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[string]*cache.AuthServer, reason string, ready func() bool) bool {
+	if imr.Cache == nil || imr.Options[ImrOptUseTransportSignals] == "false" || inTransportSignalLookup(ctx) {
+		return ready()
 	}
-	var pending []<-chan struct{}
+	type lookup struct {
+		server *cache.AuthServer
+		owner  string
+		done   <-chan struct{}
+	}
+	var pending []lookup
 	for _, server := range serverMap {
 		if server == nil || len(server.GetTransportWeights()) > 0 {
 			continue
@@ -215,23 +277,17 @@ func (imr *Imr) awaitTransportSignals(ctx context.Context, qname string, serverM
 		if owner == "" {
 			continue
 		}
-		// A signal already in the cache that never reached this server: the
-		// server was not in any zone's map when the answer was applied. A
-		// cached denial: the server signals nothing, until it expires.
-		signal, denied := imr.cachedTransportSignal(owner)
-		if signal != nil {
-			imr.applyTransportRRsetFromAnswer(owner, signal.RRset, signal.State)
+		// A signal already in the cache that never reached this server, or
+		// a cached denial: the server signals nothing, until it expires.
+		if signal, denied := imr.applyCachedTransportSignal(owner); signal || denied {
 			continue
 		}
-		if denied {
-			continue
-		}
-		imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonStrictPrivacy)
+		imr.maybeQueryTransportSignal(ctx, owner, reason)
 		if ch := imr.TransportSignalDiscovery.Pending(owner); ch != nil {
-			pending = append(pending, ch)
+			pending = append(pending, lookup{server: server, owner: owner, done: ch})
 		}
 	}
-	if ok := hasStrictCandidate(serverMap, qname); ok || len(pending) == 0 {
+	if ok := ready(); ok || len(pending) == 0 {
 		return ok
 	}
 
@@ -241,19 +297,38 @@ func (imr *Imr) awaitTransportSignals(ctx context.Context, qname string, serverM
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
-	for _, ch := range pending {
+	// Whichever lookup ends first is looked at first: one that never ends
+	// must not hold up the one that has already made a server usable.
+	ended := make(chan lookup, len(pending))
+	stop := make(chan struct{})
+	defer close(stop)
+	for _, l := range pending {
+		go func(l lookup) {
+			select {
+			case <-l.done:
+				ended <- l
+			case <-stop:
+			}
+		}(l)
+	}
+	for range pending {
 		select {
-		case <-ch:
+		case l := <-ended:
+			// The lookup applied its signal to the servers in the zone
+			// server maps; this one may have been in none.
+			if len(l.server.GetTransportWeights()) == 0 {
+				imr.applyCachedTransportSignal(l.owner)
+			}
 		case <-timer.C:
-			return hasStrictCandidate(serverMap, qname)
+			return ready()
 		case <-ctx.Done():
-			return hasStrictCandidate(serverMap, qname)
+			return ready()
 		}
-		if hasStrictCandidate(serverMap, qname) {
+		if ready() {
 			return true
 		}
 	}
-	return hasStrictCandidate(serverMap, qname)
+	return ready()
 }
 
 func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {

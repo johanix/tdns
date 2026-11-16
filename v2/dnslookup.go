@@ -820,6 +820,14 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 // withDefaultEndpoints dials the server's own address whatever its signal
 // says.
 func (imr *Imr) prioritizeServersFor(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
+	return imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, true)
+}
+
+// selectServerTuples is prioritizeServersFor, which it is with warn set.
+// Without warn it says nothing when no tuple is left: the query loop asks
+// first, and waits for its servers' transport signals before it gives up on
+// them (awaitUsableTuples).
+func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel, warn bool) (string, *cache.Zone, []ServerAddrXportTuple) {
 	zoneName, _, _ := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 	var zone *cache.Zone
 	if zoneName != "" {
@@ -907,7 +915,7 @@ func (imr *Imr) prioritizeServersFor(ctx context.Context, qname string, qtype ui
 	// an error string. It is never normal and never recoverable, so say why --
 	// at WARN, and not gated on debug, because this is exactly the state that
 	// is impossible to diagnose after the fact.
-	if len(tuples) == 0 && len(suspectTuples) == 0 {
+	if warn && len(tuples) == 0 && len(suspectTuples) == 0 {
 		lgDns.Warn("prioritizeServers: no usable (server, addr, transport) tuples; the query cannot be sent",
 			"qname", qname, "zone", zoneName, "servers", len(serverMap),
 			"privacy", privacy.String(), "why", imr.explainNoTuplesFor(ctx, serverMap, zone, qname, privacy, allowHostLocal))
@@ -920,6 +928,35 @@ func (imr *Imr) prioritizeServersFor(ctx context.Context, qname string, qtype ui
 	// reachable in principle, just deprioritized while the family is suspect.
 	tuples = append(tuples, suspectTuples...)
 	return zoneName, zone, tuples
+}
+
+// awaitUsableTuples is prioritizeServersFor for the query loop. When no
+// (server, addr, transport) tuple is left, a server may only be waiting for
+// its transport signal: its one transport so far, Do53, is in backoff, and
+// the lookup that would give it others is running, or has not been made. The
+// query then starts or joins those lookups and waits for them, as a strict
+// query does (awaitTransportSignalsUntil), and selects again.
+//
+// Without it a query that a referral had just brought to a server with no
+// Do53 failed while that server's signal was being validated: both had tried
+// the server over Do53 first and been refused, and the referral was followed
+// before the signal could be installed (#1065).
+func (imr *Imr) awaitUsableTuples(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
+	zoneName, zone, tuples := imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false)
+	if len(tuples) > 0 {
+		return zoneName, zone, tuples
+	}
+	// The selection that ends the wait is the one used: selecting again could
+	// lose a suspect family's probe tuple, which is let through once per
+	// probe interval.
+	imr.awaitTransportSignalsUntil(ctx, serverMap, transportQueryReasonNoUsableTransport, func() bool {
+		zoneName, zone, tuples = imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false)
+		return len(tuples) > 0
+	})
+	if len(tuples) > 0 {
+		return zoneName, zone, tuples
+	}
+	return imr.prioritizeServersFor(ctx, qname, qtype, serverMap, privacy)
 }
 
 // unprobedRTTSentinel is the RTT used for sort when no usable sample exists
@@ -1738,7 +1775,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		}
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		zoneName, zone, prioritized = imr.prioritizeServersFor(ctx, qname, qtype, serverMap, privacy)
+		zoneName, zone, prioritized = imr.awaitUsableTuples(ctx, qname, qtype, serverMap, privacy)
 		if Globals.Debug {
 			lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers) attempt=%d", len(prioritized), len(serverMap), attempt+1)
 		}
