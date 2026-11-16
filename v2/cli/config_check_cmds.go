@@ -1246,12 +1246,26 @@ func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, 
 				dohPathOrDefault(cfg.Listeners.DoHPath), dohPathOrDefault(resp.Listeners.DoHPath)),
 			"a `config reload` does not re-open DNS listeners; restart to change the DoH path")
 	}
+	// debug-do53-queries-refused takes effect when the DNS engine starts; a
+	// reload leaves the running setting as it was.
+	if on, _ := cfg.Do53QueriesRefusedCheck(); on != resp.Do53QueriesRefused {
+		rep.warn(g, "debug-do53-queries-refused",
+			fmt.Sprintf("config has debug-do53-queries-refused %s, the running server has it %s", onOff(on), onOff(resp.Do53QueriesRefused)),
+			"the option takes effect at the next restart")
+	}
 	if resp.ApiServer.ApiKey.Value() != "" && cfg.ApiServer.ApiKey.Value() != "" &&
 		resp.ApiServer.ApiKey.Value() != cfg.ApiServer.ApiKey.Value() {
 		rep.warn(g, "apikey",
 			"apiserver.apikey in the file differs from the running server's apikey",
 			"the running apikey changes only on restart")
 	}
+}
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }
 
 func dohPathOrDefault(path string) string {

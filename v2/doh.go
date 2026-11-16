@@ -168,10 +168,20 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, p
 	if len(ports) == 0 {
 		ports = []string{"443"}
 	}
+	// Each listener binds here, before the engine returns, as in
+	// DnsDoTEngine: a caller learns whether DoH came up.
 	var servers []*http.Server
 	for _, addr := range dohaddrs {
 		for _, port := range ports {
 			hostport := net.JoinHostPort(addr, port)
+			ln, err := net.Listen("tcp", hostport)
+			if err != nil {
+				lgDns.Error("failed to setup DoH listener", "hostport", hostport, "err", err)
+				if ctx.Err() == nil {
+					conf.Internal.ServerErrors.SetTransportPortError("doh "+hostport, err)
+				}
+				continue
+			}
 			srv := &http.Server{
 				Addr:    hostport,
 				Handler: handler,
@@ -196,19 +206,21 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, p
 				IdleTimeout:       120 * time.Second,
 			}
 			servers = append(servers, srv)
-			go func(s *http.Server, hp string) {
-				lgDns.Info("DnsEngine: setting up DoH server", "hostport", hp, "path", path)
-				if err := s.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
+			go func(s *http.Server, ln net.Listener, hp string) {
+				lgDns.Info("DnsEngine: serving on DoH", "hostport", hp, "path", path)
+				if err := s.ServeTLS(ln, certFile, keyFile); err != http.ErrServerClosed {
 					lgDns.Error("failed to setup DoH server", "hostport", hp, "err", err)
 					if ctx.Err() == nil {
 						conf.Internal.ServerErrors.SetTransportPortError("doh "+hp, err)
 					}
-				} else {
-					lgDns.Info("DnsEngine: listening on DoH", "hostport", hp)
 				}
-				lgDns.Info("DnsEngine: done setting up DoH server", "hostport", hp)
-			}(srv, hostport)
+				lgDns.Info("DnsEngine: done serving DoH", "hostport", hp)
+			}(srv, ln, hostport)
 		}
+	}
+	// Every listener failed, each with its own error recorded above.
+	if len(servers) == 0 {
+		return fmt.Errorf("DnsDoHEngine: no DoH listener could be set up on %v, ports %v", dohaddrs, ports)
 	}
 	go func() {
 		<-ctx.Done()

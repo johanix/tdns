@@ -118,3 +118,31 @@ func TestConfigCheckImrTestingPriming(t *testing.T) {
 		})
 	}
 }
+
+// An online config check reports debug-do53-queries-refused when the file and
+// the running server differ: the option takes effect only at a restart.
+func TestConfigCheckDo53QueriesRefusedDrift(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		cfg           bool
+		running, warn bool
+	}{
+		{"both off", false, false, false},
+		{"both on", true, true, false},
+		{"turned on, not restarted", true, false, true},
+		{"turned off, not restarted", false, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &tdns.Config{}
+			if tc.cfg {
+				cfg.AuthEngine.OptionsStrs = []string{"debug-do53-queries-refused"}
+			}
+			resp := tdns.ConfigResponse{Do53QueriesRefused: tc.running}
+			rep := newCCReport()
+			correlateStatus(cfg, resp, rep, "Running server")
+			if got := hasLevel(rep, "Running server", "debug-do53-queries-refused", ccWARN); got != tc.warn {
+				t.Fatalf("warned = %v, want %v; report %+v", got, tc.warn, rep.byGroup["Running server"])
+			}
+		})
+	}
+}

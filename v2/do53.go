@@ -325,9 +325,8 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	// all failed to start would answer queries over nothing. It stops instead
 	// (Shutdowner, in its own goroutine: it waits for the engines, this one
 	// among them). ParseConfig has already refused the configs that cannot
-	// work; this catches what only the start shows. A DoT or DoH listener
-	// binds after its engine has returned, so a bind failure there shows as
-	// an active error in config status, as for any server.
+	// work; this catches what only the start shows. Each encrypted engine
+	// binds its listeners before it returns, and fails when none bound.
 	if refuseQueries {
 		if err := do53QueriesRefusedStartError(certKey, certReason, encStarted); err != nil {
 			lgDns.Error("DnsEngine: refusing to run", "err", err)

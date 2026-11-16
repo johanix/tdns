@@ -66,8 +66,11 @@ func do53QueryLetThrough(q dns.Question) bool {
 // A QUERY other than those do53QueryLetThrough allows gets the refusal
 // (do53QueryRefusal), and every other message goes to next: NOTIFY, UPDATE,
 // the other opcodes, and a message without a question, which next answers
-// with FORMERR. A query with more than one question is refused: next would
-// answer the first.
+// with FORMERR.
+//
+// A query with more than one question does not get here: the Do53 servers'
+// MsgAcceptFunc answers it with FORMERR, as on every transport. Should one
+// arrive all the same, it is refused, since next would answer the first.
 func refuseDo53Queries(next func(dns.ResponseWriter, *dns.Msg)) func(dns.ResponseWriter, *dns.Msg) {
 	return func(w dns.ResponseWriter, r *dns.Msg) {
 		if r == nil || r.Opcode != dns.OpcodeQuery || len(r.Question) == 0 ||

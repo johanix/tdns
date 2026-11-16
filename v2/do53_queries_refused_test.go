@@ -5,9 +5,11 @@
 package tdns
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -289,5 +291,76 @@ func TestDo53QueriesRefusedStartError(t *testing.T) {
 	}
 	if err := do53QueriesRefusedStartError(true, "", []string{"doq"}); err != nil {
 		t.Errorf("DoQ started: %v", err)
+	}
+}
+
+// occupiedPort holds a TCP port on 127.0.0.1 for the test and returns it.
+func occupiedPort(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	return port
+}
+
+// The encrypted engines bind before they return, and fail when no listener
+// bound: DnsEngine's start check for debug-do53-queries-refused relies on
+// it. A DoT or DoH listener used to bind in its goroutine, after the engine
+// had returned nil.
+func TestEncryptedEnginesFailWhenNoListenerBinds(t *testing.T) {
+	certFile, keyFile := writeTestCert(t, t.TempDir())
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := &Config{}
+	conf.Internal.ServerErrors = NewServerErrorRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	handler := func(w dns.ResponseWriter, r *dns.Msg) {}
+	addrs := []string{"127.0.0.1"}
+
+	if err := DnsDoTEngine(ctx, conf, addrs, []string{occupiedPort(t)}, &cert, handler, false); err == nil {
+		t.Error("DoT: no error, but its only port was taken")
+	}
+	if err := DnsDoHEngine(ctx, conf, addrs, []string{occupiedPort(t)}, "", certFile, keyFile, handler); err == nil {
+		t.Error("DoH: no error, but its only port was taken")
+	}
+	if err := DnsDoTEngine(ctx, conf, addrs, []string{"0"}, &cert, handler, false); err != nil {
+		t.Errorf("DoT on a free port: %v", err)
+	}
+	if err := DnsDoHEngine(ctx, conf, addrs, []string{"0"}, "", certFile, keyFile, handler); err != nil {
+		t.Errorf("DoH on a free port: %v", err)
+	}
+}
+
+// A query with two questions sent to a real Do53 server gets FORMERR from
+// the accept layer, as on every transport, and never reaches the handler.
+func TestDo53QueryWithTwoQuestionsGetsFormerr(t *testing.T) {
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handled := false
+	auth := func(w dns.ResponseWriter, r *dns.Msg) { handled = true }
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(do53Handler(true, auth)),
+		MsgAcceptFunc: MsgAcceptFunc, NotifyStartedFunc: func() { close(started) }}
+	go func() { _ = srv.ActivateAndServe() }()
+	<-started
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	m := do53Msg(dns.OpcodeQuery, "_dns.ns1.example.", dns.TypeSVCB, dns.ClassINET, true)
+	m.Question = append(m.Question, dns.Question{Name: "www.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET})
+	c := &dns.Client{Timeout: 2 * time.Second}
+	resp, _, err := c.Exchange(m, pc.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("exchange: %v", err)
+	}
+	if resp.Rcode != dns.RcodeFormatError || handled {
+		t.Errorf("rcode %s, handler reached %v; want FORMERR from the accept layer", dns.RcodeToString[resp.Rcode], handled)
 	}
 }
