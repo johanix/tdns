@@ -18,6 +18,12 @@ import (
 // indicates the server speaks DNS but lacks features we need. Other rcodes
 // follow the standard exponential schedule. Thread-safe.
 func (z *Zone) RecordZoneAddressFailureForRcode(addr string, t core.Transport, rcode uint8, debug bool) {
+	z.RecordZoneEndpointFailureForRcode(addr, 0, t, rcode, debug)
+}
+
+// RecordZoneEndpointFailureForRcode is RecordZoneAddressFailureForRcode for
+// addr at port (0 for the transport's default). Thread-safe.
+func (z *Zone) RecordZoneEndpointFailureForRcode(addr string, port uint16, t core.Transport, rcode uint8, debug bool) {
 	if z == nil {
 		return
 	}
@@ -26,7 +32,7 @@ func (z *Zone) RecordZoneAddressFailureForRcode(addr string, t core.Transport, r
 	if z.AddressBackoffs == nil {
 		z.AddressBackoffs = make(map[AddrXport]*AddressBackoff)
 	}
-	key := AddrXport{Addr: addr, Transport: t}
+	key := AddrXport{Addr: addr, Port: port, Transport: t}
 	backoff, exists := z.AddressBackoffs[key]
 
 	var backoffDuration time.Duration
@@ -79,6 +85,12 @@ func (z *Zone) RecordZoneAddressFailureForRcode(addr string, t core.Transport, r
 // IsZoneAddrXportAvailable returns true if the (address, transport) tuple is
 // not in zone-specific backoff (or its backoff has expired). Thread-safe.
 func (z *Zone) IsZoneAddrXportAvailable(addr string, t core.Transport) bool {
+	return z.IsZoneEndpointAvailable(addr, 0, t)
+}
+
+// IsZoneEndpointAvailable is IsZoneAddrXportAvailable for addr at port (0 for
+// the transport's default). Thread-safe.
+func (z *Zone) IsZoneEndpointAvailable(addr string, port uint16, t core.Transport) bool {
 	if z == nil {
 		return true // No zone-specific restrictions
 	}
@@ -87,7 +99,7 @@ func (z *Zone) IsZoneAddrXportAvailable(addr string, t core.Transport) bool {
 	if z.AddressBackoffs == nil {
 		return true
 	}
-	backoff, exists := z.AddressBackoffs[AddrXport{Addr: addr, Transport: t}]
+	backoff, exists := z.AddressBackoffs[AddrXport{Addr: addr, Port: port, Transport: t}]
 	if !exists {
 		return true
 	}
@@ -125,12 +137,18 @@ func (z *Zone) SnapshotAddressBackoffs(now time.Time) map[AddrXport]*AddressBack
 // RecordZoneAddressSuccess clears any zone-specific backoff for the given
 // (address, transport) tuple. Thread-safe.
 func (z *Zone) RecordZoneAddressSuccess(addr string, t core.Transport) {
+	z.RecordZoneEndpointSuccess(addr, 0, t)
+}
+
+// RecordZoneEndpointSuccess is RecordZoneAddressSuccess for addr at port (0
+// for the transport's default). Thread-safe.
+func (z *Zone) RecordZoneEndpointSuccess(addr string, port uint16, t core.Transport) {
 	if z == nil {
 		return
 	}
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	if z.AddressBackoffs != nil {
-		delete(z.AddressBackoffs, AddrXport{Addr: addr, Transport: t})
+		delete(z.AddressBackoffs, AddrXport{Addr: addr, Port: port, Transport: t})
 	}
 }

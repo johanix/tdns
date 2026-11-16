@@ -31,7 +31,23 @@ Features:
   SVCB RRset a signal is read from: Secure, Insecure or Bogus when the
   RRSIG comes with it and the keys are at hand, and otherwise unknown
   until the lookup of `_dns.<ns>`. Through an AliasMode record it records
-  every hop. Nothing acts on the state yet; `dump zone servers` shows it.
+  every hop. `dump zone servers` shows it.
+
+  A record whose TargetName is not `.` sends the transports it names to
+  that host, at the record's port or theirs; `udp` and `tcp` go there like
+  the others, and a `do53` in such a record is ignored. Such a record is honoured only
+  when the RRset it came in validated Secure; otherwise it is ignored whole,
+  with a debug line and the `ignored_redirects` counter of `stats
+  auth-transports`, and an undecided one starts the lookup of `_dns.<ns>`.
+  Records with TargetName `.` are honoured either way. The target's
+  addresses are looked up in the background through every server's default
+  endpoints; until they are known the transport stays on the nameserver
+  itself. When every address of a target is backed off, the query goes on
+  to the nameserver's other transports, ending at Do53 on port 53; a udp or
+  tcp endpoint that has no usable address gives way to the nameserver itself
+  on port 53. Backoff and RTT are kept per address, port and transport.
+  `dump zone servers` shows the targets (`Signal targets`).
+
   See section 2 of [TDNS Special Features](special-features.md) for the
   full picture.
 

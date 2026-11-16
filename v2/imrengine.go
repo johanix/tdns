@@ -61,6 +61,9 @@ type Imr struct {
 	// see W9.
 	TransportSignalDiscovery *cache.DiscoveryTracker
 	TLSADiscovery            *cache.DiscoveryTracker
+	// endpointAddrs holds the addresses of the targets transport signals
+	// redirect to, and the lookups of them in flight (oots_endpoints.go).
+	endpointAddrs endpointAddrTracker
 	// zones holds the configured forward table and stub zones as one
 	// immutable snapshot; ReloadZones swaps the pointer (#436). Read it
 	// through ForwardZones()/StubZones(), never by reaching in: a query
@@ -163,9 +166,16 @@ type ImrResponse struct {
 	// when to ask again. Zero when it is not known: an error, or an answer
 	// not cached under the question.
 	Expiration time.Time
-	Error      bool
-	ErrorMsg   string
-	Msg        string
+	// ChainExpiration is when the first link of the CNAME chain this lookup
+	// followed to the answer runs out: the earliest expiration among the
+	// links, as the lookup cached or read them. Set only when the answer's
+	// owner is not the question's and the chain the lookup followed ends at
+	// it; zero otherwise. A caller that keeps an answer reached through a
+	// chain keeps it no longer than this, without reading the chain again.
+	ChainExpiration time.Time
+	Error           bool
+	ErrorMsg        string
+	Msg             string
 }
 
 // expiresWith sets resp.Expiration from entry, the cache entry for the
@@ -844,8 +854,15 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 	// Deferred after the send above, so it runs before it.
 	started := cache.Now()
 	var hit *cache.CachedRRset
+	// The CNAME links followed from qname are recorded as the lookup follows
+	// them (recordChainLink), and the response carries the first to expire.
+	ctx, chain := withChainRecorder(ctx, qname)
+	lookupCtx = imrQueryContext(ctx)
 	defer func() {
 		resp.expiresWith(lookupEntry(imr.Cache.Peek(qname, qtype), hit, resp.RRset, started))
+		if resp.RRset != nil && !core.EqualNames(resp.RRset.Name, qname) {
+			resp.ChainExpiration = chain.expiryTo(resp.RRset.Name)
+		}
 	}()
 
 	//	dump.P(imr)
