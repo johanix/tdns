@@ -5,6 +5,7 @@
 package cache
 
 import (
+	"log"
 	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -105,13 +106,25 @@ func FormatSignalPath(path []SignalHop) string {
 //
 // Without an RRSIG, or when the signer's keys are not at hand, the state is
 // SignalStateUnknown until the verifying lookup. So is an RRset synthesized
-// from a wildcard, whose proof the lookup judges. rrset is validated as given;
-// pass a copy, since a verdict caps the RRs' TTLs at the signature expiration.
+// from a wildcard, whose proof the lookup judges. Once the lookup has run, an
+// RRset equal to the copy it validated is Secure, RRSIG or not: an equal
+// harvest is the copy that was validated (equalToSecureCopy). rrset is
+// validated as given; pass a copy, since a verdict caps the RRs' TTLs at the
+// signature expiration.
 func (rrcache *RRsetCacheT) SignalRRsetState(rrset *core.RRset) ValidationState {
-	if rrcache == nil || rrset == nil || len(rrset.RRs) == 0 || len(rrset.RRSIGs) == 0 {
+	if rrcache == nil || rrset == nil || len(rrset.RRs) == 0 {
 		return SignalStateUnknown
 	}
-	if hasExpansionSignature(rrset) {
+	state := rrcache.signalRRsetVerdict(rrset)
+	if state == SignalStateUnknown && rrcache.equalToSecureCopy(rrset) {
+		return ValidationStateSecure
+	}
+	return state
+}
+
+// signalRRsetVerdict is SignalRRsetState from rrset's own RRSIGs alone.
+func (rrcache *RRsetCacheT) signalRRsetVerdict(rrset *core.RRset) ValidationState {
+	if len(rrset.RRSIGs) == 0 || hasExpansionSignature(rrset) {
 		return SignalStateUnknown
 	}
 	if state, ok := rrcache.reusableVerdict(rrset); ok {
@@ -126,4 +139,16 @@ func (rrcache *RRsetCacheT) SignalRRsetState(rrset *core.RRset) ValidationState 
 		return SignalStateUnknown
 	}
 	return SignalState(state)
+}
+
+// equalToSecureCopy reports whether the cache holds a live Secure copy of
+// rrset: the same owner, type and RRs, whatever RRSIGs came with either. A
+// replay of that RRset carries nothing the validated copy did not.
+func (rrcache *RRsetCacheT) equalToSecureCopy(rrset *core.RRset) bool {
+	cached := rrcache.Get(rrset.Name, rrset.RRtype)
+	if cached == nil || cached.State != ValidationStateSecure || cached.RRset == nil || len(cached.RRset.RRs) == 0 {
+		return false
+	}
+	differ, _, _ := cached.RRset.RRsetDiffer(rrset, log.Default(), false, false)
+	return !differ
 }

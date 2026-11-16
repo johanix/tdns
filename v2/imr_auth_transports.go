@@ -33,7 +33,15 @@ type ImrAuthTransportsRow struct {
 	Signal       map[string]uint8  `json:"signal,omitempty"`        // the signal as given, in its tokens (udp, tcp, dot, doq, doh; do53 read as udp and tcp): only the transports it named. Absent: none
 	SignalSource string            `json:"signal_source,omitempty"` // "oots", "alpn", "config" (a stub), "operator" (set server transport)
 	SignalPorts  map[string]uint16 `json:"signal_ports,omitempty"`  // non-default port per transport the signal named, keyed as Signal
-	Counts       map[string]uint64 `json:"counts"`                  // answers carried, by actual wire transport
+	// SignalTargets is the host other than the server itself that a validated
+	// signal record sent each transport to, keyed as Signal.
+	SignalTargets map[string]string `json:"signal_targets,omitempty"`
+	// Redirected is the part of Counts carried by such a target.
+	Redirected map[string]uint64 `json:"redirected,omitempty"`
+	// IgnoredRedirects counts signal records with a target ignored because
+	// their path did not validate Secure.
+	IgnoredRedirects uint64            `json:"ignored_redirects,omitempty"`
+	Counts           map[string]uint64 `json:"counts"` // answers carried, by actual wire transport
 	// ByPrivacy splits Counts by whose query it was: a client's PRIVACY level
 	// ("none", "opportunistic", "strict") or "internal" (the resolver's own).
 	// Only the classes with answers are present.
@@ -108,6 +116,14 @@ func ImrAuthTransportsSnapshot(rc *cache.RRsetCacheT, filter []string, zone stri
 			row.Signal = signalWeightsToTokens(s.Received.Weights)
 			row.SignalSource = s.Received.Source
 			row.SignalPorts = transportPortsToStrings(s.Received.Ports)
+			row.SignalTargets = transportTargetsToStrings(s.Received.Targets)
+		}
+		row.IgnoredRedirects = s.IgnoredRedirects
+		for t, c := range s.Redirected {
+			if row.Redirected == nil {
+				row.Redirected = map[string]uint64{}
+			}
+			row.Redirected[authTransportColumn(t)] += c
 		}
 		for _, level := range []edns0.PrivacyLevel{edns0.PrivacyNone, edns0.PrivacyOpportunistic, edns0.PrivacyStrict} {
 			if shares := expectedShares(s.Transports, s.Weights, level); shares != nil {
@@ -186,6 +202,23 @@ func signalWeightsToTokens(m map[core.Transport]uint8) map[string]uint8 {
 	out := make(map[string]uint8, len(m))
 	for t, w := range m {
 		out[signalTokenName(t)] = w
+	}
+	return out
+}
+
+// transportTargetsToStrings is m keyed by oots token, as the row's Signal is;
+// nil when empty.
+func transportTargetsToStrings(m map[core.Transport]string) map[string]string {
+	var out map[string]string
+	for t, target := range m {
+		name := signalTokenName(t)
+		if name == "" || target == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[name] = target
 	}
 	return out
 }

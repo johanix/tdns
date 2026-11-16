@@ -143,6 +143,7 @@ var dumpAuthServersCmd = &cobra.Command{
 					if state := formatSignalValidation(server); state != "" {
 						fmt.Printf("    Signal validation: %s\n", state)
 					}
+					printSignalEndpoints(server)
 					fmt.Printf("    Connection mode: %s\n", conn)
 					if len(server.TransportSignal) > 0 {
 						fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)
@@ -210,6 +211,9 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 					if keys[i].Addr != keys[j].Addr {
 						return keys[i].Addr < keys[j].Addr
 					}
+					if keys[i].Port != keys[j].Port {
+						return keys[i].Port < keys[j].Port
+					}
 					return keys[i].Transport < keys[j].Transport
 				})
 
@@ -227,7 +231,7 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 					if backoff.LastError != "" {
 						errorMsg = backoff.LastError
 					}
-					line := fmt.Sprintf("%s | %s | %s | retry in %s | %s | %s", nsname, k.Addr, core.TransportToString[k.Transport], formatDuration(timeUntilRetry), failures, errorMsg)
+					line := fmt.Sprintf("%s | %s | %s | retry in %s | %s | %s", nsname, k.HostPort(), core.TransportToString[k.Transport], formatDuration(timeUntilRetry), failures, errorMsg)
 					lines = append(lines, line)
 				}
 			}
@@ -350,6 +354,9 @@ With a zone argument: dumps just that zone.`,
 				if keys[i].Addr != keys[j].Addr {
 					return keys[i].Addr < keys[j].Addr
 				}
+				if keys[i].Port != keys[j].Port {
+					return keys[i].Port < keys[j].Port
+				}
 				return keys[i].Transport < keys[j].Transport
 			})
 			for _, k := range keys {
@@ -363,7 +370,7 @@ With a zone argument: dumps just that zone.`,
 					errMsg = b.LastError
 				}
 				fmt.Printf("%s | %s | %s | retry in %s | %d | %s\n",
-					e.zoneName, k.Addr, core.TransportToString[k.Transport], formatDuration(remaining), b.FailureCount, errMsg)
+					e.zoneName, k.HostPort(), core.TransportToString[k.Transport], formatDuration(remaining), b.FailureCount, errMsg)
 			}
 		}
 	},
@@ -836,6 +843,31 @@ func validationStateString(state cache.ValidationState) string {
 	return "[unset]"
 }
 
+// printSignalEndpoints prints the transports a validated signal sent to
+// another host (formatSignalTargets), and the signal records with a target
+// that were ignored for want of a Secure path, when there are any.
+func printSignalEndpoints(server *cache.AuthServer) {
+	if targets := formatSignalTargets(server); targets != "" {
+		fmt.Printf("    Signal targets: %s\n", targets)
+	}
+	if st := server.SnapshotTransportStats(); st.IgnoredRedirects > 0 {
+		fmt.Printf("    Redirects ignored (not validated): %d\n", st.IgnoredRedirects)
+	}
+}
+
+// formatSignalTargets renders each transport sent to another host as
+// "dot=dot-ns.example.:1234", in transport order. Empty when none is.
+func formatSignalTargets(server *cache.AuthServer) string {
+	eps := server.GetTransportEndpoints()
+	var parts []string
+	for _, t := range []core.Transport{core.TransportDo53, core.TransportDo53TCP, core.TransportDoT, core.TransportDoQ, core.TransportDoH} {
+		if ep, ok := eps[t]; ok && ep.Target != "" {
+			parts = append(parts, core.TransportToSignalToken[t]+"="+ep.String())
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
 // formatSignalValidation renders where the server's signal arrived and the
 // validation state of the RRsets it was read from: the whole path's state,
 // then each RRset's, as in "secure (via referral: _dns.ns.example. secure)".
@@ -850,12 +882,19 @@ func formatSignalValidation(server *cache.AuthServer) string {
 }
 
 // formatAuthServerPorts renders the non-default ports the latest signal
-// assigned, in transport order. Empty when every transport keeps its usual port.
+// assigned at the server's own name, in transport order. Empty when every
+// transport keeps its usual port there. A port at another host is shown with
+// that host (formatSignalTargets).
 func formatAuthServerPorts(server *cache.AuthServer) string {
 	if server == nil {
 		return ""
 	}
-	ports := server.GetTransportPorts()
+	ports := map[core.Transport]uint16{}
+	for t, ep := range server.GetTransportEndpoints() {
+		if ep.Target == "" && ep.Port != 0 {
+			ports[t] = ep.Port
+		}
+	}
 	if len(ports) == 0 {
 		return ""
 	}
@@ -896,6 +935,7 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 	if state := formatSignalValidation(server); state != "" {
 		fmt.Printf("    Signal validation: %s\n", state)
 	}
+	printSignalEndpoints(server)
 	fmt.Printf("    Connection mode: %s\n", server.ConnectionMode().String())
 	if len(server.TransportSignal) > 0 {
 		fmt.Printf("    Transport signal (raw): %s\n", server.TransportSignal)

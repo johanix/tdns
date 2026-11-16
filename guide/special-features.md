@@ -960,8 +960,10 @@ enable active discovery:
 - `always-query-for-transport` -- The IMR queries for
   transport signals whenever it discovers a new
   authoritative server, regardless of whether a signal
-  was observed. This is more aggressive and generates
-  additional queries.
+  was observed: from a referral's glue, and from the
+  address lookup of a nameserver that came without glue.
+  This is more aggressive and generates additional
+  queries.
 
 A query with strict privacy (the PRIVACY option, level
 strict) looks for signals even when neither option is set.
@@ -986,6 +988,20 @@ Where the root and TLD servers signal nothing, as on
 today's Internet, strict queries fail with an EDE naming
 the zone (`.` for the root) until ordinary queries have
 cached the delegations above the zone.
+
+Any query, strict or not, waits the same way when none of
+its servers has a transport it may use: typically a server
+whose only known transport, Do53, is in backoff, because it
+answers only over encrypted transports and its signal is not
+in yet. The query starts the signal lookups of the servers
+it knows nothing about, or joins those already running, and
+waits up to `tuning.discovery.strict-wait` before it gives
+up. It does not wait on a cached denial of the signal, nor
+on a lookup that failed and is cooling down. The same holds
+when the query's own attempts used up its servers' only
+transport, such as a Do53 query refused by a server that
+answers only over encrypted transports: it waits once for
+the signal, then tries again.
 
 Additional options:
 
