@@ -70,6 +70,11 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 	}
 
 	c.AddCommand(reload, reloadZones, reloadTsig, status)
+	if role != "agent" {
+		// tdns-auth (and named auth instances) synthesize the transport
+		// signal; tdns-agent does not.
+		c.AddCommand(newConfigTransportSignalCmd(role))
+	}
 	c.AddCommand(newConfigCheckCmd(role))
 	c.AddCommand(newConfigMweCmd(role))
 	return c
