@@ -80,6 +80,7 @@ observed, and the negative case.
 | Suite | Scenarios | Shows | Red on |
 |---|---|---|---|
 | `ports` | K2, P1, P2, P6 | a port on a `.` record moves the transport on the server's own address: from `ports:` config, from one record naming two transports, from an ALPN-only record | a resolver without port support; P2, P6 on #994's head |
+| `badport` | P7 | a port on the bad-port list (22 here) is refused: the record is used without it, so DoT and DoQ go to the server on 853 | a resolver before #1069 |
 | `published` | K1, M3 | what `service.transport` publishes: one record per ported transport, never do53 beside udp or tcp, an empty signal with a udp port as `udp:100` with that port (`PUB_DO53=omitted`); a default config byte-identical to the base build, or (`PUB_DO53=omitted`) identical but for the default do53 | a publisher that ignores `ports`, changes the default, or writes the default do53 against `PUB_DO53` |
 | `ignore` | P3, P4 | a record with a target, and the ServiceMode siblings of an AliasMode record, are not applied | a resolver that applies them (trap) |
 | `tiebreak` | P5 | a transport named twice takes the same record in both RR orders | a resolver where the last record wins |
