@@ -269,10 +269,26 @@ ns3.` + z + `	3600	IN	A	192.0.2.3
 	if got := svcbRecords(zd2, "_dns.ns3."+z); len(got) != 1 || !strings.Contains(got[0].String(), "doq:10") {
 		t.Fatalf("the operator's replacement was withdrawn with the record: %v", got)
 	}
-	for _, n := range []string{"ns2", "ns3"} {
-		if _, ok, _ := kdb.GetTransportSignalStored(z, "_dns."+n+"."+z); ok {
-			t.Fatalf("the record for _dns.%s outlived the withdrawal", n)
-		}
+	// The record of ns2's withdrawn signal stays; ns3's, replaced by the
+	// operator, goes.
+	if _, ok, _ := kdb.GetTransportSignalStored(z, "_dns.ns2."+z); !ok {
+		t.Fatal("the record of a withdrawn signal was dropped; a zone file not written since would bring the signal back as the operator's")
+	}
+	if _, ok, _ := kdb.GetTransportSignalStored(z, "_dns.ns3."+z); ok {
+		t.Fatal("the record for _dns.ns3 outlived the operator's replacement")
+	}
+
+	// A third process: the zone was not written after the withdrawal, so
+	// the file still holds ns2's signal. It is withdrawn again.
+	zd3, conf3 := signalTestZone(t, z, body+strings.Join(persisted, "\n")+"\n", "127.0.0.1:53")
+	zd3.KeyDB = kdb
+	conf3.Service.Identities = []string{"ns1." + z}
+	conf3.Service.Transport.Signal = "dot:20"
+	if err := zd3.CreateTransportSignalRRs(conf3); err != nil {
+		t.Fatal(err)
+	}
+	if getOwnerFrom(zd3.publishedSnapshot(), "_dns.ns2."+z) != nil {
+		t.Fatal("a withdrawn signal loaded again from an unwritten zone file was not withdrawn again")
 	}
 }
 
@@ -316,5 +332,56 @@ ns1.` + z + `	3600	IN	A	192.0.2.1
 	}
 	if _, ok, _ := kdb.GetTransportSignalStored(z, "_dns.ns1."+z); !ok {
 		t.Fatal("a secondary dropped the record of the signal it stored as primary")
+	}
+}
+
+// An identity below a zone cut to a child not served here: the child's
+// server is its home. Nothing is written below the cut in the parent, and
+// tdns-auth warns.
+func TestNoSynthesisForAnIdentityBelowACut(t *testing.T) {
+	const z = "idcut.sig.example."
+	const child = "child." + z
+	logs := captureSignalLog(t)
+	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+ns1.`+z+`	3600	IN	A	192.0.2.1
+`+child+`	3600	IN	NS	ns1.`+child+`
+ns1.`+child+`	3600	IN	A	192.0.2.2
+`, "127.0.0.1:53")
+	conf.Service.Identities = []string{"ns1." + z, "ns1." + child}
+	conf.Service.Transport.Signal = "dot:50"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if !served(zd, "_dns.ns1."+z, dns.TypeSVCB) {
+		t.Fatal("the identity at home above the cut got no signal")
+	}
+	if getOwnerFrom(zd.publishedSnapshot(), "_dns.ns1."+child) != nil {
+		t.Fatal("a signal was written below the cut to a child not served here")
+	}
+	if !strings.Contains(logs.String(), "below a zone cut") {
+		t.Fatalf("no warning for the identity below the cut:\n%s", logs.String())
+	}
+}
+
+// A withheld zone keeps its snapshot but answers SERVFAIL itself; its
+// provisioned signal is not handed out in another zone's responses.
+func TestAWithheldHomesSignalIsNotServed(t *testing.T) {
+	noIdentities(t)
+	const pz = "withheld-provider.sig.example."
+	const cz = "withheld-customer.sig.example."
+	provider, _ := signalTestZone(t, pz, pz+`	3600	IN	NS	ns.`+pz+`
+ns.`+pz+`	3600	IN	A	192.0.2.53
+_dns.ns.`+pz+`	300	IN	SVCB	1 . oots="dot:30"
+`, "127.0.0.1:53")
+	customer, _ := signalTestZone(t, cz, cz+`	3600	IN	NS	ns.`+pz+`
+`, "127.0.0.1:53")
+	if got := customer.collectSignalRRsets(customer.publishedSnapshot()); len(got) != 1 {
+		t.Fatalf("the provider's signal was expected while it answers: %v", got)
+	}
+	provider.mu.Lock()
+	provider.withheld = true
+	provider.mu.Unlock()
+	if got := customer.collectSignalRRsets(customer.publishedSnapshot()); len(got) != 0 {
+		t.Fatalf("a withheld zone's signal was handed out: %v", got)
 	}
 }

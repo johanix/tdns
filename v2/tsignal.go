@@ -537,13 +537,22 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		return fmt.Errorf("zone apex not found")
 	}
 
-	// The identities whose home is this zone.
+	// The identities whose home is this zone. One below a zone cut here is
+	// the child's, a child not served here (a co-hosted child would be its
+	// home): nothing is written for it, since this zone holds only glue and
+	// occluded data there, which is never served.
 	var homeOf []string
 	for _, id := range conf.Service.Identities {
 		id = core.CanonicalizeName(dns.Fqdn(strings.TrimSpace(id)))
-		if id != "." && zd.isHomeOf(id) && !slices.Contains(homeOf, id) {
-			homeOf = append(homeOf, id)
+		if id == "." || !zd.isHomeOf(id) || slices.Contains(homeOf, id) {
+			continue
 		}
+		if zd.stagedBelowCut("_dns." + id) {
+			lgDns.Warn("createTransportSignalSVCB: an identity is below a zone cut to a child not served here; no signal is synthesized for it (service.identities should name only names whose home zone is served here)",
+				"zone", zd.ZoneName, "identity", id)
+			continue
+		}
+		homeOf = append(homeOf, id)
 	}
 
 	// Primary and signer: the zone's content originates here (not a
@@ -616,6 +625,12 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 	// is primary and signer. A former primary that restarts as a secondary
 	// changes nothing and keeps its record: should the zone be its own
 	// again, the pass withdraws then.
+	//
+	// After a withdrawal, or with nothing at the owner, the record stays.
+	// The withdrawal reaches the zone file only when the zone is next
+	// written, and a restart before then loads the signal again; with the
+	// record kept, the pass knows it and withdraws it again. Only records
+	// that are not the pass's end the record.
 	var stale []string
 	if mayWrite {
 		stale = zd.signalStoredOwners()
@@ -624,16 +639,19 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		if want[owner] {
 			continue
 		}
-		if od := zd.stagedOwner(owner); od != nil {
-			if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs) {
-				zd.stageDeleteLocked(owner, dns.TypeSVCB)
-				if o := zd.stagedOwner(owner); o != nil && o.RRtypes.Count() == 0 {
-					zd.stageOwnerDeleteLocked(owner)
-				}
-				lgDns.Info("createTransportSignalSVCB: withdrew the signal the pass had stored for a name that is no longer an identity at home in this zone",
-					"zone", zd.ZoneName, "owner", owner)
-				changed++
+		od := zd.stagedOwner(owner)
+		if od == nil || ownerRRsetCount(od) == 0 {
+			continue
+		}
+		if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs) {
+			zd.stageDeleteLocked(owner, dns.TypeSVCB)
+			if o := zd.stagedOwner(owner); o != nil && o.RRtypes.Count() == 0 {
+				zd.stageOwnerDeleteLocked(owner)
 			}
+			lgDns.Info("createTransportSignalSVCB: withdrew the signal the pass had stored for a name that is no longer an identity at home in this zone",
+				"zone", zd.ZoneName, "owner", owner)
+			changed++
+			continue
 		}
 		zd.forgetSignalStored(owner)
 	}
@@ -665,6 +683,24 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 	}
 	zd.publishTransportSignalLocked(bare, nil)
 	return nil
+}
+
+// stagedBelowCut reports whether name is at or below a zone cut in this
+// zone's working set: an owner from name up to the apex, the apex not
+// included, that holds an NS RRset.
+func (zd *ZoneData) stagedBelowCut(name string) bool {
+	n := core.CanonicalizeName(name)
+	for dns.IsSubDomain(zd.ZoneName, n) && !core.EqualNames(n, zd.ZoneName) {
+		if od := zd.stagedOwner(n); od != nil && len(od.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs) > 0 {
+			return true
+		}
+		i, end := dns.NextLabel(n, 0)
+		if end {
+			break
+		}
+		n = n[i:]
+	}
+	return false
 }
 
 // ownerRRsetCount is the number of non-empty RRsets at an owner. NSEC is a
