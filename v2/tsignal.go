@@ -150,7 +150,7 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 		lgDns.Debug("CreateTransportSignalRRs: service.transport.type=none; skipping transport signal synthesis for zone",
 			"zone", zd.ZoneName)
 		if apex := zd.stagedOwner(zd.ZoneName); apex != nil && zd.signalMayWrite(apex, dak) {
-			if zd.withdrawStaleSignalsLocked(nil) > 0 {
+			if withdrawn, unpublished := zd.withdrawStaleSignalsLocked(nil); withdrawn+unpublished > 0 {
 				zd.publishTransportSignalLocked(bare, nil)
 			}
 		}
@@ -628,7 +628,8 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 	}
 
 	if mayWrite {
-		changed += zd.withdrawStaleSignalsLocked(want)
+		withdrawn, unpublished := zd.withdrawStaleSignalsLocked(want)
+		changed += withdrawn + unpublished
 	}
 
 	if changed == 0 {
@@ -688,9 +689,16 @@ func (zd *ZoneData) signalMayWrite(apex *OwnerData, dak *DnssecKeys) bool {
 // the record. A revocation whose KeyDB delete failed earlier in this process
 // is tried again, whatever is at the owner now.
 //
-// It returns the number of owners changed. Caller holds zd.mu.
-func (zd *ZoneData) withdrawStaleSignalsLocked(want map[string]bool) int {
-	changed := 0
+// A withdrawal staged by an earlier run whose publish was refused (signing
+// or the NSEC repair failed) is published again. The publisher keeps the
+// working set and drops the queue flag, so the owner is gone from the
+// working set while the published snapshot still serves the pass's signal
+// there, and nothing else would publish it.
+//
+// It returns the number of owners withdrawn now, and the number whose
+// earlier withdrawal is still unpublished; either calls for a publish.
+// Caller holds zd.mu.
+func (zd *ZoneData) withdrawStaleSignalsLocked(want map[string]bool) (withdrawn, unpublished int) {
 	for _, owner := range zd.signalStoredOwners() {
 		if want[owner] {
 			continue
@@ -703,6 +711,13 @@ func (zd *ZoneData) withdrawStaleSignalsLocked(want map[string]bool) int {
 		}
 		od := zd.stagedOwner(owner)
 		if od == nil || ownerRRsetCount(od) == 0 {
+			if po := getOwnerFrom(zd.publishedSnapshot(), owner); po != nil {
+				if rs := po.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs) {
+					lgDns.Info("transport signal pass: a withdrawal staged earlier is not published yet; publishing it again",
+						"zone", zd.ZoneName, "owner", owner)
+					unpublished++
+				}
+			}
 			continue
 		}
 		if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs) {
@@ -712,14 +727,14 @@ func (zd *ZoneData) withdrawStaleSignalsLocked(want map[string]bool) int {
 			}
 			lgDns.Info("transport signal pass: withdrew the signal the pass had stored for a name that is no longer an identity at home in this zone",
 				"zone", zd.ZoneName, "owner", owner)
-			changed++
+			withdrawn++
 			continue
 		}
 		if err := zd.forgetSignalStored(owner); err != nil {
 			zd.warnSignalForgetFailed(owner, err)
 		}
 	}
-	return changed
+	return withdrawn, unpublished
 }
 
 // stagedBelowCut reports whether name is at or below a zone cut in this
