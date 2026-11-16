@@ -424,12 +424,23 @@ func (imr *Imr) endpointAddrsOf(target string, qtype uint16, resp *ImrResponse, 
 // may lead elsewhere. The lookup carries the chain's expiry with its answer,
 // so a link that changed or left the cache since does not count. The zero
 // time when the chain's expiry is not known.
+//
+// A response reached through a chain carries no Expiration: the addresses are
+// not cached under the question. Their entry is read under the chain's last
+// name instead, and counts only while it holds the RRset resp carries, as
+// lookupEntry judges an entry; one stored since is another lookup's.
 func (imr *Imr) addrsExpiry(target string, qtype uint16, resp *ImrResponse) time.Time {
+	chained := !core.EqualNames(resp.RRset.Name, target)
 	exp := resp.Expiration
+	if exp.IsZero() && chained {
+		if e := imr.Cache.Peek(resp.RRset.Name, qtype); e != nil && e.RRset == resp.RRset {
+			exp = e.Expiration
+		}
+	}
 	if exp.IsZero() {
 		exp = time.Now().Add(cache.GetMinTTL(resp.RRset.RRs))
 	}
-	if !core.EqualNames(resp.RRset.Name, target) {
+	if chained {
 		if link := resp.ChainExpiration; link.Before(exp) {
 			exp = link
 		}

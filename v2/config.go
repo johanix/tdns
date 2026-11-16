@@ -237,6 +237,16 @@ type TransportConf struct {
 	// Publishing a port opens no socket; the listener is configured under
 	// listeners.ports. Only type svcb carries ports.
 	Ports map[string]uint16 `yaml:"ports"`
+	// Targets is the host that serves a transport when it is not the
+	// nameserver itself: keys dot and doq. tdns-auth gives each transport
+	// with a target an SVCB record of its own, the target as its TargetName
+	// and the transport's port, if it has one, beside it
+	// (transportSignalLayout). A resolver honours a target only from a
+	// validated signal, so a target in a zone whose signal is not signed is
+	// warned about. DoH on another host needs a path, which the signal does
+	// not carry, so a doh target is refused. "." is the nameserver itself
+	// and counts as absent. Only type svcb carries targets.
+	Targets map[string]string `yaml:"targets"`
 }
 
 // Validate refuses, at config load, a signal this server would publish (type
