@@ -1085,6 +1085,12 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 		if err := conf.Internal.KeyDB.DeleteZoneRefreshState(name); err != nil {
 			lg.Warn("RemoveDynamicZone: failed to remove refresh state", "zone", name, "error", err)
 		}
+		// And the record of what the signal pass stored: a zone created
+		// later under the same name must not take an operator's RRset for
+		// the pass's own.
+		if err := conf.Internal.KeyDB.DeleteTransportSignalStored(name); err != nil {
+			lg.Warn("RemoveDynamicZone: failed to remove the stored-signal record", "zone", name, "error", err)
+		}
 	}
 
 	// Also the zone's actual file when it differs (a template-expanded
