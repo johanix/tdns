@@ -96,12 +96,23 @@ func TestTransportSignalTargetChecks(t *testing.T) {
 		}
 		return m
 	}
+	// Names at the wire limit (RFC 1035: 255 octets, the root octet counted).
+	// The escaped one is the 255-octet name with a longer presentation form.
+	lbl := func(n int) string { return strings.Repeat("a", n) }
+	name255 := lbl(63) + "." + lbl(63) + "." + lbl(63) + "." + lbl(61) + "."
+	name255esc := `\097` + lbl(62) + "." + lbl(63) + "." + lbl(63) + "." + lbl(61) + "."
+	name256 := lbl(63) + "." + lbl(63) + "." + lbl(63) + "." + lbl(62) + "."
+	name257 := lbl(63) + "." + lbl(63) + "." + lbl(63) + "." + lbl(63)
 	for _, tc := range []struct {
 		name    string
 		conf    TransportConf
 		wantErr string // "" for none
 		warns   int
 	}{
+		{"a target of 255 wire octets", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", name255)}, "", 0},
+		{"a target of 255 wire octets, escaped", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", name255esc)}, "", 0},
+		{"a target of 256 wire octets", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", name256)}, "255 octets", 0},
+		{"a target of 257 wire octets, without the final dot", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", name257)}, "255 octets", 0},
 		{"a dot target", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", "dot.provider.example.")}, "", 0},
 		{"a doq target without the final dot", TransportConf{Type: "svcb", Signal: "doq:10", Targets: tg("doq", "doq.provider.example")}, "", 0},
 		{"\".\" is absent", TransportConf{Type: "svcb", Signal: "dot:10", Targets: tg("dot", ".")}, "", 0},
