@@ -161,6 +161,23 @@ func TestColdQueryWithDo53DoesNotWait(t *testing.T) {
 	}
 }
 
+// A server without an address is not waited for: its signal cannot make it
+// usable, and the address fallback after the first pass is what can.
+func TestColdQueryDoesNotWaitForAServerWithoutAddresses(t *testing.T) {
+	imr, _, _ := newColdTestImr(t, 5*time.Second)
+	const bareNS = "ns3.child.example."
+	bare := imr.Cache.GetOrCreateAuthServer(bareNS)
+	serverMap := map[string]*cache.AuthServer{cache.ServerKey(bareNS): bare}
+	if !imr.TransportSignalDiscovery.Begin(transportOwnerForNS(bareNS)) {
+		t.Fatal("setup: could not start the lookup")
+	}
+
+	elapsed, _ := coldQuery(context.Background(), imr, serverMap)
+	if elapsed >= time.Second {
+		t.Errorf("waited %s for the signal of a server with no address", elapsed)
+	}
+}
+
 // With transport signals turned off there is nothing to look up.
 func TestColdQueryOffWhenSignalsAreOff(t *testing.T) {
 	imr, _, serverMap := newColdTestImr(t, 5*time.Second)

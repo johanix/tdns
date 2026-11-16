@@ -946,10 +946,22 @@ func (imr *Imr) awaitUsableTuples(ctx context.Context, qname string, qtype uint1
 	if len(tuples) > 0 {
 		return zoneName, zone, tuples
 	}
+	// Only a server with an address can be made usable by its signal. One
+	// without is the address fallback's to resolve, after this pass, and
+	// waiting for its signal first only held that up.
+	withAddrs := make(map[string]*cache.AuthServer, len(serverMap))
+	for key, server := range serverMap {
+		if server != nil && len(server.GetAddrs()) > 0 {
+			withAddrs[key] = server
+		}
+	}
+	if len(withAddrs) == 0 {
+		return imr.prioritizeServersFor(ctx, qname, qtype, serverMap, privacy)
+	}
 	// The selection that ends the wait is the one used: selecting again could
 	// lose a suspect family's probe tuple, which is let through once per
 	// probe interval.
-	imr.awaitTransportSignalsUntil(ctx, serverMap, transportQueryReasonNoUsableTransport, func() bool {
+	imr.awaitTransportSignalsUntil(ctx, withAddrs, transportQueryReasonNoUsableTransport, func() bool {
 		zoneName, zone, tuples = imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false)
 		return len(tuples) > 0
 	})
