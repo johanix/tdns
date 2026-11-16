@@ -179,10 +179,19 @@ func transportSignalRelease(conf *Config, name string) ([]TransportSignalPreview
 // record would outlive a restart, and the pass would take the records for
 // its own again. A release run again tries the delete again, since the
 // pending revocation keeps the owner in signalStoredOwners.
+//
+// It also refuses while a change to the SVCB RRset at owner is staged and
+// not published (stagedSignalChangeLocked): its guards read the published
+// zone, and the staged change publishes after the release all the same. A
+// withdrawal the pass staged would then remove the RRset the release just
+// handed to the operator.
 func (zd *ZoneData) releaseSignal(owner string) (released bool, err error) {
 	owner = core.CanonicalizeName(owner)
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	if zd.stagedSignalChangeLocked(owner) {
+		return false, fmt.Errorf("%s in %s has a change staged that is not published yet (the publish cadence holds it back, or the publish was refused); run the release again after the next publish", owner, zd.ZoneName)
+	}
 	if od := getOwnerFrom(zd.publishedSnapshot(), owner); od == nil || ownerRRsetCount(od) == 0 {
 		return false, fmt.Errorf("%s holds nothing in %s; put the records there first (a release with nothing there would only let synthesis start over)", owner, zd.ZoneName)
 	}
@@ -195,4 +204,27 @@ func (zd *ZoneData) releaseSignal(owner string) (released bool, err error) {
 	lgDns.Info("transport signal released: the RRset at the owner is the operator's from now on",
 		"zone", zd.ZoneName, "owner", owner)
 	return true, nil
+}
+
+// stagedSignalChangeLocked reports whether the working set holds a change to
+// the SVCB RRset at owner that is not published: the RRset or the whole
+// owner deleted (a withdrawal), or other records put there. A working set
+// that only re-stages the published records, as every pass with an identity
+// does, holds no change. Caller holds zd.mu.
+func (zd *ZoneData) stagedSignalChangeLocked(owner string) bool {
+	if zd.workingSet == nil {
+		return false
+	}
+	svcbStrings := func(od *OwnerData) []string {
+		if od == nil {
+			return nil
+		}
+		var out []string
+		for _, rr := range od.RRtypes.GetOnlyRRSet(dns.TypeSVCB).RRs {
+			out = append(out, rr.String())
+		}
+		slices.Sort(out)
+		return out
+	}
+	return !slices.Equal(svcbStrings(zd.workingSet[owner]), svcbStrings(getOwnerFrom(zd.publishedSnapshot(), owner)))
 }

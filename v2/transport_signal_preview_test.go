@@ -12,7 +12,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -394,5 +396,73 @@ BEGIN SELECT RAISE(ABORT, 'delete refused by the test'); END`); err != nil {
 	}
 	if _, ok, err := kdb.GetTransportSignalStored(zd.ZoneName, owner); err != nil || ok {
 		t.Fatalf("after the release run again the KeyDB still holds the record: ok=%v err=%v", ok, err)
+	}
+}
+
+// A release is refused while a change to the SVCB RRset at the owner is
+// staged and not published (CodeRabbit on #1060, 2026-11-16). The name
+// leaves service.identities while an earlier change waits for the publish
+// cadence, so the pass's withdrawal is staged and waits too. A release then
+// would pass its guards, which read the published zone, and say the RRset
+// is the operator's, and the publish that follows would remove it. Once the
+// withdrawal is published, the release finds nothing at the owner.
+func TestABridgeReleaseWaitsForAStagedWithdrawal(t *testing.T) {
+	const owner = "_dns.ns1.example."
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, `example.	3600	IN	SOA	ns1.example. hostmaster.example. 1 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+ns1.example.	3600	IN	A	127.0.0.1
+`)
+	zd.Options[OptAddTransportSignal] = true
+	prevSVCB := Globals.ServerSVCB
+	Globals.ServerSVCB = &dns.SVCB{Priority: 1, Target: "."}
+	t.Cleanup(func() { Globals.ServerSVCB = prevSVCB })
+	conf := &Config{}
+	conf.Service.Transport.Type = "svcb"
+	conf.Service.Transport.Signal = "dot:50"
+	conf.Service.Identities = []string{"ns1.example."}
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	stored := svcbRecords(zd, owner)
+	if len(stored) == 0 {
+		t.Fatal("the pass synthesized no signal")
+	}
+
+	// An unrelated change, held back by the cadence.
+	t.Cleanup(zd.stopPublisher)
+	zd.mu.Lock()
+	zd.publishCadence = time.Hour
+	zd.lastPublish = time.Now()
+	zd.stageRRsetLocked("note.example.", core.RRset{Name: "note.example.", Class: dns.ClassINET, RRtype: dns.TypeTXT,
+		RRs: mustRRs(t, `note.example.	3600	IN	TXT	"an operator's change"`)})
+	zd.mu.Unlock()
+
+	// The name leaves service.identities: the withdrawal is staged, and
+	// waits for the publish.
+	conf.Service.Identities = nil
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if got := svcbRecords(zd, owner); !sameRecords(got, stored) {
+		t.Fatalf("the withdrawal was published at once, and the test needs it staged: %v", got)
+	}
+	if _, msg, err := transportSignalRelease(conf, "ns1.example."); err == nil || !strings.Contains(err.Error(), "not published yet") {
+		t.Fatalf("a release with the withdrawal staged: err=%v msg=%q, want it refused", err, msg)
+	}
+	if _, ok, err := kdb.GetTransportSignalStored(zd.ZoneName, owner); err != nil || !ok {
+		t.Fatalf("the refused release dropped the stored-signal record: ok=%v err=%v", ok, err)
+	}
+
+	// The next publish carries the withdrawal. A release then finds
+	// nothing to hand over.
+	zd.mu.Lock()
+	zd.publishLocked(zd.generation.Load())
+	zd.mu.Unlock()
+	if got := svcbRecords(zd, owner); len(got) != 0 {
+		t.Fatalf("the publish did not carry the withdrawal: %v", got)
+	}
+	if _, _, err := transportSignalRelease(conf, "ns1.example."); err == nil || !strings.Contains(err.Error(), "holds nothing") {
+		t.Fatalf("a release after the withdrawal was published: %v, want it refused for an owner with nothing", err)
 	}
 }

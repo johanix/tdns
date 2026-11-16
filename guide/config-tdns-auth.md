@@ -1196,8 +1196,10 @@ then holds only until a restart, so run it again.
 Release only once the records are in the zone's source, its zone file. A
 signal tdns-auth no longer owns is not carried over a reload, so released
 records that are only in memory are gone at the next reload. A release with
-nothing at the name is refused, since synthesis would only start over. A
-name tdns-auth never synthesized a signal for needs no release.
+nothing at the name is refused, since synthesis would only start over. So
+is a release while a change at the name is waiting to be published, such as
+a withdrawal held back by the publish cadence: run it again after the next
+publish. A name tdns-auth never synthesized a signal for needs no release.
 
 A later change to `service.transport` does not reach provisioned records:
 run the command again and replace them.
