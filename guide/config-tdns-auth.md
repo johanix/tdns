@@ -1099,7 +1099,11 @@ from who the server is. Three rules:
      identical to what the configuration gives, and it logs that it left
      them alone.
    - It withdraws a signal it stored for a name that is no longer an
-     identity, again only where it is the zone's primary and signer.
+     identity, again only where it is the zone's primary and signer. It
+     remembers what it stored there, so the same records, loaded again
+     from a zone file written before the withdrawal, are withdrawn again.
+   - An identity below a zone cut to a child not served here gets no
+     signal, and tdns-auth warns: its home is the child's server.
    - A listen address decides nothing. Behind NAT, anycast or a load
      balancer, list the name in `service.identities`.
 3. **tdns-auth never writes into a customer zone**, whatever is or is not
