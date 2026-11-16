@@ -3,17 +3,18 @@ module github.com/johanix/tdns/v2
 go 1.25.2
 
 replace (
+	github.com/johanix/tdns/v2/algorithms => ./algorithms
 	github.com/johanix/tdns/v2/cache => ./cache
 	github.com/johanix/tdns/v2/core => ./core
 	github.com/johanix/tdns/v2/edns0 => ./edns0
 )
 
 require (
-	github.com/cloudflare/circl v1.6.3
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
 	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b
+	github.com/johanix/tdns/v2/algorithms v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cache v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/core v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000
@@ -28,6 +29,7 @@ require (
 )
 
 require (
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
