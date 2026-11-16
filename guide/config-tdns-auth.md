@@ -1003,9 +1003,11 @@ These `options:` values are recognized:
 ## The transport signal: service.transport
 
 `service.transport` tells resolvers which transports the server offers, so
-that they can move off Do53. tdns-auth publishes the signal at
-`_dns.<nameserver>` for each of its identities, in every zone with the
-`add-transport-signal` option.
+that they can move off Do53. tdns-auth writes the signal at
+`_dns.<identity>` for each name in `service.identities`, in that name's home
+zone, and adds signals to the responses of every zone with the
+`add-transport-signal` option. *Where the signal comes from*, below, gives
+the rules.
 
 ```yaml
 service:
@@ -1015,6 +1017,8 @@ service:
       ports:
          dot:  1234
          doh:  8443
+      targets:
+         doq:  doq.example.net.
 ```
 
 | Key | Default | Meaning |
@@ -1022,6 +1026,7 @@ service:
 | `type` | `none` | `svcb` publishes an SVCB record with the `oots` SvcParam, `tsync` a TSYNC record, `none` nothing. An unknown value is warned about and read as `none` |
 | `signal` | — | comma-separated `transport:weight` pairs, from `udp`, `tcp`, `dot`, `doq` and `doh`, weights 0 to 100. An absent `udp` or `tcp` is 100 and an absent encrypted transport 0. `do53:N` is accepted as the shorthand for `udp:N` and `tcp:N`, and an explicit `udp` or `tcp` wins over it |
 | `ports` | — | the port published for a transport that is not on its standard port (53 for `udp` and `tcp`, 853 for `dot` and `doq`, 443 for `doh`). Only with `type: svcb` |
+| `targets` | — | the host that serves a transport, when it is not the nameserver itself: `udp`, `tcp`, `dot` and `doq`. Only with `type: svcb` |
 
 `udp` is cleartext DNS over UDP, retried over TCP after truncation; `tcp` is
 cleartext DNS over TCP. The `tcp` weight caps only the TCP a resolver would
@@ -1056,6 +1061,25 @@ A resolver sends the TCP retry after a truncation to the address and port
 that truncated, so serve TCP on a `udp` port too. TCP the resolver forces goes
 to the `tcp` port, or to port 53 when `tcp` has none.
 
+A transport with a target gets a record of its own too, with the target as
+its TargetName and its port, if it has one, beside it. With the `targets`
+above, `doq` moves to `doq.example.net` on port 853. Nothing is left for a
+record at `.` without a port, so there is none:
+
+```
+_dns.ns1.example. 10800 IN SVCB 1 . port=1234 oots="dot:10"
+_dns.ns1.example. 10800 IN SVCB 1 doq.example.net. oots="doq:20"
+_dns.ns1.example. 10800 IN SVCB 1 . port=8443 oots="doh:5"
+```
+
+A `udp` or `tcp` with a target serves cleartext there, and the TCP retry after
+a truncation goes to the same host and port, so serve TCP there too. As with a
+port, no `signal` is needed: `targets.udp: dns.example.net` alone publishes
+`SVCB 1 dns.example.net. oots="udp:100"`.
+
+The resolver looks the target's addresses up itself; tdns-auth does not add
+them to the response.
+
 **Checks at load.** Each of these is an error, and the daemon does not start:
 
 - `signal` does not parse, or names a token other than `udp`, `tcp`, `dot`,
@@ -1071,6 +1095,17 @@ to the `tcp` port, or to port 53 when `tcp` has none.
   standard port counts, so `dot` on 443 clashes with `doh`, and `dot` on 53
   with `tcp`. `udp` and `tcp` on one port is the natural case;
 - `ports` with `type: tsync` or `none`.
+- a key of `targets` other than `udp`, `tcp`, `dot` or `doq`, or one for
+  `dot` or `doq` whose transport has no weight in `signal`. A `doh` target is
+  refused: DoH on another host needs a path, which the signal does not carry;
+- a target that is an address or not a domain name. `.` is the nameserver
+  itself and counts as absent;
+- `targets` with `type: tsync` or `none`.
+
+A socket is a host and a port, so the socket rules apply per endpoint: a
+transport with a target is on another host and shares no socket with this
+one. `dot` on another host may use port 443 beside a local `doh`, and a
+targeted transport's port is not checked against this daemon's listeners.
 
 A published port that is not listened on for its transport is a warning, not
 an error: `listeners.ports` for `dot`, `doq` and `doh`, the ports of
@@ -1083,6 +1118,110 @@ as well.
 **Older resolvers.** A resolver that does not read the `port` key dials the
 standard port, fails where nothing listens there, backs off and falls back to
 Do53. Turn `ports` on once the resolvers that matter to you read it.
+
+**Targets need a signed signal.** A resolver honours a target only when the
+signal validates. When the signal goes out unsigned (its home zone is not
+signed), the start-up pass logs a warning, and the transports moved to a
+target are not offered there.
+A resolver that predates targets reads a record with a target as if it were
+about the nameserver itself, so turn `targets` on only once every resolver
+that matters to you skips such records.
+
+**Where the signal comes from.** A response carries signals composed from
+zone data, the zone's own and that of the zones this server serves, never
+from who the server is. Three rules:
+
+1. **A signal provisioned in a zone is served as it is.** An SVCB RRset that
+   an operator or a customer writes at `_dns.<nameserver>`, in either mode,
+   is zone content. It answers a direct query. It is added to the Additional
+   section of a zone's responses for every NS name whose `_dns` RRset is in
+   a zone served here: ns1, ns2 and ns3 alike. No identity and no address is
+   checked.
+   - An AliasMode record (SvcPriority 0) points at another name's signal,
+     such as a provider's. When the target is in a zone served here and has
+     an SVCB RRset there, that signal is added with the alias. Otherwise the
+     alias goes alone, and the resolver follows it.
+   - A ServiceMode record whose TargetName is not `.` names the host that
+     serves the transports it lists. Its target is not followed. tdns-imr
+     does not act on such a record yet.
+2. **A signal is synthesized from `service.transport` only for an
+   identity.** For each name in `service.identities`, tdns-auth writes
+   `_dns.<name>` into the name's home zone: the most specific zone served
+   here that holds the name, a co-hosted child rather than its parent.
+   - It writes only where it is that zone's primary and signer: no one else
+     signs it. An unsigned zone of its own counts.
+   - It writes only where nothing else is at that owner. Records there that
+     it did not store itself are left as they are, even when they are
+     identical to what the configuration gives, and it logs that it left
+     them alone.
+   - It withdraws a signal it stored for a name that is no longer an
+     identity, again only where it is the zone's primary and signer. With
+     `service.transport.type: none` it withdraws every signal it stored. It
+     remembers what it stored there, so the same records, loaded again
+     from a zone file written before the withdrawal, are withdrawn again.
+   - An identity below a zone cut to a child not served here gets no
+     signal, and tdns-auth warns: its home is the child's server.
+   - A listen address decides nothing. Behind NAT, anycast or a load
+     balancer, list the name in `service.identities`.
+3. **tdns-auth never writes into a customer zone**, whatever is or is not
+   there. Listing a name in `service.identities` says its home zone is the
+   operator's own; every other zone is a customer zone. A customer zone
+   whose NS is one of the identities gets the signal from the identity's
+   home zone, by rule 1.
+
+An `_dns.<name>` below a zone cut to a child that is not served here is
+occluded data in the parent, and is never served.
+
+**From synthesized to provisioned.** Synthesis for identities is a stopgap;
+the direction is signals provisioned in the zones. `tdns-cli auth config
+transport-signal` prints the `_dns.<name>` SVCB RRset that tdns-auth
+synthesizes from its current `service.transport`, for every name in
+`service.identities`, in zone-file format:
+
+```
+; _dns.ns1.example.net.: synthesized in example.net. now; paste these records into the zone, then run transport-signal --release ns1.example.net.; the name may then leave service.identities
+_dns.ns1.example.net.	10800	IN	SVCB	1 . oots="doq:20"
+_dns.ns1.example.net.	10800	IN	SVCB	1 . port="1234" oots="dot:10"
+```
+
+(for `signal: "doq:20,dot:10"` with `dot` on port 1234)
+
+The records are exactly what synthesis writes, ports and targets included.
+Give a name (`tdns-cli auth config transport-signal ns3.example.net.`) for
+that name alone, an identity or not.
+
+The loop is: print the records, paste them into the zone that holds the
+name, release the name, and then the name may leave `service.identities`:
+
+```
+tdns-cli auth config transport-signal --release ns1.example.net.
+```
+
+tdns-auth keeps a record of the signal it stored at each name, in its KeyDB
+so that it outlasts a restart. The pasted records are the same bytes, so
+until the release tdns-auth still takes them for its own: it would rewrite
+them when `service.transport` changes and withdraw them once the name leaves
+`service.identities`. The release drops that record. From then on the
+records are provisioned: tdns-auth serves them as they are, synthesizes
+nothing there (rule 2), never rewrites them and never withdraws them. The
+release prints the state after it, and the comment line says "provisioned
+... as below". If the KeyDB cannot drop the record, the release says so: it
+then holds only until a restart, so run it again.
+
+Release only once the records are in the zone's source, its zone file. A
+signal tdns-auth no longer owns is not carried over a reload, so released
+records that are only in memory are gone at the next reload. A release with
+nothing at the name is refused, since synthesis would only start over. So
+is a release while a change at the name is waiting to be published, such as
+a withdrawal held back by the publish cadence: run it again after the next
+publish. A name tdns-auth never synthesized a signal for needs no release.
+
+A later change to `service.transport` does not reach provisioned records:
+run the command again and replace them.
+
+When the zone loads, tdns-auth warns about a transport named in two records
+of one RRset (a resolver uses one endpoint per transport) and about an `oots`
+weight above 100 (resolvers read it as 100).
 
 **Older tdns nodes.** `udp` and `tcp` are new tokens. A tdns node older than
 the lossless `oots` codec (the dns fork's `v1.1.72-johanix.6`) drops them when
