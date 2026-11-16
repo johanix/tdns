@@ -235,6 +235,12 @@ func (imr *Imr) applyCachedTransportSignal(owner string, servers ...*cache.AuthS
 	return false, denied
 }
 
+// testHookSignalLookupStarted, when set, runs in awaitTransportSignalsUntil
+// between starting or joining a server's signal lookup and asking whether it
+// is still running. A test ends the lookup there, in the window a real one
+// can end in.
+var testHookSignalLookupStarted func(owner string)
+
 // awaitTransportSignals learns the transports of the servers in serverMap
 // that have signalled none, for a strict-privacy query that has no server it
 // may use. It waits as awaitTransportSignalsUntil does, until a server can
@@ -293,9 +299,20 @@ func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[st
 			continue
 		}
 		imr.maybeQueryTransportSignal(ctx, owner, reason)
-		if ch := imr.TransportSignalDiscovery.Pending(owner); ch != nil {
-			pending = append(pending, lookup{server: server, owner: owner, done: ch})
+		if testHookSignalLookupStarted != nil {
+			testHookSignalLookupStarted(owner)
 		}
+		ch := imr.TransportSignalDiscovery.Pending(owner)
+		if ch == nil {
+			// The lookup may have ended since the check above. Its signal
+			// reached the servers in the zone server maps, which this one
+			// need not be in yet.
+			if len(server.GetTransportWeights()) == 0 {
+				imr.applyCachedTransportSignal(owner, server)
+			}
+			continue
+		}
+		pending = append(pending, lookup{server: server, owner: owner, done: ch})
 	}
 	if ok := ready(); ok || len(pending) == 0 {
 		return ok

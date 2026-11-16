@@ -558,3 +558,40 @@ func TestNsLookupAppliesNoCachedSignalWhenSignalsAreOff(t *testing.T) {
 		t.Errorf("got weights %v, want none: transport signals are off", w)
 	}
 }
+
+// A lookup that ends between the cache check and the question whether it is
+// still running leaves nothing to wait for. Its signal reached the servers in
+// the zone server maps; the server the query holds, in none of them yet, gets
+// it too, and is used.
+func TestAwaitTransportSignalsReplaysASignalThatCameBeforePending(t *testing.T) {
+	imr, _, _ := newStrictTestImr(t, 5*time.Second)
+	const ns = "ns-late.child.example."
+	server := imr.Cache.GetOrCreateAuthServer(ns)
+	server.AddAddr("192.0.2.55")
+	serverMap := map[string]*cache.AuthServer{cache.ServerKey(ns): server}
+	owner := transportOwnerForNS(ns)
+	rr, err := dns.NewRR(owner + ` 3600 IN SVCB 1 . oots="do53:100,dot:50"`)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	// A lookup is running, so the call joins it rather than starting one.
+	if !imr.TransportSignalDiscovery.Begin(owner) {
+		t.Fatal("setup: could not mark the lookup as running")
+	}
+	testHookSignalLookupStarted = func(o string) {
+		if o != owner {
+			return
+		}
+		imr.Cache.Set(owner, dns.TypeSVCB, &cache.CachedRRset{
+			Name: owner, RRtype: dns.TypeSVCB, Context: cache.ContextAnswer,
+			State: cache.ValidationStateNone, Expiration: time.Now().Add(time.Hour),
+			RRset: &core.RRset{Name: owner, Class: dns.ClassINET, RRtype: dns.TypeSVCB, RRs: []dns.RR{rr}},
+		})
+		imr.TransportSignalDiscovery.Succeed(owner)
+	}
+	t.Cleanup(func() { testHookSignalLookupStarted = nil })
+
+	if !imr.awaitTransportSignals(context.Background(), "www."+strictChildZone, serverMap) {
+		t.Errorf("the signal that came in before the wait did not reach the server: weights %v", server.GetTransportWeights())
+	}
+}
