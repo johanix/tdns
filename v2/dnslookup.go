@@ -941,7 +941,7 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 // Do53 failed while that server's signal was being validated: both had tried
 // the server over Do53 first and been refused, and the referral was followed
 // before the signal could be installed (#1065).
-func (imr *Imr) awaitUsableTuples(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
+func (imr *Imr) awaitUsableTuples(ctx context.Context, budget *signalWaitBudget, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
 	zoneName, zone, tuples := imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false)
 	if len(tuples) > 0 {
 		return zoneName, zone, tuples
@@ -961,14 +961,57 @@ func (imr *Imr) awaitUsableTuples(ctx context.Context, qname string, qtype uint1
 	// The selection that ends the wait is the one used: selecting again could
 	// lose a suspect family's probe tuple, which is let through once per
 	// probe interval.
-	imr.awaitTransportSignalsUntil(ctx, withAddrs, transportQueryReasonNoUsableTransport, func() bool {
-		zoneName, zone, tuples = imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false)
-		return len(tuples) > 0
+	budget.run(ctx, imr.strictWait(), func(wctx context.Context) bool {
+		return imr.awaitTransportSignalsUntil(wctx, withAddrs, transportQueryReasonNoUsableTransport, func() bool {
+			zoneName, zone, tuples = imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false)
+			return len(tuples) > 0
+		})
 	})
 	if len(tuples) > 0 {
 		return zoneName, zone, tuples
 	}
 	return imr.prioritizeServersFor(ctx, qname, qtype, serverMap, privacy)
+}
+
+// tupleSelection is one selection of a query's (server, addr, transport)
+// tuples, with the zone whose backoff applied (selectServerTuples).
+type tupleSelection struct {
+	zoneName string
+	zone     *cache.Zone
+	tuples   []ServerAddrXportTuple
+}
+
+// signalWaitBudget is what a query may spend waiting for transport signals:
+// discovery.strict-wait in all, however many times it waits (the strict
+// precheck, awaitUsableTuples, anotherPassAfter). Only the time spent
+// waiting counts. Without it a query whose servers' lookups never ended
+// waited strict-wait at the start of its pass and again after it.
+type signalWaitBudget struct {
+	spent time.Duration
+}
+
+// run calls wait with a context that ends when the budget is spent, or with
+// ctx, and counts the time it took against the budget. Once the budget is
+// spent, wait still runs, and starts its lookups, but does not wait.
+func (b *signalWaitBudget) run(ctx context.Context, total time.Duration, wait func(context.Context) bool) bool {
+	left := total - b.spent
+	if left < 0 {
+		left = 0
+	}
+	wctx, cancel := context.WithTimeout(ctx, left)
+	defer cancel()
+	start := time.Now()
+	ok := wait(wctx)
+	b.spent += time.Since(start)
+	return ok
+}
+
+// strictWait is the tuning's discovery.strict-wait, or its default.
+func (imr *Imr) strictWait() time.Duration {
+	if imr.Tuning.Discovery.StrictWait > 0 {
+		return imr.Tuning.Discovery.StrictWait
+	}
+	return defaultDiscoveryStrictWait
 }
 
 // passTuple is a (server, address, transport) a pass of the query loop has
@@ -979,8 +1022,9 @@ type passTuple struct {
 	transport core.Transport
 }
 
-// anotherPassAfter reports whether a pass of the query loop that ran out of
-// tuples without an answer is worth another, given the tuples it tried.
+// anotherPassAfter decides whether a pass of the query loop that ran out of
+// tuples without an answer is worth another, given the tuples it tried, and
+// returns the selection the next pass is to use, or nil.
 //
 // It is when a tuple the pass did not try is available now. Typically a
 // server's transport signal came in during the pass, while the query's own
@@ -988,16 +1032,28 @@ type passTuple struct {
 // never had (#1065). Only tried tuples left: they failed without a backoff,
 // and another pass would repeat them. No tuple left at all: every one it
 // tried went into backoff, and a server without a signal may have nothing
-// else yet. It then waits, as awaitUsableTuples does, for the signals of the
-// servers that have an address and none, and reports whether one came in.
-func (imr *Imr) anotherPassAfter(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel, tried map[passTuple]bool) bool {
-	if _, _, tuples := imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false); len(tuples) > 0 {
-		for _, tup := range tuples {
+// else yet. It then waits, within the query's budget, for the signals of the
+// servers that have an address and none, until an untried tuple appears.
+//
+// The next pass uses the selection made here rather than selecting again:
+// selecting reserves a suspect family's probe tuple (ShouldProbe), and a
+// second selection within the probe interval would leave it out.
+func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel, tried map[passTuple]bool) *tupleSelection {
+	var sel tupleSelection
+	untried := func() bool {
+		sel.zoneName, sel.zone, sel.tuples = imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false)
+		for _, tup := range sel.tuples {
 			if !tried[passTuple{tup.Server, tup.Addr, tup.Transport}] {
 				return true
 			}
 		}
 		return false
+	}
+	if untried() {
+		return &sel
+	}
+	if len(sel.tuples) > 0 {
+		return nil
 	}
 	unsignalled := map[string]*cache.AuthServer{}
 	for key, server := range serverMap {
@@ -1006,16 +1062,14 @@ func (imr *Imr) anotherPassAfter(ctx context.Context, qname string, qtype uint16
 		}
 	}
 	if len(unsignalled) == 0 {
-		return false
+		return nil
 	}
-	return imr.awaitTransportSignalsUntil(ctx, unsignalled, transportQueryReasonNoUsableTransport, func() bool {
-		for _, server := range unsignalled {
-			if len(server.GetTransportWeights()) > 0 {
-				return true
-			}
-		}
-		return false
-	})
+	if budget.run(ctx, imr.strictWait(), func(wctx context.Context) bool {
+		return imr.awaitTransportSignalsUntil(wctx, unsignalled, transportQueryReasonNoUsableTransport, untried)
+	}) {
+		return &sel
+	}
+	return nil
 }
 
 // unprobedRTTSentinel is the RTT used for sort when no usable sample exists
@@ -1788,8 +1842,11 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// told us yet: the zone was met a moment ago, through the referral that
 	// brought us here. Its transports are learned before the query gives up on
 	// it, or the first strict query to every new zone failed (#776).
+	budget := &signalWaitBudget{}
 	if privacy == edns0.PrivacyStrict && !hasStrictCandidate(serverMap, qname) &&
-		!imr.awaitTransportSignals(ctx, qname, serverMap) {
+		!budget.run(ctx, imr.strictWait(), func(wctx context.Context) bool {
+			return imr.awaitTransportSignals(wctx, qname, serverMap)
+		}) {
 		zoneName, _, _ := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
 			privacyUnavailable(zoneName, "no servers have encrypted transports available (zone=%s)", zoneName)
@@ -1838,8 +1895,14 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// (anotherPassAfter).
 	maxPasses := 2
 	extraPassAdded := false
+	var nextPass *tupleSelection
 	for attempt := 0; attempt < maxPasses; attempt++ {
-		zoneName, zone, prioritized = imr.awaitUsableTuples(ctx, qname, qtype, serverMap, privacy)
+		if nextPass != nil {
+			zoneName, zone, prioritized = nextPass.zoneName, nextPass.zone, nextPass.tuples
+			nextPass = nil
+		} else {
+			zoneName, zone, prioritized = imr.awaitUsableTuples(ctx, budget, qname, qtype, serverMap, privacy)
+		}
 		tried := map[passTuple]bool{}
 		if Globals.Debug {
 			lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers) attempt=%d", len(prioritized), len(serverMap), attempt+1)
@@ -2077,7 +2140,10 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		// nothing on port 53, before its signal is in (#1065). A server
 		// whose signal came in during the pass, or comes in now, has
 		// transports this pass did not: go again, once per query.
-		if !extraPassAdded && imr.anotherPassAfter(ctx, qname, qtype, serverMap, privacy, tried) {
+		if !extraPassAdded {
+			nextPass = imr.anotherPassAfter(ctx, budget, qname, qtype, serverMap, privacy, tried)
+		}
+		if nextPass != nil {
 			extraPassAdded = true
 			maxPasses++
 			if Globals.Debug {

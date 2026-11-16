@@ -128,6 +128,11 @@ func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, rea
 	if owner == "" || imr.Cache == nil || ctx == nil {
 		return
 	}
+	// With transport signals turned off, a signal would not be used, so
+	// none is looked up, whatever the discovery options say.
+	if imr.Options[ImrOptUseTransportSignals] == "false" {
+		return
+	}
 	switch reason {
 	case transportQueryReasonObservation:
 		// Proceed if either option is enabled

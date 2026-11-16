@@ -133,14 +133,16 @@ func TestColdQueryDoesNotWaitOnAFailedLookup(t *testing.T) {
 	}
 }
 
-// A lookup that never ends costs the query strict-wait, and no more.
+// A lookup that never ends costs the query strict-wait, and no more: one
+// budget for the whole query, not one wait at the start of the pass and
+// another after it (signalWaitBudget).
 func TestColdQueryStopsAtTheBound(t *testing.T) {
-	imr, server, serverMap := newColdTestImr(t, 100*time.Millisecond)
+	imr, server, serverMap := newColdTestImr(t, 300*time.Millisecond)
 	startSignalLookup(t, imr, server)
 
 	elapsed, err := coldQuery(context.Background(), imr, serverMap)
-	if elapsed < 100*time.Millisecond || elapsed > 2*time.Second {
-		t.Errorf("waited %s, want about the 100ms bound", elapsed)
+	if elapsed < 300*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Errorf("waited %s, want about the 300ms bound, once", elapsed)
 	}
 	if err == nil || !strings.Contains(err.Error(), coldNoTuples) {
 		t.Errorf("got %v, want no attempt", err)
@@ -230,6 +232,39 @@ func TestColdQueryTakesTheFirstSignal(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "/dot") {
 		t.Errorf("got %v, want an attempt over DoT", err)
+	}
+}
+
+// The selection that decides on another pass is the one the next pass uses:
+// it holds a suspect family's probe tuple, which selecting reserves, and a
+// second selection within the probe interval would leave out.
+func TestAnotherPassAfterKeepsTheProbeTuple(t *testing.T) {
+	imr, server, serverMap := newStrictTestImr(t, time.Second)
+	imr.FamilyTracker = cache.NewFamilyTracker(10*time.Minute, 10*time.Minute, time.Hour, 1)
+	imr.FamilyTracker.RecordResult("192.0.2.99", false)
+	if !imr.FamilyTracker.IsSuspect(cache.FamilyV4) {
+		t.Fatal("setup: IPv4 is not suspect")
+	}
+	// The pass tried Do53, which went into backoff; the signal, offering
+	// DoT, came in meanwhile.
+	server.RecordAddressFailure("192.0.2.53", core.TransportDo53, errors.New("read: connection refused"))
+	server.SetTransportSignal([]core.Transport{core.TransportDoT}, nil, map[core.Transport]uint8{core.TransportDoT: 50}, nil)
+	tried := map[passTuple]bool{{server, "192.0.2.53", core.TransportDo53}: true}
+
+	sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "www."+strictChildZone, dns.TypeA,
+		serverMap, edns0.PrivacyNone, tried)
+	if sel == nil {
+		t.Fatal("no further pass, although DoT was never tried")
+	}
+	found := false
+	for _, tup := range sel.tuples {
+		found = found || (tup.Server == server && tup.Transport == core.TransportDoT)
+	}
+	if !found {
+		t.Fatalf("the selection for the next pass lacks the DoT probe tuple: %v", sel.tuples)
+	}
+	if imr.FamilyTracker.ShouldProbe(cache.FamilyV4) {
+		t.Error("the probe was not reserved by the selection; the test proves nothing")
 	}
 }
 
@@ -384,13 +419,13 @@ func startSignalAuthDouble(t *testing.T) *oobAuthDouble {
 // gluelessLookup runs the background address lookup a referral to oobZone
 // starts for its nameserver without glue, and returns the nameserver's
 // transport weights as soon as it has any, or after wait.
-func gluelessLookup(t *testing.T, alwaysQuery bool, wait time.Duration) (*Imr, map[core.Transport]uint8) {
+func gluelessLookup(t *testing.T, opts map[ImrOption]string, wait time.Duration) (*Imr, map[core.Transport]uint8) {
 	t.Helper()
 	d := startSignalAuthDouble(t)
 	imr := newOOBTestImr(t, d)
 	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
-	if alwaysQuery {
-		imr.Options[ImrOptAlwaysQueryForTransport] = "true"
+	for opt, val := range opts {
+		imr.Options[opt] = val
 	}
 	cacheDelegation(imr.Cache, oobZone)
 
@@ -416,7 +451,7 @@ func gluelessLookup(t *testing.T, alwaysQuery bool, wait time.Duration) (*Imr, m
 // looked up beside its address, and the server it is stored as carries the
 // signal. Only servers created from glue used to be looked up.
 func TestGluelessNameserverSignalIsLookedUp(t *testing.T) {
-	_, weights := gluelessLookup(t, true, 3*time.Second)
+	_, weights := gluelessLookup(t, map[ImrOption]string{ImrOptAlwaysQueryForTransport: "true"}, 3*time.Second)
 	if weights[core.TransportDoT] != 50 {
 		t.Errorf("got weights %v, want the signal's dot:50", weights)
 	}
@@ -424,11 +459,26 @@ func TestGluelessNameserverSignalIsLookedUp(t *testing.T) {
 
 // Without the option, the address lookup starts no signal lookup.
 func TestGluelessNameserverSignalNeedsTheOption(t *testing.T) {
-	imr, weights := gluelessLookup(t, false, 300*time.Millisecond)
+	imr, weights := gluelessLookup(t, nil, 300*time.Millisecond)
 	if len(weights) != 0 {
 		t.Errorf("got weights %v, want none: no signal lookup was asked for", weights)
 	}
 	if snap := imr.TransportSignalDiscovery.Snapshot(); len(snap) != 0 {
 		t.Errorf("a signal lookup was started without the option: %v", snap)
+	}
+}
+
+// With transport signals turned off, always-query-for-transport starts no
+// signal lookup: the signal would not be used.
+func TestGluelessNameserverSignalOffWhenSignalsAreOff(t *testing.T) {
+	imr, weights := gluelessLookup(t, map[ImrOption]string{
+		ImrOptAlwaysQueryForTransport: "true",
+		ImrOptUseTransportSignals:     "false",
+	}, 300*time.Millisecond)
+	if len(weights) != 0 {
+		t.Errorf("got weights %v, want none: transport signals are off", weights)
+	}
+	if snap := imr.TransportSignalDiscovery.Snapshot(); len(snap) != 0 {
+		t.Errorf("a signal lookup was started with transport signals off: %v", snap)
 	}
 }

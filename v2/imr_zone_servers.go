@@ -224,6 +224,11 @@ func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct
 	// chain of names it is nested in with its own name added.
 	lctx, cancel := detachedContext(2 * budget)
 	lctx = context.WithValue(lctx, nsLookupChainKey{}, append(slices.Clone(chain), key))
+	// A transport-signal lookup's address lookups are part of it: they must
+	// not wait for signal lookups either (awaitTransportSignalsUntil).
+	if inTransportSignalLookup(ctx) {
+		lctx = withTransportSignalLookup(lctx)
+	}
 	go func(ctx context.Context, cancel context.CancelFunc) {
 		defer close(lookup.done)
 		defer cancel()
