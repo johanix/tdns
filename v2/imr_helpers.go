@@ -214,17 +214,22 @@ func inTransportSignalLookup(ctx context.Context) bool {
 }
 
 // applyCachedTransportSignal applies the transport signal the cache holds at
-// owner to the servers named by it, and reports what the cache holds there:
-// the signal, or a denial that there is one.
+// owner, and reports what the cache holds there: the signal, or a denial that
+// there is one. With transport signals turned off it applies nothing and
+// reports nothing.
 //
 // A signal reaches a server through the zone server maps it is listed in
 // (applyTransportRRsetFromAnswer). A server that was in none when the answer
 // came in, because the zone was met afterwards or its address lookup had not
-// ended, missed it, and gets it here.
-func (imr *Imr) applyCachedTransportSignal(owner string) (signal, denied bool) {
+// ended, missed it. It is applied to those servers, and to servers, the ones
+// a caller holds, whether or not they are in a zone map yet.
+func (imr *Imr) applyCachedTransportSignal(owner string, servers ...*cache.AuthServer) (signal, denied bool) {
+	if imr.Options[ImrOptUseTransportSignals] == "false" {
+		return false, false
+	}
 	cached, denied := imr.cachedTransportSignal(owner)
 	if cached != nil {
-		imr.applyTransportRRsetFromAnswer(owner, cached.RRset, cached.State)
+		imr.applyTransportRRsetFromAnswer(owner, cached.RRset, cached.State, servers...)
 		return true, false
 	}
 	return false, denied
@@ -284,7 +289,7 @@ func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[st
 		}
 		// A signal already in the cache that never reached this server, or
 		// a cached denial: the server signals nothing, until it expires.
-		if signal, denied := imr.applyCachedTransportSignal(owner); signal || denied {
+		if signal, denied := imr.applyCachedTransportSignal(owner, server); signal || denied {
 			continue
 		}
 		imr.maybeQueryTransportSignal(ctx, owner, reason)
@@ -322,7 +327,7 @@ func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[st
 			// The lookup applied its signal to the servers in the zone
 			// server maps; this one may have been in none.
 			if len(l.server.GetTransportWeights()) == 0 {
-				imr.applyCachedTransportSignal(l.owner)
+				imr.applyCachedTransportSignal(l.owner, l.server)
 			}
 		case <-timer.C:
 			return ready()

@@ -482,3 +482,79 @@ func TestGluelessNameserverSignalOffWhenSignalsAreOff(t *testing.T) {
 		t.Errorf("a signal lookup was started with transport signals off: %v", snap)
 	}
 }
+
+// A cached signal reaches the server the query holds even when that server
+// is in no zone's server map yet: a signal reaches the others through those
+// maps. Without it the wait was skipped for that server ("signal cached")
+// and the server went on without the transports the signal gives.
+func TestAwaitTransportSignalsAppliesACachedSignalToAServerInNoZoneMap(t *testing.T) {
+	imr, _, _ := newStrictTestImr(t, 5*time.Second)
+	const ns = "ns2.child.example."
+	server := imr.Cache.GetOrCreateAuthServer(ns)
+	server.AddAddr("192.0.2.54")
+	serverMap := map[string]*cache.AuthServer{cache.ServerKey(ns): server}
+	owner := transportOwnerForNS(ns)
+	rr, err := dns.NewRR(owner + ` 3600 IN SVCB 1 . oots="do53:100,dot:50"`)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	imr.Cache.Set(owner, dns.TypeSVCB, &cache.CachedRRset{
+		Name: owner, RRtype: dns.TypeSVCB, Context: cache.ContextAnswer,
+		State: cache.ValidationStateNone, Expiration: time.Now().Add(time.Hour),
+		RRset: &core.RRset{Name: owner, Class: dns.ClassINET, RRtype: dns.TypeSVCB, RRs: []dns.RR{rr}},
+	})
+
+	if !imr.awaitTransportSignals(context.Background(), "www."+strictChildZone, serverMap) {
+		t.Errorf("the cached dot:50 signal did not reach the server: weights %v", server.GetTransportWeights())
+	}
+}
+
+// The wait budget is the whole query's: a call that inherits a spent budget,
+// as a referral followed below does, waits no more.
+func TestColdQueryWaitsWithinTheBudgetItInherits(t *testing.T) {
+	imr, server, serverMap := newColdTestImr(t, 300*time.Millisecond)
+	startSignalLookup(t, imr, server)
+	ctx, budget := signalWaitBudgetFor(context.Background())
+	budget.spent = 300 * time.Millisecond
+
+	elapsed, err := coldQuery(ctx, imr, serverMap)
+	if elapsed > 150*time.Millisecond {
+		t.Errorf("waited %s although the query's budget was spent", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), coldNoTuples) {
+		t.Errorf("got %v, want no attempt", err)
+	}
+}
+
+// With transport signals turned off, a nameserver's address lookup does not
+// give the server a signal the cache holds either.
+func TestNsLookupAppliesNoCachedSignalWhenSignalsAreOff(t *testing.T) {
+	d := startSignalAuthDouble(t)
+	imr := newOOBTestImr(t, d)
+	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
+	imr.Options[ImrOptUseTransportSignals] = "false"
+	cacheDelegation(imr.Cache, oobZone)
+	owner := transportOwnerForNS(oobNSName)
+	rr, err := dns.NewRR(owner + ` 3600 IN SVCB 1 . oots="do53:100,dot:50"`)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	imr.Cache.Set(owner, dns.TypeSVCB, &cache.CachedRRset{
+		Name: owner, RRtype: dns.TypeSVCB, Context: cache.ContextAnswer,
+		State: cache.ValidationStateNone, Expiration: time.Now().Add(time.Hour),
+		RRset: &core.RRset{Name: owner, Class: dns.ClassINET, RRtype: dns.TypeSVCB, RRs: []dns.RR{rr}},
+	})
+
+	select {
+	case <-imr.nsLookup(context.Background(), oobNSName, oobZone):
+	case <-time.After(5 * time.Second):
+		t.Fatal("the address lookup did not end")
+	}
+	server := imr.Cache.GetOrCreateAuthServer(oobNSName)
+	if len(server.GetAddrs()) == 0 {
+		t.Fatal("setup: the address lookup found no address")
+	}
+	if w := server.GetTransportWeights(); len(w) != 0 {
+		t.Errorf("got weights %v, want none: transport signals are off", w)
+	}
+}

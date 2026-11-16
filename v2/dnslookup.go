@@ -986,15 +986,35 @@ type tupleSelection struct {
 // precheck, awaitUsableTuples, anotherPassAfter). Only the time spent
 // waiting counts. Without it a query whose servers' lookups never ended
 // waited strict-wait at the start of its pass and again after it.
+//
+// One query is the whole lookup, referrals and the lookups nested in it
+// included: the budget travels on the context (signalWaitBudgetFor).
+// Several of them may wait at once, hence the lock.
 type signalWaitBudget struct {
+	mu    sync.Mutex
 	spent time.Duration
+}
+
+// signalWaitBudgetKey carries a query's signalWaitBudget on its context.
+type signalWaitBudgetKey struct{}
+
+// signalWaitBudgetFor returns the budget ctx carries, or a new one and a
+// context carrying it.
+func signalWaitBudgetFor(ctx context.Context) (context.Context, *signalWaitBudget) {
+	if b, ok := ctx.Value(signalWaitBudgetKey{}).(*signalWaitBudget); ok && b != nil {
+		return ctx, b
+	}
+	b := &signalWaitBudget{}
+	return context.WithValue(ctx, signalWaitBudgetKey{}, b), b
 }
 
 // run calls wait with a context that ends when the budget is spent, or with
 // ctx, and counts the time it took against the budget. Once the budget is
 // spent, wait still runs, and starts its lookups, but does not wait.
 func (b *signalWaitBudget) run(ctx context.Context, total time.Duration, wait func(context.Context) bool) bool {
+	b.mu.Lock()
 	left := total - b.spent
+	b.mu.Unlock()
 	if left < 0 {
 		left = 0
 	}
@@ -1002,7 +1022,9 @@ func (b *signalWaitBudget) run(ctx context.Context, total time.Duration, wait fu
 	defer cancel()
 	start := time.Now()
 	ok := wait(wctx)
+	b.mu.Lock()
 	b.spent += time.Since(start)
+	b.mu.Unlock()
 	return ok
 }
 
@@ -1842,7 +1864,9 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// told us yet: the zone was met a moment ago, through the referral that
 	// brought us here. Its transports are learned before the query gives up on
 	// it, or the first strict query to every new zone failed (#776).
-	budget := &signalWaitBudget{}
+	// One signal-wait budget for the whole query: a referral followed below
+	// recurses with this context, and waits within the same budget.
+	ctx, budget := signalWaitBudgetFor(ctx)
 	if privacy == edns0.PrivacyStrict && !hasStrictCandidate(serverMap, qname) &&
 		!budget.run(ctx, imr.strictWait(), func(wctx context.Context) bool {
 			return imr.awaitTransportSignals(wctx, qname, serverMap)
@@ -3523,7 +3547,12 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 	imr.applySVCBSignalSet(ctx, server, set)
 }
 
-func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, vstate cache.ValidationState) {
+// applyTransportRRsetFromAnswer applies the transport signal rrset, an answer
+// for qname (_dns.<nameserver>), to that nameserver's servers in the cache's
+// zone server maps. also names servers to apply it to besides those: a
+// server a query holds that is in none of them yet
+// (applyCachedTransportSignal).
+func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, vstate cache.ValidationState, also ...*cache.AuthServer) {
 	if imr.Cache == nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
 	}
@@ -3552,10 +3581,20 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 	}
 	// The shared instance of a nameserver is listed under every zone it
 	// serves: it takes the signal once, and its ignored redirects count once.
-	done := map[*cache.AuthServer]bool{}
+	var servers []*cache.AuthServer
 	for _, sm := range imr.Cache.ServerMap.Items() {
-		server, ok := sm[cache.ServerKey(base)]
-		if !ok || done[server] {
+		if server, ok := sm[cache.ServerKey(base)]; ok {
+			servers = append(servers, server)
+		}
+	}
+	for _, server := range also {
+		if server != nil && cache.ServerKey(server.Name) == cache.ServerKey(base) {
+			servers = append(servers, server)
+		}
+	}
+	done := map[*cache.AuthServer]bool{}
+	for _, server := range servers {
+		if done[server] {
 			continue
 		}
 		done[server] = true

@@ -244,7 +244,7 @@ func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct
 			imr.storeZoneServers(z, map[string]*cache.AuthServer{key: srv})
 		}
 		if len(zones) > 0 && len(srv.GetTransportWeights()) == 0 {
-			imr.applyCachedTransportSignal(owner)
+			imr.applyCachedTransportSignal(owner, srv)
 		}
 	}(lctx, cancel)
 	return lookup.done
