@@ -1189,7 +1189,8 @@ them when `service.transport` changes and withdraw them once the name leaves
 records are provisioned: tdns-auth serves them as they are, synthesizes
 nothing there (rule 2), never rewrites them and never withdraws them. The
 release prints the state after it, and the comment line says "provisioned
-... as below".
+... as below". If the KeyDB cannot drop the record, the release fails and
+says so; run it again.
 
 Release only once the records are in the zone's source, its zone file. A
 signal tdns-auth no longer owns is not carried over a reload, so released

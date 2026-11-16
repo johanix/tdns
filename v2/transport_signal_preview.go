@@ -174,7 +174,9 @@ func transportSignalRelease(conf *Config, name string) ([]TransportSignalPreview
 // record of what it stored, so a pass in progress cannot record the owner
 // again after the release. It refuses an owner that holds nothing: a release
 // then would only let synthesis start over. released is false when the pass
-// had no record of the owner.
+// had no record of the owner. A failed KeyDB delete is an error: the record
+// would outlive a restart, and the pass would take the records for its own
+// again.
 func (zd *ZoneData) releaseSignal(owner string) (released bool, err error) {
 	owner = core.CanonicalizeName(owner)
 	zd.mu.Lock()
@@ -185,7 +187,9 @@ func (zd *ZoneData) releaseSignal(owner string) (released bool, err error) {
 	if !slices.Contains(zd.signalStoredOwners(), owner) {
 		return false, nil
 	}
-	zd.forgetSignalStored(owner)
+	if err := zd.forgetSignalStored(owner); err != nil {
+		return false, fmt.Errorf("%s: the stored-signal record could not be dropped, so the release did not take effect; run it again: %w", owner, err)
+	}
 	lgDns.Info("transport signal released: the RRset at the owner is the operator's from now on",
 		"zone", zd.ZoneName, "owner", owner)
 	return true, nil

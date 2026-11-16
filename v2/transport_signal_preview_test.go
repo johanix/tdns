@@ -345,3 +345,53 @@ _dns.ns2.`+z+`	300	IN	SVCB	1 . oots="dot:5"
 		t.Fatalf("type none: %v", err)
 	}
 }
+
+// A release whose KeyDB delete fails reports the failure (CodeRabbit on
+// #1060, 2026-11-15). The record then outlives a restart, and the next pass
+// would still take the records at the owner for its own, so a release that
+// said it took effect would be wrong. Run again once the KeyDB takes the
+// delete, it does take effect.
+func TestABridgeReleaseWhoseKeyDBDeleteFailsSaysSo(t *testing.T) {
+	const owner = "_dns.ns1.example."
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, `example.	3600	IN	SOA	ns1.example. hostmaster.example. 1 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+ns1.example.	3600	IN	A	127.0.0.1
+`)
+	zd.Options[OptAddTransportSignal] = true
+	prevSVCB := Globals.ServerSVCB
+	Globals.ServerSVCB = &dns.SVCB{Priority: 1, Target: "."}
+	t.Cleanup(func() { Globals.ServerSVCB = prevSVCB })
+	conf := &Config{}
+	conf.Service.Transport.Type = "svcb"
+	conf.Service.Transport.Signal = "dot:50"
+	conf.Service.Identities = []string{"ns1.example."}
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := kdb.GetTransportSignalStored(zd.ZoneName, owner); err != nil || !ok {
+		t.Fatalf("after the pass the KeyDB holds no stored-signal record: ok=%v err=%v", ok, err)
+	}
+
+	if _, err := kdb.DB.Exec(`CREATE TRIGGER refuse_delete BEFORE DELETE ON TransportSignalStored
+BEGIN SELECT RAISE(ABORT, 'delete refused by the test'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, msg, err := transportSignalRelease(conf, "ns1.example."); err == nil || !strings.Contains(err.Error(), "did not take effect") {
+		t.Fatalf("a release whose KeyDB delete failed: err=%v msg=%q, want an error saying it did not take effect", err, msg)
+	}
+	if _, ok, err := kdb.GetTransportSignalStored(zd.ZoneName, owner); err != nil || !ok {
+		t.Fatalf("the refused delete should leave the record in the KeyDB: ok=%v err=%v", ok, err)
+	}
+
+	if _, err := kdb.DB.Exec(`DROP TRIGGER refuse_delete`); err != nil {
+		t.Fatal(err)
+	}
+	_, msg, err := transportSignalRelease(conf, "ns1.example.")
+	if err != nil || !strings.Contains(msg, "released") || strings.Contains(msg, "nothing to release") {
+		t.Fatalf("the release run again: err=%v msg=%q, want it released", err, msg)
+	}
+	if _, ok, err := kdb.GetTransportSignalStored(zd.ZoneName, owner); err != nil || ok {
+		t.Fatalf("after the release run again the KeyDB still holds the record: ok=%v err=%v", ok, err)
+	}
+}
