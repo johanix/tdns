@@ -293,17 +293,28 @@ func tsyncHasAlias(rrset core.RRset) bool {
 // carrying the registered oots SvcParam (draft-johani-dnsop-svcb-oots / -03)
 // and, on the record of a transport the operator gave a port, the standard
 // SVCB port key. Address hints and the private tlsa SvcParam are not
-// included. transportSignalLayout decides the records. Publishing a port
-// does not open the listen socket.
+// included. transportSignalLayout decides the records (signalRRsetFor).
+// Publishing a port does not open the listen socket.
 func (zd *ZoneData) buildServerSVCB(conf *Config, nsName string, ipv4s, ipv6s []net.IP) (*core.RRset, error) {
 	_ = ipv4s
 	_ = ipv6s
 	if Globals.ServerSVCB == nil {
 		return nil, fmt.Errorf("buildServerSVCB: no server SVCB configured")
 	}
-	recs, err := transportSignalLayout(conf.Service.Transport)
+	rs, err := signalRRsetFor(conf.Service.Transport, nsName)
 	if err != nil {
 		return nil, fmt.Errorf("buildServerSVCB: %w", err)
+	}
+	return rs, nil
+}
+
+// signalRRsetFor is the SVCB RRset at _dns.<name> that service.transport
+// gives: what the start-up pass writes, and what tdns-cli's "config
+// transport-signal" prints for an operator to provision instead.
+func signalRRsetFor(t TransportConf, nsName string) (*core.RRset, error) {
+	recs, err := transportSignalLayout(t)
+	if err != nil {
+		return nil, err
 	}
 	owner := "_dns." + nsName
 	rrs := make([]dns.RR, 0, len(recs))
