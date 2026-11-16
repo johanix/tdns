@@ -143,8 +143,17 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 
 	switch conf.Service.Transport.Type {
 	case "none", "":
+		// Nothing is synthesized. What the pass stored under a type that
+		// did synthesize is withdrawn, as for a name no longer an identity:
+		// left in place, rule 1 would serve it as provisioned, and a refresh
+		// would carry it.
 		lgDns.Debug("CreateTransportSignalRRs: service.transport.type=none; skipping transport signal synthesis for zone",
 			"zone", zd.ZoneName)
+		if apex := zd.stagedOwner(zd.ZoneName); apex != nil && zd.signalMayWrite(apex, dak) {
+			if zd.withdrawStaleSignalsLocked(nil) > 0 {
+				zd.publishTransportSignalLocked(bare, nil)
+			}
+		}
 		return nil
 	case "svcb":
 		return zd.createTransportSignalSVCB(conf, dak, bare)
@@ -523,7 +532,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 	// someone does). An unsigned zone of this server's own counts. Anywhere
 	// else nothing is synthesized: a signal there is provisioned in the zone
 	// and served as it is (rule 1), or there is none.
-	mayWrite := zoneMayOriginateContent(zd) && (dak != nil || !apexIsSigned(apex))
+	mayWrite := zd.signalMayWrite(apex, dak)
 	if len(homeOf) > 0 && !mayWrite {
 		lgDns.Info("createTransportSignalSVCB: this zone is the home of identities, but this server is not its primary and signer; no signal is synthesized, and one provisioned in the zone is served as it is",
 			"zone", zd.ZoneName, "identities", homeOf)
@@ -547,7 +556,9 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 			lgDns.Info("createTransportSignalSVCB: leaving the operator's records at the signal owner alone; the transport configuration does not apply to this name",
 				"zone", zd.ZoneName, "owner", owner, "alias", svcbHasAlias(od.RRtypes.GetOnlyRRSet(dns.TypeSVCB)), "rrsets", ownerRRsetCount(od))
 			kept++
-			zd.forgetSignalStored(owner)
+			if err := zd.forgetSignalStored(owner); err != nil {
+				zd.warnSignalForgetFailed(owner, err)
+			}
 			continue
 		}
 		stored, err := zd.buildServerSVCB(conf, id, nil, nil)
@@ -574,44 +585,8 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		changed++
 	}
 
-	// What the pass stored at an owner that is no longer an identity at home
-	// here (one dropped from service.identities, say, across a restart) is
-	// withdrawn: left in place, rule 1 would serve it as if it were
-	// provisioned. Only the pass's own unchanged signal goes; an RRset the
-	// operator has since replaced is theirs, and only the record goes.
-	// A withdrawal writes the zone, so it too happens only where this server
-	// is primary and signer. A former primary that restarts as a secondary
-	// changes nothing and keeps its record: should the zone be its own
-	// again, the pass withdraws then.
-	//
-	// After a withdrawal, or with nothing at the owner, the record stays.
-	// The withdrawal reaches the zone file only when the zone is next
-	// written, and a restart before then loads the signal again; with the
-	// record kept, the pass knows it and withdraws it again. Only records
-	// that are not the pass's end the record.
-	var stale []string
 	if mayWrite {
-		stale = zd.signalStoredOwners()
-	}
-	for _, owner := range stale {
-		if want[owner] {
-			continue
-		}
-		od := zd.stagedOwner(owner)
-		if od == nil || ownerRRsetCount(od) == 0 {
-			continue
-		}
-		if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs) {
-			zd.stageDeleteLocked(owner, dns.TypeSVCB)
-			if o := zd.stagedOwner(owner); o != nil && o.RRtypes.Count() == 0 {
-				zd.stageOwnerDeleteLocked(owner)
-			}
-			lgDns.Info("createTransportSignalSVCB: withdrew the signal the pass had stored for a name that is no longer an identity at home in this zone",
-				"zone", zd.ZoneName, "owner", owner)
-			changed++
-			continue
-		}
-		zd.forgetSignalStored(owner)
+		changed += zd.withdrawStaleSignalsLocked(want)
 	}
 
 	if changed == 0 {
@@ -633,6 +608,68 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 	}
 	zd.publishTransportSignalLocked(bare, nil)
 	return nil
+}
+
+// signalMayWrite reports whether the signal pass may write this zone:
+// primary and signer. The zone's content originates here (not a secondary
+// that serves what it received, docs/2026-07-25-secondary-zones-immutable.md)
+// and no one else signs it (an unsigned owner under a signed apex is bogus to
+// a validator; dak == nil says only that THIS server does not sign, the apex
+// says whether someone does). An unsigned zone of this server's own counts.
+func (zd *ZoneData) signalMayWrite(apex *OwnerData, dak *DnssecKeys) bool {
+	return zoneMayOriginateContent(zd) && (dak != nil || !apexIsSigned(apex))
+}
+
+// withdrawStaleSignalsLocked withdraws what the pass stored at an owner that
+// is no longer an identity at home here (not in want): one dropped from
+// service.identities, say, across a restart, or every one once
+// service.transport.type is none. Left in place, rule 1 would serve it as if
+// it were provisioned. Only the pass's own unchanged signal goes; an RRset
+// the operator has since replaced is theirs, and only the record goes. A
+// withdrawal writes the zone, so the caller runs this only where this server
+// is primary and signer (signalMayWrite). A former primary that restarts as
+// a secondary changes nothing and keeps its record: should the zone be its
+// own again, the pass withdraws then.
+//
+// After a withdrawal, or with nothing at the owner, the record stays. The
+// withdrawal reaches the zone file only when the zone is next written, and a
+// restart before then loads the signal again; with the record kept, the pass
+// knows it and withdraws it again. Only records that are not the pass's end
+// the record. A revocation whose KeyDB delete failed earlier in this process
+// is tried again, whatever is at the owner now.
+//
+// It returns the number of owners changed. Caller holds zd.mu.
+func (zd *ZoneData) withdrawStaleSignalsLocked(want map[string]bool) int {
+	changed := 0
+	for _, owner := range zd.signalStoredOwners() {
+		if want[owner] {
+			continue
+		}
+		if zd.signalRevocationPending(owner) {
+			if err := zd.forgetSignalStored(owner); err != nil {
+				zd.warnSignalForgetFailed(owner, err)
+			}
+			continue
+		}
+		od := zd.stagedOwner(owner)
+		if od == nil || ownerRRsetCount(od) == 0 {
+			continue
+		}
+		if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs) {
+			zd.stageDeleteLocked(owner, dns.TypeSVCB)
+			if o := zd.stagedOwner(owner); o != nil && o.RRtypes.Count() == 0 {
+				zd.stageOwnerDeleteLocked(owner)
+			}
+			lgDns.Info("transport signal pass: withdrew the signal the pass had stored for a name that is no longer an identity at home in this zone",
+				"zone", zd.ZoneName, "owner", owner)
+			changed++
+			continue
+		}
+		if err := zd.forgetSignalStored(owner); err != nil {
+			zd.warnSignalForgetFailed(owner, err)
+		}
+	}
+	return changed
 }
 
 // stagedBelowCut reports whether name is at or below a zone cut in this

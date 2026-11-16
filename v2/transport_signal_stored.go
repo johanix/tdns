@@ -93,29 +93,58 @@ func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 	}
 }
 
-// forgetSignalStored drops the record for owner, every digest in it: the
-// RRset there is the operator's now. A failed KeyDB delete is logged and
-// returned: the record then outlives a restart.
+// forgetSignalStored ends the pass's claim on owner: the RRset there is the
+// operator's now. The in-memory record becomes an explicit revocation first,
+// an entry with no digest, so that nothing falls back to the KeyDB's record
+// while it is being dropped. The entry goes once the KeyDB has dropped its
+// record. A failed KeyDB delete is returned and the revocation stays: in
+// this process the owner is not the pass's, signalStoredOwners still lists
+// it, and the next forget tries the delete again. After a restart the
+// KeyDB's record would count again, which is why the callers warn.
 func (zd *ZoneData) forgetSignalStored(owner string) error {
 	owner = core.CanonicalizeName(owner)
 	zd.signalStoredMu.Lock()
-	delete(zd.signalStored, owner)
+	if zd.signalStored == nil {
+		zd.signalStored = map[string][]string{}
+	}
+	zd.signalStored[owner] = nil
 	zd.signalStoredMu.Unlock()
-	kdb := zd.signalRecordDB()
-	if kdb == nil {
-		return nil
+	if kdb := zd.signalRecordDB(); kdb != nil {
+		if err := kdb.DeleteTransportSignalStoredOwner(zd.ZoneName, owner); err != nil {
+			return fmt.Errorf("forgetSignalStored: zone %s owner %s: %w", zd.ZoneName, owner, err)
+		}
 	}
-	if err := kdb.DeleteTransportSignalStoredOwner(zd.ZoneName, owner); err != nil {
-		lgDns.Warn("forgetSignalStored: could not drop the stored-signal record",
-			"zone", zd.ZoneName, "owner", owner, "error", err)
-		return fmt.Errorf("forgetSignalStored: zone %s owner %s: %w", zd.ZoneName, owner, err)
+	zd.signalStoredMu.Lock()
+	if d, ok := zd.signalStored[owner]; ok && d == nil {
+		delete(zd.signalStored, owner)
 	}
+	zd.signalStoredMu.Unlock()
 	return nil
+}
+
+// signalRevocationPending reports whether forgetSignalStored revoked owner
+// in this process and the KeyDB has not yet dropped its record.
+func (zd *ZoneData) signalRevocationPending(owner string) bool {
+	zd.signalStoredMu.Lock()
+	defer zd.signalStoredMu.Unlock()
+	d, ok := zd.signalStored[core.CanonicalizeName(owner)]
+	return ok && d == nil
+}
+
+// warnSignalForgetFailed is how the pass handles a failed forget: the
+// revocation holds in this process, and the pass tries the delete again on
+// its next run, but a restart before the KeyDB drops the record would make
+// the pass take the records at the owner for its own again.
+func (zd *ZoneData) warnSignalForgetFailed(owner string, err error) {
+	lgDns.Warn("the KeyDB could not drop the stored-signal record: the records at the owner are not the pass's in this process and the pass tries again on its next run, but after a restart the KeyDB's record would count again",
+		"zone", zd.ZoneName, "owner", owner, "error", err)
 }
 
 // signalStoredDigests returns the digests the pass recorded for owner, the
 // last first: the in-memory record, or else the KeyDB's, which holds what
-// an earlier process stored. nil when there is none or it cannot be read.
+// an earlier process stored. nil when there is none or it cannot be read,
+// and nil for an owner revoked in this process (forgetSignalStored), whose
+// KeyDB record is then not consulted.
 func (zd *ZoneData) signalStoredDigests(owner string) []string {
 	zd.signalStoredMu.Lock()
 	digests, ok := zd.signalStored[owner]
@@ -146,7 +175,8 @@ func (zd *ZoneData) signalStoredByPass(owner string, rrs []dns.RR) bool {
 
 // signalStoredOwners lists the owners the pass has a record of storing a
 // signal at in this zone: in this process, and in the KeyDB from an earlier
-// one.
+// one. An owner whose revocation is pending is listed too, so that the pass
+// tries the KeyDB delete again.
 func (zd *ZoneData) signalStoredOwners() []string {
 	seen := map[string]bool{}
 	var out []string
