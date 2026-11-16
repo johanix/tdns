@@ -181,6 +181,43 @@ func TestNotifyOverTCPBindsTransferSrc(t *testing.T) {
 	})
 }
 
+// A config-update refresh replaces zd.TransferSrc under zd.mu while NOTIFYs go
+// out on the Notifier's goroutines. Run with -race: without the lock in
+// bindNotifySrc, the detector flags the read.
+func TestNotifyReadsTransferSrcUnderZoneLock(t *testing.T) {
+	addr, _ := startNotifySrcSink(t, "udp", "127.0.0.1")
+	prev := notifyTimeout
+	notifyTimeout = 2 * time.Second
+	t.Cleanup(func() { notifyTimeout = prev })
+
+	zd := notifySrcZone([]string{"127.0.0.1"}, nil)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		// Both lists bind 127.0.0.1 for a v4 target, so every send succeeds.
+		lists := [][]string{{"127.0.0.1"}, {"2001:db8::1", "127.0.0.1"}}
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			zd.mu.Lock()
+			zd.TransferSrc = lists[i%2]
+			zd.mu.Unlock()
+		}
+	}()
+	for i := 0; i < 20; i++ {
+		if a := zd.notifyOne(context.Background(), &Config{}, dns.TypeSOA, addr); a.err != nil || a.setupErr != nil {
+			close(stop)
+			<-done
+			t.Fatalf("NOTIFY %d failed: err=%v setupErr=%v", i, a.err, a.setupErr)
+		}
+	}
+	close(stop)
+	<-done
+}
+
 // A NOTIFY refused over UDP and retried over TCP keeps its source: the bound
 // UDP attempt still sees the ICMP port unreachable, and the TCP retry binds.
 func TestNotifyTCPFallbackKeepsTransferSrc(t *testing.T) {

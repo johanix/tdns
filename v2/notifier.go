@@ -491,7 +491,13 @@ func (zd *ZoneData) notifyOneOver(ctx context.Context, conf *Config, ntype uint1
 // or TCP as c.Net already says, and a family with no configured source leaves
 // c unbound. No transfer-src at all leaves c as it was.
 func (zd *ZoneData) bindNotifySrc(ctx context.Context, c *dns.Client, dst string) {
+	// A config-update refresh replaces zd.TransferSrc under zd.mu, and NOTIFY
+	// runs on the Notifier's worker goroutines, so copy the list under the lock.
+	// The lookup below runs outside it. No NOTIFY caller holds zd.mu.
+	zd.mu.Lock()
 	srcs, tier := zd.EffectiveTransferSrcWithSource()
+	srcs = append([]string(nil), srcs...)
+	zd.mu.Unlock()
 	if len(srcs) == 0 {
 		return
 	}
