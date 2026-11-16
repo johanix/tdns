@@ -926,7 +926,8 @@ func validateTransportSignal(t TransportConf, listen ListenerPortsConf, addresse
 		}
 		return signalStandardPorts[tr]
 	}
-	// host is the endpoint's host: "" for the nameserver itself.
+	// host is the endpoint's host: "" for the nameserver itself. Hosts are
+	// compared without case, as DNS names are.
 	host := func(tr string) string { return publishedSignalTarget(t.Targets, tr) }
 	at := func(tr string) string {
 		if h := host(tr); h != "" {
@@ -938,7 +939,7 @@ func validateTransportSignal(t TransportConf, listen ListenerPortsConf, addresse
 	clash := func(users []string, sharing func(a, b string) bool, what string) error {
 		for i, a := range users {
 			for _, b := range users[i+1:] {
-				if inUse(a) && inUse(b) && host(a) == host(b) && port(a) == port(b) && !sharing(a, b) {
+				if inUse(a) && inUse(b) && strings.EqualFold(host(a), host(b)) && port(a) == port(b) && !sharing(a, b) {
 					return fmt.Errorf("service.transport.ports: %s and %s both on port %d%s; %s, so they cannot share it", a, b, port(a), at(a), what)
 				}
 			}
