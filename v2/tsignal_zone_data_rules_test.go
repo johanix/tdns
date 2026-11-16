@@ -7,6 +7,7 @@ package tdns
 import (
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -289,6 +290,77 @@ ns3.` + z + `	3600	IN	A	192.0.2.3
 	}
 	if getOwnerFrom(zd3.publishedSnapshot(), "_dns.ns2."+z) != nil {
 		t.Fatal("a withdrawn signal loaded again from an unwritten zone file was not withdrawn again")
+	}
+}
+
+// A withdrawal whose publish was refused is published by a later run
+// (CodeRabbit on #1051, 2026-11-16). A refused publish (signing or the NSEC
+// repair failed) keeps the working set, with the withdrawal staged in it,
+// serves the old snapshot and drops the queue flag. The next run finds the
+// owner already gone from the working set; counting only owners it withdrew
+// itself, it published nothing, and the old signal stayed served. A zone
+// with an identity left publishes anyway, as the pass stores that signal
+// again; the cases here have none: the last identity dropped, and
+// service.transport.type none.
+func TestARefusedWithdrawalIsPublishedByALaterRun(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		after func(*Config)
+	}{
+		{"identity dropped", func(c *Config) { c.Service.Identities = nil }},
+		{"type none", func(c *Config) { c.Service.Transport.Type = "none" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const z = "unpublished.sig.example."
+			const owner = "_dns.ns1." + z
+			kdb := newTestKeyDB(t)
+			zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+ns1.`+z+`	3600	IN	A	192.0.2.1
+`, "127.0.0.1:53")
+			zd.KeyDB = kdb
+			conf.Service.Identities = []string{"ns1." + z}
+			conf.Service.Transport.Signal = "dot:50"
+			if err := zd.CreateTransportSignalRRs(conf); err != nil {
+				t.Fatal(err)
+			}
+			if getOwnerFrom(zd.publishedSnapshot(), owner) == nil {
+				t.Fatal("the pass stored no signal")
+			}
+
+			// The run that withdraws the signal has its publish refused:
+			// what that leaves is the withdrawal staged in the working
+			// set, the old snapshot served and nothing queued.
+			tc.after(conf)
+			zd.mu.Lock()
+			zd.ensureWorkingSet()
+			zd.stageDeleteLocked(owner, dns.TypeSVCB)
+			zd.stageOwnerDeleteLocked(owner)
+			zd.refuseUnsignableWorkingSetLocked(zd.CurrentSerial, errTestSigning)
+			queued := zd.publishQueued
+			zd.mu.Unlock()
+			if queued {
+				t.Fatal("fixture: the refused publish is still queued")
+			}
+			if getOwnerFrom(zd.publishedSnapshot(), owner) == nil {
+				t.Fatal("fixture: the refused publish changed what is served")
+			}
+
+			// Signing works again, and a later run comes, past the publish
+			// cadence.
+			zd.mu.Lock()
+			zd.lastPublish = time.Now().Add(-time.Hour)
+			zd.mu.Unlock()
+			logs := captureSignalLog(t)
+			if err := zd.CreateTransportSignalRRs(conf); err != nil {
+				t.Fatal(err)
+			}
+			if getOwnerFrom(zd.publishedSnapshot(), owner) != nil {
+				t.Fatalf("the refused withdrawal is still unpublished after a later run: %v", svcbRecords(zd, owner))
+			}
+			if !strings.Contains(logs.String(), "not published yet") {
+				t.Fatalf("no info line for the withdrawal published again:\n%s", logs.String())
+			}
+		})
 	}
 }
 
