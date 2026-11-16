@@ -329,6 +329,10 @@ func TestEncryptedEnginesFailWhenNoListenerBinds(t *testing.T) {
 	if err := DnsDoHEngine(ctx, conf, addrs, []string{occupiedPort(t)}, "", certFile, keyFile, handler); err == nil {
 		t.Error("DoH: no error, but its only port was taken")
 	}
+	// A certificate that does not load fails the engine, before it returns.
+	if err := DnsDoHEngine(ctx, conf, addrs, []string{"0"}, "", certFile+".missing", keyFile, handler); err == nil {
+		t.Error("DoH: no error, but its certificate does not load")
+	}
 	if err := DnsDoTEngine(ctx, conf, addrs, []string{"0"}, &cert, handler, false); err != nil {
 		t.Errorf("DoT on a free port: %v", err)
 	}

@@ -81,6 +81,14 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, p
 	if path == "" {
 		path = DefaultDoHPath
 	}
+	// The certificate is loaded here, once, and the listeners serve with it.
+	// Left to ServeTLS, it was loaded in each listener's goroutine after the
+	// engine had returned, and a certificate that failed to load there left
+	// DoH reported as started (debug-do53-queries-refused counts on it).
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return fmt.Errorf("DnsDoHEngine: loading certfile/keyfile: %w", err)
+	}
 	lgDns.Info("DnsEngine: DoH addresses", "addrs", dohaddrs, "path", path)
 	// The closure captures ourDNSHandler (a function parameter) and conf (a pointer).
 	// Both are set once at startup before any HTTP requests are served, so there is
@@ -186,7 +194,8 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, p
 				Addr:    hostport,
 				Handler: handler,
 				TLSConfig: &tls.Config{
-					MinVersion: tls.VersionTLS13,
+					MinVersion:   tls.VersionTLS13,
+					Certificates: []tls.Certificate{cert},
 				},
 				// DoH clients speak HTTP/2 or HTTP/1.1 keep-alive and hold
 				// their TCP connections open as long as we let them; every
@@ -208,7 +217,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, p
 			servers = append(servers, srv)
 			go func(s *http.Server, ln net.Listener, hp string) {
 				lgDns.Info("DnsEngine: serving on DoH", "hostport", hp, "path", path)
-				if err := s.ServeTLS(ln, certFile, keyFile); err != http.ErrServerClosed {
+				if err := s.ServeTLS(ln, "", ""); err != http.ErrServerClosed {
 					lgDns.Error("failed to setup DoH server", "hostport", hp, "err", err)
 					if ctx.Err() == nil {
 						conf.Internal.ServerErrors.SetTransportPortError("doh "+hp, err)
