@@ -971,6 +971,36 @@ func (imr *Imr) awaitUsableTuples(ctx context.Context, qname string, qtype uint1
 	return imr.prioritizeServersFor(ctx, qname, qtype, serverMap, privacy)
 }
 
+// awaitSignalsAfterPass is for a pass of the query loop that ran out of
+// tuples without an answer. If none is left now, every one it tried went into
+// backoff, and a server without a transport signal may have nothing else yet.
+// It then waits, as awaitUsableTuples does, for the signals of the servers
+// that have an address and no signal, and reports whether one came in. With
+// tuples left, the attempts failed without a backoff, and another pass would
+// only repeat them.
+func (imr *Imr) awaitSignalsAfterPass(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) bool {
+	if _, _, tuples := imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false); len(tuples) > 0 {
+		return false
+	}
+	unsignalled := map[string]*cache.AuthServer{}
+	for key, server := range serverMap {
+		if server != nil && len(server.GetAddrs()) > 0 && len(server.GetTransportWeights()) == 0 {
+			unsignalled[key] = server
+		}
+	}
+	if len(unsignalled) == 0 {
+		return false
+	}
+	return imr.awaitTransportSignalsUntil(ctx, unsignalled, transportQueryReasonNoUsableTransport, func() bool {
+		for _, server := range unsignalled {
+			if len(server.GetTransportWeights()) > 0 {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 // unprobedRTTSentinel is the RTT used for sort when no usable sample exists
 // for a tuple. A midpoint value keeps unprobed tuples between known-fast and
 // known-slow ones, so they get tried at a reasonable priority and acquire a
@@ -1786,7 +1816,11 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			addresslessAtStart[key] = true
 		}
 	}
-	for attempt := 0; attempt < 2; attempt++ {
+	// Two passes, and one more when a transport signal arrives after a pass
+	// has run out (awaitSignalsAfterPass).
+	maxPasses := 2
+	signalPassAdded := false
+	for attempt := 0; attempt < maxPasses; attempt++ {
 		zoneName, zone, prioritized = imr.awaitUsableTuples(ctx, qname, qtype, serverMap, privacy)
 		if Globals.Debug {
 			lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers) attempt=%d", len(prioritized), len(serverMap), attempt+1)
@@ -2017,6 +2051,19 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				}
 				continue
 			}
+		}
+		// The pass's own attempts may have put the servers' one transport
+		// so far in backoff: Do53 to a server that refuses it, or has
+		// nothing on port 53, before its signal is in (#1065). A server
+		// whose signal comes in has transports this pass did not: wait for
+		// it, once per query, and go again.
+		if !signalPassAdded && imr.awaitSignalsAfterPass(ctx, qname, qtype, serverMap, privacy) {
+			signalPassAdded = true
+			maxPasses++
+			if Globals.Debug {
+				lg.Printf("IterativeDNSQuery: a transport signal arrived after the pass ran out of tuples; retrying qname=%s", qname)
+			}
+			continue
 		}
 		break
 	}

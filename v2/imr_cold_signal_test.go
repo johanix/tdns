@@ -233,6 +233,73 @@ func TestColdQueryTakesTheFirstSignal(t *testing.T) {
 	}
 }
 
+// startRefusingDouble is a loopback Do53 server that refuses every query
+// with EDE 18, as tdns-auth does with debug-do53-queries-refused (#1066).
+func startRefusingDouble(t *testing.T) (host, port string) {
+	t.Helper()
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	host, port, _ = net.SplitHostPort(pc.LocalAddr().String())
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeRefused)
+		if opt := r.IsEdns0(); opt != nil {
+			m.SetEdns0(1232, opt.Do())
+			m.IsEdns0().Option = append(m.IsEdns0().Option, &dns.EDNS0_EDE{
+				InfoCode: dns.ExtendedErrorCodeProhibited, ExtraText: "use an encrypted transport"})
+		}
+		_ = w.WriteMsg(m)
+	})
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, Handler: handler, NotifyStartedFunc: func() { close(started) }}
+	go func() { _ = srv.ActivateAndServe() }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refusing double did not start")
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	})
+	return host, port
+}
+
+// The query's own Do53 attempt is refused, before the server's signal is
+// in: the pass runs out of tuples, but the signal lookup is still running.
+// The query waits for it and goes again over DoT. It used to give up after
+// the refusal (the rig's encns suite against a server that refuses queries
+// over Do53).
+func TestColdQueryWaitsAfterItsOwnDo53IsRefused(t *testing.T) {
+	host, port := startRefusingDouble(t)
+	imr := newTestImr(t)
+	imr.Cache.DNSClient = map[core.Transport]core.DNSClienter{
+		core.TransportDo53: core.NewDNSClient(core.TransportDo53, port, nil),
+	}
+	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
+	imr.Tuning.Discovery.StrictWait = 5 * time.Second
+	server := imr.Cache.GetOrCreateAuthServer(strictChildNS)
+	server.AddAddr(host)
+	serverMap := map[string]*cache.AuthServer{cache.ServerKey(strictChildNS): server}
+	if err := imr.Cache.AddServers(strictChildZone, serverMap); err != nil {
+		t.Fatalf("setup: AddServers: %v", err)
+	}
+	end := startSignalLookup(t, imr, server)
+	end(300*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed >= 5*time.Second {
+		t.Errorf("waited %s, the whole bound", elapsed)
+	}
+	// Do53, refused; then DoT, which fails only for want of a client.
+	if err == nil || !strings.Contains(err.Error(), "attempts=2") || !strings.Contains(err.Error(), "/dot") {
+		t.Errorf("got %v, want a refused Do53 attempt and then one over DoT", err)
+	}
+}
+
 // startSignalAuthDouble is a loopback server for oobNSZone that gives
 // oobNSName an address (its own) and a transport signal offering DoT.
 func startSignalAuthDouble(t *testing.T) *oobAuthDouble {

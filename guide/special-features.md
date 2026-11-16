@@ -997,7 +997,11 @@ in yet. The query starts the signal lookups of the servers
 it knows nothing about, or joins those already running, and
 waits up to `tuning.discovery.strict-wait` before it gives
 up. It does not wait on a cached denial of the signal, nor
-on a lookup that failed and is cooling down.
+on a lookup that failed and is cooling down. The same holds
+when the query's own attempts used up its servers' only
+transport, such as a Do53 query refused by a server that
+answers only over encrypted transports: it waits once for
+the signal, then tries again.
 
 Additional options:
 
