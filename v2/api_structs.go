@@ -378,6 +378,10 @@ type ZoneResponse struct {
 	Msg      string
 	Error    bool
 	ErrorMsg string
+	// Warnings are what the operator must not overlook about an accepted
+	// "add" or "modify", such as a DANE primary while DNSSEC validation is
+	// not enforced (zoneDaneWarnings).
+	Warnings []string `json:"warnings,omitempty"`
 	// Journal carries the delta-journal report for "zone journal status|list".
 	Journal *ZoneJournalInfo `json:"journal,omitempty"`
 	// Instructions carries an ADD/DEL list back to the client: the flattened

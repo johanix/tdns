@@ -334,6 +334,10 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			skippedCount++
 			continue
 		}
+		// As for static zones (ParseZones): DANE while DNSSEC validation is
+		// not enforced is accepted, but logged loudly at every load.
+		conf.danePrimaryWarnings(lg, zoneName, zconf.Primaries)
+		conf.daneDownstreamWarnings(lg, zoneName, zconf.DownstreamAuth, zconf.Downstreams)
 
 		dpol, derr := bindDelegationPolicy(&zconf)
 		if derr != nil {

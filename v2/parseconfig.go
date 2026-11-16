@@ -1128,6 +1128,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 		crossCheckDownstreamAuth(zname, zconf.DownstreamAuth, zconf.Downstreams, conf.Internal.ImrEngine != nil)
+		conf.daneDownstreamWarnings(lgConfig, zname, zconf.DownstreamAuth, zconf.Downstreams)
 
 		zonestore := parseZoneStore(zconf.Store)
 
@@ -1192,6 +1193,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				broken_zones = append(broken_zones, zname)
 				continue
 			}
+			// DANE while DNSSEC validation is not enforced: accepted, but
+			// logged loudly, once per primary, at every load.
+			conf.danePrimaryWarnings(lgConfig, zname, zconf.Primaries)
 
 			// Resolve the as-written primaries to addr:port tuples (hostnames
 			// -> addresses via the IMR), re-resolved on every parse/reload.
