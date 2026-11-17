@@ -14,6 +14,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -155,6 +157,92 @@ func TestDaneWarningsAtConfigLoad(t *testing.T) {
 	}
 
 	if out := parse(t, true); strings.Contains(out, "DANE without DNSSEC validation") {
+		t.Errorf("validation enforced, yet warned\n--- log ---\n%s", out)
+	}
+}
+
+// TestDaneWarningsAtDynamicZoneLoad: LoadDynamicZoneFiles logs the warning at
+// boot for persisted zones on both of its paths: a template-based primary with
+// a tls-dane downstream (re-expanded from the template), and a plain secondary
+// with a dane primary. Quiet when validation is enforced.
+func TestDaneWarningsAtDynamicZoneLoad(t *testing.T) {
+	load := func(t *testing.T, enforced bool) string {
+		t.Helper()
+		resetZonesForTest()
+		t.Cleanup(resetZonesForTest)
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		conf, _ := newTestConfigForCores(t)
+		conf.Imr.RequireDnssecValidation = &enforced
+		dir := t.TempDir()
+		tmpl := dynPrimaryTestTemplate(dir)
+		tmpl.DownstreamAuth = []string{MechTLSDane}
+		tmpl.Downstreams = []AclEntry{{Prefix: "127.0.0.1/32", Key: NOKEY, PeerName: "sec1",
+			TLSIdentity: &TLSIdentity{Name: "sec1.example.", Dane: true}}}
+		withTestTemplates(t, map[string]ZoneConf{"dyn-test": tmpl})
+
+		zonefile := filepath.Join(dir, "boot.example.zone")
+		if err := os.WriteFile(zonefile, []byte("boot.example.\t3600\tIN\tSOA\tns.boot.example. h.boot.example. 1 3600 600 604800 300\nboot.example.\t3600\tIN\tNS\tns.boot.example.\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		dynCfg := filepath.Join(dir, "dynamic-zones.yaml")
+		cfgYaml := `zones:
+  - name: boot.example.
+    type: primary
+    store: map
+    template: dyn-test
+    zonefile: ` + zonefile + `
+    apimanaged: true
+  - name: sec.example.
+    type: secondary
+    store: map
+    apimanaged: true
+    primaries:
+      - addr: 192.0.2.1:853
+        key: NOKEY
+        transport: dot
+        tls-auth: dane
+        tls-name: ns1.example.
+`
+		if err := os.WriteFile(dynCfg, []byte(cfgYaml), 0644); err != nil {
+			t.Fatal(err)
+		}
+		conf.DynamicZones.ConfigFile = dynCfg
+		conf.DynamicZones.ZoneDirectory = dir
+
+		if err := conf.LoadDynamicZoneFiles(context.Background()); err != nil {
+			t.Fatalf("LoadDynamicZoneFiles: %v", err)
+		}
+		return buf.String()
+	}
+
+	out := load(t, false)
+	var templateLine, secondaryLine bool
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, "DANE without DNSSEC validation") {
+			continue
+		}
+		if !strings.Contains(line, "level=WARN") {
+			t.Errorf("not logged at WARN: %s", line)
+		}
+		if strings.Contains(line, "zone=boot.example.") && strings.Contains(line, "sec1.example.") {
+			templateLine = true
+		}
+		if strings.Contains(line, "zone=sec.example.") && strings.Contains(line, "primary=192.0.2.1:853") {
+			secondaryLine = true
+		}
+	}
+	if !templateLine {
+		t.Errorf("no warning for the template primary's tls-dane downstream\n--- log ---\n%s", out)
+	}
+	if !secondaryLine {
+		t.Errorf("no warning for the persisted secondary's dane primary\n--- log ---\n%s", out)
+	}
+
+	if out := load(t, true); strings.Contains(out, "DANE without DNSSEC validation") {
 		t.Errorf("validation enforced, yet warned\n--- log ---\n%s", out)
 	}
 }
