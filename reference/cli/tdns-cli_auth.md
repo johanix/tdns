@@ -16,12 +16,13 @@ Interact with tdns-auth (authoritative) via API
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
 ### SEE ALSO
 
-* [tdns-cli](tdns-cli.md)	 - tdns-cli is a tool used to interact with the tdnsd nameserver via API
+* [tdns-cli](tdns-cli.md)	 - tdns-cli is a tool used to interact with the TDNS applications via a mgmt API
 * [tdns-cli auth catalog](tdns-cli_auth_catalog.md)	 - Manage catalog zones (RFC 9432)
 * [tdns-cli auth config](tdns-cli_auth_config.md)	 - Commands to reload config, reload zones, etc
 * [tdns-cli auth daemon](tdns-cli_auth_daemon.md)	 - Only useful via sub-commands
@@ -29,11 +30,14 @@ Interact with tdns-auth (authoritative) via API
 * [tdns-cli auth ddns](tdns-cli_auth_ddns.md)	 - Send a DDNS update. Only usable via sub-commands.
 * [tdns-cli auth debug](tdns-cli_auth_debug.md)	 - Debug commands against the configured daemon
 * [tdns-cli auth del](tdns-cli_auth_del.md)	 - Delegation prefix command. Only usable via sub-commands.
+* [tdns-cli auth dsync-api](tdns-cli_auth_dsync-api.md)	 - Manage the DSYNC API scheme
 * [tdns-cli auth imr](tdns-cli_auth_imr.md)	 - IMR (Internal Recursive Resolver) cache commands
 * [tdns-cli auth keystore](tdns-cli_auth_keystore.md)	 - Prefix command to access different features of the keystore
 * [tdns-cli auth notify](tdns-cli_auth_notify.md)	 - The 'notify' command is only usable via defined sub-commands
 * [tdns-cli auth ping](tdns-cli_auth_ping.md)	 - Send an API ping request and present the response
 * [tdns-cli auth report](tdns-cli_auth_report.md)	 - Send a report and (optionally) discover DSYNC via the internal resolver (imr)
+* [tdns-cli auth scanner](tdns-cli_auth_scanner.md)	 - Control tdns-auth's built-in CDS/CSYNC scanner
+* [tdns-cli auth show-cmds](tdns-cli_auth_show-cmds.md)	 - List the whole command tree below this command, one line per command
 * [tdns-cli auth stop](tdns-cli_auth_stop.md)	 - Send stop command to the daemon
 * [tdns-cli auth truststore](tdns-cli_auth_truststore.md)	 - Prefix command to access different features of the truststore
 * [tdns-cli auth zone](tdns-cli_auth_zone.md)	 - Prefix command, not usable by itself

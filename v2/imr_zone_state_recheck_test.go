@@ -33,7 +33,7 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 		State: cache.ValidationStateSecure, TrustAnchor: true, Expiration: time.Now().Add(time.Hour)})
 	pk := &dns.DNSKEY{Hdr: dns.RR_Header{Name: parent, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 256, Protocol: 3, Algorithm: dns.ED25519}
-	ppriv, err := pk.Generate(256)
+	ppriv, err := generateSigningKey(pk, 256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 	// The child's DS, as the parent signs it.
 	ck := &dns.DNSKEY{Hdr: dns.RR_Header{Name: child, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 257, Protocol: 3, Algorithm: dns.ED25519}
-	if _, err := ck.Generate(256); err != nil {
+	if _, err := generateSigningKey(ck, 256); err != nil {
 		t.Fatal(err)
 	}
 	ds := ck.ToDS(dns.SHA256)

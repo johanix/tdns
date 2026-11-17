@@ -129,6 +129,12 @@ func getQueryHandlers(conf *Config, qtype uint16) []QueryHandlerFunc {
 // Returns ErrNotHandled if the handler doesn't handle this NOTIFY (allows fallthrough).
 // Returns nil if the handler successfully handled the NOTIFY.
 // Returns other error if handler attempted to handle but encountered an error.
+// What happens next depends on whether the handler had written to
+// req.ResponseWriter by then, successfully or not. If it had, the NOTIFY is
+// answered and no further handler and not the default responder sees it (a
+// handler whose reply cannot be written, because the sender has gone, returns
+// that error and the message stays its own). If it had not, the sender has no
+// answer yet and TDNS tries the next handler, then the default responder.
 type NotifyHandlerFunc func(ctx context.Context, req *DnsNotifyRequest) error
 
 // RegisterNotifyHandler registers a handler for DNS NOTIFY messages.

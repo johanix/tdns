@@ -31,6 +31,7 @@ tdns-cli agent keystore tsig import [flags]
   -d, --debug           debug output
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 

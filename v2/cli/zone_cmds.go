@@ -1077,6 +1077,47 @@ func DescribeZone(zconf tdns.ZoneConf) string {
 		}
 	}
 
+	// Section 4: per-target NOTIFY delivery (#528). The state the log used to
+	// carry as one line per failed attempt, kept here instead: one line per
+	// target, saying whether it answers, and what happened last.
+	if len(zconf.DownstreamNotifies) > 0 {
+		b.WriteString("\tDownstream notifies:\n")
+		for _, dn := range zconf.DownstreamNotifies {
+			b.WriteString(describeNotifyTarget(dn, time.Now()))
+		}
+	}
+
+	return b.String()
+}
+
+// describeNotifyTarget renders one target's NOTIFY state for `zone desc`.
+func describeNotifyTarget(dn tdns.NotifyTargetStatus, now time.Time) string {
+	label := dn.Target
+	if dn.RRtype != "" && dn.RRtype != "SOA" {
+		label = fmt.Sprintf("NOTIFY(%s) %s", dn.RRtype, dn.Target)
+	}
+	ago := func(t time.Time) string {
+		if t.IsZero() {
+			return "never"
+		}
+		return now.Sub(t).Round(time.Second).String() + " ago"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "\t\t%s: %s", label, dn.State)
+	switch dn.State {
+	case "retrying":
+		fmt.Fprintf(&b, " (attempt %d, next in %s)", dn.Attempts, dn.NextAttempt.Sub(now).Round(time.Second))
+	case "given up":
+		fmt.Fprintf(&b, " after %d attempts", dn.Attempts)
+	}
+	fmt.Fprintf(&b, "; last answer %s", ago(dn.LastSuccess))
+	if dn.Failures > 0 {
+		fmt.Fprintf(&b, "; %d unanswered in a row", dn.Failures)
+	}
+	if dn.LastError != "" {
+		fmt.Fprintf(&b, "; last error: %s", dn.LastError)
+	}
+	b.WriteString("\n")
 	return b.String()
 }
 

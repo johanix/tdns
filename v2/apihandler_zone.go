@@ -584,6 +584,11 @@ func populateZoneDescDetail(ctx context.Context, zconf *ZoneConf, zd *ZoneData, 
 	if len(zd.Upstreams) > 0 {
 		zconf.UpstreamSerials = zd.ProbeUpstreamSerials(ctx, &Conf)
 	}
+	// Per-target NOTIFY delivery (#528): a read of the Notifier's state, no
+	// network I/O.
+	if t := Conf.Internal.NotifyTracker; t != nil {
+		zconf.DownstreamNotifies = t.Status(zname)
+	}
 
 	name, source, appliedAt, ok, err := GetZoneAppliedPolicyDetail(kdb, zname)
 	if err != nil {

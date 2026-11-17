@@ -342,6 +342,12 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 					"zone", tp.Keyname, "keyid", tp.Keyid, "src", tp.Src, "from", r.RemoteAddr)
 				tp.Trusted = false
 			}
+			// A tombstone is the child's own word, given in a trusted UPDATE
+			// (truststore_tombstone.go). An operator's delete through here
+			// leaves none, whatever Src the client sent.
+			if tp.SubCommand == "delete" {
+				tp.Src = ""
+			}
 			resp, err = kdb.Sig0TrustMgmt(tx, tp)
 			if err != nil {
 				lgApi.Error("Sig0TrustMgmt failed", "err", err)
@@ -733,6 +739,13 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "show-rrsetcache":
 			lgApi.Debug("debug show-rrsetcache")
+			// Nil until InitImrEngine has built the resolver: a priming that fails
+			// leaves it so while the engine retries.
+			if conf.Internal.RRsetCache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "the resolver is not running: it has no cache"
+				break
+			}
 			resp.Msg = fmt.Sprintf("RRsetCache: %v", conf.Internal.RRsetCache.RRsets.Keys())
 			rrsets := []cache.CachedRRset{}
 			for _, rrsetkey := range conf.Internal.RRsetCache.RRsets.Keys() {

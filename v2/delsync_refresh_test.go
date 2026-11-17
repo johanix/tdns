@@ -273,7 +273,7 @@ func TestRefreshSyncInSyncParentGetsNothingWhateverItsDS(t *testing.T) {
 // may hold glue the zone no longer has. The arm must not call that in sync:
 // nothing is sent, no success is recorded, and it retries. AnalyseZoneDelegation,
 // which the explicit sync, the status command and tdns-mp read, passes over the
-// failed query as it always did.
+// failed query as it always did, and names it in Unread.
 func TestRefreshSyncUnreadParentGlueIsAFailure(t *testing.T) {
 	withApp(t, AppTypeAuth)
 	zd := childZone(t, ddcngServedZone(), OptParentSync)
@@ -300,6 +300,140 @@ func TestRefreshSyncUnreadParentGlueIsAFailure(t *testing.T) {
 	}
 	if !resp.InSync {
 		t.Error("AnalyseZoneDelegation's verdict changed: the delegation is no longer in sync")
+	}
+	if !slices.Equal(resp.Unread, []string{"ns2.deleg.example. A"}) || resp.Complete() {
+		t.Errorf("Unread = %q (complete %v), want the unread glue named", resp.Unread, resp.Complete())
+	}
+}
+
+// A failed A glue query does not skip the AAAA one: each is compared, or named
+// in Unread, on its own.
+func TestDelegationAnalysisNamesEachUnreadGlueQuery(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	for _, tc := range []struct {
+		name       string
+		parent     []string
+		servfail   []string
+		wantUnread []string
+		wantInSync bool
+	}{
+		{"A unread, AAAA differs",
+			[]string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA2, ddcngNS2A},
+			[]string{"ns1.deleg.example./A"},
+			[]string{"ns1.deleg.example. A"}, false},
+		{"A and AAAA unread",
+			[]string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A},
+			[]string{"ns1.deleg.example./A", "ns1.deleg.example./AAAA"},
+			[]string{"ns1.deleg.example. A", "ns1.deleg.example. AAAA"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := childZone(t, ddcngServedZone(), OptParentSync)
+			fakeParent(t, zd, tc.parent, tc.servfail...)
+
+			resp, err := zd.AnalyseZoneDelegation(nil)
+			if err != nil {
+				t.Fatalf("AnalyseZoneDelegation: %v", err)
+			}
+			if !slices.Equal(resp.Unread, tc.wantUnread) || resp.Complete() {
+				t.Errorf("Unread = %q (complete %v), want %q", resp.Unread, resp.Complete(), tc.wantUnread)
+			}
+			if resp.InSync != tc.wantInSync {
+				t.Errorf("in sync = %v, want %v", resp.InSync, tc.wantInSync)
+			}
+			if !tc.wantInSync && len(resp.AAAAAdds) != 1 {
+				t.Errorf("AAAA adds %v; the AAAA glue was not compared after the A query failed", resp.AAAAAdds)
+			}
+		})
+	}
+}
+
+// The DS dimension names what it could not read: the parent's DS RRset, or the
+// keystore's view of what it should be. NS and glue are in step, so InSync
+// alone would call the delegation synchronised.
+func TestDelegationAnalysisNamesAnUnreadDS(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	inStep := []string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A}
+
+	t.Run("parent DS query fails", func(t *testing.T) {
+		zd := childZone(t, ddcngServedZone(), OptParentSync)
+		fakeParent(t, zd, inStep, "deleg.example./DS")
+
+		resp, err := zd.AnalyseZoneDelegation(nil)
+		if err != nil {
+			t.Fatalf("AnalyseZoneDelegation: %v", err)
+		}
+		if !slices.Equal(resp.Unread, []string{"DS"}) || resp.Complete() {
+			t.Errorf("Unread = %q (complete %v), want [DS]", resp.Unread, resp.Complete())
+		}
+	})
+
+	t.Run("keystore cannot be read", func(t *testing.T) {
+		zd := childZone(t, ddcngServedZone(), OptParentSync)
+		kdb := gateTestKeyDB(t)
+		if _, err := kdb.DB.Exec(`DROP TABLE DnssecKeyStore`); err != nil {
+			t.Fatalf("drop DnssecKeyStore: %v", err)
+		}
+		zd.KeyDB = kdb
+		fakeParent(t, zd, append(inStep, ddcngDS(t, ddcngKSK1)))
+
+		resp, err := zd.AnalyseZoneDelegation(nil)
+		if err != nil {
+			t.Fatalf("AnalyseZoneDelegation: %v", err)
+		}
+		if !slices.Equal(resp.Unread, []string{"DS intent"}) || resp.Complete() {
+			t.Errorf("Unread = %q (complete %v), want [DS intent]", resp.Unread, resp.Complete())
+		}
+	})
+}
+
+// The DS step's deliberate absences of opinion are not reads that failed: a
+// zone in one of them is complete, so a caller asking again until the analysis
+// is complete does not ask a rolling or unmanaged zone forever.
+func TestDelegationAnalysisNoOpinionIsComplete(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	inStep := []string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A}
+	unsigned := ddcngZone(1, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A)
+
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T) *ZoneData
+	}{
+		{"a rollover owns the DS (its query would fail)", func(t *testing.T) *ZoneData {
+			zd := childZone(t, ddcngServedZone(), OptParentSync)
+			zd.KeyDB = gateTestKeyDB(t)
+			seedRolloverRow(t, zd.KeyDB, ddcngZoneName, 1)
+			fakeParent(t, zd, inStep, "deleg.example./DS")
+			return zd
+		}},
+		{"keys tdns does not manage", func(t *testing.T) *ZoneData {
+			zd := childZone(t, ddcngServedZone(), OptParentSync)
+			fakeParent(t, zd, append(inStep, ddcngDS(t, ddcngKSK2)))
+			return zd
+		}},
+		{"a proxy zone serving no CDS", func(t *testing.T) *ZoneData {
+			zd := childZone(t, ddcngServedZone(), OptParentSyncProxy)
+			fakeParent(t, zd, append(inStep, ddcngDS(t, ddcngKSK2)))
+			return zd
+		}},
+		{"no keys and no parent DS", func(t *testing.T) *ZoneData {
+			zd := childZone(t, unsigned, OptParentSync)
+			fakeParent(t, zd, inStep)
+			return zd
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := tc.setup(t)
+			resp, err := zd.AnalyseZoneDelegation(nil)
+			if err != nil {
+				t.Fatalf("AnalyseZoneDelegation: %v", err)
+			}
+			if !resp.Complete() {
+				t.Errorf("Unread = %q, want none: no opinion is not a failed read", resp.Unread)
+			}
+			if !resp.InSync {
+				t.Errorf("in sync = false (DS adds %v, removes %v), want the NS and glue verdict", resp.DSAdds, resp.DSRemoves)
+			}
+		})
 	}
 }
 

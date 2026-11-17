@@ -3,17 +3,18 @@ module github.com/johanix/tdns/v2
 go 1.25.2
 
 replace (
+	github.com/johanix/tdns/v2/algorithms => ./algorithms
 	github.com/johanix/tdns/v2/cache => ./cache
 	github.com/johanix/tdns/v2/core => ./core
 	github.com/johanix/tdns/v2/edns0 => ./edns0
 )
 
 require (
-	github.com/cloudflare/circl v1.6.3
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
 	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b
+	github.com/johanix/tdns/v2/algorithms v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cache v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/core v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000
@@ -28,6 +29,7 @@ require (
 )
 
 require (
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
@@ -54,7 +56,7 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-// Pinned at johanix/dns v1.1.72-johanix.4 — provides the pluggable
+// Pinned at johanix/dns v1.1.72-johanix.6 — provides the pluggable
 // Algorithm interface and the registered oots SvcParamKey (12) /
 // dns.SVCBOots. The algorithms it does not implement are registered
 // through that interface: ED448 and ML-DSA-44 by v2/algorithms in every
@@ -65,6 +67,14 @@ require (
 // IPSECKEY, AMTRELAY, APL and SVCB values) keeps its reason through the
 // zone parser instead of reading `dns: : "\n" at line: ...`; errors.Is
 // reaches it.
+// .5 over .4: the server hands a handler a SIG(0)-signed request as
+// received (dns.RawRequester), so SIG(0) is verified over the bytes the
+// sender signed, not over a re-pack (tdns #1028).
+// .6 over .5: the oots codec is lossless. It keeps every entry, known
+// token or not, and the weight octet as received (0-255, on the wire and
+// in zone text), so a node that re-packs
+// a _dns SVCB serves the bytes it was signed as; ignoring other tokens and
+// clamping weights are svcbOotsToRawMap's job (tdns #1043, section 8).
 // Every module that requires miekg/dns carries this same replace, which
 // TestEveryLiveModuleUsesTheDNSFork (v2) checks.
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.6
