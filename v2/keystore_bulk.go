@@ -386,7 +386,7 @@ UPDATE TsigKeystore SET algorithm=?, secret=?, origin=?, owner=?, creator=?, cre
 // and skips differing ones unless force is set. It returns one disposition per
 // offered key, in the order offered.
 //
-// Note what this does NOT do: it never parses the private key. The PEM column
+// Note what this does NOT do: it never parses a PEM private key. The PEM column
 // is stored verbatim, so a key whose algorithm this binary does not link still
 // restores correctly (it will fail later, loudly, if the zone actually tries to
 // sign with it) — which is what makes pre-load safe to run before any zone is
@@ -394,6 +394,11 @@ UPDATE TsigKeystore SET algorithm=?, secret=?, origin=?, owner=?, creator=?, cre
 // the PEM column would otherwise surface only at signing time. The public half
 // IS parsed, because that is a cheap, crypto-free way to catch a manifest that
 // disagrees with its own files.
+//
+// A key that arrives as a JWK (a manifest jwk_file) is the exception: it is
+// parsed with the draft's import rules and rebuilt as PEM (resolveBulkJWK),
+// so its algorithm must be linked, and a JWK that fails any rule rejects the
+// whole batch.
 func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (dispositions []BulkKeyDisposition, err error) {
 	tx, done, err := kdb.bulkTx(tx, "BulkImportDnssec")
 	if err != nil {
@@ -412,6 +417,9 @@ func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (di
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
 		zone := dns.Fqdn(k.Zone)
+		if err := resolveBulkJWK(dns.TypeDNSKEY, k.JWK, &k.PrivateKey, &k.KeyRR); err != nil {
+			return nil, fmt.Errorf("%s keyid %d: %w", zone, k.Keyid, err)
+		}
 		canonRR, err := validateDnssecKeyRR(k)
 		if err != nil {
 			return nil, fmt.Errorf("%s keyid %d: %v", zone, k.Keyid, err)
@@ -531,6 +539,9 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispos
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
 		zone := dns.Fqdn(k.Zone)
+		if err := resolveBulkJWK(dns.TypeKEY, k.JWK, &k.PrivateKey, &k.KeyRR); err != nil {
+			return nil, fmt.Errorf("%s keyid %d: %w", zone, k.Keyid, err)
+		}
 		canonRR, err := validateSig0KeyRR(k)
 		if err != nil {
 			return nil, fmt.Errorf("%s keyid %d: %v", zone, k.Keyid, err)

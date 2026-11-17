@@ -327,11 +327,7 @@ func KeyFileBasename(owner string, algNum uint8, keyid uint16) string {
 func (m *KeystoreManifest) LoadDnssecKeys(dir string) ([]BulkDnssecKey, error) {
 	out := make([]BulkDnssecKey, 0, len(m.Dnssec))
 	for _, e := range m.Dnssec {
-		if e.JwkFile != "" {
-			return nil, fmt.Errorf("DNSSEC key %s keyid %d: %s is a JWK key file, and this tdns cannot import JWK key files",
-				e.Zone, e.Keyid, e.JwkFile)
-		}
-		priv, keyRR, err := readManifestKeyFiles(dir, e.PrivateFile, e.PublicFile)
+		priv, jwk, keyRR, err := readManifestEntryFiles(dir, e.PrivateFile, e.JwkFile, e.PublicFile)
 		if err != nil {
 			return nil, fmt.Errorf("DNSSEC key %s keyid %d: %v", e.Zone, e.Keyid, err)
 		}
@@ -349,6 +345,7 @@ func (m *KeystoreManifest) LoadDnssecKeys(dir string) ([]BulkDnssecKey, error) {
 			ActiveSeq:   e.ActiveSeq,
 			PrivateKey:  priv,
 			KeyRR:       keyRR,
+			JWK:         jwk,
 		})
 	}
 	return out, nil
@@ -358,11 +355,7 @@ func (m *KeystoreManifest) LoadDnssecKeys(dir string) ([]BulkDnssecKey, error) {
 func (m *KeystoreManifest) LoadSig0Keys(dir string) ([]BulkSig0Key, error) {
 	out := make([]BulkSig0Key, 0, len(m.Sig0))
 	for _, e := range m.Sig0 {
-		if e.JwkFile != "" {
-			return nil, fmt.Errorf("SIG(0) key %s keyid %d: %s is a JWK key file, and this tdns cannot import JWK key files",
-				e.Zone, e.Keyid, e.JwkFile)
-		}
-		priv, keyRR, err := readManifestKeyFiles(dir, e.PrivateFile, e.PublicFile)
+		priv, jwk, keyRR, err := readManifestEntryFiles(dir, e.PrivateFile, e.JwkFile, e.PublicFile)
 		if err != nil {
 			return nil, fmt.Errorf("SIG(0) key %s keyid %d: %v", e.Zone, e.Keyid, err)
 		}
@@ -376,6 +369,7 @@ func (m *KeystoreManifest) LoadSig0Keys(dir string) ([]BulkSig0Key, error) {
 			ParentState: e.ParentState,
 			PrivateKey:  priv,
 			KeyRR:       keyRR,
+			JWK:         jwk,
 		})
 	}
 	return out, nil
@@ -467,6 +461,33 @@ func ManifestEntryForTsig(k BulkTsigKey) ManifestTsigKey {
 		CreatedAt: k.CreatedAt,
 		Comment:   k.Comment,
 	}
+}
+
+// readManifestEntryFiles loads an entry's key files: the private half from
+// private_file (PEM) or jwk_file (a JWK, parsed later by the daemon), never
+// both, and the public RR. A JWK entry may leave public_file out, since the
+// JWK holds the public key; the daemon then rebuilds the RR.
+func readManifestEntryFiles(dir, privateFile, jwkFile, publicFile string) (privPEM, jwk, keyRR string, err error) {
+	if jwkFile == "" {
+		privPEM, keyRR, err = readManifestKeyFiles(dir, privateFile, publicFile)
+		return privPEM, "", keyRR, err
+	}
+	if privateFile != "" {
+		return "", "", "", fmt.Errorf("manifest entry names both private_file %q and jwk_file %q", privateFile, jwkFile)
+	}
+	if jwk, err = readContainedFile(dir, jwkFile); err != nil {
+		return "", "", "", err
+	}
+	if publicFile != "" {
+		pub, err := readContainedFile(dir, publicFile)
+		if err != nil {
+			return "", "", "", err
+		}
+		if keyRR, err = canonicalKeyRR(pub); err != nil {
+			return "", "", "", fmt.Errorf("public key file %q: %v", publicFile, err)
+		}
+	}
+	return "", jwk, keyRR, nil
 }
 
 // readManifestKeyFiles loads the private (PEM) and public (RR text) halves of a
