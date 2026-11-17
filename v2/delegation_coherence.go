@@ -7,6 +7,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
@@ -33,19 +35,65 @@ import (
 // point. A check performed by the requesting client is not a check, and a
 // client cannot know a given parent's local requirements anyway.
 
-// dnskeyFetcher returns the DNSKEY RRset the child currently publishes, with
-// its RRSIGs, and the resolver's verdict on it: cache.ValidationStateSecure
-// when it DNSSEC-validated, the zero value when validation was not attempted.
+// dnskeyCopy is the DNSKEY RRset one nameserver of the child serves, with its
+// RRSIGs, and what is known about how it validated.
 //
-// The two travel together because only the caller can decide what an
-// unvalidated answer means: for a child that already has a DS it must be
-// authenticated some other way, and for a child that has none it is the normal
-// state of affairs. A fetcher that decided on its own could only get one of
-// those right. The RRSIGs are what the other way checks (signedByPublishedDS).
+// A child that is signed by more than one provider has a DNSKEY RRset per
+// nameserver, not one: every nameserver serves the keys of all the signers, and
+// each signs the RRset with its own signer's key only. Whether a delegation
+// works is a property of every one of those copies, so the check is given all of
+// them (#925).
+type dnskeyCopy struct {
+	// Server is the nameserver the copy came from. Empty where it is not known.
+	Server string
+
+	// RRset is the copy. Nil when Err is set.
+	RRset *core.RRset
+
+	// State is the resolver's verdict on the copy: cache.ValidationStateSecure
+	// when it DNSSEC-validated, the zero value when validation was not
+	// attempted. Only a Secure verdict is used, to authenticate a copy; the
+	// check does not rely on it to judge what a DS change leaves behind, because
+	// the verdict is about the DS RRset the resolver saw, which is not the one
+	// the change produces.
+	State cache.ValidationState
+
+	// Err is why Server gave no copy: it could not be reached, or it gave no
+	// answer.
+	Err error
+}
+
+// childServers is the delegation a DS change is judged for, as the update
+// leaves it.
+type childServers struct {
+	// NS is the child's NS RRset: the nameservers a resolver is sent to.
+	NS []dns.RR
+
+	// Glue is the A and AAAA records the parent publishes at those nameservers'
+	// names once the update is applied: what is in its zone now, with the update's
+	// additions and deletions. It is where a nameserver is asked, in place of
+	// where the resolver would look it up. A nameserver the update adds together
+	// with its glue is not in the resolver yet, and without this would be taken
+	// for one that gave no answer (#1104). A nameserver with no glue here, one
+	// outside the parent's zone, is looked up by the resolver.
+	Glue []dns.RR
+}
+
+// dnskeyFetcher returns the DNSKEY RRset each of the nameservers of servers
+// serves for child, one dnskeyCopy per nameserver asked, a nameserver that gave
+// no copy included (dnskeyCopy.Err). An error means no copy could be had at all.
+//
+// The copies and their verdicts travel together because only the caller can
+// decide what an unvalidated answer means: for a child that already has a DS it
+// must be authenticated some other way, and for a child that has none it is the
+// normal state of affairs. A fetcher that decided on its own could only get one
+// of those right. The RRSIGs are what the other way checks (signedByPublishedDS).
+//
+// A fetcher that is not able to ask a particular nameserver ignores servers.
 //
 // Injected rather than called directly so the rule below can be tested without
 // a network, and so the parent can choose how it looks the child up.
-type dnskeyFetcher func(child string) (dnskeys *core.RRset, state cache.ValidationState, err error)
+type dnskeyFetcher func(child string, servers childServers) (copies []dnskeyCopy, err error)
 
 // dsAfterActions applies the DS-affecting records of an RFC 2136 update to the
 // parent's current DS RRset for child, and reports the result.
@@ -114,18 +162,36 @@ func rrsetAfterActions(owner string, rrtype uint16, current, actions []dns.RR) (
 }
 
 // sameRecord reports whether two records are the same owner, type and rdata,
-// ignoring class and TTL.
+// ignoring class and TTL, and the case of a DS digest.
 //
 // Both have to be normalised before comparing. An RFC 2136 delete-RR carries
 // CLASS=NONE and TTL=0 while the record it removes is CLASS=IN with a real TTL,
 // and dns.IsDuplicate compares the header as it stands -- so comparing them
 // directly never matches, and a deletion silently removes nothing. That failure
 // is invisible in the result: the record simply stays.
+//
+// A digest is hex and means the same in either case, but dns.IsDuplicate
+// compares the text. A record unpacked from a message carries lowercase hex,
+// and one parsed from a zone file the case it was written in, so a withdrawal
+// received from a child did not match the DS the parent publishes, and the
+// check took it for a change that changes nothing (#925).
 func sameRecord(a, b dns.RR) bool {
 	na, nb := dns.Copy(a), dns.Copy(b)
 	na.Header().Class, nb.Header().Class = dns.ClassINET, dns.ClassINET
 	na.Header().Ttl, nb.Header().Ttl = 0, 0
+	foldDigest(na)
+	foldDigest(nb)
 	return dns.IsDuplicate(na, nb)
+}
+
+// foldDigest lowercases the digest of a DS or CDS, in place.
+func foldDigest(rr dns.RR) {
+	switch r := rr.(type) {
+	case *dns.DS:
+		r.Digest = strings.ToLower(r.Digest)
+	case *dns.CDS:
+		r.Digest = strings.ToLower(r.Digest)
+	}
 }
 
 // sameRRsetContent reports whether two RRsets hold the same records, order
@@ -217,22 +283,72 @@ func (zd *ZoneData) CheckDelegationCoherenceForUpdate(actions []dns.RR, fetch dn
 			return fmt.Errorf("cannot verify that %s would still validate: cannot read the DS this parent publishes for it: %w: %w",
 				child, err, ErrDelegationUnverifiable)
 		}
-		if err := CheckDelegationCoherence(child, currentDS, actions, fetch); err != nil {
+		if err := CheckDelegationCoherence(child, zd.childServersAfter(child, actions),
+			currentDS, actions, fetch); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// childServersAfter returns the delegation the parent publishes for child once
+// actions are applied: the NS RRset (the nameservers a resolver is sent to, and
+// so the ones whose DNSKEY RRsets a DS change has to hold for; the current one
+// when the update says nothing about NS, which is the usual case for a DS
+// change), and the glue the parent publishes for those nameservers, as the
+// update leaves it. That includes the glue the update adds for a nameserver it
+// adds, which a resolver does not know yet.
+func (zd *ZoneData) childServersAfter(child string, actions []dns.RR) childServers {
+	servers := childServers{NS: zd.currentChildNS(child)}
+	if after, touched := rrsetAfterActions(child, dns.TypeNS, servers.NS, actions); touched && len(after) > 0 {
+		servers.NS = after
+	}
+	lookup := zd.currentGlueLookup()
+	seen := map[string]bool{}
+	for _, rr := range servers.NS {
+		ns, ok := rr.(*dns.NS)
+		if !ok || seen[core.CanonicalizeName(ns.Ns)] {
+			continue
+		}
+		seen[core.CanonicalizeName(ns.Ns)] = true
+		for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+			current, _ := lookup(ns.Ns, qtype)
+			glue, _ := rrsetAfterActions(ns.Ns, qtype, current, actions)
+			servers.Glue = append(servers.Glue, glue...)
+		}
+	}
+	return servers
+}
+
 // CheckDelegationCoherence reports whether applying actions would leave child's
-// delegation unvalidatable, and refuses it if so.
+// delegation unvalidatable, and refuses it if so. servers is the delegation
+// after the change; fetch is asked for the DNSKEY RRset each of its nameservers
+// serves.
 //
 // The rule is RFC 7344's Continuity, and it is deliberately "at least one",
-// not "all": a multi-DS KSK rollover legitimately places a DS for a key whose
-// DNSKEY is not published yet, and requiring every DS to match a published key
-// would reject exactly the procedure the rollover engine implements. What must
-// hold is that SOME DS in the resulting set still resolves to a key the child
-// publishes, so the chain of trust survives the change.
+// not "all", for which key matches: a multi-DS KSK rollover legitimately places
+// a DS for a key whose DNSKEY is not published yet, and requiring every DS to
+// match a published key would reject exactly the procedure the rollover engine
+// implements. What must hold is that SOME DS in the resulting set still resolves
+// to a key the child publishes, so the chain of trust survives the change.
+//
+// It is "every" for which nameserver, when the change takes a DS away. A child
+// that several providers sign has a DNSKEY RRset per nameserver, and each
+// provider's nameservers serve it signed by that provider's key only. Taking one
+// provider's DS away leaves the DS RRset matching a key the child publishes, and
+// every resolver that asks that provider's nameservers gets an RRset no DS
+// vouches for. So a DS is withdrawn only if, at every nameserver of the
+// delegation, the DNSKEY RRset is signed by a key matching the DS RRset that
+// results (#925). A nameserver that cannot be asked leaves that open, so the
+// change is refused as unverifiable rather than accepted on the copies that
+// could be had.
+//
+// A change that only adds DS records cannot make any copy bogus: whatever
+// validated through the DS the parent publishes still does. It is judged as
+// before, on a copy the DS the parent publishes authenticates. That is any one
+// copy, not every one: the copy a resolver happens to be given may be the one
+// the DS being added is for, and signed by nothing the parent publishes a DS
+// for yet. Refusing the repair for that reason is the other half of #925.
 //
 // An empty resulting DS set is allowed. Going insecure is a legitimate thing to
 // ask for, it is what the RFC 8078 delete sentinel expresses, and it leaves the
@@ -244,7 +360,7 @@ func (zd *ZoneData) CheckDelegationCoherenceForUpdate(actions []dns.RR, fetch dn
 // turns the check into a formality that anything can bypass by being
 // unreachable at the right moment -- and the cost is bounded by the fact that
 // this runs only for updates that actually change the DS.
-func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch dnskeyFetcher) error {
+func CheckDelegationCoherence(child string, servers childServers, currentDS, actions []dns.RR, fetch dnskeyFetcher) error {
 	child = dns.Fqdn(child)
 
 	resulting, mentioned := dsAfterActions(child, currentDS, actions)
@@ -267,13 +383,33 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 		return fmt.Errorf("cannot verify that %s would still validate: %w: %w", child, errNoDnskeyFetcher, ErrDelegationUnverifiable)
 	}
 
-	dnskeys, state, err := fetch(child)
+	all, err := fetch(child, servers)
 	if err != nil {
 		return fmt.Errorf("cannot verify that %s would still validate: DNSKEY lookup failed: %w: %w", child, err, ErrDelegationUnverifiable)
 	}
-	var keys []dns.RR
-	if dnskeys != nil {
-		keys = dnskeys.RRs
+	var copies, silent []dnskeyCopy // the copies there are; the nameservers that gave none
+	for _, c := range all {
+		switch {
+		case c.Err != nil:
+			silent = append(silent, c)
+		case c.RRset == nil:
+			// An answer with no RRset is an empty one: the nameserver serves no keys.
+			c.RRset = &core.RRset{Name: child, Class: dns.ClassINET, RRtype: dns.TypeDNSKEY}
+			copies = append(copies, c)
+		default:
+			copies = append(copies, c)
+		}
+	}
+	if len(copies) == 0 {
+		var errs []error
+		for _, c := range silent {
+			errs = append(errs, fmt.Errorf("%s: %w", c.server(), c.Err))
+		}
+		if len(errs) == 0 {
+			errs = append(errs, errors.New("no nameserver gave a DNSKEY RRset"))
+		}
+		return fmt.Errorf("cannot verify that %s would still validate: DNSKEY lookup failed: %w: %w",
+			child, errors.Join(errs...), ErrDelegationUnverifiable)
 	}
 
 	// An unvalidated DNSKEY answer is only meaningful when there is something to
@@ -301,6 +437,12 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 	// above this parent -- which the child cannot fix and this change does not
 	// touch. It is logged.
 	//
+	// One authenticated copy is enough, and only the keys of authenticated
+	// copies count below. The copies come from different nameservers, and a
+	// delegation that is already broken at one of them (a DS withdrawn too
+	// early, #925) is the case the child needs to repair; the others carry
+	// the same keys, and they are authenticated.
+	//
 	// If the parent publishes no DS, the child is insecure -- and demanding a
 	// validated answer would make it permanently so. That is RFC 8078
 	// bootstrap: the child has keys, no DS chains to them yet, and adding the
@@ -314,39 +456,143 @@ func CheckDelegationCoherence(child string, currentDS, actions []dns.RR, fetch d
 	// authenticated and authorised, and the DS must match a key the child
 	// actually publishes. It is the same carve-out the CDS scanner makes for
 	// onboarding when no DS exists.
-	if len(currentDS) > 0 && state != cache.ValidationStateSecure {
-		if err := signedByPublishedDS(dnskeys, currentDS); err != nil {
-			return fmt.Errorf(
-				"the DNSKEY RRset for %s did not DNSSEC-validate (resolver: %s), and it is not"+
-					" signed by a key matching the DS this parent publishes (%v): with a DS in"+
-					" place, an unvalidated answer cannot authorise changing it",
-				child, validationStateName(state), err)
+	authenticated := copies
+	if len(currentDS) > 0 {
+		authenticated = nil
+		var why []string
+		var firstErr error
+		viaDS := 0
+		for _, c := range copies {
+			if c.State == cache.ValidationStateSecure {
+				authenticated = append(authenticated, c)
+				continue
+			}
+			if err := signedByPublishedDS(c.RRset, currentDS); err != nil {
+				why = append(why, fmt.Sprintf("%s (resolver: %s): %v", c.server(), validationStateName(c.State), err))
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			authenticated = append(authenticated, c)
+			viaDS++
+			if c.State == cache.ValidationStateBogus {
+				lgHandler.Warn("delegation coherence: the resolver holds the child's DNSKEY RRset bogus,"+
+					" but a key matching the DS this parent publishes signs it; the parent's DS decides",
+					"child", child, "server", c.Server)
+			}
 		}
-		if state == cache.ValidationStateBogus {
-			lgHandler.Warn("delegation coherence: the resolver holds the child's DNSKEY RRset bogus,"+
-				" but a key matching the DS this parent publishes signs it; the parent's DS decides",
-				"child", child)
-		} else {
+		if len(authenticated) == 0 {
+			if len(copies) == 1 {
+				return fmt.Errorf(
+					"the DNSKEY RRset for %s did not DNSSEC-validate (resolver: %s), and it is not"+
+						" signed by a key matching the DS this parent publishes (%v): with a DS in"+
+						" place, an unvalidated answer cannot authorise changing it",
+					child, validationStateName(copies[0].State), firstErr)
+			}
+			return fmt.Errorf(
+				"the DNSKEY RRsets for %s, as its %d nameservers serve them, did not DNSSEC-validate,"+
+					" and they are not signed by a key matching the DS this parent publishes (%s): with a DS in"+
+					" place, an unvalidated answer cannot authorise changing it",
+				child, len(copies), strings.Join(why, "; "))
+		}
+		if viaDS > 0 {
 			lgHandler.Info("delegation coherence: DNSKEY RRset authenticated by the DS this parent publishes",
-				"child", child, "resolver", validationStateName(state))
+				"child", child, "copies", viaDS)
 		}
 	}
 
+	keys := distinctDNSKEYs(authenticated)
+	matched := false
 	for _, dsrr := range resulting {
 		ds, ok := dsrr.(*dns.DS)
 		if !ok {
 			continue
 		}
-		for _, keyrr := range keys {
-			if dk, ok := keyrr.(*dns.DNSKEY); ok && dsMatchesKey(ds, dk) {
-				return nil
+		for _, dk := range keys {
+			if dsMatchesKey(ds, dk) {
+				matched = true
+				break
 			}
 		}
 	}
+	if !matched {
+		return fmt.Errorf(
+			"the resulting DS RRset for %s matches none of the %d DNSKEY(s) it publishes;"+
+				" applying it would make the whole child zone bogus", child, len(keys))
+	}
 
-	return fmt.Errorf(
-		"the resulting DS RRset for %s matches none of the %d DNSKEY(s) it publishes;"+
-			" applying it would make the whole child zone bogus", child, len(keys))
+	// A DS that goes away is what can leave a copy with no key to vouch for it,
+	// so every nameserver's copy is held against the DS RRset that results. The
+	// verdict on a copy that DS RRset has not been tried against says nothing.
+	if !dsWithdrawn(currentDS, resulting) {
+		return nil
+	}
+	for _, c := range copies {
+		if err := signedByPublishedDS(c.RRset, resulting); err != nil {
+			return fmt.Errorf(
+				"the resulting DS RRset for %s would not validate the DNSKEY RRset %s serves (%v);"+
+					" applying it would make %s bogus for every resolver that asks it",
+				child, c.server(), err, child)
+		}
+	}
+	if len(silent) > 0 {
+		c := silent[0]
+		return fmt.Errorf(
+			"cannot verify that %s would still validate: %s gave no DNSKEY RRset (%v), and the DS being"+
+				" withdrawn may be the one that vouches for what it serves: %w",
+			child, c.server(), c.Err, ErrDelegationUnverifiable)
+	}
+	return nil
+}
+
+// dsWithdrawn reports whether resulting leaves out a DS record that current has.
+func dsWithdrawn(current, resulting []dns.RR) bool {
+	for _, cur := range current {
+		kept := false
+		for _, res := range resulting {
+			if sameRecord(cur, res) {
+				kept = true
+				break
+			}
+		}
+		if !kept {
+			return true
+		}
+	}
+	return false
+}
+
+// distinctDNSKEYs returns the DNSKEY records the copies hold, each once.
+func distinctDNSKEYs(copies []dnskeyCopy) []*dns.DNSKEY {
+	var keys []*dns.DNSKEY
+	for _, c := range copies {
+		for _, rr := range c.RRset.RRs {
+			dk, ok := rr.(*dns.DNSKEY)
+			if !ok {
+				continue
+			}
+			dup := false
+			for _, have := range keys {
+				if sameRecord(have, dk) {
+					dup = true
+					break
+				}
+			}
+			if !dup {
+				keys = append(keys, dk)
+			}
+		}
+	}
+	return keys
+}
+
+// server names the nameserver of a copy, for a refusal.
+func (c dnskeyCopy) server() string {
+	if c.Server == "" {
+		return "a nameserver"
+	}
+	return "nameserver " + c.Server
 }
 
 // dsMatchesKey reports whether ds is the DS of dk: key tag, algorithm and
@@ -422,10 +668,10 @@ func equalFoldASCII(a, b string) bool {
 // built from conf.
 //
 // Three cases, because they call for three different answers. A running
-// resolver is asked. A server without one gets nil, and the check refuses as
-// unverifiable: that will not change by asking again. A daemon whose resolver
-// has not started yet -- still priming, or retrying a failed priming -- gets a
-// fetcher that fails with ErrNoImrEngine, which the callers answer as "try
+// resolver and scanner are asked. A server without them gets nil, and the check
+// refuses as unverifiable: that will not change by asking again. A daemon whose
+// resolver has not started yet -- still priming, or retrying a failed priming --
+// gets a fetcher that fails with ErrNoImrEngine, which the callers answer as "try
 // again" rather than as a verdict on the delegation.
 func coherenceDnskeyFetcher(conf *Config) dnskeyFetcher {
 	// ImrEngine may be read only once readiness is published. No readiness
@@ -433,46 +679,84 @@ func coherenceDnskeyFetcher(conf *Config) dnskeyFetcher {
 	// up (a CLI, a test): whatever the field holds is all there will be.
 	r := conf.Internal.ImrReady
 	if r == nil || r.Published() {
-		return imrDnskeyFetcher(conf.Internal.ImrEngine)
+		return nameserversDnskeyFetcher(conf.Internal.GetScanner())
 	}
 	if conf.Imr.Active != nil && !*conf.Imr.Active {
 		return nil
 	}
-	return func(child string) (*core.RRset, cache.ValidationState, error) {
-		return nil, 0, fmt.Errorf("this server's resolver is not running yet: %w", ErrNoImrEngine)
+	return func(string, childServers) ([]dnskeyCopy, error) {
+		return nil, fmt.Errorf("this server's resolver is not running yet: %w", ErrNoImrEngine)
 	}
 }
 
-// imrDnskeyFetcher looks the child's DNSKEY RRset up through the iterative
-// resolver, which is the parent's normal way of asking a question about a zone
-// it is not authoritative for.
+// nameserversDnskeyFetcher asks every nameserver of the child for its DNSKEY
+// RRset, which is the way the parent learns what the child serves for the CDS
+// and CSYNC scans and for the NS half of the coherence check too. Each is asked
+// directly and none is answered from a cache.
 //
-// Returns nil when there is no resolver, so the caller reports "no way to look
+// The parent's resolver would give one answer, from one nameserver and possibly
+// from its cache, and a child that several providers sign has a different one
+// at each nameserver (#925). The resolver's verdict is not taken either: it is
+// reached through the DS RRset the resolver holds, which a change in progress
+// may have just made out of date. The parent is the authority for that DS
+// RRset, and the check measures every copy against its own.
+//
+// A nameserver is asked at the addresses of the glue the parent publishes for it
+// once the update is applied (childServers.Glue), and at the resolver's only
+// when there is none. The update may add a nameserver together with its glue, and
+// the resolver does not know that address yet (#1104).
+//
+// Returns nil when there is no scanner, so the caller reports "no way to look
 // up its DNSKEYs" rather than an unexplained refusal.
-func imrDnskeyFetcher(imr *Imr) dnskeyFetcher {
-	if imr == nil {
+func nameserversDnskeyFetcher(scanner *Scanner) dnskeyFetcher {
+	if scanner == nil {
 		return nil
 	}
-	return func(child string) (*core.RRset, cache.ValidationState, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	return func(child string, servers childServers) ([]dnskeyCopy, error) {
+		if len(servers.NS) == 0 {
+			return nil, fmt.Errorf("the parent publishes no nameserver for %s to ask", child)
+		}
+		lg := scanner.Log["CDS"]
+		if lg == nil {
+			lg = log.Default()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), delegationCheckTimeout)
 		defer cancel()
 
-		resp, err := imr.ImrQuery(ctx, dns.Fqdn(child), dns.TypeDNSKEY, dns.ClassINET, nil)
+		answers, err := scanner.askChildServers(ctx, child, dns.TypeDNSKEY,
+			&core.RRset{Name: child, Class: dns.ClassINET, RRtype: dns.TypeNS, RRs: servers.NS}, servers.Glue, lg)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
-		if resp == nil || resp.RRset == nil {
-			return nil, 0, fmt.Errorf("no DNSKEY RRset returned for %s", child)
+		copies := make([]dnskeyCopy, 0, len(answers))
+		for _, a := range answers {
+			copies = append(copies, dnskeyCopy{Server: a.NS, RRset: a.RRset})
 		}
-		if resp.Error {
-			return nil, 0, fmt.Errorf("DNSKEY lookup for %s failed: %s", child, resp.ErrorMsg)
-		}
-		// Report the verdict; do not decide what it means. Only the caller
-		// knows whether the child already has a DS, which is what separates an
-		// attack from an ordinary bootstrap. The RRset may be the resolver's
-		// cached one, so the caller only reads it.
-		return resp.RRset, resp.ValidationState, nil
+		return withSilentServers(copies, servers.NS), nil
 	}
+}
+
+// withSilentServers adds, for each of nameservers that has no copy among
+// copies, an entry that says so. The scanner leaves a nameserver that gave no
+// answer out of what it returns.
+func withSilentServers(copies []dnskeyCopy, nameservers []dns.RR) []dnskeyCopy {
+	for _, rr := range nameservers {
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			continue
+		}
+		answered := false
+		for _, c := range copies {
+			if core.EqualNames(c.Server, ns.Ns) {
+				answered = true
+				break
+			}
+		}
+		if !answered {
+			copies = append(copies, dnskeyCopy{Server: ns.Ns, Err: errors.New("it gave no answer")})
+		}
+	}
+	return copies
 }
 
 // currentChildDS returns the DS RRset the parent currently publishes for child.
