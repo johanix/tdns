@@ -18,6 +18,7 @@ import (
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 var Conf Config
@@ -232,6 +233,27 @@ type TransportConf struct {
 	Signal string `yaml:"signal"`
 }
 
+// Validate refuses, at config load, a signal this server would publish (type
+// svcb or tsync) that does not parse or names a token other than do53, dot, doh
+// and doq. No tdns publisher may emit a new token, such as `udp` or `tcp`,
+// before every node that can re-pack the record keeps it (the alternative-
+// endpoint design, tdns #1043, section 8). With type none the signal is not
+// published and is not checked.
+func (t TransportConf) Validate() error {
+	switch strings.ToLower(t.Type) {
+	case "svcb", "tsync":
+	default:
+		return nil
+	}
+	if t.Signal == "" {
+		return nil
+	}
+	if err := core.ValidatePublishedTransportSignal(t.Signal); err != nil {
+		return fmt.Errorf("service.transport.signal %q: %v", t.Signal, err)
+	}
+	return nil
+}
+
 // ListenersConf is the listening side of an app's DNS service: addresses,
 // per-transport ports, and the server certificate. ONE schema for every app
 // (tdns-auth, tdns-agent, tdns-imr, ...) — each app has its own config file,
@@ -319,6 +341,14 @@ type AuthEngineConf struct {
 	//              serial stays put.
 	OutboundSoaSerial string `yaml:"outbound-soa-serial,omitempty" mapstructure:"outbound-soa-serial" validate:"omitempty,oneof=keep unixtime persist"`
 
+	// NotifyRetries and NotifyRetryInterval are the server-wide NOTIFY resend
+	// settings (#1007): how many times an unanswered NOTIFY is sent again
+	// (default 5), and the wait before the first resend, doubling each time
+	// (default "10s"). A zone's own notify-retries / notify-retry-interval
+	// override them. Read when the Notifier starts.
+	NotifyRetries       *int   `yaml:"notify-retries,omitempty" mapstructure:"notify-retries"`
+	NotifyRetryInterval string `yaml:"notify-retry-interval,omitempty" mapstructure:"notify-retry-interval"`
+
 	// TransferSrc is the server-global source address for OUTBOUND zone
 	// transfers -- the local address we bind before dialling an upstream, i.e.
 	// the address the primary's allow-transfer/provide-xfr ACL will see.
@@ -334,6 +364,10 @@ type AuthEngineConf struct {
 	// upstream is used, and an upstream with no matching entry is dialled
 	// unbound rather than failed. Per-zone ZoneConf.TransferSrc overrides this;
 	// empty there inherits.
+	//
+	// Outbound NOTIFY binds it too (#1062), picked the same way per target: a
+	// downstream's allow-notify sees the same address an upstream's
+	// allow-transfer does.
 	TransferSrc []string `yaml:"transfer-src,omitempty" mapstructure:"transfer-src"`
 }
 
@@ -1000,10 +1034,13 @@ type InternalDnsConf struct {
 	// parent primary. See parent_push_engine.go.
 	ParentPushQ chan ParentPushRequest
 	NotifyQ     chan NotifyRequest
-	AuthQueryQ  chan AuthQueryRequest
-	ResignQ     chan ResignRequest // zones needing a re-sign, and why (see ResignReason)
-	RRsetCache  *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
-	ImrEngine   *Imr
+	// NotifyTracker is the Notifier's per-target resend state and the pending
+	// set publishes hand downstream NOTIFYs to (#1007). Created with NotifyQ.
+	NotifyTracker *NotifyTracker
+	AuthQueryQ    chan AuthQueryRequest
+	ResignQ       chan ResignRequest // zones needing a re-sign, and why (see ResignReason)
+	RRsetCache    *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	ImrEngine     *Imr
 	// ImrReady is closed once ImrEngine has been stored, giving other engines
 	// a synchronised way to learn it is usable. Read ImrEngine only after
 	// receiving from it -- see ImrReadiness.

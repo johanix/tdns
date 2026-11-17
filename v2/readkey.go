@@ -337,6 +337,12 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 		default:
 			return nil, fmt.Errorf("rr is of type %T", rr)
 		}
+	} else if block, _ := pem.Decode([]byte(privkey)); block != nil {
+		// PKCS#1, SEC1 and encrypted PKCS#8 are PEM too. Handed to the bind
+		// parser they fail with "no private key seen", which names neither the
+		// problem nor the fix.
+		return nil, fmt.Errorf("private key is a PEM %q block, but only unencrypted PKCS#8 (\"PRIVATE KEY\") is accepted; "+
+			"'openssl pkey -in <file> -out <new file>' converts it", block.Type)
 	} else {
 		// BIND format: use existing logic
 		switch rr := rr.(type) {

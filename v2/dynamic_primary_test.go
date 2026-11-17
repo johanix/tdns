@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // withTestTemplates installs templates into the global Templates map for the
@@ -383,7 +384,10 @@ func TestLoadDynamicZoneFiles_PrimaryReExpansion(t *testing.T) {
 	resetZonesForTest()
 	conf, ch := newTestConfigForCores(t)
 	dir := t.TempDir()
-	withTestTemplates(t, map[string]ZoneConf{"dyn-test": dynPrimaryTestTemplate(dir)})
+	tmpl := dynPrimaryTestTemplate(dir)
+	zero := 0
+	tmpl.NotifyRetries, tmpl.NotifyRetryInterval = &zero, "7s"
+	withTestTemplates(t, map[string]ZoneConf{"dyn-test": tmpl})
 
 	zonefile := filepath.Join(dir, "boot.example.zone")
 	if err := os.WriteFile(zonefile, []byte("boot.example.\t3600\tIN\tSOA\tns.boot.example. h.boot.example. 1 3600 600 604800 300\nboot.example.\t3600\tIN\tNS\tns.boot.example.\n"), 0644); err != nil {
@@ -428,6 +432,10 @@ func TestLoadDynamicZoneFiles_PrimaryReExpansion(t *testing.T) {
 		}
 		if zr.Zonefile != zonefile {
 			t.Errorf("persisted zonefile must win over the template pattern: %q", zr.Zonefile)
+		}
+		if zr.NotifyRetries == nil || *zr.NotifyRetries != 0 || zr.NotifyRetryInterval != 7*time.Second {
+			t.Errorf("boot re-expansion lost the template's NOTIFY resend settings: %v, %v",
+				zr.NotifyRetries, zr.NotifyRetryInterval)
 		}
 	default:
 		t.Error("expected boot.example. to be enqueued")

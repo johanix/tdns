@@ -16,16 +16,17 @@ Only useful via sub-commands
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
 ### SEE ALSO
 
 * [tdns-cli scanner](tdns-cli_scanner.md)	 - Interact with tdns-scanner via API
-* [tdns-cli scanner daemon api](tdns-cli_scanner_daemon_api.md)	 - request a statusd api summary
+* [tdns-cli scanner daemon api](tdns-cli_scanner_daemon_api.md)	 - request an API summary from the tdns-scanner daemon
 * [tdns-cli scanner daemon reload](tdns-cli_scanner_daemon_reload.md)	 - Reload config from file
 * [tdns-cli scanner daemon restart](tdns-cli_scanner_daemon_restart.md)	 - Stop and then start the management daemon
-* [tdns-cli scanner daemon start](tdns-cli_scanner_daemon_start.md)	 - Start the axfr-statusd daemon
+* [tdns-cli scanner daemon start](tdns-cli_scanner_daemon_start.md)	 - Start the tdns-scanner daemon
 * [tdns-cli scanner daemon status](tdns-cli_scanner_daemon_status.md)	 - Query for the status of the management daemon
 * [tdns-cli scanner daemon stop](tdns-cli_scanner_daemon_stop.md)	 - Stop the management daemon
 

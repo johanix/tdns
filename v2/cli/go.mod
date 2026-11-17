@@ -4,6 +4,7 @@ go 1.25.2
 
 replace (
 	github.com/johanix/tdns/v2 => ../
+	github.com/johanix/tdns/v2/algorithms => ../algorithms
 	github.com/johanix/tdns/v2/cache => ../cache
 	github.com/johanix/tdns/v2/core => ../core
 	github.com/johanix/tdns/v2/edns0 => ../edns0
@@ -15,6 +16,7 @@ require (
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v2/algorithms v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000
@@ -69,4 +71,4 @@ require (
 	zgo.at/termtext v1.5.0 // indirect
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.6

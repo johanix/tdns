@@ -1,6 +1,6 @@
 ## tdns-cli auth del sync
 
-Make an API call to request TDNSD to send a DDNS update to sync parent delegation info with child data
+Make an API call to request the daemon to send a DDNS update to sync parent delegation info with child data
 
 ```
 tdns-cli auth del sync [flags]
@@ -21,6 +21,7 @@ tdns-cli auth del sync [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 

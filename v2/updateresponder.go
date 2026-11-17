@@ -26,6 +26,7 @@ type DnsHandlerRequest struct {
 type DnsUpdateRequest struct {
 	ResponseWriter dns.ResponseWriter
 	Msg            *dns.Msg
+	Wire           []byte // Msg as received, when the transport kept it (requestWire); SIG(0) is verified over it
 	Qname          string
 	Options        *edns0.MsgOptions
 	Status         *UpdateStatus
@@ -210,6 +211,27 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		}
 	}
 
+	// RFC 2136 §2.4/§3.2: the prerequisite section (the Answer section of an
+	// UPDATE) is not evaluated here, and an update that carries one is
+	// refused rather than applied without it. Applying it would turn the
+	// sender's compare-and-swap into a plain write and answer NOERROR, which
+	// is exactly what a sender that bothers with prerequisites relies on not
+	// happening. Both mechanisms, SIG(0) and TSIG.
+	if len(r.Answer) > 0 {
+		lgHandler.Warn("update refused: prerequisites are not supported",
+			"zone", zd.ZoneName, "prerequisites", len(r.Answer))
+		m.SetRcode(r, dns.RcodeNotImplemented)
+		edns0.AttachEDEToResponseWithText(m, dns.ExtendedErrorCodeNotSupported,
+			"UPDATE prerequisites (RFC 2136 section 2.4) are not supported; nothing was changed", false)
+		w.WriteMsg(m)
+		return nil
+	}
+
+	// Which mechanism authorizes this update. TSIG when the message carries a
+	// TSIG and no SIG(0); a message with a SIG RR takes the SIG(0) path as it
+	// always has, a TSIG beside it being transport only.
+	viaTsig := r.IsTsig() != nil && !hasSigRR(r.Extra)
+
 	// Refuse UPDATE on a service-impacting error, or when the zone holds
 	// no published data to update. Same predicate as the query path in
 	// defaultqueryhandlers.go, deliberately: an UPDATE that the query
@@ -229,6 +251,14 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)
 		w.WriteMsg(m)
 		return nil // didn't find any zone for that qname
+	}
+	// The same withheld guard as the query path.
+	if zd.Withheld() {
+		lgHandler.Warn("zone is withheld", "qname", qname, "zone", zd.ZoneName)
+		m.SetRcode(r, dns.RcodeServerFailure)
+		edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
+		w.WriteMsg(m)
+		return nil
 	}
 	// And the same expire guard as the query path: a zone we may no longer
 	// answer for is not one we may accept updates to either.
@@ -309,8 +339,8 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 			}
 			zd.Logger.Printf("UpdateResponder: zone %s: no child delegation covers owner %s; treating as ZONE-UPDATE",
 				zd.ZoneName, unplaced)
-			if !zd.Options[OptAllowUpdates] {
-				lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname)
+			if !zoneUpdatesAdmitted(zd, viaTsig) {
+				lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname, "tsig", viaTsig)
 				m.SetRcode(r, dns.RcodeRefused)
 				edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
 				w.WriteMsg(m)
@@ -339,8 +369,8 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	} else {
 		dur.Status.Type = "ZONE-UPDATE"
 		zd.Logger.Printf("UpdateResponder: qname %s is in auth zone %s", qname, zd.ZoneName)
-		if !zd.Options[OptAllowUpdates] {
-			lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname)
+		if !zoneUpdatesAdmitted(zd, viaTsig) {
+			lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname, "tsig", viaTsig)
 			m.SetRcode(r, dns.RcodeRefused)
 			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
 			w.WriteMsg(m)
@@ -369,7 +399,11 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	// known" for what is actually FORMERR + a format error — mislabelling a
 	// malformed request as a server-side fault and directing the child at
 	// bootstrapping a key, which does not fix a malformed message.
-	err := zd.ValidateUpdate(ctx, r, dur.Status)
+	if viaTsig {
+		return zd.respondTsigUpdate(ctx, w, m, r, dur, updateq)
+	}
+
+	err := zd.ValidateUpdate(ctx, r, dur.Wire, dur.Status)
 	if err != nil {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
 		applyValidationFailure(m, dur.Status)

@@ -256,7 +256,7 @@ func TestMLDSA44IsBuiltIn(t *testing.T) {
 
 	// Wired into miekg/dns: a key generates, signs and verifies.
 	key := &dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600}, Flags: 257, Protocol: 3, Algorithm: MLDSA44}
-	priv, err := key.Generate(0)
+	priv, err := generateSigningKey(key, 0)
 	if err != nil {
 		t.Fatalf("ML-DSA-44 is recorded but not wired into miekg/dns: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestED448RegisteredForReal(t *testing.T) {
 		t.Fatal("CapsReal(ED448) not registered as real")
 	}
 	k := &dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET}, Flags: 257, Protocol: 3, Algorithm: dns.ED448}
-	if _, err := k.Generate(0); err != nil {
+	if _, err := generateSigningKey(k, 0); err != nil {
 		t.Fatalf("ED448 is recorded but not wired into miekg/dns: %v", err)
 	}
 }

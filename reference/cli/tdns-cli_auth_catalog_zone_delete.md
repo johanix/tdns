@@ -22,6 +22,7 @@ tdns-cli auth catalog zone delete --cat <catalog-zone> --zone <zone-name> [flags
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
 ```
 
 ### SEE ALSO

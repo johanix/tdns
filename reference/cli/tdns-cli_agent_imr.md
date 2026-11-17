@@ -16,6 +16,7 @@ IMR (Internal Recursive Resolver) cache commands
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
@@ -25,7 +26,9 @@ IMR (Internal Recursive Resolver) cache commands
 * [tdns-cli agent imr dump-tuning](tdns-cli_agent_imr_dump-tuning.md)	 - Show effective IMR tuning values (backoff policy, family, discovery, etc.)
 * [tdns-cli agent imr dump-zone-backoffs](tdns-cli_agent_imr_dump-zone-backoffs.md)	 - Show zone-scoped lame-delegation backoffs (per zone, per address)
 * [tdns-cli agent imr flush](tdns-cli_agent_imr_flush.md)	 - Flush IMR cache entries at and below qname
+* [tdns-cli agent imr forward](tdns-cli_agent_imr_forward.md)	 - Inspect and probe the IMR's forward zones
 * [tdns-cli agent imr query](tdns-cli_agent_imr_query.md)	 - Query the IMR cache (cache-only, no external queries)
 * [tdns-cli agent imr reset](tdns-cli_agent_imr_reset.md)	 - Flush entire IMR cache and re-prime (preserves root NS)
 * [tdns-cli agent imr show](tdns-cli_agent_imr_show.md)	 - Show IMR cache entries related to agent discovery
+* [tdns-cli agent imr stub](tdns-cli_agent_imr_stub.md)	 - Inspect and probe the IMR's stub zones
 

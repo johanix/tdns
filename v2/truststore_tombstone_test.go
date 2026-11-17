@@ -79,7 +79,7 @@ func selfSignedUploadFrom(t *testing.T, zone string, key *dns.KEY) *dns.Msg {
 func uploadVerdict(t *testing.T, zd *ZoneData, r *dns.Msg) (bool, uint16) {
 	t.Helper()
 	us := &UpdateStatus{Type: "TRUSTSTORE-UPDATE"}
-	if err := zd.ValidateUpdate(context.Background(), r, us); err != nil {
+	if err := zd.ValidateUpdate(context.Background(), r, nil, us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
 	}
 	if err := zd.TrustUpdate(r, us); err != nil {
@@ -201,7 +201,7 @@ func TestADeletedKeyFoundInDnsIsNotRecorded(t *testing.T) {
 	stubSig0Verify(t)
 
 	us := &UpdateStatus{}
-	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), nil, us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
 	}
 	for _, done := range us.verifications {

@@ -1,6 +1,6 @@
 ## tdns-cli auth zone bump
 
-Bump SOA serial and epoch (if any) in tdns-auth version of zone
+Bump SOA serial and epoch (if any) in the daemon's version of the zone
 
 ```
 tdns-cli auth zone bump [flags]
@@ -21,6 +21,7 @@ tdns-cli auth zone bump [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
