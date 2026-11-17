@@ -44,10 +44,14 @@ pub.test.    ns1.pub.test.    127.0.0.51  -
 
 suites() { sed -n 's/^suite_\([a-z0-9_]*\)().*/\1/p' "$RIG"/suites/*.sh; }
 
+# A suite is green when nothing failed and something passed. A skip is never a
+# pass, so a suite whose every check skipped showed nothing: it is not green,
+# and neither is the run.
 summary() {
 	echo "----"
 	echo "$1: $NPASS pass, $NFAIL fail, $NSKIP skip"
-	[ "$NFAIL" -eq 0 ]
+	[ "$NFAIL" -eq 0 ] || return 1
+	[ "$NPASS" -gt 0 ] || { echo "$1: nothing passed, so it is not green"; return 1; }
 }
 
 # Keys for one signed child: start its primary once with an empty zone, wait
