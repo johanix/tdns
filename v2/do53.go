@@ -375,8 +375,12 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 				// Try registered handlers
 				handled := false
 				for _, handler := range handlers {
+					// Each handler gets a writer that notes whether it wrote
+					// to the connection, so that a failure can be told from
+					// a NOTIFY the handler did not take (see below).
+					aw := newAnswerSignalWriter(w)
 					dnr := DnsNotifyRequest{
-						ResponseWriter: w,
+						ResponseWriter: aw,
 						Msg:            r,
 						Qname:          qname,
 						Options:        msgoptions,
@@ -400,7 +404,20 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 						lgDns.Debug("DnsHandler: NOTIFY handler returned ErrNotHandled, trying next handler")
 						continue
 					} else {
-						// Handler attempted to handle but failed
+						if aw.hasAnswered() {
+							// The handler took this NOTIFY and wrote its reply
+							// (or tried to; the sender may have hung up), then
+							// returned an error. The message is answered, or as
+							// answered as it will get: no other handler and
+							// not the default responder may answer it again.
+							// The handler reports its own failure; this only
+							// says why the dispatch stops here.
+							lgDns.Warn("DnsHandler: NOTIFY handler failed after replying; not trying other handlers",
+								"qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
+							return
+						}
+						// Handler failed before it wrote anything, so the
+						// sender has had no answer yet
 						lgDns.Error("DnsHandler: NOTIFY handler error", "err", err)
 						// Continue to next handler or fall back to default
 						continue
@@ -442,6 +459,7 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 			dur := DnsUpdateRequest{
 				ResponseWriter: w,
 				Msg:            r,
+				Wire:           requestWire(w),
 				Qname:          qname,
 				Options:        msgoptions,
 				Status:         &UpdateStatus{},
@@ -481,9 +499,17 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 			// Backward compatibility: If DnsUpdateQ channel is provided, route UPDATEs there
 			// (This is the old way, kept for backward compatibility)
 			if dnsupdateq != nil {
-				// A DNS Update may trigger time consuming outbound queries
-				dnsupdateq <- dur
-				// Not waiting for a result
+				// The UPDATE is processed and answered by UpdateResponder, on
+				// another goroutine and often after the change has been
+				// published. This handler waits for that answer before it
+				// returns, because the transport acts on its return: a
+				// TCP/DoT server starts its idle timer and closes the
+				// connection when it runs out, and DoH sends whatever its
+				// buffer holds. Returning at once lost every answer later than
+				// the idle timeout. See handOverAndWaitForAnswer.
+				aw := newAnswerSignalWriter(dur.ResponseWriter)
+				dur.ResponseWriter = aw
+				handOverAndWaitForAnswer(ctx, dnsupdateq, dur, aw, qname)
 				return
 			}
 

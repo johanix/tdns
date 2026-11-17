@@ -299,7 +299,7 @@ func newKidZone(t *testing.T) kidZone {
 	t.Helper()
 	ksk := &dns.DNSKEY{Hdr: dns.RR_Header{Name: secKid, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 257, Protocol: 3, Algorithm: dns.ED25519}
-	priv, err := ksk.Generate(256)
+	priv, err := generateSigningKey(ksk, 256)
 	if err != nil {
 		t.Fatal(err)
 	}

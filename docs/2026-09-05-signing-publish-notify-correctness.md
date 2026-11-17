@@ -493,6 +493,12 @@ type ResignRequest struct {
 | `ResignPeriodic` | watchlist registration only; the ticker's `RenewZoneSignatures` decides when a pass is due |
 | data changed | **nothing** — never enqueued; C1 signed it at publish |
 
+> **Since #1033 (2026-11-11):** `ResignPeriodic` is gone, and `ResignQ` carries only
+> `ResignKeyStateChanged`. A registration sent on the queue timed out whenever the resigner was
+> busy, and the zone's signatures then expired. Registration is now a flag on the ZoneData
+> (`KeepRenewed`), and the resigner's pass walks `Zones`. See
+> `2026-11-11-tdns-1033-resigner-registration-scope.md`.
+
 A third reason, `ResignPolicyApplied`, was sketched and **not implemented**: no producer needs
 it. The policy apply signs directly through `applyZonePolicyTransactional` →
 `SignZone(kdb, true)` rather than going through the queue, so the constant would have had no
@@ -536,6 +542,10 @@ func (zd *ZoneData) registerForPeriodicResign(resignq chan<- ResignRequest) erro
 ```
 
 No inline sign, no forced re-sign, no second publish.
+
+> **Since #1033 (2026-11-11):** `func (zd *ZoneData) registerForPeriodicResign()`, with no queue
+> and no error. It runs the checks and sets the zone's watchlist flag (`KeepRenewed`), so it can
+> neither fail nor wait.
 
 Nothing signs there any more because by the time it runs something already has: a refresh
 signs its content before the swap (C1), a policy apply signs when it binds, and a restart signs

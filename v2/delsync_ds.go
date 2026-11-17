@@ -684,6 +684,7 @@ func (zd *ZoneData) sendDSViaNotify(ctx context.Context, kdb *KeyDB, notifyq cha
 		RRtype:   dns.TypeCDS,
 		Targets:  target.Addresses,
 		Response: respCh,
+		Ctx:      notifyCtx,
 	}) {
 		out.Category = SoftfailTransport
 		return out, fmt.Errorf("sendDSViaNotify: enqueue NOTIFY: %w", notifyCtx.Err())

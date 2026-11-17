@@ -98,7 +98,7 @@ func TestModifiedDownstreamZoneIsResolved(t *testing.T) {
 	// The DS UPDATE #863 saw refused as incoherent: the child's keys could not
 	// be looked up.
 	next := newFwdSecKey(t, ownChild).dnskey.ToDS(dns.SHA256)
-	if err := rig.parent.CheckDelegationCoherenceForUpdate([]dns.RR{next}, imrDnskeyFetcher(rig.imr)); err != nil {
+	if err := rig.parent.CheckDelegationCoherenceForUpdate([]dns.RR{next}, resolverDnskeyFetcher(rig.imr)); err != nil {
 		t.Errorf("coherence check on adding a DS for %s: %v", ownChild, err)
 	}
 	requireUpstreamNotAsked(t, rig.upLog, ownParent)
@@ -163,7 +163,7 @@ func TestModifiedDownstreamTakesEffectOnReload(t *testing.T) {
 		t.Errorf("www.%s A after the reload: %+v (err %v), want the published 192.0.2.55, validated", ownChild, resp, err)
 	}
 	next := newFwdSecKey(t, ownChild).dnskey.ToDS(dns.SHA256)
-	if err := rig.parent.CheckDelegationCoherenceForUpdate([]dns.RR{next}, imrDnskeyFetcher(rig.imr)); err != nil {
+	if err := rig.parent.CheckDelegationCoherenceForUpdate([]dns.RR{next}, resolverDnskeyFetcher(rig.imr)); err != nil {
 		t.Errorf("coherence check after the reload: %v", err)
 	}
 }

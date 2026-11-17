@@ -77,7 +77,7 @@ func (s *signedRootForward) anchor(t *testing.T, set func(ic *ImrEngineConf)) {
 	t.Helper()
 	conf := &Config{}
 	set(&conf.Imr)
-	s.imr.loadConfiguredTrustAnchors(conf)
+	s.imr.loadConfiguredTrustAnchors(conf.Imr)
 }
 
 // anchorParentDNSKEY configures the parent's key as a DNSKEY trust anchor.
@@ -271,8 +271,8 @@ func TestTrustAnchorDNSKEYIsFetchedThroughTheForward(t *testing.T) {
 
 	conf := &Config{}
 	conf.Imr.TrustAnchorDNSKEY = root.dnskey.String()
-	imr.loadConfiguredTrustAnchors(conf)
-	if err := imr.initializeImrTrustAnchors(context.Background(), conf); err != nil {
+	imr.loadConfiguredTrustAnchors(conf.Imr)
+	if err := imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
 		t.Fatalf("initializeImrTrustAnchors: %v", err)
 	}
 	if crr := imr.Cache.Get(".", dns.TypeDNSKEY); crr == nil || crr.State != cache.ValidationStateSecure {

@@ -62,12 +62,12 @@ func fetcherValidated(validated bool, keys ...*dns.DNSKEY) dnskeyFetcher {
 	if validated {
 		state = cache.ValidationStateSecure
 	}
-	return func(string) (*core.RRset, cache.ValidationState, error) {
+	return func(string, childServers) ([]dnskeyCopy, error) {
 		rrset := &core.RRset{Name: cohChild, Class: dns.ClassINET, RRtype: dns.TypeDNSKEY}
 		for _, k := range keys {
 			rrset.RRs = append(rrset.RRs, k)
 		}
-		return rrset, state, nil
+		return []dnskeyCopy{{RRset: rrset, State: state}}, nil
 	}
 }
 
@@ -83,12 +83,12 @@ func TestCoherenceIgnoresUpdatesThatDoNotTouchDS(t *testing.T) {
 	}
 
 	called := false
-	fetch := func(string) (*core.RRset, cache.ValidationState, error) {
+	fetch := func(string, childServers) ([]dnskeyCopy, error) {
 		called = true
-		return nil, 0, fmt.Errorf("should not have been called")
+		return nil, fmt.Errorf("should not have been called")
 	}
 
-	if err := CheckDelegationCoherence(cohChild, []dns.RR{ds}, []dns.RR{ns}, fetch); err != nil {
+	if err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{ds}, []dns.RR{ns}, fetch); err != nil {
 		t.Fatalf("an NS-only update was refused: %v", err)
 	}
 	if called {
@@ -102,11 +102,11 @@ func TestCoherenceAllowsClearingTheDS(t *testing.T) {
 	_, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
 	called := false
-	fetch := func(string) (*core.RRset, cache.ValidationState, error) {
+	fetch := func(string, childServers) ([]dnskeyCopy, error) {
 		called = true
-		return nil, cache.ValidationStateSecure, nil
+		return []dnskeyCopy{{State: cache.ValidationStateSecure}}, nil
 	}
-	if err := CheckDelegationCoherence(cohChild, []dns.RR{ds}, []dns.RR{delDSRRset()}, fetch); err != nil {
+	if err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{ds}, []dns.RR{delDSRRset()}, fetch); err != nil {
 		t.Fatalf("clearing the DS was refused: %v", err)
 	}
 	if called {
@@ -122,7 +122,7 @@ func TestCoherenceAllowsAPrePublishedDS(t *testing.T) {
 	liveKey, liveDS := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 	_, incomingDS := cohKey(t, "1G+3r1iVxr1l3jWgTnKEWXDNQSa8iiRWS/5Hi1ECTE1=")
 
-	err := CheckDelegationCoherence(cohChild,
+	err := CheckDelegationCoherence(cohChild, childServers{},
 		[]dns.RR{liveDS},
 		[]dns.RR{addDS(incomingDS)},
 		fetcherFor(liveKey))
@@ -137,7 +137,7 @@ func TestCoherenceRefusesADSSetMatchingNoPublishedKey(t *testing.T) {
 	liveKey, liveDS := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 	_, unpublishedDS := cohKey(t, "1G+3r1iVxr1l3jWgTnKEWXDNQSa8iiRWS/5Hi1ECTE1=")
 
-	err := CheckDelegationCoherence(cohChild,
+	err := CheckDelegationCoherence(cohChild, childServers{},
 		[]dns.RR{liveDS},
 		[]dns.RR{delOneDS(liveDS), addDS(unpublishedDS)},
 		fetcherFor(liveKey))
@@ -154,7 +154,7 @@ func TestCoherenceRefusesADSSetMatchingNoPublishedKey(t *testing.T) {
 func TestCoherenceAllowsBootstrappingWithAMatchingDS(t *testing.T) {
 	key, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
-	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)}, fetcherFor(key)); err != nil {
+	if err := CheckDelegationCoherence(cohChild, childServers{}, nil, []dns.RR{addDS(ds)}, fetcherFor(key)); err != nil {
 		t.Fatalf("bootstrapping with a matching DS was refused: %v", err)
 	}
 }
@@ -164,10 +164,10 @@ func TestCoherenceAllowsBootstrappingWithAMatchingDS(t *testing.T) {
 func TestCoherenceRefusesWhenTheDNSKEYLookupFails(t *testing.T) {
 	_, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
-	fetch := func(string) (*core.RRset, cache.ValidationState, error) {
-		return nil, 0, fmt.Errorf("no route to host")
+	fetch := func(string, childServers) ([]dnskeyCopy, error) {
+		return nil, fmt.Errorf("no route to host")
 	}
-	err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)}, fetch)
+	err := CheckDelegationCoherence(cohChild, childServers{}, nil, []dns.RR{addDS(ds)}, fetch)
 	if err == nil {
 		t.Fatal("a DS change was accepted despite the DNSKEY lookup failing")
 	}
@@ -251,13 +251,13 @@ func TestCoherenceIgnoresANoOpDSChange(t *testing.T) {
 	_, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
 	called := false
-	fetch := func(string) (*core.RRset, cache.ValidationState, error) {
+	fetch := func(string, childServers) ([]dnskeyCopy, error) {
 		called = true
-		return nil, 0, fmt.Errorf("should not have been called")
+		return nil, fmt.Errorf("should not have been called")
 	}
 
 	// Re-adding the DS that is already published changes nothing.
-	if err := CheckDelegationCoherence(cohChild, []dns.RR{ds}, []dns.RR{addDS(ds)}, fetch); err != nil {
+	if err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{ds}, []dns.RR{addDS(ds)}, fetch); err != nil {
 		t.Fatalf("a no-op DS re-add was refused: %v", err)
 	}
 	if called {
@@ -272,7 +272,7 @@ func TestCoherenceRefusesAnUnvalidatedAnswerWhenTheChildAlreadyHasADS(t *testing
 	liveKey, liveDS := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 	_, otherDS := cohKey(t, "1G+3r1iVxr1l3jWgTnKEWXDNQSa8iiRWS/5Hi1ECTE1=")
 
-	err := CheckDelegationCoherence(cohChild,
+	err := CheckDelegationCoherence(cohChild, childServers{},
 		[]dns.RR{liveDS},
 		[]dns.RR{addDS(otherDS)},
 		fetcherUnvalidated(liveKey))
@@ -285,7 +285,7 @@ func TestCoherenceRefusesAnUnvalidatedAnswerWhenTheChildAlreadyHasADS(t *testing
 	}
 
 	// The same change with a validated answer is fine.
-	if err := CheckDelegationCoherence(cohChild, []dns.RR{liveDS},
+	if err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{liveDS},
 		[]dns.RR{addDS(otherDS)}, fetcherFor(liveKey)); err != nil {
 		t.Fatalf("a validated answer was refused: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestCoherenceAllowsBootstrapWithAnUnvalidatedAnswer(t *testing.T) {
 	key, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
 	// No DS at the parent: the first one.
-	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)},
+	if err := CheckDelegationCoherence(cohChild, childServers{}, nil, []dns.RR{addDS(ds)},
 		fetcherUnvalidated(key)); err != nil {
 		t.Fatalf("first-DS bootstrap was refused: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestCoherenceAllowsBootstrapWithAnUnvalidatedAnswer(t *testing.T) {
 	// The DS must still match a key the child actually publishes. Bootstrap
 	// relaxes the validation requirement, not the matching one.
 	_, unrelatedDS := cohKey(t, "1G+3r1iVxr1l3jWgTnKEWXDNQSa8iiRWS/5Hi1ECTE1=")
-	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(unrelatedDS)},
+	if err := CheckDelegationCoherence(cohChild, childServers{}, nil, []dns.RR{addDS(unrelatedDS)},
 		fetcherUnvalidated(key)); err == nil {
 		t.Error("bootstrap accepted a DS matching no published key")
 	}
@@ -330,7 +330,7 @@ func TestCoherenceAcceptsAZoneBitCSK(t *testing.T) {
 	}
 	ds := csk.ToDS(dns.SHA256)
 
-	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)}, fetcherFor(csk)); err != nil {
+	if err := CheckDelegationCoherence(cohChild, childServers{}, nil, []dns.RR{addDS(ds)}, fetcherFor(csk)); err != nil {
 		t.Fatalf("a DS hashing a ZONE-bit CSK was refused: %v", err)
 	}
 }

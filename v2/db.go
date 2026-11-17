@@ -8,33 +8,96 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
+	"sync"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// keystoreBusyTimeoutMs is how long a keystore statement waits for a lock that
+// another connection holds before it fails with "database is locked". The same
+// bound is how long KeyDB.Begin waits for another transaction's Ctx to clear.
+const keystoreBusyTimeoutMs = 5000
+
+// keystoreBeginWait is how long Begin waits for an in-progress transaction.
+// Tests may shorten it; production keeps the busy-timeout bound.
+var keystoreBeginWait = time.Duration(keystoreBusyTimeoutMs) * time.Millisecond
+
+// keystoreDSN is the DSN NewKeyDB opens the sqlite keystore at path with.
+// The options apply to every connection the pool opens:
+//
+//   - _busy_timeout: a statement that meets a lock waits this long for it.
+//     The driver's default is the same 5 s; it is named here so that a
+//     driver change cannot lower it.
+//   - _txlock=immediate: Begin takes the write lock at BEGIN, where the busy
+//     timeout covers the wait. A deferred transaction that reads and then
+//     writes must upgrade its lock half way, and when another connection
+//     writes at that moment SQLite fails the write at once, without waiting:
+//     the busy timeout cannot help there.
+//
+// The path goes into a URI, so the characters that SQLite's URI parser or the
+// driver's option split would read as syntax are escaped. An absolute path
+// gets an empty authority (file:///...), so a path that starts with "//" is
+// not read as a host.
+func keystoreDSN(path string) string {
+	p := strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23").Replace(path)
+	if strings.HasPrefix(p, "/") {
+		p = "//" + p
+	}
+	return fmt.Sprintf("file:%s?_busy_timeout=%d&_txlock=immediate", p, keystoreBusyTimeoutMs)
+}
+
 func (tx *Tx) Commit() error {
 	// log.Printf("---> Committing KeyDB transaction: %s", tx.context)
+	// Claimed before the end itself: database/sql marks the tx done before
+	// the driver call, so a racing second end could otherwise return first
+	// and clear Ctx while this one still runs.
+	if !tx.ended.CompareAndSwap(false, true) {
+		return sql.ErrTxDone
+	}
 	err := tx.Tx.Commit()
-	tx.KeyDB.mu.Lock()
-	tx.KeyDB.Ctx = ""
-	tx.KeyDB.mu.Unlock()
+	tx.KeyDB.clearTxCtx()
 	if err != nil {
 		lgConfig.Error("error committing KeyDB transaction", "context", tx.context, "err", err)
+		return err
 	}
-	return err
+	for _, f := range tx.afterCommit {
+		f()
+	}
+	return nil
+}
+
+// OnCommit registers f to run once tx has committed, and not at all if it is
+// rolled back: for work that must not happen before the change is visible to
+// other connections, such as dropping a cache entry that a reader could
+// otherwise refill from the old row.
+func (tx *Tx) OnCommit(f func()) {
+	tx.afterCommit = append(tx.afterCommit, f)
 }
 
 func (tx *Tx) Rollback() error {
 	// log.Printf("<--- Rolling back KeyDB transaction: %s", tx.context)
+	if !tx.ended.CompareAndSwap(false, true) {
+		return sql.ErrTxDone
+	}
 	err := tx.Tx.Rollback()
-	tx.KeyDB.mu.Lock()
-	tx.KeyDB.Ctx = ""
-	tx.KeyDB.mu.Unlock()
+	tx.KeyDB.clearTxCtx()
 	if err != nil {
 		lgConfig.Error("error rolling back KeyDB transaction", "context", tx.context, "err", err)
 	}
 	return err
+}
+
+// clearTxCtx drops the in-progress Begin context and wakes any waiter.
+func (db *KeyDB) clearTxCtx() {
+	db.mu.Lock()
+	db.Ctx = ""
+	if db.txCond != nil {
+		db.txCond.Broadcast()
+	}
+	db.mu.Unlock()
 }
 
 func (tx *Tx) Exec(query string, args ...interface{}) (sql.Result, error) {
@@ -66,20 +129,39 @@ func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
 
 func (db *KeyDB) Begin(context string) (*Tx, error) {
 	// log.Printf("---> Beginning KeyDB transaction: %s", context)
+	deadline := time.Now().Add(keystoreBeginWait)
+
 	db.mu.Lock()
-	if db.Ctx != "" {
-		ctx := db.Ctx
-		db.mu.Unlock()
-		lgConfig.Error("KeyDB transaction already in progress", "context", ctx) // captured under lock; don't re-read db.Ctx unlocked
-		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", ctx)
+	if db.txCond == nil {
+		db.txCond = sync.NewCond(&db.mu)
+	}
+	for db.Ctx != "" {
+		holder := db.Ctx
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			db.mu.Unlock()
+			lgConfig.Error("KeyDB.Begin timed out waiting for in-progress transaction",
+				"holder", holder, "waiter", context)
+			return nil, fmt.Errorf("KeyDB.Begin timed out waiting for transaction %q (waiter %q)", holder, context)
+		}
+		lgConfig.Info("KeyDB.Begin waiting for in-progress transaction",
+			"holder", holder, "waiter", context)
+		// Wake Wait when the bound elapses so we can return a clear timeout
+		// naming both the holder and this waiter. Commit/Rollback Broadcast too.
+		timer := time.AfterFunc(remaining, func() {
+			db.mu.Lock()
+			db.txCond.Broadcast()
+			db.mu.Unlock()
+		})
+		db.txCond.Wait()
+		timer.Stop()
 	}
 	db.Ctx = context
 	db.mu.Unlock()
+
 	tx, err := db.DB.Begin()
 	if err != nil {
-		db.mu.Lock()
-		db.Ctx = ""
-		db.mu.Unlock()
+		db.clearTxCtx()
 		lgConfig.Error("error beginning transaction", "context", context, "err", err)
 		return nil, err
 	}
@@ -236,6 +318,11 @@ func dbMigrateSchema(db *sql.DB) {
 		// on the next write instead of accusing the operator of editing a file
 		// they never touched.
 		{"ZoneFileState", "digest_variant", "ALTER TABLE ZoneFileState ADD COLUMN digest_variant INTEGER NOT NULL DEFAULT 0"},
+		// A digest of the content published at the recorded serial, so a
+		// restart that loads the same content can serve that serial again
+		// (#1006). NULL, "not known", for every row an older tdns wrote, which
+		// is exactly right: the restart then lifts past it as before.
+		{"OutgoingSerials", "content_digest", "ALTER TABLE OutgoingSerials ADD COLUMN content_digest TEXT"},
 		// Rollover overhaul phase 2: softfail-state columns on RolloverZoneState.
 		// All NULL/0-default so existing testbed rows remain valid post-migration.
 		{"RolloverZoneState", "hardfail_count", "ALTER TABLE RolloverZoneState ADD COLUMN hardfail_count INTEGER NOT NULL DEFAULT 0"},
@@ -390,9 +477,29 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 	if err := os.Chmod(dbfile, 0664); err != nil {
 		return nil, fmt.Errorf("NewKeyDB: TDNS Error trying to ensure that db %s is writable: %v", dbfile, err)
 	}
-	db, err := sql.Open("sqlite3", dbfile)
+	db, err := sql.Open("sqlite3", keystoreDSN(dbfile))
 	if err != nil {
 		return nil, fmt.Errorf("NewKeyDB: TDNS Error from sql.Open: %v", err)
+	}
+	// WAL: readers do not hold off a writer's commit, and a writer does not
+	// block readers. In the rollback journal a commit waits for every reader
+	// to finish, and every key-row write is followed by a keystore read
+	// (republishSigningKeysForZone). The mode is stored in the file, so it is
+	// set once here rather than in the DSN, where every new pooled connection
+	// would set it again; an older keystore switches on its first open. Recent
+	// commits live in the -wal file next to the keystore until a checkpoint
+	// moves them in: a copy of the keystore file alone can miss them. The
+	// first statement also opens the file and applies the DSN options. SQLite
+	// keeps the old journal mode, without an error, where it cannot use WAL,
+	// and the pragma answers with the mode it kept.
+	var journalMode string
+	if err := db.QueryRow("PRAGMA journal_mode=WAL").Scan(&journalMode); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("NewKeyDB: opening %s: %v", dbfile, err)
+	}
+	if !strings.EqualFold(journalMode, "wal") {
+		lgConfig.Warn("keystore is not in WAL mode; concurrent writes may fail with \"database is locked\"",
+			"file", dbfile, "journal_mode", journalMode)
 	}
 
 	if force {
@@ -407,6 +514,12 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 			}
 		}
 	}
+	return openKeyDB(db, dbfile, options)
+}
+
+// openKeyDB sets up the tables in db and returns the KeyDB on it; dbfile is
+// what the KeyDB records as its file. On an error it closes db.
+func openKeyDB(db *sql.DB, dbfile string, options map[AuthOption]string) (*KeyDB, error) {
 	dbSetupTables(db)
 	kdb := &KeyDB{
 		DB:                  db,
@@ -415,6 +528,7 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 		TruststoreSig0Cache: NewSig0StoreT(),
 		UpdateQ:             make(chan UpdateRequest),
 	}
+	kdb.txCond = sync.NewCond(&kdb.mu)
 	kdb.SetOptions(options)
 	// Prime the empty-ledger fast path the signal-name reconciler consults on
 	// every zone refresh (db_signal_publication.go).
@@ -431,4 +545,46 @@ func NewSig0StoreT() *Sig0StoreT {
 	return &Sig0StoreT{
 		Map: core.NewCmap[Sig0Key](),
 	}
+}
+
+// The truststore cache is filled on a miss from a read made outside any
+// transaction. In WAL mode that read sees the last committed row, so while a
+// change to the row is still uncommitted -- a child's key being deleted, say
+// -- a miss elsewhere reads the row as it was and can cache it. Removing the
+// entry inside the transaction does not stop that, and removing it again after
+// the commit does not either: a read that began before the commit can store
+// its result after that removal. So a change drops the entry once more after
+// its commit and moves a generation on, and a fill stores its result only if
+// the generation it read before its query is still current.
+
+// generation is read by a cache fill before its database query.
+func (s *Sig0StoreT) generation() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gen
+}
+
+// fillIfCurrent caches what a miss read, unless a truststore change has
+// committed since gen was read: the read may predate it.
+func (s *Sig0StoreT) fillIfCurrent(gen uint64, key string, sk Sig0Key) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen == gen {
+		s.Map.Set(key, sk)
+	}
+}
+
+// invalidate drops key and moves the generation on. Called after a commit.
+func (s *Sig0StoreT) invalidate(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Map.Remove(key)
+	s.gen++
+}
+
+// dropSig0CacheEntry removes the cache entry of a truststore row that tx
+// changes: now, and again once tx has committed (see fillIfCurrent).
+func (kdb *KeyDB) dropSig0CacheEntry(tx *Tx, key string) {
+	kdb.TruststoreSig0Cache.Map.Remove(key)
+	tx.OnCommit(func() { kdb.TruststoreSig0Cache.invalidate(key) })
 }

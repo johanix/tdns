@@ -128,6 +128,37 @@ recovering a keystore you know to be wrong.`, classLabel(class)),
 		return
 	}
 
+	// SIG(0) has neither a .state file to read nor a --from flag, so the parts
+	// of the help that describe those are DNSSEC's alone.
+	stateDoc := `Key state comes from bind's .state file (9.16+, dnssec-policy zones), mapped
+onto tdns's states. A key with no .state file has no state to read, and it is
+not guessed -- pass --state to say which one applies. Guessing wrong is how a
+retired key gets published again.`
+	cascadeDoc := `
+
+--from cascade (DNSSEC only) converts the keys of zones signed by NLnet Labs'
+Cascade, so a zone moves to tdns with the same keys and the parent's DS is left
+as it is. Give each zone's dnst state file with --state-file (in Cascade's
+keys-dir, <zone>.state) and a NEW directory with --dest: Cascade's files are
+only read, never rewritten. The state file decides each key's tdns state, and
+the conversion is refused unless the result reproduces the DNSKEY RRset and DS
+set Cascade serves. A key roll in progress is refused unless
+--allow-roll-in-progress; another signer's key in the DNSKEY RRset is refused
+unless --multi-signer (the target is tdns-mpsigner, which takes such keys from
+its incoming zone). See docs/2026-09-16-cascade-key-migration.md.`
+	stateHelp := "Key state for keys with no .state file (required only for those; --from bind)"
+	fromBind := " (--from bind)"
+	if class == "sig0" {
+		stateDoc = `SIG(0) keys are not managed by dnssec-policy, so there is no key state to
+read: a .state file beside a key is ignored. --state names the state that
+every key the run converts gets: created, published, active or retired. It is
+required whenever there is a key to convert, because it is not guessed:
+guessing wrong is how a retired key gets published again.`
+		cascadeDoc = ""
+		stateHelp = "Key state for every key converted: created, published, active or retired (required)"
+		fromBind = ""
+	}
+
 	bulkConvert := &cobra.Command{
 		Use:   "bulk-convert",
 		Short: fmt.Sprintf("Convert a directory of bind9 %s keys into one tdns can pre-load", classLabel(class)),
@@ -141,34 +172,19 @@ This rewrites each .private in place as PEM, keeping the original alongside as
 .private.orig, and writes the manifest. The .key files are NOT touched: they
 already hold the public RR in exactly the form tdns exports.
 
-Key state comes from bind's .state file (9.16+, dnssec-policy zones), mapped
-onto tdns's states. A key with no .state file has no state to read, and it is
-not guessed -- pass --state to say which one applies. Guessing wrong is how a
-retired key gets published again.
+%s
 
 Runs entirely locally: no daemon, no API, no keystore. That is the point --
 these directories are built and committed before the server that serves them
-exists. Re-running is safe; already-converted keys are left alone.
-
---from cascade (DNSSEC only) converts the keys of zones signed by NLnet Labs'
-Cascade, so a zone moves to tdns with the same keys and the parent's DS is left
-as it is. Give each zone's dnst state file with --state-file (in Cascade's
-keys-dir, <zone>.state) and a NEW directory with --dest: Cascade's files are
-only read, never rewritten. The state file decides each key's tdns state, and
-the conversion is refused unless the result reproduces the DNSKEY RRset and DS
-set Cascade serves. A key roll in progress is refused unless
---allow-roll-in-progress; another signer's key in the DNSKEY RRset is refused
-unless --multi-signer (the target is tdns-mpsigner, which takes such keys from
-its incoming zone). See docs/2026-09-16-cascade-key-migration.md.`, classLabel(class)),
+exists. Re-running is safe; already-converted keys are left alone.%s`, classLabel(class), stateDoc, cascadeDoc),
 		Run: func(cmd *cobra.Command, args []string) {
 			bulkConvertRun(class, f)
 		},
 	}
-	bulkConvert.Flags().StringVar(&f.dir, "dir", "", "Directory of bind9 key files to convert in place (--from bind)")
-	bulkConvert.Flags().StringVar(&f.state, "state", "",
-		"Key state for keys with no .state file (required only for those; --from bind)")
+	bulkConvert.Flags().StringVar(&f.dir, "dir", "", "Directory of bind9 key files to convert in place"+fromBind)
+	bulkConvert.Flags().StringVar(&f.state, "state", "", stateHelp)
 	bulkConvert.Flags().BoolVar(&f.noBackup, "no-backup", false,
-		"Do not keep the original bind-format key as .private.orig (--from bind)")
+		"Do not keep the original bind-format key as .private.orig"+fromBind)
 	if class == "dnssec" {
 		bulkConvert.Short = "Convert DNSSEC keys written by bind9 or Cascade into a directory tdns can pre-load"
 		bulkConvert.Flags().StringVar(&f.from, "from", "bind", "Signer that wrote the keys: bind or cascade")

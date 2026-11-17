@@ -75,6 +75,25 @@ func (zd *ZoneData) recordPublishedSerialLocked(serial uint32) {
 	}
 }
 
+// recordPublishedContentDigestLocked stores the digest of the content about to
+// be published at serial, beside that serial (#1006). The next start compares
+// it with what it loads: equal, and it serves serial again instead of the next
+// one, so a restart with nothing changed transfers nothing.
+//
+// Best-effort: without a digest the restart lifts the serial as before, which
+// costs a transfer and nothing else.
+func (zd *ZoneData) recordPublishedContentDigestLocked(serial uint32, data map[string]*OwnerData) {
+	if zd.KeyDB == nil || zd.KeyDB.DB == nil {
+		return
+	}
+	digest := authoredContentDigest(zd.ZoneName, data, zd.contentTerms())
+	if err := zd.KeyDB.SetPublishedContentDigest(zd.ZoneName, serial, digest); err != nil {
+		lg.Warn("publish: could not record the published content digest; the next restart"+
+			" will publish this content under a new serial",
+			"zone", zd.ZoneName, "serial", serial, "err", err)
+	}
+}
+
 // PublishedSerialFloor returns the highest serial zone is known to have
 // published, and whether anything is known at all: the newer, in RFC 1982
 // order, of the recorded published serial and the journal's tail.

@@ -165,11 +165,25 @@ func tsigErrorCode(err error) (uint16, string) {
 
 // writeTsigErrorResponse answers a request whose TSIG failed verification with a
 // NOTAUTH message carrying (1) an error TSIG RR — same key name + algorithm, the
-// mapped BADKEY/BADSIG/BADTIME error code, and an EMPTY MAC (a rejected request's
-// response is not signed, RFC 8945 §5.3.2) — and (2) an EDE giving a
-// human-readable reason. The query itself is NOT answered. The message is packed
-// and written raw (w.Write) so the server's WriteMsg does not try to re-sign the
-// deliberately-unsigned error TSIG.
+// mapped BADKEY/BADSIG/BADTIME error code — and (2) an EDE giving a
+// human-readable reason. The query itself is NOT answered.
+//
+// RFC 8945 §5.3.2 splits the error TSIGs in two:
+//
+//   - BADKEY and BADSIG relate to the key or the MAC, so the server cannot (or
+//     must not) sign with it: the error TSIG has an EMPTY MAC. The message is
+//     packed and written raw (w.Write) so the server's WriteMsg does not try to
+//     sign it.
+//
+//   - BADTIME means the MAC verified and only the time was outside the fudge
+//     window (miekg checks the MAC first, as §5.2 requires, and reports ErrTime
+//     only after it). That response MUST be signed with the request's key
+//     (§5.2.3), with the request MAC in the digest. Time Signed and Fudge are
+//     the CLIENT's, echoed from the request, so that a client with a skewed
+//     clock can still verify the response; the server's own time goes in Other
+//     Data. It is written through w.WriteMsg: the server's writer holds the
+//     request MAC and the provider, and its TsigGenerateWithProvider signs any
+//     error TSIG other than BADKEY and BADSIG.
 func writeTsigErrorResponse(w dns.ResponseWriter, r *dns.Msg, reqTsig *dns.TSIG, tsigErr error) {
 	code, reason := tsigErrorCode(tsigErr)
 
@@ -187,15 +201,24 @@ func writeTsigErrorResponse(w dns.ResponseWriter, r *dns.Msg, reqTsig *dns.TSIG,
 		Error:      code,
 	}
 	if code == dns.RcodeBadTime {
-		// RFC 8945 §5.2: a BADTIME error TSIG carries the server's current time
-		// (48-bit, 6 bytes) in Other Data so a clock-skewed peer can measure its
-		// offset and correct. OtherData is a hex string of OtherLen bytes.
+		// RFC 8945 §5.2.3 and §5.3.2: the client's Time Signed and Fudge, and the
+		// server's current time (48-bit, 6 bytes) in Other Data, so the client
+		// can measure its offset. OtherData is a hex string of OtherLen bytes.
 		now := uint64(time.Now().Unix())
+		et.TimeSigned = reqTsig.TimeSigned
+		et.Fudge = reqTsig.Fudge
 		et.OtherLen = 6
 		et.OtherData = hex.EncodeToString([]byte{
 			byte(now >> 40), byte(now >> 32), byte(now >> 24),
 			byte(now >> 16), byte(now >> 8), byte(now),
 		})
+		resp.Extra = append(resp.Extra, et)
+		if err := w.WriteMsg(resp); err != nil {
+			lgDns.Warn("TSIG error response: write failed", "keyname", reqTsig.Hdr.Name, "err", err)
+		}
+		lgDns.Info("rejected TSIG-signed request that failed verification",
+			"keyname", reqTsig.Hdr.Name, "reason", reason, "remote", w.RemoteAddr())
+		return
 	}
 	resp.Extra = append(resp.Extra, et)
 

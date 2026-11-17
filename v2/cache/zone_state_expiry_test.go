@@ -47,7 +47,7 @@ func TestAZoneMarkedIndeterminateValidatesOnceTheStateLapses(t *testing.T) {
 
 	k := &dns.DNSKEY{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 256, Protocol: 3, Algorithm: dns.ED25519}
-	priv, err := k.Generate(256)
+	priv, err := generateSigningKey(k, 256)
 	if err != nil {
 		t.Fatal(err)
 	}

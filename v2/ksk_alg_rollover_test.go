@@ -10,8 +10,8 @@ import (
 
 // KSK algorithm rollover test matrix
 // (docs/2026-09-08-ksk-alg-rollover-implementation-plan.md §8). Driven
-// against a real on-disk KeyDB and a real signed zone, with the tick's
-// clock injected through RolloverEngineDeps.Now.
+// against a real KeyDB (newTestKeyDB, in memory) and a real signed zone,
+// with the tick's clock injected through RolloverEngineDeps.Now.
 
 const ktAlgZone = "kskalg.example."
 

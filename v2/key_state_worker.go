@@ -114,13 +114,13 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 	TransitionRolloverKskPublishedToStandby(ctx, conf, kdb, now, propagationDelay)
 	promoteStandbyKskBootstrapAll(conf, kdb)
 
-	transitionPublishedToStandby(conf, kdb, now, propagationDelay)
+	transitionPublishedToStandby(kdb, now, propagationDelay)
 
 	rolloverZsksForAllZones(ctx, conf, kdb, propagationDelay, now)
 
-	transitionRetiredToRemoved(ctx, conf, kdb, now, propagationDelay)
+	transitionRetiredToRemoved(ctx, kdb, now, propagationDelay)
 
-	maintainStandbyKeys(ctx, conf, kdb, propagationDelay, standbyZskCount, standbyKskCount)
+	maintainStandbyKeys(ctx, kdb, propagationDelay, standbyZskCount, standbyKskCount)
 
 	// Last, so the backstop sees every transition this tick made.
 	markZonesForDSEngine(ctx, kdb)
@@ -139,7 +139,7 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 // A global walk: it reaches every zone's published keys. A zone whose
 // lifecycle is OWNED (KeyLifecycleOwner) is different: its owner runs every
 // timer, and this walk leaves its keys alone.
-func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
+func transitionPublishedToStandby(kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStatePublished)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting published keys", "err", err)
@@ -202,10 +202,7 @@ func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propa
 		lgSigner.Info("KeyStateWorker: transitioning published→standby", "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second), "propagation_delay", propagationDelay, "dnskey_ttl", st.ttl)
 		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, DnskeyStateStandby); err != nil {
 			lgSigner.Error("KeyStateWorker: published→standby failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
-			continue
 		}
-
-		triggerResign(conf, key.ZoneName)
 	}
 }
 
@@ -225,7 +222,7 @@ func servedDnskeyTTLForZone(kdb *KeyDB, zone string) (time.Duration, bool) {
 
 // transitionRetiredToRemoved transitions keys that have been in "retired"
 // state long enough for all RRSIGs made with them to expire from caches.
-func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
+func transitionRetiredToRemoved(ctx context.Context, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStateRetired)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting retired keys", "err", err)
@@ -300,12 +297,10 @@ func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, n
 		}
 
 		lgSigner.Info("KeyStateWorker: transitioning retired→removed", "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
+		// The key leaves the served DNSKEY RRset; the write re-signs (#918).
 		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, DnskeyStateRemoved); err != nil {
 			lgSigner.Error("KeyStateWorker: retired→removed failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
-			continue
 		}
-
-		triggerResign(conf, key.ZoneName)
 	}
 }
 
@@ -326,7 +321,7 @@ func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, n
 // unbounded work -- seconds each for a large RSA key, and the PQ algorithms are
 // worse -- so a server with a few hundred signing zones that all wanted a
 // standby key would go on minting them right through shutdown.
-func maintainStandbyKeys(ctx context.Context, conf *Config, kdb *KeyDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
+func maintainStandbyKeys(ctx context.Context, kdb *KeyDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
 	for zoneName, zd := range Zones.Items() {
 		if ctx.Err() != nil {
 			lgSigner.Info("KeyStateWorker: stopping standby-key maintenance on context cancellation")
@@ -363,7 +358,7 @@ func maintainStandbyKeys(ctx context.Context, conf *Config, kdb *KeyDB, propagat
 		if zskCount == 0 && zskReplacementDue(kdb, zoneName, zd.DnssecPolicy, time.Now(), propagationDelay) {
 			zskCount = 1
 		}
-		maintainStandbyKeysForType(ctx, conf, kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, zskCount, relaxed)
+		maintainStandbyKeysForType(ctx, kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, zskCount, relaxed)
 
 		// In relaxed mode, cap the standby-ZSK TOTAL (any algorithm) at
 		// zskCount: with the algorithm-based deletion skipped, an
@@ -379,7 +374,7 @@ func maintainStandbyKeys(ctx context.Context, conf *Config, kdb *KeyDB, propagat
 			// KSK is always per-(role,algorithm): relaxed mode's role-only
 			// discipline is a ZSK-roll property (the ZSK signs the whole zone);
 			// a KSK algorithm change is refused, not gradually rolled, here.
-			maintainStandbyKeysForType(ctx, conf, kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, kskCount, false)
+			maintainStandbyKeysForType(ctx, kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, kskCount, false)
 		}
 	}
 }
@@ -389,10 +384,12 @@ func maintainStandbyKeys(ctx context.Context, conf *Config, kdb *KeyDB, propagat
 // ZSK), the standby/published pipeline counts are by ROLE (flags) only, not by
 // (role, algorithm): N old-algorithm standbys satisfy the count and nothing is
 // generated. When false (strict, or any KSK), counts are per-(role, algorithm).
-// conf is threaded in for triggerResign: a key generated here is PUBLISHED, and
-// FetchZoneDnskeysSql serves published keys, so the moment the row exists the
-// served DNSKEY RRset has a key in it that the current RRSIG does not cover.
-func maintainStandbyKeysForType(ctx context.Context, conf *Config, kdb *KeyDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, standbyKeyCount int, roleOnly bool) {
+//
+// A key generated here is staged PUBLISHED, so it enters the served DNSKEY
+// RRset, and the RRSIG over that RRset was made without it: the zone is bogus
+// until it is re-signed. Adding a key needs the re-sign as much as removing one
+// (#566). The write that stages the key asks for it (#918).
+func maintainStandbyKeysForType(ctx context.Context, kdb *KeyDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, standbyKeyCount int, roleOnly bool) {
 	standbyKeys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateStandby)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting standby keys", "zone", zoneName, "keytype", keytype, "err", err)
@@ -437,22 +434,6 @@ func maintainStandbyKeysForType(ctx context.Context, conf *Config, kdb *KeyDB, z
 		}
 		generated++
 		lgSigner.Info("KeyStateWorker: generated key", "zone", zoneName, "keytype", keytype, "keyid", keyid)
-	}
-
-	// A generated key is staged as PUBLISHED, and FetchZoneDnskeysSql serves
-	// published keys, so it is in the served DNSKEY RRset from this moment --
-	// under an RRSIG that was made over the set without it. That is not a stale
-	// signature, it is a BOGUS zone: a validator gets "no valid signature
-	// found" for the DNSKEY RRset and the whole zone, and everything delegated
-	// beneath it, fails to validate.
-	//
-	// So this is a key-state change like the ones at the two transitions above,
-	// and it takes the same trigger. Adding a key to the RRset needs the
-	// re-sign exactly as much as removing one does -- the keystore DELETE path
-	// has always taken it, which is why deleting the key appeared to "fix" the
-	// zone (#566).
-	if generated > 0 {
-		triggerResign(conf, zoneName)
 	}
 }
 
@@ -534,10 +515,19 @@ func triggerResign(conf *Config, zoneName string) {
 	// clears this only when a replace has actually succeeded.
 	zd.markResignPending()
 
+	// A key-row write that changes the served keys asks from the write path
+	// (#918), and most callers ask again after it. One queued request covers
+	// both: it is taken after both commits.
+	if !zd.resignQueued.CompareAndSwap(false, true) {
+		lgSigner.Debug("KeyStateWorker: re-sign already queued", "zone", zoneName)
+		return
+	}
+
 	select {
 	case conf.Internal.ResignQ <- ResignRequest{Zd: zd, Reason: ResignKeyStateChanged}:
 		lgSigner.Debug("KeyStateWorker: triggered re-sign", "zone", zoneName)
 	default:
+		zd.resignQueued.Store(false)
 		// Dropping used to lose the request outright. The log said it would
 		// happen on the next cycle; that stopped being true when the ticker
 		// moved from a full rebuild to renewal, because renewal only looks at

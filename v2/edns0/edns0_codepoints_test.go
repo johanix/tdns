@@ -98,6 +98,7 @@ func TestEDECodeValues(t *testing.T) {
 		{"EDEDelegationIncoherent", EDEDelegationIncoherent, 543},
 		{"EDEDelegationUnverifiable", EDEDelegationUnverifiable, 544},
 		{"EDESig0UnvalidatedUploadNotAccepted", EDESig0UnvalidatedUploadNotAccepted, 545},
+		{"EDESig0KeyRetired", EDESig0KeyRetired, 546},
 
 		// The standard code must keep its RFC 8914 value and must not be part
 		// of the private sequence.
