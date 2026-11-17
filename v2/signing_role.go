@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/miekg/dns"
@@ -170,9 +171,18 @@ func (zd *ZoneData) BindPolicyWithoutSigning() error {
 // The name is what the configuration says, the empty name for none. A zone with
 // no policy bound records it and nothing else: the role that signs it binds. A
 // zone BindPolicyWithoutSigning bound a policy to follows it, name and policy
-// together: a name over another policy's struct is what a later start would sign
-// under. A name that does not resolve leaves that binding and its name as they
-// were, with a DnssecPolicyWarning, as a signing zone's does.
+// together: a name over another policy's struct, or a policy's old definition
+// under its own name, is what a later start would sign under. So a bound zone is
+// rebound at every reload that names a policy, to the definition the config now
+// has, whether the name changed or only the definition did.
+//
+// A name that does not resolve leaves that binding and its name as they were,
+// with a DnssecPolicyWarning, as a signing zone's does. So does a policy that
+// differs from the bound one in a field the zone's key lifecycle owner runs
+// (ownerPolicyFieldsDiffer: algorithms, lifetimes, standby counts, rollover
+// method): the owner's binding is what changes those, and tdns's policy-set
+// refuses them on an owned zone the same way. A policy that differs only in the
+// mechanism fields (signature validity, TTLs) is followed.
 //
 // Nothing is signed and no last-applied record is written, as in
 // BindPolicyWithoutSigning.
@@ -196,12 +206,12 @@ func (zd *ZoneData) recordPolicyOfNonSigningZone(name string) bool {
 		zd.mu.Unlock()
 		return false
 	}
-	oldName, bound := zd.DnssecPolicyName, zd.DnssecPolicy != nil
+	oldName, oldPol := zd.DnssecPolicyName, zd.DnssecPolicy
 	switch {
-	case name == oldName:
+	case oldPol == nil && name == oldName:
 		zd.mu.Unlock()
 		return true
-	case !bound:
+	case oldPol == nil:
 		zd.DnssecPolicyName = name
 		zd.mu.Unlock()
 		lgSigner.Info("DNSSEC policy of a zone that does not sign changed by a config reload",
@@ -215,7 +225,11 @@ func (zd *ZoneData) recordPolicyOfNonSigningZone(name string) bool {
 			"zone", zd.ZoneName, "was", oldName)
 		return true
 	}
+	// A bound zone and a name: bind what the config defines under it now.
 	pol, newName, err := zd.intendedPolicyNamed(name)
+	if err == nil && zoneOwned(zd) && ownerPolicyFieldsDiffer(oldPol, pol) {
+		err = fmt.Errorf("it differs from the bound policy in a field of the zone's key lifecycle owner")
+	}
 	if err != nil {
 		zd.setErrorLocked(DnssecPolicyWarning, "DNSSEC policy %q cannot be bound: %v; keeping bound policy %q", name, err, oldName)
 		zd.mu.Unlock()
@@ -223,11 +237,19 @@ func (zd *ZoneData) recordPolicyOfNonSigningZone(name string) bool {
 			"zone", zd.ZoneName, "policy", name, "bound", oldName, "err", err)
 		return true
 	}
+	changed := newName != oldName || !reflect.DeepEqual(oldPol, pol)
 	zd.DnssecPolicy, zd.DnssecPolicyName = pol, newName
 	zd.clearErrorLocked(DnssecPolicyWarning)
 	zd.mu.Unlock()
-	lgSigner.Info("DNSSEC policy bound to a zone that does not sign moved by a config reload",
-		"zone", zd.ZoneName, "from", oldName, "to", newName)
+	switch {
+	case !changed:
+	case newName == oldName:
+		lgSigner.Info("DNSSEC policy of a zone that does not sign rebound to its changed definition by a config reload",
+			"zone", zd.ZoneName, "policy", newName)
+	default:
+		lgSigner.Info("DNSSEC policy bound to a zone that does not sign moved by a config reload",
+			"zone", zd.ZoneName, "from", oldName, "to", newName)
+	}
 	return true
 }
 

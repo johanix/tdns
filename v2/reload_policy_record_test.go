@@ -8,6 +8,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -53,10 +54,33 @@ func loadedWithPolicy(t *testing.T, kdb *KeyDB, policy string) *relayedZone {
 }
 
 // reloadedWithPolicy is a config reload whose configuration names policy.
+//
+// The engine records the policy before it dispatches the refresh, so a reload
+// that finds the previous one's refresh still marked in flight has recorded it
+// already and is answered with an error. The answer to a refresh comes from its
+// worker, a moment before the engine clears the mark. So that refusal is the
+// harness's, and the reload is sent again (recording is idempotent).
 func reloadedWithPolicy(t *testing.T, z *relayedZone, policy string) {
 	t.Helper()
 	z.policy = policy
-	z.reloaded(t)
+	for try := 0; ; try++ {
+		zr := z.configRefresher()
+		zr.Force, zr.Wait = true, true
+		zr.Response = make(chan RefresherResponse, 1)
+		z.conf.Internal.RefreshZoneCh <- zr
+		select {
+		case resp := <-zr.Response:
+			if !resp.Error {
+				return
+			}
+			if !strings.Contains(resp.ErrorMsg, "refresh already in progress") || try >= 100 {
+				t.Fatalf("reload: %s", resp.ErrorMsg)
+			}
+			time.Sleep(10 * time.Millisecond)
+		case <-time.After(10 * time.Second):
+			t.Fatal("the reload was not answered")
+		}
+	}
 }
 
 // wantPolicyRecord: the name the zone records, and the policy bound to it.
@@ -159,32 +183,137 @@ func TestAReloadMovesTheBindingOfAZoneBoundWithoutSigning(t *testing.T) {
 }
 
 // A bound zone that a reload points at a policy that does not exist keeps its
-// binding, as a signing zone does, and says so.
+// binding, as a signing zone does, and says so. Naming the bound policy again
+// takes the warning away, and with it the zone's error state.
 func TestAReloadToAPolicyThatDoesNotExistKeepsTheBinding(t *testing.T) {
 	kdb := reloadPolicySetup(t)
 	z := loadedWithPolicy(t, kdb, "base")
 	if err := z.zd.BindPolicyWithoutSigning(); err != nil {
 		t.Fatalf("BindPolicyWithoutSigning: %v", err)
 	}
+	warned := func() (warning, zoneError bool) {
+		z.zd.mu.Lock()
+		defer z.zd.mu.Unlock()
+		_, warning = z.zd.Errors[DnssecPolicyWarning]
+		return warning, z.zd.Error
+	}
 
 	reloadedWithPolicy(t, z, "gone")
 
 	wantPolicyRecord(t, z.zd, "base", "base", "after a reload to a policy that does not exist")
-	z.zd.mu.Lock()
-	_, warned := z.zd.Errors[DnssecPolicyWarning]
-	z.zd.mu.Unlock()
-	if !warned {
+	if w, _ := warned(); !w {
 		t.Error("no DNSSEC policy warning on the zone")
 	}
 
-	// Pointed back at a policy that exists, the warning goes and the zone follows.
+	// The bound policy named again: nothing to move, and the warning goes.
+	reloadedWithPolicy(t, z, "base")
+	wantPolicyRecord(t, z.zd, "base", "base", "after a reload that names the bound policy again")
+	if w, e := warned(); w || e {
+		t.Errorf("after naming the bound policy again: DNSSEC policy warning %v, zone in an error state %v", w, e)
+	}
+
+	// Pointed at a policy that exists, the zone follows.
+	reloadedWithPolicy(t, z, "gone")
 	reloadedWithPolicy(t, z, "other")
 	wantPolicyRecord(t, z.zd, "other", "other", "after a reload to a policy that exists")
-	z.zd.mu.Lock()
-	_, warned = z.zd.Errors[DnssecPolicyWarning]
-	z.zd.mu.Unlock()
-	if warned {
-		t.Error("the DNSSEC policy warning outlived the reload that fixed it")
+	if w, e := warned(); w || e {
+		t.Errorf("after a reload to a policy that exists: DNSSEC policy warning %v, zone in an error state %v", w, e)
+	}
+}
+
+// A reload that changes a policy's definition under its own name moves a bound
+// zone to the new definition: what a later start signs under is what the config
+// says now, not what it said when the zone was bound.
+func TestAReloadThatChangesAPoliciesDefinitionRebindsTheBoundZone(t *testing.T) {
+	kdb := reloadPolicySetup(t)
+	z := loadedWithPolicy(t, kdb, "base")
+	if err := z.zd.BindPolicyWithoutSigning(); err != nil {
+		t.Fatalf("BindPolicyWithoutSigning: %v", err)
+	}
+	wantPolicyRecord(t, z.zd, "base", "base", "after the bind")
+
+	// "base" now has other algorithms; the new snapshot is published before
+	// the reload, as the engine resolves against it.
+	withLivePolicies(t, map[string]DnssecPolicy{"base": otherPolicy(), "other": otherPolicy()})
+	reloadedWithPolicy(t, z, "base")
+	wantPolicyRecord(t, z.zd, "base", "base", "after the definition of the policy changed")
+	if got := z.zd.DnssecPolicy.KSKAlgorithm; got != dns.ECDSAP256SHA256 {
+		t.Errorf("the bound policy has KSK algorithm %d, want the new definition's %d", got, dns.ECDSAP256SHA256)
+	}
+
+	if err := z.zd.StartSigning(context.Background(), 0); err != nil {
+		t.Fatalf("StartSigning: %v", err)
+	}
+	for _, rr := range servedRRset(t, z.zd, ovZone, dns.TypeSOA).RRSIGs {
+		if sig, ok := rr.(*dns.RRSIG); ok && sig.Algorithm != dns.ECDSAP256SHA256 {
+			t.Errorf("the SOA is signed with algorithm %d, want the new definition's %d", sig.Algorithm, dns.ECDSAP256SHA256)
+		}
+	}
+	if len(keytagsOf(servedRRset(t, z.zd, ovZone, dns.TypeSOA).RRSIGs)) == 0 {
+		t.Error("the SOA is unsigned after the start")
+	}
+}
+
+// On an owned zone the algorithms, lifetimes, standby counts and rollover method
+// of a bound policy are the owner's: a reload follows a policy that differs from
+// the bound one in mechanism fields only, and keeps the binding, with a warning,
+// for any other. The same for a changed name and for a changed definition.
+func TestAReloadLeavesTheOwnersFieldsOfABoundZoneAlone(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	base := kskzsk(dns.ED25519, dns.ED25519)
+	base.Name = "base"
+	mech := base
+	mech.Name = "mech"
+	mech.SigValidity.Default = 12345 // a mechanism field
+	alg := base
+	alg.Name = "alg"
+	alg.KSKAlgorithm, alg.ZSKAlgorithm = dns.ECDSAP256SHA256, dns.ECDSAP256SHA256
+	withLivePolicies(t, map[string]DnssecPolicy{"base": base, "mech": mech, "alg": alg})
+
+	const zone = "owned.example."
+	zd := testZone(t, zone, zone+" 3600 IN SOA ns."+zone+" hostmaster."+zone+" 1 7200 1800 604800 7200\n"+zone+" 3600 IN NS ns."+zone+"\n")
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	zd.Options = map[ZoneOption]bool{OptMultiProvider: true}
+	installOwner(t, &testOwner{owns: map[string]bool{zone: true}})
+	zd.DnssecPolicyName = "base"
+	if err := zd.BindPolicyWithoutSigning(); err != nil {
+		t.Fatalf("BindPolicyWithoutSigning: %v", err)
+	}
+
+	step := func(name, wantName string, wantWarning bool, when string) {
+		t.Helper()
+		if !zd.recordPolicyOfNonSigningZone(name) {
+			t.Fatalf("%s: the zone was not handled", when)
+		}
+		zd.mu.Lock()
+		defer zd.mu.Unlock()
+		_, warned := zd.Errors[DnssecPolicyWarning]
+		if zd.DnssecPolicyName != wantName || zd.DnssecPolicy == nil || zd.DnssecPolicy.Name != wantName {
+			t.Errorf("%s: the zone records %q bound to %v, want %q bound to it", when, zd.DnssecPolicyName, zd.DnssecPolicy != nil, wantName)
+		}
+		if warned != wantWarning {
+			t.Errorf("%s: DNSSEC policy warning %v, want %v", when, warned, wantWarning)
+		}
+	}
+	step("mech", "mech", false, "a name that differs in a mechanism field")
+	step("alg", "mech", true, "a name that differs in an algorithm")
+	step("mech", "mech", false, "the bound policy named again")
+
+	// the same names, defined otherwise
+	mech2 := mech
+	mech2.SigValidity.Default = 54321
+	alg2 := mech
+	alg2.KSKAlgorithm, alg2.ZSKAlgorithm = dns.ECDSAP256SHA256, dns.ECDSAP256SHA256
+	withLivePolicies(t, map[string]DnssecPolicy{"base": base, "mech": mech2, "alg": alg})
+	step("mech", "mech", false, "a changed mechanism field under the same name")
+	if got := zd.DnssecPolicy.SigValidity.Default; got != 54321 {
+		t.Errorf("the bound policy's signature validity is %v, want the new definition's", got)
+	}
+	withLivePolicies(t, map[string]DnssecPolicy{"base": base, "mech": alg2, "alg": alg})
+	step("mech", "mech", true, "a changed algorithm under the same name")
+	if got := zd.DnssecPolicy.KSKAlgorithm; got != dns.ED25519 {
+		t.Errorf("the bound policy's KSK algorithm is %d, want the owner's %d kept", got, dns.ED25519)
 	}
 }
 
