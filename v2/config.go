@@ -380,6 +380,10 @@ type AuthEngineConf struct {
 	// upstream is used, and an upstream with no matching entry is dialled
 	// unbound rather than failed. Per-zone ZoneConf.TransferSrc overrides this;
 	// empty there inherits.
+	//
+	// Outbound NOTIFY binds it too (#1062), picked the same way per target: a
+	// downstream's allow-notify sees the same address an upstream's
+	// allow-transfer does.
 	TransferSrc []string `yaml:"transfer-src,omitempty" mapstructure:"transfer-src"`
 }
 
