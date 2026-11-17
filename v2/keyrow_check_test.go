@@ -55,8 +55,13 @@ type checkerZone struct {
 
 func newCheckerZone(t *testing.T) *checkerZone {
 	t.Helper()
+	return newCheckerZoneOn(t, newTestKeyDB(t))
+}
+
+// newCheckerZoneOn is newCheckerZone on the keystore kdb.
+func newCheckerZoneOn(t *testing.T, kdb *KeyDB) *checkerZone {
+	t.Helper()
 	const zone = "example."
-	kdb := newTestKeyDB(t)
 	zd := testZone(t, zone, csyncTestZone)
 	zd.KeyDB = kdb
 	registerZones(t, zd)
@@ -290,7 +295,7 @@ func TestCheckerRowsOnlyForAZoneThatIsNotLoaded(t *testing.T) {
 
 // The same checks behind the keystore API: "keystore dnssec check".
 func TestKeystoreCheckCommandReportsViolations(t *testing.T) {
-	c := newCheckerZone(t)
+	c := newCheckerZoneOn(t, newTestKeyDB(t))
 	r := c.row(DnskeyStateActive, "ZSK")
 	c.rawExec(t, `UPDATE DnssecKeyStore SET privatekey='' WHERE zonename=? AND keyid=?`, r.Zone, r.Keyid)
 	resp, err := c.kdb.DnssecKeyMgmt(context.Background(), nil, KeystorePost{Command: "dnssec-mgmt", SubCommand: "check", Zone: c.zd.ZoneName})

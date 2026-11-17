@@ -150,14 +150,14 @@ func forgetResolverSource(zone string) {
 
 // servesQueries reports whether zd answers queries now, by the tests
 // DefaultQueryHandler applies before it hands one to QueryResponder: the zone
-// has published data, no service-impacting error, and has not passed SOA
-// EXPIRE. A zone held only for transfer answers nothing, and nor does an agent,
-// which answers no ordinary query.
+// has published data, no service-impacting error, is not withheld, and has not
+// passed SOA EXPIRE. A zone held only for transfer answers nothing, and nor does
+// an agent, which answers no ordinary query.
 func (zd *ZoneData) servesQueries() bool {
 	if Globals.App.Type == AppTypeAgent || zd.ZoneStore == XfrZone {
 		return false
 	}
-	return zd.HasPublishedData() && !zd.HasServiceImpactingError() && !zd.HasExpired()
+	return zd.HasPublishedData() && !zd.HasServiceImpactingError() && !zd.Withheld() && !zd.HasExpired()
 }
 
 // localResponse is zd's response to <qname, qtype> asked with DO set, as a

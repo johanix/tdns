@@ -9,12 +9,14 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -703,22 +705,38 @@ func serveTestPrimary(t *testing.T, pzd *ZoneData) (string, func()) {
 	return serveTestPrimaryOn(t, pzd, "127.0.0.1:0")
 }
 
+// listenTCPAndUDP returns a TCP listener and a UDP socket on one address. A
+// port the kernel picked for TCP may be taken for UDP, by anything on the host,
+// so given port 0 it picks again a few times when that is what failed. Given a
+// fixed port it fails at once: the test needs that address.
+func listenTCPAndUDP(t *testing.T, addr string) (net.Listener, *net.UDPConn) {
+	t.Helper()
+	const tries = 10
+	for try := 1; ; try++ {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			t.Fatalf("listen tcp: %v", err)
+		}
+		_, portStr, _ := net.SplitHostPort(ln.Addr().String())
+		port, _ := strconv.Atoi(portStr)
+		pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+		if err == nil {
+			return ln, pc
+		}
+		ln.Close()
+		_, wanted, _ := net.SplitHostPort(addr)
+		if wanted != "0" || !errors.Is(err, syscall.EADDRINUSE) || try == tries {
+			t.Fatalf("listen udp on the tcp port: %v", err)
+		}
+	}
+}
+
 // serveTestPrimaryOn is serveTestPrimary at a chosen address: a test that
 // must first see the primary DOWN at an address the secondary already holds
 // starts it here afterwards.
 func serveTestPrimaryOn(t *testing.T, pzd *ZoneData, addr string) (string, func()) {
 	t.Helper()
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		t.Fatalf("listen tcp: %v", err)
-	}
-	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
-	port, _ := strconv.Atoi(portStr)
-	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
-	if err != nil {
-		ln.Close()
-		t.Fatalf("listen udp on the tcp port: %v", err)
-	}
+	ln, pc := listenTCPAndUDP(t, addr)
 
 	// The test's own context: cancelled at cleanup, so a transfer still in
 	// flight in ZoneTransferOut is cancelled with the test rather than

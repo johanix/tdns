@@ -319,8 +319,10 @@ func sqlStateList(table map[string]KeyRowFlags) string {
 	return strings.Join(states, ",")
 }
 
-func (kdb *KeyDB) keystoreZones() ([]string, error) {
-	rows, err := kdb.DB.Query(`SELECT DISTINCT zonename FROM DnssecKeyStore ORDER BY zonename`)
+// keystoreZones lists the zones with rows in DnssecKeyStore, read through q:
+// the KeyDB, or a transaction.
+func keystoreZones(q rowsQuerier) ([]string, error) {
+	rows, err := q.Query(`SELECT DISTINCT zonename FROM DnssecKeyStore ORDER BY zonename`)
 	if err != nil {
 		return nil, err
 	}

@@ -887,7 +887,7 @@ func confirmDSAndAdvanceCreatedKeysTx(kdb *KeyDB, zone string, low, high int, no
 // whose DS the parent has just confirmed advances the same way whichever
 // kind of rollover carried the push.
 func advanceCreatedKeysInRangeTx(tx *Tx, kdb *KeyDB, zone string, low, high int, now time.Time) (int, error) {
-	created, err := GetDnssecKeysByState(kdb, zone, DnskeyStateCreated)
+	created, err := GetDnssecKeysByStateTx(tx, zone, DnskeyStateCreated)
 	if err != nil {
 		return 0, fmt.Errorf("list created keys: %w", err)
 	}

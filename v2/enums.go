@@ -137,6 +137,28 @@ const (
 	// primary behind a signer -- so the server's resolver never answers a
 	// question about the zone from it, and resolves it as any other (#863).
 	OptModifiedDownstream
+	// OptAllowDoubledSuffix: the zone file means its names that end in the
+	// zone's name (or a name under it) twice, such as test.test. in zone test.,
+	// so the loader does not refuse them as a missing trailing dot (#1009).
+	// Off by default: almost every such name is that mistake.
+	OptAllowDoubledSuffix
+	// OptIxfrFromDifferences: a wholesale replacement of the zone -- a reload of
+	// its file, or an inbound AXFR -- is diffed against the version it replaces
+	// and the difference kept in the outbound IXFR history, so downstreams get
+	// an IXFR instead of the whole zone (#1006). BIND's option of the same name.
+	// Off by default, as in BIND: the diff compares the whole zone, which costs
+	// CPU on every replacement. Off, a replacement starts a new IXFR epoch as
+	// before.
+	OptIxfrFromDifferences
+	// OptAllowTsigUpdates admits RFC 2136 UPDATEs authorized by TSIG, separately
+	// from allow-updates (which admits SIG(0)) and allow-api-updates (the
+	// management API). What each TSIG key may change is the zone's
+	// updatepolicy.zone.tsig grants; with no grant nothing is allowed.
+	//
+	// Appended at the end for the same reason every option above it was:
+	// ZoneOption values are positional, so inserting mid-list renumbers
+	// everything after.
+	OptAllowTsigUpdates
 	optZoneOptionTdnsSentinel
 )
 
@@ -180,6 +202,9 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptUseHsyncparam:           "use-hsyncparam",
 	OptChildSyncProxy:          "childsync-proxy",
 	OptModifiedDownstream:      "modified-downstream",
+	OptAllowDoubledSuffix:      "allow-doubled-suffix",
+	OptIxfrFromDifferences:     "ixfr-from-differences",
+	OptAllowTsigUpdates:        "allow-tsig-updates",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -218,6 +243,9 @@ var StringToZoneOption = map[string]ZoneOption{
 	"use-hsyncparam":             OptUseHsyncparam,
 	"childsync-proxy":            OptChildSyncProxy,
 	"modified-downstream":        OptModifiedDownstream,
+	"allow-doubled-suffix":       OptAllowDoubledSuffix,
+	"ixfr-from-differences":      OptIxfrFromDifferences,
+	"allow-tsig-updates":         OptAllowTsigUpdates,
 }
 
 // deprecatedZoneOptionNames maps old option spellings to the canonical name
@@ -361,6 +389,11 @@ var StringToAppType = map[string]AppType{
 // ZoneStatus is the positive-lifecycle state of a zone, orthogonal to the
 // error registry (a zone can be ZoneStatusReady and still carry a RefreshError).
 // Minimal by design: a single value with a setter/getter, no registry.
+//
+// It reports progress, not whether the zone can be served: every refresh of a
+// loaded zone reads `loading` while the published snapshot is still being
+// served. Whether there is something to serve is Ready and the published
+// snapshot, which is what ZoneTransferOut admits on.
 type ZoneStatus uint8
 
 const (

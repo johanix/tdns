@@ -1,6 +1,6 @@
 # Moving a zone from Cascade to tdns with the same keys
 
-**Status:** proposal, under review. Q1–Q7 decided (r2); external review worked in r3.
+**Status:** implemented. Step 1a (Ed448) in PR #670, step 1b (`bulk-convert --from cascade`, `v2/cascade_convert.go`) in PR #669. F1 (#668, §6.3) is still open and waits for KLO (§7).
 **Repos:** tdns (converter, Ed448 registration), dnssec-algorithms (Ed448 implementation), johanix/dns fork (one comment)
 **Read at:** tdns `49df2c3a`; tdns-mp `2c25bcd`; dnssec-algorithms `5462dd5`; Cascade `v0.1.0-beta6` and `main` `57e2565`; dnst `v0.2.0-alpha3` and `main` `f696f0a9`; domain 0.12.1 (dnst's), `8abed138` (Cascade's) and `main` `849de477`
 **Related:** tdns-mp `docs/2026-09-13-key-lifecycle-ownership-design.md` (KLO) and its test plan `docs/2026-09-14-key-lifecycle-ownership-test-plan.md`

@@ -17,6 +17,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -283,6 +284,13 @@ func handleRefreshSyncDelegationWith(ctx context.Context, ready *ImrReadiness, d
 		"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
 		"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
 	msg, rcode, _, err := steps.sync(dss)
+	if errors.Is(err, ErrNoUsableDsync) {
+		// The parent offers nothing to send it through: not a failure, and
+		// nothing to retry (planUsable warned once). The next NS or glue
+		// change, or a reload, looks again.
+		lgDns.Debug("DelegationSyncher: refresh sync: nothing sent", "zone", ds.ZoneName, "reason", err)
+		return nil
+	}
 	if err != nil {
 		retry("send", err)
 		return nil

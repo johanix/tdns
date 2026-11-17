@@ -105,14 +105,14 @@ type KeystoreResponse struct {
 	// Like NeedsSigningKeysRepublish it is an instruction to the external-tx
 	// caller, not wire data — but plural, because one bulk import spans zones.
 	BulkRepublishZones []string `json:"-"`
-	// BulkSig0InvalidateZones names the zones a SIG(0) bulk import actually
-	// changed, for the external-tx caller to drop from KeystoreSig0Cache after
-	// ITS commit. Same shape and same reason as BulkRepublishZones: the
-	// invalidation cannot happen where the rows are written, because the commit
-	// that makes them visible has not happened yet, and invalidating early
-	// leaves a window for a read-through GetSig0Keys to repopulate the cache
-	// from pre-commit state — pinning the superseded key until restart, which is
-	// the exact failure the invalidation exists to prevent.
+	// BulkSig0InvalidateZones names the zones whose SIG(0) cache entries must
+	// be dropped after the external-tx caller's commit (bulk-import, and also
+	// add/generate/setstate/delete). Same shape and same reason as
+	// BulkRepublishZones: the invalidation cannot happen where the rows are
+	// written, because the commit that makes them visible has not happened yet,
+	// and invalidating early leaves a window for a read-through GetSig0Keys to
+	// repopulate the cache from pre-commit state — pinning a stale key until
+	// restart, which is the exact failure the invalidation exists to prevent.
 	BulkSig0InvalidateZones []string                   `json:"-"`
 	Algorithms              []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
 	// KeyViolations is what "keystore dnssec check" found (CheckKeyInvariants).
@@ -126,6 +126,18 @@ type KeystoreResponse struct {
 	// change the zone's active signing-key set. External-tx callers (APIkeystore)
 	// must call republishSigningKeysForZone after their Commit (R1).
 	NeedsSigningKeysRepublish bool `json:"-"`
+	// GeneratedSig0Key is the keypair a sig0-mgmt "generate" made, for an
+	// in-process caller that goes on to use it. Never on the wire: it holds the
+	// private key.
+	GeneratedSig0Key *PrivateKeyCache `json:"-"`
+	// stagedStrip is a strip of the zone's RRSIGs that DnssecKeyMgmt staged
+	// under an external tx (clear, policy-cleanup). The caller finishes it
+	// after its Commit and its republishSigningKeysForZone, or after its
+	// Rollback (#985), on a failure too. Left unfinished on a zone it holds,
+	// the hold runs out at txHoldLimit and the strip is published then; a
+	// zone that could not be held has no hold to run out, and its next
+	// publish carries the strip.
+	stagedStrip *stagedStrip
 }
 
 // TsigKeyExport carries a TSIG key's secret back to the caller for the explicit
@@ -257,9 +269,12 @@ type TruststoreResponse struct {
 	// alone. Only src=dns sets it: discovery of a key that is already recorded
 	// is not news, and acting on it again would re-verify a key that may
 	// already be trusted.
-	Existed  bool
-	Error    bool
-	ErrorMsg string
+	Existed bool
+	// Sig0Tombstones answers "tombstone-list": the child keys their own
+	// trusted UPDATEs retired (truststore_tombstone.go).
+	Sig0Tombstones []Sig0Tombstone
+	Error          bool
+	ErrorMsg       string
 }
 
 type CommandPost struct {
@@ -278,8 +293,11 @@ type CommandResponse struct {
 	Zones        map[string]ZoneConf
 	Msg          string
 	ApiEndpoints []string
-	Error        bool
-	ErrorMsg     string
+	// Warnings are shown before the status: what the operator must not
+	// overlook, such as DNSSEC validation not being enforced.
+	Warnings []string
+	Error    bool
+	ErrorMsg string
 }
 
 type ZonePost struct {

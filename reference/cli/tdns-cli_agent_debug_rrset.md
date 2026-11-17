@@ -22,6 +22,7 @@ tdns-cli agent debug rrset [flags]
       --qname string    qname of rrset to examine
       --qtype string    qtype of rrset to examine
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 

@@ -105,11 +105,17 @@ func TestOneKeyStatePollPerChildKey(t *testing.T) {
 	const zone, keyid = "poll.example.", 4711
 	release := make(chan struct{})
 
-	first := startChildKeyStatePoll(zone, keyid, func() { <-release })
+	got := make(chan *childKeyPoll, 1)
+	first := startChildKeyStatePoll(zone, keyid, func(st *childKeyPoll) { got <- st; <-release })
 	if first == nil {
 		t.Fatal("no poll started")
 	}
-	if second := startChildKeyStatePoll(zone, keyid, func() {}); second != nil {
+	// The poll's entry is the one others find in the registry (#944).
+	st := <-got
+	if v, _ := childKeyStatePolls.Load(childKeyVerificationID(zone, keyid)); v != st || st == nil {
+		t.Errorf("the poll was handed %p, the registry holds %v", st, v)
+	}
+	if second := startChildKeyStatePoll(zone, keyid, func(*childKeyPoll) {}); second != nil {
 		<-second
 		t.Error("a second poll started for a key already being polled")
 	}
@@ -119,7 +125,7 @@ func TestOneKeyStatePollPerChildKey(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the poll did not exit")
 	}
-	third := startChildKeyStatePoll(zone, keyid, func() {})
+	third := startChildKeyStatePoll(zone, keyid, func(*childKeyPoll) {})
 	if third == nil {
 		t.Fatal("the key stayed marked as polled after its poll exited")
 	}

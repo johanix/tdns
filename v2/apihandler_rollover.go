@@ -16,9 +16,10 @@ import (
 // APIRolloverStatus handles GET /api/v1/rollover/status?zone=<fqdn>.
 // Reads RolloverZoneRow + per-state DnssecKeyStore rows + the zone's
 // DnssecPolicy and returns the operator-facing RolloverStatus struct.
-// Side-effect free; no per-zone lock taken — sqlite WAL gives
-// snapshot reads while writers (the rollover tick, mutating
-// handlers) are in flight.
+// Side-effect free; no per-zone lock taken. NewKeyDB opens the keystore
+// in WAL mode, so these reads neither wait for nor hold up the writers
+// (the rollover tick, mutating handlers). Each query sees the last
+// committed state; the queries together are not one snapshot.
 func APIRolloverStatus(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

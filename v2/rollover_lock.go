@@ -17,9 +17,10 @@ import (
 // Granularity is per-zone, not global: each zone's tick work is
 // independent of every other zone's, so contention is naturally
 // limited. Read endpoints (status, when) do NOT take the lock —
-// sqlite WAL mode gives snapshot reads while writers are in flight,
-// and the API contract for those endpoints is "best-effort current
-// state at response time" which a lock-free snapshot satisfies.
+// NewKeyDB opens the keystore in WAL mode, so a read neither waits
+// for nor holds up a writer and sees the last committed state, and
+// the API contract for those endpoints is "best-effort current state
+// at response time", which such reads satisfy.
 //
 // The current rollover tick is short-lived (a single phase advance
 // per zone, no inline DNS UPDATE retries under the lock) so the

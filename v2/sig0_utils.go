@@ -326,21 +326,31 @@ INSERT INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator, privatekey
 
 	// A fresh key whose tag the zone already uses would collide with that
 	// key, so draw again, in this transaction so a key minted earlier in it
-	// counts too.
+	// counts too. Tag 0 is valid (RFC 4034, App. B), but the dns library
+	// treats it as unset and refuses to sign with it (tdns#930), so draw
+	// again on tag 0 as well.
 	for draws := 1; ; draws++ {
-		inUse, err := keyTagInUseTx(tx, rrtype, owner, pkc.KeyId)
-		if err != nil {
-			return nil, "", err
+		zeroTag := pkc.KeyId == 0
+		inUse := false
+		if !zeroTag {
+			if inUse, err = keyTagInUseTx(tx, rrtype, owner, pkc.KeyId); err != nil {
+				return nil, "", err
+			}
 		}
-		if !inUse {
+		if !zeroTag && !inUse {
 			break
 		}
 		if draws == maxKeyTagDraws {
-			return nil, "", fmt.Errorf("GenerateKeypair: %s %s: %d keys drawn, each with a key tag the zone already uses (last %d)",
+			return nil, "", fmt.Errorf("GenerateKeypair: %s %s: %d keys drawn, each with key tag 0 or a key tag the zone already uses (last %d)",
 				owner, dns.TypeToString[rrtype], draws, pkc.KeyId)
 		}
-		lgDns.Info("GenerateKeypair: key tag is in use for the zone, generating another key",
-			"zone", owner, "rrtype", dns.TypeToString[rrtype], "keyid", pkc.KeyId)
+		if zeroTag {
+			lgDns.Info("GenerateKeypair: key tag is 0, which cannot sign, generating another key",
+				"zone", owner, "rrtype", dns.TypeToString[rrtype])
+		} else {
+			lgDns.Info("GenerateKeypair: key tag is in use for the zone, generating another key",
+				"zone", owner, "rrtype", dns.TypeToString[rrtype], "keyid", pkc.KeyId)
+		}
 		if pkc, err = generateKeyMaterial(owner, rrtype, alg, keytype); err != nil {
 			return nil, "", err
 		}

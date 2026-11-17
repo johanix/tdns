@@ -258,27 +258,38 @@ func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 	}
 }
 
-// checkImrTrustAnchors flags the classic imr footgun: DNSSEC validation is on
-// by default, but if no trust anchor is configured the resolver validates
-// against an empty anchor set and returns SERVFAIL/bogus for everything.
+// checkImrTrustAnchors says which trust anchor the resolver will use. With
+// none configured it uses the compiled-in IANA root anchor, but only with the
+// compiled-in root hints and the root neither forwarded nor stubbed: anything
+// else may be a private root, and the resolver then has no anchor and
+// validates nothing (every answer Indeterminate). That case is the footgun:
+// validation is on by default.
 func checkImrTrustAnchors(cfg *tdns.Config, rep *ccReport) {
 	const g = "Trust anchors"
-	hasAnchor := cfg.Imr.TrustAnchorDS != "" || cfg.Imr.TrustAnchorDNSKEY != "" || cfg.Imr.TrustAnchorFile != ""
 	requireValidation := cfg.Imr.RequireDnssecValidation == nil || *cfg.Imr.RequireDnssecValidation
 
 	if cfg.Imr.TrustAnchorFile != "" {
 		checkFileExists(rep, g, "trust-anchor-file", cfg.Imr.TrustAnchorFile)
 	}
 
+	useDefault, why := cfg.Imr.RootAnchorFallback()
 	switch {
-	case hasAnchor:
+	case cfg.Imr.AnchorConfigured():
 		rep.pass(g, "anchor", "a DNSSEC trust anchor is configured")
+	case useDefault:
+		rep.pass(g, "anchor", "no trust anchor configured: the compiled-in IANA root anchor is used,"+
+			" as the root hints are the compiled-in ones and the root is neither forwarded nor stubbed")
 	case !requireValidation:
-		rep.info(g, "anchor", "no trust anchor, but require-dnssec-validation is false (lab mode) — validation disabled")
+		rep.info(g, "anchor", fmt.Sprintf("no trust anchor, and the compiled-in root anchor is not used (%s);"+
+			" require-dnssec-validation is false (lab mode), so lookups that require validation do without it", why))
 	default:
 		rep.fail(g, "anchor",
-			"no trust anchor configured and DNSSEC validation is on (the default) — the resolver validates against an empty anchor set and everything is BOGUS",
-			"set imrengine.trust-anchor-file (or trust-anchor-ds), or set imrengine.require-dnssec-validation: false for lab use")
+			fmt.Sprintf("no trust anchor configured, and the compiled-in root anchor is not used because %s"+
+				" (the root may be a private one): nothing validates, every answer is Indeterminate,"+
+				" and lookups that require validation fail", why),
+			"set imrengine.trust-anchor-file or trust-anchor-ds for the root in use (the compiled-in IANA root"+
+				" anchor is used only when nothing is set and the root hints are the compiled-in ones),"+
+				" or set imrengine.require-dnssec-validation: false for lab use")
 	}
 }
 
@@ -462,13 +473,17 @@ listeners:
    # keyfile:   {{KEY}}
 
 imrengine:
-   # DNSSEC validation is DISABLED in this MWE so the resolver answers out of
-   # the box without a root trust anchor. To make it a validating resolver,
-   # supply a root anchor and flip this to true:
+   # No trust anchor is set and the root hints are the compiled-in ones, so
+   # the resolver validates against the compiled-in IANA root anchor. To name
+   # the anchor yourself (needed with a root-hints file or a forwarded root):
    #   trust-anchor-file:          /etc/tdns/root.key
-   #   require-dnssec-validation:  true
-   # or paste the current root DS inline:
-   #   trust-anchor-ds: ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+   # or paste the root DS records inline, one per line:
+   #   trust-anchor-ds: |
+   #      . IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
+   #      . IN DS 38696 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16
+   # Validation is not ENFORCED in this MWE: the lookups that need a secure
+   # answer (TLSA and the like) take one that is not. Flip this to true to
+   # enforce it.
    require-dnssec-validation:  false
 
 apiserver:

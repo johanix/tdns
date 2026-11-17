@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -21,10 +22,13 @@ import (
 // UPDATE.
 //
 // Flow:
-//  1. Check HSYNCPARAM parentsync=agent (caller already verified OptParentSync)
+//  1. Check HSYNCPARAM parentsync=agent (caller already verified OptParentSync),
+//     and again before every inquiry, bootstrap and delegation sync: the
+//     poll stops when the zone's owner has taken the sync over
 //  2. Query parent via KeyState EDNS(0) inquiry
 //  3. KeyStateTrusted → done
-//  4. KeyStateUnknown → bootstrap
+//  4. KeyStateUnknown → bootstrap, once the zone's nameservers serve the
+//     key (#917)
 //  5. KeyStateBootstrapAutoOngoing → poll
 //  6. Query failure → retry with backoff
 func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone ZoneName, keyName string, keyid uint16, algorithm uint8) {
@@ -57,17 +61,33 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 
 	// One poll per key, shared with the tdns-auth post-bootstrap poll.
 	id := childKeyVerificationID(keyName, keyid)
-	if _, running := childKeyStatePolls.LoadOrStore(id, struct{}{}); running {
+	st := &childKeyPoll{}
+	if _, running := childKeyStatePolls.LoadOrStore(id, st); running {
 		lgElect.Info("ParentSyncAfterKeyPublication: already polling the parent for this key",
 			"zone", zone, "keyid", keyid)
 		return
 	}
 	defer childKeyStatePolls.Delete(id)
 
-	syncErr := conf.pollParentKeyState(ctx, parentKeyStatePoll{
+	poll := agentKeyStatePoll(kdb, imr, zone, keyName, keyid, algorithm)
+	poll.state = st
+	syncErr := conf.pollParentKeyState(ctx, poll)
+	if syncErr != nil {
+		lgElect.Warn("ParentSyncAfterKeyPublication: gave up (exhausted retries or terminal error)",
+			"zone", zone, "keyid", keyid, "err", syncErr)
+	}
+}
+
+// agentKeyStatePoll is the agent's poll of the parent for its key. The poll
+// can run for many minutes, and the zone's owner may take the delegation sync
+// over meanwhile, so it asks HSYNCPARAM again before every inquiry, bootstrap
+// and delegation sync.
+func agentKeyStatePoll(kdb *KeyDB, imr *Imr, zone ZoneName, keyName string, keyid uint16, algorithm uint8) parentKeyStatePoll {
+	return parentKeyStatePoll{
 		zone:                      zone,
 		keyid:                     keyid,
 		syncDelegationWhenTrusted: true,
+		agentsSync:                func() bool { return ZoneHasParentSyncAgent(zone) },
 		query: func(ctx context.Context) (*edns0.KeyStateOption, bool, error) {
 			return QueryParentKeyState(ctx, kdb, imr, keyName, keyid)
 		},
@@ -75,35 +95,75 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 		bootstrap: func(ctx context.Context) error {
 			return BootstrapWithParent(ctx, zone, keyName, algorithm)
 		},
+		served:           sig0KeyServed(kdb, imr, keyName, keyid),
 		pollDelay:        delegationSyncInitialDelay,
 		wait:             waitOrDone,
 		reBootstrapDelay: childReBootstrapDelay,
-	})
-	if syncErr != nil {
-		lgElect.Warn("ParentSyncAfterKeyPublication: gave up (exhausted retries or terminal error)",
-			"zone", zone, "keyid", keyid, "err", syncErr)
+	}
+}
+
+// sig0KeyServed is the look at the zone's nameservers for its SIG(0) key
+// keyid (keyServedCheck), the key read from the keystore when it looks. A key
+// the keystore does not hold as active cannot be looked for, and does not
+// hold the bootstrap. Without a keystore or a resolver there is no look.
+func sig0KeyServed(kdb *KeyDB, imr *Imr, zone string, keyid uint16) func(context.Context) (keyServedState, string) {
+	if kdb == nil || imr == nil {
+		return nil
+	}
+	return func(ctx context.Context) (keyServedState, string) {
+		sak, err := kdb.GetSig0Keys(zone, Sig0StateActive)
+		if err != nil || sak == nil {
+			return keyServedUnknown, fmt.Sprintf("the keystore cannot be read: %v", err)
+		}
+		for _, pkc := range sak.Keys {
+			if pkc.KeyRR.KeyTag() == keyid {
+				return imrKeyServedCheck(imr, zone, pkc.KeyRR.String()).look(ctx)
+			}
+		}
+		return keyServedUnknown, fmt.Sprintf("no active SIG(0) key %d in the keystore", keyid)
 	}
 }
 
 // childKeyStatePolls holds the child keys a KeyState poll of the parent is
 // running for in this process, so that there is at most one per key: the
 // agent's (ParentSyncAfterKeyPublication) or the tdns-auth post-bootstrap one
-// (pollAfterAcceptedBootstrap). Keyed like childKeyVerifications.
+// (pollAfterAcceptedBootstrap). Keyed like childKeyVerifications; the value is
+// the poll's *childKeyPoll.
 var childKeyStatePolls sync.Map
 
+// childKeyPoll is what a running poll tells others about itself through
+// childKeyStatePolls.
+type childKeyPoll struct {
+	// bootstrapped mirrors the poll's own flag: the poll has sent its
+	// bootstrap. From then on a parent that does not know the key is polled
+	// again, not sent the key again (onParentKeyState), so a BADKEY
+	// re-bootstrap must not leave the upload to this poll (#944).
+	bootstrapped atomic.Bool
+}
+
+// markBootstrapped records that the poll has sent its bootstrap. A poll run
+// outside the registry (a test) has no entry.
+func (st *childKeyPoll) markBootstrapped() {
+	if st != nil {
+		st.bootstrapped.Store(true)
+	}
+}
+
 // startChildKeyStatePoll runs poll in its own goroutine, unless a poll for
-// zone's key keyid is already running. It returns a channel closed when the
-// goroutine exits, or nil when none was started.
-func startChildKeyStatePoll(zone string, keyid uint16, poll func()) <-chan struct{} {
+// zone's key keyid is already running. poll gets the key's registry entry. It
+// returns a channel closed when the goroutine exits, or nil when none was
+// started.
+func startChildKeyStatePoll(zone string, keyid uint16, poll func(st *childKeyPoll)) <-chan struct{} {
 	id := childKeyVerificationID(zone, keyid)
-	if _, running := childKeyStatePolls.LoadOrStore(id, struct{}{}); running {
+	st := &childKeyPoll{}
+	if _, running := childKeyStatePolls.LoadOrStore(id, st); running {
 		return nil
 	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer childKeyStatePolls.Delete(id)
-		poll()
+		poll(st)
 	}()
 	return done
 }
@@ -134,10 +194,11 @@ func (conf *Config) pollAfterAcceptedBootstrap(ctx context.Context, kdb *KeyDB, 
 	keyName := zd.ZoneName
 	keyid := sak.Keys[0].KeyRR.KeyTag()
 
-	done := startChildKeyStatePoll(keyName, keyid, func() {
+	done := startChildKeyStatePoll(keyName, keyid, func(st *childKeyPoll) {
 		err := conf.pollParentKeyState(ctx, parentKeyStatePoll{
 			zone:         ZoneName(keyName),
 			keyid:        keyid,
+			state:        st,
 			bootstrapped: true,
 			query: func(ctx context.Context) (*edns0.KeyStateOption, bool, error) {
 				return QueryParentKeyState(ctx, kdb, imr, keyName, keyid)
@@ -146,6 +207,7 @@ func (conf *Config) pollAfterAcceptedBootstrap(ctx context.Context, kdb *KeyDB, 
 			bootstrap: func(ctx context.Context) error {
 				return BootstrapWithParent(ctx, ZoneName(keyName), keyName, algorithm)
 			},
+			served:           sig0KeyServed(kdb, imr, keyName, keyid),
 			pollDelay:        delegationSyncInitialDelay,
 			wait:             waitOrDone,
 			reBootstrapDelay: childReBootstrapDelay,
@@ -170,9 +232,17 @@ type parentKeyStatePoll struct {
 	// bootstrapped: the ceremony has already been sent, so a parent that does
 	// not know the key yet is polled again rather than bootstrapped again.
 	bootstrapped bool
+	// state is the poll's entry in childKeyStatePolls, told when the poll
+	// has sent its bootstrap. Nil when the poll is not registered.
+	state *childKeyPoll
 	// syncDelegationWhenTrusted enqueues a delegation sync once the parent
 	// trusts the key.
 	syncDelegationWhenTrusted bool
+	// agentsSync says whether the zone's delegation sync is still the
+	// agents' (HSYNCPARAM parentsync=agent). It is asked before each
+	// inquiry, bootstrap and delegation sync, and the poll stops when it
+	// says no. Nil for the tdns-auth child's poll, which is the owner's own.
+	agentsSync func() bool
 	// query asks the parent for our key's state; authenticated says whether
 	// the answer was.
 	query func(ctx context.Context) (ks *edns0.KeyStateOption, authenticated bool, err error)
@@ -180,12 +250,36 @@ type parentKeyStatePoll struct {
 	record func(state uint8)
 	// bootstrap sends the bootstrap ceremony to the parent.
 	bootstrap func(ctx context.Context) error
+	// served looks at what the zone's nameservers serve of the key; a
+	// bootstrap waits until they serve it (keyIsServed). Nil: no look.
+	served func(ctx context.Context) (keyServedState, string)
 	// pollDelay is the first wait between inquiries; it doubles.
 	pollDelay time.Duration
 	// wait sleeps for d, or returns false when ctx is cancelled.
 	wait func(ctx context.Context, d time.Duration) bool
 	// reBootstrapDelay is the wait before re-bootstrap round (0-based).
 	reBootstrapDelay func(round int) time.Duration
+}
+
+// ownerTookOver reports whether the zone's owner has taken the delegation
+// sync over since the poll started, in which case the poll stops before
+// sending what it was about to send: next names it.
+func (p parentKeyStatePoll) ownerTookOver(next string) bool {
+	if p.agentsSync == nil || p.agentsSync() {
+		return false
+	}
+	lgElect.Info("ParentSyncAfterKeyPublication: the zone no longer says parentsync=agent: its owner syncs its delegation, and the poll stops",
+		"zone", p.zone, "keyid", p.keyid, "withheld", next)
+	return true
+}
+
+// keyIsServed holds a bootstrap until the zone's nameservers serve the key
+// (waitUntilKeyServed, #917). It returns false only when ctx ends first.
+func (p parentKeyStatePoll) keyIsServed(ctx context.Context) bool {
+	if p.served == nil {
+		return true
+	}
+	return waitUntilKeyServed(ctx, p.zone, p.keyid, p.served, p.wait, keyServedWait)
 }
 
 // pollParentKeyState polls the parent's KeyState with the shared
@@ -200,6 +294,9 @@ type parentKeyStatePoll struct {
 func (conf *Config) pollParentKeyState(ctx context.Context, p parentKeyStatePoll) error {
 	zone, keyid := p.zone, p.keyid
 	bootstrapped := p.bootstrapped
+	if bootstrapped {
+		p.state.markBootstrapped()
+	}
 	for round := 0; ; round++ {
 		validationFailed := false
 		syncErr := retryWithBackoff(ctx, delegationSyncMaxRetries, p.pollDelay, func(attempt int) (bool, error) {
@@ -211,19 +308,40 @@ func (conf *Config) pollParentKeyState(ctx context.Context, p parentKeyStatePoll
 		if !p.wait(ctx, p.reBootstrapDelay(round)) {
 			return fmt.Errorf("shut down while waiting to re-bootstrap: %w", ctx.Err())
 		}
+		if !p.keyIsServed(ctx) {
+			return fmt.Errorf("shut down while waiting for the key to be served: %w", ctx.Err())
+		}
+		if p.ownerTookOver("the re-bootstrap") {
+			return nil
+		}
 		lgElect.Info("ParentSyncAfterKeyPublication: re-bootstrapping after the parent reported our key's validation failed",
 			"zone", zone, "keyid", keyid, "round", round+1, "of", childReBootstrapRounds)
+		sent := true
 		if err := p.bootstrap(ctx); err != nil {
 			if errors.Is(err, errBootstrapManual) {
 				lgElect.Info("ParentSyncAfterKeyPublication: parent requires manual SIG(0) bootstrap; waiting for the operator",
 					"zone", zone, "keyid", keyid)
 				return nil
 			}
+			if errors.Is(err, ErrSig0KeyTombstoned) {
+				// A trusted UPDATE from the zone deleted this key at the
+				// parent, which will not take it again. Polling cannot help.
+				lgElect.Error("ParentSyncAfterKeyPublication: the parent will not take this key again; make a new SIG(0) key",
+					"zone", zone, "keyid", keyid, "err", err)
+				return err
+			}
+			// Sent only if it failed after the parent accepted it. One that
+			// never went out leaves the poll free to bootstrap when the
+			// parent reports the key unknown.
+			sent = errors.Is(err, errBootstrapAfterSend)
 			// The poll that follows reports where the parent stands.
 			lgElect.Warn("ParentSyncAfterKeyPublication: re-bootstrap failed; polling the parent anyway",
-				"zone", zone, "keyid", keyid, "err", err)
+				"zone", zone, "keyid", keyid, "sent", sent, "err", err)
 		}
-		bootstrapped = true
+		if sent {
+			bootstrapped = true
+			p.state.markBootstrapped()
+		}
 	}
 }
 
@@ -235,6 +353,9 @@ func (conf *Config) onParentKeyState(ctx context.Context, p parentKeyStatePoll, 
 	bootstrapped, validationFailed *bool) (bool, error) {
 
 	zone, keyid := p.zone, p.keyid
+	if p.ownerTookOver("the KeyState inquiry") {
+		return true, nil // done
+	}
 	ks, authenticated, err := p.query(ctx)
 	if err != nil {
 		lgElect.Warn("ParentSyncAfterKeyPublication: KeyState inquiry failed",
@@ -259,7 +380,8 @@ func (conf *Config) onParentKeyState(ctx context.Context, p parentKeyStatePoll, 
 		// Post-bootstrap: verify delegation data is in sync with parent.
 		// Enqueue EXPLICIT-SYNC-DELEGATION which queries the parent and
 		// only syncs if there is a real delta.
-		if delsyncq := conf.Internal.DelegationSyncQ; delsyncq != nil && p.syncDelegationWhenTrusted {
+		if delsyncq := conf.Internal.DelegationSyncQ; delsyncq != nil && p.syncDelegationWhenTrusted &&
+			!p.ownerTookOver("the delegation sync") {
 			zd, exists := Zones.Get(string(zone))
 			if exists {
 				lgElect.Info("ParentSyncAfterKeyPublication: enqueuing post-bootstrap delegation verification", "zone", zone)
@@ -281,9 +403,17 @@ func (conf *Config) onParentKeyState(ctx context.Context, p parentKeyStatePoll, 
 				"zone", zone, "keyid", keyid, "attempt", attempt)
 			return false, nil // retry
 		}
+		p.record(keyState)
+		if !p.keyIsServed(ctx) {
+			return true, fmt.Errorf("shut down while waiting for the key to be served: %w", ctx.Err())
+		}
+		// The inquiry, and the wait for the key to be served, took their
+		// time; the owner may have taken over meanwhile.
+		if p.ownerTookOver("the bootstrap") {
+			return true, nil // done
+		}
 		lgElect.Info("ParentSyncAfterKeyPublication: parent does not know our key, bootstrapping",
 			"zone", zone, "keyid", keyid, "authenticated", authenticated)
-		p.record(keyState)
 		if err := p.bootstrap(ctx); err != nil {
 			if errors.Is(err, errBootstrapManual) {
 				// MANUAL-BOOTSTRAP-REQUIRED from the child's side: nothing
@@ -301,6 +431,16 @@ func (conf *Config) onParentKeyState(ctx context.Context, p parentKeyStatePoll, 
 					"zone", zone, "attempt", attempt, "err", err)
 				return false, err // retry
 			}
+			if errors.Is(err, errBootstrapTransient) {
+				// No answer, SERVFAIL, or the parent has the key and is still
+				// verifying it. Not a verdict: ask again, and bootstrap again
+				// if the parent still does not know the key.
+				lgElect.Warn("ParentSyncAfterKeyPublication: the parent's answer to the bootstrap is not final, will retry",
+					"zone", zone, "attempt", attempt, "err", err)
+				return false, err // retry
+			}
+			// Any other failure is final, a retired key (ErrSig0KeyTombstoned)
+			// included: its error says to make a new key.
 			lgElect.Error("ParentSyncAfterKeyPublication: bootstrap failed",
 				"zone", zone, "err", err)
 			return true, err // done (terminal error)
@@ -308,6 +448,7 @@ func (conf *Config) onParentKeyState(ctx context.Context, p parentKeyStatePoll, 
 		lgElect.Info("ParentSyncAfterKeyPublication: bootstrap UPDATE sent to parent, will poll for trust",
 			"zone", zone, "keyid", keyid)
 		*bootstrapped = true
+		p.state.markBootstrapped()
 		return false, nil // retry
 
 	case edns0.KeyStateBootstrapAutoOngoing:
@@ -440,9 +581,40 @@ func BootstrapWithParent(ctx context.Context, zone ZoneName, keyName string, alg
 	return nil
 }
 
-// ZoneHasParentSyncAgent checks whether the zone's HSYNCPARAM record has
-// parentsync=agent. Returns false if HSYNCPARAM is absent or parentsync=owner.
+// ParentSyncAgentFunc answers whether the agents sync zone's delegation with
+// its parent (parentsync=agent). An application that reads the zone owner's
+// instructions by its own rules registers one, so that tdns asks it rather
+// than reading its own copy of the zone (johanix/tdns-mp#211, step P3).
+type ParentSyncAgentFunc func(zone ZoneName) bool
+
+var (
+	parentSyncAgentMu   sync.RWMutex
+	parentSyncAgentFunc ParentSyncAgentFunc
+)
+
+// RegisterParentSyncAgentFunc installs f, replacing whatever was registered
+// before; nil clears it, and ZoneHasParentSyncAgent reads the zone's copy
+// again.
+func RegisterParentSyncAgentFunc(f ParentSyncAgentFunc) {
+	parentSyncAgentMu.Lock()
+	defer parentSyncAgentMu.Unlock()
+	parentSyncAgentFunc = f
+}
+
+func currentParentSyncAgentFunc() ParentSyncAgentFunc {
+	parentSyncAgentMu.RLock()
+	defer parentSyncAgentMu.RUnlock()
+	return parentSyncAgentFunc
+}
+
+// ZoneHasParentSyncAgent reports whether the agents sync the zone's
+// delegation with its parent. With a ParentSyncAgentFunc registered, its
+// answer is the answer. Without one, the zone's HSYNCPARAM record says so with
+// parentsync=agent; an absent HSYNCPARAM, or parentsync=owner, is false.
 func ZoneHasParentSyncAgent(zone ZoneName) bool {
+	if f := currentParentSyncAgentFunc(); f != nil {
+		return f(zone)
+	}
 	zd, ok := Zones.Get(string(zone))
 	if !ok || zd == nil {
 		return false

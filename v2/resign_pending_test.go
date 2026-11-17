@@ -169,7 +169,6 @@ func countStagedZsks(t *testing.T, kdb *KeyDB, zoneName string) int {
 // without making it stronger.
 func TestStandbyKeyGenerationStopsOnCancellation(t *testing.T) {
 	zd, kdb, _ := rolledZone(t)
-	conf := triggerResignConf(t, zd, 4)
 
 	before := countStagedZsks(t, kdb, zd.ZoneName)
 	if before != 0 {
@@ -179,7 +178,7 @@ func TestStandbyKeyGenerationStopsOnCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	maintainStandbyKeysForType(ctx, conf, kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 2, false)
+	maintainStandbyKeysForType(ctx, kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 2, false)
 
 	if got := countStagedZsks(t, kdb, zd.ZoneName); got != before {
 		t.Errorf("generated %d keys after cancellation; shutdown waits out every one of them",
@@ -191,10 +190,9 @@ func TestStandbyKeyGenerationStopsOnCancellation(t *testing.T) {
 // else. A guard that never lets the loop run would pass the test above.
 func TestStandbyKeyGenerationStillRunsWhenLive(t *testing.T) {
 	zd, kdb, _ := rolledZone(t)
-	conf := triggerResignConf(t, zd, 4)
 
 	before := countStagedZsks(t, kdb, zd.ZoneName)
-	maintainStandbyKeysForType(context.Background(), conf, kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 1, false)
+	maintainStandbyKeysForType(context.Background(), kdb, zd.ZoneName, dns.ED25519, "ZSK", 256, 1, false)
 
 	if got := countStagedZsks(t, kdb, zd.ZoneName); got <= before {
 		t.Errorf("standby ZSKs went %d -> %d; the zone is short of the configured count", before, got)
@@ -208,7 +206,6 @@ func TestStandbyKeyGenerationStillRunsWhenLive(t *testing.T) {
 // on the server.
 func TestStandbyMaintenanceStopsBetweenZonesOnCancellation(t *testing.T) {
 	zd, kdb, _ := rolledZone(t)
-	conf := triggerResignConf(t, zd, 4)
 	zd.DnssecPolicy.ZSKAlgorithm = dns.ED25519
 
 	prev := Conf.Internal.Completeness
@@ -230,7 +227,7 @@ func TestStandbyMaintenanceStopsBetweenZonesOnCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	maintainStandbyKeys(ctx, conf, kdb, time.Minute, 1, 0)
+	maintainStandbyKeys(ctx, kdb, time.Minute, 1, 0)
 
 	if got := countStandbyZsks(t, kdb, zd.ZoneName); got != before {
 		t.Errorf("standby ZSKs went %d -> %d after cancellation; the walk carried on"+

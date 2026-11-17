@@ -250,6 +250,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			if zconf.ApiManaged {
 				specOptions[OptApiManagedZone] = true
 			}
+			retries, retryInterval := zoneNotifyRetrySettings(zoneName, &spec.Zconf)
 			zr := ZoneRefresher{
 				Name:             zoneName,
 				Force:            true, // load from file on startup
@@ -265,11 +266,14 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				ConfigUpdate:     true, // config-bearing (persisted dynamic zone)
 				Options:          specOptions,
 				UpdatePolicy:     spec.Policy,
+				UpdatePolicySet:  true,
 				DelegationPolicy: spec.DelegationPolicy,
 				DnssecPolicy:     spec.Zconf.DnssecPolicy,
 
-				OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
-				TransferSrc:       spec.Zconf.TransferSrc,
+				OutboundSoaSerial:   spec.Zconf.OutboundSoaSerial,
+				TransferSrc:         spec.Zconf.TransferSrc,
+				NotifyRetries:       retries,
+				NotifyRetryInterval: retryInterval,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:
@@ -339,6 +343,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		}
 
 		// Create ZoneRefresher and enqueue to RefreshEngine (same as ParseZones does)
+		retries, retryInterval := zoneNotifyRetrySettings(zoneName, &zconf)
 		zr := ZoneRefresher{
 			Name:             zoneName,
 			Force:            true, // Force refresh on startup to load from disk
@@ -355,8 +360,10 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			Options:          options,
 			DelegationPolicy: dpol,
 
-			OutboundSoaSerial: zconf.OutboundSoaSerial,
-			TransferSrc:       zconf.TransferSrc,
+			OutboundSoaSerial:   zconf.OutboundSoaSerial,
+			TransferSrc:         zconf.TransferSrc,
+			NotifyRetries:       retries,
+			NotifyRetryInterval: retryInterval,
 		}
 
 		// Blocking send, exactly like the static-zone enqueue in ParseZones.
@@ -1224,6 +1231,9 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// as-configured view survives a modify and the operator's origination
 	// options are not dropped from the persisted config by the next rewrite.
 	suppressedOptions := oldZd.SuppressedOptions
+	// A zone withheld stays so: its replacement has no copy yet, and the first
+	// publish of one would go Ready on what the withholding kept back.
+	withheld := oldZd.withheld
 	oldZd.mu.Unlock()
 
 	// Normalize the SUBMITTED options, not just the carried-forward ones.
@@ -1258,6 +1268,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		OutboundSoaSerial: outboundSoaSerial,
 		TransferSrc:       transferSrc,
 		SuppressedOptions: suppressedOptions,
+		withheld:          withheld,
 	}
 	// Commit the staged inline key just before persistence so the rewritten file
 	// includes it; roll it back if persistence fails.

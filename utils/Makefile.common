@@ -171,18 +171,46 @@ tdnsnbsd:
 UTILS_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
 TDNS_ROOT := $(UTILS_DIR)..
 
-# Reject direct zone mutation outside the staging allowlist (B3).
+# Reject a write to zone data that nobody has checked (B3).
+#
+# What it protects is served data: a published snapshot is never written, and
+# a live zone changes only by staging into its working set and publishing. A
+# write is safe or not by what it writes to: the working set's own copy of an
+# owner (cloneOwner), a zone that is not published yet (SortFunc's new zone),
+# or an inbound delta's copy of the snapshot -- and in that copy only an owner
+# the delta touches, because the others share their store with the snapshot
+# being served. A grep cannot see what a write writes to, so a person says it.
+#
+# Every .RRtypes.Set, .RRtypes.Delete, .Data.Set and .Data.Delete call in a
+# non-test file must carry a marker, on the same line as the call, saying why
+# that write cannot reach served data:
+#
+#	nod.RRtypes.Set(t, rs) // mutator-ok: <why, for this call>
+#
+# One marker per call, with its own reason, so a line may hold only one such
+# call: a marker exempts its whole line. No file is exempt, the staging API
+# (zone_mutation.go) included, so a new write anywhere fails until someone
+# checks it. The grep sees those four calls only: data.Set, data.Remove, an
+# assignment to zd.Data and a write through a renamed variable pass unseen.
+# A type-aware check is #940. See
+# docs/2026-07-02-DONE-zone-mutation-snapshot-correctness.md and
+# docs/2026-07-25-inbound-ixfr-plan.md section 4.4.
 check-no-mutators:
-	@violations=$$(grep -RnE '\.(RRtypes\.Set|Data\.Set)\(' \
-		$(TDNS_ROOT)/v2 $(TDNS_ROOT)/cmdv2 --include='*.go' \
-		| grep -v zone_mutation.go \
-		| grep -v '_test\.go' \
-		| grep -v 'dnsutils\.go' || true); \
-	if [ -n "$$violations" ]; then \
-		echo "mutator Set() calls outside allowlist:"; \
-		echo "$$violations"; \
-		exit 1; \
-	fi
+	@calls='\.(RRtypes|Data)\.(Set|Delete)\('; \
+	unmarked=$$(grep -RnE "$$calls" \
+		$(TDNS_ROOT)/v2 $(TDNS_ROOT)/cmdv2 --include='*.go' --exclude='*_test.go' \
+		| grep -vE '// mutator-ok: [^ ]' || true); \
+	shared=$$(grep -RnE "($$calls.*){2}" \
+		$(TDNS_ROOT)/v2 $(TDNS_ROOT)/cmdv2 --include='*.go' --exclude='*_test.go' || true); \
+	if [ -n "$$unmarked" ]; then \
+		echo "zone data writes without a '// mutator-ok: <why>' marker:"; \
+		echo "$$unmarked"; \
+	fi; \
+	if [ -n "$$shared" ]; then \
+		echo "lines with more than one zone data write (one marker per call: split them):"; \
+		echo "$$shared"; \
+	fi; \
+	[ -z "$$unmarked" ] && [ -z "$$shared" ]
 
 # Reject DNS names folded by anything but the DNS rule. Companion to
 # check-no-mutators: a parser rather than a grep, because the defects it exists

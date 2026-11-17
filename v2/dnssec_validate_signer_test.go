@@ -45,7 +45,7 @@ func newSignerTestKey(t *testing.T, zone string, flags uint16) *signerTestKey {
 		Protocol:  3,
 		Algorithm: dns.ED25519,
 	}
-	priv, err := dk.Generate(256)
+	priv, err := generateSigningKey(dk, 256)
 	if err != nil {
 		t.Fatalf("Generate(%s): %v", zone, err)
 	}
@@ -87,7 +87,7 @@ func newSignerTestSig0Key(t *testing.T, owner string) *dns.KEY {
 		Protocol:  3,
 		Algorithm: dns.ED25519,
 	}}
-	if _, err := k.Generate(256); err != nil {
+	if _, err := generateSigningKey(k, 256); err != nil {
 		t.Fatalf("Generate(%s): %v", owner, err)
 	}
 	return k

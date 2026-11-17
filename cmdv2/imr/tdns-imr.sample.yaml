@@ -69,15 +69,23 @@ imrengine:
       # - always-query-for-transport
       # - query-for-transport-tlsa
 
-   # DNSSEC trust anchors. Choose ONE of the three forms below.
+   # DNSSEC trust anchors, in any of the three forms below (they add up).
    #
-   # IMPORTANT: if none is set, the tdns-imr DAEMON seeds no trust anchor at
-   # all and cannot establish a chain of trust. (The compiled-in root anchor is
-   # wired into `dog`, not into this daemon.) Validation is on by default —
-   # require-dnssec-validation defaults to true — so an unconfigured daemon
-   # validates against an empty anchor set.
+   # If none is set, the daemon uses the IANA root anchor compiled into the
+   # binary (KSK-2017 20326 and KSK-2024 38696), but ONLY with the compiled-in
+   # root hints (root-hints unset) and the root neither forwarded nor a stub
+   # zone. With a root-hints file, a "zone: ." forward or a stub for "." the
+   # root may be a private one: the daemon then uses no anchor at all,
+   # validates nothing, and warns at start. Set the anchor for the root you use.
+   # Validation is on by default — require-dnssec-validation defaults to true.
+   #
+   # trust-anchor-ds and trust-anchor-dnskey take one record, or several, one
+   # per line:
    #
    # trust-anchor-ds:      ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+   # trust-anchor-ds: |
+   #    . IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
+   #    . IN DS 38696 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16
    # trust-anchor-dnskey:  ". IN DNSKEY 257 3 8 AwEAAaz/tAm8y..."
    # trust-anchor-file:    /etc/tdns/root.key    # unbound-style, one DS/DNSKEY per line
 
@@ -221,6 +229,9 @@ apiserver:
 log:
    file:                /var/log/tdns/tdns-imr.log
    level:               info    # default level: debug|info|warn|error
+   # max-size:          20      # MB before the file is rotated (default 20)
+   # max-backups:       3       # rotated files kept (default 3)
+   # max-age:           14      # days a rotated file is kept (default 14)
 
 # Optional second config file, merged on top of this one. This is the only
 # `imr.`-prefixed key; it is read directly and is not part of `imrengine:`.

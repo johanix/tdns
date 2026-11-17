@@ -64,7 +64,49 @@ func parseLogConfFromFile(cfgfile string) (LogConf, error) {
 			"log.file is empty in %q (log: section found but log.file is required)",
 			cfgfile)
 	}
+	if err := raw.Log.Validate(); err != nil {
+		return LogConf{}, fmt.Errorf("%s: %w", cfgfile, err)
+	}
 	return *raw.Log, nil
+}
+
+// Log rotation when the log: section does not set it (#974).
+const (
+	defaultLogMaxSize    = 20 // MB
+	defaultLogMaxBackups = 3
+	defaultLogMaxAge     = 14 // days
+)
+
+// Validate refuses a rotation key that is set to zero or less. Lumberjack
+// reads 0 as "no limit" (100 MB for max-size), which is not what a 0
+// written in the config says.
+func (lc LogConf) Validate() error {
+	for _, k := range []struct {
+		name string
+		v    *int
+	}{{"max-size", lc.MaxSize}, {"max-backups", lc.MaxBackups}, {"max-age", lc.MaxAge}} {
+		if k.v != nil && *k.v <= 0 {
+			return fmt.Errorf("log.%s is %d; it must be a positive number (leave it out for the default)", k.name, *k.v)
+		}
+	}
+	return nil
+}
+
+// rotatingWriter returns a writer to file that rotates as lc says, with the
+// default for a key lc does not set.
+func (lc LogConf) rotatingWriter(file string) *lumberjack.Logger {
+	orDefault := func(v *int, def int) int {
+		if v == nil {
+			return def
+		}
+		return *v
+	}
+	return &lumberjack.Logger{
+		Filename:   file,
+		MaxSize:    orDefault(lc.MaxSize, defaultLogMaxSize),
+		MaxBackups: orDefault(lc.MaxBackups, defaultLogMaxBackups),
+		MaxAge:     orDefault(lc.MaxAge, defaultLogMaxAge),
+	}
 }
 
 // SetupLogging configures the slog-based logging system with lumberjack rotation.
@@ -88,13 +130,7 @@ func SetupLogging(cfgfile string) (LogConf, error) {
 		return LogConf{}, fmt.Errorf("log file path must not contain directory traversal: %s", logfile)
 	}
 
-	lj := &lumberjack.Logger{
-		Filename:   logfile,
-		MaxSize:    20,
-		MaxBackups: 3,
-		MaxAge:     14,
-	}
-	logWriter = lj
+	logWriter = logConf.rotatingWriter(logfile)
 
 	// Parse default level from config (default: info)
 	defaultLevel.Set(ParseLogLevel(logConf.Level))
