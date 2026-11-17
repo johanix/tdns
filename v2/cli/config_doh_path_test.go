@@ -146,3 +146,30 @@ func TestConfigCheckDo53QueriesRefusedDrift(t *testing.T) {
 		})
 	}
 }
+
+// tdns-agent refuses debug-do53-queries-refused whatever its value, "false"
+// included, so config check fails it for an agent whenever the key is
+// present. tdns-auth takes "false" and says nothing.
+func TestConfigCheckDo53QueriesRefusedOnAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		opts  []string
+		agent bool
+		fail  bool
+	}{
+		{"agent, absent", nil, true, false},
+		{"agent, on", []string{"debug-do53-queries-refused"}, true, true},
+		{"agent, false", []string{"debug-do53-queries-refused:false"}, true, true},
+		{"auth, false", []string{"debug-do53-queries-refused:false"}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &tdns.Config{}
+			cfg.AuthEngine.OptionsStrs = tc.opts
+			rep := newCCReport()
+			checkDo53QueriesRefused(cfg, rep, tc.agent)
+			if got := hasLevel(rep, "Listeners", "debug-do53-queries-refused", ccFAIL); got != tc.fail {
+				t.Fatalf("failed = %v, want %v; report %+v", got, tc.fail, rep.byGroup["Listeners"])
+			}
+		})
+	}
+}

@@ -133,11 +133,13 @@ func checkDo53QueriesRefused(conf *Config) error {
 }
 
 // Do53QueriesRefusedCheck parses the authengine options and reports whether
-// debug-do53-queries-refused is on, and the reason the daemon would refuse to
-// start with it, if any (checkDo53QueriesRefused). For config check.
-func (conf *Config) Do53QueriesRefusedCheck() (bool, error) {
+// debug-do53-queries-refused is present, at any value (tdns-agent refuses it
+// then, "false" included), whether it is on, and the reason the daemon would
+// refuse to start with it, if any (checkDo53QueriesRefused). For config check.
+func (conf *Config) Do53QueriesRefusedCheck() (present, on bool, err error) {
 	conf.ParseAuthOptions()
-	return do53QueriesRefusedConfigured(conf.AuthEngine.Options), checkDo53QueriesRefused(conf)
+	_, present = conf.AuthEngine.Options[AuthOptDebugDo53QueriesRefused]
+	return present, do53QueriesRefusedConfigured(conf.AuthEngine.Options), checkDo53QueriesRefused(conf)
 }
 
 // do53QueriesRefusedStartError is DnsEngine's verdict, with

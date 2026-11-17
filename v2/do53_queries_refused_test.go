@@ -252,9 +252,9 @@ func TestCheckDo53QueriesRefused(t *testing.T) {
 		}
 		conf.Listeners.Transports = tc.transports
 		conf.Listeners.CertFile, conf.Listeners.KeyFile = tc.cert, tc.key
-		on, err := conf.Do53QueriesRefusedCheck()
-		if on != (tc.opt != "") {
-			t.Errorf("%s: on = %v", tc.name, on)
+		present, on, err := conf.Do53QueriesRefusedCheck()
+		if on != (tc.opt != "") || present != on {
+			t.Errorf("%s: present = %v, on = %v", tc.name, present, on)
 		}
 		switch {
 		case tc.wantErr == "" && err != nil:

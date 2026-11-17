@@ -633,15 +633,16 @@ func checkListeners(cfg *tdns.Config, rep *ccReport) {
 // checkDo53QueriesRefused reports debug-do53-queries-refused (#1066): a WARN
 // when it is on and the daemon would start with it, since it breaks RFC
 // requirements on purpose; a FAIL when the daemon would refuse to start with
-// it, and on tdns-agent, which refuses the option.
+// it, and on tdns-agent, which refuses the option at any value, "false"
+// included.
 func checkDo53QueriesRefused(cfg *tdns.Config, rep *ccReport, agent bool) {
 	const g, check = "Listeners", "debug-do53-queries-refused"
-	on, err := cfg.Do53QueriesRefusedCheck()
+	present, on, err := cfg.Do53QueriesRefusedCheck()
 	switch {
-	case !on:
-	case agent:
-		rep.fail(g, check, "tdns-agent refuses this authengine option at startup",
+	case agent && present:
+		rep.fail(g, check, "tdns-agent refuses this authengine option at startup, whatever its value",
 			"remove it: it is for a tdns-auth leaf server under test")
+	case !on:
 	case err != nil:
 		rep.fail(g, check, err.Error(),
 			"add dot or doq to listeners.transports, with a certfile and keyfile that load, or remove the option")
@@ -1248,7 +1249,7 @@ func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, 
 	}
 	// debug-do53-queries-refused takes effect when the DNS engine starts; a
 	// reload leaves the running setting as it was.
-	if on, _ := cfg.Do53QueriesRefusedCheck(); on != resp.Do53QueriesRefused {
+	if _, on, _ := cfg.Do53QueriesRefusedCheck(); on != resp.Do53QueriesRefused {
 		rep.warn(g, "debug-do53-queries-refused",
 			fmt.Sprintf("config has debug-do53-queries-refused %s, the running server has it %s", onOff(on), onOff(resp.Do53QueriesRefused)),
 			"the option takes effect at the next restart")
