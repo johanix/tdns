@@ -402,13 +402,13 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 			}
 			resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
 			if err != nil {
-				return fmt.Errorf("Sig0KeyPreparation(%s) failed to generate keypair: %v", name, err)
+				return fmt.Errorf("Sig0KeyPreparation(%s) failed to generate keypair: %w", name, err)
 			}
 			lgDns.Info("Sig0KeyPreparation: key generated", "msg", resp.Msg)
 
 			sak, err = zd.KeyDB.GetSig0Keys(name, Sig0StateActive)
 			if err != nil {
-				return fmt.Errorf("Sig0KeyPreparation(%s, after key generation) failed to get SIG(0) active keys: %v", name, err)
+				return fmt.Errorf("Sig0KeyPreparation(%s, after key generation) failed to get SIG(0) active keys: %w", name, err)
 			}
 		}
 
@@ -1001,6 +1001,19 @@ func handleDelegationSyncSetupWith(ctx context.Context, conf *Config, delsyncq c
 			return nil
 		}
 		return deferSetupRetry(ctx, delsyncq, ds, "the parent's answer was not final")
+
+	case errors.Is(err, ErrKeyDBBusy):
+		// The keystore's transaction was held past Begin's wait, by another
+		// zone's setup generating its key in it or by any other writer. Not a
+		// verdict on this zone: the same setup succeeds once the holder is
+		// done, so it takes the same bounded backoff. With a queue per parent,
+		// several parents' first setups can wait on the transaction at once.
+		if ds.Attempt+1 >= delegationSyncMaxRetries {
+			lgDns.Error("DelegationSyncher: SIG(0) bootstrap setup gave up; the keystore stayed busy",
+				"zone", ds.ZoneName, "attempts", ds.Attempt+1, "err", err)
+			return nil
+		}
+		return deferSetupRetry(ctx, delsyncq, ds, "the keystore was busy")
 
 	case errors.Is(err, errBootstrapAdvertisementLookup):
 		// The parent's SVCB advertisement could not be looked up: not a verdict
