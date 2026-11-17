@@ -1452,7 +1452,7 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 	}
 	_, wroteSerial, err := zd.WriteFileWithSerial(fname)
 	if err == nil {
-		zd.recordZoneFileWritten(fname, wroteSerial)
+		zd.recordZoneFileWritten(fname, wroteSerial, nil)
 	}
 	return fmt.Sprintf("Zone %s written to %s", zd.ZoneName, fname), err
 }
@@ -1462,14 +1462,27 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 // now. Its serial anchors the journal, its stat and identity are recorded for
 // the next refresh and the next load, and the deltas it holds are dropped.
 //
-// One function for both writers, WriteZone and the write that follows a
-// refresh (persistRefreshedZone). The refresh's write used to do none of it,
-// so a secondary that restarted from that file found its journal anchored to
-// a serial the file did not have, and refused it as an edited file (#919).
+// One function for every writer: WriteZone, and the write that follows a
+// refresh (persistRefreshedZone), to the zone's source file and to the dynamic
+// zone directory. The refresh's writes used to do none of it, so a secondary
+// that restarted from that file found its journal anchored to a serial the
+// file did not have, and refused it as an edited file (#919).
 //
-// The caller has written the file with WriteFileWithSerial, whose success
-// means the file is on disk: the deltas dropped here have no other copy.
-func (zd *ZoneData) recordZoneFileWritten(fname string, wroteSerial uint32) {
+// The caller has written the file with WriteFileWithSerial or
+// WriteDynamicZoneFileWithSerial, whose success means the file is on disk: the
+// deltas dropped here have no other copy.
+//
+// The refresh's writes do not get here while the first load still owes the
+// journal an earlier process left (journalReplayOwed): see recordRefreshWrite.
+// WriteZone does, deliberately. It is the operator's way to reconcile a journal
+// the load refused, and what a refused replay tells them to do ("write the zone
+// out to adopt the in-memory state").
+//
+// stillLive, when not nil, is asked again just before the journal is touched:
+// the delete is by zone name, and a zone removed or replaced while its file was
+// written has rows under that name which are not this zone's. The refresh
+// checked once, before the write. See persistRefreshedZone.
+func (zd *ZoneData) recordZoneFileWritten(fname string, wroteSerial uint32, stillLive func() bool) {
 	zd.mu.Lock()
 	// The same question the dirty flag asks, captured once under the lock
 	// and reused for the identity record below: is the file still what the
@@ -1570,6 +1583,15 @@ func (zd *ZoneData) recordZoneFileWritten(fname string, wroteSerial uint32) {
 	// full transfer, and a load of this file applies it again. Dropping it
 	// would take those records out at the next full transfer.
 	if zd.KeyDB != nil && !overlay {
+		// The zone this file was written for may be gone, or have a
+		// replacement under the same name, by now. The delete is by name:
+		// it would take the replacement's rows along with this zone's.
+		if stillLive != nil && !stillLive() {
+			lg.Info("zone file written, but the zone was deleted or replaced while it was"+
+				" written; its journal is left to the zone that holds the name now",
+				"zone", zd.ZoneName, "file", fname, "serial", wroteSerial)
+			return
+		}
 		// Bound the drop by the serial actually WRITTEN, not by a ceiling
 		// read beforehand. A ceiling has a window: a publish can land in
 		// the file after the ceiling is read, and its delta row then
@@ -1590,7 +1612,7 @@ func (zd *ZoneData) recordZoneFileWritten(fname string, wroteSerial uint32) {
 		// What is left was published by this process, after the snapshot
 		// written, so it is in the content: nothing an earlier process left
 		// is owed any more. While it is owed only WriteZone gets here; the
-		// write after a refresh stops short of this (persistRefreshedZone).
+		// write after a refresh stops short of this (recordRefreshWrite).
 		zd.mu.Lock()
 		zd.journalReplayOwed = false
 		zd.mu.Unlock()

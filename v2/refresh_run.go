@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"path/filepath"
 	"time"
 )
 
@@ -217,8 +218,15 @@ func persistRefreshedZone(zd *ZoneData, zone string, gen uint64, conf *Config) {
 		lgEngine.Debug("skipping zone file write for unmodified primary zone", "zone", zone)
 
 	case conf.ShouldPersistZone(zd):
-		if _, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory); err != nil {
+		fname, wrote, err := zd.WriteDynamicZoneFileWithSerial(conf.DynamicZones.ZoneDirectory)
+		if err != nil {
 			lgEngine.Warn("failed to write dynamic zone file", "zone", zone, "error", err)
+		} else if filepath.Clean(fname) == filepath.Clean(zd.persistedZoneFilePath(conf)) {
+			// The file the zone adopts at its next start, for a secondary. A
+			// template-expanded primary's own file may live outside the zone
+			// directory, and then this copy is not what its next load reads:
+			// the journal is anchored to the file that is, which is not this.
+			recordRefreshWrite(zd, gen, fname, wrote)
 		}
 		// The zone file path may have changed, or this may be its first write.
 		if err := conf.AddDynamicZoneToConfig(zd); err != nil {
@@ -232,23 +240,33 @@ func persistRefreshedZone(zd *ZoneData, zone string, gen uint64, conf *Config) {
 			lgEngine.Warn("failed to write zone file", "zone", zone, "error", err)
 			return
 		}
-		// The file is the zone's file now, and the next load starts from it,
-		// so it gets what WriteZone's file gets: the journal anchored to it
-		// and the deltas it holds dropped (#919).
-		//
-		// Not while the first load still owes the journal an earlier process
-		// left (journalReplayOwed). Its deltas are in neither the content nor
-		// this file, so dropping the ones the serial covers would lose them,
-		// and moving the anchor would refuse the rest when they are replayed.
-		// A first-load completion that failed before its replay leaves the
-		// zone in exactly this state while a NOTIFY still refreshes it.
-		if zd.journalReplayIsOwed() {
-			lgEngine.Info("zone file written; the journal is left as it is until the first load"+
-				" has replayed it", "zone", zone, "file", zd.Zonefile, "serial", wrote)
-			return
-		}
-		zd.recordZoneFileWritten(zd.Zonefile, wrote)
+		recordRefreshWrite(zd, gen, zd.Zonefile, wrote)
 	}
+}
+
+// recordRefreshWrite is what follows the refresh's write of the zone to the file
+// the zone's next load reads: the file is the zone's file now, so it gets what
+// WriteZone's file gets. The journal is anchored to it and the deltas it holds
+// are dropped (#919). See recordZoneFileWritten.
+//
+// Not while the first load still owes the journal an earlier process left
+// (journalReplayOwed). Its deltas are in neither the content nor this file, so
+// dropping the ones the serial covers would lose them, and moving the anchor
+// would refuse the rest when they are replayed. A first-load completion that
+// failed before its replay leaves the zone in exactly this state while a NOTIFY
+// still refreshes it. The file is written; the journal stays as it is until
+// the first load has brought it in, or the operator has reconciled it.
+//
+// The liveness check is made again, after the write, for the delete that ends
+// recordZoneFileWritten: persistRefreshedZone asked before it, and the write
+// takes long enough for the zone to be deleted or replaced under it.
+func recordRefreshWrite(zd *ZoneData, gen uint64, fname string, wrote uint32) {
+	if zd.journalReplayIsOwed() {
+		lgEngine.Info("zone file written; the journal is left as it is until the first load"+
+			" has replayed it", "zone", zd.ZoneName, "file", fname, "serial", wrote)
+		return
+	}
+	zd.recordZoneFileWritten(fname, wrote, func() bool { return zoneStillLive(zd, gen) })
 }
 
 // journalReplayIsOwed reports whether the zone's first load has yet to bring

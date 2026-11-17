@@ -174,20 +174,22 @@ func (zd *ZoneData) noteSuccessfulRefresh(serial uint32) {
 //
 // The serial, and not also the recorded ZONEMD identity, though the brief asks
 // for both. The identity would catch the one case a serial cannot -- a file
-// regenerated or restored reusing the serial it had -- but it is not maintained
-// on this path: WriteZone records the file it writes, and
-// WriteDynamicZoneFile, which is what the refresh engine calls for a
-// persistable dynamic zone, does not. So the record a restarted secondary
-// finds describes some earlier read of the file, not the copy the engine last
-// wrote, and consulting it would report ZoneFileChanged on essentially every
-// restart that followed a content-changing transfer -- discarding a
-// confirmation we genuinely have, which is the case this whole feature exists
-// to preserve. Wrong in the permissive direction, but wrong every time.
+// regenerated or restored reusing the serial it had -- but it was not
+// maintained on this path when this was written: WriteZone recorded the file it
+// wrote, and the refresh engine's write of a persistable dynamic zone did not.
+// So the record a restarted secondary found described some earlier read of the
+// file, not the copy the engine last wrote, and consulting it would have
+// reported ZoneFileChanged on essentially every restart that followed a
+// content-changing transfer -- discarding a confirmation we genuinely have,
+// which is the case this whole feature exists to preserve. Wrong in the
+// permissive direction, but wrong every time.
 //
-// Making WriteDynamicZoneFile record identity the way WriteZone does is the
-// fix that would let the digest back in. It also changes what the journal
-// reconciliation decides on the next load, so it is its own change with its
-// own analysis, not a line to add here.
+// The refresh engine's write records the identity now, the way WriteZone does
+// (recordZoneFileWritten, #919), except while the first load still owes the
+// journal a replay. That is what would let the digest back in. It also
+// changes what the journal reconciliation decides on the next load, which is
+// what #919 is for; the check here is its own change, with its own analysis,
+// and has not been made.
 //
 // Anything short of a match falls back to Option 3: start the clock now, and
 // say so. That can serve past the true expire by up to one expire interval,

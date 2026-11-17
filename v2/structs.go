@@ -441,9 +441,10 @@ type ZoneData struct {
 	// in the journal an earlier process left: its deltas are in neither the
 	// content served nor the file. Set by a first-load replacement and cleared
 	// once the journal is reconciled with the content
-	// (reconcileZoneFileWithJournal), written out by WriteZone, or purged.
+	// (reconcileZoneFileWithJournal), written out by WriteZone, or purged. A
+	// replay that is refused leaves it set, for the operator to settle.
 	// While it is set, the write that follows a refresh must not drop deltas
-	// or move the journal's anchor: see persistRefreshedZone. Guarded by zd.mu.
+	// or move the journal's anchor: see recordRefreshWrite. Guarded by zd.mu.
 	journalReplayOwed bool
 	// fileDigest is the ZONEMD digest of the zone FILE as last read from or
 	// written to disk, the companion to fileSerial. The serial says which
