@@ -740,7 +740,7 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				resp.ErrorMsg = "the resolver is not running: it has no cache"
 				break
 			}
-			resp.Msg =fmt.Sprintf("RRsetCache: %v", conf.Internal.RRsetCache.RRsets.Keys())
+			resp.Msg = fmt.Sprintf("RRsetCache: %v", conf.Internal.RRsetCache.RRsets.Keys())
 			rrsets := []cache.CachedRRset{}
 			for _, rrsetkey := range conf.Internal.RRsetCache.RRsets.Keys() {
 				rrset, ok := conf.Internal.RRsetCache.RRsets.Get(rrsetkey)
