@@ -667,6 +667,17 @@ which also exits non-zero on a zone that fails. `+zonemd` needs an AXFR: an
 IXFR returns a difference rather than a zone, and `dog` refuses instead of
 digesting one.
 
+**Outbound IXFR**
+
+| Option | Effect |
+|--------|--------|
+| `ixfr-from-differences` | Diff a wholesale replacement of the zone (a reload of its file, or a full AXFR in) against the version it replaces, and keep the difference in the outbound IXFR history, so downstreams get an IXFR instead of the whole zone. BIND's option of the same name. **Off by default**, as in BIND |
+
+Off is the default because the diff compares the whole zone on every
+replacement. Without the option, a replacement starts a new IXFR history and
+downstreams get a full transfer. Either way a reload whose content is what the
+zone already serves publishes nothing: no new serial, no NOTIFY.
+
 **Zone transfer (secondary zones only)**
 
 | Option | Effect |
@@ -915,6 +926,8 @@ authengine:
 | `listeners.udp-sockets` | `1` | how many UDP sockets to open per Do53 address, so the kernel can spread datagrams across that many readers. Only useful where the kernel load-balances (below); elsewhere it falls back to one socket and logs why |
 | `listeners.imr-debug-address` | — | loopback-only DNS window into the embedded resolver's cache; non-loopback is a hard error |
 | `authengine.outbound-soa-serial` | `keep` | `keep`, `unixtime` or `persist` |
+| `authengine.notify-retries` | `5` | how many times an unanswered NOTIFY is sent again (RFC 1996 §3.6). `0` sends once. Any reply ends the tries, REFUSED included. A zone's own `notify-retries` overrides it. Read at startup |
+| `authengine.notify-retry-interval` | `10s` | the wait before the first resend; each later one waits twice as long (10s, 20s, 40s, 80s, 160s). A zone's own `notify-retry-interval` overrides it |
 | `authengine.options` | — | server-wide options, below |
 
 `ports.do53` does not exist. Do53 always listens on the ports embedded in

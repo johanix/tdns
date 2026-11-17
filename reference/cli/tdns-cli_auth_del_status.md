@@ -1,6 +1,6 @@
 ## tdns-cli auth del status
 
-Make an API call to request TDNSD to analyse whether delegation is in sync or not
+Make an API call to request the daemon to analyse whether delegation is in sync or not
 
 ```
 tdns-cli auth del status [flags]
@@ -20,6 +20,7 @@ tdns-cli auth del status [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 

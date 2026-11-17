@@ -80,7 +80,7 @@ func TestValidateDNSKEYs_TrustAnchorSurvivesDNSKEYRefresh(t *testing.T) {
 		Protocol:  3,
 		Algorithm: dns.ED25519,
 	}
-	priv, err := ksk.Generate(256)
+	priv, err := generateSigningKey(ksk, 256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestValidateDNSKEYs_TrustAnchorSurvivesDNSKEYRefresh(t *testing.T) {
 		Protocol:  3,
 		Algorithm: dns.ED25519,
 	}
-	if _, err := zsk.Generate(256); err != nil {
+	if _, err := generateSigningKey(zsk, 256); err != nil {
 		t.Fatal(err)
 	}
 

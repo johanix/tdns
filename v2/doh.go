@@ -131,6 +131,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs, ports []string, p
 		// Create a response writer abstraction for DoH
 		var buf bytes.Buffer
 		rw := newDoHResponseWriter(&buf, r, msg)
+		rw.wire = dnsQuery
 
 		lgDns.Debug("DoH: received message", "opcode", dns.OpcodeToString[msg.Opcode], "qname", msg.Question[0].Name, "rrtype", dns.TypeToString[msg.Question[0].Qtype])
 
@@ -234,7 +235,8 @@ type dohResponseWriter struct {
 	buf    *bytes.Buffer
 	local  net.Addr
 	remote net.Addr
-	tsig   bool // the request carried a TSIG RR
+	tsig   bool   // the request carried a TSIG RR
+	wire   []byte // the request as received (requestWire)
 }
 
 // newDoHResponseWriter takes the client's address from the HTTP request: the
@@ -252,6 +254,10 @@ func newDoHResponseWriter(buf *bytes.Buffer, r *http.Request, msg *dns.Msg) *doh
 	}
 	return w
 }
+
+// RawRequest returns the request as received, for SIG(0) verification
+// (requestWire).
+func (w *dohResponseWriter) RawRequest() []byte { return w.wire }
 
 func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
 	raw, err := m.Pack()

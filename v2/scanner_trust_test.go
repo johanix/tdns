@@ -43,6 +43,13 @@ type trustNet struct {
 	servedBy      map[string]map[string][]dns.RR
 	laterServedBy map[string]map[string][]dns.RR
 
+	// signatures: the RRSIGs that come with an RRset, keyed like served;
+	// signaturesBy the ones one nameserver sends instead, keyed by its name and
+	// then like served. A child that several providers sign has a different
+	// signature at each of its nameservers (#925).
+	signatures   map[string][]dns.RR
+	signaturesBy map[string]map[string][]dns.RR
+
 	// dead: nameservers that answer nothing. silent: whether a nameserver
 	// gives no answer to the nth query of a key (1: the first).
 	dead   map[string]bool
@@ -58,6 +65,29 @@ type trustNet struct {
 	denial        map[string]cache.ValidationState
 	denialsJudged []string
 	zone          string // the child, whose SOA and NSEC the proof carries
+}
+
+// signDnskeyRRset signs rrs, a DNSKEY RRset, with key, whose private half is
+// priv, valid from an hour ago for an hour.
+func signDnskeyRRset(t *testing.T, key *dns.DNSKEY, priv crypto.PrivateKey, rrs []dns.RR) dns.RR {
+	t.Helper()
+	signer, ok := priv.(crypto.Signer)
+	if !ok {
+		t.Fatalf("a %T cannot sign", priv)
+	}
+	now := time.Now()
+	sig := &dns.RRSIG{
+		Hdr:        dns.RR_Header{Ttl: rrs[0].Header().Ttl},
+		Algorithm:  key.Algorithm,
+		Inception:  uint32(now.Add(-time.Hour).Unix()),
+		Expiration: uint32(now.Add(time.Hour).Unix()),
+		KeyTag:     key.KeyTag(),
+		SignerName: key.Header().Name,
+	}
+	if err := sig.Sign(signer, rrs); err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	return sig
 }
 
 func trustKey(name string, qtype uint16) string { return name + "/" + dns.TypeToString[qtype] }
@@ -111,8 +141,13 @@ func (n *trustNet) answers(qname string, qtype uint16, ns *core.RRset) []childAn
 				},
 			}
 		}
+		sigs := n.signatures[k]
+		if by, ok := n.signaturesBy[server][k]; ok {
+			sigs = by
+		}
 		answers = append(answers, childAnswer{NS: server,
-			RRset: &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: data}, Denial: proof})
+			RRset:  &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: qtype, RRs: data, RRSIGs: sigs},
+			Denial: proof})
 	}
 	return answers
 }
@@ -534,12 +569,19 @@ func serveKeyAndCDS(t *testing.T, n *trustNet, child string) (*dns.DNSKEY, *dns.
 	t.Helper()
 	key := &dns.DNSKEY{Hdr: dns.RR_Header{Name: child, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
 		Flags: 257, Protocol: 3, Algorithm: dns.ECDSAP256SHA256}
-	if _, err := key.Generate(256); err != nil {
+	priv, err := generateSigningKey(key, 256)
+	if err != nil {
 		t.Fatalf("generating a key for %s: %v", child, err)
 	}
 	cds := key.ToDS(dns.SHA256).ToCDS()
 	n.served[trustKey(child, dns.TypeDNSKEY)] = []dns.RR{key}
 	n.served[trustKey(child, dns.TypeCDS)] = []dns.RR{cds}
+	// The key signs its own DNSKEY RRset, as a KSK does: a DS for it is then one
+	// the RRset validates through.
+	if n.signatures == nil {
+		n.signatures = map[string][]dns.RR{}
+	}
+	n.signatures[trustKey(child, dns.TypeDNSKEY)] = []dns.RR{signDnskeyRRset(t, key, priv, []dns.RR{key})}
 	return key, cds
 }
 
@@ -615,6 +657,52 @@ func TestScanCDSMustLeadToAKeyTheChildPublishes(t *testing.T) {
 	}
 }
 
+// #925: a child that two providers sign has a DNSKEY RRset per nameserver, each
+// signed by its own provider's key. A CDS that leaves out one provider's DS is
+// judged on every nameserver's copy: it passes only if each copy is signed by a
+// key the DS RRset it asks for matches. The CDS and the DNSKEY RRset validate,
+// as they do for a child with a DS; that says nothing about the DS RRset the
+// CDS would put in place.
+func TestScanCDSJudgesEveryNameserversCopyOfTheDNSKEYs(t *testing.T) {
+	const child = "signers.example."
+	p := newSignerPair(t, child)
+	dnskeyKey := trustKey(child, dns.TypeDNSKEY)
+	setup := func(cds ...*dns.DS) *trustNet {
+		n := &trustNet{served: map[string][]dns.RR{}, verdict: map[string]cache.ValidationState{}}
+		n.served[dnskeyKey] = []dns.RR{p.a.dnskey, p.b.dnskey}
+		n.signaturesBy = map[string]map[string][]dns.RR{
+			"ns1." + child:     {dnskeyKey: p.signedBy(t, p.a).RRSIGs},
+			"ns.provider.net.": {dnskeyKey: p.signedBy(t, p.b).RRSIGs},
+		}
+		var rrs []dns.RR
+		for _, ds := range cds {
+			rrs = append(rrs, ds.ToCDS())
+		}
+		n.served[trustKey(child, dns.TypeCDS)] = rrs
+		n.set(cache.ValidationStateSecure, trustKey(child, dns.TypeCDS), dnskeyKey)
+		return n
+	}
+
+	// The CDS drops A's DS. The nameserver that serves the copy A signs would
+	// serve a bogus one.
+	n := setup(p.dsB)
+	resp := runCDS(t, trustScanner(n), trustParent(t, child, trustLax()), child, []dns.RR{p.dsA, p.dsB})
+	assertRefused(t, resp, "would not validate the DNSKEY RRset nameserver ns1.signers.example.")
+
+	// A nameserver that is down leaves it open, and the scan is refused.
+	n = setup(p.dsB)
+	n.dead = map[string]bool{"ns1." + child: true}
+	resp = runCDS(t, trustScanner(n), trustParent(t, child, trustLax()), child, []dns.RR{p.dsA, p.dsB})
+	assertRefused(t, resp, "ns1.signers.example.")
+
+	// The CDS adds A's DS to the one published.
+	n = setup(p.dsA, p.dsB)
+	resp = runCDS(t, trustScanner(n), trustParent(t, child, trustLax()), child, []dns.RR{p.dsB})
+	if resp.Error || !scanResponseChangesDelegation(resp) || len(resp.DSAdds) != 1 {
+		t.Fatalf("error %q, DS adds %v; want A's DS added", resp.ErrorMsg, names(resp.DSAdds))
+	}
+}
+
 // RFC 8078's removal sentinel for a child with no DS asks for no change. It is
 // settled before the trust gate, so a strict parent does not report a refusal
 // of a no-op on every NOTIFY.
@@ -678,7 +766,7 @@ func TestScannerValidatesChildDataWithTheImrValidator(t *testing.T) {
 		Protocol:  3,
 		Algorithm: dns.ECDSAP256SHA256,
 	}
-	priv, err := key.Generate(256)
+	priv, err := generateSigningKey(key, 256)
 	if err != nil {
 		t.Fatal(err)
 	}

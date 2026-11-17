@@ -150,9 +150,10 @@ type ZoneData struct {
 	// Never read directly — call zd.EffectiveOutboundSoaSerial(), which
 	// resolves the zone/global tiers.
 	OutboundSoaSerial string
-	// TransferSrc is the per-zone source address for OUTBOUND transfers, i.e.
-	// what the upstream's allow-transfer ACL sees. Never read directly — call
-	// zd.EffectiveTransferSrc(), which falls back to authengine.transfer-src.
+	// TransferSrc is the per-zone source address for OUTBOUND transfers and
+	// NOTIFYs, i.e. what the upstream's allow-transfer ACL and a downstream's
+	// allow-notify see. Never read directly — call zd.EffectiveTransferSrc(),
+	// which falls back to authengine.transfer-src.
 	TransferSrc []string
 	// TransferSrcTier records which tier TransferSrc was resolved FROM, and is
 	// set only when TransferSrc was populated by resolution rather than by
@@ -245,6 +246,9 @@ type ZoneData struct {
 	// docs/2026-08-28-secondary-serve-until-expire.md.
 	RefreshCount  int       // times initialLoadZone loaded the zone (0 or 1), reported over the API
 	LatestRefresh time.Time // when a usable SOA was last seen; what SOA EXPIRE is measured from
+	// refreshRun counts the zone's failed and deferred refreshes in a row, for
+	// the one line each logs (refresh_failure.go).
+	refreshRun refreshRunState
 	// expireClampLoggedSerial is the serial the EXPIRE-clamp warning was last
 	// emitted for, so a primary publishing a nonsensical EXPIRE is reported
 	// once per copy rather than once per query. See effectiveExpire.
@@ -280,6 +284,12 @@ type ZoneData struct {
 	// signature again. Cleared when the resigner takes it, or when the send
 	// is dropped.
 	resignQueued atomic.Bool
+	// keepSigned records that this zone signs here and is on the resigner's
+	// renewal watchlist (KeepRenewed). The resigner's pass walks Zones and
+	// renews the zones that carry it, so a zone removed from Zones, or replaced
+	// by a new ZoneData, leaves the watchlist with it. Never cleared: a zone
+	// that stops signing is skipped by its options, as before.
+	keepSigned atomic.Bool
 	// signalSkipLogged records that RepublishAtSignalNames has said, once,
 	// that it publishes nothing for this zone because its copy carries HSYNC3
 	// (leavesSignalsToItsAgents). Cleared when the copy no longer does. Per
@@ -308,6 +318,10 @@ type ZoneData struct {
 	// once the zone is Ready (runOwedPostRefreshCallbacks), and the flag clears
 	// only when they run. Guarded by mu.
 	postRefreshOwed bool
+	// withheld keeps the zone from answering and from going Ready until its
+	// daemon knows what the zone is to it (Withhold, signing_role.go). Guarded
+	// by mu.
+	withheld bool
 	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
 	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
 	// snapshot in ensureWorkingSet so unrelated publishes preserve it.
@@ -347,8 +361,20 @@ type ZoneData struct {
 
 	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale
 	// zone replacement): updateIxfrChainLocked clears the delta history
-	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked.
+	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked,
+	// unless the zone has ixfr-from-differences.
 	wsIxfrEpochReset bool
+	// wsSkipIfUnchanged marks the next publish as a reload of the zone's file
+	// that must not publish at all when the content it carries is what the
+	// zone already serves (#1006): no new serial, no NOTIFY. Consumed at the
+	// top of publishWorkingSetLocked. Guarded by mu.
+	wsSkipIfUnchanged bool
+	// wsRecordContentDigest asks the next publish to store a digest of the
+	// content it publishes beside its serial, so a restart that loads the same
+	// content can serve that serial again instead of the next one (#1006).
+	// Set only where the digest is worth its cost: a file-backed zone that
+	// originates its content and does not sign it. Guarded by mu.
+	wsRecordContentDigest bool
 	// wsNeedsFullSign marks a working set as carrying WHOLESALE-REPLACEMENT
 	// content that this server has not signed yet -- an AXFR, or a file reload
 	// of a zone that signs its own content. publishWorkingSetLocked signs it
@@ -443,6 +469,13 @@ type ZoneData struct {
 	// disabled (IXFR queries are answered with full transfers). From zone
 	// config ixfr-chain-max-bytes; written at parse time under zd.mu.
 	ixfrChainMaxBytes int
+	// notifyRetries and notifyRetryInterval are the zone's own NOTIFY resend
+	// settings (#1007): nil and 0 inherit authengine's, then the defaults
+	// (notifier_tracker.go). From zone config notify-retries and
+	// notify-retry-interval; written at parse time under zd.mu, like
+	// ixfrChainMaxBytes above.
+	notifyRetries       *int
+	notifyRetryInterval time.Duration
 	// zonemdAlgs and zonemdScheme are the resolved RFC 8976 parameters for
 	// this zone's published ZONEMD, from the zone config's `zonemd` block.
 	// Meaningful only when OptPublishZonemd is set. Written at parse time
@@ -596,8 +629,9 @@ type ZoneConf struct {
 	OutboundSoaSerial string `yaml:"outbound-soa-serial,omitempty" mapstructure:"outbound-soa-serial" validate:"omitempty,oneof=keep unixtime persist"`
 	// TransferSrc is the per-zone override of the server-global
 	// authengine.transfer-src: the local address to bind when dialling this
-	// zone's upstreams, which is what the primary's allow-transfer ACL sees.
-	// Empty (the default) inherits the global. Set it on a TEMPLATE to give a
+	// zone's upstreams, which is what the primary's allow-transfer ACL sees,
+	// and when sending its NOTIFYs, which is what a downstream's allow-notify
+	// sees. Empty (the default) inherits the global. Set it on a TEMPLATE to give a
 	// whole class of zones one source address -- the same granularity argument
 	// as OutboundSoaSerial above, and the reason a dynamically-provisioned
 	// secondary can get a source address without the API having to carry one.
@@ -641,6 +675,9 @@ type ZoneConf struct {
 	CurrentSerial   uint32           `yaml:"-"`
 	IncomingSerial  uint32           `yaml:"-"`
 	UpstreamSerials []UpstreamSerial `yaml:"-"`
+	// DownstreamNotifies is the per-target NOTIFY delivery state (#528, #1007),
+	// populated by the single-zone `zone desc` path from the NotifyTracker.
+	DownstreamNotifies []NotifyTargetStatus `yaml:"-"`
 	// EffectiveOutboundSoaSerial is the resolved outbound serial mode and where
 	// it came from ("zone", "global" or "default"), so an operator can see both
 	// the value and why it applies.
@@ -680,6 +717,14 @@ type ZoneConf struct {
 	// this zone (estimated wire bytes). 0/unset => 1 MiB default; negative =>
 	// disable retention (IXFR clients always get a full transfer).
 	IxfrChainMaxBytes int `yaml:"ixfr-chain-max-bytes" mapstructure:"ixfr-chain-max-bytes"`
+	// NotifyRetries is how many times an unanswered NOTIFY is sent again
+	// (#1007, RFC 1996 §3.6). Unset inherits authengine.notify-retries, then 5;
+	// 0 sends once.
+	NotifyRetries *int `yaml:"notify-retries,omitempty" mapstructure:"notify-retries"`
+	// NotifyRetryInterval is the wait before the first resend, as a duration
+	// ("10s"); each later resend waits twice as long. Unset inherits
+	// authengine.notify-retry-interval, then 10s.
+	NotifyRetryInterval string `yaml:"notify-retry-interval,omitempty" mapstructure:"notify-retry-interval"`
 	// Provisioning is a display-only derived lifecycle string
 	// ("pending"|"loading"|"ready"|"error") populated by the list handlers from
 	// ZoneStatus + the error registry. Not config; not serialized to YAML.
@@ -791,9 +836,12 @@ type UpdatePolicyConf struct {
 		TTL     uint32 `yaml:"ttl"`
 	}
 	Zone struct {
-		Type    string // "selfsub" | "self" | "sub" | ...
+		Type    string // "selfsub" | "self" | "none" (SIG(0) principals)
 		RRtypes []string
 		TTL     uint32 `yaml:"ttl"`
+		// Tsig is the zone's TSIG grants: what each TSIG key may change in
+		// this zone over RFC 2136 UPDATE. See tsig_update_policy.go.
+		Tsig []TsigGrantConf `yaml:"tsig" mapstructure:"tsig"`
 	}
 	Validate bool
 }
@@ -801,6 +849,9 @@ type UpdatePolicy struct {
 	Child    UpdatePolicyDetail
 	Zone     UpdatePolicyDetail
 	Validate bool
+	// TsigGrants is updatepolicy.zone.tsig, parsed. Empty means no TSIG key
+	// may change the zone.
+	TsigGrants []TsigGrant
 }
 
 type UpdatePolicyDetail struct {
@@ -1116,7 +1167,13 @@ type DelegationSyncStatus struct {
 	// "withdraw the DS" when this is set and "no opinion about DS" when it is
 	// not; the two are opposite instructions that look identical as a nil
 	// slice, so the flag travels with the field and must be read first.
-	NewDSKnown   bool `json:"-"`
+	NewDSKnown bool `json:"-"`
+	// Unread names what the analysis asked the parent (or the keystore) and
+	// got no answer to: "<ns> A", "<ns> AAAA", "DS", "DS intent". InSync says
+	// nothing about those, so an analysis with Unread set must not be taken as
+	// the parent in step. Deliberate absences of opinion -- a rollover owning
+	// the DS, keys tdns does not manage -- are not reads and are not listed.
+	Unread       []string `json:",omitempty"`
 	Error        bool
 	ErrorMsg     string
 	UpdateResult UpdateResult // Experimental
@@ -1134,6 +1191,14 @@ type DelegationSyncStatus struct {
 	AAAARemovesStr []string `json:"AAAARemoves,omitempty"`
 	DSAddsStr      []string `json:"DSAdds,omitempty"`
 	DSRemovesStr   []string `json:"DSRemoves,omitempty"`
+}
+
+// Complete reports whether the analysis read everything it asked for. An
+// incomplete analysis may report InSync while the parent holds what it could
+// not read, so a caller that acts on InSync -- ending a retry, clearing an owed
+// sync -- must check this first.
+func (dss DelegationSyncStatus) Complete() bool {
+	return len(dss.Unread) == 0
 }
 
 func (dss *DelegationSyncStatus) ToStrings() {
@@ -1184,8 +1249,13 @@ type ZoneRefresher struct {
 	// downstreams => deny, empty allow-notify => primaries) instead of keeping
 	// stale permissions.
 	ConfigUpdate bool
-	ZoneStore    ZoneStore // 1=xfr, 2=map
-	Zonefile     string
+	// UpdatePolicySet marks a refresher whose UpdatePolicy is the zone's
+	// activated policy (ParseZones, a persisted dynamic primary), which then
+	// replaces the zone's even when it is empty. ConfigUpdate cannot mean
+	// this: a refresher can be config-bearing and carry no policy at all.
+	UpdatePolicySet bool
+	ZoneStore       ZoneStore // 1=xfr, 2=map
+	Zonefile        string
 	// Template propagates the config-template name of a dynamic zone to the
 	// ZoneData built by the RefreshEngine (copied to zd.Template), so a later
 	// persist re-serializes it. Empty for template-less zones.
@@ -1207,10 +1277,15 @@ type ZoneRefresher struct {
 	// TransferSrc carries the per-zone outbound-transfer source to the
 	// RefreshEngine (copied to zd.TransferSrc on merge). Empty inherits.
 	TransferSrc []string
-	MultiSigner string
-	Force       bool // force refresh, ignoring SOA serial
-	Wait        bool // wait for refresh to complete before responding
-	Response    chan RefresherResponse
+	// NotifyRetries and NotifyRetryInterval carry the zone's own NOTIFY
+	// resend settings (zoneNotifyRetrySettings), copied to the ZoneData by a
+	// config-bearing refresher. nil and zero inherit the server's.
+	NotifyRetries       *int
+	NotifyRetryInterval time.Duration
+	MultiSigner         string
+	Force               bool // force refresh, ignoring SOA serial
+	Wait                bool // wait for refresh to complete before responding
+	Response            chan RefresherResponse
 }
 
 type RefresherResponse struct {
@@ -1234,6 +1309,10 @@ type ValidatorResponse struct {
 
 type Sig0StoreT struct {
 	Map *core.ConcurrentMap[string, Sig0Key]
+	// mu and gen order a cache fill against a truststore change that commits
+	// while the fill's database read is in flight: see fillIfCurrent.
+	mu  sync.Mutex
+	gen uint64
 }
 
 type Sig0Key struct {
@@ -1494,7 +1573,8 @@ type KeyDB struct {
 	// OutboundSoaSerialMode()/SetOutboundSoaSerial(), never directly.
 	outboundSoaSerial atomic.Pointer[string]
 	// transferSrc is the server-global source address list for outbound zone
-	// transfers (authengine.transfer-src). Per-zone ZoneData.TransferSrc wins;
+	// transfers and NOTIFYs (authengine.transfer-src). Per-zone
+	// ZoneData.TransferSrc wins;
 	// see zd.EffectiveTransferSrc(). Same reload-vs-read exposure as the two
 	// above; access via TransferSrcList()/SetTransferSrc().
 	transferSrc atomic.Pointer[[]string]
@@ -1571,6 +1651,9 @@ type Tx struct {
 	// ended is claimed by the first Commit or Rollback. Only that one clears
 	// KeyDB.Ctx: by the time a second end runs, a waiting Begin may hold Ctx.
 	ended atomic.Bool
+	// afterCommit runs, in order, once Commit has succeeded; never after a
+	// rollback. See OnCommit.
+	afterCommit []func()
 }
 
 // String-based versions of RRset for JSON marshaling

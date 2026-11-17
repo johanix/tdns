@@ -4,6 +4,7 @@ go 1.25.2
 
 replace (
 	github.com/johanix/tdns/v2 => ../../v2
+	github.com/johanix/tdns/v2/algorithms => ../../v2/algorithms
 	github.com/johanix/tdns/v2/cache => ../../v2/cache
 	github.com/johanix/tdns/v2/cli => ../../v2/cli
 	github.com/johanix/tdns/v2/core => ../../v2/core
@@ -11,7 +12,7 @@ replace (
 	github.com/johanix/tdns/v2/edns0 => ../../v2/edns0
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.4
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.6
 
 require (
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
@@ -36,7 +37,8 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b // indirect
+	github.com/johanix/dnssec-algorithms v0.0.0-20261111143226-7198849ded4b // indirect
+	github.com/johanix/tdns/v2/algorithms v0.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect

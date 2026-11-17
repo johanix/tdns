@@ -39,7 +39,7 @@ Subcommands operate on local keystore state for a zone:
 
 * [tdns-cli auth zone dnssec](tdns-cli_auth_zone_dnssec.md)	 - Zone DNSSEC operations: signing, policy, and automated rollover
 * [tdns-cli auth zone dnssec auto-rollover asap](tdns-cli_auth_zone_dnssec_auto-rollover_asap.md)	 - Schedule a manual KSK rollover at the earliest safe moment
-* [tdns-cli auth zone dnssec auto-rollover cancel](tdns-cli_auth_zone_dnssec_auto-rollover_cancel.md)	 - Cancel a pending manual KSK rollover request
+* [tdns-cli auth zone dnssec auto-rollover cancel](tdns-cli_auth_zone_dnssec_auto-rollover_cancel.md)	 - Cancel a pending manual KSK rollover request, or abort a KSK algorithm rollover
 * [tdns-cli auth zone dnssec auto-rollover reset](tdns-cli_auth_zone_dnssec_auto-rollover_reset.md)	 - Clear last_rollover_error for one key (after operator intervention)
 * [tdns-cli auth zone dnssec auto-rollover status](tdns-cli_auth_zone_dnssec_auto-rollover_status.md)	 - Print rollover state for a zone (KSK and ZSK)
 * [tdns-cli auth zone dnssec auto-rollover unstick](tdns-cli_auth_zone_dnssec_auto-rollover_unstick.md)	 - Skip the softfail-delay and probe the parent on the next tick

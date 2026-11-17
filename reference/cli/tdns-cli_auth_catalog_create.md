@@ -21,6 +21,7 @@ tdns-cli auth catalog create --cat <catalog-zone> [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 

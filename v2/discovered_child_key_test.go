@@ -281,7 +281,7 @@ func TestValidateUpdateRecordsAKeyItDiscoveredInDns(t *testing.T) {
 	stubSig0Verify(t) // the signature verifies
 
 	us := &UpdateStatus{}
-	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), nil, us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
 	}
 	// The verifier this validation started, waited for rather than left to race
@@ -319,7 +319,7 @@ func TestValidateUpdateDoesNotRecordAKeyWhoseSignatureFailed(t *testing.T) {
 	stubSig0Verify(t, discovered.Keyid) // this signature does NOT verify
 
 	us := &UpdateStatus{}
-	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), nil, us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
 	}
 
@@ -488,7 +488,7 @@ func TestTheUpdatePathCarriesItsOwnShutdownContext(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	us := &UpdateStatus{}
-	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), us); err != nil {
+	if err := zd.ValidateUpdate(ctx, signedUpdateFrom(t, zd.ZoneName, discovered.Name, discovered.Keyid), nil, us); err != nil {
 		t.Fatalf("ValidateUpdate: %v", err)
 	}
 	if sk, _ := kdb.FindSig0TrustedKey(discovered.Name, discovered.Keyid); sk == nil {

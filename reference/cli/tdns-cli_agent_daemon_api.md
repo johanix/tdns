@@ -1,10 +1,10 @@
 ## tdns-cli agent daemon api
 
-request a statusd api summary
+request an API summary from the tdns-agent daemon
 
 ### Synopsis
 
-The daemon api queries the statusd for the provided API
+The daemon api command queries tdns-agent for the provided API
 and prints that out in a (hopefully) comprehensible fashion.
 
 ```
@@ -25,6 +25,7 @@ tdns-cli agent daemon api [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
