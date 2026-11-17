@@ -263,7 +263,7 @@ func (imr *Imr) dispatchClientQuery(ctx context.Context, qname string, qtype uin
 
 		switch kind {
 		case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-			if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r, wire, serversZone); handled {
+			if ctxNeg, rcodeNeg, handled := imr.handleNegative(ctx, qname, qtype, r, wire, serversZone); handled {
 				return replyDone(nil, rcodeNeg, ctxNeg, wire, nil)
 			}
 			// If not handled, fall through to try the next server.
@@ -284,7 +284,7 @@ func (imr *Imr) dispatchClientQuery(ctx context.Context, qname string, qtype uin
 				// servers set it on referrals; NS for a zone above is an
 				// upward referral, and lame whatever the AA bit.
 				if r.Authoritative && rcode == dns.RcodeSuccess && core.EqualNames(refZone, serversZone) {
-					if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r, wire, serversZone); handled {
+					if ctxNeg, rcodeNeg, handled := imr.handleNegative(ctx, qname, qtype, r, wire, serversZone); handled {
 						return replyDone(nil, rcodeNeg, ctxNeg, wire, nil)
 					}
 				}

@@ -3487,7 +3487,14 @@ func authorityRRsets(rrs []dns.RR) []*core.RRset {
 // what judges an authoritative denial that carries no SOA (negativeWithoutSOA);
 // without it such a denial is not used. And a denial whose SOA names a zone
 // above it is not used either (soaAboveServersZone).
-func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport core.Transport, zone string) (cache.CacheContext, int, bool) {
+//
+// ctx is the query's. The validation runs on its values, not its deadline
+// (context.WithoutCancel): a DNSKEY or DS it fetches counts against the
+// query's minimisation cap (resolveMinimised), and the loop guards it carries
+// still apply. It ran on context.Background(), and with minimisation on a
+// child-signed denial from the parent's servers could then re-query without
+// bound. A denial is still validated and cached when the client has gone.
+func (imr *Imr) handleNegative(ctx context.Context, qname string, qtype uint16, r *dns.Msg, transport core.Transport, zone string) (cache.CacheContext, int, bool) {
 	if r == nil {
 		return cache.ContextFailure, dns.RcodeServerFailure, false
 	}
@@ -3528,7 +3535,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 
 	if soarrset == nil || len(soarrset.RRs) == 0 {
 		if r.Authoritative && zone != "" {
-			return imr.negativeWithoutSOA(qname, qtype, r, negContext, zone, transport)
+			return imr.negativeWithoutSOA(ctx, qname, qtype, r, negContext, zone, transport)
 		}
 		lgDns.Debug("handleNegative: no SOA found in authority for \" \" ()",
 			"qname", qname,
@@ -3554,7 +3561,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	soaVstate := cache.ValidationStateNone
 	var err error
 	if !skipDNSKEYValidation && len(soarrset.RRSIGs) > 0 {
-		soaVstate, err = imr.Cache.ValidateRRset(context.Background(), soarrset, imr.IterativeDNSQueryFetcher())
+		soaVstate, err = imr.Cache.ValidateRRset(context.WithoutCancel(ctx), soarrset, imr.IterativeDNSQueryFetcher())
 		if err != nil {
 			lgDns.Error("handleNegative: failed to validate SOA RRset", "rrset", err)
 			return cache.ContextFailure, r.MsgHdr.Rcode, false
@@ -3593,7 +3600,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	negRcode := uint8(r.MsgHdr.Rcode)
 	if !skipDNSKEYValidation && len(negAuthority) > 0 {
 		var verdict cache.DenialVerdict
-		verdict, err = imr.Cache.ValidateDenial(context.Background(), qname, qtype, negRcode, negAuthority, imr.IterativeDNSQueryFetcher())
+		verdict, err = imr.Cache.ValidateDenial(context.WithoutCancel(ctx), qname, qtype, negRcode, negAuthority, imr.IterativeDNSQueryFetcher())
 		vstate, negRcode = verdict.State, verdict.Rcode
 		// An NSEC3 proof over the iteration limit is served, Insecure, with
 		// EDE 27 beside it (RFC 9276).
@@ -3711,8 +3718,8 @@ func soaAboveServersZone(soaOwner, zone string) bool {
 // Insecure outside a zone held Secure, Bogus below one unless an insecure
 // delegation is proven on the way down. A Bogus one is not used, and the caller
 // tries the next server.
-func (imr *Imr) negativeWithoutSOA(qname string, qtype uint16, r *dns.Msg, negContext cache.CacheContext, zone string, transport core.Transport) (cache.CacheContext, int, bool) {
-	vstate := imr.Cache.UnsignedDenialState(context.Background(), zone, qname, qtype, imr.IterativeDNSQueryFetcher())
+func (imr *Imr) negativeWithoutSOA(ctx context.Context, qname string, qtype uint16, r *dns.Msg, negContext cache.CacheContext, zone string, transport core.Transport) (cache.CacheContext, int, bool) {
+	vstate := imr.Cache.UnsignedDenialState(context.WithoutCancel(ctx), zone, qname, qtype, imr.IterativeDNSQueryFetcher())
 	if vstate == cache.ValidationStateBogus {
 		lgDns.Debug("handleNegative: denial without an SOA from a zone that must sign its denials; not used",
 			"qname", qname, "qtype", dns.TypeToString[qtype], "zone", zone,

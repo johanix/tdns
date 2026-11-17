@@ -392,7 +392,7 @@ func (imr *Imr) dispatchProbe(ctx context.Context, qname string, qtype uint16, c
 	}
 	switch classifyResponse(child, dns.TypeA, r) {
 	case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-		if _, _, handled := imr.handleNegative(child, dns.TypeA, r, wire, serversZone); !handled {
+		if _, _, handled := imr.handleNegative(ctx, child, dns.TypeA, r, wire, serversZone); !handled {
 			return replyNext()
 		}
 		step.kind = probeStepped
