@@ -214,9 +214,11 @@ when this is implemented. `cmd/` is out of scope.
 Both tuning fields are pointers, as `nsec3-max-iterations` is: an absent
 key gets the RFC's number, and an explicit `0` is a value. Valid values
 are `qmin-max-iterations` at least 1, and `qmin-one-label` at least 0 and
-less than `qmin-max-iterations`. Anything else is a config error at
-startup. So the plan always has a round left to spread the hidden labels
-over.
+less than `qmin-max-iterations`. Anything else is a config error:
+`config check` and the daemon's config load refuse it (`ValidateConfig`),
+and so does `NewImr`, for an application that builds a resolver without a
+config file. So the plan always has a round left to spread the hidden
+labels over.
 
 ## 6. Query cap
 
