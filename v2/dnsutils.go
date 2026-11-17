@@ -788,10 +788,14 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 	zp := dns.NewZoneParser(r, dns.Fqdn(zd.ZoneName), filename)
 	zp.SetIncludeAllowed(true)
 
-	// nil when the zone means its doubled names (allow-doubled-suffix), and a
-	// nil report checks nothing.
+	// A primary's zone file is operator-authored input, so catch likely missing
+	// trailing dots there. A secondary's saved file is a copy of data accepted
+	// from its primary; rejecting a name here would make the copy unusable on
+	// restart even though the secondary did not author it. The zone option also
+	// opts a primary out when it intentionally uses doubled names.
+	// A nil report checks nothing.
 	var doubled *DoubledSuffixReport
-	if !zd.Options[OptAllowDoubledSuffix] {
+	if zd.ZoneType != Secondary && !zd.Options[OptAllowDoubledSuffix] {
 		doubled = NewDoubledSuffixReport(zd.ZoneName)
 	}
 
