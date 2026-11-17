@@ -642,7 +642,9 @@ func TestQminFailedProbeSendsTheOriginalQuery(t *testing.T) {
 			}
 			return
 		}
-		if kind == "servfail" {
+		// The servers that answered the probe also answer the original query,
+		// so a failure booked on b can only come from its probe.
+		if kind != "timeout" {
 			_ = w.WriteMsg(answerA(t, r, qname, "192.0.2.80"))
 		}
 	}
@@ -660,11 +662,7 @@ func TestQminFailedProbeSendsTheOriginalQuery(t *testing.T) {
 	if err != nil || rcode != dns.RcodeSuccess || rrset == nil || rrset.RRs[0].(*dns.A).A.String() != "192.0.2.80" {
 		t.Fatalf("client answer: rcode %s rrset %v err %v", dns.RcodeToString[rcode], rrset, err)
 	}
-	z, ok := g.imr.Cache.ZoneMap.Get(".")
-	if !ok {
-		t.Fatal("root zone was not cached")
-	}
-	if !z.IsZoneAddrXportAvailable(b, core.TransportDo53) {
+	if !qminAddrAvailable(t, g, ".", "b.root-servers.net.", b) {
 		t.Error("REFUSED on the probe booked lameness")
 	}
 
@@ -686,10 +684,24 @@ func TestQminFailedProbeSendsTheOriginalQuery(t *testing.T) {
 	if _, _, _, err := g2.query(t, qname, dns.TypeA); err == nil {
 		t.Fatal("expected the original query to fail")
 	}
-	z, ok = g2.imr.Cache.ZoneMap.Get(".")
-	if !ok || z.IsZoneAddrXportAvailable("127.0.0.8", core.TransportDo53) {
-		t.Fatalf("the original query's REFUSED was not booked: zone %v", z)
+	if qminAddrAvailable(t, g2, ".", "ns.", "127.0.0.8") {
+		t.Fatal("the original query's REFUSED was not booked")
 	}
+}
+
+// qminAddrAvailable reports whether addr may still be asked over Do53 for
+// zone. askServers books a failure on the zone when the cache has one, and
+// on the server otherwise, as for a stub with no zone entry: both are read.
+func qminAddrAvailable(t *testing.T, g *qminRig, zone, nsname, addr string) bool {
+	t.Helper()
+	if z, ok := g.imr.Cache.ZoneMap.Get(zone); ok && !z.IsZoneAddrXportAvailable(addr, core.TransportDo53) {
+		return false
+	}
+	server := g.servers(t, zone, dns.TypeA)[cache.ServerKey(nsname)]
+	if server == nil {
+		t.Fatalf("no server %s for %s", nsname, zone)
+	}
+	return server.IsAddrXportAvailable(addr, core.TransportDo53)
 }
 
 func TestQminDSGoesToTheParent(t *testing.T) {
