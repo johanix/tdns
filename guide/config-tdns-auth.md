@@ -886,6 +886,49 @@ supplies only what the zone left unset. Four rules qualify that.
 `name:` and `template:` are never copied from a template. A template may itself
 set `template:` to inherit from another; cycles are detected and rejected.
 
+### Templates for zones added through the API
+
+A template with `dynamiczones: true` may be named by `tdns-cli auth zone add
+--template <name>` (and `zone modify --template`), for the zone types listed in
+`dynamiczones.dynamic.allowed`. `dynamiczones.dynamic.default-template` names
+the template an add uses when it names none, per zone type:
+
+```yaml
+dynamiczones:
+   dynamic:
+      allowed:  [ secondary ]
+      storage:  persistent
+      default-template:
+         secondary:  hub-secondary
+
+templates:
+   - name:          hub-secondary
+     type:          secondary        # required for an API secondary's template
+     dynamiczones:  true
+     downstreams:
+        - prefix: "192.0.2.0/24"
+          key:    xfr-key-2026
+     notify:
+        - addr:   "192.0.2.53:53"
+          key:    xfr-key-2026
+```
+
+- A **primary** takes its whole configuration from its template.
+- A **secondary** takes only its outbound settings: `downstreams`,
+  `downstream-auth`, `notify`, `allow-notify`, `notify-retries` and
+  `notify-retry-interval`. Its primaries, key, options and transfer source are
+  the caller's; a template's `primaries:` are never used.
+- For both, the template **owns** those outbound settings. They are not stored
+  with the zone, but expanded from the template when the zone is added, at every
+  restart and on every `config reload` / `config reload-zones`. Edit the
+  template and reload, and every zone stamped from it follows. If the template
+  no longer expands on a reload, the zones keep what they had and show a
+  `template-warning`.
+- `zone modify --clear-template` removes a zone's template and the outbound
+  settings it gave. The default template's name is recorded with each zone it
+  was applied to, so changing the default does not move existing zones; use
+  `zone modify --template` for that.
+
 ## The listeners and authengine blocks
 
 What used to be one `dnsengine:` block is two since #446: `listeners:` is

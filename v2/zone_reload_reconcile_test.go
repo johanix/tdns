@@ -338,10 +338,7 @@ func TestReloadRefusalTracksWhetherTheJournalHoldsTheChanges(t *testing.T) {
 		t.Error("a dirty zone with no database was allowed a reload that would discard its changes")
 	}
 
-	off := false
-	prev := Conf.Journal.Active
-	Conf.Journal.Active = &off
-	t.Cleanup(func() { Conf.Journal.Active = prev })
+	withJournalActive(t, false)
 	if !reloadWouldLoseChanges(dirty) {
 		t.Error("a dirty zone was allowed a reload with the journal switched off")
 	}

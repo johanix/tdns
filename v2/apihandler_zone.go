@@ -390,14 +390,16 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "modify":
 			msg, err := Conf.ModifyDynamicZone(r.Context(), DynamicZoneInput{
-				Name:        zp.Zone,
-				Type:        Secondary,
-				Primaries:   zp.Primaries,
-				Options:     zoneOptionsFromStrings(zp.Options),
-				TsigName:    zp.TsigName,
-				TsigSecret:  zp.TsigSecret,
-				TsigAlgo:    zp.TsigAlgo,
-				TransferSrc: zp.TransferSrc,
+				Name:          zp.Zone,
+				Type:          Secondary,
+				Template:      zp.Template,
+				ClearTemplate: zp.ClearTemplate,
+				Primaries:     zp.Primaries,
+				Options:       zoneOptionsFromStrings(zp.Options),
+				TsigName:      zp.TsigName,
+				TsigSecret:    zp.TsigSecret,
+				TsigAlgo:      zp.TsigAlgo,
+				TransferSrc:   zp.TransferSrc,
 			})
 			if err != nil {
 				resp.Error = true
@@ -423,6 +425,14 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					zc.Error = zd.Error
 					zc.ErrorType = zd.ErrorType
 					zc.ErrorMsg = zd.ErrorMsg
+					// The live outbound settings: for a template-driven zone
+					// they are not in the persisted form, being the template's.
+					zd.mu.Lock()
+					zc.Notify = append([]PeerConf(nil), zd.Notify...)
+					zc.AllowNotify = append([]AclEntry(nil), zd.AllowNotify...)
+					zc.Downstreams = append([]AclEntry(nil), zd.Downstreams...)
+					zc.DownstreamAuth = append([]string(nil), zd.DownstreamAuth...)
+					zd.mu.Unlock()
 				}
 				zones[zc.Name] = zc
 			}
