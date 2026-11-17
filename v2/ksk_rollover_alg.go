@@ -34,6 +34,13 @@ import (
 //	confirm ⇒ start A's clock      → pending-child-withdraw
 //	hold margin, remove A          → pending-child-withdraw (alg-roll arm)
 //	done, nothing left to push     → idle
+//
+// A roll started against a parent that holds no DS for the zone (an
+// insecure delegation; KskAlgRollState.ParentInsecure) keeps every child-side
+// step and wait, and still pushes {DS(B)}. What it does not do is wait for
+// the parent: an answer with no DS confirms the parent step, and the drain
+// is measured without a parent DS TTL. Once the parent is seen holding any
+// DS the roll is an ordinary one again.
 
 // kskAlgRollNeeded is the trigger predicate the tick evaluates on an idle
 // zone with no roll in flight. mismatch reports that the zone has exactly
@@ -95,7 +102,11 @@ func kskAlgRollNeeded(kdb *KeyDB, zone string, pol *DnssecPolicy) (fromAlg, toAl
 //
 // In the transaction:
 //
-//  1. re-check that no rollover of any kind is in flight;
+//  1. re-check that no rollover of any kind is in flight, and that the
+//     zone is idle or in the non-blocking first DS publication
+//     (firstDSPublicationWithoutParentDS); from the latter, end that
+//     publication's attempt group, and record the roll as insecure when
+//     the parent held no DS (kskAlgRollStartsInsecure);
 //  2. identify A, the single active SEP key of fromAlg, and refuse if an
 //     active SEP key of toAlg already exists;
 //  3. mint B straight into active with the next rollover_index and
@@ -142,19 +153,30 @@ func SpawnKskAlgRollover(conf *Config, kdb *KeyDB, zone string, fromAlg, toAlg u
 
 	// 1. Nothing else may be rolling. Read inside the TX so two callers
 	// cannot both spawn.
-	inProgress, err := getRolloverInProgressTx(tx, zone)
+	state, err := loadRolloverSpawnStateTx(tx, zone)
 	if err != nil {
-		return 0, fmt.Errorf("read rollover_in_progress: %w", err)
+		return 0, fmt.Errorf("read rollover state: %w", err)
 	}
-	if inProgress {
+	if state.RolloverInProgress {
 		return 0, fmt.Errorf("SpawnKskAlgRollover: zone %s already has a rollover in progress", zone)
 	}
-	var fromCol *int64
-	if err := tx.QueryRow(`SELECT alg_roll_from_alg FROM RolloverZoneState WHERE zone = ?`, zone).Scan(&fromCol); err != nil {
-		return 0, fmt.Errorf("read alg_roll_from_alg: %w", err)
-	}
-	if fromCol != nil {
+	if state.AlgRollFromAlg.Valid {
 		return 0, fmt.Errorf("SpawnKskAlgRollover: zone %s already has a KSK algorithm rollover in progress", zone)
+	}
+	// Nor may a DS push be under way to a parent that holds DS for the
+	// zone: the parent is part way through taking a DS set that names the
+	// old algorithm. A first DS publication to a parent with no DS is the
+	// exception -- nothing at the parent depends on it, and the roll takes
+	// over from it, its own push asking for the new KSK's DS instead.
+	firstDS := firstDSPublicationWithoutParentDS(state)
+	if phase := state.RolloverPhase; phase != "" && phase != rolloverPhaseIdle && !firstDS {
+		return 0, fmt.Errorf("SpawnKskAlgRollover: zone %s: %s", zone, kskRolloverPolicyChangeBlock(zone, state))
+	}
+	insecure := kskAlgRollStartsInsecure(state)
+	if firstDS {
+		if err := endFirstDSPublicationTx(tx, zone); err != nil {
+			return 0, fmt.Errorf("end the first DS publication: %w", err)
+		}
 	}
 
 	// 2. A is the old-algorithm head; there must be no new-algorithm head yet.
@@ -217,6 +239,7 @@ func SpawnKskAlgRollover(conf *Config, kdb *KeyDB, zone string, fromAlg, toAlg u
 	if err := setKskAlgRollTx(tx, zone, KskAlgRollState{
 		FromAlg: fromAlg, ToAlg: toAlg, StartedAt: now,
 		NewHeadKeyID: newKid, OldHeadKeyID: oldKid,
+		ParentInsecure: insecure,
 	}); err != nil {
 		return 0, fmt.Errorf("record algorithm roll: %w", err)
 	}
@@ -242,7 +265,8 @@ func SpawnKskAlgRollover(conf *Config, kdb *KeyDB, zone string, fromAlg, toAlg u
 		"zone", zone,
 		"from", dns.AlgorithmToString[fromAlg], "to", dns.AlgorithmToString[toAlg],
 		"old_head", oldKid, "new_head", newKid,
-		"frozen", frozen, "phase", rolloverPhasePendingChildPublish)
+		"frozen", frozen, "phase", rolloverPhasePendingChildPublish,
+		"parent_insecure", insecure, "ended_first_ds_publication", firstDS)
 
 	triggerResign(conf, zone)
 	return newKid, nil

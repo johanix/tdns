@@ -37,7 +37,7 @@ func TestPrivateKeyRoundTrip(t *testing.T) {
 		Hdr:       dns.RR_Header{Name: "example.", Rrtype: dns.TypeKEY, Class: dns.ClassINET},
 		Algorithm: Number,
 	}}
-	priv, err := keyrr.Generate(0)
+	priv, err := generateSigningKey(keyrr, 0)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestPublicKeyLength(t *testing.T) {
 		Hdr:       dns.RR_Header{Name: "example.", Rrtype: dns.TypeKEY, Class: dns.ClassINET},
 		Algorithm: Number,
 	}}
-	if _, err := keyrr.Generate(0); err != nil {
+	if _, err := generateSigningKey(keyrr, 0); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 	raw, err := base64.StdEncoding.DecodeString(keyrr.PublicKey)
@@ -92,7 +92,7 @@ func TestRRSIG(t *testing.T) {
 		Protocol:  3,
 		Algorithm: Number,
 	}
-	priv, err := keyrr.Generate(0)
+	priv, err := generateSigningKey(keyrr, 0)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestSIG0(t *testing.T) {
 		Protocol:  3,
 		Algorithm: Number,
 	}}
-	priv, err := keyrr.Generate(0)
+	priv, err := generateSigningKey(keyrr, 0)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}

@@ -143,6 +143,13 @@ specific stub zone wins over a forward zone (so a lab stub can punch a hole
 in a `zone: .` forward). Zone cuts learned from referrals never override a
 configured forward.
 
+In a daemon that serves zones, such as tdns-auth, a question about a zone
+the server serves comes before both: it is answered from the zone. A zone
+with the option `modified-downstream`, whose published version is signed or
+changed downstream of the server, is not answered from, and its questions go
+to stubs, forwards or the root like any other
+([zone options](config-tdns-auth.md#zone-options)).
+
 Per upstream:
 
 | Key | Default | Meaning |
@@ -210,6 +217,37 @@ imrengine:
       file:     /var/log/tdns/imr-debug.log   # this is the default when enabled
 ```
 
+## Outbound address families
+
+`outbound-address-families` says which IP versions the resolver sends its
+queries to authoritative servers over: `ipv4`, `ipv6`, or both, which is the
+default. What the resolver listens on is `listeners.addresses`, which binds
+exactly the addresses listed.
+
+```yaml
+imrengine:
+   outbound-address-families: [ ipv4 ]   # or [ ipv6 ], or [ ipv4, ipv6 ]
+```
+
+- **What leaving a family out does.** The resolver neither looks up nor uses
+  addresses of that family. Glue and root hints of that family are dropped as
+  they are read, and a nameserver's addresses are looked up only for the
+  family in use. A nameserver whose glue is all of the family left out is
+  looked up like one that came without glue.
+- **When to use it.** On a host where one family does not work. A host can
+  have an IPv6 address and a default route that lead nowhere, while IPv4
+  works. With both families in use, such a resolver keeps sending AAAA
+  lookups and IPv6 queries that can only fail, until the `address-family`
+  tuning group below marks the family as suspect.
+- **One family as a measurement.** With `[ ipv6 ]` the resolver reaches only
+  what IPv6 alone reaches, which shows how much is lost without IPv4.
+- **What it does not touch.** The listeners, as above. A forward zone's
+  upstreams are used as configured. A stub zone's servers are not: an
+  address of a family left out is dropped, with a log line.
+
+An unknown value is an error: the resolver does not start, and
+`config check` reports it. Changing the list takes a restart.
+
 ## Tuning
 
 Every key under `imrengine.tuning:` is optional. The values below **are** the
@@ -241,6 +279,7 @@ imrengine:
       cache-max-ttl:             86400  # seconds; ceiling on cached lifetimes
       cache-min-ttl:             0      # seconds; floor on cached lifetimes (0 = none)
       zone-state-recheck:        30s    # how long an insecure or indeterminate zone verdict stands
+      nsec3-max-iterations:      10     # NSEC3 proofs above this are not judged (RFC 9276)
 ```
 
 The `address-family` group is what demotes a broken IPv6 (or IPv4) path: once
@@ -256,6 +295,16 @@ cached lifetime, clients see the bounded TTL too. Root hints and trust anchors
 are configuration, not cached data, and are not bounded. When `cache-min-ttl`
 exceeds `cache-max-ttl`, the maximum wins.
 
+The lifetime they bound is the smallest TTL among the records an entry holds
+and serves. A denial lives for its negative TTL, the smaller of the SOA's TTL
+and its MINIMUM field (RFC 2308 section 5), and no longer than the records of
+its proof. An entry the resolver has authenticated lives no longer than the
+signatures that authenticated it allow (RFC 4035 section 5.3.3): their TTL and
+Original TTL count as TTLs, so `cache-min-ttl` raises them like any other, but
+the time left to their expiration is a bound that `cache-min-ttl` does not
+override. The resolver does not serve AD for data whose signatures have
+expired. `cache-max-ttl` still lowers the lifetime of such an entry.
+
 `zone-state-recheck` is how long the resolver acts on a zone's Indeterminate or
 Insecure DNSSEC verdict before it looks at the zone again. An Indeterminate zone,
 one whose chain of trust could not be followed, has its chain followed afresh. An
@@ -267,6 +316,67 @@ recheck, so a zone that stays unsigned costs nothing, while a signed zone still
 delegated without a DS costs one DS query per interval for as long as it is in
 use. Flushing a zone without keeping its structural records, or resetting the
 cache, drops these verdicts at once.
+
+`nsec3-max-iterations` is the most NSEC3 hash iterations the validator computes
+a proof for. RFC 9276 asks zones to use 0, and deployed zones rarely use more
+than a few. A denial whose proof needs NSEC3 records above the limit is served
+without AD, with EDE 27 (Unsupported NSEC3 Iterations Value), once the records'
+signatures have validated; a zone cut such records would prove is not judged,
+and the zone below it is treated as indeterminate. 0 is allowed.
+
+## Test-harness switches
+
+`imrengine.testing:` holds switches for black-box test harnesses, such as
+`tests/deckard/`. None of them is for production, and `config check` warns
+about any that is not at its production default. Leaving `priming` out, or
+setting it to `true`, is that default and draws no warning.
+
+```yaml
+imrengine:
+   testing:
+      priming:       false
+      faketime:      true           # the clock in $FAKETIME_TIMESTAMP_FILE
+      # faketime-file: /tmp/.time   # or name the file
+      root-refresh:  false
+```
+
+A change to any of them takes a restart.
+
+**`priming: false`**
+- **What it does.** It seeds the cache from `root-hints` as they stand and
+  marks it primed, without asking the roots for their NS RRset.
+- **Why a harness needs it.** A harness that starts its scripted servers only
+  once the resolver accepts connections needs this switch. Otherwise the
+  resolver opens its listeners only after priming has succeeded, and never
+  becomes ready.
+- **What still happens.** The root NS is still refreshed from the live roots
+  before the hints' copy expires, unless `root-refresh` is false.
+
+**`faketime`, a test clock**
+- **What it does.** The resolver's data time becomes a clock read from a
+  libfaketime timestamp file. Data time is what DNS data is measured against:
+  a signature's validity, a cache entry's expiry, the TTL served from the
+  cache.
+  - The file holds `@YYYY-MM-DD HH:MM:SS`, in local time.
+  - The clock is the file's time plus the real time since the resolver
+    started.
+  - The file is checked on every read, so a harness moves the clock by
+    rewriting it.
+  - Timeouts, RTTs and backoffs stay on real time.
+- **Why a harness needs it.** Deckard fakes the time with libfaketime, which
+  a Go binary ignores, and its DNSSEC scenarios are signed in 2007–2021.
+- **Which file.** `faketime-file`, which turns the clock on by itself, or else
+  `$FAKETIME_TIMESTAMP_FILE`, which Deckard sets.
+- **When it stops the start.** No file, or one that does not parse. A file
+  that later cannot be read leaves the last time in force.
+- **What it turns off.** The root NS refresh, which waits in real time for an
+  expiry in data time. `root-refresh: true` beside it stops the start.
+- **Where it shows.** A warning at start and every hour, and a line in
+  `config status`.
+
+**`root-refresh: false`**
+- **What it does.** It stops the refresh of the root NS before it expires.
+  The test clock implies it.
 
 ## large-algorithms
 

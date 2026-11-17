@@ -163,7 +163,7 @@ func TestEveryCdsWriterPublishesTheMatchingCdnskey(t *testing.T) {
 		r.zd.Options = map[ZoneOption]bool{OptAllowUpdates: true, OptMultiProvider: true, OptInlineSigning: true}
 		// The owner's DS set names this provider's key and another's.
 		seedKey(t, r.kdb, "example.", DnskeyStateActive, 257, pubA)
-		seedKey(t, r.kdb, "example.", DnskeyStateForeign, 257, pubB)
+		seedKey(t, r.kdb, "example.", ownerStateForeign, 257, pubB)
 		installOwner(t, &testOwner{owns: map[string]bool{"example.": true},
 			intent: map[string]DSIntent{"example.": {Set: dsFor("example.", pubA, pubB), Known: true}}})
 

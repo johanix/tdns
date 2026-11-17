@@ -55,6 +55,13 @@ type CachedRRset struct {
 	// the owner of that DNAME. The CNAME itself is unsigned. The DNAME's own
 	// entry carries the signature and the verdict, and is served beside it.
 	SynthesizedFrom string
+	// WildcardProof is set on an answer whose RRSIGs include one made over a
+	// wildcard (RFC 4035 section 5.3.2): the NSEC or NSEC3 RRsets, with their
+	// RRSIGs, that the zone sent in the authority section to prove that the
+	// name does not exist (wildcard_answer.go). Served beside the answer to DO
+	// clients, and read when the answer is validated again. The entry lives
+	// no longer than the proof's lowest TTL (Set).
+	WildcardProof []*core.RRset
 }
 
 type RRsetCacheT struct {
@@ -82,7 +89,28 @@ type RRsetCacheT struct {
 	// reason. A bare ServerMap.Get is for read-only inspection that stays
 	// local (a status dump, a membership test) and must not escape into a
 	// query — that asymmetry between the accessors, undocumented, is #345.
-	ServerMap     *core.NameMap[map[string]*AuthServer]
+	ServerMap *core.NameMap[map[string]*AuthServer]
+	// stubZones names the zones whose server map AddStub stored. That map is
+	// configuration, where every other zone's is learned from referrals: a
+	// flush and the expiry of the zone's NS RRset leave it in place
+	// (keepsServerMap). Dropping it lost the stub for good, while the stub
+	// still kept its names from any forward above it (#832). AddStub records a
+	// zone here in the same step as it stores the map, and RemoveStub forgets
+	// both, holding serverMapMu. The flushes check and delete under it too, so
+	// none of them can delete a stub stored after its check.
+	stubZones *core.NameMap[struct{}]
+	// anchorZones names the zones a configured trust anchor vouches for, DNSKEY
+	// or DS (AddTrustAnchorZone). A DS anchor puts no key in the DnskeyCache
+	// until its zone's DNSKEY RRset has been fetched and has matched it, so the
+	// cache alone did not show it.
+	anchorZones *core.NameMap[struct{}]
+	// anchorDS holds the DS records of each DS trust anchor (AddTrustAnchorDS).
+	// The DS RRset seeded in the cache from them expires and is flushed like
+	// any other; the anchor does neither (trustAnchorDSRRset).
+	anchorDS *core.NameMap[[]*dns.DS]
+	// families is which address families the resolver uses (SetAddressFamilies).
+	// Every AuthServer the cache creates shares it.
+	families      *familyPolicy
 	AuthServerMap *core.NameMap[*AuthServer]        // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 	ZoneMap       *core.NameMap[*Zone]              // map[zone]*Zone
 	ServerTLSA    *core.NameMap[*ServerTLSARecords] // nsname -> validated TLSA cache, decoupled from AuthServer instances
@@ -100,6 +128,12 @@ type RRsetCacheT struct {
 	// fetcher without any, and the fetcher forwards it (ServersFor). Nil only
 	// in a cache that no resolver is attached to, which forwards nothing.
 	Forwarded func(name string, qtype uint16) bool
+	// AnsweredLocally reports whether the question <name, qtype> is answered
+	// in process, from a zone the server this resolver runs in is
+	// authoritative for. Like a forwarded question it needs no servers from a
+	// zone cut (ServersFor). Nil only in a cache that no resolver is attached
+	// to, which answers nothing locally.
+	AnsweredLocally func(name string, qtype uint16) bool
 	//Options                map[ImrOption]string
 	Primed               bool
 	Logger               *log.Logger
@@ -109,7 +143,9 @@ type RRsetCacheT struct {
 	Quiet                bool // if true, suppress informational logging (useful for CLI tools)
 	nsRevalidateMu       sync.Mutex
 	nsRevalidateInFlight map[string]struct{}
-	serverMapMu          sync.Mutex // serializes the ServerMap writers; see ServerMap
+	serverMapMu          sync.Mutex // serializes the ServerMap writers; see ServerMap and stubZones
+	statsMu              sync.Mutex // serializes AuthServerStats, so two resets cannot interleave
+	statsSince           time.Time  // start of the auth-server counting period: creation or the last reset
 }
 
 // ServerTLSARecords is the validated TLSA cache for one nameserver, keyed by

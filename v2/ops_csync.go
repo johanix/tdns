@@ -90,9 +90,9 @@ func (zd *ZoneData) PublishCsyncRRAndWait(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf("publishing the CSYNC for %s: %w", zd.ZoneName, ctx.Err())
-	case <-time.After(UpdateApplyTimeout):
+	case <-time.After(updateWaitBound(zd.ZoneName)):
 		return fmt.Errorf("publishing the CSYNC for %s: timed out after %s waiting for it to be applied",
-			zd.ZoneName, UpdateApplyTimeout)
+			zd.ZoneName, updateWaitBound(zd.ZoneName))
 	}
 }
 

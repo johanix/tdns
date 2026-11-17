@@ -216,15 +216,21 @@ For each scan the engine:
   (preferring TCP) for the relevant RRset (CDS or CSYNC).
 - Requires that all NS for the child return the same
   RRset -- partial consistency is treated as a transient
-  state and rejected.
+  state and rejected. For a CSYNC, what must be the same
+  is its `IMMEDIATE` flag and type bitmap, and the NS
+  RRset and glue it names (RFC 9975). The SOA serial, the
+  CSYNC serial field and the `USESOAMIN` flag may differ
+  between nameservers, as they do for a zone that several
+  providers sign.
 - Authenticates the data under the parent zone's delegation
   policy, as above.
 - For CDS: converts each CDS to its DS form (RFC 7344) and
   detects the algorithm-0 removal sentinel.
 - For CSYNC: extracts the type bitmap, honours `IMMEDIATE`
-  and `USESOAMIN` flags (RFC 7477), and verifies the
-  child's SOA serial does not change during the scan to
-  catch in-flight zone updates.
+  and `USESOAMIN` flags (RFC 7477), each nameserver's
+  `USESOAMIN` against that nameserver's own SOA serial,
+  and verifies that no nameserver's SOA serial changes
+  during the scan to catch in-flight zone updates.
 - Diffs the verified records against what the
   DelegationBackend already holds and emits adds/removes.
 
@@ -489,7 +495,8 @@ signed DNS UPDATE (the agent sends the delegation records
 directly, which also covers unsigned zones). The UPDATE
 scheme needs a SIG(0) key the parent trusts -- the agent
 generates it and the operator publishes its KEY at the
-primary (a one-time `zone proxy-key` bootstrap). For the
+primary (a one-time bootstrap; `zone parentsync status`
+prints the records). For the
 full operator how-to -- configuration, the UPDATE
 KEY-bootstrap, limitations, and verification -- see
 [Agent as a DSYNC proxy](agent-dsync-proxy.md).

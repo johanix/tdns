@@ -47,11 +47,11 @@ func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 	if !ok {
 		return nil
 	}
-	if !tmp.TrustAnchor && tmp.Expiration.Before(time.Now()) {
+	if !tmp.TrustAnchor && tmp.Expiration.Before(Now()) {
 		// Under the shard lock, so a trust anchor stored since the read above
 		// is not removed in its place.
 		dkc.Map.RemoveCb(lookupKey, func(_ string, v CachedDnskeyRRset, exists bool) bool {
-			return exists && !v.TrustAnchor && v.Expiration.Before(time.Now())
+			return exists && !v.TrustAnchor && v.Expiration.Before(Now())
 		})
 		return nil
 	}
@@ -71,7 +71,7 @@ func (dkc *DnskeyCacheT) Get(zonename string, keyid uint16) *CachedDnskeyRRset {
 func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRset) {
 	lookupKey := dnskeyKey(zonename, keyid)
 	limits := GetTTLLimits()
-	now := time.Now()
+	now := Now()
 	dkc.Map.Upsert(lookupKey, *cdr, func(exists bool, old, entry CachedDnskeyRRset) CachedDnskeyRRset {
 		if exists && old.TrustAnchor {
 			entry.TrustAnchor = true
@@ -104,6 +104,10 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 		RRsets:               core.NewCmap[CachedRRset](),
 		Servers:              core.NewNameMap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
 		ServerMap:            core.NewNameMap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
+		stubZones:            core.NewNameMap[struct{}](),               // the zones AddStub stored a server map for
+		anchorZones:          core.NewNameMap[struct{}](),               // the zones a configured trust anchor vouches for
+		anchorDS:             core.NewNameMap[[]*dns.DS](),              // the DS records of the DS trust anchors
+		families:             &familyPolicy{},                           // both address families until SetAddressFamilies says otherwise
 		AuthServerMap:        core.NewNameMap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 		ZoneMap:              core.NewNameMap[*Zone](),                  // zone -> *Zone
 		ServerTLSA:           core.NewNameMap[*ServerTLSARecords](),     // nsname -> validated TLSA cache
@@ -114,6 +118,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 		Debug:                debug,
 		DNSClient:            client,
 		nsRevalidateInFlight: make(map[string]struct{}),
+		statsSince:           time.Now(),
 	}
 }
 
@@ -130,17 +135,22 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 		return nil
 	}
 	// Expiration-based eviction
-	if crrset.Expiration.Before(time.Now()) {
+	if crrset.Expiration.Before(Now()) {
 		rrcache.RRsets.Remove(lookupKey)
 		if rrcache.Debug {
 			log.Printf("RRsetCache: Removed expired key %s (%s)", lookupKey, dns.TypeToString[qtype])
 		}
-		// If an NS RRset expired, also remove its server mappings for that zone
+		// If an NS RRset expired, also remove its server mappings for that
+		// zone, unless the operator configured them (keepsServerMap)
 		if qtype == dns.TypeNS {
-			rrcache.ServerMap.Remove(qname)
-			if rrcache.Debug {
-				log.Printf("RRsetCache: Removed ServerMap entry for zone %s due to NS expiry", qname)
+			rrcache.serverMapMu.Lock()
+			if !rrcache.keepsServerMap(qname) {
+				rrcache.ServerMap.Remove(qname)
+				if rrcache.Debug {
+					log.Printf("RRsetCache: Removed ServerMap entry for zone %s due to NS expiry", qname)
+				}
 			}
+			rrcache.serverMapMu.Unlock()
 		}
 		return nil
 	}
@@ -162,6 +172,21 @@ func (rrcache *RRsetCacheT) Peek(qname string, qtype uint16) *CachedRRset {
 const rrsetCacheMaxEntries = 50000
 
 func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset) {
+	rrcache.set(qname, qtype, crrset, nil)
+}
+
+// SetUnless stores crrset for <qname, qtype> unless keep says that the entry
+// the cache holds there must stay. keep is called only when there is such an
+// entry, with that entry, under the lock that the write takes too: deciding
+// and writing are one step, so an entry stored in between by another writer
+// is judged, not overwritten unseen. keep must not touch the cache. SetUnless
+// reports whether crrset was stored.
+func (rrcache *RRsetCacheT) SetUnless(qname string, qtype uint16, crrset *CachedRRset, keep func(stored CachedRRset) bool) bool {
+	return rrcache.set(qname, qtype, crrset, keep)
+}
+
+// set is Set, and SetUnless when keep is not nil.
+func (rrcache *RRsetCacheT) set(qname string, qtype uint16, crrset *CachedRRset, keep func(stored CachedRRset) bool) bool {
 	lookupKey := rrsetKey(qname, qtype)
 	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding key %s (%s) to cache\n", lookupKey, dns.TypeToString[qtype])
@@ -169,7 +194,7 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 
 	if crrset == nil {
 		log.Printf("RRsetCache:Set: nil crrset for key %s - ignored", lookupKey)
-		return
+		return false
 	}
 
 	// Evict oldest entry if cache exceeds max size (and this is a new key)
@@ -180,33 +205,17 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 	// cache-min-ttl / cache-max-ttl, for data learned from the network. The
 	// lifetime decided here is also the TTL every client is served, so this is
 	// the one place the limits need to be applied.
-	now := time.Now()
+	now := Now()
 	bounded := ttlBounded(crrset.Context)
 	limits := GetTTLLimits()
 
-	// Compute min TTL and set Expiration accordingly when RRset present
+	// An entry with records lives as long as they do (entryLifetime); one
+	// without, as long as its caller says.
 	if crrset.RRset != nil && len(crrset.RRset.RRs) > 0 {
-		minTTL := crrset.RRset.RRs[0].Header().Ttl
-		for _, rr := range crrset.RRset.RRs[1:] {
-			if rr.Header().Ttl < minTTL {
-				minTTL = rr.Header().Ttl
-			}
-		}
-		// Apply a small TTL floor for NS RRsets only when learned via referral, to avoid instant drop
-		if qtype == dns.TypeNS && crrset.Context == ContextReferral && minTTL == 0 {
-			if rrcache.Debug {
-				log.Printf("RRsetCache:Set: NS minTTL was 0 for %q (Context=Referral); applying floor 10s", qname)
-			}
-			minTTL = 10
-		}
-		if bounded {
-			minTTL = limits.Clamp(minTTL)
-		}
+		crrset.Ttl, crrset.Expiration = entryLifetime(crrset, qtype, now, limits, bounded)
 		if rrcache.Debug && qtype == dns.TypeNS {
-			log.Printf("RRsetCache:Set: NS minTTL=%ds for zone %q (Context=%s)", minTTL, qname, CacheContextToString[crrset.Context])
+			log.Printf("RRsetCache:Set: NS lifetime %ds for zone %q (Context=%s)", crrset.Ttl, qname, CacheContextToString[crrset.Context])
 		}
-		crrset.Ttl = minTTL
-		crrset.Expiration = now.Add(time.Duration(minTTL) * time.Second)
 	} else {
 		if crrset.Expiration.IsZero() && crrset.Ttl > 0 {
 			// For negative/no-RRset entries, if Expiration not set but TTL is provided
@@ -221,7 +230,29 @@ func (rrcache *RRsetCacheT) Set(qname string, qtype uint16, crrset *CachedRRset)
 		}
 	}
 
-	rrcache.RRsets.Set(lookupKey, *crrset)
+	// keep (SetUnless) decides first: an entry it says must stay is left as it
+	// is. Otherwise, storing the entry that is cached again -- the same RRset,
+	// as a Get hands it out and a caller hands it back with other fields
+	// changed -- keeps the expiry it has: a re-store never extends an entry's
+	// life. The lifetime computed above wins when it is shorter, as a verdict
+	// that makes the entry Secure can make it. Fresh data always arrives in an
+	// RRset of its own, and is given its full lifetime. Both are decided under
+	// the lock the write takes.
+	stored := false
+	result := rrcache.RRsets.Upsert(lookupKey, *crrset, func(exist bool, cached, entry CachedRRset) CachedRRset {
+		if exist && keep != nil && keep(cached) {
+			return cached
+		}
+		stored = true
+		if exist && entry.RRset != nil && cached.RRset == entry.RRset && cached.Expiration.Before(entry.Expiration) {
+			entry.Ttl, entry.Expiration = cached.Ttl, cached.Expiration
+		}
+		return entry
+	})
+	if stored {
+		crrset.Ttl, crrset.Expiration = result.Ttl, result.Expiration
+	}
+	return stored
 }
 
 // evictOldestRRset removes the entry with the earliest expiration time from the RRsets cache.
@@ -244,11 +275,26 @@ func (rrcache *RRsetCacheT) evictOldestRRset() {
 	}
 }
 
+// keepsServerMap reports whether zone's server map is configuration, which a
+// flush and an NS expiry leave alone: a stub's (stubZones). The caller holds
+// serverMapMu from the check until the delete it decides.
+func (rrcache *RRsetCacheT) keepsServerMap(zone string) bool {
+	return rrcache.stubZones.Has(zone)
+}
+
+// IsStubZone reports whether zone is a configured stub. Its server map is
+// configuration (AddStub): nothing the resolver learns from a referral, glue,
+// a transport signal or an address lookup changes it.
+func (rrcache *RRsetCacheT) IsStubZone(zone string) bool {
+	return rrcache.stubZones.Has(zone)
+}
+
 // FlushDomain removes cached RRsets at or below the provided domain.
 // When keepStructural is true, NS/DS/DNSKEY RRsets and the address
 // records for their nameservers are preserved. When it is false, the
 // validation states of the zones at or below the domain go as well; see
-// forgetZoneStates.
+// forgetZoneStates. So do the server maps of the zones there, except a
+// configured stub's (keepsServerMap).
 func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int, error) {
 	if rrcache == nil {
 		return 0, fmt.Errorf("rrcache is nil")
@@ -312,23 +358,25 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 			rrcache.Servers.Remove(key)
 		}
 		auxKeys = auxKeys[:0]
+		rrcache.serverMapMu.Lock()
 		for item := range rrcache.ServerMap.IterBuffered() {
-			if isSubdomainOf(item.Key, domain) {
+			if isSubdomainOf(item.Key, domain) && !rrcache.keepsServerMap(item.Key) {
 				auxKeys = append(auxKeys, item.Key)
 			}
 		}
 		for _, key := range auxKeys {
 			rrcache.ServerMap.Remove(key)
 		}
+		rrcache.serverMapMu.Unlock()
 	}
 
 	return removed, nil
 }
 
 // FlushAll removes all cached data except root zone priming data (NS for ".",
-// root server A/AAAA records), along with the validation state of every zone
-// without a trust anchor (see forgetZoneStates). Returns the number of RRsets
-// removed.
+// root server A/AAAA records) and the configured stubs' server maps
+// (keepsServerMap), along with the validation state of every zone without a
+// trust anchor (see forgetZoneStates). Returns the number of RRsets removed.
 func (rrcache *RRsetCacheT) FlushAll() int {
 	if rrcache == nil {
 		return 0
@@ -387,14 +435,16 @@ func (rrcache *RRsetCacheT) FlushAll() int {
 		rrcache.Servers.Remove(key)
 	}
 	auxKeys = auxKeys[:0]
+	rrcache.serverMapMu.Lock()
 	for item := range rrcache.ServerMap.IterBuffered() {
-		if dns.CanonicalName(item.Key) != "." {
+		if dns.CanonicalName(item.Key) != "." && !rrcache.keepsServerMap(item.Key) {
 			auxKeys = append(auxKeys, item.Key)
 		}
 	}
 	for _, key := range auxKeys {
 		rrcache.ServerMap.Remove(key)
 	}
+	rrcache.serverMapMu.Unlock()
 
 	rrcache.forgetZoneStates(".")
 
@@ -428,10 +478,17 @@ func (rrcache *RRsetCacheT) forgetZoneStates(domain string) {
 	}
 }
 
-// trustAnchorZones returns the canonical names of the zones with a trust anchor
-// in the DNSKEY cache.
+// trustAnchorZones returns the canonical names of the zones a configured trust
+// anchor vouches for: those recorded by AddTrustAnchorZone, and those with a
+// trust anchor key in the DNSKEY cache. A DS anchor has no such key until its
+// zone's DNSKEY RRset has matched it, and a flush dropped its zone's state.
 func (rrcache *RRsetCacheT) trustAnchorZones() map[string]struct{} {
 	zones := map[string]struct{}{}
+	if rrcache.anchorZones != nil {
+		for _, zone := range rrcache.anchorZones.Keys() {
+			zones[core.CanonicalizeName(zone)] = struct{}{}
+		}
+	}
 	if rrcache.DnskeyCache == nil {
 		return zones
 	}
@@ -529,8 +586,16 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 		if tmpauthserver == nil {
 			continue // Skip invalid server names
 		}
+		tmpauthserver.families = rrcache.families
+		switch kept := rrcache.families.filter(server.Addrs); {
+		case len(kept) == 0 && len(server.Addrs) > 0:
+			log.Printf("AddStub: zone %s server %s: WARNING: every configured address is of an address family not in use; the server cannot be queried (imrengine.outbound-address-families)", zone, server.Name)
+		case len(kept) < len(server.Addrs):
+			log.Printf("AddStub: zone %s server %s: addresses of an address family not in use are left out (imrengine.outbound-address-families)", zone, server.Name)
+		}
 		// Override defaults with config values
 		tmpauthserver.SetAddrs(server.Addrs)
+		tmpauthserver.SetConfiguredAddrs(server.Addrs)
 		tmpauthserver.SetAlpn(server.Alpn)
 		tmpauthserver.ForceSetSrc("stub")
 		tmpauthserver.PromoteConnMode(server.ConnMode)
@@ -580,6 +645,16 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				tmpauthserver.SetAlpn(alpnOrder)
 				tmpauthserver.SetTransports(transports)
 				tmpauthserver.MergeTransportWeights(weights)
+				// The configured signal as written, for the transport stats.
+				if raw, err := core.ParseTransportStringRaw(server.TransportSignal); err == nil {
+					received := &ReceivedSignal{Source: "config", Weights: map[core.Transport]uint8{}}
+					for k, v := range raw {
+						if t, err := core.StringToTransport(k); err == nil {
+							received.Weights[t] = v
+						}
+					}
+					tmpauthserver.SetReceivedSignal(received)
+				}
 			}
 		} else {
 			// Back-compat: use ALPN order to set transports (no weights)
@@ -599,6 +674,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				}
 				tmpauthserver.SetTransports(transports)
 				tmpauthserver.MergeTransportWeights(weights)
+				tmpauthserver.SetReceivedSignal(&ReceivedSignal{Source: "config", Weights: copyMap(weights)})
 			}
 		}
 		authservers[ServerKey(server.Name)] = tmpauthserver
@@ -608,13 +684,30 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 	}
 	rrcache.serverMapMu.Lock()
 	rrcache.ServerMap.Set(zone, authservers)
+	rrcache.stubZones.Set(zone, struct{}{})
 	rrcache.serverMapMu.Unlock()
 	return nil
 }
 
+// RemoveStub drops a stub zone's server map and the record that it is a stub,
+// for a stub the configuration no longer has. Ordinary iteration re-learns the
+// zone's servers from a referral on the next query into it.
+func (rrcache *RRsetCacheT) RemoveStub(zone string) {
+	rrcache.serverMapMu.Lock()
+	rrcache.ServerMap.Remove(zone)
+	rrcache.stubZones.Remove(zone)
+	rrcache.serverMapMu.Unlock()
+}
+
+// AddServers merges sm into zone's server map. A stub's map is left as
+// configured (keepsServerMap): servers learned from a referral or a lookup do
+// not join it.
 func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) error {
 	rrcache.serverMapMu.Lock()
 	defer rrcache.serverMapMu.Unlock()
+	if rrcache.keepsServerMap(zone) {
+		return nil
+	}
 	serverMapOrig, ok := rrcache.ServerMap.Get(zone)
 
 	// Create a copy of the map to avoid concurrent map read/write errors
@@ -683,6 +776,9 @@ func (rrcache *RRsetCacheT) GetOrCreateAuthServer(nsname string) *AuthServer {
 
 	// No instance exists - create a new one
 	newServer := NewAuthServer(nsname)
+	if newServer != nil {
+		newServer.families = rrcache.families
+	}
 
 	// Store it in the global map (use SetIfAbsent to handle race conditions)
 	if rrcache.AuthServerMap.SetIfAbsent(nsname, newServer) {
@@ -798,7 +894,7 @@ func (rrcache *RRsetCacheT) StoreTLSAForServer(base, owner string, rrset *core.R
 	}
 	// Bounded like the copy of the same RRset in the RRset cache, so a DANE pin
 	// does not outlive the data it was taken from.
-	now := time.Now()
+	now := Now()
 	exp, _, _ := GetTTLLimits().bound(now.Add(GetMinTTL(rrset.RRs)), now)
 	st.mu.Lock()
 	st.recs[owner] = &CachedRRset{
@@ -837,7 +933,7 @@ func (rrcache *RRsetCacheT) LookupTLSAForServer(base, owner string) *CachedRRset
 	st.mu.RLock()
 	rec := st.recs[owner]
 	st.mu.RUnlock()
-	if rec == nil || time.Now().After(rec.Expiration) {
+	if rec == nil || Now().After(rec.Expiration) {
 		return nil
 	}
 	return rec
@@ -927,18 +1023,18 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 			nsRecords = append(nsRecords, rr)
 			nsname := rr.(*dns.NS).Ns
 			nsMap[nsname] = true
-			// Use shared AuthServer instance (ensures single instance per nameserver)
+			// Use shared AuthServer instance (ensures single instance per nameserver).
+			// A root refresh seeds from the hints while queries run, so the
+			// server is changed only through its locked setters, here and for
+			// the glue below.
 			server := rrcache.GetOrCreateAuthServer(nsname)
-			if server.Src == "" || server.Src == "unknown" {
-				server.Src = "hint"
-			}
-			if len(server.Transports) == 0 {
-				server.Transports = []core.Transport{core.TransportDo53}
-			}
+			server.SetSrc("hint")
+			server.SetTransportsIfNone([]core.Transport{core.TransportDo53})
 			authMap[nsname] = server
 			rootns = append(rootns, nsname)
 			if rrcache.Debug {
-				log.Printf("PrimeWithHints: adding server for root: name %q: %+v", nsname, authMap[nsname])
+				log.Printf("PrimeWithHints: adding server for root: name %q: src %s, transports %v",
+					nsname, server.GetSrc(), server.GetTransports())
 			}
 
 		case dns.TypeA, dns.TypeAAAA:
@@ -988,7 +1084,9 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 			continue
 		}
 
-		// Group records by type (A or AAAA)
+		// Group records by type (A or AAAA). AddAddr adds only the addresses
+		// the server lacks: a re-seed fills gaps, keeps what the server has
+		// learned since, and never lists an address twice.
 		typeGroups := map[uint16][]dns.RR{}
 		tmpsrv := authMap[name]
 		for _, rr := range rrs {
@@ -997,15 +1095,15 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 			switch rr.Header().Rrtype {
 			case dns.TypeA:
 				servers = append(servers, net.JoinHostPort(rr.(*dns.A).A.String(), "53"))
-				tmpsrv.Addrs = append(tmpsrv.Addrs, rr.(*dns.A).A.String())
+				tmpsrv.AddAddr(rr.(*dns.A).A.String())
 			case dns.TypeAAAA:
 				servers = append(servers, net.JoinHostPort(rr.(*dns.AAAA).AAAA.String(), "53"))
-				tmpsrv.Addrs = append(tmpsrv.Addrs, rr.(*dns.AAAA).AAAA.String())
+				tmpsrv.AddAddr(rr.(*dns.AAAA).AAAA.String())
 			}
 		}
 		authMap[name] = tmpsrv
 		if rrcache.Debug {
-			log.Printf("PrimeWithHints: adding addrs to server for root: name %q: %+v", name, authMap[name])
+			log.Printf("PrimeWithHints: adding addrs to server for root: name %q: addrs %v", name, tmpsrv.GetAddrs())
 		}
 
 		// Create RRset for each type
@@ -1167,16 +1265,21 @@ func (rrcache *RRsetCacheT) FindClosestKnownZoneFor(qname string, qtype uint16) 
 }
 
 // ServersFor returns the servers that the resolver's own fetch of <qname,
-// qtype> is sent to, and whether there is anything to send it to. A forwarded
-// question is sent without servers, and no zone cut is looked for: the fetcher
-// forwards it (Forwarded). Any other goes to the closest cached zone that holds
-// it (FindClosestKnownZoneFor), or to the root's servers when that zone has
-// none.
+// qtype> is sent to, and whether there is anything to send it to. A question
+// the server answers from its own zone is sent without servers, and so is a
+// forwarded one, and for neither is a zone cut looked for: the fetcher answers
+// the first from the zone (AnsweredLocally) and forwards the second
+// (Forwarded). Any other goes to the closest cached zone that holds it
+// (FindClosestKnownZoneFor), or to the root's servers when that zone has none.
 //
 // The fetches used to look for the cut first and give up without servers,
 // which for a forwarded root is whenever the root NS it holds has expired: the
-// root server map goes with it (#722).
+// root server map goes with it (#722). A parent's own DS for a child, which it
+// needs to validate the child's keys, was given up on the same way (#842).
 func (rrcache *RRsetCacheT) ServersFor(qname string, qtype uint16) (map[string]*AuthServer, bool) {
+	if rrcache.AnsweredLocally != nil && rrcache.AnsweredLocally(qname, qtype) {
+		return nil, true
+	}
 	if rrcache.Forwarded != nil && rrcache.Forwarded(qname, qtype) {
 		return nil, true
 	}
@@ -1292,6 +1395,42 @@ func (rrcache *RRsetCacheT) MarkRRsetBogus(qname string, qtype uint16, rrset *co
 		}
 	}
 	return edeCode, edeText
+}
+
+// SetVerdict changes the validation state, and the EDE, of the cached entry
+// judged was read from. A verdict changed on every serve must not extend the
+// entry's life (see MarkRRsetBogus). It may shorten it: an entry the verdict
+// makes Secure lives no longer than its signatures allow, as it would had it
+// been Secure when it was stored (entryLifetime, signature_lifetime.go). The
+// lifetime is computed from the time the entry was stored, never moved later,
+// and written back into judged as well, so an answer built from it is served
+// with what is left of it.
+//
+// The verdict is stored only while that entry is still the one cached: the
+// same records, the same expiry and the state judged had. Validation can take
+// a while, and another query may have replaced the entry meanwhile; a verdict
+// reached for one entry is never written onto another. It reports whether the
+// verdict was stored.
+func (rrcache *RRsetCacheT) SetVerdict(judged *CachedRRset, state ValidationState, edeCode uint16, edeText string) bool {
+	if judged == nil {
+		return false
+	}
+	stored := rrcache.RRsets.UpdateIf(rrsetKey(judged.Name, judged.RRtype), func(stored CachedRRset) (CachedRRset, bool) {
+		if stored.RRset != judged.RRset || !stored.Expiration.Equal(judged.Expiration) || stored.State != judged.State {
+			return stored, false
+		}
+		stored.State, stored.EDECode, stored.EDEText = state, edeCode, edeText
+		if stored.RRset != nil && len(stored.RRset.RRs) > 0 {
+			storedAt := stored.Expiration.Add(-time.Duration(stored.Ttl) * time.Second)
+			ttl, exp := entryLifetime(&stored, judged.RRtype, storedAt, GetTTLLimits(), ttlBounded(stored.Context))
+			if exp.Before(stored.Expiration) {
+				stored.Ttl, stored.Expiration = ttl, exp
+			}
+		}
+		judged.Ttl, judged.Expiration = stored.Ttl, stored.Expiration
+		return stored, true
+	})
+	return stored
 }
 
 func (rrcache *RRsetCacheT) lookupDnskeyEDE(rrset *core.RRset) (uint16, string, bool) {

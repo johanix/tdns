@@ -59,32 +59,35 @@ func TestRootOnlyServerAnswersBelowTheRoot(t *testing.T) {
 	}
 }
 
-// A single-RR UPDATE is dispatched on the RR's owner, so a TLD's delegation
-// update arrives as "tld." -- whose zone is the hosted root, not "not found".
+// A TLD's delegation update reaches the hosted root, whether its zone section
+// names the root or, from a sender that names the owner there, the TLD, whose
+// zone is then the hosted root rather than "not found".
 func TestUpdateOfATLDDelegationFindsTheHostedRoot(t *testing.T) {
 	zd := testSnapshotZone(t, ".", rootDispatchZone)
 	zd.Options = map[ZoneOption]bool{OptAllowChildUpdates: true}
 
-	m := new(dns.Msg)
-	m.SetUpdate(".")
-	rr, err := dns.NewRR("tld. 3600 IN NS ns2.tld.")
-	if err != nil {
-		t.Fatal(err)
-	}
-	m.Insert([]dns.RR{rr})
-	cw := &captureWriter{}
-	_ = UpdateResponder(context.Background(), &DnsUpdateRequest{ResponseWriter: cw, Msg: m, Qname: ".", Status: &UpdateStatus{}}, nil)
+	for _, zone := range []string{".", "tld."} {
+		m := new(dns.Msg)
+		m.SetUpdate(zone)
+		rr, err := dns.NewRR("tld. 3600 IN NS ns2.tld.")
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Insert([]dns.RR{rr})
+		cw := &captureWriter{}
+		_ = UpdateResponder(context.Background(), &DnsUpdateRequest{ResponseWriter: cw, Msg: m, Qname: zone, Status: &UpdateStatus{}}, nil)
 
-	if cw.got == nil {
-		t.Fatal("responder wrote no response")
-	}
-	if found, code, _ := edns0.ExtractEDEFromMsg(cw.got); found && code == edns0.EDEZoneNotFound {
-		t.Fatalf("UPDATE of tld.'s delegation: zone not found, but the server hosts its parent, the root")
-	}
-	// Found, it goes on to validation, which refuses the unsigned message as
-	// malformed: proof the root took it.
-	if cw.got.Rcode != dns.RcodeFormatError {
-		t.Errorf("rcode %s, want FORMERR from validating the unsigned UPDATE", dns.RcodeToString[cw.got.Rcode])
+		if cw.got == nil {
+			t.Fatalf("zone section %s: responder wrote no response", zone)
+		}
+		if found, code, _ := edns0.ExtractEDEFromMsg(cw.got); found && code == edns0.EDEZoneNotFound {
+			t.Fatalf("zone section %s: UPDATE of tld.'s delegation: zone not found, but the server hosts its parent, the root", zone)
+		}
+		// Found, it goes on to validation, which refuses the unsigned message as
+		// malformed: proof the root took it.
+		if cw.got.Rcode != dns.RcodeFormatError {
+			t.Errorf("zone section %s: rcode %s, want FORMERR from validating the unsigned UPDATE", zone, dns.RcodeToString[cw.got.Rcode])
+		}
 	}
 }
 

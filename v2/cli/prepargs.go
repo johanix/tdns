@@ -49,7 +49,9 @@ func PrepArgs(args ...interface{}) {
 		}
 	}
 
-	DefinedDnskeyStates := []string{"created", "mpdist", "mpremove", "published", "ds-published", "standby", "active", "retired", "removed", "foreign"}
+	// tdns's own key states. The states a key lifecycle owner stages its
+	// rows in are the owner's to name, through its own commands.
+	DefinedDnskeyStates := []string{"created", "published", "ds-published", "standby", "active", "retired", "removed"}
 	DefinedDnskeyTypes := []string{"KSK", "ZSK", "CSK"}
 	// DefinedAlgorithms := []string{"RSASHA256", "RSASHA512", "ED25519", "ECDSAP256SHA256", "ECDSAP384SHA384"}
 

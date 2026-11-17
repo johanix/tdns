@@ -1396,38 +1396,33 @@ func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.Keystore
 
 // formatDnssecKeyList renders "keystore dnssec list": one line per key,
 // sorted by zone, state and keyid, with the mechanism columns pub, sign and
-// ds beside the state. A foreign key's state is shown in brackets; ds is "-"
-// while unknown.
+// ds beside the state; ds is "-" while unknown. A state is shown as the
+// daemon reports it, an owner's states included: the columns say what the
+// key does, whatever its state is called.
 func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) string {
 	if len(keys) == 0 {
 		return "No DNSSEC key pairs found\n"
 	}
 	type entry struct {
-		zone, state, rawState, keyid string
-		flags                        uint16
-		alg, pub, sign, ds, keystr   string
+		zone, state, keyid         string
+		flags                      uint16
+		alg, pub, sign, ds, keystr string
 	}
 	var entries []entry
 	for k, v := range keys {
 		tmp := strings.Split(k, "::")
-		state := v.State
-		if state == "foreign" {
-			state = "[foreign]"
-		}
 		entries = append(entries, entry{
-			zone: tmp[0], state: state, rawState: v.State, keyid: tmp[1],
+			zone: tmp[0], state: v.State, keyid: tmp[1],
 			flags: v.Flags, alg: v.Algorithm, keystr: v.Keystr,
 			pub: flagColumn(v.Pub), sign: flagColumn(v.Sign), ds: dsColumn(v.DS),
 		})
 	}
-	// Sort by the raw state so the "[foreign]" bracket does not perturb it
-	// ("[" sorts before lowercase letters).
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].zone != entries[j].zone {
 			return entries[i].zone < entries[j].zone
 		}
-		if entries[i].rawState != entries[j].rawState {
-			return entries[i].rawState < entries[j].rawState
+		if entries[i].state != entries[j].state {
+			return entries[i].state < entries[j].state
 		}
 		// Key ids are decimal: 999 before 10000.
 		ki, ei := strconv.ParseUint(entries[i].keyid, 10, 16)

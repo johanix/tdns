@@ -49,7 +49,6 @@ func TestRowsWrittenWithoutFlagsGetThemOnReopen(t *testing.T) {
 	if vs := CheckKeyRowInvariants(kdb, zone); len(vs) != 0 {
 		t.Errorf("after the reopen: %s", violationList(vs))
 	}
-	assertKeySetsAgree(t, kdb, zone)
 }
 
 // The backfill leaves a row that already has its flags alone: an explicit

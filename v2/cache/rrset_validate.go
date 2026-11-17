@@ -15,11 +15,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-// dnskeyFlagSEP is the "Secure Entry Point" (KSK) flag bit for DNSKEY RRs.
-// miekg/dns does not currently export a symbolic constant for this, so we
-// define it locally for clarity.
-const dnskeyFlagSEP = 1 << 8
-
 // RRsetFetcher is a function type for fetching RRsets by querying authoritative servers.
 // It takes a context, query name, query type, and a map of authoritative servers,
 // and returns the fetched RRset or an error.
@@ -199,7 +194,7 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 				}
 				// Add fetched keys to cache only after DS-based validation has been performed.
 				// Compute min TTL for expiration.
-				exp := time.Now().Add(GetMinTTL(dkeys.RRs))
+				exp := Now().Add(GetMinTTL(dkeys.RRs))
 
 				// Attempt to validate the fetched DNSKEY RRset using DS before adding to DnskeyCache
 				// Only add validated/secure DNSKEYs to DnskeyCache, as it's used for validation of other data
@@ -311,8 +306,9 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 		// Outer loop reads this as Bogus.
 		return false, false, ValidationStateBogus, nil
 	}
-	// Time validity
-	if WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
+	// Time validity, and the TTL cap below, from one reading of the clock.
+	now := Now()
+	if WithinValidityPeriod(sig.Inception, sig.Expiration, now.UTC()) {
 		if rrcache.Debug {
 			log.Printf("ValidateRRset: signature verify OK and within validity window for %s %s using %s::%d",
 				rrset.Name, dns.TypeToString[rrset.RRtype], signer, keyid)
@@ -333,19 +329,17 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 			rrcache.ZoneMap.Set(rrset.Name, zone)
 		}
 		// cap ttl to the signature expiration
-		expirationTime := time.Unix(int64(sig.Expiration), 0)
-		remaining := time.Until(expirationTime)
-		ttl := time.Duration(remaining.Seconds()) * time.Second
+		ttl := signatureTTLCap(sig.Expiration, now)
 		if ttl < GetMinTTL(rrset.RRs) {
 			for _, rr := range rrset.RRs {
-				rr.Header().Ttl = uint32(ttl.Seconds())
+				rr.Header().Ttl = uint32(ttl / time.Second)
 			}
 		}
 		return true, false, ValidationStateNone, nil
 	}
 	if rrcache.Verbose {
 		log.Printf("ValidateRRset: signature time INVALID for %s %s using %s::%d (inc=%d exp=%d now=%d)",
-			rrset.Name, dns.TypeToString[rrset.RRtype], signer, keyid, sig.Inception, sig.Expiration, time.Now().UTC().Unix())
+			rrset.Name, dns.TypeToString[rrset.RRtype], signer, keyid, sig.Inception, sig.Expiration, now.UTC().Unix())
 	}
 	// Signature inception/expiration window is invalid (premature or
 	// expired). The crypto verified, but the sig is not currently
@@ -378,51 +372,14 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		return ValidationStateNone, fmt.Errorf("rrset is nil; nothing to validate")
 	}
 
-	// Check cache first - if we already have this RRset validated and it hasn't changed or expired, reuse the validation state.
-	// Note: the ValidationState enum starts at iota+1, so the zero value
-	// (Go-default-initialised) is 0, NOT ValidationStateNone (=1). A cached
-	// entry written without an explicit State field has State==0 and must be
-	// treated as "not validated yet", not as a usable cached verdict.
-	//
-	// Indeterminate is not reused either. It records that the chain could not be
-	// followed when the entry was made -- a DNSKEY fetch that timed out, an
-	// anchor not loaded yet -- and reusing it turned a moment's gap into the
-	// verdict for the rest of the entry's lifetime.
-	cached := rrcache.Get(rrset.Name, rrset.RRtype)
-	if cached != nil && cached.State > ValidationStateNone && cached.State != ValidationStateIndeterminate {
-		// Get() already checks expiration and returns nil if expired, so if cached is not nil, it's not expired
-		// But we double-check expiration to be explicit about the semantics
-		if cached.Expiration.Before(time.Now()) {
-			if rrcache.Verbose {
-				log.Printf("ValidateRRset: cached RRset for %s %s has expired, re-validating", rrset.Name, dns.TypeToString[rrset.RRtype])
-			}
-			// Fall through to re-validate
-		} else if cached.RRset != nil {
-			// Check if the RRset content has changed by comparing RRs and RRSIGs
-			// Use RRsetDiffer for RRs (it skips RRSIGs, which is what we want for data comparison)
-			// Then separately compare RRSIGs
-			rrsetDiffer, _, _ := cached.RRset.RRsetDiffer(rrset, log.Default(), false, false)
-			// XXX: Should we really care about comparing RRSIGs? Or perhaps only compare inception?
-			rrsigDiffer := cached.RRset.RRSIGsDiffer(rrset)
+	// An RRset synthesized from a wildcard is judged with the proof kept on
+	// its cache entry (wildcard_answer.go).
+	if rrset.RRtype != dns.TypeDNSKEY && hasExpansionSignature(rrset) {
+		return rrcache.validateWithKeptProof(ctx, rrset, fetcher)
+	}
 
-			if !rrsetDiffer && !rrsigDiffer {
-				// RRset hasn't changed and hasn't expired - reuse cached validation state
-				if rrcache.Debug {
-					log.Printf("ValidateRRset: using cached validation state %s for %s %s (RRset unchanged, not expired)", ValidationStateToString[cached.State], rrset.Name, dns.TypeToString[rrset.RRtype])
-				}
-				return cached.State, nil
-			} else {
-				if rrcache.Debug {
-					log.Printf("ValidateRRset: cached RRset for %s %s has changed (RRs differ: %v, RRSIGs differ: %v), re-validating", rrset.Name, dns.TypeToString[rrset.RRtype], rrsetDiffer, rrsigDiffer)
-				}
-				// Fall through to re-validate
-			}
-		} else {
-			// Cached RRset is nil - fall through to validate
-			if rrcache.Debug {
-				log.Printf("ValidateRRset: cached entry for %s %s has no RRset, re-validating", rrset.Name, dns.TypeToString[rrset.RRtype])
-			}
-		}
+	if state, ok := rrcache.reusableVerdict(rrset); ok {
+		return state, nil
 	}
 
 	dkc := rrcache.DnskeyCache
@@ -475,6 +432,67 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		return rrcache.unsignedRRsetState(ctx, rrset, fetcher), nil
 	}
 
+	state, _, err := rrcache.validateSignatures(ctx, rrset, rrset.RRSIGs, dkc, fetcher)
+	return state, err
+}
+
+// reusableVerdict returns the verdict cached for rrset, when the entry holds
+// the same RRs and RRSIGs, has not expired, and its verdict can be reused.
+func (rrcache *RRsetCacheT) reusableVerdict(rrset *core.RRset) (ValidationState, bool) {
+	// Check cache first - if we already have this RRset validated and it hasn't changed or expired, reuse the validation state.
+	// Note: the ValidationState enum starts at iota+1, so the zero value
+	// (Go-default-initialised) is 0, NOT ValidationStateNone (=1). A cached
+	// entry written without an explicit State field has State==0 and must be
+	// treated as "not validated yet", not as a usable cached verdict.
+	//
+	// Indeterminate is not reused either. It records that the chain could not be
+	// followed when the entry was made -- a DNSKEY fetch that timed out, an
+	// anchor not loaded yet -- and reusing it turned a moment's gap into the
+	// verdict for the rest of the entry's lifetime.
+	cached := rrcache.Get(rrset.Name, rrset.RRtype)
+	if cached != nil && cached.State > ValidationStateNone && cached.State != ValidationStateIndeterminate {
+		// Get() already checks expiration and returns nil if expired, so if cached is not nil, it's not expired
+		// But we double-check expiration to be explicit about the semantics
+		if cached.Expiration.Before(Now()) {
+			if rrcache.Verbose {
+				log.Printf("ValidateRRset: cached RRset for %s %s has expired, re-validating", rrset.Name, dns.TypeToString[rrset.RRtype])
+			}
+			// Fall through to re-validate
+		} else if cached.RRset != nil {
+			// Check if the RRset content has changed by comparing RRs and RRSIGs
+			// Use RRsetDiffer for RRs (it skips RRSIGs, which is what we want for data comparison)
+			// Then separately compare RRSIGs
+			rrsetDiffer, _, _ := cached.RRset.RRsetDiffer(rrset, log.Default(), false, false)
+			// XXX: Should we really care about comparing RRSIGs? Or perhaps only compare inception?
+			rrsigDiffer := cached.RRset.RRSIGsDiffer(rrset)
+
+			if !rrsetDiffer && !rrsigDiffer {
+				// RRset hasn't changed and hasn't expired - reuse cached validation state
+				if rrcache.Debug {
+					log.Printf("ValidateRRset: using cached validation state %s for %s %s (RRset unchanged, not expired)", ValidationStateToString[cached.State], rrset.Name, dns.TypeToString[rrset.RRtype])
+				}
+				return cached.State, true
+			} else {
+				if rrcache.Debug {
+					log.Printf("ValidateRRset: cached RRset for %s %s has changed (RRs differ: %v, RRSIGs differ: %v), re-validating", rrset.Name, dns.TypeToString[rrset.RRtype], rrsetDiffer, rrsigDiffer)
+				}
+				// Fall through to re-validate
+			}
+		} else {
+			// Cached RRset is nil - fall through to validate
+			if rrcache.Debug {
+				log.Printf("ValidateRRset: cached entry for %s %s has no RRset, re-validating", rrset.Name, dns.TypeToString[rrset.RRtype])
+			}
+		}
+	}
+
+	return ValidationStateNone, false
+}
+
+// validateSignatures tries sigs, in order, on rrset. It returns Secure, and
+// the signature, at the first that validates and is time-valid; otherwise the
+// verdict the failures add up to.
+func (rrcache *RRsetCacheT) validateSignatures(ctx context.Context, rrset *core.RRset, sigs []dns.RR, dkc *DnskeyCacheT, fetcher RRsetFetcher) (ValidationState, *dns.RRSIG, error) {
 	// Track the failure category across all RRSIGs. The inner function
 	// returns ValidationStateBogus when a sig actually failed verification
 	// or its validity window is invalid, and ValidationStateIndeterminate
@@ -484,7 +502,7 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 	// attempted.
 	sawSigFail := false  // at least one sig actually failed verification
 	sawChainGap := false // at least one sig couldn't be attempted at all
-	for _, rr := range rrset.RRSIGs {
+	for _, rr := range sigs {
 		sig, ok := rr.(*dns.RRSIG)
 		if !ok {
 			if rrcache.Debug {
@@ -494,13 +512,13 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		}
 		valid, shouldReturnEarly, returnState, err := rrcache.validateRRsetWithRRSIG(ctx, rrset, sig, dkc, fetcher)
 		if err != nil {
-			return returnState, err
+			return returnState, nil, err
 		}
 		if shouldReturnEarly {
-			return returnState, nil
+			return returnState, nil, nil
 		}
 		if valid {
-			return ValidationStateSecure, nil
+			return ValidationStateSecure, sig, nil
 		}
 		switch returnState {
 		case ValidationStateBogus:
@@ -519,12 +537,12 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 	//   - neither (no sigs at all, or all returned an unexpected state):
 	//     default to Bogus, matching the prior conservative behaviour.
 	if sawSigFail {
-		return ValidationStateBogus, nil
+		return ValidationStateBogus, nil, nil
 	}
 	if sawChainGap {
-		return ValidationStateIndeterminate, nil
+		return ValidationStateIndeterminate, nil, nil
 	}
-	return ValidationStateBogus, nil
+	return ValidationStateBogus, nil, nil
 }
 
 // ValidateDNSKEYRRsetUsingDS validates a DNSKEY RRset using a DS record.
@@ -546,11 +564,15 @@ func ValidateDNSKEYRRsetUsingDS(rrset *core.RRset, ds *dns.DS, signerName string
 		if !ok {
 			continue
 		}
-		if dk.KeyTag() != keyid {
+		// RFC 4035 section 5.2: key tag and algorithm, then the digest. The
+		// digest covers the key's algorithm field but not the DS's, so a DS
+		// naming another algorithm would otherwise still match the key.
+		if dk.KeyTag() != keyid || dk.Algorithm != ds.Algorithm {
 			continue
 		}
-		// Require SEP (KSK) bit set for DS-backed keys
-		if dk.Flags&dnskeyFlagSEP == 0 {
+		// A DS refers to a zone key (RFC 4034 section 5.2): the Zone Key flag,
+		// 256. The SEP flag (1) is only a hint, and is not checked.
+		if dk.Flags&dns.ZONE == 0 {
 			continue
 		}
 		// Check that DS digest matches this DNSKEY
@@ -616,23 +638,23 @@ func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName st
 		return false, sigForKey
 	}
 
-	// Check time validity
-	if !WithinValidityPeriod(sigForKey.Inception, sigForKey.Expiration, time.Now().UTC()) {
+	// Check time validity, and cap the TTL below, from one reading of the
+	// clock.
+	now := Now()
+	if !WithinValidityPeriod(sigForKey.Inception, sigForKey.Expiration, now.UTC()) {
 		if verbose {
 			log.Printf("validateDNSKEYRRsetSignature: signature time INVALID for %s with keytag=%d (inc=%d exp=%d now=%d)",
-				name, keyid, sigForKey.Inception, sigForKey.Expiration, time.Now().UTC().Unix())
+				name, keyid, sigForKey.Inception, sigForKey.Expiration, now.UTC().Unix())
 		}
 		return false, sigForKey
 	}
 
 	// Cap TTL to signature expiration
 	minTTL := GetMinTTL(rrset.RRs)
-	expirationTime := time.Unix(int64(sigForKey.Expiration), 0)
-	remaining := time.Until(expirationTime)
-	expttl := time.Duration(remaining.Seconds()) * time.Second
+	expttl := signatureTTLCap(sigForKey.Expiration, now)
 	if expttl < minTTL {
 		if len(rrset.RRs) > 0 {
-			expttlSeconds := uint32(expttl.Seconds())
+			expttlSeconds := uint32(expttl / time.Second)
 			for _, krr := range rrset.RRs {
 				krr.Header().Ttl = expttlSeconds
 			}
@@ -691,11 +713,31 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		}
 	}
 
+	// A zone with a DNSKEY trust anchor is validated with the anchor's keys
+	// before any DS is looked up. The anchor vouches for the zone, and an
+	// island of security below the root usually has no DS at its parent. The
+	// DS used to be looked up first, and fetched when it was not cached: a
+	// question to the parent side that the anchor makes unnecessary, and one
+	// that took the resolver to the zone's own servers when the parent side
+	// answered it with a referral. An anchor that validates no key leaves the
+	// zone to the DS below, as before.
+	taKeys := rrcache.trustAnchorKeys(name)
+	if len(taKeys) > 0 && rrcache.validateWithTrustAnchorKeys(rrset, name, taKeys) {
+		return ValidationStateSecure, nil
+	}
+
 	// OPTIMIZATION: Check for cached DS first (common case)
 	// For root, there is no DS by definition, so skip this check
 	var dsRRs *CachedRRset
 	if name != "." {
-		dsRRs = rrcache.Get(name, dns.TypeDS)
+		// A zone with a DS trust anchor has the anchor's DS, whatever its
+		// parent says: an island of security usually has no DS there at all,
+		// and asking for one proved the anchor's zone an insecure delegation
+		// once the seeded copy had expired.
+		dsRRs = rrcache.trustAnchorDSRRset(name)
+		if dsRRs == nil {
+			dsRRs = rrcache.Get(name, dns.TypeDS)
+		}
 		if dsRRs == nil {
 			// Backfill: the DS for this zone is not cached, so the chain of
 			// trust cannot be anchored yet. Fetch and validate it on demand
@@ -710,14 +752,31 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		// A denial of the DS that proves an insecure delegation (RFC 4035
 		// section 5.2) makes the zone Insecure, and its data is answered without
 		// AD. This is decided before the denial's own state is given to the
-		// zone below: every NSEC3 denial validates Indeterminate, and a proof
-		// in it still counts once its records validate (denialEvidence).
-		if rrcache.dsCacheIsInsecureCut(ctx, name, dsRRs, fetcher) {
+		// zone below: a proof in a denial that validated Indeterminate or,
+		// through an NSEC3 Opt-Out span, Insecure, still counts once its
+		// records validate (denialEvidence).
+		switch rrcache.dsCacheEvidence(ctx, name, dsRRs, fetcher) {
+		case evidenceInsecureCut:
 			rrcache.markZoneInsecure(name)
 			if rrcache.Verbose {
 				log.Printf("ValidateDNSKEYs: the parent proves %q an insecure delegation; returning insecure", name)
 			}
 			return ValidationStateInsecure, nil
+		case evidenceUnjudged:
+			// A proof that cannot be judged -- NSEC3 over the iteration
+			// limit -- leaves the zone Indeterminate, as belowSecureZone and
+			// ReferralChildState have it. The denial itself validates Insecure
+			// (RFC 9276), which the zone must not take from it below.
+			zone, ok := rrcache.ZoneMap.Get(name)
+			if !ok {
+				zone = &Zone{ZoneName: name}
+			}
+			zone.SetState(ValidationStateIndeterminate)
+			rrcache.ZoneMap.Set(name, zone)
+			if rrcache.Verbose {
+				log.Printf("ValidateDNSKEYs: the parent's proof about %q cannot be judged; returning indeterminate", name)
+			}
+			return ValidationStateIndeterminate, nil
 		}
 		// If DS exists but is not secure, we cannot validate DNSKEYs
 		if dsRRs != nil && dsRRs.State != ValidationStateSecure {
@@ -753,7 +812,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 			}
 			// Add all DNSKEYs from the validated RRset to DnskeyCache
 			minTTL := GetMinTTL(rrset.RRs)
-			exp := time.Now().Add(minTTL)
+			exp := Now().Add(minTTL)
 			for _, krr := range rrset.RRs {
 				if dk, ok := krr.(*dns.DNSKEY); ok {
 					dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
@@ -788,58 +847,23 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	}
 
 	// No cached DS or DS not secure - check for TA initialization alternatives
-	// Check for trust anchor DNSKEYs and seeded DS records
-	var taKeys []*CachedDnskeyRRset
+	// Check for trust anchor DNSKEYs (taKeys, above) and seeded DS records
 	var seededDSs []*CachedRRset
 
-	// Check for trust anchor DNSKEYs
-	for item := range dkc.Map.IterBuffered() {
-		if core.EqualNames(item.Val.Name, name) && item.Val.TrustAnchor && item.Val.State == ValidationStateSecure {
-			taKeys = append(taKeys, &item.Val)
-		}
-	}
 	// Check for seeded DS RRset (indicates DS-based TA initialization).
 	// A Secure denial of DS is not a seeded DS; actualDSRecords keeps it out.
+	// The seeded copy expires and is flushed; the anchor itself is used then.
 	if dsRRs == nil || dsRRs.State != ValidationStateSecure {
 		if seededDS := rrcache.Get(name, dns.TypeDS); seededDS != nil && seededDS.State == ValidationStateSecure && len(actualDSRecords(seededDS)) > 0 {
 			seededDSs = append(seededDSs, seededDS)
+		} else if anchor := rrcache.trustAnchorDSRRset(name); anchor != nil {
+			seededDSs = append(seededDSs, anchor)
 		}
 	}
 
-	// If we have direct DNSKEY trust anchors, try those first
+	// A DNSKEY trust anchor was tried before the DS. The DS did not validate
+	// the keys either.
 	if len(taKeys) > 0 {
-		for _, taKey := range taKeys {
-			// Validate using direct DNSKEY trust anchor
-			valid, _ := ValidateDNSKEYRRsetSignature(rrset, taKey.Keyid, name, &taKey.Dnskey, rrcache.Verbose)
-			if !valid {
-				continue
-			}
-			// Add all DNSKEYs from the validated RRset to DnskeyCache
-			// Preserve TrustAnchor flag if DNSKEY was already in cache as trust anchor
-			minTTL := GetMinTTL(rrset.RRs)
-			exp := time.Now().Add(minTTL)
-			for _, krr := range rrset.RRs {
-				if dk, ok := krr.(*dns.DNSKEY); ok {
-					keyid := dk.KeyTag()
-					trustAnchor := false
-					if existing := dkc.Get(name, keyid); existing != nil {
-						trustAnchor = existing.TrustAnchor
-					}
-					dkc.Set(dns.Fqdn(dk.Hdr.Name), keyid, &CachedDnskeyRRset{
-						Name:        dns.Fqdn(dk.Hdr.Name),
-						Keyid:       keyid,
-						State:       ValidationStateSecure,
-						TrustAnchor: trustAnchor, // Preserve trust anchor flag
-						Dnskey:      *dk,
-						Expiration:  exp,
-					})
-				}
-			}
-			if rrcache.Verbose {
-				log.Printf("ValidateDNSKEYs: added %d DNSKEYs to DnskeyCache for %q", len(rrset.RRs), name)
-			}
-			return ValidationStateSecure, nil
-		}
 		// none of the TA keys validated, return bogus
 		// Store the DNSKEY RRset as bogus with EDE code 9 (DNSKEY Missing/No DNSKEY matches DS)
 		// This ensures that dependent RRsets can retrieve the EDE info via lookupDnskeyEDE
@@ -877,7 +901,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 				}
 				// Add all DNSKEYs from the validated RRset to DnskeyCache
 				minTTL := GetMinTTL(rrset.RRs)
-				exp := time.Now().Add(minTTL)
+				exp := Now().Add(minTTL)
 				for _, krr := range rrset.RRs {
 					if dk, ok := krr.(*dns.DNSKEY); ok {
 						dkc.Set(dns.Fqdn(dk.Hdr.Name), dk.KeyTag(), &CachedDnskeyRRset{
@@ -924,6 +948,57 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	return ValidationStateIndeterminate, nil
 }
 
+// trustAnchorKeys returns the DNSKEY trust anchors held for zone.
+func (rrcache *RRsetCacheT) trustAnchorKeys(zone string) []*CachedDnskeyRRset {
+	if rrcache.DnskeyCache == nil {
+		return nil
+	}
+	var keys []*CachedDnskeyRRset
+	for item := range rrcache.DnskeyCache.Map.IterBuffered() {
+		if core.EqualNames(item.Val.Name, zone) && item.Val.TrustAnchor && item.Val.State == ValidationStateSecure {
+			keys = append(keys, &item.Val)
+		}
+	}
+	return keys
+}
+
+// validateWithTrustAnchorKeys validates the DNSKEY RRset of zone with one of
+// its trust anchor keys, and on success adds every key in it to the
+// DnskeyCache as Secure, keeping the trust anchor flag of those that have it.
+func (rrcache *RRsetCacheT) validateWithTrustAnchorKeys(rrset *core.RRset, zone string, taKeys []*CachedDnskeyRRset) bool {
+	dkc := rrcache.DnskeyCache
+	for _, taKey := range taKeys {
+		if valid, _ := ValidateDNSKEYRRsetSignature(rrset, taKey.Keyid, zone, &taKey.Dnskey, rrcache.Verbose); !valid {
+			continue
+		}
+		exp := Now().Add(GetMinTTL(rrset.RRs))
+		for _, krr := range rrset.RRs {
+			dk, ok := krr.(*dns.DNSKEY)
+			if !ok {
+				continue
+			}
+			keyid := dk.KeyTag()
+			trustAnchor := false
+			if existing := dkc.Get(zone, keyid); existing != nil {
+				trustAnchor = existing.TrustAnchor
+			}
+			dkc.Set(dns.Fqdn(dk.Hdr.Name), keyid, &CachedDnskeyRRset{
+				Name:        dns.Fqdn(dk.Hdr.Name),
+				Keyid:       keyid,
+				State:       ValidationStateSecure,
+				TrustAnchor: trustAnchor,
+				Dnskey:      *dk,
+				Expiration:  exp,
+			})
+		}
+		if rrcache.Verbose {
+			log.Printf("ValidateDNSKEYs: added %d DNSKEYs to DnskeyCache for %q", len(rrset.RRs), zone)
+		}
+		return true
+	}
+	return false
+}
+
 // actualDSRecords returns the DS records in a cached DS entry. SOA/NSEC/NSEC3
 // that ride along on a denial must not be treated as a DS RRset.
 func actualDSRecords(crr *CachedRRset) []*dns.DS {
@@ -939,18 +1014,23 @@ func actualDSRecords(crr *CachedRRset) []*dns.DS {
 	return out
 }
 
-// dsCacheIsInsecureCut reports whether a cached DS entry is a denial of the DS
-// at name whose proof shows name to be a delegation with no DS (RFC 4035 section
-// 5.2). A denial is cached with its SOA as its RRset, and its proof beside it.
-func (rrcache *RRsetCacheT) dsCacheIsInsecureCut(ctx context.Context, name string, dsRRs *CachedRRset, fetcher RRsetFetcher) bool {
+// dsCacheEvidence is what a cached DS entry for name proves about a zone cut
+// there: for a denial of the DS, what its proof shows (denialEvidence); for a
+// DS RRset in which no DS is usable, an insecure cut, as a denial of the DS
+// would be (RFC 4035 section 5.2; ds_usable.go); otherwise nothing. A denial
+// is cached with its SOA as its RRset, and its proof beside it.
+func (rrcache *RRsetCacheT) dsCacheEvidence(ctx context.Context, name string, dsRRs *CachedRRset, fetcher RRsetFetcher) cutEvidence {
 	if dsRRs == nil {
-		return false
+		return evidenceNone
 	}
 	switch dsRRs.Context {
 	case ContextNoErrNoAns, ContextNXDOMAIN:
-		return rrcache.denialEvidence(ctx, name, dsRRs, fetcher) == evidenceInsecureCut
+		return rrcache.denialEvidence(ctx, name, dsRRs, fetcher)
 	}
-	return false
+	if parentDSWithNoUsableDS(dsRRs) {
+		return evidenceInsecureCut
+	}
+	return evidenceNone
 }
 
 // parentOf returns the parent zone name of a domain name. The root is its own
@@ -973,7 +1053,7 @@ func parentOf(name string) string {
 // When there is no DS, the fetch caches the parent's denial of it, validated,
 // with its proof (handleNegative), and returns no RRset. backfillDS then
 // returns that cached denial, so ValidateDNSKEYs can read an insecure
-// delegation from it on the same pass (dsCacheIsInsecureCut). It used to
+// delegation from it on the same pass (dsCacheEvidence). It used to
 // return nil, and the zone was Indeterminate until something validated its
 // DNSKEYs a second time. It returns nil (leaving the caller to report
 // Indeterminate) when neither a DS nor a denial can be obtained.
@@ -1026,7 +1106,7 @@ func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher
 		RRset:      fetched,
 		Context:    ContextAnswer,
 		State:      vstate,
-		Expiration: time.Now().Add(GetMinTTL(fetched.RRs)),
+		Expiration: Now().Add(GetMinTTL(fetched.RRs)),
 	}
 	rrcache.Set(name, dns.TypeDS, entry)
 	if rrcache.Verbose {
@@ -1035,10 +1115,37 @@ func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher
 	return entry
 }
 
+// DenialVerdict is what ValidateDenial makes of a negative answer: its
+// validation state, the rcode it proves, and an EDE to serve beside it.
+type DenialVerdict struct {
+	State   ValidationState
+	Rcode   uint8
+	EDECode uint16 // 27 when an NSEC3 proof needs records over the iteration limit
+	EDEText string
+}
+
+// ValidateNegativeResponse is ValidateDenial without the EDE.
 func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname string, qtype uint16, rcode uint8,
 	negAuthority []*core.RRset, fetcher RRsetFetcher) (ValidationState, uint8, error) {
+	v, err := rrcache.ValidateDenial(ctx, qname, qtype, rcode, negAuthority, fetcher)
+	return v.State, v.Rcode, err
+}
+
+// ValidateDenial validates a negative answer for qname and qtype with rcode,
+// from its authority section grouped into RRsets.
+//
+// The SOA names the zone that denies. Every signed RRset must validate, and
+// only that zone's own records that validate Secure, with its signatures,
+// prove anything: an NSEC proof (RFC 4035 section 5.4, RFC 9824), or an NSEC3
+// proof (RFC 5155 section 8; nsec3.go). A signed denial with none is Bogus.
+// An NSEC3 proof through an Opt-Out span is Insecure (section 9.2), and so is
+// one that needs records over the iteration limit, with EDE 27 (RFC 9276). A
+// denial with no signatures, or with records from a zone held Insecure, is
+// judged by what the resolver knows of its zone (unsignedDenialState).
+func (rrcache *RRsetCacheT) ValidateDenial(ctx context.Context, qname string, qtype uint16, rcode uint8,
+	negAuthority []*core.RRset, fetcher RRsetFetcher) (DenialVerdict, error) {
 	if len(negAuthority) == 0 {
-		return ValidationStateNone, rcode, fmt.Errorf("no negative authority RRsets to validate")
+		return DenialVerdict{State: ValidationStateNone, Rcode: rcode}, fmt.Errorf("no negative authority RRsets to validate")
 	}
 
 	if qtype == dns.TypeDNSKEY {
@@ -1046,7 +1153,7 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		if rrcache.Debug {
 			log.Printf("ValidateNegativeResponse: skipping validation for DNSKEY negative response at %q", qname)
 		}
-		return ValidationStateBogus, rcode, nil // XXX: Cannot validate negative DNSKEY responses without the zone's DNSKEYs
+		return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}, nil // XXX: Cannot validate negative DNSKEY responses without the zone's DNSKEYs
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -1080,21 +1187,21 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		}
 	}
 	if soarrset == nil || len(soarrset.RRs) == 0 { // XXX: Here we need to know if the zone is insecure or not
-		return ValidationStateIndeterminate, rcode, fmt.Errorf("no SOA found in negative authority for %s", qname)
+		return DenialVerdict{State: ValidationStateIndeterminate, Rcode: rcode}, fmt.Errorf("no SOA found in negative authority for %s", qname)
 	}
 	zoneName := dns.CanonicalName(soarrset.Name)
 	// The SOA in a negative answer only authorises a denial for names inside
 	// its own zone. A byte suffix would accept an SOA for "ample." as covering
 	// "example." -- a forged denial one label away from the real zone.
 	if !dns.IsSubDomain(zoneName, qnameCanon) {
-		return ValidationStateBogus, rcode, nil // XXX: The zone name does not match the qname
+		return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}, nil // XXX: The zone name does not match the qname
 	}
 	// What the resolver already knows decides what a missing signature means. A
 	// denial with no signatures at all, from a zone known to be signed or from a
 	// zone below one that nothing proves insecure, is not an insecure answer, it
 	// is a stripped one (unsignedDenialState).
 	if !hasSignatures {
-		return rrcache.unsignedDenialState(ctx, zoneName, qnameCanon, qtype, fetcher), rcode, nil
+		return DenialVerdict{State: rrcache.unsignedDenialState(ctx, zoneName, qnameCanon, qtype, fetcher), Rcode: rcode}, nil
 	}
 
 	// Only records that validated can prove anything. The NSEC and NSEC3 records
@@ -1107,7 +1214,19 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 	// insecure -- is served, but proves nothing: it used to fall through to the
 	// coverage checks, which then returned Secure, and the answer went out with
 	// AD from a zone that has no chain of trust.
+	//
+	//
+	// A denial is read from records of the zone that denies, the one the SOA
+	// names. NSEC3 records count only when they are owned directly below that
+	// zone, NSEC records only when they are owned at or below it, and either
+	// only when a signature by that zone validates them, as nsec3CutProof and
+	// WildcardAnswerProof have it. Those are validated with that zone's
+	// signatures alone. Other NSEC and NSEC3 records are validated as any
+	// other RRset, and never count: another zone's NSEC chain says nothing
+	// about the names of this one, and its last NSEC, or the NSEC of a zone of
+	// one name, covers names far outside it in canonical order.
 	var provenNsecs []*dns.NSEC
+	var provenNsec3s []*dns.NSEC3
 	provenNsec3 := false
 	sawInsecure := false
 	for _, set := range negAuthority {
@@ -1117,14 +1236,22 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		if len(set.RRSIGs) == 0 {
 			continue
 		}
+		nsecCounts, nsec3Counts := false, false
+		if (set.RRtype == dns.TypeNSEC || set.RRtype == dns.TypeNSEC3) && proofOwnedIn(set, zoneName) {
+			if zs := signedBy(set, zoneName); zs != nil {
+				set = zs
+				nsecCounts = set.RRtype == dns.TypeNSEC
+				nsec3Counts = set.RRtype == dns.TypeNSEC3
+			}
+		}
 		vstate, err := rrcache.ValidateRRset(ctx, set, fetcher)
 		if err != nil {
-			return vstate, rcode, err
+			return DenialVerdict{State: vstate, Rcode: rcode}, err
 		}
 		// The Auth section has a set of RRsets that prove non-existence. Each RRset must validate for the proof to be valid
 		switch vstate {
 		case ValidationStateBogus, ValidationStateIndeterminate:
-			return vstate, rcode, fmt.Errorf("negative authority RRset for %s is bogus or indeterminate", qname)
+			return DenialVerdict{State: vstate, Rcode: rcode}, fmt.Errorf("negative authority RRset for %s is bogus or indeterminate", qname)
 		case ValidationStateSecure:
 		default:
 			sawInsecure = true
@@ -1132,57 +1259,154 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		}
 		switch set.RRtype {
 		case dns.TypeNSEC:
+			if !nsecCounts {
+				continue
+			}
 			for _, rr := range set.RRs {
 				if nsec, ok := rr.(*dns.NSEC); ok {
 					provenNsecs = append(provenNsecs, nsec)
 				}
 			}
 		case dns.TypeNSEC3:
+			if !nsec3Counts {
+				continue
+			}
 			provenNsec3 = true
+			for _, rr := range set.RRs {
+				if n, ok := rr.(*dns.NSEC3); ok {
+					provenNsec3s = append(provenNsec3s, n)
+				}
+			}
 		}
 	}
 	if sawInsecure {
-		return rrcache.unsignedDenialState(ctx, zoneName, qnameCanon, qtype, fetcher), rcode, nil
+		return DenialVerdict{State: rrcache.unsignedDenialState(ctx, zoneName, qnameCanon, qtype, fetcher), Rcode: rcode}, nil
 	}
 	nsecs, nsec3Present = provenNsecs, provenNsec3
 
-	// NSEC case: Check for traditional denial (NXDOMAIN) or compact denial (RFC 9824)
+	// The reading of the records that validated Secure (ProveDenial). Its
+	// debug lines are this cache's, as they always were.
+	if len(nsecs) > 0 || nsec3Present {
+		var logf func(format string, args ...any)
+		if rrcache.Debug {
+			logf = log.Printf
+		}
+		return proveDenial(qname, qtype, rcode, zoneName, nsecs, provenNsec3s, logf), nil
+	}
+
+	// Every signed RRset validated Secure, and none of them is an NSEC or NSEC3
+	// record of the zone that denies: a signed denial without its proof. The
+	// error keeps handleNegative from caching it, so the next server is asked.
+	return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}, fmt.Errorf("no NSEC or NSEC3 record of %s proves the denial for %s", zoneName, qname)
+}
+
+// ProveDenial reads what nsecs and nsec3s, records of zone whose signatures by
+// zone the caller has verified, prove about a negative answer for qname and
+// qtype with rcode. It is the reading ValidateDenial makes of the records that
+// validate Secure, for a caller that checks signatures with keys of its own,
+// not the cache's: the chain walk of dog +sigchase. It looks at no
+// signatures, cache or network.
+//
+// With NSEC records: an RFC 9824 compact denial, an NSEC at qname without
+// qtype, the no data proofs of nsecNoData, or a name error proof (RFC 4035
+// section 5.4). Otherwise the NSEC3 proofs of RFC 5155 section 8, through an
+// Opt-Out span Insecure, over the iteration limit Insecure with EDE 27 (RFC
+// 9276). With neither, nothing is proven: Bogus.
+//
+// An NSEC at a zone cut or a DNAME proves nothing about the names below it,
+// nor one at a cut anything at the cut but the DS (RFC 6840 section 4.1):
+// Insecure below a cut without DS, Bogus otherwise (cutDenial). The DS at a
+// zone's apex is denied by the zone above, never by the zone itself.
+func ProveDenial(qname string, qtype uint16, rcode uint8, zone string, nsecs []*dns.NSEC, nsec3s []*dns.NSEC3) DenialVerdict {
+	return proveDenial(qname, qtype, rcode, dns.CanonicalName(zone), nsecs, nsec3s, nil)
+}
+
+// proveDenial is ProveDenial, logging with logf when it is set. zoneName is
+// in canonical form. An NSEC proof is read when there are NSEC records, an
+// NSEC3 proof otherwise.
+func proveDenial(qname string, qtype uint16, rcode uint8, zoneName string, nsecs []*dns.NSEC, nsec3s []*dns.NSEC3,
+	logf func(format string, args ...any)) DenialVerdict {
+	if logf == nil {
+		logf = func(string, ...any) {}
+	}
+	qnameCanon := dns.CanonicalName(qname)
+
+	// A DS is the zone above's data (RFC 4035 section 5.2): a zone's own
+	// denial of the DS at its apex, its apex NSEC or NSEC3 without DS, is the
+	// child side answering, and proves nothing about the delegation.
+	if qtype == dns.TypeDS && qnameCanon == zoneName && zoneName != "." {
+		logf("ValidateDenial: a denial of the DS at %s from %s itself, not the zone above", qname, zoneName)
+		return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}
+	}
+
+	// NSEC case (RFC 4035 section 5.4, RFC 9824). The proof must match the
+	// rcode: a name error needs a proof that qname does not exist, and an
+	// answer of no data a proof that it exists without qtype.
 	if len(nsecs) > 0 {
-		// First, check for compact denial of existence (RFC 9824)
+		// An NSEC owned by qname. Its bitmap says what qname holds.
 		for _, nsec := range nsecs {
-			nsecOwner := dns.CanonicalName(nsec.Hdr.Name)
-			// Check if this is a compact denial NSEC: owner == qname
-			if nsecOwner == qnameCanon {
-				// Compact denial has two cases:
-				// 1. NXDOMAIN: bitmap contains exactly RRSIG, NSEC, and NXNAME
-				//    This proves the name does not exist
-				// 2. NODATA: bitmap doesn't include qtype (but may include other types)
-				//    This proves the name exists but has no data for the queried type
-
-				// Check for compact denial NXDOMAIN: bitmap contains exactly RRSIG, NSEC, and NXNAME
-				if isCompactDenialNXDOMAIN(nsec.TypeBitMap) {
-					if rrcache.Debug {
-						log.Printf("ValidateNegativeResponse: compact denial NXDOMAIN (RFC 9824) validated for %s: name does not exist", qname)
-					}
-					// Note: The Rcode should be NXDOMAIN, but this function only validates
-					// the negative authority section. The caller should set Rcode appropriately.
-					return ValidationStateSecure, dns.RcodeNameError, nil
-				}
-
-				// Check for compact denial NODATA: qtype is NOT in the type bitmap
-				if !typeInBitmap(qtype, nsec.TypeBitMap) {
-					if rrcache.Debug {
-						log.Printf("ValidateNegativeResponse: compact denial NODATA (RFC 9824) validated for %s %s: name exists but no data for type", qname, dns.TypeToString[qtype])
-					}
-					return ValidationStateSecure, rcode, nil
-				}
-
-				// If owner == qname but qtype IS in bitmap, this is not a negative response
-				// (should not happen in negative authority section, but handle gracefully)
-				if rrcache.Debug {
-					log.Printf("ValidateNegativeResponse: NSEC owner matches qname but qtype %s is in bitmap - not a compact denial", dns.TypeToString[qtype])
-				}
+			if dns.CanonicalName(nsec.Hdr.Name) != qnameCanon {
+				continue
 			}
+			bm := nsec.TypeBitMap
+			// An RFC 9824 compact denial: the bitmap is RRSIG, NSEC and NXNAME
+			// alone, and qname does not exist, whatever rcode the server put
+			// on it (NOERROR, unless the query set CO).
+			if isCompactDenialNXDOMAIN(bm) {
+				logf("ValidateDenial: compact denial (RFC 9824) for %s: the name does not exist", qname)
+				return DenialVerdict{State: ValidationStateSecure, Rcode: dns.RcodeNameError}
+			}
+
+			// At a zone cut the zone above holds the delegation and its DS,
+			// nothing else: any other type at the name is the child's
+			// (RFC 6840 section 4.1). Without DS the child is proven
+			// unsigned, and nothing about it can be Secure.
+			if qtype != dns.TypeDS && delegationBitmap(bm) {
+				logf("ValidateDenial: the NSEC at %s is the zone cut seen from %s: no proof about %s", qname, zoneName, dns.TypeToString[qtype])
+				return DenialVerdict{State: cutDenial(nsec), Rcode: rcode}
+			}
+
+			// Any other NSEC at qname shows that qname exists. It proves no
+			// data of qtype, and so an answer of NOERROR, when neither qtype
+			// nor CNAME is in its bitmap: a CNAME at qname answers every type
+			// (RFC 6840 section 4.3). It is no proof of a name error.
+			switch {
+			case rcode != dns.RcodeSuccess:
+				logf("ValidateDenial: the NSEC at %s shows that it exists, and the rcode is %s", qname, dns.RcodeToString[int(rcode)])
+				return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}
+			case typeInList(qtype, bm):
+				logf("ValidateDenial: the NSEC at %s lists %s", qname, dns.TypeToString[qtype])
+				return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}
+			case typeInList(dns.TypeCNAME, bm):
+				logf("ValidateDenial: the NSEC at %s lists a CNAME, which answers %s", qname, dns.TypeToString[qtype])
+				return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}
+			}
+			logf("ValidateDenial: the NSEC at %s proves no %s there", qname, dns.TypeToString[qtype])
+			return DenialVerdict{State: ValidationStateSecure, Rcode: rcode}
+		}
+
+		// Below a zone cut or a DNAME the zone holds no names. Its NSEC there
+		// covers every name below in canonical order, and proves nothing about
+		// them (nsecAboveCut, cutDenial).
+		for _, nsec := range nsecs {
+			if nsecAboveCut(qnameCanon, nsec) && nsecCoversName(qnameCanon, nsec) {
+				logf("ValidateDenial: %s lies below %s, a zone cut or DNAME in %s: the NSEC there is no proof about it", qname, nsec.Hdr.Name, zoneName)
+				return DenialVerdict{State: cutDenial(nsec), Rcode: rcode}
+			}
+		}
+
+		// No data at a name that owns no NSEC here: an empty non-terminal, or a
+		// wildcard without qtype (nsecNoData). For NOERROR only: neither proof
+		// is a name error.
+		if rcode == dns.RcodeSuccess && nsecNoData(qnameCanon, qtype, zoneName, nsecs) {
+			return DenialVerdict{State: ValidationStateSecure, Rcode: rcode}
+		}
+
+		// What is left is a name error proof, which an answer of NOERROR
+		// contradicts: there qname exists.
+		if rcode != dns.RcodeNameError {
+			logf("ValidateDenial: no proof that %s exists without %s, and the rcode is %s", qname, dns.TypeToString[qtype], dns.RcodeToString[int(rcode)])
+			return DenialVerdict{State: ValidationStateBogus, Rcode: rcode}
 		}
 
 		// Traditional denial (NXDOMAIN), RFC 4035 §5.4: an NSEC covering qname,
@@ -1191,38 +1415,72 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 		// right name only when the closest encloser IS the apex: a denial below
 		// an existing name was declared bogus for lacking a record it does not
 		// need.
+		//
+		// A cover whose next name lies below qname shows that qname has a
+		// descendant (nsecNextBelow): qname is an empty non-terminal and exists,
+		// and that cover is no part of a name error proof.
 		var qnameCover *dns.NSEC
 		for _, nsec := range nsecs {
-			if nsecCoversName(qnameCanon, nsec) {
+			if nsecCoversName(qnameCanon, nsec) && !nsecNextBelow(qnameCanon, nsec) {
 				qnameCover = nsec
 				break
 			}
 		}
 		if qnameCover == nil {
-			return ValidationStateBogus, rcode, nil // no NSEC covers the qname
+			return DenialVerdict{State: ValidationStateBogus, Rcode: rcode} // no NSEC covers the qname
 		}
 		wildcard := wildcardAt(closestEncloser(qnameCanon, qnameCover, zoneName))
 		for _, nsec := range nsecs {
-			if nsecCoversName(wildcard, nsec) {
+			if nsecCoversName(wildcard, nsec) && !nsecAboveCut(wildcard, nsec) {
 				// Every record used here validated Secure above.
-				return ValidationStateSecure, rcode, nil
+				return DenialVerdict{State: ValidationStateSecure, Rcode: rcode}
 			}
 		}
-		return ValidationStateBogus, rcode, nil // no NSEC covers the wildcard at the closest encloser
+		return DenialVerdict{State: ValidationStateBogus, Rcode: rcode} // no NSEC covers the wildcard at the closest encloser
 	}
 
-	// NSEC3 case: Check for traditional denial (NXDOMAIN) or compact denial (RFC 9824 NODATA)
-	if nsec3Present {
-		// TODO: Implement NSEC3 compact denial validation (RFC 9824)
-		// For NSEC3 compact denial:
-		// - NSEC3 owner (hashed) matches hashed qname
-		// - Type bitmap does NOT include qtype
-		// For now, we accept NSEC3 presence as secure (traditional denial)
-		return ValidationStateIndeterminate, rcode, nil // NSEC3 present, we do not yet verify them, but we assume they are secure
+	// NSEC3 case (RFC 5155 section 8): a name error proof for NXDOMAIN, a no
+	// data proof for anything else. An RFC 9824 compact denial with NSEC3 (a
+	// match whose bitmap is NXNAME) reads as the no data the rcode says.
+	proof := newNSEC3Proof(zoneName, nsec3s, NSEC3MaxIterations())
+	var v nsec3Verdict
+	if rcode == dns.RcodeNameError {
+		v = proof.nameError(qnameCanon)
+	} else {
+		v = proof.noData(qnameCanon, qtype)
 	}
+	logf("ValidateDenial: NSEC3 proof for %s %s (rcode %s) in %s: %s, %d hashes",
+		qname, dns.TypeToString[qtype], dns.RcodeToString[int(rcode)], zoneName, nsec3VerdictToString[v], proof.hashes)
+	verdict := DenialVerdict{State: v.state(), Rcode: rcode}
+	if v == nsec3OverLimit {
+		verdict.EDECode = edeUnsupportedNSEC3Iterations
+		verdict.EDEText = fmt.Sprintf("NSEC3 iterations above the limit of %d", NSEC3MaxIterations())
+	}
+	return verdict
+}
 
-	// No NSEC, no NSEC3, must know if zone is secure or insecure
-	return ValidationStateInsecure, rcode, fmt.Errorf("no NSECs or NSEC3, so we are insecure") // XXX: Need to know if zone is secure, but for now: No NSECs or NSEC3, so we are insecure
+// NSEC3WildcardProof reports what the NSEC3 RRsets in authority prove about an
+// answer for qname that zone synthesised from a wildcard (RFC 5155 section
+// 8.8). labels is the Labels field of the answer's RRSIG: the wildcard's
+// closest encloser is qname's last labels labels, and an NSEC3 must cover the
+// next closer name, one label longer.
+//
+// Only NSEC3 RRsets owned directly below zone count, validated with zone's
+// signatures alone; one that does not validate Secure decides the verdict. A
+// cover through an Opt-Out span is Insecure (section 9.2), and so is a proof
+// that needs records over the iteration limit, with EDE 27 (RFC 9276). No
+// cover is Bogus. The EDE code is 0 otherwise.
+//
+// It is WildcardAnswerProof over the NSEC3 RRsets alone.
+func (rrcache *RRsetCacheT) NSEC3WildcardProof(ctx context.Context, zone, qname string, labels uint8,
+	authority []*core.RRset, fetcher RRsetFetcher) (ValidationState, uint16) {
+	var nsec3 []*core.RRset
+	for _, set := range authority {
+		if set != nil && set.RRtype == dns.TypeNSEC3 {
+			nsec3 = append(nsec3, set)
+		}
+	}
+	return rrcache.WildcardAnswerProof(ctx, zone, qname, labels, nsec3, fetcher)
 }
 
 // From Mieks DNS lib:
@@ -1235,10 +1493,24 @@ func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname 
 
 const year68 = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits
 
+// signatureTTLCap is how long an RRset validated with a signature that expires
+// at expiration may be cached, at now: the signature's remaining lifetime in
+// whole seconds, never below zero. The caller passes the reading of the clock
+// it checked the signature's validity window with. A second reading could come
+// after the expiry, if the clock moved in between, and a negative lifetime
+// converted to a uint32 TTL is a very long one.
+func signatureTTLCap(expiration uint32, now time.Time) time.Duration {
+	remaining := time.Unix(int64(expiration), 0).Sub(now)
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining.Truncate(time.Second)
+}
+
 func WithinValidityPeriod(inc, exp uint32, t time.Time) bool {
 	var utc int64
 	if t.IsZero() {
-		utc = time.Now().UTC().Unix()
+		utc = Now().UTC().Unix()
 	} else {
 		utc = t.UTC().Unix()
 	}
@@ -1271,21 +1543,6 @@ func nsecCoversName(name string, nsec *dns.NSEC) bool {
 	default:
 		return afterOwner || beforeNext
 	}
-}
-
-// typeInBitmap checks if a given record type is present in an NSEC type bitmap.
-// The type bitmap is a sorted slice of uint16 values representing record types.
-func typeInBitmap(qtype uint16, bitmap []uint16) bool {
-	for _, t := range bitmap {
-		if t == qtype {
-			return true
-		}
-		// Bitmap is sorted, so if we've passed qtype, it's not present
-		if t > qtype {
-			return false
-		}
-	}
-	return false
 }
 
 // isCompactDenialNXDOMAIN checks if the type bitmap indicates compact denial NXDOMAIN.
@@ -1326,17 +1583,18 @@ func isCompactDenialNXDOMAIN(bitmap []uint16) bool {
 // NSEC only. RFC 9824 section 4 defines the NSEC3 form too -- NXNAME as the
 // sole entry in the bitmap, under a hashed owner -- and recognising that needs
 // the qname hashed under the NSEC3 parameters before the owner can be
-// compared. tdns has no NSEC3 denial validation yet (ValidateNegativeResponse
-// only notes nsec3Present), so an NSEC3 compact denial is still cached and
-// served as the NODATA the upstream rcode says it is.
+// compared. That is not done here: an NSEC3 compact denial validates as the
+// no data proof it also is (RFC 5155 section 8.5; ValidateDenial), and is
+// cached and served as the NODATA the upstream rcode says it is.
 //
 // This is a question about the SHAPE of the proof, not its validity, and the
 // resolver asks it before validation runs. The rcode an authoritative server
 // puts on such a response (NOERROR, unless the query set CO) describes how the
 // NSEC reads to a validator without NXNAME support, not what it proves; and
 // which name a denial is for has to be known whether or not the proof can be
-// validated. ValidateNegativeResponse makes the same check on the way to the
-// AD bit; this one decides what gets cached.
+// validated. ValidateDenial reads the same form from the records that count,
+// and when its verdict is Secure, handleNegative caches only the rcode that
+// verdict supports; this reading decides what gets cached otherwise.
 func CompactDenialNXDOMAIN(qname string, negAuthority []*core.RRset) bool {
 	// core.CanonicalizeName, not dns.CanonicalName: the latter rewrites every
 	// octet that is not valid UTF-8 into U+FFFD, so two distinct binary labels

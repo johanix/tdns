@@ -40,6 +40,10 @@ type ImrStatus struct {
 	// this daemon", not "when did routing last change"; the diff in the
 	// reload reply answers the latter.
 	ZonesLoadedAt time.Time `json:"zones_loaded_at,omitzero"`
+
+	// DataClock names the test clock data time is read from
+	// (imrengine.testing.faketime), and its time. Empty on real time.
+	DataClock string `json:"data_clock,omitempty"`
 }
 
 type ImrForwardZoneStatus struct {
@@ -84,6 +88,7 @@ func (imr *Imr) StatusReport() *ImrStatus {
 		RootForwarded: imr.forwardZoneFor(".") != nil,
 		StubZones:     append([]string(nil), table.stubs...),
 		ZonesLoadedAt: table.loadedAt,
+		DataClock:     dataClockStatus(),
 	}
 	if imr.Cache != nil {
 		st.Primed = imr.Cache.IsPrimed()

@@ -413,3 +413,14 @@ implementation's choices.
 The tests are in `v2/journal_overlay_test.go`: T1–T13, a CSYNC through the
 same path as the CDS, an unreadable row, `zone journal status` and purge, and
 `zone write`. #748's are in `v2/staged_replacement_test.go`.
+
+## 12. Amendment, 2026-10-01: no replacement is staged under a hold
+
+Step 3 of the publish gate (`2026-09-17-publish-gate-and-transactions.md`,
+Amendment 3; tdns #884) refuses a transfer or reload that meets an open
+transaction, with `ErrRefreshHeld`, and retries it after the hold. The words
+"including while a transaction holds the zone" in §11's bullet "A replacement
+is never journalled as a local change (#748)" no longer arise: under a hold
+there is no staged replacement for an update to be refused on. What the
+transaction staged is kept and journalled, the transfer is not (#749). The
+rest of §11 stands.

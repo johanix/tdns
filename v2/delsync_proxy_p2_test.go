@@ -165,3 +165,47 @@ func TestProxyPostRefreshEnqueue(t *testing.T) {
 	default:
 	}
 }
+
+// #790: the apex KEY is the input to the UPDATE gate. A transfer that changes
+// only the KEY queues a re-run of the gate and nothing else. One that also
+// changes the delegation queues PROXY-SYNC alone: its plan runs the same gate.
+func TestProxyKeyChangeQueuesTheUpdateGate(t *testing.T) {
+	key := "child.example.\t3600 IN KEY 256 3 15 kRLXTKfLdCVhJUvGCwOZGNhCLBhBBqBBhBBhBBhBBhA=\n"
+	a := proxyAnalysisFor(t, proxyBaseZone, proxyBaseZone+key)
+	if !a.KeyChanged {
+		t.Fatal("a KEY published at the apex was not detected")
+	}
+	if a.anyChange() {
+		t.Fatalf("a KEY change was taken for a delegation change: %+v", a)
+	}
+
+	drain := func(q chan DelegationSyncRequest) []string {
+		var got []string
+		for {
+			select {
+			case req := <-q:
+				got = append(got, req.Command)
+			default:
+				return got
+			}
+		}
+	}
+	zd := testZone(t, "child.example.", proxyBaseZone)
+	q := make(chan DelegationSyncRequest, 2)
+
+	zd.ProxyRefreshAnalysis = a
+	zd.ProxyDelegationPostRefresh(q)
+	if got := drain(q); len(got) != 1 || got[0] != "PROXY-UPDATE-GATE" {
+		t.Errorf("KEY only: queued %v, want [PROXY-UPDATE-GATE]", got)
+	}
+
+	zd.ProxyRefreshAnalysis = &ProxyDelegationAnalysis{KeyChanged: true, NsOrGlueChanged: true}
+	zd.ProxyDelegationPostRefresh(q)
+	if got := drain(q); len(got) != 1 || got[0] != "PROXY-SYNC" {
+		t.Errorf("KEY and NS: queued %v, want [PROXY-SYNC]", got)
+	}
+
+	if b := proxyAnalysisFor(t, proxyBaseZone, proxyBaseZone); b.KeyChanged {
+		t.Error("identical zones reported a KEY change")
+	}
+}

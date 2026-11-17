@@ -7,6 +7,7 @@ import (
 	"context"
 	"log"
 	"slices"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -71,6 +72,14 @@ func (rrcache *RRsetCacheT) unsignedRRsetState(ctx context.Context, rrset *core.
 // data, and is judged from the zone above, as an unsigned DS is. That also keeps
 // the DS questions asked for a DS denial strictly above the name denied, so the
 // denials those questions draw cannot lead back to it.
+// UnsignedDenialState is unsignedDenialState for the resolver: the verdict for a
+// denial from zone that carries nothing to validate. The resolver uses it for a
+// negative answer without an SOA, whose zone is known only from the servers
+// that sent it.
+func (rrcache *RRsetCacheT) UnsignedDenialState(ctx context.Context, zone, qname string, qtype uint16, fetcher RRsetFetcher) ValidationState {
+	return rrcache.unsignedDenialState(ctx, zone, dns.CanonicalName(qname), qtype, fetcher)
+}
+
 func (rrcache *RRsetCacheT) unsignedDenialState(ctx context.Context, zone, qname string, qtype uint16, fetcher RRsetFetcher) ValidationState {
 	name := dns.Fqdn(zone)
 	if qtype == dns.TypeDS && core.EqualNames(name, qname) {
@@ -124,15 +133,19 @@ func (rrcache *RRsetCacheT) belowSecureZone(ctx context.Context, zoneName, name,
 }
 
 // closestKnownZone is the ZoneMap entry at name or nearest above it that decides
-// for the names below it (judgedZone). The root is not looked up, as it was not
-// before: unsigned data that no zone below the root claims stays Indeterminate.
+// for the names below it (judgedZone), the root included. The root used to be
+// passed over, and unsigned data that no zone below it claimed -- the root's
+// own, or a name under a TLD not met yet -- was Indeterminate and served, even
+// with the root held Secure under its trust anchor.
 func (rrcache *RRsetCacheT) closestKnownZone(name string) (string, *Zone) {
-	for n := dns.Fqdn(name); n != "."; n = parentOf(n) {
+	for n := dns.Fqdn(name); ; n = parentOf(n) {
 		if zone, ok := rrcache.ZoneMap.Get(n); ok && rrcache.judgedZone(n, zone) {
 			return n, zone
 		}
+		if n == "." {
+			return "", nil
+		}
 	}
-	return "", nil
 }
 
 // proofNames lists, top down, the names whose DS decides whether unsigned data
@@ -152,8 +165,62 @@ func (rrcache *RRsetCacheT) proofNames(zoneName, name string) []string {
 	return names
 }
 
-// hasTrustAnchor reports whether a configured trust anchor vouches for zone.
+// AddTrustAnchorZone records that a configured trust anchor, DNSKEY or DS,
+// vouches for zone.
+func (rrcache *RRsetCacheT) AddTrustAnchorZone(zone string) {
+	if rrcache.anchorZones != nil {
+		rrcache.anchorZones.Set(zone, struct{}{})
+	}
+}
+
+// AddTrustAnchorDS records the DS records of a DS trust anchor for zone,
+// replacing any recorded before.
+func (rrcache *RRsetCacheT) AddTrustAnchorDS(zone string, ds []*dns.DS) {
+	if rrcache.anchorDS != nil && len(ds) > 0 {
+		rrcache.anchorDS.Set(zone, slices.Clone(ds))
+	}
+}
+
+// trustAnchorDSRRset is the DS RRset of the DS trust anchor for zone, Secure,
+// or nil when zone has none. The copy seeded in the cache expires and is
+// flushed like any other RRset; the anchor is configuration and does neither.
+// Without it, a zone whose keys had not been matched yet, or had expired from
+// the DnskeyCache, could not be validated again, and a zone below the root
+// asked its parent for a DS the anchor is there to stand in for.
+func (rrcache *RRsetCacheT) trustAnchorDSRRset(zone string) *CachedRRset {
+	if rrcache.anchorDS == nil {
+		return nil
+	}
+	list, ok := rrcache.anchorDS.Get(zone)
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	rrs := make([]dns.RR, 0, len(list))
+	for _, ds := range list {
+		rrs = append(rrs, ds)
+	}
+	return &CachedRRset{
+		Name:       dns.Fqdn(zone),
+		RRtype:     dns.TypeDS,
+		RRset:      &core.RRset{Name: dns.Fqdn(zone), Class: dns.ClassINET, RRtype: dns.TypeDS, RRs: rrs},
+		Context:    ContextPriming,
+		State:      ValidationStateSecure,
+		Expiration: Now().Add(time.Hour),
+	}
+}
+
+// HasTrustAnchors reports whether a configured trust anchor has been loaded
+// (AddTrustAnchorZone).
+func (rrcache *RRsetCacheT) HasTrustAnchors() bool {
+	return rrcache.anchorZones != nil && !rrcache.anchorZones.IsEmpty()
+}
+
+// hasTrustAnchor reports whether a configured trust anchor vouches for zone:
+// one recorded by AddTrustAnchorZone, or a trust anchor key in the DnskeyCache.
 func (rrcache *RRsetCacheT) hasTrustAnchor(zone string) bool {
+	if rrcache.anchorZones != nil && rrcache.anchorZones.Has(zone) {
+		return true
+	}
 	if rrcache.DnskeyCache == nil {
 		return false
 	}
@@ -163,6 +230,20 @@ func (rrcache *RRsetCacheT) hasTrustAnchor(zone string) bool {
 		}
 	}
 	return false
+}
+
+// UnderTrustAnchor reports whether a configured trust anchor vouches for zone
+// or for a zone above it: whether the chain of trust for data signed in zone
+// has an anchor to lead to at all.
+func (rrcache *RRsetCacheT) UnderTrustAnchor(zone string) bool {
+	for n := dns.Fqdn(zone); ; n = parentOf(n) {
+		if rrcache.hasTrustAnchor(n) {
+			return true
+		}
+		if n == "." {
+			return false
+		}
+	}
 }
 
 func (rrcache *RRsetCacheT) markZoneInsecure(name string) {
@@ -205,7 +286,7 @@ var evidenceToString = map[cutEvidence]string{
 //     an empty non-terminal, or does not exist -- means no delegation at name.
 //   - An NSEC3 denial is read the same way (nsec3CutProof): a matching NSEC3, or
 //     an Opt-Out span covering name, proves an insecure delegation.
-//   - A proof over maxNSEC3Iterations cannot be judged, nor can a DS that
+//   - A proof over the NSEC3 iteration limit cannot be judged, nor can a DS that
 //     validated Insecure or Indeterminate when the zone above name is not held
 //     Secure either.
 //   - Everything else is bogus. The parent side of name lies inside the signed
@@ -217,8 +298,18 @@ var evidenceToString = map[cutEvidence]string{
 //     there, a verdict an RRSIG earns unverified by naming a signer held
 //     Insecure. And so does no answer at all, because whoever can strip the
 //     signatures can as easily drop the question.
+//
+// A CNAME at name answers the DS question too (cnameCutEvidence). The resolver
+// caches it as the link it is, at <name, CNAME>, and nothing under <name, DS>
+// (#875); so with no DS entry, a cached link decides, before a question is
+// asked and after one.
 func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string, fetcher RRsetFetcher) cutEvidence {
 	crr := rrcache.Get(name, dns.TypeDS)
+	if crr == nil {
+		if link := rrcache.cnameLinkAt(name); link != nil {
+			return rrcache.cnameCutEvidence(name, link)
+		}
+	}
 	if crr == nil && ctx != nil && fetcher != nil {
 		// The fetch caches what it gets, answer or denial, with its verdict.
 		// A forwarded DS is fetched without servers (ServersFor).
@@ -227,6 +318,11 @@ func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string,
 				log.Printf("ValidateRRset: DS query for %q failed: %v", name, err)
 			}
 			crr = rrcache.Get(name, dns.TypeDS)
+			if crr == nil {
+				if link := rrcache.cnameLinkAt(name); link != nil {
+					return rrcache.cnameCutEvidence(name, link)
+				}
+			}
 		}
 	}
 	if crr == nil {
@@ -248,6 +344,13 @@ func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string,
 	}
 	switch state {
 	case ValidationStateSecure:
+		// No DS the resolver can use: as if the parent had proven there is
+		// none (RFC 4035 section 5.2; ds_usable.go). Not parentDSWithNoUsableDS,
+		// which reads crr.State: state may be the verdict just computed above,
+		// while crr.State is still the one cached before it.
+		if (crr.Context == ContextAnswer || crr.Context == ContextReferral) && noUsableDS(crr.RRset.RRs) {
+			return evidenceInsecureCut
+		}
 		return evidenceSecureCut
 	case ValidationStateInsecure, ValidationStateIndeterminate:
 		if !rrcache.parentSideSecure(name) {
@@ -257,18 +360,99 @@ func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string,
 	return evidenceBogus
 }
 
+// cnameLinkAt returns the CNAME link cached at name: an answer holding a CNAME
+// owned by name. nil if there is none.
+func (rrcache *RRsetCacheT) cnameLinkAt(name string) *CachedRRset {
+	link := rrcache.Get(name, dns.TypeCNAME)
+	if link == nil || link.Context != ContextAnswer || link.RRset == nil {
+		return nil
+	}
+	for _, rr := range link.RRset.RRs {
+		if c, ok := rr.(*dns.CNAME); ok && core.EqualNames(c.Hdr.Name, name) {
+			return link
+		}
+	}
+	return nil
+}
+
+// cnameCutEvidence is delegationEvidence for a name that owns a CNAME, link. A
+// CNAME owner is no delegation (RFC 2181 §10.1), so the parent side's CNAME is
+// as good a proof of no cut as its NSEC would be -- when it validates, and was
+// signed by a zone above name:
+//
+//   - Secure, with every RRSIG made by a zone strictly above name: no cut.
+//     A link synthesized from a DNAME has no RRSIGs of its own; its DNAME's
+//     count, and the DNAME sits above name by construction.
+//   - Secure, but signed by name itself: the signer would be a zone whose apex
+//     holds a CNAME, which there cannot be. Bogus.
+//   - Bogus: bogus.
+//   - Insecure or Indeterminate: the rule a DS RRset with that verdict gets.
+//     Below a zone held Secure it is bogus; elsewhere it cannot be judged.
+func (rrcache *RRsetCacheT) cnameCutEvidence(name string, link *CachedRRset) cutEvidence {
+	switch link.State {
+	case ValidationStateSecure:
+		signed := link.RRset
+		if link.SynthesizedFrom != "" {
+			dname := rrcache.Get(link.SynthesizedFrom, dns.TypeDNAME)
+			if dname == nil {
+				return evidenceNone
+			}
+			signed = dname.RRset
+		}
+		if signedOnlyFromAbove(signed, name) {
+			return evidenceNoCut
+		}
+		return evidenceBogus
+	case ValidationStateBogus:
+		return evidenceBogus
+	case ValidationStateInsecure, ValidationStateIndeterminate:
+		if !rrcache.parentSideSecure(name) {
+			return evidenceUnjudged
+		}
+		return evidenceBogus
+	}
+	return evidenceNone
+}
+
+// signedOnlyFromAbove reports whether set has RRSIGs, and every one of them
+// names a signer strictly above name.
+func signedOnlyFromAbove(set *core.RRset, name string) bool {
+	if set == nil || len(set.RRSIGs) == 0 {
+		return false
+	}
+	for _, rr := range set.RRSIGs {
+		sig, ok := rr.(*dns.RRSIG)
+		if !ok || !dns.IsSubDomain(sig.SignerName, name) || core.EqualNames(sig.SignerName, name) {
+			return false
+		}
+	}
+	return true
+}
+
 // denialEvidence is delegationEvidence for a cached denial of the DS at name,
 // and its proof decides (cutProof). A denial that validated Secure with no
 // proof about name in it shows that name is no delegation: ordinary data, an
-// empty non-terminal, or no name at all. One that validated Indeterminate --
-// every NSEC3 denial does, as does a chain that could not be followed -- and
-// holds no proof that validates is bogus below a Secure zone: an NSEC3 denial
-// that proves nothing about name, or a signature made with a key the zone does
-// not have, is not a reason to serve unsigned data.
+// empty non-terminal, or no name at all. One that validated Indeterminate -- a
+// chain that could not be followed -- and holds no proof that validates is
+// bogus below a Secure zone: a signature made with a key the zone does not
+// have is not a reason to serve unsigned data.
+//
+// An NSEC3 denial of the DS through an Opt-Out span is Insecure (RFC 5155
+// section 9.2), and so is one over the iteration limit (RFC 9276). Their
+// records validate, and the NSEC3 reading of them decides (nsec3CutProof): an
+// Opt-Out span is an insecure cut, records over the limit are unjudged. Any
+// other Insecure denial -- unsigned, or from a zone held Insecure -- has no
+// records that validate Secure, and is bogus evidence as it always was. The
+// NSEC reading of an Insecure denial is not consulted.
 func (rrcache *RRsetCacheT) denialEvidence(ctx context.Context, name string, crr *CachedRRset, fetcher RRsetFetcher) cutEvidence {
 	switch crr.State {
 	case ValidationStateSecure, ValidationStateIndeterminate:
-	case ValidationStateBogus, ValidationStateInsecure:
+	case ValidationStateInsecure:
+		if ev := rrcache.nsec3CutProof(ctx, name, crr.NegAuthority, fetcher); ev != evidenceNone {
+			return ev
+		}
+		return evidenceBogus
+	case ValidationStateBogus:
 		return evidenceBogus
 	default:
 		return evidenceNone

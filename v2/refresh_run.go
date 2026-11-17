@@ -56,12 +56,14 @@ type refreshJob struct {
 func runZoneRefresh(ctx context.Context, job refreshJob, conf *Config) (bool, error) {
 	zd, zone := job.zd, job.zone
 
+	seen := zd.refreshRun.confirmations.Load()
 	updated, err := zd.refresh(ctx, Globals.Verbose, Globals.Debug, job.force, conf, job.gate)
 	if err != nil {
 		noteRefreshFailure(zd, zone, err, "zone refresh failed")
 		respondToRefresher(job.zr, RefresherResponse{Error: true, ErrorMsg: err.Error()})
 		return false, err
 	}
+	noteRefreshSuccess(zd, zone, refreshConfirmed(zd, seen))
 
 	// Refresh-specific error state only. The other categories -- rollover
 	// policy, parent DSYNC, config -- are independent and survive a successful
@@ -112,10 +114,16 @@ func applyOutboundSerialAfterRefresh(zd *ZoneData, zone string) {
 	// config reload never passes through initialLoadZone, so a row persisted
 	// before that would survive, and a later flip back would let
 	// LoadOutgoingSerial resurrect an inflated serial.
+	//
+	// Not for the relayed zone of a registered derived app: its row is the
+	// serial it serves, written by the publish (relayedZoneRecordsItsSerial),
+	// so there is no inflated value in it to clear.
 	if !zoneMayOriginateContent(zd) {
-		if err := zd.KeyDB.DeleteOutgoingSerial(zone); err != nil {
-			lgEngine.Warn("failed to clear persisted outgoing serial for mirroring secondary",
-				"zone", zone, "err", err)
+		if !relayedZoneRecordsItsSerial() {
+			if err := zd.KeyDB.DeleteOutgoingSerial(zone); err != nil {
+				lgEngine.Warn("failed to clear persisted outgoing serial for mirroring secondary",
+					"zone", zone, "err", err)
+			}
 		}
 		return
 	}
@@ -148,13 +156,24 @@ func applyOutboundSerialAfterRefresh(zd *ZoneData, zone string) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
+	// A zone signed elsewhere serves the signer's serial (#1006): neither mode
+	// may move it.
+	if zd.servesSignedElsewhereSOA() {
+		return
+	}
+
 	serialChanged := false
 	switch mode {
 	case OutboundSoaSerialUnixtime:
-		zd.CurrentSerial = uint32(time.Now().Unix())
-		lgEngine.Info("zone updated from upstream; outbound-soa-serial=unixtime",
-			"zone", zone, "serial", zd.CurrentSerial)
-		serialChanged = true
+		// Forward only, as nextOutboundSerial is: a clock stepped back, or a
+		// burst of publishes that ran ahead of it, must not take the serial
+		// below one already served (#655).
+		if now := uint32(time.Now().Unix()); serialNewer(now, zd.CurrentSerial) {
+			zd.CurrentSerial = now
+			lgEngine.Info("zone updated from upstream; outbound-soa-serial=unixtime",
+				"zone", zone, "serial", zd.CurrentSerial)
+			serialChanged = true
+		}
 	case OutboundSoaSerialPersist:
 		// Only when the persisted serial is AHEAD of the one just refreshed in.
 		// If upstream advanced while we were down, the inbound serial is the one

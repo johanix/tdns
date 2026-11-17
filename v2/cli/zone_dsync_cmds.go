@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sort"
 
 	"github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -35,40 +34,7 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 			if err != nil {
 				log.Fatalf("Error: %v", err)
 			}
-			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
-				Command: "status",
-				Zone:    dns.Fqdn(tdns.Globals.Zonename),
-			})
-
-			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
-				os.Exit(1)
-			}
-			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
-				os.Exit(1)
-			}
-
-			if resp.Msg != "" {
-				fmt.Printf("%s\n", resp.Msg)
-			}
-			out := []string{}
-			for key, s := range resp.Functions {
-				out = append(out, fmt.Sprintf("%s|%s", key, s))
-			}
-
-			sort.Strings(out)
-			if tdns.Globals.ShowHeaders {
-				out = append([]string{"Function|Status"}, out...)
-			}
-
-			fmt.Printf("%s\n", columnize.SimpleFormat(out))
-			if len(resp.Todo) > 0 {
-				fmt.Printf("\nTODO:\n")
-				for _, todo := range resp.Todo {
-					fmt.Printf("--> %s\n", todo)
-				}
-			}
+			showParentSyncStatus(api, "Error from server")
 		},
 	}
 

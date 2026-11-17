@@ -190,6 +190,7 @@ func printJournalInfo(info *tdns.ZoneJournalInfo, detail bool) {
 	if info.Deltas == 0 {
 		fmt.Printf("Zone %s: journal is empty (zone file serial %d, serving %d)\n",
 			info.Zone, info.FileSerial, info.ServedSerial)
+		printPublishedSerial(info)
 		return
 	}
 
@@ -200,6 +201,7 @@ func printJournalInfo(info *tdns.ZoneJournalInfo, detail bool) {
 		fmt.Printf("  serials:       %d -> %d\n", info.AnchorSerial, info.HeadSerial)
 		fmt.Printf("  upstream:      serial %d\n", info.FileSerial)
 		fmt.Printf("  serving:       %d\n", info.ServedSerial)
+		printPublishedSerial(info)
 		fmt.Printf("  applied:       to every full transfer: this server's own CDS, CDNSKEY and\n")
 		fmt.Printf("                 CSYNC at the apex (inline-signing secondary)\n")
 		fmt.Printf("  purge:         takes them out of the zone at the next full transfer; a CDS\n")
@@ -210,6 +212,7 @@ func printJournalInfo(info *tdns.ZoneJournalInfo, detail bool) {
 	fmt.Printf("  chain:         %d -> %d\n", info.AnchorSerial, info.HeadSerial)
 	fmt.Printf("  zone file:     %s (serial %d)\n", info.Zonefile, info.FileSerial)
 	fmt.Printf("  serving:       %d\n", info.ServedSerial)
+	printPublishedSerial(info)
 
 	// The question an operator actually has, answered in those words.
 	if info.Replayable {
@@ -224,6 +227,19 @@ func printJournalInfo(info *tdns.ZoneJournalInfo, detail bool) {
 	}
 
 	printJournalDeltas(info, detail)
+}
+
+// printPublishedSerial says how far the zone has published, and whether a
+// restart will come back past it rather than at the zone file's serial (#655).
+func printPublishedSerial(info *tdns.ZoneJournalInfo) {
+	if !info.HavePublished {
+		return
+	}
+	if info.RestartLifts {
+		fmt.Printf("  published:     up to %d; a restart serves a serial past it\n", info.PublishedSerial)
+		return
+	}
+	fmt.Printf("  published:     up to %d\n", info.PublishedSerial)
 }
 
 func printJournalDeltas(info *tdns.ZoneJournalInfo, detail bool) {

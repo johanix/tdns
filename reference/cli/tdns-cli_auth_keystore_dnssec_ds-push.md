@@ -8,12 +8,12 @@ Loads tdns config (same as other CLI commands using -c), opens the local keystor
 and pushes the whole DS RRset to the parent. Requires imrengine in config.
 
 Offline mode: this CLI invocation builds a stub *ZoneData with no rollover policy
-attached, so PushDSRRsetForRollover falls through to the legacy single-scheme
-UPDATE path (whole-DS replacement, signed with the zone's active SIG(0) key).
-The auto / prefer-* / force-* dsync-scheme-preference values are honored only
-inside the daemon's rollover engine, where the policy is loaded from
-dnssecpolicies. To exercise NOTIFY pushes, run the daemon and let
-RolloverAutomatedTick drive the push.
+attached, so the DS delivery (SyncDSWithParent, the delegation syncher's) takes
+its single-scheme UPDATE path (whole-DS replacement, signed with the zone's
+active SIG(0) key). The auto / prefer-* / force-* dsync-scheme-preference values
+are honored only inside the daemon, where the rollover engine asks the syncher
+with the policy loaded from dnssecpolicies. To exercise NOTIFY pushes, run the
+daemon and let RolloverAutomatedTick drive the push.
 
 Use --dry-run to print the DS set and the UPDATE without sending.
 
@@ -37,6 +37,7 @@ tdns-cli auth keystore dnssec ds-push [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
 ```
 
 ### SEE ALSO

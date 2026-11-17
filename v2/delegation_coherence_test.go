@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -48,20 +50,24 @@ func fetcherFor(keys ...*dns.DNSKEY) dnskeyFetcher {
 	return fetcherValidated(true, keys...)
 }
 
-// fetcherUnvalidated returns a fetcher whose answer did NOT validate -- the
-// normal state for a child with no DS at its parent, and what an attacker
-// supplies for one that has.
+// fetcherUnvalidated returns a fetcher whose answer did NOT validate, and
+// carries no signatures -- the normal state for a child with no DS at its
+// parent, and what an attacker supplies for one that has.
 func fetcherUnvalidated(keys ...*dns.DNSKEY) dnskeyFetcher {
 	return fetcherValidated(false, keys...)
 }
 
 func fetcherValidated(validated bool, keys ...*dns.DNSKEY) dnskeyFetcher {
-	return func(string) ([]dns.RR, bool, error) {
-		var out []dns.RR
+	state := cache.ValidationStateInsecure
+	if validated {
+		state = cache.ValidationStateSecure
+	}
+	return func(string) (*core.RRset, cache.ValidationState, error) {
+		rrset := &core.RRset{Name: cohChild, Class: dns.ClassINET, RRtype: dns.TypeDNSKEY}
 		for _, k := range keys {
-			out = append(out, k)
+			rrset.RRs = append(rrset.RRs, k)
 		}
-		return out, validated, nil
+		return rrset, state, nil
 	}
 }
 
@@ -77,9 +83,9 @@ func TestCoherenceIgnoresUpdatesThatDoNotTouchDS(t *testing.T) {
 	}
 
 	called := false
-	fetch := func(string) ([]dns.RR, bool, error) {
+	fetch := func(string) (*core.RRset, cache.ValidationState, error) {
 		called = true
-		return nil, false, fmt.Errorf("should not have been called")
+		return nil, 0, fmt.Errorf("should not have been called")
 	}
 
 	if err := CheckDelegationCoherence(cohChild, []dns.RR{ds}, []dns.RR{ns}, fetch); err != nil {
@@ -96,9 +102,9 @@ func TestCoherenceAllowsClearingTheDS(t *testing.T) {
 	_, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
 	called := false
-	fetch := func(string) ([]dns.RR, bool, error) {
+	fetch := func(string) (*core.RRset, cache.ValidationState, error) {
 		called = true
-		return nil, true, nil
+		return nil, cache.ValidationStateSecure, nil
 	}
 	if err := CheckDelegationCoherence(cohChild, []dns.RR{ds}, []dns.RR{delDSRRset()}, fetch); err != nil {
 		t.Fatalf("clearing the DS was refused: %v", err)
@@ -158,7 +164,9 @@ func TestCoherenceAllowsBootstrappingWithAMatchingDS(t *testing.T) {
 func TestCoherenceRefusesWhenTheDNSKEYLookupFails(t *testing.T) {
 	_, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
-	fetch := func(string) ([]dns.RR, bool, error) { return nil, false, fmt.Errorf("no route to host") }
+	fetch := func(string) (*core.RRset, cache.ValidationState, error) {
+		return nil, 0, fmt.Errorf("no route to host")
+	}
 	err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(ds)}, fetch)
 	if err == nil {
 		t.Fatal("a DS change was accepted despite the DNSKEY lookup failing")
@@ -243,9 +251,9 @@ func TestCoherenceIgnoresANoOpDSChange(t *testing.T) {
 	_, ds := cohKey(t, "0F+2q0hUwq0k2iVfSmJDVWCMPRZ7hhQVR/4Gh0DBSD0=")
 
 	called := false
-	fetch := func(string) ([]dns.RR, bool, error) {
+	fetch := func(string) (*core.RRset, cache.ValidationState, error) {
 		called = true
-		return nil, false, fmt.Errorf("should not have been called")
+		return nil, 0, fmt.Errorf("should not have been called")
 	}
 
 	// Re-adding the DS that is already published changes nothing.

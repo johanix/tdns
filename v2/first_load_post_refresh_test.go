@@ -345,22 +345,32 @@ func TestNotifyDrivenFirstLoadBindsTheRegisteredPolicy(t *testing.T) {
 	t.Cleanup(stop)
 	conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: "example.", ZoneStore: MapZone}
 
+	// Ready and the binding are not the end of the load: the apply binds,
+	// signs -- the publish that flips Ready -- and only then records the
+	// applied policy. Wait for the record as well, not just look once.
 	deadline = time.Now().Add(10 * time.Second)
 	for {
 		zd.mu.Lock()
 		ready, pol, name := zd.Ready, zd.DnssecPolicy, zd.DnssecPolicyName
 		zd.mu.Unlock()
-		if ready && pol != nil && name == "base" {
-			break
+		bound := ready && pol != nil && name == "base"
+		if bound {
+			_, _, applied, aerr := GetZoneAppliedPolicy(kdb, "example.")
+			if aerr != nil {
+				t.Fatalf("GetZoneAppliedPolicy: %v", aerr)
+			}
+			if applied {
+				break
+			}
 		}
 		if time.Now().After(deadline) {
+			if bound {
+				t.Fatal("applied policy not recorded")
+			}
 			t.Fatalf("after the NOTIFY-driven load: Ready=%v policy bound=%v name=%q; the load bound the "+
 				"refresher's empty policy name instead of the zone's", ready, pol != nil, name)
 		}
 		time.Sleep(20 * time.Millisecond)
-	}
-	if _, _, ok, err := GetZoneAppliedPolicy(kdb, "example."); err != nil || !ok {
-		t.Fatalf("applied policy not recorded: ok=%v err=%v", ok, err)
 	}
 	apex, err := zd.GetOwner("example.")
 	if err != nil || apex == nil {
@@ -446,10 +456,16 @@ func TestFirstLoadRestoresThePersistedSerialForAnOriginatingSecondary(t *testing
 // refresher that starts the first load.
 func persistPrimary(t *testing.T, zoneStr string, saved uint32) (zd *ZoneData, conf *Config, load func()) {
 	t.Helper()
+	return modePrimary(t, OutboundSoaSerialPersist, zoneStr, saved)
+}
+
+// modePrimary is persistPrimary for any outbound-soa-serial mode.
+func modePrimary(t *testing.T, mode, zoneStr string, saved uint32) (zd *ZoneData, conf *Config, load func()) {
+	t.Helper()
 	authApp(t)
 	kdb := Conf.Internal.KeyDB
-	if err := applyOutboundSoaSerial(kdb, OutboundSoaSerialPersist); err != nil {
-		t.Fatalf("persist mode: %v", err)
+	if err := applyOutboundSoaSerial(kdb, mode); err != nil {
+		t.Fatalf("%s mode: %v", mode, err)
 	}
 	if saved != 0 {
 		if err := kdb.SaveOutgoingSerial("example.", saved); err != nil {

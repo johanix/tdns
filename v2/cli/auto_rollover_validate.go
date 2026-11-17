@@ -234,6 +234,7 @@ func renderValidateReport(cfgPath, zone, policyName string, pol *tdns.DnssecPoli
 		pol.Rollover.DsyncSchemePreference,
 		pol.Rollover.ParentCdsPollEstimate,
 		pol.Rollover.StandbyTime)
+	fmt.Printf("Standby: zsks=%s ksks=%s\n", standbyCountCell(pol.StandbyZSKs), standbyCountCell(pol.StandbyKSKs))
 	fmt.Printf("DS TTL for validation: %s\n", dsTTLSrc)
 	fmt.Println()
 

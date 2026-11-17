@@ -7,10 +7,20 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"text/tabwriter"
 
 	tdns "github.com/johanix/tdns/v2"
 )
+
+// standbyCountCell renders a policy's standby count for a role: the number
+// when the policy sets one, "kasp" when the global kasp count applies.
+func standbyCountCell(n *int) string {
+	if n == nil {
+		return "kasp"
+	}
+	return strconv.Itoa(*n)
+}
 
 // fetchServerPolicies returns the DNSSEC policies the running server loaded,
 // including any rejected at parse (PolicyError set). It hard-fails when the
@@ -44,15 +54,16 @@ func printServerPolicies(role string) error {
 
 	fmt.Printf("DNSSEC policies on the %s server:\n", role)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tSTATUS\tKSK-ALG\tZSK-ALG\tMODE\tKSK-LIFE\tZSK-LIFE\tROLLOVER")
+	fmt.Fprintln(tw, "NAME\tSTATUS\tKSK-ALG\tZSK-ALG\tMODE\tKSK-LIFE\tZSK-LIFE\tROLLOVER\tSTANDBY-ZSKS\tSTANDBY-KSKS")
 	for _, p := range pols {
 		status := "ok"
 		if p.PolicyError != "" {
 			status = "ERROR"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			p.Name, status, p.KSKAlgorithm, p.ZSKAlgorithm, p.Mode,
-			p.KSKLifetime, p.ZSKLifetime, p.RolloverMethod)
+			p.KSKLifetime, p.ZSKLifetime, p.RolloverMethod,
+			standbyCountCell(p.StandbyZSKs), standbyCountCell(p.StandbyKSKs))
 	}
 	tw.Flush()
 

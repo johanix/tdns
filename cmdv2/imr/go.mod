@@ -4,6 +4,7 @@ go 1.25.2
 
 replace (
 	github.com/johanix/tdns/v2 => ../../v2
+	github.com/johanix/tdns/v2/algorithms => ../../v2/algorithms
 	github.com/johanix/tdns/v2/cache => ../../v2/cache
 	github.com/johanix/tdns/v2/cli => ../../v2/cli
 	github.com/johanix/tdns/v2/core => ../../v2/core
@@ -32,6 +33,7 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/johanix/tdns/v2/algorithms v0.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
@@ -40,7 +42,7 @@ require (
 	github.com/mattn/go-colorable v0.1.12 // indirect
 	github.com/mattn/go-isatty v0.0.14 // indirect
 	github.com/mattn/go-runewidth v0.0.9 // indirect
-	github.com/mattn/go-sqlite3 v1.14.16 // indirect
+	github.com/mattn/go-sqlite3 v1.14.52 // indirect
 	github.com/mattn/go-tty v0.0.3 // indirect
 	github.com/miekg/dns v1.1.70 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
@@ -72,4 +74,4 @@ require (
 	zgo.at/termtext v1.5.0 // indirect
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.6

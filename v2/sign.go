@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -90,16 +91,8 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 	return &m, nil
 }
 
-// SignRRset signs an RRset with the zone's active KSK or ZSK keys, regenerating
-// any RRSIGs that NeedsResigning indicates are stale. When clamp != nil
-// (zone has clamping.enabled and a rollover is scheduled), the RR header
-// TTLs are first clamped to min(rrset.UnclampedTTL, K * margin) and then
-// signed — so the resulting RRSIG.OrigTtl matches the served TTL. See §5.2
-// of the automated KSK rollover design.
-//
-// clamp == nil disables clamping entirely (no behavior change from the
-// pre-4D signature). Most callers pass nil; SignZone builds a *ClampParams
-// once per pass for clamping zones and threads it down.
+// sigValiditySeconds returns the policy's signature validity for rrtype, or 0
+// when no policy is bound or it sets none for this type.
 func sigValiditySeconds(pol *DnssecPolicy, rrtype uint16) uint32 {
 	if pol == nil {
 		return 0
@@ -114,6 +107,31 @@ func sigValiditySeconds(pol *DnssecPolicy, rrtype uint16) uint32 {
 	}
 }
 
+// SignRRset signs an RRset with the zone's active KSK or ZSK keys, regenerating
+// any RRSIGs that NeedsResigning indicates are stale. When clamp != nil
+// (zone has clamping.enabled and a rollover is scheduled, or the policy sets
+// ttls.max-served), the RR header TTLs are first clamped to
+// min(rrset.UnclampedTTL, K * margin, MaxServedTTL) and then signed — so the
+// resulting RRSIG.OrigTtl matches the served TTL. See §5.2 of the automated
+// KSK rollover design.
+//
+// clamp == nil disables clamping entirely (no behavior change from the
+// pre-4D signature). Most callers pass nil; SignZone builds a *ClampParams
+// once per pass for clamping zones and threads it down.
+//
+// Storage contract (#797). The caller passes a pointer to its OWN core.RRset
+// struct -- GetOnlyRRSet already returns one by value -- but the RRs and RRSIGs
+// slices in it, their backing arrays and the records they point at are
+// BORROWED: on most paths they belong to the published snapshot. SignRRset
+// reads them and may keep pointers to unchanged records in slices it allocates
+// itself; it never writes an element of a borrowed slice, never appends into a
+// borrowed slice's spare capacity, and never assigns a field of a borrowed
+// record. It returns its result by assigning new slices to the fields of
+// *rrset. Callers therefore need not copy before signing, and must read the
+// result from *rrset rather than from a slice they held before the call.
+//
+// When nothing is re-signed and the clamp changes nothing, *rrset comes back
+// with the very slices it went in with. On error *rrset is unchanged.
 func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, force bool, clamp *ClampParams) (bool, error) {
 
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
@@ -157,42 +175,29 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 			"policy_bound", zd.DnssecPolicy != nil)
 	}
 
-	// Snapshot TTLs and the RRSIGs slice before any in-place mutation,
-	// so we can roll back on error. Without this, an error path (clamp
-	// + stale-RRSIG drop already done, then rrsig.Sign fails) would
-	// leave the caller storing a half-mutated RRset back into the zone.
-	origTTLs := make([]uint32, len(rrset.RRs))
-	for i := range rrset.RRs {
-		origTTLs[i] = rrset.RRs[i].Header().Ttl
-	}
-	origUnclampedTTL := rrset.UnclampedTTL
-	origRRSIGs := make([]dns.RR, len(rrset.RRSIGs))
-	copy(origRRSIGs, rrset.RRSIGs)
-	signOK := false
-	defer func() {
-		if signOK {
-			return
-		}
-		for i := range rrset.RRs {
-			rrset.RRs[i].Header().Ttl = origTTLs[i]
-		}
-		rrset.UnclampedTTL = origUnclampedTTL
-		rrset.RRSIGs = origRRSIGs
-	}()
+	// Storage contract (#797): everything reachable from *rrset on entry is
+	// BORROWED -- the RRs and RRSIGs backing arrays and the records they point
+	// at are, on most paths, the published snapshot's own, and a published
+	// snapshot is what downstreams hold for that serial. Nothing below writes
+	// into them. The work is done on a copy of the caller's struct, new state
+	// goes into slices allocated here, and *rrset is assigned once, at the
+	// end, on success. A failure returns with *rrset exactly as it was.
+	work := *rrset
 
-	// 4D K-step clamp: rewrite RR header TTLs in place before signing so
-	// the RRSIG covers the clamped TTL. Captures rrset.UnclampedTTL on
-	// first encounter; no-op when clamp == nil.
-	applyClampToRRset(rrset, clamp)
+	// 4D K-step clamp. Copy-on-write: a record whose TTL changes is replaced
+	// by a copy in a new slice, so the RRSIG covers the clamped TTL without
+	// touching the record the caller handed in. No-op when clamp == nil.
+	applyClampToRRset(&work, clamp)
 
 	var signingkeys []*PrivateKeyCache
 
-	if rrset.RRs[0].Header().Rrtype == dns.TypeDNSKEY {
+	if work.RRs[0].Header().Rrtype == dns.TypeDNSKEY {
 		signingkeys = dak.KSKs
 	} else {
 		signingkeys = dak.ZSKs
 	}
 
+	ttl := work.RRs[0].Header().Ttl
 	resigned := false
 	now := time.Now().UTC()
 
@@ -202,52 +207,77 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 	// RRSIGs by no-longer-active keys are left in place — replacing them
 	// is a zone-level "replacement" operation that belongs to ResignZone,
 	// not to individual RRset additions.
-
+	//
+	// A signature is by a key when both its key tag and its algorithm match:
+	// keys of different algorithms can share a tag, and an algorithm roll
+	// puts both in the zone at once. A key with several signatures here is
+	// re-signed when forced or when any of them is due, and all of them are
+	// then replaced by the one new signature.
+	sigs := work.RRSIGs
 	for _, key := range signingkeys {
-		shouldSign := true
-		for idx, oldsig := range rrset.RRSIGs {
-			if oldsig.(*dns.RRSIG).KeyTag == key.DnskeyRR.KeyTag() {
-				// force first: a forced re-sign (resignNow / triggerResign) must
-				// re-sign regardless, and short-circuiting skips NeedsResigning's
-				// work entirely on that path.
-				shouldSign = force || NeedsResigning(oldsig.(*dns.RRSIG), rrset.RRs[0].Header().Ttl)
-				if shouldSign {
-					lgSigner.Debug("removing older RRSIG by same DNSKEY", "name", oldsig.Header().Name, "rrtype", dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
-					rrset.RRSIGs = append(rrset.RRSIGs[:idx], rrset.RRSIGs[idx+1:]...)
-				}
+		tag, alg := key.DnskeyRR.KeyTag(), key.DnskeyRR.Algorithm
+
+		have, due := false, force
+		for _, rr := range sigs {
+			sig, ok := rr.(*dns.RRSIG)
+			if !ok || sig.KeyTag != tag || sig.Algorithm != alg {
+				continue
+			}
+			have = true
+			// force first: a forced re-sign (resignNow / triggerResign) must
+			// re-sign regardless, and short-circuiting skips NeedsResigning's
+			// work entirely on that path.
+			if !due && NeedsResigning(sig, ttl) {
+				due = true
 			}
 		}
-
-		if shouldSign {
-			rrsig := new(dns.RRSIG)
-			rrsig.Hdr = dns.RR_Header{
-				Name:   rrset.RRs[0].Header().Name, // key.DnskeyRR.Header().Name,
-				Rrtype: dns.TypeRRSIG,
-				Class:  dns.ClassINET,
-				Ttl:    rrset.RRs[0].Header().Ttl,
-			}
-			rrsig.KeyTag = key.DnskeyRR.KeyTag()
-			rrsig.Algorithm = key.DnskeyRR.Algorithm
-			lifetime := sigValiditySeconds(zd.DnssecPolicy, rrset.RRs[0].Header().Rrtype)
-			rrsig.Inception, rrsig.Expiration = sigLifetime(now, lifetime)
-			rrsig.SignerName = zd.ZoneName // name
-
-			err := rrsig.Sign(key.CS, rrset.RRs)
-			if err != nil {
-				lgSigner.Error("rrsig.Sign failed", "name", name, "err", err)
-				return false, err
-			}
-
-			// 4D clamp invariant: warn if validity would expire before the
-			// retired-key hold window completes. Doesn't refuse to sign.
-			checkValidityInvariant(zd.ZoneName, rrsig, clamp, now)
-
-			rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
-			resigned = true
+		if have && !due {
+			continue
 		}
+		if have {
+			lgSigner.Debug("replacing older RRSIG by same DNSKEY", "name", work.RRs[0].Header().Name,
+				"rrtype", dns.TypeToString[work.RRs[0].Header().Rrtype], "keytag", tag)
+		}
+
+		rrsig := new(dns.RRSIG)
+		rrsig.Hdr = dns.RR_Header{
+			Name:   work.RRs[0].Header().Name, // key.DnskeyRR.Header().Name,
+			Rrtype: dns.TypeRRSIG,
+			Class:  dns.ClassINET,
+			Ttl:    ttl,
+		}
+		rrsig.KeyTag = tag
+		rrsig.Algorithm = alg
+		lifetime := sigValiditySeconds(zd.DnssecPolicy, work.RRs[0].Header().Rrtype)
+		rrsig.Inception, rrsig.Expiration = sigLifetime(now, lifetime)
+		rrsig.SignerName = zd.ZoneName // name
+
+		// Sign copies each record before canonicalising it, so signing over
+		// borrowed records does not write into them.
+		if err := rrsig.Sign(key.CS, work.RRs); err != nil {
+			lgSigner.Error("rrsig.Sign failed", "name", name, "err", err)
+			return false, err
+		}
+
+		// 4D clamp invariant: warn if validity would expire before the
+		// retired-key hold window completes. Doesn't refuse to sign.
+		checkValidityInvariant(zd.ZoneName, rrsig, clamp, now)
+
+		// A new slice every time, never an in-place removal or an append
+		// into capacity the caller's slice may share with the snapshot.
+		next := make([]dns.RR, 0, len(sigs)+1)
+		for _, rr := range sigs {
+			if sig, ok := rr.(*dns.RRSIG); ok && sig.KeyTag == tag && sig.Algorithm == alg {
+				continue
+			}
+			next = append(next, rr)
+		}
+		sigs = append(next, rrsig)
+		resigned = true
 	}
 
-	signOK = true
+	work.RRSIGs = sigs
+	*rrset = work
 	return resigned, nil
 }
 
@@ -525,19 +555,11 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 	if len(dpk.KSKs) > 0 || len(dpk.ZSKs) > 0 {
 		lgSigner.Info("published DNSSEC keys available for promotion", "zone", zd.ZoneName)
 
-		// The lifecycle hooks may hold a published key back (KeyLifecycleHooks
-		// MayPromote): the first key of each role the hooks release is the one
-		// promoted. Nil hooks release every key, which is the promotion this
-		// has always made.
 		var promotedKskKeyId uint16
 		promotedKsk := false
 
-		// Promote the first promotable KSK from published to active
+		// Promote the first published KSK to active
 		for _, ksk := range dpk.KSKs {
-			if !keyMayPromote(zd, ksk.KeyId) {
-				lgSigner.Info("published KSK is not yet promotable, leaving it published", "zone", zd.ZoneName, "keyid", ksk.KeyId)
-				continue
-			}
 			promotedKskKeyId = ksk.KeyId
 			err = kdb.PromoteDnssecKey(zd.ZoneName, promotedKskKeyId, DnskeyStatePublished, DnskeyStateActive)
 			if err != nil {
@@ -549,14 +571,10 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 			break
 		}
 
-		// Promote the first promotable ZSK from published to active unless it
-		// has the same keyid as the promoted KSK
+		// Promote the first published ZSK to active unless it has the same
+		// keyid as the promoted KSK
 		for _, zsk := range dpk.ZSKs {
 			if promotedKsk && zsk.KeyId == promotedKskKeyId {
-				continue
-			}
-			if !keyMayPromote(zd, zsk.KeyId) {
-				lgSigner.Info("published ZSK is not yet promotable, leaving it published", "zone", zd.ZoneName, "keyid", zsk.KeyId)
 				continue
 			}
 			zskKeyId := zsk.KeyId
@@ -600,16 +618,9 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: %w", zd.ZoneName, ErrDnssecPolicyNotBound)
 	}
 
-	// Generate KSK if still missing -- unless the lifecycle hooks say not to
-	// (KeyLifecycleHooks MayGenerate): a KSK that exists in a state the
-	// hooks' owner has not released is not a reason to mint a second one
-	// beside it, and the error says so. When allowed, the key is generated
-	// ACTIVE, as it always has been: a zone with no active key cannot sign,
-	// so the staged state is not on this path.
+	// Generate KSK if still missing. The key is generated ACTIVE, as it
+	// always has been: a zone with no active key cannot sign.
 	if len(dak.KSKs) == 0 {
-		if !keyMayGenerate(zd, "KSK") {
-			return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: KSK: %w", zd.ZoneName, ErrKeyGenerationDeferred)
-		}
 		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
@@ -636,11 +647,8 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		}
 	}
 
-	// Generate ZSK only if we have zero real ZSKs; same hook as for the KSK.
+	// Generate ZSK only if we have zero real ZSKs.
 	if realZSKCount == 0 {
-		if !keyMayGenerate(zd, "ZSK") {
-			return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: ZSK: %w", zd.ZoneName, ErrKeyGenerationDeferred)
-		}
 		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate ZSK for zone %s: %v", zd.ZoneName, err)
@@ -728,6 +736,23 @@ func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	newrrsigs, err := zd.resignWorkingSetLocked(ctx, dak, clamp)
+	if err != nil {
+		return newrrsigs, err
+	}
+
+	zd.publishOrQueueLocked(zd.generation.Load(), false) // the gate: a busy zone's pass goes out with the next publish
+
+	lgSigner.Info("ResignZone completed",
+		"zone", zd.ZoneName, "rrsigs_written", newrrsigs)
+	return newrrsigs, nil
+}
+
+// resignWorkingSetLocked is ResignZone's pass, without its lock and its publish:
+// it stages the zone with every RRset's RRSIGs replaced, the NSEC chain and the
+// DNSKEY RRset built from dak. Caller holds zd.mu and publishes. On an error what
+// it staged so far stays staged.
+func (zd *ZoneData) resignWorkingSetLocked(ctx context.Context, dak *DnssecKeys, clamp *ClampParams) (int, error) {
 	zd.ensureWorkingSet()
 
 	if !zd.Options[OptBlackLies] {
@@ -799,6 +824,11 @@ func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 			// Work on a local copy. The published RRset stays unchanged
 			// until we Set the new one back in a single atomic store, so
 			// readers never observe an unsigned intermediate state.
+			//
+			// The RRs in it are borrowed from the published snapshot (the
+			// owner is at most a cloneOwner struct copy); SignRRset's storage
+			// contract is what keeps the TTL clamp from writing into them
+			// (#797).
 			rrset := owner.RRtypes.GetOnlyRRSet(rrt)
 			rrset.RRSIGs = nil
 			resigned, err := zd.SignRRset(&rrset, zd.ZoneName, dak, true, clamp)
@@ -820,8 +850,9 @@ func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 		// which is not visible here because this server synthesises its own
 		// denial and never consults the chain.
 		if cur := zd.stagedOwner(name); cur != nil && len(cur.NSEC.RRs) > 0 {
-			// A copy: signing clamps TTLs in place, and these records are
-			// shared with the snapshot currently being served.
+			// A copy: these records are shared with the snapshot currently
+			// being served. (Signing clamped TTLs in place until #797; the
+			// copy predates SignRRset's storage contract and is kept.)
 			nsec := cloneRRset(cur.NSEC)
 			nsec.RRSIGs = nil
 			resigned, err := zd.SignRRset(&nsec, zd.ZoneName, dak, true, clamp)
@@ -836,11 +867,6 @@ func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 			}
 		}
 	}
-
-	zd.publishLocked(zd.generation.Load())
-
-	lgSigner.Info("ResignZone completed",
-		"zone", zd.ZoneName, "rrsigs_written", newrrsigs)
 	return newrrsigs, nil
 }
 
@@ -860,6 +886,23 @@ func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG) bool) (int, error) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	removed, err := zd.stripZoneRRSIGsLocked(ctx, remove, nil)
+	if err != nil {
+		return removed, err
+	}
+	if removed > 0 {
+		zd.publishOrQueueLocked(zd.generation.Load(), false) // the gate: a busy zone's pass goes out with the next publish
+		lgSigner.Info("stripped orphan RRSIGs from zone", "zone", zd.ZoneName, "count", removed)
+	}
+	return removed, nil
+}
+
+// stripZoneRRSIGsLocked is StripZoneRRSIGs without the publish: it stages the
+// stripped RRsets in the working set and returns the number of RRSIGs removed.
+// took, when not nil, is told each RRset stripped: its owner, its type, its
+// records and the RRSIGs removed from it. On a cancelled ctx what was stripped
+// so far stays staged. Caller holds zd.mu.
+func (zd *ZoneData) stripZoneRRSIGsLocked(ctx context.Context, remove func(*dns.RRSIG) bool, took func(name string, rrtype uint16, rrs, sigs []dns.RR)) (int, error) {
 	zd.ensureWorkingSet()
 
 	names := make([]string, 0, len(zd.workingSet))
@@ -883,16 +926,19 @@ func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG)
 				continue
 			}
 			kept := rrset.RRSIGs[:0:0]
-			changed := false
+			var gone []dns.RR
 			for _, sig := range rrset.RRSIGs {
 				if rrsig, ok := sig.(*dns.RRSIG); ok && remove(rrsig) {
-					removed++
-					changed = true
+					gone = append(gone, sig)
 					continue
 				}
 				kept = append(kept, sig)
 			}
-			if changed {
+			if len(gone) > 0 {
+				removed += len(gone)
+				if took != nil {
+					took(name, rrt, slices.Clone(rrset.RRs), gone)
+				}
 				// GetOnlyRRSet returns an RRset whose RRtype field is unset
 				// (the store keys by type); set it to the actual type so
 				// stageRRsetLocked keys the stripped RRset correctly rather
@@ -902,10 +948,6 @@ func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG)
 				zd.stageRRsetLocked(name, rrset)
 			}
 		}
-	}
-	if removed > 0 {
-		zd.publishLocked(zd.generation.Load())
-		lgSigner.Info("stripped orphan RRSIGs from zone", "zone", zd.ZoneName, "count", removed)
 	}
 	return removed, nil
 }
@@ -975,7 +1017,7 @@ func (zd *ZoneData) SignZone(ctx context.Context, kdb *KeyDB, force bool) (int, 
 		return 0, err
 	}
 
-	zd.publishLocked(zd.generation.Load())
+	zd.publishOrQueueLocked(zd.generation.Load(), false) // the gate: a busy zone's pass goes out with the next publish
 
 	if err := UpsertZoneSigningMaxTTL(kdb, zd.ZoneName, maxObservedTTL); err != nil {
 		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
@@ -1195,12 +1237,19 @@ func (zd *ZoneData) signWorkingSetLocked(ctx context.Context, dak *DnssecKeys, c
 				zd.stripRRSIGsLocked(name, rrt, rrset)
 				continue
 			}
+			// rrset is this walk's own struct, but its RRs and RRSIGs are
+			// borrowed from the published snapshot: ensureWorkingSet is
+			// shallow and cloneOwner copies each RRset only as a struct.
+			// Signing them without writing into the served version is
+			// SignRRset's storage contract (#797) -- a forced pass used to
+			// overwrite the snapshot's signatures in place, and every IXFR
+			// link computed after it was wrong.
 			rrset, _ = MaybeSignRRset(rrset, zd.ZoneName)
 			zd.stageRRsetLocked(name, rrset)
 
 			// Record TTL after clamping. applyClampToRRset (called from
-			// SignRRset) rewrites headers to min(UnclampedTTL, K*margin,
-			// MaxServedTTL); capturing here makes max_observed_ttl reflect
+			// SignRRset) brings the returned RRs to min(UnclampedTTL,
+			// K*margin, MaxServedTTL); capturing here makes max_observed_ttl reflect
 			// what's actually served, so effective_margin converges on the
 			// first sign pass after a policy change instead of the second.
 			if len(rrset.RRs) > 0 {
@@ -1448,11 +1497,11 @@ func (zd *ZoneData) stripRRSIGsLocked(name string, rrt uint16, rrset core.RRset)
 	return removed
 }
 
-// nsecTTLLocked returns the TTL an NSEC record should carry: the SOA minimum
-// (RFC 4034 §4), which is the zone's negative-caching TTL and so the right
-// lifetime for a record that proves absence. Falls back to the apex SOA's own
-// header TTL if the zone has no readable SOA, which should not happen on a
-// path that is about to sign.
+// nsecTTLLocked returns the TTL an NSEC record should carry: the zone's
+// negative TTL, the smaller of the SOA minimum and the SOA's own TTL (RFC 9077,
+// updating RFC 4034 §4), which is the right lifetime for a record that proves
+// absence. Falls back to the apex SOA's own header TTL if the zone has no
+// readable SOA, which should not happen on a path that is about to sign.
 func (zd *ZoneData) nsecTTLLocked() uint32 {
 	od := zd.stagedOwner(zd.ZoneName)
 	if od == nil {
@@ -1463,7 +1512,7 @@ func (zd *ZoneData) nsecTTLLocked() uint32 {
 		return 3600
 	}
 	if s, ok := soa.RRs[0].(*dns.SOA); ok {
-		return s.Minttl
+		return negativeTTL(s)
 	}
 	return soa.RRs[0].Header().Ttl
 }

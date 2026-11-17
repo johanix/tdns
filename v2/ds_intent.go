@@ -27,41 +27,6 @@ type DSIntent struct {
 	Known bool
 }
 
-// dsBelongsAtParent reports whether a key in the given keystore state should
-// have its DS published at the parent right now.
-//
-// A predicate rather than a list of state names, because the question is about
-// a key, not about a label. Under the multi-DS rollover the engine implements,
-// a KSK acquires its DS at the parent BEFORE its DNSKEY is published:
-//
-//	created -> ds-published -> published -> standby -> active
-//
-// so every state from ds-published onward has, or should have, a DS. created
-// has not had one placed yet, and retired and removed are on their way out.
-//
-// mpdist is a multi-provider zone's own key, served while it is distributed to
-// the other providers and before its owner promotes it to published. Its DS does
-// not belong at the parent until then.
-//
-// foreign (another provider's key) and mpremove (tdns-mp's state for a key on
-// its way out of a multi-provider zone) are not classified here. tdns does not
-// act on either -- a foreign key's DS is not this zone's decision, and mpremove
-// is tdns-mp's to manage -- so DSIntentForZone declines for a zone holding one.
-//
-// Written this way so that a state added later has to be classified explicitly
-// rather than silently defaulting to "no DS", which would express itself as a
-// DS deletion.
-func dsBelongsAtParent(state string) (belongs, recognised bool) {
-	switch state {
-	case DnskeyStateDsPublished, DnskeyStatePublished, DnskeyStateStandby, DnskeyStateActive:
-		return true, true
-	case DnskeyStateCreated, DnskeyStateMpdist, DnskeyStateRetired, DnskeyStateRemoved:
-		return false, true
-	default:
-		return false, false
-	}
-}
-
 const dsIntentKeysSql = `
 SELECT state, keyrr, ds
 FROM DnssecKeyStore
@@ -85,9 +50,9 @@ WHERE zonename = ? AND (CAST(flags AS INTEGER) & ?) != 0`
 //
 // The answer is the ds column of the zone's SEP rows (design §3.3, §3.4): the
 // state machine that owns a zone writes ds at its transitions, and this reader
-// never needs to know the zone's DS model. Known is false as soon as one SEP
-// row has ds unset: another provider's key (state foreign), a key tdns-mp is
-// removing (mpremove) or distributing (mpdist), a row written before the
+// never needs to know the zone's DS model or the names of an owner's states.
+// Known is false as soon as one SEP row has ds unset: a row in a state an
+// owner stages, whose ds the owner has not written, a row written before the
 // column, a zone whose policy is not bound yet. Every consumer of the intent
 // acts on the parent's whole DS set -- replace mode rewrites it, and delta
 // mode removes whatever the set lacks -- so no set tdns could state would
@@ -129,9 +94,9 @@ func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error
 		seen = true
 
 		// The ds column is the answer (design §3.3). A row whose ds is unset
-		// is one nobody has decided: another provider's key, a key tdns-mp is
-		// removing, a row written before the column, a zone whose policy has
-		// not bound yet. Excluding it while still reporting Known would present
+		// is one nobody has decided: a row in an owner's state whose ds the
+		// owner has not written yet, a row written before the column, a zone
+		// whose policy has not bound yet. Excluding it while still reporting Known would present
 		// a short set as authoritative, and replace mode would delete DS
 		// records on the strength of a decision nobody made. Refusing to have
 		// an opinion is the only outcome that cannot turn "unknown" into a DS

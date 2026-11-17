@@ -77,7 +77,7 @@ func (s *signedRootForward) anchor(t *testing.T, set func(ic *ImrEngineConf)) {
 	t.Helper()
 	conf := &Config{}
 	set(&conf.Imr)
-	s.imr.loadConfiguredTrustAnchors(conf)
+	s.imr.loadConfiguredTrustAnchors(conf.Imr)
 }
 
 // anchorParentDNSKEY configures the parent's key as a DNSKEY trust anchor.
@@ -271,8 +271,8 @@ func TestTrustAnchorDNSKEYIsFetchedThroughTheForward(t *testing.T) {
 
 	conf := &Config{}
 	conf.Imr.TrustAnchorDNSKEY = root.dnskey.String()
-	imr.loadConfiguredTrustAnchors(conf)
-	if err := imr.initializeImrTrustAnchors(context.Background(), conf); err != nil {
+	imr.loadConfiguredTrustAnchors(conf.Imr)
+	if err := imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
 		t.Fatalf("initializeImrTrustAnchors: %v", err)
 	}
 	if crr := imr.Cache.Get(".", dns.TypeDNSKEY); crr == nil || crr.State != cache.ValidationStateSecure {
@@ -287,6 +287,11 @@ func TestTrustAnchorDNSKEYIsFetchedThroughTheForward(t *testing.T) {
 // nothing is.
 func TestCacheForwardedHookFollowsTheZoneTable(t *testing.T) {
 	imr := newForwardTestImr(t, rootForward("192.0.2.53", 53))
+	// A stub takes its names from the forward only with its servers in the
+	// cache (stubServersCached), as start-up and a reload put them there.
+	if err := imr.Cache.AddStub("stub.example.", []cache.AuthServer{{Name: "ns.stub.example.", Addrs: []string{"192.0.2.54"}}}); err != nil {
+		t.Fatalf("AddStub: %v", err)
+	}
 	imr.setZoneTable(imr.ForwardZones(), []string{"stub.example."}, nil)
 	for _, c := range []struct {
 		qname string

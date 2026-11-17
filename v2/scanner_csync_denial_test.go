@@ -24,7 +24,9 @@ import (
 // instead of being skipped in silence.
 
 // AuthQueryEngine keeps the authority section of an authoritative NODATA, the
-// proof that there is no such RRset, and keeps none for an answer with data.
+// proof that there is no such RRset. It keeps the authority section of an
+// answer with data too: for one synthesized from a wildcard, it holds the
+// proof that goes with it.
 func TestAuthQueryEngineKeepsTheProofOfANodata(t *testing.T) {
 	sc := NewScanner(startAuthQueryEngine(t), false, false)
 	const name = "ns1.child.example."
@@ -49,8 +51,8 @@ func TestAuthQueryEngineKeepsTheProofOfANodata(t *testing.T) {
 
 	a := name + " 300 IN A 192.0.2.1"
 	_, proof, err = sc.authQueryWithDenial(name, testAuthServerWithAuthority(t, true, []string{a}, []string{soa}), dns.TypeA, "tcp")
-	if err != nil || len(proof) != 0 {
-		t.Errorf("an answer with data: proof %v, err %v; want no proof", proof, err)
+	if err != nil || len(proof) != 1 || proof[0].RRtype != dns.TypeSOA {
+		t.Errorf("an answer with data: authority %v, err %v; want its authority section, the SOA", proof, err)
 	}
 }
 
@@ -150,12 +152,12 @@ func TestScanCSYNCKeepsGlueWhoseAbsenceIsNotProven(t *testing.T) {
 		verdict cache.ValidationState // zero: the NODATA comes with no proof
 		why     string
 	}{
-		{"an NSEC3 proof, which the validator does not verify yet", cache.ValidationStateIndeterminate, "indeterminate"},
+		{"a proof whose chain could not be followed", cache.ValidationStateIndeterminate, "indeterminate"},
 		{"a proof that fails validation", cache.ValidationStateBogus, "bogus"},
 		{"no proof at all", 0, "no proof"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			child := []string{"nsec3.example.", "bogus.example.", "noproof.example."}[i]
+			child := []string{"indeterminate.example.", "bogus.example.", "noproof.example."}[i]
 			ns1 := "ns1." + child
 			zd, n := csyncDropA(t, child, true)
 			if tc.verdict != 0 {
@@ -276,7 +278,7 @@ func validatorScanner(t *testing.T, zones ...string) (*Scanner, *Imr, func(zone 
 			Protocol:  3,
 			Algorithm: dns.ECDSAP256SHA256,
 		}
-		priv, err := key.Generate(256)
+		priv, err := generateSigningKey(key, 256)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -362,27 +364,28 @@ func TestProveAbsentRefusesTheParentsCutNSEC(t *testing.T) {
 
 	soa := rrs(t, parent+" 300 IN SOA ns."+parent+" h."+parent+" 1 3600 600 604800 300")
 	cut := rrs(t, child+" 300 IN NSEC other."+parent+" NS DS RRSIG NSEC")
-	replay := append(signedSet(sign, parent, soa), signedSet(sign, parent, cut)...)
-	planted := append(append([]dns.RR{}, replay...), rrs(t, ns1+" 300 IN NSEC ns2."+child+" AAAA RRSIG NSEC")...)
+	parentProof := append(signedSet(sign, parent, soa), signedSet(sign, parent, cut)...)
+	planted := append(append([]dns.RR{}, parentProof...), rrs(t, ns1+" 300 IN NSEC ns2."+child+" AAAA RRSIG NSEC")...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// What makes this a hole, and what childNodataProof is there for: the
-	// validator itself calls the replay Secure (#784). Pinned, so the guard
-	// below keeps testing the case it exists for.
+	// The validator itself reads nothing about a name below the cut from the
+	// parent's NSEC there (RFC 6840 section 4.1, #784): the cut has a DS, so
+	// the denial is Bogus. It used to call it Secure, and childNodataProof was
+	// the only guard; it stays, as a second one.
 	state, _, verr := imr.Cache.ValidateNegativeResponse(ctx, ns1, dns.TypeA, dns.RcodeSuccess,
-		authorityRRsets(replay), imr.IterativeDNSQueryFetcher())
-	if state != cache.ValidationStateSecure || verr != nil {
-		t.Errorf("the validator no longer calls the parent's cut NSEC a Secure denial of %s A (%s, err %v): if #784 is fixed, make this require that it refuses it",
-			ns1, cache.ValidationStateToString[state], verr)
+		authorityRRsets(parentProof), imr.IterativeDNSQueryFetcher())
+	if state != cache.ValidationStateBogus {
+		t.Errorf("the validator reads the parent's cut NSEC as a %s denial of %s A (err %v), want bogus: the names below the cut are the child's",
+			cache.ValidationStateToString[state], ns1, verr)
 	}
 
 	for _, tc := range []struct {
 		name  string
 		proof []dns.RR
 	}{
-		{"the parent's SOA and cut NSEC", replay},
+		{"the parent's SOA and cut NSEC", parentProof},
 		{"the same, with an unsigned NSEC at the nameserver name", planted},
 	} {
 		if err := sc.proveAbsent(ctx, child, ns1, dns.TypeA, authorityRRsets(tc.proof)); !isAbsenceNotProven(err) {

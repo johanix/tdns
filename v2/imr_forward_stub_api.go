@@ -303,8 +303,8 @@ func (imr *Imr) StubZoneList() []ImrStubZoneInfo {
 		for _, server := range imr.stubServers(zone) {
 			info.Servers = append(info.Servers, ImrStubServerInfo{
 				Name:  server.Name,
-				Addrs: append([]string(nil), server.Addrs...),
-				Alpn:  append([]string(nil), server.Alpn...),
+				Addrs: server.GetAddrs(),
+				Alpn:  server.GetAlpn(),
 			})
 		}
 		out = append(out, info)
@@ -326,13 +326,13 @@ func (imr *Imr) StubZoneStatus() []ImrStubZoneStatus {
 			ts := server.SnapshotTransportStats()
 			ss := ImrStubServerStatus{
 				Name:      server.Name,
-				Addrs:     append([]string(nil), server.Addrs...),
+				Addrs:     server.GetAddrs(),
 				Attempted: transportCountsToStrings(ts.Attempted),
 				Used:      transportCountsToStrings(ts.Used),
 				Failed:    transportCountsToStrings(ts.Failed),
 				Truncated: ts.Truncated,
 			}
-			for _, t := range server.Transports {
+			for _, t := range server.GetTransports() {
 				ss.Transports = append(ss.Transports, core.TransportToString[t])
 			}
 			backoffs := server.SnapshotAddressBackoffs(now)
@@ -377,11 +377,11 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 	)
 	for _, zone := range zones {
 		for _, server := range imr.stubServers(zone) {
-			transports := server.Transports
+			transports := server.GetTransports()
 			if len(transports) == 0 {
 				transports = []core.Transport{core.TransportDo53}
 			}
-			for _, addr := range server.Addrs {
+			for _, addr := range server.GetAddrs() {
 				for _, transport := range transports {
 					client, ok := imr.Cache.DNSClient[transport]
 					if !ok {

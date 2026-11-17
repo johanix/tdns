@@ -50,6 +50,22 @@ validation_failed_at TEXT NOT NULL DEFAULT '',
 UNIQUE (zonename, keyid)
 )`,
 
+	// Child SIG(0) keys the child itself retired: a trusted UPDATE deleted
+	// them from Sig0TrustStore, and no later add of the same key (matched on
+	// algorithm and public key, not the tag) is accepted for that child. See
+	// truststore_tombstone.go. zonename is the canonical (lower-case) name.
+	"Sig0TrustStoreTombstone": `CREATE TABLE IF NOT EXISTS 'Sig0TrustStoreTombstone' (
+id		  INTEGER PRIMARY KEY,
+zonename	  TEXT NOT NULL,
+keyid		  INTEGER NOT NULL,
+algorithm	  INTEGER NOT NULL,
+publickey	  TEXT NOT NULL,
+keyrr		  TEXT NOT NULL,
+deleted_at	  TEXT NOT NULL,
+source		  TEXT NOT NULL DEFAULT '',
+UNIQUE (zonename, algorithm, publickey)
+)`,
+
 	// The Sig0KeyStore should contain both the private and public SIG(0) keys for
 	// each zone that we're managing parent sync for.
 	"Sig0KeyStore": `CREATE TABLE IF NOT EXISTS 'Sig0KeyStore' (
@@ -107,10 +123,13 @@ UNIQUE (keyname)
 
 	// OutgoingSerials persists the outgoing SOA serial per zone.
 	// Prevents serial regression on restart (which causes signers to ignore NOTIFYs).
+	// content_digest (#1006) is the digest of the content published at serial,
+	// NULL when not known; dbMigrateSchema adds it to an existing database.
 	"OutgoingSerials": `CREATE TABLE IF NOT EXISTS 'OutgoingSerials' (
-		zone       TEXT NOT NULL PRIMARY KEY,
-		serial     INTEGER NOT NULL,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		zone           TEXT NOT NULL PRIMARY KEY,
+		serial         INTEGER NOT NULL,
+		updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+		content_digest TEXT
 	)`,
 
 	"RolloverKeyState": `CREATE TABLE IF NOT EXISTS 'RolloverKeyState' (
@@ -177,7 +196,8 @@ UNIQUE (keyname)
 		alg_roll_started_at            TEXT,
 		alg_roll_new_head_keyid        INTEGER,
 		alg_roll_old_head_keyid        INTEGER,
-		alg_roll_old_head_retire_at    TEXT
+		alg_roll_old_head_retire_at    TEXT,
+		alg_roll_parent_insecure       INTEGER
 	)`,
 
 	// ZoneSigningState holds per-zone signing-loop state. max_observed_ttl

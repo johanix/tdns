@@ -1,0 +1,23 @@
+# Deckard program config for tdns-imr. Paths are relative to the Deckard
+# checkout, which is where Deckard loads templates from; run.sh links this
+# directory into it as "tdns".
+#
+# tdns-imr is started through env so that the Go runtime accepts the RSA keys
+# shorter than 1024 bits that some scenarios use (Go 1.24+ refuses them
+# without GODEBUG=rsa1024min=0). run.sh puts a "tdns-imr" on the PATH.
+programs:
+- name: tdns-imr
+  binary: env
+  additional:
+    - GODEBUG=rsa1024min=0
+    - tdns-imr
+    - --config
+    - tdns-imr.yaml
+  templates:
+    - tdns/template/tdns-imr.yaml.j2
+    - template/hints_zone.j2
+    - tdns/template/tdns-imr-ta.j2
+  configs:
+    - tdns-imr.yaml
+    - hints.zone
+    - ta.keys

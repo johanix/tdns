@@ -131,21 +131,65 @@ func TestInternalWritersQueueNoSignalsEdited(t *testing.T) {
 
 // Test 26 at the updater. Under a transaction hold the served zone is still
 // the old one: the edit is found in what the update staged.
+// An edit that arrives inside a transaction hold is staged, and reported once
+// the commit's publish has served it: what follows an update (the SIGNALS-
+// EDITED enqueue among it) follows the publish that carries the change, so
+// the syncher never reads signals the zone does not serve yet. The update's
+// own answer comes with that publish too.
 func TestAnEditUnderATransactionHoldIsDetected(t *testing.T) {
 	zd, kdb := signalsRig(t)
 	id, err := zd.BeginTx(0)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
-	t.Cleanup(func() { _ = zd.CommitTx(id) })
 
-	operatorUpdate(t, kdb, zd.ZoneName, true, editCDS)
+	ur := UpdateRequest{Cmd: "ZONE-UPDATE", ZoneName: zd.ZoneName, PreAuthorized: true,
+		Actions: []dns.RR{mustRR(t, editCDS)}, Resp: make(chan ZoneUpdateResult, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = kdb.ZoneUpdaterEngine(ctx)
+	}()
+	defer func() { cancel(); <-done }()
+	kdb.UpdateQ <- ur
+	kdb.UpdateQ <- UpdateRequest{Cmd: "PING"}
+	waitFor(t, 5*time.Second, "the edit to be staged under the hold", func() bool { return zd.txStoppedPublishes() >= 1 })
 
 	if servesApexType(zd, dns.TypeCDS) {
 		t.Fatal("the held edit is served already; this test needs it staged")
 	}
-	if got := signalsEdited(zd); !reflect.DeepEqual(got, [][]uint16{{dns.TypeCDS}}) {
+	select {
+	case r := <-ur.Resp:
+		t.Fatalf("the edit was answered (applied=%v err=%v) while the zone was held", r.Applied, r.Err)
+	default:
+	}
+	if got := signalsEdited(zd); len(got) != 0 {
+		t.Fatalf("SIGNALS-EDITED queued = %v while the edit was not served yet", got)
+	}
+
+	if err := zd.CommitTx(id); err != nil {
+		t.Fatalf("CommitTx: %v", err)
+	}
+	var got [][]uint16
+	waitFor(t, 5*time.Second, "SIGNALS-EDITED after the commit's publish", func() bool {
+		got = append(got, signalsEdited(zd)...)
+		return len(got) > 0
+	})
+	if !reflect.DeepEqual(got, [][]uint16{{dns.TypeCDS}}) {
 		t.Errorf("SIGNALS-EDITED queued = %v, want one naming CDS", got)
+	}
+	if !servesApexType(zd, dns.TypeCDS) {
+		t.Error("the edit is not served after the commit")
+	}
+	select {
+	case r := <-ur.Resp:
+		if r.Err != nil || !r.Applied {
+			t.Errorf("the edit's answer after the commit: applied=%v err=%v", r.Applied, r.Err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("the edit was never answered")
 	}
 }
 

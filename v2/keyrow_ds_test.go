@@ -32,8 +32,8 @@ var wantDs = map[DSModel]map[string]bool{
 
 var tdnsKeyStates = []string{DnskeyStateCreated, DnskeyStateDsPublished, DnskeyStatePublished, DnskeyStateStandby, DnskeyStateActive, DnskeyStateRetired, DnskeyStateRemoved}
 
-// T1b.1: every state x model gives the design's ds; a ZSK never has one; a
-// multi-provider zone and the owner's states get no answer from tdns.
+// T1b.1: every state x model gives the design's ds; a ZSK never has one; the
+// owner's states get no answer from tdns.
 func TestDsTableFollowsTheDesign(t *testing.T) {
 	for model, states := range wantDs {
 		for state, want := range states {
@@ -45,15 +45,10 @@ func TestDsTableFollowsTheDesign(t *testing.T) {
 				t.Errorf("%s ZSK %s: ds=%v (valid=%v), want 0", model, state, z.Bool, z.Valid)
 			}
 		}
-		for _, mp := range []string{DnskeyStateMpdist, DnskeyStateForeign, DnskeyStateMpremove} {
+		for _, mp := range []string{ownerStateMpdist, ownerStateForeign, ownerStateMpremove} {
 			if v := dsFlagFor(model, mp, true); v.Valid {
 				t.Errorf("%s %s: tdns wrote ds=%v; the owner's states must stay unknown", model, mp, v.Bool)
 			}
-		}
-	}
-	for _, state := range tdnsKeyStates {
-		if v := dsFlagFor(DSModelMultiProvider, state, true); v.Valid {
-			t.Errorf("multi-provider zone, %s: tdns wrote ds=%v; the owner decides", state, v.Bool)
 		}
 	}
 }
@@ -160,28 +155,6 @@ func TestAlgRolloverOldHeadHasNoDs(t *testing.T) {
 	}
 }
 
-// T1b.2: today's readers, kept here as the reference, against the ds-based
-// answer, over every small keystore x model and seeded random ones. The
-// reference for none and double-signature is dsBelongsAtParent's
-// classification (DSIntentForZone); for multi-DS it is the rollover target.
-// Allowed differences: a published KSK outside multi-DS (#635) and the
-// algorithm rollover's old head. Any other difference fails.
-func refDsIntentByState(state string) bool {
-	switch state {
-	case DnskeyStateDsPublished, DnskeyStatePublished, DnskeyStateStandby, DnskeyStateActive:
-		return true
-	}
-	return false
-}
-
-func refRolloverTargetByState(state string) bool {
-	switch state {
-	case DnskeyStateCreated, DnskeyStateDsPublished, DnskeyStateStandby, DnskeyStatePublished, DnskeyStateActive, DnskeyStateRetired:
-		return true
-	}
-	return false
-}
-
 type dsRow struct {
 	keyid uint16
 	state string
@@ -209,96 +182,16 @@ func dsRows(t *testing.T, kdb *KeyDB, zone string) []dsRow {
 	return out
 }
 
-// assertDsAgrees compares the reference for the model with the ds column and
-// reports every difference not on the allowed list.
-func assertDsAgrees(t *testing.T, kdb *KeyDB, zone string, model DSModel, oldHead uint16) {
-	t.Helper()
-	for _, r := range dsRows(t, kdb, zone) {
-		if !r.sep {
-			if r.ds == nil || *r.ds != 0 {
-				t.Errorf("%s %s: ZSK %d has ds=%s, want 0", zone, model, r.keyid, flagString(r.ds))
-			}
-			continue
-		}
-		var ref bool
-		if model == DSModelMultiDS {
-			ref = refRolloverTargetByState(r.state) && r.keyid != oldHead
-		} else {
-			ref = refDsIntentByState(r.state)
-		}
-		if r.ds == nil {
-			t.Errorf("%s %s: KSK %d (%s) has ds unset", zone, model, r.keyid, r.state)
-			continue
-		}
-		got := *r.ds != 0
-		if got == ref {
-			continue
-		}
-		switch {
-		case model != DSModelMultiDS && r.state == DnskeyStatePublished && ref && !got:
-			// tdns #635: allowed.
-		case r.keyid == oldHead && ref && !got:
-			// the algorithm rollover's old head: allowed.
-		default:
-			t.Errorf("%s %s: KSK %d (%s): from state %v, from ds %v: not an allowed difference", zone, model, r.keyid, r.state, ref, got)
-		}
-	}
-}
-
-func TestOldAndNewDsAgreeOnEverySmallKeystore(t *testing.T) {
-	kdb := newTestKeyDB(t)
-	rng := newTestRand(50)
-	for model, method := range map[DSModel]RolloverMethod{DSModelNone: RolloverMethodNone, DSModelMultiDS: RolloverMethodMultiDS, DSModelDoubleSignature: RolloverMethodDoubleSignature} {
-		for _, state := range tdnsKeyStates {
-			for _, role := range []string{"KSK", "ZSK"} {
-				for n := 0; n <= 2; n++ {
-					zone := fmt.Sprintf("%s-%s-%s-%d.ds.example.", model, state, role, n)
-					dsTestZone(t, kdb, zone, method)
-					insertTestKeyRow(t, kdb, zone, DnskeyStateActive, "KSK", rng)
-					insertTestKeyRow(t, kdb, zone, DnskeyStateActive, "ZSK", rng)
-					for i := 0; i < n; i++ {
-						insertTestKeyRow(t, kdb, zone, state, role, rng)
-					}
-					assertDsAgrees(t, kdb, zone, model, 0)
-				}
-			}
-		}
-	}
-}
-
-func TestOldAndNewDsAgreeOnRandomKeystores(t *testing.T) {
-	kdb := newTestKeyDB(t)
-	models := []struct {
-		m DSModel
-		r RolloverMethod
-	}{{DSModelNone, RolloverMethodNone}, {DSModelMultiDS, RolloverMethodMultiDS}, {DSModelDoubleSignature, RolloverMethodDoubleSignature}}
-	for seed := uint64(0); seed < 100; seed++ {
-		rng := newTestRand(seed + 1000)
-		mm := models[int(seed)%len(models)]
-		zone := fmt.Sprintf("seed%d.ds.example.", seed)
-		dsTestZone(t, kdb, zone, mm.r)
-		for _, state := range tdnsKeyStates {
-			for _, role := range []string{"KSK", "ZSK"} {
-				for i, n := 0, rng.IntN(3); i < n; i++ {
-					insertTestKeyRow(t, kdb, zone, state, role, rng)
-				}
-			}
-		}
-		assertDsAgrees(t, kdb, zone, mm.m, 0)
-	}
-}
-
 // T1b.3: the S1a fixtures, which carry ds unset, get ds from the one-time
-// pass per the table, and the pass reports exactly the allowed differences.
+// pass per the table.
 func TestFixturesGetDsFromTheOneTimePass(t *testing.T) {
 	cases := map[string]struct {
-		method   RolloverMethod
-		mp       bool
-		wantDiff []string
+		method RolloverMethod
+		mp     bool
 	}{
 		"none-standby-ksk":   {method: RolloverMethodNone},
 		"multi-ds-pipeline":  {method: RolloverMethodMultiDS},
-		"alg-roll-in-flight": {method: RolloverMethodMultiDS, wantDiff: []string{DsDiffAlgRollOldHead}},
+		"alg-roll-in-flight": {method: RolloverMethodMultiDS},
 		"zsk-pipeline":       {method: RolloverMethodNone},
 		"multi-provider":     {mp: true},
 		"removed-key":        {method: RolloverMethodNone},
@@ -319,16 +212,8 @@ func TestFixturesGetDsFromTheOneTimePass(t *testing.T) {
 			} else {
 				zd = dsTestZone(t, kdb, fx.zone, c.method)
 			}
-			rep, err := kdb.FillDsForZone(zd)
-			if err != nil {
+			if _, err := kdb.FillDsForZone(zd); err != nil {
 				t.Fatalf("pass: %v", err)
-			}
-			var kinds []string
-			for _, d := range rep.Differences {
-				kinds = append(kinds, d.Kind)
-			}
-			if fmt.Sprint(kinds) != fmt.Sprint(c.wantDiff) {
-				t.Errorf("differences %v, want %v", kinds, c.wantDiff)
 			}
 			rows := dsRows(t, kdb, fx.zone)
 			if c.mp {
@@ -353,7 +238,6 @@ func TestFixturesGetDsFromTheOneTimePass(t *testing.T) {
 					t.Errorf("key %d (%s, sep=%v): ds=%s, want %s", r.keyid, r.state, r.sep, flagString(r.ds), boolFlag(want))
 				}
 			}
-			assertDsAgrees(t, kdb, fx.zone, model, oldHead)
 			if vs := CheckKeyRowInvariants(kdb, fx.zone); len(vs) != 0 {
 				t.Errorf("after the pass: %s", violationList(vs))
 			}
@@ -412,8 +296,7 @@ var _ = sql.NullBool{}
 
 // T1b.3 per model and state: rows an older binary wrote (state only, no
 // columns) get pub and sign from the backfill and ds from the one-time pass,
-// per the table; the pass names exactly the differences the design allows
-// against the state-derived rule, one per row that differs.
+// per the table.
 func TestOneTimePassOnPreColumnRows(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	rng := newTestRand(70)
@@ -439,30 +322,6 @@ func TestOneTimePassOnPreColumnRows(t *testing.T) {
 			if got, want := dsOf(t, kdb, zone, keyid), boolFlag(wantDs[model][state]); got != want {
 				t.Errorf("%s: KSK %s: ds=%s after the pass, want %s", model, state, got, want)
 			}
-		}
-		assertDsAgrees(t, kdb, zone, model, 0)
-		want := map[string]int{}
-		for _, state := range tdnsKeyStates {
-			if old, _ := dsBelongsAtParent(state); old == wantDs[model][state] {
-				continue
-			}
-			switch {
-			case model != DSModelMultiDS && state == DnskeyStatePublished:
-				want[DsDiffPublishedOutsideMultiDS]++
-			case model == DSModelMultiDS && state == DnskeyStateCreated:
-				want[DsDiffMultiDSCreated]++
-			case model == DSModelMultiDS && state == DnskeyStateRetired:
-				want[DsDiffMultiDSRetired]++
-			default:
-				t.Errorf("%s %s: the table and the state-derived rule differ where the design allows no difference", model, state)
-			}
-		}
-		got := map[string]int{}
-		for _, d := range rep.Differences {
-			got[d.Kind]++
-		}
-		if fmt.Sprint(got) != fmt.Sprint(want) {
-			t.Errorf("%s: the pass reported %v, want %v", model, got, want)
 		}
 		if vs := CheckKeyRowInvariants(kdb, zone); len(vs) != 0 {
 			t.Errorf("%s: after the pass: %s", model, violationList(vs))

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -562,7 +563,9 @@ func TestProxyKeyStatusForeignKeyNamesBothKeys(t *testing.T) {
 func TestProxyKeyStatusMessagePerState(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	key := genProxySig0Key(t, kdb, proxyUpdZone)
-	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
+	// The agent's KEY at the apex, as in READY: that arm prints the TTL the
+	// zone serves the KEY at, which here is the keystore's own.
+	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone()+key.String()+"\n")
 	zd.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
 
 	for _, tc := range []struct {
@@ -582,7 +585,15 @@ func TestProxyKeyStatusMessagePerState(t *testing.T) {
 			t.Errorf("%s: verdict %q missing from:\n%s", tc.state, tc.verdict, msg)
 		}
 		// The point of #541: the records are there whatever the verdict says.
-		for _, want := range []string{key.String(), "HSYNCPARAM", "TYPE65286"} {
+		// READY leaves out the RFC 3597 form, which is for an operator who
+		// still has to publish them.
+		wants := []string{key.String(), "HSYNCPARAM"}
+		if tc.state != ProxyUpdateReady {
+			wants = append(wants, "TYPE65286")
+		} else if strings.Contains(msg, "TYPE65286") {
+			t.Errorf("%s: report carries the RFC 3597 form", tc.state)
+		}
+		for _, want := range wants {
 			if !strings.Contains(msg, want) {
 				t.Errorf("%s: report does not carry %q", tc.state, want)
 			}
@@ -602,6 +613,85 @@ func TestProxyKeyStatusMessagePerState(t *testing.T) {
 		if !strings.Contains(msg, "No SIG(0) key has been generated") {
 			t.Errorf("%s with no key does not say so:\n%s", state, msg)
 		}
+	}
+}
+
+// #790: operator documentation quotes the WAITING block and people paste from
+// it, so its text is pinned word for word. READY shows the same records under a heading that does not
+// read as an instruction, with the TTLs the zone serves them at: it used to
+// print the template's 3600 for records the primary served at 300.
+func TestProxyKeyStatusWaitingPinnedReadyHeading(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := genProxySig0Key(t, kdb, proxyUpdZone)
+	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
+	zd.Options = map[ZoneOption]bool{OptParentSyncProxy: true}
+
+	unknown, err := zd.proxyHsyncparamPubkeyRFC3597()
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := key.String() + "\n" + zd.proxyHsyncparamPubkeyRR() + "\n\n" +
+		fmt.Sprintf("HSYNCPARAM is a private type (%d). For a primary that cannot parse it, the same\n", core.TypeHSYNCPARAM) +
+		"record in RFC 3597 form:\n\n" + unknown + "\n"
+
+	waiting, err := zd.proxyKeyStatusMessage(ProxyUpdateWaiting, kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantWaiting := "zone upd.example.: UPDATE proxy WAITING — publish the following at the primary apex, then the agent" +
+		" will proxy UPDATEs once it sees the KEY.\n\nRecords for the primary to serve at the apex:\n\n" + records
+	if waiting != wantWaiting {
+		t.Errorf("WAITING text changed:\n got %q\nwant %q", waiting, wantWaiting)
+	}
+
+	readyHead := "zone upd.example.: UPDATE proxy READY — the agent's KEY is published at the apex and the agent" +
+		" holds its private key.\n\nPublished at the primary's apex (for reference):\n\n"
+	servedKey := dns.Copy(key).(*dns.KEY)
+	servedKey.Hdr.Ttl = 300
+	servedHsync := strings.Replace(zd.proxyHsyncparamPubkeyRR(), "\t3600\t", "\t300\t", 1)
+	// READY shows the served records only: no RFC 3597 form, which is for
+	// an operator who still has to publish them.
+	readyRecords := func(keyLine, hsyncLine, _ string) string {
+		return keyLine + "\n" + hsyncLine + "\n"
+	}
+
+	// The primary serves both records at 300.
+	both := proxyUpdZoneData(t, kdb, proxyUpdBaseZone()+servedKey.String()+"\n"+servedHsync+"\n")
+	ready, err := both.proxyKeyStatusMessage(ProxyUpdateReady, kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReady := readyHead + readyRecords(servedKey.String(), servedHsync,
+		strings.Replace(unknown, "\t3600\t", "\t300\t", 1))
+	if ready != wantReady {
+		t.Errorf("READY text:\n got %q\nwant %q", ready, wantReady)
+	}
+
+	// The KEY is served but no HSYNCPARAM is: there is no served TTL for the
+	// HSYNCPARAM lines, so they carry none rather than the template's.
+	keyOnly := proxyUpdZoneData(t, kdb, proxyUpdBaseZone()+servedKey.String()+"\n")
+	ready, err = keyOnly.proxyKeyStatusMessage(ProxyUpdateReady, kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantReady = readyHead + readyRecords(servedKey.String(),
+		strings.Replace(zd.proxyHsyncparamPubkeyRR(), "\t3600\t", "\t", 1),
+		strings.Replace(unknown, "\t3600\t", "\t", 1))
+	if ready != wantReady {
+		t.Errorf("READY text, no HSYNCPARAM served:\n got %q\nwant %q", ready, wantReady)
+	}
+
+	// The apex serves an HSYNCPARAM, but not this one (pubcds, no pubkey). Its
+	// TTL says nothing about the record the report prints, so that record
+	// carries no TTL, the same as when there is no HSYNCPARAM at all.
+	other := proxyUpdZoneData(t, kdb, proxyUpdBaseZone()+servedKey.String()+"\n"+
+		proxyUpdZone+"\t300\tIN\tHSYNCPARAM\tpubcds\n")
+	ready, err = other.proxyKeyStatusMessage(ProxyUpdateReady, kdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready != wantReady {
+		t.Errorf("READY text, a different HSYNCPARAM served:\n got %q\nwant %q", ready, wantReady)
 	}
 }
 

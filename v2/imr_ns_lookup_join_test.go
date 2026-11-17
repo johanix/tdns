@@ -40,7 +40,7 @@ func referNoAddress(t *testing.T, imr *Imr, zone string) {
 	t.Helper()
 	qname := "a." + zone
 	_, _, cctx, _, err := imr.handleReferral(context.Background(), qname, dns.TypeA,
-		referralTo(zone, qname), false, map[string]bool{}, core.TransportDo53, edns0.PrivacyNone)
+		referralTo(zone, qname), false, map[string]bool{}, "", core.TransportDo53, edns0.PrivacyNone)
 	if err != nil || cctx != cache.ContextReferral {
 		t.Fatalf("referral to %s: context=%s err=%v", zone, cache.CacheContextToString[cctx], err)
 	}

@@ -13,6 +13,11 @@ import (
 // other way the check can fail to run, asking again changes nothing.
 var errNoDnskeyFetcher = errors.New("no way to look up its DNSKEYs")
 
+// errParentDSUnreadable is the other permanent one: the parent's zone store
+// holds no owner index, so it cannot read the DS it publishes for the child,
+// and never will. A parent that is merely not Ready yet will, and is retryable.
+var errParentDSUnreadable = errors.New("the zone store cannot be read by owner name")
+
 // dsyncApiCoherenceStatus is the HTTP status for a DS change the coherence
 // check refused.
 //
@@ -31,10 +36,12 @@ var errNoDnskeyFetcher = errors.New("no way to look up its DNSKEYs")
 // Both used to be 409, so a child's first DS after a cold start was refused
 // with the status a client reads as final.
 //
-// The exception is a server with no resolver at all: unverifiable, but for
-// good, so it stays 409 rather than inviting retries that cannot succeed.
+// The exceptions are a server with no resolver at all, and a parent whose zone
+// store cannot be read by owner name: unverifiable, but for good, so they stay
+// 409 rather than inviting retries that cannot succeed.
 func dsyncApiCoherenceStatus(cerr error) int {
-	if errors.Is(cerr, ErrDelegationUnverifiable) && !errors.Is(cerr, errNoDnskeyFetcher) {
+	if errors.Is(cerr, ErrDelegationUnverifiable) &&
+		!errors.Is(cerr, errNoDnskeyFetcher) && !errors.Is(cerr, errParentDSUnreadable) {
 		return http.StatusServiceUnavailable
 	}
 	return http.StatusConflict

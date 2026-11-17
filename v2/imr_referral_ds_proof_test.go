@@ -40,7 +40,7 @@ func newRefKey(t *testing.T, zone string) *refKey {
 	t.Helper()
 	k := &dns.DNSKEY{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 257, Protocol: 3, Algorithm: dns.ED25519}
-	p, err := k.Generate(256)
+	p, err := generateSigningKey(k, 256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func newRefKey(t *testing.T, zone string) *refKey {
 // sign returns rrs followed by their RRSIG.
 func (k *refKey) sign(t *testing.T, rrs ...dns.RR) []dns.RR {
 	t.Helper()
-	sig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: k.key.KeyTag(), SignerName: k.key.Hdr.Name,
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: rrs[0].Header().Ttl}, Algorithm: dns.ED25519, KeyTag: k.key.KeyTag(), SignerName: k.key.Hdr.Name,
 		Inception:  uint32(time.Now().Add(-time.Hour).Unix()),
 		Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := sig.Sign(k.priv, rrs); err != nil {

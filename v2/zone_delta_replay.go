@@ -40,12 +40,12 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 
 	// The serial of the file we just loaded.
 	//
-	// zd.fileSerial, not zd.CurrentSerial. They are equal right now -- replay
-	// runs before the load-time signing and republication that move
-	// CurrentSerial -- but relying on that ordering is what made this fragile
-	// in the first place. The journal is anchored to the file on the write
-	// side (see LastZoneDeltaSerial); anchoring it to the file here too means
-	// the two sides cannot drift apart no matter where replay is called from.
+	// zd.fileSerial, not zd.CurrentSerial. The load publishes before the replay
+	// runs -- the policy bind and the sign after it, and on a restart the lift
+	// past the published serial -- so CurrentSerial is usually past the file's
+	// serial by now. The journal is anchored to the file on the write side
+	// (see LastZoneDeltaSerial); anchoring it to the file here too means the
+	// two sides cannot drift apart no matter where replay is called from.
 	// Both values in ONE critical section. CurrentSerial is written under zd.mu
 	// by publishWorkingSetLocked and by the refresh engine, so reading it
 	// outside is a data race -- and reading it after the unlock could also pick
@@ -125,7 +125,25 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 		actions = append(actions, acts...)
 	}
 
-	lastSerial := deltas[len(deltas)-1].ToSerial
+	tailSerial := deltas[len(deltas)-1].ToSerial
+
+	// The floor the replay must land past: the highest serial this zone has
+	// published, which is the newer of the recorded published serial and the
+	// journal's tail. The tail alone is not it -- re-signs, DNSKEY publishes
+	// and serial bumps never reach the journal (#655). Read BEFORE the apply:
+	// the apply's own publish records its serial, and reading after it would
+	// make every replay bump once more for nothing.
+	//
+	// At first load this rarely fires: the load has already lifted the serial
+	// past the same floor before its first publish (applyRefreshReplacementLocked).
+	// It covers a reload, and a record that could not be written.
+	floorSerial := tailSerial
+	if published, have, perr := kdb.PublishedSerialFloor(zd.ZoneName); perr != nil {
+		lg.Warn("could not read the published serial; the replay floors on the journal's tail alone",
+			"zone", zd.ZoneName, "journal_tail_serial", tailSerial, "error", perr)
+	} else if have && serialNewer(published, floorSerial) {
+		floorSerial = published
+	}
 
 	lg.Info("replaying persisted zone deltas over the zone file",
 		"zone", zd.ZoneName, "deltas", len(deltas), "records", len(actions),
@@ -133,7 +151,8 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 		// without the lock and is a different value besides -- labelling it
 		// file_serial would print a serial the chain was never validated
 		// against, which is worse than not logging it at all.
-		"file_serial", fileSerial, "target_serial", lastSerial)
+		"file_serial", fileSerial, "journal_tail_serial", tailSerial,
+		"published_serial", floorSerial)
 
 	// InternalUpdate: these changes were authorized when they were first
 	// applied; re-checking update-policy now would drop content on a policy
@@ -189,11 +208,11 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 	}
 
 	// The published serial must end up STRICTLY GREATER than the highest serial
-	// this zone ever published (lastSerial), never merely equal to it.
+	// this zone ever published (floorSerial), never merely equal to it.
 	//
-	// Landing on lastSerial is tempting -- the replayed content is the content
-	// of lastSerial, so reusing the number looks like the honest choice, and it
-	// avoids burning a serial per restart. It is wrong. The replayed zone is
+	// Landing on the journal's tail is tempting -- the replayed content is the
+	// content of that serial, so reusing the number looks like the honest
+	// choice, and it avoids burning a serial per restart. It is wrong. The replayed zone is
 	// not byte-identical to what was published under that serial: RRSIGs are
 	// regenerated here with fresh inception and expiration. Reusing the number
 	// would leave secondaries holding a different image of "serial N" and,
@@ -206,15 +225,15 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 	// serial names two materially different zones with nothing to reconcile
 	// them.
 	//
-	// So: catch up to lastSerial and publish WITH a bump, landing past it.
+	// So: catch up to floorSerial and publish WITH a bump, landing past it.
 	// In unixtime mode the replay has already produced a serial beyond
-	// lastSerial, so the branch is skipped and nothing is burnt. The cost --
+	// floorSerial, so the branch is skipped and nothing is burnt. The cost --
 	// one serial, and one transfer to each secondary -- is paid only by a zone
 	// that actually had unspooled changes, and buys those secondaries the
 	// regenerated signatures.
 	zd.mu.Lock()
-	if !serialNewer(zd.CurrentSerial, lastSerial) {
-		zd.CurrentSerial = lastSerial
+	if !serialNewer(zd.CurrentSerial, floorSerial) {
+		zd.CurrentSerial = floorSerial
 		zd.ensureWorkingSet()
 		zd.publishWorkingSetLocked(zd.generation.Load(), true)
 	}
@@ -223,8 +242,8 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 
 	lg.Info("replayed persisted zone deltas",
 		"zone", zd.ZoneName, "deltas", len(deltas),
-		"file_serial", fileSerial, "last_published_serial", lastSerial,
-		"serial", finalSerial)
+		"file_serial", fileSerial, "journal_tail_serial", tailSerial,
+		"published_serial", floorSerial, "serial", finalSerial)
 
 	return len(deltas), nil
 }

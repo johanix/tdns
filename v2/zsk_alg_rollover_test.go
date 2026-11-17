@@ -13,8 +13,9 @@ import (
 
 // Step 2 (relaxed-mode ZSK algorithm rollover) test matrix, §8.4:
 // T1, T2, T2b, T2c, T2d, T-timing, T3, T3b, T4, T4b, T4c, T5, T6, T7, T8, T9.
-// Driven against a real on-disk KeyDB via newTestKeyDB (sign_reconcile_test.go)
-// and the package-global Conf (withCompleteness sets the mode per test).
+// Driven against a real KeyDB, in memory, via newTestKeyDB
+// (sign_reconcile_test.go), and the package-global Conf (withCompleteness
+// sets the mode per test).
 
 const algZone = "zsk-alg.example."
 
@@ -167,7 +168,7 @@ func TestT3RoleOnlyCountGeneratesNothing(t *testing.T) {
 	stampPublishedAt(t, kdb, s2, time.Now().Add(-1*time.Hour))
 
 	// New policy ZSK alg = RSASHA256; role-only count of standbys = 2 ≥ 2.
-	maintainStandbyKeysForType(context.Background(), noResignQ(), kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true /*roleOnly*/)
+	maintainStandbyKeysForType(context.Background(), kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true /*roleOnly*/)
 
 	if n := countStandbyZSKs(t, kdb); n != 2 {
 		t.Fatalf("standby ZSK count = %d, want 2 (nothing generated)", n)
@@ -198,7 +199,7 @@ func TestT3bGenerateOnDrainUsesNewAlg(t *testing.T) {
 	stampPublishedAt(t, kdb, s1, time.Now().Add(-2*time.Hour))
 
 	// Maintainer with new policy alg RSASHA256, standby target 2, role-only.
-	maintainStandbyKeysForType(context.Background(), noResignQ(), kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true)
+	maintainStandbyKeysForType(context.Background(), kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true)
 
 	// It should have generated exactly one new key, staged to published, NEW alg.
 	pub, _ := GetDnssecKeysByState(kdb, algZone, DnskeyStatePublished)
@@ -262,7 +263,7 @@ func TestT4SweepCapDeletesYoungestSurplus(t *testing.T) {
 
 	// Maintainer + cap agree: with 2 standbys and target 2, role-only maintainer
 	// generates nothing, cap removes nothing — no oscillation.
-	maintainStandbyKeysForType(context.Background(), noResignQ(), kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true)
+	maintainStandbyKeysForType(context.Background(), kdb, algZone, dns.RSASHA256, "ZSK", 256, 2, true)
 	capStandbyZsksByCount(kdb, algZone, 2)
 	if n := countStandbyZSKs(t, kdb); n != 2 {
 		t.Fatalf("after maintainer+cap re-run, standby count = %d, want stable 2", n)
@@ -338,7 +339,7 @@ func TestT5FullSequenceViaAsap(t *testing.T) {
 
 	// change-policy bound new alg (simulated by maintainer/promotions using newA).
 	// 1) maintainer: role-only count = 2, generates nothing.
-	maintainStandbyKeysForType(context.Background(), noResignQ(), kdb, algZone, newA, "ZSK", 256, 2, true)
+	maintainStandbyKeysForType(context.Background(), kdb, algZone, newA, "ZSK", 256, 2, true)
 	if countPublishedZSKs(t, kdb) != 0 || countStandbyZSKs(t, kdb) != 2 {
 		t.Fatalf("step1: expected 2 standby, 0 published; got %d/%d", countStandbyZSKs(t, kdb), countPublishedZSKs(t, kdb))
 	}
@@ -357,7 +358,7 @@ func TestT5FullSequenceViaAsap(t *testing.T) {
 	if countStandbyZSKs(t, kdb) != 0 {
 		t.Fatalf("after draining both standbys, standby count = %d, want 0", countStandbyZSKs(t, kdb))
 	}
-	maintainStandbyKeysForType(context.Background(), noResignQ(), kdb, algZone, newA, "ZSK", 256, 2, true)
+	maintainStandbyKeysForType(context.Background(), kdb, algZone, newA, "ZSK", 256, 2, true)
 	// Move the freshly-generated published keys to standby (the worker's
 	// published→standby transition), stamping published_at oldest-first.
 	pub, _ := GetDnssecKeysByState(kdb, algZone, DnskeyStatePublished)

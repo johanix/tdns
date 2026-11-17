@@ -107,7 +107,7 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   that forwards delegation-sync (NOTIFY and/or signed DNS
   UPDATE) to the parent on behalf of a DSYNC-unaware primary
   (BIND/Knot/NSD): when to use it, configuration, the
-  change mapping, the UPDATE KEY-bootstrap (`zone proxy-key`),
+  change mapping, the UPDATE KEY-bootstrap (`zone parentsync status`),
   limitations, and verification.
 
 - [Agent fronting a parent zone](childsync-proxy.md)

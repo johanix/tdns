@@ -153,7 +153,7 @@ func handleDoQStream(ctx context.Context, stream *quic.Stream, conn *quic.Conn, 
 	}
 
 	// Create a response writer for DoQ with both stream and connection
-	rw := &doqResponseWriter{stream: stream, conn: conn}
+	rw := &doqResponseWriter{stream: stream, conn: conn, tsig: msg.IsTsig() != nil, wire: msgBuf}
 
 	lgDns.Debug("DoQ: received message", "opcode", dns.OpcodeToString[msg.Opcode], "qname", msg.Question[0].Name, "rrtype", dns.TypeToString[msg.Question[0].Qtype])
 
@@ -201,8 +201,14 @@ func readExactWithContext(ctx context.Context, s *quic.Stream, buf []byte) error
 type doqResponseWriter struct {
 	stream *quic.Stream
 	conn   *quic.Conn
-	wrote  bool // Add this field to track if we've written
+	wrote  bool   // Add this field to track if we've written
+	tsig   bool   // the request carried a TSIG RR; see TsigStatus
+	wire   []byte // the request as received (requestWire)
 }
+
+// RawRequest returns the request as received, for SIG(0) verification
+// (requestWire).
+func (w *doqResponseWriter) RawRequest() []byte { return w.wire }
 
 func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
 	if w.wrote {
@@ -240,13 +246,22 @@ func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
 
 func (w *doqResponseWriter) Close() error { return w.stream.Close() }
 
-// TODO(tsig): DoQ is served by this stream-backed writer, not a miekg
-// dns.Server, so miekg's conn-level TSIG (verify-on-read, MAC-on-write) does not
-// apply and TsigStatus is a stub. Supporting TSIG over DoQ would mean manually
-// dns.TsigVerify'ing the inbound message and dns.TsigGenerate'ing the reply
-// (request-MAC prefixed) in this path. Deferred: encrypted transports usually
-// authenticate peers via TLS/mTLS, and tdns replication (AXFR/NOTIFY) is Do53.
-func (w *doqResponseWriter) TsigStatus() error         { return nil }
+// TsigStatus fails closed, for the same reason as dohResponseWriter's: DoQ is
+// served by this stream-backed writer, not a miekg dns.Server, so nothing has
+// checked a TSIG's MAC, and a nil status would tell checkInboundTSIG and the
+// transfer ACL that it verified. A signed request reports errTsigUnverified; an
+// unsigned one reports nil.
+//
+// TODO(tsig): supporting TSIG over DoQ would mean dns.TsigVerify'ing the
+// inbound message and dns.TsigGenerate'ing the reply (request-MAC prefixed) in
+// this path. Deferred: encrypted transports usually authenticate peers via
+// TLS/mTLS, and tdns replication (AXFR/NOTIFY) is Do53.
+func (w *doqResponseWriter) TsigStatus() error {
+	if w.tsig {
+		return errTsigUnverified
+	}
+	return nil
+}
 func (w *doqResponseWriter) TsigTimersOnly(bool)       {}
 func (w *doqResponseWriter) Hijack()                   {}
 func (w *doqResponseWriter) LocalAddr() net.Addr       { return w.conn.LocalAddr() }

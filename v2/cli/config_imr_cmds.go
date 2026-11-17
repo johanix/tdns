@@ -221,6 +221,41 @@ func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 	if cfg.Imr.RootHints != "" {
 		checkFileExists(rep, g, "root-hints", cfg.Imr.RootHints)
 	}
+	switch v4, v6, err := tdns.ParseAddressFamilies(cfg.Imr.OutboundAddressFamilies); {
+	case err != nil:
+		rep.fail(g, "outbound-address-families", "imrengine.outbound-address-families: "+err.Error()+" — the resolver would not start",
+			"list ipv4, ipv6, or both, e.g. [ ipv4, ipv6 ]")
+	case !v6:
+		rep.pass(g, "outbound-address-families", "IPv4 only: IPv6 addresses of authoritative servers are neither looked up nor used")
+	case !v4:
+		rep.pass(g, "outbound-address-families", "IPv6 only: IPv4 addresses of authoritative servers are neither looked up nor used")
+	}
+	t := cfg.Imr.Testing
+	if t.SkipPriming() {
+		rep.warn(g, "testing",
+			"imrengine.testing.priming is false: the resolver seeds its cache from the root hints and never primes."+
+				" This is a test-harness switch, not for production",
+			"remove imrengine.testing from a production config")
+	}
+	switch err := t.Validate(); {
+	case err != nil:
+		rep.fail(g, "testing", "imrengine.testing: "+err.Error()+" — the resolver would not start",
+			"remove root-refresh, or faketime")
+	case t.FaketimeOn():
+		file := t.FaketimePath()
+		if file == "" {
+			file = "$FAKETIME_TIMESTAMP_FILE, which is not set here"
+		}
+		rep.warn(g, "testing",
+			"imrengine.testing.faketime is on: signatures, cache expiry and served TTLs follow a test clock read from "+file+
+				", and the root NS is not refreshed. This is a test-harness switch, not for production",
+			"remove imrengine.testing from a production config")
+	case t.SkipRootRefresh():
+		rep.warn(g, "testing",
+			"imrengine.testing.root-refresh is false: the root NS is not refreshed before it expires."+
+				" This is a test-harness switch, not for production",
+			"remove imrengine.testing from a production config")
+	}
 }
 
 // checkImrTrustAnchors flags the classic imr footgun: DNSSEC validation is on

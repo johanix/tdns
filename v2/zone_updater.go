@@ -6,8 +6,11 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"runtime/debug"
 	"slices"
+	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -37,6 +40,13 @@ type UpdateRequest struct {
 	// touches every InternalUpdate site in the tree and that is a separate
 	// change from adding a channel.
 	PreAuthorized bool
+	// Authz, when non-nil, is how a DNS UPDATE that did not come through the
+	// SIG(0) path was authorized: today a TSIG key and the zone's grants
+	// (tsig_update_policy.go). The applier's per-type checks ask it, through
+	// typeAllowed, instead of the SIG(0) type list. Set only by the UPDATE
+	// responder, after the key's MAC verified and every record passed the
+	// grants.
+	Authz *UpdateAuthz
 	// Replay marks the re-application of already-persisted deltas over a
 	// freshly loaded zone file. It suppresses persistence for that apply:
 	// these changes are already in the ZoneDelta table, and recording them
@@ -197,549 +207,614 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				lg.Info("ZoneUpdater: terminating")
 				return nil
 			}
-			lg.Debug("ZoneUpdater received update request")
-			if ur.Cmd == "PING" {
-				lg.Debug("ZoneUpdater: PING received, PONG!")
-				continue
+			if kdb.applyUpdate(ctx, ur) {
+				return nil
 			}
-			zd, ok := Zones.Get(ur.ZoneName)
-			if !ok {
-				lg.Warn("ZoneUpdater: unknown zone in update request, ignoring", "cmd", ur.Cmd, "zone", ur.ZoneName)
-				lg.Debug("ZoneUpdater: known zones", "zones", Zones.Keys())
-				ur.respond(false, fmt.Errorf("unknown zone %s", ur.ZoneName))
-				continue
-			}
-
-			// Fail-closed origination gate (Fix D). The per-command checks
-			// below gate ZONE-UPDATE on allow-updates OR ur.InternalUpdate --
-			// and EVERY ops_* publisher sets InternalUpdate, so allow-updates
-			// is a call-site convention rather than an applier gate. Any
-			// publisher that does not check the option at its own call site
-			// therefore walks straight through and mutates the zone.
-			//
-			// This is the chokepoint that makes the invariant structural
-			// rather than a promise kept by N call sites: a tdns-auth zone
-			// that may not originate content never has zone content applied,
-			// whatever flags the request carries.
-			//
-			// Scoped to the two zone-content commands. TRUSTSTORE-UPDATE must
-			// pass through untouched -- it writes the keystore, never zone
-			// content. DEFERRED-UPDATE errors out below; PING returned above.
-			//
-			// Logged at ERROR as an invariant violation, matching the existing
-			// precedent for the child-updates case a few lines down: once the
-			// origination options are normalized off, nothing should ever
-			// reach this gate, so a hit means some path bypassed the option
-			// system -- a code bug worth shouting about. Deliberately not
-			// recorded in the zone's error registry, so it cannot collide with
-			// the operator-facing config warning.
-			if updaterCmdMutatesZoneContent(ur.Cmd) && !zoneMayOriginateContent(zd) {
-				lg.Error("ZoneUpdater: refusing zone mutation on a secondary that may not originate content (invariant violation)",
-					"cmd", ur.Cmd, "zone", ur.ZoneName, "internal", ur.InternalUpdate,
-					"description", ur.Description, "actions", len(ur.Actions))
-				ur.respond(false, fmt.Errorf(
-					"zone %s may not originate content", ur.ZoneName))
-				continue
-			}
-
-			switch ur.Cmd {
-			case "DEFERRED-UPDATE":
-				lg.Error("ZoneUpdater: received deferred update on wrong queue", "description", ur.Description)
-				ur.respond(false, fmt.Errorf("deferred update sent to the wrong queue"))
-				continue
-
-			case "CHILD-UPDATE":
-				// Child delegation data update: dispatch to the configured DelegationBackend.
-				// Config validation guarantees that any zone with
-				// OptAllowChildUpdates has a non-nil DelegationBackend, so
-				// there is no fallback path. If the invariant is violated
-				// (which would indicate a code bug, not a config bug),
-				// drop the update loudly rather than silently mutating
-				// in-memory zone state behind the scanner's back.
-				lg.Debug("ZoneUpdater: CHILD-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
-				lg.Debug("ZoneUpdater: CHILD-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
-
-				// Key material is not delegation data, enforced at the write
-				// rather than only at the wire. The responder classifies a
-				// KEY-only update as a TRUSTSTORE-UPDATE and refuses one that
-				// mixes KEY with delegation records, so nothing should reach
-				// here carrying a KEY -- but this is the one point EVERY
-				// delegation backend passes through, and each of them got it
-				// wrong in its own way: the direct backend published the KEY
-				// into the parent zone at the delegation point, and the db
-				// backend stored it in ChildDelegationData to be served from
-				// there. A per-backend rule would have to be written, and kept
-				// right, three times.
-				//
-				// The only type filter downstream is
-				// updatepolicy.child.rrtypes, which is the WRONG instrument:
-				// it has to contain KEY for a child to be allowed to upload
-				// one at all, so allowing the bootstrap necessarily allowed
-				// the publication.
-				//
-				// Logged as an invariant violation, like the origination gate
-				// above: reaching it means a path bypassed the classifier.
-				if keyRR := firstKeyRR(ur.Actions); keyRR != nil {
-					lg.Error("ZoneUpdater: refusing to write child key material as zone content (invariant violation)",
-						"zone", ur.ZoneName, "owner", keyRR.Header().Name, "cmd", ur.Cmd)
-					ur.respond(false, fmt.Errorf(
-						"KEY records belong in the truststore, not in the delegation data of zone %s", ur.ZoneName))
-					continue
-				}
-				// Snapshot the two fields parseconfig.go mutates under
-				// zd.mu during config reload (Options + DelegationBackend).
-				// Reading them independently without the lock would let a
-				// concurrent reload flip one between checks, producing a
-				// spurious "invariant violation" ERROR.
-				zd.mu.Lock()
-				allowChildUpdates := zd.Options[OptAllowChildUpdates]
-				backend := zd.DelegationBackend
-				zd.mu.Unlock()
-
-				// Every exit from here answers ur.Resp. A caller that is
-				// waiting for the change to be durable before it says so --
-				// the RFC 2136 responder, and the DSYNC API handler -- has no
-				// other way to find out, and silence costs it a full
-				// UpdateApplyTimeout before it gives up and reports failure
-				// for an update that may well have succeeded.
-				if !allowChildUpdates {
-					lg.Warn("ZoneUpdater: zone does not allow child updates, dropping CHILD-UPDATE", "zone", ur.ZoneName)
-					ur.respond(false, fmt.Errorf("zone %s does not allow child updates", ur.ZoneName))
-					continue
-				}
-				if backend == nil {
-					lg.Error("ZoneUpdater: zone allows child updates but has no DelegationBackend, dropping CHILD-UPDATE (invariant violation)", "zone", ur.ZoneName)
-					ur.respond(false, fmt.Errorf("zone %s has no delegation backend", ur.ZoneName))
-					continue
-				}
-				if err := backend.ApplyChildUpdate(ur.ZoneName, ur); err != nil {
-					lg.Error("ZoneUpdater: DelegationBackend.ApplyChildUpdate failed",
-						"backend", backend.Name(), "error", err)
-					ur.respond(false, err)
-				} else {
-					lg.Info("ZoneUpdater: CHILD-UPDATE applied",
-						"zone", ur.ZoneName, "backend", backend.Name())
-					// ApplyChildUpdate is durable by the time it returns: the
-					// direct backend has written the zone file, the db backend
-					// has written the row. So this is the same promise the
-					// ZONE-UPDATE path makes.
-					ur.respond(true, nil)
-					invalidateImrDelegations(ur.ZoneName, ur.Actions)
-					// OptDirty is managed by the backend: 'direct' sets
-					// then clears it via WriteZone after persisting; DB-
-					// and zonefile-backends don't touch in-memory zone
-					// data so OptDirty stays as it was.
-					logUpdateActions("CHILD-UPDATE", ur.Actions)
-				}
-
-			case "ZONE-UPDATE":
-				// This is the case where a DNS UPDATE contains updates to authoritative data in the zone
-				// (i.e. not child delegation information).
-				lg.Info("ZoneUpdater: ZONE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
-				lg.Debug("ZoneUpdater: ZONE-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
-				// Admission: the DDNS channel is gated by allow-updates, the
-				// management-API channel by allow-api-updates (checked again
-				// in the handler, which is where PreAuthorized is set -- this
-				// is the backstop, not the only gate), and internal content
-				// changes bypass both.
-				//
-				// Snapshot both options together under zd.mu: config reload
-				// mutates the map under that lock, so an unlocked read is a
-				// data race and two independent reads could straddle a reload.
-				// Same treatment the CHILD-UPDATE case above gives its options.
-				zd.mu.Lock()
-				allowUpdates := zd.Options[OptAllowUpdates]
-				allowApiUpdates := zd.Options[OptAllowApiUpdates]
-				zd.mu.Unlock()
-
-				if allowUpdates || ur.InternalUpdate ||
-					(ur.PreAuthorized && allowApiUpdates) {
-					// Compute delegation sync status before apply (needs pre-state),
-					// but only enqueue after successful apply.
-					var dss DelegationSyncStatus
-					if !ur.InternalUpdate {
-						var err error
-						dss, err = zd.ZoneUpdateChangesDelegationDataNG(ur)
-						if err != nil {
-							lg.Error("ZoneUpdateChangesDelegationData failed", "error", err)
-						}
-						lg.Debug("ZoneUpdater: delegation sync status", "inSync", dss.InSync)
-					}
-
-					// An operator's edit of the apex CDS, CDNSKEY or CSYNC is
-					// passed on to the parent (delsync_signals.go). What the
-					// zone served before is read now; what the update left is
-					// read after it.
-					var signalsBefore map[uint16][]dns.RR
-					if !ur.InternalUpdate && touchesApexSignals(zd.ZoneName, ur.Actions) {
-						signalsBefore = zd.servedApexSignals()
-					}
-
-					var updated bool
-					var err error
-
-					// Both roles apply to the zone data, and by this point
-					// there is nothing role-specific left to decide. A
-					// secondary only reaches here having passed the
-					// origination gate at the head of the loop: it is an
-					// inline-signing secondary, or a zone in a derived app
-					// whose secondaries mutate by design. Either way the
-					// content is this server's to write.
-					//
-					// What used to stand in the Secondary arm was
-					// ApplyZoneUpdateToDB, a `return nil` placeholder. It
-					// dropped the update and reported that it had landed --
-					// and the DSYNC API turns that into a 200. Worse, its
-					// `err :=` shadowed the err this switch returns, so even a
-					// real failure could not have reached ur.respond (#554).
-					switch zd.ZoneType {
-					case Primary, Secondary:
-						updated, err = zd.ApplyZoneUpdateToZoneData(ur, kdb)
-						if err != nil {
-							lg.Error("ZoneUpdater: ApplyZoneUpdateToZoneData failed", "error", err)
-						}
-
-					default:
-						// ZoneType unset (0). The switch used to fall straight
-						// through, leaving updated=false and err=nil, which a
-						// caller checking only the error reads as success.
-						err = fmt.Errorf("zone %s has no zone type; refusing to apply a zone update", zd.ZoneName)
-						lg.Error("ZoneUpdater: zone update on a zone with no zone type",
-							"zone", zd.ZoneName, "cmd", ur.Cmd, "actions", len(ur.Actions))
-					}
-					// The change is now durable AND visible, or it failed. This is
-					// the earliest point at which a caller may honestly answer
-					// its own client, so release any waiter here rather than at
-					// the end of the case: the remaining work below (zonefile
-					// write-back for API-managed primaries, delegation sync) is
-					// follow-up, not part of the promise.
-					ur.respond(updated, err)
-
-					if updated {
-						invalidateImrDelegations(zd.ZoneName, ur.Actions)
-					}
-					if updated && !ur.InternalUpdate {
-						lg.Debug("ZoneUpdater: zone updated, setting dirty flag", "zone", zd.ZoneName)
-						zd.SetOption(OptDirty, true)
-						logUpdateActions("ZONE-UPDATE", ur.Actions)
-					}
-
-					// API-managed primaries persist updated content
-					// immediately (the mirror of the CHILD-UPDATE 'direct'
-					// backend persist): without this, updated content lives
-					// only in RAM until a freeze/manual write and is lost on
-					// restart. Internal updates (CSYNC/KEY publication etc.)
-					// are included — they change zone data too but never set
-					// OptDirty, so they need force. WriteZone clears OptDirty
-					// on success, which also un-blocks the dirty-primary
-					// reload refusal. The persistence decision reads a
-					// zd.mu-protected snapshot (RefreshEngine mutates these
-					// fields under that lock on reload); the lock is NOT held
-					// across WriteZone, which reacquires it.
-					if updated {
-						zd.mu.Lock()
-						apiPrimary := zd.ZoneType == Primary && zd.Options[OptApiManagedZone]
-						zonefile := zd.Zonefile
-						zd.mu.Unlock()
-						if apiPrimary && zonefile != "" {
-							if _, werr := zd.WriteZone(true, ur.InternalUpdate); werr != nil {
-								// The client response is long gone (async queue),
-								// so surface the persistence failure durably:
-								// visible in zone list, deliberately NOT
-								// service-impacting (memory state is good).
-								lg.Warn("ZoneUpdater: failed to persist API-managed primary after ZONE-UPDATE (updated content is in memory only until the next successful write)", "zone", zd.ZoneName, "file", zonefile, "error", werr)
-								zd.SetError(RefreshError, "failed to persist zone after update: %v", werr)
-								zd.LatestError = time.Now()
-							} else {
-								// A successful persist is the primary-zone
-								// analogue of a successful refresh (both are
-								// file I/O): clear RefreshError, same as the
-								// refresh paths do.
-								zd.ClearError(RefreshError)
-								lg.Debug("ZoneUpdater: persisted API-managed primary after ZONE-UPDATE", "zone", zd.ZoneName, "file", zonefile, "internal", ur.InternalUpdate)
-							}
-						}
-					}
-
-					// Enqueue delegation sync after successful apply.
-					//
-					// Cancellable, and safe to be: the waiter was released
-					// above and the change is already durable, so this is
-					// follow-up work. A plain send is not safe. The only reader
-					// of this queue is DelegationSyncher, which exits on the
-					// SAME cancellation, so a full queue at shutdown left this
-					// engine blocked forever on a request nobody would ever
-					// take -- and ZoneUpdaterEngine never returned.
-					//
-					// Dropping it costs a round of parent sync, not
-					// correctness: the drift is still in the zone, and the next
-					// load re-detects it.
-					if updated && !ur.InternalUpdate && zd.Options[OptParentSync] && !dss.InSync &&
-						(!ur.ParentSyncDone || len(dss.DNSKEYAdds)+len(dss.DNSKEYRemoves) > 0) {
-						lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
-						if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
-							Command:    "SYNC-DELEGATION",
-							ZoneName:   zd.ZoneName,
-							ZoneData:   zd,
-							SyncStatus: dss,
-						}) {
-							lg.Info("ZoneUpdater: context cancelled before the delegation-sync enqueue; the parent will be re-synced on the next load",
-								"zone", zd.ZoneName)
-							lg.Info("ZoneUpdater: terminating")
-							return nil
-						}
-						if err := zd.PublishCsyncRR(); err != nil {
-							lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
-						} else {
-							lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
-						}
-					}
-
-					// The operator's edit, compared with what the update staged
-					// rather than with the served zone: under a transaction
-					// hold the served zone is still the old one. The syncher
-					// sends nothing until the hold has ended.
-					if updated && signalsBefore != nil && zd.DelegationSyncQ != nil {
-						if types := editedSignalTypes(signalsBefore, zd.stagedApexSignals()); len(types) > 0 &&
-							zd.childDelegationSyncEnabled() {
-							lg.Debug("ZoneUpdater: an operator edited the zone's signals, sending SIGNALS-EDITED",
-								"zone", zd.ZoneName, "types", types)
-							if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
-								Command:     "SIGNALS-EDITED",
-								ZoneName:    zd.ZoneName,
-								ZoneData:    zd,
-								SignalTypes: types,
-							}) {
-								lg.Info("ZoneUpdater: context cancelled before the SIGNALS-EDITED enqueue", "zone", zd.ZoneName)
-								lg.Info("ZoneUpdater: terminating")
-								return nil
-							}
-						}
-					}
-				} else {
-					lg.Warn("ZoneUpdater: updates disallowed for zone, dropping ZONE-UPDATE", "zone", zd.ZoneName)
-					ur.respond(false, fmt.Errorf(
-						"zone %s does not allow updates on this channel", zd.ZoneName))
-				}
-				lg.Debug("ZoneUpdater: ZONE-UPDATE done")
-
-			case "TRUSTSTORE-UPDATE":
-				lg.Debug("ZoneUpdater: TRUSTSTORE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
-				lg.Debug("ZoneUpdater: TRUSTSTORE-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
-				tx, err := kdb.Begin("UpdaterEngine")
-				if err != nil {
-					lg.Error("kdb.Begin failed", "error", err)
-					ur.respond(false, fmt.Errorf("truststore update not started: %v", err))
-					continue
-				}
-				type pendingVerification struct {
-					childZone  string
-					parentZone string
-					keyid      uint16
-					keyRR      string
-				}
-				var toVerify []pendingVerification
-
-				// If this is a self-signed bootstrap ceremony carrying a
-				// DEL-ANY-KEY, defer the DEL: register a pending key-replacement
-				// so that once the newly-added (untrusted) key is validated and
-				// promoted to trusted, the child's other keys are removed. The
-				// DEL itself is not applied now (the class-ANY case below skips
-				// it), so an un-validated bootstrap never evicts a trusted key.
-				// Noted here, REGISTERED after the commit below succeeds. A
-				// marker written for a key that then failed to store would
-				// outlive the failure and could complete a cleanup for a key
-				// this update never actually added.
-				//
-				// ceremonyHasDel and ceremonyDeferred are deliberately separate.
-				// The first says "this class-ANY KEY record is the ceremony's own
-				// DEL half", which is what licenses skipping it below; the second
-				// says "and the new key is not yet trusted, so the cleanup has to
-				// wait for validation". A ceremony that arrives already trusted
-				// still has its DEL skipped -- as it did before this path learned
-				// to reject class ANY -- but registers no deferred cleanup.
-				ceremonyKey, hasDelAnyKey, isCeremony := bootstrapCeremony(ur.Actions)
-				ceremonyHasDel := isCeremony && hasDelAnyKey
-				ceremonyDeferred := ceremonyHasDel && !ur.Trusted
-
-				var applyErr error
-			trustLoop:
-				for _, rr := range ur.Actions {
-					var subcommand string
-					switch rr.Header().Class {
-					case dns.ClassINET:
-						subcommand = "add"
-					case dns.ClassNONE:
-						subcommand = "delete"
-					case dns.ClassANY:
-						// The ONE class-ANY record this path accepts is the
-						// "DEL <child> ANY KEY" half of the self-signed bootstrap
-						// ceremony (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
-						// §"Bootstrapping the Child's Key"). It is deferred, not
-						// ignored: the registration below completes it once the
-						// newly added key has been independently validated, which
-						// is the rule that stops a bogus self-signed UPDATE from
-						// evicting the currently trusted key.
-						//
-						// Everything else class-ANY is a wholesale RRset delete
-						// this path does not implement, and must fail the whole
-						// update rather than be dropped -- silently dropping it is
-						// how a truststore change that never landed got answered
-						// NOERROR.
-						if ceremonyHasDel && rr.Header().Rrtype == dns.TypeKEY {
-							continue
-						}
-						applyErr = fmt.Errorf("class ANY (delete RRset) is not supported for a truststore update")
-						break trustLoop
-					default:
-						applyErr = fmt.Errorf("unknown class %s in truststore update", dns.ClassToString[rr.Header().Class])
-						break trustLoop
-					}
-
-					keyrr, ok := rr.(*dns.KEY)
-					if !ok {
-						applyErr = fmt.Errorf("truststore update is not a KEY RR")
-						break trustLoop
-					}
-					tppost := TruststorePost{
-						SubCommand: subcommand,
-						Src:        "child-update",
-						Keyname:    keyrr.Header().Name,
-						Keyid:      int(keyrr.KeyTag()),
-						KeyRR:      rr.String(),
-						Validated:  ur.Validated,
-						Trusted:    ur.Trusted,
-					}
-
-					// Sig0TrustMgmt reports storage failures two ways: a
-					// returned error (canonicalisation, begin), and resp.Error
-					// with a nil error (the SQL Exec paths). Both are a failed
-					// update; checking only err is how a KEY upload that did
-					// not land used to be answered NOERROR.
-					resp, err := kdb.Sig0TrustMgmt(tx, tppost)
-					if err != nil {
-						applyErr = err
-						break trustLoop
-					}
-					if resp != nil && resp.Error {
-						applyErr = fmt.Errorf("truststore update failed: %s", resp.ErrorMsg)
-						break trustLoop
-					}
-
-					if subcommand == "add" && !ur.Trusted {
-						toVerify = append(toVerify, pendingVerification{
-							childZone:  keyrr.Header().Name,
-							parentZone: zd.ZoneName,
-							keyid:      uint16(keyrr.KeyTag()),
-							keyRR:      rr.String(),
-						})
-					}
-				}
-				if applyErr != nil {
-					lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE failed", "error", applyErr)
-					if rerr := tx.Rollback(); rerr != nil {
-						lg.Error("tx.Rollback failed", "error", rerr)
-					}
-					ur.respond(false, applyErr)
-					continue
-				}
-				if len(ur.Actions) == 0 {
-					if rerr := tx.Rollback(); rerr != nil {
-						lg.Error("tx.Rollback failed", "error", rerr)
-					}
-					ur.respond(false, fmt.Errorf("truststore update contained no records"))
-					continue
-				}
-				err = tx.Commit()
-				if err != nil {
-					lg.Error("tx.Commit failed", "error", err)
-					ur.respond(false, fmt.Errorf("truststore update not committed: %v", err))
-					continue
-				}
-				ur.respond(true, nil)
-				logUpdateActions("TRUSTSTORE-UPDATE", ur.Actions)
-
-				// The deferred half of a bootstrap DEL-ANY-KEY: the new key is
-				// stored, so once it is validated and promoted to trusted the
-				// child's superseded keys may be removed. Registered only here,
-				// after the commit: every earlier exit rolls the transaction back
-				// and continues, so reaching this line IS the proof that the key
-				// landed. (The branch's own keyStoreFailed flag is gone with the
-				// partial-commit behaviour it guarded against -- a store failure
-				// now aborts and rolls back the whole truststore update.)
-				if ceremonyDeferred {
-					registerPendingKeyReplacement(ceremonyKey.Header().Name, ceremonyKey.KeyTag())
-					lg.Info("ZoneUpdater: deferring DEL-ANY-KEY from self-signed bootstrap until new key is trusted",
-						"child", ceremonyKey.Header().Name, "keyid", ceremonyKey.KeyTag())
-				}
-
-				// Trigger async DNS verification for newly stored untrusted child keys.
-				for _, pv := range toVerify {
-					lg.Info("ZoneUpdater: triggering child key verification",
-						"zone", pv.childZone, "keyid", pv.keyid)
-					kdb.TriggerChildKeyVerification(ctx, pv.childZone, pv.parentZone, pv.keyid, pv.keyRR)
-				}
-			case UpdateCmdTxBegin:
-				// {start tx <zone> <id> <flags>}: a publish hold on the zone
-				// (zone_tx.go). This queue is one ordered channel with one
-				// consumer, so a writer's begin, changes and commit are applied
-				// in the order it sent them.
-				//
-				// A zone that may not originate content has nothing of ours to
-				// group, and a hold would stop its refresh publishes. A commit,
-				// below, is never refused on those grounds: a hold that got
-				// open must be closable.
-				if !zoneMayOriginateContent(zd) {
-					lg.Warn("ZoneUpdater: refusing a transaction on a zone that may not originate content",
-						"zone", ur.ZoneName, "tx", string(ur.TxID))
-					ur.respond(false, fmt.Errorf("zone %s may not originate content", ur.ZoneName))
-					continue
-				}
-				zd.mu.Lock()
-				err := zd.beginTxLocked(ur.TxID, ur.TxFlags)
-				zd.mu.Unlock()
-				if err != nil {
-					lg.Error("ZoneUpdater: TX-BEGIN refused", "zone", ur.ZoneName, "error", err)
-				}
-				ur.respond(err == nil, err)
-
-			case UpdateCmdTxCommit:
-				// {commit tx <zone> <id>}. The Resp is NOT answered here unless
-				// the commit is refused: it is answered once the transaction is
-				// published, or with the reason it was not -- by the publish in
-				// the caller when the zone is not Ready or the hold was urgent,
-				// and otherwise by the gate's publish, in the publisher's
-				// goroutine, where this handler cannot see the outcome.
-				zd.mu.Lock()
-				err := zd.commitTxLocked(ur.TxID, ur.Resp)
-				zd.mu.Unlock()
-				if err != nil {
-					lg.Error("ZoneUpdater: TX-COMMIT refused", "zone", ur.ZoneName, "error", err)
-					ur.respond(false, err)
-				}
-
-			default:
-				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)
-				// Including this one: a caller waiting on a command the
-				// updater does not implement should be told so, not left to
-				// time out.
-				ur.respond(false, fmt.Errorf("unknown update command %q", ur.Cmd))
-			}
-			lg.Info("ZoneUpdater: update request completed", "type", ur.Cmd)
 		}
 	}
 }
 
-// The return values are NAMED deliberately. The deferred block below sets
-// updated=false when the change could not be persisted, and with unnamed
-// results that assignment lands on a local the caller never sees: `return
-// updated, nil` copies the value into the result slot BEFORE deferred
-// functions run. A child update whose persist failed would then be reported as
-// applied -- and on the DSYNC API path, answered 200, which is precisely the
-// promise this persistence work exists to keep. ApplyZoneUpdateToZoneData has
-// named results for the same reason; this one did not, and that asymmetry was
-// the bug.
+// storeTrustKey is kdb.Sig0TrustMgmt, a variable so that a test can make a
+// truststore update panic while its transaction is open.
+var storeTrustKey = (*KeyDB).Sig0TrustMgmt
+
+// applyUpdate applies one request from the ZoneUpdater's queue. It reports
+// whether the engine is to stop, which it is only when ctx ends in the middle
+// of a request.
+//
+// A panic in it -- reached, say, from a child's records in a CHILD-UPDATE or a
+// TRUSTSTORE-UPDATE -- fails that request alone (#808). It is logged with the
+// command, the zone and the stack, the caller is answered with an error, and
+// the engine takes the next request. The engine's loop does not recover: a
+// loop that stopped would leave every writer of every zone waiting on UpdateQ.
+//
+// Recovering is safe only because what a panic unwinds through leaves nothing
+// behind. The appliers stage and publish through stageAndPublishLocked, a
+// TX-COMMIT publishes under withLockPublishing, the delegation store's
+// transaction ends in endTx, the truststore's is rolled back below, and zd.mu
+// is released by a defer wherever something that can panic runs under it.
+func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			lg.Error("ZoneUpdater: PANIC recovered; the update failed, the updater carries on",
+				"cmd", ur.Cmd, "zone", ur.ZoneName, "description", ur.Description,
+				"panic", fmt.Sprintf("%v", rec), "stack", string(debug.Stack()))
+			ur.respond(false, fmt.Errorf("internal error: the update panicked: %v", rec))
+			stop = false
+		}
+	}()
+
+	lg.Debug("ZoneUpdater received update request")
+	if ur.Cmd == "PING" {
+		lg.Debug("ZoneUpdater: PING received, PONG!")
+		return false
+	}
+	zd, ok := Zones.Get(ur.ZoneName)
+	if !ok {
+		lg.Warn("ZoneUpdater: unknown zone in update request, ignoring", "cmd", ur.Cmd, "zone", ur.ZoneName)
+		lg.Debug("ZoneUpdater: known zones", "zones", Zones.Keys())
+		ur.respond(false, fmt.Errorf("unknown zone %s", ur.ZoneName))
+		return false
+	}
+
+	// Fail-closed origination gate (Fix D). The per-command checks
+	// below gate ZONE-UPDATE on allow-updates OR ur.InternalUpdate --
+	// and EVERY ops_* publisher sets InternalUpdate, so allow-updates
+	// is a call-site convention rather than an applier gate. Any
+	// publisher that does not check the option at its own call site
+	// therefore walks straight through and mutates the zone.
+	//
+	// This is the chokepoint that makes the invariant structural
+	// rather than a promise kept by N call sites: a tdns-auth zone
+	// that may not originate content never has zone content applied,
+	// whatever flags the request carries.
+	//
+	// Scoped to the two zone-content commands. TRUSTSTORE-UPDATE must
+	// pass through untouched -- it writes the keystore, never zone
+	// content. DEFERRED-UPDATE errors out below; PING returned above.
+	//
+	// Logged at ERROR as an invariant violation, matching the existing
+	// precedent for the child-updates case a few lines down: once the
+	// origination options are normalized off, nothing should ever
+	// reach this gate, so a hit means some path bypassed the option
+	// system -- a code bug worth shouting about. Deliberately not
+	// recorded in the zone's error registry, so it cannot collide with
+	// the operator-facing config warning.
+	if updaterCmdMutatesZoneContent(ur.Cmd) && !zoneMayOriginateContent(zd) {
+		lg.Error("ZoneUpdater: refusing zone mutation on a secondary that may not originate content (invariant violation)",
+			"cmd", ur.Cmd, "zone", ur.ZoneName, "internal", ur.InternalUpdate,
+			"description", ur.Description, "actions", len(ur.Actions))
+		ur.respond(false, fmt.Errorf(
+			"zone %s may not originate content", ur.ZoneName))
+		return false
+	}
+
+	switch ur.Cmd {
+	case "DEFERRED-UPDATE":
+		lg.Error("ZoneUpdater: received deferred update on wrong queue", "description", ur.Description)
+		ur.respond(false, fmt.Errorf("deferred update sent to the wrong queue"))
+		return false
+
+	case "CHILD-UPDATE":
+		// Child delegation data update: dispatch to the configured DelegationBackend.
+		// Config validation guarantees that any zone with
+		// OptAllowChildUpdates has a non-nil DelegationBackend, so
+		// there is no fallback path. If the invariant is violated
+		// (which would indicate a code bug, not a config bug),
+		// drop the update loudly rather than silently mutating
+		// in-memory zone state behind the scanner's back.
+		lg.Debug("ZoneUpdater: CHILD-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
+		lg.Debug("ZoneUpdater: CHILD-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
+
+		// Key material is not delegation data, enforced at the write
+		// rather than only at the wire. The responder classifies a
+		// KEY-only update as a TRUSTSTORE-UPDATE and refuses one that
+		// mixes KEY with delegation records, so nothing should reach
+		// here carrying a KEY -- but this is the one point EVERY
+		// delegation backend passes through, and each of them got it
+		// wrong in its own way: the direct backend published the KEY
+		// into the parent zone at the delegation point, and the db
+		// backend stored it in ChildDelegationData to be served from
+		// there. A per-backend rule would have to be written, and kept
+		// right, three times.
+		//
+		// The only type filter downstream is
+		// updatepolicy.child.rrtypes, which is the WRONG instrument:
+		// it has to contain KEY for a child to be allowed to upload
+		// one at all, so allowing the bootstrap necessarily allowed
+		// the publication.
+		//
+		// Logged as an invariant violation, like the origination gate
+		// above: reaching it means a path bypassed the classifier.
+		if keyRR := firstKeyRR(ur.Actions); keyRR != nil {
+			lg.Error("ZoneUpdater: refusing to write child key material as zone content (invariant violation)",
+				"zone", ur.ZoneName, "owner", keyRR.Header().Name, "cmd", ur.Cmd)
+			ur.respond(false, fmt.Errorf(
+				"KEY records belong in the truststore, not in the delegation data of zone %s", ur.ZoneName))
+			return false
+		}
+		// Snapshot the two fields parseconfig.go mutates under
+		// zd.mu during config reload (Options + DelegationBackend).
+		// Reading them independently without the lock would let a
+		// concurrent reload flip one between checks, producing a
+		// spurious "invariant violation" ERROR.
+		zd.mu.Lock()
+		allowChildUpdates := zd.Options[OptAllowChildUpdates]
+		backend := zd.DelegationBackend
+		zd.mu.Unlock()
+
+		// Every exit from here answers ur.Resp. A caller that is
+		// waiting for the change to be durable before it says so --
+		// the RFC 2136 responder, and the DSYNC API handler -- has no
+		// other way to find out, and silence costs it a full
+		// UpdateApplyTimeout before it gives up and reports failure
+		// for an update that may well have succeeded.
+		if !allowChildUpdates {
+			lg.Warn("ZoneUpdater: zone does not allow child updates, dropping CHILD-UPDATE", "zone", ur.ZoneName)
+			ur.respond(false, fmt.Errorf("zone %s does not allow child updates", ur.ZoneName))
+			return false
+		}
+		if backend == nil {
+			lg.Error("ZoneUpdater: zone allows child updates but has no DelegationBackend, dropping CHILD-UPDATE (invariant violation)", "zone", ur.ZoneName)
+			ur.respond(false, fmt.Errorf("zone %s has no delegation backend", ur.ZoneName))
+			return false
+		}
+		if err := backend.ApplyChildUpdate(ur.ZoneName, ur); errors.Is(err, errUpdateDeferred) {
+			// Staged, its publish deferred to the gate or to a commit: the
+			// zone answers the request from the publish that carries it.
+			// The resolver's view of the delegation is dropped by the zone
+			// after the publish that carries the change (applyChildUpdate).
+			lg.Debug("ZoneUpdater: CHILD-UPDATE staged, its publish deferred",
+				"zone", ur.ZoneName, "backend", backend.Name())
+			logUpdateActions("CHILD-UPDATE", ur.Actions)
+		} else if err != nil {
+			lg.Error("ZoneUpdater: DelegationBackend.ApplyChildUpdate failed",
+				"backend", backend.Name(), "error", err)
+			ur.respond(false, err)
+		} else {
+			lg.Info("ZoneUpdater: CHILD-UPDATE applied",
+				"zone", ur.ZoneName, "backend", backend.Name())
+			// ApplyChildUpdate is durable by the time it returns: the
+			// direct backend has written the zone file, the db backend
+			// has written the row. So this is the same promise the
+			// ZONE-UPDATE path makes.
+			ur.respond(true, nil)
+			invalidateImrDelegations(ur.ZoneName, ur.Actions)
+			// OptDirty is managed by the backend: 'direct' sets
+			// then clears it via WriteZone after persisting; DB-
+			// and zonefile-backends don't touch in-memory zone
+			// data so OptDirty stays as it was.
+			logUpdateActions("CHILD-UPDATE", ur.Actions)
+		}
+
+	case "ZONE-UPDATE":
+		// This is the case where a DNS UPDATE contains updates to authoritative data in the zone
+		// (i.e. not child delegation information).
+		lg.Info("ZoneUpdater: ZONE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
+		lg.Debug("ZoneUpdater: ZONE-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
+		// Admission: the DDNS channel is gated by allow-updates, the
+		// management-API channel by allow-api-updates (checked again
+		// in the handler, which is where PreAuthorized is set -- this
+		// is the backstop, not the only gate), and internal content
+		// changes bypass both.
+		//
+		// Snapshot both options together under zd.mu: config reload
+		// mutates the map under that lock, so an unlocked read is a
+		// data race and two independent reads could straddle a reload.
+		// Same treatment the CHILD-UPDATE case above gives its options.
+		zd.mu.Lock()
+		allowUpdates := zd.Options[OptAllowUpdates]
+		allowApiUpdates := zd.Options[OptAllowApiUpdates]
+		allowTsigUpdates := zd.Options[OptAllowTsigUpdates]
+		zd.mu.Unlock()
+
+		if allowUpdates || ur.InternalUpdate ||
+			(ur.PreAuthorized && allowApiUpdates) ||
+			(ur.Authz.isTsig() && allowTsigUpdates) {
+			// Compute delegation sync status before apply (needs pre-state),
+			// but only enqueue after successful apply.
+			var dss DelegationSyncStatus
+			if !ur.InternalUpdate {
+				var err error
+				dss, err = zd.ZoneUpdateChangesDelegationDataNG(ur)
+				if err != nil {
+					lg.Error("ZoneUpdateChangesDelegationData failed", "error", err)
+				}
+				lg.Debug("ZoneUpdater: delegation sync status", "inSync", dss.InSync)
+			}
+
+			// An operator's edit of the apex CDS, CDNSKEY or CSYNC is
+			// passed on to the parent (delsync_signals.go). What the
+			// zone served before is read now; what the update left is
+			// read after it.
+			var signalsBefore map[uint16][]dns.RR
+			if !ur.InternalUpdate && touchesApexSignals(zd.ZoneName, ur.Actions) {
+				signalsBefore = zd.servedApexSignals()
+			}
+
+			// What follows a publish. API-managed primaries persist updated
+			// content (the mirror of the CHILD-UPDATE 'direct' backend
+			// persist); internal updates are included, since they change
+			// zone data too but never set OptDirty, so they need force.
+			// Then the delegation sync, cancellable: the only reader of that
+			// queue exits on the same cancellation, so a plain send at
+			// shutdown would block this engine forever; dropping it costs a
+			// round of parent sync, not correctness. The operator's signal
+			// edit is compared with what the update staged, not with the
+			// served zone. Under the gate the publish may be the publisher's,
+			// later: then the zone runs this after the publish that carried
+			// the change, outside zd.mu, registered with the stage so that no
+			// publish can slip in between. It reports whether the engine is to
+			// stop, which is only when ctx ends during an enqueue, and only
+			// matters inline. Defined before the apply: it reads the zone when
+			// it runs, and dss and signalsBefore were read before the apply.
+			afterPublish := func() (stop bool) {
+				zd.mu.Lock()
+				apiPrimary := zd.ZoneType == Primary && zd.Options[OptApiManagedZone]
+				zonefile := zd.Zonefile
+				zd.mu.Unlock()
+				if apiPrimary && zonefile != "" {
+					if _, werr := zd.WriteZone(true, ur.InternalUpdate); werr != nil {
+						// Visible in zone list, deliberately NOT service-impacting
+						// (the memory state is good).
+						lg.Warn("ZoneUpdater: failed to persist API-managed primary after ZONE-UPDATE (updated content is in memory only until the next successful write)", "zone", zd.ZoneName, "file", zonefile, "error", werr)
+						zd.SetError(RefreshError, "failed to persist zone after update: %v", werr)
+						zd.LatestError = time.Now()
+					} else {
+						zd.ClearError(RefreshError)
+						lg.Debug("ZoneUpdater: persisted API-managed primary after ZONE-UPDATE", "zone", zd.ZoneName, "file", zonefile, "internal", ur.InternalUpdate)
+					}
+				}
+
+				if !ur.InternalUpdate && zd.Options[OptParentSync] && !dss.InSync &&
+					(!ur.ParentSyncDone || len(dss.DNSKEYAdds)+len(dss.DNSKEYRemoves) > 0) {
+					lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
+					if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
+						Command:    "SYNC-DELEGATION",
+						ZoneName:   zd.ZoneName,
+						ZoneData:   zd,
+						SyncStatus: dss,
+					}) {
+						lg.Info("ZoneUpdater: context cancelled before the delegation-sync enqueue; the parent will be re-synced on the next load",
+							"zone", zd.ZoneName)
+						return true
+					}
+					if err := zd.PublishCsyncRR(); err != nil {
+						lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
+					} else {
+						lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
+					}
+				}
+
+				if signalsBefore != nil && zd.DelegationSyncQ != nil {
+					if types := editedSignalTypes(signalsBefore, zd.stagedApexSignals()); len(types) > 0 &&
+						zd.childDelegationSyncEnabled() {
+						lg.Debug("ZoneUpdater: an operator edited the zone's signals, sending SIGNALS-EDITED",
+							"zone", zd.ZoneName, "types", types)
+						if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
+							Command:     "SIGNALS-EDITED",
+							ZoneName:    zd.ZoneName,
+							ZoneData:    zd,
+							SignalTypes: types,
+						}) {
+							lg.Info("ZoneUpdater: context cancelled before the SIGNALS-EDITED enqueue", "zone", zd.ZoneName)
+							return true
+						}
+					}
+				}
+				return false
+			}
+			var updated bool
+			var err error
+
+			// Both roles apply to the zone data, and by this point
+			// there is nothing role-specific left to decide. A
+			// secondary only reaches here having passed the
+			// origination gate at the head of the loop: it is an
+			// inline-signing secondary, or a zone in a derived app
+			// whose secondaries mutate by design. Either way the
+			// content is this server's to write.
+			//
+			// What used to stand in the Secondary arm was
+			// ApplyZoneUpdateToDB, a `return nil` placeholder. It
+			// dropped the update and reported that it had landed --
+			// and the DSYNC API turns that into a 200. Worse, its
+			// `err :=` shadowed the err this switch returns, so even a
+			// real failure could not have reached ur.respond (#554).
+			var deferred bool
+			switch zd.ZoneType {
+			case Primary, Secondary:
+				updated, deferred, err = zd.applyZoneUpdate(ur, kdb, func() { afterPublish() })
+				if err != nil {
+					lg.Error("ZoneUpdater: ApplyZoneUpdateToZoneData failed", "error", err)
+				}
+
+			default:
+				// ZoneType unset (0). The switch used to fall straight
+				// through, leaving updated=false and err=nil, which a
+				// caller checking only the error reads as success.
+				err = fmt.Errorf("zone %s has no zone type; refusing to apply a zone update", zd.ZoneName)
+				lg.Error("ZoneUpdater: zone update on a zone with no zone type",
+					"zone", zd.ZoneName, "cmd", ur.Cmd, "actions", len(ur.Actions))
+			}
+			// The change is durable and visible, or it failed, or its publish
+			// is deferred to the gate. In the first two cases this is the
+			// earliest point at which a caller may honestly answer its own
+			// client, so the waiter is released here rather than at the end of
+			// the case: the remaining work (the zone file of an API-managed
+			// primary, the delegation sync) is follow-up, not part of the
+			// promise. In the third the zone holds the request's Resp and
+			// answers it from the publish that carries the change.
+			if !deferred {
+				ur.respond(updated, err)
+			}
+
+			// The resolver's view of a changed delegation is dropped once the
+			// change is served, never before: a lookup in between would cache
+			// the old delegation again, for its TTL. Deferred, the zone does it
+			// after the publish that carries the change (applyZoneUpdate).
+			if updated && !deferred {
+				invalidateImrDelegations(zd.ZoneName, ur.Actions)
+			}
+			if updated && !ur.InternalUpdate {
+				lg.Debug("ZoneUpdater: zone updated, setting dirty flag", "zone", zd.ZoneName)
+				zd.SetOption(OptDirty, true)
+				logUpdateActions("ZONE-UPDATE", ur.Actions)
+			}
+
+			// Published in the caller: what follows runs now. Deferred: the zone
+			// registered it with the stage, and runs it after the publish that
+			// carries the change.
+			if updated && !deferred {
+				if afterPublish() {
+					lg.Info("ZoneUpdater: terminating")
+					return true
+				}
+			}
+		} else {
+			lg.Warn("ZoneUpdater: updates disallowed for zone, dropping ZONE-UPDATE", "zone", zd.ZoneName)
+			ur.respond(false, fmt.Errorf(
+				"zone %s does not allow updates on this channel", zd.ZoneName))
+		}
+		lg.Debug("ZoneUpdater: ZONE-UPDATE done")
+
+	case "TRUSTSTORE-UPDATE":
+		lg.Debug("ZoneUpdater: TRUSTSTORE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
+		lg.Debug("ZoneUpdater: TRUSTSTORE-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
+		tx, err := kdb.Begin("UpdaterEngine")
+		if err != nil {
+			lg.Error("kdb.Begin failed", "error", err)
+			ur.respond(false, fmt.Errorf("truststore update not started: %v", err))
+			return false
+		}
+		// Rolled back if a panic leaves it open: the loop below computes the
+		// key tags of a child's KEYs. KeyDB runs one transaction at a time, so
+		// one left open would refuse every later Begin in the process (#808).
+		// txOpen is cleared by each explicit end, so that this never ends a
+		// transaction twice: a second Rollback would clear KeyDB.Ctx under
+		// somebody else's transaction.
+		txOpen := true
+		defer func() {
+			if txOpen {
+				if rerr := tx.Rollback(); rerr != nil {
+					lg.Error("tx.Rollback after a panic failed", "error", rerr)
+				}
+			}
+		}()
+		type pendingVerification struct {
+			childZone  string
+			parentZone string
+			keyid      uint16
+			keyRR      string
+		}
+		var toVerify []pendingVerification
+
+		// If this is a self-signed bootstrap ceremony carrying a
+		// DEL-ANY-KEY, defer the DEL: register a pending key-replacement
+		// so that once the newly-added (untrusted) key is validated and
+		// promoted to trusted, the child's other keys are removed. The
+		// DEL itself is not applied now (the class-ANY case below skips
+		// it), so an un-validated bootstrap never evicts a trusted key.
+		// Noted here, REGISTERED after the commit below succeeds. A
+		// marker written for a key that then failed to store would
+		// outlive the failure and could complete a cleanup for a key
+		// this update never actually added.
+		//
+		// ceremonyHasDel and ceremonyDeferred are deliberately separate.
+		// The first says "this class-ANY KEY record is the ceremony's own
+		// DEL half", which is what licenses skipping it below; the second
+		// says "and the new key is not yet trusted, so the cleanup has to
+		// wait for validation". A ceremony that arrives already trusted
+		// still has its DEL skipped -- as it did before this path learned
+		// to reject class ANY -- but registers no deferred cleanup.
+		ceremonyKey, hasDelAnyKey, isCeremony := bootstrapCeremony(ur.Actions)
+		ceremonyHasDel := isCeremony && hasDelAnyKey
+		ceremonyDeferred := ceremonyHasDel && !ur.Trusted
+
+		var applyErr error
+	trustLoop:
+		for _, rr := range ur.Actions {
+			var subcommand string
+			switch rr.Header().Class {
+			case dns.ClassINET:
+				subcommand = "add"
+			case dns.ClassNONE:
+				subcommand = "delete"
+			case dns.ClassANY:
+				// The ONE class-ANY record this path accepts is the
+				// "DEL <child> ANY KEY" half of the self-signed bootstrap
+				// ceremony (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
+				// §"Bootstrapping the Child's Key"). It is deferred, not
+				// ignored: the registration below completes it once the
+				// newly added key has been independently validated, which
+				// is the rule that stops a bogus self-signed UPDATE from
+				// evicting the currently trusted key.
+				//
+				// Everything else class-ANY is a wholesale RRset delete
+				// this path does not implement, and must fail the whole
+				// update rather than be dropped -- silently dropping it is
+				// how a truststore change that never landed got answered
+				// NOERROR.
+				if ceremonyHasDel && rr.Header().Rrtype == dns.TypeKEY {
+					continue
+				}
+				applyErr = fmt.Errorf("class ANY (delete RRset) is not supported for a truststore update")
+				break trustLoop
+			default:
+				applyErr = fmt.Errorf("unknown class %s in truststore update", dns.ClassToString[rr.Header().Class])
+				break trustLoop
+			}
+
+			keyrr, ok := rr.(*dns.KEY)
+			if !ok {
+				applyErr = fmt.Errorf("truststore update is not a KEY RR")
+				break trustLoop
+			}
+			tppost := TruststorePost{
+				SubCommand: subcommand,
+				Src:        "child-update",
+				Keyname:    keyrr.Header().Name,
+				Keyid:      int(keyrr.KeyTag()),
+				KeyRR:      rr.String(),
+				Validated:  ur.Validated,
+				Trusted:    ur.Trusted,
+			}
+
+			// Sig0TrustMgmt reports storage failures two ways: a
+			// returned error (canonicalisation, begin), and resp.Error
+			// with a nil error (the SQL Exec paths). Both are a failed
+			// update; checking only err is how a KEY upload that did
+			// not land used to be answered NOERROR.
+			resp, err := storeTrustKey(kdb, tx, tppost)
+			if err != nil {
+				applyErr = err
+				break trustLoop
+			}
+			if resp != nil && resp.Error {
+				applyErr = fmt.Errorf("truststore update failed: %s", resp.ErrorMsg)
+				break trustLoop
+			}
+
+			if subcommand == "add" && !ur.Trusted {
+				toVerify = append(toVerify, pendingVerification{
+					childZone:  keyrr.Header().Name,
+					parentZone: zd.ZoneName,
+					keyid:      uint16(keyrr.KeyTag()),
+					keyRR:      rr.String(),
+				})
+			}
+		}
+		if applyErr != nil {
+			lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE failed", "error", applyErr)
+			if rerr := tx.Rollback(); rerr != nil {
+				lg.Error("tx.Rollback failed", "error", rerr)
+			}
+			txOpen = false
+			ur.respond(false, applyErr)
+			return false
+		}
+		if len(ur.Actions) == 0 {
+			if rerr := tx.Rollback(); rerr != nil {
+				lg.Error("tx.Rollback failed", "error", rerr)
+			}
+			txOpen = false
+			ur.respond(false, fmt.Errorf("truststore update contained no records"))
+			return false
+		}
+		err = tx.Commit()
+		txOpen = false
+		if err != nil {
+			lg.Error("tx.Commit failed", "error", err)
+			ur.respond(false, fmt.Errorf("truststore update not committed: %v", err))
+			return false
+		}
+		ur.respond(true, nil)
+		logUpdateActions("TRUSTSTORE-UPDATE", ur.Actions)
+
+		// The deferred half of a bootstrap DEL-ANY-KEY: the new key is
+		// stored, so once it is validated and promoted to trusted the
+		// child's superseded keys may be removed. Registered only here,
+		// after the commit: every earlier exit rolls the transaction back
+		// and continues, so reaching this line IS the proof that the key
+		// landed. (The branch's own keyStoreFailed flag is gone with the
+		// partial-commit behaviour it guarded against -- a store failure
+		// now aborts and rolls back the whole truststore update.)
+		if ceremonyDeferred {
+			registerPendingKeyReplacement(ceremonyKey.Header().Name, ceremonyKey.KeyTag())
+			lg.Info("ZoneUpdater: deferring DEL-ANY-KEY from self-signed bootstrap until new key is trusted",
+				"child", ceremonyKey.Header().Name, "keyid", ceremonyKey.KeyTag())
+		}
+
+		// Trigger async DNS verification for newly stored untrusted child keys.
+		for _, pv := range toVerify {
+			lg.Info("ZoneUpdater: triggering child key verification",
+				"zone", pv.childZone, "keyid", pv.keyid)
+			kdb.TriggerChildKeyVerification(ctx, pv.childZone, pv.parentZone, pv.keyid, pv.keyRR)
+		}
+	case UpdateCmdTxBegin:
+		// {start tx <zone> <id> <flags>}: a publish hold on the zone
+		// (zone_tx.go). This queue is one ordered channel with one
+		// consumer, so a writer's begin, changes and commit are applied
+		// in the order it sent them.
+		//
+		// A zone that may not originate content has nothing of ours to
+		// group, and a hold would stop its refresh publishes. A commit,
+		// below, is never refused on those grounds: a hold that got
+		// open must be closable.
+		if !zoneMayOriginateContent(zd) {
+			lg.Warn("ZoneUpdater: refusing a transaction on a zone that may not originate content",
+				"zone", ur.ZoneName, "tx", string(ur.TxID))
+			ur.respond(false, fmt.Errorf("zone %s may not originate content", ur.ZoneName))
+			return false
+		}
+		err := zd.withLock(func() error { return zd.beginTxLocked(ur.TxID, ur.TxFlags) })
+		if err != nil {
+			lg.Error("ZoneUpdater: TX-BEGIN refused", "zone", ur.ZoneName, "error", err)
+		}
+		ur.respond(err == nil, err)
+
+	case UpdateCmdTxCommit:
+		// {commit tx <zone> <id>}. The Resp is NOT answered here unless
+		// the commit is refused: it is answered once the transaction is
+		// published, or with the reason it was not -- by the publish in
+		// the caller when the zone is not Ready or the hold was urgent,
+		// and otherwise by the gate's publish, in the publisher's
+		// goroutine, where this handler cannot see the outcome.
+		// The commit can publish (txHoldClosedLocked), so it is guarded like
+		// the appliers' publish: a panic must not leave the zone locked, nor
+		// leave what it had staged to go out with a later publish (#808).
+		err := zd.withLockPublishing(func() error { return zd.commitTxLocked(ur.TxID, ur.Resp) })
+		if err != nil {
+			lg.Error("ZoneUpdater: TX-COMMIT refused", "zone", ur.ZoneName, "error", err)
+			ur.respond(false, err)
+		}
+
+	default:
+		lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)
+		// Including this one: a caller waiting on a command the
+		// updater does not implement should be told so, not left to
+		// time out.
+		ur.respond(false, fmt.Errorf("unknown update command %q", ur.Cmd))
+	}
+	lg.Info("ZoneUpdater: update request completed", "type", ur.Cmd)
+	return false
+}
+
+// ApplyChildUpdateToZoneData applies one child update's actions to the zone.
+//
+// A change that could not be persisted is an error, never "applied": on the
+// DSYNC API path "applied" is answered 200, which is precisely the promise the
+// persistence work exists to keep.
 func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (updated bool, err error) {
+	updated, _, err = zd.applyChildUpdate(ur, kdb, nil)
+	return updated, err
+}
+
+// applyChildUpdate is ApplyChildUpdateToZoneData, reporting a deferred
+// publish (see applyZoneUpdate). after, if given, follows the publish that
+// carries the change when that publish is deferred; the caller runs its own
+// follow-up when the publish was in the caller.
+func (zd *ZoneData) applyChildUpdate(ur UpdateRequest, kdb *KeyDB, after func()) (updated, deferred bool, err error) {
 
 	lg.Debug("ApplyChildUpdateToZoneData", "request", fmt.Sprintf("%+v", ur))
 
@@ -754,40 +829,137 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 			dak, err = zd.EnsureActiveDnssecKeys(kdb, false)
 			if err != nil {
 				lg.Error("ApplyChildUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
-				return false, err
+				return false, false, err
 			}
 			if dak == nil || len(dak.ZSKs) == 0 {
-				return false, fmt.Errorf("zone %s has no active ZSKs and signing is enabled. child update is rejected", zd.ZoneName)
+				return false, false, fmt.Errorf("zone %s has no active ZSKs and signing is enabled. child update is rejected", zd.ZoneName)
 			}
 		}
+	}
+	clamp, err := zd.updateClamp(kdb, dak)
+	if err != nil {
+		lg.Error("ApplyChildUpdateToZoneData: failed to resolve the TTL clamp", "zone", zd.ZoneName, "error", err)
+		return false, false, err
 	}
 
 	zd.mu.Lock()
-	defer func() {
-		if updated {
-			// Phase 2: delegation records written by a CHILD-UPDATE are zone
-			// content like any other -- they are staged into the working set
-			// and published from here. Without this they would be served but
-			// not recorded, and would silently roll back at the next restart
-			// while every other kind of change survived.
-			zd.wsPersistDelta = !ur.Replay
-			zd.publishLocked(zd.generation.Load())
-			if zd.wsPersistErr != nil {
-				lg.Error("child update not applied: could not persist the change",
-					"zone", zd.ZoneName, "error", zd.wsPersistErr)
-				zd.wsPersistErr = nil
-				updated = false
+	// A defer of its own, so that the lock is released however this ends, a
+	// publish that panics included (#808).
+	defer zd.mu.Unlock()
+	// Phase 2: delegation records written by a CHILD-UPDATE are zone content
+	// like any other -- they are staged into the working set and published by
+	// stageAndPublishLocked. Without that they would be served but not
+	// recorded, and would silently roll back at the next restart while every
+	// other kind of change survived.
+	var persistErr error
+	var absent []dns.RR
+	updated, deferred, persistErr, err = zd.stageAndPublishLocked(ur, func() bool {
+		// Before anything is staged: a refused update applies none of its
+		// actions.
+		if absent = zd.absentChildDeletesLocked(ur.Actions); len(absent) > 0 {
+			return false
+		}
+		return zd.stageChildUpdateLocked(ur, dak, clamp)
+	}, zd.followsPublish(ur, after))
+	if len(absent) > 0 {
+		err = &ChildDeleteNotInZoneError{Zone: zd.ZoneName, Records: absent}
+	}
+	if persistErr != nil {
+		// An error, not just updated=false: the direct backend, this
+		// applier's caller, reads only the error, and the ZoneUpdater would
+		// answer the child's DSYNC API or RFC 2136 request with success for a
+		// change the zone neither serves nor saved.
+		lg.Error("child update not applied: could not persist the change",
+			"zone", zd.ZoneName, "error", persistErr)
+		err = fmt.Errorf("zone %s: child update not applied: could not persist the change: %w",
+			zd.ZoneName, persistErr)
+	}
+	return updated, deferred, err
+}
+
+// updateClamp is the TTL clamp an update signs the RRsets it changes with: the
+// one the zone's re-signing uses (ClampParamsForZone), so the policy's
+// ttls.max-served ceiling and the rollover clamp hold for an update too. nil
+// for a zone that does not sign here, has no keys or has no policy.
+//
+// Updates used to sign with no clamp, and an RRset an update wrote was served
+// at the TTL the update carried until the next re-sign. A DS a child posted
+// with TTL 3600 was served, and cached by validating resolvers, for an hour
+// under a policy that serves nothing for longer than five minutes, and its
+// withdrawal went unseen by them for as long.
+func (zd *ZoneData) updateClamp(kdb *KeyDB, dak *DnssecKeys) (*ClampParams, error) {
+	if !zd.signsHere() || dak == nil || zd.DnssecPolicy == nil {
+		return nil, nil
+	}
+	clamp, err := ClampParamsForZone(kdb, zd.ZoneName, zd.DnssecPolicy, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("zone %s: resolving the TTL clamp: %w", zd.ZoneName, err)
+	}
+	return clamp, nil
+}
+
+// ChildDeleteNotInZoneError refuses a child update that deletes a record the
+// zone does not hold (absentChildDeletesLocked). Nothing in the update was
+// applied. The RFC 2136 responder answers it NXRRSET.
+type ChildDeleteNotInZoneError struct {
+	Zone    string
+	Records []dns.RR // the class-NONE deletes that named no record in the zone
+}
+
+func (e *ChildDeleteNotInZoneError) Error() string {
+	recs := make([]string, 0, len(e.Records))
+	for _, rr := range e.Records {
+		rrcopy := dns.Copy(rr)
+		rrcopy.Header().Class = dns.ClassINET
+		recs = append(recs, rrcopy.String())
+	}
+	return fmt.Sprintf("zone %s does not hold the record the update deletes, so nothing in it was applied: %s",
+		e.Zone, strings.Join(recs, "; "))
+}
+
+// absentChildDeletesLocked returns the class-NONE deletes in a child update
+// that name a record the working set does not hold. The caller holds zd.mu.
+//
+// RFC 2136 §3.4.2.4 lets such a delete pass as a no-op, answered NOERROR. But a
+// child's delegation syncher deletes a record it saw the parent serve, and takes
+// NOERROR to mean the parent serves it no longer: it does not send the delete
+// again. A delete that matched nothing while the record stayed in the zone was
+// answered exactly so (#843). So the update is refused, as a failed "RR exists"
+// prerequisite is, and nothing in it is applied.
+func (zd *ZoneData) absentChildDeletesLocked(actions []dns.RR) []dns.RR {
+	var absent []dns.RR
+	for _, rr := range actions {
+		if rr.Header().Class != dns.ClassNONE {
+			continue
+		}
+		// A type the policy denies is skipped by the staging, delete or not.
+		if _, ok := zd.UpdatePolicy.Child.RRtypes[rr.Header().Rrtype]; !ok {
+			continue
+		}
+		held := false
+		if owner := zd.stagedOwner(rr.Header().Name); owner != nil {
+			if rrset, exists := owner.RRtypes.Get(rr.Header().Rrtype); exists {
+				want := dns.Copy(rr)
+				want.Header().Class = dns.ClassINET
+				for _, have := range rrset.RRs {
+					if core.IsDuplicate(have, want) {
+						held = true
+						break
+					}
+				}
 			}
 		}
-		zd.mu.Unlock()
-	}()
-	// Not on top of a staged replacement: this change is journalled, and the
-	// replacement would be journalled with it (#748). A replay is not.
-	if !ur.Replay {
-		if err = zd.flushStagedReplacementLocked(); err != nil {
-			return false, err
+		if !held {
+			absent = append(absent, rr)
 		}
 	}
+	return absent
+}
+
+// stageChildUpdateLocked stages the actions of a child update in the working
+// set, and reports whether it changed anything. The caller holds zd.mu, and
+// publishes what it staged (stageAndPublishLocked).
+func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys, clamp *ClampParams) (updated bool) {
 	zd.ensureWorkingSet()
 
 	// A CSYNC/DSYNC-driven child update can create or remove a delegation, and
@@ -872,7 +1044,12 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
 			lg.Debug("ApplyChildUpdateToZoneData: Remove RR", "owner", ownerName, "rrtype", rrtypestr, "rr", rrcopy.String())
-			rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
+			if !rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) { // Cannot remove rr, because it is in the wrong class.
+				// The zone held it (absentChildDeletesLocked), so an earlier
+				// action in this update removed it. Nothing left to change.
+				lg.Debug("ApplyChildUpdateToZoneData: RR already removed by this update", "owner", ownerName, "rrtype", rrtypestr)
+				continue
+			}
 			if len(rrset.RRs) == 0 {
 				zd.stageDeleteLocked(ownerName, rrtype)
 			} else {
@@ -880,7 +1057,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 				// at a delegation point only the DS is authoritative parent
 				// data. NS and glue are the child's, signed in the child.
 				if dak != nil && zd.signableLocked(ownerName, rrtype) {
-					_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
+					_, err := zd.SignRRset(&rrset, ownerName, dak, true, clamp)
 					if err != nil {
 						lg.Error("ApplyChildUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 					}
@@ -909,7 +1086,9 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 
 		dup := false
 		for _, oldrr := range rrset.RRs {
-			if dns.IsDuplicate(oldrr, rrcopy) {
+			// core.IsDuplicate: a DS read from the zone file matches the same
+			// DS from the wire (#843), and is not added a second time.
+			if core.IsDuplicate(oldrr, rrcopy) {
 				lg.Debug("ApplyChildUpdateToZoneData: not adding duplicate", "rrtype", rrtypestr, "rr", rrcopy.String())
 				dup = true
 				break
@@ -924,7 +1103,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 		// One TTL per RRset (RFC 2181 §5.2): the child-policy TTL the new RR
 		// was given applies to the whole RRset. Also on a duplicate add, since
 		// dns.IsDuplicate ignores the TTL. #767
-		if unifyRRsetTTL(rrset.RRs, rrcopy.Header().Ttl) {
+		if setRRsetTTL(&rrset, rrcopy.Header().Ttl) {
 			lg.Debug("ApplyChildUpdateToZoneData: normalised RRset TTL", "owner", ownerName,
 				"rrtype", rrtypestr, "ttl", rrcopy.Header().Ttl)
 			changed = true
@@ -934,7 +1113,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 			// See the removal branch above: only the DS at a delegation
 			// point is ours to sign.
 			if dak != nil && zd.signableLocked(ownerName, rrtype) {
-				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
+				_, err := zd.SignRRset(&rrset, ownerName, dak, true, clamp)
 				if err != nil {
 					lg.Error("ApplyChildUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 				}
@@ -946,20 +1125,37 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (up
 		continue
 	}
 
-	zd.reconcileDelegationChangesLocked(childNsBefore, dak)
+	zd.reconcileDelegationChangesLocked(childNsBefore, dak, clamp)
 
 	lg.Debug("ApplyChildUpdateToZoneData done", "updated", updated)
 
-	return updated, nil
+	return updated
 }
 
 // ApplyZoneUpdateToZoneData applies one update's actions to the zone.
 //
-// The returns are named because the deferred publish below can fail: a change
-// whose delta cannot be persisted is refused rather than served (see
-// publishWorkingSetLocked), and that has to surface as an error here rather
-// than as a successful-looking (true, nil).
+// The publish can fail: a change whose delta cannot be persisted is refused
+// rather than served (see publishWorkingSetLocked), and that has to surface as
+// an error here rather than as a successful-looking (true, nil).
+//
+// For a caller that reads the zone back (a replay, a merge, the tests) the
+// publish is in this call: a replay publishes at once, and a zone that is
+// idle or not Ready publishes in the caller. On a busy zone the publish is
+// deferred to the gate and "updated" says the change is staged; the
+// ZoneUpdater uses applyZoneUpdate, which says so, and lets the zone answer
+// the request.
 func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (updated bool, err error) {
+	updated, _, err = zd.applyZoneUpdate(ur, kdb, nil)
+	return updated, err
+}
+
+// applyZoneUpdate is ApplyZoneUpdateToZoneData, reporting a deferred publish.
+// after, if given, follows the publish that carries the change when that
+// publish is deferred: it is registered with the stage, under the same lock, so
+// that no publish can come between the two. When the publish was in the
+// caller, the caller runs its own follow-up. The resolver's view of a changed
+// delegation is dropped the same way (invalidateImrDelegations).
+func (zd *ZoneData) applyZoneUpdate(ur UpdateRequest, kdb *KeyDB, after func()) (updated, deferred bool, err error) {
 
 	// dump.P(ur)
 	// log.Printf("**** ApplyZoneUpdateToZoneData: ur=%+v", ur)
@@ -976,12 +1172,18 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		dak, err = zd.EnsureActiveDnssecKeys(kdb, false)
 		if err != nil {
 			lg.Error("ApplyZoneUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
-			return false, err
+			return false, false, err
 		}
 		if dak == nil || len(dak.KSKs) == 0 {
 			lg.Error("ApplyZoneUpdateToZoneData: still no active KSKs after EnsureActiveDnssecKeys", "zone", zd.ZoneName)
-			return false, fmt.Errorf("zone %s has no active KSKs and online-signing is enabled. zone update is rejected", zd.ZoneName)
+			return false, false, fmt.Errorf("zone %s has no active KSKs and online-signing is enabled. zone update is rejected", zd.ZoneName)
 		}
+	}
+
+	clamp, err := zd.updateClamp(kdb, dak)
+	if err != nil {
+		lg.Error("ApplyZoneUpdateToZoneData: failed to resolve the TTL clamp", "zone", zd.ZoneName, "error", err)
+		return false, false, err
 	}
 
 	// Refuse (or, on replay, drop) any attempt to write the apex ZONEMD of a
@@ -989,36 +1191,39 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 	// staged, so the update is rejected whole rather than half-applied.
 	filteredActions, zerr := zd.filterManagedZonemdActions(ur.Actions, ur.Replay)
 	if zerr != nil {
-		return false, zerr
+		return false, false, zerr
 	}
 	ur.Actions = filteredActions
 
 	zd.mu.Lock()
-	defer func() {
-		if updated {
-			// Phase 2: the publish writes the delta durably BEFORE making the
-			// change visible, and refuses the publish if that write fails --
-			// see publishWorkingSetLocked. Report such a failure as an error:
-			// nothing was published, so returning success would claim a change
-			// the zone is not serving and will not remember.
-			zd.wsPersistDelta = !ur.Replay
-			zd.publishLocked(zd.generation.Load())
-			if zd.wsPersistErr != nil {
-				err = fmt.Errorf("zone %s: update not applied: could not persist the change: %w",
-					zd.ZoneName, zd.wsPersistErr)
-				zd.wsPersistErr = nil
-				updated = false
-			}
-		}
-		zd.mu.Unlock()
-	}()
-	// Not on top of a staged replacement: this change is journalled, and the
-	// replacement would be journalled with it (#748). A replay is not.
-	if !ur.Replay {
-		if err = zd.flushStagedReplacementLocked(); err != nil {
-			return false, err
-		}
+	// A defer of its own, so that the lock is released however this ends, a
+	// publish that panics included (#808).
+	defer zd.mu.Unlock()
+	// Refused whole, before anything is staged, and the sender is told: an
+	// update that would leave an SVCB RRset mixing AliasMode and ServiceMode
+	// records (RFC 9460 section 2.4.1), as the zone load refuses such a file.
+	if err := zd.refuseMixedSvcbUpdateLocked(ur.Actions); err != nil {
+		return false, false, err
 	}
+	var persistErr error
+	updated, deferred, persistErr, err = zd.stageAndPublishLocked(ur, func() bool { return zd.stageZoneUpdateLocked(ur, dak, clamp) },
+		zd.followsPublish(ur, after))
+	if persistErr != nil {
+		// Phase 2: the publish writes the delta durably BEFORE making the
+		// change visible, and refuses the publish if that write fails -- see
+		// publishWorkingSetLocked. Report such a failure as an error: nothing
+		// was published, so returning success would claim a change the zone is
+		// not serving and will not remember.
+		err = fmt.Errorf("zone %s: update not applied: could not persist the change: %w",
+			zd.ZoneName, persistErr)
+	}
+	return updated, deferred, err
+}
+
+// stageZoneUpdateLocked stages the actions of a zone update in the working
+// set, and reports whether it changed anything. The caller holds zd.mu, and
+// publishes what it staged (stageAndPublishLocked).
+func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys, clamp *ClampParams) (updated bool) {
 	zd.ensureWorkingSet()
 
 	lg.Debug("ApplyZoneUpdateToZoneData: processing actions", "zone", zd.ZoneName, "count", len(ur.Actions))
@@ -1129,8 +1334,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 					retained++
 					continue
 				}
-				if _, allowed := zd.UpdatePolicy.Zone.RRtypes[t]; !allowed &&
-					!ur.InternalUpdate && !ur.PreAuthorized {
+				if !ur.typeAllowed(zd, ownerName, t) {
 					denied++
 					continue
 				}
@@ -1162,8 +1366,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		// API-channel requests bypass it: the API's authorization is the API
 		// key, already checked by the handler that set PreAuthorized. Zone
 		// self-service therefore stays on DDNS, where the policy applies.
-		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
-		if !ok && !ur.InternalUpdate && !ur.PreAuthorized {
+		if !ur.typeAllowed(zd, ownerName, rrtype) {
 			lg.Error("ApplyZoneUpdateToZoneData: RR type denied by policy", "rrtype", rrtypestr)
 			continue
 		}
@@ -1219,8 +1422,8 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 			rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
 				zd.stageDeleteLocked(ownerName, rrtype)
-			} else if zd.signableLocked(ownerName, rrtype) {
-				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
+			} else if zd.signsHere() && zd.signableLocked(ownerName, rrtype) {
+				_, err := zd.SignRRset(&rrset, ownerName, dak, true, clamp)
 				if err != nil {
 					lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 					// Continue anyway - the record is still added, just not signed
@@ -1315,7 +1518,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		// when the add was a duplicate: dns.IsDuplicate ignores the TTL, so
 		// re-adding an existing RR is how a mixed-TTL RRset gets repaired.
 		// The RRs are safe to mutate: cloneRRset above deep-copies them. #767
-		if unifyRRsetTTL(rrset.RRs, rrcopy.Header().Ttl) {
+		if setRRsetTTL(&rrset, rrcopy.Header().Ttl) {
 			lg.Debug("ApplyZoneUpdateToZoneData: normalised RRset TTL", "owner", ownerName,
 				"rrtype", rrtypestr, "ttl", rrcopy.Header().Ttl)
 			changed = true
@@ -1323,8 +1526,10 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 
 		if changed {
 			// rrset.RRSIGs = []dns.RR{} // XXX: The RRset changed, so any old RRSIGs are now invalid.
-			if zd.signableLocked(ownerName, rrtype) {
-				_, err = zd.SignRRset(&rrset, ownerName, dak, true, nil)
+			// An unsigned zone has nothing to sign with: asking SignRRset
+			// only logged an ERROR for every update to it.
+			if zd.signsHere() && zd.signableLocked(ownerName, rrtype) {
+				_, err := zd.SignRRset(&rrset, ownerName, dak, true, clamp)
 				if err != nil {
 					lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 					// Continue anyway - the record is still added, just not signed
@@ -1346,11 +1551,208 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		continue
 	}
 
-	zd.reconcileDelegationChangesLocked(nsBefore, dak)
+	zd.reconcileDelegationChangesLocked(nsBefore, dak, clamp)
 
 	lg.Debug("ApplyZoneUpdateToZoneData done", "updated", updated)
 
-	return updated, nil
+	return updated
+}
+
+// stageAndPublishLocked is the locked part of the two update appliers. It
+// publishes a replacement still staged, runs stage, which stages the update's
+// actions in the working set, and publishes what stage staged. The caller holds
+// zd.mu, and releases it in a defer of its own.
+//
+// It returns stage's outcome; err when a staged replacement could not be
+// published first; and persistErr when the publish could not persist the
+// change, which each applier reports in its own way.
+//
+// A panic is not recovered here: the ZoneUpdater recovers it (#808). This
+// leaves the zone consistent for that:
+//
+//   - A panic in stage leaves nothing of the update behind. The working set is
+//     put back as it was before stage ran, so that no later publish sends what
+//     stage had staged before the panic. Somebody else's staged work is kept,
+//     as StageBatch keeps it.
+//   - A panic in a publish cannot be unwound (publishPanickedLocked).
+//
+// Before this, the publish ran from the same defer that unlocked zd.mu, when
+// updated was set -- and stage sets it action by action. A panic part-way
+// through published and journalled a partial change, just before the process
+// died, and a panic in that publish skipped the unlock.
+// errUpdateDeferred is what a DelegationBackend's ApplyChildUpdate returns
+// when the change is staged and its publish deferred: the zone holds the
+// request's Resp and answers it from the publish that carries the change.
+var errUpdateDeferred = errors.New("the update is staged; its publish is deferred and the zone answers for it")
+
+// after, if not nil, is registered to follow the publish when stage's work is
+// left for the gate's publish or a commit, under the lock the stage ran under.
+func (zd *ZoneData) stageAndPublishLocked(ur UpdateRequest, stage func() bool, after func()) (updated, deferred bool, persistErr, err error) {
+	const (
+		flushing = iota
+		staging
+		publishing
+		finished
+	)
+	step := flushing
+	var saved stagingSave
+	defer func() {
+		switch step {
+		case staging:
+			zd.restoreStagingLocked(saved)
+		case flushing, publishing:
+			zd.publishPanickedLocked()
+		}
+	}()
+
+	// Not on top of a staged replacement: this change is journalled, and the
+	// replacement would be journalled with it (#748). A replay is not.
+	if !ur.Replay {
+		if err = zd.flushStagedReplacementLocked(); err != nil {
+			step = finished
+			return false, false, nil, err
+		}
+	}
+
+	saved = zd.saveStagingLocked()
+	step = staging
+	updated = stage()
+	step = finished
+	if !updated {
+		return false, false, nil, nil
+	}
+
+	// Accumulated, not assigned: under the gate a replayed update staged after
+	// a fresh one is published with it, and that publish journals the fresh
+	// change.
+	zd.wsPersistDelta = zd.wsPersistDelta || !ur.Replay
+	step = publishing
+	errBefore := zd.ErrorMsg
+	outcome := zd.publishOrQueueLocked(zd.generation.Load(), ur.Replay)
+	step = finished
+	switch outcome {
+	case publishQueued, publishHeld:
+		// Staged and waiting for the gate's publish, or for the commit that
+		// closes the hold. The outcome, the journal's error included, reaches
+		// the sender through the zone's waiters.
+		if ur.Resp != nil {
+			zd.waiters = append(zd.waiters, ur.Resp)
+		}
+		if after != nil {
+			zd.afterPublish = append(zd.afterPublish, after)
+		}
+		return true, true, nil, nil
+	case publishRefused:
+		if zd.wsPersistErr != nil {
+			persistErr = zd.wsPersistErr
+			zd.wsPersistErr = nil
+			return false, false, persistErr, nil
+		}
+		// Refused before the journal: the zone cannot sign the change, its
+		// NSEC chain cannot be repaired, a held zone's first content is still
+		// unsigned. Nothing is served and nothing is written, so the sender
+		// is told, with what the deferred path tells its waiter. The change
+		// stays staged when the refusal kept the working set, and so does
+		// its follow-up: the publish that carries the change runs it.
+		if after != nil && zd.workingSet != nil {
+			zd.afterPublish = append(zd.afterPublish, after)
+		}
+		return false, false, nil, zd.publishRefusalErrorLocked(errBefore)
+	}
+	return true, false, nil, nil
+}
+
+// followsPublish is what runs after the publish that carries a deferred
+// update: the resolver's view of any delegation the update changed is dropped
+// (it would otherwise re-cache the old one in the window before the publish),
+// then the caller's own follow-up. Run by the publisher, outside zd.mu.
+func (zd *ZoneData) followsPublish(ur UpdateRequest, after func()) func() {
+	imr := Globals.ImrEngine // read here, on the staging goroutine, not on the publisher's
+	return func() {
+		invalidateDelegationsIn(imr, zd.ZoneName, ur.Actions)
+		if after != nil {
+			after()
+		}
+	}
+}
+
+// publishPanickedLocked is what is left to do after a publish panicked, before
+// the panic reaches the ZoneUpdater's recover. The caller holds zd.mu.
+//
+// The publish cannot be unwound. It had moved the serial, and it may have
+// written the change to the journal before it would have stored the snapshot.
+// So nothing is retried: the working set is dropped, as the publish's own
+// refusals drop it, and the zone carries a PublishError until a reload settles
+// it with the journal -- which is what a restart after a crash at the same
+// point would have done. The zone serves its last published content meanwhile.
+// The serial stays where the publish left it: going back could reuse a serial
+// the journal already holds, and a skipped serial is harmless.
+func (zd *ZoneData) publishPanickedLocked() {
+	zd.answerWaitersLocked(ZoneUpdateResult{Err: fmt.Errorf("zone %s: a publish of the zone failed part-way", zd.ZoneName)})
+	zd.afterPublish = nil
+	zd.workingSet = nil
+	zd.wsSignalSynth = nil
+	zd.wsFromReplacement = false
+	zd.publishQueued = false
+	zd.publishUrgent = false
+	zd.wsIxfrEpochReset = false
+	zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
+	zd.wsPersistDelta = false
+	zd.wsPersistErr = nil
+	zd.wsSkipIfUnchanged = false
+	zd.wsRecordContentDigest = false
+	zd.setErrorLocked(PublishError, "a publish of the zone failed part-way (internal error);"+
+		" it serves its last published content, which may disagree with its journal until the zone is reloaded")
+}
+
+// withLock runs fn with zd.mu held, and releases the lock however fn ends, a
+// panic included.
+func (zd *ZoneData) withLock(fn func() error) error {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return fn()
+}
+
+// withLockPublishing is withLock for an fn that may publish on the ZoneUpdater's
+// goroutine, where a panic is recovered: a panic in fn is handled as a publish
+// that panicked (publishPanickedLocked) before the lock is released and the
+// panic goes on.
+//
+// Only this goroutine's publishes are guarded. StageBatch, the publisher, and
+// the refresh and signing engines publish on goroutines that are not the
+// ZoneUpdater's; this change does not touch what a panic does there.
+func (zd *ZoneData) withLockPublishing(fn func() error) error {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	done := false
+	defer func() {
+		if !done {
+			zd.publishPanickedLocked()
+		}
+	}()
+	err := fn()
+	done = true
+	return err
+}
+
+// setRRsetTTL gives rrset the TTL an update carries, and reports whether that
+// changed it. An RRset the signer has clamped is served below its own TTL,
+// which UnclampedTTL holds: that is the TTL compared and set, and signing
+// clamps the records again (applyClampToRRset). Compared with the records'
+// TTL, an update re-adding an RRset at its own TTL changed it every time, and
+// one lowering the TTL was signed at the clamp of the TTL it replaced.
+func setRRsetTTL(rrset *core.RRset, ttl uint32) bool {
+	if rrset.UnclampedTTL == 0 || len(rrset.RRs) == 0 {
+		return unifyRRsetTTL(rrset.RRs, ttl)
+	}
+	if rrset.UnclampedTTL == ttl {
+		// A record just added carries ttl, the others the clamped TTL. They
+		// are one RRset, and signing brings all of them to the clamp.
+		return unifyRRsetTTL(rrset.RRs, rrset.RRs[0].Header().Ttl)
+	}
+	rrset.UnclampedTTL = ttl
+	unifyRRsetTTL(rrset.RRs, ttl)
+	return true
 }
 
 // unifyRRsetTTL sets the TTL of every RR in rrs to ttl, so the RRset obeys
@@ -1382,7 +1784,7 @@ func unifyRRsetTTL(rrs []dns.RR, ttl uint32) bool {
 // zone is a SERVFAIL for anyone validating. The NSEC chain is already repaired
 // for both directions by restitchNsecLocked, which walks every name for exactly
 // this reason -- this is the signature half of the same reconciliation.
-func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, dak *DnssecKeys) {
+func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, dak *DnssecKeys, clamp *ClampParams) {
 	var flipped []string
 	for name, had := range nsBefore {
 		if had != zd.ownerIsDelegationLocked(name) {
@@ -1427,11 +1829,13 @@ func (zd *ZoneData) reconcileDelegationChangesLocked(nsBefore map[string]bool, d
 				}
 				// Ours now. Sign only what is actually unsigned: everything
 				// else under the cut was already correct before it moved.
-				if dak == nil || len(rrset.RRs) == 0 || len(rrset.RRSIGs) > 0 {
+				if !zd.signsHere() || dak == nil || len(rrset.RRs) == 0 || len(rrset.RRSIGs) > 0 {
 					continue
 				}
 				rrset.RRtype = rrt
-				if _, serr := zd.SignRRset(&rrset, name, dak, true, nil); serr != nil {
+				// rrset's RRs are borrowed from the published snapshot;
+				// SignRRset's storage contract keeps them unwritten (#797).
+				if _, serr := zd.SignRRset(&rrset, name, dak, true, clamp); serr != nil {
 					lg.Error("reconcileDelegationChangesLocked: signing a name the moved delegation uncovered failed",
 						"zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[rrt], "error", serr)
 					continue
@@ -1513,7 +1917,12 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		// XXX: This is the wrong place for this check. These things should be already sorted out during the approval phase.
 		// XXX: But we keep it here until the approval code is updated.
 		// First check whether this update is allowed by the update-policy.
-		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
+		var ok bool
+		if ur.Authz != nil {
+			ok = ur.typeAllowed(zd, ownerName, rrtype)
+		} else {
+			_, ok = zd.UpdatePolicy.Zone.RRtypes[rrtype]
+		}
 		if !ok && !ur.InternalUpdate {
 			// log.Printf("ZUCDDNG: Error: request to add %s RR, which is denied by policy", rrtypestr)
 			continue
@@ -2105,7 +2514,14 @@ func rrPresentIn(list []dns.RR, rr dns.RR) bool {
 // just made Secure that meant every CDS and CSYNC refused as "indeterminate" for
 // up to half an hour, and a child that had re-keyed could not roll (#694).
 func invalidateImrDelegations(zone string, actions []dns.RR) {
-	imr := Globals.ImrEngine
+	invalidateDelegationsIn(Globals.ImrEngine, zone, actions)
+}
+
+// invalidateDelegationsIn is invalidateImrDelegations on a resolver read by
+// the caller: a follow-up that runs on the publisher's goroutine takes the
+// resolver when it is registered, on the goroutine that staged the change,
+// and never reads the global from another.
+func invalidateDelegationsIn(imr *Imr, zone string, actions []dns.RR) {
 	if imr == nil || imr.Cache == nil {
 		return
 	}

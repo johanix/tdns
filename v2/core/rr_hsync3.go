@@ -20,9 +20,16 @@ import (
 //
 // Fields:
 //   state    - ON or OFF
-//   label    - unqualified provider tag (e.g. "netnod"), NOT an FQDN
+//   label    - the provider's Label (e.g. "netnod"): 1 to 16 characters, each
+//              a lowercase ASCII letter, a digit or a hyphen. NOT an FQDN, and
+//              no trailing dot.
 //   identity - FQDN for agent discovery (e.g. "agent.netnod.se.")
-//   upstream - label of upstream provider, or "." if none (NOT an FQDN)
+//   upstream - the upstream provider's Label, or "." if none
+//
+// Label and upstream follow the Label rule that HSYNCPARAM's servers, signers
+// and auditors follow (isValidHsyncLabel), so that a Label in HSYNCPARAM
+// matches its HSYNC3 record octet by octet. Anything else is refused by Parse,
+// Unpack and Pack.
 
 func init() {
 	RegisterHsync3RR()
@@ -30,9 +37,9 @@ func init() {
 
 type HSYNC3 struct {
 	State    uint8  // 0=OFF, 1=ON
-	Label    string // unqualified provider tag, e.g. "netnod" — NOT an FQDN
+	Label    string // the provider's Label, e.g. "netnod" — NOT an FQDN
 	Identity string // FQDN for agent discovery, e.g. "agent.netnod.se."
-	Upstream string // label of upstream provider, or "." — NOT an FQDN
+	Upstream string // the upstream provider's Label, or "." — NOT an FQDN
 }
 
 func NewHSYNC3() dns.PrivateRdata { return new(HSYNC3) }
@@ -51,19 +58,42 @@ func (rd *HSYNC3) Parse(txt []string) error {
 		return fmt.Errorf("invalid HSYNC3 state: %s", txt[0])
 	}
 
-	label := dns.Fqdn(txt[1])
+	label := txt[1]
+	if err := checkHsync3Label(label); err != nil {
+		return err
+	}
 
 	identity := dns.Fqdn(txt[2])
 	if _, ok := dns.IsDomainName(identity); !ok {
 		return fmt.Errorf("invalid HSYNC3 identity: %s", txt[2])
 	}
 
-	upstream := dns.Fqdn(txt[3])
+	upstream := txt[3]
+	if err := checkHsync3Upstream(upstream); err != nil {
+		return err
+	}
 
 	rd.State = state
 	rd.Label = label
 	rd.Identity = identity
 	rd.Upstream = upstream
+	return nil
+}
+
+// checkHsync3Label refuses a label that is not a Label. Earlier code stored
+// the label with a trailing dot ("netnod."); that is not a Label either.
+func checkHsync3Label(label string) error {
+	if !isValidHsyncLabel(label) {
+		return fmt.Errorf("invalid HSYNC3 label %q: a Label is 1-16 of a-z, 0-9, -", label)
+	}
+	return nil
+}
+
+// checkHsync3Upstream accepts "." (no upstream) or a Label.
+func checkHsync3Upstream(upstream string) error {
+	if upstream != "." && !isValidHsyncLabel(upstream) {
+		return fmt.Errorf("invalid HSYNC3 upstream %q: a Label (1-16 of a-z, 0-9, -) or \".\"", upstream)
+	}
 	return nil
 }
 
@@ -101,6 +131,12 @@ func unpackCharacterString(buf []byte, off int) (string, int, error) {
 }
 
 func (rd *HSYNC3) Pack(buf []byte) (int, error) {
+	if err := checkHsync3Label(rd.Label); err != nil {
+		return 0, err
+	}
+	if err := checkHsync3Upstream(rd.Upstream); err != nil {
+		return 0, err
+	}
 	var off int
 	off, err := packUint8(rd.State, buf, off)
 	if err != nil {
@@ -141,6 +177,9 @@ func (rd *HSYNC3) Unpack(buf []byte) (int, error) {
 	if err != nil {
 		return off, err
 	}
+	if err := checkHsync3Label(rd.Label); err != nil {
+		return off, err
+	}
 	if off == len(buf) {
 		return off, nil
 	}
@@ -155,6 +194,9 @@ func (rd *HSYNC3) Unpack(buf []byte) (int, error) {
 
 	rd.Upstream, off, err = unpackCharacterString(buf, off)
 	if err != nil {
+		return off, err
+	}
+	if err := checkHsync3Upstream(rd.Upstream); err != nil {
 		return off, err
 	}
 

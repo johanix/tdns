@@ -1,9 +1,13 @@
 # Splitting `SignZone`: building a signed zone is not the same job as renewing its signatures
 
-**Status:** design, reviewed three times, approved, implementable from here. Nothing
-implemented yet. The clone rule and the walk table came from review 1, the locked recipe and the
-restitch correction from review 2, and the four implementation contracts at the end of §3.2 from
-review 3.
+**Status:** design, reviewed three times, approved. Implemented on `main`: §3.2
+`RenewZoneSignatures` (`8a8d4517`) and §4, the renewal schedule (`41660910`). Both came from PR
+#524, which was merged into PR #514's branch (`1ca5135d`) and reached `main` with PR #514
+(`fe83b216`, 2026-09-11). §3.3 is not implemented. The clone rule and the walk table came from
+review 1, the locked recipe and the restitch correction from review 2, and the four
+implementation contracts at the end of §3.2 from review 3.
+**Amended:** 2026-09-28 (#797): one block in §3.2, after the "harmless *by accident*"
+paragraph; nothing else is edited apart from the Status line above.
 **Base:** `main` @ `b4825f50`. `v2/` tree only.
 **Prompted by:** a field report on 2026-09-05 — every signed zone re-signed and republished
 once a minute with no content change: 8 serial bumps in 7½ minutes, 869 NOTIFY lines,
@@ -184,6 +188,23 @@ every chain name before the walk begins, so the mutation lands on clones. **The 
 design removes is the step that currently makes the walk safe.** A renewal pass that skips the
 rebuild and calls `SignRRset` on a working-set RRset writes through to the published snapshot —
 TTLs on a zone that is being served, with no rollback.
+
+> **Amendment, 2026-09-28 (#797).** This section is as written on 2026-09-05. The paragraph
+> above did not hold. `GenerateNsecChainWithDak` does `cloneOwner` every chain name, but
+> `cloneOwner` copies each RRtypes entry only as a struct, so the `RRs` and `RRSIGs` slices stay
+> shared with the snapshot — as the first of the four contracts at the end of this section says.
+> `SignZone`'s walk was therefore never protected, and `SignRRset` wrote into the snapshot
+> through the RRSIGs slice as well as the TTLs: it dropped a signature by shifting the slice in
+> place and appended the new one into the capacity that freed. A forced pass — every DNSSEC
+> policy apply — rewrote the served snapshot under an unchanged serial, and the IXFR link
+> computed after it deleted signatures no link had added and missed the ones it replaced.
+>
+> Since #797 the rule stated below holds in the callee as well: `SignRRset` never writes into
+> storage it did not allocate — it reads its input, puts new state in slices it allocates, and
+> assigns `*rrset` once, on success — and `applyClampToRRset` is copy-on-write. The clone in
+> step 5 is kept; it is no longer the only protection. One consequence for §3.3: its hazard, a
+> clamp applied to an RRset that is then not staged, no longer exists, because the clamp no
+> longer writes into shared records.
 
 So, as a rule rather than a step: collect names from the snapshot under `zd.mu`, clone before
 `SignRRset`, stage only clones. **Never call `SignRRset` on an RRset that shares storage with

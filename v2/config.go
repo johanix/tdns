@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 )
 
 var Conf Config
@@ -134,7 +136,7 @@ type DnssecConf struct {
 	Templates map[string]DnssecPolicyConf `yaml:"templates" mapstructure:"templates"`
 
 	// Policies are the named DNSSEC policies a zone references via its
-	// dnssec_policy field. YAML: dnssec.policies:.
+	// dnssecpolicy field. YAML: dnssec.policies:.
 	Policies map[string]DnssecPolicyConf `yaml:"policies" mapstructure:"policies"`
 
 	// Kasp is the Key and Signing Policy controlling the KeyStateWorker.
@@ -209,6 +211,12 @@ type LogConf struct {
 	File       string            `yaml:"file" validate:"required"`
 	Level      string            `yaml:"level"`      // "debug"|"info"|"warn"|"error"; default "info"
 	Subsystems map[string]string `yaml:"subsystems"` // per-subsystem level overrides
+	// Log rotation (#974). Each is optional; one not set takes its default
+	// (defaultLogMaxSize and its neighbours in logging.go). A pointer, so a 0
+	// that is written is refused rather than read as "not set".
+	MaxSize    *int `yaml:"max-size" mapstructure:"max-size"`       // MB before the file is rotated
+	MaxBackups *int `yaml:"max-backups" mapstructure:"max-backups"` // rotated files kept
+	MaxAge     *int `yaml:"max-age" mapstructure:"max-age"`         // days a rotated file is kept
 }
 
 type ServiceConf struct {
@@ -223,6 +231,27 @@ type ServiceConf struct {
 type TransportConf struct {
 	Type   string `yaml:"type" validate:"omitempty,oneof=tsync svcb none"`
 	Signal string `yaml:"signal"`
+}
+
+// Validate refuses, at config load, a signal this server would publish (type
+// svcb or tsync) that does not parse or names a token other than do53, dot, doh
+// and doq. No tdns publisher may emit a new token, such as `udp` or `tcp`,
+// before every node that can re-pack the record keeps it (the alternative-
+// endpoint design, tdns #1043, section 8). With type none the signal is not
+// published and is not checked.
+func (t TransportConf) Validate() error {
+	switch strings.ToLower(t.Type) {
+	case "svcb", "tsync":
+	default:
+		return nil
+	}
+	if t.Signal == "" {
+		return nil
+	}
+	if err := core.ValidatePublishedTransportSignal(t.Signal); err != nil {
+		return fmt.Errorf("service.transport.signal %q: %v", t.Signal, err)
+	}
+	return nil
 }
 
 // ListenersConf is the listening side of an app's DNS service: addresses,
@@ -304,12 +333,21 @@ type AuthEngineConf struct {
 	// transfers and NOTIFYs. One of:
 	//   keep     — outbound = inbound serial (default; current behavior).
 	//   unixtime — outbound = time.Now().Unix() at parse.
-	//   persist  — outbound = previously-saved outbound serial (from the
-	//              OutgoingSerials DB table). Every BumpSerial writes the
-	//              new value back. On clean restart with no zone change,
-	//              the serial stays put — secondaries don't see a regression
-	//              and don't trigger an unnecessary AXFR.
+	//   persist  — kept as an equivalent name for keep. What it used to add,
+	//              a restart that never goes below the last serial served,
+	//              now applies to every mode: each publish records its serial
+	//              in the OutgoingSerials DB table, and the first load lands
+	//              past it (#655). On a clean restart with no zone change the
+	//              serial stays put.
 	OutboundSoaSerial string `yaml:"outbound-soa-serial,omitempty" mapstructure:"outbound-soa-serial" validate:"omitempty,oneof=keep unixtime persist"`
+
+	// NotifyRetries and NotifyRetryInterval are the server-wide NOTIFY resend
+	// settings (#1007): how many times an unanswered NOTIFY is sent again
+	// (default 5), and the wait before the first resend, doubling each time
+	// (default "10s"). A zone's own notify-retries / notify-retry-interval
+	// override them. Read when the Notifier starts.
+	NotifyRetries       *int   `yaml:"notify-retries,omitempty" mapstructure:"notify-retries"`
+	NotifyRetryInterval string `yaml:"notify-retry-interval,omitempty" mapstructure:"notify-retry-interval"`
 
 	// TransferSrc is the server-global source address for OUTBOUND zone
 	// transfers -- the local address we bind before dialling an upstream, i.e.
@@ -326,6 +364,10 @@ type AuthEngineConf struct {
 	// upstream is used, and an upstream with no matching entry is dialled
 	// unbound rather than failed. Per-zone ZoneConf.TransferSrc overrides this;
 	// empty there inherits.
+	//
+	// Outbound NOTIFY binds it too (#1062), picked the same way per target: a
+	// downstream's allow-notify sees the same address an upstream's
+	// allow-transfer does.
 	TransferSrc []string `yaml:"transfer-src,omitempty" mapstructure:"transfer-src"`
 }
 
@@ -397,12 +439,16 @@ func ValidateTransferSrc(where string, srcs []string) error {
 // tdns-agent) is internal by design — its only listener is the loopback
 // listeners.imr-debug-address window.
 type ImrEngineConf struct {
-	Active      *bool                `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
-	RootHints   string               `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
-	Stubs       []ImrStubConf        `yaml:"stubs"`
-	Forward     []ImrForwardConf     `yaml:"forward" mapstructure:"forward"`
-	OptionsStrs []string             `yaml:"options" mapstructure:"options"`
-	Options     map[ImrOption]string `yaml:"-" mapstructure:"-"`
+	Active    *bool  `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
+	RootHints string `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
+	// OutboundAddressFamilies is which address families the resolver sends its
+	// queries to authoritative servers over: ipv4, ipv6, or both (the default).
+	// What it listens on is listeners.addresses. See ParseAddressFamilies.
+	OutboundAddressFamilies []string             `yaml:"outbound-address-families" mapstructure:"outbound-address-families"`
+	Stubs                   []ImrStubConf        `yaml:"stubs"`
+	Forward                 []ImrForwardConf     `yaml:"forward" mapstructure:"forward"`
+	OptionsStrs             []string             `yaml:"options" mapstructure:"options"`
+	Options                 map[ImrOption]string `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
 	// full RR text (zonefile format). DS is preferred as it is more convenient.
 	// Both tags are load bearing, because Config is decoded by two different
@@ -428,6 +474,90 @@ type ImrEngineConf struct {
 	// address-family tracking, discovery state, etc.). All fields
 	// are optional in YAML; LoadImrTuningDefaults fills zero values.
 	Tuning ImrTuningConf `yaml:"tuning" mapstructure:"tuning"`
+	// ClientStats: per-client transport counters (imr_client_stats.go).
+	ClientStats ImrClientStatsConf `yaml:"client-stats" mapstructure:"client-stats"`
+	// Testing holds switches for black-box test harnesses, not for production.
+	// `config check` warns about any that is set. See
+	// docs/2026-09-28-imr-deckard-test-clock-and-switches.md.
+	Testing ImrTestingConf `yaml:"testing" mapstructure:"testing"`
+}
+
+// ImrTestingConf holds the resolver's test-harness switches.
+type ImrTestingConf struct {
+	// Priming false seeds the cache from the root hints and marks it primed,
+	// without the live ". NS" query. A harness such as Deckard starts its
+	// scripted servers only once the resolver accepts connections, and the
+	// resolver listens only once priming has succeeded: without this switch it
+	// never becomes ready there.
+	Priming *bool `yaml:"priming" mapstructure:"priming"`
+
+	// Faketime makes the resolver's data time -- what signatures, cache
+	// expiry and served TTLs are measured against -- a test clock read from
+	// a libfaketime timestamp file: $FAKETIME_TIMESTAMP_FILE, or FaketimeFile.
+	// Deckard fakes the time this way, and libfaketime cannot reach a Go
+	// binary. Timeouts, backoffs and RTTs stay on real time.
+	Faketime bool `yaml:"faketime" mapstructure:"faketime"`
+	// FaketimeFile names the timestamp file, and turns the test clock on.
+	FaketimeFile string `yaml:"faketime-file" mapstructure:"faketime-file"`
+
+	// RootRefresh false stops the refresh of the root NS before it expires.
+	// The test clock implies it: the refresh waits in real time for an
+	// expiry stamped in data time.
+	RootRefresh *bool `yaml:"root-refresh" mapstructure:"root-refresh"`
+}
+
+// SkipPriming reports whether testing.priming is set to false.
+func (t ImrTestingConf) SkipPriming() bool { return t.Priming != nil && !*t.Priming }
+
+// FaketimeOn reports whether the test clock is configured.
+func (t ImrTestingConf) FaketimeOn() bool { return t.Faketime || t.FaketimeFile != "" }
+
+// FaketimePath is the timestamp file the test clock reads: faketime-file, or
+// else $FAKETIME_TIMESTAMP_FILE.
+func (t ImrTestingConf) FaketimePath() string {
+	if t.FaketimeFile != "" {
+		return t.FaketimeFile
+	}
+	return os.Getenv("FAKETIME_TIMESTAMP_FILE")
+}
+
+// SkipRootRefresh reports whether the root NS refresh is off: root-refresh is
+// false, or the test clock is on.
+func (t ImrTestingConf) SkipRootRefresh() bool {
+	return t.FaketimeOn() || (t.RootRefresh != nil && !*t.RootRefresh)
+}
+
+// Validate refuses a root refresh asked for beside the test clock, which
+// cannot run it.
+func (t ImrTestingConf) Validate() error {
+	if t.FaketimeOn() && t.RootRefresh != nil && *t.RootRefresh {
+		return fmt.Errorf("root-refresh: true cannot be combined with faketime: the refresh waits in real time for an expiry in data time")
+	}
+	return nil
+}
+
+// imrTestingEqual reports whether two testing blocks ask for the same thing.
+func imrTestingEqual(a, b ImrTestingConf) bool {
+	sameBool := func(x, y *bool) bool { return (x == nil) == (y == nil) && (x == nil || *x == *y) }
+	return sameBool(a.Priming, b.Priming) && sameBool(a.RootRefresh, b.RootRefresh) &&
+		a.Faketime == b.Faketime && a.FaketimeFile == b.FaketimeFile
+}
+
+// ImrClientStatsConf switches the per-client transport counters on. They
+// record client addresses, so they are off by default. They are set up with
+// the listeners, at startup: changing Enabled needs a restart, not a reload.
+type ImrClientStatsConf struct {
+	Enabled    bool `yaml:"enabled" mapstructure:"enabled"`
+	MaxClients int  `yaml:"max-clients" mapstructure:"max-clients"` // 0: DefaultImrClientStatsMax
+}
+
+// Validate refuses a negative max-clients rather than taking it for the
+// default: a sign typo should not quietly become 4096.
+func (c ImrClientStatsConf) Validate() error {
+	if c.MaxClients < 0 {
+		return fmt.Errorf("imrengine.client-stats.max-clients: %d is negative; use 0 for the default (%d)", c.MaxClients, DefaultImrClientStatsMax)
+	}
+	return nil
 }
 
 // ImrTuningConf holds runtime-tunable behaviour knobs for the IMR.
@@ -457,6 +587,12 @@ type ImrTuningConf struct {
 	// Indeterminate zone has its chain followed afresh, an Insecure one has its
 	// parent asked for a DS. Default 30s. See cache.ZoneStateRecheck.
 	ZoneStateRecheck time.Duration `yaml:"zone-state-recheck" mapstructure:"zone-state-recheck"`
+	// NSEC3MaxIterations is the most NSEC3 hash iterations the validator
+	// computes a proof for (RFC 9276 section 3.2). A denial that needs NSEC3
+	// records above it is served without AD, with EDE 27; a zone cut they
+	// would prove is not judged. Default 10 (cache.DefaultNSEC3MaxIterations);
+	// 0 is allowed, and then only zones with no extra iterations validate.
+	NSEC3MaxIterations *uint16 `yaml:"nsec3-max-iterations" mapstructure:"nsec3-max-iterations"`
 }
 
 // DefaultCacheMaxTTL is Unbound's cache-max-ttl default: one day.
@@ -502,7 +638,9 @@ type DiscoveryConf struct {
 // LoadImrTuningDefaults fills missing or invalid fields with sensible
 // defaults. Any non-positive duration, zero/negative integer count,
 // or out-of-range Multiplier / JitterFraction is treated as "unset"
-// and replaced. UpgradeIndirectCacheHits is left nil intentionally —
+// and replaced, and an absent NSEC3MaxIterations gets the default. 0 is a
+// valid NSEC3MaxIterations, so it is a pointer. UpgradeIndirectCacheHits is
+// left nil intentionally —
 // callers check nil-vs-explicit to distinguish "use legacy
 // behaviour" from an explicit toggle. Safe to call repeatedly.
 func LoadImrTuningDefaults(t *ImrTuningConf) {
@@ -574,6 +712,10 @@ func LoadImrTuningDefaults(t *ImrTuningConf) {
 	}
 	if t.ZoneStateRecheck <= 0 {
 		t.ZoneStateRecheck = cache.DefaultZoneStateRecheck
+	}
+	if t.NSEC3MaxIterations == nil {
+		n := uint16(cache.DefaultNSEC3MaxIterations)
+		t.NSEC3MaxIterations = &n
 	}
 }
 
@@ -871,6 +1013,7 @@ type InternalDnsConf struct {
 	StopCh              chan struct{}
 	APIStopCh           chan struct{}
 	StopOnce            sync.Once
+	stopFailed          atomic.Bool // set by Shutdowner: MainLoop exits 1, not 0 (#977)
 	RefreshZoneCh       chan ZoneRefresher
 	BumpZoneCh          chan BumperData
 	ValidatorCh         chan ValidatorRequest
@@ -891,10 +1034,13 @@ type InternalDnsConf struct {
 	// parent primary. See parent_push_engine.go.
 	ParentPushQ chan ParentPushRequest
 	NotifyQ     chan NotifyRequest
-	AuthQueryQ  chan AuthQueryRequest
-	ResignQ     chan ResignRequest // zones needing a re-sign, and why (see ResignReason)
-	RRsetCache  *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
-	ImrEngine   *Imr
+	// NotifyTracker is the Notifier's per-target resend state and the pending
+	// set publishes hand downstream NOTIFYs to (#1007). Created with NotifyQ.
+	NotifyTracker *NotifyTracker
+	AuthQueryQ    chan AuthQueryRequest
+	ResignQ       chan ResignRequest // zones needing a re-sign, and why (see ResignReason)
+	RRsetCache    *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	ImrEngine     *Imr
 	// ImrReady is closed once ImrEngine has been stored, giving other engines
 	// a synchronised way to learn it is usable. Read ImrEngine only after
 	// receiving from it -- see ImrReadiness.
@@ -1028,6 +1174,44 @@ func (conf *Config) KaspPropagationDelay() time.Duration {
 		return defaultKaspPropagationDelay
 	}
 	return d
+}
+
+// kaspStandbyCount is the global standby count for a role (sep true for the
+// KSK): kasp's standby-zsk-count or standby-ksk-count when positive, else
+// the default of one ZSK and no KSK.
+func (conf *Config) kaspStandbyCount(sep bool) int {
+	var kasp KaspConf
+	if conf != nil {
+		kasp = conf.Dnssec.Kasp
+	}
+	if sep {
+		if kasp.StandbyKskCount > 0 {
+			return kasp.StandbyKskCount
+		}
+		return defaultStandbyKskCount
+	}
+	if kasp.StandbyZskCount > 0 {
+		return kasp.StandbyZskCount
+	}
+	return defaultStandbyZskCount
+}
+
+// StandbyKeyCount is how many standby keys of a role (sep true for the KSK)
+// a zone bound to pol keeps: the policy's own standby-zsks or standby-ksks
+// when it sets one, else the global kasp count. The key state worker reads
+// it for the zones tdns runs; a key lifecycle owner reads it for the zones
+// it runs, in place of the global.
+func (conf *Config) StandbyKeyCount(pol *DnssecPolicy, sep bool) int {
+	return standbyKeyCount(pol, sep, conf.kaspStandbyCount(sep))
+}
+
+// standbyKeyCount is StandbyKeyCount for a caller that resolved the global
+// count once, such as the worker's walk over every zone.
+func standbyKeyCount(pol *DnssecPolicy, sep bool, global int) int {
+	if n, ok := pol.StandbyCount(sep); ok {
+		return n
+	}
+	return global
 }
 
 // ReloadConfig reloads the full configuration. Kept for existing callers and

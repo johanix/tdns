@@ -94,10 +94,11 @@ type appliedChanges struct {
 	responses []ScanTupleResponse
 }
 
-func (a *appliedChanges) record(_ string, _ *ZoneData, resp ScanTupleResponse) {
+func (a *appliedChanges) record(_ string, _ *ZoneData, resp ScanTupleResponse) delegationApplyResult {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.responses = append(a.responses, resp)
+	return delegationApplyResult{Applied: true}
 }
 
 func (a *appliedChanges) count(child string, scanType ScanType) int {
@@ -121,6 +122,11 @@ func pollScanner(n *trustNet) (*Scanner, *appliedChanges) {
 		mu.Lock()
 		defer mu.Unlock()
 		return n.query(ctx, qname, qtype, ns)
+	}
+	sc.queryChildServers = func(ctx context.Context, qname string, qtype uint16, ns *core.RRset) ([]childAnswer, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return n.queryServers(ctx, qname, qtype, ns)
 	}
 	sc.validateRRset = func(ctx context.Context, rrset *core.RRset) (cache.ValidationState, error) {
 		mu.Lock()

@@ -141,8 +141,9 @@ func newOOBTestImr(t *testing.T, d *oobAuthDouble) *Imr {
 		t.Fatalf("AddStub(%s): %v", oobNSZone, err)
 	}
 	return &Imr{
-		Cache: c,
-		Quiet: true,
+		Cache:   c,
+		Quiet:   true,
+		Options: loopbackTestOptions(),
 		FamilyTracker: cache.NewFamilyTracker(
 			10*time.Minute, 10*time.Minute, 30*time.Second, 5),
 	}
@@ -213,7 +214,7 @@ func TestReferralStoresKnownOutOfBailiwickServers(t *testing.T) {
 
 	qname := "a." + oobZone
 	rrset, rcode, _, _, err := imr.handleReferral(context.Background(), qname, dns.TypeA,
-		oobReferral(qname), false, map[string]bool{}, core.TransportDo53, edns0.PrivacyNone)
+		oobReferral(qname), false, map[string]bool{}, "", core.TransportDo53, edns0.PrivacyNone)
 	if err != nil || rcode != dns.RcodeSuccess || rrset == nil {
 		t.Fatalf("%s A through the referral: rcode=%s rrset=%v err=%v", qname, dns.RcodeToString[rcode], rrset, err)
 	}
@@ -241,7 +242,7 @@ func TestReferralResolvesOutOfBailiwickServersInBackground(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		// No server has an address yet, so the referral returns at once.
 		_, _, cctx, _, err := imr.handleReferral(ctx, qname, dns.TypeA,
-			oobReferral(qname), false, map[string]bool{}, core.TransportDo53, edns0.PrivacyNone)
+			oobReferral(qname), false, map[string]bool{}, "", core.TransportDo53, edns0.PrivacyNone)
 		if err != nil || cctx != cache.ContextReferral {
 			t.Fatalf("referral %d: context=%s err=%v", i, cache.CacheContextToString[cctx], err)
 		}

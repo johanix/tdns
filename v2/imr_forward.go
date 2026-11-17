@@ -632,7 +632,8 @@ func placeholderUpstream(u ImrUpstreamConf, reason string) *ForwardUpstream {
 // forwardZoneFor returns the forward zone responsible for qname, or nil when
 // the query should be resolved iteratively. The most specific configured
 // forward zone wins; a configured stub zone that is MORE specific than that
-// forward zone wins over it (its names are reachable by direct iteration).
+// forward zone wins over it (its names are reachable by direct iteration),
+// for as long as the cache holds the stub's servers (stubServersCached).
 func (imr *Imr) forwardZoneFor(qname string) *ForwardZone {
 	// One snapshot for the whole decision: a reload swapping the table
 	// mid-way must not let a stub from the new table veto a forward from
@@ -653,11 +654,28 @@ func (imr *Imr) forwardZoneFor(qname string) *ForwardZone {
 		return nil
 	}
 	for _, sz := range table.stubs {
-		if dns.CountLabel(sz) > best.Labels && dns.IsSubDomain(sz, q) {
+		if dns.CountLabel(sz) > best.Labels && dns.IsSubDomain(sz, q) && imr.stubServersCached(sz) {
 			return nil
 		}
 	}
 	return best
+}
+
+// stubServersCached reports whether the cache holds servers for the stub zone,
+// which a stub needs before it can take its names away from a forward. Without
+// them a question for a name in the stub goes to the closest cached zone cut
+// above the stub, and under a forwarded root there is none: every lookup ended
+// in `no nameservers for zone ""` (#832). The forward is the better route
+// then. The cache keeps the servers AddStub stored through flushes and NS
+// expiry, so this is the fallback for a server map lost some other way, or
+// never stored because AddStub refused it. A resolver without a cache keeps
+// the stub's claim.
+func (imr *Imr) stubServersCached(zone string) bool {
+	if imr.Cache == nil {
+		return true
+	}
+	servers, ok := imr.Cache.ServerMap.Get(zone)
+	return ok && len(servers) > 0
 }
 
 // forwardZoneForQuestion returns the forward zone that the question <qname,
@@ -681,6 +699,18 @@ func (imr *Imr) forwardZoneForQuestion(qname string, qtype uint16) *ForwardZone 
 // cache's validator asks, through RRsetCacheT.Forwarded.
 func (imr *Imr) forwarded(qname string, qtype uint16) bool {
 	return imr.forwardZoneForQuestion(qname, qtype) != nil
+}
+
+// ctxEnded reports whether ctx was done at now: cancelled, or past its
+// deadline. A context is marked done by a timer of its own, which can fire
+// after a socket deadline set from the same instant, so Err() alone can say a
+// context whose deadline has passed is still running.
+func ctxEnded(ctx context.Context, now time.Time) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	dl, ok := ctx.Deadline()
+	return ok && !now.Before(dl)
 }
 
 // forwardQuery resolves <qname, qtype> by sending a recursive query to the
@@ -804,8 +834,20 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		// rather than only when the caller gives up (#470).
 		r, _, err := core.ExchangeCtx(attemptCtx, up.Client, m, up.Addr, Globals.Debug && !imr.Quiet)
 		// Truncated by its own slice, with the caller still waiting: the
-		// upstream ran out of TIME, it did not fail.
-		truncated := attemptCtx.Err() != nil && ctx.Err() == nil
+		// upstream ran out of TIME, it did not fail. Told from the clock as
+		// well as from Err(): the exchange's read deadline is the slice's end,
+		// and the read can time out before the context's timer has marked it
+		// done. Counted as a transport failure, that attempt reset the run of
+		// slice timeouts it belongs to and marked the upstream failing.
+		//
+		// The attempt is read before the caller. A caller's cancel is set on
+		// the caller before it reaches the attempt, so an attempt that a
+		// cancel ended always finds the caller ended too. Read the other way
+		// round, a cancel between the two reads was booked as a slice timeout.
+		now := time.Now()
+		attemptDone := ctxEnded(attemptCtx, now)
+		callerDone := ctxEnded(ctx, now)
+		truncated := attemptDone && !callerDone
 		cancelAttempt()
 		if err == nil && r == nil {
 			err = fmt.Errorf("nil response from upstream %s", up.Label)
@@ -827,13 +869,17 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			}
 			continue
 		}
-		if cerr := ctx.Err(); cerr != nil && err != nil {
+		if cerr := ctx.Err(); err != nil && (cerr != nil || callerDone) {
 			// Abandoned, not failed. The ctx.Done() check at the top of the
 			// loop stops us between upstreams; this one is needed because a
 			// cancel now reaches the exchange itself, and recording it would
 			// mark a healthy upstream unreachable — and set a DEGRADED that
 			// outlives the shutdown that caused it. Same guard, same reason,
-			// as probeForwardUpstream and tryServer.
+			// as probeForwardUpstream and tryServer. callerDone: the caller's
+			// deadline has passed, though its timer has not yet fired.
+			if cerr == nil {
+				cerr = context.DeadlineExceeded
+			}
 			return nil, 0, cache.ContextFailure, up.Transport,
 				fmt.Errorf("forward zone %s: %w (attempts=%d, last error: %v)", fz.Zone, cerr, attempts, lastErr)
 		}
@@ -853,6 +899,16 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		if up.recordSuccess() {
 			lgImr.Info("forward upstream recovered", "zone", fz.Zone, "upstream", up.Label)
 			imr.updateForwardUpstreamError()
+		}
+		// A reply that does not answer the question asked is not used (RFC 5452
+		// section 3), as in tryServer. It is still a DNS response, so the
+		// upstream stays reachable (recordSuccess above): like an unusable
+		// rcode, it only sends the query on to the next upstream.
+		if qerr := replyMatchesQuery(r, m); qerr != nil {
+			lastErr = fmt.Errorf("upstream %s: %w", up.Label, qerr)
+			lgDns.Debug("forwardQuery: reply does not answer the question", "qname", qname,
+				"qtype", dns.TypeToString[qtype], "upstream", up.Label, "err", qerr)
+			continue
 		}
 		for _, hook := range getImrResponseHooks() {
 			hook(ctx, qname, qtype, up.Label, up.Addr, up.Transport, r, r.MsgHdr.Rcode)
@@ -884,7 +940,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 
 		switch classifyResponse(qname, qtype, r) {
 		case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-			if cctx, rcode, handled := imr.handleNegative(qname, qtype, r, up.Transport); handled {
+			if cctx, rcode, handled := imr.handleNegative(qname, qtype, r, up.Transport, ""); handled {
 				if fz.TrustAD {
 					imr.applyTrustADToNegative(qname, qtype, r.MsgHdr.AuthenticatedData)
 				}
@@ -1083,7 +1139,7 @@ func (imr *Imr) acceptForwardedAnswer(qname string, qtype uint16, r *dns.Msg, tr
 		RRset:      &rrset,
 		Context:    cache.ContextAnswer,
 		State:      state,
-		Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
+		Expiration: cache.Now().Add(cache.GetMinTTL(rrset.RRs)),
 		Transport:  transport,
 	})
 	return &rrset, r.MsgHdr.Rcode, cache.ContextAnswer, transport

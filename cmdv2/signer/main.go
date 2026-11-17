@@ -71,9 +71,10 @@ func main() {
 	// merely cosmetic. Two would break outright: the KeyDB is initialised only
 	// for AppTypeAuth/Agent/Scanner (v2/main_initfuncs.go, v2/parseconfig.go),
 	// so a new app type would come up with no keystore and be unable to sign
-	// at all. Two others are safety gates that stand DOWN for any app type
-	// that is not tdns-auth -- zoneMayOriginateContent (v2/zone_origination.go)
-	// and HasExpired (v2/zone_refresh_state.go) -- so a new type would silently
+	// at all. Two others are safety gates that stand DOWN for an app type
+	// that is not tdns-auth -- zoneMayOriginateContent (v2/zone_origination.go;
+	// a type can register for that one, RegisterOriginationRuleAppType) and
+	// HasExpired (v2/zone_refresh_state.go) -- so a new type would silently
 	// lose them rather than fail loudly.
 	//
 	// The cost is that logs and the startup banner say mode "auth". The

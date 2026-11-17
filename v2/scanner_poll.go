@@ -5,10 +5,12 @@ package tdns
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -165,13 +167,19 @@ func pollParents(zones map[string]*ZoneData) []*ZoneData {
 }
 
 // startPollRound starts a poll round in the background unless the previous one
-// is still running, and reports whether it started one.
+// is still running, and reports whether it started one. A panic the round does
+// not recover from per child ends the round, and the next tick starts another.
 func (scanner *Scanner) startPollRound(ctx context.Context, parents []*ZoneData, conf scannerPollConf) bool {
 	if !scanner.poll.running.CompareAndSwap(false, true) {
 		return false
 	}
 	go func() {
 		defer scanner.poll.running.Store(false)
+		defer func() {
+			if rec := recover(); rec != nil {
+				logScanPanic("ScannerEngine: poll: PANIC recovered in a poll round; the round ended early", rec)
+			}
+		}()
 		scanner.pollRound(ctx, parents, conf)
 	}()
 	return true
@@ -208,43 +216,47 @@ func (scanner *Scanner) pollRound(ctx context.Context, parents []*ZoneData, conf
 
 	var queued, withoutDS, unreadable int
 	var stopped bool
-feed:
-	for _, parent := range parents {
-		children, err := parent.DelegationBackend.ListChildren(parent.ZoneName)
-		if err != nil {
-			lg.Error("ScannerEngine: poll: cannot list the children of a parent zone", "parent", parent.ZoneName, "error", err)
-			continue
-		}
-		for _, child := range children {
-			if scanner.pollSwitch() == pollSwitchOff {
-				stopped = true
-				break feed
-			}
-			child = dns.Fqdn(child)
-			if !parent.IsChildDelegation(child) {
-				continue
-			}
-			// Whether the child has a DS decides whether it is polled. The DS a
-			// CDS scan compares against is read again, under the child's lock.
-			ds, err := currentDelegationDS(parent, child)
+	func() {
+		// Closed however the feed ends, a panic included: the workers range
+		// over jobs, and would otherwise wait for good.
+		defer close(jobs)
+	feed:
+		for _, parent := range parents {
+			children, err := parent.DelegationBackend.ListChildren(parent.ZoneName)
 			if err != nil {
-				lg.Warn("ScannerEngine: poll: cannot read the delegation, not scanning the child", "parent", parent.ZoneName, "child", child, "error", err)
-				unreadable++
+				lg.Error("ScannerEngine: poll: cannot list the children of a parent zone", "parent", parent.ZoneName, "error", err)
 				continue
 			}
-			if ds == nil && !conf.Bootstrap {
-				withoutDS++
-				continue
-			}
-			select {
-			case jobs <- pollJob{parent: parent, tuple: ScanTuple{Zone: child, CurrentData: CurrentScanData{DS: ds}}}:
-				queued++
-			case <-ctx.Done():
-				break feed
+			for _, child := range children {
+				if scanner.pollSwitch() == pollSwitchOff {
+					stopped = true
+					break feed
+				}
+				child = dns.Fqdn(child)
+				if !parent.IsChildDelegation(child) {
+					continue
+				}
+				// Whether the child has a DS decides whether it is polled. The DS a
+				// CDS scan compares against is read again, under the child's lock.
+				ds, err := pollDelegationDS(parent, child)
+				if err != nil {
+					lg.Warn("ScannerEngine: poll: cannot read the delegation, not scanning the child", "parent", parent.ZoneName, "child", child, "error", err)
+					unreadable++
+					continue
+				}
+				if ds == nil && !conf.Bootstrap {
+					withoutDS++
+					continue
+				}
+				select {
+				case jobs <- pollJob{parent: parent, tuple: ScanTuple{Zone: child, CurrentData: CurrentScanData{DS: ds}}}:
+					queued++
+				case <-ctx.Done():
+					break feed
+				}
 			}
 		}
-	}
-	close(jobs)
+	}()
 	wg.Wait()
 
 	lg.Info("ScannerEngine: poll round done", "parents", len(parents), "children", queued, "withoutDS", withoutDS,
@@ -252,10 +264,36 @@ feed:
 		"duration", time.Since(started).Round(time.Millisecond))
 }
 
+// pollDelegationDS is currentDelegationDS for the poll feed. The DS came from
+// the child: a panic reading it is an error for that child, and the feed goes
+// on to the next.
+func pollDelegationDS(parent *ZoneData, child string) (ds *core.RRset, err error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			logScanPanic("ScannerEngine: poll: PANIC recovered reading the delegation of a child", rec,
+				"parent", parentZoneName(parent), "child", child)
+			ds, err = nil, fmt.Errorf("internal error: reading the delegation panicked: %v", rec)
+		}
+	}()
+	return currentDelegationDS(parent, child)
+}
+
 // pollChild scans one child, CSYNC before CDS, each through scanChildAndApply.
 // A child without a DS -- polled only for bootstrap -- gets the CDS scan alone.
 // Each scan checks the DS again under the child's lock (pollScan).
+//
+// scanChildAndApply recovers from a panic in a scan; this recovers from one
+// anywhere else in the child's turn, counted as an error for the child. It
+// keeps the worker alive: a worker that died would leave the feed waiting to
+// hand it the next child, and the round, and with it polling, stuck for good.
 func (scanner *Scanner) pollChild(ctx context.Context, parent *ZoneData, tuple ScanTuple, bootstrap bool) (scans, changes, errs int) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			logScanPanic("ScannerEngine: poll: PANIC recovered polling a child", rec,
+				"parent", parentZoneName(parent), "child", tuple.Zone)
+			errs++
+		}
+	}()
 	types := []ScanType{ScanCDS}
 	if tuple.CurrentData.DS != nil {
 		types = []ScanType{ScanCSYNC, ScanCDS}

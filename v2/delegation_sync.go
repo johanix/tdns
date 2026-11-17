@@ -84,6 +84,11 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 
 				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, ds.SyncStatus, imr())
+				if errors.Is(err, ErrNoUsableDsync) {
+					// Not a failure: warned about once (planUsable)
+					lgDns.Debug("DelegationSyncher: nothing sent", "zone", ds.ZoneName, "reason", err)
+					continue
+				}
 				if err != nil {
 					lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					continue
@@ -94,6 +99,19 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 			case "EXPLICIT-SYNC-DELEGATION":
 				_ = handleExplicitSyncWith(ctx, conf.Internal.ImrReady, delsyncq, ds,
 					func() DelegationSyncStatus { return zd.runExplicitSync(ctx, kdb, notifyq, imr()) })
+				continue
+
+			case "SYNC-DS":
+				// The KSK rollover engine's DS push (delsync_ds.go). The
+				// engine waits for the answer with a deadline, so this
+				// starts now and is never deferred; and it runs on its own
+				// goroutine, because a delivery is a parent round trip, a
+				// NOTIFY path a CDS publish through the zone updater first,
+				// and this loop is the queue's only reader: the updater
+				// enqueues every delegation change here from afterPublish,
+				// so a loop that waited here while the queue filled would
+				// hold the updater, which the CDS publish needs.
+				go handleDSSync(ctx, kdb, notifyq, imr(), ds)
 				continue
 
 			case "SIGNALS-EDITED":
@@ -142,7 +160,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				// (delsync_refresh.go).
 				handleRefreshSyncDelegation(ctx, conf, delsyncq, kdb, notifyq, zd, ds)
 
-			case "PROXY-SYNC", "PROXY-UPDATE-SETUP":
+			case "PROXY-SYNC", "PROXY-UPDATE-SETUP", "PROXY-UPDATE-GATE":
 				// Both need an IMR: the parent's DSYNC records are discovered,
 				// not configured. At startup the zone's first transfer routinely
 				// arrives before InitImrEngine has finished priming, and the
@@ -161,6 +179,10 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					proxySync(ctx, zd, kdb, notifyq, delsyncq, imr(), ds)
 				case "PROXY-UPDATE-SETUP":
 					proxyStartupReconcile(ctx, zd, kdb, notifyq, imr(), ds)
+				case "PROXY-UPDATE-GATE":
+					proxyUpdateGate(ds.ZoneName, func() (ProxyUpdateState, error) {
+						return zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr())
+					})
 				}
 
 			default:
@@ -456,11 +478,10 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 			"zone", zd.ZoneName, "err", err)
 		return "", 0, UpdateResult{}, err
 	}
-	if !plan.Usable() {
-		lgDns.Warn("DelegationSyncEngine: no usable sync scheme", "zone", zd.ZoneName,
-			"parent", plan.Parent, "plan", plan.Summary())
-		return "", 0, UpdateResult{}, fmt.Errorf("zone %s: no usable delegation sync scheme: %s",
-			zd.ZoneName, plan.Summary())
+	// A parent that offers nothing this child can use is ErrNoUsableDsync:
+	// one warning per zone, not an error (planUsable).
+	if err := zd.planUsable(plan); err != nil {
+		return "", 0, UpdateResult{}, err
 	}
 
 	// rcode and ur are captured from whichever attempt succeeds; on total
@@ -851,6 +872,26 @@ func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan Notif
 	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "forwarded", forwarded, "msg", msg)
 }
 
+// proxyUpdateGate re-runs the §10.8 UPDATE gate for a parentsync-proxy zone
+// whose apex KEY changed in a transfer (queueProxyUpdateGate). check is the
+// gate: ProxyUpdatePreconditionCheck, which asks whether the parent advertises
+// UPDATE and then sets or clears the zone's warning for the state it finds.
+//
+// Only when UPDATE is configured. A zone that syncs by NOTIFY or API alone has
+// no use for the agent's KEY, and a warning asking the operator to publish one
+// would be wrong.
+func proxyUpdateGate(zone string, check func() (ProxyUpdateState, error)) {
+	if !configuredSchemes(ParentSyncConfig().Schemes)["update"] {
+		return
+	}
+	state, err := check()
+	if err != nil {
+		lgDns.Error("DelegationSyncher: proxy UPDATE gate failed after an apex KEY change", "zone", zone, "err", err)
+		return
+	}
+	lgDns.Info("DelegationSyncher: proxy UPDATE gate re-run after an apex KEY change", "zone", zone, "state", state)
+}
+
 // proxyStartupReconcile builds the sync plan on first load (which runs the
 // KEY-bootstrap state machine as the UPDATE gate) and, if any transport is
 // usable, does a one-time parent-vs-child reconcile -- catching drift from
@@ -1025,6 +1066,9 @@ var errBootstrapValidationFailed = errors.New("the parent's validation of the SI
 //   - a failed validation (EDE KeyValidationFailed): errBootstrapValidationFailed.
 //     Final now; the setup arm re-bootstraps later, when what the parent could
 //     not find may have appeared.
+//   - a retired key (EDE Sig0KeyRetired): ErrSig0KeyTombstoned. A trusted
+//     UPDATE from the zone deleted this key at the parent, which will not
+//     take it again. Final; only a new key can bootstrap.
 //   - anything else, any other refusal: a plain error. Retrying a verdict only
 //     repeats it.
 func bootstrapOutcome(ur UpdateResult, err error) error {
@@ -1049,6 +1093,8 @@ func bootstrapOutcome(ur UpdateResult, err error) error {
 				return fmt.Errorf("%w (EDE %d)", errBootstrapManual, ur.EDECode)
 			case edns0.EDESig0KeyValidationFailed:
 				return fmt.Errorf("%w (EDE %d %q)", errBootstrapValidationFailed, ur.EDECode, ur.EDEMessage)
+			case edns0.EDESig0KeyRetired:
+				return fmt.Errorf("%w (EDE %d %q); make a new SIG(0) key", ErrSig0KeyTombstoned, ur.EDECode, ur.EDEMessage)
 			}
 		}
 	}
@@ -1068,7 +1114,15 @@ func bootstrapOutcome(ur UpdateResult, err error) error {
 // applies bootstrapOutcome left every test green.
 func (zd *ZoneData) finishDelegationSyncSetup(msg string, ur UpdateResult, err error) error {
 	err = bootstrapOutcome(ur, err)
+	if errors.Is(err, ErrNoUsableDsync) {
+		// The parent advertises no UPDATE target: there is nobody to
+		// bootstrap the key with. The common case, not an error: warned
+		// about once per zone, and the setup is done.
+		zd.noteNoUpdateTarget(err)
+		return nil
+	}
 	if errors.Is(err, errBootstrapManual) {
+		zd.noteUpdateTargetFound()
 		// The parent's bootstrap is manual by design; this is the state
 		// MANUAL-BOOTSTRAP-REQUIRED exists for, and it recurs on every load
 		// until the operator acts. Not an error.
@@ -1083,6 +1137,7 @@ func (zd *ZoneData) finishDelegationSyncSetup(msg string, ur UpdateResult, err e
 		}
 		return err
 	}
+	zd.noteUpdateTargetFound()
 	lgDns.Info("DelegationSyncSetup: SIG(0) key bootstrap complete", "zone", zd.ZoneName, "msg", msg)
 	return nil
 }
@@ -1110,6 +1165,13 @@ func (zd *ZoneData) runExplicitSync(ctx context.Context, kdb *KeyDB, notifyq cha
 
 	// Not in sync, let's fix that.
 	msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
+	if errors.Is(err, ErrNoUsableDsync) {
+		// Not a failure: the answer says why nothing was sent, with no
+		// error (planUsable warned once)
+		lgDns.Debug("DelegationSyncher: nothing sent", "zone", zd.ZoneName, "reason", err)
+		syncstate.Msg = err.Error()
+		return syncstate
+	}
 	if err != nil {
 		lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", zd.ZoneName, "err", err)
 		syncstate.Error = true

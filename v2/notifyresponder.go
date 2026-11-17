@@ -238,6 +238,8 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
 			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyTargetNotChildDelegation,
 				fmt.Sprintf("%s has no parent label", qname), false)
+			recordNotifyRefusal(ntype, "", qname, dns.RcodeRefused, edns0.EDENotifyTargetNotChildDelegation,
+				fmt.Sprintf("%s has no parent label", qname))
 			writeNotifyReply(dnr, m)
 			return nil
 		}
@@ -247,6 +249,8 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			m.SetRcode(dnr.Msg, dns.RcodeNotAuth)
 			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyParentNotAuthoritative,
 				fmt.Sprintf("server is not authoritative for parent of %s", qname), false)
+			recordNotifyRefusal(ntype, "", qname, dns.RcodeNotAuth, edns0.EDENotifyParentNotAuthoritative,
+				fmt.Sprintf("server is not authoritative for parent of %s", qname))
 			writeNotifyReply(dnr, m)
 			return nil
 		}
@@ -255,6 +259,8 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
 			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyTargetNotChildDelegation,
 				fmt.Sprintf("%s is not a child delegation of %s", qname, zd.ZoneName), false)
+			recordNotifyRefusal(ntype, zd.ZoneName, qname, dns.RcodeRefused, edns0.EDENotifyTargetNotChildDelegation,
+				fmt.Sprintf("%s is not a child delegation of %s", qname, zd.ZoneName))
 			writeNotifyReply(dnr, m)
 			return nil
 		}
@@ -269,6 +275,8 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyDsyncSchemeNotAdvertised,
 				fmt.Sprintf("parent zone %s does not advertise NOTIFY for type %s; ignoring",
 					zd.ZoneName, dns.TypeToString[ntype]), false)
+			recordNotifyRefusal(ntype, zd.ZoneName, qname, dns.RcodeRefused, edns0.EDENotifyDsyncSchemeNotAdvertised,
+				fmt.Sprintf("the parent does not advertise NOTIFY for %s", dns.TypeToString[ntype]))
 			writeNotifyReply(dnr, m)
 			return nil
 		}
@@ -306,6 +314,10 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
 		edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyZoneInErrorState,
 			fmt.Sprintf("zone %s in error state: %s", targetZoneName, zd.ErrorMsg), false)
+		if ntype == dns.TypeCDS || ntype == dns.TypeCSYNC {
+			recordNotifyRefusal(ntype, targetZoneName, qname, dns.RcodeServerFailure, edns0.EDENotifyZoneInErrorState,
+				fmt.Sprintf("the parent zone is in error state: %s", zd.ErrorMsg))
+		}
 		writeNotifyReply(dnr, m)
 		return nil
 	}

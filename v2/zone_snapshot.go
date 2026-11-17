@@ -10,7 +10,12 @@ import (
 	"github.com/miekg/dns"
 )
 
-const DefaultPublishCadence = 5 * time.Second
+// DefaultPublishCadence is what publishCadenceForZone returns for a zone with
+// no publish-cadence of its own. A variable, not a constant, so that a test
+// package that reads a zone back right after a change can set it to zero (no
+// zone is ever busy then, and the gate publishes in the caller), as this
+// package's TestMain does and tdns-mp's may.
+var DefaultPublishCadence = 5 * time.Second
 
 // zoneSnapshot is the immutable reader-facing view of a zone at one serial
 // boundary. Published snapshots are never mutated in place. The type is
@@ -126,18 +131,58 @@ func wildcardSourceFrom(snap *zoneSnapshot, zoneName, qname string) string {
 type PendingChanges struct {
 	PublishedSerial uint32
 	PublishQueued   bool
-	Added           []string
-	Replaced        []pendingOwnerChange
-	Deleted         []pendingOwnerChange
+	// The gate: when the queued publish is due, the zone's cadence, and what
+	// that publish will answer (Resps) and run (follow-ups).
+	NextPublishAt time.Time
+	Cadence       time.Duration
+	Waiters       int
+	FollowUps     int
+	// The hold: its start and cap, the publishes it has stopped, and the open
+	// transactions, oldest first.
+	Held         bool
+	HoldSince    time.Time
+	HoldCap      time.Duration
+	HoldStopped  uint64
+	Transactions []pendingTx
+	Added        []string
+	Replaced     []pendingOwnerChange
+	Deleted      []pendingOwnerChange
+}
+
+// pendingTx is one open transaction as pendingChanges reports it.
+type pendingTx struct {
+	ID      TxID
+	Started time.Time
+	Limit   time.Duration
+	Overdue bool
+}
+
+// PendingTxJSON is pendingTx for the API.
+type PendingTxJSON struct {
+	ID           string    `json:"id"`
+	Started      time.Time `json:"started"`
+	AgeSeconds   float64   `json:"age_seconds"`
+	LimitSeconds float64   `json:"limit_seconds"`
+	Overdue      bool      `json:"overdue,omitempty"`
 }
 
 // PendingChangesView is the JSON/API representation of pendingChanges().
 type PendingChangesView struct {
-	PublishedSerial uint32                   `json:"published_serial"`
-	PublishQueued   bool                     `json:"publish_queued"`
-	Added           []string                 `json:"added,omitempty"`
-	Replaced        []PendingOwnerChangeJSON `json:"replaced,omitempty"`
-	Deleted         []PendingOwnerChangeJSON `json:"deleted,omitempty"`
+	PublishedSerial      uint32                   `json:"published_serial"`
+	PublishQueued        bool                     `json:"publish_queued"`
+	NextPublishAt        *time.Time               `json:"next_publish_at,omitempty"`
+	CadenceSeconds       float64                  `json:"cadence_seconds"`
+	Waiters              int                      `json:"waiters"`
+	FollowUps            int                      `json:"follow_ups"`
+	Held                 bool                     `json:"held"`
+	HoldSince            *time.Time               `json:"hold_since,omitempty"`
+	HoldAgeSeconds       float64                  `json:"hold_age_seconds,omitempty"`
+	HoldCapSeconds       float64                  `json:"hold_cap_seconds,omitempty"`
+	HoldStoppedPublishes uint64                   `json:"hold_stopped_publishes,omitempty"`
+	Transactions         []PendingTxJSON          `json:"transactions,omitempty"`
+	Added                []string                 `json:"added,omitempty"`
+	Replaced             []PendingOwnerChangeJSON `json:"replaced,omitempty"`
+	Deleted              []PendingOwnerChangeJSON `json:"deleted,omitempty"`
 }
 
 func pendingChangesView(pc *PendingChanges) *PendingChangesView {
@@ -145,9 +190,30 @@ func pendingChangesView(pc *PendingChanges) *PendingChangesView {
 		return nil
 	}
 	v := &PendingChangesView{
-		PublishedSerial: pc.PublishedSerial,
-		PublishQueued:   pc.PublishQueued,
-		Added:           append([]string(nil), pc.Added...),
+		PublishedSerial:      pc.PublishedSerial,
+		PublishQueued:        pc.PublishQueued,
+		CadenceSeconds:       pc.Cadence.Seconds(),
+		Waiters:              pc.Waiters,
+		FollowUps:            pc.FollowUps,
+		Held:                 pc.Held,
+		HoldStoppedPublishes: pc.HoldStopped,
+		Added:                append([]string(nil), pc.Added...),
+	}
+	if !pc.NextPublishAt.IsZero() {
+		at := pc.NextPublishAt
+		v.NextPublishAt = &at
+	}
+	if pc.Held {
+		since := pc.HoldSince
+		v.HoldSince = &since
+		v.HoldAgeSeconds = time.Since(pc.HoldSince).Seconds()
+		v.HoldCapSeconds = pc.HoldCap.Seconds()
+	}
+	for _, tx := range pc.Transactions {
+		v.Transactions = append(v.Transactions, PendingTxJSON{
+			ID: string(tx.ID), Started: tx.Started,
+			AgeSeconds: time.Since(tx.Started).Seconds(), LimitSeconds: tx.Limit.Seconds(), Overdue: tx.Overdue,
+		})
 	}
 	for _, ch := range pc.Replaced {
 		v.Replaced = append(v.Replaced, pendingOwnerChangeJSON(ch))
@@ -176,7 +242,27 @@ func FormatPendingChanges(pc *PendingChanges) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "published serial: %d\n", pc.PublishedSerial)
-	fmt.Fprintf(&b, "publish queued: %v\n", pc.PublishQueued)
+	if pc.PublishQueued {
+		fmt.Fprintf(&b, "publish queued: true (due in %s, cadence %s)\n",
+			time.Until(pc.NextPublishAt).Round(time.Millisecond), pc.Cadence)
+	} else {
+		fmt.Fprintf(&b, "publish queued: false\n")
+	}
+	if pc.Waiters > 0 || pc.FollowUps > 0 {
+		fmt.Fprintf(&b, "waiting for the publish: %d waiter(s), %d follow-up(s)\n", pc.Waiters, pc.FollowUps)
+	}
+	if pc.Held {
+		fmt.Fprintf(&b, "held: since %s ago (cap %s), %d publish(es) stopped\n",
+			time.Since(pc.HoldSince).Round(time.Millisecond), pc.HoldCap, pc.HoldStopped)
+		for _, tx := range pc.Transactions {
+			overdue := ""
+			if tx.Overdue {
+				overdue = ", overdue"
+			}
+			fmt.Fprintf(&b, "transaction %s: age %s, limit %s%s\n", tx.ID,
+				time.Since(tx.Started).Round(time.Millisecond), tx.Limit, overdue)
+		}
+	}
 	for _, name := range pc.Added {
 		fmt.Fprintf(&b, "added owner: %s\n", name)
 	}
@@ -401,6 +487,63 @@ func (zd *ZoneData) soaForResponseFrom(snap *zoneSnapshot, apex *OwnerData) core
 		}
 	}
 	return rs
+}
+
+// soaForDenialFrom is soaForResponseFrom for a negative answer: the SOA goes
+// out with the zone's negative TTL, the smaller of its own TTL and its MINIMUM
+// field, which is what RFC 2308 section 3 asks of a server. A resolver holds a
+// denial for the TTL of the SOA it arrived with, so serving the record's own
+// TTL let a long-lived SOA stretch a short MINIMUM (#699). A positive answer
+// to an SOA query keeps the record's own TTL.
+//
+// The signatures are lowered with it, since an RRSIG carries the TTL of the
+// RRset it covers (RFC 4034 section 3). They stay valid: a validator checks
+// them against their Original TTL (RFC 4035 section 5.3.3). Both are copies;
+// the stored records are not touched.
+func (zd *ZoneData) soaForDenialFrom(snap *zoneSnapshot, apex *OwnerData) core.RRset {
+	rs := zd.soaForResponseFrom(snap, apex)
+	if len(rs.RRs) == 0 {
+		return rs
+	}
+	soa, ok := rs.RRs[0].(*dns.SOA)
+	if !ok {
+		return rs
+	}
+	ttl := negativeTTL(soa)
+	soa.Hdr.Ttl = ttl
+	for _, sig := range rs.RRSIGs {
+		sig.Header().Ttl = ttl
+	}
+	return rs
+}
+
+// denialSOASigs returns copies of the signatures over the apex SOA, with the
+// TTL the SOA has in a negative answer (soaForDenialFrom). It is what the proof
+// of a denial carries beside the SOA.
+func denialSOASigs(apex *OwnerData) []dns.RR {
+	if apex == nil || apex.RRtypes == nil {
+		return nil
+	}
+	rs := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(rs.RRSIGs) == 0 {
+		return nil
+	}
+	out := make([]dns.RR, 0, len(rs.RRSIGs))
+	for _, sig := range rs.RRSIGs {
+		out = append(out, dns.Copy(sig))
+	}
+	if len(rs.RRs) == 0 {
+		return out
+	}
+	soa, ok := rs.RRs[0].(*dns.SOA)
+	if !ok {
+		return out
+	}
+	ttl := negativeTTL(soa)
+	for _, sig := range out {
+		sig.Header().Ttl = ttl
+	}
+	return out
 }
 
 // ownerForAnalysis returns the owner data for qname in a zone that may not have

@@ -110,10 +110,12 @@ type AuthQueryRequest struct {
 
 type AuthQueryResponse struct {
 	rrset *core.RRset
-	// denial: for an authoritative answer with no records of the type, the
-	// authority section that proves it, grouped into RRsets.
-	denial []*core.RRset
-	err    error
+	// authority: the authority section of an authoritative answer, grouped
+	// into RRsets. With no records of the type, it is the proof that there
+	// are none; with records synthesized from a wildcard, the proof that
+	// goes with them.
+	authority []*core.RRset
+	err       error
 }
 
 func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
@@ -229,7 +231,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 						lg.Warn("AuthQueryEngine: answer is not expected RR type", "expectedRrtype", dns.TypeToString[req.rrtype], "rr", rr.String())
 					}
 				}
-				req.response <- &AuthQueryResponse{rrset: &rrset}
+				req.response <- &AuthQueryResponse{rrset: &rrset, authority: authorityRRsets(res.Ns)}
 				continue
 			}
 
@@ -271,7 +273,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 				// proof of it: the SOA, and in a signed zone the NSEC or
 				// NSEC3 records and their RRSIGs. Kept, so that a scan that
 				// must see an absence proven can validate it (#779).
-				resp.denial = authorityRRsets(res.Ns)
+				resp.authority = authorityRRsets(res.Ns)
 			}
 			req.response <- resp
 		}
@@ -283,9 +285,10 @@ func (scanner *Scanner) AuthQueryNG(qname, ns string, rrtype uint16, transport s
 	return rrset, err
 }
 
-// authQueryWithDenial is AuthQueryNG, and for an authoritative answer with no
-// records of the type, the authority section that proves there are none,
-// grouped into RRsets (authorityRRsets).
+// authQueryWithDenial is AuthQueryNG, and the authority section of an
+// authoritative answer, grouped into RRsets (authorityRRsets): with no records
+// of the type, the proof that there are none; with records synthesized from a
+// wildcard, the proof that goes with them.
 func (scanner *Scanner) authQueryWithDenial(qname, ns string, rrtype uint16, transport string) (*core.RRset, []*core.RRset, error) {
 	response := make(chan *AuthQueryResponse)
 	defer close(response)
@@ -299,5 +302,5 @@ func (scanner *Scanner) authQueryWithDenial(qname, ns string, rrtype uint16, tra
 	}
 
 	resp := <-response
-	return resp.rrset, resp.denial, resp.err
+	return resp.rrset, resp.authority, resp.err
 }

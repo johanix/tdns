@@ -67,8 +67,10 @@ func TestCollectSignalRRsets_InBailiwick(t *testing.T) {
 }
 
 func TestCollectSignalRRsets_AliasChasedCrossZone(t *testing.T) {
+	// The operator spells the alias target as the resolver will query it,
+	// with the _dns. label (RFC 9460 section 3: no prefixes are added).
 	child := mapZoneWithSignal("example.com.", "ns.example.com.",
-		[]dns.RR{mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 0 ns.provider.com.`)})
+		[]dns.RR{mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 0 _dns.ns.provider.com.`)})
 	provider := mapZoneWithSignal("provider.com.", "ns.provider.com.",
 		[]dns.RR{mustSVCB(t, `_dns.ns.provider.com. 10800 IN SVCB 1 . alpn="dot"`)})
 	registerZones(t, child, provider)
@@ -85,18 +87,22 @@ func TestCollectSignalRRsets_AliasChasedCrossZone(t *testing.T) {
 	}
 }
 
-func TestCollectSignalRRsets_UnresolvableTargetStillReturnsAlias(t *testing.T) {
-	// provider.com is NOT registered, so the alias target cannot be resolved.
+func TestCollectSignalRRsets_UnvouchedAliasIsNotInjected(t *testing.T) {
+	// provider.com is NOT registered, so the server holds no signal for the
+	// alias target, and the NS name has no addresses that are this server's:
+	// the server cannot know the alias is about itself, so it does not
+	// inject it (docs/2026-10-04-transport-signal-publication-and-serving.md).
+	// The alias is still zone content and answers a direct query.
 	child := mapZoneWithSignal("example.com.", "ns.example.com.",
-		[]dns.RR{mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 0 ns.provider.com.`)})
+		[]dns.RR{mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 0 _dns.ns.provider.com.`)})
 	registerZones(t, child)
 
 	sigs := child.collectSignalRRsets(child.publishedSnapshot())
-	if len(sigs) != 1 {
-		t.Fatalf("want just the alias (1), got %d: %+v", len(sigs), sigs)
+	if len(sigs) != 0 {
+		t.Fatalf("an alias the server cannot vouch for was injected: %d: %+v", len(sigs), sigs)
 	}
-	if sigs[0].Name != "_dns.ns.example.com." {
-		t.Fatalf("want the alias owner, got %q", sigs[0].Name)
+	if od := getOwnerFrom(child.publishedSnapshot(), "_dns.ns.example.com."); od == nil {
+		t.Fatal("the alias is no longer zone content")
 	}
 }
 

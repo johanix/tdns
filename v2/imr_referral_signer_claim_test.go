@@ -19,11 +19,11 @@ import (
 func dsSignedInTheNameOf(ds dns.RR, signer string) []dns.RR {
 	k := &dns.DNSKEY{Hdr: dns.RR_Header{Name: signer, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 257, Protocol: 3, Algorithm: dns.ED25519}
-	p, err := k.Generate(256)
+	p, err := generateSigningKey(k, 256)
 	if err != nil {
 		panic(err)
 	}
-	sig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: k.KeyTag(), SignerName: signer,
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: ds.Header().Ttl}, Algorithm: dns.ED25519, KeyTag: k.KeyTag(), SignerName: signer,
 		Inception:  uint32(time.Now().Add(-time.Hour).Unix()),
 		Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := sig.Sign(p.(crypto.Signer), []dns.RR{ds}); err != nil {

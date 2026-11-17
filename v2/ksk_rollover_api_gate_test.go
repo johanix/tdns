@@ -1,6 +1,8 @@
 package tdns
 
 import (
+	"errors"
+	"slices"
 	"testing"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -20,51 +22,61 @@ func setRolloverApiAllowInsecure(t *testing.T, v bool) {
 	t.Cleanup(func() { SetDelegationSyncConfig(prevCS, prevPS) })
 }
 
-// The rollover DS push must not use the API scheme off an unvalidated DSYNC
-// lookup. The DSYNC RR names the target whose URI carries the endpoint the push
-// posts a bearer credential to, so an unvalidated lookup lets whoever answers
-// the query choose where the credential goes.
+// The DS delivery must not use the API scheme off an unvalidated DSYNC
+// lookup. The DSYNC RR names the target whose URI carries the endpoint the
+// push posts a bearer credential to, so an unvalidated lookup lets whoever
+// answers the query choose where the credential goes.
 //
-// UPDATE and NOTIFY carry no secret and must stay available either way --
-// gating them too would take a zone that can still sync and strand it.
-func TestRolloverApiSchemeRequiresAValidatedDsyncLookup(t *testing.T) {
-	rdata := []*core.DSYNC{
+// UPDATE and NOTIFY carry no secret and must stay available either way;
+// gating them too would take a zone that can still sync and strand it. The
+// gate is the parent sync plan's; this pins that the rollover's delivery
+// goes through it.
+func TestDSDeliveryApiSchemeRequiresAValidatedDsyncLookup(t *testing.T) {
+	zd := dsSyncTestZone(t)
+	setChildApiCredentials(t, ParentSyncApiCredentialConf{Parent: "example.", Username: "u", Key: "k"})
+	all := []*core.DSYNC{
 		gateDsyncRR(core.SchemeUpdate, dns.TypeANY, "upd.example."),
 		gateDsyncRR(core.SchemeNotify, dns.TypeCDS, "ntf.example."),
 		gateDsyncRR(core.SchemeAPI, dns.TypeANY, "api.example."),
 	}
+	apiOnly := all[2:]
+	auto := dsSyncPolicy(DsyncSchemePreferenceAuto)
 
 	t.Run("unvalidated: API is dropped, the others survive", func(t *testing.T) {
 		setRolloverApiAllowInsecure(t, false)
-		upd, ntf, api := selectRolloverDsyncRRs(DsyncResult{Validated: false, Rdata: rdata}, "child.example.")
-		if api != nil {
-			t.Error("the API scheme survived an unvalidated DSYNC lookup;" +
-				" the bearer credential could be posted to an attacker-chosen endpoint")
+		choices, _, _, err := rolloverSchemeChoices(dsSyncPlanFor(t, zd, DsyncResult{Validated: false, Rdata: all}, nil), auto)
+		if err != nil {
+			t.Fatalf("scheme choice: %v", err)
 		}
-		if upd == nil {
-			t.Error("UPDATE was dropped; it carries no secret and needs no validation")
+		if got := dsSyncChoiceTargets(choices); !slices.Equal(got, []string{"UPDATE upd.example.", "NOTIFY ntf.example."}) {
+			t.Errorf("choices %v; UPDATE and NOTIFY carry no secret and need no validation", got)
 		}
-		if ntf == nil {
-			t.Error("NOTIFY was dropped; it carries no secret and needs no validation")
+		_, _, _, err = rolloverSchemeChoices(dsSyncPlanFor(t, zd, DsyncResult{Validated: false, Rdata: apiOnly}, nil), auto)
+		if !errors.Is(err, errNoUsableScheme) {
+			t.Errorf("API only, unvalidated: err = %v; the API scheme survived an unvalidated DSYNC lookup,"+
+				" the bearer credential could be posted to an attacker-chosen endpoint", err)
 		}
 	})
 
 	t.Run("validated: API is available", func(t *testing.T) {
 		setRolloverApiAllowInsecure(t, false)
-		_, _, api := selectRolloverDsyncRRs(DsyncResult{Validated: true, Rdata: rdata}, "child.example.")
-		if api == nil {
-			t.Fatal("the API scheme was dropped despite a validated DSYNC lookup")
+		choices, _, _, err := rolloverSchemeChoices(dsSyncPlanFor(t, zd, DsyncResult{Validated: true, Rdata: apiOnly}, nil), auto)
+		if err != nil {
+			t.Fatalf("the API scheme was dropped despite a validated DSYNC lookup: %v", err)
 		}
-		if api.Target != "api.example." {
-			t.Errorf("API target = %q, want api.example.", api.Target)
+		if got := dsSyncChoiceTargets(choices); !slices.Equal(got, []string{"API api.example."}) {
+			t.Errorf("choices %v, want the API target", got)
 		}
 	})
 
 	t.Run("allow-insecure is the operator accepting the risk", func(t *testing.T) {
 		setRolloverApiAllowInsecure(t, true)
-		_, _, api := selectRolloverDsyncRRs(DsyncResult{Validated: false, Rdata: rdata}, "child.example.")
-		if api == nil {
-			t.Fatal("allow-insecure did not re-enable the API scheme")
+		choices, _, _, err := rolloverSchemeChoices(dsSyncPlanFor(t, zd, DsyncResult{Validated: false, Rdata: apiOnly}, nil), auto)
+		if err != nil {
+			t.Fatalf("allow-insecure did not re-enable the API scheme: %v", err)
+		}
+		if got := dsSyncChoiceTargets(choices); !slices.Equal(got, []string{"API api.example."}) {
+			t.Errorf("choices %v, want the API target", got)
 		}
 	})
 }

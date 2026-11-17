@@ -5,7 +5,15 @@ package tdns
 
 import "fmt"
 
-type ZoneOption uint8
+// ZoneOption is a uint16, with 512 values per repo. It was a uint8 with 32
+// per repo, and tdns filled its 32. The width costs nothing: an option is a
+// map key, and its number is never stored -- configurations, the API's input,
+// catalog zones and dynamic zones all name options by their strings.
+//
+// The number does leave the process in API responses (the zone list), where a
+// []ZoneOption is now a JSON array of numbers; as a uint8 it was a base64
+// string. A CLI and a server built from the same source agree either way.
+type ZoneOption uint16
 
 // Range allocation for ZoneOption across the tdns ecosystem.
 // Each downstream repo gets a numeric range starting one past the
@@ -15,12 +23,13 @@ type ZoneOption uint8
 //
 // and use a compile-time gate to ensure they stay in their range
 // (see enums.go in each downstream package). Resizing a range:
-// change the value here and recompile.
+// change the value here and recompile. Every downstream value moves
+// with it, which is harmless as long as no number is stored.
 const (
-	TdnsZoneOptionMax   ZoneOption = 32
-	TdnsMpZoneOptionMax ZoneOption = 64
-	TdnsNmZoneOptionMax ZoneOption = 96
-	TdnsEsZoneOptionMax ZoneOption = 128
+	TdnsZoneOptionMax   ZoneOption = 512
+	TdnsMpZoneOptionMax ZoneOption = 1024
+	TdnsNmZoneOptionMax ZoneOption = 1536
+	TdnsEsZoneOptionMax ZoneOption = 2048
 )
 
 const (
@@ -122,6 +131,34 @@ const (
 	// instead of into its own copy. Implies OptChildSync, which
 	// parseZoneOptions materialises. docs/2026-09-08-childsync-proxy.md.
 	OptChildSyncProxy
+	// OptModifiedDownstream: the copy of the zone held here is not the zone the
+	// world sees. Downstream of this server it is signed or changed in ways this
+	// server does not know of -- the source of a multi-provider zone, or a
+	// primary behind a signer -- so the server's resolver never answers a
+	// question about the zone from it, and resolves it as any other (#863).
+	OptModifiedDownstream
+	// OptAllowDoubledSuffix: the zone file means its names that end in the
+	// zone's name (or a name under it) twice, such as test.test. in zone test.,
+	// so the loader does not refuse them as a missing trailing dot (#1009).
+	// Off by default: almost every such name is that mistake.
+	OptAllowDoubledSuffix
+	// OptIxfrFromDifferences: a wholesale replacement of the zone -- a reload of
+	// its file, or an inbound AXFR -- is diffed against the version it replaces
+	// and the difference kept in the outbound IXFR history, so downstreams get
+	// an IXFR instead of the whole zone (#1006). BIND's option of the same name.
+	// Off by default, as in BIND: the diff compares the whole zone, which costs
+	// CPU on every replacement. Off, a replacement starts a new IXFR epoch as
+	// before.
+	OptIxfrFromDifferences
+	// OptAllowTsigUpdates admits RFC 2136 UPDATEs authorized by TSIG, separately
+	// from allow-updates (which admits SIG(0)) and allow-api-updates (the
+	// management API). What each TSIG key may change is the zone's
+	// updatepolicy.zone.tsig grants; with no grant nothing is allowed.
+	//
+	// Appended at the end for the same reason every option above it was:
+	// ZoneOption values are positional, so inserting mid-list renumbers
+	// everything after.
+	OptAllowTsigUpdates
 	optZoneOptionTdnsSentinel
 )
 
@@ -164,6 +201,10 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptNoRequestIxfr:           "no-request-ixfr",
 	OptUseHsyncparam:           "use-hsyncparam",
 	OptChildSyncProxy:          "childsync-proxy",
+	OptModifiedDownstream:      "modified-downstream",
+	OptAllowDoubledSuffix:      "allow-doubled-suffix",
+	OptIxfrFromDifferences:     "ixfr-from-differences",
+	OptAllowTsigUpdates:        "allow-tsig-updates",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -201,6 +242,10 @@ var StringToZoneOption = map[string]ZoneOption{
 	"no-request-ixfr":            OptNoRequestIxfr,
 	"use-hsyncparam":             OptUseHsyncparam,
 	"childsync-proxy":            OptChildSyncProxy,
+	"modified-downstream":        OptModifiedDownstream,
+	"allow-doubled-suffix":       OptAllowDoubledSuffix,
+	"ixfr-from-differences":      OptIxfrFromDifferences,
+	"allow-tsig-updates":         OptAllowTsigUpdates,
 }
 
 // deprecatedZoneOptionNames maps old option spellings to the canonical name
@@ -222,15 +267,17 @@ const (
 	ImrOptTransportSignalType
 	ImrOptQueryForTransportTLSA
 	ImrOptUseTransportSignals
+	ImrOptAllowLoopbackNameservers
 )
 
 var ImrOptionToString = map[ImrOption]string{
-	ImrOptRevalidateNS:            "revalidate-ns",
-	ImrOptQueryForTransport:       "query-for-transport",
-	ImrOptAlwaysQueryForTransport: "always-query-for-transport",
-	ImrOptTransportSignalType:     "transport-signal-type",
-	ImrOptQueryForTransportTLSA:   "query-for-transport-tlsa",
-	ImrOptUseTransportSignals:     "use-transport-signals",
+	ImrOptRevalidateNS:             "revalidate-ns",
+	ImrOptQueryForTransport:        "query-for-transport",
+	ImrOptAlwaysQueryForTransport:  "always-query-for-transport",
+	ImrOptTransportSignalType:      "transport-signal-type",
+	ImrOptQueryForTransportTLSA:    "query-for-transport-tlsa",
+	ImrOptUseTransportSignals:      "use-transport-signals",
+	ImrOptAllowLoopbackNameservers: "allow-loopback-nameservers",
 }
 
 var StringToImrOption = map[string]ImrOption{
@@ -240,6 +287,7 @@ var StringToImrOption = map[string]ImrOption{
 	"transport-signal-type":      ImrOptTransportSignalType,
 	"query-for-transport-tlsa":   ImrOptQueryForTransportTLSA,
 	"use-transport-signals":      ImrOptUseTransportSignals,
+	"allow-loopback-nameservers": ImrOptAllowLoopbackNameservers,
 }
 
 type AuthOption uint8
@@ -248,25 +296,30 @@ const (
 	AuthOptParentUpdate AuthOption = iota + 1
 	AuthOptMinimalResponses
 	AuthOptAllowAnyQueries
+	// AuthOptAddTransportSignal turns the zone option add-transport-signal on
+	// for every zone the server serves. tdns-auth only: tdns-agent refuses it.
+	AuthOptAddTransportSignal
 )
 
 var AuthOptionToString = map[AuthOption]string{
-	AuthOptParentUpdate:     "parent-update",
-	AuthOptMinimalResponses: "minimal-responses",
-	AuthOptAllowAnyQueries:  "allow-any-queries",
+	AuthOptParentUpdate:       "parent-update",
+	AuthOptMinimalResponses:   "minimal-responses",
+	AuthOptAllowAnyQueries:    "allow-any-queries",
+	AuthOptAddTransportSignal: "add-transport-signal",
 }
 
 var StringToAuthOption = map[string]AuthOption{
-	"parent-update":     AuthOptParentUpdate,
-	"minimal-responses": AuthOptMinimalResponses,
-	"allow-any-queries": AuthOptAllowAnyQueries,
+	"parent-update":        AuthOptParentUpdate,
+	"minimal-responses":    AuthOptMinimalResponses,
+	"allow-any-queries":    AuthOptAllowAnyQueries,
+	"add-transport-signal": AuthOptAddTransportSignal,
 }
 
 // outbound-soa-serial mode values for DnsEngine.OutboundSoaSerial.
 const (
 	OutboundSoaSerialKeep     = "keep"     // outbound = inbound serial (default)
 	OutboundSoaSerialUnixtime = "unixtime" // outbound = time.Now().Unix()
-	OutboundSoaSerialPersist  = "persist"  // outbound = previous outbound serial; bumps written to OutgoingSerials
+	OutboundSoaSerialPersist  = "persist"  // equivalent to keep: every mode now records its serials and floors on them at a restart (#655)
 )
 
 type AppType uint8
@@ -336,6 +389,11 @@ var StringToAppType = map[string]AppType{
 // ZoneStatus is the positive-lifecycle state of a zone, orthogonal to the
 // error registry (a zone can be ZoneStatusReady and still carry a RefreshError).
 // Minimal by design: a single value with a setter/getter, no registry.
+//
+// It reports progress, not whether the zone can be served: every refresh of a
+// loaded zone reads `loading` while the published snapshot is still being
+// served. Whether there is something to serve is Ready and the published
+// snapshot, which is what ZoneTransferOut admits on.
 type ZoneStatus uint8
 
 const (
@@ -380,10 +438,11 @@ const (
 	// RolloverParentBlocker: parent's published DSYNC RRset does not
 	// advertise a scheme matching the zone's
 	// rollover.dsync-scheme-preference. Set immediately on
-	// errNoUsableScheme; cleared on the next successful
-	// pickRolloverSchemes. The engine keeps retrying — this is a
-	// visibility signal, not a hardfail. Auto-rollover progression
-	// gates here because no scheme means no DS push is possible.
+	// errNoUsableScheme; cleared on the next DS delivery that finds a
+	// usable scheme (rolloverSchemeChoices). The engine keeps retrying;
+	// this is a visibility signal, not a hardfail. Auto-rollover
+	// progression gates here because no scheme means no DS push is
+	// possible.
 	RolloverParentBlocker
 	// DelegationSyncWarning: a delegation-sync function is degraded but the
 	// zone is otherwise fine. Used by the parentsync-proxy UPDATE path
@@ -406,6 +465,14 @@ const (
 	// that carries DnssecError. Cleared by the publish that installs the first
 	// snapshot.
 	FirstPublishError
+	// PublishError: a publish of the zone panicked part-way, and the
+	// ZoneUpdater recovered (#808). The zone still serves its last published
+	// content, but the publish may already have written its change to the
+	// journal, so what the zone serves may disagree with what a reload or a
+	// restart would give it. Visibility-only. Cleared when a reload reconciles
+	// the zone file with the journal (reconcileZoneFileWithJournal), and not
+	// when that reconcile fails to bring the journal's changes in.
+	PublishError
 )
 
 var ErrorTypeToString = map[ErrorType]string{
@@ -420,6 +487,7 @@ var ErrorTypeToString = map[ErrorType]string{
 	DelegationSyncWarning:   "delegation-sync-warning",
 	ConfigWarning:           "config-warning",
 	FirstPublishError:       "first-publish",
+	PublishError:            "publish",
 }
 
 // errorTypeReportOrder defines the deterministic order in which the
@@ -433,6 +501,7 @@ var errorTypeReportOrder = []ErrorType{
 	AgentError,
 	DnssecError,
 	FirstPublishError,
+	PublishError,
 	RolloverPolicyViolation,
 	RolloverParentBlocker,
 	DnssecPolicyWarning,

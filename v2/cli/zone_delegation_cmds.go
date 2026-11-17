@@ -4,10 +4,13 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"sort"
+	"strings"
+	"text/tabwriter"
 
 	"github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -15,6 +18,12 @@ import (
 )
 
 var delegationChild string
+
+var (
+	syncLogSince string
+	syncLogLimit int
+	syncLogJSON  bool
+)
 
 // AttachZoneDelegationCmds adds the "zone delegation" subtree.
 //
@@ -49,8 +58,87 @@ quietly give the wrong answer.`,
 	get.Flags().StringVar(&delegationChild, "child", "",
 		"Child zone to report on; omit to list the parent's children")
 
-	delegation.AddCommand(get)
+	syncLogCmd := &cobra.Command{
+		Use:   "sync-log",
+		Short: "Show what this parent received from its children, and what it did with it",
+		Long: `Show the delegation-sync log: one line per UPDATE from a child, per scan a
+NOTIFY started, per scan a poll started that found something or could not
+process the child, per NOTIFY refused before any scan, and per DSYNC API write.
+Newest first.
+
+"applied" means the parent's delegation data changed. A change a scan decided
+on is "queued" or "apply failed" until it has landed.
+
+With -z, only that parent; with --child, only that child. The log is kept in
+memory: it starts empty when the server starts, and holds the most recent
+childsync.sync-log events (default 10000).`,
+		Args: cobra.NoArgs,
+		Run:  func(cmd *cobra.Command, args []string) { runZoneDelegationSyncLog(role) },
+	}
+	syncLogCmd.Flags().StringVar(&delegationChild, "child", "", "Only this child zone")
+	syncLogCmd.Flags().StringVar(&syncLogSince, "since", "", "Only events since: a duration back from now (10m) or an RFC 3339 time")
+	syncLogCmd.Flags().IntVar(&syncLogLimit, "limit", 50, "At most this many events; 0 for all")
+	syncLogCmd.Flags().BoolVar(&syncLogJSON, "json", false, "Print the report as JSON")
+
+	delegation.AddCommand(get, syncLogCmd)
 	c.AddCommand(delegation)
+}
+
+func runZoneDelegationSyncLog(role string) {
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+	dr, err := SendDelegationCmd(api, tdns.DelegationPost{
+		Command: "sync-log",
+		Zone:    tdns.Globals.Zonename,
+		Child:   delegationChild,
+		Since:   syncLogSince,
+		Limit:   syncLogLimit,
+	})
+	if err != nil {
+		fmt.Printf("Error from %s: %s\n", role, err.Error())
+		os.Exit(1)
+	}
+	if dr.SyncLog == nil {
+		fmt.Printf("Error: %s returned no delegation-sync log\n", role)
+		os.Exit(1)
+	}
+	if syncLogJSON {
+		out, _ := json.MarshalIndent(dr.SyncLog, "", "  ")
+		fmt.Println(string(out))
+		return
+	}
+	fmt.Print(formatSyncLog(dr.SyncLog))
+}
+
+// formatSyncLog renders a delegation-sync log report as a table.
+func formatSyncLog(rep *tdns.SyncLogReport) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Delegation-sync log since %s: %d events shown, %d kept at most, %d dropped\n\n",
+		rep.Since.Format("2006-01-02 15:04:05"), len(rep.Events), rep.Size, rep.Dropped)
+	if len(rep.Events) == 0 {
+		b.WriteString("(no events)\n")
+		return b.String()
+	}
+	tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "TIME\tPARENT\tCHILD\tMECHANISM\tOUTCOME\tDETAILS")
+	for _, ev := range rep.Events {
+		var details []string
+		for _, s := range []string{ev.Changes, ev.Rcode, ev.EDE, ev.Reason} {
+			if s != "" {
+				details = append(details, s)
+			}
+		}
+		parent := ev.Parent
+		if parent == "" {
+			parent = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", ev.Time.Format("01-02 15:04:05"),
+			parent, ev.Child, ev.Mechanism, ev.Outcome, strings.Join(details, "; "))
+	}
+	tw.Flush()
+	return b.String()
 }
 
 func runZoneDelegationGet(role string) {

@@ -622,6 +622,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return err
 	}
 
+	if err := conf.Imr.ClientStats.Validate(); err != nil {
+		return err
+	}
+
 	if len(md.Unused) > 0 {
 		// Split the unused keys into two buckets: keys that match a known
 		// DEPRECATED/RENAMED config shape (the config lags the code — emit
@@ -644,7 +648,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// kasp, and the named policies) into conf.Internal.*. The zone-reload
 	// paths call this same helper so reloading zones also refreshes the
 	// policy definitions they depend on. ParseZones (later) validates zone
-	// dnssec_policy references against the resolved map.
+	// dnssecpolicy references against the resolved map.
 	if err := conf.parseDnssecConfig(); err != nil {
 		return err
 	}
@@ -667,6 +671,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 			lgConfig.Warn("unknown service.transport.type, defaulting to none", "type", conf.Service.Transport.Type)
 			conf.Service.Transport.Type = "none"
 		}
+	}
+	// A published signal may name only the tokens every tdns node can carry
+	// (TransportConf.Validate). Refused here, before anything below reaches
+	// the KeyDB or the zones, so a refused signal never takes effect, on a
+	// reload either; ValidateConfig checks it again for `config check`.
+	if err := conf.Service.Transport.Validate(); err != nil {
+		return err
 	}
 
 	lgConfig.Debug("templates defined", "count", len(conf.Templates))
@@ -728,6 +739,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent:
 		conf.ParseAuthOptions()
+		// Before the options reach the KeyDB below, so a refused option
+		// never takes effect, on a reload either.
+		if err := refuseAuthOptionsForApp(Globals.App.Type, conf.AuthEngine.Options); err != nil {
+			return err
+		}
 	}
 
 	// KDC and KRS configuration parsing has been moved to tdns-nm
@@ -1409,9 +1425,16 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zonemdChanged := zonemdSettingsDiffer(
 			zdp.Options[OptPublishZonemd], zdp.zonemdScheme, zdp.zonemdAlgs,
 			newOpts[OptPublishZonemd], zonemdSet.Scheme, zonemdSet.Algorithms)
-		zdp.Options = newOpts
+		// Likewise whether the resolver's source for the zone changes: what it
+		// holds about the zone came from the source it no longer uses.
+		sourceChanged := zdp.Options[OptModifiedDownstream] != newOpts[OptModifiedDownstream]
+		// An option the daemon set by itself is not in the file; a reload
+		// must not take it away (SetRuntimeOption).
+		zdp.Options = zdp.withRuntimeOptionsLocked(newOpts)
 		zdp.publishCadence = publishCadence
 		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
+		retries, retryInterval := zoneNotifyRetrySettings(zname, zconf)
+		zdp.notifyRetries, zdp.notifyRetryInterval = retries, retryInterval
 		zdp.zonemdScheme = zonemdSet.Scheme
 		zdp.zonemdAlgs = zonemdSet.Algorithms
 		zdp.zonemdOnVerifyFailure = zonemdSet.OnVerifyFailure
@@ -1428,6 +1451,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			lgConfig.Info("zonemd configuration changed; republishing the zone to apply it",
 				"zone", zname, "publish", newOpts[OptPublishZonemd])
 			zdp.requestPublish(false)
+		}
+		if sourceChanged {
+			forgetResolverSource(zname)
 		}
 
 		invokeOptionHandlers(zname, options)
@@ -1492,11 +1518,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// path, not under confMu.
 		if options[OptOnlineSigning] || options[OptInlineSigning] {
 			if zdp.FirstZoneLoad {
-				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					if err := zd.registerForPeriodicResign(ctx, conf.Internal.ResignQ); err != nil {
-						lgConfig.Error("registerForPeriodicResign failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
-					}
-				})
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, (*ZoneData).registerForPeriodicResign)
 			}
 		}
 
@@ -1605,12 +1627,16 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Zonefile:         zconf.Zonefile,
 				Options:          options,
 				UpdatePolicy:     policy,
+				UpdatePolicySet:  true,
 				DelegationPolicy: dpol,
 				DnssecPolicy:     zconf.DnssecPolicy,
+				TransferSrc:      zconf.TransferSrc,
 				// Always carried (empty == inherit the global), so a config
 				// edit that REMOVES a per-zone mode actually reverts the zone
 				// to the global on reload instead of keeping the stale value.
-				OutboundSoaSerial: zconf.OutboundSoaSerial,
+				OutboundSoaSerial:   zconf.OutboundSoaSerial,
+				NotifyRetries:       retries,
+				NotifyRetryInterval: retryInterval,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:
@@ -1802,6 +1828,24 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 	if zoneTTL == 0 {
 		zoneTTL = 120
 	}
+
+	tsigGrants, err := parseTsigGrants(zconf.Name, zconf.UpdatePolicy.Zone.Tsig)
+	if err != nil {
+		return UpdatePolicy{}, err
+	}
+	// Grants and the admission switch each do nothing without the other. Say
+	// so, without changing either: refusing to load the zone over it would be
+	// worse than a zone that refuses TSIG updates, which is what both halves
+	// alone amount to.
+	switch {
+	case len(tsigGrants) > 0 && !options[OptAllowTsigUpdates]:
+		lgConfig.Warn("updatepolicy.zone.tsig has grants but allow-tsig-updates is not set: no TSIG update is accepted",
+			"zone", zconf.Name, "grants", len(tsigGrants))
+	case len(tsigGrants) == 0 && options[OptAllowTsigUpdates]:
+		lgConfig.Warn("allow-tsig-updates is set but updatepolicy.zone.tsig has no grants: every TSIG update is refused",
+			"zone", zconf.Name)
+	}
+
 	return UpdatePolicy{
 		Child: UpdatePolicyDetail{
 			Type:    zconf.UpdatePolicy.Child.Type,
@@ -1813,6 +1857,7 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 			RRtypes: zonerrtypes,
 			TTL:     zoneTTL,
 		},
+		TsigGrants: tsigGrants,
 	}, nil
 }
 

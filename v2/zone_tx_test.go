@@ -42,6 +42,12 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
+func (s *syncBuffer) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.b.Reset()
+}
+
 // captureTxLogs routes the package's loggers into a buffer for one test. They
 // resolve slog.Default() per record, so swapping the default is enough.
 func captureTxLogs(t *testing.T) *syncBuffer {
@@ -81,7 +87,10 @@ func withTxHoldLimit(t *testing.T, d time.Duration) {
 func cleanupTxZone(t *testing.T, zd *ZoneData) {
 	t.Helper()
 	t.Cleanup(func() {
+		// Joined: an after-publish action still running would outlive the
+		// test and race with the next one, or write into a removed temp dir.
 		zd.stopPublisher()
+		zd.joinPublisher()
 		Zones.Remove(zd.ZoneName)
 	})
 }
@@ -271,9 +280,9 @@ func TestAZoneThatOpensNoTransactionPublishesAsBefore(t *testing.T) {
 		t.Errorf("the update did not bump the serial (%d)", after.serial)
 	}
 
-	resp, err := zd.Publish()
+	resp, err := zd.BumpSerial() // the operator's publish is immediate on a zone with no transaction
 	if err != nil || resp.NewSerial == resp.OldSerial {
-		t.Errorf("Publish: err=%v old=%d new=%d, want a new serial", err, resp.OldSerial, resp.NewSerial)
+		t.Errorf("BumpSerial: err=%v old=%d new=%d, want a new serial", err, resp.OldSerial, resp.NewSerial)
 	}
 	if n := zd.txStoppedPublishes(); n != 0 {
 		t.Errorf("%d publish(es) were stopped on a zone with no transaction", n)
@@ -724,10 +733,10 @@ func TestALostCommitOnAPublishedZoneIsReleasedWithAWarning(t *testing.T) {
 		t.Errorf("no WARN naming the zone and the transaction; log:\n%s", logs.String())
 	}
 
-	// The zone is an ordinary zone again.
+	// The zone is an ordinary zone again: the operator's immediate publish gets through.
 	stageTxt(t, zd, "b."+zone, "two")
-	if _, err := zd.Publish(); err != nil {
-		t.Fatalf("Publish after the release: %v", err)
+	if _, err := zd.BumpSerial(); err != nil {
+		t.Fatalf("BumpSerial after the release: %v", err)
 	}
 	if !served(zd, "b."+zone, dns.TypeTXT) {
 		t.Error("the zone stayed held after the release")

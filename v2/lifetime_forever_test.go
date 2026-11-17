@@ -3,6 +3,8 @@ package tdns
 import (
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // "forever" is a large FINITE number, chosen so renderLifetime can print it back
@@ -78,6 +80,57 @@ func TestBuiltinDefaultPolicySchedulesNoRollovers(t *testing.T) {
 			t.Errorf("the built-in default policy schedules a %s roll after %s,"+
 				" while documenting itself as making no automatic key rollovers",
 				tc.role, renderLifetime(tc.secs))
+		}
+	}
+}
+
+// `auto-rollover status` timed the lifetime-driven transitions of a forever key
+// from the sentinel: "active → retired, expected_at ... (9999h58m... ahead)", a
+// date nothing will act on. It now says the transition is not scheduled, for
+// the KSK pipeline and the ZSK table alike -- and a real lifetime is still timed.
+func TestStatusDoesNotTimeAForeverRoll(t *testing.T) {
+	const zone = "forever.example."
+	kdb := newTestKeyDB(t)
+	if err := RegisterBootstrapActiveKSK(kdb, zone, 1, RolloverMethodMultiDS, dns.ED25519); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	since := now.Add(-time.Hour).Format(time.RFC3339)
+	status := func(ksk, zsk uint32) *RolloverStatus {
+		pol := &DnssecPolicy{
+			Mode: DnssecPolicyModeKSKZSK,
+			KSK:  KeyLifetime{Lifetime: ksk},
+			ZSK:  KeyLifetime{Lifetime: zsk},
+		}
+		pol.Rollover.Method = RolloverMethodMultiDS
+		out := &RolloverStatus{
+			KSKs: []RolloverKeyEntry{
+				{KeyID: 1, State: DnskeyStateActive, StateSince: since},
+				{KeyID: 2, State: DnskeyStateStandby, StateSince: since},
+			},
+			ZSKs: []RolloverKeyEntry{
+				{KeyID: 3, State: DnskeyStateActive, StateSince: since},
+				{KeyID: 4, State: DnskeyStateStandby, StateSince: since},
+			},
+		}
+		populateNextTransitions(out, kdb, zone, pol, nil, time.Minute, now)
+		return out
+	}
+
+	forever := status(foreverLifetimeSecs, foreverLifetimeSecs)
+	for _, e := range append(forever.KSKs, forever.ZSKs...) {
+		if e.NextTransitionAt != "" {
+			t.Errorf("keyid %d (%s) on a forever lifetime is timed at %s", e.KeyID, e.State, e.NextTransitionAt)
+		}
+		if e.NextTransitionNote != lifetimeForeverNote {
+			t.Errorf("keyid %d (%s): note %q, want %q", e.KeyID, e.State, e.NextTransitionNote, lifetimeForeverNote)
+		}
+	}
+
+	finite := status(uint32(30*24*3600), uint32(24*3600))
+	for _, e := range []RolloverKeyEntry{finite.KSKs[0], finite.ZSKs[0]} {
+		if e.NextTransitionAt == "" {
+			t.Errorf("keyid %d on a finite lifetime lost its time (note %q)", e.KeyID, e.NextTransitionNote)
 		}
 	}
 }

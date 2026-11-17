@@ -8,17 +8,19 @@ import (
 )
 
 // Per-zone mutex registry that serializes the rollover tick against API
-// mutating handlers. Both call sites — RolloverAutomatedTick at the top
-// of its per-zone work, and HTTP handlers for /rollover/asap, cancel,
-// reset, unstick before any DB write — acquire the same per-zone mutex
-// here, so a CLI-driven write cannot interleave with a tick advance.
+// mutating handlers. The call sites — RolloverAutomatedTick at the top
+// of its per-zone work, the HTTP handlers for /rollover/asap, cancel,
+// reset, unstick before any DB write, and change-policy from its gates
+// through the bind — acquire the same per-zone mutex here, so a
+// CLI-driven write cannot interleave with a tick advance.
 //
 // Granularity is per-zone, not global: each zone's tick work is
 // independent of every other zone's, so contention is naturally
 // limited. Read endpoints (status, when) do NOT take the lock —
-// sqlite WAL mode gives snapshot reads while writers are in flight,
-// and the API contract for those endpoints is "best-effort current
-// state at response time" which a lock-free snapshot satisfies.
+// NewKeyDB opens the keystore in WAL mode, so a read neither waits
+// for nor holds up a writer and sees the last committed state, and
+// the API contract for those endpoints is "best-effort current state
+// at response time", which such reads satisfy.
 //
 // The current rollover tick is short-lived (a single phase advance
 // per zone, no inline DNS UPDATE retries under the lock) so the

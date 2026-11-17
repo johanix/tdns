@@ -105,14 +105,14 @@ type KeystoreResponse struct {
 	// Like NeedsSigningKeysRepublish it is an instruction to the external-tx
 	// caller, not wire data — but plural, because one bulk import spans zones.
 	BulkRepublishZones []string `json:"-"`
-	// BulkSig0InvalidateZones names the zones a SIG(0) bulk import actually
-	// changed, for the external-tx caller to drop from KeystoreSig0Cache after
-	// ITS commit. Same shape and same reason as BulkRepublishZones: the
-	// invalidation cannot happen where the rows are written, because the commit
-	// that makes them visible has not happened yet, and invalidating early
-	// leaves a window for a read-through GetSig0Keys to repopulate the cache
-	// from pre-commit state — pinning the superseded key until restart, which is
-	// the exact failure the invalidation exists to prevent.
+	// BulkSig0InvalidateZones names the zones whose SIG(0) cache entries must
+	// be dropped after the external-tx caller's commit (bulk-import, and also
+	// add/generate/setstate/delete). Same shape and same reason as
+	// BulkRepublishZones: the invalidation cannot happen where the rows are
+	// written, because the commit that makes them visible has not happened yet,
+	// and invalidating early leaves a window for a read-through GetSig0Keys to
+	// repopulate the cache from pre-commit state — pinning a stale key until
+	// restart, which is the exact failure the invalidation exists to prevent.
 	BulkSig0InvalidateZones []string                   `json:"-"`
 	Algorithms              []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
 	// KeyViolations is what "keystore dnssec check" found (CheckKeyInvariants).
@@ -126,6 +126,18 @@ type KeystoreResponse struct {
 	// change the zone's active signing-key set. External-tx callers (APIkeystore)
 	// must call republishSigningKeysForZone after their Commit (R1).
 	NeedsSigningKeysRepublish bool `json:"-"`
+	// GeneratedSig0Key is the keypair a sig0-mgmt "generate" made, for an
+	// in-process caller that goes on to use it. Never on the wire: it holds the
+	// private key.
+	GeneratedSig0Key *PrivateKeyCache `json:"-"`
+	// stagedStrip is a strip of the zone's RRSIGs that DnssecKeyMgmt staged
+	// under an external tx (clear, policy-cleanup). The caller finishes it
+	// after its Commit and its republishSigningKeysForZone, or after its
+	// Rollback (#985), on a failure too. Left unfinished on a zone it holds,
+	// the hold runs out at txHoldLimit and the strip is published then; a
+	// zone that could not be held has no hold to run out, and its next
+	// publish carries the strip.
+	stagedStrip *stagedStrip
 }
 
 // TsigKeyExport carries a TSIG key's secret back to the caller for the explicit
@@ -155,6 +167,10 @@ type DnssecPolicyInfo struct {
 	KSKLifetime    string `json:"ksklifetime,omitempty"`
 	ZSKLifetime    string `json:"zsklifetime,omitempty"`
 	RolloverMethod string `json:"rollovermethod,omitempty"`
+	// StandbyZSKs and StandbyKSKs are the policy's own standby counts;
+	// absent when the global kasp count applies.
+	StandbyZSKs *int `json:"standbyzsks,omitempty"`
+	StandbyKSKs *int `json:"standbyksks,omitempty"`
 }
 
 // foreverLifetimeSecs is the seconds value GenKeyLifetime assigns to the
@@ -222,6 +238,8 @@ func DnssecPolicyToInfo(p DnssecPolicy) DnssecPolicyInfo {
 		KSKLifetime:    renderLifetime(p.KSK.Lifetime),
 		ZSKLifetime:    renderLifetime(p.ZSK.Lifetime),
 		RolloverMethod: p.Rollover.Method.String(),
+		StandbyZSKs:    p.StandbyZSKs,
+		StandbyKSKs:    p.StandbyKSKs,
 	}
 }
 
@@ -251,9 +269,12 @@ type TruststoreResponse struct {
 	// alone. Only src=dns sets it: discovery of a key that is already recorded
 	// is not news, and acting on it again would re-verify a key that may
 	// already be trusted.
-	Existed  bool
-	Error    bool
-	ErrorMsg string
+	Existed bool
+	// Sig0Tombstones answers "tombstone-list": the child keys their own
+	// trusted UPDATEs retired (truststore_tombstone.go).
+	Sig0Tombstones []Sig0Tombstone
+	Error          bool
+	ErrorMsg       string
 }
 
 type CommandPost struct {
@@ -272,8 +293,11 @@ type CommandResponse struct {
 	Zones        map[string]ZoneConf
 	Msg          string
 	ApiEndpoints []string
-	Error        bool
-	ErrorMsg     string
+	// Warnings are shown before the status: what the operator must not
+	// overlook, such as DNSSEC validation not being enforced.
+	Warnings []string
+	Error    bool
+	ErrorMsg string
 }
 
 type ZonePost struct {
@@ -507,6 +531,76 @@ type ZoneParentSyncResponse struct {
 	KeyState      uint8
 	StateName     string
 	Authenticated bool
+	// Report is the answer to "status" (#790). Functions is left empty for it:
+	// a map cannot carry the order the schemes are tried in.
+	Report *ParentSyncReport `json:",omitempty"`
+}
+
+// ParentSyncReport answers one question for a zone that syncs its delegation
+// with its parent: can a change reach the parent now, by which scheme, and if
+// not, why not. The same shape for every scheme and for both roles.
+type ParentSyncReport struct {
+	Role      string // the zone option: "parentsync" or "parentsync-proxy"
+	Parent    string
+	Validated bool // the parent's DSYNC RRset DNSSEC-validated
+	// PlanError: the DSYNC discovery failed, so no scheme was evaluated.
+	// PlanNote: discovery ran (or could not start) and stopped before any
+	// scheme -- no IMR, no DSYNC records, nothing configured.
+	PlanError string `json:",omitempty"`
+	PlanNote  string `json:",omitempty"`
+	// Schemes lists every configured scheme in parentsync.schemes order.
+	Schemes []ParentSyncSchemeReport
+	// Per-scheme detail, each present only when that scheme is configured.
+	Update *ParentSyncUpdateReport `json:",omitempty"`
+	Notify *ParentSyncNotifyReport `json:",omitempty"`
+	Api    *ParentSyncApiReport    `json:",omitempty"`
+	// Delegation is the parent-vs-zone comparison, as "parentsync delta"
+	// computes it; DelegationError when it could not be made.
+	Delegation      *DelegationSyncStatus `json:",omitempty"`
+	DelegationError string                `json:",omitempty"`
+	// Warning is the zone's delegation-sync-warning, read before anything
+	// else in the report ran.
+	Warning string `json:",omitempty"`
+}
+
+// ParentSyncSchemeReport is one scheme's line in the report.
+type ParentSyncSchemeReport struct {
+	Scheme string
+	Usable bool
+	Target string `json:",omitempty"` // "name port N", when usable
+	Reason string `json:",omitempty"` // why not, when not
+}
+
+// ParentSyncUpdateReport is the UPDATE detail.
+type ParentSyncUpdateReport struct {
+	// ProxyReport (parentsync-proxy): the same text as the deprecated
+	// "zone proxy-key" -- the §10.8 state and the records to publish at the
+	// primary. Empty when the parent does not advertise UPDATE.
+	ProxyReport string `json:",omitempty"`
+
+	// The rest is the parentsync (child) role: the zone's own SIG(0) key.
+	HaveActiveKey bool
+	ActiveKeyID   uint16
+	ApexKeyIDs    []uint16 // keytags of the KEY RRs published at the apex
+	// The parent's view of the active key, as "parentsync inquire" reports it.
+	// ParentKeyError when the inquiry was not made or failed.
+	ParentKeyState         string `json:",omitempty"`
+	ParentKeyAuthenticated bool
+	ParentKeyError         string `json:",omitempty"`
+}
+
+// ParentSyncNotifyReport is the NOTIFY detail: what a NOTIFY would give the
+// parent to act on.
+type ParentSyncNotifyReport struct {
+	Signed         bool
+	PublishesCDS   bool
+	PublishesCSYNC bool
+}
+
+// ParentSyncApiReport is the API detail.
+type ParentSyncApiReport struct {
+	CredentialConfigured bool // parentsync.api.credentials has a usable one for this parent
+	AllowInsecure        bool // parentsync.api.allow-insecure
 }
 
 // ZoneChildSyncPost is the request type for /zone/childsync (parent-side operations).
@@ -616,11 +710,16 @@ type ReloadGuardrailRole struct {
 }
 
 type DelegationPost struct {
-	Command string // status | sync | export | ...
+	Command string // status | sync | export | sync-log | ...
 	Scheme  uint8  // 1=notify | 2=update
 	Zone    string
 	Force   bool
 	Outfile string `json:"outfile,omitempty"` // for "export": destination file path
+
+	// For "sync-log". Zone, when set, selects the parent.
+	Child string `json:"child,omitempty"`
+	Since string `json:"since,omitempty"` // a duration back from now ("10m") or an RFC 3339 time
+	Limit int    `json:"limit,omitempty"`
 }
 
 type DelegationResponse struct {
@@ -628,6 +727,7 @@ type DelegationResponse struct {
 	Time       time.Time
 	Zone       string
 	SyncStatus DelegationSyncStatus
+	SyncLog    *SyncLogReport `json:",omitempty"` // for "sync-log"
 	Msg        string
 	Error      bool
 	ErrorMsg   string

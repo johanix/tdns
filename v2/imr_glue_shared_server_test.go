@@ -45,7 +45,7 @@ func TestGlueWriterSharesServerSafely(t *testing.T) {
 				A:   net.IPv4(192, 0, 2, byte(i+1)),
 			}}
 			nsrrset := &core.RRset{Name: zone, Class: dns.ClassINET, RRtype: dns.TypeNS}
-			if _, err := imr.ParseAdditionalForNSAddrs(context.Background(), "authority", nsrrset, zone,
+			if _, err := imr.ParseAdditionalForNSAddrs(context.Background(), "authority", nsrrset, zone, "test.",
 				map[string]bool{nsname: true}, r); err != nil {
 				t.Errorf("ParseAdditionalForNSAddrs: %v", err)
 				return

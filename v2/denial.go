@@ -36,6 +36,17 @@ import (
 	"github.com/miekg/dns"
 )
 
+// negativeTTL is how long a resolver may hold a denial from the zone whose SOA
+// this is: the smaller of the SOA record's own TTL and its MINIMUM field. RFC
+// 2308 section 3 sets it on the SOA in a negative answer, and RFC 9077 gives
+// the NSEC records that prove the denial the same TTL.
+func negativeTTL(soa *dns.SOA) uint32 {
+	if soa.Minttl < soa.Hdr.Ttl {
+		return soa.Minttl
+	}
+	return soa.Hdr.Ttl
+}
+
 // denialSource is where a zone's negative answers get their proof (the
 // design's §3.1).
 type denialSource uint8
@@ -130,7 +141,7 @@ func (zd *ZoneData) addDenial(m *dns.Msg, snap *zoneSnapshot, apex *OwnerData, d
 	if apex == nil || apex.RRtypes == nil {
 		return nil
 	}
-	soaSigs := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs
+	soaSigs := denialSOASigs(apex)
 	if zd.signsHere() && len(soaSigs) == 0 {
 		// A zone signed here whose SOA carries no signature is broken, on
 		// every negative path, as it is on the positive one.

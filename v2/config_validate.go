@@ -152,10 +152,26 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 
+	// The same refusal of a negative max-clients the daemon applies at load.
+	if err := config.Imr.ClientStats.Validate(); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+
 	// listeners.doh-path (#666). ParseConfig ends by calling this function, so
 	// the daemon refuses a bad path at load too, rather than when the DoH
 	// engine starts, where the error would only be logged and DoH not served.
 	if err := validateDoHPath(config.Listeners.DoHPath); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+
+	// The log rotation keys, refused as SetupLogging refuses them (#974).
+	if err := config.Log.Validate(); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+
+	// service.transport.signal names only tokens a publisher may emit
+	// (the alternative-endpoint design, tdns #1043, section 8).
+	if err := config.Service.Transport.Validate(); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 

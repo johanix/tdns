@@ -6,6 +6,7 @@ package tdns
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -87,7 +88,11 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 				return
 			}
-			resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zp.Zone, br.OldSerial, br.NewSerial)
+			if br.Msg != "" {
+				resp.Msg = br.Msg
+			} else {
+				resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zp.Zone, br.OldSerial, br.NewSerial)
+			}
 
 		// "sync" is an alias for "write-zone": spool the current zone content
 		// out to disk, without the freeze/thaw ritual around it. Named for
@@ -557,6 +562,7 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 		IncomingSerial:             zd.IncomingSerial,
 		EffectiveOutboundSoaSerial: outboundMode,
 		OutboundSoaSerialSource:    outboundSource,
+		AddTransportSignalSource:   zd.transportSignalSource(),
 	}
 }
 
@@ -577,6 +583,11 @@ func populateZoneDescDetail(ctx context.Context, zconf *ZoneConf, zd *ZoneData, 
 	// to see it from tdns.
 	if len(zd.Upstreams) > 0 {
 		zconf.UpstreamSerials = zd.ProbeUpstreamSerials(ctx, &Conf)
+	}
+	// Per-target NOTIFY delivery (#528): a read of the Notifier's state, no
+	// network I/O.
+	if t := Conf.Internal.NotifyTracker; t != nil {
+		zconf.DownstreamNotifies = t.Status(zname)
 	}
 
 	name, source, appliedAt, ok, err := GetZoneAppliedPolicyDetail(kdb, zname)
@@ -612,6 +623,8 @@ func populateZoneDescDetail(ctx context.Context, zconf *ZoneConf, zd *ZoneData, 
 		SigValidityDefault: pol.SigValidity.Default,
 		SigValidityDNSKEY:  pol.SigValidity.DNSKEY,
 		SigValidityDS:      pol.SigValidity.DS,
+		StandbyZSKs:        pol.StandbyZSKs,
+		StandbyKSKs:        pol.StandbyKSKs,
 	}
 }
 
@@ -710,7 +723,7 @@ func setZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName str
 	if algChanged {
 		b.WriteString("WARNING: this change has caused multiple signatures on RRsets (new keys+sigs added alongside the old).\n")
 	}
-	fmt.Fprintf(&b, "NOTE #1: update the zone's dnssec_policy in YAML to make %q the permanent policy.", policyName)
+	fmt.Fprintf(&b, "NOTE #1: update the zone's dnssecpolicy in YAML to make %q the permanent policy.", policyName)
 	if algChanged {
 		fmt.Fprintf(&b, "\nNOTE #2: to clean up keys and signatures from the previous policy use \"... keystore dnssec policy-cleanup -z %s\" (note that this may break DNSSEC validation).", zd.ZoneName)
 	}
@@ -734,6 +747,10 @@ func setZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName str
 //     a time (§4.1).
 //   - re-entrancy: a ZSK alg roll already in flight (fuller drain-window
 //     predicate): refused.
+//   - KSK alg target while a KSK rollover, or a DS push to a parent that
+//     holds DS for the zone, is in flight: refused, naming what the engine
+//     waits for. The engine's first DS publication to a parent with no DS
+//     does not block (firstDSPublicationWithoutParentDS).
 //   - KSK-only alg target / strict mode: deferred to the reconcile, which
 //     refuses (defensive backstop) — but we surface a clean error here too.
 func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
@@ -754,6 +771,23 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return "", fmt.Errorf("change-policy: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
+
+	// The gates below read the current binding and the rollover engines'
+	// state, and the bind changes what those engines act on. Hold the
+	// per-zone rollover lock -- the one the KSK and ZSK rollover ticks
+	// take -- from reading the binding to the end of the bind, so that
+	// neither a tick nor a second change-policy can move the zone out of
+	// the state a gate admitted it in before the bind lands.
+	rolloverLock := AcquireRolloverLock(zd.ZoneName)
+	rolloverLock.Lock()
+	rolloverLocked := true
+	unlockRollover := func() {
+		if rolloverLocked {
+			rolloverLocked = false
+			rolloverLock.Unlock()
+		}
+	}
+	defer unlockRollover()
 
 	// Capture the current (source) policy algorithms/mode.
 	zd.mu.Lock()
@@ -791,6 +825,13 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 	// may be in flight (K-3, both the DS dance and the drain); no ZSK
 	// algorithm roll may be draining (D-11, the shared check below); and
 	// the zone must not carry an engine-blocking error.
+	//
+	// The engine's first DS publication to a parent that holds no DS is
+	// not "in flight" in that sense (firstDSPublicationWithoutParentDS):
+	// it never ends on its own, and nothing at the parent depends on it,
+	// so it does not block. The roll it gives way to is recorded as
+	// insecure (kskAlgRollStartsInsecure).
+	var parentNoDS *RolloverZoneRow
 	if kskChanged {
 		if pol.Rollover.Method == RolloverMethodNone {
 			return "", fmt.Errorf("change-policy: policy %q has no auto-rollover engine (rollover.method: none); a KSK algorithm change for zone %s (%s→%s) is parent-coordinated and needs rollover.method multi-ds or double-signature",
@@ -800,9 +841,11 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 		if err != nil {
 			return "", fmt.Errorf("change-policy: reading rollover state for zone %s: %w", zd.ZoneName, err)
 		}
-		if row != nil && (row.RolloverInProgress || (row.RolloverPhase != "" && row.RolloverPhase != rolloverPhaseIdle)) {
-			return "", fmt.Errorf("change-policy: a KSK rollover is already in progress for zone %s (phase %s); wait for it to complete before changing the KSK algorithm",
-				zd.ZoneName, row.RolloverPhase)
+		if block := kskRolloverPolicyChangeBlock(zd.ZoneName, row); block != "" {
+			return "", fmt.Errorf("change-policy: cannot change the KSK algorithm yet: %s", block)
+		}
+		if kskAlgRollStartsInsecure(row) {
+			parentNoDS = row
 		}
 		if st, err := kskAlgRollInFlight(kdb, zd.ZoneName, curKSKAlg); err != nil {
 			return "", fmt.Errorf("change-policy: checking in-flight KSK algorithm roll for zone %s: %w", zd.ZoneName, err)
@@ -864,6 +907,8 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 	if _, err := applyZonePolicyTransactional(ctx, zd, kdb, &pol, policyName, PolicyApplySourceCommand); err != nil {
 		return "", fmt.Errorf("change-policy: %w", err)
 	}
+	// The bind is in; the parent lookup below need not hold up the engine.
+	unlockRollover()
 
 	var b strings.Builder
 	if oldName != "" && oldName != policyName {
@@ -876,6 +921,11 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 		fmt.Fprintf(&b, "KSK algorithm will roll %s → %s via DOUBLE-SIGNATURE: the rollover engine mints a %s KSK straight into active, double-signs the DNSKEY RRset with both keys, waits propagation-delay plus the served DNSKEY TTL, replaces the DS at the parent with the %s DS (RFC 6781 §4.1.4), and removes the %s KSK once the parent has confirmed the swap and the drain window (parent DS TTL included) has elapsed.\n",
 			dns.AlgorithmToString[curKSKAlg], dns.AlgorithmToString[pol.KSKAlgorithm],
 			dns.AlgorithmToString[pol.KSKAlgorithm], dns.AlgorithmToString[pol.KSKAlgorithm], dns.AlgorithmToString[curKSKAlg])
+		if parentNoDS != nil {
+			fmt.Fprintf(&b, "The parent held no DS for zone %s at the engine's last poll (%s), so the roll will not wait for the parent: the new KSK's DS is still requested, a poll that still shows no DS ends the parent step, and the %s KSK is removed after propagation-delay plus the DNSKEY/RRSIG TTL drain. Should the parent be seen holding a DS meanwhile, the roll continues as an ordinary one. Afterwards the first DS publication resumes for the %s KSK.\n",
+				zd.ZoneName, strings.TrimSpace(parentNoDS.LastDsObservedAt.String),
+				dns.AlgorithmToString[curKSKAlg], dns.AlgorithmToString[pol.KSKAlgorithm])
+		}
 		fmt.Fprintf(&b, "This command does NOT perform the roll; the engine starts it on its next tick. Watch it with \"auto-rollover status -z %s --ksk\".\n", zd.ZoneName)
 		if warn := kskAlgRollBindWarning(ctx, zd, &pol); warn != "" {
 			fmt.Fprintf(&b, "WARNING: %s\n", warn)
@@ -888,7 +938,7 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 		b.WriteString("Algorithms unchanged; new policy timings take effect. No algorithm roll is triggered.\n")
 	}
 	b.WriteString("WARNING: the policy change is stored in the keystore, not the zone config.\n")
-	fmt.Fprintf(&b, "NOTE: update the zone's dnssec_policy in YAML to make %q the permanent policy.", policyName)
+	fmt.Fprintf(&b, "NOTE: update the zone's dnssecpolicy in YAML to make %q the permanent policy.", policyName)
 	return b.String(), nil
 }
 
@@ -905,12 +955,30 @@ func kskAlgRollBindWarning(ctx context.Context, zd *ZoneData, pol *DnssecPolicy)
 	}
 	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	choices, _, _, err := pickRolloverSchemes(lctx, zd, imr, pol)
+	// The same plan and the same choice the DS delivery makes (delsync_ds.go),
+	// built in report mode so nothing on the zone changes.
+	plan, err := zd.buildParentSyncPlan(lctx, zd.KeyDB, imr, SyncRoleChild, true)
 	if err != nil {
 		return fmt.Sprintf("could not check the parent's DSYNC advertisement (%v); if the parent advertises no usable scheme the roll will wait in parent-push-softfail until it does", err)
 	}
-	if len(choices) == 0 {
-		return "the parent advertises no usable DSYNC scheme; the roll will double-sign and then wait in parent-push-softfail until the parent advertises one"
+	choices, _, _, err := rolloverSchemeChoices(plan, pol)
+	if err != nil || len(choices) == 0 {
+		reason := plan.Summary()
+		if err != nil {
+			reason = err.Error()
+		}
+		// The same three readings the DS delivery gives: the config names
+		// no scheme, a local error of the config (an invalid preference, a
+		// credential missing for the one scheme on offer), or a parent that
+		// advertises nothing the policy accepts. Only the last is the
+		// parent's.
+		switch {
+		case plan.noSchemesConfigured():
+			return fmt.Sprintf("no scheme is configured in parentsync.schemes, so no DS can reach the parent (%s); the roll will double-sign and then wait in parent-push-softfail until one is", reason)
+		case err != nil && !errors.Is(err, errNoUsableScheme):
+			return fmt.Sprintf("the DS delivery has a local configuration error (%s); the roll will double-sign and then wait in parent-push-softfail until it is fixed", reason)
+		}
+		return fmt.Sprintf("the parent advertises no DSYNC scheme the policy can use (%s); the roll will double-sign and then wait in parent-push-softfail until the parent advertises one", reason)
 	}
 	return ""
 }
@@ -951,7 +1019,7 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	if zoneOwned(zd) {
 		return "", ownedRefusal(zd, "policy-reset")
 	}
-	// Resolve the zone's CONFIG-base policy (its YAML dnssec_policy) — what the
+	// Resolve the zone's CONFIG-base policy (its YAML dnssecpolicy) — what the
 	// zone falls back to once the override + applied records are cleared. Read
 	// the name from Conf.Zones (as the list-zones handler does) and the struct
 	// from the ConfLive() snapshot (lock-free). These guards run for the dry-run
@@ -972,14 +1040,14 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	}
 	confMu.RUnlock()
 	if configName == "" {
-		return "", fmt.Errorf("policy-reset: zone %s has no config-base dnssec_policy to reset to (dynamic/API-managed zones are not supported)", zd.ZoneName)
+		return "", fmt.Errorf("policy-reset: zone %s has no config-base dnssecpolicy to reset to (dynamic/API-managed zones are not supported)", zd.ZoneName)
 	}
 	pol, ok := ConfLive().DnssecPolicies[configName]
 	if !ok {
-		return "", fmt.Errorf("policy-reset: config dnssec_policy %q for zone %s does not exist", configName, zd.ZoneName)
+		return "", fmt.Errorf("policy-reset: config dnssecpolicy %q for zone %s does not exist", configName, zd.ZoneName)
 	}
 	if pol.Error != "" {
-		return "", fmt.Errorf("policy-reset: config dnssec_policy %q for zone %s is broken: %s", configName, zd.ZoneName, pol.Error)
+		return "", fmt.Errorf("policy-reset: config dnssecpolicy %q for zone %s is broken: %s", configName, zd.ZoneName, pol.Error)
 	}
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return "", fmt.Errorf("policy-reset: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
@@ -1100,7 +1168,18 @@ var validRollKeyActions = map[string]bool{
 	"update-local": true,
 }
 
+// APIzoneParentSync is APIzoneParentSyncWith without the delegation syncher, so
+// the status report says the parent-vs-zone comparison is not available. Kept
+// for callers built against this signature (tdns-mp registers it).
 func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+	return APIzoneParentSyncWith(ctx, app, refreshq, kdb, nil)
+}
+
+// APIzoneParentSyncWith serves /zone/parentsync. delsyncq is the delegation
+// syncher's queue; "status" sends it the same DELEGATION-STATUS request that
+// /delegation does for "parentsync delta".
+func APIzoneParentSyncWith(ctx context.Context, app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB,
+	delsyncq chan DelegationSyncRequest) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var req ZoneParentSyncPost
@@ -1147,43 +1226,28 @@ func APIzoneParentSync(ctx context.Context, app *AppDetails, refreshq chan ZoneR
 			return
 		}
 
+		// Every command but status needs the parent up front. Status reports
+		// an unresolvable parent itself -- no IMR, or a discovery that failed
+		// -- and that is the answer an operator asking why a zone cannot sync
+		// came for. A bare handler error in its place told them nothing.
 		var err error
-		parent, err := zd.ResolveParent()
-		if err != nil {
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Zone %q: %v", zd.ZoneName, err)
-			return
+		if req.Command != "status" {
+			if _, err = zd.ResolveParent(); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Zone %q: %v", zd.ZoneName, err)
+				return
+			}
 		}
 
 		switch req.Command {
 		case "status":
-			keyrrset, err := zd.GetRRset(zd.ZoneName, dns.TypeKEY)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
-				return
-			}
-			resp.Msg = fmt.Sprintf("Zone %s: current delegation sync status", req.Zone)
-			if keyrrset != nil && len(keyrrset.RRs) > 0 {
-				resp.Functions["SIG(0) key publication"] = "done"
-			} else if zd.ZoneType == Secondary {
-				if zd.Options[OptParentSync] {
-					resp.Functions["SIG(0) key publication"] = "not done; KEY record must be added to zone at primary server"
-					// No apex KEY to quote: GetRRset already reported none.
-					resp.Todo = append(resp.Todo, fmt.Sprintf("Add the zone's SIG(0) KEY record to %s at the primary server", zd.ZoneName))
-				} else {
-					resp.Functions["SIG(0) key publication"] = "disabled by policy (parentsync=false)"
-				}
-			} else if zd.ZoneType == Primary {
-				if zd.Options[OptAllowUpdates] {
-					resp.Functions["SIG(0) key publication"] = "failed"
-				} else {
-					resp.Functions["SIG(0) key publication"] = "disabled by policy (allow-updates=false)"
-				}
-			}
-			resp.Functions["Latest delegation sync transaction"] = "successful"
-			resp.Functions["Time of latest delegation sync"] = "2024-05-01 12:00:00"
-			resp.Functions["Current delegation status"] = fmt.Sprintf("parent %q is in sync with %q (the child)", parent, zd.ZoneName)
+			// The whole answer is in Report (#790). Functions stays empty: a
+			// map cannot carry the order the schemes are tried in, and the
+			// three lines it used to carry beyond the KEY check were
+			// hard-coded -- a sync time from 2024 and an unconditional "in
+			// sync" for every zone.
+			resp.Msg = fmt.Sprintf("Zone %s: delegation sync status", zd.ZoneName)
+			resp.Report, resp.Todo = zd.ParentSyncStatus(r.Context(), kdb, Globals.ImrEngine, delsyncq)
 
 		case "bootstrap":
 			switch req.Scheme {

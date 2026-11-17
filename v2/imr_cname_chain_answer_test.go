@@ -118,6 +118,16 @@ func TestCNAMEChainAnswerNegativeEnds(t *testing.T) {
 //	s3 also has a DS, as though it were a delegation, for the DS test;
 //	asked for any other type, s3 is NODATA, proved by a signed NSEC
 //
+// and, for the DS and DNSKEY questions at a CNAME owner (#875):
+//
+//	top -> the zone's apex, which has its DNSKEY
+//	self -> s3                       signed by a key named self, its own owner
+//	kid                              a signed child: its DS signed by the
+//	                                 parent, its DNSKEY by itself
+//	www.kid -> kid                   signed by kid; the response carries kid's
+//	                                 own NODATA for kid DS in AUTHORITY, as the
+//	                                 servers of a zone answering for its www do
+//
 // The double counts the questions it is asked.
 const (
 	sigChainZone = "sigchain.example."
@@ -136,7 +146,15 @@ func startSigChainDouble(t *testing.T, s *zoneSigner) (string, *chainDouble) {
 		"s2." + z:  "s3." + z,
 		"bad." + z: "s3." + z,
 		"out." + z: "www." + plainZone,
+		"top." + z: z,
 	}
+	kid := "kid." + z
+	kidSigner := newZoneSigner(t, kid)
+	selfSigner := newZoneSigner(t, "self."+z)
+	kidDS := kidSigner.key.ToDS(dns.SHA256)
+	kidDS.Hdr.Ttl = 300
+	kidSOA := mustRR(t, kid+" 300 IN SOA ns."+kid+" hostmaster."+kid+" 1 7200 1800 604800 300")
+	kidApexNSEC := mustRR(t, kid+" 300 IN NSEC www."+kid+" NS SOA RRSIG NSEC DNSKEY")
 	addrs := map[string]string{
 		"s3." + z:      "192.0.2.3",
 		"www.tgt." + z: "192.0.2.4",
@@ -173,6 +191,19 @@ func startSigChainDouble(t *testing.T, s *zoneSigner) (string, *chainDouble) {
 				target = "evil." + z
 			}
 			m.Answer = append(s.sign(t, dname), mustRR(t, q.Name+" 300 IN CNAME "+target))
+		case name == "self."+z:
+			m.Answer = selfSigner.sign(t, mustRR(t, q.Name+" 300 IN CNAME s3."+z))
+		case name == "www."+kid:
+			m.Answer = kidSigner.sign(t, mustRR(t, q.Name+" 300 IN CNAME "+kid))
+			if q.Qtype == dns.TypeDS {
+				m.Ns = append(kidSigner.sign(t, kidSOA), kidSigner.sign(t, kidApexNSEC)...)
+			}
+		case name == kid && q.Qtype == dns.TypeDS:
+			m.Answer = s.sign(t, kidDS)
+		case name == kid && q.Qtype == dns.TypeDNSKEY:
+			m.Answer = kidSigner.sign(t, kidSigner.key)
+		case name == z && q.Qtype == dns.TypeDNSKEY:
+			m.Answer = s.sign(t, s.key)
 		case cnames[name] != "":
 			cn := mustRR(t, q.Name+" 300 IN CNAME "+cnames[name])
 			if name == "bad."+z {

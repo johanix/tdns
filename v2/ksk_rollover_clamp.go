@@ -33,8 +33,9 @@ func ClampedDuration(configured, R, margin time.Duration) time.Duration {
 //     ttls.max-served; ceiling = MaxServedTTL.
 //
 // SignRRset takes the minimum of (UnclampedTTL, K*Margin if K>0,
-// MaxServedTTL if >0) and writes that to every RR header TTL before
-// generating the RRSIG.
+// MaxServedTTL if >0) and signs the RRset at that TTL. RRs whose TTL must
+// change are replaced by copies in a new slice (applyClampToRRset); the
+// caller's RRs are never written (#797).
 //
 // nil means no clamp at all (zone has clamping.enabled: false AND no
 // max-served set AND no rollover scheduled).
@@ -294,28 +295,44 @@ func ClampMetrics() (steps, clamped, unclamped, violations uint64) {
 
 // applyClampToRRset is called from SignRRset before generating the RRSIG
 // when clamp != nil. Captures UnclampedTTL on first encounter, then
-// rewrites every RR header TTL to:
+// brings every RR header TTL to:
 //
 //	min(UnclampedTTL, K*margin if K>0, MaxServedTTL if >0)
 //
 // The K*margin source is the rollover-time K-step clamp; the MaxServedTTL
 // source is the steady-state policy ttls.max-served ceiling. Either, both,
 // or neither may be in effect.
+//
+// Copy-on-write (#797). The records in rrset.RRs are borrowed -- on most
+// paths they are the published snapshot's own -- so a TTL is never assigned
+// on them. A record whose TTL must change is replaced by a copy carrying the
+// new TTL, in a new slice assigned to rrset.RRs; records already at the
+// target keep their pointers. When nothing changes rrset.RRs is left alone.
+// Only the fields of *rrset, the caller's own struct, are written.
+// ceiling returns the TTL ceiling the clamp imposes -- the lower of its
+// active sources -- and whether it imposes one at all.
+func (c *ClampParams) ceiling() (uint32, bool) {
+	if c == nil {
+		return 0, false
+	}
+	var ceiling uint32 = ^uint32(0) // "no ceiling" sentinel
+	if v := c.CeilingTTL(); v > 0 && v < ceiling {
+		ceiling = v
+	}
+	if c.MaxServedTTL > 0 && c.MaxServedTTL < ceiling {
+		ceiling = c.MaxServedTTL
+	}
+	return ceiling, ceiling != ^uint32(0)
+}
+
 func applyClampToRRset(rrset *core.RRset, clamp *ClampParams) {
 	if clamp == nil || len(rrset.RRs) == 0 {
 		atomic.AddUint64(&clampDecisionsUnclamped, 1)
 		return
 	}
 
-	// Compute the effective ceiling from whichever clamp sources are active.
-	var ceiling uint32 = ^uint32(0) // "no ceiling" sentinel
-	if c := clamp.CeilingTTL(); c > 0 && c < ceiling {
-		ceiling = c
-	}
-	if clamp.MaxServedTTL > 0 && clamp.MaxServedTTL < ceiling {
-		ceiling = clamp.MaxServedTTL
-	}
-	if ceiling == ^uint32(0) {
+	ceiling, ok := clamp.ceiling()
+	if !ok {
 		atomic.AddUint64(&clampDecisionsUnclamped, 1)
 		return
 	}
@@ -327,14 +344,22 @@ func applyClampToRRset(rrset *core.RRset, clamp *ClampParams) {
 	if ceiling < target {
 		target = ceiling
 	}
-	changed := false
-	for i := range rrset.RRs {
-		if rrset.RRs[i].Header().Ttl != target {
-			rrset.RRs[i].Header().Ttl = target
-			changed = true
+	var clamped []dns.RR
+	for i, rr := range rrset.RRs {
+		if rr.Header().Ttl == target {
+			continue
 		}
+		if clamped == nil {
+			clamped = make([]dns.RR, len(rrset.RRs))
+			copy(clamped, rrset.RRs)
+		}
+		c := dns.Copy(rr)
+		c.Header().Ttl = target
+		clamped[i] = c
 	}
+	changed := clamped != nil
 	if changed {
+		rrset.RRs = clamped
 		atomic.AddUint64(&clampDecisionsClamped, 1)
 	} else {
 		atomic.AddUint64(&clampDecisionsUnclamped, 1)

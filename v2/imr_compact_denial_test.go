@@ -235,7 +235,7 @@ func TestHandleNegativeCachesCompactDenialAsNXDOMAIN(t *testing.T) {
 		return r
 	}
 
-	ctxt, rcode, ok := imr.handleNegative(qname, dns.TypeMX, upstream([]uint16{dns.TypeNSEC, dns.TypeRRSIG, dns.TypeNXNAME}), core.TransportDo53)
+	ctxt, rcode, ok := imr.handleNegative(qname, dns.TypeMX, upstream([]uint16{dns.TypeNSEC, dns.TypeRRSIG, dns.TypeNXNAME}), core.TransportDo53, "")
 	if !ok {
 		t.Fatal("handleNegative did not handle a compact denial")
 	}
@@ -257,7 +257,7 @@ func TestHandleNegativeCachesCompactDenialAsNXDOMAIN(t *testing.T) {
 	r := upstream([]uint16{dns.TypeA, dns.TypeNSEC, dns.TypeRRSIG})
 	r.Question[0].Name = existing
 	r.Ns[1].Header().Name = existing
-	ctxt, rcode, ok = imr.handleNegative(existing, dns.TypeMX, r, core.TransportDo53)
+	ctxt, rcode, ok = imr.handleNegative(existing, dns.TypeMX, r, core.TransportDo53, "")
 	if !ok || ctxt != cache.ContextNoErrNoAns || rcode != dns.RcodeSuccess {
 		t.Fatalf("NODATA classified as %s/%s (ok=%v), want NoErrNoAns/NOERROR",
 			cache.CacheContextToString[ctxt], dns.RcodeToString[rcode], ok)

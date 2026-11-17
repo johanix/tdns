@@ -29,39 +29,14 @@ import (
 //	retired           1           0      (multi-DS keeps it until the withdraw phase)
 //	removed           0           0
 //
-// A ZSK is 0 in every state. The three multi-provider states, and every key
-// of a multi-provider zone, stay NULL until the owner writes them (S3).
-
-// DsDifference is one place where the ds column, as the one-time pass fills
-// it, disagrees with what the code before the column derived from the state
-// (dsBelongsAtParent). Kind names the allowed difference; anything else is a
-// defect.
-type DsDifference struct {
-	KeyID uint16
-	State string
-	Kind  string
-}
-
-const (
-	// DsDiffPublishedOutsideMultiDS: a published KSK outside multi-DS counted
-	// as having its DS before (tdns #635); it has none.
-	DsDiffPublishedOutsideMultiDS = "published-ksk-outside-multi-ds"
-	// DsDiffAlgRollOldHead: the old head of an in-flight algorithm rollover
-	// is active but must have no DS.
-	DsDiffAlgRollOldHead = "alg-roll-old-head"
-	// DsDiffMultiDSCreated and DsDiffMultiDSRetired: under multi-DS the old
-	// intent reader never applied; the rollover target counted created and
-	// retired keys as DS-bearing, and so does the column.
-	DsDiffMultiDSCreated = "multi-ds-created"
-	DsDiffMultiDSRetired = "multi-ds-retired"
-)
+// A ZSK is 0 in every state. The states an owner stages its rows in, and
+// every key of a multi-provider zone, stay NULL until the owner writes them.
 
 // DsFillReport is what the one-time pass did for one zone.
 type DsFillReport struct {
-	Zone        string
-	Filled      int // rows that had ds unset and got it
-	Changed     int // rows rewritten by a refresh after a DS model change
-	Differences []DsDifference
+	Zone    string
+	Filled  int // rows that had ds unset and got it
+	Changed int // rows rewritten by a refresh after a DS model change
 }
 
 // tdnsOwnKeyStates are the states tdns's own state machine moves keys
@@ -73,10 +48,11 @@ var tdnsOwnKeyStates = map[string]bool{
 }
 
 // dsFlagFor is the ds column of a tdns zone's key by DS model, state and SEP
-// bit. Not Valid means tdns has no say: a multi-provider zone, or a state an
-// owner stages.
+// bit. Not Valid means tdns has no say: a state an owner stages. A
+// multi-provider zone never reaches it; dsModelForKeyWrite answers "not
+// known" for one, and the pass over existing rows skips it.
 func dsFlagFor(model DSModel, state string, sep bool) sql.NullBool {
-	if model == DSModelMultiProvider || !tdnsOwnKeyStates[state] {
+	if !tdnsOwnKeyStates[state] {
 		return sql.NullBool{}
 	}
 	if !sep {
@@ -94,15 +70,15 @@ func dsFlagFor(model DSModel, state string, sep bool) sql.NullBool {
 }
 
 // dsModelForKeyWrite is the model a writer resolves ds with. Known for a
-// loaded zone with a policy bound; a multi-provider zone answers with its
-// model, which dsFlagFor turns into "no say".
+// loaded zone with a policy bound. Not known for a multi-provider zone: its
+// ds is its owner's to write (§3.5), so tdns's writers leave it unset.
 func dsModelForKeyWrite(zone string) (DSModel, bool) {
 	zd, ok := Zones.Get(dns.Fqdn(zone))
 	if !ok || zd == nil {
 		return DSModelNone, false
 	}
 	if zd.Options[OptMultiProvider] {
-		return DSModelMultiProvider, true
+		return DSModelNone, false
 	}
 	if zd.DnssecPolicy == nil {
 		return DSModelNone, false
@@ -170,9 +146,7 @@ func refreshKeyRowFlagsTx(tx *Tx, zone string, keyid uint16) error {
 
 // FillDsForZone fills ds for the zone's rows that have it unset, per the
 // zone's model, once its policy is known. NULL-gated: rows that carry ds keep
-// it. Reports what it filled and where the column disagrees with what the
-// code before it derived from the state (dsBelongsAtParent). A
-// multi-provider zone gets nothing from tdns.
+// it. Reports what it filled. A multi-provider zone gets nothing from tdns.
 func (kdb *KeyDB) FillDsForZone(zd *ZoneData) (DsFillReport, error) {
 	return kdb.fillDsForZone(zd, false)
 }
@@ -206,7 +180,6 @@ func (kdb *KeyDB) fillDsForZone(zd *ZoneData, force bool) (DsFillReport, error) 
 	type todo struct {
 		keyid uint16
 		state string
-		sep   bool
 		had   sql.NullInt64
 		ds    sql.NullBool
 	}
@@ -224,7 +197,7 @@ func (kdb *KeyDB) fillDsForZone(zd *ZoneData, force bool) (DsFillReport, error) 
 		if ds.Valid && ds.Bool && uint16(keyid) == oldHead {
 			ds.Bool = false
 		}
-		todos = append(todos, todo{uint16(keyid), state, sep, had, ds})
+		todos = append(todos, todo{uint16(keyid), state, had, ds})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -262,38 +235,11 @@ func (kdb *KeyDB) fillDsForZone(zd *ZoneData, force bool) (DsFillReport, error) 
 			return rep, fmt.Errorf("FillDsForZone: %s keyid %d: %w", zone, td.keyid, err)
 		}
 		rep.Filled++
-		if !td.sep {
-			continue
-		}
-		old, _ := dsBelongsAtParent(td.state)
-		if old == td.ds.Bool {
-			continue
-		}
-		kind := "unexpected"
-		switch {
-		case td.keyid == oldHead && old && !td.ds.Bool:
-			kind = DsDiffAlgRollOldHead
-		case model != DSModelMultiDS && td.state == DnskeyStatePublished && old && !td.ds.Bool:
-			kind = DsDiffPublishedOutsideMultiDS
-		case model == DSModelMultiDS && td.state == DnskeyStateCreated && !old && td.ds.Bool:
-			kind = DsDiffMultiDSCreated
-		case model == DSModelMultiDS && td.state == DnskeyStateRetired && !old && td.ds.Bool:
-			kind = DsDiffMultiDSRetired
-		}
-		rep.Differences = append(rep.Differences, DsDifference{KeyID: td.keyid, State: td.state, Kind: kind})
 	}
 	if err := tx.Commit(); err != nil {
 		return rep, err
 	}
 	committed = true
-	for _, d := range rep.Differences {
-		lg := lgSigner.Info
-		if d.Kind == "unexpected" {
-			lg = lgSigner.Error
-		}
-		lg("ds column: the one-time pass disagrees with the state-derived DS intent",
-			"zone", zone, "keyid", d.KeyID, "state", d.State, "kind", d.Kind)
-	}
 	return rep, nil
 }
 

@@ -24,8 +24,13 @@ import (
 // A zone is owned exactly when it carries OptMultiProvider, an owner is
 // registered, and the owner answers Owns. Registration happens before
 // MainInit, so it is in place before any zone's first refresh. With no owner
-// registered, or Owns false, a multi-provider zone keeps today's behaviour,
-// KeyLifecycleHooks included: that is how the owner rolls out zone by zone.
+// registered, or Owns false, a multi-provider zone gets tdns's own lifecycle,
+// as every other zone does: that is how the owner rolled out zone by zone
+// (S3), and since S4 every multi-provider zone is owned.
+//
+// The states an owner stages its rows in are its own: it registers them
+// with RegisterKeyStateFlags, and tdns reads the rows by their pub, sign and
+// ds columns without naming the states.
 type KeyLifecycleOwner interface {
 	// Name is how tdns names the owner in a refusal.
 	Name() string
@@ -44,6 +49,13 @@ type KeyLifecycleOwner interface {
 
 // ErrZoneOwned is in every refusal of a lifecycle verb on an owned zone.
 var ErrZoneOwned = errors.New("the zone's key lifecycle is owned")
+
+// ErrKeyGenerationDeferred reports that EnsureActiveDnssecKeys found no
+// active key of a role on an owned zone: the owner has not released one
+// yet, and tdns mints none beside it. Not a fault. The publish path reads it
+// as "not yet" on a zone that has not served a signed version: it publishes
+// unsigned and stays not Ready, exactly as it does before the policy binds.
+var ErrKeyGenerationDeferred = errors.New("key generation deferred: the zone's owner has not released a key of this role yet")
 
 var (
 	keyLifecycleOwnerMu sync.RWMutex
@@ -114,15 +126,27 @@ func keysOfUnownedZones(keys []DnssecKeyWithTimestamps) []DnssecKeyWithTimestamp
 
 // ownerPolicyFieldsDiffer reports whether two policies differ in a field
 // that is the owner's on an owned zone (design Q1): the algorithms, the
-// lifetimes and the rollover method. Signature validity, TTLs and the
-// clamp's signature parameters are mechanism and tdns's to apply.
+// lifetimes, the standby counts and the rollover method. Signature
+// validity, TTLs and the clamp's signature parameters are mechanism and
+// tdns's to apply. A standby count differs when one policy sets it and the
+// other leaves it to the global count, whatever that count is.
 func ownerPolicyFieldsDiffer(a, b *DnssecPolicy) bool {
 	if a == nil || b == nil {
 		return a != b
 	}
 	return a.Mode != b.Mode || a.Algorithm != b.Algorithm || a.KSKAlgorithm != b.KSKAlgorithm || a.ZSKAlgorithm != b.ZSKAlgorithm ||
 		a.KSK.Lifetime != b.KSK.Lifetime || a.ZSK.Lifetime != b.ZSK.Lifetime || a.CSK.Lifetime != b.CSK.Lifetime ||
-		a.Rollover.Method != b.Rollover.Method || a.Rollover.NumDS != b.Rollover.NumDS || a.Rollover.StandbyTime != b.Rollover.StandbyTime
+		a.Rollover.Method != b.Rollover.Method || a.Rollover.NumDS != b.Rollover.NumDS || a.Rollover.StandbyTime != b.Rollover.StandbyTime ||
+		!sameStandbyCount(a, b, false) || !sameStandbyCount(a, b, true)
+}
+
+// sameStandbyCount reports whether a and b say the same about the standby
+// count of a role: both leave it to the global count, or both set the same
+// number.
+func sameStandbyCount(a, b *DnssecPolicy, sep bool) bool {
+	an, aset := a.StandbyCount(sep)
+	bn, bset := b.StandbyCount(sep)
+	return aset == bset && an == bn
 }
 
 // What an owner needs from tdns (§3.5, "tdns exports what an owner needs").
@@ -192,7 +216,7 @@ func SetZonePolicyForOwner(ctx context.Context, zd *ZoneData, kdb *KeyDB, policy
 		return "", fmt.Errorf("owner policy-set: %w", err)
 	}
 	if oldName != "" && oldName != policyName {
-		return fmt.Sprintf("Zone %s: DNSSEC policy changed from %q to %q by its key lifecycle owner (%d new RRSIGs). Update the zone's dnssec_policy in YAML to make %q permanent.", zd.ZoneName, oldName, policyName, newrrsigs, policyName), nil
+		return fmt.Sprintf("Zone %s: DNSSEC policy changed from %q to %q by its key lifecycle owner (%d new RRSIGs). Update the zone's dnssecpolicy in YAML to make %q permanent.", zd.ZoneName, oldName, policyName, newrrsigs, policyName), nil
 	}
-	return fmt.Sprintf("Zone %s: DNSSEC policy set to %q by its key lifecycle owner (%d new RRSIGs). Update the zone's dnssec_policy in YAML to make %q permanent.", zd.ZoneName, policyName, newrrsigs, policyName), nil
+	return fmt.Sprintf("Zone %s: DNSSEC policy set to %q by its key lifecycle owner (%d new RRSIGs). Update the zone's dnssecpolicy in YAML to make %q permanent.", zd.ZoneName, policyName, newrrsigs, policyName), nil
 }

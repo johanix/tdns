@@ -102,8 +102,9 @@ func TestCNAMEChaseInsideOutOfBailiwickZone(t *testing.T) {
 	c.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, port, nil)
 	c.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, port, nil)
 	imr := &Imr{
-		Cache: c,
-		Quiet: true,
+		Cache:   c,
+		Quiet:   true,
+		Options: loopbackTestOptions(),
 		FamilyTracker: cache.NewFamilyTracker(
 			10*time.Minute, 10*time.Minute, 30*time.Second, 5),
 	}
@@ -141,7 +142,7 @@ func TestCNAMEChaseInsideOutOfBailiwickZone(t *testing.T) {
 	}}
 
 	rrset, rcode, cctx, _, err := imr.handleReferral(ctx, "a."+zone, dns.TypeA, ref, false,
-		map[string]bool{}, core.TransportDo53, edns0.PrivacyNone)
+		map[string]bool{}, "", core.TransportDo53, edns0.PrivacyNone)
 
 	if sm, ok := c.ServerMap.Get(zone); ok {
 		t.Logf("cache ServerMap[%s] after referral: %d servers", zone, len(sm))

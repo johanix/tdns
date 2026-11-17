@@ -45,14 +45,27 @@ func clarifyXfrError(zone, upstream string, err error) error {
 	const marker = "bad xfr rcode: "
 	if i := strings.Index(err.Error(), marker); i >= 0 {
 		if code, perr := strconv.Atoi(strings.TrimSpace(err.Error()[i+len(marker):])); perr == nil {
-			name := dns.RcodeToString[code]
-			if name == "" {
-				name = fmt.Sprintf("rcode %d", code)
-			}
-			return fmt.Errorf("inbound zone transfer of %s from %s failed: %s", zone, upstream, name)
+			return &xfrRcodeError{zone: zone, upstream: upstream, rcode: code}
 		}
 	}
 	return err
+}
+
+// xfrRcodeError is a transfer the upstream answered with an rcode instead of
+// the zone. Its text is the one clarifyXfrError has always returned; the type
+// is so that a refresh failure can name the rcode as its kind without parsing
+// that text (refreshErrorKind).
+type xfrRcodeError struct {
+	zone, upstream string
+	rcode          int
+}
+
+func (e *xfrRcodeError) Error() string {
+	name := dns.RcodeToString[e.rcode]
+	if name == "" {
+		name = fmt.Sprintf("rcode %d", e.rcode)
+	}
+	return fmt.Sprintf("inbound zone transfer of %s from %s failed: %s", e.zone, e.upstream, name)
 }
 
 // drainTransferEnvelopes consumes the AXFR/IXFR envelope stream, feeding each
@@ -164,14 +177,14 @@ func (zd *ZoneData) openTransferStream(ctx context.Context, up PeerConf, msg *dn
 	// fork's Transfer.In dials tcp-tls with it. nil => plain TCP (Do53).
 	tlsCfg, terr := conf.ClientTLSConfigForPeer(up)
 	if terr != nil {
-		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)
+		return nil, nil, &peerConfigError{err: fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)}
 	}
 	transfer.TLS = tlsCfg
 	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
 	// The provider also verifies the TSIG on the inbound envelopes.
 	provider, serr := SignForPeer(msg, up.Key, conf)
 	if serr != nil {
-		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
+		return nil, nil, &peerConfigError{err: fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)}
 	}
 	transfer.TsigProvider = provider
 
@@ -454,14 +467,40 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 		return zd.refuseTransfer(w, r)
 	}
 
-	if zd.GetStatus() != ZoneStatusReady {
-		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone status %s", zone, ZoneStatusToString[zd.GetStatus()])
+	// Admission is decided on Ready, the zone's "holds a servable published
+	// snapshot" flag, and not on Status. Status is the refresh engine's
+	// progress marker and reads `loading` for the whole of EVERY refresh --
+	// including a refresh of a zone that is already loaded and still answering
+	// queries from the snapshot it published. Refusing on it turned each
+	// refresh into a window in which a downstream that asked was refused
+	// although we could hand it the very zone we serve (#1016).
+	//
+	// What stays refused is a zone with nothing to offer yet (first load, a
+	// withheld zone: Ready is false) and one in a service-impacting error, the
+	// state whose queries are answered SERVFAIL. RefreshError is not one: the
+	// published copy is still the zone's.
+	//
+	// Read together under one lock acquisition: Ready, Status, the store and the
+	// error registry are all written under zd.mu, the store by the refresh's own
+	// publish, so separate reads could mix two moments of the zone.
+	zd.mu.Lock()
+	ready, status, store := zd.Ready, zd.Status, zd.ZoneStore
+	inError := zd.hasServiceImpactingErrorLocked()
+	zd.mu.Unlock()
+
+	if !ready {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone status %s (not ready: nothing servable published yet)",
+			zone, ZoneStatusToString[status])
+		return zd.refuseTransfer(w, r)
+	}
+	if inError {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone is in a service-impacting error", zone)
 		return zd.refuseTransfer(w, r)
 	}
 
-	if zd.ZoneStore != MapZone {
+	if store != MapZone {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone store %s not supported",
-			zone, ZoneStoreToString[zd.ZoneStore])
+			zone, ZoneStoreToString[store])
 		return zd.refuseTransfer(w, r)
 	}
 
@@ -507,6 +546,11 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 		RRSIGs: soaRRset.RRSIGs,
 	}
 
+	// Said at the default level, because it is the one line that shows a
+	// downstream was served in the middle of a refresh rather than refused.
+	if status == ZoneStatusLoading {
+		zd.Logger.Printf("ZoneTransferOut: %s: a refresh is in progress; serving the published copy, serial %d", zone, snap.Serial)
+	}
 	if zd.Verbose {
 		zd.Logger.Printf("ZoneTransferOut: Will try to serve zone %s", zone)
 	}
@@ -764,8 +808,27 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 		return false, 0, fmt.Errorf("ParseZoneFromReader: zone store %d not supported", zd.ZoneStore)
 	}
 
-	zp := dns.NewZoneParser(r, "", filename)
+	// The origin starts at the zone's own name, as in BIND, NSD and Knot: "@"
+	// and every relative name before a $ORIGIN line are relative to the zone.
+	// An $INCLUDE without an origin of its own inherits the one in effect.
+	//
+	// It used to start empty, which refused "@" and any relative name outright
+	// -- so the commonest shape of zone file did not load -- and refused a
+	// relative NS target missing its trailing dot only as a side effect.
+	// CheckDoubledZoneSuffix below refuses that mistake on purpose now.
+	zp := dns.NewZoneParser(r, dns.Fqdn(zd.ZoneName), filename)
 	zp.SetIncludeAllowed(true)
+
+	// A primary's zone file is operator-authored input, so catch likely missing
+	// trailing dots there. A secondary's saved file is a copy of data accepted
+	// from its primary; rejecting a name here would make the copy unusable on
+	// restart even though the secondary did not author it. The zone option also
+	// opts a primary out when it intentionally uses doubled names.
+	// A nil report checks nothing.
+	var doubled *DoubledSuffixReport
+	if zd.ZoneType != Secondary && !zd.Options[OptAllowDoubledSuffix] {
+		doubled = NewDoubledSuffixReport(zd.ZoneName)
+	}
 
 	firstSoaSeen := false
 	checkedForUnchanged := false
@@ -790,6 +853,11 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 		}
 		if Globals.Debug {
 			//  zd.Logger.Printf("ReadZoneData: parsed RR: %s", rr.String())
+		}
+		// Collected, not returned at the first: the refusal after the parse
+		// lists every doubled name (zone_parse_names.go).
+		if doubled.Check(rr) {
+			continue
 		}
 		firstSoaSeen = zd.SortFunc(rr, firstSoaSeen)
 
@@ -829,6 +897,13 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 		}
 		return false, 0, err
 	}
+	if err := doubled.Err(); err != nil {
+		where := filename
+		if where == "" {
+			where = "zone data"
+		}
+		return false, 0, fmt.Errorf("zone %s: %s: %w", zd.ZoneName, where, err)
+	}
 
 	apex, ok := zd.Data.Get(zd.ZoneName)
 	if !ok || apex.RRtypes == nil {
@@ -865,6 +940,16 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 			"zone", zd.ZoneName, "error", derr)
 	} else {
 		zd.fileDigest = digest
+	}
+
+	// An SVCB RRset that mixes an AliasMode record with ServiceMode ones is
+	// refused with the load: a client ignores the ServiceMode records beside
+	// the alias (RFC 9460 section 2.4.1), so the zone would serve records
+	// nobody uses, and the operator would not know.
+	for name, od := range zd.Data.Items() {
+		if rs, ok := od.RRtypes.Get(dns.TypeSVCB); ok && svcbMixesModes(rs) {
+			return false, 0, fmt.Errorf("zone %s: %s: an SVCB RRset mixing AliasMode and ServiceMode records; a client ignores the ServiceMode ones (RFC 9460 section 2.4.1)", zd.ZoneName, name)
+		}
 	}
 
 	// Return true only if serial changed (indicates actual update)
@@ -920,7 +1005,7 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 			if ztype == MapZone {
 				tmp = omap.RRtypes.GetOnlyRRSet(rrtype)
 				tmp.RRs = append(tmp.RRs, rr)
-				omap.RRtypes.Set(rrtype, tmp)
+				omap.RRtypes.Set(rrtype, tmp) // mutator-ok: SortFunc: the apex SOA, into a zone being built and not yet published
 			}
 		}
 
@@ -948,7 +1033,7 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 			}
 			tmp = omap.RRtypes.GetOnlyRRSet(rrt)
 			tmp.RRSIGs = append(tmp.RRSIGs, rr)
-			omap.RRtypes.Set(rrt, tmp)
+			omap.RRtypes.Set(rrt, tmp) // mutator-ok: SortFunc: an RRSIG, into a zone being built and not yet published
 		}
 
 	default:
@@ -956,11 +1041,11 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 		case MapZone:
 			tmp = omap.RRtypes.GetOnlyRRSet(rrtype)
 			tmp.RRs = append(tmp.RRs, rr)
-			omap.RRtypes.Set(rrtype, tmp)
+			omap.RRtypes.Set(rrtype, tmp) // mutator-ok: SortFunc: an RRset, into a zone being built and not yet published
 		}
 	}
 	if ztype == MapZone {
-		zd.Data.Set(owner, omap)
+		zd.Data.Set(owner, omap) // mutator-ok: SortFunc: the owner, into the Data of a zone being built
 	}
 	return firstSoaSeen
 }
@@ -1217,18 +1302,31 @@ func InBailiwick(zone string, ns *dns.NS) bool {
 
 // formatZoneParseError extracts the line number from the parse error string
 // and appends the offending line from the zone file for context.
+//
+// The line is read from the file the error names, which is not always
+// filename: an error inside an $INCLUDEd file carries the include's path as its
+// prefix ("<file>: dns: ... at line: L:C") and L counts lines in that file. The
+// parser's error type exposes neither, so both come from its text. Quoting line
+// L of the main file instead put an unrelated record under the error.
 func formatZoneParseError(err error, filename string) error {
 	errStr := err.Error()
 	lineNum := 0
-	if idx := strings.Index(errStr, "at line: "); idx != -1 {
+	if idx := strings.LastIndex(errStr, "at line: "); idx != -1 {
 		numStr := errStr[idx+len("at line: "):]
 		parts := strings.SplitN(numStr, ":", 2)
 		if n, e := strconv.Atoi(parts[0]); e == nil {
 			lineNum = n
 		}
 	}
+	errFile := filename
+	if idx := strings.Index(errStr, ": dns: "); idx > 0 {
+		errFile = errStr[:idx]
+	}
 	if lineNum > 0 {
-		if line, e := readLineFromFile(filename, lineNum); e == nil {
+		if line, e := readLineFromFile(errFile, lineNum); e == nil {
+			if errFile != filename {
+				return fmt.Errorf("%w\n  %s line %d: %s", err, errFile, lineNum, line)
+			}
 			return fmt.Errorf("%w\n  line %d: %s", err, lineNum, line)
 		}
 	}

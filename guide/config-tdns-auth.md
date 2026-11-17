@@ -667,6 +667,17 @@ which also exits non-zero on a zone that fails. `+zonemd` needs an AXFR: an
 IXFR returns a difference rather than a zone, and `dog` refuses instead of
 digesting one.
 
+**Outbound IXFR**
+
+| Option | Effect |
+|--------|--------|
+| `ixfr-from-differences` | Diff a wholesale replacement of the zone (a reload of its file, or a full AXFR in) against the version it replaces, and keep the difference in the outbound IXFR history, so downstreams get an IXFR instead of the whole zone. BIND's option of the same name. **Off by default**, as in BIND |
+
+Off is the default because the diff compares the whole zone on every
+replacement. Without the option, a replacement starts a new IXFR history and
+downstreams get a full transfer. Either way a reload whose content is what the
+zone already serves publishes nothing: no new serial, no NOTIFY.
+
 **Zone transfer (secondary zones only)**
 
 | Option | Effect |
@@ -761,6 +772,12 @@ This is separate from `multi-provider`. The full HSYNC role model -- `servers`,
 `signers`, `auditors`, delegated NS management, agent-to-agent synchronization
 -- lives in `tdns-mp`; `tdns-auth` reads exactly these two flags.
 
+**Zone files**
+
+| Option | Effect |
+|--------|--------|
+| `allow-doubled-suffix` | Load names that end in the zone's name, or a name under it, twice, such as `test.test.` in zone `test.`. **Off by default**: the loader and `config check` refuse such a name, since almost every one is a name written out in full whose trailing dot is missing |
+
 **Multi-provider and catalog**
 
 | Option | Effect |
@@ -769,6 +786,47 @@ This is separate from `multi-provider`. The full HSYNC role model -- `servers`,
 | `catalog-zone` | RFC 9432 catalog zone. Requires a `catalog:` config section |
 | `catalog-member-auto-create` | Auto-create member zones from this catalog. Only valid on a zone that also has `catalog-zone` |
 | `catalog-member-auto-delete` | Auto-delete member zones removed from this catalog. Same requirement |
+
+**The server's own resolver**
+
+| Option | Effect |
+|--------|--------|
+| `modified-downstream` | The copy of the zone held here is not the zone the world sees. The server's resolver never answers a question about the zone from it |
+
+The resolver built into tdns-auth answers a question about a zone the server
+serves from the zone itself, before any stub or forward: the server does not
+ask anyone else about its own data. That is right when the copy here is the
+zone the world sees. It is wrong when the zone is signed or changed downstream
+of this server, in ways the server does not know of:
+
+- the source of a multi-provider zone, which the providers' signers publish
+  with their own DNSKEY, KEY and signatures;
+- a primary behind a signer.
+
+Such a copy has none of what is added downstream: answered from it, the
+zone has no DNSKEY and no KEY RRset. A parent that holds such a copy of its
+child, without the option, can then neither verify the child's SIG(0) key nor
+confirm that a DS UPDATE leaves the child validating, and refuses the UPDATE.
+
+With `modified-downstream`, the resolver asks about the zone as it would if
+the server did not hold it: through a stub or forward that covers it, or by
+iterating from the root and following the parent's delegation to the
+published servers. The answers are validated through the parent's DS. The DS
+itself is the parent's data, answered from the parent when the server serves
+the parent too.
+
+```yaml
+zones:
+   - name:      child.parent.example.
+     type:      primary
+     zonefile:  /etc/tdns/zones/child.parent.example
+     options:   [ modified-downstream ]
+```
+
+A reload that turns the option on or off takes effect at once: the resolver
+drops what it holds about the zone, which came from the source it no longer
+uses. The option changes nothing about how the zone is served, transferred or
+updated.
 
 **Options you cannot set.** `dirty`, `frozen`, `automatic-zone`,
 `api-managed-zone`, `multi-signer` and `dont-publish-jwk` are real zone options,
@@ -868,6 +926,8 @@ authengine:
 | `listeners.udp-sockets` | `1` | how many UDP sockets to open per Do53 address, so the kernel can spread datagrams across that many readers. Only useful where the kernel load-balances (below); elsewhere it falls back to one socket and logs why |
 | `listeners.imr-debug-address` | — | loopback-only DNS window into the embedded resolver's cache; non-loopback is a hard error |
 | `authengine.outbound-soa-serial` | `keep` | `keep`, `unixtime` or `persist` |
+| `authengine.notify-retries` | `5` | how many times an unanswered NOTIFY is sent again (RFC 1996 §3.6). `0` sends once. Any reply ends the tries, REFUSED included. A zone's own `notify-retries` overrides it. Read at startup |
+| `authengine.notify-retry-interval` | `10s` | the wait before the first resend; each later one waits twice as long (10s, 20s, 40s, 80s, 160s). A zone's own `notify-retry-interval` overrides it |
 | `authengine.options` | — | server-wide options, below |
 
 `ports.do53` does not exist. Do53 always listens on the ports embedded in
@@ -897,10 +957,18 @@ a route to private keys and TSIG secrets. Use `127.0.0.1:6060`, and forward a
 port over ssh to profile a remote host.
 
 `outbound-soa-serial` controls the SOA serial advertised to secondaries.
-`keep` sends the inbound serial unchanged. `unixtime` uses the load time.
-`persist` remembers the last serial in the database, so a restart with no zone
-change does not regress the serial and does not provoke a needless AXFR — the
-right choice for a primary with BIND/Knot/NSD secondaries.
+`keep` sends the inbound serial unchanged. `unixtime` uses the load time, and
+never moves the serial backwards. `persist` is kept as an equivalent name for
+`keep`: what it used to add now applies to every mode.
+
+In every mode, a zone that tdns originates content for (a primary, or an
+inline-signing secondary) records each serial it publishes. After a restart it
+comes back past the highest one, so it never publishes again a serial a
+secondary may already hold, with other content. A restart when nothing was
+published since the zone file was written lifts nothing. A zone file whose
+serial is newer is kept, so the RFC 1982 procedure for changing a serial scheme
+works as before. `zone journal status` shows the serial a restart comes back
+past.
 
 Three `options:` values are recognized:
 

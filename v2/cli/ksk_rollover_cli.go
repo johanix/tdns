@@ -151,12 +151,12 @@ func newKeystoreDnssecDsPushCmd(_ string) *cobra.Command {
 and pushes the whole DS RRset to the parent. Requires imrengine in config.
 
 Offline mode: this CLI invocation builds a stub *ZoneData with no rollover policy
-attached, so PushDSRRsetForRollover falls through to the legacy single-scheme
-UPDATE path (whole-DS replacement, signed with the zone's active SIG(0) key).
-The auto / prefer-* / force-* dsync-scheme-preference values are honored only
-inside the daemon's rollover engine, where the policy is loaded from
-dnssecpolicies. To exercise NOTIFY pushes, run the daemon and let
-RolloverAutomatedTick drive the push.
+attached, so the DS delivery (SyncDSWithParent, the delegation syncher's) takes
+its single-scheme UPDATE path (whole-DS replacement, signed with the zone's
+active SIG(0) key). The auto / prefer-* / force-* dsync-scheme-preference values
+are honored only inside the daemon, where the rollover engine asks the syncher
+with the policy loaded from dnssecpolicies. To exercise NOTIFY pushes, run the
+daemon and let RolloverAutomatedTick drive the push.
 
 Use --dry-run to print the DS set and the UPDATE without sending.`,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -191,11 +191,10 @@ Use --dry-run to print the DS set and the UPDATE without sending.`,
 
 			z := dns.Fqdn(tdns.Globals.Zonename)
 			zd := &tdns.ZoneData{ZoneName: z}
-			// Intentionally leave zd.DnssecPolicy nil. The dispatcher
-			// (PushDSRRsetForRollover) gates DSYNC scheme selection on
-			// a non-nil policy and falls through to the legacy
-			// UPDATE-only path when policy is nil. Attaching the policy
-			// here would let an operator running the offline CLI on
+			// Intentionally no policy. The DS delivery gates DSYNC
+			// scheme selection on a non-nil policy and takes the
+			// UPDATE-only path without one. Passing the policy here
+			// would let an operator running the offline CLI on
 			// auto/prefer-notify silently take the NOTIFY path,
 			// contradicting the "UPDATE-only offline mode" contract
 			// documented above.
@@ -221,16 +220,9 @@ Use --dry-run to print the DS set and the UPDATE without sending.`,
 				return
 			}
 
-			deps := tdns.RolloverEngineDeps{
-				Conf: &Conf,
-				KDB:  kdb,
-				Zone: zd,
-				Imr:  imr,
-				// Policy: nil is deliberate — see comment above where
-				// zd is constructed. Forces the dispatcher onto the
-				// legacy UPDATE-only path.
-			}
-			res, err := tdns.PushDSRRsetForRollover(ctx, deps)
+			// No policy, on purpose: see the comment above where zd is
+			// constructed. That keeps the delivery on the UPDATE-only path.
+			res, err := zd.SyncDSWithParent(ctx, kdb, nil, imr, tdns.DSSyncRequest{})
 			if err != nil {
 				log.Fatalf("ds-push: %v", err)
 			}
@@ -287,7 +279,7 @@ or 2s / 60s / 1h when those are unset.
 			z := dns.Fqdn(tdns.Globals.Zonename)
 			pol := dnssecPolicyForZone(&Conf, kdb, z)
 			if pol == nil {
-				log.Fatal("no dnssec policy for this zone (dnssec_policy in zone config)")
+				log.Fatal("no dnssec policy for this zone (dnssecpolicy in zone config)")
 			}
 
 			agent := strings.TrimSpace(parentAgentFlag)
@@ -1020,7 +1012,18 @@ func printZoneGlobalHeader(s *tdns.RolloverStatus, verbose bool) {
 			if s.AlgRollFromAlg != "" {
 				fmt.Printf("  started %s; old KSK %d (%s, still signing) / new KSK %d (%s)\n",
 					formatRolloverTime(s.AlgRollStartedAt), s.AlgRollOldHeadKeyID, s.AlgRollFromAlg, s.AlgRollHeadKeyID, s.AlgRollToAlg)
+				if s.AlgRollParentInsecure {
+					fmt.Println("  the parent holds no DS for the zone: the roll does not wait for the parent")
+				}
 				switch {
+				case s.AlgRollParentInsecure && s.AlgRollProjectedRemoveAt != "":
+					fmt.Printf("  parent step done %s (no DS at the parent); old KSK removal expected %s\n",
+						formatRolloverTime(s.AlgRollOldHeadRetireAt), formatRolloverTime(s.AlgRollProjectedRemoveAt))
+				case s.AlgRollParentInsecure && s.AlgRollOldHeadRetireAt != "":
+					fmt.Printf("  parent step done %s (no DS at the parent); old KSK removal awaits the served DNSKEY TTL\n",
+						formatRolloverTime(s.AlgRollOldHeadRetireAt))
+				case s.AlgRollParentInsecure:
+					fmt.Println("  awaiting the next parent poll; the drain starts if it still shows no DS")
 				case s.AlgRollProjectedRemoveAt != "":
 					fmt.Printf("  parent confirmed %s; old KSK removal expected %s\n",
 						formatRolloverTime(s.AlgRollOldHeadRetireAt), formatRolloverTime(s.AlgRollProjectedRemoveAt))
@@ -1034,10 +1037,13 @@ func printZoneGlobalHeader(s *tdns.RolloverStatus, verbose bool) {
 			printed = true
 			continue
 		}
-		// Describe the count as published ZSKs (the live keys in the DNSKEY RRset).
+		// Name what is counted: the live ZSKs, i.e. standby, active and
+		// retired (zskAlgRollLiveStates). A key still in state "published"
+		// is not counted, so calling these "published ZSKs" read as if a
+		// just-published new-algorithm key had been missed ("0 of 2").
 		line := fmt.Sprintf("Algorithm rollover: %s %s -> %s  (in progress)", t.Role, t.FromAlg, t.ToAlg)
 		if t.Total > 0 {
-			line += fmt.Sprintf(", %d of %d published ZSKs on new algorithm", t.Done, t.Total)
+			line += fmt.Sprintf(", %d of %d live ZSKs (standby/active/retired) on new algorithm", t.Done, t.Total)
 		}
 		fmt.Println(line)
 		printed = true
@@ -1179,11 +1185,12 @@ func printStateTable(s *tdns.RolloverStatus) {
 		}
 		left = append(left, kv{"last push:", v})
 	}
-	if s.ExpectedBy != "" {
-		left = append(left, kv{"expected by:", formatRolloverTime(s.ExpectedBy)})
+	now := time.Now()
+	if v, ok := rolloverDeadlineValue(s.ExpectedBy, s.Phase, now); ok {
+		left = append(left, kv{"expected by:", v})
 	}
-	if s.AttemptTimeout != "" {
-		left = append(left, kv{"attempt timeout:", formatRolloverTime(s.AttemptTimeout)})
+	if v, ok := rolloverDeadlineValue(s.AttemptTimeout, s.Phase, now); ok {
+		left = append(left, kv{"attempt timeout:", v})
 	}
 	// Per-scheme lines: DS UPDATE / CDS published / DS observed.
 	// Each is rendered as (kidPart [+timePart]). The bracket parts
@@ -1657,6 +1664,40 @@ func formatRolloverTime(s string) string {
 	default:
 		return fmt.Sprintf("%s (%s ago)", formatted, -delta)
 	}
+}
+
+// rolloverDeadlineValue renders one of the attempt deadlines ("expected by",
+// "attempt timeout") for the status table; ok=false leaves the line out.
+//
+// Both are measured from the start of the last push attempt. A deadline that
+// has not yet come is shown as it always was. One that has passed used to be
+// shown the same way, and read as if the engine were still waiting for it:
+//
+//   - In pending-parent-push no push of the current attempt has been accepted
+//     (the engine is retrying, or has armed a new cycle), so a passed deadline
+//     belongs to an earlier attempt and describes nothing the engine is
+//     waiting for. The line is left out; "last push:" still says when the
+//     last attempt started.
+//   - In any other phase (pending-parent-observe) a passed deadline still
+//     means something -- the parent is late, or the observation is about to
+//     time out -- so it is kept and marked "passed".
+func rolloverDeadlineValue(deadline, phase string, now time.Time) (string, bool) {
+	deadline = strings.TrimSpace(deadline)
+	if deadline == "" {
+		return "", false
+	}
+	t, err := time.Parse(time.RFC3339, deadline)
+	if err != nil || t.After(now) {
+		return formatRolloverTime(deadline), true
+	}
+	if phase == "pending-parent-push" {
+		return "", false
+	}
+	v := formatRolloverTime(deadline)
+	if strings.HasSuffix(v, ")") {
+		return strings.TrimSuffix(v, ")") + ", passed)", true
+	}
+	return v + " (passed)", true
 }
 
 // formatRolloverTimeAbsolute is like formatRolloverTime but adds the

@@ -33,7 +33,7 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 		State: cache.ValidationStateSecure, TrustAnchor: true, Expiration: time.Now().Add(time.Hour)})
 	pk := &dns.DNSKEY{Hdr: dns.RR_Header{Name: parent, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 256, Protocol: 3, Algorithm: dns.ED25519}
-	ppriv, err := pk.Generate(256)
+	ppriv, err := generateSigningKey(pk, 256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,11 +46,11 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 	// The child's DS, as the parent signs it.
 	ck := &dns.DNSKEY{Hdr: dns.RR_Header{Name: child, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 		Flags: 257, Protocol: 3, Algorithm: dns.ED25519}
-	if _, err := ck.Generate(256); err != nil {
+	if _, err := generateSigningKey(ck, 256); err != nil {
 		t.Fatal(err)
 	}
 	ds := ck.ToDS(dns.SHA256)
-	dsSig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: pk.KeyTag(), SignerName: parent,
+	dsSig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: ds.Header().Ttl}, Algorithm: dns.ED25519, KeyTag: pk.KeyTag(), SignerName: parent,
 		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := dsSig.Sign(ppriv.(crypto.Signer), []dns.RR{ds}); err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 	// proof (ReferralChildState).
 	nsec := &dns.NSEC{Hdr: dns.RR_Header{Name: child, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 300},
 		NextDomain: "zzz." + parent, TypeBitMap: []uint16{dns.TypeNS, dns.TypeRRSIG, dns.TypeNSEC}}
-	nsecSig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: pk.KeyTag(), SignerName: parent,
+	nsecSig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: nsec.Header().Ttl}, Algorithm: dns.ED25519, KeyTag: pk.KeyTag(), SignerName: parent,
 		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 	if err := nsecSig.Sign(ppriv.(crypto.Signer), []dns.RR{nsec}); err != nil {
 		t.Fatal(err)
@@ -87,7 +87,7 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 		} else {
 			m.Ns = append(m.Ns, nsec, nsecSig)
 		}
-		imr.handleReferral(ctx, "www."+child, dns.TypeA, m, false, map[string]bool{}, core.TransportDo53, edns0.PrivacyNone)
+		imr.handleReferral(ctx, "www."+child, dns.TypeA, m, false, map[string]bool{}, "", core.TransportDo53, edns0.PrivacyNone)
 	}
 	state := func() cache.ValidationState {
 		z, ok := imr.Cache.ZoneMap.Get(child)

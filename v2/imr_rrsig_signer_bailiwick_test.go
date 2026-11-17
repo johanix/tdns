@@ -77,21 +77,27 @@ func startAnswerDouble(t *testing.T, zone string, qtype uint16, answer []dns.RR)
 func TestResponderRefusesAnOutOfBailiwickSigner(t *testing.T) {
 	const zone = "victim.example."
 	const qname = "www." + zone
-	cases := []struct{ name, signer, owner string }{
-		{"signer is a string suffix of the qname", "ictim.example.", qname},
-		{"answer owned by a name in the signer's zone", "attacker.example.", "www.attacker.example."},
+	// ede is the EDE the SERVFAIL carries. Records owned by another name than
+	// the one asked for are not part of the answer at all (handleAnswer), so
+	// there is no verdict on them, and no EDE.
+	cases := []struct {
+		name, signer, owner string
+		ede                 uint16
+	}{
+		{"signer is a string suffix of the qname", "ictim.example.", qname, edns0.EDEDNSSECBogus},
+		{"answer owned by a name in the signer's zone", "attacker.example.", "www.attacker.example.", 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			k := &dns.DNSKEY{Hdr: dns.RR_Header{Name: c.signer, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 300},
 				Flags: 256, Protocol: 3, Algorithm: dns.ED25519}
-			priv, err := k.Generate(256)
+			priv, err := generateSigningKey(k, 256)
 			if err != nil {
 				t.Fatal(err)
 			}
 			a := &dns.A{Hdr: dns.RR_Header{Name: c.owner, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
 				A: net.IPv4(192, 0, 2, 66)}
-			sig := &dns.RRSIG{Algorithm: dns.ED25519, KeyTag: k.KeyTag(), SignerName: c.signer,
+			sig := &dns.RRSIG{Hdr: dns.RR_Header{Ttl: a.Header().Ttl}, Algorithm: dns.ED25519, KeyTag: k.KeyTag(), SignerName: c.signer,
 				Inception:  uint32(time.Now().Add(-time.Hour).Unix()),
 				Expiration: uint32(time.Now().Add(time.Hour).Unix())}
 			if err := sig.Sign(priv.(crypto.Signer), []dns.RR{a}); err != nil {
@@ -122,9 +128,9 @@ func TestResponderRefusesAnOutOfBailiwickSigner(t *testing.T) {
 			if cw.got.AuthenticatedData {
 				t.Errorf("served with AD: rcode %s, answer %v", dns.RcodeToString[cw.got.Rcode], cw.got.Answer)
 			}
-			if cw.got.Rcode != dns.RcodeServerFailure || edeOf(cw.got) != edns0.EDEDNSSECBogus {
-				t.Errorf("rcode %s EDE %d, answer %v; want SERVFAIL with EDE %d",
-					dns.RcodeToString[cw.got.Rcode], edeOf(cw.got), cw.got.Answer, edns0.EDEDNSSECBogus)
+			if cw.got.Rcode != dns.RcodeServerFailure || edeOf(cw.got) != c.ede || len(cw.got.Answer) != 0 {
+				t.Errorf("rcode %s EDE %d, answer %v; want SERVFAIL with EDE %d and no answer",
+					dns.RcodeToString[cw.got.Rcode], edeOf(cw.got), cw.got.Answer, c.ede)
 			}
 		})
 	}

@@ -96,10 +96,12 @@ func (imr *Imr) configuredZone(name string) bool {
 // attachCacheHooks gives the cache what it needs to know of the zone table:
 // which names are the apex of a configured zone, and which questions are
 // forwarded. Both hooks read the live table on each call, so a reload needs no
-// new ones.
+// new ones. And which questions the server answers from its own zones, which
+// reads the live Zones map the same way.
 func (imr *Imr) attachCacheHooks() {
 	imr.Cache.ConfiguredZone = imr.configuredZone
 	imr.Cache.Forwarded = imr.forwarded
+	imr.Cache.AnsweredLocally = imr.answeredLocally
 }
 
 // setZoneTable publishes a table directly. Init and tests only; a reload goes
@@ -236,7 +238,8 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 	// servers have already been dropped. Dropping the ServerMap entry is not
 	// destructive: it is cache, and ordinary iteration re-learns the
 	// delegation on the next query — which is exactly what should happen once
-	// the zone is no longer stubbed.
+	// the zone is no longer stubbed. RemoveStub also tells the cache the zone
+	// is no stub any more, so a flush may drop what iteration learns there.
 	for zone := range old.stubFP {
 		if _, kept := appliedFP[zone]; kept {
 			continue
@@ -249,7 +252,7 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 			lgImr.Warn("stub zone for the root removed from config; keeping its server map (re-priming needs a restart)")
 			continue
 		}
-		imr.Cache.ServerMap.Remove(zone)
+		imr.Cache.RemoveStub(zone)
 	}
 
 	sort.Strings(res.StubsRemoved)
@@ -519,14 +522,16 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 	// defaults in before it snapshots bootConf, while the reload decodes the
 	// file raw, so an absent or partial tuning: block differed from the
 	// snapshot on every defaulted knob and every reload asked for a restart.
-	// t is a copy; the one pointer in it, UpgradeIndirectCacheHits, is left
-	// alone by LoadImrTuningDefaults.
+	// t is a copy. Of its pointers, LoadImrTuningDefaults leaves
+	// UpgradeIndirectCacheHits alone, and replaces a nil NSEC3MaxIterations
+	// with a new one.
 	effective := func(t ImrTuningConf) ImrTuningConf {
 		LoadImrTuningDefaults(&t)
 		return t
 	}
 	check("active", bothNil(boot.Active, current.Active))
 	check("root-hints", boot.RootHints == current.RootHints)
+	check("outbound-address-families", sameAddressFamilies(boot.OutboundAddressFamilies, current.OutboundAddressFamilies))
 	check("options", slices.Equal(boot.OptionsStrs, current.OptionsStrs))
 	check("trust-anchor-ds", boot.TrustAnchorDS == current.TrustAnchorDS)
 	check("trust-anchor-dnskey", boot.TrustAnchorDNSKEY == current.TrustAnchorDNSKEY)
@@ -536,6 +541,7 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 	check("debug", boot.Debug == current.Debug)
 	check("logging", boot.Logging == current.Logging)
 	check("tuning", imrTuningEqual(effective(boot.Tuning), effective(current.Tuning)))
+	check("testing", imrTestingEqual(boot.Testing, current.Testing))
 	return keys
 }
 
@@ -547,6 +553,9 @@ func imrTuningEqual(a, b ImrTuningConf) bool {
 		a.Discovery != b.Discovery || a.QueryBudget != b.QueryBudget ||
 		a.CacheMaxTTL != b.CacheMaxTTL || a.CacheMinTTL != b.CacheMinTTL ||
 		a.ZoneStateRecheck != b.ZoneStateRecheck {
+		return false
+	}
+	if i, j := a.NSEC3MaxIterations, b.NSEC3MaxIterations; (i == nil) != (j == nil) || (i != nil && *i != *j) {
 		return false
 	}
 	x, y := a.UpgradeIndirectCacheHits, b.UpgradeIndirectCacheHits

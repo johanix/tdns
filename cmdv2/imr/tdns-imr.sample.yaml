@@ -40,12 +40,29 @@ imrengine:
 
    # Optional: path to a root hints file. If empty, uses compiled-in hints.
    root-hints:          "/etc/tdns/root.hints"
+   # Which IP versions the resolver sends its queries to authoritative servers
+   # over: ipv4, ipv6, or both (the default). Leave out a family that does not
+   # work on this host, e.g. an IPv6 default route that leads nowhere. What it
+   # listens on is listeners.addresses. Takes a restart.
+   # outbound-address-families: [ ipv4, ipv6 ]
+   # Per-client transport counters: for each client address, how many queries
+   # arrived over Do53 (UDP, TCP), DoT, DoQ and DoH, since startup or the last
+   # reset ("tdns-cli imr stats client-transports"). They record client addresses,
+   # never query names, and are off by default. Read at startup: changing
+   # "enabled" needs a restart, not a reload.
+   # client-stats:
+   #    enabled:     false
+   #    max-clients: 4096      # least recently seen evicted into a total
 
    # IMR Options (all are boolean flags, no values needed):
    # - query-for-transport: Query for transport signals opportunistically when observed
    # - always-query-for-transport: Always query for new auth servers
    # - query-for-transport-tlsa: Query for TLSA records for encrypted transports
    # - transport-signal-type: Specify "svcb" (default) or "tsync"
+   # - allow-loopback-nameservers: Also query nameserver addresses on this host
+   #   (127.0.0.0/8, ::1, 0.0.0.0, ::) that come from referrals, glue or address
+   #   lookups. Off by default: a delegation cannot point the resolver at
+   #   services on its own host. A stub's configured servers are always queried.
    # Transport signal processing is always enabled - signals in Additional are automatically applied
    options:
       # - query-for-transport
@@ -158,6 +175,7 @@ imrengine:
    #    cache-max-ttl:        86400  # seconds, as in Unbound; ceiling on cached lifetimes
    #    cache-min-ttl:            0  # seconds, as in Unbound; floor (0 = none)
    #    zone-state-recheck:     30s  # how long an insecure or indeterminate zone verdict stands
+   #    nsec3-max-iterations:    10  # NSEC3 proofs above this are not judged (RFC 9276)
 
 # DNSSEC algorithms whose DNSKEY/RRSIG payloads are large for UDP. When a
 # referral DS RRset uses one, the IMR fetches the child zone's DNSKEY over TCP
@@ -203,6 +221,9 @@ apiserver:
 log:
    file:                /var/log/tdns/tdns-imr.log
    level:               info    # default level: debug|info|warn|error
+   # max-size:          20      # MB before the file is rotated (default 20)
+   # max-backups:       3       # rotated files kept (default 3)
+   # max-age:           14      # days a rotated file is kept (default 14)
 
 # Optional second config file, merged on top of this one. This is the only
 # `imr.`-prefixed key; it is read directly and is not part of `imrengine:`.

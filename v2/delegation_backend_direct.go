@@ -20,13 +20,30 @@ type DirectDelegationBackend struct {
 func (b *DirectDelegationBackend) Name() string { return "direct" }
 
 func (b *DirectDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateRequest) error {
-	updated, err := b.zd.ApplyChildUpdateToZoneData(ur, b.kdb)
+	// Deferred, the zone file follows the publish that carries the change
+	// (the gate's, or the commit's): the zone runs this then, outside its
+	// lock, registered with the stage. It holds the request's Resp and
+	// answers it from that publish.
+	updated, deferred, err := b.zd.applyChildUpdate(ur, b.kdb, func() {
+		if err := b.writeZoneFileAfterChildUpdate(); err != nil {
+			lg.Warn("DirectDelegationBackend: after the deferred publish", "zone", b.zd.ZoneName, "error", err)
+		}
+	})
 	if err != nil {
 		return err
 	}
 	if !updated {
 		return nil
 	}
+	if deferred {
+		return errUpdateDeferred
+	}
+	return b.writeZoneFileAfterChildUpdate()
+}
+
+// writeZoneFileAfterChildUpdate keeps a zone file that has no journal in step
+// with what a child update changed, once the change is published.
+func (b *DirectDelegationBackend) writeZoneFileAfterChildUpdate() error {
 	// The change is already durable: ApplyChildUpdateToZoneData publishes,
 	// and the publish path persists a delta (Phase 2 — see the wsPersistDelta
 	// assignment there, and PersistZoneDelta in publishWorkingSetLocked). The

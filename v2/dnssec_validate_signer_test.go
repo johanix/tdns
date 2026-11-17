@@ -45,7 +45,7 @@ func newSignerTestKey(t *testing.T, zone string, flags uint16) *signerTestKey {
 		Protocol:  3,
 		Algorithm: dns.ED25519,
 	}
-	priv, err := dk.Generate(256)
+	priv, err := generateSigningKey(dk, 256)
 	if err != nil {
 		t.Fatalf("Generate(%s): %v", zone, err)
 	}
@@ -65,6 +65,7 @@ func (k *signerTestKey) holdSecure(dkc *cache.DnskeyCacheT) {
 func (k *signerTestKey) sign(t *testing.T, rrs ...dns.RR) *core.RRset {
 	t.Helper()
 	sig := &dns.RRSIG{
+		Hdr:        dns.RR_Header{Ttl: rrs[0].Header().Ttl},
 		Algorithm:  k.dnskey.Algorithm,
 		Inception:  uint32(time.Now().Add(-time.Hour).Unix()),
 		Expiration: uint32(time.Now().Add(time.Hour).Unix()),
@@ -86,7 +87,7 @@ func newSignerTestSig0Key(t *testing.T, owner string) *dns.KEY {
 		Protocol:  3,
 		Algorithm: dns.ED25519,
 	}}
-	if _, err := k.Generate(256); err != nil {
+	if _, err := generateSigningKey(k, 256); err != nil {
 		t.Fatalf("Generate(%s): %v", owner, err)
 	}
 	return k

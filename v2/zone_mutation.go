@@ -2,9 +2,9 @@ package tdns
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -35,8 +35,9 @@ func (zd *ZoneData) ensureWorkingSet() {
 // holds zd.mu.
 //
 // A replacement stays staged when its publish was refused
-// (refuseUnsignableWorkingSetLocked, refuseUnrepairableChainLocked) or stopped
-// by an open transaction. An update applied on top of it would be journalled
+// (refuseUnsignableWorkingSetLocked, refuseUnrepairableChainLocked); a refresh
+// that meets an open transaction is refused instead (ErrRefreshHeld), but a
+// transaction can open after a refusal. An update applied on top of it would be journalled
 // together with it, because the journal records the difference from the
 // published snapshot (#748). So the replacement is published first,
 // unjournalled, as the publisher's retry publishes it: at a new serial. If it
@@ -78,17 +79,19 @@ func (zd *ZoneData) cloneOwner(name string) *OwnerData {
 	if src != nil {
 		for _, t := range src.RRtypes.Keys() {
 			rs, _ := src.RRtypes.Get(t)
-			nod.RRtypes.Set(t, rs)
+			nod.RRtypes.Set(t, rs) // mutator-ok: cloneOwner: into the fresh store it has just made
 		}
 		// The NSEC property travels with the owner. Rebuilding an owner from
 		// its RRtypes alone would drop the chain entry silently, and the name
 		// would fall out of the chain on the next publish without anything
 		// having asked for that.
 		//
-		// Deep-copied, because the published snapshot shares these records and
-		// signing rewrites them: applyClampToRRset assigns Header().Ttl in
-		// place, so a shared RR would have its TTL changed underneath a
-		// snapshot that is being served right now.
+		// Deep-copied, because the published snapshot shares these records.
+		// This copy used to be what kept the TTL clamp from rewriting a served
+		// NSEC in place; signing no longer writes into records it is handed
+		// (SignRRset's storage contract, #797), and the copy is kept -- it is
+		// one small RRset per owner, and the RRtypes entries above are still
+		// shared with the snapshot, so a writer here must not assume otherwise.
 		nod.NSEC = cloneRRset(src.NSEC)
 	}
 	zd.workingSet[key] = nod
@@ -97,12 +100,12 @@ func (zd *ZoneData) cloneOwner(name string) *OwnerData {
 
 func (zd *ZoneData) stageRRset(name string, rs core.RRset) {
 	zd.ensureWorkingSet()
-	zd.cloneOwner(name).RRtypes.Set(rs.RRtype, cloneRRset(rs))
+	zd.cloneOwner(name).RRtypes.Set(rs.RRtype, cloneRRset(rs)) // mutator-ok: the working set's own copy of the owner (cloneOwner)
 }
 
 func (zd *ZoneData) stageDelete(name string, rrtype uint16) {
 	zd.ensureWorkingSet()
-	zd.cloneOwner(name).RRtypes.Delete(rrtype)
+	zd.cloneOwner(name).RRtypes.Delete(rrtype) // mutator-ok: the working set's own copy of the owner (cloneOwner)
 }
 
 func (zd *ZoneData) stageOwnerReplace(name string, od *OwnerData) {
@@ -117,7 +120,8 @@ func (zd *ZoneData) pendingChanges() *PendingChanges {
 }
 
 func (zd *ZoneData) pendingChangesLocked() *PendingChanges {
-	if zd.workingSet == nil {
+	held := zd.txHeldLocked()
+	if zd.workingSet == nil && !zd.publishQueued && !held {
 		return nil
 	}
 	snap := zd.snapshot.Load()
@@ -128,6 +132,25 @@ func (zd *ZoneData) pendingChangesLocked() *PendingChanges {
 	pc := &PendingChanges{
 		PublishedSerial: publishedSerial,
 		PublishQueued:   zd.publishQueued,
+		Cadence:         publishCadenceForZone(zd),
+		Waiters:         len(zd.waiters),
+		FollowUps:       len(zd.afterPublish),
+		Held:            held,
+		HoldSince:       zd.tx.holdStart,
+		HoldStopped:     zd.tx.stopped,
+	}
+	if pc.PublishQueued {
+		pc.NextPublishAt = zd.lastPublish.Add(pc.Cadence)
+	}
+	if held {
+		pc.HoldCap = txHoldAgeCap
+		for id, tx := range zd.tx.open {
+			pc.Transactions = append(pc.Transactions, pendingTx{ID: id, Started: tx.start, Limit: tx.limit, Overdue: tx.overdue})
+		}
+		sort.Slice(pc.Transactions, func(i, j int) bool { return pc.Transactions[i].Started.Before(pc.Transactions[j].Started) })
+	}
+	if zd.workingSet == nil {
+		return pc
 	}
 	published := map[string]*OwnerData{}
 	if snap != nil {
@@ -155,7 +178,7 @@ func (zd *ZoneData) pendingChangesLocked() *PendingChanges {
 		}
 		pc.Deleted = append(pc.Deleted, pendingOwnerChange{Owner: name, RRtypes: pubOd.RRtypes.Keys()})
 	}
-	if len(pc.Added) == 0 && len(pc.Replaced) == 0 && len(pc.Deleted) == 0 && !pc.PublishQueued {
+	if len(pc.Added) == 0 && len(pc.Replaced) == 0 && len(pc.Deleted) == 0 && !pc.PublishQueued && !held {
 		return nil
 	}
 	return pc
@@ -248,6 +271,71 @@ func (zd *ZoneData) workingOwnerNamesLocked() []string {
 	return names
 }
 
+// publishOutcome is what publishOrQueueLocked reports to the writer that
+// asked it.
+type publishOutcome uint8
+
+const (
+	// publishedHere: the publish ran in the caller and installed a snapshot;
+	// the writer's change is served. (Also reported when nothing was staged:
+	// nothing to publish, nothing refused.)
+	publishedHere publishOutcome = iota
+	// publishRefused: the publish ran in the caller and installed nothing.
+	// The change is still staged when the refusal keeps the working set (a
+	// zone that cannot sign it, an NSEC chain that cannot be repaired, a held
+	// zone's unsigned first content) and gone when it does not (the journal, a
+	// zone no longer live): zd.workingSet tells which. The zone's error says
+	// why; publishRefusalErrorLocked spells it.
+	publishRefused
+	// publishQueued: the change stays staged, marked queued, and runPublisher
+	// publishes it at lastPublish + cadence with everything staged by then.
+	publishQueued
+	// publishHeld: stopped by an open transaction (step 1's hold); the commit
+	// that closes the hold carries the change.
+	publishHeld
+)
+
+// publishOrQueueLocked is the gate's entry for a writer that has staged a
+// change (docs/2026-09-17-publish-gate-and-transactions.md, Amendment 5). It
+// reports what became of the publish:
+//
+//   - a held zone: the publish is stopped inside, and the commit that closes
+//     the hold carries the change (publishHeld);
+//   - now, a zone that is not Ready, or an idle zone (no publish within the
+//     cadence): the publish runs here, under the zd.mu the caller holds,
+//     exactly as every publish did before the gate -- and the result says
+//     whether it installed a snapshot (publishedHere) or was refused
+//     (publishRefused): a refusal is decided by the snapshot, not by the
+//     publish having run;
+//   - otherwise the change stays staged, marked queued, and runPublisher
+//     publishes it at lastPublish + cadence with everything staged by then
+//     (publishQueued).
+//
+// A caller whose publish did not run here hands its Resp to zd.waiters, and
+// what it would do after a publish to zd.afterPublish; so does one whose
+// publish was refused with the change kept staged, since the next publish
+// carries it. Caller holds zd.mu.
+func (zd *ZoneData) publishOrQueueLocked(gen uint64, now bool) publishOutcome {
+	if zd.txHeldLocked() {
+		zd.publishLocked(gen)
+		return publishHeld
+	}
+	if now || !zd.Ready || zd.lastPublish.IsZero() || time.Since(zd.lastPublish) >= publishCadenceForZone(zd) {
+		if zd.workingSet == nil {
+			zd.publishLocked(gen)
+			return publishedHere
+		}
+		before := zd.snapshot.Load()
+		zd.publishLocked(gen)
+		if zd.snapshot.Load() == before {
+			return publishRefused
+		}
+		return publishedHere
+	}
+	zd.requestPublishLocked()
+	return publishQueued
+}
+
 func (zd *ZoneData) requestPublish(urgent bool) {
 	if urgent {
 		_, _ = zd.publishSync()
@@ -291,14 +379,20 @@ func (zd *ZoneData) resignWorkingSetSOAIfSigned(sm *signingMaterial) {
 		lg.Error("publish: failed to re-sign SOA", "zone", zd.ZoneName, "err", err)
 		return
 	}
-	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, cloneRRset(rs))
+	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, cloneRRset(rs)) // mutator-ok: the re-signed SOA, into the working set's own apex (cloneOwner)
 }
 
 func (zd *ZoneData) publishSync() (BumperResponse, error) {
 	resp := BumperResponse{Zone: zd.ZoneName}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	resp.OldSerial = zd.CurrentSerial
+	resp.OldSerial, resp.NewSerial = zd.CurrentSerial, zd.CurrentSerial
+	if zd.txHeldLocked() {
+		// The hold would stop the publish inside; say so instead of reporting
+		// success with the serial unchanged.
+		resp.Msg = fmt.Sprintf("zone %s is held by an open transaction; nothing published until its commit", zd.ZoneName)
+		return resp, nil
+	}
 	if zd.workingSet == nil {
 		zd.ensureWorkingSet()
 	}
@@ -355,7 +449,7 @@ func (zd *ZoneData) stageRRsetLocked(name string, rs core.RRset) {
 	}
 	rs.RRtype = rrtype
 	zd.ensureWorkingSet()
-	zd.cloneOwner(name).RRtypes.Set(rrtype, cloneRRset(rs))
+	zd.cloneOwner(name).RRtypes.Set(rrtype, cloneRRset(rs)) // mutator-ok: the working set's own copy of the owner (cloneOwner)
 }
 
 // stageNsecLocked sets an owner's NSEC property. Unlike stageRRsetLocked it
@@ -384,7 +478,7 @@ func (zd *ZoneData) stageNsecDeleteLocked(name string) {
 
 func (zd *ZoneData) stageDeleteLocked(name string, rrtype uint16) {
 	zd.ensureWorkingSet()
-	zd.cloneOwner(name).RRtypes.Delete(rrtype)
+	zd.cloneOwner(name).RRtypes.Delete(rrtype) // mutator-ok: the working set's own copy of the owner (cloneOwner)
 }
 
 func (zd *ZoneData) stageOwnerReplaceLocked(name string, od *OwnerData) {
@@ -405,13 +499,30 @@ func (zd *ZoneData) publishLocked(gen uint64) {
 // false the caller has already set zd.CurrentSerial (refresh flips, transport
 // signal synthesis without a content serial change).
 func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
-	// Commits waiting to learn that their transaction is published (zone_tx.go)
-	// are answered by this publish, however it ends: every refusal below
-	// returns through here. No waiters, which is every zone that opens no
-	// transaction, and nothing is deferred.
-	if len(zd.tx.commitWaiters) > 0 {
+	// Consumed here, before any exit, so a dropped publish cannot carry them
+	// into a later, unrelated one. A publish refused below -- signing failed,
+	// say -- leaves the working set staged for a retry, and the flags go back
+	// with it: the retry still skips a reload that changed nothing, and still
+	// records its digest. A publish that goes out, is skipped or drops the
+	// working set leaves them cleared.
+	skipIfUnchanged := zd.wsSkipIfUnchanged
+	zd.wsSkipIfUnchanged = false
+	recordContentDigest := zd.wsRecordContentDigest
+	zd.wsRecordContentDigest = false
+	defer func() {
+		if zd.workingSet != nil {
+			zd.wsSkipIfUnchanged = skipIfUnchanged
+			zd.wsRecordContentDigest = recordContentDigest
+		}
+	}()
+
+	// The changes waiting to be published (updates the gate deferred, commits
+	// waiting for their transaction: zone_tx.go) are answered by this publish,
+	// however it ends: every refusal below returns through here. Nothing
+	// waiting, and nothing is deferred.
+	if len(zd.waiters) > 0 || len(zd.afterPublish) > 0 {
 		before, errBefore := zd.snapshot.Load(), zd.ErrorMsg
-		defer func() { zd.txPublishDoneLocked(before, errBefore) }()
+		defer func() { zd.publishDoneLocked(before, errBefore) }()
 	}
 	if zd.workingSet == nil {
 		zd.publishQueued = false
@@ -495,7 +606,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.CurrentSerial = nextOutboundSerial(zd)
 		serial = zd.CurrentSerial
 	}
-	zd.setWorkingSetSOASerial(serial)
+	soaSerialChanged := zd.setWorkingSetSOASerial(serial)
 
 	// One resolution for the whole publish; every signing step below consumes
 	// it. A real failure refuses the publish; "cannot sign yet" is nil and
@@ -505,6 +616,16 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	if kerr != nil {
 		zd.refuseUnsignableWorkingSetLocked(prevSerial, kerr)
 		return
+	}
+
+	// An SOA whose serial was just rewritten and cannot be re-signed keeps the
+	// RRSIG it came with, which covers the OLD serial and fails validation. The
+	// servable gate counts any SOA RRSIG as signed, so a first load that lifts
+	// the serial before the policy binds would go Ready on it, and the sign
+	// after the bind would then skip the zone as already signed (#655). Drop
+	// it: the zone stays not Ready until it is signed.
+	if sm == nil && soaSerialChanged && zd.signsItsOwnContent() {
+		zd.dropWorkingSetSOASignaturesLocked()
 	}
 
 	// The first snapshot of a zone created held (zone_tx.go) that signs its own
@@ -586,6 +707,35 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 
 	data := zd.workingSet
 	oldSnap := zd.snapshot.Load()
+
+	// A reload whose content is what the zone already serves publishes nothing
+	// (#1006): no new serial, no NOTIFY, no IXFR link. Decided HERE, after
+	// signing, the restitch and the ZONEMD, because a zone that signs its own
+	// content gains its keys and signatures only in those steps, and comparing
+	// before them would find a difference in every signed zone. The comparison
+	// leaves out what those steps regenerate anyway (authoredContentEqual).
+	if skipIfUnchanged && oldSnap != nil &&
+		authoredContentEqual(zd.ZoneName, oldSnap.Data, data, zd.contentTerms()) {
+		lg.Info("reload: the zone's content is unchanged; keeping its serial and not notifying",
+			"zone", zd.ZoneName, "serial", oldSnap.Serial)
+		// The file now holds what that serial serves -- a journalled change
+		// folded into it, say -- so record that, and a restart that loads
+		// the file serves the serial again instead of the next one.
+		if recordContentDigest {
+			zd.recordPublishedContentDigestLocked(oldSnap.Serial, data)
+		}
+		zd.CurrentSerial = oldSnap.Serial
+		zd.workingSet = nil
+		zd.wsFromReplacement = false
+		zd.wsSignalSynth = nil
+		zd.publishQueued = false
+		zd.publishUrgent = false
+		zd.wsIxfrEpochReset = false
+		zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
+		zd.wsPersistDelta = false
+		zd.wsPersistErr = nil
+		return
+	}
 
 	// Phase 2: make the change DURABLE BEFORE making it VISIBLE.
 	//
@@ -715,6 +865,15 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		}
 	}
 
+	// Record the serial before it becomes visible, for the same reason the
+	// delta above is persisted first: a serial a secondary may already hold
+	// must survive a crash, or the restart publishes it again with other
+	// content (#655).
+	zd.recordPublishedSerialLocked(serial)
+	if recordContentDigest {
+		zd.recordPublishedContentDigestLocked(serial, data)
+	}
+
 	// Maintain the IXFR delta history BEFORE building the snapshot so the
 	// chain copied into it ends exactly at this publish's serial (Project C).
 	zd.updateIxfrChainLocked(oldSnap, serial, data)
@@ -731,15 +890,6 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.lastPublish = time.Now()
 	if zd.tx.createdHeld && oldSnap == nil {
 		zd.txFirstSnapshotInstalledLocked()
-	}
-
-	// Persist only for a zone that may originate: a mirroring secondary's
-	// serial is upstream's property, not ours to record and later restore.
-	if zd.KeyDB != nil && zoneMayOriginateContent(zd) &&
-		zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
-		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-			lg.Error("publish: failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
-		}
 	}
 
 	if loaded := zd.snapshot.Load(); loaded != nil && loaded.Serial != zd.CurrentSerial {
@@ -770,7 +920,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 // about a version we would then REFUSE to transfer only burns the downstream's
 // retry budget, and first load publishes exactly such a version: the load path
 // publishes before InstallInitialSnapshot marks the zone Ready, and a downstream
-// acting on that notification is refused on status.
+// acting on that notification is refused because the zone is not Ready.
 //
 // The hand-off is a NON-BLOCKING send to the Notifier, replacing the inline
 // NotifyDownstreams loop that used to run here (deleted with the refresh
@@ -780,13 +930,24 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 // network I/O to every downstream, blocking every reader of that zone for as
 // long as it took.
 //
-// A full queue drops and says so. NOTIFY is best-effort by design -- a
-// downstream that misses one refreshes on its SOA timer -- and blocking a
-// publish on a queue whose consumer is serial and 2s-per-target is how the stall
-// comes back somewhere new. The send cannot block, which is what makes it safe
-// to do while holding zd.mu.
+// The hand-off goes to the NotifyTracker's pending set (#1007): it coalesces a
+// burst of publishes into one NOTIFY per zone carrying the latest SOA, never
+// blocks and never drops. A NOTIFY is not best-effort any more -- one that gets
+// no answer is sent again -- and a NOTIFY dropped here on a full queue would be
+// one that is never sent at all. Neither path can block, which is what makes
+// the hand-off safe to do while holding zd.mu.
+//
+// The queue remains for a daemon that runs no tracker. There a full queue still
+// drops, and says so.
 func (zd *ZoneData) notifyIfServableLocked(snap *zoneSnapshot) {
 	if len(zd.Notify) == 0 {
+		// The last downstream may just have been removed: an empty request
+		// tells the tracker to forget the zone's targets (and to resend to
+		// none). Only when it holds some, so a zone that never had a
+		// downstream costs nothing here.
+		if t := Conf.Internal.NotifyTracker; t != nil && t.tracksDownstreams(zd.ZoneName) {
+			t.Mark(NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeSOA, Downstream: true})
+		}
 		return
 	}
 	if !zd.snapshotIsServableLocked(snap) {
@@ -794,17 +955,23 @@ func (zd *ZoneData) notifyIfServableLocked(snap *zoneSnapshot) {
 			"zone", zd.ZoneName, "ready", zd.Ready)
 		return
 	}
+	req := NotifyRequest{
+		ZoneName:   zd.ZoneName,
+		ZoneData:   zd,
+		RRtype:     dns.TypeSOA,
+		Targets:    peerAddrs(zd.Notify),
+		Downstream: true,
+	}
+	if t := Conf.Internal.NotifyTracker; t != nil {
+		t.Mark(req)
+		return
+	}
 	q := Conf.Internal.NotifyQ
 	if q == nil {
 		return
 	}
 	select {
-	case q <- NotifyRequest{
-		ZoneName: zd.ZoneName,
-		ZoneData: zd,
-		RRtype:   dns.TypeSOA,
-		Targets:  peerAddrs(zd.Notify),
-	}:
+	case q <- req:
 	default:
 		lg.Warn("publish: NOTIFY queue is full, dropping a downstream notification;"+
 			" the downstream picks this up on its own SOA timer instead",
@@ -823,19 +990,28 @@ func (zd *ZoneData) snapshotIsServableLocked(snap *zoneSnapshot) bool {
 
 // snapshotContentIsServableLocked is the CONTENT half of that test: would this
 // snapshot be servable if the zone were Ready? A zone that does not sign its own
-// content always qualifies; one that does must not offer an unsigned apex SOA.
+// content qualifies; one that does must not offer an unsigned apex SOA; and a
+// withheld zone offers nothing, since its daemon does not know yet which of the
+// two it is.
 //
 // Separate from the test above because this one decides whether to SET Ready,
 // and a predicate that reads Ready cannot do that -- it would answer false for
 // every zone forever. Same content rule, no Ready in it.
 func (zd *ZoneData) snapshotContentIsServableLocked(snap *zoneSnapshot) bool {
-	if snap == nil {
+	if snap == nil || zd.withheld {
 		return false
 	}
 	if !zd.signsItsOwnContent() {
 		return true
 	}
-	if snap.Apex == nil {
+	return snapshotApexIsSigned(snap)
+}
+
+// snapshotApexIsSigned reports whether the snapshot's apex SOA carries an RRSIG:
+// what "signed" means to the servable test, and nothing about whether the zone
+// is to be offered.
+func snapshotApexIsSigned(snap *zoneSnapshot) bool {
+	if snap == nil || snap.Apex == nil {
 		return false
 	}
 	soa := snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
@@ -849,27 +1025,99 @@ func (zd *ZoneData) snapshotContentIsServableLocked(snap *zoneSnapshot) bool {
 // than transferred from an upstream. It governs the serial floor in the default
 // branch below and nothing else, because only a file-backed zone anchors its
 // delta journal to the content it has just loaded.
+// ErrRefreshHeld: the zone has an open transaction, so the refresh was
+// refused before it touched anything, and is to be tried again shortly
+// (publish gate, step 3). A hold on a published zone ends within its limit,
+// so the refresh is late by that much at most; a zone that has never
+// published has nothing to refresh. Waiting would tie an inbound transfer to
+// a local writer's hold; replacing would discard what the transaction staged
+// (tdns #749).
+var ErrRefreshHeld = errors.New("the zone has an open transaction; the refresh is refused and retried")
+
+// ErrRefreshStaged: the zone holds a change of its own that its publish refused
+// and kept staged for a later pass (one it cannot sign yet, or whose NSEC
+// chain it cannot repair), so the refresh was refused rather than let the
+// replacement take that change. The refresh engine tries again shortly.
+var ErrRefreshStaged = errors.New("the zone has a staged change it could not publish; the refresh is refused and retried")
+
+// ErrSignedFileChangedUnderServedSerial: a zone file signed elsewhere changed
+// but kept the serial the zone serves (#1006). Downstreams that hold that
+// serial would never transfer the change, while this server served it, so the
+// reload is refused and the published version stays. A failure of the zone,
+// not a deferral: it holds until the file is re-signed under a newer serial.
+var ErrSignedFileChangedUnderServedSerial = errors.New("the zone file is signed elsewhere and its content changed but its serial did not;" +
+	" downstreams that hold that serial would never transfer the change, so the published version is still served;" +
+	" re-sign the file with a newer serial")
+
+// refreshDeferred reports whether err is one of the two refusals that are not
+// a failure of the zone and are retried shortly.
+func refreshDeferred(err error) bool {
+	return errors.Is(err, ErrRefreshHeld) || errors.Is(err, ErrRefreshStaged)
+}
+
 func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset,
 	firstLoad, fromZoneFile bool) error {
-	// The persisted outbound serial a first load may restore, read before this
-	// function changes anything: a read that fails must leave the zone exactly
-	// as it was, IncomingSerial included, or the retry would take the
-	// upstream's serial as already held and never transfer again. Only a
-	// missing row means nothing was saved. Any other error fails the load, as
-	// a refresh that cannot save its serial does below: carrying on would let
-	// the first publish persist the upstream's serial over the saved one.
-	var restoreSerial uint32
-	var haveRestoreSerial bool
-	if firstLoad && zd.KeyDB != nil && zoneMayOriginateContent(zd) &&
-		zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
-		saved, err := zd.KeyDB.LoadOutgoingSerial(zd.ZoneName)
-		switch {
-		case err == nil:
-			restoreSerial, haveRestoreSerial = saved, true
-		case !errors.Is(err, sql.ErrNoRows):
-			return fmt.Errorf("read the persisted outgoing serial for zone %s: %w", zd.ZoneName, err)
+	// Under a hold the refresh is refused before it touches anything: the
+	// commit that closes the hold carries what the transaction staged, and
+	// the refresh engine tries again shortly (ErrRefreshHeld).
+	if zd.txHeldLocked() {
+		return fmt.Errorf("zone %s: %w", zd.ZoneName, ErrRefreshHeld)
+	}
+	// A local change staged and waiting for the gate is published first, so
+	// it is served and journalled and its waiters answered, before the
+	// replacement takes the working set it was staged in. A replacement that
+	// is itself still staged (refused at signing) is simply replaced. A local
+	// change the publish refused and kept staged (unsignable yet, chain not
+	// repairable) is not taken either: the refresh is refused and retried
+	// shortly, and the change waits for the pass that can publish it. Not at
+	// first load, where the transfer is the zone's first content.
+	if zd.workingSet != nil && !zd.wsFromReplacement {
+		zd.publishLocked(zd.generation.Load())
+		if !firstLoad && zd.workingSet != nil && !zd.wsFromReplacement {
+			return fmt.Errorf("zone %s: %w", zd.ZoneName, ErrRefreshStaged)
 		}
 	}
+	// The highest serial this zone has published, which a first load must
+	// land past (#655), read before this function changes anything: a read
+	// that fails must leave the zone exactly as it was, IncomingSerial
+	// included, or the retry would take the upstream's serial as already held
+	// and never transfer again. Only a missing record means nothing was
+	// published. Any other error fails the load: carrying on would let the
+	// first publish record a lower serial over the one already served.
+	var restoreSerial uint32
+	var haveRestoreSerial bool
+	// The digest of the content published at restoreSerial, when that serial
+	// is the recorded one and a digest was stored with it (#1006). Only for a
+	// file-backed zone that does not sign its own content: one that signs
+	// re-signs at load, so its content under the same serial would differ from
+	// what downstreams hold. A failed read only means the restart lifts the
+	// serial as before.
+	var restoreDigest string
+	if firstLoad && zd.KeyDB != nil && zd.KeyDB.DB != nil && zoneMayOriginateContent(zd) {
+		high, have, err := zd.KeyDB.PublishedSerialFloor(zd.ZoneName)
+		if err != nil {
+			return fmt.Errorf("read the published serial for zone %s: %w", zd.ZoneName, err)
+		}
+		restoreSerial, haveRestoreSerial = high, have
+		if have && fromZoneFile && !zd.signsItsOwnContent() {
+			serial, digest, haveDigest, derr := zd.KeyDB.PublishedContentDigest(zd.ZoneName)
+			switch {
+			case derr != nil:
+				lg.Debug("first load: could not read the published content digest; lifting the serial as usual",
+					"zone", zd.ZoneName, "error", derr)
+			case haveDigest && serial == high:
+				restoreDigest = digest
+			}
+		}
+	}
+	keepRestoreSerial := false
+	skipIfUnchanged := false
+	refuseIfChanged := false
+	// What the file it replaces left, put back if the reload is refused: the
+	// journal anchors to fileSerial, and a refused file must not move it.
+	prevFileSerial, prevFileDigest, prevIncoming, prevReplayed, prevServed :=
+		zd.fileSerial, zd.fileDigest, zd.IncomingSerial, zd.deltasReplayed, zd.CurrentSerial
+	prevApexLen, prevStore, prevType := zd.ApexLen, zd.ZoneStore, zd.ZoneType
 	// The zone has just been re-read; whatever was replayed on top of the
 	// PREVIOUS file no longer applies to this one, so a replay for the new file
 	// is due again.
@@ -883,31 +1131,54 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	switch {
 	case firstLoad:
 		zd.CurrentSerial = new_zd.CurrentSerial
-		// A zone that originates content and persists its outbound serial
-		// takes the saved one back when it is newer than the upstream's, in
-		// RFC 1982 order. The first publish, below, persists CurrentSerial:
-		// left at the upstream's serial it would record that over the saved
-		// one before the engine's own restore looked, and the zone would come
-		// back from a restart below the serial it served -- its downstreams
-		// then ignore every NOTIFY until it catches up.
+		// A zone that originates content lands past the highest serial it
+		// published before this start, in every outbound-soa-serial mode,
+		// whenever that serial is newer than the one just loaded, in RFC 1982
+		// order. The file, or the upstream's copy, lags what was served:
+		// re-signs, DNSKEY publishes and serial bumps advance the serial
+		// without reaching the file or the journal, and a serial reused after
+		// a restart is one a secondary holding it never transfers (#655).
 		//
-		// One past the saved serial, not the saved serial itself: the content
-		// may have changed while the zone was down, and a downstream that
-		// already holds the saved serial would otherwise never fetch it. One
-		// extra transfer per restart is the price. The two later restores, in
-		// initialLoadZone and after a refresh, keep a restored serial as it
-		// is; by the time either runs, the serial chosen here or by the
-		// refresh has been persisted, so they find nothing newer.
-		if haveRestoreSerial && serialNewer(restoreSerial, zd.CurrentSerial) {
-			lg.Info("first load; outbound-soa-serial=persist (restored saved serial, plus one)",
-				"zone", zd.ZoneName, "incoming", zd.CurrentSerial, "persisted", restoreSerial, "serving", restoreSerial+1)
+		// HERE, before the first publish of the load, not in the replay: the
+		// load publishes several times before the replay runs, and each of
+		// those would otherwise reuse a served serial.
+		//
+		// One past it, not the serial itself: the content may have changed
+		// while the zone was down, and a downstream that already holds that
+		// serial would otherwise never fetch it. One extra transfer per restart
+		// is the price, paid only when something was published after the file
+		// was written. A file whose serial is newer is kept, which is what lets
+		// the RFC 1982 procedure change a serial scheme. The two later
+		// restores for outbound-soa-serial=persist, in initialLoadZone and
+		// after a refresh, then find nothing newer than what is served.
+		//
+		// Unless the content is exactly what was published at that serial
+		// (#1006): then a downstream holding it has this content already, and
+		// the extra transfer buys nothing. That is decided once the working set
+		// is built, below, by restoreDigest.
+		//
+		// Except a file signed elsewhere, which keeps its own serial whatever
+		// it is: its SOA signature covers that serial, and a lifted one would
+		// leave the served SOA failing validation. A downstream that already
+		// holds a higher serial will not fetch it; that is the operator's to
+		// fix, in the file, under a new signature.
+		switch {
+		case !haveRestoreSerial || !serialNewer(restoreSerial, zd.CurrentSerial):
+		case fromZoneFile && !zd.signsItsOwnContent() && fileSOASigned(new_zd):
+			lg.Warn("first load: the zone file is signed elsewhere, so its own serial is served although this zone has published a higher one; downstreams that hold that serial will not transfer this one",
+				"zone", zd.ZoneName, "file", zd.CurrentSerial, "published", restoreSerial)
+		default:
+			lg.Info("first load; lifting the serial past the highest one this zone has published",
+				"zone", zd.ZoneName, "loaded", zd.CurrentSerial, "published", restoreSerial, "serving", restoreSerial+1)
 			zd.CurrentSerial = restoreSerial + 1
+			keepRestoreSerial = restoreDigest != ""
 		}
 		zd.FirstZoneLoad = false
 
 	case !zoneMayOriginateContent(zd):
 		// MUST-NOT-MODIFY: a tdns-auth secondary that did not originate this
-		// content mirrors the upstream serial verbatim. The historical
+		// content mirrors the upstream serial verbatim (and so does a zone
+		// that a derived app registered for the rule only relays). The historical
 		// unconditional ++ below made every such secondary drift +1 per
 		// refresh, so two masters downstream of one signer (say BIND9 and
 		// tdns-auth) advertised different serials for identical content and
@@ -950,22 +1221,51 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		// A TRANSFERRED zone is excluded deliberately. Its serial is its own,
 		// not upstream's -- an inline-signing secondary re-signs what it
 		// receives and advances in its own space (see the MUST-NOT-MODIFY
-		// design), and off tdns-auth the whole gate stands down. Its journal
+		// design), and for an app outside the rule the gate stands down. Its journal
 		// needs no floor either: an overlay zone journals from the serial it
 		// serves (publishWorkingSetLocked, journal_overlay.go). A journalling
 		// secondary outside the overlay -- multi-provider, or a derived app's --
 		// still anchors to the received serial, and a local change there is
 		// refused whenever that serial, or the journal's tail, is ahead of the
 		// one it serves.
-		next := zd.CurrentSerial
-		if fromZoneFile && serialNewer(zd.fileSerial, next) {
-			next = zd.fileSerial
-		}
-		zd.CurrentSerial = next + 1
-		if zd.KeyDB != nil && zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
-			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-				return fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
+		//
+		// Equal is enough for #362, and it is what a file-backed zone serves
+		// when the file's serial is ahead (#1006): the anchor is then the
+		// served serial, never ahead of it, and the next journalled change runs
+		// from it to the serial after. That serial cannot have been published
+		// before -- the first load put the served serial past every one that
+		// was. Serving file serial + 1 instead left the file and the zone
+		// permanently one apart, which is what the default outbound-soa-serial
+		// mode, "keep", says it does not do.
+		//
+		// A file whose serial is not ahead gets the zone's next serial, in its
+		// outbound-soa-serial mode -- unless its content turns out to be what
+		// the zone already serves, in which case nothing is published at all
+		// (wsSkipIfUnchanged, decided after signing in publishWorkingSetLocked).
+		//
+		// A file signed elsewhere keeps its own serial in every case: the
+		// SOA's signature covers it, and a serial of ours would leave the SOA
+		// failing validation. Its signatures count as content (contentTerms).
+		// One that did not change is not published. One that changed under
+		// the served serial is refused (ErrSignedFileChangedUnderServedSerial),
+		// decided once the working set is built, below.
+		switch {
+		case fromZoneFile && serialNewer(zd.fileSerial, zd.CurrentSerial):
+			zd.CurrentSerial = zd.fileSerial
+		case fromZoneFile && !zd.signsItsOwnContent() && fileSOASigned(new_zd):
+			if zd.fileSerial == zd.CurrentSerial {
+				refuseIfChanged = true
+			} else {
+				lg.Warn("reload: the zone file is signed elsewhere and its serial is behind the served one; serving it anyway, since its SOA signature covers that serial",
+					"zone", zd.ZoneName, "file", zd.fileSerial, "served", zd.CurrentSerial)
 			}
+			zd.CurrentSerial = zd.fileSerial
+			skipIfUnchanged = true
+		case fromZoneFile:
+			zd.CurrentSerial = nextOutboundSerial(zd)
+			skipIfUnchanged = true
+		default:
+			zd.CurrentSerial++
 		}
 	}
 	zd.ApexLen = new_zd.ApexLen
@@ -1001,6 +1301,32 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		zd.wsSignalSynth = nil
 	}
 	zd.repopulateWorkingSetLocked(dynamicRRs)
+	if refuseIfChanged && overlay == nil {
+		if old := zd.snapshot.Load(); old != nil &&
+			!authoredContentEqual(zd.ZoneName, old.Data, zd.workingSet, zd.contentTerms()) {
+			zd.workingSet, zd.wsFromReplacement, zd.wsSignalSynth = nil, false, nil
+			zd.fileSerial, zd.fileDigest, zd.IncomingSerial, zd.deltasReplayed, zd.CurrentSerial =
+				prevFileSerial, prevFileDigest, prevIncoming, prevReplayed, prevServed
+			zd.ApexLen, zd.ZoneStore, zd.ZoneType = prevApexLen, prevStore, prevType
+			return fmt.Errorf("zone %s: serial %d: %w", zd.ZoneName, old.Serial, ErrSignedFileChangedUnderServedSerial)
+		}
+	}
+	if keepRestoreSerial && authoredContentDigest(zd.ZoneName, zd.workingSet, zd.contentTerms()) == restoreDigest {
+		lg.Info("first load; the content is what this zone published at its last serial, so that serial is served again",
+			"zone", zd.ZoneName, "serial", restoreSerial)
+		zd.CurrentSerial = restoreSerial
+	}
+	// A reload of a zone that signs its own content keeps the signatures and
+	// NSEC records of whatever did not change, so it re-signs and re-chains
+	// only the edit, and its IXFR link holds only the edit (#1006).
+	if !firstLoad && fromZoneFile && overlay == nil && zd.signsItsOwnContent() {
+		if n := zd.carrySignaturesLocked(zd.snapshot.Load()); n > 0 {
+			lg.Debug("reload: kept the signatures of unchanged RRsets", "zone", zd.ZoneName, "rrsets", n)
+		}
+	}
+	zd.wsSkipIfUnchanged = skipIfUnchanged && overlay == nil
+	zd.wsRecordContentDigest = fromZoneFile && overlay == nil &&
+		zoneMayOriginateContent(zd) && !zd.signsItsOwnContent()
 	// A refresh normally replaces zone data wholesale, which is a new IXFR
 	// epoch by definition: nothing links the previous snapshot to this one, so
 	// any delta across the boundary could be wrong for some downstream.
@@ -1025,7 +1351,14 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// diffs the outgoing snapshot against the data about to be published, so
 	// it sees the re-signed RRsets and the repaired NSEC records as ordinary
 	// content, exactly as an AXFR of the same publish would.
-	zd.wsIxfrEpochReset = !(new_zd != nil && new_zd.ixfrDerived)
+	//
+	// And with ixfr-from-differences, any replacement (#1006): the same
+	// argument holds for a reload or an AXFR -- the link is our own diff of
+	// what we served against what we are about to serve -- and the guards in
+	// updateIxfrChainLocked cover a serial that does not advance. It is an
+	// option because the diff compares the whole zone, which an inbound IXFR
+	// does not: it shares every untouched owner with the snapshot.
+	zd.wsIxfrEpochReset = !(new_zd != nil && new_zd.ixfrDerived) && !zd.Options[OptIxfrFromDifferences]
 	// This content came from a file or from an upstream, so whatever RRSIGs it
 	// carries are not ours. A zone that signs its own content must sign it
 	// before it is published, not in a pass afterwards.
@@ -1150,10 +1483,11 @@ func (zd *ZoneData) resolveSigningMaterialLocked() (*signingMaterial, error) {
 	case errors.Is(err, ErrDnssecPolicyNotBound):
 		return nil, nil
 	case errors.Is(err, ErrKeyGenerationDeferred) && !zd.Ready:
-		// The lifecycle hooks (KeyLifecycleHooks) hold this zone's keys back
-		// and forbid minting beside them. On a zone that has never served a
-		// signed version that is the same "not yet" as an unbound policy:
-		// publish unsigned, stay not Ready, and sign when a key is released.
+		// The zone's key lifecycle owner (KeyLifecycleOwner) has not released
+		// a signing key of every role, and tdns mints none beside its keys.
+		// On a zone that has never served a signed version that is the same
+		// "not yet" as an unbound policy: publish unsigned, stay not Ready,
+		// and sign when a key is released.
 		// On a Ready signing zone the same answer would publish an unsigned
 		// version over a signed one, which is the C1 defect; there it is a
 		// fault and the publish is refused below.
@@ -1288,7 +1622,35 @@ func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerDat
 	}
 }
 
-func (zd *ZoneData) setWorkingSetSOASerial(serial uint32) {
+// setWorkingSetSOASerial writes serial into the working set's apex SOA, and
+// reports whether that changed the serial the SOA carried.
+func (zd *ZoneData) setWorkingSetSOASerial(serial uint32) bool {
+	if zd.workingSet == nil {
+		return false
+	}
+	apex := zd.workingSet[zd.ZoneName]
+	if apex == nil {
+		return false
+	}
+	rs := cloneRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA))
+	if len(rs.RRs) == 0 {
+		return false
+	}
+	soa, ok := rs.RRs[0].(*dns.SOA)
+	if !ok {
+		return false
+	}
+	changed := soa.Serial != serial
+	soa.Serial = serial
+	// Stage into a cloned apex owner rather than writing through the shared
+	// snapshot store — the previous in-place Set tore concurrent readers.
+	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, rs) // mutator-ok: the new serial, into the working set's own apex (cloneOwner)
+	return changed
+}
+
+// dropWorkingSetSOASignaturesLocked removes the RRSIGs from the working set's
+// apex SOA. See the call in publishWorkingSetLocked.
+func (zd *ZoneData) dropWorkingSetSOASignaturesLocked() {
 	if zd.workingSet == nil {
 		return
 	}
@@ -1297,17 +1659,11 @@ func (zd *ZoneData) setWorkingSetSOASerial(serial uint32) {
 		return
 	}
 	rs := cloneRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA))
-	if len(rs.RRs) == 0 {
+	if len(rs.RRSIGs) == 0 {
 		return
 	}
-	soa, ok := rs.RRs[0].(*dns.SOA)
-	if !ok {
-		return
-	}
-	soa.Serial = serial
-	// Stage into a cloned apex owner rather than writing through the shared
-	// snapshot store — the previous in-place Set tore concurrent readers.
-	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, rs)
+	rs.RRSIGs = nil
+	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, rs) // mutator-ok: the unsigned SOA, into the working set's own apex (cloneOwner)
 }
 
 func (zd *ZoneData) publishNow(gen uint64) {
@@ -1401,6 +1757,7 @@ func (zd *ZoneData) startPublisher() {
 	zd.publisherOnce.Do(func() {
 		zd.publishWake = make(chan struct{}, 1)
 		zd.publishStop = make(chan struct{})
+		zd.publishDone = make(chan struct{})
 		go zd.runPublisher()
 	})
 }
@@ -1433,7 +1790,20 @@ func (zd *ZoneData) wakePublisher() {
 	}
 }
 
+// joinPublisher waits for the publisher goroutine to have returned after
+// stopPublisher, so that nothing it was running, an after-publish action
+// included, outlives the caller. Not from the publisher itself.
+func (zd *ZoneData) joinPublisher() {
+	zd.mu.Lock()
+	done := zd.publishDone
+	zd.mu.Unlock()
+	if done != nil {
+		<-done
+	}
+}
+
 func (zd *ZoneData) runPublisher() {
+	defer close(zd.publishDone)
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	for {
@@ -1455,7 +1825,9 @@ func (zd *ZoneData) runPublisher() {
 		for {
 			zd.mu.Lock()
 			if !zd.publishQueued {
+				acts := zd.takeAfterPublishReadyLocked()
 				zd.mu.Unlock()
+				runAfterPublish(acts)
 				break
 			}
 			urgent := zd.publishUrgent
@@ -1464,15 +1836,37 @@ func (zd *ZoneData) runPublisher() {
 			if urgent || zd.lastPublish.IsZero() || since >= cadence {
 				gen := zd.generation.Load()
 				zd.publishLocked(gen)
+				// The waiters were answered inside, with the journal's error
+				// if it refused; left behind, the next update's applier would
+				// read that error as its own.
+				zd.wsPersistErr = nil
+				acts := zd.takeAfterPublishReadyLocked()
 				zd.mu.Unlock()
+				runAfterPublish(acts)
 				continue
 			}
 			wait := cadence - since
+			acts := zd.takeAfterPublishReadyLocked()
 			zd.mu.Unlock()
+			runAfterPublish(acts)
 			timer = time.NewTimer(wait)
 			timerC = timer.C
 			break
 		}
+	}
+}
+
+// takeAfterPublishReadyLocked hands over what a publish has made runnable.
+// Caller holds zd.mu, and runs them after releasing it.
+func (zd *ZoneData) takeAfterPublishReadyLocked() []func() {
+	acts := zd.afterPublishReady
+	zd.afterPublishReady = nil
+	return acts
+}
+
+func runAfterPublish(acts []func()) {
+	for _, f := range acts {
+		f()
 	}
 }
 
@@ -1538,14 +1932,56 @@ func (zd *ZoneData) stageDraftRRsetLocked(name string, rs core.RRset) {
 	if zd.Data == nil {
 		zd.Data = core.NewNameMap[OwnerData]()
 	}
-	od, ok := zd.Data.Get(name)
+	od, ok := zd.ownDraftOwnerLocked(name)
 	if !ok {
 		od = OwnerData{Name: name, RRtypes: NewRRTypeStore()}
 	} else if od.RRtypes == nil {
 		od.RRtypes = NewRRTypeStore()
 	}
-	od.RRtypes.Set(rrtype, cloneRRset(rs))
-	zd.Data.Set(name, od)
+	od.RRtypes.Set(rrtype, cloneRRset(rs)) // mutator-ok: an owner the draft owns (ownDraftOwnerLocked), or a new owner's fresh store
+	zd.Data.Set(name, od)                  // mutator-ok: the draft's own owner map, which no snapshot shares
+}
+
+// ownDraftOwnerLocked makes one owner of a draft the draft's own before a write
+// reaches it, and returns the owner as Data then holds it.
+//
+// A draft built by an inbound IXFR (applyIxfrToScratch) deep-copied only the
+// owners the delta touched. Every other owner shares its store and its NSEC
+// with the snapshot being served (materializeForIxfr), so a write through it
+// would change the served zone in place, at the old serial, and the outbound
+// delta would never carry the change, because computeZoneDelta takes a shared
+// store for an untouched one (#965). Such an owner is deep-copied here, once,
+// as materializeForIxfr would have, and joins ixfrTouched, so the publish
+// signs it (wsSignOwners). A name the draft does not hold joins too: a new
+// owner needs signing as much as a changed one.
+//
+// Any other draft -- a zone file, an AXFR, an IXFR whose touched set is nil
+// because it copied everything -- shares nothing with the snapshot, and its
+// owners are returned as they are.
+func (zd *ZoneData) ownDraftOwnerLocked(name string) (OwnerData, bool) {
+	od, ok := zd.Data.Get(name)
+	if !zd.ixfrDerived || zd.ixfrTouched == nil {
+		return od, ok
+	}
+	key := core.CanonicalizeName(name)
+	if zd.ixfrTouched[key] {
+		return od, ok
+	}
+	zd.ixfrTouched[key] = true
+	if !ok {
+		return od, false
+	}
+	nod := OwnerData{Name: od.Name, RRtypes: NewRRTypeStore()}
+	if od.RRtypes != nil {
+		for _, t := range od.RRtypes.Keys() {
+			if rs, ok := od.RRtypes.Get(t); ok {
+				nod.RRtypes.Set(t, cloneRRset(rs)) // mutator-ok: the fresh store of the owner's deep copy
+			}
+		}
+	}
+	nod.NSEC = cloneRRset(od.NSEC)
+	zd.Data.Set(name, nod) // mutator-ok: the draft's own owner map, which no snapshot shares
+	return nod, true
 }
 
 // stageDraftDeleteLocked removes one RRset of one owner from a draft's Data.
@@ -1559,9 +1995,15 @@ func (zd *ZoneData) stageDraftDeleteLocked(name string, rrtype uint16) {
 	if !ok || od.RRtypes == nil {
 		return
 	}
+	// Nothing to delete is no write: the owner stays shared and untouched,
+	// so a signing secondary does not re-sign what did not change.
+	if _, ok := od.RRtypes.Get(rrtype); !ok {
+		return
+	}
+	od, _ = zd.ownDraftOwnerLocked(name)
 	// RRtypes is a pointer shared with the stored value, so the delete lands
 	// in Data without a Set.
-	od.RRtypes.Delete(rrtype)
+	od.RRtypes.Delete(rrtype) // mutator-ok: an owner the draft owns (ownDraftOwnerLocked)
 }
 
 // stageDraftOwnerDeleteLocked removes an owner from a draft's Data.
@@ -1628,16 +2070,37 @@ func (zd *ZoneData) StageOwnerDelete(name string) {
 	zd.stageOwnerDeleteLocked(name)
 }
 
-// Publish cuts a new snapshot from whatever is staged: one serial, one
-// snapshot, one IXFR delta, one NOTIFY. It is the same call as
-// BumpSerialOnly, under the name that says what it does.
-//
-// It bumps even when nothing is staged: with no working set, publishSync seeds
-// one from the served snapshot and republishes identical content under a new
-// serial. A caller that may have staged nothing should use StageBatch, whose
-// callback reports whether anything changed.
+// Publish asks the gate for what is staged: an idle zone publishes in the
+// caller and the response carries the new serial (one serial, one snapshot,
+// one IXFR delta, one NOTIFY); a busy zone's publish is the gate's, at the
+// next cadence, and the response says so with the serial unchanged; a held
+// zone publishes nothing until its commit; a publish refused in the caller
+// says why. It bumps nothing of its own: with nothing staged there is nothing
+// to publish, and the response says that too. The operator's bump
+// (BumpSerial) is the immediate call, and the one that bumps regardless.
 func (zd *ZoneData) Publish() (BumperResponse, error) {
-	return zd.publishSync()
+	resp := BumperResponse{Zone: zd.ZoneName}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	resp.OldSerial, resp.NewSerial = zd.CurrentSerial, zd.CurrentSerial
+	if zd.workingSet == nil && !zd.txHeldLocked() {
+		resp.Msg = fmt.Sprintf("zone %s: nothing staged, nothing to publish", zd.ZoneName)
+		return resp, nil
+	}
+	errBefore := zd.ErrorMsg
+	switch zd.publishOrQueueLocked(zd.generation.Load(), false) {
+	case publishedHere:
+		resp.NewSerial = zd.CurrentSerial
+	case publishRefused:
+		resp.Msg = zd.publishRefusalErrorLocked(errBefore).Error()
+	case publishHeld:
+		// Asked, and stopped by the hold, which counts it; the commit that
+		// closes the hold carries what is staged.
+		resp.Msg = fmt.Sprintf("zone %s is held by an open transaction; nothing published until its commit", zd.ZoneName)
+	case publishQueued:
+		resp.Msg = fmt.Sprintf("zone %s: staged; the gate publishes it at the next cadence", zd.ZoneName)
+	}
+	return resp, nil
 }
 
 // StopPublisher terminates the zone's coalescing publisher goroutine, the one
@@ -1756,6 +2219,37 @@ func (s *batchStager) DeleteOwner(name string) {
 	s.zd.stageOwnerDeleteLocked(name)
 }
 
+// stagingSave is what a zone's working set held before a writer began staging,
+// so that a writer that fails part-way can be unwound without dropping somebody
+// else's staged work along with its own. Staging replaces an owner with a clone
+// before it changes it (cloneOwner), so a copy of the map is enough. The common
+// case is nothing: the working set is nil between publishes, and restoring nil
+// is what discards the failed writer's changes.
+type stagingSave struct {
+	workingSet    map[string]*OwnerData
+	wsSignalSynth map[string]*core.RRset
+}
+
+// saveStagingLocked records what the working set holds now. The caller holds
+// zd.mu.
+func (zd *ZoneData) saveStagingLocked() stagingSave {
+	s := stagingSave{wsSignalSynth: zd.wsSignalSynth}
+	if zd.workingSet != nil {
+		s.workingSet = make(map[string]*OwnerData, len(zd.workingSet))
+		for k, v := range zd.workingSet {
+			s.workingSet[k] = v
+		}
+	}
+	return s
+}
+
+// restoreStagingLocked puts the working set back as saveStagingLocked found it.
+// The caller holds zd.mu.
+func (zd *ZoneData) restoreStagingLocked(s stagingSave) {
+	zd.workingSet = s.workingSet
+	zd.wsSignalSynth = s.wsSignalSynth
+}
+
 // StageBatch runs fn with zd.mu held and publishes once, through the same
 // path as Publish, if fn reports a change. On a draft it writes Data and
 // publishes nothing: the refresh publish that consumes the draft is the
@@ -1782,8 +2276,10 @@ func (s *batchStager) DeleteOwner(name string) {
 // must undo its own writes.
 //
 // The response carries the serials before and after. NewSerial == OldSerial
-// means nothing was published: no change reported, a draft, or a publish the
-// zone refused (an apex-less or unsignable working set, which is logged).
+// means this call published nothing: no change reported, a draft, a publish
+// the zone refused (an apex-less or unsignable working set, which is logged),
+// or a busy zone, where the batch is staged and the gate's publish carries it
+// at the next cadence, with its own serial.
 func (zd *ZoneData) StageBatch(fn func(s Stager) (changed bool, err error)) (BumperResponse, error) {
 	resp := BumperResponse{Zone: zd.ZoneName}
 	if fn == nil {
@@ -1799,24 +2295,15 @@ func (zd *ZoneData) StageBatch(fn func(s Stager) (changed bool, err error)) (Bum
 	draft := zd.isDraftLocked()
 	s := &batchStager{zd: zd, draft: draft}
 
-	// What was pending when the batch started, so a failed batch can be
-	// unwound without dropping somebody else's staged work along with it.
-	// The common case is nothing: the working set is nil between publishes,
-	// and restoring nil is what discards the failed batch's writes.
-	var saved map[string]*OwnerData
-	savedSynth := zd.wsSignalSynth
-	if !draft && zd.workingSet != nil {
-		saved = make(map[string]*OwnerData, len(zd.workingSet))
-		for k, v := range zd.workingSet {
-			saved[k] = v
-		}
+	var saved stagingSave
+	if !draft {
+		saved = zd.saveStagingLocked()
 	}
 
 	changed, err := fn(s)
 	if err != nil {
 		if !draft {
-			zd.workingSet = saved
-			zd.wsSignalSynth = savedSynth
+			zd.restoreStagingLocked(saved)
 		}
 		resp.Error = true
 		resp.ErrorMsg = err.Error()
@@ -1832,7 +2319,12 @@ func (zd *ZoneData) StageBatch(fn func(s Stager) (changed bool, err error)) (Bum
 		zd.dropBareWorkingSetLocked()
 		return resp, nil
 	}
-	zd.publishLocked(zd.generation.Load())
-	resp.NewSerial = zd.CurrentSerial
+	errBefore := zd.ErrorMsg
+	switch zd.publishOrQueueLocked(zd.generation.Load(), false) {
+	case publishedHere:
+		resp.NewSerial = zd.CurrentSerial
+	case publishRefused:
+		resp.Msg = zd.publishRefusalErrorLocked(errBefore).Error()
+	}
 	return resp, nil
 }

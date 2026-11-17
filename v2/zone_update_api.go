@@ -147,6 +147,9 @@ func (zd *ZoneData) queueApiZoneUpdate(ctx context.Context, ur UpdateRequest, ve
 		return ZoneUpdateResult{}, fmt.Errorf("timeout while queueing the update for zone %s", zd.ZoneName)
 	}
 
+	// The one bound every sender waits: the change may wait for the gate's
+	// publish, up to a cadence away.
+	bound := updateWaitBound(zd.ZoneName)
 	select {
 	case res := <-respch:
 		if res.Err != nil {
@@ -164,11 +167,11 @@ func (zd *ZoneData) queueApiZoneUpdate(ctx context.Context, ur UpdateRequest, ve
 				" the update was already queued and is NOT cancelled: %w",
 			zd.ZoneName, verb, ctx.Err())
 
-	case <-time.After(UpdateApplyTimeout):
+	case <-time.After(bound):
 		return ZoneUpdateResult{}, fmt.Errorf(
 			"zone %s: timed out after %s waiting for %s to be applied;"+
 				" it may or may not have taken effect",
-			zd.ZoneName, UpdateApplyTimeout, verb)
+			zd.ZoneName, bound, verb)
 	}
 }
 

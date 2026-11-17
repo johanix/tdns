@@ -148,7 +148,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				"rcode":      dns.RcodeToString[int(crrset.Rcode)],
 				"ttl":        crrset.Ttl,
 				"expiration": crrset.Expiration.Format(time.RFC3339),
-				"expires_in": time.Until(crrset.Expiration).Truncate(time.Second).String(),
+				"expires_in": cache.Until(crrset.Expiration).Truncate(time.Second).String(),
 				"context":    fmt.Sprintf("%d", crrset.Context),
 				"state":      fmt.Sprintf("%d", crrset.State),
 			}
@@ -285,7 +285,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 					"rcode":      dns.RcodeToString[int(cr.Rcode)],
 					"ttl":        cr.Ttl,
 					"expiration": cr.Expiration.Format(time.RFC3339),
-					"expires_in": time.Until(cr.Expiration).Truncate(time.Second).String(),
+					"expires_in": cache.Until(cr.Expiration).Truncate(time.Second).String(),
 				}
 				if cr.RRset != nil {
 					var rrs []string
@@ -335,6 +335,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				"cache_max_ttl":               t.CacheMaxTTL,
 				"cache_min_ttl":               t.CacheMinTTL,
 				"zone_state_recheck":          t.ZoneStateRecheck.String(),
+				"nsec3_max_iterations":        cache.NSEC3MaxIterations(),
 			}
 			resp.Data = data
 			resp.Msg = "IMR tuning snapshot"
@@ -421,7 +422,11 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				resp.ErrorMsg = fmt.Sprintf("unknown RR type: %s", qtypeStr)
 				return
 			}
-			ir, err := imr.ImrQuery(r.Context(), qname, qtype, dns.ClassINET, nil)
+			// Asked as a DNS client asks (asClientQuery), so that it is
+			// answered as dig is: a DS or DNSKEY question at a CNAME owner
+			// follows the CNAME (#875). It is counted as client traffic too,
+			// with no PRIVACY level.
+			ir, err := imr.ImrQuery(asClientQuery(r.Context()), qname, qtype, dns.ClassINET, nil)
 			data := map[string]interface{}{"qname": qname, "qtype": dns.TypeToString[qtype]}
 			if ir != nil {
 				data["state"] = cache.ValidationStateToString[ir.ValidationState]
@@ -454,6 +459,67 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			default:
 				resp.Msg = fmt.Sprintf("%s %s", qname, dns.TypeToString[qtype])
 			}
+
+		case "imr-client-stats":
+			// Per-client transport counters. "clients" (addresses or
+			// prefixes) only filters what is returned; "reset" clears the
+			// whole store afterwards, whatever the filter.
+			imr := Globals.ImrEngine
+			if imr == nil || imr.ClientStats == nil {
+				resp.Error = true
+				resp.ErrorMsg = "per-client transport counters are off (imrengine.client-stats.enabled; it takes effect at restart)"
+				return
+			}
+			var specs []string
+			if list, ok := amp.Data["clients"].([]interface{}); ok {
+				for _, v := range list {
+					if s, ok := v.(string); ok {
+						specs = append(specs, s)
+					}
+				}
+			}
+			filter, err := ParseClientFilter(specs)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			reset, _ := amp.Data["reset"].(bool)
+			rep := imr.ClientStats.Snapshot(filter, reset)
+			resp.Data = rep
+
+		case "imr-auth-transports":
+			// Per-server transport counters, one row per server rather than
+			// per zone. "servers" (names, each selecting the servers at and
+			// below it) and "zone" (only the servers it lists) only filter
+			// what is returned; "reset" clears every server's counters
+			// afterwards, whatever the filter.
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			var specs []string
+			if list, ok := amp.Data["servers"].([]interface{}); ok {
+				for _, v := range list {
+					if s, ok := v.(string); ok {
+						specs = append(specs, s)
+					}
+				}
+			}
+			filter, err := ParseServerFilter(specs)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			zone, _ := amp.Data["zone"].(string)
+			if zone != "" {
+				zone = dns.Fqdn(zone)
+			}
+			reset, _ := amp.Data["reset"].(bool)
+			resp.Data = ImrAuthTransportsSnapshot(imr.Cache, filter, zone, reset)
 
 		case "imr-transport-stats":
 			imr := Globals.ImrEngine

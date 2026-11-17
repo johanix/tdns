@@ -57,6 +57,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		var dnssecResignZone string
 		var dnssecBulkRepublishZones []string
 		var sig0InvalidateZones []string
+		var dnssecStrip *stagedStrip
 
 		tx, err := kdb.Begin("APIkeystore")
 
@@ -64,6 +65,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			if tx != nil {
 				if err != nil {
 					tx.Rollback()
+					dnssecStrip.finish(false)
 				} else {
 					if commitErr := tx.Commit(); commitErr != nil {
 						err = commitErr
@@ -71,6 +73,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 							resp.Error = true
 							resp.ErrorMsg = commitErr.Error()
 						}
+						dnssecStrip.finish(false)
 					} else {
 						// R1: DnssecKeyMgmt always receives this external tx, so its
 						// localtx republish path never runs. Republish here after
@@ -81,6 +84,10 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 									"zone", dnssecRepublishZone, "err", rerr)
 							}
 						}
+						// The strip clear and policy-cleanup staged goes out
+						// now, after the republish, so the publish signs with
+						// the new keys (#985).
+						dnssecStrip.finish(true)
 						// A bulk import touches many zones at once, so it gets
 						// its own plural republish rather than trying to squeeze
 						// through the single-zone field above. Re-sign each one
@@ -187,6 +194,11 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 
 		case "dnssec-mgmt":
 			resp, err = kdb.DnssecKeyMgmt(r.Context(), tx, kp)
+			// Kept on a failure too, before resp is replaced: the rollback
+			// in the defer puts the strip back after it.
+			if resp != nil {
+				dnssecStrip = resp.stagedStrip
+			}
 			if err != nil {
 				lgApi.Error("DnssecKeyMgmt failed", "err", err)
 				resp = &KeystoreResponse{
@@ -330,6 +342,12 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 					"zone", tp.Keyname, "keyid", tp.Keyid, "src", tp.Src, "from", r.RemoteAddr)
 				tp.Trusted = false
 			}
+			// A tombstone is the child's own word, given in a trusted UPDATE
+			// (truststore_tombstone.go). An operator's delete through here
+			// leaves none, whatever Src the client sent.
+			if tp.SubCommand == "delete" {
+				tp.Src = ""
+			}
 			resp, err = kdb.Sig0TrustMgmt(tx, tp)
 			if err != nil {
 				lgApi.Error("Sig0TrustMgmt failed", "err", err)
@@ -377,6 +395,9 @@ func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *ht
 			lgApi.Debug("daemon status inquiry")
 			resp.Status = "ok" // only status we know, so far
 			resp.Msg = fmt.Sprintf("%s: I'm happy, but send more cookies", Globals.App.Name)
+			if conf.DnssecValidationNotEnforced() {
+				resp.Warnings = append(resp.Warnings, DnssecValidationNotEnforcedWarning)
+			}
 
 		case "stop":
 			lgApi.Info("daemon instructed to stop")
@@ -502,6 +523,17 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 		err := decoder.Decode(&dp)
 		if err != nil {
 			lgApi.Warn("error decoding delegation post", "err", err)
+		}
+
+		// The delegation-sync log is not about one zone: the parent is an
+		// optional filter, so it is answered before the zone lookup below.
+		if dp.Command == "sync-log" {
+			resp := DelegationResponse{Time: time.Now(), Zone: dp.Zone}
+			resp.SyncLog, resp.ErrorMsg = delegationSyncLogReport(dp)
+			resp.Error = resp.ErrorMsg != ""
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+			return
 		}
 
 		dp.Zone = dns.Fqdn(dp.Zone)
@@ -707,6 +739,13 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		case "show-rrsetcache":
 			lgApi.Debug("debug show-rrsetcache")
+			// Nil until InitImrEngine has built the resolver: a priming that fails
+			// leaves it so while the engine retries.
+			if conf.Internal.RRsetCache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "the resolver is not running: it has no cache"
+				break
+			}
 			resp.Msg = fmt.Sprintf("RRsetCache: %v", conf.Internal.RRsetCache.RRsets.Keys())
 			rrsets := []cache.CachedRRset{}
 			for _, rrsetkey := range conf.Internal.RRsetCache.RRsets.Keys() {

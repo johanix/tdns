@@ -95,6 +95,11 @@ authengine:
    #               BIND/Knot/etc. secondaries where serial-regression on
    #               restart would otherwise cause sync confusion.
    # outbound-soa-serial:  persist
+   # An unanswered NOTIFY is sent again (RFC 1996 §3.6): notify-retries times,
+   # the first after notify-retry-interval, each later one twice as long. Any
+   # reply ends the tries. A zone's own settings override these.
+   # notify-retries:        5
+   # notify-retry-interval: 10s
    # options is a list of server-wide auth options. Recognized:
    #   minimal-responses        — omit authority NS RRset and apex glue from
    #                              positive answers (BIND-style). Referrals
@@ -106,6 +111,14 @@ authengine:
    #                              a single RRset (RFC 8482). Bool; absence =
    #                              false, and an invalid value also reads as
    #                              false.
+   #   add-transport-signal     — the zone option add-transport-signal for
+   #                              every zone this server serves, secondaries
+   #                              included (where it injects and never stores
+   #                              into the zone). The server signals only for
+   #                              NS names that are its own. `zone list` shows
+   #                              it as add-transport-signal(global). Bool;
+   #                              absence = false, and an invalid value also
+   #                              reads as false. tdns-agent refuses it.
    #   parent-update:delta      — parent delegation update mode (delta only).
    # options:
    #    - minimal-responses
@@ -194,6 +207,11 @@ childsync:
    # in parent zones, we support these schemes, and will publish DSYNC RRs
    # if allowed to:
    schemes:  [ notify, update ]
+   # The delegation-sync log: what this parent received from its children
+   # (UPDATE, NOTIFY, scans, the DSYNC API) and what it did with it, kept in
+   # memory. "tdns-cli zone delegation sync-log" shows it. Default 10000
+   # events; 0 turns it off.
+   # sync-log: 10000
    notify:
       types:      [ CDS, CSYNC ]
       port:       5354                      # MUST be a port the listeners: block listens on
@@ -412,6 +430,15 @@ scanner:
 #     value is 1h. No silent default — config parse fails closed if
 #     omitted.
 #
+# Standby keys:
+#   standby-zsks / standby-ksks: how many standby keys of each role a zone
+#     bound to the policy keeps. Unset: the global kasp.standby-zsk-count /
+#     kasp.standby-ksk-count applies. 0 keeps none: a ZSK roll then gets its
+#     replacement minted when the roll comes within propagation-delay plus
+#     the DNSKEY TTL, so it is standby when the roll fires. A negative
+#     number is refused. For a zone whose key lifecycle an owner runs, these
+#     are the owner's fields.
+#
 # All DNSSEC configuration lives under this one block: deployment-wide
 # guardrails (large-algorithms, split-algorithms), the named policies that
 # zones reference (dnssec.policies:), and the key/signing policy for the
@@ -597,11 +624,14 @@ dnssec:
                                  # transitions for non-rollover zones. Also used by the
                                  # rollover worker's pending-child-publish phase.
       check-interval:     1m     # How often the KeyStateWorker runs its checks
-      standby-zsk-count:  1      # Number of standby ZSKs to maintain per zone (0 = no standby)
+      standby-zsk-count:  1      # Number of standby ZSKs to maintain per zone. 0 or unset: the
+                                 # default of one; a policy's standby-zsks: 0 keeps none
       standby-ksk-count:  0      # Number of standby KSKs to maintain per zone (0 = no standby).
                                  # NOTE: For zones with rollover.method != none, the rollover
                                  # pipeline-fill (Phase 4A) generates KSKs up to rollover.num-ds
                                  # automatically; standby-ksk-count is independent of that.
+                                 # A policy's standby-zsks / standby-ksks (see the policies
+                                 # above) override both for the zones bound to that policy.
 
 # Catalog zone configuration (RFC 9432)
 # Required if any zone has the 'catalog-zone' option enabled.
@@ -747,6 +777,15 @@ log:
    # Global log level, applied to every subsystem unless overridden below.
    # One of: debug | info | warn | error   (empty defaults to info)
    level:  info
+
+   # Rotation. The file is rotated when it reaches max-size MB, and the
+   # max-backups newest rotated files are kept, for at most max-age days.
+   # Each key is optional and must be a positive number; the defaults are
+   # shown. A long run at debug level may want a larger max-size, so that
+   # the log does not rotate mid-run.
+   # max-size:     20
+   # max-backups:  3
+   # max-age:      14
 
    # Per-subsystem level overrides. A subsystem uses the global 'level' above
    # unless listed here. The subsystem name is the tag shown after the level in

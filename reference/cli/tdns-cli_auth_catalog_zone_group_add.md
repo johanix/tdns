@@ -23,6 +23,7 @@ tdns-cli auth catalog zone group add --cat <catalog-zone> --zone <zone-name> --g
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
 ```
 
 ### SEE ALSO

@@ -114,7 +114,9 @@ Zone transfers:
                           names rather than the SOA's
 
 DNSSEC chain validation:
-  +sigchase, +sigcha, +sc walk and validate the chain, per-link verdict
+  +sigchase, +sigcha, +sc walk and validate the chain, per-link verdict;
+                          asks with DO and CD set, follows CNAMEs, and
+                          names the trust anchor it used (-k)
   +algchase, +algcha, +ac as +sigchase, naming each algorithm number
 
 Output:
@@ -286,8 +288,9 @@ See guide/app-dog.md for the long form.
 				// AD bit are the chaser's own to decide, and neither is
 				// reachable from here without changing its API.
 				chaserClient := core.NewDNSClient(chaserTransport, options["port"], nil, timeoutOptions(options)...)
-				dss := loadChaserAnchors()
+				dss, taSource := loadChaserAnchors()
 				chaser := tdns.NewChaser(chaserClient, options["server"], dss)
+				chaser.TrustAnchorSource = taSource
 				result, err := chaser.Chase(qname, rrtype)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: chase failed: %v\n", err)
@@ -630,7 +633,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&showVersion, "version", false, "print version and supported algorithms, then exit")
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
-	rootCmd.PersistentFlags().StringVarP(&trustAnchorFile, "trust-anchor", "k", "", "Path to DNSSEC trust anchor file (zone-file format DS or DNSKEY records). Used by +sigchase. Default: read from "+tdns.DefaultImrCfgFile+" or fall back to compiled-in root KSK DS records.")
+	rootCmd.PersistentFlags().StringVarP(&trustAnchorFile, "trust-anchor", "k", "", "Path to DNSSEC trust anchor file (zone-file format DS or DNSKEY records). Used by +sigchase, which prints the source it used. Default: read from "+tdns.DefaultImrCfgFile+" or fall back to compiled-in root KSK DS records.")
 	rootCmd.PersistentFlags().StringVarP(&tsigKeyFlag, "tsig", "y", "", "TSIG-sign the query. Format [algorithm:]name:secret (dig-compatible); algorithm defaults to hmac-sha256. Do53/Do53-TCP/DoT only.")
 }
 
@@ -674,7 +677,12 @@ func showDNSMessageTrace() bool {
 // (autotrust / RFC 5011 managed) hold DNSKEY records rather than DS; each
 // KSK DNSKEY is converted to its SHA-256 DS equivalent so the chaser, which
 // keys off DS, can anchor the root regardless of file format.
-func loadChaserAnchors() []*dns.DS {
+//
+// It also returns where the anchors came from, with their count, which the
+// chase prints: the fallback to the compiled-in root anchors is otherwise
+// invisible, and a chase run with other anchors than the operator meant
+// reports a verdict that looks like any other.
+func loadChaserAnchors() ([]*dns.DS, string) {
 	// Not gated on --verbose. Every message on this path means an anchor the
 	// operator configured is NOT being used -- a stale key spelling, an
 	// unreadable file, an RR that would not parse. The chase still produces a
@@ -695,7 +703,7 @@ func loadChaserAnchors() []*dns.DS {
 	if tdns.Globals.Verbose {
 		fmt.Fprintf(os.Stderr, ";; trust anchor source: %s (%d DS records, %d DNSKEYs)\n", taSource, len(dss), len(keys))
 	}
-	return dss
+	return dss, fmt.Sprintf("%s (%d DS)", taSource, len(dss))
 }
 
 // verifyFlagsGiven reports whether any of the certificate-verification
@@ -872,7 +880,9 @@ func dogDaneTLSConfig(server, port string) (*tls.Config, error) {
 		return nil, fmt.Errorf("+tlsa: cannot determine system resolver: %v", err)
 	}
 	client := core.NewDNSClient(core.TransportDo53, "53", nil)
-	chaser := tdns.NewChaser(client, resolver, loadChaserAnchors())
+	dss, taSource := loadChaserAnchors()
+	chaser := tdns.NewChaser(client, resolver, dss)
+	chaser.TrustAnchorSource = taSource
 	owner := fmt.Sprintf("_%s._tcp.%s", port, dns.Fqdn(server))
 	res, err := chaser.Chase(owner, dns.TypeTLSA)
 	if err != nil {

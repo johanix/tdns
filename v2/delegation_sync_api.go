@@ -66,7 +66,7 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 
 	endpoint, err := DiscoverDsyncApiEndpoint(dctx, imr, dsynctarget.Name, requireDnssec)
 	if err != nil {
-		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: %v", zd.ZoneName, err)
+		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: %w", zd.ZoneName, err)
 	}
 	lgDns.Info("DSYNC API endpoint discovered", "zone", zd.ZoneName, "parent", parent,
 		"target", endpoint.Target, "endpoint", endpoint.Url, "dialect", endpoint.Dialect,
@@ -99,7 +99,9 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 	del, err := DsyncApiPostDelegationRequest(dctx, endpoint, cred, zd.ZoneName, rrsets,
 		childconf.AllowInsecure, childconf.CaFile)
 	if err != nil {
-		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: %v", zd.ZoneName, err)
+		// Wrapped, not flattened: a DS delivery classifies the endpoint's
+		// HTTP status into the rollover's softfail categories.
+		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: %w", zd.ZoneName, err)
 	}
 
 	// The endpoint answers with the delegation as it stands AFTER applying, and

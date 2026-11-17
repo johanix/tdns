@@ -4,6 +4,7 @@ go 1.25.2
 
 replace (
 	github.com/johanix/tdns/v2 => ../../v2
+	github.com/johanix/tdns/v2/algorithms => ../../v2/algorithms
 	github.com/johanix/tdns/v2/cache => ../../v2/cache
 	github.com/johanix/tdns/v2/cli => ../../v2/cli
 	github.com/johanix/tdns/v2/core => ../../v2/core
@@ -31,10 +32,11 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/johanix/tdns/v2/algorithms v0.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
-	github.com/mattn/go-sqlite3 v1.14.16 // indirect
+	github.com/mattn/go-sqlite3 v1.14.52 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/open-quantum-safe/liboqs-go v0.0.0-20260310140033-75451133b94a // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
@@ -58,4 +60,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.6

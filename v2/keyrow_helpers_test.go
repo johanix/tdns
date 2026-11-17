@@ -4,76 +4,40 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math/rand/v2"
-	"sort"
 	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
 )
 
-// The two queries S1a replaces, kept here as the reference for T1a.2: what the
-// code before the key columns meant by "the keys that sign" and "the DNSKEYs
-// that are served" (loadDnssecKeysFromDB with state active, and
-// FetchZoneDnskeysSql plus the active set). They are not edited when the code
-// changes; S4 removes them with the code they describe (test plan T4.3).
+// The states a multi-provider owner (tdns-mp) stages its rows in, with the
+// flags it registers for them. tdns names none of them (test plan T4.2): the
+// tests register them the way the owner does, before any keystore opens, so
+// the fixtures that carry such rows and the table tests over them run
+// against the same schema the owner writes.
 const (
-	refSigningKeysSql = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state='active'`
-	refServedKeysSql  = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND state IN ('active','published','standby','retired','mpdist','foreign')`
-	colSigningKeysSql = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND sign=1`
-	colServedKeysSql  = `SELECT keyid FROM DnssecKeyStore WHERE zonename=? AND pub=1`
+	ownerStateMpdist   = "mpdist"
+	ownerStateForeign  = "foreign"
+	ownerStateMpremove = "mpremove"
 )
 
-// keyStatesForRowTests is every state a DnssecKeyStore row can carry today:
+func init() {
+	RegisterKeyStateFlags(map[string]KeyRowFlags{
+		ownerStateMpdist:   {Pub: true},
+		ownerStateForeign:  {Pub: true},
+		ownerStateMpremove: {},
+	})
+}
+
+// keyStatesForRowTests is every state a DnssecKeyStore row can carry:
 // tdns's own seven and the three a multi-provider owner stages.
 var keyStatesForRowTests = []string{
 	DnskeyStateCreated, DnskeyStateDsPublished, DnskeyStatePublished, DnskeyStateStandby,
 	DnskeyStateActive, DnskeyStateRetired, DnskeyStateRemoved,
-	DnskeyStateMpdist, DnskeyStateForeign, DnskeyStateMpremove,
+	ownerStateMpdist, ownerStateForeign, ownerStateMpremove,
 }
 
 var keyRolesForRowTests = []string{"KSK", "ZSK", "CSK"}
-
-func keyidSet(t *testing.T, kdb *KeyDB, q, zone string) map[uint16]bool {
-	t.Helper()
-	rows, err := kdb.Query(q, zone)
-	if err != nil {
-		t.Fatalf("query %q: %v", q, err)
-	}
-	defer rows.Close()
-	out := map[uint16]bool{}
-	for rows.Next() {
-		var k int
-		if err := rows.Scan(&k); err != nil {
-			t.Fatalf("scan: %v", err)
-		}
-		out[uint16(k)] = true
-	}
-	return out
-}
-
-func keyidSetString(m map[uint16]bool) string {
-	var ks []int
-	for k := range m {
-		ks = append(ks, int(k))
-	}
-	sort.Ints(ks)
-	return fmt.Sprint(ks)
-}
-
-// assertKeySetsAgree is T1a.2's assertion: the reference sets and the column
-// sets are equal for zone.
-func assertKeySetsAgree(t *testing.T, kdb *KeyDB, zone string) {
-	t.Helper()
-	for _, c := range []struct{ what, ref, col string }{
-		{"signing set", refSigningKeysSql, colSigningKeysSql},
-		{"served DNSKEY set", refServedKeysSql, colServedKeysSql},
-	} {
-		ref, col := keyidSet(t, kdb, c.ref, zone), keyidSet(t, kdb, c.col, zone)
-		if keyidSetString(ref) != keyidSetString(col) {
-			t.Errorf("%s: %s differs: from state %v, from the columns %v", zone, c.what, keyidSetString(ref), keyidSetString(col))
-		}
-	}
-}
 
 // testDNSKEY is a DNSKEY whose public key is rng-derived bytes: it has a key
 // tag and a wire form, and is never used for crypto. Row-level tests need the
@@ -103,7 +67,7 @@ func testKeyRow(zone, state, role string, rng *rand.Rand) KeyRow {
 	dk := testDNSKEY(zone, role, rng)
 	priv := "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----\n"
 	creator := "test"
-	if state == DnskeyStateForeign {
+	if state == ownerStateForeign {
 		priv, creator = "", "foreign"
 	}
 	return KeyRow{

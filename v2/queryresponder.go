@@ -262,6 +262,14 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 //
 //   - We host only a grandparent (it delegates to qname's real parent, which we
 //     do NOT host): referral to that parent — the DS is its to answer. Rarest.
+//
+// Whose state decides follows from that. With a hosted ancestor it is the
+// ancestor's, by the test the query handler applies to a zone it answers from
+// (servesQueries), and zd's is never looked at: zd may have no copy at all, so
+// nothing here reads its snapshot. Without one, the answer is zd's own NODATA
+// from its copy, and DefaultQueryHandler has already applied zd's guards to it.
+// When DefaultQueryHandler skips zd's guards because it found a parent, it
+// hands that parent to answerDS (dsResponder), and this lookup is not made.
 func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
 
@@ -272,9 +280,19 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 	// TLD as the root: FindZone("") tries nothing, and a server hosting both
 	// "." and a TLD answered the TLD's DS with the TLD's own NODATA. For "."
 	// itself it returns the root, which has no parent and answers NODATA.
-	pzd := FindParentZone(qname)
+	return zd.answerDS(m, w, qname, FindParentZone(qname), msgoptions, kdb)
+}
+
+// answerDS is handleDSQuery with the parent side already found: pzd, or nil
+// when none is hosted.
+func (zd *ZoneData) answerDS(m *dns.Msg, w dns.ResponseWriter, qname string, pzd *ZoneData,
+	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
+
 	if pzd == nil {
 		if core.EqualNames(qname, zd.ZoneName) {
+			// That NODATA comes from the zone's copy, so the query handler's
+			// guards on this zone (withheld, expired, no copy, in error) have
+			// already decided whether it may be given.
 			return zd.sendChildApexDSNodata(m, w, qname, msgoptions, kdb)
 		}
 		// We host nothing above qname, and qname is not our apex. Nothing to
@@ -287,15 +305,20 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		return nil
 	}
 
-	// Switch to the parent-side zone: pin ITS snapshot, apex, and signer.
-	psnap := pzd.publishedSnapshot()
-	if psnap == nil {
-		lgHandler.Error("DS query: parent-side zone has no published snapshot",
-			"zone", pzd.ZoneName, "qname", qname)
+	// The parent answers this no more than it answers for its own names: with
+	// no copy, in error, withheld, past SOA EXPIRE, held only for transfer, or
+	// on an agent, it SERVFAILs. The query handler's guards, if any ran, were
+	// on the zone of qname, not on this one.
+	if !pzd.servesQueries() {
+		lgHandler.Debug("DS query: parent-side zone does not answer queries", "zone", pzd.ZoneName, "qname", qname)
 		m.MsgHdr.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(m)
 		return nil
 	}
+
+	// Switch to the parent-side zone: pin ITS snapshot, apex, and signer. A
+	// snapshot gone since servesQueries looked has no apex either.
+	psnap := pzd.publishedSnapshot()
 	papex := getOwnerFrom(psnap, pzd.ZoneName)
 	if papex == nil {
 		lgHandler.Error("DS query: parent-side zone snapshot missing apex",
@@ -346,7 +369,7 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		lgHandler.Debug("QueryResponder: DS query, insecure delegation (no DS) — authenticated NODATA",
 			"qname", qname, "parent", pzd.ZoneName)
 		m.MsgHdr.Rcode = dns.RcodeSuccess
-		m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
+		m.Ns = append(m.Ns, pzd.soaForDenialFrom(psnap, papex).RRs...)
 		if msgoptions.DO {
 			d := denial{kind: denyType, qname: qname, qtype: dns.TypeDS,
 				owner: getOwnerFrom(psnap, qname), types: []uint16{dns.TypeNS}}
@@ -364,7 +387,7 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		if owner := getOwnerFrom(psnap, qname); owner != nil {
 			m.MsgHdr.Authoritative = true
 			m.MsgHdr.Rcode = dns.RcodeSuccess
-			m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
+			m.Ns = append(m.Ns, pzd.soaForDenialFrom(psnap, papex).RRs...)
 			if msgoptions.DO {
 				// Existing types at qname (DS is not among them) → NODATA proof.
 				d := denial{kind: denyType, qname: qname, qtype: dns.TypeDS,
@@ -432,7 +455,7 @@ func (zd *ZoneData) sendChildApexDSNodata(m *dns.Msg, w dns.ResponseWriter, qnam
 		"qname", qname, "zone", zd.ZoneName)
 	m.MsgHdr.Authoritative = true
 	m.MsgHdr.Rcode = dns.RcodeSuccess
-	m.Ns = append(m.Ns, zd.soaForResponseFrom(snap, apex).RRs...)
+	m.Ns = append(m.Ns, zd.soaForDenialFrom(snap, apex).RRs...)
 	if msgoptions.DO {
 		// The apex's own types, never DS: a DS stored at the apex is parent-side
 		// data that does not belong in the child, and a bitmap listing it would
@@ -525,7 +548,7 @@ func respondEDNS(m, r *dns.Msg, msgoptions *edns0.MsgOptions) {
 func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData, snap *zoneSnapshot,
 	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
 	m.MsgHdr.Rcode = dns.RcodeNameError
-	soaRRset := zd.soaForResponseFrom(snap, apex)
+	soaRRset := zd.soaForDenialFrom(snap, apex)
 	m.Ns = append(m.Ns, soaRRset.RRs...)
 	if msgoptions.DO {
 		// The proof comes from the zone's denial source (addDenial). Only a
@@ -550,7 +573,7 @@ func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string,
 func (zd *ZoneData) sendENTNodata(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData, snap *zoneSnapshot,
 	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
 	m.MsgHdr.Rcode = dns.RcodeSuccess
-	soaRRset := zd.soaForResponseFrom(snap, apex)
+	soaRRset := zd.soaForDenialFrom(snap, apex)
 	m.Ns = append(m.Ns, soaRRset.RRs...)
 	if msgoptions.DO {
 		if err := zd.addDenial(m, snap, apex, denial{kind: denyENT, qname: qname}, msgoptions, signFunc); err != nil {
@@ -633,7 +656,7 @@ func (zd *ZoneData) sendAnswer(m, r *dns.Msg, w dns.ResponseWriter, qname, origq
 // wildcard, a zone with a chain also proves that qname does not exist.
 func (zd *ZoneData) sendTypeNodata(m *dns.Msg, w dns.ResponseWriter, qname string, qtype uint16, owner, apex *OwnerData, snap *zoneSnapshot,
 	msgoptions *edns0.MsgOptions, signFunc func(core.RRset, string) (core.RRset, error)) {
-	m.Ns = append(m.Ns, zd.soaForResponseFrom(snap, apex).RRs...)
+	m.Ns = append(m.Ns, zd.soaForDenialFrom(snap, apex).RRs...)
 	if msgoptions.DO {
 		d := denial{kind: denyType, qname: qname, qtype: qtype, owner: owner, types: owner.RRtypes.Keys()}
 		if err := zd.addDenial(m, snap, apex, d, msgoptions, signFunc); err != nil {
@@ -789,7 +812,7 @@ func (zd *ZoneData) addTransportSignal(m *dns.Msg, sigs []core.RRset, msgoptions
 // cannot be resolved is still returned (the alias is authoritative and the
 // resolver can chase it / may already hold the target); SVCB fails safe.
 func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
-	if snap == nil || snap.Apex == nil || !zd.Options[OptAddTransportSignal] {
+	if snap == nil || snap.Apex == nil || !zd.addsTransportSignal() {
 		return nil
 	}
 	nsRRset := snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeNS)
@@ -813,17 +836,66 @@ func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
 			}
 			seen[key] = true
 			out = append(out, rs)
+			// RFC 9460 section 3: an AliasMode target is queried as written,
+			// "without additional prefixes". The operator spells it
+			// _dns.<ns>; nothing is added here.
 			for _, tgt := range signalChaseTargets(rs) {
-				add("_dns."+tgt, depth+1)
+				add(tgt, depth+1)
 			}
 		}
 	}
 	for _, rr := range nsRRset.RRs {
-		if ns, ok := rr.(*dns.NS); ok {
-			add("_dns."+ns.Ns, 0)
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			continue
 		}
+		owner := "_dns." + ns.Ns
+		if !zd.signalIsAboutThisServer(snap, ns.Ns, owner) {
+			continue
+		}
+		add(owner, 0)
 	}
 	return out
+}
+
+// signalIsAboutThisServer decides whether the signal at an NS name's owner is
+// injected: a server speaks only about itself and never asks anyone
+// (docs/2026-10-04-transport-signal-publication-and-serving.md). A stored
+// ServiceMode signal, a co-hosted zone's signal and the synthesized fallback
+// exist only because the pass found the name to be this server's, so they
+// are. An operator alias is the operator's statement and is injected only
+// when the server can know it is about itself: it holds the target's signal
+// (a co-hosted zone's, or its own fallback), which is injected with it, or the
+// NS name's own addresses in this zone are its listeners (the alias goes
+// alone; the resolver chases it).
+func (zd *ZoneData) signalIsAboutThisServer(snap *zoneSnapshot, nsName, owner string) bool {
+	rrsets := zd.lookupSignalRRsets(snap, owner)
+	alias := false
+	for _, rs := range rrsets {
+		if svcbHasAlias(rs) {
+			alias = true
+		}
+	}
+	if !alias {
+		return len(rrsets) > 0
+	}
+	for _, rs := range rrsets {
+		for _, tgt := range signalChaseTargets(rs) {
+			// Hosting the target's signal, not merely a zone around the
+			// target's name: what is injected with the alias is that signal.
+			if len(zd.lookupSignalRRsets(snap, tgt)) > 0 {
+				return true
+			}
+		}
+	}
+	if od := getOwnerFrom(snap, nsName); od != nil {
+		a := od.RRtypes.GetOnlyRRSet(dns.TypeA)
+		aaaa := od.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
+		if matchesConfiguredAddrs(Conf.Listeners.Addresses, &a) || matchesConfiguredAddrs(Conf.Listeners.Addresses, &aaaa) {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupSignalRRsets returns the SVCB/TSYNC RRsets stored at a transport-signal
@@ -833,7 +905,16 @@ func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
 // synthesized fallback (Case A) is used.
 func (zd *ZoneData) lookupSignalRRsets(snap *zoneSnapshot, name string) []core.RRset {
 	if dns.IsSubDomain(zd.ZoneName, name) {
-		return signalRRsetsFromOwner(getOwnerFrom(snap, name))
+		if rrs := signalRRsetsFromOwner(getOwnerFrom(snap, name)); len(rrs) > 0 {
+			return rrs
+		}
+		// Nothing stored: the fallback a server keeps beside the snapshot
+		// for a zone it does not sign (it stores nothing into a zone signed
+		// by someone else), injected only, never content.
+		if rs, ok := snap.signalSynth[name]; ok && rs != nil {
+			return []core.RRset{*rs}
+		}
+		return nil
 	}
 	if tz := FindZone(name); tz != nil {
 		if tz == zd {
@@ -1070,8 +1151,11 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname, or
 	return true, nil
 }
 
-func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
-	qname string, qtype uint16, msgoptions *edns0.MsgOptions, kdb *KeyDB, imr *Imr) error {
+// newResponse starts a reply to r, for QueryResponder and dsResponder. If ctx
+// is done it writes a SERVFAIL and returns ctx's error. Otherwise it returns an
+// authoritative reply with the OPT the query asks for.
+func newResponse(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
+	msgoptions *edns0.MsgOptions) (*dns.Msg, error) {
 
 	select {
 	case <-ctx.Done():
@@ -1081,9 +1165,58 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		respondEDNS(m, r, msgoptions)
 		m.MsgHdr.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(m)
-		return ctx.Err()
+		return nil, ctx.Err()
 	default:
 	}
+
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.MsgHdr.Authoritative = true
+	// RFC 6891 §6.1.1: an EDNS query MUST get an OPT in the response. Attach it
+	// once here, up front, so every exit path of the responders (positive
+	// answers, referrals, NXDOMAIN/NODATA, DS, CNAME, SOA, REFUSED — all of
+	// which reuse this m) carries it. No-op for non-EDNS queries. Later EDE/CDE
+	// error paths find and reuse this OPT rather than adding a second one.
+	// Downstream UDP truncation preserves the OPT and re-appends it after
+	// trimming.
+	respondEDNS(m, r, msgoptions)
+	return m, nil
+}
+
+// dsResponder answers a DS at zd's apex from pzd, the hosted parent that
+// DefaultQueryHandler found when it decided to skip zd's guards. It takes that
+// parent and does not look again, so the decision and the answer rest on one
+// lookup. A parent removed in between (RemoveDynamicZone) still answers, as
+// the zone of any query in flight does. A second lookup would find no parent
+// there and fall back to zd's own copy, which zd's guards were never asked
+// about.
+func (zd *ZoneData) dsResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
+	qname string, pzd *ZoneData, msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
+
+	m, err := newResponse(ctx, w, r, msgoptions)
+	if err != nil {
+		return err
+	}
+	return zd.answerDS(m, w, qname, pzd, msgoptions, kdb)
+}
+
+func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
+	qname string, qtype uint16, msgoptions *edns0.MsgOptions, kdb *KeyDB, imr *Imr) error {
+
+	m, err := newResponse(ctx, w, r, msgoptions)
+	if err != nil {
+		return err
+	}
+
+	// 0. Is this a DS query? If so, trap it ASAP: DS is parent-side data, so it
+	// is answered from the nearest hosted ancestor of qname, resolved from the
+	// local Zones map (never the resolver). See handleDSQuery. Ahead of the
+	// key lookup and the snapshot pin below, which are this zone's: at its apex
+	// the parent answers, and this zone may have no copy to pin.
+	if qtype == dns.TypeDS {
+		return zd.handleDSQuery(m, w, qname, msgoptions, kdb)
+	}
+
 	// minimal-responses: BIND-style suppression of authority NS RRset and
 	// apex glue on positive answers. Referrals and NXDOMAIN/NODATA paths are
 	// unaffected (their authority/additional sections are still required).
@@ -1102,7 +1235,6 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 	// Get DNSSEC keys if KeyDB is available and zone has DNSSEC enabled
 	var dak *DnssecKeys
-	var err error
 	if kdb != nil {
 		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil {
@@ -1119,18 +1251,6 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	MaybeSignRRset := func(rrset core.RRset, qname string) (core.RRset, error) {
 		return zd.signRRsetForZone(rrset, qname, msgoptions, kdb, dak)
 	}
-
-	// log.Printf("QueryResponder: qname: %s qtype: %s", qname, dns.TypeToString[qtype])
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.MsgHdr.Authoritative = true
-	// RFC 6891 §6.1.1: an EDNS query MUST get an OPT in the response. Attach it
-	// once here, up front, so every exit path below (positive answers,
-	// referrals, NXDOMAIN/NODATA, DS, CNAME, SOA, REFUSED — all of which reuse
-	// this m) carries it. No-op for non-EDNS queries. Later EDE/CDE error paths
-	// find and reuse this OPT rather than adding a second one. Downstream UDP
-	// truncation preserves the OPT and re-appends it after trimming.
-	respondEDNS(m, r, msgoptions)
 
 	// Pin ONE snapshot for the whole response so the answer, authority SOA, NS,
 	// and glue all come from the same serial — no intra-response tearing (C1).
@@ -1165,10 +1285,9 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	}
 
 	// Meta-TYPEs and reserved types (RFC 6895 section 3.1) name nothing a zone
-	// can hold. They are refused here, ahead of the DS trap and the name
-	// lookup, so the answer is the same at a name that exists, one that does
-	// not, a zone cut and a CNAME. ANY, AXFR and IXFR are meta too, and have
-	// paths of their own below.
+	// can hold. They are refused here, ahead of the name lookup, so the answer
+	// is the same at a name that exists, one that does not, a zone cut and a
+	// CNAME. ANY, AXFR and IXFR are meta too, and have paths of their own below.
 	if (core.IsMetaType(qtype) || core.IsReservedType(qtype)) &&
 		qtype != dns.TypeANY && qtype != dns.TypeAXFR && qtype != dns.TypeIXFR {
 		lgHandler.Debug("refusing a meta or reserved qtype", "qname", qname, "qtype", qtype, "zone", zd.ZoneName)
@@ -1179,13 +1298,6 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 	var wildqname string
 	origqname := qname
-
-	// 0. Is this a DS query? If so, trap it ASAP: DS is parent-side data, so it
-	// is answered from the nearest hosted ancestor of qname, resolved from the
-	// local Zones map (never the resolver). See handleDSQuery.
-	if qtype == dns.TypeDS {
-		return zd.handleDSQuery(m, w, qname, msgoptions, kdb)
-	}
 
 	// log.Printf("---> Checking for existence of qname %s", qname)
 	if !nameExistsFrom(snap, qname) {
@@ -1359,7 +1471,7 @@ func addReferralNSEC(m *dns.Msg, cdd *ChildDelegationData, apex *OwnerData, zone
 	var soaMinTTL uint32 = 3600
 	if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
 		if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
-			soaMinTTL = soa.Minttl
+			soaMinTTL = negativeTTL(soa)
 		}
 	}
 
@@ -1412,7 +1524,7 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 
 	if soaRR, ok := apex.RRtypes.Get(dns.TypeSOA); ok && len(soaRR.RRs) > 0 {
 		if soa, ok := soaRR.RRs[0].(*dns.SOA); ok {
-			soaMinTTL = soa.Minttl
+			soaMinTTL = negativeTTL(soa)
 			lgHandler.Debug("negative TTL from SOA", "zone", zd.ZoneName, "minTTL", soaMinTTL)
 		}
 	}
@@ -1459,7 +1571,7 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 		}(),
 	}
 	m.Ns = append(m.Ns, nsecRR)
-	m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
+	m.Ns = append(m.Ns, denialSOASigs(apex)...)
 
 	nsecRRset, err := signFunc(core.RRset{RRs: []dns.RR{nsecRR}}, zd.ZoneName)
 	if err != nil {

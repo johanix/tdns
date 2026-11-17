@@ -26,6 +26,7 @@ type DnsHandlerRequest struct {
 type DnsUpdateRequest struct {
 	ResponseWriter dns.ResponseWriter
 	Msg            *dns.Msg
+	Wire           []byte // Msg as received, when the transport kept it (requestWire); SIG(0) is verified over it
 	Qname          string
 	Options        *edns0.MsgOptions
 	Status         *UpdateStatus
@@ -124,7 +125,11 @@ func applyValidationFailure(m *dns.Msg, us *UpdateStatus) {
 }
 
 func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
-	w := dur.ResponseWriter
+	// A child's UPDATE is recorded in the delegation-sync log with the answer
+	// it gets, whenever that is written: see syncLogUpdateWriter. Updates that
+	// turn out not to be a child's are not recorded.
+	slw := &syncLogUpdateWriter{ResponseWriter: dur.ResponseWriter}
+	w := dns.ResponseWriter(slw)
 	r := dur.Msg
 	qname := dur.Qname
 
@@ -165,12 +170,20 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	// This is a DNS UPDATE, so the Query Section becomes the Zone Section
 	zone := qname
 
-	if len(r.Ns) == 1 {
-		qname = r.Ns[0].Header().Name // If there is only one RR in the update, we will use that name as the qname
-	}
-	// 1. Is qname inside or below a zone that we're auth for?
-	// Let's see if we can find the zone. OrRoot: a single-RR UPDATE of a
-	// TLD's delegation arrives here as the TLD's name, and its zone is ".".
+	// 1. RFC 2136 §2.3: the zone section names the zone to be updated, however
+	// many records the update section holds. Routing a one-record update by
+	// its owner instead sent a parent's DS change for a child this server
+	// also serves to the child zone, which refused it as an update of its own
+	// data.
+	//
+	// The lookup is FindZone's longest match, not an exact one. A zone
+	// section that names a zone served here finds that zone. One that names
+	// a name inside a served zone -- a sender that puts the child's name
+	// there for its KEY or delegation, or a TLD's name for its delegation --
+	// finds the zone that contains it. RFC 2136 would answer NOTAUTH; this is
+	// a tolerance, and the NOTZONE check below keeps it to records inside the
+	// zone it finds. OrRoot: a hosted root is the zone for any name no more
+	// specific hosted zone covers.
 	zd := FindZoneOrRoot(qname)
 	if zd == nil {
 		lgHandler.Warn("zone not found", "qname", qname)
@@ -179,6 +192,45 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		w.WriteMsg(m)
 		return nil // didn't find any zone for that qname
 	}
+	// From here on the zone being updated is the one found. It differs from
+	// the zone section when that names a name inside a served zone, and the
+	// updater looks the zone up by this name.
+	zone = zd.ZoneName
+
+	// RFC 2136 §3.4.1.3: every record in the update section must be in the
+	// zone being updated. Nothing else enforces it: the classifiers look only
+	// at names relative to the zone they were given, so an out-of-zone record
+	// would be judged as that zone's own data, with only the update policy's
+	// signer check between it and the zone.
+	for _, rr := range r.Ns {
+		if !dns.IsSubDomain(zd.ZoneName, rr.Header().Name) {
+			lgHandler.Warn("update rejected: record outside the zone", "zone", zd.ZoneName, "owner", rr.Header().Name)
+			m.SetRcode(r, dns.RcodeNotZone)
+			w.WriteMsg(m)
+			return nil
+		}
+	}
+
+	// RFC 2136 §2.4/§3.2: the prerequisite section (the Answer section of an
+	// UPDATE) is not evaluated here, and an update that carries one is
+	// refused rather than applied without it. Applying it would turn the
+	// sender's compare-and-swap into a plain write and answer NOERROR, which
+	// is exactly what a sender that bothers with prerequisites relies on not
+	// happening. Both mechanisms, SIG(0) and TSIG.
+	if len(r.Answer) > 0 {
+		lgHandler.Warn("update refused: prerequisites are not supported",
+			"zone", zd.ZoneName, "prerequisites", len(r.Answer))
+		m.SetRcode(r, dns.RcodeNotImplemented)
+		edns0.AttachEDEToResponseWithText(m, dns.ExtendedErrorCodeNotSupported,
+			"UPDATE prerequisites (RFC 2136 section 2.4) are not supported; nothing was changed", false)
+		w.WriteMsg(m)
+		return nil
+	}
+
+	// Which mechanism authorizes this update. TSIG when the message carries a
+	// TSIG and no SIG(0); a message with a SIG RR takes the SIG(0) path as it
+	// always has, a TSIG beside it being transport only.
+	viaTsig := r.IsTsig() != nil && !hasSigRR(r.Extra)
 
 	// Refuse UPDATE on a service-impacting error, or when the zone holds
 	// no published data to update. Same predicate as the query path in
@@ -199,6 +251,14 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)
 		w.WriteMsg(m)
 		return nil // didn't find any zone for that qname
+	}
+	// The same withheld guard as the query path.
+	if zd.Withheld() {
+		lgHandler.Warn("zone is withheld", "qname", qname, "zone", zd.ZoneName)
+		m.SetRcode(r, dns.RcodeServerFailure)
+		edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
+		w.WriteMsg(m)
+		return nil
 	}
 	// And the same expire guard as the query path: a zone we may no longer
 	// answer for is not one we may accept updates to either.
@@ -233,6 +293,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	if child, ok := zd.classifyTruststoreUpdate(r.Ns); ok {
 		lgHandler.Info("update carries child key material", "child", child)
 		dur.Status.Type = "TRUSTSTORE-UPDATE"
+		slw.setChild(zd.ZoneName, child, SyncMechUpdateKey, r.Ns)
 		// Deliberately not gated on allow-child-updates: a truststore update
 		// writes no zone content at all. ApproveTrustUpdate is its gate.
 	} else if keyRR := zd.childKeyRR(r.Ns); keyRR != nil {
@@ -244,6 +305,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		// the only thing standing between a child's KEY and the parent zone.
 		lgHandler.Warn("update rejected: child key material that does not identify a single child",
 			"zone", zd.ZoneName, "owner", keyRR.Header().Name, "updateRRs", len(r.Ns))
+		slw.setChild(zd.ZoneName, keyRR.Header().Name, SyncMechUpdateKey, r.Ns)
 		m.SetRcode(r, dns.RcodeRefused)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateRRtypeNotAllowed)
 		w.WriteMsg(m)
@@ -256,6 +318,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		if isChildUpdate && childDel != "" {
 			lgHandler.Info("update targets child delegation", "child", childDel)
 			dur.Status.Type = "CHILD-UPDATE"
+			slw.setChild(zd.ZoneName, childDel, SyncMechUpdate, r.Ns)
 			if !zd.Options[OptAllowChildUpdates] {
 				lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "child", childDel)
 				m.SetRcode(r, dns.RcodeRefused)
@@ -276,8 +339,8 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 			}
 			zd.Logger.Printf("UpdateResponder: zone %s: no child delegation covers owner %s; treating as ZONE-UPDATE",
 				zd.ZoneName, unplaced)
-			if !zd.Options[OptAllowUpdates] {
-				lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname)
+			if !zoneUpdatesAdmitted(zd, viaTsig) {
+				lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname, "tsig", viaTsig)
 				m.SetRcode(r, dns.RcodeRefused)
 				edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
 				w.WriteMsg(m)
@@ -292,6 +355,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the name of an existing child zone",
 			zd.ZoneName, qname)
 		dur.Status.Type = "CHILD-UPDATE"
+		slw.setChild(zd.ZoneName, qname, SyncMechUpdate, r.Ns)
 		if !zd.Options[OptAllowChildUpdates] {
 			lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "qname", qname)
 			m.SetRcode(r, dns.RcodeRefused)
@@ -305,8 +369,8 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	} else {
 		dur.Status.Type = "ZONE-UPDATE"
 		zd.Logger.Printf("UpdateResponder: qname %s is in auth zone %s", qname, zd.ZoneName)
-		if !zd.Options[OptAllowUpdates] {
-			lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname)
+		if !zoneUpdatesAdmitted(zd, viaTsig) {
+			lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname, "tsig", viaTsig)
 			m.SetRcode(r, dns.RcodeRefused)
 			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
 			w.WriteMsg(m)
@@ -335,7 +399,11 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	// known" for what is actually FORMERR + a format error — mislabelling a
 	// malformed request as a server-side fault and directing the child at
 	// bootstrapping a key, which does not fix a malformed message.
-	err := zd.ValidateUpdate(ctx, r, dur.Status)
+	if viaTsig {
+		return zd.respondTsigUpdate(ctx, w, m, r, dur, updateq)
+	}
+
+	err := zd.ValidateUpdate(ctx, r, dur.Wire, dur.Status)
 	if err != nil {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
 		applyValidationFailure(m, dur.Status)
@@ -456,13 +524,78 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 		return nil
 	}
 
-	return answerAfterApply(ctx, w, m, req, updateq, finalRcode)
+	return answerWhenApplied(ctx, w, m, req, updateq, finalRcode)
+}
+
+// maxUpdatesAwaitingAnswer bounds how many DNS UPDATEs may wait for their
+// publish at once. Each holds a goroutine for at most updateWaitBound.
+const maxUpdatesAwaitingAnswer = 256
+
+// updatesAwaitingAnswer holds a slot per update that has been handed to the
+// ZoneUpdater and not yet answered.
+var updatesAwaitingAnswer = make(chan struct{}, maxUpdatesAwaitingAnswer)
+
+// answerWhenApplied hands an approved update to the ZoneUpdater and answers the
+// client once it has been applied, without holding up the next update.
+//
+// UpdateHandler is one goroutine serving every UPDATE on the server. Under the
+// publish gate an update to a busy zone is answered only after the publish
+// that carries it, up to a cadence later. Waiting for that here made every
+// UPDATE on the server, to any zone, queue behind the publish of the one
+// before it: a burst of N updates took N cadences, and a UDP client heard
+// nothing meanwhile and retransmitted.
+//
+// The hand-over stays on the caller's goroutine, so updates reach the
+// ZoneUpdater in the order they arrived. Only the wait for the outcome and the
+// answer move to a goroutine of their own. Past maxUpdatesAwaitingAnswer the
+// update is not handed over and the client is told SERVFAIL at once, which it
+// retries.
+func answerWhenApplied(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req UpdateRequest,
+	updateq chan UpdateRequest, finalRcode int) error {
+
+	slots := updatesAwaitingAnswer
+	select {
+	case slots <- struct{}{}:
+	default:
+		lgHandler.Warn("too many updates waiting to be applied; answering SERVFAIL",
+			"zone", req.ZoneName, "limit", maxUpdatesAwaitingAnswer)
+		m.SetRcode(m, dns.RcodeServerFailure)
+		edns0.AttachEDEToResponseWithText(m, edns0.EDEZoneUpdateNotApplied,
+			"too many updates waiting to be applied; retry", false)
+		w.WriteMsg(m)
+		return nil
+	}
+
+	respch, err := handOverUpdate(ctx, req, updateq)
+	if err != nil {
+		<-slots
+		return err
+	}
+	go func() {
+		defer func() { <-slots }()
+		answerUpdateOutcome(w, m, req, respch, finalRcode)
+	}()
+	return nil
 }
 
 // answerAfterApply hands an approved update to the ZoneUpdater and answers the
-// client once it has been applied.
+// client once it has been applied, waiting for that on the caller's goroutine.
+// For a caller that must not go on until the update is applied, such as one
+// holding the zone's delegation lock (answerOwnDelegationUpdate).
 func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req UpdateRequest,
 	updateq chan UpdateRequest, finalRcode int) error {
+
+	respch, err := handOverUpdate(ctx, req, updateq)
+	if err != nil {
+		return err
+	}
+	answerUpdateOutcome(w, m, req, respch, finalRcode)
+	return nil
+}
+
+// handOverUpdate puts an approved update on the ZoneUpdater's queue with a
+// reply channel, and returns that channel.
+func handOverUpdate(ctx context.Context, req UpdateRequest, updateq chan UpdateRequest) (chan ZoneUpdateResult, error) {
 
 	// RFC 2136 §3.4.2.5: a NOERROR response means the requested update HAS been
 	// made. Answering as soon as the request was queued makes that a statement
@@ -490,12 +623,32 @@ func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req
 	case <-ctx.Done():
 		lgHandler.Info("shutting down before the update could be handed to the updater",
 			"zone", req.ZoneName, "type", req.Cmd)
-		return fmt.Errorf("update for %s not queued: %w", req.ZoneName, ctx.Err())
+		return nil, fmt.Errorf("update for %s not queued: %w", req.ZoneName, ctx.Err())
 	}
+	return respch, nil
+}
 
+// answerUpdateOutcome waits for the outcome of a handed-over update, at most
+// updateWaitBound, and answers the client with it.
+func answerUpdateOutcome(w dns.ResponseWriter, m *dns.Msg, req UpdateRequest, respch chan ZoneUpdateResult, finalRcode int) {
 	select {
 	case res := <-respch:
-		if res.Err != nil {
+		var notInZone *ChildDeleteNotInZoneError
+		switch {
+		case errors.As(res.Err, &notInZone):
+			// A delete of a record the zone does not hold: refused, nothing
+			// in the update applied, as a failed "RR exists" prerequisite is
+			// (RFC 2136 §3.2.5). Not SERVFAIL, which the child would retry
+			// unchanged.
+			lgHandler.Warn("update deletes a record the zone does not hold; answering NXRRSET",
+				"zone", req.ZoneName, "error", res.Err)
+			m.SetRcode(m, dns.RcodeNXRrset)
+			text := res.Err.Error()
+			if len(text) > 300 {
+				text = text[:300]
+			}
+			edns0.AttachEDEToResponseWithText(m, edns0.EDEZoneUpdateNotApplied, text, false)
+		case res.Err != nil:
 			// The update was refused or could not be made durable. SERVFAIL is
 			// the honest answer: the client learns to retry or escalate,
 			// instead of believing a change that was never made.
@@ -503,11 +656,11 @@ func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req
 				"zone", req.ZoneName, "error", res.Err)
 			m.SetRcode(m, dns.RcodeServerFailure)
 			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateNotApplied)
-		} else {
+		default:
 			m.SetRcode(m, finalRcode)
 		}
 
-	case <-time.After(UpdateApplyTimeout):
+	case <-time.After(updateWaitBound(req.ZoneName)):
 		// The updater is a single goroutine serving every zone, so a slow or
 		// wedged apply shows up here. Do NOT answer NOERROR on a timeout: the
 		// update may yet be applied, but we no longer know, and the whole point
@@ -515,13 +668,11 @@ func answerAfterApply(ctx context.Context, w dns.ResponseWriter, m *dns.Msg, req
 		// an RFC 2136 update is idempotent, so a retry that arrives after a
 		// late apply is harmless.
 		lgHandler.Error("timed out waiting for the update to be applied; answering SERVFAIL",
-			"zone", req.ZoneName, "timeout", UpdateApplyTimeout)
+			"zone", req.ZoneName, "timeout", updateWaitBound(req.ZoneName))
 		m.SetRcode(m, dns.RcodeServerFailure)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateApplyTimeout)
 	}
 	w.WriteMsg(m)
-
-	return nil
 }
 
 // answerOwnDelegationUpdate applies an update to a zone that syncs its own
@@ -583,9 +734,9 @@ func dnsZoneUpdateSubmitter(updateq chan UpdateRequest) zoneUpdateSubmitter {
 			return res, nil
 		case <-ctx.Done():
 			return ZoneUpdateResult{}, fmt.Errorf("stopped waiting for the update to %s: %w", ur.ZoneName, ctx.Err())
-		case <-time.After(UpdateApplyTimeout):
+		case <-time.After(updateWaitBound(ur.ZoneName)):
 			return ZoneUpdateResult{}, fmt.Errorf("timed out after %s waiting for the update to %s to be applied;"+
-				" it may or may not have taken effect", UpdateApplyTimeout, ur.ZoneName)
+				" it may or may not have taken effect", updateWaitBound(ur.ZoneName), ur.ZoneName)
 		}
 	}
 }
@@ -595,6 +746,23 @@ func dnsZoneUpdateSubmitter(updateq chan UpdateRequest) zoneUpdateSubmitter {
 // answering SERVFAIL. Generous: the wait covers a database write and, on a
 // signed zone, re-signing the affected RRsets.
 const UpdateApplyTimeout = 10 * time.Second
+
+// twiceCadence is twice the zone's publish cadence, the longest a change can
+// wait for the gate's publish plus one cadence of margin; zero for a zone
+// that is not registered.
+func twiceCadence(zone string) time.Duration {
+	if zd, ok := Zones.Get(zone); ok && zd != nil {
+		return 2 * publishCadenceForZone(zd)
+	}
+	return 0
+}
+
+// updateWaitBound is how long a sender waits for its change to be applied,
+// persisted and published: the larger of UpdateApplyTimeout and twice the
+// zone's cadence. A wait equal to the cadence loses the race with the gate.
+func updateWaitBound(zone string) time.Duration {
+	return max(UpdateApplyTimeout, twiceCadence(zone))
+}
 
 // Returns approved, updatezone, error
 func (zd *ZoneData) ApproveUpdate(zone string, us *UpdateStatus, r *dns.Msg) (bool, bool, error) {
@@ -873,6 +1041,28 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 	// 3. Class is not NONE or ANY (i.e. not a removal, but an add)
 	// 4. Name of key must be == existing delegation
 	lgHandler.Debug("ApproveTrustUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "delegationpolicy", zd.boundDelegationPolicy().Name, "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
+
+	// A key this child retired with a trusted UPDATE is not taken back: not
+	// as a self-signed upload, not as the bootstrap ceremony, not from the
+	// child's trusted key (truststore_tombstone.go). Asked before the upload
+	// allowances below, so that the child is told why instead of being left
+	// to wait for a verification that would never start.
+	if key, isKey := rr.(*dns.KEY); isKey && rrclass == dns.ClassINET && zd.KeyDB != nil {
+		dead, deletedAt, terr := zd.KeyDB.Sig0KeyTombstoned(key.Hdr.Name, key)
+		if terr != nil {
+			us.Approved = false
+			return false, false, fmt.Errorf("ApproveTrustUpdate: looking for a tombstone of %s keyid %d: %v",
+				key.Hdr.Name, key.KeyTag(), terr)
+		}
+		if dead {
+			us.Approved = false
+			us.RejectionEDE = edns0.EDESig0KeyRetired
+			lgHandler.Warn("trust update rejected: the key was retired by its child's trusted UPDATE",
+				"zone", zone, "child", key.Hdr.Name, "keyid", key.KeyTag(), "deleted", deletedAt,
+				"signer", us.SignerName)
+			return false, false, nil
+		}
+	}
 
 	if !us.ValidatedByTrustedKey {
 		// If the update is not trusted (i.e. validated against a trusted key) it should be

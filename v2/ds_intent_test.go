@@ -1,8 +1,6 @@
 package tdns
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -10,14 +8,11 @@ import (
 
 func intentTestKeyDB(t *testing.T) *KeyDB {
 	t.Helper()
-	f := filepath.Join(t.TempDir(), "intent.db")
-	if err := os.WriteFile(f, nil, 0664); err != nil {
-		t.Fatalf("create db file: %v", err)
-	}
-	kdb, err := NewKeyDB(f, false, nil)
+	kdb, err := NewKeyDBInMemory(t.Name())
 	if err != nil {
-		t.Fatalf("NewKeyDB: %v", err)
+		t.Fatalf("NewKeyDBInMemory: %v", err)
 	}
+	t.Cleanup(func() { kdb.Close() })
 	return kdb
 }
 
@@ -76,36 +71,6 @@ const (
 	pubD = "3I+5t3kXzt3n5lYiVpMGYZFPSUc0kkTYU/7Jk3GEVG3="
 )
 
-// dsBelongsAtParent is the whole of D1: under multi-DS a KSK gets its DS at the
-// parent BEFORE its DNSKEY is published, so everything from ds-published
-// onwards should have one.
-func TestDSBelongsAtParent(t *testing.T) {
-	yes := []string{DnskeyStateDsPublished, DnskeyStatePublished, DnskeyStateStandby, DnskeyStateActive}
-	no := []string{DnskeyStateCreated, DnskeyStateMpdist, DnskeyStateRetired, DnskeyStateRemoved}
-
-	for _, st := range yes {
-		belongs, recognised := dsBelongsAtParent(st)
-		if !recognised {
-			t.Errorf("state %q was not recognised", st)
-		}
-		if !belongs {
-			t.Errorf("state %q should have a DS at the parent, got false", st)
-		}
-	}
-	for _, st := range no {
-		belongs, recognised := dsBelongsAtParent(st)
-		if !recognised {
-			t.Errorf("state %q was not recognised", st)
-		}
-		if belongs {
-			t.Errorf("state %q should NOT have a DS at the parent, got true", st)
-		}
-	}
-	if _, recognised := dsBelongsAtParent("some-future-state"); recognised {
-		t.Error("an unrecognised state was reported as recognised")
-	}
-}
-
 // A state this code does not classify must make the whole intent unknown, not
 // merely trim the set. Reporting Known with a short set would have replace mode
 // delete DS records on the strength of a state nobody has classified -- turning
@@ -149,7 +114,7 @@ func intentDS(zone, pubkey string) *dns.DS {
 func TestDSIntentGivesAnMpdistKeyNoDS(t *testing.T) {
 	kdb := intentTestKeyDB(t)
 	seedKey(t, kdb, "child.example.", DnskeyStateActive, 257, pubA)
-	seedKey(t, kdb, "child.example.", DnskeyStateMpdist, 257, pubB)
+	seedKey(t, kdb, "child.example.", ownerStateMpdist, 257, pubB)
 
 	intent, err := DSIntentForZone(kdb, "child.example.", dns.SHA256)
 	if err != nil {
@@ -158,7 +123,7 @@ func TestDSIntentGivesAnMpdistKeyNoDS(t *testing.T) {
 	if intent.Known {
 		t.Fatalf("an mpdist key with ds unset gave a known intent (%d records); nobody has decided its DS", len(intent.Set))
 	}
-	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET ds=0 WHERE zonename=? AND state=?`, "child.example.", DnskeyStateMpdist); err != nil {
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET ds=0 WHERE zonename=? AND state=?`, "child.example.", ownerStateMpdist); err != nil {
 		t.Fatal(err)
 	}
 	intent, err = DSIntentForZone(kdb, "child.example.", dns.SHA256)
@@ -190,7 +155,7 @@ func TestDSIntentIsUnknownWhenOnlyAnMpdistKeyIsLeft(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			kdb := intentTestKeyDB(t)
-			seedKey(t, kdb, "child.example.", DnskeyStateMpdist, 257, pubA)
+			seedKey(t, kdb, "child.example.", ownerStateMpdist, 257, pubA)
 			for i, st := range tc.others {
 				seedKey(t, kdb, "child.example.", st, 257, []string{pubB, pubC}[i])
 			}
@@ -215,7 +180,7 @@ func TestDSIntentDeclinesForAZoneHoldingAForeignKSK(t *testing.T) {
 	t.Run("foreign KSK", func(t *testing.T) {
 		kdb := intentTestKeyDB(t)
 		seedKey(t, kdb, "child.example.", DnskeyStateActive, 257, pubA)
-		seedKey(t, kdb, "child.example.", DnskeyStateForeign, 257, pubB)
+		seedKey(t, kdb, "child.example.", ownerStateForeign, 257, pubB)
 
 		intent, err := DSIntentForZone(kdb, "child.example.", dns.SHA256)
 		if err != nil {
@@ -236,7 +201,7 @@ func TestDSIntentDeclinesForAZoneHoldingAForeignKSK(t *testing.T) {
 	t.Run("mpremove KSK", func(t *testing.T) {
 		kdb := intentTestKeyDB(t)
 		seedKey(t, kdb, "child.example.", DnskeyStateActive, 257, pubA)
-		seedKey(t, kdb, "child.example.", DnskeyStateMpremove, 257, pubB)
+		seedKey(t, kdb, "child.example.", ownerStateMpremove, 257, pubB)
 
 		intent, err := DSIntentForZone(kdb, "child.example.", dns.SHA256)
 		if err != nil {
@@ -251,7 +216,7 @@ func TestDSIntentDeclinesForAZoneHoldingAForeignKSK(t *testing.T) {
 	t.Run("a foreign ZSK has no DS and changes nothing", func(t *testing.T) {
 		kdb := intentTestKeyDB(t)
 		seedKey(t, kdb, "child.example.", DnskeyStateActive, 257, pubA)
-		seedKey(t, kdb, "child.example.", DnskeyStateForeign, 256, pubB)
+		seedKey(t, kdb, "child.example.", ownerStateForeign, 256, pubB)
 
 		intent, err := DSIntentForZone(kdb, "child.example.", dns.SHA256)
 		if err != nil {

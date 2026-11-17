@@ -1041,7 +1041,7 @@ algorithm-transition line in the header while a roll is in
 flight, e.g.
 
 ```
-Algorithm rollover: ZSK ED25519 -> MAYO1  (in progress), 1 of 3 published ZSKs on new algorithm
+Algorithm rollover: ZSK ED25519 -> MAYO1  (in progress), 1 of 3 live ZSKs (standby/active/retired) on new algorithm
 ```
 
 The roll is complete when every live ZSK is on the new
