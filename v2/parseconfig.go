@@ -975,6 +975,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		seenZoneName[zkey] = true
 	}
 
+	// The policies this parse applies, for the refreshers it queues.
+	reloadPolicies := dnssecPoliciesOfConfig(conf)
+
 	// Process each zone configuration
 	for i := range conf.Zones {
 		zconf := &conf.Zones[i]
@@ -1630,7 +1633,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				UpdatePolicySet:  true,
 				DelegationPolicy: dpol,
 				DnssecPolicy:     zconf.DnssecPolicy,
-				DnssecPolicyDef:  zonePolicyDef(zconf.DnssecPolicy, conf.Internal.DnssecPolicies),
+				DnssecPolicies:   reloadPolicies,
 				TransferSrc:      zconf.TransferSrc,
 				// Always carried (empty == inherit the global), so a config
 				// edit that REMOVES a per-zone mode actually reverts the zone

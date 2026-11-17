@@ -120,6 +120,19 @@ func resolvePolicyPair(kdb *KeyDB, zone, configPolicyName string) (
 	appliedName string, appliedPol *DnssecPolicy, appliedOK bool,
 	err error,
 ) {
+	return resolvePolicyPairIn(kdb, zone, configPolicyName, nil)
+}
+
+// resolvePolicyPairIn is resolvePolicyPair resolving both names, the override's
+// among them, against pols instead of the runtime snapshot. pols is the policies
+// of the config a reload is applying (ZoneRefresher.DnssecPolicies): a reload
+// publishes its snapshot after it has queued its refreshers, so the engine can
+// resolve against the previous config's policies. Nil: the snapshot.
+func resolvePolicyPairIn(kdb *KeyDB, zone, configPolicyName string, pols map[string]DnssecPolicy) (
+	intentName string, intentPol *DnssecPolicy,
+	appliedName string, appliedPol *DnssecPolicy, appliedOK bool,
+	err error,
+) {
 	intentName, _, err = EffectiveDnssecPolicyName(kdb, zone, configPolicyName)
 	if err != nil {
 		// EffectiveDnssecPolicyName still returns a usable config-base name on a
@@ -132,15 +145,17 @@ func resolvePolicyPair(kdb *KeyDB, zone, configPolicyName string) (
 	}
 	appliedName, appliedOK = an, ok
 
-	live := ConfLive()
+	if pols == nil {
+		pols = ConfLive().DnssecPolicies
+	}
 	if intentName != "" {
-		if p, exists := live.DnssecPolicies[intentName]; exists {
+		if p, exists := pols[intentName]; exists {
 			ip := p
 			intentPol = &ip
 		}
 	}
 	if appliedOK && appliedName != "" {
-		if p, exists := live.DnssecPolicies[appliedName]; exists {
+		if p, exists := pols[appliedName]; exists {
 			ap := p
 			appliedPol = &ap
 		}
@@ -394,6 +409,14 @@ func keepBindingOrQuarantineForBadIntent(zd *ZoneData, intentName, keepMsg, quar
 // keep an existing in-memory binding + DnssecPolicyWarning; on first-bind with
 // no binding yet, proceed toward intent when resolvable, else quarantine.
 func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyDB, conf *Config, configPolicyName string) error {
+	return syncZoneDnssecPolicyFromConfigIn(ctx, zd, kdb, conf, configPolicyName, nil)
+}
+
+// syncZoneDnssecPolicyFromConfigIn is syncZoneDnssecPolicyFromConfig resolving
+// the zone's policies against pols, the policies of the config being applied,
+// where the caller has them (a reload's refresher carries them); see
+// resolvePolicyPairIn. Nil: the runtime snapshot.
+func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *KeyDB, conf *Config, configPolicyName string, pols map[string]DnssecPolicy) error {
 	if zd == nil || kdb == nil {
 		return fmt.Errorf("syncZoneDnssecPolicyFromConfig: nil zone or keydb")
 	}
@@ -401,7 +424,7 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 		return nil
 	}
 
-	intentName, intentPol, appliedName, appliedPol, appliedOK, err := resolvePolicyPair(kdb, zd.ZoneName, configPolicyName)
+	intentName, intentPol, appliedName, appliedPol, appliedOK, err := resolvePolicyPairIn(kdb, zd.ZoneName, configPolicyName, pols)
 	if err != nil {
 		return fmt.Errorf("resolve DNSSEC policy pair for zone %s: %w", zd.ZoneName, err)
 	}

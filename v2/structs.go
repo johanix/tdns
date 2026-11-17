@@ -1269,11 +1269,12 @@ type ZoneRefresher struct {
 	UpdatePolicy     UpdatePolicy
 	DelegationPolicy *DelegationPolicy
 	DnssecPolicy     string
-	// DnssecPolicyDef is DnssecPolicy's definition in the config being applied
-	// (ParseZones). The runtime-config snapshot a refresher is resolved against
-	// is published after ParseZones has queued it, so for a reload it may still
-	// hold the previous definitions. Nil: resolve through the snapshot.
-	DnssecPolicyDef *DnssecPolicy
+	// DnssecPolicies are the DNSSEC policies of the config being applied
+	// (ParseZones; one copy, shared by the refreshers of a parse, never
+	// written). The runtime-config snapshot a refresher is resolved against is
+	// published after ParseZones has queued it, so for a reload it may still
+	// hold the previous config's policies. Nil: resolve through the snapshot.
+	DnssecPolicies map[string]DnssecPolicy
 	// OutboundSoaSerial carries the per-zone outbound serial mode to the
 	// RefreshEngine (copied to zd.OutboundSoaSerial on merge). Empty means
 	// "inherit the server-global setting" and is a valid, self-consistent

@@ -341,23 +341,28 @@ func TestAReloadLeavesTheRecordOfASigningZoneToThePolicySync(t *testing.T) {
 	}
 }
 
+// A reload as ReloadZoneConfig makes it, for a zone of a running RefreshEngine.
+//
 // ReloadZoneConfig publishes the new runtime-config snapshot only after
 // ParseZones has queued the refreshers, so the engine can handle a zone's
-// refresher while ConfLive still holds the previous config's policies. A bound
-// zone must follow the policies of the reload being applied all the same: one
-// defined and selected in that reload, and one edited under its own name. Each
-// reload here is parsed by ParseZones against the new policies
+// refresher while ConfLive still holds the previous config's policies. Each
+// reload here is parsed by ParseZones against the policies of the reload
 // (conf.Internal.DnssecPolicies) and handled by the engine with the snapshot
-// still the old one, which is published only after the engine has finished.
-func TestAReloadFollowsThePoliciesOfTheReloadNotTheRunningSnapshot(t *testing.T) {
-	authApp(t)
-	kdb := Conf.Internal.KeyDB
-	named := func(p DnssecPolicy, name string) DnssecPolicy { p.Name = name; return p }
-	oldBase := named(kskzsk(dns.ED25519, dns.ED25519), "base")
-	other := named(kskzsk(dns.ECDSAP256SHA256, dns.ECDSAP256SHA256), "other")
-	other2 := named(kskzsk(dns.RSASHA256, dns.RSASHA256), "other") // "other", edited
+// left as it was, which is how the engine meets it when it gets there first.
+type reloadHarness struct {
+	t          *testing.T
+	zone       string
+	file       string
+	options    []string
+	conf       *Config // what ParseZones is given
+	engineConf *Config // what the engine runs on
+	parsed     chan ZoneRefresher
+}
 
-	const zone = "snap.config.example."
+// newReloadHarness starts an engine on kdb and makes the zone's file. options
+// are the zone's configured options, as the config names them.
+func newReloadHarness(t *testing.T, kdb *KeyDB, zone string, options ...string) *reloadHarness {
+	t.Helper()
 	file := filepath.Join(t.TempDir(), "zone")
 	body := zone + "\t3600\tIN\tSOA\tns1." + zone + " hostmaster." + zone + " 1 7200 1800 604800 7200\n" +
 		zone + "\t3600\tIN\tNS\tns1." + zone + "\n" +
@@ -373,99 +378,211 @@ func TestAReloadFollowsThePoliciesOfTheReloadNotTheRunningSnapshot(t *testing.T)
 		Zones.Remove(zone)
 	})
 
-	// ParseZones queues its refreshers on parsed, and the test hands them on to
-	// the engine, which is the only way to wait for the refresh a refresher
+	// ParseZones queues its refreshers on parsed, and the test hands them on
+	// to the engine, which is the only way to wait for the refresh a refresher
 	// starts: ParseZones builds them with nobody waiting.
-	engineConf := &Config{}
-	engineConf.Internal.KeyDB = kdb
-	engineConf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 4)
-	engineConf.Internal.BumpZoneCh = make(chan BumperData, 1)
-	runRefreshEngine(t, engineConf)
-	conf := &Config{}
-	conf.Internal.KeyDB = kdb
-	parsed := make(chan ZoneRefresher, 4)
-	conf.Internal.RefreshZoneCh = parsed
+	h := &reloadHarness{t: t, zone: zone, file: file, options: options, parsed: make(chan ZoneRefresher, 4)}
+	h.engineConf = &Config{}
+	h.engineConf.Internal.KeyDB = kdb
+	h.engineConf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 4)
+	h.engineConf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	runRefreshEngine(t, h.engineConf)
+	h.conf = &Config{}
+	h.conf.Internal.KeyDB = kdb
+	h.conf.Internal.RefreshZoneCh = h.parsed
+	return h
+}
+
+// answered sends zr to the engine and waits for its answer, which a refresher
+// with Wait set gets when its refresh is done.
+func (h *reloadHarness) answered(zr ZoneRefresher) {
+	h.t.Helper()
+	resp := make(chan RefresherResponse, 1)
+	zr.Wait, zr.Response = true, resp
+	h.engineConf.Internal.RefreshZoneCh <- zr
+	select {
+	case r := <-resp:
+		if r.Error {
+			h.t.Fatalf("the engine's answer: %s", r.ErrorMsg)
+		}
+	case <-time.After(10 * time.Second):
+		h.t.Fatal("the engine did not answer")
+	}
+}
+
+// reload is a ParseZones of the zone naming policy, against the policies the
+// reload has parsed, and the engine's handling of what it queued, its refresh
+// included.
+func (h *reloadHarness) reload(isReload bool, policy string, policies map[string]DnssecPolicy) *ZoneData {
+	h.t.Helper()
+	h.conf.Internal.DnssecPolicies = policies
+	h.conf.Zones = []ZoneConf{{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: policy, OptionsStrs: h.options}}
+	if _, broken, err := h.conf.ParseZones(context.Background(), isReload); err != nil || len(broken) > 0 {
+		h.t.Fatalf("ParseZones(reload=%v): err=%v broken=%v", isReload, err, broken)
+	}
+	zr := <-h.parsed
+	if isReload {
+		h.answered(zr)
+	} else {
+		// a first load answers when it fails, and when it is done goes on to
+		// the next request
+		h.engineConf.Internal.RefreshZoneCh <- zr
+		h.answered(ZoneRefresher{Name: h.zone, ZoneStore: MapZone})
+	}
+	zd, ok := Zones.Get(h.zone)
+	if !ok {
+		h.t.Fatalf("zone %s is not held", h.zone)
+	}
+	return zd
+}
+
+// named is the policy with its name set, as the config parse leaves it.
+func named(p DnssecPolicy, name string) DnssecPolicy { p.Name = name; return p }
+
+// validFor is p with signature validities the sig-validity floor accepts, so
+// that a zone signing under it is not put in an error state the engine skips.
+func validFor(p DnssecPolicy, secs uint32) DnssecPolicy {
+	p.SigValidity = PolicySigValidity{Default: secs, DNSKEY: secs, DS: secs}
+	return p
+}
+
+// policyState is what a zone records of its policy, and whether it carries a
+// DNSSEC policy warning.
+func policyState(zd *ZoneData) (name string, pol *DnssecPolicy, warned bool) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	_, warned = zd.Errors[DnssecPolicyWarning]
+	return zd.DnssecPolicyName, zd.DnssecPolicy, warned
+}
+
+// validityOf and kskAlgOf read a bound policy for a failure message: 0 for none.
+func validityOf(p *DnssecPolicy) uint32 {
+	if p == nil {
+		return 0
+	}
+	return p.SigValidity.Default
+}
+
+func kskAlgOf(p *DnssecPolicy) uint8 {
+	if p == nil {
+		return 0
+	}
+	return p.KSKAlgorithm
+}
+
+// A bound zone follows the policies of the reload being applied: one defined
+// and selected in that reload, and one edited under its own name.
+func TestAReloadFollowsThePoliciesOfTheReloadNotTheRunningSnapshot(t *testing.T) {
+	authApp(t)
+	h := newReloadHarness(t, Conf.Internal.KeyDB, "snap.config.example.")
+	oldBase := named(kskzsk(dns.ED25519, dns.ED25519), "base")
+	other := named(kskzsk(dns.ECDSAP256SHA256, dns.ECDSAP256SHA256), "other")
+	other2 := named(kskzsk(dns.RSASHA256, dns.RSASHA256), "other") // "other", edited
 
 	// The running daemon's snapshot, which the reloads below do not replace.
 	withLivePolicies(t, map[string]DnssecPolicy{"base": oldBase})
-	livePolicies := func(pols map[string]DnssecPolicy) {
-		t.Helper()
-		liveConfig.Store(&RuntimeConfig{DnssecPolicies: pols})
-	}
 
-	// answered sends zr to the engine and waits for its answer, which a
-	// refresher with Wait set gets when its refresh is done.
-	answered := func(zr ZoneRefresher) {
-		t.Helper()
-		resp := make(chan RefresherResponse, 1)
-		zr.Wait, zr.Response = true, resp
-		engineConf.Internal.RefreshZoneCh <- zr
-		select {
-		case r := <-resp:
-			if r.Error {
-				t.Fatalf("the engine's answer: %s", r.ErrorMsg)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("the engine did not answer")
-		}
-	}
-	// reload is a ParseZones of the zone naming policy, against the policies
-	// the reload has parsed, and the engine's handling of what it queued, its
-	// refresh included.
-	reload := func(isReload bool, policy string, policies map[string]DnssecPolicy) *ZoneData {
-		t.Helper()
-		conf.Internal.DnssecPolicies = policies
-		conf.Zones = []ZoneConf{{Name: zone, Type: "primary", Store: "map", Zonefile: file, DnssecPolicy: policy}}
-		if _, broken, err := conf.ParseZones(context.Background(), isReload); err != nil || len(broken) > 0 {
-			t.Fatalf("ParseZones(reload=%v): err=%v broken=%v", isReload, err, broken)
-		}
-		zr := <-parsed
-		if isReload {
-			answered(zr)
-		} else {
-			// a first load answers when it fails, and when it is done goes on to
-			// the next request
-			engineConf.Internal.RefreshZoneCh <- zr
-			answered(ZoneRefresher{Name: zone, ZoneStore: MapZone})
-		}
-		zd, ok := Zones.Get(zone)
-		if !ok {
-			t.Fatalf("zone %s is not held", zone)
-		}
-		return zd
-	}
-	state := func(zd *ZoneData) (name string, alg uint8, warned bool) {
-		zd.mu.Lock()
-		defer zd.mu.Unlock()
-		if zd.DnssecPolicy != nil {
-			alg = zd.DnssecPolicy.KSKAlgorithm
-		}
-		_, warned = zd.Errors[DnssecPolicyWarning]
-		return zd.DnssecPolicyName, alg, warned
-	}
-
-	zd := reload(false, "base", map[string]DnssecPolicy{"base": oldBase})
+	zd := h.reload(false, "base", map[string]DnssecPolicy{"base": oldBase})
 	if err := zd.BindPolicyWithoutSigning(); err != nil {
 		t.Fatalf("BindPolicyWithoutSigning: %v", err)
 	}
-	if n, a, w := state(zd); n != "base" || a != dns.ED25519 || w {
-		t.Fatalf("after the bind: %q, KSK algorithm %d, warning %v", n, a, w)
+	if n, p, w := policyState(zd); n != "base" || p.KSKAlgorithm != dns.ED25519 || w {
+		t.Fatalf("after the bind: %q, KSK algorithm %d, warning %v", n, p.KSKAlgorithm, w)
 	}
 
 	// "other" is defined in this reload and selected for the zone. The snapshot
 	// does not have it.
-	zd = reload(true, "other", map[string]DnssecPolicy{"base": oldBase, "other": other})
-	if n, a, w := state(zd); n != "other" || a != dns.ECDSAP256SHA256 || w {
-		t.Errorf("a policy defined in the reload: the zone records %q bound with KSK algorithm %d, warning %v; want %q, %d, no warning",
-			n, a, w, "other", dns.ECDSAP256SHA256)
+	zd = h.reload(true, "other", map[string]DnssecPolicy{"base": oldBase, "other": other})
+	if n, p, w := policyState(zd); n != "other" || p == nil || p.KSKAlgorithm != dns.ECDSAP256SHA256 || w {
+		t.Errorf("a policy defined in the reload: the zone records %q bound to %v, warning %v; want %q bound to KSK algorithm %d, no warning",
+			n, p != nil, w, "other", dns.ECDSAP256SHA256)
 	}
 
 	// "other" is in the snapshot now, and the next reload edits it: the zone
 	// follows the edit, not the definition the snapshot still holds.
-	livePolicies(map[string]DnssecPolicy{"base": oldBase, "other": other})
-	zd = reload(true, "other", map[string]DnssecPolicy{"base": oldBase, "other": other2})
-	if n, a, w := state(zd); n != "other" || a != dns.RSASHA256 || w {
-		t.Errorf("a policy edited in the reload: the zone records %q bound with KSK algorithm %d, warning %v; want %q, %d, no warning",
-			n, a, w, "other", dns.RSASHA256)
+	liveConfig.Store(&RuntimeConfig{DnssecPolicies: map[string]DnssecPolicy{"base": oldBase, "other": other}})
+	zd = h.reload(true, "other", map[string]DnssecPolicy{"base": oldBase, "other": other2})
+	if n, p, w := policyState(zd); n != "other" || p == nil || p.KSKAlgorithm != dns.RSASHA256 || w {
+		t.Errorf("a policy edited in the reload: the zone records %q bound to %v, warning %v; want %q bound to KSK algorithm %d, no warning",
+			n, p != nil, w, "other", dns.RSASHA256)
+	}
+}
+
+// The same for a zone that signs, whose policy goes through the policy sync: a
+// policy edited under its own name is bound by the sync, and a policy defined
+// and selected in the reload is applied (a rename with the same algorithms
+// re-signs under it), where the previous snapshot would give the old definition
+// or none at all, and the zone would keep its policy with a warning.
+func TestAReloadOfASigningZoneFollowsThePoliciesOfTheReloadNotTheRunningSnapshot(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "snapsign.config.example.", "online-signing")
+	const month = 30 * 86400
+	base := named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "base")
+	base2 := named(validFor(kskzsk(dns.ED25519, dns.ED25519), 2*month), "base") // "base", edited
+	other := named(validFor(kskzsk(dns.ED25519, dns.ED25519), 3*month), "other")
+	withLivePolicies(t, map[string]DnssecPolicy{"base": base})
+
+	zd := h.reload(false, "base", map[string]DnssecPolicy{"base": base})
+	if !zd.signsItsOwnContent() {
+		t.Fatal("the zone does not sign; the test has lost its point")
+	}
+	if n, p, w := policyState(zd); n != "base" || p == nil || p.SigValidity.Default != month || w {
+		t.Fatalf("after the first load: %q bound to signature validity %d, warning %v", n, validityOf(p), w)
+	}
+	if name, _, ok, err := GetZoneAppliedPolicy(kdb, h.zone); err != nil || !ok || name != "base" {
+		t.Fatalf("after the first load the last-applied record is %q %v %v, want base", name, ok, err)
+	}
+
+	// "base" is edited in this reload; the snapshot still holds the old one.
+	zd = h.reload(true, "base", map[string]DnssecPolicy{"base": base2})
+	if n, p, w := policyState(zd); n != "base" || p == nil || p.SigValidity.Default != 2*month || w {
+		t.Errorf("a policy edited in the reload: the zone records %q bound to signature validity %d, warning %v; want %q bound to %d, no warning",
+			n, validityOf(p), w, "base", 2*month)
+	}
+
+	// "other" is defined in this reload and selected for the zone: not in the
+	// snapshot, which holds the policies before the reload.
+	zd = h.reload(true, "other", map[string]DnssecPolicy{"base": base2, "other": other})
+	if n, p, w := policyState(zd); n != "other" || p == nil || p.SigValidity.Default != 3*month || w {
+		t.Errorf("a policy defined in the reload: the zone records %q bound to signature validity %d, warning %v; want %q bound to %d, no warning",
+			n, validityOf(p), w, "other", 3*month)
+	}
+	if name, _, ok, err := GetZoneAppliedPolicy(kdb, h.zone); err != nil || !ok || name != "other" {
+		t.Errorf("after the reload the last-applied record is %q %v %v, want other", name, ok, err)
+	}
+	if len(keytagsOf(servedRRset(t, zd, h.zone, dns.TypeSOA).RRSIGs)) == 0 {
+		t.Error("the SOA is unsigned after the reload")
+	}
+}
+
+// A keystore override of the zone's policy is resolved against the policies of
+// the reload too: the policy it names is the one that was edited, not the one
+// the config names for the zone, and the reload follows it all the same.
+func TestAReloadFollowsAnOverridesPolicyInTheReloadNotTheRunningSnapshot(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "snapovr.config.example.")
+	base := named(kskzsk(dns.ED25519, dns.ED25519), "base")
+	ovr := named(kskzsk(dns.ED25519, dns.ED25519), "ovr")
+	ovr2 := named(kskzsk(dns.ECDSAP256SHA256, dns.ECDSAP256SHA256), "ovr") // "ovr", edited
+	withLivePolicies(t, map[string]DnssecPolicy{"base": base, "ovr": ovr})
+
+	zd := h.reload(false, "base", map[string]DnssecPolicy{"base": base, "ovr": ovr})
+	if err := SetZonePolicyOverride(kdb, h.zone, "ovr"); err != nil {
+		t.Fatalf("SetZonePolicyOverride: %v", err)
+	}
+	if err := zd.BindPolicyWithoutSigning(); err != nil {
+		t.Fatalf("BindPolicyWithoutSigning: %v", err)
+	}
+	if n, p, w := policyState(zd); n != "ovr" || p == nil || p.KSKAlgorithm != dns.ED25519 || w {
+		t.Fatalf("after the bind: %q bound to KSK algorithm %d, warning %v; want the override's policy", n, kskAlgOf(p), w)
+	}
+
+	// The config still names "base" for the zone; "ovr" is what the reload edits.
+	zd = h.reload(true, "base", map[string]DnssecPolicy{"base": base, "ovr": ovr2})
+	if n, p, w := policyState(zd); n != "ovr" || p == nil || p.KSKAlgorithm != dns.ECDSAP256SHA256 || w {
+		t.Errorf("an override's policy edited in the reload: the zone records %q bound to KSK algorithm %d, warning %v; want %q bound to %d, no warning",
+			n, kskAlgOf(p), w, "ovr", dns.ECDSAP256SHA256)
 	}
 }
