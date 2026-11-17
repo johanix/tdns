@@ -73,7 +73,7 @@ func TestAnErroredZoneReschedulesRatherThanStayingDue(t *testing.T) {
 // instead of retrying in thirty seconds.
 func TestRetryIntervalReachesTheCounterTheMapHolds(t *testing.T) {
 	const zone = "z.example."
-	counters := core.NewCmap[*RefreshCounter]()
+	counters := core.NewNameMap[*RefreshCounter]()
 
 	stale := &RefreshCounter{Name: zone, SOARefresh: 3600, CurRefresh: 0}
 	counters.Set(zone, stale)
@@ -97,6 +97,37 @@ func TestRetryIntervalReachesTheCounterTheMapHolds(t *testing.T) {
 	if got, _ := counters.Get(zone); got.CurRefresh != 7200 {
 		t.Errorf("reset to %d, want the live counter's SOARefresh 7200 (the stale one says %d)",
 			got.CurRefresh, stale.SOARefresh)
+	}
+}
+
+// One zone has one refresh counter, whatever the spelling of the name that
+// reached the engine (#1005).
+//
+// A NOTIFY or an API refresh looks the counter up under the name it arrived
+// with. Keyed by spelling, that missed the ticker's counter and created a second
+// one, so the zone had two refresh schedules and the completion of a refresh
+// reset only the one it was dispatched under.
+func TestOneZoneHasOneRefreshCounterInEverySpelling(t *testing.T) {
+	counters := core.NewNameMap[*RefreshCounter]()
+	live := &RefreshCounter{Name: "Z.Example.", SOARefresh: 3600, CurRefresh: 0}
+	counters.Set("Z.Example.", live)
+
+	if got, ok := counters.Get("z.example."); !ok || got != live {
+		t.Fatalf("the counter set as %q was not found as %q", "Z.Example.", "z.example.")
+	}
+
+	// The completion's spelling is not the counter's, and still finds it.
+	setRefreshRetry(counters, "Z.EXAMPLE.", live, 30)
+	if live.CurRefresh != 30 {
+		t.Errorf("CurRefresh=%d after a retry set under another spelling, want 30", live.CurRefresh)
+	}
+
+	// A walk sees one counter for the zone, not one per spelling it was named by.
+	counters.Set("z.example.", live)
+	seen := 0
+	counters.IterCb(func(_ string, rc *RefreshCounter) { seen++ })
+	if seen != 1 {
+		t.Errorf("the ticker would walk %d counters for one zone, want 1", seen)
 	}
 }
 
