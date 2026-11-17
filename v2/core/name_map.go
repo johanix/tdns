@@ -75,6 +75,11 @@ func (nm *NameMap[V]) Keys() []string { return nm.m.Keys() }
 // Items returns a snapshot of the map as a plain map, keyed canonically.
 func (nm *NameMap[V]) Items() map[string]V { return nm.m.Items() }
 
+// IterCb calls fn for every entry, with the canonical key. Each shard's read lock
+// is held while fn runs on that shard's entries, so fn must not Set or Remove on
+// this map: collect what it needs and mutate after the walk.
+func (nm *NameMap[V]) IterCb(fn IterCb[string, V]) { nm.m.IterCb(fn) }
+
 // Iter returns a channel of every entry.
 func (nm *NameMap[V]) Iter() <-chan Tuple[string, V] { return nm.m.Iter() }
 

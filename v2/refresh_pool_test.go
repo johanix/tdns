@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // undrainedPool is a pool with a queue and no workers, so dispatch decisions can
@@ -30,7 +32,7 @@ func waitingJob(zone string) (refreshJob, chan RefresherResponse) {
 // rebuilding.
 func TestDispatchSkipsAZoneAlreadyInFlight(t *testing.T) {
 	pool := undrainedPool(4)
-	inflight := map[string]struct{}{}
+	inflight := core.NewNameMap[struct{}]()
 
 	first, _ := waitingJob("example.test.")
 	dispatchRefresh(pool, inflight, first)
@@ -46,12 +48,44 @@ func TestDispatchSkipsAZoneAlreadyInFlight(t *testing.T) {
 	assertAnswered(t, resp, "already in progress")
 }
 
+// The zone is the same zone whatever the spelling of the name that asked for the
+// refresh. A NOTIFY or an API call carries the name as it arrived and the ticker
+// the counter's, so "Example.COM." and "example.com." reach dispatch for one
+// ZoneData and must find one in-flight entry between them (#1005).
+func TestDispatchSkipsAZoneAlreadyInFlightUnderAnotherSpelling(t *testing.T) {
+	pool := undrainedPool(4)
+	inflight := core.NewNameMap[struct{}]()
+
+	first, _ := waitingJob("Example.COM.")
+	dispatchRefresh(pool, inflight, first)
+	if len(pool.jobs) != 1 {
+		t.Fatalf("first dispatch: %d jobs queued, want 1", len(pool.jobs))
+	}
+
+	second, resp := waitingJob("example.com.")
+	dispatchRefresh(pool, inflight, second)
+	if len(pool.jobs) != 1 {
+		t.Fatalf("one zone was dispatched twice because its name was spelled differently: %d jobs queued", len(pool.jobs))
+	}
+	assertAnswered(t, resp, "already in progress")
+
+	// The completion carries the spelling its job was dispatched with, and it
+	// has to clear the entry for every spelling, or the zone is in flight for
+	// the life of the process.
+	inflight.Remove("Example.COM.")
+	third, _ := waitingJob("EXAMPLE.com.")
+	dispatchRefresh(pool, inflight, third)
+	if len(pool.jobs) != 2 {
+		t.Fatalf("a zone whose refresh had completed was refused: %d jobs queued, want 2", len(pool.jobs))
+	}
+}
+
 // A saturated pool refuses, and says so to anyone waiting. The zone is left due:
 // dispatchRefresh does not touch the refresh counters at all, so the next tick
 // finds it still at or below zero and tries again.
 func TestDispatchRefusesWhenTheQueueIsFull(t *testing.T) {
 	pool := undrainedPool(1)
-	inflight := map[string]struct{}{}
+	inflight := core.NewNameMap[struct{}]()
 
 	first, _ := waitingJob("one.example.test.")
 	dispatchRefresh(pool, inflight, first)
@@ -62,7 +96,7 @@ func TestDispatchRefusesWhenTheQueueIsFull(t *testing.T) {
 	if len(pool.jobs) != 1 {
 		t.Fatalf("the queue took a job it had no room for: %d", len(pool.jobs))
 	}
-	if _, marked := inflight["two.example.test."]; marked {
+	if inflight.Has("two.example.test.") {
 		t.Fatal("a zone that was never dispatched was marked in flight; nothing will " +
 			"ever clear that entry and the zone is never refreshed again")
 	}
