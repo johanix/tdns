@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/spf13/viper"
@@ -93,10 +94,83 @@ func resignCandidates(zones map[string]*ZoneData) map[string]*ZoneData {
 	return out
 }
 
-// resignPass renews every zone in zones, one after another, stopping between
-// zones when ctx is done.
+// resignWorkers is how many zones one renewal pass works on at the same time.
+//
+// More than one, so that a zone that is slow -- large, or waiting on a zd.mu
+// that a long refresh holds -- costs the pass one worker and not the zones that
+// would have come after it (#1034). Few, because what the workers share is
+// serial: the keystore is one SQLite handle behind kdb.mu, so a wider pool only
+// queues there, and a mint or a promotion under it stalls every worker, the
+// KeyStateWorker and the API alike. Three is inside the 2-4 the issue asks for:
+// two zones stuck at once still leave a worker.
+//
+// A constant and not a setting: nothing an operator can usefully tune. If as
+// many zones as workers are stuck the pass waits for them, as the single
+// sweeper always did.
+const resignWorkers = 3
+
+// resignPass renews every zone in zones, resignWorkers at a time, and returns
+// when the last worker has. It stops starting zones when ctx is done.
 func resignPass(ctx context.Context, zones map[string]*ZoneData) {
+	sweepZones(ctx, zones, resignWorkers, resignSweepZone)
+}
+
+// sweepZones hands every zone in zones to sweep, width at a time, and returns
+// only when every worker has returned.
+//
+// What keeps two workers off one zone: zones is keyed by name, so a zone is in
+// it once; each is put on the work queue once and a queue gives an item to one
+// receiver; and the pass is synchronous. Renewals and replaces are started only
+// by the engine goroutine -- a replace for a ResignQ request, between passes --
+// and by this pass's workers, one zone each (resignSweepZone replaces a zone
+// that is owed one, then renews it, in the same worker). The engine goroutine
+// is here until the workers are gone, so the replace it runs between passes can
+// never overlap a renewal, and nor can the next pass overlap this one. A
+// renewal that resolved its keys before a key-state change therefore never
+// signs after the replace that followed it. Anything that made the pass
+// asynchronous would need an in-flight set by zone name, with the replace going
+// through it.
+//
+// Waiting is also what shutdown relies on: engineWg waits for the engine
+// goroutine, which is waiting for the workers. A worker inside a zone cannot be
+// interrupted -- zd.mu is a plain mutex, as it was for the single sweeper -- so
+// a stop waits for the zones in flight, and ctx reaches the zone after.
+//
+// The workers are handed ctx, and take no zone from the queue once it is done.
+func sweepZones(ctx context.Context, zones map[string]*ZoneData, width int,
+	sweep func(context.Context, *ZoneData)) {
+	if len(zones) == 0 {
+		return
+	}
+	if width < 1 {
+		width = 1
+	}
+	if width > len(zones) {
+		width = len(zones)
+	}
+
+	// Filled before the workers start, and closed: the queue holds the whole
+	// pass, so there is no feeder goroutine to stop.
+	work := make(chan *ZoneData, len(zones))
 	for _, zd := range zones {
+		work <- zd
+	}
+	close(work)
+
+	var wg sync.WaitGroup
+	wg.Add(width)
+	for i := 0; i < width; i++ {
+		go func(ctx context.Context) {
+			defer wg.Done()
+			sweepWorker(ctx, work, sweep)
+		}(ctx)
+	}
+	wg.Wait()
+}
+
+// sweepWorker takes zones off the queue until it is empty or ctx is done.
+func sweepWorker(ctx context.Context, work <-chan *ZoneData, sweep func(context.Context, *ZoneData)) {
+	for zd := range work {
 		// Shutdown latency here is one pass per zone, not one pass, so the
 		// check belongs between zones: a stop during a sweep of several hundred
 		// should not wait out the whole sweep. Inside a pass there is nothing
@@ -105,7 +179,7 @@ func resignPass(ctx context.Context, zones map[string]*ZoneData) {
 		if ctx.Err() != nil {
 			return
 		}
-		resignSweepZone(ctx, zd)
+		sweep(ctx, zd)
 	}
 }
 
