@@ -92,6 +92,26 @@ func TestZoneFileRefusesADoubledSuffix(t *testing.T) {
 	}
 }
 
+// A secondary's saved zone is copied from its primary, so a doubled suffix in
+// upstream data must not prevent the secondary from restoring that copy.
+func TestSecondaryZoneFileLoadsUpstreamDoubledSuffix(t *testing.T) {
+	zd := originTestZone("r1.test.")
+	zd.ZoneType = Secondary
+	_, _, err := zd.ReadZoneData(`$TTL 300
+r1.test. IN SOA ns.r1.test. hostmaster.r1.test. 1 600 600 604800 600
+r1.test. IN NS ns.r1.test.
+ns.r1.test. IN A 192.0.2.53
+r1.test. IN NAPTR 10 100 "S" "SIP+D2U" "" email.r1.test.r1.test.
+`, false)
+	if err != nil {
+		t.Fatalf("secondary rejected its saved upstream zone: %v", err)
+	}
+	naptr := originTestRRs(t, zd, "r1.test.", dns.TypeNAPTR)[0].(*dns.NAPTR)
+	if naptr.Replacement != "email.r1.test.r1.test." {
+		t.Errorf("saved upstream replacement = %q, want email.r1.test.r1.test.", naptr.Replacement)
+	}
+}
+
 // The check cannot tell a name written out in full from one completed by the
 // origin, so a zone that means its doubled names opts out of it.
 func TestZoneFileLoadsADoubledSuffixWhenTheZoneAllowsIt(t *testing.T) {
