@@ -1066,3 +1066,133 @@ func TestQminGluelessReferralDoesNotLoop(t *testing.T) {
 		t.Errorf("child saw %v, want [%s A]", got, qname)
 	}
 }
+
+// childSignedRig is a parent and a signed child on one server: the server
+// answers for child.example. itself rather than referring to it. A probe of
+// the child's name gets the child's signed NODATA. The signature is never
+// checked: its key tag is not cached, which is what makes the validator
+// fetch the child's DNSKEY. After 200 questions the server refuses, so a
+// loop ends in a count, not a hung test.
+type childSignedRig struct {
+	g   *qminRig
+	log *asked
+}
+
+const (
+	qminSignedChild      = "child.example."
+	qminSignedChildQname = "www.child.example."
+)
+
+func newChildSignedRig(t *testing.T) *childSignedRig {
+	t.Helper()
+	const srv = "127.0.0.1"
+	g := newQminRig(t)
+	var mu sync.Mutex
+	n := 0
+	log := g.listen(t, net.ParseIP(srv), func(w dns.ResponseWriter, r *dns.Msg) {
+		mu.Lock()
+		n++
+		over := n > 200
+		mu.Unlock()
+		if over {
+			m := new(dns.Msg)
+			m.SetRcode(r, dns.RcodeRefused)
+			_ = w.WriteMsg(m)
+			return
+		}
+		q := r.Question[0]
+		switch name := dns.CanonicalName(q.Name); {
+		case name == qminSignedChildQname && q.Qtype == dns.TypeA:
+			_ = w.WriteMsg(answerA(t, r, qminSignedChildQname, "192.0.2.80"))
+		case name == qminSignedChild && q.Qtype == dns.TypeDS:
+			_ = w.WriteMsg(nodata(t, r, "example."))
+		case name == qminSignedChild:
+			m := nodata(t, r, qminSignedChild)
+			m.Ns = append(m.Ns, mustRR(t, qminSignedChild+" 300 IN RRSIG SOA 15 2 300 20300101000000 20200101000000 4242 "+qminSignedChild+
+				" c2lnbmF0dXJlLW5vdC1jaGVja2VkLXNpZ25hdHVyZS1ub3QtY2hlY2tlZC1zaWduYXR1cmUtbm90LWNoZWNrZWQtc2ln"))
+			_ = w.WriteMsg(m)
+		default:
+			_ = w.WriteMsg(nodata(t, r, "example."))
+		}
+	})
+	g.ready(t)
+	g.stub(t, "example.", []cache.AuthServer{{Name: "ns.example.", Addrs: []string{srv}, Alpn: []string{"do53"}}})
+	return &childSignedRig{g: g, log: log}
+}
+
+// query resolves qminSignedChildQname and fails the test if it does not return.
+func (c *childSignedRig) query(t *testing.T) *core.RRset {
+	t.Helper()
+	type result struct {
+		rrset *core.RRset
+		err   error
+	}
+	done := make(chan result, 1)
+	servers := c.g.servers(t, qminSignedChildQname, dns.TypeA)
+	go func() {
+		rrset, _, _, _, err := c.g.imr.IterativeDNSQuery(context.Background(), qminSignedChildQname, dns.TypeA, servers, false, edns0.PrivacyNone)
+		done <- result{rrset, err}
+	}()
+	select {
+	case res := <-done:
+		if res.err != nil {
+			t.Fatalf("query: %v (server saw %v)", res.err, c.log.list())
+		}
+		return res.rrset
+	case <-time.After(20 * time.Second):
+		t.Fatalf("query did not return; server saw %d questions", len(c.log.list()))
+	}
+	return nil
+}
+
+func (c *childSignedRig) count(q string) int {
+	n := 0
+	for _, s := range c.log.list() {
+		if s == q {
+			n++
+		}
+	}
+	return n
+}
+
+// A child-signed NODATA from the parent's servers is validated, and the
+// validation fetches the child's DNSKEY. That fetch names the child's apex,
+// so it goes as DNSKEY, not as another probe of the child's name, and the
+// lookup ends with the client's answer.
+func TestQminChildSignedDenialFromTheParentTerminates(t *testing.T) {
+	c := newChildSignedRig(t)
+	rrset := c.query(t)
+	if rrset == nil || len(rrset.RRs) != 1 || rrset.RRs[0].(*dns.A).A.String() != "192.0.2.80" {
+		t.Fatalf("client answer: %v", rrset)
+	}
+	if n := c.count(qminSignedChild + " A"); n != 1 {
+		t.Errorf("the child's name was probed %d times, want 1: %v", n, c.log.list())
+	}
+	if n := c.count(qminSignedChild + " DNSKEY"); n < 1 {
+		t.Errorf("the child's DNSKEY was never asked for as DNSKEY: %v", c.log.list())
+	}
+	if n := len(c.log.list()); n > 10 {
+		t.Errorf("server saw %d questions, want a handful: %v", n, c.log.list())
+	}
+}
+
+// With the resolver's own DNSKEY fetches minimised (a test-only switch), the
+// same shape loops through validation: each DNSKEY fetch probes the child's
+// name, and the NODATA's validation fetches the DNSKEY again. The validation
+// runs on the query's context, so the query's cap ends the loop.
+func TestQminRequestCapBoundsTheValidationPath(t *testing.T) {
+	c := newChildSignedRig(t)
+	c.g.imr.qminProbeOwnDNSKEY = true
+	rrset := c.query(t)
+	if rrset == nil || len(rrset.RRs) != 1 || rrset.RRs[0].(*dns.A).A.String() != "192.0.2.80" {
+		t.Fatalf("client answer: %v", rrset)
+	}
+	maxIter, _ := c.g.imr.qminLimits()
+	probes := c.count(qminSignedChild + " A")
+	if probes < 2 {
+		t.Fatalf("the child's name was probed %d times: the validation path was not exercised: %v", probes, c.log.list())
+	}
+	if probes > 3*maxIter+1 {
+		t.Errorf("the child's name was probed %d times, want at most the query's cap (%d) plus the first probe", probes, 3*maxIter)
+	}
+}

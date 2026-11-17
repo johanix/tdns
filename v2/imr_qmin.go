@@ -286,6 +286,16 @@ func (imr *Imr) resolveMinimised(ctx context.Context, qname string, qtype uint16
 	if serversZone == "" || !dns.IsSubDomain(zone, target) {
 		return imr.askOriginal(ctx, qname, qtype, serverMap, serversZone, force, visitedZones, privacy)
 	}
+	// The resolver's own DNSKEY fetch names a zone apex: the signer of an
+	// RRSIG being validated (RFC 4034 section 3.1.7) or a trust anchor's
+	// zone. A DNSKEY at an apex sends no probe (design section 3), whether
+	// or not the cut is cached. Probing it would ask the same servers for
+	// the name as A, and a parent that also serves the child answers with
+	// the child's signed SOA, whose validation fetches this DNSKEY again. A
+	// client's DNSKEY query is minimised as before.
+	if qtype == dns.TypeDNSKEY && !isClientQuery(ctx) && !imr.qminProbeOwnDNSKEY {
+		return imr.askOriginal(ctx, qname, qtype, serverMap, serversZone, force, visitedZones, privacy)
+	}
 	st := qminState(ctx)
 	key := qminWalkKey(qname, qtype)
 	known := zone

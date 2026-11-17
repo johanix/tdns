@@ -115,6 +115,10 @@ type Imr struct {
 	// nsAddrLookups tracks the background address lookups for out-of-
 	// bailiwick nameservers (resolveZoneServersInBackground).
 	nsAddrLookups nsAddrLookups
+	// qminProbeOwnDNSKEY is for tests only. It minimises the resolver's own
+	// DNSKEY fetches like any other query (resolveMinimised), to show that
+	// the query's cap alone bounds the validation path.
+	qminProbeOwnDNSKEY bool
 }
 
 func (imr *Imr) isLargeAlgorithm(alg uint8) bool {
