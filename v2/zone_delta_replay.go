@@ -194,10 +194,7 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 		// grows without bound, and every restart replays the whole thing from
 		// the beginning. Observed as exactly that -- "zone sync" doing nothing
 		// on a zone whose changes had just been replayed.
-		if zd.OptionsSnapshot() == nil {
-			zd.setOptionsLocked(map[ZoneOption]bool{})
-		}
-		zd.Options[OptDirty] = true
+		zd.setOptionLocked(OptDirty, true)
 	}
 	zd.mu.Unlock()
 

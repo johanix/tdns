@@ -543,7 +543,7 @@ func newTransferScratchZone(zd *ZoneData) ZoneData {
 		Logger:          zd.Logger,
 		Verbose:         zd.Verbose,
 		Debug:           zd.Debug,
-		Options:         zd.OptionsSnapshot(),
+		Options:         zd.optionsToShare(),
 		TransferSrc:     srcs,
 		TransferSrcTier: tier,
 		Ready:           true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
@@ -663,7 +663,7 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
 		Debug:          zd.Debug,
-		Options:        zd.OptionsSnapshot(),
+		Options:        zd.optionsToShare(),
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
@@ -1337,7 +1337,7 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 		// delta is bounded by serial, so it survives the drop below and replays
 		// -- but the operator is told the file is current when it is not.)
 		if fileIsCurrent {
-			zd.Options[OptDirty] = false
+			zd.setOptionLocked(OptDirty, false)
 		}
 		// The file now carries this serial, so that is what a future journal
 		// anchors to. Without this the next change would chain from the serial
@@ -1441,9 +1441,11 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 	return fmt.Sprintf("Zone %s written to %s", zd.ZoneName, fname), err
 }
 
+// SetOption turns one option of the zone on or off. The zone gets a new
+// options map with it set (setOptionLocked); the one it had is not written to.
 func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
 	zd.mu.Lock()
-	zd.Options[option] = value
+	zd.setOptionLocked(option, value)
 	zd.mu.Unlock()
 }
 

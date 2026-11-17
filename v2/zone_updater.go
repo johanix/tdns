@@ -1120,7 +1120,7 @@ func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys, cl
 			}
 			zd.stageRRsetLocked(ownerName, rrset)
 			updated = true
-			zd.Options[OptDirty] = true
+			zd.setOptionLocked(OptDirty, true)
 		}
 		continue
 	}

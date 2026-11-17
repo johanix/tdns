@@ -156,8 +156,10 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 		return fmt.Errorf("failed to create catalog zone: %v", err)
 	}
 
-	// Mark it as a catalog zone
-	zd.Options[OptCatalogZone] = true
+	// Mark it as a catalog zone. The zone is registered by now, so this is a
+	// store into the options of a zone that is read: SetOption gives it a new
+	// map under the zone's lock.
+	zd.SetOption(OptCatalogZone, true)
 
 	zd.mu.Lock()
 	zd.ensureWorkingSet()

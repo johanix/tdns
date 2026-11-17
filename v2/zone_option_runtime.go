@@ -4,6 +4,8 @@
 
 package tdns
 
+import "maps"
+
 // Run-time zone options.
 //
 // A zone's options come from its configuration, and a config update (config
@@ -23,12 +25,16 @@ package tdns
 // SetRuntimeOption records such an option beside the configured ones, and
 // the config update lays the record over what it was given.
 //
-// Reading the options. The map a zone has is replaced whole, by a config
-// update and by SetRuntimeOption, and the map it had is not written to: a
-// reader that got hold of one can go on reading it. Replacing it is still a
-// write to the zone's Options field, and a reader's look at that field is a
-// read of it, so a reader that holds no lock and a replacement are a data
-// race however the map was copied (johanix/tdns#981). Option and
+// Reading the options. The map a zone has is never written to once the zone
+// has it: a config update replaces it whole (setOptionsLocked), and a store of
+// one option, SetRuntimeOption or SetOption or the dirty flag, gives the zone
+// a new map with that option set (setOptionLocked). A reader that got hold of
+// a map can therefore go on reading it, whatever is stored after. (The zone
+// built for a refresh in progress holds the served zone's map on purpose,
+// optionsToShare, and an app's write into it is not covered.) Replacing
+// it is still a write to the zone's Options field, and a reader's look at that
+// field is a read of it, so a reader that holds no lock and a replacement are
+// a data race however the map was copied (johanix/tdns#981). Option and
 // OptionsSnapshot are the way to the field for a reader, and setOptionsLocked
 // the way for a writer; they meet on the zone's optionsMu.
 //
@@ -64,7 +70,17 @@ func (zd *ZoneData) setRuntimeOptionLocked(opt ZoneOption, on bool) {
 		zd.runtimeOptions = map[ZoneOption]bool{}
 	}
 	zd.runtimeOptions[opt] = on
-	// Plain reads of the field: every writer of it holds zd.mu, as this one does.
+	zd.setOptionLocked(opt, on)
+}
+
+// setOptionLocked stores one option, by giving the zone a new options map with
+// it set; the map the zone had is left as it was. A store into that map would
+// meet every reader that indexes it, or ranges over a snapshot of it, and a
+// concurrent map read and write stops the process. An option that already
+// reads as asked for leaves the map alone, and a zone with no map gets one.
+// The caller holds zd.mu, and with it every other writer of the field is out:
+// the plain reads of the field here are safe for that reason.
+func (zd *ZoneData) setOptionLocked(opt ZoneOption, on bool) {
 	if zd.Options[opt] == on {
 		return
 	}
@@ -97,10 +113,27 @@ func (zd *ZoneData) Option(opt ZoneOption) bool {
 
 // OptionsSnapshot is the zone's options as they are now, for a caller that
 // needs the set and not one option: to range over it, to hand it on, to
-// ask several questions of one answer. The map is the zone's own, not a copy,
-// and the caller does not write to it. It is the map as of the call: a
-// replacement that follows leaves it as it was.
+// ask several questions of one answer. The map is a copy and the caller's
+// own, to write to if it likes: it changes nothing the zone reads. It is the
+// options as of the call; a store that follows does not reach it. A zone with
+// no options map gives nil.
+//
+// The zone's own map is not handed out because a caller that wrote it would
+// meet every reader. It is not written to once installed, so it is copied
+// outside the lock, which is held for the load of the field alone.
 func (zd *ZoneData) OptionsSnapshot() map[ZoneOption]bool {
+	return maps.Clone(zd.optionsToShare())
+}
+
+// optionsToShare is the zone's own options map, not a copy, for the one kind
+// of caller that hands it on on purpose: the zone built for a refresh in
+// progress (newTransferScratchZone, FetchFromFile) holds the served zone's map,
+// so that an option a derived app sets on the incoming zone in an
+// OnZonePreRefresh callback lands where the served zone reads it. The caller
+// reads the map and does not write to it; an app that does write it in place
+// is outside what the zone guards, and should use SetRuntimeOption on the zone
+// that is served instead.
+func (zd *ZoneData) optionsToShare() map[ZoneOption]bool {
 	zd.optionsMu.RLock()
 	opts := zd.Options
 	zd.optionsMu.RUnlock()

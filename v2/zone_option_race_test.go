@@ -40,15 +40,20 @@ var optionReaders = map[string]func(zd *ZoneData) bool{
 	"zoneManagesZonemd":   (*ZoneData).zoneManagesZonemd,
 }
 
-// readOptionsUntil runs a goroutine per reader path that calls it in a loop
-// until stop is closed, and returns a func that stops them, waits for them and
-// returns how many reads they made.
-func readOptionsUntil(t *testing.T, zd *ZoneData) (stop func() int64) {
+// readOptionsUntil runs a goroutine per reader path, and per extra reader the
+// caller adds, that calls it in a loop until the returned func stops them. That
+// func waits for them and returns how many reads they made.
+func readOptionsUntil(t *testing.T, zd *ZoneData, extra ...func(*ZoneData) bool) (stop func() int64) {
 	t.Helper()
+	readers := make([]func(*ZoneData) bool, 0, len(optionReaders)+len(extra))
+	for _, read := range optionReaders {
+		readers = append(readers, read)
+	}
+	readers = append(readers, extra...)
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	var reads atomic.Int64
-	for _, read := range optionReaders {
+	for _, read := range readers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
