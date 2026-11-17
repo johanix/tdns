@@ -20,8 +20,10 @@ import (
 type DelegationSyncHandler func(ctx context.Context, ds DelegationSyncRequest)
 
 // delegationSyncLaneWarnAt is the length of one parent's queue at which a
-// warning is logged, and again at each doubling. It is not a bound: nothing is
-// dropped. A variable only so a test need not queue a hundred requests.
+// warning is logged, and again at each doubling. It is not a limit: nothing is
+// dropped. A queue is bounded by merging (mergeDelegationSyncRequests), so one
+// this long has many zones behind a parent that is slow or not answering. A
+// variable only so a test need not queue a hundred requests.
 var delegationSyncLaneWarnAt = 100
 
 // activeDelegationSyncLanes is the running syncher's lanes, for
@@ -54,6 +56,12 @@ var activeDelegationSyncLanes atomic.Pointer[delegationSyncLanes]
 //     re-enqueue (deferForImr, requeueSetupAfter, deferUntilHoldEnds) sends to
 //     intake as before, with its counts, and comes back through here.
 //   - intake is the same channel, so no sender changes. It just rarely fills.
+//
+// What is new: a request that arrives while one for the same zone with the
+// same command waits in the queue is merged into it where that does what
+// running both would (mergeDelegationSyncRequests). Without that a zone that
+// keeps changing behind a parent that does not answer would grow the queue
+// without limit, now that a full intake no longer holds its senders back.
 //
 // The parent is the zone's cached parent (GetParent). While that is not known
 // yet, the zone's name less its first label stands in. The stand-in is only a
@@ -122,13 +130,21 @@ func newDelegationSyncLanes(handle DelegationSyncHandler) *delegationSyncLanes {
 	}
 }
 
-// dispatch puts ds at the back of its zone's lane, and starts the lane's
-// goroutine if none serves it. It never waits on a handler.
+// dispatch puts ds at the back of its zone's lane, or merges it into a
+// request of the zone's that waits there, and starts the lane's goroutine if
+// none serves it. It never waits on a handler.
 func (l *delegationSyncLanes) dispatch(ctx context.Context, ds DelegationSyncRequest) {
 	zone := delegationSyncZoneKey(ds)
 
 	l.mu.Lock()
 	pin := l.zones[zone]
+	if pin != nil && pin.lane.merge(zone, ds) {
+		parent := pin.lane.parent
+		l.mu.Unlock()
+		lgDns.Debug("DelegationSyncher: merged into the zone's waiting request",
+			"zone", ds.ZoneName, "command", ds.Command, "parent", parent)
+		return
+	}
 	if pin == nil {
 		parent := delegationSyncLaneKey(ds)
 		ln := l.lanes[parent]
@@ -161,6 +177,27 @@ func (l *delegationSyncLanes) dispatch(ctx context.Context, ds DelegationSyncReq
 	if start {
 		go l.runLane(ctx, ln)
 	}
+}
+
+// merge merges ds into the latest request for zone with ds's command that
+// waits in ln, and reports whether it did. Never into the running request: it
+// may have read the zone already. Called with l.mu held.
+func (ln *delegationSyncLane) merge(zone string, ds DelegationSyncRequest) bool {
+	if !delegationSyncMerges(ds) {
+		return false
+	}
+	for i := len(ln.queue) - 1; i >= 0; i-- {
+		it := &ln.queue[i]
+		if it.zone != zone || it.ds.Command != ds.Command {
+			continue
+		}
+		merged, ok := mergeDelegationSyncRequests(it.ds, ds)
+		if ok {
+			it.ds = merged
+		}
+		return ok
+	}
+	return false
 }
 
 // runLane serves ln until it is empty or ctx ends, one request at a time.

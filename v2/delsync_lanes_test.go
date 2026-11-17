@@ -371,7 +371,9 @@ func TestDelegationSyncLanesStop(t *testing.T) {
 		}()
 		for _, zd := range []*ZoneData{laneZone("a.p.example.", "p.example."), laneZone("b.p.example.", "p.example."),
 			laneZone("c.q.example.", "q.example."), laneZone("a.p.example.", "p.example."), laneZone("d.q.example.", "q.example.")} {
-			offer(t, q, laneRequest(zd, "SYNC-DELEGATION"))
+			// A command that is never merged: the second request for
+			// a.p.example. must run too, not join the first.
+			offer(t, q, laneRequest(zd, "queued"))
 		}
 		close(q)
 		if err := receive(t, done, "the runner to return after the intake closed"); err != nil {
