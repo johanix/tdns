@@ -1,6 +1,6 @@
 ## tdns-cli auth zone add
 
-Add a dynamic secondary zone at runtime (persists across restart)
+Add a dynamic zone at runtime: secondary, or template-constrained primary (persists across restart)
 
 ```
 tdns-cli auth zone add [flags]
@@ -10,13 +10,16 @@ tdns-cli auth zone add [flags]
 
 ```
   -h, --help                      help for add
-      --options strings           Zone options (comma-separated)
-      --primaries strings         Primary (upstream) addresses [host:port], comma-separated
+      --options strings           Zone options (comma-separated; secondary zones — primaries take options from the template)
+      --primaries strings         Primary (upstream) addresses [host:port], comma-separated (secondary zones)
       --primary-key string        Primary TSIG key name applied to all primaries (NOKEY for none) (default "NOKEY")
+      --template string           Config template for a primary zone (must carry dynamiczones: true)
+      --transfer-src strings      Source address(es) to bind for this zone's outbound transfers (IP only, one per family)
       --tsig-algo string          Inline TSIG algorithm (default hmac-sha256)
-      --tsig-name string          Inline TSIG key name; created in keystore if absent and applied to keyless primaries
+      --tsig-name string          Inline TSIG key name; created in keystore if absent and applied to keyless primaries (secondary) or keyless downstreams (primary)
       --tsig-secret string        Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file
       --tsig-secret-file string   File containing the inline TSIG secret (base64); preferred over --tsig-secret
+      --type string               Zone type: secondary (default) or primary (requires --template) (default "secondary")
   -z, --zone string               Zone to add
 ```
 
@@ -29,6 +32,7 @@ tdns-cli auth zone add [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
 ```
 
 ### SEE ALSO

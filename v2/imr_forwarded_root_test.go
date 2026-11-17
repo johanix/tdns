@@ -232,14 +232,15 @@ func TestListenersDoNotWaitForTrustAnchorSetup(t *testing.T) {
 	imr.DnskeyCache = imr.Cache.DnskeyCache
 	conf := &Config{}
 	conf.Imr.TrustAnchorDS = parent.dnskey.ToDS(dns.SHA256).String()
-	imr.loadConfiguredTrustAnchors(conf)
+	imr.bootConf = conf.Imr // what Start reads
+	imr.loadConfiguredTrustAnchors(conf.Imr)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	listening := make(chan struct{})
 	started := make(chan struct{})
 	go func(ctx context.Context) {
 		defer close(started)
-		imr.startServing(ctx, conf, func(context.Context) { close(listening) })
+		imr.startServing(ctx, func(context.Context) { close(listening) })
 	}(ctx)
 	defer func() {
 		cancel()
@@ -287,8 +288,8 @@ func TestForwardedAnchorZoneSkipsTheNSStep(t *testing.T) {
 
 	conf := &Config{}
 	conf.Imr.TrustAnchorDNSKEY = root.dnskey.String()
-	imr.loadConfiguredTrustAnchors(conf)
-	if err := imr.initializeImrTrustAnchors(context.Background(), conf); err != nil {
+	imr.loadConfiguredTrustAnchors(conf.Imr)
+	if err := imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
 		t.Fatalf("initializeImrTrustAnchors: %v", err)
 	}
 	if seen := logr.find(".", dns.TypeNS); len(seen) != 0 {

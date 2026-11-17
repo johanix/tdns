@@ -5,17 +5,17 @@ package tdns
 
 // loadConfiguredTrustAnchors puts the configured trust anchors into the DNSKEY
 // cache without touching the network: DNSKEY anchors directly, DS anchors as a
-// seeded DS RRset. InitImrEngine calls it before priming, so the root that
+// seeded DS RRset. NewImr calls it before priming, so the root that
 // priming fetches is validated against the anchor instead of against nothing.
 //
 // initializeImrTrustAnchors, which runs once the cache is primed, loads the same
 // anchors again (harmless: both writes are idempotent) before fetching and
 // validating the anchored zones' DNSKEY RRsets.
-func (imr *Imr) loadConfiguredTrustAnchors(conf *Config) {
-	if imr == nil || imr.Cache == nil || conf == nil {
+func (imr *Imr) loadConfiguredTrustAnchors(ic ImrEngineConf) {
+	if imr == nil || imr.Cache == nil {
 		return
 	}
-	dsByName, dnskeysByName, err := imr.parseTrustAnchorsFromConfig(conf)
+	dsByName, dnskeysByName, err := imr.parseTrustAnchorsFromConfig(ic)
 	if err != nil {
 		// initializeImrTrustAnchors fails on the same error and reports it.
 		lgImr.Debug("trust anchors not loaded before priming", "err", err)

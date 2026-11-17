@@ -70,8 +70,10 @@ func (zd *ZoneData) updateIxfrChainLocked(old *zoneSnapshot, newSerial uint32, n
 		return
 	}
 	if epochReset || old == nil || old.SOA == nil {
-		// Wholesale replace (refresh/reload/AXFR-in) or no baseline: new
-		// epoch. A replace has no meaningful delta; do not diff it.
+		// Wholesale replace (refresh/reload/AXFR-in) of a zone without
+		// ixfr-from-differences, or no baseline: new epoch. With the option a
+		// replace is diffed like any other publish: the guards below cover
+		// what can go wrong across it (#1006).
 		zd.IxfrChain = nil
 		return
 	}
@@ -82,7 +84,24 @@ func (zd *ZoneData) updateIxfrChainLocked(old *zoneSnapshot, newSerial uint32, n
 		return
 	}
 
-	removed, added, est := computeZoneDelta(zd.ZoneName, old.Data, newData)
+	// Bounded by the budget: a replacement shares no storage with the snapshot
+	// it replaces, so its diff compares every owner, and a delta bigger than
+	// the budget is thrown away below anyway. Stop as soon as it is.
+	removed, added, est, complete := computeZoneDeltaBounded(zd.ZoneName, old.Data, newData, budget)
+	if !complete {
+		if newSerial == old.Serial {
+			lg.Error("ixfr: zone content changed without a serial bump; resetting IXFR history",
+				"zone", zd.ZoneName, "serial", newSerial)
+		} else if !serialNewer(newSerial, old.Serial) {
+			lg.Error("ixfr: outbound serial did not advance (RFC 1982); resetting IXFR history",
+				"zone", zd.ZoneName, "old", old.Serial, "new", newSerial)
+		} else {
+			lg.Warn("ixfr: single delta exceeds ixfr-chain-max-bytes; resetting IXFR history",
+				"zone", zd.ZoneName, "delta_bytes_at_least", est, "budget", budget)
+		}
+		zd.IxfrChain = nil
+		return
+	}
 
 	if newSerial == old.Serial {
 		if len(removed) == 0 && len(added) == 0 {
@@ -181,6 +200,14 @@ func sameRRSlice(a, b []dns.RR) bool {
 // RRs are excluded (the IXFR brackets carry the SOA change); apex SOA RRSIGs
 // are included. Output is sorted by owner name then type for determinism.
 func computeZoneDelta(zoneName string, oldData, newData map[string]*OwnerData) (removed, added []core.RRset, est int) {
+	removed, added, est, _ = computeZoneDeltaBounded(zoneName, oldData, newData, -1)
+	return removed, added, est
+}
+
+// computeZoneDeltaBounded is computeZoneDelta with a size limit: it stops as
+// soon as the estimate passes limit and reports complete=false, with a partial
+// result the caller must not use. A negative limit means no limit.
+func computeZoneDeltaBounded(zoneName string, oldData, newData map[string]*OwnerData, limit int) (removed, added []core.RRset, est int, complete bool) {
 	type ownerPair struct {
 		name     string
 		old, new *OwnerData
@@ -205,8 +232,11 @@ func computeZoneDelta(zoneName string, oldData, newData map[string]*OwnerData) (
 		removed = append(removed, rem...)
 		added = append(added, add...)
 		est += sz
+		if limit >= 0 && est > limit {
+			return nil, nil, est, false
+		}
 	}
-	return removed, added, est
+	return removed, added, est, true
 }
 
 func ownerTypes(od *OwnerData) []uint16 {

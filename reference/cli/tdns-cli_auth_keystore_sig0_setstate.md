@@ -1,6 +1,6 @@
 ## tdns-cli auth keystore sig0 setstate
 
-Set the state of and existing SIG(0) key pair in the TDNSD keystore
+Set the state of and existing SIG(0) key pair in the keystore
 
 ```
 tdns-cli auth keystore sig0 setstate [flags]
@@ -22,6 +22,7 @@ tdns-cli auth keystore sig0 setstate [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 

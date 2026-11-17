@@ -244,6 +244,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// queue) and the consumer is a single goroutine spending up to 2s per
 	// unreachable target. Matches DnsNotifyQ below.
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 100)
+	// Downstream NOTIFYs for a publish go through the tracker's pending set,
+	// which never drops one; the queue carries the rest (#1007).
+	conf.Internal.NotifyTracker = NewNotifyTracker()
 	conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
 	conf.Internal.RecursorCh = make(chan ImrRequest, 10)
 	// Used by tdns-auth, tdns-agent and tdns-combiner

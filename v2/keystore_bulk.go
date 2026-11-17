@@ -899,7 +899,8 @@ func validateBulkPrivateKey(privkey string) error {
 		return fmt.Errorf("no private key material")
 	}
 	if !IsPEMFormat(privkey) {
-		return fmt.Errorf("private key is not PKCS#8 PEM; for a BIND-format key use 'keystore <class> import', which converts it")
+		return fmt.Errorf("private key is not PKCS#8 PEM; for BIND-format keys use 'keystore <class> bulk-convert', " +
+			"which converts a whole directory, or 'keystore <class> import' for a single key")
 	}
 	return nil
 }

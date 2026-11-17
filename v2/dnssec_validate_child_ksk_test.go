@@ -215,7 +215,7 @@ func TestValidateUpdateChildDnskeysUnknownKeyTag(t *testing.T) {
 
 	us := &UpdateStatus{}
 	err := f.zd.ValidateUpdate(context.Background(),
-		signedUpdateFrom(t, f.zd.ZoneName, childKskChild, f.sig0.KeyTag()), us)
+		signedUpdateFrom(t, f.zd.ZoneName, childKskChild, f.sig0.KeyTag()), nil, us)
 	if f.fetches != 1 {
 		t.Errorf("ValidateUpdate (err %v) fetched the child DNSKEY RRset %d times, want 1", err, f.fetches)
 	}

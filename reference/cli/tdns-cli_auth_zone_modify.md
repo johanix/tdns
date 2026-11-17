@@ -13,6 +13,7 @@ tdns-cli auth zone modify [flags]
       --options strings           Zone options (comma-separated)
       --primaries strings         New primary (upstream) addresses [host:port], comma-separated
       --primary-key string        New primary TSIG key name applied to all primaries (NOKEY for none) (default "NOKEY")
+      --transfer-src strings      Replace the zone's outbound-transfer source address(es); omit to leave unchanged
       --tsig-algo string          Inline TSIG algorithm (default hmac-sha256)
       --tsig-name string          Inline TSIG key name; created in keystore if absent (existing keys cannot be rotated here)
       --tsig-secret string        Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file
@@ -29,6 +30,7 @@ tdns-cli auth zone modify [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
 ```
 
 ### SEE ALSO
