@@ -130,6 +130,11 @@ pair, the private half as PEM or, with `--format bind`, in bind's own format.
 What each side accepts and writes is under [key formats](#key-formats). For
 moving more than one key at a time, use the bulk commands below.
 
+Until decoded-key comparison lands (#1100): a key that is already in the keystore (same zone and keyid) is
+replaced without any check, even when it is the same key, and its state goes
+back to `created`: re-importing an `active` key resets it. The next PR in the
+stack (#1100) compares the decoded keys and refuses to replace by accident.
+
 ### Lifecycle
 
 | Command | |
@@ -334,6 +339,12 @@ thing you are restoring *from* is the correct copy and the keystore is the wrong
 one.
 
 An import is all-or-nothing: one invalid key rolls the whole batch back.
+
+Until decoded-key comparison lands (#1100): "identical" compares the private key as PEM text, and
+the `creator` field as well. The same key in another tool's PEM encoding (or
+with another creator) is therefore reported as a `conflict` and skipped, and
+`--force` replaces it. The next PR in the stack (#1100) compares the decoded
+keys.
 
 **What is checked.** The private key is stored verbatim, never parsed — which is
 what lets a key restore into a binary that has no implementation for its

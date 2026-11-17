@@ -476,7 +476,9 @@ func newKeystoreSig0Cmd(role string) *cobra.Command {
 		Long: `Add a new SIG(0) key pair to the keystore. Required arguments are the name of the file
 containing either the private or the public SIG(0) key and the name of the zone.
 A file ending in .jwk is read as a SIG(0) JWK ("sig0key" parameter); the daemon
-checks it and refuses a DNSSEC JWK ("dnskey").`,
+checks it and refuses a DNSSEC JWK ("dnskey").
+
+` + singleKeyImportCaveat,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("filename", "childzone")
 			sig0KeyMgmt(role, "add")
@@ -490,6 +492,7 @@ checks it and refuses a DNSSEC JWK ("dnskey").`,
 	importCmd := &cobra.Command{
 		Use:   "import",
 		Short: "Add a new SIG(0) key pair to the keystore",
+		Long:  "Same as add.\n\n" + singleKeyImportCaveat,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("filename", "childzone")
 			sig0KeyMgmt(role, "import")
@@ -603,7 +606,9 @@ func newKeystoreDnssecCmd(role string) *cobra.Command {
 		Long: `Add a new DNSSEC key pair to the keystore. Required arguments are the name of the file
 containing either the private or the public DNSSEC key and the name of the zone.
 A file ending in .jwk is read as a DNSSEC JWK ("dnskey" parameter); the daemon
-checks it and refuses a SIG(0) JWK ("sig0key").`,
+checks it and refuses a SIG(0) JWK ("sig0key").
+
+` + singleKeyImportCaveat,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("filename", "zonename")
 			dnssecKeyMgmt(role, "add")
@@ -617,6 +622,7 @@ checks it and refuses a SIG(0) JWK ("sig0key").`,
 	importCmd := &cobra.Command{
 		Use:   "import",
 		Short: "Add a new DNSSEC key pair to the keystore",
+		Long:  "Same as add.\n\n" + singleKeyImportCaveat,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("filename", "zonename")
 			dnssecKeyMgmt(role, "import")
@@ -1028,6 +1034,13 @@ func writeSig0ExportFiles(sk tdns.Sig0Key, outdir string) error {
 	}
 	return writeNewFile(filepath.Join(outdir, base+".key"), []byte(keyRR), 0644)
 }
+
+// singleKeyImportCaveat is the single-key add/import's behaviour for a key
+// already in the keystore, until #1100 compares decoded keys.
+const singleKeyImportCaveat = `Until decoded-key comparison lands (#1100): a key that is already in the
+keystore (same zone and keyid) is replaced without any check, even when it is
+the same key, and its state goes back to created. The next PR in the stack
+(#1100) compares the decoded keys.`
 
 // isJWKFile: the single-key import tells a JWK by its .jwk name, as it
 // tells the halves of a bind pair by .key and .private.
