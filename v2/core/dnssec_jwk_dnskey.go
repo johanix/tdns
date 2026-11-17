@@ -196,6 +196,27 @@ func HasJWKRepresentation(alg uint8) bool {
 	return ok
 }
 
+// RegistryOnlyAlgorithmNote returns a one-line warning for a DNSSEC
+// algorithm whose JWK carries a number from the dnssec-algorithms registry
+// rather than IANA's table (ML-DSA-65 at 200, ML-DSA-87 at 201), and "" for
+// every other algorithm. The JWK is well formed either way; the note is for
+// the operator who hands it to a peer, because the number is in the
+// "dnskey" parameter and a peer that numbers ML-DSA differently will not
+// read the key as the same algorithm.
+func RegistryOnlyAlgorithmNote(alg uint8) string {
+	var name string
+	switch alg {
+	case 200:
+		name = "ML-DSA-65"
+	case 201:
+		name = "ML-DSA-87"
+	default:
+		return ""
+	}
+	return fmt.Sprintf("algorithm %d (%s) is the dnssec-algorithms registry's number, not IANA's; "+
+		"this JWK only interoperates with peers that use the same number", alg, name)
+}
+
 // checkForm is rule 2: the JWK's kty and crv/alg must be the ones the
 // DNSSEC algorithm uses. An "alg" on a non-AKP key is optional but, when
 // present, must not name another algorithm family; tdns only checks it is
