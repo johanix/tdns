@@ -24,9 +24,13 @@ func startBlackholeUDP(t *testing.T) (string, func()) {
 }
 
 // withRefreshBudgets installs probe/transfer budgets for one test and restores
-// whatever was published before.
+// whatever was published before. It also shortens the wait before a lost probe's
+// retry, so that a test that probes a silent upstream pays the extra attempt's
+// budget but not its spacing; a test of the retry itself sets its own with
+// withProbeRetry.
 func withRefreshBudgets(t *testing.T, probeSecs, transferSecs int) {
 	t.Helper()
+	withProbeRetry(t, 1, 10*time.Millisecond)
 	prev := ConfLive()
 	cfg := *prev
 	cfg.ProbeTimeout = probeSecs
@@ -47,6 +51,9 @@ func withRefreshBudgets(t *testing.T, probeSecs, transferSecs int) {
 // is left unset (miekg only ever TIGHTENS to the context deadline).
 func TestProbeDeadlineBoundsAnUnreachableUpstream(t *testing.T) {
 	withRefreshBudgets(t, 1, 300)
+	// This is about what ONE attempt may cost. The retry of a lost probe is
+	// tested in refresh_probe_retry_test.go, with its own bounds.
+	withProbeRetry(t, 0, 0)
 	blackhole, stop := startBlackholeUDP(t)
 	defer stop()
 
