@@ -920,7 +920,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 // about a version we would then REFUSE to transfer only burns the downstream's
 // retry budget, and first load publishes exactly such a version: the load path
 // publishes before InstallInitialSnapshot marks the zone Ready, and a downstream
-// acting on that notification is refused on status.
+// acting on that notification is refused because the zone is not Ready.
 //
 // The hand-off is a NON-BLOCKING send to the Notifier, replacing the inline
 // NotifyDownstreams loop that used to run here (deleted with the refresh
