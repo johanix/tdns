@@ -39,22 +39,28 @@ func peerUsesDANE(p PeerConf) bool {
 	return peerUsesDoT(p) && strings.EqualFold(strings.TrimSpace(p.TLSAuth), TLSAuthDANE)
 }
 
-// daneDownstreams returns the downstreams entries that the tls-dane mechanism
-// can authenticate under mechs: the zone's downstream-auth lists tls-dane
-// (and not "any", which skips every TLS check) and the entry carries a dane
-// tls-identity. Each is named by its TLS name, plus its peer name if it has one.
-func daneDownstreams(mechs []string, downstreams []AclEntry) []string {
+// daneThroughAny is the text for a downstreams entry with a dane tls-identity
+// under a downstream-auth that lists "any": the ladder then accepts it on its
+// address and TSIG alone, before any TLS check (authorizeTransfer).
+const daneThroughAny = "DANE downstream reached through downstream-auth any: any accepts it without checking its certificate, and with imrengine.require-dnssec-validation: false the TLSA record would not be validated either"
+
+// daneDownstreams returns the non-BLOCKED downstreams entries that carry a
+// dane tls-identity with a name, when the zone's downstream-auth lists
+// tls-dane or "any". Each is named by its TLS name, plus its peer name if it
+// has one. viaAny is true when the list holds "any", which skips every TLS
+// check: those peers are then reached through any, not through tls-dane.
+func daneDownstreams(mechs []string, downstreams []AclEntry) (names []string, viaAny bool) {
 	dane := false
 	for _, m := range mechs {
 		switch strings.ToLower(strings.TrimSpace(m)) {
 		case MechAny:
-			return nil
+			viaAny = true
 		case MechTLSDane:
 			dane = true
 		}
 	}
-	if !dane {
-		return nil
+	if !dane && !viaAny {
+		return nil, false
 	}
 	var out []string
 	for _, e := range downstreams {
@@ -68,7 +74,7 @@ func daneDownstreams(mechs []string, downstreams []AclEntry) []string {
 		}
 		out = append(out, name)
 	}
-	return out
+	return out, viaAny
 }
 
 // danePrimaryWarnings logs, at WARN, each primary of zone that uses tls-auth:
@@ -90,16 +96,22 @@ func (conf *Config) danePrimaryWarnings(logger *slog.Logger, zone string, primar
 }
 
 // daneDownstreamWarnings is danePrimaryWarnings for the downstreams entries
-// that the tls-dane mechanism authenticates. The lookup that checks a client
-// certificate shares the same escape hatch (verifyClientCertDANE).
+// with a dane tls-identity. The lookup that checks a client certificate shares
+// the same escape hatch (verifyClientCertDANE). Under "any" the text says the
+// peer is reached through any instead.
 func (conf *Config) daneDownstreamWarnings(logger *slog.Logger, zone string, mechs []string, downstreams []AclEntry) []string {
 	if !conf.DnssecValidationNotEnforced() {
 		return nil
 	}
+	names, viaAny := daneDownstreams(mechs, downstreams)
+	msg := daneNotValidated
+	if viaAny {
+		msg = daneThroughAny
+	}
 	var out []string
-	for _, name := range daneDownstreams(mechs, downstreams) {
-		logger.Warn(daneNotValidated, "zone", zone, "downstream", name)
-		out = append(out, fmt.Sprintf("zone %s: downstream %s: %s", zone, name, daneNotValidated))
+	for _, name := range names {
+		logger.Warn(msg, "zone", zone, "downstream", name)
+		out = append(out, fmt.Sprintf("zone %s: downstream %s: %s", zone, name, msg))
 	}
 	return out
 }
@@ -140,7 +152,8 @@ func (zd *ZoneData) zoneUsesDANE() bool {
 			return true
 		}
 	}
-	return len(daneDownstreams(mechs, downstreams)) > 0
+	names, _ := daneDownstreams(mechs, downstreams)
+	return len(names) > 0
 }
 
 // daneZonesWarning names, for daemon status, the zones that use DANE while

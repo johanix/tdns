@@ -73,34 +73,49 @@ func TestDaneDownstreamWarnings(t *testing.T) {
 		TLSIdentity: &TLSIdentity{Name: "sec3.example.", Dane: true}}
 	acl := []AclEntry{daneEntry, pinEntry, blocked}
 
+	const viaDane = "zone example.: downstream sec1.example. (peer sec1): " + daneNotValidated
+	const viaAny = "zone example.: downstream sec1.example. (peer sec1): " + daneThroughAny
 	for _, tc := range []struct {
 		name     string
 		mechs    []string
 		enforced bool
-		want     int
+		want     string // "" = no warning
 	}{
-		{"tls-dane allowed", []string{MechTLSPin, MechTLSDane}, false, 1},
-		{"tls-dane allowed, unnormalized", []string{"TLS-DANE"}, false, 1},
-		{"tls-dane not allowed", []string{MechTLSPin}, false, 0},
-		{"any skips every TLS check", []string{MechTLSDane, MechAny}, false, 0},
-		{"no ladder", nil, false, 0},
-		{"validation enforced", []string{MechTLSDane}, true, 0},
+		{"tls-dane allowed", []string{MechTLSPin, MechTLSDane}, false, viaDane},
+		{"tls-dane allowed, unnormalized", []string{"TLS-DANE"}, false, viaDane},
+		{"tls-dane not allowed", []string{MechTLSPin}, false, ""},
+		// "any" skips every TLS check: the dane peer is reached through any,
+		// and that is said, with or without tls-dane in the list.
+		{"any with tls-dane", []string{MechTLSDane, MechAny}, false, viaAny},
+		{"any alone", []string{MechAny}, false, viaAny},
+		{"any, unnormalized", []string{" ANY "}, false, viaAny},
+		{"any, validation enforced", []string{MechAny}, true, ""},
+		{"no ladder", nil, false, ""},
+		{"validation enforced", []string{MechTLSDane}, true, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := notEnforcedConf(tc.enforced).daneDownstreamWarnings(discard, "example.", tc.mechs, acl)
-			if len(got) != tc.want {
-				t.Fatalf("got %d warnings, want %d: %q", len(got), tc.want, got)
+			if tc.want == "" {
+				if len(got) != 0 {
+					t.Fatalf("got %d warnings, want none: %q", len(got), got)
+				}
+				return
 			}
-			if tc.want == 1 && !strings.Contains(got[0], "zone example.: downstream sec1.example. (peer sec1): DANE without DNSSEC validation") {
-				t.Errorf("warning does not name zone and downstream: %q", got[0])
+			// Only the dane entry: not the pin entry, not the BLOCKED one.
+			if len(got) != 1 {
+				t.Fatalf("got %d warnings, want 1: %q", len(got), got)
+			}
+			if got[0] != tc.want {
+				t.Errorf("warning =\n  %q\nwant\n  %q", got[0], tc.want)
 			}
 		})
 	}
 }
 
 // TestDaneWarningsAtConfigLoad: ParseZones logs the warning at WARN for a
-// static secondary with a dane primary and for a tls-dane downstream, and is
-// quiet when validation is enforced.
+// static secondary with a dane primary, for a tls-dane downstream and for a
+// dane downstream reached through "any", and is quiet when validation is
+// enforced.
 func TestDaneWarningsAtConfigLoad(t *testing.T) {
 	parse := func(t *testing.T, enforced bool) string {
 		t.Helper()
@@ -121,6 +136,13 @@ func TestDaneWarningsAtConfigLoad(t *testing.T) {
 				Downstreams: []AclEntry{{Prefix: "192.0.2.0/24", Key: NOKEY, PeerName: "sec1",
 					TLSIdentity: &TLSIdentity{Name: "sec1.example.", Dane: true}}},
 			},
+			{
+				// "any" skips the certificate check: not silent either.
+				Name: "dane-any.example.", Type: "primary", Store: "map", Zonefile: "/nonexistent",
+				DownstreamAuth: []string{MechAny},
+				Downstreams: []AclEntry{{Prefix: "192.0.2.0/24", Key: NOKEY, PeerName: "sec2",
+					TLSIdentity: &TLSIdentity{Name: "sec2.example.", Dane: true}}},
+			},
 		}
 		conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
 		if _, _, err := conf.ParseZones(context.Background(), false); err != nil {
@@ -128,13 +150,18 @@ func TestDaneWarningsAtConfigLoad(t *testing.T) {
 		}
 		Zones.Remove("dane-sec.example.")
 		Zones.Remove("dane-pri.example.")
+		Zones.Remove("dane-any.example.")
 		return buf.String()
+	}
+	isDaneWarning := func(line string) bool {
+		return strings.Contains(line, "DANE without DNSSEC validation") ||
+			strings.Contains(line, "DANE downstream reached through downstream-auth any")
 	}
 
 	out := parse(t, false)
-	var primaryLine, downstreamLine string
+	var primaryLine, downstreamLine, anyLine string
 	for _, line := range strings.Split(out, "\n") {
-		if !strings.Contains(line, "DANE without DNSSEC validation") {
+		if !isDaneWarning(line) {
 			continue
 		}
 		if !strings.Contains(line, "level=WARN") {
@@ -145,6 +172,9 @@ func TestDaneWarningsAtConfigLoad(t *testing.T) {
 			primaryLine = line
 		case strings.Contains(line, "zone=dane-pri.example.") && strings.Contains(line, "sec1.example."):
 			downstreamLine = line
+		case strings.Contains(line, "zone=dane-any.example.") && strings.Contains(line, "sec2.example.") &&
+			strings.Contains(line, "reached through downstream-auth any"):
+			anyLine = line
 		case strings.Contains(line, "192.0.2.2"):
 			t.Errorf("warned about a plain Do53 primary: %s", line)
 		}
@@ -155,9 +185,14 @@ func TestDaneWarningsAtConfigLoad(t *testing.T) {
 	if downstreamLine == "" {
 		t.Errorf("no warning for the tls-dane downstream\n--- log ---\n%s", out)
 	}
+	if anyLine == "" {
+		t.Errorf("no warning for the dane downstream reached through any\n--- log ---\n%s", out)
+	}
 
-	if out := parse(t, true); strings.Contains(out, "DANE without DNSSEC validation") {
-		t.Errorf("validation enforced, yet warned\n--- log ---\n%s", out)
+	for _, line := range strings.Split(parse(t, true), "\n") {
+		if isDaneWarning(line) {
+			t.Errorf("validation enforced, yet warned: %s", line)
+		}
 	}
 }
 
