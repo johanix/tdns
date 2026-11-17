@@ -142,13 +142,17 @@ func TestReloadImrEngineFromFile_NoBlock(t *testing.T) {
 	}
 }
 
-// runningImr returns a resolver with one forward zone, as if it had booted
-// from bootConf.
+// runningImr returns a resolver with one forward zone, ".", as if it had
+// booted from bootConf with that forward in it. The forward goes into bootConf
+// too: whether the root is forwarded decides the default trust anchor, and a
+// bootConf without it would differ from a reloaded file that has it.
 func runningImr(t *testing.T, boot ImrEngineConf) *Imr {
 	t.Helper()
 	imr := newReloadTestImr(t)
+	root := []ImrForwardConf{fwdConf(".", "192.0.2.1", 0)}
+	boot.Forward = root
 	imr.bootConf = boot
-	if _, err := imr.ReloadZones(nil, []ImrForwardConf{fwdConf(".", "192.0.2.1", 0)}); err != nil {
+	if _, err := imr.ReloadZones(nil, root); err != nil {
 		t.Fatalf("seeding the running forward table: %v", err)
 	}
 	return imr
