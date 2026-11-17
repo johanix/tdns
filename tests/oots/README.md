@@ -51,6 +51,13 @@ Red against green, for a resolver change:
     BIN=/path/to/change-build IMR=/path/to/base/tdns-imr \
         sh run.sh suite ignore                                 # red
 
+Each check prints PASS, FAIL or SKIP. A SKIP is a precondition that did not
+hold, never a pass. A suite exits 0 when nothing failed and something passed,
+so a suite whose every check skipped is not green, and neither is `all` or
+`suite` with it. A count the resolver's report leaves out because it is zero
+reads 0 only when the row carries the field the report always sends beside it;
+a missing row or field fails the check.
+
 `setup` is needed once per work root (`/var/tmp/oots-rig`, or `WORK=`). Keys
 stay in each party's database under it; `clean` removes it.
 
