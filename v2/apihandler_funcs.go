@@ -506,6 +506,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Identities = conf.Service.Identities
 			resp.DBFile = conf.Db.File
 			resp.ServerErrors = conf.Internal.ServerErrors.List()
+			resp.Do53QueriesRefused = conf.Internal.do53QueriesRefused.Load()
 			// Every daemon that carries an IMR — tdns-imr itself or the
 			// embedded resolver in tdns-auth/tdns-agent — reports its state.
 			resp.Imr = Globals.ImrEngine.StatusReport()

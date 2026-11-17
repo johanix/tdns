@@ -52,12 +52,25 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs, ports []string, c
 	if len(ports) == 0 {
 		ports = []string{"853"}
 	}
+	// Each listener binds here, before the engine returns, so a caller
+	// knows whether DoT came up: one that bound in its goroutine could fail
+	// after the engine had reported success (debug-do53-queries-refused
+	// stops the server when no encrypted transport came up).
 	var servers []*dns.Server
 	for _, addr := range dotaddrs {
 		for _, port := range ports {
 			hostport := net.JoinHostPort(addr, port)
+			ln, err := tls.Listen("tcp", hostport, tlsConfig)
+			if err != nil {
+				lgDns.Error("failed to setup DoT listener", "hostport", hostport, "err", err)
+				if ctx.Err() == nil {
+					conf.Internal.ServerErrors.SetTransportPortError("dot "+hostport, err)
+				}
+				continue
+			}
 			server := &dns.Server{
 				Addr:          hostport,
+				Listener:      ln,
 				Net:           "tcp-tls",
 				TLSConfig:     tlsConfig,
 				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
@@ -71,16 +84,16 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs, ports []string, c
 			servers = append(servers, server)
 			go func(srv *dns.Server, hp string) {
 				lgDns.Info("DnsEngine: serving on DoT", "hostport", hp)
-				if err := srv.ListenAndServe(); err != nil {
-					lgDns.Error("failed to setup DoT server", "hostport", hp, "err", err)
-					if ctx.Err() == nil {
-						conf.Internal.ServerErrors.SetTransportPortError("dot "+hp, err)
-					}
-				} else {
-					lgDns.Info("DnsEngine: listening on DoT", "hostport", hp)
+				if err := srv.ActivateAndServe(); err != nil && ctx.Err() == nil {
+					lgDns.Error("DoT server stopped unexpectedly", "hostport", hp, "err", err)
+					conf.Internal.ServerErrors.SetTransportPortError("dot "+hp, err)
 				}
 			}(server, hostport)
 		}
+	}
+	// Every listener failed, each with its own error recorded above.
+	if len(servers) == 0 {
+		return fmt.Errorf("DnsDoTEngine: no DoT listener could be set up on %v, ports %v", dotaddrs, ports)
 	}
 	go func() {
 		<-ctx.Done()
