@@ -1,0 +1,15 @@
+{
+  "kid": "ni1azkx1Qe3zOuUw1eRd3oNN_91av68ll49pGTLF_BM",
+  "kty": "EC",
+  "crv": "P-256",
+  "x": "9cqheie08FXlvnU17YJJm1FMUXD4rwi7-4atSdZ3og8",
+  "y": "PR66xkQK4YKumafBX4tYV4N008RfZHQZdMxs_7ToK5A",
+  "d": "ZaTVn0mC1OgwzCvuQ1V3qf6z-6mMjDStD2QzzUQoHxA",
+  "dnskey": {
+    "name": "example.com.",
+    "flags": 256,
+    "protocol": 3,
+    "algorithm": 13,
+    "keytag": 9115
+  }
+}
