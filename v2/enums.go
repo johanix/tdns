@@ -389,6 +389,11 @@ var StringToAppType = map[string]AppType{
 // ZoneStatus is the positive-lifecycle state of a zone, orthogonal to the
 // error registry (a zone can be ZoneStatusReady and still carry a RefreshError).
 // Minimal by design: a single value with a setter/getter, no registry.
+//
+// It reports progress, not whether the zone can be served: every refresh of a
+// loaded zone reads `loading` while the published snapshot is still being
+// served. Whether there is something to serve is Ready and the published
+// snapshot, which is what ZoneTransferOut admits on.
 type ZoneStatus uint8
 
 const (

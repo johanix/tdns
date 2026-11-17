@@ -13,10 +13,19 @@ import (
 )
 
 // CompiledInRootTrustAnchor contains the IANA-published DS records for
-// the root zone DNSKEY KSKs currently in active use. Used when no
-// trust-anchor-file is configured (mirrors the CompiledInRootHints
-// fallback). Format: standard DNS zone-file syntax, parseable by
-// dns.NewRR.
+// the root zone DNSKEY KSKs currently in active use. Two users:
+//
+//   - the IMR, when its config names no trust anchor (none of
+//     trust-anchor-ds, trust-anchor-dnskey, trust-anchor-file) and the
+//     root it reaches is the IANA root: the compiled-in root hints, and
+//     the root neither forwarded nor stubbed. With a root-hints file or a
+//     "." forward or stub the root may be a private one, and the IMR uses
+//     no anchor (ImrEngineConf.RootAnchorFallback in the tdns package).
+//   - dog +sigchase, when neither --trust-anchor nor the IMR config names
+//     an anchor (LoadDefaultTrustAnchors).
+//
+// Mirrors the CompiledInRootHints fallback. Format: standard DNS
+// zone-file syntax, one record per line, parseable by ParseTrustAnchors.
 //
 // Maintenance: root KSK rollovers have historically been ~8 years
 // apart (KSK-2010 → KSK-2017 → KSK-2024) so a compiled-in default is
@@ -33,8 +42,9 @@ import (
 // Both DS records published by IANA at
 // https://data.iana.org/root-anchors/root-anchors.xml
 const CompiledInRootTrustAnchor = `; Root trust anchors - IANA-published DS records for the root KSKs
-; This is compiled into the binary and used when no trust-anchor-file
-; config is provided. Mirrors the CompiledInRootHints fallback.
+; This is compiled into the binary and used when no trust anchor is
+; configured (the IMR only with the compiled-in root hints). Mirrors the
+; CompiledInRootHints fallback.
 ;
 ; KSK-2017 (keytag 20326) — still active per IANA root-anchors.xml
 .  IN  DS  20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D
