@@ -23,7 +23,14 @@
 # resolves each RRset through the secondary.
 #
 # Observed: the secondary holds the primary's serial; each RRset reads the same
-# from both servers; the resolver answers each with AD.
+# from both servers in dog; the resolver answers each with AD.
+#
+# The byte check is the AD: the RRSIG is the primary's, and the resolver reaches
+# cs.test. only through the secondary, so AD means the secondary served the
+# primary's bytes. dog's text is a reading, and two different values could
+# read the same, so it is a check on dog's view only. A dog that cannot read c
+# (one before dns#6) makes c a SKIP; every other name is still checked, AD
+# included.
 #
 # Negative: an unsigned name (csu.test.) must come back without AD, which shows
 # AD is not simply always on. Red on base: a secondary on main drops tokens or
@@ -59,19 +66,18 @@ EOF
 	wait_for 20 same_serial
 	check C1 "the secondary holds the primary's serial ($(serial 127.0.0.40))" same_serial
 
-	if [ -z "$(rdata 127.0.0.40 _dns.c.cs.test. SVCB)" ]; then
-		skip "C1 dog cannot read the only-unknown value from the primary; DOG must be a lossless build"
-		return
-	fi
-
 	imr_up || { fail "lossless: the resolver did not start"; return; }
 	for x in a b c d e; do
 		p=$(rdata 127.0.0.40 "_dns.$x.cs.test." SVCB)
+		if [ "$x" = c ] && [ -z "$p" ]; then
+			skip "C1 _dns.c: dog cannot read the only-unknown value from the primary; DOG must be a lossless build"
+			continue
+		fi
 		s=$(rdata 127.0.0.41 "_dns.$x.cs.test." SVCB)
 		note "$x primary:   $p"
 		[ "$s" = "$p" ] || note "$x secondary: $s"
-		check C1 "_dns.$x: the secondary serves what the primary does" [ -n "$p" -a "$s" = "$p" ]
-		check C1 "_dns.$x: the resolver validates it (AD)" _ad "_dns.$x.cs.test." SVCB
+		check C1 "_dns.$x: dog reads the same from the secondary as from the primary" [ -n "$p" -a "$s" = "$p" ]
+		check C1 "_dns.$x: the resolver validates it through the secondary (AD): the primary's bytes" _ad "_dns.$x.cs.test." SVCB
 	done
 	if _ad www.csu.test. TXT; then
 		fail "C1 an unsigned name came back with AD: the AD check proves nothing"

@@ -51,13 +51,15 @@
 #       ignored before the path is decided (a sighting in Additional ahead of
 #       the verifying lookup) are S6's design, so they are noted, not failed.
 #   Z6  run 2: the synthesized signal is in provider.test and nowhere else.
-#   Z7  two customers' aliases to one target, first asked together on a
-#       fresh resolver: ns1.customer2.test, like ns1.customer.test, holds
-#       the provider's signal, honours the DoT target in run 1, and answers
-#       over DoT and DoQ. This guards the main case. It does not reach the
-#       shared-hop race fixed in S6b's review (#1056 1f53f021): the target
-#       arrives in Additional, and a hop lookup on loopback ends long before
-#       the second owner gets there, so 7b1ce491 passes Z7 too.
+#   Z7  a second customer's alias to the same target: ns1.customer2.test,
+#       like ns1.customer.test, holds the provider's signal, honours the DoT
+#       target in run 1, and answers over DoT and DoQ. This guards the main
+#       case. Z7 does NOT cover the shared-hop race fixed in S6b's review
+#       (#1056 1f53f021), though the two first queries go out together: the
+#       target arrives in Additional, and a hop lookup on loopback ends long
+#       before the second owner gets there, so a resolver from before that
+#       fix (7b1ce491) passes Z7 too. Reaching the race needs the hop lookup
+#       still open when the second owner arrives, which this rig cannot hold.
 #   Z8  a two.test response carries both servers' signals, as the zone data
 #       holds them: ns1's whole RRset, its record with a target included, and
 #       ns2's, though ns2 is not this server. Inclusion goes by zone data, not
@@ -117,7 +119,8 @@ _cz_run() { # 1|2
 	check Z8 "run $_r: two.test carries nothing else" [ "$(_cz_svcb "$cz_2" | awk '{ print $1 }' | sort -u | tr '\n' ' ')" = "_dns.ns1.provider.test. _dns.ns2.provider.test. " ]
 
 	# Z5 and Z7, through a fresh resolver: the first queries for the two
-	# customers' zones go out together, so both aliases meet one target.
+	# customers' zones go out together. Both aliases meet one target, but not
+	# inside one hop lookup: Z7 is not the shared-hop race (see the header).
 	imr_up || { fail "customer: the resolver did not start (run $_r)"; return 1; }
 	# Wait for these two queries only: a bare wait would also wait for the
 	# daemons this shell started in the background.
@@ -138,6 +141,7 @@ _cz_run() { # 1|2
 	check Z5 "run $_r: the resolver validates the alias (AD)" _cz_ad _dns.ns1.customer.test. SVCB
 	check Z5 "run $_r: the resolver validates the provider's signal (AD)" _cz_ad _dns.ns1.provider.test. SVCB
 
+	note "Z7 does not cover the shared-hop race (#1056): the target arrives in Additional"
 	note "ns1.customer2.test. signal=$(at_get ns1.customer2.test. signal) targets=$(at_get ns1.customer2.test. signal_targets) redirected=$(at_get ns1.customer2.test. redirected) ignored=$(at_get ns1.customer2.test. ignored_redirects) counts=$(at_get ns1.customer2.test. counts) failed=$(at_get ns1.customer2.test. failed)"
 	check Z7 "run $_r: ns1.customer2.test. holds the provider's signal too (doq 50, dot 50)" [ "$(at_get ns1.customer2.test. signal.doq)" = 50 -a "$(at_get ns1.customer2.test. signal.dot)" = 50 ]
 	if [ "$_r" = 1 ]; then
