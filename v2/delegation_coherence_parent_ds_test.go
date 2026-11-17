@@ -4,6 +4,8 @@
 package tdns
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -25,7 +27,9 @@ import (
 // fetcherAnswer returns a fetcher that answers with rrset, and state as the
 // resolver's verdict on it.
 func fetcherAnswer(state cache.ValidationState, rrset *core.RRset) dnskeyFetcher {
-	return func(string) (*core.RRset, cache.ValidationState, error) { return rrset, state, nil }
+	return func(string, []dns.RR) ([]dnskeyCopy, error) {
+		return []dnskeyCopy{{RRset: rrset, State: state}}, nil
+	}
 }
 
 // dsForKey is the SHA-256 DS for k.
@@ -60,7 +64,7 @@ func TestCoherenceTheParentsDSAuthenticatesAnUnvalidatedAnswer(t *testing.T) {
 			// signature comes first and names a key the parent has no DS for
 			// yet, so every signature has to be tried.
 			both := signedDnskeys(t, testKeys(oldKSK, newKSK), testKeys(newKSK, oldKSK), inc, exp)
-			if err := CheckDelegationCoherence(cohChild, []dns.RR{oldDS},
+			if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{oldDS},
 				[]dns.RR{addDS(newDS)}, fetcherAnswer(state, both)); err != nil {
 				t.Fatalf("the new KSK's DS was refused: %v", err)
 			}
@@ -68,7 +72,7 @@ func TestCoherenceTheParentsDSAuthenticatesAnUnvalidatedAnswer(t *testing.T) {
 			// The old KSK is gone and only the new one signs. The parent holds
 			// its DS already, so withdrawing the old DS is authenticated too.
 			onlyNew := signedDnskeys(t, testKeys(newKSK), testKeys(newKSK), inc, exp)
-			if err := CheckDelegationCoherence(cohChild, []dns.RR{oldDS, newDS},
+			if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{oldDS, newDS},
 				[]dns.RR{delOneDS(oldDS)}, fetcherAnswer(state, onlyNew)); err != nil {
 				t.Fatalf("withdrawing the old KSK's DS was refused: %v", err)
 			}
@@ -84,7 +88,7 @@ func TestCoherenceTheParentsDSAllowsAPrePublishedDS(t *testing.T) {
 	now := time.Now()
 	rrset := signedDnskeys(t, testKeys(live), testKeys(live), now.Add(-time.Hour), now.Add(time.Hour))
 
-	if err := CheckDelegationCoherence(cohChild, []dns.RR{dsForKey(t, live)},
+	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{dsForKey(t, live)},
 		[]dns.RR{addDS(dsForKey(t, incoming))},
 		fetcherAnswer(cache.ValidationStateInsecure, rrset)); err != nil {
 		t.Fatalf("a pre-published DS was refused: %v", err)
@@ -139,7 +143,7 @@ func TestCoherenceRefusesWhatNeitherTheResolverNorTheParentsDSValidates(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			// The update adds a DS for the rogue key, which the RRset carries:
 			// on an unauthenticated answer it would pass the matching rule.
-			err := CheckDelegationCoherence(cohChild, []dns.RR{dsForKey(t, live)},
+			err := CheckDelegationCoherence(cohChild, nil, []dns.RR{dsForKey(t, live)},
 				[]dns.RR{addDS(dsForKey(t, rogue))}, fetcherAnswer(tc.state, tc.rrset))
 			if err == nil {
 				t.Fatal("a DS change was accepted on an answer neither the resolver nor the parent's DS validates")
@@ -171,7 +175,7 @@ func TestCoherenceABogusAnswerIsDecidedByTheParentsDS(t *testing.T) {
 	now := time.Now()
 	onlyNew := signedDnskeys(t, testKeys(newKSK), testKeys(newKSK), now.Add(-time.Hour), now.Add(time.Hour))
 
-	if err := CheckDelegationCoherence(cohChild, []dns.RR{oldDS, newDS},
+	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{oldDS, newDS},
 		[]dns.RR{delOneDS(oldDS)}, fetcherAnswer(cache.ValidationStateBogus, onlyNew)); err != nil {
 		t.Fatalf("a DNSKEY RRset signed by a key the parent holds a DS for was refused on"+
 			" the resolver's Bogus: %v", err)
@@ -186,12 +190,12 @@ func TestCoherenceTheParentsDSIsAskedOnlyWhenTheResolverDidNotValidate(t *testin
 	incoming := newSignerTestKey(t, cohChild, 257)
 	unsigned := signedDnskeys(t, testKeys(live), nil, time.Time{}, time.Time{})
 
-	if err := CheckDelegationCoherence(cohChild, []dns.RR{dsForKey(t, live)},
+	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{dsForKey(t, live)},
 		[]dns.RR{addDS(dsForKey(t, incoming))},
 		fetcherAnswer(cache.ValidationStateSecure, unsigned)); err != nil {
 		t.Errorf("a Secure answer was refused: %v", err)
 	}
-	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{addDS(dsForKey(t, live))},
+	if err := CheckDelegationCoherence(cohChild, nil, nil, []dns.RR{addDS(dsForKey(t, live))},
 		fetcherAnswer(cache.ValidationStateInsecure, unsigned)); err != nil {
 		t.Errorf("a first DS was refused: %v", err)
 	}
@@ -213,20 +217,53 @@ func childDSParent(t *testing.T, ds ...*dns.DS) *ZoneData {
 	return zd
 }
 
-// resolverAnswers makes this server's resolver answer the DNSKEY query for
-// child from its cache: rrset, with state as the verdict it holds.
-func resolverAnswers(t *testing.T, child string, rrset *core.RRset, state cache.ValidationState) {
+// childNS is the one nameserver childDSParent delegates child.parent.example.
+// to.
+const childNS = "ns1.child.parent.example."
+
+// nameserversServe makes the nameservers this server asks about a child answer
+// the DNSKEY query with copies: the RRset each serves, by nameserver name. A
+// nameserver with no entry gives no answer.
+func nameserversServe(t *testing.T, copies map[string]*core.RRset) {
 	t.Helper()
-	imr := newTestImr(t)
-	imr.Cache.Set(child, dns.TypeDNSKEY, &cache.CachedRRset{Name: child, RRtype: dns.TypeDNSKEY,
-		RRset: rrset, Context: cache.ContextAnswer, State: state, Expiration: time.Now().Add(time.Hour)})
+	sc := NewScanner(nil, false, false)
+	sc.queryChildServers = func(_ context.Context, qname string, qtype uint16, ns *core.RRset) ([]childAnswer, error) {
+		if qtype != dns.TypeDNSKEY {
+			return nil, fmt.Errorf("asked for %s %s, not the DNSKEY RRset", qname, dns.TypeToString[qtype])
+		}
+		var answers []childAnswer
+		for _, rr := range ns.RRs {
+			nsrr, ok := rr.(*dns.NS)
+			if !ok {
+				continue
+			}
+			for name, rrset := range copies {
+				if core.EqualNames(name, nsrr.Ns) {
+					answers = append(answers, childAnswer{NS: nsrr.Ns, RRset: rrset})
+				}
+			}
+		}
+		return answers, nil
+	}
+	prevScanner := Conf.Internal.GetScanner()
 	prevImr, prevReady := Conf.Internal.ImrEngine, Conf.Internal.ImrReady
-	Conf.Internal.ImrEngine, Conf.Internal.ImrReady = imr, nil
-	t.Cleanup(func() { Conf.Internal.ImrEngine, Conf.Internal.ImrReady = prevImr, prevReady })
+	Conf.Internal.PublishScanner(sc)
+	Conf.Internal.ImrEngine, Conf.Internal.ImrReady = nil, nil
+	t.Cleanup(func() {
+		Conf.Internal.PublishScanner(prevScanner)
+		Conf.Internal.ImrEngine, Conf.Internal.ImrReady = prevImr, prevReady
+	})
 }
 
-// The whole UPDATE path: the DS the parent publishes, the resolver's Insecure
-// answer as it hands it over, and the refusal the child is sent.
+// nameserverServes is nameserversServe for a child with the one nameserver
+// childDSParent gives it.
+func nameserverServes(t *testing.T, rrset *core.RRset) {
+	t.Helper()
+	nameserversServe(t, map[string]*core.RRset{childNS: rrset})
+}
+
+// The whole UPDATE path: the DS the parent publishes, the DNSKEY RRset the
+// child's nameserver serves, and the refusal the child is sent.
 func TestApproveChildUpdateTakesTheParentsDSOverAnInsecureAnswer(t *testing.T) {
 	const child = "child.parent.example."
 	oldKSK := newSignerTestKey(t, child, 257)
@@ -251,20 +288,18 @@ func TestApproveChildUpdateTakesTheParentsDSOverAnInsecureAnswer(t *testing.T) {
 		return approved, us, err
 	}
 
-	resolverAnswers(t, child, signedDnskeys(t, testKeys(oldKSK, newKSK), testKeys(oldKSK), inc, exp),
-		cache.ValidationStateInsecure)
+	nameserverServes(t, signedDnskeys(t, testKeys(oldKSK, newKSK), testKeys(oldKSK), inc, exp))
 	if approved, _, err := update(); !approved || err != nil {
 		t.Fatalf("the roll's DS add was not approved (err %v)", err)
 	}
 
-	resolverAnswers(t, child, signedDnskeys(t, testKeys(oldKSK, newKSK), testKeys(rogue), inc, exp),
-		cache.ValidationStateInsecure)
+	nameserverServes(t, signedDnskeys(t, testKeys(oldKSK, newKSK), testKeys(rogue), inc, exp))
 	approved, us, err := update()
 	if approved || err == nil {
 		t.Fatal("approved on a DNSKEY RRset no key matching the parent's DS signs")
 	}
-	if !strings.Contains(err.Error(), "resolver: insecure") {
-		t.Errorf("the refusal does not name the resolver's verdict: %v", err)
+	if !strings.Contains(err.Error(), "not signed by a key matching the DS this parent publishes") {
+		t.Errorf("the refusal does not say why the DNSKEY RRset was not authenticated: %v", err)
 	}
 	if us.ValidationRcode != dns.RcodeRefused || us.RejectionEDE != edns0.EDEDelegationIncoherent {
 		t.Errorf("rcode %s, EDE %d; want REFUSED with EDE %d",
@@ -295,20 +330,18 @@ func TestDsyncApiTakesTheParentsDSOverAnInsecureAnswer(t *testing.T) {
 		return zd.CheckDelegationCoherenceForUpdate(actions, coherenceDnskeyFetcher(&Conf))
 	}
 
-	resolverAnswers(t, child, signedDnskeys(t, testKeys(oldKSK, newKSK), testKeys(oldKSK), inc, exp),
-		cache.ValidationStateInsecure)
+	nameserverServes(t, signedDnskeys(t, testKeys(oldKSK, newKSK), testKeys(oldKSK), inc, exp))
 	if err := check(); err != nil {
 		t.Fatalf("the roll's DS add was refused: %v", err)
 	}
 
-	resolverAnswers(t, child, signedDnskeys(t, testKeys(oldKSK, newKSK), testKeys(rogue), inc, exp),
-		cache.ValidationStateInsecure)
+	nameserverServes(t, signedDnskeys(t, testKeys(oldKSK, newKSK), testKeys(rogue), inc, exp))
 	err := check()
 	if err == nil {
 		t.Fatal("accepted on a DNSKEY RRset no key matching the parent's DS signs")
 	}
-	if !strings.Contains(err.Error(), "resolver: insecure") {
-		t.Errorf("the refusal does not name the resolver's verdict: %v", err)
+	if !strings.Contains(err.Error(), "not signed by a key matching the DS this parent publishes") {
+		t.Errorf("the refusal does not say why the DNSKEY RRset was not authenticated: %v", err)
 	}
 	if got := dsyncApiCoherenceStatus(err); got != http.StatusConflict {
 		t.Errorf("status %d, want %d: the parent has decided, and asking again changes nothing",

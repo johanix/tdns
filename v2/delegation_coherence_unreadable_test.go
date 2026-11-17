@@ -23,9 +23,9 @@ import (
 
 // countingFetcher answers with rrset and state, and counts the lookups.
 func countingFetcher(state cache.ValidationState, rrset *core.RRset, calls *int) dnskeyFetcher {
-	return func(string) (*core.RRset, cache.ValidationState, error) {
+	return func(string, []dns.RR) ([]dnskeyCopy, error) {
 		*calls++
-		return rrset, state, nil
+		return []dnskeyCopy{{RRset: rrset, State: state}}, nil
 	}
 }
 
@@ -105,8 +105,7 @@ func TestApproveChildUpdateRefusesWhenTheParentCannotReadItsOwnDS(t *testing.T) 
 	now := time.Now()
 	zd := childDSParent(t, dsForKey(t, live))
 	zd.Ready = false
-	resolverAnswers(t, child, signedDnskeys(t, testKeys(rogue), testKeys(rogue), now.Add(-time.Hour), now.Add(time.Hour)),
-		cache.ValidationStateInsecure)
+	nameserverServes(t, signedDnskeys(t, testKeys(rogue), testKeys(rogue), now.Add(-time.Hour), now.Add(time.Hour)))
 
 	r := new(dns.Msg)
 	r.SetUpdate(zd.ZoneName)

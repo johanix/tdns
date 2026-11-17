@@ -8,8 +8,6 @@ import (
 	"net/http"
 	"testing"
 
-	cache "github.com/johanix/tdns/v2/cache"
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -27,16 +25,16 @@ func TestDsyncApiCoherenceStatus(t *testing.T) {
 		want  int
 	}{
 		{"the child's DNSKEY lookup failed (not at its nameservers yet)",
-			func(string) (*core.RRset, cache.ValidationState, error) { return nil, 0, errors.New("i/o timeout") },
+			func(string, []dns.RR) ([]dnskeyCopy, error) { return nil, errors.New("i/o timeout") },
 			http.StatusServiceUnavailable},
 		{"this server's resolver has not started",
-			func(string) (*core.RRset, cache.ValidationState, error) { return nil, 0, ErrNoImrEngine },
+			func(string, []dns.RR) ([]dnskeyCopy, error) { return nil, ErrNoImrEngine },
 			http.StatusServiceUnavailable},
 		{"no resolver at all", nil, http.StatusConflict},
 		{"the resulting DS set matches no published key", fetcherFor(other), http.StatusConflict},
 	}
 	for _, c := range cases {
-		err := CheckDelegationCoherence(cohChild, nil, update, c.fetch)
+		err := CheckDelegationCoherence(cohChild, nil, nil, update, c.fetch)
 		if err == nil {
 			t.Fatalf("%s: the check accepted the update", c.name)
 		}

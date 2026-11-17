@@ -20,7 +20,7 @@ func TestCoherenceTellsANotYetRunningResolverFromNoResolver(t *testing.T) {
 	conf := &Config{}
 	conf.Internal.ImrReady = NewImrReadiness() // not published: still priming
 
-	err := CheckDelegationCoherence(cohChild, nil, update, coherenceDnskeyFetcher(conf))
+	err := CheckDelegationCoherence(cohChild, nil, nil, update, coherenceDnskeyFetcher(conf))
 	if !errors.Is(err, ErrNoImrEngine) {
 		t.Fatalf("resolver not running yet: got %v, want an error wrapping ErrNoImrEngine", err)
 	}
@@ -33,7 +33,7 @@ func TestCoherenceTellsANotYetRunningResolverFromNoResolver(t *testing.T) {
 	if coherenceDnskeyFetcher(conf) != nil {
 		t.Error("a server configured without a resolver got a fetcher")
 	}
-	err = CheckDelegationCoherence(cohChild, nil, update, coherenceDnskeyFetcher(conf))
+	err = CheckDelegationCoherence(cohChild, nil, nil, update, coherenceDnskeyFetcher(conf))
 	if err == nil || errors.Is(err, ErrNoImrEngine) {
 		t.Errorf("no resolver by configuration: got %v, want a plain unverifiable refusal", err)
 	}
