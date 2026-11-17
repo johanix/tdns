@@ -7,33 +7,60 @@ import (
 	"context"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
-// startCountingBlackholeUDP binds a UDP port that never answers and counts the
-// datagrams that reach it. A refresh of a zone whose only upstream is this port
-// sends exactly one probe per refresh and then waits out the probe budget, so
-// the count is the number of refreshes that actually ran against the zone.
-func startCountingBlackholeUDP(t *testing.T) (string, func() int) {
+// startGatedUDP binds a UDP port that holds every query it receives until the
+// test calls release, and then answers each with REFUSED, which a refresh takes
+// as a quiet back-off and completes on. A query that arrives after release is
+// answered at once. probes counts the queries that reached the port, held or
+// not.
+//
+// A refresh of a zone whose only upstream is this port sends one probe, and is
+// then held in flight for exactly as long as the test wants: the test decides
+// when it ends, not a timeout, so no ordering between two requests depends on
+// how fast the test goroutine runs.
+func startGatedUDP(t *testing.T) (addr string, probes func() int, release func()) {
 	t.Helper()
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	gate := make(chan struct{})
+	var once sync.Once
 	var n atomic.Int64
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			if _, _, err := pc.ReadFromUDP(buf); err != nil {
+			size, from, err := pc.ReadFromUDP(buf)
+			if err != nil {
 				return
 			}
+			req := new(dns.Msg)
+			if req.Unpack(buf[:size]) != nil {
+				continue
+			}
 			n.Add(1)
+			// Counted as it arrives, answered when the gate opens: a second probe
+			// must show in the count while the first is still being held.
+			go func() {
+				<-gate
+				resp := new(dns.Msg)
+				resp.SetRcode(req, dns.RcodeRefused)
+				if out, err := resp.Pack(); err == nil {
+					_, _ = pc.WriteToUDP(out, from)
+				}
+			}()
 		}
 	}()
-	t.Cleanup(func() { _ = pc.Close() })
-	return pc.LocalAddr().String(), func() int { return int(n.Load()) }
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(func() { release(); _ = pc.Close() })
+	return pc.LocalAddr().String(), func() int { return int(n.Load()) }, release
 }
 
 // One zone is refreshed one at a time, whatever the spelling of the name that
@@ -52,22 +79,27 @@ func startCountingBlackholeUDP(t *testing.T) (string, func() int) {
 // zone in flight for good.
 func TestAZoneRefreshesOneAtATimeInEverySpelling(t *testing.T) {
 	authApp(t)
-	withRefreshBudgets(t, 1, 5)
-	upstream, probes := startCountingBlackholeUDP(t)
+	// A probe budget far longer than the test: the first refresh ends when the
+	// test releases the gate, never because a timeout fired first.
+	withRefreshBudgets(t, 30, 30)
 
 	// What one refresh of this zone costs in probes, measured on a copy outside
-	// the engine so the figure does not rest on a number written in the test.
+	// the engine, against an upstream that answers at once, so the figure does
+	// not rest on a number written in the test.
+	baseAddr, baseProbes, baseRelease := startGatedUDP(t)
+	baseRelease()
 	baseline := &ZoneData{ZoneName: "baseline.refresh.test.", ZoneType: Secondary, ZoneStore: MapZone,
-		Upstreams: []PeerConf{{Addr: upstream}}, Logger: discardLogger()}
+		Upstreams: []PeerConf{{Addr: baseAddr}}, Logger: discardLogger()}
 	if _, err := runZoneRefresh(context.Background(),
-		refreshJob{zd: baseline, zone: baseline.ZoneName, gen: baseline.generation.Load()}, &Config{}); err == nil {
-		t.Fatal("a refresh against a blackhole succeeded")
+		refreshJob{zd: baseline, zone: baseline.ZoneName, gen: baseline.generation.Load()}, &Config{}); err != nil {
+		t.Fatalf("a refresh against a refusing upstream failed: %v", err)
 	}
-	perRefresh := probes()
+	perRefresh := baseProbes()
 	if perRefresh < 1 {
 		t.Fatalf("a refresh sent %d probes, want at least 1", perRefresh)
 	}
 
+	upstream, probes, release := startGatedUDP(t)
 	const zone = "inflight-key.refresh.test."
 	zd := &ZoneData{ZoneName: zone, ZoneType: Secondary, ZoneStore: MapZone,
 		Upstreams: []PeerConf{{Addr: upstream}}, Logger: discardLogger()}
@@ -100,20 +132,37 @@ func TestAZoneRefreshesOneAtATimeInEverySpelling(t *testing.T) {
 		return r.Error && strings.Contains(r.ErrorMsg, "already in progress")
 	}
 
-	// Two requests for one zone, in two spellings, one behind the other. The
-	// first is still waiting out its probe when the engine reads the second.
+	// Two requests for one zone, in two spellings. The first is held in flight
+	// at the upstream, and only sent for the second once the first has reached
+	// it, so the engine reads the second request while the first cannot have
+	// finished.
 	const first, second = "Inflight-Key.Refresh.TEST.", "inflight-key.refresh.test."
 	r1 := send(first)
+	waitFor(t, 5*time.Second, "the first refresh to reach the upstream", func() bool { return probes() >= 1 })
 	r2 := send(second)
-	if got := answer(second, r2); !busy(got) {
-		t.Errorf("a refresh requested as %q while one requested as %q was running was answered %+v, "+
-			"want it refused as already in progress", second, first, got)
+	select {
+	case got := <-r2:
+		if !busy(got) {
+			t.Errorf("a refresh requested as %q while one requested as %q was running was answered %+v, "+
+				"want it refused as already in progress", second, first, got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Errorf("a refresh requested as %q while one requested as %q was held was not refused; "+
+			"it was dispatched as well", second, first)
 	}
-	if got := answer(first, r1); busy(got) {
-		t.Errorf("the refresh that was first in was refused: %+v", got)
+	if got := probes(); got != 1 {
+		t.Errorf("two requests for one zone had sent %d probes by the time the second was answered, "+
+			"want 1: one refresh, not two", got)
 	}
-	if got, want := probes()-perRefresh, perRefresh; got != want {
-		t.Errorf("two requests for one zone sent %d probes, want %d: one refresh, not two", got, want)
+
+	// Now the first may finish. A REFUSED probe is a quiet back-off, not a
+	// failure: the refresh completes and says so.
+	release()
+	if got := answer(first, r1); got.Error {
+		t.Errorf("the refresh that was first in was not run to completion: %+v", got)
+	}
+	if got := probes(); got != perRefresh {
+		t.Errorf("two requests for one zone sent %d probes in all, want %d: one refresh, not two", got, perRefresh)
 	}
 
 	// The completion clears the entry whatever spelling it comes back under: a
@@ -125,8 +174,8 @@ func TestAZoneRefreshesOneAtATimeInEverySpelling(t *testing.T) {
 	for {
 		got := answer(third, send(third))
 		if !busy(got) {
-			if !got.Error {
-				t.Errorf("a refresh against a blackhole answered success: %+v", got)
+			if got.Error {
+				t.Errorf("a refresh after the first had finished failed: %+v", got)
 			}
 			break
 		}
@@ -136,7 +185,7 @@ func TestAZoneRefreshesOneAtATimeInEverySpelling(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if got, want := probes()-perRefresh, 2*perRefresh; got != want {
+	if got, want := probes(), 2*perRefresh; got != want {
 		t.Errorf("a refresh after the first had finished sent %d probes in all, want %d", got, want)
 	}
 }
