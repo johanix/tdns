@@ -51,6 +51,13 @@ Red against green, for a resolver change:
     BIN=/path/to/change-build IMR=/path/to/base/tdns-imr \
         sh run.sh suite ignore                                 # red
 
+Each check prints PASS, FAIL or SKIP. A SKIP is a precondition that did not
+hold, never a pass. A suite exits 0 when nothing failed and something passed,
+so a suite whose every check skipped is not green, and neither is `all` or
+`suite` with it. A count the resolver's report leaves out because it is zero
+reads 0 only when the row carries the field the report always sends beside it;
+a missing row or field fails the check.
+
 `setup` is needed once per work root (`/var/tmp/oots-rig`, or `WORK=`). Keys
 stay in each party's database under it; `clean` removes it.
 
@@ -82,8 +89,8 @@ observed, and the negative case.
 | `ports` | K2, P1, P2, P6 | a port on a `.` record moves the transport on the server's own address: from `ports:` config, from one record naming two transports, from an ALPN-only record | a resolver without port support; P2, P6 on #994's head |
 | `badport` | P7 | a port on the bad-port list (22 here) is refused: the record is used without it, so DoT and DoQ go to the server on 853 | a resolver before #1069 |
 | `published` | K1, M3 | what `service.transport` publishes: one record per ported transport, never do53 beside udp or tcp, an empty signal with a udp port as `udp:100` with that port (`PUB_DO53=omitted`); a default config byte-identical to the base build, or (`PUB_DO53=omitted`) identical but for the default do53 | a publisher that ignores `ports`, changes the default, or writes the default do53 against `PUB_DO53` |
-| `ignore` | P3, P4 | a record with a target, and the ServiceMode siblings of an AliasMode record, are not applied | a resolver that applies them (trap) |
-| `tiebreak` | P5 | a transport named twice takes the same record in both RR orders | a resolver where the last record wins |
+| `ignore` | P3 | a record with a target is not applied, alone or beside a `.` record (P4, the ServiceMode siblings of an AliasMode record, is not here: tdns-auth will not publish that RRset; see the suite header) | a resolver that applies it (trap) |
+| `tiebreak` | P5 | a transport named twice takes the same record in both RR orders; not green when the server sends both in one order | a resolver where the last record wins |
 | `lossless` | C1 | a tdns secondary re-serves every oots value byte for byte: unknown tokens, only-unknown values, odd identifiers, a weight octet above 100; the resolver validates each through the secondary, which is the byte check (dog's reading is not); a dog that cannot read the only-unknown value skips that name alone | a secondary or resolver whose codec drops or clamps |
 | `customer` | Z1–Z8 | a server includes signals by zone data and writes one only into its own zone: a customer's alias to the provider's signal, two customers' aliases to one target (not the shared-hop race of #1056: the target arrives in Additional), an NS named in the provider's zone, two provider servers named in one zone (one RRset with a target), an alias to a target it does not hold; nothing written into a customer zone, with or without an identity; the resolver follows the alias on a Secure path | a publisher that writes into a zone it hosts for someone else, or injects by identity; a resolver that does not follow the alias |
 | `bridge` | B1–B4 | tdns-cli's bridge from a synthesized signal to a provisioned one: the printed records are the served ones; pasted and released, they stay once the name leaves `service.identities` and a changed `service.transport` does not reach them | a release that does nothing; without the release the records are withdrawn (the suite's own red, B4) |

@@ -37,7 +37,6 @@ p6.test.     ns.p6.test.      127.0.0.13  -
 p22.test.    ns.p22.test.     127.0.0.14  -
 ign.test.    ns.ign.test.     127.0.0.21  -
 ign2.test.   ns.ign2.test.    127.0.0.22  -
-ign3.test.   ns.ign3.test.    127.0.0.23  -
 tb1.test.    ns.tb1.test.     127.0.0.31  -
 tb2.test.    ns.tb2.test.     127.0.0.32  -
 cs.test.     ns.cs.test.      127.0.0.41  cs-pri:127.0.0.40
@@ -53,10 +52,14 @@ far.test.      ns1.far.test.      127.0.0.61 cust:127.0.0.61
 
 suites() { sed -n 's/^suite_\([a-z0-9_]*\)().*/\1/p' "$RIG"/suites/*.sh; }
 
+# A suite is green when nothing failed and something passed. A skip is never a
+# pass, so a suite whose every check skipped showed nothing: it is not green,
+# and neither is the run.
 summary() {
 	echo "----"
 	echo "$1: $NPASS pass, $NFAIL fail, $NSKIP skip"
-	[ "$NFAIL" -eq 0 ]
+	[ "$NFAIL" -eq 0 ] || return 1
+	[ "$NPASS" -gt 0 ] || { echo "$1: nothing passed, so it is not green"; return 1; }
 }
 
 # Keys for one signed child: start its primary once with an empty zone, wait

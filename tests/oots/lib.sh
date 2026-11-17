@@ -149,6 +149,13 @@ answers() { # server name type: zero when the server answers NOERROR with data
 # The resolver's view: tdns-cli imr stats auth-transports --json, read with
 # python3. at_get server expr prints one value, empty when absent.
 #   expr: counts.dot | failed.dot | signal.dot | signal_ports.dot | total
+# The report leaves a counter out when it is zero: a transport never used is
+# absent from counts, failed is absent when nothing failed, redirected when
+# nothing was. at_get prints 0 for those, but only when the row carries the
+# field the report always sends beside them (counts; failed_total for failed).
+# Without that field, or without the row, it prints nothing, and num turns
+# nothing into -1, which no count check accepts: a dropped or renamed field is
+# a FAIL, not a zero.
 # ---------------------------------------------------------------------------
 cli_imr() { "$CLI_IMR" --config "$WORK/q/tdns-cli.yaml" imr "$@"; }
 
@@ -158,6 +165,8 @@ at_get() { # server expr
 	at_json | python3 -I -c '
 import json, sys
 srv, expr = sys.argv[1], sys.argv[2]
+# a counter left out when zero -> the field always sent that vouches for it
+zero = {"counts": "counts", "failed": "failed_total", "redirected": "counts"}
 try:
     rep = json.load(sys.stdin)
 except Exception:
@@ -165,19 +174,24 @@ except Exception:
 for row in rep.get("rows") or []:
     if row.get("server") != srv:
         continue
+    parts = expr.split(".")
     v = row
-    for part in expr.split("."):
+    for part in parts:
         v = v.get(part) if isinstance(v, dict) else None
         if v is None:
             break
     if v is not None:
         print(v)
+    elif len(parts) == 2 and zero.get(parts[0]) in row:
+        m = row.get(parts[0])
+        if isinstance(m, dict) or (m is None and not (parts[0] == "failed" and row["failed_total"])):
+            print(0)
     break
 ' "$1" "$2"
 }
 
-num() { # value -> integer, empty as 0
-	case "$1" in ''|*[!0-9]*) echo 0 ;; *) echo "$1" ;; esac
+num() { # value -> integer; empty or not a number -> -1, which no count check accepts
+	case "$1" in ''|*[!0-9]*) echo -1 ;; *) echo "$1" ;; esac
 }
 
 # The resolver must have learnt a signal before a suite counts transports:
