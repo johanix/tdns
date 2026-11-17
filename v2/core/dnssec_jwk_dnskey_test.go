@@ -488,3 +488,24 @@ func TestDNSSECJWKDraftVectorsEndToEnd(t *testing.T) {
 		})
 	}
 }
+
+// TestRegistryOnlyAlgorithmNote pins which algorithms an export warns
+// about: only the registry's ML-DSA-65 and -87 numbers.
+func TestRegistryOnlyAlgorithmNote(t *testing.T) {
+	for alg, name := range map[uint8]string{200: "ML-DSA-65", 201: "ML-DSA-87"} {
+		note := RegistryOnlyAlgorithmNote(alg)
+		for _, want := range []string{name, "dnssec-algorithms registry", "IANA", "same number"} {
+			if !strings.Contains(note, want) {
+				t.Errorf("algorithm %d: note %q lacks %q", alg, note, want)
+			}
+		}
+		if strings.Contains(note, "\n") {
+			t.Errorf("algorithm %d: note is not one line: %q", alg, note)
+		}
+	}
+	for _, alg := range []uint8{dns.RSASHA256, dns.ECDSAP256SHA256, dns.ED25519, dns.ED448, 18, 199, 202} {
+		if note := RegistryOnlyAlgorithmNote(alg); note != "" {
+			t.Errorf("algorithm %d: unexpected note %q", alg, note)
+		}
+	}
+}

@@ -455,8 +455,13 @@ $ORIGIN example.test.
 	}
 }
 
+// TestZoneTransferOut_RefusesWhenNotReady is the first load: nothing servable
+// has been published, so there is nothing to hand out. A refresh of a zone that
+// is already loaded is a different case and is served
+// (TestZoneTransferOut_ServesPublishedSnapshotWhileRefreshing).
 func TestZoneTransferOut_RefusesWhenNotReady(t *testing.T) {
 	zd := loadTestTransferZone(t, basicZone)
+	zd.Ready = false
 	zd.Status = ZoneStatusLoading
 	w := &fakeRW{remote: udpAddr("127.0.0.1")}
 	r := new(dns.Msg)
@@ -479,7 +484,8 @@ func TestZoneTransferOut_RefusesWhenNotReady(t *testing.T) {
 // same way on the refuse path (failingRW is defined in ixfr_test.go).
 func TestZoneTransferOut_RefuseWriteErrorPropagates(t *testing.T) {
 	zd := loadTestTransferZone(t, basicZone)
-	zd.Status = ZoneStatusLoading // force the refuse path
+	zd.Ready = false // force the refuse path: a first load
+	zd.Status = ZoneStatusLoading
 	w := &failingRW{fakeRW: fakeRW{remote: udpAddr("127.0.0.1")}, writeErr: fmt.Errorf("boom")}
 	r := new(dns.Msg)
 	r.SetAxfr(zd.ZoneName)
