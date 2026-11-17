@@ -350,7 +350,7 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 	model := dsModelForZone(zd)
 	var cds []dns.RR
 	switch {
-	case zd.Options[OptMultiProvider]:
+	case zd.Option(OptMultiProvider):
 		// A multi-provider zone's DS set is its owner's (§4). On the signer
 		// of an owned zone the CDS is the owner's DS set (arrow 1): the
 		// owner knows which of its own and the other providers' KSKs
@@ -451,7 +451,7 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 // kdb.dsSyncPending.
 func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
 	owned := ownedZoneSignedHere(zd)
-	if !owned && (zd.Options[OptMultiProvider] || dsModelForZone(zd) != DSModelNone) {
+	if !owned && (zd.Option(OptMultiProvider) || dsModelForZone(zd) != DSModelNone) {
 		return
 	}
 	current, err := currentCdsTuples(zd)
@@ -538,11 +538,11 @@ func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
 func cdsAlwaysPublishedLocked(zd *ZoneData) (always, settingIgnored bool) {
 	// A multi-provider zone's CDS is its owner's DS set (ownedZoneCDS), not
 	// this rule's.
-	if !(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) || zd.Options[OptMultiProvider] || dsModelForZone(zd) != DSModelNone {
+	if !(zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)) || zd.Option(OptMultiProvider) || dsModelForZone(zd) != DSModelNone {
 		return false, false
 	}
 	if zd.DnssecPolicy != nil && zd.DnssecPolicy.SuppressCDS {
-		if childDelegationSyncPredicate(Globals.App.Type, zd.Options) {
+		if childDelegationSyncPredicate(Globals.App.Type, zd.OptionsSnapshot()) {
 			return true, true
 		}
 		return false, false
@@ -644,7 +644,7 @@ func (zd *ZoneData) dsEngineFollows() bool {
 	always, _ := cdsAlwaysPublishedLocked(zd)
 	zd.mu.Unlock()
 	switch {
-	case zd.Options[OptMultiProvider]:
+	case zd.Option(OptMultiProvider):
 		return ownedZoneSignedHere(zd)
 	case model != DSModelNone:
 		return false
@@ -780,7 +780,7 @@ func cdsDeleteRR(zone string) dns.RR {
 // owner's DS set says (key lifecycle ownership design §4.1, arrow 1). The
 // agent of the same zone signs nothing and serves nothing the parent reads.
 func ownedZoneSignedHere(zd *ZoneData) bool {
-	return zd != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && zoneOwned(zd)
+	return zd != nil && (zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)) && zoneOwned(zd)
 }
 
 // ownedZoneCDS is the CDS such a zone serves: the owner's DS set as CDS,

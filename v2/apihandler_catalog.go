@@ -214,7 +214,7 @@ func handleCatalogDelete(catalogZoneName string, resp *CatalogResponse) error {
 	}
 
 	// Verify it's actually a catalog zone
-	if !zd.Options[OptCatalogZone] {
+	if !zd.Option(OptCatalogZone) {
 		return fmt.Errorf("zone %s is not a catalog zone", catalogZoneName)
 	}
 
@@ -339,10 +339,10 @@ func handleCatalogZoneDelete(catalogZoneName, zoneName string, resp *CatalogResp
 
 	// Check if the member zone should be removed (if it's a catalog member and catalog has auto-delete enabled)
 	zd, exists := Zones.Get(zoneName)
-	if exists && zd.Options[OptAutomaticZone] && zd.SourceCatalog == catalogZoneName {
+	if exists && zd.Option(OptAutomaticZone) && zd.SourceCatalog == catalogZoneName {
 		// Check if catalog zone has auto-delete enabled
 		catalogZd, catalogExists := Zones.Get(catalogZoneName)
-		if catalogExists && catalogZd.Options[OptCatalogMemberAutoDelete] {
+		if catalogExists && catalogZd.Option(OptCatalogMemberAutoDelete) {
 			lgApi.Info("auto-removing zone from catalog", "zone", zoneName, "catalog", catalogZoneName)
 
 			// Remove from Zones map
@@ -624,7 +624,7 @@ func handleCatalogNotifyAdd(catalogZoneName, address string, resp *CatalogRespon
 	}
 
 	// Validate that it's a catalog zone
-	if !zd.Options[OptCatalogZone] {
+	if !zd.Option(OptCatalogZone) {
 		return fmt.Errorf("zone %s is not a catalog zone", catalogZoneName)
 	}
 
@@ -677,7 +677,7 @@ func handleCatalogNotifyRemove(catalogZoneName, address string, resp *CatalogRes
 	}
 
 	// Validate that it's a catalog zone
-	if !zd.Options[OptCatalogZone] {
+	if !zd.Option(OptCatalogZone) {
 		return fmt.Errorf("zone %s is not a catalog zone", catalogZoneName)
 	}
 
@@ -729,7 +729,7 @@ func handleCatalogNotifyList(catalogZoneName string, resp *CatalogResponse) erro
 	}
 
 	// Validate that it's a catalog zone
-	if !zd.Options[OptCatalogZone] {
+	if !zd.Option(OptCatalogZone) {
 		return fmt.Errorf("zone %s is not a catalog zone", catalogZoneName)
 	}
 

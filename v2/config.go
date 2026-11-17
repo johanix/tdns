@@ -1410,7 +1410,7 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		// storage: memory, which is a disk-persistence policy, not a liveness
 		// signal — a memory-backed dynamic zone is still a valid live zone and
 		// must survive a config reload.
-		if zd.Options[OptCatalogZone] || zd.Options[OptAutomaticZone] || zd.Options[OptApiManagedZone] {
+		if zd.Option(OptCatalogZone) || zd.Option(OptAutomaticZone) || zd.Option(OptApiManagedZone) {
 			lgConfig.Info("ReloadZoneConfig: zone is dynamic/managed, not removing from zone list", "zone", zname)
 			continue
 		}

@@ -43,7 +43,7 @@ func (zd *ZoneData) RenewZoneSignatures(ctx context.Context, kdb *KeyDB) (int, e
 	if err := ctx.Err(); err != nil {
 		return 0, fmt.Errorf("renewing signatures for %s: %w", zd.ZoneName, err)
 	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return 0, fmt.Errorf("RenewZoneSignatures: zone %s should not be signed here (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 	if zd.HasError(DnssecError) {

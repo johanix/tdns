@@ -174,7 +174,7 @@ func (conf *Config) detectStrandingPolicyChanges(newPolicies map[string]DnssecPo
 			continue
 		}
 		zd.mu.Lock()
-		signed := zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
+		signed := zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)
 		polName := zd.DnssecPolicyName
 		zd.mu.Unlock()
 		if !signed || polName == "" || zoneOwned(zd) {

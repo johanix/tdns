@@ -22,6 +22,21 @@ package tdns
 //
 // SetRuntimeOption records such an option beside the configured ones, and
 // the config update lays the record over what it was given.
+//
+// Reading the options. The map a zone has is replaced whole, by a config
+// update and by SetRuntimeOption, and the map it had is not written to: a
+// reader that got hold of one can go on reading it. Replacing it is still a
+// write to the zone's Options field, and a reader's look at that field is a
+// read of it, so a reader that holds no lock and a replacement are a data
+// race however the map was copied (johanix/tdns#981). Option and
+// OptionsSnapshot are the way to the field for a reader, and setOptionsLocked
+// the way for a writer; they meet on the zone's optionsMu.
+//
+// optionsMu is a leaf lock. It is held only across the read or the write of
+// the field, and nothing else is acquired while it is. A reader may therefore
+// call Option holding zd.mu, or any other lock, or none: it never waits for
+// one. A writer holds zd.mu, as every replacement does, and takes optionsMu
+// inside it; that is the only order the two are ever taken in.
 
 // SetRuntimeOption sets an option the daemon decides by itself while it runs.
 // It takes effect at once, and it stays as set across a config update until
@@ -49,6 +64,7 @@ func (zd *ZoneData) setRuntimeOptionLocked(opt ZoneOption, on bool) {
 		zd.runtimeOptions = map[ZoneOption]bool{}
 	}
 	zd.runtimeOptions[opt] = on
+	// Plain reads of the field: every writer of it holds zd.mu, as this one does.
 	if zd.Options[opt] == on {
 		return
 	}
@@ -57,7 +73,38 @@ func (zd *ZoneData) setRuntimeOptionLocked(opt ZoneOption, on bool) {
 		next[o] = v
 	}
 	next[opt] = on
-	zd.Options = next
+	zd.setOptionsLocked(next)
+}
+
+// setOptionsLocked replaces the zone's options. It is the one way the field is
+// replaced on a zone that is live: the caller holds zd.mu, and the lock a
+// reader that holds no other takes is held across the write.
+func (zd *ZoneData) setOptionsLocked(opts map[ZoneOption]bool) {
+	zd.optionsMu.Lock()
+	zd.Options = opts
+	zd.optionsMu.Unlock()
+}
+
+// Option reports whether a zone option is on, for the caller that holds
+// nothing or holds any lock but optionsMu: it takes no lock of the zone's but
+// that one, held for the read alone.
+func (zd *ZoneData) Option(opt ZoneOption) bool {
+	zd.optionsMu.RLock()
+	on := zd.Options[opt]
+	zd.optionsMu.RUnlock()
+	return on
+}
+
+// OptionsSnapshot is the zone's options as they are now, for a caller that
+// needs the set and not one option: to range over it, to hand it on, to
+// ask several questions of one answer. The map is the zone's own, not a copy,
+// and the caller does not write to it. It is the map as of the call: a
+// replacement that follows leaves it as it was.
+func (zd *ZoneData) OptionsSnapshot() map[ZoneOption]bool {
+	zd.optionsMu.RLock()
+	opts := zd.Options
+	zd.optionsMu.RUnlock()
+	return opts
 }
 
 // withRuntimeOptionsLocked is opts with the zone's run-time options laid over

@@ -1358,7 +1358,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// updateIxfrChainLocked cover a serial that does not advance. It is an
 	// option because the diff compares the whole zone, which an inbound IXFR
 	// does not: it shares every untouched owner with the snapshot.
-	zd.wsIxfrEpochReset = !(new_zd != nil && new_zd.ixfrDerived) && !zd.Options[OptIxfrFromDifferences]
+	zd.wsIxfrEpochReset = !(new_zd != nil && new_zd.ixfrDerived) && !zd.Option(OptIxfrFromDifferences)
 	// This content came from a file or from an upstream, so whatever RRSIGs it
 	// carries are not ours. A zone that signs its own content must sign it
 	// before it is published, not in a pass afterwards.

@@ -260,7 +260,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 					if sr.ZoneData == nil {
 						lg.Error("ScannerEngine: no ZoneData on scan request, cannot compute current delegation state", "child", sr.ChildZone)
 					} else if sr.ZoneData.DelegationBackend == nil {
-						if sr.ZoneData.Options[OptAllowChildUpdates] {
+						if sr.ZoneData.Option(OptAllowChildUpdates) {
 							lg.Error("ScannerEngine: zone allows child updates but has no DelegationBackend; diff against empty current state will produce spurious adds (invariant violation)", "child", sr.ChildZone, "parent", sr.ZoneData.ZoneName)
 						} else {
 							lg.Warn("ScannerEngine: parent zone has no DelegationBackend, cannot read current DS for diff", "child", sr.ChildZone, "parent", sr.ZoneData.ZoneName)
@@ -1019,7 +1019,7 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	// accumulate (the same class of bug as DS accumulation on CDS).
 	var delegationData map[string]map[uint16][]dns.RR
 	if parentZD.DelegationBackend == nil {
-		if parentZD.Options[OptAllowChildUpdates] {
+		if parentZD.Option(OptAllowChildUpdates) {
 			scanLog.Printf("ProcessCSYNCNotify: %s: parent zone %s allows child updates but has no DelegationBackend; refusing to compute diff against empty current state (invariant violation)", childZone, parentZD.ZoneName)
 			response.Error = true
 			response.ErrorMsg = "parent zone has no DelegationBackend"

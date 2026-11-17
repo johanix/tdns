@@ -198,7 +198,7 @@ func applyZonePolicyTransactionalLocked(
 	if newPol.Error != "" {
 		return 0, fmt.Errorf("applyZonePolicyTransactional: DNSSEC policy %q is broken: %s", newName, newPol.Error)
 	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return 0, fmt.Errorf("applyZonePolicyTransactional: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
@@ -278,7 +278,7 @@ func backfillAppliedIfEligible(kdb *KeyDB, zd *ZoneData, intentName string, inte
 	if intentPol == nil || intentName == "" {
 		return false, nil
 	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return false, nil
 	}
 	match, err := zoneActiveKeysMatchAlgs(kdb, zd.ZoneName, intentPol)
@@ -397,7 +397,7 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 	if zd == nil || kdb == nil {
 		return fmt.Errorf("syncZoneDnssecPolicyFromConfig: nil zone or keydb")
 	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return nil
 	}
 

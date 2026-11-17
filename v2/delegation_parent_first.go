@@ -222,7 +222,7 @@ func (zd *ZoneData) lockDelegationChanges() (unlock func()) {
 func (zd *ZoneData) syncsOwnDelegation() bool {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return zd.Options[OptParentSync] && !zd.Options[OptParentSyncProxy]
+	return zd.Option(OptParentSync) && !zd.Option(OptParentSyncProxy)
 }
 
 // zoneUpdateSubmitter applies one update through the ZoneUpdater and waits for

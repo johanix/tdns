@@ -268,13 +268,13 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 			// If a zone has modifications, freezing implies that the updated
 			// zone data should be written out to disk.
-			if !zd.Options[OptAllowUpdates] && !zd.Options[OptAllowChildUpdates] {
+			if !zd.Option(OptAllowUpdates) && !zd.Option(OptAllowChildUpdates) {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("FreezeZone: zone %s does not allow updates. Freeze would be a no-op", zd.ZoneName)
 				return
 			}
 
-			if zd.Options[OptFrozen] {
+			if zd.Option(OptFrozen) {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("FreezeZone: zone %s is already frozen", zd.ZoneName)
 				return
@@ -283,7 +283,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			// zd.mu.Lock()
 			zd.SetOption(OptFrozen, true)
 			//zd.mu.Unlock()
-			if zd.Options[OptDirty] {
+			if zd.Option(OptDirty) {
 				tosource := true
 				zd.WriteZone(tosource, false)
 				resp.Msg = fmt.Sprintf("Zone %s is now frozen, modifications will be written to disk", zd.ZoneName)
@@ -298,12 +298,12 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = msg
 				return
 			}
-			if !zd.Options[OptAllowUpdates] && !zd.Options[OptAllowChildUpdates] {
+			if !zd.Option(OptAllowUpdates) && !zd.Option(OptAllowChildUpdates) {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ThawZone: zone %s does not allow updates. Thaw would be a no-op", zd.ZoneName)
 				return
 			}
-			if !zd.Options[OptFrozen] {
+			if !zd.Option(OptFrozen) {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ThawZone: zone %s is not frozen", zd.ZoneName)
 				return
@@ -416,7 +416,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			for _, zc := range Conf.getDynamicZonesFromZonesMap() {
 				if zd, ok := Zones.Get(zc.Name); ok {
 					zc.Provisioning = zoneProvisioning(zd)
-					zc.ApiManaged = zd.Options[OptApiManagedZone]
+					zc.ApiManaged = zd.Option(OptApiManagedZone)
 					// Surface the zone's error/warning state (e.g. ConfigWarning
 					// for a partially-resolved primary set) — zoneDataToZoneConf
 					// deliberately omits runtime error fields.
@@ -486,7 +486,7 @@ func zoneProvisioning(zd *ZoneData) string {
 // desc` additionally fills the detail fields via populateZoneDescDetail.
 func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 	options := []ZoneOption{}
-	for opt, val := range zd.Options {
+	for opt, val := range zd.OptionsSnapshot() {
 		if val {
 			options = append(options, opt)
 		}
@@ -537,15 +537,15 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 		Name:                   zname,
 		Type:                   ZoneTypeToString[zd.ZoneType],
 		Store:                  ZoneStoreToString[zd.ZoneStore],
-		Dirty:                  zd.Options[OptDirty],
-		Frozen:                 zd.Options[OptFrozen],
+		Dirty:                  zd.Option(OptDirty),
+		Frozen:                 zd.Option(OptFrozen),
 		Options:                options,
 		Error:                  zd.Error,
 		ErrorType:              zd.ErrorType,
 		ErrorMsg:               zd.ErrorMsg,
 		RefreshCount:           zd.RefreshCount,
 		SourceCatalog:          zd.SourceCatalog,
-		ApiManaged:             zd.Options[OptApiManagedZone],
+		ApiManaged:             zd.Option(OptApiManagedZone),
 		Provisioning:           zoneProvisioning(zd),
 		Zonefile:               zd.Zonefile,
 		Primaries:              primaries,
@@ -671,7 +671,7 @@ func setZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName str
 	if pol.Error != "" {
 		return "", fmt.Errorf("policy-set: DNSSEC policy %q is broken: %s", policyName, pol.Error)
 	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return "", fmt.Errorf("policy-set: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 	// On an owned zone the algorithms, lifetimes, standby counts and the
@@ -768,7 +768,7 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 	if pol.Error != "" {
 		return "", fmt.Errorf("change-policy: DNSSEC policy %q is broken: %s", policyName, pol.Error)
 	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return "", fmt.Errorf("change-policy: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
@@ -1049,7 +1049,7 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	if pol.Error != "" {
 		return "", fmt.Errorf("policy-reset: config dnssecpolicy %q for zone %s is broken: %s", configName, zd.ZoneName, pol.Error)
 	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return "", fmt.Errorf("policy-reset: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
@@ -1213,8 +1213,8 @@ func APIzoneParentSyncWith(ctx context.Context, app *AppDetails, refreshq chan Z
 		}
 
 		// Gate: zone must have exactly one of parentsync or parentsync-proxy.
-		hasParentSync := zd.Options[OptParentSync]
-		hasProxy := zd.Options[OptParentSyncProxy]
+		hasParentSync := zd.Option(OptParentSync)
+		hasProxy := zd.Option(OptParentSyncProxy)
 		if !hasParentSync && !hasProxy {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %q does not have parentsync or parentsync-proxy option", zd.ZoneName)
@@ -1349,7 +1349,7 @@ func APIzoneChildSync(ctx context.Context, app *AppDetails) func(w http.Response
 		}
 
 		// Gate: zone must have childsync option.
-		if !zd.Options[OptChildSync] {
+		if !zd.Option(OptChildSync) {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %q does not have the childsync option", zd.ZoneName)
 			return
@@ -1389,7 +1389,7 @@ func APIzoneChildSync(ctx context.Context, app *AppDetails) func(w http.Response
 		// reconcile runs the refresh hook's body -- in-memory work and an
 		// enqueue to the push engine.
 		case "proxy-status", "advert", "reconcile":
-			if !zd.Options[OptChildSyncProxy] {
+			if !zd.Option(OptChildSyncProxy) {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Zone %q is not a childsync-proxy", zd.ZoneName)
 				return

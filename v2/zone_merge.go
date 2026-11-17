@@ -512,8 +512,8 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 	// the flag that says "memory differs from disk". Guarded because a nil
 	// Options map must not panic the LOAD path -- a zone that fails to come up
 	// is a worse outcome than a zone that comes up without a dirty flag.
-	if zd.Options == nil {
-		zd.Options = map[ZoneOption]bool{}
+	if zd.OptionsSnapshot() == nil {
+		zd.setOptionsLocked(map[ZoneOption]bool{})
 	}
 	zd.Options[OptDirty] = true
 	zd.mu.Unlock()
@@ -534,7 +534,7 @@ func zoneConflictPolicy(zd *ZoneData) ZoneConflictPolicy {
 	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	if zd.Options[OptOnConflictZonefileWins] {
+	if zd.Option(OptOnConflictZonefileWins) {
 		return ConflictZonefileWins
 	}
 	return ConflictDBWins

@@ -268,7 +268,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 	}
 
 	// Check if auto-create is enabled for this catalog zone
-	autoConfigureEnabled := catalogZd.Options[OptCatalogMemberAutoCreate]
+	autoConfigureEnabled := catalogZd.Option(OptCatalogMemberAutoCreate)
 	lg.Info("CATALOG: AutoConfigureZonesFromCatalog: policy check", "catalog", update.CatalogZone, "autoCreate", autoConfigureEnabled)
 
 	// VALIDATION: Check all member zones for configuration errors (applies regardless of policy)
@@ -453,7 +453,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			Name:      zoneName,
 			ZoneType:  Secondary,
 			ZoneStore: zd.ZoneStore,
-			Options:   zd.Options,
+			Options:   zd.OptionsSnapshot(),
 		}
 
 		// Attempt non-blocking send with timeout and context cancellation support

@@ -810,7 +810,7 @@ func (zd *ZoneData) requestIxfr() bool {
 	}
 	// Explicit off wins over explicit on: the safe direction is the one that
 	// only ever asks for a full transfer.
-	if zd.Options[OptNoRequestIxfr] {
+	if zd.Option(OptNoRequestIxfr) {
 		return false
 	}
 	return true
@@ -826,5 +826,5 @@ func (zd *ZoneData) signsItsOwnContent() bool {
 	if zd == nil {
 		return false
 	}
-	return zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
+	return zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)
 }

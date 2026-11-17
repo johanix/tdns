@@ -77,7 +77,7 @@ func dsModelForKeyWrite(zone string) (DSModel, bool) {
 	if !ok || zd == nil {
 		return DSModelNone, false
 	}
-	if zd.Options[OptMultiProvider] {
+	if zd.Option(OptMultiProvider) {
 		return DSModelNone, false
 	}
 	if zd.DnssecPolicy == nil {
@@ -162,7 +162,7 @@ func (kdb *KeyDB) RefreshDsForZone(zd *ZoneData) (DsFillReport, error) {
 
 func (kdb *KeyDB) fillDsForZone(zd *ZoneData, force bool) (DsFillReport, error) {
 	rep := DsFillReport{Zone: zd.ZoneName}
-	if zd.Options[OptMultiProvider] || zd.DnssecPolicy == nil {
+	if zd.Option(OptMultiProvider) || zd.DnssecPolicy == nil {
 		return rep, nil
 	}
 	model := dsModelForZone(zd)
@@ -263,7 +263,7 @@ func dsModelOfPolicy(pol *DnssecPolicy) DSModel {
 // old model carry its answers and nothing else rewrites them. oldPol is the
 // policy bound before, nil for a first bind.
 func reconcileDsAfterBind(kdb *KeyDB, zd *ZoneData, oldPol *DnssecPolicy) {
-	if kdb == nil || zd == nil || zd.Options[OptMultiProvider] || zd.DnssecPolicy == nil {
+	if kdb == nil || zd == nil || zd.Option(OptMultiProvider) || zd.DnssecPolicy == nil {
 		return
 	}
 	changed := oldPol != nil && dsModelOfPolicy(oldPol) != dsModelOfPolicy(zd.DnssecPolicy)
@@ -288,7 +288,7 @@ func fillDsForPolicyZones(ctx context.Context, kdb *KeyDB) {
 		if ctx.Err() != nil {
 			return
 		}
-		if zd.DnssecPolicy == nil || zd.Options[OptMultiProvider] {
+		if zd.DnssecPolicy == nil || zd.Option(OptMultiProvider) {
 			continue
 		}
 		var n int

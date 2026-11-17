@@ -339,7 +339,7 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 		// concurrent reload flip one between checks, producing a
 		// spurious "invariant violation" ERROR.
 		zd.mu.Lock()
-		allowChildUpdates := zd.Options[OptAllowChildUpdates]
+		allowChildUpdates := zd.Option(OptAllowChildUpdates)
 		backend := zd.DelegationBackend
 		zd.mu.Unlock()
 
@@ -403,9 +403,9 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 		// data race and two independent reads could straddle a reload.
 		// Same treatment the CHILD-UPDATE case above gives its options.
 		zd.mu.Lock()
-		allowUpdates := zd.Options[OptAllowUpdates]
-		allowApiUpdates := zd.Options[OptAllowApiUpdates]
-		allowTsigUpdates := zd.Options[OptAllowTsigUpdates]
+		allowUpdates := zd.Option(OptAllowUpdates)
+		allowApiUpdates := zd.Option(OptAllowApiUpdates)
+		allowTsigUpdates := zd.Option(OptAllowTsigUpdates)
 		zd.mu.Unlock()
 
 		if allowUpdates || ur.InternalUpdate ||
@@ -450,7 +450,7 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 			// it runs, and dss and signalsBefore were read before the apply.
 			afterPublish := func() (stop bool) {
 				zd.mu.Lock()
-				apiPrimary := zd.ZoneType == Primary && zd.Options[OptApiManagedZone]
+				apiPrimary := zd.ZoneType == Primary && zd.Option(OptApiManagedZone)
 				zonefile := zd.Zonefile
 				zd.mu.Unlock()
 				if apiPrimary && zonefile != "" {
@@ -466,7 +466,7 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 					}
 				}
 
-				if !ur.InternalUpdate && zd.Options[OptParentSync] && !dss.InSync &&
+				if !ur.InternalUpdate && zd.Option(OptParentSync) && !dss.InSync &&
 					(!ur.ParentSyncDone || len(dss.DNSKEYAdds)+len(dss.DNSKEYRemoves) > 0) {
 					lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
 					if !enqueueDelegationSync(ctx, zd.DelegationSyncQ, DelegationSyncRequest{
@@ -822,7 +822,7 @@ func (zd *ZoneData) applyChildUpdate(ur UpdateRequest, kdb *KeyDB, after func())
 	// modified delegation RRsets (notably DS, which is authoritative parent
 	// data and MUST carry a fresh RRSIG).
 	var dak *DnssecKeys
-	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
+	if zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning) {
 		var err error
 		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil || dak == nil || len(dak.ZSKs) == 0 {
@@ -1166,7 +1166,7 @@ func (zd *ZoneData) applyZoneUpdate(ur UpdateRequest, kdb *KeyDB, after func()) 
 	// the (nil,nil) "no error, no keys" case. Otherwise SignRRset is later called
 	// under zd.mu with a nil dak, reaches PublishDnskeyRRs, and self-deadlocks
 	// re-locking zd.mu.
-	if (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && (err != nil || dak == nil || len(dak.KSKs) == 0) {
+	if (zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)) && (err != nil || dak == nil || len(dak.KSKs) == 0) {
 		lg.Debug("ApplyZoneUpdateToZoneData: GetDnssecKeys failed, attempting to ensure keys exist", "zone", zd.ZoneName)
 		// Try to ensure active keys exist (will generate if needed)
 		dak, err = zd.EnsureActiveDnssecKeys(kdb, false)

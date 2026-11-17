@@ -211,7 +211,7 @@ func persistRefreshedZone(zd *ZoneData, zone string, gen uint64, conf *Config) {
 	}
 
 	switch {
-	case zd.ZoneType == Primary && !zd.Options[OptDirty]:
+	case zd.ZoneType == Primary && !zd.Option(OptDirty):
 		// A primary's file is its SOURCE and the refresh has just read it.
 		// Writing it back rewrites the operator's file behind their back.
 		lgEngine.Debug("skipping zone file write for unmodified primary zone", "zone", zone)
@@ -240,7 +240,7 @@ func persistRefreshedZone(zd *ZoneData, zone string, gen uint64, conf *Config) {
 // RefreshZoneCh, whose only reader is the refresh engine -- so doing it inline
 // from a refresh would let a full channel deadlock the engine against itself.
 func reparseCatalogZone(ctx context.Context, zd *ZoneData, zone string, updated bool, conf *Config) {
-	if !zd.Options[OptCatalogZone] {
+	if !zd.Option(OptCatalogZone) {
 		return
 	}
 	lgEngine.Info("parsing catalog zone member zones", "zone", zone, "updated", updated)

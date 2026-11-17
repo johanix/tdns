@@ -191,6 +191,7 @@ type ZoneData struct {
 	Children          map[string]*ChildDelegationData
 	DelegationBackend DelegationBackend // parent-side: backend for storing child delegation data
 	Options           map[ZoneOption]bool
+	optionsMu         sync.RWMutex        // see Option, in zone_option_runtime.go: orders the replacement of Options against a reader holding no lock
 	runtimeOptions    map[ZoneOption]bool // set by the daemon itself, kept across a config update (SetRuntimeOption); guarded by mu
 	// SuppressedOptions records the origination options that were configured
 	// for this zone but stripped by normalizeOptionsForRole (a tdns-auth

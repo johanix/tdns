@@ -86,7 +86,7 @@ func dnskeyIdentity(rr dns.RR) string {
 }
 
 func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
-	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptAllowUpdates) && !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return fmt.Errorf("zone %s does not allow updates or signing", zd.ZoneName)
 	}
 

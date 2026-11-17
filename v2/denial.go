@@ -72,7 +72,7 @@ var errDenialUnproven = errors.New("zone must be signed but its NSEC chain canno
 // signsHere reports whether this server signs zd, the test signRRsetForZone
 // applies as well.
 func (zd *ZoneData) signsHere() bool {
-	return zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
+	return zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)
 }
 
 // denialSourceFor says where zd's negative answers get their proof, given the
@@ -85,7 +85,7 @@ func (zd *ZoneData) signsHere() bool {
 // key to sign a synthesized NSEC with.
 func (zd *ZoneData) denialSourceFor(apex *OwnerData) denialSource {
 	if zd.signsHere() {
-		if zd.Options[OptBlackLies] {
+		if zd.Option(OptBlackLies) {
 			return denialCompact
 		}
 		return denialChain

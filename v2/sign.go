@@ -134,7 +134,7 @@ func sigValiditySeconds(pol *DnssecPolicy, rrtype uint16) uint32 {
 // with the very slices it went in with. On error *rrset is unchanged.
 func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, force bool, clamp *ClampParams) (bool, error) {
 
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return false, fmt.Errorf("SignRRset: zone %s does not allow signing (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
@@ -480,7 +480,7 @@ func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (b
 var ErrDnssecPolicyNotBound = errors.New("no DNSSEC policy bound yet; cannot generate active keys")
 
 func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKeys, error) {
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s does not allow signing (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
@@ -712,7 +712,7 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 //
 // Returns the count of RRSIGs written by the final pass.
 func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return 0, fmt.Errorf("ResignZone: zone %s should not be signed here (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 	if zd.HasError(DnssecError) {
@@ -755,7 +755,7 @@ func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 func (zd *ZoneData) resignWorkingSetLocked(ctx context.Context, dak *DnssecKeys, clamp *ClampParams) (int, error) {
 	zd.ensureWorkingSet()
 
-	if !zd.Options[OptBlackLies] {
+	if !zd.Option(OptBlackLies) {
 		if err := zd.GenerateNsecChainWithDak(ctx, dak); err != nil {
 			return 0, err
 		}
@@ -956,7 +956,7 @@ func (zd *ZoneData) stripZoneRRSIGsLocked(ctx context.Context, remove func(*dns.
 // At the end, is anything hass been signed, then we must end by bumping the
 // SOA Serial and resigning the SOA.
 func (zd *ZoneData) SignZone(ctx context.Context, kdb *KeyDB, force bool) (int, error) {
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return 0, fmt.Errorf("SignZone: zone %s should not be signed here (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 	if zd.HasError(DnssecError) {
@@ -1006,7 +1006,7 @@ func (zd *ZoneData) SignZone(ctx context.Context, kdb *KeyDB, force bool) (int, 
 	defer zd.mu.Unlock()
 	zd.ensureWorkingSet()
 
-	if !zd.Options[OptBlackLies] {
+	if !zd.Option(OptBlackLies) {
 		if err = zd.GenerateNsecChainWithDak(ctx, dak); err != nil {
 			return 0, err
 		}
@@ -1556,7 +1556,7 @@ func (zd *ZoneData) nsecRRForLocked(name, next string, ttl uint32, dak *DnssecKe
 	}
 	// Every authoritative name in a signed zone carries at least the RRSIG over
 	// its own NSEC, so the zone-level condition is the whole answer.
-	if dak != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && len(dak.KSKs) > 0 {
+	if dak != nil && (zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)) && len(dak.KSKs) > 0 {
 		tmap = append(tmap, int(dns.TypeRRSIG))
 	}
 
@@ -1572,7 +1572,7 @@ func (zd *ZoneData) nsecRRForLocked(name, next string, ttl uint32, dak *DnssecKe
 
 // GenerateNsecChainWithDak builds or refreshes the NSEC chain using the given active DNSSEC keys.
 func (zd *ZoneData) GenerateNsecChainWithDak(ctx context.Context, dak *DnssecKeys) error {
-	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptAllowUpdates) && !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return fmt.Errorf("GenerateNsecChainWithDak: zone %s is not allowed to be updated or signed", zd.ZoneName)
 	}
 

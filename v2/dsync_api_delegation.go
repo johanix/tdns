@@ -233,7 +233,7 @@ func DsyncApiPostDelegation() func(w http.ResponseWriter, r *http.Request) {
 		parent = zd.ZoneName
 
 		zd.mu.Lock()
-		frozen := zd.Options[OptFrozen]
+		frozen := zd.Option(OptFrozen)
 		policy := zd.UpdatePolicy.Child
 		zd.mu.Unlock()
 

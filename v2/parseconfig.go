@@ -1423,14 +1423,14 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// so no publish would otherwise be queued -- and the stale ZONEMD
 		// would go on being served until something unrelated touched the zone.
 		zonemdChanged := zonemdSettingsDiffer(
-			zdp.Options[OptPublishZonemd], zdp.zonemdScheme, zdp.zonemdAlgs,
+			zdp.Option(OptPublishZonemd), zdp.zonemdScheme, zdp.zonemdAlgs,
 			newOpts[OptPublishZonemd], zonemdSet.Scheme, zonemdSet.Algorithms)
 		// Likewise whether the resolver's source for the zone changes: what it
 		// holds about the zone came from the source it no longer uses.
-		sourceChanged := zdp.Options[OptModifiedDownstream] != newOpts[OptModifiedDownstream]
+		sourceChanged := zdp.Option(OptModifiedDownstream) != newOpts[OptModifiedDownstream]
 		// An option the daemon set by itself is not in the file; a reload
 		// must not take it away (SetRuntimeOption).
-		zdp.Options = zdp.withRuntimeOptionsLocked(newOpts)
+		zdp.setOptionsLocked(zdp.withRuntimeOptionsLocked(newOpts))
 		zdp.publishCadence = publishCadence
 		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
 		retries, retryInterval := zoneNotifyRetrySettings(zname, zconf)
@@ -1553,10 +1553,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			capturedOpts := options
 			setupSync := func(zd *ZoneData) {
 				// Skip if the MP HSYNCPARAM callback already set up delegation sync for this zone.
-				if zd.Options[OptParentSync] && !capturedOpts[OptParentSync] {
+				if zd.Option(OptParentSync) && !capturedOpts[OptParentSync] {
 					return
 				}
-				if zd.Options[OptChildSync] && !capturedOpts[OptChildSync] {
+				if zd.Option(OptChildSync) && !capturedOpts[OptChildSync] {
 					return
 				}
 				delegationSyncQ := conf.Internal.DelegationSyncQ
