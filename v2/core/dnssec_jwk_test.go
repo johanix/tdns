@@ -366,6 +366,28 @@ func TestJSONWebKeySet(t *testing.T) {
 	}
 }
 
+// TestJSONWebKeySetNamesBadKey checks that a set refused for one key says
+// which key: its index in "keys" and its kid when it has a string one.
+func TestJSONWebKeySetNamesBadKey(t *testing.T) {
+	good := string(mustMarshalJWK(t, testKeys(t)["EC P-256"]))
+	for _, tc := range []struct {
+		name, bad, want string
+		sentinel        error
+	}{
+		{"with kid", `{"kty":"XYZ","kid":"k-17"}`, `keys[1] (kid "k-17"): `, ErrJWKUnsupportedKty},
+		{"no kid", `{"kty":"XYZ"}`, "keys[1]: ", ErrJWKUnsupportedKty},
+		{"non-string kid", `{"kty":"XYZ","kid":7}`, "keys[1]: ", ErrJWKMemberType},
+	} {
+		_, err := ParseJSONWebKeySet([]byte(`{"keys":[` + good + `,` + tc.bad + `]}`))
+		if !errors.Is(err, tc.sentinel) {
+			t.Fatalf("%s: err = %v, want %v", tc.name, err, tc.sentinel)
+		}
+		if msg := err.Error(); !strings.Contains(msg, tc.want) {
+			t.Errorf("%s: err %q does not name %q", tc.name, msg, tc.want)
+		}
+	}
+}
+
 // TestJSONWebKeyThumbprintRFC7638 checks the thumbprint against the worked
 // example of RFC 7638 section 3.1.
 func TestJSONWebKeyThumbprintRFC7638(t *testing.T) {

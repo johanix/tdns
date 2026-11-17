@@ -481,12 +481,29 @@ func (s *JSONWebKeySet) UnmarshalJSON(data []byte) error {
 	for i, e := range elems {
 		k, err := ParseJSONWebKey(e)
 		if err != nil {
-			return fmt.Errorf("JWK Set key %d: %w", i, err)
+			return fmt.Errorf("JWK Set %s: %w", jwkSetKeyName(i, e), err)
 		}
 		keys = append(keys, k)
 	}
 	s.Keys = keys
 	return nil
+}
+
+// jwkSetKeyName names a set element for an error: its position in "keys"
+// and, when it carries one, its kid. An operator with a set of many keys
+// needs both to find the one that refused the set; the kid is read on its
+// own because the key itself did not parse.
+func jwkSetKeyName(i int, elem json.RawMessage) string {
+	name := fmt.Sprintf("keys[%d]", i)
+	var m map[string]json.RawMessage
+	if json.Unmarshal(elem, &m) != nil {
+		return name
+	}
+	var kid string
+	if raw, ok := m["kid"]; ok && json.Unmarshal(raw, &kid) == nil && kid != "" {
+		name += fmt.Sprintf(" (kid %q)", kid)
+	}
+	return name
 }
 
 // ParseJSONWebKeySet parses a JWK Set.
