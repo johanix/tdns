@@ -48,6 +48,13 @@ Features:
   on port 53. Backoff and RTT are kept per address, port and transport.
   `dump zone servers` shows the targets (`Signal targets`).
 
+  A signal may name any port except those on the Fetch Standard's bad-port
+  list (https://fetch.spec.whatwg.org/#port-blocking: SSH, SMTP and the
+  like), which browsers refuse for HTTPS records too; 53, 853 and 443 are
+  never refused. A record with such a port is used as one about the
+  nameserver itself without a port: its transports go to the nameserver
+  on their default ports, with a debug line.
+
   An AliasMode record at `_dns.<ns>` delegates the whole signal: tdns-imr
   takes the signal of the RRset the alias leads to, from the Additional
   section when it was injected beside the alias, and otherwise by looking up
