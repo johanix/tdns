@@ -831,12 +831,27 @@ type JournalConf struct {
 	Active *bool `yaml:"active" mapstructure:"active"`
 }
 
+// Clone returns a copy of j that shares nothing with it. Active is a pointer,
+// and a saved copy of the pointer follows the value it points to.
+func (j JournalConf) Clone() JournalConf {
+	if j.Active != nil {
+		v := *j.Active
+		j.Active = &v
+	}
+	return j
+}
+
 // JournalActive reports whether delta persistence is enabled. Absent config
 // means enabled.
+//
+// Reads the published runtime-config snapshot, NOT Conf under confMu. The
+// publish path calls this under zd.mu, and every config reload takes zd.mu
+// zone by zone while it holds confMu's write lock, so taking confMu here is a
+// lock-order inversion: an update applying on a zone while a reload reaches
+// that zone is a deadlock, and it stops every later update and reload (#1001).
+// This function must stay free of confMu and of anything that takes it.
 func JournalActive() bool {
-	confMu.RLock()
-	defer confMu.RUnlock()
-	return Conf.Journal.Active == nil || *Conf.Journal.Active
+	return !ConfLive().JournalOff
 }
 
 // KeystoreConf is the keystore: block. Today it carries only pre-load, but the
@@ -1353,10 +1368,16 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	// can still refuse the reload. Adds and template re-expansion must not
 	// go on with templates from a config that was refused.
 	runningTemplates, runningTemplateList := Templates, conf.Templates
+	// ParseConfig decodes into conf before it validates, so a refused reload
+	// leaves the journal: block it decoded behind, and the next publish of the
+	// runtime-config snapshot (a single-zone reload) would put it in force.
+	// Keep the accepted one and put it back on a refusal.
+	runningJournal := conf.Journal.Clone()
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
 		Templates, conf.Templates = runningTemplates, runningTemplateList
+		conf.Journal = runningJournal
 	}
 	// Rebuild the TSIG store ONLY after a successful parse. With KeyDB, reconcile
 	// config keys in place (§6).
@@ -1501,9 +1522,9 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 
 	// Zones this reload is dropping. Collected here and acted on AFTER confMu is
 	// released: the signal-name withdrawal below enqueues onto KeyDB.UpdateQ
-	// with a blocking send, and applying a zone update reaches JournalActive(),
-	// which takes confMu.RLock -- so a full queue under the write lock would
-	// deadlock the daemon rather than slow it down.
+	// with a blocking send, and the updater applies updates under the zone
+	// locks this reload takes zone by zone -- so a full queue under the write
+	// lock would hold every config reader up behind the updater.
 	var removedZones []string
 
 	for _, zname := range prezones {
