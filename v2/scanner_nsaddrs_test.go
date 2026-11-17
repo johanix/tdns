@@ -99,7 +99,7 @@ func TestQueryAllNSAsksTheNextAddressWhenTheFirstDoesNotAnswer(t *testing.T) {
 	sc.childPort = port
 	ns := &core.RRset{Name: child, RRtype: dns.TypeNS, RRs: []dns.RR{mustRR(t, child+" 300 IN NS "+nsName)}}
 
-	answers, queryErrors, err := sc.queryAllNS(context.Background(), child, dns.TypeA, ns, imr, nil)
+	answers, queryErrors, err := sc.queryAllNS(context.Background(), child, dns.TypeA, ns, nil, imr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestQueryAllNSLeavesOutANameserverNoAddressOfWhichAnswers(t *testing.T) {
 	sc.childPort = port
 	ns := &core.RRset{Name: child, RRtype: dns.TypeNS, RRs: []dns.RR{mustRR(t, child+" 300 IN NS "+nsName)}}
 
-	answers, queryErrors, err := sc.queryAllNS(context.Background(), child, dns.TypeA, ns, imr, nil)
+	answers, queryErrors, err := sc.queryAllNS(context.Background(), child, dns.TypeA, ns, nil, imr, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,16 +136,18 @@ func TestQueryAllNSLeavesOutANameserverNoAddressOfWhichAnswers(t *testing.T) {
 	}
 }
 
-// Once the budget is spent no further address is tried.
+// Once the budget is spent no address is tried, the first included.
 func TestAskNameserverAddressesStopsWhenTheContextIsDone(t *testing.T) {
 	port := ipv6Server(t, "child.example. 300 IN A 192.0.2.7")
 	sc := NewScanner(startAuthQueryEngine(t), false, false)
+	addr := net.JoinHostPort("::1", port)
+
+	if _, _, err := sc.askNameserverAddresses(context.Background(), "child.example.", dns.TypeA, []string{addr}); err != nil {
+		t.Fatalf("the address answers: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-
-	// The first address is always asked; the second would answer, and is not.
-	_, _, err := sc.askNameserverAddresses(ctx, "child.example.", dns.TypeA,
-		[]string{net.JoinHostPort("127.0.0.1", port), net.JoinHostPort("::1", port)})
+	_, _, err := sc.askNameserverAddresses(ctx, "child.example.", dns.TypeA, []string{addr})
 	if err == nil || !strings.Contains(err.Error(), "context canceled") {
 		t.Errorf("got %v, want no answer, the context being done", err)
 	}
@@ -177,7 +179,7 @@ func TestCoherenceAsksAnIPv6AddressWhenTheIPv4OneDoesNotAnswer(t *testing.T) {
 	sc.conf = conf
 	sc.childPort = port
 
-	err := CheckDelegationCoherence(cohChild, []dns.RR{mustRR(t, cohChild+" 3600 IN NS "+nsName)},
+	err := CheckDelegationCoherence(cohChild, childServers{NS: []dns.RR{mustRR(t, cohChild+" 3600 IN NS "+nsName)}},
 		[]dns.RR{p.dsA, p.dsB}, []dns.RR{delOneDS(p.dsA)}, nameserversDnskeyFetcher(sc))
 	if err != nil {
 		t.Fatalf("withdrawing A's DS, with the one nameserver serving B's copy at its IPv6 address: %v", err)

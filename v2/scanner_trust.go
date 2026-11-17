@@ -136,15 +136,17 @@ func (scanner *Scanner) askChildWithDenial(ctx context.Context, qname string, qt
 // askChildServers asks every nameserver in nsRRset for (qname, qtype) and
 // returns what each one that answered said, in the order of nsRRset, without
 // comparing the answers. A nameserver that gives no answer is left out, as
-// askChild leaves it out; no answer from any of them is an error.
-func (scanner *Scanner) askChildServers(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, lg *log.Logger) ([]childAnswer, error) {
+// askChild leaves it out; no answer from any of them is an error. glue, the A
+// and AAAA records of the nameservers that the caller knows, says where to ask
+// those nameservers; the others are looked up (queryAllNS).
+func (scanner *Scanner) askChildServers(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, glue []dns.RR, lg *log.Logger) ([]childAnswer, error) {
 	var answers []childAnswer
 	var queryErrors []string
 	var err error
 	if scanner.queryChildServers != nil {
 		answers, err = scanner.queryChildServers(ctx, qname, qtype, nsRRset)
 	} else {
-		answers, queryErrors, err = scanner.queryAllNS(ctx, qname, qtype, nsRRset, scanner.imr(), lg)
+		answers, queryErrors, err = scanner.queryAllNS(ctx, qname, qtype, nsRRset, glue, scanner.imr(), lg)
 	}
 	if err != nil {
 		return nil, err
@@ -187,7 +189,7 @@ func serialAt(serials []nsSerial, ns string) (uint32, bool) {
 // nameservers had to agree on did through securedChildRRsetFetcher. A missing
 // SOA is an absenceNotProven error unless its absence is proven, as there.
 func (scanner *Scanner) childSOASerials(ctx context.Context, childZone string, nsRRset *core.RRset, pol DelegationPolicy, lg *log.Logger) ([]nsSerial, error) {
-	answers, err := scanner.askChildServers(ctx, childZone, dns.TypeSOA, nsRRset, lg)
+	answers, err := scanner.askChildServers(ctx, childZone, dns.TypeSOA, nsRRset, nil, lg)
 	if err != nil {
 		return nil, err
 	}
@@ -469,12 +471,12 @@ func (scanner *Scanner) checkDSMatchesChildKeys(ctx context.Context, childZone s
 		cp.Header().Class = dns.ClassNONE
 		actions = append(actions, cp)
 	}
-	var nameservers []dns.RR
+	var servers childServers
 	if nsRRset != nil {
-		nameservers = nsRRset.RRs
+		servers.NS = nsRRset.RRs
 	}
-	fetch := func(child string, _ []dns.RR) ([]dnskeyCopy, error) {
-		answers, err := scanner.askChildServers(ctx, child, dns.TypeDNSKEY, nsRRset, lg)
+	fetch := func(child string, _ childServers) ([]dnskeyCopy, error) {
+		answers, err := scanner.askChildServers(ctx, child, dns.TypeDNSKEY, nsRRset, nil, lg)
 		if err != nil {
 			return nil, err
 		}
@@ -511,9 +513,9 @@ func (scanner *Scanner) checkDSMatchesChildKeys(ctx context.Context, childZone s
 			}
 			copies = append(copies, c)
 		}
-		return withSilentServers(copies, nameservers), nil
+		return withSilentServers(copies, servers.NS), nil
 	}
-	if err := CheckDelegationCoherence(childZone, nameservers, currentDS, actions, fetch); err != nil {
+	if err := CheckDelegationCoherence(childZone, servers, currentDS, actions, fetch); err != nil {
 		return refusef("%v", err)
 	}
 	return nil

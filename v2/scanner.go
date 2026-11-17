@@ -494,7 +494,7 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 // with it. It goes with the first answer, as the RRSIGs of a non-empty RRset
 // do.
 func (scanner *Scanner) queryAllNSAndCompareWithDenial(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, imr *Imr, lg *log.Logger) (*core.RRset, []*core.RRset, bool, error) {
-	answers, queryErrors, err := scanner.queryAllNS(ctx, qname, qtype, nsRRset, imr, lg)
+	answers, queryErrors, err := scanner.queryAllNS(ctx, qname, qtype, nsRRset, nil, imr, lg)
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -522,14 +522,20 @@ type childAnswer struct {
 // queryAllNS queries all nameservers in an NS RRset for a given qname/qtype
 // and returns what each one that answered said, in the order of the NS RRset,
 // and why each of the others gave no answer.
-func (scanner *Scanner) queryAllNS(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, imr *Imr, lg *log.Logger) ([]childAnswer, []string, error) {
+//
+// glue holds the A and AAAA records the caller knows for the nameservers. A
+// nameserver that has some is asked at those addresses and not looked up, and
+// so does not need imr. The delegation check does this for a nameserver an
+// update adds together with its glue, which the resolver cannot know yet. The
+// others are looked up through imr.
+func (scanner *Scanner) queryAllNS(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, glue []dns.RR, imr *Imr, lg *log.Logger) ([]childAnswer, []string, error) {
 	// IMR may be disabled or the generalized-NOTIFY path may have
 	// reached the scanner before the IMR singleton was initialized;
 	// without this guard the subsequent imr.ImrQuery(...) call
 	// dereferences a nil *Imr and panics the tdns-authv2 process
 	// from inside a server handler goroutine, killing the daemon on
 	// otherwise-accepted NOTIFY(CDS/CSYNC) traffic.
-	if imr == nil {
+	if imr == nil && len(glue) == 0 {
 		return nil, nil, fmt.Errorf("queryAllNSAndCompare: no IMR available yet; cannot compare child NS data")
 	}
 	// Extract nameserver names from NS RRset
@@ -562,9 +568,18 @@ func (scanner *Scanner) queryAllNS(ctx context.Context, qname string, qtype uint
 		port = "53"
 	}
 	for _, nsName := range nsNames {
-		// Get A/AAAA records for the nameserver
-		var v4, v6 []string
+		// Get A/AAAA records for the nameserver: the glue the caller has for it,
+		// or else what the resolver finds.
+		v4, v6 := glueAddresses(glue, nsName, port)
+		haveGlue := len(v4)+len(v6) > 0
+		if !haveGlue && imr == nil {
+			queryErrors = append(queryErrors, fmt.Sprintf("%s: no glue, and no IMR available yet to look it up", nsName))
+			continue
+		}
 		for _, rrtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+			if haveGlue {
+				break
+			}
 			addrResp, err := imr.ImrQuery(ctx, nsName, rrtype, dns.ClassINET, nil)
 			if err != nil {
 				if scanner.Verbose && lg != nil {
@@ -622,6 +637,23 @@ func (scanner *Scanner) queryAllNS(ctx context.Context, qname string, qtype uint
 // those -- eight seconds, sixteen at the worst -- and the others wait for it.
 const maxNameserverAddresses = 4
 
+// glueAddresses returns the addresses of nsName that glue holds, as host:port,
+// IPv4 and IPv6 apart.
+func glueAddresses(glue []dns.RR, nsName, port string) (v4, v6 []string) {
+	for _, rr := range glue {
+		if !core.EqualNames(rr.Header().Name, nsName) {
+			continue
+		}
+		switch rr := rr.(type) {
+		case *dns.A:
+			v4 = append(v4, net.JoinHostPort(rr.A.String(), port))
+		case *dns.AAAA:
+			v6 = append(v6, net.JoinHostPort(rr.AAAA.String(), port))
+		}
+	}
+	return v4, v6
+}
+
 // nameserverAddressOrder is the order a nameserver's addresses are tried in: the
 // first IPv4 address, the first IPv6 address, the second of each, and so on, up
 // to maxNameserverAddresses. Both families are tried before either is tried
@@ -644,11 +676,11 @@ func nameserverAddressOrder(v4, v6 []string) []string {
 // (qname, qtype), and returns the first answer. Any failure to answer (no
 // connection, no reply, an error rcode, a reply that is not authoritative)
 // moves on to the next address. When none answers, the error says what each
-// said. Once ctx is done no further address is tried.
+// said. Once ctx is done no address is tried, the first included.
 func (scanner *Scanner) askNameserverAddresses(ctx context.Context, qname string, qtype uint16, addrs []string) (*core.RRset, []*core.RRset, error) {
 	var failures []string
-	for i, addr := range addrs {
-		if i > 0 && ctx.Err() != nil {
+	for _, addr := range addrs {
+		if ctx.Err() != nil {
 			failures = append(failures, ctx.Err().Error())
 			break
 		}
@@ -941,7 +973,7 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 	// a DS). Through the secured fetcher, a missing CSYNC under require-dnssec
 	// was an error, which a poll would log for every such child on every round.
 	// A CSYNC that is there is validated before anything is read from it.
-	csyncAnswers, err := scanner.askChildServers(ctx, childZone, dns.TypeCSYNC, nsRRset, scanLog)
+	csyncAnswers, err := scanner.askChildServers(ctx, childZone, dns.TypeCSYNC, nsRRset, nil, scanLog)
 	if err != nil {
 		fail("error querying CSYNC", err)
 		return

@@ -25,16 +25,16 @@ func TestDsyncApiCoherenceStatus(t *testing.T) {
 		want  int
 	}{
 		{"the child's DNSKEY lookup failed (not at its nameservers yet)",
-			func(string, []dns.RR) ([]dnskeyCopy, error) { return nil, errors.New("i/o timeout") },
+			func(string, childServers) ([]dnskeyCopy, error) { return nil, errors.New("i/o timeout") },
 			http.StatusServiceUnavailable},
 		{"this server's resolver has not started",
-			func(string, []dns.RR) ([]dnskeyCopy, error) { return nil, ErrNoImrEngine },
+			func(string, childServers) ([]dnskeyCopy, error) { return nil, ErrNoImrEngine },
 			http.StatusServiceUnavailable},
 		{"no resolver at all", nil, http.StatusConflict},
 		{"the resulting DS set matches no published key", fetcherFor(other), http.StatusConflict},
 	}
 	for _, c := range cases {
-		err := CheckDelegationCoherence(cohChild, nil, nil, update, c.fetch)
+		err := CheckDelegationCoherence(cohChild, childServers{}, nil, update, c.fetch)
 		if err == nil {
 			t.Fatalf("%s: the check accepted the update", c.name)
 		}

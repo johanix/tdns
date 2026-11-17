@@ -63,9 +63,25 @@ type dnskeyCopy struct {
 	Err error
 }
 
-// dnskeyFetcher returns the DNSKEY RRset each of nameservers serves for child,
-// one dnskeyCopy per nameserver asked, a nameserver that gave no copy included
-// (dnskeyCopy.Err). An error means no copy could be had at all.
+// childServers is the delegation a DS change is judged for, as the update
+// leaves it.
+type childServers struct {
+	// NS is the child's NS RRset: the nameservers a resolver is sent to.
+	NS []dns.RR
+
+	// Glue is the A and AAAA records the parent publishes at those nameservers'
+	// names once the update is applied: what is in its zone now, with the update's
+	// additions and deletions. It is where a nameserver is asked, in place of
+	// where the resolver would look it up. A nameserver the update adds together
+	// with its glue is not in the resolver yet, and without this would be taken
+	// for one that gave no answer (#1104). A nameserver with no glue here, one
+	// outside the parent's zone, is looked up by the resolver.
+	Glue []dns.RR
+}
+
+// dnskeyFetcher returns the DNSKEY RRset each of the nameservers of servers
+// serves for child, one dnskeyCopy per nameserver asked, a nameserver that gave
+// no copy included (dnskeyCopy.Err). An error means no copy could be had at all.
 //
 // The copies and their verdicts travel together because only the caller can
 // decide what an unvalidated answer means: for a child that already has a DS it
@@ -73,12 +89,11 @@ type dnskeyCopy struct {
 // normal state of affairs. A fetcher that decided on its own could only get one
 // of those right. The RRSIGs are what the other way checks (signedByPublishedDS).
 //
-// nameservers is the child's NS RRset: the delegation the update leaves. A
-// fetcher that is not able to ask a particular nameserver ignores it.
+// A fetcher that is not able to ask a particular nameserver ignores servers.
 //
 // Injected rather than called directly so the rule below can be tested without
 // a network, and so the parent can choose how it looks the child up.
-type dnskeyFetcher func(child string, nameservers []dns.RR) (copies []dnskeyCopy, err error)
+type dnskeyFetcher func(child string, servers childServers) (copies []dnskeyCopy, err error)
 
 // dsAfterActions applies the DS-affecting records of an RFC 2136 update to the
 // parent's current DS RRset for child, and reports the result.
@@ -268,7 +283,7 @@ func (zd *ZoneData) CheckDelegationCoherenceForUpdate(actions []dns.RR, fetch dn
 			return fmt.Errorf("cannot verify that %s would still validate: cannot read the DS this parent publishes for it: %w: %w",
 				child, err, ErrDelegationUnverifiable)
 		}
-		if err := CheckDelegationCoherence(child, zd.childNameserversAfter(child, actions),
+		if err := CheckDelegationCoherence(child, zd.childServersAfter(child, actions),
 			currentDS, actions, fetch); err != nil {
 			return err
 		}
@@ -276,22 +291,38 @@ func (zd *ZoneData) CheckDelegationCoherenceForUpdate(actions []dns.RR, fetch dn
 	return nil
 }
 
-// childNameserversAfter returns the NS RRset the parent publishes for child once
-// actions are applied: the nameservers a resolver is sent to after the change,
-// and so the ones whose DNSKEY RRsets a DS change has to hold for. The current
-// RRset when the update says nothing about NS, which is the usual case for a
-// DS change.
-func (zd *ZoneData) childNameserversAfter(child string, actions []dns.RR) []dns.RR {
-	current := zd.currentChildNS(child)
-	if after, touched := rrsetAfterActions(child, dns.TypeNS, current, actions); touched && len(after) > 0 {
-		return after
+// childServersAfter returns the delegation the parent publishes for child once
+// actions are applied: the NS RRset (the nameservers a resolver is sent to, and
+// so the ones whose DNSKEY RRsets a DS change has to hold for; the current one
+// when the update says nothing about NS, which is the usual case for a DS
+// change), and the glue the parent publishes for those nameservers, as the
+// update leaves it. That includes the glue the update adds for a nameserver it
+// adds, which a resolver does not know yet.
+func (zd *ZoneData) childServersAfter(child string, actions []dns.RR) childServers {
+	servers := childServers{NS: zd.currentChildNS(child)}
+	if after, touched := rrsetAfterActions(child, dns.TypeNS, servers.NS, actions); touched && len(after) > 0 {
+		servers.NS = after
 	}
-	return current
+	lookup := zd.currentGlueLookup()
+	seen := map[string]bool{}
+	for _, rr := range servers.NS {
+		ns, ok := rr.(*dns.NS)
+		if !ok || seen[core.CanonicalizeName(ns.Ns)] {
+			continue
+		}
+		seen[core.CanonicalizeName(ns.Ns)] = true
+		for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+			current, _ := lookup(ns.Ns, qtype)
+			glue, _ := rrsetAfterActions(ns.Ns, qtype, current, actions)
+			servers.Glue = append(servers.Glue, glue...)
+		}
+	}
+	return servers
 }
 
 // CheckDelegationCoherence reports whether applying actions would leave child's
-// delegation unvalidatable, and refuses it if so. nameservers is the child's NS
-// RRset after the change; fetch is asked for the DNSKEY RRset each of them
+// delegation unvalidatable, and refuses it if so. servers is the delegation
+// after the change; fetch is asked for the DNSKEY RRset each of its nameservers
 // serves.
 //
 // The rule is RFC 7344's Continuity, and it is deliberately "at least one",
@@ -329,7 +360,7 @@ func (zd *ZoneData) childNameserversAfter(child string, actions []dns.RR) []dns.
 // turns the check into a formality that anything can bypass by being
 // unreachable at the right moment -- and the cost is bounded by the fact that
 // this runs only for updates that actually change the DS.
-func CheckDelegationCoherence(child string, nameservers, currentDS, actions []dns.RR, fetch dnskeyFetcher) error {
+func CheckDelegationCoherence(child string, servers childServers, currentDS, actions []dns.RR, fetch dnskeyFetcher) error {
 	child = dns.Fqdn(child)
 
 	resulting, mentioned := dsAfterActions(child, currentDS, actions)
@@ -352,7 +383,7 @@ func CheckDelegationCoherence(child string, nameservers, currentDS, actions []dn
 		return fmt.Errorf("cannot verify that %s would still validate: %w: %w", child, errNoDnskeyFetcher, ErrDelegationUnverifiable)
 	}
 
-	all, err := fetch(child, nameservers)
+	all, err := fetch(child, servers)
 	if err != nil {
 		return fmt.Errorf("cannot verify that %s would still validate: DNSKEY lookup failed: %w: %w", child, err, ErrDelegationUnverifiable)
 	}
@@ -653,7 +684,7 @@ func coherenceDnskeyFetcher(conf *Config) dnskeyFetcher {
 	if conf.Imr.Active != nil && !*conf.Imr.Active {
 		return nil
 	}
-	return func(string, []dns.RR) ([]dnskeyCopy, error) {
+	return func(string, childServers) ([]dnskeyCopy, error) {
 		return nil, fmt.Errorf("this server's resolver is not running yet: %w", ErrNoImrEngine)
 	}
 }
@@ -670,14 +701,19 @@ func coherenceDnskeyFetcher(conf *Config) dnskeyFetcher {
 // may have just made out of date. The parent is the authority for that DS
 // RRset, and the check measures every copy against its own.
 //
+// A nameserver is asked at the addresses of the glue the parent publishes for it
+// once the update is applied (childServers.Glue), and at the resolver's only
+// when there is none. The update may add a nameserver together with its glue, and
+// the resolver does not know that address yet (#1104).
+//
 // Returns nil when there is no scanner, so the caller reports "no way to look
 // up its DNSKEYs" rather than an unexplained refusal.
 func nameserversDnskeyFetcher(scanner *Scanner) dnskeyFetcher {
 	if scanner == nil {
 		return nil
 	}
-	return func(child string, nameservers []dns.RR) ([]dnskeyCopy, error) {
-		if len(nameservers) == 0 {
+	return func(child string, servers childServers) ([]dnskeyCopy, error) {
+		if len(servers.NS) == 0 {
 			return nil, fmt.Errorf("the parent publishes no nameserver for %s to ask", child)
 		}
 		lg := scanner.Log["CDS"]
@@ -688,7 +724,7 @@ func nameserversDnskeyFetcher(scanner *Scanner) dnskeyFetcher {
 		defer cancel()
 
 		answers, err := scanner.askChildServers(ctx, child, dns.TypeDNSKEY,
-			&core.RRset{Name: child, Class: dns.ClassINET, RRtype: dns.TypeNS, RRs: nameservers}, lg)
+			&core.RRset{Name: child, Class: dns.ClassINET, RRtype: dns.TypeNS, RRs: servers.NS}, servers.Glue, lg)
 		if err != nil {
 			return nil, err
 		}
@@ -696,7 +732,7 @@ func nameserversDnskeyFetcher(scanner *Scanner) dnskeyFetcher {
 		for _, a := range answers {
 			copies = append(copies, dnskeyCopy{Server: a.NS, RRset: a.RRset})
 		}
-		return withSilentServers(copies, nameservers), nil
+		return withSilentServers(copies, servers.NS), nil
 	}
 }
 

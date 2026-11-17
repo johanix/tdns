@@ -258,7 +258,7 @@ func TestOwnZoneQuestionsAreAnsweredFromTheZone(t *testing.T) {
 // nameserver of the child, #925). It stands for what the resolver itself
 // answers for a child whose DS this zone holds, which is what these tests pin.
 func resolverDnskeyFetcher(imr *Imr) dnskeyFetcher {
-	return func(child string, _ []dns.RR) ([]dnskeyCopy, error) {
+	return func(child string, _ childServers) ([]dnskeyCopy, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		resp, err := imr.ImrQuery(ctx, dns.Fqdn(child), dns.TypeDNSKEY, dns.ClassINET, nil)

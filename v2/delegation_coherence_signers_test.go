@@ -61,7 +61,7 @@ func silentServer(server string) dnskeyCopy {
 
 // serversGive is a fetcher that hands over copies as they are.
 func serversGive(copies ...dnskeyCopy) dnskeyFetcher {
-	return func(string, []dns.RR) ([]dnskeyCopy, error) { return copies, nil }
+	return func(string, childServers) ([]dnskeyCopy, error) { return copies, nil }
 }
 
 // Withdrawing one signer's DS leaves the DS RRset matching a key the child
@@ -76,7 +76,7 @@ func TestCoherenceRefusesWithdrawingASignersDSWhileItsNameserversServeItsCopy(t 
 	copyB := copyOf(nsB, p.signedBy(t, p.b))
 
 	// What was judged before: whichever copy the resolver gave. B's is fine.
-	if err := CheckDelegationCoherence(cohChild, nil, current, withdrawA, serversGive(copyB)); err != nil {
+	if err := CheckDelegationCoherence(cohChild, childServers{}, current, withdrawA, serversGive(copyB)); err != nil {
 		t.Fatalf("B's copy alone was refused, so this does not show why one copy is not enough: %v", err)
 	}
 
@@ -93,7 +93,7 @@ func TestCoherenceRefusesWithdrawingASignersDSWhileItsNameserversServeItsCopy(t 
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckDelegationCoherence(cohChild, nil, current, withdrawA, serversGive(tc.copies...))
+			err := CheckDelegationCoherence(cohChild, childServers{}, current, withdrawA, serversGive(tc.copies...))
 			if err == nil {
 				t.Fatal("a DS was withdrawn that the DNSKEY RRset at a nameserver is signed by," +
 					" and no other DS vouches for")
@@ -123,14 +123,14 @@ func TestCoherenceAllowsWithdrawingTheDSOfASignerThatIsOutOfTheDelegation(t *tes
 	withdrawA := []dns.RR{delOneDS(p.dsA)}
 
 	// Only B's nameservers are in the delegation, so only B's copy is asked.
-	if err := CheckDelegationCoherence(cohChild, nil, current, withdrawA,
+	if err := CheckDelegationCoherence(cohChild, childServers{}, current, withdrawA,
 		serversGive(copyOf(nsB, p.signedBy(t, p.b)))); err != nil {
 		t.Fatalf("withdrawing A's DS after A's nameservers left the delegation was refused: %v", err)
 	}
 
 	// Both nameservers in the delegation, and both serve copies B signs: the
 	// hand-over is complete.
-	if err := CheckDelegationCoherence(cohChild, nil, current, withdrawA,
+	if err := CheckDelegationCoherence(cohChild, childServers{}, current, withdrawA,
 		serversGive(copyOf(nsA, p.signedBy(t, p.b)), copyOf(nsB, p.signedBy(t, p.b)))); err != nil {
 		t.Fatalf("withdrawing A's DS once every copy is signed by B was refused: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestCoherenceRefusesReplacingADSThatTheCopiesAreNotSignedFor(t *testing.T) 
 	swap := []dns.RR{delOneDS(p.dsA), addDS(p.dsB)}
 	copies := []dnskeyCopy{copyOf(nsA, p.signedBy(t, p.a)), copyOf(nsB, p.signedBy(t, p.a))}
 
-	err := CheckDelegationCoherence(cohChild, nil, []dns.RR{p.dsA}, swap, serversGive(copies...))
+	err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{p.dsA}, swap, serversGive(copies...))
 	if err == nil {
 		t.Fatal("A's DS was replaced by B's while every copy is signed by A only")
 	}
@@ -162,7 +162,7 @@ func TestCoherenceWithdrawingADSNeedsEveryNameserversCopy(t *testing.T) {
 	withdrawA := []dns.RR{delOneDS(p.dsA)}
 	copyB := copyOf(nsB, p.signedBy(t, p.b))
 
-	err := CheckDelegationCoherence(cohChild, nil, current, withdrawA, serversGive(copyB, silentServer(nsA)))
+	err := CheckDelegationCoherence(cohChild, childServers{}, current, withdrawA, serversGive(copyB, silentServer(nsA)))
 	if err == nil {
 		t.Fatal("a DS was withdrawn with one nameserver's copy not seen")
 	}
@@ -178,7 +178,7 @@ func TestCoherenceWithdrawingADSNeedsEveryNameserversCopy(t *testing.T) {
 
 	// A copy that is already wrong is what the child is told, not that a
 	// nameserver was silent.
-	err = CheckDelegationCoherence(cohChild, nil, current, withdrawA,
+	err = CheckDelegationCoherence(cohChild, childServers{}, current, withdrawA,
 		serversGive(copyOf(nsA, p.signedBy(t, p.a)), silentServer("ns2.provider-a.example.")))
 	if err == nil || errors.Is(err, ErrDelegationUnverifiable) {
 		t.Errorf("got %v, want the refusal for the copy that is signed by the withdrawn key", err)
@@ -198,7 +198,7 @@ func TestCoherenceAllowsAddingASignersDSBackWhateverCopyAResolverWouldGive(t *te
 	copyB := copyOf(nsB, p.signedBy(t, p.b))
 
 	// Judged on A's copy alone, as it was: refused.
-	err := CheckDelegationCoherence(cohChild, nil, published, addA, serversGive(copyA))
+	err := CheckDelegationCoherence(cohChild, childServers{}, published, addA, serversGive(copyA))
 	if err == nil {
 		t.Fatal("A's copy alone was accepted: a copy signed by the key being added is not authenticated by the DS published")
 	}
@@ -215,7 +215,7 @@ func TestCoherenceAllowsAddingASignersDSBackWhateverCopyAResolverWouldGive(t *te
 		{"a further nameserver gave no copy", []dnskeyCopy{copyA, copyB, silentServer("ns2.provider-b.example.")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := CheckDelegationCoherence(cohChild, nil, published, addA, serversGive(tc.copies...)); err != nil {
+			if err := CheckDelegationCoherence(cohChild, childServers{}, published, addA, serversGive(tc.copies...)); err != nil {
 				t.Fatalf("adding A's DS back was refused: %v", err)
 			}
 		})
@@ -236,7 +236,7 @@ func TestCoherenceAnAdditionStillNeedsACopyTheParentsDSAuthenticates(t *testing.
 	addRogue := []dns.RR{addDS(dsForKey(t, rogue))}
 
 	// Every copy is signed by the rogue key, whose DS is the one being added.
-	err := CheckDelegationCoherence(cohChild, nil, published, addRogue,
+	err := CheckDelegationCoherence(cohChild, childServers{}, published, addRogue,
 		serversGive(copyOf(nsA, rogueSigned(rogue)), copyOf(nsB, rogueSigned(rogue))))
 	if err == nil {
 		t.Fatal("a DS was added on copies nothing the parent publishes authenticates")
@@ -247,7 +247,7 @@ func TestCoherenceAnAdditionStillNeedsACopyTheParentsDSAuthenticates(t *testing.
 
 	// One copy is signed by B, whose DS is published: the keys it holds,
 	// the rogue key among them, are then the child's.
-	if err := CheckDelegationCoherence(cohChild, nil, published, addRogue,
+	if err := CheckDelegationCoherence(cohChild, childServers{}, published, addRogue,
 		serversGive(copyOf(nsA, rogueSigned(rogue)), copyOf(nsB, rogueSigned(p.b)))); err != nil {
 		t.Fatalf("a DS for a key the authenticated copy holds was refused: %v", err)
 	}
@@ -255,7 +255,7 @@ func TestCoherenceAnAdditionStillNeedsACopyTheParentsDSAuthenticates(t *testing.
 	// The keys of a copy nothing authenticates do not count: the DS being
 	// added names a key only that copy holds.
 	stranger := newSignerTestKey(t, cohChild, 257)
-	err = CheckDelegationCoherence(cohChild, nil, nil, []dns.RR{addDS(dsForKey(t, stranger))},
+	err = CheckDelegationCoherence(cohChild, childServers{}, nil, []dns.RR{addDS(dsForKey(t, stranger))},
 		serversGive(copyOf(nsB, signedDnskeys(t, testKeys(p.b), testKeys(p.b), p.inc, p.exp))))
 	if err == nil || !strings.Contains(err.Error(), "matches none") {
 		t.Errorf("a DS for a key no copy holds: %v, want it to match none", err)
@@ -266,7 +266,7 @@ func TestCoherenceAnAdditionStillNeedsACopyTheParentsDSAuthenticates(t *testing.
 // signed by anything a DS vouches for. The first DS only has to match a key.
 func TestCoherenceTheFirstDSIsJudgedOnAnyCopy(t *testing.T) {
 	p := newSignerPair(t, cohChild)
-	if err := CheckDelegationCoherence(cohChild, nil, nil, []dns.RR{addDS(p.dsA)},
+	if err := CheckDelegationCoherence(cohChild, childServers{}, nil, []dns.RR{addDS(p.dsA)},
 		serversGive(copyOf(nsA, p.signedBy(t, p.a)), silentServer(nsB))); err != nil {
 		t.Fatalf("a first DS was refused: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestCoherenceTheFirstDSIsJudgedOnAnyCopy(t *testing.T) {
 // try again.
 func TestCoherenceNoCopyFromAnyNameserverIsUnverifiable(t *testing.T) {
 	p := newSignerPair(t, cohChild)
-	err := CheckDelegationCoherence(cohChild, nil, []dns.RR{p.dsB}, []dns.RR{addDS(p.dsA)},
+	err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{p.dsB}, []dns.RR{addDS(p.dsA)},
 		serversGive(silentServer(nsA), silentServer(nsB)))
 	if err == nil {
 		t.Fatal("a DS was added with no copy of the DNSKEY RRset seen")
@@ -292,9 +292,9 @@ func TestCoherenceAsksTheNameserversTheDelegationHasAfterTheUpdate(t *testing.T)
 	zd := twoSignerParent(t, p.dsA, p.dsB)
 
 	var asked []string
-	fetch := func(_ string, nameservers []dns.RR) ([]dnskeyCopy, error) {
+	fetch := func(_ string, servers childServers) ([]dnskeyCopy, error) {
 		asked = nil
-		for _, rr := range nameservers {
+		for _, rr := range servers.NS {
 			asked = append(asked, rr.(*dns.NS).Ns)
 		}
 		return []dnskeyCopy{copyOf(nsB, p.signedBy(t, p.b))}, nil
@@ -460,11 +460,11 @@ func TestCoherenceJudgesAWithdrawalWhateverCaseTheDigestIsWrittenIn(t *testing.T
 
 	current := []dns.RR{published, p.dsB}
 	called := false
-	fetch := func(string, []dns.RR) ([]dnskeyCopy, error) {
+	fetch := func(string, childServers) ([]dnskeyCopy, error) {
 		called = true
 		return []dnskeyCopy{copyOf(nsA, p.signedBy(t, p.a)), copyOf(nsB, p.signedBy(t, p.b))}, nil
 	}
-	err = CheckDelegationCoherence(cohChild, nil, current, received.Ns, fetch)
+	err = CheckDelegationCoherence(cohChild, childServers{}, current, received.Ns, fetch)
 	if !called {
 		t.Fatal("the DNSKEY RRsets were not looked at: the withdrawal was taken for a no-op")
 	}

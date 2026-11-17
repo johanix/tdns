@@ -23,7 +23,7 @@ import (
 
 // countingFetcher answers with rrset and state, and counts the lookups.
 func countingFetcher(state cache.ValidationState, rrset *core.RRset, calls *int) dnskeyFetcher {
-	return func(string, []dns.RR) ([]dnskeyCopy, error) {
+	return func(string, childServers) ([]dnskeyCopy, error) {
 		*calls++
 		return []dnskeyCopy{{RRset: rrset, State: state}}, nil
 	}

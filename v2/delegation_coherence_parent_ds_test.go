@@ -27,7 +27,7 @@ import (
 // fetcherAnswer returns a fetcher that answers with rrset, and state as the
 // resolver's verdict on it.
 func fetcherAnswer(state cache.ValidationState, rrset *core.RRset) dnskeyFetcher {
-	return func(string, []dns.RR) ([]dnskeyCopy, error) {
+	return func(string, childServers) ([]dnskeyCopy, error) {
 		return []dnskeyCopy{{RRset: rrset, State: state}}, nil
 	}
 }
@@ -64,7 +64,7 @@ func TestCoherenceTheParentsDSAuthenticatesAnUnvalidatedAnswer(t *testing.T) {
 			// signature comes first and names a key the parent has no DS for
 			// yet, so every signature has to be tried.
 			both := signedDnskeys(t, testKeys(oldKSK, newKSK), testKeys(newKSK, oldKSK), inc, exp)
-			if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{oldDS},
+			if err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{oldDS},
 				[]dns.RR{addDS(newDS)}, fetcherAnswer(state, both)); err != nil {
 				t.Fatalf("the new KSK's DS was refused: %v", err)
 			}
@@ -72,7 +72,7 @@ func TestCoherenceTheParentsDSAuthenticatesAnUnvalidatedAnswer(t *testing.T) {
 			// The old KSK is gone and only the new one signs. The parent holds
 			// its DS already, so withdrawing the old DS is authenticated too.
 			onlyNew := signedDnskeys(t, testKeys(newKSK), testKeys(newKSK), inc, exp)
-			if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{oldDS, newDS},
+			if err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{oldDS, newDS},
 				[]dns.RR{delOneDS(oldDS)}, fetcherAnswer(state, onlyNew)); err != nil {
 				t.Fatalf("withdrawing the old KSK's DS was refused: %v", err)
 			}
@@ -88,7 +88,7 @@ func TestCoherenceTheParentsDSAllowsAPrePublishedDS(t *testing.T) {
 	now := time.Now()
 	rrset := signedDnskeys(t, testKeys(live), testKeys(live), now.Add(-time.Hour), now.Add(time.Hour))
 
-	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{dsForKey(t, live)},
+	if err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{dsForKey(t, live)},
 		[]dns.RR{addDS(dsForKey(t, incoming))},
 		fetcherAnswer(cache.ValidationStateInsecure, rrset)); err != nil {
 		t.Fatalf("a pre-published DS was refused: %v", err)
@@ -143,7 +143,7 @@ func TestCoherenceRefusesWhatNeitherTheResolverNorTheParentsDSValidates(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			// The update adds a DS for the rogue key, which the RRset carries:
 			// on an unauthenticated answer it would pass the matching rule.
-			err := CheckDelegationCoherence(cohChild, nil, []dns.RR{dsForKey(t, live)},
+			err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{dsForKey(t, live)},
 				[]dns.RR{addDS(dsForKey(t, rogue))}, fetcherAnswer(tc.state, tc.rrset))
 			if err == nil {
 				t.Fatal("a DS change was accepted on an answer neither the resolver nor the parent's DS validates")
@@ -175,7 +175,7 @@ func TestCoherenceABogusAnswerIsDecidedByTheParentsDS(t *testing.T) {
 	now := time.Now()
 	onlyNew := signedDnskeys(t, testKeys(newKSK), testKeys(newKSK), now.Add(-time.Hour), now.Add(time.Hour))
 
-	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{oldDS, newDS},
+	if err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{oldDS, newDS},
 		[]dns.RR{delOneDS(oldDS)}, fetcherAnswer(cache.ValidationStateBogus, onlyNew)); err != nil {
 		t.Fatalf("a DNSKEY RRset signed by a key the parent holds a DS for was refused on"+
 			" the resolver's Bogus: %v", err)
@@ -190,12 +190,12 @@ func TestCoherenceTheParentsDSIsAskedOnlyWhenTheResolverDidNotValidate(t *testin
 	incoming := newSignerTestKey(t, cohChild, 257)
 	unsigned := signedDnskeys(t, testKeys(live), nil, time.Time{}, time.Time{})
 
-	if err := CheckDelegationCoherence(cohChild, nil, []dns.RR{dsForKey(t, live)},
+	if err := CheckDelegationCoherence(cohChild, childServers{}, []dns.RR{dsForKey(t, live)},
 		[]dns.RR{addDS(dsForKey(t, incoming))},
 		fetcherAnswer(cache.ValidationStateSecure, unsigned)); err != nil {
 		t.Errorf("a Secure answer was refused: %v", err)
 	}
-	if err := CheckDelegationCoherence(cohChild, nil, nil, []dns.RR{addDS(dsForKey(t, live))},
+	if err := CheckDelegationCoherence(cohChild, childServers{}, nil, []dns.RR{addDS(dsForKey(t, live))},
 		fetcherAnswer(cache.ValidationStateInsecure, unsigned)); err != nil {
 		t.Errorf("a first DS was refused: %v", err)
 	}
