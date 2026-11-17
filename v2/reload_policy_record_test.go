@@ -6,6 +6,8 @@ package tdns
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -283,7 +285,7 @@ func TestAReloadLeavesTheOwnersFieldsOfABoundZoneAlone(t *testing.T) {
 
 	step := func(name, wantName string, wantWarning bool, when string) {
 		t.Helper()
-		if !zd.recordPolicyOfNonSigningZone(name) {
+		if !zd.recordPolicyOfNonSigningZone(name, nil) {
 			t.Fatalf("%s: the zone was not handled", when)
 		}
 		zd.mu.Lock()
@@ -336,5 +338,134 @@ func TestAReloadLeavesTheRecordOfASigningZoneToThePolicySync(t *testing.T) {
 	wantPolicyRecord(t, z.zd, "base", "base", "after a reload")
 	if !z.zd.signsItsOwnContent() {
 		t.Fatal("a reload took signing away")
+	}
+}
+
+// ReloadZoneConfig publishes the new runtime-config snapshot only after
+// ParseZones has queued the refreshers, so the engine can handle a zone's
+// refresher while ConfLive still holds the previous config's policies. A bound
+// zone must follow the policies of the reload being applied all the same: one
+// defined and selected in that reload, and one edited under its own name. Each
+// reload here is parsed by ParseZones against the new policies
+// (conf.Internal.DnssecPolicies) and handled by the engine with the snapshot
+// still the old one, which is published only after the engine has finished.
+func TestAReloadFollowsThePoliciesOfTheReloadNotTheRunningSnapshot(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	named := func(p DnssecPolicy, name string) DnssecPolicy { p.Name = name; return p }
+	oldBase := named(kskzsk(dns.ED25519, dns.ED25519), "base")
+	other := named(kskzsk(dns.ECDSAP256SHA256, dns.ECDSAP256SHA256), "other")
+	other2 := named(kskzsk(dns.RSASHA256, dns.RSASHA256), "other") // "other", edited
+
+	const zone = "snap.config.example."
+	file := filepath.Join(t.TempDir(), "zone")
+	body := zone + "\t3600\tIN\tSOA\tns1." + zone + " hostmaster." + zone + " 1 7200 1800 604800 7200\n" +
+		zone + "\t3600\tIN\tNS\tns1." + zone + "\n" +
+		"ns1." + zone + "\t3600\tIN\tA\t192.0.2.53\n"
+	if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Registered before the engine starts, so it runs after the engine stops.
+	t.Cleanup(func() {
+		if zd, ok := Zones.Get(zone); ok {
+			zd.stopPublisher()
+		}
+		Zones.Remove(zone)
+	})
+
+	// ParseZones queues its refreshers on parsed, and the test hands them on to
+	// the engine, which is the only way to wait for the refresh a refresher
+	// starts: ParseZones builds them with nobody waiting.
+	engineConf := &Config{}
+	engineConf.Internal.KeyDB = kdb
+	engineConf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 4)
+	engineConf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	runRefreshEngine(t, engineConf)
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	parsed := make(chan ZoneRefresher, 4)
+	conf.Internal.RefreshZoneCh = parsed
+
+	// The running daemon's snapshot, which the reloads below do not replace.
+	withLivePolicies(t, map[string]DnssecPolicy{"base": oldBase})
+	livePolicies := func(pols map[string]DnssecPolicy) {
+		t.Helper()
+		liveConfig.Store(&RuntimeConfig{DnssecPolicies: pols})
+	}
+
+	// answered sends zr to the engine and waits for its answer, which a
+	// refresher with Wait set gets when its refresh is done.
+	answered := func(zr ZoneRefresher) {
+		t.Helper()
+		resp := make(chan RefresherResponse, 1)
+		zr.Wait, zr.Response = true, resp
+		engineConf.Internal.RefreshZoneCh <- zr
+		select {
+		case r := <-resp:
+			if r.Error {
+				t.Fatalf("the engine's answer: %s", r.ErrorMsg)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the engine did not answer")
+		}
+	}
+	// reload is a ParseZones of the zone naming policy, against the policies
+	// the reload has parsed, and the engine's handling of what it queued, its
+	// refresh included.
+	reload := func(isReload bool, policy string, policies map[string]DnssecPolicy) *ZoneData {
+		t.Helper()
+		conf.Internal.DnssecPolicies = policies
+		conf.Zones = []ZoneConf{{Name: zone, Type: "primary", Store: "map", Zonefile: file, DnssecPolicy: policy}}
+		if _, broken, err := conf.ParseZones(context.Background(), isReload); err != nil || len(broken) > 0 {
+			t.Fatalf("ParseZones(reload=%v): err=%v broken=%v", isReload, err, broken)
+		}
+		zr := <-parsed
+		if isReload {
+			answered(zr)
+		} else {
+			// a first load answers when it fails, and when it is done goes on to
+			// the next request
+			engineConf.Internal.RefreshZoneCh <- zr
+			answered(ZoneRefresher{Name: zone, ZoneStore: MapZone})
+		}
+		zd, ok := Zones.Get(zone)
+		if !ok {
+			t.Fatalf("zone %s is not held", zone)
+		}
+		return zd
+	}
+	state := func(zd *ZoneData) (name string, alg uint8, warned bool) {
+		zd.mu.Lock()
+		defer zd.mu.Unlock()
+		if zd.DnssecPolicy != nil {
+			alg = zd.DnssecPolicy.KSKAlgorithm
+		}
+		_, warned = zd.Errors[DnssecPolicyWarning]
+		return zd.DnssecPolicyName, alg, warned
+	}
+
+	zd := reload(false, "base", map[string]DnssecPolicy{"base": oldBase})
+	if err := zd.BindPolicyWithoutSigning(); err != nil {
+		t.Fatalf("BindPolicyWithoutSigning: %v", err)
+	}
+	if n, a, w := state(zd); n != "base" || a != dns.ED25519 || w {
+		t.Fatalf("after the bind: %q, KSK algorithm %d, warning %v", n, a, w)
+	}
+
+	// "other" is defined in this reload and selected for the zone. The snapshot
+	// does not have it.
+	zd = reload(true, "other", map[string]DnssecPolicy{"base": oldBase, "other": other})
+	if n, a, w := state(zd); n != "other" || a != dns.ECDSAP256SHA256 || w {
+		t.Errorf("a policy defined in the reload: the zone records %q bound with KSK algorithm %d, warning %v; want %q, %d, no warning",
+			n, a, w, "other", dns.ECDSAP256SHA256)
+	}
+
+	// "other" is in the snapshot now, and the next reload edits it: the zone
+	// follows the edit, not the definition the snapshot still holds.
+	livePolicies(map[string]DnssecPolicy{"base": oldBase, "other": other})
+	zd = reload(true, "other", map[string]DnssecPolicy{"base": oldBase, "other": other2})
+	if n, a, w := state(zd); n != "other" || a != dns.RSASHA256 || w {
+		t.Errorf("a policy edited in the reload: the zone records %q bound with KSK algorithm %d, warning %v; want %q, %d, no warning",
+			n, a, w, "other", dns.RSASHA256)
 	}
 }

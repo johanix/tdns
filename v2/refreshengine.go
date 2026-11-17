@@ -1025,7 +1025,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// reload still records the policy the config now names
 						// (added, changed or removed) for a signing role learned
 						// later (#1000).
-						if zr.ConfigUpdate && !zd.recordPolicyOfNonSigningZone(zr.DnssecPolicy) {
+						if zr.ConfigUpdate && !zd.recordPolicyOfNonSigningZone(zr.DnssecPolicy, zr.DnssecPolicyDef) {
 							if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, zr.DnssecPolicy); err != nil {
 								lgEngine.Warn("DNSSEC policy sync on reload failed", "zone", zone, "err", err)
 								if zr.Response != nil {

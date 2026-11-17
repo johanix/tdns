@@ -1630,6 +1630,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				UpdatePolicySet:  true,
 				DelegationPolicy: dpol,
 				DnssecPolicy:     zconf.DnssecPolicy,
+				DnssecPolicyDef:  zonePolicyDef(zconf.DnssecPolicy, conf.Internal.DnssecPolicies),
 				TransferSrc:      zconf.TransferSrc,
 				// Always carried (empty == inherit the global), so a config
 				// edit that REMOVES a per-zone mode actually reverts the zone

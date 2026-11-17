@@ -107,13 +107,22 @@ func (zd *ZoneData) ReleaseWithheld() {
 // intendedPolicy is the policy a first load would bind to the zone: the CLI
 // override if there is one, else the name from its configuration.
 func (zd *ZoneData) intendedPolicy() (*DnssecPolicy, string, error) {
-	return zd.intendedPolicyNamed(zd.DnssecPolicyName)
+	return zd.intendedPolicyNamed(zd.DnssecPolicyName, nil)
 }
 
 // intendedPolicyNamed is intendedPolicy for a configuration that names
-// configName, which need not be the name the zone records yet.
-func (zd *ZoneData) intendedPolicyNamed(configName string) (*DnssecPolicy, string, error) {
+// configName, which need not be the name the zone records yet. def, when the
+// caller has it, is configName's definition in the config being applied. It
+// stands in for the runtime snapshot's, which a config reload publishes after
+// it has queued its refreshers, so that the snapshot may still be the previous
+// config's. An override of the policy in the keystore is not the configuration's
+// and is resolved as ever.
+func (zd *ZoneData) intendedPolicyNamed(configName string, def *DnssecPolicy) (*DnssecPolicy, string, error) {
 	name, pol, _, _, _, err := resolvePolicyPair(zd.KeyDB, zd.ZoneName, configName)
+	if err == nil && def != nil && name == configName {
+		d := *def
+		pol = &d
+	}
 	switch {
 	case err != nil:
 		return nil, "", fmt.Errorf("resolve the DNSSEC policy of zone %s: %w", zd.ZoneName, err)
@@ -160,6 +169,16 @@ func (zd *ZoneData) BindPolicyWithoutSigning() error {
 	return nil
 }
 
+// zonePolicyDef is the definition of the policy a zone's config names, in the
+// policies of the config being applied, for the refresher that carries it
+// (ZoneRefresher.DnssecPolicyDef). Nil for no policy or an unknown name.
+func zonePolicyDef(name string, policies map[string]DnssecPolicy) *DnssecPolicy {
+	if p, ok := policies[name]; ok && name != "" {
+		return &p
+	}
+	return nil
+}
+
 // recordPolicyOfNonSigningZone is the policy half of a config reload for a zone
 // that does not sign, and the reload's whole record of its policy. The policy
 // paths ask for a signing option and leave such a zone alone, so without this a
@@ -187,10 +206,15 @@ func (zd *ZoneData) BindPolicyWithoutSigning() error {
 // Nothing is signed and no last-applied record is written, as in
 // BindPolicyWithoutSigning.
 //
+// def is name's definition in the config the reload applies (ZoneRefresher's
+// DnssecPolicyDef), which a bound zone is rebound to, in place of the runtime
+// snapshot's: the reload publishes that after its refreshers are queued, and
+// the engine can get here first. Nil resolves through the snapshot.
+//
 // It reports whether it handled the zone. A zone that signs, or starts to while
 // this waits for the zone's policy lock, is not handled: its policy goes through
 // syncZoneDnssecPolicyFromConfig.
-func (zd *ZoneData) recordPolicyOfNonSigningZone(name string) bool {
+func (zd *ZoneData) recordPolicyOfNonSigningZone(name string, def *DnssecPolicy) bool {
 	zd.mu.Lock()
 	signs := zd.signsItsOwnContent()
 	zd.mu.Unlock()
@@ -226,7 +250,7 @@ func (zd *ZoneData) recordPolicyOfNonSigningZone(name string) bool {
 		return true
 	}
 	// A bound zone and a name: bind what the config defines under it now.
-	pol, newName, err := zd.intendedPolicyNamed(name)
+	pol, newName, err := zd.intendedPolicyNamed(name, def)
 	if err == nil && zoneOwned(zd) && ownerPolicyFieldsDiffer(oldPol, pol) {
 		err = fmt.Errorf("it differs from the bound policy in a field of the zone's key lifecycle owner")
 	}
