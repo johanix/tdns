@@ -562,36 +562,65 @@ func TestJournalPurgeReportsWhatArrivedDuringIt(t *testing.T) {
 
 // withJournalActive sets the deployment-wide kill-switch for the duration of a
 // test. Absent config means ON, so the tests that need it OFF must say so.
+//
+// JournalActive reads the published runtime-config snapshot (it must not take
+// confMu: #1001), so the switch is flipped there, on a copy of whatever is
+// published now.
 func withJournalActive(t *testing.T, active bool) {
 	t.Helper()
-	confMu.Lock()
-	prev := Conf.Journal.Active
-	Conf.Journal.Active = &active
-	confMu.Unlock()
-	t.Cleanup(func() {
-		confMu.Lock()
-		Conf.Journal.Active = prev
-		confMu.Unlock()
-	})
+	prev := liveConfig.Load()
+	next := *prev
+	next.JournalOff = !active
+	liveConfig.Store(&next)
+	t.Cleanup(func() { liveConfig.Store(prev) })
 }
 
 // TestJournalActiveDefaultsOn is the single most important property of the
 // switch. It is a *bool so that ABSENT means on -- a plain bool would default
 // to false and silently disable persistence for every existing config on
 // upgrade, which is the exact failure this subsystem exists to prevent.
+//
+// Checked at both ends of the path: the snapshot built from a config that does
+// not mention journal.active, and the seed snapshot a reader gets before the
+// first publish.
 func TestJournalActiveDefaultsOn(t *testing.T) {
-	confMu.Lock()
-	prev := Conf.Journal.Active
-	Conf.Journal.Active = nil
-	confMu.Unlock()
-	t.Cleanup(func() {
-		confMu.Lock()
-		Conf.Journal.Active = prev
-		confMu.Unlock()
-	})
+	prev := liveConfig.Load()
+	t.Cleanup(func() { liveConfig.Store(prev) })
 
+	liveConfig.Store(&RuntimeConfig{})
+	if !JournalActive() {
+		t.Fatal("the seed snapshot disabled persistence; it must default ON")
+	}
+
+	conf := &Config{}
+	conf.publishRuntimeConfig()
 	if !JournalActive() {
 		t.Fatal("an absent journal.active disabled persistence; it must default ON")
+	}
+}
+
+// TestPublishedSnapshotCarriesTheJournalSwitch: the value in the config is what
+// ends up in the snapshot JournalActive reads, for every value it can have.
+func TestPublishedSnapshotCarriesTheJournalSwitch(t *testing.T) {
+	prev := liveConfig.Load()
+	t.Cleanup(func() { liveConfig.Store(prev) })
+
+	on, off := true, false
+	for _, c := range []struct {
+		name   string
+		active *bool
+		want   bool
+	}{
+		{"absent", nil, true},
+		{"true", &on, true},
+		{"false", &off, false},
+	} {
+		conf := &Config{}
+		conf.Journal.Active = c.active
+		conf.publishRuntimeConfig()
+		if got := JournalActive(); got != c.want {
+			t.Errorf("journal.active %s: JournalActive() = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 
