@@ -320,6 +320,18 @@ func ChildGlueRRsToAddrs(v4glue, v6glue []dns.RR) ([]string, error) {
 	return addrs, nil
 }
 
+// authServerAddr is ns as AuthDNSQuery dials it: ns itself when it carries a
+// port, with port 53 added when it does not. The port is told from the address
+// by its form (net.SplitHostPort), not by how it ends: an address that ends in
+// ":53" is not for that reason one with a port (an IPv6 address can end so),
+// and one with another port has one.
+func authServerAddr(ns string) string {
+	if _, _, err := net.SplitHostPort(ns); err == nil {
+		return ns
+	}
+	return net.JoinHostPort(ns, "53")
+}
+
 // XXX: Do we still use this anywhere?
 func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 	rrtype uint16, verbose bool) (*core.RRset, int, error) {
@@ -336,9 +348,7 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 
 	m := authQueryMsg(qname, rrtype)
 	for _, ns := range nameservers {
-		if ns[len(ns)-3:] != ":53" {
-			ns = net.JoinHostPort(ns, "53")
-		}
+		ns = authServerAddr(ns)
 		if verbose {
 			// lg.Printf("AuthDNSQuery: using nameserver %s for <%s, %s> query\n",
 			// 	ns, qname, dns.TypeToString[rrtype])
@@ -404,9 +414,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 
 	m := authQueryMsg(qname, qtype)
 	for _, ns := range nameservers {
-		if ns[len(ns)-3:] != ":53" {
-			ns = net.JoinHostPort(ns, "53")
-		}
+		ns = authServerAddr(ns)
 		if verbose {
 			lg.Printf("AuthDNSQuery: using nameserver %s for <%s, %s> query\n",
 				ns, qname, dns.TypeToString[qtype])
