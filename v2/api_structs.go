@@ -51,15 +51,18 @@ type KeystorePost struct {
 	// narrows an export; the Bulk*Keys carry the payload of an import. Force
 	// (above) turns import's create-if-absent into overwrite.
 	// KeyFormat selects how exported private keys are rendered: "pem"
-	// (default, PKCS#8 exactly as stored) or "bind". Rendering happens here,
-	// daemon-side, because only the daemon links the algorithm
-	// implementations -- see bind_export.go.
+	// (default, PKCS#8 exactly as stored), "bind" or "jwk". Rendering
+	// happens here, daemon-side, because only the daemon links the
+	// algorithm implementations -- see bind_export.go and jwk_export.go.
 	KeyFormat      string          `json:"keyformat,omitempty"`
 	SelectExact    []string        `json:"selectexact,omitempty"`
 	SelectSubtree  []string        `json:"selectsubtree,omitempty"`
 	BulkDnssecKeys []BulkDnssecKey `json:"bulkdnsseckeys,omitempty"`
 	BulkSig0Keys   []BulkSig0Key   `json:"bulksig0keys,omitempty"`
 	BulkTsigKeys   []BulkTsigKey   `json:"bulktsigkeys,omitempty"`
+	// SkipUnsupported: a bulk export in jwk format leaves out the keys that
+	// have no JWK form and lists them in BulkSkipped, instead of failing.
+	SkipUnsupported bool `json:"skipunsupported,omitempty"`
 }
 
 type TsigKeyInfo struct {
@@ -101,6 +104,9 @@ type KeystoreResponse struct {
 	BulkSig0Keys     []BulkSig0Key        `json:"bulksig0keys,omitempty"`
 	BulkTsigKeys     []BulkTsigKey        `json:"bulktsigkeys,omitempty"`
 	BulkDispositions []BulkKeyDisposition `json:"bulkdispositions,omitempty"`
+	// BulkSkipped lists the keys a jwk bulk export with SkipUnsupported
+	// left out.
+	BulkSkipped []BulkSkippedKey `json:"bulkskipped,omitempty"`
 	// BulkRepublishZones names the zones a DNSSEC bulk import actually changed.
 	// Like NeedsSigningKeysRepublish it is an instruction to the external-tx
 	// caller, not wire data — but plural, because one bulk import spans zones.

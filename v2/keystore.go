@@ -176,19 +176,34 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			resp.ErrorMsg = err.Error()
 			return &resp, err
 		}
+		if err := checkSkipUnsupported(kp); err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, nil
+		}
 		// SIG(0) keys carry no timestamps, so a bind rendering of one gets
 		// the key material and no timing tags.
-		for i := range keys {
-			priv, err := PrivateKeyForExport(kp.KeyFormat, keys[i].KeyRR, keys[i].PrivateKey, "", "", "")
+		kept := keys[:0]
+		for _, k := range keys {
+			priv, jwk, err := exportKeyMaterial(kp.KeyFormat, dns.TypeKEY, k.KeyRR, k.PrivateKey, "", "", "")
 			if err != nil {
+				if kp.SkipUnsupported && IsJWKUnsupported(err) {
+					resp.BulkSkipped = append(resp.BulkSkipped, BulkSkippedKey{
+						Zone: k.Zone, Keyid: k.Keyid, Algorithm: k.Algorithm, Reason: err.Error()})
+					continue
+				}
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("%s keyid %d: %v", keys[i].Zone, keys[i].Keyid, err)
+				resp.ErrorMsg = fmt.Sprintf("%s keyid %d: %v", k.Zone, k.Keyid, err)
 				return &resp, nil
 			}
-			keys[i].PrivateKey = priv
+			k.PrivateKey, k.JWK = priv, jwk
+			kept = append(kept, k)
 		}
-		resp.BulkSig0Keys = keys
-		resp.Msg = fmt.Sprintf("Exported %d SIG(0) key(s)", len(keys))
+		resp.BulkSig0Keys = kept
+		resp.Msg = fmt.Sprintf("Exported %d SIG(0) key(s)", len(kept))
+		if n := len(resp.BulkSkipped); n > 0 {
+			resp.Msg += fmt.Sprintf("; skipped %d with no JWK form", n)
+		}
 		txSuccess = true
 		return &resp, nil
 
@@ -308,7 +323,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			}
 			return &resp, fmt.Errorf("error from row.Scan(): %v", err)
 		}
-		privkeyOut, err := PrivateKeyForExport(kp.KeyFormat, keyrrstr, privatekey, "", "", "")
+		privkeyOut, jwkOut, err := exportKeyMaterial(kp.KeyFormat, dns.TypeKEY, keyrrstr, privatekey, "", "", "")
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("%s keyid %d: %v", zonename, keyid, err)
@@ -323,6 +338,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 				Algorithm:  algorithm,
 				Creator:    creator,
 				PrivateKey: privkeyOut, // unredacted: export intentionally surfaces it
+				JWK:        jwkOut,
 				Keystr:     keyrrstr,
 			},
 		}
@@ -416,6 +432,15 @@ SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zon
 		resp.BulkSig0InvalidateZones = sig0InvalidateZones
 	}
 	return &resp, nil
+}
+
+// checkSkipUnsupported refuses SkipUnsupported outside a jwk export: pem
+// and bind export every key, so the flag would be accepted and mean nothing.
+func checkSkipUnsupported(kp KeystorePost) error {
+	if kp.SkipUnsupported && kp.KeyFormat != KeyFormatJWK {
+		return fmt.Errorf("skip-unsupported applies only to format %q", KeyFormatJWK)
+	}
+	return nil
 }
 
 // appendSig0InvalidateZone adds zone to the post-commit SIG(0) cache drop list
@@ -595,18 +620,33 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			resp.ErrorMsg = err.Error()
 			return &resp, err
 		}
-		for i := range keys {
-			priv, err := PrivateKeyForExport(kp.KeyFormat, keys[i].KeyRR, keys[i].PrivateKey,
-				keys[i].PublishedAt, keys[i].ActiveAt, keys[i].RetiredAt)
+		if err := checkSkipUnsupported(kp); err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, nil
+		}
+		kept := keys[:0]
+		for _, k := range keys {
+			priv, jwk, err := exportKeyMaterial(kp.KeyFormat, dns.TypeDNSKEY, k.KeyRR, k.PrivateKey,
+				k.PublishedAt, k.ActiveAt, k.RetiredAt)
 			if err != nil {
+				if kp.SkipUnsupported && IsJWKUnsupported(err) {
+					resp.BulkSkipped = append(resp.BulkSkipped, BulkSkippedKey{
+						Zone: k.Zone, Keyid: k.Keyid, Algorithm: k.Algorithm, Reason: err.Error()})
+					continue
+				}
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("%s keyid %d: %v", keys[i].Zone, keys[i].Keyid, err)
+				resp.ErrorMsg = fmt.Sprintf("%s keyid %d: %v", k.Zone, k.Keyid, err)
 				return &resp, nil
 			}
-			keys[i].PrivateKey = priv
+			k.PrivateKey, k.JWK = priv, jwk
+			kept = append(kept, k)
 		}
-		resp.BulkDnssecKeys = keys
-		resp.Msg = fmt.Sprintf("Exported %d DNSSEC key(s)", len(keys))
+		resp.BulkDnssecKeys = kept
+		resp.Msg = fmt.Sprintf("Exported %d DNSSEC key(s)", len(kept))
+		if n := len(resp.BulkSkipped); n > 0 {
+			resp.Msg += fmt.Sprintf("; skipped %d with no JWK form", n)
+		}
 		txSuccess = true
 		return &resp, nil
 
@@ -751,7 +791,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		}
 		// The single-key row carries no timestamps, so a bind rendering here
 		// gets the key material and no timing tags; bulk-export has them.
-		privkeyOut, err := PrivateKeyForExport(kp.KeyFormat, keyrrstr, privatekey, "", "", "")
+		privkeyOut, jwkOut, err := exportKeyMaterial(kp.KeyFormat, dns.TypeDNSKEY, keyrrstr, privatekey, "", "", "")
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("%s keyid %d: %v", zonename, keyid, err)
@@ -767,6 +807,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 				Algorithm:  algorithm,
 				Creator:    creator,
 				PrivateKey: privkeyOut, // unredacted: export intentionally surfaces it
+				JWK:        jwkOut,
 				Keystr:     keyrrstr,
 			},
 		}

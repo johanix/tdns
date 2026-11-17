@@ -213,9 +213,10 @@ Selection is additive and repeatable:
 For TSIG the flags are `--key` / `--keys`, with the same semantics — TSIG keys
 are named rather than zone-scoped, so calling them zones would be a lie.
 
-DNSSEC and SIG(0) exports also take `--format pem|bind`. `pem` is the default,
-and the only format `bulk-import` and pre-load read back; `bind` is for handing
-keys to bind9 or another tool that reads its key files. See
+DNSSEC and SIG(0) exports also take `--format pem|bind|jwk`. `pem` is the
+default, and the only format `bulk-import` and pre-load read back; `bind` is for
+handing keys to bind9 or another tool that reads its key files; `jwk` writes
+each private key as a DNSSEC JWK (draft-schlyter-dnsop-dnssec-jwk). See
 [key formats](#key-formats), including why re-exporting into a bind-format
 directory is less forgiving than the merge described next.
 
@@ -243,6 +244,9 @@ noise that hides the real change.
     Kpq.example.+015+52388.key
     Kpq.example.+015+52388.private
 ```
+
+With `--format jwk` each `.private` is replaced by a `.jwk` file holding the
+key as a JWK; the `.key` file is written as before.
 
 The manifest is not decoration, and an export directory without one is not
 usable. A `K<name>+<alg>+<keyid>.{key,private}` pair records nothing about
@@ -293,6 +297,11 @@ Worth knowing about the format:
   binary that does not link its algorithm.
 - Optional fields are omitted rather than written empty, and a manifest from a
   newer format version is refused rather than half-understood.
+- **A JWK export names `jwk_file` instead of `private_file`.** Such a manifest
+  is written as version 2; one with PEM or bind files only stays version 1, so
+  binaries that predate JWK still read it. The version follows the content: a
+  directory re-exported as PEM goes back to version 1. Key state and timing
+  stay in the manifest either way, because a JWK carries none.
 
 ### Importing
 
@@ -405,8 +414,66 @@ Activate: 20260806085839
 - **TSIG has no `--format`.** A TSIG secret is not a private key and has no
   file to format.
 
+`--format jwk` writes each private key as a JSON Web Key after
+draft-schlyter-dnsop-dnssec-jwk, in `K<name>+<alg>+<keyid>.jwk` in place of
+the `.private` file:
+
+```json
+{
+  "kid": "Gdxx70GZ3hlwc4KUPbGUspKQ303dplPhuU7SslPV1ng",
+  "kty": "OKP",
+  "crv": "Ed25519",
+  "x": "aIufB25wu_A9nLOZOm7ZlAxkdQyeCqAQcH7wMCg8DVo",
+  "d": "LrIfCpsKYav5oA8R9AoMipYE990WHLd6tceF2w-p4pM",
+  "dnskey": {
+    "name": "pq.example.",
+    "flags": 257,
+    "protocol": 3,
+    "algorithm": 15,
+    "keytag": 37134
+  }
+}
+```
+
+- **Key material** uses the JWK key types: `RSA` (all CRT members), `EC`
+  (P-256, P-384), `OKP` (Ed25519, Ed448) and `AKP` (ML-DSA-44, -65, -87).
+  `kid` is the RFC 7638 thumbprint and `keytag` is always written; `alg`
+  appears only on `AKP` keys, which need it. The DNSSEC algorithm comes from
+  `algorithm`, since `RSA` alone cannot tell RSASHA256 from RSASHA512.
+- **DNSSEC keys carry `"dnskey"`, SIG(0) keys `"sig0key"`**, never the other
+  way round. A SIG(0) KEY has flags 256, and in `"dnskey"` it would import
+  into any DNSSEC signer as a ZSK; a consumer that does not know `"sig0key"`
+  finds no `"dnskey"` and rejects the key. `"sig0key"` is tdns's proposal and
+  not (yet) in the draft. Which one is written follows the store the key is
+  in; a row whose RR type does not match its store is refused.
+- **ML-DSA exports the 32-byte seed** as `"priv"`. A key stored by a tdns
+  release before the seed form, or imported in the expanded-only form, has no
+  seed, and the seed cannot be recovered from the expanded key: export
+  refuses it with a message that says so. Such keys age out through
+  rollovers; keys generated now keep their seed.
+- **Algorithms with no JWK form** are refused: DSA, the GOST algorithms and
+  SM2SM3 (draft section 2.5), and the post-quantum families tdns registers
+  beyond ML-DSA (SLH-DSA, Falcon, MAYO, SNOVA, SQIsign, QR-UOV, CROSS), for
+  which no JOSE key type is defined. Export those as `pem` or `bind`.
+- **`bulk-export --format jwk` fails the run** on a key it cannot write.
+  `--skip-unsupported` leaves such keys out instead and lists each one with
+  the reason; it is refused with any other format. A key whose private and
+  public halves do not match is a broken row, not an unsupported one, and
+  fails the run either way.
+- **Every JWK is checked before it is written**: it is parsed back with the
+  draft's import rules, including the check that the private key matches the
+  public one, and must rebuild the stored DNSKEY or KEY and the stored private
+  key.
+- **Key state and timing are not in the JWK** (the draft carries none); in a
+  bulk export they stay in the manifest, which names the file as `jwk_file`.
+- **A JWK file is a cleartext private key**, mode 0600 like a `.private`
+  file. The draft recommends JWE for private keys in transit; tdns does not
+  encrypt exports (yet).
+
 The manifest is written either way, but a `--format bind` directory is not one
 `bulk-import` or pre-load will take as it is. Run `bulk-convert` on it first.
+Nor, in this release, is a `--format jwk` directory: `bulk-import` and pre-load
+refuse a manifest entry that names a `jwk_file`.
 
 **On the way in** there are three paths, and they differ, deliberately:
 

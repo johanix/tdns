@@ -64,6 +64,9 @@ type BulkDnssecKey struct {
 	ActiveSeq   *int64 `json:"active_seq,omitempty"`
 	PrivateKey  string `json:"privatekey"` // PKCS#8 PEM, exactly as stored
 	KeyRR       string `json:"keyrr"`      // zone-file DNSKEY RR text
+	// JWK is the key as a DNSSEC JWK ("dnskey" parameter). An export with
+	// --format jwk fills it instead of PrivateKey.
+	JWK string `json:"jwk,omitempty"`
 }
 
 // BulkSig0Key is one SIG(0) key on the wire, key material included.
@@ -77,6 +80,18 @@ type BulkSig0Key struct {
 	ParentState uint8  `json:"parent_state,omitempty"`
 	PrivateKey  string `json:"privatekey"` // PKCS#8 PEM, exactly as stored
 	KeyRR       string `json:"keyrr"`      // zone-file KEY RR text
+	// JWK is the key as a SIG(0) JWK ("sig0key" parameter), filled instead
+	// of PrivateKey by an export with --format jwk.
+	JWK string `json:"jwk,omitempty"`
+}
+
+// BulkSkippedKey is a key a bulk export with --skip-unsupported left out,
+// and why.
+type BulkSkippedKey struct {
+	Zone      string `json:"zone"`
+	Keyid     uint16 `json:"keyid"`
+	Algorithm string `json:"algorithm"`
+	Reason    string `json:"reason"`
 }
 
 // BulkTsigKey is one TSIG key on the wire. The secret is the whole key.

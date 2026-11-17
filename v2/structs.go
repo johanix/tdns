@@ -1325,6 +1325,8 @@ type Sig0Key struct {
 	PrivateKey      string //
 	Key             dns.KEY
 	Keystr          string
+	// JWK is set instead of PrivateKey by "export --format jwk".
+	JWK string `json:"jwk,omitempty"`
 	// ValidationFailed: the parent's automatic verification of this child key
 	// ran out of attempts (TriggerChildKeyVerification). Distinct from
 	// !Validated, which also covers "verification in progress". Reported as
@@ -1350,6 +1352,8 @@ type DnssecKey struct {
 	Pub  bool
 	Sign bool
 	DS   *bool
+	// JWK is set instead of PrivateKey by "export --format jwk".
+	JWK string `json:"jwk,omitempty"`
 }
 
 type DelegationSyncRequest struct {

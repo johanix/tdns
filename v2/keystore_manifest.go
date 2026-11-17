@@ -32,10 +32,22 @@ import (
 )
 
 const (
-	// KeystoreManifestVersion is the on-disk format version. The reader
-	// refuses anything newer rather than silently ignoring fields it does
-	// not understand — a half-understood key restore is worse than none.
-	KeystoreManifestVersion = 1
+	// KeystoreManifestVersion is the newest on-disk format version this
+	// binary reads. The reader refuses anything newer rather than silently
+	// ignoring fields it does not understand — a half-understood key
+	// restore is worse than none.
+	KeystoreManifestVersion = KeystoreManifestVersionJWK
+
+	// KeystoreManifestVersionBase is the format with PEM key files only.
+	// A manifest is written at this version unless it names a JWK file,
+	// so a PEM export stays readable by binaries that know only v1.
+	KeystoreManifestVersionBase = 1
+
+	// KeystoreManifestVersionJWK adds jwk_file. An entry with jwk_file
+	// has no private_file; a binary that knows only v1 would find no
+	// private key and must therefore refuse the manifest, which the
+	// version bump makes it do.
+	KeystoreManifestVersionJWK = 2
 
 	// KeystoreManifestFile is the manifest's fixed name inside an export
 	// directory.
@@ -68,8 +80,11 @@ type ManifestDnssecKey struct {
 	ActiveAt    string `yaml:"active_at,omitempty"`
 	RetiredAt   string `yaml:"retired_at,omitempty"`
 	ActiveSeq   *int64 `yaml:"active_seq,omitempty"`
-	PrivateFile string `yaml:"private_file"`
+	PrivateFile string `yaml:"private_file,omitempty"`
 	PublicFile  string `yaml:"public_file"`
+	// JwkFile names the key's DNSSEC JWK, in place of PrivateFile, for a
+	// --format jwk export. State and timing stay here: the JWK has none.
+	JwkFile string `yaml:"jwk_file,omitempty"`
 }
 
 // ManifestSig0Key mirrors a Sig0KeyStore row minus the key material.
@@ -81,8 +96,11 @@ type ManifestSig0Key struct {
 	Creator     string `yaml:"creator,omitempty"`
 	Comment     string `yaml:"comment,omitempty"`
 	ParentState uint8  `yaml:"parent_state,omitempty"`
-	PrivateFile string `yaml:"private_file"`
+	PrivateFile string `yaml:"private_file,omitempty"`
 	PublicFile  string `yaml:"public_file"`
+	// JwkFile names the key's SIG(0) JWK ("sig0key"), in place of
+	// PrivateFile.
+	JwkFile string `yaml:"jwk_file,omitempty"`
 }
 
 // ManifestTsigKey carries a TSIG key whole: the secret IS the key material, so
@@ -134,7 +152,7 @@ func LoadKeystoreManifest(dir string) (*KeystoreManifest, error) {
 			path, m.Version, KeystoreManifestVersion)
 	}
 	if m.Version == 0 {
-		m.Version = KeystoreManifestVersion
+		m.Version = KeystoreManifestVersionBase
 	}
 	return &m, nil
 }
@@ -145,7 +163,7 @@ func LoadOrNewKeystoreManifest(dir string) (*KeystoreManifest, error) {
 	path := filepath.Join(dir, KeystoreManifestFile)
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
-			return &KeystoreManifest{Version: KeystoreManifestVersion}, nil
+			return &KeystoreManifest{Version: KeystoreManifestVersionBase}, nil
 		}
 		return nil, fmt.Errorf("stat %s: %v", path, err)
 	}
@@ -160,9 +178,9 @@ func LoadOrNewKeystoreManifest(dir string) (*KeystoreManifest, error) {
 // control, where a reordered manifest is noise that hides the real change.
 func (m *KeystoreManifest) Save(dir string) error {
 	m.sort()
-	if m.Version == 0 {
-		m.Version = KeystoreManifestVersion
-	}
+	// Computed, never carried over: a directory re-exported as PEM after a
+	// JWK export goes back to v1, and one that gains a JWK file goes to v2.
+	m.Version = m.formatVersion()
 
 	data, err := yaml.Marshal(m)
 	if err != nil {
@@ -230,6 +248,21 @@ func (m *KeystoreManifest) Save(dir string) error {
 	return nil
 }
 
+// formatVersion is the lowest format version that can express m.
+func (m *KeystoreManifest) formatVersion() int {
+	for _, e := range m.Dnssec {
+		if e.JwkFile != "" {
+			return KeystoreManifestVersionJWK
+		}
+	}
+	for _, e := range m.Sig0 {
+		if e.JwkFile != "" {
+			return KeystoreManifestVersionJWK
+		}
+	}
+	return KeystoreManifestVersionBase
+}
+
 func (m *KeystoreManifest) sort() {
 	sort.Slice(m.Dnssec, func(i, j int) bool {
 		if m.Dnssec[i].Zone != m.Dnssec[j].Zone {
@@ -294,6 +327,10 @@ func KeyFileBasename(owner string, algNum uint8, keyid uint16) string {
 func (m *KeystoreManifest) LoadDnssecKeys(dir string) ([]BulkDnssecKey, error) {
 	out := make([]BulkDnssecKey, 0, len(m.Dnssec))
 	for _, e := range m.Dnssec {
+		if e.JwkFile != "" {
+			return nil, fmt.Errorf("DNSSEC key %s keyid %d: %s is a JWK key file, and this tdns cannot import JWK key files",
+				e.Zone, e.Keyid, e.JwkFile)
+		}
 		priv, keyRR, err := readManifestKeyFiles(dir, e.PrivateFile, e.PublicFile)
 		if err != nil {
 			return nil, fmt.Errorf("DNSSEC key %s keyid %d: %v", e.Zone, e.Keyid, err)
@@ -321,6 +358,10 @@ func (m *KeystoreManifest) LoadDnssecKeys(dir string) ([]BulkDnssecKey, error) {
 func (m *KeystoreManifest) LoadSig0Keys(dir string) ([]BulkSig0Key, error) {
 	out := make([]BulkSig0Key, 0, len(m.Sig0))
 	for _, e := range m.Sig0 {
+		if e.JwkFile != "" {
+			return nil, fmt.Errorf("SIG(0) key %s keyid %d: %s is a JWK key file, and this tdns cannot import JWK key files",
+				e.Zone, e.Keyid, e.JwkFile)
+		}
 		priv, keyRR, err := readManifestKeyFiles(dir, e.PrivateFile, e.PublicFile)
 		if err != nil {
 			return nil, fmt.Errorf("SIG(0) key %s keyid %d: %v", e.Zone, e.Keyid, err)
@@ -376,9 +417,26 @@ func ManifestEntryForDnssec(k BulkDnssecKey, base string) ManifestDnssecKey {
 		ActiveAt:    k.ActiveAt,
 		RetiredAt:   k.RetiredAt,
 		ActiveSeq:   k.ActiveSeq,
-		PrivateFile: base + ".private",
+		PrivateFile: privateFileFor(base, k.JWK),
 		PublicFile:  base + ".key",
+		JwkFile:     jwkFileFor(base, k.JWK),
 	}
+}
+
+// privateFileFor and jwkFileFor name the private half of an exported key:
+// base.private for PEM or bind, base.jwk for a JWK, never both.
+func privateFileFor(base, jwk string) string {
+	if jwk != "" {
+		return ""
+	}
+	return base + ".private"
+}
+
+func jwkFileFor(base, jwk string) string {
+	if jwk == "" {
+		return ""
+	}
+	return base + ".jwk"
 }
 
 // ManifestEntryForSig0 builds the manifest entry for an exported SIG(0) key.
@@ -391,8 +449,9 @@ func ManifestEntryForSig0(k BulkSig0Key, base string) ManifestSig0Key {
 		Creator:     k.Creator,
 		Comment:     k.Comment,
 		ParentState: k.ParentState,
-		PrivateFile: base + ".private",
+		PrivateFile: privateFileFor(base, k.JWK),
 		PublicFile:  base + ".key",
+		JwkFile:     jwkFileFor(base, k.JWK),
 	}
 }
 
