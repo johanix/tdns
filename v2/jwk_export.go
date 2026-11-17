@@ -82,7 +82,8 @@ func mldsaJWK(alg string, pub interface{ Bytes() []byte }, seed []byte) (*core.J
 	if seed == nil {
 		return nil, fmt.Errorf("%w: %s keys stored by tdns releases before the seed form (or imported in the "+
 			"expanded-only form) keep only the expanded key, and the 32-byte seed a JWK carries as \"priv\" "+
-			"cannot be recovered from it; such a key cannot be exported as JWK and ages out through a rollover",
+			"cannot be recovered from it, so this key has no JWK form; export it with --format pem or "+
+			"--format bind instead, or replace it with a new key through a rollover (new keys keep their seed)",
 			ErrJWKNoSeed, alg)
 	}
 	return &core.JSONWebKey{Kty: core.JWKKtyAKP, Alg: alg, Pub: pub.Bytes(), Priv: append([]byte(nil), seed...)}, nil

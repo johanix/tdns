@@ -455,15 +455,23 @@ the `.private` file:
 - **ML-DSA exports the 32-byte seed** as `"priv"`. A key stored by a tdns
   release before the seed form, or imported in the expanded-only form, has no
   seed, and the seed cannot be recovered from the expanded key: export
-  refuses it with a message that says so. Such keys age out through
-  rollovers; keys generated now keep their seed.
+  refuses it with a message that says so. Such a key still exports as `pem`
+  or `bind`; to get a JWK, replace it with a new key through a rollover
+  (keys generated now keep their seed).
+- **ML-DSA-65 and ML-DSA-87 use algorithms 200 and 201**, the
+  dnssec-algorithms registry's numbers, not IANA's. The JWK is written, but
+  it only interoperates with peers that use the same numbers, so each such
+  key gets a `WARNING` line on stderr; the export still succeeds.
 - **Algorithms with no JWK form** are refused: DSA, the GOST algorithms and
   SM2SM3 (draft section 2.5), and the post-quantum families tdns registers
   beyond ML-DSA (SLH-DSA, Falcon, MAYO, SNOVA, SQIsign, QR-UOV, CROSS), for
   which no JOSE key type is defined. Export those as `pem` or `bind`.
 - **`bulk-export --format jwk` fails the run** on a key it cannot write.
-  `--skip-unsupported` leaves such keys out instead and lists each one with
-  the reason; it is refused with any other format. A key whose private and
+  `--skip-unsupported` leaves such keys out instead. It is loud about it: one
+  `WARNING` line per key on stderr, naming zone, keyid, algorithm and reason,
+  and a closing `WARNING: N key(s) NOT written` line, also when no key was
+  written at all. The exit status stays 0, since the skip was asked for. It
+  is refused with any other format. A key whose private and
   public halves do not match is a broken row, not an unsupported one, and
   fails the run either way.
 - **Every JWK is checked before it is written**: it is parsed back with the

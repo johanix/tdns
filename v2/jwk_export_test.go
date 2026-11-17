@@ -233,8 +233,17 @@ func TestJWKExportRefusesMLDSAWithoutSeed(t *testing.T) {
 	if !errors.Is(err, ErrJWKNoSeed) || !IsJWKUnsupported(err) {
 		t.Fatalf("got %v, want ErrJWKNoSeed", err)
 	}
-	if !strings.Contains(err.Error(), "seed") || !strings.Contains(err.Error(), "rollover") {
-		t.Errorf("the refusal should say why and what to do: %v", err)
+	for _, want := range []string{"seed", "--format pem", "--format bind", "rollover"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal should say why and what to do (%q): %v", want, err)
+		}
+	}
+	// The refusal points at pem and bind; both must work for this key.
+	for _, f := range []string{KeyFormatPEM, KeyFormatBind} {
+		out, err := PrivateKeyForExport(f, k.keyRR, k.privPEM, "", "", "")
+		if err != nil || out == "" {
+			t.Errorf("--format %s of a seedless ML-DSA key: %q, %v", f, out, err)
+		}
 	}
 }
 

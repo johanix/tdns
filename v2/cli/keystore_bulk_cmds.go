@@ -16,6 +16,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -88,8 +89,14 @@ run are left in place, so several exports can populate one directory.
 With --format jwk (DNSSEC and SIG(0)) each private key is written as a JWK
 in K<name>+<alg>+<keyid>.jwk instead of a .private file. A key that has no
 JWK form -- an algorithm without one, or an ML-DSA key stored without its
-seed -- fails the run; --skip-unsupported leaves such keys out and lists
-them instead.`,
+seed (by a tdns release before the seed form) -- fails the run; such a key
+can still be exported with --format pem or --format bind, or replaced through
+a rollover. --skip-unsupported leaves such keys out instead: it prints one
+WARNING line per key on stderr (zone, keyid, algorithm, reason) and a closing
+line with the number of keys NOT written, and still exits 0. A key written as
+a JWK with algorithm 200 or 201 (ML-DSA-65/-87, the dnssec-algorithms
+registry's numbers, not IANA's) gets a WARNING on stderr; the export
+succeeds.`,
 			classLabel(class), exactFlag, subtreeFlag, subtreeFlag),
 		Run: func(cmd *cobra.Command, args []string) {
 			bulkExportRun(role, class, f)
@@ -101,7 +108,7 @@ them instead.`,
 	if class != "tsig" {
 		bulkExport.Flags().StringVar(&f.format, "format", tdns.KeyFormatPEM, keyFormatHelp)
 		bulkExport.Flags().BoolVar(&f.skipUnsup, "skip-unsupported", false,
-			"With --format jwk: skip and list keys that have no JWK form instead of failing")
+			"With --format jwk: leave out keys that have no JWK form instead of failing, with a WARNING per key on stderr")
 	}
 	bulkExport.Flags().StringArrayVarP(&f.selExact, exactFlag, exactShorthand, nil, exactHelp)
 	bulkExport.Flags().StringArrayVar(&f.selSubtre, subtreeFlag, nil, subtreeHelp)
@@ -483,8 +490,11 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 	}
 
 	// Listed before anything else is said, so a run that wrote nothing
-	// still names what it left out and why.
-	printBulkSkipped(tr.BulkSkipped)
+	// still names what it left out and why. The summary is deferred so it
+	// is the last line also when no key matched; os.Exit on an error skips
+	// it, and the error is what matters then.
+	printBulkSkipped(os.Stderr, tr.BulkSkipped)
+	defer printBulkSkippedSummary(os.Stderr, tr.BulkSkipped)
 
 	var written int
 	switch class {
@@ -502,6 +512,9 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 			if err := writeKeyPair(f.dest, base, k.PrivateKey, k.JWK, k.KeyRR); err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
+			}
+			if k.JWK != "" {
+				warnRegistryOnlyAlgorithm(os.Stderr, k.Zone, k.Keyid, k.KeyRR)
 			}
 			// A bind export without a .state file is only half a round trip:
 			// bulk-convert reads the state from there, and with none present
@@ -538,6 +551,9 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 			if err := writeKeyPair(f.dest, base, k.PrivateKey, k.JWK, k.KeyRR); err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
+			}
+			if k.JWK != "" {
+				warnRegistryOnlyAlgorithm(os.Stderr, k.Zone, k.Keyid, k.KeyRR)
 			}
 			manifest.UpsertSig0(tdns.ManifestEntryForSig0(k, base))
 			written++
@@ -612,15 +628,24 @@ func writeOrVerifyFile(path, content string, perm os.FileMode) error {
 	return nil
 }
 
-// printBulkSkipped lists the keys a --skip-unsupported export left out.
-func printBulkSkipped(skipped []tdns.BulkSkippedKey) {
+// printBulkSkipped warns, one line per key, about the keys a
+// --skip-unsupported export left out. Loud on purpose: the operator asked
+// for the skip, but a key missing from an archive they expected complete
+// must not pass unnoticed, so this goes to stderr like any other warning.
+func printBulkSkipped(w io.Writer, skipped []tdns.BulkSkippedKey) {
+	for _, k := range skipped {
+		fmt.Fprintf(w, "WARNING: %s keyid %d (%s) NOT written, no JWK form: %s\n", k.Zone, k.Keyid, k.Algorithm, k.Reason)
+	}
+}
+
+// printBulkSkippedSummary closes a --skip-unsupported run with the count of
+// keys NOT written, after everything else the run said.
+func printBulkSkippedSummary(w io.Writer, skipped []tdns.BulkSkippedKey) {
 	if len(skipped) == 0 {
 		return
 	}
-	fmt.Printf("Skipped %d key(s) with no JWK form:\n", len(skipped))
-	for _, k := range skipped {
-		fmt.Printf("  %s keyid %d %s: %s\n", k.Zone, k.Keyid, k.Algorithm, k.Reason)
-	}
+	fmt.Fprintf(w, "WARNING: %d key(s) NOT written (--skip-unsupported); the export directory does not hold them\n",
+		len(skipped))
 }
 
 // --- import ------------------------------------------------------------

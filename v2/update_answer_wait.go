@@ -33,6 +33,10 @@ import (
 // UpdateHandler, which goes on to the next UPDATE at once.
 
 // answerSignalWriter closes answered once the first answer has been written.
+// It closes it whether the write worked or not: the signal says the answer
+// was attempted, not that it arrived. The NOTIFY dispatch reads it that way
+// too (hasAnswered), to tell a handler that failed after replying from one
+// that failed before it had.
 type answerSignalWriter struct {
 	dns.ResponseWriter
 	once     sync.Once
@@ -44,6 +48,17 @@ func newAnswerSignalWriter(w dns.ResponseWriter) *answerSignalWriter {
 }
 
 func (w *answerSignalWriter) signal() { w.once.Do(func() { close(w.answered) }) }
+
+// hasAnswered reports whether a write has been attempted on the writer, with
+// or without success.
+func (w *answerSignalWriter) hasAnswered() bool {
+	select {
+	case <-w.answered:
+		return true
+	default:
+		return false
+	}
+}
 
 // WriteMsg signals after the write has returned, so the connection is not
 // released before the answer is on it.

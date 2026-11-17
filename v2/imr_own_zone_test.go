@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -251,6 +252,29 @@ func TestOwnZoneQuestionsAreAnsweredFromTheZone(t *testing.T) {
 	}
 }
 
+// resolverDnskeyFetcher is a dnskeyFetcher that looks the child's DNSKEY RRset
+// up through imr: one copy, and the resolver's verdict on it. It is not what a
+// server's coherence check is given (nameserversDnskeyFetcher asks every
+// nameserver of the child, #925). It stands for what the resolver itself
+// answers for a child whose DS this zone holds, which is what these tests pin.
+func resolverDnskeyFetcher(imr *Imr) dnskeyFetcher {
+	return func(child string, _ childServers) ([]dnskeyCopy, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		resp, err := imr.ImrQuery(ctx, dns.Fqdn(child), dns.TypeDNSKEY, dns.ClassINET, nil)
+		if err != nil {
+			return nil, err
+		}
+		if resp == nil || resp.RRset == nil {
+			return nil, fmt.Errorf("no DNSKEY RRset returned for %s", child)
+		}
+		if resp.Error {
+			return nil, fmt.Errorf("DNSKEY lookup for %s failed: %s", child, resp.ErrorMsg)
+		}
+		return []dnskeyCopy{{RRset: resp.RRset, State: resp.ValidationState}}, nil
+	}
+}
+
 // The coherence check on a child's DS UPDATE validates the child's DNSKEY RRset
 // through the resolver, and that needs the child's DS and the parent's keys:
 // both the parent's own data. Taken from the forward, the child came back
@@ -261,7 +285,7 @@ func TestOwnZoneCoherenceCheckValidatesTheChild(t *testing.T) {
 	// A second DS, for a key the child does not publish yet: the start of a
 	// KSK roll. The DS already published still matches the child's key.
 	next := newFwdSecKey(t, ownChild).dnskey.ToDS(dns.SHA256)
-	if err := rig.parent.CheckDelegationCoherenceForUpdate([]dns.RR{next}, imrDnskeyFetcher(rig.imr)); err != nil {
+	if err := rig.parent.CheckDelegationCoherenceForUpdate([]dns.RR{next}, resolverDnskeyFetcher(rig.imr)); err != nil {
 		t.Fatalf("coherence check on adding a DS for %s: %v", ownChild, err)
 	}
 	requireUpstreamNotAsked(t, rig.upLog, ownParent)
