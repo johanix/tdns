@@ -125,7 +125,17 @@ pre-provisioning keys deliberately, which is exactly what a restore does.
 
 `import` / `add` bring in one existing key pair from BIND-convention files.
 Point `--file` at either the `.key` or the `.private`; both are read, and the
-key is added in state `created`. `export` writes one key back out to such a
+key is added in state `created`. A key that is already in the keystore (same
+zone and keyid) is not overwritten by accident, because a replacement resets
+its state (an `active` key would go back to `created`):
+
+- the same key and the same RR: reported `Unchanged`, nothing is written and
+  the key keeps its state; exit 0. "The same key" means the decoded key, not
+  the PEM text (see [importing](#importing));
+- anything different: refused, naming the stored state and what differs
+  (`privatekey`, `keyrr`);
+- `--force` replaces the key and resets its state, and says so. It also
+  replaces an identical key: a deliberate reset. The stored `creator` is kept. `export` writes one key back out to such a
 pair, the private half as PEM or, with `--format bind`, in bind's own format.
 What each side accepts and writes is under [key formats](#key-formats). For
 moving more than one key at a time, use the bulk commands below.
@@ -315,7 +325,7 @@ Each key gets one of four outcomes:
 | Outcome | When |
 |---|---|
 | `imported` | not in the keystore — inserted |
-| `unchanged` | present and identical — left alone |
+| `unchanged` | present and the same — left alone |
 | `conflict` | present and **different** — reported and **skipped** |
 | `replaced` | present and different, with `--force` |
 
@@ -335,7 +345,32 @@ one.
 
 An import is all-or-nothing: one invalid key rolls the whole batch back.
 
-**What is checked.** The private key is stored verbatim, never parsed — which is
+**What "the same" means.** The private key is compared by what it decodes to,
+not by its PEM text. One key can sit in the keystore as different texts: a bulk
+import stores the PEM it is given, while a JWK import and the single-key import
+write tdns's own encoding. OpenSSL's ML-DSA seed-plus-expanded form against the
+seed-only form, CRLF line ends, a missing final newline, text before
+`-----BEGIN`, 76-column lines, or an EC key with a compressed public point are
+all the same key, and re-importing it in another encoding is `unchanged`. The
+stored text is then left as it is. A different key under the same keyid is
+still a `conflict` (`privatekey, keyrr`). If either side cannot be decoded by
+this binary (its algorithm is not linked, or the row predates PEM storage), the
+texts are compared, as before, so pre-load still restores and recognises keys
+whose algorithm it does not link.
+
+One case is not `unchanged` although the key is the same: an ML-DSA key stored
+without its seed (expanded-only, or written by a tdns release before the seed
+form) and offered with one. That is a `conflict` with the detail
+`privatekey (stored without seed)`; `--force` stores the seeded key, which can
+then be exported as JWK. The other way round (stored with seed, offered
+without) is `unchanged`: the stored row is the better one.
+
+`creator` is never a conflict. The creator already in the keystore wins and
+the imported one is dropped; under `--force`, when other fields differ, the
+stored creator is kept too, also when it is empty.
+
+**What is checked.** The private key is stored verbatim and need not parse
+(it is decoded only to compare it with a stored key, when it can be) — which is
 what lets a key restore into a binary that has no implementation for its
 algorithm (it will fail later, loudly, if the zone tries to sign with it). It is
 checked for PKCS#8 PEM armour, though, because that is what the keystore column
@@ -512,6 +547,8 @@ A `--format jwk` directory is: `bulk-import` and pre-load read each
   - applies the draft's five import rules, the private/public check among
     them; any failure rejects the key, and in a bulk import the whole batch;
   - refuses a public-only JWK, since the keystore holds private keys;
+  - refuses a JWK Set (`{"keys":[...]}`) with a message saying so: import
+    takes one key per file, and bulk-import one `jwk_file` per key;
   - stores the key as PKCS#8 PEM (RFC 9881 seed form for ML-DSA, so the seed
     survives and the key can be exported as JWK again) plus the DNSKEY or KEY
     rebuilt from the JWK.
@@ -522,7 +559,8 @@ A `--format jwk` directory is: `bulk-import` and pre-load read each
   rebuilt RR gets TTL 3600, as a generated key does. State and owner follow
   the other formats: a single-key import is stored in state `created` and the
   key's owner must be `--zone` (the daemon checks it, since only the daemon
-  reads the JWK); a bulk import takes state and timing from the manifest,
+  reads the JWK), and a key already stored follows the `--force` rule under
+  [creating](#creating); a bulk import takes state and timing from the manifest,
   with the same `imported`/`unchanged`/`conflict`/`replaced` outcomes. A
   manifest entry naming both `private_file` and `jwk_file` is refused.
 
