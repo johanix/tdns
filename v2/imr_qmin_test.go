@@ -1069,10 +1069,11 @@ func TestQminGluelessReferralDoesNotLoop(t *testing.T) {
 
 // childSignedRig is a parent and a signed child on one server: the server
 // answers for child.example. itself rather than referring to it. A probe of
-// the child's name gets the child's signed NODATA. The signature is never
-// checked: its key tag is not cached, which is what makes the validator
-// fetch the child's DNSKEY. After 200 questions the server refuses, so a
-// loop ends in a count, not a hung test.
+// the child's name gets the child's signed NODATA, or with apexAnswer a
+// signed A at the apex, and then the client's answer is signed too. The
+// signatures are never checked: their key tag is not cached, which is what
+// makes the validator fetch the child's DNSKEY. After 200 questions the
+// server refuses, so a loop ends in a count, not a hung test.
 type childSignedRig struct {
 	g   *qminRig
 	log *asked
@@ -1083,7 +1084,16 @@ const (
 	qminSignedChildQname = "www.child.example."
 )
 
-func newChildSignedRig(t *testing.T) *childSignedRig {
+// qminFakeRRSIG is an RRSIG by qminSignedChild over covered at owner, with a
+// signature that is never checked.
+func qminFakeRRSIG(t *testing.T, owner, covered string) dns.RR {
+	t.Helper()
+	labels := strconv.Itoa(dns.CountLabel(owner))
+	return mustRR(t, owner+" 300 IN RRSIG "+covered+" 15 "+labels+" 300 20300101000000 20200101000000 4242 "+qminSignedChild+
+		" c2lnbmF0dXJlLW5vdC1jaGVja2VkLXNpZ25hdHVyZS1ub3QtY2hlY2tlZC1zaWduYXR1cmUtbm90LWNoZWNrZWQtc2ln")
+}
+
+func newChildSignedRig(t *testing.T, apexAnswer bool) *childSignedRig {
 	t.Helper()
 	const srv = "127.0.0.1"
 	g := newQminRig(t)
@@ -1103,13 +1113,20 @@ func newChildSignedRig(t *testing.T) *childSignedRig {
 		q := r.Question[0]
 		switch name := dns.CanonicalName(q.Name); {
 		case name == qminSignedChildQname && q.Qtype == dns.TypeA:
-			_ = w.WriteMsg(answerA(t, r, qminSignedChildQname, "192.0.2.80"))
+			m := answerA(t, r, qminSignedChildQname, "192.0.2.80")
+			if apexAnswer {
+				m.Answer = append(m.Answer, qminFakeRRSIG(t, qminSignedChildQname, "A"))
+			}
+			_ = w.WriteMsg(m)
 		case name == qminSignedChild && q.Qtype == dns.TypeDS:
 			_ = w.WriteMsg(nodata(t, r, "example."))
+		case name == qminSignedChild && q.Qtype == dns.TypeA && apexAnswer:
+			m := answerA(t, r, qminSignedChild, "192.0.2.1")
+			m.Answer = append(m.Answer, qminFakeRRSIG(t, qminSignedChild, "A"))
+			_ = w.WriteMsg(m)
 		case name == qminSignedChild:
 			m := nodata(t, r, qminSignedChild)
-			m.Ns = append(m.Ns, mustRR(t, qminSignedChild+" 300 IN RRSIG SOA 15 2 300 20300101000000 20200101000000 4242 "+qminSignedChild+
-				" c2lnbmF0dXJlLW5vdC1jaGVja2VkLXNpZ25hdHVyZS1ub3QtY2hlY2tlZC1zaWduYXR1cmUtbm90LWNoZWNrZWQtc2ln"))
+			m.Ns = append(m.Ns, qminFakeRRSIG(t, qminSignedChild, "SOA"))
 			_ = w.WriteMsg(m)
 		default:
 			_ = w.WriteMsg(nodata(t, r, "example."))
@@ -1160,7 +1177,7 @@ func (c *childSignedRig) count(q string) int {
 // so it goes as DNSKEY, not as another probe of the child's name, and the
 // lookup ends with the client's answer.
 func TestQminChildSignedDenialFromTheParentTerminates(t *testing.T) {
-	c := newChildSignedRig(t)
+	c := newChildSignedRig(t, false)
 	rrset := c.query(t)
 	if rrset == nil || len(rrset.RRs) != 1 || rrset.RRs[0].(*dns.A).A.String() != "192.0.2.80" {
 		t.Fatalf("client answer: %v", rrset)
@@ -1181,7 +1198,7 @@ func TestQminChildSignedDenialFromTheParentTerminates(t *testing.T) {
 // name, and the NODATA's validation fetches the DNSKEY again. The validation
 // runs on the query's context, so the query's cap ends the loop.
 func TestQminRequestCapBoundsTheValidationPath(t *testing.T) {
-	c := newChildSignedRig(t)
+	c := newChildSignedRig(t, false)
 	c.g.imr.qminProbeOwnDNSKEY = true
 	rrset := c.query(t)
 	if rrset == nil || len(rrset.RRs) != 1 || rrset.RRs[0].(*dns.A).A.String() != "192.0.2.80" {
@@ -1194,5 +1211,32 @@ func TestQminRequestCapBoundsTheValidationPath(t *testing.T) {
 	}
 	if probes > 3*maxIter+1 {
 		t.Errorf("the child's name was probed %d times, want at most the query's cap (%d) plus the first probe", probes, 3*maxIter)
+	}
+}
+
+// The same parent and signed child, with a signed A at the child's apex.
+// Each signed answer's validation fetches the child's DNSKEY. With the option
+// on, the apex is asked as A once, by the client's walk, and the DNSKEY no
+// more often than with the option off: not once per probe round.
+func TestQminChildSignedAnswerAsksTheApexOnce(t *testing.T) {
+	run := func(qmin bool) (apex, dnskey int) {
+		c := newChildSignedRig(t, true)
+		if !qmin {
+			delete(c.g.imr.Options, ImrOptQnameMinimisation)
+		}
+		rrset := c.query(t)
+		if rrset == nil || len(rrset.RRs) != 1 || rrset.RRs[0].(*dns.A).A.String() != "192.0.2.80" {
+			t.Fatalf("qmin %v: client answer: %v", qmin, rrset)
+		}
+		return c.count(qminSignedChild + " A"), c.count(qminSignedChild + " DNSKEY")
+	}
+	offApex, offKey := run(false)
+	onApex, onKey := run(true)
+	t.Logf("apex A: %d on, %d off; DNSKEY: %d on, %d off", onApex, offApex, onKey, offKey)
+	if onApex != 1 {
+		t.Errorf("the apex was asked as A %d times with the option on, want 1", onApex)
+	}
+	if onKey > offKey {
+		t.Errorf("the DNSKEY was asked %d times with the option on, %d with it off", onKey, offKey)
 	}
 }
