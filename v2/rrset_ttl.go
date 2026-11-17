@@ -32,7 +32,8 @@ import (
 // (applyClampToRRset) lowers it from there: unify first, then clamp. A zone
 // that does not sign here but holds signatures -- a zone file signed
 // elsewhere -- keeps the signatures it came with, so its RRsets are never
-// raised above the original TTL those signatures carry.
+// served above the original TTL those signatures carry: an RRset above it is
+// lowered to it, whether its TTLs differed or it arrived at one TTL.
 //
 // Not touched: the SOA, a single record; NSEC, whose TTL follows the SOA's
 // negative TTL (RFC 9077) and which lives outside RRtypes; and, in a zone
@@ -126,18 +127,18 @@ func walkAdoptedRRsets(data *core.NameMap[OwnerData], owners map[string]bool, si
 	}
 }
 
-// unifyAdoptedTTLs brings each RRset in data whose TTLs differ to one TTL, and
-// returns how many it rewrote. The stores walked are the adopted content's
+// unifyAdoptedTTLs brings each RRset in data to the one TTL unifiedTTL gives
+// it, and returns how many it rewrote. The stores walked are the adopted content's
 // own, not yet published; the records in them may be shared, so a record whose
 // TTL changes is replaced by a copy.
 func unifyAdoptedTTLs(data *core.NameMap[OwnerData], owners map[string]bool, signsHere bool) int {
 	rewritten := 0
 	walkAdoptedRRsets(data, owners, signsHere, func(name string, od OwnerData, t uint16, rs core.RRset) {
-		ttl, mixed := unifiedTTL(rs, signsHere)
-		if !mixed {
+		ttl, rewrite := unifiedTTL(rs, signsHere)
+		if !rewrite {
 			return
 		}
-		lg.Debug("unified the TTLs of an RRset to the largest", "owner", name,
+		lg.Debug("brought an RRset to one TTL", "owner", name,
 			"rrtype", dns.TypeToString[t], "ttl", ttl)
 		od.RRtypes.Set(t, rrsetWithTTL(rs, ttl, signsHere)) // mutator-ok: the adopted content's own store, not yet published or shared
 		rewritten++
@@ -178,7 +179,7 @@ func unsignApexSOA(data *core.NameMap[OwnerData], apex string) {
 func mixedTTLRRsets(data *core.NameMap[OwnerData], owners map[string]bool, signsHere bool) []string {
 	var out []string
 	walkAdoptedRRsets(data, owners, signsHere, func(name string, _ OwnerData, t uint16, rs core.RRset) {
-		if _, mixed := unifiedTTL(rs, true); mixed { // true: whether they differ, not the cap
+		if _, mixed := unifiedTTL(rs, true); mixed { // true: no cap, so only whether they differ
 			out = append(out, name+" "+dns.TypeToString[t])
 		}
 	})
@@ -186,30 +187,31 @@ func mixedTTLRRsets(data *core.NameMap[OwnerData], owners map[string]bool, signs
 	return out
 }
 
-// unifiedTTL returns the TTL an RRset is to have and whether its TTLs differ.
-// That is the largest of them, except in a copy signed elsewhere (signsHere
-// false), where it is never above the smallest original TTL of the RRSIGs
-// covering the RRset: the signature stays as it came, and a TTL above its
-// original one would be served for longer than its signer said.
+// unifiedTTL returns the TTL an RRset is to have and whether any of its
+// records is at another. That is the largest of its TTLs, except in a copy
+// signed elsewhere (signsHere false), where it is never above the smallest
+// original TTL of the RRSIGs covering the RRset: the signature stays as it
+// came, and a TTL above its original one would be served for longer than its
+// signer said. The cap holds whether the TTLs differ or not, so an RRset that
+// arrived at one TTL above the original TTL, a single record included, is
+// brought down to it.
 func unifiedTTL(rs core.RRset, signsHere bool) (uint32, bool) {
-	if len(rs.RRs) < 2 {
+	if len(rs.RRs) == 0 {
 		return 0, false
 	}
 	lo, hi := rs.RRs[0].Header().Ttl, rs.RRs[0].Header().Ttl
 	for _, rr := range rs.RRs[1:] {
 		lo, hi = min(lo, rr.Header().Ttl), max(hi, rr.Header().Ttl)
 	}
-	if lo == hi {
-		return 0, false
-	}
+	ttl := hi
 	if !signsHere {
 		for _, rr := range rs.RRSIGs {
 			if sig, ok := rr.(*dns.RRSIG); ok {
-				hi = min(hi, sig.OrigTtl)
+				ttl = min(ttl, sig.OrigTtl)
 			}
 		}
 	}
-	return hi, true
+	return ttl, lo != ttl || hi != ttl
 }
 
 // rrsetWithTTL returns rs with every record at ttl. Records already at ttl keep

@@ -5,7 +5,8 @@
 
 **Status:** implemented on `claude/996-rrset-ttl-unify`, revised the same day
 for the ruling on secondaries, and on 2026-11-17 for a zone that cannot sign
-yet (see "Changes from the first version"). #1015 is merged; the PR targets
+yet and for an RRset that arrives at one TTL above its signatures' original
+TTL (see "Changes from the first version"). #1015 is merged; the PR targets
 main. Part 2, the DNSKEY RRset and the keystore rows, is not in this change.
 
 ## The problem
@@ -83,7 +84,8 @@ server compute the digest.
 zone file load (first load and reload), AXFR and applied IXFR delta goes
 through, decides (`adoptedTTLsUnify`) and then unifies (`unifyAdoptedTTLs`)
 or warns (`mixedTTLRRsets`). Each RRset whose TTLs differ goes to the largest
-of them. Each record whose TTL changes is replaced by a copy, so no record
+of them; in a copy signed elsewhere, an RRset above its signatures' original
+TTL is also lowered to it (`unifiedTTL`). Each record whose TTL changes is replaced by a copy, so no record
 that a published snapshot may share is written in place.
 
 Where in that function, and why:
@@ -144,9 +146,12 @@ own TTL, which follows the RRset (RFC 4034 §3). The signature does not cover
 that TTL. An RRset with no RRSIGs, such as a delegation's NS RRset or glue,
 takes the largest TTL with no cap.
 
-An RRset whose records already share one TTL is left as it came, even when
-that TTL is above the original TTL of its RRSIGs. Nothing is rewritten, so
-rule 3 does not apply, and a validator caps it at the original TTL anyway.
+The cap also holds for an RRset whose records already share one TTL, a
+single record included. When that TTL is above the original TTL of its RRSIGs,
+the RRset is lowered to the original TTL, the same as one whose TTLs differ.
+Otherwise it would be served for longer than its signer said. A validator caps
+it at the original TTL anyway, but a resolver that does not validate does not.
+An RRset at or below the original TTL is left as it came.
 
 A signed secondary this server only relays is not touched at all (rule 4).
 
@@ -189,7 +194,8 @@ duplicate add at a higher TTL still raises the RRset to it, since
 ## Side effects
 
 - **The first start after the upgrade** can lift the serial once for a primary
-  with mixed TTLs in its zone file. The restart digest the old binary recorded
+  with mixed TTLs in its zone file, or with an RRset above its signatures'
+  original TTL in a file signed elsewhere. The restart digest the old binary recorded
   was over content that was not unified, and the new content is, so they
   differ. That costs one extra transfer, once.
 - **A later IXFR delete still matches** in a secondary that unifies. Inbound
@@ -219,6 +225,15 @@ In `v2/rrset_ttl_test.go`:
   signed elsewhere with records at 300 and 3600. Under an RRSIG with an
   original TTL of 1800 it is served at 1800. Under one of 7200 it is served at
   3600. The signature is unchanged, and its own TTL follows the RRset.
+- `TestCopySignedElsewhereAtOneTTLIsCappedAtTheOriginalTTL`: a zone file
+  signed elsewhere with an RRset of two records and one of a single record,
+  each at 3600. Under an original TTL of 1800 both are served at 1800, and the
+  rewrite is logged. Under 3600 or 7200 both stay at 3600 and nothing is
+  rewritten. The signatures are unchanged, and a reload of the unchanged file
+  publishes nothing.
+- `TestUnifiedTTL`: the TTL an RRset is brought to, and whether it is
+  rewritten, for TTLs that differ or not, under an original TTL above, at or
+  below them, and in a zone that signs here, which has no cap.
 - `TestZonemdNotComputedHereKeepsTheTTLs`: a zone file with records at 300 and
   3600 and a ZONEMD over them is served as it arrived, its ZONEMD still
   matching, with the warning. With `publish-zonemd` it is served at 3600, and
@@ -251,7 +266,9 @@ The tests that expect a unified RRset fail with the call in
 the `toldToModify` check taken out, and the ZONEMD test with the ZONEMD check
 taken out. With `unsignApexSOA` taken out, the policy-bind test finds the zone
 counted as signed, the RRset unsigned after the bind, and a ZONEMD that no
-longer describes the zone.
+longer describes the zone. With the cap limited to RRsets whose TTLs differ,
+the one-TTL tests find RRsets at 3600 under an original TTL of 1800 served at
+3600.
 
 In `v2/zone_updater_ttl_test.go` and `v2/update_ttl_clamp_test.go`, #767's
 tests were rewritten for the new rule. A DDNS, API or child add below the
@@ -276,3 +293,8 @@ binds left the rewritten RRsets unsigned and the file's ZONEMD stale. Since
 the SOA kept its signature, the zone counted as signed and was never signed.
 The apex SOA now loses its signature along with theirs (see "A zone signed
 here, as against a copy signed elsewhere").
+
+A third review (2026-11-17) found that the original-TTL cap ran only when an
+RRset's TTLs differed. A copy signed elsewhere whose RRset arrived at one TTL
+above its signatures' original TTL was served at that TTL, which is the case
+the cap is for. The cap now holds whether the TTLs differ or not.

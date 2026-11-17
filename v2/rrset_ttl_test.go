@@ -304,6 +304,104 @@ func TestCopySignedElsewhereIsNeverRaisedAboveTheOriginalTTL(t *testing.T) {
 	}
 }
 
+// uniformSignedElsewhereZone is a zone signed elsewhere whose RRsets each
+// arrive at one TTL, 3600: www.example. A with two records and one.example. A
+// with one, each under a signature at that TTL whose original TTL is origTTL.
+func uniformSignedElsewhereZone(origTTL string) string {
+	b64 := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'a'}, 64))
+	sig := "\t3600\tIN\tRRSIG\tA 15 2 " + origTTL + " 20991231000000 20260101000000 12345 example. " + b64 + "\n"
+	return reloadText("100",
+		"www.example.\t3600\tIN\tA\t192.0.2.1\n"+
+			"www.example.\t3600\tIN\tA\t192.0.2.2\n"+
+			"one.example.\t3600\tIN\tA\t192.0.2.3\n") +
+		"example.\t3600\tIN\tRRSIG\tSOA 15 1 3600 20991231000000 20260101000000 12345 example. " + b64 + "\n" +
+		"www.example." + sig + "one.example." + sig
+}
+
+// The original-TTL cap holds for an RRset that arrived at one TTL as it does
+// for one whose TTLs differ: above its signature's original TTL it is served
+// at the original TTL, and at or below it, it is left as it came. A single
+// record is such an RRset too. A capped file reloaded unchanged publishes
+// nothing.
+func TestCopySignedElsewhereAtOneTTLIsCappedAtTheOriginalTTL(t *testing.T) {
+	for _, tc := range []struct {
+		origTTL string
+		want    uint32
+	}{{"1800", 1800}, {"3600", 3600}, {"7200", 3600}} {
+		t.Run("orig "+tc.origTTL, func(t *testing.T) {
+			logs := captureLog(t)
+			zd := loadZoneFile(t, newTestKeyDB(t), uniformSignedElsewhereZone(tc.origTTL))
+			for _, set := range []struct {
+				owner string
+				count int
+			}{{"www.example.", 2}, {"one.example.", 1}} {
+				rs := assertServedAt(t, zd, "signed elsewhere at one TTL", set.owner, dns.TypeA, tc.want, set.count)
+				if len(rs.RRSIGs) != 1 {
+					t.Fatalf("%s: the RRset carries %d signatures, want the 1 it came with", set.owner, len(rs.RRSIGs))
+				}
+				sig := rs.RRSIGs[0].(*dns.RRSIG)
+				if sig.Hdr.Ttl != tc.want {
+					t.Errorf("%s: the RRSIG is served at TTL %d, want the RRset's %d", set.owner, sig.Hdr.Ttl, tc.want)
+				}
+				if sig.Signature != base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{'a'}, 64)) ||
+					itoa(int(sig.OrigTtl)) != tc.origTTL {
+					t.Errorf("%s: the signature was changed: %s", set.owner, sig)
+				}
+			}
+			capped := tc.want != 3600
+			if got := strings.Contains(logs.String(), "brought to one TTL"); got != capped {
+				t.Errorf("logged a rewrite: %v, want %v\n%s", got, capped, logs.String())
+			}
+			before := zd.publishedSnapshot()
+			mustReload(t, zd, true)
+			if zd.publishedSnapshot() != before {
+				t.Error("an unchanged signed file was published again")
+			}
+		})
+	}
+}
+
+// unifiedTTL: the largest TTL, capped at the smallest original TTL of the
+// covering RRSIGs only in a copy signed elsewhere, and a rewrite whenever a
+// record is not at that TTL.
+func TestUnifiedTTL(t *testing.T) {
+	rrset := func(origTTL uint32, ttls ...uint32) core.RRset {
+		var rs core.RRset
+		for i, ttl := range ttls {
+			rs.RRs = append(rs.RRs, mustRR(t, "www.example. "+itoa(int(ttl))+" IN A 192.0.2."+itoa(i+1)))
+		}
+		if origTTL != 0 {
+			sig := mustRR(t, "www.example. 3600 IN RRSIG A 15 2 "+itoa(int(origTTL))+" 20991231000000 20260101000000 12345 example. AAAA")
+			rs.RRSIGs = []dns.RR{sig}
+		}
+		return rs
+	}
+	for _, tc := range []struct {
+		name      string
+		rs        core.RRset
+		signsHere bool
+		want      uint32
+		rewrite   bool
+	}{
+		{"empty", core.RRset{}, false, 0, false},
+		{"differ, unsigned", rrset(0, 300, 3600), false, 3600, true},
+		{"one TTL, unsigned", rrset(0, 3600, 3600), false, 3600, false},
+		{"differ, below the original", rrset(7200, 300, 3600), false, 3600, true},
+		{"differ, above the original", rrset(1800, 300, 3600), false, 1800, true},
+		{"one TTL, above the original", rrset(1800, 3600, 3600), false, 1800, true},
+		{"one record, above the original", rrset(1800, 3600), false, 1800, true},
+		{"one TTL, at the original", rrset(3600, 3600, 3600), false, 3600, false},
+		{"one TTL, below the original", rrset(7200, 3600, 3600), false, 3600, false},
+		{"signs here: no cap", rrset(1800, 3600, 3600), true, 3600, false},
+		{"signs here, differ: no cap", rrset(1800, 300, 3600), true, 3600, true},
+	} {
+		ttl, rewrite := unifiedTTL(tc.rs, tc.signsHere)
+		if rewrite != tc.rewrite || (rewrite && ttl != tc.want) {
+			t.Errorf("%s: got (%d, %v), want (%d, %v)", tc.name, ttl, rewrite, tc.want, tc.rewrite)
+		}
+	}
+}
+
 // A zone file that carries a ZONEMD this server does not compute is served as
 // it arrived, mixed TTLs included, so the ZONEMD still describes it, and the
 // zone warns. With publish-zonemd the zone unifies, and the ZONEMD it computes

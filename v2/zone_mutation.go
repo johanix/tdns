@@ -1257,7 +1257,8 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		overlay = zd.applyJournalOverlayLocked(new_zd)
 	}
 
-	// One TTL per RRset, the largest of those that arrived (#996), in a zone
+	// One TTL per RRset, the largest of those that arrived and never above the
+	// original TTL of a signature made elsewhere (#996, unifiedTTL), in a zone
 	// this server is told to modify; a secondary, or a ZONEMD this server does
 	// not compute, is served as received (adoptedTTLsUnify). Here, after the
 	// inbound ZONEMD gate, which digests the TTLs as they arrived, and after
@@ -1280,7 +1281,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	signsHere := zd.signsItsOwnContent()
 	if unify, why := zd.adoptedTTLsUnify(new_zd.Data); unify {
 		if n := unifyAdoptedTTLs(new_zd.Data, ttlOwners, signsHere); n > 0 {
-			lg.Info("RRsets with differing TTLs were brought to the largest of them",
+			lg.Info("RRsets were brought to one TTL: the largest, never above the original TTL of a signature made elsewhere",
 				"zone", zd.ZoneName, "rrsets", n)
 			if signsHere {
 				unsignApexSOA(new_zd.Data, zd.ZoneName)
