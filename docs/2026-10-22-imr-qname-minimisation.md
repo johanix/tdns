@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-22
 **Status:** implemented. Scoped against main at `51eb0988`.
-**Revision:** 6.
+**Revision:** 7.
 
 | Rev | Date | Change |
 |---|---|---|
@@ -12,6 +12,7 @@
 | 4 | 2026-10-22 | The four `iter_minim_*` Deckard scenarios script Knot Resolver's `NS` probes and stay skipped with that reason. Scenarios of our own with `A` probes are optional (§11). |
 | 5 | 2026-10-22 | A probe that no server completes no longer fails the lookup: the original query goes to the current ancestor and its answer stands, as at the caps. A probe error still books no lameness. The forced downgrade and the timeout cost are stated (§2, §4, §7, §9). |
 | 6 | 2026-10-22 | Implemented. The default stays off because the resolver is also embedded and the tests pin the query stream; qmin is for standalone tdns-imr (§2). `val_ta_sentinel_insecure` stays skipped (§11). |
+| 7 | 2026-11-17 | After a Deckard run with the switch wired. The validation of a child-signed negative answer from the parent's servers could re-query without bound with the option on; it is fixed. A denial is validated on the query's context, so the request cap bounds it, and the resolver's own DNSKEY fetch sends no probe (§3, §6). The Deckard switch is wired (§11). |
 
 RFC 9156 is the specification. It obsoletes RFC 7816. This design follows
 9156 and does not keep the 7816 behaviour (NS as the hiding type, one
@@ -86,6 +87,15 @@ Every consumer of the iterative path comes through this function:
 validator's `RRsetFetcher`. They all minimise when the option is on. A
 DNSKEY at a zone apex does not generate a probe: the ancestor is the apex,
 so the first query is the DNSKEY itself.
+
+The resolver's own DNSKEY fetch sends no probe even when the apex is not a
+known cut. Its name is the signer of an RRSIG being validated (RFC 4034
+§3.1.7) or a trust anchor's zone, so it is an apex. The case is a parent's
+servers that also serve a signed child: they answer the child's name with
+the child's signed data and no referral. A probe would ask them for the
+child's name as `A` again, and the answer's validation would fetch the
+DNSKEY again. The name goes to the servers that sent it, or to a deeper
+known zone's. A client's DNSKEY query is minimised like any other.
 
 The tuple loop handles a response inline, and every handler is keyed to the
 name it sent. `handleAnswer` chases a CNAME (`answerViaCNAME`).
@@ -244,17 +254,20 @@ expose the rest of the client's name early.
 **Per request.** RFC 9156 §2.3 requires a limit on the outgoing queries per
 user request, and walks multiply: each link of a CNAME chain and each
 glueless NS name is a walk of its own. The outermost lookup puts a second
-counter on the context, and every walk under it shares that counter. It
-counts probes sent. Once it reaches 3 × `qmin-max-iterations` (30 with the
+counter on the context, and every walk under it shares that counter.
+Validation shares it too: a denial is validated on the query's context
+values (`handleNegative`), so a walk the validator starts counts against
+the request. It counts probes sent. Once it reaches 3 × `qmin-max-iterations` (30 with the
 defaults), no walk in that request sends another probe: a walk in progress
 sends its original query at its current ancestor, and every later walk
 sends its original query without probing, as the IMR does today. Not a
 setting.
 
 The existing per-query wall clock (`tuning.query-budget`, default 8s)
-still bounds the whole request in time, including validation of probe
-NODATA and any transport-signal lookups the existing options already
-trigger.
+still bounds the request in time. The validation of a denial is not bound
+by it: it runs without the query's deadline (`context.WithoutCancel`), as
+it ran on `context.Background()` before revision 7, so that a denial is
+still cached when the client has gone. The request cap bounds it instead.
 
 Neither cap counts original queries, validator fetches, NS address
 lookups, or transport-signal queries. Those are unchanged, and they are
@@ -316,6 +329,15 @@ Walk, option on:
 - Option off: one upstream query, the full name and the original type.
 - A name in a forward zone, and a name in a zone this process serves, are
   sent in full.
+- A parent and a signed child on one server. A probe of the child's name
+  gets the child's signed NODATA, and its validation fetches the child's
+  DNSKEY as DNSKEY. The lookup ends with the client's answer, and the
+  child's name is probed once.
+- The same, with a signed `A` at the child's apex. The apex is asked as
+  `A` once, and the DNSKEY no more often than with the option off.
+- The same, with the resolver's own DNSKEY fetches minimised (a test-only
+  switch): the validation's walks share the query's cap, and the lookup
+  ends with the client's answer.
 
 Option off is the default, so the existing iterative tests keep the query
 stream they have. They are also what holds the walk's move (§3) to no
@@ -417,13 +439,17 @@ refuse `NS`.
 1. Implement §3–§7 on this design, as the two commits of §3. Update the
    sample and the guide in the same change.
 2. Run the new tests, then `make check-all` from `tdns/`.
-3. When those are green, wire the Deckard switch. The template turns a
-   scenario's `query-minimization: on` into `qname-minimisation` in that
-   scenario's own `imrengine.options`. The other 95 keep the default,
-   which does not change.
+3. When those are green, wire the Deckard switch. Done in revision 7. The
+   template (`tests/deckard/template/tdns-imr.yaml.j2`) adds
+   `qname-minimisation` to `imrengine.options` when Deckard's `QMIN` is
+   true. Of the 191 resolver scenarios, 95 pin the switch off, 5 pin it
+   on, and Deckard runs the other 90 twice, with and without it. The
+   switch is what makes those runs differ. Before it, both runs of a
+   scenario were the same, with minimisation off. The results are in
+   `tests/deckard/RESULTS.md`.
 
-   Five scenarios set the switch. All five are skipped today because
-   tdns-imr has no minimisation (`tests/deckard/skip.txt`;
+   Five scenarios pin the switch on. They stay skipped
+   (`tests/deckard/skip.txt`;
    `docs/2026-09-28-imr-deckard-test-clock-and-switches.md` §7).
 
    - `iter_minim_a`, `iter_minim_a_nxdomain`, `iter_minim_nonempty` and
