@@ -4,8 +4,9 @@
 (`claude/1006-reload-signatures`), which changes the same load path.
 
 **Status:** implemented on `claude/996-rrset-ttl-unify`, revised the same day
-for the ruling on secondaries (see "Changes from the first version"). Part 2,
-the DNSKEY RRset and the keystore rows, is not in this change.
+for the ruling on secondaries, and on 2026-11-17 for a zone that cannot sign
+yet (see "Changes from the first version"). #1015 is merged; the PR targets
+main. Part 2, the DNSKEY RRset and the keystore rows, is not in this change.
 
 ## The problem
 
@@ -120,6 +121,19 @@ the largest TTL with no cap. A rewritten RRset loses the RRSIGs it came with,
 and the publish signs it again, so the new signature's original TTL is the
 unified TTL.
 
+That publish may not be able to sign yet. A zone's DNSSEC policy binds after
+its first load, so a first load publishes with no signing material. If the
+loaded file was signed elsewhere, its SOA still carries a signature, and the
+servable gate counts any SOA signature as signed. The zone would then go
+Ready with the rewritten RRsets unsigned, and with the ZONEMD from the file,
+which no longer matches the unified content. The sign after the policy binds
+would skip the zone as signed already. So when unifying rewrites anything in a
+zone that signs here, the apex SOA loses its RRSIGs too (`unsignApexSOA`). A
+publish that can sign re-signs the SOA anyway. One that cannot leaves the
+zone not Ready until the sign after the bind, which signs the rewritten
+RRsets and computes the ZONEMD. This is the same treatment as a serial lifted
+before the policy binds (#655).
+
 **A copy signed elsewhere** that this server is told to modify -- in practice
 a primary whose zone file was signed by another signer -- keeps the signatures
 it came with, because it has no keys to sign again. So the unified TTL is the
@@ -218,6 +232,12 @@ In `v2/rrset_ttl_test.go`:
   and signed at 600, and both cases validate.
 - `TestSignedReloadOfMixedTTLsKeepsTheSignature`: a reload whose mixed-TTL
   RRset unifies to what is already served keeps its signature (#1015's carry).
+- `TestUnifiedBeforeThePolicyBindsIsSignedWhenItBinds`: a zone that signs
+  here first loads a file signed elsewhere, with records at 300 and 3600,
+  before its policy binds. It does not count as signed. Once the policy binds
+  and the zone is signed, the RRset is served at 3600 and validates. With
+  `publish-zonemd` and a ZONEMD in the file, the published ZONEMD then
+  describes the unified zone.
 - `TestToldToModify`: on tdns-auth, a primary and an inline-signing secondary
   are told to modify; a plain secondary is not, nor one with `allow-updates`
   left on. In a derived app, a secondary is told to modify by `allow-edits`,
@@ -229,7 +249,9 @@ In `v2/rrset_ttl_test.go`:
 The tests that expect a unified RRset fail with the call in
 `applyRefreshReplacementLocked` taken out. The plain-secondary tests fail with
 the `toldToModify` check taken out, and the ZONEMD test with the ZONEMD check
-taken out.
+taken out. With `unsignApexSOA` taken out, the policy-bind test finds the zone
+counted as signed, the RRset unsigned after the bind, and a ZONEMD that no
+longer describes the zone.
 
 In `v2/zone_updater_ttl_test.go` and `v2/update_ttl_clamp_test.go`, #767's
 tests were rewritten for the new rule. A DDNS, API or child add below the
@@ -247,3 +269,10 @@ digest that no longer described it, which a downstream that verifies ZONEMD
 refuses. Rule 4 followed: a plain secondary is now served as received, and a
 ZONEMD this server does not compute is never broken by the unification, in
 any zone.
+
+A second review (2026-11-12) found the case of a zone that signs here but
+cannot sign yet: unifying a file signed elsewhere before the zone's policy
+binds left the rewritten RRsets unsigned and the file's ZONEMD stale. Since
+the SOA kept its signature, the zone counted as signed and was never signed.
+The apex SOA now loses its signature along with theirs (see "A zone signed
+here, as against a copy signed elsewhere").

@@ -364,6 +364,58 @@ func TestToldToModify(t *testing.T) {
 // A file signed elsewhere with an RRset at two TTLs, reloaded unchanged,
 // publishes nothing: the reloaded content is unified as the published content
 // was, so the two compare equal.
+// bindPolicyAndSign binds a DNSSEC policy to a zone loaded without one, as the
+// policy sync after a first load does, and then signs as finishFirstLoadPolicy
+// does.
+func bindPolicyAndSign(t *testing.T, zd *ZoneData) {
+	t.Helper()
+	zd.DnssecPolicy = &DnssecPolicy{
+		Mode:         DnssecPolicyModeKSKZSK,
+		KSKAlgorithm: dns.ED25519,
+		ZSKAlgorithm: dns.ED25519,
+		SigValidity:  PolicySigValidity{Default: 14 * 24 * 3600, DNSKEY: 14 * 24 * 3600, DS: 14 * 24 * 3600},
+	}
+	if err := signOnceAfterPolicyBind(context.Background(), zd); err != nil {
+		t.Fatalf("signing after the policy bound: %v", err)
+	}
+}
+
+func assertNotServable(t *testing.T, zd *ZoneData, how string) {
+	t.Helper()
+	zd.mu.Lock()
+	servable := zd.snapshotContentIsServableLocked(zd.publishedSnapshot())
+	zd.mu.Unlock()
+	if servable {
+		t.Errorf("%s: the zone counts as signed before it could sign the RRsets it unified", how)
+	}
+}
+
+// A zone that signs here and first loads a file signed elsewhere, before its
+// DNSSEC policy binds, cannot sign the RRsets it unifies, whose signatures are
+// gone. The SOA's signature goes with them, so the zone stays not Ready and
+// the sign after the bind signs them, rather than skip the zone as signed
+// already. Likewise a ZONEMD the zone publishes: the one in the file no longer
+// matches the unified content, and the sign after the bind computes it.
+func TestUnifiedBeforeThePolicyBindsIsSignedWhenItBinds(t *testing.T) {
+	t.Run("signatures", func(t *testing.T) {
+		zd := loadZoneFileWith(t, newTestKeyDB(t), signedElsewhereZone("100", "7200"),
+			map[ZoneOption]bool{OptOnlineSigning: true})
+		assertNotServable(t, zd, "before the bind")
+		bindPolicyAndSign(t, zd)
+		assertServedTTL(t, zd, "after the bind", "www.example.", dns.TypeA, 3600)
+		assertPublishedRRsetVerifies(t, zd, "www.example.", dns.TypeA)
+	})
+
+	t.Run("ZONEMD", func(t *testing.T) {
+		zd := loadZoneFileWith(t, newTestKeyDB(t), withZonemd(t, signedElsewhereZone("100", "7200")),
+			map[ZoneOption]bool{OptOnlineSigning: true, OptPublishZonemd: true})
+		assertNotServable(t, zd, "before the bind")
+		bindPolicyAndSign(t, zd)
+		assertZonemdMatchesSnapshot(t, zd, "after the bind")
+		assertServedTTL(t, zd, "after the bind", "www.example.", dns.TypeA, 3600)
+	})
+}
+
 func TestReloadOfAnUnchangedSignedFileWithMixedTTLsPublishesNothing(t *testing.T) {
 	zd := loadZoneFile(t, newTestKeyDB(t), signedElsewhereZone("100", "1800"))
 	assertServedAt(t, zd, "first load", "www.example.", dns.TypeA, 1800, 2)

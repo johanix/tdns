@@ -145,6 +145,34 @@ func unifyAdoptedTTLs(data *core.NameMap[OwnerData], owners map[string]bool, sig
 	return rewritten
 }
 
+// unsignApexSOA removes the RRSIGs of the apex SOA in data, content a zone
+// that signs here adopts, after unifyAdoptedTTLs rewrote some of its RRsets
+// and so dropped their signatures (rrsetWithTTL). A publish that can sign
+// signs the SOA afresh anyway, and the rewritten RRsets with it. One that
+// cannot yet -- the zone's DNSSEC policy is not bound, as on a first load --
+// publishes the content as it stands, and the servable gate counts any SOA
+// signature as signed: the zone would go Ready with those RRsets unsigned and
+// with the ZONEMD the content came with, which no longer matches it, and the
+// sign after the policy binds would skip it as signed already. With the SOA
+// unsigned the zone stays not Ready until that sign, which signs the RRsets
+// and computes the ZONEMD. As for a serial lifted before the policy binds
+// (#655, publishWorkingSetLocked).
+func unsignApexSOA(data *core.NameMap[OwnerData], apex string) {
+	if data == nil {
+		return
+	}
+	od, ok := data.Get(apex)
+	if !ok || od.RRtypes == nil {
+		return
+	}
+	rs := od.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(rs.RRSIGs) == 0 {
+		return
+	}
+	rs.RRSIGs = nil
+	od.RRtypes.Set(dns.TypeSOA, rs) // mutator-ok: the adopted content's own apex, not yet published; an applied IXFR delta always counts the apex as touched
+}
+
 // mixedTTLRRsets names the RRsets in data whose TTLs differ, as "owner TYPE",
 // sorted, walking what unifyAdoptedTTLs would.
 func mixedTTLRRsets(data *core.NameMap[OwnerData], owners map[string]bool, signsHere bool) []string {

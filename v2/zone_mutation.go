@@ -1267,6 +1267,9 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// served serial and the IXFR diff all compare unified content with the
 	// unified content already served. An applied delta shares its untouched
 	// owners with the published snapshot: only the ones it touched are walked.
+	// In a zone that signs here, a unified RRset loses its signatures and the
+	// apex SOA loses its own (unsignApexSOA), so a zone that cannot sign yet
+	// stays not Ready until it can.
 	var ttlOwners map[string]bool
 	if new_zd.ixfrDerived {
 		ttlOwners = new_zd.ixfrTouched
@@ -1279,6 +1282,9 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		if n := unifyAdoptedTTLs(new_zd.Data, ttlOwners, signsHere); n > 0 {
 			lg.Info("RRsets with differing TTLs were brought to the largest of them",
 				"zone", zd.ZoneName, "rrsets", n)
+			if signsHere {
+				unsignApexSOA(new_zd.Data, zd.ZoneName)
+			}
 		}
 	} else if mixed := mixedTTLRRsets(new_zd.Data, ttlOwners, signsHere); len(mixed) > 0 {
 		n := len(mixed)
