@@ -535,15 +535,23 @@ zone is currently answering with.
 
 A secondary whose content came by transfer shows `transferred:
 serial N` in place of the `zone file` line, and the chain must
-start at that serial instead. When the upstream has moved on since
-the journal was recorded, `will replay` says `NO`, and a load by
-transfer discards the journal rather than refusing it: a full
-transfer does not keep a secondary's local changes. The discarded
+start at that serial instead. When it does not, `will replay` says
+`NO`, and a full transfer discards the journal rather than refusing
+it: a full transfer does not keep a secondary's local changes, so
+what the journal recorded is gone with the content it was recorded
+against. That holds for the load at a restart, when the upstream
+has moved on since the journal was recorded, and for a full
+transfer while the server runs. After the latter the next local
+change is journalled from the serial received, publishing past it
+if the zone's own serial count is behind, and is still there after
+a restart with an upstream that has not moved. An applied IXFR is
+not a full transfer and leaves the journal alone. The discarded
 instructions go to `{zonefile}.{serial}.purged` when the zone has
 a file, and to the log when it has none. No warning is recorded,
-since nothing needs fixing. An inline-signing secondary on
-tdns-auth is different: its own CDS, CDNSKEY and CSYNC are applied
-to every full transfer, and `status` says so.
+since nothing needs fixing, unless the journal could not be
+discarded. An inline-signing secondary on tdns-auth is different:
+its own CDS, CDNSKEY and CSYNC are applied to every full transfer,
+and `status` says so.
 
 ### list
 

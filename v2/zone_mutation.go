@@ -604,6 +604,9 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	serial := zd.CurrentSerial
 	if bumpSerial {
 		zd.CurrentSerial = nextOutboundSerial(zd)
+		if zd.wsPersistDelta && zd.snapshot.Load() != nil {
+			zd.CurrentSerial = zd.serialPastReceivedAnchorLocked(zd.CurrentSerial)
+		}
 		serial = zd.CurrentSerial
 	}
 	soaSerialChanged := zd.setWorkingSetSOASerial(serial)
@@ -1129,6 +1132,35 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	zd.fileDigest = new_zd.fileDigest
 	zd.contentFromTransfer = !fromZoneFile
 	zd.IncomingSerial = new_zd.IncomingSerial
+	// A full transfer at runtime replaces the zone, and the journal recorded
+	// against the content it replaces goes with it (#919). Here, under the lock
+	// the next local change has to take as well, and before the replacement is
+	// published: a change journalled after the transfer would otherwise chain
+	// from the tail of that journal, and at the next restart the whole journal
+	// would be discarded for not starting at the serial received, the change
+	// with it.
+	//
+	// Not at first load, where the zone has no content of its own yet and the
+	// journal is from an earlier run: that is settled with the first load's
+	// replay (reconcileZoneFileWithJournal), and the journal may chain from the
+	// serial received. Not for a zone file, which is what the journal is a chain
+	// from. Not for an applied IXFR, whose content is the zone as served plus the
+	// difference, local changes included. Not for a zone that may not originate
+	// content, which takes no local change to journal.
+	//
+	// Whatever becomes of the publish below, this stands. A replacement that is
+	// refused at signing stays staged, and no local change is accepted until it
+	// has been published (flushStagedReplacementLocked), so nothing is journalled
+	// against the old content in the meantime.
+	if !fromZoneFile && !firstLoad && !new_zd.ixfrDerived && zoneMayOriginateContent(zd) {
+		if _, err := zd.discardJournalBehindTransferLocked(); err != nil {
+			lg.Error("could not discard the persisted deltas recorded against the content a full"+
+				" transfer has replaced; a change made from now on is not journalled reliably",
+				"zone", zd.ZoneName, "error", err)
+			zd.setErrorLocked(ConfigWarning,
+				"persisted zone deltas predate the transferred copy and could not be discarded: %v", err)
+		}
+	}
 	switch {
 	case firstLoad:
 		zd.CurrentSerial = new_zd.CurrentSerial
