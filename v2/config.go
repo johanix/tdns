@@ -641,9 +641,10 @@ type AddressFamilyConf struct {
 type DiscoveryConf struct {
 	RetryAfterFailure time.Duration `yaml:"retry-after-failure" mapstructure:"retry-after-failure"`
 	MaxFailures       int           `yaml:"max-failures" mapstructure:"max-failures"`
-	// StrictWait bounds how long a strict-privacy query waits for the
-	// transport signals of servers it knows nothing about, before it gives
-	// up on them. The query's own deadline cuts it shorter. Default 2s.
+	// StrictWait bounds how long a query waits for the transport signals
+	// of servers it knows nothing about, before it gives up on them: a
+	// strict-privacy query, or any query left with no transport it may use
+	// (#1065). The query's own deadline cuts it shorter. Default 2s.
 	StrictWait time.Duration `yaml:"strict-wait" mapstructure:"strict-wait"`
 }
 
@@ -1026,6 +1027,7 @@ type InternalDnsConf struct {
 	APIStopCh           chan struct{}
 	StopOnce            sync.Once
 	stopFailed          atomic.Bool // set by Shutdowner: MainLoop exits 1, not 0 (#977)
+	do53QueriesRefused  atomic.Bool // debug-do53-queries-refused as DnsEngine started with it; a reload takes effect at the next start (#1066)
 	RefreshZoneCh       chan ZoneRefresher
 	BumpZoneCh          chan BumperData
 	ValidatorCh         chan ValidatorRequest

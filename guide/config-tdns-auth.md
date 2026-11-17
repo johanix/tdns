@@ -971,7 +971,7 @@ serial is newer is kept, so the RFC 1982 procedure for changing a serial scheme
 works as before. `zone journal status` shows the serial a restart comes back
 past.
 
-Three `options:` values are recognized:
+These `options:` values are recognized:
 
 - **`minimal-responses`** — omit the authority NS RRset and apex glue from
   positive answers, BIND-style. Referrals and NXDOMAIN/NODATA are unaffected.
@@ -984,6 +984,21 @@ Three `options:` values are recognized:
 - **`parent-update:delta`** or **`parent-update:replace`** — how delegation
   updates are applied to the parent. `delta` is the default and applies even
   when no `options:` block is present.
+- **`debug-do53-queries-refused`** — for testing resolvers against a server
+  whose zones can be read only over an encrypted transport. Over Do53, every
+  QUERY is refused with REFUSED and EDE 18 (Prohibited), except an SVCB query
+  for a name whose first label is `_dns` and a DNSKEY query: those are what a
+  resolver needs to find and validate the server's transport signal. NOTIFY,
+  UPDATE and the other opcodes are handled as usual, and DoT, DoQ and DoH are
+  unchanged. It is meant for a leaf server, such as a secondary at the edge:
+  its own transfers from its primary are unaffected, but AXFR, IXFR and SOA
+  queries sent to it over Do53 are refused like any other. It breaks RFC
+  requirements on purpose. The daemon refuses to start with it unless
+  `listeners.transports` has dot, doq or doh and the certificate loads, and
+  stops if none of those transports starts. It logs a WARN at every start;
+  `config check` warns, and `config status` (verbose) shows a line. A reload
+  that changes it takes effect at the next start. Absence means false, and
+  so does an invalid value. tdns-agent refuses it.
 
 ## The transport signal: service.transport
 
