@@ -204,6 +204,14 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 
 	// Check if this is a catalog zone and parse it
 	if zd.Options[OptCatalogZone] {
+		// A catalog this server originates: its member list is rebuilt from
+		// what it was loaded with (rebuildCatalogMembership), and again once
+		// the journal has been replayed (completeFirstZonePolicyAndLoad).
+		// This first one keeps the list from being empty if the load stops
+		// before the replay.
+		if _, err := rebuildCatalogMembership(zd); err != nil {
+			lgEngine.Error("failed to rebuild the catalog's member list", "zone", zone, "error", err)
+		}
 		lgEngine.Info("parsing catalog zone member zones", "zone", zone)
 		catalogUpdate, err := ParseCatalogZone(zd)
 		if err != nil {
@@ -490,6 +498,16 @@ func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Con
 	// deltas hold everything that has happened since. Serving the file alone
 	// would silently roll the zone back to that point.
 	replayZoneDeltasOnLoad(zd)
+
+	// A catalog this server originates: its member list again, now from the
+	// replayed content. The rebuild at the start of the load read the file
+	// alone, and a member added since the last write of the file is only in
+	// the journal; left out of the list, the next catalog edit would drop it.
+	if zd.Options[OptCatalogZone] {
+		if _, err := rebuildCatalogMembership(zd); err != nil {
+			lgEngine.Error("failed to rebuild the catalog's member list after the journal replay", "zone", zd.ZoneName, "error", err)
+		}
+	}
 
 	// The transport signal. After the bind, so that it is signed with the
 	// policy's keys and lifetime; after the replay, so that it is derived from
@@ -1135,6 +1153,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						DownstreamAuth:    zr.DownstreamAuth,
 						Zonefile:          zr.Zonefile,
 						Template:          zr.Template,
+						InlineTsigKey:     zr.InlineTsigKey,
 						ZoneType:          zr.ZoneType,
 						Options:           zr.Options,
 						OutboundSoaSerial: zr.OutboundSoaSerial,
@@ -1221,6 +1240,14 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
 
 					Zones.Set(zone, zd)
+
+					// A persisted template-driven zone whose template did not
+					// expand at boot: loaded without the template's outbound
+					// settings, and says why. After Zones.Set, because
+					// SetError republishes the zone.
+					if zr.TemplateWarning != "" {
+						zd.SetError(TemplateWarning, "%s", zr.TemplateWarning)
+					}
 
 					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters); err != nil {
 						noteRefreshFailure(zd, zone, err, "zone refresh failed")
@@ -1400,7 +1427,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			var err error
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
-					if zd.Error {
+					if zd.blocksSerialBump() {
 						lgEngine.Warn("zone in error state, not bumping serial", "zone", zone, "error", zd.ErrorMsg)
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("Zone %s is in error state: %s. Not bumping serial.", zone, zd.ErrorMsg)

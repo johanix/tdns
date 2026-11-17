@@ -51,13 +51,29 @@
 #
 # DYNAMIC-ZONE BLESSING: a template carrying `dynamiczones: true` may be
 # instantiated at runtime via the management API (tdns-cli auth zone add
-# --type primary --template <name>), provided dynamiczones.dynamic.allowed
-# includes "primary" in the main config. The flag marks the TEMPLATE as
+# [--type primary] --template <name>), provided dynamiczones.dynamic.allowed
+# includes the zone type in the main config. The flag marks the TEMPLATE as
 # API-instantiable and is never copied to zones. This is the security
 # envelope: an API client cannot express an update policy, it can only pick
-# among templates you bless here. A blessed template for a dynamic primary
-# must yield a zonefile (set a %s pattern) and must not use
-# allow-child-updates, catalog-*, or multi-provider options (refused in v1).
+# among templates you bless here.
+#
+#   - A blessed template for a dynamic PRIMARY gives the zone its whole
+#     configuration. It must yield a zonefile (set a %s pattern) and must not
+#     use allow-child-updates, catalog-*, or multi-provider options (refused
+#     in v1).
+#   - A blessed template for a dynamic SECONDARY must say `type: secondary`,
+#     and gives the zone only its outbound settings: downstreams,
+#     downstream-auth, notify, allow-notify, notify-retries and
+#     notify-retry-interval. Primaries, options and everything else stay the
+#     API caller's, so a template can never redirect where a zone comes from.
+#
+# For an API zone the template OWNS the outbound settings: they are not
+# persisted with the zone, but expanded from the template when the zone is
+# added, at every restart and on every config reload (config reload or
+# config reload-zones). Edit the template, reload, and every zone stamped
+# from it follows: that is how a new downstream gets every zone.
+# dynamiczones.dynamic.default-template (main config) names the template an
+# add uses when the request names none.
 #
 # ==============================================================================
 # COMPLETE LIST OF ZONE OPTIONS
@@ -344,6 +360,20 @@ templates:
      type:            secondary
      store:           map         # Default storage (serves normal DNS queries)
      # primaries: must be set per-zone or overridden
+
+   # Outbound settings for API-added secondaries (zone add --template
+   # hub-secondary, or as dynamiczones.dynamic.default-template.secondary):
+   # every such zone may be transferred by the listed downstreams with the
+   # operator key, and they are NOTIFYed after each transfer in.
+   - name:            hub-secondary
+     type:            secondary
+     dynamiczones:    true
+     downstreams:
+        - prefix:     "192.0.2.0/24"
+          key:        xfr-key-2026
+     notify:
+        - addr:       "192.0.2.53:53"
+          key:        xfr-key-2026
 
    # Secondary with child sync
    - name:            child-secondary
