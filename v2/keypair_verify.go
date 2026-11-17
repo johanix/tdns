@@ -24,6 +24,9 @@ package tdns
 
 import (
 	"crypto"
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/pem"
 	"fmt"
 	"time"
 
@@ -141,6 +144,14 @@ func VerifyStoredKeyPair(privPEM string, pub *dns.DNSKEY) (checked bool, err err
 	}
 	signer, perr := ParsePrivateKeyPEM([]byte(privPEM))
 	if perr != nil || signer == nil {
+		// A PKCS#8 key whose algorithm this binary links but whose contents it
+		// cannot decode (e.g. an EC key with explicit curve parameters) is not
+		// benign: it can never sign, so refuse it here rather than letting it
+		// into the keystore, where it would later break every export.
+		if pkcs8AlgorithmLinked(privPEM) {
+			return true, fmt.Errorf("stored private key for %s keyid %d is for an algorithm this binary links but does not parse: %v",
+				pub.Header().Name, pub.KeyTag(), keyParseCause(perr))
+		}
 		// Logged, not swallowed. Two very different inputs land here -- a key
 		// whose algorithm this binary does not link, and a .private that is
 		// corrupt -- and only the first is benign. Returning a bare false for
@@ -157,4 +168,45 @@ func VerifyStoredKeyPair(privPEM string, pub *dns.DNSKEY) (checked bool, err err
 		return true, verr
 	}
 	return true, nil
+}
+
+// pkcs8AlgorithmLinked reports whether privPEM is a PKCS#8 "PRIVATE KEY" block
+// whose outer structure decodes and whose algorithm (RSA, ECDSA or Ed25519) is
+// one the standard library, and therefore this binary, can handle. It is used
+// to tell "this key cannot be decoded because the algorithm is not linked"
+// (benign, see VerifyStoredKeyPair) from "this algorithm is linked but the key
+// is malformed" (refused).
+// keyParseCause renders the parse failure for an error message. ParsePrivateKeyPEM
+// can return a nil signer with a nil error, which must not print as "<nil>".
+func keyParseCause(perr error) string {
+	if perr == nil {
+		return "no signer returned"
+	}
+	return perr.Error()
+}
+
+func pkcs8AlgorithmLinked(privPEM string) bool {
+	block, _ := pem.Decode([]byte(privPEM))
+	if block == nil || block.Type != "PRIVATE KEY" {
+		return false
+	}
+	var info struct {
+		Version    int
+		Algo       pkix.AlgorithmIdentifier
+		PrivateKey []byte
+		Attributes asn1.RawValue `asn1:"optional,tag:0"`
+	}
+	if _, err := asn1.Unmarshal(block.Bytes, &info); err != nil {
+		return false
+	}
+	for _, oid := range []asn1.ObjectIdentifier{
+		{1, 2, 840, 113549, 1, 1, 1}, // rsaEncryption
+		{1, 2, 840, 10045, 2, 1},     // id-ecPublicKey
+		{1, 3, 101, 112},             // id-Ed25519
+	} {
+		if info.Algo.Algorithm.Equal(oid) {
+			return true
+		}
+	}
+	return false
 }
