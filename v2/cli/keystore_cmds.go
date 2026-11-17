@@ -483,6 +483,7 @@ checks it and refuses a DNSSEC JWK ("dnskey").`,
 	}
 	add.Flags().StringVarP(&filename, "file", "f", "", "Key file: the .key or .private of a pair, or a .jwk JWK")
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add SIG(0) key for")
+	add.Flags().BoolVar(&singleKeyForce, "force", false, singleKeyForceHelp)
 	add.MarkFlagRequired("file")
 	add.MarkFlagRequired("zone")
 
@@ -496,6 +497,7 @@ checks it and refuses a DNSSEC JWK ("dnskey").`,
 	}
 	importCmd.Flags().StringVarP(&filename, "file", "f", "", "Key file: the .key or .private of a pair, or a .jwk JWK")
 	importCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import SIG(0) key for")
+	importCmd.Flags().BoolVar(&singleKeyForce, "force", false, singleKeyForceHelp)
 	importCmd.MarkFlagRequired("file")
 	importCmd.MarkFlagRequired("zone")
 
@@ -605,6 +607,7 @@ checks it and refuses a SIG(0) JWK ("sig0key").`,
 	}
 	add.Flags().StringVarP(&filename, "file", "f", "", "Key file: the .key or .private of a pair, or a .jwk JWK")
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add DNSSEC key for")
+	add.Flags().BoolVar(&singleKeyForce, "force", false, singleKeyForceHelp)
 	add.MarkFlagRequired("file")
 	add.MarkFlagRequired("zone")
 
@@ -618,6 +621,7 @@ checks it and refuses a SIG(0) JWK ("sig0key").`,
 	}
 	importCmd.Flags().StringVarP(&filename, "file", "f", "", "Key file: the .key or .private of a pair, or a .jwk JWK")
 	importCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import DNSSEC key for")
+	importCmd.Flags().BoolVar(&singleKeyForce, "force", false, singleKeyForceHelp)
 	importCmd.MarkFlagRequired("file")
 	importCmd.MarkFlagRequired("zone")
 
@@ -912,6 +916,9 @@ func sig0KeyMgmt(role, cmd string) {
 	if cmd == "setstate" {
 		data.State = NewState
 	}
+	if cmd == "add" || cmd == "import" {
+		data.Force = singleKeyForce
+	}
 
 	if tdns.Globals.Debug {
 		log.Printf("sig0KeyMgmt: calling SendKeystoreCmd with data=%v", data)
@@ -1014,6 +1021,14 @@ func writeSig0ExportFiles(sk tdns.Sig0Key, outdir string) error {
 	}
 	return writeNewFile(filepath.Join(outdir, base+".key"), []byte(keyRR), 0644)
 }
+
+// singleKeyForce is --force on the single-key add/import: replace a key
+// that is already in the keystore, as bulk-import --force does.
+var singleKeyForce bool
+
+const singleKeyForceHelp = "Replace the key if it is already in the keystore (same zone and keyid); " +
+	"the replacement resets its state to created. Without it an identical key is reported unchanged " +
+	"and a differing one is refused"
 
 // isJWKFile: the single-key import tells a JWK by its .jwk name, as it
 // tells the halves of a bind pair by .key and .private.
@@ -1151,6 +1166,9 @@ func dnssecKeyMgmt(role, cmd string) {
 
 	if cmd == "setstate" {
 		data.State = NewState
+	}
+	if cmd == "add" || cmd == "import" {
+		data.Force = singleKeyForce
 	}
 
 	tr, err := SendKeystoreCmd(api, data)

@@ -141,14 +141,41 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
 		}
 
-		res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
-			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", privkeyPEM, pkc.KeyRR.String())
+		zone, keyid := pkc.KeyRR.Header().Name, pkc.KeyRR.KeyTag()
+		var curState string
+		var curCreator, curPriv, curRR sql.NullString
+		scanErr := tx.QueryRow(`SELECT state, creator, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`,
+			zone, int(keyid)).Scan(&curState, &curCreator, &curPriv, &curRR)
+		if scanErr != nil && scanErr != sql.ErrNoRows {
+			return &resp, fmt.Errorf("reading SIG(0) key %s keyid %d: %v", zone, keyid, scanErr)
+		}
+		found := scanErr == nil
+		add, err := decideSingleKeyAdd("SIG(0)", zone, keyid, found, curState, curPriv.String, curRR.String,
+			kp.State, privkeyPEM, pkc.KeyRR.String(), kp.Force)
+		if err != nil {
+			return &resp, err
+		}
+		if !add.write {
+			// Nothing written, the TrustStore included: the key is there.
+			resp.Msg = add.msg
+			break
+		}
+		// The creator already in the keystore wins, as in bulk import.
+		creator := "tdns-cli"
+		if found {
+			creator = curCreator.String
+		}
+		res, err = tx.Exec(addSig0KeySql, zone, kp.State, keyid,
+			dns.AlgorithmToString[pkc.Algorithm], creator, privkeyPEM, pkc.KeyRR.String())
 		if err != nil {
 			lgSigner.Error("failed to add SIG(0) key", "err", err)
 			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Updated %d rows.\nAdded private+public key to KeyStore.", rows)
+			if add.msg != "" {
+				resp.Msg = add.msg + "\n" + resp.Msg
+			}
 		}
 
 		// Now also add the public key to the TrustStore.
@@ -623,16 +650,43 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
 		}
 
+		zone, keyid := pkc.DnskeyRR.Header().Name, pkc.DnskeyRR.KeyTag()
+		var curState string
+		var curCreator, curPriv, curRR sql.NullString
+		scanErr := tx.QueryRow(`SELECT state, creator, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`,
+			zone, int(keyid)).Scan(&curState, &curCreator, &curPriv, &curRR)
+		if scanErr != nil && scanErr != sql.ErrNoRows {
+			return &resp, fmt.Errorf("reading DNSSEC key %s keyid %d: %v", zone, keyid, scanErr)
+		}
+		found := scanErr == nil
+		add, err := decideSingleKeyAdd("DNSSEC", zone, keyid, found, curState, curPriv.String, curRR.String,
+			kp.State, privkeyPEM, pkc.DnskeyRR.String(), kp.Force)
+		if err != nil {
+			return &resp, err
+		}
+		if !add.write {
+			resp.Msg = add.msg
+			break
+		}
+		// The creator already in the keystore wins over this import's, as in
+		// bulk import, also under --force.
+		creator := "tdns-cli"
+		if found {
+			creator = curCreator.String
+		}
 		if err := insertKeyRowTx(tx, KeyRow{
-			Zone: pkc.DnskeyRR.Header().Name, State: kp.State, Keyid: pkc.DnskeyRR.KeyTag(), Flags: pkc.DnskeyRR.Flags,
-			Algorithm: dns.AlgorithmToString[pkc.Algorithm], Creator: "tdns-cli", PrivateKey: privkeyPEM,
-			KeyRR: pkc.DnskeyRR.String(), Replace: true,
+			Zone: zone, State: kp.State, Keyid: keyid, Flags: pkc.DnskeyRR.Flags,
+			Algorithm: dns.AlgorithmToString[pkc.Algorithm], Creator: creator, PrivateKey: privkeyPEM,
+			KeyRR: pkc.DnskeyRR.String(), Replace: add.replace,
 		}); err != nil {
 			lgSigner.Error("failed to add DNSKEY", "err", err)
 			return &resp, err
 		}
 		lgSigner.Debug("DNSKEY added successfully")
 		resp.Msg = "Updated 1 rows"
+		if add.msg != "" {
+			resp.Msg = add.msg
+		}
 		needsRepublish = true
 
 	case "bulk-export":
