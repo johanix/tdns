@@ -150,9 +150,10 @@ type ZoneData struct {
 	// Never read directly — call zd.EffectiveOutboundSoaSerial(), which
 	// resolves the zone/global tiers.
 	OutboundSoaSerial string
-	// TransferSrc is the per-zone source address for OUTBOUND transfers, i.e.
-	// what the upstream's allow-transfer ACL sees. Never read directly — call
-	// zd.EffectiveTransferSrc(), which falls back to authengine.transfer-src.
+	// TransferSrc is the per-zone source address for OUTBOUND transfers and
+	// NOTIFYs, i.e. what the upstream's allow-transfer ACL and a downstream's
+	// allow-notify see. Never read directly — call zd.EffectiveTransferSrc(),
+	// which falls back to authengine.transfer-src.
 	TransferSrc []string
 	// TransferSrcTier records which tier TransferSrc was resolved FROM, and is
 	// set only when TransferSrc was populated by resolution rather than by
@@ -628,8 +629,9 @@ type ZoneConf struct {
 	OutboundSoaSerial string `yaml:"outbound-soa-serial,omitempty" mapstructure:"outbound-soa-serial" validate:"omitempty,oneof=keep unixtime persist"`
 	// TransferSrc is the per-zone override of the server-global
 	// authengine.transfer-src: the local address to bind when dialling this
-	// zone's upstreams, which is what the primary's allow-transfer ACL sees.
-	// Empty (the default) inherits the global. Set it on a TEMPLATE to give a
+	// zone's upstreams, which is what the primary's allow-transfer ACL sees,
+	// and when sending its NOTIFYs, which is what a downstream's allow-notify
+	// sees. Empty (the default) inherits the global. Set it on a TEMPLATE to give a
 	// whole class of zones one source address -- the same granularity argument
 	// as OutboundSoaSerial above, and the reason a dynamically-provisioned
 	// secondary can get a source address without the API having to carry one.
@@ -1567,7 +1569,8 @@ type KeyDB struct {
 	// OutboundSoaSerialMode()/SetOutboundSoaSerial(), never directly.
 	outboundSoaSerial atomic.Pointer[string]
 	// transferSrc is the server-global source address list for outbound zone
-	// transfers (authengine.transfer-src). Per-zone ZoneData.TransferSrc wins;
+	// transfers and NOTIFYs (authengine.transfer-src). Per-zone
+	// ZoneData.TransferSrc wins;
 	// see zd.EffectiveTransferSrc(). Same reload-vs-read exposure as the two
 	// above; access via TransferSrcList()/SetTransferSrc().
 	transferSrc atomic.Pointer[[]string]
