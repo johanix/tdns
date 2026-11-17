@@ -269,9 +269,12 @@ type TruststoreResponse struct {
 	// alone. Only src=dns sets it: discovery of a key that is already recorded
 	// is not news, and acting on it again would re-verify a key that may
 	// already be trusted.
-	Existed  bool
-	Error    bool
-	ErrorMsg string
+	Existed bool
+	// Sig0Tombstones answers "tombstone-list": the child keys their own
+	// trusted UPDATEs retired (truststore_tombstone.go).
+	Sig0Tombstones []Sig0Tombstone
+	Error          bool
+	ErrorMsg       string
 }
 
 type CommandPost struct {

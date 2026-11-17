@@ -130,7 +130,7 @@ func TestOwnZoneTrustAnchorComesFromTheZone(t *testing.T) {
 
 	conf := &Config{}
 	conf.Imr.TrustAnchorDS = kskDS(t, rig.parent).String()
-	if err := rig.imr.initializeImrTrustAnchors(context.Background(), conf); err != nil {
+	if err := rig.imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
 		t.Fatalf("trust anchor initialization for the server's own zone: %v", err)
 	}
 	if c := rig.imr.Cache.Get(ownParent, dns.TypeDNSKEY); c == nil || c.State != cache.ValidationStateSecure {
@@ -151,7 +151,8 @@ func TestOwnZoneTrustAnchorBeforeTheZoneLoads(t *testing.T) {
 	conf := &Config{}
 	conf.Imr.TrustAnchorDS = ds.String()
 	conf.Internal.AllZones = []string{ownParent}
-	if err := rig.imr.initializeImrTrustAnchors(context.Background(), conf); err != nil {
+	rig.imr.pendingOwnZone = func(zone string) bool { return rig.imr.ownZonePending(conf, zone) } // as InitImrEngine binds it
+	if err := rig.imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
 		t.Fatalf("trust anchor initialization before the server's own zone has loaded: %v", err)
 	}
 	requireUpstreamNotAsked(t, rig.upLog, ownParent)
@@ -174,7 +175,7 @@ func TestOwnZoneTrustAnchorNeedsNoServers(t *testing.T) {
 
 	conf := &Config{}
 	conf.Imr.TrustAnchorDS = kskDS(t, parent).String()
-	if err := imr.initializeImrTrustAnchors(context.Background(), conf); err != nil {
+	if err := imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
 		t.Fatalf("trust anchor initialization for the server's own zone: %v", err)
 	}
 	// Not forwarded, so the anchor zone's NS RRset is validated too.

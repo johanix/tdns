@@ -444,6 +444,14 @@ func (zd *ZoneData) rememberDiscoveredChildKey(ctx context.Context, key *Sig0Key
 		Src:             "dns",
 		KeyRR:           keyRR,
 	})
+	if errors.Is(err, ErrSig0KeyTombstoned) {
+		// Not a storage fault: somebody signed an UPDATE with a key this child
+		// retired, and it is still published where we looked.
+		_ = tx.Rollback()
+		lgSigner.Warn("not recording a discovered SIG(0) key: its child retired it",
+			"parent", zd.ZoneName, "zone", key.Name, "keyid", key.Keyid, "err", err)
+		return nil
+	}
 	if err != nil || (resp != nil && resp.Error) {
 		_ = tx.Rollback()
 		msg := ""

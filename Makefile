@@ -56,7 +56,7 @@ namecheck:
 # v1 tree, music/ and obe/ are frozen and are not what this checks; a target
 # that fails because a frozen module no longer builds is one people learn to
 # skip.
-TESTMODS = v2 v2/core v2/cache v2/cli v2/debug v2/edns0 tools/namecheck
+TESTMODS = v2 v2/core v2/cache v2/cli v2/debug v2/edns0 v2/algorithms tools/namecheck
 
 check-all:
 	@rc=0; \
