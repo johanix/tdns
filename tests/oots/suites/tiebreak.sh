@@ -14,7 +14,10 @@
 #   the resolver  127.0.0.100 IMR.
 #
 # Precondition: the two servers send the records in different orders (dog).
-# Otherwise the suite cannot tell order-free from lucky: SKIP.
+# Otherwise the suite cannot tell order-free from lucky: SKIP. Nothing has
+# passed then, so the suite is not green, and neither is the run. A publisher
+# that sends an SVCB RRset in one canonical order keeps it that way: P5 then
+# needs another way to serve the two orders, not a quiet skip.
 #
 # Observed: both servers hold dot:10 on 8853 and doh:20 with no port, and both
 # answered over DoT and DoH without failures.
