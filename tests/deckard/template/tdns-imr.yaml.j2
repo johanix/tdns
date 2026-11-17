@@ -12,7 +12,9 @@ imrengine:
    trust-anchor-file: "{{WORKING_DIR}}/ta.keys"
 {% endif %}
    # Keeps the experimental transport-signal option off outgoing queries.
-   options: [ "use-transport-signals:false" ]
+   # Deckard's query-minimization switch: QMIN is "true" unless the scenario pins
+   # it off (design docs/2026-10-22-imr-qname-minimisation.md, section 11).
+   options: [ "use-transport-signals:false"{% if QMIN == "true" %}, "qname-minimisation"{% endif %} ]
    # The scenarios predate RFC 9276, and RFC 5155's example zone uses 12 NSEC3
    # iterations: 150 instead of the default 10, so their proofs are judged.
    tuning:
