@@ -831,6 +831,16 @@ type JournalConf struct {
 	Active *bool `yaml:"active" mapstructure:"active"`
 }
 
+// Clone returns a copy of j that shares nothing with it. Active is a pointer,
+// and a saved copy of the pointer follows the value it points to.
+func (j JournalConf) Clone() JournalConf {
+	if j.Active != nil {
+		v := *j.Active
+		j.Active = &v
+	}
+	return j
+}
+
 // JournalActive reports whether delta persistence is enabled. Absent config
 // means enabled.
 //
@@ -1248,9 +1258,15 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	// apply below then refuses the new block and keeps the running table,
 	// conf.Imr would otherwise go on describing zones that were rejected.
 	runningStubs, runningForward := conf.Imr.Stubs, conf.Imr.Forward
+	// ParseConfig decodes into conf before it validates, so a refused reload
+	// leaves the journal: block it decoded behind, and the next publish of the
+	// runtime-config snapshot (a single-zone reload) would put it in force.
+	// Keep the accepted one and put it back on a refusal.
+	runningJournal := conf.Journal.Clone()
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
+		conf.Journal = runningJournal
 	}
 	// Rebuild the TSIG store ONLY after a successful parse. With KeyDB, reconcile
 	// config keys in place (§6).

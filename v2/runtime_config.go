@@ -49,6 +49,9 @@ type RuntimeConfig struct {
 	// under zd.mu, and a reload takes zd.mu per zone while holding confMu's
 	// write lock: a confMu read there is the zd.mu -> confMu / confMu -> zd.mu
 	// inversion that deadlocks the daemon (#1001).
+	//
+	// Built from conf.Journal, which therefore has to hold only an accepted
+	// value: reloadConfig puts the running one back when it refuses a reload.
 	JournalOff bool
 }
 

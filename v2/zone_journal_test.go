@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -621,6 +622,51 @@ func TestPublishedSnapshotCarriesTheJournalSwitch(t *testing.T) {
 		if got := JournalActive(); got != c.want {
 			t.Errorf("journal.active %s: JournalActive() = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestRefusedReloadDoesNotSwitchTheJournalOff: ParseConfig decodes into the
+// live Config before it validates, so a full reload that decodes
+// journal.active: false and is then refused used to leave the value behind. The
+// refusal publishes nothing, but the next successful single-zone reload
+// publishes the snapshot again from the same Config and put the refused value
+// in force: new updates stopped being recorded though no reload had accepted it.
+func TestRefusedReloadDoesNotSwitchTheJournalOff(t *testing.T) {
+	prevLive := liveConfig.Load()
+	prevSync := delegationSyncConf.Load()
+	t.Cleanup(func() {
+		liveConfig.Store(prevLive)
+		delegationSyncConf.Store(prevSync)
+	})
+
+	// journal.active: false is decoded; the debug address is then refused (it
+	// must be loopback), after the decode.
+	conf := &Config{}
+	conf.Internal.KeyDB = newTestKeyDB(t)
+	conf.Internal.CfgFile = writeCfg(t,
+		"journal:\n   active: false\nlisteners:\n   imr-debug-address: \"192.0.2.1:5353\"\n")
+	conf.publishRuntimeConfig()
+	if !JournalActive() {
+		t.Fatal("the journal is off before any reload")
+	}
+
+	_, err := conf.ReloadConfig()
+	if err == nil || !strings.Contains(err.Error(), "imr-debug-address") {
+		t.Fatalf("the full reload was not refused for its debug address: %v", err)
+	}
+	if conf.Journal.Active != nil {
+		t.Errorf("the refused reload left journal.active = %v in the config", *conf.Journal.Active)
+	}
+	if !JournalActive() {
+		t.Fatal("the refused full reload switched the journal off")
+	}
+
+	if _, err := conf.ReloadZoneConfig(context.Background()); err != nil {
+		t.Fatalf("the single-zone reload failed: %v", err)
+	}
+	if !JournalActive() {
+		t.Fatal("a single-zone reload after a refused full reload published the refused " +
+			"journal.active: false; new updates would stop being recorded")
 	}
 }
 
