@@ -552,3 +552,48 @@ func TestTheSyncherRunsEachParentOnItsOwnQueue(t *testing.T) {
 	cancel()
 	receive(t, done, "the syncher to stop")
 }
+
+// (b) through the production syncher: while one of a zone's requests runs, the
+// zone's next request waits behind it. The running one is an explicit sync
+// whose answer nobody reads yet, so its handler cannot return. (A SYNC-DS
+// handler returns once it has started its delivery, as it always did; the
+// queue orders handlers, not that delivery.)
+func TestTheSyncherRunsAZonesRequestsOneAtATime(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	conf := &Config{}
+	conf.Internal.ImrReady = NewImrReadiness()
+	ctx, cancel := context.WithCancel(context.Background())
+	q := make(chan DelegationSyncRequest, 10)
+	done := make(chan struct{})
+	go func() { defer close(done); _ = kdb.DelegationSyncher(ctx, q, nil, conf) }()
+
+	zd := laneZone("one.p1.example.", "")
+	held := make(chan DelegationSyncStatus) // nobody reads it yet
+	offer(t, q, DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName,
+		ZoneData: zd, Response: held})
+	waitFor(t, 2*time.Second, "the held explicit sync to run", func() bool {
+		pos, ok := DelegationSyncWaiting(zd.ZoneName)
+		return ok && pos.Running
+	})
+
+	status := make(chan DelegationSyncStatus, 1)
+	offer(t, q, DelegationSyncRequest{Command: "DELEGATION-STATUS", ZoneName: zd.ZoneName,
+		ZoneData: zd, Response: status})
+	waitFor(t, 2*time.Second, "the status request to queue behind it", func() bool {
+		if len(status) > 0 {
+			t.Fatal("the zone's status request ran while its explicit sync was still running")
+		}
+		pos, ok := DelegationSyncWaiting(zd.ZoneName)
+		return ok && pos.Waiting == 2
+	})
+	select {
+	case <-status:
+		t.Fatal("the zone's status request ran while its explicit sync was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	receive(t, held, "the held explicit sync's answer")
+	receive(t, status, "the status request, once the explicit sync is done")
+	cancel()
+	receive(t, done, "the syncher to stop")
+}
