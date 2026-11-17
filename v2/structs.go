@@ -150,9 +150,10 @@ type ZoneData struct {
 	// Never read directly — call zd.EffectiveOutboundSoaSerial(), which
 	// resolves the zone/global tiers.
 	OutboundSoaSerial string
-	// TransferSrc is the per-zone source address for OUTBOUND transfers, i.e.
-	// what the upstream's allow-transfer ACL sees. Never read directly — call
-	// zd.EffectiveTransferSrc(), which falls back to authengine.transfer-src.
+	// TransferSrc is the per-zone source address for OUTBOUND transfers and
+	// NOTIFYs, i.e. what the upstream's allow-transfer ACL and a downstream's
+	// allow-notify see. Never read directly — call zd.EffectiveTransferSrc(),
+	// which falls back to authengine.transfer-src.
 	TransferSrc []string
 	// TransferSrcTier records which tier TransferSrc was resolved FROM, and is
 	// set only when TransferSrc was populated by resolution rather than by
@@ -245,6 +246,9 @@ type ZoneData struct {
 	// docs/2026-08-28-secondary-serve-until-expire.md.
 	RefreshCount  int       // times initialLoadZone loaded the zone (0 or 1), reported over the API
 	LatestRefresh time.Time // when a usable SOA was last seen; what SOA EXPIRE is measured from
+	// refreshRun counts the zone's failed and deferred refreshes in a row, for
+	// the one line each logs (refresh_failure.go).
+	refreshRun refreshRunState
 	// expireClampLoggedSerial is the serial the EXPIRE-clamp warning was last
 	// emitted for, so a primary publishing a nonsensical EXPIRE is reported
 	// once per copy rather than once per query. See effectiveExpire.
@@ -280,6 +284,12 @@ type ZoneData struct {
 	// signature again. Cleared when the resigner takes it, or when the send
 	// is dropped.
 	resignQueued atomic.Bool
+	// keepSigned records that this zone signs here and is on the resigner's
+	// renewal watchlist (KeepRenewed). The resigner's pass walks Zones and
+	// renews the zones that carry it, so a zone removed from Zones, or replaced
+	// by a new ZoneData, leaves the watchlist with it. Never cleared: a zone
+	// that stops signing is skipped by its options, as before.
+	keepSigned atomic.Bool
 	// signalSkipLogged records that RepublishAtSignalNames has said, once,
 	// that it publishes nothing for this zone because its copy carries HSYNC3
 	// (leavesSignalsToItsAgents). Cleared when the copy no longer does. Per
@@ -308,6 +318,10 @@ type ZoneData struct {
 	// once the zone is Ready (runOwedPostRefreshCallbacks), and the flag clears
 	// only when they run. Guarded by mu.
 	postRefreshOwed bool
+	// withheld keeps the zone from answering and from going Ready until its
+	// daemon knows what the zone is to it (Withhold, signing_role.go). Guarded
+	// by mu.
+	withheld bool
 	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
 	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
 	// snapshot in ensureWorkingSet so unrelated publishes preserve it.
@@ -615,8 +629,9 @@ type ZoneConf struct {
 	OutboundSoaSerial string `yaml:"outbound-soa-serial,omitempty" mapstructure:"outbound-soa-serial" validate:"omitempty,oneof=keep unixtime persist"`
 	// TransferSrc is the per-zone override of the server-global
 	// authengine.transfer-src: the local address to bind when dialling this
-	// zone's upstreams, which is what the primary's allow-transfer ACL sees.
-	// Empty (the default) inherits the global. Set it on a TEMPLATE to give a
+	// zone's upstreams, which is what the primary's allow-transfer ACL sees,
+	// and when sending its NOTIFYs, which is what a downstream's allow-notify
+	// sees. Empty (the default) inherits the global. Set it on a TEMPLATE to give a
 	// whole class of zones one source address -- the same granularity argument
 	// as OutboundSoaSerial above, and the reason a dynamically-provisioned
 	// secondary can get a source address without the API having to carry one.
@@ -1152,7 +1167,13 @@ type DelegationSyncStatus struct {
 	// "withdraw the DS" when this is set and "no opinion about DS" when it is
 	// not; the two are opposite instructions that look identical as a nil
 	// slice, so the flag travels with the field and must be read first.
-	NewDSKnown   bool `json:"-"`
+	NewDSKnown bool `json:"-"`
+	// Unread names what the analysis asked the parent (or the keystore) and
+	// got no answer to: "<ns> A", "<ns> AAAA", "DS", "DS intent". InSync says
+	// nothing about those, so an analysis with Unread set must not be taken as
+	// the parent in step. Deliberate absences of opinion -- a rollover owning
+	// the DS, keys tdns does not manage -- are not reads and are not listed.
+	Unread       []string `json:",omitempty"`
 	Error        bool
 	ErrorMsg     string
 	UpdateResult UpdateResult // Experimental
@@ -1170,6 +1191,14 @@ type DelegationSyncStatus struct {
 	AAAARemovesStr []string `json:"AAAARemoves,omitempty"`
 	DSAddsStr      []string `json:"DSAdds,omitempty"`
 	DSRemovesStr   []string `json:"DSRemoves,omitempty"`
+}
+
+// Complete reports whether the analysis read everything it asked for. An
+// incomplete analysis may report InSync while the parent holds what it could
+// not read, so a caller that acts on InSync -- ending a retry, clearing an owed
+// sync -- must check this first.
+func (dss DelegationSyncStatus) Complete() bool {
+	return len(dss.Unread) == 0
 }
 
 func (dss *DelegationSyncStatus) ToStrings() {
@@ -1540,7 +1569,8 @@ type KeyDB struct {
 	// OutboundSoaSerialMode()/SetOutboundSoaSerial(), never directly.
 	outboundSoaSerial atomic.Pointer[string]
 	// transferSrc is the server-global source address list for outbound zone
-	// transfers (authengine.transfer-src). Per-zone ZoneData.TransferSrc wins;
+	// transfers and NOTIFYs (authengine.transfer-src). Per-zone
+	// ZoneData.TransferSrc wins;
 	// see zd.EffectiveTransferSrc(). Same reload-vs-read exposure as the two
 	// above; access via TransferSrcList()/SetTransferSrc().
 	transferSrc atomic.Pointer[[]string]

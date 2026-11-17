@@ -45,14 +45,27 @@ func clarifyXfrError(zone, upstream string, err error) error {
 	const marker = "bad xfr rcode: "
 	if i := strings.Index(err.Error(), marker); i >= 0 {
 		if code, perr := strconv.Atoi(strings.TrimSpace(err.Error()[i+len(marker):])); perr == nil {
-			name := dns.RcodeToString[code]
-			if name == "" {
-				name = fmt.Sprintf("rcode %d", code)
-			}
-			return fmt.Errorf("inbound zone transfer of %s from %s failed: %s", zone, upstream, name)
+			return &xfrRcodeError{zone: zone, upstream: upstream, rcode: code}
 		}
 	}
 	return err
+}
+
+// xfrRcodeError is a transfer the upstream answered with an rcode instead of
+// the zone. Its text is the one clarifyXfrError has always returned; the type
+// is so that a refresh failure can name the rcode as its kind without parsing
+// that text (refreshErrorKind).
+type xfrRcodeError struct {
+	zone, upstream string
+	rcode          int
+}
+
+func (e *xfrRcodeError) Error() string {
+	name := dns.RcodeToString[e.rcode]
+	if name == "" {
+		name = fmt.Sprintf("rcode %d", e.rcode)
+	}
+	return fmt.Sprintf("inbound zone transfer of %s from %s failed: %s", e.zone, e.upstream, name)
 }
 
 // drainTransferEnvelopes consumes the AXFR/IXFR envelope stream, feeding each
@@ -164,14 +177,14 @@ func (zd *ZoneData) openTransferStream(ctx context.Context, up PeerConf, msg *dn
 	// fork's Transfer.In dials tcp-tls with it. nil => plain TCP (Do53).
 	tlsCfg, terr := conf.ClientTLSConfigForPeer(up)
 	if terr != nil {
-		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)
+		return nil, nil, &peerConfigError{err: fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)}
 	}
 	transfer.TLS = tlsCfg
 	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
 	// The provider also verifies the TSIG on the inbound envelopes.
 	provider, serr := SignForPeer(msg, up.Key, conf)
 	if serr != nil {
-		return nil, nil, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
+		return nil, nil, &peerConfigError{err: fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)}
 	}
 	transfer.TsigProvider = provider
 

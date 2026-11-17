@@ -56,12 +56,14 @@ type refreshJob struct {
 func runZoneRefresh(ctx context.Context, job refreshJob, conf *Config) (bool, error) {
 	zd, zone := job.zd, job.zone
 
+	seen := zd.refreshRun.confirmations.Load()
 	updated, err := zd.refresh(ctx, Globals.Verbose, Globals.Debug, job.force, conf, job.gate)
 	if err != nil {
 		noteRefreshFailure(zd, zone, err, "zone refresh failed")
 		respondToRefresher(job.zr, RefresherResponse{Error: true, ErrorMsg: err.Error()})
 		return false, err
 	}
+	noteRefreshSuccess(zd, zone, refreshConfirmed(zd, seen))
 
 	// Refresh-specific error state only. The other categories -- rollover
 	// policy, parent DSYNC, config -- are independent and survive a successful

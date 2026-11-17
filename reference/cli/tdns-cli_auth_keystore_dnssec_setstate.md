@@ -1,6 +1,6 @@
 ## tdns-cli auth keystore dnssec setstate
 
-Set the state of and existing DNSSEC key pair in the TDNSD keystore
+Set the state of and existing DNSSEC key pair in the keystore
 
 ```
 tdns-cli auth keystore dnssec setstate [flags]
@@ -22,6 +22,7 @@ tdns-cli auth keystore dnssec setstate [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 

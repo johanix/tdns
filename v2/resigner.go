@@ -24,18 +24,12 @@ const (
 	// removed. The served RRSIG set has to match the new active set now, and
 	// that means REPLACING signatures rather than adding to them.
 	ResignKeyStateChanged ResignReason = iota + 1
-
-	// ResignPeriodic: keep this zone on the watchlist that renews ageing
-	// signatures. No immediate pass -- the ticker decides when one is due.
-	ResignPeriodic
 )
 
 func (r ResignReason) String() string {
 	switch r {
 	case ResignKeyStateChanged:
 		return "key-state-changed"
-	case ResignPeriodic:
-		return "periodic"
 	}
 	return "unknown"
 }
@@ -51,6 +45,69 @@ type ResignRequest struct {
 // resignSafetyTick bounds how long the resigner will sleep on its own estimate.
 // See nextResignWake.
 const resignSafetyTick = time.Hour
+
+// resignWake tells the resigner that a zone has joined the watchlist. One slot,
+// sent to without blocking: a full slot means a wake is already owed, and the
+// engine reads the watchlist itself when it wakes.
+var resignWake = make(chan struct{}, 1)
+
+// KeepRenewed puts the zone on the resigner's renewal watchlist, so its
+// signatures are renewed before they age out. It cannot fail and does not wait.
+//
+// Registration used to be a send on the ResignQ, bounded at two seconds. The
+// resigner is one goroutine, and while it replaced a zone's signatures or swept
+// the watchlist nothing read the queue -- so a registration that arrived then
+// timed out, the zone was never renewed, and its signatures expired. The
+// watchlist is now this flag, and the resigner's pass reads it (#1033).
+//
+// No checks: the caller has decided the zone signs here. registerForPeriodicResign
+// is the checked form, for zones whose config says whether they sign.
+func (zd *ZoneData) KeepRenewed() {
+	if zd == nil || !zd.keepSigned.CompareAndSwap(false, true) {
+		return
+	}
+	lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
+	select {
+	case resignWake <- struct{}{}:
+	default:
+	}
+}
+
+// resignCandidates picks the zones a resigner pass looks at from zones, which is
+// Zones.Items(): those on the watchlist, and those owed a replace. The second
+// kind is a key-state request that was dropped (triggerResign marks the zone
+// first), and it is honoured whether or not the zone ever registered -- as it
+// would have been had the request been delivered.
+//
+// Walking the live registry, rather than a list of its own, is what keeps the
+// watchlist honest: a zone removed from Zones leaves the pass with it, and a
+// zone replaced by a new ZoneData is renewed as the new one, once that one
+// registers. The list this replaced kept every ZoneData it was ever handed.
+func resignCandidates(zones map[string]*ZoneData) map[string]*ZoneData {
+	out := make(map[string]*ZoneData)
+	for name, zd := range zones {
+		if zd.keepSigned.Load() || zd.resignPendingSet() {
+			out[name] = zd
+		}
+	}
+	return out
+}
+
+// resignPass renews every zone in zones, one after another, stopping between
+// zones when ctx is done.
+func resignPass(ctx context.Context, zones map[string]*ZoneData) {
+	for _, zd := range zones {
+		// Shutdown latency here is one pass per zone, not one pass, so the
+		// check belongs between zones: a stop during a sweep of several hundred
+		// should not wait out the whole sweep. Inside a pass there is nothing
+		// useful to abandon -- it holds zd.mu and signs only what is due, and
+		// SignZone and ResignZone bound themselves the same way.
+		if ctx.Err() != nil {
+			return
+		}
+		resignSweepZone(ctx, zd)
+	}
+}
 
 // nextResignWake returns how long the resigner may sleep before its next pass:
 // until the earliest renewal any watched zone reports, bounded at both ends.
@@ -133,8 +190,6 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 			" are always renewed. Remove the setting from the config.")
 	}
 
-	ZonesToKeepSigned := make(map[string]*ZoneData)
-
 	// The renewal pass is scheduled rather than merely periodic. Every zone
 	// records when its earliest signature crosses the renewal threshold, so
 	// there is no reason to wake every minute and walk every zone to be told
@@ -157,11 +212,24 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 	// this EARLIER; see earlierResignWake.
 	nextWake := time.Now().Add(floor)
 
+	// Whatever the engine is currently sleeping through was computed without
+	// the zone that just arrived, which has no estimate of its own yet -- so it
+	// may need an earlier wake. Never a later one.
+	wakeSooner := func() {
+		if at, sooner := earlierResignWake(nextWake, time.Now(), floor); sooner {
+			timer.Stop()
+			timer.Reset(time.Until(at))
+			nextWake = at
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			lgSigner.Info("ResignerEngine terminating")
 			return
+		case <-resignWake:
+			wakeSooner()
 		case req, ok := <-zoneresignch:
 			if !ok {
 				return
@@ -173,19 +241,14 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 				continue
 			}
 
-			// What to do now depends on why the zone was sent. A key-state
-			// change cannot wait for the ticker: the zone is serving signatures
-			// by keys that are no longer active. A periodic registration is the
-			// opposite -- it asks to be watched, and the ticker decides when
-			// anything is due.
+			// A key-state change cannot wait for the ticker: the zone is
+			// serving signatures by keys that are no longer active.
 			switch req.Reason {
 			case ResignKeyStateChanged:
 				// Before the pass reads the keystore: a trigger from here
 				// on is for a change this pass may not see.
 				zd.resignQueued.Store(false)
 				zd.replaceSignaturesNow(ctx)
-			case ResignPeriodic:
-				// Registration only; the watchlist add below is the whole effect.
 			default:
 				lgSigner.Warn("ResignerEngine: unknown resign reason, registering only",
 					"zone", zd.ZoneName, "reason", uint8(req.Reason))
@@ -193,39 +256,21 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 
 			// Keep the zone on the watchlist for the periodic re-sign ticker,
 			// which since #515 always runs.
-			if _, exist := ZonesToKeepSigned[zd.ZoneName]; !exist {
-				lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
-			}
-			ZonesToKeepSigned[zd.ZoneName] = zd
-
-			// Whatever the engine is currently sleeping through was computed
-			// without this zone, which has no estimate of its own yet -- so it
-			// may need an earlier wake. Never a later one.
-			if at, sooner := earlierResignWake(nextWake, time.Now(), floor); sooner {
-				timer.Stop()
-				timer.Reset(time.Until(at))
-				nextWake = at
-			}
+			zd.KeepRenewed()
+			wakeSooner()
 
 		case <-timer.C:
-			for _, zd := range ZonesToKeepSigned {
-				// Shutdown latency here is one pass per zone, not one pass, so
-				// the check belongs between zones: a stop during a sweep of
-				// several hundred should not wait out the whole sweep. Inside a
-				// pass there is nothing useful to abandon -- it holds zd.mu and
-				// signs only what is due, and SignZone and ResignZone bound
-				// themselves the same way.
-				if ctx.Err() != nil {
-					lgSigner.Info("ResignerEngine terminating during a renewal sweep")
-					return
-				}
-				resignSweepZone(ctx, zd)
+			zones := resignCandidates(Zones.Items())
+			resignPass(ctx, zones)
+			if ctx.Err() != nil {
+				lgSigner.Info("ResignerEngine terminating during a renewal sweep")
+				return
 			}
 
-			wake := nextResignWake(ZonesToKeepSigned, floor)
+			wake := nextResignWake(zones, floor)
 			nextWake = time.Now().Add(wake)
 			lgSigner.Debug("ResignerEngine sleeping until the next renewal is due",
-				"zones", len(ZonesToKeepSigned), "sleep", wake.String())
+				"zones", len(zones), "sleep", wake.String())
 			timer.Reset(wake)
 		}
 	}

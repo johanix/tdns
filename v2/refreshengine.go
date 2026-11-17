@@ -47,14 +47,31 @@ func refreshWritesZoneToSourceFile(zd *ZoneData) bool {
 	return zd != nil && zd.Zonefile != "" && zd.ZoneType != Primary
 }
 
-// After all zones are initialized, (re)compute transport signals across zones to resolve cross-zone dependencies.
-func runTransportSignalPostpass(conf *Config) {
-	for zname, zdz := range Zones.Items() {
-		if zdz != nil && zdz.addsTransportSignal() {
-			if err := zdz.CreateTransportSignalRRs(conf); err != nil {
-				lgEngine.Error("postpass CreateTransportSignalRRs failed", "zone", zname, "error", err)
-			}
-		}
+// runTransportSignalPass derives a zone's transport signal (its _dns.<ns>
+// RRsets). It runs once per zone, when that zone's first load has bound its
+// DNSSEC policy: in completeFirstZonePolicyAndLoad, or in
+// finishFirstLoadPolicy when the bind is retried (#1058).
+//
+// Not before the bind. The pass signs what it stores, and a signing zone with
+// no keys yet gets them from EnsureActiveDnssecKeys, which needs the policy:
+// on a first start the pass failed with ErrDnssecPolicyNotBound and nothing
+// ran it again, so the zone had no signal until a restart. On a restart the
+// keys exist, but a signature made with no policy bound gets the five-minute
+// no-policy lifetime (sigLifetime).
+//
+// Not at an all-zones barrier either, which is where it used to run: when the
+// last configured zone finished its first load, which is before that zone's
+// policy binds. The pass reads no other zone's content. Its one cross-zone
+// question, whether the zone of an out-of-bailiwick identity NS is co-hosted,
+// is asked of Zones, where ParseZones registers every configured zone before
+// the first load. A zone registered later is found at query time as well
+// (lookupSignalRRsets), and its signal is preferred to a fallback.
+func runTransportSignalPass(zd *ZoneData, conf *Config) {
+	if zd == nil || !zd.addsTransportSignal() {
+		return
+	}
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		lgEngine.Error("transport signal pass failed", "zone", zd.ZoneName, "error", err)
 	}
 }
 
@@ -83,6 +100,9 @@ type RefreshCounter struct {
 //
 // One helper rather than an errors.Is at each of the five call sites: they all
 // want the same rule, and the next one added should get it for free.
+//
+// It logs the ONE ERROR of a failed refresh: the lines below it in the call
+// are DEBUG, and its fields carry what they said (refreshFailureAttrs).
 func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 	if errors.Is(err, context.Canceled) {
 		lgEngine.Info("zone refresh cancelled", "zone", zone)
@@ -91,11 +111,14 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 	if refreshDeferred(err) {
 		// Not a failure of the zone: a local writer holds it, for its limit at
 		// most, or a change of its own waits for the pass that can publish
-		// it. The next attempt comes soon (nextRefreshAfterFailure).
-		lgEngine.Info("zone refresh deferred", "zone", zone, "reason", err)
+		// it. The next attempt comes soon (nextRefreshAfterFailure). Counted,
+		// so that one that does not end reaches ERROR.
+		noteRefreshDeferral(zd, zone, err)
 		return false
 	}
-	lgEngine.Error(msg, "zone", zone, "error", err)
+	endRefreshDeferral(zd, zone)
+	attempts, since := zd.refreshRun.noteFailed(time.Now())
+	lgEngine.Error(msg, refreshFailureAttrs(zone, err, attempts, since)...)
 	zd.SetError(RefreshError, "refresh error: %v", err)
 	zd.LatestError = time.Now()
 	return true
@@ -105,9 +128,9 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 // post-init hooks, OnFirstLoad callbacks, and downstream notification.
 // Called for both newly-created zones and pre-registered zone stubs.
 func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefresher, conf *Config,
-	refreshCounters *core.ConcurrentMap[string, *RefreshCounter],
-	tryPostpass func(string)) (bool, error) {
+	refreshCounters *core.ConcurrentMap[string, *RefreshCounter]) (bool, error) {
 
+	seen := zd.refreshRun.confirmations.Load()
 	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
 	if err != nil {
 		// A failed refresh no longer implies an empty zone. A secondary that
@@ -155,6 +178,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		}
 		return false, err
 	}
+	noteRefreshSuccess(zd, zone, refreshConfirmed(zd, seen))
 
 	refresh, err := FindSoaRefresh(zd)
 	if err != nil {
@@ -208,9 +232,10 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		}
 	}
 
-	// Defer transport signal synthesis until all zones are initialized.
-	tryPostpass(zone)
-
+	// Note: the transport signal pass is NOT run here either. It signs, and
+	// the policy that gives it keys and a signature lifetime is bound later,
+	// in completeFirstZonePolicyAndLoad, which runs it (runTransportSignalPass).
+	//
 	// Note: the OnFirstLoad callbacks and SetupZoneSync are NOT run here.
 	// Those callbacks (registration for periodic re-signing, from ParseZones) are
 	// drained by completeFirstZonePolicyAndLoad AFTER InstallInitialSnapshot
@@ -298,8 +323,15 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 // paths so the callbacks registered by ParseZones see a Ready zone with the
 // correct policy binding. Preserves the #286 one-shot deferral: callbacks
 // still run once, just post-Ready rather than mid-load.
+//
+// A withheld zone keeps them, as it keeps the zone off the air: its release
+// drains them (ReleaseWithheld).
 func drainAndRunOnFirstLoad(zd *ZoneData) {
 	zd.mu.Lock()
+	if zd.withheld {
+		zd.mu.Unlock()
+		return
+	}
 	callbacks := zd.OnFirstLoad
 	zd.OnFirstLoad = nil
 	zd.mu.Unlock()
@@ -310,14 +342,16 @@ func drainAndRunOnFirstLoad(zd *ZoneData) {
 }
 
 // hasPendingOnFirstLoad reports whether OnFirstLoad callbacks are still waiting
-// to run (e.g. after a first-load policy sync failure). Reads under zd.mu.
+// to run (e.g. after a first-load policy sync failure). Reads under zd.mu. A
+// withheld zone's are not waiting for a retry: the ticker's retry would take the
+// place of the zone's refreshes for as long as it is withheld.
 func hasPendingOnFirstLoad(zd *ZoneData) bool {
 	if zd == nil {
 		return false
 	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return len(zd.OnFirstLoad) > 0
+	return len(zd.OnFirstLoad) > 0 && !zd.withheld
 }
 
 // finishFirstLoadPolicy is the post-Ready tail of first-bind completion: sync
@@ -355,6 +389,9 @@ func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, conf
 	if err := signOnceAfterPolicyBind(ctx, zd); err != nil {
 		return err
 	}
+	// The transport signal, which completeFirstZonePolicyAndLoad would have
+	// derived had its policy sync not failed. Here, as there, after the bind.
+	runTransportSignalPass(zd, conf)
 	// The post-refresh callbacks the first load deferred, now that the sign
 	// has made the zone Ready. There is no journal replay on this retry-only
 	// path, so the drain follows the sign directly. Ready-guarded inside: a
@@ -397,10 +434,7 @@ func signOnceAfterPolicyBind(ctx context.Context, zd *ZoneData) error {
 	// signatures came in with the file. Signing again would republish and bump
 	// the serial for nothing, and finishFirstLoadPolicy is explicitly a
 	// retry-only path that must not re-publish.
-	zd.mu.Lock()
-	signed := zd.snapshotContentIsServableLocked(zd.snapshot.Load())
-	zd.mu.Unlock()
-	if signed {
+	if snapshotApexIsSigned(zd.snapshot.Load()) {
 		return nil
 	}
 	newrrsigs, err := zd.SignZone(ctx, zd.KeyDB, false)
@@ -456,6 +490,13 @@ func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Con
 	// deltas hold everything that has happened since. Serving the file alone
 	// would silently roll the zone back to that point.
 	replayZoneDeltasOnLoad(zd)
+
+	// The transport signal. After the bind, so that it is signed with the
+	// policy's keys and lifetime; after the replay, so that it is derived from
+	// the NS RRset the zone serves, not the one in the file; before the
+	// callbacks, which then see the zone with its signal, as they do after any
+	// later refresh, which carries the signal over.
+	runTransportSignalPass(zd, conf)
 
 	// The post-refresh callbacks the first load deferred (see
 	// runPostRefreshCallbacks). After the replay, so that they see the zone's
@@ -713,20 +754,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	// var refreshCounters = make(map[string]*RefreshCounter, 5)
 	var refreshCounters = core.NewCmap[*RefreshCounter]()
 
-	// Build expected zone set from config for a robust post-initialization barrier
-	expected := map[string]struct{}{}
-	for _, zn := range conf.Internal.AllZones {
-		expected[zn] = struct{}{}
-	}
-	tryPostpass := func(doneZone string) {
-		if doneZone != "" {
-			delete(expected, doneZone)
-		}
-		if len(expected) == 0 {
-			runTransportSignalPostpass(conf)
-		}
-	}
-
 	// Every steady-state refresh runs here, not on this goroutine. Shutdown is
 	// deferred so it covers all three ways out of the loop below; it closes the
 	// job channel, lets each worker finish what it holds, and waits -- so no
@@ -823,17 +850,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.mu.Unlock()
 						}
 
-						if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
-							tryPostpass); err != nil {
+						if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters); err != nil {
 							noteRefreshFailure(zd, zone, err, "zone refresh failed")
 
 							// Set a refresh counter so the ticker can retry.
 							if _, exists := refreshCounters.Get(zone); !exists {
 								refreshCounters.Set(zone, &RefreshCounter{
 									Name:       zone,
-									SOARefresh: 300, // 5 min fallback
-									SOARetry:   300, // no SOA to read a real RETRY from
-									CurRefresh: 30,  // retry sooner on initial failure
+									SOARefresh: 300,                   // 5 min fallback
+									SOARetry:   300,                   // no SOA to read a real RETRY from
+									CurRefresh: firstLoadRetrySeconds, // retry sooner on initial failure
 								})
 							}
 
@@ -1156,12 +1182,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// still retries without signing.
 					zd.mu.Lock()
 					if Globals.App.Type != AppTypeAgent {
-						resignQ := conf.Internal.ResignQ
-						zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
-							if err := z.registerForPeriodicResign(ctx, resignQ); err != nil {
-								lgEngine.Error("registerForPeriodicResign failed", "zone", z.ZoneName, "error", err)
-							}
-						})
+						zd.OnFirstLoad = append(zd.OnFirstLoad, (*ZoneData).registerForPeriodicResign)
 					} else if len(zd.OnFirstLoad) == 0 {
 						zd.OnFirstLoad = append(zd.OnFirstLoad, func(*ZoneData) {})
 					}
@@ -1199,8 +1220,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 					Zones.Set(zone, zd)
 
-					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
-						tryPostpass); err != nil {
+					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters); err != nil {
 						noteRefreshFailure(zd, zone, err, "zone refresh failed")
 						continue
 					}
@@ -1300,7 +1320,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// (rollover-policy, config) are independent and survive.
 					zd.ClearError(RefreshError)
 					if _, err := initialLoadZone(ctx, zd, zone, ZoneRefresher{Name: zone, Force: true}, conf,
-						refreshCounters, tryPostpass); err != nil {
+						refreshCounters); err != nil {
 						noteRefreshFailure(zd, zone, err, "initial load retry failed")
 					} else {
 						if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
@@ -1458,6 +1478,11 @@ func nextRefreshAfterFailure(rc *RefreshCounter, err error) uint32 {
 	}
 	return refreshCounterRetry(rc)
 }
+
+// firstLoadRetrySeconds is how soon the ticker retries a pre-registered zone
+// whose first load failed. A variable only so that a test does not have to
+// wait thirty seconds.
+var firstLoadRetrySeconds uint32 = 30
 
 func refreshCounterRetry(rc *RefreshCounter) uint32 {
 	if rc.SOARetry > 0 {

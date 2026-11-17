@@ -426,12 +426,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	// First-load callbacks, mirroring what ParseZones registers for static
 	// zones (the engine's stub branch drains OnFirstLoad post-Ready).
 	if options[OptOnlineSigning] || options[OptInlineSigning] {
-		resignQ := conf.Internal.ResignQ
-		zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
-			if err := z.registerForPeriodicResign(ctx, resignQ); err != nil {
-				lg.Error("registerForPeriodicResign failed in OnFirstLoad", "zone", z.ZoneName, "error", err)
-			}
-		})
+		zd.OnFirstLoad = append(zd.OnFirstLoad, (*ZoneData).registerForPeriodicResign)
 	}
 	// SetupZoneSync's parentsync path does an unbounded send to
 	// DelegationSyncQ, and OnFirstLoad callbacks run inside the RefreshEngine
