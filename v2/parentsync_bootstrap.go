@@ -323,6 +323,13 @@ func (conf *Config) pollParentKeyState(ctx context.Context, p parentKeyStatePoll
 					"zone", zone, "keyid", keyid)
 				return nil
 			}
+			if errors.Is(err, ErrSig0KeyTombstoned) {
+				// A trusted UPDATE from the zone deleted this key at the
+				// parent, which will not take it again. Polling cannot help.
+				lgElect.Error("ParentSyncAfterKeyPublication: the parent will not take this key again; make a new SIG(0) key",
+					"zone", zone, "keyid", keyid, "err", err)
+				return err
+			}
 			// Sent only if it failed after the parent accepted it. One that
 			// never went out leaves the poll free to bootstrap when the
 			// parent reports the key unknown.
@@ -424,6 +431,16 @@ func (conf *Config) onParentKeyState(ctx context.Context, p parentKeyStatePoll, 
 					"zone", zone, "attempt", attempt, "err", err)
 				return false, err // retry
 			}
+			if errors.Is(err, errBootstrapTransient) {
+				// No answer, SERVFAIL, or the parent has the key and is still
+				// verifying it. Not a verdict: ask again, and bootstrap again
+				// if the parent still does not know the key.
+				lgElect.Warn("ParentSyncAfterKeyPublication: the parent's answer to the bootstrap is not final, will retry",
+					"zone", zone, "attempt", attempt, "err", err)
+				return false, err // retry
+			}
+			// Any other failure is final, a retired key (ErrSig0KeyTombstoned)
+			// included: its error says to make a new key.
 			lgElect.Error("ParentSyncAfterKeyPublication: bootstrap failed",
 				"zone", zone, "err", err)
 			return true, err // done (terminal error)
