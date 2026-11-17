@@ -7,6 +7,7 @@ import (
 	"context"
 	"sync"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/spf13/viper"
 )
 
@@ -210,11 +211,19 @@ func transferConcurrency() int {
 // dispatchRefresh hands a zone to the pool, or answers the operator if it
 // cannot.
 //
-// Runs on the engine goroutine, which is what makes inflight correct with no
-// synchronisation at all: dispatch and completion are the same goroutine, so the
-// map is never read and written concurrently. Two concurrent refreshes of one
-// zone would not merely duplicate work -- ZoneTransferIn replaces zd.Data
-// wholesale, and the FetchFrom* paths do a read-modify-write on FirstZoneLoad.
+// Runs on the engine goroutine, which is what makes inflight correct without
+// any ordering between dispatch and completion: they are the same goroutine, so
+// the set is never read and written at the same moment. Two concurrent
+// refreshes of one zone would not merely duplicate work -- ZoneTransferIn
+// replaces zd.Data wholesale, and the FetchFrom* paths do a read-modify-write on
+// FirstZoneLoad.
+//
+// inflight is a NameMap, not a plain map, so that the dispatch check, the insert
+// below and the completion's delete all fold the zone name the same way. A NOTIFY
+// or an API call carries the spelling it arrived with and the ticker the
+// counter's, and a map keyed by spelling treated "Example.COM." and
+// "example.com." as two zones: both refreshes were dispatched and ran at once
+// against one ZoneData (#1005).
 //
 // The entry is set only AFTER a successful dispatch. Marking the zone in flight
 // and then attempting the send would pin it forever whenever the queue is full:
@@ -224,8 +233,8 @@ func transferConcurrency() int {
 // A skipped zone that has somebody waiting is ANSWERED. Silently skipping a
 // Wait-ing refresher hangs `tdns-cli zone reload`, and the operator's next move
 // is a restart.
-func dispatchRefresh(pool *refreshPool, inflight map[string]struct{}, job refreshJob) {
-	if _, busy := inflight[job.zone]; busy {
+func dispatchRefresh(pool *refreshPool, inflight *core.NameMap[struct{}], job refreshJob) {
+	if inflight.Has(job.zone) {
 		lgEngine.Debug("refresh already in progress, not dispatching again", "zone", job.zone)
 		respondToRefresher(job.zr, RefresherResponse{
 			Error:    true,
@@ -241,5 +250,5 @@ func dispatchRefresh(pool *refreshPool, inflight map[string]struct{}, job refres
 		})
 		return
 	}
-	inflight[job.zone] = struct{}{}
+	inflight.Set(job.zone, struct{}{})
 }

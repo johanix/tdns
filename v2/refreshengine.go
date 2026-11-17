@@ -128,7 +128,7 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 // post-init hooks, OnFirstLoad callbacks, and downstream notification.
 // Called for both newly-created zones and pre-registered zone stubs.
 func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefresher, conf *Config,
-	refreshCounters *core.ConcurrentMap[string, *RefreshCounter]) (bool, error) {
+	refreshCounters *core.NameMap[*RefreshCounter]) (bool, error) {
 
 	seen := zd.refreshRun.confirmations.Load()
 	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
@@ -751,8 +751,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	var zonerefch = conf.Internal.RefreshZoneCh
 	var bumpch = conf.Internal.BumpZoneCh
 
-	// var refreshCounters = make(map[string]*RefreshCounter, 5)
-	var refreshCounters = core.NewCmap[*RefreshCounter]()
+	// Keyed by the folded zone name, like Zones and inflight: a counter per
+	// spelling would be a counter per refresh schedule for one zone (#1005).
+	var refreshCounters = core.NewNameMap[*RefreshCounter]()
 
 	// Every steady-state refresh runs here, not on this goroutine. Shutdown is
 	// deferred so it covers all three ways out of the loop below; it closes the
@@ -761,8 +762,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	pool := newRefreshPool(ctx, refreshWorkers(), 0, transferConcurrency(), conf)
 	defer pool.Shutdown()
 
-	// Owned by this goroutine alone. See dispatchRefresh.
-	inflight := map[string]struct{}{}
+	// Owned by this goroutine alone, and keyed by the folded zone name. See
+	// dispatchRefresh.
+	inflight := core.NewNameMap[struct{}]()
 
 	ticker := time.NewTicker(1 * time.Second)
 	lgEngine.Info("refresh engine starting")
@@ -1374,7 +1376,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			}
 
 		case out := <-pool.Done():
-			delete(inflight, out.Zone)
+			inflight.Remove(out.Zone)
 			if rc, ok := refreshCounters.Get(out.Zone); ok {
 				// Reset at COMPLETION, not at dispatch. Reset-at-dispatch would
 				// double the effective interval for exactly the slow zones that
@@ -1617,7 +1619,7 @@ func refreshCounterTick(rc *RefreshCounter) bool {
 // taken before that call no longer reaches the map, and an interval written
 // through it is silently discarded. secs of 0 means "whatever the live counter
 // says its SOA REFRESH is", which is the normal reset.
-func setRefreshRetry(refreshCounters *core.ConcurrentMap[string, *RefreshCounter], zone string, rc *RefreshCounter, secs uint32) {
+func setRefreshRetry(refreshCounters *core.NameMap[*RefreshCounter], zone string, rc *RefreshCounter, secs uint32) {
 	live := rc
 	if cur, ok := refreshCounters.Get(zone); ok && cur != nil {
 		live = cur
