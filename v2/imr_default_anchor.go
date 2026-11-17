@@ -160,3 +160,12 @@ func parseInlineDNSKEYAnchors(s string) ([]*dns.DNSKEY, error) {
 	}
 	return keys, nil
 }
+
+// anchorZone is the zone a trust anchor is grouped under: its owner as a
+// canonical (lowercase) FQDN. The caches key names case-insensitively, so
+// "Example." and "example." are one zone there. Grouped apart, both groups
+// would seed the same cache entry and the last one written would replace the
+// other, keeping only part of the zone's anchors.
+func anchorZone(owner string) string {
+	return core.CanonicalizeName(dns.Fqdn(owner))
+}

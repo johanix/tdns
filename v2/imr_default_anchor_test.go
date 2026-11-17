@@ -216,6 +216,41 @@ func TestTrustAnchorDNSKEYRecords(t *testing.T) {
 	}
 }
 
+// One zone spelled in different case is one anchor zone: every DS and DNSKEY
+// for it lands in one group, under the canonical name, whichever setting it
+// came from. The caches fold case, so two groups would seed one entry and
+// the last written would replace the other.
+func TestTrustAnchorsGroupedByCanonicalOwner(t *testing.T) {
+	const (
+		dsUpper = "Example.Test. IN DS 11111 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+		dsLower = "example.test. IN DS 22222 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16"
+		dsFile  = "EXAMPLE.TEST. IN DS 33333 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16"
+		dkMixed = "eXample.tEst. IN DNSKEY 257 3 15 dem0H2M22a8CDAe0PDZoGBBCBB2fHJ1fe39FkhNToAA="
+	)
+	file := filepath.Join(t.TempDir(), "anchors")
+	if err := os.WriteFile(file, []byte(dsFile+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	imr := newForwardTestImr(t, nil)
+	dsByName, keysByName, err := imr.parseTrustAnchorsFromConfig(ImrEngineConf{
+		TrustAnchorDS:     dsUpper + "\n" + dsLower,
+		TrustAnchorDNSKEY: dkMixed,
+		TrustAnchorFile:   file,
+	})
+	if err != nil {
+		t.Fatalf("parseTrustAnchorsFromConfig: %v", err)
+	}
+	if len(dsByName) != 1 {
+		t.Errorf("DS anchors in %d groups, want 1: %v", len(dsByName), dsByName)
+	}
+	if got, want := dsKeyTags(dsByName["example.test."]), []uint16{11111, 22222, 33333}; !slices.Equal(got, want) {
+		t.Errorf("example.test. DS key tags = %v, want %v", got, want)
+	}
+	if len(keysByName) != 1 || len(keysByName["example.test."]) != 1 {
+		t.Errorf("DNSKEY anchors = %v, want one, under example.test.", keysByName)
+	}
+}
+
 // A block scalar reaches the field intact through viper, the daemons' path,
 // and both its records load.
 func TestViperTrustAnchorDSBlockScalar(t *testing.T) {

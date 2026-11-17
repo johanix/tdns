@@ -2210,11 +2210,11 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic ImrEngineConf) (map[string][]*dns
 			return nil, nil, err
 		}
 		for _, ds := range dss {
-			name := dns.Fqdn(ds.Hdr.Name)
+			name := anchorZone(ds.Hdr.Name)
 			dsByName[name] = append(dsByName[name], ds)
 		}
 		for _, k := range keys {
-			name := dns.Fqdn(k.Hdr.Name)
+			name := anchorZone(k.Hdr.Name)
 			dnskeysByName[name] = append(dnskeysByName[name], k)
 		}
 		imr.anchorNotice.Do(func() {
@@ -2235,7 +2235,7 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic ImrEngineConf) (map[string][]*dns
 			return nil, nil, fmt.Errorf("failed to parse trust-anchor-dnskey: %v", err)
 		}
 		for _, dk := range keys {
-			name := dns.Fqdn(dk.Hdr.Name)
+			name := anchorZone(dk.Hdr.Name)
 			dnskeysByName[name] = append(dnskeysByName[name], dk)
 		}
 	}
@@ -2247,7 +2247,7 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic ImrEngineConf) (map[string][]*dns
 			return nil, nil, fmt.Errorf("failed to parse trust-anchor-ds: %v", err)
 		}
 		for _, ds := range dss {
-			name := dns.Fqdn(ds.Hdr.Name)
+			name := anchorZone(ds.Hdr.Name)
 			dsByName[name] = append(dsByName[name], ds)
 			lgImr.Info("configured DS trust anchor", "zone", name, "keytag", ds.KeyTag, "digesttype", ds.DigestType)
 		}
@@ -2264,11 +2264,11 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic ImrEngineConf) (map[string][]*dns
 			return nil, nil, fmt.Errorf("failed to read trust-anchor-file %q: %v", taFile, err)
 		}
 		for _, ds := range fileDS {
-			name := dns.Fqdn(ds.Hdr.Name)
+			name := anchorZone(ds.Hdr.Name)
 			dsByName[name] = append(dsByName[name], ds)
 		}
 		for _, k := range fileKeys {
-			name := dns.Fqdn(k.Hdr.Name)
+			name := anchorZone(k.Hdr.Name)
 			dnskeysByName[name] = append(dnskeysByName[name], k)
 		}
 	}
