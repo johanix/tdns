@@ -17,6 +17,9 @@ import (
 	"encoding/json"
 	"errors"
 	"math/big"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -377,5 +380,47 @@ func TestJSONWebKeyThumbprintRFC7638(t *testing.T) {
 	}
 	if want := "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"; tp != want {
 		t.Errorf("thumbprint %s, want %s", tp, want)
+	}
+}
+
+// TestJSONWebKeyDraftVectors parses the draft's Appendix A keys (the J2
+// testdata) with the codec: kid is the codec's thumbprint, the stdlib keys
+// convert and check, and marshalling gives the same members back.
+func TestJSONWebKeyDraftVectors(t *testing.T) {
+	for _, vec := range jwkVectors {
+		t.Run(vec.name, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("testdata", "dnssec-jwk", vec.name+".json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			k, err := ParseJSONWebKey(data)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if k.IsPrivate() != vec.private {
+				t.Errorf("IsPrivate = %v, want %v", k.IsPrivate(), vec.private)
+			}
+			tp, err := k.Thumbprint()
+			if err != nil || tp != k.Kid {
+				t.Errorf("thumbprint %q (%v), kid %q", tp, err, k.Kid)
+			}
+			if k.IsPrivate() && k.Kty != JWKKtyAKP {
+				if _, err := k.PrivateKey(); err != nil {
+					t.Errorf("PrivateKey: %v", err)
+				}
+			}
+			// Same members and values as the draft, "dnskey" aside.
+			var want, got map[string]any
+			if err := json.Unmarshal(data, &want); err != nil {
+				t.Fatal(err)
+			}
+			delete(want, "dnskey")
+			if err := json.Unmarshal(mustMarshalJWK(t, k), &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("re-marshalled JWK differs:\n got %v\nwant %v", got, want)
+			}
+		})
 	}
 }
