@@ -539,3 +539,53 @@ func TestRefreshWriteLeavesTheJournalOfAZoneReplacedWhileItWasWritten(t *testing
 		})
 	}
 }
+
+// The ticker's retry of a failed first-load completion, finishFirstLoadPolicy,
+// brings in the journal the first load owes, as the completion it retries
+// does. It used to leave it, so the zone served without its journalled changes
+// until the next restart, and the journal stayed owed for the life of the
+// process: every write after a refresh then left it alone.
+func TestFirstLoadRetryReplaysTheJournalTheFirstLoadOwes(t *testing.T) {
+	for _, v := range zfVariants {
+		t.Run(v.name, func(t *testing.T) {
+			zd := zfSecondary(t, v.setup)
+			addr := zfUpstream(t, 8)
+			zfRefresh(t, zd, addr)
+			txt := zfLocalTXT(t, 1)
+			if err := ovUpdate(t, zd, txt); err != nil {
+				t.Fatalf("local change: %v", err)
+			}
+
+			again := zfFirstBind(t, zd, v.setup, addr)
+			if !again.journalReplayIsOwed() {
+				t.Fatal("the first load does not record that it owes the journal")
+			}
+			if ovHas(ovServed(t, again, "local.example.", dns.TypeTXT), txt) {
+				t.Fatal("precondition: the change is served before the replay")
+			}
+
+			conf := &Config{}
+			conf.Internal.KeyDB = again.KeyDB
+			if err := finishFirstLoadPolicy(context.Background(), again, conf, ""); err != nil {
+				t.Fatalf("finishFirstLoadPolicy: %v", err)
+			}
+
+			if w := ovConfigWarning(again); w != "" {
+				t.Errorf("the retry raised a ConfigWarning: %s", w)
+			}
+			if !ovHas(ovServed(t, again, "local.example.", dns.TypeTXT), txt) {
+				t.Errorf("the change is not served after the retry; journal:%s",
+					ovJournalString(ovJournal(t, again)))
+			}
+			if again.journalReplayIsOwed() {
+				t.Error("the journal is still owed after the retry replayed it")
+			}
+
+			// The gate is open: the next refresh's write anchors the journal.
+			persistRefreshedZone(again, again.ZoneName, again.generation.Load(), &Config{})
+			if j := ovJournal(t, again); len(j) != 0 {
+				t.Errorf("the write after the retry kept deltas the file holds:%s", ovJournalString(j))
+			}
+		})
+	}
+}

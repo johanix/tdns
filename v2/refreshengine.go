@@ -389,13 +389,24 @@ func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, conf
 	if err := signOnceAfterPolicyBind(ctx, zd); err != nil {
 		return err
 	}
+	// The journal the first load still owes, when the completion this retries
+	// stopped before its replay: the policy did not bind, or the sign failed.
+	// Without it the zone serves its file alone until the next restart, and the
+	// journal stays owed, which keeps every write of the zone's file from
+	// anchoring it (journalReplayOwed). Here, as in the completion, after the
+	// sign, which the replay's re-signing needs, and before the transport
+	// signal, which is derived from the content the zone serves. Only when it
+	// is owed: a retry after a completion that did replay finds it settled.
+	if zd.journalReplayIsOwed() {
+		replayZoneDeltasOnLoad(zd)
+	}
 	// The transport signal, which completeFirstZonePolicyAndLoad would have
 	// derived had its policy sync not failed. Here, as there, after the bind.
 	runTransportSignalPass(zd, conf)
 	// The post-refresh callbacks the first load deferred, now that the sign
-	// has made the zone Ready. There is no journal replay on this retry-only
-	// path, so the drain follows the sign directly. Ready-guarded inside: a
-	// zone the sign left not Ready keeps them owed.
+	// has made the zone Ready, and the journal has been replayed if it was
+	// owed. Ready-guarded inside: a zone the sign left not Ready keeps them
+	// owed.
 	zd.runOwedPostRefreshCallbacks()
 	drainAndRunOnFirstLoad(zd)
 	return nil
