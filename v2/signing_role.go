@@ -106,7 +106,13 @@ func (zd *ZoneData) ReleaseWithheld() {
 // intendedPolicy is the policy a first load would bind to the zone: the CLI
 // override if there is one, else the name from its configuration.
 func (zd *ZoneData) intendedPolicy() (*DnssecPolicy, string, error) {
-	name, pol, _, _, _, err := resolvePolicyPair(zd.KeyDB, zd.ZoneName, zd.DnssecPolicyName)
+	return zd.intendedPolicyNamed(zd.DnssecPolicyName)
+}
+
+// intendedPolicyNamed is intendedPolicy for a configuration that names
+// configName, which need not be the name the zone records yet.
+func (zd *ZoneData) intendedPolicyNamed(configName string) (*DnssecPolicy, string, error) {
+	name, pol, _, _, _, err := resolvePolicyPair(zd.KeyDB, zd.ZoneName, configName)
 	switch {
 	case err != nil:
 		return nil, "", fmt.Errorf("resolve the DNSSEC policy of zone %s: %w", zd.ZoneName, err)
@@ -151,6 +157,78 @@ func (zd *ZoneData) BindPolicyWithoutSigning() error {
 	zd.mu.Unlock()
 	lgSigner.Info("DNSSEC policy bound; the zone does not sign yet", "zone", zd.ZoneName, "policy", name)
 	return nil
+}
+
+// recordPolicyOfNonSigningZone is the policy half of a config reload for a zone
+// that does not sign, and the reload's whole record of its policy. The policy
+// paths ask for a signing option and leave such a zone alone, so without this a
+// zone loaded with no policy and reloaded with one keeps naming none, and a
+// signing role learned later (BindPolicyWithoutSigning, StartSigning) fails
+// with "names no DNSSEC policy" until the daemon restarts (#1000). The same
+// holds for a policy changed or removed by the reload.
+//
+// The name is what the configuration says, the empty name for none. A zone with
+// no policy bound records it and nothing else: the role that signs it binds. A
+// zone BindPolicyWithoutSigning bound a policy to follows it, name and policy
+// together: a name over another policy's struct is what a later start would sign
+// under. A name that does not resolve leaves that binding and its name as they
+// were, with a DnssecPolicyWarning, as a signing zone's does.
+//
+// Nothing is signed and no last-applied record is written, as in
+// BindPolicyWithoutSigning.
+//
+// It reports whether it handled the zone. A zone that signs, or starts to while
+// this waits for the zone's policy lock, is not handled: its policy goes through
+// syncZoneDnssecPolicyFromConfig.
+func (zd *ZoneData) recordPolicyOfNonSigningZone(name string) bool {
+	zd.mu.Lock()
+	signs := zd.signsItsOwnContent()
+	zd.mu.Unlock()
+	if signs {
+		return false // the common case, and not one to wait for an apply over
+	}
+
+	zd.policyApplyMu.Lock()
+	defer zd.policyApplyMu.Unlock()
+
+	zd.mu.Lock()
+	if zd.signsItsOwnContent() {
+		zd.mu.Unlock()
+		return false
+	}
+	oldName, bound := zd.DnssecPolicyName, zd.DnssecPolicy != nil
+	switch {
+	case name == oldName:
+		zd.mu.Unlock()
+		return true
+	case !bound:
+		zd.DnssecPolicyName = name
+		zd.mu.Unlock()
+		lgSigner.Info("DNSSEC policy of a zone that does not sign changed by a config reload",
+			"zone", zd.ZoneName, "from", oldName, "to", name)
+		return true
+	case name == "":
+		zd.DnssecPolicy, zd.DnssecPolicyName = nil, ""
+		zd.clearErrorLocked(DnssecPolicyWarning)
+		zd.mu.Unlock()
+		lgSigner.Info("DNSSEC policy removed from a zone that does not sign by a config reload",
+			"zone", zd.ZoneName, "was", oldName)
+		return true
+	}
+	pol, newName, err := zd.intendedPolicyNamed(name)
+	if err != nil {
+		zd.setErrorLocked(DnssecPolicyWarning, "DNSSEC policy %q cannot be bound: %v; keeping bound policy %q", name, err, oldName)
+		zd.mu.Unlock()
+		lgSigner.Warn("a config reload names a DNSSEC policy that cannot be bound; keeping the bound policy",
+			"zone", zd.ZoneName, "policy", name, "bound", oldName, "err", err)
+		return true
+	}
+	zd.DnssecPolicy, zd.DnssecPolicyName = pol, newName
+	zd.clearErrorLocked(DnssecPolicyWarning)
+	zd.mu.Unlock()
+	lgSigner.Info("DNSSEC policy bound to a zone that does not sign moved by a config reload",
+		"zone", zd.ZoneName, "from", oldName, "to", newName)
+	return true
 }
 
 // ErrSigningHeld: StartSigning found an open transaction on the zone, or changes

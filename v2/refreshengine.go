@@ -1020,7 +1020,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// resolve→backfill→classify→apply. First-load OnFirstLoad
 						// completion retries on the ticker (hasPendingOnFirstLoad),
 						// not here.
-						if zr.ConfigUpdate && (zr.DnssecPolicy != "" || zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
+						//
+						// A zone that does not sign has no sync to run, but its
+						// reload still records the policy the config now names
+						// (added, changed or removed) for a signing role learned
+						// later (#1000).
+						if zr.ConfigUpdate && !zd.recordPolicyOfNonSigningZone(zr.DnssecPolicy) {
 							if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, zr.DnssecPolicy); err != nil {
 								lgEngine.Warn("DNSSEC policy sync on reload failed", "zone", zone, "err", err)
 								if zr.Response != nil {
