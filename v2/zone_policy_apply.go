@@ -399,6 +399,11 @@ func keepBindingOrQuarantineForBadIntent(zd *ZoneData, intentName, keepMsg, quar
 	zd.mu.Unlock()
 }
 
+// policySyncAfterClassify is nil, and is set by a test that has to land
+// something between the policy sync's reads and what it does with them: it is
+// called once the sync has classified the change, before it acts on it.
+var policySyncAfterClassify func(zd *ZoneData)
+
 // syncZoneDnssecPolicyFromConfig is the refresh-engine policy path (plan §6.2):
 // resolve applied vs intent → Branch 0 backfill/first-apply → classify →
 // cheap rebind / skip-in-flight / transactional apply / refuse. Config source
@@ -419,6 +424,9 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 // the zone's policies against pols, the policies of the config being applied,
 // where the caller has them (a reload's refresher carries them); see
 // resolvePolicyPairIn. Nil: the runtime snapshot.
+//
+// For a zone that signs it takes zd.policyApplyMu, so the caller MUST NOT hold
+// it.
 func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *KeyDB, conf *Config, configPolicyName string, pols map[string]DnssecPolicy) error {
 	if zd == nil || kdb == nil {
 		return fmt.Errorf("syncZoneDnssecPolicyFromConfig: nil zone or keydb")
@@ -426,6 +434,18 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return nil
 	}
+
+	// Held from the reads below to the end: the sync reads the last-applied
+	// record and the bound definition, classifies, and then acts on what it read
+	// -- binds, applies, or refuses by putting the applied policy back. A
+	// command-source apply (policy-change, policy-set) that completed in
+	// between had bound and persisted another policy, and the refusal restored
+	// the pre-command one in memory while the command's override stayed in the
+	// keystore. The command's apply holds this lock for its whole span, so it
+	// now waits for the sync and lands after it. The apply branches therefore
+	// call applyZonePolicyTransactionalLocked.
+	zd.policyApplyMu.Lock()
+	defer zd.policyApplyMu.Unlock()
 
 	intentName, intentPol, appliedName, appliedPol, appliedOK, err := resolvePolicyPairIn(kdb, zd.ZoneName, configPolicyName, pols)
 	if err != nil {
@@ -475,7 +495,7 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 				"zone", zd.ZoneName, "policy", intentName)
 			return nil
 		}
-		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+		if _, aerr := applyZonePolicyTransactionalLocked(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
 			lgEngine.Warn("first config apply of DNSSEC policy failed; binding reverted",
 				"zone", zd.ZoneName, "policy", intentName, "err", aerr)
 			return aerr
@@ -499,7 +519,7 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 			return nil
 		}
 		// First-bind: no healthy binding to keep — proceed toward intent.
-		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+		if _, aerr := applyZonePolicyTransactionalLocked(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
 			lgEngine.Warn("config apply toward intent after unavailable applied policy failed",
 				"zone", zd.ZoneName, "policy", intentName, "err", aerr)
 			return aerr
@@ -510,6 +530,9 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 	appliedPol = definitionBoundUnder(zd, appliedName, appliedPol)
 
 	class := classifyPolicyChange(appliedPol, appliedName, intentPol, intentName)
+	if policySyncAfterClassify != nil {
+		policySyncAfterClassify(zd)
+	}
 
 	// Branch 1 — same name, same algs (incl. internals-only edits).
 	if intentName == appliedName && class == PolicyChangeNone {
@@ -571,7 +594,7 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 
 	switch class {
 	case PolicyChangeCompatibleName:
-		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+		if _, aerr := applyZonePolicyTransactionalLocked(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
 			lgEngine.Warn("compatible DNSSEC policy rename apply failed; binding reverted",
 				"zone", zd.ZoneName, "from", appliedName, "to", intentName, "err", aerr)
 			return aerr
@@ -586,7 +609,7 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 			// can carry: bind transactionally (the reconcile no-ops on the
 			// mismatch) and the engine spawns the algorithm roll on its
 			// next tick. Same outcome as `zone dnssec policy-change`.
-			if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+			if _, aerr := applyZonePolicyTransactionalLocked(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
 				lgEngine.Warn("KSK algorithm-change policy apply failed; binding reverted",
 					"zone", zd.ZoneName, "from", appliedName, "to", intentName, "err", aerr)
 				return aerr
@@ -602,7 +625,7 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 
 	default:
 		// Defensive: treat unknown as compatible apply.
-		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+		if _, aerr := applyZonePolicyTransactionalLocked(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
 			return aerr
 		}
 		return nil

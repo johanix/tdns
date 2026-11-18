@@ -863,3 +863,84 @@ func TestAFirstLoadBindsAPolicyThatOnlyTheReloadDefines(t *testing.T) {
 		t.Errorf("after the first load the last-applied record is %q %v %v, want base", name, ok, err)
 	}
 }
+
+// A command-source apply (policy-change, policy-set) cannot land between the
+// policy sync's reads and what it does with them. The sync reads the zone's
+// last-applied record and bound definition, classifies the change and, for an
+// algorithm change nothing can carry, refuses it by putting the applied policy
+// back. A command that completed in between had bound and persisted another
+// policy, and the refusal then put the pre-command one back in memory while the
+// command's override stayed in the keystore: the zone and its keystore
+// disagreed until the next restart. The sync holds the zone's policy apply lock
+// for that span, so the command waits for it and lands after.
+//
+// The hook runs in the span. If the lock is free there, the command runs to
+// completion in it, as it could; if the sync holds it, the command is started
+// and waits.
+func TestACommandApplyCannotLandBetweenThePolicySyncsReadAndItsRefusal(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "interleave.config.example.", "online-signing")
+	const month = 30 * 86400
+	base := named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "base")
+	baseAlg := named(validFor(kskzsk(dns.ECDSAP256SHA256, dns.ECDSAP256SHA256), month), "base") // "base", other algorithms
+	cmd := named(validFor(kskzsk(dns.ED25519, dns.ED25519), 2*month), "cmd")                    // the operator's, of the algorithms the zone has keys of
+	withLivePolicies(t, map[string]DnssecPolicy{"base": base, "cmd": cmd})
+
+	zd := h.reload(false, "base", map[string]DnssecPolicy{"base": base, "cmd": cmd})
+	if !zd.signsItsOwnContent() {
+		t.Fatal("the zone does not sign; the test has lost its point")
+	}
+
+	var fired, heldBySync bool
+	done := make(chan error, 1)
+	runCommand := func() error {
+		pol := cmd
+		_, err := applyZonePolicyTransactional(context.Background(), zd, kdb, &pol, "cmd", PolicyApplySourceCommand)
+		return err
+	}
+	policySyncAfterClassify = func(z *ZoneData) {
+		if z != zd || fired {
+			return
+		}
+		fired = true
+		if z.policyApplyMu.TryLock() { // the sync does not hold it: the command can land here
+			z.policyApplyMu.Unlock()
+			done <- runCommand()
+			return
+		}
+		heldBySync = true
+		go func() { done <- runCommand() }()
+	}
+	t.Cleanup(func() { policySyncAfterClassify = nil })
+
+	// "base" has other algorithms in this reload: refused, and the zone is put
+	// back on the definition it has keys of.
+	h.reload(true, "base", map[string]DnssecPolicy{"base": baseAlg, "cmd": cmd})
+	if !fired {
+		t.Fatal("the policy sync did not classify a change; the test has lost its point")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the command's apply: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the command's apply did not finish")
+	}
+
+	if !heldBySync {
+		t.Error("a command's apply completed between the policy sync's reads and its refusal: the sync does not hold the zone's policy apply lock over that span")
+	}
+	override, ok, err := GetZonePolicyOverride(kdb, h.zone)
+	if err != nil || !ok || override != "cmd" {
+		t.Fatalf("the persisted override is %q %v %v, want cmd", override, ok, err)
+	}
+	if applied, _, ok, err := GetZoneAppliedPolicy(kdb, h.zone); err != nil || !ok || applied != "cmd" {
+		t.Errorf("the persisted last-applied record is %q %v %v, want cmd", applied, ok, err)
+	}
+	if n, p, _ := policyState(zd); n != override || p == nil || p.SigValidity.Default != 2*month {
+		t.Errorf("the zone is bound to %q (signature validity %d) and its keystore says %q: memory and keystore disagree",
+			n, validityOf(p), override)
+	}
+}
