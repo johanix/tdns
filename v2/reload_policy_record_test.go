@@ -1143,10 +1143,13 @@ func TestAFirstLoadStillPendingTakesThePolicyOfTheReloadThatReachesIt(t *testing
 	}
 }
 
-// A reload that does not parse applies nothing. ParseZones used to queue each
-// zone's refresher as the zone was parsed, so when a later zone failed its
+// A reload that does not parse queues no refreshers. ParseZones used to queue
+// each zone's refresher as the zone was parsed, so when a later zone failed its
 // validation the earlier zones' refreshers were still queued, and the engine
-// went on to apply the policy of a config that the reload had rejected.
+// went on to apply the policy of a config that the reload had rejected. That is
+// all this holds: the parse of the zones before the failing one has already
+// changed what the live zones hold (a zone file path, say), and a failed parse
+// does not undo it.
 func TestAReloadThatDoesNotParseQueuesNoRefreshers(t *testing.T) {
 	authApp(t)
 	dir := t.TempDir()
@@ -1208,10 +1211,14 @@ func TestAReloadThatDoesNotParseQueuesNoRefreshers(t *testing.T) {
 // The refreshers go to a channel the test reads, which is unbuffered: a send
 // completes when the test takes it, so the reload is still in the middle of
 // whatever it does around the send while the test looks. The second zone's
-// refresher is left unsent while the test looks at the first.
+// refresher is left unsent while the test looks at the first. What the test
+// compares is the snapshot as the reload's own goroutine finds it just before it
+// sends the first refresher, which does not depend on when the test gets to look.
 func TestAReloadHandsItsRefreshersToTheEngineOnlyAfterPublishingItsSnapshot(t *testing.T) {
 	authApp(t)
 	kdb := Conf.Internal.KeyDB
+	// Registered before the harness, so that it runs after the engine has stopped.
+	t.Cleanup(func() { zoneRefresherSendProbe = nil })
 	const month = 30 * 86400
 	oldBase := named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "base")
 	h := newReloadHarness(t, kdb, "ordering.config.example.")
@@ -1251,6 +1258,18 @@ func TestAReloadHandsItsRefreshersToTheEngineOnlyAfterPublishingItsSnapshot(t *t
 		{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: "base"},
 		{Name: second, Type: "primary", Store: "map", Zonefile: secondFile, DnssecPolicy: "base"},
 	}
+	// The policy "base" as the live snapshot has it just before the first send,
+	// taken on the reload's goroutine; the channel send orders it before the
+	// test's read.
+	var atFirstSend uint8
+	var probed bool
+	zoneRefresherSendProbe = func(zr ZoneRefresher) {
+		if probed {
+			return
+		}
+		probed = true
+		atFirstSend = ConfLive().DnssecPolicies["base"].KSKAlgorithm
+	}
 	reloaded := make(chan error, 1)
 	go func() {
 		_, err := conf.ReloadZoneConfig(context.Background())
@@ -1286,9 +1305,9 @@ func TestAReloadHandsItsRefreshersToTheEngineOnlyAfterPublishingItsSnapshot(t *t
 	}
 
 	// The refresher is in the test's hands, the reload not through yet.
-	if got := ConfLive().DnssecPolicies["base"].KSKAlgorithm; got != dns.ECDSAP256SHA256 {
-		t.Errorf("the reload handed the engine a refresher before it had published its snapshot: policy \"base\" has KSK algorithm %d, the reload's is %d",
-			got, dns.ECDSAP256SHA256)
+	if atFirstSend != dns.ECDSAP256SHA256 {
+		t.Errorf("the reload handed the engine a refresher before it had published its snapshot: policy \"base\" had KSK algorithm %d when the first was sent, the reload's is %d",
+			atFirstSend, dns.ECDSAP256SHA256)
 	}
 
 	// The engine takes it, and the zone starts signing at once: under the

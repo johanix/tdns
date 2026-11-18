@@ -951,10 +951,18 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 	return zones, broken, conf.queueZoneRefreshers(ctx, pending)
 }
 
+// zoneRefresherSendProbe is nil, and is set by a test that has to look at the
+// daemon's state at the moment a refresher is about to be handed to the engine,
+// from the sender's side: it is called with each refresher just before its send.
+var zoneRefresherSendProbe func(zr ZoneRefresher)
+
 // queueZoneRefreshers hands refreshers to the RefreshEngine, in order, giving
 // up when ctx is done.
 func (conf *Config) queueZoneRefreshers(ctx context.Context, zrs []ZoneRefresher) error {
 	for _, zr := range zrs {
+		if zoneRefresherSendProbe != nil {
+			zoneRefresherSendProbe(zr)
+		}
 		select {
 		case conf.Internal.RefreshZoneCh <- zr:
 		case <-ctx.Done():
