@@ -23,6 +23,7 @@
  *     clear a DEGRADED that is still true, which teaches operators to
  *     distrust the flag.
  */
+
 package imr
 
 import (

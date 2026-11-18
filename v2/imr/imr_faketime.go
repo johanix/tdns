@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
+
 package imr
 
 import (

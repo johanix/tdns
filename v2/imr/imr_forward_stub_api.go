@@ -13,6 +13,7 @@
  * poison resolution, which is exactly the failure mode of the 2026-08-11
  * stub outage (a stray query booking a backoff on the stub's only server).
  */
+
 package imr
 
 import (
