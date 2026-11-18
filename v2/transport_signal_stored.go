@@ -73,8 +73,11 @@ func (zd *ZoneData) signalRecordDB() *KeyDB {
 // replaced by the new digest alone, which would drop them: a zone file that
 // still holds an earlier signal of the pass's would then read as the
 // operator's after a restart. The new digest is put ahead of whatever the
-// record holds instead (PrependTransportSignalStored). In memory it stands
-// alone, which is enough for this process: the zone holds the new signal.
+// record holds instead (PrependTransportSignalStored), and nothing is
+// recorded in memory. A record in memory holding the new digest alone would
+// be what the next store reads, without the KeyDB, and writes back whole
+// (SetTransportSignalStored), dropping the digests the prepend kept. Left
+// unset, the next read goes to the KeyDB's record.
 func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 	owner = core.CanonicalizeName(owner)
 	digest := signalDigest(rrs)
@@ -89,12 +92,14 @@ func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 			digests = append(digests, d)
 		}
 	}
-	zd.signalStoredMu.Lock()
-	if zd.signalStored == nil {
-		zd.signalStored = map[string][]string{}
+	if readErr == nil {
+		zd.signalStoredMu.Lock()
+		if zd.signalStored == nil {
+			zd.signalStored = map[string][]string{}
+		}
+		zd.signalStored[owner] = digests
+		zd.signalStoredMu.Unlock()
 	}
-	zd.signalStored[owner] = digests
-	zd.signalStoredMu.Unlock()
 	kdb := zd.signalRecordDB()
 	if kdb == nil {
 		return

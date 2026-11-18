@@ -214,3 +214,35 @@ func TestPrependTransportSignalStoredKeepsTheEarlierDigests(t *testing.T) {
 		t.Errorf("an owner with no record: %v", got)
 	}
 }
+
+// A record of the pass's signal made while the earlier digests could not be
+// read leaves nothing in memory, so the next record reads the KeyDB's and
+// keeps its earlier digests. A record in memory holding the new digest alone
+// was what the next store read and wrote back whole, dropping them. Here
+// the failed read fails the prepend too; what is checked is what the second
+// record finds.
+func TestASecondRecordAfterAFailedReadKeepsTheEarlierDigests(t *testing.T) {
+	const z = "noteagain.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	if err := kdb.SetTransportSignalStored(z, owner, []string{"b", "a"}); err != nil {
+		t.Fatal(err)
+	}
+	zd := &ZoneData{ZoneName: z, KeyDB: kdb}
+	rrs := mustRRs(t, owner+` 300 IN SVCB 1 . alpn=dot`)
+	digest := signalDigest(rrs)
+
+	mend := breakSignalRecordReads(t, kdb)
+	captureSignalLog(t)
+	zd.noteSignalStored(owner, rrs)
+	mend()
+	zd.noteSignalStored(owner, rrs)
+
+	got, _, err := kdb.GetTransportSignalStored(z, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{digest, "b", "a"}; !slices.Equal(got, want) {
+		t.Errorf("after a record with the read broken and one after it: %v, want %v", got, want)
+	}
+}
