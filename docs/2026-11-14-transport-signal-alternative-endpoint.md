@@ -1,7 +1,9 @@
 # The transport signal's alternative endpoint: a ServiceMode TargetName
 
-**Date:** 2026-11-14. **Status:** proposal, r4, not implemented. Points marked
-**Decided** were settled on 2026-11-14; everything else is proposed.
+**Date:** 2026-11-14. **Status:** r4 implemented on `oots-endpoint`, merged
+into main in #1118; r5 (section 9) in the pull request for #1128 and #1129.
+Points marked **Decided** were settled on 2026-11-14; everything else is
+proposed.
 
 **Revisions:**
 - **r1**, 2026-11-14: first write-up, with six open questions.
@@ -39,6 +41,10 @@
     proposed `target:` key (section 5);
   - mixed versions: a lossless codec is a precondition for publishing the new
     tokens (section 8, new).
+- **r5**, 2026-11-18, after the ruling on F25 in the CodeRabbit review of
+  #1118: a ServiceMode target other than `.` is a server of its own, with its
+  own backoff and RTT, apart from the nameserver that redirects to it
+  (section 9, new; one line added to section 3).
 
 Builds on `2026-10-04-transport-signal-publication-and-serving.md` (the
 authoritative side), `2026-09-26-imr-refresh-engine.md` (the resolver side, itself
@@ -189,6 +195,8 @@ old signals' `do53:0` ("send me none") being read as 100.
   address, port and transport. A same-host `udp` endpoint on port 5353 that
   fails must not back off the fallback on port 53, the one endpoint that has to
   keep working, and a changed port starts with a clean slate.
+  - (r5, 2026-11-18) At a target, backoff and RTT belong to the target, not to
+    the nameserver whose signal sent the transport there (section 9).
 - **The operator asserts that the alternative endpoint serves the nameserver's
   zones.** Nothing checks it before connecting. An endpoint that refuses, times
   out or fails the handshake is a failure like any other, handled as above.
@@ -385,3 +393,44 @@ Rules:
 - **Other software is unaffected.** BIND, Knot and NSD hold key 12 as opaque
   data. A resolver that predates the new tokens skips them and applies the
   default of 100 for `do53`, so it degrades without failing.
+
+## 9. Delta 2026-11-18: a redirect target is a server of its own
+
+Added after the ruling on F25 in the CodeRabbit review of #1118 (Johan: a
+target other than `.` "is most likely a completely different auth
+nameserver"). Tracked in #1129, built with #1128. Sections 2 to 8 stand as
+written; this section says how section 3's rules apply at a target.
+
+- **One server per target name.** The resolver keeps one server state per
+  canonical target name, created when the target's addresses are first found
+  and kept across later lookups of them, so that its backoff and RTT carry
+  on. It is dropped once its addresses have run out and nothing has used it
+  for as long as a backoff or RTT sample can stay in force.
+- **It is not a nameserver.** It holds only the addresses of the target
+  lookup (A and AAAA, CNAMEs followed, nothing Bogus, each family until its
+  own records and the CNAME links run out). It never takes glue, a same-named
+  nameserver's addresses or a stub's, and it never carries a signal. The
+  transport and port of an attempt still come from the redirecting
+  nameserver's endpoint, so a redirect of a redirect cannot happen. It is not
+  in the shared nameserver map or any zone's server list, so nothing that
+  installs a signal by name reaches it.
+- **Several nameservers, one target.** Nameservers redirected to the same
+  target share its state: a failure or an RTT sample through one is seen
+  through the others. That is the provider case, reached through AliasMode.
+- **A nameserver of the same name keeps its own state.** Its signal, glue,
+  backoff and RTT are not the target's, nor the target's its. The two share
+  only what is keyed by address: the zone's lameness and the address-family
+  tracker. The cost is at most one extra failed dial per role.
+- **What is kept where.** Server backoff (timeouts, refused connections,
+  handshake failures) and RTT: on the target, at address, port and
+  transport. Zone lameness (REFUSED, NOTAUTH): in the zone, at the address
+  and port dialed, as at the nameserver's own address. The answers a target
+  carries are counted on the target; the nameserver counts how many of its
+  answers its targets carried.
+- **Waiting for a target.** Until a target's addresses are known its
+  transport goes to the default endpoint (section 3). When that attempt has
+  failed and nothing else is left, a query waits, within its signal-wait
+  allowance, for a lookup of the target's addresses that is running, as it
+  waits for a server's signal lookup.
+- **Status output** lists each target on a line of its own, marked as a
+  target.

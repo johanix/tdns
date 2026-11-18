@@ -143,8 +143,8 @@ func TestALameSignalledUDPPortFallsBackToPort53(t *testing.T) {
 	ctx := context.Background()
 
 	zone.RecordZoneEndpointFailureForRcode(epLameNSAddr, 5353, core.TransportDo53, dns.RcodeRefused, false)
-	if a, p, ok := imr.attemptKey(ctx, server, zone, epLameNSAddr, core.TransportDo53, false); !ok || a != epLameNSAddr || p != 0 {
-		t.Errorf("the attempt goes to %s port %d (%v), want %s on port 53", a, p, ok, epLameNSAddr)
+	if d, ok := imr.attemptKey(ctx, server, zone, epLameNSAddr, core.TransportDo53, false); !ok || d.addr != epLameNSAddr || d.keyPort != 0 {
+		t.Errorf("the attempt goes to %s port %d (%v), want %s on port 53", d.addr, d.keyPort, ok, epLameNSAddr)
 	}
 	if !hasTuple(imr, serverMap, epLameNSAddr, core.TransportDo53) {
 		t.Error("selection does not offer port 53 while 5353 is lame")
@@ -180,8 +180,8 @@ func TestAnotherPassAfterAFailedSignalledPortTriesPort53(t *testing.T) {
 		t.Fatal("no further pass, although port 53 was never tried")
 	}
 	for _, tup := range sel.tuples {
-		if a, p, _ := imr.attemptKey(context.Background(), tup.Server, sel.zone, tup.Addr, tup.Transport, false); tried[passTuple{tup.Server, a, p, tup.Transport}] {
-			t.Errorf("the next pass holds a tried endpoint: %s port %d", a, p)
+		if d, _ := imr.attemptKey(context.Background(), tup.Server, sel.zone, tup.Addr, tup.Transport, false); tried[passTuple{d.server, d.addr, d.keyPort, tup.Transport}] {
+			t.Errorf("the next pass holds a tried endpoint: %s port %d", d.addr, d.keyPort)
 		}
 	}
 }
@@ -217,8 +217,8 @@ func TestAnExplicitDefaultPortIsTheDefaultEndpoint(t *testing.T) {
 	applyTransportMapWithPorts(server, map[string]uint8{"udp": 100, "dot": 50},
 		map[core.Transport]uint16{core.TransportDo53: 53, core.TransportDoT: 853})
 	for _, tr := range []core.Transport{core.TransportDo53, core.TransportDoT} {
-		if a, p, ok := imr.attemptKey(ctx, server, nil, epLameNSAddr, tr, false); !ok || a != epLameNSAddr || p != 0 {
-			t.Errorf("%s: kept under %s port %d (%v), want port 0", core.TransportToString[tr], a, p, ok)
+		if d, ok := imr.attemptKey(ctx, server, nil, epLameNSAddr, tr, false); !ok || d.addr != epLameNSAddr || d.keyPort != 0 {
+			t.Errorf("%s: kept under %s port %d (%v), want port 0", core.TransportToString[tr], d.addr, d.keyPort, ok)
 		}
 	}
 	server.RecordEndpointAddrFailure(epLameNSAddr, 0, core.TransportDoT, nil)
@@ -227,12 +227,12 @@ func TestAnExplicitDefaultPortIsTheDefaultEndpoint(t *testing.T) {
 	}
 
 	imr.Cache.DNSClient[core.TransportDoT] = core.NewDNSClient(core.TransportDoT, "8853", nil)
-	if _, p, _ := imr.attemptKey(ctx, server, nil, epLameNSAddr, core.TransportDoT, false); p != 853 {
-		t.Errorf("a client on 8853: port 853 kept under %d, want 853", p)
+	if d, _ := imr.attemptKey(ctx, server, nil, epLameNSAddr, core.TransportDoT, false); d.keyPort != 853 {
+		t.Errorf("a client on 8853: port 853 kept under %d, want 853", d.keyPort)
 	}
 	applyTransportMapWithPorts(server, map[string]uint8{"dot": 50}, map[core.Transport]uint16{core.TransportDoT: 8853})
-	if _, p, _ := imr.attemptKey(ctx, server, nil, epLameNSAddr, core.TransportDoT, false); p != 0 {
-		t.Errorf("a client on 8853: port 8853 kept under %d, want 0", p)
+	if d, _ := imr.attemptKey(ctx, server, nil, epLameNSAddr, core.TransportDoT, false); d.keyPort != 0 {
+		t.Errorf("a client on 8853: port 8853 kept under %d, want 0", d.keyPort)
 	}
 }
 
