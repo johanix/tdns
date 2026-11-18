@@ -2256,12 +2256,16 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	var dynamicRRs []*core.RRset
 
-	if (!zd.Option(OptAllowUpdates) && !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning)) || zd.KeyDB == nil {
+	// One look at the options, for every question below: each zd.Option is a
+	// look of its own, and a config update between two of them would answer
+	// from the old set and the new at once.
+	opts := zd.OptionsSnapshot()
+	if (!opts[OptAllowUpdates] && !opts[OptOnlineSigning] && !opts[OptInlineSigning]) || zd.KeyDB == nil {
 		return dynamicRRs
 	}
 
 	// 1. Collect DNSKEY records (if signing enabled)
-	if zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning) {
+	if opts[OptOnlineSigning] || opts[OptInlineSigning] {
 		dak, err := zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil {
 			lg.Error("CollectDynamicRRs: failed to get DNSSEC keys", "zone", zd.ZoneName, "err", err)
@@ -2312,7 +2316,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 		}
 	}
 
-	if !zd.Option(OptDontPublishKey) {
+	if !opts[OptDontPublishKey] {
 		sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 		if err != nil {
 			// Not an error if no SIG(0) keys exist

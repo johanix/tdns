@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // johanix/tdns#981: a zone's options are replaced, never written in place
@@ -234,6 +236,65 @@ func runUntilTheEngineIsFree(t *testing.T, z *relayedZone, zr ZoneRefresher) {
 			time.Sleep(5 * time.Millisecond)
 		case <-time.After(10 * time.Second):
 			t.Fatal("the refresh was not answered")
+		}
+	}
+}
+
+// CollectDynamicRRs gates on three options at once, and every zd.Option is a
+// look at the zone's options of its own: a config update between two looks
+// answers from the old set and the new together. With one set that allows
+// updates and another that signs inline, a gate that mixes them sees neither
+// and returns nothing, though either alone would collect the zone's SIG(0) key
+// (johanix/tdns#981 review). The config update here is a writer that swaps
+// between the two sets as fast as it can; the collector must find the key
+// every time. The mix is a window of a few instructions, so on code that
+// reads the options one look at a time this fails often, not every run.
+func TestCollectDynamicRRsGatesOnOneSetOfOptions(t *testing.T) {
+	zd, kdb, _ := newSig0KeyPrepZone(t, sig0KeyPrepZone, Primary)
+	zd.Options = map[ZoneOption]bool{OptParentSync: true}
+	if err := zd.Sig0KeyPreparation("example.", dns.ED25519, kdb); err != nil {
+		t.Fatalf("Sig0KeyPreparation: %v", err)
+	}
+	collectsKey := func() bool {
+		for _, rs := range zd.CollectDynamicRRs(&Config{}) {
+			if rs.RRtype == dns.TypeKEY {
+				return true
+			}
+		}
+		return false
+	}
+	sets := [2]map[ZoneOption]bool{{OptAllowUpdates: true}, {OptInlineSigning: true}}
+	for i, set := range sets {
+		zd.mu.Lock()
+		zd.setOptionsLocked(set)
+		zd.mu.Unlock()
+		if !collectsKey() {
+			t.Fatalf("precondition: set %d alone does not collect the SIG(0) key", i)
+		}
+	}
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			zd.mu.Lock()
+			zd.setOptionsLocked(sets[i%2])
+			zd.mu.Unlock()
+		}
+	}()
+	defer func() { close(done); wg.Wait() }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for i := 0; i < 20000 && time.Now().Before(deadline); i++ {
+		if !collectsKey() {
+			t.Fatalf("collection %d found nothing while the options swapped between two sets that each allow it", i)
 		}
 	}
 }
