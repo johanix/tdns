@@ -141,7 +141,7 @@ ns1.`+z2+`	3600	IN	A	127.0.0.1
 	if !strings.Contains(logs2.String(), "leaving the operator's") {
 		t.Fatalf("an operator's RRset identical to the configuration's was not left alone:\n%s", logs2.String())
 	}
-	if zd2.signalStoredByPass("_dns.ns1."+z2, svcbRecords(zd2, "_dns.ns1."+z2)) {
+	if own, err := zd2.signalStoredByPass("_dns.ns1."+z2, svcbRecords(zd2, "_dns.ns1."+z2)); err != nil || own {
 		t.Fatal("the pass took the operator's RRset as its own because it matched the configuration")
 	}
 	conf2.Service.Transport.Signal = "dot:50"
@@ -497,7 +497,7 @@ BEGIN SELECT RAISE(ABORT, 'delete refused by the test'); END`); err != nil {
 	if got := svcbRecords(zd, owner); !sameRecords(got, stored) {
 		t.Fatalf("the KeyDB record undid the revocation: the pass rewrote the operator's SVCB to %v", got)
 	}
-	if zd.signalStoredByPass(owner, stored) {
+	if own, err := zd.signalStoredByPass(owner, stored); err != nil || own {
 		t.Fatal("the revoked SVCB is known as the pass's own again")
 	}
 
