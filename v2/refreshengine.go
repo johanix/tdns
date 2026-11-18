@@ -128,7 +128,7 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 // post-init hooks, OnFirstLoad callbacks, and downstream notification.
 // Called for both newly-created zones and pre-registered zone stubs.
 func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefresher, conf *Config,
-	refreshCounters *core.ConcurrentMap[string, *RefreshCounter]) (bool, error) {
+	refreshCounters *core.NameMap[*RefreshCounter]) (bool, error) {
 
 	seen := zd.refreshRun.confirmations.Load()
 	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
@@ -204,6 +204,14 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 
 	// Check if this is a catalog zone and parse it
 	if zd.Options[OptCatalogZone] {
+		// A catalog this server originates: its member list is rebuilt from
+		// what it was loaded with (rebuildCatalogMembership), and again once
+		// the journal has been replayed (completeFirstZonePolicyAndLoad).
+		// This first one keeps the list from being empty if the load stops
+		// before the replay.
+		if _, err := rebuildCatalogMembership(zd); err != nil {
+			lgEngine.Error("failed to rebuild the catalog's member list", "zone", zone, "error", err)
+		}
 		lgEngine.Info("parsing catalog zone member zones", "zone", zone)
 		catalogUpdate, err := ParseCatalogZone(zd)
 		if err != nil {
@@ -491,6 +499,16 @@ func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Con
 	// would silently roll the zone back to that point.
 	replayZoneDeltasOnLoad(zd)
 
+	// A catalog this server originates: its member list again, now from the
+	// replayed content. The rebuild at the start of the load read the file
+	// alone, and a member added since the last write of the file is only in
+	// the journal; left out of the list, the next catalog edit would drop it.
+	if zd.Options[OptCatalogZone] {
+		if _, err := rebuildCatalogMembership(zd); err != nil {
+			lgEngine.Error("failed to rebuild the catalog's member list after the journal replay", "zone", zd.ZoneName, "error", err)
+		}
+	}
+
 	// The transport signal. After the bind, so that it is signed with the
 	// policy's keys and lifetime; after the replay, so that it is derived from
 	// the NS RRset the zone serves, not the one in the file; before the
@@ -751,8 +769,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	var zonerefch = conf.Internal.RefreshZoneCh
 	var bumpch = conf.Internal.BumpZoneCh
 
-	// var refreshCounters = make(map[string]*RefreshCounter, 5)
-	var refreshCounters = core.NewCmap[*RefreshCounter]()
+	// Keyed by the folded zone name, like Zones and inflight: a counter per
+	// spelling would be a counter per refresh schedule for one zone (#1005).
+	var refreshCounters = core.NewNameMap[*RefreshCounter]()
 
 	// Every steady-state refresh runs here, not on this goroutine. Shutdown is
 	// deferred so it covers all three ways out of the loop below; it closes the
@@ -761,8 +780,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	pool := newRefreshPool(ctx, refreshWorkers(), 0, transferConcurrency(), conf)
 	defer pool.Shutdown()
 
-	// Owned by this goroutine alone. See dispatchRefresh.
-	inflight := map[string]struct{}{}
+	// Owned by this goroutine alone, and keyed by the folded zone name. See
+	// dispatchRefresh.
+	inflight := core.NewNameMap[struct{}]()
 
 	ticker := time.NewTicker(1 * time.Second)
 	lgEngine.Info("refresh engine starting")
@@ -1133,6 +1153,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						DownstreamAuth:    zr.DownstreamAuth,
 						Zonefile:          zr.Zonefile,
 						Template:          zr.Template,
+						InlineTsigKey:     zr.InlineTsigKey,
 						ZoneType:          zr.ZoneType,
 						Options:           zr.Options,
 						OutboundSoaSerial: zr.OutboundSoaSerial,
@@ -1219,6 +1240,14 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
 
 					Zones.Set(zone, zd)
+
+					// A persisted template-driven zone whose template did not
+					// expand at boot: loaded without the template's outbound
+					// settings, and says why. After Zones.Set, because
+					// SetError republishes the zone.
+					if zr.TemplateWarning != "" {
+						zd.SetError(TemplateWarning, "%s", zr.TemplateWarning)
+					}
 
 					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters); err != nil {
 						noteRefreshFailure(zd, zone, err, "zone refresh failed")
@@ -1374,7 +1403,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			}
 
 		case out := <-pool.Done():
-			delete(inflight, out.Zone)
+			inflight.Remove(out.Zone)
 			if rc, ok := refreshCounters.Get(out.Zone); ok {
 				// Reset at COMPLETION, not at dispatch. Reset-at-dispatch would
 				// double the effective interval for exactly the slow zones that
@@ -1398,7 +1427,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			var err error
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
-					if zd.Error {
+					if zd.blocksSerialBump() {
 						lgEngine.Warn("zone in error state, not bumping serial", "zone", zone, "error", zd.ErrorMsg)
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("Zone %s is in error state: %s. Not bumping serial.", zone, zd.ErrorMsg)
@@ -1617,7 +1646,7 @@ func refreshCounterTick(rc *RefreshCounter) bool {
 // taken before that call no longer reaches the map, and an interval written
 // through it is silently discarded. secs of 0 means "whatever the live counter
 // says its SOA REFRESH is", which is the normal reset.
-func setRefreshRetry(refreshCounters *core.ConcurrentMap[string, *RefreshCounter], zone string, rc *RefreshCounter, secs uint32) {
+func setRefreshRetry(refreshCounters *core.NameMap[*RefreshCounter], zone string, rc *RefreshCounter, secs uint32) {
 	live := rc
 	if cur, ok := refreshCounters.Get(zone); ok && cur != nil {
 		live = cur

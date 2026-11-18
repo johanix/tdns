@@ -506,7 +506,7 @@ func TestOutboundSerialModesLeaveAZoneSignedElsewhereAlone(t *testing.T) {
 			t.Cleanup(func() { Zones.Remove("example.") })
 			t.Cleanup(fresh.stopPublisher)
 			if _, err := initialLoadZone(context.Background(), fresh, "example.", ZoneRefresher{Name: "example."},
-				&Config{}, core.NewCmap[*RefreshCounter]()); err != nil {
+				&Config{}, core.NewNameMap[*RefreshCounter]()); err != nil {
 				t.Fatalf("initialLoadZone: %v", err)
 			}
 			assertSignedSOAServedAt(t, fresh, 100, 'a', "at a start")

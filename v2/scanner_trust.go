@@ -136,15 +136,17 @@ func (scanner *Scanner) askChildWithDenial(ctx context.Context, qname string, qt
 // askChildServers asks every nameserver in nsRRset for (qname, qtype) and
 // returns what each one that answered said, in the order of nsRRset, without
 // comparing the answers. A nameserver that gives no answer is left out, as
-// askChild leaves it out; no answer from any of them is an error.
-func (scanner *Scanner) askChildServers(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, lg *log.Logger) ([]childAnswer, error) {
+// askChild leaves it out; no answer from any of them is an error. glue, the A
+// and AAAA records of the nameservers that the caller knows, says where to ask
+// those nameservers; the others are looked up (queryAllNS).
+func (scanner *Scanner) askChildServers(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, glue []dns.RR, lg *log.Logger) ([]childAnswer, error) {
 	var answers []childAnswer
 	var queryErrors []string
 	var err error
 	if scanner.queryChildServers != nil {
 		answers, err = scanner.queryChildServers(ctx, qname, qtype, nsRRset)
 	} else {
-		answers, queryErrors, err = scanner.queryAllNS(ctx, qname, qtype, nsRRset, scanner.imr(), lg)
+		answers, queryErrors, err = scanner.queryAllNS(ctx, qname, qtype, nsRRset, glue, scanner.imr(), lg)
 	}
 	if err != nil {
 		return nil, err
@@ -187,7 +189,7 @@ func serialAt(serials []nsSerial, ns string) (uint32, bool) {
 // nameservers had to agree on did through securedChildRRsetFetcher. A missing
 // SOA is an absenceNotProven error unless its absence is proven, as there.
 func (scanner *Scanner) childSOASerials(ctx context.Context, childZone string, nsRRset *core.RRset, pol DelegationPolicy, lg *log.Logger) ([]nsSerial, error) {
-	answers, err := scanner.askChildServers(ctx, childZone, dns.TypeSOA, nsRRset, lg)
+	answers, err := scanner.askChildServers(ctx, childZone, dns.TypeSOA, nsRRset, nil, lg)
 	if err != nil {
 		return nil, err
 	}
@@ -451,8 +453,11 @@ func (scanner *Scanner) securedChildRRsetFetcher(pol DelegationPolicy, childZone
 // (CheckDelegationCoherence): at least one DS of the resulting RRset matches a
 // published key, an empty RRset (going insecure) is allowed, and for a child
 // that already has a DS the DNSKEY RRset must validate, or be signed by a key
-// matching the DS the parent holds. The DNSKEYs are asked of the child's
-// nameservers, as the CDS was, and they must agree on them.
+// matching the DS the parent holds, and a DS that is withdrawn must leave every
+// nameserver's copy of it signed by a key the resulting DS RRset matches. The
+// DNSKEYs are asked of the child's nameservers, as the CDS was, and they must
+// agree on them. Each nameserver's copy is judged: they agree on the keys, and
+// differ in the signatures when several providers sign the child (#925).
 func (scanner *Scanner) checkDSMatchesChildKeys(ctx context.Context, childZone string, nsRRset *core.RRset,
 	currentDS, adds, removes []dns.RR, lg *log.Logger) error {
 	var actions []dns.RR
@@ -466,31 +471,51 @@ func (scanner *Scanner) checkDSMatchesChildKeys(ctx context.Context, childZone s
 		cp.Header().Class = dns.ClassNONE
 		actions = append(actions, cp)
 	}
-	fetch := func(child string) (*core.RRset, cache.ValidationState, error) {
-		keys, inSync, err := scanner.askChild(ctx, child, dns.TypeDNSKEY, nsRRset, lg)
+	var servers childServers
+	if nsRRset != nil {
+		servers.NS = nsRRset.RRs
+	}
+	fetch := func(child string, _ childServers) ([]dnskeyCopy, error) {
+		answers, err := scanner.askChildServers(ctx, child, dns.TypeDNSKEY, nsRRset, nil, lg)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
+		}
+		rrsets := make([]*core.RRset, len(answers))
+		for i, a := range answers {
+			rrsets[i] = a.RRset
+		}
+		keys, inSync, err := compareChildAnswers(child, dns.TypeDNSKEY, rrsets, nil, lg, scanner.Verbose, scanner.Debug)
+		if err != nil {
+			return nil, err
 		}
 		if !inSync {
-			return nil, 0, errors.New("the child's nameservers do not agree on its DNSKEY RRset")
+			return nil, errors.New("the child's nameservers do not agree on its DNSKEY RRset")
 		}
 		if keys == nil || len(keys.RRs) == 0 {
-			return nil, 0, fmt.Errorf("%s publishes no DNSKEY RRset", child)
+			return nil, fmt.Errorf("%s publishes no DNSKEY RRset", child)
 		}
-		// Validation matters only where a DS already exists (see
-		// CheckDelegationCoherence); a child waiting for its first DS has no
-		// chain to validate through.
-		if len(currentDS) == 0 {
-			return keys, 0, nil
+		// Every nameserver's copy is judged, each signed by its own signer's key
+		// (#925): the nameservers agree on the keys, not on the signatures.
+		copies := make([]dnskeyCopy, 0, len(answers))
+		secure := false
+		for _, a := range answers {
+			c := dnskeyCopy{Server: a.NS, RRset: a.RRset}
+			// Validation matters only where a DS already exists (see
+			// CheckDelegationCoherence); a child waiting for its first DS has no
+			// chain to validate through. Without a verdict the DS the parent holds
+			// still decides. One copy that validates Secure is all the check asks
+			// of the resolver, so the rest are not put to it.
+			if len(currentDS) > 0 && !secure {
+				if state, err := scanner.validateChildData(ctx, a.RRset, nil); err == nil {
+					c.State = state
+					secure = state == cache.ValidationStateSecure
+				}
+			}
+			copies = append(copies, c)
 		}
-		state, err := scanner.validateChildData(ctx, keys, nil)
-		if err != nil {
-			// No verdict. The DS the parent holds still decides.
-			return keys, 0, nil
-		}
-		return keys, state, nil
+		return withSilentServers(copies, servers.NS), nil
 	}
-	if err := CheckDelegationCoherence(childZone, currentDS, actions, fetch); err != nil {
+	if err := CheckDelegationCoherence(childZone, servers, currentDS, actions, fetch); err != nil {
 		return refusef("%v", err)
 	}
 	return nil

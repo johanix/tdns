@@ -39,6 +39,20 @@ type RuntimeConfig struct {
 	ScannerPollEnabled     bool // scanner.poll.enabled
 	ScannerPollBootstrap   bool // scanner.poll.bootstrap
 	ScannerPollConcurrency int  // scanner.poll.concurrency
+
+	// JournalOff is journal.active: false, the delta-persistence kill-switch.
+	// Stored INVERTED, so the zero value -- the seed snapshot a reader gets
+	// before the first publish -- means ON, which is what an absent
+	// journal.active means (see JournalConf.Active).
+	//
+	// It lives here, not behind confMu, because it is read by the publish path
+	// under zd.mu, and a reload takes zd.mu per zone while holding confMu's
+	// write lock: a confMu read there is the zd.mu -> confMu / confMu -> zd.mu
+	// inversion that deadlocks the daemon (#1001).
+	//
+	// Built from conf.Journal, which therefore has to hold only an accepted
+	// value: reloadConfig puts the running one back when it refuses a reload.
+	JournalOff bool
 }
 
 // liveConfig holds the current published snapshot. Seeded with an empty snapshot
@@ -78,6 +92,8 @@ func (conf *Config) buildRuntimeConfig() *RuntimeConfig {
 		ScannerPollEnabled:     viper.GetBool("scanner.poll.enabled"),
 		ScannerPollBootstrap:   viper.GetBool("scanner.poll.bootstrap"),
 		ScannerPollConcurrency: viper.GetInt("scanner.poll.concurrency"),
+
+		JournalOff: conf.Journal.Active != nil && !*conf.Journal.Active,
 	}
 }
 

@@ -70,7 +70,7 @@ func LoadDefaultTrustAnchors(explicitFile string, logf func(format string, args 
 
 // imrConfigAnchors reads the IMR config at cfgPath and returns every trust
 // anchor it declares: the inline trust-anchor-ds and trust-anchor-dnskey RRs
-// and the contents of trust-anchor-file.
+// (one or several each) and the contents of trust-anchor-file.
 //
 // All three are additive and all three count, which is what the IMR's own
 // parseTrustAnchorsFromConfig does. They used to disagree: this function read
@@ -125,31 +125,24 @@ func imrConfigAnchors(cfgPath string, logf func(format string, args ...any)) ([]
 	var keys []*dns.DNSKEY
 	var srcs []string
 
+	// The inline settings go through the IMR's own parsers, so each may hold
+	// several records here too, one per line. A value with anything in it that
+	// the IMR refuses is ignored whole, as the IMR refuses it whole.
 	if v := strings.TrimSpace(sub.Imrengine.TrustAnchorDNSKEY); v != "" {
-		switch rr, err := dns.NewRR(v); {
-		case err != nil:
+		if k, err := parseInlineDNSKEYAnchors(v); err != nil {
 			logf("imrConfigAnchors: trust-anchor-dnskey in %s failed to parse (%v); ignoring", cfgPath, err)
-		default:
-			if dk, ok := rr.(*dns.DNSKEY); ok {
-				keys = append(keys, dk)
-				srcs = append(srcs, "trust-anchor-dnskey")
-			} else {
-				logf("imrConfigAnchors: trust-anchor-dnskey in %s is a %T, not a DNSKEY; ignoring", cfgPath, rr)
-			}
+		} else {
+			keys = append(keys, k...)
+			srcs = append(srcs, "trust-anchor-dnskey")
 		}
 	}
 
 	if v := strings.TrimSpace(sub.Imrengine.TrustAnchorDS); v != "" {
-		switch rr, err := dns.NewRR(v); {
-		case err != nil:
+		if d, err := parseInlineDSAnchors(v); err != nil {
 			logf("imrConfigAnchors: trust-anchor-ds in %s failed to parse (%v); ignoring", cfgPath, err)
-		default:
-			if ds, ok := rr.(*dns.DS); ok {
-				dss = append(dss, ds)
-				srcs = append(srcs, "trust-anchor-ds")
-			} else {
-				logf("imrConfigAnchors: trust-anchor-ds in %s is a %T, not a DS; ignoring", cfgPath, rr)
-			}
+		} else {
+			dss = append(dss, d...)
+			srcs = append(srcs, "trust-anchor-ds")
 		}
 	}
 

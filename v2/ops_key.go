@@ -263,6 +263,18 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 		}
 	}
 
+	return zd.sendSig0BootstrapCeremony(ctx, sak, dsyncTarget.Addresses)
+}
+
+// sendSig0BootstrapCeremony sends the bootstrap ceremony for sak's first key
+// to the parent at addrs, and makes the key active once the parent has taken
+// it. A parent that does not answer NOERROR is an error (bootstrapOutcome),
+// with its rcode and EDE still in the UpdateResult. SendUpdate hands a
+// refusal back with a nil error, and the callers that read only the error
+// took a REFUSED for a success.
+func (zd *ZoneData) sendSig0BootstrapCeremony(ctx context.Context, sak *Sig0ActiveKeys, addrs []string) (string, UpdateResult, error) {
+	pkc := sak.Keys[0]
+
 	// 3. Create the self-signed bootstrap ceremony "DEL <child> ANY KEY" +
 	// "ADD <child> KEY" (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
 	// §"Bootstrapping the Child's Key"). The DEL removes any previously
@@ -276,15 +288,15 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 	msg.Insert([]dns.RR{&pkc.KeyRR})      // ADD <child> KEY
 	msg.SetEdns0(1232, true)              // OPT RR so the parent can return EDE
 
-	msg, err = SignMsg(*msg, zd.ZoneName, sak)
+	msg, err := SignMsg(*msg, zd.ZoneName, sak)
 	if err != nil {
 		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to sign message: %v", zd.ZoneName, err), UpdateResult{}, err
 	}
 
 	// 4. Send the message to the parent
-	rcode, ur, err := SendUpdate(ctx, msg, zd.GetParent(), dsyncTarget.Addresses)
+	rcode, ur, err := SendUpdate(ctx, msg, zd.GetParent(), addrs)
 	if err != nil {
-		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to send update message: %v", zd.ZoneName, err), ur, err
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to send update message: %v", zd.ZoneName, err), ur, bootstrapOutcome(ur, err)
 	}
 
 	if rcode == dns.RcodeSuccess {
@@ -330,7 +342,7 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 		zd.Logger.Printf("%s", resp.Msg)
 	}
 
-	return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) sent update message; received rcode %s back", zd.ZoneName, dns.RcodeToString[rcode]), ur, nil
+	return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) sent update message; received rcode %s back", zd.ZoneName, dns.RcodeToString[rcode]), ur, bootstrapOutcome(ur, nil)
 }
 
 // rolloverLookupDSYNCTarget and rolloverSendUpdate are the parent exchanges
