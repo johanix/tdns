@@ -1045,3 +1045,33 @@ func TestAFirstLoadThatAdoptsAPersistedCopyBindsAPolicyThatOnlyTheReloadDefines(
 		t.Errorf("after the first load the last-applied record is %q %v %v, want base", name, ok, err)
 	}
 }
+
+// A policy warning recorded for a zone that a reload has since removed does not
+// put the zone back. The engine holds the zone it was handed; the reload removes
+// it from the registry, and a write to the removed zone's error state went
+// through setErrorLocked and clearErrorLocked, which end by registering the zone
+// they were called on.
+func TestAReloadsRecordOfAZoneThatWasRemovedDoesNotRegisterItAgain(t *testing.T) {
+	kdb := reloadPolicySetup(t)
+	z := loadedWithPolicy(t, kdb, "base")
+	if err := z.zd.BindPolicyWithoutSigning(); err != nil {
+		t.Fatalf("BindPolicyWithoutSigning: %v", err)
+	}
+	zd := z.zd
+	Zones.Remove(ovZone) // the reload removes it; the engine still holds zd
+
+	for _, step := range []struct{ name, what string }{
+		{"gone", "a policy that cannot be bound (a warning)"},
+		{"base", "the bound policy again (the warning cleared)"},
+		{"other", "another policy that exists"},
+		{"", "no policy (the binding removed)"},
+	} {
+		if !zd.recordPolicyOfNonSigningZone(step.name, nil) {
+			t.Fatalf("%s: the zone was not handled", step.what)
+		}
+		if _, registered := Zones.Get(ovZone); registered {
+			t.Errorf("%s: the zone that was removed is registered again", step.what)
+			Zones.Remove(ovZone)
+		}
+	}
+}

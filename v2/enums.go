@@ -593,6 +593,18 @@ func (zd *ZoneData) SetError(errtype ErrorType, errmsg string, args ...interface
 // exists so a zd.mu-holding path (e.g. SignZone → UpdateSigValidityFloor) can
 // record an error without re-locking — Go mutexes are not reentrant.
 func (zd *ZoneData) setErrorLocked(errtype ErrorType, errmsg string, args ...interface{}) {
+	zd.setErrorUnpublishedLocked(errtype, errmsg, args...)
+	// no-refresh-hooks: republishes an existing ZoneData.
+	Zones.Set(zd.ZoneName, zd)
+}
+
+// setErrorUnpublishedLocked is setErrorLocked without the republish: the zone's
+// error state is changed and nothing else is. The republish is a no-op for a zone
+// that is registered, and registers one that is not: a caller that holds a
+// ZoneData a reload has since removed from Zones would put it back. A caller
+// that can be handed a zone like that uses this one. The caller MUST already
+// hold zd.mu.
+func (zd *ZoneData) setErrorUnpublishedLocked(errtype ErrorType, errmsg string, args ...interface{}) {
 	if errtype == NoError {
 		zd.Errors = nil
 	} else {
@@ -602,8 +614,6 @@ func (zd *ZoneData) setErrorLocked(errtype ErrorType, errmsg string, args ...int
 		zd.Errors[errtype] = ZoneError{Type: errtype, Msg: fmt.Sprintf(errmsg, args...)}
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
-	// no-refresh-hooks: republishes an existing ZoneData.
-	Zones.Set(zd.ZoneName, zd)
 }
 
 // snapshotErrorsLocked copies the current entries for the given categories, for
@@ -644,6 +654,14 @@ func (zd *ZoneData) ClearError(errtype ErrorType) {
 // clearErrorLocked is ClearError's body; the caller MUST already hold zd.mu.
 // See setErrorLocked for why this exists.
 func (zd *ZoneData) clearErrorLocked(errtype ErrorType) {
+	zd.clearErrorUnpublishedLocked(errtype)
+	// no-refresh-hooks: republishes an existing ZoneData.
+	Zones.Set(zd.ZoneName, zd)
+}
+
+// clearErrorUnpublishedLocked is clearErrorLocked without the republish; see
+// setErrorUnpublishedLocked. The caller MUST already hold zd.mu.
+func (zd *ZoneData) clearErrorUnpublishedLocked(errtype ErrorType) {
 	if errtype == NoError {
 		zd.Errors = nil
 	} else if zd.Errors != nil {
@@ -653,8 +671,6 @@ func (zd *ZoneData) clearErrorLocked(errtype ErrorType) {
 		}
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
-	// no-refresh-hooks: republishes an existing ZoneData.
-	Zones.Set(zd.ZoneName, zd)
 }
 
 // SetStatus sets the zone's positive-lifecycle status and republishes the zone
