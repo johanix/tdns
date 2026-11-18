@@ -450,11 +450,11 @@ func TestRegisteredAppZoneThatStartsToSignAcrossARestartGoesOnPastWhatItRelayed(
 
 // The same zone, once inline-signing is on for it, keeps a serial of its own.
 // A derived app switches the option on in a pre-refresh callback, on the
-// incoming zone's options, which are the served zone's: that is the moment a
-// relayed zone becomes one the app signs. From there the zone goes on from one
-// past the serial it was serving, whatever the upstream's serial is, and counts
-// by itself at every refresh and forced re-fetch. A restart lands past the
-// highest serial it published.
+// incoming zone's options, which reach the served zone's when the callbacks
+// are done: that is the moment a relayed zone becomes one the app signs. From
+// there the zone goes on from one past the serial it was serving, whatever the
+// upstream's serial is, and counts by itself at every refresh and forced
+// re-fetch. A restart lands past the highest serial it published.
 //
 // No DNSSEC policy is bound here and nothing is signed: what is under test is
 // the serial, and that follows the option alone.
@@ -708,12 +708,12 @@ func TestRuntimeOptionsAreLaidOverTheConfiguredOnes(t *testing.T) {
 
 // Setting a run-time option gives the zone a new options map; the map it had
 // is not written to. That map is read without the zone's lock by the query
-// and refresh paths, and the incoming zone of a refresh in progress holds it
-// as well, so a write into it could meet a read of it and stop the process.
+// and refresh paths, and a reader that took it before the set still holds it,
+// so a write into it could meet a read of it and stop the process.
 func TestSettingARuntimeOptionDoesNotWriteTheMapTheZoneHad(t *testing.T) {
 	had := map[ZoneOption]bool{OptAllowUpdates: true}
 	zd := &ZoneData{ZoneName: "example.", Options: had}
-	incoming := &ZoneData{ZoneName: "example.", Options: zd.Options} // as a refresh builds it
+	holder := &ZoneData{ZoneName: "example.", Options: zd.Options} // a reader that took the map before the set
 
 	zd.SetRuntimeOption(OptInlineSigning, true)
 	if !zd.Options[OptInlineSigning] || !zd.Options[OptAllowUpdates] {
@@ -722,8 +722,8 @@ func TestSettingARuntimeOptionDoesNotWriteTheMapTheZoneHad(t *testing.T) {
 	if had[OptInlineSigning] || len(had) != 1 {
 		t.Fatalf("the map the zone had was written to: %v", had)
 	}
-	if incoming.Options[OptInlineSigning] {
-		t.Fatal("the incoming zone's map, shared with the served zone's old one, was written to")
+	if holder.Options[OptInlineSigning] {
+		t.Fatal("the map a reader held, the served zone's old one, was written to")
 	}
 
 	// An option that already reads as asked for is no change: the same map.

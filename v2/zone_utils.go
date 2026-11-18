@@ -664,6 +664,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 // Anything added to ZoneTransferIn's reads of zd belongs in this function.
 func newTransferScratchZone(zd *ZoneData) ZoneData {
 	srcs, tier := zd.EffectiveTransferSrcWithSource()
+	opts, atStart := zd.optionsForIncoming()
 	return ZoneData{
 		ZoneName:        zd.ZoneName,
 		ZoneType:        zd.ZoneType,
@@ -673,7 +674,8 @@ func newTransferScratchZone(zd *ZoneData) ZoneData {
 		Logger:          zd.Logger,
 		Verbose:         zd.Verbose,
 		Debug:           zd.Debug,
-		Options:         zd.optionsToShare(),
+		Options:         opts,
+		optionsAtStart:  atStart,
 		TransferSrc:     srcs,
 		TransferSrcTier: tier,
 		Ready:           true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
@@ -784,6 +786,7 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	prevStatus := zd.GetStatus()
 	zd.SetStatus(ZoneStatusLoading)
 
+	opts, atStart := zd.optionsForIncoming()
 	new_zd := ZoneData{
 		ZoneName:       zd.ZoneName,
 		ZoneStore:      zd.ZoneStore,
@@ -793,7 +796,8 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
 		Debug:          zd.Debug,
-		Options:        zd.optionsToShare(),
+		Options:        opts,
+		optionsAtStart: atStart,
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
@@ -910,6 +914,8 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	for _, cb := range zd.OnZonePreRefresh {
 		cb(zd, &new_zd)
 	}
+	// What they set on the incoming zone's options reaches the served zone's.
+	zd.foldIncomingOptions(&new_zd)
 
 	// Last gate before the hard flip, after the callbacks have run. See the
 	// matching comment on the upstream path.
@@ -1367,6 +1373,8 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 	for _, cb := range zd.OnZonePreRefresh {
 		cb(zd, &new_zd)
 	}
+	// What they set on the incoming zone's options reaches the served zone's.
+	zd.foldIncomingOptions(&new_zd)
 
 	// Last gate before the hard flip. The transfer and the pre-refresh
 	// callbacks both take real time -- an AXFR of a large zone, then MP roles
