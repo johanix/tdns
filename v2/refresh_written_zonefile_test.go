@@ -472,22 +472,28 @@ func TestRefreshWriteOfADynamicCopyThatIsNotTheZonesFileLeavesTheJournal(t *test
 		t.Fatalf("local change: %v", err)
 	}
 	before := ovJournal(t, zd)
+	anchor := zfFileSerial(zd)
+	if len(before) != 1 {
+		t.Fatalf("precondition: the journal holds %d deltas, want 1", len(before))
+	}
 
-	addr := zfUpstream(t, 8)
-	zfRefreshWith(t, zd, addr, conf)
+	// The write after a refresh, with no transfer: what is in question is
+	// what the write does, not what a transfer does to the journal.
+	persistRefreshedZone(zd, zd.ZoneName, zd.generation.Load(), conf)
 	if _, err := os.Stat(GetDynamicZoneFilePath(zd.ZoneName, conf.DynamicZones.ZoneDirectory)); err != nil {
-		t.Fatalf("precondition: the refresh wrote no dynamic zone file: %v", err)
+		t.Fatalf("precondition: the write left no dynamic zone file: %v", err)
 	}
 
-	// The transfer anchored the journal to the serial received. The write
-	// would have moved it to the serial it wrote.
-	if got, written := zfFileSerial(zd), ovServedSerial(t, zd); got == written {
-		t.Errorf("the journal is anchored to serial %d, the one written to a file the zone does not"+
-			" load from", got)
+	// The write would have moved the anchor to the serial it wrote, and
+	// dropped the delta the copy holds.
+	if got := zfFileSerial(zd); got != anchor {
+		t.Errorf("the journal's anchor moved from %d to %d for a copy the zone does not load from",
+			anchor, got)
 	}
-	if after := ovJournal(t, zd); len(after) != len(before) {
-		t.Errorf("the journal went from %d deltas to %d for a file the zone does not load from:%s",
-			len(before), len(after), ovJournalString(after))
+	if after := ovJournal(t, zd); len(after) != 1 || after[0].FromSerial != before[0].FromSerial ||
+		after[0].ToSerial != before[0].ToSerial {
+		t.Errorf("the journal changed for a copy the zone does not load from:\nbefore:%s\nafter:%s",
+			ovJournalString(before), ovJournalString(after))
 	}
 }
 
