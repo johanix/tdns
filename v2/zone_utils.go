@@ -2346,7 +2346,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 			if od == nil || !strings.HasPrefix(owner, "_dns.") {
 				continue
 			}
-			if svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB); exists && len(svcbRRset.RRs) > 0 && zd.signalStoredByPass(owner, svcbRRset.RRs) {
+			if svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB); exists && len(svcbRRset.RRs) > 0 && zd.refreshCarriesSignal(owner, svcbRRset.RRs) {
 				svcbClone := &core.RRset{
 					Name:   owner,
 					Class:  dns.ClassINET,
