@@ -437,6 +437,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	}
 
 	checkListeners(&cfg, rep)
+	checkDo53QueriesRefused(&cfg, rep, effectiveRole(role) == "agent")
 	checkApiServer(&cfg, cfgPath, rep)
 	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
@@ -626,6 +627,28 @@ func checkListeners(cfg *tdns.Config, rep *ccReport) {
 			checkFileExists(rep, g, "certfile", cfg.Listeners.CertFile)
 			checkFileExists(rep, g, "keyfile", cfg.Listeners.KeyFile)
 		}
+	}
+}
+
+// checkDo53QueriesRefused reports debug-do53-queries-refused (#1066): a WARN
+// when it is on and the daemon would start with it, since it breaks RFC
+// requirements on purpose; a FAIL when the daemon would refuse to start with
+// it, and on tdns-agent, which refuses the option at any value, "false"
+// included.
+func checkDo53QueriesRefused(cfg *tdns.Config, rep *ccReport, agent bool) {
+	const g, check = "Listeners", "debug-do53-queries-refused"
+	present, on, err := cfg.Do53QueriesRefusedCheck()
+	switch {
+	case agent && present:
+		rep.fail(g, check, "tdns-agent refuses this authengine option at startup, whatever its value",
+			"remove it: it is for a tdns-auth leaf server under test")
+	case !on:
+	case err != nil:
+		rep.fail(g, check, err.Error(),
+			"add dot or doq to listeners.transports, with a certfile and keyfile that load, or remove the option")
+	default:
+		rep.warn(g, check, "queries over Do53 will be REFUSED (EDE 18), except _dns SVCB and DNSKEY; NOTIFY and UPDATE are handled as usual. This breaks RFC requirements on purpose",
+			"use it only on a leaf server under test")
 	}
 }
 
@@ -1224,12 +1247,26 @@ func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, 
 				dohPathOrDefault(cfg.Listeners.DoHPath), dohPathOrDefault(resp.Listeners.DoHPath)),
 			"a `config reload` does not re-open DNS listeners; restart to change the DoH path")
 	}
+	// debug-do53-queries-refused takes effect when the DNS engine starts; a
+	// reload leaves the running setting as it was.
+	if _, on, _ := cfg.Do53QueriesRefusedCheck(); on != resp.Do53QueriesRefused {
+		rep.warn(g, "debug-do53-queries-refused",
+			fmt.Sprintf("config has debug-do53-queries-refused %s, the running server has it %s", onOff(on), onOff(resp.Do53QueriesRefused)),
+			"the option takes effect at the next restart")
+	}
 	if resp.ApiServer.ApiKey.Value() != "" && cfg.ApiServer.ApiKey.Value() != "" &&
 		resp.ApiServer.ApiKey.Value() != cfg.ApiServer.ApiKey.Value() {
 		rep.warn(g, "apikey",
 			"apiserver.apikey in the file differs from the running server's apikey",
 			"the running apikey changes only on restart")
 	}
+}
+
+func onOff(on bool) string {
+	if on {
+		return "on"
+	}
+	return "off"
 }
 
 func dohPathOrDefault(path string) string {

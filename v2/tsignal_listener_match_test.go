@@ -112,24 +112,27 @@ func TestLocalAddrsReadsTheSystemAtMostOncePerInterval(t *testing.T) {
 }
 
 // The join: a zone shared with another provider, a wildcard listener and the
-// server-wide option. Only this server's NS name gets a signal; the other
-// provider's in-bailiwick name gets none.
+// server-wide option. Only this server's identity gets a signal; the other
+// provider's in-zone name gets none, though its address is this host's too.
+// The listener plays no part in SVCB synthesis (rule 2 of the maintainer's
+// ruling on plan step S2, 2026-11-15).
 func TestAWildcardListenerSignalsOnlyForThisServersNS(t *testing.T) {
 	stubLocalAddrs(t, "127.0.0.1")
 	const z = "shared.sig.example."
 	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
 `+z+`	3600	IN	NS	ns2.`+z+`
 ns1.`+z+`	3600	IN	A	127.0.0.1
-ns2.`+z+`	3600	IN	A	192.0.2.2
+ns2.`+z+`	3600	IN	A	127.0.0.1
 `, "0.0.0.0:53")
+	conf.Service.Identities = []string{"ns1." + z}
 	delete(zd.Options, OptAddTransportSignal)
 	serverOptions(zd, map[AuthOption]string{AuthOptAddTransportSignal: "true"})
 
 	runTransportSignalPass(zd, conf)
 	if !served(zd, "_dns.ns1."+z, dns.TypeSVCB) {
-		t.Fatal("no signal for this server's own NS name behind a wildcard listener")
+		t.Fatal("no signal for this server's identity behind a wildcard listener")
 	}
 	if served(zd, "_dns.ns2."+z, dns.TypeSVCB) {
-		t.Fatal("a wildcard listener claimed the other provider's NS name and published this server's transports under it")
+		t.Fatal("an address claimed the other provider's NS name and published this server's transports under it")
 	}
 }

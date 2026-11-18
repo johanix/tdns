@@ -61,6 +61,11 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs, ports []string, c
 			}(listener, hostport)
 		}
 	}
+	// Every listener failed, each with its own error recorded above: say so,
+	// rather than report a DoQ service that is not there.
+	if len(listeners) == 0 {
+		return fmt.Errorf("DnsDoQEngine: no DoQ listener could be set up on %v, ports %v", doqaddrs, ports)
+	}
 	go func() {
 		<-ctx.Done()
 		lgDns.Info("DnsDoQEngine: shutting down DoQ listeners")

@@ -964,6 +964,15 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 			return false, 0, fmt.Errorf("zone %s: %s: an SVCB RRset mixing AliasMode and ServiceMode records; a client ignores the ServiceMode ones (RFC 9460 section 2.4.1)", zd.ZoneName, name)
 		}
 	}
+	// A transport signal the operator wrote is served as written; what a
+	// resolver will read differently from what it says is warned about.
+	for name, od := range zd.Data.Items() {
+		if rs, ok := od.RRtypes.Get(dns.TypeSVCB); ok {
+			for _, w := range svcbSignalWarnings(rs) {
+				lgDns.Warn("zone load: transport signal: "+w, "zone", zd.ZoneName, "owner", name)
+			}
+		}
+	}
 
 	// Return true only if serial changed (indicates actual update)
 	// If force=true but serial unchanged, return false (validated but no update)
