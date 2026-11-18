@@ -981,7 +981,12 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 // Do53 failed while that server's signal was being validated: both had tried
 // the server over Do53 first and been refused, and the referral was followed
 // before the signal could be installed (#1065).
+//
+// Before it selects, it waits for the signal lookups of the servers that are
+// still looking theirs up (awaitRunningSignalLookups), so that the query goes
+// out over what the signal offers rather than over Do53 first.
 func (imr *Imr) awaitUsableTuples(ctx context.Context, budget *signalWaitBudget, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
+	imr.awaitRunningSignalLookups(ctx, budget, qtype, serverMap)
 	zoneName, zone, tuples := imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false)
 	if len(tuples) > 0 {
 		return zoneName, zone, tuples
@@ -1011,6 +1016,56 @@ func (imr *Imr) awaitUsableTuples(ctx context.Context, budget *signalWaitBudget,
 		return zoneName, zone, tuples
 	}
 	return imr.prioritizeServersFor(ctx, qname, qtype, serverMap, privacy)
+}
+
+// awaitRunningSignalLookups waits, within the query's budget, for the
+// transport-signal lookups of the servers in serverMap that have an address
+// and no signal yet: until one of the servers has a signal, or every lookup
+// has ended. A server with a signal already ends it at once, and whichever
+// lookup ends first is looked at first, so a lookup that never ends does not
+// hold up a server whose signal has come in. A lookup is waited for when it
+// is running, typically the one the referral that brought the query here
+// started (always-query-for-transport), and with always-query-for-transport
+// it is started when it is not. A server whose signal is denied, or whose
+// lookup failed and is cooling down, is not waited for.
+//
+// The query then goes out over what the signal offers. Without the wait it
+// went to the server over Do53 first, before the signal was in. A server
+// that refuses queries over Do53 answered REFUSED, and the refusal put Do53
+// to it in the zone's backoff. A nameserver named inside its own zone has
+// its signal in that zone, so the signal lookup was left with nothing to
+// send if it had not sent its query yet, and every query to the zone failed
+// until the backoff ran out, then failed the same way again (#1116).
+//
+// A transport-signal lookup, and what it asks on the way, never waits
+// (awaitTransportSignalsUntil). Nor do DNSKEY and DS queries: they validate
+// signals, and a lookup validates a denial with a context of its own, so its
+// DNSKEY query would otherwise wait for the very lookup it serves until the
+// budget ran out.
+func (imr *Imr) awaitRunningSignalLookups(ctx context.Context, budget *signalWaitBudget, qtype uint16, serverMap map[string]*cache.AuthServer) {
+	if qtype == dns.TypeDNSKEY || qtype == dns.TypeDS || inTransportSignalLookup(ctx) {
+		return
+	}
+	withAddrs := make(map[string]*cache.AuthServer, len(serverMap))
+	for key, server := range serverMap {
+		if server != nil && len(server.GetAddrs()) > 0 {
+			withAddrs[key] = server
+		}
+	}
+	signalled := func() bool {
+		for _, server := range withAddrs {
+			if len(server.GetTransportWeights()) > 0 {
+				return true
+			}
+		}
+		return false
+	}
+	if len(withAddrs) == 0 || signalled() {
+		return
+	}
+	budget.run(ctx, imr.strictWait(), func(wctx context.Context) bool {
+		return imr.awaitTransportSignalsUntil(wctx, withAddrs, transportQueryReasonNewServer, signalled)
+	})
 }
 
 // tupleSelection is one selection of a query's (server, addr, transport)

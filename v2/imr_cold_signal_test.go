@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,17 +150,119 @@ func TestColdQueryStopsAtTheBound(t *testing.T) {
 	}
 }
 
-// A server with a transport it may use is used at once, lookup or no lookup.
-func TestColdQueryWithDo53DoesNotWait(t *testing.T) {
+// A server whose signal lookup is running is waited for even with Do53
+// available, and the query goes out over what the signal offers. It used to go
+// over Do53 at once, and a server that refuses Do53 put Do53 to it in the
+// zone's backoff, where the signal lookup could no longer reach it (#1116).
+func TestQueryWaitsForTheRunningSignalLookupWithDo53Available(t *testing.T) {
 	imr, server, serverMap := newStrictTestImr(t, 5*time.Second)
-	startSignalLookup(t, imr, server)
+	end := startSignalLookup(t, imr, server)
+	end(50*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 100})
 
 	elapsed, err := coldQuery(context.Background(), imr, serverMap)
-	if elapsed > time.Second {
-		t.Errorf("waited %s with Do53 available", elapsed)
+	if elapsed < 50*time.Millisecond || elapsed >= time.Second {
+		t.Errorf("waited %s, want about the lookup's 50ms", elapsed)
+	}
+	// DoT, which fails for want of a client, then Do53, which a signal
+	// leaves as the last resort.
+	if err == nil || !strings.Contains(err.Error(), "attempts=2") {
+		t.Errorf("got %v, want two attempts: DoT, then Do53", err)
+	}
+}
+
+// A lookup that finds no signal leaves the server its Do53, which the query
+// then uses, once the lookup has ended.
+func TestQueryUsesDo53AfterALookupThatFoundNoSignal(t *testing.T) {
+	imr, server, serverMap := newStrictTestImr(t, 5*time.Second)
+	end := startSignalLookup(t, imr, server)
+	end(50*time.Millisecond, nil)
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed < 50*time.Millisecond || elapsed >= time.Second {
+		t.Errorf("waited %s, want about the lookup's 50ms", elapsed)
 	}
 	if err == nil || !strings.Contains(err.Error(), "attempts=1") || !strings.Contains(err.Error(), "/do53") {
 		t.Errorf("got %v, want one attempt over Do53", err)
+	}
+}
+
+// With no lookup running, and always-query-for-transport off, nothing is
+// started and nothing waited for: the server's Do53 is used at once.
+func TestQueryWithDo53AndNoLookupDoesNotWait(t *testing.T) {
+	imr, _, serverMap := newStrictTestImr(t, 5*time.Second)
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed > time.Second {
+		t.Errorf("waited %s with Do53 available and no lookup", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "attempts=1") || !strings.Contains(err.Error(), "/do53") {
+		t.Errorf("got %v, want one attempt over Do53", err)
+	}
+	if snap := imr.TransportSignalDiscovery.Snapshot(); len(snap) != 0 {
+		t.Errorf("a lookup was started without always-query-for-transport: %v", snap)
+	}
+}
+
+// With always-query-for-transport the query starts the lookup of a server
+// that has none running, and waits for it. The lookup here is real and fails
+// at once, as the test cache has no client to send it with; the query then
+// goes over Do53.
+func TestQueryStartsTheSignalLookupWithAlwaysQuery(t *testing.T) {
+	imr, _, serverMap := newStrictTestImr(t, 5*time.Second)
+	imr.Options[ImrOptAlwaysQueryForTransport] = "true"
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed >= 5*time.Second {
+		t.Errorf("waited %s, the whole bound, for a lookup that failed at once", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "attempts=1") || !strings.Contains(err.Error(), "/do53") {
+		t.Errorf("got %v, want one attempt over Do53", err)
+	}
+	st, ok := imr.TransportSignalDiscovery.Snapshot()[strictChildOwner]
+	if !ok || st.AttemptCount != 1 {
+		t.Errorf("got %+v (found %v), want one lookup started by the query", st, ok)
+	}
+}
+
+// DNSKEY and DS queries validate signals, and never wait for one: a lookup
+// validating its answer would otherwise wait for itself.
+func TestDNSKEYAndDSQueriesDoNotWaitForASignalLookup(t *testing.T) {
+	for _, qtype := range []uint16{dns.TypeDNSKEY, dns.TypeDS} {
+		imr, server, serverMap := newStrictTestImr(t, 5*time.Second)
+		startSignalLookup(t, imr, server)
+
+		start := time.Now()
+		_, _, _, _, err := imr.IterativeDNSQuery(context.Background(), strictChildZone, qtype, serverMap, true, edns0.PrivacyNone)
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("%s: waited %s for a signal lookup", dns.TypeToString[qtype], elapsed)
+		}
+		if err == nil || !strings.Contains(err.Error(), "/do53") {
+			t.Errorf("%s: got %v, want an attempt over Do53", dns.TypeToString[qtype], err)
+		}
+	}
+}
+
+// The #1116 shape: the zone's one server refuses queries over Do53, and its
+// signal lookup is running, as the referral started it. The query waits for
+// the signal and goes over DoT first. The server sees a Do53 query only as the
+// last resort, once DoT has failed (for want of a client here), never before
+// the signal is in.
+func TestQueryToARefusingServerWaitsForTheSignalBeforeDo53(t *testing.T) {
+	var early atomic.Int32
+	imr, server, serverMap := newRefusedTestImr(t, 0, func(_ *Imr, s *cache.AuthServer) {
+		if len(s.GetTransportWeights()) == 0 {
+			early.Add(1)
+		}
+	})
+	end := startSignalLookup(t, imr, server)
+	end(50*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 100})
+
+	_, err := coldQuery(context.Background(), imr, serverMap)
+	if err == nil || !strings.Contains(err.Error(), "attempts=2") {
+		t.Errorf("got %v, want two attempts: DoT, then Do53", err)
+	}
+	if n := early.Load(); n != 0 {
+		t.Errorf("the server got %d queries over Do53 before the signal was in, want none", n)
 	}
 }
 
@@ -270,8 +373,8 @@ func TestAnotherPassAfterKeepsTheProbeTuple(t *testing.T) {
 
 // startRefusingDouble is a loopback Do53 server that refuses every query
 // with EDE 18, as tdns-auth does with debug-do53-queries-refused (#1066),
-// after delay.
-func startRefusingDouble(t *testing.T, delay time.Duration) (host, port string) {
+// after delay. onQuery, when set, runs as each query arrives.
+func startRefusingDouble(t *testing.T, delay time.Duration, onQuery func()) (host, port string) {
 	t.Helper()
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -279,6 +382,9 @@ func startRefusingDouble(t *testing.T, delay time.Duration) (host, port string) 
 	}
 	host, port, _ = net.SplitHostPort(pc.LocalAddr().String())
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		if onQuery != nil {
+			onQuery()
+		}
 		time.Sleep(delay)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeRefused)
@@ -309,11 +415,11 @@ func startRefusingDouble(t *testing.T, delay time.Duration) (host, port string) 
 // in: the pass runs out of tuples, but the signal lookup is still running.
 // The query waits for it and goes again over DoT. It used to give up after
 // the refusal (the rig's encns suite against a server that refuses queries
-// over Do53).
+// over Do53). The lookup starts while the Do53 attempt is out: one running
+// before the query selects is waited for first, and no Do53 attempt is made
+// (TestQueryToARefusingServerWaitsAndSendsNoDo53).
 func TestColdQueryWaitsAfterItsOwnDo53IsRefused(t *testing.T) {
-	imr, server, serverMap := newRefusedTestImr(t, 0)
-	end := startSignalLookup(t, imr, server)
-	end(300*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
+	imr, _, serverMap := newRefusedTestImr(t, 0, beginLookupEnding(300*time.Millisecond))
 
 	elapsed, err := coldQuery(context.Background(), imr, serverMap)
 	if elapsed >= 5*time.Second {
@@ -329,11 +435,10 @@ func TestColdQueryWaitsAfterItsOwnDo53IsRefused(t *testing.T) {
 // arrives after it: the pass ends with DoT available, a tuple it never had.
 // The query goes again over DoT. It used to give up: tuples were left, and
 // the query took them for ones it had tried (the rig's encns suite, against
-// a server that refuses queries over Do53).
+// a server that refuses queries over Do53). The lookup starts while the Do53
+// attempt is out, as above.
 func TestColdQueryGoesAgainWhenTheSignalCameDuringThePass(t *testing.T) {
-	imr, server, serverMap := newRefusedTestImr(t, 300*time.Millisecond)
-	end := startSignalLookup(t, imr, server)
-	end(50*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
+	imr, _, serverMap := newRefusedTestImr(t, 300*time.Millisecond, beginLookupEnding(50*time.Millisecond))
 
 	_, err := coldQuery(context.Background(), imr, serverMap)
 	if err == nil || !strings.Contains(err.Error(), "attempts=2") || !strings.Contains(err.Error(), "/dot") {
@@ -341,19 +446,35 @@ func TestColdQueryGoesAgainWhenTheSignalCameDuringThePass(t *testing.T) {
 	}
 }
 
+// beginLookupEnding is an onQuery for newRefusedTestImr: the server's signal
+// lookup starts as the query's Do53 attempt arrives, and ends after delay
+// with a signal offering DoT, beside Do53.
+func beginLookupEnding(delay time.Duration) func(*Imr, *cache.AuthServer) {
+	return func(imr *Imr, server *cache.AuthServer) {
+		if end := beginSignalLookup(imr, server); end != nil {
+			end(delay, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
+		}
+	}
+}
+
 // newRefusedTestImr is an IMR whose one server for the child zone refuses
 // queries over Do53 after delay, and has no transport signal yet. It has no
-// client for any other transport, so a DoT attempt fails at once.
-func newRefusedTestImr(t *testing.T, delay time.Duration) (*Imr, *cache.AuthServer, map[string]*cache.AuthServer) {
+// client for any other transport, so a DoT attempt fails at once. onQuery,
+// when set, runs with the IMR and the server as each Do53 query arrives.
+func newRefusedTestImr(t *testing.T, delay time.Duration, onQuery func(*Imr, *cache.AuthServer)) (*Imr, *cache.AuthServer, map[string]*cache.AuthServer) {
 	t.Helper()
-	host, port := startRefusingDouble(t, delay)
 	imr := newTestImr(t)
-	imr.Cache.DNSClient = map[core.Transport]core.DNSClienter{
-		core.TransportDo53: core.NewDNSClient(core.TransportDo53, port, nil),
-	}
 	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
 	imr.Tuning.Discovery.StrictWait = 5 * time.Second
 	server := imr.Cache.GetOrCreateAuthServer(strictChildNS)
+	var hook func()
+	if onQuery != nil {
+		hook = func() { onQuery(imr, server) }
+	}
+	host, port := startRefusingDouble(t, delay, hook)
+	imr.Cache.DNSClient = map[core.Transport]core.DNSClienter{
+		core.TransportDo53: core.NewDNSClient(core.TransportDo53, port, nil),
+	}
 	server.AddAddr(host)
 	serverMap := map[string]*cache.AuthServer{cache.ServerKey(strictChildNS): server}
 	if err := imr.Cache.AddServers(strictChildZone, serverMap); err != nil {

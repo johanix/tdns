@@ -262,9 +262,10 @@ func (imr *Imr) awaitTransportSignals(ctx context.Context, qname string, serverM
 // already running, and waits until ready says a server can carry the query,
 // every lookup has ended, the tuning's strict-wait has passed, or ctx is
 // done. It reports what ready says then. reason is the lookup's, for
-// maybeQueryTransportSignal: either reason this is called with starts a
+// maybeQueryTransportSignal: strict-privacy and no-usable-transport start a
 // lookup whatever the discovery options say, and only
-// use-transport-signals: false turns them off.
+// use-transport-signals: false turns them off; new-auth-server starts one
+// only with always-query-for-transport (awaitRunningSignalLookups).
 //
 // A server whose signal is known is not looked up again, whatever the signal
 // says. Nor is one whose signal the cache holds a denial of, until the
