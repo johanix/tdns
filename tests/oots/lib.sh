@@ -81,6 +81,17 @@ stop_daemons() {
 	rm -f "$PIDS"
 }
 
+# One daemon, by name, out of $PIDS, so a suite can restart a party while the
+# rig root keeps running.
+stop_daemon() { # name
+	local _p
+	[ -f "$PIDS" ] || return 0
+	for _p in $(awk -v n="$1" '$2 == n { print $1 }' "$PIDS"); do kill "$_p" 2>/dev/null; done
+	sleep 1
+	for _p in $(awk -v n="$1" '$2 == n { print $1 }' "$PIDS"); do kill -9 "$_p" 2>/dev/null; done
+	awk -v n="$1" '$2 != n' "$PIDS" > "$PIDS.new" && mv "$PIDS.new" "$PIDS"
+}
+
 alive() { # name: the daemon of that name is running
 	local _p
 	[ -f "$PIDS" ] || return 1
