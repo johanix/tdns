@@ -68,14 +68,21 @@ func (zd *ZoneData) signalRecordDB() *KeyDB {
 // memory and in the KeyDB, ahead of the digests of what it stored there
 // before. A failed write is logged and the in-memory record stands: the
 // signal is then known as the pass's own until the next restart.
+//
+// When the earlier digests cannot be read, the KeyDB's record is not
+// replaced by the new digest alone, which would drop them: a zone file that
+// still holds an earlier signal of the pass's would then read as the
+// operator's after a restart. The new digest is put ahead of whatever the
+// record holds instead (PrependTransportSignalStored). In memory it stands
+// alone, which is enough for this process: the zone holds the new signal.
 func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 	owner = core.CanonicalizeName(owner)
 	digest := signalDigest(rrs)
 	digests := []string{digest}
-	earlier, err := zd.signalStoredDigests(owner)
-	if err != nil {
-		lgDns.Warn("noteSignalStored: could not read the earlier digests; the new one is recorded alone",
-			"zone", zd.ZoneName, "owner", owner, "error", err)
+	earlier, readErr := zd.signalStoredDigests(owner)
+	if readErr != nil {
+		lgDns.Warn("noteSignalStored: could not read the earlier digests; the new one is put ahead of what the KeyDB holds",
+			"zone", zd.ZoneName, "owner", owner, "error", readErr)
 	}
 	for _, d := range earlier {
 		if d != digest && len(digests) < signalStoredKeep {
@@ -92,7 +99,11 @@ func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 	if kdb == nil {
 		return
 	}
-	if err := kdb.SetTransportSignalStored(zd.ZoneName, owner, digests); err != nil {
+	write := func() error { return kdb.SetTransportSignalStored(zd.ZoneName, owner, digests) }
+	if readErr != nil {
+		write = func() error { return kdb.PrependTransportSignalStored(zd.ZoneName, owner, digest) }
+	}
+	if err := write(); err != nil {
 		lgDns.Warn("noteSignalStored: could not record the stored signal; after a restart it may be taken for the operator's",
 			"zone", zd.ZoneName, "owner", owner, "error", err)
 	}
@@ -248,6 +259,34 @@ VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`,
 	return nil
 }
 
+// PrependTransportSignalStored records digest as the last one for owner,
+// ahead of the digests the record holds, in one statement: for a writer that
+// could not read the record first (noteSignalStored). A digest that is the
+// last one already changes nothing. The list is not trimmed here; the next
+// SetTransportSignalStored trims it to signalStoredKeep.
+func (kdb *KeyDB) PrependTransportSignalStored(zone, owner, digest string) error {
+	if kdb == nil || kdb.DB == nil {
+		return fmt.Errorf("PrependTransportSignalStored: no database")
+	}
+	if digest == "" {
+		return fmt.Errorf("PrependTransportSignalStored: zone %s owner %s: no digest", zone, owner)
+	}
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+	_, err := kdb.DB.Exec(`
+INSERT INTO TransportSignalStored (zone, owner, digest, earlier, updated_at)
+VALUES (?, ?, ?, '', CURRENT_TIMESTAMP)
+ON CONFLICT(zone, owner) DO UPDATE SET
+	earlier = CASE WHEN digest = excluded.digest THEN earlier ELSE TRIM(digest || ' ' || earlier) END,
+	digest = excluded.digest,
+	updated_at = CURRENT_TIMESTAMP`,
+		dns.Fqdn(zone), core.CanonicalizeName(owner), digest)
+	if err != nil {
+		return fmt.Errorf("PrependTransportSignalStored: zone %s owner %s: %v", zone, owner, err)
+	}
+	return nil
+}
+
 // GetTransportSignalStored returns the recorded digests for owner, the last
 // first, and whether there is a record. No record is not an error.
 func (kdb *KeyDB) GetTransportSignalStored(zone, owner string) ([]string, bool, error) {
@@ -323,15 +362,21 @@ func (kdb *KeyDB) DeleteTransportSignalStored(zone string) error {
 }
 
 // refreshCarriesSignal reports whether a refresh carries the SVCB RRset rrs
-// at owner over from the published zone (CollectDynamicRRs): only when it is
-// the pass's own. A record that cannot be read carries nothing, as an
-// operator's RRset is not carried: the fresh data then holds what the zone
-// file says, and the pass decides the owner when it next runs.
+// at owner over from the published zone (CollectDynamicRRs): when it is the
+// pass's own, and when that cannot be told because the record cannot be
+// read. A signal the pass synthesized is in no zone file or transfer, so
+// not carrying it would take it out of the served zone for as long as the
+// record stays unreadable. An operator's RRset is not carried because the
+// fresh data holds their edit, and a carried copy never overrides that:
+// records the fresh data holds at the owner win (repopulateWorkingSetLocked
+// drops the carried copy). Only an RRset the operator removed from the file
+// comes back, until a refresh after the record reads again.
 func (zd *ZoneData) refreshCarriesSignal(owner string, rrs []dns.RR) bool {
 	own, err := zd.signalStoredByPass(owner, rrs)
 	if err != nil {
-		lgDns.Warn("CollectDynamicRRs: could not read the record of what the pass stored at the owner; its SVCB RRset is not carried over the refresh",
+		lgDns.Warn("CollectDynamicRRs: could not read the record of what the pass stored at the owner; its SVCB RRset is carried over the refresh, as the pass's own would be",
 			"zone", zd.ZoneName, "owner", owner, "error", err)
+		return true
 	}
 	return own
 }

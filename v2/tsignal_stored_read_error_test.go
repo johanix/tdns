@@ -1,8 +1,12 @@
 package tdns
 
 import (
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // A record of what the pass stored that cannot be read is not "no record"
@@ -142,5 +146,71 @@ func TestAnUnreadableRecordDoesNotWithdrawOrForget(t *testing.T) {
 	}
 	if getOwnerFrom(zd.publishedSnapshot(), owner) != nil {
 		t.Fatalf("once the record read again, the pass did not withdraw its signal: %v", svcbRecords(zd, owner))
+	}
+}
+
+// A refresh while the record cannot be read: the pass's signal, which is in
+// no zone file or transfer, is carried over as the pass's own would be, so
+// the served zone keeps it. Not carrying it, as for an operator's RRset,
+// took it out of the zone for as long as the record stayed unreadable.
+func TestARefreshCarriesThePassSignalWhileTheRecordCannotBeRead(t *testing.T) {
+	const z = "readerrc.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	zd, conf := storeThenRestart(t, z, kdb, "dot:50")
+
+	breakSignalRecordReads(t, kdb)
+	logs := captureSignalLog(t)
+	if err := zd.CreateTransportSignalRRs(conf); err != nil { // leaves the owner as it is
+		t.Fatal(err)
+	}
+	carried := false
+	for _, rs := range zd.CollectDynamicRRs(conf) {
+		if rs.RRtype == dns.TypeSVCB && core.EqualNames(rs.Name, owner) {
+			carried = len(rs.RRs) == 1 && strings.Contains(rs.RRs[0].String(), "dot:50")
+		}
+	}
+	if !carried {
+		t.Fatalf("the pass's signal is not carried over a refresh while its record cannot be read:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "carried over the refresh") {
+		t.Fatalf("no warning for the carry:\n%s", logs.String())
+	}
+}
+
+// A digest put ahead of the record by a writer that could not read it keeps
+// the digests the record holds; the same digest again changes nothing, and
+// an owner with no record gets one.
+func TestPrependTransportSignalStoredKeepsTheEarlierDigests(t *testing.T) {
+	const z = "prepend.sig.example."
+	kdb := newTestKeyDB(t)
+	read := func(owner string) []string {
+		t.Helper()
+		d, _, err := kdb.GetTransportSignalStored(z, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	if err := kdb.SetTransportSignalStored(z, "_dns.a."+z, []string{"b", "a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := kdb.PrependTransportSignalStored(z, "_dns.a."+z, "c"); err != nil {
+		t.Fatal(err)
+	}
+	if got := read("_dns.a." + z); !slices.Equal(got, []string{"c", "b", "a"}) {
+		t.Errorf("after prepending c to [b a]: %v", got)
+	}
+	if err := kdb.PrependTransportSignalStored(z, "_dns.a."+z, "c"); err != nil {
+		t.Fatal(err)
+	}
+	if got := read("_dns.a." + z); !slices.Equal(got, []string{"c", "b", "a"}) {
+		t.Errorf("after prepending the last digest again: %v", got)
+	}
+	if err := kdb.PrependTransportSignalStored(z, "_dns.b."+z, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if got := read("_dns.b." + z); !slices.Equal(got, []string{"x"}) {
+		t.Errorf("an owner with no record: %v", got)
 	}
 }
