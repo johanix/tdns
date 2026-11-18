@@ -1,6 +1,9 @@
 # TDNS Catalog Zone Support (RFC 9432)
 
 **Last Updated:** 2026-01-21
+**Amended 2026-11-12** (#1040): the member list of a catalog this server
+produces now survives a restart, and a producer needs no config groups; see
+the amendment at the end.
 
 ## Overview
 RFC 9432 catalog zone support is implemented in the tdns library. Catalog zones are a standard DNS mechanism for distributing zone membership information. This feature is available to all tdns applications (tdns-auth, tdns-imr, KRS, etc.).
@@ -1457,3 +1460,26 @@ Result: Warning logged, uses first signing group (`sign_edge_zsk`).
 8. **Dynamic config groups** - Allow config groups to be updated without restart
 9. **Zone removal cleanup** - Automatically clean up zone data when removed from catalog
 10. **Group inheritance** - Default meta/signing groups if not specified
+
+## Amendment 2026-11-12: a produced catalog's member list survives a restart (#1040)
+
+Design: `2026-11-12-dynamic-zone-templates.md`, section "Catalog zones".
+Changes against the text above:
+
+- The member list the catalog API edits (`CatalogMembership`) is rebuilt from
+  the catalog's own PTR and group TXT records when a catalog this server
+  originates is loaded, and after a refresh that changed it. Before, it lived
+  only in memory: after a restart the next `catalog zone add` or `delete`
+  rewrote the catalog from an empty list and dropped every earlier member.
+- A catalog defined in the config file writes its changes back to its own
+  `zonefile` (as `zone write` does), not to a copy under
+  `dynamiczones.zonedirectory`, and is not copied into the dynamic config
+  file. Before, a restart or `config reload-zones` served it from its file
+  without the changes.
+- `catalog.config-groups` is required only for a catalog with
+  `catalog-member-auto-create`. A catalog the server produces, or only reads,
+  needs no `catalog:` block; without one, every group is ordinary. (The check
+  quoted in "2. Validate Catalog Zone Option" above required config groups for every
+  catalog zone.) Member auto-configuration likewise checks a member's config
+  group against the local config groups only for a catalog that auto-creates;
+  a catalog that only reads is no longer put in ConfigError over one.

@@ -162,7 +162,8 @@ resignerengine:
 imrengine:
    active:             true                    # true | false, default is true
    root-hints:         /etc/tdns/root.hints    # optional, default is compiled-in hints
-   trust-anchor-file:  /etc/tdns/root.key      # not optional, no DNSSEC validation without this
+   trust-anchor-file:  /etc/tdns/root.key      # with no anchor set: the compiled-in IANA root anchor if
+                                               # root-hints is unset and . is not forwarded, else none
 
 apiserver:
    addresses:  [ 127.0.0.1:8989 ]
@@ -757,6 +758,13 @@ dynamiczones:
    dynamic:
       allowed:  [ ]              # e.g. [ secondary ] or [ secondary, primary ]
       storage:  memory           # "memory" or "persistent" - default: "memory"
+      # The template a zone add uses when the request names none, per zone
+      # type. Must be a template blessed with dynamiczones: true, of that
+      # type (see auth-templates.sample.yaml). The name is recorded with the
+      # zone, so changing the default later does not move existing zones.
+      # default-template:
+      #    secondary:  hub-secondary
+      #    primary:    dynamic-primary
 
 db:
    file:  /var/lib/tdns/tdns-auth.db

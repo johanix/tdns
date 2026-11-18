@@ -397,6 +397,11 @@ var StringToAppType = map[string]AppType{
 // ZoneStatus is the positive-lifecycle state of a zone, orthogonal to the
 // error registry (a zone can be ZoneStatusReady and still carry a RefreshError).
 // Minimal by design: a single value with a setter/getter, no registry.
+//
+// It reports progress, not whether the zone can be served: every refresh of a
+// loaded zone reads `loading` while the published snapshot is still being
+// served. Whether there is something to serve is Ready and the published
+// snapshot, which is what ZoneTransferOut admits on.
 type ZoneStatus uint8
 
 const (
@@ -476,6 +481,14 @@ const (
 	// the zone file with the journal (reconcileZoneFileWithJournal), and not
 	// when that reconcile fails to bring the journal's changes in.
 	PublishError
+	// TemplateWarning: a template-driven dynamic zone's template could not be
+	// expanded (missing, no longer blessed, wrong type, or its outbound lists
+	// do not validate). The zone keeps serving with the outbound settings it
+	// had (on a reload) or with none (at boot: no downstreams means no
+	// transfers out). Visibility-only. Cleared by the next expansion that
+	// succeeds. Its own category, not ConfigWarning, so that clearing it
+	// cannot wipe an unrelated config warning, nor the other way round.
+	TemplateWarning
 )
 
 var ErrorTypeToString = map[ErrorType]string{
@@ -491,6 +504,7 @@ var ErrorTypeToString = map[ErrorType]string{
 	ConfigWarning:           "config-warning",
 	FirstPublishError:       "first-publish",
 	PublishError:            "publish",
+	TemplateWarning:         "template-warning",
 }
 
 // errorTypeReportOrder defines the deterministic order in which the
@@ -510,6 +524,7 @@ var errorTypeReportOrder = []ErrorType{
 	DnssecPolicyWarning,
 	RolloverPolicyWarning,
 	DelegationSyncWarning,
+	TemplateWarning,
 	ConfigWarning,
 }
 
@@ -710,6 +725,21 @@ outer:
 			}
 		}
 		return true
+	}
+	return false
+}
+
+// blocksSerialBump reports whether the zone's errors refuse a serial bump.
+// Any error does, as before, except a TemplateWarning: that one says only
+// that the template did not expand on a reload, the zone keeping its outbound
+// settings and serving as before.
+func (zd *ZoneData) blocksSerialBump() bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	for t := range zd.Errors {
+		if t != TemplateWarning {
+			return true
+		}
 	}
 	return false
 }

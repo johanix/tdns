@@ -467,14 +467,40 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 		return zd.refuseTransfer(w, r)
 	}
 
-	if zd.GetStatus() != ZoneStatusReady {
-		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone status %s", zone, ZoneStatusToString[zd.GetStatus()])
+	// Admission is decided on Ready, the zone's "holds a servable published
+	// snapshot" flag, and not on Status. Status is the refresh engine's
+	// progress marker and reads `loading` for the whole of EVERY refresh --
+	// including a refresh of a zone that is already loaded and still answering
+	// queries from the snapshot it published. Refusing on it turned each
+	// refresh into a window in which a downstream that asked was refused
+	// although we could hand it the very zone we serve (#1016).
+	//
+	// What stays refused is a zone with nothing to offer yet (first load, a
+	// withheld zone: Ready is false) and one in a service-impacting error, the
+	// state whose queries are answered SERVFAIL. RefreshError is not one: the
+	// published copy is still the zone's.
+	//
+	// Read together under one lock acquisition: Ready, Status, the store and the
+	// error registry are all written under zd.mu, the store by the refresh's own
+	// publish, so separate reads could mix two moments of the zone.
+	zd.mu.Lock()
+	ready, status, store := zd.Ready, zd.Status, zd.ZoneStore
+	inError := zd.hasServiceImpactingErrorLocked()
+	zd.mu.Unlock()
+
+	if !ready {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone status %s (not ready: nothing servable published yet)",
+			zone, ZoneStatusToString[status])
+		return zd.refuseTransfer(w, r)
+	}
+	if inError {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone is in a service-impacting error", zone)
 		return zd.refuseTransfer(w, r)
 	}
 
-	if zd.ZoneStore != MapZone {
+	if store != MapZone {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone store %s not supported",
-			zone, ZoneStoreToString[zd.ZoneStore])
+			zone, ZoneStoreToString[store])
 		return zd.refuseTransfer(w, r)
 	}
 
@@ -520,6 +546,11 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 		RRSIGs: soaRRset.RRSIGs,
 	}
 
+	// Said at the default level, because it is the one line that shows a
+	// downstream was served in the middle of a refresh rather than refused.
+	if status == ZoneStatusLoading {
+		zd.Logger.Printf("ZoneTransferOut: %s: a refresh is in progress; serving the published copy, serial %d", zone, snap.Serial)
+	}
 	if zd.Verbose {
 		zd.Logger.Printf("ZoneTransferOut: Will try to serve zone %s", zone)
 	}
@@ -788,10 +819,14 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 	zp := dns.NewZoneParser(r, dns.Fqdn(zd.ZoneName), filename)
 	zp.SetIncludeAllowed(true)
 
-	// nil when the zone means its doubled names (allow-doubled-suffix), and a
-	// nil report checks nothing.
+	// A primary's zone file is operator-authored input, so catch likely missing
+	// trailing dots there. A secondary's saved file is a copy of data accepted
+	// from its primary; rejecting a name here would make the copy unusable on
+	// restart even though the secondary did not author it. The zone option also
+	// opts a primary out when it intentionally uses doubled names.
+	// A nil report checks nothing.
 	var doubled *DoubledSuffixReport
-	if !zd.Options[OptAllowDoubledSuffix] {
+	if zd.ZoneType != Secondary && !zd.Options[OptAllowDoubledSuffix] {
 		doubled = NewDoubledSuffixReport(zd.ZoneName)
 	}
 

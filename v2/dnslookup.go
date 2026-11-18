@@ -323,6 +323,48 @@ func ChildGlueRRsToAddrs(v4glue, v6glue []dns.RR) ([]string, error) {
 	return addrs, nil
 }
 
+// authServerAddr is ns as AuthDNSQuery dials it: ns itself when it carries a
+// port, with port 53 added when it does not. The port is told from the address
+// by its form (net.SplitHostPort), not by how it ends: an address that ends in
+// ":53" is not for that reason one with a port (an IPv6 address can end so),
+// and one with another port has one.
+func authServerAddr(ns string) string {
+	if _, _, err := net.SplitHostPort(ns); err == nil {
+		return ns
+	}
+	return net.JoinHostPort(ns, "53")
+}
+
+// authExchange asks the server at ns, a host and a port, for m over UDP, and
+// over TCP when the UDP reply has TC set (RFC 1035 section 4.2.1, RFC 7766
+// section 3). A truncated reply is not an answer: what it leaves out says
+// nothing of what the server serves, and a large RRset, a post-quantum DNSKEY
+// RRset above all, goes past the buffer m advertises. Nothing of it is used:
+// not the records it may carry, and not the lack of them.
+//
+// The result is a whole reply or an error, never both. A reply that did not
+// unpack comes back from the library as far as it did, and that part is no
+// answer. An error means the server has not answered: nothing came back, what
+// came did not read, there was no TCP to ask over, or the reply was truncated
+// over TCP as well, where TC has no meaning.
+func authExchange(m *dns.Msg, ns string) (*dns.Msg, error) {
+	r, err := dns.Exchange(m, ns)
+	if r != nil && r.Truncated {
+		r, _, err = (&dns.Client{Net: "tcp"}).Exchange(m, ns)
+		switch {
+		case err != nil:
+			return nil, fmt.Errorf("reply truncated, and over TCP: %w", err)
+		case r == nil || r.Truncated:
+			return nil, errors.New("reply truncated, over TCP as well")
+		}
+		return r, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
 // XXX: Do we still use this anywhere?
 func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 	rrtype uint16, verbose bool) (*core.RRset, int, error) {
@@ -339,17 +381,16 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string,
 
 	m := authQueryMsg(qname, rrtype)
 	for _, ns := range nameservers {
-		if ns[len(ns)-3:] != ":53" {
-			ns = net.JoinHostPort(ns, "53")
-		}
+		ns = authServerAddr(ns)
 		if verbose {
 			// lg.Printf("AuthDNSQuery: using nameserver %s for <%s, %s> query\n",
 			// 	ns, qname, dns.TypeToString[rrtype])
 		}
-		r, err := dns.Exchange(m, ns)
-		// r, _, err := c.Exchange(m, ns)
-		if err != nil && verbose {
-			lg.Printf("AuthDNSQuery: Error from dns.Exchange: %v", err)
+		r, err := authExchange(m, ns)
+		if err != nil {
+			if verbose {
+				lg.Printf("AuthDNSQuery: no reply from %s: %v", ns, err)
+			}
 			continue // go to next server
 		}
 
@@ -407,17 +448,16 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 
 	m := authQueryMsg(qname, qtype)
 	for _, ns := range nameservers {
-		if ns[len(ns)-3:] != ":53" {
-			ns = net.JoinHostPort(ns, "53")
-		}
+		ns = authServerAddr(ns)
 		if verbose {
 			lg.Printf("AuthDNSQuery: using nameserver %s for <%s, %s> query\n",
 				ns, qname, dns.TypeToString[qtype])
 		}
-		r, err := dns.Exchange(m, ns)
-		// r, _, err := c.Exchange(m, ns)
-		if err != nil && verbose {
-			lg.Printf("AuthDNSQuery: Error from dns.Exchange: %v", err)
+		r, err := authExchange(m, ns)
+		if err != nil {
+			if verbose {
+				lg.Printf("AuthDNSQuery: no reply from %s: %v", ns, err)
+			}
 			continue // go to next server
 		}
 

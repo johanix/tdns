@@ -135,6 +135,9 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	if err := config.DynamicZones.Validate(); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
+	if err := config.DynamicZones.ValidateDefaultTemplates(config.Templates); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
 
 	// The service.transport rules the daemon loader applies (ParseConfig).
 	if _, err := validateTransportSignal(config.Service.Transport, config.Listeners.Ports, config.Listeners.Addresses); err != nil {

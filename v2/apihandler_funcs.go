@@ -342,6 +342,12 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 					"zone", tp.Keyname, "keyid", tp.Keyid, "src", tp.Src, "from", r.RemoteAddr)
 				tp.Trusted = false
 			}
+			// A tombstone is the child's own word, given in a trusted UPDATE
+			// (truststore_tombstone.go). An operator's delete through here
+			// leaves none, whatever Src the client sent.
+			if tp.SubCommand == "delete" {
+				tp.Src = ""
+			}
 			resp, err = kdb.Sig0TrustMgmt(tx, tp)
 			if err != nil {
 				lgApi.Error("Sig0TrustMgmt failed", "err", err)
@@ -391,6 +397,9 @@ func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *ht
 			resp.Msg = fmt.Sprintf("%s: I'm happy, but send more cookies", Globals.App.Name)
 			if conf.DnssecValidationNotEnforced() {
 				resp.Warnings = append(resp.Warnings, DnssecValidationNotEnforcedWarning)
+				if w := conf.daneZonesWarning(); w != "" {
+					resp.Warnings = append(resp.Warnings, w)
+				}
 			}
 
 		case "stop":
