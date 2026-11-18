@@ -286,9 +286,11 @@ func TestReceivedSignalIsWhatTheServerSaid(t *testing.T) {
 
 // expectedShares mirrors candidateTransports: over many names, the first
 // picks fall in the proportions it states. #854's example signal, and the udp
-// weight as a cap on the share Do53 gets (design 2026-11-14, section 3;
-// CodeRabbit on #1118): udp:0 sends no first pick over Do53, and a cap above
-// what the encrypted weights leave of 100 changes nothing.
+// weight as a cap on the share Do53 gets (design 2026-11-14, sections 2 and 3;
+// CodeRabbit on #1118): udp:0 sends no first pick over Do53, a cap holds on
+// the share after the weights are normalized (udp:20,dot:60 is 20/80, not
+// 25/75), and a cap above what the encrypted weights leave of 100 changes
+// nothing.
 func TestExpectedSharesMatchSelection(t *testing.T) {
 	example := map[string]uint8{"do53": 100, "dot": 10, "doq": 10, "doh": 1}
 	for _, tc := range []struct {
@@ -301,7 +303,8 @@ func TestExpectedSharesMatchSelection(t *testing.T) {
 		{example, edns0.PrivacyStrict, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDoQ: 50}},
 		{map[string]uint8{"udp": 0, "dot": 50}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDoT: 100}},
 		{map[string]uint8{"do53": 0, "dot": 10}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDoT: 100}},
-		{map[string]uint8{"udp": 20, "dot": 60}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDo53: 25, core.TransportDoT: 75}},
+		{map[string]uint8{"udp": 20, "dot": 60}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDo53: 20, core.TransportDoT: 80}},
+		{map[string]uint8{"udp": 30, "dot": 50}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDo53: 30, core.TransportDoT: 70}},
 		{map[string]uint8{"udp": 100, "dot": 50}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDo53: 50, core.TransportDoT: 50}},
 		{map[string]uint8{"dot": 50}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDo53: 50, core.TransportDoT: 50}},
 	} {

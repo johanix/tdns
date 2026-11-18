@@ -1500,6 +1500,10 @@ func candidateTransports(server *cache.AuthServer, qname string, privacy edns0.P
 	return out
 }
 
+// poolScale is the factor transportPool scales its weights by without
+// privacy, so that a Do53 weight cut to the udp cap keeps its precision.
+const poolScale = 100
+
 // poolEntry is a transport and its weight in the draw candidateTransports
 // makes.
 type poolEntry struct {
@@ -1515,12 +1519,18 @@ type poolEntry struct {
 //
 // Each encrypted transport with a weight above 1 is in the pool with its
 // weight. Without privacy, Do53 is in it with what the encrypted weights leave
-// of 100, capped by the signal's udp weight: a udp weight limits the share of
-// queries the resolver sends over UDP by its own choice (design 2026-11-14,
-// section 3), so udp:0 sends none that way. A signal that names no udp weight
-// has 100 by the absence default (core.ApplyTransportDefaults), which caps
-// nothing. Do53 stays the last resort all the same (candidateTransports).
-// With privacy (opportunistic or strict) only the encrypted transports are.
+// of 100, cut so that its share of the draw is no more than the signal's udp
+// weight: a udp weight caps the share of queries the resolver sends over UDP
+// by its own choice (design 2026-11-14, sections 2 and 3). The cap is on the
+// share, not the weight: udp:20,dot:60 gives UDP 20% of first picks and DoT
+// 80%, not 20 parts in 80. udp:0 sends none that way. A signal that names no
+// udp weight has 100 by the absence default (core.ApplyTransportDefaults),
+// which caps nothing. Do53 stays the last resort all the same
+// (candidateTransports). With privacy (opportunistic or strict) only the
+// encrypted transports are.
+//
+// Without privacy the weights are scaled by poolScale, so that a Do53 weight
+// cut to a share rounds down, never above the cap.
 func transportPool(transports []core.Transport, weights map[core.Transport]uint8, privacy edns0.PrivacyLevel) []poolEntry {
 	seen := map[core.Transport]bool{}
 	var encrypted []poolEntry
@@ -1555,9 +1565,16 @@ func transportPool(transports []core.Transport, weights map[core.Transport]uint8
 		return encrypted
 	}
 	var pool []poolEntry
-	do53Share := 100 - encSum
-	if w, ok := weights[core.TransportDo53]; ok && int(w) < do53Share {
-		do53Share = int(w)
+	do53Share := (100 - encSum) * poolScale
+	if c, ok := weights[core.TransportDo53]; ok && c < 100 {
+		// Do53's share of the draw is do53/(do53+encSum); at most c/100
+		// means do53 <= c*encSum/(100-c).
+		if capped := int(c) * encSum * poolScale / (100 - int(c)); capped < do53Share {
+			do53Share = capped
+		}
+	}
+	for i := range encrypted {
+		encrypted[i].w *= poolScale
 	}
 	if do53Share < 0 {
 		do53Share = 0
@@ -2100,7 +2117,10 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 
 			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
 			if dnskeyBypass {
-				dnskeyAttempted[dnskeyTried(dnskeyKey, ep, effTransport)] = true
+				// Under the transport tryServer dialed: it reads the
+				// preference again, and a signal update in between may
+				// have changed it from effTransport.
+				dnskeyAttempted[dnskeyTried(dnskeyKey, ep, wireTransport)] = true
 			}
 			// The endpoint tried: the one tryServer dialed, or the server's
 			// own address when it did not get as far as choosing one, kept
