@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -213,6 +214,13 @@ func TestPrependTransportSignalStoredKeepsTheEarlierDigests(t *testing.T) {
 	if got := read("_dns.b." + z); !slices.Equal(got, []string{"x"}) {
 		t.Errorf("an owner with no record: %v", got)
 	}
+	// A digest among the earlier ones moves to the front, once.
+	if err := kdb.PrependTransportSignalStored(z, "_dns.a."+z, "b"); err != nil {
+		t.Fatal(err)
+	}
+	if got := read("_dns.a." + z); !slices.Equal(got, []string{"b", "c", "a"}) {
+		t.Errorf("after prepending b to [c b a]: %v, want [b c a]", got)
+	}
 }
 
 // A record of the pass's signal made while the earlier digests could not be
@@ -244,5 +252,162 @@ func TestASecondRecordAfterAFailedReadKeepsTheEarlierDigests(t *testing.T) {
 	}
 	if want := []string{digest, "b", "a"}; !slices.Equal(got, want) {
 		t.Errorf("after a record with the read broken and one after it: %v, want %v", got, want)
+	}
+}
+
+// The pass stores its signal while the record cannot be read and the KeyDB
+// takes nothing: with the earlier column missing the prepend fails too.
+// Once the record reads again, the pass's next run still knows the signal
+// for its own and applies the changed configuration, rather than leaving it
+// as the operator's; the record then holds the new digest ahead of the one
+// stored while the KeyDB took nothing.
+func TestASignalStoredWhileTheKeyDBTookNothingIsStillThePasss(t *testing.T) {
+	const z = "unrec.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	zd, conf := signalTestZone(t, z, z+strings.ReplaceAll(readErrZoneBody, "%[1]s", z), "127.0.0.1:53")
+	zd.KeyDB = kdb
+	conf.Service.Identities = []string{"ns1." + z}
+	conf.Service.Transport.Signal = "dot:50"
+
+	mend := breakSignalRecordReads(t, kdb)
+	logs := captureSignalLog(t)
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	first := svcbRecords(zd, owner)
+	if len(first) != 1 || !strings.Contains(first[0].String(), "dot:50") {
+		t.Fatalf("the pass did not store its signal: %v", first)
+	}
+	if n := signalRecordRows(t, kdb, z, owner); n != 0 {
+		t.Fatalf("setup: the KeyDB took a record (%d rows) with the column missing", n)
+	}
+
+	mend()
+	conf.Service.Transport.Signal = "dot:20"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logs.String(), "leaving the operator's") {
+		t.Fatalf("the pass took its own signal for the operator's once the record read again:\n%s", logs.String())
+	}
+	second := svcbRecords(zd, owner)
+	if len(second) != 1 || !strings.Contains(second[0].String(), "dot:20") {
+		t.Fatalf("the pass did not replace its own signal: %v", second)
+	}
+	got, _, err := kdb.GetTransportSignalStored(z, owner)
+	if want := []string{signalDigest(second), signalDigest(first)}; err != nil || !slices.Equal(got, want) {
+		t.Errorf("the record after the second run: %v %v, want %v", got, err, want)
+	}
+}
+
+// noteSignalStored in each of its four outcomes: the read of the earlier
+// digests ok or failed, times the write (the replace after a read, the
+// prepend after a failed one) ok or failed. Each case checks what is left in
+// memory, in the record and among the digests the KeyDB did not take, and
+// whether the signal is then the pass's. A second record, made with
+// everything working again, writes the new digest ahead of every earlier
+// one in all four.
+func TestNoteSignalStoredInEachOutcome(t *testing.T) {
+	const z = "outcomes.sig.example."
+	const owner = "_dns.ns1." + z
+	rrs := mustRRs(t, owner+` 300 IN SVCB 1 . alpn=dot`)
+	d := signalDigest(rrs)
+	for _, tc := range []struct {
+		name                  string
+		readFails, writeFails bool
+		memory, record        []string // nil memory: no in-memory record
+		unrecorded            []string
+		owned                 string // "yes", or "unknown" while the read fails
+	}{
+		{"read ok, write ok", false, false, []string{d, "b", "a"}, []string{d, "b", "a"}, nil, "yes"},
+		{"read ok, write fails", false, true, []string{d, "b", "a"}, []string{"b", "a"}, nil, "yes"},
+		{"read fails, prepend ok", true, false, nil, []string{d, "b", "a"}, nil, "unknown"},
+		{"read fails, prepend fails", true, true, nil, []string{"b", "a"}, []string{d}, "yes"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kdb := newTestKeyDB(t)
+			if err := kdb.SetTransportSignalStored(z, owner, []string{"b", "a"}); err != nil {
+				t.Fatal(err)
+			}
+			zd := &ZoneData{ZoneName: z, KeyDB: kdb}
+			captureSignalLog(t)
+			if tc.readFails {
+				saved := signalStoredReadHook
+				signalStoredReadHook = func(string, string) error { return errors.New("read refused by the test") }
+				t.Cleanup(func() { signalStoredReadHook = saved })
+			}
+			if tc.writeFails {
+				for _, ev := range []string{"INSERT", "UPDATE"} {
+					if _, err := kdb.DB.Exec(`CREATE TRIGGER refuse_` + ev + ` BEFORE ` + ev + ` ON TransportSignalStored
+BEGIN SELECT RAISE(ABORT, 'write refused by the test'); END`); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			zd.noteSignalStored(owner, rrs)
+
+			zd.signalStoredMu.Lock()
+			memory, inMemory := zd.signalStored[owner]
+			unrecorded := append([]string(nil), zd.signalUnrecorded[owner]...)
+			zd.signalStoredMu.Unlock()
+			if (tc.memory == nil) != !inMemory || !slices.Equal(memory, tc.memory) {
+				t.Errorf("memory %v (present %v), want %v", memory, inMemory, tc.memory)
+			}
+			if !slices.Equal(unrecorded, tc.unrecorded) {
+				t.Errorf("unrecorded %v, want %v", unrecorded, tc.unrecorded)
+			}
+			if got, _, err := kdb.GetTransportSignalStored(z, owner); err != nil || !slices.Equal(got, tc.record) {
+				t.Errorf("record %v %v, want %v", got, err, tc.record)
+			}
+			own, err := zd.signalStoredByPass(owner, rrs)
+			switch tc.owned {
+			case "yes":
+				if err != nil || !own {
+					t.Errorf("the signal is the pass's: %v %v, want yes", own, err)
+				}
+			case "unknown":
+				if err == nil {
+					t.Errorf("the signal is the pass's: %v with no error, want an unknown answer while the read fails", own)
+				}
+			}
+
+			// Everything works again: the next record keeps every digest.
+			signalStoredReadHook = nil
+			if tc.writeFails {
+				for _, ev := range []string{"INSERT", "UPDATE"} {
+					if _, err := kdb.DB.Exec(`DROP TRIGGER refuse_` + ev); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			zd.noteSignalStored(owner, rrs)
+			if got, _, err := kdb.GetTransportSignalStored(z, owner); err != nil || !slices.Equal(got, []string{d, "b", "a"}) {
+				t.Errorf("record after the next store %v %v, want %v", got, err, []string{d, "b", "a"})
+			}
+			if own, err := zd.signalStoredByPass(owner, rrs); err != nil || !own {
+				t.Errorf("after the next store the signal is the pass's: %v %v, want yes", own, err)
+			}
+		})
+	}
+}
+
+// The list a record writes holds each digest once: a duplicate already in
+// the KeyDB's record would otherwise take one of the signalStoredKeep places
+// from a distinct digest that a zone file may still hold.
+func TestNoteSignalStoredWritesEachDigestOnce(t *testing.T) {
+	const z = "dedupe.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	if err := kdb.SetTransportSignalStored(z, owner, []string{"x", "a", "x"}); err != nil {
+		t.Fatal(err)
+	}
+	zd := &ZoneData{ZoneName: z, KeyDB: kdb}
+	rrs := mustRRs(t, owner+` 300 IN SVCB 1 . alpn=dot`)
+	zd.noteSignalStored(owner, rrs)
+	got, _, err := kdb.GetTransportSignalStored(z, owner)
+	if want := []string{signalDigest(rrs), "x", "a"}; err != nil || !slices.Equal(got, want) {
+		t.Errorf("record %v %v, want %v", got, err, want)
 	}
 }
