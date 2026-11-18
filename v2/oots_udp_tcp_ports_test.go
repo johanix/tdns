@@ -112,14 +112,14 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	applyTransportMapWithPorts(s, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53: uint16(closed)})
 	m := new(dns.Msg)
 	m.SetQuestion("www.example.", dns.TypeA)
-	_, _, _, dial, err := imr.tryServer(context.Background(), s, addr, core.TransportDo53, m, "www.example.", dns.TypeA, false, cache.ClassNone)
+	_, _, _, dial, err := imr.tryServer(context.Background(), s, nil, addr, core.TransportDo53, m, "www.example.", dns.TypeA, false, cache.ClassNone)
 	if err == nil {
 		t.Fatalf("tryServer to the closed port %d succeeded", closed)
 	}
 	endpoint := net.JoinHostPort(addr, ps)
 	// The caller books the rcode outcome by the endpoint tryServer returns,
 	// the one it tried.
-	if got := dial.dialAddr(); got != endpoint || dial.lamenessPort() != uint16(closed) {
+	if got := dial.dialAddr(); got != endpoint || dial.keyPort != uint16(closed) {
 		t.Errorf("tryServer returned %+v (dial %q), want %s", dial, got, endpoint)
 	}
 	if s.IsEndpointAddrAvailable(addr, uint16(closed), core.TransportDo53) {
@@ -149,7 +149,7 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	if !hasDo53() {
 		t.Error("prioritizeServers does not offer the fallback on port 53 while the signalled endpoint is backed off")
 	}
-	if a, p, ok := imr.attemptKey(context.Background(), s, addr, core.TransportDo53); !ok || a != addr || p != 0 {
+	if a, p, ok := imr.attemptKey(context.Background(), s, nil, addr, core.TransportDo53, false); !ok || a != addr || p != 0 {
 		t.Errorf("the attempt goes to %s port %d (%v), want %s on port 53", a, p, ok, addr)
 	}
 	// The signal drops the port: the fallback on 53 is offered.
@@ -159,7 +159,7 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	}
 	// Another port starts clean.
 	applyTransportMapWithPorts(s, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53: uint16(closed) ^ 1})
-	if _, p, _ := imr.attemptKey(context.Background(), s, addr, core.TransportDo53); p != uint16(closed)^1 {
+	if _, p, _ := imr.attemptKey(context.Background(), s, nil, addr, core.TransportDo53, false); p != uint16(closed)^1 {
 		t.Errorf("the attempt goes to port %d, want the changed port %d", p, uint16(closed)^1)
 	}
 	if !hasDo53() {
@@ -257,11 +257,11 @@ func TestDNSKEYAttemptKeyIsTheEndpoint(t *testing.T) {
 	applyTransportMapWithPorts(b, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53TCP: 5355})
 	c := cache.NewAuthServer("ns3.example.")
 	applyTransportMapWithPorts(c, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53TCP: 5354})
-	ka := imr.dnskeyAttemptKey(ctx, a, addr, core.TransportDo53TCP)
-	if ka == imr.dnskeyAttemptKey(ctx, b, addr, core.TransportDo53TCP) {
+	ka := imr.dnskeyAttemptKey(ctx, a, nil, addr, core.TransportDo53TCP)
+	if ka == imr.dnskeyAttemptKey(ctx, b, nil, addr, core.TransportDo53TCP) {
 		t.Errorf("one key for two tcp endpoints: %v", ka)
 	}
-	if kc := imr.dnskeyAttemptKey(ctx, c, addr, core.TransportDo53TCP); ka != kc {
+	if kc := imr.dnskeyAttemptKey(ctx, c, nil, addr, core.TransportDo53TCP); ka != kc {
 		t.Errorf("two keys for one endpoint: %v and %v", ka, kc)
 	}
 }
