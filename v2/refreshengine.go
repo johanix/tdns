@@ -130,6 +130,19 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefresher, conf *Config,
 	refreshCounters *core.NameMap[*RefreshCounter]) (bool, error) {
 
+	// A config-bearing refresher is the config as it stands, so the policy name
+	// the first bind goes by is its, not what an earlier attempt stored: a zone
+	// whose first load is still pending when a reload reaches it keeps the merge
+	// of the first refresher (the merge runs only while ZoneType is 0), and the
+	// name a reload has dropped or changed would be looked up in the reload's
+	// policies, where it is not. Stored, so that the ticker's retries, which
+	// carry no refresher, go on with the name the config has now.
+	if zr.ConfigUpdate {
+		zd.mu.Lock()
+		zd.DnssecPolicyName = zr.DnssecPolicy
+		zd.mu.Unlock()
+	}
+
 	seen := zd.refreshRun.confirmations.Load()
 	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
 	if err != nil {

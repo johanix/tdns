@@ -1075,3 +1075,100 @@ func TestAReloadsRecordOfAZoneThatWasRemovedDoesNotRegisterItAgain(t *testing.T)
 		}
 	}
 }
+
+// The first load of a zone that a reload reaches while its first load is still
+// pending takes the policy name from that reload's config, not from the first
+// attempt's. A secondary whose transfer fails has no copy to adopt the first
+// time; the reload, which drops that policy and names another, comes after a
+// copy has been persisted, and the retry adopts it. The name the first attempt
+// stored is not in the reload's policies, and the zone would be quarantined for
+// a policy "that does not exist" with the adopted copy neither bound nor
+// signed. The ticker's retries carry no refresher and go on with the stored
+// name, so the reload's name is stored too.
+func TestAFirstLoadStillPendingTakesThePolicyOfTheReloadThatReachesIt(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	conf, dir := persistentConf(t, kdb)
+	kdb = Conf.Internal.KeyDB
+	conf.Internal.KeyDB = kdb
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 2)
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	const month = 30 * 86400
+	oldPol := named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "old")
+	newPol := named(validFor(kskzsk(dns.ED25519, dns.ED25519), 2*month), "new")
+	withLivePolicies(t, map[string]DnssecPolicy{}) // the running config has neither
+	t.Cleanup(func() {
+		if z, ok := Zones.Get("example."); ok {
+			z.stopPublisher()
+		}
+		Zones.Remove("example.")
+	})
+	runRefreshEngine(t, conf)
+
+	refresher := func(policy string, pols map[string]DnssecPolicy) ZoneRefresher {
+		return ZoneRefresher{
+			Name:           "example.",
+			ZoneType:       Secondary,
+			ZoneStore:      MapZone,
+			Primaries:      []PeerConf{{Addr: "127.0.0.1:1"}}, // nothing listening
+			ConfigUpdate:   true,
+			Options:        map[ZoneOption]bool{OptApiManagedZone: true, OptInlineSigning: true},
+			DnssecPolicy:   policy,
+			DnssecPolicies: pols,
+		}
+	}
+	// send is a refresher for the zone as it is waiting for its first load,
+	// which the engine answers when its load fails.
+	send := func(policy string, pols map[string]DnssecPolicy) RefresherResponse {
+		t.Helper()
+		zr := refresher(policy, pols)
+		zr.Wait, zr.Response = true, make(chan RefresherResponse, 1)
+		conf.Internal.RefreshZoneCh <- zr
+		select {
+		case resp := <-zr.Response:
+			return resp
+		case <-time.After(10 * time.Second):
+			t.Fatal("the refresher was not answered")
+		}
+		return RefresherResponse{}
+	}
+
+	// The first load, with no copy on disk and no primary: nothing is adopted,
+	// nothing is bound, and the name "old" is what the zone has stored. The
+	// engine does not answer the load of a zone it creates; the failure is the
+	// sign that it is through.
+	conf.Internal.RefreshZoneCh <- refresher("old", map[string]DnssecPolicy{"old": oldPol})
+	var zd *ZoneData
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if z, ok := Zones.Get("example."); ok && z.HasError(RefreshError) {
+			zd = z
+			break
+		}
+	}
+	if zd == nil || !zd.FirstZoneLoad || zd.publishedSnapshot() != nil {
+		t.Fatal("the zone is not waiting for its first load; the test has lost its point")
+	}
+
+	// A copy is persisted, and a reload names "new" and no longer defines "old".
+	if err := os.WriteFile(filepath.Join(dir, "example.zone"), []byte(s2Zone), 0644); err != nil {
+		t.Fatalf("write zone file: %v", err)
+	}
+	if resp := send("new", map[string]DnssecPolicy{"new": newPol}); !resp.Error {
+		t.Fatal("the transfer succeeded; the test has lost its point")
+	}
+
+	if zd.publishedSnapshot() == nil {
+		t.Fatal("the persisted copy was not adopted; the test has lost its point")
+	}
+	if zd.HasError(DnssecError) {
+		zd.mu.Lock()
+		msg := zd.Errors[DnssecError].Msg
+		zd.mu.Unlock()
+		t.Errorf("the zone is quarantined after adopting its persisted copy: %s", msg)
+	}
+	if n, p, _ := policyState(zd); n != "new" || p == nil || p.SigValidity.Default != 2*month {
+		t.Errorf("after the first load: %q bound with signature validity %d; want %q bound to the reload's definition", n, validityOf(p), "new")
+	}
+	if len(keytagsOf(servedRRset(t, zd, "example.", dns.TypeSOA).RRSIGs)) == 0 {
+		t.Error("the SOA is unsigned after the first load")
+	}
+}
