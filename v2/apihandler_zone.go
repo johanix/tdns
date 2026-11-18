@@ -378,6 +378,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			resp.Status = "accepted"
 			resp.Zone = dns.Fqdn(zp.Zone)
 			resp.Msg = msg
+			resp.Warnings = Conf.zoneDaneWarnings(lgApi, zp.Zone)
 
 		case "delete":
 			msg, err := Conf.RemoveDynamicZone(zp.Zone)
@@ -408,6 +409,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 			resp.Status = "accepted"
 			resp.Msg = msg
+			resp.Warnings = Conf.zoneDaneWarnings(lgApi, zp.Zone)
 
 		case "list-dynamic":
 			// The persistable dynamic subset (catalog members + API-managed),

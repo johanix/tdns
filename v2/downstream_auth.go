@@ -271,7 +271,10 @@ func verifyClientCertDANE(ctx context.Context, leaf *x509.Certificate, name stri
 	if imr == nil {
 		return fmt.Errorf("tls-dane requires the built-in IMR")
 	}
-	rrset, err := lookupTLSAValidatedIMR(ctx, imr, name, daneClientTLSAPort)
+	// An unvalidated TLSA (lab mode) is logged inside the lookup, and the
+	// zone's tls-dane downstreams are named at config load
+	// (daneDownstreamWarnings); the result stays the same.
+	rrset, _, err := lookupTLSAValidatedIMR(ctx, imr, name, daneClientTLSAPort)
 	if err != nil {
 		return err
 	}

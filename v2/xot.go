@@ -169,6 +169,15 @@ const daneLookupTimeout = 5 * time.Second
 // caller stays on plain TCP/Do53 (a nil *tls.Config is the Do53 signal
 // throughout the transfer path).
 func (conf *Config) ClientTLSConfigForPeer(peer PeerConf) (*tls.Config, error) {
+	return conf.clientTLSConfigForPeer(peer, nil)
+}
+
+// clientTLSConfigForPeer is ClientTLSConfigForPeer with a hook for DANE:
+// onUnvalidatedTLSA (if not nil) is called during the handshake when the
+// TLSA record was taken without DNSSEC validation (lab mode, see
+// lookupTLSAValidatedIMR). The serial probe uses it to show that in `zone
+// desc`.
+func (conf *Config) clientTLSConfigForPeer(peer PeerConf, onUnvalidatedTLSA func()) (*tls.Config, error) {
 	if !peerUsesDoT(peer) {
 		return nil, nil
 	}
@@ -224,7 +233,7 @@ func (conf *Config) ClientTLSConfigForPeer(peer PeerConf) (*tls.Config, error) {
 		name, lookupPort := serverName, port
 		tlsCfg.InsecureSkipVerify = true // DANE-EE replaces PKIX; VerifyConnection is the gate
 		tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
-			return conf.verifyPeerCertDANE(cs, name, lookupPort)
+			return conf.verifyPeerCertDANE(cs, name, lookupPort, onUnvalidatedTLSA)
 		}
 	case TLSAuthPKIX:
 		if peer.CAFile != "" {
@@ -263,15 +272,19 @@ func verifyPeerCertPins(cs tls.ConnectionState, pins []string) error {
 
 // verifyPeerCertDANE is the VerifyConnection gate for tls-auth: dane: the
 // leaf certificate must match a TLSA record at _<port>._tcp.<name> obtained
-// through a DNSSEC-validated lookup.
-func (conf *Config) verifyPeerCertDANE(cs tls.ConnectionState, name, port string) error {
+// through a DNSSEC-validated lookup. onUnvalidatedTLSA (if not nil) is called
+// when the lookup took a TLSA RRset that is not DNSSEC-secure (lab mode).
+func (conf *Config) verifyPeerCertDANE(cs tls.ConnectionState, name, port string, onUnvalidatedTLSA func()) error {
 	if len(cs.PeerCertificates) == 0 {
 		return fmt.Errorf("xot: peer presented no certificate")
 	}
 	leaf := cs.PeerCertificates[0]
-	rrset, err := conf.lookupTLSAValidated(name, port)
+	rrset, unvalidated, err := conf.lookupTLSAValidated(name, port)
 	if err != nil {
 		return err
+	}
+	if unvalidated && onUnvalidatedTLSA != nil {
+		onUnvalidatedTLSA()
 	}
 	for _, rr := range rrset.RRs {
 		tlsa, ok := rr.(*dns.TLSA)
@@ -315,8 +328,9 @@ func ServerTLSConfigForDoT(conf *Config, cert *tls.Certificate, requestClientCer
 // direct TLSA answers) is consulted first; otherwise the RRset is fetched and
 // validated through the in-process IMR. The imr.RequireDnssecValidation
 // lab-mode escape hatch (config: imrengine.require-dnssec-validation) is
-// honored, with a loud warning, to match how the rest of tdns treats TLSA.
-func (conf *Config) lookupTLSAValidated(name, port string) (*core.RRset, error) {
+// honored, with a loud warning, to match how the rest of tdns treats TLSA;
+// unvalidated is then true when the RRset returned is not DNSSEC-secure.
+func (conf *Config) lookupTLSAValidated(name, port string) (rrset *core.RRset, unvalidated bool, err error) {
 	// Outbound secondary-pull path: a background refresh, not a request, so it
 	// uses context.Background() (the DANE lookup's own timeout still applies).
 	return lookupTLSAValidatedIMR(context.Background(), conf.Internal.ImrEngine, name, port)
@@ -324,10 +338,13 @@ func (conf *Config) lookupTLSAValidated(name, port string) (*core.RRset, error) 
 
 // lookupTLSAValidatedIMR is the IMR-based core of lookupTLSAValidated, usable
 // where no *Config is in reach (the transfer-time downstream-auth tls-dane
-// check receives the imr through QueryResponder).
-func lookupTLSAValidatedIMR(ctx context.Context, imr *Imr, name, port string) (*core.RRset, error) {
+// check receives the imr through QueryResponder). unvalidated is true when it
+// returns a TLSA RRset that is not DNSSEC-secure, which it does only while
+// require-dnssec-validation is off: the caller must not treat that check as
+// proof of anything, and says so where the operator looks.
+func lookupTLSAValidatedIMR(ctx context.Context, imr *Imr, name, port string) (rrset *core.RRset, unvalidated bool, err error) {
 	if imr == nil {
-		return nil, fmt.Errorf("xot: dane requires the built-in IMR to be active")
+		return nil, false, fmt.Errorf("xot: dane requires the built-in IMR to be active")
 	}
 	fqdn := dns.Fqdn(name)
 	owner := fmt.Sprintf("_%s._tcp.%s", port, fqdn)
@@ -345,23 +362,23 @@ func lookupTLSAValidatedIMR(ctx context.Context, imr *Imr, name, port string) (*
 	}
 
 	if cr := imr.Cache.LookupTLSAForServer(fqdn, owner); cr != nil && cr.RRset != nil && len(cr.RRset.RRs) > 0 && acceptState(cr.State) {
-		return cr.RRset, nil
+		return cr.RRset, cr.State != cache.ValidationStateSecure, nil
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, daneLookupTimeout)
 	defer cancel()
-	rrset, err := imr.DefaultRRsetFetcher(ctx, owner, dns.TypeTLSA)
+	rrset, err = imr.DefaultRRsetFetcher(ctx, owner, dns.TypeTLSA)
 	if err != nil {
-		return nil, fmt.Errorf("xot: TLSA lookup for %s failed: %v", owner, err)
+		return nil, false, fmt.Errorf("xot: TLSA lookup for %s failed: %v", owner, err)
 	}
 	vstate, err := imr.Cache.ValidateRRsetWithParentZone(ctx, rrset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 	if err != nil {
-		return nil, fmt.Errorf("xot: TLSA validation for %s failed: %v", owner, err)
+		return nil, false, fmt.Errorf("xot: TLSA validation for %s failed: %v", owner, err)
 	}
 	if !acceptState(vstate) {
-		return nil, fmt.Errorf("xot: TLSA RRset for %s is not DNSSEC-secure (state %s); refusing DANE (fail closed)", owner, cache.ValidationStateToString[vstate])
+		return nil, false, fmt.Errorf("xot: TLSA RRset for %s is not DNSSEC-secure (state %s); refusing DANE (fail closed)", owner, cache.ValidationStateToString[vstate])
 	}
-	return rrset, nil
+	return rrset, vstate != cache.ValidationStateSecure, nil
 }
 
 // SPKISHA256 returns the base64 (standard encoding) SHA-256 digest of the

@@ -397,6 +397,9 @@ func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *ht
 			resp.Msg = fmt.Sprintf("%s: I'm happy, but send more cookies", Globals.App.Name)
 			if conf.DnssecValidationNotEnforced() {
 				resp.Warnings = append(resp.Warnings, DnssecValidationNotEnforcedWarning)
+				if w := conf.daneZonesWarning(); w != "" {
+					resp.Warnings = append(resp.Warnings, w)
+				}
 			}
 
 		case "stop":
