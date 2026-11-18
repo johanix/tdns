@@ -1077,16 +1077,6 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 			return fmt.Errorf("zone %s: %w", zd.ZoneName, ErrRefreshStaged)
 		}
 	}
-	// What the pre-refresh callbacks set on the incoming zone's options reaches
-	// the served zone's here, and not before: the options change together with
-	// the data they describe, so a refresh refused above (a hold, a staged
-	// change that could not be published) leaves them as they were. After the
-	// publish of a staged local change, which is the old content and goes out
-	// under the old options; before every decision below that reads them, which
-	// are the new content's (whether the zone originates it, the serial it
-	// lands on, whether it signs it). A refusal further down puts them back.
-	undoOptions := zd.foldIncomingOptionsLocked(new_zd)
-
 	// The highest serial this zone has published, which a first load must
 	// land past (#655), read before this function changes anything: a read
 	// that fails must leave the zone exactly as it was, IncomingSerial
@@ -1106,7 +1096,6 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	if firstLoad && zd.KeyDB != nil && zd.KeyDB.DB != nil && zoneMayOriginateContent(zd) {
 		high, have, err := zd.KeyDB.PublishedSerialFloor(zd.ZoneName)
 		if err != nil {
-			undoOptions()
 			return fmt.Errorf("read the published serial for zone %s: %w", zd.ZoneName, err)
 		}
 		restoreSerial, haveRestoreSerial = high, have
@@ -1313,9 +1302,10 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	}
 	// The dynamic RRsets were collected before the callbacks ran, under the
 	// options of that time: a SIG(0) KEY is among them unless the zone said
-	// dont-publish-key then. A callback may have said it since, and the options
-	// adopted above are the ones that rule. Only the collected KEY is dropped;
-	// one the replacement carries itself is its content and stays.
+	// dont-publish-key then. A callback may have said it since (SetRuntimeOption
+	// on this zone), and the options the zone has now are the ones that rule.
+	// Only the collected KEY is dropped; one the replacement carries itself is
+	// its content and stays.
 	if zd.Options[OptDontPublishKey] {
 		dynamicRRs = withoutCollectedSig0Key(dynamicRRs)
 	}
@@ -1327,7 +1317,6 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 			zd.fileSerial, zd.fileDigest, zd.IncomingSerial, zd.deltasReplayed, zd.CurrentSerial =
 				prevFileSerial, prevFileDigest, prevIncoming, prevReplayed, prevServed
 			zd.ApexLen, zd.ZoneStore, zd.ZoneType = prevApexLen, prevStore, prevType
-			undoOptions()
 			return fmt.Errorf("zone %s: serial %d: %w", zd.ZoneName, old.Serial, ErrSignedFileChangedUnderServedSerial)
 		}
 	}
@@ -1395,8 +1384,8 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		// Only when the zone signed its own content when the refresh began,
 		// which is when the delta's base was taken: the owners the delta did not
 		// touch keep the signatures they have. A zone that became a signer since,
-		// by an option a callback set on the incoming zone or on this one
-		// (SetRuntimeOption), has none, and takes the full pass below.
+		// by a callback's SetRuntimeOption on this zone, has none, and takes the
+		// full pass below.
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, new_zd.ixfrTouched
 	default:
 		zd.wsNeedsFullSign, zd.wsSignOwners = true, nil

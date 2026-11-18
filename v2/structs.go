@@ -223,7 +223,6 @@ type ZoneData struct {
 	Options           map[ZoneOption]bool
 	optionsMu         sync.RWMutex        // see Option, in zone_option_runtime.go: orders the replacement of Options against a reader holding no lock
 	runtimeOptions    map[ZoneOption]bool // set by the daemon itself, kept across a config update (SetRuntimeOption); guarded by mu
-	optionsAtStart    map[ZoneOption]bool // an incoming zone's only: the served zone's options as the refresh began, never written; see foldIncomingOptionsLocked
 	signsAtStart      bool                // an incoming zone's only: the served zone signed its own content as the refresh began (signsFromOptions); read by applyRefreshReplacementLocked
 	// SuppressedOptions records the origination options that were configured
 	// for this zone but stripped by normalizeOptionsForRole (a tdns-auth
@@ -572,8 +571,9 @@ type ZoneData struct {
 	// zone data. Used for: analysis (compare old vs new for HSYNC/DNSKEY/delegation changes),
 	// modification of new_zd (combiner contributions, signature TXT, MP data population),
 	// and agent RFIs (RequestAndWaitForKeyInventory). new_zd's Options are a copy of zd's as of
-	// the start of the refresh: what a callback changes in them reaches zd's when the refresh is
-	// adopted (foldIncomingOptionsLocked); an option to decide at once uses zd.SetRuntimeOption.
+	// the start of the refresh and are discarded with new_zd: an option a callback writes there
+	// does not reach zd. An option to decide for good is set with zd.SetRuntimeOption on the
+	// served zone (the first argument): at once, and it survives a config update.
 	OnZonePreRefresh []func(zd, new_zd *ZoneData)
 
 	// OnZonePostRefresh callbacks run AFTER the hard flip (and after RepopulateDynamicRRs).
