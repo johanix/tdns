@@ -240,6 +240,43 @@ func runUntilTheEngineIsFree(t *testing.T, z *relayedZone, zr ZoneRefresher) {
 	}
 }
 
+// swapOptions runs a writer that replaces the zone's options with one of sets
+// after the other, as fast as it can, as a stream of config updates does, until
+// the returned func stops it. It returns only once the writer has made a swap,
+// and the counter says how many it has made, so that a test can require that
+// swaps happened while it ran: a stress test that passes with no concurrent
+// change tests nothing.
+func swapOptions(t *testing.T, zd *ZoneData, sets []map[ZoneOption]bool) (swaps *atomic.Int64, stop func()) {
+	t.Helper()
+	swaps = new(atomic.Int64)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			zd.mu.Lock()
+			zd.setOptionsLocked(sets[i%len(sets)])
+			zd.mu.Unlock()
+			swaps.Add(1)
+		}
+	}()
+	stop = func() { close(done); wg.Wait() }
+	for deadline := time.Now().Add(5 * time.Second); swaps.Load() == 0; {
+		if time.Now().After(deadline) {
+			stop()
+			t.Fatal("the writer made no swap")
+		}
+		runtime.Gosched()
+	}
+	return swaps, stop
+}
+
 // CollectDynamicRRs gates on three options at once, and every zd.Option is a
 // look at the zone's options of its own: a config update between two looks
 // answers from the old set and the new together. With one set that allows
@@ -263,7 +300,7 @@ func TestCollectDynamicRRsGatesOnOneSetOfOptions(t *testing.T) {
 		}
 		return false
 	}
-	sets := [2]map[ZoneOption]bool{{OptAllowUpdates: true}, {OptInlineSigning: true}}
+	sets := []map[ZoneOption]bool{{OptAllowUpdates: true}, {OptInlineSigning: true}}
 	for i, set := range sets {
 		zd.mu.Lock()
 		zd.setOptionsLocked(set)
@@ -273,28 +310,74 @@ func TestCollectDynamicRRsGatesOnOneSetOfOptions(t *testing.T) {
 		}
 	}
 
-	done := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-			}
-			zd.mu.Lock()
-			zd.setOptionsLocked(sets[i%2])
-			zd.mu.Unlock()
-		}
-	}()
-	defer func() { close(done); wg.Wait() }()
-
+	swaps, stop := swapOptions(t, zd, sets)
+	defer stop()
+	before := swaps.Load()
 	deadline := time.Now().Add(3 * time.Second)
 	for i := 0; i < 20000 && time.Now().Before(deadline); i++ {
 		if !collectsKey() {
 			t.Fatalf("collection %d found nothing while the options swapped between two sets that each allow it", i)
 		}
+	}
+	if swaps.Load() == before {
+		t.Fatal("the options were not swapped while the collections ran: the test proved nothing")
+	}
+}
+
+// The same collector asks the options again for the CDS of an owned zone
+// (ownedZoneCDS, through ownedZoneSignedHere), and the KEY it collects follows
+// dont-publish-key: asked one look at a time, a config update between the two
+// gives a CDS from one set of options beside a KEY from the other. One set
+// signs an owned zone and publishes its key, the other does neither; a
+// collection holds both or neither (johanix/tdns#981 review).
+func TestCollectDynamicRRsTakesCDSAndKeyFromOneSetOfOptions(t *testing.T) {
+	r := buildDSEngineRig(t, 0, false)
+	withAppType(t, AppTypeAuth)
+	r.zd.ZoneType = Primary
+	r.zd.Options = map[ZoneOption]bool{OptParentSync: true}
+	if err := r.zd.Sig0KeyPreparation("example.", dns.ED25519, r.kdb); err != nil {
+		t.Fatalf("Sig0KeyPreparation: %v", err)
+	}
+	owner := &testOwner{owns: map[string]bool{"example.": true},
+		intent: map[string]DSIntent{"example.": {Set: dsFor("example.", pubA), Known: true}}}
+	installOwner(t, owner)
+
+	collect := func() (cds, key bool) {
+		for _, rs := range r.zd.CollectDynamicRRs(&Config{}) {
+			switch rs.RRtype {
+			case dns.TypeCDS:
+				cds = true
+			case dns.TypeKEY:
+				key = true
+			}
+		}
+		return cds, key
+	}
+	signedAndKeyed := map[ZoneOption]bool{OptMultiProvider: true, OptInlineSigning: true}
+	neither := map[ZoneOption]bool{OptAllowUpdates: true, OptDontPublishKey: true}
+	for _, tc := range []struct {
+		name     string
+		set      map[ZoneOption]bool
+		cds, key bool
+	}{{"signed and keyed", signedAndKeyed, true, true}, {"neither", neither, false, false}} {
+		r.zd.mu.Lock()
+		r.zd.setOptionsLocked(tc.set)
+		r.zd.mu.Unlock()
+		if cds, key := collect(); cds != tc.cds || key != tc.key {
+			t.Fatalf("precondition, %s: CDS %v KEY %v, want %v %v", tc.name, cds, key, tc.cds, tc.key)
+		}
+	}
+
+	swaps, stop := swapOptions(t, r.zd, []map[ZoneOption]bool{signedAndKeyed, neither})
+	defer stop()
+	before := swaps.Load()
+	deadline := time.Now().Add(3 * time.Second)
+	for i := 0; i < 5000 && time.Now().Before(deadline); i++ {
+		if cds, key := collect(); cds != key {
+			t.Fatalf("collection %d has CDS %v and KEY %v: two sets of options in one collection", i, cds, key)
+		}
+	}
+	if swaps.Load() == before {
+		t.Fatal("the options were not swapped while the collections ran: the test proved nothing")
 	}
 }

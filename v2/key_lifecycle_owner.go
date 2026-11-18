@@ -86,6 +86,16 @@ func zoneOwned(zd *ZoneData) bool {
 	return o != nil && o.Owns(zd)
 }
 
+// zoneOwnedIn is zoneOwned with OptMultiProvider read from opts, the options
+// the caller took, so that it agrees with the caller's other reads of them.
+func zoneOwnedIn(zd *ZoneData, opts map[ZoneOption]bool) bool {
+	if zd == nil || !opts[OptMultiProvider] {
+		return false
+	}
+	o := currentKeyLifecycleOwner()
+	return o != nil && o.Owns(zd)
+}
+
 // zoneOwnedByName is zoneOwned for the keystore functions, which are keyed
 // by zone name; a zone that is not loaded is not owned.
 func zoneOwnedByName(zone string) (*ZoneData, bool) {

@@ -2293,7 +2293,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	// owned serves the CDS of its DS set (key lifecycle ownership design
 	// §4.1, arrow 1): the DS engine owns the content, and a transfer from
 	// the combiner is where it would be lost.
-	if cds := ownedZoneCDS(zd); len(cds) > 0 {
+	if cds := ownedZoneCDSIn(zd, opts); len(cds) > 0 {
 		dynamicRRs = append(dynamicRRs, &core.RRset{
 			Name:   zd.ZoneName,
 			Class:  dns.ClassINET,
