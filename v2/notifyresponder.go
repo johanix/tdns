@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"sync"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -27,7 +29,7 @@ import (
 // REFUSED + EDENotifyDsyncSchemeNotAdvertised on the first attempt
 // instead of a generic parent-publish-failure after attempt-timeout.
 func (zd *ZoneData) advertisesDsyncNotify(qtype uint16) bool {
-	owner, err := zd.GetOwner(dsyncOwnerName(zd.ZoneName))
+	owner, err := zd.GetOwner(imrcore.DsyncOwnerName(zd.ZoneName))
 	if err != nil || owner == nil {
 		return false
 	}

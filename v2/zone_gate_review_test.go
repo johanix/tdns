@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -58,7 +60,7 @@ func TestTheResolverViewIsDroppedAfterTheDeferredPublish(t *testing.T) {
 	const child = "kid." + zone
 	rrcache := cache.NewRRsetCache(log.New(os.Stderr, "test ", 0), false, false)
 	saved := Globals.ImrEngine
-	Globals.ImrEngine = &Imr{Cache: rrcache}
+	Globals.ImrEngine = &Imr{Imr: &imrcore.Imr{Cache: rrcache}}
 	t.Cleanup(func() { Globals.ImrEngine = saved })
 	soa := &core.RRset{Name: zone, Class: dns.ClassINET, RRtype: dns.TypeSOA,
 		RRs: []dns.RR{mustRR(t, zone+" 900 IN SOA ns."+zone+" h."+zone+" 1 1800 900 604800 900")}}

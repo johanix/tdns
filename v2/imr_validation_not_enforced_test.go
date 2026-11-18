@@ -3,7 +3,11 @@
  */
 package tdns
 
-import "testing"
+import (
+	"testing"
+
+	imrcore "github.com/johanix/tdns/v2/imr"
+)
 
 func TestDnssecValidationNotEnforced(t *testing.T) {
 	yes, no := true, false
@@ -18,8 +22,8 @@ func TestDnssecValidationNotEnforced(t *testing.T) {
 		{"required", nil, &yes, nil, false},
 		{"configured not enforced", nil, &no, nil, true},
 		{"configured not enforced, no resolver", &no, &no, nil, false},
-		{"running, required", nil, &no, &Imr{RequireDnssecValidation: true}, false},
-		{"running, not enforced", nil, nil, &Imr{RequireDnssecValidation: false}, true},
+		{"running, required", nil, &no, &Imr{Imr: &imrcore.Imr{RequireDnssecValidation: true}}, false},
+		{"running, not enforced", nil, nil, &Imr{Imr: &imrcore.Imr{RequireDnssecValidation: false}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			conf := &Config{}

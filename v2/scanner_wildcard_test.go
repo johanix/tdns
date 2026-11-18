@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -36,7 +38,7 @@ func TestScannerValidatesWildcardGlueWithItsProof(t *testing.T) {
 
 	answer := wildcardSigned(t, s, "*.w."+zone+" 300 IN A 192.0.2.53", host)
 	glue := &core.RRset{Name: host, Class: dns.ClassINET, RRtype: dns.TypeA, RRs: answer[:1], RRSIGs: answer[1:]}
-	proof := authorityRRsets(s.sign(t, mustRR(t, "a.w."+zone+" 300 IN NSEC zz.w."+zone+" A RRSIG NSEC")))
+	proof := imrcore.AuthorityRRsets(s.sign(t, mustRR(t, "a.w."+zone+" 300 IN NSEC zz.w."+zone+" A RRSIG NSEC")))
 	ns := &core.RRset{Name: zone, Class: dns.ClassINET, RRtype: dns.TypeNS, RRs: []dns.RR{mustRR(t, zone+" 300 IN NS "+host)}}
 
 	for _, c := range []struct {
