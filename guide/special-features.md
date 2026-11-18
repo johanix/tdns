@@ -927,8 +927,11 @@ record in the Additional section, it:
    `tcp:N`; an explicit `udp` or `tcp` wins over it. The `udp`
    weight caps the share of queries the resolver sends over
    UDP by its own choice: Do53 gets what the encrypted
-   weights leave of 100, and no more than the `udp` weight,
-   so `udp:0,dot:50` sends every first attempt over DoT.
+   weights leave of 100, cut so that its share of first
+   attempts is no more than the `udp` weight. The cap is on
+   the share: `udp:20,dot:60` sends 20% of first attempts
+   over UDP and 80% over DoT, and `udp:0,dot:50` sends every
+   first attempt over DoT.
    Port 53 stays the last resort all the same. The `tcp`
    weight only caps the TCP the resolver would choose on its
    own, and tdns chooses none: TCP after a truncation, or

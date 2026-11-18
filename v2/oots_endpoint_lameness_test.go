@@ -342,3 +342,47 @@ func TestTryServerRechecksTheFinalEndpoint(t *testing.T) {
 		t.Errorf("port 53 usable: %+v %v, dialed %q, want 192.0.2.2 on port 53", ep, err, lastDial(do53))
 	}
 }
+
+// A DNSKEY bypass attempt is recorded under the transport tryServer dialed,
+// which reads the preference again: a change between the query loop's reading
+// and tryServer's must not leave the attempt recorded under a transport never
+// dialed, so that the next tuple, which reads the new preference, dials the
+// same endpoint again.
+func TestDNSKEYAttemptIsRecordedUnderTheTransportDialed(t *testing.T) {
+	const ns = "ns.dnskey.example."
+	const addr = "192.0.2.53"
+	imr := newTestImr(t)
+	imr.Quiet = true
+	imr.dnskeyTransport = DNSKEYTransportTryEncrypted
+	server := imr.Cache.GetOrCreateAuthServer(ns)
+	server.AddAddr(addr)
+	applyTransportMapToServer(server, map[string]uint8{"dot": 50, "doq": 50})
+	serverMap := map[string]*cache.AuthServer{cache.ServerKey(ns): server}
+	clients := map[core.Transport]*core.FakeDNSClient{}
+	imr.Cache.DNSClient = map[core.Transport]core.DNSClienter{}
+	for _, tr := range []core.Transport{core.TransportDo53, core.TransportDo53TCP, core.TransportDoT, core.TransportDoQ} {
+		f := core.NewFakeDNSClient(tr)
+		f.Set("dnskey.example.", addr, core.FakeResponse{Err: errors.New("i/o timeout")})
+		clients[tr] = f
+		imr.Cache.DNSClient[tr] = f
+	}
+	reads := 0
+	saved := preferredDNSKEYTransportHook
+	preferredDNSKEYTransportHook = func(*Imr, *cache.AuthServer) core.Transport {
+		reads++
+		if reads == 1 {
+			return core.TransportDoT
+		}
+		return core.TransportDoQ
+	}
+	t.Cleanup(func() { preferredDNSKEYTransportHook = saved })
+
+	_, _, _, _, _ = imr.IterativeDNSQuery(context.Background(), "dnskey.example.", dns.TypeDNSKEY, serverMap, true, edns0.PrivacyNone)
+
+	if n := len(clients[core.TransportDoQ].Calls()); n != 1 {
+		t.Errorf("DoQ dialed %d times, want 1: the attempt was recorded under a transport never dialed", n)
+	}
+	if n := len(clients[core.TransportDoT].Calls()); n != 0 {
+		t.Errorf("DoT dialed %d times, want 0", n)
+	}
+}
