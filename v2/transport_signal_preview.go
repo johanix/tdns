@@ -119,7 +119,12 @@ func (zd *ZoneData) signalStateAt(owner string, want []dns.RR) (state string, ma
 		return SignalStateNone, false
 	}
 	svcb := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
-	if zd.ownerHoldsOnlyPassSignal(owner, od) {
+	own, err := zd.ownerHoldsOnlyPassSignal(owner, od)
+	if err != nil {
+		lgDns.Warn("transport signal preview: could not read the record of what the pass stored at the owner; shown as provisioned",
+			"zone", zd.ZoneName, "owner", owner, "error", err)
+	}
+	if own {
 		return SignalStateSynthesized, false
 	}
 	return SignalStateProvisioned, len(svcb.RRs) > 0 && signalDigest(svcb.RRs) == signalDigest(want)
