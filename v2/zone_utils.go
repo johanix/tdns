@@ -1504,9 +1504,13 @@ func (zd *ZoneData) recordZoneFileWritten(fname string, wroteSerial uint32, stil
 	// anchors to. Without this the next change would chain from the serial
 	// the file had BEFORE this write, and the load after that would refuse
 	// the journal.
-	if wroteSerial != 0 {
-		zd.fileSerial = wroteSerial
-	}
+	//
+	// Serial 0 included. It is a serial like another: a secondary that wraps
+	// from 4294967295 writes a file that holds it, and leaving the anchor at
+	// the serial before keeps the next change from chaining from the file. (The
+	// identity record below does stay clear of it: there, 0 may also mean that
+	// no SOA was written.)
+	zd.fileSerial = wroteSerial
 	zd.mu.Unlock()
 
 	// The file we have just written is a file we have looked at, so the
@@ -1583,9 +1587,22 @@ func (zd *ZoneData) recordZoneFileWritten(fname string, wroteSerial uint32, stil
 	// full transfer, and a load of this file applies it again. Dropping it
 	// would take those records out at the next full transfer.
 	if zd.KeyDB != nil && !overlay {
+		// Look at the journal BEFORE asking whether the zone is still live: the
+		// look is what the delete below is bound by, and a row that is not in
+		// it is not dropped. A zone that replaces this one is registered after
+		// the check, so its rows are persisted after the look; had the look
+		// come after the check, a row that landed between the two would be in
+		// it, and its serial is covered. See CutZoneDeltasAt.
+		cut, cerr := zd.KeyDB.CutZoneDeltasAt(zd.ZoneName, wroteSerial)
+		if cerr != nil {
+			lg.Error("zone written to file but its persisted deltas could not be read;"+
+				" a restart will replay changes the file already contains",
+				"zone", zd.ZoneName, "file", fname, "error", cerr)
+			return
+		}
 		// The zone this file was written for may be gone, or have a
-		// replacement under the same name, by now. The delete is by name:
-		// it would take the replacement's rows along with this zone's.
+		// replacement under the same name, by now. The journal is by name:
+		// what follows would take the replacement's rows along with this zone's.
 		if stillLive != nil && !stillLive() {
 			lg.Info("zone file written, but the zone was deleted or replaced while it was"+
 				" written; its journal is left to the zone that holds the name now",
@@ -1597,8 +1614,14 @@ func (zd *ZoneData) recordZoneFileWritten(fname string, wroteSerial uint32, stil
 		// the file after the ceiling is read, and its delta row then
 		// survives the drop and fails the chain check on the next load.
 		// "Is this change already in the file?" is answered by the file's
-		// serial, and that has no window at all.
-		n, derr := zd.KeyDB.DeleteZoneDeltasThroughSerial(zd.ZoneName, wroteSerial)
+		// serial, and that has no window at all. (The look above is taken after
+		// the write, so every delta the file holds is in it.)
+		//
+		// And the delta persisted while the file was being written starts from
+		// where the journal was anchored before the write, which the file has
+		// passed. It is re-based onto the written serial, in the same
+		// transaction. See AnchorZoneDeltasAt.
+		n, rebased, derr := zd.KeyDB.AnchorZoneDeltasAt(zd.ZoneName, wroteSerial, cut)
 		if derr != nil {
 			lg.Error("zone written to file but its persisted deltas could not be dropped;"+
 				" a restart will replay changes the file already contains",
@@ -1608,6 +1631,10 @@ func (zd *ZoneData) recordZoneFileWritten(fname string, wroteSerial uint32, stil
 		if n > 0 {
 			lg.Info("zone written to file; persisted deltas dropped",
 				"zone", zd.ZoneName, "file", fname, "rows", n)
+		}
+		if rebased {
+			lg.Info("zone written to file; a delta persisted while it was written now chains from it",
+				"zone", zd.ZoneName, "file", fname, "serial", wroteSerial)
 		}
 		// What is left was published by this process, after the snapshot
 		// written, so it is in the content: nothing an earlier process left

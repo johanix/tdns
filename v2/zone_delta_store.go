@@ -302,6 +302,10 @@ func ZoneDeltaActions(rec ZoneDeltaRecord) ([]dns.RR, error) {
 // Comparison is RFC 1982 serial arithmetic, so a wrapped serial behaves like
 // every other serial comparison in this package. That is also why the filter
 // cannot be pushed into SQL as `toserial <= ?`.
+//
+// The write of a zone file no longer comes through here. It looks at the
+// journal before it asks whether the zone is still live, and it also re-bases
+// the delta that spans the serial written: CutZoneDeltasAt, AnchorZoneDeltasAt.
 func (kdb *KeyDB) DeleteZoneDeltasThroughSerial(zone string, serial uint32) (int64, error) {
 	if kdb == nil || kdb.DB == nil {
 		return 0, fmt.Errorf("DeleteZoneDeltasThroughSerial: no database")
@@ -338,6 +342,151 @@ func (kdb *KeyDB) DeleteZoneDeltasThroughSerial(zone string, serial uint32) (int
 		return 0, nil
 	}
 	return n, nil
+}
+
+// ZoneDeltaCut is a look at a zone's journal, taken to cut it at the serial a
+// zone file was written at: which rows that file already holds, and how far the
+// look reached. See CutZoneDeltasAt and AnchorZoneDeltasAt.
+type ZoneDeltaCut struct {
+	// CoveredThroughID is the highest row id of the deltas whose ToSerial is not
+	// newer than the serial: 0 when the file covers none of them.
+	CoveredThroughID int64
+	// ObservedThroughID is the highest row id the look saw: 0 for an empty
+	// journal. Rows above it were persisted after the look.
+	ObservedThroughID int64
+}
+
+// CutZoneDeltasAt looks at zone's journal for the written serial, and keeps the
+// result for AnchorZoneDeltasAt. Two steps, with the caller's liveness check
+// between them, so that the cut is made BEFORE that decision.
+//
+// A delete by zone name must not take a row the zone's replacement persisted:
+// the replacement is registered after the zone's own liveness check, so its rows
+// come after it, and rows persisted after this look are above ObservedThroughID,
+// where AnchorZoneDeltasAt does not reach. Looking after the check, as the
+// delete used to, includes a row that landed between the two. The look needs
+// no lock for that: it is the order that does it. A lock shared with zone
+// replacement would run against the order the publish path already takes,
+// zd.mu and then the zone registry, and the replacement and the write-out
+// share no other lock.
+//
+// Bound by content, like DeleteZoneDeltasThroughSerial: a delta the written file
+// already holds is one whose ToSerial is not newer than the serial. Take it after
+// the write, so that every delta published before the snapshot that was written
+// is in it.
+func (kdb *KeyDB) CutZoneDeltasAt(zone string, serial uint32) (ZoneDeltaCut, error) {
+	var cut ZoneDeltaCut
+	if kdb == nil || kdb.DB == nil {
+		return cut, fmt.Errorf("CutZoneDeltasAt: no database")
+	}
+	zone = dns.Fqdn(zone)
+
+	// Ids and serials only: the rows' text is not needed to decide, and a
+	// journal can be long.
+	rows, err := kdb.DB.Query(
+		`SELECT id, toserial FROM ZoneDelta WHERE zone=? ORDER BY id ASC`, zone)
+	if err != nil {
+		return cut, fmt.Errorf("CutZoneDeltasAt: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var to uint32
+		if err := rows.Scan(&id, &to); err != nil {
+			return cut, fmt.Errorf("CutZoneDeltasAt: scan: %v", err)
+		}
+		cut.ObservedThroughID = id
+		if to == serial || !serialNewer(to, serial) {
+			cut.CoveredThroughID = id
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return cut, fmt.Errorf("CutZoneDeltasAt: %v", err)
+	}
+	return cut, nil
+}
+
+// AnchorZoneDeltasAt makes zone's journal start at serial, the serial a zone
+// file was just written at, in one transaction: it drops the rows the file
+// holds (cut.CoveredThroughID), and re-bases the delta that spans serial.
+//
+// The re-base is for a delta persisted while the file was being written. Its
+// base is the serial the journal was anchored to before the write, and its
+// content is the change from the snapshot before it, which is the snapshot
+// written (or a later one that differs from it by nothing authored). The file
+// holds everything up to serial and the delta everything after, so it chains from
+// serial, not from where the journal was anchored; left as it was, the next load
+// refuses the journal because it does not chain from the file. Only the first
+// delta after those dropped can span serial, as every later one chains from its
+// predecessor's ToSerial, and only if its FromSerial is older than serial and its
+// ToSerial newer.
+//
+// Only rows the look saw (cut.ObservedThroughID) are touched, for the reason given
+// at CutZoneDeltasAt. A delta persisted after it is anchored by the next write or
+// by the zone that persisted it.
+//
+// Reports how many rows went, and whether a delta was re-based.
+func (kdb *KeyDB) AnchorZoneDeltasAt(zone string, serial uint32, cut ZoneDeltaCut) (int64, bool, error) {
+	if kdb == nil || kdb.DB == nil {
+		return 0, false, fmt.Errorf("AnchorZoneDeltasAt: no database")
+	}
+	if cut.CoveredThroughID <= 0 && cut.ObservedThroughID <= 0 {
+		return 0, false, nil
+	}
+	zone = dns.Fqdn(zone)
+
+	tx, err := kdb.Begin("AnchorZoneDeltasAt")
+	if err != nil {
+		return 0, false, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+
+	var dropped int64
+	if cut.CoveredThroughID > 0 {
+		res, err := tx.Exec(`DELETE FROM ZoneDelta WHERE zone=? AND id<=?`, zone, cut.CoveredThroughID)
+		if err != nil {
+			return 0, false, fmt.Errorf("AnchorZoneDeltasAt: %v", err)
+		}
+		if n, rerr := res.RowsAffected(); rerr != nil {
+			lg.Warn("AnchorZoneDeltasAt: rows deleted but the count is unavailable",
+				"zone", zone, "through_serial", serial, "error", rerr)
+		} else {
+			dropped = n
+		}
+	}
+
+	rebased := false
+	if cut.ObservedThroughID > cut.CoveredThroughID {
+		var from, to uint32
+		err := tx.QueryRow(
+			`SELECT fromserial, toserial FROM ZoneDelta WHERE zone=? AND id>? AND id<=? ORDER BY id ASC LIMIT 1`,
+			zone, cut.CoveredThroughID, cut.ObservedThroughID).Scan(&from, &to)
+		switch {
+		case err == sql.ErrNoRows:
+			// Taken by someone else since the look.
+		case err != nil:
+			return 0, false, fmt.Errorf("AnchorZoneDeltasAt: reading the first delta left: %v", err)
+		case from != serial && serialNewer(serial, from) && serialNewer(to, serial):
+			if _, err := tx.Exec(
+				`UPDATE ZoneDelta SET fromserial=? WHERE zone=? AND id>? AND id<=? AND fromserial=? AND toserial=?`,
+				serial, zone, cut.CoveredThroughID, cut.ObservedThroughID, from, to); err != nil {
+				return 0, false, fmt.Errorf("AnchorZoneDeltasAt: re-basing the delta %d -> %d onto %d: %v",
+					from, to, serial, err)
+			}
+			rebased = true
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("AnchorZoneDeltasAt: commit: %v", err)
+	}
+	committed = true
+	return dropped, rebased, nil
 }
 
 // zoneDeltaExistsAtSerial reports whether the journal already holds a delta

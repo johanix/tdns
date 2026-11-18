@@ -13,6 +13,8 @@ import (
 	"testing"
 
 	"github.com/miekg/dns"
+
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // Tests for #919, for a secondary with a zone file. The refresh engine writes
@@ -585,6 +587,197 @@ func TestFirstLoadRetryReplaysTheJournalTheFirstLoadOwes(t *testing.T) {
 			persistRefreshedZone(again, again.ZoneName, again.generation.Load(), &Config{})
 			if j := ovJournal(t, again); len(j) != 0 {
 				t.Errorf("the write after the retry kept deltas the file holds:%s", ovJournalString(j))
+			}
+		})
+	}
+}
+
+// A delta published while the file is being written. The write takes a
+// snapshot of the zone, and a local change can be published before the write
+// is recorded: the journal was anchored to the serial the transfer brought, so
+// the delta starts there, and it ends past the serial written. The file has
+// passed where the delta starts, so the journal does not chain from it at the
+// next start, and the change is only in a journal that is refused. Recording
+// the write re-bases that delta onto the serial written.
+func TestWriteAnchorsADeltaPublishedWhileTheFileWasBeingWritten(t *testing.T) {
+	for _, arm := range []struct {
+		name   string
+		record func(zd *ZoneData, wrote uint32)
+	}{
+		{"the write after a refresh", func(zd *ZoneData, wrote uint32) {
+			recordRefreshWrite(zd, zd.generation.Load(), zd.Zonefile, wrote)
+		}},
+		{"WriteZone", func(zd *ZoneData, wrote uint32) {
+			zd.recordZoneFileWritten(zd.Zonefile, wrote, nil)
+		}},
+	} {
+		for _, v := range zfVariants {
+			t.Run(arm.name+"/"+v.name, func(t *testing.T) {
+				zd := zfSecondary(t, v.setup)
+				addr := zfUpstream(t, 8)
+				// The transfer, without the write that follows it: the journal is
+				// anchored to the serial received.
+				ovTransferFrom(t, zd, addr, true)
+				anchored := zfFileSerial(zd)
+
+				_, wrote, err := zd.WriteFileWithSerial(zd.Zonefile)
+				if err != nil {
+					t.Fatalf("WriteFileWithSerial: %v", err)
+				}
+				// A local change publishes before the write is recorded.
+				txt := zfLocalTXT(t, 1)
+				if err := ovUpdate(t, zd, txt); err != nil {
+					t.Fatalf("local change: %v", err)
+				}
+				j := ovJournal(t, zd)
+				if len(j) != 1 || j[0].FromSerial != anchored || !serialNewer(j[0].ToSerial, wrote) {
+					t.Fatalf("precondition: the journal is not one delta from the anchor %d to a serial past"+
+						" the %d written:%s", anchored, wrote, ovJournalString(j))
+				}
+				to := j[0].ToSerial
+
+				arm.record(zd, wrote)
+
+				if got := zfFileSerial(zd); got != wrote {
+					t.Errorf("the journal is anchored to serial %d, the file holds serial %d", got, wrote)
+				}
+				if j := ovJournal(t, zd); len(j) != 1 || j[0].FromSerial != wrote || j[0].ToSerial != to {
+					t.Fatalf("the delta published during the write does not chain from the file's serial %d:%s",
+						wrote, ovJournalString(j))
+				}
+
+				buf := ovCaptureLog(t)
+				again := zfFirstBind(t, zd, v.setup, addr)
+				replayZoneDeltasOnLoad(again)
+				if w := ovConfigWarning(again); w != "" {
+					t.Errorf("the first load raised a ConfigWarning: %s", w)
+				}
+				if strings.Contains(buf.String(), "edited or replaced") {
+					t.Error("the load says the zone file was edited or replaced; tdns wrote it")
+				}
+				if !ovHas(ovServed(t, again, "local.example.", dns.TypeTXT), txt) {
+					t.Errorf("the change is not served after the restart; journal:%s",
+						ovJournalString(ovJournal(t, again)))
+				}
+			})
+		}
+	}
+}
+
+// A row persisted after the write looked at the journal is not dropped by it,
+// whatever its serial. The look comes before the liveness check, so a row
+// that a replacement zone persists between the check and the delete is not in
+// it, and the delete does not reach it. (The check here persists it, which
+// puts it in the same place.)
+func TestRefreshWriteLeavesARowThatLandsAfterTheJournalWasLookedAt(t *testing.T) {
+	zd := zfSecondary(t, zfVariants[0].setup)
+	zfRefresh(t, zd, zfUpstream(t, 8))
+	_, wrote, err := zd.WriteFileWithSerial(zd.Zonefile)
+	if err != nil {
+		t.Fatalf("WriteFileWithSerial: %v", err)
+	}
+
+	live := func() bool {
+		// The replacement's delta, its serial one the written file covers.
+		ovPlant(t, zd, wrote-2, wrote-1, "local.example.\t3600\tIN\tTXT\t\"replacement\"")
+		return true
+	}
+	zd.recordZoneFileWritten(zd.Zonefile, wrote, live)
+
+	j := ovJournal(t, zd)
+	if len(j) != 1 || j[0].FromSerial != wrote-2 || j[0].ToSerial != wrote-1 {
+		t.Errorf("the row persisted after the look was dropped or changed:%s", ovJournalString(j))
+	}
+}
+
+// Serial 0 is a serial: a secondary that wraps from 4294967295 writes a file
+// that holds it, and the journal anchors to it.
+func TestWriteAnchorsTheJournalToSerialZero(t *testing.T) {
+	zd := zfSecondary(t, zfVariants[0].setup)
+	zfRefresh(t, zd, zfUpstream(t, 8))
+	if got := zfFileSerial(zd); got == 0 {
+		t.Fatal("precondition: the journal is anchored to serial 0 already")
+	}
+
+	zd.recordZoneFileWritten(zd.Zonefile, 0, nil)
+
+	if got := zfFileSerial(zd); got != 0 {
+		t.Errorf("the journal is anchored to serial %d, the file holds serial 0", got)
+	}
+}
+
+// AnchorZoneDeltasAt drops what the file holds and re-bases the one delta that
+// spans the serial written, and nothing else.
+func TestAnchorZoneDeltasAtRebasesOnlyTheDeltaThatSpansTheSerial(t *testing.T) {
+	type d struct{ from, to uint32 }
+	for _, tc := range []struct {
+		name      string
+		journal   []d
+		serial    uint32
+		want      []d
+		rebased   bool
+		persisted *d // persisted after the look, which the anchor leaves alone
+	}{
+		{"empty journal", nil, 12, nil, false, nil},
+		{"the delta spans the serial",
+			[]d{{8, 10}, {10, 13}, {13, 14}}, 12, []d{{12, 13}, {13, 14}}, true, nil},
+		{"the delta starts at the serial",
+			[]d{{8, 10}, {10, 12}, {12, 13}}, 12, []d{{12, 13}}, false, nil},
+		{"the delta starts past the serial",
+			[]d{{14, 15}}, 12, []d{{14, 15}}, false, nil},
+		{"every delta is covered",
+			[]d{{8, 10}, {10, 12}}, 12, nil, false, nil},
+		{"a delta persisted after the look",
+			[]d{{8, 10}, {10, 13}}, 12, []d{{12, 13}, {13, 14}}, true, &d{13, 14}},
+		{"a delta persisted after the look, nothing else",
+			nil, 12, []d{{3, 11}}, false, &d{3, 11}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kdb := newTestKeyDB(t)
+			persist := func(x d) {
+				t.Helper()
+				// Two records, so that a delta is more than one row.
+				rrs := []dns.RR{
+					mustRR(t, fmt.Sprintf("a.example.\t3600\tIN\tTXT\t\"%d\"", x.to)),
+					mustRR(t, fmt.Sprintf("b.example.\t3600\tIN\tTXT\t\"%d\"", x.to)),
+				}
+				if err := kdb.PersistZoneDelta("example.", x.from, x.to, nil,
+					[]core.RRset{{RRs: rrs}}); err != nil {
+					t.Fatalf("PersistZoneDelta %d -> %d: %v", x.from, x.to, err)
+				}
+			}
+			for _, x := range tc.journal {
+				persist(x)
+			}
+			cut, err := kdb.CutZoneDeltasAt("example.", tc.serial)
+			if err != nil {
+				t.Fatalf("CutZoneDeltasAt: %v", err)
+			}
+			if tc.persisted != nil {
+				persist(*tc.persisted)
+			}
+
+			_, rebased, err := kdb.AnchorZoneDeltasAt("example.", tc.serial, cut)
+			if err != nil {
+				t.Fatalf("AnchorZoneDeltasAt: %v", err)
+			}
+			if rebased != tc.rebased {
+				t.Errorf("rebased = %v, want %v", rebased, tc.rebased)
+			}
+			got, err := kdb.LoadZoneDeltas("example.")
+			if err != nil {
+				t.Fatalf("LoadZoneDeltas: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("the journal holds %d deltas, want %d:%s", len(got), len(tc.want), ovJournalString(got))
+			}
+			for i, w := range tc.want {
+				if got[i].FromSerial != w.from || got[i].ToSerial != w.to {
+					t.Errorf("delta %d is %d -> %d, want %d -> %d", i, got[i].FromSerial, got[i].ToSerial, w.from, w.to)
+				}
+				if len(got[i].RRs) != 2 {
+					t.Errorf("delta %d holds %d records, want its 2", i, len(got[i].RRs))
+				}
 			}
 		})
 	}
