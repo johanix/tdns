@@ -4,17 +4,15 @@
 package tdns
 
 import (
-	"bytes"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
-	"github.com/johanix/tdns/v2/cache"
-	"github.com/miekg/dns"
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	"github.com/spf13/viper"
 )
 
@@ -35,9 +33,9 @@ func TestViperTrustAnchorDSBlockScalar(t *testing.T) {
 	if err := v.Unmarshal(&c); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
-	dss, err := parseInlineDSAnchors(c.Imr.TrustAnchorDS)
+	dss, err := imrcore.ParseInlineDSAnchors(c.Imr.TrustAnchorDS)
 	if err != nil {
-		t.Fatalf("parseInlineDSAnchors(%q): %v", c.Imr.TrustAnchorDS, err)
+		t.Fatalf("imrcore.ParseInlineDSAnchors(%q): %v", c.Imr.TrustAnchorDS, err)
 	}
 	if got, want := dsKeyTags(dss), []uint16{20326, 38696}; !slices.Equal(got, want) {
 		t.Errorf("key tags = %v, want %v", got, want)

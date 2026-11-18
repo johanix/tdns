@@ -5,6 +5,7 @@ package imr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -165,7 +166,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 	if parent == "" {
 		parent = parent_guess
 	}
-	name = dsyncOwnerName(parent)
+	name = DsyncOwnerName(parent)
 
 	lgDns.Debug("looking up DSYNC", "name", name)
 	resp, err = imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
@@ -277,13 +278,13 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 // once per zone where the sentinel is made).
 var ErrNoUsableDsync = errors.New("the parent publishes no usable DSYNC scheme")
 
-// dsyncOwnerName is the owner of a zone's DSYNC RRset, and
+// DsyncOwnerName is the owner of a zone's DSYNC RRset, and
 // dsyncPerChildLookupName a child's own name under it: _dsync.<zone> and
 // <child>._dsync.<zone>, and at the root _dsync. and <tld>._dsync. (RFC 9859).
 //
 // The root's used to be _dsync.root. and <tld>._dsync.root. That was a clean
 // switch (#757): nothing publishes or looks up the old names.
-func dsyncOwnerName(zonename string) string {
+func DsyncOwnerName(zonename string) string {
 	return dsyncNameUnder("_dsync", zonename)
 }
 

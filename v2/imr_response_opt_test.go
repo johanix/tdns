@@ -8,9 +8,7 @@ package tdns
 import (
 	"context"
 	"testing"
-	"time"
 
-	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 

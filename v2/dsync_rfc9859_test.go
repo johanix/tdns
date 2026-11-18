@@ -4,18 +4,12 @@
 package tdns
 
 import (
-	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"slices"
-	"strconv"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
-	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -111,7 +105,6 @@ _dsync.example. 7200 IN DSYNC CSYNC NOTIFY 5302 notify.example.
 	}
 }
 
-
 // A root zone publishes its DSYNC RRset at _dsync. and nothing at
 // _dsync.root. A record an older build left at _dsync.root. is not the
 // root's DSYNC: the scheme it names is published at _dsync. all the same.
@@ -203,10 +196,3 @@ a.root. 3600 IN A 192.0.2.1
 		t.Errorf("only a TXT at _dsync.root.: %d warnings, want none\n%s", n, buf.String())
 	}
 }
-
-
-
-
-
-
-

@@ -8,13 +8,10 @@ package imr
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 
-	"github.com/gorilla/mux"
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 

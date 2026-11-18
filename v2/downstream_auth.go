@@ -19,16 +19,12 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net/netip"
-	"os"
 	"strings"
-	"sync"
-	"time"
+
+	imrcore "github.com/johanix/tdns/v2/imr"
 
 	"github.com/miekg/dns"
 )
-
-
-
 
 // Transfer-auth mechanism classes, weakest to strongest. Each tls-* class
 // escalates ON TOP of the matched entry's address/TSIG requirements — it
@@ -203,7 +199,7 @@ func pinMatches(leaf *x509.Certificate, pins []string) bool {
 // identity. The listener used RequestClientCert, so nothing was verified
 // during the handshake; this is the verification.
 func verifyClientCertPKIX(leaf *x509.Certificate, presented []*x509.Certificate, caFile, name string) error {
-	roots, err := loadCAPool(caFile)
+	roots, err := imrcore.LoadCAPool(caFile)
 	if err != nil {
 		return err
 	}

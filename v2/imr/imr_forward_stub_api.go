@@ -327,9 +327,9 @@ func (imr *Imr) StubZoneStatus() []ImrStubZoneStatus {
 			ss := ImrStubServerStatus{
 				Name:      server.Name,
 				Addrs:     server.GetAddrs(),
-				Attempted: transportCountsToStrings(ts.Attempted),
-				Used:      transportCountsToStrings(ts.Used),
-				Failed:    transportCountsToStrings(ts.Failed),
+				Attempted: TransportCountsToStrings(ts.Attempted),
+				Used:      TransportCountsToStrings(ts.Used),
+				Failed:    TransportCountsToStrings(ts.Failed),
 				Truncated: ts.Truncated,
 			}
 			for _, t := range server.GetTransports() {
@@ -462,29 +462,29 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 	return results, nil
 }
 
-// transportName returns the string name for t, with a stable fallback so an
+// TransportName returns the string name for t, with a stable fallback so an
 // unregistered transport (a future enum value missing from TransportToString)
 // never produces an empty-string map key in the API JSON.
-func transportName(t core.Transport) string {
+func TransportName(t core.Transport) string {
 	if name, ok := core.TransportToString[t]; ok {
 		return name
 	}
 	return fmt.Sprintf("unknown-%d", t)
 }
 
-// transportCountsToStrings converts a transport-keyed counter map to a
+// TransportCountsToStrings converts a transport-keyed counter map to a
 // name-keyed one for JSON transport over the API.
-func transportCountsToStrings(m map[core.Transport]uint64) map[string]uint64 {
+func TransportCountsToStrings(m map[core.Transport]uint64) map[string]uint64 {
 	if len(m) == 0 {
 		return nil
 	}
 	out := make(map[string]uint64, len(m))
 	for t, c := range m {
-		out[transportName(t)] = c
+		out[TransportName(t)] = c
 	}
 	return out
 }
 
 const (
-	TimeLayout        = "2006-01-02 15:04:05"
+	TimeLayout = "2006-01-02 15:04:05"
 )

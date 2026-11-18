@@ -5,15 +5,12 @@ package tdns
 
 import (
 	"context"
-	"net"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/johanix/tdns/v2/cache"
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -76,13 +73,13 @@ func TestListenersDoNotWaitForTrustAnchorSetup(t *testing.T) {
 		"www." + fwdSecParent + " A": {Answer: www},
 	}, &open)
 
-	imr := newForwardTestImr(t, rootForward(addr, port))
-	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
-	imr.DnskeyCache = imr.Cache.DnskeyCache
-	conf := &Config{}
-	conf.Imr.TrustAnchorDS = parent.dnskey.ToDS(dns.SHA256).String()
-	imr.bootConf = conf.Imr // what Start reads
-	imr.loadConfiguredTrustAnchors(conf.Imr)
+	signerTestDnskeyCache(t) // the cache NewImr builds takes it: not the process-wide one
+	// NewImr loads the configured anchor, and keeps the config for what Start
+	// reads.
+	imr := newForwardTestImrWith(t, ImrEngineConf{
+		Forward:       rootForward(addr, port),
+		TrustAnchorDS: parent.dnskey.ToDS(dns.SHA256).String(),
+	}, ImrOptions{})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	listening := make(chan struct{})

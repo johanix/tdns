@@ -42,7 +42,7 @@ func TestTCPWeightNeverChoosesTCP(t *testing.T) {
 					t.Fatalf("%s, privacy %v: candidates %v hold Do53TCP", sig, level, got)
 				}
 			}
-			if _, ok := expectedShares(ts, ws, level)[core.TransportDo53TCP]; ok {
+			if _, ok := ExpectedShares(ts, ws, level)[core.TransportDo53TCP]; ok {
 				t.Errorf("%s, privacy %v: expected shares give Do53TCP a share", sig, level)
 			}
 		}
@@ -124,5 +124,3 @@ func TestStubSignalSplitsUDPAndTCP(t *testing.T) {
 		t.Errorf("stub signal %v (%s), want %v (config)", st.Received, st.Source, want)
 	}
 }
-
-

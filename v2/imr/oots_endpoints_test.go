@@ -375,7 +375,6 @@ func TestEndpointAddrTracker(t *testing.T) {
 	}
 }
 
-
 // A record with a target gives the ALPN order only the tokens it may carry:
 // do53 comes from a record with TargetName "." alone.
 func TestAlpnOrderTargetCarriesNoDo53(t *testing.T) {

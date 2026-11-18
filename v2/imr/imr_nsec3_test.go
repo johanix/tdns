@@ -205,8 +205,6 @@ func TestNSEC3MaxIterationsTuningDefault(t *testing.T) {
 	}
 }
 
-
-
 // startForwardUpstreamFunc is startSignedForwardUpstream with the answer to
 // each question from answer, which is called on the server's goroutine; nil
 // is SERVFAIL.
@@ -359,7 +357,7 @@ func TestADNSKEYDenialIsNotValidatedAgain(t *testing.T) {
 	zone := newFwdSecKey(t, fwdSecParent)
 	imr := n3Rig(t, func(*fwdSecKey) map[string]*dns.Msg { return map[string]*dns.Msg{} })
 	d := n3Denial(t, zone, dns.RcodeSuccess, n3RR(fwdSecParent, n3WWW, false, 0, 0, dns.TypeA, dns.TypeRRSIG))
-	sets := authorityRRsets(d.Ns)
+	sets := AuthorityRRsets(d.Ns)
 	imr.Cache.Set(n3WWW, dns.TypeDNSKEY, &cache.CachedRRset{Name: n3WWW, RRtype: dns.TypeDNSKEY, Rcode: uint8(dns.RcodeSuccess),
 		RRset: sets[0], NegAuthority: sets, Context: cache.ContextNoErrNoAns, State: cache.ValidationStateNone,
 		Expiration: time.Now().Add(time.Minute)})

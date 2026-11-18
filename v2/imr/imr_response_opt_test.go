@@ -120,5 +120,3 @@ func TestResponsePacks(t *testing.T) {
 		t.Fatalf("response does not pack: %v", err)
 	}
 }
-
-

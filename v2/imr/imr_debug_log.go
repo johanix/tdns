@@ -5,11 +5,9 @@ package imr
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"sync"
-	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"

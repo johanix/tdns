@@ -5,8 +5,6 @@ package imr
 
 import (
 	"context"
-	"errors"
-	"log/slog"
 	"net"
 	"slices"
 	"strconv"
@@ -22,9 +20,9 @@ import (
 
 func TestDsyncNamesAtTheRoot(t *testing.T) {
 	for _, tc := range []struct{ got, want string }{
-		{dsyncOwnerName("."), "_dsync."},
-		{dsyncOwnerName("example."), "_dsync.example."},
-		{dsyncOwnerName("example"), "_dsync.example."},
+		{DsyncOwnerName("."), "_dsync."},
+		{DsyncOwnerName("example."), "_dsync.example."},
+		{DsyncOwnerName("example"), "_dsync.example."},
 		{dsyncPerChildLookupName("se", "."), "se._dsync."},
 		{dsyncPerChildLookupName("child", "example."), "child._dsync.example."},
 		{dsyncPerChildLookupName("a.b", "example."), "a.b._dsync.example."},

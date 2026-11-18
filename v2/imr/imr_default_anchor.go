@@ -30,7 +30,7 @@ import (
 
 // AnchorConfigured reports whether the config names a trust anchor of its own,
 // in any of the three forms.
-func (ic *ImrEngineConf) AnchorConfigured() bool {
+func (ic *Config) AnchorConfigured() bool {
 	return strings.TrimSpace(ic.TrustAnchorDS) != "" ||
 		strings.TrimSpace(ic.TrustAnchorDNSKEY) != "" ||
 		strings.TrimSpace(ic.TrustAnchorFile) != ""
@@ -45,7 +45,7 @@ func (ic *ImrEngineConf) AnchorConfigured() bool {
 // resolver is whichever root that resolver uses, and nothing in the config
 // says which. Quarantined and dropped entries count too; a config that names
 // a private root is not a config for the IANA one because the entry is broken.
-func (ic *ImrEngineConf) NonDefaultRoot() string {
+func (ic *Config) NonDefaultRoot() string {
 	if hints := strings.TrimSpace(ic.RootHints); hints != "" {
 		return fmt.Sprintf("root-hints is set (%s)", hints)
 	}
@@ -70,7 +70,7 @@ func (ic *ImrEngineConf) NonDefaultRoot() string {
 // root anchor: when the config names no anchor, and the root is the IANA root
 // (NonDefaultRoot is ""). When the config names no anchor and the root may be
 // a private one, why says how; the resolver then has no anchor at all.
-func (ic *ImrEngineConf) RootAnchorFallback() (use bool, why string) {
+func (ic *Config) RootAnchorFallback() (use bool, why string) {
 	if ic.AnchorConfigured() {
 		return false, ""
 	}
@@ -125,9 +125,9 @@ func parseInlineAnchors(s string) ([]dns.RR, error) {
 	return rrs, nil
 }
 
-// parseInlineDSAnchors reads a trust-anchor-ds value: every RR in it must be
+// ParseInlineDSAnchors reads a trust-anchor-ds value: every RR in it must be
 // a DS.
-func parseInlineDSAnchors(s string) ([]*dns.DS, error) {
+func ParseInlineDSAnchors(s string) ([]*dns.DS, error) {
 	rrs, err := parseInlineAnchors(s)
 	if err != nil {
 		return nil, err
@@ -143,9 +143,9 @@ func parseInlineDSAnchors(s string) ([]*dns.DS, error) {
 	return dss, nil
 }
 
-// parseInlineDNSKEYAnchors reads a trust-anchor-dnskey value: every RR in it
+// ParseInlineDNSKEYAnchors reads a trust-anchor-dnskey value: every RR in it
 // must be a DNSKEY.
-func parseInlineDNSKEYAnchors(s string) ([]*dns.DNSKEY, error) {
+func ParseInlineDNSKEYAnchors(s string) ([]*dns.DNSKEY, error) {
 	rrs, err := parseInlineAnchors(s)
 	if err != nil {
 		return nil, err

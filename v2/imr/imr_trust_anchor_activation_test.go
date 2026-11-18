@@ -215,11 +215,11 @@ func TestEveryTrustAnchorIsProcessedWhenOneFails(t *testing.T) {
 	if err := os.WriteFile(file, []byte(otherDS.String()+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	conf := &Config{}
-	conf.Imr.TrustAnchorDS = rootDS.String()
-	conf.Imr.TrustAnchorFile = file
+	ic := Config{}
+	ic.TrustAnchorDS = rootDS.String()
+	ic.TrustAnchorFile = file
 
-	err := imr.initializeImrTrustAnchors(context.Background(), conf.Imr)
+	err := imr.initializeImrTrustAnchors(context.Background(), ic)
 	if err == nil {
 		t.Fatal("want an error: no anchor zone's DNSKEY RRset can be fetched")
 	}

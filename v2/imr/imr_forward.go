@@ -454,9 +454,9 @@ func buildForwardUpstream(zone string, u ImrUpstreamConf) (*ForwardUpstream, err
 		if u.CAFile != "" {
 			// Parsed now rather than at dial time so a missing or unparseable
 			// anchor is a config error, not a resolution failure hours later.
-			// loadCAPool memoizes by mtime, so pointing several upstreams at
+			// LoadCAPool memoizes by mtime, so pointing several upstreams at
 			// one anchor reads it once.
-			pool, err := loadCAPool(u.CAFile)
+			pool, err := LoadCAPool(u.CAFile)
 			if err != nil {
 				return nil, fmt.Errorf("forward zone %s: upstream %s: %v", zone, u.Addr, err)
 			}

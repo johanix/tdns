@@ -4,13 +4,7 @@
 package imr
 
 import (
-	"crypto/ecdsa"
-	"crypto/x509"
-	"encoding/pem"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -96,4 +90,3 @@ func TestRecordFailureSameInstantIsNotSuperseded(t *testing.T) {
 		t.Errorf("simultaneous failure not recorded: failing=%v failures=%d", up.failing, up.failures)
 	}
 }
-

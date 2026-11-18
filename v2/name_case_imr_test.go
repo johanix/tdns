@@ -13,10 +13,7 @@
 package tdns
 
 import (
-	"strings"
 	"testing"
-
-	"github.com/miekg/dns"
 )
 
 // ZoneMatchesSelector is the one predicate both IMR dump handlers filter with.

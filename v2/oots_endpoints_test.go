@@ -5,16 +5,12 @@
 package tdns
 
 import (
-	"context"
-	"reflect"
-	"strings"
 	"testing"
-	"time"
+
+	imrcore "github.com/johanix/tdns/v2/imr"
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/edns0"
-	"github.com/miekg/dns"
 )
 
 // stats auth-transports shows where a validated signal sent each transport,
@@ -22,7 +18,7 @@ import (
 func TestAuthTransportsReportRedirects(t *testing.T) {
 	imr := newTestImr(t)
 	server := imr.Cache.GetOrCreateAuthServer(pathNS)
-	installTransportMap(server, map[string]uint8{"dot": 30}, nil, map[core.Transport]string{core.TransportDoT: dotTarget},
+	imrcore.InstallTransportSignal(server, map[string]uint8{"dot": 30}, nil, map[core.Transport]string{core.TransportDoT: dotTarget},
 		cache.SignalViaLookup, []cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
 	server.CountAnswer(core.TransportDoT, cache.ClassNone, true)
 	server.CountAnswer(core.TransportDoT, cache.ClassNone, false)

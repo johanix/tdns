@@ -3,8 +3,6 @@
  */
 package imr
 
-import "fmt"
-
 type ImrOption uint8
 
 const (

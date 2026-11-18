@@ -178,7 +178,6 @@ func TestReplyWithoutQuestionFallsThroughToAnotherServer(t *testing.T) {
 	}
 }
 
-
 // startShapedUpstream is a recursive upstream on 127.0.0.1 that answers every
 // query with an A record for it, changed by shape, and counts the queries.
 func startShapedUpstream(t *testing.T, shape func(*dns.Msg)) (string, uint16, *atomic.Int32) {

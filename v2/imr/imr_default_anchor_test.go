@@ -5,7 +5,6 @@ package imr
 
 import (
 	"bytes"
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -15,7 +14,6 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // The IANA root DS records, as an operator would paste them.
@@ -29,9 +27,11 @@ const (
 func captureImrLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	prev, prevImr, prevDns := slog.Default(), lgImr, lgDns
+	l := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	slog.SetDefault(l)
+	SetLoggers(l, l)
+	t.Cleanup(func() { slog.SetDefault(prev); SetLoggers(prevImr, prevDns) })
 	return &buf
 }
 
@@ -50,7 +50,7 @@ func dsKeyTags(dss []*dns.DS) []uint16 {
 func TestNoAnchorCompiledInHintsUsesCompiledInRootAnchor(t *testing.T) {
 	logbuf := captureImrLog(t)
 	imr := newForwardTestImr(t, nil)
-	ic := ImrEngineConf{}
+	ic := Config{}
 
 	for range 2 {
 		dsByName, keysByName, err := imr.parseTrustAnchorsFromConfig(ic)
@@ -90,12 +90,12 @@ func TestNoAnchorCompiledInHintsUsesCompiledInRootAnchor(t *testing.T) {
 func TestNoAnchorNonDefaultRootGetsNoAnchor(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		ic     ImrEngineConf
+		ic     Config
 		reason string
 	}{
-		{"root-hints file", ImrEngineConf{RootHints: "/etc/tdns/root.hints"}, "root-hints is set"},
-		{"forwarded root", ImrEngineConf{Forward: []ImrForwardConf{fwdConf(".", "192.0.2.53", 0)}}, "root is forwarded"},
-		{"stubbed root", ImrEngineConf{Stubs: []ImrStubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}, "root is a stub zone"},
+		{"root-hints file", Config{RootHints: "/etc/tdns/root.hints"}, "root-hints is set"},
+		{"forwarded root", Config{Forward: []ImrForwardConf{fwdConf(".", "192.0.2.53", 0)}}, "root is forwarded"},
+		{"stubbed root", Config{Stubs: []ImrStubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}, "root is a stub zone"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logbuf := captureImrLog(t)
@@ -124,7 +124,7 @@ func TestNoAnchorNonDefaultRootGetsNoAnchor(t *testing.T) {
 	}
 
 	// A forward or stub below the root leaves the IANA root in place.
-	ic := ImrEngineConf{
+	ic := Config{
 		Forward: []ImrForwardConf{fwdConf("fwd.example.", "192.0.2.53", 0)},
 		Stubs:   []ImrStubConf{stubConf("stub.example.", "ns.stub.example.", "192.0.2.1")},
 	}
@@ -132,7 +132,7 @@ func TestNoAnchorNonDefaultRootGetsNoAnchor(t *testing.T) {
 		t.Errorf("a forward and a stub below the root turned the compiled-in anchor off: %s", why)
 	}
 	// And a configured anchor is never replaced by it.
-	ic = ImrEngineConf{TrustAnchorDS: rootDS20326}
+	ic = Config{TrustAnchorDS: rootDS20326}
 	if use, _ := ic.RootAnchorFallback(); use {
 		t.Error("the compiled-in anchor is used although the config names one")
 	}
@@ -154,7 +154,7 @@ func TestTrustAnchorDSRecords(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			imr := newForwardTestImr(t, nil)
-			dsByName, _, err := imr.parseTrustAnchorsFromConfig(ImrEngineConf{TrustAnchorDS: tc.value})
+			dsByName, _, err := imr.parseTrustAnchorsFromConfig(Config{TrustAnchorDS: tc.value})
 			if err != nil {
 				t.Fatalf("parseTrustAnchorsFromConfig: %v", err)
 			}
@@ -169,7 +169,7 @@ func TestTrustAnchorDSRecords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dss, err := parseInlineDSAnchors(rootDS20326)
+	dss, err := ParseInlineDSAnchors(rootDS20326)
 	if err != nil || len(dss) != 1 || dss[0].String() != rr.String() {
 		t.Errorf("single DS: got %v (err %v), want %s", dss, err, rr)
 	}
@@ -188,7 +188,7 @@ func TestTrustAnchorDSRejectsBadEntries(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			imr := newForwardTestImr(t, nil)
-			dsByName, keysByName, err := imr.parseTrustAnchorsFromConfig(ImrEngineConf{TrustAnchorDS: tc.value})
+			dsByName, keysByName, err := imr.parseTrustAnchorsFromConfig(Config{TrustAnchorDS: tc.value})
 			if err == nil {
 				t.Fatalf("no error; got DS %v, DNSKEY %v", dsByName, keysByName)
 			}
@@ -204,14 +204,14 @@ func TestTrustAnchorDNSKEYRecords(t *testing.T) {
 	const k1 = ". IN DNSKEY 257 3 15 dem0H2M22a8CDAe0PDZoGBBCBB2fHJ1fe39FkhNToAA="
 	const k2 = ". IN DNSKEY 257 3 15 l02Woi0iS8Aa25FQkUd9RMzZHJpBoRQwAQEX1SxZJA4="
 	imr := newForwardTestImr(t, nil)
-	_, keysByName, err := imr.parseTrustAnchorsFromConfig(ImrEngineConf{TrustAnchorDNSKEY: k1 + "\n" + k2})
+	_, keysByName, err := imr.parseTrustAnchorsFromConfig(Config{TrustAnchorDNSKEY: k1 + "\n" + k2})
 	if err != nil {
 		t.Fatalf("parseTrustAnchorsFromConfig: %v", err)
 	}
 	if len(keysByName["."]) != 2 {
 		t.Errorf("want 2 root DNSKEY anchors, got %v", keysByName)
 	}
-	if _, _, err := imr.parseTrustAnchorsFromConfig(ImrEngineConf{TrustAnchorDNSKEY: rootDS20326}); err == nil {
+	if _, _, err := imr.parseTrustAnchorsFromConfig(Config{TrustAnchorDNSKEY: rootDS20326}); err == nil {
 		t.Error("a DS in trust-anchor-dnskey was accepted")
 	}
 }
@@ -232,7 +232,7 @@ func TestTrustAnchorsGroupedByCanonicalOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	imr := newForwardTestImr(t, nil)
-	dsByName, keysByName, err := imr.parseTrustAnchorsFromConfig(ImrEngineConf{
+	dsByName, keysByName, err := imr.parseTrustAnchorsFromConfig(Config{
 		TrustAnchorDS:     dsUpper + "\n" + dsLower,
 		TrustAnchorDNSKEY: dkMixed,
 		TrustAnchorFile:   file,
@@ -251,8 +251,6 @@ func TestTrustAnchorsGroupedByCanonicalOwner(t *testing.T) {
 	}
 }
 
-
-
 // Forwards and stubs are reloadable, the anchors are not: a reload that adds
 // or removes a "." forward or stub changes which anchor an anchorless config
 // would get, and says that a restart applies it.
@@ -261,10 +259,10 @@ func TestRestartRequiredWhenTheDefaultRootAnchorChanges(t *testing.T) {
 	hasKey := func(keys []string) bool {
 		return slices.ContainsFunc(keys, func(k string) bool { return strings.HasPrefix(k, key) })
 	}
-	plain := ImrEngineConf{}
-	fwdRoot := ImrEngineConf{Forward: []ImrForwardConf{fwdConf(".", "192.0.2.53", 0)}}
-	stubRoot := ImrEngineConf{Stubs: []ImrStubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}
-	fwdBelow := ImrEngineConf{Forward: []ImrForwardConf{fwdConf("fwd.example.", "192.0.2.53", 0)}}
+	plain := Config{}
+	fwdRoot := Config{Forward: []ImrForwardConf{fwdConf(".", "192.0.2.53", 0)}}
+	stubRoot := Config{Stubs: []ImrStubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}
+	fwdBelow := Config{Forward: []ImrForwardConf{fwdConf("fwd.example.", "192.0.2.53", 0)}}
 
 	if keys := imrRestartRequiredKeys(plain, fwdRoot); !hasKey(keys) {
 		t.Errorf("adding a . forward: restart-required keys %v, want %q", keys, key)
@@ -278,7 +276,7 @@ func TestRestartRequiredWhenTheDefaultRootAnchorChanges(t *testing.T) {
 	if keys := imrRestartRequiredKeys(fwdRoot, stubRoot); len(keys) != 0 {
 		t.Errorf("a . forward replaced by a . stub: restart-required keys %v, want none", keys)
 	}
-	anchored := ImrEngineConf{TrustAnchorDS: rootDS20326}
+	anchored := Config{TrustAnchorDS: rootDS20326}
 	anchoredFwd := anchored
 	anchoredFwd.Forward = fwdRoot.Forward
 	if keys := imrRestartRequiredKeys(anchored, anchoredFwd); len(keys) != 0 {

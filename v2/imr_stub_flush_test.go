@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
@@ -44,19 +43,18 @@ func newStubFlushResolver(t *testing.T) *stubFlushResolver {
 	stubAddr, stubPort, stopStub := startStubAuthServer(t, stubFlushChild)
 	t.Cleanup(stopStub)
 
-	imr := newForwardTestImr(t, rootForward(upAddr, upPort))
+	imr := newForwardTestImrWith(t, ImrEngineConf{
+		Forward: rootForward(upAddr, upPort),
+		Stubs: []ImrStubConf{{Zone: stubFlushChild, Servers: []cache.AuthServer{
+			{Name: "ns." + stubFlushChild, Addrs: []string{stubAddr}, Alpn: []string{"do53"}},
+		}}},
+	}, ImrOptions{})
 	imr.FamilyTracker = cache.NewFamilyTracker(10*time.Minute, 10*time.Minute, 30*time.Second, 5)
 	// The stub's server is reached through the cache's shared per-transport
 	// clients (fixed port); point them at the stub double. The forward has
 	// its own client, built for the upstream's port.
 	imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, stubPort, nil)
 	imr.Cache.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, stubPort, nil)
-	if err := imr.Cache.AddStub(stubFlushChild, []cache.AuthServer{
-		{Name: "ns." + stubFlushChild, Addrs: []string{stubAddr}, Alpn: []string{"do53"}},
-	}); err != nil {
-		t.Fatalf("AddStub: %v", err)
-	}
-	imr.setZoneTable(imr.ForwardZones(), []string{stubFlushChild}, nil)
 
 	saved := Globals.ImrEngine
 	Globals.ImrEngine = imr
@@ -133,8 +131,7 @@ func TestLostStubFallsBackToTheForward(t *testing.T) {
 	if err := s.imr.Cache.AddStub(stubFlushChild, []cache.AuthServer{{Name: "ns." + stubFlushChild, Addrs: []string{"192.0.2.53"}}}); err != nil {
 		t.Fatalf("AddStub: %v", err)
 	}
-	if fz := s.imr.forwardZoneFor("www." + stubFlushChild); fz != nil {
-		t.Errorf("with the stub's servers back, www.%s is still forwarded to %s", stubFlushChild, fz.Zone)
+	if s.imr.Cache.Forwarded("www."+stubFlushChild, dns.TypeA) {
+		t.Errorf("with the stub's servers back, www.%s is still forwarded", stubFlushChild)
 	}
 }
-

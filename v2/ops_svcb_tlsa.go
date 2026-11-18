@@ -3,12 +3,10 @@ package tdns
 import (
 	"encoding/hex"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/miekg/dns"
 )
-
 
 // MarshalTLSAToString renders a TLSA record to the "usage selector matching data" representation.
 func MarshalTLSAToString(tlsa *dns.TLSA) (string, error) {

@@ -12,19 +12,16 @@
 package imr
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"os"
 	"reflect"
 	"sort"
-	"strings"
 	"testing"
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
-	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -290,15 +287,6 @@ func TestSignalTokenFilter(t *testing.T) {
 	}
 }
 
-
-
-
-
-
-
-
-
-
 // The ALPN fallback is a received path too: alpn tokens that are not signal
 // tokens (do53-tcp, h2) are skipped, and an ALPN list naming none is not
 // applied. A tcp in the list is read, and not chosen. Case does not matter.
@@ -333,7 +321,6 @@ func TestReceivedALPNSignalIgnoresOtherTokens(t *testing.T) {
 		t.Errorf("an ALPN list naming no signal token was applied: %+v", got)
 	}
 }
-
 
 // An SVCB whose oots names no signal token is ignored whole: its alpn is not
 // read in place of the oots, on any of the three paths an SVCB arrives by

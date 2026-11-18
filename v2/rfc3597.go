@@ -7,11 +7,9 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"strings"
 
 	"github.com/miekg/dns"
 )
-
 
 func (zd *ZoneData) FetchParentData(imr *Imr) error {
 	parent, err := zd.ResolveParentVia(imr)

@@ -8,15 +8,10 @@ package tdns
 
 import (
 	"context"
-	"crypto"
-	"net"
 	"testing"
 	"time"
 
 	"github.com/johanix/tdns/v2/cache"
-	core "github.com/johanix/tdns/v2/core"
-	edns0 "github.com/johanix/tdns/v2/edns0"
-	"github.com/miekg/dns"
 )
 
 // The key decodes as a duration, and a changed value is reported as needing a

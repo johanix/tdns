@@ -6,15 +6,6 @@
 
 package imr
 
-import (
-	"fmt"
-	"strings"
-
-	"github.com/miekg/dns"
-
-	algorithms "github.com/johanix/tdns/v2/algorithms"
-)
-
 // DNSKEYTransportPolicy selects how the IMR chooses a transport for DNSKEY
 // queries. See DnssecConf.DNSKEYTransport for the semantics of each value.
 type DNSKEYTransportPolicy string

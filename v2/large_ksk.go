@@ -15,7 +15,6 @@ import (
 	algorithms "github.com/johanix/tdns/v2/algorithms"
 )
 
-
 // buildLargeAlgorithmSet resolves the dnssec.large-algorithms entries into the
 // derived codepoint lookup. Each entry is either an exact algorithm name
 // (e.g. "MLDSA44") or a name prefix with a trailing "*" (e.g. "MLDSA*") that
@@ -89,8 +88,6 @@ func resolveLargeAlgorithms(names []string, catalog map[string]uint8) (map[uint8
 	}
 	return m, nil
 }
-
-
 
 // parseDNSKEYTransportPolicy validates the configured dnskey-query-transport
 // value. An empty value defaults to use_ds_signal (the backward-compatible

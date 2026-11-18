@@ -26,10 +26,7 @@ import (
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
-
-var lgDns = Logger("dns")
 
 // ErrPrivacyUnavailable is returned when the client asked for strict privacy
 // (PRIVACY option, level 2) and no encrypted transport was available to carry
@@ -74,7 +71,6 @@ func privacyUnavailable(zone, format string, args ...any) error {
 // 2. Find the address of each NS
 // 3. Query child NS for <qname, qtype>
 
-
 // This is mostly used for debugging of the DNSSEC validation code
 // func (zd *ZoneData) LookupAndValidateRRset(qname string, qtype uint16) (string, error) {
 //	zd.Logger.Printf("LookupAndValidateRRset: Looking up %s %s in DNS", qname, dns.TypeToString[qtype])
@@ -96,12 +92,6 @@ func privacyUnavailable(zone, format string, args ...any) error {
 //}
 
 // XXX: This should not be a method of ZoneData, but rather a function.
-
-
-
-
-
-
 
 // authServerAddr is ns as AuthDNSQuery dials it: ns itself when it carries a
 // port, with port 53 added when it does not. The port is told from the address
@@ -1314,11 +1304,11 @@ func transportPool(transports []core.Transport, weights map[core.Transport]uint8
 	return append(pool, encrypted...)
 }
 
-// expectedShares is the share of first picks, in percent, that
+// ExpectedShares is the share of first picks, in percent, that
 // candidateTransports gives each transport of a server with this signal under
 // privacy: the pool's weights, normalised. With an empty pool the pick is Do53
 // (100) unless privacy is strict, where the server is not used at all (nil).
-func expectedShares(transports []core.Transport, weights map[core.Transport]uint8, privacy edns0.PrivacyLevel) map[core.Transport]uint8 {
+func ExpectedShares(transports []core.Transport, weights map[core.Transport]uint8, privacy edns0.PrivacyLevel) map[core.Transport]uint8 {
 	pool := transportPool(transports, weights, privacy)
 	if len(pool) == 0 {
 		if privacy == edns0.PrivacyStrict {
@@ -2091,10 +2081,10 @@ func walkErr(zoneName, lastNS, lastAddr string, lastTransport core.Transport, at
 
 // parseOwnerName extracts the base server name from an owner name, handling both
 // direct nameserver names and OOTS transport signal owners (_dns.{nsname}).
-// oobTransportPrefix is the owner-name prefix an out-of-bailiwick transport
+// OOBTransportPrefix is the owner-name prefix an out-of-bailiwick transport
 // signal lives under (draft-ietf-dnsop-oots). Named so the test and the strip
 // cannot drift apart -- they did.
-const oobTransportPrefix = "_dns."
+const OOBTransportPrefix = "_dns."
 
 // Returns: baseName, isOOTSOwner, originalOwner
 func parseOwnerName(owner string) (baseName string, isOOTSOwner bool, originalOwner string) {
@@ -2105,9 +2095,9 @@ func parseOwnerName(owner string) (baseName string, isOOTSOwner bool, originalOw
 	// prefix, so baseName stayed the whole owner and every lookup on it missed.
 	// Slicing preserves the leftover case, which is the point: the base name is
 	// a nameserver name, and we serve back what arrived.
-	if strings.HasPrefix(core.CanonicalizeName(owner), oobTransportPrefix) {
+	if strings.HasPrefix(core.CanonicalizeName(owner), OOBTransportPrefix) {
 		isOOTSOwner = true
-		baseName = owner[len(oobTransportPrefix):]
+		baseName = owner[len(OOBTransportPrefix):]
 	} else {
 		baseName = owner
 	}
@@ -2827,10 +2817,6 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 // pickTransport removed in W6 cleanup; its logic was absorbed into
 // candidateTransports + the prioritizeServers tuple-expansion loop.
 
-
-
-
-
 // Helpers
 
 // authQueryMsg is a query for an authoritative server: the resolver's own
@@ -3322,11 +3308,11 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 		return
 	}
 	owner := dns.Fqdn(qname)
-	if !strings.HasPrefix(core.CanonicalizeName(owner), oobTransportPrefix) {
+	if !strings.HasPrefix(core.CanonicalizeName(owner), OOBTransportPrefix) {
 		return
 	}
 	// Sliced, not TrimPrefix'd: see parseOwnerName.
-	base := owner[len(oobTransportPrefix):]
+	base := owner[len(OOBTransportPrefix):]
 	if base == "" {
 		return
 	}
@@ -3496,7 +3482,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		}
 		// With the authority section: an answer synthesized from a wildcard
 		// is validated with the proof that came with it, which is kept.
-		verdict, err := imr.Cache.ValidateAnswer(ctx, &rrset, authorityRRsets(r.Ns), imr.IterativeDNSQueryFetcher())
+		verdict, err := imr.Cache.ValidateAnswer(ctx, &rrset, AuthorityRRsets(r.Ns), imr.IterativeDNSQueryFetcher())
 		vstate = verdict.State
 		if err != nil {
 			lgDns.Error("handleAnswer: failed to validate RRset", "rrset", err)
@@ -4249,11 +4235,11 @@ func classifyResponse(qname string, qtype uint16, r *dns.Msg) responseKind {
 	}
 }
 
-// authorityRRsets groups the records of an authority section into RRsets, in
+// AuthorityRRsets groups the records of an authority section into RRsets, in
 // the order each owner and type first appears, each with the RRSIGs that cover
 // it. A negative answer's proof is read this way: the SOA, the NSEC or NSEC3
 // records, and their signatures, as cache.ValidateNegativeResponse takes them.
-func authorityRRsets(rrs []dns.RR) []*core.RRset {
+func AuthorityRRsets(rrs []dns.RR) []*core.RRset {
 	sets := make(map[string]*core.RRset)
 	var out []*core.RRset
 	setFor := func(name string, rrtype uint16) *core.RRset {
@@ -4312,7 +4298,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	// The authority section is the proof of the denial. Its first SOA names
 	// the zone that denies. How long the denial is cached, the cache decides
 	// from the SOA and the proof (RFC 2308 section 5; cache entryLifetime).
-	negAuthority := authorityRRsets(r.Ns)
+	negAuthority := AuthorityRRsets(r.Ns)
 	var (
 		soaOwner string
 		soarrset *core.RRset
@@ -4534,9 +4520,9 @@ func (imr *Imr) negativeWithoutSOA(qname string, qtype uint16, r *dns.Msg, negCo
 	return negContext, r.MsgHdr.Rcode, true
 }
 
-// maxCNAMEChain is the most CNAMEs one answer follows, as BIND's default
+// MaxCNAMEChain is the most CNAMEs one answer follows, as BIND's default
 // max-query-restarts.
-const maxCNAMEChain = 11
+const MaxCNAMEChain = 11
 
 // cnameChainKey carries, on the context of a CNAME chase, the chain it is
 // following: canonical names, the query name first and the current target
@@ -4547,7 +4533,7 @@ type cnameChainKey struct{}
 // chain on ctx when owner is its last name. Any other chase -- say, the lookup
 // of a nameserver's address made while resolving one link -- is a chain of its
 // own and starts from owner. It fails on a name the chain has already visited,
-// and on a chain of more than maxCNAMEChain CNAMEs.
+// and on a chain of more than MaxCNAMEChain CNAMEs.
 //
 // The chain has to be carried on the context because the chase nests: the
 // query for each target goes through IterativeDNSQuery and handleAnswer, which
@@ -4562,8 +4548,8 @@ func extendCNAMEChain(ctx context.Context, owner, target string) ([]string, erro
 	if slices.Contains(chain, t) {
 		return nil, fmt.Errorf("CNAME loop: %s leads back to %s", owner, target)
 	}
-	if len(chain) > maxCNAMEChain {
-		return nil, fmt.Errorf("CNAME chain from %s is longer than %d", chain[0], maxCNAMEChain)
+	if len(chain) > MaxCNAMEChain {
+		return nil, fmt.Errorf("CNAME chain from %s is longer than %d", chain[0], MaxCNAMEChain)
 	}
 	return append(slices.Clone(chain), t), nil
 }

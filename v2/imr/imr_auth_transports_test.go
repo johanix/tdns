@@ -5,17 +5,9 @@
 package imr
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
@@ -64,7 +56,7 @@ func TestReceivedSignalIsWhatTheServerSaid(t *testing.T) {
 	}
 }
 
-// expectedShares mirrors candidateTransports: over many names, the first
+// ExpectedShares mirrors candidateTransports: over many names, the first
 // picks fall in the proportions it states. #854's example signal.
 func TestExpectedSharesMatchSelection(t *testing.T) {
 	server := cache.NewAuthServer("ns.example.")
@@ -78,7 +70,7 @@ func TestExpectedSharesMatchSelection(t *testing.T) {
 		{edns0.PrivacyOpportunistic, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDoQ: 50}},
 		{edns0.PrivacyStrict, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDoQ: 50}},
 	} {
-		got := expectedShares(transports, weights, tc.level)
+		got := ExpectedShares(transports, weights, tc.level)
 		if len(got) != len(tc.want) {
 			t.Errorf("%s: expected %v, want %v (DoH's weight of 1 is not used)", tc.level, got, tc.want)
 			continue

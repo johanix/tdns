@@ -13,10 +13,6 @@ package imr
 
 import (
 	"fmt"
-	"os"
-	"sort"
-	"strings"
-	"sync"
 	"time"
 )
 

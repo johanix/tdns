@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -138,7 +137,6 @@ func TestResolverFollowsTheTestClock(t *testing.T) {
 	}
 }
 
-
 // Starting the resolver again, after a failed start, keeps the clock running.
 func TestFaketimeRestartKeepsTheClock(t *testing.T) {
 	path := startTestDataClock(t, faketime2010)
@@ -153,8 +151,8 @@ func TestFaketimeRestartKeepsTheClock(t *testing.T) {
 
 // A changed testing block needs a restart.
 func TestTestingChangeNeedsARestart(t *testing.T) {
-	boot := ImrEngineConf{}
-	cur := ImrEngineConf{}
+	boot := Config{}
+	cur := Config{}
 	cur.Testing.Faketime = true
 	if !slices.Contains(imrRestartRequiredKeys(boot, cur), "imrengine.testing") {
 		t.Errorf("turning faketime on: restart-required keys %v; want imrengine.testing", imrRestartRequiredKeys(boot, cur))
@@ -164,5 +162,32 @@ func TestTestingChangeNeedsARestart(t *testing.T) {
 	cur.Testing.Faketime = false
 	if keys := imrRestartRequiredKeys(boot, cur); slices.Contains(keys, "imrengine.testing") {
 		t.Errorf("the same testing block: restart-required keys %v", keys)
+	}
+}
+
+// The test clock needs its file, cannot be combined with a root refresh, and
+// implies none. (TestFaketimeActivation in tdns's tests: a resolver asked for
+// it without a file does not start.)
+func TestFaketimeActivationDataClock(t *testing.T) {
+	t.Cleanup(func() { cache.SetDataClock(nil) })
+	t.Setenv("FAKETIME_TIMESTAMP_FILE", "")
+	on, off := true, false
+	ctx := context.Background()
+
+	for name, tc := range map[string]ImrTestingConf{
+		"no file named":             {Faketime: true},
+		"a missing file":            {FaketimeFile: filepath.Join(t.TempDir(), "missing")},
+		"root-refresh beside it":    {Faketime: true, FaketimeFile: startTestDataClock(t, faketime2010), RootRefresh: &on},
+		"root-refresh without file": {Faketime: true, RootRefresh: &on},
+	} {
+		cache.SetDataClock(nil)
+		if err := startDataClock(ctx, tc); err == nil {
+			t.Errorf("%s: the clock started", name)
+		}
+	}
+
+	if !(ImrTestingConf{Faketime: true}).SkipRootRefresh() || !(ImrTestingConf{RootRefresh: &off}).SkipRootRefresh() ||
+		(ImrTestingConf{}).SkipRootRefresh() || (ImrTestingConf{RootRefresh: &on}).SkipRootRefresh() {
+		t.Error("the root refresh is off exactly when root-refresh is false or the test clock is on")
 	}
 }

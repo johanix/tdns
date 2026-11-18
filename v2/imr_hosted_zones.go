@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 
-	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -174,9 +173,12 @@ type localResponseWriter struct{ msg *dns.Msg }
 
 var localResponseAddr = &net.UDPAddr{IP: net.IPv6loopback, Port: 53}
 
-func (w *localResponseWriter) LocalAddr() net.Addr       { return localResponseAddr }
-func (w *localResponseWriter) RemoteAddr() net.Addr      { return localResponseAddr }
+func (w *localResponseWriter) LocalAddr() net.Addr { return localResponseAddr }
+
+func (w *localResponseWriter) RemoteAddr() net.Addr { return localResponseAddr }
+
 func (w *localResponseWriter) WriteMsg(m *dns.Msg) error { w.msg = m; return nil }
+
 func (w *localResponseWriter) Write(b []byte) (int, error) {
 	m := new(dns.Msg)
 	if err := m.Unpack(b); err != nil {
@@ -185,7 +187,11 @@ func (w *localResponseWriter) Write(b []byte) (int, error) {
 	w.msg = m
 	return len(b), nil
 }
-func (w *localResponseWriter) Close() error        { return nil }
-func (w *localResponseWriter) TsigStatus() error   { return nil }
+
+func (w *localResponseWriter) Close() error { return nil }
+
+func (w *localResponseWriter) TsigStatus() error { return nil }
+
 func (w *localResponseWriter) TsigTimersOnly(bool) {}
-func (w *localResponseWriter) Hijack()             {}
+
+func (w *localResponseWriter) Hijack() {}

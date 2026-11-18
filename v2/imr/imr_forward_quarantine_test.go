@@ -19,7 +19,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-
 // A quarantined zone answers SERVFAIL without an exchange, and without
 // falling back to iteration. The nil Client on the placeholder upstream is
 // the proof that nothing dialled: forwardQuery would panic if it tried.
@@ -116,7 +115,7 @@ func TestForwardQuarantineNotCarriedAcrossTrustADRemoval(t *testing.T) {
 // even when it was carried across a reload with a stale failing flag.
 func TestForwardQuarantinedUpstreamIsNotAlsoUnreachable(t *testing.T) {
 	imr := newReloadTestImr(t)
-	imr.errorRegistry = NewServerErrorRegistry()
+	imr.errorRegistry = newTestErrorSink()
 	forwards, _ := BuildImrForwards([]ImrForwardConf{
 		{Zone: "mix.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot"},
@@ -152,7 +151,7 @@ func TestForwardQuarantinedUpstreamIsNotAlsoUnreachable(t *testing.T) {
 // A reload that fixes the config clears the aggregate the startup path set.
 func TestForwardQuarantineAggregateClears(t *testing.T) {
 	imr := newReloadTestImr(t)
-	imr.errorRegistry = NewServerErrorRegistry()
+	imr.errorRegistry = newTestErrorSink()
 	forwards, _ := BuildImrForwards([]ImrForwardConf{
 		{Zone: "a.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
 	})
@@ -181,7 +180,7 @@ func TestForwardProbeReportsQuarantinedWithoutDialling(t *testing.T) {
 		}},
 	})
 	imr.setZoneTable(forwards, nil, map[string]string{})
-	imr.errorRegistry = NewServerErrorRegistry()
+	imr.errorRegistry = newTestErrorSink()
 
 	results, err := imr.ProbeForwardUpstreamsReport(context.Background(), "")
 	if err != nil {

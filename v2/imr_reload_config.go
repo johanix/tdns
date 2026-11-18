@@ -26,16 +26,7 @@
 package tdns
 
 import (
-	"context"
-	"fmt"
-	"slices"
-	"sort"
 	"strings"
-	"time"
-
-	cache "github.com/johanix/tdns/v2/cache"
-	core "github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
 // applyImrEngineReload hands the configured imrengine: stub and forward zones
@@ -80,7 +71,7 @@ func (conf *Config) applyImrEngineReload() (ImrZoneReloadResult, error) {
 	// zone-reload path conf.Imr still holds the boot values for everything
 	// except stubs and forwards, so that comparison would compare the boot
 	// config with itself and never report anything.
-	res.RestartRequired = imrRestartRequiredKeys(imr.bootConf, *block)
+	res.RestartRequired = imr.RestartRequiredKeys(*block)
 	if len(res.RestartRequired) > 0 {
 		lgImr.Warn("imrengine keys changed but are not reloadable; the resolver keeps running on the values it started with",
 			"keys", strings.Join(res.RestartRequired, ", "))

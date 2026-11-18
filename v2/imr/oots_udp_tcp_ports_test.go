@@ -14,7 +14,6 @@ import (
 	"net"
 	"slices"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -166,8 +165,6 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 		t.Error("prioritizeServers does not offer Do53 on a changed port")
 	}
 }
-
-
 
 // A DNSKEY bypass attempt is deduplicated by endpoint and transport: two
 // servers on one address that signal different tcp ports are two attempts.

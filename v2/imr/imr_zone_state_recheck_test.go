@@ -115,5 +115,3 @@ func TestZoneStateRecheckTuningDefault(t *testing.T) {
 		t.Errorf("default zone-state-recheck is %s, want %s", tc.ZoneStateRecheck, cache.DefaultZoneStateRecheck)
 	}
 }
-
-

@@ -7,9 +7,7 @@ import (
 	"context"
 	"path/filepath"
 	"runtime/pprof"
-	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -95,7 +93,3 @@ func TestNewImrReturnsThePrimingError(t *testing.T) {
 		t.Error("a failed NewImr published an Imr")
 	}
 }
-
-
-
-

@@ -7,14 +7,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/x509"
 	"encoding/pem"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/miekg/dns"
 )
 
 // loadImrListenerCert: mutually exclusive checks, one accurate reason each.

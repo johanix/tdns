@@ -56,7 +56,7 @@ func TestProbeForwardUpstreamsReport(t *testing.T) {
 		}},
 		{Zone: "other.example.", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
 	})
-	imr.errorRegistry = NewServerErrorRegistry()
+	imr.errorRegistry = newTestErrorSink()
 	for _, fz := range imr.ForwardZones() {
 		for _, up := range fz.Upstreams {
 			c := up.Client.(*core.DNSClient)
@@ -119,7 +119,7 @@ func TestProbeCancellation(t *testing.T) {
 	imr := newForwardTestImr(t, []ImrForwardConf{
 		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
 	})
-	imr.errorRegistry = NewServerErrorRegistry()
+	imr.errorRegistry = newTestErrorSink()
 
 	// A stub zone pointed at the same double, so the cancelled stub probe
 	// is exercised against a server that WOULD answer.

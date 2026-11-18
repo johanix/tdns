@@ -25,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -546,7 +548,7 @@ func daneTestConf(t *testing.T, leafCert *x509.Certificate, port uint16, vstate 
 	rrcache.StoreTLSAForServer("ns1.test.", tlsa.Hdr.Name, rrset, vstate)
 
 	conf := &Config{}
-	conf.Internal.ImrEngine = &Imr{Cache: rrcache, RequireDnssecValidation: requireSecure}
+	conf.Internal.ImrEngine = &Imr{Imr: &imrcore.Imr{Cache: rrcache, RequireDnssecValidation: requireSecure}}
 	return conf
 }
 

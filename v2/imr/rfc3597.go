@@ -6,7 +6,6 @@ package imr
 import (
 	"context"
 	"fmt"
-	"net"
 	"strings"
 
 	"github.com/miekg/dns"

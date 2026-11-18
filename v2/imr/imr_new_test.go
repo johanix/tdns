@@ -6,14 +6,11 @@ package imr
 import (
 	"context"
 	"path/filepath"
-	"runtime/pprof"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
-	cache "github.com/johanix/tdns/v2/cache"
 	"github.com/miekg/dns"
 )
 
@@ -28,13 +25,20 @@ func (s *recordingSink) note(c string) {
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, c)
 }
-func (s *recordingSink) SetImrForwardZoneError(msg string)           { s.note("set-zone " + msg) }
-func (s *recordingSink) ClearImrForwardZoneError()                   { s.note("clear-zone") }
-func (s *recordingSink) SetImrForwardUpstreamError(msg string)       { s.note("set-upstream " + msg) }
-func (s *recordingSink) ClearImrForwardUpstreamError()               { s.note("clear-upstream") }
+
+func (s *recordingSink) SetImrForwardZoneError(msg string) { s.note("set-zone " + msg) }
+
+func (s *recordingSink) ClearImrForwardZoneError() { s.note("clear-zone") }
+
+func (s *recordingSink) SetImrForwardUpstreamError(msg string) { s.note("set-upstream " + msg) }
+
+func (s *recordingSink) ClearImrForwardUpstreamError() { s.note("clear-upstream") }
+
 func (s *recordingSink) SetImrForwardUpstreamConfigError(msg string) { s.note("set-config " + msg) }
-func (s *recordingSink) ClearImrForwardUpstreamConfigError()         { s.note("clear-config") }
-func (s *recordingSink) List() []ServerError                         { return nil }
+
+func (s *recordingSink) ClearImrForwardUpstreamConfigError() { s.note("clear-config") }
+
+func (s *recordingSink) List() []ServerError { return nil }
 
 // The forward table's quarantine goes to the sink NewImr was given, whatever it
 // is; a nil sink, a typed nil registry and the daemon's registry are all fine.
@@ -42,15 +46,15 @@ func TestNewImrReportsToTheErrorSink(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
-	ic := ImrEngineConf{Forward: append(rootForward(addr, port),
+	ic := Config{Forward: append(rootForward(addr, port),
 		// trust-ad over plaintext: quarantined, not fatal.
 		ImrForwardConf{Zone: "bad.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.9"}}})}
 
-	rec, reg := &recordingSink{}, NewServerErrorRegistry()
+	rec, reg := &recordingSink{}, newTestErrorSink()
 	for _, tc := range []struct {
 		name string
 		sink ErrorSink
-	}{{"recording sink", rec}, {"registry", reg}, {"nil sink", nil}, {"typed nil registry", (*ServerErrorRegistry)(nil)}} {
+	}{{"recording sink", rec}, {"registry", reg}, {"nil sink", nil}, {"typed nil registry", (*testErrorSink)(nil)}} {
 		imr, err := NewImr(context.Background(), ic, ImrOptions{Errors: tc.sink, Quiet: true})
 		if err != nil {
 			t.Fatalf("%s: NewImr: %v", tc.name, err)
@@ -80,7 +84,7 @@ func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 	const zone = "anchor.fwd.example."
-	ic := ImrEngineConf{
+	ic := Config{
 		Forward:       rootForward(addr, port),
 		TrustAnchorDS: zone + " 3600 IN DS 12345 13 2 " + strings.Repeat("ab", 32),
 	}
@@ -104,5 +108,35 @@ func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 	_ = imr.initializeImrTrustAnchors(context.Background(), imr.bootConf) // the upstream has no such key
 	if len(logr.find(zone, dns.TypeDNSKEY)) == 0 {
 		t.Errorf("trust-anchor set-up did not ask for %s DNSKEY with nothing pending", zone)
+	}
+}
+
+// A start that fails and the one that follows it, as the daemon's init retry
+// runs them, register one set of debug hooks between them, not one each (which
+// would log every query once per failed start).
+func TestNewImrRegistersItsDebugHooksOnce(t *testing.T) {
+	restoreProcessWideTuning(t)
+	addr, port, _, stop := startTestUpstream(t)
+	defer stop()
+	hooks := func() int {
+		globalImrOutboundQueryHooksMutex.RLock()
+		defer globalImrOutboundQueryHooksMutex.RUnlock()
+		return len(globalImrOutboundQueryHooks)
+	}
+
+	ic := Config{RootHints: filepath.Join(t.TempDir(), "no-such-hints")}
+	ic.Logging.Enabled = true
+	ic.Logging.File = filepath.Join(t.TempDir(), "imr-debug.log")
+	before := hooks()
+	if imr, err := NewImr(context.Background(), ic, ImrOptions{Quiet: true}); err == nil || imr != nil {
+		t.Fatalf("NewImr with no root hints to read: %v, %v; want no Imr and an error", imr, err)
+	}
+	ic.RootHints = ""
+	ic.Forward = rootForward(addr, port)
+	if _, err := NewImr(context.Background(), ic, ImrOptions{Quiet: true}); err != nil {
+		t.Fatalf("second NewImr: %v", err)
+	}
+	if got := hooks() - before; got > 1 {
+		t.Errorf("%d debug hooks registered over two starts, want at most one", got)
 	}
 }

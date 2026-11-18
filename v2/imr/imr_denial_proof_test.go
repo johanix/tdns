@@ -66,7 +66,7 @@ func (o denialOutcome) secure(t *testing.T, what string, rcode int) {
 func TestHandleNegativeReadsOnlyTheDenyingZonesNSEC(t *testing.T) {
 	const zone = "signed.example."
 	const other = "other.test."
-	_, imr, sign := validatorScanner(t, zone, other)
+	imr, sign := validatorImr(t, zone, other)
 	soa := rrs(t, zone+" 300 IN SOA ns."+zone+" h."+zone+" 7 3600 600 604800 300")
 	stranger := signedSet(sign, other, rrs(t, other+" 300 IN NSEC "+other+" A RRSIG NSEC"))
 	ns := append(signedSet(sign, zone, soa), stranger...)
@@ -114,7 +114,7 @@ func TestHandleNegativeReadsNothingBelowAZoneCut(t *testing.T) {
 		{"at an unsigned cut, no DS", "NS RRSIG NSEC", child, dns.TypeDS, dns.RcodeSuccess, cache.ValidationStateSecure},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			_, imr, sign := validatorScanner(t, parent)
+			imr, sign := validatorImr(t, parent)
 			cut := rrs(t, child+" 300 IN NSEC other."+parent+" "+c.types)
 			ns := append(signedSet(sign, parent, soa(t)), signedSet(sign, parent, cut)...)
 			// Asked of the zone above's servers: what the SOA says matches them.
@@ -138,7 +138,7 @@ func TestHandleNegativeReadsNothingBelowAZoneCut(t *testing.T) {
 func TestHandleNegativeCachesTheRcodeTheProofSupports(t *testing.T) {
 	const zone = "signed.example."
 	const www = "www." + zone
-	_, imr, sign := validatorScanner(t, zone)
+	imr, sign := validatorImr(t, zone)
 	soa := signedSet(sign, zone, rrs(t, zone+" 300 IN SOA ns."+zone+" h."+zone+" 7 3600 600 604800 300"))
 	noData := signedSet(sign, zone, rrs(t, www+" 300 IN NSEC zzz."+zone+" A RRSIG NSEC"))
 	join := func(sets ...[]dns.RR) []dns.RR {
@@ -199,7 +199,7 @@ func TestHandleNegativeRefusesAnSOAFromAboveTheServersZone(t *testing.T) {
 		{"the zone above's SOA, from a stub zone's servers", "www." + child, child, true, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			_, imr, sign := validatorScanner(t, parent)
+			imr, sign := validatorImr(t, parent)
 			if c.stub {
 				imr.setZoneTable(imr.ForwardZones(), []string{child}, nil)
 			}

@@ -10,17 +10,13 @@
 package tdns
 
 import (
-	"context"
-	"net"
-	"slices"
-	"strconv"
 	"strings"
 	"testing"
-	"time"
+
+	imrcore "github.com/johanix/tdns/v2/imr"
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
-	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -74,18 +70,17 @@ func TestTransportSignalChecksUDPAndTCP(t *testing.T) {
 // resolver's dial addresses.
 func TestUDPPortConfigReachesTheDial(t *testing.T) {
 	rrs := buildSignalRRs(t, TransportConf{Type: "svcb", Signal: "do53:50,dot:10", Ports: map[string]uint16{"udp": 5353, "tcp": 5354}})
-	imr := &Imr{Quiet: true}
+	imr := &Imr{Imr: &imrcore.Imr{Quiet: true}}
 	s := cache.NewAuthServer(pathNS)
-	sm := map[string]*cache.AuthServer{cache.ServerKey(pathNS): s}
-	pending := map[string]*svcbSignalSet{}
+	var svcbs []*dns.SVCB
 	for _, rr := range rrs {
 		svcb, ok := rr.(*dns.SVCB)
 		if !ok {
 			t.Fatalf("published %T, want SVCB", rr)
 		}
-		imr.collectSVCBSignal(pending, pathNS, svcb)
+		svcbs = append(svcbs, svcb)
 	}
-	if installed, _ := imr.installSVCBSignal(sm[cache.ServerKey(pathNS)], pending[cache.ServerKey(pathNS)]); !installed {
+	if !imr.InstallSVCBSignal(s, svcbs) {
 		t.Fatalf("the published signal %v was not installed", rrs)
 	}
 	for tr, want := range map[core.Transport]string{

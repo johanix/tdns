@@ -14,13 +14,11 @@ package tdns
 import (
 	"bytes"
 	"context"
-	"fmt"
-	"log"
-	"os"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
+
+	imrcore "github.com/johanix/tdns/v2/imr"
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
@@ -262,15 +260,15 @@ func TestOOTSOnlyOtherTokensInAdditional(t *testing.T) {
 	}
 	verifySection(t, extra, keys)
 
-	imr := &Imr{}
+	imr := &Imr{Imr: &imrcore.Imr{}}
 	fromAdditional := func(name string) signalState {
 		s := cache.NewAuthServer(name)
-		imr.parseTransportForServerFromAdditional(context.Background(), s, served)
+		imr.TransportSignalFromAdditional(context.Background(), s, served)
 		return stateOf(s)
 	}
 	applied := func(name string, m map[string]uint8) signalState {
 		s := cache.NewAuthServer(name)
-		applyTransportMapToServer(s, m)
+		imrcore.ApplyTransportSignal(s, m)
 		return stateOf(s)
 	}
 	if st := fromAdditional("ns3.oots.example."); st.Source != "" || len(st.Weights) != 0 {

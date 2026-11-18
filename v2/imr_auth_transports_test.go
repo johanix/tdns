@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -16,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	imrcore "github.com/johanix/tdns/v2/imr"
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
@@ -28,7 +29,7 @@ func authTransportsTestCache(t *testing.T) *cache.RRsetCacheT {
 	rc := cache.NewRRsetCache(log.New(io.Discard, "", 0), false, false)
 	ns1 := rc.GetOrCreateAuthServer("ns1.example.net.")
 	// The signal as a server sends it, through the path a received one takes.
-	if !applyTransportMapToServer(ns1, map[string]uint8{"do53": 100, "dot": 50}) {
+	if !imrcore.ApplyTransportSignal(ns1, map[string]uint8{"do53": 100, "dot": 50}) {
 		t.Fatal("applyTransportMapToServer refused the signal")
 	}
 	ns1.IncrementUsedCounter(core.TransportDo53, cache.ClassNone)
@@ -144,12 +145,12 @@ func TestImrAuthTransportsAPI(t *testing.T) {
 		return resp, rec.Body.String()
 	}
 
-	Globals.ImrEngine = &Imr{}
+	Globals.ImrEngine = &Imr{Imr: &imrcore.Imr{}}
 	if resp, _ := call(""); !resp.Error {
 		t.Error("no cache, yet the command answered without an error")
 	}
 
-	Globals.ImrEngine = &Imr{Cache: authTransportsTestCache(t)}
+	Globals.ImrEngine = &Imr{Imr: &imrcore.Imr{Cache: authTransportsTestCache(t)}}
 	if resp, _ := call("", "bad..name"); !resp.Error {
 		t.Error("a bad server name was accepted")
 	}
@@ -242,6 +243,3 @@ func TestImrAuthTransportsCountsAClientsPrivacy(t *testing.T) {
 		t.Errorf("by privacy %v, want the client's answer under opportunistic, none under none or strict", bp)
 	}
 }
-
-
-

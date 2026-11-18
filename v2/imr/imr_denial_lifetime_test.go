@@ -60,7 +60,7 @@ func lifetimeReply(qname string, qtype uint16, rcode int, ns []dns.RR) *dns.Msg 
 // TTL alone. The SOA, cached as an answer of its own, keeps its TTL.
 func TestHandleNegativeCachesForTheNegativeTTL(t *testing.T) {
 	const zone = "signed.example."
-	_, imr, _ := validatorScanner(t)
+	imr, _ := validatorImr(t)
 	sign := lifetimeSigner(t, imr, zone)
 	week := cache.Now().Add(7 * 24 * time.Hour)
 	soa := sign(rrs(t, zone+" 3600 IN SOA ns."+zone+" h."+zone+" 7 3600 600 604800 300"), week)

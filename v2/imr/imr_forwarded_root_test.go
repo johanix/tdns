@@ -6,7 +6,6 @@ package imr
 import (
 	"context"
 	"net"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -59,7 +57,6 @@ func runRefreshRootLoop(t *testing.T, imr *Imr, query func(context.Context, map[
 		}
 	})
 }
-
 
 // RefreshRoot neither seeds nor queries a forwarded root. With only a zone
 // below the root forwarded, the root is iterated and refreshed as before.
@@ -170,7 +167,6 @@ func startGatedSignedForwardUpstream(t *testing.T, answers map[string]*dns.Msg, 
 	return host, port
 }
 
-
 // Trust-anchor set-up for a forwarded anchor zone skips the NS step. It
 // validates a delegation the resolver never uses, and for a forwarded root it
 // sent a forced ". NS" through the forward and cached the upstream's
@@ -186,10 +182,10 @@ func TestForwardedAnchorZoneSkipsTheNSStep(t *testing.T) {
 	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 	imr.DnskeyCache = imr.Cache.DnskeyCache
 
-	conf := &Config{}
-	conf.Imr.TrustAnchorDNSKEY = root.dnskey.String()
-	imr.loadConfiguredTrustAnchors(conf.Imr)
-	if err := imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
+	ic := Config{}
+	ic.TrustAnchorDNSKEY = root.dnskey.String()
+	imr.loadConfiguredTrustAnchors(ic)
+	if err := imr.initializeImrTrustAnchors(context.Background(), ic); err != nil {
 		t.Fatalf("initializeImrTrustAnchors: %v", err)
 	}
 	if seen := logr.find(".", dns.TypeNS); len(seen) != 0 {

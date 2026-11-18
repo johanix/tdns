@@ -6,17 +6,8 @@ package tdns
 
 import (
 	"context"
-	"net"
-	"slices"
-	"strconv"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
-	"github.com/johanix/tdns/v2/cache"
-	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 

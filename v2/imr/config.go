@@ -5,28 +5,19 @@
 package imr
 
 import (
-	"context"
 	"fmt"
-	"net"
 	"os"
-	"path/filepath"
-	"slices"
-	"strconv"
-	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
-	core "github.com/johanix/tdns/v2/core"
 )
 
-// ImrEngineConf is RESOLVER behavior only. The listener keys (addresses,
+// Config is RESOLVER behavior only. The listener keys (addresses,
 // transports, certfile/keyfile) moved to the shared listeners: block (#446):
 // tdns-imr's service listens there, and an embedded imr (tdns-auth,
 // tdns-agent) is internal by design — its only listener is the loopback
 // listeners.imr-debug-address window.
-type ImrEngineConf struct {
+type Config struct {
 	Active    *bool  `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
 	RootHints string `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
 	// OutboundAddressFamilies is which address families the resolver sends its
@@ -39,7 +30,7 @@ type ImrEngineConf struct {
 	Options                 map[ImrOption]string `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
 	// full RR text (zonefile format). DS is preferred as it is more convenient.
-	// Both tags are load bearing, because Config is decoded by two different
+	// Both tags are load bearing, because the daemon's Config is decoded by two different
 	// tag conventions: the daemon's decodeConfigMap sets TagName "yaml"
 	// (parseconfig.go), while viper.Unmarshal -- used by config check and the
 	// CLI roots -- keys off mapstructure and falls back to the field name.
@@ -122,13 +113,6 @@ func (t ImrTestingConf) Validate() error {
 		return fmt.Errorf("root-refresh: true cannot be combined with faketime: the refresh waits in real time for an expiry in data time")
 	}
 	return nil
-}
-
-// imrTestingEqual reports whether two testing blocks ask for the same thing.
-func imrTestingEqual(a, b ImrTestingConf) bool {
-	sameBool := func(x, y *bool) bool { return (x == nil) == (y == nil) && (x == nil || *x == *y) }
-	return sameBool(a.Priming, b.Priming) && sameBool(a.RootRefresh, b.RootRefresh) &&
-		a.Faketime == b.Faketime && a.FaketimeFile == b.FaketimeFile
 }
 
 // ImrClientStatsConf switches the per-client transport counters on. They
@@ -312,6 +296,7 @@ type ImrLoggingConf struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
 	File    string `yaml:"file" mapstructure:"file"`
 }
+
 type ImrStubConf struct {
 	Zone string `validate:"required"`
 	// Servers []StubServerConf `validate:"required"`
@@ -365,3 +350,10 @@ type ImrUpstreamConf struct {
 
 // DefaultImrClientStatsMax is imrengine.client-stats.max-clients when unset.
 const DefaultImrClientStatsMax = 4096
+
+// imrTestingEqual reports whether two testing blocks ask for the same thing.
+func imrTestingEqual(a, b ImrTestingConf) bool {
+	sameBool := func(x, y *bool) bool { return (x == nil) == (y == nil) && (x == nil || *x == *y) }
+	return sameBool(a.Priming, b.Priming) && sameBool(a.RootRefresh, b.RootRefresh) &&
+		a.Faketime == b.Faketime && a.FaketimeFile == b.FaketimeFile
+}

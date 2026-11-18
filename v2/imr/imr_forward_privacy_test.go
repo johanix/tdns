@@ -162,7 +162,7 @@ func TestForwardStrictPrivacyExhaustionWrapsSentinel(t *testing.T) {
 			{Addr: addr, Port: port, Transport: "dot", TLSServerName: "dns.test.example"},
 		}},
 	})
-	imr.errorRegistry = NewServerErrorRegistry()
+	imr.errorRegistry = newTestErrorSink()
 	fz := imr.ForwardZones()[0]
 	trustUpstreamCert(t, fz, pool)
 	if !fz.hasEncryptedUpstream() {

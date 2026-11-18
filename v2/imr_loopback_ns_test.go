@@ -5,17 +5,7 @@
 package tdns
 
 import (
-	"net"
-	"slices"
-	"strconv"
-	"strings"
-	"sync/atomic"
 	"testing"
-
-	"github.com/johanix/tdns/v2/cache"
-	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/edns0"
-	"github.com/miekg/dns"
 )
 
 func TestAllowLoopbackNameserversOptionParses(t *testing.T) {

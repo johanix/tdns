@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -21,7 +23,7 @@ func TestChangedDelegationDropsTheResolversView(t *testing.T) {
 	const parent, child, other = "parent.example.", "kid.parent.example.", "other.parent.example."
 	rrcache := cache.NewRRsetCache(log.New(os.Stderr, "test ", 0), false, false)
 	saved := Globals.ImrEngine
-	Globals.ImrEngine = &Imr{Cache: rrcache}
+	Globals.ImrEngine = &Imr{Imr: &imrcore.Imr{Cache: rrcache}}
 	defer func() { Globals.ImrEngine = saved }()
 
 	soa := &core.RRset{Name: parent, Class: dns.ClassINET, RRtype: dns.TypeSOA,

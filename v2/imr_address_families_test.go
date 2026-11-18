@@ -6,18 +6,8 @@ package tdns
 
 import (
 	"context"
-	"net"
-	"slices"
-	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
-
-	"github.com/johanix/tdns/v2/cache"
-	"github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
 // An unknown address family stops the resolver from starting, before it has

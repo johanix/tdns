@@ -8,16 +8,9 @@
 package tdns
 
 import (
-	"context"
-	"net"
-	"strconv"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
-	core "github.com/johanix/tdns/v2/core"
-	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -34,10 +27,9 @@ func TestOwnNSEC3ZoneWildcardAnswerValidates(t *testing.T) {
 	}
 	upLog := &upstreamLog{}
 	upAddr, upPort := startLoggedSignedForwardUpstream(t, nil, upLog)
-	imr := newForwardTestImr(t, rootForward(upAddr, upPort))
+	imr := newForwardTestImrWith(t, ImrEngineConf{Forward: rootForward(upAddr, upPort)}, ImrOptions{OwnZones: hostedZones{}})
 	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 	imr.DnskeyCache = imr.Cache.DnskeyCache
-	imr.ownZones = hostedZones{}
 
 	m := askWith(t, imr, "x.wild.example.", dns.TypeTXT, true)
 	if m.Rcode != dns.RcodeSuccess || !m.AuthenticatedData || countType(m.Answer, dns.TypeTXT) != 1 {

@@ -149,4 +149,3 @@ func TestParseOwnerNameStripsThePrefixItMatched(t *testing.T) {
 		})
 	}
 }
-

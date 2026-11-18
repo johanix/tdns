@@ -258,8 +258,6 @@ var deprecatedZoneOptionNames = map[string]string{
 	"delegation-sync-proxy":  "parentsync-proxy",
 }
 
-
-
 var ImrOptionToString = map[ImrOption]string{
 	ImrOptRevalidateNS:             "revalidate-ns",
 	ImrOptQueryForTransport:        "query-for-transport",

@@ -11,7 +11,7 @@ package imr
 // initializeImrTrustAnchors, which runs once the cache is primed, loads the same
 // anchors again (harmless: both writes are idempotent) before fetching and
 // validating the anchored zones' DNSKEY RRsets.
-func (imr *Imr) loadConfiguredTrustAnchors(ic ImrEngineConf) {
+func (imr *Imr) loadConfiguredTrustAnchors(ic Config) {
 	if imr == nil || imr.Cache == nil {
 		return
 	}

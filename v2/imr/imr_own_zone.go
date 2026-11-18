@@ -5,9 +5,6 @@ package imr
 
 import (
 	"context"
-	"net"
-	"slices"
-	"strings"
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
@@ -70,16 +67,10 @@ func (imr *Imr) ownZoneFor(qname string, qtype uint16) OwnZone {
 	return imr.ownZones.ZoneFor(qname, qtype)
 }
 
-
-
-
-
-
 // ownZoneTransport is what an answer from the server's own zone is reported,
 // and cached, as having arrived over. It crossed no wire; Do53 claims no
 // encryption, the safe side of the privacy status a client is given.
 const ownZoneTransport = core.TransportDo53
-
 
 // answeredLocally reports whether the question <qname, qtype> is answered from
 // a zone this server is authoritative for. The cache's validator asks, through
@@ -87,14 +78,6 @@ const ownZoneTransport = core.TransportDo53
 func (imr *Imr) answeredLocally(qname string, qtype uint16) bool {
 	return imr.ownZoneFor(qname, qtype) != nil
 }
-
-
-
-
-
-
-
-
 
 // holdOwnZoneKeys makes zone's own DNSKEY RRset the resolver's trust point
 // for it, and returns zone's response to the DNSKEY question at its apex. The

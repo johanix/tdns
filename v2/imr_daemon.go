@@ -6,16 +6,13 @@ package tdns
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
-	"log"
 	"net"
 	"os"
-	"sort"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
+
+	imrcore "github.com/johanix/tdns/v2/imr"
 
 	"github.com/spf13/viper"
 
@@ -166,7 +163,7 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 			// ImrQuery is fully reentrant; serialising callers behind
 			// the channel-read loop served no purpose and stalled
 			// concurrent CLI / RPC invocations behind any slow query.
-			go imr.handleRecursorRequest(ctx, rrq)
+			go imr.HandleRecursorRequest(ctx, rrq)
 		}
 	}
 }
@@ -187,7 +184,7 @@ func appendCachedNegativeSOA(rrcache *cache.RRsetCacheT, qname string, qtype uin
 	if cached == nil || cached.RRset == nil {
 		return false
 	}
-	appendSOAToMessage(cached.RRset, msgoptions, m)
+	imrcore.AppendSOAToMessage(cached.RRset, msgoptions, m)
 	if cached.State == cache.ValidationStateSecure {
 		m.AuthenticatedData = true
 	}

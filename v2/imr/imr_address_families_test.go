@@ -9,7 +9,6 @@ import (
 	"net"
 	"slices"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -45,7 +44,7 @@ func TestParseAddressFamilies(t *testing.T) {
 }
 
 func TestAddressFamiliesChangeNeedsARestart(t *testing.T) {
-	boot := ImrEngineConf{OutboundAddressFamilies: []string{"ipv4", "ipv6"}}
+	boot := Config{OutboundAddressFamilies: []string{"ipv4", "ipv6"}}
 	for _, tc := range []struct {
 		families []string
 		restart  bool
@@ -272,4 +271,3 @@ func TestGlueRevalidationAsksOnlyTheFamiliesInUse(t *testing.T) {
 		t.Errorf("asked for %v, want A alone", asked)
 	}
 }
-

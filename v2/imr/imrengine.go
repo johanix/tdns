@@ -5,11 +5,9 @@ package imr
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"sort"
 	"strings"
@@ -17,21 +15,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/spf13/viper"
-
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
-var lgImr = Logger("engine")
-
 type Imr struct {
-	// ClientStats holds the per-client transport counters, or nil when they
-	// are off (imrengine.client-stats). See imr_client_stats.go.
-	ClientStats *ImrClientStats
-
 	Cache       *cache.RRsetCacheT
 	DnskeyCache *cache.DnskeyCacheT
 	Options     map[ImrOption]string
@@ -82,7 +72,7 @@ type Imr struct {
 	// reload can report which edited keys are not reloadable and need a
 	// restart; deliberately never updated, since the running resolver keeps
 	// running on these values until it is restarted.
-	bootConf ImrEngineConf
+	bootConf Config
 	// PrimedVia and PrimedAt record how and when the cache was primed
 	// ("hints+fetch" at start-up, or how RefreshRoot re-primed it), for the
 	// config-status report. A resolver whose root is forwarded is not primed.
@@ -264,24 +254,23 @@ func (resp *ImrResponse) denied(kind cache.CacheContext, state cache.ValidationS
 // all dancing recursive server. It is just intended to get the job done for the particular cases
 // that we need to support.
 
-
 // NewImr builds an Imr from ic alone: the cache, the forward table, the stubs,
 // the configured trust anchors (the offline half) and, unless the root is
 // forwarded, the priming. It starts nothing and publishes nothing: Start runs
 // the rest, the caller keeps the result, and an application that wants a
-// resolver needs no Config. Query it with ImrQuery, ImrQueryFresh and
+// resolver needs no daemon Config. Query it with ImrQuery, ImrQueryFresh and
 // IterativeDNSQuery, all reentrant.
 //
 // The Imr is not the daemon's: NewImr does not touch Globals.ImrEngine,
 // conf.Internal or ImrReady, and enforces no singleton. That is
-// (*Config).InitImrEngine's.
+// tdns's (*Config).InitImrEngine's.
 //
 // Some of what ic configures is process-wide, and a second Imr in the process
 // shares it: cache.SetBackoffPolicy, cache.SetTTLLimits,
 // cache.SetZoneStateRecheck and cache.SetNSEC3MaxIterations are set from
 // ic.Tuning, and the last one built wins; the data clock (ic.Testing) and the
 // debug log hooks (ic.Logging) are set up once, by the first.
-func NewImr(ctx context.Context, ic ImrEngineConf, opts ImrOptions) (*Imr, error) {
+func NewImr(ctx context.Context, ic Config, opts ImrOptions) (*Imr, error) {
 	// The test clock, if one is asked for, before anything is cached: priming
 	// stamps expirations in data time.
 	if err := startDataClock(ctx, ic.Testing); err != nil {
@@ -482,9 +471,6 @@ func warnUnreadableRootHints(hintsfile string) {
 	}
 }
 
-
-
-
 // Start does what an Imr built by NewImr still has to do before it serves
 // well: fetch and validate the trust anchors' DNSKEY RRsets, probe the forward
 // upstreams, and keep the root NS refreshed. It reads the configuration NewImr
@@ -525,7 +511,7 @@ func (imr *Imr) Start(ctx context.Context) {
 	go imr.RefreshRoot(ctx, imr.bootConf.RootHints)
 }
 
-// handleRecursorRequest answers a single RecursorCh request. Runs
+// HandleRecursorRequest answers a single RecursorCh request. Runs
 // on its own goroutine spawned by the engine loop. Cache hits are
 // answered directly; everything else falls through to ImrQuery.
 //
@@ -533,10 +519,10 @@ func (imr *Imr) Start(ctx context.Context) {
 // goroutine logs and reports an error to the caller rather than
 // killing the whole process. tdns-auth and tdns-mp embed this
 // engine and a panic here previously took down the server.
-func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
+func (imr *Imr) HandleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			lgImr.Error("handleRecursorRequest: PANIC recovered",
+			lgImr.Error("HandleRecursorRequest: PANIC recovered",
 				"qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype],
 				"panic", fmt.Sprintf("%v", rec))
 			// Try to send an error response so the caller doesn't hang.
@@ -565,9 +551,9 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 		select {
 		case rrq.ResponseCh <- r:
 		case <-ctx.Done():
-			lgImr.Warn("handleRecursorRequest: ctx cancelled before response delivered", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+			lgImr.Warn("HandleRecursorRequest: ctx cancelled before response delivered", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
 		case <-time.After(2 * time.Second):
-			lgImr.Warn("handleRecursorRequest: timed out sending response", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+			lgImr.Warn("HandleRecursorRequest: timed out sending response", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
 		}
 	}
 
@@ -704,7 +690,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		defer cancel()
 	}
 	// What the lookups below run as: the resolver's own lookup, or a DNS
-	// client's when the caller asked for that (asClientQuery).
+	// client's when the caller asked for that (AsClientQuery).
 	lookupCtx := imrQueryContext(ctx)
 
 	maxiter := 12
@@ -1211,7 +1197,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			m.SetRcode(r, negativeRcode(crrset, msgoptions))
 			negStart := len(m.Ns)
 			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, msgoptions) && crrset.RRset != nil {
-				appendSOAToMessage(crrset.RRset, msgoptions, m)
+				AppendSOAToMessage(crrset.RRset, msgoptions, m)
 			}
 			// Served straight from the entry, so the proof carries the
 			// entry's remaining lifetime like any other cached record.
@@ -1248,7 +1234,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			m.SetRcode(r, dns.RcodeSuccess)
 			negStart := len(m.Ns)
 			if !appendNegAuthorityToMessage(m, crrset.NegAuthority, msgoptions) && crrset.RRset != nil {
-				appendSOAToMessage(crrset.RRset, msgoptions, m)
+				AppendSOAToMessage(crrset.RRset, msgoptions, m)
 			}
 			// Served straight from the entry, so the proof carries the
 			// entry's remaining lifetime like any other cached record.
@@ -1620,7 +1606,7 @@ func negativeRcode(c *cache.CachedRRset, msgoptions *edns0.MsgOptions) int {
 	return int(c.Rcode)
 }
 
-func appendSOAToMessage(soa *core.RRset, msgoptions *edns0.MsgOptions, m *dns.Msg) {
+func AppendSOAToMessage(soa *core.RRset, msgoptions *edns0.MsgOptions, m *dns.Msg) {
 	if soa == nil || m == nil {
 		return
 	}
@@ -1722,7 +1708,7 @@ func buildNegAuthorityFromMsg(src *dns.Msg) []*core.RRset {
 // applyRemainingTTL rewrites the TTL of the records a serve helper just
 // appended to a message section, from index start onward.
 //
-// appendSOAToMessage and appendNegAuthorityToMessage both dns.Copy what they
+// AppendSOAToMessage and appendNegAuthorityToMessage both dns.Copy what they
 // append, so this edits the message and never the cache. A negative proof is
 // cached data like any other: served with its original TTL on every hit, it
 // re-arms a downstream cache's negative entry forever.
@@ -1751,7 +1737,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 	if msgoptions.CD && !msgoptions.DO {
 		if cached != nil && cached.RRset != nil {
 			start := len(resp.Ns)
-			appendSOAToMessage(cached.RRset, msgoptions, resp)
+			AppendSOAToMessage(cached.RRset, msgoptions, resp)
 			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(cache.Now()))
 			return true
 		}
@@ -1762,7 +1748,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 	if !msgoptions.DO {
 		if cached != nil && cached.RRset != nil {
 			start := len(resp.Ns)
-			appendSOAToMessage(cached.RRset, msgoptions, resp)
+			AppendSOAToMessage(cached.RRset, msgoptions, resp)
 			applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(cache.Now()))
 			resp.AuthenticatedData = negativeAD(cached, src, msgoptions)
 			attachNegativeEDE(resp, msgoptions, cached, src)
@@ -1788,7 +1774,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 	}
 	if cached != nil && cached.RRset != nil {
 		start := len(resp.Ns)
-		appendSOAToMessage(cached.RRset, msgoptions, resp)
+		AppendSOAToMessage(cached.RRset, msgoptions, resp)
 		applyRemainingTTL(resp.Ns, start, cached.RemainingTTL(cache.Now()))
 		if cached.State == cache.ValidationStateSecure {
 			resp.AuthenticatedData = true
@@ -1822,7 +1808,6 @@ func attachNegativeEDE(resp *dns.Msg, msgoptions *edns0.MsgOptions, cached *cach
 	}
 }
 
-
 func appendSOAFromMsg(r *dns.Msg, msgoptions *edns0.MsgOptions, m *dns.Msg) {
 	if r == nil || len(r.Ns) == 0 {
 		return
@@ -1845,11 +1830,9 @@ func appendSOAFromMsg(r *dns.Msg, msgoptions *edns0.MsgOptions, m *dns.Msg) {
 		}
 	}
 	if soaRRset != nil {
-		appendSOAToMessage(soaRRset, msgoptions, m)
+		AppendSOAToMessage(soaRRset, msgoptions, m)
 	}
 }
-
-
 
 // parseTrustAnchorsFromConfig parses trust anchors from config and file into maps keyed by zone name.
 // Returns maps of DS and DNSKEY trust anchors.
@@ -1861,7 +1844,7 @@ func appendSOAFromMsg(r *dns.Msg, msgoptions *edns0.MsgOptions, m *dns.Msg) {
 //
 // NewImr (loadConfiguredTrustAnchors) and Start (initializeImrTrustAnchors)
 // both read the anchors through here, so they cannot disagree about them.
-func (imr *Imr) parseTrustAnchorsFromConfig(ic ImrEngineConf) (map[string][]*dns.DS, map[string][]*dns.DNSKEY, error) {
+func (imr *Imr) parseTrustAnchorsFromConfig(ic Config) (map[string][]*dns.DS, map[string][]*dns.DNSKEY, error) {
 	dsByName := map[string][]*dns.DS{}
 	dnskeysByName := map[string][]*dns.DNSKEY{}
 
@@ -1904,7 +1887,7 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic ImrEngineConf) (map[string][]*dns
 
 	// If DNSKEY TAs are provided, add them directly
 	if taDNSKEY != "" {
-		keys, err := parseInlineDNSKEYAnchors(taDNSKEY)
+		keys, err := ParseInlineDNSKEYAnchors(taDNSKEY)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to parse trust-anchor-dnskey: %v", err)
 		}
@@ -1916,7 +1899,7 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic ImrEngineConf) (map[string][]*dns
 
 	// If DS TAs are provided, remember them for matching after fetching the DNSKEY RRset
 	if taDS != "" {
-		dss, err := parseInlineDSAnchors(taDS)
+		dss, err := ParseInlineDSAnchors(taDS)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to parse trust-anchor-ds: %v", err)
 		}
@@ -2354,7 +2337,7 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 //
 // For each anchored name, it loads direct DNSKEY TAs (trusted), matches DS→DNSKEY(s),
 // validates the anchored DNSKEY RRset and then validates the NS RRset for that name.
-func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, ic ImrEngineConf) error {
+func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, ic Config) error {
 	// Parse trust anchors from config and file, or the compiled-in default
 	dsByName, dnskeysByName, err := imr.parseTrustAnchorsFromConfig(ic)
 	if err != nil {
@@ -2416,5 +2399,3 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, ic ImrEngineConf)
 	}
 	return errors.Join(errs...)
 }
-
-

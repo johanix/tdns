@@ -744,5 +744,3 @@ func PrintRR(rr dns.RR, leftpad int, options map[string]string) error {
 	}
 	return nil
 }
-
-

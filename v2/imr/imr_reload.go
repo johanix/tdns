@@ -446,6 +446,12 @@ func carryForwardUpstreams(old, new []*ForwardZone) {
 
 // --- config-side plumbing --------------------------------------------------
 
+// RestartRequiredKeys names the imrengine: keys that differ between the
+// config imr was built from and current, and that a reload cannot apply
+// (imrRestartRequiredKeys).
+func (imr *Imr) RestartRequiredKeys(current Config) []string {
+	return imrRestartRequiredKeys(imr.bootConf, current)
+}
 
 // imrRestartRequiredKeys names the imrengine: keys that differ between the
 // config the resolver was BUILT from and the config just parsed, and that a
@@ -458,7 +464,7 @@ func carryForwardUpstreams(old, new []*ForwardZone) {
 // and forwards are absent on purpose — those are what the reload DOES apply —
 // except that a "." among them decides whether an anchorless config gets the
 // compiled-in root anchor, and that is reported when it changes.
-func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
+func imrRestartRequiredKeys(boot, current Config) []string {
 	var keys []string
 	check := func(key string, same bool) {
 		if !same {

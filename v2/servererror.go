@@ -20,16 +20,6 @@ import (
 	"time"
 )
 
-
-
-
-
-
-
-
-
-
-
 type errKey struct {
 	cat ErrorCategory
 	sub ErrorSubtype

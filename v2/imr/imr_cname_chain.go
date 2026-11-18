@@ -263,7 +263,7 @@ func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn
 	link := &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: dns.TypeCNAME}
 	// A link, or the DNAME that synthesized it, synthesized from a wildcard
 	// is validated with the proof in the authority section, which is kept.
-	authority := authorityRRsets(r.Ns)
+	authority := AuthorityRRsets(r.Ns)
 	var verdict cache.AnswerVerdict
 	var synthesizedFrom string
 	if dname := dnameAbove(r, qname); dname != nil {
@@ -405,7 +405,7 @@ func (imr *Imr) chainEntry(name string, t uint16, privacy edns0.PrivacyLevel, gr
 // in order, and the entry for <last name, qtype>, holding data or a denial.
 // Entries are read with chainEntry and grace. started reports that qname holds
 // a CNAME; final is nil when some part of the chain is missing. err reports a
-// loop, or a chain longer than maxCNAMEChain.
+// loop, or a chain longer than MaxCNAMEChain.
 func (imr *Imr) chainAt(qname string, qtype uint16, privacy edns0.PrivacyLevel, grace time.Duration) (links []*cache.CachedRRset, final *cache.CachedRRset, started bool, err error) {
 	name := qname
 	seen := map[string]bool{core.CanonicalizeName(qname): true}
@@ -431,8 +431,8 @@ func (imr *Imr) chainAt(qname string, qtype uint16, privacy edns0.PrivacyLevel, 
 		if link.SynthesizedFrom != "" && imr.chainEntry(link.SynthesizedFrom, dns.TypeDNAME, privacy, grace) == nil {
 			return nil, nil, true, nil
 		}
-		if len(links) == maxCNAMEChain {
-			return nil, nil, true, fmt.Errorf("CNAME chain from %s is longer than %d", qname, maxCNAMEChain)
+		if len(links) == MaxCNAMEChain {
+			return nil, nil, true, fmt.Errorf("CNAME chain from %s is longer than %d", qname, MaxCNAMEChain)
 		}
 		links = append(links, link)
 		t := core.CanonicalizeName(target)

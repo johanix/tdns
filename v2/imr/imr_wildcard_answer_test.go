@@ -355,7 +355,6 @@ func TestRevalidatedGlueKeepsItsProof(t *testing.T) {
 
 // ----- the server's own zone -----
 
-
 // ----- EDE 27 on a positive answer -----
 
 // EDE 27 on an answer that is Insecure goes out beside it, fresh and from the

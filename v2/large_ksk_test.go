@@ -1,17 +1,10 @@
 package tdns
 
 import (
-	"log"
-	"os"
-	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/johanix/tdns/v2/cache"
-	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -362,8 +355,6 @@ func TestGenKeyLifetimeEmpty(t *testing.T) {
 	}
 }
 
-
-
 func TestParseDNSKEYTransportPolicy(t *testing.T) {
 	cases := map[string]DNSKEYTransportPolicy{
 		"":                DNSKEYTransportUseDSSignal, // empty -> default
@@ -385,8 +376,3 @@ func TestParseDNSKEYTransportPolicy(t *testing.T) {
 		t.Fatal("parse(bogus) should error")
 	}
 }
-
-
-
-
-

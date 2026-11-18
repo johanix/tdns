@@ -73,17 +73,17 @@ func newSignedRootForward(t *testing.T, answers func(parent, kid *fwdSecKey) map
 
 // anchor loads trust anchors from the configuration, as start-up does before
 // anything is fetched (loadConfiguredTrustAnchors).
-func (s *signedRootForward) anchor(t *testing.T, set func(ic *ImrEngineConf)) {
+func (s *signedRootForward) anchor(t *testing.T, set func(ic *Config)) {
 	t.Helper()
-	conf := &Config{}
-	set(&conf.Imr)
-	s.imr.loadConfiguredTrustAnchors(conf.Imr)
+	ic := Config{}
+	set(&ic)
+	s.imr.loadConfiguredTrustAnchors(ic)
 }
 
 // anchorParentDNSKEY configures the parent's key as a DNSKEY trust anchor.
 func (s *signedRootForward) anchorParentDNSKEY(t *testing.T) {
 	t.Helper()
-	s.anchor(t, func(ic *ImrEngineConf) { ic.TrustAnchorDNSKEY = s.parent.dnskey.String() })
+	s.anchor(t, func(ic *Config) { ic.TrustAnchorDNSKEY = s.parent.dnskey.String() })
 	if z, ok := s.imr.Cache.ZoneMap.Get(fwdSecParent); !ok || z.GetState() != cache.ValidationStateSecure {
 		t.Fatalf("test setup: %s is not Secure after loading its trust anchor", fwdSecParent)
 	}
@@ -194,7 +194,7 @@ func TestValidatorFetchesASignersDNSKEYThroughTheForward(t *testing.T) {
 		}
 	})
 	// A DS-form anchor: the DS is known, the key has to be fetched.
-	s.anchor(t, func(ic *ImrEngineConf) { ic.TrustAnchorDS = s.parent.dnskey.ToDS(dns.SHA256).String() })
+	s.anchor(t, func(ic *Config) { ic.TrustAnchorDS = s.parent.dnskey.ToDS(dns.SHA256).String() })
 
 	www := signedRRset(s.parent.sign(t, fwdSecRR(t, "www."+fwdSecParent+" 300 IN A 192.0.2.8")))
 	vstate, err := s.imr.Cache.ValidateRRset(context.Background(), www, s.imr.IterativeDNSQueryFetcher())
@@ -269,10 +269,10 @@ func TestTrustAnchorDNSKEYIsFetchedThroughTheForward(t *testing.T) {
 	imr.DnskeyCache = imr.Cache.DnskeyCache
 	requireNoRootServerMap(t, imr)
 
-	conf := &Config{}
-	conf.Imr.TrustAnchorDNSKEY = root.dnskey.String()
-	imr.loadConfiguredTrustAnchors(conf.Imr)
-	if err := imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
+	ic := Config{}
+	ic.TrustAnchorDNSKEY = root.dnskey.String()
+	imr.loadConfiguredTrustAnchors(ic)
+	if err := imr.initializeImrTrustAnchors(context.Background(), ic); err != nil {
 		t.Fatalf("initializeImrTrustAnchors: %v", err)
 	}
 	if crr := imr.Cache.Get(".", dns.TypeDNSKEY); crr == nil || crr.State != cache.ValidationStateSecure {

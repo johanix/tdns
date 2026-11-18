@@ -4,16 +4,8 @@
 package imr
 
 import (
-	"crypto/tls"
 	"fmt"
-	"net"
-	"strconv"
-	"strings"
-	"time"
 
-	algorithms "github.com/johanix/tdns/v2/algorithms"
-	core "github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 	// "github.com/gookit/goutil/dump"
 )

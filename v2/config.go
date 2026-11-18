@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -449,31 +448,11 @@ func ValidateTransferSrc(where string, srcs []string) error {
 	return nil
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // type StubServerConf struct {
 // 	Name  string   `validate:"required"`
 // 	Addrs []string `validate:"required"`
 // 	Alpn  []string `validate:"required"`
 // }
-
-
 
 type ApiServerConf struct {
 	Addresses []string        `validate:"required"` // Must be in addr:port format

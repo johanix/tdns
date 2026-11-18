@@ -4,26 +4,12 @@
 package tdns
 
 import (
-	"bytes"
-	"cmp"
-	"context"
-	"errors"
 	"fmt"
-	"hash/fnv"
-	"log"
-	"maps"
-	mrand "math/rand/v2"
 	"net"
-	"slices"
-	"sort"
-	"strings"
-	"sync"
-	"syscall"
 	"time"
 
-	edns0 "github.com/johanix/tdns/v2/edns0"
 	// "github.com/johanix/tdns/v2/transport"
-	cache "github.com/johanix/tdns/v2/cache"
+
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"

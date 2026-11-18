@@ -4,10 +4,8 @@
 package imr
 
 import (
-	"context"
 	"sync"
 	"testing"
-	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"

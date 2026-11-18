@@ -97,7 +97,6 @@ func TestLoopbackGlueOnAStubServerIsNotQueried(t *testing.T) {
 	}
 }
 
-
 // NS revalidation sends its queries without prioritizeServers, and skips an
 // address on this host the same way.
 func TestRevalidationSkipsHostLocalAddresses(t *testing.T) {

@@ -28,15 +28,12 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 )
-
 
 func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 	forwards, diags := BuildImrForwards([]ImrForwardConf{
@@ -855,7 +852,7 @@ func TestProbeForwardUpstreams(t *testing.T) {
 			{Addr: addr, Port: port},
 		}},
 	})
-	imr.errorRegistry = NewServerErrorRegistry()
+	imr.errorRegistry = newTestErrorSink()
 	for _, up := range imr.ForwardZones()[0].Upstreams {
 		c := up.Client.(*core.DNSClient)
 		c.Timeout = 500 * time.Millisecond
@@ -962,7 +959,7 @@ func TestForwardQueryCancelIsNotAnUpstreamFailure(t *testing.T) {
 	imr := newForwardTestImr(t, []ImrForwardConf{
 		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: host, Port: port}}},
 	})
-	imr.errorRegistry = NewServerErrorRegistry()
+	imr.errorRegistry = newTestErrorSink()
 	up := imr.ForwardZones()[0].Upstreams[0]
 	c := up.Client.(*core.DNSClient)
 	c.Timeout = 5 * time.Second
@@ -1161,17 +1158,13 @@ func TestExchangeDoQCancelIsNotLoggedAsFailure(t *testing.T) {
 // The positive case asserts RootCAs is non-nil rather than comparing pools.
 // x509.CertPool has no comparison worth making, and the property under test is
 // "this upstream stopped using the system store", which nil/non-nil says
-// exactly. That the pool contains the right anchor is loadCAPool's contract and
+// exactly. That the pool contains the right anchor is LoadCAPool's contract and
 // is covered where that is tested.
 func TestBuildImrForwardsCAFile(t *testing.T) {
 	dir := t.TempDir()
 
-	ca, err := CreateCA(CAOptions{Name: "test-ca", Alg: CertAlgEd25519})
-	if err != nil {
-		t.Fatalf("CreateCA: %v", err)
-	}
 	caFile := filepath.Join(dir, "test-ca.crt")
-	if err := os.WriteFile(caFile, ca.CertPEM, 0o644); err != nil {
+	if err := os.WriteFile(caFile, testCACertPEM(t), 0o644); err != nil {
 		t.Fatalf("write ca-file: %v", err)
 	}
 	notPEM := filepath.Join(dir, "garbage.crt")

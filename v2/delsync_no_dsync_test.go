@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -39,7 +41,7 @@ const (
 // none; each name in addrs an A record and a no-data AAAA answer.
 func cacheOnlyImr(t *testing.T, dsync map[string][]string, addrs map[string]string) *Imr {
 	t.Helper()
-	imr := &Imr{Cache: cache.NewRRsetCache(log.New(io.Discard, "", 0), false, false)}
+	imr := &Imr{Imr: &imrcore.Imr{Cache: cache.NewRRsetCache(log.New(io.Discard, "", 0), false, false)}}
 	set := func(name string, rrtype uint16, rrs ...dns.RR) {
 		c := &cache.CachedRRset{Name: name, RRtype: rrtype, Context: cache.ContextNoErrNoAns,
 			State: cache.ValidationStateSecure, Ttl: 3600, Expiration: time.Now().Add(time.Hour)}

@@ -228,7 +228,7 @@ func TestReloadZonesStubBeatsForward(t *testing.T) {
 // TestImrRestartRequiredKeys: an edit the reload cannot apply must be
 // reported, not silently ignored.
 func TestImrRestartRequiredKeys(t *testing.T) {
-	boot := ImrEngineConf{
+	boot := Config{
 		RootHints:       "/etc/tdns/root.hints",
 		TrustAnchorFile: "/etc/tdns/anchors",
 		Tuning:          ImrTuningConf{QueryBudget: 10 * time.Second},

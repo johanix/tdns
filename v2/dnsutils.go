@@ -27,7 +27,7 @@ import (
 
 const (
 	year68            = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits
-	safeMessageSize   = 64000 // ~1.5 KB headroom for per-envelope question + TSIG
+	safeMessageSize   = 64000   // ~1.5 KB headroom for per-envelope question + TSIG
 	dnsMaxMessageSize = 65535
 )
 

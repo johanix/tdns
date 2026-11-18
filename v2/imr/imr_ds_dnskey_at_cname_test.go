@@ -4,11 +4,7 @@
 package imr
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -248,7 +244,6 @@ func TestImrQueryAtACNAMEOwnerIsNoData(t *testing.T) {
 	}
 }
 
-
 // Who follows, and for whom a CNAME is the answer.
 func TestFollowsCNAMEByOrigin(t *testing.T) {
 	bg := context.Background()
@@ -288,12 +283,12 @@ func TestFollowsCNAMEByOrigin(t *testing.T) {
 }
 
 // What ImrQuery's lookups run as. A caller that marked its context
-// asClientQuery (the API's "imr query") gets a client's lookup, counted as
+// AsClientQuery (the API's "imr query") gets a client's lookup, counted as
 // client traffic; any other caller the resolver's own. An ImrQuery nested
 // inside the first is the resolver's own again.
 func TestImrQueryContextByCaller(t *testing.T) {
 	bg := context.Background()
-	asClient := imrQueryContext(asClientQuery(bg))
+	asClient := imrQueryContext(AsClientQuery(bg))
 	if !isClientQuery(asClient) || trafficClass(asClient, edns0.PrivacyNone) != cache.ClassNone {
 		t.Errorf("asked as a client: client %v, class %v; want a client's lookup without PRIVACY",
 			isClientQuery(asClient), trafficClass(asClient, edns0.PrivacyNone))

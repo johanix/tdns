@@ -6,13 +6,7 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
-	"os"
-	"sync"
 	"time"
-
-	core "github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
 // Priming needs an answer from a root server, and a daemon starts at the moment
@@ -66,5 +60,3 @@ func (conf *Config) initImrEngineRetrying(ctx context.Context, init func() error
 		}
 	}
 }
-
-

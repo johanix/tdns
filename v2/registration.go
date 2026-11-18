@@ -13,7 +13,6 @@ import (
 	"sync"
 
 	"github.com/gorilla/mux"
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -435,8 +434,6 @@ type ImrClientQueryHookFunc func(ctx context.Context, w dns.ResponseWriter,
 	r *dns.Msg, qname string, qtype uint16,
 	msgoptions *edns0.MsgOptions) (context.Context, *dns.Msg)
 
-
-
 var (
 	globalImrClientQueryHooks      []ImrClientQueryHookFunc
 	globalImrClientQueryHooksMutex sync.RWMutex
@@ -456,16 +453,12 @@ func RegisterImrClientQueryHook(hook ImrClientQueryHookFunc) error {
 	return nil
 }
 
-
-
 // getImrClientQueryHooks returns all registered client query hooks.
 func getImrClientQueryHooks() []ImrClientQueryHookFunc {
 	globalImrClientQueryHooksMutex.RLock()
 	defer globalImrClientQueryHooksMutex.RUnlock()
 	return globalImrClientQueryHooks
 }
-
-
 
 // StartRegisteredEngines starts all registered engines as goroutines.
 // This should be called after TDNS initialization is complete.

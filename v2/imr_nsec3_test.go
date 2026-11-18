@@ -5,15 +5,9 @@ package tdns
 
 import (
 	"context"
-	"net"
-	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
-	edns0 "github.com/johanix/tdns/v2/edns0"
-	"github.com/miekg/dns"
 )
 
 // The key decodes, 0 included, and a changed value is reported as needing a

@@ -14,8 +14,6 @@ import (
 	"strings"
 	"testing"
 
-	core "github.com/johanix/tdns/v2/core"
-	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -44,15 +42,18 @@ func TestInitImrEngineStartsWithABadForwardZone(t *testing.T) {
 		t.Fatal("no engine after InitImrEngine")
 	}
 
-	bad := imr.forwardZoneFor("www.bad.example.")
-	if bad == nil {
+	zones := map[string]ImrForwardZoneInfo{}
+	for _, z := range imr.ForwardZoneList() {
+		zones[z.Zone] = z
+	}
+	bad, ok := zones["bad.example."]
+	if !ok || !imr.Cache.Forwarded("www.bad.example.", dns.TypeA) {
 		t.Fatal("quarantined zone left the table: names under it would fall back to iteration")
 	}
-	if !bad.isQuarantined() {
+	if !bad.Quarantined {
 		t.Error("bad.example. is serving; want quarantined")
 	}
-	good := imr.forwardZoneFor("www.other.example.")
-	if good == nil || good.Zone != "." || good.isQuarantined() {
+	if good, ok := zones["."]; !ok || good.Quarantined || !imr.Cache.Forwarded("www.other.example.", dns.TypeA) {
 		t.Errorf("the healthy root forward did not survive: %+v", good)
 	}
 

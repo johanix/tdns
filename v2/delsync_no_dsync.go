@@ -5,7 +5,6 @@
 package tdns
 
 import (
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -21,7 +20,6 @@ import (
 // scheme is logged at INFO. A failure where a usable scheme exists (the
 // parent refuses the UPDATE, the API call fails, a timeout) is not this
 // case and is reported as before.
-
 
 // dsyncNoticeBook is what the log has been told about each zone's parent:
 // that it offers nothing of the kind the book is for. Keyed by the zone's

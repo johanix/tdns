@@ -13,18 +13,11 @@
 package imr
 
 import (
-	"context"
-	"crypto/subtle"
-	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"net/netip"
 	"os"
-	"strings"
 	"sync"
 	"time"
-
-	"github.com/miekg/dns"
 )
 
 // caPoolCache memoizes parsed trust-anchor pools per ca-file, invalidated by
@@ -40,10 +33,10 @@ type caPoolEntry struct {
 	pool    *x509.CertPool
 }
 
-// loadCAPool returns the trust-anchor pool for caFile, reusing a cached parse
+// LoadCAPool returns the trust-anchor pool for caFile, reusing a cached parse
 // when the file is unchanged (by mtime) and re-parsing when it has been
 // modified. Errors mirror the previous inline behavior.
-func loadCAPool(caFile string) (*x509.CertPool, error) {
+func LoadCAPool(caFile string) (*x509.CertPool, error) {
 	fi, err := os.Stat(caFile)
 	if err != nil {
 		return nil, fmt.Errorf("reading ca-file: %v", err)

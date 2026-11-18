@@ -34,7 +34,6 @@ import (
 // No query names and no answers are recorded. The embedded resolver's loopback
 // debug window (listeners.imr-debug-address) is not counted.
 
-
 // clientTransport is one of the five ways a client reaches the resolver.
 type clientTransport int
 

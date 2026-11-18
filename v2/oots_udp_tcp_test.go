@@ -11,14 +11,10 @@
 package tdns
 
 import (
-	"fmt"
 	"reflect"
-	"slices"
 	"testing"
 
-	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
-	edns0 "github.com/johanix/tdns/v2/edns0"
 )
 
 // The stats name a received signal by its tokens, udp and tcp apart.

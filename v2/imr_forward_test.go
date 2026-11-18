@@ -4,37 +4,9 @@
 package tdns
 
 import (
-	"bytes"
-	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/binary"
-	"errors"
-	"fmt"
-	"io"
-	"log"
-	"math/big"
-	"net"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"gopkg.in/yaml.v3"
-
-	cache "github.com/johanix/tdns/v2/cache"
-	core "github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/edns0"
-	"github.com/miekg/dns"
-	"github.com/quic-go/quic-go"
 )
 
 // The forward form documented in cmdv2/imr/tdns-imr.sample.yaml must decode,
