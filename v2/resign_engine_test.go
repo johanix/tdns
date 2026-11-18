@@ -47,15 +47,20 @@ type testResigner struct {
 	done   chan struct{}
 }
 
-// startResigner runs the engine loop at floor on work. It is stopped, and
-// waited for, when the test ends; a test that holds a worker inside a zone
-// releases it first, with a defer.
+// startResigner runs the engine loop at floor on work, with the default number
+// of workers. It is stopped, and waited for, when the test ends; a test that
+// holds a worker inside a zone releases it first, with a defer.
 func startResigner(t *testing.T, floor time.Duration, work resignWork) *testResigner {
+	t.Helper()
+	return startResignerWith(t, floor, defaultResignWorkers, work)
+}
+
+func startResignerWith(t *testing.T, floor time.Duration, workers int, work resignWork) *testResigner {
 	t.Helper()
 	r := &testResigner{q: make(chan ResignRequest, 64), done: make(chan struct{})}
 	var ctx context.Context
 	ctx, r.cancel = context.WithCancel(context.Background())
-	go func() { runResigner(ctx, r.q, floor, work); close(r.done) }()
+	go func() { runResigner(ctx, r.q, floor, workers, work); close(r.done) }()
 	t.Cleanup(func() { r.cancel(); <-r.done })
 	return r
 }
@@ -105,7 +110,7 @@ func (c *zoneCount) waitAll(zones []*ZoneData, want int) bool {
 // next wake, so even with zones renewed side by side, no new pass began until
 // the slowest zone had finished and every zone's cadence was the slowest zone's.
 //
-// Here resignWorkers-1 zones have their lock held for the whole test, so the
+// Here defaultResignWorkers-1 zones have their lock held for the whole test, so the
 // workers that reach them wait. Three others must be renewed over and over --
 // pass after pass, at the engine's own cadence -- while the locks are held.
 //
@@ -117,29 +122,46 @@ func TestSlowZonesDoNotHoldUpTheRestOfTheEngine(t *testing.T) {
 		name string
 		due  func(zd *ZoneData, floor time.Duration)
 	}{
-		{"due again within a floor", func(zd *ZoneData, floor time.Duration) {
-			if snap := zd.snapshot.Load(); snap != nil {
-				zd.setResignSchedule(time.Now().Add(floor/4), snap.Serial)
-			}
-		}},
-		{"no estimate", func(zd *ZoneData, _ time.Duration) { zd.setResignSchedule(time.Time{}, 0) }},
+		{"due again within a floor", dueAgainWithinAFloor},
+		{"no estimate", noEstimate},
 	}
 	for _, floor := range engineFloors {
 		for _, mode := range modes {
 			t.Run(fmt.Sprintf("floor %s, %s", floor, mode.name), func(t *testing.T) {
-				slowZonesDoNotHoldUpTheRest(t, floor, mode.due)
+				slowZonesDoNotHoldUpTheRest(t, floor, defaultResignWorkers, mode.due)
 			})
 		}
 	}
 }
 
-func slowZonesDoNotHoldUpTheRest(t *testing.T, floor time.Duration, due func(*ZoneData, time.Duration)) {
+// dueAgainWithinAFloor is a zone with a short signature validity: whatever a
+// pass leaves it with, it is due again within a floor.
+func dueAgainWithinAFloor(zd *ZoneData, floor time.Duration) {
+	if snap := zd.snapshot.Load(); snap != nil {
+		zd.setResignSchedule(time.Now().Add(floor/4), snap.Serial)
+	}
+}
+
+func noEstimate(zd *ZoneData, _ time.Duration) { zd.setResignSchedule(time.Time{}, 0) }
+
+// TestSlowZonesDoNotHoldUpTheEngineAtAnyWidth: the pool tolerates W-1 slow
+// zones for the W it is configured with (resignerengine.workers), not only for
+// the default of 3.
+func TestSlowZonesDoNotHoldUpTheEngineAtAnyWidth(t *testing.T) {
+	for _, workers := range []int{1, 2, 5, 8} {
+		t.Run(fmt.Sprintf("%d workers", workers), func(t *testing.T) {
+			slowZonesDoNotHoldUpTheRest(t, engineFloors[0], workers, dueAgainWithinAFloor)
+		})
+	}
+}
+
+func slowZonesDoNotHoldUpTheRest(t *testing.T, floor time.Duration, workers int, due func(*ZoneData, time.Duration)) {
 	const free, passes = 3, 4
 	freshZones(t)
 
 	mine := make(map[string]bool)
 	var held, rest []*ZoneData
-	for i := 0; i < resignWorkers-1; i++ {
+	for i := 0; i < workers-1; i++ {
 		zd := watchedTestZone(t, fmt.Sprintf("held%02d.example.", i))
 		zd.KeepRenewed()
 		held = append(held, zd)
@@ -176,7 +198,7 @@ func slowZonesDoNotHoldUpTheRest(t *testing.T, floor time.Duration, due func(*Zo
 		due(zd, floor)
 		returned.add(zd.ZoneName)
 	}
-	startResigner(t, floor, work)
+	startResignerWith(t, floor, workers, work)
 
 	if !returned.waitAll(rest, passes) {
 		for _, zd := range rest {
@@ -336,8 +358,8 @@ feed:
 
 	mu.Lock()
 	defer mu.Unlock()
-	if maxActive > resignWorkers {
-		t.Errorf("%d zones were in a worker at once, the pool is %d wide", maxActive, resignWorkers)
+	if maxActive > defaultResignWorkers {
+		t.Errorf("%d zones were in a worker at once, the pool is %d wide", maxActive, defaultResignWorkers)
 	}
 	for _, zd := range zones {
 		if renews.get(zd.ZoneName) < 3 {
@@ -356,7 +378,7 @@ feed:
 // done, and the zones still queued are dropped.
 func TestShutdownWaitsForTheZonesInFlightAndStartsNoOther(t *testing.T) {
 	freshZones(t)
-	for i := 0; i < resignWorkers+2; i++ {
+	for i := 0; i < defaultResignWorkers+2; i++ {
 		engineZone(t, fmt.Sprintf("stop%02d.example.", i))
 	}
 
@@ -367,7 +389,7 @@ func TestShutdownWaitsForTheZonesInFlightAndStartsNoOther(t *testing.T) {
 		g.work(ctx, zd)
 	}})
 	defer g.open()
-	g.waitFor(t, resignWorkers)
+	g.waitFor(t, defaultResignWorkers)
 
 	r.cancel()
 	select {
@@ -375,8 +397,8 @@ func TestShutdownWaitsForTheZonesInFlightAndStartsNoOther(t *testing.T) {
 		t.Fatal("the engine returned while its workers were still inside a zone")
 	case <-time.After(settle):
 	}
-	if n := started.Load(); n != resignWorkers {
-		t.Errorf("%d zones started before the stop, want %d", n, resignWorkers)
+	if n := started.Load(); n != defaultResignWorkers {
+		t.Errorf("%d zones started before the stop, want %d", n, defaultResignWorkers)
 	}
 
 	g.open()
@@ -385,8 +407,8 @@ func TestShutdownWaitsForTheZonesInFlightAndStartsNoOther(t *testing.T) {
 	case <-time.After(poolWait):
 		t.Fatal("the engine did not return after its workers were released")
 	}
-	if n := started.Load(); n != resignWorkers {
-		t.Errorf("%d zones were started in all, want %d: a worker took a zone after the stop", n, resignWorkers)
+	if n := started.Load(); n != defaultResignWorkers {
+		t.Errorf("%d zones were started in all, want %d: a worker took a zone after the stop", n, defaultResignWorkers)
 	}
 }
 
@@ -458,5 +480,107 @@ func TestAZoneThatEndsOwingWorkIsNotSleptThrough(t *testing.T) {
 	}
 	if calls.Load() < 2 {
 		t.Errorf("the zone ended owing a replace and the engine did not look at it again in %s", poolWait)
+	}
+}
+
+// TestWSlowZonesExhaustTheEngineAtAnyWidth is the limit, at the engine and at
+// the configured width: with as many zones held as there are workers, no other
+// zone is renewed; and with one of them let go, the others are -- the zones were
+// waiting in the queue, not lost.
+func TestWSlowZonesExhaustTheEngineAtAnyWidth(t *testing.T) {
+	for _, workers := range []int{1, 2, 5} {
+		t.Run(fmt.Sprintf("%d workers", workers), func(t *testing.T) {
+			freshZones(t)
+			mine := make(map[string]bool)
+			var held, rest []*ZoneData
+			unlock := make([]func(), workers)
+			for i := 0; i < workers; i++ {
+				zd := watchedTestZone(t, fmt.Sprintf("held%02d.example.", i))
+				zd.KeepRenewed()
+				held = append(held, zd)
+				mine[zd.ZoneName] = true
+				zd.mu.Lock()
+				var once sync.Once
+				z := zd
+				unlock[i] = func() { once.Do(z.mu.Unlock) }
+				defer unlock[i]()
+			}
+			for i := 0; i < 3; i++ {
+				zd := watchedTestZone(t, fmt.Sprintf("free%02d.example.", i))
+				zd.KeepRenewed()
+				rest = append(rest, zd)
+				mine[zd.ZoneName] = true
+			}
+
+			var entered, returned zoneCount
+			work := liveResignWork()
+			work.renew = func(ctx context.Context, zd *ZoneData) {
+				if !mine[zd.ZoneName] {
+					return
+				}
+				entered.add(zd.ZoneName)
+				resignSweepZone(ctx, zd)
+				noEstimate(zd, 0)
+				returned.add(zd.ZoneName)
+			}
+			startResignerWith(t, engineFloors[0], workers, work)
+
+			// Until every worker is inside a held zone the free ones may still
+			// run -- they can be taken first. From then on none may start.
+			if !entered.waitAll(held, 1) {
+				t.Fatalf("not every one of the %d workers got into a held zone", workers)
+			}
+			base := make(map[string]int)
+			for _, zd := range rest {
+				base[zd.ZoneName] = entered.get(zd.ZoneName)
+			}
+			time.Sleep(10 * engineFloors[0])
+			for _, zd := range rest {
+				if n := entered.get(zd.ZoneName); n != base[zd.ZoneName] {
+					t.Errorf("%s was started again with all %d workers held: the pool is wider than %d",
+						zd.ZoneName, workers, workers)
+				}
+			}
+
+			// One held zone let go: the zones that were waiting are renewed.
+			unlock[0]()
+			deadline := time.Now().Add(poolWait)
+			for _, zd := range rest {
+				for returned.get(zd.ZoneName) < base[zd.ZoneName]+1 && time.Now().Before(deadline) {
+					time.Sleep(2 * time.Millisecond)
+				}
+				if returned.get(zd.ZoneName) < base[zd.ZoneName]+1 {
+					t.Errorf("%s: one held zone was let go and it was still not renewed in %s", zd.ZoneName, poolWait)
+				}
+			}
+			for _, zd := range held[1:] {
+				if n := returned.get(zd.ZoneName); n != 0 {
+					t.Errorf("%s is still held, and its renewal returned %d times", zd.ZoneName, n)
+				}
+			}
+		})
+	}
+}
+
+// TestTheEngineRunsAsManyWorkersAsItIsGiven: the width the engine is started with
+// is the pool's. More zones than workers, every worker blocked inside one: exactly
+// that many are inside at once.
+func TestTheEngineRunsAsManyWorkersAsItIsGiven(t *testing.T) {
+	for _, workers := range []int{1, 2, 5, 8} {
+		t.Run(fmt.Sprintf("%d workers", workers), func(t *testing.T) {
+			freshZones(t)
+			for i := 0; i < workers+4; i++ {
+				engineZone(t, fmt.Sprintf("wide%02d.example.", i))
+			}
+			g := newGate(64)
+			startResignerWith(t, engineFloors[0], workers, resignWork{renew: g.work})
+			defer g.open()
+
+			g.waitFor(t, workers)
+			time.Sleep(settle)
+			if extra := len(g.entered); extra != 0 {
+				t.Errorf("%d zones were inside a worker at once, want %d", workers+extra, workers)
+			}
+		})
 	}
 }

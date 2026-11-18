@@ -150,6 +150,29 @@ func nextResignWake(zones map[string]*ZoneData, floor time.Duration) time.Durati
 	}
 }
 
+// resignerSettings is what the resigner is started with. Read once, when the
+// engine starts, from the runtime-config snapshot: a config reload publishes a
+// new snapshot but does not reach an engine that is running, so a change to
+// either value needs a restart.
+type resignerSettings struct {
+	interval    int // resignerengine.interval, seconds, clamped to 60..3600
+	workers     int // resignerengine.workers, see resignWorkersFor
+	workersNote string
+}
+
+func readResignerSettings() resignerSettings {
+	live := ConfLive()
+	st := resignerSettings{interval: live.ResignerInterval}
+	if st.interval < 60 {
+		st.interval = 60
+	}
+	if st.interval > 3600 {
+		st.interval = 3600
+	}
+	st.workers, st.workersNote = resignWorkersFor(live.ResignerWorkers)
+	return st
+}
+
 // ResignerEngine runs the resigner: a timer that decides when the zones on the
 // watchlist are looked at, a pool of workers that looks at them, and the
 // ResignQ.
@@ -163,20 +186,15 @@ func nextResignWake(zones map[string]*ZoneData, floor time.Duration) time.Durati
 // there. Which pass a zone belongs to does not matter: a pass is only the set of
 // zones one tick handed over, and it is never waited for (#1034).
 //
-// The pool is bounded (resignWorkers) and owns a zone for as long as it works
+// The pool is bounded (resignerengine.workers, 3 unless set) and owns a zone for as long as it works
 // on it, so a zone that is still in flight when the next tick comes is skipped,
 // not handed to a second worker. See resignPool.
 func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 
 	//	var zoneresignch = conf.Internal.ResignZoneCh
 
-	interval := ConfLive().ResignerInterval
-	if interval < 60 {
-		interval = 60
-	}
-	if interval > 3600 {
-		interval = 3600
-	}
+	st := readResignerSettings()
+	interval := st.interval
 
 	// The periodic pass is unconditional. It used to be gated on
 	// service.resign, and there is no deployment that wants signatures to
@@ -190,7 +208,10 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 	// the same reason found the hard way: with service.resign unset the engine
 	// drained triggerResign requests and dropped them, so a rollover left the
 	// DNSKEY RRset signed by a retired key. This is the rest of that fix.
-	lgSigner.Info("ResignerEngine starting", "interval_sec", interval)
+	lgSigner.Info("ResignerEngine starting", "interval_sec", interval, "workers", st.workers)
+	if st.workersNote != "" {
+		lgSigner.Warn("resignerengine.workers: " + st.workersNote)
+	}
 
 	// A config that has stopped meaning what it says is its own trap, so an
 	// explicit setting is called out rather than ignored in silence.
@@ -213,15 +234,16 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 	// a missed one.
 	floor := time.Duration(interval) * time.Second
 
-	runResigner(ctx, zoneresignch, floor, liveResignWork())
+	runResigner(ctx, zoneresignch, floor, st.workers, liveResignWork())
 }
 
-// runResigner is ResignerEngine's loop, with the floor and the zones' work
-// handed in so that a test can run it at a pace and on work of its own.
+// runResigner is ResignerEngine's loop, with the floor, the number of workers and
+// the zones' work handed in so that a test can run it at a pace and on work of
+// its own.
 func runResigner(ctx context.Context, zoneresignch chan ResignRequest, floor time.Duration,
-	work resignWork) {
+	workers int, work resignWork) {
 
-	pool := newResignPool(resignWorkers, work)
+	pool := newResignPool(workers, work)
 	// A stop waits for the workers, as it always waited for the sweep: the engine
 	// is what the daemon's shutdown waits on, and a worker left running would
 	// touch zones and the keystore after the daemon has torn them down. A worker

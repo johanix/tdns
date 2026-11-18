@@ -156,7 +156,9 @@ carries #514.
 [514]: https://github.com/johanix/tdns/pull/514
 
 The periodic re-signer (`resignerengine.interval`) is separate, and is about
-signature *freshness*, not about new content.
+signature *freshness*, not about new content. It renews zones through a small
+pool of workers (`resignerengine.workers`, default 3) so that one slow zone does
+not hold up the others; see [The re-signer](config-tdns-auth.md#the-re-signer-resignerengine).
 
 ## Do not enable inbound updates on a signer
 

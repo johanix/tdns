@@ -5,30 +5,68 @@ package tdns
 
 import (
 	"context"
+	"strconv"
 	"sync"
 
 	"github.com/johanix/tdns/v2/core"
 )
 
-// resignWorkers is how many zones the resigner works on at the same time.
+// defaultResignWorkers is how many zones the resigner works on at the same time
+// when resignerengine.workers is not set.
 //
 // More than one, so that a zone that is slow -- large, signed with an expensive
 // algorithm, or waiting on a zd.mu that a long refresh holds -- costs the
-// resigner one worker and not every zone behind it (#1034). Few, because what
-// the workers share is serial: the keystore is one SQLite handle behind kdb.mu,
-// so a wider pool only queues there, and a mint or a promotion under it stalls
-// every worker, the KeyStateWorker and the API alike. Three is inside the 2-4
-// the issue asks for.
+// resigner one worker and not every zone behind it (#1034). And not many, by
+// default, because what the workers share is serial: the keystore is one SQLite
+// handle behind kdb.mu, so more workers than the signing keeps busy only queue
+// there, and a mint or a promotion under it stalls every worker, the
+// KeyStateWorker and the API alike. Three is inside the 2-4 the issue asks for.
+// How far a given deployment can usefully go above it is not something to guess
+// at: it depends on how much of a renewal is signing and how much is resolving
+// keys, which is why it is a setting (resignWorkersFor).
 //
-// A constant and not a setting: nothing an operator can usefully tune.
+// THE LIMIT. The pool tolerates W-1 slow zones, W being the number of workers:
+// with that many in flight one worker is left, and every other zone is still
+// renewed on the engine's cadence, one after another. With W slow zones in
+// flight at once the pool is exhausted and no other zone is renewed until one of
+// them finishes -- the engine keeps ticking and the zones wait in the queue, in
+// order. A larger W raises the limit.
+const defaultResignWorkers = 3
+
+// maxResignWorkers is the most resignerengine.workers can ask for. Not a limit
+// anyone should come near: past a few per core the workers only queue on kdb.mu.
+// It is here so that a typo -- an extra zero, a value meant for something else --
+// is clamped, with a warning, instead of starting thousands of goroutines against
+// one keystore handle.
+const maxResignWorkers = 64
+
+// resignWorkersFor resolves resignerengine.workers into the number of workers
+// to start. n is always in 1..maxResignWorkers. note says what was wrong with the
+// configured value when something was, and is empty otherwise.
 //
-// THE LIMIT. The pool tolerates resignWorkers-1 slow zones: with that many in
-// flight one worker is left, and every other zone is still renewed on the
-// engine's cadence, one after another. With resignWorkers slow zones in flight
-// at once the pool is exhausted and no other zone is renewed until one of them
-// finishes -- the engine keeps ticking and the zones wait in the queue, in
-// order. Raising the constant raises the limit and the queue on kdb.mu with it.
-const resignWorkers = 3
+//	0 (or absent)  defaultResignWorkers, and no complaint: nothing was asked for.
+//	1..max         as configured.
+//	above max      maxResignWorkers, with a note.
+//	below 0        defaultResignWorkers, with a note: it is not a count of anything.
+//
+// A value that is not a number reads as 0 and so as absent, which is how the
+// other integer settings in this block behave.
+//
+// The value is read once, when the resigner starts (ResignerEngine): a config
+// reload publishes it but does not reach the pool, so a change needs a restart.
+func resignWorkersFor(configured int) (n int, note string) {
+	switch {
+	case configured == 0:
+		return defaultResignWorkers, ""
+	case configured < 0:
+		return defaultResignWorkers, "must be at least 1, got " + strconv.Itoa(configured) +
+			"; using the default of " + strconv.Itoa(defaultResignWorkers)
+	case configured > maxResignWorkers:
+		return maxResignWorkers, "at most " + strconv.Itoa(maxResignWorkers) + " workers, got " +
+			strconv.Itoa(configured) + "; using " + strconv.Itoa(maxResignWorkers)
+	}
+	return configured, ""
+}
 
 // resignJobs is what a worker may be asked to do for a zone, as flags: a zone
 // has at most one job, and a second request for it adds to the first.

@@ -23,7 +23,7 @@ const settle = 100 * time.Millisecond
 // workers do, and returns when they have all finished. The engine never waits
 // like this; tests that want a zone renewed and then look at it do.
 func resignPass(ctx context.Context, zones map[string]*ZoneData) {
-	pool := newResignPool(resignWorkers, liveResignWork())
+	pool := newResignPool(defaultResignWorkers, liveResignWork())
 	for _, zd := range zones {
 		pool.submit(ctx, zd, resignJobRenew)
 	}
@@ -73,7 +73,7 @@ func (g *gate) waitFor(t *testing.T, n int) {
 
 // TestEachZoneIsRunByExactlyOneWorker: what keeps two workers off the same zone.
 // Every zone is handed over once, to one worker. The barrier makes the first
-// resignWorkers calls wait for each other, which proves they ran at the same
+// defaultResignWorkers calls wait for each other, which proves they ran at the same
 // time and that the pool did not quietly degrade to one.
 func TestEachZoneIsRunByExactlyOneWorker(t *testing.T) {
 	const n = 200
@@ -83,7 +83,7 @@ func TestEachZoneIsRunByExactlyOneWorker(t *testing.T) {
 	inFlight := make(map[string]bool)
 	calls := make(map[string]int)
 	var active, maxActive int
-	arrived := make(chan struct{}, resignWorkers)
+	arrived := make(chan struct{}, defaultResignWorkers)
 	barrier := make(chan struct{})
 	var barrierOnce sync.Once
 	var first atomic.Int32
@@ -100,12 +100,12 @@ func TestEachZoneIsRunByExactlyOneWorker(t *testing.T) {
 		}
 		mu.Unlock()
 
-		if first.Add(1) <= resignWorkers {
+		if first.Add(1) <= defaultResignWorkers {
 			arrived <- struct{}{}
 			select {
 			case <-barrier:
 			case <-time.After(poolWait):
-				t.Errorf("the first %d calls did not run together: the pool is not concurrent", resignWorkers)
+				t.Errorf("the first %d calls did not run together: the pool is not concurrent", defaultResignWorkers)
 			}
 		} else {
 			time.Sleep(50 * time.Microsecond)
@@ -117,19 +117,19 @@ func TestEachZoneIsRunByExactlyOneWorker(t *testing.T) {
 		mu.Unlock()
 	}
 
-	pool := newResignPool(resignWorkers, resignWork{renew: renew})
+	pool := newResignPool(defaultResignWorkers, resignWork{renew: renew})
 	for _, zd := range zones {
 		if !pool.submit(context.Background(), zd, resignJobRenew) {
 			t.Fatalf("%s: a zone that was not in flight was not taken on", zd.ZoneName)
 		}
 	}
-	for i := 0; i < resignWorkers; i++ {
+	for i := 0; i < defaultResignWorkers; i++ {
 		select {
 		case <-arrived:
 		case <-time.After(poolWait):
 			barrierOnce.Do(func() { close(barrier) })
 			pool.wait()
-			t.Fatalf("only %d of %d workers started", i, resignWorkers)
+			t.Fatalf("only %d of %d workers started", i, defaultResignWorkers)
 		}
 	}
 	barrierOnce.Do(func() { close(barrier) })
@@ -143,8 +143,8 @@ func TestEachZoneIsRunByExactlyOneWorker(t *testing.T) {
 			t.Errorf("%s was run %d times for one request", name, c)
 		}
 	}
-	if maxActive != resignWorkers {
-		t.Errorf("at most %d zones were run at once, want exactly the pool width %d", maxActive, resignWorkers)
+	if maxActive != defaultResignWorkers {
+		t.Errorf("at most %d zones were run at once, want exactly the pool width %d", maxActive, defaultResignWorkers)
 	}
 }
 
@@ -155,7 +155,7 @@ func TestEachZoneIsRunByExactlyOneWorker(t *testing.T) {
 func TestARequestForAZoneInFlightIsNotHandedToASecondWorker(t *testing.T) {
 	g := newGate(8)
 	var renews atomic.Int32
-	pool := newResignPool(resignWorkers, resignWork{renew: func(ctx context.Context, zd *ZoneData) {
+	pool := newResignPool(defaultResignWorkers, resignWork{renew: func(ctx context.Context, zd *ZoneData) {
 		renews.Add(1)
 		g.work(ctx, zd)
 	}})
@@ -188,7 +188,7 @@ func TestARequestForAZoneInFlightIsNotHandedToASecondWorker(t *testing.T) {
 // name, as every map made from zone names is.
 func TestTheSameZoneSpelledAnotherWayIsInFlightOnce(t *testing.T) {
 	g := newGate(4)
-	pool := newResignPool(resignWorkers, resignWork{renew: g.work})
+	pool := newResignPool(defaultResignWorkers, resignWork{renew: g.work})
 	a := &ZoneData{ZoneName: "Mixed.Example."}
 	b := &ZoneData{ZoneName: "mixed.example."}
 
@@ -291,7 +291,7 @@ func TestAReplaceAskedForDuringARenewalFollowsIt(t *testing.T) {
 		mu.Unlock()
 		inside.Add(-1)
 	}
-	pool := newResignPool(resignWorkers, resignWork{
+	pool := newResignPool(defaultResignWorkers, resignWork{
 		renew: func(ctx context.Context, zd *ZoneData) {
 			enter("renew")
 			g.work(ctx, zd)
@@ -333,7 +333,7 @@ func TestAReplaceAskedForDuringARenewalFollowsIt(t *testing.T) {
 func TestWhatIsAskedForDuringAReplaceNeverRunsBesideIt(t *testing.T) {
 	g := newGate(4)
 	var inside, replaces, renews atomic.Int32
-	pool := newResignPool(resignWorkers, resignWork{
+	pool := newResignPool(defaultResignWorkers, resignWork{
 		replace: func(ctx context.Context, zd *ZoneData) {
 			if inside.Add(1) != 1 {
 				t.Error("a job began beside a replace of the same zone")
@@ -441,67 +441,79 @@ func TestTheQueueIsFirstInFirstOut(t *testing.T) {
 	}
 }
 
+// poolWidths are the widths the pool is exercised at: the default and others, so
+// that what holds for the default of 3 holds for any resignerengine.workers.
+var poolWidths = []int{1, 2, 3, 8}
+
 // TestWMinusOneSlowZonesLeaveTheRestRunning is the pool's half of #1034: with
-// resignWorkers-1 zones stuck, the others still run, though only through the one
-// worker that is left.
+// width-1 zones stuck, the others still run, though only through the one worker
+// that is left.
 func TestWMinusOneSlowZonesLeaveTheRestRunning(t *testing.T) {
-	g := newGate(resignWorkers)
-	var rest atomic.Int32
-	pool := newResignPool(resignWorkers, resignWork{renew: func(ctx context.Context, zd *ZoneData) {
-		if zd.ZoneName[0] == 's' {
-			g.work(ctx, zd)
-			return
-		}
-		rest.Add(1)
-	}})
-	for i := 0; i < resignWorkers-1; i++ {
-		pool.submit(context.Background(), &ZoneData{ZoneName: fmt.Sprintf("slow%d.example.", i)}, resignJobRenew)
+	for _, width := range poolWidths {
+		t.Run(fmt.Sprintf("width %d", width), func(t *testing.T) {
+			g := newGate(width)
+			var rest atomic.Int32
+			pool := newResignPool(width, resignWork{renew: func(ctx context.Context, zd *ZoneData) {
+				if zd.ZoneName[0] == 's' {
+					g.work(ctx, zd)
+					return
+				}
+				rest.Add(1)
+			}})
+			for i := 0; i < width-1; i++ {
+				pool.submit(context.Background(), &ZoneData{ZoneName: fmt.Sprintf("slow%d.example.", i)}, resignJobRenew)
+			}
+			g.waitFor(t, width-1)
+			const free = 30
+			for i := 0; i < free; i++ {
+				pool.submit(context.Background(), &ZoneData{ZoneName: fmt.Sprintf("fast%02d.example.", i)}, resignJobRenew)
+			}
+			deadline := time.Now().Add(poolWait)
+			for rest.Load() < free && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if got := rest.Load(); got != free {
+				t.Errorf("%d zones stuck and only %d of %d others ran", width-1, got, free)
+			}
+			g.open()
+			pool.wait()
+		})
 	}
-	g.waitFor(t, resignWorkers-1)
-	const free = 30
-	for i := 0; i < free; i++ {
-		pool.submit(context.Background(), &ZoneData{ZoneName: fmt.Sprintf("fast%02d.example.", i)}, resignJobRenew)
-	}
-	deadline := time.Now().Add(poolWait)
-	for rest.Load() < free && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if got := rest.Load(); got != free {
-		t.Errorf("%d zones stuck and only %d of %d others ran", resignWorkers-1, got, free)
-	}
-	g.open()
-	pool.wait()
 }
 
 // TestWSlowZonesExhaustThePool states the limit, so that it is a decision and
-// not a surprise. With as many zones stuck as there are workers, nothing else
-// runs -- it queues, in order, and runs as soon as a worker is free. Nothing is
-// lost and nothing is run twice.
+// not a surprise, for whatever width the pool is configured with. With as many
+// zones stuck as there are workers, nothing else runs -- it queues, in order, and
+// runs as soon as a worker is free. Nothing is lost and nothing is run twice.
 func TestWSlowZonesExhaustThePool(t *testing.T) {
-	g := newGate(resignWorkers)
-	var rest atomic.Int32
-	pool := newResignPool(resignWorkers, resignWork{renew: func(ctx context.Context, zd *ZoneData) {
-		if zd.ZoneName[0] == 's' {
-			g.work(ctx, zd)
-			return
-		}
-		rest.Add(1)
-	}})
-	for i := 0; i < resignWorkers; i++ {
-		pool.submit(context.Background(), &ZoneData{ZoneName: fmt.Sprintf("slow%d.example.", i)}, resignJobRenew)
-	}
-	g.waitFor(t, resignWorkers)
-	for i := 0; i < 5; i++ {
-		pool.submit(context.Background(), &ZoneData{ZoneName: fmt.Sprintf("fast%d.example.", i)}, resignJobRenew)
-	}
-	time.Sleep(settle)
-	if got := rest.Load(); got != 0 {
-		t.Errorf("%d zones ran with every worker stuck", got)
-	}
-	g.open()
-	pool.wait()
-	if got := rest.Load(); got != 5 {
-		t.Errorf("%d of 5 queued zones ran once the workers were free", got)
+	for _, width := range poolWidths {
+		t.Run(fmt.Sprintf("width %d", width), func(t *testing.T) {
+			g := newGate(width)
+			var rest atomic.Int32
+			pool := newResignPool(width, resignWork{renew: func(ctx context.Context, zd *ZoneData) {
+				if zd.ZoneName[0] == 's' {
+					g.work(ctx, zd)
+					return
+				}
+				rest.Add(1)
+			}})
+			for i := 0; i < width; i++ {
+				pool.submit(context.Background(), &ZoneData{ZoneName: fmt.Sprintf("slow%d.example.", i)}, resignJobRenew)
+			}
+			g.waitFor(t, width)
+			for i := 0; i < 5; i++ {
+				pool.submit(context.Background(), &ZoneData{ZoneName: fmt.Sprintf("fast%d.example.", i)}, resignJobRenew)
+			}
+			time.Sleep(settle)
+			if got := rest.Load(); got != 0 {
+				t.Errorf("%d zones ran with every worker stuck", got)
+			}
+			g.open()
+			pool.wait()
+			if got := rest.Load(); got != 5 {
+				t.Errorf("%d of 5 queued zones ran once the workers were free", got)
+			}
+		})
 	}
 }
 
@@ -557,7 +569,7 @@ func TestANarrowOrWidePoolAndAnEmptyOneStillTerminate(t *testing.T) {
 	var ran atomic.Int32
 	work := resignWork{renew: func(context.Context, *ZoneData) { ran.Add(1) }}
 
-	empty := newResignPool(resignWorkers, work)
+	empty := newResignPool(defaultResignWorkers, work)
 	empty.wait()
 	if empty.submit(context.Background(), nil, resignJobRenew) || empty.submit(context.Background(), &ZoneData{ZoneName: "x."}, 0) {
 		t.Error("an empty request was taken on")
