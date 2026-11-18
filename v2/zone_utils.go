@@ -2334,6 +2334,9 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	// which does not include server-synthesized _dns.<ns> signals; carry them
 	// over so they survive until the transport signal pass regenerates them. (The
 	// synthesized-fallback map is carried separately in applyRefreshReplacementLocked.)
+	// Only an SVCB RRset the pass itself stored is carried: an operator's RRset
+	// at _dns.<ns> is in the fresh data, and carrying the old copy would merge
+	// it back over the operator's edit (design 2026-11-14 section 5).
 	if zd.addsTransportSignal() {
 		snap := zd.publishedSnapshot()
 		if snap == nil {
@@ -2343,7 +2346,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 			if od == nil || !strings.HasPrefix(owner, "_dns.") {
 				continue
 			}
-			if svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB); exists && len(svcbRRset.RRs) > 0 {
+			if svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB); exists && len(svcbRRset.RRs) > 0 && zd.refreshCarriesSignal(owner, svcbRRset.RRs) {
 				svcbClone := &core.RRset{
 					Name:   owner,
 					Class:  dns.ClassINET,
@@ -2403,6 +2406,18 @@ func (zd *ZoneData) repopulateWorkingSetLocked(dynamicRRs []*core.RRset) {
 		}
 
 		existing, exists := owner.RRtypes.Get(rrset.RRtype)
+		if rrset.RRtype == dns.TypeSVCB && ownerRRsetCount(owner) > 0 {
+			// The only SVCB RRsets carried are the transport signal's
+			// (CollectDynamicRRs, section 3). Records already in the fresh
+			// data at that owner, of any type, are the operator's: the
+			// carried copy is dropped, not merged into an SVCB RRset there
+			// (design 2026-11-14 section 5) nor set beside a CNAME (RFC 1034
+			// section 3.6.2), and the start-up pass leaves the operator's
+			// records alone.
+			lg.Debug("RepopulateDynamicRRs: the fresh data holds records at the signal owner; not carrying the old signal over them",
+				"owner", rrset.Name, "zone", zd.ZoneName)
+			continue
+		}
 		if exists {
 			// Get returns an RRset whose RRs slice shares the published
 			// snapshot's backing array; copy it before appending so a

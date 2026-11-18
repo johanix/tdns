@@ -27,8 +27,44 @@ Features:
   updates the server's transport preferences in the referral cache, and
   promotes the connection mode to "opportunistic" so subsequent queries
   attempt the preferred encrypted transport. TSYNC is supported as an
-  alternative carrier. See section 2 of
-  [TDNS Special Features](special-features.md) for the full picture.
+  alternative carrier. It records the DNSSEC validation state of each
+  SVCB RRset a signal is read from: Secure, Insecure or Bogus when the
+  RRSIG comes with it and the keys are at hand, and otherwise unknown
+  until the lookup of `_dns.<ns>`. Through an AliasMode record it records
+  every hop. `dump zone servers` shows it.
+
+  A record whose TargetName is not `.` sends the transports it names to
+  that host, at the record's port or theirs; `udp` and `tcp` go there like
+  the others, and a `do53` in such a record is ignored. Such a record is honoured only
+  when the RRset it came in validated Secure; otherwise it is ignored whole,
+  with a debug line and the `ignored_redirects` counter of `stats
+  auth-transports`, and an undecided one starts the lookup of `_dns.<ns>`.
+  Records with TargetName `.` are honoured either way. The target's
+  addresses are looked up in the background through every server's default
+  endpoints; until they are known the transport stays on the nameserver
+  itself. When every address of a target is backed off, the query goes on
+  to the nameserver's other transports, ending at Do53 on port 53; a udp or
+  tcp endpoint that has no usable address gives way to the nameserver itself
+  on port 53. Backoff and RTT are kept per address, port and transport.
+  `dump zone servers` shows the targets (`Signal targets`).
+
+  A signal may name any port except those on the Fetch Standard's bad-port
+  list (https://fetch.spec.whatwg.org/#port-blocking: SSH, SMTP and the
+  like), which browsers refuse for HTTPS records too; 53, 853 and 443 are
+  never refused. A record with such a port is used as one about the
+  nameserver itself without a port: its transports go to the nameserver
+  on their default ports, with a debug line.
+
+  An AliasMode record at `_dns.<ns>` delegates the whole signal: tdns-imr
+  takes the signal of the RRset the alias leads to, from the Additional
+  section when it was injected beside the alias, and otherwise by looking up
+  each hop in the background, at most three. A target at the end of that
+  path is honoured only when every RRset on it validated Secure; records
+  with TargetName `.` are inherited whatever the state. An alias to `.`, a
+  loop, or a longer path gives no signal.
+
+  See section 2 of [TDNS Special Features](special-features.md) for the
+  full picture.
 
 ## Resolution modes: iteration, stubs, and forwarding
 
@@ -194,7 +230,7 @@ zone reload.
 |---------|--------|
 | `dump suffix <suffix>` | Cached RRsets whose owner name ends in `<suffix>` |
 | `dump zones` | All cached zones, with secure-delegation status |
-| `dump zone servers <zone>` | Servers known for one zone |
+| `dump zone servers <zone>` | Servers known for one zone, with each server's transport signal and the validation state of the RRsets it was read from (`Signal validation`) |
 | `dump zone backoffs <zone>` | Lame-delegation backoffs for one zone |
 | `dump servers` | Servers, grouped by zone |
 | `dump auth-servers` | Authoritative-server table |
@@ -230,7 +266,7 @@ zone reload.
 | `show config` | Listen addresses, cache-primed flag, trust anchors, stub zones |
 | `show options` | The configured `imrengine.options` |
 | `set linewidth <n>` | Output truncation width |
-| `set server transport --server <ns> --signal "doq:20,dot:100,do53:3"` | Override a server's transport signal at runtime (debug). `--reset` clears it |
+| `set server transport --server <ns> --signal "doq:20,dot:100,udp:3,tcp:0"` | Override a server's transport signal at runtime (debug). `do53:N` is `udp:N` and `tcp:N`; absent `udp` and `tcp` are 100. `--reset` clears it |
 
 **Zones**
 

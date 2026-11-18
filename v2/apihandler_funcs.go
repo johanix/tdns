@@ -489,6 +489,24 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				resp.ErrorMsg = err.Error()
 			}
 
+		case "transport-signal":
+			// The bridge from synthesized to provisioned signals: what the
+			// start-up pass writes at _dns.<name>, as zone-file lines.
+			resp.TransportSignal, err = transportSignalPreview(conf, cp.Name)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		case "transport-signal-release":
+			// The pass hands _dns.<name> over to the operator: it drops its
+			// record of what it stored there, and returns the state after.
+			resp.TransportSignal, resp.Msg, err = transportSignalRelease(conf, cp.Name)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
 		case "status":
 			lgApi.Debug("config status inquiry")
 			resp.Listeners = conf.Listeners
@@ -497,6 +515,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Identities = conf.Service.Identities
 			resp.DBFile = conf.Db.File
 			resp.ServerErrors = conf.Internal.ServerErrors.List()
+			resp.Do53QueriesRefused = conf.Internal.do53QueriesRefused.Load()
 			// Every daemon that carries an IMR — tdns-imr itself or the
 			// embedded resolver in tdns-auth/tdns-agent — reports its state.
 			resp.Imr = Globals.ImrEngine.StatusReport()

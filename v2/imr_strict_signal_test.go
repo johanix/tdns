@@ -55,8 +55,18 @@ func newStrictTestImr(t *testing.T, wait time.Duration) (*Imr, *cache.AuthServer
 // found no signal.
 func startSignalLookup(t *testing.T, imr *Imr, server *cache.AuthServer) func(delay time.Duration, weights map[core.Transport]uint8) {
 	t.Helper()
-	if !imr.TransportSignalDiscovery.Begin(strictChildOwner) {
+	end := beginSignalLookup(imr, server)
+	if end == nil {
 		t.Fatal("setup: could not mark the signal lookup as running")
+	}
+	return end
+}
+
+// beginSignalLookup is startSignalLookup for a goroutine other than the
+// test's: it returns nil when the lookup could not be marked as running.
+func beginSignalLookup(imr *Imr, server *cache.AuthServer) func(delay time.Duration, weights map[core.Transport]uint8) {
+	if !imr.TransportSignalDiscovery.Begin(strictChildOwner) {
+		return nil
 	}
 	return func(delay time.Duration, weights map[core.Transport]uint8) {
 		go func() {

@@ -889,8 +889,9 @@ The `type` field selects the record type used for signaling:
 
 The `signal` field is a comma-separated list of
 `protocol:weight` pairs. Higher weight means the server
-prefers that transport. Supported protocols are `doq`, `dot`,
-`doh`, and `do53`.
+prefers that transport. Supported protocols are `udp`, `tcp`,
+`doq`, `dot` and `doh`; `do53:N` is the shorthand for `udp:N`
+and `tcp:N`, and is published as the two.
 
 The resulting SVCB record looks like:
 
@@ -920,6 +921,32 @@ record in the Additional section, it:
    65280.
 3. Updates the server's connection preferences in the
    referral cache.
+
+   Cleartext is two tokens, `udp` and `tcp`, each 100 when
+   absent. An older signal's `do53:N` is read as `udp:N` and
+   `tcp:N`; an explicit `udp` or `tcp` wins over it. The `udp`
+   weight caps the share of queries the resolver sends over
+   UDP by its own choice: Do53 gets what the encrypted
+   weights leave of 100, cut so that its share of first
+   attempts is no more than the `udp` weight. The cap is on
+   the share: `udp:20,dot:60` sends 20% of first attempts
+   over UDP and 80% over DoT, and `udp:0,dot:50` sends every
+   first attempt over DoT.
+   Port 53 stays the last resort all the same. The `tcp`
+   weight only caps the TCP the resolver would choose on its
+   own, and tdns chooses none: TCP after a truncation, or
+   forced for a large DNSKEY, ignores it, `tcp:0` included.
+   A record's `port` applies to `udp` and `tcp` as to the
+   other transports it names, but never to `do53`, which is
+   ignored in a record with a port. The retry over TCP after
+   a truncation goes to the address and port that truncated;
+   forced TCP goes to the `tcp` port, or to port 53. Backoff,
+   round-trip times and a zone's lameness (a REFUSED for the
+   zone) are kept per address, port and transport, so an
+   endpoint that refuses holds back only itself: not port
+   53, and not a target's other addresses. A token the
+   resolver does not know is kept in
+   the record and not acted on.
 4. Promotes the server's connection mode to "opportunistic",
    meaning the resolver will attempt encrypted transports
    on subsequent queries to that server.
@@ -944,8 +971,10 @@ enable active discovery:
 - `always-query-for-transport` -- The IMR queries for
   transport signals whenever it discovers a new
   authoritative server, regardless of whether a signal
-  was observed. This is more aggressive and generates
-  additional queries.
+  was observed: from a referral's glue, and from the
+  address lookup of a nameserver that came without glue.
+  This is more aggressive and generates additional
+  queries.
 
 A query with strict privacy (the PRIVACY option, level
 strict) looks for signals even when neither option is set.
@@ -970,6 +999,20 @@ Where the root and TLD servers signal nothing, as on
 today's Internet, strict queries fail with an EDE naming
 the zone (`.` for the root) until ordinary queries have
 cached the delegations above the zone.
+
+Any query, strict or not, waits the same way when none of
+its servers has a transport it may use: typically a server
+whose only known transport, Do53, is in backoff, because it
+answers only over encrypted transports and its signal is not
+in yet. The query starts the signal lookups of the servers
+it knows nothing about, or joins those already running, and
+waits up to `tuning.discovery.strict-wait` before it gives
+up. It does not wait on a cached denial of the signal, nor
+on a lookup that failed and is cooling down. The same holds
+when the query's own attempts used up its servers' only
+transport, such as a Do53 query refused by a server that
+answers only over encrypted transports: it waits once for
+the signal, then tries again.
 
 Additional options:
 

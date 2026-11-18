@@ -53,7 +53,33 @@ service:
 
    transport:
       type:    svcb               # svcb | tsync | none; default is none
-      signal:  "doq:20,dot:10"    # comma-sep list of doq,dot,doh,do53 with traffic share
+      signal:  "doq:20,dot:10"    # comma-sep list of udp,tcp,doq,dot,doh with traffic share
+      #                            # (udp and tcp 100 when absent; do53:N is
+      #                            # udp:N plus tcp:N)
+      # ports:                     # optional: a transport not on its standard
+      #    dot:  1234              # port. Each one gets an SVCB record of its
+      #    doq:  1235              # own; the rest share one record.
+      #    udp:  5353              # Keys: udp, tcp, dot, doq, doh; dot, doq and
+      #    tcp:  5353              # doh each with a weight in signal. Ports
+      #                            # are sockets: no two of tcp, dot, doh on one
+      #                            # port, nor udp and doq, and udp takes its
+      #                            # port on TCP too (the retry after TC).
+      #                            # Only type svcb carries ports. Publishing a
+      #                            # port does not listen on it: list it under
+      #                            # listeners.ports too (a warning otherwise).
+      #                            # A non-standard port also keeps a test
+      #                            # listener off port 853, which resolvers
+      #                            # that follow RFC 9539 try unasked.
+      # targets:                   # optional: a transport served by another
+      #    dot:  dot.example.net.  # host. Each one gets an SVCB record of its
+      #                            # own with the host as its TargetName, and
+      #                            # its port from ports: if it has one. Keys:
+      #                            # udp, tcp, dot, doq; dot and doq need a
+      #                            # weight in signal. doh is refused (it
+      #                            # would need a path).
+      #                            # Resolvers honour a target only from a
+      #                            # signed signal: a warning in an unsigned
+      #                            # zone. Only type svcb carries targets.
 
 # The listeners: block is the SAME schema in every tdns app (#446): where
 # this daemon's DNS service listens. Authoritative-serving BEHAVIOR lives

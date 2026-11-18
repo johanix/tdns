@@ -1,11 +1,13 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * A received transport signal is acted on for the signal tokens only (do53,
- * dot, doh, doq until the token split). Other tokens -- udp and tcp from the
- * split, or tokens not yet defined -- are kept on the wire by the dns codec, so
- * a record re-packs to the bytes it was signed as, and selection never sees
- * them. Design: the alternative-endpoint note, tdns #1043, section 8.
+ * A received transport signal is acted on for the signal tokens only: udp
+ * and tcp, dot, doh and doq, and do53, the shorthand for udp and tcp. Tokens
+ * not yet defined are kept on the wire by the dns codec, so a record re-packs
+ * to the bytes it was signed as, and selection never sees them. udp and tcp
+ * are read, but neither makes the resolver choose TCP: a tcp weight caps only
+ * the TCP chosen on its own, and tdns chooses none. Design: the
+ * alternative-endpoint note, tdns #1043, sections 2, 3 and 8.
  */
 package tdns
 
@@ -47,24 +49,53 @@ func stateOf(s *cache.AuthServer) signalState {
 	return st
 }
 
-func assertNoDo53TCP(t *testing.T, label string, st signalState) {
+// assertTCPNotChosen fails when Do53TCP is among the transports selection
+// draws from. A tcp weight may be held, as a cap, but tdns never chooses
+// optional TCP.
+func assertTCPNotChosen(t *testing.T, label string, st signalState) {
 	t.Helper()
 	for _, tr := range st.Transports {
 		if tr == core.TransportDo53TCP {
 			t.Errorf("%s: transports %v hold Do53TCP", label, st.Transports)
 		}
 	}
-	if _, ok := st.Weights[core.TransportDo53TCP]; ok {
-		t.Errorf("%s: weights %v hold a Do53TCP weight", label, st.Weights)
+}
+
+// chosen is what selection acts on in a server's state: the transports it
+// draws from and their weights. The cleartext weights, udp (Do53) and tcp
+// (Do53TCP), are left out: Do53 gets what the encrypted weights leave, and
+// tcp is not chosen at all, so neither changes a choice.
+type chosen struct {
+	Transports []core.Transport
+	Weights    map[core.Transport]uint8
+}
+
+func chosenOf(st signalState) chosen {
+	w := map[core.Transport]uint8{}
+	for tr, v := range st.Weights {
+		if core.IsEncryptedTransport(tr) {
+			w[tr] = v
+		}
 	}
-	if _, ok := st.Received[core.TransportDo53TCP]; ok {
-		t.Errorf("%s: received signal %v holds a Do53TCP weight", label, st.Received)
-	}
+	return chosen{Transports: st.Transports, Weights: w}
 }
 
 const ootsTestNS = "ns.example."
 
-func ootsSVCB(t *testing.T, target, oots string) *dns.SVCB {
+// applySVCBForNS is what ParseAdditionalForNSAddrs does with one SVCB for a
+// nameserver: collect it into the nameserver's set, then install the set. It
+// reports whether a signal was installed.
+func applySVCBForNS(imr *Imr, rr *dns.SVCB, serverName string, sm map[string]*cache.AuthServer) bool {
+	pending := map[string]*svcbSignalSet{}
+	imr.collectSVCBSignal(pending, serverName, rr)
+	key := cache.ServerKey(serverName)
+	installed, _ := imr.installSVCBSignal(sm[key], pending[key])
+	return installed
+}
+
+// ootsTextSVCB is the _dns SVCB of ootsTestNS at target, parsed from its
+// presentation form, so that tokens the codec only carries come through too.
+func ootsTextSVCB(t *testing.T, target, oots string) *dns.SVCB {
 	t.Helper()
 	rr := mustSVCB(t, fmt.Sprintf(`_dns.%s 10800 IN SVCB 1 %s oots=%q`, ootsTestNS, target, oots))
 	return rr.(*dns.SVCB)
@@ -80,9 +111,11 @@ func tsyncRR(t *testing.T, transports string) *dns.PrivateRR {
 }
 
 // The signal without the other tokens, and the same signal with them in every
-// mix: udp, tcp (both at 0 and above), and an undefined token.
+// mix: udp, tcp (both at 0 and above), and an undefined token. ootsUnknown
+// adds only undefined tokens, which leave the state exactly as without them.
 var (
 	ootsPlain     = "do53:100,dot:50,doq:20"
+	ootsUnknown   = "do53:100,dot:50,doq:20,xyz:9,future-thing:42"
 	ootsWithOther = []string{
 		"do53:100,dot:50,doq:20,tcp:30",
 		"udp:100,do53:100,dot:50,doq:20",
@@ -91,8 +124,9 @@ var (
 	}
 )
 
-// A signal carrying udp, tcp or unknown tokens yields the same selection as one
-// without them, on the SVCB path: a direct answer, and Additional.
+// A signal carrying udp, tcp or unknown tokens chooses what the same signal
+// without them chooses, on the SVCB path: a direct answer, and Additional.
+// Undefined tokens change nothing at all.
 func TestReceivedSVCBSignalIgnoresOtherTokens(t *testing.T) {
 	imr := &Imr{}
 	ctx := context.Background()
@@ -104,15 +138,15 @@ func TestReceivedSVCBSignalIgnoresOtherTokens(t *testing.T) {
 	}
 	direct := func(oots string) func(*cache.AuthServer) {
 		return func(s *cache.AuthServer) {
-			imr.parseSVCBTransportSignal(ootsSVCB(t, ".", oots), ootsTestNS,
-				map[string]*cache.AuthServer{cache.ServerKey(ootsTestNS): s}, ctx)
+			applySVCBForNS(imr, ootsTextSVCB(t, ".", oots), ootsTestNS,
+				map[string]*cache.AuthServer{cache.ServerKey(ootsTestNS): s})
 		}
 	}
 	additional := func(oots string) func(*cache.AuthServer) {
 		return func(s *cache.AuthServer) {
 			r := new(dns.Msg)
 			r.SetQuestion("www.example.", dns.TypeA)
-			r.Extra = []dns.RR{ootsSVCB(t, ".", oots)}
+			r.Extra = []dns.RR{ootsTextSVCB(t, ".", oots)}
 			imr.parseTransportForServerFromAdditional(ctx, s, r)
 		}
 	}
@@ -128,10 +162,13 @@ func TestReceivedSVCBSignalIgnoresOtherTokens(t *testing.T) {
 		for _, oots := range ootsWithOther {
 			got := want(path.apply(oots))
 			label := path.name + " " + oots
-			assertNoDo53TCP(t, label, got)
-			if !reflect.DeepEqual(got, base) {
-				t.Errorf("%s: selection %+v, want the same as without the other tokens: %+v", label, got, base)
+			assertTCPNotChosen(t, label, got)
+			if !reflect.DeepEqual(chosenOf(got), chosenOf(base)) {
+				t.Errorf("%s: selection %+v, want the same as without the other tokens: %+v", label, chosenOf(got), chosenOf(base))
 			}
+		}
+		if got := want(path.apply(ootsUnknown)); !reflect.DeepEqual(got, base) {
+			t.Errorf("%s %s: state %+v, want the same as without the undefined tokens: %+v", path.name, ootsUnknown, got, base)
 		}
 	}
 }
@@ -177,78 +214,84 @@ func TestReceivedTSYNCSignalIgnoresOtherTokens(t *testing.T) {
 		for _, tr := range ootsWithOther {
 			got := run(path.apply(tr))
 			label := path.name + " " + tr
-			assertNoDo53TCP(t, label, got)
-			if !reflect.DeepEqual(got, base) {
-				t.Errorf("%s: selection %+v, want the same as without the other tokens: %+v", label, got, base)
+			assertTCPNotChosen(t, label, got)
+			if !reflect.DeepEqual(chosenOf(got), chosenOf(base)) {
+				t.Errorf("%s: selection %+v, want the same as without the other tokens: %+v", label, chosenOf(got), chosenOf(base))
 			}
+		}
+		if got := run(path.apply(ootsUnknown)); !reflect.DeepEqual(got, base) {
+			t.Errorf("%s %s: state %+v, want the same as without the undefined tokens: %+v", path.name, ootsUnknown, got, base)
 		}
 	}
 }
 
-// A signal that names only other tokens is no signal: it is not applied, so it
-// neither installs the absence defaults nor replaces what another record said.
+// A signal that names only undefined tokens is no signal: it is not applied,
+// so it neither installs the absence defaults nor replaces what another record
+// said.
 func TestReceivedSignalWithOnlyOtherTokensIsNotApplied(t *testing.T) {
 	imr := &Imr{}
 	ctx := context.Background()
 	s := cache.NewAuthServer(ootsTestNS)
 	sm := map[string]*cache.AuthServer{cache.ServerKey(ootsTestNS): s}
-	imr.parseSVCBTransportSignal(ootsSVCB(t, ".", ootsPlain), ootsTestNS, sm, ctx)
+	applySVCBForNS(imr, ootsTextSVCB(t, ".", ootsPlain), ootsTestNS, sm)
 	before := stateOf(s)
 
-	only := ootsSVCB(t, "tcp-ns.example.", "tcp:30")
+	only := ootsTextSVCB(t, ".", "xyz:30")
 	if m, ok, err := GetTransportParamRaw(only); ok || err != nil || m != nil {
-		t.Errorf("GetTransportParamRaw(only tcp) = %v, %v, %v; want no oots to act on", m, ok, err)
+		t.Errorf("GetTransportParamRaw(only xyz) = %v, %v, %v; want no oots to act on", m, ok, err)
 	}
-	if imr.parseSVCBTransportSignal(only, ootsTestNS, sm, ctx) {
-		t.Error("parseSVCBTransportSignal applied a record naming only tcp")
+	if applySVCBForNS(imr, only, ootsTestNS, sm) {
+		t.Error("the NS-address path applied a record naming only xyz")
 	}
 	r := new(dns.Msg)
-	r.Extra = []dns.RR{only, ootsSVCB(t, ".", "udp:100,xyz:1")}
+	r.Extra = []dns.RR{only, ootsTextSVCB(t, ".", "future-thing:100,xyz:1")}
 	imr.parseTransportForServerFromAdditional(ctx, s, r)
-	if imr.applyTransportSignalToServer(s, "tcp:30,udp:100") {
-		t.Error("applyTransportSignalToServer applied a string naming only tcp and udp")
+	if imr.applyTransportSignalToServer(s, "xyz:30,future-thing:100") {
+		t.Error("applyTransportSignalToServer applied a string naming only undefined tokens")
 	}
 	// The TSYNC parser reports that it looked, not that it applied; what
 	// matters is the state, checked below.
-	_ = imr.parseTSYNCTransportSignal(tsyncRR(t, "tcp:30"), ootsTestNS, sm, ctx)
-	if applyTransportMapToServer(s, map[string]uint8{"tcp": 30, "udp": 100}) {
-		t.Error("applyTransportMapToServer applied a map naming only tcp and udp")
+	_ = imr.parseTSYNCTransportSignal(tsyncRR(t, "xyz:30"), ootsTestNS, sm, ctx)
+	// do53-tcp is an operator alias of StringToTransport, not a token.
+	if applyTransportMapToServer(s, map[string]uint8{"xyz": 30, "do53-tcp": 100}) {
+		t.Error("applyTransportMapToServer applied a map naming no signal token")
 	}
 	if got := stateOf(s); !reflect.DeepEqual(got, before) {
 		t.Errorf("state changed by signals naming only other tokens:\n got %+v\nwant %+v", got, before)
 	}
 }
 
-// The filter accepts exactly the four signal tokens; StringToTransport's
-// operator aliases (tcp, do53-tcp, DoT, ...) are not signal tokens.
+// The filter accepts exactly the six signal tokens; StringToTransport's
+// other operator aliases (do53-tcp, DoT, ...) are not signal tokens.
 func TestSignalTokenFilter(t *testing.T) {
-	for _, tok := range []string{"do53", "dot", "doh", "doq"} {
+	for _, tok := range []string{"do53", "udp", "tcp", "dot", "doh", "doq"} {
 		if !core.IsSignalToken(tok) {
 			t.Errorf("IsSignalToken(%q) = false", tok)
 		}
 	}
-	for _, tok := range []string{"tcp", "udp", "do53-tcp", "DoT", "TCP", "h2", "xyz", ""} {
+	for _, tok := range []string{"do53-tcp", "DoT", "TCP", "UDP", "h2", "xyz", ""} {
 		if core.IsSignalToken(tok) {
 			t.Errorf("IsSignalToken(%q) = true", tok)
 		}
 	}
-	m, err := core.ParseReceivedTransportString("do53:100, TCP:30 ,dot:150,udp:0")
+	m, err := core.ParseReceivedTransportString("do53:100, TCP:30 ,dot:150,udp:0,xyz:5")
 	if err != nil {
 		t.Fatalf("ParseReceivedTransportString: %v", err)
 	}
-	if want := map[string]uint8{"do53": 100, "dot": 100}; !reflect.DeepEqual(m, want) {
+	if want := map[string]uint8{"do53": 100, "tcp": 30, "udp": 0, "dot": 100}; !reflect.DeepEqual(m, want) {
 		t.Errorf("ParseReceivedTransportString = %v, want %v", m, want)
 	}
 	if _, err := core.ParseReceivedTransportString("dot:5,dot:6"); err == nil {
 		t.Error("ParseReceivedTransportString accepted a duplicate")
 	}
 	// The codec keeps a raw weight octet above 100; the reader clamps.
-	if m := svcbOotsToRawMap(&dns.SVCBOots{Oots: []dns.SVCBOotsEntry{{Proto: "dot", Weight: 150}, {Proto: "tcp", Weight: 200}}}); !reflect.DeepEqual(m, map[string]uint8{"dot": 100}) {
-		t.Errorf("svcbOotsToRawMap = %v, want dot:100 alone", m)
+	if m := svcbOotsToRawMap(&dns.SVCBOots{Oots: []dns.SVCBOotsEntry{{Proto: "dot", Weight: 150}, {Proto: "tcp", Weight: 200}, {Proto: "xyz", Weight: 7}}}); !reflect.DeepEqual(m, map[string]uint8{"dot": 100, "tcp": 100}) {
+		t.Errorf("svcbOotsToRawMap = %v, want dot:100 and tcp:100", m)
 	}
 }
 
-// tdns-auth refuses, at config load, a published signal naming another token.
+// tdns-auth refuses, at config load, a published signal naming a token that is
+// not defined.
 func TestPublishedTransportSignalRefusesOtherTokens(t *testing.T) {
 	for _, tc := range []struct {
 		typ, signal string
@@ -258,14 +301,16 @@ func TestPublishedTransportSignalRefusesOtherTokens(t *testing.T) {
 		{"tsync", "do53:0,doh:5", true},
 		{"SVCB", "dot:10", true},
 		{"svcb", "", true},
-		{"svcb", "dot:10,tcp:30", false},
-		{"tsync", "udp:100", false},
+		// From S5 on the publisher emits udp and tcp.
+		{"svcb", "dot:10,tcp:30", true},
+		{"tsync", "udp:100", true},
+		{"svcb", "dot:10,xyz:30", false},
 		{"svcb", "xyz:1", false},
 		{"svcb", "dot:10,", false},
 		{"svcb", "dot", false},
 		// Not published: not checked.
-		{"none", "tcp:30", true},
-		{"", "tcp:30", true},
+		{"none", "xyz:30", true},
+		{"", "xyz:30", true},
 	} {
 		err := TransportConf{Type: tc.typ, Signal: tc.signal}.Validate()
 		if (err == nil) != tc.ok {
@@ -276,8 +321,8 @@ func TestPublishedTransportSignalRefusesOtherTokens(t *testing.T) {
 
 // ootsZone carries _dns SVCBs that a tdns node of this version must keep as
 // written: one mixing signal tokens with others, one whose only entry is tcp
-// (which the old codec re-packed as an empty value), and one naming only tcp
-// at an alternative host. A node that loads, signs and serves the zone must
+// (which the old codec re-packed as an empty value), one naming only undefined
+// tokens, and one naming only tcp at an alternative host. A node that loads, signs and serves the zone must
 // serve the RDATA as written, and the RRSIG must still verify over what a
 // receiver unpacks off the wire and packs again.
 //
@@ -288,17 +333,21 @@ func TestPublishedTransportSignalRefusesOtherTokens(t *testing.T) {
 const ootsZone = `oots.example.	3600	IN	SOA	ns.oots.example. hostmaster.oots.example. 1 7200 1800 604800 7200
 oots.example.	3600	IN	NS	ns.oots.example.
 oots.example.	3600	IN	NS	ns2.oots.example.
+oots.example.	3600	IN	NS	ns3.oots.example.
 ns.oots.example.	3600	IN	A	127.0.0.1
 ns2.oots.example.	3600	IN	A	127.0.0.2
+ns3.oots.example.	3600	IN	A	127.0.0.3
 www.oots.example.	3600	IN	A	192.0.2.1
 _dns.ns.oots.example.	3600	IN	SVCB	1 . oots="do53:100,tcp:30,dot:50,udp:100,xyz:9"
 _dns.ns2.oots.example.	3600	IN	SVCB	1 . oots="tcp:30"
+_dns.ns3.oots.example.	3600	IN	SVCB	1 . oots="xyz:9,future-thing:42"
 _dns.alt.oots.example.	3600	IN	SVCB	1 tcp-alt.oots.example. oots="tcp:30"
 `
 
 var ootsZoneSignals = map[string]string{
 	"_dns.ns.oots.example.":  `1 . oots="do53:100,tcp:30,dot:50,udp:100,xyz:9"`,
 	"_dns.ns2.oots.example.": `1 . oots="tcp:30"`,
+	"_dns.ns3.oots.example.": `1 . oots="xyz:9,future-thing:42"`,
 	"_dns.alt.oots.example.": `1 tcp-alt.oots.example. oots="tcp:30"`,
 }
 
@@ -409,10 +458,11 @@ func TestOOTSOtherTokensServedLosslessAndSigned(t *testing.T) {
 	}
 }
 
-// The record whose only entry is tcp, served in Additional beside a mixed one,
-// does not break the response: it packs, unpacks, keeps its RRSIG valid, and
-// the resolver reading it applies nothing, while the mixed record's signal
-// tokens are applied as without the others.
+// The records whose only entry is tcp, or only undefined tokens, served in
+// Additional beside a mixed one, do not break the response: they pack, unpack
+// and keep their RRSIGs valid. The resolver reading them applies tcp:30, with
+// udp at its default, and nothing from the undefined tokens, while the mixed
+// record's signal tokens are applied as without the undefined one.
 func TestOOTSOnlyOtherTokensInAdditional(t *testing.T) {
 	zd, kdb := ootsSignedZone(t)
 	keys := zoneDNSKEYs(t, zd, kdb)
@@ -438,17 +488,22 @@ func TestOOTSOnlyOtherTokensInAdditional(t *testing.T) {
 	if len(served.Answer) == 0 {
 		t.Fatalf("no answer: %v", served)
 	}
-	var onlyTCP *dns.SVCB
-	for _, rr := range served.Extra {
-		if s, ok := rr.(*dns.SVCB); ok && strings.EqualFold(s.Hdr.Name, "_dns.ns2.oots.example.") {
-			onlyTCP = s
+	for owner, want := range map[string]string{
+		"_dns.ns2.oots.example.": "_dns.ns2.oots.example.\t3600\tIN\tSVCB\t1 . oots=\"tcp:30\"",
+		"_dns.ns3.oots.example.": "_dns.ns3.oots.example.\t3600\tIN\tSVCB\t1 . oots=\"xyz:9,future-thing:42\"",
+	} {
+		var found *dns.SVCB
+		for _, rr := range served.Extra {
+			if s, ok := rr.(*dns.SVCB); ok && strings.EqualFold(s.Hdr.Name, owner) {
+				found = s
+			}
 		}
-	}
-	if onlyTCP == nil {
-		t.Fatalf("the only-tcp signal is not in Additional: %v", served.Extra)
-	}
-	if got, want := onlyTCP.String(), "_dns.ns2.oots.example.\t3600\tIN\tSVCB\t1 . oots=\"tcp:30\""; got != want {
-		t.Errorf("Additional holds %q, want %q", got, want)
+		if found == nil {
+			t.Fatalf("the signal at %s is not in Additional: %v", owner, served.Extra)
+		}
+		if got := found.String(); got != want {
+			t.Errorf("Additional holds %q, want %q", got, want)
+		}
 	}
 	var extra []dns.RR
 	signed := map[string]bool{}
@@ -470,25 +525,34 @@ func TestOOTSOnlyOtherTokensInAdditional(t *testing.T) {
 	verifySection(t, extra, keys)
 
 	imr := &Imr{}
-	s2 := cache.NewAuthServer("ns2.oots.example.")
-	imr.parseTransportForServerFromAdditional(context.Background(), s2, served)
-	if st := stateOf(s2); st.Source != "" || len(st.Weights) != 0 {
-		t.Errorf("a resolver applied the only-tcp signal: %+v", st)
+	fromAdditional := func(name string) signalState {
+		s := cache.NewAuthServer(name)
+		imr.parseTransportForServerFromAdditional(context.Background(), s, served)
+		return stateOf(s)
 	}
-	s1 := cache.NewAuthServer("ns.oots.example.")
-	imr.parseTransportForServerFromAdditional(context.Background(), s1, served)
-	want := cache.NewAuthServer("ns.oots.example.")
-	applyTransportMapToServer(want, map[string]uint8{"do53": 100, "dot": 50})
-	got := stateOf(s1)
-	assertNoDo53TCP(t, "ns from Additional", got)
-	if !reflect.DeepEqual(got, stateOf(want)) {
-		t.Errorf("ns from Additional: selection %+v, want do53:100,dot:50 alone: %+v", got, stateOf(want))
+	applied := func(name string, m map[string]uint8) signalState {
+		s := cache.NewAuthServer(name)
+		applyTransportMapToServer(s, m)
+		return stateOf(s)
+	}
+	if st := fromAdditional("ns3.oots.example."); st.Source != "" || len(st.Weights) != 0 {
+		t.Errorf("a resolver applied the signal of undefined tokens only: %+v", st)
+	}
+	got2 := fromAdditional("ns2.oots.example.")
+	assertTCPNotChosen(t, "ns2 from Additional", got2)
+	if want := applied("ns2.oots.example.", map[string]uint8{"tcp": 30}); !reflect.DeepEqual(got2, want) || got2.Weights[core.TransportDo53TCP] != 30 || got2.Weights[core.TransportDo53] != 100 {
+		t.Errorf("ns2 from Additional: %+v, want tcp:30 with udp at its default 100: %+v", got2, want)
+	}
+	got := fromAdditional("ns.oots.example.")
+	assertTCPNotChosen(t, "ns from Additional", got)
+	if want := applied("ns.oots.example.", map[string]uint8{"do53": 100, "tcp": 30, "dot": 50, "udp": 100}); !reflect.DeepEqual(got, want) {
+		t.Errorf("ns from Additional: %+v, want its signal tokens alone: %+v", got, want)
 	}
 }
 
 // The ALPN fallback is a received path too: alpn tokens that are not signal
-// tokens (tcp, do53-tcp, h2) are skipped, so they install no Do53TCP weight,
-// and an ALPN list naming none is not applied. Case does not matter.
+// tokens (do53-tcp, h2) are skipped, and an ALPN list naming none is not
+// applied. A tcp in the list is read, and not chosen. Case does not matter.
 func TestReceivedALPNSignalIgnoresOtherTokens(t *testing.T) {
 	run := func(alpn string) signalState {
 		s := cache.NewAuthServer(ootsTestNS)
@@ -499,28 +563,38 @@ func TestReceivedALPNSignalIgnoresOtherTokens(t *testing.T) {
 	if base.Source != "alpn" || base.Weights[core.TransportDoT] != 100 {
 		t.Fatalf("the plain ALPN signal was not applied: %+v", base)
 	}
-	for _, alpn := range []string{"dot,tcp,doq", "do53-tcp,dot,doq,h2", "DoT,DoQ", "dot, TCP ,doq"} {
-		got := run(alpn)
-		assertNoDo53TCP(t, "alpn "+alpn, got)
-		if !reflect.DeepEqual(got, base) {
-			t.Errorf("alpn %q: selection %+v, want the same as dot,doq: %+v", alpn, got, base)
+	for _, alpn := range []string{"do53-tcp,dot,doq,h2", "DoT,DoQ"} {
+		if got := run(alpn); !reflect.DeepEqual(got, base) {
+			t.Errorf("alpn %q: state %+v, want the same as dot,doq: %+v", alpn, got, base)
 		}
 	}
-	if got := run("tcp,do53-tcp,h2"); got.Source != "" || len(got.Weights) != 0 {
+	for _, alpn := range []string{"dot,tcp,doq", "dot, TCP ,doq"} {
+		got := run(alpn)
+		assertTCPNotChosen(t, "alpn "+alpn, got)
+		if !reflect.DeepEqual(chosenOf(got), chosenOf(base)) || got.Weights[core.TransportDo53TCP] != 100 {
+			t.Errorf("alpn %q: %+v, want the choice of dot,doq and tcp at 100: %+v", alpn, got, base)
+		}
+	}
+	// do53 in an ALPN list is udp and tcp, as in oots.
+	if got := run("do53,dot"); got.Weights[core.TransportDo53] != 100 || got.Weights[core.TransportDo53TCP] != 100 ||
+		!reflect.DeepEqual(got.Transports, []core.Transport{core.TransportDo53, core.TransportDoT}) {
+		t.Errorf("alpn do53,dot: %+v, want udp and tcp at 100, Do53 and DoT chosen from", got)
+	}
+	if got := run("do53-tcp,h2,xyz"); got.Source != "" || len(got.Weights) != 0 {
 		t.Errorf("an ALPN list naming no signal token was applied: %+v", got)
 	}
 }
 
 // config check refuses the signal too (ValidateConfig), and the message names
-// the signal tokens from the filter's own set.
+// the publishable tokens from the check's own set.
 func TestValidateConfigRefusesOtherTokensInSignal(t *testing.T) {
-	cfg := writeCfg(t, "service:\n   transport:\n      type: svcb\n      signal: \"dot:10,tcp:30\"\n")
+	cfg := writeCfg(t, "service:\n   transport:\n      type: svcb\n      signal: \"dot:10,xyz:30\"\n")
 	err := ValidateConfig(nil, cfg)
-	if err == nil || !strings.Contains(err.Error(), "service.transport.signal") || !strings.Contains(err.Error(), "tcp") {
-		t.Fatalf("ValidateConfig = %v, want a service.transport.signal error naming tcp", err)
+	if err == nil || !strings.Contains(err.Error(), "service.transport.signal") || !strings.Contains(err.Error(), "xyz") {
+		t.Fatalf("ValidateConfig = %v, want a service.transport.signal error naming xyz", err)
 	}
-	if !strings.Contains(err.Error(), "do53, doh, doq, dot") {
-		t.Errorf("ValidateConfig = %v, want the signal tokens named from the filter's set", err)
+	if !strings.Contains(err.Error(), "do53, doh, doq, dot, tcp, udp") {
+		t.Errorf("ValidateConfig = %v, want the publishable tokens named from the check's set", err)
 	}
 }
 
@@ -539,7 +613,7 @@ func TestOOTSWithoutSignalTokenIgnoresALPN(t *testing.T) {
 		apply func(*Imr, *cache.AuthServer, *dns.SVCB)
 	}{
 		{"answer", func(imr *Imr, s *cache.AuthServer, rr *dns.SVCB) {
-			imr.parseSVCBTransportSignal(rr, ootsTestNS, map[string]*cache.AuthServer{cache.ServerKey(ootsTestNS): s}, ctx)
+			applySVCBForNS(imr, rr, ootsTestNS, map[string]*cache.AuthServer{cache.ServerKey(ootsTestNS): s})
 		}},
 		{"additional", func(imr *Imr, s *cache.AuthServer, rr *dns.SVCB) {
 			r := new(dns.Msg)
@@ -558,14 +632,13 @@ func TestOOTSWithoutSignalTokenIgnoresALPN(t *testing.T) {
 		return mustSVCB(t, fmt.Sprintf("_dns.%s 10800 IN SVCB 1 . %s", ootsTestNS, params)).(*dns.SVCB)
 	}
 	for _, path := range paths {
-		for _, params := range []string{`alpn="dot" oots="tcp:30"`, `alpn="tcp" oots="tcp:30,udp:100"`} {
+		for _, params := range []string{`alpn="dot" oots="xyz:30"`, `alpn="tcp" oots="xyz:30,future-thing:100"`} {
 			imr := newImr()
 			s := cache.NewAuthServer(ootsTestNS)
 			applyTransportMapToServer(s, map[string]uint8{"do53": 100, "doq": 40})
 			before := stateOf(s)
 			path.apply(imr, s, svcb(params))
 			got := stateOf(s)
-			assertNoDo53TCP(t, path.name+" "+params, got)
 			if !reflect.DeepEqual(got, before) {
 				t.Errorf("%s %s: the server's signal changed to %+v, want it kept: %+v", path.name, params, got, before)
 			}
