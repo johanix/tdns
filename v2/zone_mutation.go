@@ -1077,6 +1077,16 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 			return fmt.Errorf("zone %s: %w", zd.ZoneName, ErrRefreshStaged)
 		}
 	}
+	// What the pre-refresh callbacks set on the incoming zone's options reaches
+	// the served zone's here, and not before: the options change together with
+	// the data they describe, so a refresh refused above (a hold, a staged
+	// change that could not be published) leaves them as they were. After the
+	// publish of a staged local change, which is the old content and goes out
+	// under the old options; before every decision below that reads them, which
+	// are the new content's (whether the zone originates it, the serial it
+	// lands on, whether it signs it). A refusal further down puts them back.
+	undoOptions := zd.foldIncomingOptionsLocked(new_zd)
+
 	// The highest serial this zone has published, which a first load must
 	// land past (#655), read before this function changes anything: a read
 	// that fails must leave the zone exactly as it was, IncomingSerial
@@ -1096,6 +1106,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	if firstLoad && zd.KeyDB != nil && zd.KeyDB.DB != nil && zoneMayOriginateContent(zd) {
 		high, have, err := zd.KeyDB.PublishedSerialFloor(zd.ZoneName)
 		if err != nil {
+			undoOptions()
 			return fmt.Errorf("read the published serial for zone %s: %w", zd.ZoneName, err)
 		}
 		restoreSerial, haveRestoreSerial = high, have
@@ -1308,6 +1319,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 			zd.fileSerial, zd.fileDigest, zd.IncomingSerial, zd.deltasReplayed, zd.CurrentSerial =
 				prevFileSerial, prevFileDigest, prevIncoming, prevReplayed, prevServed
 			zd.ApexLen, zd.ZoneStore, zd.ZoneType = prevApexLen, prevStore, prevType
+			undoOptions()
 			return fmt.Errorf("zone %s: serial %d: %w", zd.ZoneName, old.Serial, ErrSignedFileChangedUnderServedSerial)
 		}
 	}

@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 )
@@ -150,4 +151,97 @@ func TestTheIncomingZoneDoesNotShareTheServedZonesOptionsMap(t *testing.T) {
 	// A zone with no options map still hands over one a callback may write.
 	bare := newTransferScratchZone(&ZoneData{ZoneName: "example."})
 	bare.Options[OptInlineSigning] = true
+}
+
+// The options change with the data they describe. A refresh the zone refuses
+// (an open transaction holds it, ErrRefreshHeld) is not adopted, so the
+// options an OnZonePreRefresh callback set on the incoming zone are not the
+// served zone's yet: work that runs before the hold clears would otherwise
+// act under a role the served data does not have. Once the hold is gone and
+// the refresh is adopted, they are.
+func TestACallbackOptionIsNotTheServedZonesWhileTheRefreshIsRefusedUnderAHold(t *testing.T) {
+	setsFrozen := func(_, incoming *ZoneData) { incoming.Options[OptFrozen] = true }
+
+	t.Run("file", func(t *testing.T) {
+		zd := reloadZone(t, newTestKeyDB(t), reloadBase)
+		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, setsFrozen)
+		id, err := zd.BeginTx(TxUrgent)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		operatorEdit(t, zd, reloadBase+"more.example.\t3600\tIN\tA\t192.0.2.9\n")
+		if _, err := zd.FetchFromFile(context.Background(), false, false, true, nil); !errors.Is(err, ErrRefreshHeld) {
+			t.Fatalf("a reload under a hold: err=%v, want ErrRefreshHeld", err)
+		}
+		if optionOn(zd, OptFrozen) {
+			t.Fatal("the refused refresh changed the served zone's options")
+		}
+		if err := zd.CommitTx(id); err != nil {
+			t.Fatalf("CommitTx: %v", err)
+		}
+		if _, err := zd.FetchFromFile(context.Background(), false, false, true, nil); err != nil {
+			t.Fatalf("the reload after the hold: %v", err)
+		}
+		if !optionOn(zd, OptFrozen) {
+			t.Fatal("the adopted refresh did not bring the option the callback set")
+		}
+	})
+
+	t.Run("transfer", func(t *testing.T) {
+		zd := ixSigningSecondary(t, ixApplyZone)
+		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, setsFrozen)
+		id, err := zd.BeginTx(TxUrgent)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		_, addr, stop := ixfrTestPrimary(t, ovUpstreamZone(20, srFresh))
+		defer stop()
+		zd.mu.Lock()
+		zd.Upstreams = []PeerConf{{Addr: addr}}
+		zd.mu.Unlock()
+		if _, err := zd.FetchFromUpstream(context.Background(), false, false, true,
+			zd.CollectDynamicRRs(&Config{}), &Config{}); !errors.Is(err, ErrRefreshHeld) {
+			t.Fatalf("a refresh under a hold: err=%v, want ErrRefreshHeld", err)
+		}
+		if optionOn(zd, OptFrozen) {
+			t.Fatal("the refused refresh changed the served zone's options")
+		}
+		if err := zd.CommitTx(id); err != nil {
+			t.Fatalf("CommitTx: %v", err)
+		}
+		ovTransferFrom(t, zd, addr, true)
+		if !optionOn(zd, OptFrozen) {
+			t.Fatal("the adopted refresh did not bring the option the callback set")
+		}
+	})
+}
+
+// The same for a refusal that comes after the options were folded in: a zone
+// file signed elsewhere that changed under the served serial is refused and
+// the zone's state is put back (ErrSignedFileChangedUnderServedSerial), and
+// the options with it. Adopted under a newer serial, it brings them.
+func TestACallbackOptionIsNotKeptByARefusedReload(t *testing.T) {
+	zd := reloadZone(t, newTestKeyDB(t), signedElsewhere("100", 'a'))
+	zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(_, incoming *ZoneData) {
+		incoming.Options[OptFrozen] = true
+	})
+
+	operatorEdit(t, zd, signedElsewhere("100", 'b'))
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); !errors.Is(err, ErrSignedFileChangedUnderServedSerial) {
+		t.Fatalf("a signed file changed under the served serial: reload error %v", err)
+	}
+	if optionOn(zd, OptFrozen) {
+		t.Fatal("the refused reload left the option a callback set on the served zone")
+	}
+	if !optionOn(zd, OptAllowUpdates) {
+		t.Fatal("putting the options back lost one the zone had")
+	}
+
+	operatorEdit(t, zd, signedElsewhere("101", 'b'))
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
+		t.Fatalf("the reload under a newer serial: %v", err)
+	}
+	if !optionOn(zd, OptFrozen) || !optionOn(zd, OptAllowUpdates) {
+		t.Fatalf("after the adopted reload the options are %v", zd.OptionsSnapshot())
+	}
 }

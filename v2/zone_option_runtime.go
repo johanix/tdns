@@ -52,11 +52,15 @@ import "maps"
 // zone (`zone freeze` over the API, a config update) came between the start of
 // the refresh and the write. What the callbacks leave different in the
 // incoming zone's options is laid over the served zone's options as they are
-// when the callbacks are done (foldIncomingOptions), so an option a callback
-// sets on the incoming zone reaches the served zone, and a store made on the
-// served zone meanwhile stays, unless the callback set that option as well.
-// A callback that decides an option for good uses SetRuntimeOption on the
-// served zone, which also keeps it across a config update.
+// when the refresh is adopted (foldIncomingOptionsLocked, in
+// applyRefreshReplacementLocked), so an option a callback sets on the incoming
+// zone reaches the served zone together with the data it describes, and a store
+// made on the served zone meanwhile stays, unless the callback set that option
+// as well. A refresh that is refused (an open transaction holds the zone) has
+// changed no option of the served zone. A callback that decides an option for
+// good, at once and whether or not the refresh is adopted, uses
+// SetRuntimeOption on the served zone, which also keeps it across a config
+// update.
 
 // SetRuntimeOption sets an option the daemon decides by itself while it runs.
 // It takes effect at once, and it stays as set across a config update until
@@ -152,7 +156,7 @@ func (zd *ZoneData) optionsMap() map[ZoneOption]bool {
 // optionsForIncoming is what the incoming zone of a refresh is built with: a
 // copy of the zone's options, for it to own and for the callbacks to write, and
 // the zone's own map as of now, which is what the copy is compared with when the
-// callbacks are done (foldIncomingOptions). The second is never written to, so
+// refresh is adopted (foldIncomingOptionsLocked). The second is never written to, so
 // it is kept as it is and not copied again. Neither is nil: a zone with no
 // options gives two empty maps, so that a callback may always write the first.
 func (zd *ZoneData) optionsForIncoming() (own, atStart map[ZoneOption]bool) {
@@ -163,8 +167,8 @@ func (zd *ZoneData) optionsForIncoming() (own, atStart map[ZoneOption]bool) {
 	return maps.Clone(atStart), atStart
 }
 
-// foldIncomingOptions lays what the OnZonePreRefresh callbacks changed in the
-// incoming zone's options over the options the served zone, zd, has now. An
+// foldIncomingOptionsLocked lays what the OnZonePreRefresh callbacks changed in
+// the incoming zone's options over the options the served zone, zd, has now. An
 // option counts as changed when the incoming zone's options differ in it from
 // the ones it was built with (optionsAtStart), whether the callback wrote the
 // map in place, replaced it, or set the option with SetOption. The served
@@ -174,16 +178,19 @@ func (zd *ZoneData) optionsForIncoming() (own, atStart map[ZoneOption]bool) {
 // nothing to set. An incoming zone that no refresh built has nothing to be
 // compared with, and nothing is done.
 //
-// Called by the refresh once the callbacks have returned and with no lock held:
-// it takes zd.mu, as every writer of the options does.
-func (zd *ZoneData) foldIncomingOptions(incoming *ZoneData) {
-	atStart := incoming.optionsAtStart
-	if atStart == nil {
-		return
+// The caller holds zd.mu, and is the replacement that adopts the refresh
+// (applyRefreshReplacementLocked): the options change with the data they
+// describe, so a refresh that is refused leaves the served zone's options as
+// they were. The returned func puts them back, for a refusal that comes after
+// the fold. It is a no-op when nothing was set, and is only to be called with
+// zd.mu held and before anything else stores an option.
+func (zd *ZoneData) foldIncomingOptionsLocked(incoming *ZoneData) (undo func()) {
+	undo = func() {}
+	if incoming == nil || incoming.optionsAtStart == nil {
+		return undo
 	}
+	atStart := incoming.optionsAtStart
 	now := incoming.optionsMap()
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
 	var next map[ZoneOption]bool
 	set := func(opt ZoneOption, on bool) {
 		if zd.Options[opt] == on {
@@ -207,9 +214,12 @@ func (zd *ZoneData) foldIncomingOptions(incoming *ZoneData) {
 			set(opt, false) // a callback deleted it: an option that is absent reads as off
 		}
 	}
-	if next != nil {
-		zd.setOptionsLocked(next)
+	if next == nil {
+		return undo
 	}
+	before := zd.Options
+	zd.setOptionsLocked(next)
+	return func() { zd.setOptionsLocked(before) }
 }
 
 // withRuntimeOptionsLocked is opts with the zone's run-time options laid over

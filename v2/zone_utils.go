@@ -914,8 +914,6 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	for _, cb := range zd.OnZonePreRefresh {
 		cb(zd, &new_zd)
 	}
-	// What they set on the incoming zone's options reaches the served zone's.
-	zd.foldIncomingOptions(&new_zd)
 
 	// Last gate before the hard flip, after the callbacks have run. See the
 	// matching comment on the upstream path.
@@ -1373,8 +1371,6 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 	for _, cb := range zd.OnZonePreRefresh {
 		cb(zd, &new_zd)
 	}
-	// What they set on the incoming zone's options reaches the served zone's.
-	zd.foldIncomingOptions(&new_zd)
 
 	// Last gate before the hard flip. The transfer and the pre-refresh
 	// callbacks both take real time -- an AXFR of a large zone, then MP roles
