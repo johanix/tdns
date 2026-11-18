@@ -85,12 +85,12 @@ func readOptionsUntil(t *testing.T, zd *ZoneData, extra ...func(*ZoneData) bool)
 	}
 }
 
-// TestReadOptionsUntilHasEveryReaderReadBeforeItReturns: readOptionsUntil hands
-// back its stop func only once every reader has made a read. Without that, a
-// writer that finishes before a reader is scheduled stops it unread, and a test
-// of correct code fails with "the readers never ran" (johanix/tdns#981 review).
-// One P makes the case certain: the readers do not run until the caller blocks,
-// so a stop func that did not wait for them would be called with nothing read.
+// TestReadOptionsUntilHasEveryReaderReadBeforeItReturns: readOptionsUntil
+// returns only once every reader has made a read. Without that, a writer that
+// finishes before a reader is scheduled stops it unread, and a test of correct
+// code fails with "the readers never ran" (johanix/tdns#981 review). One P makes
+// the case certain: the readers do not run until the caller blocks, so a
+// readOptionsUntil that did not wait for them returns with nothing read.
 func TestReadOptionsUntilHasEveryReaderReadBeforeItReturns(t *testing.T) {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	zd := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{OptAllowUpdates: true}}
@@ -100,15 +100,15 @@ func TestReadOptionsUntilHasEveryReaderReadBeforeItReturns(t *testing.T) {
 		readers[i] = func(*ZoneData) bool { extra[i].Add(1); return false }
 	}
 	stop := readOptionsUntil(t, zd, readers...)
-	reads := stop() // at once: the writer's whole work, here, is nothing
+	// Looked at here, before stop: stop joins the workers, and a worker reads
+	// once before it looks at done, so after it every reader has read whatever
+	// readOptionsUntil did. What is claimed is that they had when it returned.
 	for i := range extra {
 		if extra[i].Load() == 0 {
-			t.Errorf("reader %d had not read when the stop func returned", i)
+			t.Errorf("reader %d had not read when readOptionsUntil returned", i)
 		}
 	}
-	if want := int64(len(optionReaders) + len(extra)); reads < want {
-		t.Errorf("%d reads, want at least one from each of the %d readers", reads, want)
-	}
+	stop()
 }
 
 // optionOn reads an option the way the tests' own assertions may: under the
