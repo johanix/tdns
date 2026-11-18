@@ -1455,3 +1455,50 @@ func TestAReloadDeliversEveryRefresherAfterItPublishedWhateverItsCallersContextD
 		t.Fatal("the reload did not finish")
 	}
 }
+
+// A refresher that a reload queued for a zone, which a later reload then removed,
+// does not make the zone again. ParseZones registers every zone it queues a
+// refresher for, so the engine finds it; when it does not, the zone was removed
+// in between, and the refresher is the config of a zone that is no longer in the
+// config, with the policies of a reload that has been superseded. Creating the
+// zone from it registered the removed zone again and ran its first load.
+func TestARefresherForAZoneRemovedByALaterReloadCreatesNoZone(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "removedmeanwhile.config.example.")
+	base := named(validFor(kskzsk(dns.ED25519, dns.ED25519), 30*86400), "base")
+	withLivePolicies(t, map[string]DnssecPolicy{"base": base})
+
+	// A reload's parse: the zone is registered and its refresher is queued.
+	h.conf.Internal.DnssecPolicies = map[string]DnssecPolicy{"base": base}
+	h.conf.Zones = []ZoneConf{{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: "base"}}
+	if _, _, err := h.conf.ParseZones(context.Background(), false); err != nil {
+		t.Fatalf("ParseZones: %v", err)
+	}
+	zr := <-h.parsed
+	zd, ok := Zones.Get(h.zone)
+	if !ok {
+		t.Fatal("the parse did not register the zone; the test has lost its point")
+	}
+
+	// A later reload removes the zone before the engine gets to the refresher.
+	zd.stopPublisher()
+	Zones.Remove(h.zone)
+	zd.generation.Add(1)
+
+	// The engine takes the refresher; a marker behind it, for a name no refresher
+	// builds a zone for, is answered when the engine is through with it.
+	h.engineConf.Internal.RefreshZoneCh <- zr
+	marker := ZoneRefresher{Name: "marker.config.example.", Wait: true, Response: make(chan RefresherResponse, 1)}
+	h.engineConf.Internal.RefreshZoneCh <- marker
+	select {
+	case <-marker.Response:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the engine did not get through the refresher")
+	}
+
+	if created, registered := Zones.Get(h.zone); registered {
+		created.stopPublisher()
+		t.Error("the zone a later reload removed is registered again by the refresher of an earlier one")
+	}
+}
