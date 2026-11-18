@@ -626,19 +626,26 @@ func (imr *Imr) prioritizeServers(qname string, qtype uint16, serverMap map[stri
 }
 
 // prioritizeServersFor is prioritizeServers for the query ctx belongs to. The
-// server's backoff is that of the address an attempt would dial
-// (serverBackoffAllows), which depends on ctx: a context marked
+// server's backoff and the zone's lameness are those of the address and port
+// an attempt would dial (attemptKey), which depends on ctx: a context marked
 // withDefaultEndpoints dials the server's own address whatever its signal
 // says.
 func (imr *Imr) prioritizeServersFor(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
-	return imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, true)
+	return imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, true, nil)
 }
 
-// selectServerTuples is prioritizeServersFor, which it is with warn set.
-// Without warn it says nothing when no tuple is left: the query loop asks
-// first, and waits for its servers' transport signals before it gives up on
-// them (awaitUsableTuples).
-func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel, warn bool) (string, *cache.Zone, []ServerAddrXportTuple) {
+// tupleSkip, when given to selectServerTuples, leaves out a tuple whose
+// attempt would dial addr at port over t for server: an endpoint a pass has
+// already tried (anotherPassAfter). It is asked after the backoff tests and
+// before the family test, so that a suspect family's probe is not reserved
+// for a tuple that is left out.
+type tupleSkip func(server *cache.AuthServer, addr string, port uint16, t core.Transport) bool
+
+// selectServerTuples is prioritizeServersFor, which it is with warn set and
+// no skip. Without warn it says nothing when no tuple is left: the query loop
+// asks first, and waits for its servers' transport signals before it gives up
+// on them (awaitUsableTuples).
+func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel, warn bool, skip tupleSkip) (string, *cache.Zone, []ServerAddrXportTuple) {
 	zoneName, _, _ := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 	var zone *cache.Zone
 	if zoneName != "" {
@@ -681,22 +688,27 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 				continue
 			}
 			for rank, t := range transports {
-				// The backoff of what the attempt would dial
-				// (attemptKey): the endpoint's address and port.
-				if !imr.serverBackoffAllows(ctx, server, addr, t) {
+				// What the attempt would dial (attemptKey): the endpoint's
+				// address and port, where both the server's backoff and the
+				// zone's lameness are read. A target whose addresses are not
+				// known is looked up from here, so that the default
+				// endpoint's backoff does not keep it from being found.
+				a, p, ok := imr.attemptKey(ctx, server, zone, addr, t, true)
+				if !ok || !server.IsEndpointAddrAvailable(a, p, t) {
 					if imr.Debug {
 						imr.lgDns().Debug("prioritizeServers: skipping (addr,transport) due to server backoff",
-							"addr", addr, "transport", core.TransportToString[t], "ns", nsname)
+							"addr", addr, "dial", cache.JoinDialAddr(a, p), "transport", core.TransportToString[t], "ns", nsname)
 					}
 					continue
 				}
-				// Lameness is the nameserver's: kept at its own address, at
-				// the port of an endpoint at its own name (lamenessPort).
-				if zone != nil && !zone.IsZoneEndpointAvailable(addr, imr.lamenessPort(ctx, server, addr, t), t) {
+				if zone != nil && !zone.IsZoneEndpointAvailable(a, p, t) {
 					if imr.Debug {
 						imr.lgDns().Debug("prioritizeServers: skipping (addr,transport) due to zone backoff",
-							"addr", addr, "transport", core.TransportToString[t], "ns", nsname, "zone", zoneName)
+							"addr", addr, "dial", cache.JoinDialAddr(a, p), "transport", core.TransportToString[t], "ns", nsname, "zone", zoneName)
 					}
+					continue
+				}
+				if skip != nil && skip(server, a, p, t) {
 					continue
 				}
 				// Address-family deprioritization (W8). If the local host's
@@ -733,7 +745,7 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 	}
 
 	sortTuplesByRankThenRTT(tuples, func(tup ServerAddrXportTuple) (time.Duration, bool) {
-		return imr.tupleRTT(ctx, tup)
+		return imr.tupleRTT(ctx, zone, tup)
 	})
 	// Suspect-family tuples (if any) follow the healthy ones — they're
 	// reachable in principle, just deprioritized while the family is suspect.
@@ -758,7 +770,7 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 // out over what the signal offers rather than over Do53 first.
 func (imr *Imr) awaitUsableTuples(ctx context.Context, budget *signalWaitBudget, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel) (string, *cache.Zone, []ServerAddrXportTuple) {
 	imr.awaitRunningSignalLookups(ctx, budget, qtype, serverMap)
-	zoneName, zone, tuples := imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false)
+	zoneName, zone, tuples := imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false, nil)
 	if len(tuples) > 0 {
 		return zoneName, zone, tuples
 	}
@@ -779,7 +791,7 @@ func (imr *Imr) awaitUsableTuples(ctx context.Context, budget *signalWaitBudget,
 	// probe interval.
 	budget.run(ctx, imr.strictWait(), func(wctx context.Context) bool {
 		return imr.awaitTransportSignalsUntil(wctx, withAddrs, transportQueryReasonNoUsableTransport, func() bool {
-			zoneName, zone, tuples = imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false)
+			zoneName, zone, tuples = imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false, nil)
 			return len(tuples) > 0
 		})
 	})
@@ -902,11 +914,15 @@ func (imr *Imr) strictWait() time.Duration {
 	return defaultDiscoveryStrictWait
 }
 
-// passTuple is a (server, address, transport) a pass of the query loop has
-// tried (anotherPassAfter).
+// passTuple is an endpoint a pass of the query loop has tried
+// (anotherPassAfter): the server, and the address and port the attempt
+// dialed (endpointDial) over the tuple's transport. A tuple whose attempt
+// would now dial elsewhere, as a udp endpoint on 5353 that failed gives way
+// to port 53, is not one the pass tried.
 type passTuple struct {
 	server    *cache.AuthServer
 	addr      string
+	port      uint16
 	transport core.Transport
 }
 
@@ -925,22 +941,29 @@ type passTuple struct {
 //
 // The next pass uses the selection made here rather than selecting again:
 // selecting reserves a suspect family's probe tuple (ShouldProbe), and a
-// second selection within the probe interval would leave it out.
+// second selection within the probe interval would leave it out. The
+// selection leaves out the endpoints the pass tried before it reserves a
+// probe, so the next pass holds only the tuples it did not try, and a probe
+// is not used up on a tuple that would be left out.
 func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel, tried map[passTuple]bool) *tupleSelection {
 	var sel tupleSelection
-	untried := func() bool {
-		sel.zoneName, sel.zone, sel.tuples = imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false)
-		for _, tup := range sel.tuples {
-			if !tried[passTuple{tup.Server, tup.Addr, tup.Transport}] {
-				return true
-			}
+	triedLeft := false
+	skip := func(server *cache.AuthServer, addr string, port uint16, t core.Transport) bool {
+		if tried[passTuple{server, addr, port, t}] {
+			triedLeft = true
+			return true
 		}
 		return false
+	}
+	untried := func() bool {
+		triedLeft = false
+		sel.zoneName, sel.zone, sel.tuples = imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false, skip)
+		return len(sel.tuples) > 0
 	}
 	if untried() {
 		return &sel
 	}
-	if len(sel.tuples) > 0 {
+	if triedLeft {
 		return nil
 	}
 	unsignalled := map[string]*cache.AuthServer{}
@@ -1009,8 +1032,10 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 	serverAllows := func(server *cache.AuthServer, addr string, t core.Transport) bool {
 		return server.IsEndpointAddrAvailable(addr, server.SelfPort(t), t)
 	}
-	zonePort := func(server *cache.AuthServer, addr string, t core.Transport) uint16 { return server.SelfPort(t) }
-	return explainNoTuplesWith(serverMap, zone, ft, qname, privacy, allowHostLocal, serverAllows, zonePort)
+	zoneAllows := func(server *cache.AuthServer, addr string, t core.Transport) bool {
+		return zone.IsZoneEndpointAvailable(addr, server.SelfPort(t), t)
+	}
+	return explainNoTuplesWith(serverMap, zone, ft, qname, privacy, allowHostLocal, serverAllows, zoneAllows)
 }
 
 // explainNoTuplesFor is explainNoTuples with the backoff tests
@@ -1018,20 +1043,22 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 func (imr *Imr) explainNoTuplesFor(ctx context.Context, serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 	qname string, privacy edns0.PrivacyLevel, allowHostLocal bool) string {
 	serverAllows := func(server *cache.AuthServer, addr string, t core.Transport) bool {
-		return imr.serverBackoffAllows(ctx, server, addr, t)
+		a, p, ok := imr.attemptKey(ctx, server, zone, addr, t, false)
+		return ok && server.IsEndpointAddrAvailable(a, p, t)
 	}
-	zonePort := func(server *cache.AuthServer, addr string, t core.Transport) uint16 {
-		return imr.lamenessPort(ctx, server, addr, t)
+	zoneAllows := func(server *cache.AuthServer, addr string, t core.Transport) bool {
+		a, p, ok := imr.attemptKey(ctx, server, zone, addr, t, false)
+		return ok && zone.IsZoneEndpointAvailable(a, p, t)
 	}
-	return explainNoTuplesWith(serverMap, zone, imr.FamilyTracker, qname, privacy, allowHostLocal, serverAllows, zonePort)
+	return explainNoTuplesWith(serverMap, zone, imr.FamilyTracker, qname, privacy, allowHostLocal, serverAllows, zoneAllows)
 }
 
 // explainNoTuplesWith is explainNoTuples with the server's backoff test and
-// the port the zone's backoff is read at given.
+// the zone's given.
 func explainNoTuplesWith(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 	ft *cache.FamilyTracker, qname string, privacy edns0.PrivacyLevel, allowHostLocal bool,
 	serverAllows func(*cache.AuthServer, string, core.Transport) bool,
-	zonePort func(*cache.AuthServer, string, core.Transport) uint16) string {
+	zoneAllows func(*cache.AuthServer, string, core.Transport) bool) string {
 
 	if len(serverMap) == 0 {
 		return "no servers in the map for this zone"
@@ -1067,7 +1094,7 @@ func explainNoTuplesWith(serverMap map[string]*cache.AuthServer, zone *cache.Zon
 					serverBackoff++
 					continue
 				}
-				if zone != nil && !zone.IsZoneEndpointAvailable(addr, zonePort(server, addr, t), t) {
+				if zone != nil && !zoneAllows(server, addr, t) {
 					zoneBackoff++
 					continue
 				}
@@ -1244,6 +1271,10 @@ func candidateTransports(server *cache.AuthServer, qname string, privacy edns0.P
 	return out
 }
 
+// poolScale is the factor transportPool scales its weights by without
+// privacy, so that a Do53 weight cut to the udp cap keeps its precision.
+const poolScale = 100
+
 // poolEntry is a transport and its weight in the draw candidateTransports
 // makes.
 type poolEntry struct {
@@ -1259,8 +1290,18 @@ type poolEntry struct {
 //
 // Each encrypted transport with a weight above 1 is in the pool with its
 // weight. Without privacy, Do53 is in it with what the encrypted weights leave
-// of 100, whatever weight the signal gave Do53 itself. With privacy
-// (opportunistic or strict) only the encrypted transports are.
+// of 100, cut so that its share of the draw is no more than the signal's udp
+// weight: a udp weight caps the share of queries the resolver sends over UDP
+// by its own choice (design 2026-11-14, sections 2 and 3). The cap is on the
+// share, not the weight: udp:20,dot:60 gives UDP 20% of first picks and DoT
+// 80%, not 20 parts in 80. udp:0 sends none that way. A signal that names no
+// udp weight has 100 by the absence default (core.ApplyTransportDefaults),
+// which caps nothing. Do53 stays the last resort all the same
+// (candidateTransports). With privacy (opportunistic or strict) only the
+// encrypted transports are.
+//
+// Without privacy the weights are scaled by poolScale, so that a Do53 weight
+// cut to a share rounds down, never above the cap.
 func transportPool(transports []core.Transport, weights map[core.Transport]uint8, privacy edns0.PrivacyLevel) []poolEntry {
 	seen := map[core.Transport]bool{}
 	var encrypted []poolEntry
@@ -1295,7 +1336,17 @@ func transportPool(transports []core.Transport, weights map[core.Transport]uint8
 		return encrypted
 	}
 	var pool []poolEntry
-	do53Share := 100 - encSum
+	do53Share := (100 - encSum) * poolScale
+	if c, ok := weights[core.TransportDo53]; ok && c < 100 {
+		// Do53's share of the draw is do53/(do53+encSum); at most c/100
+		// means do53 <= c*encSum/(100-c).
+		if capped := int(c) * encSum * poolScale / (100 - int(c)); capped < do53Share {
+			do53Share = capped
+		}
+	}
+	for i := range encrypted {
+		encrypted[i].w *= poolScale
+	}
 	if do53Share < 0 {
 		do53Share = 0
 	}
@@ -1813,20 +1864,21 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			// tuple's probabilistic pick, or the policy-preferred transport
 			// under dnskeyBypass.
 			effTransport := transport
+			var dnskeyKey cache.AddrXport
 			if dnskeyBypass {
 				// All tuples for this (server, addr) collapse to the same
 				// preferred transport; skip the ones we've already tried.
+				// The attempt is recorded once made, under the endpoint
+				// tryServer dialed (dnskeyTried).
 				eff := imr.preferredDNSKEYTransport(server)
-				key := imr.dnskeyAttemptKey(ctx, server, addr, eff)
-				if dnskeyAttempted[key] {
+				dnskeyKey = imr.dnskeyAttemptKey(ctx, server, zone, addr, eff)
+				if dnskeyAttempted[dnskeyKey] {
 					continue
 				}
-				dnskeyAttempted[key] = true
 				effTransport = eff
 			}
 
 			lastNS, lastAddr, lastTransport = nsname, addr, transport
-			tried[passTuple{server, addr, transport}] = true
 			attempts++
 
 			if imr.Debug {
@@ -1834,7 +1886,26 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
+			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
+			if dnskeyBypass {
+				// Under the transport tryServer dialed: it reads the
+				// preference again, and a signal update in between may
+				// have changed it from effTransport.
+				dnskeyAttempted[dnskeyTried(dnskeyKey, ep, wireTransport)] = true
+			}
+			// The endpoint tried: the one tryServer dialed, or the server's
+			// own address when it did not get as far as choosing one, kept
+			// under the tuple's transport. anotherPassAfter compares it with
+			// what an attempt for that transport would dial, so the two agree
+			// when the tuple dialed itself. Under the DNSKEY bypass the
+			// endpoint is the preferred transport's, which anotherPassAfter
+			// may not see as tried; dnskeyAttempted, which lasts the whole
+			// query, is what keeps the extra pass from dialing it again.
+			if ep.addr != "" {
+				tried[passTuple{server, ep.addr, ep.keyPort, transport}] = true
+			} else {
+				tried[passTuple{server, addr, 0, transport}] = true
+			}
 			lastTransport = wireTransport
 			if err != nil {
 				lastErr = err
@@ -1892,25 +1963,27 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					lg.Printf("IterativeDNSQuery: %s response from %s@%s over %s for %s %s (likely lame delegation for zone %q)",
 						dns.RcodeToString[rcode], addr, nsname, core.TransportToString[wireTransport], qname, dns.TypeToString[qtype], zoneName)
 				}
-				// Booked at the nameserver's address and the port of the
-				// endpoint tryServer tried, when that was at its own name
-				// (endpointDial.lamenessPort): a lame endpoint on 5353
-				// does not hold back port 53. The port is the one tried,
-				// not a fresh reading, which a signal update during the
-				// exchange may have moved.
-				if port := ep.lamenessPort(); zone != nil {
-					zone.RecordZoneEndpointFailureForRcode(addr, port, wireTransport, uint8(rcode), imr.Debug)
+				// Booked at the address and port tryServer dialed: the
+				// server's own address, or the address of the target the
+				// signal sent the transport to. A lame endpoint holds back
+				// only itself: one on 5353 not port 53, a target address
+				// not the target's others nor the nameserver's own address
+				// (design 2026-11-14, section 3). The endpoint is the one
+				// tried, not a fresh reading, which a signal update during
+				// the exchange may have moved.
+				if zone != nil {
+					zone.RecordZoneEndpointFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode), imr.Debug)
 				} else {
-					server.RecordEndpointAddrFailureForRcode(addr, port, wireTransport, uint8(rcode))
+					server.RecordEndpointAddrFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode))
 				}
 				continue
 			case dns.RcodeSuccess:
 				if zone != nil {
-					zone.RecordZoneEndpointSuccess(addr, ep.lamenessPort(), wireTransport)
+					zone.RecordZoneEndpointSuccess(ep.addr, ep.keyPort, wireTransport)
 				}
 			default:
 				if zone != nil {
-					zone.RecordZoneEndpointSuccess(addr, ep.lamenessPort(), wireTransport)
+					zone.RecordZoneEndpointSuccess(ep.addr, ep.keyPort, wireTransport)
 				}
 			}
 
@@ -2854,12 +2927,25 @@ func replyMatchesQuery(r, query *dns.Msg) error {
 // servers that share an address but signal different ports or targets for
 // the transport are two endpoints, and a failure on one must not skip the
 // other.
-func (imr *Imr) dnskeyAttemptKey(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport) cache.AddrXport {
-	a, p, ok := imr.attemptKey(ctx, server, addr, t)
+func (imr *Imr) dnskeyAttemptKey(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport) cache.AddrXport {
+	a, p, ok := imr.attemptKey(ctx, server, zone, addr, t, false)
 	if !ok {
 		return cache.AddrXport{Addr: addr, Transport: t}
 	}
 	return cache.AddrXport{Addr: a, Port: p, Transport: t}
+}
+
+// dnskeyTried is the key a DNSKEY bypass attempt is recorded under once it
+// has been made: the endpoint tryServer dialed, at its address and key port
+// over the effective transport eff, or pre, the key the attempt was checked
+// against, when tryServer chose no endpoint. Recording pre for an attempt
+// that dialed elsewhere, as a target whose addresses came in between the two
+// readings, would skip a later attempt at an endpoint never dialed.
+func dnskeyTried(pre cache.AddrXport, ep endpointDial, eff core.Transport) cache.AddrXport {
+	if ep.addr == "" {
+		return pre
+	}
+	return cache.AddrXport{Addr: ep.addr, Port: ep.keyPort, Transport: eff}
 }
 
 func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
@@ -2879,12 +2965,13 @@ func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 // It returns the transport it attempted and the endpoint it tried, whose
 // address and port its backoff and RTT went under (the zero endpointDial
 // when it never got as far as choosing one). The caller books the rcode
-// outcome by the same endpoint (endpointDial.lamenessPort), not a fresh
-// reading: a signal update during the exchange may have moved the port, and
-// the answer came from the endpoint tried.
+// outcome by the same endpoint, not a fresh reading: a signal update during
+// the exchange may have moved the port, and the answer came from the
+// endpoint tried. zone is the zone the query is for (nil when none is
+// known): an endpoint lame for it is not chosen (endpointFor).
 //
 // class is whose query it is, for the per-class answer counters.
-func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass) (*dns.Msg, time.Duration, core.Transport, endpointDial, error) {
+func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass) (*dns.Msg, time.Duration, core.Transport, endpointDial, error) {
 	eff := t
 	if dnskeyBypass {
 		// DNSKEY transport policy bypasses this server's probabilistic
@@ -2914,7 +3001,16 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	// (oots_endpoints.go). At the server's own address backoff, RTT and the
 	// family tracker stay on the bare IP, as they always were; at a target
 	// they are kept under the target's address and the endpoint's port.
-	ep, eerr := imr.endpointFor(ctx, server, addr, eff)
+	ep, eerr := imr.endpointFor(ctx, server, zone, addr, eff)
+	// The endpoint chosen now is checked again: selection checked the one
+	// an attempt would have dialed then, and an attempt earlier in the pass
+	// may since have made it, or the fallback it gives way to, lame or
+	// backed off, as a target that refused does for the next tuple sent to
+	// it. Not under the DNSKEY bypass, which dials the preferred transport
+	// whatever selection said.
+	if eerr == nil && !dnskeyBypass && !endpointUsable(server, zone, ep.addr, ep.keyPort, eff) {
+		eerr = errEndpointUnavailable{server: server.Name, target: cache.JoinDialAddr(ep.addr, ep.port), transport: eff}
+	}
 	if eerr != nil {
 		if imr.Debug {
 			imr.lgDns().Debug("tryServer: no attempt", "server", server.Name, "addr", addr, "transport", core.TransportToString[eff], "error", eerr)

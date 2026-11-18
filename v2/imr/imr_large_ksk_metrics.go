@@ -181,6 +181,11 @@ func (imr *Imr) dnskeyDSSignalsLarge(qname string) bool {
 	return false
 }
 
+// preferredDNSKEYTransportHook, when set, stands in for
+// preferredDNSKEYTransport: tests set it to change the preference between
+// the query loop's reading and tryServer's.
+var preferredDNSKEYTransportHook func(imr *Imr, server *cache.AuthServer) core.Transport
+
 // preferredDNSKEYTransport picks the transport for a DNSKEY query that has been
 // selected to bypass probabilistic transport weights. It honors the server's
 // advertised capabilities (server.Transports, less any signalled at weight 0;
@@ -191,6 +196,9 @@ func (imr *Imr) dnskeyDSSignalsLarge(qname string) bool {
 // advertises no encrypted transport; the caller must fail the query in that
 // case rather than fall back to cleartext.
 func (imr *Imr) preferredDNSKEYTransport(server *cache.AuthServer) core.Transport {
+	if preferredDNSKEYTransportHook != nil {
+		return preferredDNSKEYTransportHook(imr, server)
+	}
 	order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH}
 	for _, pref := range order {
 		if serverAdvertises(server, pref) {

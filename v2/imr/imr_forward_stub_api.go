@@ -397,7 +397,7 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 					// or an address of the target it sent the transport
 					// to, once those are known. It starts no lookup.
 					dialAddr, dialErr := addr, ""
-					if ep, err := imr.resolveEndpoint(server, addr, transport, false); err != nil {
+					if ep, err := imr.resolveEndpoint(server, nil, addr, transport, false); err != nil {
 						dialErr = err.Error()
 					} else {
 						dialAddr = cache.JoinDialAddr(ep.addr, ep.port)

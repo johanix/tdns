@@ -604,14 +604,22 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		// its presence and not by matching what the configuration gives: an
 		// operator may write exactly that, and a later configuration must
 		// not replace it.
-		if od := zd.stagedOwner(owner); od != nil && ownerRRsetCount(od) > 0 && !zd.ownerHoldsOnlyPassSignal(owner, od) {
-			lgDns.Info("createTransportSignalSVCB: leaving the operator's records at the signal owner alone; the transport configuration does not apply to this name",
-				"zone", zd.ZoneName, "owner", owner, "alias", svcbHasAlias(od.RRtypes.GetOnlyRRSet(dns.TypeSVCB)), "rrsets", ownerRRsetCount(od))
-			kept++
-			if err := zd.forgetSignalStored(owner); err != nil {
-				zd.warnSignalForgetFailed(owner, err)
+		if od := zd.stagedOwner(owner); od != nil && ownerRRsetCount(od) > 0 {
+			own, err := zd.ownerHoldsOnlyPassSignal(owner, od)
+			if err != nil {
+				zd.warnSignalRecordUnreadable(owner, err)
+				kept++
+				continue
 			}
-			continue
+			if !own {
+				lgDns.Info("createTransportSignalSVCB: leaving the operator's records at the signal owner alone; the transport configuration does not apply to this name",
+					"zone", zd.ZoneName, "owner", owner, "alias", svcbHasAlias(od.RRtypes.GetOnlyRRSet(dns.TypeSVCB)), "rrsets", ownerRRsetCount(od))
+				kept++
+				if err := zd.forgetSignalStored(owner); err != nil {
+					zd.warnSignalForgetFailed(owner, err)
+				}
+				continue
+			}
 		}
 		stored, err := zd.buildServerSVCB(conf, id, nil, nil)
 		if err != nil {
@@ -723,23 +731,37 @@ func (zd *ZoneData) withdrawStaleSignalsLocked(want map[string]bool) (withdrawn,
 		od := zd.stagedOwner(owner)
 		if od == nil || ownerRRsetCount(od) == 0 {
 			if po := getOwnerFrom(zd.publishedSnapshot(), owner); po != nil {
-				if rs := po.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs) {
-					lgDns.Info("transport signal pass: a withdrawal staged earlier is not published yet; publishing it again",
-						"zone", zd.ZoneName, "owner", owner)
-					unpublished++
+				if rs := po.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 {
+					own, err := zd.signalStoredByPass(owner, rs.RRs)
+					if err != nil {
+						zd.warnSignalRecordUnreadable(owner, err)
+						continue
+					}
+					if own {
+						lgDns.Info("transport signal pass: a withdrawal staged earlier is not published yet; publishing it again",
+							"zone", zd.ZoneName, "owner", owner)
+						unpublished++
+					}
 				}
 			}
 			continue
 		}
-		if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs) {
-			zd.stageDeleteLocked(owner, dns.TypeSVCB)
-			if o := zd.stagedOwner(owner); o != nil && o.RRtypes.Count() == 0 {
-				zd.stageOwnerDeleteLocked(owner)
+		if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 {
+			own, err := zd.signalStoredByPass(owner, rs.RRs)
+			if err != nil {
+				zd.warnSignalRecordUnreadable(owner, err)
+				continue
 			}
-			lgDns.Info("transport signal pass: withdrew the signal the pass had stored for a name that is no longer an identity at home in this zone",
-				"zone", zd.ZoneName, "owner", owner)
-			withdrawn++
-			continue
+			if own {
+				zd.stageDeleteLocked(owner, dns.TypeSVCB)
+				if o := zd.stagedOwner(owner); o != nil && o.RRtypes.Count() == 0 {
+					zd.stageOwnerDeleteLocked(owner)
+				}
+				lgDns.Info("transport signal pass: withdrew the signal the pass had stored for a name that is no longer an identity at home in this zone",
+					"zone", zd.ZoneName, "owner", owner)
+				withdrawn++
+				continue
+			}
 		}
 		if err := zd.forgetSignalStored(owner); err != nil {
 			zd.warnSignalForgetFailed(owner, err)
@@ -779,10 +801,15 @@ func ownerRRsetCount(od *OwnerData) int {
 }
 
 // ownerHoldsOnlyPassSignal reports whether the only records at owner are the
-// SVCB RRset the signal pass last stored there.
-func (zd *ZoneData) ownerHoldsOnlyPassSignal(owner string, od *OwnerData) bool {
+// SVCB RRset the signal pass last stored there. Other records at the owner
+// answer no without the record being read; otherwise an error when it cannot
+// be read (signalStoredByPass).
+func (zd *ZoneData) ownerHoldsOnlyPassSignal(owner string, od *OwnerData) (bool, error) {
 	rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
-	return ownerRRsetCount(od) == 1 && len(rs.RRs) > 0 && zd.signalStoredByPass(owner, rs.RRs)
+	if ownerRRsetCount(od) != 1 || len(rs.RRs) == 0 {
+		return false, nil
+	}
+	return zd.signalStoredByPass(owner, rs.RRs)
 }
 
 // nsNamesWithASignalHere counts the zone's NS names whose signal a response
