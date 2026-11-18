@@ -188,6 +188,39 @@ func TestAnIxfrRefreshOfASigningZoneSignsOnlyWhatTheDeltaTouched(t *testing.T) {
 	}
 }
 
+// A signing secondary that is switched off keeps in its snapshot the signatures
+// it made, and a delta is applied onto that snapshot. If the zone is a signer
+// again when the delta is adopted (a callback's SetRuntimeOption), the RRset the
+// delta changed still carries the old signature, which covers its previous
+// contents: it must be signed again, and signed again for real, not kept as
+// "already signed" because the key matches and no renewal is due. The refresh
+// began with the zone not signing, so it is not the scoped pass, and the full
+// pass that takes its place must still force what the delta touched. The check
+// is cryptographic: the signature published must verify against the records
+// published under it.
+func TestAnIxfrRefreshOfAZoneSwitchedOffAndOnSignsWhatTheDeltaChangedAgain(t *testing.T) {
+	zd := ixSigningSecondary(t, ixResignZone)
+	assertPublishedAddresses(t, zd, "www.example.", []string{"10.0.0.3", "10.0.0.4"})
+	assertPublishedRRsetVerifies(t, zd, "www.example.", dns.TypeA)
+
+	zd.SetRuntimeOption(OptInlineSigning, false) // switched off; the snapshot is as it was
+	incoming := newTransferScratchZone(zd)       // the refresh begins: no signer
+	delta := ixDeltaStream(t, 7, 8, nil, []dns.RR{ixA(t, "www.example.", "10.0.0.5")})
+	if err := zd.applyIxfrToScratch(&incoming, delta); err != nil {
+		t.Fatalf("applyIxfrToScratch refused the delta: %v", err)
+	}
+	zd.SetRuntimeOption(OptInlineSigning, true) // the callback: a signer again
+	zd.mu.Lock()
+	err := zd.applyRefreshReplacementLocked(&incoming, nil, false, false)
+	zd.mu.Unlock()
+	if err != nil {
+		t.Fatalf("applyRefreshReplacementLocked: %v", err)
+	}
+
+	assertPublishedAddresses(t, zd, "www.example.", []string{"10.0.0.3", "10.0.0.4", "10.0.0.5"})
+	assertPublishedRRsetVerifies(t, zd, "www.example.", dns.TypeA)
+}
+
 // The dynamic RRsets are collected before the callbacks run. A callback that
 // then says dont-publish-key for the zone (SetRuntimeOption on the served zone)
 // has the options the zone has when the refresh is adopted rule: the SIG(0) KEY

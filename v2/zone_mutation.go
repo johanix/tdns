@@ -1387,6 +1387,15 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		// by a callback's SetRuntimeOption on this zone, has none, and takes the
 		// full pass below.
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, new_zd.ixfrTouched
+	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil:
+		// A delta, on a zone that did not sign when the refresh began: the full
+		// pass signs what is unsigned. But the delta was applied onto the
+		// snapshot as it was, and a zone that signed once and was switched off
+		// keeps its old signatures there, so an RRset the delta changed still
+		// carries one over its previous contents, which the full pass (not
+		// forced) would take for current. The touched owners are signed again
+		// by force as well; see signStagedScopeLocked.
+		zd.wsNeedsFullSign, zd.wsSignOwners = true, new_zd.ixfrTouched
 	default:
 		zd.wsNeedsFullSign, zd.wsSignOwners = true, nil
 	}
@@ -1547,10 +1556,25 @@ func (zd *ZoneData) signStagedScopeLocked(ctx context.Context, sm *signingMateri
 	// zone. It does mean the apex is re-signed on every inbound delta
 	// (ixfrTouchedOwners always includes it), the apex DNSKEY with it.
 	//
+	//
+	// Both set is a delta adopted by a zone that did not sign when the refresh
+	// began (applyRefreshReplacementLocked): what is unsigned is signed first,
+	// everywhere, and then what the delta touched is signed again by force,
+	// because the snapshot it was applied onto may hold signatures of ours that
+	// are no longer true of those owners.
+	//
 	// signNsec=false: restitchNsecLocked regenerates and signs the chain a few
 	// lines below, so signing it here would be thrown away.
-	_, _, err := zd.signWorkingSetLocked(ctx, sm.dak, sm.clamp, zd.wsSignOwners != nil, false, zd.wsSignOwners)
-	return err
+	if zd.wsNeedsFullSign {
+		if _, _, err := zd.signWorkingSetLocked(ctx, sm.dak, sm.clamp, false, false, nil); err != nil {
+			return err
+		}
+	}
+	if zd.wsSignOwners != nil {
+		_, _, err := zd.signWorkingSetLocked(ctx, sm.dak, sm.clamp, true, false, zd.wsSignOwners)
+		return err
+	}
+	return nil
 }
 
 // refuseUnsignableWorkingSetLocked drops a publish whose content could not be
