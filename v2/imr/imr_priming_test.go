@@ -203,7 +203,7 @@ func TestNewImrSendsNothing(t *testing.T) {
 
 	qctx, qcancel := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer qcancel()
-	resp, err := imr.Query(qctx, "www.example.", dns.TypeA, dns.ClassINET, nil)
+	resp, err := imr.Query(qctx, "www.example.", dns.TypeA, dns.ClassINET)
 	if resp != nil || err == nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "no-such-hints") {
 		t.Errorf("Query before priming: %+v, %v; want no answer, the deadline and the priming error", resp, err)
 	}
@@ -228,7 +228,7 @@ func TestQueryWaitsForReady(t *testing.T) {
 	}
 	answered := make(chan result, 1)
 	go func() {
-		resp, err := imr.Query(context.Background(), "www.fwd.example.", dns.TypeA, dns.ClassINET, nil)
+		resp, err := imr.Query(context.Background(), "www.fwd.example.", dns.TypeA, dns.ClassINET)
 		answered <- result{resp, err}
 	}()
 	select {

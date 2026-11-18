@@ -232,7 +232,7 @@ func TestImrQueryAtACNAMEOwnerIsNoData(t *testing.T) {
 	for _, qtype := range []uint16{dns.TypeDS, dns.TypeDNSKEY} {
 		t.Run(dns.TypeToString[qtype], func(t *testing.T) {
 			imr, _ := sigChainImr(t)
-			resp, err := imr.Query(context.Background(), "s1."+sigChainZone, qtype, dns.ClassINET, nil)
+			resp, err := imr.Query(context.Background(), "s1."+sigChainZone, qtype, dns.ClassINET)
 			if err != nil || resp == nil {
 				t.Fatalf("ImrQuery: %v, %v", resp, err)
 			}

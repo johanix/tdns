@@ -786,7 +786,7 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq Request) {
 	}
 
 	imr.lgImr().Debug("not in cache, querying", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
-	resp, err := imr.Query(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
+	resp, err := imr.Query(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass)
 	if err != nil {
 		imr.lgImr().Error("ImrQuery failed",
 			"qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "err", err)
@@ -831,8 +831,8 @@ func (imr *Imr) upgradeIndirectCacheHits() bool {
 // what it finds. Before the resolver is Ready it waits for that, within ctx
 // and the query budget (imrengine.tuning.query-budget), which the wait counts
 // against.
-func (imr *Imr) Query(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *Response) (*Response, error) {
-	return imr.queryWhenReady(ctx, qname, qtype, qclass, respch, false)
+func (imr *Imr) Query(ctx context.Context, qname string, qtype uint16, qclass uint16) (*Response, error) {
+	return imr.queryWhenReady(ctx, qname, qtype, qclass, false)
 }
 
 // QueryFresh is Query without the cache for the answer itself: a cached
@@ -847,14 +847,14 @@ func (imr *Imr) Query(ctx context.Context, qname string, qtype uint16, qclass ui
 // behind that attempt's cached NXDOMAIN for the whole negative TTL, and every
 // retry would read the same entry.
 func (imr *Imr) QueryFresh(ctx context.Context, qname string, qtype uint16, qclass uint16) (*Response, error) {
-	return imr.queryWhenReady(ctx, qname, qtype, qclass, nil, true)
+	return imr.queryWhenReady(ctx, qname, qtype, qclass, true)
 }
 
 // queryWhenReady is Query and QueryFresh: imrQuery, once the resolver is
 // Ready. Only they wait. The resolver's own lookups call imrQuery: priming
 // itself can start some (a root server's transport signal, a nameserver
 // address), and would otherwise wait for its own end.
-func (imr *Imr) queryWhenReady(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *Response, fresh bool) (*Response, error) {
+func (imr *Imr) queryWhenReady(ctx context.Context, qname string, qtype uint16, qclass uint16, fresh bool) (*Response, error) {
 	select {
 	case <-imr.Ready():
 	default:
@@ -874,10 +874,10 @@ func (imr *Imr) queryWhenReady(ctx context.Context, qname string, qtype uint16, 
 			return nil, fmt.Errorf("resolver not ready (root not primed yet): %w", ctx.Err())
 		}
 	}
-	return imr.imrQuery(ctx, qname, qtype, qclass, respch, fresh)
+	return imr.imrQuery(ctx, qname, qtype, qclass, fresh)
 }
 
-func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *Response, fresh bool) (*Response, error) {
+func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, fresh bool) (*Response, error) {
 	imr.lgImr().Debug("ImrQuery: not in cache, querying", "qname", qname, "qtype", dns.TypeToString[qtype])
 
 	// Apply per-query wall-time budget at the top-level public entry,
@@ -944,23 +944,10 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		resp.denied(kind, state)
 	}
 
-	// If a response channel is provided, use it to send responses
-	if respch != nil {
-		defer func() {
-			select {
-			case respch <- &resp:
-				// sent successfully
-			case <-time.After(2 * time.Second):
-				imr.lgImr().Warn("ImrQuery: timed out sending response to channel", "qname", qname, "qtype", dns.TypeToString[qtype])
-			}
-		}()
-	}
-
 	// Every return below says when what it carries expires: the entry the
 	// answer or the denial is cached in, read after validation, which can
 	// shorten its life to its signatures' (lookupEntry). Peek, not Get: an
 	// entry with TTL 0 is stored already expired and still says when.
-	// Deferred after the send above, so it runs before it.
 	started := cache.Now()
 	var hit *cache.CachedRRset
 	// The CNAME links followed from qname are recorded as the lookup follows

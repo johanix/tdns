@@ -564,7 +564,7 @@ func TestImrQueryCarriesTheChainExpiry(t *testing.T) {
 	ctx := context.Background()
 
 	// The wire path: s1 -> s2 -> s3 A, every record 300 s.
-	resp, err := imr.Query(ctx, "s1."+sigChainZone, dns.TypeA, dns.ClassINET, nil)
+	resp, err := imr.Query(ctx, "s1."+sigChainZone, dns.TypeA, dns.ClassINET)
 	if err != nil || resp == nil || resp.RRset == nil {
 		t.Fatalf("s1 A: %v, %v", resp, err)
 	}
@@ -572,7 +572,7 @@ func TestImrQueryCarriesTheChainExpiry(t *testing.T) {
 		t.Errorf("s1 A over the wire: chain expires in %v, want within the links' 300 s", left)
 	}
 	// Asked for the data's own name, no chain is followed.
-	direct, err := imr.Query(ctx, "s3."+sigChainZone, dns.TypeA, dns.ClassINET, nil)
+	direct, err := imr.Query(ctx, "s3."+sigChainZone, dns.TypeA, dns.ClassINET)
 	if err != nil || direct == nil {
 		t.Fatalf("s3 A: %v, %v", direct, err)
 	}
@@ -590,7 +590,7 @@ func TestImrQueryCarriesTheChainExpiry(t *testing.T) {
 	}
 	put(c1, mustRR(t, c1+` 60 IN CNAME `+c2), time.Minute)
 	put(c2, mustRR(t, c2+` 3600 IN A 192.0.2.62`), time.Hour)
-	resp, err = imr.Query(ctx, c1, dns.TypeA, dns.ClassINET, nil)
+	resp, err = imr.Query(ctx, c1, dns.TypeA, dns.ClassINET)
 	if err != nil || resp == nil || resp.RRset == nil || !core.EqualNames(resp.RRset.Name, c2) {
 		t.Fatalf("c1 A: %v, %v", resp, err)
 	}
@@ -618,7 +618,7 @@ func TestImrQueryChainExpiryHonoursCacheMaxTTL(t *testing.T) {
 
 	imr, _ := sigChainImr(t)
 	// s1 -> s2 -> s3 A, every record 300 s, kept for 60.
-	resp, err := imr.Query(context.Background(), "s1."+sigChainZone, dns.TypeA, dns.ClassINET, nil)
+	resp, err := imr.Query(context.Background(), "s1."+sigChainZone, dns.TypeA, dns.ClassINET)
 	if err != nil || resp == nil || resp.RRset == nil {
 		t.Fatalf("s1 A: %v, %v", resp, err)
 	}
@@ -649,7 +649,7 @@ func TestAddrsExpiryOnACachedChainUsesTheAddressEntry(t *testing.T) {
 	put(c2, mustRR(t, c2+` 3600 IN A 192.0.2.62`))
 	cache.SetTTLLimits(prev)
 
-	resp, err := imr.Query(context.Background(), c1, dns.TypeA, dns.ClassINET, nil)
+	resp, err := imr.Query(context.Background(), c1, dns.TypeA, dns.ClassINET)
 	if err != nil || resp == nil || resp.RRset == nil || !core.EqualNames(resp.RRset.Name, c2) {
 		t.Fatalf("c1 A: %v, %v", resp, err)
 	}

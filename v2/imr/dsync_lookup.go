@@ -117,7 +117,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 	name := dsyncPerChildLookupName(prefix, parent_guess)
 
 	imr.lgDns().Debug("looking up DSYNC", "name", name)
-	resp, err := imr.Query(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
+	resp, err := imr.Query(ctx, name, core.TypeDSYNC, dns.ClassINET)
 	if err != nil {
 		imr.lgDns().Error("error during ImrQuery", "err", err)
 		return dr, err
@@ -147,7 +147,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 		}
 		name = dsyncPerChildLookupName(prefix, parent)
 		imr.lgDns().Debug("looking up DSYNC", "name", name)
-		resp, err = imr.Query(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
+		resp, err = imr.Query(ctx, name, core.TypeDSYNC, dns.ClassINET)
 		if err != nil {
 			imr.lgDns().Error("error during ImrQuery", "err", err)
 			return dr, err
@@ -169,7 +169,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 	name = DsyncOwnerName(parent)
 
 	imr.lgDns().Debug("looking up DSYNC", "name", name)
-	resp, err = imr.Query(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
+	resp, err = imr.Query(ctx, name, core.TypeDSYNC, dns.ClassINET)
 	if err != nil {
 		imr.lgDns().Error("error during ImrQuery", "err", err)
 		return dr, err
@@ -234,7 +234,7 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 	// stdlib resolver, which would consult /etc/resolv.conf).
 	target := dns.Fqdn(dsync.Target)
 	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		resp, qerr := imr.Query(ctx, target, qtype, dns.ClassINET, nil)
+		resp, qerr := imr.Query(ctx, target, qtype, dns.ClassINET)
 		if qerr != nil {
 			imr.lgDns().Debug("IMR address lookup failed", "target", target, "qtype", dns.TypeToString[qtype], "err", qerr)
 			continue

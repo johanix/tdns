@@ -316,7 +316,7 @@ func (imr *Imr) lookupSignalAliasHop(owner, target string) {
 	lookup := func(imr *Imr, target string) (*Response, error) {
 		ctx, cancel := detachedContext(5 * time.Second)
 		defer cancel()
-		return imr.imrQuery(ctx, target, dns.TypeSVCB, dns.ClassINET, nil, false)
+		return imr.imrQuery(ctx, target, dns.TypeSVCB, dns.ClassINET, false)
 	}
 	if signalAliasHopLookupHook != nil {
 		lookup = signalAliasHopLookupHook

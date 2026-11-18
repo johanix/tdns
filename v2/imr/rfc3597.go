@@ -22,7 +22,7 @@ func (imr *Imr) ParentZone(z string) (string, error) {
 
 		// Query for SOA at the potential parent zone name using Query
 		ctx := context.Background()
-		resp, err := imr.imrQuery(ctx, upone, dns.TypeSOA, dns.ClassINET, nil, false)
+		resp, err := imr.imrQuery(ctx, upone, dns.TypeSOA, dns.ClassINET, false)
 		if err != nil {
 			return "", err
 		}

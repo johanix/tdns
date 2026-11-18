@@ -378,7 +378,7 @@ func (imr *Imr) lookupEndpointAddrs(target string) ([]string, time.Time) {
 	var addrs []string
 	var expire time.Time
 	for _, qtype := range imr.Cache.AddressTypes() {
-		resp, err := imr.imrQuery(ctx, target, qtype, dns.ClassINET, nil, false)
+		resp, err := imr.imrQuery(ctx, target, qtype, dns.ClassINET, false)
 		if err != nil || resp == nil || resp.RRset == nil || resp.ValidationState == cache.ValidationStateBogus {
 			continue
 		}

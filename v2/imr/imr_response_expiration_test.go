@@ -39,8 +39,8 @@ func TestImrResponseExpirationOfAnAnswer(t *testing.T) {
 		name string
 		ask  func() (*Response, error)
 	}{
-		{"fresh", func() (*Response, error) { return imr.Query(ctx, qname, dns.TypeTXT, dns.ClassINET, nil) }},
-		{"cached", func() (*Response, error) { return imr.Query(ctx, qname, dns.TypeTXT, dns.ClassINET, nil) }},
+		{"fresh", func() (*Response, error) { return imr.Query(ctx, qname, dns.TypeTXT, dns.ClassINET) }},
+		{"cached", func() (*Response, error) { return imr.Query(ctx, qname, dns.TypeTXT, dns.ClassINET) }},
 		{"past the cache", func() (*Response, error) { return imr.QueryFresh(ctx, qname, dns.TypeTXT, dns.ClassINET) }},
 	}
 	var first time.Time
@@ -77,7 +77,7 @@ func TestImrResponseExpirationOfADenial(t *testing.T) {
 			defer cancel()
 			want := time.Now().Add(60 * time.Second)
 			for _, ask := range []string{"fresh", "cached"} {
-				resp, err := imr.Query(ctx, tc.qname, dns.TypeTXT, dns.ClassINET, nil)
+				resp, err := imr.Query(ctx, tc.qname, dns.TypeTXT, dns.ClassINET)
 				if err != nil || resp == nil || resp.Error || resp.Denial == 0 {
 					t.Fatalf("%s: err=%v resp=%+v", ask, err, resp)
 				}
@@ -106,7 +106,7 @@ func TestImrResponseExpirationOfASecureAnswerFollowsItsSignatures(t *testing.T) 
 		Transport: core.TransportDo53,
 	})
 
-	resp, err := imr.Query(context.Background(), qname, dns.TypeTXT, dns.ClassINET, nil)
+	resp, err := imr.Query(context.Background(), qname, dns.TypeTXT, dns.ClassINET)
 	if err != nil || resp == nil || resp.Error || !resp.Validated {
 		t.Fatalf("err=%v resp=%+v", err, resp)
 	}

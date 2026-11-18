@@ -116,7 +116,7 @@ func TestImrQueryAnswersADenialTheSameWayTwice(t *testing.T) {
 			defer cancel()
 			var resps [2]*Response
 			for i := range resps {
-				resp, err := imr.Query(ctx, tc.qname, dns.TypeTXT, dns.ClassINET, nil)
+				resp, err := imr.Query(ctx, tc.qname, dns.TypeTXT, dns.ClassINET)
 				if err != nil || resp == nil || resp.Error {
 					t.Fatalf("ask %d: err=%v resp=%+v", i+1, err, resp)
 				}
@@ -161,7 +161,7 @@ func TestAFreshDenialWithTTLZeroKeepsItsVerdict(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resp, err := imr.Query(ctx, qname, dns.TypeTXT, dns.ClassINET, nil)
+	resp, err := imr.Query(ctx, qname, dns.TypeTXT, dns.ClassINET)
 	if err != nil || resp == nil || resp.Error {
 		t.Fatalf("err=%v resp=%+v", err, resp)
 	}
@@ -210,7 +210,7 @@ func TestCachedDenialKeepsItsVerdict(t *testing.T) {
 	t.Run("ImrQuery", func(t *testing.T) {
 		imr := newTestImr(t)
 		seed(imr)
-		resp, err := imr.Query(context.Background(), qname, core.TypeDSYNC, dns.ClassINET, nil)
+		resp, err := imr.Query(context.Background(), qname, core.TypeDSYNC, dns.ClassINET)
 		if err != nil {
 			t.Fatalf("ImrQuery: %v", err)
 		}

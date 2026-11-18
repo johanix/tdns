@@ -158,7 +158,7 @@ func TestClientDSQueryGoesToTheParent(t *testing.T) {
 
 	t.Run("ImrQuery", func(t *testing.T) {
 		imr, atParent, atChild := setup(t)
-		resp, err := imr.Query(context.Background(), child, dns.TypeDS, dns.ClassINET, nil)
+		resp, err := imr.Query(context.Background(), child, dns.TypeDS, dns.ClassINET)
 		if err != nil {
 			t.Fatalf("ImrQuery: %v", err)
 		}

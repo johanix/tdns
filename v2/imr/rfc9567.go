@@ -27,7 +27,7 @@ func (imr *Imr) SendRfc9567ErrorReport(ctx context.Context, qname string, qtype 
 			}
 			report_qname := fmt.Sprintf("_er.%d.%s%d._er.%s", qtype, qname, ede_code, msgoptions.ErAgentDomain)
 			imr.lgImr().Debug("sending RFC 9567 error report query", "qname", report_qname)
-			ir, err := imr.imrQuery(ctx, report_qname, dns.TypeTXT, dns.ClassINET, nil, false)
+			ir, err := imr.imrQuery(ctx, report_qname, dns.TypeTXT, dns.ClassINET, false)
 			if err != nil {
 				imr.lgImr().Error("error from ImrQuery for error report", "err", err)
 			} else {

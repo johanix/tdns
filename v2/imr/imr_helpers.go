@@ -187,7 +187,7 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 		if imr.Cache.Debug {
 			imr.Cache.Logger.Printf("Transport signal query (%s): querying %s %s", reason, owner, dns.TypeToString[rrtype])
 		}
-		resp, err := imr.imrQuery(queryCtx, owner, rrtype, dns.ClassINET, nil, false)
+		resp, err := imr.imrQuery(queryCtx, owner, rrtype, dns.ClassINET, false)
 		if imr.Cache.Debug && (err != nil || resp == nil || resp.RRset == nil || resp.RRset.RRtype != rrtype) {
 			imr.Cache.Logger.Printf("Transport signal query (%s) found no signal for %s %s: %v", reason, owner, dns.TypeToString[rrtype], err)
 		}
@@ -378,7 +378,7 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 		go func(owner string) {
 			queryCtx, cancel := detachedContext(5 * time.Second)
 			defer cancel()
-			resp, err := imr.imrQuery(queryCtx, owner, dns.TypeTLSA, dns.ClassINET, nil, false)
+			resp, err := imr.imrQuery(queryCtx, owner, dns.TypeTLSA, dns.ClassINET, false)
 			if err != nil || resp == nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 				imr.TLSADiscovery.Fail(owner, err)
 				return

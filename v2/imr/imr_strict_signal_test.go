@@ -333,7 +333,7 @@ func TestStrictPrivacySeesASignalPublishedAfterADenial(t *testing.T) {
 	if !imr.TransportSignalDiscovery.Begin(strictChildOwner) {
 		t.Fatal("setup: could not start the first lookup")
 	}
-	resp, err := imr.Query(context.Background(), strictChildOwner, dns.TypeSVCB, dns.ClassINET, nil)
+	resp, err := imr.Query(context.Background(), strictChildOwner, dns.TypeSVCB, dns.ClassINET)
 	if err != nil || resp == nil || resp.Denial != cache.ContextNXDOMAIN {
 		t.Fatalf("setup: ImrQuery did not answer with the cached denial: %+v, %v", resp, err)
 	}
