@@ -2577,8 +2577,8 @@ func reloadWouldLoseChanges(zd *ZoneData) bool {
 	if !dirty {
 		return false
 	}
-	// After the unlock: JournalActive takes the config lock, and there is no
-	// reason to hold two.
+	// After the unlock: the switch is a lock-free read, and nothing below
+	// needs zd.mu.
 	return zd.KeyDB == nil || !JournalActive()
 }
 
