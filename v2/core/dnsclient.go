@@ -391,7 +391,7 @@ func (c *DNSClient) exchangeInner(ctx context.Context, msg *dns.Msg, server stri
 		return nil, 0, ExchangeResult{WireTransport: c.Transport}, err
 	}
 	if debug {
-		fmt.Printf("*** Exchange: sending %s message to %s:%s opcode: %s qname: %s rrtype: %s\n",
+		c.log().Printf("*** Exchange: sending %s message to %s:%s opcode: %s qname: %s rrtype: %s",
 			TransportToString[c.Transport], server, c.Port,
 			dns.OpcodeToString[msg.Opcode],
 			msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
@@ -479,7 +479,7 @@ func (c *DNSClient) exchangeDoH(ctx context.Context, msg *dns.Msg, server string
 	// Create HTTP request
 	url := fmt.Sprintf("https://%s/dns-query", hostPort)
 	if debug {
-		fmt.Printf("*** DoH sending HTTPS POST to %s opcode: %s qname: %s rrtype: %s\n", url, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+		c.log().Printf("*** DoH sending HTTPS POST to %s opcode: %s qname: %s rrtype: %s", url, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(packed))
@@ -539,7 +539,7 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	}
 
 	if debug {
-		fmt.Printf("*** DoQ sending message to %s opcode: %s qname: %s rrtype: %s\n", server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+		c.log().Printf("*** DoQ sending message to %s opcode: %s qname: %s rrtype: %s", server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
 
 	// Connect to the QUIC server
@@ -620,7 +620,7 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	}
 
 	if debug {
-		fmt.Printf("*** DoQ received response length: %d. Now closing stream\n", respLen)
+		c.log().Printf("*** DoQ received response length: %d. Now closing stream", respLen)
 	}
 
 	// Unpack the response
