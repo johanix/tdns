@@ -826,5 +826,11 @@ func (zd *ZoneData) signsItsOwnContent() bool {
 	if zd == nil {
 		return false
 	}
-	return zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)
+	return signsFromOptions(zd.optionsMap())
+}
+
+// signsFromOptions is signsItsOwnContent for the options opts, taken once by a
+// caller that has other questions to ask of the same set.
+func signsFromOptions(opts map[ZoneOption]bool) bool {
+	return opts[OptOnlineSigning] || opts[OptInlineSigning]
 }

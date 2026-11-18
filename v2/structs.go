@@ -224,6 +224,7 @@ type ZoneData struct {
 	optionsMu         sync.RWMutex        // see Option, in zone_option_runtime.go: orders the replacement of Options against a reader holding no lock
 	runtimeOptions    map[ZoneOption]bool // set by the daemon itself, kept across a config update (SetRuntimeOption); guarded by mu
 	optionsAtStart    map[ZoneOption]bool // an incoming zone's only: the served zone's options as the refresh began, never written; see foldIncomingOptionsLocked
+	signsAtStart      bool                // an incoming zone's only: the served zone signed its own content as the refresh began (signsFromOptions); read by applyRefreshReplacementLocked
 	// SuppressedOptions records the origination options that were configured
 	// for this zone but stripped by normalizeOptionsForRole (a tdns-auth
 	// secondary may not originate content). Options above is the EFFECTIVE

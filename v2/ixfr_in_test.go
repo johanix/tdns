@@ -1871,7 +1871,10 @@ func assertPublishedAddresses(t *testing.T, zd *ZoneData, owner string, want []s
 // been collected: apply onto a scratch zone, then swap and publish it.
 func applyIxfrAndPublish(t *testing.T, zd *ZoneData, rrs []dns.RR) {
 	t.Helper()
-	newZd := &ZoneData{ZoneName: zd.ZoneName, ZoneStore: MapZone, Logger: discardLogger()}
+	// signsAtStart as newTransferScratchZone records it when a refresh begins:
+	// the scoped signing pass is for a zone that signed then.
+	newZd := &ZoneData{ZoneName: zd.ZoneName, ZoneStore: MapZone, Logger: discardLogger(),
+		signsAtStart: zd.signsItsOwnContent()}
 	if err := zd.applyIxfrToScratch(newZd, rrs); err != nil {
 		t.Fatalf("applyIxfrToScratch refused the delta: %v", err)
 	}

@@ -253,52 +253,103 @@ func TestACallbackOptionIsNotKeptByARefusedReload(t *testing.T) {
 
 // A zone an OnZonePreRefresh callback makes a signer, refreshed by a delta, has
 // none of its owners signed: the scoped signing pass of an IXFR refresh is for
-// a zone that already signed what the delta extends. Its owners the delta never
-// touched are unsigned in the snapshot the delta is applied to, and a signed
-// apex over unsigned RRsets does not validate.
+// a zone that already signed what the delta extends, and it is asked when the
+// refresh begins, which is when the delta's base is taken. Its owners the delta
+// never touched are unsigned in that base, and a signed apex over unsigned
+// RRsets does not validate. The callback makes the zone a signer in either of
+// the two ways it can: an option set on the incoming zone, which reaches the
+// served zone when the refresh is adopted, and SetRuntimeOption on the served
+// zone, which is how tdns-mp does it and which takes effect before the refresh
+// is adopted at all.
 func TestAnIxfrRefreshThatMakesTheZoneASignerSignsEveryOwner(t *testing.T) {
+	for name, enable := range map[string]func(served, incoming *ZoneData){
+		"option set on the incoming zone": func(_, incoming *ZoneData) { incoming.Options[OptInlineSigning] = true },
+		"SetRuntimeOption on the served zone": func(served, _ *ZoneData) {
+			served.SetRuntimeOption(OptInlineSigning, true)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			authApp(t)
+			pzd, addr, stop := ixfrTestPrimary(t, ixApplyZone)
+			defer stop()
+			base := pzd.publishedSnapshot().Serial
+			// A chain for the primary to serve a delta from (as TestIxfrInConvergesViaDelta).
+			Zones.Set("example.", pzd)
+			t.Cleanup(func() { Zones.Remove("example.") })
+			stageAndPublish(t, pzd, stageAddA(t, pzd, "one.example.", "10.1.0.1"))
+			stageAndPublish(t, pzd, stageAddA(t, pzd, "two.example.", "10.1.0.2"))
+			Zones.Remove("example.")
+
+			// An unsigned secondary that has keys and a policy but is no signer yet.
+			zd := ixfrTestSecondary(t, ixApplyZone, addr, nil)
+			zd.IncomingSerial, zd.CurrentSerial = base, base
+			makeZoneSigning(t, zd)
+			zd.Options[OptOnlineSigning] = false
+			zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, enable)
+
+			// The refresh must be a delta: a full zone takes the full pass anyway.
+			if outcome, _, err := zd.ixfrTransferIn(context.Background(), zd.Upstreams[0], base, &Config{}); err != nil || outcome != ixfrDelta {
+				t.Fatalf("precondition: the primary answered %v (err %v), want a delta", outcome, err)
+			}
+			if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
+				t.Fatalf("FetchFromUpstream: %v", err)
+			}
+			if !optionOn(zd, OptInlineSigning) {
+				t.Fatal("the callback's option did not reach the zone")
+			}
+
+			snap := zd.publishedSnapshot()
+			for _, name := range []string{"example.", "ns.example.", "www.example.", "one.example.", "two.example."} {
+				od := getOwnerFrom(snap, name)
+				if od == nil {
+					t.Fatalf("%s is not in the published zone", name)
+				}
+				for _, rrt := range od.RRtypes.Keys() {
+					if rs := od.RRtypes.GetOnlyRRSet(rrt); len(rs.RRSIGs) == 0 {
+						t.Errorf("%s %s is published unsigned in a zone that signs", name, dns.TypeToString[rrt])
+					}
+				}
+			}
+		})
+	}
+}
+
+// A zone that signed when the refresh began keeps the scoped pass: the owners a
+// delta did not touch are not signed again. The owner added sorts last, so that
+// the NSEC chain only re-links its neighbours, www.example. and the apex, and
+// ns.example. is left alone.
+func TestAnIxfrRefreshOfASigningZoneSignsOnlyWhatTheDeltaTouched(t *testing.T) {
 	authApp(t)
 	pzd, addr, stop := ixfrTestPrimary(t, ixApplyZone)
 	defer stop()
 	base := pzd.publishedSnapshot().Serial
-	// A chain for the primary to serve a delta from (as TestIxfrInConvergesViaDelta).
 	Zones.Set("example.", pzd)
 	t.Cleanup(func() { Zones.Remove("example.") })
-	stageAndPublish(t, pzd, stageAddA(t, pzd, "one.example.", "10.1.0.1"))
-	stageAndPublish(t, pzd, stageAddA(t, pzd, "two.example.", "10.1.0.2"))
+	stageAndPublish(t, pzd, stageAddA(t, pzd, "zz.example.", "10.1.0.1"))
 	Zones.Remove("example.")
 
-	// An unsigned secondary that has keys and a policy but is no signer yet.
-	zd := ixfrTestSecondary(t, ixApplyZone, addr, nil)
+	zd := ixSigningSecondary(t, ixApplyZone)
+	zd.Upstreams = []PeerConf{{Addr: addr}}
 	zd.IncomingSerial, zd.CurrentSerial = base, base
-	makeZoneSigning(t, zd)
-	zd.Options[OptOnlineSigning] = false
-	zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(_, incoming *ZoneData) {
-		incoming.Options[OptInlineSigning] = true
-	})
-
-	// The refresh must be a delta: a full zone takes the full pass anyway.
+	untouched := getOwnerFrom(zd.publishedSnapshot(), "ns.example.")
+	if untouched == nil {
+		t.Fatal("precondition: ns.example. is not published")
+	}
+	before := untouched.RRtypes
 	if outcome, _, err := zd.ixfrTransferIn(context.Background(), zd.Upstreams[0], base, &Config{}); err != nil || outcome != ixfrDelta {
 		t.Fatalf("precondition: the primary answered %v (err %v), want a delta", outcome, err)
 	}
+
 	if _, err := zd.FetchFromUpstream(context.Background(), false, false, false, nil, &Config{}); err != nil {
 		t.Fatalf("FetchFromUpstream: %v", err)
 	}
-	if !optionOn(zd, OptInlineSigning) {
-		t.Fatal("the callback's option did not reach the zone")
+	after := getOwnerFrom(zd.publishedSnapshot(), "ns.example.")
+	if after == nil || after.RRtypes != before {
+		t.Fatal("an owner the delta never touched was signed again: the scoped pass was lost for a zone that already signed")
 	}
-
-	snap := zd.publishedSnapshot()
-	for _, name := range []string{"example.", "ns.example.", "www.example.", "one.example.", "two.example."} {
-		od := getOwnerFrom(snap, name)
-		if od == nil {
-			t.Fatalf("%s is not in the published zone", name)
-		}
-		for _, rrt := range od.RRtypes.Keys() {
-			if rs := od.RRtypes.GetOnlyRRSet(rrt); len(rs.RRSIGs) == 0 {
-				t.Errorf("%s %s is published unsigned in a zone that signs", name, dns.TypeToString[rrt])
-			}
-		}
+	if od := getOwnerFrom(zd.publishedSnapshot(), "zz.example."); od == nil ||
+		len(od.RRtypes.GetOnlyRRSet(dns.TypeA).RRSIGs) == 0 {
+		t.Fatal("the owner the delta touched is not signed")
 	}
 }
 

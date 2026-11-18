@@ -1085,12 +1085,6 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// under the old options; before every decision below that reads them, which
 	// are the new content's (whether the zone originates it, the serial it
 	// lands on, whether it signs it). A refusal further down puts them back.
-	//
-	// Whether the zone signs its own content is asked before that: the IXFR
-	// signing scope below belongs to a zone that already signed the content
-	// this replacement extends, and a zone the callbacks have just made a
-	// signer has none of its owners signed.
-	wasSigning := zd.signsItsOwnContent()
 	undoOptions := zd.foldIncomingOptionsLocked(new_zd)
 
 	// The highest serial this zone has published, which a first load must
@@ -1397,10 +1391,12 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	switch {
 	case !zd.signsItsOwnContent():
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
-	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil && wasSigning:
-		// Only when the zone signed before this replacement: its untouched
-		// owners keep the signatures they have. One that has just become a
-		// signer has none, and takes the full pass below.
+	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil && new_zd.signsAtStart:
+		// Only when the zone signed its own content when the refresh began,
+		// which is when the delta's base was taken: the owners the delta did not
+		// touch keep the signatures they have. A zone that became a signer since,
+		// by an option a callback set on the incoming zone or on this one
+		// (SetRuntimeOption), has none, and takes the full pass below.
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, new_zd.ixfrTouched
 	default:
 		zd.wsNeedsFullSign, zd.wsSignOwners = true, nil

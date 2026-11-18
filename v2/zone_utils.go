@@ -676,6 +676,7 @@ func newTransferScratchZone(zd *ZoneData) ZoneData {
 		Debug:           zd.Debug,
 		Options:         opts,
 		optionsAtStart:  atStart,
+		signsAtStart:    signsFromOptions(atStart),
 		TransferSrc:     srcs,
 		TransferSrcTier: tier,
 		Ready:           true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
@@ -798,6 +799,7 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 		Debug:          zd.Debug,
 		Options:        opts,
 		optionsAtStart: atStart,
+		signsAtStart:   signsFromOptions(atStart),
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
