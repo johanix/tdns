@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,7 +43,9 @@ var optionReaders = map[string]func(zd *ZoneData) bool{
 
 // readOptionsUntil runs a goroutine per reader path, and per extra reader the
 // caller adds, that calls it in a loop until the returned func stops them. That
-// func waits for them and returns how many reads they made.
+// func waits for them and returns how many reads they made. It returns only
+// once every reader has made a read, so that a writer that finishes before a
+// reader is scheduled does not stop it unread.
 func readOptionsUntil(t *testing.T, zd *ZoneData, extra ...func(*ZoneData) bool) (stop func() int64) {
 	t.Helper()
 	readers := make([]func(*ZoneData) bool, 0, len(optionReaders)+len(extra))
@@ -51,12 +54,18 @@ func readOptionsUntil(t *testing.T, zd *ZoneData, extra ...func(*ZoneData) bool)
 	}
 	readers = append(readers, extra...)
 	done := make(chan struct{})
-	var wg sync.WaitGroup
+	var wg, started sync.WaitGroup
 	var reads atomic.Int64
 	for _, read := range readers {
 		wg.Add(1)
+		started.Add(1)
 		go func() {
 			defer wg.Done()
+			// The first read comes before the done check and is announced:
+			// the caller waits for it below.
+			_ = read(zd)
+			reads.Add(1)
+			started.Done()
 			for {
 				select {
 				case <-done:
@@ -68,10 +77,37 @@ func readOptionsUntil(t *testing.T, zd *ZoneData, extra ...func(*ZoneData) bool)
 			}
 		}()
 	}
+	started.Wait()
 	return func() int64 {
 		close(done)
 		wg.Wait()
 		return reads.Load()
+	}
+}
+
+// TestReadOptionsUntilHasEveryReaderReadBeforeItReturns: readOptionsUntil hands
+// back its stop func only once every reader has made a read. Without that, a
+// writer that finishes before a reader is scheduled stops it unread, and a test
+// of correct code fails with "the readers never ran" (johanix/tdns#981 review).
+// One P makes the case certain: the readers do not run until the caller blocks,
+// so a stop func that did not wait for them would be called with nothing read.
+func TestReadOptionsUntilHasEveryReaderReadBeforeItReturns(t *testing.T) {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	zd := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{OptAllowUpdates: true}}
+	var extra [8]atomic.Int64
+	readers := make([]func(*ZoneData) bool, len(extra))
+	for i := range extra {
+		readers[i] = func(*ZoneData) bool { extra[i].Add(1); return false }
+	}
+	stop := readOptionsUntil(t, zd, readers...)
+	reads := stop() // at once: the writer's whole work, here, is nothing
+	for i := range extra {
+		if extra[i].Load() == 0 {
+			t.Errorf("reader %d had not read when the stop func returned", i)
+		}
+	}
+	if want := int64(len(optionReaders) + len(extra)); reads < want {
+		t.Errorf("%d reads, want at least one from each of the %d readers", reads, want)
 	}
 }
 
