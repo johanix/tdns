@@ -496,6 +496,19 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone is in a service-impacting error", zone)
 		return zd.refuseTransfer(w, r)
 	}
+	// A secondary past SOA EXPIRE is no longer entitled to answer from the copy
+	// it holds (RFC 1034 section 4.3.5), and its queries are SERVFAILed on that
+	// ground. A transfer is the same answer in bulk, so it is refused on the
+	// same ground. Asked here, and not folded into inError above, because
+	// expire is deliberately NOT a service-impacting error: the refresh ticker
+	// skips those zones, and an expired zone would then have no way back. It
+	// keeps being refreshed, and the next usable SOA un-expires it. HasExpired
+	// takes zd.mu itself, so it is asked outside the lock above.
+	if zd.HasExpired() {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, the zone has passed SOA EXPIRE since its last confirmed refresh (%s)",
+			zone, zd.lastRefresh().Format(time.RFC3339))
+		return zd.refuseTransfer(w, r)
+	}
 
 	if store != MapZone {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone store %s not supported",

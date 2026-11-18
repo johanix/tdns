@@ -213,7 +213,7 @@ func TestTryServerRedirectWaitsForTargetAddrs(t *testing.T) {
 	t.Cleanup(func() { endpointAddrLookupHook = saved })
 	ctx := context.Background()
 
-	if _, _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
 		t.Fatalf("before the lookup: %v", err)
 	}
 	if got := lastDial(dot); got != "192.0.2.1" {
@@ -238,7 +238,7 @@ func TestTryServerRedirectWaitsForTargetAddrs(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if _, _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
 		t.Fatalf("after the lookup: %v", err)
 	}
 	if got := lastDial(dot); got != "192.0.2.53:1234" {
@@ -265,7 +265,7 @@ func TestTryServerRedirectBackoffAndFallback(t *testing.T) {
 	ctx := context.Background()
 	server.RecordEndpointAddrRTT("192.0.2.99", 1234, core.TransportDoT, time.Millisecond) // the faster one, tried first
 
-	if _, _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err == nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err == nil {
 		t.Fatal("192.0.2.99 has no programmed answer; want a failure")
 	}
 	if got := lastDial(dot); got != "192.0.2.99:1234" {
@@ -277,28 +277,29 @@ func TestTryServerRedirectBackoffAndFallback(t *testing.T) {
 	if !server.IsAddrXportAvailable("192.0.2.1", core.TransportDoT) {
 		t.Errorf("a target's failure backed off the nameserver's own address")
 	}
-	_, _, _, ep, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone)
+	_, _, _, ep, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone)
 	if err != nil {
 		t.Fatalf("second attempt: %v", err)
 	}
 	if got := lastDial(dot); got != "[2001:db8::53]:1234" || ep.dialAddr() != got {
 		t.Errorf("second dial %q (returned %q), want the target's other address", got, ep.dialAddr())
 	}
-	// A lame answer from the target is kept at the nameserver's own tuple.
-	if !ep.redirect || ep.lamenessPort() != 0 {
-		t.Errorf("returned endpoint %+v: want a redirect with lameness at port 0", ep)
+	// A lame answer from the target is booked where it came from: the
+	// target's address, at the endpoint's port.
+	if !ep.redirect || ep.addr != "2001:db8::53" || ep.keyPort != 1234 {
+		t.Errorf("returned endpoint %+v: want a redirect to 2001:db8::53, kept under port 1234", ep)
 	}
 
 	server.RecordEndpointAddrFailure("2001:db8::53", 1234, core.TransportDoT, nil)
 	n := len(dot.Calls())
-	_, _, _, _, err = imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone)
+	_, _, _, _, err = imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone)
 	if _, ok := err.(errEndpointUnavailable); !ok {
 		t.Errorf("every target address backed off: err %v, want errEndpointUnavailable", err)
 	}
 	if len(dot.Calls()) != n {
 		t.Errorf("an attempt was dialed with every target address backed off")
 	}
-	if _, _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
 		t.Fatalf("Do53 fallback: %v", err)
 	}
 	if got := lastDial(do53); got != "192.0.2.1" {
@@ -312,7 +313,7 @@ func TestTryServerDefaultEndpointsContext(t *testing.T) {
 	imr, server, dot, _, q := endpointTestRig(t)
 	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
 	ctx := withDefaultEndpoints(context.Background())
-	if _, _, _, _, err := imr.tryServer(ctx, server, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if got := lastDial(dot); got != "192.0.2.1" {
@@ -333,17 +334,17 @@ func TestChooseEndpointAddr(t *testing.T) {
 	server.RecordEndpointAddrFailure("192.0.2.12", 853, core.TransportDoT, nil)
 
 	imr.Options[ImrOptAllowLoopbackNameservers] = "false"
-	if got := imr.chooseEndpointAddr(server, addrs, 853, core.TransportDoT); got != "192.0.2.11" {
+	if got := imr.chooseEndpointAddr(server, nil, addrs, 853, core.TransportDoT); got != "192.0.2.11" {
 		t.Errorf("chose %q, want 192.0.2.11", got)
 	}
 	imr.Options[ImrOptAllowLoopbackNameservers] = "true"
-	if got := imr.chooseEndpointAddr(server, addrs, 853, core.TransportDoT); got != "127.0.0.1" {
+	if got := imr.chooseEndpointAddr(server, nil, addrs, 853, core.TransportDoT); got != "127.0.0.1" {
 		t.Errorf("with loopback allowed chose %q, want 127.0.0.1", got)
 	}
-	if got := imr.chooseEndpointAddr(server, []string{"192.0.2.12"}, 853, core.TransportDoT); got != "" {
+	if got := imr.chooseEndpointAddr(server, nil, []string{"192.0.2.12"}, 853, core.TransportDoT); got != "" {
 		t.Errorf("only a backed-off address: chose %q", got)
 	}
-	if got := imr.chooseEndpointAddr(server, []string{"192.0.2.12"}, 1234, core.TransportDoT); got != "192.0.2.12" {
+	if got := imr.chooseEndpointAddr(server, nil, []string{"192.0.2.12"}, 1234, core.TransportDoT); got != "192.0.2.12" {
 		t.Errorf("another port is not backed off: chose %q", got)
 	}
 }
@@ -708,22 +709,22 @@ func TestEndpointFallsBackToPort53(t *testing.T) {
 	server.RecordEndpointAddrFailure("192.0.2.53", 1234, core.TransportDoT, nil)
 	ctx := context.Background()
 
-	d, err := imr.endpointFor(ctx, server, "192.0.2.1", core.TransportDo53)
+	d, err := imr.endpointFor(ctx, server, nil, "192.0.2.1", core.TransportDo53)
 	if err != nil || d.addr != "192.0.2.1" || d.port != 0 || d.keyPort != 0 || d.redirect {
 		t.Errorf("udp: %+v %v, want the nameserver on port 53", d, err)
 	}
-	if _, err := imr.endpointFor(ctx, server, "192.0.2.1", core.TransportDoT); err == nil {
+	if _, err := imr.endpointFor(ctx, server, nil, "192.0.2.1", core.TransportDoT); err == nil {
 		t.Error("DoT: an attempt with every target address backed off")
 	}
 
 	// At the server's own name: the udp port backed off, port 53 is used.
 	self := cache.NewAuthServer(pathNS)
 	applyTransportMapWithPorts(self, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53: 5353})
-	if d, _ := imr.endpointFor(ctx, self, "192.0.2.1", core.TransportDo53); d.port != 5353 || d.keyPort != 5353 {
+	if d, _ := imr.endpointFor(ctx, self, nil, "192.0.2.1", core.TransportDo53); d.port != 5353 || d.keyPort != 5353 {
 		t.Errorf("udp endpoint usable: %+v, want port 5353", d)
 	}
 	self.RecordEndpointAddrFailure("192.0.2.1", 5353, core.TransportDo53, nil)
-	if d, _ := imr.endpointFor(ctx, self, "192.0.2.1", core.TransportDo53); d.port != 0 || d.keyPort != 0 {
+	if d, _ := imr.endpointFor(ctx, self, nil, "192.0.2.1", core.TransportDo53); d.port != 0 || d.keyPort != 0 {
 		t.Errorf("udp endpoint backed off: %+v, want port 53", d)
 	}
 }

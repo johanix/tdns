@@ -368,9 +368,16 @@ type ZoneData struct {
 	// (CollectDynamicRRs).
 	signalStoredMu sync.Mutex
 	signalStored   map[string][]string
-	publishCadence time.Duration
-	publishQueued  bool
-	publishUrgent  bool
+	// signalUnrecorded holds, per owner, the digests of signals the pass
+	// stored that the KeyDB did not take: the record could not be read, and
+	// the prepend that stands in for the write failed too. They are the
+	// pass's own in this process (signalStoredByPass), and the next store
+	// that reads the KeyDB's record puts them ahead of it. Guarded by
+	// signalStoredMu.
+	signalUnrecorded map[string][]string
+	publishCadence   time.Duration
+	publishQueued    bool
+	publishUrgent    bool
 	// tx is the zone's transactions: the publish hold, and what a zone created
 	// held remembers about its first content. See zone_tx.go. Guarded by mu.
 	tx zoneTxState
