@@ -874,12 +874,19 @@ func TestAFirstLoadBindsAPolicyThatOnlyTheReloadDefines(t *testing.T) {
 // disagreed until the next restart. The sync holds the zone's policy apply lock
 // for that span, so the command waits for it and lands after.
 //
-// The hook runs in the span. If the lock is free there, the command runs to
-// completion in it, as it could; if the sync holds it, the command is started
-// and waits.
+// The probe sees the sync at three points: before its first read, once it has
+// classified, and just before it refuses. The lock has to be held at each of
+// them, which a lock taken after the first read, or let go before the refusal,
+// would not be. At the second a command is landed: if the lock is free there,
+// the command runs to completion in the probe, as it could; if the sync holds
+// it, the command is started and waits.
 func TestACommandApplyCannotLandBetweenThePolicySyncsReadAndItsRefusal(t *testing.T) {
 	authApp(t)
 	kdb := Conf.Internal.KeyDB
+	// Registered before the harness, so that it runs after the harness has
+	// stopped the engine: the engine reads the probe, and clearing it first
+	// would race with a read on a failure.
+	t.Cleanup(func() { policySyncProbe = nil })
 	h := newReloadHarness(t, kdb, "interleave.config.example.", "online-signing")
 	const month = 30 * 86400
 	base := named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "base")
@@ -892,33 +899,51 @@ func TestACommandApplyCannotLandBetweenThePolicySyncsReadAndItsRefusal(t *testin
 		t.Fatal("the zone does not sign; the test has lost its point")
 	}
 
-	var fired, heldBySync bool
+	// What the probe saw. Written on the engine's goroutine and read here after
+	// the reload has been answered, which orders them.
+	var seen [3]bool
+	var free [3]bool
+	var heldBySync bool
 	done := make(chan error, 1)
 	runCommand := func() error {
 		pol := cmd
 		_, err := applyZonePolicyTransactional(context.Background(), zd, kdb, &pol, "cmd", PolicyApplySourceCommand)
 		return err
 	}
-	policySyncAfterClassify = func(z *ZoneData) {
-		if z != zd || fired {
+	policySyncProbe = func(z *ZoneData, stage policySyncStage) {
+		if z != zd || seen[stage] {
 			return
 		}
-		fired = true
-		if z.policyApplyMu.TryLock() { // the sync does not hold it: the command can land here
+		seen[stage] = true
+		if z.policyApplyMu.TryLock() { // the sync does not hold it
 			z.policyApplyMu.Unlock()
+			free[stage] = true
+		}
+		if stage != policySyncClassified {
+			return
+		}
+		if free[stage] { // the command can land here
 			done <- runCommand()
 			return
 		}
 		heldBySync = true
 		go func() { done <- runCommand() }()
 	}
-	t.Cleanup(func() { policySyncAfterClassify = nil })
 
 	// "base" has other algorithms in this reload: refused, and the zone is put
 	// back on the definition it has keys of.
 	h.reload(true, "base", map[string]DnssecPolicy{"base": baseAlg, "cmd": cmd})
-	if !fired {
-		t.Fatal("the policy sync did not classify a change; the test has lost its point")
+	for stage, name := range map[policySyncStage]string{
+		policySyncRead:       "before its first read",
+		policySyncClassified: "once it has classified",
+		policySyncActing:     "just before it refuses",
+	} {
+		if !seen[stage] {
+			t.Fatalf("the policy sync did not get as far as %s; the test has lost its point", name)
+		}
+		if free[stage] {
+			t.Errorf("the policy sync does not hold the zone's policy apply lock %s", name)
+		}
 	}
 	select {
 	case err := <-done:
@@ -930,7 +955,7 @@ func TestACommandApplyCannotLandBetweenThePolicySyncsReadAndItsRefusal(t *testin
 	}
 
 	if !heldBySync {
-		t.Error("a command's apply completed between the policy sync's reads and its refusal: the sync does not hold the zone's policy apply lock over that span")
+		t.Error("a command's apply completed between the policy sync's reads and its refusal")
 	}
 	override, ok, err := GetZonePolicyOverride(kdb, h.zone)
 	if err != nil || !ok || override != "cmd" {

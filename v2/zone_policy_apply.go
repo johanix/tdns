@@ -399,10 +399,20 @@ func keepBindingOrQuarantineForBadIntent(zd *ZoneData, intentName, keepMsg, quar
 	zd.mu.Unlock()
 }
 
-// policySyncAfterClassify is nil, and is set by a test that has to land
-// something between the policy sync's reads and what it does with them: it is
-// called once the sync has classified the change, before it acts on it.
-var policySyncAfterClassify func(zd *ZoneData)
+// policySyncStage names a point in syncZoneDnssecPolicyFromConfigIn that a test
+// can observe.
+type policySyncStage int
+
+const (
+	policySyncRead       policySyncStage = iota // the lock is taken, nothing is read yet
+	policySyncClassified                        // the change is classified, nothing is done with it yet
+	policySyncActing                            // the checks are passed: the next step binds, applies or refuses
+)
+
+// policySyncProbe is nil, and is set by a test that has to see, or land
+// something at, a point between the policy sync's reads and what it does with
+// them. It is called with the zone and the stage the sync has reached.
+var policySyncProbe func(zd *ZoneData, stage policySyncStage)
 
 // syncZoneDnssecPolicyFromConfig is the refresh-engine policy path (plan §6.2):
 // resolve applied vs intent → Branch 0 backfill/first-apply → classify →
@@ -446,6 +456,9 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 	// call applyZonePolicyTransactionalLocked.
 	zd.policyApplyMu.Lock()
 	defer zd.policyApplyMu.Unlock()
+	if policySyncProbe != nil {
+		policySyncProbe(zd, policySyncRead)
+	}
 
 	intentName, intentPol, appliedName, appliedPol, appliedOK, err := resolvePolicyPairIn(kdb, zd.ZoneName, configPolicyName, pols)
 	if err != nil {
@@ -530,8 +543,8 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 	appliedPol = definitionBoundUnder(zd, appliedName, appliedPol)
 
 	class := classifyPolicyChange(appliedPol, appliedName, intentPol, intentName)
-	if policySyncAfterClassify != nil {
-		policySyncAfterClassify(zd)
+	if policySyncProbe != nil {
+		policySyncProbe(zd, policySyncClassified)
 	}
 
 	// Branch 1 — same name, same algs (incl. internals-only edits).
@@ -592,6 +605,9 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 		return nil
 	}
 
+	if policySyncProbe != nil {
+		policySyncProbe(zd, policySyncActing)
+	}
 	switch class {
 	case PolicyChangeCompatibleName:
 		if _, aerr := applyZonePolicyTransactionalLocked(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
