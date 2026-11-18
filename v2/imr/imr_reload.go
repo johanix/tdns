@@ -180,7 +180,7 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 	// a config that would quarantine anything changes nothing at all. At
 	// startup there is no such state, so the same input quarantines and the
 	// daemon serves what is left.
-	newForwards, diags := buildImrForwards(fwdconf, imr.Cache.Logger)
+	newForwards, diags := buildImrForwards(fwdconf, imr.Cache.DebugLog())
 	if err := forwardDiagsError(diags); err != nil {
 		return res, fmt.Errorf("imrengine.forward: %v", err)
 	}

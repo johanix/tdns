@@ -305,6 +305,9 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 	// 1. Create the cache
 	rrcache := cache.NewRRsetCache(cacheLogger(opts.Logger), ic.Verbose, ic.Debug)
 	rrcache.DebugLogger = slog.NewLogLogger(lg.Handler(), slog.LevelDebug)
+	// The DNS clients log a line per exchange, such as a truncated answer
+	// retried over TCP: at Debug, with the per-RRset lines.
+	rrcache.DNSClient = cache.NewDNSClients(rrcache.DebugLog())
 
 	// The address families in use, before anything adds a server address:
 	// priming seeds the root hints'.
@@ -385,7 +388,7 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 	// used to stop the resolver entirely, even though every other forward
 	// zone and the iterative path would have worked. The offending upstream
 	// or zone is quarantined instead and the daemon starts.
-	forwards, fwdDiags := buildImrForwards(ic.Forward, rrcache.Logger)
+	forwards, fwdDiags := buildImrForwards(ic.Forward, rrcache.DebugLog())
 	for _, d := range fwdDiags {
 		if d.Dropped {
 			lg.Error("forward config entry dropped", "problem", d.String())

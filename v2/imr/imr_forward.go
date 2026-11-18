@@ -541,7 +541,8 @@ func BuildImrForwards(conf []ImrForwardConf) ([]*ForwardZone, []ForwardDiag) {
 }
 
 // buildImrForwards is BuildImrForwards whose upstreams' DNS clients log
-// through lg (nil is the log package's): the resolver passes its cache's.
+// through lg (nil is the log package's): the resolver passes its cache's
+// DebugLog, since a client logs a line per exchange (cache.NewDNSClients).
 func buildImrForwards(conf []ImrForwardConf, lg *log.Logger) ([]*ForwardZone, []ForwardDiag) {
 	if len(conf) == 0 {
 		return nil, nil

@@ -186,7 +186,7 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 					return false, true, ValidationStateInsecure, nil
 				}
 			}
-			rrcache.debugLogger().Printf("ValidateRRset: issuing a DNS query for DNSKEY RRset from the signer zone %q", signer)
+			rrcache.DebugLog().Printf("ValidateRRset: issuing a DNS query for DNSKEY RRset from the signer zone %q", signer)
 			// Fetch DNSKEYs from the signer zone
 			if dkeys, err := fetcher(ctx, signer, dns.TypeDNSKEY, servers); err == nil && dkeys != nil && len(dkeys.RRs) > 0 {
 				if rrcache.Debug {
@@ -390,7 +390,7 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		rrcache.Logger.Printf("%s", rrsetStr)
 	}
 
-	rrcache.debugLogger().Printf("ValidateRRset: start: owner=%q type=%s sigs=%d rrs=%d",
+	rrcache.DebugLog().Printf("ValidateRRset: start: owner=%q type=%s sigs=%d rrs=%d",
 		rrset.Name, dns.TypeToString[rrset.RRtype], len(rrset.RRSIGs), len(rrset.RRs))
 
 	// Early check, for an unsigned RRset: if the zone it belongs to is

@@ -88,29 +88,35 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRs
 
 // var RRsetCache = NewRRsetCache()
 
-// NewRRsetCache creates and initializes an RRsetCacheT with per-transport DNS clients and empty concurrent maps.
-//
-// The returned cache has ready-to-use concurrent maps for RRsets, Servers, ServerMap, AuthServerMap, ZoneMap and a reference to the global DnskeyCache, along with per-transport DNS clients (Do53, DoT, DoH, DoQ) using standard ports. The provided logger is used for cache logging (nil is the log package's); the verbose and debug flags enable their respective logging modes.
-// debugLogger is where the per-RRset lines go: DebugLogger, or Logger.
-func (rrcache *RRsetCacheT) debugLogger() *log.Logger {
+// DebugLog is where the per-RRset lines go: DebugLogger, or Logger.
+func (rrcache *RRsetCacheT) DebugLog() *log.Logger {
 	if rrcache.DebugLogger != nil {
 		return rrcache.DebugLogger
 	}
 	return rrcache.Logger
 }
 
+// NewDNSClients is a DNS client per transport, at its standard port, each
+// logging through lg (nil is the log package's). A client logs a line per
+// exchange that it retries or that fails: a truncated UDP answer retried over
+// TCP, a DoQ connection or stream that failed.
+func NewDNSClients(lg *log.Logger) map[core.Transport]core.DNSClienter {
+	return map[core.Transport]core.DNSClienter{
+		core.TransportDo53:    core.NewDNSClient(core.TransportDo53, "53", nil, core.WithLogger(lg)),
+		core.TransportDo53TCP: core.NewDNSClient(core.TransportDo53TCP, "53", nil, core.WithLogger(lg)),
+		core.TransportDoT:     core.NewDNSClient(core.TransportDoT, "853", nil, core.WithLogger(lg)),
+		core.TransportDoH:     core.NewDNSClient(core.TransportDoH, "443", nil, core.WithLogger(lg)),
+		core.TransportDoQ:     core.NewDNSClient(core.TransportDoQ, "853", nil, core.WithLogger(lg)), // RFC 9250: DoQ uses port 853
+	}
+}
+
+// NewRRsetCache creates and initializes an RRsetCacheT with per-transport DNS clients and empty concurrent maps.
+//
+// The returned cache has ready-to-use concurrent maps for RRsets, Servers, ServerMap, AuthServerMap, ZoneMap and a reference to the global DnskeyCache, along with per-transport DNS clients (Do53, DoT, DoH, DoQ) using standard ports. The provided logger is used for cache logging (nil is the log package's); the verbose and debug flags enable their respective logging modes.
 func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	if lg == nil {
 		lg = log.Default()
 	}
-	var client = map[core.Transport]core.DNSClienter{}
-
-	client[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, "53", nil, core.WithLogger(lg))
-	client[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, "53", nil, core.WithLogger(lg))
-	client[core.TransportDoT] = core.NewDNSClient(core.TransportDoT, "853", nil, core.WithLogger(lg))
-	client[core.TransportDoH] = core.NewDNSClient(core.TransportDoH, "443", nil, core.WithLogger(lg))
-	client[core.TransportDoQ] = core.NewDNSClient(core.TransportDoQ, "853", nil, core.WithLogger(lg)) // RFC 9250: DoQ uses port 853
-
 	return &RRsetCacheT{
 		RRsets:               core.NewCmap[CachedRRset](),
 		Servers:              core.NewNameMap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
@@ -127,7 +133,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 		LineWidth:            130, // default line width for truncating long lines in logging and output
 		Verbose:              verbose,
 		Debug:                debug,
-		DNSClient:            client,
+		DNSClient:            NewDNSClients(lg),
 		nsRevalidateInFlight: make(map[string]struct{}),
 		statsSince:           time.Now(),
 	}
@@ -1066,7 +1072,7 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 
 	// Store NS records for root
 	if len(nsRecords) > 0 {
-		rrcache.debugLogger().Printf("Found %d NS RRs", len(nsRecords))
+		rrcache.DebugLog().Printf("Found %d NS RRs", len(nsRecords))
 		rrcache.Set(".", dns.TypeNS, &CachedRRset{
 			Name:    ".",
 			RRtype:  dns.TypeNS,
@@ -1089,7 +1095,7 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 	var servers []string
 
 	// Store glue records for root nameservers
-	rrcache.debugLogger().Printf("Found %d glue records", len(glueRecords))
+	rrcache.DebugLog().Printf("Found %d glue records", len(glueRecords))
 	for name, rrs := range glueRecords {
 		if !nsMap[name] {
 			rrcache.Logger.Printf("*** Glue record for a non-root nameserver found: %v. Ignored.", name)
