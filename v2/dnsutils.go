@@ -27,7 +27,6 @@ import (
 
 const (
 	year68            = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits
-	TimeLayout        = "2006-01-02 15:04:05"
 	safeMessageSize   = 64000 // ~1.5 KB headroom for per-envelope question + TSIG
 	dnsMaxMessageSize = 65535
 )

@@ -438,26 +438,8 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 	return nil
 }
 
-// dsyncOwnerName is the owner of a zone's DSYNC RRset, and
-// dsyncPerChildLookupName a child's own name under it: _dsync.<zone> and
-// <child>._dsync.<zone>, and at the root _dsync. and <tld>._dsync. (RFC 9859).
-//
-// The root's used to be _dsync.root. and <tld>._dsync.root. That was a clean
-// switch (#757): nothing publishes or looks up the old names.
-func dsyncOwnerName(zonename string) string {
-	return dsyncNameUnder("_dsync", zonename)
-}
 
-func dsyncPerChildLookupName(childLabel, parent string) string {
-	return dsyncNameUnder(childLabel+"._dsync", parent)
-}
 
-func dsyncNameUnder(prefix, zonename string) string {
-	if zonename = dns.Fqdn(zonename); zonename == "." {
-		return prefix + "."
-	}
-	return prefix + "." + zonename
-}
 
 // expandDsyncTemplate fills {ZONENAME} in a target template. A target is any
 // name the operator picks, not one RFC 9859 fixes, so the root keeps its

@@ -22,13 +22,6 @@ import (
 // parent refuses the UPDATE, the API call fails, a timeout) is not this
 // case and is reported as before.
 
-// ErrNoUsableDsync marks a delegation sync, or a SIG(0) bootstrap, that was
-// not attempted because the parent publishes no DSYNC record this child can
-// use: none at all, none for a configured scheme, or none past its gate.
-// The DSYNC discovery itself succeeded; a failed discovery is a different
-// error. Callers log it at DEBUG and do not retry it (the warning is given
-// once per zone where the sentinel is made).
-var ErrNoUsableDsync = errors.New("the parent publishes no usable DSYNC scheme")
 
 // dsyncNoticeBook is what the log has been told about each zone's parent:
 // that it offers nothing of the kind the book is for. Keyed by the zone's

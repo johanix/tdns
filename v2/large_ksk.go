@@ -15,15 +15,6 @@ import (
 	algorithms "github.com/johanix/tdns/v2/algorithms"
 )
 
-// LargeAlgDSMetrics returns the total number of individual large-alg DS RRs
-// encountered in referrals. Prefer LargeKskImrMetricsSnapshot.
-func LargeAlgDSMetrics() uint64 {
-	var n uint64
-	for i := range imrDSDLargeRRByAlg {
-		n += imrDSDLargeRRByAlg[i].Load()
-	}
-	return n
-}
 
 // buildLargeAlgorithmSet resolves the dnssec.large-algorithms entries into the
 // derived codepoint lookup. Each entry is either an exact algorithm name
@@ -99,16 +90,7 @@ func resolveLargeAlgorithms(names []string, catalog map[string]uint8) (map[uint8
 	return m, nil
 }
 
-// DNSKEYTransportPolicy selects how the IMR chooses a transport for DNSKEY
-// queries. See DnssecConf.DNSKEYTransport for the semantics of each value.
-type DNSKEYTransportPolicy string
 
-const (
-	DNSKEYTransportForceUDP       DNSKEYTransportPolicy = "force_udp"
-	DNSKEYTransportUseDSSignal    DNSKEYTransportPolicy = "use_ds_signal"
-	DNSKEYTransportTryEncrypted   DNSKEYTransportPolicy = "try_encrypted"
-	DNSKEYTransportForceEncrypted DNSKEYTransportPolicy = "force_encrypted"
-)
 
 // parseDNSKEYTransportPolicy validates the configured dnskey-query-transport
 // value. An empty value defaults to use_ds_signal (the backward-compatible

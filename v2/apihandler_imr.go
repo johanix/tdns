@@ -35,28 +35,7 @@ type ImrServerTransportStats struct {
 	Truncated uint64            `json:"truncated"`
 }
 
-// transportName returns the string name for t, with a stable fallback so an
-// unregistered transport (a future enum value missing from TransportToString)
-// never produces an empty-string map key in the API JSON.
-func transportName(t core.Transport) string {
-	if name, ok := core.TransportToString[t]; ok {
-		return name
-	}
-	return fmt.Sprintf("unknown-%d", t)
-}
 
-// transportCountsToStrings converts a transport-keyed counter map to a
-// name-keyed one for JSON transport over the API.
-func transportCountsToStrings(m map[core.Transport]uint64) map[string]uint64 {
-	if len(m) == 0 {
-		return nil
-	}
-	out := make(map[string]uint64, len(m))
-	for t, c := range m {
-		out[transportName(t)] = c
-	}
-	return out
-}
 
 // transportWeightsToStrings converts a transport-keyed weight map to a
 // name-keyed one for JSON transport over the API.
