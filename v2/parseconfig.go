@@ -682,6 +682,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	lgConfig.Debug("templates defined", "count", len(conf.Templates))
 
+	// Before buildTemplateMap, which replaces the live template map: a
+	// reload refused here must leave the running map as it was, or adds
+	// would use templates from a config that was rejected. (It reads the
+	// decoded template list, not the map.)
+	if err := conf.DynamicZones.ValidateDefaultTemplates(conf.Templates); err != nil {
+		return err
+	}
 	if err := conf.buildTemplateMap(); err != nil {
 		return err
 	}
@@ -1023,6 +1030,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Logger:        log.Default(),
 				FirstZoneLoad: true,
 			}
+			zd.fromStaticConfig.Store(true)
 			// Before Zones.Set, while the zone is still private to this
 			// goroutine -- the contract registerStandardRefreshHooks states
 			// and the other three creation paths already keep. This zone is
@@ -1039,6 +1047,12 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			// this registration is documented as avoiding.
 			zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
 			Zones.Set(zname, zd)
+		} else {
+			// A zone that was dynamic (an API catalog, say) and is now
+			// defined in the config file belongs to the config file from
+			// here on: no longer copied into the dynamic config, and a
+			// catalog among them writes its own zonefile.
+			zd.fromStaticConfig.Store(true)
 		}
 
 		// A zone defined more than once is served under NEITHER definition.
@@ -1128,6 +1142,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 		crossCheckDownstreamAuth(zname, zconf.DownstreamAuth, zconf.Downstreams, conf.Internal.ImrEngine != nil)
+		conf.daneDownstreamWarnings(lgConfig, zname, zconf.DownstreamAuth, zconf.Downstreams)
 
 		zonestore := parseZoneStore(zconf.Store)
 
@@ -1192,6 +1207,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				broken_zones = append(broken_zones, zname)
 				continue
 			}
+			// DANE while DNSSEC validation is not enforced: accepted, but
+			// logged loudly, once per primary, at every load.
+			conf.danePrimaryWarnings(lgConfig, zname, zconf.Primaries)
 
 			// Resolve the as-written primaries to addr:port tuples (hostnames
 			// -> addresses via the IMR), re-resolved on every parse/reload.
@@ -1931,6 +1949,9 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		// DynamicZones is a property of the TEMPLATE (API-instantiable), not
 		// of the zones stamped out from it — never copied.
 		"DynamicZones": true,
+		// A dynamic zone's own inline TSIG key (persisted by the daemon),
+		// never a template's to hand out.
+		"InlineTsigKey": true,
 	}
 	gapFillStruct(reflect.ValueOf(&zconf).Elem(), reflect.ValueOf(tmpl).Elem(), bespoke, false)
 	return zconf, nil
@@ -2008,28 +2029,31 @@ func (conf *Config) buildTemplateMap() error {
 		return nil
 	}
 
-	// Build template map
-	Templates = make(map[string]ZoneConf) // Clear existing entries on reload
+	// Build the new map on the side and install it only once it is
+	// complete: an error below leaves the running map as it was (a reload
+	// that fails keeps the templates in use, rather than none or half).
+	tm := make(map[string]ZoneConf, len(conf.Templates))
 	for _, tmpl := range conf.Templates {
 		if tmpl.Name == "" {
 			return fmt.Errorf("template missing required 'name' field")
 		}
-		if _, exists := Templates[tmpl.Name]; exists {
+		if _, exists := tm[tmpl.Name]; exists {
 			return fmt.Errorf("duplicate template name: %s", tmpl.Name)
 		}
-		Templates[tmpl.Name] = tmpl
+		tm[tmpl.Name] = tmpl
 	}
 
 	// Handle template expansion if specified
 	// Robust expansion with cycle detection
 	var done = make(map[string]bool)
 	for _, t := range conf.Templates {
-		if _, ok := Templates[t.Name]; !ok {
+		if _, ok := tm[t.Name]; !ok {
 			continue
 		}
-		_, _ = expandTemplateChain(t.Name, []string{}, make(map[string]bool), done, Globals.App.Type)
+		_, _ = expandTemplateChain(tm, t.Name, []string{}, make(map[string]bool), done, Globals.App.Type)
 	}
 
+	Templates = tm
 	lgConfig.Debug("buildTemplateMap complete", "count", len(Templates))
 	return nil
 }
@@ -2046,8 +2070,14 @@ func (conf *Config) reloadTemplatesFromFile() error {
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
+	// The transfer-list aliases (provide-xfr: and the rest), rewritten and
+	// conflict-checked as the startup parse does (ParseConfig). Without it a
+	// template spelled with an alias lost its downstreams on this reload.
+	aliasConflicts := NormalizeXfrAliases(configMap)
 
-	// Decode only the templates from the config
+	// Decode only the templates from the config, with the same hooks as the
+	// zones (reloadZonesFromFile), so a peer or ACL entry written as a bare
+	// string decodes as it does at startup.
 	// Note: TagName:"yaml" means mapstructure reads yaml struct tags
 	var partial struct {
 		Templates []ZoneConf `yaml:"templates"`
@@ -2055,6 +2085,10 @@ func (conf *Config) reloadTemplatesFromFile() error {
 	decoderConfig := &mapstructure.DecoderConfig{
 		TagName: "yaml",
 		Result:  &partial,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			stringToPeerConfHook(),
+			stringToAclEntryHook(),
+		),
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
 	if err != nil {
@@ -2064,8 +2098,18 @@ func (conf *Config) reloadTemplatesFromFile() error {
 		return fmt.Errorf("error decoding templates: %v", err)
 	}
 
+	// Install the new list and map together, and only if both are good: a
+	// refused reload keeps the templates in use (the caller carries on with
+	// them). buildTemplateMap reads conf.Templates, so the list goes in first
+	// and is put back if the map is refused.
+	prevTemplates := conf.Templates
 	conf.Templates = partial.Templates
-	return conf.buildTemplateMap()
+	if err := conf.buildTemplateMap(); err != nil {
+		conf.Templates = prevTemplates
+		return err
+	}
+	conf.Internal.XfrAliasConflicts = aliasConflicts
+	return nil
 }
 
 // reloadDnssecFromFile re-reads the config file, decodes just the dnssec:
@@ -2177,6 +2221,9 @@ func (conf *Config) reloadZonesFromFile() error {
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
+	// The transfer-list aliases, as at startup: a zone spelled with
+	// provide-xfr: (or another alias) lost that list on this reload.
+	conf.Internal.XfrAliasConflicts = NormalizeXfrAliases(configMap)
 
 	var partial struct {
 		Zones []ZoneConf `yaml:"zones"`
@@ -2314,11 +2361,11 @@ func (conf *Config) reloadTsigKeysFromFile() error {
 // template on success. If a cycle is detected, all templates in the cycle are removed from the
 // Templates map and an error is returned. Missing parent references also remove the referring
 // template.
-func expandTemplateChain(name string, stack []string, onStack map[string]bool, done map[string]bool, appMode AppType) (ZoneConf, error) {
+func expandTemplateChain(tm map[string]ZoneConf, name string, stack []string, onStack map[string]bool, done map[string]bool, appMode AppType) (ZoneConf, error) {
 	if done[name] {
-		return Templates[name], nil
+		return tm[name], nil
 	}
-	t, exists := Templates[name]
+	t, exists := tm[name]
 	if !exists {
 		return ZoneConf{}, fmt.Errorf("expandTemplateChain: template %q not found", name)
 	}
@@ -2335,7 +2382,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 		cycle = append(cycle, name)
 		lgConfig.Error("template cycle detected", "cycle", strings.Join(cycle, " -> "))
 		for _, n := range cycle {
-			delete(Templates, n)
+			delete(tm, n)
 		}
 		return ZoneConf{}, fmt.Errorf("template cycle: %s", strings.Join(cycle, " -> "))
 	}
@@ -2344,15 +2391,15 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 	stack = append(stack, name)
 
 	if t.Template != "" && t.Template != name {
-		parent, exists := Templates[t.Template]
+		parent, exists := tm[t.Template]
 		if !exists {
 			lgConfig.Warn("template refers to non-existing template, ignored", "template", t.Name, "parent", t.Template)
-			delete(Templates, t.Name)
+			delete(tm, t.Name)
 			onStack[name] = false
 			return ZoneConf{}, fmt.Errorf("missing parent template %q for %q", t.Template, t.Name)
 		}
 		// Recurse to expand parent first
-		expandedParent, err := expandTemplateChain(parent.Name, stack, onStack, done, appMode)
+		expandedParent, err := expandTemplateChain(tm, parent.Name, stack, onStack, done, appMode)
 		if err != nil {
 			onStack[name] = false
 			return ZoneConf{}, err
@@ -2361,7 +2408,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 		expandedChild, err := ExpandTemplate(t, &expandedParent, appMode)
 		if err != nil {
 			lgConfig.Error("error expanding template from parent", "template", t.Name, "parent", t.Template, "err", err)
-			delete(Templates, t.Name)
+			delete(tm, t.Name)
 			onStack[name] = false
 			return ZoneConf{}, err
 		}
@@ -2369,7 +2416,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 	} else if t.Template == name {
 		// Self-cycle
 		lgConfig.Error("self-referential template cycle, removing", "template", name)
-		delete(Templates, name)
+		delete(tm, name)
 		onStack[name] = false
 		return ZoneConf{}, fmt.Errorf("self-referential template %q", name)
 	}
@@ -2377,7 +2424,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 	// Mark done and store expanded result
 	done[name] = true
 	onStack[name] = false
-	Templates[name] = t
+	tm[name] = t
 	return t, nil
 }
 

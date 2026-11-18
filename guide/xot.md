@@ -281,6 +281,13 @@ publishes about itself: the verifier fetches and DNSSEC-validates the TLSA at
 > **Requires validation.** dane needs a working DNSSEC-validating resolver: the
 > auth server's `imrengine` must be active (`active: true`) with a trust anchor,
 > and the peer name must be securely delegated with a published, signed TLSA.
+>
+> With `imrengine.require-dnssec-validation: false` (lab mode) tdns still accepts
+> a TLSA record it could not validate. Then the check proves nothing: anyone on
+> the path can forge both the TLSA record and the certificate. tdns says so
+> loudly: in the response to a `zone add` or `zone modify` through the API, in
+> the log at every config load, on the primary's line in `zone desc`, and in
+> `daemon status`.
 
 ### 3a. Publish the TLSA record
 

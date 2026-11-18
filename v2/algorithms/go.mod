@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/cloudflare/circl v1.6.3
-	github.com/johanix/dnssec-algorithms v0.0.0-20260916121050-4d74f086374b
+	github.com/johanix/dnssec-algorithms v0.0.0-20261111143226-7198849ded4b
 	github.com/miekg/dns v1.1.70
 )
 
