@@ -241,18 +241,20 @@ func assertEveryPublishedRRsetVerifies(t *testing.T, zd *ZoneData) {
 	}
 }
 
-// The scoped signing pass of an IXFR refresh signs the owners the delta
-// touched and the apex, and shares every other owner with the snapshot the
-// delta was applied onto. That is only right if the snapshot's other owners
-// carry signatures already. A signing zone can serve a snapshot that does not:
-// its full pass could not run (the policy was not bound yet, or the publish was
-// refused) and the zone kept, or published, unsigned content. A delta applied
-// onto that snapshot must take the full pass, and every owner must verify after
-// the publish, not only the ones the delta touched.
-func TestAnIxfrDeltaOnASnapshotThatWasNeverSignedSignsEveryOwner(t *testing.T) {
-	// A secondary with keys and a policy of its own, serving unsigned content,
-	// signing switched off.
-	newZone := func(t *testing.T) (*ZoneData, *DnssecPolicy) {
+// The signing passes of an IXFR adoption, row by row (the table in
+// applyRefreshReplacementLocked): what is signed is base+delta, so what the
+// pass may assume is whether the BASE, the snapshot the delta was built on, was
+// signed throughout, however the zone was signed before and whatever was
+// published between the base being read and the delta being adopted. After each
+// adoption every RRset of every owner must verify against the zone's published
+// DNSKEYs, and the address the delta added must be there.
+func TestAnIxfrAdoptionSignsByTheStateOfItsBase(t *testing.T) {
+	const www = "www.example."
+	wantAddrs := []string{"10.0.0.3", "10.0.0.4", "10.0.0.5"}
+
+	// A secondary that serves unsigned content, has keys and a policy of its
+	// own, and is no signer yet.
+	unsigned := func(t *testing.T) (*ZoneData, *DnssecPolicy) {
 		authApp(t)
 		zd := ixBase(t, ixResignZone)
 		zd.ZoneType = Secondary
@@ -260,28 +262,61 @@ func TestAnIxfrDeltaOnASnapshotThatWasNeverSignedSignsEveryOwner(t *testing.T) {
 		t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
 		makeZoneSigning(t, zd)
 		zd.Options[OptOnlineSigning] = false
+		zd.IncomingSerial, zd.CurrentSerial = 7, 7
 		return zd, zd.DnssecPolicy
 	}
-	// A delta from serial `from`, adding an address to www.example., adopted the
-	// way a refresh adopts it: the incoming zone is built when the refresh begins.
-	adoptDelta := func(t *testing.T, zd *ZoneData, from, to uint32) {
+	// The same, a signer with a full pass published.
+	signed := func(t *testing.T) *ZoneData {
+		zd := ixSigningSecondary(t, ixResignZone)
+		zd.IncomingSerial, zd.CurrentSerial = 7, 7
+		return zd
+	}
+	// A refresh begins and its delta, from serial 7, is built on the snapshot
+	// served now: the BASE.
+	capture := func(t *testing.T, zd *ZoneData) *ZoneData {
 		t.Helper()
-		zd.IncomingSerial, zd.CurrentSerial = from, from
 		incoming := newTransferScratchZone(zd)
-		delta := ixDeltaStream(t, from, to, nil, []dns.RR{ixA(t, "www.example.", "10.0.0.5")})
+		delta := ixDeltaStream(t, 7, 8, nil, []dns.RR{ixA(t, www, "10.0.0.5")})
 		if err := zd.applyIxfrToScratch(&incoming, delta); err != nil {
 			t.Fatalf("applyIxfrToScratch refused the delta: %v", err)
 		}
+		return &incoming
+	}
+	adopt := func(t *testing.T, zd, incoming *ZoneData) {
+		t.Helper()
 		zd.mu.Lock()
-		err := zd.applyRefreshReplacementLocked(&incoming, nil, false, false)
+		err := zd.applyRefreshReplacementLocked(incoming, nil, false, false)
 		zd.mu.Unlock()
 		if err != nil {
 			t.Fatalf("applyRefreshReplacementLocked: %v", err)
 		}
+		assertPublishedAddresses(t, zd, www, wantAddrs)
+		assertEveryPublishedRRsetVerifies(t, zd)
+	}
+	// A publish that runs the full pass, as the one after a policy bind or a
+	// forced re-sign does: the snapshot it installs is signed throughout.
+	fullPassPublish := func(t *testing.T, zd *ZoneData) {
+		t.Helper()
+		zd.mu.Lock()
+		zd.ensureWorkingSet()
+		zd.wsNeedsFullSign = true
+		zd.publishWorkingSetLocked(zd.generation.Load(), true)
+		zd.mu.Unlock()
+	}
+	// A publish that cannot sign, because the zone is not a signer: the
+	// snapshot it installs is unsigned, whatever signatures its RRsets still hold.
+	unsignedPublish := func(t *testing.T, zd *ZoneData) {
+		t.Helper()
+		zd.mu.Lock()
+		zd.ensureWorkingSet()
+		zd.stageRRsetLocked("t.example.", core.RRset{Name: "t.example.", Class: dns.ClassINET,
+			RRtype: dns.TypeTXT, RRs: []dns.RR{mustRR(t, `t.example. 3600 IN TXT "unsigned"`)}})
+		zd.publishWorkingSetLocked(zd.generation.Load(), true)
+		zd.mu.Unlock()
 	}
 
-	t.Run("the full replacement could not be signed yet", func(t *testing.T) {
-		zd, policy := newZone(t)
+	t.Run("base unsigned: the full replacement could not be signed yet", func(t *testing.T) {
+		zd, policy := unsigned(t)
 		zd.DnssecPolicy = nil // not bound yet: the publish cannot sign
 		zd.SetRuntimeOption(OptInlineSigning, true)
 
@@ -300,18 +335,91 @@ func TestAnIxfrDeltaOnASnapshotThatWasNeverSignedSignsEveryOwner(t *testing.T) {
 		if soa := getOwnerFrom(zd.publishedSnapshot(), "example.").RRtypes.GetOnlyRRSet(dns.TypeSOA); len(soa.RRSIGs) != 0 {
 			t.Fatal("precondition: the zone published signatures although its policy was not bound")
 		}
-
 		zd.DnssecPolicy = policy // bound now: the zone can sign
-		adoptDelta(t, zd, 8, 9)
-		assertPublishedAddresses(t, zd, "www.example.", []string{"10.0.0.3", "10.0.0.4", "10.0.0.5"})
-		assertEveryPublishedRRsetVerifies(t, zd)
+
+		zd.IncomingSerial, zd.CurrentSerial = 8, 8
+		incoming := newTransferScratchZone(zd)
+		delta := ixDeltaStream(t, 8, 9, nil, []dns.RR{ixA(t, www, "10.0.0.5")})
+		if err := zd.applyIxfrToScratch(&incoming, delta); err != nil {
+			t.Fatalf("applyIxfrToScratch refused the delta: %v", err)
+		}
+		adopt(t, zd, &incoming)
 	})
 
-	t.Run("signing was switched on over an unsigned snapshot", func(t *testing.T) {
-		zd, _ := newZone(t)
-		zd.SetRuntimeOption(OptInlineSigning, true) // no publish has followed: the snapshot is as it was
-		adoptDelta(t, zd, 7, 8)
-		assertPublishedAddresses(t, zd, "www.example.", []string{"10.0.0.3", "10.0.0.4", "10.0.0.5"})
+	t.Run("base unsigned: signing was switched on over it", func(t *testing.T) {
+		zd, _ := unsigned(t)
+		zd.SetRuntimeOption(OptInlineSigning, true) // no publish has followed
+		adopt(t, zd, capture(t, zd))
+	})
+
+	t.Run("base unsigned: a full pass publishes a signed snapshot before the adoption", func(t *testing.T) {
+		zd, _ := unsigned(t)
+		zd.SetRuntimeOption(OptInlineSigning, true)
+		incoming := capture(t, zd) // built on the unsigned snapshot
+		fullPassPublish(t, zd)     // the served snapshot is signed now, and marked
+		if !zd.publishedSnapshot().signed {
+			t.Fatal("precondition: the full pass did not mark the snapshot it published")
+		}
+		adopt(t, zd, incoming) // base+delta replaces it: the base's owners are unsigned
+	})
+
+	t.Run("base unsigned: SignZone publishes a signed snapshot before the adoption", func(t *testing.T) {
+		zd, _ := unsigned(t)
+		zd.SetRuntimeOption(OptInlineSigning, true)
+		incoming := capture(t, zd)
+		if _, err := zd.SignZone(context.Background(), zd.KeyDB, false); err != nil {
+			t.Fatalf("SignZone: %v", err)
+		}
+		if _, err := zd.publishSync(); err != nil {
+			t.Fatalf("publishSync: %v", err)
+		}
+		adopt(t, zd, incoming)
+	})
+
+	t.Run("base signed, served signed: the scoped pass", func(t *testing.T) {
+		zd := signed(t)
+		if !zd.publishedSnapshot().signed {
+			t.Fatal("precondition: the full pass did not mark the snapshot it published")
+		}
+		adopt(t, zd, capture(t, zd))
+	})
+
+	t.Run("base signed: an unsigned snapshot is published before the adoption", func(t *testing.T) {
+		zd := signed(t)
+		incoming := capture(t, zd) // built on the signed snapshot
+		zd.SetRuntimeOption(OptInlineSigning, false)
+		unsignedPublish(t, zd) // served: unsigned, marked so
+		if zd.publishedSnapshot().signed {
+			t.Fatal("precondition: a publish that could not sign marked its snapshot signed")
+		}
+		zd.SetRuntimeOption(OptInlineSigning, true)
+		adopt(t, zd, incoming) // base+delta replaces it, and the base was signed throughout
+	})
+
+	t.Run("base unsigned but carrying signatures of ours from before the zone was switched off", func(t *testing.T) {
+		zd := signed(t)
+		zd.SetRuntimeOption(OptInlineSigning, false)
+		unsignedPublish(t, zd) // its RRsets keep their old signatures; the snapshot is unmarked
+		if zd.publishedSnapshot().signed {
+			t.Fatal("precondition: a publish that could not sign marked its snapshot signed")
+		}
+		zd.SetRuntimeOption(OptInlineSigning, true)
+		// The delta adds an address to an RRset that holds an old signature:
+		// the full pass alone would keep it as current.
+		zd.IncomingSerial, zd.CurrentSerial = zd.publishedSnapshot().Serial, zd.publishedSnapshot().Serial
+		from := zd.IncomingSerial
+		incoming := newTransferScratchZone(zd)
+		delta := ixDeltaStream(t, from, from+1, nil, []dns.RR{ixA(t, www, "10.0.0.5")})
+		if err := zd.applyIxfrToScratch(&incoming, delta); err != nil {
+			t.Fatalf("applyIxfrToScratch refused the delta: %v", err)
+		}
+		zd.mu.Lock()
+		err := zd.applyRefreshReplacementLocked(&incoming, nil, false, false)
+		zd.mu.Unlock()
+		if err != nil {
+			t.Fatalf("applyRefreshReplacementLocked: %v", err)
+		}
+		assertPublishedAddresses(t, zd, www, wantAddrs)
 		assertEveryPublishedRRsetVerifies(t, zd)
 	})
 }

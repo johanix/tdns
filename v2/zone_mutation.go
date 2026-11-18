@@ -881,12 +881,12 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 
 	snap := zd.buildSnapshotLocked(serial, data, zd.wsSignalSynth)
 	snap.prepareDenialIndex()
-	zd.snapshot.Store(snap)
 	// Signed throughout if this publish could sign and either ran the full pass
 	// or extended a snapshot that already was (an incremental change signs what
-	// it stages; the scoped pass of an IXFR refresh is only taken on one that
-	// is). A publish that could not sign leaves the zone's content unsigned.
-	zd.snapshotSigned = sm != nil && (fullPass || zd.snapshotSigned)
+	// it stages). A publish that could not sign leaves the content unsigned.
+	// Set before the store: the snapshot carries it from then on.
+	snap.signed = sm != nil && (fullPass || (oldSnap != nil && oldSnap.signed))
+	zd.snapshot.Store(snap)
 
 	zd.workingSet = nil
 	zd.wsFromReplacement = false
@@ -1378,34 +1378,54 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// carries are not ours. A zone that signs its own content must sign it
 	// before it is published, not in a pass afterwards.
 	//
-	// Scoped, not wholesale, when the replacement is an applied IXFR delta:
-	// materializeForIxfr deep-copied exactly the owners the delta reached and
-	// SHARES the rest with the published snapshot, and a full pass would stage
-	// -- and therefore cloneOwner -- every owner it walked, re-materialising the
+	// Which owners to sign: what each pass may assume (johanix/tdns#981).
+	//
+	// The one fact a pass needs is whether the owners it does NOT sign carry
+	// our signatures. For the scoped pass of an IXFR refresh those owners are
+	// shared with the BASE of the delta: the snapshot applyIxfrToScratch read
+	// when it built the delta. Whether that snapshot is signed throughout was
+	// taken with it (zoneSnapshot.signed, immutable, so no lock is needed to
+	// read the pair) and travels here as new_zd.baseSigned. The snapshot served
+	// NOW is not asked about: a publish between the capture and this adoption
+	// (a full pass, SignZone, the resigner) is replaced by base+delta, and what
+	// has to be signed is that content, whatever was served in between. For the
+	// same reason the role the zone had when the refresh began does not enter:
+	// a zone switched off and on again with no publish between still has its
+	// signed base; one a callback made a signer (SetRuntimeOption on this zone,
+	// before this adoption) has an unsigned base.
+	//
+	//   role now      base signed   pass                                      signed throughout after
+	//   not signing   any           none: the publish cannot sign             no
+	//   signing       yes           scoped: the touched owners, forced; the   yes
+	//                               rest keep the base's signatures
+	//   signing       no            full, unforced, over every owner, then    yes
+	//                               the touched owners again, forced (an
+	//                               unmarked base may hold signatures of ours
+	//                               from before the zone was switched off,
+	//                               over contents a delta changed)
+	//   (a whole zone, AXFR or file)  full, unforced                           yes
+	//   (an incremental change)       signs what it stages                    only if it extends a signed snapshot
+	//
+	// "Signed throughout after" is what publishWorkingSetLocked records in the
+	// snapshot it installs: the publish could sign (resolved signing material),
+	// and ran the full pass or extended a snapshot that was signed. A publish
+	// that cannot sign, or any snapshot nobody has marked, counts as not signed;
+	// that is the safe direction, and costs one full pass. SignZone, which
+	// signs the whole working set itself and publishes without the full-pass
+	// flag, marks nothing: the first delta after the pass that follows a policy
+	// bind takes the full pass once, and that publish marks the snapshot.
+	//
+	// Scoped, not wholesale, when the replacement is an applied IXFR delta on a
+	// signed base: materializeForIxfr deep-copied exactly the owners the delta
+	// reached and SHARES the rest with the base, and a full pass would stage --
+	// and therefore cloneOwner -- every owner it walked, re-materialising the
 	// whole zone for a two-record change. See wsSignOwners.
 	switch {
 	case !zd.signsItsOwnContent():
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
-	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil &&
-		new_zd.signsAtStart && zd.snapshotSigned:
-		// Only when the zone signed its own content when the refresh began,
-		// which is when the delta's base was taken, and that base is signed
-		// throughout: the owners the delta did not touch keep the signatures
-		// they have. A zone that became a signer since, by a callback's
-		// SetRuntimeOption on this zone, has none; and one whose served
-		// snapshot was never signed (its full pass could not run, or was
-		// refused, and it kept or published unsigned content) has them on no
-		// owner. Both take the full pass below.
+	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil && new_zd.baseSigned:
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, new_zd.ixfrTouched
 	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil:
-		// A delta, on a zone that did not sign when the refresh began or whose
-		// snapshot is not signed throughout: the full pass signs what is
-		// unsigned. But the delta was applied onto the snapshot as it was, and
-		// a zone that signed once and was switched off keeps its old
-		// signatures there, so an RRset the delta changed still carries one
-		// over its previous contents, which the full pass (not forced) would
-		// take for current. The touched owners are signed again by force as
-		// well; see signStagedScopeLocked.
 		zd.wsNeedsFullSign, zd.wsSignOwners = true, new_zd.ixfrTouched
 	default:
 		zd.wsNeedsFullSign, zd.wsSignOwners = true, nil

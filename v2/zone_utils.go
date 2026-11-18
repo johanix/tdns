@@ -664,7 +664,6 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 // Anything added to ZoneTransferIn's reads of zd belongs in this function.
 func newTransferScratchZone(zd *ZoneData) ZoneData {
 	srcs, tier := zd.EffectiveTransferSrcWithSource()
-	opts, signs := zd.optionsForIncoming()
 	return ZoneData{
 		ZoneName:        zd.ZoneName,
 		ZoneType:        zd.ZoneType,
@@ -674,8 +673,7 @@ func newTransferScratchZone(zd *ZoneData) ZoneData {
 		Logger:          zd.Logger,
 		Verbose:         zd.Verbose,
 		Debug:           zd.Debug,
-		Options:         opts,
-		signsAtStart:    signs,
+		Options:         zd.optionsForIncoming(),
 		TransferSrc:     srcs,
 		TransferSrcTier: tier,
 		Ready:           true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
@@ -786,7 +784,6 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	prevStatus := zd.GetStatus()
 	zd.SetStatus(ZoneStatusLoading)
 
-	opts, signs := zd.optionsForIncoming()
 	new_zd := ZoneData{
 		ZoneName:       zd.ZoneName,
 		ZoneStore:      zd.ZoneStore,
@@ -796,8 +793,7 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
 		Debug:          zd.Debug,
-		Options:        opts,
-		signsAtStart:   signs,
+		Options:        zd.optionsForIncoming(),
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 

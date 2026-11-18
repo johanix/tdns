@@ -146,17 +146,15 @@ func (zd *ZoneData) optionsMap() map[ZoneOption]bool {
 }
 
 // optionsForIncoming is what the incoming zone of a refresh is built with: a
-// copy of the zone's options, for it to own and for the callbacks to write, and
-// whether the zone signs its own content by them (signsFromOptions), both from
-// one look at the zone's options. The copy is not nil: a zone with no options
-// gives an empty map, so that a callback may always write it.
-func (zd *ZoneData) optionsForIncoming() (own map[ZoneOption]bool, signs bool) {
-	served := zd.optionsMap()
-	own = maps.Clone(served)
+// copy of the zone's options, for it to own and for the callbacks to write. The
+// copy is not nil: a zone with no options gives an empty map, so that a
+// callback may always write it.
+func (zd *ZoneData) optionsForIncoming() map[ZoneOption]bool {
+	own := maps.Clone(zd.optionsMap())
 	if own == nil {
 		own = map[ZoneOption]bool{}
 	}
-	return own, signsFromOptions(served)
+	return own
 }
 
 // withRuntimeOptionsLocked is opts with the zone's run-time options laid over

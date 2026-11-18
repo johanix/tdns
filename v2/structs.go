@@ -223,7 +223,7 @@ type ZoneData struct {
 	Options           map[ZoneOption]bool
 	optionsMu         sync.RWMutex        // see Option, in zone_option_runtime.go: orders the replacement of Options against a reader holding no lock
 	runtimeOptions    map[ZoneOption]bool // set by the daemon itself, kept across a config update (SetRuntimeOption); guarded by mu
-	signsAtStart      bool                // an incoming zone's only: the served zone signed its own content as the refresh began (signsFromOptions); read by applyRefreshReplacementLocked
+	baseSigned        bool                // an incoming zone's only: the snapshot its IXFR delta was built on was signed throughout (zoneSnapshot.signed); read by applyRefreshReplacementLocked
 	// SuppressedOptions records the origination options that were configured
 	// for this zone but stripped by normalizeOptionsForRole (a tdns-auth
 	// secondary may not originate content). Options above is the EFFECTIVE
@@ -294,15 +294,6 @@ type ZoneData struct {
 
 	// Zone snapshot publish path (Project B).
 	snapshot atomic.Pointer[zoneSnapshot]
-	// snapshotSigned: every owner of the published snapshot carries signatures
-	// of ours. Set by the publish that installs a snapshot, which signed the
-	// whole zone (a wholesale replacement, whose full pass covers it) or
-	// extended one that already was; false for a snapshot published unsigned
-	// (a signing zone that could not sign yet) and for one nobody has marked.
-	// The scoped signing pass of an IXFR refresh signs the owners the delta
-	// touched and shares the rest with this snapshot, so it is taken only when
-	// this is set; see applyRefreshReplacementLocked. Guarded by mu.
-	snapshotSigned bool
 	// nextResign caches when this zone's earliest-expiring signature crosses
 	// the renewal threshold, so the resigner can sleep until then instead of
 	// walking every zone every minute to find out that nothing is due. Written

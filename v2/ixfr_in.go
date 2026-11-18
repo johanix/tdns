@@ -758,6 +758,10 @@ func (zd *ZoneData) applyIxfrToScratch(newZd *ZoneData, rrs []dns.RR) error {
 	}
 
 	newZd.Data = data
+	// Whether the snapshot this delta was built on is signed throughout, taken
+	// with that snapshot: what the adoption may assume about the owners the
+	// delta did not touch, which it shares with it.
+	newZd.baseSigned = snap.signed
 	newZd.IncomingSerial = target
 	newZd.CurrentSerial = target
 	// This replacement is a delta applied to what we already served, not a
