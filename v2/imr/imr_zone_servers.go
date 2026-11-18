@@ -73,7 +73,7 @@ func (imr *Imr) lookupServerAddrs(ctx context.Context, srv *cache.AuthServer, ns
 		wg.Add(1)
 		go func(ctx context.Context, atype uint16) {
 			defer wg.Done()
-			resp, err := imr.ImrQuery(ctx, nsname, atype, dns.ClassINET, nil)
+			resp, err := imr.Query(ctx, nsname, atype, dns.ClassINET, nil)
 			if err != nil || resp == nil || resp.RRset == nil {
 				return
 			}
@@ -181,7 +181,7 @@ const nsAddrLookupFallbackBudget = 8 * time.Second
 //
 // The lookup runs on a detached context, so a caller that stops waiting leaves
 // it running, and its result is stored all the same. Its A and AAAA queries go
-// out together, and each ImrQuery is bounded by one query budget; the
+// out together, and each Query is bounded by one query budget; the
 // context's deadline of twice the budget is only the outer cap.
 //
 // A lookup can come to need its own name: resolving ns1.example. may start at

@@ -16,7 +16,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// A denial is the answer "no such data", and ImrQuery gives it the same way on
+// A denial is the answer "no such data", and Query gives it the same way on
 // the first ask and on every later one within the negative TTL (#698). The
 // cache-hit branch used to hand back the SOA that proves the denial as the
 // answer RRset, so a caller testing for records saw none on the first ask and
@@ -114,9 +114,9 @@ func TestImrQueryAnswersADenialTheSameWayTwice(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			var resps [2]*ImrResponse
+			var resps [2]*Response
 			for i := range resps {
-				resp, err := imr.ImrQuery(ctx, tc.qname, dns.TypeTXT, dns.ClassINET, nil)
+				resp, err := imr.Query(ctx, tc.qname, dns.TypeTXT, dns.ClassINET, nil)
 				if err != nil || resp == nil || resp.Error {
 					t.Fatalf("ask %d: err=%v resp=%+v", i+1, err, resp)
 				}
@@ -161,7 +161,7 @@ func TestAFreshDenialWithTTLZeroKeepsItsVerdict(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	resp, err := imr.ImrQuery(ctx, qname, dns.TypeTXT, dns.ClassINET, nil)
+	resp, err := imr.Query(ctx, qname, dns.TypeTXT, dns.ClassINET, nil)
 	if err != nil || resp == nil || resp.Error {
 		t.Fatalf("err=%v resp=%+v", err, resp)
 	}
@@ -194,7 +194,7 @@ func TestCachedDenialKeepsItsVerdict(t *testing.T) {
 			Transport:  core.TransportDo53,
 		})
 	}
-	check := func(t *testing.T, resp *ImrResponse) {
+	check := func(t *testing.T, resp *Response) {
 		t.Helper()
 		if resp.RRset != nil {
 			t.Errorf("RRset %v, want none for a denial", resp.RRset.RRs)
@@ -210,7 +210,7 @@ func TestCachedDenialKeepsItsVerdict(t *testing.T) {
 	t.Run("ImrQuery", func(t *testing.T) {
 		imr := newTestImr(t)
 		seed(imr)
-		resp, err := imr.ImrQuery(context.Background(), qname, core.TypeDSYNC, dns.ClassINET, nil)
+		resp, err := imr.Query(context.Background(), qname, core.TypeDSYNC, dns.ClassINET, nil)
 		if err != nil {
 			t.Fatalf("ImrQuery: %v", err)
 		}
@@ -222,8 +222,8 @@ func TestCachedDenialKeepsItsVerdict(t *testing.T) {
 	t.Run("request loop", func(t *testing.T) {
 		imr := newTestImr(t)
 		seed(imr)
-		ch := make(chan ImrResponse, 1)
-		imr.HandleRecursorRequest(context.Background(), ImrRequest{
+		ch := make(chan Response, 1)
+		imr.HandleRecursorRequest(context.Background(), Request{
 			Qname: qname, Qclass: dns.ClassINET, Qtype: core.TypeDSYNC, ResponseCh: ch,
 		})
 		select {

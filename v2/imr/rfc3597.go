@@ -20,9 +20,9 @@ func (imr *Imr) ParentZone(z string) (string, error) {
 	} else if len(labels) > 1 {
 		upone := dns.Fqdn(strings.Join(labels[1:], "."))
 
-		// Query for SOA at the potential parent zone name using ImrQuery
+		// Query for SOA at the potential parent zone name using Query
 		ctx := context.Background()
-		resp, err := imr.ImrQuery(ctx, upone, dns.TypeSOA, dns.ClassINET, nil)
+		resp, err := imr.Query(ctx, upone, dns.TypeSOA, dns.ClassINET, nil)
 		if err != nil {
 			return "", err
 		}

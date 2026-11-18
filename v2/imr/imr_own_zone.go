@@ -34,7 +34,7 @@ import (
 // rest of the zone validates against it, locally, as data validates against
 // any validated DNSKEY RRset. Nobody above the zone is asked to vouch for it.
 //
-// The resolver reaches the zones through OwnZones (ImrOptions.OwnZones). The
+// The resolver reaches the zones through OwnZones (Options.OwnZones). The
 // daemon's is hostedZones, over the Zones map; an Imr without one answers
 // nothing locally.
 

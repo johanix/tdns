@@ -112,13 +112,13 @@ func (imr *Imr) cachedLink(qname string, privacy edns0.PrivacyLevel) (*cache.Cac
 	return link, target, true
 }
 
-// chainRecorderKey carries, on the context of one ImrQuery, the recorder of
+// chainRecorderKey carries, on the context of one Query, the recorder of
 // the CNAME chain the lookup follows from its question (withChainRecorder).
 type chainRecorderKey struct{}
 
 // chainRecorder is the CNAME chain one lookup followed from its question: the
 // name the chain has reached, and the earliest expiration among the links
-// that led there. The response carries it (ImrResponse.ChainExpiration), so a
+// that led there. The response carries it (Response.ChainExpiration), so a
 // caller that keeps an answer reached through the chain need not read the
 // chain from the cache again, where it may since have changed.
 type chainRecorder struct {
@@ -128,7 +128,7 @@ type chainRecorder struct {
 }
 
 // withChainRecorder returns ctx with a new recorder for the chain followed
-// from qname. A lookup nested in this one (an ImrQuery of its own) gets its
+// from qname. A lookup nested in this one (an Query of its own) gets its
 // own recorder.
 func withChainRecorder(ctx context.Context, qname string) (context.Context, *chainRecorder) {
 	rec := &chainRecorder{last: core.CanonicalizeName(qname)}

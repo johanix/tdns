@@ -114,7 +114,7 @@ func TestImrQueryForwardsWithoutARootServerMap(t *testing.T) {
 	imr := newForwardTestImr(t, rootForward(addr, port))
 	requireNoRootServerMap(t, imr)
 
-	resp, err := imr.ImrQuery(context.Background(), "www.fwd.example.", dns.TypeA, dns.ClassINET, nil)
+	resp, err := imr.Query(context.Background(), "www.fwd.example.", dns.TypeA, dns.ClassINET, nil)
 	if err != nil {
 		t.Fatalf("ImrQuery: %v", err)
 	}

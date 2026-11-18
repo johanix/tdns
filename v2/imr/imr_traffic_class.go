@@ -65,11 +65,11 @@ func trafficClass(ctx context.Context, privacy edns0.PrivacyLevel) cache.Traffic
 	return cache.ClassNone
 }
 
-// imrQueryAsClientKey marks a context whose ImrQuery asks its question as a DNS
+// imrQueryAsClientKey marks a context whose Query asks its question as a DNS
 // client does (AsClientQuery).
 type imrQueryAsClientKey struct{}
 
-// AsClientQuery marks ctx for ImrQuery to ask its question as a DNS client's
+// AsClientQuery marks ctx for Query to ask its question as a DNS client's
 // query (withClientQuery) rather than as the resolver's own lookup: a DS or
 // DNSKEY question then follows a CNAME at the query name (followsCNAME), and
 // the answers are counted under the client classes. Lookups nested inside
@@ -84,9 +84,9 @@ func AsClientQuery(ctx context.Context) context.Context {
 	return context.WithValue(ctx, imrQueryAsClientKey{}, true)
 }
 
-// imrQueryContext is the context ImrQuery's lookups run on: the resolver's own
+// imrQueryContext is the context Query's lookups run on: the resolver's own
 // lookup, unless the caller marked ctx with AsClientQuery. The mark is taken
-// off, so that an ImrQuery nested inside is the resolver's own.
+// off, so that an Query nested inside is the resolver's own.
 func imrQueryContext(ctx context.Context) context.Context {
 	if asClient, _ := ctx.Value(imrQueryAsClientKey{}).(bool); asClient {
 		return withClientQuery(context.WithValue(ctx, imrQueryAsClientKey{}, false))

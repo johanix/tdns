@@ -88,6 +88,17 @@ func (imr *Imr) TransportSignalCached(owner string) bool {
 	return imr.core().TransportSignalCached(owner)
 }
 
+// ImrQuery and ImrQueryFresh are the module's Query and QueryFresh, under the
+// names they have here.
+
+func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
+	return imr.Imr.Query(ctx, qname, qtype, qclass, respch)
+}
+
+func (imr *Imr) ImrQueryFresh(ctx context.Context, qname string, qtype uint16, qclass uint16) (*ImrResponse, error) {
+	return imr.Imr.QueryFresh(ctx, qname, qtype, qclass)
+}
+
 // The resolver's names, as they have always been in this package.
 
 type ImrEngineConf = imrcore.Config
@@ -113,10 +124,10 @@ type (
 	ImrForwardZoneStatus     = imrcore.ImrForwardZoneStatus
 	ImrLoggingConf           = imrcore.ImrLoggingConf
 	ImrOption                = imrcore.ImrOption
-	ImrOptions               = imrcore.ImrOptions
+	ImrOptions               = imrcore.Options
 	ImrOutboundQueryHookFunc = imrcore.ImrOutboundQueryHookFunc
-	ImrRequest               = imrcore.ImrRequest
-	ImrResponse              = imrcore.ImrResponse
+	ImrRequest               = imrcore.Request
+	ImrResponse              = imrcore.Response
 	ImrResponseHookFunc      = imrcore.ImrResponseHookFunc
 	ImrStatus                = imrcore.ImrStatus
 	ImrStubConf              = imrcore.ImrStubConf

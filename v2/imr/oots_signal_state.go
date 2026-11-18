@@ -299,10 +299,10 @@ func (tr *aliasHopTracker) done(target string, now time.Time) []string {
 	return owners
 }
 
-// signalAliasHopLookupHook, when set, stands in for the ImrQuery of an alias
+// signalAliasHopLookupHook, when set, stands in for the Query of an alias
 // hop: tests set it, so that no lookup leaves the process. It is to leave the
 // answer in the cache, as a lookup does.
-var signalAliasHopLookupHook func(imr *Imr, target string) (*ImrResponse, error)
+var signalAliasHopLookupHook func(imr *Imr, target string) (*Response, error)
 
 // lookupSignalAliasHop looks up the SVCB RRset at target, a hop on the alias
 // path of the signal at owner, off the query path. One lookup of a target
@@ -313,10 +313,10 @@ func (imr *Imr) lookupSignalAliasHop(owner, target string) {
 	if imr.TransportSignalDiscovery == nil || !imr.signalAliasHops.join(target, owner, time.Now()) {
 		return
 	}
-	lookup := func(imr *Imr, target string) (*ImrResponse, error) {
+	lookup := func(imr *Imr, target string) (*Response, error) {
 		ctx, cancel := detachedContext(5 * time.Second)
 		defer cancel()
-		return imr.ImrQuery(ctx, target, dns.TypeSVCB, dns.ClassINET, nil)
+		return imr.Query(ctx, target, dns.TypeSVCB, dns.ClassINET, nil)
 	}
 	if signalAliasHopLookupHook != nil {
 		lookup = signalAliasHopLookupHook
@@ -343,7 +343,7 @@ func (imr *Imr) lookupSignalAliasHop(owner, target string) {
 // After a denial or a failure they are not: the cache has nothing new to lead
 // them to, and the next query that brings an owner's RRset follows it again
 // once signalAliasHopRetry has passed.
-func signalAliasHopFound(resp *ImrResponse, err error) bool {
+func signalAliasHopFound(resp *Response, err error) bool {
 	return err == nil && resp != nil && resp.RRset != nil && resp.RRset.RRtype == dns.TypeSVCB && len(resp.RRset.RRs) > 0
 }
 

@@ -3,12 +3,12 @@
  */
 package imr
 
-// ImrOptions is what NewImr takes besides the imrengine: configuration. They
+// Options is what NewImr takes besides the imrengine: configuration. They
 // are the few things a resolver reads from outside it, so that an application
 // can build one without the daemon's Config. The zero value is a resolver with no large
 // DNSSEC algorithms, the default DNSKEY transport, nowhere to report server
 // errors, and no own zones.
-type ImrOptions struct {
+type Options struct {
 	// LargeAlgorithms is the set of DNSSEC algorithms whose DNSKEYs and
 	// signatures are too large for a UDP response. RefreshDnssecPolicy replaces
 	// it on a live resolver.

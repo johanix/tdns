@@ -40,8 +40,8 @@ type DsyncResult struct {
 	Bogus bool
 }
 
-// extractDsyncFromResponse extracts DSYNC records and parent zone name from ImrQuery response
-func (imr *Imr) extractDsyncFromResponse(qname string, resp *ImrResponse, verbose bool) ([]*core.DSYNC, string, error) {
+// extractDsyncFromResponse extracts DSYNC records and parent zone name from Query response
+func (imr *Imr) extractDsyncFromResponse(qname string, resp *Response, verbose bool) ([]*core.DSYNC, string, error) {
 	var dsyncrrs []*core.DSYNC
 	var parent string
 
@@ -117,7 +117,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 	name := dsyncPerChildLookupName(prefix, parent_guess)
 
 	lgDns.Debug("looking up DSYNC", "name", name)
-	resp, err := imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
+	resp, err := imr.Query(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
 	if err != nil {
 		lgDns.Error("error during ImrQuery", "err", err)
 		return dr, err
@@ -147,7 +147,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 		}
 		name = dsyncPerChildLookupName(prefix, parent)
 		lgDns.Debug("looking up DSYNC", "name", name)
-		resp, err = imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
+		resp, err = imr.Query(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
 		if err != nil {
 			lgDns.Error("error during ImrQuery", "err", err)
 			return dr, err
@@ -169,7 +169,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 	name = DsyncOwnerName(parent)
 
 	lgDns.Debug("looking up DSYNC", "name", name)
-	resp, err = imr.ImrQuery(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
+	resp, err = imr.Query(ctx, name, core.TypeDSYNC, dns.ClassINET, nil)
 	if err != nil {
 		lgDns.Error("error during ImrQuery", "err", err)
 		return dr, err
@@ -234,7 +234,7 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 	// stdlib resolver, which would consult /etc/resolv.conf).
 	target := dns.Fqdn(dsync.Target)
 	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		resp, qerr := imr.ImrQuery(ctx, target, qtype, dns.ClassINET, nil)
+		resp, qerr := imr.Query(ctx, target, qtype, dns.ClassINET, nil)
 		if qerr != nil {
 			lgDns.Debug("IMR address lookup failed", "target", target, "qtype", dns.TypeToString[qtype], "err", qerr)
 			continue

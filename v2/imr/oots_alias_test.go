@@ -164,12 +164,12 @@ func TestOOTSAliasLookupFetchesHop(t *testing.T) {
 	fetched := make(chan string, 1)
 	release := make(chan struct{})
 	saved := signalAliasHopLookupHook
-	signalAliasHopLookupHook = func(imr *Imr, target string) (*ImrResponse, error) {
+	signalAliasHopLookupHook = func(imr *Imr, target string) (*Response, error) {
 		<-release
 		cacheSignal(imr, target, providerRecords(t), cache.ValidationStateSecure)
 		fetched <- target
 		rrset := imr.Cache.Get(target, dns.TypeSVCB).RRset
-		return &ImrResponse{RRset: rrset, ValidationState: cache.ValidationStateSecure}, nil
+		return &Response{RRset: rrset, ValidationState: cache.ValidationStateSecure}, nil
 	}
 	t.Cleanup(func() { signalAliasHopLookupHook = saved })
 
@@ -202,7 +202,7 @@ func TestOOTSAliasLookupLoopAndCap(t *testing.T) {
 	imr := newTestImr(t)
 	imr.Quiet = true
 	saved := signalAliasHopLookupHook
-	signalAliasHopLookupHook = func(*Imr, string) (*ImrResponse, error) {
+	signalAliasHopLookupHook = func(*Imr, string) (*Response, error) {
 		t.Error("a hop was looked up")
 		return nil, nil
 	}
@@ -254,11 +254,11 @@ func TestOOTSAliasDeniedHopNotRefollowed(t *testing.T) {
 	var calls atomic.Int32
 	first := make(chan struct{}, 1)
 	saved := signalAliasHopLookupHook
-	signalAliasHopLookupHook = func(*Imr, string) (*ImrResponse, error) {
+	signalAliasHopLookupHook = func(*Imr, string) (*Response, error) {
 		if calls.Add(1) == 1 {
 			first <- struct{}{}
 		}
-		return &ImrResponse{Denial: cache.ContextNXDOMAIN}, nil
+		return &Response{Denial: cache.ContextNXDOMAIN}, nil
 	}
 	t.Cleanup(func() { signalAliasHopLookupHook = saved })
 
@@ -313,11 +313,11 @@ func aliasHopRetryAt(t *testing.T, imr *Imr, target string) time.Time {
 // hookAliasHop stands in for the lookups of alias hops for one test: answer
 // fills the cache for the target and returns what the lookup would. It
 // returns the count of lookups made.
-func hookAliasHop(t *testing.T, answer func(imr *Imr, target string) (*ImrResponse, error)) *atomic.Int32 {
+func hookAliasHop(t *testing.T, answer func(imr *Imr, target string) (*Response, error)) *atomic.Int32 {
 	t.Helper()
 	var calls atomic.Int32
 	saved := signalAliasHopLookupHook
-	signalAliasHopLookupHook = func(imr *Imr, target string) (*ImrResponse, error) {
+	signalAliasHopLookupHook = func(imr *Imr, target string) (*Response, error) {
 		calls.Add(1)
 		return answer(imr, target)
 	}
@@ -355,10 +355,10 @@ func TestOOTSAliasSharedHopServesEveryOwner(t *testing.T) {
 	imr.Cache.ServerMap.Set(stateZone, map[string]*cache.AuthServer{cache.ServerKey(pathNS): s1, cache.ServerKey(ns2): s2})
 
 	release := make(chan struct{})
-	calls := hookAliasHop(t, func(imr *Imr, target string) (*ImrResponse, error) {
+	calls := hookAliasHop(t, func(imr *Imr, target string) (*Response, error) {
 		<-release
 		cacheSignal(imr, target, providerRecords(t), cache.ValidationStateSecure)
-		return &ImrResponse{RRset: imr.Cache.Get(target, dns.TypeSVCB).RRset, ValidationState: cache.ValidationStateSecure}, nil
+		return &Response{RRset: imr.Cache.Get(target, dns.TypeSVCB).RRset, ValidationState: cache.ValidationStateSecure}, nil
 	})
 	imr.applyTransportRRsetFromAnswer(pathOwner, &core.RRset{Name: pathOwner, RRtype: dns.TypeSVCB, RRs: copyRRs(alias1)},
 		cache.ValidationStateSecure)
@@ -395,7 +395,7 @@ func TestOOTSAliasHopThroughACNAME(t *testing.T) {
 			server := cache.NewAuthServer(pathNS)
 			imr.Cache.ServerMap.Set(stateZone, map[string]*cache.AuthServer{cache.ServerKey(pathNS): server})
 
-			calls := hookAliasHop(t, func(imr *Imr, target string) (*ImrResponse, error) {
+			calls := hookAliasHop(t, func(imr *Imr, target string) (*Response, error) {
 				link := mustRR(t, target+` 3600 IN CNAME `+elsewhere)
 				imr.Cache.Set(target, dns.TypeCNAME, &cache.CachedRRset{Name: target, RRtype: dns.TypeCNAME,
 					Context: cache.ContextAnswer, State: tc.link, Expiration: time.Now().Add(time.Hour),
@@ -405,7 +405,7 @@ func TestOOTSAliasHopThroughACNAME(t *testing.T) {
 					mustRR(t, elsewhere+` 3600 IN SVCB 1 . oots="doq:20"`),
 				}
 				cacheSignal(imr, elsewhere, recs, cache.ValidationStateSecure)
-				return &ImrResponse{RRset: imr.Cache.Get(elsewhere, dns.TypeSVCB).RRset, ValidationState: tc.link}, nil
+				return &Response{RRset: imr.Cache.Get(elsewhere, dns.TypeSVCB).RRset, ValidationState: tc.link}, nil
 			})
 			imr.applyTransportRRsetFromAnswer(pathOwner, &core.RRset{Name: pathOwner, RRtype: dns.TypeSVCB, RRs: copyRRs(alias)},
 				cache.ValidationStateSecure)
@@ -443,9 +443,9 @@ func TestOOTSAliasExpiredHopLookedUpAgain(t *testing.T) {
 	cacheSignal(imr, pathOwner, alias, cache.ValidationStateSecure)
 	server := cache.NewAuthServer(pathNS)
 	imr.Cache.ServerMap.Set(stateZone, map[string]*cache.AuthServer{cache.ServerKey(pathNS): server})
-	calls := hookAliasHop(t, func(imr *Imr, target string) (*ImrResponse, error) {
+	calls := hookAliasHop(t, func(imr *Imr, target string) (*Response, error) {
 		cacheSignal(imr, target, providerRecords(t), cache.ValidationStateSecure)
-		return &ImrResponse{RRset: imr.Cache.Get(target, dns.TypeSVCB).RRset, ValidationState: cache.ValidationStateSecure}, nil
+		return &Response{RRset: imr.Cache.Get(target, dns.TypeSVCB).RRset, ValidationState: cache.ValidationStateSecure}, nil
 	})
 	apply := func() {
 		imr.applyTransportRRsetFromAnswer(pathOwner, &core.RRset{Name: pathOwner, RRtype: dns.TypeSVCB, RRs: copyRRs(alias)},

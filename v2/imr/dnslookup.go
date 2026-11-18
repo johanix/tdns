@@ -1672,7 +1672,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// Forwarding: when qname falls under a configured forward zone, hand the
 	// query to that zone's upstream resolver(s) instead of iterating. Placed
 	// after the cache check so cached answers still short-circuit, and inside
-	// this entry point so every internal consumer (responder, ImrQuery, CNAME
+	// this entry point so every internal consumer (responder, Query, CNAME
 	// chase, NS-address resolution, the validator's fetcher) forwards
 	// consistently. The serverMap argument is deliberately ignored here: a
 	// forward zone outranks whatever zone cut the caller had found. The callers

@@ -27,7 +27,7 @@ import (
 //
 // The forward decision is taken inside IterativeDNSQueryWithLoopDetection,
 // after the cache check, so every internal consumer of the iterative path —
-// the responder, ImrQuery, the CNAME chase, NS-address resolution and the
+// the responder, Query, the CNAME chase, NS-address resolution and the
 // validator's RRsetFetcher — is forwarded consistently, and cached answers
 // still short-circuit.
 //
