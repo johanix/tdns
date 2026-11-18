@@ -147,7 +147,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		// refresh DID fail, the ticker must retry, and RefreshError must be
 		// recorded.
 		if zd.publishedSnapshot() != nil {
-			if cerr := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); cerr != nil {
+			if cerr := completeFirstZonePolicyAndLoadIn(ctx, zd, conf, zd.DnssecPolicyName, zr.DnssecPolicies); cerr != nil {
 				lgEngine.Error("policy sync after adopting a persisted copy failed",
 					"zone", zone, "error", cerr)
 				zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", cerr)

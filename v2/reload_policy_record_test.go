@@ -944,3 +944,79 @@ func TestACommandApplyCannotLandBetweenThePolicySyncsReadAndItsRefusal(t *testin
 			n, validityOf(p), override)
 	}
 }
+
+// The first load that adopts a persisted copy meets the reload's policies too.
+// A secondary that signs, whose primary is down at its first bind, serves the
+// copy it persisted, and initialLoadZone binds its policy there, on the failed
+// refresh's way out. That is the same first load as any other: the refresher a
+// reload queued carries the policies the config defines, the snapshot may not
+// hold them yet, and a zone quarantined for a policy that "does not exist" is
+// the wrong answer for a config that names a valid one.
+func TestAFirstLoadThatAdoptsAPersistedCopyBindsAPolicyThatOnlyTheReloadDefines(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	conf, dir := persistentConf(t, kdb)
+	kdb = Conf.Internal.KeyDB // the one the signing paths of the daemon-wide config use
+	conf.Internal.KeyDB = kdb
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 1)
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	if err := os.WriteFile(filepath.Join(dir, "example.zone"), []byte(s2Zone), 0644); err != nil {
+		t.Fatalf("write zone file: %v", err)
+	}
+	const month = 30 * 86400
+	base := named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "base")
+	withLivePolicies(t, map[string]DnssecPolicy{}) // the running config has no policies
+	t.Cleanup(func() {
+		if z, ok := Zones.Get("example."); ok {
+			z.stopPublisher()
+		}
+		Zones.Remove("example.")
+	})
+	runRefreshEngine(t, conf)
+
+	conf.Internal.RefreshZoneCh <- ZoneRefresher{
+		Name:           "example.",
+		ZoneType:       Secondary,
+		ZoneStore:      MapZone,
+		Primaries:      []PeerConf{{Addr: "127.0.0.1:1"}}, // nothing listening
+		ConfigUpdate:   true,
+		Options:        map[ZoneOption]bool{OptApiManagedZone: true, OptInlineSigning: true},
+		DnssecPolicy:   "base",
+		DnssecPolicies: map[string]DnssecPolicy{"base": base},
+	}
+
+	// The copy is adopted and the policy bound inside the refresh; the engine
+	// records the failed transfer after that, last.
+	deadline := time.Now().Add(10 * time.Second)
+	var zd *ZoneData
+	for time.Now().Before(deadline) {
+		if z, ok := Zones.Get("example."); ok && z.HasError(RefreshError) {
+			zd = z
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if zd == nil {
+		t.Fatal("the zone never recorded the failed transfer")
+	}
+	if !zd.signsItsOwnContent() {
+		t.Fatal("the zone does not sign; the test has lost its point")
+	}
+	if zd.publishedSnapshot() == nil {
+		t.Fatal("the persisted copy was not adopted; the test has lost its point")
+	}
+	if zd.HasError(DnssecError) {
+		zd.mu.Lock()
+		msg := zd.Errors[DnssecError].Msg
+		zd.mu.Unlock()
+		t.Errorf("the zone is quarantined after adopting its persisted copy: %s", msg)
+	}
+	if n, p, _ := policyState(zd); n != "base" || p == nil || p.KSKAlgorithm != dns.ED25519 {
+		t.Errorf("after the first load: %q bound to KSK algorithm %d; want %q bound to %d", n, kskAlgOf(p), "base", dns.ED25519)
+	}
+	if len(keytagsOf(servedRRset(t, zd, "example.", dns.TypeSOA).RRSIGs)) == 0 {
+		t.Error("the SOA is unsigned after the first load")
+	}
+	if name, _, ok, err := GetZoneAppliedPolicy(kdb, "example."); err != nil || !ok || name != "base" {
+		t.Errorf("after the first load the last-applied record is %q %v %v, want base", name, ok, err)
+	}
+}
