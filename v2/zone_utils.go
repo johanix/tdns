@@ -14,6 +14,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -265,6 +266,92 @@ func transferTimeout() time.Duration {
 	return defaultTransferTimeout
 }
 
+// A lost SOA probe is tried once more before the refresh gives up on it (#1010).
+//
+// Several zones refreshing at once from one listener -- a restart, a NOTIFY
+// burst, a key roll -- can send it more datagrams in a moment than its UDP
+// receive buffer holds, and the ones that do not fit are dropped without a word.
+// The prober sees a probe that is never answered; until now that failed the
+// refresh and the zone was served stale until the next one, minutes away. The
+// buffer has drained long before a second probe a few seconds later, so the
+// second probe is the cheap cure.
+//
+// The wait before the retry is short and jittered, and not the zone's SOA RETRY:
+// that is how long a failed REFRESH waits for its next try, and it still
+// applies to a probe that stays lost. The jitter keeps the probes that were lost
+// together from being sent together again.
+//
+// The price is paid only by a refresh that was going to fail anyway: a UDP
+// upstream that stays silent now takes two probe budgets and the wait to fail,
+// where it took one. That is the same worker (or, at first load, the engine
+// goroutine) for longer, by one probe budget plus the wait, per such zone.
+//
+// The policy is held behind an atomic pointer so that a test can change it while
+// refresh workers of an earlier test are still winding down.
+type probeRetryPolicy struct {
+	retries int           // extra passes over the upstreams that did not answer
+	delay   time.Duration // minimum wait before each; up to twice that is used
+}
+
+var probeRetry atomic.Pointer[probeRetryPolicy]
+
+func currentProbeRetry() probeRetryPolicy {
+	if p := probeRetry.Load(); p != nil {
+		return *p
+	}
+	return probeRetryPolicy{retries: 1, delay: time.Second}
+}
+
+// wait is the delay before a retry pass: base plus up to the same again, drawn
+// from the engine's jitter source.
+func (p probeRetryPolicy) wait() time.Duration {
+	if p.delay <= 0 {
+		return 0
+	}
+	refreshJitterMu.Lock()
+	defer refreshJitterMu.Unlock()
+	return p.delay + time.Duration(refreshJitter.Int63n(int64(p.delay)))
+}
+
+// soaProbeUnanswered reports whether a failed SOA probe is one that a second
+// try can cure: a UDP datagram that got no answer inside the probe's budget.
+//
+// Nothing else qualifies. A refused connection, a TSIG failure or a TLS failure
+// gives the same answer again, and a stream that timed out is not a lost
+// datagram: TCP retransmits for itself, so a second attempt would only make a
+// dead peer cost the refresh a second budget for nothing.
+//
+// budgetSpent is whether the probe's own deadline had passed when the exchange
+// returned. It is needed because exchangeCancellable closes the connection when
+// that deadline fires, so the read usually fails with "use of closed network
+// connection" rather than "i/o timeout" -- which says nothing by itself about
+// whether the budget ran out or the socket was shut for another reason.
+func soaProbeUnanswered(network string, err error, budgetSpent bool) bool {
+	if network != "" && !strings.HasPrefix(network, "udp") {
+		return false
+	}
+	switch refreshErrorKind(err) {
+	case "timeout":
+		return true
+	case "closed":
+		return budgetSpent
+	}
+	return false
+}
+
+// setUpstreamFailure records f, replacing an earlier entry for the same
+// upstream: a probe that was retried is ONE failure of that upstream, the later
+// attempt's, and not a line per attempt.
+func setUpstreamFailure(failures []upstreamFailure, f upstreamFailure) []upstreamFailure {
+	for i := range failures {
+		if failures[i].addr == f.addr {
+			failures[i] = f
+			return failures
+		}
+	}
+	return append(failures, f)
+}
+
 // Return shouldTransfer, new upstream serial, error
 //
 // The SOA probe iterates zd.Upstreams, advancing to the next address whenever
@@ -275,6 +362,11 @@ func transferTimeout() time.Duration {
 // A usable NOERROR+SOA from any primary is honoured (transfer decided on
 // serial). If every primary answered but none gave a usable SOA, we back off
 // quietly (no transfer, no error); only all-unreachable is a hard error.
+//
+// A pass that ends with no usable SOA, and with some upstream whose probe got no
+// answer over UDP, is followed by a second pass over just those upstreams (see
+// probeRetryPolicy). It comes after the whole first pass, so a quiet upstream
+// never holds up a healthy sibling.
 func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32, error) {
 	if zd == nil {
 		panic("DoTransfer: zd == nil")
@@ -373,125 +465,163 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	// Each upstream's own error, for the one ERROR the refresh logs. lastErr
 	// keeps only the last one.
 	var failures []upstreamFailure
+	// The upstreams to probe in the pass that is running: all of them in the
+	// first, and in a retry pass only those whose probe got no answer.
+	pending := make([]int, len(plans))
 	for i := range plans {
-		p := &plans[i]
-		up, upstream := p.up, p.upstream
+		pending[i] = i
+	}
+	retry := currentProbeRetry()
+	for pass := 0; ; pass++ {
+		// Upstreams whose probe in this pass got no answer, in a way a second try
+		// can cure (soaProbeUnanswered).
+		var unanswered []int
+		for _, i := range pending {
+			p := &plans[i]
+			up, upstream := p.up, p.upstream
 
-		if p.err != nil {
-			lg.Error("DoTransfer: peer config setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", p.err)
-			lastErr = fmt.Errorf("%s: %w", upstream, p.err)
-			failures = append(failures, newUpstreamFailure(upstream, p.err))
-			continue
-		}
-		// Nobody is waiting for this result any more; stop walking upstreams.
-		if cerr := ctx.Err(); cerr != nil {
-			return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
-		}
-
-		// Fresh message per attempt: TSIG signing adds an RR with a per-attempt
-		// timestamp and this upstream's key. Stamped here, not during the
-		// snapshot above: the probes are sequential and each can block until it
-		// times out, so a timestamp taken in phase 1 could be outside the fudge
-		// window by the time a later message is sent, and the peer would answer
-		// BADTIME.
-		m := new(dns.Msg)
-		m.SetQuestion(zd.ZoneName, dns.TypeSOA)
-		if p.keyName != "" {
-			StampTsigForPeer(m, p.keyName, p.tsigAlgo)
-		}
-		c := p.client
-		// Bind the source here, in phase 2, and not in the snapshot above: for
-		// a hostname upstream the pick has to resolve it, and phase 1 does no
-		// network I/O by design -- it holds confMu, and a resolver timeout
-		// there would stall every config reload behind it.
-		if src := bindClientSrc(ctx, c, upstream, probeSrcs); src != nil {
-			lg.Debug("DoTransfer: SOA probe binding source address",
-				"zone", zd.ZoneName, "upstream", upstream, "src", src.String(),
-				"net", c.Net, "from", probeSrcTier)
-		} else if len(probeSrcs) > 0 {
-			// Not an error -- an operator naming only one family must not
-			// thereby break every upstream in the other -- but the probe then
-			// leaves from whatever the route picks, which is exactly what
-			// transfer-src is configured to prevent. Say so rather than
-			// letting it be invisible until an ACL refuses.
-			lg.Warn("DoTransfer: no configured transfer-src matches this upstream's family; probing unbound",
-				"zone", zd.ZoneName, "upstream", upstream, "configured", probeSrcs, "from", probeSrcTier)
-		}
-		// Bound THIS attempt, not the walk. miekg's default is 2s per exchange,
-		// which is tight for a slow-but-alive primary; this makes the budget
-		// explicit and configurable without letting it grow into the transfer
-		// budget. See the note on defaultProbeTimeout.
-		probeCtx, cancelProbe := context.WithTimeout(ctx, probeTimeout())
-		// exchangeCancellable, not ExchangeContext: the latter hands the context
-		// to the dial and then only tightens the socket deadlines with it -- it
-		// never watches ctx.Done() -- so a read already in flight runs to the
-		// probe budget no matter what the caller does. That was tolerable while
-		// the budget was miekg's 2s default; making it configurable (and 5s by
-		// default, so a slow-but-alive primary is not cut off) would otherwise
-		// have made every shutdown wait out an in-flight probe. This closes the
-		// connection on cancellation instead, and it honours c.Dialer, so the
-		// transfer-src binding below and the XoT client survive it (#409).
-		r, _, err := exchangeCancellable(probeCtx, c, m, upstream)
-		cancelProbe()
-		tried = append(tried, upstream)
-		if err != nil {
-			// A cancelled exchange is not a sick primary: every sibling would
-			// fail the same way. Ask the PARENT context rather than the error --
-			// the per-attempt deadline above also surfaces as DeadlineExceeded,
-			// and THAT one means "this upstream did not answer in time, try the
-			// next", which is the whole point of bounding the attempt instead of
-			// the walk. Testing errors.Is(err, DeadlineExceeded) here would
-			// abandon every remaining sibling the moment one primary went quiet.
+			if p.err != nil {
+				lg.Error("DoTransfer: peer config setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", p.err)
+				lastErr = fmt.Errorf("%s: %w", upstream, p.err)
+				failures = append(failures, newUpstreamFailure(upstream, p.err))
+				continue
+			}
+			// Nobody is waiting for this result any more; stop walking upstreams.
 			if cerr := ctx.Err(); cerr != nil {
 				return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
 			}
-			// Transport failure (or a TSIG response-verify failure) — try the next sibling.
-			lg.Warn("DoTransfer: SOA probe failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
-			// Wrapped with the address: this error becomes the zone's
-			// RefreshError, and "i/o timeout" on its own tells an operator
-			// nothing about WHICH primary is unreachable (#502).
-			lastErr = fmt.Errorf("%s: %w", upstream, err)
-			failures = append(failures, newUpstreamFailure(upstream, err))
-			continue
-		}
-		sawResponse = true
-		switch r.MsgHdr.Rcode {
-		case dns.RcodeSuccess:
-			if len(r.Answer) == 0 {
-				lg.Debug("DoTransfer: NOERROR but empty answer section, trying next upstream", "zone", zd.ZoneName, "upstream", upstream)
+
+			// Fresh message per attempt: TSIG signing adds an RR with a per-attempt
+			// timestamp and this upstream's key. Stamped here, not during the
+			// snapshot above: the probes are sequential and each can block until it
+			// times out, so a timestamp taken in phase 1 could be outside the fudge
+			// window by the time a later message is sent, and the peer would answer
+			// BADTIME.
+			m := new(dns.Msg)
+			m.SetQuestion(zd.ZoneName, dns.TypeSOA)
+			if p.keyName != "" {
+				StampTsigForPeer(m, p.keyName, p.tsigAlgo)
+			}
+			c := p.client
+			// Bind the source here, in phase 2, and not in the snapshot above: for
+			// a hostname upstream the pick has to resolve it, and phase 1 does no
+			// network I/O by design -- it holds confMu, and a resolver timeout
+			// there would stall every config reload behind it.
+			if src := bindClientSrc(ctx, c, upstream, probeSrcs); src != nil {
+				lg.Debug("DoTransfer: SOA probe binding source address",
+					"zone", zd.ZoneName, "upstream", upstream, "src", src.String(),
+					"net", c.Net, "from", probeSrcTier)
+			} else if len(probeSrcs) > 0 {
+				// Not an error -- an operator naming only one family must not
+				// thereby break every upstream in the other -- but the probe then
+				// leaves from whatever the route picks, which is exactly what
+				// transfer-src is configured to prevent. Say so rather than
+				// letting it be invisible until an ACL refuses.
+				lg.Warn("DoTransfer: no configured transfer-src matches this upstream's family; probing unbound",
+					"zone", zd.ZoneName, "upstream", upstream, "configured", probeSrcs, "from", probeSrcTier)
+			}
+			// Bound THIS attempt, not the walk. miekg's default is 2s per exchange,
+			// which is tight for a slow-but-alive primary; this makes the budget
+			// explicit and configurable without letting it grow into the transfer
+			// budget. See the note on defaultProbeTimeout.
+			probeCtx, cancelProbe := context.WithTimeout(ctx, probeTimeout())
+			// exchangeCancellable, not ExchangeContext: the latter hands the context
+			// to the dial and then only tightens the socket deadlines with it -- it
+			// never watches ctx.Done() -- so a read already in flight runs to the
+			// probe budget no matter what the caller does. That was tolerable while
+			// the budget was miekg's 2s default; making it configurable (and 5s by
+			// default, so a slow-but-alive primary is not cut off) would otherwise
+			// have made every shutdown wait out an in-flight probe. This closes the
+			// connection on cancellation instead, and it honours c.Dialer, so the
+			// transfer-src binding below and the XoT client survive it (#409).
+			r, _, err := exchangeCancellable(probeCtx, c, m, upstream)
+			// Read before cancelProbe, which ends the context whatever happened.
+			budgetSpent := errors.Is(probeCtx.Err(), context.DeadlineExceeded)
+			cancelProbe()
+			// Once per upstream, not once per attempt: it is the list of who was
+			// asked, in the error an operator reads.
+			if pass == 0 {
+				tried = append(tried, upstream)
+			}
+			if err != nil {
+				// A cancelled exchange is not a sick primary: every sibling would
+				// fail the same way. Ask the PARENT context rather than the error --
+				// the per-attempt deadline above also surfaces as DeadlineExceeded,
+				// and THAT one means "this upstream did not answer in time, try the
+				// next", which is the whole point of bounding the attempt instead of
+				// the walk. Testing errors.Is(err, DeadlineExceeded) here would
+				// abandon every remaining sibling the moment one primary went quiet.
+				if cerr := ctx.Err(); cerr != nil {
+					return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
+				}
+				// Transport failure (or a TSIG response-verify failure) — try the next sibling.
+				lg.Warn("DoTransfer: SOA probe failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
+				// Wrapped with the address: this error becomes the zone's
+				// RefreshError, and "i/o timeout" on its own tells an operator
+				// nothing about WHICH primary is unreachable (#502).
+				lastErr = fmt.Errorf("%s: %w", upstream, err)
+				failures = setUpstreamFailure(failures, newUpstreamFailure(upstream, err))
+				if soaProbeUnanswered(c.Net, err, budgetSpent) {
+					unanswered = append(unanswered, i)
+				}
 				continue
 			}
-			if soa, ok := r.Answer[0].(*dns.SOA); ok {
-				lg.Info("DoTransfer: serial check", "zone", zd.ZoneName, "upstream", upstream, "notify_serial", soa.Serial, "incoming_serial", zd.IncomingSerial, "current_serial", zd.CurrentSerial)
-				// A usable SOA, from either arm: this is the RFC's
-				// proof the primary is alive, and the only thing that
-				// advances the expire clock. The serial-unchanged arm
-				// matters most -- it is the case that confirms without
-				// transferring anything, and the one a nil-error test
-				// cannot tell apart from all-primaries-REFUSED.
-				//
-				// serialNewer, not `>`: SOA serials are mod-2^32 and
-				// wrap (RFC 1982). A plain comparison reads the first
-				// serial after a wrap as OLDER than the one we hold, so
-				// the secondary stops transferring and serves stale data
-				// until someone forces a retransfer. Every other serial
-				// comparison in the tree already goes through this
-				// helper; this one did not.
-				if !serialNewer(soa.Serial, zd.IncomingSerial) {
-					zd.noteSuccessfulRefresh(zd.IncomingSerial)
-					return false, soa.Serial, nil
+			sawResponse = true
+			switch r.MsgHdr.Rcode {
+			case dns.RcodeSuccess:
+				if len(r.Answer) == 0 {
+					lg.Debug("DoTransfer: NOERROR but empty answer section, trying next upstream", "zone", zd.ZoneName, "upstream", upstream)
+					continue
 				}
-				zd.noteSuccessfulRefresh(zd.IncomingSerial)
-				return true, soa.Serial, nil
+				if soa, ok := r.Answer[0].(*dns.SOA); ok {
+					lg.Info("DoTransfer: serial check", "zone", zd.ZoneName, "upstream", upstream, "notify_serial", soa.Serial, "incoming_serial", zd.IncomingSerial, "current_serial", zd.CurrentSerial)
+					// A usable SOA, from either arm: this is the RFC's
+					// proof the primary is alive, and the only thing that
+					// advances the expire clock. The serial-unchanged arm
+					// matters most -- it is the case that confirms without
+					// transferring anything, and the one a nil-error test
+					// cannot tell apart from all-primaries-REFUSED.
+					//
+					// serialNewer, not `>`: SOA serials are mod-2^32 and
+					// wrap (RFC 1982). A plain comparison reads the first
+					// serial after a wrap as OLDER than the one we hold, so
+					// the secondary stops transferring and serves stale data
+					// until someone forces a retransfer. Every other serial
+					// comparison in the tree already goes through this
+					// helper; this one did not.
+					if !serialNewer(soa.Serial, zd.IncomingSerial) {
+						zd.noteSuccessfulRefresh(zd.IncomingSerial)
+						return false, soa.Serial, nil
+					}
+					zd.noteSuccessfulRefresh(zd.IncomingSerial)
+					return true, soa.Serial, nil
+				}
+				// NOERROR but the first answer is not a SOA — try the next sibling.
+				continue
+			default:
+				// REFUSED / SERVFAIL / NXDOMAIN / etc. This primary will not give a
+				// usable SOA, but a sibling may (e.g. differing per-primary ACLs).
+				lg.Debug("DoTransfer: non-usable SOA rcode, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "rcode", dns.RcodeToString[r.MsgHdr.Rcode])
+				continue
 			}
-			// NOERROR but the first answer is not a SOA — try the next sibling.
-			continue
-		default:
-			// REFUSED / SERVFAIL / NXDOMAIN / etc. This primary will not give a
-			// usable SOA, but a sibling may (e.g. differing per-primary ACLs).
-			lg.Debug("DoTransfer: non-usable SOA rcode, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "rcode", dns.RcodeToString[r.MsgHdr.Rcode])
-			continue
 		}
+
+		// Only a pass that found no usable SOA gets here (one that did returned),
+		// so this is the point to ask whether a lost probe is worth another try.
+		if len(unanswered) == 0 || pass >= retry.retries {
+			break
+		}
+		delay := retry.wait()
+		lg.Info("DoTransfer: SOA probe got no answer, retrying", "zone", zd.ZoneName,
+			"upstreams", len(unanswered), "attempt", pass+2, "delay", delay.Round(time.Millisecond))
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, ctx.Err())
+		}
+		pending = unanswered
 	}
 
 	if sawResponse {
@@ -2399,8 +2529,8 @@ func reloadWouldLoseChanges(zd *ZoneData) bool {
 	if !dirty {
 		return false
 	}
-	// After the unlock: JournalActive takes the config lock, and there is no
-	// reason to hold two.
+	// After the unlock: the switch is a lock-free read, and nothing below
+	// needs zd.mu.
 	return zd.KeyDB == nil || !JournalActive()
 }
 

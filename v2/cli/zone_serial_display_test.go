@@ -83,3 +83,31 @@ func TestDescribeZoneOmitsEmptyUpstreamSection(t *testing.T) {
 		t.Errorf("upstream section rendered with no upstreams:\n%s", out)
 	}
 }
+
+// TestDescribeZoneShowsUnvalidatedTLSA: a dane primary whose TLSA record the
+// probe took without DNSSEC validation (lab mode) is flagged on its own line,
+// whether the probe succeeded or not.
+func TestDescribeZoneShowsUnvalidatedTLSA(t *testing.T) {
+	zconf := tdns.ZoneConf{
+		Name: "example.", Type: "secondary", Store: "MapZone",
+		IncomingSerial: 42,
+		UpstreamSerials: []tdns.UpstreamSerial{
+			{Addr: "192.0.2.1:853", Serial: 42, Warning: tdns.TLSANotValidatedWarning},
+			{Addr: "192.0.2.2:853", Err: "certificate mismatch", Warning: tdns.TLSANotValidatedWarning},
+			{Addr: "192.0.2.3:853", Serial: 42},
+		},
+	}
+	out := DescribeZone(zconf)
+
+	want1 := "\t\t192.0.2.1:853: 42\n\t\t\tWARNING: " + tdns.TLSANotValidatedWarning + "\n"
+	if !strings.Contains(out, want1) {
+		t.Errorf("unvalidated TLSA not flagged under its primary:\n%s", out)
+	}
+	want2 := "\t\t192.0.2.2:853: (probe failed: certificate mismatch)\n\t\t\tWARNING: " + tdns.TLSANotValidatedWarning + "\n"
+	if !strings.Contains(out, want2) {
+		t.Errorf("unvalidated TLSA not flagged under a failed probe:\n%s", out)
+	}
+	if n := strings.Count(out, "WARNING:"); n != 2 {
+		t.Errorf("got %d WARNING lines, want 2:\n%s", n, out)
+	}
+}

@@ -1,6 +1,6 @@
 ## tdns-cli auth zone modify
 
-Modify a dynamic (API-managed) zone's primary or options
+Modify a dynamic (API-managed) zone's primary, options or template
 
 ```
 tdns-cli auth zone modify [flags]
@@ -9,10 +9,12 @@ tdns-cli auth zone modify [flags]
 ### Options
 
 ```
+      --clear-template            Remove the zone's template, and the outbound settings it gave the zone
   -h, --help                      help for modify
       --options strings           Zone options (comma-separated)
       --primaries strings         New primary (upstream) addresses [host:port], comma-separated
       --primary-key string        New primary TSIG key name applied to all primaries (NOKEY for none) (default "NOKEY")
+      --template string           Set or replace the zone's template (outbound settings: downstreams, notify); omit to keep it
       --transfer-src strings      Replace the zone's outbound-transfer source address(es); omit to leave unchanged
       --tsig-algo string          Inline TSIG algorithm (default hmac-sha256)
       --tsig-name string          Inline TSIG key name; created in keystore if absent (existing keys cannot be rotated here)

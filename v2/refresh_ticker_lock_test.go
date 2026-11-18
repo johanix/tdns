@@ -35,7 +35,7 @@ func TestMutatingTheCounterMapInsideIterCbDeadlocks(t *testing.T) {
 	// that would poison any later goroutine-leak check. The child is killed
 	// once it has proved the point; nothing is left behind here.
 	if os.Getenv(iterCbDeadlockProbeEnv) == "1" {
-		m := core.NewCmap[*RefreshCounter]()
+		m := core.NewNameMap[*RefreshCounter]()
 		m.Set("one.example.", &RefreshCounter{Name: "one.example."})
 		m.IterCb(func(zone string, rc *RefreshCounter) {
 			// Exactly what initialLoadZone does with the zone being iterated.
@@ -73,7 +73,7 @@ const iterCbDeadlockProbeEnv = "TDNS_ITERCB_DEADLOCK_PROBE"
 
 // And the shape that avoids it: decide nothing inside the walk, mutate after.
 func TestCollectingInsideThenMutatingAfterIsSafe(t *testing.T) {
-	m := core.NewCmap[*RefreshCounter]()
+	m := core.NewNameMap[*RefreshCounter]()
 	for _, z := range []string{"a.example.", "b.example.", "c.example."} {
 		m.Set(z, &RefreshCounter{Name: z, CurRefresh: 1})
 	}
