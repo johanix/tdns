@@ -9,6 +9,7 @@ package imr
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -39,7 +40,7 @@ func RegisterImrOutboundQueryHook(hook ImrOutboundQueryHookFunc) error {
 	globalImrOutboundQueryHooksMutex.Lock()
 	globalImrOutboundQueryHooks = append(globalImrOutboundQueryHooks, hook)
 	globalImrOutboundQueryHooksMutex.Unlock()
-	lgImr.Debug("RegisterImrOutboundQueryHook: registered hook")
+	slog.Debug("RegisterImrOutboundQueryHook: registered hook")
 	return nil
 }
 
@@ -53,7 +54,7 @@ func RegisterImrResponseHook(hook ImrResponseHookFunc) error {
 	globalImrResponseHooksMutex.Lock()
 	globalImrResponseHooks = append(globalImrResponseHooks, hook)
 	globalImrResponseHooksMutex.Unlock()
-	lgImr.Debug("RegisterImrResponseHook: registered hook")
+	slog.Debug("RegisterImrResponseHook: registered hook")
 	return nil
 }
 

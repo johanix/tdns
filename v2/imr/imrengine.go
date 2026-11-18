@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -125,6 +126,10 @@ type Imr struct {
 	// resolver is not ready (PrimingError), under primingMu.
 	primingMu  sync.Mutex
 	primingErr error
+	// logger and lookupLogger are Options.Logger and Options.LookupLogger;
+	// read them through lgImr and lgDns (logging.go).
+	logger       *slog.Logger
+	lookupLogger *slog.Logger
 }
 
 func (imr *Imr) isLargeAlgorithm(alg uint8) bool {
@@ -282,14 +287,19 @@ func (resp *Response) denied(kind cache.CacheContext, state cache.ValidationStat
 // ic.Tuning, and the last one built wins; the data clock (ic.Testing) and the
 // debug log hooks (ic.Logging) are set up once, by the first.
 func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
+	lg := opts.Logger
+	if lg == nil {
+		lg = slog.Default()
+	}
+
 	// The test clock, if one is asked for, before anything is cached: priming
 	// stamps expirations in data time.
-	if err := startDataClock(ctx, ic.Testing); err != nil {
+	if err := startDataClock(ctx, lg, ic.Testing); err != nil {
 		return nil, fmt.Errorf("imrengine.testing: %w", err)
 	}
 
 	// 1. Create the cache
-	rrcache := cache.NewRRsetCache(log.Default(), ic.Verbose, ic.Debug)
+	rrcache := cache.NewRRsetCache(cacheLogger(opts.Logger), ic.Verbose, ic.Debug)
 	rrcache.Quiet = opts.Quiet
 
 	// The address families in use, before anything adds a server address:
@@ -300,7 +310,7 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 	}
 	rrcache.SetAddressFamilies(v4, v6)
 	if !v4 || !v6 {
-		lgImr.Info("address families limited by imrengine.outbound-address-families", "ipv4", v4, "ipv6", v6)
+		lg.Info("address families limited by imrengine.outbound-address-families", "ipv4", v4, "ipv6", v6)
 	}
 
 	requireDnssec := true // default: enforce DNSSEC validation
@@ -354,11 +364,14 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 		dnskeyTransport: opts.DNSKEYTransport,
 		pendingOwnZone:  opts.PendingOwnZone,
 		ownZones:        opts.OwnZones,
+		logger:          opts.Logger,
+		lookupLogger:    opts.LookupLogger,
 	}
+	imr.FamilyTracker.Logger = rrcache.Logger
 	imr.attachCacheHooks()
 
 	if ic.Logging.Enabled {
-		imr.DebugLog = imrDebugLogger(ic.Logging.File)
+		imr.DebugLog = imrDebugLogger(lg, ic.Logging.File)
 	}
 
 	// Build the forward table before anything sends a query: PrimeWithHints
@@ -372,12 +385,12 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 	forwards, fwdDiags := BuildImrForwards(ic.Forward)
 	for _, d := range fwdDiags {
 		if d.Dropped {
-			lgImr.Error("forward config entry dropped", "problem", d.String())
+			lg.Error("forward config entry dropped", "problem", d.String())
 			continue
 		}
-		lgImr.Error("forward config quarantined", "problem", d.String())
+		lg.Error("forward config quarantined", "problem", d.String())
 	}
-	stubZones, stubFP, _ := canonicalStubs(ic.Stubs)
+	stubZones, stubFP, _ := canonicalStubs(lg, ic.Stubs)
 	// Published before priming: PrimeWithHints resolves through the
 	// iterative path, and forwardZoneFor below has to see the table.
 	// stubFP is filled in as the stubs are actually applied, further down.
@@ -392,11 +405,11 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 			ups = append(ups, up.Label)
 		}
 		if q, why := fz.quarantineState(); q {
-			lgImr.Error("adding forward zone QUARANTINED: names under it will SERVFAIL",
+			lg.Error("adding forward zone QUARANTINED: names under it will SERVFAIL",
 				"zone", fz.Zone, "reason", why)
 			continue
 		}
-		lgImr.Info("adding forward zone", "zone", fz.Zone, "trust-ad", fz.TrustAD, "upstreams", strings.Join(ups, ", "))
+		lg.Info("adding forward zone", "zone", fz.Zone, "trust-ad", fz.TrustAD, "upstreams", strings.Join(ups, ", "))
 	}
 
 	// Trust anchors are configuration, and priming already validates what it
@@ -419,8 +432,8 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 		// only so that lookups which looked for a cached zone cut before
 		// asking the forward would find one (#722); those look at the forward
 		// first now. RefreshRoot primes if a reload removes the forward.
-		lgImr.Info("root is covered by a forward zone: not priming, and not reading root-hints")
-		warnUnreadableRootHints(ic.RootHints)
+		lg.Info("root is covered by a forward zone: not priming, and not reading root-hints")
+		warnUnreadableRootHints(lg, ic.RootHints)
 		imr.markReady()
 	} else if ic.Testing.SkipPriming() {
 		// Test harnesses only (imrengine.testing.priming: false). The hints
@@ -430,7 +443,7 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 		if err := rrcache.PrimeFromHintsOnly(ic.RootHints); err != nil {
 			return nil, fmt.Errorf("failed to seed RecursorCache from root hints: %v", err)
 		}
-		lgImr.Warn("imrengine.testing.priming is false: seeded from the root hints without priming;" +
+		lg.Warn("imrengine.testing.priming is false: seeded from the root hints without priming;" +
 			" a test-harness switch, not for production")
 		imr.PrimedVia = "hints only (testing.priming: false)"
 		imr.PrimedAt = time.Now()
@@ -449,9 +462,9 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 				server := &stub.Servers[i]
 				stubservers = append(stubservers, server.Name+" ("+strings.Join(server.Addrs, ", ")+")")
 			}
-			lgImr.Info("adding stub", "zone", zone, "servers", strings.Join(stubservers, ", "))
+			lg.Info("adding stub", "zone", zone, "servers", strings.Join(stubservers, ", "))
 			if err := imr.Cache.AddStub(zone, stub.Servers); err != nil {
-				lgImr.Error("failed to add stub zone", "zone", zone, "err", err)
+				lg.Error("failed to add stub zone", "zone", zone, "err", err)
 				continue
 			}
 			applied[zone] = stubFP[zone]
@@ -468,12 +481,12 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 // read while the root is forwarded. It is not read now, but a reload that
 // removes the "." forward primes from it. An empty path means the compiled-in
 // hints.
-func warnUnreadableRootHints(hintsfile string) {
+func warnUnreadableRootHints(lg *slog.Logger, hintsfile string) {
 	if hintsfile == "" {
 		return
 	}
 	if _, err := os.Stat(hintsfile); err != nil {
-		lgImr.Warn("root-hints cannot be read; it is not needed while the root is forwarded,"+
+		lg.Warn("root-hints cannot be read; it is not needed while the root is forwarded,"+
 			" but a reload that removes the . forward will fail to prime", "root-hints", hintsfile, "err", err)
 	}
 }
@@ -505,7 +518,7 @@ func (imr *Imr) Start(ctx context.Context) {
 		// validated against them on demand.
 		go func(ctx context.Context) {
 			if err := imr.initializeImrTrustAnchors(ctx, imr.bootConf); err != nil {
-				lgImr.Warn("trust anchor initialization failed", "err", err)
+				imr.lgImr().Warn("trust anchor initialization failed", "err", err)
 			}
 		}(ctx)
 
@@ -519,7 +532,7 @@ func (imr *Imr) Start(ctx context.Context) {
 		// nor on the test clock: the refresh waits in real time for an expiry in
 		// data time.
 		if imr.bootConf.Testing.SkipRootRefresh() {
-			lgImr.Warn("imrengine.testing: the root NS is not refreshed; a test-harness setting, not for production")
+			imr.lgImr().Warn("imrengine.testing: the root NS is not refreshed; a test-harness setting, not for production")
 			return
 		}
 		imr.RefreshRoot(ctx, imr.bootConf.RootHints)
@@ -568,7 +581,7 @@ func (imr *Imr) primeRetrying(ctx context.Context, prime func(context.Context) e
 		if err == nil {
 			if attempt > 0 {
 				imr.errorRegistry.ClearImrPrimingError()
-				lgImr.Info("root primed after failed attempts", "attempts", attempt+1)
+				imr.lgImr().Info("root primed after failed attempts", "attempts", attempt+1)
 			}
 			imr.markReady()
 			return true
@@ -579,7 +592,7 @@ func (imr *Imr) primeRetrying(ctx context.Context, prime func(context.Context) e
 		imr.primingMu.Unlock()
 		imr.errorRegistry.SetImrPrimingError(
 			fmt.Sprintf("IMR root priming failed, not resolving yet; retrying in %s: %v", wait, err))
-		lgImr.Warn("root priming failed; will retry", "attempt", attempt+1, "retry-in", wait, "err", err)
+		imr.lgImr().Warn("root priming failed; will retry", "attempt", attempt+1, "retry-in", wait, "err", err)
 		select {
 		case <-ctx.Done():
 			return false
@@ -659,7 +672,7 @@ func (imr *Imr) Serve(ctx context.Context, requests <-chan Request) {
 				return
 			}
 			if rrq.ResponseCh == nil {
-				lgImr.Warn("received nil or invalid request (no response channel)")
+				imr.lgImr().Warn("received nil or invalid request (no response channel)")
 				continue
 			}
 			// Each request runs in its own goroutine. Query is fully
@@ -682,7 +695,7 @@ func (imr *Imr) Serve(ctx context.Context, requests <-chan Request) {
 func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq Request) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			lgImr.Error("HandleRecursorRequest: PANIC recovered",
+			imr.lgImr().Error("HandleRecursorRequest: PANIC recovered",
 				"qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype],
 				"panic", fmt.Sprintf("%v", rec))
 			// Try to send an error response so the caller doesn't hang.
@@ -699,7 +712,7 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq Request) {
 		}
 	}()
 
-	lgImr.Debug("received query", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype])
+	imr.lgImr().Debug("received query", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype])
 	if imr.DebugLog != nil {
 		imr.DebugLog.Printf("QUERY qname=%s qtype=%s", rrq.Qname, dns.TypeToString[rrq.Qtype])
 	}
@@ -711,9 +724,9 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq Request) {
 		select {
 		case rrq.ResponseCh <- r:
 		case <-ctx.Done():
-			lgImr.Warn("HandleRecursorRequest: ctx cancelled before response delivered", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+			imr.lgImr().Warn("HandleRecursorRequest: ctx cancelled before response delivered", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
 		case <-time.After(2 * time.Second):
-			lgImr.Warn("HandleRecursorRequest: timed out sending response", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+			imr.lgImr().Warn("HandleRecursorRequest: timed out sending response", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
 		}
 	}
 
@@ -723,7 +736,7 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq Request) {
 	if crrset != nil {
 		switch crrset.Context {
 		case cache.ContextAnswer, cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
-			lgImr.Debug("cache hit", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+			imr.lgImr().Debug("cache hit", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
 			if imr.DebugLog != nil {
 				var rrs []string
 				if crrset.RRset != nil {
@@ -748,7 +761,7 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq Request) {
 			return
 		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint:
 			if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == rrq.Qtype {
-				lgImr.Debug("returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+				imr.lgImr().Debug("returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
 				resp = &Response{
 					RRset:     crrset.RRset,
 					Validated: crrset.State == cache.ValidationStateSecure,
@@ -757,24 +770,24 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq Request) {
 				sendResp(*resp)
 				return
 			}
-			lgImr.Debug("cache hit but indirect context, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+			imr.lgImr().Debug("cache hit but indirect context, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
 			if imr.DebugLog != nil {
 				imr.DebugLog.Printf("CACHE-INDIRECT qname=%s qtype=%s context=%s, issuing fresh query",
 					rrq.Qname, dns.TypeToString[rrq.Qtype], cache.CacheContextToString[crrset.Context])
 			}
 		case cache.ContextPriming, cache.ContextFailure:
-			lgImr.Debug("cache hit but priming/failure, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+			imr.lgImr().Debug("cache hit but priming/failure, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
 		default:
-			lgImr.Debug("cache hit with unknown context, issuing query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+			imr.lgImr().Debug("cache hit with unknown context, issuing query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
 		}
 	} else if imr.DebugLog != nil {
 		imr.DebugLog.Printf("CACHE-MISS qname=%s qtype=%s, issuing fresh query", rrq.Qname, dns.TypeToString[rrq.Qtype])
 	}
 
-	lgImr.Debug("not in cache, querying", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+	imr.lgImr().Debug("not in cache, querying", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
 	resp, err := imr.Query(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
 	if err != nil {
-		lgImr.Error("ImrQuery failed",
+		imr.lgImr().Error("ImrQuery failed",
 			"qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "err", err)
 	}
 	sendResp(buildImrResponse(resp, err))
@@ -864,7 +877,7 @@ func (imr *Imr) queryWhenReady(ctx context.Context, qname string, qtype uint16, 
 }
 
 func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *Response, fresh bool) (*Response, error) {
-	lgImr.Debug("ImrQuery: not in cache, querying", "qname", qname, "qtype", dns.TypeToString[qtype])
+	imr.lgImr().Debug("ImrQuery: not in cache, querying", "qname", qname, "qtype", dns.TypeToString[qtype])
 
 	// Apply per-query wall-time budget at the top-level public entry,
 	// not just at IterativeDNSQueryWithLoopDetection. Sub-queries made on
@@ -899,13 +912,13 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		vstate, err := imr.Cache.ValidateRRsetWithParentZone(ctx, resp.RRset,
 			imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 		if err != nil {
-			lgImr.Debug("ImrQuery: DNSSEC validation failed", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
+			imr.lgImr().Debug("ImrQuery: DNSSEC validation failed", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
 			return
 		}
 		resp.ValidationState = vstate
 		if vstate == cache.ValidationStateSecure {
 			resp.Validated = true
-			lgImr.Debug("ImrQuery: DNSSEC validated", "qname", qname, "qtype", dns.TypeToString[qtype])
+			imr.lgImr().Debug("ImrQuery: DNSSEC validated", "qname", qname, "qtype", dns.TypeToString[qtype])
 		}
 	}
 
@@ -937,7 +950,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			case respch <- &resp:
 				// sent successfully
 			case <-time.After(2 * time.Second):
-				lgImr.Warn("ImrQuery: timed out sending response to channel", "qname", qname, "qtype", dns.TypeToString[qtype])
+				imr.lgImr().Warn("ImrQuery: timed out sending response to channel", "qname", qname, "qtype", dns.TypeToString[qtype])
 			}
 		}()
 	}
@@ -978,12 +991,12 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			// whole proof. Validating the SOA alone replaced it with the
 			// SOA's own verdict: a Bogus denial in a signed zone came back
 			// Secure.
-			lgImr.Debug("ImrQuery: cache hit", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+			imr.lgImr().Debug("ImrQuery: cache hit", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 			hit = crrset
 			resp.denied(crrset.Context, crrset.State)
 			return &resp, nil
 		case cache.ContextAnswer:
-			lgImr.Debug("ImrQuery: cache hit", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+			imr.lgImr().Debug("ImrQuery: cache hit", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 			hit = crrset
 			resp.RRset = crrset.RRset
 			resp.ValidationState = crrset.State
@@ -999,7 +1012,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			// the cached data instead -- saves query volume when the
 			// cached glue/referral already answers the question.
 			if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == qtype {
-				lgImr.Debug("ImrQuery: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+				imr.lgImr().Debug("ImrQuery: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 				hit = crrset
 				resp.RRset = crrset.RRset
 				// Every path that yields an RRset reports its verdict; here it is
@@ -1008,17 +1021,17 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 				resp.Validated = crrset.State == cache.ValidationStateSecure
 				return &resp, nil
 			}
-			lgImr.Debug("ImrQuery: cache hit but indirect context, issuing direct query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+			imr.lgImr().Debug("ImrQuery: cache hit but indirect context, issuing direct query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 		case cache.ContextPriming, cache.ContextFailure:
-			lgImr.Debug("ImrQuery: cache hit but priming/failure, issuing direct query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+			imr.lgImr().Debug("ImrQuery: cache hit but priming/failure, issuing direct query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 		default:
-			lgImr.Debug("ImrQuery: cache hit with unknown context, issuing query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+			imr.lgImr().Debug("ImrQuery: cache hit with unknown context, issuing query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 		}
 	}
 
 	for {
 		if maxiter <= 0 {
-			lgImr.Warn("ImrQuery: max iterations reached, giving up")
+			imr.lgImr().Warn("ImrQuery: max iterations reached, giving up")
 			resp.Error = true
 			resp.ErrorMsg = "max iterations reached, giving up"
 			return &resp, fmt.Errorf("max iterations reached, giving up")
@@ -1031,7 +1044,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			resp.ErrorMsg = fmt.Sprintf("Error finding the zone cut: %v", err)
 			return &resp, err
 		}
-		lgImr.Debug("ImrQuery: best zone match", "qname", qname, "bestmatch", bestmatch, "serverless", serverless)
+		imr.lgImr().Debug("ImrQuery: best zone match", "qname", qname, "bestmatch", bestmatch, "serverless", serverless)
 		// ss := servers
 
 		switch {
@@ -1040,17 +1053,17 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			done, err := imr.resolveNSAddresses(ctx, bestmatch, qname, qtype, authservers, func(authservers map[string]*cache.AuthServer) (bool, error) {
 				rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(lookupCtx, qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal, and ImrQuery has none to pass on
 				if err != nil {
-					lgImr.Error("IterativeDNSQuery failed", "err", err)
+					imr.lgImr().Error("IterativeDNSQuery failed", "err", err)
 					// return false, nil // Continue trying
 					return false, err
 				}
 				if rrset != nil {
-					lgImr.Debug("ImrQuery: received response from IterativeDNSQuery", "count", len(rrset.RRs))
+					imr.lgImr().Debug("ImrQuery: received response from IterativeDNSQuery", "count", len(rrset.RRs))
 					resp.RRset = rrset
 					return true, nil // Success, stop trying
 				}
 				if rcode == dns.RcodeNameError {
-					lgImr.Info("ImrQuery: received NXDOMAIN, no point in continuing", "qname", qname)
+					imr.lgImr().Info("ImrQuery: received NXDOMAIN, no point in continuing", "qname", qname)
 					freshDenial(cache.ContextNXDOMAIN)
 					return true, nil // Success (negative response), stop trying
 				}
@@ -1073,7 +1086,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 				return &resp, nil
 			}
 			// If we get here, we tried all responses without finding a usable address
-			lgImr.Warn("ImrQuery: failed to resolve query using any nameserver address", "qname", qname, "qtype", dns.TypeToString[qtype])
+			imr.lgImr().Warn("ImrQuery: failed to resolve query using any nameserver address", "qname", qname, "qtype", dns.TypeToString[qtype])
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Failed to resolve query %q, %s, using any nameserver address", qname, dns.TypeToString[qtype])
 			return &resp, nil
@@ -1085,7 +1098,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			// ss = append(servers, "...")
 		}
 
-		lgImr.Debug("ImrQuery: sending query to auth servers", "qname", qname, "qtype", dns.TypeToString[qtype], "count", len(authservers))
+		imr.lgImr().Debug("ImrQuery: sending query to auth servers", "qname", qname, "qtype", dns.TypeToString[qtype], "count", len(authservers))
 
 		rrset, rcode, context, _, err := imr.IterativeDNSQueryInZone(lookupCtx, qname, qtype, authservers, bestmatch, fresh, edns0.PrivacyNone) // privacy is a client signal, and ImrQuery has none to pass on
 		// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
@@ -1096,13 +1109,13 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		}
 
 		if rrset != nil {
-			lgImr.Debug("ImrQuery: received response from IterativeDNSQuery", "count", len(rrset.RRs))
+			imr.lgImr().Debug("ImrQuery: received response from IterativeDNSQuery", "count", len(rrset.RRs))
 			resp.RRset = rrset
 			validateResponse()
 			return &resp, nil
 		}
 		if rcode == dns.RcodeNameError {
-			lgImr.Info("ImrQuery: received NXDOMAIN, no point in continuing", "qname", qname)
+			imr.lgImr().Info("ImrQuery: received NXDOMAIN, no point in continuing", "qname", qname)
 			freshDenial(cache.ContextNXDOMAIN)
 			return &resp, nil
 		}
@@ -1131,14 +1144,14 @@ func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname 
 	authservers map[string]*cache.AuthServer,
 	onResponse func(authservers map[string]*cache.AuthServer) (bool, error)) (bool, error) {
 
-	lgImr.Info("resolveNSAddresses: no server addresses", "zone", bestmatch, "qname", qname)
+	imr.lgImr().Info("resolveNSAddresses: no server addresses", "zone", bestmatch, "qname", qname)
 	cnsrrset := imr.Cache.Get(bestmatch, dns.TypeNS)
 	if cnsrrset == nil || cnsrrset.RRset == nil {
-		lgImr.Warn("resolveNSAddresses: no nameservers either, giving up", "zone", bestmatch)
+		imr.lgImr().Warn("resolveNSAddresses: no nameservers either, giving up", "zone", bestmatch)
 		return false, fmt.Errorf("no nameservers for zone %q", bestmatch)
 	}
 
-	lgImr.Debug("resolveNSAddresses: have nameserver names", "zone", bestmatch, "count", len(cnsrrset.RRset.RRs))
+	imr.lgImr().Debug("resolveNSAddresses: have nameserver names", "zone", bestmatch, "count", len(cnsrrset.RRset.RRs))
 
 	// Each nameserver's shared server is sent here once its lookup has ended
 	// (or at once, if it needs none). Buffered for all of them, so a sender
@@ -1192,7 +1205,7 @@ func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname 
 	}
 
 	// If we get here, we tried all responses without finding a usable address
-	lgImr.Warn("resolveNSAddresses: failed to resolve query using any nameserver address", "qname", qname, "qtype", dns.TypeToString[qtype])
+	imr.lgImr().Warn("resolveNSAddresses: failed to resolve query using any nameserver address", "qname", qname, "qtype", dns.TypeToString[qtype])
 	return false, nil
 }
 
@@ -1232,7 +1245,7 @@ func (imr *Imr) serversForQuestion(qname string, qtype uint16) (zone string, ser
 // The OPT is created with the query's DO bit rather than a hardcoded false:
 // the response OPT must mirror DO (RFC 3225 §3), and the flag-bit code this
 // replaced quietly cleared it whenever it was the thing that built the OPT.
-func setPrivacyStatus(m *dns.Msg, msgoptions *edns0.MsgOptions, status edns0.PrivacyStatus) {
+func (imr *Imr) setPrivacyStatus(m *dns.Msg, msgoptions *edns0.MsgOptions, status edns0.PrivacyStatus) {
 	if m == nil || msgoptions == nil || !msgoptions.HasPrivacy {
 		return
 	}
@@ -1240,7 +1253,7 @@ func setPrivacyStatus(m *dns.Msg, msgoptions *edns0.MsgOptions, status edns0.Pri
 		m.SetEdns0(dns.DefaultMsgSize, msgoptions.DO)
 	}
 	if err := edns0.AddPrivacyStatusToMessage(m, status); err != nil {
-		lgImr.Error("failed to attach PRIVACY option to response", "err", err, "status", status.String())
+		imr.lgImr().Error("failed to attach PRIVACY option to response", "err", err, "status", status.String())
 	}
 }
 
@@ -1340,7 +1353,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		// transport cannot be served, so drop the hit and re-query. An
 		// opportunistic client accepted cleartext and keeps the cache hit.
 		if msgoptions.Privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(crrset.Transport) {
-			lgImr.Debug("ImrResponder: strict privacy requested but cached data came over unencrypted transport, skipping cache", "qname", qname, "qtype", dns.TypeToString[qtype], "transport", core.TransportToString[crrset.Transport])
+			imr.lgImr().Debug("ImrResponder: strict privacy requested but cached data came over unencrypted transport, skipping cache", "qname", qname, "qtype", dns.TypeToString[qtype], "transport", core.TransportToString[crrset.Transport])
 			crrset = nil // Force query over encrypted transport
 		}
 	}
@@ -1360,7 +1373,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			crrset.Context == cache.ContextGlue ||
 			crrset.Context == cache.ContextHint) &&
 		crrset.RRset != nil && crrset.RRset.RRtype == qtype {
-		lgImr.Debug("ImrResponder: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+		imr.lgImr().Debug("ImrResponder: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 		imr.serveCachedPositive(ctx, w, r, m, qname, qtype, crrset, msgoptions)
 		return
 	}
@@ -1400,7 +1413,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			// }
 			m.AuthenticatedData = negativeAD(crrset, r, msgoptions)
 			attachNegativeEDE(m, msgoptions, crrset, r)
-			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
+			imr.setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
 			return
 		// No qtype exclusion. This case once read `&& qtype != dns.TypeSOA`,
@@ -1437,7 +1450,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			// }
 			m.AuthenticatedData = negativeAD(crrset, r, msgoptions)
 			attachNegativeEDE(m, msgoptions, crrset, r)
-			setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
+			imr.setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 			w.WriteMsg(m)
 			return
 		case crrset.Rcode == uint8(dns.RcodeSuccess) && crrset.Context == cache.ContextAnswer &&
@@ -1451,12 +1464,12 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 
 	m.SetRcode(r, dns.RcodeServerFailure)
 	if msgoptions.RD {
-		lgImr.Debug("ImrResponder: not in cache, querying", "qname", qname, "qtype", dns.TypeToString[qtype])
+		imr.lgImr().Debug("ImrResponder: not in cache, querying", "qname", qname, "qtype", dns.TypeToString[qtype])
 		maxiter := 12
 
 		for {
 			if maxiter <= 0 {
-				lgImr.Warn("ImrResponder: max iterations reached, giving up")
+				imr.lgImr().Warn("ImrResponder: max iterations reached, giving up")
 				return
 			} else {
 				maxiter--
@@ -1474,7 +1487,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				w.WriteMsg(m)
 				return
 			}
-			lgImr.Debug("ImrResponder: best zone match", "qname", qname, "bestmatch", bestmatch, "serverless", serverless)
+			imr.lgImr().Debug("ImrResponder: best zone match", "qname", qname, "bestmatch", bestmatch, "serverless", serverless)
 
 			switch {
 			case len(authservers) == 0 && !serverless:
@@ -1495,7 +1508,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 						if errors.Is(err, ErrPrivacyUnavailable) {
 							privacyErr = err
 						}
-						lgImr.Error("IterativeDNSQuery failed", "err", err)
+						imr.lgImr().Error("IterativeDNSQuery failed", "err", err)
 						return false, nil // Continue trying with next address
 					}
 					done, err := imr.ProcessAuthDNSResponse(ctx, qname, qtype, rrset, rcode, context, msgoptions, m, w, r, transport)
@@ -1520,7 +1533,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 					return
 				}
 				// If we get here, we tried all responses without finding a usable address
-				lgImr.Warn("ImrResponder: failed to resolve query using any nameserver address", "qname", qname, "qtype", dns.TypeToString[qtype])
+				imr.lgImr().Warn("ImrResponder: failed to resolve query using any nameserver address", "qname", qname, "qtype", dns.TypeToString[qtype])
 				if privacyErr != nil {
 					attachPrivacyUnavailableEDE(m, r, privacyUnavailableZone(privacyErr, bestmatch), msgoptions)
 				} else {
@@ -1530,7 +1543,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 				return
 			}
 
-			lgImr.Debug("ImrResponder: sending query to authservers", "qname", qname, "qtype", dns.TypeToString[qtype], "count", len(authservers), "zone", bestmatch)
+			imr.lgImr().Debug("ImrResponder: sending query to authservers", "qname", qname, "qtype", dns.TypeToString[qtype], "count", len(authservers), "zone", bestmatch)
 			rrset, rcode, context, transport, err := imr.IterativeDNSQueryInZone(ctx, qname, qtype, authservers, bestmatch, false, msgoptions.Privacy)
 			// log.Printf("Recursor: response from AuthDNSQuery: rcode: %d, err: %v", rrset, rcode, err)
 			if err != nil {
@@ -1555,7 +1568,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			continue
 		}
 	} else {
-		lgImr.Info("not in cache and RD bit is not set, refusing", "qname", qname, "qtype", dns.TypeToString[qtype])
+		imr.lgImr().Info("not in cache and RD bit is not set, refusing", "qname", qname, "qtype", dns.TypeToString[qtype])
 		m.SetRcode(r, dns.RcodeRefused)
 		m.Ns = append(m.Ns, &dns.TXT{
 			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
@@ -1569,7 +1582,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 // returns true if we have a response (i.e. we're done), false if we have an error
 // all errors are treated as "done"
 func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype uint16, rrset *core.RRset, rcode int, context cache.CacheContext, msgoptions *edns0.MsgOptions, m *dns.Msg, w dns.ResponseWriter, r *dns.Msg, transport core.Transport) (bool, error) {
-	lgImr.Debug("ProcessAuthDNSResponse", "qname", qname, "rcode", rcode, "context", context, "DO", msgoptions.DO, "CD", msgoptions.CD)
+	imr.lgImr().Debug("ProcessAuthDNSResponse", "qname", qname, "rcode", rcode, "context", context, "DO", msgoptions.DO, "CD", msgoptions.CD)
 	// qname is a CNAME, and what came back is the data or the denial at the
 	// chain's last name: the answer is the chain, built from its cached links
 	// (serveChain). This query has just fetched them, so an entry that has
@@ -1586,7 +1599,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 			return true, nil
 		}
 		if outcome == chainIncomplete || (rrset != nil && len(rrset.RRs) > 0) {
-			lgImr.Info("ProcessAuthDNSResponse: a CNAME chain was followed but cannot be answered from its links",
+			imr.lgImr().Info("ProcessAuthDNSResponse: a CNAME chain was followed but cannot be answered from its links",
 				"qname", qname, "qtype", dns.TypeToString[qtype])
 			m.Answer, m.Ns = nil, nil
 			m.SetRcode(r, dns.RcodeServerFailure)
@@ -1596,7 +1609,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 	}
 	m.SetRcode(r, rcode)
 	if rrset != nil {
-		lgImr.Debug("ProcessAuthDNSResponse: received response from IterativeDNSQuery", "count", len(rrset.RRs))
+		imr.lgImr().Debug("ProcessAuthDNSResponse: received response from IterativeDNSQuery", "count", len(rrset.RRs))
 		// The TTL on the wire is what is LEFT of the entry's lifetime.
 		//
 		// This RRset may have come off the wire moments ago or out of the
@@ -1672,7 +1685,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 				v, err := imr.Cache.ValidateAnswer(ctx, rrset, proof, imr.IterativeDNSQueryFetcher())
 				vstate, edeCode, edeText = v.State, v.EDECode, v.EDEText
 				if err != nil && !msgoptions.CD {
-					lgImr.Error("failed to validate RRset", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
+					imr.lgImr().Error("failed to validate RRset", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
 					m.Answer = nil
 					m.Ns = nil
 					m.SetRcode(r, dns.RcodeServerFailure)
@@ -1710,7 +1723,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		}
 		appendWildcardProof(m, entry, msgoptions)
 		attachAnswerEDE(m, r, vstate, edeCode, edeText, msgoptions)
-		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
+		imr.setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
 	}
@@ -1742,7 +1755,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		}
 		m.SetRcode(r, rc)
 		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r, cached)
-		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
+		imr.setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
 	case cache.ContextReferral:
@@ -1756,7 +1769,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		}
 		m.SetRcode(r, dns.RcodeSuccess)
 		imr.serveNegativeResponse(ctx, qname, qtype, msgoptions, m, r, cached)
-		setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
+		imr.setPrivacyStatus(m, msgoptions, privacyStatusFor(transport))
 		w.WriteMsg(m)
 		return true, nil
 	}
@@ -2047,7 +2060,7 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic Config) (map[string][]*dns.DS, ma
 		use, why := ic.RootAnchorFallback()
 		if !use {
 			imr.anchorNotice.Do(func() {
-				lgImr.Warn("no trust anchor configured, and the root may not be the IANA root, so the compiled-in"+
+				imr.lgImr().Warn("no trust anchor configured, and the root may not be the IANA root, so the compiled-in"+
 					" root anchor is not used: nothing will validate (answers are Indeterminate)."+
 					" Configure trust-anchor-ds or trust-anchor-file for the root in use", "reason", why)
 			})
@@ -2070,7 +2083,7 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic Config) (map[string][]*dns.DS, ma
 			for _, ds := range dss {
 				tags = append(tags, fmt.Sprint(ds.KeyTag))
 			}
-			lgImr.Info("no trust anchor configured: using the compiled-in IANA root trust anchor",
+			imr.lgImr().Info("no trust anchor configured: using the compiled-in IANA root trust anchor",
 				"zone", ".", "keytags", strings.Join(tags, ","))
 		})
 		return dsByName, dnskeysByName, nil
@@ -2097,7 +2110,7 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic Config) (map[string][]*dns.DS, ma
 		for _, ds := range dss {
 			name := anchorZone(ds.Hdr.Name)
 			dsByName[name] = append(dsByName[name], ds)
-			lgImr.Info("configured DS trust anchor", "zone", name, "keytag", ds.KeyTag, "digesttype", ds.DigestType)
+			imr.lgImr().Info("configured DS trust anchor", "zone", name, "keytag", ds.KeyTag, "digesttype", ds.DigestType)
 		}
 	}
 
@@ -2106,7 +2119,7 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic Config) (map[string][]*dns.DS, ma
 	// the same parser, so any format quirks are handled in one place.
 	if taFile != "" {
 		fileDS, fileKeys, err := cache.LoadTrustAnchorsFromFile(taFile, func(format string, args ...any) {
-			lgImr.Warn(fmt.Sprintf("trust-anchor-file %s: "+format, append([]any{taFile}, args...)...))
+			imr.lgImr().Warn(fmt.Sprintf("trust-anchor-file %s: "+format, append([]any{taFile}, args...)...))
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read trust-anchor-file %q: %v", taFile, err)
@@ -2127,10 +2140,10 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic Config) (map[string][]*dns.DS, ma
 // addDirectDNSKEYTrustAnchors adds direct DNSKEY trust anchors to the cache.
 func (imr *Imr) addDirectDNSKEYTrustAnchors(dnskeysByName map[string][]*dns.DNSKEY) {
 	for name, list := range dnskeysByName {
-		lgImr.Info("zone has DNSKEY trust anchors", "zone", name)
+		imr.lgImr().Info("zone has DNSKEY trust anchors", "zone", name)
 		exp := cache.Now().Add(365 * 24 * time.Hour)
 		for _, dk := range list {
-			lgImr.Info("adding DNSKEY trust anchor", "zone", name, "keyid", dk.KeyTag())
+			imr.lgImr().Info("adding DNSKEY trust anchor", "zone", name, "keyid", dk.KeyTag())
 			imr.DnskeyCache.Set(name, dk.KeyTag(), &cache.CachedDnskeyRRset{
 				Name:        name,
 				Keyid:       dk.KeyTag(),
@@ -2139,7 +2152,7 @@ func (imr *Imr) addDirectDNSKEYTrustAnchors(dnskeysByName map[string][]*dns.DNSK
 				Dnskey:      *dk,
 				Expiration:  exp,
 			})
-			lgImr.Info("added DNSKEY trust anchor", "zone", name, "keyid", dk.KeyTag(), "expires", exp)
+			imr.lgImr().Info("added DNSKEY trust anchor", "zone", name, "keyid", dk.KeyTag(), "expires", exp)
 		}
 		imr.markAnchorZoneSecure(name, "DNSKEY")
 	}
@@ -2159,7 +2172,7 @@ func (imr *Imr) markAnchorZoneSecure(name, kind string) {
 	}
 	z.SetState(cache.ValidationStateSecure)
 	imr.Cache.ZoneMap.Set(name, z)
-	lgImr.Debug("zone added to ZoneMap as secure via trust anchor", "zone", name, "anchor", kind)
+	imr.lgImr().Debug("zone added to ZoneMap as secure via trust anchor", "zone", name, "anchor", kind)
 }
 
 // seedDSRRsetFromTrustAnchors seeds the DS RRset from trust anchors into the cache.
@@ -2191,7 +2204,7 @@ func (imr *Imr) seedDSRRsetFromTrustAnchors(anchorName string, dslist []*dns.DS)
 		State:      cache.ValidationStateSecure,
 		Expiration: cache.Now().Add(time.Duration(minTTL) * time.Second),
 	})
-	lgImr.Debug("seeded validated DS RRset from trust anchors", "zone", anchorName, "count", len(rrds), "ttl", minTTL)
+	imr.lgImr().Debug("seeded validated DS RRset from trust anchors", "zone", anchorName, "count", len(rrds), "ttl", minTTL)
 	imr.Cache.AddTrustAnchorDS(anchorName, dslist)
 	imr.markAnchorZoneSecure(anchorName, "DS")
 }
@@ -2227,7 +2240,7 @@ func (imr *Imr) matchDSTrustAnchorsToDNSKEYs(anchorName string, dslist []*dns.DS
 					Expiration:  exp,
 				}
 				imr.DnskeyCache.Set(cdr.Name, cdr.Keyid, &cdr)
-				lgImr.Info("DS matched DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "expires", exp)
+				imr.lgImr().Info("DS matched DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "expires", exp)
 			}
 		}
 	}
@@ -2248,7 +2261,7 @@ func (imr *Imr) validateDNSKEYRRsetUsingSeededDS(anchorName string, rrset *core.
 		}
 		valid, _ := cache.ValidateDNSKEYRRsetUsingDS(rrset, ds, name, verbose)
 		if valid {
-			lgImr.Debug("DNSKEY RRset validated using DS trust anchor", "zone", anchorName, "keytag", ds.KeyTag)
+			imr.lgImr().Debug("DNSKEY RRset validated using DS trust anchor", "zone", anchorName, "keytag", ds.KeyTag)
 			return true
 		}
 	}
@@ -2264,7 +2277,7 @@ func (imr *Imr) validateDNSKEYRRsetUsingDirectTA(anchorName string, rrset *core.
 		if core.EqualNames(item.Val.Name, name) && item.Val.TrustAnchor && item.Val.State == cache.ValidationStateSecure {
 			valid, _ := cache.ValidateDNSKEYRRsetSignature(rrset, item.Val.Keyid, name, &item.Val.Dnskey, verbose)
 			if valid {
-				lgImr.Debug("DNSKEY RRset validated using direct DNSKEY trust anchor", "zone", anchorName, "keytag", item.Val.Keyid)
+				imr.lgImr().Debug("DNSKEY RRset validated using direct DNSKEY trust anchor", "zone", anchorName, "keytag", item.Val.Keyid)
 				return true
 			}
 		}
@@ -2304,7 +2317,7 @@ func (imr *Imr) validateAndCacheDNSKEYRRset(ctx context.Context, anchorName stri
 	var vstate cache.ValidationState
 	if crr != nil && crr.State == cache.ValidationStateSecure {
 		// Already validated, use the cached state
-		lgImr.Debug("DNSKEY RRset already validated in cache", "zone", anchorName)
+		imr.lgImr().Debug("DNSKEY RRset already validated in cache", "zone", anchorName)
 		// vstate not needed here as we're using cached state
 	} else {
 		// Not validated yet, validate using trust anchors directly
@@ -2325,7 +2338,7 @@ func (imr *Imr) validateAndCacheDNSKEYRRset(ctx context.Context, anchorName stri
 		}
 
 		if !validated {
-			lgImr.Error("DNSKEY RRset failed to validate using trust anchors", "zone", anchorName)
+			imr.lgImr().Error("DNSKEY RRset failed to validate using trust anchors", "zone", anchorName)
 			return fmt.Errorf("failed to validate %q DNSKEY RRset using trust anchors", anchorName)
 		}
 
@@ -2379,9 +2392,9 @@ func (imr *Imr) updateDNSKEYCacheFromRRset(anchorName string, rrset *core.RRset,
 				stored = k.Expiration
 			}
 			if trustAnchor {
-				lgImr.Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "trustAnchor", true, "expires", stored)
+				imr.lgImr().Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "trustAnchor", true, "expires", stored)
 			} else {
-				lgImr.Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "expires", stored)
+				imr.lgImr().Info("cached DNSKEY", "zone", cdr.Name, "keyid", cdr.Keyid, "expires", stored)
 			}
 		}
 	}
@@ -2393,11 +2406,11 @@ func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string,
 	// Fetch and validate the NS RRset for the anchor zone (non-fatal - continue even if it fails)
 	nsRRset, _, _, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), anchorName, dns.TypeNS, serverMap, serversZone, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
 	if err != nil {
-		lgImr.Warn("failed to fetch NS RRset for trust anchor zone", "zone", anchorName, "err", err)
+		imr.lgImr().Warn("failed to fetch NS RRset for trust anchor zone", "zone", anchorName, "err", err)
 		return
 	}
 	if nsRRset == nil || len(nsRRset.RRs) == 0 {
-		lgImr.Warn("no NS RRset found for trust anchor zone", "zone", anchorName)
+		imr.lgImr().Warn("no NS RRset found for trust anchor zone", "zone", anchorName)
 		return
 	}
 	// Check if the NS RRset is already validated in cache (from IterativeDNSQuery)
@@ -2405,17 +2418,17 @@ func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string,
 	var nsVstate cache.ValidationState
 	if nsCrr != nil && nsCrr.State == cache.ValidationStateSecure {
 		// Already validated, use the cached state
-		lgImr.Debug("NS RRset already validated in cache", "zone", anchorName)
+		imr.lgImr().Debug("NS RRset already validated in cache", "zone", anchorName)
 		// nsVstate not needed here as we're using cached state
 	} else {
 		// Not validated yet, validate it now
 		nsVstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 		if err != nil {
-			lgImr.Warn("failed to validate NS RRset for trust anchor zone", "zone", anchorName, "err", err)
+			imr.lgImr().Warn("failed to validate NS RRset for trust anchor zone", "zone", anchorName, "err", err)
 			return
 		}
 		if nsVstate != cache.ValidationStateSecure {
-			lgImr.Warn("NS RRset failed to validate for trust anchor zone", "zone", anchorName, "vstate", cache.ValidationStateToString[nsVstate])
+			imr.lgImr().Warn("NS RRset failed to validate for trust anchor zone", "zone", anchorName, "vstate", cache.ValidationStateToString[nsVstate])
 			return
 		}
 		// Update cached NS RRset with validated state
@@ -2444,7 +2457,7 @@ func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string,
 
 // processTrustAnchorZone processes a single trust anchor zone: fetches, validates, and caches DNSKEY and NS RRsets.
 func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, dsByName map[string][]*dns.DS, dnskeysByName map[string][]*dns.DNSKEY) error {
-	lgImr.Info("processing trust anchor zone", "zone", anchorName)
+	imr.lgImr().Info("processing trust anchor zone", "zone", anchorName)
 
 	// Seed DS RRset from trust anchors (if provided) into cache as validated,
 	// so DNSKEY validation can find a validated DS RRset.
@@ -2507,7 +2520,7 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 	}
 	z.SetState(cache.ValidationStateSecure)
 	imr.Cache.ZoneMap.Set(anchorName, z)
-	lgImr.Debug("zone added to ZoneMap as secure via DS trust anchor", "zone", anchorName)
+	imr.lgImr().Debug("zone added to ZoneMap as secure via DS trust anchor", "zone", anchorName)
 
 	// Validate NS RRset (non-fatal). Not for a forwarded anchor zone: that
 	// validates a delegation the resolver never uses, and for a forwarded root
@@ -2565,7 +2578,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, ic Config) error 
 	if hasRoot {
 		anchorNames = append([]string{"."}, anchorNames...)
 	}
-	lgImr.Info("processing trust anchor zones", "count", len(anchorNames), "names", anchorNames)
+	imr.lgImr().Info("processing trust anchor zones", "count", len(anchorNames), "names", anchorNames)
 
 	// Process each trust anchor zone. One that fails does not stop the others:
 	// every anchor zone is Secure from the moment it was loaded, and one whose
@@ -2578,7 +2591,7 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, ic Config) error 
 		// the forward about the server's own zone (#842). The anchor itself
 		// is in place already, for any question that comes first.
 		if imr.pendingOwnZone != nil && imr.pendingOwnZone(anchorName) {
-			lgImr.Info("trust anchor zone is hosted here and not loaded yet: its keys will come from the zone", "zone", anchorName)
+			imr.lgImr().Info("trust anchor zone is hosted here and not loaded yet: its keys will come from the zone", "zone", anchorName)
 			if dslist := dsByName[anchorName]; len(dslist) > 0 {
 				imr.seedDSRRsetFromTrustAnchors(anchorName, dslist)
 			}

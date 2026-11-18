@@ -90,8 +90,11 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRs
 
 // NewRRsetCache creates and initializes an RRsetCacheT with per-transport DNS clients and empty concurrent maps.
 //
-// The returned cache has ready-to-use concurrent maps for RRsets, Servers, ServerMap, AuthServerMap, ZoneMap and a reference to the global DnskeyCache, along with per-transport DNS clients (Do53, DoT, DoH, DoQ) using standard ports. The provided logger is used for cache logging; the verbose and debug flags enable their respective logging modes.
+// The returned cache has ready-to-use concurrent maps for RRsets, Servers, ServerMap, AuthServerMap, ZoneMap and a reference to the global DnskeyCache, along with per-transport DNS clients (Do53, DoT, DoH, DoQ) using standard ports. The provided logger is used for cache logging (nil is the log package's); the verbose and debug flags enable their respective logging modes.
 func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
+	if lg == nil {
+		lg = log.Default()
+	}
 	var client = map[core.Transport]core.DNSClienter{}
 
 	client[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, "53", nil)
@@ -138,7 +141,7 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 	if crrset.Expiration.Before(Now()) {
 		rrcache.RRsets.Remove(lookupKey)
 		if rrcache.Debug {
-			log.Printf("RRsetCache: Removed expired key %s (%s)", lookupKey, dns.TypeToString[qtype])
+			rrcache.Logger.Printf("RRsetCache: Removed expired key %s (%s)", lookupKey, dns.TypeToString[qtype])
 		}
 		// If an NS RRset expired, also remove its server mappings for that
 		// zone, unless the operator configured them (keepsServerMap)
@@ -147,7 +150,7 @@ func (rrcache *RRsetCacheT) Get(qname string, qtype uint16) *CachedRRset {
 			if !rrcache.keepsServerMap(qname) {
 				rrcache.ServerMap.Remove(qname)
 				if rrcache.Debug {
-					log.Printf("RRsetCache: Removed ServerMap entry for zone %s due to NS expiry", qname)
+					rrcache.Logger.Printf("RRsetCache: Removed ServerMap entry for zone %s due to NS expiry", qname)
 				}
 			}
 			rrcache.serverMapMu.Unlock()
@@ -193,7 +196,7 @@ func (rrcache *RRsetCacheT) set(qname string, qtype uint16, crrset *CachedRRset,
 	}
 
 	if crrset == nil {
-		log.Printf("RRsetCache:Set: nil crrset for key %s - ignored", lookupKey)
+		rrcache.Logger.Printf("RRsetCache:Set: nil crrset for key %s - ignored", lookupKey)
 		return false
 	}
 
@@ -214,7 +217,7 @@ func (rrcache *RRsetCacheT) set(qname string, qtype uint16, crrset *CachedRRset,
 	if crrset.RRset != nil && len(crrset.RRset.RRs) > 0 {
 		crrset.Ttl, crrset.Expiration = entryLifetime(crrset, qtype, now, limits, bounded)
 		if rrcache.Debug && qtype == dns.TypeNS {
-			log.Printf("RRsetCache:Set: NS lifetime %ds for zone %q (Context=%s)", crrset.Ttl, qname, CacheContextToString[crrset.Context])
+			rrcache.Logger.Printf("RRsetCache:Set: NS lifetime %ds for zone %q (Context=%s)", crrset.Ttl, qname, CacheContextToString[crrset.Context])
 		}
 	} else {
 		if crrset.Expiration.IsZero() && crrset.Ttl > 0 {
@@ -270,7 +273,7 @@ func (rrcache *RRsetCacheT) evictOldestRRset() {
 	if !first {
 		rrcache.RRsets.Remove(oldestKey)
 		if rrcache.Debug {
-			log.Printf("RRsetCache: evicted oldest entry %s (expired %v) to stay within %d limit", oldestKey, oldestTime, rrsetCacheMaxEntries)
+			rrcache.Logger.Printf("RRsetCache: evicted oldest entry %s (expired %v) to stay within %d limit", oldestKey, oldestTime, rrsetCacheMaxEntries)
 		}
 	}
 }
@@ -589,9 +592,9 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 		tmpauthserver.families = rrcache.families
 		switch kept := rrcache.families.filter(server.Addrs); {
 		case len(kept) == 0 && len(server.Addrs) > 0:
-			log.Printf("AddStub: zone %s server %s: WARNING: every configured address is of an address family not in use; the server cannot be queried (imrengine.outbound-address-families)", zone, server.Name)
+			rrcache.Logger.Printf("AddStub: zone %s server %s: WARNING: every configured address is of an address family not in use; the server cannot be queried (imrengine.outbound-address-families)", zone, server.Name)
 		case len(kept) < len(server.Addrs):
-			log.Printf("AddStub: zone %s server %s: addresses of an address family not in use are left out (imrengine.outbound-address-families)", zone, server.Name)
+			rrcache.Logger.Printf("AddStub: zone %s server %s: addresses of an address family not in use are left out (imrengine.outbound-address-families)", zone, server.Name)
 		}
 		// Override defaults with config values
 		tmpauthserver.SetAddrs(server.Addrs)
@@ -603,7 +606,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 		if server.TransportSignal != "" {
 			kvMap, err := core.ParseTransportString(server.TransportSignal)
 			if err != nil {
-				log.Printf("AddStub: invalid transport string for %s: %q: %v", server.Name, server.TransportSignal, err)
+				rrcache.Logger.Printf("AddStub: invalid transport string for %s: %q: %v", server.Name, server.TransportSignal, err)
 			} else {
 				// build weights and order by weight desc (stable)
 				type pair struct {
@@ -635,7 +638,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				for _, p := range pairs {
 					t, err := core.StringToTransport(p.k)
 					if err != nil {
-						log.Printf("AddStub: unknown transport %q for %s", p.k, server.Name)
+						rrcache.Logger.Printf("AddStub: unknown transport %q for %s", p.k, server.Name)
 						continue
 					}
 					weights[t] = p.w
@@ -740,7 +743,7 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 			for _, alpn := range server.GetAlpn() {
 				t, err := core.StringToTransport(alpn)
 				if err != nil {
-					log.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
+					rrcache.Logger.Printf("rrcache.AddServers: error from StringToTransport: %v", err)
 					continue
 				}
 				sharedServer.AddAlpn(alpn)
@@ -989,7 +992,7 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 	// If no hints file is configured, use compiled-in hints
 	if hintsfile == "" || strings.TrimSpace(hintsfile) == "" {
 		if !rrcache.Quiet {
-			log.Printf("PrimeWithHints: no root-hints config provided, using compiled-in root hints")
+			rrcache.Logger.Printf("PrimeWithHints: no root-hints config provided, using compiled-in root hints")
 		}
 		data = []byte(CompiledInRootHints)
 		source = "compiled-in"
@@ -999,7 +1002,7 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 			return nil, fmt.Errorf("Root hints file %s not found: %v", hintsfile, err)
 		}
 
-		log.Printf("PrimeWithHints: reading root hints from file %s", hintsfile)
+		rrcache.Logger.Printf("PrimeWithHints: reading root hints from file %s", hintsfile)
 		// Read and parse root hints file
 		data, err = os.ReadFile(hintsfile)
 		if err != nil {
@@ -1024,7 +1027,7 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 		switch rr.Header().Rrtype {
 		case dns.TypeNS:
 			if rr.Header().Name != "." {
-				log.Printf("Non-root NS record among hints: %v. Ignored.", rr.String())
+				rrcache.Logger.Printf("Non-root NS record among hints: %v. Ignored.", rr.String())
 				continue
 			}
 			nsRecords = append(nsRecords, rr)
@@ -1040,12 +1043,12 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 			authMap[nsname] = server
 			rootns = append(rootns, nsname)
 			if rrcache.Debug {
-				log.Printf("PrimeWithHints: adding server for root: name %q: src %s, transports %v",
+				rrcache.Logger.Printf("PrimeWithHints: adding server for root: name %q: src %s, transports %v",
 					nsname, server.GetSrc(), server.GetTransports())
 			}
 
 		case dns.TypeA, dns.TypeAAAA:
-			// log.Printf("PWH: read address RR: %s", rr.String())
+			// rrcache.Logger.Printf("PWH: read address RR: %s", rr.String())
 			name := rr.Header().Name
 			glueRecords[name] = append(glueRecords[name], rr)
 		}
@@ -1058,7 +1061,7 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 	// Store NS records for root
 	if len(nsRecords) > 0 {
 		if !rrcache.Quiet {
-			log.Printf("Found %d NS RRs quiet: %v", len(nsRecords), rrcache.Quiet)
+			rrcache.Logger.Printf("Found %d NS RRs quiet: %v", len(nsRecords), rrcache.Quiet)
 		}
 		rrcache.Set(".", dns.TypeNS, &CachedRRset{
 			Name:    ".",
@@ -1083,11 +1086,11 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 
 	// Store glue records for root nameservers
 	if !rrcache.Quiet {
-		log.Printf("Found %d glue records", len(glueRecords))
+		rrcache.Logger.Printf("Found %d glue records", len(glueRecords))
 	}
 	for name, rrs := range glueRecords {
 		if !nsMap[name] {
-			log.Printf("*** Glue record for a non-root nameserver found: %v. Ignored.", name)
+			rrcache.Logger.Printf("*** Glue record for a non-root nameserver found: %v. Ignored.", name)
 			continue
 		}
 
@@ -1110,7 +1113,7 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 		}
 		authMap[name] = tmpsrv
 		if rrcache.Debug {
-			log.Printf("PrimeWithHints: adding addrs to server for root: name %q: addrs %v", name, tmpsrv.GetAddrs())
+			rrcache.Logger.Printf("PrimeWithHints: adding addrs to server for root: name %q: addrs %v", name, tmpsrv.GetAddrs())
 		}
 
 		// Create RRset for each type
@@ -1137,7 +1140,7 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 	rrcache.Servers.Set(".", servers)
 
 	if rrcache.Debug {
-		log.Printf("*** RRsetCache: seeded root hints from %s: %v", source, rootns)
+		rrcache.Logger.Printf("*** RRsetCache: seeded root hints from %s: %v", source, rootns)
 	}
 	return authMap, nil
 }
@@ -1223,7 +1226,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 	// var servers []string
 	var servers map[string]*AuthServer
 	if rrcache.Debug {
-		log.Printf("FindClosestKnownZone: checking qname %q against %d zones with data in cache", qname, rrcache.Servers.Count())
+		rrcache.Logger.Printf("FindClosestKnownZone: checking qname %q against %d zones with data in cache", qname, rrcache.Servers.Count())
 	}
 
 	for item := range rrcache.ServerMap.IterBuffered() {
@@ -1250,7 +1253,7 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 		for name := range cp {
 			auths = append(auths, name)
 		}
-		log.Printf("FindClosestKnownZone: authservers for zone %q: %s", qname, strings.Join(auths, ", "))
+		rrcache.Logger.Printf("FindClosestKnownZone: authservers for zone %q: %s", qname, strings.Join(auths, ", "))
 	}
 	return bestmatch, cp, nil
 }

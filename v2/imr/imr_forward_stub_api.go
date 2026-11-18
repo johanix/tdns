@@ -137,11 +137,11 @@ func (imr *Imr) probeForwardUpstream(ctx context.Context, zone string, up *Forwa
 			return rtt, cerr
 		}
 		up.recordFailure(start, err)
-		lgImr.Warn("forward upstream unreachable", "zone", zone, "upstream", up.Label, "err", err)
+		imr.lgImr().Warn("forward upstream unreachable", "zone", zone, "upstream", up.Label, "err", err)
 		return rtt, err
 	}
 	up.recordSuccess()
-	lgImr.Debug("forward upstream probe ok", "zone", zone, "upstream", up.Label, "rtt", rtt)
+	imr.lgImr().Debug("forward upstream probe ok", "zone", zone, "upstream", up.Label, "rtt", rtt)
 	return rtt, nil
 }
 

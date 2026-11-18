@@ -63,7 +63,7 @@ func (imr *Imr) withoutBadPorts(server *cache.AuthServer, recs []ootsRecord) []o
 			copy(out, recs[:i])
 		}
 		if !imr.Quiet {
-			lgDns.Debug("transport signal: a port on the bad-port list refused; the nameserver itself on the default port",
+			imr.lgDns().Debug("transport signal: a port on the bad-port list refused; the nameserver itself on the default port",
 				"servername", server.Name, "port", rec.port, "target", rec.target, "transports", MarshalTransport(rec.raw))
 		}
 		rec.port, rec.target = 0, ""

@@ -59,10 +59,10 @@ func (imr *Imr) storeZoneServers(zone string, servers map[string]*cache.AuthServ
 		return
 	}
 	if err := imr.Cache.AddServers(zone, store); err != nil {
-		lgDns.Debug("storeZoneServers: AddServers failed", "zone", zone, "err", err)
+		imr.lgDns().Debug("storeZoneServers: AddServers failed", "zone", zone, "err", err)
 		return
 	}
-	lgDns.Debug("storeZoneServers: stored servers", "zone", zone, "count", len(store))
+	imr.lgDns().Debug("storeZoneServers: stored servers", "zone", zone, "count", len(store))
 }
 
 // lookupServerAddrs resolves nsname's A and AAAA records, the two at once, and
@@ -205,7 +205,7 @@ func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct
 	key := cache.ServerKey(nsname)
 	chain, _ := ctx.Value(nsLookupChainKey{}).([]string)
 	if slices.Contains(chain, key) {
-		lgDns.Debug("nsLookup: nameserver is already being looked up on this chain",
+		imr.lgDns().Debug("nsLookup: nameserver is already being looked up on this chain",
 			"ns", nsname, "zone", zone, "chain", chain)
 		imr.nsAddrLookups.join(nsname, zone)
 		return ended
@@ -237,7 +237,7 @@ func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct
 		imr.lookupServerAddrs(ctx, srv, nsname)
 		zones := imr.nsAddrLookups.end(nsname)
 		if len(srv.GetAddrs()) == 0 {
-			lgDns.Debug("nsLookup: no address for nameserver", "ns", nsname, "zones", zones)
+			imr.lgDns().Debug("nsLookup: no address for nameserver", "ns", nsname, "zones", zones)
 			return
 		}
 		for _, z := range zones {

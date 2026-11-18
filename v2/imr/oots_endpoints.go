@@ -50,7 +50,7 @@ func (imr *Imr) honouredRecords(server *cache.AuthServer, set *svcbSignalSet, re
 		}
 		ignored++
 		if !imr.Quiet {
-			lgDns.Debug("transport signal: a redirect ignored for want of validation",
+			imr.lgDns().Debug("transport signal: a redirect ignored for want of validation",
 				"servername", server.Name, "target", rec.target, "port", rec.port, "transports", MarshalTransport(rec.raw),
 				"state", cache.SignalStateString(state), "via", set.via, "path", cache.FormatSignalPath(set.path))
 		}
@@ -361,7 +361,7 @@ func (imr *Imr) startEndpointLookup(target string) {
 		addrs, expire := lookup(imr, target)
 		imr.endpointAddrs.finish(target, addrs, expire, time.Now())
 		if !imr.Quiet {
-			lgDns.Debug("transport signal: endpoint addresses", "target", target, "addrs", addrs, "expire", expire)
+			imr.lgDns().Debug("transport signal: endpoint addresses", "target", target, "addrs", addrs, "expire", expire)
 		}
 	}()
 }

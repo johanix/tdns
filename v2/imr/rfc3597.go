@@ -37,7 +37,7 @@ func (imr *Imr) ParentZone(z string) (string, error) {
 				}
 			}
 			// If we got an answer but no SOA, the response is broken
-			lgImr.Error("received answer for SOA query but no SOA record found", "zone", upone)
+			imr.lgImr().Error("received answer for SOA query but no SOA record found", "zone", upone)
 			return "", fmt.Errorf("received answer for '%s' SOA query but no SOA record found", upone)
 		}
 
@@ -69,9 +69,9 @@ func (imr *Imr) ParentZone(z string) (string, error) {
 			}
 		}
 
-		lgImr.Error("failed to locate parent via Answer and Authority, guessing", "zone", z)
+		imr.lgImr().Error("failed to locate parent via Answer and Authority, guessing", "zone", z)
 		return upone, fmt.Errorf("failed to locate parent of '%s' via Answer and Authority", z)
 	}
-	lgImr.Error("had difficulties splitting zone", "zone", z)
+	imr.lgImr().Error("had difficulties splitting zone", "zone", z)
 	return z, fmt.Errorf("failed to split zone name '%s' into labels", z)
 }

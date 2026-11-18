@@ -18,7 +18,7 @@ func (imr *Imr) loadConfiguredTrustAnchors(ic Config) {
 	dsByName, dnskeysByName, err := imr.parseTrustAnchorsFromConfig(ic)
 	if err != nil {
 		// initializeImrTrustAnchors fails on the same error and reports it.
-		lgImr.Debug("trust anchors not loaded before priming", "err", err)
+		imr.lgImr().Debug("trust anchors not loaded before priming", "err", err)
 		return
 	}
 	imr.addDirectDNSKEYTrustAnchors(dnskeysByName)

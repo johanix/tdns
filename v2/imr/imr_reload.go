@@ -28,6 +28,7 @@ package imr
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 	"strings"
@@ -182,7 +183,7 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 	if err := forwardDiagsError(diags); err != nil {
 		return res, fmt.Errorf("imrengine.forward: %v", err)
 	}
-	newStubs, newFP, newServers := canonicalStubs(stubconf)
+	newStubs, newFP, newServers := canonicalStubs(imr.lgImr(), stubconf)
 
 	// One reload at a time: two concurrent reloads would each diff against
 	// the table the other is replacing, and the loser's cache-side stub work
@@ -210,7 +211,7 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 		if err := imr.Cache.AddStub(zone, newServers[zone]); err != nil {
 			// A rejected stub is not a reason to abandon the rest of the
 			// reload; report it and leave that zone's old servers in place.
-			lgImr.Error("stub zone reload failed, keeping previous servers", "zone", zone, "err", err)
+			imr.lgImr().Error("stub zone reload failed, keeping previous servers", "zone", zone, "err", err)
 			appliedFP[zone] = old.stubFP[zone]
 			continue
 		}
@@ -249,7 +250,7 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 			// The root's server map is the priming state, not a delegation
 			// the resolver can re-learn: removing it leaves a resolver that
 			// cannot start a walk.
-			lgImr.Warn("stub zone for the root removed from config; keeping its server map (re-priming needs a restart)")
+			imr.lgImr().Warn("stub zone for the root removed from config; keeping its server map (re-priming needs a restart)")
 			continue
 		}
 		imr.Cache.RemoveStub(zone)
@@ -279,14 +280,14 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 				// A zone a later reload has removed is no longer there to
 				// probe, which is not a failure of this one.
 				if _, err := imr.ProbeForwardUpstreamsReport(ctx, zone); err != nil {
-					lgImr.Warn("probing a reloaded forward zone failed", "zone", zone, "err", err)
+					imr.lgImr().Warn("probing a reloaded forward zone failed", "zone", zone, "err", err)
 				}
 			}
 		}(probeCtx, probeZones)
 	}
 
 	if res.Changed() {
-		lgImr.Info("imrengine zones reloaded", "summary", res.Summary())
+		imr.lgImr().Info("imrengine zones reloaded", "summary", res.Summary())
 	}
 	return res, nil
 }
@@ -295,25 +296,25 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 // each one's server list. Lenient by design — the same config that booted
 // must keep booting — so a duplicate zone (last wins) or an empty server list
 // is a WARN, not an error.
-func canonicalStubs(stubs []ImrStubConf) ([]string, map[string]string, map[string][]cache.AuthServer) {
+func canonicalStubs(lg *slog.Logger, stubs []ImrStubConf) ([]string, map[string]string, map[string][]cache.AuthServer) {
 	zones := make([]string, 0, len(stubs))
 	fps := make(map[string]string, len(stubs))
 	servers := make(map[string][]cache.AuthServer, len(stubs))
 	for _, sc := range stubs {
 		if sc.Zone == "" {
-			lgImr.Warn("stub zone without a zone name, ignored")
+			lg.Warn("stub zone without a zone name, ignored")
 			continue
 		}
 		zone := dns.Fqdn(core.CanonicalizeName(sc.Zone))
 		if _, ok := dns.IsDomainName(zone); !ok {
-			lgImr.Warn("stub zone is not a valid domain name, ignored", "zone", sc.Zone)
+			lg.Warn("stub zone is not a valid domain name, ignored", "zone", sc.Zone)
 			continue
 		}
 		if len(sc.Servers) == 0 {
-			lgImr.Warn("stub zone has no servers; it will resolve nothing", "zone", zone)
+			lg.Warn("stub zone has no servers; it will resolve nothing", "zone", zone)
 		}
 		if _, dup := fps[zone]; dup {
-			lgImr.Warn("stub zone is configured more than once; the last entry wins", "zone", zone)
+			lg.Warn("stub zone is configured more than once; the last entry wins", "zone", zone)
 			zones = dropZone(zones, zone)
 		}
 		zones = append(zones, zone)

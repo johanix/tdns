@@ -21,7 +21,7 @@ import (
 // sent no OPT at all, no OPT invented for it.
 func TestSetPrivacyStatusOnlyForClientsThatAsked(t *testing.T) {
 	m := new(dns.Msg)
-	setPrivacyStatus(m, &edns0.MsgOptions{HasPrivacy: false}, edns0.PrivacyEncrypted)
+	new(Imr).setPrivacyStatus(m, &edns0.MsgOptions{HasPrivacy: false}, edns0.PrivacyEncrypted)
 	if m.IsEdns0() != nil {
 		t.Error("response gained an OPT RR for a client that never asked")
 	}
@@ -32,7 +32,7 @@ func TestSetPrivacyStatusValues(t *testing.T) {
 		edns0.PrivacyCleartext, edns0.PrivacyEncrypted, edns0.PrivacyCached,
 	} {
 		m := new(dns.Msg)
-		setPrivacyStatus(m, &edns0.MsgOptions{HasPrivacy: true, Privacy: edns0.PrivacyStrict}, status)
+		new(Imr).setPrivacyStatus(m, &edns0.MsgOptions{HasPrivacy: true, Privacy: edns0.PrivacyStrict}, status)
 		got, found := edns0.ExtractPrivacyStatus(m.IsEdns0())
 		if !found {
 			t.Errorf("status %s: no PRIVACY option in the response", status)
@@ -49,7 +49,7 @@ func TestSetPrivacyStatusValues(t *testing.T) {
 // clearing DO on exactly the responses it touched.
 func TestSetPrivacyStatusPreservesDO(t *testing.T) {
 	m := new(dns.Msg)
-	setPrivacyStatus(m, &edns0.MsgOptions{HasPrivacy: true, DO: true}, edns0.PrivacyEncrypted)
+	new(Imr).setPrivacyStatus(m, &edns0.MsgOptions{HasPrivacy: true, DO: true}, edns0.PrivacyEncrypted)
 	opt := m.IsEdns0()
 	if opt == nil {
 		t.Fatal("no OPT RR in the response")
@@ -64,7 +64,7 @@ func TestSetPrivacyStatusPreservesDO(t *testing.T) {
 func TestSetPrivacyStatusReusesExistingOPT(t *testing.T) {
 	m := new(dns.Msg)
 	m.SetEdns0(1232, true)
-	setPrivacyStatus(m, &edns0.MsgOptions{HasPrivacy: true, DO: true}, edns0.PrivacyCached)
+	new(Imr).setPrivacyStatus(m, &edns0.MsgOptions{HasPrivacy: true, DO: true}, edns0.PrivacyCached)
 
 	opts := 0
 	for _, rr := range m.Extra {

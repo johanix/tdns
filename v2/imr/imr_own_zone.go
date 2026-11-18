@@ -184,7 +184,7 @@ func (imr *Imr) answerFromOwnZone(ctx context.Context, qname string, qtype uint1
 		r = z.Response(ctx, qname, qtype)
 	}
 	if r == nil || !r.Authoritative || (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) {
-		lgImr.Debug("own zone has no authoritative answer; asking elsewhere",
+		imr.lgImr().Debug("own zone has no authoritative answer; asking elsewhere",
 			"zone", z.Apex(), "qname", qname, "qtype", dns.TypeToString[qtype])
 		return nil, 0, cache.ContextFailure, ownZoneTransport, nil, false
 	}

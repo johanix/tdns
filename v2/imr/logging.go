@@ -3,22 +3,38 @@
  */
 package imr
 
-import "log/slog"
-
-// The resolver logs through two loggers: lgImr for the engine and lgDns for
-// the lookups. Both are slog.Default() as it is when the package initialises,
-// until SetLoggers replaces them. An application that sets its own default
-// logger later passes it to SetLoggers too; otherwise the resolver's records
-// reach it through the log package's bridge, at the bridge's level.
-var (
-	lgImr = slog.Default()
-	lgDns = slog.Default()
+import (
+	"log"
+	"log/slog"
 )
 
-// SetLoggers sets the loggers the resolver logs through: engine for the engine,
-// dns for the lookups. Call it before the first Imr is built; the loggers are
-// read without a lock. tdns passes its "engine" and "dns" subsystem loggers.
-func SetLoggers(engine, dns *slog.Logger) {
-	lgImr = engine
-	lgDns = dns
+// A resolver logs through the loggers it was built with (Options.Logger,
+// Options.LookupLogger): the engine through lgImr, the lookups through lgDns,
+// and its cache through a log.Logger over Options.Logger. Without them, and in
+// an Imr built by hand, it is slog.Default() at the time of the call.
+
+// lgImr is the logger the engine logs through.
+func (imr *Imr) lgImr() *slog.Logger {
+	if imr != nil && imr.logger != nil {
+		return imr.logger
+	}
+	return slog.Default()
+}
+
+// lgDns is the logger the lookups log through: Options.LookupLogger, or the
+// engine's.
+func (imr *Imr) lgDns() *slog.Logger {
+	if imr != nil && imr.lookupLogger != nil {
+		return imr.lookupLogger
+	}
+	return imr.lgImr()
+}
+
+// cacheLogger is the log.Logger the cache and the family tracker log
+// through: Options.Logger's handler at level Info, or the log package's.
+func cacheLogger(lg *slog.Logger) *log.Logger {
+	if lg == nil {
+		return log.Default()
+	}
+	return slog.NewLogLogger(lg.Handler(), slog.LevelInfo)
 }

@@ -3,6 +3,8 @@
  */
 package imr
 
+import "log/slog"
+
 // Options is what NewImr takes besides the imrengine: configuration. They
 // are the few things a resolver reads from outside it, so that an application
 // can build one without the daemon's Config. The zero value is a resolver with no large
@@ -28,6 +30,12 @@ type Options struct {
 	OwnZones OwnZones
 	// Quiet suppresses informational logging (useful for CLI tools).
 	Quiet bool
+	// Logger is what the resolver logs through: the engine, the lookups and
+	// the cache, which logs at level Info. Nil is slog.Default().
+	Logger *slog.Logger
+	// LookupLogger, when it is set, takes the lookups' records instead of
+	// Logger. The tdns daemon logs them under a subsystem of their own.
+	LookupLogger *slog.Logger
 }
 
 // ErrorSink is where a resolver reports the server-wide error conditions it

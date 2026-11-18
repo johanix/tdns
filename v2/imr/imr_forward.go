@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"net"
 	"sort"
 	"strings"
@@ -239,11 +240,11 @@ type ForwardZone struct {
 // Before this existed the responder wrote the SERVFAIL without any log line,
 // which is how a forwarding resolver could serve SERVFAIL for everything, for
 // an hour, in silence (#443).
-func (fz *ForwardZone) noteAllUpstreamsFailed(qname string, qtype uint16, live, attempts int, lastErr error) bool {
+func (fz *ForwardZone) noteAllUpstreamsFailed(lg *slog.Logger, qname string, qtype uint16, live, attempts int, lastErr error) bool {
 	if !fz.throttleServfailLog() {
 		return false
 	}
-	lgImr.Warn("forward zone: all upstreams failed, answering SERVFAIL (throttled: one line per 30s per zone)",
+	lg.Warn("forward zone: all upstreams failed, answering SERVFAIL (throttled: one line per 30s per zone)",
 		"zone", fz.Zone, "qname", qname, "qtype", dns.TypeToString[qtype],
 		"upstreams", live, "attempts", attempts, "lastErr", lastErr)
 	return true
@@ -252,11 +253,11 @@ func (fz *ForwardZone) noteAllUpstreamsFailed(qname string, qtype uint16, live, 
 // noteQuarantined is noteAllUpstreamsFailed for the zone that never had a
 // usable upstream to fail: same throttle, same "do not serve SERVFAIL in
 // silence" reason (#443), different cause.
-func (fz *ForwardZone) noteQuarantined(qname string, qtype uint16, why string) bool {
+func (fz *ForwardZone) noteQuarantined(lg *slog.Logger, qname string, qtype uint16, why string) bool {
 	if !fz.throttleServfailLog() {
 		return false
 	}
-	lgImr.Warn("forward zone is quarantined, answering SERVFAIL (throttled: one line per 30s per zone)",
+	lg.Warn("forward zone is quarantined, answering SERVFAIL (throttled: one line per 30s per zone)",
 		"zone", fz.Zone, "qname", qname, "qtype", dns.TypeToString[qtype], "reason", why)
 	return true
 }
@@ -728,7 +729,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 	// — forwarding is forward-only, and for a "zone: ." forward silently
 	// iterating would change the resolution path for everything.
 	if q, why := fz.quarantineState(); q {
-		fz.noteQuarantined(qname, qtype, why)
+		fz.noteQuarantined(imr.lgImr(), qname, qtype, why)
 		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
 			fmt.Errorf("forward zone %s is quarantined: %s", fz.Zone, why)
 	}
@@ -809,7 +810,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			starved++
 			lastErr = fmt.Errorf("upstream %s not attempted: %v left, below the %v an attempt needs",
 				up.Label, remaining.Round(time.Millisecond), forwardMinAttempt)
-			lgDns.Debug("forwardQuery: upstream starved", "qname", qname, "upstream", up.Label,
+			imr.lgDns().Debug("forwardQuery: upstream starved", "qname", qname, "upstream", up.Label,
 				"remaining", remaining, "floor", forwardMinAttempt)
 			continue
 		}
@@ -856,13 +857,13 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			starved++
 			lastErr = fmt.Errorf("upstream %s did not answer within its %v of the budget",
 				up.Label, slice.Round(time.Millisecond))
-			lgDns.Debug("forwardQuery: upstream slice expired", "qname", qname,
+			imr.lgDns().Debug("forwardQuery: upstream slice expired", "qname", qname,
 				"upstream", up.Label, "slice", slice)
 			// Not recordFailure -- the attempt was cut short, and one of those
 			// says nothing. A RUN of them says the upstream never answers, and
 			// this is where that run is counted.
 			if up.recordSliceTimeout(start) {
-				lgImr.Warn("forward upstream unreachable", "zone", fz.Zone, "upstream", up.Label,
+				imr.lgImr().Warn("forward upstream unreachable", "zone", fz.Zone, "upstream", up.Label,
 					"reason", "no answer within its slice of the query budget",
 					"times", forwardSliceTimeoutsBeforeFailing)
 				imr.updateForwardUpstreamError()
@@ -884,20 +885,20 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 				fmt.Errorf("forward zone %s: %w (attempts=%d, last error: %v)", fz.Zone, cerr, attempts, lastErr)
 		}
 		if err != nil {
-			lgDns.Debug("forwardQuery: upstream error", "qname", qname, "qtype", dns.TypeToString[qtype],
+			imr.lgDns().Debug("forwardQuery: upstream error", "qname", qname, "qtype", dns.TypeToString[qtype],
 				"upstream", up.Label, "err", err)
 			if up.recordFailure(start, err) {
 				// Reachability transition: this line is the only INFO-level
 				// trace of a mid-life upstream failure, so it must exist —
 				// repeat failures stay at Debug above.
-				lgImr.Warn("forward upstream unreachable", "zone", fz.Zone, "upstream", up.Label, "err", err)
+				imr.lgImr().Warn("forward upstream unreachable", "zone", fz.Zone, "upstream", up.Label, "err", err)
 				imr.updateForwardUpstreamError()
 			}
 			lastErr = err
 			continue
 		}
 		if up.recordSuccess() {
-			lgImr.Info("forward upstream recovered", "zone", fz.Zone, "upstream", up.Label)
+			imr.lgImr().Info("forward upstream recovered", "zone", fz.Zone, "upstream", up.Label)
 			imr.updateForwardUpstreamError()
 		}
 		// A reply that does not answer the question asked is not used (RFC 5452
@@ -906,7 +907,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		// rcode, it only sends the query on to the next upstream.
 		if qerr := replyMatchesQuery(r, m); qerr != nil {
 			lastErr = fmt.Errorf("upstream %s: %w", up.Label, qerr)
-			lgDns.Debug("forwardQuery: reply does not answer the question", "qname", qname,
+			imr.lgDns().Debug("forwardQuery: reply does not answer the question", "qname", qname,
 				"qtype", dns.TypeToString[qtype], "upstream", up.Label, "err", qerr)
 			continue
 		}
@@ -956,7 +957,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			continue
 		}
 	}
-	fz.noteAllUpstreamsFailed(qname, qtype, len(live), attempts, lastErr)
+	fz.noteAllUpstreamsFailed(imr.lgImr(), qname, qtype, len(live), attempts, lastErr)
 	// starved is reported separately from attempts because the two call for
 	// different action: attempts that failed say something about the
 	// upstreams, whereas starved ones say the budget was too small to try

@@ -84,11 +84,11 @@ func (imr *Imr) refreshRootLoop(ctx context.Context, hintsfile string,
 		forwarded = imr.forwardZoneFor(".") != nil
 		if forwarded {
 			if !wasForwarded {
-				lgImr.Info("RefreshRoot: the root is forwarded; idle until a reload changes that")
+				imr.lgImr().Info("RefreshRoot: the root is forwarded; idle until a reload changes that")
 			}
 			select {
 			case <-ctx.Done():
-				lgImr.Info("RefreshRoot: terminating (context cancelled)")
+				imr.lgImr().Info("RefreshRoot: terminating (context cancelled)")
 				return
 			case <-wake:
 			}
@@ -106,7 +106,7 @@ func (imr *Imr) refreshRootLoop(ctx context.Context, hintsfile string,
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			lgImr.Info("RefreshRoot: terminating (context cancelled)")
+			imr.lgImr().Info("RefreshRoot: terminating (context cancelled)")
 			return
 		case <-wake:
 			timer.Stop()
@@ -121,16 +121,16 @@ func (imr *Imr) refreshRootLoop(ctx context.Context, hintsfile string,
 func (imr *Imr) primeRoot(ctx context.Context, hintsfile string,
 	query func(context.Context, map[string]*cache.AuthServer) (*core.RRset, error)) {
 
-	lgImr.Info("RefreshRoot: the root is no longer forwarded; priming", "hintsfile", hintsfile)
+	imr.lgImr().Info("RefreshRoot: the root is no longer forwarded; priming", "hintsfile", hintsfile)
 	if err := imr.Cache.PrimeFromHintsOnly(hintsfile); err != nil {
-		lgImr.Error("RefreshRoot: priming from hints failed", "err", err)
+		imr.lgImr().Error("RefreshRoot: priming from hints failed", "err", err)
 		return
 	}
 	imr.PrimedVia = "hints (the root forward was removed)"
 	imr.PrimedAt = time.Now()
 	servers, _ := imr.Cache.ServerMapCopy(".")
 	if _, err := query(ctx, servers); err != nil {
-		lgImr.Warn("RefreshRoot: the live . NS fetch failed; the root NS is the hints' until its first refresh",
+		imr.lgImr().Warn("RefreshRoot: the live . NS fetch failed; the root NS is the hints' until its first refresh",
 			"err", err)
 		return
 	}
@@ -163,15 +163,15 @@ func (imr *Imr) rootRefreshPass(ctx context.Context, hintsfile string,
 		// Already gone. Nothing can be fetched without a root server
 		// address, so this is the one case that needs the hints -- and
 		// reaching it at all means a refresh was missed.
-		lgImr.Warn("RefreshRoot: the root NS RRset is gone; re-priming from hints",
+		imr.lgImr().Warn("RefreshRoot: the root NS RRset is gone; re-priming from hints",
 			"hintsfile", hintsfile)
 		if err := imr.Cache.PrimeFromHintsOnly(hintsfile); err != nil {
-			lgImr.Error("RefreshRoot: re-priming from hints failed", "err", err)
+			imr.lgImr().Error("RefreshRoot: re-priming from hints failed", "err", err)
 			return rootRefreshRetry
 		}
 		imr.PrimedVia = "hints (re-primed after expiry)"
 		imr.PrimedAt = time.Now()
-		lgImr.Info("RefreshRoot: re-primed from hints; the next refresh" +
+		imr.lgImr().Info("RefreshRoot: re-primed from hints; the next refresh" +
 			" will upgrade to the live roots")
 		return 0
 
@@ -256,26 +256,26 @@ func (imr *Imr) refreshRootFromLiveRoots(ctx context.Context,
 	// makes the same copy for the same reason.
 	servers, ok := imr.Cache.ServerMapCopy(".")
 	if !ok || len(servers) == 0 {
-		lgImr.Warn("RefreshRoot: no root servers in the cache to refresh against")
+		imr.lgImr().Warn("RefreshRoot: no root servers in the cache to refresh against")
 		return false
 	}
 
 	rrset, err := query(ctx, servers)
 	if err != nil || rrset == nil {
-		lgImr.Warn("RefreshRoot: refreshing the root NS failed; will retry while"+
+		imr.lgImr().Warn("RefreshRoot: refreshing the root NS failed; will retry while"+
 			" the current RRset is still valid", "err", err)
 		return false
 	}
 
 	after := imr.Cache.Peek(".", dns.TypeNS)
 	if after == nil {
-		lgImr.Warn("RefreshRoot: the fetch succeeded but the cache still holds no root NS")
+		imr.lgImr().Warn("RefreshRoot: the fetch succeeded but the cache still holds no root NS")
 		return false
 	}
 	// A fetch that returned the same near-expiry entry has not bought us
 	// anything, and treating it as success would spin until it expired.
 	if before != nil && !after.Expiration.After(before.Expiration) {
-		lgImr.Warn("RefreshRoot: the root NS was re-fetched but its expiry did not move",
+		imr.lgImr().Warn("RefreshRoot: the root NS was re-fetched but its expiry did not move",
 			"expiration", after.Expiration)
 		return false
 	}
@@ -285,12 +285,12 @@ func (imr *Imr) refreshRootFromLiveRoots(ctx context.Context,
 	// "moved by the round trip" passed for success, one query after another,
 	// until the RRset expired (#722).
 	if time.Until(after.Expiration) <= rootRefreshLead {
-		lgImr.Warn("RefreshRoot: the re-fetched root NS expires within the refresh lead;"+
+		imr.lgImr().Warn("RefreshRoot: the re-fetched root NS expires within the refresh lead;"+
 			" not counted as a refresh", "expiration", after.Expiration, "lead", rootRefreshLead)
 		return false
 	}
 
-	lgImr.Info("RefreshRoot: root NS refreshed from the live roots",
+	imr.lgImr().Info("RefreshRoot: root NS refreshed from the live roots",
 		"servers", len(servers), "expiration", after.Expiration)
 	return true
 }

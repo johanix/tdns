@@ -280,7 +280,7 @@ func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn
 		})
 		target := synthesizeFromDNAME(qname, dname.Name, d.Target)
 		if !core.EqualNames(cn.Target, target) {
-			lgDns.Warn("handleAnswer: the CNAME differs from what its DNAME synthesizes; following the DNAME",
+			imr.lgDns().Warn("handleAnswer: the CNAME differs from what its DNAME synthesizes; following the DNAME",
 				"qname", qname, "cname", cn.Target, "dname", dname.Name, "synthesized", target)
 		}
 		link.RRs = []dns.RR{&dns.CNAME{
@@ -324,7 +324,7 @@ func (imr *Imr) cacheCNAMELink(ctx context.Context, qname string, r *dns.Msg, cn
 func (imr *Imr) answerViaCNAME(ctx context.Context, qname string, qtype uint16, r *dns.Msg, cn *dns.CNAME, force bool, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
 	target, expire, err := imr.cacheCNAMELink(ctx, qname, r, cn, transport)
 	if err != nil {
-		lgDns.Error("handleAnswer: failed to validate a CNAME link", "qname", qname, "err", err)
+		imr.lgDns().Error("handleAnswer: failed to validate a CNAME link", "qname", qname, "err", err)
 		return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err, false
 	}
 	recordChainLink(ctx, qname, target, expire)
@@ -351,10 +351,10 @@ func (imr *Imr) answerViaCNAME(ctx context.Context, qname string, qtype uint16, 
 // answered from the link (IterativeDNSQueryWithLoopDetection).
 func (imr *Imr) cnameAsNoData(ctx context.Context, qname string, qtype uint16, r *dns.Msg, cn *dns.CNAME, transport core.Transport) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
 	if _, _, err := imr.cacheCNAMELink(ctx, qname, r, cn, transport); err != nil {
-		lgDns.Error("handleAnswer: failed to validate a CNAME link", "qname", qname, "err", err)
+		imr.lgDns().Error("handleAnswer: failed to validate a CNAME link", "qname", qname, "err", err)
 		return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err, false
 	}
-	lgDns.Debug("handleAnswer: the name is a CNAME, which holds no "+dns.TypeToString[qtype], "qname", qname)
+	imr.lgDns().Debug("handleAnswer: the name is a CNAME, which holds no "+dns.TypeToString[qtype], "qname", qname)
 	return nil, dns.RcodeSuccess, cache.ContextNoErrNoAns, transport, nil, true
 }
 
@@ -464,7 +464,7 @@ func (imr *Imr) chainAt(qname string, qtype uint16, privacy edns0.PrivacyLevel, 
 func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions, status edns0.PrivacyStatus, grace time.Duration) chainOutcome {
 	links, final, started, err := imr.chainAt(qname, qtype, msgoptions.Privacy, grace)
 	if err != nil {
-		lgImr.Info("ImrResponder: refusing a CNAME chain", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
+		imr.lgImr().Info("ImrResponder: refusing a CNAME chain", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
 		m.Answer, m.Ns = nil, nil
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)
@@ -501,7 +501,7 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 		disp, ede := imr.dispositionFor(state, edeCode, signed, msgoptions)
 		switch disp {
 		case answerServfail:
-			lgImr.Debug("ImrResponder: returning SERVFAIL for a CNAME chain with a part that did not validate",
+			imr.lgImr().Debug("ImrResponder: returning SERVFAIL for a CNAME chain with a part that did not validate",
 				"qname", qname, "qtype", dns.TypeToString[qtype], "part", e.Name, "type", dns.TypeToString[e.RRtype],
 				"state", cache.ValidationStateToString[state], "edeCode", ede)
 			m.Answer, m.Ns = nil, nil
@@ -574,7 +574,7 @@ func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.
 		appendWildcardProof(m, e, msgoptions)
 	}
 	attachAnswerEDE(m, r, beside.state, beside.code, beside.text, msgoptions)
-	setPrivacyStatus(m, msgoptions, status)
+	imr.setPrivacyStatus(m, msgoptions, status)
 	w.WriteMsg(m)
 	return chainServed
 }
