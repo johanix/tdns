@@ -1386,6 +1386,10 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	// and the zone refresh path publishes from conf.Service.Transport. A
 	// refused reload must leave the running signal in place.
 	runningTransport := conf.Service.Transport
+	// And the identities the signal is published for: ParseConfig decodes
+	// service.identities before it refuses the file too, and the preview and
+	// a zone's first-load pass would pair them with the running transport.
+	runningIdentities := slices.Clone(conf.Service.Identities)
 	// The template map in use, put back if the parse fails: ParseConfig
 	// installs a new map part-way through, and a check after that point
 	// can still refuse the reload. Adds and template re-expansion must not
@@ -1400,6 +1404,7 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
 		conf.Service.Transport = runningTransport
+		conf.Service.Identities = runningIdentities
 		Templates, conf.Templates = runningTemplates, runningTemplateList
 		conf.Journal = runningJournal
 	}
