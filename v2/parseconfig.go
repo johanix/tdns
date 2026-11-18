@@ -1307,9 +1307,31 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			polName := zconf.DnssecPolicy
 			usable, errMsg := resolveZonePolicyRef(polName, conf.Internal.DnssecPolicies)
 			if errMsg != "" {
-				lgConfig.Error("zone DNSSEC policy unusable, zone will not be signed", "zone", zname, "policy", polName, "err", errMsg)
-				zconf.DnssecPolicy = ""
-				zd.SetError(DnssecError, "%s", errMsg)
+				// A policy the config names and the zone cannot use.
+				//
+				// A zone that signs, or asks to, and one that has not loaded, is
+				// quarantined with the reason, and the name is cleared so that
+				// nothing is bound under it (which also drops the signing option
+				// below: it is ignored without a policy).
+				//
+				// A zone that is loaded and does not sign is not: it serves as it
+				// did, and the policy is for a signing role it may learn later. It
+				// is told, and the name goes on to the engine as the config's, not
+				// as a removal: the engine keeps the policy bound to the zone, with
+				// the reload's warning, or, with none bound, records the name for
+				// the role that binds (recordPolicyOfNonSigningZone). Quarantining
+				// it here refused every refresh of the zone and answered its
+				// queries with SERVFAIL, and clearing the name was read by the
+				// engine as the policy removed (#1000).
+				if zoneKeepsServingWithoutPolicy(zd, zconf) {
+					lgConfig.Warn("zone DNSSEC policy unusable; the zone does not sign, so it keeps serving and keeps its policy binding",
+						"zone", zname, "policy", polName, "err", errMsg)
+					zd.SetError(DnssecPolicyWarning, "%s; the zone does not sign, so it keeps serving and keeps its policy binding", errMsg)
+				} else {
+					lgConfig.Error("zone DNSSEC policy unusable, zone will not be signed", "zone", zname, "policy", polName, "err", errMsg)
+					zconf.DnssecPolicy = ""
+					zd.SetError(DnssecError, "%s", errMsg)
+				}
 			} else if usable {
 				lgConfig.Info("DNSSEC policy accepted", "zone", zname, "policy", polName)
 			}
@@ -2530,6 +2552,29 @@ func (conf *Config) parseDnssecConfig() error {
 		conf.Internal.DnssecPolicies["default"] = BuiltinDefaultDnssecPolicy()
 	}
 	return nil
+}
+
+// zoneKeepsServingWithoutPolicy reports whether a zone whose configured DNSSEC
+// policy cannot be used is left in service, with a warning, rather than
+// quarantined: it has loaded, so it has a binding for a reload to keep, and it
+// does not sign. A zone signs here if the zone as it runs does (its options,
+// which a derived app's run-time options are among), or the config being parsed
+// asks it to. The zone's options are read as the previous parse and the daemon
+// left them: this parse has not applied its own yet.
+func zoneKeepsServingWithoutPolicy(zd *ZoneData, zconf *ZoneConf) bool {
+	zd.mu.Lock()
+	loaded, signs := !zd.FirstZoneLoad, zd.signsItsOwnContent()
+	zd.mu.Unlock()
+	if !loaded || signs {
+		return false
+	}
+	for _, o := range zconf.OptionsStrs {
+		switch StringToZoneOption[strings.ToLower(strings.TrimSpace(o))] {
+		case OptOnlineSigning, OptInlineSigning:
+			return false
+		}
+	}
+	return true
 }
 
 // resolveZonePolicyRef decides whether a zone's named DNSSEC policy is usable.

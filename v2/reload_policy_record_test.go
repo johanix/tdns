@@ -668,3 +668,111 @@ func TestAReloadThatChangesTheAlgorithmsOfASigningZonesPolicyUnderItsNameIsRefus
 	}
 	soaSignedWith("after an edit that keeps the algorithms", dns.ED25519)
 }
+
+// A reload that names a policy the config does not define or cannot use, for a
+// zone that is loaded and does not sign, does not take the zone out of service,
+// and does not remove its policy: the zone keeps the binding it has, with a
+// warning. This goes through the parse, which is where it was decided, and which
+// the tests that hand the engine a refresher do not reach.
+func TestAReloadToAnUnresolvedPolicyDoesNotQuarantineAZoneThatDoesNotSign(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "unresolved.config.example.")
+	base := named(kskzsk(dns.ED25519, dns.ED25519), "base")
+	broken := DnssecPolicy{Name: "broken", Error: "a test policy that did not parse"}
+	pols := map[string]DnssecPolicy{"base": base, "broken": broken}
+	withLivePolicies(t, pols)
+
+	zd := h.reload(false, "base", pols)
+	if zd.signsItsOwnContent() {
+		t.Fatal("the zone signs; the test has lost its point")
+	}
+	if err := zd.BindPolicyWithoutSigning(); err != nil {
+		t.Fatalf("BindPolicyWithoutSigning: %v", err)
+	}
+	// wantKept: the zone serves, still records and is bound to "base", and says
+	// that the policy the config names is not usable. The warning is the
+	// engine's, which only the engine writes: the refresh was not refused.
+	wantKept := func(when string) {
+		t.Helper()
+		if zd.HasServiceImpactingError() {
+			t.Errorf("%s: the zone is quarantined: %s", when, zd.ErrorMsg)
+		}
+		n, p, w := policyState(zd)
+		if n != "base" || p == nil || p.KSKAlgorithm != dns.ED25519 {
+			t.Errorf("%s: the zone records %q bound to KSK algorithm %d, want %q kept", when, n, kskAlgOf(p), "base")
+		}
+		zd.mu.Lock()
+		warning := zd.Errors[DnssecPolicyWarning].Msg
+		zd.mu.Unlock()
+		if !w || !strings.Contains(warning, "keeping bound policy") {
+			t.Errorf("%s: DNSSEC policy warning %q (set %v), want the engine's, that the bound policy is kept", when, warning, w)
+		}
+	}
+
+	zd = h.reload(true, "gone", pols)
+	wantKept("a policy the config does not define")
+
+	zd = h.reload(true, "broken", pols)
+	wantKept("a policy that is broken")
+
+	// The bound policy named again: the warning goes, and nothing else changes.
+	zd = h.reload(true, "base", pols)
+	if n, p, w := policyState(zd); n != "base" || p == nil || w || zd.Error {
+		t.Errorf("after naming the bound policy again: %q bound %v, warning %v, zone in an error state %v", n, p != nil, w, zd.Error)
+	}
+}
+
+// The same reload for a zone with no policy bound: it serves, and the name it
+// records is what the config says, as for any other name, so that a signing
+// role learned later says that the policy does not exist rather than that the
+// zone names none.
+func TestAReloadToAnUnresolvedPolicyDoesNotQuarantineAnUnboundZoneThatDoesNotSign(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "unresolvedunbound.config.example.")
+	base := named(kskzsk(dns.ED25519, dns.ED25519), "base")
+	pols := map[string]DnssecPolicy{"base": base}
+	withLivePolicies(t, pols)
+
+	zd := h.reload(false, "base", pols)
+	zd = h.reload(true, "gone", pols)
+	if zd.HasServiceImpactingError() {
+		t.Errorf("the zone is quarantined: %s", zd.ErrorMsg)
+	}
+	n, p, w := policyState(zd)
+	if n != "gone" || p != nil || !w {
+		t.Errorf("the zone records %q, bound %v, warning %v; want %q recorded, nothing bound, a warning", n, p != nil, w, "gone")
+	}
+	err := zd.StartSigning(context.Background(), 0)
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("StartSigning on a zone whose config names a policy that does not exist: %v", err)
+	}
+}
+
+// What a reload to an unresolved policy still does to the zones it was always
+// meant for: a zone that signs is quarantined with the reason, and so is a zone
+// that is not loaded yet.
+func TestAReloadToAnUnresolvedPolicyStillQuarantinesAZoneThatSigns(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	base := named(validFor(kskzsk(dns.ED25519, dns.ED25519), 30*86400), "base")
+	pols := map[string]DnssecPolicy{"base": base}
+	withLivePolicies(t, pols)
+
+	h := newReloadHarness(t, kdb, "unresolvedsigns.config.example.", "online-signing")
+	zd := h.reload(false, "base", pols)
+	if !zd.signsItsOwnContent() {
+		t.Fatal("the zone does not sign; the test has lost its point")
+	}
+	zd = h.reload(true, "gone", pols)
+	if !zd.HasError(DnssecError) {
+		t.Error("a zone that signs, reloaded to a policy that does not exist, is not in the DNSSEC error state")
+	}
+
+	h2 := newReloadHarness(t, kdb, "unresolvedfirst.config.example.")
+	zd = h2.reload(false, "gone", pols)
+	if !zd.HasError(DnssecError) {
+		t.Error("a zone loaded for the first time with a policy that does not exist is not in the DNSSEC error state")
+	}
+}
