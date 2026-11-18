@@ -1267,6 +1267,9 @@ type UpstreamSerial struct {
 	Addr   string
 	Serial uint32
 	Err    string
+	// Warning is set when the probe took this primary's TLSA record without
+	// DNSSEC validation (tls-auth: dane in lab mode): TLSANotValidatedWarning.
+	Warning string `json:",omitempty"`
 }
 
 type ZoneRefresher struct {

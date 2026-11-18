@@ -280,6 +280,11 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				needsRepersist = true
 			}
 			retries, retryInterval := zoneNotifyRetrySettings(zoneName, &spec.Zconf)
+			// As for static zones (ParseZones) and the generic path below: a
+			// tls-dane downstream while DNSSEC validation is not enforced is
+			// accepted, but logged loudly at every load. A primary zone has no
+			// upstream primaries, so only its downstreams are checked.
+			conf.daneDownstreamWarnings(lg, zoneName, spec.Zconf.DownstreamAuth, spec.Zconf.Downstreams)
 			zr := ZoneRefresher{
 				Name:             zoneName,
 				Force:            true, // load from file on startup
@@ -388,6 +393,10 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			skippedCount++
 			continue
 		}
+		// As for static zones (ParseZones): DANE while DNSSEC validation is
+		// not enforced is accepted, but logged loudly at every load.
+		conf.danePrimaryWarnings(lg, zoneName, zconf.Primaries)
+		conf.daneDownstreamWarnings(lg, zoneName, zconf.DownstreamAuth, zconf.Downstreams)
 
 		dpol, derr := bindDelegationPolicy(&zconf)
 		if derr != nil {

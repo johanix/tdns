@@ -700,8 +700,17 @@ func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey 
 		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 		os.Exit(1)
 	}
+	printZoneWarnings(cr.Warnings)
 	if cr.Msg != "" {
 		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+// printZoneWarnings prints the warnings of an accepted zone add or modify
+// first, before the message, as daemon status does.
+func printZoneWarnings(warnings []string) {
+	for _, w := range warnings {
+		fmt.Printf("WARNING: %s\n", w)
 	}
 }
 
@@ -760,6 +769,7 @@ func RunZoneModify(role string, primaries []string, primaryKey string, options [
 		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 		os.Exit(1)
 	}
+	printZoneWarnings(cr.Warnings)
 	if cr.Msg != "" {
 		fmt.Printf("%s\n", cr.Msg)
 	}
@@ -1077,13 +1087,19 @@ func DescribeZone(zconf tdns.ZoneConf) string {
 		for _, us := range zconf.UpstreamSerials {
 			if us.Err != "" {
 				fmt.Fprintf(&b, "\t\t%s: (probe failed: %s)\n", us.Addr, us.Err)
-				continue
+			} else {
+				marker := ""
+				if zconf.IncomingSerial != 0 && us.Serial != zconf.IncomingSerial {
+					marker = "\t<-- differs from our inbound serial"
+				}
+				fmt.Fprintf(&b, "\t\t%s: %d%s\n", us.Addr, us.Serial, marker)
 			}
-			marker := ""
-			if zconf.IncomingSerial != 0 && us.Serial != zconf.IncomingSerial {
-				marker = "\t<-- differs from our inbound serial"
+			// A dane primary whose TLSA record was not DNSSEC-validated (lab
+			// mode): the transfer is accepted, but the certificate check
+			// proves nothing, so say so on the primary's own line.
+			if us.Warning != "" {
+				fmt.Fprintf(&b, "\t\t\tWARNING: %s\n", us.Warning)
 			}
-			fmt.Fprintf(&b, "\t\t%s: %d%s\n", us.Addr, us.Serial, marker)
 		}
 	}
 
