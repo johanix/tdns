@@ -238,7 +238,7 @@ func (zd *ZoneData) recordPolicyOfNonSigningZone(name string, pols map[string]Dn
 		lgSigner.Info("DNSSEC policy of a zone that does not sign changed by a config reload",
 			"zone", zd.ZoneName, "from", oldName, "to", name)
 		return true
-	case name == "":
+	case name == "" && !zd.hasPolicyOverrideLocked():
 		zd.DnssecPolicy, zd.DnssecPolicyName = nil, ""
 		zd.clearErrorLocked(DnssecPolicyWarning)
 		zd.mu.Unlock()
@@ -246,13 +246,19 @@ func (zd *ZoneData) recordPolicyOfNonSigningZone(name string, pols map[string]Dn
 			"zone", zd.ZoneName, "was", oldName)
 		return true
 	}
-	// A bound zone and a name: bind what the config defines under it now.
+	// A bound zone and a name: bind what the config defines under it now. With
+	// no name, or a name an override replaces, that is the override's policy,
+	// which is the zone's policy whatever the config names (a start binds it).
 	pol, newName, err := zd.intendedPolicyNamed(name, pols)
 	if err == nil && zoneOwned(zd) && ownerPolicyFieldsDiffer(oldPol, pol) {
 		err = fmt.Errorf("it differs from the bound policy in a field of the zone's key lifecycle owner")
 	}
 	if err != nil {
-		zd.setErrorLocked(DnssecPolicyWarning, "DNSSEC policy %q cannot be bound: %v; keeping bound policy %q", name, err, oldName)
+		what := fmt.Sprintf("DNSSEC policy %q", name)
+		if name == "" {
+			what = "the zone's policy override"
+		}
+		zd.setErrorLocked(DnssecPolicyWarning, "%s cannot be bound: %v; keeping bound policy %q", what, err, oldName)
 		zd.mu.Unlock()
 		lgSigner.Warn("a config reload names a DNSSEC policy that cannot be bound; keeping the bound policy",
 			"zone", zd.ZoneName, "policy", name, "bound", oldName, "err", err)
@@ -272,6 +278,16 @@ func (zd *ZoneData) recordPolicyOfNonSigningZone(name string, pols map[string]Dn
 			"zone", zd.ZoneName, "from", oldName, "to", newName)
 	}
 	return true
+}
+
+// hasPolicyOverrideLocked reports whether the zone's keystore holds a policy
+// override for it, or may: a keystore that cannot be read is answered as if it
+// does, so that a policy the zone is bound to is not dropped on a failed read
+// (the bind that follows says so, and keeps the binding with a warning). The
+// caller holds zd.mu, as intendedPolicyNamed's reads are made under it.
+func (zd *ZoneData) hasPolicyOverrideLocked() bool {
+	_, overridden, err := EffectiveDnssecPolicyName(zd.KeyDB, zd.ZoneName, "")
+	return overridden || err != nil
 }
 
 // ErrSigningHeld: StartSigning found an open transaction on the zone, or changes

@@ -781,3 +781,52 @@ func TestAReloadToAnUnresolvedPolicyStillQuarantinesAZoneThatSigns(t *testing.T)
 		t.Error("a zone loaded for the first time with a policy that does not exist is not in the DNSSEC error state")
 	}
 }
+
+// An operator's override is the zone's policy whatever the config names, so a
+// reload that takes the config's policy away from a bound zone that does not
+// sign does not take its binding away while an override is there to be bound:
+// a start binds the override (EffectiveDnssecPolicyName), and so does a reload
+// that keeps the config's policy. The binding goes when neither the config nor
+// an override names a policy. An override that names a policy that is not
+// defined is a name that does not resolve: the binding is kept, with a warning.
+func TestAReloadThatRemovesThePolicyKeepsTheOverrideOfABoundZone(t *testing.T) {
+	kdb := reloadPolicySetup(t)
+	z := loadedWithPolicy(t, kdb, "base")
+	if err := SetZonePolicyOverride(kdb, ovZone, "other"); err != nil {
+		t.Fatalf("SetZonePolicyOverride: %v", err)
+	}
+	if err := z.zd.BindPolicyWithoutSigning(); err != nil {
+		t.Fatalf("BindPolicyWithoutSigning: %v", err)
+	}
+	wantPolicyRecord(t, z.zd, "other", "other", "after the bind")
+	warned := func() bool {
+		z.zd.mu.Lock()
+		defer z.zd.mu.Unlock()
+		_, w := z.zd.Errors[DnssecPolicyWarning]
+		return w
+	}
+
+	reloadedWithPolicy(t, z, "")
+	wantPolicyRecord(t, z.zd, "other", "other", "after the config's policy was removed, with an override")
+	if warned() {
+		t.Error("a DNSSEC policy warning on a zone that follows its override")
+	}
+
+	if err := SetZonePolicyOverride(kdb, ovZone, "gone"); err != nil {
+		t.Fatalf("SetZonePolicyOverride: %v", err)
+	}
+	reloadedWithPolicy(t, z, "")
+	wantPolicyRecord(t, z.zd, "other", "other", "after the config's policy was removed, with an override that does not exist")
+	if !warned() {
+		t.Error("no DNSSEC policy warning for an override that names a policy that does not exist")
+	}
+
+	if err := ClearZonePolicyOverride(kdb, ovZone); err != nil {
+		t.Fatalf("ClearZonePolicyOverride: %v", err)
+	}
+	reloadedWithPolicy(t, z, "")
+	wantPolicyRecord(t, z.zd, "", "", "after the config's policy was removed, with no override")
+	if warned() {
+		t.Error("a DNSSEC policy warning on a zone with no policy at all")
+	}
+}
