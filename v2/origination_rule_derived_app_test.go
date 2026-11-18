@@ -409,9 +409,9 @@ func TestRegisteredAppZoneThatStartsToSignAcrossARestartGoesOnPastWhatItRelayed(
 
 	var signs atomic.Bool
 	prepare := func(zd *ZoneData) {
-		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(_, incoming *ZoneData) {
-			if on := signs.Load(); incoming.Options[OptInlineSigning] != on {
-				incoming.Options[OptInlineSigning] = on
+		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(served, _ *ZoneData) {
+			if on := signs.Load(); served.Option(OptInlineSigning) != on {
+				served.SetRuntimeOption(OptInlineSigning, on)
 			}
 		})
 	}
@@ -449,12 +449,12 @@ func TestRegisteredAppZoneThatStartsToSignAcrossARestartGoesOnPastWhatItRelayed(
 }
 
 // The same zone, once inline-signing is on for it, keeps a serial of its own.
-// A derived app switches the option on in a pre-refresh callback, on the
-// incoming zone's options, which reach the served zone's when the callbacks
-// are done: that is the moment a relayed zone becomes one the app signs. From
-// there the zone goes on from one past the serial it was serving, whatever the
-// upstream's serial is, and counts by itself at every refresh and forced
-// re-fetch. A restart lands past the highest serial it published.
+// A derived app switches the option on in a pre-refresh callback, with
+// SetRuntimeOption on the served zone: that is the moment a relayed zone
+// becomes one the app signs. From there the zone goes on from one past the
+// serial it was serving, whatever the upstream's serial is, and counts by
+// itself at every refresh and forced re-fetch. A restart lands past the
+// highest serial it published.
 //
 // No DNSSEC policy is bound here and nothing is signed: what is under test is
 // the serial, and that follows the option alone.
@@ -464,9 +464,9 @@ func TestRegisteredAppZoneKeepsItsOwnSerialOnceItSigns(t *testing.T) {
 
 	var signs atomic.Bool
 	prepare := func(zd *ZoneData) {
-		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(_, incoming *ZoneData) {
-			if on := signs.Load(); incoming.Options[OptInlineSigning] != on {
-				incoming.Options[OptInlineSigning] = on
+		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(served, _ *ZoneData) {
+			if on := signs.Load(); served.Option(OptInlineSigning) != on {
+				served.SetRuntimeOption(OptInlineSigning, on)
 			}
 		})
 	}
