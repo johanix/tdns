@@ -830,3 +830,36 @@ func TestAReloadThatRemovesThePolicyKeepsTheOverrideOfABoundZone(t *testing.T) {
 		t.Error("a DNSSEC policy warning on a zone with no policy at all")
 	}
 }
+
+// The first load of a zone a reload adds meets the reload's policies, not the
+// runtime snapshot's: the snapshot is published after the refreshers are
+// queued, so a zone that signs and a policy that the same config defines can
+// reach the engine while the snapshot has neither. The zone binds the policy
+// its config names and signs under it, and is not quarantined for a policy it
+// "does not exist".
+func TestAFirstLoadBindsAPolicyThatOnlyTheReloadDefines(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "firstpols.config.example.", "online-signing")
+	const month = 30 * 86400
+	base := named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "base")
+	withLivePolicies(t, map[string]DnssecPolicy{}) // the running config has no policies
+
+	zd := h.reload(false, "base", map[string]DnssecPolicy{"base": base})
+	if !zd.signsItsOwnContent() {
+		t.Fatal("the zone does not sign; the test has lost its point")
+	}
+	if zd.HasServiceImpactingError() {
+		t.Errorf("the zone is quarantined after its first load: %s", zd.ErrorMsg)
+	}
+	if n, p, w := policyState(zd); n != "base" || p == nil || p.KSKAlgorithm != dns.ED25519 || w {
+		t.Errorf("after the first load: %q bound to KSK algorithm %d, warning %v; want %q bound to %d, no warning",
+			n, kskAlgOf(p), w, "base", dns.ED25519)
+	}
+	if len(keytagsOf(servedRRset(t, zd, h.zone, dns.TypeSOA).RRSIGs)) == 0 {
+		t.Error("the SOA is unsigned after the first load")
+	}
+	if name, _, ok, err := GetZoneAppliedPolicy(kdb, h.zone); err != nil || !ok || name != "base" {
+		t.Errorf("after the first load the last-applied record is %q %v %v, want base", name, ok, err)
+	}
+}

@@ -474,12 +474,24 @@ func signOnceAfterPolicyBind(ctx context.Context, zd *ZoneData) error {
 // publication, delegation-sync setup) see the zone's actual content rather than
 // the pre-replay file.
 func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) error {
+	return completeFirstZonePolicyAndLoadIn(ctx, zd, conf, configPolicyName, nil)
+}
+
+// completeFirstZonePolicyAndLoadIn is completeFirstZonePolicyAndLoad resolving
+// the zone's policy against pols, the policies of the config being applied, for
+// a first load that has the refresher the config produced
+// (ZoneRefresher.DnssecPolicies). The runtime snapshot is published after a
+// reload has queued its refreshers, so a zone the reload adds, and the policy
+// the same reload defines for it, can reach the engine while the snapshot has
+// neither, and the zone would be quarantined for a policy that does not exist.
+// Nil: the snapshot, as for a retry that has no refresher.
+func completeFirstZonePolicyAndLoadIn(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string, pols map[string]DnssecPolicy) error {
 	zd.InstallInitialSnapshot()
 
 	// Bind the policy BEFORE replay signs anything. On failure OnFirstLoad is
 	// retained for a later retry, exactly as finishFirstLoadPolicy does -- and
 	// the deltas are left unreplayed rather than replayed with a nil policy.
-	if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, configPolicyName); err != nil {
+	if err := syncZoneDnssecPolicyFromConfigIn(ctx, zd, conf.Internal.KeyDB, conf, configPolicyName, pols); err != nil {
 		lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
 		return err
 	}
@@ -891,7 +903,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							continue
 						}
-						if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, firstLoadPolicyName(zd, zr)); err != nil {
+						if err := completeFirstZonePolicyAndLoadIn(ctx, zd, conf, firstLoadPolicyName(zd, zr), zr.DnssecPolicies); err != nil {
 							lgEngine.Error("zone policy sync after first load failed", "zone", zone, "error", err)
 							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 							zd.LatestError = time.Now()
@@ -1267,7 +1279,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// on the normal path renews. That is the exact ordering bug
 					// the helper was extracted to prevent on the static-zone path;
 					// the dynamic path kept its own copy and kept the bug.
-					if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, firstLoadPolicyName(zd, zr)); err != nil {
+					if err := completeFirstZonePolicyAndLoadIn(ctx, zd, conf, firstLoadPolicyName(zd, zr), zr.DnssecPolicies); err != nil {
 						lgEngine.Warn("DNSSEC policy sync for dynamic zone failed", "zone", zone, "err", err)
 						zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 						zd.LatestError = time.Now()
