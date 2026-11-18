@@ -41,7 +41,8 @@ func TestSig0KeyPreparationReportsABusyKeystore(t *testing.T) {
 }
 
 // A setup that found the keystore busy is retried with the setup backoff, not
-// logged and dropped (the arm returns nil when it drops).
+// logged and dropped (the arm returns nil when it drops). The retry must come
+// back: the same zone and command, one attempt on.
 func TestSetupRetriesABusyKeystore(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -59,6 +60,15 @@ func TestSetupRetriesABusyKeystore(t *testing.T) {
 	defer awaitExit(t, cancel, scheduled)
 	if scheduled == nil {
 		t.Fatal("a setup that found the keystore busy was dropped; the same setup succeeds once the holder is done")
+	}
+	select {
+	case got := <-q:
+		if got.ZoneName != ds.ZoneName || got.Command != ds.Command || got.Attempt != ds.Attempt+1 {
+			t.Errorf("the retry is %s for %s at attempt %d, want %s for %s at attempt %d",
+				got.Command, got.ZoneName, got.Attempt, ds.Command, ds.ZoneName, ds.Attempt+1)
+		}
+	case <-time.After(setupRetryDelay(ds.Attempt) + 5*time.Second):
+		t.Error("the retry never came back")
 	}
 }
 

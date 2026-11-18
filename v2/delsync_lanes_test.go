@@ -520,15 +520,8 @@ func TestDelegationSyncLaneWarns(t *testing.T) {
 // zones' parents are unknown and there is no IMR, so each analysis fails at
 // once and the answer is the error.
 func TestTheSyncherRunsEachParentOnItsOwnQueue(t *testing.T) {
-	kdb := newTestKeyDB(t)
-	conf := &Config{}
-	conf.Internal.ImrReady = NewImrReadiness()
-	ctx, cancel := context.WithCancel(context.Background())
-	q := make(chan DelegationSyncRequest, 10)
-	done := make(chan struct{})
-	go func() { defer close(done); _ = kdb.DelegationSyncher(ctx, q, nil, conf) }()
-
 	held := make(chan DelegationSyncStatus) // nobody reads it yet
+	q := runSyncher(t, held)
 	heldZone := laneZone("held.p1.example.", "")
 	offer(t, q, DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: heldZone.ZoneName,
 		ZoneData: heldZone, Response: held})
@@ -549,8 +542,6 @@ func TestTheSyncherRunsEachParentOnItsOwnQueue(t *testing.T) {
 	}
 
 	receive(t, held, "the held explicit sync's answer")
-	cancel()
-	receive(t, done, "the syncher to stop")
 }
 
 // (b) through the production syncher: while one of a zone's requests runs, the
@@ -559,16 +550,9 @@ func TestTheSyncherRunsEachParentOnItsOwnQueue(t *testing.T) {
 // handler returns once it has started its delivery, as it always did; the
 // queue orders handlers, not that delivery.)
 func TestTheSyncherRunsAZonesRequestsOneAtATime(t *testing.T) {
-	kdb := newTestKeyDB(t)
-	conf := &Config{}
-	conf.Internal.ImrReady = NewImrReadiness()
-	ctx, cancel := context.WithCancel(context.Background())
-	q := make(chan DelegationSyncRequest, 10)
-	done := make(chan struct{})
-	go func() { defer close(done); _ = kdb.DelegationSyncher(ctx, q, nil, conf) }()
-
-	zd := laneZone("one.p1.example.", "")
 	held := make(chan DelegationSyncStatus) // nobody reads it yet
+	q := runSyncher(t, held)
+	zd := laneZone("one.p1.example.", "")
 	offer(t, q, DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName,
 		ZoneData: zd, Response: held})
 	waitFor(t, 2*time.Second, "the held explicit sync to run", func() bool {
@@ -594,6 +578,35 @@ func TestTheSyncherRunsAZonesRequestsOneAtATime(t *testing.T) {
 
 	receive(t, held, "the held explicit sync's answer")
 	receive(t, status, "the status request, once the explicit sync is done")
-	cancel()
-	receive(t, done, "the syncher to stop")
+}
+
+// runSyncher runs tdns's DelegationSyncher, with no parent known and no IMR,
+// on a fresh intake until the test ends. Its cleanup is registered before any
+// request is sent: it stops the syncher and waits for it, taking what is sent
+// on held meanwhile. A test that fails before it reads held would otherwise
+// leave the handler blocked on that send, which no cancellation ends.
+func runSyncher(t *testing.T, held <-chan DelegationSyncStatus) chan DelegationSyncRequest {
+	t.Helper()
+	kdb := newTestKeyDB(t)
+	conf := &Config{}
+	conf.Internal.ImrReady = NewImrReadiness()
+	ctx, cancel := context.WithCancel(context.Background())
+	q := make(chan DelegationSyncRequest, 10)
+	done := make(chan struct{})
+	go func() { defer close(done); _ = kdb.DelegationSyncher(ctx, q, nil, conf) }()
+	t.Cleanup(func() {
+		cancel()
+		deadline := time.After(2 * time.Second)
+		for {
+			select {
+			case <-held:
+			case <-done:
+				return
+			case <-deadline:
+				t.Error("the syncher did not stop within 2s of its context being cancelled")
+				return
+			}
+		}
+	})
+	return q
 }
