@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log"
 	"log/slog"
 	"net"
 	"sort"
@@ -413,7 +414,7 @@ var forwardTransportDefaults = map[core.Transport]string{
 
 // buildForwardUpstream validates one ImrUpstreamConf and constructs its
 // runtime form, including the dedicated DNS client.
-func buildForwardUpstream(zone string, u ImrUpstreamConf) (*ForwardUpstream, error) {
+func buildForwardUpstream(zone string, u ImrUpstreamConf, lg *log.Logger) (*ForwardUpstream, error) {
 	if net.ParseIP(u.Addr) == nil {
 		return nil, fmt.Errorf("forward zone %s: upstream addr %q is not an IP address (hostnames are not supported)", zone, u.Addr)
 	}
@@ -479,7 +480,7 @@ func buildForwardUpstream(zone string, u ImrUpstreamConf) (*ForwardUpstream, err
 		Insecure:      u.Insecure,
 		TLSServerName: u.TLSServerName,
 		Label:         fmt.Sprintf("%s/%s", net.JoinHostPort(u.Addr, port), core.TransportToString[transport]),
-		Client:        core.NewDNSClient(transport, port, tlsConfig),
+		Client:        core.NewDNSClient(transport, port, tlsConfig, core.WithLogger(lg)),
 	}, nil
 }
 
@@ -535,6 +536,12 @@ func forwardDiagsError(diags []ForwardDiag) error {
 // with no usable zone name, and a duplicate of a zone already configured
 // (the first definition stands).
 func BuildImrForwards(conf []ImrForwardConf) ([]*ForwardZone, []ForwardDiag) {
+	return buildImrForwards(conf, nil)
+}
+
+// buildImrForwards is BuildImrForwards whose upstreams' DNS clients log
+// through lg (nil is the log package's): the resolver passes its cache's.
+func buildImrForwards(conf []ImrForwardConf, lg *log.Logger) ([]*ForwardZone, []ForwardDiag) {
 	if len(conf) == 0 {
 		return nil, nil
 	}
@@ -574,7 +581,7 @@ func BuildImrForwards(conf []ImrForwardConf) ([]*ForwardZone, []ForwardDiag) {
 			diags = append(diags, ForwardDiag{Zone: zone, Msg: "no upstreams configured; the zone is quarantined"})
 		}
 		for _, u := range fc.Upstreams {
-			up, err := buildForwardUpstream(zone, u)
+			up, err := buildForwardUpstream(zone, u, lg)
 			if err != nil {
 				up = placeholderUpstream(u, err.Error())
 				diags = append(diags, ForwardDiag{Zone: zone, Upstream: up.Label, Msg: err.Error()})

@@ -383,7 +383,7 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 	// used to stop the resolver entirely, even though every other forward
 	// zone and the iterative path would have worked. The offending upstream
 	// or zone is quarantined instead and the daemon starts.
-	forwards, fwdDiags := BuildImrForwards(ic.Forward)
+	forwards, fwdDiags := buildImrForwards(ic.Forward, rrcache.Logger)
 	for _, d := range fwdDiags {
 		if d.Dropped {
 			lg.Error("forward config entry dropped", "problem", d.String())
