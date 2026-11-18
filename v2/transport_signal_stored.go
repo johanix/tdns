@@ -92,9 +92,26 @@ func (zd *ZoneData) signalRecordDB() *KeyDB {
 // In every case the next store that reads the record writes the new digest
 // ahead of every digest kept, never a shorter list.
 func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
+	zd.noteSignalStoredOver(owner, rrs, nil)
+}
+
+// noteSignalStoredOver is noteSignalStored for a store that replaced
+// replaced, a signal of the pass's that was at the owner. Its digest is kept
+// right behind the new one, so the history never evicts it. It is what the
+// zone loaded, from the zone file or the journal, and it stays what a
+// restart loads until the zone is next written: a run of stores that each
+// replace it, one per restart with a configuration that changed each time,
+// and no write in between, would otherwise push it out of the
+// signalStoredKeep places. The next restart would then load a signal of the
+// pass's that the record no longer knows, and take it for the operator's
+// for good (CodeRabbit on #1118).
+func (zd *ZoneData) noteSignalStoredOver(owner string, rrs, replaced []dns.RR) {
 	owner = core.CanonicalizeName(owner)
 	digest := signalDigest(rrs)
 	digests := []string{digest}
+	if len(replaced) > 0 {
+		digests = append(digests, signalDigest(replaced))
+	}
 	earlier, readErr := zd.signalStoredDigests(owner)
 	if readErr != nil {
 		lgDns.Warn("noteSignalStored: could not read the earlier digests; the new one is put ahead of what the KeyDB holds",
@@ -278,11 +295,35 @@ func (zd *ZoneData) warnSignalRecordUnreadable(owner string, err error) {
 		"zone", zd.ZoneName, "owner", owner, "error", err)
 }
 
+// signalStoredRecorded reports whether the pass has a record of storing a
+// signal at owner: in this process (a revocation still pending included, so
+// that a release tries the KeyDB delete again), among the digests the KeyDB
+// did not take, or in the KeyDB from an earlier process. An error when the
+// KeyDB cannot be asked: "no record" would make a release report that there
+// was nothing to release, while the KeyDB's record stays and counts again
+// (CodeRabbit on #1118).
+func (zd *ZoneData) signalStoredRecorded(owner string) (bool, error) {
+	owner = core.CanonicalizeName(owner)
+	zd.signalStoredMu.Lock()
+	_, inMemory := zd.signalStored[owner]
+	unrecorded := len(zd.signalUnrecorded[owner]) > 0
+	zd.signalStoredMu.Unlock()
+	if inMemory || unrecorded {
+		return true, nil
+	}
+	kdb := zd.signalRecordDB()
+	if kdb == nil {
+		return false, nil
+	}
+	return kdb.HasTransportSignalStored(zd.ZoneName, owner)
+}
+
 // signalStoredOwners lists the owners the pass has a record of storing a
 // signal at in this zone: in this process, and in the KeyDB from an earlier
 // one. An owner whose revocation is pending is listed too, so that the pass
-// tries the KeyDB delete again.
-func (zd *ZoneData) signalStoredOwners() []string {
+// tries the KeyDB delete again. An error when the KeyDB's list cannot be
+// read; the owners known in this process are listed all the same.
+func (zd *ZoneData) signalStoredOwners() ([]string, error) {
 	seen := map[string]bool{}
 	var out []string
 	zd.signalStoredMu.Lock()
@@ -297,12 +338,10 @@ func (zd *ZoneData) signalStoredOwners() []string {
 		}
 	}
 	zd.signalStoredMu.Unlock()
+	var listErr error
 	if kdb := zd.signalRecordDB(); kdb != nil {
 		owners, err := kdb.ListTransportSignalStored(zd.ZoneName)
-		if err != nil {
-			lgDns.Warn("signalStoredOwners: could not list the stored-signal records",
-				"zone", zd.ZoneName, "error", err)
-		}
+		listErr = err
 		for _, owner := range owners {
 			if !seen[owner] {
 				seen[owner] = true
@@ -311,7 +350,7 @@ func (zd *ZoneData) signalStoredOwners() []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, listErr
 }
 
 // SetTransportSignalStored records the digests of the signals stored at
@@ -385,6 +424,27 @@ func (kdb *KeyDB) GetTransportSignalStored(zone, owner string) ([]string, bool, 
 		return nil, false, fmt.Errorf("GetTransportSignalStored: zone %s owner %s: %v", zone, owner, err)
 	}
 	return append([]string{digest}, strings.Fields(earlier)...), true, nil
+}
+
+// HasTransportSignalStored reports whether owner has a record in zone. It
+// reads no digest, so it answers where GetTransportSignalStored cannot read
+// the digests.
+func (kdb *KeyDB) HasTransportSignalStored(zone, owner string) (bool, error) {
+	if kdb == nil || kdb.DB == nil {
+		return false, fmt.Errorf("HasTransportSignalStored: no database")
+	}
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+	var one int
+	err := kdb.DB.QueryRow(`SELECT 1 FROM TransportSignalStored WHERE zone=? AND owner=?`,
+		dns.Fqdn(zone), core.CanonicalizeName(owner)).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("HasTransportSignalStored: zone %s owner %s: %v", zone, owner, err)
+	}
+	return true, nil
 }
 
 // ListTransportSignalStored returns the owners with a record in zone.

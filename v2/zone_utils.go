@@ -2342,25 +2342,10 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 		if snap == nil {
 			return dynamicRRs
 		}
+		dynamicRRs = append(dynamicRRs, zd.carriedSignalSVCBs(snap)...)
 		for owner, od := range snap.Data {
 			if od == nil || !strings.HasPrefix(owner, "_dns.") {
 				continue
-			}
-			if svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB); exists && len(svcbRRset.RRs) > 0 && zd.refreshCarriesSignal(owner, svcbRRset.RRs) {
-				svcbClone := &core.RRset{
-					Name:   owner,
-					Class:  dns.ClassINET,
-					RRtype: dns.TypeSVCB,
-					RRs:    make([]dns.RR, len(svcbRRset.RRs)),
-					RRSIGs: make([]dns.RR, len(svcbRRset.RRSIGs)),
-				}
-				for i, rr := range svcbRRset.RRs {
-					svcbClone.RRs[i] = dns.Copy(rr)
-				}
-				for i, rr := range svcbRRset.RRSIGs {
-					svcbClone.RRSIGs[i] = dns.Copy(rr)
-				}
-				dynamicRRs = append(dynamicRRs, svcbClone)
 			}
 			if tsyncRRset, exists := od.RRtypes.Get(core.TypeTSYNC); exists && len(tsyncRRset.RRs) > 0 {
 				tsyncClone := &core.RRset{
@@ -2384,9 +2369,68 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	return dynamicRRs
 }
 
+// carriedSignalSVCBs is the transport signal a refresh carries over from
+// snap: a copy of each SVCB RRset at a _dns. owner that refreshCarriesSignal
+// carries.
+func (zd *ZoneData) carriedSignalSVCBs(snap *zoneSnapshot) []*core.RRset {
+	if snap == nil {
+		return nil
+	}
+	var out []*core.RRset
+	for owner, od := range snap.Data {
+		if od == nil || !strings.HasPrefix(owner, "_dns.") {
+			continue
+		}
+		svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB)
+		if !exists || len(svcbRRset.RRs) == 0 || !zd.refreshCarriesSignal(owner, svcbRRset.RRs) {
+			continue
+		}
+		svcbClone := &core.RRset{
+			Name:   owner,
+			Class:  dns.ClassINET,
+			RRtype: dns.TypeSVCB,
+			RRs:    make([]dns.RR, len(svcbRRset.RRs)),
+			RRSIGs: make([]dns.RR, len(svcbRRset.RRSIGs)),
+		}
+		for i, rr := range svcbRRset.RRs {
+			svcbClone.RRs[i] = dns.Copy(rr)
+		}
+		for i, rr := range svcbRRset.RRSIGs {
+			svcbClone.RRSIGs[i] = dns.Copy(rr)
+		}
+		out = append(out, svcbClone)
+	}
+	return out
+}
+
+// signalCarryNowLocked replaces the transport signal CollectDynamicRRs
+// collected with what the published zone holds now. CollectDynamicRRs runs
+// before the refresh fetches, outside zd.mu, and the signal pass may run in
+// between: a signal it withdrew would be put back, and one it stored or
+// replaced would be lost or replaced by the old one (CodeRabbit on #1118).
+// Here, under zd.mu and before the replacement is published, the published
+// snapshot is the zone the pass last published. The SVCB RRsets collected
+// are all the signal's (CollectDynamicRRs, section 3), and they are taken
+// again only where CollectDynamicRRs would take them. Caller holds zd.mu.
+func (zd *ZoneData) signalCarryNowLocked(dynamicRRs []*core.RRset) []*core.RRset {
+	carries := zd.KeyDB != nil && zd.addsTransportSignal() &&
+		(zd.Options[OptAllowUpdates] || zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning])
+	if !carries {
+		return dynamicRRs
+	}
+	out := make([]*core.RRset, 0, len(dynamicRRs))
+	for _, rs := range dynamicRRs {
+		if rs == nil || rs.RRtype != dns.TypeSVCB {
+			out = append(out, rs)
+		}
+	}
+	return append(out, zd.carriedSignalSVCBs(zd.publishedSnapshot())...)
+}
+
 // repopulateWorkingSetLocked merges dynamic RRsets into the working set.
 // Caller must hold zd.mu and have initialized zd.workingSet.
 func (zd *ZoneData) repopulateWorkingSetLocked(dynamicRRs []*core.RRset) {
+	dynamicRRs = zd.signalCarryNowLocked(dynamicRRs)
 	if len(dynamicRRs) == 0 {
 		return
 	}
