@@ -484,7 +484,7 @@ func RegisterImrOutboundQueryHook(hook ImrOutboundQueryHookFunc) error {
 	globalImrOutboundQueryHooksMutex.Lock()
 	globalImrOutboundQueryHooks = append(globalImrOutboundQueryHooks, hook)
 	globalImrOutboundQueryHooksMutex.Unlock()
-	lg.Debug("RegisterImrOutboundQueryHook: registered hook")
+	lgImr.Debug("RegisterImrOutboundQueryHook: registered hook")
 	return nil
 }
 
@@ -498,7 +498,7 @@ func RegisterImrResponseHook(hook ImrResponseHookFunc) error {
 	globalImrResponseHooksMutex.Lock()
 	globalImrResponseHooks = append(globalImrResponseHooks, hook)
 	globalImrResponseHooksMutex.Unlock()
-	lg.Debug("RegisterImrResponseHook: registered hook")
+	lgImr.Debug("RegisterImrResponseHook: registered hook")
 	return nil
 }
 

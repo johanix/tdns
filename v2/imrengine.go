@@ -103,6 +103,8 @@ type Imr struct {
 	errorRegistry ErrorSink
 	// pendingOwnZone is ImrOptions.PendingOwnZone. Nil: no own zones.
 	pendingOwnZone func(zone string) bool
+	// ownZones is ImrOptions.OwnZones. Nil: no own zones.
+	ownZones OwnZones
 	// fwdErrMu serializes updateForwardUpstreamError's scan of the
 	// per-upstream failing flags with its registry write: without it, two
 	// concurrent recomputes (a live query racing an on-demand probe) can
@@ -302,23 +304,25 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	// NewImr fills the tuning defaults into its own copy of conf.Imr; the
 	// daemon's imr-dump-tuning reads them from conf.
 	LoadImrTuningDefaults(&conf.Imr.Tuning)
-	// Bound to the Imr below: only Start calls it, and that is after NewImr.
-	var imr *Imr
 	opts := ImrOptions{
 		LargeAlgorithms: conf.Internal.LargeAlgorithms,
 		DNSKEYTransport: conf.Internal.DNSKEYTransport,
-		PendingOwnZone:  func(zone string) bool { return imr.ownZonePending(conf, zone) },
+		PendingOwnZone:  func(zone string) bool { return ownZonePending(conf, zone) },
+		OwnZones:        hostedZones{},
 		Quiet:           quiet,
 	}
 	// Not the nil pointer in a non-nil interface: NewImr takes nil for "none".
 	if conf.Internal.ServerErrors != nil {
 		opts.Errors = conf.Internal.ServerErrors
 	}
-	var err error
-	imr, err = NewImr(ctx, conf.Imr, opts)
+	imr, err := NewImr(ctx, conf.Imr, opts)
 	if err != nil {
 		return err
 	}
+	// The daemon's resolver debugs and is verbose on --debug and --verbose
+	// too, not only on imrengine.debug and imrengine.verbose.
+	imr.Debug = imr.Debug || Globals.Debug
+	imr.Verbose = imr.Verbose || Globals.Verbose
 	conf.Internal.RRsetCache = imr.Cache
 	conf.publishImr(imr)
 	lgImr.Info("InitImrEngine: IMR initialized and available")
@@ -413,6 +417,7 @@ func NewImr(ctx context.Context, ic ImrEngineConf, opts ImrOptions) (*Imr, error
 		largeAlgs:       opts.LargeAlgorithms,
 		dnskeyTransport: opts.DNSKEYTransport,
 		pendingOwnZone:  opts.PendingOwnZone,
+		ownZones:        opts.OwnZones,
 	}
 	imr.attachCacheHooks()
 
@@ -1177,8 +1182,8 @@ func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname 
 // cut's NS RRset, and for a forwarded root whose root NS had expired that was
 // `no nameservers for zone ""` before the forward was consulted (#722).
 func (imr *Imr) serversForQuestion(qname string, qtype uint16) (zone string, servers map[string]*cache.AuthServer, serverless bool, err error) {
-	if zd := imr.ownZoneForQuestion(qname, qtype); zd != nil {
-		return zd.ZoneName, nil, true, nil
+	if z := imr.ownZoneFor(qname, qtype); z != nil {
+		return z.Apex(), nil, true, nil
 	}
 	if fz := imr.forwardZoneForQuestion(qname, qtype); fz != nil {
 		return fz.Zone, nil, true, nil
@@ -2482,7 +2487,7 @@ func (imr *Imr) validateAndCacheDNSKEYRRset(ctx context.Context, anchorName stri
 	} else {
 		// Not validated yet, validate using trust anchors directly
 		// This bypasses the normal validation chain which may fail for indeterminate zones
-		verbose := Globals.Debug
+		verbose := imr.Debug
 		validated := false
 
 		// First, try validation using seeded DS trust anchors
@@ -2633,7 +2638,7 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 	// current known servers.
 	var serverMap map[string]*cache.AuthServer
 	var serversZone string // the zone serverMap serves
-	if imr.ownZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil && imr.forwardZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil {
+	if imr.ownZoneFor(anchorName, dns.TypeDNSKEY) == nil && imr.forwardZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil {
 		var ok bool
 		serversZone = anchorName
 		serverMap, ok = imr.Cache.ServerMapCopy(anchorName)

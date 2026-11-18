@@ -213,7 +213,7 @@ func wantNoAnswers(t *testing.T, when string) {
 				dns.RcodeToString[m.Rcode], len(m.Answer), len(m.Ns))
 		}
 	}
-	if zd := (&Imr{}).ownZoneForQuestion(ovZone, dns.TypeSOA); zd != nil {
+	if zd := ownZoneForQuestion(ovZone, dns.TypeSOA); zd != nil {
 		t.Errorf("%s: the zone's own resolver would answer from it", when)
 	}
 	if m := askUpdate(t, ovZone); m.Rcode != dns.RcodeServerFailure {
@@ -229,7 +229,7 @@ func wantAnswers(t *testing.T, zd *ZoneData, when string) {
 			t.Errorf("%s: %s %s: rcode %s, %d answers", when, q.name, dns.TypeToString[q.rrtype], dns.RcodeToString[m.Rcode], len(m.Answer))
 		}
 	}
-	if got := (&Imr{}).ownZoneForQuestion(ovZone, dns.TypeSOA); got != zd {
+	if got := ownZoneForQuestion(ovZone, dns.TypeSOA); got != zd {
 		t.Errorf("%s: the zone's own resolver would not answer from it", when)
 	}
 	if m := askUpdate(t, ovZone); m.Rcode == dns.RcodeServerFailure {
@@ -406,7 +406,7 @@ ns.`+child+` 3600 IN A 192.0.2.1
 	if m := ask(t, child, dns.TypeDS); m.Rcode != dns.RcodeServerFailure {
 		t.Errorf("a DS asked of the withheld parent: rcode %s, want SERVFAIL", dns.RcodeToString[m.Rcode])
 	}
-	if (&Imr{}).ownZoneForQuestion(child, dns.TypeDS) != nil {
+	if ownZoneForQuestion(child, dns.TypeDS) != nil {
 		t.Error("the resolver would answer a DS from the withheld parent")
 	}
 
@@ -434,7 +434,7 @@ func TestADSAtAWithheldZonesApexIsItsParentsToAnswer(t *testing.T) {
 			dns.RcodeToString[m.Rcode], len(m.Answer), len(m.Ns))
 	}
 	wantOPT(t, askWithOPT(t, ovZone, dns.TypeDS), "no parent here")
-	if (&Imr{}).ownZoneForQuestion(ovZone, dns.TypeDS) != nil {
+	if ownZoneForQuestion(ovZone, dns.TypeDS) != nil {
 		t.Error("no parent here: the resolver would answer from something")
 	}
 
@@ -465,7 +465,7 @@ ns.` + ovZone + ` 3600 IN A 192.0.2.54
 		if m.Rcode != dns.RcodeSuccess || len(m.Answer) != 1 || m.Answer[0].Header().Rrtype != dns.TypeDS {
 			t.Errorf("rcode %s, answer %v: want the parent's DS", dns.RcodeToString[m.Rcode], m.Answer)
 		}
-		if got := (&Imr{}).ownZoneForQuestion(ovZone, dns.TypeDS); got != root {
+		if got := ownZoneForQuestion(ovZone, dns.TypeDS); got != root {
 			t.Errorf("the resolver answers from %v, not the parent", got)
 		}
 		wantOnlyTheDS(t)
