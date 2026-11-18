@@ -174,6 +174,15 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 		return
 	}
 	if signal, denied := imr.cachedTransportSignal(owner); signal != nil || denied {
+		// The cache holds owner's signal, so there is nothing to look up
+		// at owner. When it is an alias the Additional section could not
+		// follow to its end, a hop on its path may be missing from the
+		// cache: the alias is followed again from the cache, which looks
+		// such a hop up once signalAliasHopRetry has passed, rather than
+		// only after owner's RRset expires.
+		if reason == transportQueryReasonVerify && signal != nil {
+			imr.refollowAliasOwner(aliasWalkFor(ctx), owner)
+		}
 		return
 	}
 	if !imr.TransportSignalDiscovery.Begin(owner) {
