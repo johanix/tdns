@@ -31,9 +31,11 @@ type Options struct {
 }
 
 // ErrorSink is where a resolver reports the server-wide error conditions it
-// owns: the forward table's quarantine and its upstreams' reachability.
-// *ServerErrorRegistry is one.
+// owns: root priming that fails, the forward table's quarantine and its
+// upstreams' reachability. *ServerErrorRegistry is one.
 type ErrorSink interface {
+	SetImrPrimingError(msg string)
+	ClearImrPrimingError()
 	SetImrForwardZoneError(msg string)
 	ClearImrForwardZoneError()
 	SetImrForwardUpstreamError(msg string)
@@ -47,6 +49,8 @@ type ErrorSink interface {
 // noErrorSink is the ErrorSink that drops everything.
 type noErrorSink struct{}
 
+func (noErrorSink) SetImrPrimingError(string)               {}
+func (noErrorSink) ClearImrPrimingError()                   {}
 func (noErrorSink) SetImrForwardZoneError(string)           {}
 func (noErrorSink) ClearImrForwardZoneError()               {}
 func (noErrorSink) SetImrForwardUpstreamError(string)       {}

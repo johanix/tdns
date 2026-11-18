@@ -81,12 +81,22 @@ func TestListenersDoNotWaitForTrustAnchorSetup(t *testing.T) {
 		TrustAnchorDS: parent.dnskey.ToDS(dns.SHA256).String(),
 	}, ImrOptions{})
 
+	prevGlobal := Globals.ImrEngine
+	t.Cleanup(func() { Globals.ImrEngine = prevGlobal })
+	conf := &Config{}
+	conf.Internal.ImrReady = NewImrReadiness()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	listening := make(chan struct{})
 	started := make(chan struct{})
 	go func(ctx context.Context) {
 		defer close(started)
-		imr.startServing(ctx, func(context.Context) { close(listening) })
+		conf.startImr(ctx, imr, func(context.Context) {
+			if !conf.Internal.ImrReady.Published() {
+				t.Error("the listeners started before the resolver was announced")
+			}
+			close(listening)
+		})
 	}(ctx)
 	defer func() {
 		cancel()

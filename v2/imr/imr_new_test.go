@@ -26,6 +26,10 @@ func (s *recordingSink) note(c string) {
 	s.calls = append(s.calls, c)
 }
 
+func (s *recordingSink) SetImrPrimingError(msg string) { s.note("set-priming " + msg) }
+
+func (s *recordingSink) ClearImrPrimingError() { s.note("clear-priming") }
+
 func (s *recordingSink) SetImrForwardZoneError(msg string) { s.note("set-zone " + msg) }
 
 func (s *recordingSink) ClearImrForwardZoneError() { s.note("clear-zone") }
@@ -111,9 +115,8 @@ func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 	}
 }
 
-// A start that fails and the one that follows it, as the daemon's init retry
-// runs them, register one set of debug hooks between them, not one each (which
-// would log every query once per failed start).
+// Two resolvers in one process register one set of debug hooks between them,
+// not one each (which would log every query once per resolver).
 func TestNewImrRegistersItsDebugHooksOnce(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, _, stop := startTestUpstream(t)
@@ -124,19 +127,16 @@ func TestNewImrRegistersItsDebugHooksOnce(t *testing.T) {
 		return len(globalImrOutboundQueryHooks)
 	}
 
-	ic := Config{RootHints: filepath.Join(t.TempDir(), "no-such-hints")}
+	ic := Config{Forward: rootForward(addr, port)}
 	ic.Logging.Enabled = true
 	ic.Logging.File = filepath.Join(t.TempDir(), "imr-debug.log")
 	before := hooks()
-	if imr, err := NewImr(context.Background(), ic, Options{Quiet: true}); err == nil || imr != nil {
-		t.Fatalf("NewImr with no root hints to read: %v, %v; want no Imr and an error", imr, err)
-	}
-	ic.RootHints = ""
-	ic.Forward = rootForward(addr, port)
-	if _, err := NewImr(context.Background(), ic, Options{Quiet: true}); err != nil {
-		t.Fatalf("second NewImr: %v", err)
+	for i := 0; i < 2; i++ {
+		if _, err := NewImr(context.Background(), ic, Options{Quiet: true}); err != nil {
+			t.Fatalf("NewImr %d: %v", i+1, err)
+		}
 	}
 	if got := hooks() - before; got > 1 {
-		t.Errorf("%d debug hooks registered over two starts, want at most one", got)
+		t.Errorf("%d debug hooks registered by two resolvers, want at most one", got)
 	}
 }

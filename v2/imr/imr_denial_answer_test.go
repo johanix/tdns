@@ -223,7 +223,7 @@ func TestCachedDenialKeepsItsVerdict(t *testing.T) {
 		imr := newTestImr(t)
 		seed(imr)
 		ch := make(chan Response, 1)
-		imr.HandleRecursorRequest(context.Background(), Request{
+		imr.handleRecursorRequest(context.Background(), Request{
 			Qname: qname, Qclass: dns.ClassINET, Qtype: core.TypeDSYNC, ResponseCh: ch,
 		})
 		select {

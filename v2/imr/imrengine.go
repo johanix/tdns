@@ -117,6 +117,14 @@ type Imr struct {
 	// nsAddrLookups tracks the background address lookups for out-of-
 	// bailiwick nameservers (resolveZoneServersInBackground).
 	nsAddrLookups nsAddrLookups
+	// ready is closed once the resolver can resolve (Ready, markReady). Nil
+	// in an Imr built by hand, which Ready counts as ready.
+	ready     chan struct{}
+	readyOnce sync.Once
+	// primingErr is the error of the last failed priming attempt while the
+	// resolver is not ready (PrimingError), under primingMu.
+	primingMu  sync.Mutex
+	primingErr error
 }
 
 func (imr *Imr) isLargeAlgorithm(alg uint8) bool {
@@ -254,12 +262,15 @@ func (resp *Response) denied(kind cache.CacheContext, state cache.ValidationStat
 // all dancing recursive server. It is just intended to get the job done for the particular cases
 // that we need to support.
 
-// NewImr builds an Imr from ic alone: the cache, the forward table, the stubs,
-// the configured trust anchors (the offline half) and, unless the root is
-// forwarded, the priming. It starts nothing and publishes nothing: Start runs
-// the rest, the caller keeps the result, and an application that wants a
-// resolver needs no daemon Config. Query it with Query, QueryFresh and
-// IterativeDNSQuery, all reentrant.
+// NewImr builds an Imr from ic alone: the cache, the forward table, the stubs
+// and the configured trust anchors. It sends nothing, so it does not fail on
+// the network: Start primes the root and runs the rest, and Ready says when
+// the resolver is up. It publishes nothing either: the caller keeps the result,
+// and an application that wants a resolver needs no daemon Config. Query it
+// with Query, QueryFresh and IterativeDNSQuery, all reentrant.
+//
+// A resolver with nothing to prime is Ready when NewImr returns: one whose
+// root is forwarded, and one under imrengine.testing.priming: false.
 //
 // The Imr is not the daemon's: NewImr does not touch Globals.ImrEngine,
 // conf.Internal or ImrReady, and enforces no singleton. That is
@@ -398,60 +409,56 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 	// stays in initializeImrTrustAnchors.
 	imr.loadConfiguredTrustAnchors(ic)
 
-	if !rrcache.IsPrimed() {
-		if imr.forwardZoneFor(".") != nil {
-			// The root is covered by a forward zone, so nothing is iterated:
-			// the root NS is never used to send a query, and there is nothing
-			// to prime. Not even the hints are read. They used to be seeded
-			// here, only so that lookups which looked for a cached zone cut
-			// before asking the forward would find one (#722); those look at
-			// the forward first now. RefreshRoot primes if a reload removes
-			// the forward.
-			lgImr.Info("root is covered by a forward zone: not priming, and not reading root-hints")
-			warnUnreadableRootHints(ic.RootHints)
-		} else if ic.Testing.SkipPriming() {
-			// Test harnesses only (imrengine.testing.priming: false). The
-			// hints are used as they stand, and nothing asks the root for its
-			// NS RRset. RefreshRoot upgrades to the live roots when the hints'
-			// copy nears expiry, as it does after re-priming from hints.
-			if err := rrcache.PrimeFromHintsOnly(ic.RootHints); err != nil {
-				return nil, fmt.Errorf("failed to seed RecursorCache from root hints: %v", err)
-			}
-			lgImr.Warn("imrengine.testing.priming is false: seeded from the root hints without priming;" +
-				" a test-harness switch, not for production")
-			imr.PrimedVia = "hints only (testing.priming: false)"
-			imr.PrimedAt = time.Now()
-		} else {
-			err := rrcache.PrimeWithHints(ctx, ic.RootHints, imr.IterativeDNSQueryFetcher())
-			if err != nil {
-				return nil, fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
-			}
-			imr.PrimedVia = "hints+fetch"
-			imr.PrimedAt = time.Now()
+	// Priming is the network's, and Start's (primeRetrying). Here only what
+	// needs no priming is settled: a resolver with nothing to prime is ready.
+	imr.ready = make(chan struct{})
+	if imr.forwardZoneFor(".") != nil {
+		// The root is covered by a forward zone, so nothing is iterated: the
+		// root NS is never used to send a query, and there is nothing to
+		// prime. Not even the hints are read. They used to be seeded here,
+		// only so that lookups which looked for a cached zone cut before
+		// asking the forward would find one (#722); those look at the forward
+		// first now. RefreshRoot primes if a reload removes the forward.
+		lgImr.Info("root is covered by a forward zone: not priming, and not reading root-hints")
+		warnUnreadableRootHints(ic.RootHints)
+		imr.markReady()
+	} else if ic.Testing.SkipPriming() {
+		// Test harnesses only (imrengine.testing.priming: false). The hints
+		// are used as they stand, and nothing asks the root for its NS RRset.
+		// RefreshRoot upgrades to the live roots when the hints' copy nears
+		// expiry, as it does after re-priming from hints.
+		if err := rrcache.PrimeFromHintsOnly(ic.RootHints); err != nil {
+			return nil, fmt.Errorf("failed to seed RecursorCache from root hints: %v", err)
 		}
-		if len(ic.Stubs) > 0 {
-			applied := make(map[string]string, len(ic.Stubs))
-			for _, stub := range ic.Stubs {
-				zone := dns.Fqdn(core.CanonicalizeName(stub.Zone))
-				if _, ok := stubFP[zone]; !ok {
-					continue // rejected by canonicalStubs, which said why
-				}
-				stubservers := []string{}
-				for i := range stub.Servers {
-					server := &stub.Servers[i]
-					stubservers = append(stubservers, server.Name+" ("+strings.Join(server.Addrs, ", ")+")")
-				}
-				lgImr.Info("adding stub", "zone", zone, "servers", strings.Join(stubservers, ", "))
-				if err := imr.Cache.AddStub(zone, stub.Servers); err != nil {
-					lgImr.Error("failed to add stub zone", "zone", zone, "err", err)
-					continue
-				}
-				applied[zone] = stubFP[zone]
+		lgImr.Warn("imrengine.testing.priming is false: seeded from the root hints without priming;" +
+			" a test-harness switch, not for production")
+		imr.PrimedVia = "hints only (testing.priming: false)"
+		imr.PrimedAt = time.Now()
+		imr.markReady()
+	}
+
+	if len(ic.Stubs) > 0 {
+		applied := make(map[string]string, len(ic.Stubs))
+		for _, stub := range ic.Stubs {
+			zone := dns.Fqdn(core.CanonicalizeName(stub.Zone))
+			if _, ok := stubFP[zone]; !ok {
+				continue // rejected by canonicalStubs, which said why
 			}
-			// Record what was actually applied, so the first reload can tell
-			// an untouched stub from an edited one.
-			imr.setZoneTable(forwards, stubZones, applied)
+			stubservers := []string{}
+			for i := range stub.Servers {
+				server := &stub.Servers[i]
+				stubservers = append(stubservers, server.Name+" ("+strings.Join(server.Addrs, ", ")+")")
+			}
+			lgImr.Info("adding stub", "zone", zone, "servers", strings.Join(stubservers, ", "))
+			if err := imr.Cache.AddStub(zone, stub.Servers); err != nil {
+				lgImr.Error("failed to add stub zone", "zone", zone, "err", err)
+				continue
+			}
+			applied[zone] = stubFP[zone]
 		}
+		// Record what was actually applied, so the first reload can tell an
+		// untouched stub from an edited one.
+		imr.setZoneTable(forwards, stubZones, applied)
 	}
 
 	return imr, nil
@@ -471,55 +478,208 @@ func warnUnreadableRootHints(hintsfile string) {
 	}
 }
 
-// Start does what an Imr built by NewImr still has to do before it serves
-// well: fetch and validate the trust anchors' DNSKEY RRsets, probe the forward
-// upstreams, and keep the root NS refreshed. It reads the configuration NewImr
-// was given (bootConf), starts no listeners and no RecursorCh loop, and
-// returns at once: the work runs in goroutines that end when ctx does.
+// Start brings up an Imr built by NewImr and keeps it going: it primes the
+// root, retrying until that works (primeRetrying), and then fetches and
+// validates the trust anchors' DNSKEY RRsets and keeps the root NS refreshed.
+// It probes the forward upstreams at once. It reads the configuration NewImr
+// was given (bootConf), starts no listeners, and returns at once: the work runs
+// in goroutines that end when ctx does. Ready says when the resolver is up.
 func (imr *Imr) Start(ctx context.Context) {
-	// Trust anchors: fetch and validate the anchored zones' DNSKEY RRsets.
-	// This needs the network, and it used to run to completion first, so a
-	// validating resolver whose upstream was down waited out those fetches
-	// before it bound its listeners. It runs beside them now, and beside the
-	// forward probe. The configured keys themselves are in the cache already
-	// (loadConfiguredTrustAnchors, in NewImr): a query that arrives
-	// first has its DNSKEY RRset fetched and validated against them on demand.
-	go func(ctx context.Context) {
-		if err := imr.initializeImrTrustAnchors(ctx, imr.bootConf); err != nil {
-			lgImr.Warn("trust anchor initialization failed", "err", err)
-		}
-	}(ctx)
-
 	// Verify the forward upstreams are reachable, concurrently with normal
 	// operation: failures WARN and mark `config status` DEGRADED, they do
-	// not stop the resolver.
+	// not stop the resolver. They need no root.
 	go imr.ProbeForwardUpstreams(ctx)
 
-	// Keep an iterated root NS alive: start-up primes it once, and without
-	// this it expires on its TTL and cannot be re-fetched, because fetching
-	// ". NS" needs a root server address. While "." is forwarded there is
-	// nothing to keep, and this idles instead. It also primes a root that a
-	// reload stops forwarding. See imr_root_refresh.go.
-	//
-	// Not under a test harness that says so (testing.root-refresh: false), nor
-	// on the test clock: the refresh waits in real time for an expiry in data
-	// time.
-	if imr.bootConf.Testing.SkipRootRefresh() {
-		lgImr.Warn("imrengine.testing: the root NS is not refreshed; a test-harness setting, not for production")
-		return
-	}
-	go imr.RefreshRoot(ctx, imr.bootConf.RootHints)
+	go func(ctx context.Context) {
+		if !imr.primeRetrying(ctx, imr.primeFromHints, primingRetryDelay) {
+			return
+		}
+
+		// Trust anchors: fetch and validate the anchored zones' DNSKEY RRsets.
+		// This needs the primed cache and the network, and it used to run to
+		// completion first, so a validating resolver whose upstream was down
+		// waited out those fetches before it bound its listeners. It runs
+		// beside them now, and beside the forward probe. The configured keys
+		// themselves are in the cache already (loadConfiguredTrustAnchors, in
+		// NewImr): a query that arrives first has its DNSKEY RRset fetched and
+		// validated against them on demand.
+		go func(ctx context.Context) {
+			if err := imr.initializeImrTrustAnchors(ctx, imr.bootConf); err != nil {
+				lgImr.Warn("trust anchor initialization failed", "err", err)
+			}
+		}(ctx)
+
+		// Keep an iterated root NS alive: priming fetches it once, and without
+		// this it expires on its TTL and cannot be re-fetched, because fetching
+		// ". NS" needs a root server address. While "." is forwarded there is
+		// nothing to keep, and this idles instead. It also primes a root that a
+		// reload stops forwarding. See imr_root_refresh.go.
+		//
+		// Not under a test harness that says so (testing.root-refresh: false),
+		// nor on the test clock: the refresh waits in real time for an expiry in
+		// data time.
+		if imr.bootConf.Testing.SkipRootRefresh() {
+			lgImr.Warn("imrengine.testing: the root NS is not refreshed; a test-harness setting, not for production")
+			return
+		}
+		imr.RefreshRoot(ctx, imr.bootConf.RootHints)
+	}(ctx)
 }
 
-// HandleRecursorRequest answers a single RecursorCh request. Runs
-// on its own goroutine spawned by the engine loop. Cache hits are
-// answered directly; everything else falls through to Query.
+// Priming needs an answer from a root server, and a resolver starts at the
+// moment it is least likely to get one: the network not up yet, every resolver
+// on it priming at once, or the root server on the same host not up yet. A
+// failed priming used to end the daemon's resolver for good: the process stayed
+// up with no resolver, the DelegationSyncher waited for it forever, and every DS
+// change a parent had to check was refused as unverifiable -- one root timeout
+// at boot cost a restart. So it is retried, as long as it takes.
+
+const (
+	primingFirstRetry = 5 * time.Second
+	primingMaxRetry   = 2 * time.Minute
+)
+
+// primingRetryDelay is the wait before priming attempt attempt+2: 5s, doubling,
+// capped at two minutes.
+func primingRetryDelay(attempt int) time.Duration {
+	d := primingFirstRetry
+	for i := 0; i < attempt && d < primingMaxRetry; i++ {
+		d *= 2
+	}
+	if d > primingMaxRetry {
+		d = primingMaxRetry
+	}
+	return d
+}
+
+// primeRetrying runs prime until it succeeds or ctx is done, and reports
+// whether the resolver is Ready. A resolver that is Ready already, with nothing
+// to prime, is left as it is. While priming keeps failing, PrimingError has the
+// latest reason, and so has the ErrorSink (`config status` shows DEGRADED);
+// both are cleared once it works.
+func (imr *Imr) primeRetrying(ctx context.Context, prime func(context.Context) error, delay func(attempt int) time.Duration) bool {
+	select {
+	case <-imr.Ready():
+		return true
+	default:
+	}
+	for attempt := 0; ; attempt++ {
+		err := prime(ctx)
+		if err == nil {
+			if attempt > 0 {
+				imr.errorRegistry.ClearImrPrimingError()
+				lgImr.Info("root primed after failed attempts", "attempts", attempt+1)
+			}
+			imr.markReady()
+			return true
+		}
+		wait := delay(attempt)
+		imr.primingMu.Lock()
+		imr.primingErr = err
+		imr.primingMu.Unlock()
+		imr.errorRegistry.SetImrPrimingError(
+			fmt.Sprintf("IMR root priming failed, not resolving yet; retrying in %s: %v", wait, err))
+		lgImr.Warn("root priming failed; will retry", "attempt", attempt+1, "retry-in", wait, "err", err)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(wait):
+		}
+	}
+}
+
+// primeFromHints is one priming attempt: the root hints, then a live ". NS".
+// What an earlier attempt taught the root servers' backoff is forgotten first,
+// so that every attempt starts as the first did: an attempt made while the
+// network comes up fails with a routing error, which holds a server back for an
+// hour (BackoffConf.RoutingFailure), and the attempts are retried for exactly
+// that case.
+func (imr *Imr) primeFromHints(ctx context.Context) error {
+	servers, _ := imr.Cache.ServerMapCopy(".")
+	for _, server := range servers {
+		server.ForgetAddressFailures()
+	}
+	if err := imr.Cache.PrimeWithHints(ctx, imr.bootConf.RootHints, imr.IterativeDNSQueryFetcher()); err != nil {
+		return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
+	}
+	imr.PrimedVia = "hints+fetch"
+	imr.PrimedAt = time.Now()
+	return nil
+}
+
+// closedReady is what Ready returns for an Imr built by hand, not by NewImr:
+// there is no priming to wait for.
+var closedReady = func() chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}()
+
+// Ready returns a channel that is closed once the resolver can resolve: once
+// Start has primed the root, or when NewImr returns if there is nothing to
+// prime. Until then Query and QueryFresh wait for it, and PrimingError says
+// what keeps it.
+func (imr *Imr) Ready() <-chan struct{} {
+	if imr.ready == nil {
+		return closedReady
+	}
+	return imr.ready
+}
+
+// markReady closes Ready, once.
+func (imr *Imr) markReady() {
+	imr.readyOnce.Do(func() {
+		imr.primingMu.Lock()
+		imr.primingErr = nil
+		imr.primingMu.Unlock()
+		close(imr.ready)
+	})
+}
+
+// PrimingError is why the resolver is not Ready yet: the error of the last
+// priming attempt that failed. It is nil before an attempt has failed, and
+// once the resolver is Ready.
+func (imr *Imr) PrimingError() error {
+	imr.primingMu.Lock()
+	defer imr.primingMu.Unlock()
+	return imr.primingErr
+}
+
+// Serve answers the requests that come on requests, each in a goroutine of its
+// own, until ctx is done or requests is closed. It is the channel API beside
+// Query, and the tdns daemon serves its RecursorCh with it. A request that
+// comes before the resolver is Ready waits for it, as a Query does.
+func (imr *Imr) Serve(ctx context.Context, requests <-chan Request) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case rrq, ok := <-requests:
+			if !ok {
+				return
+			}
+			if rrq.ResponseCh == nil {
+				lgImr.Warn("received nil or invalid request (no response channel)")
+				continue
+			}
+			// Each request runs in its own goroutine. Query is fully
+			// reentrant; serialising callers behind the channel-read loop
+			// served no purpose and stalled concurrent CLI / RPC invocations
+			// behind any slow query.
+			go imr.handleRecursorRequest(ctx, rrq)
+		}
+	}
+}
+
+// handleRecursorRequest answers a single request for Serve, on its own
+// goroutine. Cache hits are answered directly; everything else falls through
+// to Query.
 //
 // Defensive: a top-level recover ensures that any panic in this
 // goroutine logs and reports an error to the caller rather than
 // killing the whole process. tdns-auth and tdns-mp embed this
 // engine and a panic here previously took down the server.
-func (imr *Imr) HandleRecursorRequest(ctx context.Context, rrq Request) {
+func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq Request) {
 	defer func() {
 		if rec := recover(); rec != nil {
 			lgImr.Error("HandleRecursorRequest: PANIC recovered",
@@ -653,8 +813,12 @@ func (imr *Imr) upgradeIndirectCacheHits() bool {
 	return *imr.Tuning.UpgradeIndirectCacheHits
 }
 
+// Query looks up <qname, qtype>, from the cache or by iteration, and validates
+// what it finds. Before the resolver is Ready it waits for that, within ctx
+// and the query budget (imrengine.tuning.query-budget), which the wait counts
+// against.
 func (imr *Imr) Query(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *Response) (*Response, error) {
-	return imr.imrQuery(ctx, qname, qtype, qclass, respch, false)
+	return imr.queryWhenReady(ctx, qname, qtype, qclass, respch, false)
 }
 
 // QueryFresh is Query without the cache for the answer itself: a cached
@@ -669,7 +833,34 @@ func (imr *Imr) Query(ctx context.Context, qname string, qtype uint16, qclass ui
 // behind that attempt's cached NXDOMAIN for the whole negative TTL, and every
 // retry would read the same entry.
 func (imr *Imr) QueryFresh(ctx context.Context, qname string, qtype uint16, qclass uint16) (*Response, error) {
-	return imr.imrQuery(ctx, qname, qtype, qclass, nil, true)
+	return imr.queryWhenReady(ctx, qname, qtype, qclass, nil, true)
+}
+
+// queryWhenReady is Query and QueryFresh: imrQuery, once the resolver is
+// Ready. Only they wait. The resolver's own lookups call imrQuery: priming
+// itself can start some (a root server's transport signal, a nameserver
+// address), and would otherwise wait for its own end.
+func (imr *Imr) queryWhenReady(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *Response, fresh bool) (*Response, error) {
+	select {
+	case <-imr.Ready():
+	default:
+		// The budget imrQuery applies is counted from here, as the deadline
+		// it inherits.
+		if budget := imr.Tuning.QueryBudget; budget > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, budget)
+			defer cancel()
+		}
+		select {
+		case <-imr.Ready():
+		case <-ctx.Done():
+			if err := imr.PrimingError(); err != nil {
+				return nil, fmt.Errorf("resolver not ready (root priming: %v): %w", err, ctx.Err())
+			}
+			return nil, fmt.Errorf("resolver not ready (root not primed yet): %w", ctx.Err())
+		}
+	}
+	return imr.imrQuery(ctx, qname, qtype, qclass, respch, fresh)
 }
 
 func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *Response, fresh bool) (*Response, error) {

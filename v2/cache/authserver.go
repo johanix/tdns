@@ -1029,6 +1029,17 @@ func (as *AuthServer) RecordEndpointAddrSuccess(addr string, port uint16, t core
 	}
 }
 
+// ForgetAddressFailures clears the backoff of every address and transport of
+// the server, as if none had failed. Thread-safe.
+func (as *AuthServer) ForgetAddressFailures() {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.AddressBackoffs = nil
+}
+
 // rttEMAAlpha is the smoothing factor for RTT EMA updates. Lower values
 // react more slowly to changes; higher values are noisier. 0.25 gives
 // each new sample 25% weight and 75% to the running average.

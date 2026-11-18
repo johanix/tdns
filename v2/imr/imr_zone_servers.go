@@ -73,7 +73,7 @@ func (imr *Imr) lookupServerAddrs(ctx context.Context, srv *cache.AuthServer, ns
 		wg.Add(1)
 		go func(ctx context.Context, atype uint16) {
 			defer wg.Done()
-			resp, err := imr.Query(ctx, nsname, atype, dns.ClassINET, nil)
+			resp, err := imr.imrQuery(ctx, nsname, atype, dns.ClassINET, nil, false)
 			if err != nil || resp == nil || resp.RRset == nil {
 				return
 			}

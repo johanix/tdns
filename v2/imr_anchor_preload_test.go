@@ -12,10 +12,10 @@ import (
 	"github.com/miekg/dns"
 )
 
-// The anchors must be in place before priming asks the root anything. A start
-// whose priming cannot even begin -- no root hints to read -- is the cleanest
-// place to see it: whatever InitImrEngine loaded before priming is in the DNSKEY
-// cache, and nothing after it ran.
+// The anchors must be in place before priming asks the root anything.
+// InitImrEngine loads them and sends nothing: priming is Start's. So after it,
+// with root hints that could not even be read, the anchor is in the DNSKEY
+// cache and the resolver is not Ready.
 func TestInitImrEngineLoadsTrustAnchorsBeforePriming(t *testing.T) {
 	const anchor = "anchor-preload.example."
 	k := &dns.DNSKEY{Hdr: dns.RR_Header{Name: anchor, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
@@ -41,8 +41,13 @@ func TestInitImrEngineLoadsTrustAnchorsBeforePriming(t *testing.T) {
 	conf.Imr.RootHints = filepath.Join(t.TempDir(), "no-such-hints")
 	conf.Imr.TrustAnchorDNSKEY = k.String()
 
-	if err := conf.InitImrEngine(context.Background(), true); err == nil {
-		t.Fatal("InitImrEngine succeeded with no root hints to read")
+	if err := conf.InitImrEngine(context.Background(), true); err != nil {
+		t.Fatalf("InitImrEngine sends nothing, and failed: %v", err)
+	}
+	select {
+	case <-conf.Internal.ImrEngine.Ready():
+		t.Fatal("Ready before anything was primed")
+	default:
 	}
 	got := cache.DnskeyCache.Get(anchor, k.KeyTag())
 	if got == nil || !got.TrustAnchor {
