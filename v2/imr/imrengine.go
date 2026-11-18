@@ -122,6 +122,9 @@ type Imr struct {
 	// in an Imr built by hand, which Ready counts as ready.
 	ready     chan struct{}
 	readyOnce sync.Once
+	// stopped is closed when the context given to Start ends before the
+	// resolver is Ready (WaitReady). Nil in an Imr built by hand.
+	stopped chan struct{}
 	// primingErr is the error of the last failed priming attempt while the
 	// resolver is not ready (PrimingError), under primingMu.
 	primingMu  sync.Mutex
@@ -426,6 +429,7 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 	// Priming is the network's, and Start's (primeRetrying). Here only what
 	// needs no priming is settled: a resolver with nothing to prime is ready.
 	imr.ready = make(chan struct{})
+	imr.stopped = make(chan struct{})
 	if imr.forwardZoneFor(".") != nil {
 		// The root is covered by a forward zone, so nothing is iterated: the
 		// root NS is never used to send a query, and there is nothing to
@@ -497,7 +501,8 @@ func warnUnreadableRootHints(lg *slog.Logger, hintsfile string) {
 // validates the trust anchors' DNSKEY RRsets and keeps the root NS refreshed.
 // It probes the forward upstreams at once. It reads the configuration NewImr
 // was given (bootConf), starts no listeners, and returns at once: the work runs
-// in goroutines that end when ctx does. Ready says when the resolver is up.
+// in goroutines that end when ctx does. Ready and WaitReady say when the
+// resolver is up; if ctx ends before that, WaitReady and Query fail at once.
 func (imr *Imr) Start(ctx context.Context) {
 	// Verify the forward upstreams are reachable, concurrently with normal
 	// operation: failures WARN and mark `config status` DEGRADED, they do
@@ -506,6 +511,7 @@ func (imr *Imr) Start(ctx context.Context) {
 
 	go func(ctx context.Context) {
 		if !imr.primeRetrying(ctx, imr.primeFromHints, primingRetryDelay) {
+			close(imr.stopped)
 			return
 		}
 
@@ -632,7 +638,8 @@ var closedReady = func() chan struct{} {
 // Ready returns a channel that is closed once the resolver can resolve: once
 // Start has primed the root, or when NewImr returns if there is nothing to
 // prime. Until then Query and QueryFresh wait for it, and PrimingError says
-// what keeps it.
+// what keeps it. It is never closed if Start's context ends first; WaitReady
+// says that too.
 func (imr *Imr) Ready() <-chan struct{} {
 	if imr.ready == nil {
 		return closedReady
@@ -659,10 +666,35 @@ func (imr *Imr) PrimingError() error {
 	return imr.primingErr
 }
 
+// WaitReady waits until the resolver is Ready, and then returns nil. It
+// returns an error at once if the context given to Start ended before the
+// resolver was ready, one that wraps PrimingError: nothing will make it ready.
+// If ctx ends first, the error wraps ctx.Err() and names the priming error, if
+// an attempt has failed.
+func (imr *Imr) WaitReady(ctx context.Context) error {
+	select {
+	case <-imr.Ready():
+		return nil
+	default:
+	}
+	select {
+	case <-imr.Ready():
+		return nil
+	case <-imr.stopped:
+		return fmt.Errorf("resolver stopped before it was ready: %w", imr.PrimingError())
+	case <-ctx.Done():
+		if err := imr.PrimingError(); err != nil {
+			return fmt.Errorf("resolver not ready (root priming: %v): %w", err, ctx.Err())
+		}
+		return fmt.Errorf("resolver not ready (root not primed yet): %w", ctx.Err())
+	}
+}
+
 // Serve answers the requests that come on requests, each in a goroutine of its
 // own, until ctx is done or requests is closed. It is the channel API beside
 // Query, and the tdns daemon serves its RecursorCh with it. A request that
-// comes before the resolver is Ready waits for it, as a Query does.
+// comes before the resolver is Ready waits for it, as a Query does, and fails
+// as a Query does when the resolver stopped before it was ready.
 func (imr *Imr) Serve(ctx context.Context, requests <-chan Request) {
 	for {
 		select {
@@ -828,9 +860,9 @@ func (imr *Imr) upgradeIndirectCacheHits() bool {
 }
 
 // Query looks up <qname, qtype>, from the cache or by iteration, and validates
-// what it finds. Before the resolver is Ready it waits for that, within ctx
-// and the query budget (imrengine.tuning.query-budget), which the wait counts
-// against.
+// what it finds. Before the resolver is Ready it waits for that (WaitReady),
+// within ctx and the query budget (imrengine.tuning.query-budget), which the
+// wait counts against.
 func (imr *Imr) Query(ctx context.Context, qname string, qtype uint16, qclass uint16) (*Response, error) {
 	return imr.queryWhenReady(ctx, qname, qtype, qclass, false)
 }
@@ -865,13 +897,8 @@ func (imr *Imr) queryWhenReady(ctx context.Context, qname string, qtype uint16, 
 			ctx, cancel = context.WithTimeout(ctx, budget)
 			defer cancel()
 		}
-		select {
-		case <-imr.Ready():
-		case <-ctx.Done():
-			if err := imr.PrimingError(); err != nil {
-				return nil, fmt.Errorf("resolver not ready (root priming: %v): %w", err, ctx.Err())
-			}
-			return nil, fmt.Errorf("resolver not ready (root not primed yet): %w", ctx.Err())
+		if err := imr.WaitReady(ctx); err != nil {
+			return nil, err
 		}
 	}
 	return imr.imrQuery(ctx, qname, qtype, qclass, fresh)

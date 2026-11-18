@@ -209,6 +209,62 @@ func TestNewImrSendsNothing(t *testing.T) {
 	}
 }
 
+// A resolver whose Start context ended before it was Ready will not become
+// ready: WaitReady, Query and Serve's requests say so at once, with the
+// priming error, instead of waiting out their deadlines.
+func TestStoppedBeforeReadyFailsAtOnce(t *testing.T) {
+	restoreProcessWideTuning(t)
+	ic := Config{RootHints: filepath.Join(t.TempDir(), "no-such-hints")}
+	imr, err := NewImr(context.Background(), ic, Options{Quiet: true})
+	if err != nil {
+		t.Fatalf("NewImr: %v", err)
+	}
+	imr.Tuning.QueryBudget = time.Hour // only the stop can end the waits below
+
+	ctx, cancel := context.WithCancel(context.Background())
+	imr.Start(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for imr.PrimingError() == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if imr.PrimingError() == nil {
+		t.Fatal("priming did not fail")
+	}
+	cancel()
+
+	wctx, wcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer wcancel()
+	err = imr.WaitReady(wctx)
+	if err == nil || errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, imr.PrimingError()) ||
+		!strings.Contains(err.Error(), "stopped before it was ready") {
+		t.Fatalf("WaitReady once Start's context ended: %v; want the stop, wrapping the priming error", err)
+	}
+
+	start := time.Now()
+	resp, err := imr.Query(context.Background(), "www.example.", dns.TypeA, dns.ClassINET)
+	if resp != nil || err == nil || !strings.Contains(err.Error(), "stopped before it was ready") {
+		t.Errorf("Query: %+v, %v; want the stop", resp, err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("Query took %v to fail; want at once", d)
+	}
+
+	requests := make(chan Request, 1)
+	respch := make(chan Response, 1)
+	requests <- Request{Qname: "www.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET, ResponseCh: respch}
+	sctx, scancel := context.WithCancel(context.Background())
+	defer scancel()
+	go imr.Serve(sctx, requests)
+	select {
+	case resp := <-respch:
+		if !resp.Error || !strings.Contains(resp.ErrorMsg, "stopped before it was ready") {
+			t.Errorf("Serve answered %+v; want the stop", resp)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("Serve did not answer")
+	}
+}
+
 // A Query that comes before the resolver is Ready waits for it, and is
 // answered once it is.
 func TestQueryWaitsForReady(t *testing.T) {
