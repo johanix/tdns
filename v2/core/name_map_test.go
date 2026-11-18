@@ -129,3 +129,35 @@ func TestNameMapKeepsRawOctetsDistinct(t *testing.T) {
 		t.Errorf("Get on the 0xff name returned %q", got)
 	}
 }
+
+// IterCb walks one entry per name, under the canonical key, however many
+// spellings the name was stored under.
+func TestNameMapIterCbVisitsOneEntryPerName(t *testing.T) {
+	nm := NewNameMap[int]()
+	nm.Set("WWW.example.com.", 1)
+	nm.Set("www.EXAMPLE.com.", 2)
+	nm.Set("Mail.Example.COM.", 3)
+
+	// Visits are counted, not just recorded: a map overwrites a repeat, so a
+	// walk that visited an entry twice would look the same, and the ticker would
+	// decrement that counter twice.
+	got := map[string]int{}
+	visits := map[string]int{}
+	nm.IterCb(func(key string, v int) {
+		got[key] = v
+		visits[key]++
+	})
+
+	want := map[string]int{"www.example.com.": 2, "mail.example.com.": 3}
+	if len(got) != len(want) {
+		t.Fatalf("IterCb visited %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("IterCb[%q] = %d, want %d", k, got[k], v)
+		}
+		if visits[k] != 1 {
+			t.Errorf("IterCb visited %q %d times, want exactly once", k, visits[k])
+		}
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -169,13 +170,22 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 		var signingGroup string
 		var configGroup string
 
-		// Get configured group prefixes
-		if Conf.Catalog == nil {
-			lg.Error("ParseCatalogZone: Conf.Catalog is nil, cannot categorize groups")
-			return nil, fmt.Errorf("Conf.Catalog is nil, cannot parse catalog zone")
+		// Get configured group prefixes. A server with no catalog: block
+		// (a producer of catalogs needs none) has no group types: every group
+		// is an ordinary one.
+		configPrefix, signingPrefix := "none", "none"
+		if Conf.Catalog != nil {
+			configPrefix = Conf.Catalog.GroupPrefixes.Config
+			signingPrefix = Conf.Catalog.GroupPrefixes.Signing
 		}
-		configPrefix := Conf.Catalog.GroupPrefixes.Config
-		signingPrefix := Conf.Catalog.GroupPrefixes.Signing
+		// An unset prefix is no group type, as "none" is: an empty prefix
+		// would match every group (strings.HasPrefix(g, "") is true).
+		if configPrefix == "" {
+			configPrefix = "none"
+		}
+		if signingPrefix == "" {
+			signingPrefix = "none"
+		}
 
 		for _, group := range info.groups {
 			// Check if this is a signing group (only if prefix != "none")
@@ -263,6 +273,13 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 	}
 
 	if conf.Catalog == nil {
+		// No catalog: block. A catalog that does not auto-create its members
+		// (one this server produces, or only reads) needs none, and has
+		// nothing to configure: with no group prefixes no member names a
+		// config group.
+		if !catalogZd.Options[OptCatalogMemberAutoCreate] {
+			return nil
+		}
 		lg.Warn("CATALOG: conf.Catalog is nil, cannot auto-configure zones")
 		return fmt.Errorf("AutoConfigureZonesFromCatalog: conf.Catalog is nil for catalog zone %s", update.CatalogZone)
 	}
@@ -281,9 +298,14 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			errorCount++
 			continue
 		}
-		// VALIDATION (a): Check if zone references a group that doesn't exist in config
-		// This validation applies regardless of auto-config policy
-		if member.MetaGroup != "" {
+		// VALIDATION (a): Check if zone references a group that doesn't exist
+		// in config. Only for a catalog that auto-creates its members: the
+		// local config groups are what auto-create configures them from. A
+		// catalog that does not -- one this server produces, or one it only
+		// reads -- has nothing to configure from them, and a group label it
+		// carries for others is not this server's business (a ruling of the
+		// maintainer, 2026-11-12).
+		if member.MetaGroup != "" && autoConfigureEnabled {
 			configGroupConfig, exists := conf.Catalog.ConfigGroups[member.MetaGroup]
 			if !exists {
 				errorMsg := fmt.Sprintf("Member zone %s in catalog %s references group '%s' which does not exist in local config. Available groups: %v",
@@ -532,6 +554,13 @@ type CatalogMembership struct {
 	CatalogZoneName string
 	MemberZones     map[string]*CatalogMemberZone // zonename -> member data
 	AvailableGroups []string                      // List of all defined groups (RFC 9432 terminology)
+	// edits counts the member changes (members and their groups) made
+	// through the API; publishedEdits is the edits value the catalog's
+	// published content reflects, set once the publish carrying a
+	// regeneration has landed. While the two differ the list is ahead of
+	// the zone, and rebuildCatalogMembership leaves it alone.
+	edits          uint64
+	publishedEdits uint64
 }
 
 // CatalogMemberZone represents a member zone in the catalog
@@ -546,6 +575,105 @@ var (
 	catalogMemberships     = make(map[string]*CatalogMembership) // catalog-zone-name -> membership
 	catalogMembershipMutex sync.RWMutex
 )
+
+// rebuildCatalogMembership makes the member list of a catalog zone this
+// server originates match the catalog's own records: one member per PTR at
+// <id>.zones.<catalog>, with the groups of its group.<id>.zones.<catalog> TXT.
+// It returns the number of members.
+//
+// The member list is what the catalog API edits, and regenerateCatalogZone
+// rewrites the whole zones.<catalog> subtree from it. Kept only in memory, it
+// was empty after a restart, so the next catalog zone add or delete rewrote
+// the catalog with the new member alone and every consumer dropped the rest.
+// So the zone's content is the record, and the list is rebuilt from it when
+// the zone is loaded: at the first load, and when a refresh changed it (an
+// edited zone file reloaded). Not on every refresh: a change the API has
+// staged but not yet published is in the list and not yet in the snapshot,
+// and rebuilding from the snapshot then would lose it.
+//
+// The <id> labels are kept as they are, so a rewrite does not move a member
+// to a new owner name. Groups seen on members are added to the catalog's
+// available groups; a group defined but on no member is not in the zone and
+// does not survive a restart.
+//
+// A secondary's catalog is not touched: it mirrors its upstream and has no
+// member list to keep.
+func rebuildCatalogMembership(zd *ZoneData) (int, error) {
+	if zd == nil || !zd.Options[OptCatalogZone] || !zoneMayOriginateContent(zd) {
+		return 0, nil
+	}
+	// The list may be ahead of the zone: a member change made through the
+	// API whose publish has not landed yet. The zone does not have it, so a
+	// rebuild from the zone would lose it; the list is kept. The same check
+	// again before the list is replaced catches a change made while the
+	// zone was being read.
+	cm := GetOrCreateCatalogMembership(zd.ZoneName)
+	cm.mu.RLock()
+	before, ahead := cm.edits, cm.edits != cm.publishedEdits
+	kept := len(cm.MemberZones)
+	cm.mu.RUnlock()
+	if ahead {
+		lg.Info("CATALOG: member list ahead of the catalog's published content; not rebuilt", "catalog", zd.ZoneName)
+		return kept, nil
+	}
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		return 0, fmt.Errorf("catalog zone %s has no published content", zd.ZoneName)
+	}
+	catalog := zd.ZoneName
+	suffix := ".zones." + catalog
+	names := map[string]string{}    // id -> member zone name
+	groups := map[string][]string{} // id -> groups
+	for owner, od := range snap.Data {
+		if !strings.HasSuffix(owner, suffix) {
+			continue
+		}
+		labels := strings.Split(strings.TrimSuffix(owner, suffix), ".")
+		switch {
+		case len(labels) == 1:
+			for _, rr := range od.RRtypes.GetOnlyRRSet(dns.TypePTR).RRs {
+				if ptr, ok := rr.(*dns.PTR); ok {
+					names[labels[0]] = dns.Fqdn(ptr.Ptr)
+				}
+			}
+		case len(labels) == 2 && labels[0] == "group":
+			for _, rr := range od.RRtypes.GetOnlyRRSet(dns.TypeTXT).RRs {
+				if txt, ok := rr.(*dns.TXT); ok {
+					groups[labels[1]] = append(groups[labels[1]], txt.Txt...)
+				}
+			}
+		}
+	}
+
+	members := make(map[string]*CatalogMemberZone, len(names))
+	seenGroup := map[string]bool{}
+	now := time.Now()
+	for id, zname := range names {
+		g := append([]string{}, groups[id]...)
+		for _, grp := range g {
+			seenGroup[grp] = true
+		}
+		members[zname] = &CatalogMemberZone{ZoneName: zname, Hash: id, Groups: g, DiscoveredAt: now}
+	}
+
+	cm.mu.Lock()
+	if cm.edits != before || cm.edits != cm.publishedEdits {
+		kept = len(cm.MemberZones)
+		cm.mu.Unlock()
+		lg.Info("CATALOG: member list changed while the catalog was read; not rebuilt", "catalog", catalog)
+		return kept, nil
+	}
+	cm.MemberZones = members
+	for _, grp := range cm.AvailableGroups {
+		delete(seenGroup, grp)
+	}
+	for grp := range seenGroup {
+		cm.AvailableGroups = append(cm.AvailableGroups, grp)
+	}
+	cm.mu.Unlock()
+	lg.Info("CATALOG: member list rebuilt from the catalog's records", "catalog", catalog, "members", len(members))
+	return len(members), nil
+}
 
 // GetOrCreateCatalogMembership returns the membership for a catalog zone, creating if needed
 func GetOrCreateCatalogMembership(catalogZoneName string) *CatalogMembership {
@@ -580,6 +708,7 @@ func (cm *CatalogMembership) AddMemberZone(zoneName string) error {
 		Groups:       []string{},
 		DiscoveredAt: time.Now(),
 	}
+	cm.edits++
 
 	lg.Info("CATALOG: added zone to catalog", "zone", zoneName, "catalog", cm.CatalogZoneName, "hash", cm.MemberZones[zoneName].Hash)
 	return nil
@@ -595,6 +724,7 @@ func (cm *CatalogMembership) RemoveMemberZone(zoneName string) error {
 	}
 
 	delete(cm.MemberZones, zoneName)
+	cm.edits++
 	lg.Info("CATALOG: removed zone from catalog", "zone", zoneName, "catalog", cm.CatalogZoneName)
 	return nil
 }
@@ -633,6 +763,24 @@ func (cm *CatalogMembership) RemoveGroup(group string) error {
 
 	if !found {
 		return fmt.Errorf("group %s not found in catalog %s", group, cm.CatalogZoneName)
+	}
+
+	// A group a member still carries is in the catalog's published records
+	// (the member's group TXT), and the member list is rebuilt from those at
+	// the next load (rebuildCatalogMembership), which would bring the group
+	// back. Refused rather than half-done: remove it from the members first.
+	var users []string
+	for name, m := range cm.MemberZones {
+		for _, g := range m.Groups {
+			if g == group {
+				users = append(users, name)
+				break
+			}
+		}
+	}
+	if len(users) > 0 {
+		sort.Strings(users)
+		return fmt.Errorf("group %s is still used by %d member zone(s) of catalog %s (%s); remove it from them first (catalog zone group delete)", group, len(users), cm.CatalogZoneName, strings.Join(users, ", "))
 	}
 
 	cm.AvailableGroups = newGroups
@@ -685,6 +833,7 @@ func (cm *CatalogMembership) AddZoneGroup(zoneName, group string) error {
 	}
 
 	member.Groups = append(member.Groups, group)
+	cm.edits++
 	lg.Info("CATALOG: added group to zone", "group", group, "zone", zoneName, "catalog", cm.CatalogZoneName)
 	return nil
 }
@@ -714,6 +863,7 @@ func (cm *CatalogMembership) RemoveZoneGroup(zoneName, group string) error {
 	}
 
 	member.Groups = newGroups
+	cm.edits++
 	lg.Info("CATALOG: removed group from zone", "group", group, "zone", zoneName, "catalog", cm.CatalogZoneName)
 	return nil
 }
@@ -727,7 +877,9 @@ func (cm *CatalogMembership) GetMemberZones() map[string]*MemberZone {
 
 	// Get configured group prefixes
 	if Conf.Catalog == nil {
-		lg.Warn("GetMemberZones: Conf.Catalog is nil, returning members without group categorization")
+		// Normal for a catalog that does not auto-create: it needs no catalog
+		// block (#1040), so this is not worth a warning.
+		lg.Debug("GetMemberZones: no catalog block in the config, returning members without group categorization")
 		for zoneName, member := range cm.MemberZones {
 			discoveredAt := member.DiscoveredAt
 			if discoveredAt.IsZero() {

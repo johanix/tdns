@@ -319,10 +319,18 @@ type ZonePost struct {
 	Options   []string
 	// ZoneType selects what `zone add` creates: "secondary" (the default) or
 	// "primary" (template-provisioned). Template names the operator-blessed
-	// (dynamiczones: true) template a primary is expanded from — REQUIRED for
-	// primaries, unused for secondaries.
-	ZoneType string
-	Template string
+	// (dynamiczones: true) template the zone is expanded from. With none,
+	// dynamiczones.dynamic.default-template for the zone type applies. A
+	// primary takes its whole configuration from the template and cannot be
+	// added without one; a secondary takes only its outbound settings
+	// (downstreams, downstream-auth, notify, allow-notify, NOTIFY resend).
+	//
+	// On modify (secondaries), Template sets or replaces the zone's template,
+	// ClearTemplate removes it (and the outbound settings it gave), and
+	// neither keeps it.
+	ZoneType      string
+	Template      string
+	ClearTemplate bool `json:"cleartemplate,omitempty"`
 	// Zone content updates ("zone update <verb>"). UpdateRRs carries
 	// presentation-form records for addrr/delrr/replacerrset; UpdateName and
 	// UpdateRrtype address an RRset or a name for delrrset/delname. See
@@ -362,8 +370,8 @@ type ZonePost struct {
 	//
 	// It has to be settable here rather than only in the config file, because
 	// the zones that most need it are dynamic: a secondary provisioned over
-	// this API has no config-file stanza to carry it, and no template either
-	// (templates are a primary-only mechanism). Without this field the value
+	// this API has no config-file stanza to carry it, and its template (if
+	// any) gives it only its outbound settings. Without this field the value
 	// could be persisted and reloaded but never set in the first place.
 	//
 	// On modify, a nil slice leaves the current value alone; an explicitly
@@ -381,6 +389,10 @@ type ZoneResponse struct {
 	Msg      string
 	Error    bool
 	ErrorMsg string
+	// Warnings are what the operator must not overlook about an accepted
+	// "add" or "modify", such as a DANE primary while DNSSEC validation is
+	// not enforced (zoneDaneWarnings).
+	Warnings []string `json:"warnings,omitempty"`
 	// Journal carries the delta-journal report for "zone journal status|list".
 	Journal *ZoneJournalInfo `json:"journal,omitempty"`
 	// Instructions carries an ADD/DEL list back to the client: the flattened
@@ -665,10 +677,11 @@ type DsyncApiCredentialResponse struct {
 }
 
 type ConfigPost struct {
-	Command       string   // status | reload | reload-zones | reload-tsig | ...
+	Command       string   // status | reload | reload-zones | reload-tsig | transport-signal | ...
 	Force         bool     // reload-tsig: overwrite secret conflicts
 	Confirm       bool     `json:"confirm,omitempty"`       // reload / reload-zones: acknowledge a guarded DNSSEC policy algorithm change
 	TsigOverwrite []string `json:"tsigoverwrite,omitempty"` // reload-tsig --interactive: per-key overwrite
+	Name          string   `json:"name,omitempty"`          // transport-signal: one name instead of every identity; transport-signal-release: the name to release
 }
 
 type ConfigResponse struct {
@@ -684,11 +697,15 @@ type ConfigResponse struct {
 	ErrorMsg             string
 	TsigConflicts        []string              `json:"tsigconflicts,omitempty"`
 	TsigWithheldRemovals []string              `json:"tsigwithheldremovals,omitempty"`
-	ServerErrors         []ServerError         `json:"servererrors,omitempty"`     // active server-wide error conditions
-	GuardrailBlocked     bool                  `json:"guardrailblocked,omitempty"` // reload refused by the DNSSEC policy-change guardrail
-	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`   // per-zone would-strand findings (with GuardrailBlocked)
-	Imr                  *ImrStatus            `json:"imr,omitempty"`              // IMR priming + stub/forward state, when this daemon carries one
-	Proc                 *ProcStatus           `json:"proc,omitempty"`             // process resources (open fds, goroutines), for leak visibility (#443)
+	ServerErrors         []ServerError         `json:"servererrors,omitempty"`       // active server-wide error conditions
+	Do53QueriesRefused   bool                  `json:"do53queriesrefused,omitempty"` // debug-do53-queries-refused, as the DNS engine started with it (#1066)
+	GuardrailBlocked     bool                  `json:"guardrailblocked,omitempty"`   // reload refused by the DNSSEC policy-change guardrail
+	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`     // per-zone would-strand findings (with GuardrailBlocked)
+	Imr                  *ImrStatus            `json:"imr,omitempty"`                // IMR priming + stub/forward state, when this daemon carries one
+	Proc                 *ProcStatus           `json:"proc,omitempty"`               // process resources (open fds, goroutines), for leak visibility (#443)
+	// transport-signal: what synthesis writes at _dns.<name> per name, for
+	// an operator to provision in the zone instead.
+	TransportSignal []TransportSignalPreview `json:"transportsignal,omitempty"`
 }
 
 // ReloadGuardrailZone is one signed zone a config reload would strand: its bound

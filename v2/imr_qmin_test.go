@@ -1339,3 +1339,26 @@ func TestQminPublicEntryKeepsOneCountPerRequest(t *testing.T) {
 		})
 	}
 }
+
+// A minimised query waits for transport signals within one budget, as the
+// query does without minimisation (TestColdQueryStopsAtTheBound). The probe
+// and the original question each walk the servers (askServers), and a signal
+// lookup that never ends costs the query strict-wait once, not once per walk.
+// Uses newColdTestImr and startSignalLookup of the signal tests.
+func TestQminWaitsForSignalsWithinOneBudget(t *testing.T) {
+	imr, server, serverMap := newColdTestImr(t, 300*time.Millisecond)
+	imr.Options[ImrOptQnameMinimisation] = "true"
+	startSignalLookup(t, imr, server)
+
+	// Two labels below the servers' zone: a probe for www.child.example. A,
+	// which finds no server to ask, and then the original question.
+	start := time.Now()
+	_, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "a.www."+strictChildZone, dns.TypeA, serverMap, true, edns0.PrivacyNone)
+	elapsed := time.Since(start)
+	if elapsed < 300*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Errorf("waited %s, want about the 300ms bound, once", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), coldNoTuples) {
+		t.Errorf("got %v, want no attempt", err)
+	}
+}

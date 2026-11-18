@@ -144,10 +144,10 @@ func (conf *Config) ParseAuthOptions() {
 				lg.Warn("Auth option has invalid value, defaulting to false", "option", key, "value", optval)
 				clean[authOpt] = "false"
 			}
-		case AuthOptAddTransportSignal:
+		case AuthOptAddTransportSignal, AuthOptDebugDo53QueriesRefused:
 			// Off on an invalid value, like allow-any-queries: a mistyped
 			// value must not start publishing into every zone the server
-			// serves.
+			// serves, nor stop it answering queries over Do53.
 			val := strings.ToLower(optval)
 			switch val {
 			case "", "true":
@@ -173,6 +173,10 @@ func (conf *Config) ParseAuthOptions() {
 // tdns-agent every zone may originate content, so a server-wide default would
 // publish transport signals into every secondary the agent serves. Any value,
 // "false" included, is refused, so the config says what the app does.
+//
+// debug-do53-queries-refused is tdns-auth's alone too. It is for a leaf
+// server under test; an agent talks to its peers and parents over DNS, and
+// has no business refusing their queries.
 func refuseAuthOptionsForApp(appType AppType, opts map[AuthOption]string) error {
 	if appType != AppTypeAgent {
 		return nil
@@ -180,6 +184,10 @@ func refuseAuthOptionsForApp(appType AppType, opts map[AuthOption]string) error 
 	if _, ok := opts[AuthOptAddTransportSignal]; ok {
 		return fmt.Errorf("authengine option %q is not supported by tdns-agent: it would publish transport signals into every zone the agent serves, secondaries included",
 			AuthOptionToString[AuthOptAddTransportSignal])
+	}
+	if _, ok := opts[AuthOptDebugDo53QueriesRefused]; ok {
+		return fmt.Errorf("authengine option %q is not supported by tdns-agent: it is for a tdns-auth leaf server under test",
+			AuthOptionToString[AuthOptDebugDo53QueriesRefused])
 	}
 	return nil
 }
@@ -199,12 +207,17 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 	// This allows catalog-member-auto-create/auto-delete validation to work
 	// regardless of YAML option order
 	isCatalogZone := false
+	// Config groups are what auto-create configures member zones from, so
+	// only a catalog that auto-creates needs them. A catalog this server
+	// produces, or one it only reads, does not.
+	catalogAutoCreate := false
 	for _, option := range zconf.OptionsStrs {
-		option = strings.ToLower(strings.TrimSpace(option))
-		if option == "catalog-zone" {
+		switch strings.ToLower(strings.TrimSpace(option)) {
+		case "catalog-zone":
 			isCatalogZone = true
 			options[OptCatalogZone] = true
-			break
+		case "catalog-member-auto-create":
+			catalogAutoCreate = true
 		}
 	}
 
@@ -381,8 +394,9 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 				continue
 			}
 
-			// Check for config-groups (or legacy meta-groups)
-			if conf.Catalog == nil || (conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil) {
+			// Check for config-groups (or legacy meta-groups), which only
+			// a catalog that auto-creates its member zones needs.
+			if catalogAutoCreate && (conf.Catalog == nil || (conf.Catalog.ConfigGroups == nil && conf.Catalog.MetaGroups == nil)) {
 				errorMsg := fmt.Sprintf("Zone %s is configured as a catalog zone (option catalog-zone), but catalog.config-groups is missing or incorrectly structured. Please ensure your config has:\n"+
 					"catalog:\n"+
 					"  group-prefixes:\n"+

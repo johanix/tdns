@@ -75,6 +75,17 @@ func (nm *NameMap[V]) Keys() []string { return nm.m.Keys() }
 // Items returns a snapshot of the map as a plain map, keyed canonically.
 func (nm *NameMap[V]) Items() map[string]V { return nm.m.Items() }
 
+// IterCb calls fn for every entry, with the canonical key. Each shard's read lock
+// is held while fn runs on that shard's entries, so fn must not call ANY method
+// on this map: not Set, Remove or SetIfAbsent, and not Get or Has either. A write
+// deadlocks at once, since it waits for the lock the walk holds. A read can
+// deadlock too, because Go's RWMutex has no recursive read lock: if a writer is
+// already waiting for the shard, the callback's read queues behind it, and the
+// writer waits for the walk to let go. Collect what is needed and call the map
+// after the walk. Touching the value, which the map does not lock, is fine; the
+// refresh ticker's callback does only that, to the counter it is handed.
+func (nm *NameMap[V]) IterCb(fn IterCb[string, V]) { nm.m.IterCb(fn) }
+
 // Iter returns a channel of every entry.
 func (nm *NameMap[V]) Iter() <-chan Tuple[string, V] { return nm.m.Iter() }
 

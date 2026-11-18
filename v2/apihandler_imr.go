@@ -379,7 +379,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 						rem = 0
 					}
 					records = append(records, zoneRecord{
-						Zone: item.Key, Address: key.Addr,
+						Zone: item.Key, Address: key.HostPort(),
 						Transport: core.TransportToString[key.Transport],
 						NextTry:   b.NextTry.Format(time.RFC3339),
 						Remain:    rem.Truncate(time.Second).String(),

@@ -11,6 +11,7 @@ files, the zones they serve, a `setup.sh` that seeds a work tree, and a
 | `zonemd/` | RFC 8976 ZONEMD as a gate on inbound transfer, against Knot: valid, wrong, absent and uncheckable digests |
 | `ixfr-interop/` | RFC 1995 incremental transfer against BIND9, in both roles and in cascade: a long update series must leave every server in the chain holding an identical zone, reached incrementally |
 | `deckard/` | tdns-imr under CZ.NIC's Deckard: its scripted resolver scenarios (iteration, DNSSEC validation, caching), black-box, on Linux. Unlike the rigs above it renders its configs per scenario from templates, and has no fixed work root |
+| `oots/` | The `_dns` SVCB transport signal end to end: tdns-auth publishes, a tdns secondary re-serves, tdns-imr acts, in suites that run on their own. Linux, in an unprivileged network namespace, under a signed rig root. Each role can run another build, so a suite shows a change's red on its base. It writes its daemons' configs per suite rather than committing them |
 
 ## Relative to cmdv2/debug/
 

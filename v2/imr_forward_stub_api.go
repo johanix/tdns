@@ -245,7 +245,7 @@ type ImrStubZoneStatus struct {
 type ImrStubProbeResult struct {
 	Zone      string `json:"zone"`
 	Server    string `json:"server"`
-	Addr      string `json:"addr"`
+	Addr      string `json:"addr"` // as dialed: with the port a signal assigned, if any
 	Transport string `json:"transport"`
 	OK        bool   `json:"ok"` // response received, NOERROR, AA set
 	Rcode     string `json:"rcode,omitempty"`
@@ -344,12 +344,15 @@ func (imr *Imr) StubZoneStatus() []ImrStubZoneStatus {
 				if keys[i].Addr != keys[j].Addr {
 					return keys[i].Addr < keys[j].Addr
 				}
+				if keys[i].Port != keys[j].Port {
+					return keys[i].Port < keys[j].Port
+				}
 				return keys[i].Transport < keys[j].Transport
 			})
 			for _, k := range keys {
 				b := backoffs[k]
 				ss.Backoffs = append(ss.Backoffs, fmt.Sprintf("%s/%s: until %s (%d failure(s))",
-					k.Addr, core.TransportToString[k.Transport],
+					k.HostPort(), core.TransportToString[k.Transport],
 					b.NextTry.Format(TimeLayout), b.FailureCount))
 			}
 			zs.Servers = append(zs.Servers, ss)
@@ -388,9 +391,26 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 						continue
 					}
 					wg.Add(1)
-					go func(zone, serverName, addr string, transport core.Transport, client core.DNSClienter) {
+					// The probe dials what a query would (endpointFor): a
+					// port the server's signal assigned to this transport,
+					// or an address of the target it sent the transport
+					// to, once those are known. It starts no lookup.
+					dialAddr, dialErr := addr, ""
+					if ep, err := imr.resolveEndpoint(server, nil, addr, transport, false); err != nil {
+						dialErr = err.Error()
+					} else {
+						dialAddr = cache.JoinDialAddr(ep.addr, ep.port)
+					}
+					go func(zone, serverName, dialAddr, dialErr string, transport core.Transport, client core.DNSClienter) {
 						defer wg.Done()
 						if ctx.Err() != nil {
+							return
+						}
+						if dialErr != "" {
+							mu.Lock()
+							results = append(results, ImrStubProbeResult{Zone: zone, Server: serverName, Addr: dialAddr,
+								Transport: core.TransportToString[transport], Error: dialErr})
+							mu.Unlock()
 							return
 						}
 						m := new(dns.Msg)
@@ -398,12 +418,12 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 						m.RecursionDesired = false // authoritative probe, not a recursive query
 						m.SetEdns0(4096, true)
 						start := time.Now()
-						r, _, err := core.ExchangeCtx(ctx, client, m, addr, false)
+						r, _, err := core.ExchangeCtx(ctx, client, m, dialAddr, false)
 						rtt := time.Since(start)
 						res := ImrStubProbeResult{
 							Zone:      zone,
 							Server:    serverName,
-							Addr:      addr,
+							Addr:      dialAddr,
 							Transport: core.TransportToString[transport],
 							RTT:       rtt.Truncate(time.Millisecond).String(),
 						}
@@ -420,7 +440,7 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 						mu.Lock()
 						results = append(results, res)
 						mu.Unlock()
-					}(zone, server.Name, addr, transport, client)
+					}(zone, server.Name, dialAddr, dialErr, transport, client)
 				}
 			}
 		}

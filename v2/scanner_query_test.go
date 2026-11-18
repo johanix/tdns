@@ -30,6 +30,13 @@ func testAuthServer(t *testing.T, authoritative bool, answer ...string) string {
 // testAuthServerWithAuthority is testAuthServer with authority records as well.
 func testAuthServerWithAuthority(t *testing.T, authoritative bool, answer, authority []string) string {
 	t.Helper()
+	return testAuthServerAt(t, "127.0.0.1:0", authoritative, answer, authority)
+}
+
+// testAuthServerAt is testAuthServerWithAuthority listening on listen, which a
+// test that needs another address, or a port, has to say.
+func testAuthServerAt(t *testing.T, listen string, authoritative bool, answer, authority []string) string {
+	t.Helper()
 	var records, nsRecords []dns.RR
 	for _, s := range answer {
 		records = append(records, mustRR(t, s))
@@ -37,7 +44,7 @@ func testAuthServerWithAuthority(t *testing.T, authoritative bool, answer, autho
 	for _, s := range authority {
 		nsRecords = append(nsRecords, mustRR(t, s))
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		t.Fatal(err)
 	}

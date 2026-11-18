@@ -504,7 +504,9 @@ func (conf *Config) applyImrEngineReload() (ImrZoneReloadResult, error) {
 // are copied into Imr.Tuning and into the process-wide backoff policy, the
 // trust anchors are consumed once by initializeImrTrustAnchors, root-hints
 // priming has already happened, and the debug log file handle is open. Stubs
-// and forwards are absent on purpose — those are what the reload DOES apply.
+// and forwards are absent on purpose — those are what the reload DOES apply —
+// except that a "." among them decides whether an anchorless config gets the
+// compiled-in root anchor, and that is reported when it changes.
 func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 	var keys []string
 	check := func(key string, same bool) {
@@ -536,6 +538,18 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 	check("trust-anchor-ds", boot.TrustAnchorDS == current.TrustAnchorDS)
 	check("trust-anchor-dnskey", boot.TrustAnchorDNSKEY == current.TrustAnchorDNSKEY)
 	check("trust-anchor-file", boot.TrustAnchorFile == current.TrustAnchorFile)
+	// The anchors are loaded once, and an anchorless config's depends on the
+	// root: the compiled-in IANA anchor only while no root-hints file, "."
+	// forward or "." stub may lead elsewhere (RootAnchorFallback). Forwards
+	// and stubs are reloadable, and a reload that adds or drops one for "."
+	// does not load or unload the anchor.
+	bootDefault, _ := boot.RootAnchorFallback()
+	curDefault, _ := current.RootAnchorFallback()
+	if bootDefault != curDefault {
+		inUse := map[bool]string{true: "in use", false: "not in use"}
+		keys = append(keys, fmt.Sprintf("the compiled-in root trust anchor (%s at start, %s for this config)",
+			inUse[bootDefault], inUse[curDefault]))
+	}
 	check("require-dnssec-validation", bothNil(boot.RequireDnssecValidation, current.RequireDnssecValidation))
 	check("verbose", boot.Verbose == current.Verbose)
 	check("debug", boot.Debug == current.Debug)

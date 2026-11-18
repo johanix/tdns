@@ -61,6 +61,13 @@ type Imr struct {
 	// see W9.
 	TransportSignalDiscovery *cache.DiscoveryTracker
 	TLSADiscovery            *cache.DiscoveryTracker
+	// endpointAddrs holds the addresses of the targets transport signals
+	// redirect to, and the lookups of them in flight (oots_endpoints.go).
+	endpointAddrs endpointAddrTracker
+	// signalAliasHops runs the lookups of the hops on alias paths of
+	// transport signals, and holds the owners waiting for each
+	// (oots_signal_state.go).
+	signalAliasHops aliasHopTracker
 	// zones holds the configured forward table and stub zones as one
 	// immutable snapshot; ReloadZones swaps the pointer (#436). Read it
 	// through ForwardZones()/StubZones(), never by reaching in: a query
@@ -86,6 +93,9 @@ type Imr struct {
 	// and several collapse into one wake-up. Made on first use (rootWakeCh).
 	rootWake     chan struct{}
 	rootWakeOnce sync.Once
+	// anchorNotice says once which root anchor an anchorless config gets
+	// (parseTrustAnchorsFromConfig): NewImr and Start both read the anchors.
+	anchorNotice sync.Once
 	// errorRegistry is where the IMR reports the Config/ImrForward* and
 	// Upstream/ImrForward server errors it owns (ImrOptions.Errors), set at
 	// init. In the daemon it is the daemon-wide ServerErrorRegistry. NewImr
@@ -171,9 +181,16 @@ type ImrResponse struct {
 	// when to ask again. Zero when it is not known: an error, or an answer
 	// not cached under the question.
 	Expiration time.Time
-	Error      bool
-	ErrorMsg   string
-	Msg        string
+	// ChainExpiration is when the first link of the CNAME chain this lookup
+	// followed to the answer runs out: the earliest expiration among the
+	// links, as the lookup cached or read them. Set only when the answer's
+	// owner is not the question's and the chain the lookup followed ends at
+	// it; zero otherwise. A caller that keeps an answer reached through a
+	// chain keeps it no longer than this, without reading the chain again.
+	ChainExpiration time.Time
+	Error           bool
+	ErrorMsg        string
+	Msg             string
 }
 
 // expiresWith sets resp.Expiration from entry, the cache entry for the
@@ -915,8 +932,15 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 	// Deferred after the send above, so it runs before it.
 	started := cache.Now()
 	var hit *cache.CachedRRset
+	// The CNAME links followed from qname are recorded as the lookup follows
+	// them (recordChainLink), and the response carries the first to expire.
+	ctx, chain := withChainRecorder(ctx, qname)
+	lookupCtx = imrQueryContext(ctx)
 	defer func() {
 		resp.expiresWith(lookupEntry(imr.Cache.Peek(qname, qtype), hit, resp.RRset, started))
+		if resp.RRset != nil && !core.EqualNames(resp.RRset.Name, qname) {
+			resp.ChainExpiration = chain.expiryTo(resp.RRset.Name)
+		}
 	}()
 
 	//	dump.P(imr)
@@ -2196,6 +2220,14 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 
 // parseTrustAnchorsFromConfig parses trust anchors from config and file into maps keyed by zone name.
 // Returns maps of DS and DNSKEY trust anchors.
+//
+// trust-anchor-ds and trust-anchor-dnskey may each hold several records, one
+// per line (a YAML block scalar), and trust-anchor-file any number. When the
+// config names no anchor at all, the compiled-in IANA root anchor is used if
+// the root is the IANA root, and no anchor otherwise (RootAnchorFallback).
+//
+// NewImr (loadConfiguredTrustAnchors) and Start (initializeImrTrustAnchors)
+// both read the anchors through here, so they cannot disagree about them.
 func (imr *Imr) parseTrustAnchorsFromConfig(ic ImrEngineConf) (map[string][]*dns.DS, map[string][]*dns.DNSKEY, error) {
 	dsByName := map[string][]*dns.DS{}
 	dnskeysByName := map[string][]*dns.DNSKEY{}
@@ -2204,33 +2236,62 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic ImrEngineConf) (map[string][]*dns
 	taDNSKEY := strings.TrimSpace(ic.TrustAnchorDNSKEY)
 	taFile := strings.TrimSpace(ic.TrustAnchorFile)
 
-	// If DNSKEY TA is provided, add it directly
+	if !ic.AnchorConfigured() {
+		use, why := ic.RootAnchorFallback()
+		if !use {
+			imr.anchorNotice.Do(func() {
+				lgImr.Warn("no trust anchor configured, and the root may not be the IANA root, so the compiled-in"+
+					" root anchor is not used: nothing will validate (answers are Indeterminate)."+
+					" Configure trust-anchor-ds or trust-anchor-file for the root in use", "reason", why)
+			})
+			return dsByName, dnskeysByName, nil
+		}
+		dss, keys, err := compiledInRootAnchors()
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, ds := range dss {
+			name := anchorZone(ds.Hdr.Name)
+			dsByName[name] = append(dsByName[name], ds)
+		}
+		for _, k := range keys {
+			name := anchorZone(k.Hdr.Name)
+			dnskeysByName[name] = append(dnskeysByName[name], k)
+		}
+		imr.anchorNotice.Do(func() {
+			tags := make([]string, 0, len(dss))
+			for _, ds := range dss {
+				tags = append(tags, fmt.Sprint(ds.KeyTag))
+			}
+			lgImr.Info("no trust anchor configured: using the compiled-in IANA root trust anchor",
+				"zone", ".", "keytags", strings.Join(tags, ","))
+		})
+		return dsByName, dnskeysByName, nil
+	}
+
+	// If DNSKEY TAs are provided, add them directly
 	if taDNSKEY != "" {
-		rr, err := dns.NewRR(taDNSKEY)
+		keys, err := parseInlineDNSKEYAnchors(taDNSKEY)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to parse trust-anchor-dnskey: %v", err)
 		}
-		dk, ok := rr.(*dns.DNSKEY)
-		if !ok {
-			return nil, nil, fmt.Errorf("trust-anchor-dnskey is not a DNSKEY RR: %T", rr)
+		for _, dk := range keys {
+			name := anchorZone(dk.Hdr.Name)
+			dnskeysByName[name] = append(dnskeysByName[name], dk)
 		}
-		name := dns.Fqdn(dk.Hdr.Name)
-		dnskeysByName[name] = append(dnskeysByName[name], dk)
 	}
 
-	// If DS TA is provided, remember it for matching after fetching DNSKEY RRset
+	// If DS TAs are provided, remember them for matching after fetching the DNSKEY RRset
 	if taDS != "" {
-		rr, err := dns.NewRR(taDS)
+		dss, err := parseInlineDSAnchors(taDS)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to parse trust-anchor-ds: %v", err)
 		}
-		ds, ok := rr.(*dns.DS)
-		if !ok {
-			return nil, nil, fmt.Errorf("trust-anchor-ds is not a DS RR: %T", rr)
+		for _, ds := range dss {
+			name := anchorZone(ds.Hdr.Name)
+			dsByName[name] = append(dsByName[name], ds)
+			lgImr.Info("configured DS trust anchor", "zone", name, "keytag", ds.KeyTag, "digesttype", ds.DigestType)
 		}
-		name := dns.Fqdn(ds.Hdr.Name)
-		dsByName[name] = append(dsByName[name], ds)
-		lgImr.Info("configured DS trust anchor", "zone", name, "keytag", ds.KeyTag, "digesttype", ds.DigestType)
 	}
 
 	// If trust-anchor-file is provided, read and parse all RRs via
@@ -2244,11 +2305,11 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic ImrEngineConf) (map[string][]*dns
 			return nil, nil, fmt.Errorf("failed to read trust-anchor-file %q: %v", taFile, err)
 		}
 		for _, ds := range fileDS {
-			name := dns.Fqdn(ds.Hdr.Name)
+			name := anchorZone(ds.Hdr.Name)
 			dsByName[name] = append(dsByName[name], ds)
 		}
 		for _, k := range fileKeys {
-			name := dns.Fqdn(k.Hdr.Name)
+			name := anchorZone(k.Hdr.Name)
 			dnskeysByName[name] = append(dnskeysByName[name], k)
 		}
 	}
@@ -2653,23 +2714,22 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 }
 
 // initializeImrTrustAnchors loads trust anchors from config:
-// - DS/DNSKEY strings (single)
-// - trust-anchor-file (multiple lines)
+//   - DS/DNSKEY strings (one RR or several, one per line)
+//   - trust-anchor-file (multiple lines)
+//   - with none of those, the compiled-in IANA root anchor, if the root is the
+//     IANA root (RootAnchorFallback)
+//
 // For each anchored name, it loads direct DNSKEY TAs (trusted), matches DS→DNSKEY(s),
 // validates the anchored DNSKEY RRset and then validates the NS RRset for that name.
 func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, ic ImrEngineConf) error {
-	// Only act if we have any trust-anchor configured
-	taDS := strings.TrimSpace(ic.TrustAnchorDS)
-	taDNSKEY := strings.TrimSpace(ic.TrustAnchorDNSKEY)
-	taFile := strings.TrimSpace(ic.TrustAnchorFile)
-	if taDS == "" && taDNSKEY == "" && taFile == "" {
-		return nil
-	}
-
-	// Parse trust anchors from config and file
+	// Parse trust anchors from config and file, or the compiled-in default
 	dsByName, dnskeysByName, err := imr.parseTrustAnchorsFromConfig(ic)
 	if err != nil {
 		return err
+	}
+	// No anchor configured, and the compiled-in one not used: nothing to do.
+	if len(dsByName) == 0 && len(dnskeysByName) == 0 {
+		return nil
 	}
 
 	// Add direct DNSKEY trust anchors to cache first

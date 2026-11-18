@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -562,36 +563,110 @@ func TestJournalPurgeReportsWhatArrivedDuringIt(t *testing.T) {
 
 // withJournalActive sets the deployment-wide kill-switch for the duration of a
 // test. Absent config means ON, so the tests that need it OFF must say so.
+//
+// JournalActive reads the published runtime-config snapshot (it must not take
+// confMu: #1001), so the switch is flipped there, on a copy of whatever is
+// published now.
 func withJournalActive(t *testing.T, active bool) {
 	t.Helper()
-	confMu.Lock()
-	prev := Conf.Journal.Active
-	Conf.Journal.Active = &active
-	confMu.Unlock()
-	t.Cleanup(func() {
-		confMu.Lock()
-		Conf.Journal.Active = prev
-		confMu.Unlock()
-	})
+	prev := liveConfig.Load()
+	next := *prev
+	next.JournalOff = !active
+	liveConfig.Store(&next)
+	t.Cleanup(func() { liveConfig.Store(prev) })
 }
 
 // TestJournalActiveDefaultsOn is the single most important property of the
 // switch. It is a *bool so that ABSENT means on -- a plain bool would default
 // to false and silently disable persistence for every existing config on
 // upgrade, which is the exact failure this subsystem exists to prevent.
+//
+// Checked at both ends of the path: the snapshot built from a config that does
+// not mention journal.active, and the seed snapshot a reader gets before the
+// first publish.
 func TestJournalActiveDefaultsOn(t *testing.T) {
-	confMu.Lock()
-	prev := Conf.Journal.Active
-	Conf.Journal.Active = nil
-	confMu.Unlock()
-	t.Cleanup(func() {
-		confMu.Lock()
-		Conf.Journal.Active = prev
-		confMu.Unlock()
-	})
+	prev := liveConfig.Load()
+	t.Cleanup(func() { liveConfig.Store(prev) })
 
+	liveConfig.Store(&RuntimeConfig{})
+	if !JournalActive() {
+		t.Fatal("the seed snapshot disabled persistence; it must default ON")
+	}
+
+	conf := &Config{}
+	conf.publishRuntimeConfig()
 	if !JournalActive() {
 		t.Fatal("an absent journal.active disabled persistence; it must default ON")
+	}
+}
+
+// TestPublishedSnapshotCarriesTheJournalSwitch: the value in the config is what
+// ends up in the snapshot JournalActive reads, for every value it can have.
+func TestPublishedSnapshotCarriesTheJournalSwitch(t *testing.T) {
+	prev := liveConfig.Load()
+	t.Cleanup(func() { liveConfig.Store(prev) })
+
+	on, off := true, false
+	for _, c := range []struct {
+		name   string
+		active *bool
+		want   bool
+	}{
+		{"absent", nil, true},
+		{"true", &on, true},
+		{"false", &off, false},
+	} {
+		conf := &Config{}
+		conf.Journal.Active = c.active
+		conf.publishRuntimeConfig()
+		if got := JournalActive(); got != c.want {
+			t.Errorf("journal.active %s: JournalActive() = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRefusedReloadDoesNotSwitchTheJournalOff: ParseConfig decodes into the
+// live Config before it validates, so a full reload that decodes
+// journal.active: false and is then refused used to leave the value behind. The
+// refusal publishes nothing, but the next successful single-zone reload
+// publishes the snapshot again from the same Config and put the refused value
+// in force: new updates stopped being recorded though no reload had accepted it.
+func TestRefusedReloadDoesNotSwitchTheJournalOff(t *testing.T) {
+	prevLive := liveConfig.Load()
+	prevSync := delegationSyncConf.Load()
+	t.Cleanup(func() {
+		liveConfig.Store(prevLive)
+		delegationSyncConf.Store(prevSync)
+	})
+
+	// journal.active: false is decoded; the debug address is then refused (it
+	// must be loopback), after the decode.
+	conf := &Config{}
+	conf.Internal.KeyDB = newTestKeyDB(t)
+	conf.Internal.CfgFile = writeCfg(t,
+		"journal:\n   active: false\nlisteners:\n   imr-debug-address: \"192.0.2.1:5353\"\n")
+	conf.publishRuntimeConfig()
+	if !JournalActive() {
+		t.Fatal("the journal is off before any reload")
+	}
+
+	_, err := conf.ReloadConfig()
+	if err == nil || !strings.Contains(err.Error(), "imr-debug-address") {
+		t.Fatalf("the full reload was not refused for its debug address: %v", err)
+	}
+	if conf.Journal.Active != nil {
+		t.Errorf("the refused reload left journal.active = %v in the config", *conf.Journal.Active)
+	}
+	if !JournalActive() {
+		t.Fatal("the refused full reload switched the journal off")
+	}
+
+	if _, err := conf.ReloadZoneConfig(context.Background()); err != nil {
+		t.Fatalf("the single-zone reload failed: %v", err)
+	}
+	if !JournalActive() {
+		t.Fatal("a single-zone reload after a refused full reload published the refused " +
+			"journal.active: false; new updates would stop being recorded")
 	}
 }
 

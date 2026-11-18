@@ -34,6 +34,8 @@ func TestParseServerAddressForms(t *testing.T) {
 		{arg: "tls://2001:db8::5", server: "2001:db8::5", transport: "DoT"},
 		{arg: "tls://2001:db8::beef", server: "2001:db8::beef", transport: "DoT"},
 		{arg: "quic://::1", server: "::1", transport: "DoQ"},
+		// udp:// is dns://: the oots token for UDP with a TCP retry.
+		{arg: "udp://192.0.2.5:5354", server: "192.0.2.5", port: "5354", transport: "Do53"},
 		{arg: "2001:db8::beef", server: "2001:db8::beef", transport: "Do53"},
 	}
 
@@ -63,5 +65,48 @@ func TestParseServerRejectsGarbage(t *testing.T) {
 		if opts, err := ParseServer(arg, map[string]string{}); err == nil {
 			t.Errorf("ParseServer(%q) accepted it: %v", arg, opts)
 		}
+	}
+}
+
+// TestParseServerUDPSchemeWithTCPFlag: udp:// is dns://, so +tcp upgrades it
+// to Do53-TCP whichever comes first on the command line, as it does for
+// dns://. An encrypted scheme still conflicts with +tcp.
+func TestParseServerUDPSchemeWithTCPFlag(t *testing.T) {
+	for _, scheme := range []string{"dns", "udp"} {
+		server := scheme + "://192.0.2.5"
+
+		// +tcp first, then @server.
+		opts, err := ProcessOptions(map[string]string{}, "+TCP", "+tcp")
+		if err != nil {
+			t.Fatalf("+tcp: %v", err)
+		}
+		opts, err = ParseServer(server, opts)
+		if err != nil {
+			t.Fatalf("+tcp @%s: %v", server, err)
+		}
+		if opts["transport"] != "Do53-TCP" {
+			t.Errorf("+tcp @%s: transport = %q, want Do53-TCP", server, opts["transport"])
+		}
+
+		// @server first, then +tcp.
+		opts, err = ParseServer(server, map[string]string{})
+		if err != nil {
+			t.Fatalf("@%s: %v", server, err)
+		}
+		opts, err = ProcessOptions(opts, "+TCP", "+tcp")
+		if err != nil {
+			t.Fatalf("@%s +tcp: %v", server, err)
+		}
+		if opts["transport"] != "Do53-TCP" {
+			t.Errorf("@%s +tcp: transport = %q, want Do53-TCP", server, opts["transport"])
+		}
+	}
+
+	opts, err := ProcessOptions(map[string]string{}, "+TCP", "+tcp")
+	if err != nil {
+		t.Fatalf("+tcp: %v", err)
+	}
+	if _, err := ParseServer("tls://192.0.2.5", opts); err == nil {
+		t.Error("+tcp @tls://: accepted, want a conflict")
 	}
 }

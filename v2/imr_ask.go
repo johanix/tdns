@@ -71,8 +71,15 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 	// told us yet: the zone was met a moment ago, through the referral that
 	// brought us here. Its transports are learned before the query gives up on
 	// it, or the first strict query to every new zone failed (#776).
+	// One signal-wait budget for the whole query: a referral followed below
+	// recurses with this context, and waits within the same budget.
+	// IterativeDNSQueryInZone has put it on the context already, so the
+	// probes and the original question share it.
+	ctx, budget := signalWaitBudgetFor(ctx)
 	if privacy == edns0.PrivacyStrict && !hasStrictCandidate(serverMap, qname) &&
-		!imr.awaitTransportSignals(ctx, qname, serverMap) {
+		!budget.run(ctx, imr.strictWait(), func(wctx context.Context) bool {
+			return imr.awaitTransportSignals(wctx, qname, serverMap)
+		}) {
 		zoneName, _, _ := imr.Cache.FindClosestKnownZoneFor(qname, qtype)
 		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,
 			privacyUnavailable(zoneName, "no servers have encrypted transports available (zone=%s)", zoneName)
@@ -103,8 +110,20 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 			addresslessAtStart[key] = true
 		}
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		zoneName, zone, prioritized = imr.prioritizeServers(qname, qtype, serverMap, privacy)
+	// Two passes, and one more when a pass has run out and a tuple it did
+	// not have is available, or comes with a transport signal
+	// (anotherPassAfter).
+	maxPasses := 2
+	extraPassAdded := false
+	var nextPass *tupleSelection
+	for attempt := 0; attempt < maxPasses; attempt++ {
+		if nextPass != nil {
+			zoneName, zone, prioritized = nextPass.zoneName, nextPass.zone, nextPass.tuples
+			nextPass = nil
+		} else {
+			zoneName, zone, prioritized = imr.awaitUsableTuples(ctx, budget, qname, qtype, serverMap, privacy)
+		}
+		tried := map[passTuple]bool{}
 		if Globals.Debug {
 			lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers) attempt=%d", len(prioritized), len(serverMap), attempt+1)
 		}
@@ -121,13 +140,17 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 			transport := tuple.Transport
 
 			effTransport := transport
+			var dnskeyKey cache.AddrXport
 			if dnskeyBypass {
+				// All tuples for this (server, addr) collapse to the same
+				// preferred transport; skip the ones we've already tried.
+				// The attempt is recorded once made, under the endpoint
+				// tryServer dialed (dnskeyTried).
 				eff := imr.preferredDNSKEYTransport(server)
-				key := cache.AddrXport{Addr: addr, Transport: eff}
-				if dnskeyAttempted[key] {
+				dnskeyKey = imr.dnskeyAttemptKey(ctx, server, zone, addr, eff)
+				if dnskeyAttempted[dnskeyKey] {
 					continue
 				}
-				dnskeyAttempted[key] = true
 				effTransport = eff
 			}
 
@@ -139,7 +162,26 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
+			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
+			if dnskeyBypass {
+				// Under the transport tryServer dialed: it reads the
+				// preference again, and a signal update in between may
+				// have changed it from effTransport.
+				dnskeyAttempted[dnskeyTried(dnskeyKey, ep, wireTransport)] = true
+			}
+			// The endpoint tried: the one tryServer dialed, or the server's
+			// own address when it did not get as far as choosing one, kept
+			// under the tuple's transport. anotherPassAfter compares it with
+			// what an attempt for that transport would dial, so the two agree
+			// when the tuple dialed itself. Under the DNSKEY bypass the
+			// endpoint is the preferred transport's, which anotherPassAfter
+			// may not see as tried; dnskeyAttempted, which lasts the whole
+			// query, is what keeps the extra pass from dialing it again.
+			if ep.addr != "" {
+				tried[passTuple{server, ep.addr, ep.keyPort, transport}] = true
+			} else {
+				tried[passTuple{server, addr, 0, transport}] = true
+			}
 			lastTransport = wireTransport
 			if err != nil {
 				lastErr = err
@@ -177,19 +219,27 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 					lg.Printf("IterativeDNSQuery: %s response from %s@%s over %s for %s %s (likely lame delegation for zone %q)",
 						dns.RcodeToString[rcode], addr, nsname, core.TransportToString[wireTransport], qname, dns.TypeToString[qtype], zoneName)
 				}
+				// Booked at the address and port tryServer dialed: the
+				// server's own address, or the address of the target the
+				// signal sent the transport to. A lame endpoint holds back
+				// only itself: one on 5353 not port 53, a target address
+				// not the target's others nor the nameserver's own address
+				// (design 2026-11-14, section 3). The endpoint is the one
+				// tried, not a fresh reading, which a signal update during
+				// the exchange may have moved.
 				if zone != nil {
-					zone.RecordZoneAddressFailureForRcode(addr, wireTransport, uint8(rcode), Globals.Debug)
+					zone.RecordZoneEndpointFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode), Globals.Debug)
 				} else {
-					server.RecordAddressFailureForRcode(addr, wireTransport, uint8(rcode))
+					server.RecordEndpointAddrFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode))
 				}
 				continue
 			case dns.RcodeSuccess:
 				if zone != nil {
-					zone.RecordZoneAddressSuccess(addr, wireTransport)
+					zone.RecordZoneEndpointSuccess(ep.addr, ep.keyPort, wireTransport)
 				}
 			default:
 				if zone != nil {
-					zone.RecordZoneAddressSuccess(addr, wireTransport)
+					zone.RecordZoneEndpointSuccess(ep.addr, ep.keyPort, wireTransport)
 				}
 			}
 
@@ -206,6 +256,22 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 				}
 				continue
 			}
+		}
+		// The pass's own attempts may have put the servers' one transport
+		// so far in backoff: Do53 to a server that refuses it, or has
+		// nothing on port 53, before its signal is in (#1065). A server
+		// whose signal came in during the pass, or comes in now, has
+		// transports this pass did not: go again, once per query.
+		if !extraPassAdded {
+			nextPass = imr.anotherPassAfter(ctx, budget, qname, qtype, serverMap, privacy, tried)
+		}
+		if nextPass != nil {
+			extraPassAdded = true
+			maxPasses++
+			if Globals.Debug {
+				lg.Printf("IterativeDNSQuery: tuples the pass did not try are available after it ran out; retrying qname=%s", qname)
+			}
+			continue
 		}
 		break
 	}

@@ -350,9 +350,11 @@ the PKCS#8 encoding of RSA, ECDSA and Ed25519 only; every other algorithm
 package registers a codec of its own with the `dnssec-algorithms/pkcs8`
 registry, keyed by algorithm OID, and tdns falls through to it. The codec
 ships with the algorithm, so a binary that can sign with an algorithm can also
-store its keys. What goes inside the PEM is the codec's choice — for ML-DSA-44
-an interim layout, until the IETF's own is final — so do not expect another
-tool's PKCS#8 reader to accept a PQ key. See
+store its keys. What goes inside the PEM is the codec's choice. For ML-DSA it
+is RFC 9881's seed form, which OpenSSL 3.5 and later read; tdns reads all
+three RFC 9881 forms, and the older layout its earlier releases wrote. For the
+other PQ algorithms the layout is the codec's own, so do not expect another
+tool's PKCS#8 reader to accept those keys. See
 [Post-Quantum DNSSEC](pq-dnssec.md) for which binary links which algorithm.
 
 The public half is *not* PEM. A `.key` file holds the record in zone-file

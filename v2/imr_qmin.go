@@ -382,7 +382,7 @@ func (imr *Imr) dispatchProbe(ctx context.Context, qname string, qtype uint16, c
 		return replyDone(rrset, rcode, cctx, tr, err)
 	}
 	if cn := cnameAt(r, child); cn != nil {
-		if _, err := imr.cacheCNAMELink(ctx, child, r, cn, wire); err != nil {
+		if _, _, err := imr.cacheCNAMELink(ctx, child, r, cn, wire); err != nil {
 			return replyNext()
 		}
 		step.kind = probeStepped

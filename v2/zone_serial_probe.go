@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync/atomic"
 
 	"github.com/miekg/dns"
 )
@@ -86,6 +87,9 @@ func (zd *ZoneData) ProbeUpstreamSerials(ctx context.Context, conf *Config) []Up
 		keyName  string
 		tsigAlgo string
 		failed   bool
+		// tlsaUnvalidated is set during the handshake when a dane primary's
+		// TLSA record was taken without DNSSEC validation (lab mode).
+		tlsaUnvalidated *atomic.Bool
 	}
 	plans := make([]probePlan, 0, len(upstreams))
 
@@ -96,11 +100,14 @@ func (zd *ZoneData) ProbeUpstreamSerials(ctx context.Context, conf *Config) []Up
 			p.upstream = net.JoinHostPort(p.upstream, defaultPortForPeer(up))
 		}
 		p.client = new(dns.Client)
+		p.tlsaUnvalidated = new(atomic.Bool)
+		unvalidated := p.tlsaUnvalidated
 
 		// Probe over the same verified channel the transfer itself would use,
 		// so an XoT peer is not silently probed in plaintext and a TSIG
-		// mismatch surfaces here rather than at transfer time.
-		if tlsCfg, terr := conf.ClientTLSConfigForPeer(up); terr != nil {
+		// mismatch surfaces here rather than at transfer time. A dane peer
+		// whose TLSA record was taken unvalidated is flagged on the result.
+		if tlsCfg, terr := conf.clientTLSConfigForPeer(up, func() { unvalidated.Store(true) }); terr != nil {
 			p.res.Err = fmt.Sprintf("TLS setup failed: %v", terr)
 			p.failed = true
 			plans = append(plans, p)
@@ -166,6 +173,9 @@ func (zd *ZoneData) ProbeUpstreamSerials(ctx context.Context, conf *Config) []Up
 			} else {
 				p.res.Err = "first answer is not a SOA"
 			}
+		}
+		if p.tlsaUnvalidated.Load() {
+			p.res.Warning = TLSANotValidatedWarning
 		}
 		out = append(out, p.res)
 	}

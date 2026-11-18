@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-22
 **Status:** implemented. Scoped against main at `51eb0988`.
-**Revision:** 8.
+**Revision:** 9.
 
 | Rev | Date | Change |
 |---|---|---|
@@ -14,6 +14,7 @@
 | 6 | 2026-10-22 | Implemented. The default stays off because the resolver is also embedded and the tests pin the query stream; qmin is for standalone tdns-imr (§2). `val_ta_sentinel_insecure` stays skipped (§11). |
 | 7 | 2026-11-17 | After a Deckard run with the switch wired. The validation of a child-signed negative answer from the parent's servers could re-query without bound with the option on; it is fixed. A denial is validated on the query's context, so the request cap bounds it, and the resolver's own DNSKEY fetch sends no probe (§3, §6). The Deckard switch is wired (§11). |
 | 8 | 2026-11-18 | After a review round. The public entry points (`imrQuery`, `ImrResponder`) put the counters on the context once per request. A walk their own loop starts again, after a delegation without glue, and the validation of their answer now count against the same name and request (§6, §7). |
+| 9 | 2026-11-18 | After merging `main` with the transport signal endpoint work. The walk (`askServers`) takes main's wait for transport signals, its extra pass and its booking per endpoint. The wait's budget goes on the context before the probe loop, so the probes and the original question share it (§3, §7). |
 
 RFC 9156 is the specification. It obsoletes RFC 7816. This design follows
 9156 and does not keep the 7816 behaviour (NS as the hiding type, one
@@ -123,6 +124,13 @@ So the change is two commits:
    with the probe question.
 
 With the option off, the IMR sends exactly the questions it sends today.
+
+A walk may wait for the servers' transport signals, within one budget per
+query (`signalWaitBudget`). `IterativeDNSQueryInZone` puts the budget on
+the context before the probe loop, so the probes, the original question and
+the referrals they follow all wait within it. A signal lookup that never
+ends then costs a minimised query `strict-wait` once, as it costs a query
+without minimisation.
 
 A probe response is cached under the probe name and type and is not
 returned to the client. The existing answer, referral, and negative paths
@@ -345,6 +353,9 @@ Walk, option on:
 - The same, with the resolver's own DNSKEY fetches minimised (a test-only
   switch): the validation's walks share the query's cap, and the lookup
   ends with the client's answer.
+- A server whose signal lookup never ends, and a name two labels below its
+  zone: the probe and the original question together wait `strict-wait`
+  once.
 
 Option off is the default, so the existing iterative tests keep the query
 stream they have. They are also what holds the walk's move (§3) to no

@@ -231,14 +231,30 @@ type ServiceConf struct {
 type TransportConf struct {
 	Type   string `yaml:"type" validate:"omitempty,oneof=tsync svcb none"`
 	Signal string `yaml:"signal"`
+	// Ports is the port published for a transport that is not on its
+	// standard one: keys udp, tcp, dot, doq and doh. tdns-auth gives each
+	// transport with a port an SVCB record of its own (transportSignalLayout).
+	// Publishing a port opens no socket; the listener is configured under
+	// listeners.ports. Only type svcb carries ports.
+	Ports map[string]uint16 `yaml:"ports"`
+	// Targets is the host that serves a transport when it is not the
+	// nameserver itself: keys dot and doq. tdns-auth gives each transport
+	// with a target an SVCB record of its own, the target as its TargetName
+	// and the transport's port, if it has one, beside it
+	// (transportSignalLayout). A resolver honours a target only from a
+	// validated signal, so a target in a zone whose signal is not signed is
+	// warned about. DoH on another host needs a path, which the signal does
+	// not carry, so a doh target is refused. "." is the nameserver itself
+	// and counts as absent. Only type svcb carries targets.
+	Targets map[string]string `yaml:"targets"`
 }
 
 // Validate refuses, at config load, a signal this server would publish (type
-// svcb or tsync) that does not parse or names a token other than do53, dot, doh
-// and doq. No tdns publisher may emit a new token, such as `udp` or `tcp`,
-// before every node that can re-pack the record keeps it (the alternative-
-// endpoint design, tdns #1043, section 8). With type none the signal is not
-// published and is not checked.
+// svcb or tsync) that does not parse or names a token other than udp, tcp,
+// dot, doh, doq and do53 (published as udp and tcp). No tdns publisher may
+// emit a token that is not defined, before every node that can re-pack the
+// record keeps it (the alternative-endpoint design, tdns #1043, section 8).
+// With type none the signal is not published and is not checked.
 func (t TransportConf) Validate() error {
 	switch strings.ToLower(t.Type) {
 	case "svcb", "tsync":
@@ -637,9 +653,10 @@ type AddressFamilyConf struct {
 type DiscoveryConf struct {
 	RetryAfterFailure time.Duration `yaml:"retry-after-failure" mapstructure:"retry-after-failure"`
 	MaxFailures       int           `yaml:"max-failures" mapstructure:"max-failures"`
-	// StrictWait bounds how long a strict-privacy query waits for the
-	// transport signals of servers it knows nothing about, before it gives
-	// up on them. The query's own deadline cuts it shorter. Default 2s.
+	// StrictWait bounds how long a query waits for the transport signals
+	// of servers it knows nothing about, before it gives up on them: a
+	// strict-privacy query, or any query left with no transport it may use
+	// (#1065). The query's own deadline cuts it shorter. Default 2s.
 	StrictWait time.Duration `yaml:"strict-wait" mapstructure:"strict-wait"`
 }
 
@@ -849,12 +866,27 @@ type JournalConf struct {
 	Active *bool `yaml:"active" mapstructure:"active"`
 }
 
+// Clone returns a copy of j that shares nothing with it. Active is a pointer,
+// and a saved copy of the pointer follows the value it points to.
+func (j JournalConf) Clone() JournalConf {
+	if j.Active != nil {
+		v := *j.Active
+		j.Active = &v
+	}
+	return j
+}
+
 // JournalActive reports whether delta persistence is enabled. Absent config
 // means enabled.
+//
+// Reads the published runtime-config snapshot, NOT Conf under confMu. The
+// publish path calls this under zd.mu, and every config reload takes zd.mu
+// zone by zone while it holds confMu's write lock, so taking confMu here is a
+// lock-order inversion: an update applying on a zone while a reload reaches
+// that zone is a deadlock, and it stops every later update and reload (#1001).
+// This function must stay free of confMu and of anything that takes it.
 func JournalActive() bool {
-	confMu.RLock()
-	defer confMu.RUnlock()
-	return Conf.Journal.Active == nil || *Conf.Journal.Active
+	return !ConfLive().JournalOff
 }
 
 // KeystoreConf is the keystore: block. Today it carries only pre-load, but the
@@ -982,6 +1014,26 @@ type ZoneTypeList []string
 type DynamicApiZoneConf struct {
 	Allowed ZoneTypeList `yaml:"allowed" mapstructure:"allowed"`                                              // Zone types the API may create: primary, secondary
 	Storage string       `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
+	// DefaultTemplate names, per zone type ("primary", "secondary"), the
+	// template a zone add uses when the request names none. Each must be a
+	// template blessed with dynamiczones: true, of that type. The point is an
+	// operator guarantee: on a server whose API zones must all reach the same
+	// downstreams, a caller that forgets the template still gets them. The
+	// resolved name is persisted with the zone, so changing the default later
+	// does not move zones that were added under the old one.
+	DefaultTemplate map[string]string `yaml:"default-template" mapstructure:"default-template"`
+}
+
+// DefaultTemplateFor returns the operator's default template for zone type
+// zt, or "" when none is configured.
+func (c DynamicApiZoneConf) DefaultTemplateFor(zt ZoneType) string {
+	want := ZoneTypeToString[zt]
+	for t, name := range c.DefaultTemplate {
+		if strings.EqualFold(strings.TrimSpace(t), want) {
+			return strings.TrimSpace(name)
+		}
+	}
+	return ""
 }
 
 // Allows reports whether the API may create zones of type zt.
@@ -1004,6 +1056,79 @@ func (d *DynamicZonesConf) Validate() error {
 		case "primary", "secondary":
 		default:
 			return fmt.Errorf("dynamiczones.dynamic.allowed: unknown zone type %q (valid values: primary, secondary)", t)
+		}
+	}
+	// Keys are matched without regard to case or surrounding space
+	// (DefaultTemplateFor), so two keys for one zone type would leave the
+	// choice to map iteration order.
+	seen := map[string]string{}
+	for t := range d.Dynamic.DefaultTemplate {
+		norm := strings.ToLower(strings.TrimSpace(t))
+		switch norm {
+		case "primary", "secondary":
+		default:
+			return fmt.Errorf("dynamiczones.dynamic.default-template: unknown zone type %q (valid values: primary, secondary)", t)
+		}
+		if prev, dup := seen[norm]; dup {
+			return fmt.Errorf("dynamiczones.dynamic.default-template: zone type %s is set more than once (%q and %q)", norm, prev, t)
+		}
+		seen[norm] = t
+	}
+	return nil
+}
+
+// ValidateDefaultTemplates checks that every dynamiczones.dynamic.default-template
+// entry names a template that exists, is blessed with dynamiczones: true, and
+// is of the zone type it is the default for -- the same gates a zone add
+// applies (dynamicTemplateGate), so a default that every add would refuse is
+// refused at load instead. Separate from Validate because it needs the
+// templates. Called from both ParseConfig and ValidateConfig.
+func (d *DynamicZonesConf) ValidateDefaultTemplates(templates []ZoneConf) error {
+	byName := make(map[string]ZoneConf, len(templates))
+	for _, t := range templates {
+		byName[t.Name] = t
+	}
+	for t, name := range d.Dynamic.DefaultTemplate {
+		zt := Secondary
+		if strings.EqualFold(strings.TrimSpace(t), "primary") {
+			zt = Primary
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: empty template name", t)
+		}
+		tmpl, ok := byName[name]
+		if !ok {
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q does not exist", t, name)
+		}
+		// Walk the parent chain as buildTemplateMap does. A template whose
+		// chain names a missing parent, or loops, is dropped from the template
+		// map at load, so a default naming it would fail every add; refuse it
+		// here instead, whatever the template itself declares. A type unset on
+		// the template comes from the first parent that sets one;
+		// dynamiczones: is never inherited.
+		// A template naming itself is a cycle too: buildTemplateMap removes it.
+		seen := map[string]bool{name: true}
+		p := tmpl.Template
+		if p == name {
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q names itself as its parent template", t, name)
+		}
+		for p != "" {
+			if seen[p] {
+				return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q is in a template cycle (through %q)", t, name, p)
+			}
+			seen[p] = true
+			parent, ok := byName[p]
+			if !ok {
+				return fmt.Errorf("dynamiczones.dynamic.default-template.%s: template %q inherits from template %q, which does not exist", t, name, p)
+			}
+			if tmpl.Type == "" {
+				tmpl.Type = parent.Type
+			}
+			p = parent.Template
+		}
+		if err := dynamicTemplateGate(name, &tmpl, zt, true); err != nil {
+			return fmt.Errorf("dynamiczones.dynamic.default-template.%s: %v", t, err)
 		}
 	}
 	return nil
@@ -1032,6 +1157,7 @@ type InternalDnsConf struct {
 	APIStopCh           chan struct{}
 	StopOnce            sync.Once
 	stopFailed          atomic.Bool // set by Shutdowner: MainLoop exits 1, not 0 (#977)
+	do53QueriesRefused  atomic.Bool // debug-do53-queries-refused as DnsEngine started with it; a reload takes effect at the next start (#1066)
 	RefreshZoneCh       chan ZoneRefresher
 	BumpZoneCh          chan BumperData
 	ValidatorCh         chan ValidatorRequest
@@ -1237,12 +1363,24 @@ func standbyKeyCount(pol *DnssecPolicy, sep bool, global int) int {
 // DNSSEC policy-algorithm guardrail (checkReloadPolicyGuardrail) holds a dangerous
 // same-name algorithm change rather than applying it. Use ReloadConfigConfirm to
 // carry an operator's explicit confirm.
-func (conf *Config) ReloadConfig() (string, error) { return conf.reloadConfig(false) }
+func (conf *Config) ReloadConfig() (string, error) { return conf.reloadConfigAndTemplates(false) }
 
 // ReloadConfigConfirm is ReloadConfig with the operator's confirm flag: confirm
 // lets a guarded DNSSEC policy-algorithm change through the reload gate.
 func (conf *Config) ReloadConfigConfirm(confirm bool) (string, error) {
-	return conf.reloadConfig(confirm)
+	return conf.reloadConfigAndTemplates(confirm)
+}
+
+// reloadConfigAndTemplates is reloadConfig, then the re-expansion of every
+// template-driven dynamic zone against the templates the reload just
+// rebuilt. The re-expansion runs after reloadConfig has released confMu: the
+// template lookup takes it.
+func (conf *Config) reloadConfigAndTemplates(confirm bool) (string, error) {
+	msg, err := conf.reloadConfig(confirm)
+	if err == nil {
+		msg += conf.ReapplyDynamicZoneTemplates().summary()
+	}
+	return msg, err
 }
 
 func (conf *Config) reloadConfig(confirm bool) (string, error) {
@@ -1261,9 +1399,27 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	// apply below then refuses the new block and keeps the running table,
 	// conf.Imr would otherwise go on describing zones that were rejected.
 	runningStubs, runningForward := conf.Imr.Stubs, conf.Imr.Forward
+	// The published transport signal, for the same reason: ParseConfig
+	// decodes service.transport into conf before it refuses a bad signal,
+	// and the zone refresh path publishes from conf.Service.Transport. A
+	// refused reload must leave the running signal in place.
+	runningTransport := conf.Service.Transport
+	// The template map in use, put back if the parse fails: ParseConfig
+	// installs a new map part-way through, and a check after that point
+	// can still refuse the reload. Adds and template re-expansion must not
+	// go on with templates from a config that was refused.
+	runningTemplates, runningTemplateList := Templates, conf.Templates
+	// ParseConfig decodes into conf before it validates, so a refused reload
+	// leaves the journal: block it decoded behind, and the next publish of the
+	// runtime-config snapshot (a single-zone reload) would put it in force.
+	// Keep the accepted one and put it back on a refusal.
+	runningJournal := conf.Journal.Clone()
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
+		conf.Service.Transport = runningTransport
+		Templates, conf.Templates = runningTemplates, runningTemplateList
+		conf.Journal = runningJournal
 	}
 	// Rebuild the TSIG store ONLY after a successful parse. With KeyDB, reconcile
 	// config keys in place (§6).
@@ -1408,9 +1564,9 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 
 	// Zones this reload is dropping. Collected here and acted on AFTER confMu is
 	// released: the signal-name withdrawal below enqueues onto KeyDB.UpdateQ
-	// with a blocking send, and applying a zone update reaches JournalActive(),
-	// which takes confMu.RLock -- so a full queue under the write lock would
-	// deadlock the daemon rather than slow it down.
+	// with a blocking send, and the updater applies updates under the zone
+	// locks this reload takes zone by zone -- so a full queue under the write
+	// lock would hold every config reader up behind the updater.
 	var removedZones []string
 
 	for _, zname := range prezones {
@@ -1479,5 +1635,10 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		WithdrawSignalPublicationsForZone(conf.Internal.KeyDB, zname)
 	}
 
-	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s", prezones, zonelist, imrReloadMsg), err
+	// The templates were rebuilt above: re-expand every template-driven
+	// dynamic zone against them, so an edited template reaches its zones on
+	// this reload. Off confMu: the template lookup takes it.
+	templateMsg := conf.ReapplyDynamicZoneTemplates().summary()
+
+	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s%s", prezones, zonelist, imrReloadMsg, templateMsg), err
 }
