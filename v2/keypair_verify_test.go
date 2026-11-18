@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -169,6 +170,12 @@ func TestVerifyStoredKeyPairRefusesLinkedAlgorithmThatDoesNotParse(t *testing.T)
 	checked, err := VerifyStoredKeyPair(privPEM, k)
 	if err == nil {
 		t.Fatalf("a PKCS#8 key for a linked algorithm that does not parse must be refused by bulk import, got checked=%v err=nil", checked)
+	}
+	if !checked {
+		t.Fatal("a PKCS#8 key for a linked algorithm that does not parse must be marked checked")
+	}
+	if !strings.Contains(err.Error(), "asn1: syntax error") {
+		t.Fatalf("refusal error must include the PKCS#8 parse failure, got %v", err)
 	}
 }
 

@@ -170,12 +170,6 @@ func VerifyStoredKeyPair(privPEM string, pub *dns.DNSKEY) (checked bool, err err
 	return true, nil
 }
 
-// pkcs8AlgorithmLinked reports whether privPEM is a PKCS#8 "PRIVATE KEY" block
-// whose outer structure decodes and whose algorithm (RSA, ECDSA or Ed25519) is
-// one the standard library, and therefore this binary, can handle. It is used
-// to tell "this key cannot be decoded because the algorithm is not linked"
-// (benign, see VerifyStoredKeyPair) from "this algorithm is linked but the key
-// is malformed" (refused).
 // keyParseCause renders the parse failure for an error message. ParsePrivateKeyPEM
 // can return a nil signer with a nil error, which must not print as "<nil>".
 func keyParseCause(perr error) string {
@@ -185,6 +179,12 @@ func keyParseCause(perr error) string {
 	return perr.Error()
 }
 
+// pkcs8AlgorithmLinked reports whether privPEM is a PKCS#8 "PRIVATE KEY" block
+// whose outer structure decodes and whose algorithm (RSA, ECDSA or Ed25519) is
+// one the standard library, and therefore this binary, can handle. It is used
+// to tell "this key cannot be decoded because the algorithm is not linked"
+// (benign, see VerifyStoredKeyPair) from "this algorithm is linked but the key
+// is malformed" (refused).
 func pkcs8AlgorithmLinked(privPEM string) bool {
 	block, _ := pem.Decode([]byte(privPEM))
 	if block == nil || block.Type != "PRIVATE KEY" {
