@@ -376,3 +376,16 @@ func TestParseDNSKEYTransportPolicy(t *testing.T) {
 		t.Fatal("parse(bogus) should error")
 	}
 }
+
+// With no dnssec.large-algorithms the daemon's resolver has none: it gets an
+// empty set, which it does not read as its default.
+func TestImrLargeAlgorithmsEmptyIsNone(t *testing.T) {
+	conf := &Config{}
+	if set := conf.imrLargeAlgorithms(); set == nil || len(set) != 0 {
+		t.Errorf("no large-algorithms: %v, want an empty set, not nil", set)
+	}
+	conf.Internal.LargeAlgorithms = map[uint8]bool{dns.RSASHA512: true}
+	if set := conf.imrLargeAlgorithms(); !set[dns.RSASHA512] || len(set) != 1 {
+		t.Errorf("large-algorithms [RSASHA512]: %v", set)
+	}
+}

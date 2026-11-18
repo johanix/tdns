@@ -7,13 +7,16 @@ import "log/slog"
 
 // Options is what NewImr takes besides the imrengine: configuration. They
 // are the few things a resolver reads from outside it, so that an application
-// can build one without the daemon's Config. The zero value is a resolver with no large
-// DNSSEC algorithms, the default DNSKEY transport, nowhere to report server
-// errors, and no own zones.
+// can build one without the daemon's Config. The zero value is a resolver with
+// the default large DNSSEC algorithms and DNSKEY transport, nowhere to report
+// server errors, no own zones, and slog.Default() to log through.
 type Options struct {
 	// LargeAlgorithms is the set of DNSSEC algorithms whose DNSKEYs and
-	// signatures are too large for a UDP response. RefreshDnssecPolicy replaces
-	// it on a live resolver.
+	// signatures are too large for a UDP response: the resolver asks for
+	// their DNSKEY RRsets over TCP or an encrypted transport rather than
+	// have them come back truncated. Nil is the default set, the post-quantum
+	// families MLDSA, SLHDSA, FALCON and CROSS; an empty set is none.
+	// RefreshDnssecPolicy replaces it on a live resolver.
 	LargeAlgorithms map[uint8]bool
 	// DNSKEYTransport is the transport policy for DNSKEY queries.
 	DNSKEYTransport DNSKEYTransportPolicy

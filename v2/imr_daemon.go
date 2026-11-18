@@ -68,7 +68,7 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	// daemon's imr-dump-tuning reads them from conf.
 	LoadImrTuningDefaults(&conf.Imr.Tuning)
 	opts := ImrOptions{
-		LargeAlgorithms: conf.Internal.LargeAlgorithms,
+		LargeAlgorithms: conf.imrLargeAlgorithms(),
 		DNSKEYTransport: conf.Internal.DNSKEYTransport,
 		PendingOwnZone:  func(zone string) bool { return ownZonePending(conf, zone) },
 		OwnZones:        hostedZones{},

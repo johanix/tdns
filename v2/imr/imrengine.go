@@ -143,12 +143,13 @@ func (imr *Imr) isLargeAlgorithm(alg uint8) bool {
 // large-algorithm set and DNSKEY transport policy until restart. The map is
 // installed by reference: callers pass the freshly built set from the parse
 // and must not mutate it afterwards.
+// A nil set is the default, as in Options.LargeAlgorithms.
 func (imr *Imr) RefreshDnssecPolicy(largeAlgs map[uint8]bool, transport DNSKEYTransportPolicy) {
 	if imr == nil {
 		return
 	}
 	imr.dnssecPolicyMu.Lock()
-	imr.largeAlgs = largeAlgs
+	imr.largeAlgs = largeAlgorithmsOrDefault(largeAlgs)
 	imr.dnskeyTransport = transport
 	imr.dnssecPolicyMu.Unlock()
 }
@@ -360,7 +361,7 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 			ic.Tuning.Discovery.RetryAfterFailure,
 			ic.Tuning.Discovery.MaxFailures,
 		),
-		largeAlgs:       opts.LargeAlgorithms,
+		largeAlgs:       largeAlgorithmsOrDefault(opts.LargeAlgorithms),
 		dnskeyTransport: opts.DNSKEYTransport,
 		pendingOwnZone:  opts.PendingOwnZone,
 		ownZones:        opts.OwnZones,
