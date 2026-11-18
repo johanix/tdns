@@ -63,8 +63,9 @@ var activeDelegationSyncLanes atomic.Pointer[delegationSyncLanes]
 // keeps changing behind a parent that does not answer would grow the queue
 // without limit, now that a full intake no longer holds its senders back. The
 // merged request runs where the waiting one stood, so it runs ahead of the
-// zone's requests that arrived between the two; never ahead of one a caller
-// waits on, or one that is never merged (delegationSyncLane.merge).
+// zone's requests that arrived between the two. Those may only be live
+// reconciliations, which see the merged change when they run after it
+// (delegationSyncMayBeOvertaken).
 //
 // The parent is the zone's cached parent (GetParent). While that is not known
 // yet, the zone's name less its first label stands in. The stand-in is only a
@@ -186,16 +187,15 @@ func (l *delegationSyncLanes) dispatch(ctx context.Context, ds DelegationSyncReq
 // waits in ln, and reports whether it did. Never into the running request: it
 // may have read the zone already. Called with l.mu held.
 //
-// Merging moves ds ahead of the zone's requests that wait between the two. It
-// does not move it past one that is never merged (delegationSyncMerges): one a
-// caller waits on, as a DELEGATION-STATUS reads the parent and answers what it
-// finds, or one whose command is never merged. Those see the zone's requests
-// in the order they arrived. The zone's other waiting requests are themselves
-// ones that merge, and they work from the zone as it is when they run or carry
-// a difference, so the order between them and ds changes nothing the parent
-// ends up with. Stopping at every request with another command would keep a
-// SYNC-DELEGATION and the SIGNALS-EDITED the same zone update sends after it
-// from ever merging, and the queue would grow with each update again.
+// Merging moves ds ahead of the zone's requests that wait between the two,
+// so it stops at the first of them that may not be overtaken
+// (delegationSyncMayBeOvertaken): only live reconciliations may. That keeps a
+// SYNC-DELEGATION merging into the zone's waiting one past the SIGNALS-EDITED,
+// EXPLICIT-SYNC-DELEGATION and REFRESH-SYNC-DELEGATION between them, which
+// see the merged change when they run after it. Stopping at every request with
+// another command would keep a SYNC-DELEGATION and the SIGNALS-EDITED the same
+// zone update sends after it from ever merging, and the queue would grow with
+// each such update again.
 func (ln *delegationSyncLane) merge(zone string, ds DelegationSyncRequest) bool {
 	if !delegationSyncMerges(ds) {
 		return false
@@ -206,7 +206,7 @@ func (ln *delegationSyncLane) merge(zone string, ds DelegationSyncRequest) bool 
 			continue
 		}
 		if it.ds.Command != ds.Command {
-			if !delegationSyncMerges(it.ds) {
+			if !delegationSyncMayBeOvertaken(it.ds) {
 				return false
 			}
 			continue

@@ -42,7 +42,7 @@ func TestSig0KeyPreparationReportsABusyKeystore(t *testing.T) {
 
 // A setup that found the keystore busy is retried with the setup backoff, not
 // logged and dropped (the arm returns nil when it drops). The retry must come
-// back: the same zone and command, one attempt on.
+// back, no sooner than the backoff: the same zone and command, one attempt on.
 func TestSetupRetriesABusyKeystore(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -54,6 +54,7 @@ func TestSetupRetriesABusyKeystore(t *testing.T) {
 	zd.Options = map[ZoneOption]bool{OptParentSync: true}
 	holdKeyDB(t, kdb)
 
+	start := time.Now()
 	scheduled := handleDelegationSyncSetupWith(ctx, conf, q, ds, func() error {
 		return zd.Sig0KeyPreparation("example.", dns.ED25519, kdb)
 	})
@@ -63,6 +64,9 @@ func TestSetupRetriesABusyKeystore(t *testing.T) {
 	}
 	select {
 	case got := <-q:
+		if waited := time.Since(start); waited < setupRetryDelay(ds.Attempt) {
+			t.Errorf("the retry came back after %s, before the setup backoff of %s", waited, setupRetryDelay(ds.Attempt))
+		}
 		if got.ZoneName != ds.ZoneName || got.Command != ds.Command || got.Attempt != ds.Attempt+1 {
 			t.Errorf("the retry is %s for %s at attempt %d, want %s for %s at attempt %d",
 				got.Command, got.ZoneName, got.Attempt, ds.Command, ds.ZoneName, ds.Attempt+1)
