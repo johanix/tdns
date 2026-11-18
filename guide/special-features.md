@@ -924,7 +924,12 @@ record in the Additional section, it:
 
    Cleartext is two tokens, `udp` and `tcp`, each 100 when
    absent. An older signal's `do53:N` is read as `udp:N` and
-   `tcp:N`; an explicit `udp` or `tcp` wins over it. The `tcp`
+   `tcp:N`; an explicit `udp` or `tcp` wins over it. The `udp`
+   weight caps the share of queries the resolver sends over
+   UDP by its own choice: Do53 gets what the encrypted
+   weights leave of 100, and no more than the `udp` weight,
+   so `udp:0,dot:50` sends every first attempt over DoT.
+   Port 53 stays the last resort all the same. The `tcp`
    weight only caps the TCP the resolver would choose on its
    own, and tdns chooses none: TCP after a truncation, or
    forced for a large DNSKEY, ignores it, `tcp:0` included.
@@ -932,9 +937,12 @@ record in the Additional section, it:
    other transports it names, but never to `do53`, which is
    ignored in a record with a port. The retry over TCP after
    a truncation goes to the address and port that truncated;
-   forced TCP goes to the `tcp` port, or to port 53. Backoff
-   and round-trip times are kept per address, port and
-   transport. A token the resolver does not know is kept in
+   forced TCP goes to the `tcp` port, or to port 53. Backoff,
+   round-trip times and a zone's lameness (a REFUSED for the
+   zone) are kept per address, port and transport, so an
+   endpoint that refuses holds back only itself: not port
+   53, and not a target's other addresses. A token the
+   resolver does not know is kept in
    the record and not acted on.
 4. Promotes the server's connection mode to "opportunistic",
    meaning the resolver will attempt encrypted transports
