@@ -134,6 +134,11 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	if zd.signalPassRetired {
+		lgDns.Debug("CreateTransportSignalRRs: the zone is being removed; no transport signal pass",
+			"zone", zd.ZoneName)
+		return nil
+	}
 	// Bare: no working set before this pass, so the one seeded below holds
 	// nothing but what the pass stages, and its publish can stay serial-less.
 	// A working set that already exists carries another writer's change,

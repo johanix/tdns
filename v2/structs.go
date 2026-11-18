@@ -375,9 +375,15 @@ type ZoneData struct {
 	// that reads the KeyDB's record puts them ahead of it. Guarded by
 	// signalStoredMu.
 	signalUnrecorded map[string][]string
-	publishCadence   time.Duration
-	publishQueued    bool
-	publishUrgent    bool
+	// signalPassRetired is set when the zone is being removed
+	// (RemoveDynamicZone): the transport-signal pass then stores nothing and
+	// records nothing, so that no record of a removed zone outlives the
+	// delete of its records. Guarded by mu, which the pass holds for its
+	// whole run.
+	signalPassRetired bool
+	publishCadence    time.Duration
+	publishQueued     bool
+	publishUrgent     bool
 	// tx is the zone's transactions: the publish hold, and what a zone created
 	// held remembers about its first content. See zone_tx.go. Guarded by mu.
 	tx zoneTxState

@@ -435,7 +435,7 @@ func (kdb *KeyDB) DeleteTransportSignalStored(zone string) error {
 	}
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
-	if _, err := kdb.DB.Exec(`DELETE FROM TransportSignalStored WHERE zone=?`, dns.Fqdn(zone)); err != nil {
+	if _, err := kdb.DB.Exec(`DELETE FROM TransportSignalStored WHERE zone=?`, core.CanonicalizeName(dns.Fqdn(zone))); err != nil {
 		return fmt.Errorf("DeleteTransportSignalStored: %v", err)
 	}
 	return nil
