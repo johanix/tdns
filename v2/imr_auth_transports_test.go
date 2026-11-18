@@ -285,27 +285,37 @@ func TestReceivedSignalIsWhatTheServerSaid(t *testing.T) {
 }
 
 // expectedShares mirrors candidateTransports: over many names, the first
-// picks fall in the proportions it states. #854's example signal.
+// picks fall in the proportions it states. #854's example signal, and the udp
+// weight as a cap on the share Do53 gets (design 2026-11-14, section 3;
+// CodeRabbit on #1118): udp:0 sends no first pick over Do53, and a cap above
+// what the encrypted weights leave of 100 changes nothing.
 func TestExpectedSharesMatchSelection(t *testing.T) {
-	server := cache.NewAuthServer("ns.example.")
-	applyTransportMapToServer(server, map[string]uint8{"do53": 100, "dot": 10, "doq": 10, "doh": 1})
-	transports, weights := server.GetTransportSignal()
+	example := map[string]uint8{"do53": 100, "dot": 10, "doq": 10, "doh": 1}
 	for _, tc := range []struct {
-		level edns0.PrivacyLevel
-		want  map[core.Transport]uint8
+		signal map[string]uint8
+		level  edns0.PrivacyLevel
+		want   map[core.Transport]uint8
 	}{
-		{edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDo53: 80, core.TransportDoT: 10, core.TransportDoQ: 10}},
-		{edns0.PrivacyOpportunistic, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDoQ: 50}},
-		{edns0.PrivacyStrict, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDoQ: 50}},
+		{example, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDo53: 80, core.TransportDoT: 10, core.TransportDoQ: 10}},
+		{example, edns0.PrivacyOpportunistic, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDoQ: 50}},
+		{example, edns0.PrivacyStrict, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDoQ: 50}},
+		{map[string]uint8{"udp": 0, "dot": 50}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDoT: 100}},
+		{map[string]uint8{"do53": 0, "dot": 10}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDoT: 100}},
+		{map[string]uint8{"udp": 20, "dot": 60}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDo53: 25, core.TransportDoT: 75}},
+		{map[string]uint8{"udp": 100, "dot": 50}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDo53: 50, core.TransportDoT: 50}},
+		{map[string]uint8{"dot": 50}, edns0.PrivacyNone, map[core.Transport]uint8{core.TransportDo53: 50, core.TransportDoT: 50}},
 	} {
+		server := cache.NewAuthServer("ns.example.")
+		applyTransportMapToServer(server, tc.signal)
+		transports, weights := server.GetTransportSignal()
 		got := expectedShares(transports, weights, tc.level)
 		if len(got) != len(tc.want) {
-			t.Errorf("%s: expected %v, want %v (DoH's weight of 1 is not used)", tc.level, got, tc.want)
+			t.Errorf("%v %s: expected %v, want %v (a weight of 1 is not used)", tc.signal, tc.level, got, tc.want)
 			continue
 		}
 		for tr, w := range tc.want {
 			if got[tr] != w {
-				t.Errorf("%s: expected %v, want %v", tc.level, got, tc.want)
+				t.Errorf("%v %s: expected %v, want %v", tc.signal, tc.level, got, tc.want)
 			}
 		}
 		const n = 20000
@@ -315,7 +325,7 @@ func TestExpectedSharesMatchSelection(t *testing.T) {
 		}
 		for tr, w := range tc.want {
 			if share := picks[tr] * 100 / n; share < int(w)-3 || share > int(w)+3 {
-				t.Errorf("%s: %s picked %d%% of %d names, expected %d%%", tc.level, core.TransportToString[tr], share, n, w)
+				t.Errorf("%v %s: %s picked %d%% of %d names, expected %d%%", tc.signal, tc.level, core.TransportToString[tr], share, n, w)
 			}
 		}
 	}

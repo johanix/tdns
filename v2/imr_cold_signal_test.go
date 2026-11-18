@@ -352,7 +352,7 @@ func TestAnotherPassAfterKeepsTheProbeTuple(t *testing.T) {
 	// DoT, came in meanwhile.
 	server.RecordAddressFailure("192.0.2.53", core.TransportDo53, errors.New("read: connection refused"))
 	server.SetTransportSignal([]core.Transport{core.TransportDoT}, nil, map[core.Transport]uint8{core.TransportDoT: 50}, nil)
-	tried := map[passTuple]bool{{server, "192.0.2.53", core.TransportDo53}: true}
+	tried := map[passTuple]bool{{server, "192.0.2.53", 0, core.TransportDo53}: true}
 
 	sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "www."+strictChildZone, dns.TypeA,
 		serverMap, edns0.PrivacyNone, tried)
