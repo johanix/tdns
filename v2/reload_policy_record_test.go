@@ -395,18 +395,30 @@ func newReloadHarness(t *testing.T, kdb *KeyDB, zone string, options ...string) 
 
 // answered sends zr to the engine and waits for its answer, which a refresher
 // with Wait set gets when its refresh is done.
+//
+// The answer to a refresh comes from its worker, a moment before the engine
+// clears the zone's in-flight mark, so a refresher sent right behind another is
+// sometimes refused for that. That refusal is the harness's, as in
+// reloadedWithPolicy: the refresher is sent again, up to a bound, and no other
+// refusal is retried.
 func (h *reloadHarness) answered(zr ZoneRefresher) {
 	h.t.Helper()
-	resp := make(chan RefresherResponse, 1)
-	zr.Wait, zr.Response = true, resp
-	h.engineConf.Internal.RefreshZoneCh <- zr
-	select {
-	case r := <-resp:
-		if r.Error {
-			h.t.Fatalf("the engine's answer: %s", r.ErrorMsg)
+	for try := 0; ; try++ {
+		resp := make(chan RefresherResponse, 1)
+		zr.Wait, zr.Response = true, resp
+		h.engineConf.Internal.RefreshZoneCh <- zr
+		select {
+		case r := <-resp:
+			if !r.Error {
+				return
+			}
+			if !strings.Contains(r.ErrorMsg, "refresh already in progress") || try >= 100 {
+				h.t.Fatalf("the engine's answer: %s", r.ErrorMsg)
+			}
+			time.Sleep(10 * time.Millisecond)
+		case <-time.After(10 * time.Second):
+			h.t.Fatal("the engine did not answer")
 		}
-	case <-time.After(10 * time.Second):
-		h.t.Fatal("the engine did not answer")
 	}
 }
 
