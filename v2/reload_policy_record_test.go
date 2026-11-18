@@ -482,6 +482,13 @@ func kskAlgOf(p *DnssecPolicy) uint8 {
 	return p.KSKAlgorithm
 }
 
+func zskAlgOf(p *DnssecPolicy) uint8 {
+	if p == nil {
+		return 0
+	}
+	return p.ZSKAlgorithm
+}
+
 // A bound zone follows the policies of the reload being applied: one defined
 // and selected in that reload, and one edited under its own name.
 func TestAReloadFollowsThePoliciesOfTheReloadNotTheRunningSnapshot(t *testing.T) {
@@ -597,4 +604,67 @@ func TestAReloadFollowsAnOverridesPolicyInTheReloadNotTheRunningSnapshot(t *test
 		t.Errorf("an override's policy edited in the reload: the zone records %q bound to KSK algorithm %d, warning %v; want %q bound to %d, no warning",
 			n, kskAlgOf(p), w, "ovr", dns.ECDSAP256SHA256)
 	}
+}
+
+// A reload that changes the algorithms of the policy a signing zone is bound to,
+// under the policy's own name, is an algorithm change like any other. The
+// applied record and the intent both name "base", and both resolve to the
+// definition the reload carries, so only the definition the zone is bound to
+// still says what its keys were made under. The change is refused, as a change
+// of the zone to another policy of other algorithms is, and the zone keeps
+// signing under the definition it has keys for. An edit that keeps the
+// algorithms is followed as before.
+func TestAReloadThatChangesTheAlgorithmsOfASigningZonesPolicyUnderItsNameIsRefused(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "algedit.config.example.", "online-signing")
+	const month = 30 * 86400
+	base := named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "base")
+	baseAlg := named(validFor(kskzsk(dns.ECDSAP256SHA256, dns.ECDSAP256SHA256), month), "base") // "base", other algorithms
+	base2 := named(validFor(kskzsk(dns.ED25519, dns.ED25519), 2*month), "base")                 // "base", same algorithms, edited
+	withLivePolicies(t, map[string]DnssecPolicy{"base": base})
+
+	zd := h.reload(false, "base", map[string]DnssecPolicy{"base": base})
+	if !zd.signsItsOwnContent() {
+		t.Fatal("the zone does not sign; the test has lost its point")
+	}
+	if n, p, w := policyState(zd); n != "base" || p == nil || p.KSKAlgorithm != dns.ED25519 || w {
+		t.Fatalf("after the first load: %q bound to KSK algorithm %d, warning %v", n, kskAlgOf(p), w)
+	}
+	soaSignedWith := func(when string, want uint8) {
+		t.Helper()
+		sigs := servedRRset(t, zd, h.zone, dns.TypeSOA).RRSIGs
+		if len(sigs) == 0 {
+			t.Errorf("%s: the SOA is unsigned", when)
+		}
+		for _, rr := range sigs {
+			if sig, ok := rr.(*dns.RRSIG); ok && sig.Algorithm != want {
+				t.Errorf("%s: the SOA is signed with algorithm %d, want %d", when, sig.Algorithm, want)
+			}
+		}
+	}
+	soaSignedWith("after the first load", dns.ED25519)
+
+	// "base" has other algorithms in this reload. The zone has no keys of them.
+	zd = h.reload(true, "base", map[string]DnssecPolicy{"base": baseAlg})
+	n, p, _ := policyState(zd)
+	if n != "base" || p == nil || p.KSKAlgorithm != dns.ED25519 || p.ZSKAlgorithm != dns.ED25519 {
+		t.Errorf("an algorithm change under the policy's name: the zone records %q bound to KSK/ZSK algorithms %d/%d; want %q bound to the %d it has keys of",
+			n, kskAlgOf(p), zskAlgOf(p), "base", dns.ED25519)
+	}
+	if zd.HasServiceImpactingError() {
+		t.Errorf("an algorithm change under the policy's name left the zone in an error state: %s", zd.ErrorMsg)
+	}
+	soaSignedWith("after the refused algorithm change", dns.ED25519)
+	if name, _, ok, err := GetZoneAppliedPolicy(kdb, h.zone); err != nil || !ok || name != "base" {
+		t.Errorf("after the refused change the last-applied record is %q %v %v, want base", name, ok, err)
+	}
+
+	// An edit that keeps the algorithms is followed, the refusal behind it.
+	zd = h.reload(true, "base", map[string]DnssecPolicy{"base": base2})
+	if n, p, w := policyState(zd); n != "base" || p == nil || p.SigValidity.Default != 2*month || w {
+		t.Errorf("an edit that keeps the algorithms: the zone records %q bound to signature validity %d, warning %v; want %q bound to %d, no warning",
+			n, validityOf(p), w, "base", 2*month)
+	}
+	soaSignedWith("after an edit that keeps the algorithms", dns.ED25519)
 }

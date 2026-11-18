@@ -49,6 +49,9 @@ const (
 	// separate "benign internals" class. Finding A: resolvePolicyPair resolves
 	// applied and intent from the SAME ConfLive() snapshot by NAME, so a
 	// "same name, changed internals" delta is unreachable at classify time.
+	// A same-name change of ALGORITHMS is reachable on a reload, through the
+	// definition the zone is bound to (definitionBoundUnder), and classifies as
+	// PolicyChangeIncompatibleAlg.
 	PolicyChangeNone PolicyChangeClass = iota
 	// PolicyChangeCompatibleName: different name, same KSK+ZSK algorithms —
 	// apply transactionally.
@@ -504,6 +507,8 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 		return nil
 	}
 
+	appliedPol = definitionBoundUnder(zd, appliedName, appliedPol)
+
 	class := classifyPolicyChange(appliedPol, appliedName, intentPol, intentName)
 
 	// Branch 1 — same name, same algs (incl. internals-only edits).
@@ -602,6 +607,44 @@ func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *Ke
 		}
 		return nil
 	}
+}
+
+// definitionBoundUnder is the definition of the applied policy appliedName that
+// the zone's keys were made under, for the classifier to compare against intent.
+// byName is the definition the applied name resolves to now.
+//
+// They are one and the same until a config edit changes the algorithms of the
+// policy under its own name: then the applied name and the intent name are the
+// same, and both resolve to the edited definition, so the classifier finds
+// nothing changed and Branch 1 rebinds the zone to algorithms it has no keys of.
+// The definition the zone is bound to is the only record left of the old
+// algorithms, and it is the one the keys, and the algorithm-roll checks below,
+// follow. So when the zone is bound under the applied name to a definition of
+// other KSK or ZSK algorithms, that definition is the applied one, and the change
+// is classified, refused or carried like a change to any other policy.
+//
+// The binding is used for the definition only, and only under the applied name.
+// It is never what decides that the policy changed (blocking ①): on a restart
+// the binding is the config's already, and the name comparison stays what finds
+// a change then. An edit that keeps the algorithms leaves byName as it was, and
+// stays Branch 1's.
+func definitionBoundUnder(zd *ZoneData, appliedName string, byName *DnssecPolicy) *DnssecPolicy {
+	zd.mu.Lock()
+	bound := zd.DnssecPolicy
+	boundName := zd.DnssecPolicyName
+	zd.mu.Unlock()
+	if bound == nil || boundName != appliedName || bound.Error != "" || byName == nil {
+		return byName
+	}
+	if bound.KSKAlgorithm == byName.KSKAlgorithm && bound.ZSKAlgorithm == byName.ZSKAlgorithm {
+		return byName
+	}
+	lgEngine.Debug("applied DNSSEC policy was redefined with other algorithms; comparing against the definition the zone is bound to",
+		"zone", zd.ZoneName, "policy", appliedName,
+		"bound_ksk_alg", dns.AlgorithmToString[bound.KSKAlgorithm], "bound_zsk_alg", dns.AlgorithmToString[bound.ZSKAlgorithm],
+		"defined_ksk_alg", dns.AlgorithmToString[byName.KSKAlgorithm], "defined_zsk_alg", dns.AlgorithmToString[byName.ZSKAlgorithm])
+	cp := *bound
+	return &cp
 }
 
 // kskOnlyAlgChangeWithEngine reports whether the applied→intent change is
