@@ -294,6 +294,15 @@ type ZoneData struct {
 
 	// Zone snapshot publish path (Project B).
 	snapshot atomic.Pointer[zoneSnapshot]
+	// snapshotSigned: every owner of the published snapshot carries signatures
+	// of ours. Set by the publish that installs a snapshot, which signed the
+	// whole zone (a wholesale replacement, whose full pass covers it) or
+	// extended one that already was; false for a snapshot published unsigned
+	// (a signing zone that could not sign yet) and for one nobody has marked.
+	// The scoped signing pass of an IXFR refresh signs the owners the delta
+	// touched and shares the rest with this snapshot, so it is taken only when
+	// this is set; see applyRefreshReplacementLocked. Guarded by mu.
+	snapshotSigned bool
 	// nextResign caches when this zone's earliest-expiring signature crosses
 	// the renewal threshold, so the resigner can sleep until then instead of
 	// walking every zone every minute to find out that nothing is due. Written

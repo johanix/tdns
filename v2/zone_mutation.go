@@ -666,6 +666,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// blast radius that does not belong inside a signing fix. The whole-zone
 	// walk that SignZone drives IS cancellable now, which is the unbounded one
 	// an operator waits on.
+	fullPass := zd.wsNeedsFullSign // cleared below, and wanted at the install
 	if err := zd.signStagedScopeLocked(context.Background(), sm); err != nil {
 		zd.refuseUnsignableWorkingSetLocked(prevSerial, err)
 		return
@@ -881,6 +882,11 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	snap := zd.buildSnapshotLocked(serial, data, zd.wsSignalSynth)
 	snap.prepareDenialIndex()
 	zd.snapshot.Store(snap)
+	// Signed throughout if this publish could sign and either ran the full pass
+	// or extended a snapshot that already was (an incremental change signs what
+	// it stages; the scoped pass of an IXFR refresh is only taken on one that
+	// is). A publish that could not sign leaves the zone's content unsigned.
+	zd.snapshotSigned = sm != nil && (fullPass || zd.snapshotSigned)
 
 	zd.workingSet = nil
 	zd.wsFromReplacement = false
@@ -1380,21 +1386,26 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	switch {
 	case !zd.signsItsOwnContent():
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
-	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil && new_zd.signsAtStart:
+	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil &&
+		new_zd.signsAtStart && zd.snapshotSigned:
 		// Only when the zone signed its own content when the refresh began,
-		// which is when the delta's base was taken: the owners the delta did not
-		// touch keep the signatures they have. A zone that became a signer since,
-		// by a callback's SetRuntimeOption on this zone, has none, and takes the
-		// full pass below.
+		// which is when the delta's base was taken, and that base is signed
+		// throughout: the owners the delta did not touch keep the signatures
+		// they have. A zone that became a signer since, by a callback's
+		// SetRuntimeOption on this zone, has none; and one whose served
+		// snapshot was never signed (its full pass could not run, or was
+		// refused, and it kept or published unsigned content) has them on no
+		// owner. Both take the full pass below.
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, new_zd.ixfrTouched
 	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil:
-		// A delta, on a zone that did not sign when the refresh began: the full
-		// pass signs what is unsigned. But the delta was applied onto the
-		// snapshot as it was, and a zone that signed once and was switched off
-		// keeps its old signatures there, so an RRset the delta changed still
-		// carries one over its previous contents, which the full pass (not
-		// forced) would take for current. The touched owners are signed again
-		// by force as well; see signStagedScopeLocked.
+		// A delta, on a zone that did not sign when the refresh began or whose
+		// snapshot is not signed throughout: the full pass signs what is
+		// unsigned. But the delta was applied onto the snapshot as it was, and
+		// a zone that signed once and was switched off keeps its old
+		// signatures there, so an RRset the delta changed still carries one
+		// over its previous contents, which the full pass (not forced) would
+		// take for current. The touched owners are signed again by force as
+		// well; see signStagedScopeLocked.
 		zd.wsNeedsFullSign, zd.wsSignOwners = true, new_zd.ixfrTouched
 	default:
 		zd.wsNeedsFullSign, zd.wsSignOwners = true, nil
