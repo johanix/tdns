@@ -121,6 +121,11 @@ func TestAReloadThatAddsAPolicyLetsTheZoneStartSigning(t *testing.T) {
 	if z.zd.signsItsOwnContent() {
 		t.Fatal("the reload switched signing on")
 	}
+	// The reload signed nothing, so it recorded nothing as applied: the record
+	// is what the start writes.
+	if name, _, ok, err := GetZoneAppliedPolicy(kdb, ovZone); err != nil || ok {
+		t.Errorf("last-applied record after the reload: %q %v %v, want none", name, ok, err)
+	}
 	if err := z.zd.StartSigning(context.Background(), 0); err != nil {
 		t.Fatalf("StartSigning after a reload that named a policy: %v", err)
 	}
