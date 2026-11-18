@@ -2391,6 +2391,20 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	return dynamicRRs
 }
 
+// withoutCollectedSig0Key is dynamicRRs without the SIG(0) KEY RRset
+// CollectDynamicRRs put there (the only KEY RRset it collects). dynamicRRs
+// itself, the caller's, is not changed.
+func withoutCollectedSig0Key(dynamicRRs []*core.RRset) []*core.RRset {
+	out := make([]*core.RRset, 0, len(dynamicRRs))
+	for _, rrset := range dynamicRRs {
+		if rrset != nil && rrset.RRtype == dns.TypeKEY {
+			continue
+		}
+		out = append(out, rrset)
+	}
+	return out
+}
+
 // repopulateWorkingSetLocked merges dynamic RRsets into the working set.
 // Caller must hold zd.mu and have initialized zd.workingSet.
 func (zd *ZoneData) repopulateWorkingSetLocked(dynamicRRs []*core.RRset) {

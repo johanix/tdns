@@ -1085,6 +1085,12 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// under the old options; before every decision below that reads them, which
 	// are the new content's (whether the zone originates it, the serial it
 	// lands on, whether it signs it). A refusal further down puts them back.
+	//
+	// Whether the zone signs its own content is asked before that: the IXFR
+	// signing scope below belongs to a zone that already signed the content
+	// this replacement extends, and a zone the callbacks have just made a
+	// signer has none of its owners signed.
+	wasSigning := zd.signsItsOwnContent()
 	undoOptions := zd.foldIncomingOptionsLocked(new_zd)
 
 	// The highest serial this zone has published, which a first load must
@@ -1311,6 +1317,14 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	} else {
 		zd.wsSignalSynth = nil
 	}
+	// The dynamic RRsets were collected before the callbacks ran, under the
+	// options of that time: a SIG(0) KEY is among them unless the zone said
+	// dont-publish-key then. A callback may have said it since, and the options
+	// adopted above are the ones that rule. Only the collected KEY is dropped;
+	// one the replacement carries itself is its content and stays.
+	if zd.Options[OptDontPublishKey] {
+		dynamicRRs = withoutCollectedSig0Key(dynamicRRs)
+	}
 	zd.repopulateWorkingSetLocked(dynamicRRs)
 	if refuseIfChanged && overlay == nil {
 		if old := zd.snapshot.Load(); old != nil &&
@@ -1383,7 +1397,10 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	switch {
 	case !zd.signsItsOwnContent():
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
-	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil:
+	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil && wasSigning:
+		// Only when the zone signed before this replacement: its untouched
+		// owners keep the signatures they have. One that has just become a
+		// signer has none, and takes the full pass below.
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, new_zd.ixfrTouched
 	default:
 		zd.wsNeedsFullSign, zd.wsSignOwners = true, nil
