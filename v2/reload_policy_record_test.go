@@ -1356,3 +1356,102 @@ func TestAReloadsRecordOfAZoneThatWasRemovedDoesNotRegisterItAgain(t *testing.T)
 		}
 	}
 }
+
+// After a reload has published its snapshot, the engine receives the refresher of
+// every zone the reload kept, whatever its caller's context does. The reload-zones
+// API handler passes the request's context, so a client that goes away in the
+// middle of a reload cancels it; the refreshers not yet sent were dropped with the
+// context, and the zones behind them kept the settings of the previous config (a
+// downstream ACL the reload had removed, say, stays in force, because a ticker's
+// refresh reuses the zone and does not read the config).
+func TestAReloadDeliversEveryRefresherAfterItPublishedWhateverItsCallersContextDoes(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	withLivePolicies(t, map[string]DnssecPolicy{}) // restores the snapshot the reload publishes
+	prevSync := delegationSyncConf.Load()
+	t.Cleanup(func() { delegationSyncConf.Store(prevSync) })
+
+	dir := t.TempDir()
+	names := []string{"cancelfirst.config.example.", "cancelsecond.config.example."}
+	var zones []ZoneConf
+	for _, name := range names {
+		file := filepath.Join(dir, name+"zone")
+		body := name + "\t3600\tIN\tSOA\tns1." + name + " hostmaster." + name + " 1 7200 1800 604800 7200\n" +
+			name + "\t3600\tIN\tNS\tns1." + name + "\n" + "ns1." + name + "\t3600\tIN\tA\t192.0.2.53\n"
+		if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		zones = append(zones, ZoneConf{Name: name, Type: "primary", Store: "map", Zonefile: file})
+	}
+	t.Cleanup(func() {
+		for _, name := range names {
+			if z, ok := Zones.Get(name); ok {
+				z.stopPublisher()
+			}
+			Zones.Remove(name)
+		}
+	})
+
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher) // a send completes when the test takes it
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	conf.Zones = zones
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reloaded := make(chan error, 1)
+	go func() {
+		_, err := conf.ReloadZoneConfig(ctx)
+		reloaded <- err
+	}()
+	// The reload is let go of whatever happens below, so that it does not hang
+	// the run; unless it has ended already.
+	ended := false
+	defer func() {
+		for !ended {
+			select {
+			case <-conf.Internal.RefreshZoneCh:
+			case <-reloaded:
+				return
+			case <-time.After(10 * time.Second):
+				return
+			}
+		}
+	}()
+
+	var first ZoneRefresher
+	select {
+	case first = <-conf.Internal.RefreshZoneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reload queued no refresher")
+	}
+	if first.Name != names[0] {
+		t.Fatalf("the first refresher is for %q, want %q; the test has lost its point", first.Name, names[0])
+	}
+
+	// The reload has published, and is blocked on the second refresher. The caller
+	// goes away.
+	cancel()
+
+	select {
+	case second := <-conf.Internal.RefreshZoneCh:
+		if second.Name != names[1] {
+			t.Errorf("the second refresher is for %q, want %q", second.Name, names[1])
+		}
+	case err := <-reloaded:
+		ended = true
+		t.Fatalf("the reload ended (%v) without sending the refresher of its second zone after its caller's context was cancelled", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second refresher was not sent")
+	}
+	select {
+	case err := <-reloaded:
+		ended = true
+		if err != nil {
+			t.Errorf("ReloadZoneConfig: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reload did not finish")
+	}
+}

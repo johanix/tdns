@@ -1447,6 +1447,24 @@ func (conf *Config) ReloadZoneConfigConfirm(ctx context.Context, confirm bool) (
 	return conf.reloadZoneConfig(ctx, confirm)
 }
 
+// detachedFromCaller is a context that ends when the daemon is told to stop and
+// not when ctx does: ctx's values, its deadline and cancellation dropped, and the
+// stop of conf.Internal.APIStopCh (which MainLoop and the API's stop handler end
+// the daemon through) put in their place. The returned function ends it.
+func (conf *Config) detachedFromCaller(ctx context.Context) (context.Context, context.CancelFunc) {
+	dctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	if stop := conf.Internal.APIStopCh; stop != nil {
+		go func() {
+			select {
+			case <-stop:
+				cancel()
+			case <-dctx.Done():
+			}
+		}()
+	}
+	return dctx, cancel
+}
+
 func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string, error) {
 	confMu.Lock()
 	if ctx == nil {
@@ -1568,9 +1586,18 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 	// reads the snapshot for what it applies them with, and until now that was the
 	// previous config's: a zone could be given a policy name of this reload and
 	// the definition of the last (#1000). The zones this reload dropped are gone
-	// from Zones, so none of them is refreshed. If ctx ends first, the zones are
-	// not refreshed, and the rest of the reload goes on.
-	if qerr := conf.queueZoneRefreshers(ctx, refreshers); qerr != nil {
+	// from Zones, so none of them is refreshed.
+	//
+	// The snapshot is out, and a zone whose refresher does not follow keeps the
+	// settings of the config it was last given (a downstream ACL this reload
+	// removed stays in force: a ticker's refresh reuses the zone and does not read
+	// the config). So the caller's context, which the reload-zones API handler
+	// takes from the request and a client that goes away cancels, does not end
+	// the delivery; the daemon stopping does.
+	dctx, stopDelivery := conf.detachedFromCaller(ctx)
+	qerr := conf.queueZoneRefreshers(dctx, refreshers)
+	stopDelivery()
+	if qerr != nil {
 		lgConfig.Error("ReloadZoneConfig: refreshers not queued", "err", qerr)
 		err = fmt.Errorf("ReloadZoneConfig: %w", qerr)
 	}
