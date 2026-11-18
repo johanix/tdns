@@ -62,7 +62,7 @@ func TestZoneStateRecheckReachesTheCache(t *testing.T) {
 	conf := &Config{}
 	conf.Imr.Forward = []ImrForwardConf{fwdConf(".", addr, port)}
 	conf.Imr.Tuning.ZoneStateRecheck = 5 * time.Minute
-	if err := conf.InitImrEngine(context.Background(), true); err != nil {
+	if err := conf.InitImrEngine(context.Background()); err != nil {
 		t.Fatalf("InitImrEngine: %v", err)
 	}
 	if got := cache.ZoneStateRecheck(); got != 5*time.Minute {

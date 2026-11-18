@@ -22,7 +22,7 @@ func TestLargeAlgorithmsDefault(t *testing.T) {
 	ic := Config{}
 	ic.Testing.Priming = &off
 
-	imr, err := NewImr(context.Background(), ic, Options{Quiet: true})
+	imr, err := NewImr(context.Background(), ic, Options{})
 	if err != nil {
 		t.Fatalf("NewImr: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestLargeAlgorithmsDefault(t *testing.T) {
 		t.Error("with no LargeAlgorithms, ED25519 is large")
 	}
 
-	imr, err = NewImr(context.Background(), ic, Options{LargeAlgorithms: map[uint8]bool{}, Quiet: true})
+	imr, err = NewImr(context.Background(), ic, Options{LargeAlgorithms: map[uint8]bool{}})
 	if err != nil {
 		t.Fatalf("NewImr: %v", err)
 	}

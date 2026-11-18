@@ -60,7 +60,7 @@ func TestNSEC3MaxIterationsReachesTheCache(t *testing.T) {
 	conf.Imr.Forward = []ImrForwardConf{fwdConf(".", addr, port)}
 	limit := uint16(20)
 	conf.Imr.Tuning.NSEC3MaxIterations = &limit
-	if err := conf.InitImrEngine(context.Background(), true); err != nil {
+	if err := conf.InitImrEngine(context.Background()); err != nil {
 		t.Fatalf("InitImrEngine: %v", err)
 	}
 	if got := cache.NSEC3MaxIterations(); got != limit {

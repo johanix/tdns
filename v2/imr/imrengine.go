@@ -29,7 +29,6 @@ type Imr struct {
 	LineWidth   int // used to truncate long lines in logging and output (eg. DNSKEYs and RRSIGs)
 	Verbose     bool
 	Debug       bool
-	Quiet       bool        // if true, suppress informational logging (useful for CLI tools)
 	DebugLog    *log.Logger // non-nil when imr debug logging is enabled
 	// RequireDnssecValidation: when true, security-sensitive lookups (TLSA, etc.) require
 	// a secure DNSSEC validation state. Default true; set false in lab environments where
@@ -304,7 +303,7 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 
 	// 1. Create the cache
 	rrcache := cache.NewRRsetCache(cacheLogger(opts.Logger), ic.Verbose, ic.Debug)
-	rrcache.Quiet = opts.Quiet
+	rrcache.DebugLogger = slog.NewLogLogger(lg.Handler(), slog.LevelDebug)
 
 	// The address families in use, before anything adds a server address:
 	// priming seeds the root hints'.
@@ -347,7 +346,6 @@ func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 		LineWidth:               130,
 		Verbose:                 ic.Verbose,
 		Debug:                   ic.Debug,
-		Quiet:                   opts.Quiet,
 		RequireDnssecValidation: requireDnssec,
 		Tuning:                  ic.Tuning,
 		FamilyTracker: cache.NewFamilyTracker(
@@ -1078,7 +1076,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 					return true, nil // Success, stop trying
 				}
 				if rcode == dns.RcodeNameError {
-					imr.lgImr().Info("ImrQuery: received NXDOMAIN, no point in continuing", "qname", qname)
+					imr.lgImr().Debug("ImrQuery: received NXDOMAIN, no point in continuing", "qname", qname)
 					freshDenial(cache.ContextNXDOMAIN)
 					return true, nil // Success (negative response), stop trying
 				}
@@ -1130,7 +1128,7 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			return &resp, nil
 		}
 		if rcode == dns.RcodeNameError {
-			imr.lgImr().Info("ImrQuery: received NXDOMAIN, no point in continuing", "qname", qname)
+			imr.lgImr().Debug("ImrQuery: received NXDOMAIN, no point in continuing", "qname", qname)
 			freshDenial(cache.ContextNXDOMAIN)
 			return &resp, nil
 		}
@@ -1159,7 +1157,7 @@ func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname 
 	authservers map[string]*cache.AuthServer,
 	onResponse func(authservers map[string]*cache.AuthServer) (bool, error)) (bool, error) {
 
-	imr.lgImr().Info("resolveNSAddresses: no server addresses", "zone", bestmatch, "qname", qname)
+	imr.lgImr().Debug("resolveNSAddresses: no server addresses", "zone", bestmatch, "qname", qname)
 	cnsrrset := imr.Cache.Get(bestmatch, dns.TypeNS)
 	if cnsrrset == nil || cnsrrset.RRset == nil {
 		imr.lgImr().Warn("resolveNSAddresses: no nameservers either, giving up", "zone", bestmatch)
@@ -1583,7 +1581,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			continue
 		}
 	} else {
-		imr.lgImr().Info("not in cache and RD bit is not set, refusing", "qname", qname, "qtype", dns.TypeToString[qtype])
+		imr.lgImr().Debug("not in cache and RD bit is not set, refusing", "qname", qname, "qtype", dns.TypeToString[qtype])
 		m.SetRcode(r, dns.RcodeRefused)
 		m.Ns = append(m.Ns, &dns.TXT{
 			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 3600},
@@ -1614,7 +1612,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 			return true, nil
 		}
 		if outcome == chainIncomplete || (rrset != nil && len(rrset.RRs) > 0) {
-			imr.lgImr().Info("ProcessAuthDNSResponse: a CNAME chain was followed but cannot be answered from its links",
+			imr.lgImr().Debug("ProcessAuthDNSResponse: a CNAME chain was followed but cannot be answered from its links",
 				"qname", qname, "qtype", dns.TypeToString[qtype])
 			m.Answer, m.Ns = nil, nil
 			m.SetRcode(r, dns.RcodeServerFailure)

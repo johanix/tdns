@@ -34,7 +34,7 @@ func TestInitImrEngineStartsWithABadForwardZone(t *testing.T) {
 		// trust-ad over plaintext: used to abort the whole daemon.
 		{Zone: "bad.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.9"}}},
 	}
-	if err := conf.InitImrEngine(context.Background(), true); err != nil {
+	if err := conf.InitImrEngine(context.Background()); err != nil {
 		t.Fatalf("InitImrEngine refused to start over one bad forward zone: %v", err)
 	}
 	imr := conf.Internal.ImrEngine

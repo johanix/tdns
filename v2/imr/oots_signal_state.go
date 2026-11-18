@@ -324,9 +324,7 @@ func (imr *Imr) lookupSignalAliasHop(owner, target string) {
 	go func() {
 		resp, err := lookup(imr, target)
 		owners := imr.signalAliasHops.done(target, time.Now())
-		if !imr.Quiet {
-			imr.lgDns().Debug("transport signal: alias hop looked up", "target", target, "owners", owners, "err", err)
-		}
+		imr.lgDns().Debug("transport signal: alias hop looked up", "target", target, "owners", owners, "err", err)
 		if !signalAliasHopFound(resp, err) {
 			return
 		}

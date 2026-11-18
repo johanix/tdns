@@ -151,7 +151,6 @@ func TestOOTSUndecidedRedirectAwaitsLookup(t *testing.T) {
 		{cache.ValidationStateSecure, false},
 	} {
 		imr := newTestImr(t)
-		imr.Quiet = true
 		set := &svcbSignalSet{}
 		for _, rr := range redirectRecords(t) {
 			set.add(rr.(*dns.SVCB))
@@ -170,7 +169,6 @@ func TestOOTSUndecidedRedirectAwaitsLookup(t *testing.T) {
 func endpointTestRig(t *testing.T) (*Imr, *cache.AuthServer, *core.FakeDNSClient, *core.FakeDNSClient, *dns.Msg) {
 	t.Helper()
 	imr := newTestImr(t)
-	imr.Quiet = true
 	q := new(dns.Msg)
 	q.SetQuestion("example.", dns.TypeA)
 	reply := new(dns.Msg)
@@ -441,7 +439,6 @@ func TestPrioritizeServersRedirectBackoff(t *testing.T) {
 func TestProbeStubServersFollowsRedirect(t *testing.T) {
 	const zone = "stubredirect.example."
 	imr := newTestImr(t)
-	imr.Quiet = true
 	q := new(dns.Msg)
 	q.SetQuestion(zone, dns.TypeSOA)
 	reply := new(dns.Msg)

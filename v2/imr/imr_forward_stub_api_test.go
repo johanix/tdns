@@ -200,7 +200,6 @@ func TestStubListStatusProbe(t *testing.T) {
 	}
 	imr := &Imr{
 		Cache: c,
-		Quiet: true,
 		FamilyTracker: cache.NewFamilyTracker(
 			10*time.Minute, 10*time.Minute, 30*time.Second, 5),
 	}

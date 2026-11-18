@@ -31,7 +31,7 @@ func TestImrIsAnnouncedOnlyOncePrimed(t *testing.T) {
 	conf.Internal.ServerErrors = NewServerErrorRegistry()
 	conf.Internal.ImrReady = NewImrReadiness()
 	ic := ImrEngineConf{RootHints: filepath.Join(t.TempDir(), "no-such-hints")}
-	imr, err := NewImr(context.Background(), ic, ImrOptions{Errors: conf.Internal.ServerErrors, Quiet: true})
+	imr, err := NewImr(context.Background(), ic, ImrOptions{Errors: conf.Internal.ServerErrors})
 	if err != nil {
 		t.Fatalf("NewImr sends nothing, and failed: %v", err)
 	}

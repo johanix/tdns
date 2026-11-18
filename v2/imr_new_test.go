@@ -53,7 +53,7 @@ func TestNewImrFromImrEngineConfAlone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	imr, err := NewImr(ctx, ImrEngineConf{Forward: rootForward(addr, port)}, ImrOptions{Quiet: true})
+	imr, err := NewImr(ctx, ImrEngineConf{Forward: rootForward(addr, port)}, ImrOptions{})
 	if err != nil {
 		t.Fatalf("NewImr: %v", err)
 	}

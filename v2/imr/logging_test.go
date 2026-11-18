@@ -10,6 +10,9 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // A resolver built with a logger logs through it, the engine and the cache
@@ -42,5 +45,29 @@ func TestTheResolverLogsThroughItsOwnLogger(t *testing.T) {
 	}
 	if global.Len() != 0 {
 		t.Errorf("the process-wide loggers got:\n%s", global.String())
+	}
+}
+
+// Per-RRset lines are at Debug: the cache's line for an RRset it validates
+// reaches the resolver's logger at Debug, and not at Info.
+func TestTheCachesPerRRsetLinesAreAtDebug(t *testing.T) {
+	restoreProcessWideTuning(t)
+	rr, err := dns.NewRR("www.example. 300 IN A 192.0.2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rrset := &core.RRset{Name: "www.example.", RRtype: dns.TypeA, Class: dns.ClassINET, RRs: []dns.RR{rr}}
+	for _, level := range []slog.Level{slog.LevelInfo, slog.LevelDebug} {
+		var own bytes.Buffer
+		lg := slog.New(slog.NewTextHandler(&own, &slog.HandlerOptions{Level: level}))
+		imr, err := NewImr(context.Background(), Config{}, Options{Logger: lg})
+		if err != nil {
+			t.Fatalf("NewImr: %v", err)
+		}
+		_, _ = imr.Cache.ValidateRRset(context.Background(), rrset, nil)
+		logged := strings.Contains(own.String(), "ValidateRRset: start: owner=")
+		if logged != (level == slog.LevelDebug) {
+			t.Errorf("logger at %v: the per-RRset line logged = %v:\n%s", level, logged, own.String())
+		}
 	}
 }

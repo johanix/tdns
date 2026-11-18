@@ -52,7 +52,6 @@ func TestOOTSAliasAdditionalR5(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			imr := newTestImr(t)
-			imr.Quiet = true
 			set := &svcbSignalSet{}
 			for _, rr := range svcbAt(tc.section, pathOwner) {
 				set.add(rr.(*dns.SVCB))
@@ -89,7 +88,6 @@ func TestOOTSAliasToNothing(t *testing.T) {
 		{mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner), mustRR(t, providerOwner+` 3600 IN SVCB 0 .`)},
 	} {
 		imr := newTestImr(t)
-		imr.Quiet = true
 		set := &svcbSignalSet{}
 		for _, rr := range svcbAt(section, pathOwner) {
 			set.add(rr.(*dns.SVCB))
@@ -125,7 +123,6 @@ func TestOOTSAliasLookupFromCache(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			imr := newTestImr(t)
-			imr.Quiet = true
 			cacheSignal(imr, providerOwner, providerRecords(t), tc.hop)
 			server := cache.NewAuthServer(pathNS)
 			imr.Cache.ServerMap.Set(stateZone, map[string]*cache.AuthServer{cache.ServerKey(pathNS): server})
@@ -154,7 +151,6 @@ func TestOOTSAliasLookupFromCache(t *testing.T) {
 // signal installed.
 func TestOOTSAliasLookupFetchesHop(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
 	alias := []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner)}
 	cacheSignal(imr, pathOwner, alias, cache.ValidationStateSecure)
@@ -200,7 +196,6 @@ func TestOOTSAliasLookupFetchesHop(t *testing.T) {
 // and looks nothing up.
 func TestOOTSAliasLookupLoopAndCap(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	saved := signalAliasHopLookupHook
 	signalAliasHopLookupHook = func(*Imr, string) (*Response, error) {
 		t.Error("a hop was looked up")
@@ -243,7 +238,6 @@ func TestOOTSAliasLookupLoopAndCap(t *testing.T) {
 // brings the owner's RRset after signalAliasHopRetry looks again.
 func TestOOTSAliasDeniedHopNotRefollowed(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	imr.signalAliasHops.retry = 300 * time.Millisecond
 	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
 	alias := []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner)}
@@ -343,7 +337,6 @@ func waitRedirect(t *testing.T, server *cache.AuthServer, what string) {
 // (CodeRabbit on #1056).
 func TestOOTSAliasSharedHopServesEveryOwner(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
 	const ns2 = "ns2.kid.p.test."
 	owner2 := "_dns." + ns2
@@ -387,7 +380,6 @@ func TestOOTSAliasHopThroughACNAME(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			imr := newTestImr(t)
-			imr.Quiet = true
 			imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
 			const elsewhere = "_dns.ns.elsewhere.example."
 			alias := []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner)}
@@ -436,7 +428,6 @@ func TestOOTSAliasHopThroughACNAME(t *testing.T) {
 // #1056).
 func TestOOTSAliasExpiredHopLookedUpAgain(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	imr.signalAliasHops.retry = 50 * time.Millisecond
 	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
 	alias := []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner)}

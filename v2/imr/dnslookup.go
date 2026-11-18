@@ -2468,39 +2468,31 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 		// one are ignored. The signal is the one the alias leads to, read with
 		// the whole path.
 		if set.final != nil && !set.final.alias {
-			if !imr.Quiet {
-				imr.lgDns().Debug("SVCB signal through an AliasMode record", "servername", server.Name,
-					"via", set.via, "state", pathState, "path", pathText)
-			}
+			imr.lgDns().Debug("SVCB signal through an AliasMode record", "servername", server.Name,
+				"via", set.via, "state", pathState, "path", pathText)
 			installed, oots = imr.installSVCBSignal(server, set.final)
 			if set.final.awaitsLookup {
 				set.awaitsLookup = true
 			}
 			return installed, oots
 		}
-		if !imr.Quiet {
-			imr.lgDns().Debug("SVCB signal ignored: the RRset holds an AliasMode record that leads to no signal", "servername", server.Name,
-				"via", set.via, "state", pathState, "path", pathText)
-		}
+		imr.lgDns().Debug("SVCB signal ignored: the RRset holds an AliasMode record that leads to no signal", "servername", server.Name,
+			"via", set.via, "state", pathState, "path", pathText)
 		return false, false
 	}
 	recs := imr.honouredRecords(server, set, set.recs)
 	alpnRecs := imr.honouredRecords(server, set, set.alpn)
 	if len(recs) > 0 {
 		raw, ports, targets := combineOOTSEndpoints(recs)
-		if !imr.Quiet {
-			imr.lgDns().Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports,
-				"targets", targets, "via", set.via, "state", pathState, "path", pathText)
-		}
+		imr.lgDns().Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports,
+			"targets", targets, "via", set.via, "state", pathState, "path", pathText)
 		return installTransportMap(server, raw, ports, targets, set.via, set.pathCopy()), true
 	}
 	if len(alpnRecs) > 0 {
 		_, ports, targets := combineOOTSEndpoints(alpnRecs)
 		order := alpnOrder(alpnRecs)
-		if !imr.Quiet {
-			imr.lgDns().Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports,
-				"targets", targets, "via", set.via, "state", pathState, "path", pathText)
-		}
+		imr.lgDns().Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports,
+			"targets", targets, "via", set.via, "state", pathState, "path", pathText)
 		return installAlpnSignal(server, order, ports, targets, set.via, set.pathCopy()), false
 	}
 	return false, false
@@ -2544,9 +2536,7 @@ func (imr *Imr) parseTSYNCTransportSignal(rr *dns.PrivateRR, serverName string, 
 	}
 
 	val := strings.TrimPrefix(ts.Transports, "transport=")
-	if !imr.Quiet {
-		imr.lgDns().Debug("TSYNC transport value for", "servername", serverName, "value", val)
-	}
+	imr.lgDns().Debug("TSYNC transport value for", "servername", serverName, "value", val)
 	if imr.applyTransportSignalToServer(server, val) {
 		server.PromoteConnMode(cache.ConnModeOpportunistic)
 	}
@@ -2573,7 +2563,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	}
 	// If we don't know the zone name (no NS owner found), don't mutate ServerMap with an empty key
 	if zonename == "" {
-		if imr.Cache.Debug && !imr.Quiet {
+		if imr.Cache.Debug {
 			imr.lgDns().Debug("ParseAdditionalForNSAddrs: empty zonename; skipping glue collection")
 		}
 		return map[string]*cache.AuthServer{}, nil
@@ -2587,7 +2577,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		return serverMap, nil
 	}
 
-	if imr.Debug && !imr.Quiet {
+	if imr.Debug {
 		imr.lgDns().Debug("*** ParseAdditionalForNSAddrs: zonename: \nnsMap", "zonename", zonename, "nnsmap", nsMap)
 	}
 
@@ -2608,7 +2598,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	for name, srv := range serverMap {
 		if expire := srv.GetExpire(); !expire.IsZero() && expire.Before(now) {
 			delete(serverMap, name)
-			if imr.Debug && !imr.Quiet {
+			if imr.Debug {
 				imr.lgDns().Debug("ParseAdditionalForNSAddrs: pruned expired server for zone", "server", name, "zone", zonename)
 			}
 		}
@@ -2636,9 +2626,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 					serverName = baseName
 					isGlueRecord = true
 				} else {
-					if !imr.Quiet {
-						imr.lgDns().Debug("*** IterativeDNSQuery: non-glue record in Additional", "additional", rr.String())
-					}
+					imr.lgDns().Debug("*** IterativeDNSQuery: non-glue record in Additional", "additional", rr.String())
 					continue
 				}
 			} else {
@@ -2665,9 +2653,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 				}
 			} else {
 				// Not OOTS owner, skip transport signals (they should be _dns.*)
-				if !imr.Quiet {
-					imr.lgDns().Debug("*** IterativeDNSQuery: non-glue record in Additional", "additional", rr.String())
-				}
+				imr.lgDns().Debug("*** IterativeDNSQuery: non-glue record in Additional", "additional", rr.String())
 				continue
 			}
 		default:
@@ -2679,10 +2665,8 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		// For a nameserver outside it the record is not used, and its
 		// addresses are looked up as for a referral without glue.
 		if !withinGlueZone(owner, glueZone) {
-			if !imr.Quiet {
-				imr.lgDns().Debug("ParseAdditionalForNSAddrs: record outside the referring zone not used",
-					"rr", rr.String(), "zone", zonename, "referring_zone", referringZone)
-			}
+			imr.lgDns().Debug("ParseAdditionalForNSAddrs: record outside the referring zone not used",
+				"rr", rr.String(), "zone", zonename, "referring_zone", referringZone)
 			continue
 		}
 
@@ -2736,17 +2720,13 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 
 		case *dns.SVCB:
 			if shouldProcessTransportSignal {
-				if !imr.Quiet {
-					imr.lgDns().Debug("Additional contains an SVCB; rr", "rr", rr.String())
-				}
+				imr.lgDns().Debug("Additional contains an SVCB; rr", "rr", rr.String())
 				imr.collectSVCBSignal(pendingSVCB, serverName, rr)
 			}
 
 		case *dns.PrivateRR:
 			if shouldProcessTransportSignal {
-				if !imr.Quiet {
-					imr.lgDns().Debug("Additional contains TSYNC; rr", "rr", rr.String())
-				}
+				imr.lgDns().Debug("Additional contains TSYNC; rr", "rr", rr.String())
 				imr.parseTSYNCTransportSignal(rr, serverName, serverMap, ctx)
 			}
 		}
@@ -2762,7 +2742,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
-		if imr.Debug && !imr.Quiet {
+		if imr.Debug {
 			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, A> (adding glue unless a live answer is cached)\n", nsname)
 		}
 		imr.Cache.SetUnless(nsname, dns.TypeA, &cache.CachedRRset{
@@ -2781,7 +2761,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
-		if imr.Debug && !imr.Quiet {
+		if imr.Debug {
 			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, AAAA> (adding glue unless a live answer is cached)\n", nsname)
 		}
 		imr.Cache.SetUnless(nsname, dns.TypeAAAA, &cache.CachedRRset{
@@ -2795,7 +2775,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}, glueKeeps) // not over a live answer (glueMayReplace)
 	}
 
-	if imr.Debug && !imr.Quiet {
+	if imr.Debug {
 		imr.lgDns().Debug("*** ParseAdditionalForNSAddrs: adding servers for zone to cache",
 			"adding", len(serverMap),
 			"zone", zonename)
@@ -2803,7 +2783,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	// rrcache.Servers.Set(zonename, servers)
 	imr.Cache.AddServers(zonename, serverMap)
 
-	if imr.Debug && !imr.Quiet {
+	if imr.Debug {
 		imr.lgDns().Debug("ParseAdditionalForNSAddrs: serverMap:")
 		for n, as := range serverMap {
 			imr.lgDns().Debug("server: : (addrs: )", "server", n, "s", as.Name, "addrs", as.GetAddrs())
@@ -2953,18 +2933,16 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"qname", qname,
 			"qtype", dns.TypeToString[qtype])
 	}
-	if !imr.Quiet {
-		weights := server.GetTransportWeights()
-		imr.lgDns().Debug("IMR: query",
-			"query", qname,
-			"rrtype", dns.TypeToString[qtype],
-			"name", server.Name,
-			"transport", core.TransportToString[eff],
-			"doq", weights[core.TransportDoQ],
-			"dot", weights[core.TransportDoT],
-			"doh", weights[core.TransportDoH],
-			"do53", weights[core.TransportDo53])
-	}
+	weights := server.GetTransportWeights()
+	imr.lgDns().Debug("IMR: query",
+		"query", qname,
+		"rrtype", dns.TypeToString[qtype],
+		"name", server.Name,
+		"transport", core.TransportToString[eff],
+		"doq", weights[core.TransportDoQ],
+		"dot", weights[core.TransportDoT],
+		"doh", weights[core.TransportDoH],
+		"do53", weights[core.TransportDo53])
 	for _, hook := range getImrOutboundQueryHooks() {
 		if err := hook(ctx, qname, qtype, server.Name, ep.addr, eff); err != nil {
 			return nil, 0, eff, ep, err
@@ -2989,7 +2967,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	// rtt and hides any preceding UDP-timeout cost. The wall-clock value is
 	// what we actually care about for prioritization.
 	start := time.Now()
-	r, _, xres, err := core.ExchangeCtxWithResult(ctx, c, m, dial, imr.Debug && !imr.Quiet)
+	r, _, xres, err := core.ExchangeCtxWithResult(ctx, c, m, dial, imr.Debug)
 	rtt := time.Since(start)
 	// A TC=1 truncation upgrade is a size-driven fact about this exchange (not a
 	// failure); record it regardless of the subsequent TCP outcome.
@@ -3600,7 +3578,7 @@ func zoneHasVerdict(z *cache.Zone) bool {
 // NS RRset, its DS, and the glue and transport signals that may be used
 // (ParseAdditionalForNSAddrs).
 func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, serversZone string, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
-	if imr.Debug && !imr.Quiet {
+	if imr.Debug {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
 	}
 	nsRRset, zonename, nsMap := extractReferral(r, qname, qtype)
@@ -3620,14 +3598,14 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		}
 	}
 
-	if imr.Debug && !imr.Quiet {
+	if imr.Debug {
 		imr.Cache.Logger.Printf("*** handleReferral: zone name is %q, nsRRset: %+v", zonename, nsRRset)
 	}
 	if len(nsRRset.RRs) != 0 {
 		nsRRset.Name = zonename
 		nsRRset.Class = dns.ClassINET
 		nsRRset.RRtype = dns.TypeNS
-		if imr.Debug && !imr.Quiet {
+		if imr.Debug {
 			fmt.Printf("handleReferral: Calling rrcache.Set for <%s, NS>\n", zonename)
 		}
 		// Validate NS RRset if signatures are present
@@ -4577,13 +4555,13 @@ func (imr *Imr) chaseCNAME(ctx context.Context, owner, target string, qtype uint
 			return nil, 0, cache.ContextFailure, core.TransportDo53, ctx.Err()
 		default:
 		}
-		imr.Cache.Logger.Printf("*** IterativeDNSQuery: found CNAME target: %s, chasing.", target)
+		imr.lgDns().Debug("IterativeDNSQuery: found CNAME target, chasing", "target", target)
 		bestmatch, tmpservers, err := imr.Cache.FindClosestKnownZoneFor(target, qtype)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from FindClosestKnownZoneFor: %v", err)
 			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, err
 		}
-		imr.Cache.Logger.Printf("*** IterativeDNSQuery: best match for target %s is %s", target, bestmatch)
+		imr.lgDns().Debug("IterativeDNSQuery: best match for CNAME target", "target", target, "zone", bestmatch)
 		tmprrset, rcode, context, hopTransport, err := imr.IterativeDNSQueryInZone(ctx, target, qtype, tmpservers, bestmatch, force, privacy)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from IterativeDNSQuery: %v", err)

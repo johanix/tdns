@@ -31,10 +31,10 @@ type Options struct {
 	// about them are answered from them, in process (imr_own_zone.go). Nil
 	// is a server that has no zones of its own.
 	OwnZones OwnZones
-	// Quiet suppresses informational logging (useful for CLI tools).
-	Quiet bool
 	// Logger is what the resolver logs through: the engine, the lookups and
-	// the cache, which logs at level Info. Nil is slog.Default().
+	// the cache. Per-query and per-RRset lines are at Debug; Info is for what
+	// happens once or rarely, such as priming and the trust anchors. Nil is
+	// slog.Default().
 	Logger *slog.Logger
 	// LookupLogger, when it is set, takes the lookups' records instead of
 	// Logger. The tdns daemon logs them under a subsystem of their own.

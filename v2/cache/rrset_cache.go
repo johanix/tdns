@@ -91,6 +91,14 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRs
 // NewRRsetCache creates and initializes an RRsetCacheT with per-transport DNS clients and empty concurrent maps.
 //
 // The returned cache has ready-to-use concurrent maps for RRsets, Servers, ServerMap, AuthServerMap, ZoneMap and a reference to the global DnskeyCache, along with per-transport DNS clients (Do53, DoT, DoH, DoQ) using standard ports. The provided logger is used for cache logging (nil is the log package's); the verbose and debug flags enable their respective logging modes.
+// debugLogger is where the per-RRset lines go: DebugLogger, or Logger.
+func (rrcache *RRsetCacheT) debugLogger() *log.Logger {
+	if rrcache.DebugLogger != nil {
+		return rrcache.DebugLogger
+	}
+	return rrcache.Logger
+}
+
 func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	if lg == nil {
 		lg = log.Default()
@@ -991,9 +999,7 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 
 	// If no hints file is configured, use compiled-in hints
 	if hintsfile == "" || strings.TrimSpace(hintsfile) == "" {
-		if !rrcache.Quiet {
-			rrcache.Logger.Printf("PrimeWithHints: no root-hints config provided, using compiled-in root hints")
-		}
+		rrcache.Logger.Printf("PrimeWithHints: no root-hints config provided, using compiled-in root hints")
 		data = []byte(CompiledInRootHints)
 		source = "compiled-in"
 	} else {
@@ -1060,9 +1066,7 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 
 	// Store NS records for root
 	if len(nsRecords) > 0 {
-		if !rrcache.Quiet {
-			rrcache.Logger.Printf("Found %d NS RRs quiet: %v", len(nsRecords), rrcache.Quiet)
-		}
+		rrcache.debugLogger().Printf("Found %d NS RRs", len(nsRecords))
 		rrcache.Set(".", dns.TypeNS, &CachedRRset{
 			Name:    ".",
 			RRtype:  dns.TypeNS,
@@ -1085,9 +1089,7 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 	var servers []string
 
 	// Store glue records for root nameservers
-	if !rrcache.Quiet {
-		rrcache.Logger.Printf("Found %d glue records", len(glueRecords))
-	}
+	rrcache.debugLogger().Printf("Found %d glue records", len(glueRecords))
 	for name, rrs := range glueRecords {
 		if !nsMap[name] {
 			rrcache.Logger.Printf("*** Glue record for a non-root nameserver found: %v. Ignored.", name)

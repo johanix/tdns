@@ -41,7 +41,7 @@ func TestInitImrEngineLoadsTrustAnchorsBeforePriming(t *testing.T) {
 	conf.Imr.RootHints = filepath.Join(t.TempDir(), "no-such-hints")
 	conf.Imr.TrustAnchorDNSKEY = k.String()
 
-	if err := conf.InitImrEngine(context.Background(), true); err != nil {
+	if err := conf.InitImrEngine(context.Background()); err != nil {
 		t.Fatalf("InitImrEngine sends nothing, and failed: %v", err)
 	}
 	select {

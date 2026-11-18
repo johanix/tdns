@@ -138,7 +138,7 @@ func TestPrimingRetryDelay(t *testing.T) {
 // hour, which is what an attempt made while the network comes up gets.
 func TestPrimingForgetsTheRootServersFailures(t *testing.T) {
 	restoreProcessWideTuning(t)
-	imr, err := NewImr(context.Background(), Config{}, Options{Quiet: true})
+	imr, err := NewImr(context.Background(), Config{}, Options{})
 	if err != nil {
 		t.Fatalf("NewImr: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestNewImrSendsNothing(t *testing.T) {
 	restoreProcessWideTuning(t)
 	sink := newTestErrorSink()
 	ic := Config{RootHints: filepath.Join(t.TempDir(), "no-such-hints")}
-	imr, err := NewImr(context.Background(), ic, Options{Errors: sink, Quiet: true})
+	imr, err := NewImr(context.Background(), ic, Options{Errors: sink})
 	if err != nil || imr == nil {
 		t.Fatalf("NewImr with no root hints to read: %v, %v; want an Imr, not yet Ready", imr, err)
 	}
@@ -215,7 +215,7 @@ func TestNewImrSendsNothing(t *testing.T) {
 func TestStoppedBeforeReadyFailsAtOnce(t *testing.T) {
 	restoreProcessWideTuning(t)
 	ic := Config{RootHints: filepath.Join(t.TempDir(), "no-such-hints")}
-	imr, err := NewImr(context.Background(), ic, Options{Quiet: true})
+	imr, err := NewImr(context.Background(), ic, Options{})
 	if err != nil {
 		t.Fatalf("NewImr: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestQueryWaitsForReady(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
-	imr, err := NewImr(context.Background(), Config{Forward: rootForward(addr, port)}, Options{Quiet: true})
+	imr, err := NewImr(context.Background(), Config{Forward: rootForward(addr, port)}, Options{})
 	if err != nil {
 		t.Fatalf("NewImr: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestServeAnswersItsRequests(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
-	imr, err := NewImr(context.Background(), Config{Forward: rootForward(addr, port)}, Options{Quiet: true})
+	imr, err := NewImr(context.Background(), Config{Forward: rootForward(addr, port)}, Options{})
 	if err != nil {
 		t.Fatalf("NewImr: %v", err)
 	}

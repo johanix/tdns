@@ -42,8 +42,7 @@ import (
 // cache, root hints, and validation state are expensive to construct and
 // would diverge between two instances. The guard at the top of this function
 // makes that singleton property hold by construction, regardless of which
-// application initialises the IMR or in what order. First-init wins; the
-// `quiet` parameter on subsequent calls is ignored.
+// application initialises the IMR or in what order. First-init wins.
 //
 // IMPORTANT: tdns-mp depends on this split. The mpagent calls InitImrEngine()
 // synchronously at startup so that conf.Internal.ImrEngine is guaranteed
@@ -55,8 +54,9 @@ import (
 // ctx is NewImr's: it ends the data clock of imrengine.testing. tdns-mp pins a
 // published tdns/v2 and so is unaffected until it bumps the dependency; when it
 // does, its two call sites (tdns-mp/v2/start_agent.go:35, start_auditor.go:41)
-// must pass their already-in-scope ctx: InitImrEngine(ctx, true).
-func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
+// must pass their already-in-scope ctx, and no quiet flag: InitImrEngine(ctx),
+// and ImrEngine(ctx).
+func (conf *Config) InitImrEngine(ctx context.Context) error {
 	// Idempotency guard: IMR is a process singleton. Subsequent calls are
 	// no-ops; first-init wins.
 	if conf.Internal.ImrEngine != nil {
@@ -72,7 +72,6 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 		DNSKEYTransport: conf.Internal.DNSKEYTransport,
 		PendingOwnZone:  func(zone string) bool { return ownZonePending(conf, zone) },
 		OwnZones:        hostedZones{},
-		Quiet:           quiet,
 	}
 	// Not the nil pointer in a non-nil interface: NewImr takes nil for "none".
 	if conf.Internal.ServerErrors != nil {
@@ -110,7 +109,7 @@ func (conf *Config) publishImr(imr *Imr) {
 	conf.Internal.ImrReady.Publish()
 }
 
-func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
+func (conf *Config) ImrEngine(ctx context.Context) error {
 	var recursorch = conf.Internal.RecursorCh
 
 	// IMR is active by default unless explicitly set to false
@@ -139,7 +138,7 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 	// call). That sends nothing, and fails only on the configuration: the
 	// priming, which is what fails at boot, is Start's, and Start retries it.
 	if conf.Internal.ImrEngine == nil {
-		if err := conf.InitImrEngine(ctx, quiet); err != nil {
+		if err := conf.InitImrEngine(ctx); err != nil {
 			conf.Internal.ServerErrors.SetImrPrimingError(fmt.Sprintf("IMR did not start (no DNS listeners): %v", err))
 			return fmt.Errorf("ImrEngine: InitImrEngine failed: %w", err)
 		}
@@ -229,17 +228,15 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 			if _, err := imr.startImrDebugListener(ctx, dbg, conf); err != nil {
 				lgImr.Error("imr debug listener not started", "err", err)
 			}
-		} else if !imr.Quiet {
-			lgImr.Info("embedded resolver: internal only (set listeners.imr-debug-address for a loopback debug window)")
+		} else {
+			lgImr.Debug("embedded resolver: internal only (set listeners.imr-debug-address for a loopback debug window)")
 		}
 		return nil
 	}
 
 	addresses := conf.Listeners.Addresses
 	if len(addresses) == 0 {
-		if !imr.Quiet {
-			lgImr.Info("no addresses provided, will only be an internal recursive resolver")
-		}
+		lgImr.Info("no addresses provided, will only be an internal recursive resolver")
 		return nil
 	}
 

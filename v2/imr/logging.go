@@ -10,8 +10,9 @@ import (
 
 // A resolver logs through the loggers it was built with (Options.Logger,
 // Options.LookupLogger): the engine through lgImr, the lookups through lgDns,
-// and its cache through a log.Logger over Options.Logger. Without them, and in
-// an Imr built by hand, it is slog.Default() at the time of the call.
+// and its cache through log.Loggers over Options.Logger's handler: Logger at
+// Info, and DebugLogger, for its per-RRset lines, at Debug. Without them, and
+// in an Imr built by hand, it is slog.Default() at the time of the call.
 
 // lgImr is the logger the engine logs through.
 func (imr *Imr) lgImr() *slog.Logger {

@@ -309,7 +309,7 @@ func (conf *Config) loadDynamicZonesIfConfigured(ctx context.Context) {
 func (conf *Config) StartImr(ctx context.Context, apirouter *mux.Router) error {
 	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	StartEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
-	StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, false) })
+	StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx) })
 	return nil
 }
 
@@ -321,7 +321,7 @@ func (conf *Config) StartScanner(ctx context.Context, apirouter *mux.Router) err
 	// without this engine the first such query blocks its scan for good.
 	StartEngineNoError(&Globals.App, "AuthQueryEngine", func() { AuthQueryEngine(ctx, conf.Internal.AuthQueryQ) })
 	StartEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
-	StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, false) })
+	StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx) })
 	return nil
 }
 
@@ -342,7 +342,7 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	// In tdns-auth, IMR is active by default unless explicitly set to false
 	imrActive := conf.Imr.Active == nil || *conf.Imr.Active
 	if imrActive {
-		StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, true) })
+		StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx) })
 	} else {
 		lgConfig.Info("NOT starting imrengine (explicitly set to false)", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 	}
@@ -392,7 +392,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	// In tdns-agent, IMR is active by default unless explicitly set to false
 	imrActive := conf.Imr.Active == nil || *conf.Imr.Active
 	if imrActive {
-		StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, true) })
+		StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx) })
 	} else {
 		lgConfig.Info("NOT starting imrengine (explicitly set to false)", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 	}

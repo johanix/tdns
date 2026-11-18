@@ -31,7 +31,7 @@ func TestForwardedRootStartsWithoutRootHints(t *testing.T) {
 	conf.Imr.Forward = rootForward(addr, port)
 	conf.Imr.Stubs = []ImrStubConf{{Zone: "stub.example.",
 		Servers: []cache.AuthServer{{Name: "ns.stub.example.", Addrs: []string{"192.0.2.1"}}}}}
-	if err := conf.InitImrEngine(context.Background(), true); err != nil {
+	if err := conf.InitImrEngine(context.Background()); err != nil {
 		t.Fatalf("InitImrEngine with the root forwarded and no root hints: %v", err)
 	}
 	imr := conf.Internal.ImrEngine

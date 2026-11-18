@@ -840,7 +840,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 		// full client timeout before the second was even tried. The bounded
 		// attemptCtx is what makes that cancellation happen on schedule
 		// rather than only when the caller gives up (#470).
-		r, _, err := core.ExchangeCtx(attemptCtx, up.Client, m, up.Addr, imr.Debug && !imr.Quiet)
+		r, _, err := core.ExchangeCtx(attemptCtx, up.Client, m, up.Addr, imr.Debug)
 		// Truncated by its own slice, with the caller still waiting: the
 		// upstream ran out of TIME, it did not fail. Told from the clock as
 		// well as from Err(): the exchange's read deadline is the slice's end,

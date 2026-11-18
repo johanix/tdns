@@ -464,7 +464,7 @@ func (imr *Imr) chainAt(qname string, qtype uint16, privacy edns0.PrivacyLevel, 
 func (imr *Imr) serveChain(ctx context.Context, w dns.ResponseWriter, r, m *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions, status edns0.PrivacyStatus, grace time.Duration) chainOutcome {
 	links, final, started, err := imr.chainAt(qname, qtype, msgoptions.Privacy, grace)
 	if err != nil {
-		imr.lgImr().Info("ImrResponder: refusing a CNAME chain", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
+		imr.lgImr().Debug("ImrResponder: refusing a CNAME chain", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
 		m.Answer, m.Ns = nil, nil
 		m.SetRcode(r, dns.RcodeServerFailure)
 		w.WriteMsg(m)

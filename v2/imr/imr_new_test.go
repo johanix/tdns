@@ -59,7 +59,7 @@ func TestNewImrReportsToTheErrorSink(t *testing.T) {
 		name string
 		sink ErrorSink
 	}{{"recording sink", rec}, {"registry", reg}, {"nil sink", nil}, {"typed nil registry", (*testErrorSink)(nil)}} {
-		imr, err := NewImr(context.Background(), ic, Options{Errors: tc.sink, Quiet: true})
+		imr, err := NewImr(context.Background(), ic, Options{Errors: tc.sink})
 		if err != nil {
 			t.Fatalf("%s: NewImr: %v", tc.name, err)
 		}
@@ -93,7 +93,7 @@ func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 		TrustAnchorDS: zone + " 3600 IN DS 12345 13 2 " + strings.Repeat("ab", 32),
 	}
 
-	pending := Options{Quiet: true, PendingOwnZone: func(z string) bool { return z == zone }}
+	pending := Options{PendingOwnZone: func(z string) bool { return z == zone }}
 	imr, err := NewImr(context.Background(), ic, pending)
 	if err != nil {
 		t.Fatalf("NewImr: %v", err)
@@ -105,7 +105,7 @@ func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 		t.Errorf("trust-anchor set-up asked the upstream for %s DNSKEY %d time(s) though the zone is pending", zone, n)
 	}
 
-	imr, err = NewImr(context.Background(), ic, Options{Quiet: true})
+	imr, err = NewImr(context.Background(), ic, Options{})
 	if err != nil {
 		t.Fatalf("NewImr: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestNewImrRegistersItsDebugHooksOnce(t *testing.T) {
 	ic.Logging.File = filepath.Join(t.TempDir(), "imr-debug.log")
 	before := hooks()
 	for i := 0; i < 2; i++ {
-		if _, err := NewImr(context.Background(), ic, Options{Quiet: true}); err != nil {
+		if _, err := NewImr(context.Background(), ic, Options{}); err != nil {
 			t.Fatalf("NewImr %d: %v", i+1, err)
 		}
 	}

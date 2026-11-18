@@ -17,7 +17,6 @@ import (
 func newForwardTestImrWith(t *testing.T, ic ImrEngineConf, opts ImrOptions) *Imr {
 	t.Helper()
 	restoreProcessWideTuning(t)
-	opts.Quiet = true
 	imr, err := NewImr(context.Background(), ic, opts)
 	if err != nil {
 		t.Fatalf("NewImr: %v", err)
