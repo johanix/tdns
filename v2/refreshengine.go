@@ -678,11 +678,11 @@ func (zd *ZoneData) reconcileZoneFileWithJournal(verdict ZoneFileVerdict, prev *
 	// that a zone file was edited: such a zone may have no file at all.
 	if handled, derr := zd.discardJournalBehindTransfer(); handled {
 		if derr != nil {
+			// The ConfigWarning for it is raised by the discard itself
+			// (journalDiscardWarning), where a later discard clears it.
 			lg.Error("could not discard persisted deltas recorded against an older copy"+
 				" from the upstream; they are NOT applied",
 				"zone", zd.ZoneName, "error", derr)
-			zd.SetError(ConfigWarning,
-				"persisted zone deltas predate the transferred copy and could not be discarded: %v", derr)
 			reconciled = false
 		}
 		return

@@ -1138,7 +1138,10 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// published: a change journalled after the transfer would otherwise chain
 	// from the tail of that journal, and at the next restart the whole journal
 	// would be discarded for not starting at the serial received, the change
-	// with it.
+	// with it. All of it goes, including a journal that chains from the serial
+	// received, which a forced retransfer at the serial the zone holds leaves:
+	// the replacement does not carry its changes, and a restart would replay
+	// them.
 	//
 	// Not at first load, where the zone has no content of its own yet and the
 	// journal is from an earlier run: that is settled with the first load's
@@ -1153,12 +1156,11 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// has been published (flushStagedReplacementLocked), so nothing is journalled
 	// against the old content in the meantime.
 	if !fromZoneFile && !firstLoad && !new_zd.ixfrDerived && zoneMayOriginateContent(zd) {
-		if _, err := zd.discardJournalBehindTransferLocked(); err != nil {
+		if _, err := zd.discardJournalBehindTransferLocked(true); err != nil {
+			// The zone has its ConfigWarning already, for a discard that failed.
 			lg.Error("could not discard the persisted deltas recorded against the content a full"+
 				" transfer has replaced; a change made from now on is not journalled reliably",
 				"zone", zd.ZoneName, "error", err)
-			zd.setErrorLocked(ConfigWarning,
-				"persisted zone deltas predate the transferred copy and could not be discarded: %v", err)
 		}
 	}
 	switch {

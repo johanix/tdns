@@ -255,6 +255,185 @@ func TestJournalDiscardByTransferNotSavedKeepsJournalAndWarns(t *testing.T) {
 	}
 }
 
+// A forced full transfer at the serial the zone already holds. The journal
+// then chains from the serial received, but the transfer has replaced the
+// content it was recorded against all the same, local changes included. Kept,
+// it would be replayed at the next restart and bring back what the running zone
+// dropped, so the zone would serve one thing while it ran and another after a
+// restart. It goes with the content, and a change made after the transfer chains
+// from the serial received.
+func TestJournalDiscardedByForcedRetransferAtTheSameSerial(t *testing.T) {
+	for _, v := range btVariants {
+		t.Run(v.name, func(t *testing.T) {
+			zd := ixSigningSecondary(t, ixApplyZone)
+			v.setup(t, zd)
+			first, second := btLocalTXT(t, 1), btLocalTXT(t, 2)
+			if err := ovUpdate(t, zd, first); err != nil {
+				t.Fatalf("local change: %v", err)
+			}
+			if j := ovJournal(t, zd); len(j) != 1 || j[0].FromSerial != 7 {
+				t.Fatalf("precondition: the journal does not chain from the serial received, 7:%s",
+					ovJournalString(j))
+			}
+
+			buf := ovCaptureLog(t)
+			ovTransfer(t, zd, ovUpstreamZone(7), true)
+
+			if ovHas(ovServed(t, zd, "local.example.", dns.TypeTXT), first) {
+				t.Fatal("precondition: the full transfer kept the local change")
+			}
+			if j := ovJournal(t, zd); len(j) != 0 {
+				t.Errorf("the journal recorded against the replaced content was kept:%s",
+					ovJournalString(j))
+			}
+			if logged := buf.String(); !strings.Contains(logged, "deltas were discarded") ||
+				!strings.Contains(logged, "local-1") {
+				t.Errorf("the discarded change is not in the log:\n%s", logged)
+			}
+
+			// What a restart rebuilds is what the zone serves now.
+			again := btRestart(t, zd, v.setup, 7)
+			if ovHas(ovServed(t, again, "local.example.", dns.TypeTXT), first) {
+				t.Error("a restart brought back a change the running zone had dropped")
+			}
+
+			// And a change after the transfer survives one.
+			if err := ovUpdate(t, again, second); err != nil {
+				t.Fatalf("local change after the restart: %v", err)
+			}
+			if j := ovJournal(t, again); len(j) != 1 || j[0].FromSerial != 7 {
+				t.Errorf("the change is not journalled from the serial received, 7:%s", ovJournalString(j))
+			}
+			third := btRestart(t, again, v.setup, 7)
+			served := ovServed(t, third, "local.example.", dns.TypeTXT)
+			if !ovHas(served, second) || ovHas(served, first) {
+				t.Errorf("after a restart the zone serves %v, want only the change made after the first", served)
+			}
+		})
+	}
+}
+
+// A discard that could not be done says so in a ConfigWarning, and a later one
+// that is done takes that warning away, and only that one.
+func TestJournalDiscardWarningClearedBySuccessfulDiscard(t *testing.T) {
+	const raised = "could not be discarded"
+	setup := func(t *testing.T) *ZoneData {
+		zd := ixSigningSecondary(t, ixApplyZone)
+		btVariants[0].setup(t, zd)
+		// Nowhere to save the discarded journal: the discard fails.
+		zd.Zonefile = filepath.Join(t.TempDir(), "no-such-directory", "example.zone")
+		if err := ovUpdate(t, zd, btLocalTXT(t, 1)); err != nil {
+			t.Fatalf("local change: %v", err)
+		}
+		ovTransfer(t, zd, ovUpstreamZone(20), true)
+		if w := ovConfigWarning(zd); !strings.Contains(w, raised) {
+			t.Fatalf("precondition: ConfigWarning = %q, want the failed discard", w)
+		}
+		return zd
+	}
+
+	t.Run("a discard that succeeds", func(t *testing.T) {
+		zd := setup(t)
+		zd.Zonefile = filepath.Join(t.TempDir(), "example.zone")
+		ovTransfer(t, zd, ovUpstreamZone(30), true)
+		if j := ovJournal(t, zd); len(j) != 0 {
+			t.Errorf("the journal was kept:%s", ovJournalString(j))
+		}
+		if w := ovConfigWarning(zd); w != "" {
+			t.Errorf("the warning of the failed discard is still there after a successful one: %s", w)
+		}
+	})
+
+	t.Run("a journal that is gone", func(t *testing.T) {
+		zd := setup(t)
+		zd.Zonefile = ""
+		if _, err := zd.JournalPurge(true); err != nil {
+			t.Fatalf("JournalPurge: %v", err)
+		}
+		ovTransfer(t, zd, ovUpstreamZone(30), true)
+		if w := ovConfigWarning(zd); w != "" {
+			t.Errorf("the warning of the failed discard is still there with nothing left to discard: %s", w)
+		}
+	})
+
+	t.Run("another warning is not ours to clear", func(t *testing.T) {
+		zd := setup(t)
+		zd.Zonefile = filepath.Join(t.TempDir(), "example.zone")
+		zd.SetError(ConfigWarning, "something else is wrong with this zone")
+		ovTransfer(t, zd, ovUpstreamZone(30), true)
+		if w := ovConfigWarning(zd); w != "something else is wrong with this zone" {
+			t.Errorf("ConfigWarning = %q, want the one raised by something else left alone", w)
+		}
+	})
+}
+
+// The purge's confirmation gate and its delete go by the same rows. A journal
+// that predates the copy a zone received is purged without --force, since it
+// replays nowhere; a change made after the transfer chains from the serial
+// received, replays, and is not purged without it.
+func TestJournalPurgeGateJudgesTheRowsItDeletes(t *testing.T) {
+	zd := ixSigningSecondary(t, ixApplyZone)
+	btVariants[0].setup(t, zd)
+	ovPlant(t, zd, 3, 5, "local.example.\t3600\tIN\tTXT\t\"planted\"")
+	if _, err := zd.JournalPurge(false); err != nil {
+		t.Fatalf("a journal that predates the copy received is refused without --force: %v", err)
+	}
+	if j := ovJournal(t, zd); len(j) != 0 {
+		t.Errorf("the purge left the journal:%s", ovJournalString(j))
+	}
+
+	// The transfer has discarded what there was, and a change made since
+	// chains from the serial received.
+	if err := ovUpdate(t, zd, btLocalTXT(t, 1)); err != nil {
+		t.Fatalf("local change: %v", err)
+	}
+	_, err := zd.JournalPurge(false)
+	if err == nil || !strings.Contains(err.Error(), "would replay cleanly") {
+		t.Fatalf("a journal that replays was purged without --force: %v", err)
+	}
+	if j := ovJournal(t, zd); len(j) != 1 {
+		t.Errorf("the refused purge changed the journal:%s", ovJournalString(j))
+	}
+	if _, err := zd.JournalPurge(true); err != nil {
+		t.Fatalf("JournalPurge(force): %v", err)
+	}
+	if j := ovJournal(t, zd); len(j) != 0 {
+		t.Errorf("the forced purge left the journal:%s", ovJournalString(j))
+	}
+}
+
+// journalReplayability is the one judgement both `status` and the purge's gate
+// use.
+func TestJournalReplayabilityJudgesTheRowsItIsGiven(t *testing.T) {
+	deltas := func(from, to uint32) []ZoneDeltaRecord {
+		return []ZoneDeltaRecord{{FromSerial: from, ToSerial: to}}
+	}
+	for _, tc := range []struct {
+		name                  string
+		deltas                []ZoneDeltaRecord
+		fileSerial            uint32
+		overlay, fromTransfer bool
+		replayable            bool
+		diagnosisMentions     string
+	}{
+		{"chains from the file", deltas(7, 9), 7, false, false, true, ""},
+		{"does not chain from the file", deltas(3, 9), 7, false, false, false, "do not chain from this zone file"},
+		{"chains from the serial received", deltas(20, 21), 20, false, true, true, ""},
+		{"predates the serial received", deltas(7, 9), 20, false, true, false, "transferred at serial 20"},
+		{"an overlay zone has no chain to check", deltas(3, 9), 20, true, true, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, why := journalReplayability("example.", tc.deltas, tc.fileSerial, tc.overlay, tc.fromTransfer)
+			if ok != tc.replayable {
+				t.Errorf("replayable = %v, want %v (%s)", ok, tc.replayable, why)
+			}
+			if tc.diagnosisMentions == "" && why != "" || !strings.Contains(why, tc.diagnosisMentions) {
+				t.Errorf("diagnosis = %q, want it to mention %q", why, tc.diagnosisMentions)
+			}
+		})
+	}
+}
+
 // An applied IXFR is not a full transfer: its content is the zone as served,
 // local changes included, plus the difference, so the journal is left alone.
 func TestJournalKeptByAppliedIxfr(t *testing.T) {

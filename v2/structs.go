@@ -466,6 +466,12 @@ type ZoneData struct {
 	// at that serial, which is gone once the upstream moves on. Set by
 	// applyRefreshReplacementLocked. Guarded by zd.mu.
 	contentFromTransfer bool
+	// journalDiscardFailed is set while the last discard of a transferred
+	// zone's journal failed and its ConfigWarning (journalDiscardWarning) is
+	// raised; journalDiscardPrevWarning is the ConfigWarning it displaced.
+	// Guarded by zd.mu.
+	journalDiscardFailed      bool
+	journalDiscardPrevWarning map[ErrorType]ZoneError
 	// deltasReplayed records that the persisted deltas have already been
 	// applied on top of the zone file CURRENTLY loaded. Set by
 	// ReplayPersistedDeltas on success and cleared by
