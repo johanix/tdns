@@ -1513,7 +1513,9 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 	prezones := Zones.Keys()
 	lgConfig.Info("ReloadZones: zones prior to reloading", "zones", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
-	zonelist, brokenlist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
+	// The refreshers it produced are queued below, after the snapshot is
+	// published, and not at all if the parse failed.
+	zonelist, brokenlist, refreshers, err := conf.parseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
 		confMu.Unlock()
 		lgConfig.Error("ReloadZoneConfig: error parsing zones", "err", err)
@@ -1561,6 +1563,17 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 	// Publish the new runtime-config snapshot while still under confMu — the
 	// reloaded DnssecPolicies (via reloadDnssecFromFile above) are now final.
 	conf.publishRuntimeConfig()
+
+	// Only now hand the engine the refreshers of the zones this reload kept. It
+	// reads the snapshot for what it applies them with, and until now that was the
+	// previous config's: a zone could be given a policy name of this reload and
+	// the definition of the last (#1000). The zones this reload dropped are gone
+	// from Zones, so none of them is refreshed. If ctx ends first, the zones are
+	// not refreshed, and the rest of the reload goes on.
+	if qerr := conf.queueZoneRefreshers(ctx, refreshers); qerr != nil {
+		lgConfig.Error("ReloadZoneConfig: refreshers not queued", "err", qerr)
+		err = fmt.Errorf("ReloadZoneConfig: %w", qerr)
+	}
 
 	// Snapshot the configured zone names while conf.Zones is still under the
 	// lock. The set is rebuilt from them below, after the unlock, because

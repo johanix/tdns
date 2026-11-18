@@ -1046,36 +1046,6 @@ func TestAFirstLoadThatAdoptsAPersistedCopyBindsAPolicyThatOnlyTheReloadDefines(
 	}
 }
 
-// A policy warning recorded for a zone that a reload has since removed does not
-// put the zone back. The engine holds the zone it was handed; the reload removes
-// it from the registry, and a write to the removed zone's error state went
-// through setErrorLocked and clearErrorLocked, which end by registering the zone
-// they were called on.
-func TestAReloadsRecordOfAZoneThatWasRemovedDoesNotRegisterItAgain(t *testing.T) {
-	kdb := reloadPolicySetup(t)
-	z := loadedWithPolicy(t, kdb, "base")
-	if err := z.zd.BindPolicyWithoutSigning(); err != nil {
-		t.Fatalf("BindPolicyWithoutSigning: %v", err)
-	}
-	zd := z.zd
-	Zones.Remove(ovZone) // the reload removes it; the engine still holds zd
-
-	for _, step := range []struct{ name, what string }{
-		{"gone", "a policy that cannot be bound (a warning)"},
-		{"base", "the bound policy again (the warning cleared)"},
-		{"other", "another policy that exists"},
-		{"", "no policy (the binding removed)"},
-	} {
-		if !zd.recordPolicyOfNonSigningZone(step.name, nil) {
-			t.Fatalf("%s: the zone was not handled", step.what)
-		}
-		if _, registered := Zones.Get(ovZone); registered {
-			t.Errorf("%s: the zone that was removed is registered again", step.what)
-			Zones.Remove(ovZone)
-		}
-	}
-}
-
 // The first load of a zone that a reload reaches while its first load is still
 // pending takes the policy name from that reload's config, not from the first
 // attempt's. A secondary whose transfer fails has no copy to adopt the first
@@ -1170,5 +1140,200 @@ func TestAFirstLoadStillPendingTakesThePolicyOfTheReloadThatReachesIt(t *testing
 	}
 	if len(keytagsOf(servedRRset(t, zd, "example.", dns.TypeSOA).RRSIGs)) == 0 {
 		t.Error("the SOA is unsigned after the first load")
+	}
+}
+
+// A reload that does not parse applies nothing. ParseZones used to queue each
+// zone's refresher as the zone was parsed, so when a later zone failed its
+// validation the earlier zones' refreshers were still queued, and the engine
+// went on to apply the policy of a config that the reload had rejected.
+func TestAReloadThatDoesNotParseQueuesNoRefreshers(t *testing.T) {
+	authApp(t)
+	dir := t.TempDir()
+	zoneFile := func(name string) string {
+		file := filepath.Join(dir, name+"zone")
+		body := name + "\t3600\tIN\tSOA\tns1." + name + " hostmaster." + name + " 1 7200 1800 604800 7200\n" +
+			name + "\t3600\tIN\tNS\tns1." + name + "\n" +
+			"ns1." + name + "\t3600\tIN\tA\t192.0.2.53\n"
+		if err := os.WriteFile(file, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return file
+	}
+	const a, b = "parsefirst.config.example.", "parselater.config.example."
+	t.Cleanup(func() {
+		for _, name := range []string{a, b} {
+			if zd, ok := Zones.Get(name); ok {
+				zd.stopPublisher()
+			}
+			Zones.Remove(name)
+		}
+	})
+	conf := &Config{}
+	conf.Internal.KeyDB = Conf.Internal.KeyDB
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	conf.Internal.DnssecPolicies = map[string]DnssecPolicy{"base": named(kskzsk(dns.ED25519, dns.ED25519), "base")}
+	conf.Zones = []ZoneConf{
+		{Name: a, Type: "primary", Store: "map", Zonefile: zoneFile(a), DnssecPolicy: "base"},
+		// The second does not validate: transfer-src is an address.
+		{Name: b, Type: "primary", Store: "map", Zonefile: zoneFile(b), DnssecPolicy: "base", TransferSrc: []string{"not-an-address"}},
+	}
+
+	if _, _, err := conf.ParseZones(context.Background(), true); err == nil {
+		t.Fatal("ParseZones accepted a zone that does not validate; the test has lost its point")
+	}
+	if n := len(conf.Internal.RefreshZoneCh); n != 0 {
+		t.Errorf("%d refresher(s) queued by a reload that did not parse, want none", n)
+	}
+
+	// The same reload with the zone corrected queues both, after the parse.
+	conf.Zones[1].TransferSrc = nil
+	if _, _, err := conf.ParseZones(context.Background(), true); err != nil {
+		t.Fatalf("ParseZones: %v", err)
+	}
+	if n := len(conf.Internal.RefreshZoneCh); n != 2 {
+		t.Errorf("%d refresher(s) queued by a reload that parsed, want 2", n)
+	}
+}
+
+// A reload hands its refreshers to the engine only after it has published its
+// runtime-config snapshot. The engine reads the snapshot for the policies, the
+// multi-signer config and the refresh limits it applies a refresher with, so a
+// refresher that arrives first is applied against the previous config: a zone
+// that starts signing between a reload's record of its policy and the reload's
+// publish signs under the definition the config no longer has, and persists its
+// name as applied.
+//
+// The refreshers go to a channel the test reads, which is unbuffered: a send
+// completes when the test takes it, so the reload is still in the middle of
+// whatever it does around the send while the test looks. The second zone's
+// refresher is left unsent while the test looks at the first.
+func TestAReloadHandsItsRefreshersToTheEngineOnlyAfterPublishingItsSnapshot(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	const month = 30 * 86400
+	oldBase := named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "base")
+	h := newReloadHarness(t, kdb, "ordering.config.example.")
+	withLivePolicies(t, map[string]DnssecPolicy{"base": oldBase})
+	prevSync := delegationSyncConf.Load()
+	t.Cleanup(func() { delegationSyncConf.Store(prevSync) })
+
+	zd := h.reload(false, "base", map[string]DnssecPolicy{"base": oldBase})
+	if zd.signsItsOwnContent() {
+		t.Fatal("the zone signs; the test has lost its point")
+	}
+
+	const second = "orderingsecond.config.example."
+	secondFile := filepath.Join(t.TempDir(), "zone")
+	body := second + "\t3600\tIN\tSOA\tns1." + second + " hostmaster." + second + " 1 7200 1800 604800 7200\n" +
+		second + "\t3600\tIN\tNS\tns1." + second + "\n" + "ns1." + second + "\t3600\tIN\tA\t192.0.2.53\n"
+	if err := os.WriteFile(secondFile, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if z, ok := Zones.Get(second); ok {
+			z.stopPublisher()
+		}
+		Zones.Remove(second)
+	})
+
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher)
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	// The reload re-parses the policies from this, and "base" is edited in it.
+	edited := DnssecPolicyConf{Algorithm: "ECDSAP256SHA256"}
+	edited.KSK.Lifetime, edited.ZSK.Lifetime, edited.CSK.Lifetime = "forever", "forever", "none"
+	edited.SigValidity = DnssecPolicySigValidityConf{Default: "30d", Dnskey: "30d", Ds: "30d"}
+	conf.Dnssec.Policies = map[string]DnssecPolicyConf{"base": edited}
+	conf.Zones = []ZoneConf{
+		{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: "base"},
+		{Name: second, Type: "primary", Store: "map", Zonefile: secondFile, DnssecPolicy: "base"},
+	}
+	reloaded := make(chan error, 1)
+	go func() {
+		_, err := conf.ReloadZoneConfig(context.Background())
+		reloaded <- err
+	}()
+	// Whatever happens, the reload is let go of, so that it does not hang the
+	// run on a failure above.
+	finish := func() {
+		for {
+			select {
+			case <-conf.Internal.RefreshZoneCh:
+			case err := <-reloaded:
+				if err != nil {
+					t.Errorf("ReloadZoneConfig: %v", err)
+				}
+				return
+			case <-time.After(10 * time.Second):
+				t.Error("the reload did not finish")
+				return
+			}
+		}
+	}
+	defer finish()
+
+	var zr ZoneRefresher
+	select {
+	case zr = <-conf.Internal.RefreshZoneCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reload queued no refresher")
+	}
+	if zr.Name != h.zone {
+		t.Fatalf("the first refresher is for %q, want %q; the test has lost its point", zr.Name, h.zone)
+	}
+
+	// The refresher is in the test's hands, the reload not through yet.
+	if got := ConfLive().DnssecPolicies["base"].KSKAlgorithm; got != dns.ECDSAP256SHA256 {
+		t.Errorf("the reload handed the engine a refresher before it had published its snapshot: policy \"base\" has KSK algorithm %d, the reload's is %d",
+			got, dns.ECDSAP256SHA256)
+	}
+
+	// The engine takes it, and the zone starts signing at once: under the
+	// definition the config has now.
+	h.answered(zr)
+	if err := zd.StartSigning(context.Background(), 0); err != nil {
+		t.Fatalf("StartSigning: %v", err)
+	}
+	sigs := servedRRset(t, zd, h.zone, dns.TypeSOA).RRSIGs
+	if len(sigs) == 0 {
+		t.Error("the SOA is unsigned after the start")
+	}
+	for _, rr := range sigs {
+		if sig, ok := rr.(*dns.RRSIG); ok && sig.Algorithm != dns.ECDSAP256SHA256 {
+			t.Errorf("the SOA is signed with algorithm %d, want the reload's definition's %d", sig.Algorithm, dns.ECDSAP256SHA256)
+		}
+	}
+}
+
+// A policy warning recorded for a zone that a reload has since removed does not
+// put the zone back. The engine holds the zone it was handed; the reload removes
+// it from the registry, and a write to the removed zone's error state went
+// through setErrorLocked and clearErrorLocked, which end by registering the zone
+// they were called on.
+func TestAReloadsRecordOfAZoneThatWasRemovedDoesNotRegisterItAgain(t *testing.T) {
+	kdb := reloadPolicySetup(t)
+	z := loadedWithPolicy(t, kdb, "base")
+	if err := z.zd.BindPolicyWithoutSigning(); err != nil {
+		t.Fatalf("BindPolicyWithoutSigning: %v", err)
+	}
+	zd := z.zd
+	Zones.Remove(ovZone) // the reload removes it; the engine still holds zd
+
+	for _, step := range []struct{ name, what string }{
+		{"gone", "a policy that cannot be bound (a warning)"},
+		{"base", "the bound policy again (the warning cleared)"},
+		{"other", "another policy that exists"},
+		{"", "no policy (the binding removed)"},
+	} {
+		if !zd.recordPolicyOfNonSigningZone(step.name, nil) {
+			t.Fatalf("%s: the zone was not handled", step.what)
+		}
+		if _, registered := Zones.Get(ovZone); registered {
+			t.Errorf("%s: the zone that was removed is registered again", step.what)
+			Zones.Remove(ovZone)
+		}
 	}
 }

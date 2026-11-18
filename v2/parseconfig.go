@@ -937,10 +937,49 @@ func zoneNameKey(name string) string {
 // the Zones map with the error attached so they remain visible to the
 // zone-list API and survive reload-diffs, but are not sent to the
 // RefreshEngine.
+//
+// A reload queues its refreshers only when every zone has parsed: a parse that
+// fails part way queues none, so the engine never applies a config the reload
+// rejected. An initial parse queues each zone's as it is parsed, so that the
+// engine loads zones while the rest are still being parsed, and a failure ends
+// the process.
 func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []string, error) {
+	zones, broken, pending, err := conf.parseZones(ctx, reload)
+	if err != nil {
+		return zones, broken, err
+	}
+	return zones, broken, conf.queueZoneRefreshers(ctx, pending)
+}
+
+// queueZoneRefreshers hands refreshers to the RefreshEngine, in order, giving
+// up when ctx is done.
+func (conf *Config) queueZoneRefreshers(ctx context.Context, zrs []ZoneRefresher) error {
+	for _, zr := range zrs {
+		select {
+		case conf.Internal.RefreshZoneCh <- zr:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// parseZones is ParseZones up to the queueing of a reload's refreshers: it
+// returns them, in zone order, for the caller to queue with queueZoneRefreshers
+// when it chooses. An initial parse (reload false) queues as it goes and returns
+// none.
+//
+// A reload's caller chooses to queue them after it has published the runtime-
+// config snapshot (reloadZoneConfig). The engine reads that snapshot -- the
+// DNSSEC policies, the multi-signer config, the refresh limits -- for what it
+// applies a refresher with, so a refresher that reaches it first is applied
+// against the config the reload replaces, and the zone ends up on a mixture of
+// the two: a policy name of the new config under the definition of the old.
+func (conf *Config) parseZones(ctx context.Context, reload bool) ([]string, []string, []ZoneRefresher, error) {
+	var pending []ZoneRefresher
 	if len(conf.Zones) == 0 {
 		lgConfig.Info("no authoritative zones defined")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	lgConfig.Debug("parsing authoritative zones", "count", len(conf.Zones))
@@ -1362,7 +1401,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// more likely place for a typo, and it silently shadows a correct
 		// global list rather than falling back to it.
 		if err := ValidateTransferSrc(fmt.Sprintf("zone %s: transfer-src", zname), zconf.TransferSrc); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		zd.TransferSrc = zconf.TransferSrc
 
@@ -1653,7 +1692,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		default:
 			if conf.Internal.RefreshZoneCh == nil {
 				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")
-				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
+				return nil, nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
 				Name:             zname,
@@ -1682,20 +1721,20 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				NotifyRetries:       retries,
 				NotifyRetryInterval: retryInterval,
 			}
-			select {
-			case conf.Internal.RefreshZoneCh <- zr:
-			case <-ctx.Done():
-				return all_zones, broken_zones, ctx.Err()
+			if reload {
+				pending = append(pending, zr)
+			} else if qerr := conf.queueZoneRefreshers(ctx, []ZoneRefresher{zr}); qerr != nil {
+				return all_zones, broken_zones, nil, qerr
 			}
 		}
 	}
 
-	lgConfig.Info("zones parsed and refreshing", "count", len(all_zones), "zones", all_zones, "broken", broken_zones, "queued", len(conf.Internal.RefreshZoneCh))
+	lgConfig.Info("zones parsed and refreshing", "count", len(all_zones), "zones", all_zones, "broken", broken_zones, "queued", len(conf.Internal.RefreshZoneCh), "pending", len(pending))
 
 	warnGlobalOutboundSerialSuppressed(conf, serialSuppressedZones)
 
 	lgConfig.Debug("ParseZones complete")
-	return all_zones, broken_zones, nil
+	return all_zones, broken_zones, pending, nil
 }
 
 // warnGlobalOutboundSerialSuppressed tells the operator, once per parse, that a
