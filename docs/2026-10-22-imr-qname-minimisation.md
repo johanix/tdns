@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-22
 **Status:** implemented. Scoped against main at `51eb0988`.
-**Revision:** 7.
+**Revision:** 8.
 
 | Rev | Date | Change |
 |---|---|---|
@@ -13,6 +13,7 @@
 | 5 | 2026-10-22 | A probe that no server completes no longer fails the lookup: the original query goes to the current ancestor and its answer stands, as at the caps. A probe error still books no lameness. The forced downgrade and the timeout cost are stated (§2, §4, §7, §9). |
 | 6 | 2026-10-22 | Implemented. The default stays off because the resolver is also embedded and the tests pin the query stream; qmin is for standalone tdns-imr (§2). `val_ta_sentinel_insecure` stays skipped (§11). |
 | 7 | 2026-11-17 | After a Deckard run with the switch wired. The validation of a child-signed negative answer from the parent's servers could re-query without bound with the option on; it is fixed. A denial is validated on the query's context, so the request cap bounds it, and the resolver's own DNSKEY fetch sends no probe (§3, §6). The Deckard switch is wired (§11). |
+| 8 | 2026-11-18 | After a review round. The public entry points (`imrQuery`, `ImrResponder`) put the counters on the context once per request. A walk their own loop starts again, after a delegation without glue, and the validation of their answer now count against the same name and request (§6, §7). |
 
 RFC 9156 is the specification. It obsoletes RFC 7816. This design follows
 9156 and does not keep the 7816 behaviour (NS as the hiding type, one
@@ -235,9 +236,10 @@ labels over.
 **Per walk.** The round counter belongs to one walk: the lookup of one
 name and type. It travels on the context, keyed by that name and type. The
 referral path's recursion for the same name and type finds its own key and
-continues the count. The labels still hidden below the new ancestor are
-spread over the rounds left (§4 step 1); a referral does not restart the
-plan at one label per round. A name across many cuts, such as one under
+continues the count. So does the walk an entry point starts again after a
+delegation without glue, once it has looked up the server's address. The
+labels still hidden below the new ancestor are spread over the rounds left
+(§4 step 1); a referral does not restart the plan at one label per round. A name across many cuts, such as one under
 `ip6.arpa`, sends at most `qmin-max-iterations` probes in all.
 
 Any other lookup started inside a walk finds a different key and starts
@@ -253,11 +255,12 @@ expose the rest of the client's name early.
 
 **Per request.** RFC 9156 §2.3 requires a limit on the outgoing queries per
 user request, and walks multiply: each link of a CNAME chain and each
-glueless NS name is a walk of its own. The outermost lookup puts a second
-counter on the context, and every walk under it shares that counter.
-Validation shares it too: a denial is validated on the query's context
-values (`handleNegative`), so a walk the validator starts counts against
-the request. It counts probes sent. Once it reaches 3 × `qmin-max-iterations` (30 with the
+glueless NS name is a walk of its own. The public entry point (`imrQuery`
+or `ImrResponder`) puts the counters on the context once per request, and
+every walk under it shares the request's counter. Validation shares it
+too: a denial is validated on the query's context values
+(`handleNegative`), and an answer on the entry point's, so a walk the
+validator starts counts against the request. It counts probes sent. Once it reaches 3 × `qmin-max-iterations` (30 with the
 defaults), no walk in that request sends another probe: a walk in progress
 sends its original query at its current ancestor, and every later walk
 sends its original query without probing, as the IMR does today. Not a
@@ -321,6 +324,10 @@ Walk, option on:
 - A 100-label name under a wildcard stops at 10 rounds and then sends the
   original name.
 - A name across several cuts sends at most 10 probes in all.
+- A delegation without glue sends the referral back to the public entry
+  point, which looks up the server's address and starts the walk again.
+  Through `ImrQuery` and through `ImrResponder`, the name sends at most
+  `qmin-max-iterations` probes in all.
 - Servers handed over by a fallback (the root's servers for a cached cut
   with no server map): labels are counted from the root.
 - No `serversZone` can be found: no probe is sent.

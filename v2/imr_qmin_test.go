@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1238,5 +1239,103 @@ func TestQminChildSignedAnswerAsksTheApexOnce(t *testing.T) {
 	}
 	if onKey > offKey {
 		t.Errorf("the DNSKEY was asked %d times with the option on, %d with it off", onKey, offKey)
+	}
+}
+
+const (
+	qminGluelessZone  = "example."
+	qminGluelessQname = "a1.a2.a3.a4.a5.a6.example."
+	qminGluelessNS    = "ns.other."
+)
+
+// qminGluelessProbes looks qname up as MX through one public entry point and
+// counts the probes sent for it. One server is both the root and the zone
+// example., delegated without glue to an out-of-bailiwick name. Until the
+// root has answered the client's question itself with that referral, every
+// name under example. gets the referral; from then on the server answers as
+// example. So the lookup reaches example. through the entry point's own
+// loop: the referral goes back to it, it looks up the server's address, and
+// it starts the walk again under example.
+func qminGluelessProbes(t *testing.T, entry string) int {
+	t.Helper()
+	g := newQminRig(t)
+	maxIter, one := 2, 0
+	g.imr.Tuning.QminMaxIterations = &maxIter
+	g.imr.Tuning.QminOneLabel = &one
+	var asChild atomic.Bool
+	log := g.listen(t, net.ParseIP("127.0.0.1"), func(w dns.ResponseWriter, r *dns.Msg) {
+		q := r.Question[0]
+		name := dns.CanonicalName(q.Name)
+		switch {
+		case name == qminGluelessNS && q.Qtype == dns.TypeA:
+			_ = w.WriteMsg(answerA(t, r, qminGluelessNS, "127.0.0.1"))
+		case !dns.IsSubDomain(qminGluelessZone, name):
+			_ = w.WriteMsg(nodata(t, r, "."))
+		case !asChild.Load():
+			if name == qminGluelessQname && q.Qtype == dns.TypeMX {
+				asChild.Store(true)
+			}
+			m := new(dns.Msg)
+			m.SetReply(r)
+			m.Ns = []dns.RR{mustRR(t, qminGluelessZone+" 300 IN NS "+qminGluelessNS)}
+			_ = w.WriteMsg(m)
+		case name == qminGluelessQname && q.Qtype == dns.TypeMX:
+			m := new(dns.Msg)
+			m.SetReply(r)
+			m.Authoritative = true
+			m.Answer = []dns.RR{mustRR(t, qminGluelessQname+" 300 IN MX 10 mail.")}
+			_ = w.WriteMsg(m)
+		default:
+			_ = w.WriteMsg(nodata(t, r, qminGluelessZone))
+		}
+	})
+	g.ready(t)
+	g.stub(t, ".", []cache.AuthServer{{Name: "ns.", Addrs: []string{"127.0.0.1"}, Alpn: []string{"do53"}}})
+
+	done := make(chan bool, 1)
+	go func() {
+		switch entry {
+		case "ImrQuery":
+			resp, err := g.imr.ImrQuery(context.Background(), qminGluelessQname, dns.TypeMX, dns.ClassINET, nil)
+			done <- err == nil && resp != nil && resp.RRset != nil && len(resp.RRset.RRs) == 1 &&
+				resp.RRset.RRs[0].Header().Rrtype == dns.TypeMX
+		default:
+			r, opts := verdictQuery{}.msgFor(qminGluelessQname, dns.TypeMX)
+			cw := &captureWriter{}
+			g.imr.ImrResponder(context.Background(), cw, r, qminGluelessQname, dns.TypeMX, opts)
+			done <- cw.got != nil && answerHas(cw.got, qminGluelessQname, dns.TypeMX)
+		}
+	}()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatalf("%s: no MX answer; server saw %v", entry, log.list())
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatalf("%s did not return; server saw %v", entry, log.list())
+	}
+	probes := 0
+	for _, s := range log.list() {
+		name, qtype, _ := strings.Cut(s, " ")
+		if qtype == "A" && dns.IsSubDomain(qminGluelessZone, name) {
+			probes++
+		}
+	}
+	if probes == 0 {
+		t.Fatalf("%s: no probes; server saw %v", entry, log.list())
+	}
+	return probes
+}
+
+// One name sends at most qmin-max-iterations probes for the whole request,
+// also when the walk goes back to the public entry point and starts again:
+// both entry points keep one set of counters for the request.
+func TestQminPublicEntryKeepsOneCountPerRequest(t *testing.T) {
+	for _, entry := range []string{"ImrQuery", "ImrResponder"} {
+		t.Run(entry, func(t *testing.T) {
+			if probes := qminGluelessProbes(t, entry); probes > 2 {
+				t.Errorf("%d probes for %s MX, want at most 2 (qmin-max-iterations)", probes, qminGluelessQname)
+			}
+		})
 	}
 }
