@@ -2076,15 +2076,17 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			// tuple's probabilistic pick, or the policy-preferred transport
 			// under dnskeyBypass.
 			effTransport := transport
+			var dnskeyKey cache.AddrXport
 			if dnskeyBypass {
 				// All tuples for this (server, addr) collapse to the same
 				// preferred transport; skip the ones we've already tried.
+				// The attempt is recorded once made, under the endpoint
+				// tryServer dialed (dnskeyTried).
 				eff := imr.preferredDNSKEYTransport(server)
-				key := imr.dnskeyAttemptKey(ctx, server, zone, addr, eff)
-				if dnskeyAttempted[key] {
+				dnskeyKey = imr.dnskeyAttemptKey(ctx, server, zone, addr, eff)
+				if dnskeyAttempted[dnskeyKey] {
 					continue
 				}
-				dnskeyAttempted[key] = true
 				effTransport = eff
 			}
 
@@ -2097,9 +2099,17 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			}
 
 			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
-			// The endpoint tried, as anotherPassAfter compares it: the one
-			// tryServer dialed, or the server's own address when it did not
-			// get as far as choosing one.
+			if dnskeyBypass {
+				dnskeyAttempted[dnskeyTried(dnskeyKey, ep, effTransport)] = true
+			}
+			// The endpoint tried: the one tryServer dialed, or the server's
+			// own address when it did not get as far as choosing one, kept
+			// under the tuple's transport. anotherPassAfter compares it with
+			// what an attempt for that transport would dial, so the two agree
+			// when the tuple dialed itself. Under the DNSKEY bypass the
+			// endpoint is the preferred transport's, which anotherPassAfter
+			// may not see as tried; dnskeyAttempted, which lasts the whole
+			// query, is what keeps the extra pass from dialing it again.
 			if ep.addr != "" {
 				tried[passTuple{server, ep.addr, ep.keyPort, transport}] = true
 			} else {
@@ -3268,6 +3278,19 @@ func (imr *Imr) dnskeyAttemptKey(ctx context.Context, server *cache.AuthServer, 
 	return cache.AddrXport{Addr: a, Port: p, Transport: t}
 }
 
+// dnskeyTried is the key a DNSKEY bypass attempt is recorded under once it
+// has been made: the endpoint tryServer dialed, at its address and key port
+// over the effective transport eff, or pre, the key the attempt was checked
+// against, when tryServer chose no endpoint. Recording pre for an attempt
+// that dialed elsewhere, as a target whose addresses came in between the two
+// readings, would skip a later attempt at an endpoint never dialed.
+func dnskeyTried(pre cache.AddrXport, ep endpointDial, eff core.Transport) cache.AddrXport {
+	if ep.addr == "" {
+		return pre
+	}
+	return cache.AddrXport{Addr: ep.addr, Port: ep.keyPort, Transport: eff}
+}
+
 func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 	m := authQueryMsg(qname, qtype)
 	if withOOTS {
@@ -3322,6 +3345,15 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	// family tracker stay on the bare IP, as they always were; at a target
 	// they are kept under the target's address and the endpoint's port.
 	ep, eerr := imr.endpointFor(ctx, server, zone, addr, eff)
+	// The endpoint chosen now is checked again: selection checked the one
+	// an attempt would have dialed then, and an attempt earlier in the pass
+	// may since have made it, or the fallback it gives way to, lame or
+	// backed off, as a target that refused does for the next tuple sent to
+	// it. Not under the DNSKEY bypass, which dials the preferred transport
+	// whatever selection said.
+	if eerr == nil && !dnskeyBypass && !endpointUsable(server, zone, ep.addr, ep.keyPort, eff) {
+		eerr = errEndpointUnavailable{server: server.Name, target: cache.JoinDialAddr(ep.addr, ep.port), transport: eff}
+	}
 	if eerr != nil {
 		if Globals.Debug {
 			lgDns.Debug("tryServer: no attempt", "server", server.Name, "addr", addr, "transport", core.TransportToString[eff], "error", eerr)

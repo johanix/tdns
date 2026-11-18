@@ -291,3 +291,54 @@ func TestSelectionStartsTheTargetLookupBehindABackedOffDefault(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 }
+
+// A DNSKEY bypass attempt is recorded under the endpoint tryServer dialed,
+// not the key it was checked against beforehand: the two differ when a
+// target's addresses come in between, and recording the first would skip a
+// later attempt at an endpoint never dialed. With no endpoint chosen, the
+// key checked is recorded.
+func TestDNSKEYTriedIsTheEndpointDialed(t *testing.T) {
+	pre := cache.AddrXport{Addr: epLameNSAddr, Port: 0, Transport: core.TransportDoT}
+	dialed := endpointDial{addr: "192.0.2.53", port: 1234, redirect: true, keyPort: 1234}
+	if got := dnskeyTried(pre, dialed, core.TransportDoT); got != (cache.AddrXport{Addr: "192.0.2.53", Port: 1234, Transport: core.TransportDoT}) {
+		t.Errorf("an attempt that dialed the target is recorded as %+v", got)
+	}
+	if got := dnskeyTried(pre, endpointDial{}, core.TransportDoT); got != pre {
+		t.Errorf("an attempt with no endpoint is recorded as %+v, want %+v", got, pre)
+	}
+}
+
+// tryServer checks the endpoint it ends up with. udp went to a target that
+// has since refused, so the attempt gives way to the nameserver's own
+// address on port 53; at an address whose port 53 is backed off it makes no
+// dial, and at one whose port 53 is usable it dials there.
+func TestTryServerRechecksTheFinalEndpoint(t *testing.T) {
+	imr, server, zone, _ := epLameZoneImr(t)
+	server.AddAddr("192.0.2.2")
+	redirectTo(server, map[string]uint8{"udp": 100}, core.TransportDo53, 5353)
+	imr.endpointAddrs.set(epLameTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
+	q := new(dns.Msg)
+	q.SetQuestion("www."+epLameZone, dns.TypeA)
+	reply := new(dns.Msg)
+	reply.SetReply(q)
+	do53 := core.NewFakeDNSClient(core.TransportDo53)
+	for _, a := range []string{epLameNSAddr, "192.0.2.2"} {
+		do53.Set("www."+epLameZone, a, core.FakeResponse{Msg: reply})
+	}
+	imr.Cache.DNSClient[core.TransportDo53] = do53
+	zone.RecordZoneEndpointFailureForRcode("192.0.2.53", 5353, core.TransportDo53, dns.RcodeRefused, false)
+	server.RecordEndpointAddrFailure(epLameNSAddr, 0, core.TransportDo53, errors.New("i/o timeout"))
+	ctx := context.Background()
+
+	_, _, _, _, err := imr.tryServer(ctx, server, zone, epLameNSAddr, core.TransportDo53, q, "www."+epLameZone, dns.TypeA, false, cache.ClassNone)
+	if _, ok := err.(errEndpointUnavailable); !ok {
+		t.Errorf("port 53 backed off: err %v, want errEndpointUnavailable", err)
+	}
+	if n := len(do53.Calls()); n != 0 {
+		t.Fatalf("%d dial(s) to an endpoint that is backed off", n)
+	}
+	_, _, _, ep, err := imr.tryServer(ctx, server, zone, "192.0.2.2", core.TransportDo53, q, "www."+epLameZone, dns.TypeA, false, cache.ClassNone)
+	if err != nil || ep.addr != "192.0.2.2" || ep.port != 0 || lastDial(do53) != "192.0.2.2" {
+		t.Errorf("port 53 usable: %+v %v, dialed %q, want 192.0.2.2 on port 53", ep, err, lastDial(do53))
+	}
+}
