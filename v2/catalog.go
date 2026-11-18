@@ -447,6 +447,19 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			}
 		}
 
+		// Normalize them for the zone's role here, while the zone is private
+		// to this goroutine, and not in the refresh engine through the refresh
+		// request below: a request that carries options replaces the zone's
+		// whole map with them, and a store made on the zone between building
+		// the request and the engine taking it (`zone freeze` over the API)
+		// would be undone. Under zd.mu, which applyOptionNormalization needs;
+		// nothing else holds it yet.
+		zd.mu.Lock()
+		normOpts, normSerial := zd.applyOptionNormalization(zd.ZoneType, zd.OptionsSnapshot(), zd.OutboundSoaSerial)
+		zd.setOptionsLocked(normOpts)
+		zd.OutboundSoaSerial = normSerial
+		zd.mu.Unlock()
+
 		// (TSIG for the upstream is now carried by primariesConf[].Key above and
 		// resolved by name from the keys: store at transfer time.)
 
@@ -471,11 +484,12 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 
 		// Trigger initial zone transfer (non-blocking with timeout and context support)
 		lg.Info("CATALOG: triggering initial zone transfer", "zone", zoneName, "upstream", configGroupConfig.Upstream)
+		// No Options: the zone's are settled above, and the engine leaves a
+		// zone's options alone for a request that has none.
 		zr := ZoneRefresher{
 			Name:      zoneName,
 			ZoneType:  Secondary,
 			ZoneStore: zd.ZoneStore,
-			Options:   zd.OptionsSnapshot(),
 		}
 
 		// Attempt non-blocking send with timeout and context cancellation support
