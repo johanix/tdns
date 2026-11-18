@@ -1502,3 +1502,47 @@ func TestARefresherForAZoneRemovedByALaterReloadCreatesNoZone(t *testing.T) {
 		t.Error("the zone a later reload removed is registered again by the refresher of an earlier one")
 	}
 }
+
+// A reload that adds a zone's first policy is recorded for a zone whose content
+// the engine refuses to reload, too. The refusal is for a Primary with changes only
+// memory holds (the delta journal is not recording them); the policy record
+// changes no content, and without it a zone left naming no policy cannot start
+// signing until a reload is accepted or the daemon restarts.
+func TestAReloadTheContentGuardRefusesStillRecordsThePolicyOfAZoneThatDoesNotSign(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "guarded.config.example.")
+	base := named(kskzsk(dns.ED25519, dns.ED25519), "base")
+	pols := map[string]DnssecPolicy{"base": base}
+	withLivePolicies(t, pols)
+
+	zd := h.reload(false, "", pols) // loaded, no policy
+	if n, _, _ := policyState(zd); n != "" {
+		t.Fatalf("the zone records %q; the test has lost its point", n)
+	}
+	// Changes only memory holds: dirty, with no keystore to journal them.
+	zd.SetOption(OptDirty, true)
+	zd.mu.Lock()
+	zd.KeyDB = nil
+	zd.mu.Unlock()
+
+	zr := ZoneRefresher{
+		Name: h.zone, ZoneType: Primary, ZoneStore: MapZone, Zonefile: h.file, ConfigUpdate: true,
+		DnssecPolicy: "base", DnssecPolicies: pols,
+		Wait: true, Response: make(chan RefresherResponse, 1),
+	}
+	h.engineConf.Internal.RefreshZoneCh <- zr
+	var resp RefresherResponse
+	select {
+	case resp = <-zr.Response:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the engine did not answer")
+	}
+
+	if !strings.Contains(resp.Msg, "changes that only memory holds") {
+		t.Errorf("the reload was not refused for its content: %q; the test has lost its point", resp.Msg)
+	}
+	if n, _, _ := policyState(zd); n != "base" {
+		t.Errorf("the zone records %q after a reload that named %q and was refused for its content", n, "base")
+	}
+}

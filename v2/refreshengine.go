@@ -949,6 +949,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has changes that only memory holds"+
 								" (the delta journal is not recording them), reload not possible", zone)
 							lgEngine.Warn("zone has unjournalled modifications, reload not possible", "zone", zone)
+							// The content is what the refusal protects. The policy a
+							// zone that does not sign records changes none of it, and
+							// without the record a reload that gave the zone its first
+							// policy leaves it naming none, so that it cannot start
+							// signing until a reload is accepted or the daemon
+							// restarts (#1000). A zone that signs is not handled by
+							// this call, and its policy waits with its content.
+							if zr.ConfigUpdate {
+								zd.recordPolicyOfNonSigningZone(zr.DnssecPolicy, zr.DnssecPolicies)
+							}
 							if zr.Response != nil {
 								zr.Response <- resp
 							}
