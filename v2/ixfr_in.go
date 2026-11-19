@@ -254,14 +254,57 @@ func ixfrRemovesDelegation(zoneName string, base *zoneSnapshot, after *core.Name
 }
 
 // ixfrScopedPassHolds reports whether the adoption of an IXFR-derived
-// replacement may sign only the owners it touched: the snapshot the delta was
-// built on is signed throughout, and the content being adopted has lost none of
-// its delegation cuts (ixfrRemovesDelegation). Asked at the adoption, after the
-// pre-refresh callbacks have had their say, of the incoming zone's content as it
-// is then.
+// replacement may sign only the owners that changed (ixfrChangedOwners): the
+// snapshot the delta was built on is signed throughout, and the content being
+// adopted has lost none of its delegation cuts (ixfrRemovesDelegation). Asked
+// at the adoption, after the pre-refresh callbacks have had their say, of the
+// incoming zone's content as it is then.
 func ixfrScopedPassHolds(zoneName string, newZd *ZoneData) bool {
 	base := newZd.ixfrBase
 	return base != nil && base.signed && !ixfrRemovesDelegation(zoneName, base, newZd.Data)
+}
+
+// ixfrChangedOwners is the set of owners the adoption of an IXFR-derived
+// replacement must sign again: the ones the delta touched (ixfrTouched), and
+// every other owner of the content being adopted that is not the base's own.
+// An owner is the base's own when the incoming zone holds the very store the
+// base holds, which is how materializeForIxfr leaves every owner the delta did
+// not reach; one the incoming zone holds under another store was added or
+// replaced, by the delta or by a pre-refresh callback that wrote Data directly,
+// and has to be signed whether or not anything recorded it in ixfrTouched.
+// ixfrTouched is a hint to the walk; the content decides.
+//
+// What it does not ask, and why:
+//   - Owners the incoming zone lacks. Nothing is signed at a name that is gone;
+//     the chain is repaired for it by the restitch, which diffs the zone being
+//     published against the one served; and a removed delegation cut is the
+//     other rule's business (ixfrRemovesDelegation).
+//   - A write through a store the incoming zone shares with the base. That
+//     changes the served snapshot in place, which nothing may do (#965); the
+//     draft writes (StageRRset and the rest) copy the owner first, and a
+//     callback that goes around them is outside the contract, and cannot be
+//     seen from here.
+//   - OwnerData.NSEC and the RRSIGs. They are derived: the restitch rewrites the
+//     chain for the names that changed and their neighbours and signs it, and
+//     the forced pass over the owners returned here replaces the RRSIGs of their
+//     RRsets. Nothing outside the signer authors either.
+//
+// Read-only, one pass over the incoming zone's owners, comparing a pointer.
+func ixfrChangedOwners(newZd *ZoneData) map[string]bool {
+	changed := make(map[string]bool, len(newZd.ixfrTouched))
+	for name := range newZd.ixfrTouched {
+		changed[name] = true
+	}
+	base := newZd.ixfrBase
+	if base == nil || newZd.Data == nil {
+		return changed
+	}
+	newZd.Data.IterCb(func(name string, od OwnerData) {
+		if b := base.Data[name]; b == nil || b.RRtypes != od.RRtypes {
+			changed[name] = true
+		}
+	})
+	return changed
 }
 
 // materializeForIxfr copies the published snapshot into a fresh owner map that

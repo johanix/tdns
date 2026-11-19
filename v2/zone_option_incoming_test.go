@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"sort"
 	"strings"
 	"testing"
 
@@ -680,6 +681,131 @@ func TestOrdinaryEditsOfAnAdoptionKeepTheScopedPass(t *testing.T) {
 	assertEveryPublishedRRsetVerifies(t, zd)
 	if !zd.publishedSnapshot().signed {
 		t.Error("the adopted snapshot is signed throughout but not marked so")
+	}
+}
+
+// aOwner is an owner holding one A RRset, as a callback that writes the content
+// directly would build it.
+func aOwner(name string, rrs ...dns.RR) OwnerData {
+	st := NewRRTypeStore()
+	st.Set(dns.TypeA, core.RRset{Name: name, Class: dns.ClassINET, RRtype: dns.TypeA, RRs: rrs})
+	return OwnerData{Name: name, RRtypes: st}
+}
+
+// What the adoption signs is read from the content, with ixfrTouched as a hint:
+// an owner the incoming zone holds under a store other than the base's was added
+// or replaced, and is signed again whether or not anything recorded it. A
+// pre-refresh callback that writes Data directly is the case (the draft writes
+// record themselves). Both owners here are outside ixfrTouched: a new owner, and
+// an existing one replaced by another store that still carries the signature of
+// its old records. The wire delta is an ordinary edit, so the pass stays scoped,
+// and the owner nobody touched is not re-materialised.
+func TestACallbackThatWritesOwnersStraightIntoTheContentHasThemSigned(t *testing.T) {
+	for name, write := range map[string]func(t *testing.T, base *zoneSnapshot, data *core.NameMap[OwnerData]){
+		"a new owner": func(t *testing.T, _ *zoneSnapshot, data *core.NameMap[OwnerData]) {
+			data.Set("zz.example.", aOwner("zz.example.", ixA(t, "zz.example.", "10.1.0.1")))
+		},
+		"an existing owner replaced, carrying its old signature": func(t *testing.T, base *zoneSnapshot, data *core.NameMap[OwnerData]) {
+			old := getOwnerFrom(base, "www.example.")
+			rs := cloneRRset(old.RRtypes.GetOnlyRRSet(dns.TypeA))
+			if len(rs.RRSIGs) == 0 {
+				t.Fatal("precondition: www.example. A carries no signature in the base")
+			}
+			rs.RRs = []dns.RR{ixA(t, "www.example.", "10.9.9.9")} // the old signature stays
+			nod := aOwner("www.example.")
+			nod.RRtypes.Set(dns.TypeA, rs)
+			data.Set("www.example.", nod)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			zd := ixSigningSecondary(t, ixDelegationZone)
+			zd.IncomingSerial, zd.CurrentSerial = 7, 7
+			untouched := getOwnerFrom(zd.publishedSnapshot(), "ns.example.")
+			if untouched == nil {
+				t.Fatal("precondition: ns.example. is not published")
+			}
+			before := untouched.RRtypes
+
+			// The wire delta is an ordinary edit, at a name the callback does not write.
+			incoming := newTransferScratchZone(zd)
+			delta := ixDeltaStream(t, 7, 8, nil, []dns.RR{ixA(t, "two.example.", "10.0.0.40")})
+			if err := zd.applyIxfrToScratch(&incoming, delta); err != nil {
+				t.Fatalf("applyIxfrToScratch refused the delta: %v", err)
+			}
+			write(t, zd.publishedSnapshot(), incoming.Data) // the callback
+			if !ixfrScopedPassHolds("example.", &incoming) {
+				t.Fatal("precondition: the edits are not on the scoped pass")
+			}
+
+			zd.mu.Lock()
+			err := zd.applyRefreshReplacementLocked(&incoming, nil, false, false)
+			zd.mu.Unlock()
+			if err != nil {
+				t.Fatalf("applyRefreshReplacementLocked: %v", err)
+			}
+			assertEveryPublishedRRsetVerifies(t, zd)
+			if after := getOwnerFrom(zd.publishedSnapshot(), "ns.example."); after == nil || after.RRtypes != before {
+				t.Fatal("an owner nobody touched was signed again: the scope grew past what changed")
+			}
+		})
+	}
+}
+
+// ixfrChangedOwners: the touched owners, and every owner of the content that is
+// not the base's own store. Not the owners the content lacks, and not the ones
+// it shares with the base.
+func TestIxfrChangedOwners(t *testing.T) {
+	zd := ixBase(t, ixDelegationZone)
+	base := zd.publishedSnapshot()
+	build := func(t *testing.T, added []dns.RR, edit func(*core.NameMap[OwnerData])) *ZoneData {
+		steps, err := parseIxfrDeltas("example.", ixDeltaStream(t, 7, 8, nil, added), 7)
+		if err != nil {
+			t.Fatalf("parseIxfrDeltas: %v", err)
+		}
+		touched := ixfrTouchedOwners("example.", steps)
+		data, signed := materializeForIxfr(base, touched)
+		if err := applyIxfrSteps("example.", data, signed, steps); err != nil {
+			t.Fatalf("applyIxfrSteps: %v", err)
+		}
+		if edit != nil {
+			edit(data)
+		}
+		return &ZoneData{Data: data, ixfrDerived: true, ixfrTouched: touched, ixfrBase: base}
+	}
+	set := func(m map[string]bool) string {
+		var names []string
+		for n := range m {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		return strings.Join(names, " ")
+	}
+	for _, tc := range []struct {
+		what  string
+		added []dns.RR
+		edit  func(*core.NameMap[OwnerData])
+		want  string
+	}{
+		{"the wire delta alone", []dns.RR{ixA(t, "www.example.", "10.0.0.5")}, nil, "example. www.example."},
+		{"a new owner written straight in", []dns.RR{ixA(t, "www.example.", "10.0.0.5")},
+			func(d *core.NameMap[OwnerData]) {
+				d.Set("zz.example.", aOwner("zz.example.", ixA(t, "zz.example.", "10.1.0.1")))
+			},
+			"example. www.example. zz.example."},
+		{"an owner replaced by another store", []dns.RR{ixA(t, "www.example.", "10.0.0.5")},
+			func(d *core.NameMap[OwnerData]) {
+				d.Set("ns.example.", aOwner("ns.example.", ixA(t, "ns.example.", "10.0.0.9")))
+			},
+			"example. ns.example. www.example."},
+		{"an owner removed", []dns.RR{ixA(t, "www.example.", "10.0.0.5")},
+			func(d *core.NameMap[OwnerData]) { d.Remove("ns.example.") },
+			"example. www.example."},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			if got := set(ixfrChangedOwners(build(t, tc.added, tc.edit))); got != tc.want {
+				t.Fatalf("changed owners = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

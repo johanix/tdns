@@ -385,9 +385,11 @@ type ZoneData struct {
 	ixfrDerived bool
 
 	// ixfrTouched is the owner set that delta reached, carried from the IXFR
-	// apply to applyRefreshReplacementLocked so it can stage wsSignOwners.
-	// Set only alongside ixfrDerived. A pre-refresh write into the draft adds
-	// the owner it writes (ownDraftOwnerLocked).
+	// apply to applyRefreshReplacementLocked as the start of what it stages in
+	// wsSignOwners (ixfrChangedOwners adds every owner of the content that is not
+	// the base's own, so this is a hint and not the truth). Set only alongside
+	// ixfrDerived. A pre-refresh write into the draft adds the owner it writes
+	// (ownDraftOwnerLocked).
 	ixfrTouched map[string]bool
 	// ixfrBase is the snapshot the delta was built on, kept by the IXFR apply
 	// for applyRefreshReplacementLocked (ixfrScopedPassHolds). Never written.

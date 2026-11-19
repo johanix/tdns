@@ -1080,7 +1080,8 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 // verbatim onto re-signed data -- the delete section names RRSIGs we do not
 // hold. What removes it is that the apply no longer works that way: the delta
 // is staged and the publish re-signs exactly the owners it touched
-// (wsSignOwners = new_zd.ixfrTouched, zone_mutation.go), and restitchNsecLocked
+// (wsSignOwners = ixfrChangedOwners, which starts from the touched set and adds
+// whatever else differs from the base, zone_mutation.go), and restitchNsecLocked
 // repairs the chain around those same names -- and further, since it diffs
 // owner content rather than reading the touched set.
 //

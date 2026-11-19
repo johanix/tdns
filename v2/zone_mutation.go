@@ -1412,6 +1412,22 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// into Data); the owner delete of a draft does not even join ixfrTouched,
 	// which is why the rule does not ask the touched set.
 	//
+	// Which owners "the touched owners" are: ixfrChangedOwners, from the content
+	// as well as the hint. The owners the delta touched (ixfrTouched, which the
+	// draft writes of a pre-refresh callback extend), plus every owner of the
+	// content being adopted that is not the base's own store: added, or replaced
+	// by another store, by the delta or by a callback writing Data directly.
+	// Covered: an owner added; an owner replaced; an RRset type added or removed
+	// at an owner (its store is replaced, so the owner is in); the apex (always
+	// touched, for the SOA); a delegation lost (the rule above); a delegation
+	// added (the signing pass strips what it occludes, before it asks the
+	// scope). Left to the signing pass, deliberately: an owner removed (nothing
+	// to sign; the restitch repairs the chain); NSEC and RRSIG (derived, written
+	// by the restitch and the forced pass, authored by nothing else). Out of
+	// contract and not visible from here: a write through a store the incoming
+	// zone shares with the base, which changes the served snapshot in place
+	// (#965); the draft writes copy the owner first.
+	//
 	//   role now      base signed, and   pass                                  signed throughout after
 	//                 no cut lost
 	//   not signing   any                none: the publish cannot sign         no
@@ -1442,13 +1458,17 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// reached and SHARES the rest with the base, and a full pass would stage --
 	// and therefore cloneOwner -- every owner it walked, re-materialising the
 	// whole zone for a two-record change. See wsSignOwners.
+	var changed map[string]bool
+	if new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil {
+		changed = ixfrChangedOwners(new_zd)
+	}
 	switch {
 	case !zd.signsItsOwnContent():
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
-	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil && ixfrScopedPassHolds(zd.ZoneName, new_zd):
-		zd.wsNeedsFullSign, zd.wsSignOwners = false, new_zd.ixfrTouched
-	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil:
-		zd.wsNeedsFullSign, zd.wsSignOwners = true, new_zd.ixfrTouched
+	case changed != nil && ixfrScopedPassHolds(zd.ZoneName, new_zd):
+		zd.wsNeedsFullSign, zd.wsSignOwners = false, changed
+	case changed != nil:
+		zd.wsNeedsFullSign, zd.wsSignOwners = true, changed
 	default:
 		zd.wsNeedsFullSign, zd.wsSignOwners = true, nil
 	}
