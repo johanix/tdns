@@ -320,6 +320,11 @@ type aliasHopTracker struct {
 	waiting map[string]map[string]string // target -> owners waiting (canonical -> as given); present while a lookup is in flight
 	next    map[string]time.Time         // target -> when it may be looked up again
 	retry   time.Duration                // signalAliasHopRetry when zero; tests set it
+	// running counts the lookups in flight, each until the owners that
+	// waited for it have been followed again. A lookup those walks start is
+	// counted before the one that started it ends, so a Wait returns once
+	// the chain of lookups has ended (tests).
+	running sync.WaitGroup
 }
 
 // hopLookup is what became of a call for an alias hop's lookup
@@ -414,7 +419,9 @@ func (imr *Imr) lookupSignalAliasHop(owner, target string) hopLookup {
 	if signalAliasHopLookupHook != nil {
 		lookup = signalAliasHopLookupHook
 	}
+	imr.signalAliasHops.running.Add(1)
 	go func() {
+		defer imr.signalAliasHops.running.Done()
 		ctx, cancel := detachedContext(5 * time.Second)
 		defer cancel()
 		resp, err := lookup(withSignalAliasHopLookup(ctx), imr, target)
@@ -452,8 +459,13 @@ var testHookAliasRefollowRead func(owner string)
 // installed them itself. An answer can also replace it between the read and
 // the install, and install first, so the RRset is read again after the
 // install. If it is no longer the one followed, the one there now is
-// installed again, after this install. Either way the newest answer is what
-// stays installed.
+// installed again, after this install, at most maxSignalRefollows times. An
+// answer that replaces the RRset between the last read and the last install
+// is still overwritten by an older one: that takes more than
+// maxSignalRefollows replacements of one owner's RRset during one refollow,
+// and the older install stays until a later answer for owner installs
+// again. A lock would close that window, but it would be held across the
+// install, which runs honouredRecords.
 func (imr *Imr) refollowAliasOwner(walk aliasWalk, owner string) {
 	if imr.Cache == nil {
 		return

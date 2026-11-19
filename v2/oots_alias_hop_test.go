@@ -47,6 +47,23 @@ func foundProvider(t *testing.T) func(imr *Imr, target string) (*ImrResponse, er
 	}
 }
 
+// waitAliasHopsEnded waits until the alias hop lookups imr runs have ended,
+// each with the walks of the owners that waited for it, and every lookup those
+// walks started.
+func waitAliasHopsEnded(t *testing.T, imr *Imr) {
+	t.Helper()
+	ended := make(chan struct{})
+	go func() {
+		imr.signalAliasHops.running.Wait()
+		close(ended)
+	}()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the alias hop lookups did not end")
+	}
+}
+
 // With use-transport-signals: false the answer to a query for an AliasMode
 // _dns SVCB is cached, but its alias is not followed: nothing is installed
 // through it, and no hop is looked up.
@@ -198,28 +215,7 @@ func TestOOTSAliasChainLookupsStayCapped(t *testing.T) {
 	t.Cleanup(func() { signalAliasHopLookupHook = saved })
 
 	imr.applyTransportRRsetFromAnswer(pathOwner, svcbRRset(pathOwner, alias), cache.ValidationStateSecure)
-	count := func() int {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(looked)
-	}
-	// Settled: no lookup in flight, and none started for a while.
-	deadline := time.Now().Add(5 * time.Second)
-	last, quiet := -1, 0
-	for quiet < 6 {
-		if time.Now().After(deadline) {
-			t.Fatalf("the lookups did not settle: %d so far", count())
-		}
-		time.Sleep(50 * time.Millisecond)
-		imr.signalAliasHops.mu.Lock()
-		inFlight := len(imr.signalAliasHops.waiting)
-		imr.signalAliasHops.mu.Unlock()
-		if n := count(); n == last && inFlight == 0 {
-			quiet++
-		} else {
-			last, quiet = n, 0
-		}
-	}
+	waitAliasHopsEnded(t, imr)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(looked) != maxSignalAliasDepth {
@@ -228,6 +224,30 @@ func TestOOTSAliasChainLookupsStayCapped(t *testing.T) {
 	if rec := server.GetReceivedSignal(); rec != nil {
 		t.Errorf("a path longer than the cap installed a signal: %s", cache.FormatSignalPath(rec.Path))
 	}
+}
+
+// A query that is part of an alias hop's lookup follows a cached alias it
+// applies while it waits for signals through the cache only, as it does the
+// alias in its answer: a hop the cache does not hold is for a walk outside
+// any hop lookup to look up. Any other query looks it up.
+func TestOOTSAliasHopQueryFollowsCachedAliasCacheOnly(t *testing.T) {
+	imr, _, server := aliasHopImr(t)
+	calls := hookAliasHop(t, foundProvider(t))
+	servers := map[string]*cache.AuthServer{cache.ServerKey(pathNS): server}
+	never := func() bool { return false }
+
+	imr.awaitTransportSignalsUntil(withSignalAliasHopLookup(context.Background()), servers, transportQueryReasonNewServer, never)
+	waitAliasHopsEnded(t, imr)
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("a query in a hop's lookup looked up %d hop(s) through a cached alias", n)
+	}
+
+	imr.awaitTransportSignalsUntil(context.Background(), servers, transportQueryReasonNewServer, never)
+	waitAliasHopsEnded(t, imr)
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("a query outside any hop's lookup looked up %d hop(s), want 1", n)
+	}
+	waitRedirect(t, server, "the hop that query looked up")
 }
 
 // The owner's RRset is replaced, and the newer answer installed, while the
@@ -257,7 +277,7 @@ func TestOOTSAliasRefollowYieldsToNewerAnswer(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the owner was not followed again after the hop's lookup")
 	}
-	time.Sleep(200 * time.Millisecond)
+	waitAliasHopsEnded(t, imr)
 	rec := server.GetReceivedSignal()
 	if rec == nil {
 		t.Fatal("nothing installed")
