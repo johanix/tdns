@@ -178,9 +178,26 @@ type DNSClient struct {
 	DNSClientTLS    *dns.Client
 	DisableFallback bool
 	ForceTCP        bool
+	// logger is where the client logs (WithLogger); nil is the log package's.
+	logger *log.Logger
 }
 
 type DNSClientOption func(*DNSClient)
+
+// WithLogger sets the logger the client logs through: the UDP-to-TCP
+// fallbacks and the DoQ failures. Without it, the log package's.
+func WithLogger(lg *log.Logger) DNSClientOption {
+	return func(c *DNSClient) {
+		c.logger = lg
+	}
+}
+
+func (c *DNSClient) log() *log.Logger {
+	if c.logger != nil {
+		return c.logger
+	}
+	return log.Default()
+}
 
 func WithDisableFallback() DNSClientOption {
 	return func(c *DNSClient) {
@@ -396,7 +413,7 @@ func (c *DNSClient) exchangeInner(ctx context.Context, msg *dns.Msg, server stri
 	}
 	addr := dialAddr(server, port)
 	if debug {
-		fmt.Printf("*** Exchange: sending %s message to %s opcode: %s qname: %s rrtype: %s\n",
+		c.log().Printf("*** Exchange: sending %s message to %s opcode: %s qname: %s rrtype: %s",
 			TransportToString[c.Transport], addr,
 			dns.OpcodeToString[msg.Opcode],
 			msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
@@ -405,7 +422,7 @@ func (c *DNSClient) exchangeInner(ctx context.Context, msg *dns.Msg, server stri
 	switch c.Transport {
 	case TransportDo53, TransportDo53TCP:
 		if debug {
-			log.Printf("*** Do53 sending message to %s opcode: %s qname: %s rrtype: %s",
+			c.log().Printf("*** Do53 sending message to %s opcode: %s qname: %s rrtype: %s",
 				addr,
 				dns.OpcodeToString[msg.Opcode],
 				msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
@@ -416,7 +433,7 @@ func (c *DNSClient) exchangeInner(ctx context.Context, msg *dns.Msg, server stri
 		}
 		r, rtt, err := exchangeCancellable(ctx, c.DNSClientUDP, msg, addr)
 		if err == nil && r != nil && r.Truncated && !c.DisableFallback && c.DNSClientTCP != nil {
-			log.Printf("Do53: UDP response from %s truncated (TC=1); retrying over TCP", addr)
+			c.log().Printf("Do53: UDP response from %s truncated (TC=1); retrying over TCP", addr)
 			tr, trtt, terr := exchangeCancellable(ctx, c.DNSClientTCP, msg, addr)
 			return tr, trtt, ExchangeResult{WireTransport: TransportDo53TCP, Truncated: true}, terr
 		}
@@ -427,7 +444,7 @@ func (c *DNSClient) exchangeInner(ctx context.Context, msg *dns.Msg, server stri
 		// (This is NOT a truncation — Truncated stays false.)
 		if err != nil && !c.DisableFallback && c.DNSClientTCP != nil && IsTransientNetErr(err) {
 			if debug {
-				log.Printf("Do53: UDP transient error from %s (%v); retrying over TCP", addr, err)
+				c.log().Printf("Do53: UDP transient error from %s (%v); retrying over TCP", addr, err)
 			}
 			tr, trtt, terr := exchangeCancellable(ctx, c.DNSClientTCP, msg, addr)
 			if terr == nil {
@@ -477,7 +494,7 @@ func (c *DNSClient) exchangeDoH(ctx context.Context, msg *dns.Msg, server string
 	// Create HTTP request
 	url := fmt.Sprintf("https://%s/dns-query", hostPort)
 	if debug {
-		fmt.Printf("*** DoH sending HTTPS POST to %s opcode: %s qname: %s rrtype: %s\n", url, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+		c.log().Printf("*** DoH sending HTTPS POST to %s opcode: %s qname: %s rrtype: %s", url, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(packed))
@@ -533,11 +550,11 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 		if errors.Is(ctx.Err(), context.Canceled) {
 			return
 		}
-		log.Printf(format, args...)
+		c.log().Printf(format, args...)
 	}
 
 	if debug {
-		fmt.Printf("*** DoQ sending message to %s opcode: %s qname: %s rrtype: %s\n", server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
+		c.log().Printf("*** DoQ sending message to %s opcode: %s qname: %s rrtype: %s", server, dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
 	}
 
 	// Connect to the QUIC server
@@ -580,7 +597,7 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	// Pack the DNS message
 	packed, err := msg.Pack()
 	if err != nil {
-		log.Printf("*** DoQ failed to pack DNS message: %v", err)
+		c.log().Printf("*** DoQ failed to pack DNS message: %v", err)
 		return nil, 0, fmt.Errorf("failed to pack DNS message: %v", err)
 	}
 
@@ -618,7 +635,7 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	}
 
 	if debug {
-		fmt.Printf("*** DoQ received response length: %d. Now closing stream\n", respLen)
+		c.log().Printf("*** DoQ received response length: %d. Now closing stream", respLen)
 	}
 
 	// Unpack the response
