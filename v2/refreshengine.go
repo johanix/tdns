@@ -1142,6 +1142,17 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// Lookup MultiSigner from config. DNSSEC policy sync runs
 						// AFTER unlock via syncZoneDnssecPolicyFromConfig (applied
 						// vs intent; replaces applyReloadedPolicyLocked).
+						//
+						// By name, in the live snapshot, which is not what the
+						// policies do: those travel on the refresher
+						// (ZoneRefresher.DnssecPolicies). ParseZones names no
+						// multi-signer on its refreshers, so for a zone of the config
+						// file this block does not run, and the stub merge above and
+						// the creation of a dynamic zone below look up the empty name.
+						// A producer that sets ZoneRefresher.MultiSigner reads the map
+						// of whatever reload published last, which may be a later one
+						// than its own: it has to carry the map as ParseZones carries
+						// the policies.
 						if zr.MultiSigner != "" {
 							if msc, exists := ConfLive().MultiSigner[zr.MultiSigner]; exists {
 								zd.MultiSigner = &msc
