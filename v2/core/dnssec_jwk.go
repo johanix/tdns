@@ -75,6 +75,7 @@ var (
 	ErrJWKUnsupportedGoKey   = errors.New("jwk: unsupported Go key type")
 	ErrJWKSetMalformed       = errors.New("jwk: malformed JWK Set")
 	ErrJWKInvalidPrivateKey  = errors.New("jwk: invalid private key")
+	ErrJWKNotMinimal         = errors.New("jwk: RSA integer member is not the shortest encoding")
 	errJWKInternalMemberKind = errors.New("jwk: internal: unknown member")
 )
 
@@ -123,10 +124,21 @@ var b64url = base64.RawURLEncoding.Strict()
 
 func b64(b []byte) string { return b64url.EncodeToString(b) }
 
-// IsPrivate reports whether the key carries private members.
+// IsPrivate reports whether the key carries the private members of its own
+// key type. A member that belongs to another type (an RSA "p" on an OKP
+// key) does not count: it would send PrivateKey to a constructor that has
+// no key material to build from, and some of those panic.
 func (k *JSONWebKey) IsPrivate() bool {
-	return len(k.D) > 0 || len(k.Priv) > 0 || len(k.P) > 0 || len(k.Q) > 0 ||
-		len(k.DP) > 0 || len(k.DQ) > 0 || len(k.QI) > 0
+	switch k.Kty {
+	case JWKKtyRSA:
+		return len(k.D) > 0 || len(k.P) > 0 || len(k.Q) > 0 ||
+			len(k.DP) > 0 || len(k.DQ) > 0 || len(k.QI) > 0
+	case JWKKtyEC, JWKKtyOKP:
+		return len(k.D) > 0
+	case JWKKtyAKP:
+		return len(k.Priv) > 0
+	}
+	return false
 }
 
 // PublicJWK returns a copy of k without its private members, which is how
@@ -205,6 +217,19 @@ func (k *JSONWebKey) Validate() error {
 	case JWKKtyRSA:
 		if len(k.N) == 0 || len(k.E) == 0 {
 			return fmt.Errorf("%w: RSA key needs \"n\" and \"e\"", ErrJWKMissingMember)
+		}
+		// RFC 7518 section 6.3.1: the shortest octet sequence. "AQAB" and
+		// "AAEAAQ" are both 65537, and the kid hashes the octets, so the
+		// same key would get two ids. Only n and e are held to this (the
+		// kid does not depend on the private members, and other tools pad
+		// those).
+		for _, m := range []struct {
+			name string
+			v    []byte
+		}{{"n", k.N}, {"e", k.E}} {
+			if len(m.v) > 1 && m.v[0] == 0 {
+				return fmt.Errorf("%w: %q has a leading zero octet", ErrJWKNotMinimal, m.name)
+			}
 		}
 		priv := [][]byte{k.D, k.P, k.Q, k.DP, k.DQ, k.QI}
 		n := 0
@@ -335,8 +360,11 @@ func (k *JSONWebKey) wire() jwkWire {
 	}
 }
 
-// MarshalJSON validates k and writes it as a JWK.
-func (k *JSONWebKey) MarshalJSON() ([]byte, error) {
+// MarshalJSON validates k and writes it as a JWK. It has a value receiver
+// so json.Marshal(*k) gets the wire format too; with a pointer receiver
+// encoding/json would write the Go field names (Kty, not kty), which
+// ParseJSONWebKey refuses.
+func (k JSONWebKey) MarshalJSON() ([]byte, error) {
 	if err := k.Validate(); err != nil {
 		return nil, err
 	}
@@ -364,6 +392,11 @@ func (m jwkMembers) bin(name string) ([]byte, error) {
 	s, ok, err := m.str(name)
 	if err != nil || !ok {
 		return nil, err
+	}
+	// encoding/base64 skips CR and LF even in strict mode; a JSON escape
+	// ("\n") can put one into a member that is otherwise canonical.
+	if strings.ContainsAny(s, "\r\n") {
+		return nil, fmt.Errorf("%w: %q contains a line break", ErrJWKBadBase64, name)
 	}
 	b, err := b64url.DecodeString(s)
 	if err != nil {
@@ -449,11 +482,19 @@ type JSONWebKeySet struct {
 	Keys []*JSONWebKey
 }
 
-// MarshalJSON writes the set as {"keys":[...]}.
-func (s *JSONWebKeySet) MarshalJSON() ([]byte, error) {
+// MarshalJSON writes the set as {"keys":[...]}. Value receiver for the same
+// reason as JSONWebKey.MarshalJSON. A nil element is an error: encoding/json
+// would write null without asking the key, and ParseJSONWebKeySet refuses
+// the result.
+func (s JSONWebKeySet) MarshalJSON() ([]byte, error) {
 	keys := s.Keys
 	if keys == nil {
 		keys = []*JSONWebKey{}
+	}
+	for i, k := range keys {
+		if k == nil {
+			return nil, fmt.Errorf("%w: keys[%d] is nil", ErrJWKSetMalformed, i)
+		}
 	}
 	return json.Marshal(struct {
 		Keys []*JSONWebKey `json:"keys"`
@@ -554,7 +595,13 @@ func (k *JSONWebKey) PublicKey() (crypto.PublicKey, error) {
 		if !e.IsInt64() || e.Int64() > 1<<31-1 || e.Int64() < 2 {
 			return nil, fmt.Errorf("%w: RSA exponent out of range", ErrJWKInvalidPublicKey)
 		}
-		return &rsa.PublicKey{N: new(big.Int).SetBytes(k.N), E: int(e.Int64())}, nil
+		n := new(big.Int).SetBytes(k.N)
+		// The stdlib refuses an even modulus when the key is used; say so
+		// here, not at the first signature.
+		if n.Bit(0) == 0 {
+			return nil, fmt.Errorf("%w: RSA modulus is even", ErrJWKInvalidPublicKey)
+		}
+		return &rsa.PublicKey{N: n, E: int(e.Int64())}, nil
 	case JWKKtyEC:
 		return k.ecdsaPublicKey()
 	case JWKKtyOKP:
@@ -691,11 +738,19 @@ func NewJSONWebKeyFromPrivate(priv crypto.PrivateKey) (*JSONWebKey, error) {
 		if err != nil {
 			return nil, err
 		}
+		if p.D == nil || p.Primes[0] == nil || p.Primes[1] == nil {
+			return nil, fmt.Errorf("%w: RSA key lacks D or a prime", ErrJWKInvalidPrivateKey)
+		}
 		pc := p.Precomputed
 		if pc.Dp == nil || pc.Dq == nil || pc.Qinv == nil {
 			c := *p
 			c.Precompute()
 			pc = c.Precomputed
+			// Precompute cannot report an error: for a key whose D does
+			// not fit its primes it returns and leaves these nil.
+			if pc.Dp == nil || pc.Dq == nil || pc.Qinv == nil {
+				return nil, fmt.Errorf("%w: RSA key has no CRT values and they cannot be computed", ErrJWKInvalidPrivateKey)
+			}
 		}
 		k.D, k.P, k.Q = p.D.Bytes(), p.Primes[0].Bytes(), p.Primes[1].Bytes()
 		k.DP, k.DQ, k.QI = pc.Dp.Bytes(), pc.Dq.Bytes(), pc.Qinv.Bytes()
