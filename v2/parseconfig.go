@@ -1817,24 +1817,11 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// Delegation sync setup: DSYNC publication (parent) or
 		// delegation sync monitoring (child), or proxy forwarding for a
 		// DSYNC-unaware primary (agent secondary).
-		if options[OptChildSync] || options[OptParentSync] || options[OptParentSyncProxy] || options[OptChildSyncProxy] {
+		// Zones created at run time get the same through registerZoneSyncSetup.
+		if wantsZoneSyncSetup(options) {
 			capturedOpts := options
 			setupSync := func(zd *ZoneData) {
-				// Skip if the MP HSYNCPARAM callback already set up delegation sync for this zone.
-				if zd.Options[OptParentSync] && !capturedOpts[OptParentSync] {
-					return
-				}
-				if zd.Options[OptChildSync] && !capturedOpts[OptChildSync] {
-					return
-				}
-				delegationSyncQ := conf.Internal.DelegationSyncQ
-				if delegationSyncQ == nil {
-					lgConfig.Error("DelegationSyncQ not available", "zone", zd.ZoneName)
-					return
-				}
-				if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
-					lgConfig.Error("SetupZoneSync failed", "zone", zd.ZoneName, "error", err)
-				}
+				runZoneSyncSetup(zd, capturedOpts, conf.Internal.DelegationSyncQ)
 			}
 			if zdp.FirstZoneLoad {
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, setupSync)

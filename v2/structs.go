@@ -589,6 +589,11 @@ type ZoneData struct {
 	// after executing them. Protected by zd.mu.
 	OnFirstLoad []func(*ZoneData)
 
+	// zoneSyncSetup is the delegation sync setup that a zone created at run
+	// time owes after its first load (registerZoneSyncSetup), or nil. Set once,
+	// while the ZoneData is still private; its done flag is atomic.
+	zoneSyncSetup *owedZoneSyncSetup
+
 	// OnZonePreRefresh callbacks run BEFORE the hard flip in FetchFromFile/FetchFromUpstream.
 	// They receive both old (zd, current, still served) and new (new_zd, incoming, not yet served)
 	// zone data. Used for: analysis (compare old vs new for HSYNC/DNSKEY/delegation changes),
