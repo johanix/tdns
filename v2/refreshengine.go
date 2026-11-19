@@ -1209,28 +1209,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					} else if len(zd.OnFirstLoad) == 0 {
 						zd.OnFirstLoad = append(zd.OnFirstLoad, func(*ZoneData) {})
 					}
-					// Template-driven dynamic zones (dynamic primaries): wire
-					// delegation sync on first load, as ParseZones does for
-					// static zones. Scoped to zr.Template != "" so no
-					// pre-existing dynamic-zone class changes behavior.
-					// SetupZoneSync's parentsync path does an
-					// unbounded send to DelegationSyncQ, and OnFirstLoad
-					// callbacks run inside this engine loop — dispatch async so
-					// a full/stopped consumer cannot stall refresh processing.
-					if zr.Template != "" && (zd.Options[OptChildSync] || zd.Options[OptParentSync]) {
-						delegationSyncQ := conf.Internal.DelegationSyncQ
-						zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
-							if delegationSyncQ == nil {
-								lgEngine.Error("DelegationSyncQ not available", "zone", z.ZoneName)
-								return
-							}
-							go func() {
-								if err := z.SetupZoneSync(delegationSyncQ); err != nil {
-									lgEngine.Error("SetupZoneSync failed", "zone", z.ZoneName, "error", err)
-								}
-							}()
-						})
-					}
+					// Delegation sync on first load, as ParseZones does for a
+					// static zone: for every zone whose options ask for it.
+					// This used to require a template and childsync or
+					// parentsync, so a zone added through the API without a
+					// template, or with parentsync-proxy, lost its setup at
+					// every restart (#1151).
+					zd.registerZoneSyncSetup(conf.Internal.DelegationSyncQ)
 					zd.mu.Unlock()
 
 					// Same entitlement as a config-defined zone: this branch
