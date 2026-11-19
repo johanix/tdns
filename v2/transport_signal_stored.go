@@ -96,30 +96,36 @@ func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 }
 
 // noteSignalStoredOver is noteSignalStored for a store that replaced
-// replaced, a signal of the pass's that was at the owner. Its digest is kept
-// right behind the new one, and the digest of what the zone file holds at
-// the owner behind that (signalOnDiskDigest), so the history never evicts
-// either. The zone file's signal is what a restart loads until the zone is
-// next written. A run of stores with no write in between, one per restart
-// with a configuration that changed each time, or several in one process,
-// would otherwise push it out of the signalStoredKeep places. The next
-// restart would then load a signal of the pass's that the record no longer
-// knows, and take it for the operator's for good (CodeRabbit on #1118 and
-// on #1145).
+// replaced, a signal of the pass's that was staged at the owner. Right
+// behind the new digest it keeps those of the signals of the pass's the zone
+// can still serve or load at the owner, so the history never evicts them:
+// the replaced one, the one the zone serves (signalServedDigest), and the
+// one the zone file holds (signalOnDiskDigest). Each would otherwise be held
+// only by its place in the signalStoredKeep places, and a run of stores
+// would push it out: stores the publish cadence holds back push out the
+// signal still served, and stores with no zone write in between, one per
+// restart with a configuration that changed each time or several in one
+// process, push out the zone file's, which a restart loads until the zone is
+// next written. The pass would then take a signal of its own for the
+// operator's for good, in this process or after the next restart
+// (CodeRabbit on #1118 and on #1145).
 func (zd *ZoneData) noteSignalStoredOver(owner string, rrs, replaced []dns.RR) {
 	owner = core.CanonicalizeName(owner)
 	digest := signalDigest(rrs)
-	digests := []string{digest}
-	if len(replaced) > 0 {
-		digests = append(digests, signalDigest(replaced))
-	}
-	if onDisk := zd.signalOnDiskDigest(owner, replaced); onDisk != "" {
-		digests = append(digests, onDisk)
-	}
 	earlier, readErr := zd.signalStoredDigests(owner)
 	if readErr != nil {
 		lgDns.Warn("noteSignalStored: could not read the earlier digests; the new one is put ahead of what the KeyDB holds",
 			"zone", zd.ZoneName, "owner", owner, "error", readErr)
+	}
+	digests := []string{digest}
+	if len(replaced) > 0 {
+		digests = append(digests, signalDigest(replaced))
+	}
+	if served := zd.signalServedDigest(owner, append(slices.Clone(digests), earlier...)); served != "" {
+		digests = append(digests, served)
+	}
+	if onDisk := zd.signalOnDiskDigest(owner, replaced); onDisk != "" {
+		digests = append(digests, onDisk)
 	}
 	digests = mergeSignalDigests(digests, earlier)
 	if readErr == nil {
@@ -162,12 +168,29 @@ func (zd *ZoneData) noteSignalUnrecorded(owner, digest string) {
 	zd.signalUnrecorded[owner] = mergeSignalDigests([]string{digest}, zd.signalUnrecorded[owner])
 }
 
+// signalServedDigest returns the digest of the SVCB RRset the zone serves
+// at owner (the published snapshot) when known, the digests the record
+// holds for the pass's, has it: the pass's signal served there. "" when the
+// zone serves none there, or serves an RRset the record does not know for
+// the pass's. Caller holds zd.mu, as the pass does.
+func (zd *ZoneData) signalServedDigest(owner string, known []string) string {
+	rrset := getRRsetFrom(zd.publishedSnapshot(), owner, dns.TypeSVCB)
+	if rrset == nil || len(rrset.RRs) == 0 {
+		return ""
+	}
+	if d := signalDigest(rrset.RRs); slices.Contains(known, d) {
+		return d
+	}
+	return ""
+}
+
 // signalOnDiskDigest returns the digest of the pass's signal the zone file
-// holds at owner, "" when it holds none. The first store at the owner in
-// this process sets it from what that store replaced: the zone has not
-// been written since it loaded, so the working set holds what the file
-// gave, or nothing of the pass's. noteZoneFileWritten moves it when the
-// zone is written.
+// holds at owner, "" when it holds none. A load or a refresh that adopts
+// the zone file sets it (noteZoneFileAdopted), and a zone write moves it
+// (noteZoneFileWritten). Failing both, the first store at the owner in this
+// process sets it from what that store replaced: the zone has not been
+// written since it loaded, so the working set holds what the file gave, or
+// nothing of the pass's.
 func (zd *ZoneData) signalOnDiskDigest(owner string, replaced []dns.RR) string {
 	zd.signalStoredMu.Lock()
 	defer zd.signalStoredMu.Unlock()
@@ -207,6 +230,49 @@ func (zd *ZoneData) noteZoneFileWritten(snap *zoneSnapshot) {
 		if slices.Contains(zd.signalStored[owner], d) || slices.Contains(zd.signalUnrecorded[owner], d) {
 			zd.signalOnDisk[owner] = d
 		}
+	}
+}
+
+// noteZoneFileAdopted sets what signalOnDiskDigest returns, for each owner
+// the record holds, to what the zone file a load or a refresh has just
+// adopted holds there (file, the zone data parsed from it, before the
+// refresh adds anything), by noteZoneFileWritten's rule: "" when the file
+// holds no SVCB RRset there, its digest when the record knows that for the
+// pass's, and as it was when the record does not, or cannot be read. When
+// the KeyDB's list of owners cannot be read, only the owners known in this
+// process follow the file. A reload that adopts a file holding a signal of
+// the pass's other than the one last written left that signal held only by
+// its place in the record, and a run of stores pushed it out while the file
+// still held it (CodeRabbit on #1145). Caller holds zd.mu, so that no store
+// runs in between.
+func (zd *ZoneData) noteZoneFileAdopted(file *core.NameMap[OwnerData]) {
+	if file == nil {
+		return
+	}
+	owners, err := zd.signalStoredOwners()
+	if err != nil {
+		lgDns.Warn("noteZoneFileAdopted: could not list the owners the KeyDB's record holds; only those known in this process follow the zone file",
+			"zone", zd.ZoneName, "error", err)
+	}
+	for _, owner := range owners {
+		d := ""
+		if od, ok := file.Get(owner); ok {
+			if rrset, ok := od.RRtypes.Get(dns.TypeSVCB); ok && len(rrset.RRs) > 0 {
+				d = signalDigest(rrset.RRs)
+			}
+		}
+		if d != "" {
+			known, err := zd.signalStoredDigests(owner)
+			if err != nil || !slices.Contains(known, d) {
+				continue
+			}
+		}
+		zd.signalStoredMu.Lock()
+		if zd.signalOnDisk == nil {
+			zd.signalOnDisk = map[string]string{}
+		}
+		zd.signalOnDisk[owner] = d
+		zd.signalStoredMu.Unlock()
 	}
 }
 

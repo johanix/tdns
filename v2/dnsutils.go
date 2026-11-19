@@ -1154,6 +1154,10 @@ func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error)
 		return fname, 0, fmt.Errorf("renaming %s to %s: %v", tmpname, fname, err)
 	}
 	committed = true
+	// The file holds what was written from here on, whether or not the sync
+	// below succeeds: the record of what the transport signal pass stored
+	// keeps the signal now in it (noteZoneFileWritten).
+	zd.noteZoneFileWritten(snap)
 
 	// Persist the rename itself, and FAIL if that cannot be done.
 	//
@@ -1174,7 +1178,6 @@ func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error)
 	if cerr := d.Close(); cerr != nil {
 		return fname, 0, fmt.Errorf("closing %s after syncing: %v", dir, cerr)
 	}
-	zd.noteZoneFileWritten(snap)
 
 	return fname, wrote, nil
 }

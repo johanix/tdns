@@ -3,12 +3,15 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 )
 
 // Stored-signal ownership and withdrawal (CodeRabbit on #1118, issue
@@ -394,5 +397,122 @@ func TestAZoneWriteDoesNotKeepTheOperatorsSignal(t *testing.T) {
 	}
 	if own, err := zd.signalStoredByPass(owner, op); err != nil || own {
 		t.Fatalf("the operator's SVCB RRset reads as the pass's (%v, %v)", own, err)
+	}
+}
+
+// Stores the publish cadence holds back keep the signal the zone serves in
+// the record. Each replaces the one staged before it, not the served one,
+// which would otherwise drop out of the record at the seventh while the
+// zone still serves it; the pass would then take it for the operator's
+// (CodeRabbit on #1145).
+func TestHeldBackStoresKeepTheSignalServed(t *testing.T) {
+	const z = "heldback.sig.example."
+	const owner = "_dns.ns1." + z
+	zd, conf := signalTestZone(t, z, z+strings.ReplaceAll(readErrZoneBody, "%[1]s", z), "127.0.0.1:53")
+	zd.KeyDB = newTestKeyDB(t)
+	conf.Service.Identities = []string{"ns1." + z}
+	storeSignal(t, zd, conf, owner, "dot:1")
+	served := svcbRecords(zd, owner)
+
+	// An unrelated change, held back by the cadence, holds back the stores
+	// after it too.
+	t.Cleanup(zd.stopPublisher)
+	zd.mu.Lock()
+	zd.publishCadence = time.Hour
+	zd.lastPublish = time.Now()
+	zd.stageRRsetLocked("note."+z, core.RRset{Name: "note." + z, Class: dns.ClassINET, RRtype: dns.TypeTXT,
+		RRs: mustRRs(t, "note."+z+`	3600	IN	TXT	"an operator's change"`)})
+	zd.mu.Unlock()
+	for i := 2; i <= signalStoredKeep+2; i++ {
+		conf.Service.Transport.Signal = fmt.Sprintf("dot:%d", i)
+		if err := zd.CreateTransportSignalRRs(conf); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := svcbRecords(zd, owner); !sameRecords(got, served) {
+		t.Fatalf("a store was published, and the test needs them held back: %v", got)
+	}
+	if own, err := zd.signalStoredByPass(owner, served); err != nil || !own {
+		t.Fatalf("after the held-back stores the signal the zone serves is not the pass's (%v, %v)", own, err)
+	}
+	if got, ok, err := zd.KeyDB.GetTransportSignalStored(z, owner); err != nil || !ok || !slices.Contains(got, signalDigest(served)) {
+		t.Fatalf("the KeyDB's record does not hold the signal the zone serves: %v (present %v, error %v)", got, ok, err)
+	}
+}
+
+// A reload that adopts a zone file holding a signal of the pass's other
+// than the one last written moves what the record keeps for the zone file
+// to it: stores after the reload keep it, and a restart from that file
+// knows it for the pass's (CodeRabbit on #1145).
+func TestStoresAfterAReloadKeepTheSignalTheFileHolds(t *testing.T) {
+	const owner = "_dns.ns1.example."
+	const head = `example.	3600	IN	SOA	ns1.example. hostmaster.example. %d 7200 1800 604800 7200
+`
+	const body = `example.	3600	IN	NS	ns1.example.
+ns1.example.	3600	IN	A	127.0.0.1
+`
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, fmt.Sprintf(head, 1)+body)
+	zd.Options[OptAddTransportSignal] = true
+	prevSVCB, prevListeners := Globals.ServerSVCB, Conf.Listeners.Addresses
+	Globals.ServerSVCB = &dns.SVCB{Hdr: dns.RR_Header{Name: "_dns.server.example.", Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 300}, Priority: 1, Target: "."}
+	Conf.Listeners.Addresses = []string{"127.0.0.1:53"}
+	t.Cleanup(func() { Globals.ServerSVCB, Conf.Listeners.Addresses = prevSVCB, prevListeners })
+	conf := &Config{}
+	conf.Service.Transport.Type = "svcb"
+	conf.Service.Identities = []string{"ns1.example."}
+	conf.Listeners.Addresses = Conf.Listeners.Addresses
+
+	storeSignal(t, zd, conf, owner, "dot:1")
+	if _, err := zd.WriteDynamicZoneFile(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	// The zone file the zone loads from comes to hold a later signal of the
+	// pass's, as a copy restored from a backup would, and a reload adopts it.
+	storeSignal(t, zd, conf, owner, "dot:2")
+	adopted := body + signalLines(t, zd, owner)
+	operatorEdit(t, zd, fmt.Sprintf(head, 2)+adopted)
+	if _, err := zd.FetchFromFile(context.Background(), false, false, true, nil); err != nil {
+		t.Fatalf("FetchFromFile: %v", err)
+	}
+	for i := 3; i <= signalStoredKeep+3; i++ {
+		storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
+	}
+	restartKnowsItsSignal(t, "example.", kdb, adopted, "dot:99")
+}
+
+// A zone write whose rename landed has put the signal in the zone file even
+// when the directory sync after it fails: what the record keeps for the
+// zone file moves to it all the same, and the write still reports the
+// failure (CodeRabbit on #1145).
+func TestAZoneWriteWhoseDirectorySyncFailsStillMovesTheFilesSignal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a directory it may not read")
+	}
+	const z = "dirsync.sig.example."
+	const owner = "_dns.ns1." + z
+	zd, conf := signalTestZone(t, z, z+strings.ReplaceAll(readErrZoneBody, "%[1]s", z), "127.0.0.1:53")
+	zd.KeyDB = newTestKeyDB(t)
+	conf.Service.Identities = []string{"ns1." + z}
+	storeSignal(t, zd, conf, owner, "dot:1")
+
+	// A directory the server may write to but not read: the rename lands,
+	// and opening the directory to sync it fails.
+	dir := t.TempDir()
+	prevDir := viper.GetString("external.filedir")
+	viper.Set("external.filedir", dir)
+	t.Cleanup(func() { viper.Set("external.filedir", prevDir) })
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if _, _, err := zd.WriteFileWithSerial("dirsync.zone"); err == nil || !strings.Contains(err.Error(), "to sync the rename") {
+		t.Fatalf("the write whose directory sync failed returned %v", err)
+	}
+	zd.signalStoredMu.Lock()
+	kept := zd.signalOnDisk[owner]
+	zd.signalStoredMu.Unlock()
+	if want := signalDigest(svcbRecords(zd, owner)); kept != want {
+		t.Fatalf("after the rename the record keeps %q for the zone file, want the signal written (%q)", kept, want)
 	}
 }

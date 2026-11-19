@@ -947,6 +947,10 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 		lg.Error("could not apply the refreshed zone; nothing was published", "zone", zd.ZoneName, "err", err)
 		return false, err
 	}
+	// What the file holds at the transport signal's owners, for the record
+	// of what the pass stored there: from the zone data parsed from the
+	// file, before the refresh added anything to it.
+	zd.noteZoneFileAdopted(new_zd.Data)
 	if firstLoad {
 		zd.postRefreshOwed = true
 	}
