@@ -681,6 +681,9 @@ func (s *jwkVectorState) checkPrivateRSA() error {
 	}
 	elen, off := int(raw[0]), 1
 	if elen == 0 {
+		if len(raw) < 3 {
+			return fmt.Errorf("draft DNSKEY public key is short")
+		}
 		elen, off = int(raw[1])<<8|int(raw[2]), 3
 	}
 	if off+elen >= len(raw) {
