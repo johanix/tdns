@@ -467,6 +467,8 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		// catalog member is a transfer-provisioned zone like any other and is
 		// entitled to the standard hooks (#500).
 		zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+		// The group's options may ask for delegation sync (#1151).
+		zd.registerZoneSyncSetup(conf.Internal.DelegationSyncQ)
 
 		// Add to Zones map
 		Zones.Set(zoneName, zd)

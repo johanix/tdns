@@ -419,30 +419,38 @@ var imrShowOptionsCmd = &cobra.Command{
 	},
 }
 
-// renderSignal formats the received transport percentage signal. If none, returns "do53=100".
+// noSignalRendered is how a server without a signal is shown: the absence
+// defaults, cleartext at 100 over UDP and TCP.
+const noSignalRendered = "udp=100,tcp=100"
+
+// renderSignal formats the received transport percentage signal. If none,
+// returns noSignalRendered.
 func renderSignal(server *cache.AuthServer) string {
 	return renderSignalFromWeights(server.GetTransportWeights())
 }
 
-// renderSignalFromWeights formats advertised OOTS weights as "doq=20,dot=10,..."
-// (order-stable, non-zero only), falling back to "do53=100" when absent. Shared
-// by the in-process REPL and the remote transport-stats renderer so the signal
-// looks identical either way (fixes the REPL-vs-remote drift).
+// renderSignalFromWeights formats advertised OOTS weights as
+// "doq=20,dot=10,udp=100,tcp=30" (order-stable, cleartext by its oots
+// tokens), falling back to noSignalRendered when there are no weights.
+// An encrypted transport at 0 is left out, since absent it weighs 0. A
+// recorded udp or tcp 0 is shown, since absent it weighs 100: "udp=0,tcp=0"
+// is a signal, not the absence of one. Shared by the in-process REPL and the
+// remote transport-stats renderer so the signal looks identical either way
+// (fixes the REPL-vs-remote drift).
 func renderSignalFromWeights(weights map[core.Transport]uint8) string {
-	// Prefer showing only the received signal (SVCB pct). If absent, fallback to do53=100.
-	// Order by known transports for stable output.
-	order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH, core.TransportDo53}
 	if len(weights) == 0 {
-		return "do53=100"
+		return noSignalRendered
 	}
 	var parts []string
-	for _, t := range order {
-		if w, ok := weights[t]; ok && w > 0 {
-			parts = append(parts, fmt.Sprintf("%s=%d", core.TransportToString[t], int(w)))
+	for _, t := range signalWeightOrder {
+		w, ok := weights[t]
+		if !ok || (w == 0 && t != core.TransportDo53 && t != core.TransportDo53TCP) {
+			continue
 		}
+		parts = append(parts, fmt.Sprintf("%s=%d", core.TransportToSignalToken[t], int(w)))
 	}
 	if len(parts) == 0 {
-		return "do53=100"
+		return noSignalRendered
 	}
 	return strings.Join(parts, ",")
 }

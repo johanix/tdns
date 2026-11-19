@@ -137,8 +137,10 @@ func countOrShare(n, total uint64, pct bool) string {
 }
 
 // signalOrder is the order of the transports in the OOTS and EXPECTED columns:
-// that of the table's transport columns.
-var signalOrder = []string{"do53", "dot", "doq", "doh"}
+// that of the table's transport columns. The OOTS column names cleartext udp
+// and tcp, as a signal does; EXPECTED names do53, the transport selection
+// picks (UDP, retried over TCP after truncation).
+var signalOrder = []string{"udp", "tcp", "do53", "dot", "doq", "doh"}
 
 // orderedTransports is the transports of m in signalOrder, then any others
 // sorted.

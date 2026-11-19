@@ -638,15 +638,22 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 						log.Printf("AddStub: unknown transport %q for %s", p.k, server.Name)
 						continue
 					}
-					transports = append(transports, t)
-					alpnOrder = append(alpnOrder, p.k)
 					weights[t] = p.w
+					// tcp keeps its weight, a cap on optional TCP, but
+					// is not a transport selection chooses.
+					if !core.SelectableTransport(t) {
+						continue
+					}
+					transports = append(transports, t)
+					alpnOrder = append(alpnOrder, core.TransportToString[t])
 				}
 				tmpauthserver.SetAlpn(alpnOrder)
 				tmpauthserver.SetTransports(transports)
 				tmpauthserver.MergeTransportWeights(weights)
-				// The configured signal as written, for the transport stats.
+				// The configured signal as written, for the transport
+				// stats, with the do53 shorthand read as udp and tcp.
 				if raw, err := core.ParseTransportStringRaw(server.TransportSignal); err == nil {
+					core.ExpandDo53Shorthand(raw)
 					received := &ReceivedSignal{Source: "config", Weights: map[core.Transport]uint8{}}
 					for k, v := range raw {
 						if t, err := core.StringToTransport(k); err == nil {

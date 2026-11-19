@@ -994,8 +994,15 @@ func (zd *ZoneData) notifyIfServableLocked(snap *zoneSnapshot) {
 // snapshotIsServableLocked reports whether a downstream could take this
 // snapshot. The two gates are ZoneTransferOut's, for its reasons: the zone must
 // be Ready, and a zone configured to be signed must not be offering an unsigned
-// apex SOA. Keeping the predicates identical is the point -- what we notify
-// about and what we will hand over have to be the same set of versions.
+// apex SOA. What we notify about and what we will hand over should be the same
+// set of versions.
+//
+// They are not quite: ZoneTransferOut also refuses a zone in a service-impacting
+// error and a secondary past SOA EXPIRE, states of the zone at the moment of
+// asking that are not asked here (HasExpired takes its own locks and cannot be
+// called with zd.mu held). A publish in either state can therefore notify a
+// version the transfer then refuses, which costs the downstream one retry and
+// never a wrong answer.
 func (zd *ZoneData) snapshotIsServableLocked(snap *zoneSnapshot) bool {
 	return zd.Ready && zd.snapshotContentIsServableLocked(snap)
 }
@@ -1318,7 +1325,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// on this zone), and the options the zone has now are the ones that rule.
 	// Only the collected KEY is dropped; one the replacement carries itself is
 	// its content and stays.
-	if zd.Options[OptDontPublishKey] {
+	if zd.Option(OptDontPublishKey) {
 		dynamicRRs = withoutCollectedSig0Key(dynamicRRs)
 	}
 	zd.repopulateWorkingSetLocked(dynamicRRs)

@@ -139,6 +139,11 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 
+	// The service.transport rules the daemon loader applies (ParseConfig).
+	if _, err := validateTransportSignal(config.Service.Transport, config.Listeners.Ports, config.Listeners.Addresses); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+
 	// Global + every zone + every template, via the same function the daemon
 	// loader uses, so this command cannot pass what startup would refuse.
 	if err := ValidateAllTransferSrc(&config); err != nil {

@@ -70,6 +70,11 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 	}
 
 	c.AddCommand(reload, reloadZones, reloadTsig, status)
+	if role != "agent" {
+		// tdns-auth (and named auth instances) synthesize the transport
+		// signal; tdns-agent does not.
+		c.AddCommand(newConfigTransportSignalCmd(role))
+	}
 	c.AddCommand(newConfigCheckCmd(role))
 	c.AddCommand(newConfigMweCmd(role))
 	return c
@@ -312,6 +317,9 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		if len(resp.Listeners.Addresses) > 0 {
 			fmt.Printf("Listeners: listening on %v\n", resp.Listeners.Addresses)
 			fmt.Printf("Listeners: configured transports: %v\n", resp.Listeners.Transports)
+			if resp.Do53QueriesRefused {
+				fmt.Printf("Listeners: Do53 queries REFUSED (debug-do53-queries-refused): over Do53 only NOTIFY, UPDATE, _dns SVCB and DNSKEY are answered\n")
+			}
 		} else {
 			fmt.Printf("Listeners: not listening on any addresses\n")
 		}

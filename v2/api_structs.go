@@ -677,10 +677,11 @@ type DsyncApiCredentialResponse struct {
 }
 
 type ConfigPost struct {
-	Command       string   // status | reload | reload-zones | reload-tsig | ...
+	Command       string   // status | reload | reload-zones | reload-tsig | transport-signal | ...
 	Force         bool     // reload-tsig: overwrite secret conflicts
 	Confirm       bool     `json:"confirm,omitempty"`       // reload / reload-zones: acknowledge a guarded DNSSEC policy algorithm change
 	TsigOverwrite []string `json:"tsigoverwrite,omitempty"` // reload-tsig --interactive: per-key overwrite
+	Name          string   `json:"name,omitempty"`          // transport-signal: one name instead of every identity; transport-signal-release: the name to release
 }
 
 type ConfigResponse struct {
@@ -696,11 +697,15 @@ type ConfigResponse struct {
 	ErrorMsg             string
 	TsigConflicts        []string              `json:"tsigconflicts,omitempty"`
 	TsigWithheldRemovals []string              `json:"tsigwithheldremovals,omitempty"`
-	ServerErrors         []ServerError         `json:"servererrors,omitempty"`     // active server-wide error conditions
-	GuardrailBlocked     bool                  `json:"guardrailblocked,omitempty"` // reload refused by the DNSSEC policy-change guardrail
-	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`   // per-zone would-strand findings (with GuardrailBlocked)
-	Imr                  *ImrStatus            `json:"imr,omitempty"`              // IMR priming + stub/forward state, when this daemon carries one
-	Proc                 *ProcStatus           `json:"proc,omitempty"`             // process resources (open fds, goroutines), for leak visibility (#443)
+	ServerErrors         []ServerError         `json:"servererrors,omitempty"`       // active server-wide error conditions
+	Do53QueriesRefused   bool                  `json:"do53queriesrefused,omitempty"` // debug-do53-queries-refused, as the DNS engine started with it (#1066)
+	GuardrailBlocked     bool                  `json:"guardrailblocked,omitempty"`   // reload refused by the DNSSEC policy-change guardrail
+	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`     // per-zone would-strand findings (with GuardrailBlocked)
+	Imr                  *ImrStatus            `json:"imr,omitempty"`                // IMR priming + stub/forward state, when this daemon carries one
+	Proc                 *ProcStatus           `json:"proc,omitempty"`               // process resources (open fds, goroutines), for leak visibility (#443)
+	// transport-signal: what synthesis writes at _dns.<name> per name, for
+	// an operator to provision in the zone instead.
+	TransportSignal []TransportSignalPreview `json:"transportsignal,omitempty"`
 }
 
 // ReloadGuardrailZone is one signed zone a config reload would strand: its bound
