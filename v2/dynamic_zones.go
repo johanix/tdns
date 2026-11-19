@@ -1141,6 +1141,10 @@ func (conf *Config) enqueueRefresh(ctx context.Context, zr ZoneRefresher) error 
 // window a real one can run in.
 var testHookSignalRecordTaken func()
 
+// testHookRemovalLocking, when set, runs in RemoveDynamicZone right before it
+// takes templateApplyMu. Tests only.
+var testHookRemovalLocking func()
+
 // RemoveDynamicZone is the shared *delete* core. It refuses to delete a static
 // or catalog-managed zone (guard on OptApiManagedZone), bumps the zone's
 // generation counter so any in-flight refresh self-aborts at its pre-persist
@@ -1165,6 +1169,9 @@ var testHookSignalRecordTaken func()
 // pass would take that signal for the operator's without it.
 func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	name = core.CanonicalizeName(dns.Fqdn(name))
+	if testHookRemovalLocking != nil {
+		testHookRemovalLocking()
+	}
 	templateApplyMu.Lock()
 	defer templateApplyMu.Unlock()
 	zd, exists := Zones.Get(name)

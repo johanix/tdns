@@ -202,16 +202,31 @@ func TestARemovedZonesSignalPassRecordsNothing(t *testing.T) {
 
 // An add of the same name waits for the removal (templateApplyMu, which an
 // add holds until the zone is in Zones): the removal holds it throughout, so
-// it cannot drop the records of the zone that add creates.
+// it cannot drop the records of the zone that add creates. The removal
+// starts while the test holds templateApplyMu, as an add would, and reaches
+// the lock before the test checks that the zone is still there. Once the
+// test lets go, the lock is checked again from inside the removal, where
+// its records have been taken: it must be held.
 func TestADeleteHoldsOffAnAddOfTheSameName(t *testing.T) {
 	conf, _, zd := removalFixture(t)
+	reached := make(chan struct{})
+	heldInside := false
+	t.Cleanup(func() { testHookRemovalLocking, testHookSignalRecordTaken = nil, nil })
+	testHookRemovalLocking = func() { close(reached) }
+	testHookSignalRecordTaken = func() {
+		if templateApplyMu.TryLock() {
+			templateApplyMu.Unlock()
+			return
+		}
+		heldInside = true
+	}
 	templateApplyMu.Lock()
 	done := make(chan error, 1)
 	go func() {
 		_, err := conf.RemoveDynamicZone(zd.ZoneName)
 		done <- err
 	}()
-	time.Sleep(100 * time.Millisecond)
+	<-reached
 	_, present := Zones.Get(zd.ZoneName)
 	templateApplyMu.Unlock()
 	if err := <-done; err != nil {
@@ -220,7 +235,45 @@ func TestADeleteHoldsOffAnAddOfTheSameName(t *testing.T) {
 	if !present {
 		t.Fatal("the removal ran while an add held templateApplyMu")
 	}
+	if !heldInside {
+		t.Fatal("the removal took the zone's records without holding templateApplyMu")
+	}
 	if _, ok := Zones.Get(zd.ZoneName); ok {
 		t.Fatal("the zone is still present after the delete")
+	}
+}
+
+// A signal pass on an instance that is no longer the zone's live one, one
+// a modify replaced or one whose zone has been removed, records nothing:
+// only the live instance is retired by a removal, and records written under
+// the zone's name would pass to a zone added later under it (CodeRabbit on
+// #1146).
+func TestASignalPassOnAStaleInstanceRecordsNothing(t *testing.T) {
+	const z = "remove.sig.example."
+	const owner = "_dns.ns1." + z
+	// The instance a modify replaces: the fixture's zone takes its place in
+	// Zones.
+	stale, sconf := signalTestZone(t, z, z+"	3600	IN	NS	ns1."+z+"\nns1."+z+"	3600	IN	A	127.0.0.1\n", "127.0.0.1:53")
+	conf, kdb, zd := removalFixture(t)
+	stale.KeyDB = kdb
+	sconf.Service.Identities = []string{"ns1." + z}
+	sconf.Service.Transport.Signal = "dot:50"
+
+	if err := stale.CreateTransportSignalRRs(sconf); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := kdb.GetTransportSignalStored(z, owner); err != nil || !slices.Equal(got, []string{"d1"}) {
+		t.Fatalf("the pass on the replaced instance changed the zone's record: %v (error %v)", got, err)
+	}
+
+	// And once the zone is gone.
+	if _, err := conf.RemoveDynamicZone(zd.ZoneName); err != nil {
+		t.Fatalf("RemoveDynamicZone: %v", err)
+	}
+	if err := stale.CreateTransportSignalRRs(sconf); err != nil {
+		t.Fatal(err)
+	}
+	if n := storedSignalRows(t, kdb, z); n != 0 {
+		t.Fatalf("the pass on an instance of the removed zone recorded a stored signal (%d rows)", n)
 	}
 }
