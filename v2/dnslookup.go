@@ -3833,6 +3833,12 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 // server a query holds that is in none of them yet
 // (applyCachedTransportSignal).
 func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, vstate cache.ValidationState, also ...*cache.AuthServer) {
+	imr.applyTransportRRsetWalk(aliasWalk{}, qname, rrset, vstate, also...)
+}
+
+// applyTransportRRsetWalk is applyTransportRRsetFromAnswer, with walk for how
+// an AliasMode record in rrset is followed (followLookupAlias).
+func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *core.RRset, vstate cache.ValidationState, also ...*cache.AuthServer) {
 	if imr.Cache == nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
 	}
@@ -3857,7 +3863,7 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 			}
 		}
 		set.decideLookupPath(vstate)
-		imr.followLookupAlias(set)
+		imr.followLookupAlias(set, walk)
 	}
 	// The shared instance of a nameserver is listed under every zone it
 	// serves: it takes the signal once, and its ignored redirects count once.
@@ -4035,7 +4041,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		}
 		imr.Cache.Set(qname, qtype, cr)
 		if qtype == dns.TypeSVCB || qtype == core.TypeTSYNC {
-			imr.applyTransportRRsetFromAnswer(qname, &rrset, vstate)
+			imr.applyTransportRRsetWalk(aliasWalkFor(ctx), qname, &rrset, vstate)
 		} else if qtype == dns.TypeTLSA {
 			base := baseFromTLSAOwner(qname)
 			if base != "" {

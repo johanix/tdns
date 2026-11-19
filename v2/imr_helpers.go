@@ -174,15 +174,23 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 		return
 	}
 	if signal, denied := imr.cachedTransportSignal(owner); signal != nil || denied {
+		// The cache holds owner's signal, so there is nothing to look up
+		// at owner. When it is an alias the Additional section could not
+		// follow to its end, a hop on its path may be missing from the
+		// cache: the alias is followed again from the cache, which looks
+		// such a hop up once signalAliasHopRetry has passed, rather than
+		// only after owner's RRset expires.
+		if reason == transportQueryReasonVerify && signal != nil {
+			imr.refollowAliasOwner(aliasWalkFor(ctx), owner)
+		}
 		return
 	}
 	if !imr.TransportSignalDiscovery.Begin(owner) {
 		return
 	}
 	go func() {
-		queryCtx, cancel := detachedContext(5 * time.Second)
+		queryCtx, cancel := transportSignalQueryContext(ctx)
 		defer cancel()
-		queryCtx = withTransportSignalLookup(queryCtx)
 		rrtype := imr.TransportSignalRRType()
 		if imr.Cache.Debug {
 			imr.Cache.Logger.Printf("Transport signal query (%s): querying %s %s", reason, owner, dns.TypeToString[rrtype])
@@ -193,6 +201,21 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 		}
 		imr.settleTransportSignalLookup(owner, resp, err)
 	}()
+}
+
+// transportSignalQueryContext is the context of the transport-signal lookup
+// that launchTransportSignalQuery starts for a query made on ctx: detached,
+// with a deadline of its own, and marked as a signal lookup's. When ctx is
+// part of an alias hop's lookup, so is the signal lookup (aliasWalkFor): the
+// AliasMode record in its answer is followed through the cache only, and its
+// next hop is left to the walk of an owner outside any hop lookup.
+func transportSignalQueryContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	queryCtx, cancel := detachedContext(5 * time.Second)
+	queryCtx = withTransportSignalLookup(queryCtx)
+	if aliasWalkFor(ctx).cacheOnly {
+		queryCtx = withSignalAliasHopLookup(queryCtx)
+	}
+	return queryCtx, cancel
 }
 
 // transportSignalLookupKey marks the context of a transport-signal lookup
@@ -223,13 +246,18 @@ func inTransportSignalLookup(ctx context.Context) bool {
 // came in, because the zone was met afterwards or its address lookup had not
 // ended, missed it. It is applied to those servers, and to servers, the ones
 // a caller holds, whether or not they are in a zone map yet.
-func (imr *Imr) applyCachedTransportSignal(owner string, servers ...*cache.AuthServer) (signal, denied bool) {
+//
+// walk is how an AliasMode record in the signal is followed: the caller's
+// (aliasWalkFor), so that a query that is part of an alias hop's lookup
+// follows a cached alias through the cache only, as it does the one in an
+// answer.
+func (imr *Imr) applyCachedTransportSignal(walk aliasWalk, owner string, servers ...*cache.AuthServer) (signal, denied bool) {
 	if imr.Options[ImrOptUseTransportSignals] == "false" {
 		return false, false
 	}
 	cached, denied := imr.cachedTransportSignal(owner)
 	if cached != nil {
-		imr.applyTransportRRsetFromAnswer(owner, cached.RRset, cached.State, servers...)
+		imr.applyTransportRRsetWalk(walk, owner, cached.RRset, cached.State, servers...)
 		return true, false
 	}
 	return false, denied
@@ -296,7 +324,7 @@ func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[st
 		}
 		// A signal already in the cache that never reached this server, or
 		// a cached denial: the server signals nothing, until it expires.
-		if signal, denied := imr.applyCachedTransportSignal(owner, server); signal || denied {
+		if signal, denied := imr.applyCachedTransportSignal(aliasWalkFor(ctx), owner, server); signal || denied {
 			continue
 		}
 		imr.maybeQueryTransportSignal(ctx, owner, reason)
@@ -309,7 +337,7 @@ func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[st
 			// reached the servers in the zone server maps, which this one
 			// need not be in yet.
 			if len(server.GetTransportWeights()) == 0 {
-				imr.applyCachedTransportSignal(owner, server)
+				imr.applyCachedTransportSignal(aliasWalkFor(ctx), owner, server)
 			}
 			continue
 		}
@@ -345,7 +373,7 @@ func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[st
 			// The lookup applied its signal to the servers in the zone
 			// server maps; this one may have been in none.
 			if len(l.server.GetTransportWeights()) == 0 {
-				imr.applyCachedTransportSignal(l.owner, l.server)
+				imr.applyCachedTransportSignal(aliasWalkFor(ctx), l.owner, l.server)
 			}
 		case <-timer.C:
 			return ready()
