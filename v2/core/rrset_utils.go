@@ -276,18 +276,13 @@ func (rrset *RRset) RRSIGsDiffer(newrrset *RRset) bool {
 }
 
 // RemoveRR removes rr from the RRset, and reports whether it was there.
+// It does not log: the result says what it did, for the caller to log
+// through its own logger. verbose and debug are unused.
 func (rrset *RRset) RemoveRR(rr dns.RR, verbose, debug bool) bool {
-	if debug {
-		log.Printf("RemoveRR: Trying to remove '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
-	}
 	for i, r := range rrset.RRs {
-		if debug {
-			log.Printf("RemoveRR: Comparing:\n%s\n%s\n", r.String(), rr.String())
-		}
 		if IsDuplicate(r, rr) {
 			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
 			rrset.RRSIGs = []dns.RR{}
-			log.Printf("RemoveRR: *REMOVED* '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
 			return true
 		}
 	}
@@ -342,17 +337,11 @@ func (rrset *RRset) Clone() *RRset {
 }
 
 func (rrset *RRset) String(maxlen int) (out string) {
+	// A panic part-way (in an RR's String) is reported in the result, after
+	// what was rendered before it: String has no error to return.
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("RRset.String: panic recovered: %v", r)
-			if out == "" {
-				out = fmt.Sprintf("(RRset.String panic: %v)\n", r)
-			}
-		}
-		if out == "" {
-			// Fallback: ensure we always return something
-			log.Printf("RRset.String: WARNING - returning empty string, using fallback")
-			out = "(RRset.String returned empty string - this should not happen)\n"
+			out += fmt.Sprintf("(RRset.String panic: %v)\n", r)
 		}
 	}()
 
