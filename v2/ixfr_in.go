@@ -218,26 +218,31 @@ func ixfrTouchedOwners(zoneName string, steps []ixfrStep) map[string]bool {
 	return touched
 }
 
-// ixfrRemovesDelegation reports whether a delta took away a delegation cut: an
-// owner below the apex that held an NS RRset in the base holds none once the
-// delta is applied. The names below such a cut stop being occluded and become
-// the zone's own data, which a signing pass scoped to the delta's touched owners
-// does not reach, since the delta never names them; and they were skipped when
-// the base was signed, so they carry no signatures. A delta that changes an NS
-// RRset and leaves it non-empty keeps the cut.
+// ixfrRemovesDelegation reports whether the content being adopted has lost a
+// delegation cut the base had: an owner below the apex that held an NS RRset in
+// the base holds none in after. The names below such a cut stop being occluded
+// and become the zone's own data, which a signing pass scoped to the touched
+// owners does not reach, since nothing names them; and they were skipped when
+// the base was signed, so they carry no signatures. A cut whose NS RRset changed
+// and is not empty is still a cut.
 //
-// Only the touched owners are asked: a cut that goes is one whose NS the delta
-// removed, so its owner is among them.
-func ixfrRemovesDelegation(zoneName string, base *zoneSnapshot, after *core.NameMap[OwnerData], touched map[string]bool) bool {
+// It reads the content, not the paths that produced it: the wire delta, a
+// pre-refresh callback's draft writes (StageDelete, StageOwnerDelete,
+// StageRRset, StageBatch, a write straight into Data) and anything added later
+// all end in the incoming zone's Data, and this compares that with the base. It
+// asks every owner of the base, not only the touched ones: a draft owner delete
+// does not join ixfrTouched. One pass over the base's owners, read-only, which
+// is cheaper than the delegation survey the signing pass makes of every name.
+func ixfrRemovesDelegation(zoneName string, base *zoneSnapshot, after *core.NameMap[OwnerData]) bool {
 	hasNS := func(od *OwnerData) bool {
-		if od == nil {
+		if od == nil || od.RRtypes == nil {
 			return false
 		}
 		rs, ok := od.RRtypes.Get(dns.TypeNS)
 		return ok && len(rs.RRs) > 0
 	}
-	for name := range touched {
-		if core.EqualNames(name, zoneName) || !hasNS(getOwnerFrom(base, name)) {
+	for name, od := range base.Data {
+		if core.EqualNames(name, zoneName) || !hasNS(od) {
 			continue
 		}
 		nod, ok := after.Get(name)
@@ -246,6 +251,17 @@ func ixfrRemovesDelegation(zoneName string, base *zoneSnapshot, after *core.Name
 		}
 	}
 	return false
+}
+
+// ixfrScopedPassHolds reports whether the adoption of an IXFR-derived
+// replacement may sign only the owners it touched: the snapshot the delta was
+// built on is signed throughout, and the content being adopted has lost none of
+// its delegation cuts (ixfrRemovesDelegation). Asked at the adoption, after the
+// pre-refresh callbacks have had their say, of the incoming zone's content as it
+// is then.
+func ixfrScopedPassHolds(zoneName string, newZd *ZoneData) bool {
+	base := newZd.ixfrBase
+	return base != nil && base.signed && !ixfrRemovesDelegation(zoneName, base, newZd.Data)
 }
 
 // materializeForIxfr copies the published snapshot into a fresh owner map that
@@ -788,13 +804,12 @@ func (zd *ZoneData) applyIxfrToScratch(newZd *ZoneData, rrs []dns.RR) error {
 	}
 
 	newZd.Data = data
-	// Whether the owners this delta shares with the snapshot it was built on
-	// carry signatures that still hold, taken with that snapshot: what the
-	// adoption may assume about the owners the delta did not touch. The base
-	// being signed throughout is not enough when the delta removes a delegation:
-	// the names below the cut were occluded in the base, so they carry none, and
-	// they become authoritative without the delta mentioning them.
-	newZd.baseSigned = snap.signed && !ixfrRemovesDelegation(zd.ZoneName, snap, data, touched)
+	// The snapshot this delta was built on, kept for the adoption: what it may
+	// assume about the owners the delta did not touch depends on whether that
+	// snapshot is signed throughout (zoneSnapshot.signed, immutable, so the pair
+	// is consistent) and on what the content being adopted has lost since,
+	// which the pre-refresh callbacks can change too. See ixfrScopedPassHolds.
+	newZd.ixfrBase = snap
 	newZd.IncomingSerial = target
 	newZd.CurrentSerial = target
 	// This replacement is a delta applied to what we already served, not a

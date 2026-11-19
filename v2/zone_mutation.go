@@ -1387,37 +1387,45 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// Which owners to sign: what each pass may assume (johanix/tdns#981).
 	//
 	// The one fact a pass needs is whether the owners it does NOT sign carry
-	// our signatures. For the scoped pass of an IXFR refresh those owners are
-	// shared with the BASE of the delta: the snapshot applyIxfrToScratch read
-	// when it built the delta. Whether that snapshot is signed throughout was
-	// taken with it (zoneSnapshot.signed, immutable, so no lock is needed to
-	// read the pair) and travels here as new_zd.baseSigned. The snapshot served
-	// NOW is not asked about: a publish between the capture and this adoption
-	// (a full pass, SignZone, the resigner) is replaced by base+delta, and what
-	// has to be signed is that content, whatever was served in between. For the
-	// same reason the role the zone had when the refresh began does not enter:
-	// a zone switched off and on again with no publish between still has its
-	// signed base; one a callback made a signer (SetRuntimeOption on this zone,
-	// before this adoption) has an unsigned base.
+	// our signatures that still hold. For the scoped pass of an IXFR refresh
+	// those owners are shared with the BASE of the delta: the snapshot
+	// applyIxfrToScratch read when it built the delta, kept as new_zd.ixfrBase.
+	// Whether that snapshot is signed throughout was taken with it
+	// (zoneSnapshot.signed, immutable, so no lock is needed to read the pair).
+	// The snapshot served NOW is not asked about: a publish between the capture
+	// and this adoption (a full pass, SignZone, the resigner) is replaced by
+	// base+delta, and what has to be signed is that content, whatever was served
+	// in between. For the same reason the role the zone had when the refresh
+	// began does not enter: a zone switched off and on again with no publish
+	// between still has its signed base; one a callback made a signer
+	// (SetRuntimeOption on this zone, before this adoption) has an unsigned base.
 	//
-	//   role now      base signed   pass                                      signed throughout after
-	//   not signing   any           none: the publish cannot sign             no
-	//   signing       yes, and the  scoped: the touched owners, forced; the   yes
-	//                 delta removes rest keep the base's signatures
-	//                 no delegation
-	//   signing       no            full, unforced, over every owner, then    yes
-	//                               the touched owners again, forced (an
-	//                               unmarked base may hold signatures of ours
-	//                               from before the zone was switched off,
-	//                               over contents a delta changed)
-	//   signing       the delta     as the row above: the names below a cut   yes
-	//                 removes a     the delta removes were occluded in the
-	//                 delegation    base and carry none, they become
-	//                               authoritative without being named, and a
-	//                               scope of the touched owners would not
-	//                               reach them (baseSigned is false then)
-	//   (a whole zone, AXFR or file)  full, unforced                           yes
-	//   (an incremental change)       signs what it stages                    only if it extends a signed snapshot
+	// A signed base is not enough either. A delegation cut the content being
+	// adopted has lost makes the names below it authoritative without anything
+	// naming them: occluded in the base, they carry no signatures, and a scope
+	// of the touched owners does not reach them. That is decided here, once, by
+	// ixfrScopedPassHolds, from the content as it stands now (new_zd.Data) set
+	// against the base: not from the paths that changed it. Every path feeds
+	// the same rule because every path ends in new_zd.Data: the wire delta
+	// (applyIxfrSteps), and what a pre-refresh callback writes into the draft
+	// (StageRRset, StageDelete, StageOwnerDelete, StageBatch, a write straight
+	// into Data); the owner delete of a draft does not even join ixfrTouched,
+	// which is why the rule does not ask the touched set.
+	//
+	//   role now      base signed, and   pass                                  signed throughout after
+	//                 no cut lost
+	//   not signing   any                none: the publish cannot sign         no
+	//   signing       yes                scoped: the touched owners, forced;   yes
+	//                                    the rest keep the base's signatures
+	//   signing       no: the base is    full, unforced, over every owner,     yes
+	//                 unsigned or        then the touched owners again,
+	//                 unmarked, or a     forced (an unmarked base may hold
+	//                 cut was lost       signatures of ours from before the
+	//                                    zone was switched off, over contents
+	//                                    a delta changed; the names below a
+	//                                    lost cut carry none)
+	//   (a whole zone, AXFR or file)     full, unforced                        yes
+	//   (an incremental change)          signs what it stages                  only if it extends a signed snapshot
 	//
 	// "Signed throughout after" is what publishWorkingSetLocked records in the
 	// snapshot it installs: the publish could sign (resolved signing material),
@@ -1437,7 +1445,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	switch {
 	case !zd.signsItsOwnContent():
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, nil
-	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil && new_zd.baseSigned:
+	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil && ixfrScopedPassHolds(zd.ZoneName, new_zd):
 		zd.wsNeedsFullSign, zd.wsSignOwners = false, new_zd.ixfrTouched
 	case new_zd != nil && new_zd.ixfrDerived && new_zd.ixfrTouched != nil:
 		zd.wsNeedsFullSign, zd.wsSignOwners = true, new_zd.ixfrTouched

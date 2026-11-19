@@ -455,8 +455,9 @@ func TestAnIxfrAdoptionSignsByTheStateOfItsBase(t *testing.T) {
 	})
 }
 
-// ixfrRemovesDelegation says when a delta takes a delegation cut away: an owner
-// below the apex that held NS holds none afterwards.
+// ixfrRemovesDelegation says when the content being adopted has lost a
+// delegation cut the base had: an owner below the apex that held NS holds none,
+// whether the wire delta took it or a callback did afterwards.
 func TestIxfrRemovesDelegation(t *testing.T) {
 	zd := ixBase(t, ixDelegationZone)
 	base := zd.publishedSnapshot()
@@ -470,15 +471,22 @@ func TestIxfrRemovesDelegation(t *testing.T) {
 	for _, tc := range []struct {
 		what           string
 		removed, added []dns.RR
+		edit           func(data *core.NameMap[OwnerData]) // what a callback does to the content afterwards
 		want           bool
 	}{
-		{"the NS RRset of a cut is removed", rm("sub.example. 3600 IN NS ns.sub.example."), nil, true},
-		{"the NS RRset is replaced", rm("sub.example. 3600 IN NS ns.sub.example."), rm("sub.example. 3600 IN NS ns2.sub.example."), false},
-		{"one of two NS is removed", rm("two.example. 3600 IN NS ns1.two.example."), nil, false},
-		{"an address is added", nil, rm("www.example. 3600 IN A 10.0.0.5"), false},
-		{"a record below a cut is removed", rm("deep.sub.example. 3600 IN A 10.0.0.21"), nil, false},
-		{"a cut is added", nil, rm("www.example. 3600 IN NS ns.www.example."), false},
-		{"the apex NS changes", rm("example. 3600 IN NS ns.example."), rm("example. 3600 IN NS ns9.example."), false},
+		{"the NS RRset of a cut is removed", rm("sub.example. 3600 IN NS ns.sub.example."), nil, nil, true},
+		{"the NS RRset is replaced", rm("sub.example. 3600 IN NS ns.sub.example."), rm("sub.example. 3600 IN NS ns2.sub.example."), nil, false},
+		{"one of two NS is removed", rm("two.example. 3600 IN NS ns1.two.example."), nil, nil, false},
+		{"an address is added", nil, rm("www.example. 3600 IN A 10.0.0.5"), nil, false},
+		{"a record below a cut is removed", rm("deep.sub.example. 3600 IN A 10.0.0.21"), nil, nil, false},
+		{"a cut is added", nil, rm("www.example. 3600 IN NS ns.www.example."), nil, false},
+		{"the apex NS changes", rm("example. 3600 IN NS ns.example."), rm("example. 3600 IN NS ns9.example."), nil, false},
+		{"a callback deletes the NS RRset of a cut", nil, rm("www.example. 3600 IN A 10.0.0.5"),
+			func(data *core.NameMap[OwnerData]) { dropRRset(data, "sub.example.", dns.TypeNS) }, true},
+		{"a callback deletes the owner of a cut", nil, rm("www.example. 3600 IN A 10.0.0.5"),
+			func(data *core.NameMap[OwnerData]) { data.Remove("sub.example.") }, true},
+		{"a callback edits an address", nil, rm("www.example. 3600 IN A 10.0.0.5"),
+			func(data *core.NameMap[OwnerData]) { dropRRset(data, "www.example.", dns.TypeA) }, false},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			steps, err := parseIxfrDeltas("example.", ixDeltaStream(t, 7, 8, tc.removed, tc.added), 7)
@@ -490,11 +498,34 @@ func TestIxfrRemovesDelegation(t *testing.T) {
 			if err := applyIxfrSteps("example.", data, signed, steps); err != nil {
 				t.Fatalf("applyIxfrSteps: %v", err)
 			}
-			if got := ixfrRemovesDelegation("example.", base, data, touched); got != tc.want {
+			if tc.edit != nil {
+				tc.edit(data)
+			}
+			if got := ixfrRemovesDelegation("example.", base, data); got != tc.want {
 				t.Fatalf("ixfrRemovesDelegation = %v, want %v", got, tc.want)
 			}
 		})
 	}
+}
+
+// dropRRset removes one RRset of one owner from data the way a draft does: the
+// owner is copied first, because the owners a delta did not touch share their
+// stores with the snapshot, and a write through the shared store would change
+// the base the next case reads.
+func dropRRset(data *core.NameMap[OwnerData], name string, rrtype uint16) {
+	od, ok := data.Get(name)
+	if !ok {
+		return
+	}
+	nod := OwnerData{Name: od.Name, RRtypes: NewRRTypeStore()}
+	for _, t := range od.RRtypes.Keys() {
+		if t == rrtype {
+			continue
+		}
+		rs, _ := od.RRtypes.Get(t)
+		nod.RRtypes.Set(t, rs)
+	}
+	data.Set(name, nod)
 }
 
 const ixDelegationZone = `example.	3600	IN	SOA	ns.example. hostmaster.example. 7 7200 1800 604800 7200
@@ -536,9 +567,6 @@ func TestAnIxfrDeltaThatRemovesADelegationSignsTheNamesBelowIt(t *testing.T) {
 	if err := zd.applyIxfrToScratch(&incoming, delta); err != nil {
 		t.Fatalf("applyIxfrToScratch refused the delta: %v", err)
 	}
-	if incoming.baseSigned {
-		t.Error("a delta that removes a delegation was left on the scoped pass")
-	}
 	zd.mu.Lock()
 	err := zd.applyRefreshReplacementLocked(&incoming, nil, false, false)
 	zd.mu.Unlock()
@@ -557,6 +585,99 @@ func TestAnIxfrDeltaThatRemovesADelegationSignsTheNamesBelowIt(t *testing.T) {
 				name, len(od.NSEC.RRs), len(od.NSEC.RRSIGs))
 		}
 	}
+	if !zd.publishedSnapshot().signed {
+		t.Error("the adopted snapshot is signed throughout but not marked so")
+	}
+}
+
+// The pre-refresh callbacks run after the delta is built and may edit the
+// incoming content. One that removes a delegation (the NS RRset of a cut, or its
+// owner) makes the names below it authoritative, as a delta that removes it
+// does, and the adoption must take the full pass for it: the rule reads the
+// content being adopted against the base, not the paths that changed it. The
+// owner delete of a draft does not join the touched owners, so it is a path the
+// touched set alone would miss. After the adoption every name below the cut
+// verifies and has a signed NSEC.
+func TestACallbackThatRemovesADelegationHasTheNamesBelowItSigned(t *testing.T) {
+	for name, remove := range map[string]func(incoming *ZoneData){
+		"StageDelete of the NS RRset": func(incoming *ZoneData) { incoming.StageDelete("sub.example.", dns.TypeNS) },
+		"StageOwnerDelete of the cut": func(incoming *ZoneData) { incoming.StageOwnerDelete("sub.example.") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			zd := ixSigningSecondary(t, ixDelegationZone)
+			zd.IncomingSerial, zd.CurrentSerial = 7, 7
+			below := []string{"ns.sub.example.", "deep.sub.example."}
+
+			// The wire delta is an ordinary address edit: it leaves every cut alone.
+			incoming := newTransferScratchZone(zd)
+			delta := ixDeltaStream(t, 7, 8, nil, []dns.RR{ixA(t, "www.example.", "10.0.0.5")})
+			if err := zd.applyIxfrToScratch(&incoming, delta); err != nil {
+				t.Fatalf("applyIxfrToScratch refused the delta: %v", err)
+			}
+			if !ixfrScopedPassHolds("example.", &incoming) {
+				t.Fatal("precondition: an address edit on a signed base is not on the scoped pass")
+			}
+			remove(&incoming) // the callback
+
+			zd.mu.Lock()
+			err := zd.applyRefreshReplacementLocked(&incoming, nil, false, false)
+			zd.mu.Unlock()
+			if err != nil {
+				t.Fatalf("applyRefreshReplacementLocked: %v", err)
+			}
+
+			assertEveryPublishedRRsetVerifies(t, zd)
+			for _, n := range below {
+				od := getOwnerFrom(zd.publishedSnapshot(), n)
+				if od == nil {
+					t.Fatalf("%s is gone from the published zone", n)
+				}
+				if len(od.NSEC.RRs) == 0 || len(od.NSEC.RRSIGs) == 0 {
+					t.Errorf("%s is authoritative now and has no signed NSEC (%d records, %d signatures)",
+						n, len(od.NSEC.RRs), len(od.NSEC.RRSIGs))
+				}
+			}
+		})
+	}
+}
+
+// Ordinary edits keep the scoped pass: a delta that adds an address and a
+// callback that edits an address leave every cut alone, so only the touched
+// owners are signed again and an owner nobody touched is not re-materialised
+// (its store is the base's). The new owner sorts last, so the NSEC chain only
+// re-links its neighbours, www.example. and the apex, and ns.example. is left
+// alone.
+func TestOrdinaryEditsOfAnAdoptionKeepTheScopedPass(t *testing.T) {
+	zd := ixSigningSecondary(t, ixDelegationZone)
+	zd.IncomingSerial, zd.CurrentSerial = 7, 7
+	untouched := getOwnerFrom(zd.publishedSnapshot(), "ns.example.")
+	if untouched == nil {
+		t.Fatal("precondition: ns.example. is not published")
+	}
+	before := untouched.RRtypes
+
+	incoming := newTransferScratchZone(zd)
+	delta := ixDeltaStream(t, 7, 8, nil, []dns.RR{ixA(t, "zz.example.", "10.1.0.1")})
+	if err := zd.applyIxfrToScratch(&incoming, delta); err != nil {
+		t.Fatalf("applyIxfrToScratch refused the delta: %v", err)
+	}
+	// The callback: an address edit in the content the delta produced.
+	incoming.StageRRset("zz.example.", core.RRset{Name: "zz.example.", Class: dns.ClassINET, RRtype: dns.TypeA,
+		RRs: []dns.RR{ixA(t, "zz.example.", "10.1.0.2")}})
+	if !ixfrScopedPassHolds("example.", &incoming) {
+		t.Fatal("ordinary edits took the adoption off the scoped pass")
+	}
+
+	zd.mu.Lock()
+	err := zd.applyRefreshReplacementLocked(&incoming, nil, false, false)
+	zd.mu.Unlock()
+	if err != nil {
+		t.Fatalf("applyRefreshReplacementLocked: %v", err)
+	}
+	if after := getOwnerFrom(zd.publishedSnapshot(), "ns.example."); after == nil || after.RRtypes != before {
+		t.Fatal("an owner nobody touched was signed again: the scoped pass was lost for ordinary edits")
+	}
+	assertEveryPublishedRRsetVerifies(t, zd)
 	if !zd.publishedSnapshot().signed {
 		t.Error("the adopted snapshot is signed throughout but not marked so")
 	}

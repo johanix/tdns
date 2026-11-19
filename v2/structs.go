@@ -223,7 +223,6 @@ type ZoneData struct {
 	Options           map[ZoneOption]bool
 	optionsMu         sync.RWMutex        // see Option, in zone_option_runtime.go: orders the replacement of Options against a reader holding no lock
 	runtimeOptions    map[ZoneOption]bool // set by the daemon itself, kept across a config update (SetRuntimeOption); guarded by mu
-	baseSigned        bool                // an incoming zone's only: the snapshot its IXFR delta was built on was signed throughout (zoneSnapshot.signed); read by applyRefreshReplacementLocked
 	// SuppressedOptions records the origination options that were configured
 	// for this zone but stripped by normalizeOptionsForRole (a tdns-auth
 	// secondary may not originate content). Options above is the EFFECTIVE
@@ -390,6 +389,9 @@ type ZoneData struct {
 	// Set only alongside ixfrDerived. A pre-refresh write into the draft adds
 	// the owner it writes (ownDraftOwnerLocked).
 	ixfrTouched map[string]bool
+	// ixfrBase is the snapshot the delta was built on, kept by the IXFR apply
+	// for applyRefreshReplacementLocked (ixfrScopedPassHolds). Never written.
+	ixfrBase *zoneSnapshot
 
 	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale
 	// zone replacement): updateIxfrChainLocked clears the delta history
