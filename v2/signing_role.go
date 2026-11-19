@@ -209,8 +209,7 @@ func dnssecPoliciesOfConfig(conf *Config) map[string]DnssecPolicy {
 // the engine can get here first. Nil resolves through the snapshot.
 //
 // The zone it is handed is the one the engine captured, which a reload may have
-// removed from Zones since. Its error state is written without the republish
-// that setErrorLocked ends with, which would register the removed zone again.
+// removed from Zones since. It writes the zone's own state and nothing in Zones.
 //
 // It reports whether it handled the zone. A zone that signs, or starts to while
 // this waits for the zone's policy lock, is not handled: its policy goes through
@@ -244,7 +243,7 @@ func (zd *ZoneData) recordPolicyOfNonSigningZone(name string, pols map[string]Dn
 		return true
 	case name == "" && !zd.hasPolicyOverrideLocked():
 		zd.DnssecPolicy, zd.DnssecPolicyName = nil, ""
-		zd.clearErrorUnpublishedLocked(DnssecPolicyWarning)
+		zd.clearErrorLocked(DnssecPolicyWarning)
 		zd.mu.Unlock()
 		lgSigner.Info("DNSSEC policy removed from a zone that does not sign by a config reload",
 			"zone", zd.ZoneName, "was", oldName)
@@ -262,7 +261,7 @@ func (zd *ZoneData) recordPolicyOfNonSigningZone(name string, pols map[string]Dn
 		if name == "" {
 			what = "the zone's policy override"
 		}
-		zd.setErrorUnpublishedLocked(DnssecPolicyWarning, "%s cannot be bound: %v; keeping bound policy %q", what, err, oldName)
+		zd.setErrorLocked(DnssecPolicyWarning, "%s cannot be bound: %v; keeping bound policy %q", what, err, oldName)
 		zd.mu.Unlock()
 		lgSigner.Warn("a config reload names a DNSSEC policy that cannot be bound; keeping the bound policy",
 			"zone", zd.ZoneName, "policy", name, "bound", oldName, "err", err)
@@ -270,7 +269,7 @@ func (zd *ZoneData) recordPolicyOfNonSigningZone(name string, pols map[string]Dn
 	}
 	changed := newName != oldName || !reflect.DeepEqual(oldPol, pol)
 	zd.DnssecPolicy, zd.DnssecPolicyName = pol, newName
-	zd.clearErrorUnpublishedLocked(DnssecPolicyWarning)
+	zd.clearErrorLocked(DnssecPolicyWarning)
 	zd.mu.Unlock()
 	switch {
 	case !changed:

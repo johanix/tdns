@@ -1689,8 +1689,13 @@ func TestAZoneARealReloadRemovedWhileItsFirstLoadWasInFlightIsNotRegisteredAgain
 	leaving := ZoneConf{Name: gone, Type: "primary", Store: "map", Zonefile: goneFile, DnssecPolicy: "base", OptionsStrs: []string{"online-signing"}}
 
 	// The engine is held inside the first load of the zone that goes, until released.
+	// The release is deferred, once, before the first reload starts, so that a failure
+	// below does not leave the engine held in the probe, where it cannot answer the
+	// shutdown the cleanup asks of it.
 	inFlight, release := make(chan struct{}), make(chan struct{})
-	var once sync.Once
+	var once, releaseOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	defer closeRelease()
 	policySyncProbe = func(z *ZoneData, stage policySyncStage) {
 		if z.ZoneName != gone || stage != policySyncRead {
 			return
@@ -1730,7 +1735,7 @@ func TestAZoneARealReloadRemovedWhileItsFirstLoadWasInFlightIsNotRegisteredAgain
 	// queued. (Not a refresh of the kept zone: the engine reads the zone's fields as
 	// it dispatches one, while the refresh that the second reload's refresher started
 	// is still writing them.)
-	close(release)
+	closeRelease()
 	marker := ZoneRefresher{Name: "marker.config.example.", Wait: true, Response: make(chan RefresherResponse, 1)}
 	h.engineConf.Internal.RefreshZoneCh <- marker
 	select {
@@ -1751,61 +1756,128 @@ func TestAZoneARealReloadRemovedWhileItsFirstLoadWasInFlightIsNotRegisteredAgain
 	}
 }
 
-// The writers of a zone's state, and what each does to a zone that a reload has
-// removed (its generation is bumped and it is out of Zones) -- written out where
-// the engine enforces the ordering invariant (RefreshEngine's dispatch), one test
-// per row that is not the engine's own:
+// The writers of a zone's state, and what each does to a ZoneData that something
+// still holds after it left Zones -- written out where the engine enforces the
+// ordering invariant (RefreshEngine's dispatch), one test per row that is not the
+// engine's own:
 //
 //	the engine's merge, sync and first load   they go on, on the zone it dequeued: it is detached, and nothing
 //	                                          they write registers it (TestAZoneARealReloadRemoved...)
-//	SetError, ClearError and their *Locked    write the zone's own error state, and republish it only while
-//	forms                                     the zone has not been removed or replaced (this test)
-//	SetStatus                                 republishes only while the zone is still the registered one (this test)
+//	SetError, ClearError, SetStatus and the   write the zone's own state and nothing in Zones (this test)
+//	*Locked forms
 //	recordPolicyOfNonSigningZone              writes no registry entry at all (TestAReloadsRecordOfAZoneThat...)
 //	the resigner                              walks the live registry: a removed zone is not renewed
 //	the engine, for a refresher queued        creates no zone, or drops it (the two tests above)
 //	before the removal
+//
+// The zone the writers hold is a stale pointer in three ways: it was removed and
+// marked (the reload's removal bumps its generation), it was removed by a path that
+// does not mark it (a catalog's, a rollback's), or another registration took its
+// name. None of them may put it into Zones, or over the registration that replaced
+// it. A zone that was never registered is not registered by a write either: the
+// creation paths register it themselves.
 func TestTheStateWritersOfAZoneARealReloadRemovedDoNotRegisterItAgain(t *testing.T) {
 	authApp(t)
-	const name = "writers.config.example."
-	zd := &ZoneData{ZoneName: name, Options: map[ZoneOption]bool{}, Logger: discardLogger()}
-	registerZones(t, zd)
-	if _, ok := Zones.Get(name); !ok {
-		t.Fatal("the zone is not registered; the test has lost its point")
-	}
-
-	// A reload removes it, as reloadZoneConfig does.
-	Zones.Remove(name)
-	zd.generation.Add(1)
-
-	for _, w := range []struct {
+	writers := func(zd *ZoneData) []struct {
 		what string
 		do   func()
-	}{
-		{"SetError", func() { zd.SetError(DnssecPolicyWarning, "a warning") }},
-		{"ClearError", func() { zd.ClearError(DnssecPolicyWarning) }},
-		{"SetError (a service-impacting category)", func() { zd.SetError(DnssecError, "an error") }},
-		{"ClearError (every category)", func() { zd.ClearError(NoError) }},
-		{"SetStatus", func() { zd.SetStatus(ZoneStatusReady) }},
-		{"the signature-validity check", func() {
-			zd.mu.Lock()
-			zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
-			zd.mu.Unlock()
-			UpdateSigValidityFloor(zd, &DnssecPolicy{}, 0, 0, false, func(uint8) bool { return false }, false)
-		}},
 	} {
-		w.do()
-		if _, registered := Zones.Get(name); registered {
-			t.Errorf("%s: the zone that was removed is registered again", w.what)
-			Zones.Remove(name)
+		return []struct {
+			what string
+			do   func()
+		}{
+			{"SetError", func() { zd.SetError(DnssecPolicyWarning, "a warning") }},
+			{"ClearError", func() { zd.ClearError(DnssecPolicyWarning) }},
+			{"SetError (a service-impacting category)", func() { zd.SetError(DnssecError, "an error") }},
+			{"ClearError (every category)", func() { zd.ClearError(NoError) }},
+			{"SetStatus", func() { zd.SetStatus(ZoneStatusReady) }},
+			{"the signature-validity check", func() {
+				zd.mu.Lock()
+				zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+				zd.mu.Unlock()
+				UpdateSigValidityFloor(zd, &DnssecPolicy{}, 0, 0, false, func(uint8) bool { return false }, false)
+			}},
+		}
+	}
+	newZone := func(name string) *ZoneData {
+		return &ZoneData{ZoneName: name, Options: map[ZoneOption]bool{}, Logger: discardLogger()}
+	}
+
+	for _, c := range []struct {
+		what string
+		mark bool // the removal bumps the generation
+	}{
+		{"removed and marked, as a reload removes a zone", true},
+		{"removed without a mark, as a path that does not bump the generation does", false},
+	} {
+		name := "writers-" + strings.Fields(c.what)[0] + map[bool]string{true: "m", false: "u"}[c.mark] + ".config.example."
+		zd := newZone(name)
+		registerZones(t, zd)
+		Zones.Remove(name)
+		if c.mark {
+			zd.generation.Add(1)
+		}
+		for _, w := range writers(zd) {
+			w.do()
+			if _, registered := Zones.Get(name); registered {
+				t.Errorf("%s, %s: the zone that was removed is registered again", c.what, w.what)
+				Zones.Remove(name)
+			}
 		}
 	}
 
-	// And a zone that is not removed is republished as before.
-	live := &ZoneData{ZoneName: "writerslive.config.example.", Options: map[ZoneOption]bool{}, Logger: discardLogger()}
-	t.Cleanup(func() { Zones.Remove(live.ZoneName) })
-	live.SetError(DnssecPolicyWarning, "a warning")
-	if cur, ok := Zones.Get(live.ZoneName); !ok || cur != live {
-		t.Error("SetError no longer registers a zone that has not been removed")
+	// Another registration took the name: the stale pointer does not replace it.
+	const taken = "writers-replaced.config.example."
+	old, current := newZone(taken), newZone(taken)
+	registerZones(t, old)
+	Zones.Set(taken, current) // the replacement registers; old's generation is not bumped yet
+	t.Cleanup(func() { Zones.Remove(taken) })
+	for _, w := range writers(old) {
+		w.do()
+		if cur, _ := Zones.Get(taken); cur != current {
+			t.Errorf("%s: a stale zone replaced the registration that took its name", w.what)
+			Zones.Set(taken, current)
+		}
+	}
+
+	// A zone that was never registered is not registered by a write.
+	const never = "writers-never.config.example."
+	fresh := newZone(never)
+	for _, w := range writers(fresh) {
+		w.do()
+		if _, registered := Zones.Get(never); registered {
+			t.Errorf("%s: a zone that was never registered is registered by a write", w.what)
+			Zones.Remove(never)
+		}
+	}
+
+	// And the window the generation check left: writers running while a
+	// replacement lands, ending with the replacement in place.
+	const raced = "writers-raced.config.example."
+	for i := 0; i < 300; i++ {
+		stale, fresh := newZone(raced), newZone(raced)
+		Zones.Set(raced, stale)
+		stop, done := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(done)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					stale.SetError(DnssecPolicyWarning, "a warning")
+					stale.ClearError(DnssecPolicyWarning)
+				}
+			}
+		}()
+		time.Sleep(50 * time.Microsecond)
+		Zones.Set(raced, fresh)
+		stale.generation.Add(1)
+		close(stop)
+		<-done
+		if cur, _ := Zones.Get(raced); cur != fresh {
+			t.Fatalf("round %d: a writer holding the replaced zone put it back over the registration that replaced it", i)
+		}
+		Zones.Remove(raced)
 	}
 }

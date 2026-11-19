@@ -848,7 +848,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			//	                          removed it
 			//	the same ZoneData         applied. Refreshers of one registration
 			//	                          are applied in the order they were queued,
-			//	                          so the newest config lands last
+			//	                          so the newest config lands last, on what
+			//	                          the earlier ones left: a zone they gave
+			//	                          keys under one algorithm meets a newest
+			//	                          config with another as the algorithm
+			//	                          change it is (refused without a rollover
+			//	                          engine, as for any signed zone)
 			//	another ZoneData          dropped: a later reload removed the zone
 			//	                          and registered it again, and that
 			//	                          registration's own refresher, queued after
@@ -882,19 +887,22 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			//	load and refresh                   detached; nothing they write registers
 			//	                                   it, and the persist steps stop at the
 			//	                                   generation (B5b)
-			//	SetError, ClearError and the       write the zone's own error state, and
-			//	*Locked forms                      republish it only while its generation
-			//	                                   is 0 (republishUnlessRemoved)
-			//	SetStatus                          republishes only while the zone is the
-			//	                                   registered one
+			//	SetError, ClearError, SetStatus    write the zone's own state and nothing
+			//	and the *Locked forms              in Zones: they used to end with a
+			//	                                   Zones.Set, which put a removed zone
+			//	                                   back, or put a stale pointer over the
+			//	                                   registration that replaced it
 			//	recordPolicyOfNonSigningZone       writes no registry entry
 			//	the resigner                       walks the live registry: a removed zone
 			//	                                   is not renewed
 			//	a refresher queued before the      creates no zone, or is dropped (above)
 			//	removal
 			//
-			// A write that has read the generation before the bump and reaches its
-			// Set after the Remove is the one case left; it is a few statements wide.
+			// A zone is put into Zones where it is created, by an explicit Zones.Set
+			// (ParseZones, the engine's creation of a dynamic zone, the dynamic and
+			// catalog paths), and nowhere else on these paths. What is in the keystore
+			// under the zone's name (its keys, its last-applied policy) is not the
+			// registration's, and outlives it.
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
 					if zr.Registered != nil && zr.Registered != zd {

@@ -580,9 +580,16 @@ type ZoneError struct {
 // after every change. zd.ErrorType reports the highest-priority active
 // category per errorTypeReportOrder.
 //
-// Holds zd.mu for the duration so the registry mutation, derived-field
-// recomputation, and Zones.Set are atomic against any concurrent
-// HasError/ErrorList reader.
+// Holds zd.mu for the duration so the registry mutation and the derived-field
+// recomputation are atomic against any concurrent HasError/ErrorList reader.
+//
+// It writes the zone's own error state and nothing in Zones. It used to end with
+// a Set of the zone under its own name, a no-op for the registered zone and an
+// insertion for any other: a ZoneData that a reload had removed, or another
+// registration had replaced, and that something still held (the engine in the
+// middle of a first load, a policy apply), put itself back, or put itself over the
+// registration that replaced it. A zone is registered where it is created,
+// explicitly.
 func (zd *ZoneData) SetError(errtype ErrorType, errmsg string, args ...interface{}) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
@@ -593,40 +600,6 @@ func (zd *ZoneData) SetError(errtype ErrorType, errmsg string, args ...interface
 // exists so a zd.mu-holding path (e.g. SignZone → UpdateSigValidityFloor) can
 // record an error without re-locking — Go mutexes are not reentrant.
 func (zd *ZoneData) setErrorLocked(errtype ErrorType, errmsg string, args ...interface{}) {
-	zd.setErrorUnpublishedLocked(errtype, errmsg, args...)
-	zd.republishUnlessRemoved()
-}
-
-// republishUnlessRemoved is the Zones.Set that setErrorLocked and clearErrorLocked
-// end with: a no-op for a zone that is registered, and a registration for one that is
-// not yet, as the creation paths that build a zone and write its error state first
-// have always had it. It does nothing for a zone that has been removed or replaced,
-// which is what a bumped generation says: whoever holds such a zone (the engine, in
-// the middle of a first load, a policy apply, a refresh) goes on writing its error
-// state, and every write registered it again, so that a zone a reload had removed
-// came back, signed and served, with nothing in the config to name it.
-//
-// Every removal bumps the generation: the reload's (reloadZoneConfig), an API
-// delete's and a replacement's. The check and the Set are not one step, and the
-// removal's own Remove and bump are not either, so a write that reads the
-// generation before the bump and reaches the Set after the Remove still registers
-// the zone; the window is a few statements wide, on both sides, and the guard
-// narrows to it what was the whole of the zone's remaining work.
-func (zd *ZoneData) republishUnlessRemoved() {
-	if zd.generation.Load() != 0 {
-		return
-	}
-	// no-refresh-hooks: republishes an existing ZoneData.
-	Zones.Set(zd.ZoneName, zd)
-}
-
-// setErrorUnpublishedLocked is setErrorLocked without the republish: the zone's
-// error state is changed and nothing else is. The republish is a no-op for a zone
-// that is registered, and registers one that is not: a caller that holds a
-// ZoneData a reload has since removed from Zones would put it back. A caller
-// that can be handed a zone like that uses this one. The caller MUST already
-// hold zd.mu.
-func (zd *ZoneData) setErrorUnpublishedLocked(errtype ErrorType, errmsg string, args ...interface{}) {
 	if errtype == NoError {
 		zd.Errors = nil
 	} else {
@@ -676,13 +649,6 @@ func (zd *ZoneData) ClearError(errtype ErrorType) {
 // clearErrorLocked is ClearError's body; the caller MUST already hold zd.mu.
 // See setErrorLocked for why this exists.
 func (zd *ZoneData) clearErrorLocked(errtype ErrorType) {
-	zd.clearErrorUnpublishedLocked(errtype)
-	zd.republishUnlessRemoved()
-}
-
-// clearErrorUnpublishedLocked is clearErrorLocked without the republish; see
-// setErrorUnpublishedLocked. The caller MUST already hold zd.mu.
-func (zd *ZoneData) clearErrorUnpublishedLocked(errtype ErrorType) {
 	if errtype == NoError {
 		zd.Errors = nil
 	} else if zd.Errors != nil {
@@ -694,22 +660,17 @@ func (zd *ZoneData) clearErrorUnpublishedLocked(errtype ErrorType) {
 	zd.recomputeDerivedErrorFieldsLocked()
 }
 
-// SetStatus sets the zone's positive-lifecycle status and republishes the zone
-// in the Zones map. Same lock discipline as SetError; no derived fields to
-// recompute. Orthogonal to the error registry.
+// SetStatus sets the zone's positive-lifecycle status. Same lock discipline as
+// SetError; no derived fields to recompute. Orthogonal to the error registry.
 //
-// The republish is guarded: an in-flight refresh on a deleted or replaced zone
-// (e.g. SetStatus(Loading) at the top of FetchFromUpstream) must NOT re-insert
-// the stale pointer into Zones — that would resurrect a zone the operator just
-// deleted. We only republish when zd is still the live entry for its name.
+// It writes the zone and nothing in Zones. The republish it used to end with was
+// guarded (only while zd was the registered entry), but the guard and the Set were
+// two steps, and a registration that replaced zd between them was replaced again
+// by zd: the stale pointer is not put back by something that merely holds it.
 func (zd *ZoneData) SetStatus(s ZoneStatus) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 	zd.Status = s
-	if cur, live := Zones.Get(zd.ZoneName); live && cur == zd {
-		// no-refresh-hooks: republishes an existing ZoneData.
-		Zones.Set(zd.ZoneName, zd)
-	}
 }
 
 // GetStatus returns the zone's positive-lifecycle status under the lock.
