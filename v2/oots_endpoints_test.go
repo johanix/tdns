@@ -213,7 +213,7 @@ func TestTryServerRedirectWaitsForTargetAddrs(t *testing.T) {
 	t.Cleanup(func() { endpointAddrLookupHook = saved })
 	ctx := context.Background()
 
-	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err != nil {
 		t.Fatalf("before the lookup: %v", err)
 	}
 	if got := lastDial(dot); got != "192.0.2.1" {
@@ -238,7 +238,7 @@ func TestTryServerRedirectWaitsForTargetAddrs(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err != nil {
 		t.Fatalf("after the lookup: %v", err)
 	}
 	if got := lastDial(dot); got != "192.0.2.53:1234" {
@@ -273,7 +273,7 @@ func TestTryServerRedirectBackoffAndFallback(t *testing.T) {
 	target := targetServer(t, imr, dotTarget)
 	target.RecordEndpointAddrRTT("192.0.2.99", 1234, core.TransportDoT, time.Millisecond) // the faster one, tried first
 
-	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err == nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err == nil {
 		t.Fatal("192.0.2.99 has no programmed answer; want a failure")
 	}
 	if got := lastDial(dot); got != "192.0.2.99:1234" {
@@ -288,7 +288,7 @@ func TestTryServerRedirectBackoffAndFallback(t *testing.T) {
 	if !server.IsAddrXportAvailable("192.0.2.1", core.TransportDoT) {
 		t.Errorf("a target's failure backed off the nameserver's own address")
 	}
-	_, _, _, ep, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone)
+	_, _, _, ep, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown)
 	if err != nil {
 		t.Fatalf("second attempt: %v", err)
 	}
@@ -303,14 +303,14 @@ func TestTryServerRedirectBackoffAndFallback(t *testing.T) {
 
 	target.RecordEndpointAddrFailure("2001:db8::53", 1234, core.TransportDoT, nil)
 	n := len(dot.Calls())
-	_, _, _, _, err = imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone)
+	_, _, _, _, err = imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown)
 	if _, ok := err.(errEndpointUnavailable); !ok {
 		t.Errorf("every target address backed off: err %v, want errEndpointUnavailable", err)
 	}
 	if len(dot.Calls()) != n {
 		t.Errorf("an attempt was dialed with every target address backed off")
 	}
-	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err != nil {
 		t.Fatalf("Do53 fallback: %v", err)
 	}
 	if got := lastDial(do53); got != "192.0.2.1" {
@@ -324,7 +324,7 @@ func TestTryServerDefaultEndpointsContext(t *testing.T) {
 	imr, server, dot, _, q := endpointTestRig(t)
 	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
 	ctx := withDefaultEndpoints(context.Background())
-	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err != nil {
 		t.Fatalf("%v", err)
 	}
 	if got := lastDial(dot); got != "192.0.2.1" {
@@ -368,7 +368,7 @@ func TestEndpointAddrTracker(t *testing.T) {
 	if _, _, ok, _ := tr.get(dotTarget, now); ok {
 		t.Fatal("known before any lookup")
 	}
-	if !tr.begin(dotTarget, now) || tr.begin(dotTarget, now) {
+	if !began(tr.begin(dotTarget, now)) || began(tr.begin(dotTarget, now)) {
 		t.Fatal("begin: want one lookup in flight")
 	}
 	running := tr.inflight(dotTarget)
@@ -384,10 +384,10 @@ func TestEndpointAddrTracker(t *testing.T) {
 	if tr.inflight(dotTarget) != nil {
 		t.Error("a lookup still running after finish")
 	}
-	if tr.begin(dotTarget, now.Add(endpointAddrRetry/2)) {
+	if began(tr.begin(dotTarget, now.Add(endpointAddrRetry/2))) {
 		t.Error("a failed lookup retried before endpointAddrRetry")
 	}
-	if !tr.begin(dotTarget, now.Add(endpointAddrRetry)) {
+	if !began(tr.begin(dotTarget, now.Add(endpointAddrRetry))) {
 		t.Fatal("not retried after endpointAddrRetry")
 	}
 	tr.finish(dotTarget, sameExpiry([]string{"192.0.2.53"}, now.Add(time.Minute)), now, nil)
@@ -557,7 +557,7 @@ func TestProbeStubServersFollowsRedirect(t *testing.T) {
 	}
 	// A lookup started would be in flight or have failed: either way begin
 	// could not claim it now.
-	if !imr.endpointAddrs.begin(dotTarget, time.Now()) {
+	if !began(imr.endpointAddrs.begin(dotTarget, time.Now())) {
 		t.Error("the probe started a lookup")
 	}
 	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))

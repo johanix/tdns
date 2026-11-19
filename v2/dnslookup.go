@@ -797,13 +797,17 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 // ServerAddrXportTuple represents one prioritized query candidate: a server,
 // one of its addresses, and the transport to use for the attempt.
 // Rank is the index of Transport in candidateTransports for this
-// (qname, server) — 0 is the OOTS share-weighted winner.
+// (qname, server) — 0 is the OOTS share-weighted winner. Family is the
+// address family selection decided on: that of the address the attempt
+// would dial then (attemptKey), a redirect target's or the server's own.
+// FamilyUnknown for a tuple made elsewhere.
 type ServerAddrXportTuple struct {
 	Server    *cache.AuthServer
 	Addr      string
 	NSName    string
 	Transport core.Transport
 	Rank      int
+	Family    cache.AddressFamily
 }
 
 // hostLocalAddr reports whether addr, a bare IP literal, reaches this host: a
@@ -950,7 +954,7 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 				// the glue's.
 				fam := cache.FamilyOf(d.addr)
 				tup := ServerAddrXportTuple{
-					Server: server, Addr: addr, NSName: nsname, Transport: t, Rank: rank,
+					Server: server, Addr: addr, NSName: nsname, Transport: t, Rank: rank, Family: fam,
 				}
 				if imr.FamilyTracker.IsSuspect(fam) {
 					if imr.FamilyTracker.ShouldProbe(fam) {
@@ -1161,7 +1165,7 @@ type passTuple struct {
 }
 
 // anotherPassSelectedHook, when set, runs in anotherPassAfter after the pass's
-// first selection, before the running target lookups are collected: tests end
+// first selection, before the target lookups are looked at again: tests end
 // or allow a lookup there.
 var anotherPassSelectedHook func()
 
@@ -1183,10 +1187,11 @@ var anotherPassWaitHook func()
 // all: every one it tried went into backoff, and a server without a signal
 // may have nothing else yet. It then waits, within the query's budget, until
 // an untried tuple appears: first for the running lookups of the redirect
-// targets the servers' signals name, then, unless tried tuples are left, for
-// the signals of the servers that have an address and none. A query held to
-// the default endpoints (withDefaultEndpoints), as a target's own address
-// lookup is, never dials a target, and waits for none. A transport
+// targets the servers' signals send a transport the query may use to
+// (targetLookupWatch), then, unless tried tuples are left, for the signals of
+// the servers that have an address and none. A query held to the default
+// endpoints (withDefaultEndpoints), as a target's own address lookup is,
+// never dials a target, and waits for none. A transport
 // redirected to a target whose addresses are still being looked up goes to
 // its default endpoint, the nameserver's own address, which may not serve
 // it; once that attempt has failed, the target is the one thing left, and the
@@ -1214,33 +1219,33 @@ func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, 
 		sel.zoneName, sel.zone, sel.tuples = imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false, skip)
 		return len(sel.tuples) > 0
 	}
+	// Where the target lookups stand is read before the first selection,
+	// so that one ending after it shows (targetLookupWatch).
+	var watch func() (map[string]<-chan struct{}, bool)
+	if !defaultEndpointsOnly(ctx) {
+		watch = imr.targetLookupWatch(serverMap, qname, privacy)
+		watch()
+	}
 	if untried() {
 		return &sel
 	}
 	if anotherPassSelectedHook != nil {
 		anotherPassSelectedHook()
 	}
-	// The running target lookups are collected, and the selection made
-	// again: a lookup that ended after the last selection and before the
-	// collection brought tuples that selection never saw, and one ending
-	// after it is waited for. A selection may start a lookup itself, as when
-	// a target's retry mark ran out after the last one, so the collection is
-	// made again after each selection, until it finds no new lookup.
+	// The running target lookups are collected, to be waited for, and the
+	// selection made again: a target's retry mark may have run out since the
+	// last one, and a selection starts the lookup of such a target itself.
+	// It is made again for as long as a lookup has ended since the selection
+	// before, whose tuples that selection may not have seen.
 	targets := map[string]<-chan struct{}{}
-	collect := func() bool {
-		n := len(targets)
-		maps.Copy(targets, imr.runningTargetLookups(serverMap))
-		return len(targets) > n
-	}
-	if !defaultEndpointsOnly(ctx) {
-		collect()
-		for {
-			if untried() {
-				return &sel
-			}
-			if !collect() {
-				break
-			}
+	for reselected := false; watch != nil; reselected = true {
+		running, ended := watch()
+		maps.Copy(targets, running)
+		if reselected && !ended {
+			break
+		}
+		if untried() {
+			return &sel
 		}
 	}
 	if triedLeft && len(targets) == 0 {
@@ -1261,7 +1266,7 @@ func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, 
 		if anotherPassWaitHook != nil {
 			anotherPassWaitHook()
 		}
-		if len(targets) > 0 && awaitTargetLookups(wctx, targets, untried) {
+		if len(targets) > 0 && awaitTargetLookups(wctx, targets, watch, untried) {
 			return true
 		}
 		if len(unsignalled) > 0 {
@@ -1272,6 +1277,15 @@ func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, 
 		return &sel
 	}
 	return nil
+}
+
+// familyChangedToSuspect reports whether addr, the address an attempt is
+// about to dial, is of a family other than selected, the one selection
+// decided on, and held suspect: no probe was reserved for it. FamilyUnknown
+// is no decision.
+func (imr *Imr) familyChangedToSuspect(selected cache.AddressFamily, addr string) bool {
+	fam := cache.FamilyOf(addr)
+	return selected != cache.FamilyUnknown && fam != selected && imr.FamilyTracker.IsSuspect(fam)
 }
 
 // unprobedRTTSentinel is the RTT used for sort when no usable sample exists
@@ -2177,7 +2191,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
+			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy), tuple.Family)
 			if dnskeyBypass {
 				// Under the transport tryServer dialed: it reads the
 				// preference again, and a signal update in between may
@@ -3396,8 +3410,10 @@ func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 // endpoint tried. zone is the zone the query is for (nil when none is
 // known): an endpoint lame for it is not chosen (endpointFor).
 //
-// class is whose query it is, for the per-class answer counters.
-func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass) (*dns.Msg, time.Duration, core.Transport, endpointDial, error) {
+// class is whose query it is, for the per-class answer counters. family is
+// the address family selection decided on for the tuple
+// (ServerAddrXportTuple.Family), FamilyUnknown when none did.
+func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass, family cache.AddressFamily) (*dns.Msg, time.Duration, core.Transport, endpointDial, error) {
 	eff := t
 	if dnskeyBypass {
 		// DNSKEY transport policy bypasses this server's probabilistic
@@ -3434,9 +3450,13 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	// an attempt would have dialed then, and an attempt earlier in the pass
 	// may since have made it, or the fallback it gives way to, lame or
 	// backed off, as a target that refused does for the next tuple sent to
-	// it. Not under the DNSKEY bypass, which dials the preferred transport
-	// whatever selection said.
-	if eerr == nil && !dnskeyBypass && !endpointUsable(ep.server, zone, ep.addr, ep.keyPort, eff) {
+	// it. So is its address family, when it is not the one selection
+	// decided on: a udp or tcp endpoint at a target whose address has gone
+	// out of use gives way to the server's own address, and a family held
+	// suspect is dialed only as the probe selection reserved for it. Not
+	// under the DNSKEY bypass, which dials the preferred transport whatever
+	// selection said.
+	if eerr == nil && !dnskeyBypass && (!endpointUsable(ep.server, zone, ep.addr, ep.keyPort, eff) || imr.familyChangedToSuspect(family, ep.addr)) {
 		eerr = errEndpointUnavailable{server: server.Name, target: cache.JoinDialAddr(ep.addr, ep.port), transport: eff}
 	}
 	if eerr != nil {

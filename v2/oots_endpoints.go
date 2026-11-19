@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -449,6 +451,8 @@ type endpointAddrTracker struct {
 	entries map[string]*endpointTarget
 	pending map[string]chan struct{}
 	retry   map[string]time.Time
+	ended   map[string]uint64 // the stamp of each target's last lookup to end (lookupState)
+	stamps  uint64            // the last stamp given
 }
 
 // get returns target's instance and its addresses that are live, and whether
@@ -470,32 +474,62 @@ func (tr *endpointAddrTracker) get(target string, now time.Time) (srv *cache.Aut
 	return e.server, addrs, true, e.due(now)
 }
 
-// begin claims the lookup of target: false when one is in flight, or the last
-// one left the target without a live address less than endpointAddrRetry
-// ago.
-func (tr *endpointAddrTracker) begin(target string, now time.Time) bool {
+// begin claims the lookup of target, and returns the families it is to
+// query: every family but one that failed and whose retry time is still to
+// come, so that the refresh of one family does not retry the other early.
+// ok is false when a lookup is in flight, when the last one left the target
+// without a live address less than endpointAddrRetry ago, when no family is
+// left to query, or when the target has live addresses and no family of it is
+// due (endpointFamily.due): the caller read it stale before another lookup
+// refreshed it.
+func (tr *endpointAddrTracker) begin(target string, now time.Time) (fams []cache.AddressFamily, ok bool) {
 	key := core.CanonicalizeName(target)
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	if tr.pending[key] != nil || now.Before(tr.retry[key]) {
-		return false
+		return nil, false
+	}
+	e := tr.entries[key]
+	if e != nil && len(e.live(now)) > 0 && !e.due(now) {
+		return nil, false
+	}
+	for _, fam := range endpointFamilies {
+		if e != nil {
+			if f := e.fams[fam]; f != nil && now.Before(f.retryAt) {
+				continue
+			}
+		}
+		fams = append(fams, fam)
+	}
+	if len(fams) == 0 {
+		return nil, false
 	}
 	if tr.pending == nil {
 		tr.pending = map[string]chan struct{}{}
 	}
 	tr.pending[key] = make(chan struct{})
-	return true
+	return fams, true
 }
 
 // inflight returns a channel that is closed when the running lookup of
 // target ends, or nil when none is running.
 func (tr *endpointAddrTracker) inflight(target string) <-chan struct{} {
+	_, ch := tr.lookupState(target)
+	return ch
+}
+
+// lookupState returns the stamp of the last lookup of target to end, 0 when
+// the tracker holds none, and a channel that is closed when the running one
+// ends, nil when none is running. Each lookup that ends gets a stamp no other
+// has had, so that one ending between two readings always shows.
+func (tr *endpointAddrTracker) lookupState(target string) (ended uint64, running <-chan struct{}) {
+	key := core.CanonicalizeName(target)
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
-	if ch := tr.pending[core.CanonicalizeName(target)]; ch != nil {
-		return ch
+	if ch := tr.pending[key]; ch != nil {
+		running = ch
 	}
-	return nil
+	return tr.ended[key], running
 }
 
 // finish ends the lookup of target with the addresses found, in the form
@@ -537,6 +571,16 @@ func (tr *endpointAddrTracker) finishLookup(target string, results []familyLooku
 			delete(tr.retry, k)
 		}
 	}
+	for k := range tr.ended {
+		if tr.entries[k] == nil && tr.pending[k] == nil && tr.retry[k].IsZero() {
+			delete(tr.ended, k)
+		}
+	}
+	if tr.ended == nil {
+		tr.ended = map[string]uint64{}
+	}
+	tr.stamps++
+	tr.ended[key] = tr.stamps
 	e := tr.entries[key]
 	fams := map[cache.AddressFamily]*endpointFamily{}
 	if e != nil {
@@ -627,23 +671,40 @@ func sameExpiry(addrs []string, expire time.Time) []endpointAddr {
 // endpointAddrLookupHook, when set, stands in for lookupEndpointAddrs: tests
 // set it, so that no lookup leaves the process. Its addresses all run out at
 // the time it returns, and it is read as finish reads addresses (answersOf):
-// a family with none is denied, and none at all is a lookup that failed.
+// a family with none is denied, and none at all is a lookup that failed. Of
+// that, only the families the lookup queries count (onlyFamilies).
 var endpointAddrLookupHook func(imr *Imr, target string) ([]string, time.Time)
 
-// startEndpointLookup looks up target's addresses off the query path, unless
-// a lookup is in flight or failed a moment ago.
+// onlyFamilies is the outcomes in results of the families in fams.
+func onlyFamilies(results []familyLookup, fams []cache.AddressFamily) []familyLookup {
+	out := make([]familyLookup, 0, len(results))
+	for _, r := range results {
+		if slices.Contains(fams, r.family) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// startEndpointLookup looks up target's addresses off the query path, the
+// families begin says are to be queried, unless a lookup is in flight or
+// failed a moment ago, or no family is due.
 func (imr *Imr) startEndpointLookup(target string) {
-	if imr.Cache == nil || !imr.endpointAddrs.begin(target, time.Now()) {
+	if imr.Cache == nil {
+		return
+	}
+	fams, ok := imr.endpointAddrs.begin(target, time.Now())
+	if !ok {
 		return
 	}
 	lookup := (*Imr).lookupEndpointAddrs
 	if hook := endpointAddrLookupHook; hook != nil {
-		lookup = func(imr *Imr, target string) []familyLookup {
-			return answersOf(sameExpiry(hook(imr, target)))
+		lookup = func(imr *Imr, target string, fams []cache.AddressFamily) []familyLookup {
+			return onlyFamilies(answersOf(sameExpiry(hook(imr, target))), fams)
 		}
 	}
 	go func() {
-		results := lookup(imr, target)
+		results := lookup(imr, target, fams)
 		imr.endpointAddrs.finishLookup(target, results, time.Now(), imr.Cache.NewTargetAuthServer)
 		if !imr.Quiet {
 			lgDns.Debug("transport signal: endpoint addresses", "target", target, "results", fmt.Sprint(results))
@@ -651,9 +712,9 @@ func (imr *Imr) startEndpointLookup(target string) {
 	}()
 }
 
-// lookupEndpointAddrs looks up target's A and AAAA, CNAMEs followed, as for
-// any nameserver name, through the servers' default endpoints, and returns
-// each family's outcome (familyLookup). An answer held Bogus is not used;
+// lookupEndpointAddrs looks up the families of target's addresses in fams, A
+// and AAAA, CNAMEs followed, as for any nameserver name, through the servers'
+// default endpoints, and returns each family's outcome (familyLookup). An answer held Bogus is not used;
 // Insecure is, as a nameserver's address is (section 4). Each family's
 // addresses run out when the first of the records that led to them does, the
 // links of a CNAME chain included (addrsExpiry): the two families apart, so
@@ -661,7 +722,7 @@ func (imr *Imr) startEndpointLookup(target string) {
 // with it. A family failed when its query got no answer to go by: an error,
 // a Bogus answer or denial, or addresses whose expiry is not known. A denial
 // is an answer: the family has no addresses.
-func (imr *Imr) lookupEndpointAddrs(target string) []familyLookup {
+func (imr *Imr) lookupEndpointAddrs(target string, fams []cache.AddressFamily) []familyLookup {
 	ctx, cancel := detachedContext(5 * time.Second)
 	defer cancel()
 	ctx = withDefaultEndpoints(ctx)
@@ -670,6 +731,9 @@ func (imr *Imr) lookupEndpointAddrs(target string) []familyLookup {
 		r := familyLookup{family: cache.FamilyV4}
 		if qtype == dns.TypeAAAA {
 			r.family = cache.FamilyV6
+		}
+		if !slices.Contains(fams, r.family) {
+			continue
 		}
 		resp, err := imr.ImrQuery(ctx, target, qtype, dns.ClassINET, nil)
 		switch {
@@ -751,62 +815,107 @@ func redirectTargetName(d endpointDial) string {
 	return d.server.Name
 }
 
-// runningTargetLookups returns, for the servers in serverMap that have an
-// address, the running lookups of the targets their signals send a transport
-// to: a channel per target, closed when its lookup ends.
-func (imr *Imr) runningTargetLookups(serverMap map[string]*cache.AuthServer) map[string]<-chan struct{} {
-	out := map[string]<-chan struct{}{}
-	for _, server := range serverMap {
-		if server == nil || len(server.GetAddrs()) == 0 {
-			continue
-		}
-		for _, ep := range server.GetTransportEndpoints() {
-			if ep.Target == "" {
+// targetLookupWatch follows the lookups of the targets that the servers in
+// serverMap that have an address send a transport to, a transport a query
+// for qname at privacy may use (candidateTransports): a strict query never
+// waits for the target of a udp endpoint, which it cannot dial. Each call
+// returns the lookups running then, a channel per target closed when its
+// lookup ends, and whether a lookup of one of the targets has ended since the
+// call before (endpointAddrTracker.lookupState). The first call reads where
+// things stand.
+func (imr *Imr) targetLookupWatch(serverMap map[string]*cache.AuthServer, qname string, privacy edns0.PrivacyLevel) func() (running map[string]<-chan struct{}, ended bool) {
+	last := map[string]uint64{}
+	return func() (map[string]<-chan struct{}, bool) {
+		running := map[string]<-chan struct{}{}
+		ended := false
+		seen := map[string]bool{}
+		for _, server := range serverMap {
+			if server == nil || len(server.GetAddrs()) == 0 {
 				continue
 			}
-			key := core.CanonicalizeName(ep.Target)
-			if _, ok := out[key]; ok {
-				continue
-			}
-			if ch := imr.endpointAddrs.inflight(key); ch != nil {
-				out[key] = ch
+			for _, t := range candidateTransports(server, qname, privacy) {
+				ep := server.GetTransportEndpoint(t)
+				if ep.Target == "" {
+					continue
+				}
+				key := core.CanonicalizeName(ep.Target)
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				stamp, ch := imr.endpointAddrs.lookupState(key)
+				if stamp != last[key] {
+					ended = true
+					last[key] = stamp
+				}
+				if ch != nil {
+					running[key] = ch
+				}
 			}
 		}
+		return running, ended
 	}
-	return out
 }
 
-// awaitTargetLookups waits for the target lookups in running
-// (runningTargetLookups) until ready says a tuple is usable, every lookup
-// has ended, or ctx is done, and reports what ready says then. ready is
-// asked once per lookup that ends, and not before: the caller has just
-// asked, and each asking selects, which may reserve a suspect family's
-// probe. Whichever lookup ends first is looked at first. A lookup is bounded
-// by its own deadline (lookupEndpointAddrs), so the wait is too.
-func awaitTargetLookups(ctx context.Context, running map[string]<-chan struct{}, ready func() bool) bool {
+// awaitTargetLookups waits for the target lookups in running until ready
+// says a tuple is usable, no lookup it waits for is running, or ctx is done,
+// and reports what ready says then. ready is asked when a lookup ends, and
+// not before: the caller has just asked, and each asking selects, which may
+// reserve a suspect family's probe. Whichever lookup ends first is looked at
+// first. After each asking, watch (targetLookupWatch) gives the lookups
+// running then, which the wait takes on, as one that ready itself started for
+// a target whose retry mark had run out; when a lookup ended meanwhile, ready
+// is asked again. A lookup is bounded by its own deadline
+// (lookupEndpointAddrs), so the wait is too.
+func awaitTargetLookups(ctx context.Context, running map[string]<-chan struct{}, watch func() (map[string]<-chan struct{}, bool), ready func() bool) bool {
 	if len(running) == 0 {
 		return ready()
 	}
-	ended := make(chan struct{}, len(running))
+	ended := make(chan struct{})
 	stop := make(chan struct{})
 	defer close(stop)
-	for _, ch := range running {
-		go func(ch <-chan struct{}) {
-			select {
-			case <-ch:
-				ended <- struct{}{}
-			case <-stop:
+	waiting := map[<-chan struct{}]bool{}
+	left := 0
+	add := func(lookups map[string]<-chan struct{}) {
+		for _, ch := range lookups {
+			if waiting[ch] {
+				continue
 			}
-		}(ch)
+			waiting[ch] = true
+			left++
+			go func() {
+				select {
+				case <-ch:
+					select {
+					case ended <- struct{}{}:
+					case <-stop:
+					}
+				case <-stop:
+				}
+			}()
+		}
 	}
-	for range running {
+	take := func() bool {
+		lookups, endedSince := watch()
+		add(lookups)
+		return endedSince
+	}
+	add(running)
+	for left > 0 {
 		select {
 		case <-ended:
+			left--
 		case <-ctx.Done():
 			return ready()
 		}
-		if ready() {
-			return true
+		take()
+		for {
+			if ready() {
+				return true
+			}
+			if !take() {
+				break
+			}
 		}
 	}
 	return false

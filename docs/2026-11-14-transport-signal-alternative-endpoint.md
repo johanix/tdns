@@ -416,10 +416,14 @@ written; this section says how section 3's rules apply at a target.
     the other family;
   - *failed*: its query got no answer to go by. It keeps the addresses it
     holds, used while they are live, and it is looked up again after the
-    usual retry interval, whether or not it holds any.
+    usual retry interval, whether or not it holds any. Until then it is not
+    queried, even when a lookup refreshes the other family.
 
   Only an answer replaces what a family holds. A denial counts as an answer,
-  so it clears the family even when the other family's query fails. The
+  so it clears the family even when the other family's query fails. A
+  lookup is claimed only while a family is due, checked when it is claimed,
+  so a query that found the target due just before another lookup refreshed
+  it starts none. The
   target never takes glue, a same-named nameserver's addresses or a stub's,
   and it never carries a signal. The
   transport and port of an attempt still come from the redirecting
@@ -446,7 +450,16 @@ written; this section says how section 3's rules apply at a target.
   waits for a server's signal lookup. It waits also when the default
   endpoint failed without a backoff (a refused DS query): the target is an
   endpoint the query has not tried. That includes a lookup the query's own
-  server selection has just started. A query held to the default endpoints,
-  as a target's address lookup is, never waits for a target.
+  server selection has just started, before or during the wait. It waits
+  only for targets that a transport the query may use is sent to: a strict
+  query never waits for a udp endpoint's target. A query held to the default
+  endpoints, as a target's address lookup is, never waits for a target.
+- **The address family of an attempt.** Selection holds back a tuple whose
+  address family is suspect, letting one through now and then as a probe,
+  by the address the attempt would dial: a target's, not the glue's. If that
+  changes before the attempt, as when a udp endpoint at a target whose
+  address has gone into backoff gives way to the nameserver's own address,
+  an address of a suspect family is not dialed unless selection chose that
+  family.
 - **Status output** lists each target on a line of its own, marked as a
   target.

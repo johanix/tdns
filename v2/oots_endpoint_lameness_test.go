@@ -330,14 +330,14 @@ func TestTryServerRechecksTheFinalEndpoint(t *testing.T) {
 	server.RecordEndpointAddrFailure(epLameNSAddr, 0, core.TransportDo53, errors.New("i/o timeout"))
 	ctx := context.Background()
 
-	_, _, _, _, err := imr.tryServer(ctx, server, zone, epLameNSAddr, core.TransportDo53, q, "www."+epLameZone, dns.TypeA, false, cache.ClassNone)
+	_, _, _, _, err := imr.tryServer(ctx, server, zone, epLameNSAddr, core.TransportDo53, q, "www."+epLameZone, dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown)
 	if _, ok := err.(errEndpointUnavailable); !ok {
 		t.Errorf("port 53 backed off: err %v, want errEndpointUnavailable", err)
 	}
 	if n := len(do53.Calls()); n != 0 {
 		t.Fatalf("%d dial(s) to an endpoint that is backed off", n)
 	}
-	_, _, _, ep, err := imr.tryServer(ctx, server, zone, "192.0.2.2", core.TransportDo53, q, "www."+epLameZone, dns.TypeA, false, cache.ClassNone)
+	_, _, _, ep, err := imr.tryServer(ctx, server, zone, "192.0.2.2", core.TransportDo53, q, "www."+epLameZone, dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown)
 	if err != nil || ep.addr != "192.0.2.2" || ep.port != 0 || lastDial(do53) != "192.0.2.2" {
 		t.Errorf("port 53 usable: %+v %v, dialed %q, want 192.0.2.2 on port 53", ep, err, lastDial(do53))
 	}

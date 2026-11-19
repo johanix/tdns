@@ -9,6 +9,7 @@ import (
 	"errors"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,12 +41,24 @@ func targetServer(t *testing.T, imr *Imr, target string) *cache.AuthServer {
 // redirectedServer is a nameserver at addr whose DoT a validated signal sends
 // to dotTarget at port 1234.
 func redirectedServer(name, addr string) *cache.AuthServer {
+	return redirectedServerTo(name, addr, core.TransportDoT, dotTarget)
+}
+
+// redirectedServerTo is a nameserver at addr whose one transport, t, a
+// validated signal sends to target at port 1234.
+func redirectedServerTo(name, addr string, t core.Transport, target string) *cache.AuthServer {
 	server := cache.NewAuthServer(name)
 	server.SetAddrs([]string{addr})
-	installTransportMap(server, map[string]uint8{"dot": 30}, map[core.Transport]uint16{core.TransportDoT: 1234},
-		map[core.Transport]string{core.TransportDoT: dotTarget}, cache.SignalViaLookup,
+	token := map[core.Transport]string{core.TransportDoT: "dot", core.TransportDo53: "udp"}[t]
+	installTransportMap(server, map[string]uint8{token: 30}, map[core.Transport]uint16{t: 1234},
+		map[core.Transport]string{t: target}, cache.SignalViaLookup,
 		[]cache.SignalHop{{Owner: "_dns." + name, State: cache.ValidationStateSecure}})
 	return server
+}
+
+// began is whether begin claimed the lookup.
+func began(_ []cache.AddressFamily, ok bool) bool {
+	return ok
 }
 
 // Two nameservers redirected to one target share its instance: a failure at
@@ -81,7 +94,7 @@ func TestATargetSharedByTwoNameserversLearnsItsBackoffOnce(t *testing.T) {
 	}
 
 	// One answer through ns1: counted on the target, and as redirected on ns1.
-	if _, _, _, _, err := imr.tryServer(ctx, ns1, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, ns1, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err != nil {
 		t.Fatalf("through ns1: %v", err)
 	}
 	if got := lastDial(dot); got != "192.0.2.53:1234" {
@@ -103,7 +116,7 @@ func TestATargetSharedByTwoNameserversLearnsItsBackoffOnce(t *testing.T) {
 
 	// The target's address fails through ns1.
 	dot.Set("example.", "192.0.2.53:1234", core.FakeResponse{Err: errors.New("i/o timeout")})
-	if _, _, _, _, err := imr.tryServer(ctx, ns1, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err == nil {
+	if _, _, _, _, err := imr.tryServer(ctx, ns1, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err == nil {
 		t.Fatal("through ns1: want a failure")
 	}
 	for _, s := range []*cache.AuthServer{ns1, ns2} {
@@ -115,7 +128,7 @@ func TestATargetSharedByTwoNameserversLearnsItsBackoffOnce(t *testing.T) {
 		t.Fatal("the target's failure is not on its instance")
 	}
 	n := len(dot.Calls())
-	if _, _, _, _, err := imr.tryServer(ctx, ns2, nil, "192.0.2.2", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err == nil {
+	if _, _, _, _, err := imr.tryServer(ctx, ns2, nil, "192.0.2.2", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err == nil {
 		t.Error("through ns2: an attempt at a target backed off through ns1")
 	}
 	if len(dot.Calls()) != n {
@@ -133,7 +146,9 @@ func TestATargetSharedByTwoNameserversLearnsItsBackoffOnce(t *testing.T) {
 	// the target is ns2's tuple too.
 	target.RecordEndpointAddrSuccess("192.0.2.53", 1234, core.TransportDoT)
 	tried := map[passTuple]bool{{target, "192.0.2.53", 1234, core.TransportDoT}: true}
-	skip := func(s *cache.AuthServer, a string, p uint16, tr core.Transport) bool { return tried[passTuple{s, a, p, tr}] }
+	skip := func(s *cache.AuthServer, a string, p uint16, tr core.Transport) bool {
+		return tried[passTuple{s, a, p, tr}]
+	}
 	_, _, tuples = imr.selectServerTuples(ctx, "example.", dns.TypeA, serverMap, edns0.PrivacyNone, false, skip)
 	for _, tup := range tuples {
 		if tup.Transport == core.TransportDoT {
@@ -222,7 +237,7 @@ func TestATargetsAddressFamiliesRunOutApart(t *testing.T) {
 	put(mustRR(t, dotTarget+` 1 IN A 192.0.2.53`), 500*time.Millisecond)
 	put(mustRR(t, dotTarget+` 3600 IN AAAA 2001:db8::53`), time.Hour)
 
-	results := imr.lookupEndpointAddrs(dotTarget)
+	results := imr.lookupEndpointAddrs(dotTarget, endpointFamilies[:])
 	if len(results) != 2 || results[0].failed || results[1].failed {
 		t.Fatalf("lookup %v, want both families answered", results)
 	}
@@ -233,8 +248,10 @@ func TestATargetsAddressFamiliesRunOutApart(t *testing.T) {
 	if !ok || len(addrs) != 1 || addrs[0] != "2001:db8::53" {
 		t.Errorf("after the A records ran out: %v %v, want the AAAA address", addrs, ok)
 	}
-	if imr.endpointAddrs.begin(dotTarget, later) == false {
-		// A retry mark would hold the next lookup back.
+	imr.endpointAddrs.mu.Lock()
+	_, held := imr.endpointAddrs.retry[core.CanonicalizeName(dotTarget)]
+	imr.endpointAddrs.mu.Unlock()
+	if held {
 		t.Error("the target is held back as if its lookup had failed")
 	}
 }
@@ -371,7 +388,7 @@ func TestAnotherPassWaitsForARunningTargetLookup(t *testing.T) {
 func TestAuthTransportsListsTargets(t *testing.T) {
 	imr, server, _, _, q := endpointTestRig(t)
 	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
-	if _, _, _, _, err := imr.tryServer(context.Background(), server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(context.Background(), server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err != nil {
 		t.Fatal(err)
 	}
 	rep := imr.AuthTransportsSnapshot(nil, "", false)
@@ -447,7 +464,7 @@ func TestAFamilyThatRunsOutIsLookedUpAgain(t *testing.T) {
 func TestAnotherPassSeesATargetLookupThatEndedBeforeTheCollection(t *testing.T) {
 	imr, server, _, _, _ := endpointTestRig(t)
 	server.SetAddrs([]string{"192.0.2.1"})
-	if !imr.endpointAddrs.begin(dotTarget, time.Now()) {
+	if !began(imr.endpointAddrs.begin(dotTarget, time.Now())) {
 		t.Fatal("setup: the lookup could not be claimed")
 	}
 	saved := anotherPassSelectedHook
@@ -519,7 +536,7 @@ func TestAFamilyWhoseRefreshFailsKeepsItsAddresses(t *testing.T) {
 		{addr: "2001:db8::53", expire: now.Add(time.Hour)},
 	}, now.Add(-time.Minute), imr.Cache.NewTargetAuthServer)
 
-	results := imr.lookupEndpointAddrs(dotTarget)
+	results := imr.lookupEndpointAddrs(dotTarget, endpointFamilies[:])
 	if len(results) != 2 || results[0].failed || !slices.Equal(results[0].addrs, []string{"192.0.2.54"}) || !results[1].failed {
 		t.Fatalf("lookup %v, want the new A and IPv6 failed", results)
 	}
@@ -544,7 +561,7 @@ func TestAFamilyThatRanOutAndFailedIsRetriedLater(t *testing.T) {
 		{addr: "2001:db8::53", expire: now.Add(time.Hour)},
 	}, now, nil)
 	later := now.Add(2 * time.Minute)
-	if !tr.begin(dotTarget, later) {
+	if !began(tr.begin(dotTarget, later)) {
 		t.Fatal("setup: the refresh could not be claimed")
 	}
 	tr.finishLookup(dotTarget, []familyLookup{
@@ -558,7 +575,7 @@ func TestAFamilyThatRanOutAndFailedIsRetriedLater(t *testing.T) {
 	if _, _, _, stale := tr.get(dotTarget, later.Add(endpointAddrRetry+time.Second)); !stale {
 		t.Error("the failed family is not due after endpointAddrRetry")
 	}
-	if !tr.begin(dotTarget, later.Add(endpointAddrRetry+time.Second)) {
+	if !began(tr.begin(dotTarget, later.Add(endpointAddrRetry+time.Second))) {
 		t.Error("the failed family's lookup could not be claimed after endpointAddrRetry")
 	}
 }
@@ -610,7 +627,7 @@ func TestAFamilyWhoseFirstQueryFailsIsRetried(t *testing.T) {
 	if _, _, _, stale := tr.get(dotTarget, retry); !stale {
 		t.Error("the A that failed is not due after endpointAddrRetry")
 	}
-	if !tr.begin(dotTarget, retry) {
+	if !began(tr.begin(dotTarget, retry)) {
 		t.Fatal("the A's lookup could not be claimed")
 	}
 	tr.finishLookup(dotTarget, []familyLookup{
@@ -631,7 +648,7 @@ func TestAnotherPassWaitsForALookupItsSelectionStarted(t *testing.T) {
 	server.SetAddrs([]string{"192.0.2.1"})
 	imr.Tuning.Discovery.StrictWait = 3 * time.Second
 	// A lookup failed a moment ago: the first selection cannot start one.
-	if !imr.endpointAddrs.begin(dotTarget, time.Now()) {
+	if !began(imr.endpointAddrs.begin(dotTarget, time.Now())) {
 		t.Fatal("setup: the lookup could not be claimed")
 	}
 	imr.endpointAddrs.finish(dotTarget, nil, time.Now(), nil)
@@ -683,13 +700,242 @@ func TestADefaultEndpointsQueryDoesNotWaitForTargets(t *testing.T) {
 	serverMap := map[string]*cache.AuthServer{pathNS: server}
 	tried := map[passTuple]bool{{server, "192.0.2.1", 0, core.TransportDoT}: true}
 
-	start := time.Now()
+	waited := watchForWait(t)
 	sel := imr.anotherPassAfter(withDefaultEndpoints(context.Background()), &signalWaitBudget{}, "example.", dns.TypeA, serverMap, edns0.PrivacyStrict, tried)
 	if sel != nil {
 		t.Errorf("next pass %+v, want none", sel.tuples)
 	}
-	if waited := time.Since(start); waited > time.Second {
-		t.Errorf("waited %v for a target lookup the query cannot use", waited)
+	if waited.Load() {
+		t.Error("the pass waited for a target lookup the query cannot use")
+	}
+}
+
+// watchForWait reports whether anotherPassAfter's wait began
+// (anotherPassWaitHook).
+func watchForWait(t *testing.T) *atomic.Bool {
+	t.Helper()
+	var waited atomic.Bool
+	saved := anotherPassWaitHook
+	anotherPassWaitHook = func() { waited.Store(true) }
+	t.Cleanup(func() { anotherPassWaitHook = saved })
+	return &waited
+}
+
+// A strict pass does not wait for the lookup of a target that only a udp
+// endpoint is sent to (CodeRabbit on #1147): a strict query never dials udp,
+// so the lookup cannot give it a tuple, and the wait would spend the query's
+// budget for nothing.
+func TestAStrictPassDoesNotWaitForAUdpTarget(t *testing.T) {
+	imr, _, _, _, _ := endpointTestRig(t)
+	imr.Tuning.Discovery.StrictWait = 300 * time.Millisecond
+	const udpTarget = "udp.target.example."
+	server := cache.NewAuthServer(pathNS)
+	server.SetAddrs([]string{"192.0.2.1"})
+	installTransportMap(server, map[string]uint8{"dot": 30, "udp": 10}, map[core.Transport]uint16{core.TransportDo53: 1234},
+		map[core.Transport]string{core.TransportDo53: udpTarget}, cache.SignalViaLookup,
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	saved := endpointAddrLookupHook
+	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) {
+		<-release
+		return []string{"192.0.2.53"}, time.Now().Add(time.Hour)
+	}
+	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	imr.startEndpointLookup(udpTarget)
+	if imr.endpointAddrs.inflight(udpTarget) == nil {
+		t.Fatal("setup: the udp target's lookup is not running")
+	}
+	serverMap := map[string]*cache.AuthServer{pathNS: server}
+	tried := map[passTuple]bool{{server, "192.0.2.1", 0, core.TransportDoT}: true}
+
+	waited := watchForWait(t)
+	sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "example.", dns.TypeA, serverMap, edns0.PrivacyStrict, tried)
+	if sel != nil {
+		t.Errorf("next pass %+v, want none", sel.tuples)
+	}
+	if waited.Load() {
+		t.Error("the strict pass waited for the lookup of a udp endpoint's target")
+	}
+}
+
+// The wait takes on a lookup that its own readiness check started
+// (CodeRabbit on #1147): target A's lookup is running and B's retry mark runs
+// out while the pass waits. A's lookup ends without an address, and the
+// selection made then starts B's lookup but finds no tuple yet; the pass
+// waits for B rather than giving up, and the next pass goes to B.
+func TestTheWaitTakesOnALookupItsReadinessCheckStarted(t *testing.T) {
+	imr, _, _, _, _ := endpointTestRig(t)
+	imr.Tuning.Discovery.StrictWait = 2 * time.Second
+	const targetA, targetB = "a.target.example.", "b.target.example."
+	ns1 := redirectedServerTo("ns1.example.", "192.0.2.1", core.TransportDoT, targetA)
+	ns2 := redirectedServerTo("ns2.example.", "192.0.2.2", core.TransportDoT, targetB)
+	releaseA := make(chan struct{})
+	saved := endpointAddrLookupHook
+	endpointAddrLookupHook = func(_ *Imr, target string) ([]string, time.Time) {
+		if target == targetA {
+			<-releaseA
+			return nil, time.Time{}
+		}
+		return []string{"192.0.2.54"}, time.Now().Add(time.Hour)
+	}
+	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	imr.endpointAddrs.finish(targetB, nil, time.Now(), nil) // B failed a moment ago
+	imr.startEndpointLookup(targetA)
+	var once sync.Once
+	savedWait := anotherPassWaitHook
+	anotherPassWaitHook = func() {
+		once.Do(func() {
+			// B's retry mark runs out, and A's lookup ends.
+			imr.endpointAddrs.mu.Lock()
+			delete(imr.endpointAddrs.retry, core.CanonicalizeName(targetB))
+			imr.endpointAddrs.mu.Unlock()
+			close(releaseA)
+		})
+	}
+	t.Cleanup(func() {
+		anotherPassWaitHook = savedWait
+		once.Do(func() { close(releaseA) })
+	})
+	serverMap := map[string]*cache.AuthServer{"ns1.example.": ns1, "ns2.example.": ns2}
+	tried := map[passTuple]bool{
+		{ns1, "192.0.2.1", 0, core.TransportDoT}: true,
+		{ns2, "192.0.2.2", 0, core.TransportDoT}: true,
+	}
+
+	sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "example.", dns.TypeA, serverMap, edns0.PrivacyStrict, tried)
+	if sel == nil || len(sel.tuples) != 1 || sel.tuples[0].Server != ns2 {
+		t.Fatalf("next pass %+v, want ns2's DoT tuple to target B", sel)
+	}
+	if d, _ := imr.attemptKey(context.Background(), ns2, sel.zone, "192.0.2.2", core.TransportDoT, false); !d.redirect || d.addr != "192.0.2.54" {
+		t.Errorf("the next pass dials %+v, want target B", d)
+	}
+}
+
+// A selector that read a target stale claims no lookup once another lookup
+// has refreshed it meanwhile (CodeRabbit on #1147): here the refresh failed
+// the A that had run out and renewed the AAAA, so no family is due until the
+// A's retry time.
+func TestAnOutdatedStaleReadingClaimsNoLookup(t *testing.T) {
+	var tr endpointAddrTracker
+	now := time.Now()
+	tr.finishLookup(dotTarget, []familyLookup{
+		{family: cache.FamilyV4, addrs: []string{"192.0.2.53"}, expire: now.Add(time.Minute)},
+		{family: cache.FamilyV6, addrs: []string{"2001:db8::53"}, expire: now.Add(time.Hour)},
+	}, now, nil)
+	later := now.Add(2 * time.Minute)
+	if _, _, _, stale := tr.get(dotTarget, later); !stale {
+		t.Fatal("setup: the target is not stale once its A has run out")
+	}
+	// Another selector's refresh runs first.
+	if !began(tr.begin(dotTarget, later)) {
+		t.Fatal("setup: the other refresh could not be claimed")
+	}
+	tr.finishLookup(dotTarget, []familyLookup{
+		{family: cache.FamilyV4, failed: true},
+		{family: cache.FamilyV6, addrs: []string{"2001:db8::54"}, expire: later.Add(time.Hour)},
+	}, later, nil)
+	if fams, ok := tr.begin(dotTarget, later); ok {
+		t.Errorf("a lookup of %v was claimed on the outdated stale reading, before the A's retry time", fams)
+	}
+	if !began(tr.begin(dotTarget, later.Add(endpointAddrRetry))) {
+		t.Error("the A's lookup could not be claimed at its retry time")
+	}
+}
+
+// The refresh of a family that ran out leaves a failed family out until its
+// retry time (CodeRabbit on #1147): here the A failed, and the AAAA runs out
+// before the A's retry time; the refresh queries the AAAA alone, and the A
+// keeps its retry time.
+func TestARefreshOfOneFamilyLeavesAFailedOneToItsRetry(t *testing.T) {
+	imr, _, _, _, _ := endpointTestRig(t)
+	now := time.Now()
+	failedAt := now.Add(-10 * time.Second)
+	first := []familyLookup{
+		{family: cache.FamilyV4, failed: true},
+		{family: cache.FamilyV6, addrs: []string{"2001:db8::53"}, expire: now.Add(-time.Second)},
+	}
+	var tr endpointAddrTracker
+	tr.finishLookup(dotTarget, first, failedAt, nil)
+	if fams, ok := tr.begin(dotTarget, now); !ok || !slices.Equal(fams, []cache.AddressFamily{cache.FamilyV6}) {
+		t.Fatalf("the refresh queries %v (claimed %v), want the AAAA alone", fams, ok)
+	}
+
+	imr.endpointAddrs.finishLookup(dotTarget, first, failedAt, nil)
+
+	looked := make(chan struct{}, 1)
+	saved := endpointAddrLookupHook
+	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) {
+		looked <- struct{}{}
+		return []string{"192.0.2.53", "2001:db8::54"}, time.Now().Add(time.Hour)
+	}
+	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	imr.startEndpointLookup(dotTarget)
+	running := imr.endpointAddrs.inflight(dotTarget)
+	if running == nil {
+		t.Fatal("the refresh was not started")
+	}
+	<-looked
+	<-running
+	imr.endpointAddrs.mu.Lock()
+	v4 := *imr.endpointAddrs.entries[core.CanonicalizeName(dotTarget)].fams[cache.FamilyV4]
+	imr.endpointAddrs.mu.Unlock()
+	if len(v4.addrs) != 0 || !v4.retryAt.Equal(failedAt.Add(endpointAddrRetry)) {
+		t.Errorf("the A after the AAAA's refresh: %+v, want no address and its retry time kept", v4)
+	}
+	if _, addrs, ok, _ := imr.endpointAddrs.get(dotTarget, time.Now()); !ok || len(addrs) != 1 || addrs[0] != "2001:db8::54" {
+		t.Errorf("after the refresh: %v known %v, want the new AAAA", addrs, ok)
+	}
+
+	// The lookup itself queries only the families it is given.
+	put := func(rr dns.RR) {
+		name := rr.Header().Name
+		imr.Cache.Set(name, rr.Header().Rrtype, &cache.CachedRRset{Name: name, RRtype: rr.Header().Rrtype,
+			Context: cache.ContextAnswer, State: cache.ValidationStateSecure, Ttl: 3600,
+			Expiration: time.Now().Add(time.Hour), RRset: &core.RRset{Name: name, Class: dns.ClassINET,
+				RRtype: rr.Header().Rrtype, RRs: []dns.RR{rr}}})
+	}
+	put(mustRR(t, dotTarget+` 3600 IN A 192.0.2.53`))
+	put(mustRR(t, dotTarget+` 3600 IN AAAA 2001:db8::54`))
+	if results := imr.lookupEndpointAddrs(dotTarget, []cache.AddressFamily{cache.FamilyV6}); len(results) != 1 || results[0].family != cache.FamilyV6 {
+		t.Errorf("a lookup of the AAAA alone gave %v", results)
+	}
+}
+
+// An attempt whose endpoint has changed to an address of a suspect family
+// since selection is not made (CodeRabbit on #1147): selection admitted the
+// udp tuple for the target's IPv4 address, which then went into backoff, so
+// udp gives way to the server's own IPv6 address, and IPv6 is suspect with no
+// probe reserved for it. A tuple selection admitted as an IPv6 probe is
+// still sent there.
+func TestAnAttemptWhoseFamilyTurnedSuspectIsNotMade(t *testing.T) {
+	imr, _, _, do53, q := endpointTestRig(t)
+	reply := new(dns.Msg)
+	reply.SetReply(q)
+	do53.Set("example.", "2001:db8::1", core.FakeResponse{Msg: reply})
+	server := redirectedServerTo("ns6.example.", "2001:db8::1", core.TransportDo53, dotTarget)
+	imr.FamilyTracker = cache.NewFamilyTracker(10*time.Minute, 10*time.Minute, time.Hour, 1)
+	imr.FamilyTracker.RecordResult("2001:db8::99", false)
+	if !imr.FamilyTracker.IsSuspect(cache.FamilyV6) {
+		t.Fatal("setup: IPv6 is not suspect")
+	}
+	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
+	_, _, tuples := imr.prioritizeServers("example.", dns.TypeA, map[string]*cache.AuthServer{"ns6.example.": server}, edns0.PrivacyNone)
+	if len(tuples) != 1 || tuples[0].Transport != core.TransportDo53 || tuples[0].Family != cache.FamilyV4 {
+		t.Fatalf("selection %+v, want the udp tuple, decided for IPv4", tuples)
+	}
+	targetServer(t, imr, dotTarget).RecordEndpointAddrFailure("192.0.2.53", 1234, core.TransportDo53, errors.New("read: connection refused"))
+
+	ctx := context.Background()
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "2001:db8::1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone, tuples[0].Family); err == nil {
+		t.Error("the attempt was made")
+	}
+	if got := lastDial(do53); got != "" {
+		t.Errorf("dialed %s, an address of the suspect family", got)
+	}
+	_, _, _, ep, err := imr.tryServer(ctx, server, nil, "2001:db8::1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyV6)
+	if err != nil || ep.addr != "2001:db8::1" {
+		t.Errorf("the IPv6 probe: %+v %v, want it sent to the server's own address", ep, err)
 	}
 }
 
