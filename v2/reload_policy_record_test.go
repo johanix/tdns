@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1638,5 +1639,173 @@ func TestASupersededRefresherDoesNotBindItsPolicyToAZoneRegisteredAgain(t *testi
 	if n, p, w := policyState(zd); n != "base" || p == nil || p.SigValidity.Default != 2*month || w {
 		t.Errorf("a later reload of the same registration: the zone records %q bound with signature validity %d, warning %v; want %q bound with %d",
 			n, validityOf(p), w, "base", 2*month)
+	}
+}
+
+// Two zones are added by one reload and one of them is removed by the next while
+// the engine is in the middle of the first load of the zone that goes, as the rig's
+// L1 case has it (150 zones added, the second half removed by a reload that starts a
+// moment later). The engine holds the zone it dequeued, and what it goes on to do
+// to it writes the zone's error state (the policy apply's signature-validity check
+// clears DnssecError, for one), which ended with Zones.Set and registered the removed
+// zone again, signed and served, with nothing in the config that names it.
+//
+// The probe holds the engine inside that first load until the second reload has run,
+// which is what the queue's backlog does in the rig. The reload goes through
+// ReloadZoneConfig, as the rig's does.
+func TestAZoneARealReloadRemovedWhileItsFirstLoadWasInFlightIsNotRegisteredAgain(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	// Registered before the harness, so that it runs after the engine has stopped.
+	t.Cleanup(func() { policySyncProbe = nil })
+	h := newReloadHarness(t, kdb, "inflightkept.config.example.")
+	withLivePolicies(t, map[string]DnssecPolicy{})
+	prevSync := delegationSyncConf.Load()
+	t.Cleanup(func() { delegationSyncConf.Store(prevSync) })
+
+	const gone = "inflightgone.config.example."
+	goneFile := filepath.Join(t.TempDir(), "zone")
+	body := gone + "\t3600\tIN\tSOA\tns1." + gone + " hostmaster." + gone + " 1 7200 1800 604800 7200\n" +
+		gone + "\t3600\tIN\tNS\tns1." + gone + "\n" + "ns1." + gone + "\t3600\tIN\tA\t192.0.2.53\n"
+	if err := os.WriteFile(goneFile, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if z, ok := Zones.Get(gone); ok {
+			z.stopPublisher()
+		}
+		Zones.Remove(gone)
+	})
+
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	conf.Internal.RefreshZoneCh = h.engineConf.Internal.RefreshZoneCh // the harness's engine
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	pol := DnssecPolicyConf{Algorithm: "ED25519"}
+	pol.KSK.Lifetime, pol.ZSK.Lifetime, pol.CSK.Lifetime = "forever", "forever", "none"
+	pol.SigValidity = DnssecPolicySigValidityConf{Default: "30d", Dnskey: "30d", Ds: "30d"}
+	conf.Dnssec.Policies = map[string]DnssecPolicyConf{"base": pol}
+	kept := ZoneConf{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: "base", OptionsStrs: []string{"online-signing"}}
+	leaving := ZoneConf{Name: gone, Type: "primary", Store: "map", Zonefile: goneFile, DnssecPolicy: "base", OptionsStrs: []string{"online-signing"}}
+
+	// The engine is held inside the first load of the zone that goes, until released.
+	inFlight, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	policySyncProbe = func(z *ZoneData, stage policySyncStage) {
+		if z.ZoneName != gone || stage != policySyncRead {
+			return
+		}
+		once.Do(func() {
+			close(inFlight)
+			<-release
+		})
+	}
+
+	conf.Zones = []ZoneConf{kept, leaving}
+	if _, err := conf.ReloadZoneConfig(context.Background()); err != nil {
+		t.Fatalf("the reload that adds the zones: %v", err)
+	}
+	select {
+	case <-inFlight:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the engine did not reach the first load of the second zone")
+	}
+	goneZd, ok := Zones.Get(gone)
+	if !ok {
+		t.Fatal("the zone is not registered while its first load is in flight; the test has lost its point")
+	}
+
+	// The next reload no longer has the zone: it removes it while the engine is in it.
+	conf.Zones = []ZoneConf{kept}
+	if _, err := conf.ReloadZoneConfig(context.Background()); err != nil {
+		t.Fatalf("the reload that removes the zone: %v", err)
+	}
+	if _, still := Zones.Get(gone); still {
+		t.Fatal("the reload did not remove the zone; the test has lost its point")
+	}
+
+	// The engine goes on with the first load of the zone it holds. A marker behind
+	// it, for a name no refresher builds a zone for, is answered when the engine is
+	// through with the zone and with the kept zone's refresher that the second reload
+	// queued. (Not a refresh of the kept zone: the engine reads the zone's fields as
+	// it dispatches one, while the refresh that the second reload's refresher started
+	// is still writing them.)
+	close(release)
+	marker := ZoneRefresher{Name: "marker.config.example.", Wait: true, Response: make(chan RefresherResponse, 1)}
+	h.engineConf.Internal.RefreshZoneCh <- marker
+	select {
+	case <-marker.Response:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the engine did not get through the first load")
+	}
+
+	if z, registered := Zones.Get(gone); registered {
+		z.stopPublisher()
+		t.Errorf("the zone a reload removed while its first load was in flight is registered again")
+	}
+	if goneZd.generation.Load() == 0 {
+		t.Error("the removal did not mark the zone it removed")
+	}
+	if _, ok := Zones.Get(h.zone); !ok {
+		t.Error("the kept zone is not registered")
+	}
+}
+
+// The writers of a zone's state, and what each does to a zone that a reload has
+// removed (its generation is bumped and it is out of Zones) -- written out where
+// the engine enforces the ordering invariant (RefreshEngine's dispatch), one test
+// per row that is not the engine's own:
+//
+//	the engine's merge, sync and first load   they go on, on the zone it dequeued: it is detached, and nothing
+//	                                          they write registers it (TestAZoneARealReloadRemoved...)
+//	SetError, ClearError and their *Locked    write the zone's own error state, and republish it only while
+//	forms                                     the zone has not been removed or replaced (this test)
+//	SetStatus                                 republishes only while the zone is still the registered one (this test)
+//	recordPolicyOfNonSigningZone              writes no registry entry at all (TestAReloadsRecordOfAZoneThat...)
+//	the resigner                              walks the live registry: a removed zone is not renewed
+//	the engine, for a refresher queued        creates no zone, or drops it (the two tests above)
+//	before the removal
+func TestTheStateWritersOfAZoneARealReloadRemovedDoNotRegisterItAgain(t *testing.T) {
+	authApp(t)
+	const name = "writers.config.example."
+	zd := &ZoneData{ZoneName: name, Options: map[ZoneOption]bool{}, Logger: discardLogger()}
+	registerZones(t, zd)
+	if _, ok := Zones.Get(name); !ok {
+		t.Fatal("the zone is not registered; the test has lost its point")
+	}
+
+	// A reload removes it, as reloadZoneConfig does.
+	Zones.Remove(name)
+	zd.generation.Add(1)
+
+	for _, w := range []struct {
+		what string
+		do   func()
+	}{
+		{"SetError", func() { zd.SetError(DnssecPolicyWarning, "a warning") }},
+		{"ClearError", func() { zd.ClearError(DnssecPolicyWarning) }},
+		{"SetError (a service-impacting category)", func() { zd.SetError(DnssecError, "an error") }},
+		{"ClearError (every category)", func() { zd.ClearError(NoError) }},
+		{"SetStatus", func() { zd.SetStatus(ZoneStatusReady) }},
+		{"the signature-validity check", func() {
+			zd.mu.Lock()
+			zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+			zd.mu.Unlock()
+			UpdateSigValidityFloor(zd, &DnssecPolicy{}, 0, 0, false, func(uint8) bool { return false }, false)
+		}},
+	} {
+		w.do()
+		if _, registered := Zones.Get(name); registered {
+			t.Errorf("%s: the zone that was removed is registered again", w.what)
+			Zones.Remove(name)
+		}
+	}
+
+	// And a zone that is not removed is republished as before.
+	live := &ZoneData{ZoneName: "writerslive.config.example.", Options: map[ZoneOption]bool{}, Logger: discardLogger()}
+	t.Cleanup(func() { Zones.Remove(live.ZoneName) })
+	live.SetError(DnssecPolicyWarning, "a warning")
+	if cur, ok := Zones.Get(live.ZoneName); !ok || cur != live {
+		t.Error("SetError no longer registers a zone that has not been removed")
 	}
 }

@@ -871,6 +871,30 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			// dequeued. Nothing writes it after the refresher exists, so the compare
 			// takes no lock. A removal that follows the compare is the case of a
 			// captured ZoneData, which the generation taken at dispatch covers (B5b).
+			//
+			// The same removal can come while the engine, or anything else, holds
+			// the zone: it was dequeued, and the first load, the merge, the policy
+			// sync or a refresh is in the middle of it. A removal bumps the zone's
+			// generation (the reload's, an API delete's, a replacement's), and what
+			// can write the zone afterwards does this to it:
+			//
+			//	the engine's merge, sync, first    go on, on the zone they hold. It is
+			//	load and refresh                   detached; nothing they write registers
+			//	                                   it, and the persist steps stop at the
+			//	                                   generation (B5b)
+			//	SetError, ClearError and the       write the zone's own error state, and
+			//	*Locked forms                      republish it only while its generation
+			//	                                   is 0 (republishUnlessRemoved)
+			//	SetStatus                          republishes only while the zone is the
+			//	                                   registered one
+			//	recordPolicyOfNonSigningZone       writes no registry entry
+			//	the resigner                       walks the live registry: a removed zone
+			//	                                   is not renewed
+			//	a refresher queued before the      creates no zone, or is dropped (above)
+			//	removal
+			//
+			// A write that has read the generation before the bump and reaches its
+			// Set after the Remove is the one case left; it is a few statements wide.
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
 					if zr.Registered != nil && zr.Registered != zd {

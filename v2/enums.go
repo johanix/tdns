@@ -594,6 +594,28 @@ func (zd *ZoneData) SetError(errtype ErrorType, errmsg string, args ...interface
 // record an error without re-locking — Go mutexes are not reentrant.
 func (zd *ZoneData) setErrorLocked(errtype ErrorType, errmsg string, args ...interface{}) {
 	zd.setErrorUnpublishedLocked(errtype, errmsg, args...)
+	zd.republishUnlessRemoved()
+}
+
+// republishUnlessRemoved is the Zones.Set that setErrorLocked and clearErrorLocked
+// end with: a no-op for a zone that is registered, and a registration for one that is
+// not yet, as the creation paths that build a zone and write its error state first
+// have always had it. It does nothing for a zone that has been removed or replaced,
+// which is what a bumped generation says: whoever holds such a zone (the engine, in
+// the middle of a first load, a policy apply, a refresh) goes on writing its error
+// state, and every write registered it again, so that a zone a reload had removed
+// came back, signed and served, with nothing in the config to name it.
+//
+// Every removal bumps the generation: the reload's (reloadZoneConfig), an API
+// delete's and a replacement's. The check and the Set are not one step, and the
+// removal's own Remove and bump are not either, so a write that reads the
+// generation before the bump and reaches the Set after the Remove still registers
+// the zone; the window is a few statements wide, on both sides, and the guard
+// narrows to it what was the whole of the zone's remaining work.
+func (zd *ZoneData) republishUnlessRemoved() {
+	if zd.generation.Load() != 0 {
+		return
+	}
 	// no-refresh-hooks: republishes an existing ZoneData.
 	Zones.Set(zd.ZoneName, zd)
 }
@@ -655,8 +677,7 @@ func (zd *ZoneData) ClearError(errtype ErrorType) {
 // See setErrorLocked for why this exists.
 func (zd *ZoneData) clearErrorLocked(errtype ErrorType) {
 	zd.clearErrorUnpublishedLocked(errtype)
-	// no-refresh-hooks: republishes an existing ZoneData.
-	Zones.Set(zd.ZoneName, zd)
+	zd.republishUnlessRemoved()
 }
 
 // clearErrorUnpublishedLocked is clearErrorLocked without the republish; see
