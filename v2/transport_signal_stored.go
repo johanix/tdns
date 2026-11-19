@@ -100,15 +100,17 @@ func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 // behind the new digest it keeps those of the signals of the pass's the zone
 // can still serve or load at the owner, so the history never evicts them:
 // the replaced one, the one the zone serves (signalServedDigest), and the
-// one the zone file holds (signalOnDiskDigest), and the ones a write of the
-// zone file in progress is putting in it (signalWritingDigests). Each would
+// one the zone file holds (signalOnDiskDigest), the ones a write of the
+// zone file in progress is putting in it (signalWritingDigests), and the one
+// a replay of the journal yields (signalJournaledDigest). Each would
 // otherwise be held only by its place in the signalStoredKeep places, and a
 // run of stores would push it out: stores the publish cadence holds back
 // push out the signal still served, stores with no zone write in between,
 // one per restart with a configuration that changed each time or several in
 // one process, push out the zone file's, which a restart loads until the
-// zone is next written, and stores published while a write runs push out
-// the signal it writes. The pass would then take a signal of its own for the
+// zone is next written, stores published while a write runs push out the
+// signal it writes, and stores published with no journal entry push out the
+// signal an earlier journaled publish carried, which a restart replays. The pass would then take a signal of its own for the
 // operator's for good, in this process or after the next restart
 // (CodeRabbit on #1118 and on #1145).
 func (zd *ZoneData) noteSignalStoredOver(owner string, rrs, replaced []dns.RR) {
@@ -130,6 +132,9 @@ func (zd *ZoneData) noteSignalStoredOver(owner string, rrs, replaced []dns.RR) {
 		digests = append(digests, onDisk)
 	}
 	digests = append(digests, zd.signalWritingDigests(owner)...)
+	if journaled := zd.signalJournaledDigest(owner); journaled != "" {
+		digests = append(digests, journaled)
+	}
 	digests = mergeSignalDigests(digests, earlier)
 	if readErr == nil {
 		// The digests read include those the KeyDB had not taken
@@ -293,6 +298,107 @@ func (zd *ZoneData) signalWritingDigests(owner string) []string {
 	return out
 }
 
+// signalJournalPin is a signal of the pass's that a replay of the zone's
+// journal yields at an owner, and the serial of the journal delta that last
+// set it there (signalJournaled).
+type signalJournalPin struct {
+	digest string
+	serial uint32
+}
+
+// signalOwnersInDelta returns the _dns. owners whose SVCB RRset a journal
+// delta changes: the owner of each SVCB RRset among removed and added.
+func signalOwnersInDelta(removed, added []core.RRset) []string {
+	var owners []string
+	for _, rs := range append(append([]core.RRset(nil), removed...), added...) {
+		owner := core.CanonicalizeName(rs.Name)
+		if rs.RRtype == dns.TypeSVCB && strings.HasPrefix(owner, "_dns.") && !slices.Contains(owners, owner) {
+			owners = append(owners, owner)
+		}
+	}
+	return owners
+}
+
+// signalOwnersInActions returns the _dns. owners whose SVCB RRset replayed
+// update actions can change: an SVCB action, or one deleting every RRset at
+// the owner.
+func signalOwnersInActions(actions []dns.RR) []string {
+	var owners []string
+	for _, rr := range actions {
+		h := rr.Header()
+		owner := core.CanonicalizeName(h.Name)
+		if (h.Rrtype == dns.TypeSVCB || h.Rrtype == dns.TypeANY) && strings.HasPrefix(owner, "_dns.") && !slices.Contains(owners, owner) {
+			owners = append(owners, owner)
+		}
+	}
+	return owners
+}
+
+// noteSignalsJournaled records, for each of owners, _dns. owners whose SVCB
+// RRset journal deltas up to serial changed, what a replay of the journal
+// now yields there: the SVCB RRset snap holds at the owner, snap being the
+// zone those deltas were published or replayed into. A signal the record
+// knows for the pass's is kept in every store until a zone write drops
+// those deltas (noteJournalDropped). No SVCB RRset there, or one the record
+// does not know for the pass's, ends what was kept. When the record cannot
+// be read, what was kept stays: it is a signal of the pass's, and keeping
+// it costs one place in the record. A stored signal that rode in a journaled
+// publish of another writer's change, and was then replaced by stores
+// published with no journal entry, was held only by its place in the
+// record, and a run of such stores pushed it out while the journal still
+// held it: a restart replayed it and took it for the operator's (CodeRabbit
+// on #1145). Caller holds zd.mu.
+func (zd *ZoneData) noteSignalsJournaled(owners []string, snap *zoneSnapshot, serial uint32) {
+	for _, owner := range owners {
+		d := ""
+		if rrset := getRRsetFrom(snap, owner, dns.TypeSVCB); rrset != nil && len(rrset.RRs) > 0 {
+			d = signalDigest(rrset.RRs)
+		}
+		if d != "" {
+			known, err := zd.signalStoredDigests(owner)
+			if err != nil {
+				lgDns.Warn("noteSignalsJournaled: could not read the record of what the pass stored at the owner; what it keeps for the journal is left as it was",
+					"zone", zd.ZoneName, "owner", owner, "error", err)
+				continue
+			}
+			if !slices.Contains(known, d) {
+				d = ""
+			}
+		}
+		zd.signalStoredMu.Lock()
+		if d == "" {
+			delete(zd.signalJournaled, owner)
+		} else {
+			if zd.signalJournaled == nil {
+				zd.signalJournaled = map[string]signalJournalPin{}
+			}
+			zd.signalJournaled[owner] = signalJournalPin{digest: d, serial: serial}
+		}
+		zd.signalStoredMu.Unlock()
+	}
+}
+
+// signalJournaledDigest returns the digest of the pass's signal a replay of
+// the journal yields at owner, "" for none known (noteSignalsJournaled).
+func (zd *ZoneData) signalJournaledDigest(owner string) string {
+	zd.signalStoredMu.Lock()
+	defer zd.signalStoredMu.Unlock()
+	return zd.signalJournaled[owner].digest
+}
+
+// noteJournalDropped ends what noteSignalsJournaled keeps for the journal
+// deltas a zone write has dropped: those whose serial is not newer than
+// serial, the one the zone file was written at, which holds what they did.
+func (zd *ZoneData) noteJournalDropped(serial uint32) {
+	zd.signalStoredMu.Lock()
+	defer zd.signalStoredMu.Unlock()
+	for owner, pin := range zd.signalJournaled {
+		if !serialNewer(pin.serial, serial) {
+			delete(zd.signalJournaled, owner)
+		}
+	}
+}
+
 // noteZoneFileAdopted sets what signalOnDiskDigest returns, for each owner
 // the record holds, to what the zone file a load or a refresh has just
 // adopted holds there (file, the zone data parsed from it, before the
@@ -365,6 +471,7 @@ func (zd *ZoneData) forgetSignalStored(owner string) error {
 	zd.signalStored[owner] = nil
 	delete(zd.signalUnrecorded, owner)
 	delete(zd.signalOnDisk, owner)
+	delete(zd.signalJournaled, owner)
 	zd.signalStoredMu.Unlock()
 	if kdb := zd.signalRecordDB(); kdb != nil {
 		if err := kdb.DeleteTransportSignalStoredOwner(zd.ZoneName, owner); err != nil {

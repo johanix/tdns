@@ -389,9 +389,15 @@ type ZoneData struct {
 	// Guarded by signalStoredMu.
 	signalWriting    map[uint64]map[string]string
 	signalWritingSeq uint64
-	publishCadence   time.Duration
-	publishQueued    bool
-	publishUrgent    bool
+	// signalJournaled holds, per owner, the pass's signal a replay of the
+	// zone's journal yields there, with the serial of the journal delta that
+	// last set it (noteSignalsJournaled). Every store keeps it in the record
+	// until a zone write drops that delta (noteJournalDropped). Guarded by
+	// signalStoredMu.
+	signalJournaled map[string]signalJournalPin
+	publishCadence  time.Duration
+	publishQueued   bool
+	publishUrgent   bool
 	// tx is the zone's transactions: the publish hold, and what a zone created
 	// held remembers about its first content. See zone_tx.go. Guarded by mu.
 	tx zoneTxState

@@ -591,3 +591,100 @@ ns1.example.	3600	IN	A	127.0.0.1
 		t.Fatalf("the refresh brought back the operator's SVCB RRset the file no longer holds: %v", got)
 	}
 }
+
+// A stored signal that rides in a journaled publish of another writer's
+// change stays the pass's for as long as the journal holds it, though the
+// stores after it are published with no journal entry: a restart replays it,
+// and the pass must still know it for its own, in the process that
+// journaled it and in one that only replayed it (CodeRabbit on #1145).
+func TestAJournaledSignalStaysThePassesUntilTheZoneIsWritten(t *testing.T) {
+	const owner = "_dns.ns1.example."
+	const file = `example.	3600	IN	SOA	ns1.example. hostmaster.example. 1 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+ns1.example.	3600	IN	A	127.0.0.1
+`
+	kdb := newTestKeyDB(t)
+	prevSVCB, prevListeners := Globals.ServerSVCB, Conf.Listeners.Addresses
+	Globals.ServerSVCB = &dns.SVCB{Hdr: dns.RR_Header{Name: "_dns.server.example.", Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 300}, Priority: 1, Target: "."}
+	Conf.Listeners.Addresses = []string{"127.0.0.1:53"}
+	t.Cleanup(func() { Globals.ServerSVCB, Conf.Listeners.Addresses = prevSVCB, prevListeners })
+	// start is a process: the zone loaded from the file, and the journal
+	// reconciled with it.
+	start := func() (*ZoneData, *Config) {
+		t.Helper()
+		zd := reloadZone(t, kdb, file)
+		zd.Options[OptAddTransportSignal] = true
+		if _, err := zd.FetchFromFile(context.Background(), false, false, true, nil); err != nil {
+			t.Fatalf("FetchFromFile: %v", err)
+		}
+		conf := &Config{}
+		conf.Service.Transport.Type = "svcb"
+		conf.Service.Identities = []string{"ns1.example."}
+		conf.Listeners.Addresses = Conf.Listeners.Addresses
+		return zd, conf
+	}
+	journaled := func() int {
+		t.Helper()
+		deltas, err := kdb.LoadZoneDeltas("example.")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(deltas)
+	}
+
+	zd, conf := start()
+	storeSignal(t, zd, conf, owner, "dot:1")
+	// An operator's change is staged and held back, and the next store
+	// rides in its publish, which is journaled.
+	zd.mu.Lock()
+	prevCadence := zd.publishCadence
+	zd.publishCadence = time.Hour
+	zd.lastPublish = time.Now()
+	zd.mu.Unlock()
+	actions, err := BuildZoneUpdateActions("example.", ZoneUpdateSpec{
+		Verb: VerbAddRR, RRs: []string{`note.example. 3600 IN TXT "an operator's change"`},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: actions}, kdb); err != nil {
+		t.Fatal(err)
+	}
+	conf.Service.Transport.Signal = "dot:2"
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	publishNow(zd)
+	if got := svcbRecords(zd, owner); len(got) != 1 || !strings.Contains(got[0].String(), `"dot:2"`) {
+		t.Fatalf("the journaled publish did not carry the signal: %v", got)
+	}
+	if n := journaled(); n != 1 {
+		t.Fatalf("the publish with the operator's change left %d journal deltas, want 1", n)
+	}
+	zd.mu.Lock()
+	zd.publishCadence = prevCadence
+	zd.lastPublish = time.Time{}
+	zd.mu.Unlock()
+	for i := 3; i <= signalStoredKeep+3; i++ {
+		storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
+	}
+	if n := journaled(); n != 1 {
+		t.Fatalf("the stores after it were journaled (%d deltas), and the test needs them not to be", n)
+	}
+
+	// A restart replays the journaled signal, and stores in that process,
+	// with no zone write, push it no further than the journal goes.
+	zd, conf = start()
+	if got := svcbRecords(zd, owner); len(got) != 1 || !strings.Contains(got[0].String(), `"dot:2"`) {
+		t.Fatalf("the restart did not replay the journaled signal: %v", got)
+	}
+	for i := 20; i <= signalStoredKeep+20; i++ {
+		storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
+	}
+
+	zd, conf = start()
+	if got := svcbRecords(zd, owner); len(got) != 1 || !strings.Contains(got[0].String(), `"dot:2"`) {
+		t.Fatalf("the second restart did not replay the journaled signal: %v", got)
+	}
+	storeSignal(t, zd, conf, owner, "dot:99")
+}

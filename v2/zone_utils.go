@@ -1566,9 +1566,14 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 				lg.Error("zone written to file but its persisted deltas could not be dropped;"+
 					" a restart will replay changes the file already contains",
 					"zone", zd.ZoneName, "file", fname, "error", derr)
-			} else if n > 0 {
-				lg.Info("zone written to file; persisted deltas dropped",
-					"zone", zd.ZoneName, "file", fname, "rows", n)
+			} else {
+				// The signals of the pass's those deltas carried are in the
+				// file now, which the record keeps (noteZoneFileWritten).
+				zd.noteJournalDropped(wroteSerial)
+				if n > 0 {
+					lg.Info("zone written to file; persisted deltas dropped",
+						"zone", zd.ZoneName, "file", fname, "rows", n)
+				}
 			}
 		}
 	}
