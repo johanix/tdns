@@ -1714,7 +1714,7 @@ func (conf *Config) parseZones(ctx context.Context, reload bool) ([]string, []st
 				Downstreams:      zconf.Downstreams,
 				DownstreamAuth:   zconf.DownstreamAuth,
 				ConfigUpdate:     true, // config-bearing: lets reload clear removed ACLs
-				PreRegistered:    true, // the zone is registered above, before this is queued
+				Registered:       zd,   // the zone is registered above, before this is queued
 				Zonefile:         zconf.Zonefile,
 				Options:          options,
 				UpdatePolicy:     policy,

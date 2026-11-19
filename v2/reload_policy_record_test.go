@@ -1546,3 +1546,97 @@ func TestAReloadTheContentGuardRefusesStillRecordsThePolicyOfAZoneThatDoesNotSig
 		t.Errorf("the zone records %q after a reload that named %q and was refused for its content", n, "base")
 	}
 }
+
+// What a refresher that ParseZones queued may assume about the zone it meets
+// (the ordering invariant is written out where the engine enforces it, at the
+// head of RefreshEngine's dispatch), one test per row:
+//
+//	absent                     no zone is created: TestARefresherForAZoneRemovedByALaterReloadCreatesNoZone
+//	present, same registration the refresher is applied: every reload test that goes through ParseZones, and the last step here
+//	present, newer registration the refresher is dropped, and the newer registration's own refresher
+//	                           applies the config that registered it: this test
+//
+// The newer registration is the case of three reloads while a refresher waits in
+// the queue. Reload A adds a signing zone; B removes it; C adds the same name with
+// other algorithms; A's refresher is still queued, because queueing does not wait
+// for the engine, and the engine dequeues it when the name is registered again. It
+// took the zone as it found it, merged A's config into C's zone and bound A's
+// policy to it, which signed the zone under A's algorithms; C's own refresher was
+// then classified against the applied record and refused as an incompatible
+// algorithm change, with A's binding kept.
+func TestASupersededRefresherDoesNotBindItsPolicyToAZoneRegisteredAgain(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "superseded.config.example.", "online-signing")
+	const month = 30 * 86400
+	polA := map[string]DnssecPolicy{"base": named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "base")}
+	polC := map[string]DnssecPolicy{"base": named(validFor(kskzsk(dns.ECDSAP256SHA256, dns.ECDSAP256SHA256), month), "base")}
+	polD := map[string]DnssecPolicy{"base": named(validFor(kskzsk(dns.ECDSAP256SHA256, dns.ECDSAP256SHA256), 2*month), "base")}
+	withLivePolicies(t, map[string]DnssecPolicy{}) // the running config has none of them
+
+	// A reload's parse: the zone is registered and its refresher is queued.
+	parse := func(pols map[string]DnssecPolicy) (ZoneRefresher, *ZoneData) {
+		t.Helper()
+		h.conf.Internal.DnssecPolicies = pols
+		h.conf.Zones = []ZoneConf{{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: "base", OptionsStrs: h.options}}
+		if _, _, err := h.conf.ParseZones(context.Background(), false); err != nil {
+			t.Fatalf("ParseZones: %v", err)
+		}
+		zr := <-h.parsed
+		zd, ok := Zones.Get(h.zone)
+		if !ok {
+			t.Fatal("the parse did not register the zone")
+		}
+		return zr, zd
+	}
+	zrA, zdA := parse(polA)
+
+	// Reload B removes the zone, as a reload does.
+	zdA.stopPublisher()
+	Zones.Remove(h.zone)
+	zdA.generation.Add(1)
+
+	// Reload C registers the name again, with other algorithms.
+	zrC, zdC := parse(polC)
+	if zdC == zdA {
+		t.Fatal("the zone was not registered again; the test has lost its point")
+	}
+
+	// A's refresher reaches the engine first, then C's. The load of a zone that
+	// is not loaded yet is not answered, so a refresh behind them is, and the engine
+	// takes them in order.
+	h.engineConf.Internal.RefreshZoneCh <- zrA
+	h.engineConf.Internal.RefreshZoneCh <- zrC
+	h.answered(ZoneRefresher{Name: h.zone, ZoneStore: MapZone})
+
+	if cur, ok := Zones.Get(h.zone); !ok || cur != zdC {
+		t.Fatal("the zone C registered is not the one registered")
+	}
+	if zdC.HasServiceImpactingError() {
+		t.Errorf("the zone is in an error state: %s", zdC.ErrorMsg)
+	}
+	if n, p, _ := policyState(zdC); n != "base" || p == nil || p.KSKAlgorithm != dns.ECDSAP256SHA256 {
+		t.Errorf("the zone C registered records %q bound to KSK algorithm %d; want %q bound to C's %d, not A's %d",
+			n, kskAlgOf(p), "base", dns.ECDSAP256SHA256, dns.ED25519)
+	}
+	sigs := servedRRset(t, zdC, h.zone, dns.TypeSOA).RRSIGs
+	if len(sigs) == 0 {
+		t.Error("the SOA is unsigned")
+	}
+	for _, rr := range sigs {
+		if sig, ok := rr.(*dns.RRSIG); ok && sig.Algorithm != dns.ECDSAP256SHA256 {
+			t.Errorf("the SOA is signed with algorithm %d, want C's %d", sig.Algorithm, dns.ECDSAP256SHA256)
+		}
+	}
+
+	// The same registration's later reload is applied: the row that must go on
+	// working.
+	zd := h.reload(true, "base", polD)
+	if zd != zdC {
+		t.Fatal("a reload of the same registration reached another zone")
+	}
+	if n, p, w := policyState(zd); n != "base" || p == nil || p.SigValidity.Default != 2*month || w {
+		t.Errorf("a later reload of the same registration: the zone records %q bound with signature validity %d, warning %v; want %q bound with %d",
+			n, validityOf(p), w, "base", 2*month)
+	}
+}

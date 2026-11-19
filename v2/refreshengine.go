@@ -831,8 +831,57 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			resp := RefresherResponse{
 				Zone: zr.Name,
 			}
+			// THE ORDERING INVARIANT between a queued refresher and the zone it meets.
+			//
+			// A refresher is one zone's config as one parse of the config produced
+			// it, and it waits in a buffered queue: queueing does not wait for the
+			// engine, so by the time it is dequeued later reloads may have removed
+			// the zone, or registered it again. What it may assume depends on who
+			// queued it.
+			//
+			// A refresher that names the registration it was queued for
+			// (ZoneRefresher.Registered: ParseZones, which registers the zone and
+			// names that ZoneData) is for that registration only:
+			//
+			//	Zones holds ...           the refresher is ...
+			//	no zone                   dropped, no zone created: a later reload
+			//	                          removed it
+			//	the same ZoneData         applied. Refreshers of one registration
+			//	                          are applied in the order they were queued,
+			//	                          so the newest config lands last
+			//	another ZoneData          dropped: a later reload removed the zone
+			//	                          and registered it again, and that
+			//	                          registration's own refresher, queued after
+			//	                          this one, applies the config that
+			//	                          registered it. Applying this one would bind
+			//	                          an older reload's config, its policies
+			//	                          among it, to the newer zone
+			//
+			// A refresher that names none (a dynamic zone, a catalog member, a
+			// NOTIFY, the CLI, the ticker) has no registration to compare against:
+			//
+			//	no zone                   config-bearing with a zone type: creates
+			//	                          the zone, which is its first appearance;
+			//	                          any other: dropped (#970)
+			//	a zone                    applied
+			//
+			// The identity is the *ZoneData. ParseZones reads it from Zones as it
+			// registers or finds the zone and carries it by value, and it is
+			// compared here with what Zones.Get returns when the refresher is
+			// dequeued. Nothing writes it after the refresher exists, so the compare
+			// takes no lock. A removal that follows the compare is the case of a
+			// captured ZoneData, which the generation taken at dispatch covers (B5b).
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
+					if zr.Registered != nil && zr.Registered != zd {
+						lgEngine.Info("refresher of a registration a later reload replaced; dropped", "zone", zone)
+						if zr.Response != nil {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("refresher for zone %s superseded: the zone was registered again after it was queued", zone)
+							zr.Response <- resp
+						}
+						continue
+					}
 					if zd.FirstZoneLoad {
 						// PRE-REGISTERED STUB: zone was pre-registered with
 						// OnFirstLoad callbacks but not yet loaded. Merge config
@@ -1149,7 +1198,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zr:    &zrCopy,
 						})
 					}
-				} else if !zr.ConfigUpdate || zr.ZoneType == 0 || zr.PreRegistered {
+				} else if !zr.ConfigUpdate || zr.ZoneType == 0 || zr.Registered != nil {
 					// A refresh of a name Zones does not hold, with nothing to
 					// build a zone from: a NOTIFY or a reload that raced the
 					// zone's removal, or a caller asking for a zone this server
@@ -1165,7 +1214,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// building it from that refresher would register the removed
 					// zone again, with the config and the policies of a reload
 					// that has been superseded.
-					if zr.PreRegistered {
+					if zr.Registered != nil {
 						lgEngine.Info("refresh of a zone a later reload removed; no zone created", "zone", zone)
 					} else if zr.ConfigUpdate {
 						lgEngine.Error("config-bearing refresh without a zone type; no zone created", "zone", zone)

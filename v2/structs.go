@@ -1288,15 +1288,14 @@ type ZoneRefresher struct {
 	// downstreams => deny, empty allow-notify => primaries) instead of keeping
 	// stale permissions.
 	ConfigUpdate bool
-	// PreRegistered marks a refresher whose producer registered the zone in Zones
-	// before it queued the refresher: ParseZones, for every zone of the zones:
-	// block. The engine finds such a zone. If it does not, the zone was removed
-	// after the refresher was queued (a later reload dropped it), and the
-	// refresher, which carries the config of a zone that is no longer in the
-	// config and the policies of a reload that has been superseded, creates no
-	// zone. A config-bearing refresher without it (a dynamic zone, a catalog
-	// member) is the zone's first appearance, and creates it.
-	PreRegistered bool
+	// Registered is the ZoneData that the producer of the refresher registered
+	// in Zones, or found there, before it queued the refresher: ParseZones sets it
+	// for every zone of the zones: block. The refresher is for that registration
+	// only: the engine creates no zone for it if Zones holds none, and drops it if
+	// Zones holds another. A config-bearing refresher without it (a dynamic zone, a
+	// catalog member) is the zone's first appearance, and creates it. The rules, and
+	// why, are at the head of RefreshEngine's dispatch.
+	Registered *ZoneData
 	// UpdatePolicySet marks a refresher whose UpdatePolicy is the zone's
 	// activated policy (ParseZones, a persisted dynamic primary), which then
 	// replaces the zone's even when it is empty. ConfigUpdate cannot mean
