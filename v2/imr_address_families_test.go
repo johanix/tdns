@@ -15,7 +15,7 @@ import (
 func TestAnUnknownAddressFamilyStopsTheStart(t *testing.T) {
 	conf := &Config{}
 	conf.Imr.OutboundAddressFamilies = []string{"ipv4", "ipv5"}
-	err := conf.InitImrEngine(context.Background(), true)
+	err := conf.InitImrEngine(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "imrengine.outbound-address-families") {
 		t.Fatalf("InitImrEngine: %v, want an error naming imrengine.outbound-address-families", err)
 	}

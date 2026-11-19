@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
+
 package imr
 
 // loadConfiguredTrustAnchors puts the configured trust anchors into the DNSKEY
@@ -18,7 +19,7 @@ func (imr *Imr) loadConfiguredTrustAnchors(ic Config) {
 	dsByName, dnskeysByName, err := imr.parseTrustAnchorsFromConfig(ic)
 	if err != nil {
 		// initializeImrTrustAnchors fails on the same error and reports it.
-		lgImr.Debug("trust anchors not loaded before priming", "err", err)
+		imr.lgImr().Debug("trust anchors not loaded before priming", "err", err)
 		return
 	}
 	imr.addDirectDNSKEYTrustAnchors(dnskeysByName)

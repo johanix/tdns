@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
+
 package imr
 
 import (
@@ -108,11 +109,11 @@ func (imr *Imr) cachedTransportSignal(owner string) (signal *cache.CachedRRset, 
 // The tracker forgets the owner, so the first query after the denial expires
 // looks again at once. A denial with TTL 0 is not cached at all, and the next
 // query looks again straight away. Recording a denial as a success was
-// terminal (ImrQuery used to hand back a cached denial's SOA as the answer,
+// terminal (Query used to hand back a cached denial's SOA as the answer,
 // #698), and as a failure it added the backoff meant for servers that do not
 // answer; either way the verdict outlived the denial. Anything else is a
 // failure, retried after the backoff.
-func (imr *Imr) settleTransportSignalLookup(owner string, resp *ImrResponse, err error) {
+func (imr *Imr) settleTransportSignalLookup(owner string, resp *Response, err error) {
 	switch {
 	case err == nil && resp != nil && resp.RRset != nil &&
 		resp.RRset.RRtype == imr.TransportSignalRRType() && len(resp.RRset.RRs) > 0:
@@ -187,7 +188,7 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 		if imr.Cache.Debug {
 			imr.Cache.Logger.Printf("Transport signal query (%s): querying %s %s", reason, owner, dns.TypeToString[rrtype])
 		}
-		resp, err := imr.ImrQuery(queryCtx, owner, rrtype, dns.ClassINET, nil)
+		resp, err := imr.imrQuery(queryCtx, owner, rrtype, dns.ClassINET, false)
 		if imr.Cache.Debug && (err != nil || resp == nil || resp.RRset == nil || resp.RRset.RRtype != rrtype) {
 			imr.Cache.Logger.Printf("Transport signal query (%s) found no signal for %s %s: %v", reason, owner, dns.TypeToString[rrtype], err)
 		}
@@ -275,7 +276,7 @@ func (imr *Imr) awaitTransportSignals(ctx context.Context, qname string, serverM
 //
 // A transport-signal lookup, and what it asks on the way, never waits here:
 // it could be waiting for itself, or for a lookup that waits for it. Strict
-// queries could not anyway: ImrQuery never asks for privacy.
+// queries could not anyway: Query never asks for privacy.
 func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[string]*cache.AuthServer, reason string, ready func() bool) bool {
 	if imr.Cache == nil || imr.Options[ImrOptUseTransportSignals] == "false" || inTransportSignalLookup(ctx) {
 		return ready()
@@ -378,7 +379,7 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 		go func(owner string) {
 			queryCtx, cancel := detachedContext(5 * time.Second)
 			defer cancel()
-			resp, err := imr.ImrQuery(queryCtx, owner, dns.TypeTLSA, dns.ClassINET, nil)
+			resp, err := imr.imrQuery(queryCtx, owner, dns.TypeTLSA, dns.ClassINET, false)
 			if err != nil || resp == nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 				imr.TLSADiscovery.Fail(owner, err)
 				return
@@ -388,7 +389,7 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 			if len(rr.RRSIGs) > 0 {
 				vstate, err = imr.Cache.ValidateRRsetWithParentZone(queryCtx, rr, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 				if err != nil {
-					lgImr.Warn("maybeQueryTLSA: failed to validate TLSA RRset", "err", err)
+					imr.lgImr().Warn("maybeQueryTLSA: failed to validate TLSA RRset", "err", err)
 					imr.TLSADiscovery.Fail(owner, err)
 					return
 				}

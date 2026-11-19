@@ -27,6 +27,10 @@ const (
 // that family is broken — with periodic probes so the situation is noticed
 // when it recovers.
 type FamilyTracker struct {
+	// Logger is where the tracker says a family went suspect or came back.
+	// Nil is the log package's. Set it before the tracker is used.
+	Logger *log.Logger
+
 	mu              sync.Mutex
 	window          time.Duration
 	threshold       int
@@ -35,6 +39,13 @@ type FamilyTracker struct {
 
 	v4 familyStats
 	v6 familyStats
+}
+
+func (f *FamilyTracker) logger() *log.Logger {
+	if f.Logger != nil {
+		return f.Logger
+	}
+	return log.Default()
 }
 
 type familyStats struct {
@@ -102,7 +113,7 @@ func (f *FamilyTracker) RecordResult(addr string, success bool) {
 			// "Success" here means the path answered, which includes a refused
 			// connection: the host was reached, whatever it said. Do not claim
 			// the query succeeded.
-			log.Printf("FamilyTracker: IPv%d is reachable again (path to %s)", fam, addr)
+			f.logger().Printf("FamilyTracker: IPv%d is reachable again (path to %s)", fam, addr)
 		}
 		stats.suspectUntil = time.Time{}
 		return
@@ -113,7 +124,7 @@ func (f *FamilyTracker) RecordResult(addr string, success bool) {
 		// family is skipped, and without this the only trace is a zone that
 		// answers SERVFAIL (#703).
 		if stats.suspectUntil.IsZero() || !now.Before(stats.suspectUntil) {
-			log.Printf("FamilyTracker: IPv%d marked suspect for %v: %d failures in %v and no success (last: %s)",
+			f.logger().Printf("FamilyTracker: IPv%d marked suspect for %v: %d failures in %v and no success (last: %s)",
 				fam, f.suspectDuration, len(stats.recentFailures), f.window, addr)
 		}
 		stats.suspectUntil = now.Add(f.suspectDuration)

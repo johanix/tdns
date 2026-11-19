@@ -37,7 +37,7 @@ func TestInitImrEngineWithoutPrimingUsesTheHints(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	start := time.Now()
-	if err := conf.InitImrEngine(ctx, true); err != nil {
+	if err := conf.InitImrEngine(ctx); err != nil {
 		t.Fatalf("InitImrEngine with priming off: %v", err)
 	}
 	if took := time.Since(start); took > 2*time.Second {

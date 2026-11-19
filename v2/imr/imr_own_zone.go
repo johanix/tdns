@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
+
 package imr
 
 import (
@@ -34,7 +35,7 @@ import (
 // rest of the zone validates against it, locally, as data validates against
 // any validated DNSKEY RRset. Nobody above the zone is asked to vouch for it.
 //
-// The resolver reaches the zones through OwnZones (ImrOptions.OwnZones). The
+// The resolver reaches the zones through OwnZones (Options.OwnZones). The
 // daemon's is hostedZones, over the Zones map; an Imr without one answers
 // nothing locally.
 
@@ -184,7 +185,7 @@ func (imr *Imr) answerFromOwnZone(ctx context.Context, qname string, qtype uint1
 		r = z.Response(ctx, qname, qtype)
 	}
 	if r == nil || !r.Authoritative || (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) {
-		lgImr.Debug("own zone has no authoritative answer; asking elsewhere",
+		imr.lgImr().Debug("own zone has no authoritative answer; asking elsewhere",
 			"zone", z.Apex(), "qname", qname, "qtype", dns.TypeToString[qtype])
 		return nil, 0, cache.ContextFailure, ownZoneTransport, nil, false
 	}

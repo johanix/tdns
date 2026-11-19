@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
+
 package imr
 
 // Private-use SVCB key codes for TDNS.

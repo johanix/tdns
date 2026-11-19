@@ -294,6 +294,10 @@ func (s *testErrorSink) clear(cat ErrorCategory, sub ErrorSubtype) {
 	delete(s.errs, [2]int{int(cat), int(sub)})
 }
 
+func (s *testErrorSink) SetImrPrimingError(msg string) {
+	s.set(ErrCatUpstream, ErrSubImrPriming, msg)
+}
+func (s *testErrorSink) ClearImrPrimingError() { s.clear(ErrCatUpstream, ErrSubImrPriming) }
 func (s *testErrorSink) SetImrForwardZoneError(msg string) {
 	s.set(ErrCatConfig, ErrSubImrForwardZone, msg)
 }

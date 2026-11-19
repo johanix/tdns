@@ -18,7 +18,9 @@ import (
 // tdns-agent) is internal by design — its only listener is the loopback
 // listeners.imr-debug-address window.
 type Config struct {
-	Active    *bool  `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
+	// Active is the daemon's (tdns's ImrEngine): if nil or true, the IMR is
+	// active, and only false disables it. NewImr does not read it.
+	Active    *bool  `yaml:"active" mapstructure:"active"`
 	RootHints string `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
 	// OutboundAddressFamilies is which address families the resolver sends its
 	// queries to authoritative servers over: ipv4, ipv6, or both (the default).

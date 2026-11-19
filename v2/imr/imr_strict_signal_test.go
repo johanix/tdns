@@ -318,7 +318,7 @@ func cacheSignalDenial(t *testing.T, imr *Imr, ttl uint32) {
 // afterwards, must be seen to. The order is the natural one: a strict query
 // meets the zone, its signal lookup is denied, the zone publishes, the client
 // asks again. The "no signal" verdict stood for good: a lookup that met the
-// cached denial got its proving SOA back from ImrQuery as the answer (#698,
+// cached denial got its proving SOA back from Query as the answer (#698,
 // since fixed there) and was recorded as a success, which the tracker never
 // retries.
 //
@@ -329,11 +329,11 @@ func TestStrictPrivacySeesASignalPublishedAfterADenial(t *testing.T) {
 	imr, server, serverMap := newStrictTestImr(t, 5*time.Second)
 	cacheSignalDenial(t, imr, 1)
 	// The first lookup meets the cached denial. It runs as the lookup
-	// goroutine runs it: through ImrQuery, which answers from the cache.
+	// goroutine runs it: through Query, which answers from the cache.
 	if !imr.TransportSignalDiscovery.Begin(strictChildOwner) {
 		t.Fatal("setup: could not start the first lookup")
 	}
-	resp, err := imr.ImrQuery(context.Background(), strictChildOwner, dns.TypeSVCB, dns.ClassINET, nil)
+	resp, err := imr.Query(context.Background(), strictChildOwner, dns.TypeSVCB, dns.ClassINET)
 	if err != nil || resp == nil || resp.Denial != cache.ContextNXDOMAIN {
 		t.Fatalf("setup: ImrQuery did not answer with the cached denial: %+v, %v", resp, err)
 	}
@@ -386,16 +386,16 @@ func TestSettleTransportSignalLookup(t *testing.T) {
 	svcb := &core.RRset{Name: strictChildOwner, Class: dns.ClassINET, RRtype: dns.TypeSVCB, RRs: []dns.RR{signal}}
 
 	for name, tc := range map[string]struct {
-		resp *ImrResponse
+		resp *Response
 		err  error
 		want string // tracker status, or "" for no state
 	}{
-		"signal found":       {resp: &ImrResponse{RRset: svcb}, want: "succeeded"},
-		"NXDOMAIN":           {resp: &ImrResponse{Denial: cache.ContextNXDOMAIN}, want: ""},
-		"NODATA":             {resp: &ImrResponse{Denial: cache.ContextNoErrNoAns}, want: ""},
-		"an SOA, no denial":  {resp: &ImrResponse{RRset: childSOA(t, 3600)}, want: "failed"},
-		"lookup error":       {resp: &ImrResponse{Error: true}, err: errors.New("timeout"), want: "failed"},
-		"nothing, no denial": {resp: &ImrResponse{}, want: "failed"},
+		"signal found":       {resp: &Response{RRset: svcb}, want: "succeeded"},
+		"NXDOMAIN":           {resp: &Response{Denial: cache.ContextNXDOMAIN}, want: ""},
+		"NODATA":             {resp: &Response{Denial: cache.ContextNoErrNoAns}, want: ""},
+		"an SOA, no denial":  {resp: &Response{RRset: childSOA(t, 3600)}, want: "failed"},
+		"lookup error":       {resp: &Response{Error: true}, err: errors.New("timeout"), want: "failed"},
+		"nothing, no denial": {resp: &Response{}, want: "failed"},
 	} {
 		imr, _, _ := newStrictTestImr(t, time.Second)
 		imr.TransportSignalDiscovery.Begin(strictChildOwner)

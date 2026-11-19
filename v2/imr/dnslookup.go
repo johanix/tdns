@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
+
 package imr
 
 import (
@@ -365,7 +366,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						// upstream returns under 0x20 randomisation.
 						if dns.IsSubDomain(rr.Header().Name, qname) {
 							// Yes, this SOA may auth a negative response for qname
-							lgDns.Debug("*** AuthDNSQ: found SOA in Auth, it was a neg resp")
+							imr.lgDns().Debug("*** AuthDNSQ: found SOA in Auth, it was a neg resp")
 							imr.Cache.Set(qname, qtype, &cache.CachedRRset{
 								Name:   qname,
 								RRtype: qtype,
@@ -383,8 +384,8 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 							})
 							return nil, rcode, cache.ContextNoErrNoAns, nil
 						} else {
-							lgDns.Debug("*** The SOA is not correct to speak for qname", "soa", rr.Header().Name, "qname", qname)
-							lgDns.Debug("should never get here")
+							imr.lgDns().Debug("*** The SOA is not correct to speak for qname", "soa", rr.Header().Name, "qname", qname)
+							imr.lgDns().Debug("should never get here")
 						}
 					default:
 					}
@@ -414,13 +415,13 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 				for _, rr := range r.Extra {
 					name := rr.Header().Name
 					if _, exist := nsMap[name]; !exist {
-						lgDns.Debug("*** AuthDNSQuery: non-glue record in Additional", "additional", rr.String())
+						imr.lgDns().Debug("*** AuthDNSQuery: non-glue record in Additional", "additional", rr.String())
 						continue
 					}
 					// The zone of the servers asked is not known here, so
 					// only in-domain glue is used (imr_referral_glue.go).
 					if !withinGlueZone(name, referralGlueZone("", zonename)) {
-						lgDns.Debug("AuthDNSQuery: record outside the delegated zone not used", "additional", rr.String(), "zone", zonename)
+						imr.lgDns().Debug("AuthDNSQuery: record outside the delegated zone not used", "additional", rr.String(), "zone", zonename)
 						continue
 					}
 					switch rr := rr.(type) {
@@ -455,7 +456,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 						glue6Map[name] = tmp
 
 					case *dns.SVCB:
-						lgDns.Debug("Additional contains an SVCB, here we should collect the ALPN")
+						imr.lgDns().Debug("Additional contains an SVCB, here we should collect the ALPN")
 						svcb := rr
 						// Ensure we have a shared AuthServer instance for this NS
 						server := imr.Cache.GetOrCreateAuthServer(name)
@@ -477,7 +478,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 									if alpn, ok := kv.(*dns.SVCBAlpn); ok {
 										server.SetAlpn(alpn.Alpn)
 										server.SetTransports(transports)
-										lgDns.Debug("Found ALPN values for", "name", name, "s", alpn.Alpn)
+										imr.lgDns().Debug("Found ALPN values for", "name", name, "s", alpn.Alpn)
 									}
 								}
 							}
@@ -486,7 +487,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 					}
 				}
 
-				lgDns.Debug("AuthDNSQuery: adding servers for zone to cache", "count", len(servers), "zone", zonename)
+				imr.lgDns().Debug("AuthDNSQuery: adding servers for zone to cache", "count", len(servers), "zone", zonename)
 				imr.Cache.Servers.Set(zonename, servers)
 
 				for nsname, rrset := range glue4Map {
@@ -552,7 +553,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 
 				return nil, rcode, cache.ContextNXDOMAIN, nil
 			default:
-				lgDns.Debug("*** AuthDNSQuery: surprising rcode", "rcode", dns.RcodeToString[rcode])
+				imr.lgDns().Debug("*** AuthDNSQuery: surprising rcode", "rcode", dns.RcodeToString[rcode])
 			}
 		} else {
 			if rcode == dns.RcodeSuccess {
@@ -666,7 +667,7 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 			// and a server with no addresses are different faults, and saying
 			// "no addresses" about a nil entry sends the reader looking for a
 			// nameserver that was never there.
-			noteServerProblem(zoneName, nsname, "nil server entry in the server map")
+			imr.noteServerProblem(zoneName, nsname, "nil server entry in the server map")
 			continue
 		}
 		addrs := server.GetAddrs()
@@ -678,12 +679,12 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 			// whose nameserver has no address records. Worth a line even when
 			// other servers carry the query, because nothing else will ever
 			// mention it.
-			noteServerProblem(zoneName, nsname, "no addresses")
+			imr.noteServerProblem(zoneName, nsname, "no addresses")
 			continue
 		}
 		for _, addr := range addrs {
 			if !mayQueryAddr(server, addr, allowHostLocal) {
-				noteServerProblem(zoneName, nsname, "address "+addr+" is on this host (allow-loopback-nameservers is not set)")
+				imr.noteServerProblem(zoneName, nsname, "address "+addr+" is on this host (allow-loopback-nameservers is not set)")
 				continue
 			}
 			for rank, t := range transports {
@@ -695,14 +696,14 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 				a, p, ok := imr.attemptKey(ctx, server, zone, addr, t, true)
 				if !ok || !server.IsEndpointAddrAvailable(a, p, t) {
 					if imr.Debug {
-						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to server backoff",
+						imr.lgDns().Debug("prioritizeServers: skipping (addr,transport) due to server backoff",
 							"addr", addr, "dial", cache.JoinDialAddr(a, p), "transport", core.TransportToString[t], "ns", nsname)
 					}
 					continue
 				}
 				if zone != nil && !zone.IsZoneEndpointAvailable(a, p, t) {
 					if imr.Debug {
-						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to zone backoff",
+						imr.lgDns().Debug("prioritizeServers: skipping (addr,transport) due to zone backoff",
 							"addr", addr, "dial", cache.JoinDialAddr(a, p), "transport", core.TransportToString[t], "ns", nsname, "zone", zoneName)
 					}
 					continue
@@ -722,7 +723,7 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 					if imr.FamilyTracker.ShouldProbe(fam) {
 						suspectTuples = append(suspectTuples, tup)
 					} else if imr.Debug {
-						lgDns.Debug("prioritizeServers: skipping suspect-family (addr,transport)",
+						imr.lgDns().Debug("prioritizeServers: skipping suspect-family (addr,transport)",
 							"addr", addr, "transport", core.TransportToString[t], "family", int(fam))
 					}
 					continue
@@ -738,7 +739,7 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 	// at WARN, and not gated on debug, because this is exactly the state that
 	// is impossible to diagnose after the fact.
 	if warn && len(tuples) == 0 && len(suspectTuples) == 0 {
-		lgDns.Warn("prioritizeServers: no usable (server, addr, transport) tuples; the query cannot be sent",
+		imr.lgDns().Warn("prioritizeServers: no usable (server, addr, transport) tuples; the query cannot be sent",
 			"qname", qname, "zone", zoneName, "servers", len(serverMap),
 			"privacy", privacy.String(), "why", imr.explainNoTuplesFor(ctx, serverMap, zone, qname, privacy, allowHostLocal))
 	}
@@ -1127,7 +1128,7 @@ var (
 
 // noteServerProblem reports, once per zone/server per repeat interval, that a
 // server in the map cannot be queried and why.
-func noteServerProblem(zoneName, nsname, reason string) {
+func (imr *Imr) noteServerProblem(zoneName, nsname, reason string) {
 	key := zoneName + "|" + nsname + "|" + reason
 
 	unusableServersMu.Lock()
@@ -1157,7 +1158,7 @@ func noteServerProblem(zoneName, nsname, reason string) {
 	}
 	unusableServersMu.Unlock()
 
-	lgDns.Warn("prioritizeServers: server cannot be queried",
+	imr.lgDns().Warn("prioritizeServers: server cannot be queried",
 		"ns", nsname, "zone", zoneName, "reason", reason,
 		"note", "reported once per zone/server/reason per hour")
 }
@@ -1503,7 +1504,7 @@ func (imr *Imr) expandServerMapWithMissingNSSince(ctx context.Context, qname str
 			added++
 			usable[cache.ServerKey(l.nsname)] = l.srv
 			if imr.Debug {
-				lgDns.Debug("expandServerMapWithMissingNS: resolved addresses for previously-unresolved NS",
+				imr.lgDns().Debug("expandServerMapWithMissingNS: resolved addresses for previously-unresolved NS",
 					"ns", l.nsname, "zone", zonename, "addresses", addrs)
 			}
 		}
@@ -1595,7 +1596,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// holds neither. Answered without asking, and nothing is cached. Asking
 	// returned the link, which was then validated again, without end (#717).
 	if cnameDeniesType(ctx, qtype) && validatingCNAME(ctx, qname) {
-		lgDns.Debug("IterativeDNSQuery: the name is a CNAME being validated; not asking for its "+dns.TypeToString[qtype], "qname", qname)
+		imr.lgDns().Debug("IterativeDNSQuery: the name is a CNAME being validated; not asking for its "+dns.TypeToString[qtype], "qname", qname)
 		return nil, dns.RcodeSuccess, cache.ContextNoErrNoAns, core.TransportDo53, nil
 	}
 	var servernames []string
@@ -1723,7 +1724,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// Forwarding: when qname falls under a configured forward zone, hand the
 	// query to that zone's upstream resolver(s) instead of iterating. Placed
 	// after the cache check so cached answers still short-circuit, and inside
-	// this entry point so every internal consumer (responder, ImrQuery, CNAME
+	// this entry point so every internal consumer (responder, Query, CNAME
 	// chase, NS-address resolution, the validator's fetcher) forwards
 	// consistently. The serverMap argument is deliberately ignored here: a
 	// forward zone outranks whatever zone cut the caller had found. The callers
@@ -1999,7 +2000,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				if len(nsRRs.RRs) > 0 && referralLeavesZone(zonename, serversZone) {
 					serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRs, zonename, serversZone, nsMap, r)
 					if err != nil {
-						lgDns.Error("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional",
+						imr.lgDns().Error("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional",
 							"collectnsaddressesfromadditional", err)
 						return nil, rcode, cache.ContextFailure, wireTransport, err
 					}
@@ -2018,7 +2019,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			// falls through as before.
 			if len(r.Ns) != 0 || (r.Authoritative && (rcode == dns.RcodeNameError || rcode == dns.RcodeSuccess)) {
 				kind := classifyResponse(qname, qtype, r)
-				lgDns.Debug("IterativeDNSQuery: classified response",
+				imr.lgDns().Debug("IterativeDNSQuery: classified response",
 					"qname", qname, "qtype", dns.TypeToString[qtype],
 					"kind", responseKindToString(kind), "rcode", dns.RcodeToString[rcode],
 					"answerCount", len(r.Answer), "authorityCount", len(r.Ns))
@@ -2030,7 +2031,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					}
 					// If not handled, fall through to try next server
 					if rcode == dns.RcodeNameError {
-						lgDns.Debug("IterativeDNSQuery: NXDOMAIN response lacked usable SOA",
+						imr.lgDns().Debug("IterativeDNSQuery: NXDOMAIN response lacked usable SOA",
 							"qname", qname, "qtype", dns.TypeToString[qtype])
 					}
 					continue
@@ -2054,7 +2055,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 						// Otherwise the server is lame for the zone: try the
 						// next one. The fallback below still resolves the
 						// zone's glue-less nameservers.
-						lgDns.Debug("IterativeDNSQuery: NS RRset does not lead below the zone being queried;"+
+						imr.lgDns().Debug("IterativeDNSQuery: NS RRset does not lead below the zone being queried;"+
 							" treating the server as lame and trying the next one",
 							"qname", qname, "qtype", dns.TypeToString[qtype],
 							"zone", serversZone, "ns_owner", refZone, "server", nsname, "addr", addr,
@@ -2063,17 +2064,17 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					}
 					return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, serversZone, wireTransport, privacy)
 				case responseKindError:
-					lgDns.Debug("IterativeDNSQuery: treating response as error",
+					imr.lgDns().Debug("IterativeDNSQuery: treating response as error",
 						"qname", qname, "qtype", dns.TypeToString[qtype],
 						"rcode", dns.RcodeToString[rcode])
 					continue
 				case responseKindUnknown:
-					lgDns.Debug("IterativeDNSQuery: responseKindUnknown, trying next server",
+					imr.lgDns().Debug("IterativeDNSQuery: responseKindUnknown, trying next server",
 						"qname", qname, "qtype", dns.TypeToString[qtype])
 					continue
 				default:
 					// Should not reach here, but be defensive
-					lgDns.Debug("IterativeDNSQuery: unexpected response kind, trying next server",
+					imr.lgDns().Debug("IterativeDNSQuery: unexpected response kind, trying next server",
 						"kind", kind, "qname", qname, "qtype", dns.TypeToString[qtype])
 					continue
 				}
@@ -2541,39 +2542,31 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 		// one are ignored. The signal is the one the alias leads to, read with
 		// the whole path.
 		if set.final != nil && !set.final.alias {
-			if !imr.Quiet {
-				lgDns.Debug("SVCB signal through an AliasMode record", "servername", server.Name,
-					"via", set.via, "state", pathState, "path", pathText)
-			}
+			imr.lgDns().Debug("SVCB signal through an AliasMode record", "servername", server.Name,
+				"via", set.via, "state", pathState, "path", pathText)
 			installed, oots = imr.installSVCBSignal(server, set.final)
 			if set.final.awaitsLookup {
 				set.awaitsLookup = true
 			}
 			return installed, oots
 		}
-		if !imr.Quiet {
-			lgDns.Debug("SVCB signal ignored: the RRset holds an AliasMode record that leads to no signal", "servername", server.Name,
-				"via", set.via, "state", pathState, "path", pathText)
-		}
+		imr.lgDns().Debug("SVCB signal ignored: the RRset holds an AliasMode record that leads to no signal", "servername", server.Name,
+			"via", set.via, "state", pathState, "path", pathText)
 		return false, false
 	}
 	recs := imr.honouredRecords(server, set, set.recs)
 	alpnRecs := imr.honouredRecords(server, set, set.alpn)
 	if len(recs) > 0 {
 		raw, ports, targets := combineOOTSEndpoints(recs)
-		if !imr.Quiet {
-			lgDns.Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports,
-				"targets", targets, "via", set.via, "state", pathState, "path", pathText)
-		}
+		imr.lgDns().Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports,
+			"targets", targets, "via", set.via, "state", pathState, "path", pathText)
 		return installTransportMap(server, raw, ports, targets, set.via, set.pathCopy()), true
 	}
 	if len(alpnRecs) > 0 {
 		_, ports, targets := combineOOTSEndpoints(alpnRecs)
 		order := alpnOrder(alpnRecs)
-		if !imr.Quiet {
-			lgDns.Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports,
-				"targets", targets, "via", set.via, "state", pathState, "path", pathText)
-		}
+		imr.lgDns().Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports,
+			"targets", targets, "via", set.via, "state", pathState, "path", pathText)
 		return installAlpnSignal(server, order, ports, targets, set.via, set.pathCopy()), false
 	}
 	return false, false
@@ -2617,9 +2610,7 @@ func (imr *Imr) parseTSYNCTransportSignal(rr *dns.PrivateRR, serverName string, 
 	}
 
 	val := strings.TrimPrefix(ts.Transports, "transport=")
-	if !imr.Quiet {
-		lgDns.Debug("TSYNC transport value for", "servername", serverName, "value", val)
-	}
+	imr.lgDns().Debug("TSYNC transport value for", "servername", serverName, "value", val)
 	if imr.applyTransportSignalToServer(server, val) {
 		server.PromoteConnMode(cache.ConnModeOpportunistic)
 	}
@@ -2646,8 +2637,8 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	}
 	// If we don't know the zone name (no NS owner found), don't mutate ServerMap with an empty key
 	if zonename == "" {
-		if imr.Cache.Debug && !imr.Quiet {
-			lgDns.Debug("ParseAdditionalForNSAddrs: empty zonename; skipping glue collection")
+		if imr.Cache.Debug {
+			imr.lgDns().Debug("ParseAdditionalForNSAddrs: empty zonename; skipping glue collection")
 		}
 		return map[string]*cache.AuthServer{}, nil
 	}
@@ -2660,8 +2651,8 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		return serverMap, nil
 	}
 
-	if imr.Debug && !imr.Quiet {
-		lgDns.Debug("*** ParseAdditionalForNSAddrs: zonename: \nnsMap", "zonename", zonename, "nnsmap", nsMap)
+	if imr.Debug {
+		imr.lgDns().Debug("*** ParseAdditionalForNSAddrs: zonename: \nnsMap", "zonename", zonename, "nnsmap", nsMap)
 	}
 
 	// Collect any glue from Additional
@@ -2681,8 +2672,8 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	for name, srv := range serverMap {
 		if expire := srv.GetExpire(); !expire.IsZero() && expire.Before(now) {
 			delete(serverMap, name)
-			if imr.Debug && !imr.Quiet {
-				lgDns.Debug("ParseAdditionalForNSAddrs: pruned expired server for zone", "server", name, "zone", zonename)
+			if imr.Debug {
+				imr.lgDns().Debug("ParseAdditionalForNSAddrs: pruned expired server for zone", "server", name, "zone", zonename)
 			}
 		}
 	}
@@ -2709,9 +2700,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 					serverName = baseName
 					isGlueRecord = true
 				} else {
-					if !imr.Quiet {
-						lgDns.Debug("*** IterativeDNSQuery: non-glue record in Additional", "additional", rr.String())
-					}
+					imr.lgDns().Debug("*** IterativeDNSQuery: non-glue record in Additional", "additional", rr.String())
 					continue
 				}
 			} else {
@@ -2738,9 +2727,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 				}
 			} else {
 				// Not OOTS owner, skip transport signals (they should be _dns.*)
-				if !imr.Quiet {
-					lgDns.Debug("*** IterativeDNSQuery: non-glue record in Additional", "additional", rr.String())
-				}
+				imr.lgDns().Debug("*** IterativeDNSQuery: non-glue record in Additional", "additional", rr.String())
 				continue
 			}
 		default:
@@ -2752,10 +2739,8 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		// For a nameserver outside it the record is not used, and its
 		// addresses are looked up as for a referral without glue.
 		if !withinGlueZone(owner, glueZone) {
-			if !imr.Quiet {
-				lgDns.Debug("ParseAdditionalForNSAddrs: record outside the referring zone not used",
-					"rr", rr.String(), "zone", zonename, "referring_zone", referringZone)
-			}
+			imr.lgDns().Debug("ParseAdditionalForNSAddrs: record outside the referring zone not used",
+				"rr", rr.String(), "zone", zonename, "referring_zone", referringZone)
 			continue
 		}
 
@@ -2809,17 +2794,13 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 
 		case *dns.SVCB:
 			if shouldProcessTransportSignal {
-				if !imr.Quiet {
-					lgDns.Debug("Additional contains an SVCB; rr", "rr", rr.String())
-				}
+				imr.lgDns().Debug("Additional contains an SVCB; rr", "rr", rr.String())
 				imr.collectSVCBSignal(pendingSVCB, serverName, rr)
 			}
 
 		case *dns.PrivateRR:
 			if shouldProcessTransportSignal {
-				if !imr.Quiet {
-					lgDns.Debug("Additional contains TSYNC; rr", "rr", rr.String())
-				}
+				imr.lgDns().Debug("Additional contains TSYNC; rr", "rr", rr.String())
 				imr.parseTSYNCTransportSignal(rr, serverName, serverMap, ctx)
 			}
 		}
@@ -2835,7 +2816,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
-		if imr.Debug && !imr.Quiet {
+		if imr.Debug {
 			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, A> (adding glue unless a live answer is cached)\n", nsname)
 		}
 		imr.Cache.SetUnless(nsname, dns.TypeA, &cache.CachedRRset{
@@ -2854,7 +2835,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
-		if imr.Debug && !imr.Quiet {
+		if imr.Debug {
 			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, AAAA> (adding glue unless a live answer is cached)\n", nsname)
 		}
 		imr.Cache.SetUnless(nsname, dns.TypeAAAA, &cache.CachedRRset{
@@ -2868,18 +2849,18 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}, glueKeeps) // not over a live answer (glueMayReplace)
 	}
 
-	if imr.Debug && !imr.Quiet {
-		lgDns.Debug("*** ParseAdditionalForNSAddrs: adding servers for zone to cache",
+	if imr.Debug {
+		imr.lgDns().Debug("*** ParseAdditionalForNSAddrs: adding servers for zone to cache",
 			"adding", len(serverMap),
 			"zone", zonename)
 	}
 	// rrcache.Servers.Set(zonename, servers)
 	imr.Cache.AddServers(zonename, serverMap)
 
-	if imr.Debug && !imr.Quiet {
-		lgDns.Debug("ParseAdditionalForNSAddrs: serverMap:")
+	if imr.Debug {
+		imr.lgDns().Debug("ParseAdditionalForNSAddrs: serverMap:")
 		for n, as := range serverMap {
-			lgDns.Debug("server: : (addrs: )", "server", n, "s", as.Name, "addrs", as.GetAddrs())
+			imr.lgDns().Debug("server: : (addrs: )", "server", n, "s", as.Name, "addrs", as.GetAddrs())
 		}
 	}
 
@@ -3032,14 +3013,14 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	}
 	if eerr != nil {
 		if imr.Debug {
-			lgDns.Debug("tryServer: no attempt", "server", server.Name, "addr", addr, "transport", core.TransportToString[eff], "error", eerr)
+			imr.lgDns().Debug("tryServer: no attempt", "server", server.Name, "addr", addr, "transport", core.TransportToString[eff], "error", eerr)
 		}
 		return nil, 0, eff, endpointDial{}, eerr
 	}
 	server.IncrementTransportCounter(eff)
 	dial := ep.dialAddr()
 	if imr.Debug {
-		lgDns.Debug("*** tryServer: calling c.Exchange",
+		imr.lgDns().Debug("*** tryServer: calling c.Exchange",
 			"transport", core.TransportToString[eff],
 			"server", server.Name,
 			"addrs", server.GetAddrs(),
@@ -3049,18 +3030,16 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 			"qname", qname,
 			"qtype", dns.TypeToString[qtype])
 	}
-	if !imr.Quiet {
-		weights := server.GetTransportWeights()
-		lgDns.Debug("IMR: query",
-			"query", qname,
-			"rrtype", dns.TypeToString[qtype],
-			"name", server.Name,
-			"transport", core.TransportToString[eff],
-			"doq", weights[core.TransportDoQ],
-			"dot", weights[core.TransportDoT],
-			"doh", weights[core.TransportDoH],
-			"do53", weights[core.TransportDo53])
-	}
+	weights := server.GetTransportWeights()
+	imr.lgDns().Debug("IMR: query",
+		"query", qname,
+		"rrtype", dns.TypeToString[qtype],
+		"name", server.Name,
+		"transport", core.TransportToString[eff],
+		"doq", weights[core.TransportDoQ],
+		"dot", weights[core.TransportDoT],
+		"doh", weights[core.TransportDoH],
+		"do53", weights[core.TransportDo53])
 	for _, hook := range getImrOutboundQueryHooks() {
 		if err := hook(ctx, qname, qtype, server.Name, ep.addr, eff); err != nil {
 			return nil, 0, eff, ep, err
@@ -3085,7 +3064,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	// rtt and hides any preceding UDP-timeout cost. The wall-clock value is
 	// what we actually care about for prioritization.
 	start := time.Now()
-	r, _, xres, err := core.ExchangeCtxWithResult(ctx, c, m, dial, imr.Debug && !imr.Quiet)
+	r, _, xres, err := core.ExchangeCtxWithResult(ctx, c, m, dial, imr.Debug)
 	rtt := time.Since(start)
 	// A TC=1 truncation upgrade is a size-driven fact about this exchange (not a
 	// failure); record it regardless of the subsequent TCP outcome.
@@ -3108,7 +3087,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	// window ran out (#703).
 	imr.FamilyTracker.RecordResult(ep.addr, (err == nil && r != nil) || isConnRefused(err))
 	if err != nil {
-		lgDns.Error("*** tryServer: query returned error",
+		imr.lgDns().Error("*** tryServer: query returned error",
 			"qname", qname,
 			"qtype", dns.TypeToString[qtype],
 			"addr", addr,
@@ -3132,7 +3111,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 		// A reply to some other question, or to none, is a failed attempt at
 		// this server: nothing below may read it as an answer to ours.
 		if qerr := replyMatchesQuery(r, m); qerr != nil {
-			lgDns.Warn("tryServer: discarding a reply that does not answer the query",
+			imr.lgDns().Warn("tryServer: discarding a reply that does not answer the query",
 				"qname", qname,
 				"qtype", dns.TypeToString[qtype],
 				"addr", addr,
@@ -3146,7 +3125,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 		server.CountAnswer(xres.WireTransport, class, ep.redirect)
 		server.RecordEndpointAddrRTT(ep.addr, ep.keyPort, eff, rtt)
 	} else if imr.Debug {
-		lgDns.Debug("*** tryServer: query returned no response",
+		imr.lgDns().Debug("*** tryServer: query returned no response",
 			"qname", qname,
 			"qtype", dns.TypeToString[qtype],
 			"addr", addr,
@@ -3166,7 +3145,7 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 	}
 	kvMap, err := core.ParseReceivedTransportString(s)
 	if err != nil {
-		lgDns.Debug("applyTransportSignalToServer: invalid transport string for :", "name", server.Name, "s", s, "q", err)
+		imr.lgDns().Debug("applyTransportSignalToServer: invalid transport string for :", "name", server.Name, "s", s, "q", err)
 		return false
 	}
 	return applyTransportMapToServer(server, kvMap)
@@ -3341,15 +3320,15 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 		ctx = context.Background()
 	}
 	if server == nil || r == nil {
-		lgDns.Debug("*** parseTransportForServerFromAdditional: server or r is nil")
+		imr.lgDns().Debug("*** parseTransportForServerFromAdditional: server or r is nil")
 		return
 	}
-	lgDns.Debug("parseTransportForServerFromAdditional: inspecting server", "server", server.Name, "addrs", server.GetAddrs())
+	imr.lgDns().Debug("parseTransportForServerFromAdditional: inspecting server", "server", server.Name, "addrs", server.GetAddrs())
 	if len(r.Question) > 0 {
-		lgDns.Debug("pTFSA: looking for transport signal in response", "qname", r.Question[0].Name, "qtype", dns.TypeToString[r.Question[0].Qtype], "additionalRRs", len(r.Extra))
+		imr.lgDns().Debug("pTFSA: looking for transport signal in response", "qname", r.Question[0].Name, "qtype", dns.TypeToString[r.Question[0].Qtype], "additionalRRs", len(r.Extra))
 	}
 	if len(r.Extra) == 0 {
-		lgDns.Debug("*** parseTransportForServerFromAdditional: no Additional section in response")
+		imr.lgDns().Debug("*** parseTransportForServerFromAdditional: no Additional section in response")
 		return
 	}
 	// Canonicalize target owner to FQDN and lower-case for case-insensitive compare
@@ -3363,22 +3342,22 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 	for _, rr := range r.Extra {
 		owner := dns.Fqdn(rr.Header().Name)
 		if !core.EqualNames(owner, targetOwner) {
-			lgDns.Debug("parseTransportForServerFromAdditional: owner != target", "owner", owner, "target", targetOwner)
+			imr.lgDns().Debug("parseTransportForServerFromAdditional: owner != target", "owner", owner, "target", targetOwner)
 			continue
 		}
-		lgDns.Debug("parseTransportForServerFromAdditional: owner matches target", "owner", owner, "target", targetOwner)
+		imr.lgDns().Debug("parseTransportForServerFromAdditional: owner matches target", "owner", owner, "target", targetOwner)
 		switch x := rr.(type) {
 		case *dns.SVCB:
-			lgDns.Debug("**** parseTransportForServerFromAdditional: x", "x", x)
+			imr.lgDns().Debug("**** parseTransportForServerFromAdditional: x", "x", x)
 			set.add(x)
 		case *dns.PrivateRR:
-			lgDns.Debug("parseTransportForServerFromAdditional: TSYNC RR", "rr", x)
+			imr.lgDns().Debug("parseTransportForServerFromAdditional: TSYNC RR", "rr", x)
 			if ts, ok := x.Data.(*core.TSYNC); ok && ts != nil {
-				lgDns.Debug("parseTransportForServerFromAdditional: TSYNC data", "tsync", ts)
-				lgDns.Debug("parseTransportForServerFromAdditional: TSYNC transports", "transports", ts.Transports)
+				imr.lgDns().Debug("parseTransportForServerFromAdditional: TSYNC data", "tsync", ts)
+				imr.lgDns().Debug("parseTransportForServerFromAdditional: TSYNC transports", "transports", ts.Transports)
 				if ts.Transports != "" {
 					val := strings.TrimPrefix(ts.Transports, "transport=")
-					lgDns.Debug("parseTransportForServerFromAdditional: parsing TSYNC transport value", "value", val)
+					imr.lgDns().Debug("parseTransportForServerFromAdditional: parsing TSYNC transport value", "value", val)
 					if imr.applyTransportSignalToServer(server, val) {
 						server.PromoteConnMode(cache.ConnModeOpportunistic)
 					}
@@ -3492,7 +3471,7 @@ func (imr *Imr) storeTLSAFromSVCB(base string, owners []string, svcb *dns.SVCB, 
 		}
 		tlsaRR, err := ParseTLSAString(string(local.Data))
 		if err != nil {
-			lgDns.Error("applyTransportRRsetFromAnswer: failed to parse TLSA from SVCB", "svcb", err)
+			imr.lgDns().Error("applyTransportRRsetFromAnswer: failed to parse TLSA from SVCB", "svcb", err)
 			continue
 		}
 		for _, ownerName := range owners {
@@ -3581,7 +3560,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		verdict, err := imr.Cache.ValidateAnswer(ctx, &rrset, AuthorityRRsets(r.Ns), imr.IterativeDNSQueryFetcher())
 		vstate = verdict.State
 		if err != nil {
-			lgDns.Error("handleAnswer: failed to validate RRset", "rrset", err)
+			imr.lgDns().Error("handleAnswer: failed to validate RRset", "rrset", err)
 			return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err, false
 		}
 		if imr.Debug {
@@ -3696,7 +3675,7 @@ func zoneHasVerdict(z *cache.Zone) bool {
 // NS RRset, its DS, and the glue and transport signals that may be used
 // (ParseAdditionalForNSAddrs).
 func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, serversZone string, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
-	if imr.Debug && !imr.Quiet {
+	if imr.Debug {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
 	}
 	nsRRset, zonename, nsMap := extractReferral(r, qname, qtype)
@@ -3716,14 +3695,14 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		}
 	}
 
-	if imr.Debug && !imr.Quiet {
+	if imr.Debug {
 		imr.Cache.Logger.Printf("*** handleReferral: zone name is %q, nsRRset: %+v", zonename, nsRRset)
 	}
 	if len(nsRRset.RRs) != 0 {
 		nsRRset.Name = zonename
 		nsRRset.Class = dns.ClassINET
 		nsRRset.RRtype = dns.TypeNS
-		if imr.Debug && !imr.Quiet {
+		if imr.Debug {
 			fmt.Printf("handleReferral: Calling rrcache.Set for <%s, NS>\n", zonename)
 		}
 		// Validate NS RRset if signatures are present
@@ -3732,7 +3711,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		if len(nsRRset.RRSIGs) > 0 {
 			vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, nsRRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 			if err != nil {
-				lgDns.Error("handleReferral: failed to validate NS RRset", "rrset", err)
+				imr.lgDns().Error("handleReferral: failed to validate NS RRset", "rrset", err)
 				return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err
 			}
 		}
@@ -3766,7 +3745,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		if len(dsSigs) > 0 {
 			vstate, err = imr.Cache.ValidateRRsetWithParentZone(ctx, dsRRset, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 			if err != nil {
-				lgDns.Error("handleReferral: failed to validate DS RRset", "rrset", err)
+				imr.lgDns().Error("handleReferral: failed to validate DS RRset", "rrset", err)
 				return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err
 			}
 		}
@@ -3820,7 +3799,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	}
 	serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRset, zonename, serversZone, nsMap, r)
 	if err != nil {
-		lgDns.Error("*** handleReferral: Error from CollectNSAddressesFromAdditional",
+		imr.lgDns().Error("*** handleReferral: Error from CollectNSAddressesFromAdditional",
 			"collectnsaddressesfromadditional", err)
 		return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err
 	}
@@ -3954,7 +3933,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 				}
 			}
 			if imr.Debug {
-				lgDns.Debug("handleReferral: OOB resolution budget",
+				imr.lgDns().Debug("handleReferral: OOB resolution budget",
 					"zone", zonename, "depth", zoneDepth(zonename),
 					"budget", budget, "picked", picked)
 			}
@@ -4055,7 +4034,7 @@ func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serve
 	rrset, rcode, _, err := imr.AuthDNSQuery(ctx, zonename, dns.TypeNS, addrs, imr.Cache.Logger, imr.Cache.Verbose)
 	if err != nil || rrset == nil || len(rrset.RRs) == 0 {
 		if imr.Cache.Debug && err != nil {
-			lgDns.Error("NS revalidation for failed", "zonename", zonename, "failed", err)
+			imr.lgDns().Error("NS revalidation for failed", "zonename", zonename, "failed", err)
 		}
 		return
 	}
@@ -4412,14 +4391,14 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 		if r.Authoritative && zone != "" {
 			return imr.negativeWithoutSOA(qname, qtype, r, negContext, zone, transport)
 		}
-		lgDns.Debug("handleNegative: no SOA found in authority for \" \" ()",
+		imr.lgDns().Debug("handleNegative: no SOA found in authority for \" \" ()",
 			"qname", qname,
 			"s", dns.TypeToString[qtype],
 			"rcode", dns.RcodeToString[r.MsgHdr.Rcode])
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
 	}
 	if soaAboveServersZone(soaOwner, zone) && !imr.configuredZone(zone) {
-		lgDns.Debug("handleNegative: the denial's SOA is from a zone above the one the servers serve; not used",
+		imr.lgDns().Debug("handleNegative: the denial's SOA is from a zone above the one the servers serve; not used",
 			"qname", qname, "qtype", dns.TypeToString[qtype], "soa", soaOwner, "zone", zone,
 			"rcode", dns.RcodeToString[r.MsgHdr.Rcode])
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
@@ -4438,7 +4417,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	if !skipDNSKEYValidation && len(soarrset.RRSIGs) > 0 {
 		soaVstate, err = imr.Cache.ValidateRRset(context.Background(), soarrset, imr.IterativeDNSQueryFetcher())
 		if err != nil {
-			lgDns.Error("handleNegative: failed to validate SOA RRset", "rrset", err)
+			imr.lgDns().Error("handleNegative: failed to validate SOA RRset", "rrset", err)
 			return cache.ContextFailure, r.MsgHdr.Rcode, false
 		}
 	}
@@ -4486,10 +4465,10 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 			// If validation returns ValidationStateIndeterminate (e.g., no trust anchors),
 			// we should still cache and return the response, not treat it as a failure.
 			if vstate == cache.ValidationStateIndeterminate {
-				lgDns.Debug("handleNegative: validation returned indeterminate state (likely no trust anchors)", "err", err)
+				imr.lgDns().Debug("handleNegative: validation returned indeterminate state (likely no trust anchors)", "err", err)
 				// Continue to cache with indeterminate state
 			} else {
-				lgDns.Error("handleNegative: failed to validate negative response", "response", err)
+				imr.lgDns().Error("handleNegative: failed to validate negative response", "response", err)
 				return cache.ContextFailure, r.MsgHdr.Rcode, false
 			}
 		}
@@ -4501,7 +4480,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	}
 	// In the specific case where ValidateNegativeResponse has modified the rcode from NOERROR to NXDOMAIN we propagate this change.
 	if negRcode != uint8(r.MsgHdr.Rcode) && negRcode == dns.RcodeNameError && uint8(r.MsgHdr.Rcode) == dns.RcodeSuccess {
-		lgDns.Debug("handleNegative: ValidateNegativeResponse has modified the rcode from NOERROR to NXDOMAIN")
+		imr.lgDns().Debug("handleNegative: ValidateNegativeResponse has modified the rcode from NOERROR to NXDOMAIN")
 		cachedRcode = uint8(dns.RcodeNameError)
 		negContext = cache.ContextNXDOMAIN
 	}
@@ -4513,7 +4492,7 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	// proof that validated. ValidateDenial reads the RFC 9824 form from the
 	// records that count.
 	if vstate == cache.ValidationStateSecure && negRcode != cachedRcode {
-		lgDns.Debug("handleNegative: the proof that validated does not support the rcode; not used",
+		imr.lgDns().Debug("handleNegative: the proof that validated does not support the rcode; not used",
 			"qname", qname, "qtype", dns.TypeToString[qtype],
 			"proof", dns.RcodeToString[int(negRcode)], "rcode", dns.RcodeToString[int(cachedRcode)])
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
@@ -4523,12 +4502,12 @@ func (imr *Imr) handleNegative(qname string, qtype uint16, r *dns.Msg, transport
 	// If we're caching as NXDOMAIN, the RCODE must be NXDOMAIN
 	// If we're caching as NODATA, the RCODE must be NOERROR
 	if negContext == cache.ContextNXDOMAIN && cachedRcode != uint8(dns.RcodeNameError) {
-		lgDns.Warn("*** handleNegative: WARNING - caching as NXDOMAIN but RCODE is (expected NXDOMAIN)",
+		imr.lgDns().Warn("*** handleNegative: WARNING - caching as NXDOMAIN but RCODE is (expected NXDOMAIN)",
 			"rcode", dns.RcodeToString[r.MsgHdr.Rcode])
 		// cachedRcode = uint8(dns.RcodeNameError)
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
 	} else if negContext == cache.ContextNoErrNoAns && cachedRcode != uint8(dns.RcodeSuccess) {
-		lgDns.Warn("*** handleNegative: WARNING - caching as NODATA but RCODE is (expected NOERROR)",
+		imr.lgDns().Warn("*** handleNegative: WARNING - caching as NODATA but RCODE is (expected NOERROR)",
 			"rcode", dns.RcodeToString[r.MsgHdr.Rcode])
 		// cachedRcode = uint8(dns.RcodeSuccess)
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
@@ -4596,7 +4575,7 @@ func soaAboveServersZone(soaOwner, zone string) bool {
 func (imr *Imr) negativeWithoutSOA(qname string, qtype uint16, r *dns.Msg, negContext cache.CacheContext, zone string, transport core.Transport) (cache.CacheContext, int, bool) {
 	vstate := imr.Cache.UnsignedDenialState(context.Background(), zone, qname, qtype, imr.IterativeDNSQueryFetcher())
 	if vstate == cache.ValidationStateBogus {
-		lgDns.Debug("handleNegative: denial without an SOA from a zone that must sign its denials; not used",
+		imr.lgDns().Debug("handleNegative: denial without an SOA from a zone that must sign its denials; not used",
 			"qname", qname, "qtype", dns.TypeToString[qtype], "zone", zone,
 			"rcode", dns.RcodeToString[r.MsgHdr.Rcode])
 		return cache.ContextFailure, r.MsgHdr.Rcode, false
@@ -4610,7 +4589,7 @@ func (imr *Imr) negativeWithoutSOA(qname string, qtype uint16, r *dns.Msg, negCo
 		Expiration: cache.Now(),
 		Transport:  transport,
 	})
-	lgDns.Debug("handleNegative: serving a denial without an SOA, uncached",
+	imr.lgDns().Debug("handleNegative: serving a denial without an SOA, uncached",
 		"qname", qname, "qtype", dns.TypeToString[qtype], "zone", zone,
 		"rcode", dns.RcodeToString[r.MsgHdr.Rcode], "state", cache.ValidationStateToString[vstate])
 	return negContext, r.MsgHdr.Rcode, true
@@ -4673,13 +4652,13 @@ func (imr *Imr) chaseCNAME(ctx context.Context, owner, target string, qtype uint
 			return nil, 0, cache.ContextFailure, core.TransportDo53, ctx.Err()
 		default:
 		}
-		imr.Cache.Logger.Printf("*** IterativeDNSQuery: found CNAME target: %s, chasing.", target)
+		imr.lgDns().Debug("IterativeDNSQuery: found CNAME target, chasing", "target", target)
 		bestmatch, tmpservers, err := imr.Cache.FindClosestKnownZoneFor(target, qtype)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from FindClosestKnownZoneFor: %v", err)
 			return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, err
 		}
-		imr.Cache.Logger.Printf("*** IterativeDNSQuery: best match for target %s is %s", target, bestmatch)
+		imr.lgDns().Debug("IterativeDNSQuery: best match for CNAME target", "target", target, "zone", bestmatch)
 		tmprrset, rcode, context, hopTransport, err := imr.IterativeDNSQueryInZone(ctx, target, qtype, tmpservers, bestmatch, force, privacy)
 		if err != nil {
 			imr.Cache.Logger.Printf("*** IterativeDNSQuery: Error from IterativeDNSQuery: %v", err)

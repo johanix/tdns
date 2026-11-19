@@ -5,6 +5,7 @@ package imr
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -42,7 +43,7 @@ func startTestDataClock(t *testing.T, at time.Time) string {
 	writeFaketimeFile(t, path, at)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); cache.SetDataClock(nil) })
-	if err := startDataClock(ctx, ImrTestingConf{FaketimeFile: path}); err != nil {
+	if err := startDataClock(ctx, slog.Default(), ImrTestingConf{FaketimeFile: path}); err != nil {
 		t.Fatalf("startDataClock: %v", err)
 	}
 	return path
@@ -141,7 +142,7 @@ func TestResolverFollowsTheTestClock(t *testing.T) {
 func TestFaketimeRestartKeepsTheClock(t *testing.T) {
 	path := startTestDataClock(t, faketime2010)
 	first := cache.DataClock()
-	if err := startDataClock(context.Background(), ImrTestingConf{FaketimeFile: path}); err != nil {
+	if err := startDataClock(context.Background(), slog.Default(), ImrTestingConf{FaketimeFile: path}); err != nil {
 		t.Fatalf("second start: %v", err)
 	}
 	if cache.DataClock() != first {
@@ -181,7 +182,7 @@ func TestFaketimeActivationDataClock(t *testing.T) {
 		"root-refresh without file": {Faketime: true, RootRefresh: &on},
 	} {
 		cache.SetDataClock(nil)
-		if err := startDataClock(ctx, tc); err == nil {
+		if err := startDataClock(ctx, slog.Default(), tc); err == nil {
 			t.Errorf("%s: the clock started", name)
 		}
 	}

@@ -1,11 +1,13 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
+
 package imr
 
 import (
 	"context"
 	"log"
+	"log/slog"
 	"os"
 	"sync"
 
@@ -24,18 +26,18 @@ var (
 
 // imrDebugLogger returns the IMR debug logger, opening logfile and registering
 // the hooks on first use. Nil if the file cannot be opened.
-func imrDebugLogger(logfile string) *log.Logger {
+func imrDebugLogger(lg *slog.Logger, logfile string) *log.Logger {
 	imrDebugLogOnce.Do(func() {
 		if logfile == "" {
 			logfile = "/var/log/tdns/imr-debug.log"
 		}
 		f, err := os.OpenFile(logfile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
-			lgImr.Error("failed to open IMR debug log file, debug logging disabled", "file", logfile, "err", err)
+			lg.Error("failed to open IMR debug log file, debug logging disabled", "file", logfile, "err", err)
 			return
 		}
 		dl := log.New(f, "", log.Ldate|log.Ltime|log.Lmicroseconds)
-		lgImr.Info("IMR debug logging enabled", "file", logfile)
+		lg.Info("IMR debug logging enabled", "file", logfile)
 		RegisterImrOutboundQueryHook(func(ctx context.Context, qname string, qtype uint16, serverName, serverAddr string, transport core.Transport) error {
 			dl.Printf("OUTBOUND qname=%s qtype=%s server=%s addr=%s transport=%s",
 				qname, dns.TypeToString[qtype], serverName, serverAddr, core.TransportToString[transport])

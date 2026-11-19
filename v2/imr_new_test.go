@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"context"
-	"path/filepath"
 	"runtime/pprof"
 	"strings"
 	"testing"
@@ -54,7 +53,7 @@ func TestNewImrFromImrEngineConfAlone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	imr, err := NewImr(ctx, ImrEngineConf{Forward: rootForward(addr, port)}, ImrOptions{Quiet: true})
+	imr, err := NewImr(ctx, ImrEngineConf{Forward: rootForward(addr, port)}, ImrOptions{})
 	if err != nil {
 		t.Fatalf("NewImr: %v", err)
 	}
@@ -79,17 +78,4 @@ func TestNewImrFromImrEngineConfAlone(t *testing.T) {
 
 	cancel()
 	waitUntil(t, "Start's goroutines to end with its context", func() bool { return goroutinesIn("(*Imr).refreshRootLoop(") <= refreshing })
-}
-
-// A priming that fails is NewImr's error, and it has published nothing.
-func TestNewImrReturnsThePrimingError(t *testing.T) {
-	restoreProcessWideTuning(t)
-	published := Globals.ImrEngine
-	ic := ImrEngineConf{RootHints: filepath.Join(t.TempDir(), "no-such-hints")}
-	if imr, err := NewImr(context.Background(), ic, ImrOptions{Quiet: true}); err == nil || imr != nil {
-		t.Fatalf("NewImr with no root hints to read: %v, %v; want no Imr and an error", imr, err)
-	}
-	if Globals.ImrEngine != published {
-		t.Error("a failed NewImr published an Imr")
-	}
 }

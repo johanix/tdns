@@ -26,7 +26,6 @@ func newReloadTestImr(t *testing.T) *Imr {
 	lg := log.New(os.Stderr, "test", log.LstdFlags)
 	imr := &Imr{
 		Cache: cache.NewRRsetCache(lg, false, false),
-		Quiet: true,
 	}
 	imr.setZoneTable(nil, nil, map[string]string{})
 	return imr

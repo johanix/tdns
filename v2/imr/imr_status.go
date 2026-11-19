@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
+
 package imr
 
 import (
@@ -83,15 +84,20 @@ func (imr *Imr) StatusReport() *ImrStatus {
 	}
 	table := imr.zoneTable()
 	st := &ImrStatus{
-		PrimedVia:     imr.PrimedVia,
-		PrimedAt:      imr.PrimedAt,
 		RootForwarded: imr.forwardZoneFor(".") != nil,
 		StubZones:     append([]string(nil), table.stubs...),
 		ZonesLoadedAt: table.loadedAt,
 		DataClock:     dataClockStatus(),
 	}
-	if imr.Cache != nil {
-		st.Primed = imr.Cache.IsPrimed()
+	// Until the resolver is Ready, Start's priming writes these: it is not
+	// primed, and they are not read.
+	select {
+	case <-imr.Ready():
+		st.PrimedVia, st.PrimedAt = imr.PrimedVia, imr.PrimedAt
+		if imr.Cache != nil {
+			st.Primed = imr.Cache.IsPrimed()
+		}
+	default:
 	}
 	st.RootNSPresent, st.RootNSExpires, st.RootNSCount = imr.RootNSStatus()
 	for _, fz := range table.forwards {

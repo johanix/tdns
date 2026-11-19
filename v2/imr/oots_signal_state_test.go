@@ -35,7 +35,6 @@ func stateOnEachPath(t *testing.T, section []dns.RR, lookupState cache.Validatio
 	out := map[string]*cache.AuthServer{}
 	fresh := func() *Imr {
 		imr := newTestImr(t)
-		imr.Quiet = true
 		if prep != nil {
 			prep(imr)
 		}
@@ -316,7 +315,6 @@ func TestOOTSSignalStateAliasHops(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			imr := newTestImr(t)
-			imr.Quiet = true
 			set := &svcbSignalSet{}
 			for _, rr := range svcbAt(tc.section, pathOwner) {
 				set.add(rr.(*dns.SVCB))
@@ -378,7 +376,6 @@ func TestOOTSSignalStateAliasDelegates(t *testing.T) {
 
 	ctx := context.Background()
 	imr := newTestImr(t)
-	imr.Quiet = true
 	server := cache.NewAuthServer(pathNS)
 	r := new(dns.Msg)
 	r.SetQuestion("www."+stateZone, dns.TypeA)
@@ -397,7 +394,6 @@ func TestOOTSSignalStateAliasDelegates(t *testing.T) {
 	}
 
 	imr = newTestImr(t)
-	imr.Quiet = true
 	nsrrset := &core.RRset{Name: stateZone, Class: dns.ClassINET, RRtype: dns.TypeNS,
 		RRs: []dns.RR{mustRR(t, stateZone+" 3600 IN NS "+pathNS)}}
 	ref := new(dns.Msg)

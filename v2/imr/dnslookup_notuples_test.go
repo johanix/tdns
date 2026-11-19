@@ -91,7 +91,7 @@ func TestNoteServerProblemIsReportedOncePerInterval(t *testing.T) {
 		unusableServersMu.Unlock()
 	})
 
-	noteServerProblem(zone, ns, reason)
+	new(Imr).noteServerProblem(zone, ns, reason)
 	unusableServersMu.Lock()
 	first, ok := unusableServers[key]
 	unusableServersMu.Unlock()
@@ -101,7 +101,7 @@ func TestNoteServerProblemIsReportedOncePerInterval(t *testing.T) {
 
 	// A second call inside the interval must not refresh the timestamp, or a
 	// server reported continuously would never be re-reported.
-	noteServerProblem(zone, ns, reason)
+	new(Imr).noteServerProblem(zone, ns, reason)
 	unusableServersMu.Lock()
 	second := unusableServers[key]
 	unusableServersMu.Unlock()
@@ -126,8 +126,8 @@ func TestNoteServerProblemSeparatesReasons(t *testing.T) {
 		unusableServersMu.Unlock()
 	})
 
-	noteServerProblem(zone, ns, "no addresses")
-	noteServerProblem(zone, ns, "nil server entry in the server map")
+	new(Imr).noteServerProblem(zone, ns, "no addresses")
+	new(Imr).noteServerProblem(zone, ns, "nil server entry in the server map")
 
 	unusableServersMu.Lock()
 	defer unusableServersMu.Unlock()
@@ -153,7 +153,7 @@ func TestNoteServerProblemBoundsItsState(t *testing.T) {
 	})
 
 	for i := 0; i < unusableServerMaxKeys*2; i++ {
-		noteServerProblem(fmt.Sprintf("zone%d.example.", i), "ns1.example.", "no addresses")
+		new(Imr).noteServerProblem(fmt.Sprintf("zone%d.example.", i), "ns1.example.", "no addresses")
 	}
 
 	unusableServersMu.Lock()

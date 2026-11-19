@@ -101,7 +101,6 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	closed, _ := strconv.Atoi(ps)
 
 	imr := newTestImr(t)
-	imr.Quiet = true
 	c := core.NewDNSClient(core.TransportDo53, "53", nil)
 	c.Timeout, c.DNSClientUDP.Timeout, c.DNSClientTCP.Timeout = time.Second, time.Second, time.Second
 	imr.Cache.DNSClient[core.TransportDo53] = c

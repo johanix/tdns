@@ -253,7 +253,7 @@ func bootImrFromFile(t *testing.T, body string) *Config {
 		t.Fatalf("decodeConfigMap: %v", err)
 	}
 	conf.Internal.ServerErrors = NewServerErrorRegistry()
-	if err := conf.InitImrEngine(context.Background(), true); err != nil {
+	if err := conf.InitImrEngine(context.Background()); err != nil {
 		t.Fatalf("InitImrEngine: %v", err)
 	}
 	return conf

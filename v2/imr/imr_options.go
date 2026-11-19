@@ -1,17 +1,23 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
+
 package imr
 
-// ImrOptions is what NewImr takes besides the imrengine: configuration. They
+import "log/slog"
+
+// Options is what NewImr takes besides the imrengine: configuration. They
 // are the few things a resolver reads from outside it, so that an application
-// can build one without the daemon's Config. The zero value is a resolver with no large
-// DNSSEC algorithms, the default DNSKEY transport, nowhere to report server
-// errors, and no own zones.
-type ImrOptions struct {
+// can build one without the daemon's Config. The zero value is a resolver with
+// the default large DNSSEC algorithms and DNSKEY transport, nowhere to report
+// server errors, no own zones, and slog.Default() to log through.
+type Options struct {
 	// LargeAlgorithms is the set of DNSSEC algorithms whose DNSKEYs and
-	// signatures are too large for a UDP response. RefreshDnssecPolicy replaces
-	// it on a live resolver.
+	// signatures are too large for a UDP response: the resolver asks for
+	// their DNSKEY RRsets over TCP or an encrypted transport rather than
+	// have them come back truncated. Nil is the default set, the post-quantum
+	// families MLDSA, SLHDSA, FALCON and CROSS; an empty set is none.
+	// RefreshDnssecPolicy replaces it on a live resolver.
 	LargeAlgorithms map[uint8]bool
 	// DNSKEYTransport is the transport policy for DNSKEY queries.
 	DNSKEYTransport DNSKEYTransportPolicy
@@ -26,14 +32,22 @@ type ImrOptions struct {
 	// about them are answered from them, in process (imr_own_zone.go). Nil
 	// is a server that has no zones of its own.
 	OwnZones OwnZones
-	// Quiet suppresses informational logging (useful for CLI tools).
-	Quiet bool
+	// Logger is what the resolver logs through: the engine, the lookups and
+	// the cache. Per-query and per-RRset lines are at Debug; Info is for what
+	// happens once or rarely, such as priming and the trust anchors. Nil is
+	// slog.Default().
+	Logger *slog.Logger
+	// LookupLogger, when it is set, takes the lookups' records instead of
+	// Logger. The tdns daemon logs them under a subsystem of their own.
+	LookupLogger *slog.Logger
 }
 
 // ErrorSink is where a resolver reports the server-wide error conditions it
-// owns: the forward table's quarantine and its upstreams' reachability.
-// *ServerErrorRegistry is one.
+// owns: root priming that fails, the forward table's quarantine and its
+// upstreams' reachability. *ServerErrorRegistry is one.
 type ErrorSink interface {
+	SetImrPrimingError(msg string)
+	ClearImrPrimingError()
 	SetImrForwardZoneError(msg string)
 	ClearImrForwardZoneError()
 	SetImrForwardUpstreamError(msg string)
@@ -47,6 +61,8 @@ type ErrorSink interface {
 // noErrorSink is the ErrorSink that drops everything.
 type noErrorSink struct{}
 
+func (noErrorSink) SetImrPrimingError(string)               {}
+func (noErrorSink) ClearImrPrimingError()                   {}
 func (noErrorSink) SetImrForwardZoneError(string)           {}
 func (noErrorSink) ClearImrForwardZoneError()               {}
 func (noErrorSink) SetImrForwardUpstreamError(string)       {}

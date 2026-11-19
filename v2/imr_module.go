@@ -27,8 +27,16 @@ type Imr struct {
 	ClientStats *ImrClientStats
 }
 
-// NewImr is imrcore.NewImr, returning the daemon's Imr.
+// NewImr is imrcore.NewImr, returning the daemon's Imr. Unless opts says
+// otherwise, the resolver logs through the daemon's engine subsystem logger,
+// and its lookups through the dns one.
 func NewImr(ctx context.Context, ic ImrEngineConf, opts ImrOptions) (*Imr, error) {
+	if opts.Logger == nil {
+		opts.Logger = lgImr
+	}
+	if opts.LookupLogger == nil {
+		opts.LookupLogger = lgDns
+	}
 	r, err := imrcore.NewImr(ctx, ic, opts)
 	if err != nil {
 		return nil, err
@@ -36,15 +44,10 @@ func NewImr(ctx context.Context, ic ImrEngineConf, opts ImrOptions) (*Imr, error
 	return &Imr{Imr: r}, nil
 }
 
-// The resolver logs through the daemon's engine and dns subsystem loggers.
 var (
 	lgImr = Logger("engine")
 	lgDns = Logger("dns")
 )
-
-func init() {
-	imrcore.SetLoggers(lgImr, lgDns)
-}
 
 // core is the module's Imr, nil for a nil imr.
 func (imr *Imr) core() *imrcore.Imr {
@@ -88,6 +91,18 @@ func (imr *Imr) TransportSignalCached(owner string) bool {
 	return imr.core().TransportSignalCached(owner)
 }
 
+// ImrQuery and ImrQueryFresh are the module's Query and QueryFresh, under the
+// names they have here. ImrQuery keeps the respch parameter for its callers in
+// tdns-mp and tdns-transport, which pass nil; it is not used.
+
+func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
+	return imr.Imr.Query(ctx, qname, qtype, qclass)
+}
+
+func (imr *Imr) ImrQueryFresh(ctx context.Context, qname string, qtype uint16, qclass uint16) (*ImrResponse, error) {
+	return imr.Imr.QueryFresh(ctx, qname, qtype, qclass)
+}
+
 // The resolver's names, as they have always been in this package.
 
 type ImrEngineConf = imrcore.Config
@@ -113,10 +128,10 @@ type (
 	ImrForwardZoneStatus     = imrcore.ImrForwardZoneStatus
 	ImrLoggingConf           = imrcore.ImrLoggingConf
 	ImrOption                = imrcore.ImrOption
-	ImrOptions               = imrcore.ImrOptions
+	ImrOptions               = imrcore.Options
 	ImrOutboundQueryHookFunc = imrcore.ImrOutboundQueryHookFunc
-	ImrRequest               = imrcore.ImrRequest
-	ImrResponse              = imrcore.ImrResponse
+	ImrRequest               = imrcore.Request
+	ImrResponse              = imrcore.Response
 	ImrResponseHookFunc      = imrcore.ImrResponseHookFunc
 	ImrStatus                = imrcore.ImrStatus
 	ImrStubConf              = imrcore.ImrStubConf

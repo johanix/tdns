@@ -1078,7 +1078,7 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 		// The IMR is a process singleton that snapshots the DNSSEC knobs at
 		// init; hand it the re-derived values or it serves the stale ones
 		// until restart.
-		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
+		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.imrLargeAlgorithms(), conf.Internal.DNSKEYTransport)
 		// Same reasoning for the resolver's stub and forward zones (#436). A
 		// rejected forward table is reported but does NOT fail the reload:
 		// everything else has already been applied, and ReloadZones leaves the
@@ -1160,7 +1160,7 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 		// parseDnssecConfig rebuilt Internal.LargeAlgorithms; hand the fresh
 		// set to the singleton Imr. DNSKEYTransport is not re-parsed on this
 		// path, so Internal still holds the last full-parse value.
-		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
+		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.imrLargeAlgorithms(), conf.Internal.DNSKEYTransport)
 	}
 
 	if err := conf.reloadDelegationSyncFromFile(); err != nil {

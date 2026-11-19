@@ -570,7 +570,6 @@ func newForwardTestImr(t *testing.T, conf []ImrForwardConf) *Imr {
 	lg := log.New(os.Stderr, "test", log.LstdFlags)
 	imr := &Imr{
 		Cache: cache.NewRRsetCache(lg, false, false),
-		Quiet: true,
 	}
 	imr.attachCacheHooks()
 	imr.setZoneTable(forwards, nil, nil)

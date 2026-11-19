@@ -174,7 +174,7 @@ func (imr *Imr) dnskeyDSSignalsLarge(qname string) bool {
 		if !ok || !imr.isLargeAlgorithm(d.Algorithm) {
 			continue
 		}
-		lgDns.Info("large-alg DS observed; will bypass UDP for child DNSKEY",
+		imr.lgDns().Debug("large-alg DS observed; will bypass UDP for child DNSKEY",
 			"zone", qname, "alg", d.Algorithm)
 		return true
 	}

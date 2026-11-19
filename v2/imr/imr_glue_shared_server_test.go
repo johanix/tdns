@@ -26,7 +26,7 @@ import (
 // added.
 func TestGlueWriterSharesServerSafely(t *testing.T) {
 	c := cache.NewRRsetCache(log.New(os.Stderr, "test", log.LstdFlags), false, false)
-	imr := &Imr{Cache: c, Quiet: true}
+	imr := &Imr{Cache: c}
 	const (
 		zone   = "glued.test."
 		nsname = "ns1.glued.test."

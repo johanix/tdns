@@ -135,12 +135,14 @@ type RRsetCacheT struct {
 	// to, which answers nothing locally.
 	AnsweredLocally func(name string, qtype uint16) bool
 	//Options                map[ImrOption]string
-	Primed               bool
-	Logger               *log.Logger
+	Primed bool
+	Logger *log.Logger
+	// DebugLogger takes the per-RRset lines, which a resolver logs at level
+	// Debug (NewImr). Nil is Logger.
+	DebugLogger          *log.Logger
 	LineWidth            int
 	Verbose              bool
 	Debug                bool
-	Quiet                bool // if true, suppress informational logging (useful for CLI tools)
 	nsRevalidateMu       sync.Mutex
 	nsRevalidateInFlight map[string]struct{}
 	serverMapMu          sync.Mutex // serializes the ServerMap writers; see ServerMap and stubZones

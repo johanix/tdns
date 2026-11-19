@@ -22,16 +22,14 @@ const (
 	rootDS38696 = ". IN DS 38696 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16"
 )
 
-// captureImrLog sends the slog default, which the subsystem loggers write
-// through, to a buffer for the rest of the test.
+// captureImrLog sends the slog default, which a resolver built without a
+// logger writes through, to a buffer for the rest of the test.
 func captureImrLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
-	prev, prevImr, prevDns := slog.Default(), lgImr, lgDns
-	l := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	slog.SetDefault(l)
-	SetLoggers(l, l)
-	t.Cleanup(func() { slog.SetDefault(prev); SetLoggers(prevImr, prevDns) })
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
 }
 

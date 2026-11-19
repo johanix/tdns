@@ -27,6 +27,12 @@ import (
 // safe to call synchronously before other engines start, guaranteeing that the
 // Imr is available by the time transport bridges and agent registries are created.
 //
+// It does not prime: NewImr sends nothing, and ImrEngine starts the resolver
+// (imr.Start primes, retrying until that works) and publishes ImrReady once it
+// is primed. Until then the Imr's Query waits for it; its other lookups do not.
+// An app that calls InitImrEngine itself waits on conf.Internal.ImrReady before
+// its first lookup.
+//
 // Apps that need the IMR available early (e.g. mpagent) call this before
 // StartEngine("ImrEngine", ...). Apps that don't need early availability can
 // just call ImrEngine() which calls InitImrEngine() internally if needed.
@@ -36,8 +42,7 @@ import (
 // cache, root hints, and validation state are expensive to construct and
 // would diverge between two instances. The guard at the top of this function
 // makes that singleton property hold by construction, regardless of which
-// application initialises the IMR or in what order. First-init wins; the
-// `quiet` parameter on subsequent calls is ignored.
+// application initialises the IMR or in what order. First-init wins.
 //
 // IMPORTANT: tdns-mp depends on this split. The mpagent calls InitImrEngine()
 // synchronously at startup so that conf.Internal.ImrEngine is guaranteed
@@ -46,12 +51,12 @@ import (
 // calls panic. Do not fold InitImrEngine back into ImrEngine without updating
 // tdns-mp/v2/start_agent.go.
 //
-// ctx is threaded into root-hints priming (PrimeWithHints' "." NS fetch), so a
-// stalled prime can be cancelled rather than blocking startup. tdns-mp pins a
+// ctx is NewImr's: it ends the data clock of imrengine.testing. tdns-mp pins a
 // published tdns/v2 and so is unaffected until it bumps the dependency; when it
 // does, its two call sites (tdns-mp/v2/start_agent.go:35, start_auditor.go:41)
-// must pass their already-in-scope ctx: InitImrEngine(ctx, true).
-func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
+// must pass their already-in-scope ctx, and no quiet flag: InitImrEngine(ctx),
+// and ImrEngine(ctx).
+func (conf *Config) InitImrEngine(ctx context.Context) error {
 	// Idempotency guard: IMR is a process singleton. Subsequent calls are
 	// no-ops; first-init wins.
 	if conf.Internal.ImrEngine != nil {
@@ -63,11 +68,10 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	// daemon's imr-dump-tuning reads them from conf.
 	LoadImrTuningDefaults(&conf.Imr.Tuning)
 	opts := ImrOptions{
-		LargeAlgorithms: conf.Internal.LargeAlgorithms,
+		LargeAlgorithms: conf.imrLargeAlgorithms(),
 		DNSKEYTransport: conf.Internal.DNSKEYTransport,
 		PendingOwnZone:  func(zone string) bool { return ownZonePending(conf, zone) },
 		OwnZones:        hostedZones{},
-		Quiet:           quiet,
 	}
 	// Not the nil pointer in a non-nil interface: NewImr takes nil for "none".
 	if conf.Internal.ServerErrors != nil {
@@ -82,8 +86,11 @@ func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	imr.Debug = imr.Debug || Globals.Debug
 	imr.Verbose = imr.Verbose || Globals.Verbose
 	conf.Internal.RRsetCache = imr.Cache
-	conf.publishImr(imr)
-	lgImr.Info("InitImrEngine: IMR initialized and available")
+	// Stored now, for the apps that take it before ImrEngine runs (tdns-mp).
+	// ImrEngine announces it once it is primed (startImr, publishImr).
+	conf.Internal.ImrEngine = imr
+	Globals.ImrEngine = imr
+	lgImr.Info("InitImrEngine: IMR initialized")
 	return nil
 }
 
@@ -102,7 +109,7 @@ func (conf *Config) publishImr(imr *Imr) {
 	conf.Internal.ImrReady.Publish()
 }
 
-func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
+func (conf *Config) ImrEngine(ctx context.Context) error {
 	var recursorch = conf.Internal.RecursorCh
 
 	// IMR is active by default unless explicitly set to false
@@ -127,53 +134,48 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 		lgImr.Info("ImrEngine starting")
 	}
 
-	// Initialize the Imr if not already done (e.g. by a prior InitImrEngine call),
-	// retrying for as long as that fails: priming is the step most likely to
-	// fail at boot, and the daemon is useless without it (imr_init_retry.go).
-	// Returns an error only if ctx ends first, and never calls Shutdowner --
-	// that would leave conf.Internal.ImrEngine nil and the dereference below
-	// would panic.
+	// Initialize the Imr if not already done (e.g. by a prior InitImrEngine
+	// call). That sends nothing, and fails only on the configuration: the
+	// priming, which is what fails at boot, is Start's, and Start retries it.
 	if conf.Internal.ImrEngine == nil {
-		init := func() error { return conf.InitImrEngine(ctx, quiet) }
-		if err := conf.initImrEngineRetrying(ctx, init, imrInitRetryDelay); err != nil {
+		if err := conf.InitImrEngine(ctx); err != nil {
+			conf.Internal.ServerErrors.SetImrPrimingError(fmt.Sprintf("IMR did not start (no DNS listeners): %v", err))
 			return fmt.Errorf("ImrEngine: InitImrEngine failed: %w", err)
 		}
 	}
 	imr := conf.Internal.ImrEngine
 
-	imr.startServing(ctx, func(ctx context.Context) {
+	if !conf.startImr(ctx, imr, func(ctx context.Context) {
 		// The recursive nameserver responding to queries with RD bit set.
 		imr.StartImrEngineListeners(ctx, conf)
-	})
-
-	for {
-		select {
-		case <-ctx.Done():
-			lgImr.Info("terminating (active mode, context cancelled)")
-			return nil
-		case rrq, ok := <-recursorch:
-			if !ok {
-				return nil
-			}
-			if rrq.ResponseCh == nil {
-				lgImr.Warn("received nil or invalid request (no response channel)")
-				continue
-			}
-			// Each request runs in its own goroutine. The underlying
-			// ImrQuery is fully reentrant; serialising callers behind
-			// the channel-read loop served no purpose and stalled
-			// concurrent CLI / RPC invocations behind any slow query.
-			go imr.HandleRecursorRequest(ctx, rrq)
-		}
+	}) {
+		lgImr.Info("terminating (active mode, context cancelled)")
+		return nil
 	}
+
+	imr.Serve(ctx, recursorch)
+	if ctx.Err() != nil {
+		lgImr.Info("terminating (active mode, context cancelled)")
+	}
+	return nil
 }
 
-// startServing starts what runs beside ImrEngine's request loop once the Imr
-// is built: the listeners, and what Start does. listen starts the listeners; it
-// is a parameter so that a test can see when it is called.
-func (imr *Imr) startServing(ctx context.Context, listen func(context.Context)) {
-	go listen(ctx)
+// startImr starts the resolver and, once it is Ready (primed, which Start
+// retries until it works), announces it and calls listen in a goroutine of its
+// own. Until then the engines waiting on ImrReady wait, there are no
+// listeners, and `config status` says why. It reports whether the resolver got
+// Ready before ctx ended. listen starts the listeners; it is a parameter so
+// that a test can see when it is called.
+func (conf *Config) startImr(ctx context.Context, imr *Imr, listen func(context.Context)) bool {
 	imr.Start(ctx)
+	select {
+	case <-imr.Ready():
+	case <-ctx.Done():
+		return false
+	}
+	conf.publishImr(imr)
+	go listen(ctx)
+	return true
 }
 
 func appendCachedNegativeSOA(rrcache *cache.RRsetCacheT, qname string, qtype uint16, msgoptions *edns0.MsgOptions, m *dns.Msg) bool {
@@ -226,17 +228,15 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 			if _, err := imr.startImrDebugListener(ctx, dbg, conf); err != nil {
 				lgImr.Error("imr debug listener not started", "err", err)
 			}
-		} else if !imr.Quiet {
-			lgImr.Info("embedded resolver: internal only (set listeners.imr-debug-address for a loopback debug window)")
+		} else {
+			lgImr.Debug("embedded resolver: internal only (set listeners.imr-debug-address for a loopback debug window)")
 		}
 		return nil
 	}
 
 	addresses := conf.Listeners.Addresses
 	if len(addresses) == 0 {
-		if !imr.Quiet {
-			lgImr.Info("no addresses provided, will only be an internal recursive resolver")
-		}
+		lgImr.Info("no addresses provided, will only be an internal recursive resolver")
 		return nil
 	}
 

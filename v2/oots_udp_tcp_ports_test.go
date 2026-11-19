@@ -70,7 +70,7 @@ func TestTransportSignalChecksUDPAndTCP(t *testing.T) {
 // resolver's dial addresses.
 func TestUDPPortConfigReachesTheDial(t *testing.T) {
 	rrs := buildSignalRRs(t, TransportConf{Type: "svcb", Signal: "do53:50,dot:10", Ports: map[string]uint16{"udp": 5353, "tcp": 5354}})
-	imr := &Imr{Imr: &imrcore.Imr{Quiet: true}}
+	imr := &Imr{Imr: &imrcore.Imr{}}
 	s := cache.NewAuthServer(pathNS)
 	var svcbs []*dns.SVCB
 	for _, rr := range rrs {
