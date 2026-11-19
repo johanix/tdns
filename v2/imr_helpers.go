@@ -189,9 +189,8 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 		return
 	}
 	go func() {
-		queryCtx, cancel := detachedContext(5 * time.Second)
+		queryCtx, cancel := transportSignalQueryContext(ctx)
 		defer cancel()
-		queryCtx = withTransportSignalLookup(queryCtx)
 		rrtype := imr.TransportSignalRRType()
 		if imr.Cache.Debug {
 			imr.Cache.Logger.Printf("Transport signal query (%s): querying %s %s", reason, owner, dns.TypeToString[rrtype])
@@ -202,6 +201,21 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 		}
 		imr.settleTransportSignalLookup(owner, resp, err)
 	}()
+}
+
+// transportSignalQueryContext is the context of the transport-signal lookup
+// that launchTransportSignalQuery starts for a query made on ctx: detached,
+// with a deadline of its own, and marked as a signal lookup's. When ctx is
+// part of an alias hop's lookup, so is the signal lookup (aliasWalkFor): the
+// AliasMode record in its answer is followed through the cache only, and its
+// next hop is left to the walk of an owner outside any hop lookup.
+func transportSignalQueryContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	queryCtx, cancel := detachedContext(5 * time.Second)
+	queryCtx = withTransportSignalLookup(queryCtx)
+	if aliasWalkFor(ctx).cacheOnly {
+		queryCtx = withSignalAliasHopLookup(queryCtx)
+	}
+	return queryCtx, cancel
 }
 
 // transportSignalLookupKey marks the context of a transport-signal lookup

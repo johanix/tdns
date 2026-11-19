@@ -250,6 +250,33 @@ func TestOOTSAliasHopQueryFollowsCachedAliasCacheOnly(t *testing.T) {
 	waitRedirect(t, server, "the hop that query looked up")
 }
 
+// The transport-signal lookup that a query starts is part of an alias hop's
+// lookup when the query is: the AliasMode record in its answer is followed
+// through the cache only (aliasWalkFor). Any other query's signal lookup
+// follows it with lookups. Both are signal lookups.
+func TestOOTSSignalLookupKeepsAliasHopMark(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want bool
+	}{
+		{"in a hop's lookup", withSignalAliasHopLookup(context.Background()), true},
+		{"outside any hop's lookup", context.Background(), false},
+	} {
+		queryCtx, cancel := transportSignalQueryContext(tc.ctx)
+		if got := aliasWalkFor(queryCtx).cacheOnly; got != tc.want {
+			t.Errorf("%s: the signal lookup follows an alias cache-only=%v, want %v", tc.name, got, tc.want)
+		}
+		if !inTransportSignalLookup(queryCtx) {
+			t.Errorf("%s: the signal lookup's context is not marked as a signal lookup's", tc.name)
+		}
+		if _, ok := queryCtx.Deadline(); !ok {
+			t.Errorf("%s: the signal lookup has no deadline", tc.name)
+		}
+		cancel()
+	}
+}
+
 // The owner's RRset is replaced, and the newer answer installed, while the
 // walk after a hop's lookup holds the alias it read: what stays installed is
 // the newer answer, not the older alias's result.

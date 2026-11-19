@@ -459,13 +459,22 @@ var testHookAliasRefollowRead func(owner string)
 // installed them itself. An answer can also replace it between the read and
 // the install, and install first, so the RRset is read again after the
 // install. If it is no longer the one followed, the one there now is
-// installed again, after this install, at most maxSignalRefollows times. An
-// answer that replaces the RRset between the last read and the last install
-// is still overwritten by an older one: that takes more than
-// maxSignalRefollows replacements of one owner's RRset during one refollow,
-// and the older install stays until a later answer for owner installs
-// again. A lock would close that window, but it would be held across the
-// install, which runs honouredRecords.
+// installed again, after this install, at most maxSignalRefollows times.
+//
+// Two races are left, and in both the older RRset's signal stays installed
+// until a later install on that server replaces it:
+//   - An answer that replaces the RRset between the last read and the last
+//     install is overwritten by the older one. That takes more than
+//     maxSignalRefollows replacements of one owner's RRset during one
+//     refollow. A lock would close the window, but it would be held across
+//     the install, which runs honouredRecords.
+//   - No install withdraws a signal, on any path. An answer whose RRset
+//     installs none, such as an AliasMode record that leads to no signal,
+//     leaves in place the older RRset's signal that this refollow installed,
+//     and one replacement between the first read and the first install is
+//     enough. The same two answers leave that state with no refollow at all
+//     when the older one is installed first. Closing it takes an install
+//     that withdraws, which changes every install path.
 func (imr *Imr) refollowAliasOwner(walk aliasWalk, owner string) {
 	if imr.Cache == nil {
 		return
