@@ -54,6 +54,45 @@ listeners:
 	}
 }
 
+// A refused reload that also changed listeners.addresses leaves the running
+// addresses, and a later publish of the runtime-config snapshot (a
+// single-zone reload publishes one) does not hand the refused ones to the
+// signal readers: the pass matches them against the nameservers' addresses
+// to find this server's names.
+func TestARefusedReloadKeepsTheListenerAddresses(t *testing.T) {
+	keepLiveConfig(t)
+	const z = "reloadaddr.sig.example."
+	const owner = "_dns.ns1." + z
+	zd, conf := signalTestZone(t, z, z+`	3600	IN	NS	ns1.`+z+`
+ns1.`+z+`	3600	IN	A	127.0.0.1
+`, "127.0.0.1:53")
+	conf.Internal.KeyDB = newTestKeyDB(t)
+	conf.Service.Identities = []string{"ns1." + z}
+	conf.Service.Transport.Signal = "dot:50"
+	conf.publishRuntimeConfig()
+	// The addresses are decoded; the debug address is then refused (it must
+	// be loopback), after the decode.
+	conf.Internal.CfgFile = writeCfg(t, `listeners:
+   addresses: [ "192.0.2.9:53" ]
+   imr-debug-address: "192.0.2.1:5353"
+`)
+
+	if _, err := conf.ReloadConfig(); err == nil || !strings.Contains(err.Error(), "imr-debug-address") {
+		t.Fatalf("the reload was not refused for its debug address: %v", err)
+	}
+	if !slices.Equal(conf.Listeners.Addresses, []string{"127.0.0.1:53"}) {
+		t.Errorf("the refused reload left listeners.addresses %v", conf.Listeners.Addresses)
+	}
+	conf.publishRuntimeConfig()
+	if got := conf.transportSignalConfig().Listeners.Addresses; !slices.Equal(got, []string{"127.0.0.1:53"}) {
+		t.Fatalf("after a refused reload and a later publish the readers see listener addresses %v", got)
+	}
+	runTransportSignalPass(zd, conf)
+	if got := svcbRecords(zd, owner); len(got) != 1 || !strings.Contains(got[0].String(), "dot:50") {
+		t.Fatalf("the first-load pass after the refused reload stored %v, want the signal for ns1.%s", got, z)
+	}
+}
+
 // While a reload has service.transport cleared or holds a refused value, the
 // preview through the API and a zone's first-load pass read what was last
 // accepted, not the live Config.
