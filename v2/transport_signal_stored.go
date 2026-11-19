@@ -100,13 +100,15 @@ func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 // behind the new digest it keeps those of the signals of the pass's the zone
 // can still serve or load at the owner, so the history never evicts them:
 // the replaced one, the one the zone serves (signalServedDigest), and the
-// one the zone file holds (signalOnDiskDigest). Each would otherwise be held
-// only by its place in the signalStoredKeep places, and a run of stores
-// would push it out: stores the publish cadence holds back push out the
-// signal still served, and stores with no zone write in between, one per
-// restart with a configuration that changed each time or several in one
-// process, push out the zone file's, which a restart loads until the zone is
-// next written. The pass would then take a signal of its own for the
+// one the zone file holds (signalOnDiskDigest), and the ones a write of the
+// zone file in progress is putting in it (signalWritingDigests). Each would
+// otherwise be held only by its place in the signalStoredKeep places, and a
+// run of stores would push it out: stores the publish cadence holds back
+// push out the signal still served, stores with no zone write in between,
+// one per restart with a configuration that changed each time or several in
+// one process, push out the zone file's, which a restart loads until the
+// zone is next written, and stores published while a write runs push out
+// the signal it writes. The pass would then take a signal of its own for the
 // operator's for good, in this process or after the next restart
 // (CodeRabbit on #1118 and on #1145).
 func (zd *ZoneData) noteSignalStoredOver(owner string, rrs, replaced []dns.RR) {
@@ -127,6 +129,7 @@ func (zd *ZoneData) noteSignalStoredOver(owner string, rrs, replaced []dns.RR) {
 	if onDisk := zd.signalOnDiskDigest(owner, replaced); onDisk != "" {
 		digests = append(digests, onDisk)
 	}
+	digests = append(digests, zd.signalWritingDigests(owner)...)
 	digests = mergeSignalDigests(digests, earlier)
 	if readErr == nil {
 		// The digests read include those the KeyDB had not taken
@@ -231,6 +234,63 @@ func (zd *ZoneData) noteZoneFileWritten(snap *zoneSnapshot) {
 			zd.signalOnDisk[owner] = d
 		}
 	}
+}
+
+// holdSignalsWritten takes the published snapshot for a write of the
+// zone's own file, and until release keeps the digest of the pass's signal
+// it holds at each owner noteZoneFileWritten follows (signalOnDisk), by
+// noteZoneFileWritten's rule: the record knows it for the pass's. Stores
+// that run while the file is written can publish newer signals, and each
+// keeps the served one and the zone file's, not the one being written: a
+// run of them would push it out of the record, and noteZoneFileWritten,
+// not finding it there, would leave the zone file's digest at the earlier
+// signal, which a restart then loads while the record does not know it
+// (CodeRabbit on #1145). The snapshot is taken under signalStoredMu, so
+// that no store records between taking it and holding what it holds.
+// Release once the write has failed or noteZoneFileWritten has followed it.
+func (zd *ZoneData) holdSignalsWritten() (*zoneSnapshot, func()) {
+	zd.signalStoredMu.Lock()
+	defer zd.signalStoredMu.Unlock()
+	snap := zd.publishedSnapshot()
+	held := map[string]string{}
+	for owner := range zd.signalOnDisk {
+		rrset := getRRsetFrom(snap, owner, dns.TypeSVCB)
+		if rrset == nil || len(rrset.RRs) == 0 {
+			continue
+		}
+		d := signalDigest(rrset.RRs)
+		if slices.Contains(zd.signalStored[owner], d) || slices.Contains(zd.signalUnrecorded[owner], d) {
+			held[owner] = d
+		}
+	}
+	if len(held) == 0 {
+		return snap, func() {}
+	}
+	if zd.signalWriting == nil {
+		zd.signalWriting = map[uint64]map[string]string{}
+	}
+	zd.signalWritingSeq++
+	id := zd.signalWritingSeq
+	zd.signalWriting[id] = held
+	return snap, func() {
+		zd.signalStoredMu.Lock()
+		delete(zd.signalWriting, id)
+		zd.signalStoredMu.Unlock()
+	}
+}
+
+// signalWritingDigests returns the digests holdSignalsWritten holds at
+// owner for the writes of the zone file in progress.
+func (zd *ZoneData) signalWritingDigests(owner string) []string {
+	zd.signalStoredMu.Lock()
+	defer zd.signalStoredMu.Unlock()
+	var out []string
+	for _, held := range zd.signalWriting {
+		if d, ok := held[owner]; ok && !slices.Contains(out, d) {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // noteZoneFileAdopted sets what signalOnDiskDigest returns, for each owner

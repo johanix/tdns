@@ -47,8 +47,15 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 	}
 	tempFilePath := tempFile.Name()
 
-	// Write zone data to temp file
-	_, snap, err := zd.writeZoneToFile(tempFile)
+	// Write zone data to temp file. The signals of the pass's it puts in the
+	// file stay in the record until noteZoneFileWritten has followed it
+	// (holdSignalsWritten).
+	snap, release := zd.holdSignalsWritten()
+	defer release()
+	_, err = zd.writeSnapshotToFile(tempFile, snap)
+	if err == nil && testHookZoneFileWriting != nil {
+		testHookZoneFileWriting()
+	}
 	if err != nil {
 		tempFile.Close()
 		os.Remove(tempFilePath) // Clean up temp file on error

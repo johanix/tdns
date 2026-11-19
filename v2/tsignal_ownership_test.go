@@ -516,3 +516,78 @@ func TestAZoneWriteWhoseDirectorySyncFailsStillMovesTheFilesSignal(t *testing.T)
 		t.Fatalf("after the rename the record keeps %q for the zone file, want the signal written (%q)", kept, want)
 	}
 }
+
+// Stores that run while the zone file is being written, and publish newer
+// signals, do not push the signal being written out of the record: once the
+// write is in place, what the record keeps for the zone file moves to it,
+// stores after it keep it, and a restart from that file knows it for the
+// pass's (CodeRabbit on #1145).
+func TestStoresDuringAZoneWriteKeepTheSignalItWrites(t *testing.T) {
+	const z = "writing.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	loaded, _ := storeThenRestart(t, z, kdb, "dot:50")
+	head := z + strings.ReplaceAll(readErrZoneBody, "%[1]s", z)
+
+	zd, conf := signalTestZone(t, z, head+signalLines(t, loaded, owner), "127.0.0.1:53")
+	zd.KeyDB = kdb
+	conf.Service.Identities = []string{"ns1." + z}
+	storeSignal(t, zd, conf, owner, "dot:1")
+	written := signalLines(t, zd, owner)
+	t.Cleanup(func() { testHookZoneFileWriting = nil })
+	testHookZoneFileWriting = func() {
+		testHookZoneFileWriting = nil
+		for i := 2; i <= signalStoredKeep+2; i++ {
+			storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
+		}
+	}
+	if _, err := zd.WriteDynamicZoneFile(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	for i := signalStoredKeep + 3; i <= 2*signalStoredKeep+3; i++ {
+		storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
+	}
+	restartKnowsItsSignal(t, z, kdb, head+written, "dot:99")
+}
+
+// A refresh that collected an operator's SVCB RRset as the operator's, and
+// cannot read the record when it takes the signal again, does not carry
+// that RRset: the fresh data, which no longer holds it, stands (CodeRabbit
+// on #1145).
+func TestARefreshDoesNotCarryTheOperatorsSignalOnAFailedRecheck(t *testing.T) {
+	const owner = "_dns.ns1.example."
+	const head = `example.	3600	IN	SOA	ns1.example. hostmaster.example. %d 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+ns1.example.	3600	IN	A	127.0.0.1
+`
+	const operators = `_dns.ns1.example.	3600	IN	SVCB	1 . alpn="dot"
+`
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, fmt.Sprintf(head, 1)+operators)
+	zd.Options[OptAddTransportSignal] = true
+	conf := &Config{}
+	conf.Service.Transport.Type = "svcb"
+	if got := svcbRecords(zd, owner); len(got) != 1 {
+		t.Fatalf("the zone does not serve the operator's SVCB RRset: %v", got)
+	}
+	collected := zd.CollectDynamicRRs(conf)
+	for _, rs := range collected {
+		if rs != nil && rs.RRtype == dns.TypeSVCB {
+			t.Fatalf("the refresh collected the operator's SVCB RRset: %v", rs.RRs)
+		}
+	}
+
+	// The operator removes the RRset from the file, and the record cannot be
+	// read when the refresh takes the signal again.
+	operatorEdit(t, zd, fmt.Sprintf(head, 2))
+	if _, err := kdb.DB.Exec(`ALTER TABLE TransportSignalStored RENAME TO TransportSignalStored_gone`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { kdb.DB.Exec(`ALTER TABLE TransportSignalStored_gone RENAME TO TransportSignalStored`) })
+	if _, err := zd.FetchFromFile(context.Background(), false, false, true, collected); err != nil {
+		t.Fatalf("FetchFromFile: %v", err)
+	}
+	if got := svcbRecords(zd, owner); len(got) != 0 {
+		t.Fatalf("the refresh brought back the operator's SVCB RRset the file no longer holds: %v", got)
+	}
+}

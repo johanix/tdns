@@ -2346,7 +2346,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 		if snap == nil {
 			return dynamicRRs
 		}
-		dynamicRRs = append(dynamicRRs, zd.carriedSignalSVCBs(snap)...)
+		dynamicRRs = append(dynamicRRs, zd.carriedSignalSVCBs(snap, zd.refreshCarriesSignal)...)
 		for owner, od := range snap.Data {
 			if od == nil || !strings.HasPrefix(owner, "_dns.") {
 				continue
@@ -2374,9 +2374,10 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 }
 
 // carriedSignalSVCBs is the transport signal a refresh carries over from
-// snap: a copy of each SVCB RRset at a _dns. owner that refreshCarriesSignal
-// carries.
-func (zd *ZoneData) carriedSignalSVCBs(snap *zoneSnapshot) []*core.RRset {
+// snap: a copy of each SVCB RRset at a _dns. owner that carries carries
+// (refreshCarriesSignal when CollectDynamicRRs collects, signalCarryNowLocked's
+// rule when it takes them again).
+func (zd *ZoneData) carriedSignalSVCBs(snap *zoneSnapshot, carries func(owner string, rrs []dns.RR) bool) []*core.RRset {
 	if snap == nil {
 		return nil
 	}
@@ -2386,7 +2387,7 @@ func (zd *ZoneData) carriedSignalSVCBs(snap *zoneSnapshot) []*core.RRset {
 			continue
 		}
 		svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB)
-		if !exists || len(svcbRRset.RRs) == 0 || !zd.refreshCarriesSignal(owner, svcbRRset.RRs) {
+		if !exists || len(svcbRRset.RRs) == 0 || !carries(owner, svcbRRset.RRs) {
 			continue
 		}
 		svcbClone := &core.RRset{
@@ -2415,7 +2416,13 @@ func (zd *ZoneData) carriedSignalSVCBs(snap *zoneSnapshot) []*core.RRset {
 // Here, under zd.mu and before the replacement is published, the published
 // snapshot is the zone the pass last published. The SVCB RRsets collected
 // are all the signal's (CollectDynamicRRs, section 3), and they are taken
-// again only where CollectDynamicRRs would take them. Caller holds zd.mu.
+// again only where CollectDynamicRRs would take them: an RRset the record
+// knows for the pass's. When the record cannot be read now, an RRset is
+// taken again only if collection took the same one, on what it knew then.
+// Carrying it on the failed read alone, as collection does, would carry an
+// RRset collection had found to be the operator's, and one the fresh data
+// no longer holds would come back (CodeRabbit on #1145). Caller holds
+// zd.mu.
 func (zd *ZoneData) signalCarryNowLocked(dynamicRRs []*core.RRset) []*core.RRset {
 	carries := zd.KeyDB != nil && zd.addsTransportSignal() &&
 		(zd.Options[OptAllowUpdates] || zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning])
@@ -2423,12 +2430,29 @@ func (zd *ZoneData) signalCarryNowLocked(dynamicRRs []*core.RRset) []*core.RRset
 		return dynamicRRs
 	}
 	out := make([]*core.RRset, 0, len(dynamicRRs))
+	collected := map[string]string{}
 	for _, rs := range dynamicRRs {
 		if rs == nil || rs.RRtype != dns.TypeSVCB {
 			out = append(out, rs)
+		} else if len(rs.RRs) > 0 {
+			collected[core.CanonicalizeName(rs.Name)] = signalDigest(rs.RRs)
 		}
 	}
-	return append(out, zd.carriedSignalSVCBs(zd.publishedSnapshot())...)
+	again := func(owner string, rrs []dns.RR) bool {
+		own, err := zd.signalStoredByPass(owner, rrs)
+		if err == nil {
+			return own
+		}
+		if d, ok := collected[core.CanonicalizeName(owner)]; ok && d == signalDigest(rrs) {
+			lgDns.Warn("refresh: could not read the record of what the pass stored at the owner; its SVCB RRset is carried, as it was when the refresh collected it",
+				"zone", zd.ZoneName, "owner", owner, "error", err)
+			return true
+		}
+		lgDns.Warn("refresh: could not read the record of what the pass stored at the owner; its SVCB RRset, which the refresh did not collect, is not carried",
+			"zone", zd.ZoneName, "owner", owner, "error", err)
+		return false
+	}
+	return append(out, zd.carriedSignalSVCBs(zd.publishedSnapshot(), again)...)
 }
 
 // repopulateWorkingSetLocked merges dynamic RRsets into the working set.

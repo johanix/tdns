@@ -380,10 +380,18 @@ type ZoneData struct {
 	// pass's signal the zone file holds there, "" for none
 	// (signalOnDiskDigest, noteZoneFileAdopted, noteZoneFileWritten). Every
 	// store keeps it in the record. Guarded by signalStoredMu.
-	signalOnDisk   map[string]string
-	publishCadence time.Duration
-	publishQueued  bool
-	publishUrgent  bool
+	signalOnDisk map[string]string
+	// signalWriting holds, per write of the zone's own file in progress,
+	// the digest of the pass's signal at each owner of signalOnDisk in the
+	// snapshot being written (holdSignalsWritten). Every store keeps them
+	// in the record until the write ends, so that the record still knows
+	// the signal the file comes to hold when noteZoneFileWritten looks.
+	// Guarded by signalStoredMu.
+	signalWriting    map[uint64]map[string]string
+	signalWritingSeq uint64
+	publishCadence   time.Duration
+	publishQueued    bool
+	publishUrgent    bool
 	// tx is the zone's transactions: the publish hold, and what a zone created
 	// held remembers about its first content. See zone_tx.go. Guarded by mu.
 	tx zoneTxState
