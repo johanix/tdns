@@ -1135,6 +1135,12 @@ func (conf *Config) enqueueRefresh(ctx context.Context, zr ZoneRefresher) error 
 	}
 }
 
+// testHookSignalRecordTaken, when set, runs in RemoveDynamicZone once the
+// KeyDB's record of what the transport signal pass stored has been taken,
+// while the zone is still served. A test runs a release there, in the
+// window a real one can run in.
+var testHookSignalRecordTaken func()
+
 // RemoveDynamicZone is the shared *delete* core. It refuses to delete a static
 // or catalog-managed zone (guard on OptApiManagedZone), bumps the zone's
 // generation counter so any in-flight refresh self-aborts at its pre-persist
@@ -1183,6 +1189,9 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 			zd.mu.Unlock()
 			return "", fmt.Errorf("zone %s not deleted: the KeyDB could not drop the record of what the transport signal pass stored, which a zone added later under this name would inherit; nothing was removed, run the delete again: %w", name, err)
 		}
+	}
+	if testHookSignalRecordTaken != nil {
+		testHookSignalRecordTaken()
 	}
 
 	// Withdraw anything published at an RFC 9615 signal name on this zone's

@@ -127,6 +127,42 @@ func TestADeleteWhoseConfigRewriteFailsKeepsTheSignalRecord(t *testing.T) {
 	}
 }
 
+// A release in a zone whose removal has started is refused. A removal whose
+// config rewrite fails puts the record of what the pass stored back, and a
+// release reported done in between would be undone by it: after the
+// restart the pass would take the operator's RRset for its own.
+func TestAReleaseDuringARemovalIsRefused(t *testing.T) {
+	conf, kdb, zd := removalFixture(t)
+	z := zd.ZoneName
+	owner := "_dns.ns1." + z
+	sconf := &Config{}
+	sconf.Service.Transport.Type = "svcb"
+	sconf.Service.Transport.Signal = "dot:50"
+	sconf.Service.Identities = []string{"ns1." + z}
+	sconf.Listeners.Addresses = []string{"127.0.0.1:53"}
+	if err := zd.CreateTransportSignalRRs(sconf); err != nil {
+		t.Fatal(err)
+	}
+	if len(svcbRecords(zd, owner)) == 0 {
+		t.Fatal("the pass stored no signal")
+	}
+	conf.DynamicZones.ConfigFile = filepath.Join(t.TempDir(), "missing", "dynamic.yaml")
+
+	var released bool
+	var releaseErr error
+	testHookSignalRecordTaken = func() { released, releaseErr = zd.releaseSignal(owner) }
+	t.Cleanup(func() { testHookSignalRecordTaken = nil })
+	if _, err := conf.RemoveDynamicZone(z); err == nil || !strings.Contains(err.Error(), "will reappear on restart") {
+		t.Fatalf("the delete with a failed config rewrite returned %v", err)
+	}
+	if released || releaseErr == nil {
+		t.Errorf("a release during the removal returned released=%v, error %v; the failed removal put the record back", released, releaseErr)
+	}
+	if _, ok, err := kdb.GetTransportSignalStored(z, owner); err != nil || !ok {
+		t.Errorf("the failed removal left no record at %s (error %v)", owner, err)
+	}
+}
+
 // When the record cannot be put back either, the error says so: after the
 // restart the pass takes the zone file's signal for the operator's.
 func TestADeleteWhoseRecordCannotBePutBackSaysSo(t *testing.T) {

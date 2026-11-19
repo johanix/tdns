@@ -378,8 +378,8 @@ type ZoneData struct {
 	// signalPassRetired is set when the zone is being removed
 	// (RemoveDynamicZone): the transport-signal pass then stores nothing and
 	// records nothing, so that no record of a removed zone outlives the
-	// delete of its records. Guarded by mu, which the pass holds for its
-	// whole run.
+	// delete of its records, and a release is refused (releaseSignal).
+	// Guarded by mu, which the pass and a release hold for their whole run.
 	signalPassRetired bool
 	publishCadence    time.Duration
 	publishQueued     bool
