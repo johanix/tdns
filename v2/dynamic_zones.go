@@ -1492,6 +1492,9 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		// no-refresh-hooks: rollback republishes the PREVIOUS ZoneData, which
 		// already carries its hooks.
 		Zones.Set(name, oldZd)
+		// Its delegation sync setup may have been passed over while newZd was
+		// in Zones (#1151).
+		oldZd.resumeOwedZoneSyncSetup()
 		rollbackKey()
 		return "", fmt.Errorf("zone %s failed to persist; rolled back the in-memory modification: %w", name, err)
 	}

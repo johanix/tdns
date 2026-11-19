@@ -264,6 +264,103 @@ func TestAModifiedZoneOwesItsSyncSetupAndTheReplacedOneDoesNot(t *testing.T) {
 	}
 }
 
+// A modify that fails to persist puts the old ZoneData back. If the old zone's
+// first refresh published while the replacement was in Zones, its callback
+// passed it over. The setup must still be owed, and the rollback dispatches
+// it: an unchanged upstream serial would never publish again to run the
+// callback. Found by review on #1153.
+func TestARolledBackModifyKeepsTheOldZonesSyncSetup(t *testing.T) {
+	withAppType(t, AppTypeAgent)
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, _ := newTestConfigForCores(t)
+	q := make(chan DelegationSyncRequest, 16)
+	conf.Internal.DelegationSyncQ = q
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic-zones.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	conf.DynamicZones.Dynamic.Storage = "persistent"
+
+	const zone = "rb.p.test."
+	in := DynamicZoneInput{
+		Name: zone, Type: Secondary,
+		Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
+		Options:   map[ZoneOption]bool{OptParentSyncProxy: true},
+	}
+	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	old, _ := Zones.Get(zone)
+
+	// Hold the dynamic config file's lock, so the modify stops at its
+	// persist with the replacement in Zones. That is the window.
+	dynamicConfigMutex.Lock()
+	locked := true
+	unlock := func() {
+		if locked {
+			locked = false
+			dynamicConfigMutex.Unlock()
+		}
+	}
+	t.Cleanup(func() {
+		unlock()
+		dynamicConfigMutex.Lock()
+		dynamicConfigBroken = false
+		dynamicConfigMutex.Unlock()
+	})
+	errc := make(chan error, 1)
+	go func() {
+		_, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{
+			Name: zone, Type: Secondary,
+			Primaries: []PeerConf{{Addr: "192.0.2.9:53", Key: NOKEY}},
+			Options:   map[ZoneOption]bool{OptParentSyncProxy: true},
+		})
+		errc <- err
+	}()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if cur, ok := Zones.Get(zone); ok && cur != old {
+			break
+		}
+		if time.Now().After(deadline) {
+			unlock()
+			t.Fatal("setup: the modify never put its replacement into Zones")
+		}
+	}
+
+	// The old zone's first refresh publishes now: a publish makes it Ready and
+	// runs its post-refresh callbacks. It is not the zone in Zones, so it gets
+	// no setup.
+	old.mu.Lock()
+	old.Ready = true
+	old.mu.Unlock()
+	old.runPostRefreshCallbacks(false)
+	if n := countSyncRequests(q, "PROXY-UPDATE-SETUP", zone, -1, 300*time.Millisecond); n != 0 {
+		t.Fatalf("the replaced ZoneData queued %d PROXY-UPDATE-SETUP while out of Zones, want 0", n)
+	}
+
+	// The persist fails, and the modify rolls back.
+	dynamicConfigBroken = true
+	unlock()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("setup: the modify persisted, so nothing was rolled back")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the modify did not return")
+	}
+	if cur, _ := Zones.Get(zone); cur != old {
+		t.Fatal("setup: the rollback did not put the old ZoneData back")
+	}
+	if n := countSyncRequests(q, "PROXY-UPDATE-SETUP", zone, 1, 3*time.Second); n != 1 {
+		t.Fatalf("after the rollback: %d PROXY-UPDATE-SETUP, want 1", n)
+	}
+	old.runPostRefreshCallbacks(false)
+	if n := countSyncRequests(q, "PROXY-UPDATE-SETUP", zone, -1, 300*time.Millisecond); n != 0 {
+		t.Errorf("a later refresh queued %d more PROXY-UPDATE-SETUP, want 0", n)
+	}
+}
+
 // Every option SetupZoneSync acts on makes the setup owed, on both ways a
 // zone first loads; a zone with none of them owes nothing. This is the list
 // the run-time paths used to get wrong.
@@ -286,7 +383,7 @@ func TestEverySyncOptionMakesTheSetupOwed(t *testing.T) {
 	none.registerZoneSyncSetup(nil)
 	none.FirstZoneLoad = true
 	none.registerZoneSyncSetup(nil)
-	if len(none.OnFirstLoad) != 0 || len(none.OnZonePostRefresh) != 0 {
+	if len(none.OnFirstLoad) != 0 || len(none.OnZonePostRefresh) != 0 || none.zoneSyncSetup != nil {
 		t.Errorf("a zone without a sync option got %d OnFirstLoad and %d post-refresh callbacks, want none",
 			len(none.OnFirstLoad), len(none.OnZonePostRefresh))
 	}

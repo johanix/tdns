@@ -66,9 +66,10 @@ func runZoneSyncSetup(zd *ZoneData, configured map[ZoneOption]bool, delsyncq cha
 //
 // Once per ZoneData, then. A modify builds a new ZoneData, so it gets the
 // setup again for its new options, as a static zone does on a reload. A
-// ZoneData that is no longer the one in Zones (deleted, or replaced by a
-// modify while its first refresh was in flight) gets nothing: its replacement
-// has the setup owed.
+// ZoneData that is not the one in Zones when its callback runs (deleted, or
+// replaced by a modify while its first load was in flight) is passed over and
+// keeps the setup owed: if it is a modify that fails to persist, the rollback
+// puts it back, and resumeOwedZoneSyncSetup dispatches what it still owes.
 //
 // Call it where the ZoneData is constructed, with its options final, while it
 // is still private to the creating goroutine: after registerStandardRefreshHooks
@@ -82,25 +83,72 @@ func (zd *ZoneData) registerZoneSyncSetup(delsyncq chan DelegationSyncRequest) {
 	for opt, on := range zd.Options {
 		configured[opt] = on
 	}
-	run := func(z *ZoneData) {
-		if cur, ok := Zones.Get(z.ZoneName); !ok || cur != z {
-			lg.Debug("SetupZoneSync: zone was deleted or replaced before its first load finished; skipped",
-				"zone", z.ZoneName)
-			return
-		}
-		// Not on the caller's goroutine. SetupZoneSync's sends to
-		// DelegationSyncQ block while the queue is full, and the caller is the
-		// refresh engine's loop (OnFirstLoad) or a refresh worker.
-		go runZoneSyncSetup(z, configured, delsyncq)
-	}
+	zd.zoneSyncSetup = &owedZoneSyncSetup{configured: configured, delsyncq: delsyncq}
+	run := func(z *ZoneData) { z.runOwedZoneSyncSetup() }
 	if zd.FirstZoneLoad {
 		zd.OnFirstLoad = append(zd.OnFirstLoad, run)
 		return
 	}
-	var done atomic.Bool
-	zd.OnZonePostRefresh = append(zd.OnZonePostRefresh, func(z *ZoneData) {
-		if done.CompareAndSwap(false, true) {
-			run(z)
-		}
-	})
+	zd.OnZonePostRefresh = append(zd.OnZonePostRefresh, run)
+}
+
+// owedZoneSyncSetup is what registerZoneSyncSetup records for a zone: the
+// options it was configured with, the queue, and whether the setup has been
+// dispatched.
+type owedZoneSyncSetup struct {
+	configured map[ZoneOption]bool
+	delsyncq   chan DelegationSyncRequest
+	done       atomic.Bool
+}
+
+// runOwedZoneSyncSetup dispatches the setup zd owes, if it still owes it and
+// is the ZoneData in Zones, and reports whether it did.
+//
+// The check against Zones comes before the guard is spent. A ZoneData that is
+// out of Zones, deleted or replaced by a modify, gets nothing and keeps the
+// setup owed: a modify that fails to persist puts it back.
+func (zd *ZoneData) runOwedZoneSyncSetup() bool {
+	s := zd.zoneSyncSetup
+	if s == nil || s.done.Load() {
+		return false
+	}
+	if cur, ok := Zones.Get(zd.ZoneName); !ok || cur != zd {
+		lg.Debug("SetupZoneSync: zone is not the one in Zones (deleted or replaced); setup stays owed",
+			"zone", zd.ZoneName)
+		return false
+	}
+	if !s.done.CompareAndSwap(false, true) {
+		return false
+	}
+	// Not on the caller's goroutine. SetupZoneSync's sends to DelegationSyncQ
+	// block while the queue is full, and the caller is the refresh engine's
+	// loop (OnFirstLoad), a refresh worker, or the API handler (a rollback).
+	go runZoneSyncSetup(zd, s.configured, s.delsyncq)
+	return true
+}
+
+// resumeOwedZoneSyncSetup is for a ZoneData that has been put back into Zones
+// after it was replaced: the rollback of a modify that failed to persist.
+// While it was out of Zones, the callback that dispatches its setup may have
+// run and passed it over, and nothing would run that callback again. For a
+// zone that first loaded through an ordinary refresh, the next run is the next
+// refresh that publishes, which an unchanged upstream serial never brings.
+//
+// So if that callback has had its turn, dispatch the setup here. The zone must
+// be Ready, its first load done with no OnFirstLoad callbacks left, and no
+// post-refresh callbacks owed. Otherwise a callback is still to come, and it
+// dispatches the setup itself, now that the zone is back in Zones. The guard
+// in runOwedZoneSyncSetup makes it once either way.
+func (zd *ZoneData) resumeOwedZoneSyncSetup() bool {
+	if zd.zoneSyncSetup == nil {
+		return false
+	}
+	zd.mu.Lock()
+	callbacksHadTheirTurn := zd.Ready && !zd.withheld && !zd.FirstZoneLoad &&
+		len(zd.OnFirstLoad) == 0 && !zd.postRefreshOwed
+	zd.mu.Unlock()
+	if !callbacksHadTheirTurn {
+		return false
+	}
+	return zd.runOwedZoneSyncSetup()
 }
