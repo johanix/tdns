@@ -48,7 +48,7 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 	tempFilePath := tempFile.Name()
 
 	// Write zone data to temp file
-	_, err = zd.WriteZoneToFile(tempFile)
+	_, snap, err := zd.writeZoneToFile(tempFile)
 	if err != nil {
 		tempFile.Close()
 		os.Remove(tempFilePath) // Clean up temp file on error
@@ -66,6 +66,7 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 		os.Remove(tempFilePath) // Clean up temp file on error
 		return "", fmt.Errorf("failed to rename temp file to final file: %v", err)
 	}
+	zd.noteZoneFileWritten(snap)
 
 	lg.Info("wrote zone file", "zone", zd.ZoneName, "path", zoneFilePath)
 	return zoneFilePath, nil

@@ -375,9 +375,14 @@ type ZoneData struct {
 	// that reads the KeyDB's record puts them ahead of it. Guarded by
 	// signalStoredMu.
 	signalUnrecorded map[string][]string
-	publishCadence   time.Duration
-	publishQueued    bool
-	publishUrgent    bool
+	// signalOnDisk holds, per owner the pass stored at in this process, the
+	// digest of the pass's signal the zone file holds there, "" for none
+	// (signalOnDiskDigest, noteZoneFileWritten). Every store keeps it in
+	// the record. Guarded by signalStoredMu.
+	signalOnDisk   map[string]string
+	publishCadence time.Duration
+	publishQueued  bool
+	publishUrgent  bool
 	// tx is the zone's transactions: the publish hold, and what a zone created
 	// held remembers about its first content. See zone_tx.go. Guarded by mu.
 	tx zoneTxState

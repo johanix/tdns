@@ -1129,7 +1129,7 @@ func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error)
 		}
 	}()
 
-	wrote, err := zd.WriteZoneToFile(tmp)
+	wrote, snap, err := zd.writeZoneToFile(tmp)
 	if err != nil {
 		return fname, 0, err
 	}
@@ -1174,6 +1174,7 @@ func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error)
 	if cerr := d.Close(); cerr != nil {
 		return fname, 0, fmt.Errorf("closing %s after syncing: %v", dir, cerr)
 	}
+	zd.noteZoneFileWritten(snap)
 
 	return fname, wrote, nil
 }
@@ -1183,6 +1184,14 @@ func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error)
 // journalled change whose ToSerial is not newer than it is, by definition,
 // already in this file.
 func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
+	serial, _, err := zd.writeZoneToFile(f)
+	return serial, err
+}
+
+// writeZoneToFile is WriteZoneToFile, also returning the snapshot written, for
+// a caller that writes the zone's own file to tell the transport signal pass
+// what the file now holds (noteZoneFileWritten) once the file is in place.
+func (zd *ZoneData) writeZoneToFile(f *os.File) (uint32, *zoneSnapshot, error) {
 	var err error
 	var bytes, totalbytes int
 	zonedata := ""
@@ -1193,7 +1202,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 	apex := getOwnerFrom(snap, zd.ZoneName)
 	if apex == nil {
 		lgDns.Error("WriteZoneToFile: failed to get zone apex", "zone", zd.ZoneName)
-		return 0, fmt.Errorf("WriteZoneToFile: %s: no apex in published snapshot", zd.ZoneName)
+		return 0, nil, fmt.Errorf("WriteZoneToFile: %s: no apex in published snapshot", zd.ZoneName)
 	}
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 
@@ -1258,7 +1267,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 			if count >= 1000 {
 				bytes, err = writer.WriteString(zonedata)
 				if err != nil {
-					return 0, err
+					return 0, nil, err
 				}
 				totalbytes += bytes
 				bytes = 0
@@ -1273,7 +1282,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 	// 		if rrcount%1000 == 0 {
 	// 			bytes, err = writer.WriteString(zonedata)
 	// 			if err != nil {
-	// 				return 0, err
+	// 				return 0, nil, err
 	// 			}
 	// 			totalbytes += bytes
 	// 			bytes = 0
@@ -1282,7 +1291,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 	// 	}
 	bytes, err = writer.WriteString(zonedata)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	totalbytes += bytes
 	// Flush's error is the one that matters most and used to be discarded. Every
@@ -1292,9 +1301,9 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 	// WriteString instead, reporting a complete file to a caller that then
 	// deleted the journal.
 	if err := writer.Flush(); err != nil {
-		return 0, fmt.Errorf("writing zone %s: %v", zd.ZoneName, err)
+		return 0, nil, fmt.Errorf("writing zone %s: %v", zd.ZoneName, err)
 	}
-	return wroteSerial, nil
+	return wroteSerial, snap, nil
 }
 
 func RRsetToString(rrset *core.RRset) string {

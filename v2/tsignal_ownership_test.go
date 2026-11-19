@@ -280,3 +280,119 @@ ns1.example.	3600	IN	A	127.0.0.1
 		t.Fatalf("the refresh did not carry the signal the pass last published: %v", got)
 	}
 }
+
+// signalLines is the SVCB RRset zd publishes at owner, as zone file lines.
+func signalLines(t *testing.T, zd *ZoneData, owner string) string {
+	t.Helper()
+	rrs := svcbRecords(zd, owner)
+	if len(rrs) == 0 {
+		t.Fatalf("no signal published at %s", owner)
+	}
+	var b strings.Builder
+	for _, rr := range rrs {
+		b.WriteString(rr.String() + "\n")
+	}
+	return b.String()
+}
+
+// storeSignal runs the pass on zd with signal and checks that it stored it.
+func storeSignal(t *testing.T, zd *ZoneData, conf *Config, owner, signal string) {
+	t.Helper()
+	conf.Service.Transport.Signal = signal
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if got := svcbRecords(zd, owner); len(got) != 1 || !strings.Contains(got[0].String(), `"`+signal+`"`) {
+		t.Fatalf("the pass did not store %s: %v", signal, got)
+	}
+}
+
+// restartKnowsItsSignal loads body as a restart would, on kdb, and checks
+// that the pass takes the signal there for its own: it replaces it with
+// signal rather than leaving it as the operator's.
+func restartKnowsItsSignal(t *testing.T, z string, kdb *KeyDB, body, signal string) {
+	t.Helper()
+	zd, conf := signalTestZone(t, z, body, "127.0.0.1:53")
+	zd.KeyDB = kdb
+	conf.Service.Identities = []string{"ns1." + z}
+	logs := captureSignalLog(t)
+	conf.Service.Transport.Signal = signal
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		t.Fatal(err)
+	}
+	if got := svcbRecords(zd, "_dns.ns1."+z); len(got) != 1 || !strings.Contains(got[0].String(), `"`+signal+`"`) {
+		t.Fatalf("after the restart the pass did not know the signal the zone file holds for its own: %v\n%s", got, logs.String())
+	}
+}
+
+// Several stores in one process, with no zone write in between, keep the
+// signal the zone file holds in the record: it is what a restart loads,
+// and it must still be the pass's then. Each store replaces the one before
+// it, not the file's (CodeRabbit on #1145).
+func TestStoresInOneProcessKeepTheSignalTheZoneFileHolds(t *testing.T) {
+	const z = "manystores.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	loaded, _ := storeThenRestart(t, z, kdb, "dot:50")
+	body := z + strings.ReplaceAll(readErrZoneBody, "%[1]s", z) + signalLines(t, loaded, owner)
+
+	zd, conf := signalTestZone(t, z, body, "127.0.0.1:53")
+	zd.KeyDB = kdb
+	conf.Service.Identities = []string{"ns1." + z}
+	for i := 1; i <= signalStoredKeep+1; i++ {
+		storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
+	}
+	restartKnowsItsSignal(t, z, kdb, body, "dot:99")
+}
+
+// A zone write changes what the zone file holds: stores after it, with no
+// further write, keep the signal written in the record.
+func TestStoresAfterAZoneWriteKeepTheSignalWritten(t *testing.T) {
+	const z = "written.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	loaded, _ := storeThenRestart(t, z, kdb, "dot:50")
+	head := z + strings.ReplaceAll(readErrZoneBody, "%[1]s", z)
+
+	zd, conf := signalTestZone(t, z, head+signalLines(t, loaded, owner), "127.0.0.1:53")
+	zd.KeyDB = kdb
+	conf.Service.Identities = []string{"ns1." + z}
+	storeSignal(t, zd, conf, owner, "dot:1")
+	written := signalLines(t, zd, owner)
+	if _, err := zd.WriteDynamicZoneFile(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 2; i <= signalStoredKeep+2; i++ {
+		storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
+	}
+	restartKnowsItsSignal(t, z, kdb, head+written, "dot:99")
+}
+
+// A zone write that finds an operator's SVCB RRset at the owner does not
+// keep its digest for the pass's: the record would then take the
+// operator's records for the pass's.
+func TestAZoneWriteDoesNotKeepTheOperatorsSignal(t *testing.T) {
+	const z = "writtenop.sig.example."
+	const owner = "_dns.ns1." + z
+	zd, conf := signalTestZone(t, z, z+strings.ReplaceAll(readErrZoneBody, "%[1]s", z), "127.0.0.1:53")
+	zd.KeyDB = newTestKeyDB(t)
+	conf.Service.Identities = []string{"ns1." + z}
+	storeSignal(t, zd, conf, owner, "dot:1")
+	op := mustRRs(t, owner+` 300 IN SVCB 1 . oots="doq:10"`)
+	zd.mu.Lock()
+	zd.stageRRsetLocked(owner, core.RRset{Name: owner, RRtype: dns.TypeSVCB, RRs: op})
+	zd.publishWorkingSetLocked(zd.generation.Load(), false)
+	zd.mu.Unlock()
+	if _, err := zd.WriteDynamicZoneFile(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	zd.signalStoredMu.Lock()
+	kept := zd.signalOnDisk[owner]
+	zd.signalStoredMu.Unlock()
+	if kept == signalDigest(op) {
+		t.Fatal("the zone write kept the operator's SVCB RRset as the pass's signal on disk")
+	}
+	if own, err := zd.signalStoredByPass(owner, op); err != nil || own {
+		t.Fatalf("the operator's SVCB RRset reads as the pass's (%v, %v)", own, err)
+	}
+}

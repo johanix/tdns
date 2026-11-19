@@ -97,20 +97,24 @@ func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 
 // noteSignalStoredOver is noteSignalStored for a store that replaced
 // replaced, a signal of the pass's that was at the owner. Its digest is kept
-// right behind the new one, so the history never evicts it. It is what the
-// zone loaded, from the zone file or the journal, and it stays what a
-// restart loads until the zone is next written: a run of stores that each
-// replace it, one per restart with a configuration that changed each time,
-// and no write in between, would otherwise push it out of the
-// signalStoredKeep places. The next restart would then load a signal of the
-// pass's that the record no longer knows, and take it for the operator's
-// for good (CodeRabbit on #1118).
+// right behind the new one, and the digest of what the zone file holds at
+// the owner behind that (signalOnDiskDigest), so the history never evicts
+// either. The zone file's signal is what a restart loads until the zone is
+// next written. A run of stores with no write in between, one per restart
+// with a configuration that changed each time, or several in one process,
+// would otherwise push it out of the signalStoredKeep places. The next
+// restart would then load a signal of the pass's that the record no longer
+// knows, and take it for the operator's for good (CodeRabbit on #1118 and
+// on #1145).
 func (zd *ZoneData) noteSignalStoredOver(owner string, rrs, replaced []dns.RR) {
 	owner = core.CanonicalizeName(owner)
 	digest := signalDigest(rrs)
 	digests := []string{digest}
 	if len(replaced) > 0 {
 		digests = append(digests, signalDigest(replaced))
+	}
+	if onDisk := zd.signalOnDiskDigest(owner, replaced); onDisk != "" {
+		digests = append(digests, onDisk)
 	}
 	earlier, readErr := zd.signalStoredDigests(owner)
 	if readErr != nil {
@@ -158,6 +162,54 @@ func (zd *ZoneData) noteSignalUnrecorded(owner, digest string) {
 	zd.signalUnrecorded[owner] = mergeSignalDigests([]string{digest}, zd.signalUnrecorded[owner])
 }
 
+// signalOnDiskDigest returns the digest of the pass's signal the zone file
+// holds at owner, "" when it holds none. The first store at the owner in
+// this process sets it from what that store replaced: the zone has not
+// been written since it loaded, so the working set holds what the file
+// gave, or nothing of the pass's. noteZoneFileWritten moves it when the
+// zone is written.
+func (zd *ZoneData) signalOnDiskDigest(owner string, replaced []dns.RR) string {
+	zd.signalStoredMu.Lock()
+	defer zd.signalStoredMu.Unlock()
+	if d, ok := zd.signalOnDisk[owner]; ok {
+		return d
+	}
+	d := ""
+	if len(replaced) > 0 {
+		d = signalDigest(replaced)
+	}
+	if zd.signalOnDisk == nil {
+		zd.signalOnDisk = map[string]string{}
+	}
+	zd.signalOnDisk[owner] = d
+	return d
+}
+
+// noteZoneFileWritten moves what signalOnDiskDigest returns, for each owner
+// the pass stored at in this process, to what the zone file now holds there
+// (snap, the snapshot written): the pass's signal, or nothing. An SVCB
+// RRset there that the record does not know for the pass's leaves it as it
+// was: keeping that digest would take the operator's records for the
+// pass's.
+func (zd *ZoneData) noteZoneFileWritten(snap *zoneSnapshot) {
+	if snap == nil {
+		return
+	}
+	zd.signalStoredMu.Lock()
+	defer zd.signalStoredMu.Unlock()
+	for owner := range zd.signalOnDisk {
+		rrset := getRRsetFrom(snap, owner, dns.TypeSVCB)
+		if rrset == nil || len(rrset.RRs) == 0 {
+			zd.signalOnDisk[owner] = ""
+			continue
+		}
+		d := signalDigest(rrset.RRs)
+		if slices.Contains(zd.signalStored[owner], d) || slices.Contains(zd.signalUnrecorded[owner], d) {
+			zd.signalOnDisk[owner] = d
+		}
+	}
+}
+
 // mergeSignalDigests is first followed by the digests of then that are not
 // in it, at most signalStoredKeep in all.
 func mergeSignalDigests(first, then []string) []string {
@@ -186,6 +238,7 @@ func (zd *ZoneData) forgetSignalStored(owner string) error {
 	}
 	zd.signalStored[owner] = nil
 	delete(zd.signalUnrecorded, owner)
+	delete(zd.signalOnDisk, owner)
 	zd.signalStoredMu.Unlock()
 	if kdb := zd.signalRecordDB(); kdb != nil {
 		if err := kdb.DeleteTransportSignalStoredOwner(zd.ZoneName, owner); err != nil {
