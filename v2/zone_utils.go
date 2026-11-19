@@ -2056,8 +2056,7 @@ func RegisterMultiProviderAgentAppType(t AppType) { multiProviderAgentAppTypes[t
 func multiProviderAgentApp(t AppType) bool { return multiProviderAgentAppTypes[t] }
 
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
-	wantsSync := zd.Options[OptChildSync] || zd.Options[OptParentSync] || zd.Options[OptParentSyncProxy] ||
-		zd.Options[OptChildSyncProxy]
+	wantsSync := wantsZoneSyncSetup(zd.Options)
 
 	// Dynamic parentsync=agent detection removed — handled by tdns-mp
 	// MPPostRefresh (hsync_utils.go) and OnFirstLoad (start_agent.go).

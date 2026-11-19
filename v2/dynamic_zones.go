@@ -1089,6 +1089,9 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// an API-created zone is entitled to the same hooks as a configured one
 	// (#500).
 	zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+	// And to the delegation sync setup a configured zone gets at first load
+	// (#1151). This zone first loads through an ordinary refresh.
+	zd.registerZoneSyncSetup(conf.Internal.DelegationSyncQ)
 
 	Zones.Set(name, zd)
 	if err := conf.AddDynamicZoneToConfig(zd); err != nil {
@@ -1478,6 +1481,9 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// silently strips the hooks from a zone that had them -- and modify is
 	// what a reconciling caller runs routinely (#500).
 	newZd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+	// The delegation sync setup too, for the options the zone has now, as a
+	// reload does for a static zone (#1151).
+	newZd.registerZoneSyncSetup(conf.Internal.DelegationSyncQ)
 
 	Zones.Set(name, newZd)
 
@@ -1494,6 +1500,9 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		// no-refresh-hooks: rollback republishes the PREVIOUS ZoneData, which
 		// already carries its hooks.
 		Zones.Set(name, oldZd)
+		// Its delegation sync setup may have been passed over while newZd was
+		// in Zones (#1151).
+		oldZd.resumeOwedZoneSyncSetup()
 		rollbackKey()
 		return "", fmt.Errorf("zone %s failed to persist; rolled back the in-memory modification: %w", name, err)
 	}

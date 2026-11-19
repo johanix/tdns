@@ -752,19 +752,40 @@ func (zd *ZoneData) anyRRsets(owner *OwnerData, snap *zoneSnapshot, apex *OwnerD
 // addNSAndGlue adds NS records and glue records (A/AAAA) to the message, along with DNSSEC signatures if requested.
 // When minimalResponses is true, BIND-style minimal-responses semantics apply: the authority NS RRset and
 // its associated additional-section glue (and their RRSIGs) are omitted from positive answers.
+//
+// When the answer already holds the apex NS RRset -- an NS or ANY query at the
+// apex, or a CNAME chain ending there -- the authority NS RRset and its RRSIGs
+// are left out: a second copy says nothing new, and its signatures only make
+// the response bigger. The glue still goes in ADDITIONAL, as BIND does.
 func (zd *ZoneData) addNSAndGlue(m *dns.Msg, apex *OwnerData, snap *zoneSnapshot, msgoptions *edns0.MsgOptions, minimalResponses bool) {
 	if minimalResponses {
 		return
 	}
-	m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
-	v4glue, v6glue := zd.findGlueFrom(snap, apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DO)
+	nsrrset := apex.RRtypes.GetOnlyRRSet(dns.TypeNS)
+	if !answerHoldsNS(m, zd.ZoneName) {
+		m.Ns = append(m.Ns, nsrrset.RRs...)
+		if msgoptions.DO {
+			m.Ns = append(m.Ns, nsrrset.RRSIGs...)
+		}
+	}
+	v4glue, v6glue := zd.findGlueFrom(snap, nsrrset, msgoptions.DO)
 	m.Extra = append(m.Extra, v4glue.RRs...)
 	m.Extra = append(m.Extra, v6glue.RRs...)
 	if msgoptions.DO {
-		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRSIGs...)
 		m.Extra = append(m.Extra, v4glue.RRSIGs...)
 		m.Extra = append(m.Extra, v6glue.RRSIGs...)
 	}
+}
+
+// answerHoldsNS reports whether the answer section of m holds an NS record
+// owned by name, however either is spelled.
+func answerHoldsNS(m *dns.Msg, name string) bool {
+	for _, rr := range m.Answer {
+		if h := rr.Header(); h.Rrtype == dns.TypeNS && core.EqualNames(h.Name, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // addTransportSignal opportunistically adds transport-signal RRs to the Extra
