@@ -408,12 +408,20 @@ written; this section says how section 3's rules apply at a target.
   for as long as a backoff or RTT sample can stay in force.
 - **It is not a nameserver.** It holds only the addresses of the target
   lookup (A and AAAA, CNAMEs followed, nothing Bogus, each family until its
-  own records and the CNAME links run out). A family that runs out while the
-  other is live is looked up again, and the other's addresses are used
-  meanwhile. Only an answer replaces a family's addresses: one whose query
-  fails keeps what it holds, and if that has run out, it is looked up again
-  after the usual retry interval. It never takes glue, a same-named
-  nameserver's addresses or a stub's, and it never carries a signal. The
+  own records and the CNAME links run out). Each family is in one of three
+  states, apart from the other:
+  - *answered*: its addresses are used until they run out, and then it is
+    looked up again while the other family's addresses are used;
+  - *denied*: it has no addresses, and it is looked up again only along with
+    the other family;
+  - *failed*: its query got no answer to go by. It keeps the addresses it
+    holds, used while they are live, and it is looked up again after the
+    usual retry interval, whether or not it holds any.
+
+  Only an answer replaces what a family holds. A denial counts as an answer,
+  so it clears the family even when the other family's query fails. The
+  target never takes glue, a same-named nameserver's addresses or a stub's,
+  and it never carries a signal. The
   transport and port of an attempt still come from the redirecting
   nameserver's endpoint, so a redirect of a redirect cannot happen. It is not
   in the shared nameserver map or any zone's server list, so nothing that
@@ -437,6 +445,8 @@ written; this section says how section 3's rules apply at a target.
   allowance, for a lookup of the target's addresses that is running, as it
   waits for a server's signal lookup. It waits also when the default
   endpoint failed without a backoff (a refused DS query): the target is an
-  endpoint the query has not tried.
+  endpoint the query has not tried. That includes a lookup the query's own
+  server selection has just started. A query held to the default endpoints,
+  as a target's address lookup is, never waits for a target.
 - **Status output** lists each target on a line of its own, marked as a
   target.

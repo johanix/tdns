@@ -1160,6 +1160,16 @@ type passTuple struct {
 	transport core.Transport
 }
 
+// anotherPassSelectedHook, when set, runs in anotherPassAfter after the pass's
+// first selection, before the running target lookups are collected: tests end
+// or allow a lookup there.
+var anotherPassSelectedHook func()
+
+// anotherPassWaitHook, when set, runs in anotherPassAfter when its wait
+// begins, once the running target lookups are collected and no tuple is
+// usable: tests end a lookup there, so that the wait is what sees it.
+var anotherPassWaitHook func()
+
 // anotherPassAfter decides whether a pass of the query loop that ran out of
 // tuples without an answer is worth another, given the tuples it tried, and
 // returns the selection the next pass is to use, or nil.
@@ -1174,11 +1184,14 @@ type passTuple struct {
 // may have nothing else yet. It then waits, within the query's budget, until
 // an untried tuple appears: first for the running lookups of the redirect
 // targets the servers' signals name, then, unless tried tuples are left, for
-// the signals of the servers that have an address and none. A transport redirected to a target whose addresses are still being
-// looked up goes to its default endpoint, the nameserver's own address,
-// which may not serve it; once that attempt has failed, the target is the
-// one thing left, and the first strict query to a cold target used to fail
-// although its addresses came in a moment later.
+// the signals of the servers that have an address and none. A query held to
+// the default endpoints (withDefaultEndpoints), as a target's own address
+// lookup is, never dials a target, and waits for none. A transport
+// redirected to a target whose addresses are still being looked up goes to
+// its default endpoint, the nameserver's own address, which may not serve
+// it; once that attempt has failed, the target is the one thing left, and the
+// first strict query to a cold target used to fail although its addresses
+// came in a moment later.
 //
 // The next pass uses the selection made here rather than selecting again:
 // selecting reserves a suspect family's probe tuple (ShouldProbe), and a
@@ -1186,11 +1199,6 @@ type passTuple struct {
 // selection leaves out the endpoints the pass tried before it reserves a
 // probe, so the next pass holds only the tuples it did not try, and a probe
 // is not used up on a tuple that would be left out.
-// anotherPassSelectedHook, when set, runs in anotherPassAfter after the pass's
-// first selection, before the running target lookups are collected: tests end
-// a lookup there.
-var anotherPassSelectedHook func()
-
 func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel, tried map[passTuple]bool) *tupleSelection {
 	var sel tupleSelection
 	triedLeft := false
@@ -1212,12 +1220,28 @@ func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, 
 	if anotherPassSelectedHook != nil {
 		anotherPassSelectedHook()
 	}
-	// A target lookup that ended after that selection and before they are
-	// collected brought tuples the selection never saw, so select again once
-	// the running ones are collected: one that ends after is waited for.
-	targets := imr.runningTargetLookups(serverMap)
-	if untried() {
-		return &sel
+	// The running target lookups are collected, and the selection made
+	// again: a lookup that ended after the last selection and before the
+	// collection brought tuples that selection never saw, and one ending
+	// after it is waited for. A selection may start a lookup itself, as when
+	// a target's retry mark ran out after the last one, so the collection is
+	// made again after each selection, until it finds no new lookup.
+	targets := map[string]<-chan struct{}{}
+	collect := func() bool {
+		n := len(targets)
+		maps.Copy(targets, imr.runningTargetLookups(serverMap))
+		return len(targets) > n
+	}
+	if !defaultEndpointsOnly(ctx) {
+		collect()
+		for {
+			if untried() {
+				return &sel
+			}
+			if !collect() {
+				break
+			}
+		}
 	}
 	if triedLeft && len(targets) == 0 {
 		return nil
@@ -1234,6 +1258,9 @@ func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, 
 		return nil
 	}
 	if budget.run(ctx, imr.strictWait(), func(wctx context.Context) bool {
+		if anotherPassWaitHook != nil {
+			anotherPassWaitHook()
+		}
 		if len(targets) > 0 && awaitTargetLookups(wctx, targets, untried) {
 			return true
 		}

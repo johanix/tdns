@@ -222,13 +222,13 @@ func TestATargetsAddressFamiliesRunOutApart(t *testing.T) {
 	put(mustRR(t, dotTarget+` 1 IN A 192.0.2.53`), 500*time.Millisecond)
 	put(mustRR(t, dotTarget+` 3600 IN AAAA 2001:db8::53`), time.Hour)
 
-	found, _ := imr.lookupEndpointAddrs(dotTarget)
-	if len(found) != 2 {
-		t.Fatalf("lookup found %+v, want both families", found)
+	results := imr.lookupEndpointAddrs(dotTarget)
+	if len(results) != 2 || results[0].failed || results[1].failed {
+		t.Fatalf("lookup %v, want both families answered", results)
 	}
 	// The lookup ends a second later, as when the AAAA query took that long.
 	later := time.Now().Add(time.Second)
-	imr.endpointAddrs.finish(dotTarget, found, later, imr.Cache.NewTargetAuthServer)
+	imr.endpointAddrs.finishLookup(dotTarget, results, later, imr.Cache.NewTargetAuthServer)
 	_, addrs, ok, _ := imr.endpointAddrs.get(dotTarget, later)
 	if !ok || len(addrs) != 1 || addrs[0] != "2001:db8::53" {
 		t.Errorf("after the A records ran out: %v %v, want the AAAA address", addrs, ok)
@@ -343,14 +343,11 @@ func TestAnotherPassWaitsForARunningTargetLookup(t *testing.T) {
 		return []string{"192.0.2.53"}, time.Now().Add(time.Hour)
 	}
 	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	releaseOnWait(t, release)
 	imr.startEndpointLookup(dotTarget)
 	server.RecordEndpointAddrFailure("192.0.2.1", 0, core.TransportDoT, errors.New("read: connection refused"))
 	serverMap := map[string]*cache.AuthServer{pathNS: server}
 	tried := map[passTuple]bool{{server, "192.0.2.1", 0, core.TransportDoT}: true}
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		close(release)
-	}()
 
 	start := time.Now()
 	sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "example.", dns.TypeA, serverMap, edns0.PrivacyStrict, tried)
@@ -364,7 +361,7 @@ func TestAnotherPassWaitsForARunningTargetLookup(t *testing.T) {
 		t.Errorf("the next pass dials %+v, want the target", d)
 	}
 	if waited := time.Since(start); waited > 2*time.Second {
-		t.Errorf("waited %v, want about the lookup's 100 ms", waited)
+		t.Errorf("waited %v, want only until the lookup ended", waited)
 	}
 }
 
@@ -416,11 +413,7 @@ func TestAFamilyThatRunsOutIsLookedUpAgain(t *testing.T) {
 	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53", "2001:db8::53"}, time.Now().Add(time.Hour))
 	// The A records run out.
 	imr.endpointAddrs.mu.Lock()
-	for i, a := range imr.endpointAddrs.entries[core.CanonicalizeName(dotTarget)].addrs {
-		if a.addr == "192.0.2.53" {
-			imr.endpointAddrs.entries[core.CanonicalizeName(dotTarget)].addrs[i].expire = time.Now().Add(-time.Second)
-		}
-	}
+	imr.endpointAddrs.entries[core.CanonicalizeName(dotTarget)].fams[cache.FamilyV4].expire = time.Now().Add(-time.Second)
 	imr.endpointAddrs.mu.Unlock()
 
 	d, err := imr.endpointFor(context.Background(), server, nil, "192.0.2.1", core.TransportDoT)
@@ -490,13 +483,10 @@ func TestATriedDefaultEndpointStillWaitsForTheTarget(t *testing.T) {
 		return []string{"192.0.2.53"}, time.Now().Add(time.Hour)
 	}
 	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	releaseOnWait(t, release)
 	imr.startEndpointLookup(dotTarget)
 	serverMap := map[string]*cache.AuthServer{pathNS: server}
 	tried := map[passTuple]bool{{server, "192.0.2.1", 0, core.TransportDoT}: true}
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		close(release)
-	}()
 
 	sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "example.", dns.TypeDS, serverMap, edns0.PrivacyStrict, tried)
 	if sel == nil || len(sel.tuples) != 1 || sel.tuples[0].Transport != core.TransportDoT {
@@ -529,11 +519,11 @@ func TestAFamilyWhoseRefreshFailsKeepsItsAddresses(t *testing.T) {
 		{addr: "2001:db8::53", expire: now.Add(time.Hour)},
 	}, now.Add(-time.Minute), imr.Cache.NewTargetAuthServer)
 
-	found, failed := imr.lookupEndpointAddrs(dotTarget)
-	if len(found) != 1 || found[0].addr != "192.0.2.54" || len(failed) != 1 || failed[0] != cache.FamilyV6 {
-		t.Fatalf("lookup found %+v failed %v, want the new A and IPv6 failed", found, failed)
+	results := imr.lookupEndpointAddrs(dotTarget)
+	if len(results) != 2 || results[0].failed || !slices.Equal(results[0].addrs, []string{"192.0.2.54"}) || !results[1].failed {
+		t.Fatalf("lookup %v, want the new A and IPv6 failed", results)
 	}
-	imr.endpointAddrs.finishLookup(dotTarget, found, failed, time.Now(), imr.Cache.NewTargetAuthServer)
+	imr.endpointAddrs.finishLookup(dotTarget, results, time.Now(), imr.Cache.NewTargetAuthServer)
 	srv, addrs, ok, stale := imr.endpointAddrs.get(dotTarget, time.Now())
 	if !ok || stale || !slices.Contains(addrs, "192.0.2.54") || !slices.Contains(addrs, "2001:db8::53") || len(addrs) != 2 {
 		t.Fatalf("after the refresh: %v known %v stale %v, want the new A and the AAAA held", addrs, ok, stale)
@@ -543,9 +533,9 @@ func TestAFamilyWhoseRefreshFailsKeepsItsAddresses(t *testing.T) {
 	}
 }
 
-// A family that has run out and whose refresh fails stays stale, and is
-// looked up again once endpointAddrRetry has passed, not on every query in
-// between; the other family's answer is taken meanwhile.
+// A family that has run out and whose refresh fails is looked up again once
+// endpointAddrRetry has passed, not on every query in between; the other
+// family's answer is taken meanwhile.
 func TestAFamilyThatRanOutAndFailedIsRetriedLater(t *testing.T) {
 	var tr endpointAddrTracker
 	now := time.Now()
@@ -557,15 +547,163 @@ func TestAFamilyThatRanOutAndFailedIsRetriedLater(t *testing.T) {
 	if !tr.begin(dotTarget, later) {
 		t.Fatal("setup: the refresh could not be claimed")
 	}
-	tr.finishLookup(dotTarget, sameExpiry([]string{"2001:db8::54"}, later.Add(time.Hour)), []cache.AddressFamily{cache.FamilyV4}, later, nil)
-	_, addrs, ok, stale := tr.get(dotTarget, later)
-	if !ok || !stale || len(addrs) != 1 || addrs[0] != "2001:db8::54" {
-		t.Fatalf("after the refresh: %v known %v stale %v, want the new AAAA, and the A still stale", addrs, ok, stale)
+	tr.finishLookup(dotTarget, []familyLookup{
+		{family: cache.FamilyV4, failed: true},
+		{family: cache.FamilyV6, addrs: []string{"2001:db8::54"}, expire: later.Add(time.Hour)},
+	}, later, nil)
+	_, addrs, ok, stale := tr.get(dotTarget, later.Add(time.Second))
+	if !ok || stale || len(addrs) != 1 || addrs[0] != "2001:db8::54" {
+		t.Fatalf("after the refresh: %v known %v stale %v, want the new AAAA, and the A not due yet", addrs, ok, stale)
 	}
-	if tr.begin(dotTarget, later.Add(time.Second)) {
-		t.Error("the failed family is looked up again at once")
+	if _, _, _, stale := tr.get(dotTarget, later.Add(endpointAddrRetry+time.Second)); !stale {
+		t.Error("the failed family is not due after endpointAddrRetry")
 	}
 	if !tr.begin(dotTarget, later.Add(endpointAddrRetry+time.Second)) {
-		t.Error("the failed family is not looked up again after endpointAddrRetry")
+		t.Error("the failed family's lookup could not be claimed after endpointAddrRetry")
 	}
+}
+
+// A refresh in which one family is denied and the other fails clears the
+// denied family though no new address came in (CodeRabbit on #1147): the
+// denial is an answer. The failed family keeps what it holds.
+func TestADenialClearsAFamilyWhenTheOtherFails(t *testing.T) {
+	var tr endpointAddrTracker
+	now := time.Now()
+	tr.finish(dotTarget, sameExpiry([]string{"192.0.2.53", "2001:db8::53"}, now.Add(time.Hour)), now, nil)
+	later := now.Add(time.Minute)
+	tr.finishLookup(dotTarget, []familyLookup{
+		{family: cache.FamilyV4},
+		{family: cache.FamilyV6, failed: true},
+	}, later, nil)
+	srv, addrs, ok, _ := tr.get(dotTarget, later)
+	if !ok || len(addrs) != 1 || addrs[0] != "2001:db8::53" {
+		t.Fatalf("after the refresh: %v known %v, want the AAAA alone", addrs, ok)
+	}
+	if got := srv.GetAddrs(); len(got) != 1 || got[0] != "2001:db8::53" {
+		t.Errorf("the instance's addresses %v, want the AAAA alone", got)
+	}
+	// Both denied, or the AAAA denied too: the target has no address left.
+	tr.finishLookup(dotTarget, []familyLookup{{family: cache.FamilyV6}}, later, nil)
+	if _, addrs, ok, _ := tr.get(dotTarget, later); ok {
+		t.Errorf("after both families were denied: %v still known", addrs)
+	}
+	if got := srv.GetAddrs(); len(got) != 0 {
+		t.Errorf("the instance still holds %v", got)
+	}
+}
+
+// A family whose first query fails while the other answers is looked up
+// again after endpointAddrRetry, though it held nothing (CodeRabbit on
+// #1147): otherwise an IPv4-only resolver would lose the target for as long
+// as the AAAA answer lasts.
+func TestAFamilyWhoseFirstQueryFailsIsRetried(t *testing.T) {
+	var tr endpointAddrTracker
+	now := time.Now()
+	tr.finishLookup(dotTarget, []familyLookup{
+		{family: cache.FamilyV4, failed: true},
+		{family: cache.FamilyV6, addrs: []string{"2001:db8::53"}, expire: now.Add(time.Hour)},
+	}, now, nil)
+	if _, addrs, ok, stale := tr.get(dotTarget, now); !ok || stale || len(addrs) != 1 {
+		t.Fatalf("after the lookup: %v known %v stale %v, want the AAAA, the A not due yet", addrs, ok, stale)
+	}
+	retry := now.Add(endpointAddrRetry)
+	if _, _, _, stale := tr.get(dotTarget, retry); !stale {
+		t.Error("the A that failed is not due after endpointAddrRetry")
+	}
+	if !tr.begin(dotTarget, retry) {
+		t.Fatal("the A's lookup could not be claimed")
+	}
+	tr.finishLookup(dotTarget, []familyLookup{
+		{family: cache.FamilyV4, addrs: []string{"192.0.2.53"}, expire: retry.Add(time.Hour)},
+		{family: cache.FamilyV6, addrs: []string{"2001:db8::53"}, expire: retry.Add(time.Hour)},
+	}, retry, nil)
+	if _, addrs, ok, stale := tr.get(dotTarget, retry); !ok || stale || len(addrs) != 2 {
+		t.Errorf("after the retry: %v known %v stale %v, want both families", addrs, ok, stale)
+	}
+}
+
+// A selection that starts a target's lookup itself, as when the target's
+// retry mark ran out after the pass's first selection, has that lookup
+// waited for (CodeRabbit on #1147): the collection made before it found
+// nothing running.
+func TestAnotherPassWaitsForALookupItsSelectionStarted(t *testing.T) {
+	imr, server, _, _, _ := endpointTestRig(t)
+	server.SetAddrs([]string{"192.0.2.1"})
+	imr.Tuning.Discovery.StrictWait = 3 * time.Second
+	// A lookup failed a moment ago: the first selection cannot start one.
+	if !imr.endpointAddrs.begin(dotTarget, time.Now()) {
+		t.Fatal("setup: the lookup could not be claimed")
+	}
+	imr.endpointAddrs.finish(dotTarget, nil, time.Now(), nil)
+	release := make(chan struct{})
+	saved := endpointAddrLookupHook
+	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) {
+		<-release
+		return []string{"192.0.2.53"}, time.Now().Add(time.Hour)
+	}
+	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	releaseOnWait(t, release)
+	savedSel := anotherPassSelectedHook
+	anotherPassSelectedHook = func() {
+		// The retry mark runs out.
+		imr.endpointAddrs.mu.Lock()
+		delete(imr.endpointAddrs.retry, core.CanonicalizeName(dotTarget))
+		imr.endpointAddrs.mu.Unlock()
+	}
+	t.Cleanup(func() { anotherPassSelectedHook = savedSel })
+	server.RecordEndpointAddrFailure("192.0.2.1", 0, core.TransportDoT, errors.New("read: connection refused"))
+	serverMap := map[string]*cache.AuthServer{pathNS: server}
+	tried := map[passTuple]bool{{server, "192.0.2.1", 0, core.TransportDoT}: true}
+
+	sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "example.", dns.TypeA, serverMap, edns0.PrivacyStrict, tried)
+	if sel == nil || len(sel.tuples) != 1 || sel.tuples[0].Transport != core.TransportDoT {
+		t.Fatalf("next pass %+v, want the DoT tuple to the target", sel)
+	}
+	if d, _ := imr.attemptKey(context.Background(), server, sel.zone, "192.0.2.1", core.TransportDoT, false); !d.redirect || d.addr != "192.0.2.53" {
+		t.Errorf("the next pass dials %+v, want the target", d)
+	}
+}
+
+// A query held to the default endpoints, as a target's own address lookup
+// is, does not wait for a running target lookup (CodeRabbit on #1147): it
+// never dials a target, so the lookup cannot give it a tuple.
+func TestADefaultEndpointsQueryDoesNotWaitForTargets(t *testing.T) {
+	imr, server, _, _, _ := endpointTestRig(t)
+	server.SetAddrs([]string{"192.0.2.1"})
+	imr.Tuning.Discovery.StrictWait = 2 * time.Second
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	saved := endpointAddrLookupHook
+	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) {
+		<-release
+		return []string{"192.0.2.53"}, time.Now().Add(time.Hour)
+	}
+	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	imr.startEndpointLookup(dotTarget)
+	serverMap := map[string]*cache.AuthServer{pathNS: server}
+	tried := map[passTuple]bool{{server, "192.0.2.1", 0, core.TransportDoT}: true}
+
+	start := time.Now()
+	sel := imr.anotherPassAfter(withDefaultEndpoints(context.Background()), &signalWaitBudget{}, "example.", dns.TypeA, serverMap, edns0.PrivacyStrict, tried)
+	if sel != nil {
+		t.Errorf("next pass %+v, want none", sel.tuples)
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Errorf("waited %v for a target lookup the query cannot use", waited)
+	}
+}
+
+// releaseOnWait has anotherPassAfter close release when its wait begins
+// (anotherPassWaitHook), so that a lookup held on release ends only once the
+// pass has collected it and found no tuple usable. release is closed at the
+// end of the test if the wait never began.
+func releaseOnWait(t *testing.T, release chan struct{}) {
+	t.Helper()
+	var once sync.Once
+	saved := anotherPassWaitHook
+	anotherPassWaitHook = func() { once.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		anotherPassWaitHook = saved
+		once.Do(func() { close(release) })
+	})
 }
