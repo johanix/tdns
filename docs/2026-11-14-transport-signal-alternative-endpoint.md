@@ -410,7 +410,9 @@ written; this section says how section 3's rules apply at a target.
   lookup (A and AAAA, CNAMEs followed, nothing Bogus, each family until its
   own records and the CNAME links run out). A family that runs out while the
   other is live is looked up again, and the other's addresses are used
-  meanwhile. It never takes glue, a same-named
+  meanwhile. Only an answer replaces a family's addresses: one whose query
+  fails keeps what it holds, and if that has run out, it is looked up again
+  after the usual retry interval. It never takes glue, a same-named
   nameserver's addresses or a stub's, and it never carries a signal. The
   transport and port of an attempt still come from the redirecting
   nameserver's endpoint, so a redirect of a redirect cannot happen. It is not

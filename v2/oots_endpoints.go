@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
@@ -389,16 +390,26 @@ func (tr *endpointAddrTracker) inflight(target string) <-chan struct{} {
 	return nil
 }
 
-// finish ends the lookup of target with the addresses found. Those that have
-// already run out at now are left out, each family by its own expiry, and
-// none left is a failure, retried after endpointAddrRetry. The first success
+// finish ends the lookup of target with the addresses found, every family
+// answered (finishLookup).
+func (tr *endpointAddrTracker) finish(target string, found []endpointAddr, now time.Time, newServer func(string) *cache.AuthServer) {
+	tr.finishLookup(target, found, nil, now, newServer)
+}
+
+// finishLookup ends the lookup of target with the addresses found. Those that
+// have already run out at now are left out, each family by its own expiry,
+// and none left is a failure, retried after endpointAddrRetry. A family whose
+// query failed (failed) keeps the addresses held for it: those still live
+// stay usable, and those that have run out keep the family stale, so it is
+// looked up again, after endpointAddrRetry. Only an answer replaces a
+// family's addresses. The first success
 // creates the target's instance with newServer (nil: a plain AuthServer);
 // later ones give it their addresses, and its backoff and RTT carry on.
 // Retry marks that have run out are dropped, and so are the targets whose
 // addresses ran out and that no one has asked for for endpointTargetIdle, so
 // the tracker holds only the targets that are live, waiting, or still have
 // state that counts.
-func (tr *endpointAddrTracker) finish(target string, found []endpointAddr, now time.Time, newServer func(string) *cache.AuthServer) {
+func (tr *endpointAddrTracker) finishLookup(target string, found []endpointAddr, failed []cache.AddressFamily, now time.Time, newServer func(string) *cache.AuthServer) {
 	key := core.CanonicalizeName(target)
 	idle := endpointTargetIdle()
 	tr.mu.Lock()
@@ -418,16 +429,9 @@ func (tr *endpointAddrTracker) finish(target string, found []endpointAddr, now t
 		}
 	}
 	var live []endpointAddr
-	var addrs []string
-	var latest time.Time
 	for _, a := range found {
-		if !now.Before(a.expire) {
-			continue
-		}
-		live = append(live, a)
-		addrs = append(addrs, a.addr)
-		if a.expire.After(latest) {
-			latest = a.expire
+		if now.Before(a.expire) {
+			live = append(live, a)
 		}
 	}
 	if len(live) == 0 {
@@ -438,6 +442,26 @@ func (tr *endpointAddrTracker) finish(target string, found []endpointAddr, now t
 		return
 	}
 	e := tr.entries[key]
+	kept := false
+	if e != nil && len(failed) > 0 {
+		for _, a := range e.addrs {
+			if slices.Contains(failed, cache.FamilyOf(a.addr)) {
+				live = append(live, a)
+				kept = true
+			}
+		}
+	}
+	var addrs []string
+	var latest time.Time
+	for _, a := range live {
+		if !now.Before(a.expire) {
+			continue
+		}
+		addrs = append(addrs, a.addr)
+		if a.expire.After(latest) {
+			latest = a.expire
+		}
+	}
 	if e == nil {
 		var srv *cache.AuthServer
 		if newServer != nil {
@@ -458,7 +482,14 @@ func (tr *endpointAddrTracker) finish(target string, found []endpointAddr, now t
 	e.used = now
 	e.server.SetAddrs(addrs)
 	e.server.SetExpire(latest)
-	delete(tr.retry, key)
+	if kept {
+		if tr.retry == nil {
+			tr.retry = map[string]time.Time{}
+		}
+		tr.retry[key] = now.Add(endpointAddrRetry)
+	} else {
+		delete(tr.retry, key)
+	}
 }
 
 // set records target's addresses directly, live until expire.
@@ -511,15 +542,15 @@ func (imr *Imr) startEndpointLookup(target string) {
 	}
 	lookup := (*Imr).lookupEndpointAddrs
 	if hook := endpointAddrLookupHook; hook != nil {
-		lookup = func(imr *Imr, target string) []endpointAddr {
-			return sameExpiry(hook(imr, target))
+		lookup = func(imr *Imr, target string) ([]endpointAddr, []cache.AddressFamily) {
+			return sameExpiry(hook(imr, target)), nil
 		}
 	}
 	go func() {
-		found := lookup(imr, target)
-		imr.endpointAddrs.finish(target, found, time.Now(), imr.Cache.NewTargetAuthServer)
+		found, failed := lookup(imr, target)
+		imr.endpointAddrs.finishLookup(target, found, failed, time.Now(), imr.Cache.NewTargetAuthServer)
 		if !imr.Quiet {
-			lgDns.Debug("transport signal: endpoint addresses", "target", target, "addrs", found)
+			lgDns.Debug("transport signal: endpoint addresses", "target", target, "addrs", found, "failed", failed)
 		}
 	}()
 }
@@ -530,21 +561,37 @@ func (imr *Imr) startEndpointLookup(target string) {
 // Each address runs out when the first of the records that led to it does,
 // the links of a CNAME chain included (addrsExpiry): the two families apart,
 // so that one that runs out during the other's lookup does not take the
-// other with it.
-func (imr *Imr) lookupEndpointAddrs(target string) []endpointAddr {
+// other with it. failed is the families whose query got no answer to go by:
+// an error, a Bogus answer or denial, or addresses whose expiry is not known.
+// A denial is an answer: the family has no addresses.
+func (imr *Imr) lookupEndpointAddrs(target string) (found []endpointAddr, failed []cache.AddressFamily) {
 	ctx, cancel := detachedContext(5 * time.Second)
 	defer cancel()
 	ctx = withDefaultEndpoints(ctx)
-	var out []endpointAddr
 	for _, qtype := range imr.Cache.AddressTypes() {
+		fam := cache.FamilyV4
+		if qtype == dns.TypeAAAA {
+			fam = cache.FamilyV6
+		}
 		resp, err := imr.ImrQuery(ctx, target, qtype, dns.ClassINET, nil)
-		if err != nil || resp == nil || resp.RRset == nil || resp.ValidationState == cache.ValidationStateBogus {
+		if err != nil || resp == nil || resp.ValidationState == cache.ValidationStateBogus {
+			failed = append(failed, fam)
 			continue
 		}
-		found, exp := imr.endpointAddrsOf(target, qtype, resp, time.Now())
-		out = append(out, sameExpiry(found, exp)...)
+		if resp.RRset == nil {
+			if resp.Denial == 0 {
+				failed = append(failed, fam)
+			}
+			continue
+		}
+		addrs, exp := imr.endpointAddrsOf(target, qtype, resp, time.Now())
+		if len(addrs) == 0 {
+			failed = append(failed, fam)
+			continue
+		}
+		found = append(found, sameExpiry(addrs, exp)...)
 	}
-	return out
+	return found, failed
 }
 
 // endpointAddrsOf returns the addresses resp carries for <target, qtype> and

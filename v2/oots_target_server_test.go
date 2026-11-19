@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -221,7 +222,7 @@ func TestATargetsAddressFamiliesRunOutApart(t *testing.T) {
 	put(mustRR(t, dotTarget+` 1 IN A 192.0.2.53`), 500*time.Millisecond)
 	put(mustRR(t, dotTarget+` 3600 IN AAAA 2001:db8::53`), time.Hour)
 
-	found := imr.lookupEndpointAddrs(dotTarget)
+	found, _ := imr.lookupEndpointAddrs(dotTarget)
 	if len(found) != 2 {
 		t.Fatalf("lookup found %+v, want both families", found)
 	}
@@ -503,5 +504,68 @@ func TestATriedDefaultEndpointStillWaitsForTheTarget(t *testing.T) {
 	}
 	if d, _ := imr.attemptKey(context.Background(), server, sel.zone, "192.0.2.1", core.TransportDoT, false); !d.redirect || d.addr != "192.0.2.53" {
 		t.Errorf("the next pass dials %+v, want the target", d)
+	}
+}
+
+// A refresh whose query for the family still live fails keeps that family's
+// addresses (review of #1147, F2): only an answer replaces them. Here the A
+// records have run out and are looked up again, and the AAAA query comes
+// back Bogus; the AAAA held stays live beside the new A.
+func TestAFamilyWhoseRefreshFailsKeepsItsAddresses(t *testing.T) {
+	imr := newTestImr(t)
+	imr.Quiet = true
+	put := func(rr dns.RR, state cache.ValidationState) {
+		name := rr.Header().Name
+		imr.Cache.Set(name, rr.Header().Rrtype, &cache.CachedRRset{Name: name, RRtype: rr.Header().Rrtype,
+			Context: cache.ContextAnswer, State: state, Ttl: 3600,
+			Expiration: time.Now().Add(time.Hour), RRset: &core.RRset{Name: name, Class: dns.ClassINET,
+				RRtype: rr.Header().Rrtype, RRs: []dns.RR{rr}}})
+	}
+	put(mustRR(t, dotTarget+` 3600 IN A 192.0.2.54`), cache.ValidationStateSecure)
+	put(mustRR(t, dotTarget+` 3600 IN AAAA 2001:db8::99`), cache.ValidationStateBogus)
+	now := time.Now()
+	imr.endpointAddrs.finish(dotTarget, []endpointAddr{
+		{addr: "192.0.2.53", expire: now.Add(-time.Second)},
+		{addr: "2001:db8::53", expire: now.Add(time.Hour)},
+	}, now.Add(-time.Minute), imr.Cache.NewTargetAuthServer)
+
+	found, failed := imr.lookupEndpointAddrs(dotTarget)
+	if len(found) != 1 || found[0].addr != "192.0.2.54" || len(failed) != 1 || failed[0] != cache.FamilyV6 {
+		t.Fatalf("lookup found %+v failed %v, want the new A and IPv6 failed", found, failed)
+	}
+	imr.endpointAddrs.finishLookup(dotTarget, found, failed, time.Now(), imr.Cache.NewTargetAuthServer)
+	srv, addrs, ok, stale := imr.endpointAddrs.get(dotTarget, time.Now())
+	if !ok || stale || !slices.Contains(addrs, "192.0.2.54") || !slices.Contains(addrs, "2001:db8::53") || len(addrs) != 2 {
+		t.Fatalf("after the refresh: %v known %v stale %v, want the new A and the AAAA held", addrs, ok, stale)
+	}
+	if got := srv.GetAddrs(); len(got) != 2 {
+		t.Errorf("the instance's addresses %v, want both", got)
+	}
+}
+
+// A family that has run out and whose refresh fails stays stale, and is
+// looked up again once endpointAddrRetry has passed, not on every query in
+// between; the other family's answer is taken meanwhile.
+func TestAFamilyThatRanOutAndFailedIsRetriedLater(t *testing.T) {
+	var tr endpointAddrTracker
+	now := time.Now()
+	tr.finish(dotTarget, []endpointAddr{
+		{addr: "192.0.2.53", expire: now.Add(time.Minute)},
+		{addr: "2001:db8::53", expire: now.Add(time.Hour)},
+	}, now, nil)
+	later := now.Add(2 * time.Minute)
+	if !tr.begin(dotTarget, later) {
+		t.Fatal("setup: the refresh could not be claimed")
+	}
+	tr.finishLookup(dotTarget, sameExpiry([]string{"2001:db8::54"}, later.Add(time.Hour)), []cache.AddressFamily{cache.FamilyV4}, later, nil)
+	_, addrs, ok, stale := tr.get(dotTarget, later)
+	if !ok || !stale || len(addrs) != 1 || addrs[0] != "2001:db8::54" {
+		t.Fatalf("after the refresh: %v known %v stale %v, want the new AAAA, and the A still stale", addrs, ok, stale)
+	}
+	if tr.begin(dotTarget, later.Add(time.Second)) {
+		t.Error("the failed family is looked up again at once")
+	}
+	if !tr.begin(dotTarget, later.Add(endpointAddrRetry+time.Second)) {
+		t.Error("the failed family is not looked up again after endpointAddrRetry")
 	}
 }
