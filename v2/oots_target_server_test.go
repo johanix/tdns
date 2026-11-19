@@ -29,7 +29,7 @@ import (
 // targetServer is the instance the resolver holds for target.
 func targetServer(t *testing.T, imr *Imr, target string) *cache.AuthServer {
 	t.Helper()
-	srv, _, ok := imr.endpointAddrs.get(target, time.Now())
+	srv, _, ok, _ := imr.endpointAddrs.get(target, time.Now())
 	if !ok || srv == nil {
 		t.Fatalf("no live instance for the target %s", target)
 	}
@@ -228,7 +228,7 @@ func TestATargetsAddressFamiliesRunOutApart(t *testing.T) {
 	// The lookup ends a second later, as when the AAAA query took that long.
 	later := time.Now().Add(time.Second)
 	imr.endpointAddrs.finish(dotTarget, found, later, imr.Cache.NewTargetAuthServer)
-	_, addrs, ok := imr.endpointAddrs.get(dotTarget, later)
+	_, addrs, ok, _ := imr.endpointAddrs.get(dotTarget, later)
 	if !ok || len(addrs) != 1 || addrs[0] != "2001:db8::53" {
 		t.Errorf("after the A records ran out: %v %v, want the AAAA address", addrs, ok)
 	}
@@ -395,5 +395,113 @@ func TestAuthTransportsListsTargets(t *testing.T) {
 	imr.AuthTransportsSnapshot(nil, "", true)
 	if got := targetServer(t, imr, dotTarget).SnapshotTransportStats().Used[core.TransportDoT]; got != 0 {
 		t.Errorf("after a reset the target still counts %d answers", got)
+	}
+}
+
+// A target's A and AAAA run out apart, and one that has run out is looked up
+// again while the other's addresses are used (CodeRabbit on #1147): with only
+// the AAAA live, an IPv6 path that is down would otherwise leave the target
+// unreachable until the AAAA ran out too, though its IPv4 works.
+func TestAFamilyThatRunsOutIsLookedUpAgain(t *testing.T) {
+	imr, server, _, _, _ := endpointTestRig(t)
+	server.SetAddrs([]string{"192.0.2.1"})
+	looked := make(chan struct{}, 1)
+	saved := endpointAddrLookupHook
+	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) {
+		looked <- struct{}{}
+		return []string{"192.0.2.53", "2001:db8::53"}, time.Now().Add(time.Hour)
+	}
+	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53", "2001:db8::53"}, time.Now().Add(time.Hour))
+	// The A records run out.
+	imr.endpointAddrs.mu.Lock()
+	for i, a := range imr.endpointAddrs.entries[core.CanonicalizeName(dotTarget)].addrs {
+		if a.addr == "192.0.2.53" {
+			imr.endpointAddrs.entries[core.CanonicalizeName(dotTarget)].addrs[i].expire = time.Now().Add(-time.Second)
+		}
+	}
+	imr.endpointAddrs.mu.Unlock()
+
+	d, err := imr.endpointFor(context.Background(), server, nil, "192.0.2.1", core.TransportDoT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.redirect || d.addr != "2001:db8::53" {
+		t.Errorf("dials %+v, want the target's live AAAA meanwhile", d)
+	}
+	select {
+	case <-looked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the target was not looked up again after its A records ran out")
+	}
+	if ch := imr.endpointAddrs.inflight(dotTarget); ch != nil {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatal("the lookup did not end")
+		}
+	}
+	if _, addrs, ok, stale := imr.endpointAddrs.get(dotTarget, time.Now()); !ok || len(addrs) != 2 || stale {
+		t.Errorf("after the lookup: %v known %v stale %v, want both families live", addrs, ok, stale)
+	}
+}
+
+// A target lookup that ends after the pass's first selection, before the
+// running lookups are collected, is not lost (CodeRabbit on #1147): the pass
+// selects again once they are collected, and its next pass goes to the
+// target.
+func TestAnotherPassSeesATargetLookupThatEndedBeforeTheCollection(t *testing.T) {
+	imr, server, _, _, _ := endpointTestRig(t)
+	server.SetAddrs([]string{"192.0.2.1"})
+	if !imr.endpointAddrs.begin(dotTarget, time.Now()) {
+		t.Fatal("setup: the lookup could not be claimed")
+	}
+	saved := anotherPassSelectedHook
+	anotherPassSelectedHook = func() {
+		imr.endpointAddrs.finish(dotTarget, sameExpiry([]string{"192.0.2.53"}, time.Now().Add(time.Hour)), time.Now(), imr.Cache.NewTargetAuthServer)
+	}
+	t.Cleanup(func() { anotherPassSelectedHook = saved })
+	server.RecordEndpointAddrFailure("192.0.2.1", 0, core.TransportDoT, errors.New("read: connection refused"))
+	serverMap := map[string]*cache.AuthServer{pathNS: server}
+	tried := map[passTuple]bool{{server, "192.0.2.1", 0, core.TransportDoT}: true}
+
+	sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "example.", dns.TypeA, serverMap, edns0.PrivacyStrict, tried)
+	if sel == nil || len(sel.tuples) != 1 || sel.tuples[0].Transport != core.TransportDoT {
+		t.Fatalf("next pass %+v, want the DoT tuple to the target", sel)
+	}
+	if d, _ := imr.attemptKey(context.Background(), server, sel.zone, "192.0.2.1", core.TransportDoT, false); !d.redirect || d.addr != "192.0.2.53" {
+		t.Errorf("the next pass dials %+v, want the target", d)
+	}
+}
+
+// A default endpoint that was tried and failed without a backoff, as a DS
+// query refused by a child's server does, does not keep the pass from
+// waiting for the running target lookup (CodeRabbit on #1147): the target is
+// an endpoint the pass never tried.
+func TestATriedDefaultEndpointStillWaitsForTheTarget(t *testing.T) {
+	imr, server, _, _, _ := endpointTestRig(t)
+	server.SetAddrs([]string{"192.0.2.1"})
+	imr.Tuning.Discovery.StrictWait = 3 * time.Second
+	release := make(chan struct{})
+	saved := endpointAddrLookupHook
+	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) {
+		<-release
+		return []string{"192.0.2.53"}, time.Now().Add(time.Hour)
+	}
+	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	imr.startEndpointLookup(dotTarget)
+	serverMap := map[string]*cache.AuthServer{pathNS: server}
+	tried := map[passTuple]bool{{server, "192.0.2.1", 0, core.TransportDoT}: true}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		close(release)
+	}()
+
+	sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "example.", dns.TypeDS, serverMap, edns0.PrivacyStrict, tried)
+	if sel == nil || len(sel.tuples) != 1 || sel.tuples[0].Transport != core.TransportDoT {
+		t.Fatalf("next pass %+v, want the DoT tuple to the target", sel)
+	}
+	if d, _ := imr.attemptKey(context.Background(), server, sel.zone, "192.0.2.1", core.TransportDoT, false); !d.redirect || d.addr != "192.0.2.53" {
+		t.Errorf("the next pass dials %+v, want the target", d)
 	}
 }

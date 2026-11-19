@@ -1168,12 +1168,13 @@ type passTuple struct {
 // server's transport signal came in during the pass, while the query's own
 // Do53 attempt to it was being refused: the server has transports the pass
 // never had (#1065). Only tried tuples left: they failed without a backoff,
-// and another pass would repeat them. No tuple left at all: every one it
-// tried went into backoff, and a server without a signal may have nothing
-// else yet. It then waits, within the query's budget, until an untried tuple
-// appears: first for the running lookups of the redirect targets the servers'
-// signals name, then for the signals of the servers that have an address and
-// none. A transport redirected to a target whose addresses are still being
+// and another pass would repeat them, unless a redirect target's lookup is
+// running, whose addresses are tuples the pass never had. No tuple left at
+// all: every one it tried went into backoff, and a server without a signal
+// may have nothing else yet. It then waits, within the query's budget, until
+// an untried tuple appears: first for the running lookups of the redirect
+// targets the servers' signals name, then, unless tried tuples are left, for
+// the signals of the servers that have an address and none. A transport redirected to a target whose addresses are still being
 // looked up goes to its default endpoint, the nameserver's own address,
 // which may not serve it; once that attempt has failed, the target is the
 // one thing left, and the first strict query to a cold target used to fail
@@ -1185,6 +1186,11 @@ type passTuple struct {
 // selection leaves out the endpoints the pass tried before it reserves a
 // probe, so the next pass holds only the tuples it did not try, and a probe
 // is not used up on a tuple that would be left out.
+// anotherPassSelectedHook, when set, runs in anotherPassAfter after the pass's
+// first selection, before the running target lookups are collected: tests end
+// a lookup there.
+var anotherPassSelectedHook func()
+
 func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel, tried map[passTuple]bool) *tupleSelection {
 	var sel tupleSelection
 	triedLeft := false
@@ -1203,16 +1209,27 @@ func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, 
 	if untried() {
 		return &sel
 	}
-	if triedLeft {
+	if anotherPassSelectedHook != nil {
+		anotherPassSelectedHook()
+	}
+	// A target lookup that ended after that selection and before they are
+	// collected brought tuples the selection never saw, so select again once
+	// the running ones are collected: one that ends after is waited for.
+	targets := imr.runningTargetLookups(serverMap)
+	if untried() {
+		return &sel
+	}
+	if triedLeft && len(targets) == 0 {
 		return nil
 	}
 	unsignalled := map[string]*cache.AuthServer{}
-	for key, server := range serverMap {
-		if server != nil && len(server.GetAddrs()) > 0 && len(server.GetTransportWeights()) == 0 {
-			unsignalled[key] = server
+	if !triedLeft {
+		for key, server := range serverMap {
+			if server != nil && len(server.GetAddrs()) > 0 && len(server.GetTransportWeights()) == 0 {
+				unsignalled[key] = server
+			}
 		}
 	}
-	targets := imr.runningTargetLookups(serverMap)
 	if len(unsignalled) == 0 && len(targets) == 0 {
 		return nil
 	}

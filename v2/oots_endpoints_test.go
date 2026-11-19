@@ -229,7 +229,7 @@ func TestTryServerRedirectWaitsForTargetAddrs(t *testing.T) {
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, _, known := imr.endpointAddrs.get(dotTarget, time.Now()); known {
+		if _, _, known, _ := imr.endpointAddrs.get(dotTarget, time.Now()); known {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -365,7 +365,7 @@ func TestChooseEndpointAddr(t *testing.T) {
 func TestEndpointAddrTracker(t *testing.T) {
 	var tr endpointAddrTracker
 	now := time.Now()
-	if _, _, ok := tr.get(dotTarget, now); ok {
+	if _, _, ok, _ := tr.get(dotTarget, now); ok {
 		t.Fatal("known before any lookup")
 	}
 	if !tr.begin(dotTarget, now) || tr.begin(dotTarget, now) {
@@ -391,10 +391,10 @@ func TestEndpointAddrTracker(t *testing.T) {
 		t.Fatal("not retried after endpointAddrRetry")
 	}
 	tr.finish(dotTarget, sameExpiry([]string{"192.0.2.53"}, now.Add(time.Minute)), now, nil)
-	if srv, addrs, ok := tr.get("DOT-NS.kid.p.test.", now); !ok || len(addrs) != 1 || srv == nil {
+	if srv, addrs, ok, _ := tr.get("DOT-NS.kid.p.test.", now); !ok || len(addrs) != 1 || srv == nil {
 		t.Errorf("get after a lookup: %v %v %v", srv, addrs, ok)
 	}
-	if _, _, ok := tr.get(dotTarget, now.Add(time.Minute)); ok {
+	if _, _, ok, _ := tr.get(dotTarget, now.Add(time.Minute)); ok {
 		t.Error("served after the addresses expired")
 	}
 }

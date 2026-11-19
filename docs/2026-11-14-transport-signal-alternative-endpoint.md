@@ -408,7 +408,9 @@ written; this section says how section 3's rules apply at a target.
   for as long as a backoff or RTT sample can stay in force.
 - **It is not a nameserver.** It holds only the addresses of the target
   lookup (A and AAAA, CNAMEs followed, nothing Bogus, each family until its
-  own records and the CNAME links run out). It never takes glue, a same-named
+  own records and the CNAME links run out). A family that runs out while the
+  other is live is looked up again, and the other's addresses are used
+  meanwhile. It never takes glue, a same-named
   nameserver's addresses or a stub's, and it never carries a signal. The
   transport and port of an attempt still come from the redirecting
   nameserver's endpoint, so a redirect of a redirect cannot happen. It is not
@@ -431,6 +433,8 @@ written; this section says how section 3's rules apply at a target.
   transport goes to the default endpoint (section 3). When that attempt has
   failed and nothing else is left, a query waits, within its signal-wait
   allowance, for a lookup of the target's addresses that is running, as it
-  waits for a server's signal lookup.
+  waits for a server's signal lookup. It waits also when the default
+  endpoint failed without a backoff (a refused DS query): the target is an
+  endpoint the query has not tried.
 - **Status output** lists each target on a line of its own, marked as a
   target.

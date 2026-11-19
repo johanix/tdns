@@ -132,9 +132,10 @@ func (e errEndpointUnavailable) Error() string {
 // own name it is addr, at the endpoint's port. At a target it is the best
 // usable address of the target, once those are known; until then the default
 // endpoint, addr at the usual port, and the lookup of the target's addresses
-// is started. A udp or tcp endpoint with no usable address (fallsBackToPort53)
-// gives way to addr on port 53. A context marked withDefaultEndpoints always
-// gets the default endpoint. Forced TCP asks for Do53TCP, so it goes to the
+// is started; it is started again when one family of them has run out, and
+// the other's are used meanwhile. A udp or tcp endpoint with no usable
+// address (fallsBackToPort53) gives way to addr on port 53. A context marked
+// withDefaultEndpoints always gets the default endpoint. Forced TCP asks for Do53TCP, so it goes to the
 // tcp endpoint or port 53, never to the udp one.
 func (imr *Imr) endpointFor(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport) (endpointDial, error) {
 	if defaultEndpointsOnly(ctx) {
@@ -145,7 +146,8 @@ func (imr *Imr) endpointFor(ctx context.Context, server *cache.AuthServer, zone 
 
 // resolveEndpoint is endpointFor's choice for a context not marked
 // withDefaultEndpoints. lookup says whether a target whose addresses are not
-// known is looked up: not for the stub probe, which only reports. An address
+// known, or one of whose families has run out, is looked up: not for the stub
+// probe, which only reports. An address
 // is usable when neither the backoff of the instance it belongs to nor the
 // zone's lameness holds it at the endpoint's port (endpointUsable). A
 // target's addresses belong to the target's own instance, never to the
@@ -167,11 +169,11 @@ func (imr *Imr) resolveEndpoint(server *cache.AuthServer, zone *cache.Zone, addr
 		}
 		return endpointDial{server: server, addr: addr, port: ep.Port, keyPort: ep.Port}, nil
 	}
-	target, addrs, known := imr.endpointAddrs.get(ep.Target, time.Now())
+	target, addrs, known, stale := imr.endpointAddrs.get(ep.Target, time.Now())
+	if lookup && (!known || stale) {
+		imr.startEndpointLookup(ep.Target)
+	}
 	if !known {
-		if lookup {
-			imr.startEndpointLookup(ep.Target)
-		}
 		return own, nil
 	}
 	pick := imr.chooseEndpointAddr(target, zone, addrs, ep.Port, t)
@@ -341,20 +343,23 @@ type endpointAddrTracker struct {
 }
 
 // get returns target's instance and its addresses that are live, and whether
-// any is.
-func (tr *endpointAddrTracker) get(target string, now time.Time) (*cache.AuthServer, []string, bool) {
+// any is. stale is true when some address the last lookup found has run out
+// while others are live: A and AAAA run out apart, and a family that has run
+// out is looked up again (resolveEndpoint) while the other's addresses are
+// used.
+func (tr *endpointAddrTracker) get(target string, now time.Time) (srv *cache.AuthServer, addrs []string, known, stale bool) {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	e, ok := tr.entries[core.CanonicalizeName(target)]
 	if !ok {
-		return nil, nil, false
+		return nil, nil, false, false
 	}
-	addrs := e.live(now)
+	addrs = e.live(now)
 	if len(addrs) == 0 {
-		return nil, nil, false
+		return nil, nil, false, false
 	}
 	e.used = now
-	return e.server, addrs, true
+	return e.server, addrs, true, len(addrs) < len(e.addrs)
 }
 
 // begin claims the lookup of target: false when one is in flight, or the last
