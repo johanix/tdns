@@ -70,7 +70,9 @@ func runTransportSignalPass(zd *ZoneData, conf *Config) {
 	if zd == nil || !zd.addsTransportSignal() {
 		return
 	}
-	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+	// The configuration as last accepted, not conf, which a reload decodes
+	// in place (transportSignalConfig).
+	if err := zd.CreateTransportSignalRRs(conf.transportSignalConfig()); err != nil {
 		lgEngine.Error("transport signal pass failed", "zone", zd.ZoneName, "error", err)
 	}
 }
