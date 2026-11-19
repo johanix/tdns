@@ -224,18 +224,44 @@ func TestAnIxfrRefreshOfAZoneSwitchedOffAndOnSignsWhatTheDeltaChangedAgain(t *te
 
 // assertEveryPublishedRRsetVerifies checks every RRset of every owner the zone
 // publishes against the zone's own published DNSKEYs: each must carry a
-// signature, and the signature must cover the records published under it.
+// signature, and the signature must cover the records published under it. What
+// is not the zone's own data is left out, as signing leaves it: the names below
+// a delegation cut, and at the cut everything but the DS.
 func assertEveryPublishedRRsetVerifies(t *testing.T, zd *ZoneData) {
 	t.Helper()
 	snap := zd.publishedSnapshot()
 	if snap == nil {
 		t.Fatal("no published snapshot")
 	}
+	var cuts []string
+	for name, od := range snap.Data {
+		if od == nil || core.EqualNames(name, zd.ZoneName) {
+			continue
+		}
+		if rs := od.RRtypes.GetOnlyRRSet(dns.TypeNS); len(rs.RRs) > 0 {
+			cuts = append(cuts, name)
+		}
+	}
 	for name, od := range snap.Data {
 		if od == nil {
 			continue
 		}
+		occluded, atCut := false, false
+		for _, cut := range cuts {
+			switch {
+			case core.EqualNames(name, cut):
+				atCut = true
+			case dns.IsSubDomain(cut, name):
+				occluded = true
+			}
+		}
+		if occluded {
+			continue
+		}
 		for _, rrt := range od.RRtypes.Keys() {
+			if atCut && rrt != dns.TypeDS {
+				continue
+			}
 			assertPublishedRRsetVerifies(t, zd, name, rrt)
 		}
 	}
@@ -292,6 +318,11 @@ func TestAnIxfrAdoptionSignsByTheStateOfItsBase(t *testing.T) {
 		}
 		assertPublishedAddresses(t, zd, www, wantAddrs)
 		assertEveryPublishedRRsetVerifies(t, zd)
+		// And it is recorded: the next delta onto this snapshot may take the
+		// scoped pass instead of the full one.
+		if !zd.publishedSnapshot().signed {
+			t.Error("the adopted snapshot is signed throughout but not marked so: the next delta would take the full pass")
+		}
 	}
 	// A publish that runs the full pass, as the one after a policy bind or a
 	// forced re-sign does: the snapshot it installs is signed throughout.
@@ -422,6 +453,113 @@ func TestAnIxfrAdoptionSignsByTheStateOfItsBase(t *testing.T) {
 		assertPublishedAddresses(t, zd, www, wantAddrs)
 		assertEveryPublishedRRsetVerifies(t, zd)
 	})
+}
+
+// ixfrRemovesDelegation says when a delta takes a delegation cut away: an owner
+// below the apex that held NS holds none afterwards.
+func TestIxfrRemovesDelegation(t *testing.T) {
+	zd := ixBase(t, ixDelegationZone)
+	base := zd.publishedSnapshot()
+	rm := func(rrs ...string) []dns.RR {
+		var out []dns.RR
+		for _, r := range rrs {
+			out = append(out, mustRR(t, r))
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		what           string
+		removed, added []dns.RR
+		want           bool
+	}{
+		{"the NS RRset of a cut is removed", rm("sub.example. 3600 IN NS ns.sub.example."), nil, true},
+		{"the NS RRset is replaced", rm("sub.example. 3600 IN NS ns.sub.example."), rm("sub.example. 3600 IN NS ns2.sub.example."), false},
+		{"one of two NS is removed", rm("two.example. 3600 IN NS ns1.two.example."), nil, false},
+		{"an address is added", nil, rm("www.example. 3600 IN A 10.0.0.5"), false},
+		{"a record below a cut is removed", rm("deep.sub.example. 3600 IN A 10.0.0.21"), nil, false},
+		{"a cut is added", nil, rm("www.example. 3600 IN NS ns.www.example."), false},
+		{"the apex NS changes", rm("example. 3600 IN NS ns.example."), rm("example. 3600 IN NS ns9.example."), false},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			steps, err := parseIxfrDeltas("example.", ixDeltaStream(t, 7, 8, tc.removed, tc.added), 7)
+			if err != nil {
+				t.Fatalf("parseIxfrDeltas: %v", err)
+			}
+			touched := ixfrTouchedOwners("example.", steps)
+			data, signed := materializeForIxfr(base, touched)
+			if err := applyIxfrSteps("example.", data, signed, steps); err != nil {
+				t.Fatalf("applyIxfrSteps: %v", err)
+			}
+			if got := ixfrRemovesDelegation("example.", base, data, touched); got != tc.want {
+				t.Fatalf("ixfrRemovesDelegation = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+const ixDelegationZone = `example.	3600	IN	SOA	ns.example. hostmaster.example. 7 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+www.example.	3600	IN	A	10.0.0.3
+sub.example.	3600	IN	NS	ns.sub.example.
+ns.sub.example.	3600	IN	A	10.0.0.20
+deep.sub.example.	3600	IN	A	10.0.0.21
+two.example.	3600	IN	NS	ns1.two.example.
+two.example.	3600	IN	NS	ns2.two.example.
+ns1.two.example.	3600	IN	A	10.0.0.30
+ns2.two.example.	3600	IN	A	10.0.0.31
+`
+
+// A delta that removes a delegation makes the names below the cut the zone's
+// own data. They were occluded in the base, so they were skipped when it was
+// signed and carry no signatures and no NSEC; the delta never names them, so a
+// signing pass scoped to its touched owners does not reach them. The adoption
+// takes the full pass for such a delta, and after it every name below the
+// removed cut verifies, and has an NSEC the chain reaches. A delta that leaves
+// the cuts alone keeps the scoped pass (the guard test above).
+func TestAnIxfrDeltaThatRemovesADelegationSignsTheNamesBelowIt(t *testing.T) {
+	zd := ixSigningSecondary(t, ixDelegationZone)
+	zd.IncomingSerial, zd.CurrentSerial = 7, 7
+	below := []string{"ns.sub.example.", "deep.sub.example."}
+	for _, name := range below {
+		od := getOwnerFrom(zd.publishedSnapshot(), name)
+		if od == nil || len(od.RRtypes.GetOnlyRRSet(dns.TypeA).RRSIGs) != 0 {
+			t.Fatalf("precondition: %s should be occluded and unsigned in the base", name)
+		}
+	}
+	if !zd.publishedSnapshot().signed {
+		t.Fatal("precondition: the base is not marked signed")
+	}
+
+	incoming := newTransferScratchZone(zd)
+	delta := ixDeltaStream(t, 7, 8, []dns.RR{mustRR(t, "sub.example. 3600 IN NS ns.sub.example.")}, nil)
+	if err := zd.applyIxfrToScratch(&incoming, delta); err != nil {
+		t.Fatalf("applyIxfrToScratch refused the delta: %v", err)
+	}
+	if incoming.baseSigned {
+		t.Error("a delta that removes a delegation was left on the scoped pass")
+	}
+	zd.mu.Lock()
+	err := zd.applyRefreshReplacementLocked(&incoming, nil, false, false)
+	zd.mu.Unlock()
+	if err != nil {
+		t.Fatalf("applyRefreshReplacementLocked: %v", err)
+	}
+
+	assertEveryPublishedRRsetVerifies(t, zd)
+	for _, name := range below {
+		od := getOwnerFrom(zd.publishedSnapshot(), name)
+		if od == nil {
+			t.Fatalf("%s is gone from the published zone", name)
+		}
+		if len(od.NSEC.RRs) == 0 || len(od.NSEC.RRSIGs) == 0 {
+			t.Errorf("%s is authoritative now and has no signed NSEC (%d records, %d signatures)",
+				name, len(od.NSEC.RRs), len(od.NSEC.RRSIGs))
+		}
+	}
+	if !zd.publishedSnapshot().signed {
+		t.Error("the adopted snapshot is signed throughout but not marked so")
+	}
 }
 
 // The dynamic RRsets are collected before the callbacks run. A callback that

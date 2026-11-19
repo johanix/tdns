@@ -666,7 +666,12 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// blast radius that does not belong inside a signing fix. The whole-zone
 	// walk that SignZone drives IS cancellable now, which is the unbounded one
 	// an operator waits on.
-	fullPass := zd.wsNeedsFullSign // cleared below, and wanted at the install
+	// Both cleared below, and wanted at the install. A scoped staging is only
+	// ever made for a delta adopted on a base that is signed throughout
+	// (applyRefreshReplacementLocked), so the owners it leaves alone are signed
+	// and what it signs completes the zone.
+	fullPass := zd.wsNeedsFullSign
+	scoped := zd.wsSignOwners != nil
 	if err := zd.signStagedScopeLocked(context.Background(), sm); err != nil {
 		zd.refuseUnsignableWorkingSetLocked(prevSerial, err)
 		return
@@ -881,11 +886,12 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 
 	snap := zd.buildSnapshotLocked(serial, data, zd.wsSignalSynth)
 	snap.prepareDenialIndex()
-	// Signed throughout if this publish could sign and either ran the full pass
-	// or extended a snapshot that already was (an incremental change signs what
-	// it stages). A publish that could not sign leaves the content unsigned.
-	// Set before the store: the snapshot carries it from then on.
-	snap.signed = sm != nil && (fullPass || (oldSnap != nil && oldSnap.signed))
+	// Signed throughout if this publish could sign and either ran the full pass,
+	// completed a scoped one on a signed base, or extended a snapshot that
+	// already was (an incremental change signs what it stages). A publish that
+	// could not sign leaves the content unsigned. Set before the store: the
+	// snapshot carries it from then on.
+	snap.signed = sm != nil && (fullPass || scoped || (oldSnap != nil && oldSnap.signed))
 	zd.snapshot.Store(snap)
 
 	zd.workingSet = nil
@@ -1396,19 +1402,27 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	//
 	//   role now      base signed   pass                                      signed throughout after
 	//   not signing   any           none: the publish cannot sign             no
-	//   signing       yes           scoped: the touched owners, forced; the   yes
-	//                               rest keep the base's signatures
+	//   signing       yes, and the  scoped: the touched owners, forced; the   yes
+	//                 delta removes rest keep the base's signatures
+	//                 no delegation
 	//   signing       no            full, unforced, over every owner, then    yes
 	//                               the touched owners again, forced (an
 	//                               unmarked base may hold signatures of ours
 	//                               from before the zone was switched off,
 	//                               over contents a delta changed)
+	//   signing       the delta     as the row above: the names below a cut   yes
+	//                 removes a     the delta removes were occluded in the
+	//                 delegation    base and carry none, they become
+	//                               authoritative without being named, and a
+	//                               scope of the touched owners would not
+	//                               reach them (baseSigned is false then)
 	//   (a whole zone, AXFR or file)  full, unforced                           yes
 	//   (an incremental change)       signs what it stages                    only if it extends a signed snapshot
 	//
 	// "Signed throughout after" is what publishWorkingSetLocked records in the
 	// snapshot it installs: the publish could sign (resolved signing material),
-	// and ran the full pass or extended a snapshot that was signed. A publish
+	// and ran the full pass, completed a scoped one (which only a signed base
+	// gets), or extended a snapshot that was signed. A publish
 	// that cannot sign, or any snapshot nobody has marked, counts as not signed;
 	// that is the safe direction, and costs one full pass. SignZone, which
 	// signs the whole working set itself and publishes without the full-pass

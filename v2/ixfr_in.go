@@ -218,6 +218,36 @@ func ixfrTouchedOwners(zoneName string, steps []ixfrStep) map[string]bool {
 	return touched
 }
 
+// ixfrRemovesDelegation reports whether a delta took away a delegation cut: an
+// owner below the apex that held an NS RRset in the base holds none once the
+// delta is applied. The names below such a cut stop being occluded and become
+// the zone's own data, which a signing pass scoped to the delta's touched owners
+// does not reach, since the delta never names them; and they were skipped when
+// the base was signed, so they carry no signatures. A delta that changes an NS
+// RRset and leaves it non-empty keeps the cut.
+//
+// Only the touched owners are asked: a cut that goes is one whose NS the delta
+// removed, so its owner is among them.
+func ixfrRemovesDelegation(zoneName string, base *zoneSnapshot, after *core.NameMap[OwnerData], touched map[string]bool) bool {
+	hasNS := func(od *OwnerData) bool {
+		if od == nil {
+			return false
+		}
+		rs, ok := od.RRtypes.Get(dns.TypeNS)
+		return ok && len(rs.RRs) > 0
+	}
+	for name := range touched {
+		if core.EqualNames(name, zoneName) || !hasNS(getOwnerFrom(base, name)) {
+			continue
+		}
+		nod, ok := after.Get(name)
+		if !ok || !hasNS(&nod) {
+			return true
+		}
+	}
+	return false
+}
+
 // materializeForIxfr copies the published snapshot into a fresh owner map that
 // the delta can be applied to, and reports which RRsets were signed.
 //
@@ -758,10 +788,13 @@ func (zd *ZoneData) applyIxfrToScratch(newZd *ZoneData, rrs []dns.RR) error {
 	}
 
 	newZd.Data = data
-	// Whether the snapshot this delta was built on is signed throughout, taken
-	// with that snapshot: what the adoption may assume about the owners the
-	// delta did not touch, which it shares with it.
-	newZd.baseSigned = snap.signed
+	// Whether the owners this delta shares with the snapshot it was built on
+	// carry signatures that still hold, taken with that snapshot: what the
+	// adoption may assume about the owners the delta did not touch. The base
+	// being signed throughout is not enough when the delta removes a delegation:
+	// the names below the cut were occluded in the base, so they carry none, and
+	// they become authoritative without the delta mentioning them.
+	newZd.baseSigned = snap.signed && !ixfrRemovesDelegation(zd.ZoneName, snap, data, touched)
 	newZd.IncomingSerial = target
 	newZd.CurrentSerial = target
 	// This replacement is a delta applied to what we already served, not a
