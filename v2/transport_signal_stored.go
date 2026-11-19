@@ -427,16 +427,70 @@ func (kdb *KeyDB) DeleteTransportSignalStoredOwner(zone, owner string) error {
 	return nil
 }
 
-// DeleteTransportSignalStored drops a zone's records, used when the zone is
-// removed.
-func (kdb *KeyDB) DeleteTransportSignalStored(zone string) error {
+// TransportSignalStoredRow is one owner's record as the table keeps it:
+// what TakeTransportSignalStored drops and RestoreTransportSignalStored puts
+// back.
+type TransportSignalStoredRow struct {
+	Owner   string
+	Digest  string
+	Earlier string
+}
+
+// TakeTransportSignalStored drops a zone's records, used when the zone is
+// removed, and returns them, so that a removal that fails later can put
+// them back as they were (RestoreTransportSignalStored). They are read and
+// dropped under the one lock every writer of the table takes, so no record
+// written in between is dropped without being returned.
+func (kdb *KeyDB) TakeTransportSignalStored(zone string) ([]TransportSignalStoredRow, error) {
 	if kdb == nil || kdb.DB == nil {
-		return fmt.Errorf("DeleteTransportSignalStored: no database")
+		return nil, fmt.Errorf("TakeTransportSignalStored: no database")
 	}
+	zone = core.CanonicalizeName(dns.Fqdn(zone))
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
-	if _, err := kdb.DB.Exec(`DELETE FROM TransportSignalStored WHERE zone=?`, core.CanonicalizeName(dns.Fqdn(zone))); err != nil {
-		return fmt.Errorf("DeleteTransportSignalStored: %v", err)
+	rows, err := kdb.DB.Query(`SELECT owner, digest, earlier FROM TransportSignalStored WHERE zone=?`, zone)
+	if err != nil {
+		return nil, fmt.Errorf("TakeTransportSignalStored: zone %s: %v", zone, err)
+	}
+	defer rows.Close()
+	var taken []TransportSignalStoredRow
+	for rows.Next() {
+		var r TransportSignalStoredRow
+		if err := rows.Scan(&r.Owner, &r.Digest, &r.Earlier); err != nil {
+			return nil, fmt.Errorf("TakeTransportSignalStored: zone %s: %v", zone, err)
+		}
+		taken = append(taken, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("TakeTransportSignalStored: zone %s: %v", zone, err)
+	}
+	rows.Close()
+	if _, err := kdb.DB.Exec(`DELETE FROM TransportSignalStored WHERE zone=?`, zone); err != nil {
+		return nil, fmt.Errorf("TakeTransportSignalStored: zone %s: %v", zone, err)
+	}
+	return taken, nil
+}
+
+// RestoreTransportSignalStored puts back the records TakeTransportSignalStored
+// dropped, in one statement, so either all of them are back or none is.
+func (kdb *KeyDB) RestoreTransportSignalStored(zone string, taken []TransportSignalStoredRow) error {
+	if len(taken) == 0 {
+		return nil
+	}
+	if kdb == nil || kdb.DB == nil {
+		return fmt.Errorf("RestoreTransportSignalStored: no database")
+	}
+	zone = core.CanonicalizeName(dns.Fqdn(zone))
+	args := make([]any, 0, 4*len(taken))
+	for _, r := range taken {
+		args = append(args, zone, r.Owner, r.Digest, r.Earlier)
+	}
+	q := `INSERT OR REPLACE INTO TransportSignalStored (zone, owner, digest, earlier, updated_at) VALUES ` +
+		strings.TrimSuffix(strings.Repeat("(?, ?, ?, ?, CURRENT_TIMESTAMP), ", len(taken)), ", ")
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+	if _, err := kdb.DB.Exec(q, args...); err != nil {
+		return fmt.Errorf("RestoreTransportSignalStored: zone %s: %v", zone, err)
 	}
 	return nil
 }

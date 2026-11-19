@@ -1,6 +1,8 @@
 package tdns
 
 import (
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -89,6 +91,54 @@ BEGIN SELECT RAISE(ABORT, 'delete refused by the test'); END`); err != nil {
 	}
 	if n := storedSignalRows(t, kdb, zd.ZoneName); n != 0 {
 		t.Errorf("the stored-signal record outlived the zone (%d rows)", n)
+	}
+}
+
+// A delete whose dynamic config rewrite fails leaves the zone to come back
+// on restart, from a zone file that can still hold the signals the pass
+// stored. The record of them is put back as it was, every owner and every
+// digest: without it the pass would take those signals for the operator's.
+func TestADeleteWhoseConfigRewriteFailsKeepsTheSignalRecord(t *testing.T) {
+	conf, kdb, zd := removalFixture(t)
+	z := zd.ZoneName
+	want := map[string][]string{
+		"_dns.ns1." + z: {"d3", "d2", "d1"},
+		"_dns.ns2." + z: {"e1"},
+	}
+	for owner, digests := range want {
+		if err := kdb.SetTransportSignalStored(z, owner, digests); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory that does not exist: the rewrite cannot create its file.
+	conf.DynamicZones.ConfigFile = filepath.Join(t.TempDir(), "missing", "dynamic.yaml")
+
+	if _, err := conf.RemoveDynamicZone(z); err == nil || !strings.Contains(err.Error(), "will reappear on restart") {
+		t.Fatalf("the delete with a failed config rewrite returned %v", err)
+	}
+	for owner, digests := range want {
+		got, ok, err := kdb.GetTransportSignalStored(z, owner)
+		if err != nil || !ok || !slices.Equal(got, digests) {
+			t.Errorf("after the failed rewrite the record at %s is %v (present %v, error %v), want %v", owner, got, ok, err, digests)
+		}
+	}
+	if n := storedSignalRows(t, kdb, z); n != len(want) {
+		t.Errorf("after the failed rewrite the zone has %d stored-signal rows, want %d", n, len(want))
+	}
+}
+
+// When the record cannot be put back either, the error says so: after the
+// restart the pass takes the zone file's signal for the operator's.
+func TestADeleteWhoseRecordCannotBePutBackSaysSo(t *testing.T) {
+	conf, kdb, zd := removalFixture(t)
+	conf.DynamicZones.ConfigFile = filepath.Join(t.TempDir(), "missing", "dynamic.yaml")
+	if _, err := kdb.DB.Exec(`CREATE TRIGGER refuse_insert BEFORE INSERT ON TransportSignalStored
+BEGIN SELECT RAISE(ABORT, 'insert refused by the test'); END`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := conf.RemoveDynamicZone(zd.ZoneName)
+	if err == nil || !strings.Contains(err.Error(), "will reappear on restart") || !strings.Contains(err.Error(), "could not be put back") {
+		t.Fatalf("the delete whose record could not be put back returned %v", err)
 	}
 }
 

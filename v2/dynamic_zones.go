@@ -1153,7 +1153,10 @@ func (conf *Config) enqueueRefresh(ctx context.Context, zr ZoneRefresher) error 
 // that no pass of the zone records anything after it. When the KeyDB cannot
 // drop it, nothing is removed and the delete fails: a zone created later
 // under the same name would take records that match the old record for the
-// pass's own (CodeRabbit on #1118).
+// pass's own (CodeRabbit on #1118). When the dynamic config cannot be
+// rewritten afterwards, the zone comes back on restart, from a zone file
+// that can hold the signal the pass stored, so the record is put back: the
+// pass would take that signal for the operator's without it.
 func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	name = core.CanonicalizeName(dns.Fqdn(name))
 	templateApplyMu.Lock()
@@ -1171,8 +1174,10 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	zd.mu.Lock()
 	zd.signalPassRetired = true
 	zd.mu.Unlock()
+	var signalRecord []TransportSignalStoredRow
 	if conf.Internal.KeyDB != nil {
-		if err := conf.Internal.KeyDB.DeleteTransportSignalStored(name); err != nil {
+		var err error
+		if signalRecord, err = conf.Internal.KeyDB.TakeTransportSignalStored(name); err != nil {
 			zd.mu.Lock()
 			zd.signalPassRetired = false
 			zd.mu.Unlock()
@@ -1202,6 +1207,9 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	// zone is gone from memory but the stale config entry would resurrect it on
 	// restart — that's a failed delete, not a success.
 	if err := conf.RemoveDynamicZoneFromConfig(name); err != nil {
+		if rerr := conf.Internal.KeyDB.RestoreTransportSignalStored(name, signalRecord); rerr != nil {
+			return "", fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w; the record of what the transport signal pass stored could not be put back either, so after the restart the pass takes a signal it stored in the zone file for the operator's: %v", name, err, rerr)
+		}
 		return "", fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w", name, err)
 	}
 	// The zone has now left the dynamic config file, so the signal-name orphan
