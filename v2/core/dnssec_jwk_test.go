@@ -251,6 +251,19 @@ func TestJSONWebKeyRejects(t *testing.T) {
 		{"AKP no pub", jsonOf("AKP ML-DSA-44", func(m map[string]any) { delete(m, "pub") }), ErrJWKMissingMember},
 		{"AKP pub of another set", jsonOf("AKP ML-DSA-44", func(m map[string]any) { m["alg"] = "ML-DSA-65" }), ErrJWKBadKeySize},
 		{"AKP expanded priv", jsonOf("AKP ML-DSA-44", func(m map[string]any) { m["priv"] = b64(fill(2560, 1)) }), ErrJWKBadKeySize},
+		{"line feed in a member", jsonOf("OKP Ed25519", func(m map[string]any) {
+			x := m["x"].(string)
+			m["x"] = x[:10] + "\n" + x[10:]
+		}), ErrJWKBadBase64},
+		{"carriage return in a member", jsonOf("OKP Ed25519", func(m map[string]any) {
+			x := m["x"].(string)
+			m["x"] = x + "\r"
+		}), ErrJWKBadBase64},
+		{"RSA e with a leading zero", jsonOf("RSA", func(m map[string]any) { m["e"] = "AAEAAQ" }), ErrJWKNotMinimal},
+		{"RSA n with a leading zero", jsonOf("RSA", func(m map[string]any) {
+			n, _ := b64url.DecodeString(m["n"].(string))
+			m["n"] = b64(append([]byte{0}, n...))
+		}), ErrJWKNotMinimal},
 		{"RSA no n", jsonOf("RSA", func(m map[string]any) { delete(m, "n") }), ErrJWKMissingMember},
 		{"RSA no e", jsonOf("RSA", func(m map[string]any) { delete(m, "e") }), ErrJWKMissingMember},
 		{"RSA oth", jsonOf("RSA", func(m map[string]any) { m["oth"] = []any{} }), ErrJWKRSAOth},
@@ -276,6 +289,101 @@ func TestJSONWebKeyRejects(t *testing.T) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestJSONWebKeyMarshalValue: json.Marshal of a JSONWebKey or a
+// JSONWebKeySet value (not a pointer) must write the wire format too.
+func TestJSONWebKeyMarshalValue(t *testing.T) {
+	k := testKeys(t)["OKP Ed25519"]
+	b, err := json.Marshal(*k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseJSONWebKey(b); err != nil {
+		t.Errorf("key value marshalled as %s, which does not parse: %v", b, err)
+	}
+	sb, err := json.Marshal(JSONWebKeySet{Keys: []*JSONWebKey{k}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseJSONWebKeySet(sb); err != nil {
+		t.Errorf("set value marshalled as %s, which does not parse: %v", sb, err)
+	}
+	if eb, _ := json.Marshal(JSONWebKeySet{}); string(eb) != `{"keys":[]}` {
+		t.Errorf("empty set value = %s", eb)
+	}
+}
+
+func TestJSONWebKeySetMarshalNilKey(t *testing.T) {
+	set := &JSONWebKeySet{Keys: []*JSONWebKey{testKeys(t)["EC P-256"], nil}}
+	_, err := json.Marshal(set)
+	if !errors.Is(err, ErrJWKSetMalformed) || !strings.Contains(err.Error(), "keys[1]") {
+		t.Errorf("nil key in a set: err = %v, want ErrJWKSetMalformed naming keys[1]", err)
+	}
+}
+
+// TestJSONWebKeyStrayPrivateMember: a member that belongs to another key
+// type must not make a public key look private. An Ed25519 JWK with a
+// stray RSA "p" and no "d" used to reach ed25519.NewKeyFromSeed(nil),
+// which panics.
+func TestJSONWebKeyStrayPrivateMember(t *testing.T) {
+	x := b64(testKeys(t)["OKP Ed25519"].X)
+	k, err := ParseJSONWebKey([]byte(`{"kty":"OKP","crv":"Ed25519","x":"` + x + `","p":"AQ"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k.IsPrivate() {
+		t.Error("Ed25519 key with only a stray RSA member reports IsPrivate")
+	}
+	if _, err := k.PrivateKey(); !errors.Is(err, ErrJWKMissingMember) {
+		t.Errorf("PrivateKey: err = %v, want ErrJWKMissingMember", err)
+	}
+	// The same key with its own "d" is still private and converts.
+	priv := testKeys(t)["OKP Ed25519"]
+	if !priv.IsPrivate() {
+		t.Error("Ed25519 key with d is not private")
+	}
+	if _, err := priv.PrivateKey(); err != nil {
+		t.Errorf("Ed25519 PrivateKey: %v", err)
+	}
+}
+
+func TestJSONWebKeyRSAEvenModulus(t *testing.T) {
+	k := &JSONWebKey{Kty: JWKKtyRSA, N: fill(256, 0xFE), E: []byte{1, 0, 1}}
+	if err := k.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if _, err := k.PublicKey(); !errors.Is(err, ErrJWKInvalidPublicKey) {
+		t.Errorf("even modulus: err = %v, want ErrJWKInvalidPublicKey", err)
+	}
+}
+
+// TestJSONWebKeyFromRSAWithoutCRT: an RSA key with no cached CRT values
+// exports when they can be computed and is refused, not panicked on, when
+// they cannot (Precompute has no way to report that).
+func TestJSONWebKeyFromRSAWithoutCRT(t *testing.T) {
+	rk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh := func(d *big.Int) *rsa.PrivateKey {
+		return &rsa.PrivateKey{PublicKey: rk.PublicKey, D: d, Primes: rk.Primes}
+	}
+	k, err := NewJSONWebKeyFromPrivate(fresh(rk.D))
+	if err != nil {
+		t.Fatalf("valid key without cached CRT values: %v", err)
+	}
+	if len(k.DP) == 0 || len(k.DQ) == 0 || len(k.QI) == 0 {
+		t.Error("CRT members not filled in")
+	}
+	for name, bad := range map[string]*rsa.PrivateKey{
+		"D does not fit the primes": fresh(big.NewInt(1)),
+		"no D":                      fresh(nil),
+	} {
+		if _, err := NewJSONWebKeyFromPrivate(bad); !errors.Is(err, ErrJWKInvalidPrivateKey) {
+			t.Errorf("%s: err = %v, want ErrJWKInvalidPrivateKey", name, err)
+		}
 	}
 }
 
