@@ -144,8 +144,9 @@ func TestAProxyCompareClearsOutOfStepOnlyWhenItReachedTheParent(t *testing.T) {
 // explicit sync's is; otherwise the parent is in step only when the compare
 // compared the DS and found it in sync, or the send was one the parent said it
 // applied, UPDATE or API. And what a proxy sync records (noteProxySyncForwarded):
-// in step after an UPDATE or API, out of step when nothing was forwarded, and
-// the mark left as it was after a NOTIFY (CodeRabbit on bb87c26b).
+// in step after an UPDATE or API, and out of step when nothing was forwarded
+// or it went by NOTIFY, whatever the mark was (CodeRabbit on bb87c26b and
+// 4d398b97). A proxy compare that sent by NOTIFY marks the parent too.
 func TestAProxyCompareOrSyncCountsOnlyWhatTheParentApplied(t *testing.T) {
 	complete := DelegationSyncStatus{dsCompared: true}
 	unread := DelegationSyncStatus{dsCompared: true, Unread: []string{"ns1 A"}}
@@ -163,9 +164,14 @@ func TestAProxyCompareOrSyncCountsOnlyWhatTheParentApplied(t *testing.T) {
 		{"found in sync without all of the glue", unread, "", false, true},
 		{"sent without all of the glue", unread, "UPDATE", false, true},
 	} {
-		inStep, err := proxyCompareOutcome(c.dss, c.scheme)
+		cmp := &ZoneData{ZoneName: "child.test."}
+		inStep, err := cmp.proxyCompareOutcome(c.dss, c.scheme)
 		if inStep != c.inStep || errors.Is(err, errDelegationNotAllRead) != c.unread || (err != nil && !c.unread) {
 			t.Errorf("%s: in step %v, err %v; want in step %v, not-all-read %v", c.name, inStep, err, c.inStep, c.unread)
+		}
+		// From a clear mark: only a NOTIFY sets it.
+		if got := cmp.delegationOutOfStep.Load(); got != (c.scheme == "NOTIFY") {
+			t.Errorf("%s: from a clear mark, marked out of step %v, want %v", c.name, got, c.scheme == "NOTIFY")
 		}
 	}
 
@@ -175,7 +181,7 @@ func TestAProxyCompareOrSyncCountsOnlyWhatTheParentApplied(t *testing.T) {
 		before, want bool
 	}{
 		{"UPDATE", true, false}, {"API", true, false}, {"", false, true},
-		{"NOTIFY", true, true}, {"NOTIFY", false, false},
+		{"NOTIFY", true, true}, {"NOTIFY", false, true},
 	} {
 		zd.delegationOutOfStep.Store(c.before)
 		zd.noteProxySyncForwarded(c.scheme)

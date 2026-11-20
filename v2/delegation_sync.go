@@ -87,8 +87,8 @@ func (kdb *KeyDB) handleDelegationSyncRequest(ctx context.Context, delsyncq chan
 				_, err := zd.ResolveParentVia(imr())
 				return err
 			},
-			sync: func(dss DelegationSyncStatus) (string, uint8, UpdateResult, error) {
-				return zd.SyncZoneDelegation(ctx, kdb, notifyq, dss, imr())
+			sync: func(dss DelegationSyncStatus) (string, uint8, UpdateResult, string, error) {
+				return zd.syncZoneDelegationVia(ctx, kdb, notifyq, dss, imr())
 			},
 			requeue: func(next DelegationSyncRequest, delay time.Duration) {
 				requeueLookAfter(ctx, delsyncq, next, delay)
@@ -1003,11 +1003,27 @@ func (zd *ZoneData) noteDelegationSyncNotSent() {
 	}
 }
 
+// noteDelegationSyncSentBy records what a send that succeeded says about the
+// parent, by the scheme that carried it. A NOTIFY's success says only that
+// the notifier took it: the parent has yet to come and read the zone, and may
+// never, so it is marked as possibly lacking the change (delegationOutOfStep)
+// until a compare finds it in step. Otherwise a later stored change could go
+// as a difference by UPDATE -- the plan falls back to it when a NOTIFY cannot
+// be handed off -- and leave out what the parent never read. An UPDATE's or
+// an API call's success says the parent applied this change, and nothing
+// about earlier ones, so it leaves the mark as it is: the callers that know
+// more clear it (inStepAfter, noteProxySyncForwarded).
+func (zd *ZoneData) noteDelegationSyncSentBy(scheme string) {
+	if zd != nil && scheme == "NOTIFY" {
+		zd.delegationOutOfStep.Store(true)
+	}
+}
+
 // syncDelegationSteps are the parts of the SYNC-DELEGATION arm that talk to
 // the parent, passed in so a test can stand in for them.
 type syncDelegationSteps struct {
 	resolve func() error
-	sync    func(DelegationSyncStatus) (string, uint8, UpdateResult, error)
+	sync    func(DelegationSyncStatus) (string, uint8, UpdateResult, string, error)
 	requeue func(next DelegationSyncRequest, delay time.Duration)
 }
 
@@ -1032,7 +1048,7 @@ func handleSyncDelegationWith(ds DelegationSyncRequest, steps syncDelegationStep
 		lookAgainLater(ds, "find the parent", err, steps.requeue)
 		return
 	}
-	msg, rcode, _, err := steps.sync(dss)
+	msg, rcode, _, scheme, err := steps.sync(dss)
 	if errors.Is(err, ErrNoUsableDsync) {
 		// Not a failure: warned about once (planUsable), and nothing to retry
 		// through. But the parent lacks the change now.
@@ -1044,7 +1060,11 @@ func handleSyncDelegationWith(ds DelegationSyncRequest, steps syncDelegationStep
 		lookAgainLater(ds, "send", err, steps.requeue)
 		return
 	}
-	lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
+	// A success does not say the parent holds earlier changes; a NOTIFY's
+	// does not even say it has this one.
+	ds.ZoneData.noteDelegationSyncSentBy(scheme)
+	lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg,
+		"rcode", dns.RcodeToString[int(rcode)], "scheme", scheme)
 }
 
 // lookAgainLater retries ds, a stored change whose send failed, as a compare
@@ -1103,14 +1123,16 @@ func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan Notif
 // declares the whole delegation and takes its withdrawals from the parent as
 // well, so one the parent applied -- an UPDATE or an API call -- leaves it in
 // step. One that did not reach it leaves the parent without the change. A
-// NOTIFY the notifier took leaves the mark as it was, as a stored change sent
-// that way does: the parent has yet to come and read the zone.
+// NOTIFY the notifier took marks it too, as every NOTIFY does: the parent has
+// yet to come and read the zone (noteDelegationSyncSentBy).
 func (zd *ZoneData) noteProxySyncForwarded(scheme string) {
 	switch scheme {
 	case "UPDATE", "API":
 		zd.noteDelegationSyncInStep()
 	case "":
 		zd.noteDelegationSyncNotSent()
+	default:
+		zd.noteDelegationSyncSentBy(scheme)
 	}
 }
 
@@ -1488,6 +1510,8 @@ func (zd *ZoneData) runExplicitSyncWith(analyse func() (DelegationSyncStatus, er
 			"rcode", dns.RcodeToString[int(rcode)], "scheme", scheme)
 		if syncstate.inStepAfter(scheme) {
 			zd.noteDelegationSyncInStep()
+		} else {
+			zd.noteDelegationSyncSentBy(scheme)
 		}
 	}
 	syncstate.Msg = msg
@@ -1501,7 +1525,8 @@ func (zd *ZoneData) runExplicitSyncWith(analyse func() (DelegationSyncStatus, er
 // (Complete) and compared the DS (dsCompared: not while a rollover owns it).
 // A send counts only when the parent said it applied it: an UPDATE or an API
 // call. A NOTIFY's success says the notifier took it; the parent has yet to
-// come and read it, and a compare that finds it in step will say so.
+// come and read it, so it marks the parent instead (noteDelegationSyncSentBy),
+// and a compare that finds it in step will clear that.
 func (dss DelegationSyncStatus) inStepAfter(scheme string) bool {
 	if !dss.Complete() || !dss.dsCompared {
 		return false

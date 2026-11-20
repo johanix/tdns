@@ -660,7 +660,7 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 	}
 	if dss.InSync {
 		lgDns.Info("parentsync-proxy: startup reconcile — parent already in sync", "zone", zd.ZoneName)
-		inStep, err = proxyCompareOutcome(dss, "")
+		inStep, err = zd.proxyCompareOutcome(dss, "")
 		return "startup reconcile: parent already in sync; nothing sent", inStep, err
 	}
 
@@ -675,15 +675,17 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 	if serr != nil {
 		return "", false, fmt.Errorf("ProxyStartupReconcile: %w", serr)
 	}
-	inStep, err = proxyCompareOutcome(dss, scheme)
+	inStep, err = zd.proxyCompareOutcome(dss, scheme)
 	return "startup reconcile: " + msg, inStep, err
 }
 
 // proxyCompareOutcome is what a proxy compare that found dss, and sent by
 // scheme ("" for nothing sent), reports: whether the parent is known to hold
 // the whole delegation (inStepAfter), or errDelegationNotAllRead when the
-// compare could not read all of it, so that it is retried.
-func proxyCompareOutcome(dss DelegationSyncStatus, scheme string) (inStep bool, err error) {
+// compare could not read all of it, so that it is retried. A send by NOTIFY
+// marks the parent as possibly lacking it (noteDelegationSyncSentBy).
+func (zd *ZoneData) proxyCompareOutcome(dss DelegationSyncStatus, scheme string) (inStep bool, err error) {
+	zd.noteDelegationSyncSentBy(scheme)
 	if !dss.Complete() {
 		return false, fmt.Errorf("%w: %v", errDelegationNotAllRead, dss.Unread)
 	}

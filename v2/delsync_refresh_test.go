@@ -190,6 +190,14 @@ type armRecord struct {
 func runArm(t *testing.T, zd *ZoneData, ds DelegationSyncRequest,
 	analyse func() (DelegationSyncStatus, error), syncErr error) *armRecord {
 	t.Helper()
+	return runArmBy(t, zd, ds, analyse, "", syncErr)
+}
+
+// runArmBy is runArm with a send that reports scheme as the one that carried
+// the difference.
+func runArmBy(t *testing.T, zd *ZoneData, ds DelegationSyncRequest,
+	analyse func() (DelegationSyncStatus, error), scheme string, syncErr error) *armRecord {
+	t.Helper()
 	rec := &armRecord{}
 	ready := NewImrReadiness()
 	ready.Publish()
@@ -198,9 +206,9 @@ func runArm(t *testing.T, zd *ZoneData, ds DelegationSyncRequest,
 			rec.analyses++
 			return analyse()
 		},
-		sync: func(dss DelegationSyncStatus) (string, uint8, UpdateResult, error) {
+		sync: func(dss DelegationSyncStatus) (string, uint8, UpdateResult, string, error) {
 			rec.synced = append(rec.synced, dss)
-			return "sent", dns.RcodeSuccess, UpdateResult{}, syncErr
+			return "sent", dns.RcodeSuccess, UpdateResult{}, scheme, syncErr
 		},
 		requeue: func(next DelegationSyncRequest, delay time.Duration) {
 			rec.requeued = append(rec.requeued, next)
@@ -676,6 +684,29 @@ func TestARefreshSyncWithNoUsableSchemeMarksTheParent(t *testing.T) {
 	}
 	if !zd.delegationOutOfStep.Load() {
 		t.Error("a difference not sent for want of a usable scheme left the parent marked in step")
+	}
+}
+
+// A refresh sync whose difference went by NOTIFY marks the parent: the
+// notifier took it, and the parent has yet to come and read the zone. One sent
+// by UPDATE or API leaves the mark as it was (CodeRabbit on 4d398b97).
+func TestARefreshSyncByNotifyMarksTheParent(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	zd := childZone(t, ddcngServedZone(), OptParentSync)
+	for _, c := range []struct {
+		scheme string
+		mark   bool
+	}{{"NOTIFY", true}, {"UPDATE", false}, {"API", false}} {
+		zd.delegationOutOfStep.Store(false)
+		rec := runArmBy(t, zd, refreshRequest(zd), func() (DelegationSyncStatus, error) {
+			return DelegationSyncStatus{ZoneName: zd.ZoneName}, nil
+		}, c.scheme, nil)
+		if len(rec.synced) != 1 || len(rec.requeued) != 0 {
+			t.Fatalf("%s: %d sends and %d retries, want 1 and 0", c.scheme, len(rec.synced), len(rec.requeued))
+		}
+		if got := zd.delegationOutOfStep.Load(); got != c.mark {
+			t.Errorf("a refresh sync sent by %s: marked out of step %v, want %v", c.scheme, got, c.mark)
+		}
 	}
 }
 

@@ -202,7 +202,8 @@ func TestAStoredChangeIsSentOnlyWhenItStartsAtOnce(t *testing.T) {
 // difference assumes. It is retried as a compare with the parent, after the
 // first retry wait. A parent that offers no usable scheme is not a failure and
 // leaves nothing to retry, but marks the parent out of step; a success leaves
-// nothing to retry.
+// nothing to retry, and marks the parent only when it went by NOTIFY, which
+// the parent has yet to act on.
 func TestAFailedStoredChangeIsRetriedAsACompare(t *testing.T) {
 	zd := laneZone("failed.down.example.", "down.example.")
 	ds := laneRequest(zd, "SYNC-DELEGATION")
@@ -212,12 +213,13 @@ func TestAFailedStoredChangeIsRetriedAsACompare(t *testing.T) {
 		ds    DelegationSyncRequest
 		delay time.Duration
 	}
+	scheme := ""
 	run := func(resolveErr, syncErr error) (sent int, out []requeue) {
 		handleSyncDelegationWith(ds, syncDelegationSteps{
 			resolve: func() error { return resolveErr },
-			sync: func(DelegationSyncStatus) (string, uint8, UpdateResult, error) {
+			sync: func(DelegationSyncStatus) (string, uint8, UpdateResult, string, error) {
 				sent++
-				return "", 0, UpdateResult{}, syncErr
+				return "", 0, UpdateResult{}, scheme, syncErr
 			},
 			requeue: func(next DelegationSyncRequest, delay time.Duration) {
 				out = append(out, requeue{next, delay})
@@ -252,17 +254,21 @@ func TestAFailedStoredChangeIsRetriedAsACompare(t *testing.T) {
 	// success leaves the mark as it was: a difference brings the parent this
 	// change, not what it may have missed.
 	for _, c := range []struct {
-		err  error
-		mark bool
-	}{{ErrNoUsableDsync, true}, {nil, false}} {
+		err    error
+		scheme string
+		mark   bool
+	}{{ErrNoUsableDsync, "", true}, {nil, "UPDATE", false}, {nil, "API", false}, {nil, "NOTIFY", true}} {
 		zd.delegationOutOfStep.Store(false)
+		scheme = c.scheme
 		if _, out := run(nil, c.err); len(out) != 0 {
-			t.Errorf("a send that returned %v was retried", c.err)
+			t.Errorf("a send that returned %v by %q was retried", c.err, c.scheme)
 		}
 		if got := zd.delegationOutOfStep.Load(); got != c.mark {
-			t.Errorf("a send that returned %v left the parent marked out of step %v, want %v", c.err, got, c.mark)
+			t.Errorf("a send that returned %v by %q left the parent marked out of step %v, want %v",
+				c.err, c.scheme, got, c.mark)
 		}
 	}
+	scheme = ""
 
 	// The proxy's stored change is retried as the proxy's compare.
 	var out []requeue
@@ -347,7 +353,8 @@ func TestACompareNobodyWaitsOnIsRetriedUntilTheParentAnswers(t *testing.T) {
 // all it asked, compared the DS (not while a rollover owns it), and found the
 // parent in step or sent the difference by a scheme whose success says the
 // parent applied it, UPDATE or API. A NOTIFY's success says only that the
-// notifier took it (CodeRabbit on bb87c26b). One that cannot send because the
+// notifier took it, so it marks the parent, whatever the mark was (CodeRabbit
+// on bb87c26b and 4d398b97). One that cannot send because the
 // parent offers no usable scheme answers with no error and is not retried,
 // even after an incomplete read, but marks the parent out of step, so the next
 // change goes as a compare (re-review 4, F6; CodeRabbit on bb87c26b).
@@ -378,6 +385,8 @@ func TestAnExplicitSyncClearsTheMarkOnlyWhenTheParentHoldsItAll(t *testing.T) {
 		{"a difference sent by UPDATE", true, differs, "UPDATE", nil, false, false},
 		{"a difference sent by API", true, differs, "API", nil, false, false},
 		{"a difference the notifier took", true, differs, "NOTIFY", nil, true, false},
+		{"a difference the notifier took, the mark clear", false, differs, "NOTIFY", nil, true, false},
+		{"a difference sent by UPDATE, the mark clear", false, differs, "UPDATE", nil, false, false},
 		{"a difference sent after an incomplete read", true, incomplete, "UPDATE", nil, true, true},
 		{"the parent found in step", true, inStep, "", nil, false, false},
 		{"in step while a rollover owns the DS", true, rollingInStep, "", nil, true, false},

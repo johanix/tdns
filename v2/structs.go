@@ -247,8 +247,9 @@ type ZoneData struct {
 	// child's). A retry of a sync that failed before it is dropped
 	// (delegationSyncRetrySuperseded). Guarded by mu.
 	delegationLastSyncOK time.Time
-	// delegationOutOfStep is set when a change of the zone did not reach the
-	// parent -- its sync failed, or the parent offered no usable scheme -- and
+	// delegationOutOfStep is set when a change of the zone may not have reached
+	// the parent -- its sync failed, the parent offered no usable scheme, or it
+	// went by NOTIFY, which the parent has yet to act on -- and
 	// no compare has found the parent in step since: the parent may lack
 	// changes the zone has made. A stored change is then queued as a compare
 	// instead of being sent as a difference (delegationSyncLanes.startsAtOnce).

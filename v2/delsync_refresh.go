@@ -179,7 +179,7 @@ func (zd *ZoneData) childDelegationPostRefresh(delsyncq chan DelegationSyncReque
 // to the parent, passed in so a test can stand in for them.
 type refreshSyncSteps struct {
 	analyse func() (DelegationSyncStatus, error)
-	sync    func(DelegationSyncStatus) (string, uint8, UpdateResult, error)
+	sync    func(DelegationSyncStatus) (string, uint8, UpdateResult, string, error)
 	requeue func(next DelegationSyncRequest, delay time.Duration)
 }
 
@@ -205,8 +205,8 @@ func refreshSyncStepsFor(ctx context.Context, conf *Config, delsyncq chan Delega
 			resp, _, _, err := zd.analyseNSAndGlue(imr())
 			return resp, err
 		},
-		sync: func(dss DelegationSyncStatus) (string, uint8, UpdateResult, error) {
-			return zd.SyncZoneDelegation(ctx, kdb, notifyq, dss, imr())
+		sync: func(dss DelegationSyncStatus) (string, uint8, UpdateResult, string, error) {
+			return zd.syncZoneDelegationVia(ctx, kdb, notifyq, dss, imr())
 		},
 		requeue: func(next DelegationSyncRequest, delay time.Duration) {
 			requeueLookAfter(ctx, delsyncq, next, delay)
@@ -282,7 +282,7 @@ func handleRefreshSyncDelegationWith(ctx context.Context, ready *ImrReadiness, d
 		"ns_removes", len(dss.NsRemoves), "ns_adds", len(dss.NsAdds),
 		"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
 		"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
-	msg, rcode, _, err := steps.sync(dss)
+	msg, rcode, _, scheme, err := steps.sync(dss)
 	if errors.Is(err, ErrNoUsableDsync) {
 		// The parent offers nothing to send it through: not a failure, and
 		// nothing to retry (planUsable warned once). The next NS or glue
@@ -297,6 +297,9 @@ func handleRefreshSyncDelegationWith(ctx context.Context, ready *ImrReadiness, d
 		return nil
 	}
 	succeeded()
-	lgDns.Info("DelegationSyncher: refresh sync done", "zone", ds.ZoneName, "msg", msg, "rcode", rcode)
+	// A NOTIFY says only that the notifier took it: the parent may lack the
+	// difference yet (noteDelegationSyncSentBy).
+	zd.noteDelegationSyncSentBy(scheme)
+	lgDns.Info("DelegationSyncher: refresh sync done", "zone", ds.ZoneName, "msg", msg, "rcode", rcode, "scheme", scheme)
 	return nil
 }
