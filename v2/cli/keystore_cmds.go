@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -25,7 +26,7 @@ var keyid int
 var NewState, filename, keytype, outdir string
 var keyExportFormat string
 
-const keyFormatHelp = "Private key format to write: pem (PKCS#8, as stored) or bind (Private-key-format v1.3)"
+const keyFormatHelp = "Private key format to write: pem (PKCS#8, as stored), bind (Private-key-format v1.3) or jwk (DNSSEC JWK, .jwk file)"
 
 // NewKeystoreCmd returns a fresh "keystore" command tree bound to the
 // given role. The subtree (sig0 + dnssec branches with their children
@@ -536,7 +537,14 @@ containing either the private or the public SIG(0) key and the name of the zone.
 convention: K<zone>+<alg-num>+<keyid>.private and .key (zone-file KEY RR).
 The private half is written as PKCS#8 PEM, or as bind's Private-key-format
 v1.3 with --format bind. The resulting pair is directly consumable by commands
-accepting --key <basename.private>.`,
+accepting --key <basename.private>. With --format jwk the private half is a
+SIG(0) JWK ("sig0key" parameter) in K<zone>+<alg-num>+<keyid>.jwk instead of
+the .private file.
+An algorithm with no JWK form, and an ML-DSA key stored without its seed (by a
+tdns release before the seed form), are refused with --format jwk; export them
+with --format pem or --format bind, or replace the key through a rollover. A
+key with algorithm 200 or 201 (ML-DSA-65/-87, the dnssec-algorithms
+registry's numbers, not IANA's) is written with a WARNING on stderr.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename", "keyid")
 			if err := tdns.ValidateKeyFormat(keyExportFormat); err != nil {
@@ -548,7 +556,7 @@ accepting --key <basename.private>.`,
 	export.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone the key belongs to")
 	export.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to export")
 	export.Flags().StringVar(&keyExportFormat, "format", tdns.KeyFormatPEM, keyFormatHelp)
-	export.Flags().StringVarP(&outdir, "outdir", "o", ".", "Directory to write .private and .key files to")
+	export.Flags().StringVarP(&outdir, "outdir", "o", ".", "Directory to write .private (or .jwk) and .key files to")
 	export.MarkFlagRequired("zone")
 	export.MarkFlagRequired("keyid")
 
@@ -682,7 +690,14 @@ the keystore. Exits non-zero when a violation is found.`,
 convention: K<zone>+<alg-num>+<keyid>.private and .key (zone-file DNSKEY RR).
 The private half is written as PKCS#8 PEM, or as bind's Private-key-format
 v1.3 with --format bind. The resulting pair is directly consumable by
-'keystore dnssec import'.`,
+'keystore dnssec import'. With --format jwk the private half is a DNSSEC JWK
+("dnskey" parameter) in K<zone>+<alg-num>+<keyid>.jwk instead of the .private
+file.
+An algorithm with no JWK form, and an ML-DSA key stored without its seed (by a
+tdns release before the seed form), are refused with --format jwk; export them
+with --format pem or --format bind, or replace the key through a rollover. A
+key with algorithm 200 or 201 (ML-DSA-65/-87, the dnssec-algorithms
+registry's numbers, not IANA's) is written with a WARNING on stderr.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename", "keyid")
 			if err := tdns.ValidateKeyFormat(keyExportFormat); err != nil {
@@ -694,7 +709,7 @@ v1.3 with --format bind. The resulting pair is directly consumable by
 	export.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone the key belongs to")
 	export.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to export")
 	export.Flags().StringVar(&keyExportFormat, "format", tdns.KeyFormatPEM, keyFormatHelp)
-	export.Flags().StringVarP(&outdir, "outdir", "o", ".", "Directory to write .private and .key files to")
+	export.Flags().StringVarP(&outdir, "outdir", "o", ".", "Directory to write .private (or .jwk) and .key files to")
 	export.MarkFlagRequired("zone")
 	export.MarkFlagRequired("keyid")
 
@@ -993,8 +1008,11 @@ func writeSig0ExportFiles(sk tdns.Sig0Key, outdir string) error {
 		return fmt.Errorf("unknown algorithm %q in exported key", sk.Algorithm)
 	}
 	base := fmt.Sprintf("K%s+%03d+%05d", sk.Name, algNum, sk.Keyid)
-	if err := writeNewFile(filepath.Join(outdir, base+".private"), []byte(sk.PrivateKey), 0600); err != nil {
+	if err := writePrivateHalf(outdir, base, sk.PrivateKey, sk.JWK); err != nil {
 		return err
+	}
+	if sk.JWK != "" {
+		warnRegistryOnlyAlgorithm(os.Stderr, sk.Name, sk.Keyid, sk.Keystr)
 	}
 	keyRR := sk.Keystr
 	if !strings.HasSuffix(keyRR, "\n") {
@@ -1003,14 +1021,52 @@ func writeSig0ExportFiles(sk tdns.Sig0Key, outdir string) error {
 	return writeNewFile(filepath.Join(outdir, base+".key"), []byte(keyRR), 0644)
 }
 
+// warnRegistryOnlyAlgorithm prints core.RegistryOnlyAlgorithmNote as a
+// warning for a key just written as a JWK. The export has succeeded; the
+// warning is for whoever hands the file to a peer that may number the
+// algorithm differently. The number is read from the exported key RR, not
+// looked up by name, so the warning does not depend on which algorithms
+// this CLI binary links.
+func warnRegistryOnlyAlgorithm(w io.Writer, zone string, keyid uint16, keyRR string) {
+	rr, err := dns.NewRR(strings.TrimSpace(keyRR))
+	if err != nil || rr == nil {
+		return
+	}
+	var alg uint8
+	switch k := rr.(type) {
+	case *dns.DNSKEY:
+		alg = k.Algorithm
+	case *dns.KEY:
+		alg = k.Algorithm
+	default:
+		return
+	}
+	if note := core.RegistryOnlyAlgorithmNote(alg); note != "" {
+		fmt.Fprintf(w, "WARNING: %s keyid %d: %s\n", zone, keyid, note)
+	}
+}
+
+// writePrivateHalf writes the daemon's rendering of the private key: a JWK
+// to base.jwk when there is one, otherwise base.private. 0600 either way;
+// a JWK export is a private key too.
+func writePrivateHalf(outdir, base, priv, jwk string) error {
+	if jwk != "" {
+		return writeNewFile(filepath.Join(outdir, base+".jwk"), []byte(jwk), 0600)
+	}
+	return writeNewFile(filepath.Join(outdir, base+".private"), []byte(priv), 0600)
+}
+
 func writeDnssecExportFiles(dk tdns.DnssecKey, outdir string) error {
 	algNum, ok := AlgorithmNumber(strings.ToUpper(dk.Algorithm))
 	if !ok {
 		return fmt.Errorf("unknown algorithm %q in exported key", dk.Algorithm)
 	}
 	base := fmt.Sprintf("K%s+%03d+%05d", dk.Name, algNum, dk.Keyid)
-	if err := writeNewFile(filepath.Join(outdir, base+".private"), []byte(dk.PrivateKey), 0600); err != nil {
+	if err := writePrivateHalf(outdir, base, dk.PrivateKey, dk.JWK); err != nil {
 		return err
+	}
+	if dk.JWK != "" {
+		warnRegistryOnlyAlgorithm(os.Stderr, dk.Name, dk.Keyid, dk.Keystr)
 	}
 	keyRR := dk.Keystr
 	if !strings.HasSuffix(keyRR, "\n") {

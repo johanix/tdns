@@ -16,6 +16,7 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,6 +41,7 @@ type bulkFlags struct {
 	state     string
 	noBackup  bool
 	force     bool
+	skipUnsup bool
 	selExact  []string
 	selSubtre []string
 
@@ -82,7 +84,20 @@ boundaries, so --%s pq.dnslab does not match notpq.dnslab. With no selector at
 all, the whole class is exported.
 
 Re-exporting into a directory MERGES: entries for keys not covered by this
-run are left in place, so several exports can populate one directory.`,
+run are left in place, so several exports can populate one directory.
+
+With --format jwk (DNSSEC and SIG(0)) each private key is written as a JWK
+in K<name>+<alg>+<keyid>.jwk instead of a .private file. A key that has no
+JWK form -- an algorithm without one, or an ML-DSA key stored without its
+seed (by a tdns release before the seed form) -- fails the run; such a key
+can still be exported with --format pem or --format bind, or replaced through
+a rollover. --skip-unsupported leaves such keys out instead: it prints one
+WARNING line per key on stderr (zone, keyid, algorithm, reason) and a closing
+line with the number of keys NOT written by this run, and still exits 0; files
+already in the directory from an earlier export are left as they are. A key written as
+a JWK with algorithm 200 or 201 (ML-DSA-65/-87, the dnssec-algorithms
+registry's numbers, not IANA's) gets a WARNING on stderr; the export
+succeeds.`,
 			classLabel(class), exactFlag, subtreeFlag, subtreeFlag),
 		Run: func(cmd *cobra.Command, args []string) {
 			bulkExportRun(role, class, f)
@@ -93,6 +108,8 @@ run are left in place, so several exports can populate one directory.`,
 	// private-key file, so the flag would be accepted and then ignored.
 	if class != "tsig" {
 		bulkExport.Flags().StringVar(&f.format, "format", tdns.KeyFormatPEM, keyFormatHelp)
+		bulkExport.Flags().BoolVar(&f.skipUnsup, "skip-unsupported", false,
+			"With --format jwk: leave out keys that have no JWK form instead of failing, with a WARNING per key on stderr")
 	}
 	bulkExport.Flags().StringArrayVarP(&f.selExact, exactFlag, exactShorthand, nil, exactHelp)
 	bulkExport.Flags().StringArrayVar(&f.selSubtre, subtreeFlag, nil, subtreeHelp)
@@ -400,6 +417,10 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
+	if f.skipUnsup && f.format != tdns.KeyFormatJWK {
+		fmt.Printf("Error: --skip-unsupported applies only to --format jwk\n")
+		os.Exit(1)
+	}
 
 	api, err := GetApiClient(role, true)
 	if err != nil {
@@ -423,11 +444,12 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 	}
 
 	tr, err := SendKeystoreCmd(api, tdns.KeystorePost{
-		Command:       classCommand(class),
-		SubCommand:    "bulk-export",
-		KeyFormat:     f.format,
-		SelectExact:   f.selExact,
-		SelectSubtree: f.selSubtre,
+		Command:         classCommand(class),
+		SubCommand:      "bulk-export",
+		KeyFormat:       f.format,
+		SkipUnsupported: f.skipUnsup,
+		SelectExact:     f.selExact,
+		SelectSubtree:   f.selSubtre,
 	})
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -468,6 +490,13 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 		os.Exit(1)
 	}
 
+	// Listed before anything else is said, so a run that wrote nothing
+	// still names what it left out and why. The summary is deferred so it
+	// is the last line also when no key matched; os.Exit on an error skips
+	// it, and the error is what matters then.
+	printBulkSkipped(os.Stderr, tr.BulkSkipped)
+	defer printBulkSkippedSummary(os.Stderr, tr.BulkSkipped)
+
 	var written int
 	switch class {
 	case "dnssec":
@@ -481,9 +510,12 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 				fmt.Printf("Error: %s keyid %d: %v\n", k.Zone, k.Keyid, err)
 				os.Exit(1)
 			}
-			if err := writeKeyPair(f.dest, base, k.PrivateKey, k.KeyRR); err != nil {
+			if err := writeKeyPair(f.dest, base, k.PrivateKey, k.JWK, k.KeyRR); err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
+			}
+			if k.JWK != "" {
+				warnRegistryOnlyAlgorithm(os.Stderr, k.Zone, k.Keyid, k.KeyRR)
 			}
 			// A bind export without a .state file is only half a round trip:
 			// bulk-convert reads the state from there, and with none present
@@ -517,9 +549,12 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 				fmt.Printf("Error: %s keyid %d: %v\n", k.Zone, k.Keyid, err)
 				os.Exit(1)
 			}
-			if err := writeKeyPair(f.dest, base, k.PrivateKey, k.KeyRR); err != nil {
+			if err := writeKeyPair(f.dest, base, k.PrivateKey, k.JWK, k.KeyRR); err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
+			}
+			if k.JWK != "" {
+				warnRegistryOnlyAlgorithm(os.Stderr, k.Zone, k.Keyid, k.KeyRR)
 			}
 			manifest.UpsertSig0(tdns.ManifestEntryForSig0(k, base))
 			written++
@@ -558,15 +593,20 @@ func bulkKeyBasename(owner, algorithm string, keyid uint16) (string, error) {
 	return tdns.KeyFileBasename(owner, algNum, keyid), nil
 }
 
-// writeKeyPair writes the .private/.key pair, tolerating a re-export of a key
-// that is already there: identical content is a no-op, different content is an
-// error rather than a silent overwrite (the manifest and the files must agree,
-// and the operator should know which one moved).
-func writeKeyPair(dir, base, privPEM, keyRR string) error {
+// writeKeyPair writes the .private/.key pair (.jwk/.key for a JWK export),
+// tolerating a re-export of a key that is already there: identical content is
+// a no-op, different content is an error rather than a silent overwrite (the
+// manifest and the files must agree, and the operator should know which one
+// moved).
+func writeKeyPair(dir, base, privPEM, jwk, keyRR string) error {
 	if !strings.HasSuffix(keyRR, "\n") {
 		keyRR += "\n"
 	}
-	if err := writeOrVerifyFile(filepath.Join(dir, base+".private"), privPEM, 0600); err != nil {
+	privName, priv := base+".private", privPEM
+	if jwk != "" {
+		privName, priv = base+".jwk", jwk
+	}
+	if err := writeOrVerifyFile(filepath.Join(dir, privName), priv, 0600); err != nil {
 		return err
 	}
 	return writeOrVerifyFile(filepath.Join(dir, base+".key"), keyRR, 0644)
@@ -587,6 +627,28 @@ func writeOrVerifyFile(path, content string, perm os.FileMode) error {
 		return fmt.Errorf("writing %s: %v", path, err)
 	}
 	return nil
+}
+
+// printBulkSkipped warns, one line per key, about the keys a
+// --skip-unsupported export left out. Loud on purpose: the operator asked
+// for the skip, but a key missing from an archive they expected complete
+// must not pass unnoticed, so this goes to stderr like any other warning.
+func printBulkSkipped(w io.Writer, skipped []tdns.BulkSkippedKey) {
+	for _, k := range skipped {
+		fmt.Fprintf(w, "WARNING: %s keyid %d (%s) NOT written, no JWK form: %s\n", k.Zone, k.Keyid, k.Algorithm, k.Reason)
+	}
+}
+
+// printBulkSkippedSummary closes a --skip-unsupported run with the count of
+// keys NOT written, after everything else the run said.
+func printBulkSkippedSummary(w io.Writer, skipped []tdns.BulkSkippedKey) {
+	if len(skipped) == 0 {
+		return
+	}
+	// "By this run": the directory can already hold a PEM or BIND export of
+	// such a key from an earlier run, and a merge leaves it alone.
+	fmt.Fprintf(w, "WARNING: %d key(s) NOT written by this run (--skip-unsupported); "+
+		"files already in the export directory are left as they are\n", len(skipped))
 }
 
 // --- import ------------------------------------------------------------

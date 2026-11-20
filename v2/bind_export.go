@@ -45,10 +45,10 @@ const (
 // typo cannot produce a half-written export directory.
 func ValidateKeyFormat(f string) error {
 	switch f {
-	case "", KeyFormatPEM, KeyFormatBind:
+	case "", KeyFormatPEM, KeyFormatBind, KeyFormatJWK:
 		return nil
 	default:
-		return fmt.Errorf("unknown key format %q (want %q or %q)", f, KeyFormatPEM, KeyFormatBind)
+		return fmt.Errorf("unknown key format %q (want %q, %q or %q)", f, KeyFormatPEM, KeyFormatBind, KeyFormatJWK)
 	}
 }
 
@@ -201,6 +201,13 @@ func PrivateKeyForExport(format, keyRR, privPEM, publishedAt, activeAt, retiredA
 	// feature exists to close, on the path that does not go through cobra.
 	if err := ValidateKeyFormat(format); err != nil {
 		return "", err
+	}
+	if format == KeyFormatJWK {
+		// A JWK replaces the .private file rather than filling it, and it
+		// needs to know which store the key is from ("dnskey" or "sig0key"),
+		// which this signature does not carry. Falling through to PEM here
+		// would write PKCS#8 where the caller asked for a JWK.
+		return "", fmt.Errorf("format %q is rendered by JWKForExport, not PrivateKeyForExport", format)
 	}
 	if format != KeyFormatBind {
 		return privPEM, nil
