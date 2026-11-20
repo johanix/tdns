@@ -216,6 +216,43 @@ Without `config-file:` the check falls back to the compiled-in default
 (`/etc/tdns/tdns-auth.yaml`) — which for a second instance is the wrong file.
 Set it.
 
+## imr instances
+
+A second `tdns-imr` (a resolver, not an authoritative server) is wired with
+`role: imr`:
+
+```yaml
+   - name:              imr2
+     role:              imr
+     baseurl:           http://127.0.0.1:8081/api/v1
+     apikey:            <the second resolver's api key>
+     authmethod:        X-API-Key
+     config-file:       /etc/tdns/tdns-imr2.yaml
+```
+
+A resolver offers the CLI less than an authoritative server does, so an imr
+instance has only what talks to the daemon's management API:
+
+```
+tdns-ncli imr2 ping | daemon | config (check, mwe, status)
+tdns-ncli imr2 query <name> <type>
+tdns-ncli imr2 flush (common | all) <domain>
+tdns-ncli imr2 forward (list | probe | status)
+tdns-ncli imr2 stub (list | probe | status)
+tdns-ncli imr2 stats (auth-transports | client-transports | transport-stats)
+```
+
+and not the commands that only describe the process they run in, which for
+`tdns-ncli` is never the resolver: `show` and `set` (they are for
+`tdns-imr --cli`), `stats large-ksk`, `dsync-query` (it starts a resolver of
+its own inside the CLI), and `zone` (placeholders). `tdns-ncli imr ...` has them
+as before; they report on the CLI process and say so.
+
+`imr2 config check` reads `imr2`'s own `config-file:` by default. `imr2 flush`,
+`query` and the `stats` commands go to `imr2`'s daemon: they used to pass the
+literal role `imr`, so a second resolver's cache would have been flushed by
+asking the first.
+
 ## What an instance tree does not include
 
 Two subtrees are deliberately absent from an instance:

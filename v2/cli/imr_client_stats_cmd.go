@@ -56,13 +56,14 @@ The counters must be switched on in the resolver's configuration
 client addresses, never query names.`,
 	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
-		runClientStats(cmd.Context())
+		runClientStats(cmd.Context(), imrRoleFor(cmd))
 	},
 }
 
 // runClientStats fetches the report -- from the live counters in the tdns-imr
 // shell, over the /imr API from tdns-cli -- and prints it as the flags say.
-func runClientStats(ctx context.Context) {
+// role names the daemon the API call goes to.
+func runClientStats(ctx context.Context, role string) {
 	var rep tdns.ImrClientStatsReport
 	if imr := tdns.Globals.ImrEngine; imr != nil && imr.ClientStats != nil {
 		// In-process: the REPL has no reason to call its own API.
@@ -77,7 +78,7 @@ func runClientStats(ctx context.Context) {
 		if len(clientStatsClients) > 0 {
 			data["clients"] = clientStatsClients
 		}
-		amr, err := SendImrMgmtCmd(ctx, "imr", &tdns.ImrMgmtPost{Command: "imr-client-stats", Data: data})
+		amr, err := SendImrMgmtCmd(ctx, role, &tdns.ImrMgmtPost{Command: "imr-client-stats", Data: data})
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
