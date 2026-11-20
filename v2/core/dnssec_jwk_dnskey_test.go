@@ -182,6 +182,11 @@ func TestDNSSECJWKRejects(t *testing.T) {
 		{"keytag not an integer", editJSON(t, dEC, func(top, dk map[string]any) { dk["keytag"] = true }), ErrDNSKEYParamMalformed},
 		{"name without trailing dot", editJSON(t, dEC, func(top, dk map[string]any) { dk["name"] = "example.com" }), ErrDNSKEYName},
 		{"name with empty label", editJSON(t, dEC, func(top, dk map[string]any) { dk["name"] = "example..com." }), ErrDNSKEYName},
+		{"name with a raw non-ASCII byte", editJSON(t, dEC, func(top, dk map[string]any) { dk["name"] = "b\u00ff.example." }), ErrDNSKEYName},
+		{"name with a raw control byte", editJSON(t, dEC, func(top, dk map[string]any) { dk["name"] = "a\u0001b.example." }), ErrDNSKEYName},
+		{"name with a raw space", editJSON(t, dEC, func(top, dk map[string]any) { dk["name"] = "my zone.example." }), ErrDNSKEYName},
+		{"name with \\DDD above 255", editJSON(t, dEC, func(top, dk map[string]any) { dk["name"] = `a\256b.example.` }), ErrDNSKEYName},
+		{"name with a short \\DDD", editJSON(t, dEC, func(top, dk map[string]any) { dk["name"] = `a\25.example.` }), ErrDNSKEYName},
 		{"protocol 2", editJSON(t, dEC, func(top, dk map[string]any) { dk["protocol"] = 2 }), ErrDNSKEYProtocol},
 		{"EC key under RSA algorithm", editJSON(t, dEC, func(top, dk map[string]any) { dk["algorithm"] = 8 }), ErrDNSKEYKeyTypeMismatch},
 		{"P-256 key under P-384 algorithm", editJSON(t, dEC, func(top, dk map[string]any) { dk["algorithm"] = 14 }), ErrDNSKEYKeyTypeMismatch},
@@ -249,6 +254,46 @@ func TestDNSSECJWKOptionalAlg(t *testing.T) {
 				t.Errorf("DNSKEY differs")
 			}
 		})
+	}
+}
+
+// TestDNSSECJWKOwnerOctets: the owner is in presentation format, so a raw
+// non-printable or non-ASCII byte is refused on export and import (it would
+// not survive the JSON text, and the keytag does not cover the owner), and
+// the \DDD and \X escapes, which are the way to write those octets, still work.
+func TestDNSSECJWKOwnerOctets(t *testing.T) {
+	rr, _ := genDNSKEY(t, "example.com.", dns.ED25519, 256)
+	for _, name := range []string{"b\xff.example.", "a\x00b.example.", "a b.example.", "\u00e9.example.", "a\x7fb.example."} {
+		r := *rr
+		r.Hdr.Name = name
+		if _, err := NewDNSSECJWK(&r, nil); !errors.Is(err, ErrDNSKEYName) {
+			t.Errorf("export of owner %q: err = %v, want ErrDNSKEYName", name, err)
+		}
+	}
+	for _, name := range []string{`b\255.example.`, `a\000b.example.`, `a\.b.example.`, `a\ b.example.`, `\127.example.`, "."} {
+		r := *rr
+		r.Hdr.Name = name
+		d, err := NewDNSSECJWK(&r, nil)
+		if err != nil {
+			t.Errorf("owner %q refused: %v", name, err)
+			continue
+		}
+		b, _ := json.Marshal(d)
+		if _, got, err := ParseDNSSECJWK(b); err != nil || got.Hdr.Name != name {
+			t.Errorf("owner %q does not round trip: %q, %v", name, got, err)
+		}
+	}
+}
+
+// A DNSSECJWK built by hand with a parameter and no key must be refused,
+// not dereferenced (MarshalJSON already refuses it).
+func TestDNSSECJWKWithoutAKey(t *testing.T) {
+	d := &DNSSECJWK{DNSKEY: &DNSKEYParam{Name: "example.com.", Flags: 257, Protocol: 3, Algorithm: dns.ED25519}}
+	if _, err := d.ToDNSKEY(); !errors.Is(err, ErrJWKMissingMember) {
+		t.Errorf("ToDNSKEY without a key: err = %v, want ErrJWKMissingMember", err)
+	}
+	if _, err := json.Marshal(d); err == nil {
+		t.Error("MarshalJSON accepted a DNSSEC JWK without a key")
 	}
 }
 
