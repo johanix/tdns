@@ -137,6 +137,29 @@ func TestRTT_DecayOthersOnRecord(t *testing.T) {
 	}
 }
 
+// An RTT estimate whose last sample is older than the policy's MaxFailure,
+// which GetRTT no longer uses, is dropped when another endpoint takes a
+// sample, so the map does not grow by one key for every endpoint ever
+// dialed. A recent one is kept and decays as before (CodeRabbit on #1118).
+func TestRTT_StaleEstimatesArePruned(t *testing.T) {
+	as := NewAuthServer("rtt-prune.example.")
+	as.RecordEndpointAddrRTT("192.0.2.1", 1234, core.TransportDoT, 10*time.Millisecond)
+	as.RecordEndpointAddrRTT("192.0.2.2", 1234, core.TransportDoT, 10*time.Millisecond)
+	as.mu.Lock()
+	as.RTTEstimates[AddrXport{Addr: "192.0.2.1", Port: 1234, Transport: core.TransportDoT}].LastSampleAt =
+		time.Now().Add(-GetBackoffPolicy().MaxFailure - time.Minute)
+	as.mu.Unlock()
+
+	as.RecordEndpointAddrRTT("192.0.2.3", 1234, core.TransportDoT, 10*time.Millisecond)
+	snap := as.SnapshotRTTEstimates()
+	if _, ok := snap[AddrXport{Addr: "192.0.2.1", Port: 1234, Transport: core.TransportDoT}]; ok {
+		t.Error("a stale estimate was kept")
+	}
+	if len(snap) != 2 {
+		t.Errorf("estimates %v, want the two recent ones", snap)
+	}
+}
+
 // TestRTT_DecayCrossover verifies the exploration cross-over: with a
 // fast winner and a slower-but-not-much-slower loser, after enough picks
 // of the winner the loser's decayed EMA dips below the winner's,

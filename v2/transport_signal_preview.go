@@ -193,10 +193,18 @@ func transportSignalRelease(conf *Config, name string) ([]TransportSignalPreview
 // zone, and the staged change publishes after the release all the same. A
 // withdrawal the pass staged would then remove the RRset the release just
 // handed to the operator.
+//
+// It refuses in a zone whose removal has started (signalPassRetired, which
+// RemoveDynamicZone sets under zd.mu before it takes the KeyDB's record). A
+// removal whose config rewrite fails puts that record back, and would undo
+// a release made in between.
 func (zd *ZoneData) releaseSignal(owner string) (released bool, err error) {
 	owner = core.CanonicalizeName(owner)
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	if zd.signalPassRetired {
+		return false, fmt.Errorf("zone %s is being removed, so %s cannot be released: a removal that fails puts the record of what the pass stored back", zd.ZoneName, owner)
+	}
 	if zd.stagedSignalChangeLocked(owner) {
 		return false, fmt.Errorf("%s in %s has a change staged that is not published yet (the publish cadence holds it back, or the publish was refused); run the release again after the next publish", owner, zd.ZoneName)
 	}

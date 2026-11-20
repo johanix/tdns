@@ -292,16 +292,16 @@ func TestTryServerDialsSignalPort(t *testing.T) {
 	applyTransportMapWithPorts(server, raw, ports)
 
 	ctx := context.Background()
-	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{}); err != nil {
 		t.Fatalf("DoT: %v", err)
 	}
-	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{}); err != nil {
 		t.Fatalf("Do53: %v", err)
 	}
-	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "2001:db8::1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "2001:db8::1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{}); err != nil {
 		t.Fatalf("DoT v6: %v", err)
 	}
-	if _, _, wire, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDo53, q, "example.", dns.TypeA, true, cache.ClassInternal); err != nil {
+	if _, _, wire, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDo53, q, "example.", dns.TypeA, true, cache.ClassInternal, attemptSelection{}); err != nil {
 		t.Fatalf("DNSKEY bypass: %v", err)
 	} else if wire != core.TransportDoQ {
 		t.Errorf("bypass wire transport %s, want doq", core.TransportToString[wire])
@@ -319,7 +319,7 @@ func TestTryServerDialsSignalPort(t *testing.T) {
 
 	// The next signal has no port. DoT goes back to the bare address.
 	applyTransportMapToServer(server, map[string]uint8{"dot": 30})
-	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{}); err != nil {
 		t.Fatalf("DoT after a port-less signal: %v", err)
 	}
 	if got := dot.Calls(); got[len(got)-1].Addr != "192.0.2.1" {

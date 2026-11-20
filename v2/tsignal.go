@@ -134,6 +134,22 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	if zd.signalPassRetired {
+		lgDns.Debug("CreateTransportSignalRRs: the zone is being removed; no transport signal pass",
+			"zone", zd.ZoneName)
+		return nil
+	}
+	// Only the zone's live instance runs the pass. An instance a modify has
+	// replaced, or one whose zone has been removed since, is not retired: the
+	// removal retires the instance it finds in Zones. A pass on it would
+	// record what it stored under the zone's name, and a zone added later
+	// under that name would take those records for its own (CodeRabbit on
+	// #1146). Every zone is in Zones before its first load runs the pass.
+	if live, ok := Zones.Get(zd.ZoneName); !ok || live != zd {
+		lgDns.Debug("CreateTransportSignalRRs: not the zone's live instance; no transport signal pass",
+			"zone", zd.ZoneName)
+		return nil
+	}
 	// Bare: no working set before this pass, so the one seeded below holds
 	// nothing but what the pass stages, and its publish can stay serial-less.
 	// A working set that already exists carries another writer's change,

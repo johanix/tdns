@@ -405,9 +405,15 @@ type ZoneData struct {
 	// them in the record until a zone write drops those deltas
 	// (noteJournalDropped). Guarded by signalStoredMu.
 	signalJournaled map[string][]signalJournalPin
-	publishCadence  time.Duration
-	publishQueued   bool
-	publishUrgent   bool
+	// signalPassRetired is set when the zone is being removed
+	// (RemoveDynamicZone): the transport-signal pass then stores nothing and
+	// records nothing, so that no record of a removed zone outlives the
+	// delete of its records, and a release is refused (releaseSignal).
+	// Guarded by mu, which the pass and a release hold for their whole run.
+	signalPassRetired bool
+	publishCadence    time.Duration
+	publishQueued     bool
+	publishUrgent     bool
 	// tx is the zone's transactions: the publish hold, and what a zone created
 	// held remembers about its first content. See zone_tx.go. Guarded by mu.
 	tx zoneTxState
