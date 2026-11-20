@@ -130,6 +130,11 @@ pair, the private half as PEM or, with `--format bind`, in bind's own format.
 What each side accepts and writes is under [key formats](#key-formats). For
 moving more than one key at a time, use the bulk commands below.
 
+Until decoded-key comparison lands (#1100): a key that is already in the keystore (same zone and keyid) is
+replaced without any check, even when it is the same key, and its state goes
+back to `created`: re-importing an `active` key resets it. The next PR in the
+stack (#1100) compares the decoded keys and refuses to replace by accident.
+
 ### Lifecycle
 
 | Command | |
@@ -214,9 +219,10 @@ For TSIG the flags are `--key` / `--keys`, with the same semantics — TSIG keys
 are named rather than zone-scoped, so calling them zones would be a lie.
 
 DNSSEC and SIG(0) exports also take `--format pem|bind|jwk`. `pem` is the
-default, and the only format `bulk-import` and pre-load read back; `bind` is for
-handing keys to bind9 or another tool that reads its key files; `jwk` writes
-each private key as a DNSSEC JWK (draft-schlyter-dnsop-dnssec-jwk). See
+default; `bind` is for handing keys to bind9 or another tool that reads its key
+files; `jwk` writes each private key as a DNSSEC JWK
+(draft-schlyter-dnsop-dnssec-jwk). `bulk-import` and pre-load read `pem` and
+`jwk` directories back. See
 [key formats](#key-formats), including why re-exporting into a bind-format
 directory is less forgiving than the merge described next.
 
@@ -334,6 +340,12 @@ one.
 
 An import is all-or-nothing: one invalid key rolls the whole batch back.
 
+Until decoded-key comparison lands (#1100): "identical" compares the private key as PEM text, and
+the `creator` field as well. The same key in another tool's PEM encoding (or
+with another creator) is therefore reported as a `conflict` and skipped, and
+`--force` replaces it. The next PR in the stack (#1100) compares the decoded
+keys.
+
 **What is checked.** The private key is stored verbatim, never parsed — which is
 what lets a key restore into a binary that has no implementation for its
 algorithm (it will fail later, loudly, if the zone tries to sign with it). It is
@@ -342,6 +354,11 @@ holds; see [key formats](#key-formats) below. The public half *is* parsed, as a
 cheap crypto-free consistency check: owner name must match the zone, flags and
 keytag must match what the manifest claims. That catches a manifest that has
 drifted from its own files.
+
+A key that comes as a JWK (`jwk_file`) is the exception: it is parsed, in the
+daemon, and must pass all of the draft's import rules, including the check
+that the private key gives the public one. Its algorithm must therefore be
+linked into the daemon. See [key formats](#key-formats).
 
 ### Key formats
 
@@ -483,8 +500,8 @@ the `.private` file:
 
 The manifest is written either way, but a `--format bind` directory is not one
 `bulk-import` or pre-load will take as it is. Run `bulk-convert` on it first.
-Nor, in this release, is a `--format jwk` directory: `bulk-import` and pre-load
-refuse a manifest entry that names a `jwk_file`.
+A `--format jwk` directory is: `bulk-import` and pre-load read each
+`jwk_file`, as described below.
 
 **On the way in** there are three paths, and they differ, deliberately:
 
@@ -496,7 +513,8 @@ refuse a manifest entry that names a `jwk_file`.
   (`EC PRIVATE KEY`) and encrypted PKCS#8 (`ENCRYPTED PRIVATE KEY`) are
   refused with an error naming the PEM block type; `openssl pkey` rewrites any
   of them as plain PKCS#8.
-- **`bulk-import`** and pre-load accept PEM only, and refuse anything else with
+- **`bulk-import`** and pre-load accept PEM (and JWK files, below) only, and
+  refuse anything else with
   a message pointing at `bulk-convert` for a directory of BIND-format keys, or
   the single-key `import` for one key. They store the blob verbatim,
   so accepting a BIND-format key would mean writing a non-PEM value into the
@@ -504,9 +522,34 @@ refuse a manifest entry that names a `jwk_file`.
 - **`bulk-convert`** turns a directory of bind9 or Cascade key files into PEM
   plus a manifest, which the other two then read. See
   [converting keys from other signers](#converting-keys-from-other-signers).
+- **JWK files** come in through the first two: `import` (or `add`) takes a
+  `--file` ending in `.jwk`, and `bulk-import` and pre-load read the
+  manifest's `jwk_file` entries. Either way the JWK goes to the daemon
+  unparsed, and the daemon:
+  - refuses a JWK of the other kind, naming the mismatch: `"sig0key"` into
+    the DNSSEC keystore, or `"dnskey"` into the SIG(0) keystore. One with
+    both parameters, or neither, is refused too;
+  - refuses an algorithm it does not link: unlike a PEM key, a JWK has to be
+    rebuilt as PKCS#8, and its private key checked, before it can be stored;
+  - applies the draft's five import rules, the private/public check among
+    them; any failure rejects the key, and in a bulk import the whole batch;
+  - refuses a public-only JWK, since the keystore holds private keys;
+  - stores the key as PKCS#8 PEM (RFC 9881 seed form for ML-DSA, so the seed
+    survives and the key can be exported as JWK again) plus the DNSKEY or KEY
+    rebuilt from the JWK.
 
-`import` and `bulk-convert` parse the private key, and they do it in
-`tdns-cli`, which links only the algorithms every tdns binary has: the
+  The `.key` file beside a `.jwk` (or the manifest's `public_file`), when
+  there is one, must be the key the JWK holds; its text is stored, TTL and
+  all, so an export and re-import leaves the row unchanged. Without one the
+  rebuilt RR gets TTL 3600, as a generated key does. State and owner follow
+  the other formats: a single-key import is stored in state `created` and the
+  key's owner must be `--zone` (the daemon checks it, since only the daemon
+  reads the JWK); a bulk import takes state and timing from the manifest,
+  with the same `imported`/`unchanged`/`conflict`/`replaced` outcomes. A
+  manifest entry naming both `private_file` and `jwk_file` is refused.
+
+`import` of a PEM or bind key and `bulk-convert` parse the private key, and
+they do it in `tdns-cli`, which links only the algorithms every tdns binary has: the
 classical ones, ED448 and ML-DSA-44. A key in any other PQ algorithm cannot go
 through either. It has to arrive as PEM in an export directory, through
 `bulk-import` or pre-load: those never parse the private key, which is what

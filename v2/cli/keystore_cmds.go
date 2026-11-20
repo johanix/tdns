@@ -474,13 +474,17 @@ func newKeystoreSig0Cmd(role string) *cobra.Command {
 		Use:   "add",
 		Short: "Add a new SIG(0) key pair to the keystore",
 		Long: `Add a new SIG(0) key pair to the keystore. Required arguments are the name of the file
-containing either the private or the public SIG(0) key and the name of the zone.`,
+containing either the private or the public SIG(0) key and the name of the zone.
+A file ending in .jwk is read as a SIG(0) JWK ("sig0key" parameter); the daemon
+checks it and refuses a DNSSEC JWK ("dnskey").
+
+` + singleKeyImportCaveat,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("filename", "childzone")
 			sig0KeyMgmt(role, "add")
 		},
 	}
-	add.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	add.Flags().StringVarP(&filename, "file", "f", "", "Key file: the .key or .private of a pair, or a .jwk JWK")
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add SIG(0) key for")
 	add.MarkFlagRequired("file")
 	add.MarkFlagRequired("zone")
@@ -488,12 +492,13 @@ containing either the private or the public SIG(0) key and the name of the zone.
 	importCmd := &cobra.Command{
 		Use:   "import",
 		Short: "Add a new SIG(0) key pair to the keystore",
+		Long:  "Same as add.\n\n" + singleKeyImportCaveat,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("filename", "childzone")
 			sig0KeyMgmt(role, "import")
 		},
 	}
-	importCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	importCmd.Flags().StringVarP(&filename, "file", "f", "", "Key file: the .key or .private of a pair, or a .jwk JWK")
 	importCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import SIG(0) key for")
 	importCmd.MarkFlagRequired("file")
 	importCmd.MarkFlagRequired("zone")
@@ -598,14 +603,18 @@ func newKeystoreDnssecCmd(role string) *cobra.Command {
 	add := &cobra.Command{
 		Use:   "add",
 		Short: "Add a new DNSSEC key pair to the keystore",
-		Long: `Add a new SIG(0) key pair to the keystore. Required arguments are the name of the file
-containing either the private or the public SIG(0) key and the name of the zone.`,
+		Long: `Add a new DNSSEC key pair to the keystore. Required arguments are the name of the file
+containing either the private or the public DNSSEC key and the name of the zone.
+A file ending in .jwk is read as a DNSSEC JWK ("dnskey" parameter); the daemon
+checks it and refuses a SIG(0) JWK ("sig0key").
+
+` + singleKeyImportCaveat,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("filename", "zonename")
 			dnssecKeyMgmt(role, "add")
 		},
 	}
-	add.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	add.Flags().StringVarP(&filename, "file", "f", "", "Key file: the .key or .private of a pair, or a .jwk JWK")
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add DNSSEC key for")
 	add.MarkFlagRequired("file")
 	add.MarkFlagRequired("zone")
@@ -613,12 +622,13 @@ containing either the private or the public SIG(0) key and the name of the zone.
 	importCmd := &cobra.Command{
 		Use:   "import",
 		Short: "Add a new DNSSEC key pair to the keystore",
+		Long:  "Same as add.\n\n" + singleKeyImportCaveat,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("filename", "zonename")
 			dnssecKeyMgmt(role, "import")
 		},
 	}
-	importCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	importCmd.Flags().StringVarP(&filename, "file", "f", "", "Key file: the .key or .private of a pair, or a .jwk JWK")
 	importCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import DNSSEC key for")
 	importCmd.MarkFlagRequired("file")
 	importCmd.MarkFlagRequired("zone")
@@ -864,6 +874,10 @@ func sig0KeyMgmt(role, cmd string) {
 		// no action
 
 	case "add", "import":
+		if isJWKFile(filename) {
+			data = jwkAddPost("sig0-mgmt", filename)
+			break
+		}
 		pkc, err := tdns.ReadPrivateKey(filename)
 		if err != nil {
 			log.Fatalf("Error reading key '%s': %v", filename, err)
@@ -916,9 +930,7 @@ func sig0KeyMgmt(role, cmd string) {
 		data.State = NewState
 	}
 
-	if tdns.Globals.Debug {
-		log.Printf("sig0KeyMgmt: calling SendKeystoreCmd with data=%v", data)
-	}
+	logKeystoreRequest("sig0KeyMgmt", data)
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
@@ -1021,6 +1033,43 @@ func writeSig0ExportFiles(sk tdns.Sig0Key, outdir string) error {
 	return writeNewFile(filepath.Join(outdir, base+".key"), []byte(keyRR), 0644)
 }
 
+// singleKeyImportCaveat is the single-key add/import's behaviour for a key
+// already in the keystore, until #1100 compares decoded keys.
+const singleKeyImportCaveat = `Until decoded-key comparison lands (#1100): a key that is already in the
+keystore (same zone and keyid) is replaced without any check, even when it is
+the same key, and its state goes back to created. The next PR in the stack
+(#1100) compares the decoded keys.`
+
+// isJWKFile: the single-key import tells a JWK by its .jwk name, as it
+// tells the halves of a bind pair by .key and .private.
+func isJWKFile(name string) bool { return strings.HasSuffix(name, ".jwk") }
+
+// jwkAddPost builds the "add" for a JWK file. The CLI does not parse the
+// JWK: the daemon applies the draft's import rules, which need the
+// algorithm, and checks the key's owner against --zone. The .key file
+// beside the JWK, when there is one, goes along so the stored RR keeps its
+// TTL; the daemon checks it is the JWK's key.
+func jwkAddPost(command, file string) tdns.KeystorePost {
+	jwk, err := os.ReadFile(file)
+	if err != nil {
+		log.Fatalf("Error reading JWK file '%s': %v", file, err)
+	}
+	var keyRR string
+	if pub, err := os.ReadFile(strings.TrimSuffix(file, ".jwk") + ".key"); err == nil {
+		keyRR = string(pub)
+	} else if !os.IsNotExist(err) {
+		log.Fatalf("Error reading the public key beside '%s': %v", file, err)
+	}
+	return tdns.KeystorePost{
+		Command:    command,
+		SubCommand: "add",
+		Zone:       tdns.Globals.Zonename,
+		JWK:        string(jwk),
+		KeyRR:      keyRR,
+		State:      "created",
+	}
+}
+
 // warnRegistryOnlyAlgorithm prints core.RegistryOnlyAlgorithmNote as a
 // warning for a key just written as a JWK. The export has succeeded; the
 // warning is for whoever hands the file to a peer that may number the
@@ -1093,6 +1142,10 @@ func dnssecKeyMgmt(role, cmd string) {
 
 	case "add", "import":
 		fmt.Printf("Adding DNSSEC key pair to keystore\n")
+		if isJWKFile(filename) {
+			data = jwkAddPost("dnssec-mgmt", filename)
+			break
+		}
 		pkc, err := tdns.ReadPrivateKey(filename)
 		if err != nil {
 			log.Fatalf("Error reading key '%s': %v", filename, err)
@@ -1511,4 +1564,25 @@ func dsColumn(b *bool) string {
 		return "-"
 	}
 	return flagColumn(*b)
+}
+
+// keystoreRequestSummary describes a keystore request for the debug log
+// without any key material. The request carries private keys in every form
+// (PEM, a cached key, JWK, TSIG secrets, bulk imports), so "%v" of the
+// struct must never reach a log; this says what is being asked and whether
+// key material is attached, not what it is.
+func keystoreRequestSummary(d tdns.KeystorePost) string {
+	material := d.PrivateKey != "" || d.JWK != "" || d.PrivateKeyCache != nil ||
+		d.TsigSecret != "" || d.TsigImportData != "" ||
+		len(d.BulkDnssecKeys) > 0 || len(d.BulkSig0Keys) > 0 || len(d.BulkTsigKeys) > 0
+	return fmt.Sprintf("command=%q subcommand=%q zone=%q keyname=%q keyid=%d algorithm=%d state=%q keyformat=%q force=%t key-material=%t",
+		d.Command, d.SubCommand, d.Zone, d.Keyname, d.Keyid, d.Algorithm, d.State, d.KeyFormat, d.Force, material)
+}
+
+// logKeystoreRequest writes the debug line before a keystore command is
+// sent, when --debug is on.
+func logKeystoreRequest(label string, d tdns.KeystorePost) {
+	if tdns.Globals.Debug {
+		log.Printf("%s: calling SendKeystoreCmd with %s", label, keystoreRequestSummary(d))
+	}
 }

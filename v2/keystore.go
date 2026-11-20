@@ -120,6 +120,14 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	// XXX: FIXME: "add" should also add the public key to the TrustStore.
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
+		if kp.JWK != "" {
+			if pkc, err = jwkKeyCache(dns.TypeKEY, kp.JWK, kp.KeyRR, kp.Zone); err != nil {
+				return &resp, err
+			}
+		}
+		if pkc == nil {
+			return &resp, fmt.Errorf("add: no key given")
+		}
 		lgSigner.Info("importing private key", "type", fmt.Sprintf("%T", pkc.K))
 
 		privkey, err := reconstructSigningKey(pkc, pkc.KeyRR.String(), dns.TypeKEY)
@@ -208,6 +216,18 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		return &resp, nil
 
 	case "bulk-import":
+		// JWK keys are rebuilt here rather than inside BulkImportSig0, so the
+		// TrustStore mirroring below sees their KEY RR: a jwk_file entry need
+		// not come with a public_file.
+		for i := range kp.BulkSig0Keys {
+			k := &kp.BulkSig0Keys[i]
+			if err := resolveBulkJWK(dns.TypeKEY, k.JWK, &k.PrivateKey, &k.KeyRR); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("%s keyid %d: %v", dns.Fqdn(k.Zone), k.Keyid, err)
+				return &resp, fmt.Errorf("%s", resp.ErrorMsg)
+			}
+			k.JWK = ""
+		}
 		dispositions, err := kdb.BulkImportSig0(tx, kp.BulkSig0Keys, kp.Force)
 		if err != nil {
 			resp.Error = true
@@ -581,6 +601,14 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
+		if kp.JWK != "" {
+			if pkc, err = jwkKeyCache(dns.TypeDNSKEY, kp.JWK, kp.KeyRR, kp.Zone); err != nil {
+				return &resp, err
+			}
+		}
+		if pkc == nil {
+			return &resp, fmt.Errorf("add: no key given")
+		}
 
 		// Convert private key to PEM format for storage
 		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey

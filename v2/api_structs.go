@@ -63,6 +63,10 @@ type KeystorePost struct {
 	// SkipUnsupported: a bulk export in jwk format leaves out the keys that
 	// have no JWK form and lists them in BulkSkipped, instead of failing.
 	SkipUnsupported bool `json:"skipunsupported,omitempty"`
+	// JWK is a private DNSSEC or SIG(0) JWK for "add": the daemon parses
+	// it (jwk_import.go), checks it and stores it as PEM. KeyRR above may
+	// carry the key's RR from the .key file beside it.
+	JWK string `json:"jwk,omitempty"`
 }
 
 type TsigKeyInfo struct {
