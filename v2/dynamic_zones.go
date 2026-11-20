@@ -68,15 +68,42 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 		return "", fmt.Errorf("failed to close temp file: %v", err)
 	}
 
-	// Atomic rename: temp file -> final file
+	// Atomic rename: temp file -> final file. What the record of the
+	// transport signal pass keeps for the zone file follows it, in the order
+	// of the renames (zoneFileMu), and only when it is the file the zone
+	// loads: a zone whose Zonefile names another keeps loading that one,
+	// which this write left as it was (CodeRabbit on #1145).
+	zd.zoneFileMu.Lock()
 	if err := os.Rename(tempFilePath, zoneFilePath); err != nil {
+		zd.zoneFileMu.Unlock()
 		os.Remove(tempFilePath) // Clean up temp file on error
 		return "", fmt.Errorf("failed to rename temp file to final file: %v", err)
 	}
-	zd.noteZoneFileWritten(snap)
+	if testHookZoneFileRenamed != nil {
+		testHookZoneFileRenamed()
+	}
+	if zd.loadsZoneFile(zoneFilePath) {
+		zd.noteZoneFileWritten(snap, true)
+	}
+	zd.zoneFileMu.Unlock()
 
 	lg.Info("wrote zone file", "zone", zd.ZoneName, "path", zoneFilePath)
 	return zoneFilePath, nil
+}
+
+// loadsZoneFile reports whether path, a file WriteDynamicZoneFile wrote, is
+// the one the zone loads (persistedZoneFilePath): zd.Zonefile when set, the
+// path WriteDynamicZoneFile derives when not.
+func (zd *ZoneData) loadsZoneFile(path string) bool {
+	if zd.Zonefile == "" {
+		return true
+	}
+	loads, err := filepath.Abs(zd.Zonefile)
+	if err != nil {
+		return false
+	}
+	wrote, err := filepath.Abs(path)
+	return err == nil && loads == wrote
 }
 
 // GetDynamicZoneFilePath returns the expected file path for a dynamic zone file

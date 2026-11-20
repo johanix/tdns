@@ -381,6 +381,16 @@ type ZoneData struct {
 	// (signalOnDiskDigest, noteZoneFileAdopted, noteZoneFileWritten). Every
 	// store keeps it in the record. Guarded by signalStoredMu.
 	signalOnDisk map[string]string
+	// signalOnDiskPrev holds, per owner, the digests of the pass's signals
+	// that zone files held which writes replaced with a rename not yet on
+	// disk: a crash can bring one back. Every store keeps them in the
+	// record until a write whose rename is on disk (noteZoneFileWritten).
+	// Guarded by signalStoredMu.
+	signalOnDiskPrev map[string][]string
+	// zoneFileMu is held across each rename of the zone's file into place
+	// and noteZoneFileWritten for it, so that what the record keeps for the
+	// zone file follows the renames in their order.
+	zoneFileMu sync.Mutex
 	// signalWriting holds, per write of the zone's own file in progress,
 	// the digest of the pass's signal at each owner of signalOnDisk in the
 	// snapshot being written (holdSignalsWritten). Every store keeps them
@@ -389,12 +399,12 @@ type ZoneData struct {
 	// Guarded by signalStoredMu.
 	signalWriting    map[uint64]map[string]string
 	signalWritingSeq uint64
-	// signalJournaled holds, per owner, the pass's signal a replay of the
-	// zone's journal yields there, with the serial of the journal delta that
-	// last set it (noteSignalsJournaled). Every store keeps it in the record
-	// until a zone write drops that delta (noteJournalDropped). Guarded by
-	// signalStoredMu.
-	signalJournaled map[string]signalJournalPin
+	// signalJournaled holds, per owner, the pass's signals a replay of the
+	// zone's journal can yield there, each with the serial of the newest
+	// journal delta that set it (noteSignalsJournaled). Every store keeps
+	// them in the record until a zone write drops those deltas
+	// (noteJournalDropped). Guarded by signalStoredMu.
+	signalJournaled map[string][]signalJournalPin
 	publishCadence  time.Duration
 	publishQueued   bool
 	publishUrgent   bool

@@ -2425,14 +2425,17 @@ func (zd *ZoneData) carriedSignalSVCBs(snap *zoneSnapshot, carries func(owner st
 // taken again only if collection took the same one, on what it knew then.
 // Carrying it on the failed read alone, as collection does, would carry an
 // RRset collection had found to be the operator's, and one the fresh data
-// no longer holds would come back (CodeRabbit on #1145). Caller holds
-// zd.mu.
+// no longer holds would come back (CodeRabbit on #1145). When the zone no
+// longer carries the signal, as an option change since collection can
+// make it, none of the SVCB RRsets collected is carried: one the pass has
+// withdrawn since would come back (CodeRabbit on #1145). The carried SVCB
+// RRsets go ahead of the other dynamic RRsets, in the order
+// CollectDynamicRRs collects them, so that only the fresh data at an owner
+// keeps one out (repopulateWorkingSetLocked), not another RRset carried
+// there (CodeRabbit on #1145). Caller holds zd.mu.
 func (zd *ZoneData) signalCarryNowLocked(dynamicRRs []*core.RRset) []*core.RRset {
 	carries := zd.KeyDB != nil && zd.addsTransportSignal() &&
 		(zd.Options[OptAllowUpdates] || zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning])
-	if !carries {
-		return dynamicRRs
-	}
 	out := make([]*core.RRset, 0, len(dynamicRRs))
 	collected := map[string]string{}
 	for _, rs := range dynamicRRs {
@@ -2441,6 +2444,9 @@ func (zd *ZoneData) signalCarryNowLocked(dynamicRRs []*core.RRset) []*core.RRset
 		} else if len(rs.RRs) > 0 {
 			collected[core.CanonicalizeName(rs.Name)] = signalDigest(rs.RRs)
 		}
+	}
+	if !carries {
+		return out
 	}
 	again := func(owner string, rrs []dns.RR) bool {
 		own, err := zd.signalStoredByPass(owner, rrs)
@@ -2456,7 +2462,7 @@ func (zd *ZoneData) signalCarryNowLocked(dynamicRRs []*core.RRset) []*core.RRset
 			"zone", zd.ZoneName, "owner", owner, "error", err)
 		return false
 	}
-	return append(out, zd.carriedSignalSVCBs(zd.publishedSnapshot(), again)...)
+	return append(zd.carriedSignalSVCBs(zd.publishedSnapshot(), again), out...)
 }
 
 // repopulateWorkingSetLocked merges dynamic RRsets into the working set.

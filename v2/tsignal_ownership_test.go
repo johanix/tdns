@@ -592,99 +592,383 @@ ns1.example.	3600	IN	A	127.0.0.1
 	}
 }
 
+// journalRig is a run of processes on one KeyDB, each loading the zone
+// example. from a file and reconciling its journal with it.
+type journalRig struct {
+	t   *testing.T
+	kdb *KeyDB
+}
+
+const journalRigOwner = "_dns.ns1.example."
+
+const journalRigFile = `example.	3600	IN	SOA	ns1.example. hostmaster.example. 1 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+ns1.example.	3600	IN	A	127.0.0.1
+`
+
+func newJournalRig(t *testing.T) *journalRig {
+	t.Helper()
+	prevSVCB, prevListeners := Globals.ServerSVCB, Conf.Listeners.Addresses
+	Globals.ServerSVCB = &dns.SVCB{Hdr: dns.RR_Header{Name: "_dns.server.example.", Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 300}, Priority: 1, Target: "."}
+	Conf.Listeners.Addresses = []string{"127.0.0.1:53"}
+	t.Cleanup(func() { Globals.ServerSVCB, Conf.Listeners.Addresses = prevSVCB, prevListeners })
+	return &journalRig{t: t, kdb: newTestKeyDB(t)}
+}
+
+// start is a process: the zone loaded from body, and the journal
+// reconciled with it.
+func (r *journalRig) start(body string) (*ZoneData, *Config) {
+	r.t.Helper()
+	zd := reloadZone(r.t, r.kdb, body)
+	zd.Options[OptAddTransportSignal] = true
+	if _, err := zd.FetchFromFile(context.Background(), false, false, true, nil); err != nil {
+		r.t.Fatalf("FetchFromFile: %v", err)
+	}
+	conf := &Config{}
+	conf.Service.Transport.Type = "svcb"
+	conf.Service.Identities = []string{"ns1.example."}
+	conf.Listeners.Addresses = Conf.Listeners.Addresses
+	return zd, conf
+}
+
+// deltas is the number of journal deltas the KeyDB holds.
+func (r *journalRig) deltas() int {
+	r.t.Helper()
+	deltas, err := r.kdb.LoadZoneDeltas("example.")
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	return len(deltas)
+}
+
+// update applies an operator's change through the applier, which journals
+// it once published.
+func (r *journalRig) update(zd *ZoneData, spec ZoneUpdateSpec) {
+	r.t.Helper()
+	actions, err := BuildZoneUpdateActions("example.", spec)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: actions}, r.kdb); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+// rideJournaled has the pass store signal while an operator's change is
+// held back, so that the store rides in that change's publish, which is
+// journaled.
+func (r *journalRig) rideJournaled(zd *ZoneData, conf *Config, signal string) {
+	r.t.Helper()
+	before := r.deltas()
+	zd.mu.Lock()
+	prevCadence := zd.publishCadence
+	zd.publishCadence = time.Hour
+	zd.lastPublish = time.Now()
+	zd.mu.Unlock()
+	r.update(zd, ZoneUpdateSpec{Verb: VerbAddRR, RRs: []string{`note.example. 3600 IN TXT "an operator's change"`}})
+	conf.Service.Transport.Signal = signal
+	if err := zd.CreateTransportSignalRRs(conf); err != nil {
+		r.t.Fatal(err)
+	}
+	publishNow(zd)
+	zd.mu.Lock()
+	zd.publishCadence = prevCadence
+	zd.lastPublish = time.Time{}
+	zd.mu.Unlock()
+	if got := svcbRecords(zd, journalRigOwner); len(got) != 1 || !strings.Contains(got[0].String(), `"`+signal+`"`) {
+		r.t.Fatalf("the journaled publish did not carry the signal: %v", got)
+	}
+	if n := r.deltas(); n != before+1 {
+		r.t.Fatalf("the publish with the operator's change left %d journal deltas, want %d", n, before+1)
+	}
+}
+
+// storeMany has the pass store signals prefix:from to prefix:to, each
+// published with no journal entry.
+func (r *journalRig) storeMany(zd *ZoneData, conf *Config, from, to int) {
+	r.t.Helper()
+	before := r.deltas()
+	for i := from; i <= to; i++ {
+		storeSignal(r.t, zd, conf, journalRigOwner, fmt.Sprintf("dot:%d", i))
+	}
+	if n := r.deltas(); n != before {
+		r.t.Fatalf("the stores were journaled (%d deltas, %d before), and the test needs them not to be", n, before)
+	}
+}
+
+// replays checks that the zone serves signal at the owner, which only a
+// replay of the journal can have put there.
+func (r *journalRig) replays(zd *ZoneData, signal string) {
+	r.t.Helper()
+	if got := svcbRecords(zd, journalRigOwner); len(got) != 1 || !strings.Contains(got[0].String(), `"`+signal+`"`) {
+		r.t.Fatalf("the restart did not replay the journaled signal %s: %v", signal, got)
+	}
+}
+
 // A stored signal that rides in a journaled publish of another writer's
 // change stays the pass's for as long as the journal holds it, though the
 // stores after it are published with no journal entry: a restart replays it,
 // and the pass must still know it for its own, in the process that
 // journaled it and in one that only replayed it (CodeRabbit on #1145).
 func TestAJournaledSignalStaysThePassesUntilTheZoneIsWritten(t *testing.T) {
-	const owner = "_dns.ns1.example."
-	const file = `example.	3600	IN	SOA	ns1.example. hostmaster.example. 1 7200 1800 604800 7200
-example.	3600	IN	NS	ns1.example.
-ns1.example.	3600	IN	A	127.0.0.1
-`
-	kdb := newTestKeyDB(t)
-	prevSVCB, prevListeners := Globals.ServerSVCB, Conf.Listeners.Addresses
-	Globals.ServerSVCB = &dns.SVCB{Hdr: dns.RR_Header{Name: "_dns.server.example.", Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 300}, Priority: 1, Target: "."}
-	Conf.Listeners.Addresses = []string{"127.0.0.1:53"}
-	t.Cleanup(func() { Globals.ServerSVCB, Conf.Listeners.Addresses = prevSVCB, prevListeners })
-	// start is a process: the zone loaded from the file, and the journal
-	// reconciled with it.
-	start := func() (*ZoneData, *Config) {
-		t.Helper()
-		zd := reloadZone(t, kdb, file)
-		zd.Options[OptAddTransportSignal] = true
-		if _, err := zd.FetchFromFile(context.Background(), false, false, true, nil); err != nil {
-			t.Fatalf("FetchFromFile: %v", err)
-		}
-		conf := &Config{}
-		conf.Service.Transport.Type = "svcb"
-		conf.Service.Identities = []string{"ns1.example."}
-		conf.Listeners.Addresses = Conf.Listeners.Addresses
-		return zd, conf
-	}
-	journaled := func() int {
-		t.Helper()
-		deltas, err := kdb.LoadZoneDeltas("example.")
-		if err != nil {
-			t.Fatal(err)
-		}
-		return len(deltas)
-	}
-
-	zd, conf := start()
-	storeSignal(t, zd, conf, owner, "dot:1")
-	// An operator's change is staged and held back, and the next store
-	// rides in its publish, which is journaled.
-	zd.mu.Lock()
-	prevCadence := zd.publishCadence
-	zd.publishCadence = time.Hour
-	zd.lastPublish = time.Now()
-	zd.mu.Unlock()
-	actions, err := BuildZoneUpdateActions("example.", ZoneUpdateSpec{
-		Verb: VerbAddRR, RRs: []string{`note.example. 3600 IN TXT "an operator's change"`},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: actions}, kdb); err != nil {
-		t.Fatal(err)
-	}
-	conf.Service.Transport.Signal = "dot:2"
-	if err := zd.CreateTransportSignalRRs(conf); err != nil {
-		t.Fatal(err)
-	}
-	publishNow(zd)
-	if got := svcbRecords(zd, owner); len(got) != 1 || !strings.Contains(got[0].String(), `"dot:2"`) {
-		t.Fatalf("the journaled publish did not carry the signal: %v", got)
-	}
-	if n := journaled(); n != 1 {
-		t.Fatalf("the publish with the operator's change left %d journal deltas, want 1", n)
-	}
-	zd.mu.Lock()
-	zd.publishCadence = prevCadence
-	zd.lastPublish = time.Time{}
-	zd.mu.Unlock()
-	for i := 3; i <= signalStoredKeep+3; i++ {
-		storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
-	}
-	if n := journaled(); n != 1 {
-		t.Fatalf("the stores after it were journaled (%d deltas), and the test needs them not to be", n)
-	}
+	r := newJournalRig(t)
+	zd, conf := r.start(journalRigFile)
+	storeSignal(t, zd, conf, journalRigOwner, "dot:1")
+	r.rideJournaled(zd, conf, "dot:2")
+	r.storeMany(zd, conf, 3, signalStoredKeep+3)
 
 	// A restart replays the journaled signal, and stores in that process,
 	// with no zone write, push it no further than the journal goes.
-	zd, conf = start()
-	if got := svcbRecords(zd, owner); len(got) != 1 || !strings.Contains(got[0].String(), `"dot:2"`) {
-		t.Fatalf("the restart did not replay the journaled signal: %v", got)
+	zd, conf = r.start(journalRigFile)
+	r.replays(zd, "dot:2")
+	r.storeMany(zd, conf, 20, signalStoredKeep+20)
+
+	zd, conf = r.start(journalRigFile)
+	r.replays(zd, "dot:2")
+	storeSignal(t, zd, conf, journalRigOwner, "dot:99")
+}
+
+// A process that has only replayed a journaled signal, and stored nothing
+// at the owner yet, follows it into the zone file it writes: the write
+// drops the journal, and the zone file is what holds the signal then
+// (CodeRabbit on #1145).
+func TestAZoneWriteFollowsTheSignalTheJournalReplayed(t *testing.T) {
+	r := newJournalRig(t)
+	zd, conf := r.start(journalRigFile)
+	storeSignal(t, zd, conf, journalRigOwner, "dot:1")
+	r.rideJournaled(zd, conf, "dot:2")
+
+	zd, conf = r.start(journalRigFile)
+	r.replays(zd, "dot:2")
+	if _, err := zd.WriteZone(true, true); err != nil {
+		t.Fatalf("WriteZone: %v", err)
 	}
-	for i := 20; i <= signalStoredKeep+20; i++ {
+	if n := r.deltas(); n != 0 {
+		t.Fatalf("the zone write left %d journal deltas, want 0", n)
+	}
+	written, err := os.ReadFile(zd.Zonefile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.storeMany(zd, conf, 20, signalStoredKeep+20)
+
+	zd, conf = r.start(string(written))
+	r.replays(zd, "dot:2")
+	storeSignal(t, zd, conf, journalRigOwner, "dot:99")
+}
+
+// A replay that cannot read the record when it replays the signal, though
+// the load before it could, keeps the signal all the same, and the first
+// store that can read the record finds it there and goes on keeping it
+// (CodeRabbit on #1145). The load finds the zone file without a signal at
+// the owner, so nothing else keeps the replayed one.
+func TestAJournaledSignalStaysThePassesWhenTheReplayCannotReadTheRecord(t *testing.T) {
+	r := newJournalRig(t)
+	zd, conf := r.start(journalRigFile)
+	storeSignal(t, zd, conf, journalRigOwner, "dot:1")
+	r.rideJournaled(zd, conf, "dot:2")
+
+	// The replay's read fails: what it records for the journal, it records
+	// on a failed read.
+	zd, conf = r.start(journalRigFile)
+	r.replays(zd, "dot:2")
+	if _, err := r.kdb.DB.Exec(`ALTER TABLE TransportSignalStored RENAME TO TransportSignalStored_gone`); err != nil {
+		t.Fatal(err)
+	}
+	zd.mu.Lock()
+	zd.signalStoredMu.Lock()
+	zd.signalJournaled = nil
+	zd.signalStoredMu.Unlock()
+	zd.noteSignalsJournaled([]string{journalRigOwner}, zd.publishedSnapshot(), zd.CurrentSerial)
+	zd.mu.Unlock()
+	if _, err := r.kdb.DB.Exec(`ALTER TABLE TransportSignalStored_gone RENAME TO TransportSignalStored`); err != nil {
+		t.Fatal(err)
+	}
+	r.storeMany(zd, conf, 20, signalStoredKeep+20)
+
+	zd, conf = r.start(journalRigFile)
+	r.replays(zd, "dot:2")
+	storeSignal(t, zd, conf, journalRigOwner, "dot:99")
+}
+
+// A journaled publish that leaves no SVCB RRset at the owner does not end
+// what is kept for an earlier one: the stores in between were not
+// journaled, the later delta removes only what the zone held before it,
+// and a replay brings back the signal the earlier delta added (CodeRabbit
+// on #1145).
+func TestAJournaledRemovalKeepsTheSignalAReplayStillYields(t *testing.T) {
+	r := newJournalRig(t)
+	zd, conf := r.start(journalRigFile)
+	storeSignal(t, zd, conf, journalRigOwner, "dot:1")
+	r.rideJournaled(zd, conf, "dot:2")
+	r.storeMany(zd, conf, 3, 3)
+	zd.UpdatePolicy = policyAllowing(dns.TypeA, dns.TypeTXT, dns.TypeSVCB)
+	r.update(zd, ZoneUpdateSpec{Verb: VerbDelRRset, Name: journalRigOwner, Rrtype: "SVCB"})
+	publishNow(zd)
+	if got := svcbRecords(zd, journalRigOwner); len(got) != 0 {
+		t.Fatalf("the operator's removal left %v", got)
+	}
+	if n := r.deltas(); n != 2 {
+		t.Fatalf("the removal left %d journal deltas, want 2", n)
+	}
+	r.storeMany(zd, conf, 10, signalStoredKeep+10)
+
+	zd, conf = r.start(journalRigFile)
+	r.replays(zd, "dot:2")
+	storeSignal(t, zd, conf, journalRigOwner, "dot:99")
+}
+
+// A refresh carries the pass's signal at an owner where it also carries
+// another dynamic RRset: only the fresh data there keeps the signal out
+// (CodeRabbit on #1145).
+func TestARefreshCarriesTheSignalBesideAnotherCarriedRRset(t *testing.T) {
+	r := newJournalRig(t)
+	zd, conf := r.start(journalRigFile)
+	storeSignal(t, zd, conf, journalRigOwner, "dot:1")
+	collected := append(zd.CollectDynamicRRs(conf), &core.RRset{
+		Name: journalRigOwner, Class: dns.ClassINET, RRtype: dns.TypeTXT,
+		RRs: mustRRs(t, journalRigOwner+` 300 IN TXT "carried beside the signal"`),
+	})
+	operatorEdit(t, zd, strings.Replace(journalRigFile, " 1 7200", " 2 7200", 1))
+	if _, err := zd.FetchFromFile(context.Background(), false, false, true, collected); err != nil {
+		t.Fatalf("FetchFromFile: %v", err)
+	}
+	if got := svcbRecords(zd, journalRigOwner); len(got) != 1 || !strings.Contains(got[0].String(), `"dot:1"`) {
+		t.Fatalf("the refresh did not carry the pass's signal: %v", got)
+	}
+}
+
+// A refresh in a zone that no longer carries the signal, the option turned
+// off since the refresh collected it, does not carry the SVCB RRset it
+// collected (CodeRabbit on #1145).
+func TestARefreshDoesNotCarryTheSignalOnceTheZoneStopsCarryingIt(t *testing.T) {
+	r := newJournalRig(t)
+	zd, conf := r.start(journalRigFile)
+	storeSignal(t, zd, conf, journalRigOwner, "dot:1")
+	collected := zd.CollectDynamicRRs(conf)
+	if !slices.ContainsFunc(collected, func(rs *core.RRset) bool { return rs != nil && rs.RRtype == dns.TypeSVCB }) {
+		t.Fatal("the refresh did not collect the pass's signal")
+	}
+	zd.mu.Lock()
+	zd.Options[OptAddTransportSignal] = false
+	zd.mu.Unlock()
+	operatorEdit(t, zd, strings.Replace(journalRigFile, " 1 7200", " 2 7200", 1))
+	if _, err := zd.FetchFromFile(context.Background(), false, false, true, collected); err != nil {
+		t.Fatalf("FetchFromFile: %v", err)
+	}
+	if got := svcbRecords(zd, journalRigOwner); len(got) != 0 {
+		t.Fatalf("the refresh carried the signal of a zone that no longer carries it: %v", got)
+	}
+}
+
+// A zone write whose directory sync fails keeps the signal the replaced
+// zone file held beside the one written: a crash can bring that file back,
+// and a restart from it must still know its signal for the pass's
+// (CodeRabbit on #1145).
+func TestAZoneWriteWhoseDirectorySyncFailsKeepsTheReplacedFilesSignal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a directory it may not read")
+	}
+	const z = "dirsyncprev.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	loaded, _ := storeThenRestart(t, z, kdb, "dot:50")
+	head := z + strings.ReplaceAll(readErrZoneBody, "%[1]s", z)
+	replaced := head + signalLines(t, loaded, owner)
+
+	zd, conf := signalTestZone(t, z, replaced, "127.0.0.1:53")
+	zd.KeyDB = kdb
+	conf.Service.Identities = []string{"ns1." + z}
+	storeSignal(t, zd, conf, owner, "dot:1")
+	dir := t.TempDir()
+	prevDir := viper.GetString("external.filedir")
+	viper.Set("external.filedir", dir)
+	t.Cleanup(func() { viper.Set("external.filedir", prevDir) })
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if _, _, err := zd.WriteFileWithSerial("dirsyncprev.zone"); err == nil || !strings.Contains(err.Error(), "to sync the rename") {
+		t.Fatalf("the write whose directory sync failed returned %v", err)
+	}
+	for i := 2; i <= signalStoredKeep+2; i++ {
 		storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
 	}
+	restartKnowsItsSignal(t, z, kdb, replaced, "dot:99")
+}
 
-	zd, conf = start()
-	if got := svcbRecords(zd, owner); len(got) != 1 || !strings.Contains(got[0].String(), `"dot:2"`) {
-		t.Fatalf("the second restart did not replay the journaled signal: %v", got)
+// A dynamic zone file written beside the file a zone loads (its Zonefile
+// names another) leaves what the record keeps for the zone file as it was:
+// the file the zone loads still holds its signal (CodeRabbit on #1145).
+func TestADynamicZoneFileTheZoneDoesNotLoadKeepsTheLoadedFilesSignal(t *testing.T) {
+	const z = "elsewhere.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	loaded, _ := storeThenRestart(t, z, kdb, "dot:50")
+	head := z + strings.ReplaceAll(readErrZoneBody, "%[1]s", z)
+	loads := head + signalLines(t, loaded, owner)
+
+	zd, conf := signalTestZone(t, z, loads, "127.0.0.1:53")
+	zd.KeyDB = kdb
+	zd.Zonefile = t.TempDir() + "/loaded.zone"
+	conf.Service.Identities = []string{"ns1." + z}
+	storeSignal(t, zd, conf, owner, "dot:1")
+	if _, err := zd.WriteDynamicZoneFile(t.TempDir()); err != nil {
+		t.Fatal(err)
 	}
-	storeSignal(t, zd, conf, owner, "dot:99")
+	for i := 2; i <= signalStoredKeep+2; i++ {
+		storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
+	}
+	restartKnowsItsSignal(t, z, kdb, loads, "dot:99")
+}
+
+// Two writes of the zone file that rename in one order follow them in the
+// record in that order: the record ends at the signal of the file renamed
+// last, which is the one in place (CodeRabbit on #1145).
+func TestZoneWritesFollowTheirRenamesInOrder(t *testing.T) {
+	const z = "renames.sig.example."
+	const owner = "_dns.ns1." + z
+	zd, conf := signalTestZone(t, z, z+strings.ReplaceAll(readErrZoneBody, "%[1]s", z), "127.0.0.1:53")
+	zd.KeyDB = newTestKeyDB(t)
+	conf.Service.Identities = []string{"ns1." + z}
+	storeSignal(t, zd, conf, owner, "dot:1")
+	dir := t.TempDir()
+
+	// The first write is renamed into place; before it follows the rename,
+	// the pass stores a newer signal and a second write runs.
+	second := make(chan error, 1)
+	t.Cleanup(func() { testHookZoneFileRenamed = nil })
+	testHookZoneFileRenamed = func() {
+		testHookZoneFileRenamed = nil
+		storeSignal(t, zd, conf, owner, "dot:2")
+		go func() {
+			_, err := zd.WriteDynamicZoneFile(dir)
+			second <- err
+		}()
+		select {
+		case err := <-second:
+			second <- err
+		case <-time.After(300 * time.Millisecond):
+		}
+	}
+	path, err := zd.WriteDynamicZoneFile(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err != nil {
+		t.Fatal(err)
+	}
+	inPlace, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(inPlace), `"dot:2"`) {
+		t.Fatalf("the zone file in place does not hold the newer signal:\n%s", inPlace)
+	}
+	zd.signalStoredMu.Lock()
+	kept := zd.signalOnDisk[owner]
+	zd.signalStoredMu.Unlock()
+	if want := signalDigest(svcbRecords(zd, owner)); kept != want {
+		t.Fatalf("the record keeps %q for the zone file, want the signal of the file in place (%q)", kept, want)
+	}
 }
