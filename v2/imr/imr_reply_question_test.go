@@ -74,7 +74,7 @@ func rqImr(t *testing.T, servers map[string]dns.HandlerFunc) *Imr {
 		stub = append(stub, cache.AuthServer{Name: "ns" + strconv.Itoa(len(stub)) + "." + rqZone, Addrs: []string{ip}, Alpn: []string{"do53"}})
 	}
 	imr := verdictImr(t, false)
-	if imr.Options[ImrOptUseTransportSignals] == "false" {
+	if imr.Options[OptUseTransportSignals] == "false" {
 		t.Fatal("precondition: transport signals are off")
 	}
 	p := strconv.Itoa(port)

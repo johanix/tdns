@@ -4,14 +4,14 @@
 
 package imr
 
-type ImrOption uint8
+type Option uint8
 
 const (
-	ImrOptRevalidateNS ImrOption = iota + 1
-	ImrOptQueryForTransport
-	ImrOptAlwaysQueryForTransport
-	ImrOptTransportSignalType
-	ImrOptQueryForTransportTLSA
-	ImrOptUseTransportSignals
-	ImrOptAllowLoopbackNameservers
+	OptRevalidateNS Option = iota + 1
+	OptQueryForTransport
+	OptAlwaysQueryForTransport
+	OptTransportSignalType
+	OptQueryForTransportTLSA
+	OptUseTransportSignals
+	OptAllowLoopbackNameservers
 )

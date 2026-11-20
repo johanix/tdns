@@ -16,24 +16,24 @@ import (
 	"github.com/miekg/dns"
 )
 
-// ImrOutboundQueryHookFunc is called before the IMR sends an iterative query
+// OutboundQueryHookFunc is called before the IMR sends an iterative query
 // to an authoritative server.
 // Return nil to proceed with the query.
 // Return a non-nil error to skip this server (behaves as if the server didn't respond).
-type ImrOutboundQueryHookFunc func(ctx context.Context, qname string,
+type OutboundQueryHookFunc func(ctx context.Context, qname string,
 	qtype uint16, serverName string, serverAddr string,
 	transport core.Transport) error
 
-// ImrResponseHookFunc is called after the IMR receives a response from an
+// ResponseHookFunc is called after the IMR receives a response from an
 // authoritative server. Observe-only — return value is ignored.
-type ImrResponseHookFunc func(ctx context.Context, qname string, qtype uint16,
+type ResponseHookFunc func(ctx context.Context, qname string, qtype uint16,
 	serverName string, serverAddr string, transport core.Transport,
 	response *dns.Msg, rcode int)
 
-// RegisterImrOutboundQueryHook registers a hook that is called before the IMR
+// RegisterOutboundQueryHook registers a hook that is called before the IMR
 // sends an iterative query to an authoritative server. Multiple hooks can be
 // registered and are called in registration order.
-func RegisterImrOutboundQueryHook(hook ImrOutboundQueryHookFunc) error {
+func RegisterOutboundQueryHook(hook OutboundQueryHookFunc) error {
 	if hook == nil {
 		return fmt.Errorf("hook cannot be nil")
 	}
@@ -44,10 +44,10 @@ func RegisterImrOutboundQueryHook(hook ImrOutboundQueryHookFunc) error {
 	return nil
 }
 
-// RegisterImrResponseHook registers a hook that is called after the IMR
+// RegisterResponseHook registers a hook that is called after the IMR
 // receives a response from an authoritative server. Multiple hooks can be
 // registered and are called in registration order.
-func RegisterImrResponseHook(hook ImrResponseHookFunc) error {
+func RegisterResponseHook(hook ResponseHookFunc) error {
 	if hook == nil {
 		return fmt.Errorf("hook cannot be nil")
 	}
@@ -59,23 +59,23 @@ func RegisterImrResponseHook(hook ImrResponseHookFunc) error {
 }
 
 // getImrOutboundQueryHooks returns all registered outbound query hooks.
-func getImrOutboundQueryHooks() []ImrOutboundQueryHookFunc {
+func getImrOutboundQueryHooks() []OutboundQueryHookFunc {
 	globalImrOutboundQueryHooksMutex.RLock()
 	defer globalImrOutboundQueryHooksMutex.RUnlock()
 	return globalImrOutboundQueryHooks
 }
 
 // getImrResponseHooks returns all registered response hooks.
-func getImrResponseHooks() []ImrResponseHookFunc {
+func getImrResponseHooks() []ResponseHookFunc {
 	globalImrResponseHooksMutex.RLock()
 	defer globalImrResponseHooksMutex.RUnlock()
 	return globalImrResponseHooks
 }
 
 var (
-	globalImrOutboundQueryHooks      []ImrOutboundQueryHookFunc
+	globalImrOutboundQueryHooks      []OutboundQueryHookFunc
 	globalImrOutboundQueryHooksMutex sync.RWMutex
 
-	globalImrResponseHooks      []ImrResponseHookFunc
+	globalImrResponseHooks      []ResponseHookFunc
 	globalImrResponseHooksMutex sync.RWMutex
 )

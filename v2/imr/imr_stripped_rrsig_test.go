@@ -151,7 +151,7 @@ func askResponder(t *testing.T, imr *Imr, qname string, q verdictQuery) *dns.Msg
 	t.Helper()
 	r, opts := q.msgFor(qname, dns.TypeA)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, qname, dns.TypeA, opts)
+	imr.Responder(context.Background(), cw, r, qname, dns.TypeA, opts)
 	if cw.got == nil {
 		t.Fatalf("%s: responder wrote nothing", qname)
 	}

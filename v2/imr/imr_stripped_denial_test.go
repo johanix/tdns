@@ -123,7 +123,7 @@ func askDenialImr(t *testing.T, imr *Imr, qname string, qtype uint16, q verdictQ
 	t.Helper()
 	r, opts := q.msgFor(qname, qtype)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, qname, qtype, opts)
+	imr.Responder(context.Background(), cw, r, qname, qtype, opts)
 	if cw.got == nil {
 		t.Fatalf("%s %s: responder wrote nothing", qname, dns.TypeToString[qtype])
 	}

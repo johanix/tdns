@@ -113,7 +113,7 @@ func answerFromCache(t *testing.T, imr *Imr, r *dns.Msg) *dns.Msg {
 		t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
 	}
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, r.Question[0].Name, r.Question[0].Qtype, msgo)
+	imr.Responder(context.Background(), cw, r, r.Question[0].Name, r.Question[0].Qtype, msgo)
 	if cw.got == nil {
 		t.Fatal("no response written")
 	}
@@ -269,7 +269,7 @@ func TestHandleNegativeCachesCompactDenialAsNXDOMAIN(t *testing.T) {
 
 // CD used to take the proof away and leave the rcode behind. serveNegativeResponse
 // answered a +cd client with the SOA alone, whatever it had asked for, while the
-// cached-answer path in ImrResponder never looked at CD and sent the NSEC. On a
+// cached-answer path in Responder never looked at CD and sent the NSEC. On a
 // compact denial the two disagreed in the worst direction: negativeRcode
 // downgrades to NOERROR *because* the client is about to read the owner=qname
 // NSEC as existence, so dropping that NSEC left a +cd +dnssec client holding

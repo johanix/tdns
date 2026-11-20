@@ -331,11 +331,11 @@ func TestChooseEndpointAddr(t *testing.T) {
 	server.RecordEndpointAddrRTT("192.0.2.12", 853, core.TransportDoT, time.Millisecond)
 	server.RecordEndpointAddrFailure("192.0.2.12", 853, core.TransportDoT, nil)
 
-	imr.Options[ImrOptAllowLoopbackNameservers] = "false"
+	imr.Options[OptAllowLoopbackNameservers] = "false"
 	if got := imr.chooseEndpointAddr(server, nil, addrs, 853, core.TransportDoT); got != "192.0.2.11" {
 		t.Errorf("chose %q, want 192.0.2.11", got)
 	}
-	imr.Options[ImrOptAllowLoopbackNameservers] = "true"
+	imr.Options[OptAllowLoopbackNameservers] = "true"
 	if got := imr.chooseEndpointAddr(server, nil, addrs, 853, core.TransportDoT); got != "127.0.0.1" {
 		t.Errorf("with loopback allowed chose %q, want 127.0.0.1", got)
 	}

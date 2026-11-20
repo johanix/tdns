@@ -92,7 +92,7 @@ func cached(t *testing.T, imr *Imr, q verdictQuery) *dns.Msg {
 	t.Helper()
 	r, opts := q.msg()
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, verdictName, dns.TypeA, opts)
+	imr.Responder(context.Background(), cw, r, verdictName, dns.TypeA, opts)
 	if cw.got == nil {
 		t.Fatal("cached path wrote nothing")
 	}
@@ -189,7 +189,7 @@ func cachedAs(t *testing.T, imr *Imr, qname string, qtype uint16, q verdictQuery
 	t.Helper()
 	r, opts := q.msgFor(qname, qtype)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, qname, qtype, opts)
+	imr.Responder(context.Background(), cw, r, qname, qtype, opts)
 	if cw.got == nil {
 		t.Fatal("cached path wrote nothing")
 	}

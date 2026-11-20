@@ -71,7 +71,7 @@ func TestForwardUpstreamsForPrivacy(t *testing.T) {
 
 // Strict privacy on a forward zone with no encrypted upstream must fail with
 // the sentinel the responder matches on, not with a message that happens to
-// contain the right words: ImrResponder attaches the privacy-unavailable EDE
+// contain the right words: Responder attaches the privacy-unavailable EDE
 // on errors.Is and nothing else.
 func TestForwardStrictPrivacyReturnsSentinel(t *testing.T) {
 	fz := &ForwardZone{

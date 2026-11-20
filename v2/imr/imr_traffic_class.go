@@ -17,7 +17,7 @@ import (
 // resolver's own lookups -- DNSKEY and DS for validation, nameserver
 // addresses, transport signals, priming -- all go out with PrivacyNone, as a
 // client query without PRIVACY does. So the client path marks its context
-// (ImrResponder), and the own lookups that run inside a client's query mark
+// (Responder), and the own lookups that run inside a client's query mark
 // theirs back. A context without a mark is not a DNS client's: the transport
 // signal and TLSA lookups start from a context of their own, and the embedded
 // users (the scanner, the DSYNC lookups) never had one. "imr query" over the

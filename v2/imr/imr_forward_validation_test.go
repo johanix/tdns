@@ -176,7 +176,7 @@ func TestForwardValidatesASignedZoneWithNoDSAsInsecure(t *testing.T) {
 					r.SetQuestion(first.qname, first.qtype)
 					r.SetEdns0(4096, true)
 					cw := &captureWriter{}
-					imr.ImrResponder(context.Background(), cw, r, first.qname, first.qtype, &edns0.MsgOptions{RD: true, DO: true})
+					imr.Responder(context.Background(), cw, r, first.qname, first.qtype, &edns0.MsgOptions{RD: true, DO: true})
 					if cw.got == nil {
 						t.Fatalf("question %d: nothing written", i)
 					}

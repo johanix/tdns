@@ -35,7 +35,7 @@ func newStrictTestImr(t *testing.T, wait time.Duration) (*Imr, *cache.AuthServer
 	t.Helper()
 	imr := newTestImr(t)
 	imr.Cache.DNSClient = map[core.Transport]core.DNSClienter{}
-	imr.Options = map[ImrOption]string{}
+	imr.Options = map[Option]string{}
 	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
 	imr.Tuning.Discovery.StrictWait = wait
 	server := imr.Cache.GetOrCreateAuthServer(strictChildNS)
@@ -226,7 +226,7 @@ func TestAwaitTransportSignalsLeavesKnownServersAlone(t *testing.T) {
 // With transport signals turned off there is nothing to look up.
 func TestAwaitTransportSignalsOffWhenSignalsAreOff(t *testing.T) {
 	imr, _, serverMap := newStrictTestImr(t, 5*time.Second)
-	imr.Options[ImrOptUseTransportSignals] = "false"
+	imr.Options[OptUseTransportSignals] = "false"
 
 	if imr.awaitTransportSignals(context.Background(), "www."+strictChildZone, serverMap) {
 		t.Error("a server was found usable with transport signals off")

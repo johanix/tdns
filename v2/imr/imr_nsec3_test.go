@@ -92,7 +92,7 @@ func n3Ask(t *testing.T, imr *Imr, qname string, qtype uint16, do, cd bool) *dns
 	r.SetEdns0(4096, do)
 	r.CheckingDisabled = cd
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, qname, qtype, &edns0.MsgOptions{RD: true, DO: do, CD: cd})
+	imr.Responder(context.Background(), cw, r, qname, qtype, &edns0.MsgOptions{RD: true, DO: do, CD: cd})
 	if cw.got == nil {
 		t.Fatalf("%s %s: nothing written", qname, dns.TypeToString[qtype])
 	}

@@ -31,7 +31,7 @@ import (
 
 // ErrPrivacyUnavailable is returned when the client asked for strict privacy
 // (PRIVACY option, level 2) and no encrypted transport was available to carry
-// the query. ImrResponder turns it into SERVFAIL + EDE
+// the query. Responder turns it into SERVFAIL + EDE
 // EDEPrivacyRequestedUnavailable.
 //
 // It is a sentinel, matched with errors.Is, precisely so the message text is
@@ -600,7 +600,7 @@ func mayQueryAddr(server *cache.AuthServer, addr string, allowHostLocal bool) bo
 
 // allowHostLocalServers reports whether allow-loopback-nameservers is set.
 func (imr *Imr) allowHostLocalServers() bool {
-	return imr.Options[ImrOptAllowLoopbackNameservers] == "true"
+	return imr.Options[OptAllowLoopbackNameservers] == "true"
 }
 
 // prioritizeServers returns a flat, prioritized list of
@@ -1751,7 +1751,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	var rrset core.RRset
 	var rcode int
 
-	withOOTS := imr.Options[ImrOptUseTransportSignals] != "false"
+	withOOTS := imr.Options[OptUseTransportSignals] != "false"
 	m, err := buildQuery(qname, qtype, withOOTS)
 	if err != nil {
 		lg.Printf("IterativeDNSQuery: Error building query: %v", err)
@@ -2709,7 +2709,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			}
 		case *dns.SVCB, *dns.PrivateRR:
 			// -03: ignore Additional OOTS unless we set the OOTS option (use-transport-signals).
-			if imr.Options[ImrOptUseTransportSignals] == "false" {
+			if imr.Options[OptUseTransportSignals] == "false" {
 				continue
 			}
 			// Transport signals: process if:
@@ -3313,7 +3313,7 @@ func installAlpnSignal(server *cache.AuthServer, tokens []string, ports map[core
 // parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section.
 // -03: ignore Additional OOTS unless we set the OOTS option on the query (coupled to use-transport-signals).
 func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, server *cache.AuthServer, r *dns.Msg) {
-	if imr.Options[ImrOptUseTransportSignals] == "false" {
+	if imr.Options[OptUseTransportSignals] == "false" {
 		return
 	}
 	if ctx == nil {
@@ -3806,7 +3806,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 
 	// For out-of-bailiwick nameservers, we still need their addresses if they
 	// are not already present in cache. In-bailiwick NS should primarily use
-	// glue (and, when ImrOptRevalidateNS is enabled, will later be
+	// glue (and, when OptRevalidateNS is enabled, will later be
 	// revalidated by scheduleReferralNSRevalidation / revalidateInBailiwickGlue).
 	// Not for a stub: its servers are the configured ones, whatever the
 	// referral names.
@@ -3973,7 +3973,7 @@ func (imr *Imr) scheduleReferralNSRevalidation(zonename string, serverMap map[st
 	if imr.Cache == nil || zonename == "" || len(serverMap) == 0 {
 		return
 	}
-	if imr.Options[ImrOptRevalidateNS] != "true" {
+	if imr.Options[OptRevalidateNS] != "true" {
 		return
 	}
 	if !imr.Cache.MarkNSRevalidation(zonename) {
@@ -4009,7 +4009,7 @@ func cloneServerMap(src map[string]*cache.AuthServer) map[string]*cache.AuthServ
 
 func (imr *Imr) revalidateReferralNS(ctx context.Context, zonename string, serverMap map[string]*cache.AuthServer) {
 	imr.Cache.Logger.Printf("*** revalidateReferralNS: revalidating NS for zone %s", zonename)
-	if imr.Cache == nil || imr.Options[ImrOptRevalidateNS] != "true" || zonename == "" || len(serverMap) == 0 {
+	if imr.Cache == nil || imr.Options[OptRevalidateNS] != "true" || zonename == "" || len(serverMap) == 0 {
 		return
 	}
 	var existing *cache.CachedRRset
@@ -4115,7 +4115,7 @@ func collectInBailiwickNS(serverMap map[string]*cache.AuthServer, zonename strin
 }
 
 func (imr *Imr) revalidateInBailiwickGlue(ctx context.Context, zonename string, serverMap map[string]*cache.AuthServer, force bool) {
-	if imr.Cache == nil || imr.Options[ImrOptRevalidateNS] != "true" {
+	if imr.Cache == nil || imr.Options[OptRevalidateNS] != "true" {
 		return
 	}
 	hosts := collectInBailiwickNS(serverMap, zonename)

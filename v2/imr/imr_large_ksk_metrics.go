@@ -32,8 +32,8 @@ type LargeKskDSAlgCount struct {
 	Count     uint64
 }
 
-// LargeKskImrMetrics is a snapshot of IMR large-KSK telemetry counters.
-type LargeKskImrMetrics struct {
+// LargeKskMetrics is a snapshot of IMR large-KSK telemetry counters.
+type LargeKskMetrics struct {
 	DSEncounteredTotal    uint64
 	DSEncounteredLarge    uint64
 	DSDLargeRRByAlgorithm []LargeKskDSAlgCount
@@ -53,8 +53,8 @@ func DNSSECAlgorithmLabel(alg uint8) string {
 	return fmt.Sprintf("(%d)", alg)
 }
 
-func LargeKskImrMetricsSnapshot() LargeKskImrMetrics {
-	m := LargeKskImrMetrics{
+func LargeKskMetricsSnapshot() LargeKskMetrics {
+	m := LargeKskMetrics{
 		DSEncounteredTotal:   imrDSEncounteredTotal.Load(),
 		DSEncounteredLarge:   imrDSEncounteredLarge.Load(),
 		DNSKEYLookupTotal:    imrDNSKEYLookupTotal.Load(),
@@ -242,7 +242,7 @@ func serverAdvertises(server *cache.AuthServer, t core.Transport) bool {
 }
 
 // LargeAlgDSMetrics returns the total number of individual large-alg DS RRs
-// encountered in referrals. Prefer LargeKskImrMetricsSnapshot.
+// encountered in referrals. Prefer LargeKskMetricsSnapshot.
 func LargeAlgDSMetrics() uint64 {
 	var n uint64
 	for i := range imrDSDLargeRRByAlg {

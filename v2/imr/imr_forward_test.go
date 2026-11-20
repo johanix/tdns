@@ -35,7 +35,7 @@ import (
 	"github.com/quic-go/quic-go"
 )
 
-func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
+func TestBuildForwardsDefaultsAndOrder(t *testing.T) {
 	forwards, diags := BuildForwards([]ForwardConf{
 		{Zone: ".", Upstreams: []UpstreamConf{{Addr: "192.0.2.3"}}},
 		{Zone: "Foo.Bar", Upstreams: []UpstreamConf{
@@ -1150,7 +1150,7 @@ func TestExchangeDoQCancelIsNotLoggedAsFailure(t *testing.T) {
 	}
 }
 
-// TestBuildImrForwardsCAFile covers the ca-file trust anchor on a forward
+// TestBuildForwardsCAFile covers the ca-file trust anchor on a forward
 // upstream: it is parsed at build time, it lands in RootCAs, and the two
 // configurations that cannot mean anything are refused.
 //
@@ -1159,7 +1159,7 @@ func TestExchangeDoQCancelIsNotLoggedAsFailure(t *testing.T) {
 // "this upstream stopped using the system store", which nil/non-nil says
 // exactly. That the pool contains the right anchor is LoadCAPool's contract and
 // is covered where that is tested.
-func TestBuildImrForwardsCAFile(t *testing.T) {
+func TestBuildForwardsCAFile(t *testing.T) {
 	dir := t.TempDir()
 
 	caFile := filepath.Join(dir, "test-ca.crt")
@@ -1455,7 +1455,7 @@ func TestForwardStarvedUpstreamDoesNotFireOutboundHook(t *testing.T) {
 
 	var mu sync.Mutex
 	var asked []string
-	if err := RegisterImrOutboundQueryHook(func(_ context.Context, _ string, _ uint16,
+	if err := RegisterOutboundQueryHook(func(_ context.Context, _ string, _ uint16,
 		serverName, _ string, _ core.Transport) error {
 		mu.Lock()
 		asked = append(asked, serverName)

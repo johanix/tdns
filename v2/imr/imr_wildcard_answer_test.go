@@ -252,7 +252,7 @@ func askWith(t *testing.T, imr *Imr, qname string, qtype uint16, do bool) *dns.M
 	t.Helper()
 	r, opts := verdictQuery{do: do}.msgFor(qname, qtype)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, qname, qtype, opts)
+	imr.Responder(context.Background(), cw, r, qname, qtype, opts)
 	if cw.got == nil {
 		t.Fatalf("%s %s: responder wrote nothing", qname, dns.TypeToString[qtype])
 	}

@@ -52,7 +52,7 @@ func (imr *Imr) TransportSignalRRType() uint16 {
 	if imr == nil {
 		return dns.TypeSVCB
 	}
-	if val, ok := imr.Options[ImrOptTransportSignalType]; ok {
+	if val, ok := imr.Options[OptTransportSignalType]; ok {
 		switch strings.ToLower(val) {
 		case "tsync":
 			return core.TypeTSYNC
@@ -131,18 +131,18 @@ func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, rea
 	}
 	// With transport signals turned off, a signal would not be used, so
 	// none is looked up, whatever the discovery options say.
-	if imr.Options[ImrOptUseTransportSignals] == "false" {
+	if imr.Options[OptUseTransportSignals] == "false" {
 		return
 	}
 	switch reason {
 	case transportQueryReasonObservation:
 		// Proceed if either option is enabled
-		if imr.Options[ImrOptQueryForTransport] == "true" || imr.Options[ImrOptAlwaysQueryForTransport] == "true" {
+		if imr.Options[OptQueryForTransport] == "true" || imr.Options[OptAlwaysQueryForTransport] == "true" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	case transportQueryReasonNewServer:
 		// Only proceed if always-query option is enabled
-		if imr.Options[ImrOptAlwaysQueryForTransport] == "true" {
+		if imr.Options[OptAlwaysQueryForTransport] == "true" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	case transportQueryReasonVerify:
@@ -150,7 +150,7 @@ func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, rea
 		// Additional section could not tell, this lookup can, whether or not
 		// the options ask for discovery. Only use-transport-signals: false
 		// turns it off.
-		if imr.Options[ImrOptUseTransportSignals] != "false" {
+		if imr.Options[OptUseTransportSignals] != "false" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	case transportQueryReasonStrictPrivacy, transportQueryReasonNoUsableTransport:
@@ -159,12 +159,12 @@ func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, rea
 		// server's Do53 in backoff, say), so they look the transports up
 		// whether or not the options ask for discovery. Only
 		// use-transport-signals: false turns signals off.
-		if imr.Options[ImrOptUseTransportSignals] != "false" {
+		if imr.Options[OptUseTransportSignals] != "false" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	default:
 		// Proceed if either option is enabled
-		if imr.Options[ImrOptQueryForTransport] == "true" || imr.Options[ImrOptAlwaysQueryForTransport] == "true" {
+		if imr.Options[OptQueryForTransport] == "true" || imr.Options[OptAlwaysQueryForTransport] == "true" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	}
@@ -225,7 +225,7 @@ func inTransportSignalLookup(ctx context.Context) bool {
 // ended, missed it. It is applied to those servers, and to servers, the ones
 // a caller holds, whether or not they are in a zone map yet.
 func (imr *Imr) applyCachedTransportSignal(owner string, servers ...*cache.AuthServer) (signal, denied bool) {
-	if imr.Options[ImrOptUseTransportSignals] == "false" {
+	if imr.Options[OptUseTransportSignals] == "false" {
 		return false, false
 	}
 	cached, denied := imr.cachedTransportSignal(owner)
@@ -278,7 +278,7 @@ func (imr *Imr) awaitTransportSignals(ctx context.Context, qname string, serverM
 // it could be waiting for itself, or for a lookup that waits for it. Strict
 // queries could not anyway: Query never asks for privacy.
 func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[string]*cache.AuthServer, reason string, ready func() bool) bool {
-	if imr.Cache == nil || imr.Options[ImrOptUseTransportSignals] == "false" || inTransportSignalLookup(ctx) {
+	if imr.Cache == nil || imr.Options[OptUseTransportSignals] == "false" || inTransportSignalLookup(ctx) {
 		return ready()
 	}
 	type lookup struct {
@@ -361,7 +361,7 @@ func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[st
 }
 
 func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
-	if imr.Cache == nil || ctx == nil || imr.Options[ImrOptQueryForTransportTLSA] != "true" {
+	if imr.Cache == nil || ctx == nil || imr.Options[OptQueryForTransportTLSA] != "true" {
 		return
 	}
 	base = dns.Fqdn(strings.TrimSpace(base))

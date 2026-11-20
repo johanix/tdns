@@ -166,7 +166,7 @@ func TestCachedNodataOnTheWireKeepsADAndAnEmptyAnswer(t *testing.T) {
 	r.SetEdns0(4096, true)
 
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, "ns1.example.", dns.TypeSOA,
+	imr.Responder(context.Background(), cw, r, "ns1.example.", dns.TypeSOA,
 		&edns0.MsgOptions{RD: true, DO: true})
 
 	if cw.got == nil {

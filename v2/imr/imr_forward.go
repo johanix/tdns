@@ -743,7 +743,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 			fmt.Errorf("forward zone %s is quarantined: %s", fz.Zone, why)
 	}
 
-	// Mirror the iterative path's strict-privacy precheck. ImrResponder
+	// Mirror the iterative path's strict-privacy precheck. Responder
 	// recognises the failure through errors.Is(ErrPrivacyUnavailable) and
 	// attaches the EDE.
 	if privacy == edns0.PrivacyStrict && !fz.hasEncryptedUpstream() {
@@ -978,7 +978,7 @@ func (imr *Imr) forwardQuery(ctx context.Context, qname string, qtype uint16, fz
 	// Under strict privacy the only upstreams tried were the encrypted ones,
 	// so exhausting them IS the privacy failure: a cleartext upstream might
 	// have answered, and the client forbade asking. Wrapping the sentinel is
-	// what lets ImrResponder attach the EDE, and it mirrors what the iterative
+	// what lets Responder attach the EDE, and it mirrors what the iterative
 	// path does when its encrypted tuples run out.
 	if privacy == edns0.PrivacyStrict {
 		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53,

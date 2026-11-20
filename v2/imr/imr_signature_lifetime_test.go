@@ -97,7 +97,7 @@ func askLifetime(t *testing.T, imr *Imr, qname string, qtype uint16) *dns.Msg {
 	r.SetQuestion(qname, qtype)
 	r.SetEdns0(4096, true)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, qname, qtype, &edns0.MsgOptions{RD: true, DO: true})
+	imr.Responder(context.Background(), cw, r, qname, qtype, &edns0.MsgOptions{RD: true, DO: true})
 	if cw.got == nil {
 		t.Fatalf("%s %s: nothing written", qname, dns.TypeToString[qtype])
 	}

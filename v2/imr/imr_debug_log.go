@@ -38,12 +38,12 @@ func imrDebugLogger(lg *slog.Logger, logfile string) *log.Logger {
 		}
 		dl := log.New(f, "", log.Ldate|log.Ltime|log.Lmicroseconds)
 		lg.Info("IMR debug logging enabled", "file", logfile)
-		RegisterImrOutboundQueryHook(func(ctx context.Context, qname string, qtype uint16, serverName, serverAddr string, transport core.Transport) error {
+		RegisterOutboundQueryHook(func(ctx context.Context, qname string, qtype uint16, serverName, serverAddr string, transport core.Transport) error {
 			dl.Printf("OUTBOUND qname=%s qtype=%s server=%s addr=%s transport=%s",
 				qname, dns.TypeToString[qtype], serverName, serverAddr, core.TransportToString[transport])
 			return nil
 		})
-		RegisterImrResponseHook(func(ctx context.Context, qname string, qtype uint16, serverName, serverAddr string, transport core.Transport, response *dns.Msg, rcode int) {
+		RegisterResponseHook(func(ctx context.Context, qname string, qtype uint16, serverName, serverAddr string, transport core.Transport, response *dns.Msg, rcode int) {
 			var ans []string
 			if response != nil {
 				for _, rr := range response.Answer {

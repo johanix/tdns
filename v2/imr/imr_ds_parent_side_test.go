@@ -140,7 +140,7 @@ func TestClientDSQueryGoesToTheParent(t *testing.T) {
 		r := new(dns.Msg)
 		r.SetQuestion(child, dns.TypeDS)
 		cw := &captureWriter{}
-		imr.ImrResponder(context.Background(), cw, r, child, dns.TypeDS, &edns0.MsgOptions{RD: true})
+		imr.Responder(context.Background(), cw, r, child, dns.TypeDS, &edns0.MsgOptions{RD: true})
 		if cw.got == nil {
 			t.Fatal("responder wrote no response")
 		}

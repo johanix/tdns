@@ -124,9 +124,9 @@ func TestImrQueryForwardsWithoutARootServerMap(t *testing.T) {
 	requireAsked(t, logr, "www.fwd.example.", dns.TypeA)
 }
 
-// Gate: ImrResponder. The same path as imrQuery's, and the client got a
+// Gate: Responder. The same path as imrQuery's, and the client got a
 // SERVFAIL.
-func TestImrResponderForwardsWithoutARootServerMap(t *testing.T) {
+func TestResponderForwardsWithoutARootServerMap(t *testing.T) {
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
@@ -136,7 +136,7 @@ func TestImrResponderForwardsWithoutARootServerMap(t *testing.T) {
 	r := new(dns.Msg)
 	r.SetQuestion("www.fwd.example.", dns.TypeA)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, "www.fwd.example.", dns.TypeA, &edns0.MsgOptions{RD: true})
+	imr.Responder(context.Background(), cw, r, "www.fwd.example.", dns.TypeA, &edns0.MsgOptions{RD: true})
 	if cw.got == nil {
 		t.Fatal("nothing written")
 	}
@@ -350,7 +350,7 @@ func TestAQuestionWhoseForwardWasRemovedIsIterated(t *testing.T) {
 		{"the fetchers (ServersFor)", func(imr *Imr) (map[string]*cache.AuthServer, bool) {
 			return imr.Cache.ServersFor(qname, dns.TypeA)
 		}},
-		{"imrQuery and ImrResponder (serversForQuestion)", func(imr *Imr) (map[string]*cache.AuthServer, bool) {
+		{"imrQuery and Responder (serversForQuestion)", func(imr *Imr) (map[string]*cache.AuthServer, bool) {
 			_, servers, forwarded, _ := imr.serversForQuestion(qname, dns.TypeA)
 			return servers, forwarded
 		}},

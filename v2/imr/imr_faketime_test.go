@@ -92,7 +92,7 @@ func askWWW(t *testing.T, imr *Imr) *dns.Msg {
 	r.SetQuestion(fwdSecWWW, dns.TypeA)
 	r.SetEdns0(4096, true)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, fwdSecWWW, dns.TypeA, &edns0.MsgOptions{RD: true, DO: true})
+	imr.Responder(context.Background(), cw, r, fwdSecWWW, dns.TypeA, &edns0.MsgOptions{RD: true, DO: true})
 	if cw.got == nil {
 		t.Fatal("nothing written")
 	}

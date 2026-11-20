@@ -26,7 +26,7 @@ func edns0Query(qname string, qtype uint16, do bool) *dns.Msg {
 func serveFromCache(t *testing.T, imr *Imr, r *dns.Msg, qname string, qtype uint16, opts *edns0.MsgOptions) *dns.Msg {
 	t.Helper()
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, qname, qtype, opts)
+	imr.Responder(context.Background(), cw, r, qname, qtype, opts)
 	if cw.got == nil {
 		t.Fatal("responder wrote no response")
 	}

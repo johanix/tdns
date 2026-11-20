@@ -26,7 +26,7 @@ import (
 type Imr struct {
 	Cache       *cache.RRsetCacheT
 	DnskeyCache *cache.DnskeyCacheT
-	Options     map[ImrOption]string
+	Options     map[Option]string
 	LineWidth   int // used to truncate long lines in logging and output (eg. DNSKEYs and RRSIGs)
 	Verbose     bool
 	Debug       bool
@@ -1226,7 +1226,7 @@ func (imr *Imr) resolveNSAddresses(ctx context.Context, bestmatch string, qname 
 	return false, nil
 }
 
-// serversForQuestion is where imrQuery and ImrResponder send <qname, qtype>.
+// serversForQuestion is where imrQuery and Responder send <qname, qtype>.
 // A question about a zone this server is authoritative for goes to that zone,
 // with no servers: IterativeDNSQuery answers it from the zone (#842). A
 // forwarded question goes to its forward zone, named in zone, with no servers
@@ -1321,7 +1321,7 @@ func attachPrivacyUnavailableEDE(m, r *dns.Msg, zone string, msgoptions *edns0.M
 	edns0.AttachEDEToResponseWithText(m, edns0.EDEPrivacyRequestedUnavailable, edeText, msgoptions.DO)
 }
 
-func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions) {
+func (imr *Imr) Responder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions) {
 	// A client's query: the answers it causes are counted under its privacy
 	// level (see trafficClass), except those of the resolver's own lookups
 	// inside it, which mark themselves.
@@ -1381,7 +1381,7 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		return
 	}
 	// Optional fast return for indirect cache hits. By default
-	// ImrResponder falls through to a full iterative query for
+	// Responder falls through to a full iterative query for
 	// Referral/Glue/Hint entries (to get DNSSEC signatures). With
 	// UpgradeIndirectCacheHits=false, return the cached data if it
 	// answers the question — same trade-off as Query's branch.
@@ -1679,7 +1679,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 		// PrivacyCached. Under strict privacy that is still accurate -- cached
 		// data that arrived over cleartext is not served at all -- and
 		// reporting the recorded transport is never a claim of MORE privacy
-		// than the data got. Only ImrResponder's own cache short-circuits,
+		// than the data got. Only Responder's own cache short-circuits,
 		// above, can say "from cache" without qualification.
 		//
 		// The verdict is the validation's, whatever the client asked for: DO
@@ -1747,7 +1747,7 @@ func (imr *Imr) ProcessAuthDNSResponse(ctx context.Context, qname string, qtype 
 	// A negative answer was fetched over a transport just as a positive one
 	// was, so it carries the same status. Omitting it here was a hole a client
 	// could not read as anything but "the resolver ignored my request": the
-	// cached-negative paths in ImrResponder do attach PrivacyCached, and the
+	// cached-negative paths in Responder do attach PrivacyCached, and the
 	// migration note tells a strict client to treat a missing status as a
 	// resolver that did not honor the option.
 	//
@@ -1950,7 +1950,7 @@ func (imr *Imr) serveNegativeResponse(ctx context.Context, qname string, qtype u
 	// gets the proof -- CD means "do not validate on my behalf" (RFC 4035
 	// section 3.2.2), not "do not send me the records", and stripping them
 	// here made this path disagree with the cached-answer path in
-	// ImrResponder, which never consulted CD. On a compact denial the
+	// Responder, which never consulted CD. On a compact denial the
 	// disagreement was not cosmetic: negativeRcode downgrades to NOERROR
 	// precisely BECAUSE the client is about to see the owner=qname NSEC, so
 	// dropping that NSEC left a +cd +dnssec client with NOERROR and no proof
