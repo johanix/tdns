@@ -694,4 +694,17 @@ with a socket and, later, an access file:
   removes it as a stale socket (seen working on the restart), so this is
   cosmetic; noted here rather than fixed.
 
-Not yet run on NetBSD.
+**2026-11-20, the same on NetBSD 10.1, as root** (both binaries built from
+#1168's head with make):
+
+- **NetBSD enforces a socket file's own permissions**, which section 7 left
+  open: `nobody` could not connect to a root-owned 0600 socket in a 0755
+  directory, and could once it was 0666. The 0700 directory is a second layer,
+  not the only one.
+- The daemon created `run/` 0700 and the socket 0600, both root's. `config add`
+  run as root wrote a socket entry (`unix:///...`, `authmethod: none`, no key),
+  and `ping` over it was admin; `nobody` could not open it.
+- `config add --tcp` wrote a pinned TCP entry. Its key was admin before the
+  access file and read-write after it; a certificate entry was "me
+  (read-write)"; `daemon stop` over TCP got 403; `client list` matched the
+  running policy; stop over the socket worked.
