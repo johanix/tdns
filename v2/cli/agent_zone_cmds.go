@@ -13,212 +13,274 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// AgentZoneCmd is the agent-specific "zone" command group.
+// NewAgentZoneCmd builds the agent-specific "zone" command group for one agent
+// instance: `role` is the key GetApiClient resolves, "agent" for the canonical
+// tdns-agent and the instance's own name for an extra one.
+//
 // It contains only the zone subcommands relevant to the agent,
 // plus the new addrr/delrr commands for managing synced RRs.
-var AgentZoneCmd = &cobra.Command{
-	Use:   "zone",
-	Short: "Agent zone management commands",
-}
+//
+// A function rather than package-level command values for the reason every
+// other per-instance subtree is one (see NewAuthTree): a *cobra.Command has one
+// parent, so a second agent tree needs its own copy of every command, and the
+// commands must take their target from the tree rather than from a literal.
+func NewAgentZoneCmd(role string) *cobra.Command {
+	AgentZoneCmd := &cobra.Command{
+		Use:   "zone",
+		Short: "Agent zone management commands",
+	}
 
-// --- Zone subcommands relevant to the agent ---
+	// --- Zone subcommands relevant to the agent ---
 
-var agentZoneListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List configured zones",
-	Run:   func(cmd *cobra.Command, args []string) { RunZoneList("agent", args) },
-}
+	agentZoneListCmd := &cobra.Command{
+		Use:   "list",
+		Short: "List configured zones",
+		Run:   func(cmd *cobra.Command, args []string) { RunZoneList(role, args) },
+	}
 
-var agentZoneReloadCmd = &cobra.Command{
-	Use:   "reload",
-	Short: "Request re-loading a zone",
-	Run:   func(cmd *cobra.Command, args []string) { RunZoneReload("agent", args) },
-}
+	agentZoneReloadCmd := &cobra.Command{
+		Use:   "reload",
+		Short: "Request re-loading a zone",
+		Run:   func(cmd *cobra.Command, args []string) { RunZoneReload(role, args) },
+	}
 
-var agentZoneWriteCmd = &cobra.Command{
-	Use:   "write",
-	Short: "Write a zone to disk",
-	Run:   func(cmd *cobra.Command, args []string) { RunZoneWrite("agent", args) },
-}
+	agentZoneWriteCmd := &cobra.Command{
+		Use:   "write",
+		Short: "Write a zone to disk",
+		Run:   func(cmd *cobra.Command, args []string) { RunZoneWrite(role, args) },
+	}
 
-var agentZoneUpdateCmd = &cobra.Command{
-	Use:   "update",
-	Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
-}
+	agentZoneUpdateCmd := &cobra.Command{
+		Use:   "update",
+		Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
+	}
 
-var agentZoneUpdateCreateCmd = &cobra.Command{
-	Use:   "create",
-	Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
-	Long: `Will query for details about the DNS UPDATE via (add|del|show|set-ttl) commands.
+	agentZoneUpdateCreateCmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
+		Long: `Will query for details about the DNS UPDATE via (add|del|show|set-ttl) commands.
 When the message is complete it may be signed and sent by the 'send' command. After a
 message has been send the loop will start again with a new, empty message to create.
 Loop ends on the command "QUIT"
 
 The zone to update is mandatory to specify on the command line with the --zone flag.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-		CreateUpdate("agent", "zone")
-	},
-}
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
+			CreateUpdate(role, "zone")
+		},
+	}
 
-var agentZoneReadFakeCmd = &cobra.Command{
-	Use:   "readfake",
-	Short: "Create a fake zone from a compiled in string",
-	Run: func(cmd *cobra.Command, args []string) {
-		err := ReadZoneData(dns.Fqdn(tdns.Globals.Zonename))
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
-	},
-}
+	agentZoneReadFakeCmd := &cobra.Command{
+		Use:   "readfake",
+		Short: "Create a fake zone from a compiled in string",
+		Run: func(cmd *cobra.Command, args []string) {
+			err := ReadZoneData(dns.Fqdn(tdns.Globals.Zonename))
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+		},
+	}
 
-// --- Dsync subcommands ---
+	// --- Dsync subcommands ---
 
-var agentZoneDsyncCmd = &cobra.Command{
-	Use:   "dsync",
-	Short: "Prefix command, not useable by itself",
-}
+	agentZoneDsyncCmd := &cobra.Command{
+		Use:   "dsync",
+		Short: "Prefix command, not useable by itself",
+	}
 
-var agentZoneDsyncStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Send dsync status command to the agent",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
+	agentZoneDsyncStatusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Send dsync status command to the agent",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
 
-		// AgentZoneCmd is only attached under AgentCmd → role "agent".
-		api, err := GetApiClient("agent", true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
-		showParentSyncStatus(api, "Error from agent")
-	},
-}
+			// The target is read off the command tree, so an extra agent instance's
+			// tree drives that instance and not the canonical tdns-agent.
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client: %v", err)
+			}
+			showParentSyncStatus(api, "Error from agent")
+		},
+	}
 
-var agentZoneDsyncBootstrapCmd = &cobra.Command{
-	Use:   "bootstrap-sig0-key",
-	Short: "Send dsync bootstrap command to the agent",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-		alg := ResolveAlgorithm("agent", useSIG0)
+	agentZoneDsyncBootstrapCmd := &cobra.Command{
+		Use:   "bootstrap-sig0-key",
+		Short: "Send dsync bootstrap command to the agent",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
+			alg := ResolveAlgorithm(role, useSIG0)
 
-		// AgentZoneCmd is only attached under AgentCmd → role "agent".
-		api, err := GetApiClient("agent", true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
+			// The target is read off the command tree, so an extra agent instance's
+			// tree drives that instance and not the canonical tdns-agent.
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client: %v", err)
+			}
 
-		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
-			Command:   "bootstrap-sig0-key",
-			Zone:      dns.Fqdn(tdns.Globals.Zonename),
-			Algorithm: alg,
-		})
-		PrintUpdateResult(resp.UpdateResult)
-		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if resp.Error {
-			fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
-			os.Exit(1)
-		}
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-	},
-}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
+				Command:   "bootstrap-sig0-key",
+				Zone:      dns.Fqdn(tdns.Globals.Zonename),
+				Algorithm: alg,
+			})
+			PrintUpdateResult(resp.UpdateResult)
+			if err != nil {
+				fmt.Printf("Error: %s\n", err.Error())
+				os.Exit(1)
+			}
+			if resp.Error {
+				fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
+				os.Exit(1)
+			}
+			if resp.Msg != "" {
+				fmt.Printf("%s\n", resp.Msg)
+			}
+		},
+	}
 
-var agentZoneDsyncRollKeyCmd = &cobra.Command{
-	Use:   "roll-sig0-key",
-	Short: "Send dsync rollover command to the agent",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename", "rollaction")
-		alg := ResolveAlgorithm("agent", useSIG0)
+	agentZoneDsyncRollKeyCmd := &cobra.Command{
+		Use:   "roll-sig0-key",
+		Short: "Send dsync rollover command to the agent",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename", "rollaction")
+			alg := ResolveAlgorithm(role, useSIG0)
 
-		// AgentZoneCmd is only attached under AgentCmd → role "agent".
-		api, err := GetApiClient("agent", true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
+			// The target is read off the command tree, so an extra agent instance's
+			// tree drives that instance and not the canonical tdns-agent.
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client: %v", err)
+			}
 
-		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
-			Command:   "roll-sig0-key",
-			Zone:      dns.Fqdn(tdns.Globals.Zonename),
-			Algorithm: alg,
-			Action:    agentRollaction,
-		})
-		PrintUpdateResult(resp.UpdateResult)
-		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if resp.Error {
-			fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
-			os.Exit(1)
-		}
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-	},
-}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
+				Command:   "roll-sig0-key",
+				Zone:      dns.Fqdn(tdns.Globals.Zonename),
+				Algorithm: alg,
+				Action:    agentRollaction,
+			})
+			PrintUpdateResult(resp.UpdateResult)
+			if err != nil {
+				fmt.Printf("Error: %s\n", err.Error())
+				os.Exit(1)
+			}
+			if resp.Error {
+				fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
+				os.Exit(1)
+			}
+			if resp.Msg != "" {
+				fmt.Printf("%s\n", resp.Msg)
+			}
+		},
+	}
 
-var agentZoneDsyncPublishCmd = &cobra.Command{
-	Use:   "publish",
-	Short: "Send dsync publish-dsync-rrset command to the agent",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
+	agentZoneDsyncPublishCmd := &cobra.Command{
+		Use:   "publish",
+		Short: "Send dsync publish-dsync-rrset command to the agent",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
 
-		// AgentZoneCmd is only attached under AgentCmd → role "agent".
-		api, err := GetApiClient("agent", true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
+			// The target is read off the command tree, so an extra agent instance's
+			// tree drives that instance and not the canonical tdns-agent.
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client: %v", err)
+			}
 
-		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
-			Command: "publish-dsync-rrset",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-		})
-		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if resp.Error {
-			fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
-			os.Exit(1)
-		}
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-	},
-}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
+				Command: "publish-dsync-rrset",
+				Zone:    dns.Fqdn(tdns.Globals.Zonename),
+			})
+			if err != nil {
+				fmt.Printf("Error: %s\n", err.Error())
+				os.Exit(1)
+			}
+			if resp.Error {
+				fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
+				os.Exit(1)
+			}
+			if resp.Msg != "" {
+				fmt.Printf("%s\n", resp.Msg)
+			}
+		},
+	}
 
-var agentZoneDsyncUnpublishCmd = &cobra.Command{
-	Use:   "unpublish",
-	Short: "Send dsync unpublish-dsync-rrset command to the agent",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
+	agentZoneDsyncUnpublishCmd := &cobra.Command{
+		Use:   "unpublish",
+		Short: "Send dsync unpublish-dsync-rrset command to the agent",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
 
-		// AgentZoneCmd is only attached under AgentCmd → role "agent".
-		api, err := GetApiClient("agent", true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
+			// The target is read off the command tree, so an extra agent instance's
+			// tree drives that instance and not the canonical tdns-agent.
+			api, err := GetApiClientForCmd(cmd, true)
+			if err != nil {
+				log.Fatalf("Error getting API client: %v", err)
+			}
 
-		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
-			Command: "unpublish-dsync-rrset",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-		})
-		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if resp.Error {
-			fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
-			os.Exit(1)
-		}
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-	},
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
+				Command: "unpublish-dsync-rrset",
+				Zone:    dns.Fqdn(tdns.Globals.Zonename),
+			})
+			if err != nil {
+				fmt.Printf("Error: %s\n", err.Error())
+				os.Exit(1)
+			}
+			if resp.Error {
+				fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
+				os.Exit(1)
+			}
+			if resp.Msg != "" {
+				fmt.Printf("%s\n", resp.Msg)
+			}
+		},
+	}
+
+	// Zone subcommands relevant to the agent
+	AgentZoneCmd.AddCommand(agentZoneListCmd, agentZoneReloadCmd, agentZoneWriteCmd)
+	AgentZoneCmd.AddCommand(agentZoneUpdateCmd, agentZoneReadFakeCmd)
+	AgentZoneCmd.AddCommand(agentZoneDsyncCmd)
+	// parentsync-proxy is valid ONLY on a tdns-agent secondary, so this is
+	// the role the command exists for -- yet it was reachable only through
+	// "auth", while the operator guide tells the reader to run it here.
+	AgentZoneCmd.AddCommand(NewZoneProxyKeyCmd(role))
+	// parentsync, for the same reason: the daemon serves /zone/parentsync for
+	// AppTypeAgent as well as AppTypeAuth, and the handler gates on the zone's
+	// parentsync option rather than on the app type, so every verb already
+	// worked here -- there was just no way to reach it (#539). What existed
+	// was a second, hidden implementation hanging off "agent" directly.
+	AgentZoneCmd.AddCommand(newZoneParentSyncCmd(role))
+
+	// Dsync subcommands
+	agentZoneDsyncCmd.AddCommand(agentZoneDsyncStatusCmd, agentZoneDsyncBootstrapCmd,
+		agentZoneDsyncRollKeyCmd, agentZoneDsyncPublishCmd, agentZoneDsyncUnpublishCmd)
+
+	// Update subcommands
+	agentZoneUpdateCmd.AddCommand(agentZoneUpdateCreateCmd)
+	agentZoneUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
+	AttachUpdateCreateFlags(agentZoneUpdateCreateCmd)
+
+	// Flags. The variables are package-level and shared by every agent tree's
+	// flags: only one command runs per invocation, so binding the same
+	// variable from two trees is harmless.
+	AgentZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
+
+	agentZoneListCmd.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
+	agentZoneListCmd.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
+	agentZoneListCmd.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")
+
+	// 20260415 johani: agentZoneAddRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to add")
+	// 20260415 johani: agentZoneAddRRCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
+	// 20260415 johani: agentZoneDelRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to delete")
+	// 20260415 johani: agentZoneDelRRCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
+
+	agentZoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "",
+		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
+	agentZoneDsyncBootstrapCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "",
+		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
+	agentZoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&agentRollaction, "rollaction", "r", "complete", "[debug] Phase of the rollover to perform: complete, add, remove, update-local")
+	agentZoneDsyncRollKeyCmd.PersistentFlags().MarkHidden("rollaction")
+
+	return AgentZoneCmd
 }
 
 // --- New addrr/delrr commands ---
@@ -269,8 +331,9 @@ Examples:
 			req.Data = map[string]interface{}{"force": true}
 		}
 
-		// AgentZoneCmd is only attached under AgentCmd → role "agent".
-		api, err := GetApiClient("agent", true)
+		// The target is read off the command tree, so an extra agent instance's
+		// tree drives that instance and not the canonical tdns-agent.
+		api, err := GetApiClientForCmd(cmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -343,8 +406,9 @@ Examples:
 			req.Data = map[string]interface{}{"force": true}
 		}
 
-		// AgentZoneCmd is only attached under AgentCmd → role "agent".
-		api, err := GetApiClient("agent", true)
+		// The target is read off the command tree, so an extra agent instance's
+		// tree drives that instance and not the canonical tdns-agent.
+		api, err := GetApiClientForCmd(cmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -389,59 +453,18 @@ var agentRollaction string
 
 // --- init ---
 
-func init() {
-	AgentCmd.AddCommand(AgentZoneCmd)
-
-	// Zone subcommands relevant to the agent
-	AgentZoneCmd.AddCommand(agentZoneListCmd, agentZoneReloadCmd, agentZoneWriteCmd)
-	AgentZoneCmd.AddCommand(agentZoneUpdateCmd, agentZoneReadFakeCmd)
-	AgentZoneCmd.AddCommand(agentZoneDsyncCmd)
-	// parentsync-proxy is valid ONLY on a tdns-agent secondary, so this is
-	// the role the command exists for -- yet it was reachable only through
-	// "auth", while the operator guide tells the reader to run it here.
-	AgentZoneCmd.AddCommand(NewZoneProxyKeyCmd("agent"))
-	// parentsync, for the same reason: the daemon serves /zone/parentsync for
-	// AppTypeAgent as well as AppTypeAuth, and the handler gates on the zone's
-	// parentsync option rather than on the app type, so every verb already
-	// worked here -- there was just no way to reach it (#539). What existed
-	// was a second, hidden implementation hanging off "agent" directly.
-	AgentZoneCmd.AddCommand(newZoneParentSyncCmd("agent"))
-	// ...and the path that second implementation occupied, kept hidden so
-	// anything invoking "agent parentsync ..." keeps working. Its own subtree,
-	// because a cobra command records its parent and cannot have two.
-	legacy := newZoneParentSyncCmd("agent")
+// newLegacyAgentParentSync is the hidden "agent parentsync", the path the
+// second parentsync implementation used to occupy, kept so anything invoking
+// "agent parentsync ..." keeps working. Its own subtree, because a cobra
+// command records its parent and cannot have two.
+func newLegacyAgentParentSync(role string) *cobra.Command {
+	legacy := newZoneParentSyncCmd(role)
 	legacy.Hidden = true
 	legacy.Short = "Deprecated location of \"agent zone parentsync\""
-	AgentCmd.AddCommand(legacy)
+	return legacy
+}
 
-	// New addrr/delrr commands
-	// 20260415 johani: AgentZoneCmd.AddCommand(agentZoneAddRRCmd, agentZoneDelRRCmd)
-
-	// Dsync subcommands
-	agentZoneDsyncCmd.AddCommand(agentZoneDsyncStatusCmd, agentZoneDsyncBootstrapCmd,
-		agentZoneDsyncRollKeyCmd, agentZoneDsyncPublishCmd, agentZoneDsyncUnpublishCmd)
-
-	// Update subcommands
-	agentZoneUpdateCmd.AddCommand(agentZoneUpdateCreateCmd)
-	agentZoneUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
-	AttachUpdateCreateFlags(agentZoneUpdateCreateCmd)
-
-	// Flags
-	AgentZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
-
-	agentZoneListCmd.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
-	agentZoneListCmd.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
-	agentZoneListCmd.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")
-
-	// 20260415 johani: agentZoneAddRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to add")
-	// 20260415 johani: agentZoneAddRRCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
-	// 20260415 johani: agentZoneDelRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to delete")
-	// 20260415 johani: agentZoneDelRRCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
-
-	agentZoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "",
-		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
-	agentZoneDsyncBootstrapCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "",
-		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
-	agentZoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&agentRollaction, "rollaction", "r", "complete", "[debug] Phase of the rollover to perform: complete, add, remove, update-local")
-	agentZoneDsyncRollKeyCmd.PersistentFlags().MarkHidden("rollaction")
+func init() {
+	AgentCmd.AddCommand(NewAgentZoneCmd("agent"))
+	AgentCmd.AddCommand(newLegacyAgentParentSync("agent"))
 }
