@@ -1295,8 +1295,20 @@ func (zd *ZoneData) finishDelegationSyncSetup(msg string, ur UpdateResult, err e
 // costs a lookup and is sent nothing.
 func (zd *ZoneData) runExplicitSync(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, imr *Imr) DelegationSyncStatus {
 	lgDns.Info("DelegationSyncher: request for explicit delegation sync", "zone", zd.ZoneName)
+	return zd.runExplicitSyncWith(
+		func() (DelegationSyncStatus, error) { return zd.AnalyseZoneDelegation(imr) },
+		func(syncstate DelegationSyncStatus) (string, uint8, UpdateResult, error) {
+			return zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
+		})
+}
 
-	syncstate, err := zd.AnalyseZoneDelegation(imr)
+// runExplicitSyncWith is runExplicitSync with the compare and the send passed
+// in, so a test can stand in for the parent. It decides what the outcome means
+// for the zone's mark that the parent may lack a change (delegationOutOfStep).
+func (zd *ZoneData) runExplicitSyncWith(analyse func() (DelegationSyncStatus, error),
+	send func(DelegationSyncStatus) (string, uint8, UpdateResult, error)) DelegationSyncStatus {
+
+	syncstate, err := analyse()
 	if err != nil {
 		lgDns.Error("DelegationSyncher: error from AnalyseZoneDelegation", "zone", zd.ZoneName, "err", err)
 		syncstate.Error = true
@@ -1314,11 +1326,15 @@ func (zd *ZoneData) runExplicitSync(ctx context.Context, kdb *KeyDB, notifyq cha
 	}
 
 	// Not in sync, let's fix that.
-	msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
+	msg, rcode, ur, err := send(syncstate)
 	if errors.Is(err, ErrNoUsableDsync) {
 		// Not a failure: the answer says why nothing was sent, with no
-		// error (planUsable warned once)
+		// error (planUsable warned once), and nothing retries, since there
+		// is nothing usable to retry through. But the parent lacks the
+		// difference this compare found, so a later change must go as a
+		// compare too, as when a stored change is not sent for this reason.
 		lgDns.Debug("DelegationSyncher: nothing sent", "zone", zd.ZoneName, "reason", err)
+		zd.noteDelegationSyncNotSent()
 		syncstate.Msg = err.Error()
 		return syncstate
 	}
@@ -1350,7 +1366,9 @@ func (zd *ZoneData) runExplicitSync(ctx context.Context, kdb *KeyDB, notifyq cha
 // delegation (Complete), it is retried until the parent answers
 // (requeueLookAfter). It is not dropped for a later success, as a refresh
 // sync's retry is: that success may have been a refresh sync, which compares
-// no DS.
+// no DS. One that found a difference it could not send, because the parent
+// offers no usable scheme, has nothing to retry through: it is not retried,
+// and the run marks the parent out of step (runExplicitSyncWith).
 //
 // It returns the channel of the worker it started -- the wait for the IMR, or
 // the retry -- and nil when it started none.

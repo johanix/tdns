@@ -342,6 +342,66 @@ func TestACompareNobodyWaitsOnIsRetriedUntilTheParentAnswers(t *testing.T) {
 	}
 }
 
+// An explicit sync that finds the parent out of step but cannot send the
+// difference, because the parent offers no usable scheme, answers with no
+// error and is not retried, but marks the parent out of step, so the next
+// change goes as a compare (re-review 4, F6). Otherwise the run clears the
+// mark only when it covered the whole delegation: in step or sent, with a
+// complete read.
+func TestAnExplicitSyncThatCannotSendMarksTheParentOutOfStep(t *testing.T) {
+	saved := delegationSyncRetryDelays
+	delegationSyncRetryDelays = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { delegationSyncRetryDelays = saved })
+	// Not in Zones: the incomplete read's retry is dropped when due.
+	zd := laneZone("nosend.down.example.", "down.example.")
+	q := make(chan DelegationSyncRequest, 1)
+	differs := DelegationSyncStatus{ZoneName: zd.ZoneName}
+	incomplete := DelegationSyncStatus{ZoneName: zd.ZoneName, Unread: []string{"ns1 A"}}
+	inStep := DelegationSyncStatus{ZoneName: zd.ZoneName, InSync: true}
+
+	for _, c := range []struct {
+		name     string
+		before   bool
+		analysis DelegationSyncStatus
+		sendErr  error
+		mark     bool
+	}{
+		{"a difference with no usable scheme", false, differs, ErrNoUsableDsync, true},
+		{"a difference sent", true, differs, nil, false},
+		{"a difference sent after an incomplete read", true, incomplete, nil, true},
+		{"the parent found in step", true, inStep, nil, false},
+	} {
+		zd.delegationOutOfStep.Store(c.before)
+		sent := false
+		run := func() DelegationSyncStatus {
+			return zd.runExplicitSyncWith(
+				func() (DelegationSyncStatus, error) { return c.analysis, nil },
+				func(DelegationSyncStatus) (string, uint8, UpdateResult, error) {
+					sent = true
+					return "sent", dns.RcodeSuccess, UpdateResult{}, c.sendErr
+				})
+		}
+		look := DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName, ZoneData: zd}
+		done := handleExplicitSyncWith(context.Background(), nil, q, look, run)
+		if c.analysis.InSync == sent {
+			t.Errorf("%s: sent %v, want %v", c.name, sent, !c.analysis.InSync)
+		}
+		if got := zd.delegationOutOfStep.Load(); got != c.mark {
+			t.Errorf("%s: the parent is marked out of step %v, want %v", c.name, got, c.mark)
+		}
+		if c.analysis.Complete() && done != nil {
+			t.Errorf("%s: retried", c.name)
+		}
+		if done != nil {
+			<-done
+			select {
+			case <-q:
+			default:
+			}
+		}
+	}
+}
+
 // A request someone waits on gets its own answer: it is never merged, nor is a
 // request merged into it. Commands not listed are never merged either.
 func TestARequestSomeoneWaitsOnIsNeverMerged(t *testing.T) {
