@@ -375,9 +375,39 @@ type ZoneData struct {
 	// that reads the KeyDB's record puts them ahead of it. Guarded by
 	// signalStoredMu.
 	signalUnrecorded map[string][]string
-	publishCadence   time.Duration
-	publishQueued    bool
-	publishUrgent    bool
+	// signalOnDisk holds, per owner the pass stored at in this process or
+	// the record held when the zone file was last adopted, the digest of the
+	// pass's signal the zone file holds there, "" for none
+	// (signalOnDiskDigest, noteZoneFileAdopted, noteZoneFileWritten). Every
+	// store keeps it in the record. Guarded by signalStoredMu.
+	signalOnDisk map[string]string
+	// signalOnDiskPrev holds, per owner, the digests of the pass's signals
+	// that zone files held which writes replaced with a rename not yet on
+	// disk: a crash can bring one back. Every store keeps them in the
+	// record until a write whose rename is on disk (noteZoneFileWritten).
+	// Guarded by signalStoredMu.
+	signalOnDiskPrev map[string][]string
+	// zoneFileMu is held across each rename of the zone's file into place
+	// and noteZoneFileWritten for it, so that what the record keeps for the
+	// zone file follows the renames in their order.
+	zoneFileMu sync.Mutex
+	// signalWriting holds, per write of the zone's own file in progress,
+	// the digest of the pass's signal at each owner of signalOnDisk in the
+	// snapshot being written (holdSignalsWritten). Every store keeps them
+	// in the record until the write ends, so that the record still knows
+	// the signal the file comes to hold when noteZoneFileWritten looks.
+	// Guarded by signalStoredMu.
+	signalWriting    map[uint64]map[string]string
+	signalWritingSeq uint64
+	// signalJournaled holds, per owner, the pass's signals a replay of the
+	// zone's journal can yield there, each with the serial of the newest
+	// journal delta that set it (noteSignalsJournaled). Every store keeps
+	// them in the record until a zone write drops those deltas
+	// (noteJournalDropped). Guarded by signalStoredMu.
+	signalJournaled map[string][]signalJournalPin
+	publishCadence  time.Duration
+	publishQueued   bool
+	publishUrgent   bool
 	// tx is the zone's transactions: the publish hold, and what a zone created
 	// held remembers about its first content. See zone_tx.go. Guarded by mu.
 	tx zoneTxState
