@@ -3,8 +3,9 @@
 **Date:** 2026-11-20
 **Status:** being implemented. Steps 0 and 1 (section 5) are #1163 and #1164,
 on main. Step 2, the local socket, is #1165, stacked on the tdns-ncli PRs #1159,
-#1160 and #1161; step 3, the access file and the roles, is stacked on #1165.
-Step 4 follows. Section 9 lists what implementing changed or settled.
+#1160 and #1161; step 3, the access file and the roles, is #1167, stacked on
+#1165; step 4, tdns-ncli's side, is stacked on #1167. Section 9 lists what
+implementing changed or settled.
 
 Scope: the management API of every daemon that builds its router with
 `SetupAPIRouter` (tdns-auth, tdns-agent, ...) or `SetupSimpleAPIRouter`
@@ -641,3 +642,56 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
 - **tdns-mp.** `RegisterApiRouteRoles` lets code outside the package declare
   the roles of its routes; until tdns-mp does, its routes need admin when an
   access file is set.
+
+**2026-11-20, implementing step 4.**
+
+- **The client certificate is presented only by entries that ask for it**
+  (`authmethod: certificate`, which then sends no key). The design had the
+  certificate on every connection. But a certificate is the identity (step 3):
+  a daemon that does not know it refuses it even with a valid key, so offering
+  it everywhere would lock an operator out of every daemon they are not
+  enrolled on the moment they run `client init`.
+- **Strict verification is tdns-ncli's alone** (`RequireServerVerification`).
+  tdns-cli shares the client code and keeps its default (no rootca: no
+  check), as the design said. A `tlsauth: pkix` entry without a rootca uses the
+  system roots.
+- **One bad entry no longer stops the others.** An entry that cannot be built
+  (no pins for `tlsauth: pin`, a missing rootca file, a certificate entry
+  without a certificate) is reported when it is used, not at start-up.
+- **`config add` pins the daemon's certificate** from `apiserver.certfile`. If
+  that file cannot be read the entry is written without pins and a note says
+  what to add; tdns-ncli then refuses that entry rather than connecting
+  unverified.
+- **`config list --check`** uses the same client as every other command and
+  shows who each daemon took the CLI for (from `ping`).
+- **The `client` commands** are added to the canonical auth, agent and imr
+  trees by tdns-ncli itself and to the instance trees by their factories, so
+  tdns-cli and tdns-imr's own shell do not get them. `client init` needs no CLI
+  config. A new access file takes the daemon config's mode.
+- **`config list` warns when two entries pin the same key**, with or without
+  `--check`: a pin that cannot tell two daemons apart is the shared-key hazard
+  again.
+
+**2026-11-20, a live run of steps 2 to 4** (tdns-imr and tdns-ncli built from
+the step 4 branch, on macOS, in a scratch directory, not as root). A resolver
+with a socket and, later, an access file:
+
+- `config add` as non-root wrote a TCP entry with the daemon's pin; `ping`
+  over it said "authenticated as apikey (admin) by api key". A hand-written
+  socket entry said "on the local socket (admin)". `config list --check`
+  showed both.
+- `client init`, then `client add` while the daemon config named no access
+  file: the file was created and the lines to add were printed. With the line
+  added, a `client` edit over the socket reloaded it ("Access file reloaded:
+  1 client(s)"), and `client list` said the daemon runs the file.
+- With the access file: the key was read-write; the certificate entry was "me
+  (read-write)"; a flush worked; `daemon stop` over TCP got 403 naming the
+  socket, and the daemon kept running. After `keyauth off` the key got 403 and
+  the certificate still worked. A hand-broken file at a reload was refused with
+  the validator's reasons, and the running policy carried on.
+- `daemon stop` over the socket stopped it. **The socket file outlives a
+  stop**: the daemon exits before the listener's cleanup runs. The next start
+  removes it as a stale socket (seen working on the restart), so this is
+  cosmetic; noted here rather than fixed.
+
+Not yet run on NetBSD.

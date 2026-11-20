@@ -326,12 +326,69 @@ The same happens for an entry naming an unknown `role:`, or one with no
 `name`.
 
 Reserved: `auth`, `agent`, `imr`, `scanner`, and the top-level commands
-`cert`, `config`, `util`, `version`, `show-cmds`, `completion` and `help`.
+`cert`, `client`, `config`, `util`, `version`, `show-cmds`, `completion` and
+`help`.
 
 An instance may not take the name of an existing API client either:
 `tdns-auth`, `tdns-agent`, `tdns-imr`, or the name of any other entry. Two
 entries of one name would be one API client, the later silently replacing the
 earlier, so a command meant for one daemon would reach the other.
+
+## Verifying the daemon, and being known by a certificate
+
+**tdns-ncli verifies the daemon on every https entry.** `config add` pins the
+daemon's own certificate (`apiserver.certfile`), so there is nothing to do:
+
+```yaml
+   - name:        tdns-auth
+     baseurl:     https://127.0.0.1:8989/api/v1
+     apikey:      ...
+     authmethod:  X-API-Key
+     tlsauth:     pin
+     pins:        [ "<SPKI SHA-256 of the daemon's key>" ]
+```
+
+The pin is the daemon's key: no CA and no name check, and a list so a new key
+can be added before the daemon changes to it. `tlsauth: pkix` with a `rootca:`
+(or none, for the system roots) is the alternative for a daemon with a real CA.
+An https entry that verifies nothing is refused unless it says
+`rootca: insecure`, and then tdns-ncli warns when it uses it. (tdns-cli keeps
+its old default of not checking.)
+
+**Your own certificate** is made once:
+
+```bash
+tdns-ncli client init
+```
+
+It writes a self-signed certificate and its key (mode 0600) to
+`~/.config/tdns/` (for root, `/etc/tdns/tdns-ncli-client.crt` and `.key`) and
+prints its pin and the line that enrolls it on a daemon. An entry with
+`authmethod: certificate` presents it, and sends no key; a top-level `client:`
+block (`cert:`, `key:`) names other files. Only such entries present it: a
+daemon that does not know your certificate refuses it even with a valid key,
+so an entry that should keep using the key must not offer the certificate.
+
+**On the daemon's host**, `tdns-ncli <daemon> client ...` manages the daemon's
+access file:
+
+```bash
+tdns-ncli auth client add anna --pin <pin> --role read-write
+tdns-ncli auth client list            # the file, and whether the daemon runs it
+tdns-ncli auth client disable anna    # revoked, entry kept
+tdns-ncli auth client set-role anna read-only
+tdns-ncli auth client keyauth off     # the TCP API now needs a certificate
+```
+
+Every change is checked with the daemon's own validator (a file the daemon
+would refuse is not written), written atomically with the previous file kept
+as `.prev`, and followed by a reload (`--no-reload` skips it, `--dry-run`
+shows the result). The commands edit files on the daemon's host and refuse an
+entry whose daemon config is not there. If the daemon config does not name an
+access file yet, `client add` creates one next to it and prints the
+`access-file:` (and `socket:`) lines to add; until then the daemon ignores it.
+Roles and the rules behind them: `guide/config-tdns-auth.md`, "Network clients
+and roles".
 
 ## Running two tdns-auth daemons
 
