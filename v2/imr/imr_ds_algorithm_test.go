@@ -69,7 +69,7 @@ func dsRig(t *testing.T, ds func(kid *fwdSecKey) []dns.RR, anchor func(parent *f
 		fwdSecKid + " DS":              {Answer: parent.sign(t, ds(kid)...)},
 		fwdSecParent + " DNSKEY":       {Answer: parent.sign(t, dns.Copy(parent.dnskey))},
 	})
-	imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+	imr := newForwardTestImr(t, []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}})
 	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 	imr.DnskeyCache = imr.Cache.DnskeyCache
 	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {

@@ -76,8 +76,8 @@ func TestRefreshRootIdlesWhileTheRootIsForwarded(t *testing.T) {
 	})
 
 	t.Run("fwd.example. forwarded", func(t *testing.T) {
-		imr := newForwardTestImr(t, []ImrForwardConf{
-			{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
+		imr := newForwardTestImr(t, []ForwardConf{
+			{Zone: "fwd.example.", Upstreams: []UpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
 		})
 		imr.Cache = rootNSCache(t, 30) // inside the refresh lead
 		seedRootServers(t, imr.Cache)
@@ -203,8 +203,8 @@ func TestStatusReportsAForwardedRoot(t *testing.T) {
 	if st := newForwardTestImr(t, rootForward("192.0.2.53", 53)).StatusReport(); !st.RootForwarded {
 		t.Error("a forwarded root is not reported as forwarded")
 	}
-	sub := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
+	sub := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
 	})
 	if st := sub.StatusReport(); st.RootForwarded {
 		t.Error("an iterated root is reported as forwarded")

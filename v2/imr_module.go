@@ -120,31 +120,31 @@ type (
 	ForwardDiag              = imrcore.ForwardDiag
 	ForwardUpstream          = imrcore.ForwardUpstream
 	ForwardZone              = imrcore.ForwardZone
-	ImrClientStatsConf       = imrcore.ImrClientStatsConf
-	ImrForwardConf           = imrcore.ImrForwardConf
-	ImrForwardProbeResult    = imrcore.ImrForwardProbeResult
-	ImrForwardUpstreamInfo   = imrcore.ImrForwardUpstreamInfo
-	ImrForwardZoneInfo       = imrcore.ImrForwardZoneInfo
-	ImrForwardZoneStatus     = imrcore.ImrForwardZoneStatus
-	ImrLoggingConf           = imrcore.ImrLoggingConf
+	ImrClientStatsConf       = imrcore.ClientStatsConf
+	ImrForwardConf           = imrcore.ForwardConf
+	ImrForwardProbeResult    = imrcore.ForwardProbeResult
+	ImrForwardUpstreamInfo   = imrcore.ForwardUpstreamInfo
+	ImrForwardZoneInfo       = imrcore.ForwardZoneInfo
+	ImrForwardZoneStatus     = imrcore.ForwardZoneStatus
+	ImrLoggingConf           = imrcore.LoggingConf
 	ImrOption                = imrcore.ImrOption
 	ImrOptions               = imrcore.Options
 	ImrOutboundQueryHookFunc = imrcore.ImrOutboundQueryHookFunc
 	ImrRequest               = imrcore.Request
 	ImrResponse              = imrcore.Response
 	ImrResponseHookFunc      = imrcore.ImrResponseHookFunc
-	ImrStatus                = imrcore.ImrStatus
-	ImrStubConf              = imrcore.ImrStubConf
-	ImrStubProbeResult       = imrcore.ImrStubProbeResult
-	ImrStubServerInfo        = imrcore.ImrStubServerInfo
-	ImrStubServerStatus      = imrcore.ImrStubServerStatus
-	ImrStubZoneInfo          = imrcore.ImrStubZoneInfo
-	ImrStubZoneStatus        = imrcore.ImrStubZoneStatus
-	ImrTestingConf           = imrcore.ImrTestingConf
-	ImrTuningConf            = imrcore.ImrTuningConf
-	ImrUpstreamConf          = imrcore.ImrUpstreamConf
-	ImrUpstreamStatus        = imrcore.ImrUpstreamStatus
-	ImrZoneReloadResult      = imrcore.ImrZoneReloadResult
+	ImrStatus                = imrcore.Status
+	ImrStubConf              = imrcore.StubConf
+	ImrStubProbeResult       = imrcore.StubProbeResult
+	ImrStubServerInfo        = imrcore.StubServerInfo
+	ImrStubServerStatus      = imrcore.StubServerStatus
+	ImrStubZoneInfo          = imrcore.StubZoneInfo
+	ImrStubZoneStatus        = imrcore.StubZoneStatus
+	ImrTestingConf           = imrcore.TestingConf
+	ImrTuningConf            = imrcore.TuningConf
+	ImrUpstreamConf          = imrcore.UpstreamConf
+	ImrUpstreamStatus        = imrcore.UpstreamStatus
+	ImrZoneReloadResult      = imrcore.ZoneReloadResult
 	LargeKskDSAlgCount       = imrcore.LargeKskDSAlgCount
 	LargeKskImrMetrics       = imrcore.LargeKskImrMetrics
 	OwnZone                  = imrcore.OwnZone
@@ -160,7 +160,7 @@ const (
 	DNSKEYTransportTryEncrypted    = imrcore.DNSKEYTransportTryEncrypted
 	DNSKEYTransportUseDSSignal     = imrcore.DNSKEYTransportUseDSSignal
 	DefaultCacheMaxTTL             = imrcore.DefaultCacheMaxTTL
-	DefaultImrClientStatsMax       = imrcore.DefaultImrClientStatsMax
+	DefaultImrClientStatsMax       = imrcore.DefaultClientStatsMax
 	ErrCatConfig                   = imrcore.ErrCatConfig
 	ErrCatOther                    = imrcore.ErrCatOther
 	ErrCatTransport                = imrcore.ErrCatTransport
@@ -193,7 +193,7 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string, rrtype uin
 }
 
 func BuildImrForwards(conf []ImrForwardConf) ([]*ForwardZone, []ForwardDiag) {
-	return imrcore.BuildImrForwards(conf)
+	return imrcore.BuildForwards(conf)
 }
 
 func DNSSECAlgorithmLabel(alg uint8) string {
@@ -217,7 +217,7 @@ func LargeKskImrMetricsSnapshot() LargeKskImrMetrics {
 }
 
 func LoadImrTuningDefaults(t *ImrTuningConf) {
-	imrcore.LoadImrTuningDefaults(t)
+	imrcore.LoadTuningDefaults(t)
 }
 
 func MarshalTransport(transports map[string]uint8) string {

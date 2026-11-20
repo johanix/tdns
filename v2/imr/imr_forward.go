@@ -223,7 +223,7 @@ func (up *ForwardUpstream) authenticated() bool {
 	return core.IsEncryptedTransport(up.Transport) && !up.Insecure
 }
 
-// ForwardZone is the runtime form of an ImrForwardConf entry.
+// ForwardZone is the runtime form of a ForwardConf entry.
 type ForwardZone struct {
 	Zone      string // canonical FQDN
 	Labels    int    // dns.CountLabel(Zone), precomputed for specificity checks
@@ -413,9 +413,9 @@ var forwardTransportDefaults = map[core.Transport]string{
 	core.TransportDoQ:     "853", // RFC 9250
 }
 
-// buildForwardUpstream validates one ImrUpstreamConf and constructs its
+// buildForwardUpstream validates one UpstreamConf and constructs its
 // runtime form, including the dedicated DNS client.
-func buildForwardUpstream(zone string, u ImrUpstreamConf, lg *log.Logger) (*ForwardUpstream, error) {
+func buildForwardUpstream(zone string, u UpstreamConf, lg *log.Logger) (*ForwardUpstream, error) {
 	if net.ParseIP(u.Addr) == nil {
 		return nil, fmt.Errorf("forward zone %s: upstream addr %q is not an IP address (hostnames are not supported)", zone, u.Addr)
 	}
@@ -520,7 +520,7 @@ func forwardDiagsError(diags []ForwardDiag) error {
 	return fmt.Errorf("%s", strings.Join(msgs, "; "))
 }
 
-// BuildImrForwards validates the configured forward zones and returns the
+// BuildForwards validates the configured forward zones and returns the
 // runtime table, sorted most-specific first so the first suffix match in
 // forwardZoneFor is the longest one, together with a diagnostic per problem
 // found.
@@ -536,14 +536,14 @@ func forwardDiagsError(diags []ForwardDiag) error {
 // quarantine needs a namespace to apply to and these have none: an entry
 // with no usable zone name, and a duplicate of a zone already configured
 // (the first definition stands).
-func BuildImrForwards(conf []ImrForwardConf) ([]*ForwardZone, []ForwardDiag) {
+func BuildForwards(conf []ForwardConf) ([]*ForwardZone, []ForwardDiag) {
 	return buildImrForwards(conf, nil)
 }
 
-// buildImrForwards is BuildImrForwards whose upstreams' DNS clients log
+// buildImrForwards is BuildForwards whose upstreams' DNS clients log
 // through lg (nil is the log package's): the resolver passes its cache's
 // DebugLog, since a client logs a line per exchange (cache.NewDNSClients).
-func buildImrForwards(conf []ImrForwardConf, lg *log.Logger) ([]*ForwardZone, []ForwardDiag) {
+func buildImrForwards(conf []ForwardConf, lg *log.Logger) ([]*ForwardZone, []ForwardDiag) {
 	if len(conf) == 0 {
 		return nil, nil
 	}
@@ -617,7 +617,7 @@ func buildImrForwards(conf []ImrForwardConf, lg *log.Logger) ([]*ForwardZone, []
 // quarantined rather than left for the caller to mark: liveUpstreams is what
 // keeps it away from anything that dials, and an unquarantined placeholder
 // would be a nil client on the query path.
-func placeholderUpstream(u ImrUpstreamConf, reason string) *ForwardUpstream {
+func placeholderUpstream(u UpstreamConf, reason string) *ForwardUpstream {
 	addr := u.Addr
 	if addr == "" {
 		addr = "<unset>"

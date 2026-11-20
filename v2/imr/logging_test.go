@@ -85,7 +85,7 @@ func TestTheDNSClientsPerExchangeLinesAreAtDebug(t *testing.T) {
 	for _, level := range []slog.Level{slog.LevelInfo, slog.LevelDebug} {
 		var own bytes.Buffer
 		lg := slog.New(slog.NewTextHandler(&own, &slog.HandlerOptions{Level: level}))
-		ic := Config{Forward: []ImrForwardConf{fwdConf("fwd.example.", addr, port)}}
+		ic := Config{Forward: []ForwardConf{fwdConf("fwd.example.", addr, port)}}
 		imr, err := New(context.Background(), ic, Options{Logger: lg})
 		if err != nil {
 			t.Fatalf("New: %v", err)

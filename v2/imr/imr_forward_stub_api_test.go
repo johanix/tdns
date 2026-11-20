@@ -19,11 +19,11 @@ import (
 )
 
 func TestForwardZoneList(t *testing.T) {
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "foo.bar.", TrustAD: true, Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "foo.bar.", TrustAD: true, Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", Port: 8853, Transport: "doq", TLSServerName: "dns.example.net"},
 		}},
-		{Zone: ".", Upstreams: []ImrUpstreamConf{
+		{Zone: ".", Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.2", Transport: "dot", Insecure: true},
 		}},
 	})
@@ -49,12 +49,12 @@ func TestProbeForwardUpstreamsReport(t *testing.T) {
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: addr, Port: port},
 			{Addr: "192.0.2.9", Port: 1},
 		}},
-		{Zone: "other.example.", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
+		{Zone: "other.example.", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}},
 	})
 	imr.errorRegistry = newTestErrorSink()
 	for _, fz := range imr.ForwardZones() {
@@ -116,8 +116,8 @@ func TestProbeCancellation(t *testing.T) {
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}},
 	})
 	imr.errorRegistry = newTestErrorSink()
 
@@ -223,7 +223,7 @@ func TestStubListStatusProbe(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("want 2 probe results (2 addrs x 1 transport), got %d: %+v", len(results), results)
 	}
-	byAddr := map[string]ImrStubProbeResult{}
+	byAddr := map[string]StubProbeResult{}
 	for _, res := range results {
 		byAddr[res.Addr] = res
 	}

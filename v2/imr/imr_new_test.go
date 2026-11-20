@@ -52,7 +52,7 @@ func TestNewReportsToTheErrorSink(t *testing.T) {
 	defer stop()
 	ic := Config{Forward: append(rootForward(addr, port),
 		// trust-ad over plaintext: quarantined, not fatal.
-		ImrForwardConf{Zone: "bad.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.9"}}})}
+		ForwardConf{Zone: "bad.example.", TrustAD: true, Upstreams: []UpstreamConf{{Addr: "192.0.2.9"}}})}
 
 	rec, reg := &recordingSink{}, newTestErrorSink()
 	for _, tc := range []struct {

@@ -70,7 +70,7 @@ func n3Rig(t *testing.T, answers func(zone *fwdSecKey) map[string]*dns.Msg) *Imr
 	a := answers(zone)
 	a[fwdSecParent+" DNSKEY"] = &dns.Msg{Answer: zone.sign(t, dns.Copy(zone.dnskey))}
 	addr, port := startSignedForwardUpstream(t, a)
-	imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+	imr := newForwardTestImr(t, []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}})
 	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 	imr.DnskeyCache = imr.Cache.DnskeyCache
 	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
@@ -198,8 +198,8 @@ func TestAnNSEC3DenialThatDoesNotHoldIsServedWithCD(t *testing.T) {
 }
 
 func TestNSEC3MaxIterationsTuningDefault(t *testing.T) {
-	var tc ImrTuningConf
-	LoadImrTuningDefaults(&tc)
+	var tc TuningConf
+	LoadTuningDefaults(&tc)
 	if tc.NSEC3MaxIterations == nil || *tc.NSEC3MaxIterations != cache.DefaultNSEC3MaxIterations {
 		t.Errorf("default nsec3-max-iterations is %v, want %d", tc.NSEC3MaxIterations, cache.DefaultNSEC3MaxIterations)
 	}
@@ -270,7 +270,7 @@ func TestAnIndeterminateDenialIsValidatedAgainFromTheCache(t *testing.T) {
 		}
 		return nil
 	})
-	imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+	imr := newForwardTestImr(t, []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}})
 	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 	imr.DnskeyCache = imr.Cache.DnskeyCache
 	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
@@ -324,7 +324,7 @@ func TestADenialThatFailsWhenValidatedAgainIsBogus(t *testing.T) {
 		}
 		return nil
 	})
-	imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+	imr := newForwardTestImr(t, []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}})
 	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 	imr.DnskeyCache = imr.Cache.DnskeyCache
 	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {

@@ -30,8 +30,8 @@ import (
 
 // --- forward zones ---------------------------------------------------------
 
-// ImrForwardUpstreamInfo is the config view of one forward upstream.
-type ImrForwardUpstreamInfo struct {
+// ForwardUpstreamInfo is the config view of one forward upstream.
+type ForwardUpstreamInfo struct {
 	Upstream      string `json:"upstream"` // "addr:port/transport"
 	TLSServerName string `json:"tls_server_name,omitempty"`
 	Insecure      bool   `json:"insecure,omitempty"`
@@ -40,17 +40,17 @@ type ImrForwardUpstreamInfo struct {
 	QuarantineReason string `json:"quarantine_reason,omitempty"`
 }
 
-// ImrForwardZoneInfo is the config view of one forward zone (imr-forward-list).
-type ImrForwardZoneInfo struct {
-	Zone             string                   `json:"zone"`
-	TrustAD          bool                     `json:"trust_ad,omitempty"`
-	Upstreams        []ImrForwardUpstreamInfo `json:"upstreams"`
-	Quarantined      bool                     `json:"quarantined,omitempty"`
-	QuarantineReason string                   `json:"quarantine_reason,omitempty"`
+// ForwardZoneInfo is the config view of one forward zone (imr-forward-list).
+type ForwardZoneInfo struct {
+	Zone             string                `json:"zone"`
+	TrustAD          bool                  `json:"trust_ad,omitempty"`
+	Upstreams        []ForwardUpstreamInfo `json:"upstreams"`
+	Quarantined      bool                  `json:"quarantined,omitempty"`
+	QuarantineReason string                `json:"quarantine_reason,omitempty"`
 }
 
-// ImrForwardProbeResult is one upstream's outcome of imr-forward-probe.
-type ImrForwardProbeResult struct {
+// ForwardProbeResult is one upstream's outcome of imr-forward-probe.
+type ForwardProbeResult struct {
 	Zone     string `json:"zone"`
 	Upstream string `json:"upstream"`
 	OK       bool   `json:"ok"`
@@ -59,17 +59,17 @@ type ImrForwardProbeResult struct {
 }
 
 // ForwardZoneList returns the configured forward table (config view).
-func (imr *Imr) ForwardZoneList() []ImrForwardZoneInfo {
+func (imr *Imr) ForwardZoneList() []ForwardZoneInfo {
 	if imr == nil {
 		return nil
 	}
-	var out []ImrForwardZoneInfo
+	var out []ForwardZoneInfo
 	for _, fz := range imr.ForwardZones() {
-		info := ImrForwardZoneInfo{Zone: fz.Zone, TrustAD: fz.TrustAD}
+		info := ForwardZoneInfo{Zone: fz.Zone, TrustAD: fz.TrustAD}
 		info.Quarantined, info.QuarantineReason = fz.quarantineState()
 		for _, up := range fz.Upstreams {
 			q, why := up.quarantineState()
-			info.Upstreams = append(info.Upstreams, ImrForwardUpstreamInfo{
+			info.Upstreams = append(info.Upstreams, ForwardUpstreamInfo{
 				Upstream:         up.Label,
 				TLSServerName:    up.TLSServerName,
 				Insecure:         up.Insecure,
@@ -150,7 +150,7 @@ func (imr *Imr) probeForwardUpstream(ctx context.Context, zone string, up *Forwa
 // (zoneFilter "" = all) in parallel and returns the per-upstream outcome.
 // Same recording semantics as the startup probe. ctx cancellation stops
 // probes that have not started their exchange yet (see probeForwardUpstream).
-func (imr *Imr) ProbeForwardUpstreamsReport(ctx context.Context, zoneFilter string) ([]ImrForwardProbeResult, error) {
+func (imr *Imr) ProbeForwardUpstreamsReport(ctx context.Context, zoneFilter string) ([]ForwardProbeResult, error) {
 	zones, err := imr.forwardZonesMatching(zoneFilter)
 	if err != nil {
 		return nil, err
@@ -158,7 +158,7 @@ func (imr *Imr) ProbeForwardUpstreamsReport(ctx context.Context, zoneFilter stri
 	var (
 		wg      sync.WaitGroup
 		mu      sync.Mutex
-		results []ImrForwardProbeResult
+		results []ForwardProbeResult
 	)
 	for _, fz := range zones {
 		for _, up := range fz.Upstreams {
@@ -168,7 +168,7 @@ func (imr *Imr) ProbeForwardUpstreamsReport(ctx context.Context, zoneFilter stri
 			// This check, not the nil-Client backstop below it, is what keeps
 			// a quarantined-but-fully-built upstream from being dialled.
 			if q, why := up.quarantineState(); q {
-				results = append(results, ImrForwardProbeResult{
+				results = append(results, ForwardProbeResult{
 					Zone: fz.Zone, Upstream: up.Label, OK: false,
 					RTT: time.Duration(0).String(), Error: "quarantined: " + why,
 				})
@@ -178,7 +178,7 @@ func (imr *Imr) ProbeForwardUpstreamsReport(ctx context.Context, zoneFilter stri
 			go func(zone string, up *ForwardUpstream) {
 				defer wg.Done()
 				rtt, err := imr.probeForwardUpstream(ctx, zone, up)
-				res := ImrForwardProbeResult{
+				res := ForwardProbeResult{
 					Zone:     zone,
 					Upstream: up.Label,
 					OK:       err == nil,
@@ -206,24 +206,24 @@ func (imr *Imr) ProbeForwardUpstreamsReport(ctx context.Context, zoneFilter stri
 
 // --- stub zones ------------------------------------------------------------
 
-// ImrStubServerInfo is the config view of one stub server.
-type ImrStubServerInfo struct {
+// StubServerInfo is the config view of one stub server.
+type StubServerInfo struct {
 	Name  string   `json:"name"`
 	Addrs []string `json:"addrs"`
 	Alpn  []string `json:"alpn,omitempty"`
 }
 
-// ImrStubZoneInfo is the config view of one stub zone (imr-stub-list).
-type ImrStubZoneInfo struct {
-	Zone    string              `json:"zone"`
-	Servers []ImrStubServerInfo `json:"servers"`
+// StubZoneInfo is the config view of one stub zone (imr-stub-list).
+type StubZoneInfo struct {
+	Zone    string           `json:"zone"`
+	Servers []StubServerInfo `json:"servers"`
 }
 
-// ImrStubServerStatus is the live view of one stub server: the per-transport
+// StubServerStatus is the live view of one stub server: the per-transport
 // counters the resolver has accumulated against it, and any active
 // (address, transport) backoffs — the state that silently disabled stubs in
 // the 2026-08-11 outage, now inspectable.
-type ImrStubServerStatus struct {
+type StubServerStatus struct {
 	Name       string            `json:"name"`
 	Addrs      []string          `json:"addrs"`
 	Transports []string          `json:"transports"`
@@ -234,16 +234,16 @@ type ImrStubServerStatus struct {
 	Backoffs   []string          `json:"backoffs,omitempty"` // "addr/transport: until <t> (N failures)"
 }
 
-// ImrStubZoneStatus is the live view of one stub zone (imr-stub-status).
-type ImrStubZoneStatus struct {
-	Zone    string                `json:"zone"`
-	Servers []ImrStubServerStatus `json:"servers"`
+// StubZoneStatus is the live view of one stub zone (imr-stub-status).
+type StubZoneStatus struct {
+	Zone    string             `json:"zone"`
+	Servers []StubServerStatus `json:"servers"`
 }
 
-// ImrStubProbeResult is one (server, address, transport) outcome of
+// StubProbeResult is one (server, address, transport) outcome of
 // imr-stub-probe: an RD=0 SOA query for the stub zone, reporting whether the
 // server answers authoritatively.
-type ImrStubProbeResult struct {
+type StubProbeResult struct {
 	Zone      string `json:"zone"`
 	Server    string `json:"server"`
 	Addr      string `json:"addr"` // as dialed: with the port a signal assigned, if any
@@ -294,15 +294,15 @@ func (imr *Imr) stubServers(zone string) []*cache.AuthServer {
 }
 
 // StubZoneList returns the configured stub table (config view).
-func (imr *Imr) StubZoneList() []ImrStubZoneInfo {
+func (imr *Imr) StubZoneList() []StubZoneInfo {
 	if imr == nil {
 		return nil
 	}
-	var out []ImrStubZoneInfo
+	var out []StubZoneInfo
 	for _, zone := range imr.StubZones() {
-		info := ImrStubZoneInfo{Zone: zone}
+		info := StubZoneInfo{Zone: zone}
 		for _, server := range imr.stubServers(zone) {
-			info.Servers = append(info.Servers, ImrStubServerInfo{
+			info.Servers = append(info.Servers, StubServerInfo{
 				Name:  server.Name,
 				Addrs: server.GetAddrs(),
 				Alpn:  server.GetAlpn(),
@@ -315,17 +315,17 @@ func (imr *Imr) StubZoneList() []ImrStubZoneInfo {
 
 // StubZoneStatus returns the live view of the configured stub zones:
 // per-server transport counters and active backoffs.
-func (imr *Imr) StubZoneStatus() []ImrStubZoneStatus {
+func (imr *Imr) StubZoneStatus() []StubZoneStatus {
 	if imr == nil {
 		return nil
 	}
 	now := time.Now()
-	var out []ImrStubZoneStatus
+	var out []StubZoneStatus
 	for _, zone := range imr.StubZones() {
-		zs := ImrStubZoneStatus{Zone: zone}
+		zs := StubZoneStatus{Zone: zone}
 		for _, server := range imr.stubServers(zone) {
 			ts := server.SnapshotTransportStats()
-			ss := ImrStubServerStatus{
+			ss := StubServerStatus{
 				Name:      server.Name,
 				Addrs:     server.GetAddrs(),
 				Attempted: TransportCountsToStrings(ts.Attempted),
@@ -369,7 +369,7 @@ func (imr *Imr) StubZoneStatus() []ImrStubZoneStatus {
 // recorded into the AuthServer state (see the file comment). A cancelled ctx
 // skips tuples whose exchange has not started and interrupts those already
 // on the wire (#435).
-func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrStubProbeResult, error) {
+func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]StubProbeResult, error) {
 	zones, err := imr.stubZonesMatching(zoneFilter)
 	if err != nil {
 		return nil, err
@@ -377,7 +377,7 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 	var (
 		wg      sync.WaitGroup
 		mu      sync.Mutex
-		results []ImrStubProbeResult
+		results []StubProbeResult
 	)
 	for _, zone := range zones {
 		for _, server := range imr.stubServers(zone) {
@@ -409,7 +409,7 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 						}
 						if dialErr != "" {
 							mu.Lock()
-							results = append(results, ImrStubProbeResult{Zone: zone, Server: serverName, Addr: dialAddr,
+							results = append(results, StubProbeResult{Zone: zone, Server: serverName, Addr: dialAddr,
 								Transport: core.TransportToString[transport], Error: dialErr})
 							mu.Unlock()
 							return
@@ -421,7 +421,7 @@ func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]ImrS
 						start := time.Now()
 						r, _, err := core.ExchangeCtx(ctx, client, m, dialAddr, false)
 						rtt := time.Since(start)
-						res := ImrStubProbeResult{
+						res := StubProbeResult{
 							Zone:      zone,
 							Server:    serverName,
 							Addr:      dialAddr,

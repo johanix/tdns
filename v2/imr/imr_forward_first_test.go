@@ -26,8 +26,8 @@ import (
 // gone for a while. Nothing is primed, and no hints are seeded.
 
 // rootForward is a forward of "." to the upstream at addr:port.
-func rootForward(addr string, port uint16) []ImrForwardConf {
-	return []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}}
+func rootForward(addr string, port uint16) []ForwardConf {
+	return []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}}
 }
 
 // requireNoRootServerMap fails the test unless the resolver holds no server
@@ -310,8 +310,8 @@ func TestCacheForwardedHookFollowsTheZoneTable(t *testing.T) {
 
 	// Only fwd.example. forwarded, and nothing cached: its names go out with
 	// no servers, and every other name is iterated, with no servers to ask.
-	sub := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
+	sub := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
 	})
 	if !sub.Cache.Forwarded("www.fwd.example.", dns.TypeA) {
 		t.Error("a name under the forward zone is not forwarded")

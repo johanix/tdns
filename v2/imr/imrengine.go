@@ -36,10 +36,10 @@ type Imr struct {
 	// the full DNSSEC chain is not yet established.
 	RequireDnssecValidation bool
 	// Tuning is a snapshot of conf.Imr.Tuning taken at init time
-	// with defaults applied via LoadImrTuningDefaults. Subsequent
+	// with defaults applied via LoadTuningDefaults. Subsequent
 	// work items read backoff / address-family / discovery /
 	// query-budget knobs from here.
-	Tuning ImrTuningConf
+	Tuning TuningConf
 	// FamilyTracker deprioritizes v4 or v6 tuples when the local host
 	// appears to have lost connectivity over that family. Sourced from
 	// Tuning.AddressFamily; see W8.
@@ -324,7 +324,7 @@ func New(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 	if ic.RequireDnssecValidation != nil {
 		requireDnssec = *ic.RequireDnssecValidation
 	}
-	LoadImrTuningDefaults(&ic.Tuning)
+	LoadTuningDefaults(&ic.Tuning)
 	cache.SetBackoffPolicy(cache.BackoffPolicy{
 		FirstFailure:   ic.Tuning.Backoff.FirstFailure,
 		MaxFailure:     ic.Tuning.Backoff.MaxFailure,

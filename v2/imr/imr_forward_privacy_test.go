@@ -157,8 +157,8 @@ func TestForwardStrictPrivacyExhaustionWrapsSentinel(t *testing.T) {
 	addr, port, stop := startSilentUpstreamDoT(t, cert)
 	defer stop()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: addr, Port: port, Transport: "dot", TLSServerName: "dns.test.example"},
 		}},
 	})

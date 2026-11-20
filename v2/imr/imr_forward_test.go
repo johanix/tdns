@@ -36,18 +36,18 @@ import (
 )
 
 func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
-	forwards, diags := BuildImrForwards([]ImrForwardConf{
-		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.3"}}},
-		{Zone: "Foo.Bar", Upstreams: []ImrUpstreamConf{
+	forwards, diags := BuildForwards([]ForwardConf{
+		{Zone: ".", Upstreams: []UpstreamConf{{Addr: "192.0.2.3"}}},
+		{Zone: "Foo.Bar", Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", Transport: "doq"},
 			{Addr: "192.0.2.4", Transport: "doh"},
 			{Addr: "192.0.2.5", Transport: "udp"},
 			{Addr: "192.0.2.6", Transport: "tcp"},
 		}},
-		{Zone: "bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2", Transport: "dot", Port: 8853}}},
+		{Zone: "bar.", Upstreams: []UpstreamConf{{Addr: "192.0.2.2", Transport: "dot", Port: 8853}}},
 	})
 	if len(diags) != 0 {
-		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
+		t.Fatalf("BuildForwards: unexpected diags: %v", diags)
 	}
 	// Most-specific first: foo.bar. (2 labels), bar. (1), . (0).
 	if forwards[0].Zone != "foo.bar." || forwards[1].Zone != "bar." || forwards[2].Zone != "." {
@@ -74,8 +74,8 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 	}
 
 	// trust-ad demands an authenticated channel and must be accepted on one.
-	if _, d := BuildImrForwards([]ImrForwardConf{
-		{Zone: "ok.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{
+	if _, d := BuildForwards([]ForwardConf{
+		{Zone: "ok.example.", TrustAD: true, Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot", TLSServerName: "dns.example.com"},
 			{Addr: "192.0.2.2", Transport: "doq"},
 		}},
@@ -90,7 +90,7 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 	// names under the zone SERVFAIL instead of falling back to iteration.
 	bad := []struct {
 		name string
-		conf []ImrForwardConf
+		conf []ForwardConf
 		// wantZones is the number of zones that reach the table.
 		wantZones int
 		// wantQuarantined is how many of them are quarantined.
@@ -98,32 +98,32 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 		// wantUpQuarantined counts quarantined upstreams across the table.
 		wantUpQuarantined int
 	}{
-		{"hostname addr", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "dns.example.com"}}}}, 1, 1, 1},
-		{"unknown transport", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "smtp"}}}}, 1, 1, 1},
-		{"tls options on do53", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", TLSServerName: "x.example."}}}}, 1, 1, 1},
+		{"hostname addr", []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: "dns.example.com"}}}}, 1, 1, 1},
+		{"unknown transport", []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: "192.0.2.1", Transport: "smtp"}}}}, 1, 1, 1},
+		{"tls options on do53", []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: "192.0.2.1", TLSServerName: "x.example."}}}}, 1, 1, 1},
 		// The duplicate is dropped and the FIRST definition stands, serving.
-		{"duplicate zone", []ImrForwardConf{
-			{Zone: "foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
-			{Zone: "Foo.bar", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2"}}},
+		{"duplicate zone", []ForwardConf{
+			{Zone: "foo.bar.", Upstreams: []UpstreamConf{{Addr: "192.0.2.1"}}},
+			{Zone: "Foo.bar", Upstreams: []UpstreamConf{{Addr: "192.0.2.2"}}},
 		}, 1, 0, 0},
 		// Kept, not dropped: dropping it would hand the zone to iteration.
-		{"no upstreams", []ImrForwardConf{{Zone: "foo.bar."}}, 1, 1, 0},
-		{"no zone", []ImrForwardConf{{Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}, 0, 0, 0},
+		{"no upstreams", []ForwardConf{{Zone: "foo.bar."}}, 1, 1, 0},
+		{"no zone", []ForwardConf{{Upstreams: []UpstreamConf{{Addr: "192.0.2.1"}}}}, 0, 0, 0},
 		// A spoofable AD bit must not be a Secure-cache oracle: trust-ad
 		// over plaintext or unverified TLS is quarantined at build time.
-		{"trust-ad on do53", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}}}, 1, 1, 1},
-		{"trust-ad on tcp", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "tcp"}}}}, 1, 1, 1},
-		{"trust-ad with insecure dot", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1", Transport: "dot", Insecure: true}}}}, 1, 1, 1},
+		{"trust-ad on do53", []ForwardConf{{Zone: ".", TrustAD: true, Upstreams: []UpstreamConf{{Addr: "192.0.2.1"}}}}, 1, 1, 1},
+		{"trust-ad on tcp", []ForwardConf{{Zone: ".", TrustAD: true, Upstreams: []UpstreamConf{{Addr: "192.0.2.1", Transport: "tcp"}}}}, 1, 1, 1},
+		{"trust-ad with insecure dot", []ForwardConf{{Zone: ".", TrustAD: true, Upstreams: []UpstreamConf{{Addr: "192.0.2.1", Transport: "dot", Insecure: true}}}}, 1, 1, 1},
 		// The one case that keeps serving: the dot upstream authenticates,
 		// so only the plaintext one is quarantined and the zone survives
 		// with reduced redundancy.
-		{"trust-ad with one plaintext upstream", []ImrForwardConf{{Zone: ".", TrustAD: true, Upstreams: []ImrUpstreamConf{
+		{"trust-ad with one plaintext upstream", []ForwardConf{{Zone: ".", TrustAD: true, Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot"},
 			{Addr: "192.0.2.2"},
 		}}}, 1, 0, 1},
 	}
 	for _, b := range bad {
-		forwards, diags := BuildImrForwards(b.conf)
+		forwards, diags := BuildForwards(b.conf)
 		if len(diags) == 0 {
 			t.Errorf("%s: config accepted silently, want a diag", b.name)
 		}
@@ -153,14 +153,14 @@ func TestBuildImrForwardsDefaultsAndOrder(t *testing.T) {
 
 // The TLS settings of an encrypted upstream must reach the DNS client.
 func TestForwardUpstreamTLSConfig(t *testing.T) {
-	forwards, diags := BuildImrForwards([]ImrForwardConf{
-		{Zone: "a.example.", Upstreams: []ImrUpstreamConf{
+	forwards, diags := BuildForwards([]ForwardConf{
+		{Zone: "a.example.", Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", Transport: "doq", TLSServerName: "dns.example.com"},
 			{Addr: "192.0.2.2", Transport: "dot", Insecure: true},
 		}},
 	})
 	if len(diags) != 0 {
-		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
+		t.Fatalf("BuildForwards: unexpected diags: %v", diags)
 	}
 	doq := forwards[0].Upstreams[0].Client.(*core.DNSClient)
 	if doq.TLSConfig.ServerName != "dns.example.com" {
@@ -182,13 +182,13 @@ func TestForwardUpstreamTLSConfig(t *testing.T) {
 }
 
 func TestForwardZoneFor(t *testing.T) {
-	forwards, diags := BuildImrForwards([]ImrForwardConf{
-		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
-		{Zone: "sub.foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.2"}}},
-		{Zone: "foo.bar.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.3"}}},
+	forwards, diags := BuildForwards([]ForwardConf{
+		{Zone: ".", Upstreams: []UpstreamConf{{Addr: "192.0.2.1"}}},
+		{Zone: "sub.foo.bar.", Upstreams: []UpstreamConf{{Addr: "192.0.2.2"}}},
+		{Zone: "foo.bar.", Upstreams: []UpstreamConf{{Addr: "192.0.2.3"}}},
 	})
 	if len(diags) != 0 {
-		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
+		t.Fatalf("BuildForwards: unexpected diags: %v", diags)
 	}
 	// foo.bar. is deliberately BOTH a stub and a forward zone: equal
 	// specificity means the forward wins — a stub overrides only when it is
@@ -561,11 +561,11 @@ func startTestUpstreamDoQ(t *testing.T, cert tls.Certificate) (string, uint16, *
 	}
 }
 
-func newForwardTestImr(t *testing.T, conf []ImrForwardConf) *Imr {
+func newForwardTestImr(t *testing.T, conf []ForwardConf) *Imr {
 	t.Helper()
-	forwards, diags := BuildImrForwards(conf)
+	forwards, diags := BuildForwards(conf)
 	if len(diags) != 0 {
-		t.Fatalf("BuildImrForwards: unexpected diags: %v", diags)
+		t.Fatalf("BuildForwards: unexpected diags: %v", diags)
 	}
 	lg := log.New(os.Stderr, "test", log.LstdFlags)
 	imr := &Imr{
@@ -587,8 +587,8 @@ func TestForwardQueryTrustAD(t *testing.T) {
 	addr, port, logr, stop := startTestUpstreamDoT(t, cert)
 	defer stop()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", TrustAD: true, Upstreams: []UpstreamConf{
 			{Addr: addr, Port: port, Transport: "dot", TLSServerName: "dns.test.example"},
 		}},
 	})
@@ -664,8 +664,8 @@ func TestForwardQueryValidatesLocally(t *testing.T) {
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}},
 	})
 	ctx := context.Background()
 
@@ -708,8 +708,8 @@ func TestForwardQueryDoH(t *testing.T) {
 	addr, port, logr, stop := startTestUpstreamDoH(t, cert)
 	defer stop()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: addr, Port: port, Transport: "doh"},
 		}},
 	})
@@ -734,8 +734,8 @@ func TestForwardQueryDoQ(t *testing.T) {
 	addr, port, logr, stop := startTestUpstreamDoQ(t, cert)
 	defer stop()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: addr, Port: port, Transport: "doq", TLSServerName: "dns.test.example"},
 		}},
 	})
@@ -762,8 +762,8 @@ func TestForwardQueryFailover(t *testing.T) {
 
 	// 192.0.2.9 is TEST-NET: nothing answers. Use a sub-second timeout so
 	// the failover test doesn't sit out the full 5s default.
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.9", Port: 1},
 			{Addr: addr, Port: port},
 		}},
@@ -783,8 +783,8 @@ func TestForwardQueryFailover(t *testing.T) {
 		t.Fatalf("failover: rcode=%d rrset=%v", rcode, rrset)
 	}
 
-	dead := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.9", Port: 1}}},
+	dead := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{{Addr: "192.0.2.9", Port: 1}}},
 	})
 	c := dead.ForwardZones()[0].Upstreams[0].Client.(*core.DNSClient)
 	c.Timeout = 500 * time.Millisecond
@@ -808,8 +808,8 @@ func TestForwardRootPrimingSkipsFetch(t *testing.T) {
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}},
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}},
 	})
 
 	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
@@ -845,8 +845,8 @@ func TestProbeForwardUpstreams(t *testing.T) {
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.9", Port: 1},
 			{Addr: addr, Port: port},
 		}},
@@ -955,8 +955,8 @@ func TestForwardQueryCancelIsNotAnUpstreamFailure(t *testing.T) {
 	host, port, stop := startSilentUpstream(t)
 	defer stop()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: host, Port: port}}},
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{{Addr: host, Port: port}}},
 	})
 	imr.errorRegistry = newTestErrorSink()
 	up := imr.ForwardZones()[0].Upstreams[0]
@@ -1171,14 +1171,14 @@ func TestBuildImrForwardsCAFile(t *testing.T) {
 		t.Fatalf("write garbage: %v", err)
 	}
 
-	forwards, diags := BuildImrForwards([]ImrForwardConf{
-		{Zone: ".", Upstreams: []ImrUpstreamConf{
+	forwards, diags := BuildForwards([]ForwardConf{
+		{Zone: ".", Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot", TLSServerName: "dns.example.", CAFile: caFile},
 			{Addr: "192.0.2.2", Transport: "dot", TLSServerName: "dns.example."},
 		}},
 	})
 	if len(diags) != 0 {
-		t.Fatalf("BuildImrForwards with ca-file: unexpected diags: %v", diags)
+		t.Fatalf("BuildForwards with ca-file: unexpected diags: %v", diags)
 	}
 	withCA := forwards[0].Upstreams[0].Client.(*core.DNSClient)
 	if withCA.TLSConfig == nil || withCA.TLSConfig.RootCAs == nil {
@@ -1194,19 +1194,19 @@ func TestBuildImrForwardsCAFile(t *testing.T) {
 
 	bad := []struct {
 		name string
-		conf []ImrForwardConf
+		conf []ForwardConf
 	}{
-		{"ca-file on do53", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{
+		{"ca-file on do53", []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", CAFile: caFile}}}}},
-		{"ca-file with insecure", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{
+		{"ca-file with insecure", []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot", CAFile: caFile, Insecure: true}}}}},
-		{"ca-file that does not exist", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{
+		{"ca-file that does not exist", []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot", CAFile: filepath.Join(dir, "absent.crt")}}}}},
-		{"ca-file with no certificate in it", []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{
+		{"ca-file with no certificate in it", []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot", CAFile: notPEM}}}}},
 	}
 	for _, b := range bad {
-		forwards, diags := BuildImrForwards(b.conf)
+		forwards, diags := BuildForwards(b.conf)
 		if len(diags) == 0 {
 			t.Errorf("%s: accepted silently, want a diag", b.name)
 		}
@@ -1247,8 +1247,8 @@ func TestForwardBlackholedUpstreamDoesNotStarveTheNext(t *testing.T) {
 	bh, bhPort, stopBH := startBlackholeUpstream(t)
 	defer stopBH()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: bh, Port: bhPort},
 			{Addr: good, Port: goodPort},
 		}},
@@ -1307,8 +1307,8 @@ func TestForwardStarvedUpstreamIsNotRecordedAsFailed(t *testing.T) {
 	answering, answeringPort, _, stopAnswering := startTestUpstream(t)
 	defer stopAnswering()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: bh, Port: bhPort},
 			{Addr: starved, Port: starvedPort},
 			{Addr: answering, Port: answeringPort},
@@ -1466,8 +1466,8 @@ func TestForwardStarvedUpstreamDoesNotFireOutboundHook(t *testing.T) {
 	}
 
 	// Same shape as the test above: up0 dialled, up1 below the floor, up2 last.
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: bh, Port: bhPort},
 			{Addr: starved, Port: starvedPort},
 			{Addr: answering, Port: answeringPort},
@@ -1515,8 +1515,8 @@ func TestForwardRepeatedSliceTimeoutsMarkTheUpstreamFailing(t *testing.T) {
 	answering, answeringPort, _, stopAnswering := startTestUpstream(t)
 	defer stopAnswering()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: bh, Port: bhPort},
 			{Addr: answering, Port: answeringPort},
 		}},

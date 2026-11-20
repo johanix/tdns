@@ -365,7 +365,7 @@ func TestProbeStubServersDialsSignalPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeStubServers: %v", err)
 	}
-	var probed []ImrStubProbeResult
+	var probed []StubProbeResult
 	for _, res := range results {
 		if res.Transport == "dot" {
 			probed = append(probed, res)

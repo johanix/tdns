@@ -75,7 +75,7 @@ func newLifetimeImr(t *testing.T) (*Imr, *upstreamLog) {
 	}
 	logr := &upstreamLog{}
 	addr, port := startLoggedSignedForwardUpstream(t, answers, logr)
-	imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+	imr := newForwardTestImr(t, []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}})
 	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
 		t.Fatalf("PrimeFromHintsOnly: %v", err)

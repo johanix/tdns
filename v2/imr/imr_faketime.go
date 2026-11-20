@@ -21,7 +21,7 @@ const faketimeBannerInterval = time.Hour
 // and every hour after, until ctx ends. Without faketime it does nothing, and
 // data time is real time. A retried start keeps the clock it started.
 // docs/2026-09-28-imr-deckard-test-clock-and-switches.md §3.3.
-func startDataClock(ctx context.Context, lg *slog.Logger, t ImrTestingConf) error {
+func startDataClock(ctx context.Context, lg *slog.Logger, t TestingConf) error {
 	if err := t.Validate(); err != nil {
 		return err
 	}

@@ -92,8 +92,8 @@ func TestNoAnchorNonDefaultRootGetsNoAnchor(t *testing.T) {
 		reason string
 	}{
 		{"root-hints file", Config{RootHints: "/etc/tdns/root.hints"}, "root-hints is set"},
-		{"forwarded root", Config{Forward: []ImrForwardConf{fwdConf(".", "192.0.2.53", 0)}}, "root is forwarded"},
-		{"stubbed root", Config{Stubs: []ImrStubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}, "root is a stub zone"},
+		{"forwarded root", Config{Forward: []ForwardConf{fwdConf(".", "192.0.2.53", 0)}}, "root is forwarded"},
+		{"stubbed root", Config{Stubs: []StubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}, "root is a stub zone"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logbuf := captureImrLog(t)
@@ -123,8 +123,8 @@ func TestNoAnchorNonDefaultRootGetsNoAnchor(t *testing.T) {
 
 	// A forward or stub below the root leaves the IANA root in place.
 	ic := Config{
-		Forward: []ImrForwardConf{fwdConf("fwd.example.", "192.0.2.53", 0)},
-		Stubs:   []ImrStubConf{stubConf("stub.example.", "ns.stub.example.", "192.0.2.1")},
+		Forward: []ForwardConf{fwdConf("fwd.example.", "192.0.2.53", 0)},
+		Stubs:   []StubConf{stubConf("stub.example.", "ns.stub.example.", "192.0.2.1")},
 	}
 	if use, why := ic.RootAnchorFallback(); !use {
 		t.Errorf("a forward and a stub below the root turned the compiled-in anchor off: %s", why)
@@ -258,9 +258,9 @@ func TestRestartRequiredWhenTheDefaultRootAnchorChanges(t *testing.T) {
 		return slices.ContainsFunc(keys, func(k string) bool { return strings.HasPrefix(k, key) })
 	}
 	plain := Config{}
-	fwdRoot := Config{Forward: []ImrForwardConf{fwdConf(".", "192.0.2.53", 0)}}
-	stubRoot := Config{Stubs: []ImrStubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}
-	fwdBelow := Config{Forward: []ImrForwardConf{fwdConf("fwd.example.", "192.0.2.53", 0)}}
+	fwdRoot := Config{Forward: []ForwardConf{fwdConf(".", "192.0.2.53", 0)}}
+	stubRoot := Config{Stubs: []StubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}
+	fwdBelow := Config{Forward: []ForwardConf{fwdConf("fwd.example.", "192.0.2.53", 0)}}
 
 	if keys := imrRestartRequiredKeys(plain, fwdRoot); !hasKey(keys) {
 		t.Errorf("adding a . forward: restart-required keys %v, want %q", keys, key)

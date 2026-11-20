@@ -161,7 +161,7 @@ func TestForwardValidatesASignedZoneWithNoDSAsInsecure(t *testing.T) {
 					fwdSecParent + " DNSKEY": {Answer: parent.sign(t, dns.Copy(parent.dnskey))},
 				})
 
-				imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+				imr := newForwardTestImr(t, []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}})
 				imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 				if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
 					t.Fatalf("PrimeFromHintsOnly: %v", err)

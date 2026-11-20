@@ -43,7 +43,7 @@ func startTestDataClock(t *testing.T, at time.Time) string {
 	writeFaketimeFile(t, path, at)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); cache.SetDataClock(nil) })
-	if err := startDataClock(ctx, slog.Default(), ImrTestingConf{FaketimeFile: path}); err != nil {
+	if err := startDataClock(ctx, slog.Default(), TestingConf{FaketimeFile: path}); err != nil {
 		t.Fatalf("startDataClock: %v", err)
 	}
 	return path
@@ -74,7 +74,7 @@ func newImr2010(t *testing.T) *Imr {
 		fwdSecKid + " DS":        {Answer: parent.signAt(t, from, until, kid.dnskey.ToDS(dns.SHA256))},
 		fwdSecParent + " DNSKEY": {Answer: parent.signAt(t, from, until, dns.Copy(parent.dnskey))},
 	})
-	imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+	imr := newForwardTestImr(t, []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}})
 	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
 		t.Fatalf("PrimeFromHintsOnly: %v", err)
@@ -142,7 +142,7 @@ func TestResolverFollowsTheTestClock(t *testing.T) {
 func TestFaketimeRestartKeepsTheClock(t *testing.T) {
 	path := startTestDataClock(t, faketime2010)
 	first := cache.DataClock()
-	if err := startDataClock(context.Background(), slog.Default(), ImrTestingConf{FaketimeFile: path}); err != nil {
+	if err := startDataClock(context.Background(), slog.Default(), TestingConf{FaketimeFile: path}); err != nil {
 		t.Fatalf("second start: %v", err)
 	}
 	if cache.DataClock() != first {
@@ -175,7 +175,7 @@ func TestFaketimeActivationDataClock(t *testing.T) {
 	on, off := true, false
 	ctx := context.Background()
 
-	for name, tc := range map[string]ImrTestingConf{
+	for name, tc := range map[string]TestingConf{
 		"no file named":             {Faketime: true},
 		"a missing file":            {FaketimeFile: filepath.Join(t.TempDir(), "missing")},
 		"root-refresh beside it":    {Faketime: true, FaketimeFile: startTestDataClock(t, faketime2010), RootRefresh: &on},
@@ -187,8 +187,8 @@ func TestFaketimeActivationDataClock(t *testing.T) {
 		}
 	}
 
-	if !(ImrTestingConf{Faketime: true}).SkipRootRefresh() || !(ImrTestingConf{RootRefresh: &off}).SkipRootRefresh() ||
-		(ImrTestingConf{}).SkipRootRefresh() || (ImrTestingConf{RootRefresh: &on}).SkipRootRefresh() {
+	if !(TestingConf{Faketime: true}).SkipRootRefresh() || !(TestingConf{RootRefresh: &off}).SkipRootRefresh() ||
+		(TestingConf{}).SkipRootRefresh() || (TestingConf{RootRefresh: &on}).SkipRootRefresh() {
 		t.Error("the root refresh is off exactly when root-refresh is false or the test clock is on")
 	}
 }

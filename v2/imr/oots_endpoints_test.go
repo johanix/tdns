@@ -468,7 +468,7 @@ func TestProbeStubServersFollowsRedirect(t *testing.T) {
 	saved := endpointAddrLookupHook
 	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) { return nil, time.Time{} }
 	t.Cleanup(func() { endpointAddrLookupHook = saved })
-	probe := func() ImrStubProbeResult {
+	probe := func() StubProbeResult {
 		t.Helper()
 		results, err := imr.ProbeStubServers(context.Background(), zone)
 		if err != nil || len(results) != 1 {
