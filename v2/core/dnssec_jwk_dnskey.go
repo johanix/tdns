@@ -81,7 +81,7 @@ func jsonUint(raw json.RawMessage, member string, max uint64) (uint64, error) {
 	return v, nil
 }
 
-// parseDNSKEYParam reads a "dnskey" (or, in J5, "sig0key") object. Unknown
+// parseDNSKEYParam reads a "dnskey" or "sig0key" object. Unknown
 // members are ignored (draft section 2.2).
 func parseDNSKEYParam(raw json.RawMessage, param string) (*DNSKEYParam, error) {
 	var m map[string]json.RawMessage
@@ -460,28 +460,45 @@ func (k *JSONWebKey) CheckKeyPair() error {
 
 // --- the DNSSEC JWK ---
 
-// DNSSECJWK is a DNSSEC JWK: key material plus the "dnskey" parameter.
+// DNSSECJWK is a DNSSEC JWK: key material plus the "dnskey" parameter, or,
+// for a SIG(0) key, the "sig0key" parameter (dnssec_jwk_sig0key.go).
+// Exactly one of DNSKEY and Sig0Key is set.
 type DNSSECJWK struct {
-	Key    *JSONWebKey
-	DNSKEY *DNSKEYParam
+	Key     *JSONWebKey
+	DNSKEY  *DNSKEYParam
+	Sig0Key *DNSKEYParam
 }
 
-// MarshalJSON writes the key with "dnskey" as its last member, as in the
-// draft's examples.
+// MarshalJSON writes the key with "dnskey" (or "sig0key") as its last
+// member, as in the draft's examples.
 func (d *DNSSECJWK) MarshalJSON() ([]byte, error) {
-	if d.Key == nil || d.DNSKEY == nil {
-		return nil, fmt.Errorf("%w: DNSSEC JWK needs key material and \"dnskey\"", ErrDNSKEYParamMissing)
+	if d.DNSKEY != nil && d.Sig0Key != nil {
+		return nil, ErrBothKeyParams
+	}
+	p := d.DNSKEY
+	if p == nil {
+		p = d.Sig0Key
+	}
+	if d.Key == nil || p == nil {
+		return nil, fmt.Errorf("%w: a DNSSEC JWK needs key material and \"dnskey\" or \"sig0key\"", ErrNoKeyParam)
 	}
 	if err := d.Key.Validate(); err != nil {
 		return nil, err
 	}
-	if err := d.DNSKEY.check(); err != nil {
+	if err := p.check(); err != nil {
 		return nil, err
 	}
-	return json.Marshal(struct {
+	out := struct {
 		jwkWire
-		DNSKEY *dnskeyParamWire `json:"dnskey"`
-	}{d.Key.wire(), d.DNSKEY.wire()})
+		DNSKEY  *dnskeyParamWire `json:"dnskey,omitempty"`
+		Sig0Key *dnskeyParamWire `json:"sig0key,omitempty"`
+	}{jwkWire: d.Key.wire()}
+	if d.DNSKEY != nil {
+		out.DNSKEY = p.wire()
+	} else {
+		out.Sig0Key = p.wire()
+	}
+	return json.Marshal(out)
 }
 
 // ParseDNSSECJWK parses a DNSSEC JWK and applies all five import rules of
@@ -490,25 +507,17 @@ func (d *DNSSECJWK) MarshalJSON() ([]byte, error) {
 // ErrDNSKEYParamMalformed, ErrDNSKEYName or ErrDNSKEYProtocol (1),
 // ErrDNSKEYKeyTypeMismatch or ErrNoJWKRepresentation (2), ErrDNSKEYPublicKey
 // (3), ErrDNSKEYKeyTag (4), ErrDNSKEYPrivateMismatch or ErrNoKeyPairCheck
-// (5). Key material errors are the codec's (ErrJWK...).
+// (5). Key material errors are the codec's (ErrJWK...). A SIG(0) JWK
+// ("sig0key" only) has no "dnskey" and fails rule 1, as it does in any
+// consumer that knows only "dnskey"; one with both is ErrBothKeyParams.
 func ParseDNSSECJWK(data []byte) (*DNSSECJWK, *dns.DNSKEY, error) {
-	m, err := parseJWKMembers(data)
+	d, err := parseKeyParams(data)
 	if err != nil {
 		return nil, nil, err
 	}
-	raw, ok := m["dnskey"]
-	if !ok {
+	if d.DNSKEY == nil {
 		return nil, nil, ErrDNSKEYParamMissing
 	}
-	p, err := parseDNSKEYParam(raw, "dnskey")
-	if err != nil {
-		return nil, nil, err
-	}
-	var k JSONWebKey
-	if err := k.fromMembers(m); err != nil {
-		return nil, nil, err
-	}
-	d := &DNSSECJWK{Key: &k, DNSKEY: p}
 	rr, err := d.ToDNSKEY()
 	if err != nil {
 		return nil, nil, err
@@ -518,6 +527,9 @@ func ParseDNSSECJWK(data []byte) (*DNSSECJWK, *dns.DNSKEY, error) {
 
 // ToDNSKEY applies rules 2 to 5 to d and returns its DNSKEY RR.
 func (d *DNSSECJWK) ToDNSKEY() (*dns.DNSKEY, error) {
+	if d.DNSKEY != nil && d.Sig0Key != nil {
+		return nil, ErrBothKeyParams
+	}
 	if d.DNSKEY == nil {
 		return nil, ErrDNSKEYParamMissing
 	}
