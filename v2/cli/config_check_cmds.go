@@ -671,6 +671,7 @@ func checkDoHPath(cfg *tdns.Config, rep *ccReport, g string, doh bool) {
 
 func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 	const g = "API server"
+	checkApiAccessFile(cfg, rep)
 	if len(cfg.ApiServer.Addresses) == 0 {
 		rep.fail(g, "addresses", "apiserver.addresses is empty",
 			"set at least one addr:port (loopback is fine, e.g. 127.0.0.1:8989)")
@@ -1964,4 +1965,25 @@ func checkDuplicateTemplates(cfg *tdns.Config, rep *ccReport) {
 		rep.pass("Zones", "duplicate template",
 			fmt.Sprintf("no duplicate names among %d template(s)", len(cfg.Templates)))
 	}
+}
+
+// checkApiAccessFile runs the daemon's own validator over the access file, so
+// a file the daemon would not use is found before the reload rather than by it.
+func checkApiAccessFile(cfg *tdns.Config, rep *ccReport) {
+	const g = "API access file"
+	path := cfg.ApiServer.AccessFile
+	if path == "" {
+		return
+	}
+	af, err := tdns.LoadAccessFile(path)
+	if err != nil {
+		rep.fail(g, "access-file", err.Error(),
+			"fix the file (tdns-ncli <daemon> client ... writes only files that pass this check), then reload over the local socket")
+		return
+	}
+	keyauth := "on"
+	if !af.KeyAuthOn() {
+		keyauth = "off"
+	}
+	rep.pass(g, "access-file", fmt.Sprintf("%s: %d client(s), keyauth %s", path, len(af.Clients), keyauth))
 }

@@ -829,6 +829,14 @@ type ApiServerConf struct {
 	// with mode 0600 and refuses a directory that group or others can enter.
 	// See api_socket.go and docs/2026-11-20-api-pinning-mtls-roles-design.md.
 	Socket string
+
+	// AccessFile is the network API's access policy (apiserver.access-file):
+	// the clients, by certificate pin, with their roles, and whether the API
+	// key still works. Unset, the network API works as before: the API key,
+	// as admin. Set, it requires Socket, because admin then exists only there.
+	// The file is read by its own loader (api_access.go), not decoded with
+	// this config, and tdns-ncli manages it.
+	AccessFile string `yaml:"access-file" mapstructure:"access-file"`
 }
 
 type ApiServerAppConf struct {
@@ -1240,6 +1248,10 @@ type InternalConf struct {
 	// once and preserved across config reloads (so boot-scoped Transport
 	// errors survive a reload).
 	ServerErrors *ServerErrorRegistry
+	// ApiAccess is the network management API's access policy as running,
+	// built from apiserver.access-file by the router builders and replaced
+	// whole by a successful reload. See api_auth.go.
+	ApiAccess *apiAccessHolder
 
 	// LargeAlgorithms is the derived lookup set from Dnssec.LargeAlgorithms.
 	LargeAlgorithms map[uint8]bool
@@ -1469,6 +1481,10 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 			msg += " " + summary
 		}
 		conf.publishRuntimeConfig()
+		// The network API's access policy is not part of the decoded
+		// config: its own loader reads it, and a file that does not load
+		// leaves the running policy in place (api_auth.go).
+		msg += conf.reloadApiAccess()
 	}
 	Globals.App.ServerConfigTime = time.Now()
 	return msg, err

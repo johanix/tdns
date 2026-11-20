@@ -80,6 +80,11 @@ func runPing(role string, cmd *cobra.Command, args []string) {
 		fmt.Printf("%s: pings: %d, pongs: %d, uptime: %s, time: %s\n",
 			pr.Msg, pr.Pings, pr.Pongs, uptimeStr, pr.Time.Format(timelayout))
 	}
+	// Who the daemon took us for: the first thing to look at when access does
+	// not work as expected. Older daemons do not say.
+	if pr.Auth != "" {
+		fmt.Printf("%s\n", pr.Auth)
+	}
 }
 
 func init() {

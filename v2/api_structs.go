@@ -703,6 +703,7 @@ type ConfigResponse struct {
 	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`     // per-zone would-strand findings (with GuardrailBlocked)
 	Imr                  *ImrStatus            `json:"imr,omitempty"`                // IMR priming + stub/forward state, when this daemon carries one
 	Proc                 *ProcStatus           `json:"proc,omitempty"`               // process resources (open fds, goroutines), for leak visibility (#443)
+	Access               *ApiAccessStatus      `json:"access,omitempty"`             // the network API's access policy as running, when apiserver.access-file is set
 	// transport-signal: what synthesis writes at _dns.<name> per name, for
 	// an operator to provision in the zone instead.
 	TransportSignal []TransportSignalPreview `json:"transportsignal,omitempty"`

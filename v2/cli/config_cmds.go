@@ -390,6 +390,7 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		} else {
 			fmt.Printf("ApiServer: api key is not set\n")
 		}
+		printAccessStatus(resp.Access)
 	}
 
 	if resp.Msg != "" {
@@ -450,4 +451,28 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	}
 
 	return cr, nil
+}
+
+// printAccessStatus prints the network API's access policy as the daemon is
+// running it, if it has one.
+func printAccessStatus(a *tdns.ApiAccessStatus) {
+	if a == nil {
+		return
+	}
+	if a.Error != "" {
+		fmt.Printf("Access file: %s CANNOT BE USED, so the TCP API answers 503 (the local socket works): %s\n", a.File, a.Error)
+		return
+	}
+	keyauth := "the API key is accepted (read-write)"
+	if !a.KeyAuth {
+		keyauth = "the API key is off"
+	}
+	fmt.Printf("Access file: %s; %s; %d client(s)\n", a.File, keyauth, len(a.Clients))
+	for _, c := range a.Clients {
+		state := ""
+		if c.Disabled {
+			state = ", disabled"
+		}
+		fmt.Printf("   %s (%s%s)\n", c.Name, c.Role, state)
+	}
 }
