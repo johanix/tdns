@@ -77,8 +77,12 @@ func checkJWKKind(data []byte, wantType uint16) (alg uint8, haveAlg bool, err er
 		return 0, false, fmt.Errorf("%w: not a JSON object", core.ErrJWKMalformed)
 	}
 	if raw, ok := top["keys"]; ok {
+		// Only a JSON array is a JWK Set. "null" also unmarshals without
+		// error, into a nil slice, and a single key that carries
+		// "keys":null (an unknown member, which RFC 7517 says to ignore)
+		// imported before the Set check existed. An empty array is a Set.
 		var set []json.RawMessage
-		if json.Unmarshal(raw, &set) == nil {
+		if json.Unmarshal(raw, &set) == nil && set != nil {
 			return 0, false, fmt.Errorf("%w: the file holds a JWK Set (a top-level \"keys\" array of %d); "+
 				"import takes one key per file, and bulk-import one jwk_file per key", ErrJWKSet, len(set))
 		}

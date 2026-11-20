@@ -129,9 +129,12 @@ key is added in state `created`. A key that is already in the keystore (same
 zone and keyid) is not overwritten by accident, because a replacement resets
 its state (an `active` key would go back to `created`):
 
-- the same key and the same RR: reported `Unchanged`, nothing is written and
-  the key keeps its state; exit 0. "The same key" means the decoded key, not
-  the PEM text (see [importing](#importing));
+- the same key and the same RR: reported `Unchanged`, nothing is written to
+  the keystore and the key keeps its state; exit 0. "The same key" means the
+  decoded key, not the PEM text (see [importing](#importing)). For a SIG(0)
+  key the public copy in the truststore is put back if its row was deleted
+  (the truststore delete command removes only that row); a row that is there
+  is left as it is;
 - anything different: refused, naming the stored state and what differs
   (`privatekey`, `keyrr`);
 - `--force` replaces the key and resets its state, and says so. It also
@@ -558,8 +561,10 @@ A `--format jwk` directory is: `bulk-import` and pre-load read each
   - applies the draft's five import rules, the private/public check among
     them; any failure rejects the key, and in a bulk import the whole batch;
   - refuses a public-only JWK, since the keystore holds private keys;
-  - refuses a JWK Set (`{"keys":[...]}`) with a message saying so: import
-    takes one key per file, and bulk-import one `jwk_file` per key;
+  - refuses a JWK Set (`{"keys":[...]}`, a top-level `keys` array) with a
+    message saying so: import takes one key per file, and bulk-import one
+    `jwk_file` per key. A `keys` member that is not an array (`null`, say)
+    is an unknown member of a single key and is ignored;
   - stores the key as PKCS#8 PEM (RFC 9881 seed form for ML-DSA, so the seed
     survives and the key can be exported as JWK again) plus the DNSKEY or KEY
     rebuilt from the JWK.
