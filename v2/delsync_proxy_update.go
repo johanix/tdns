@@ -766,6 +766,13 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
 				return "", fmt.Errorf("ProxyUpdateParent: analyse delegation (delta): %w", aerr)
 			}
 		}
+		// A difference from an analysis that could not read all of the
+		// parent's delegation is not sent, and nor is "in sync" taken from
+		// it: either would report an UPDATE that brought the parent in step
+		// (noteProxySyncForwarded). The error makes the caller look again.
+		if !dss.Complete() {
+			return "", fmt.Errorf("ProxyUpdateParent: delta: %w: %v", errDelegationNotAllRead, dss.Unread)
+		}
 		if dss.InSync {
 			return "delta: parent already in sync; nothing sent", nil
 		}

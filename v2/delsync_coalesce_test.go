@@ -391,6 +391,7 @@ func TestAnExplicitSyncClearsTheMarkOnlyWhenTheParentHoldsItAll(t *testing.T) {
 		{"the parent found in step", true, inStep, "", nil, false, false},
 		{"in step while a rollover owns the DS", true, rollingInStep, "", nil, true, false},
 		{"sent by UPDATE while a rollover owns the DS", true, rolling, "UPDATE", nil, true, false},
+		{"a send that failed", false, differs, "", errors.New("refused"), true, true},
 	} {
 		zd.delegationOutOfStep.Store(c.before)
 		sent := false
@@ -420,6 +421,29 @@ func TestAnExplicitSyncClearsTheMarkOnlyWhenTheParentHoldsItAll(t *testing.T) {
 			default:
 			}
 		}
+	}
+
+	// An operator's request is answered and not retried, so nothing else
+	// would record that the parent lacks what its compare found when the
+	// send fails: the run marks it (CodeRabbit on 9c217184).
+	zd.delegationOutOfStep.Store(false)
+	asked := DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName, ZoneData: zd,
+		Response: make(chan DelegationSyncStatus, 1)}
+	done := handleExplicitSyncWith(context.Background(), nil, q, asked, func() DelegationSyncStatus {
+		return zd.runExplicitSyncWith(
+			func() (DelegationSyncStatus, error) { return differs, nil },
+			func(DelegationSyncStatus) (string, uint8, UpdateResult, string, error) {
+				return "", dns.RcodeServerFailure, UpdateResult{}, "", errors.New("refused")
+			})
+	})
+	if done != nil {
+		t.Error("an operator's explicit sync whose send failed was retried")
+	}
+	if answer := <-asked.Response; !answer.Error {
+		t.Error("the operator was not told the send failed")
+	}
+	if !zd.delegationOutOfStep.Load() {
+		t.Error("an operator's explicit sync whose send failed left the parent marked in step")
 	}
 }
 

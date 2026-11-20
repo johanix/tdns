@@ -296,9 +296,12 @@ func handleRefreshSyncDelegationWith(ctx context.Context, ready *ImrReadiness, d
 		retry("send", err)
 		return nil
 	}
-	succeeded()
 	// A NOTIFY says only that the notifier took it: the parent may lack the
-	// difference yet (noteDelegationSyncSentBy).
+	// difference yet. It marks the parent (noteDelegationSyncSentBy) and is
+	// not a success: it must not drop an older refresh retry.
+	if scheme != "NOTIFY" {
+		succeeded()
+	}
 	zd.noteDelegationSyncSentBy(scheme)
 	lgDns.Info("DelegationSyncher: refresh sync done", "zone", ds.ZoneName, "msg", msg, "rcode", rcode, "scheme", scheme)
 	return nil

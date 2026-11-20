@@ -394,6 +394,29 @@ func TestDelegationAnalysisNamesAnUnreadDS(t *testing.T) {
 	})
 }
 
+// An in-bailiwick nameserver the zone keeps in its NS RRset but serves no
+// address for still has the parent's glue for it compared, with none: the
+// parent's A and AAAA are to be removed, as a stored difference that removed
+// the addresses would have removed them. Skipping it, the compare called the
+// parent in step with the stale glue still there (CodeRabbit on 9c217184).
+func TestDelegationAnalysisComparesGlueTheZoneNoLongerHas(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	zd := childZone(t, ddcngZone(1, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS2A), OptParentSync)
+	fakeParent(t, zd, []string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A})
+
+	resp, err := zd.AnalyseZoneDelegation(nil)
+	if err != nil {
+		t.Fatalf("AnalyseZoneDelegation: %v", err)
+	}
+	if resp.InSync || !resp.Complete() {
+		t.Fatalf("in sync %v, unread %q; want a complete compare that differs", resp.InSync, resp.Unread)
+	}
+	if len(resp.ARemoves) != 1 || len(resp.AAAARemoves) != 1 || len(resp.AAdds) != 0 || len(resp.AAAAAdds) != 0 {
+		t.Errorf("A removes %v, AAAA removes %v, adds %v %v; want the parent's ns1 A and AAAA removed, nothing added",
+			resp.ARemoves, resp.AAAARemoves, resp.AAdds, resp.AAAAAdds)
+	}
+}
+
 // The DS step's deliberate absences of opinion are not reads that failed: a
 // zone in one of them is complete, so a caller asking again until the analysis
 // is complete does not ask a rolling or unmanaged zone forever. Only while a
@@ -688,8 +711,9 @@ func TestARefreshSyncWithNoUsableSchemeMarksTheParent(t *testing.T) {
 }
 
 // A refresh sync whose difference went by NOTIFY marks the parent: the
-// notifier took it, and the parent has yet to come and read the zone. One sent
-// by UPDATE or API leaves the mark as it was (CodeRabbit on 4d398b97).
+// notifier took it, and the parent has yet to come and read the zone. Nor is
+// it a success that would drop an older refresh retry. One sent by UPDATE or
+// API leaves the mark as it was (CodeRabbit on 4d398b97 and 9c217184).
 func TestARefreshSyncByNotifyMarksTheParent(t *testing.T) {
 	withApp(t, AppTypeAuth)
 	zd := childZone(t, ddcngServedZone(), OptParentSync)
@@ -698,6 +722,9 @@ func TestARefreshSyncByNotifyMarksTheParent(t *testing.T) {
 		mark   bool
 	}{{"NOTIFY", true}, {"UPDATE", false}, {"API", false}} {
 		zd.delegationOutOfStep.Store(false)
+		zd.mu.Lock()
+		zd.delegationLastSyncOK = time.Time{}
+		zd.mu.Unlock()
 		rec := runArmBy(t, zd, refreshRequest(zd), func() (DelegationSyncStatus, error) {
 			return DelegationSyncStatus{ZoneName: zd.ZoneName}, nil
 		}, c.scheme, nil)
@@ -706,6 +733,14 @@ func TestARefreshSyncByNotifyMarksTheParent(t *testing.T) {
 		}
 		if got := zd.delegationOutOfStep.Load(); got != c.mark {
 			t.Errorf("a refresh sync sent by %s: marked out of step %v, want %v", c.scheme, got, c.mark)
+		}
+		// A NOTIFY is not a success that drops an older refresh retry
+		// (CodeRabbit on 9c217184); an UPDATE or API call is.
+		zd.mu.Lock()
+		stamped := !zd.delegationLastSyncOK.IsZero()
+		zd.mu.Unlock()
+		if stamped == c.mark {
+			t.Errorf("a refresh sync sent by %s: recorded as a success %v, want %v", c.scheme, stamped, !c.mark)
 		}
 	}
 }

@@ -196,16 +196,26 @@ func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserv
 	for _, ns := range child_inb {
 		owner, err := zd.GetOwner(ns)
 		if err != nil {
+			// The zone's own glue could not be read: the compare is
+			// incomplete, not one that found no glue to compare.
 			lgDns.Warn("error from GetOwner", "name", ns, "err", err)
+			resp.Unread = append(resp.Unread, ns+" A (child)", ns+" AAAA (child)")
 			continue
 		}
+		// A nameserver the zone serves no address for still has its glue at
+		// the parent compared, with none: what the parent holds for it is to
+		// be removed, as a stored difference that removed the address would
+		// have removed it.
+		var child_a_glue, child_aaaa_glue []dns.RR
 		if owner == nil {
-			lgDns.Warn("AnalyseZoneDelegation: owner data is nil for NS", "zone", zd.ZoneName, "ns", ns)
-			continue
+			lgDns.Warn("AnalyseZoneDelegation: the zone has no address for an in-bailiwick NS; comparing the parent's glue with none",
+				"zone", zd.ZoneName, "ns", ns)
+		} else {
+			child_a_glue = owner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs
+			child_aaaa_glue = owner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs
 		}
 		// A failed A query does not skip the AAAA one: each is compared, or
 		// named in resp.Unread, on its own.
-		child_a_glue := owner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs
 		parent_a_glue, err := AuthQuery(ns, pserver, dns.TypeA)
 		if err != nil {
 			lgDns.Warn("error from AuthQuery for A glue", "server", pserver, "ns", ns, "err", err)
@@ -221,7 +231,6 @@ func (zd *ZoneData) analyseNSAndGlue(imr *Imr) (resp DelegationSyncStatus, pserv
 			}
 		}
 
-		child_aaaa_glue := owner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs
 		parent_aaaa_glue, err := AuthQuery(ns, pserver, dns.TypeAAAA)
 		if err != nil {
 			lgDns.Warn("error from AuthQuery for AAAA glue", "server", pserver, "ns", ns, "err", err)

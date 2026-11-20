@@ -953,20 +953,31 @@ func (p *pendingLook) release(key pendingLookKey) {
 	}
 }
 
-// delegationSyncRetryStale reports whether ds is a compare re-run
-// (requeueLookAfter) whose zone was removed or replaced after its timer fired,
-// while it waited in its parent's queue. It is dropped then, as it would have
-// been had that happened before: run, it would compare and send the delegation
-// of a zone no longer served.
+// delegationSyncRetryStale reports whether ds is a retry whose zone was
+// removed or replaced since it was scheduled: a compare re-run
+// (requeueLookAfter), whose timer checked the zone but which may have waited
+// in its parent's queue since, or a setup retry or re-bootstrap round
+// (requeueSetupAfter), whose timer does not check. It is dropped: run, it would
+// compare and send the delegation, or bootstrap a key with the parent, for a
+// zone no longer served -- or one whose new instance does not sync with its
+// parent at all.
 func delegationSyncRetryStale(ds DelegationSyncRequest) bool {
-	if ds.Attempt == 0 || ds.Response != nil {
+	if ds.Response != nil {
 		return false
 	}
 	switch ds.Command {
 	case "EXPLICIT-SYNC-DELEGATION", "REFRESH-SYNC-DELEGATION", "PROXY-UPDATE-SETUP":
-		return !delegationSyncZoneLoaded(ds)
+		if ds.Attempt == 0 {
+			return false
+		}
+	case "DELEGATION-SYNC-SETUP":
+		if ds.Attempt == 0 && ds.ReBootstrapRound == 0 {
+			return false
+		}
+	default:
+		return false
 	}
-	return false
+	return !delegationSyncZoneLoaded(ds)
 }
 
 // delegationSyncZoneLoaded reports whether ds's zone is still the one loaded
@@ -1010,9 +1021,11 @@ func (zd *ZoneData) noteDelegationSyncNotSent() {
 // until a compare finds it in step. Otherwise a later stored change could go
 // as a difference by UPDATE -- the plan falls back to it when a NOTIFY cannot
 // be handed off -- and leave out what the parent never read. An UPDATE's or
-// an API call's success says the parent applied this change, and nothing
-// about earlier ones, so it leaves the mark as it is: the callers that know
-// more clear it (inStepAfter, noteProxySyncForwarded).
+// an API call's success says the parent applied what was sent. That clears the
+// mark only when what was sent was the whole delegation, which the callers
+// know: an explicit sync's difference from a complete compare that compared
+// the DS (inStepAfter), or a proxy sync (noteProxySyncForwarded). A stored
+// change or a refresh sync sends a part, so here it leaves the mark as it is.
 func (zd *ZoneData) noteDelegationSyncSentBy(scheme string) {
 	if zd != nil && scheme == "NOTIFY" {
 		zd.delegationOutOfStep.Store(true)
@@ -1501,7 +1514,11 @@ func (zd *ZoneData) runExplicitSyncWith(analyse func() (DelegationSyncStatus, er
 		return syncstate
 	}
 	if err != nil {
+		// The compare found a difference the parent did not get. A retry
+		// marks that too (requeueLookAfter), but a request an operator waits
+		// on is answered and not retried.
 		lgDns.Error("DelegationSyncher: error from SyncZoneDelegation", "zone", zd.ZoneName, "err", err)
+		zd.noteDelegationSyncNotSent()
 		syncstate.Error = true
 		syncstate.ErrorMsg = err.Error()
 		syncstate.UpdateResult = ur

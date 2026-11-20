@@ -242,7 +242,9 @@ func TestOneCompareRetryWaitsPerZoneAndCommand(t *testing.T) {
 	t0 := time.Now()
 
 	// Due later: it joins.
-	first := requeueLookAfter(ctx, q, ex(3, t0), 50*time.Millisecond)
+	// Far above scheduling jitter, so the first cannot fire before the
+	// second call; receive waits 2 s.
+	first := requeueLookAfter(ctx, q, ex(3, t0), 500*time.Millisecond)
 	if first == nil {
 		t.Fatal("the first retry started no worker")
 	}
@@ -285,10 +287,12 @@ func TestOneCompareRetryWaitsPerZoneAndCommand(t *testing.T) {
 	}
 }
 
-// A compare retry whose zone was removed or replaced while it waited in its
-// parent's queue, after its timer had checked it, is dropped when its lane
-// runs it (CodeRabbit on bb87c26b). A first try, a request someone waits on,
-// and a command that is not a compare retry are not looked at.
+// A retry whose zone was removed or replaced since it was scheduled is dropped
+// when its lane runs it: a compare retry, whose timer checked the zone but
+// which may have waited in its parent's queue since (CodeRabbit on bb87c26b),
+// and a setup retry or re-bootstrap round, whose timer does not check
+// (CodeRabbit on 9c217184). A first try, a request someone waits on, and a
+// command that is not a retry are not looked at.
 func TestARetryWhoseZoneWentWhileQueuedIsStale(t *testing.T) {
 	zd := laneZone("stale.down.example.", "down.example.")
 	Zones.Set(zd.ZoneName, zd)
@@ -296,26 +300,35 @@ func TestARetryWhoseZoneWentWhileQueuedIsStale(t *testing.T) {
 	retry := func(cmd string) DelegationSyncRequest {
 		return DelegationSyncRequest{Command: cmd, ZoneName: zd.ZoneName, ZoneData: zd, Attempt: 1}
 	}
-	for _, cmd := range []string{"EXPLICIT-SYNC-DELEGATION", "REFRESH-SYNC-DELEGATION", "PROXY-UPDATE-SETUP"} {
-		if delegationSyncRetryStale(retry(cmd)) {
-			t.Errorf("a %s retry of the loaded zone is stale", cmd)
+	round := retry("DELEGATION-SYNC-SETUP")
+	round.Attempt, round.ReBootstrapRound = 0, 1
+	retries := map[string]DelegationSyncRequest{"a re-bootstrap round": round}
+	for _, cmd := range []string{"EXPLICIT-SYNC-DELEGATION", "REFRESH-SYNC-DELEGATION", "PROXY-UPDATE-SETUP", "DELEGATION-SYNC-SETUP"} {
+		retries["a "+cmd+" retry"] = retry(cmd)
+	}
+	for name, ds := range retries {
+		if delegationSyncRetryStale(ds) {
+			t.Errorf("%s of the loaded zone is stale", name)
 		}
 	}
 	Zones.Set(zd.ZoneName, laneZone(zd.ZoneName, "down.example."))
-	for _, cmd := range []string{"EXPLICIT-SYNC-DELEGATION", "REFRESH-SYNC-DELEGATION", "PROXY-UPDATE-SETUP"} {
-		if !delegationSyncRetryStale(retry(cmd)) {
-			t.Errorf("a %s retry of a replaced zone is not stale", cmd)
+	for name, ds := range retries {
+		if !delegationSyncRetryStale(ds) {
+			t.Errorf("%s of a replaced zone is not stale", name)
 		}
 	}
 	first := retry("EXPLICIT-SYNC-DELEGATION")
 	first.Attempt = 0
+	firstSetup := retry("DELEGATION-SYNC-SETUP")
+	firstSetup.Attempt = 0
 	asked := retry("EXPLICIT-SYNC-DELEGATION")
 	asked.Response = make(chan DelegationSyncStatus, 1)
 	for name, ds := range map[string]DelegationSyncRequest{
-		"a first try": first, "a request someone waits on": asked, "a setup retry": retry("DELEGATION-SYNC-SETUP"),
+		"a first try": first, "a first setup": firstSetup, "a request someone waits on": asked,
+		"a status request": retry("DELEGATION-STATUS"),
 	} {
 		if delegationSyncRetryStale(ds) {
-			t.Errorf("%s is dropped as a stale compare retry", name)
+			t.Errorf("%s is dropped as a stale retry", name)
 		}
 	}
 }

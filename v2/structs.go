@@ -254,11 +254,16 @@ type ZoneData struct {
 	// changes the zone has made. A stored change is then queued as a compare
 	// instead of being sent as a difference (delegationSyncLanes.startsAtOnce).
 	// Cleared only by what covers all a stored difference assumes
-	// (noteDelegationSyncInStep): an explicit sync's compare of NS, glue and DS
-	// that found the parent in step or sent the difference by UPDATE or API, or
-	// a proxy's compare or sync the parent applied. Not by a refresh sync,
-	// which compares no DS, nor by a compare while a rollover owns the DS, nor
-	// by a NOTIFY, which the parent has yet to act on.
+	// (noteDelegationSyncInStep): a compare that found the parent in step, or a
+	// send of the whole delegation that the parent said it applied (UPDATE or
+	// API). That is an explicit sync's compare of NS, glue and DS, complete,
+	// in step or followed by such a send of its difference; a proxy compare
+	// the same way; or a proxy sync by UPDATE or API, which sends the whole
+	// delegation (replace form) or the difference from a complete compare
+	// (delta form). Not by a stored change's or a refresh sync's send, which
+	// carry a part, nor by a refresh's compare, which reads no DS, nor by a
+	// compare while a rollover owns the DS, nor by a NOTIFY, which the parent
+	// has yet to act on.
 	delegationOutOfStep atomic.Bool
 	// childRefreshNSGlueChanged is what the child-mode pre-refresh hook saw:
 	// the incoming zone's NS or glue differs from the served zone's. Consumed
@@ -1249,7 +1254,8 @@ type DelegationSyncStatus struct {
 	// slice, so the flag travels with the field and must be read first.
 	NewDSKnown bool `json:"-"`
 	// Unread names what the analysis asked the parent (or the keystore) and
-	// got no answer to: "<ns> A", "<ns> AAAA", "DS", "DS intent". InSync says
+	// got no answer to: "<ns> A", "<ns> AAAA", "DS", "DS intent"; or the
+	// zone's own glue that could not be read: "<ns> A (child)". InSync says
 	// nothing about those, so an analysis with Unread set must not be taken as
 	// the parent in step. Deliberate absences of opinion -- a rollover owning
 	// the DS, keys tdns does not manage -- are not reads and are not listed.
