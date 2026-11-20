@@ -411,11 +411,69 @@ func TestJSONWebKeyPrivateMismatch(t *testing.T) {
 			t.Errorf("err = %v, want ErrJWKInvalidPrivateKey", err)
 		}
 	})
+	// The standard library's RSA check never looks at d, so a changed d
+	// alone used to convert.
+	t.Run("RSA d minus one", func(t *testing.T) {
+		k := *keys["RSA"]
+		d := new(big.Int).SetBytes(k.D)
+		k.D = d.Sub(d, big.NewInt(1)).Bytes()
+		if _, err := k.PrivateKey(); !errors.Is(err, ErrJWKInvalidPrivateKey) {
+			t.Errorf("err = %v, want ErrJWKInvalidPrivateKey", err)
+		}
+	})
+	t.Run("RSA d plus lambda still converts", func(t *testing.T) {
+		// d + lcm(p-1, q-1) inverts e just as d does, and gives the same dp
+		// and dq: an unreduced d is a valid private exponent.
+		k := *keys["RSA"]
+		p1 := new(big.Int).Sub(new(big.Int).SetBytes(k.P), big.NewInt(1))
+		q1 := new(big.Int).Sub(new(big.Int).SetBytes(k.Q), big.NewInt(1))
+		lambda := new(big.Int).Div(new(big.Int).Mul(p1, q1), new(big.Int).GCD(nil, nil, p1, q1))
+		k.D = new(big.Int).Add(new(big.Int).SetBytes(k.D), lambda).Bytes()
+		if _, err := k.PrivateKey(); err != nil {
+			t.Errorf("an unreduced but valid d was refused: %v", err)
+		}
+	})
 	t.Run("public only", func(t *testing.T) {
 		if _, err := keys["EC P-256"].PublicJWK().PrivateKey(); !errors.Is(err, ErrJWKMissingMember) {
 			t.Errorf("err = %v, want ErrJWKMissingMember", err)
 		}
 	})
+}
+
+// TestCheckRSAExponentD tests the d check on its own: the standard library
+// verifies d only from Go 1.26 on, so the end-to-end cases in
+// TestJSONWebKeyPrivateMismatch cannot show the check works on 1.25.
+func TestCheckRSAExponentD(t *testing.T) {
+	rk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	with := func(d *big.Int) *rsa.PrivateKey {
+		return &rsa.PrivateKey{PublicKey: rk.PublicKey, D: d, Primes: rk.Primes,
+			Precomputed: rsa.PrecomputedValues{Dp: rk.Precomputed.Dp, Dq: rk.Precomputed.Dq, Qinv: rk.Precomputed.Qinv}}
+	}
+	if err := checkRSAExponentD(with(rk.D)); err != nil {
+		t.Fatalf("the generated key: %v", err)
+	}
+	if err := checkRSAExponentD(with(new(big.Int).Sub(rk.D, big.NewInt(1)))); !errors.Is(err, ErrJWKInvalidPrivateKey) {
+		t.Errorf("d-1: err = %v, want ErrJWKInvalidPrivateKey", err)
+	}
+	if err := checkRSAExponentD(with(new(big.Int).Add(rk.D, big.NewInt(1)))); !errors.Is(err, ErrJWKInvalidPrivateKey) {
+		t.Errorf("d+1: err = %v, want ErrJWKInvalidPrivateKey", err)
+	}
+	// An unreduced d (d + lambda) inverts e the same way and is accepted.
+	p1 := new(big.Int).Sub(rk.Primes[0], big.NewInt(1))
+	q1 := new(big.Int).Sub(rk.Primes[1], big.NewInt(1))
+	lambda := new(big.Int).Div(new(big.Int).Mul(p1, q1), new(big.Int).GCD(nil, nil, p1, q1))
+	if err := checkRSAExponentD(with(new(big.Int).Add(rk.D, lambda))); err != nil {
+		t.Errorf("d+lambda: %v", err)
+	}
+	// A degenerate prime is refused, not divided by zero.
+	bad := with(rk.D)
+	bad.Primes = []*big.Int{big.NewInt(1), rk.Primes[1]}
+	if err := checkRSAExponentD(bad); !errors.Is(err, ErrJWKInvalidPrivateKey) {
+		t.Errorf("prime 1: err = %v, want ErrJWKInvalidPrivateKey", err)
+	}
 }
 
 func TestJSONWebKeyFromGoKeyRejects(t *testing.T) {
