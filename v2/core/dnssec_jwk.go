@@ -652,6 +652,9 @@ func (k *JSONWebKey) PrivateKey() (crypto.PrivateKey, error) {
 		if err := priv.Validate(); err != nil {
 			return nil, fmt.Errorf("%w: RSA: %v", ErrJWKInvalidPrivateKey, err)
 		}
+		if err := checkRSAExponentD(priv); err != nil {
+			return nil, err
+		}
 		return priv, nil
 	case *ecdsa.PublicKey:
 		priv, err := ecdsa.ParseRawPrivateKey(p.Curve, k.D)
@@ -679,6 +682,30 @@ func (k *JSONWebKey) PrivateKey() (crypto.PrivateKey, error) {
 		return priv, nil
 	}
 	return nil, fmt.Errorf("%w: %T", ErrJWKUnsupportedGoKey, pub)
+}
+
+// checkRSAExponentD checks that d gives the CRT exponents: dp is d mod (p-1)
+// and dq is d mod (q-1). Any exponent that inverts e modulo lambda(N) does,
+// so a d that was not reduced is accepted. The standard library's
+// rsa.PrivateKey.Validate checks dp, dq and qi against e and the primes and,
+// up to Go 1.25, never looks at d (the private operation does not use it),
+// so a JWK whose "d" alone is wrong passed; Go 1.26 added the check, and
+// this keeps the codec's answer the same on every toolchain the module
+// builds with.
+func checkRSAExponentD(priv *rsa.PrivateKey) error {
+	one := big.NewInt(1)
+	for _, c := range []struct {
+		name       string
+		prime, crt *big.Int
+	}{{"dp", priv.Primes[0], priv.Precomputed.Dp}, {"dq", priv.Primes[1], priv.Precomputed.Dq}} {
+		if c.prime.Cmp(big.NewInt(2)) < 0 {
+			return fmt.Errorf("%w: RSA prime is below 2", ErrJWKInvalidPrivateKey)
+		}
+		if new(big.Int).Mod(priv.D, new(big.Int).Sub(c.prime, one)).Cmp(c.crt) != 0 {
+			return fmt.Errorf("%w: RSA \"d\" does not give %q", ErrJWKInvalidPrivateKey, c.name)
+		}
+	}
+	return nil
 }
 
 func ecCrvName(c elliptic.Curve) (string, bool) {
