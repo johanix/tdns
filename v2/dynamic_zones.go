@@ -62,7 +62,13 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 		return "", fmt.Errorf("failed to write zone data to temp file: %v", err)
 	}
 
-	// Close temp file before rename (WriteZoneToFile flushes but doesn't close)
+	// Sync the contents before the rename puts them in place, then close the
+	// temp file (WriteZoneToFile flushes but doesn't close).
+	if err := tempFile.Sync(); err != nil {
+		tempFile.Close()
+		os.Remove(tempFilePath)
+		return "", fmt.Errorf("failed to sync temp file: %v", err)
+	}
 	if err := tempFile.Close(); err != nil {
 		os.Remove(tempFilePath)
 		return "", fmt.Errorf("failed to close temp file: %v", err)
@@ -72,7 +78,10 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 	// transport signal pass keeps for the zone file follows it, in the order
 	// of the renames (zoneFileMu), and only when it is the file the zone
 	// loads: a zone whose Zonefile names another keeps loading that one,
-	// which this write left as it was (CodeRabbit on #1145).
+	// which this write left as it was. The rename is on disk once the
+	// directory is synced; until then a crash can bring back the file it
+	// replaced, whose signal the record keeps too (noteZoneFileWritten), and
+	// the write reports the failed sync (CodeRabbit on #1145).
 	zd.zoneFileMu.Lock()
 	if err := os.Rename(tempFilePath, zoneFilePath); err != nil {
 		zd.zoneFileMu.Unlock()
@@ -82,28 +91,48 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 	if testHookZoneFileRenamed != nil {
 		testHookZoneFileRenamed()
 	}
+	syncErr := syncZoneDirectory(zoneDirectory)
 	if zd.loadsZoneFile(zoneFilePath) {
-		zd.noteZoneFileWritten(snap, true)
+		zd.noteZoneFileWritten(snap, syncErr == nil)
 	}
 	zd.zoneFileMu.Unlock()
+	if syncErr != nil {
+		return zoneFilePath, fmt.Errorf("syncing %s after renaming %s into place: %v", zoneDirectory, zoneFilePath, syncErr)
+	}
 
 	lg.Info("wrote zone file", "zone", zd.ZoneName, "path", zoneFilePath)
 	return zoneFilePath, nil
 }
 
-// loadsZoneFile reports whether path, a file WriteDynamicZoneFile wrote, is
-// the one the zone loads (persistedZoneFilePath): zd.Zonefile when set, the
-// path WriteDynamicZoneFile derives when not.
+// syncZoneDirectory syncs dir, so that a rename into it is on disk.
+func syncZoneDirectory(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
+}
+
+// loadsZoneFile reports whether the zone loads the file WriteDynamicZoneFile
+// has just renamed into place at path (persistedZoneFilePath): zd.Zonefile
+// when set names that very file, however the two paths name it (through a
+// symlinked directory, say), and the path WriteDynamicZoneFile derives when
+// Zonefile is not set. Called after the rename, under zoneFileMu, so the
+// file at path is the one written (CodeRabbit on #1145).
 func (zd *ZoneData) loadsZoneFile(path string) bool {
 	if zd.Zonefile == "" {
 		return true
 	}
-	loads, err := filepath.Abs(zd.Zonefile)
+	loads, err := os.Stat(zd.Zonefile)
 	if err != nil {
 		return false
 	}
-	wrote, err := filepath.Abs(path)
-	return err == nil && loads == wrote
+	wrote, err := os.Stat(path)
+	return err == nil && os.SameFile(loads, wrote)
 }
 
 // GetDynamicZoneFilePath returns the expected file path for a dynamic zone file

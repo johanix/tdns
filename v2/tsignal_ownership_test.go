@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -665,7 +666,7 @@ func (r *journalRig) rideJournaled(zd *ZoneData, conf *Config, signal string) {
 	zd.publishCadence = time.Hour
 	zd.lastPublish = time.Now()
 	zd.mu.Unlock()
-	r.update(zd, ZoneUpdateSpec{Verb: VerbAddRR, RRs: []string{`note.example. 3600 IN TXT "an operator's change"`}})
+	r.update(zd, ZoneUpdateSpec{Verb: VerbAddRR, RRs: []string{`note.example. 3600 IN TXT "an operator's change beside ` + signal + `"`}})
 	conf.Service.Transport.Signal = signal
 	if err := zd.CreateTransportSignalRRs(conf); err != nil {
 		r.t.Fatal(err)
@@ -702,6 +703,24 @@ func (r *journalRig) replays(zd *ZoneData, signal string) {
 	r.t.Helper()
 	if got := svcbRecords(zd, journalRigOwner); len(got) != 1 || !strings.Contains(got[0].String(), `"`+signal+`"`) {
 		r.t.Fatalf("the restart did not replay the journaled signal %s: %v", signal, got)
+	}
+}
+
+// replayCannotRead has the replay that start ran record what it yields as
+// it would on a failed read of the record: unverified.
+func (r *journalRig) replayCannotRead(zd *ZoneData) {
+	r.t.Helper()
+	if _, err := r.kdb.DB.Exec(`ALTER TABLE TransportSignalStored RENAME TO TransportSignalStored_gone`); err != nil {
+		r.t.Fatal(err)
+	}
+	zd.mu.Lock()
+	zd.signalStoredMu.Lock()
+	zd.signalJournaled = nil
+	zd.signalStoredMu.Unlock()
+	zd.noteSignalsJournaled([]string{journalRigOwner}, zd.publishedSnapshot(), zd.CurrentSerial)
+	zd.mu.Unlock()
+	if _, err := r.kdb.DB.Exec(`ALTER TABLE TransportSignalStored_gone RENAME TO TransportSignalStored`); err != nil {
+		r.t.Fatal(err)
 	}
 }
 
@@ -772,18 +791,7 @@ func TestAJournaledSignalStaysThePassesWhenTheReplayCannotReadTheRecord(t *testi
 	// on a failed read.
 	zd, conf = r.start(journalRigFile)
 	r.replays(zd, "dot:2")
-	if _, err := r.kdb.DB.Exec(`ALTER TABLE TransportSignalStored RENAME TO TransportSignalStored_gone`); err != nil {
-		t.Fatal(err)
-	}
-	zd.mu.Lock()
-	zd.signalStoredMu.Lock()
-	zd.signalJournaled = nil
-	zd.signalStoredMu.Unlock()
-	zd.noteSignalsJournaled([]string{journalRigOwner}, zd.publishedSnapshot(), zd.CurrentSerial)
-	zd.mu.Unlock()
-	if _, err := r.kdb.DB.Exec(`ALTER TABLE TransportSignalStored_gone RENAME TO TransportSignalStored`); err != nil {
-		t.Fatal(err)
-	}
+	r.replayCannotRead(zd)
 	r.storeMany(zd, conf, 20, signalStoredKeep+20)
 
 	zd, conf = r.start(journalRigFile)
@@ -936,10 +944,16 @@ func TestZoneWritesFollowTheirRenamesInOrder(t *testing.T) {
 
 	// The first write is renamed into place; before it follows the rename,
 	// the pass stores a newer signal and a second write runs.
+	// The hook runs with zoneFileMu held, so the second write's rename waits
+	// for the first to follow its own.
 	second := make(chan error, 1)
 	t.Cleanup(func() { testHookZoneFileRenamed = nil })
 	testHookZoneFileRenamed = func() {
 		testHookZoneFileRenamed = nil
+		if zd.zoneFileMu.TryLock() {
+			zd.zoneFileMu.Unlock()
+			t.Error("the zone file was renamed into place without zoneFileMu held")
+		}
 		storeSignal(t, zd, conf, owner, "dot:2")
 		go func() {
 			_, err := zd.WriteDynamicZoneFile(dir)
@@ -948,15 +962,20 @@ func TestZoneWritesFollowTheirRenamesInOrder(t *testing.T) {
 		select {
 		case err := <-second:
 			second <- err
-		case <-time.After(300 * time.Millisecond):
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
 	path, err := zd.WriteDynamicZoneFile(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := <-second; err != nil {
-		t.Fatal(err)
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second write did not finish; the rename hook may not have run")
 	}
 	inPlace, err := os.ReadFile(path)
 	if err != nil {
@@ -971,4 +990,225 @@ func TestZoneWritesFollowTheirRenamesInOrder(t *testing.T) {
 	if want := signalDigest(svcbRecords(zd, owner)); kept != want {
 		t.Fatalf("the record keeps %q for the zone file, want the signal of the file in place (%q)", kept, want)
 	}
+}
+
+// A dynamic zone file write whose directory sync fails reports it, and keeps
+// the signal the replaced zone file held beside the one written: a crash can
+// bring that file back (CodeRabbit on #1145).
+func TestADynamicZoneFileWriteWhoseDirectorySyncFailsKeepsTheReplacedFilesSignal(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a directory it may not read")
+	}
+	const z = "dyndirsync.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	loaded, _ := storeThenRestart(t, z, kdb, "dot:50")
+	head := z + strings.ReplaceAll(readErrZoneBody, "%[1]s", z)
+	replaced := head + signalLines(t, loaded, owner)
+
+	zd, conf := signalTestZone(t, z, replaced, "127.0.0.1:53")
+	zd.KeyDB = kdb
+	conf.Service.Identities = []string{"ns1." + z}
+	storeSignal(t, zd, conf, owner, "dot:1")
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if _, err := zd.WriteDynamicZoneFile(dir); err == nil || !strings.Contains(err.Error(), "after renaming") {
+		t.Fatalf("the write whose directory sync failed returned %v", err)
+	}
+	for i := 2; i <= signalStoredKeep+2; i++ {
+		storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
+	}
+	restartKnowsItsSignal(t, z, kdb, replaced, "dot:99")
+}
+
+// A dynamic zone file written through another path to the file the zone
+// loads (a symlinked directory) is that file: what the record keeps for the
+// zone file moves to the signal written (CodeRabbit on #1145).
+func TestADynamicZoneFileWrittenThroughAnotherPathIsTheOneTheZoneLoads(t *testing.T) {
+	const z = "symlinked.sig.example."
+	const owner = "_dns.ns1." + z
+	kdb := newTestKeyDB(t)
+	loaded, _ := storeThenRestart(t, z, kdb, "dot:50")
+	head := z + strings.ReplaceAll(readErrZoneBody, "%[1]s", z)
+
+	zd, conf := signalTestZone(t, z, head+signalLines(t, loaded, owner), "127.0.0.1:53")
+	zd.KeyDB = kdb
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "zones")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	zd.Zonefile = filepath.Join(link, strings.TrimSuffix(z, ".")+".zone")
+	conf.Service.Identities = []string{"ns1." + z}
+	storeSignal(t, zd, conf, owner, "dot:1")
+	written := signalLines(t, zd, owner)
+	if _, err := zd.WriteDynamicZoneFile(real); err != nil {
+		t.Fatal(err)
+	}
+	for i := 2; i <= signalStoredKeep+2; i++ {
+		storeSignal(t, zd, conf, owner, fmt.Sprintf("dot:%d", i))
+	}
+	restartKnowsItsSignal(t, z, kdb, head+written, "dot:99")
+}
+
+// More journaled signals at one owner than the record has places for all
+// stay the pass's until a zone write: the newest, which a restart replays,
+// is not cut off behind the others (CodeRabbit on #1145).
+func TestEveryJournaledSignalStaysThePassesPastTheCap(t *testing.T) {
+	r := newJournalRig(t)
+	zd, conf := r.start(journalRigFile)
+	storeSignal(t, zd, conf, journalRigOwner, "dot:1")
+	for i := 2; i <= signalStoredKeep+1; i++ {
+		r.rideJournaled(zd, conf, fmt.Sprintf("dot:%d", i))
+	}
+	r.storeMany(zd, conf, 20, signalStoredKeep+20)
+
+	zd, conf = r.start(journalRigFile)
+	r.replays(zd, fmt.Sprintf("dot:%d", signalStoredKeep+1))
+	storeSignal(t, zd, conf, journalRigOwner, "dot:99")
+}
+
+// A zone write after a replay that could not read the record, the record
+// readable again by then, keeps the replayed signal past the drop of the
+// journal: the zone file holds it now, and the first store reads the
+// record, finds it there and goes on keeping it (CodeRabbit on #1145).
+func TestAZoneWriteKeepsTheSignalAReplayCouldNotReadAbout(t *testing.T) {
+	r := newJournalRig(t)
+	zd, conf := r.start(journalRigFile)
+	storeSignal(t, zd, conf, journalRigOwner, "dot:1")
+	r.rideJournaled(zd, conf, "dot:2")
+
+	zd, conf = r.start(journalRigFile)
+	r.replays(zd, "dot:2")
+	r.replayCannotRead(zd)
+	if _, err := zd.WriteZone(true, true); err != nil {
+		t.Fatalf("WriteZone: %v", err)
+	}
+	if n := r.deltas(); n != 0 {
+		t.Fatalf("the zone write left %d journal deltas, want 0", n)
+	}
+	written, err := os.ReadFile(zd.Zonefile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.storeMany(zd, conf, 20, signalStoredKeep+20)
+
+	zd, conf = r.start(string(written))
+	r.replays(zd, "dot:2")
+	storeSignal(t, zd, conf, journalRigOwner, "dot:99")
+}
+
+// A zone write that still cannot read the record about a signal a replay
+// yields keeps it past the drop of the journal, since the zone file holds
+// it now, and the first store that can read the record settles it
+// (CodeRabbit on #1145).
+func TestASignalAReplayCouldNotReadAboutStaysPastTheJournalsDrop(t *testing.T) {
+	r := newJournalRig(t)
+	zd, conf := r.start(journalRigFile)
+	storeSignal(t, zd, conf, journalRigOwner, "dot:1")
+	r.rideJournaled(zd, conf, "dot:2")
+
+	zd, conf = r.start(journalRigFile)
+	r.replays(zd, "dot:2")
+	r.replayCannotRead(zd)
+	mend := breakSignalRecordReads(t, r.kdb)
+	if _, err := zd.WriteZone(true, true); err != nil {
+		t.Fatalf("WriteZone: %v", err)
+	}
+	mend()
+	if n := r.deltas(); n != 0 {
+		t.Fatalf("the zone write left %d journal deltas, want 0", n)
+	}
+	written, err := os.ReadFile(zd.Zonefile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.storeMany(zd, conf, 20, signalStoredKeep+20)
+
+	zd, conf = r.start(string(written))
+	r.replays(zd, "dot:2")
+	storeSignal(t, zd, conf, journalRigOwner, "dot:99")
+}
+
+// A reload after a zone write whose directory sync failed keeps the signal
+// of the file that write replaced: the reload does not put the rename on
+// disk, and a crash can still bring that file back (CodeRabbit on #1145).
+func TestAReloadKeepsTheSignalOfAFileACrashCanBringBack(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens a directory it may not read")
+	}
+	r := newJournalRig(t)
+	zd, conf := r.start(journalRigFile)
+	storeSignal(t, zd, conf, journalRigOwner, "dot:1")
+	if _, err := zd.WriteZone(true, true); err != nil {
+		t.Fatalf("WriteZone: %v", err)
+	}
+	replaced, err := os.ReadFile(zd.Zonefile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeSignal(t, zd, conf, journalRigOwner, "dot:2")
+	dir := filepath.Dir(zd.Zonefile)
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if _, err := zd.WriteZone(true, true); err == nil || !strings.Contains(err.Error(), "to sync the rename") {
+		t.Fatalf("the write whose directory sync failed returned %v", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zd.FetchFromFile(context.Background(), false, false, true, nil); err != nil {
+		t.Fatalf("FetchFromFile: %v", err)
+	}
+	r.storeMany(zd, conf, 3, signalStoredKeep+3)
+
+	zd, conf = r.start(string(replaced))
+	r.replays(zd, "dot:1")
+	storeSignal(t, zd, conf, journalRigOwner, "dot:99")
+}
+
+// A refresh during which a zone write puts a newer file in place does not
+// make the older file it read the zone file's in the record: the write has
+// noted the file in place, and stores after the refresh keep its signal
+// (CodeRabbit on #1145).
+func TestARefreshDoesNotNoteAFileAWriteReplacedWhileItRan(t *testing.T) {
+	r := newJournalRig(t)
+	zd, conf := r.start(journalRigFile)
+	storeSignal(t, zd, conf, journalRigOwner, "dot:1")
+	operatorEdit(t, zd, strings.Replace(journalRigFile, " 1 7200", " 2 7200", 1)+signalLines(t, zd, journalRigOwner))
+	storeSignal(t, zd, conf, journalRigOwner, "dot:2")
+
+	wrote := false
+	zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(served, _ *ZoneData) {
+		if wrote {
+			return
+		}
+		wrote = true
+		if _, _, err := served.WriteFileWithSerial(served.Zonefile); err != nil {
+			t.Errorf("the write during the refresh: %v", err)
+		}
+	})
+	if _, err := zd.FetchFromFile(context.Background(), false, false, true, nil); err != nil {
+		t.Fatalf("FetchFromFile: %v", err)
+	}
+	if !wrote {
+		t.Fatal("the refresh ran no pre-refresh callback")
+	}
+	inPlace, err := os.ReadFile(zd.Zonefile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(inPlace), `"dot:2"`) {
+		t.Fatalf("the zone file in place does not hold the signal written during the refresh:\n%s", inPlace)
+	}
+	r.storeMany(zd, conf, 3, signalStoredKeep+3)
+
+	zd, conf = r.start(string(inPlace))
+	r.replays(zd, "dot:2")
+	storeSignal(t, zd, conf, journalRigOwner, "dot:99")
 }

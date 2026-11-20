@@ -949,8 +949,9 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 	}
 	// What the file holds at the transport signal's owners, for the record
 	// of what the pass stored there: from the zone data parsed from the
-	// file, before the refresh added anything to it.
-	zd.noteZoneFileAdopted(new_zd.Data)
+	// file, before the refresh added anything to it, and only while the file
+	// read (st) is still the one in place.
+	zd.noteZoneFileAdopted(new_zd.Data, st)
 	if firstLoad {
 		zd.postRefreshOwed = true
 	}

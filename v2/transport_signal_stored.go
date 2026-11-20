@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -111,9 +112,11 @@ func (zd *ZoneData) noteSignalStored(owner string, rrs []dns.RR) {
 // one process, push out the zone file's, which a restart loads until the
 // zone is next written, stores published while a write runs push out the
 // signal it writes, and stores published with no journal entry push out the
-// signal an earlier journaled publish carried, which a restart replays. The pass would then take a signal of its own for the
-// operator's for good, in this process or after the next restart
-// (CodeRabbit on #1118 and on #1145).
+// signal an earlier journaled publish carried, which a restart replays. The
+// pass would then take a signal of its own for the operator's for good, in
+// this process or after the next restart (CodeRabbit on #1118 and on
+// #1145). None of them takes one of those places from another: the record
+// holds them all, past signalStoredKeep if need be (mergeSignalDigests).
 func (zd *ZoneData) noteSignalStoredOver(owner string, rrs, replaced []dns.RR) {
 	owner = core.CanonicalizeName(owner)
 	digest := signalDigest(rrs)
@@ -249,11 +252,54 @@ func (zd *ZoneData) noteZoneFileWritten(snap *zoneSnapshot, durable bool) {
 			zd.signalOnDisk = map[string]string{}
 		}
 		zd.signalOnDisk[owner] = now
-		if !durable && had && was != "" && was != now && !slices.Contains(zd.signalOnDiskPrev[owner], was) {
-			if zd.signalOnDiskPrev == nil {
-				zd.signalOnDiskPrev = map[string][]string{}
+		if !durable && had && was != "" && was != now {
+			zd.keepOnDiskPrevLocked(owner, was)
+		}
+	}
+	zd.fileJournalPinsLocked(snap, durable)
+}
+
+// keepOnDiskPrevLocked keeps d, the signal of the pass's a zone file whose
+// replacement is not yet on disk held at owner (signalOnDiskPrevDigests).
+// Caller holds signalStoredMu.
+func (zd *ZoneData) keepOnDiskPrevLocked(owner, d string) {
+	if slices.Contains(zd.signalOnDiskPrev[owner], d) {
+		return
+	}
+	if zd.signalOnDiskPrev == nil {
+		zd.signalOnDiskPrev = map[string][]string{}
+	}
+	zd.signalOnDiskPrev[owner] = append(zd.signalOnDiskPrev[owner], d)
+}
+
+// fileJournalPinsLocked marks each signal a replay of the journal can yield
+// (signalJournaled) that the zone file now holds, snap being the snapshot
+// written: filed. A verified one this write has already followed into the
+// zone file's (noteZoneFileWritten). An unverified one the file holds stays
+// past the drop of the journal (noteJournalDropped), until the next store
+// that reads the record settles it (signalJournaledDigests): once the
+// journal is gone the file is what holds the signal, and a write that
+// dropped the pin with the journal kept nothing for the file it went into.
+// A filed one that this write replaced stays filed while the rename is not
+// on disk, since a crash can bring its file back; a verified one goes to
+// signalOnDiskPrev then, as the zone file's own signal would (CodeRabbit on
+// #1145). Caller holds signalStoredMu.
+func (zd *ZoneData) fileJournalPinsLocked(snap *zoneSnapshot, durable bool) {
+	for owner, pins := range zd.signalJournaled {
+		holds := ""
+		if rrset := getRRsetFrom(snap, owner, dns.TypeSVCB); rrset != nil && len(rrset.RRs) > 0 {
+			holds = signalDigest(rrset.RRs)
+		}
+		for i := range pins {
+			switch {
+			case pins[i].digest == holds:
+				pins[i].filed = true
+			case !pins[i].filed || durable:
+				pins[i].filed = false
+			case pins[i].verified:
+				zd.keepOnDiskPrevLocked(owner, pins[i].digest)
+				pins[i].filed = false
 			}
-			zd.signalOnDiskPrev[owner] = append(zd.signalOnDiskPrev[owner], was)
 		}
 	}
 }
@@ -358,10 +404,13 @@ func (zd *ZoneData) signalWritingDigests(owner string) []string {
 // there (signalJournaled). verified says the KeyDB's record knew it for the
 // pass's. An unverified one was set when the record could not be read, and
 // the next store that reads it settles which it is (signalJournaledDigests).
+// filed says the zone file holds it, or may hold it again after a crash
+// (fileJournalPinsLocked).
 type signalJournalPin struct {
 	digest   string
 	serial   uint32
 	verified bool
+	filed    bool
 }
 
 // signalOwnersInDelta returns the _dns. owners whose SVCB RRset a journal
@@ -481,11 +530,15 @@ func (zd *ZoneData) signalJournaledDigests(owner string, known []string, readOK 
 // noteJournalDropped ends what noteSignalsJournaled keeps for the journal
 // deltas a zone write has dropped: those whose serial is not newer than
 // serial, the one the zone file was written at, which holds what they did.
+// An unverified one the zone file holds stays until a read of the record
+// settles it (fileJournalPinsLocked).
 func (zd *ZoneData) noteJournalDropped(serial uint32) {
 	zd.signalStoredMu.Lock()
 	defer zd.signalStoredMu.Unlock()
 	for owner, pins := range zd.signalJournaled {
-		pins = slices.DeleteFunc(pins, func(p signalJournalPin) bool { return !serialNewer(p.serial, serial) })
+		pins = slices.DeleteFunc(pins, func(p signalJournalPin) bool {
+			return !serialNewer(p.serial, serial) && (p.verified || !p.filed)
+		})
 		if len(pins) == 0 {
 			delete(zd.signalJournaled, owner)
 		} else {
@@ -506,7 +559,16 @@ func (zd *ZoneData) noteJournalDropped(serial uint32) {
 // its place in the record, and a run of stores pushed it out while the file
 // still held it (CodeRabbit on #1145). Caller holds zd.mu, so that no store
 // runs in between.
-func (zd *ZoneData) noteZoneFileAdopted(file *core.NameMap[OwnerData]) {
+//
+// read is the stat of the zone file taken before it was read. The note is
+// made only while that file is still the one in place, checked under
+// zoneFileMu, so that no write renames another over it in between: a write
+// that put a newer file in place while the refresh ran has noted that file,
+// and the older file read must not take its place. With no stat, the note
+// is made. The signals kept for files a crash can bring back
+// (signalOnDiskPrevDigests) stay: a reload does not put a rename on disk
+// (CodeRabbit on #1145).
+func (zd *ZoneData) noteZoneFileAdopted(file *core.NameMap[OwnerData], read os.FileInfo) {
 	if file == nil {
 		return
 	}
@@ -515,6 +577,7 @@ func (zd *ZoneData) noteZoneFileAdopted(file *core.NameMap[OwnerData]) {
 		lgDns.Warn("noteZoneFileAdopted: could not list the owners the KeyDB's record holds; only those known in this process follow the zone file",
 			"zone", zd.ZoneName, "error", err)
 	}
+	onDisk := map[string]string{}
 	for _, owner := range owners {
 		d := ""
 		if od, ok := file.Get(owner); ok {
@@ -528,21 +591,50 @@ func (zd *ZoneData) noteZoneFileAdopted(file *core.NameMap[OwnerData]) {
 				continue
 			}
 		}
-		zd.signalStoredMu.Lock()
-		if zd.signalOnDisk == nil {
-			zd.signalOnDisk = map[string]string{}
-		}
+		onDisk[owner] = d
+	}
+	zd.zoneFileMu.Lock()
+	defer zd.zoneFileMu.Unlock()
+	if !zoneFileStillRead(zd.Zonefile, read) {
+		lgDns.Debug("noteZoneFileAdopted: the zone file was replaced after it was read; the record follows the file in place",
+			"zone", zd.ZoneName, "file", zd.Zonefile)
+		return
+	}
+	zd.signalStoredMu.Lock()
+	defer zd.signalStoredMu.Unlock()
+	if zd.signalOnDisk == nil {
+		zd.signalOnDisk = map[string]string{}
+	}
+	for owner, d := range onDisk {
 		zd.signalOnDisk[owner] = d
-		delete(zd.signalOnDiskPrev, owner)
-		zd.signalStoredMu.Unlock()
 	}
 }
 
+// zoneFileStillRead reports whether the file at path is still the one read
+// describes, the stat taken before it was read: the same file, unchanged
+// since. True when there is no stat to compare.
+func zoneFileStillRead(path string, read os.FileInfo) bool {
+	if read == nil {
+		return true
+	}
+	now, err := os.Stat(path)
+	return err == nil && os.SameFile(read, now) && now.Size() == read.Size() && now.ModTime().Equal(read.ModTime())
+}
+
 // mergeSignalDigests is first followed by the digests of then that are not
-// in it, at most signalStoredKeep in all.
+// in it, at most signalStoredKeep in all. Every digest of first is kept,
+// past signalStoredKeep if need be: the caller holds each one, and the cap
+// only ends the history behind them. A cap that cut first dropped held
+// signals, the newest a replay of the journal can yield among them, while
+// they were still held (CodeRabbit on #1145).
 func mergeSignalDigests(first, then []string) []string {
 	out := make([]string, 0, len(first)+len(then))
-	for _, d := range append(append([]string(nil), first...), then...) {
+	for _, d := range first {
+		if !slices.Contains(out, d) {
+			out = append(out, d)
+		}
+	}
+	for _, d := range then {
 		if !slices.Contains(out, d) && len(out) < signalStoredKeep {
 			out = append(out, d)
 		}
