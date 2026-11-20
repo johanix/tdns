@@ -519,7 +519,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				zone = dns.Fqdn(zone)
 			}
 			reset, _ := amp.Data["reset"].(bool)
-			resp.Data = ImrAuthTransportsSnapshot(imr.Cache, filter, zone, reset)
+			resp.Data = imr.AuthTransportsSnapshot(filter, zone, reset)
 
 		case "imr-transport-stats":
 			imr := Globals.ImrEngine
