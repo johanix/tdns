@@ -93,7 +93,8 @@ seed (by a tdns release before the seed form) -- fails the run; such a key
 can still be exported with --format pem or --format bind, or replaced through
 a rollover. --skip-unsupported leaves such keys out instead: it prints one
 WARNING line per key on stderr (zone, keyid, algorithm, reason) and a closing
-line with the number of keys NOT written, and still exits 0. A key written as
+line with the number of keys NOT written by this run, and still exits 0; files
+already in the directory from an earlier export are left as they are. A key written as
 a JWK with algorithm 200 or 201 (ML-DSA-65/-87, the dnssec-algorithms
 registry's numbers, not IANA's) gets a WARNING on stderr; the export
 succeeds.`,
@@ -644,8 +645,10 @@ func printBulkSkippedSummary(w io.Writer, skipped []tdns.BulkSkippedKey) {
 	if len(skipped) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "WARNING: %d key(s) NOT written (--skip-unsupported); the export directory does not hold them\n",
-		len(skipped))
+	// "By this run": the directory can already hold a PEM or BIND export of
+	// such a key from an earlier run, and a merge leaves it alone.
+	fmt.Fprintf(w, "WARNING: %d key(s) NOT written by this run (--skip-unsupported); "+
+		"files already in the export directory are left as they are\n", len(skipped))
 }
 
 // bulkImportCaveat says what "identical" means for bulk-import until #1100

@@ -34,8 +34,15 @@ func TestBulkSkippedWarnsPerKeyAndSummarises(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(lines[2], "WARNING: 2 key(s) NOT written") {
-		t.Errorf("summary = %q", lines[2])
+	// The summary speaks for this run: a merged directory may still hold
+	// an earlier export of a skipped key, and must not be said to lack it.
+	for _, want := range []string{"WARNING: 2 key(s) NOT written by this run", "already in the export directory are left as they are"} {
+		if !strings.Contains(lines[2], want) {
+			t.Errorf("summary %q lacks %q", lines[2], want)
+		}
+	}
+	if strings.Contains(lines[2], "does not hold") {
+		t.Errorf("summary claims the directory lacks the keys: %q", lines[2])
 	}
 
 	w.Reset()

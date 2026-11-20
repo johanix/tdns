@@ -247,6 +247,36 @@ func TestJWKExportRefusesMLDSAWithoutSeed(t *testing.T) {
 	}
 }
 
+// A seedless ML-DSA key is "unsupported" (skippable) only when it is the
+// RR's key. If the RR is another ML-DSA-44 key's, or an Ed448 RR, the row
+// is broken, and that is what must be reported: --skip-unsupported hides
+// unsupported keys, never broken rows.
+func TestJWKExportSeedlessKeyThatIsNotTheRRsIsBroken(t *testing.T) {
+	seedless := expandedOnlyMLDSA44(t, dns.TypeDNSKEY)
+	other := storedJWKTestKey(t, dns.TypeDNSKEY, 18, 0)
+	ed448 := storedJWKTestKey(t, dns.TypeDNSKEY, dns.ED448, 0)
+	for name, keyRR := range map[string]string{
+		"another ML-DSA-44 key's RR": other.keyRR,
+		"an Ed448 RR":                ed448.keyRR,
+	} {
+		_, err := JWKForExport(dns.TypeDNSKEY, keyRR, seedless.privPEM)
+		if err == nil {
+			t.Errorf("%s: a seedless key that is not the RR's was exported", name)
+		} else if IsJWKUnsupported(err) {
+			t.Errorf("%s: a broken row was classified as unsupported (skippable): %v", name, err)
+		}
+	}
+	// The same key under its own RR stays skippable.
+	if _, err := JWKForExport(dns.TypeDNSKEY, seedless.keyRR, seedless.privPEM); !errors.Is(err, ErrJWKNoSeed) {
+		t.Errorf("matching seedless key: err = %v, want ErrJWKNoSeed", err)
+	}
+	// And a seedless ML-DSA key under an RSA RR is refused as before.
+	rsaKey := storedJWKTestKey(t, dns.TypeDNSKEY, dns.RSASHA256, 2048)
+	if _, err := JWKForExport(dns.TypeDNSKEY, rsaKey.keyRR, seedless.privPEM); err == nil || IsJWKUnsupported(err) {
+		t.Errorf("seedless ML-DSA key under an RSA RR: err = %v, want a broken-row error", err)
+	}
+}
+
 func TestJWKExportRefusesAlgorithmWithoutJWKForm(t *testing.T) {
 	keyRR := "jwk.example. 3600 IN DNSKEY 257 3 3 AQID"
 	_, err := JWKForExport(dns.TypeDNSKEY, keyRR, "unused")

@@ -188,6 +188,11 @@ func TestDNSSECJWKRejects(t *testing.T) {
 		{"EC key under Ed25519", editJSON(t, dEC, func(top, dk map[string]any) { dk["algorithm"] = 15 }), ErrDNSKEYKeyTypeMismatch},
 		{"RSA key under ML-DSA-44", editJSON(t, dRSA, func(top, dk map[string]any) { dk["algorithm"] = 18 }), ErrDNSKEYKeyTypeMismatch},
 		{"AKP alg on an EC key", editJSON(t, dEC, func(top, dk map[string]any) { top["alg"] = "ML-DSA-44" }), ErrDNSKEYKeyTypeMismatch},
+		{"ES256 on an RSA key under algorithm 8", editJSON(t, dRSA, func(top, dk map[string]any) { top["alg"] = "ES256" }), ErrDNSKEYKeyTypeMismatch},
+		{"RS256 on an RSA key under algorithm 10", editJSON(t, dRSA, func(top, dk map[string]any) { top["alg"] = "RS256"; dk["algorithm"] = 10 }), ErrDNSKEYKeyTypeMismatch},
+		{"RS384 on an RSA key (no DNSSEC algorithm)", editJSON(t, dRSA, func(top, dk map[string]any) { top["alg"] = "RS384" }), ErrDNSKEYKeyTypeMismatch},
+		{"ES384 on a P-256 key", editJSON(t, dEC, func(top, dk map[string]any) { top["alg"] = "ES384" }), ErrDNSKEYKeyTypeMismatch},
+		{"RS256 on an EC key", editJSON(t, dEC, func(top, dk map[string]any) { top["alg"] = "RS256" }), ErrDNSKEYKeyTypeMismatch},
 		{"DSA algorithm", editJSON(t, dEC, func(top, dk map[string]any) { dk["algorithm"] = 3 }), ErrNoJWKRepresentation},
 		{"wrong keytag", editJSON(t, dEC, func(top, dk map[string]any) { dk["keytag"] = int(rrEC.KeyTag()) ^ 1 }), ErrDNSKEYKeyTag},
 		{"flags changed under the keytag", editJSON(t, dEC, func(top, dk map[string]any) { dk["flags"] = 256 }), ErrDNSKEYKeyTag},
@@ -202,6 +207,46 @@ func TestDNSSECJWKRejects(t *testing.T) {
 			_, _, err := ParseDNSSECJWK(tc.data)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v\n%s", err, tc.want, tc.data)
+			}
+		})
+	}
+}
+
+// TestDNSSECJWKOptionalAlg: an optional "alg" on an RSA, EC or OKP key that
+// fits the DNSSEC algorithm is accepted on import, an unknown value is not
+// judged, and a private JWK that carries a consistent "alg" matches its RR
+// and does not carry the "alg" into the DNSSEC JWK (it is for AKP only).
+func TestDNSSECJWKOptionalAlg(t *testing.T) {
+	for _, tc := range []struct {
+		alg  uint8
+		bits int
+		jws  string
+	}{
+		{dns.ECDSAP256SHA256, 256, "ES256"},
+		{dns.ECDSAP384SHA384, 384, "ES384"},
+		{dns.ED25519, 256, "EdDSA"},
+		{dns.ED25519, 256, "Ed25519"},
+		{dns.RSASHA256, 2048, "RS256"},
+		{dns.RSASHA512, 2048, "RS512"},
+		{dns.RSASHA256, 2048, "x-private-use"},
+	} {
+		t.Run(algName(tc.alg)+"/"+tc.jws, func(t *testing.T) {
+			rr, priv := genDNSKEY(t, "example.com.", tc.alg, tc.bits)
+			priv.Alg = tc.jws
+			d, err := NewDNSSECJWK(rr, priv)
+			if err != nil {
+				t.Fatalf("NewDNSSECJWK with alg %q on the private JWK: %v", tc.jws, err)
+			}
+			if d.Key.Alg != "" {
+				t.Errorf("DNSSEC JWK carries alg %q on a non-AKP key", d.Key.Alg)
+			}
+			data := editJSON(t, d, func(top, dk map[string]any) { top["alg"] = tc.jws })
+			_, got, err := ParseDNSSECJWK(data)
+			if err != nil {
+				t.Fatalf("import with alg %q: %v", tc.jws, err)
+			}
+			if !sameDNSKEY(got, rr) {
+				t.Errorf("DNSKEY differs")
 			}
 		})
 	}
