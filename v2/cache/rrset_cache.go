@@ -772,6 +772,20 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 	return nil
 }
 
+// NewTargetAuthServer returns an AuthServer for a transport signal's
+// redirect target name: a server of its own, under the cache's address-family
+// policy, with Src "target". It is in neither AuthServerMap nor any zone's
+// ServerMap; the resolver holds it, apart from a nameserver of the same name.
+func (rrcache *RRsetCacheT) NewTargetAuthServer(name string) *AuthServer {
+	as := NewAuthServer(name)
+	if as == nil {
+		return nil
+	}
+	as.families = rrcache.families
+	as.ForceSetSrc("target")
+	return as
+}
+
 // GetOrCreateAuthServer returns an existing AuthServer instance for the given nameserver name,
 // or creates a new one if it doesn't exist. This ensures there is only one AuthServer instance
 // per nameserver name across all zones. Uses O(1) map lookup instead of iterating through zones.

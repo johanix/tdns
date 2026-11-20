@@ -117,8 +117,10 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 	extraPassAdded := false
 	var nextPass *tupleSelection
 	for attempt := 0; attempt < maxPasses; attempt++ {
+		var triedBefore map[passTuple]bool
 		if nextPass != nil {
 			zoneName, zone, prioritized = nextPass.zoneName, nextPass.zone, nextPass.tuples
+			triedBefore = nextPass.tried
 			nextPass = nil
 		} else {
 			zoneName, zone, prioritized = imr.awaitUsableTuples(ctx, budget, qname, qtype, serverMap, privacy)
@@ -162,12 +164,15 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
+			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy), attemptSelection{family: tuple.Family, probe: tuple.Probe, tried: triedBefore})
 			if dnskeyBypass {
 				// Under the transport tryServer dialed: it reads the
 				// preference again, and a signal update in between may
-				// have changed it from effTransport.
-				dnskeyAttempted[dnskeyTried(dnskeyKey, ep, wireTransport)] = true
+				// have changed it from effTransport. An attempt refused for
+				// its suspect family is none (dnskeyTried).
+				if key, ok := dnskeyTried(dnskeyKey, ep, wireTransport, err); ok {
+					dnskeyAttempted[key] = true
+				}
 			}
 			// The endpoint tried: the one tryServer dialed, or the server's
 			// own address when it did not get as far as choosing one, kept
@@ -176,11 +181,10 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 			// when the tuple dialed itself. Under the DNSKEY bypass the
 			// endpoint is the preferred transport's, which anotherPassAfter
 			// may not see as tried; dnskeyAttempted, which lasts the whole
-			// query, is what keeps the extra pass from dialing it again.
-			if ep.addr != "" {
-				tried[passTuple{server, ep.addr, ep.keyPort, transport}] = true
-			} else {
-				tried[passTuple{server, addr, 0, transport}] = true
+			// query, is what keeps the extra pass from dialing it again. An
+			// attempt refused for its suspect family is none (passTried).
+			if key, ok := passTried(server, addr, transport, ep, err); ok {
+				tried[key] = true
 			}
 			lastTransport = wireTransport
 			if err != nil {
@@ -230,7 +234,7 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 				if zone != nil {
 					zone.RecordZoneEndpointFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode), Globals.Debug)
 				} else {
-					server.RecordEndpointAddrFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode))
+					ep.server.RecordEndpointAddrFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode))
 				}
 				continue
 			case dns.RcodeSuccess:
