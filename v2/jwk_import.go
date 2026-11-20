@@ -36,6 +36,11 @@ var ErrJWKKindMismatch = errors.New("JWK is for the other keystore")
 // this binary, so its private key can neither be checked nor stored.
 var ErrJWKAlgorithmNotLinked = errors.New("JWK algorithm is not linked into this daemon")
 
+// ErrJWKSet: a JWK Set ({"keys":[...]}) given where one key is expected.
+// The import paths take one key per file; the generic "neither dnskey nor
+// sig0key" would send the operator looking for a missing member.
+var ErrJWKSet = errors.New("a JWK Set is not accepted")
+
 // jwkImportTTL is the TTL given to a key RR rebuilt from a JWK, which has
 // none; the same one GenerateKeypair gives a new key.
 const jwkImportTTL = 3600
@@ -70,6 +75,17 @@ func checkJWKKind(data []byte, wantType uint16) (alg uint8, haveAlg bool, err er
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(data, &top); err != nil || top == nil {
 		return 0, false, fmt.Errorf("%w: not a JSON object", core.ErrJWKMalformed)
+	}
+	if raw, ok := top["keys"]; ok {
+		// Only a JSON array is a JWK Set. "null" also unmarshals without
+		// error, into a nil slice, and a single key that carries
+		// "keys":null (an unknown member, which RFC 7517 says to ignore)
+		// imported before the Set check existed. An empty array is a Set.
+		var set []json.RawMessage
+		if json.Unmarshal(raw, &set) == nil && set != nil {
+			return 0, false, fmt.Errorf("%w: the file holds a JWK Set (a top-level \"keys\" array of %d); "+
+				"import takes one key per file, and bulk-import one jwk_file per key", ErrJWKSet, len(set))
+		}
 	}
 	rawDK, hasDK := top["dnskey"]
 	rawS0, hasS0 := top["sig0key"]

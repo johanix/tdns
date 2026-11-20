@@ -31,7 +31,10 @@ type KeystorePost struct {
 	State           string
 	ParentState     uint8
 	Creator         string
-	Force           bool // commit destructive operation; otherwise dry-run (used by 'purge')
+	// Force commits a destructive operation: 'purge' (otherwise a dry run),
+	// 'bulk-import' (overwrite differing rows), and the single-key 'add'
+	// (replace a key already stored, which resets its state).
+	Force bool
 	// The key columns for a "setstate" that names them (design §3.2): on a
 	// zone whose key lifecycle is owned, setstate without them is refused.
 	Pub  *bool `json:"pub,omitempty"`

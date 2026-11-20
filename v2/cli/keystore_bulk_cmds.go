@@ -127,7 +127,7 @@ file that may be arbitrarily stale, and silently overwriting it is how a stale
 export un-rolls a rolled key.
 
 --force flips that last case to overwrite, which is what you want when
-recovering a keystore you know to be wrong.`, classLabel(class)) + bulkImportCaveatFor(class),
+recovering a keystore you know to be wrong.`, classLabel(class)),
 		Run: func(cmd *cobra.Command, args []string) {
 			bulkImportRun(role, class, f)
 		},
@@ -649,21 +649,6 @@ func printBulkSkippedSummary(w io.Writer, skipped []tdns.BulkSkippedKey) {
 	// such a key from an earlier run, and a merge leaves it alone.
 	fmt.Fprintf(w, "WARNING: %d key(s) NOT written by this run (--skip-unsupported); "+
 		"files already in the export directory are left as they are\n", len(skipped))
-}
-
-// bulkImportCaveat says what "identical" means for bulk-import until #1100
-// compares decoded keys. DNSSEC and SIG(0) only; TSIG has no PEM.
-const bulkImportCaveat = `Until decoded-key comparison lands (#1100): "identical" compares the private key as
-PEM text, and the creator as well, so the same key in another tool's PEM
-encoding (or with another creator) is reported as a conflict and skipped;
---force replaces it. The next PR in the stack (#1100) compares the decoded
-keys.`
-
-func bulkImportCaveatFor(class string) string {
-	if class == "tsig" {
-		return ""
-	}
-	return "\n\n" + bulkImportCaveat
 }
 
 // --- import ------------------------------------------------------------

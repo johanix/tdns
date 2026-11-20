@@ -386,14 +386,19 @@ UPDATE TsigKeystore SET algorithm=?, secret=?, origin=?, owner=?, creator=?, cre
 // and skips differing ones unless force is set. It returns one disposition per
 // offered key, in the order offered.
 //
-// Note what this does NOT do: it never parses a PEM private key. The PEM column
-// is stored verbatim, so a key whose algorithm this binary does not link still
-// restores correctly (it will fail later, loudly, if the zone actually tries to
-// sign with it) — which is what makes pre-load safe to run before any zone is
-// bound. It is still checked for PEM armour, since storing a non-PEM blob in
-// the PEM column would otherwise surface only at signing time. The public half
-// IS parsed, because that is a cheap, crypto-free way to catch a manifest that
-// disagrees with its own files.
+// Note what this does NOT do: it never requires a PEM private key to parse.
+// The PEM column is stored verbatim, so a key whose algorithm this binary does
+// not link still restores correctly (it will fail later, loudly, if the zone
+// actually tries to sign with it) — which is what makes pre-load safe to run
+// before any zone is bound. It is still checked for PEM armour, since storing a
+// non-PEM blob in the PEM column would otherwise surface only at signing time.
+// The public half IS parsed, because that is a cheap, crypto-free way to catch
+// a manifest that disagrees with its own files.
+//
+// A key already in the keystore is compared by what both PEMs decode to
+// (comparePrivateKeyPEM), so the same key in another encoding is "unchanged"
+// and its stored text is left alone. Where either side does not decode in this
+// binary the comparison falls back to the text.
 //
 // A key that arrives as a JWK (a manifest jwk_file) is the exception: it is
 // parsed with the draft's import rules and rebuilt as PEM (resolveBulkJWK),
@@ -456,12 +461,17 @@ func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (di
 			return nil, fmt.Errorf("reading DNSSEC key %s keyid %d: %v", zone, k.Keyid, scanErr)
 
 		default:
+			// creator is not compared: the creator already in the keystore
+			// wins and the imported one is dropped, here and under force.
+			// A key added with the single-key import carries another
+			// creator than its export does, and that alone is no reason
+			// to refuse the same key.
+			privField, privCmp := privateKeyField(curPriv.String, k.PrivateKey)
 			diffs := diffFields(
 				field{"state", curState, k.State},
 				field{"flags", fmt.Sprint(curFlags), fmt.Sprint(k.Flags)},
 				field{"algorithm", curAlg, k.Algorithm},
-				field{"creator", curCreator.String, k.Creator},
-				field{"privatekey", curPriv.String, k.PrivateKey},
+				privField,
 				field{"keyrr", curKeyRR.String, k.KeyRR},
 				field{"comment", curComment.String, k.Comment},
 				field{"published_at", curPub.String, k.PublishedAt},
@@ -484,7 +494,7 @@ func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (di
 					return nil, fmt.Errorf("replacing DNSSEC key %s keyid %d: %v", zone, k.Keyid, err)
 				}
 				if _, err := tx.Exec(bulkUpdateDnssecFieldsSql, int(k.Flags), k.Algorithm,
-					k.Creator, k.PrivateKey, k.KeyRR, k.Comment, k.PublishedAt, k.ActiveAt,
+					curCreator, keptPrivateKey(privCmp, curPriv.String, k.PrivateKey), k.KeyRR, k.Comment, k.PublishedAt, k.ActiveAt,
 					k.RetiredAt, nullableInt64(k.ActiveSeq), zone, int(k.Keyid)); err != nil {
 					return nil, fmt.Errorf("replacing DNSSEC key %s keyid %d: %v", zone, k.Keyid, err)
 				}
@@ -569,11 +579,13 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispos
 			return nil, fmt.Errorf("reading SIG(0) key %s keyid %d: %v", zone, k.Keyid, scanErr)
 
 		default:
+			// creator is not compared, and is kept under force: see
+			// BulkImportDnssec.
+			privField, privCmp := privateKeyField(curPriv.String, k.PrivateKey)
 			diffs := diffFields(
 				field{"state", curState, k.State},
 				field{"algorithm", curAlg, k.Algorithm},
-				field{"creator", curCreator.String, k.Creator},
-				field{"privatekey", curPriv.String, k.PrivateKey},
+				privField,
 				field{"keyrr", curKeyRR.String, k.KeyRR},
 				field{"comment", curComment.String, k.Comment},
 				field{"parent_state", fmt.Sprint(curParentState), fmt.Sprint(k.ParentState)},
@@ -585,8 +597,8 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispos
 				out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid,
 					Status: BulkStatusConflict, Detail: strings.Join(diffs, ", ")})
 			default:
-				if _, err := tx.Exec(bulkUpdateSig0Sql, k.State, k.Algorithm, k.Creator,
-					k.PrivateKey, k.KeyRR, k.Comment, int(k.ParentState), zone, int(k.Keyid)); err != nil {
+				if _, err := tx.Exec(bulkUpdateSig0Sql, k.State, k.Algorithm, curCreator,
+					keptPrivateKey(privCmp, curPriv.String, k.PrivateKey), k.KeyRR, k.Comment, int(k.ParentState), zone, int(k.Keyid)); err != nil {
 					return nil, fmt.Errorf("replacing SIG(0) key %s keyid %d: %v", zone, k.Keyid, err)
 				}
 				out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid,

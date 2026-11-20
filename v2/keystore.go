@@ -141,28 +141,61 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
 		}
 
-		res, err = tx.Exec(addSig0KeySql, pkc.KeyRR.Header().Name, kp.State, pkc.KeyRR.KeyTag(),
-			dns.AlgorithmToString[pkc.Algorithm], "tdns-cli", privkeyPEM, pkc.KeyRR.String())
+		zone, keyid := pkc.KeyRR.Header().Name, pkc.KeyRR.KeyTag()
+		var curState string
+		var curCreator, curPriv, curRR sql.NullString
+		scanErr := tx.QueryRow(`SELECT state, creator, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`,
+			zone, int(keyid)).Scan(&curState, &curCreator, &curPriv, &curRR)
+		if scanErr != nil && scanErr != sql.ErrNoRows {
+			return &resp, fmt.Errorf("reading SIG(0) key %s keyid %d: %v", zone, keyid, scanErr)
+		}
+		found := scanErr == nil
+		add, err := decideSingleKeyAdd("SIG(0)", zone, keyid, found, curState, curPriv.String, curRR.String,
+			kp.State, privkeyPEM, pkc.KeyRR.String(), kp.Force)
+		if err != nil {
+			return &resp, err
+		}
+		if !add.write {
+			// Nothing is written to the keystore: the key is there. Its
+			// public copy in the TrustStore may not be, since the TrustStore
+			// delete command removes only that row, and the unconditional add
+			// this replaced put it back. Restore a missing row; leave an
+			// existing one (it may carry a trust decision) and the private
+			// row and its state alone.
+			resp.Msg = add.msg
+			note, restored, err := kdb.ensureSig0TrustRow(tx, pkc.KeyRR.Header().Name, keyid, pkc.KeyRR.String())
+			if err != nil {
+				return &resp, err
+			}
+			if note != "" {
+				resp.Msg += "\n" + note
+			}
+			if restored {
+				// After commit only, as on the write path below.
+				sig0InvalidateZones = appendSig0InvalidateZone(sig0InvalidateZones, pkc.KeyRR.Header().Name)
+			}
+			break
+		}
+		// The creator already in the keystore wins, as in bulk import.
+		creator := "tdns-cli"
+		if found {
+			creator = curCreator.String
+		}
+		res, err = tx.Exec(addSig0KeySql, zone, kp.State, keyid,
+			dns.AlgorithmToString[pkc.Algorithm], creator, privkeyPEM, pkc.KeyRR.String())
 		if err != nil {
 			lgSigner.Error("failed to add SIG(0) key", "err", err)
 			return &resp, err
 		} else {
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Updated %d rows.\nAdded private+public key to KeyStore.", rows)
+			if add.msg != "" {
+				resp.Msg = add.msg + "\n" + resp.Msg
+			}
 		}
 
 		// Now also add the public key to the TrustStore.
-		tspost := TruststorePost{
-			Command:    "truststore",
-			SubCommand: "add",
-			Keyname:    pkc.KeyRR.Header().Name,
-			Keyid:      int(pkc.KeyRR.KeyTag()),
-			Validated:  true,
-			Trusted:    true, // we implicitly trust keys that we have added ourselves
-			Src:        "keystore",
-			KeyRR:      pkc.KeyRR.String(),
-		}
-		tsresp, err := kdb.Sig0TrustMgmt(tx, tspost)
+		tsresp, err := kdb.Sig0TrustMgmt(tx, sig0KeystoreMirrorPost(pkc.KeyRR.Header().Name, keyid, pkc.KeyRR.String()))
 		if err != nil {
 			return nil, err
 		}
@@ -477,6 +510,50 @@ func appendSig0InvalidateZone(zones []string, zone string) []string {
 	return append(zones, zone)
 }
 
+// sig0KeystoreMirrorPost is the TrustStore add that mirrors a key stored in
+// the SIG(0) keystore: validated and trusted, since we implicitly trust the
+// keys we added ourselves.
+func sig0KeystoreMirrorPost(zone string, keyid uint16, keyRR string) TruststorePost {
+	return TruststorePost{
+		Command:    "truststore",
+		SubCommand: "add",
+		Keyname:    zone,
+		Keyid:      int(keyid),
+		Validated:  true,
+		Trusted:    true,
+		Src:        "keystore",
+		KeyRR:      keyRR,
+	}
+}
+
+// ensureSig0TrustRow restores the TrustStore copy of a SIG(0) key that is
+// already in the keystore, in the caller's transaction, when the TrustStore
+// has no row for it. A row that is there is left alone, whatever it holds:
+// it may carry a trust decision the operator made. A key its child retired
+// is refused by the TrustStore add (ErrSig0KeyTombstoned) and the error
+// comes back, as it did when every add went through the TrustStore.
+func (kdb *KeyDB) ensureSig0TrustRow(tx *Tx, zone string, keyid uint16, keyRR string) (note string, restored bool, err error) {
+	var cur string
+	switch serr := tx.QueryRow(`SELECT keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`,
+		zone, int(keyid)).Scan(&cur); {
+	case serr == nil:
+		if !sameKeyRRText(cur, keyRR) {
+			return fmt.Sprintf("The TrustStore holds a different KEY for %s keyid %d; left as it is.", zone, keyid), false, nil
+		}
+		return "", false, nil
+	case !errors.Is(serr, sql.ErrNoRows):
+		return "", false, fmt.Errorf("reading the TrustStore row of SIG(0) key %s keyid %d: %v", zone, keyid, serr)
+	}
+	tsresp, err := kdb.Sig0TrustMgmt(tx, sig0KeystoreMirrorPost(zone, keyid, keyRR))
+	if err != nil {
+		return "", false, fmt.Errorf("restoring the public key of SIG(0) key %s keyid %d in the TrustStore: %w", zone, keyid, err)
+	}
+	if tsresp != nil && tsresp.Error {
+		return "", false, fmt.Errorf("restoring the public key of SIG(0) key %s keyid %d in the TrustStore: %s", zone, keyid, tsresp.ErrorMsg)
+	}
+	return fmt.Sprintf("Restored the public key in the TrustStore: %s", tsresp.Msg), true, nil
+}
+
 func (kdb *KeyDB) DnssecKeyMgmt(ctx context.Context, tx *Tx, kp KeystorePost) (out *KeystoreResponse, err error) {
 	// dump.P(kp)
 
@@ -623,16 +700,43 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			return &resp, fmt.Errorf("failed to convert private key to PEM: %v", err)
 		}
 
+		zone, keyid := pkc.DnskeyRR.Header().Name, pkc.DnskeyRR.KeyTag()
+		var curState string
+		var curCreator, curPriv, curRR sql.NullString
+		scanErr := tx.QueryRow(`SELECT state, creator, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`,
+			zone, int(keyid)).Scan(&curState, &curCreator, &curPriv, &curRR)
+		if scanErr != nil && scanErr != sql.ErrNoRows {
+			return &resp, fmt.Errorf("reading DNSSEC key %s keyid %d: %v", zone, keyid, scanErr)
+		}
+		found := scanErr == nil
+		add, err := decideSingleKeyAdd("DNSSEC", zone, keyid, found, curState, curPriv.String, curRR.String,
+			kp.State, privkeyPEM, pkc.DnskeyRR.String(), kp.Force)
+		if err != nil {
+			return &resp, err
+		}
+		if !add.write {
+			resp.Msg = add.msg
+			break
+		}
+		// The creator already in the keystore wins over this import's, as in
+		// bulk import, also under --force.
+		creator := "tdns-cli"
+		if found {
+			creator = curCreator.String
+		}
 		if err := insertKeyRowTx(tx, KeyRow{
-			Zone: pkc.DnskeyRR.Header().Name, State: kp.State, Keyid: pkc.DnskeyRR.KeyTag(), Flags: pkc.DnskeyRR.Flags,
-			Algorithm: dns.AlgorithmToString[pkc.Algorithm], Creator: "tdns-cli", PrivateKey: privkeyPEM,
-			KeyRR: pkc.DnskeyRR.String(), Replace: true,
+			Zone: zone, State: kp.State, Keyid: keyid, Flags: pkc.DnskeyRR.Flags,
+			Algorithm: dns.AlgorithmToString[pkc.Algorithm], Creator: creator, PrivateKey: privkeyPEM,
+			KeyRR: pkc.DnskeyRR.String(), Replace: add.replace,
 		}); err != nil {
 			lgSigner.Error("failed to add DNSKEY", "err", err)
 			return &resp, err
 		}
 		lgSigner.Debug("DNSKEY added successfully")
 		resp.Msg = "Updated 1 rows"
+		if add.msg != "" {
+			resp.Msg = add.msg
+		}
 		needsRepublish = true
 
 	case "bulk-export":
