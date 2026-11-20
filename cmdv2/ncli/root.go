@@ -35,9 +35,11 @@ var rootCmd = &cobra.Command{
 		// show-cmds (pure introspection of the in-memory command tree) and
 		// the cert PKI subtree (offline provisioning; cert init reads the
 		// server config via its own --serverconfig flag) do not need
-		// config or API.
+		// config or API. Neither does "config add|list": they read and edit
+		// the CLI config themselves, and "config add" is how it gets created.
 		if isRootKeysCommand(cmd) || cmd.Name() == "gen-docs" ||
-			cmd.Name() == cli.ShowCmdsName || isCertCommand(cmd) {
+			cmd.Name() == cli.ShowCmdsName || isCertCommand(cmd) ||
+			cli.IsCliConfigCmd(cmd) {
 			return
 		}
 		initConfig()
@@ -141,14 +143,24 @@ func isRootKeysCommand(cmd *cobra.Command) bool {
 }
 
 func init() {
+	// tdns-ncli has its own CLI config, not tdns-cli's: only this binary
+	// understands the role: key. Set before anything reads the default (the
+	// flag help below, ConfigPathFromArgs, initConfig).
+	cli.DefaultCliConfigFile = tdns.DefaultNcliCfgFile
+
 	// Config/API init moved to rootCmd.PersistentPreRun (skipped for root-level "keys")
 
 	// Catalog zone management lives under 'auth' — catalog zones are an
 	// auth-daemon concern (RFC 9432 catalog zones served by tdns-auth).
 	cli.AuthCmd.AddCommand(cli.CatalogCmd)
 
+	// "config add|list": maintain the CLI config's apiservers: list. Attached
+	// here, before wireInstances runs, so an instance named "config" is
+	// refused as the collision it is.
+	rootCmd.AddCommand(cli.NewCliConfigCmd())
+
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
-		fmt.Sprintf("config file (default is %s)", tdns.DefaultCliCfgFile))
+		fmt.Sprintf("config file (default is %s)", cli.DefaultCliConfigFile))
 	rootCmd.PersistentFlags().BoolVar(&showVersion, "version", false, "print version and supported algorithms, then exit")
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "zone name")
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.ParentZone, "pzone", "Z", "", "parent zone name")
@@ -167,7 +179,7 @@ func initConfig() {
 		// Use config file from the flag.
 		viper.SetConfigFile(cfgFile)
 	} else {
-		viper.SetConfigFile(tdns.DefaultCliCfgFile)
+		viper.SetConfigFile(cli.DefaultCliConfigFile)
 	}
 
 	viper.AutomaticEnv() // read in environment variables that match
@@ -179,6 +191,12 @@ func initConfig() {
 		}
 		cfgFileUsed = viper.ConfigFileUsed()
 	} else {
+		if os.IsNotExist(err) {
+			// tdns-ncli's config is its own file, so on a host that has only
+			// ever run tdns-cli it does not exist yet. Say how to make it.
+			log.Fatalf("No CLI config %s. Create it from the daemons' own configs with:\n    tdns-ncli config add /etc/tdns/tdns-auth.yaml",
+				viper.ConfigFileUsed())
+		}
 		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
 	}
 
