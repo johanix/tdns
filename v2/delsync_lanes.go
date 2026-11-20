@@ -152,22 +152,27 @@ func (l *delegationSyncLanes) dispatch(ctx context.Context, ds DelegationSyncReq
 
 	l.mu.Lock()
 	pin := l.zones[zone]
+	// The parent is read once: the idle check and the enqueue below must
+	// agree on the lane, and the zone's parent may change in between.
+	var parent string
+	if pin == nil {
+		parent = delegationSyncLaneKey(ds)
+	}
 	stored := ds.Command
 	look, isStored := delegationSyncLook(ds)
-	if isStored && !l.startsAtOnce(pin, ds) {
+	if isStored && !l.startsAtOnce(pin, ds, parent) {
 		ds = look
 		defer lgDns.Debug("DelegationSyncher: the parent's queue is busy; the change waits as a compare with the parent",
 			"zone", look.ZoneName, "change", stored, "queued", look.Command)
 	}
 	if pin != nil && pin.lane.merge(zone, ds) {
-		parent := pin.lane.parent
+		lane := pin.lane.parent
 		l.mu.Unlock()
 		lgDns.Debug("DelegationSyncher: merged into the zone's waiting request",
-			"zone", ds.ZoneName, "command", ds.Command, "parent", parent)
+			"zone", ds.ZoneName, "command", ds.Command, "parent", lane)
 		return
 	}
 	if pin == nil {
-		parent := delegationSyncLaneKey(ds)
 		ln := l.lanes[parent]
 		if ln == nil {
 			ln = &delegationSyncLane{parent: parent}
@@ -204,13 +209,14 @@ func (l *delegationSyncLanes) dispatch(ctx context.Context, ds DelegationSyncReq
 // would start as soon as it is queued, since its zone has nothing in a lane
 // (pin) and its parent's lane has nothing waiting or running, and the parent
 // is not known to lack an earlier change of the zone (delegationOutOfStep):
-// the difference assumes the parent holds what the zone held before it. Called
-// with l.mu held.
-func (l *delegationSyncLanes) startsAtOnce(pin *delegationSyncPin, ds DelegationSyncRequest) bool {
+// the difference assumes the parent holds what the zone held before it.
+// parent is the lane the zone would join, read once by dispatch. Called with
+// l.mu held.
+func (l *delegationSyncLanes) startsAtOnce(pin *delegationSyncPin, ds DelegationSyncRequest, parent string) bool {
 	if pin != nil || (ds.ZoneData != nil && ds.ZoneData.delegationOutOfStep.Load()) {
 		return false
 	}
-	ln := l.lanes[delegationSyncLaneKey(ds)]
+	ln := l.lanes[parent]
 	return ln == nil || (len(ln.queue) == 0 && ln.current == nil)
 }
 

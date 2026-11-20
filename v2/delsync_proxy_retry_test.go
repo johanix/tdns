@@ -138,3 +138,49 @@ func TestAProxyCompareClearsOutOfStepOnlyWhenItReachedTheParent(t *testing.T) {
 		}
 	}
 }
+
+// What a proxy compare reports (proxyCompareOutcome): one that could not read
+// all of the parent's delegation is retried, found in sync or sent, as an
+// explicit sync's is; otherwise the parent is in step only when the compare
+// compared the DS and found it in sync, or the send was one the parent said it
+// applied, UPDATE or API. And what a proxy sync records (noteProxySyncForwarded):
+// in step after an UPDATE or API, out of step when nothing was forwarded, and
+// the mark left as it was after a NOTIFY (CodeRabbit on bb87c26b).
+func TestAProxyCompareOrSyncCountsOnlyWhatTheParentApplied(t *testing.T) {
+	complete := DelegationSyncStatus{dsCompared: true}
+	unread := DelegationSyncStatus{dsCompared: true, Unread: []string{"ns1 A"}}
+	for _, c := range []struct {
+		name   string
+		dss    DelegationSyncStatus
+		scheme string
+		inStep bool
+		unread bool
+	}{
+		{"found in sync", complete, "", true, false},
+		{"sent by UPDATE", complete, "UPDATE", true, false},
+		{"sent by API", complete, "API", true, false},
+		{"taken by the notifier", complete, "NOTIFY", false, false},
+		{"found in sync without all of the glue", unread, "", false, true},
+		{"sent without all of the glue", unread, "UPDATE", false, true},
+	} {
+		inStep, err := proxyCompareOutcome(c.dss, c.scheme)
+		if inStep != c.inStep || errors.Is(err, errDelegationNotAllRead) != c.unread || (err != nil && !c.unread) {
+			t.Errorf("%s: in step %v, err %v; want in step %v, not-all-read %v", c.name, inStep, err, c.inStep, c.unread)
+		}
+	}
+
+	zd := &ZoneData{ZoneName: "child.test."}
+	for _, c := range []struct {
+		scheme       string
+		before, want bool
+	}{
+		{"UPDATE", true, false}, {"API", true, false}, {"", false, true},
+		{"NOTIFY", true, true}, {"NOTIFY", false, false},
+	} {
+		zd.delegationOutOfStep.Store(c.before)
+		zd.noteProxySyncForwarded(c.scheme)
+		if got := zd.delegationOutOfStep.Load(); got != c.want {
+			t.Errorf("a proxy sync forwarded by %q with the mark %v: marked %v, want %v", c.scheme, c.before, got, c.want)
+		}
+	}
+}

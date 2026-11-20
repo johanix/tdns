@@ -280,6 +280,7 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		if err := zd.compareParentDS(&resp, pserver, apex); err != nil {
 			return resp, err
 		}
+		resp.dsCompared = true
 	}
 
 	return resp, nil

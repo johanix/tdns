@@ -213,6 +213,113 @@ func TestDelegationSyncZoneStaysInItsQueue(t *testing.T) {
 	}
 }
 
+// A zone instance has at most one compare retry of each command waiting for
+// its timer. Each failed retry starts its successor, so without that every
+// failure during an outage would start a stream of its own (CodeRabbit on
+// bb87c26b). A retry due no sooner than the waiting one joins it: one run, at
+// the waiting one's time, with the fewer attempts and the later failure. One
+// due sooner takes its place, and the replaced one sends nothing. Another
+// command, or another instance of the zone, waits apart.
+func TestOneCompareRetryWaitsPerZoneAndCommand(t *testing.T) {
+	zd := laneZone("retry.down.example.", "down.example.")
+	Zones.Set(zd.ZoneName, zd)
+	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	q := make(chan DelegationSyncRequest, 8)
+	ex := func(attempt int, failedAt time.Time) DelegationSyncRequest {
+		return DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName, ZoneData: zd,
+			Attempt: attempt, FailedAt: failedAt}
+	}
+	nothingMore := func(what string) {
+		t.Helper()
+		select {
+		case ds := <-q:
+			t.Errorf("%s: a second retry ran: %s attempt %d", what, ds.Command, ds.Attempt)
+		case <-time.After(150 * time.Millisecond):
+		}
+	}
+	t0 := time.Now()
+
+	// Due later: it joins.
+	first := requeueLookAfter(ctx, q, ex(3, t0), 50*time.Millisecond)
+	if first == nil {
+		t.Fatal("the first retry started no worker")
+	}
+	if requeueLookAfter(ctx, q, ex(1, t0.Add(time.Second)), time.Hour) != nil {
+		t.Error("a retry due later than the waiting one started a worker of its own")
+	}
+	got := receive(t, q, "the joined retry")
+	if got.Attempt != 1 || !got.FailedAt.Equal(t0.Add(time.Second)) {
+		t.Errorf("the joined retry has attempt %d, failed at %v; want 1 and the later failure", got.Attempt, got.FailedAt)
+	}
+	receive(t, first, "the worker to end")
+	nothingMore("joined")
+
+	// Due sooner: it takes the waiting one's place.
+	late := requeueLookAfter(ctx, q, ex(3, t0), time.Hour)
+	soon := requeueLookAfter(ctx, q, ex(1, t0.Add(time.Second)), 10*time.Millisecond)
+	if late == nil || soon == nil {
+		t.Fatal("a retry due sooner than the waiting one started no worker")
+	}
+	got = receive(t, q, "the sooner retry")
+	if got.Attempt != 1 {
+		t.Errorf("the sooner retry has attempt %d, want 1", got.Attempt)
+	}
+	cancel()
+	receive(t, late, "the replaced worker to end")
+	nothingMore("replaced")
+
+	// Another command, or another instance of the zone, waits apart.
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	t.Cleanup(cancel2)
+	replaced := laneZone(zd.ZoneName, "down.example.")
+	rf := ex(1, t0)
+	rf.Command = "REFRESH-SYNC-DELEGATION"
+	other := ex(1, t0)
+	other.ZoneData = replaced
+	if requeueLookAfter(ctx2, q, ex(1, t0), time.Hour) == nil ||
+		requeueLookAfter(ctx2, q, rf, time.Hour) == nil ||
+		requeueLookAfter(ctx2, q, other, time.Hour) == nil {
+		t.Error("a retry of another command or zone instance joined one it does not stand for")
+	}
+}
+
+// A compare retry whose zone was removed or replaced while it waited in its
+// parent's queue, after its timer had checked it, is dropped when its lane
+// runs it (CodeRabbit on bb87c26b). A first try, a request someone waits on,
+// and a command that is not a compare retry are not looked at.
+func TestARetryWhoseZoneWentWhileQueuedIsStale(t *testing.T) {
+	zd := laneZone("stale.down.example.", "down.example.")
+	Zones.Set(zd.ZoneName, zd)
+	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
+	retry := func(cmd string) DelegationSyncRequest {
+		return DelegationSyncRequest{Command: cmd, ZoneName: zd.ZoneName, ZoneData: zd, Attempt: 1}
+	}
+	for _, cmd := range []string{"EXPLICIT-SYNC-DELEGATION", "REFRESH-SYNC-DELEGATION", "PROXY-UPDATE-SETUP"} {
+		if delegationSyncRetryStale(retry(cmd)) {
+			t.Errorf("a %s retry of the loaded zone is stale", cmd)
+		}
+	}
+	Zones.Set(zd.ZoneName, laneZone(zd.ZoneName, "down.example."))
+	for _, cmd := range []string{"EXPLICIT-SYNC-DELEGATION", "REFRESH-SYNC-DELEGATION", "PROXY-UPDATE-SETUP"} {
+		if !delegationSyncRetryStale(retry(cmd)) {
+			t.Errorf("a %s retry of a replaced zone is not stale", cmd)
+		}
+	}
+	first := retry("EXPLICIT-SYNC-DELEGATION")
+	first.Attempt = 0
+	asked := retry("EXPLICIT-SYNC-DELEGATION")
+	asked.Response = make(chan DelegationSyncStatus, 1)
+	for name, ds := range map[string]DelegationSyncRequest{
+		"a first try": first, "a request someone waits on": asked, "a setup retry": retry("DELEGATION-SYNC-SETUP"),
+	} {
+		if delegationSyncRetryStale(ds) {
+			t.Errorf("%s is dropped as a stale compare retry", name)
+		}
+	}
+}
+
 // (c) A failed sync re-enqueued after its backoff comes back through the
 // lanes with its count and its failure time, no sooner than its delay. Past
 // the schedule's end it keeps coming back after the last delay: a compare is
@@ -478,9 +585,18 @@ func TestParentSyncStatusSaysWhichParentItWaitsFor(t *testing.T) {
 	offer(t, q, laneRequest(stuck, "SYNC-DELEGATION"))
 	receive(t, started, "the stuck sync")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	// Each status request is ended only once the lanes have it in its place:
+	// a timeout could end it while it was still in the intake, before the
+	// queue knew of it.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	dss, msg := waiting.requestDelegationStatus(ctx, q)()
+	answer := waiting.requestDelegationStatus(ctx, q)
+	waitFor(t, 2*time.Second, "the status request to wait behind the stuck sync", func() bool {
+		pos, ok := DelegationSyncWaiting(waiting.ZoneName)
+		return ok && pos.Waiting == 1 && pos.Ahead == 1
+	})
+	cancel()
+	dss, msg := answer()
 	if dss != nil {
 		t.Fatalf("the status was answered (%+v) while its parent's queue was stuck", dss)
 	}
@@ -491,9 +607,15 @@ func TestParentSyncStatusSaysWhichParentItWaitsFor(t *testing.T) {
 	// Behind a slow sync of the same zone the status request waits too. The
 	// sync running is not the status request, and the note does not say it
 	// is: it speaks of the zone's syncs.
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
-	_, msg = stuck.requestDelegationStatus(ctx2, q)()
+	answer = stuck.requestDelegationStatus(ctx2, q)
+	waitFor(t, 2*time.Second, "the status request to wait behind the zone's own sync", func() bool {
+		pos, ok := DelegationSyncWaiting(stuck.ZoneName)
+		return ok && pos.Waiting == 2
+	})
+	cancel2()
+	_, msg = answer()
 	if want := "a delegation sync of the zone is running, in the queue for parent down.example.; 2 of its syncs in the queue"; !strings.Contains(msg, want) {
 		t.Errorf("behind the zone's own slow sync the status says %q, want it to contain %q", msg, want)
 	}

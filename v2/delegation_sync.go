@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/johanix/tdns/v2/edns0"
@@ -42,6 +43,12 @@ func (kdb *KeyDB) handleDelegationSyncRequest(ctx context.Context, delsyncq chan
 	imr := func() *Imr { return conf.Internal.ImrEngine }
 
 	zd := ds.ZoneData
+
+	if delegationSyncRetryStale(ds) {
+		lgDns.Info("DelegationSyncher: retry dropped; the zone is no longer loaded",
+			"zone", ds.ZoneName, "command", ds.Command, "attempt", ds.Attempt)
+		return
+	}
 
 	switch ds.Command {
 
@@ -422,6 +429,14 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 
 // SyncZoneDelegation() is used for delegation synchronization request via API.
 func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus, imr *Imr) (string, uint8, UpdateResult, error) {
+	msg, rcode, ur, _, err := zd.syncZoneDelegationVia(ctx, kdb, notifyq, syncstate, imr)
+	return msg, rcode, ur, err
+}
+
+// syncZoneDelegationVia is SyncZoneDelegation that also returns the scheme
+// that carried the difference: "" when nothing was sent. Only an UPDATE or API
+// success says the parent applied it; a NOTIFY's says the notifier took it.
+func (zd *ZoneData) syncZoneDelegationVia(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, syncstate DelegationSyncStatus, imr *Imr) (string, uint8, UpdateResult, string, error) {
 
 	//	syncstate, err := AnalyseZoneDelegation(conf, zd)
 	//	if err != nil {
@@ -430,7 +445,7 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 
 	if syncstate.InSync {
 		return fmt.Sprintf("Zone \"%s\" delegation data in parent \"%s\" is in sync. No action needed.",
-			syncstate.ZoneName, zd.GetParent()), 0, UpdateResult{}, nil
+			syncstate.ZoneName, zd.GetParent()), 0, UpdateResult{}, "", nil
 	} else {
 		lgDns.Info("zone delegation data in parent is NOT in sync, sync action needed",
 			"zone", syncstate.ZoneName, "parent", zd.GetParent())
@@ -466,18 +481,19 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 	if err != nil {
 		lgDns.Error("DelegationSyncEngine: could not build the parent sync plan, ignoring sync request",
 			"zone", zd.ZoneName, "err", err)
-		return "", 0, UpdateResult{}, err
+		return "", 0, UpdateResult{}, "", err
 	}
 	// A parent that offers nothing this child can use is ErrNoUsableDsync:
 	// one warning per zone, not an error (planUsable).
 	if err := zd.planUsable(plan); err != nil {
-		return "", 0, UpdateResult{}, err
+		return "", 0, UpdateResult{}, "", err
 	}
 
 	// rcode and ur are captured from whichever attempt succeeds; on total
 	// failure walkSyncPlan returns the error and they are not consulted.
 	var rcode uint8
 	var ur UpdateResult
+	var scheme string
 
 	msg, err := zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
 		var m string
@@ -502,11 +518,11 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 			// transport's rcode, and the caller stored that as the outcome.
 			return m, e
 		}
-		rcode, ur = candRcode, candUr
+		rcode, ur, scheme = candRcode, candUr, cand.Scheme
 		return m, e
 	})
 
-	return msg, rcode, ur, err
+	return msg, rcode, ur, scheme, err
 }
 
 func (zd *ZoneData) SyncZoneDelegationViaUpdate(ctx context.Context, kdb *KeyDB, syncstate DelegationSyncStatus,
@@ -814,11 +830,51 @@ func nextDelegationSyncRetry(ds DelegationSyncRequest, failedAt time.Time) (next
 // delay, as requeueSetupAfter does, and marks the zone's parent as known to be
 // out of step (delegationOutOfStep). When it is due, a re-run whose zone is no
 // longer loaded, or has been replaced, is dropped: the retries do not run out,
-// so nothing else would end them. The returned channel closes when the worker
-// exits.
+// so nothing else would end them. It is checked again when its lane runs it
+// (delegationSyncRetryStale).
+//
+// A zone instance has at most one re-run of each command waiting for its
+// timer (pendingLooks). Each failed re-run starts its successor, so without
+// that every failure while the parent is down would start a retry stream of
+// its own, each comparing every 30 minutes for as long as the outage lasts:
+// the lane merges only requests that wait in it at the same time. A re-run
+// due no sooner than the one waiting joins it (mergeDelegationSyncRequests:
+// the fewer attempts, the later failure); one due sooner takes its place,
+// with what the waiting one carried, so a fresh trigger keeps its short wait.
+//
+// The returned channel closes when the worker it started exits; it is nil
+// when next joined a waiting re-run and no worker was started.
 func requeueLookAfter(ctx context.Context, delsyncq chan DelegationSyncRequest, next DelegationSyncRequest, delay time.Duration) <-chan struct{} {
+	var key pendingLookKey
+	var me *pendingLook
 	if next.ZoneData != nil {
 		next.ZoneData.delegationOutOfStep.Store(true)
+		key = pendingLookKey{zd: next.ZoneData, command: next.Command}
+		due := time.Now().Add(delay)
+		register := true
+		pendingLooks.Lock()
+		if p := pendingLooks.m[key]; p != nil {
+			merged, ok := mergeDelegationSyncRequests(p.next, next)
+			switch {
+			case !ok:
+				// Not one the waiting re-run can stand for: it waits on a
+				// timer of its own, as before, and replaces nothing.
+				register = false
+			case !due.Before(p.due):
+				p.next = merged
+				pendingLooks.Unlock()
+				lgDns.Debug("DelegationSyncher: retry joins the one already waiting",
+					"zone", next.ZoneName, "command", next.Command, "due", p.due)
+				return nil
+			default:
+				next = merged
+			}
+		}
+		if register {
+			me = &pendingLook{next: next, due: due}
+			pendingLooks.m[key] = me
+		}
+		pendingLooks.Unlock()
 	}
 	done := make(chan struct{})
 	go func() {
@@ -827,20 +883,90 @@ func requeueLookAfter(ctx context.Context, delsyncq chan DelegationSyncRequest, 
 		defer t.Stop()
 		select {
 		case <-ctx.Done():
+			me.release(key)
 			return
 		case <-t.C:
 		}
-		if !delegationSyncZoneLoaded(next) {
+		run, current := me.take(key, next)
+		if !current {
+			// A re-run due sooner took its place and carries it.
+			return
+		}
+		if !delegationSyncZoneLoaded(run) {
 			lgDns.Info("DelegationSyncher: retry dropped; the zone is no longer loaded",
-				"zone", next.ZoneName, "command", next.Command, "attempt", next.Attempt)
+				"zone", run.ZoneName, "command", run.Command, "attempt", run.Attempt)
 			return
 		}
 		select {
-		case delsyncq <- next:
+		case delsyncq <- run:
 		case <-ctx.Done():
 		}
 	}()
 	return done
+}
+
+// pendingLooks holds the compare re-runs waiting for their timer, at most one
+// per zone instance and command (requeueLookAfter).
+var pendingLooks = struct {
+	sync.Mutex
+	m map[pendingLookKey]*pendingLook
+}{m: map[pendingLookKey]*pendingLook{}}
+
+type pendingLookKey struct {
+	zd      *ZoneData
+	command string
+}
+
+// pendingLook is one re-run waiting for its timer: what it will enqueue, and
+// when.
+type pendingLook struct {
+	next DelegationSyncRequest
+	due  time.Time
+}
+
+// take ends p's wait: it returns what p is to enqueue, and whether p is still
+// the zone's waiting re-run. When it is not, one due sooner replaced it. A nil
+// p, a request with no zone, was never registered: it returns fallback.
+func (p *pendingLook) take(key pendingLookKey, fallback DelegationSyncRequest) (DelegationSyncRequest, bool) {
+	if p == nil {
+		return fallback, true
+	}
+	pendingLooks.Lock()
+	defer pendingLooks.Unlock()
+	if pendingLooks.m[key] != p {
+		return DelegationSyncRequest{}, false
+	}
+	delete(pendingLooks.m, key)
+	return p.next, true
+}
+
+// release forgets p if it is still the zone's waiting re-run: its context
+// ended.
+func (p *pendingLook) release(key pendingLookKey) {
+	if p == nil {
+		return
+	}
+	pendingLooks.Lock()
+	defer pendingLooks.Unlock()
+	if pendingLooks.m[key] == p {
+		delete(pendingLooks.m, key)
+	}
+}
+
+// delegationSyncRetryStale reports whether ds is a compare re-run
+// (requeueLookAfter) whose zone was removed or replaced after its timer fired,
+// while it waited in its parent's queue. It is dropped then, as it would have
+// been had that happened before: run, it would compare and send the delegation
+// of a zone no longer served.
+func delegationSyncRetryStale(ds DelegationSyncRequest) bool {
+	if ds.Attempt == 0 || ds.Response != nil {
+		return false
+	}
+	switch ds.Command {
+	case "EXPLICIT-SYNC-DELEGATION", "REFRESH-SYNC-DELEGATION", "PROXY-UPDATE-SETUP":
+		return !delegationSyncZoneLoaded(ds)
+	}
+	return false
 }
 
 // delegationSyncZoneLoaded reports whether ds's zone is still the one loaded
@@ -854,8 +980,9 @@ func delegationSyncZoneLoaded(ds DelegationSyncRequest) bool {
 }
 
 // noteDelegationSyncInStep records that the parent holds what the zone says: a
-// compare of NS, glue and DS found it in step or brought it there, or a proxy
-// sync, which declares the whole delegation, reached it. A retry of an earlier
+// compare of NS, glue and DS found it in step, or brought it there by a send
+// the parent applied (inStepAfter), or a proxy sync, which declares the whole
+// delegation, was applied by it. A retry of an earlier
 // failure is dropped (delegationSyncRetrySuperseded), and a stored change may
 // again be sent as a difference (delegationOutOfStep). A refresh sync, which
 // compares no DS, does not call it.
@@ -957,25 +1084,34 @@ func delegationSyncRetrySuperseded(zd *ZoneData, ds DelegationSyncRequest) bool 
 func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan NotifyRequest,
 	delsyncq chan DelegationSyncRequest, imr *Imr, ds DelegationSyncRequest) {
 
-	msg, forwarded, err := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr, ds.ProxyAnalysis)
+	msg, scheme, err := zd.proxyDelegationSyncVia(ctx, kdb, notifyq, imr, ds.ProxyAnalysis)
 	if err != nil {
 		lookAgainLater(ds, "forward", err, func(next DelegationSyncRequest, delay time.Duration) {
 			requeueLookAfter(ctx, delsyncq, next, delay)
 		})
 		return
 	}
-	// Only a sync that reached the parent supersedes a pending retry. "Nothing
-	// forwarded" (no usable scheme, for instance an empty DSYNC discovery) is
-	// not an error, but it sent nothing, and must not cancel a retry that
-	// might. A proxy sync declares the whole delegation and takes its
-	// withdrawals from the parent as well, so one that reached the parent
-	// leaves it in step. One that did not leaves the parent without the change.
-	if forwarded {
+	zd.noteProxySyncForwarded(scheme)
+	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "scheme", scheme, "msg", msg)
+}
+
+// noteProxySyncForwarded records what a proxy sync that returned no error
+// says about the parent, by the scheme that forwarded it ("" for none). Only a
+// sync the parent applied supersedes a pending retry. "Nothing forwarded" (no
+// usable scheme, for instance an empty DSYNC discovery) is not an error, but
+// it sent nothing, and must not cancel a retry that might. A proxy sync
+// declares the whole delegation and takes its withdrawals from the parent as
+// well, so one the parent applied -- an UPDATE or an API call -- leaves it in
+// step. One that did not reach it leaves the parent without the change. A
+// NOTIFY the notifier took leaves the mark as it was, as a stored change sent
+// that way does: the parent has yet to come and read the zone.
+func (zd *ZoneData) noteProxySyncForwarded(scheme string) {
+	switch scheme {
+	case "UPDATE", "API":
 		zd.noteDelegationSyncInStep()
-	} else {
+	case "":
 		zd.noteDelegationSyncNotSent()
 	}
-	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "forwarded", forwarded, "msg", msg)
 }
 
 // proxyUpdateGate re-runs the §10.8 UPDATE gate for a parentsync-proxy zone
@@ -1016,10 +1152,11 @@ func proxyStartupReconcile(ctx context.Context, zd *ZoneData, kdb *KeyDB, notify
 
 // handleProxyCompareWith is the decision half of the proxy's compare, with the
 // compare (run) and the requeue passed in so a test can stand in for them. A
-// failure is retried until the parent answers. A compare that found the parent
-// in step or brought it there (inStep) clears delegationOutOfStep; one that
-// sent nothing because the parent offers no usable scheme returns no error and
-// does not.
+// failure, and a compare that could not read all of the parent's delegation
+// (errDelegationNotAllRead), is retried until the parent answers. A compare
+// that found the parent in step or brought it there (inStep) clears
+// delegationOutOfStep; one that sent nothing because the parent offers no
+// usable scheme returns no error and does not.
 func handleProxyCompareWith(zd *ZoneData, ds DelegationSyncRequest, run func() (msg string, inStep bool, err error),
 	requeue func(next DelegationSyncRequest, delay time.Duration)) {
 
@@ -1297,16 +1434,18 @@ func (zd *ZoneData) runExplicitSync(ctx context.Context, kdb *KeyDB, notifyq cha
 	lgDns.Info("DelegationSyncher: request for explicit delegation sync", "zone", zd.ZoneName)
 	return zd.runExplicitSyncWith(
 		func() (DelegationSyncStatus, error) { return zd.AnalyseZoneDelegation(imr) },
-		func(syncstate DelegationSyncStatus) (string, uint8, UpdateResult, error) {
-			return zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
+		func(syncstate DelegationSyncStatus) (string, uint8, UpdateResult, string, error) {
+			return zd.syncZoneDelegationVia(ctx, kdb, notifyq, syncstate, imr)
 		})
 }
 
 // runExplicitSyncWith is runExplicitSync with the compare and the send passed
-// in, so a test can stand in for the parent. It decides what the outcome means
-// for the zone's mark that the parent may lack a change (delegationOutOfStep).
+// in, so a test can stand in for the parent. send returns the scheme that
+// carried the difference. It decides what the outcome means for the zone's
+// mark that the parent may lack a change (delegationOutOfStep): it clears it
+// only when the parent is known to hold the whole delegation (inStepAfter).
 func (zd *ZoneData) runExplicitSyncWith(analyse func() (DelegationSyncStatus, error),
-	send func(DelegationSyncStatus) (string, uint8, UpdateResult, error)) DelegationSyncStatus {
+	send func(DelegationSyncStatus) (string, uint8, UpdateResult, string, error)) DelegationSyncStatus {
 
 	syncstate, err := analyse()
 	if err != nil {
@@ -1319,14 +1458,14 @@ func (zd *ZoneData) runExplicitSyncWith(analyse func() (DelegationSyncStatus, er
 	if syncstate.InSync {
 		lgDns.Info("DelegationSyncher: delegation data in parent is in sync with child, no action needed",
 			"zone", syncstate.ZoneName, "parent", syncstate.Parent)
-		if syncstate.Complete() {
+		if syncstate.inStepAfter("") {
 			zd.noteDelegationSyncInStep()
 		}
 		return syncstate
 	}
 
 	// Not in sync, let's fix that.
-	msg, rcode, ur, err := send(syncstate)
+	msg, rcode, ur, scheme, err := send(syncstate)
 	if errors.Is(err, ErrNoUsableDsync) {
 		// Not a failure: the answer says why nothing was sent, with no
 		// error (planUsable warned once), and nothing retries, since there
@@ -1335,6 +1474,7 @@ func (zd *ZoneData) runExplicitSyncWith(analyse func() (DelegationSyncStatus, er
 		// compare too, as when a stored change is not sent for this reason.
 		lgDns.Debug("DelegationSyncher: nothing sent", "zone", zd.ZoneName, "reason", err)
 		zd.noteDelegationSyncNotSent()
+		syncstate.noUsableScheme = true
 		syncstate.Msg = err.Error()
 		return syncstate
 	}
@@ -1344,14 +1484,33 @@ func (zd *ZoneData) runExplicitSyncWith(analyse func() (DelegationSyncStatus, er
 		syncstate.ErrorMsg = err.Error()
 		syncstate.UpdateResult = ur
 	} else {
-		lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", zd.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
-		if syncstate.Complete() {
+		lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", zd.ZoneName, "msg", msg,
+			"rcode", dns.RcodeToString[int(rcode)], "scheme", scheme)
+		if syncstate.inStepAfter(scheme) {
 			zd.noteDelegationSyncInStep()
 		}
 	}
 	syncstate.Msg = msg
 	syncstate.Rcode = rcode
 	return syncstate
+}
+
+// inStepAfter reports whether an explicit sync's compare, and the send by
+// scheme that followed it ("" for none), leave the parent known to hold all a
+// stored difference assumes. The compare must have read all it asked
+// (Complete) and compared the DS (dsCompared: not while a rollover owns it).
+// A send counts only when the parent said it applied it: an UPDATE or an API
+// call. A NOTIFY's success says the notifier took it; the parent has yet to
+// come and read it, and a compare that finds it in step will say so.
+func (dss DelegationSyncStatus) inStepAfter(scheme string) bool {
+	if !dss.Complete() || !dss.dsCompared {
+		return false
+	}
+	switch scheme {
+	case "", "UPDATE", "API":
+		return true
+	}
+	return false
 }
 
 // handleExplicitSyncWith is the EXPLICIT-SYNC-DELEGATION arm. The DS engine's
@@ -1368,7 +1527,8 @@ func (zd *ZoneData) runExplicitSyncWith(analyse func() (DelegationSyncStatus, er
 // sync's retry is: that success may have been a refresh sync, which compares
 // no DS. One that found a difference it could not send, because the parent
 // offers no usable scheme, has nothing to retry through: it is not retried,
-// and the run marks the parent out of step (runExplicitSyncWith).
+// even after an incomplete read, and the run marks the parent out of step
+// (runExplicitSyncWith).
 //
 // It returns the channel of the worker it started -- the wait for the IMR, or
 // the retry -- and nil when it started none.
@@ -1383,7 +1543,7 @@ func handleExplicitSyncWith(ctx context.Context, ready *ImrReadiness, delsyncq c
 		ds.Response <- syncstate
 		return nil
 	}
-	if !syncstate.Error && syncstate.Complete() {
+	if syncstate.noUsableScheme || (!syncstate.Error && syncstate.Complete()) {
 		return nil
 	}
 	why := syncstate.ErrorMsg

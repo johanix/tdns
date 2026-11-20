@@ -75,12 +75,20 @@ func delegationSyncLook(ds DelegationSyncRequest) (DelegationSyncRequest, bool) 
 // own answer. Nor is SYNC-DNSKEY-RRSET, whose key sets are a snapshot of a
 // multi-signer exchange, or a command not listed above.
 //
+// Nor are two requests for different instances of the zone: a retry for a
+// copy that has since been replaced, and a compare of the replacement. The
+// merged request would run on one of them, and the other's run would be lost.
+// The lane still pins both to one lane by name, so they do not run at once.
+//
 // The merged request keeps the fresher retry counts of the two: a new trigger
 // that joins a retry gives the zone its shortest wait again, as it would have
 // had if queued on its own. Its FailedAt is apart from that: see
 // mergedFailedAt.
 func mergeDelegationSyncRequests(waiting, next DelegationSyncRequest) (DelegationSyncRequest, bool) {
 	if waiting.Command != next.Command || !delegationSyncMerges(waiting) || !delegationSyncMerges(next) {
+		return waiting, false
+	}
+	if waiting.ZoneData != nil && next.ZoneData != nil && waiting.ZoneData != next.ZoneData {
 		return waiting, false
 	}
 	merged := waiting
@@ -129,7 +137,12 @@ func mergedFailedAt(a, b DelegationSyncRequest) time.Time {
 // then, so running later only means they see more.
 //
 // Nothing else may be overtaken. Not a request a caller waits on: it answers
-// what it finds when it runs. And not a setup (DELEGATION-SYNC-SETUP,
+// what it finds when it runs, and the zone's requests that arrived before it
+// run before it, those after it after. That is run order, not a view of the
+// zone as it was when the request arrived: a compare reads the zone as it is
+// when it runs, so one that runs before a status request may send a change
+// that arrived after it, and the status then reports the parent with it. And
+// not a setup (DELEGATION-SYNC-SETUP,
 // PROXY-UPDATE-SETUP, PROXY-UPDATE-GATE): what is moved ahead of it could go
 // to the parent before the key it needs is in place.
 func delegationSyncMayBeOvertaken(ds DelegationSyncRequest) bool {

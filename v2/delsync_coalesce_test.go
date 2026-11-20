@@ -342,43 +342,55 @@ func TestACompareNobodyWaitsOnIsRetriedUntilTheParentAnswers(t *testing.T) {
 	}
 }
 
-// An explicit sync that finds the parent out of step but cannot send the
-// difference, because the parent offers no usable scheme, answers with no
-// error and is not retried, but marks the parent out of step, so the next
-// change goes as a compare (re-review 4, F6). Otherwise the run clears the
-// mark only when it covered the whole delegation: in step or sent, with a
-// complete read.
-func TestAnExplicitSyncThatCannotSendMarksTheParentOutOfStep(t *testing.T) {
+// An explicit sync clears the mark that the parent may lack a change only when
+// the parent is known to hold the whole delegation afterwards: the compare read
+// all it asked, compared the DS (not while a rollover owns it), and found the
+// parent in step or sent the difference by a scheme whose success says the
+// parent applied it, UPDATE or API. A NOTIFY's success says only that the
+// notifier took it (CodeRabbit on bb87c26b). One that cannot send because the
+// parent offers no usable scheme answers with no error and is not retried,
+// even after an incomplete read, but marks the parent out of step, so the next
+// change goes as a compare (re-review 4, F6; CodeRabbit on bb87c26b).
+func TestAnExplicitSyncClearsTheMarkOnlyWhenTheParentHoldsItAll(t *testing.T) {
 	saved := delegationSyncRetryDelays
 	delegationSyncRetryDelays = []time.Duration{time.Millisecond}
 	t.Cleanup(func() { delegationSyncRetryDelays = saved })
-	// Not in Zones: the incomplete read's retry is dropped when due.
+	// Not in Zones: an incomplete read's retry is dropped when due.
 	zd := laneZone("nosend.down.example.", "down.example.")
 	q := make(chan DelegationSyncRequest, 1)
-	differs := DelegationSyncStatus{ZoneName: zd.ZoneName}
-	incomplete := DelegationSyncStatus{ZoneName: zd.ZoneName, Unread: []string{"ns1 A"}}
-	inStep := DelegationSyncStatus{ZoneName: zd.ZoneName, InSync: true}
+	differs := DelegationSyncStatus{ZoneName: zd.ZoneName, dsCompared: true}
+	incomplete := DelegationSyncStatus{ZoneName: zd.ZoneName, Unread: []string{"ns1 A"}, dsCompared: true}
+	inStep := DelegationSyncStatus{ZoneName: zd.ZoneName, InSync: true, dsCompared: true}
+	rolling := DelegationSyncStatus{ZoneName: zd.ZoneName}
+	rollingInStep := DelegationSyncStatus{ZoneName: zd.ZoneName, InSync: true}
 
 	for _, c := range []struct {
 		name     string
 		before   bool
 		analysis DelegationSyncStatus
+		scheme   string
 		sendErr  error
 		mark     bool
+		retried  bool
 	}{
-		{"a difference with no usable scheme", false, differs, ErrNoUsableDsync, true},
-		{"a difference sent", true, differs, nil, false},
-		{"a difference sent after an incomplete read", true, incomplete, nil, true},
-		{"the parent found in step", true, inStep, nil, false},
+		{"a difference with no usable scheme", false, differs, "", ErrNoUsableDsync, true, false},
+		{"no usable scheme after an incomplete read", false, incomplete, "", ErrNoUsableDsync, true, false},
+		{"a difference sent by UPDATE", true, differs, "UPDATE", nil, false, false},
+		{"a difference sent by API", true, differs, "API", nil, false, false},
+		{"a difference the notifier took", true, differs, "NOTIFY", nil, true, false},
+		{"a difference sent after an incomplete read", true, incomplete, "UPDATE", nil, true, true},
+		{"the parent found in step", true, inStep, "", nil, false, false},
+		{"in step while a rollover owns the DS", true, rollingInStep, "", nil, true, false},
+		{"sent by UPDATE while a rollover owns the DS", true, rolling, "UPDATE", nil, true, false},
 	} {
 		zd.delegationOutOfStep.Store(c.before)
 		sent := false
 		run := func() DelegationSyncStatus {
 			return zd.runExplicitSyncWith(
 				func() (DelegationSyncStatus, error) { return c.analysis, nil },
-				func(DelegationSyncStatus) (string, uint8, UpdateResult, error) {
+				func(DelegationSyncStatus) (string, uint8, UpdateResult, string, error) {
 					sent = true
-					return "sent", dns.RcodeSuccess, UpdateResult{}, c.sendErr
+					return "sent", dns.RcodeSuccess, UpdateResult{}, c.scheme, c.sendErr
 				})
 		}
 		look := DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName, ZoneData: zd}
@@ -389,8 +401,8 @@ func TestAnExplicitSyncThatCannotSendMarksTheParentOutOfStep(t *testing.T) {
 		if got := zd.delegationOutOfStep.Load(); got != c.mark {
 			t.Errorf("%s: the parent is marked out of step %v, want %v", c.name, got, c.mark)
 		}
-		if c.analysis.Complete() && done != nil {
-			t.Errorf("%s: retried", c.name)
+		if (done != nil) != c.retried {
+			t.Errorf("%s: retried %v, want %v", c.name, done != nil, c.retried)
 		}
 		if done != nil {
 			<-done
@@ -399,6 +411,31 @@ func TestAnExplicitSyncThatCannotSendMarksTheParentOutOfStep(t *testing.T) {
 			default:
 			}
 		}
+	}
+}
+
+// Two compares for different instances of a zone do not merge: a retry for a
+// copy since replaced would take the replacement's compare with it (CodeRabbit
+// on bb87c26b). The same instance merges, and a request without ZoneData
+// merges by name as before.
+func TestCompareRequestsForDifferentZoneInstancesDoNotMerge(t *testing.T) {
+	old := laneZone("swap.down.example.", "down.example.")
+	replacement := laneZone("swap.down.example.", "down.example.")
+	ex := func(zd *ZoneData, attempt int) DelegationSyncRequest {
+		return DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: "swap.down.example.",
+			ZoneData: zd, Attempt: attempt}
+	}
+	if _, ok := mergeDelegationSyncRequests(ex(replacement, 0), ex(old, 2)); ok {
+		t.Error("a retry for the old instance merged into the replacement's compare")
+	}
+	if _, ok := mergeDelegationSyncRequests(ex(old, 2), ex(replacement, 0)); ok {
+		t.Error("the replacement's compare merged into a retry for the old instance")
+	}
+	if m, ok := mergeDelegationSyncRequests(ex(old, 2), ex(old, 0)); !ok || m.Attempt != 0 {
+		t.Errorf("two compares of one instance: merged %v, attempt %d; want merged, attempt 0", ok, m.Attempt)
+	}
+	if _, ok := mergeDelegationSyncRequests(ex(nil, 0), ex(old, 0)); !ok {
+		t.Error("a compare without ZoneData no longer merges by name")
 	}
 }
 
@@ -523,10 +560,12 @@ func TestAMergedRetryIsDroppedOnlyWhenBothWouldBe(t *testing.T) {
 }
 
 // A merge does not move a zone's request past one of the zone's that a caller
-// waits on. The status request reads the parent and answers what it finds:
-// that must be the parent after the change that arrived before it, not after
-// one that arrived later. Both changes wait as compares, behind the zone's
-// request that sticks.
+// waits on: the requests that arrived before the status request run before it,
+// and those after it after. Both changes wait as compares, behind the zone's
+// request that sticks. That is the order the handlers run in, not a view of the
+// zone at the status request's arrival: the first compare reads the zone as it
+// is when it runs, and may already send the later change, so the status then
+// reports the parent with it (delegationSyncMayBeOvertaken).
 func TestAMergeDoesNotJumpARequestACallerWaitsOn(t *testing.T) {
 	zd := laneZone("order.down.example.", "down.example.")
 

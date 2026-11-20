@@ -286,8 +286,10 @@ func handleRefreshSyncDelegationWith(ctx context.Context, ready *ImrReadiness, d
 	if errors.Is(err, ErrNoUsableDsync) {
 		// The parent offers nothing to send it through: not a failure, and
 		// nothing to retry (planUsable warned once). The next NS or glue
-		// change, or a reload, looks again.
+		// change, or a reload, looks again. The parent lacks the difference
+		// found, so that next change goes as a compare.
 		lgDns.Debug("DelegationSyncher: refresh sync: nothing sent", "zone", ds.ZoneName, "reason", err)
+		zd.noteDelegationSyncNotSent()
 		return nil
 	}
 	if err != nil {

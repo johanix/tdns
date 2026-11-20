@@ -19,6 +19,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -636,8 +637,11 @@ func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis, par
 //
 // inStep reports whether the parent holds what the zone says afterwards: the
 // compare read all of the parent's delegation and found it in sync, or the
-// difference was sent and accepted. A plan with no usable scheme is not an
-// error, and is not in step either.
+// difference was sent and the parent said it applied it (an UPDATE or an API
+// call: a NOTIFY's success says only that the notifier took it). A plan with
+// no usable scheme is not an error, and is not in step either. A compare that
+// could not read all of the parent's delegation returns errDelegationNotAllRead
+// after doing what it could, so that it is retried.
 func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 	notifyq chan NotifyRequest, imr *Imr) (msg string, inStep bool, err error) {
 	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr, SyncRoleProxy)
@@ -656,7 +660,8 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 	}
 	if dss.InSync {
 		lgDns.Info("parentsync-proxy: startup reconcile — parent already in sync", "zone", zd.ZoneName)
-		return "startup reconcile: parent already in sync; nothing sent", dss.Complete(), nil
+		inStep, err = proxyCompareOutcome(dss, "")
+		return "startup reconcile: parent already in sync; nothing sent", inStep, err
 	}
 
 	// NOTIFY needs to know WHICH signal to send, which the steady-state path
@@ -666,12 +671,29 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 
 	lgDns.Info("parentsync-proxy: startup reconcile — parent out of sync",
 		"zone", zd.ZoneName, "plan", plan.Summary())
-	msg, serr := zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis, &dss)
+	msg, scheme, serr := zd.syncWithParentVia(ctx, kdb, notifyq, imr, plan, analysis, &dss)
 	if serr != nil {
 		return "", false, fmt.Errorf("ProxyStartupReconcile: %w", serr)
 	}
-	return "startup reconcile: " + msg, dss.Complete(), nil
+	inStep, err = proxyCompareOutcome(dss, scheme)
+	return "startup reconcile: " + msg, inStep, err
 }
+
+// proxyCompareOutcome is what a proxy compare that found dss, and sent by
+// scheme ("" for nothing sent), reports: whether the parent is known to hold
+// the whole delegation (inStepAfter), or errDelegationNotAllRead when the
+// compare could not read all of it, so that it is retried.
+func proxyCompareOutcome(dss DelegationSyncStatus, scheme string) (inStep bool, err error) {
+	if !dss.Complete() {
+		return false, fmt.Errorf("%w: %v", errDelegationNotAllRead, dss.Unread)
+	}
+	return dss.inStepAfter(scheme), nil
+}
+
+// errDelegationNotAllRead says a compare could not read all of the parent's
+// delegation (DelegationSyncStatus.Unread): whatever it found, it must run
+// again, like a compare that failed.
+var errDelegationNotAllRead = errors.New("the parent's delegation was not all read")
 
 // ProxyDelegationSync is the steady-state dispatcher: on a detected change it
 // forwards to the parent over whichever transport is actually usable.
@@ -688,12 +710,19 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 // returns "nothing forwarded" with a nil error -- but nothing was sent, and a
 // caller counting successes must not count it.
 func (zd *ZoneData) ProxyDelegationSync(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, imr *Imr, analysis *ProxyDelegationAnalysis) (msg string, forwarded bool, err error) {
+	msg, scheme, err := zd.proxyDelegationSyncVia(ctx, kdb, notifyq, imr, analysis)
+	return msg, scheme != "", err
+}
+
+// proxyDelegationSyncVia is ProxyDelegationSync that returns the scheme that
+// forwarded the change ("" for none) in place of forwarded.
+func (zd *ZoneData) proxyDelegationSyncVia(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, imr *Imr,
+	analysis *ProxyDelegationAnalysis) (msg string, scheme string, err error) {
 	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr, SyncRoleProxy)
 	if err != nil {
-		return "", false, fmt.Errorf("ProxyDelegationSync: %w", err)
+		return "", "", fmt.Errorf("ProxyDelegationSync: %w", err)
 	}
-	msg, err = zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis, nil)
-	return msg, err == nil && plan.Usable(), err
+	return zd.syncWithParentVia(ctx, kdb, notifyq, imr, plan, analysis, nil)
 }
 
 // proxyUpdateMode returns the parent-update form for the proxy: the operator's

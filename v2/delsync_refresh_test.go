@@ -388,34 +388,38 @@ func TestDelegationAnalysisNamesAnUnreadDS(t *testing.T) {
 
 // The DS step's deliberate absences of opinion are not reads that failed: a
 // zone in one of them is complete, so a caller asking again until the analysis
-// is complete does not ask a rolling or unmanaged zone forever.
+// is complete does not ask a rolling or unmanaged zone forever. Only while a
+// rollover owns the DS does the analysis say it did not compare it
+// (dsCompared), so that it does not clear the mark that the parent may lack a
+// change (CodeRabbit on bb87c26b).
 func TestDelegationAnalysisNoOpinionIsComplete(t *testing.T) {
 	withApp(t, AppTypeAuth)
 	inStep := []string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A}
 	unsigned := ddcngZone(1, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A)
 
 	for _, tc := range []struct {
-		name  string
-		setup func(t *testing.T) *ZoneData
+		name       string
+		dsCompared bool
+		setup      func(t *testing.T) *ZoneData
 	}{
-		{"a rollover owns the DS (its query would fail)", func(t *testing.T) *ZoneData {
+		{"a rollover owns the DS (its query would fail)", false, func(t *testing.T) *ZoneData {
 			zd := childZone(t, ddcngServedZone(), OptParentSync)
 			zd.KeyDB = gateTestKeyDB(t)
 			seedRolloverRow(t, zd.KeyDB, ddcngZoneName, 1)
 			fakeParent(t, zd, inStep, "deleg.example./DS")
 			return zd
 		}},
-		{"keys tdns does not manage", func(t *testing.T) *ZoneData {
+		{"keys tdns does not manage", true, func(t *testing.T) *ZoneData {
 			zd := childZone(t, ddcngServedZone(), OptParentSync)
 			fakeParent(t, zd, append(inStep, ddcngDS(t, ddcngKSK2)))
 			return zd
 		}},
-		{"a proxy zone serving no CDS", func(t *testing.T) *ZoneData {
+		{"a proxy zone serving no CDS", true, func(t *testing.T) *ZoneData {
 			zd := childZone(t, ddcngServedZone(), OptParentSyncProxy)
 			fakeParent(t, zd, append(inStep, ddcngDS(t, ddcngKSK2)))
 			return zd
 		}},
-		{"no keys and no parent DS", func(t *testing.T) *ZoneData {
+		{"no keys and no parent DS", true, func(t *testing.T) *ZoneData {
 			zd := childZone(t, unsigned, OptParentSync)
 			fakeParent(t, zd, inStep)
 			return zd
@@ -432,6 +436,9 @@ func TestDelegationAnalysisNoOpinionIsComplete(t *testing.T) {
 			}
 			if !resp.InSync {
 				t.Errorf("in sync = false (DS adds %v, removes %v), want the NS and glue verdict", resp.DSAdds, resp.DSRemoves)
+			}
+			if resp.dsCompared != tc.dsCompared {
+				t.Errorf("DS compared = %v, want %v", resp.dsCompared, tc.dsCompared)
 			}
 		})
 	}
@@ -649,6 +656,26 @@ func TestARefreshSyncSuccessLeavesTheParentOutOfStep(t *testing.T) {
 		if !zd.delegationOutOfStep.Load() {
 			t.Errorf("%s: a refresh sync's success cleared the out-of-step mark", c.name)
 		}
+	}
+}
+
+// A refresh sync that finds the parent without the zone's NS or glue, and
+// cannot send it because the parent offers no usable scheme, has nothing to
+// retry through, but marks the parent out of step: the next stored change
+// must not assume the parent has what this one found missing (CodeRabbit on
+// bb87c26b).
+func TestARefreshSyncWithNoUsableSchemeMarksTheParent(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	zd := childZone(t, ddcngServedZone(), OptParentSync)
+	zd.delegationOutOfStep.Store(false)
+	rec := runArm(t, zd, refreshRequest(zd), func() (DelegationSyncStatus, error) {
+		return DelegationSyncStatus{ZoneName: zd.ZoneName}, nil
+	}, ErrNoUsableDsync)
+	if len(rec.synced) != 1 || len(rec.requeued) != 0 {
+		t.Fatalf("%d sends and %d retries, want 1 and 0", len(rec.synced), len(rec.requeued))
+	}
+	if !zd.delegationOutOfStep.Load() {
+		t.Error("a difference not sent for want of a usable scheme left the parent marked in step")
 	}
 }
 

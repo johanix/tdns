@@ -253,9 +253,11 @@ type ZoneData struct {
 	// changes the zone has made. A stored change is then queued as a compare
 	// instead of being sent as a difference (delegationSyncLanes.startsAtOnce).
 	// Cleared only by what covers all a stored difference assumes
-	// (noteDelegationSyncInStep): an explicit sync's compare of NS, glue and DS,
-	// or a proxy's compare or sync that reached the parent. Not by a refresh
-	// sync, which compares no DS.
+	// (noteDelegationSyncInStep): an explicit sync's compare of NS, glue and DS
+	// that found the parent in step or sent the difference by UPDATE or API, or
+	// a proxy's compare or sync the parent applied. Not by a refresh sync,
+	// which compares no DS, nor by a compare while a rollover owns the DS, nor
+	// by a NOTIFY, which the parent has yet to act on.
 	delegationOutOfStep atomic.Bool
 	// childRefreshNSGlueChanged is what the child-mode pre-refresh hook saw:
 	// the incoming zone's NS or glue differs from the served zone's. Consumed
@@ -1250,10 +1252,20 @@ type DelegationSyncStatus struct {
 	// nothing about those, so an analysis with Unread set must not be taken as
 	// the parent in step. Deliberate absences of opinion -- a rollover owning
 	// the DS, keys tdns does not manage -- are not reads and are not listed.
-	Unread       []string `json:",omitempty"`
-	Error        bool
-	ErrorMsg     string
-	UpdateResult UpdateResult // Experimental
+	Unread []string `json:",omitempty"`
+	// dsCompared says the analysis compared the parent's DS with the zone's
+	// (AnalyseZoneDelegation), where it was asked to: not while a rollover
+	// owns the DS. Only such a compare may say the parent holds all a stored
+	// difference assumes (noteDelegationSyncInStep). Unread says whether the
+	// DS read itself succeeded.
+	dsCompared bool
+	// noUsableScheme says the explicit sync found a difference and sent
+	// nothing, because the parent offers no usable scheme: there is nothing
+	// to retry it through (runExplicitSyncWith).
+	noUsableScheme bool
+	Error          bool
+	ErrorMsg       string
+	UpdateResult   UpdateResult // Experimental
 	// Complete new delegation data for replace mode
 	NewNS   []dns.RR `json:"-"`
 	NewA    []dns.RR `json:"-"`
