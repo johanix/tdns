@@ -1,0 +1,718 @@
+/*
+ * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
+ */
+
+package tdns
+
+import (
+	"context"
+	"errors"
+	"net"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
+	"github.com/miekg/dns"
+)
+
+// A query that a referral has just brought to a server whose transport signal
+// is not known yet (#1065). The server's one transport so far is Do53, and
+// Do53 to it is in backoff: the server has no Do53, and the query and the
+// signal lookup both tried it there first. Uses newStrictTestImr and
+// startSignalLookup of imr_strict_signal_test.go.
+
+const coldNoTuples = "no auth-server attempts made"
+
+// newColdTestImr is newStrictTestImr with Do53 to the child's server in
+// backoff.
+func newColdTestImr(t *testing.T, wait time.Duration) (*Imr, *cache.AuthServer, map[string]*cache.AuthServer) {
+	t.Helper()
+	imr, server, serverMap := newStrictTestImr(t, wait)
+	server.RecordAddressFailure("192.0.2.53", core.TransportDo53, errors.New("read: connection refused"))
+	return imr, server, serverMap
+}
+
+// coldQuery sends the query a client without PRIVACY sends, and returns its
+// error and how long it took.
+func coldQuery(ctx context.Context, imr *Imr, serverMap map[string]*cache.AuthServer) (time.Duration, error) {
+	start := time.Now()
+	_, _, _, _, err := imr.IterativeDNSQuery(ctx, "www."+strictChildZone, dns.TypeA, serverMap, true, edns0.PrivacyNone)
+	return time.Since(start), err
+}
+
+// The query waits for the running lookup, and then uses the transport the
+// signal offers. It used to fail at once with no attempt at all.
+func TestColdQueryWaitsForARunningSignalLookup(t *testing.T) {
+	imr, server, serverMap := newColdTestImr(t, 5*time.Second)
+	end := startSignalLookup(t, imr, server)
+	end(50*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed >= 5*time.Second {
+		t.Errorf("waited %s, the whole bound: the lookup's end went unnoticed", elapsed)
+	}
+	if err == nil {
+		t.Fatal("no error, but the test cache has no DNS client to send the query with")
+	}
+	if strings.Contains(err.Error(), coldNoTuples) {
+		t.Fatalf("the query gave up without waiting for the signal: %v", err)
+	}
+	// Sent over DoT, failed only for want of a client.
+	if !strings.Contains(err.Error(), "attempts=1") || !strings.Contains(err.Error(), "/dot") {
+		t.Errorf("got %v, want one attempt over DoT", err)
+	}
+}
+
+// A server never looked up gets its lookup started by the query, whatever the
+// discovery options say. The lookup here is real and fails at once, as the
+// test cache has no client to send it with.
+func TestColdQueryStartsTheSignalLookup(t *testing.T) {
+	imr, _, serverMap := newColdTestImr(t, 5*time.Second)
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed >= 5*time.Second {
+		t.Errorf("waited %s, the whole bound, for a lookup that failed at once", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), coldNoTuples) {
+		t.Errorf("got %v, want no attempt: the server has no transport left", err)
+	}
+	st, ok := imr.TransportSignalDiscovery.Snapshot()[strictChildOwner]
+	if !ok {
+		t.Fatal("no signal lookup was started")
+	}
+	if st.AttemptCount != 1 || st.Status != cache.DiscoveryFailed {
+		t.Errorf("got %d attempts, status %s; want 1, failed",
+			st.AttemptCount, cache.DiscoveryStatusToString[st.Status])
+	}
+}
+
+// A cached denial of the signal means no signal until it expires: nothing to
+// look up, nothing to wait for.
+func TestColdQueryDoesNotWaitOnADenial(t *testing.T) {
+	imr, _, serverMap := newColdTestImr(t, 5*time.Second)
+	imr.Cache.Set(strictChildOwner, dns.TypeSVCB, &cache.CachedRRset{
+		Name:       strictChildOwner,
+		RRtype:     dns.TypeSVCB,
+		Context:    cache.ContextNXDOMAIN,
+		State:      cache.ValidationStateNone,
+		Expiration: time.Now().Add(time.Hour),
+	})
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed > time.Second {
+		t.Errorf("waited %s on a denied signal", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), coldNoTuples) {
+		t.Errorf("got %v, want no attempt", err)
+	}
+	if snap := imr.TransportSignalDiscovery.Snapshot(); len(snap) != 0 {
+		t.Errorf("a lookup was started although the signal is denied: %v", snap)
+	}
+}
+
+// A lookup that failed and is cooling down is not retried, nor waited for.
+func TestColdQueryDoesNotWaitOnAFailedLookup(t *testing.T) {
+	imr, _, serverMap := newColdTestImr(t, 5*time.Second)
+	if !imr.TransportSignalDiscovery.Begin(strictChildOwner) {
+		t.Fatal("setup: could not start the lookup")
+	}
+	imr.TransportSignalDiscovery.Fail(strictChildOwner, errors.New("timeout"))
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed > time.Second {
+		t.Errorf("waited %s on a failed lookup", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), coldNoTuples) {
+		t.Errorf("got %v, want no attempt", err)
+	}
+	if st := imr.TransportSignalDiscovery.Snapshot()[strictChildOwner]; st.AttemptCount != 1 {
+		t.Errorf("the lookup was retried during its cooldown: %d attempts", st.AttemptCount)
+	}
+}
+
+// A lookup that never ends costs the query strict-wait, and no more: one
+// budget for the whole query, not one wait at the start of the pass and
+// another after it (signalWaitBudget).
+func TestColdQueryStopsAtTheBound(t *testing.T) {
+	imr, server, serverMap := newColdTestImr(t, 300*time.Millisecond)
+	startSignalLookup(t, imr, server)
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed < 300*time.Millisecond || elapsed > 500*time.Millisecond {
+		t.Errorf("waited %s, want about the 300ms bound, once", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), coldNoTuples) {
+		t.Errorf("got %v, want no attempt", err)
+	}
+}
+
+// A server whose signal lookup is running is waited for even with Do53
+// available, and the query goes out over what the signal offers. It used to go
+// over Do53 at once, and a server that refuses Do53 put Do53 to it in the
+// zone's backoff, where the signal lookup could no longer reach it (#1116).
+func TestQueryWaitsForTheRunningSignalLookupWithDo53Available(t *testing.T) {
+	imr, server, serverMap := newStrictTestImr(t, 5*time.Second)
+	end := startSignalLookup(t, imr, server)
+	end(50*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 100})
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed < 50*time.Millisecond || elapsed >= time.Second {
+		t.Errorf("waited %s, want about the lookup's 50ms", elapsed)
+	}
+	// DoT, which fails for want of a client, then Do53, which a signal
+	// leaves as the last resort.
+	if err == nil || !strings.Contains(err.Error(), "attempts=2") {
+		t.Errorf("got %v, want two attempts: DoT, then Do53", err)
+	}
+}
+
+// A lookup that finds no signal leaves the server its Do53, which the query
+// then uses, once the lookup has ended.
+func TestQueryUsesDo53AfterALookupThatFoundNoSignal(t *testing.T) {
+	imr, server, serverMap := newStrictTestImr(t, 5*time.Second)
+	end := startSignalLookup(t, imr, server)
+	end(50*time.Millisecond, nil)
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed < 50*time.Millisecond || elapsed >= time.Second {
+		t.Errorf("waited %s, want about the lookup's 50ms", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "attempts=1") || !strings.Contains(err.Error(), "/do53") {
+		t.Errorf("got %v, want one attempt over Do53", err)
+	}
+}
+
+// With no lookup running, and always-query-for-transport off, nothing is
+// started and nothing waited for: the server's Do53 is used at once.
+func TestQueryWithDo53AndNoLookupDoesNotWait(t *testing.T) {
+	imr, _, serverMap := newStrictTestImr(t, 5*time.Second)
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed > time.Second {
+		t.Errorf("waited %s with Do53 available and no lookup", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "attempts=1") || !strings.Contains(err.Error(), "/do53") {
+		t.Errorf("got %v, want one attempt over Do53", err)
+	}
+	if snap := imr.TransportSignalDiscovery.Snapshot(); len(snap) != 0 {
+		t.Errorf("a lookup was started without always-query-for-transport: %v", snap)
+	}
+}
+
+// With always-query-for-transport the query starts the lookup of a server
+// that has none running, and waits for it. The lookup here is real and fails
+// at once, as the test cache has no client to send it with; the query then
+// goes over Do53.
+func TestQueryStartsTheSignalLookupWithAlwaysQuery(t *testing.T) {
+	imr, _, serverMap := newStrictTestImr(t, 5*time.Second)
+	imr.Options[ImrOptAlwaysQueryForTransport] = "true"
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed >= 5*time.Second {
+		t.Errorf("waited %s, the whole bound, for a lookup that failed at once", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "attempts=1") || !strings.Contains(err.Error(), "/do53") {
+		t.Errorf("got %v, want one attempt over Do53", err)
+	}
+	st, ok := imr.TransportSignalDiscovery.Snapshot()[strictChildOwner]
+	if !ok || st.AttemptCount != 1 {
+		t.Errorf("got %+v (found %v), want one lookup started by the query", st, ok)
+	}
+}
+
+// DNSKEY and DS queries validate signals, and never wait for one: a lookup
+// validating its answer would otherwise wait for itself.
+func TestDNSKEYAndDSQueriesDoNotWaitForASignalLookup(t *testing.T) {
+	for _, qtype := range []uint16{dns.TypeDNSKEY, dns.TypeDS} {
+		imr, server, serverMap := newStrictTestImr(t, 5*time.Second)
+		startSignalLookup(t, imr, server)
+
+		start := time.Now()
+		_, _, _, _, err := imr.IterativeDNSQuery(context.Background(), strictChildZone, qtype, serverMap, true, edns0.PrivacyNone)
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Errorf("%s: waited %s for a signal lookup", dns.TypeToString[qtype], elapsed)
+		}
+		if err == nil || !strings.Contains(err.Error(), "/do53") {
+			t.Errorf("%s: got %v, want an attempt over Do53", dns.TypeToString[qtype], err)
+		}
+	}
+}
+
+// The #1116 shape: the zone's one server refuses queries over Do53, and its
+// signal lookup is running, as the referral started it. The query waits for
+// the signal and goes over DoT first. The server sees a Do53 query only as the
+// last resort, once DoT has failed (for want of a client here), never before
+// the signal is in.
+func TestQueryToARefusingServerWaitsForTheSignalBeforeDo53(t *testing.T) {
+	var early atomic.Int32
+	imr, server, serverMap := newRefusedTestImr(t, 0, func(_ *Imr, s *cache.AuthServer) {
+		if len(s.GetTransportWeights()) == 0 {
+			early.Add(1)
+		}
+	})
+	end := startSignalLookup(t, imr, server)
+	end(50*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 100})
+
+	_, err := coldQuery(context.Background(), imr, serverMap)
+	if err == nil || !strings.Contains(err.Error(), "attempts=2") {
+		t.Errorf("got %v, want two attempts: DoT, then Do53", err)
+	}
+	if n := early.Load(); n != 0 {
+		t.Errorf("the server got %d queries over Do53 before the signal was in, want none", n)
+	}
+}
+
+// A server without an address is not waited for: its signal cannot make it
+// usable, and the address fallback after the first pass is what can.
+func TestColdQueryDoesNotWaitForAServerWithoutAddresses(t *testing.T) {
+	imr, _, _ := newColdTestImr(t, 5*time.Second)
+	const bareNS = "ns3.child.example."
+	bare := imr.Cache.GetOrCreateAuthServer(bareNS)
+	serverMap := map[string]*cache.AuthServer{cache.ServerKey(bareNS): bare}
+	if !imr.TransportSignalDiscovery.Begin(transportOwnerForNS(bareNS)) {
+		t.Fatal("setup: could not start the lookup")
+	}
+
+	elapsed, _ := coldQuery(context.Background(), imr, serverMap)
+	if elapsed >= time.Second {
+		t.Errorf("waited %s for the signal of a server with no address", elapsed)
+	}
+}
+
+// With transport signals turned off there is nothing to look up.
+func TestColdQueryOffWhenSignalsAreOff(t *testing.T) {
+	imr, _, serverMap := newColdTestImr(t, 5*time.Second)
+	imr.Options[ImrOptUseTransportSignals] = "false"
+
+	if _, err := coldQuery(context.Background(), imr, serverMap); err == nil || !strings.Contains(err.Error(), coldNoTuples) {
+		t.Errorf("got %v, want no attempt", err)
+	}
+	if snap := imr.TransportSignalDiscovery.Snapshot(); len(snap) != 0 {
+		t.Errorf("a lookup was started with transport signals off: %v", snap)
+	}
+}
+
+// A transport-signal lookup does not wait for signal lookups: it could be
+// waiting for itself.
+func TestSignalLookupDoesNotWaitForSignals(t *testing.T) {
+	imr, server, serverMap := newColdTestImr(t, 5*time.Second)
+	startSignalLookup(t, imr, server)
+
+	elapsed, err := coldQuery(withTransportSignalLookup(context.Background()), imr, serverMap)
+	if elapsed > time.Second {
+		t.Errorf("a signal lookup waited %s for a signal lookup", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), coldNoTuples) {
+		t.Errorf("got %v, want no attempt", err)
+	}
+}
+
+// Whichever lookup ends first is looked at first: a server whose lookup never
+// ends does not hold up one whose signal has come in.
+func TestColdQueryTakesTheFirstSignal(t *testing.T) {
+	imr, server, serverMap := newColdTestImr(t, 5*time.Second)
+	const stuckNS = "ns2.child.example."
+	stuck := imr.Cache.GetOrCreateAuthServer(stuckNS)
+	stuck.AddAddr("192.0.2.54")
+	stuck.RecordAddressFailure("192.0.2.54", core.TransportDo53, errors.New("read: connection refused"))
+	serverMap[cache.ServerKey(stuckNS)] = stuck
+	if err := imr.Cache.AddServers(strictChildZone, serverMap); err != nil {
+		t.Fatalf("setup: AddServers: %v", err)
+	}
+	if !imr.TransportSignalDiscovery.Begin(transportOwnerForNS(stuckNS)) {
+		t.Fatal("setup: could not start the stuck lookup")
+	}
+	end := startSignalLookup(t, imr, server)
+	end(50*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed >= time.Second {
+		t.Errorf("waited %s: the stuck lookup held up the one that ended", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "/dot") {
+		t.Errorf("got %v, want an attempt over DoT", err)
+	}
+}
+
+// The selection that decides on another pass is the one the next pass uses:
+// it holds a suspect family's probe tuple, which selecting reserves, and a
+// second selection within the probe interval would leave out.
+func TestAnotherPassAfterKeepsTheProbeTuple(t *testing.T) {
+	imr, server, serverMap := newStrictTestImr(t, time.Second)
+	imr.FamilyTracker = cache.NewFamilyTracker(10*time.Minute, 10*time.Minute, time.Hour, 1)
+	imr.FamilyTracker.RecordResult("192.0.2.99", false)
+	if !imr.FamilyTracker.IsSuspect(cache.FamilyV4) {
+		t.Fatal("setup: IPv4 is not suspect")
+	}
+	// The pass tried Do53, which went into backoff; the signal, offering
+	// DoT, came in meanwhile.
+	server.RecordAddressFailure("192.0.2.53", core.TransportDo53, errors.New("read: connection refused"))
+	server.SetTransportSignal([]core.Transport{core.TransportDoT}, nil, map[core.Transport]uint8{core.TransportDoT: 50}, nil)
+	tried := map[passTuple]bool{{server, "192.0.2.53", 0, core.TransportDo53}: true}
+
+	sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "www."+strictChildZone, dns.TypeA,
+		serverMap, edns0.PrivacyNone, tried)
+	if sel == nil {
+		t.Fatal("no further pass, although DoT was never tried")
+	}
+	found := false
+	for _, tup := range sel.tuples {
+		found = found || (tup.Server == server && tup.Transport == core.TransportDoT)
+	}
+	if !found {
+		t.Fatalf("the selection for the next pass lacks the DoT probe tuple: %v", sel.tuples)
+	}
+	if imr.FamilyTracker.ShouldProbe(cache.FamilyV4) {
+		t.Error("the probe was not reserved by the selection; the test proves nothing")
+	}
+}
+
+// startRefusingDouble is a loopback Do53 server that refuses every query
+// with EDE 18, as tdns-auth does with debug-do53-queries-refused (#1066),
+// after delay. onQuery, when set, runs as each query arrives.
+func startRefusingDouble(t *testing.T, delay time.Duration, onQuery func()) (host, port string) {
+	t.Helper()
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	host, port, _ = net.SplitHostPort(pc.LocalAddr().String())
+	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		if onQuery != nil {
+			onQuery()
+		}
+		time.Sleep(delay)
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeRefused)
+		if opt := r.IsEdns0(); opt != nil {
+			m.SetEdns0(1232, opt.Do())
+			m.IsEdns0().Option = append(m.IsEdns0().Option, &dns.EDNS0_EDE{
+				InfoCode: dns.ExtendedErrorCodeProhibited, ExtraText: "use an encrypted transport"})
+		}
+		_ = w.WriteMsg(m)
+	})
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, Handler: handler, NotifyStartedFunc: func() { close(started) }}
+	go func() { _ = srv.ActivateAndServe() }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("refusing double did not start")
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	})
+	return host, port
+}
+
+// The query's own Do53 attempt is refused, before the server's signal is
+// in: the pass runs out of tuples, but the signal lookup is still running.
+// The query waits for it and goes again over DoT. It used to give up after
+// the refusal (the rig's encns suite against a server that refuses queries
+// over Do53). The lookup starts while the Do53 attempt is out: one running
+// before the query selects is waited for first, and no Do53 attempt is made
+// (TestQueryToARefusingServerWaitsAndSendsNoDo53).
+func TestColdQueryWaitsAfterItsOwnDo53IsRefused(t *testing.T) {
+	imr, _, serverMap := newRefusedTestImr(t, 0, beginLookupEnding(300*time.Millisecond))
+
+	elapsed, err := coldQuery(context.Background(), imr, serverMap)
+	if elapsed >= 5*time.Second {
+		t.Errorf("waited %s, the whole bound", elapsed)
+	}
+	// Do53, refused; then DoT, which fails only for want of a client.
+	if err == nil || !strings.Contains(err.Error(), "attempts=2") || !strings.Contains(err.Error(), "/dot") {
+		t.Errorf("got %v, want a refused Do53 attempt and then one over DoT", err)
+	}
+}
+
+// The signal comes in while the query's Do53 attempt is out, and the refusal
+// arrives after it: the pass ends with DoT available, a tuple it never had.
+// The query goes again over DoT. It used to give up: tuples were left, and
+// the query took them for ones it had tried (the rig's encns suite, against
+// a server that refuses queries over Do53). The lookup starts while the Do53
+// attempt is out, as above.
+func TestColdQueryGoesAgainWhenTheSignalCameDuringThePass(t *testing.T) {
+	imr, _, serverMap := newRefusedTestImr(t, 300*time.Millisecond, beginLookupEnding(50*time.Millisecond))
+
+	_, err := coldQuery(context.Background(), imr, serverMap)
+	if err == nil || !strings.Contains(err.Error(), "attempts=2") || !strings.Contains(err.Error(), "/dot") {
+		t.Errorf("got %v, want a refused Do53 attempt and then one over DoT", err)
+	}
+}
+
+// beginLookupEnding is an onQuery for newRefusedTestImr: the server's signal
+// lookup starts as the query's Do53 attempt arrives, and ends after delay
+// with a signal offering DoT, beside Do53.
+func beginLookupEnding(delay time.Duration) func(*Imr, *cache.AuthServer) {
+	return func(imr *Imr, server *cache.AuthServer) {
+		if end := beginSignalLookup(imr, server); end != nil {
+			end(delay, map[core.Transport]uint8{core.TransportDoT: 50, core.TransportDo53: 100})
+		}
+	}
+}
+
+// newRefusedTestImr is an IMR whose one server for the child zone refuses
+// queries over Do53 after delay, and has no transport signal yet. It has no
+// client for any other transport, so a DoT attempt fails at once. onQuery,
+// when set, runs with the IMR and the server as each Do53 query arrives.
+func newRefusedTestImr(t *testing.T, delay time.Duration, onQuery func(*Imr, *cache.AuthServer)) (*Imr, *cache.AuthServer, map[string]*cache.AuthServer) {
+	t.Helper()
+	imr := newTestImr(t)
+	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
+	imr.Tuning.Discovery.StrictWait = 5 * time.Second
+	server := imr.Cache.GetOrCreateAuthServer(strictChildNS)
+	var hook func()
+	if onQuery != nil {
+		hook = func() { onQuery(imr, server) }
+	}
+	host, port := startRefusingDouble(t, delay, hook)
+	imr.Cache.DNSClient = map[core.Transport]core.DNSClienter{
+		core.TransportDo53: core.NewDNSClient(core.TransportDo53, port, nil),
+	}
+	server.AddAddr(host)
+	serverMap := map[string]*cache.AuthServer{cache.ServerKey(strictChildNS): server}
+	if err := imr.Cache.AddServers(strictChildZone, serverMap); err != nil {
+		t.Fatalf("setup: AddServers: %v", err)
+	}
+	return imr, server, serverMap
+}
+
+// startSignalAuthDouble is a loopback server for oobNSZone that gives
+// oobNSName an address (its own) and a transport signal offering DoT.
+func startSignalAuthDouble(t *testing.T) *oobAuthDouble {
+	t.Helper()
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	d := &oobAuthDouble{}
+	d.host, d.port, _ = net.SplitHostPort(pc.LocalAddr().String())
+	owner := transportOwnerForNS(oobNSName)
+	signal, err := dns.NewRR(owner + ` 3600 IN SVCB 1 . oots="do53:100,dot:50"`)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	mux := dns.NewServeMux()
+	mux.HandleFunc(oobNSZone, func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Authoritative = true
+		q := r.Question[0]
+		switch {
+		case core.EqualNames(q.Name, oobNSName) && q.Qtype == dns.TypeA:
+			m.Answer = append(m.Answer, &dns.A{
+				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600},
+				A:   net.ParseIP(d.host),
+			})
+		case core.EqualNames(q.Name, owner) && q.Qtype == dns.TypeSVCB:
+			m.Answer = append(m.Answer, signal)
+		default:
+			m.Ns = append(m.Ns, &dns.SOA{
+				Hdr: dns.RR_Header{Name: oobNSZone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 60},
+				Ns:  "ns." + oobNSZone, Mbox: "hostmaster." + oobNSZone,
+				Serial: 1, Refresh: 3600, Retry: 600, Expire: 86400, Minttl: 60,
+			})
+		}
+		_ = w.WriteMsg(m)
+	})
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, Handler: mux, NotifyStartedFunc: func() { close(started) }}
+	go func() { _ = srv.ActivateAndServe() }()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("auth double did not start")
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	})
+	return d
+}
+
+// gluelessLookup runs the background address lookup a referral to oobZone
+// starts for its nameserver without glue, and returns the nameserver's
+// transport weights as soon as it has any, or after wait.
+func gluelessLookup(t *testing.T, opts map[ImrOption]string, wait time.Duration) (*Imr, map[core.Transport]uint8) {
+	t.Helper()
+	d := startSignalAuthDouble(t)
+	imr := newOOBTestImr(t, d)
+	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
+	for opt, val := range opts {
+		imr.Options[opt] = val
+	}
+	cacheDelegation(imr.Cache, oobZone)
+
+	select {
+	case <-imr.nsLookup(context.Background(), oobNSName, oobZone):
+	case <-time.After(5 * time.Second):
+		t.Fatal("the address lookup did not end")
+	}
+	server := imr.Cache.GetOrCreateAuthServer(oobNSName)
+	if len(server.GetAddrs()) == 0 {
+		t.Fatal("setup: the address lookup found no address")
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		if w := server.GetTransportWeights(); len(w) > 0 || time.Now().After(deadline) {
+			return imr, w
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// With always-query-for-transport, a nameserver without glue has its signal
+// looked up beside its address, and the server it is stored as carries the
+// signal. Only servers created from glue used to be looked up.
+func TestGluelessNameserverSignalIsLookedUp(t *testing.T) {
+	_, weights := gluelessLookup(t, map[ImrOption]string{ImrOptAlwaysQueryForTransport: "true"}, 3*time.Second)
+	if weights[core.TransportDoT] != 50 {
+		t.Errorf("got weights %v, want the signal's dot:50", weights)
+	}
+}
+
+// Without the option, the address lookup starts no signal lookup.
+func TestGluelessNameserverSignalNeedsTheOption(t *testing.T) {
+	imr, weights := gluelessLookup(t, nil, 300*time.Millisecond)
+	if len(weights) != 0 {
+		t.Errorf("got weights %v, want none: no signal lookup was asked for", weights)
+	}
+	if snap := imr.TransportSignalDiscovery.Snapshot(); len(snap) != 0 {
+		t.Errorf("a signal lookup was started without the option: %v", snap)
+	}
+}
+
+// With transport signals turned off, always-query-for-transport starts no
+// signal lookup: the signal would not be used.
+func TestGluelessNameserverSignalOffWhenSignalsAreOff(t *testing.T) {
+	imr, weights := gluelessLookup(t, map[ImrOption]string{
+		ImrOptAlwaysQueryForTransport: "true",
+		ImrOptUseTransportSignals:     "false",
+	}, 300*time.Millisecond)
+	if len(weights) != 0 {
+		t.Errorf("got weights %v, want none: transport signals are off", weights)
+	}
+	if snap := imr.TransportSignalDiscovery.Snapshot(); len(snap) != 0 {
+		t.Errorf("a signal lookup was started with transport signals off: %v", snap)
+	}
+}
+
+// A cached signal reaches the server the query holds even when that server
+// is in no zone's server map yet: a signal reaches the others through those
+// maps. Without it the wait was skipped for that server ("signal cached")
+// and the server went on without the transports the signal gives.
+func TestAwaitTransportSignalsAppliesACachedSignalToAServerInNoZoneMap(t *testing.T) {
+	imr, _, _ := newStrictTestImr(t, 5*time.Second)
+	const ns = "ns2.child.example."
+	server := imr.Cache.GetOrCreateAuthServer(ns)
+	server.AddAddr("192.0.2.54")
+	serverMap := map[string]*cache.AuthServer{cache.ServerKey(ns): server}
+	owner := transportOwnerForNS(ns)
+	rr, err := dns.NewRR(owner + ` 3600 IN SVCB 1 . oots="do53:100,dot:50"`)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	imr.Cache.Set(owner, dns.TypeSVCB, &cache.CachedRRset{
+		Name: owner, RRtype: dns.TypeSVCB, Context: cache.ContextAnswer,
+		State: cache.ValidationStateNone, Expiration: time.Now().Add(time.Hour),
+		RRset: &core.RRset{Name: owner, Class: dns.ClassINET, RRtype: dns.TypeSVCB, RRs: []dns.RR{rr}},
+	})
+
+	if !imr.awaitTransportSignals(context.Background(), "www."+strictChildZone, serverMap) {
+		t.Errorf("the cached dot:50 signal did not reach the server: weights %v", server.GetTransportWeights())
+	}
+}
+
+// The wait budget is the whole query's: a call that inherits a spent budget,
+// as a referral followed below does, waits no more.
+func TestColdQueryWaitsWithinTheBudgetItInherits(t *testing.T) {
+	imr, server, serverMap := newColdTestImr(t, 300*time.Millisecond)
+	startSignalLookup(t, imr, server)
+	ctx, budget := signalWaitBudgetFor(context.Background())
+	budget.spent = 300 * time.Millisecond
+
+	elapsed, err := coldQuery(ctx, imr, serverMap)
+	if elapsed > 150*time.Millisecond {
+		t.Errorf("waited %s although the query's budget was spent", elapsed)
+	}
+	if err == nil || !strings.Contains(err.Error(), coldNoTuples) {
+		t.Errorf("got %v, want no attempt", err)
+	}
+}
+
+// With transport signals turned off, a nameserver's address lookup does not
+// give the server a signal the cache holds either.
+func TestNsLookupAppliesNoCachedSignalWhenSignalsAreOff(t *testing.T) {
+	d := startSignalAuthDouble(t)
+	imr := newOOBTestImr(t, d)
+	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
+	imr.Options[ImrOptUseTransportSignals] = "false"
+	cacheDelegation(imr.Cache, oobZone)
+	owner := transportOwnerForNS(oobNSName)
+	rr, err := dns.NewRR(owner + ` 3600 IN SVCB 1 . oots="do53:100,dot:50"`)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	imr.Cache.Set(owner, dns.TypeSVCB, &cache.CachedRRset{
+		Name: owner, RRtype: dns.TypeSVCB, Context: cache.ContextAnswer,
+		State: cache.ValidationStateNone, Expiration: time.Now().Add(time.Hour),
+		RRset: &core.RRset{Name: owner, Class: dns.ClassINET, RRtype: dns.TypeSVCB, RRs: []dns.RR{rr}},
+	})
+
+	select {
+	case <-imr.nsLookup(context.Background(), oobNSName, oobZone):
+	case <-time.After(5 * time.Second):
+		t.Fatal("the address lookup did not end")
+	}
+	server := imr.Cache.GetOrCreateAuthServer(oobNSName)
+	if len(server.GetAddrs()) == 0 {
+		t.Fatal("setup: the address lookup found no address")
+	}
+	if w := server.GetTransportWeights(); len(w) != 0 {
+		t.Errorf("got weights %v, want none: transport signals are off", w)
+	}
+}
+
+// A lookup that ends between the cache check and the question whether it is
+// still running leaves nothing to wait for. Its signal reached the servers in
+// the zone server maps; the server the query holds, in none of them yet, gets
+// it too, and is used.
+func TestAwaitTransportSignalsReplaysASignalThatCameBeforePending(t *testing.T) {
+	imr, _, _ := newStrictTestImr(t, 5*time.Second)
+	const ns = "ns-late.child.example."
+	server := imr.Cache.GetOrCreateAuthServer(ns)
+	server.AddAddr("192.0.2.55")
+	serverMap := map[string]*cache.AuthServer{cache.ServerKey(ns): server}
+	owner := transportOwnerForNS(ns)
+	rr, err := dns.NewRR(owner + ` 3600 IN SVCB 1 . oots="do53:100,dot:50"`)
+	if err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	// A lookup is running, so the call joins it rather than starting one.
+	if !imr.TransportSignalDiscovery.Begin(owner) {
+		t.Fatal("setup: could not mark the lookup as running")
+	}
+	testHookSignalLookupStarted = func(o string) {
+		if o != owner {
+			return
+		}
+		imr.Cache.Set(owner, dns.TypeSVCB, &cache.CachedRRset{
+			Name: owner, RRtype: dns.TypeSVCB, Context: cache.ContextAnswer,
+			State: cache.ValidationStateNone, Expiration: time.Now().Add(time.Hour),
+			RRset: &core.RRset{Name: owner, Class: dns.ClassINET, RRtype: dns.TypeSVCB, RRs: []dns.RR{rr}},
+		})
+		imr.TransportSignalDiscovery.Succeed(owner)
+	}
+	t.Cleanup(func() { testHookSignalLookupStarted = nil })
+
+	if !imr.awaitTransportSignals(context.Background(), "www."+strictChildZone, serverMap) {
+		t.Errorf("the signal that came in before the wait did not reach the server: weights %v", server.GetTransportWeights())
+	}
+}

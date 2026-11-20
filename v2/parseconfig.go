@@ -10,12 +10,15 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -152,6 +155,7 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 			stringToPeerConfHook(),
 			stringToAclEntryHook(),
 			legacyDynamicAllowedHook(),
+			portMapRangeHook(),
 		),
 	}
 	decoder, derr := mapstructure.NewDecoder(decoderConfig)
@@ -172,6 +176,9 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 	// instead of preserving the previously-decoded value (mapstructure leaves
 	// absent keys untouched).
 	conf.Dnssec.DNSKEYTransport = ""
+	// service.transport as a whole: a signal, or a key of ports, that the new
+	// file removes would otherwise stay published.
+	conf.Service.Transport = TransportConf{}
 
 	if derr := decoder.Decode(configMap); derr != nil {
 		return fmt.Errorf("error decoding config: %v", derr)
@@ -679,9 +686,19 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := conf.Service.Transport.Validate(); err != nil {
 		return err
 	}
+	if err := conf.checkTransportSignal(); err != nil {
+		return err
+	}
 
 	lgConfig.Debug("templates defined", "count", len(conf.Templates))
 
+	// Before buildTemplateMap, which replaces the live template map: a
+	// reload refused here must leave the running map as it was, or adds
+	// would use templates from a config that was rejected. (It reads the
+	// decoded template list, not the map.)
+	if err := conf.DynamicZones.ValidateDefaultTemplates(conf.Templates); err != nil {
+		return err
+	}
 	if err := conf.buildTemplateMap(); err != nil {
 		return err
 	}
@@ -743,6 +760,15 @@ func (conf *Config) ParseConfig(reload bool) error {
 		// never takes effect, on a reload either.
 		if err := refuseAuthOptionsForApp(Globals.App.Type, conf.AuthEngine.Options); err != nil {
 			return err
+		}
+		if err := checkDo53QueriesRefused(conf); err != nil {
+			return err
+		}
+		if reload {
+			if want := do53QueriesRefusedConfigured(conf.AuthEngine.Options); want != conf.Internal.do53QueriesRefused.Load() {
+				lg.Warn("authengine option debug-do53-queries-refused changed; it takes effect at the next restart",
+					"configured", want, "running", conf.Internal.do53QueriesRefused.Load())
+			}
 		}
 	}
 
@@ -828,6 +854,237 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	return nil
+}
+
+// checkTransportSignal checks service.transport at load and logs its
+// warnings. See validateTransportSignal.
+func (conf *Config) checkTransportSignal() error {
+	if conf == nil {
+		return nil
+	}
+	warnings, err := validateTransportSignal(conf.Service.Transport, conf.Listeners.Ports, conf.Listeners.Addresses)
+	for _, w := range warnings {
+		lgConfig.Warn(w)
+	}
+	return err
+}
+
+// validateTransportSignal checks service.transport. Each finding is an error,
+// except the warnings it returns:
+//   - signal parses;
+//   - each key of ports is udp, tcp, dot, doq or doh. An encrypted transport
+//     needs a weight in the signal; udp and tcp do not, since absent they
+//     weigh 100, and cleartext is used whatever its weight (the last resort,
+//     and forced TCP);
+//   - a port is 1-65535 (portMapRangeHook catches what does not fit a
+//     uint16), and a transport's standard port counts as absent;
+//   - each key of targets is udp, tcp, dot or doq, with the same rule for a
+//     weight. A doh target is refused: DoH on another host needs a path,
+//     which the signal does not carry;
+//   - a target is a domain name, not an address; "." is the nameserver
+//     itself and counts as absent;
+//   - ports or targets with type tsync or none is refused: only SVCB carries
+//     them;
+//   - ports are sockets (the alternative-endpoint design, section 2), and a
+//     socket is a host and a port, so these apply per endpoint: no two of
+//     tcp, dot and doh on one TCP port, and udp and doq not on one UDP port.
+//     udp takes its port on TCP too, for the retry after truncation, so dot
+//     or doh on udp's port is refused; udp and tcp on one port is the natural
+//     case. A transport on its standard port counts, so dot on 443 clashes
+//     with doh, and dot on 53 with tcp. An encrypted transport counts only
+//     when the signal gives it a weight; udp and tcp always count. Two
+//     transports at different hosts share no socket;
+//   - a warning when a published port is not listened on for its transport:
+//     listeners.ports for dot, doq and doh, the ports of listeners.addresses
+//     for udp and tcp. A front end may publish a port the daemon does not
+//     listen on, so it is not an error. A transport with a target is served
+//     by the target, so its port is not checked against this daemon.
+//
+// Whether the zone's signal is signed, which a target needs, is known only
+// per zone, so the start-up pass warns about that (createTransportSignalSVCB).
+//
+// ValidateConfig calls it too, for the errors, so `config check` refuses
+// what the daemon refuses.
+func validateTransportSignal(t TransportConf, listen ListenerPortsConf, addresses []string) ([]string, error) {
+	raw, err := core.ParseTransportStringRaw(t.Signal)
+	if err != nil {
+		return nil, fmt.Errorf("service.transport.signal %q: %w", t.Signal, err)
+	}
+	if len(t.Ports) == 0 && len(t.Targets) == 0 {
+		return nil, nil
+	}
+	if t.Type != "svcb" {
+		if len(t.Ports) > 0 {
+			return nil, fmt.Errorf("service.transport.ports: only an SVCB signal carries a port, and type is %s", t.Type)
+		}
+		return nil, fmt.Errorf("service.transport.targets: only an SVCB signal carries a target, and type is %s", t.Type)
+	}
+	weights := maps.Clone(raw)
+	core.ApplyTransportDefaults(weights)
+	if err := validateSignalTargets(t.Targets, weights); err != nil {
+		return nil, err
+	}
+	keys := slices.Sorted(maps.Keys(t.Ports))
+	for _, k := range keys {
+		if _, ok := signalStandardPorts[k]; !ok {
+			return nil, fmt.Errorf("service.transport.ports.%s: not a transport that takes a port (%s)", k, strings.Join(signalPortOrder, ", "))
+		}
+		if !cleartextSignalToken(k) && weights[k] == 0 {
+			return nil, fmt.Errorf("service.transport.ports.%s: the signal gives %s no weight, so its port would be published for nothing", k, k)
+		}
+		if t.Ports[k] == 0 {
+			return nil, fmt.Errorf("service.transport.ports.%s: 0 is not a port (1-65535)", k)
+		}
+	}
+	port := func(tr string) uint16 {
+		if p := publishedSignalPort(t.Ports, tr); p != 0 {
+			return p
+		}
+		return signalStandardPorts[tr]
+	}
+	// host is the endpoint's host: "" for the nameserver itself. Hosts are
+	// compared without case, as DNS names are.
+	host := func(tr string) string { return publishedSignalTarget(t.Targets, tr) }
+	at := func(tr string) string {
+		if h := host(tr); h != "" {
+			return " at " + h
+		}
+		return ""
+	}
+	inUse := func(tr string) bool { return cleartextSignalToken(tr) || weights[tr] > 0 }
+	clash := func(users []string, sharing func(a, b string) bool, what string) error {
+		for i, a := range users {
+			for _, b := range users[i+1:] {
+				if inUse(a) && inUse(b) && strings.EqualFold(host(a), host(b)) && port(a) == port(b) && !sharing(a, b) {
+					return fmt.Errorf("service.transport.ports: %s and %s both on port %d%s; %s, so they cannot share it", a, b, port(a), at(a), what)
+				}
+			}
+		}
+		return nil
+	}
+	udpAndTCP := func(a, b string) bool { return a == "udp" && b == "tcp" }
+	if err := clash([]string{"udp", "tcp", "dot", "doh"}, udpAndTCP,
+		"both are TCP (udp takes its port on TCP too, for the retry after truncation)"); err != nil {
+		return nil, err
+	}
+	if err := clash([]string{"udp", "doq"}, func(a, b string) bool { return false }, "both are UDP"); err != nil {
+		return nil, err
+	}
+	do53 := listenerAddressPorts(addresses)
+	listening := map[string][]uint16{"udp": do53, "tcp": do53, "dot": listen.DoT, "doq": listen.DoQ, "doh": listen.DoH}
+	var warnings []string
+	for _, k := range keys {
+		p := publishedSignalPort(t.Ports, k)
+		if p == 0 || host(k) != "" || slices.Contains(listening[k], p) {
+			continue // no port, served by the target, or listened on
+		}
+		where := "listeners.ports." + k
+		if cleartextSignalToken(k) {
+			where = "listeners.addresses"
+		}
+		warnings = append(warnings, fmt.Sprintf(
+			"service.transport.ports.%s: port %d is published but is not in %s; resolvers will dial it", k, p, where))
+	}
+	return warnings, nil
+}
+
+// signalTargetKeys is the transports that take a target: every transport
+// that takes a port except doh, whose other host would need a path.
+func signalTargetKeys() []string {
+	var out []string
+	for _, tr := range signalPortOrder {
+		if tr != "doh" {
+			out = append(out, tr)
+		}
+	}
+	return out
+}
+
+// validateSignalTargets checks service.transport.targets against the
+// signal's weights, absence defaults applied. See validateTransportSignal.
+func validateSignalTargets(targets map[string]string, weights map[string]uint8) error {
+	for _, k := range slices.Sorted(maps.Keys(targets)) {
+		if k == "doh" {
+			return fmt.Errorf("service.transport.targets.doh: DoH on another host needs a path, which the signal does not carry; a doh target is refused")
+		}
+		if !slices.Contains(signalTargetKeys(), k) {
+			return fmt.Errorf("service.transport.targets.%s: not a transport that takes a target (%s)", k, strings.Join(signalTargetKeys(), ", "))
+		}
+		if !cleartextSignalToken(k) && weights[k] == 0 {
+			return fmt.Errorf("service.transport.targets.%s: the signal gives %s no weight, so its target would be published for nothing", k, k)
+		}
+		v := strings.TrimSpace(targets[k])
+		switch {
+		case v == "":
+			return fmt.Errorf("service.transport.targets.%s: empty; give a host name, or leave the key out", k)
+		case v == ".":
+			continue // the nameserver itself: absent
+		case net.ParseIP(v) != nil:
+			return fmt.Errorf("service.transport.targets.%s: %q is an address; a target is a host name, whose addresses the resolver looks up", k, v)
+		}
+		if _, ok := dns.IsDomainName(v); !ok {
+			return fmt.Errorf("service.transport.targets.%s: %q is not a domain name", k, v)
+		}
+		// IsDomainName lets through names of 256 and 257 wire octets, and
+		// packing does not check the length either. RFC 1035 allows 255,
+		// the root octet counted; a longer target is one no resolver can use.
+		if n, err := dns.PackDomainName(dns.Fqdn(v), make([]byte, 512), 0, nil, false); err != nil || n > 255 {
+			return fmt.Errorf("service.transport.targets.%s: %q is longer than the 255 octets a domain name may take on the wire", k, v)
+		}
+	}
+	return nil
+}
+
+// listenerAddressPorts is the ports of listeners.addresses, the Do53 listen
+// sockets ("addr:port"). An entry without a port is skipped.
+func listenerAddressPorts(addresses []string) []uint16 {
+	var out []uint16
+	for _, a := range addresses {
+		_, ps, err := net.SplitHostPort(a)
+		if err != nil {
+			continue
+		}
+		if p, err := strconv.ParseUint(ps, 10, 16); err == nil {
+			out = append(out, uint16(p))
+		}
+	}
+	return out
+}
+
+// portMapRangeHook refuses a value outside 0-65535, or with a fraction, in a
+// map of ports before the decoder narrows it: mapstructure stores an int or a
+// float into a uint16 by truncating, so 70000 or 70000.0 would publish port
+// 4464, and 1234.5 port 1234. It looks only at map[string]uint16 targets, of
+// which service.transport.ports is the one in Config.
+func portMapRangeHook() mapstructure.DecodeHookFuncType {
+	target := reflect.TypeOf(map[string]uint16(nil))
+	return func(_ reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+		if to != target {
+			return data, nil
+		}
+		m, ok := data.(map[string]interface{})
+		if !ok {
+			return data, nil
+		}
+		for k, v := range m {
+			rv := reflect.ValueOf(v)
+			switch rv.Kind() {
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				if n := rv.Int(); n < 0 || n > 65535 {
+					return nil, fmt.Errorf("%s: %d is not a port (1-65535)", k, n)
+				}
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+				if n := rv.Uint(); n > 65535 {
+					return nil, fmt.Errorf("%s: %d is not a port (1-65535)", k, n)
+				}
+			case reflect.Float32, reflect.Float64:
+				if f := rv.Float(); f != math.Trunc(f) || f < 0 || f > 65535 {
+					return nil, fmt.Errorf("%s: %v is not a port (1-65535)", k, v)
+				}
+			}
+		}
+		return data, nil
+	}
 }
 
 // KDC and KRS configuration parsing has been moved to tdns-nm
@@ -1023,6 +1280,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Logger:        log.Default(),
 				FirstZoneLoad: true,
 			}
+			zd.fromStaticConfig.Store(true)
 			// Before Zones.Set, while the zone is still private to this
 			// goroutine -- the contract registerStandardRefreshHooks states
 			// and the other three creation paths already keep. This zone is
@@ -1039,6 +1297,12 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			// this registration is documented as avoiding.
 			zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
 			Zones.Set(zname, zd)
+		} else {
+			// A zone that was dynamic (an API catalog, say) and is now
+			// defined in the config file belongs to the config file from
+			// here on: no longer copied into the dynamic config, and a
+			// catalog among them writes its own zonefile.
+			zd.fromStaticConfig.Store(true)
 		}
 
 		// A zone defined more than once is served under NEITHER definition.
@@ -1128,6 +1392,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 		crossCheckDownstreamAuth(zname, zconf.DownstreamAuth, zconf.Downstreams, conf.Internal.ImrEngine != nil)
+		conf.daneDownstreamWarnings(lgConfig, zname, zconf.DownstreamAuth, zconf.Downstreams)
 
 		zonestore := parseZoneStore(zconf.Store)
 
@@ -1192,6 +1457,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				broken_zones = append(broken_zones, zname)
 				continue
 			}
+			// DANE while DNSSEC validation is not enforced: accepted, but
+			// logged loudly, once per primary, at every load.
+			conf.danePrimaryWarnings(lgConfig, zname, zconf.Primaries)
 
 			// Resolve the as-written primaries to addr:port tuples (hostnames
 			// -> addresses via the IMR), re-resolved on every parse/reload.
@@ -1549,24 +1817,11 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// Delegation sync setup: DSYNC publication (parent) or
 		// delegation sync monitoring (child), or proxy forwarding for a
 		// DSYNC-unaware primary (agent secondary).
-		if options[OptChildSync] || options[OptParentSync] || options[OptParentSyncProxy] || options[OptChildSyncProxy] {
+		// Zones created at run time get the same through registerZoneSyncSetup.
+		if wantsZoneSyncSetup(options) {
 			capturedOpts := options
 			setupSync := func(zd *ZoneData) {
-				// Skip if the MP HSYNCPARAM callback already set up delegation sync for this zone.
-				if zd.Options[OptParentSync] && !capturedOpts[OptParentSync] {
-					return
-				}
-				if zd.Options[OptChildSync] && !capturedOpts[OptChildSync] {
-					return
-				}
-				delegationSyncQ := conf.Internal.DelegationSyncQ
-				if delegationSyncQ == nil {
-					lgConfig.Error("DelegationSyncQ not available", "zone", zd.ZoneName)
-					return
-				}
-				if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
-					lgConfig.Error("SetupZoneSync failed", "zone", zd.ZoneName, "error", err)
-				}
+				runZoneSyncSetup(zd, capturedOpts, conf.Internal.DelegationSyncQ)
 			}
 			if zdp.FirstZoneLoad {
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, setupSync)
@@ -1931,6 +2186,9 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		// DynamicZones is a property of the TEMPLATE (API-instantiable), not
 		// of the zones stamped out from it — never copied.
 		"DynamicZones": true,
+		// A dynamic zone's own inline TSIG key (persisted by the daemon),
+		// never a template's to hand out.
+		"InlineTsigKey": true,
 	}
 	gapFillStruct(reflect.ValueOf(&zconf).Elem(), reflect.ValueOf(tmpl).Elem(), bespoke, false)
 	return zconf, nil
@@ -2008,28 +2266,31 @@ func (conf *Config) buildTemplateMap() error {
 		return nil
 	}
 
-	// Build template map
-	Templates = make(map[string]ZoneConf) // Clear existing entries on reload
+	// Build the new map on the side and install it only once it is
+	// complete: an error below leaves the running map as it was (a reload
+	// that fails keeps the templates in use, rather than none or half).
+	tm := make(map[string]ZoneConf, len(conf.Templates))
 	for _, tmpl := range conf.Templates {
 		if tmpl.Name == "" {
 			return fmt.Errorf("template missing required 'name' field")
 		}
-		if _, exists := Templates[tmpl.Name]; exists {
+		if _, exists := tm[tmpl.Name]; exists {
 			return fmt.Errorf("duplicate template name: %s", tmpl.Name)
 		}
-		Templates[tmpl.Name] = tmpl
+		tm[tmpl.Name] = tmpl
 	}
 
 	// Handle template expansion if specified
 	// Robust expansion with cycle detection
 	var done = make(map[string]bool)
 	for _, t := range conf.Templates {
-		if _, ok := Templates[t.Name]; !ok {
+		if _, ok := tm[t.Name]; !ok {
 			continue
 		}
-		_, _ = expandTemplateChain(t.Name, []string{}, make(map[string]bool), done, Globals.App.Type)
+		_, _ = expandTemplateChain(tm, t.Name, []string{}, make(map[string]bool), done, Globals.App.Type)
 	}
 
+	Templates = tm
 	lgConfig.Debug("buildTemplateMap complete", "count", len(Templates))
 	return nil
 }
@@ -2046,8 +2307,14 @@ func (conf *Config) reloadTemplatesFromFile() error {
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
+	// The transfer-list aliases (provide-xfr: and the rest), rewritten and
+	// conflict-checked as the startup parse does (ParseConfig). Without it a
+	// template spelled with an alias lost its downstreams on this reload.
+	aliasConflicts := NormalizeXfrAliases(configMap)
 
-	// Decode only the templates from the config
+	// Decode only the templates from the config, with the same hooks as the
+	// zones (reloadZonesFromFile), so a peer or ACL entry written as a bare
+	// string decodes as it does at startup.
 	// Note: TagName:"yaml" means mapstructure reads yaml struct tags
 	var partial struct {
 		Templates []ZoneConf `yaml:"templates"`
@@ -2055,6 +2322,10 @@ func (conf *Config) reloadTemplatesFromFile() error {
 	decoderConfig := &mapstructure.DecoderConfig{
 		TagName: "yaml",
 		Result:  &partial,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			stringToPeerConfHook(),
+			stringToAclEntryHook(),
+		),
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
 	if err != nil {
@@ -2064,8 +2335,18 @@ func (conf *Config) reloadTemplatesFromFile() error {
 		return fmt.Errorf("error decoding templates: %v", err)
 	}
 
+	// Install the new list and map together, and only if both are good: a
+	// refused reload keeps the templates in use (the caller carries on with
+	// them). buildTemplateMap reads conf.Templates, so the list goes in first
+	// and is put back if the map is refused.
+	prevTemplates := conf.Templates
 	conf.Templates = partial.Templates
-	return conf.buildTemplateMap()
+	if err := conf.buildTemplateMap(); err != nil {
+		conf.Templates = prevTemplates
+		return err
+	}
+	conf.Internal.XfrAliasConflicts = aliasConflicts
+	return nil
 }
 
 // reloadDnssecFromFile re-reads the config file, decodes just the dnssec:
@@ -2177,6 +2458,9 @@ func (conf *Config) reloadZonesFromFile() error {
 	if err != nil {
 		return fmt.Errorf("error processing config: %v", err)
 	}
+	// The transfer-list aliases, as at startup: a zone spelled with
+	// provide-xfr: (or another alias) lost that list on this reload.
+	conf.Internal.XfrAliasConflicts = NormalizeXfrAliases(configMap)
 
 	var partial struct {
 		Zones []ZoneConf `yaml:"zones"`
@@ -2314,11 +2598,11 @@ func (conf *Config) reloadTsigKeysFromFile() error {
 // template on success. If a cycle is detected, all templates in the cycle are removed from the
 // Templates map and an error is returned. Missing parent references also remove the referring
 // template.
-func expandTemplateChain(name string, stack []string, onStack map[string]bool, done map[string]bool, appMode AppType) (ZoneConf, error) {
+func expandTemplateChain(tm map[string]ZoneConf, name string, stack []string, onStack map[string]bool, done map[string]bool, appMode AppType) (ZoneConf, error) {
 	if done[name] {
-		return Templates[name], nil
+		return tm[name], nil
 	}
-	t, exists := Templates[name]
+	t, exists := tm[name]
 	if !exists {
 		return ZoneConf{}, fmt.Errorf("expandTemplateChain: template %q not found", name)
 	}
@@ -2335,7 +2619,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 		cycle = append(cycle, name)
 		lgConfig.Error("template cycle detected", "cycle", strings.Join(cycle, " -> "))
 		for _, n := range cycle {
-			delete(Templates, n)
+			delete(tm, n)
 		}
 		return ZoneConf{}, fmt.Errorf("template cycle: %s", strings.Join(cycle, " -> "))
 	}
@@ -2344,15 +2628,15 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 	stack = append(stack, name)
 
 	if t.Template != "" && t.Template != name {
-		parent, exists := Templates[t.Template]
+		parent, exists := tm[t.Template]
 		if !exists {
 			lgConfig.Warn("template refers to non-existing template, ignored", "template", t.Name, "parent", t.Template)
-			delete(Templates, t.Name)
+			delete(tm, t.Name)
 			onStack[name] = false
 			return ZoneConf{}, fmt.Errorf("missing parent template %q for %q", t.Template, t.Name)
 		}
 		// Recurse to expand parent first
-		expandedParent, err := expandTemplateChain(parent.Name, stack, onStack, done, appMode)
+		expandedParent, err := expandTemplateChain(tm, parent.Name, stack, onStack, done, appMode)
 		if err != nil {
 			onStack[name] = false
 			return ZoneConf{}, err
@@ -2361,7 +2645,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 		expandedChild, err := ExpandTemplate(t, &expandedParent, appMode)
 		if err != nil {
 			lgConfig.Error("error expanding template from parent", "template", t.Name, "parent", t.Template, "err", err)
-			delete(Templates, t.Name)
+			delete(tm, t.Name)
 			onStack[name] = false
 			return ZoneConf{}, err
 		}
@@ -2369,7 +2653,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 	} else if t.Template == name {
 		// Self-cycle
 		lgConfig.Error("self-referential template cycle, removing", "template", name)
-		delete(Templates, name)
+		delete(tm, name)
 		onStack[name] = false
 		return ZoneConf{}, fmt.Errorf("self-referential template %q", name)
 	}
@@ -2377,7 +2661,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 	// Mark done and store expanded result
 	done[name] = true
 	onStack[name] = false
-	Templates[name] = t
+	tm[name] = t
 	return t, nil
 }
 

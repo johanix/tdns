@@ -58,8 +58,10 @@ dig's as possible; arguments are case-insensitive and may appear in any order.
   dog [@server] [name] [type] [+option ...]
 
 @server takes @host, @host:port, @[ipv6], @[ipv6]:port, or a URL form that
-selects the transport directly: dns:// tcp:// tls:// dot:// https:// doh://
-quic:// doq://. Queries are always class IN.
+selects the transport directly: dns:// udp:// tcp:// tls:// dot:// https://
+doh:// quic:// doq://. udp:// is dns://, UDP with a TCP retry after truncation:
+the oots tokens udp and tcp name the two cleartext transports. Queries are
+always class IN.
 
 Query:
   +opcode=QUERY|NOTIFY|UPDATE
@@ -1362,7 +1364,7 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	// Map scheme to transport
 	scheme := strings.ToLower(u.Scheme)
 	switch scheme {
-	case "dns", "do53":
+	case "dns", "do53", "udp":
 		transport = "Do53"
 	case "tcp":
 		transport = "Do53-TCP"
@@ -1377,9 +1379,10 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	}
 
 	// Only signal error if there are two explicit transport specifications that conflict
-	// A transport is explicit if it comes from a flag or a non-default URI scheme
+	// A transport is explicit if it comes from a flag or a non-default URI scheme.
+	// udp:// is dns:// (see the help text), so +tcp upgrades it in either order.
 	if existingTransport, exists := options["transport"]; exists {
-		if scheme != "dns" && existingTransport != transport {
+		if scheme != "dns" && scheme != "udp" && existingTransport != transport {
 			return nil, fmt.Errorf("Conflicting transport specifications: %s (from flag) vs %s (from URI)", existingTransport, transport)
 		}
 		// If we have a flag-specified transport, keep it

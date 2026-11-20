@@ -379,7 +379,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 						rem = 0
 					}
 					records = append(records, zoneRecord{
-						Zone: item.Key, Address: key.Addr,
+						Zone: item.Key, Address: key.HostPort(),
 						Transport: core.TransportToString[key.Transport],
 						NextTry:   b.NextTry.Format(time.RFC3339),
 						Remain:    rem.Truncate(time.Second).String(),
@@ -519,7 +519,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				zone = dns.Fqdn(zone)
 			}
 			reset, _ := amp.Data["reset"].(bool)
-			resp.Data = ImrAuthTransportsSnapshot(imr.Cache, filter, zone, reset)
+			resp.Data = imr.AuthTransportsSnapshot(filter, zone, reset)
 
 		case "imr-transport-stats":
 			imr := Globals.ImrEngine

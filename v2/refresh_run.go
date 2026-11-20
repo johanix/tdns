@@ -243,6 +243,14 @@ func reparseCatalogZone(ctx context.Context, zd *ZoneData, zone string, updated 
 	if !zd.Options[OptCatalogZone] {
 		return
 	}
+	// A catalog this server originates, reloaded with different content (an
+	// edited zone file): its member list follows. Only when the refresh
+	// changed the zone -- see rebuildCatalogMembership for why not always.
+	if updated {
+		if _, err := rebuildCatalogMembership(zd); err != nil {
+			lgEngine.Error("failed to rebuild the catalog's member list", "zone", zone, "error", err)
+		}
+	}
 	lgEngine.Info("parsing catalog zone member zones", "zone", zone, "updated", updated)
 	catalogUpdate, err := ParseCatalogZone(zd)
 	if err != nil {

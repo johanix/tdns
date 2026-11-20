@@ -299,20 +299,28 @@ const (
 	// AuthOptAddTransportSignal turns the zone option add-transport-signal on
 	// for every zone the server serves. tdns-auth only: tdns-agent refuses it.
 	AuthOptAddTransportSignal
+	// AuthOptDebugDo53QueriesRefused refuses queries over Do53, all but the
+	// ones a resolver needs to find and trust the server's encrypted
+	// transports; NOTIFY and UPDATE are handled as usual (#1066). For
+	// testing: it breaks RFC requirements on purpose. tdns-auth only:
+	// tdns-agent refuses it.
+	AuthOptDebugDo53QueriesRefused
 )
 
 var AuthOptionToString = map[AuthOption]string{
-	AuthOptParentUpdate:       "parent-update",
-	AuthOptMinimalResponses:   "minimal-responses",
-	AuthOptAllowAnyQueries:    "allow-any-queries",
-	AuthOptAddTransportSignal: "add-transport-signal",
+	AuthOptParentUpdate:            "parent-update",
+	AuthOptMinimalResponses:        "minimal-responses",
+	AuthOptAllowAnyQueries:         "allow-any-queries",
+	AuthOptAddTransportSignal:      "add-transport-signal",
+	AuthOptDebugDo53QueriesRefused: "debug-do53-queries-refused",
 }
 
 var StringToAuthOption = map[string]AuthOption{
-	"parent-update":        AuthOptParentUpdate,
-	"minimal-responses":    AuthOptMinimalResponses,
-	"allow-any-queries":    AuthOptAllowAnyQueries,
-	"add-transport-signal": AuthOptAddTransportSignal,
+	"parent-update":              AuthOptParentUpdate,
+	"minimal-responses":          AuthOptMinimalResponses,
+	"allow-any-queries":          AuthOptAllowAnyQueries,
+	"add-transport-signal":       AuthOptAddTransportSignal,
+	"debug-do53-queries-refused": AuthOptDebugDo53QueriesRefused,
 }
 
 // outbound-soa-serial mode values for DnsEngine.OutboundSoaSerial.
@@ -473,6 +481,14 @@ const (
 	// the zone file with the journal (reconcileZoneFileWithJournal), and not
 	// when that reconcile fails to bring the journal's changes in.
 	PublishError
+	// TemplateWarning: a template-driven dynamic zone's template could not be
+	// expanded (missing, no longer blessed, wrong type, or its outbound lists
+	// do not validate). The zone keeps serving with the outbound settings it
+	// had (on a reload) or with none (at boot: no downstreams means no
+	// transfers out). Visibility-only. Cleared by the next expansion that
+	// succeeds. Its own category, not ConfigWarning, so that clearing it
+	// cannot wipe an unrelated config warning, nor the other way round.
+	TemplateWarning
 )
 
 var ErrorTypeToString = map[ErrorType]string{
@@ -488,6 +504,7 @@ var ErrorTypeToString = map[ErrorType]string{
 	ConfigWarning:           "config-warning",
 	FirstPublishError:       "first-publish",
 	PublishError:            "publish",
+	TemplateWarning:         "template-warning",
 }
 
 // errorTypeReportOrder defines the deterministic order in which the
@@ -507,6 +524,7 @@ var errorTypeReportOrder = []ErrorType{
 	DnssecPolicyWarning,
 	RolloverPolicyWarning,
 	DelegationSyncWarning,
+	TemplateWarning,
 	ConfigWarning,
 }
 
@@ -707,6 +725,21 @@ outer:
 			}
 		}
 		return true
+	}
+	return false
+}
+
+// blocksSerialBump reports whether the zone's errors refuse a serial bump.
+// Any error does, as before, except a TemplateWarning: that one says only
+// that the template did not expand on a reload, the zone keeping its outbound
+// settings and serving as before.
+func (zd *ZoneData) blocksSerialBump() bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	for t := range zd.Errors {
+		if t != TemplateWarning {
+			return true
+		}
 	}
 	return false
 }

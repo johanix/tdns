@@ -43,28 +43,42 @@ does not listen, while the resolver runs normally. If you do set it, note that
 `keyfile`; otherwise the API listener fails to start (the resolver keeps
 running).
 
-**No trust anchor is configured by default.** DNSSEC validation is on —
-`require-dnssec-validation` defaults to true — but the daemon seeds no root
-anchor unless you configure one. The compiled-in root anchor is wired into
-`dog`, not into `tdns-imr`. A resolver with no anchor cannot build a chain of
-trust. See below.
+**With no trust anchor configured, the compiled-in IANA root anchor is used —
+but only with the compiled-in root hints.** DNSSEC validation is on —
+`require-dnssec-validation` defaults to true. When none of the three anchor
+settings below is set, `imrengine.root-hints` is unset and the root is neither
+forwarded nor a stub zone, the resolver validates against the IANA root DS
+records compiled into the binary (KSK-2017, key tag 20326, and KSK-2024, key
+tag 38696), and logs that it does. A root-hints file, a `zone: .` forward or a
+stub for `.` may lead to a private root, and there the IANA anchor would make
+every signed answer bogus; with any of them and no anchor configured, the
+resolver uses no anchor at all, validates nothing (every signed answer is
+indeterminate), and logs a warning saying so. Configure the anchor for the root
+you use. See below.
 
 ## Trust anchors
 
-Exactly three forms exist. Note that two use underscores and the third uses
-hyphens.
+Three forms exist, and they are additive.
 
 ```yaml
 imrengine:
-   # inline DS record (preferred)
-   trust-anchor-ds:      ". IN DS 20326 8 2 E06D44B8...EC8D"
+   # inline DS records (preferred): one, or several, one per line
+   trust-anchor-ds: |
+      . IN DS 20326 8 2 E06D44B8...EC8D
+      . IN DS 38696 8 2 683D2D0A...2B16
 
-   # or inline DNSKEY
+   # or inline DNSKEY records, the same way
    trust-anchor-dnskey:  ". IN DNSKEY 257 3 8 AwEAAaz/tAm8y..."
 
    # or an unbound-style file, one DS/DNSKEY per line
    trust-anchor-file:    /etc/tdns/root.key
 ```
+
+`trust-anchor-ds` and `trust-anchor-dnskey` take a single record in quotes, or
+several records as a YAML block scalar (`|`), one per line, in zone-file
+syntax. Every record in `trust-anchor-ds` must be a DS, and every record in
+`trust-anchor-dnskey` a DNSKEY; anything else is an error, and the resolver
+then loads no anchor at all.
 
 Inspect what the running resolver actually loaded with `show config` in the
 interactive shell.
@@ -88,7 +102,9 @@ interactive shell.
 that arrive in the Additional section are applied whether or not these options
 are set; the options control whether the resolver goes looking for them. A
 strict-privacy query goes looking regardless, for the servers it knows nothing
-about, and waits up to `tuning.discovery.strict-wait` for the answers.
+about, and waits up to `tuning.discovery.strict-wait` for the answers. So does
+any query left with no transport it may use, such as one whose only server
+answers only over encrypted transports and has not signalled them yet.
 
 ## Stub zones
 
@@ -189,7 +205,9 @@ whole: the running one is left exactly as it was and the reply says so.
 The rest of `imrengine:` is not reloadable — trust anchors, tuning, options,
 root hints and logging are consumed once at startup. Editing one of those and
 reloading reports it (`restart required for imrengine.tuning`) rather than
-silently ignoring it.
+silently ignoring it. So does a reload that adds or removes a forward or stub
+for `.` on a resolver with no anchor configured: it changes whether the
+compiled-in root anchor applies, and the anchor is loaded once, at startup.
 
 Startup behaviour: when a forward zone covers the root, the live `. NS`
 priming fetch is skipped — the hints are seeded offline and the cache is
@@ -273,7 +291,7 @@ imrengine:
       discovery:
          retry-after-failure: 30s # transport-signal discovery retry
          max-failures:        3   # give up discovery after this many
-         strict-wait:         2s  # how long a strict-privacy query waits for new servers' signals
+         strict-wait:         2s  # how long a query waits for new servers' signals (strict, or no usable transport)
       query-budget:              8s     # total wall-clock budget for one query
       upgrade-indirect-cache-hits: true # left unset in code; treated as true
       cache-max-ttl:             86400  # seconds; ceiling on cached lifetimes

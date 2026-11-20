@@ -194,6 +194,13 @@ const nsAddrLookupFallbackBudget = 8 * time.Second
 // lookups that were started independently can still wait on each other; those
 // waits end when the lookups' own queries run out of budget, and such a
 // delegation has no address to find anyway.
+//
+// With always-query-for-transport, the lookup that starts also starts the
+// lookup of the server's transport signal, as a referral does for a server it
+// brings glue for (transportQueryReasonNewServer). A nameserver without glue
+// was the one server the option never looked up (#1065). The signal can come
+// in before the server is in any zone's server map, so the lookup applies it
+// once it has stored the server.
 func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct{} {
 	key := cache.ServerKey(nsname)
 	chain, _ := ctx.Value(nsLookupChainKey{}).([]string)
@@ -207,6 +214,8 @@ func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct
 	if !start {
 		return lookup.done
 	}
+	owner := transportOwnerForNS(nsname)
+	imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonNewServer)
 	budget := imr.Tuning.QueryBudget
 	if budget <= 0 {
 		budget = nsAddrLookupFallbackBudget
@@ -215,6 +224,21 @@ func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct
 	// chain of names it is nested in with its own name added.
 	lctx, cancel := detachedContext(2 * budget)
 	lctx = context.WithValue(lctx, nsLookupChainKey{}, append(slices.Clone(chain), key))
+	// A transport-signal lookup's address lookups are part of it: they must
+	// not wait for signal lookups either (awaitTransportSignalsUntil).
+	if inTransportSignalLookup(ctx) {
+		lctx = withTransportSignalLookup(lctx)
+	}
+	// So are a target lookup's: they go to every server's default endpoint,
+	// never through a redirected one (withDefaultEndpoints).
+	if defaultEndpointsOnly(ctx) {
+		lctx = withDefaultEndpoints(lctx)
+	}
+	// An alias hop's lookup's address lookups are part of it too: a cached alias
+	// they apply is followed through the cache only (aliasWalkFor).
+	if aliasWalkFor(ctx).cacheOnly {
+		lctx = withSignalAliasHopLookup(lctx)
+	}
 	go func(ctx context.Context, cancel context.CancelFunc) {
 		defer close(lookup.done)
 		defer cancel()
@@ -228,6 +252,9 @@ func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct
 		}
 		for _, z := range zones {
 			imr.storeZoneServers(z, map[string]*cache.AuthServer{key: srv})
+		}
+		if len(zones) > 0 && len(srv.GetTransportWeights()) == 0 {
+			imr.applyCachedTransportSignal(aliasWalkFor(ctx), owner, srv)
 		}
 	}(lctx, cancel)
 	return lookup.done

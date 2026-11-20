@@ -638,15 +638,22 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 						log.Printf("AddStub: unknown transport %q for %s", p.k, server.Name)
 						continue
 					}
-					transports = append(transports, t)
-					alpnOrder = append(alpnOrder, p.k)
 					weights[t] = p.w
+					// tcp keeps its weight, a cap on optional TCP, but
+					// is not a transport selection chooses.
+					if !core.SelectableTransport(t) {
+						continue
+					}
+					transports = append(transports, t)
+					alpnOrder = append(alpnOrder, core.TransportToString[t])
 				}
 				tmpauthserver.SetAlpn(alpnOrder)
 				tmpauthserver.SetTransports(transports)
 				tmpauthserver.MergeTransportWeights(weights)
-				// The configured signal as written, for the transport stats.
+				// The configured signal as written, for the transport
+				// stats, with the do53 shorthand read as udp and tcp.
 				if raw, err := core.ParseTransportStringRaw(server.TransportSignal); err == nil {
+					core.ExpandDo53Shorthand(raw)
 					received := &ReceivedSignal{Source: "config", Weights: map[core.Transport]uint8{}}
 					for k, v := range raw {
 						if t, err := core.StringToTransport(k); err == nil {
@@ -763,6 +770,20 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 	}
 	rrcache.ServerMap.Set(zone, serverMap)
 	return nil
+}
+
+// NewTargetAuthServer returns an AuthServer for a transport signal's
+// redirect target name: a server of its own, under the cache's address-family
+// policy, with Src "target". It is in neither AuthServerMap nor any zone's
+// ServerMap; the resolver holds it, apart from a nameserver of the same name.
+func (rrcache *RRsetCacheT) NewTargetAuthServer(name string) *AuthServer {
+	as := NewAuthServer(name)
+	if as == nil {
+		return nil
+	}
+	as.families = rrcache.families
+	as.ForceSetSrc("target")
+	return as
 }
 
 // GetOrCreateAuthServer returns an existing AuthServer instance for the given nameserver name,

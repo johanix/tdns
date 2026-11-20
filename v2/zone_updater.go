@@ -1066,7 +1066,7 @@ func (zd *ZoneData) stageChildUpdateLocked(ur UpdateRequest, dak *DnssecKeys, cl
 			}
 			updated = true
 			// zd.Options["dirty"] = true
-			lg.Debug("ApplyChildUpdateToZoneData: Remove RR done", "owner", ownerName, "rrtype", rrtypestr)
+			lg.Debug("ApplyChildUpdateToZoneData: Remove RR done", "owner", ownerName, "rrtype", rrtypestr, "rr", rrcopy.String())
 			continue
 
 		case dns.ClassANY:
@@ -1419,7 +1419,7 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys, cla
 		switch class {
 		case dns.ClassNONE:
 			// ClassNONE: Remove exact RR
-			rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
+			removed := rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
 				zd.stageDeleteLocked(ownerName, rrtype)
 			} else if zd.signsHere() && zd.signableLocked(ownerName, rrtype) {
@@ -1438,7 +1438,7 @@ func (zd *ZoneData) stageZoneUpdateLocked(ur UpdateRequest, dak *DnssecKeys, cla
 			}
 			updated = true
 			// zd.Options["dirty"] = true
-			lg.Debug("ApplyZoneUpdateToZoneData: Remove RR", "owner", ownerName, "rrtype", rrtypestr, "rr", rrcopy.String())
+			lg.Debug("ApplyZoneUpdateToZoneData: Remove RR", "owner", ownerName, "rrtype", rrtypestr, "rr", rrcopy.String(), "removed", removed)
 			continue
 
 		case dns.ClassANY:

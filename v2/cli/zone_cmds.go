@@ -254,6 +254,7 @@ would roll, whether the parent DS would break) and changes nothing; add
 	var dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo string
 	var dzTransferSrc []string
 	var dzZoneType, dzTemplate string
+	var dzClearTemplate bool
 	var dzPrimaries, dzOptions []string
 
 	add := &cobra.Command{
@@ -262,16 +263,13 @@ would roll, whether the parent DS would break) and changes nothing; add
 		Run: func(cmd *cobra.Command, args []string) {
 			// --primaries is required for secondaries (the pre-primary
 			// MarkFlagRequired behavior) and refused server-side for
-			// primaries; --template is required for primaries.
+			// primaries. A primary needs a template, but the server may have
+			// a default one (dynamiczones.dynamic.default-template), so that
+			// check is the server's.
 			switch strings.ToLower(dzZoneType) {
 			case "", "secondary":
 				if len(dzPrimaries) == 0 {
 					fmt.Println("Error: a secondary zone requires --primaries")
-					os.Exit(1)
-				}
-			case "primary":
-				if dzTemplate == "" {
-					fmt.Println("Error: a primary zone requires --template (an operator-blessed template with dynamiczones: true)")
 					os.Exit(1)
 				}
 			}
@@ -279,8 +277,8 @@ would roll, whether the parent DS would break) and changes nothing; add
 		},
 	}
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add")
-	add.Flags().StringVar(&dzZoneType, "type", "secondary", "Zone type: secondary (default) or primary (requires --template)")
-	add.Flags().StringVar(&dzTemplate, "template", "", "Config template for a primary zone (must carry dynamiczones: true)")
+	add.Flags().StringVar(&dzZoneType, "type", "secondary", "Zone type: secondary (default) or primary (needs a template: --template, or the server's default-template for primaries)")
+	add.Flags().StringVar(&dzTemplate, "template", "", "Config template (must carry dynamiczones: true): a primary's whole config, a secondary's outbound settings (downstreams, notify). Default: the server's default-template for the zone type")
 	add.Flags().StringSliceVar(&dzPrimaries, "primaries", nil, "Primary (upstream) addresses [host:port], comma-separated (secondary zones)")
 	add.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "Primary TSIG key name applied to all primaries (NOKEY for none)")
 	add.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated; secondary zones — primaries take options from the template)")
@@ -304,9 +302,13 @@ would roll, whether the parent DS would break) and changes nothing; add
 
 	modify := &cobra.Command{
 		Use:   "modify",
-		Short: "Modify a dynamic (API-managed) zone's primary or options",
+		Short: "Modify a dynamic (API-managed) zone's primary, options or template",
 		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneModify(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo, dzTransferSrc)
+			if dzClearTemplate && dzTemplate != "" {
+				fmt.Println("Error: use --template or --clear-template, not both")
+				os.Exit(1)
+			}
+			RunZoneModify(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo, dzTransferSrc, dzTemplate, dzClearTemplate)
 		},
 	}
 	modify.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to modify")
@@ -320,6 +322,8 @@ would roll, whether the parent DS would break) and changes nothing; add
 	// Unset leaves the zone's current value alone; --transfer-src="" clears it.
 	modify.Flags().StringSliceVar(&dzTransferSrc, "transfer-src", nil,
 		"Replace the zone's outbound-transfer source address(es); omit to leave unchanged")
+	modify.Flags().StringVar(&dzTemplate, "template", "", "Set or replace the zone's template (outbound settings: downstreams, notify); omit to keep it")
+	modify.Flags().BoolVar(&dzClearTemplate, "clear-template", false, "Remove the zone's template, and the outbound settings it gave the zone")
 	modify.MarkFlagRequired("zone")
 
 	listDynamic := &cobra.Command{
@@ -696,8 +700,17 @@ func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey 
 		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 		os.Exit(1)
 	}
+	printZoneWarnings(cr.Warnings)
 	if cr.Msg != "" {
 		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+// printZoneWarnings prints the warnings of an accepted zone add or modify
+// first, before the message, as daemon status does.
+func printZoneWarnings(warnings []string) {
+	for _, w := range warnings {
+		fmt.Printf("WARNING: %s\n", w)
 	}
 }
 
@@ -723,7 +736,7 @@ func RunZoneDelete(role string) {
 	}
 }
 
-func RunZoneModify(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string, transferSrc []string) {
+func RunZoneModify(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string, transferSrc []string, template string, clearTemplate bool) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
 		os.Exit(1)
@@ -738,13 +751,15 @@ func RunZoneModify(role string, primaries []string, primaryKey string, options [
 		log.Fatalf("Error getting API client for %s: %v", role, err)
 	}
 	post := tdns.ZonePost{
-		Command:     "modify",
-		Zone:        dns.Fqdn(tdns.Globals.Zonename),
-		Options:     options,
-		TsigName:    tsigName,
-		TsigSecret:  secret,
-		TsigAlgo:    tsigAlgo,
-		TransferSrc: transferSrc,
+		Command:       "modify",
+		Zone:          dns.Fqdn(tdns.Globals.Zonename),
+		Options:       options,
+		TsigName:      tsigName,
+		TsigSecret:    secret,
+		TsigAlgo:      tsigAlgo,
+		TransferSrc:   transferSrc,
+		Template:      template,
+		ClearTemplate: clearTemplate,
 	}
 	if peers := peerConfsFromAddrs(primaries, primaryKey); len(peers) > 0 {
 		post.Primaries = peers
@@ -754,6 +769,7 @@ func RunZoneModify(role string, primaries []string, primaryKey string, options [
 		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 		os.Exit(1)
 	}
+	printZoneWarnings(cr.Warnings)
 	if cr.Msg != "" {
 		fmt.Printf("%s\n", cr.Msg)
 	}
@@ -778,7 +794,7 @@ func RunZoneListDynamic(role string) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	out := []string{"Zone|Type|Provisioning|Managed|Primary|Error"}
+	out := []string{"Zone|Type|Provisioning|Managed|Primary|Template|Notify|Error"}
 	for _, name := range names {
 		zc := cr.Zones[name]
 		managed := "catalog"
@@ -789,8 +805,12 @@ func RunZoneListDynamic(role string) {
 		if zc.Error {
 			errStr = zc.ErrorMsg
 		}
-		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s",
-			name, zc.Type, zc.Provisioning, managed, peerConfAddrsString(zc.Primaries), errStr))
+		tmpl := zc.Template
+		if tmpl == "" {
+			tmpl = "-"
+		}
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s",
+			name, zc.Type, zc.Provisioning, managed, peerConfAddrsString(zc.Primaries), tmpl, peerConfAddrsString(zc.Notify), errStr))
 	}
 	fmt.Println(columnize.SimpleFormat(out))
 }
@@ -1067,13 +1087,19 @@ func DescribeZone(zconf tdns.ZoneConf) string {
 		for _, us := range zconf.UpstreamSerials {
 			if us.Err != "" {
 				fmt.Fprintf(&b, "\t\t%s: (probe failed: %s)\n", us.Addr, us.Err)
-				continue
+			} else {
+				marker := ""
+				if zconf.IncomingSerial != 0 && us.Serial != zconf.IncomingSerial {
+					marker = "\t<-- differs from our inbound serial"
+				}
+				fmt.Fprintf(&b, "\t\t%s: %d%s\n", us.Addr, us.Serial, marker)
 			}
-			marker := ""
-			if zconf.IncomingSerial != 0 && us.Serial != zconf.IncomingSerial {
-				marker = "\t<-- differs from our inbound serial"
+			// A dane primary whose TLSA record was not DNSSEC-validated (lab
+			// mode): the transfer is accepted, but the certificate check
+			// proves nothing, so say so on the primary's own line.
+			if us.Warning != "" {
+				fmt.Fprintf(&b, "\t\t\tWARNING: %s\n", us.Warning)
 			}
-			fmt.Fprintf(&b, "\t\t%s: %d%s\n", us.Addr, us.Serial, marker)
 		}
 	}
 

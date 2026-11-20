@@ -26,13 +26,28 @@ import (
 // are keyed by the names in ImrClientTransports (Do53 over UDP and TCP apart);
 // a transport never used is absent.
 type ImrAuthTransportsRow struct {
-	Server       string            `json:"server"`
-	Src          string            `json:"src,omitempty"`           // "answer", "glue", "hint", "priming", "stub", ...
-	Shared       bool              `json:"shared"`                  // false: a stub zone's private instance, counted apart
+	Server string `json:"server"`
+	Src    string `json:"src,omitempty"` // "answer", "glue", "hint", "priming", "stub", ...
+	Shared bool   `json:"shared"`        // false: a stub zone's private instance, or a redirect target's, counted apart
+	// Target marks a redirect target's own instance: a name a transport
+	// signal sent a transport to, which serves no zone of its own and
+	// carries no signal. It counts the attempts sent to that target, from
+	// whichever nameserver.
+	Target       bool              `json:"target,omitempty"`
 	Zones        []string          `json:"zones,omitempty"`         // the zones that list this server
-	Signal       map[string]uint8  `json:"signal,omitempty"`        // the signal as given: only the transports it named. Absent: none
+	Signal       map[string]uint8  `json:"signal,omitempty"`        // the signal as given, in its tokens (udp, tcp, dot, doq, doh; do53 read as udp and tcp): only the transports it named. Absent: none
 	SignalSource string            `json:"signal_source,omitempty"` // "oots", "alpn", "config" (a stub), "operator" (set server transport)
-	Counts       map[string]uint64 `json:"counts"`                  // answers carried, by actual wire transport
+	SignalPorts  map[string]uint16 `json:"signal_ports,omitempty"`  // non-default port per transport the signal named, keyed as Signal
+	// SignalTargets is the host other than the server itself that a validated
+	// signal record sent each transport to, keyed as Signal.
+	SignalTargets map[string]string `json:"signal_targets,omitempty"`
+	// Redirected counts the answers such a target carried for this server.
+	// They are counted in the target's own row (Target), not in Counts.
+	Redirected map[string]uint64 `json:"redirected,omitempty"`
+	// IgnoredRedirects counts signal records with a target ignored because
+	// their path did not validate Secure.
+	IgnoredRedirects uint64            `json:"ignored_redirects,omitempty"`
+	Counts           map[string]uint64 `json:"counts"` // answers carried, by actual wire transport
 	// ByPrivacy splits Counts by whose query it was: a client's PRIVACY level
 	// ("none", "opportunistic", "strict") or "internal" (the resolver's own).
 	// Only the classes with answers are present.
@@ -84,8 +99,21 @@ func ParseServerFilter(specs []string) ([]string, error) {
 // selection, as with the client counters: clearing only the selected servers
 // would let an operator believe a new period had started when it had not.
 func ImrAuthTransportsSnapshot(rc *cache.RRsetCacheT, filter []string, zone string, reset bool) ImrAuthTransportsReport {
+	return authTransportsSnapshot(rc, nil, filter, zone, reset)
+}
+
+// AuthTransportsSnapshot is ImrAuthTransportsSnapshot for the resolver's
+// cache, with a row for each redirect target's own instance as well
+// (RedirectTargetServers), marked Target. A target serves no zone, so a
+// selection by zone leaves the targets out; with reset their counters are
+// cleared too.
+func (imr *Imr) AuthTransportsSnapshot(filter []string, zone string, reset bool) ImrAuthTransportsReport {
+	return authTransportsSnapshot(imr.Cache, imr.RedirectTargetServers(), filter, zone, reset)
+}
+
+func authTransportsSnapshot(rc *cache.RRsetCacheT, targets []*cache.AuthServer, filter []string, zone string, reset bool) ImrAuthTransportsReport {
 	since, stats := rc.AuthServerStats(reset)
-	rep := ImrAuthTransportsReport{Since: since, Zone: zone, Servers: len(stats), Reset: reset}
+	rep := ImrAuthTransportsReport{Since: since, Zone: zone, Servers: len(stats) + len(targets), Reset: reset}
 	for _, s := range stats {
 		if len(filter) > 0 && !namesCover(filter, s.Name) {
 			continue
@@ -93,58 +121,86 @@ func ImrAuthTransportsSnapshot(rc *cache.RRsetCacheT, filter []string, zone stri
 		if zone != "" && !zonesInclude(s.Zones, zone) {
 			continue
 		}
-		row := ImrAuthTransportsRow{
-			Server:    s.Name,
-			Src:       s.Src,
-			Shared:    s.Shared,
-			Zones:     s.Zones,
-			Counts:    map[string]uint64{},
-			LastUsed:  map[string]time.Time{},
-			Truncated: s.Truncated,
-			Expected:  map[string]map[string]uint8{},
+		rep.Rows = append(rep.Rows, authTransportsRow(s))
+	}
+	for _, as := range targets {
+		s := cache.AuthServerStats{Name: as.Name, Src: as.GetSrc()}
+		if reset {
+			s.TransportStats = as.TakeTransportStats()
+		} else {
+			s.TransportStats = as.SnapshotTransportStats()
 		}
-		if s.Received != nil {
-			row.Signal = transportWeightsToStrings(s.Received.Weights)
-			row.SignalSource = s.Received.Source
+		if zone != "" || (len(filter) > 0 && !namesCover(filter, s.Name)) {
+			continue
 		}
-		for _, level := range []edns0.PrivacyLevel{edns0.PrivacyNone, edns0.PrivacyOpportunistic, edns0.PrivacyStrict} {
-			if shares := expectedShares(s.Transports, s.Weights, level); shares != nil {
-				row.Expected[level.String()] = transportWeightsToStrings(shares)
-			}
-		}
-		for t, c := range s.Used {
-			row.Counts[authTransportColumn(t)] += c
-			row.Total += c
-		}
-		for class, used := range s.UsedByClass {
-			if len(used) == 0 {
-				continue
-			}
-			if row.ByPrivacy == nil {
-				row.ByPrivacy = map[string]map[string]uint64{}
-			}
-			counts := map[string]uint64{}
-			for t, c := range used {
-				counts[authTransportColumn(t)] += c
-			}
-			row.ByPrivacy[cache.TrafficClass(class).String()] = counts
-		}
-		for t, at := range s.LastUsed {
-			row.LastUsed[authTransportColumn(t)] = at
-			if at.After(row.LastAny) {
-				row.LastAny = at
-			}
-		}
-		if len(s.Failed) > 0 {
-			row.Failed = map[string]uint64{}
-			for t, c := range s.Failed {
-				row.Failed[authTransportColumn(t)] += c
-				row.FailedTotal += c
-			}
-		}
+		row := authTransportsRow(s)
+		row.Target = true
 		rep.Rows = append(rep.Rows, row)
 	}
 	return rep
+}
+
+// authTransportsRow is the report's row for one instance's counters.
+func authTransportsRow(s cache.AuthServerStats) ImrAuthTransportsRow {
+	row := ImrAuthTransportsRow{
+		Server:    s.Name,
+		Src:       s.Src,
+		Shared:    s.Shared,
+		Zones:     s.Zones,
+		Counts:    map[string]uint64{},
+		LastUsed:  map[string]time.Time{},
+		Truncated: s.Truncated,
+		Expected:  map[string]map[string]uint8{},
+	}
+	if s.Received != nil {
+		row.Signal = signalWeightsToTokens(s.Received.Weights)
+		row.SignalSource = s.Received.Source
+		row.SignalPorts = transportPortsToStrings(s.Received.Ports)
+		row.SignalTargets = transportTargetsToStrings(s.Received.Targets)
+	}
+	row.IgnoredRedirects = s.IgnoredRedirects
+	for t, c := range s.Redirected {
+		if row.Redirected == nil {
+			row.Redirected = map[string]uint64{}
+		}
+		row.Redirected[authTransportColumn(t)] += c
+	}
+	for _, level := range []edns0.PrivacyLevel{edns0.PrivacyNone, edns0.PrivacyOpportunistic, edns0.PrivacyStrict} {
+		if shares := expectedShares(s.Transports, s.Weights, level); shares != nil {
+			row.Expected[level.String()] = transportWeightsToStrings(shares)
+		}
+	}
+	for t, c := range s.Used {
+		row.Counts[authTransportColumn(t)] += c
+		row.Total += c
+	}
+	for class, used := range s.UsedByClass {
+		if len(used) == 0 {
+			continue
+		}
+		if row.ByPrivacy == nil {
+			row.ByPrivacy = map[string]map[string]uint64{}
+		}
+		counts := map[string]uint64{}
+		for t, c := range used {
+			counts[authTransportColumn(t)] += c
+		}
+		row.ByPrivacy[cache.TrafficClass(class).String()] = counts
+	}
+	for t, at := range s.LastUsed {
+		row.LastUsed[authTransportColumn(t)] = at
+		if at.After(row.LastAny) {
+			row.LastAny = at
+		}
+	}
+	if len(s.Failed) > 0 {
+		row.Failed = map[string]uint64{}
+		for t, c := range s.Failed {
+			row.Failed[authTransportColumn(t)] += c
+			row.FailedTotal += c
+		}
+	}
+	return row
 }
 
 // authTransportColumn names a wire transport as the client counters do, so
@@ -163,6 +219,66 @@ func authTransportColumn(t core.Transport) string {
 		return ImrClientTransports[ctDoH]
 	}
 	return transportName(t)
+}
+
+// signalTokenName names a transport by its oots token (udp, tcp, dot, doq,
+// doh), so that a signal reads as it is written and udp and tcp are told
+// apart. A transport without one falls back to transportName.
+func signalTokenName(t core.Transport) string {
+	if name, ok := core.TransportToSignalToken[t]; ok {
+		return name
+	}
+	return transportName(t)
+}
+
+// signalWeightsToTokens converts a received signal's weights to a map keyed
+// by oots token (signalTokenName) for the stats row.
+func signalWeightsToTokens(m map[core.Transport]uint8) map[string]uint8 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]uint8, len(m))
+	for t, w := range m {
+		out[signalTokenName(t)] = w
+	}
+	return out
+}
+
+// transportTargetsToStrings is m keyed by oots token, as the row's Signal is;
+// nil when empty.
+func transportTargetsToStrings(m map[core.Transport]string) map[string]string {
+	var out map[string]string
+	for t, target := range m {
+		name := signalTokenName(t)
+		if name == "" || target == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[name] = target
+	}
+	return out
+}
+
+// transportPortsToStrings converts a transport-keyed port map to one keyed by
+// oots token, as the row's Signal is, for the stats row. A zero port is
+// omitted: it means the usual port.
+func transportPortsToStrings(m map[core.Transport]uint16) map[string]uint16 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]uint16, len(m))
+	for t, p := range m {
+		if p == 0 {
+			continue
+		}
+		out[signalTokenName(t)] = p
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func zonesInclude(zones []string, zone string) bool {
