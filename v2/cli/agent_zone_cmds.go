@@ -17,8 +17,8 @@ import (
 // instance: `role` is the key GetApiClient resolves, "agent" for the canonical
 // tdns-agent and the instance's own name for an extra one.
 //
-// It contains only the zone subcommands relevant to the agent,
-// plus the new addrr/delrr commands for managing synced RRs.
+// It contains only the zone subcommands relevant to the agent. (The addrr
+// and delrr commands below it are disabled; see the note there.)
 //
 // A function rather than package-level command values for the reason every
 // other per-instance subtree is one (see NewAuthTree): a *cobra.Command has one
@@ -283,7 +283,11 @@ The zone to update is mandatory to specify on the command line with the --zone f
 	return AgentZoneCmd
 }
 
-// --- New addrr/delrr commands ---
+// --- addrr/delrr: DISABLED, kept for reference ---
+//
+// Not on any command tree since 2026-04-15 (the dated lines in
+// NewAgentZoneCmd). Their client lookups already use GetApiClientForCmd, so
+// re-enabling one means moving it inside NewAgentZoneCmd and adding it there.
 /*
 var agentZoneAddRRCmd = &cobra.Command{
 	Use:   "addrr",
