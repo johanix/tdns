@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -217,11 +218,41 @@ func RegistryOnlyAlgorithmNote(alg uint8) string {
 		"this JWK only interoperates with peers that use the same number", alg, name)
 }
 
+// jwsAlgDNSSEC maps the JOSE signature algorithm names that spell what a
+// DNSSEC algorithm does (RFC 7518, RFC 8037, RFC 8812, and the
+// fully-specified names ESP256, ESP384, Ed25519 and Ed448) to the DNSSEC
+// algorithms they are consistent with. RS1 is RSA with SHA-1: both SHA-1
+// DNSSEC algorithms. The hash is part of the name, so RS256 does not fit
+// RSASHA512.
+var jwsAlgDNSSEC = map[string][]uint8{
+	"RS1":     {dns.RSASHA1, dns.RSASHA1NSEC3SHA1},
+	"RS256":   {dns.RSASHA256},
+	"RS512":   {dns.RSASHA512},
+	"ES256":   {dns.ECDSAP256SHA256},
+	"ESP256":  {dns.ECDSAP256SHA256},
+	"ES384":   {dns.ECDSAP384SHA384},
+	"ESP384":  {dns.ECDSAP384SHA384},
+	"EdDSA":   {dns.ED25519, dns.ED448},
+	"Ed25519": {dns.ED25519},
+	"Ed448":   {dns.ED448},
+}
+
+// jwsAlgNoDNSSEC are JOSE signature algorithm names with no DNSSEC
+// counterpart (another hash, RSASSA-PSS, P-521, secp256k1, MACs). A key
+// that names one is not consistent with any DNSSEC algorithm.
+var jwsAlgNoDNSSEC = map[string]bool{
+	"RS384": true, "PS256": true, "PS384": true, "PS512": true,
+	"ES512": true, "ESP512": true, "ES256K": true,
+	"HS256": true, "HS384": true, "HS512": true, "none": true,
+}
+
 // checkForm is rule 2: the JWK's kty and crv/alg must be the ones the
 // DNSSEC algorithm uses. An "alg" on a non-AKP key is optional but, when
-// present, must not name another algorithm family; tdns only checks it is
-// not an AKP parameter set, since JOSE "alg" values for RSA/EC/OKP are
-// signature algorithms with no one-to-one DNSSEC mapping.
+// present, must be consistent with the DNSSEC algorithm: an AKP parameter
+// set never is, and a JOSE signature algorithm name must be one that
+// jwsAlgDNSSEC lists for it (so "ES256" on an RSA key under algorithm 8
+// is refused). A value that is not a JOSE signature algorithm name at all
+// is not judged: tdns cannot tell it from a private-use name.
 func checkForm(k *JSONWebKey, alg uint8) error {
 	f, err := formFor(alg)
 	if err != nil {
@@ -238,6 +269,15 @@ func checkForm(k *JSONWebKey, alg uint8) error {
 	if k.Kty != JWKKtyAKP {
 		if _, isAKP := jwkFixedSizes[JWKKtyAKP+"/"+k.Alg]; isAKP {
 			return fmt.Errorf("%w: \"alg\" %q on a %s key", ErrDNSKEYKeyTypeMismatch, k.Alg, k.Kty)
+		}
+		if k.Alg != "" {
+			if ok, known := jwsAlgDNSSEC[k.Alg]; known {
+				if !slices.Contains(ok, alg) {
+					return fmt.Errorf("%w: \"alg\" %q does not fit algorithm %s", ErrDNSKEYKeyTypeMismatch, k.Alg, algName(alg))
+				}
+			} else if jwsAlgNoDNSSEC[k.Alg] {
+				return fmt.Errorf("%w: \"alg\" %q has no DNSSEC algorithm, so it does not fit %s", ErrDNSKEYKeyTypeMismatch, k.Alg, algName(alg))
+			}
 		}
 	}
 	return nil
@@ -516,6 +556,16 @@ func withPrivate(pub, priv *JSONWebKey) (*JSONWebKey, error) {
 		if err := priv.Validate(); err != nil {
 			return nil, err
 		}
+		// "alg" on an RSA, EC or OKP key is optional metadata, not key
+		// material: the RR has none, and the DNSSEC JWK carries "alg" for
+		// AKP keys only (where it names the parameter set). Leave it out of
+		// the comparison and the exported key, so a private JWK with a
+		// consistent "alg" is not taken for another key.
+		p := *priv
+		if p.Kty != JWKKtyAKP {
+			p.Alg = ""
+		}
+		priv = &p
 		pb, err := json.Marshal(priv.PublicJWK().wire())
 		if err != nil {
 			return nil, err
