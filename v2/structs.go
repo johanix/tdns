@@ -217,11 +217,15 @@ type ZoneData struct {
 	// child's). A retry of a sync that failed before it is dropped
 	// (delegationSyncRetrySuperseded). Guarded by mu.
 	delegationLastSyncOK time.Time
-	// delegationOutOfStep is set when a sync with the parent failed and no
-	// compare has found the parent in step since: the parent may lack changes
-	// the zone has made. A stored change is then queued as a compare instead of
-	// being sent as a difference (delegationSyncLanes.startsAtOnce). Cleared
-	// when delegationLastSyncOK is set.
+	// delegationOutOfStep is set when a change of the zone did not reach the
+	// parent -- its sync failed, or the parent offered no usable scheme -- and
+	// no compare has found the parent in step since: the parent may lack
+	// changes the zone has made. A stored change is then queued as a compare
+	// instead of being sent as a difference (delegationSyncLanes.startsAtOnce).
+	// Cleared only by what covers all a stored difference assumes
+	// (noteDelegationSyncInStep): an explicit sync's compare of NS, glue and DS,
+	// or a proxy's compare or sync that reached the parent. Not by a refresh
+	// sync, which compares no DS.
 	delegationOutOfStep atomic.Bool
 	// childRefreshNSGlueChanged is what the child-mode pre-refresh hook saw:
 	// the incoming zone's NS or glue differs from the served zone's. Consumed

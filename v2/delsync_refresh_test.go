@@ -623,6 +623,35 @@ func TestRefreshSyncRetries(t *testing.T) {
 	}
 }
 
+// A refresh sync compares NS and glue, not DS. Its success, found in sync or
+// sent, does not clear the mark that the parent may lack an earlier change: a
+// difference sent next could assume a DS the parent never got (re-review 3,
+// F3). It still drops an older refresh retry (TestRefreshSyncRetries).
+func TestARefreshSyncSuccessLeavesTheParentOutOfStep(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	zd := childZone(t, ddcngServedZone(), OptParentSync)
+	inSync := func() (DelegationSyncStatus, error) {
+		return DelegationSyncStatus{ZoneName: zd.ZoneName, InSync: true}, nil
+	}
+	outOfSync := func() (DelegationSyncStatus, error) {
+		return DelegationSyncStatus{ZoneName: zd.ZoneName}, nil
+	}
+	for _, c := range []struct {
+		name    string
+		analyse func() (DelegationSyncStatus, error)
+		sends   int
+	}{{"found in sync", inSync, 0}, {"sent", outOfSync, 1}} {
+		zd.delegationOutOfStep.Store(true)
+		rec := runArm(t, zd, refreshRequest(zd), c.analyse, nil)
+		if len(rec.synced) != c.sends || len(rec.requeued) != 0 {
+			t.Fatalf("%s: %d sends and %d retries, want %d and 0", c.name, len(rec.synced), len(rec.requeued), c.sends)
+		}
+		if !zd.delegationOutOfStep.Load() {
+			t.Errorf("%s: a refresh sync's success cleared the out-of-step mark", c.name)
+		}
+	}
+}
+
 // The arm waits for the IMR, as the proxy arm does: at startup the request
 // routinely arrives before the IMR is up, and the parent is found through it.
 func TestRefreshSyncWaitsForTheImr(t *testing.T) {

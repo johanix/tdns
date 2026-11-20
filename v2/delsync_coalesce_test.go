@@ -200,8 +200,9 @@ func TestAStoredChangeIsSentOnlyWhenItStartsAtOnce(t *testing.T) {
 // A stored change whose send fails is not sent again: the zone may change
 // before the parent answers, and the parent may then hold less than the
 // difference assumes. It is retried as a compare with the parent, after the
-// first retry wait. A parent that offers no usable scheme is not a failure,
-// and a success leaves nothing to retry.
+// first retry wait. A parent that offers no usable scheme is not a failure and
+// leaves nothing to retry, but marks the parent out of step; a success leaves
+// nothing to retry.
 func TestAFailedStoredChangeIsRetriedAsACompare(t *testing.T) {
 	zd := laneZone("failed.down.example.", "down.example.")
 	ds := laneRequest(zd, "SYNC-DELEGATION")
@@ -246,9 +247,20 @@ func TestAFailedStoredChangeIsRetriedAsACompare(t *testing.T) {
 			t.Errorf("%s: retried after %s, want %s", c.name, out[0].delay, delegationSyncRetryDelays[0])
 		}
 	}
-	for _, err := range []error{ErrNoUsableDsync, nil} {
-		if _, out := run(nil, err); len(out) != 0 {
-			t.Errorf("a send that returned %v was retried", err)
+	// No usable scheme: nothing to retry through, but the parent lacks the
+	// change, so the next one must go as a compare (re-review 3, F5). A
+	// success leaves the mark as it was: a difference brings the parent this
+	// change, not what it may have missed.
+	for _, c := range []struct {
+		err  error
+		mark bool
+	}{{ErrNoUsableDsync, true}, {nil, false}} {
+		zd.delegationOutOfStep.Store(false)
+		if _, out := run(nil, c.err); len(out) != 0 {
+			t.Errorf("a send that returned %v was retried", c.err)
+		}
+		if got := zd.delegationOutOfStep.Load(); got != c.mark {
+			t.Errorf("a send that returned %v left the parent marked out of step %v, want %v", c.err, got, c.mark)
 		}
 	}
 

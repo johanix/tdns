@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -93,11 +94,47 @@ func TestProxyNoopSyncDoesNotSupersedeARetry(t *testing.T) {
 	if stamped {
 		t.Error("a sync that forwarded nothing was recorded as a success")
 	}
+	if !zd.delegationOutOfStep.Load() {
+		t.Error("a sync that forwarded nothing left the parent marked in step; the next change would assume it")
+	}
 
 	// And so a retry of an earlier failure still runs.
 	retry, _ := nextDelegationSyncRetry(DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName},
 		time.Now().Add(-time.Minute))
 	if delegationSyncRetrySuperseded(zd, retry) {
 		t.Error("a retry was dropped after a sync that forwarded nothing")
+	}
+}
+
+// The proxy's compare clears the out-of-step mark only when it reached the
+// parent: found it in step, or brought it there. One that sent nothing for want
+// of a usable scheme returns no error and leaves the mark, and one that failed
+// is retried (re-review 3, F4). Before, no proxy compare cleared it, so after
+// one failed PROXY-SYNC every later change went as a compare.
+func TestAProxyCompareClearsOutOfStepOnlyWhenItReachedTheParent(t *testing.T) {
+	zd := &ZoneData{ZoneName: "child.test."}
+	ds := DelegationSyncRequest{Command: "PROXY-UPDATE-SETUP", ZoneName: zd.ZoneName, ZoneData: zd}
+	for _, c := range []struct {
+		name     string
+		inStep   bool
+		err      error
+		wantMark bool
+		retries  int
+	}{
+		{"reached the parent", true, nil, false, 0},
+		{"no usable scheme", false, nil, true, 0},
+		{"failed", false, errors.New("the parent refused"), true, 1},
+	} {
+		zd.delegationOutOfStep.Store(true)
+		var requeued []DelegationSyncRequest
+		handleProxyCompareWith(zd, ds,
+			func() (string, bool, error) { return "", c.inStep, c.err },
+			func(next DelegationSyncRequest, _ time.Duration) { requeued = append(requeued, next) })
+		if got := zd.delegationOutOfStep.Load(); got != c.wantMark {
+			t.Errorf("%s: marked out of step %v, want %v", c.name, got, c.wantMark)
+		}
+		if len(requeued) != c.retries {
+			t.Errorf("%s: %d retries, want %d", c.name, len(requeued), c.retries)
+		}
 	}
 }

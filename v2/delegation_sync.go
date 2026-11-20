@@ -854,14 +854,26 @@ func delegationSyncZoneLoaded(ds DelegationSyncRequest) bool {
 }
 
 // noteDelegationSyncInStep records that the parent holds what the zone says: a
-// compare found it in step or brought it there. A retry of an earlier failure
-// is dropped (delegationSyncRetrySuperseded), and a stored change may again be
-// sent as a difference (delegationOutOfStep).
+// compare of NS, glue and DS found it in step or brought it there, or a proxy
+// sync, which declares the whole delegation, reached it. A retry of an earlier
+// failure is dropped (delegationSyncRetrySuperseded), and a stored change may
+// again be sent as a difference (delegationOutOfStep). A refresh sync, which
+// compares no DS, does not call it.
 func (zd *ZoneData) noteDelegationSyncInStep() {
 	zd.mu.Lock()
 	zd.delegationLastSyncOK = time.Now()
 	zd.mu.Unlock()
 	zd.delegationOutOfStep.Store(false)
+}
+
+// noteDelegationSyncNotSent records that a change of the zone did not reach
+// the parent and nothing will retry it: the parent offers no usable scheme. A
+// later change then goes as a compare, not as a difference that assumes the
+// parent has this one (delegationOutOfStep).
+func (zd *ZoneData) noteDelegationSyncNotSent() {
+	if zd != nil {
+		zd.delegationOutOfStep.Store(true)
+	}
 }
 
 // syncDelegationSteps are the parts of the SYNC-DELEGATION arm that talk to
@@ -895,8 +907,10 @@ func handleSyncDelegationWith(ds DelegationSyncRequest, steps syncDelegationStep
 	}
 	msg, rcode, _, err := steps.sync(dss)
 	if errors.Is(err, ErrNoUsableDsync) {
-		// Not a failure: warned about once (planUsable)
+		// Not a failure: warned about once (planUsable), and nothing to retry
+		// through. But the parent lacks the change now.
 		lgDns.Debug("DelegationSyncher: nothing sent", "zone", ds.ZoneName, "reason", err)
+		ds.ZoneData.noteDelegationSyncNotSent()
 		return
 	}
 	if err != nil {
@@ -955,9 +969,11 @@ func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan Notif
 	// not an error, but it sent nothing, and must not cancel a retry that
 	// might. A proxy sync declares the whole delegation and takes its
 	// withdrawals from the parent as well, so one that reached the parent
-	// leaves it in step.
+	// leaves it in step. One that did not leaves the parent without the change.
 	if forwarded {
 		zd.noteDelegationSyncInStep()
+	} else {
+		zd.noteDelegationSyncNotSent()
 	}
 	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "forwarded", forwarded, "msg", msg)
 }
@@ -993,20 +1009,37 @@ func proxyUpdateGate(zone string, check func() (ProxyUpdateState, error)) {
 func proxyStartupReconcile(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan NotifyRequest,
 	delsyncq chan DelegationSyncRequest, imr *Imr, ds DelegationSyncRequest) {
 
+	handleProxyCompareWith(zd, ds,
+		func() (string, bool, error) { return zd.ProxyStartupReconcile(ctx, kdb, notifyq, imr) },
+		func(next DelegationSyncRequest, delay time.Duration) { requeueLookAfter(ctx, delsyncq, next, delay) })
+}
+
+// handleProxyCompareWith is the decision half of the proxy's compare, with the
+// compare (run) and the requeue passed in so a test can stand in for them. A
+// failure is retried until the parent answers. A compare that found the parent
+// in step or brought it there (inStep) clears delegationOutOfStep; one that
+// sent nothing because the parent offers no usable scheme returns no error and
+// does not.
+func handleProxyCompareWith(zd *ZoneData, ds DelegationSyncRequest, run func() (msg string, inStep bool, err error),
+	requeue func(next DelegationSyncRequest, delay time.Duration)) {
+
 	if delegationSyncRetrySuperseded(zd, ds) {
 		lgDns.Info("DelegationSyncher: proxy compare retry dropped; a later sync has succeeded",
 			"zone", ds.ZoneName, "attempt", ds.Attempt)
 		return
 	}
-	msg, err := zd.ProxyStartupReconcile(ctx, kdb, notifyq, imr)
+	msg, inStep, err := run()
 	if err != nil {
 		next, delay := nextDelegationSyncRetry(ds, time.Now())
 		lgDns.Error("DelegationSyncher: proxy compare with the parent failed; will retry", "zone", ds.ZoneName,
 			"attempt", next.Attempt, "retry_in", delay, "err", err)
-		requeueLookAfter(ctx, delsyncq, next, delay)
+		requeue(next, delay)
 		return
 	}
-	lgDns.Info("DelegationSyncher: proxy startup reconcile", "zone", ds.ZoneName, "msg", msg)
+	if inStep {
+		zd.noteDelegationSyncInStep()
+	}
+	lgDns.Info("DelegationSyncher: proxy startup reconcile", "zone", ds.ZoneName, "in_step", inStep, "msg", msg)
 }
 
 // handleDelegationSyncSetup is the DELEGATION-SYNC-SETUP arm of the syncher.

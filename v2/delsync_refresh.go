@@ -256,7 +256,14 @@ func handleRefreshSyncDelegationWith(ctx context.Context, ready *ImrReadiness, d
 			"step", what, "attempt", ds.Attempt+1, "retry_in", delay, "err", err)
 		steps.requeue(next, delay)
 	}
-	succeeded := zd.noteDelegationSyncInStep
+	// A refresh sync compares NS and glue, not DS. Its success drops an older
+	// refresh retry, but it does not say the parent holds everything a stored
+	// difference assumes, so it leaves delegationOutOfStep as it is.
+	succeeded := func() {
+		zd.mu.Lock()
+		zd.delegationLastSyncOK = time.Now()
+		zd.mu.Unlock()
+	}
 
 	dss, err := steps.analyse()
 	if err != nil {

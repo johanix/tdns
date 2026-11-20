@@ -633,25 +633,30 @@ func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis, par
 // startup reconcile at all and its drift went uncorrected until the next
 // transfer happened to change something. It now uses whatever transport is
 // available, via the same plan the steady-state path uses.
+//
+// inStep reports whether the parent holds what the zone says afterwards: the
+// compare read all of the parent's delegation and found it in sync, or the
+// difference was sent and accepted. A plan with no usable scheme is not an
+// error, and is not in step either.
 func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
-	notifyq chan NotifyRequest, imr *Imr) (string, error) {
+	notifyq chan NotifyRequest, imr *Imr) (msg string, inStep bool, err error) {
 	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr, SyncRoleProxy)
 	if err != nil {
-		return "", fmt.Errorf("ProxyStartupReconcile: %w", err)
+		return "", false, fmt.Errorf("ProxyStartupReconcile: %w", err)
 	}
 	if !plan.Usable() {
 		// Degraded, not broken: the zone is served either way, and the reasons
 		// are in the summary rather than in a shrug.
-		return "startup reconcile: " + plan.Summary(), nil
+		return "startup reconcile: " + plan.Summary(), false, nil
 	}
 
 	dss, aerr := zd.AnalyseZoneDelegation(imr)
 	if aerr != nil {
-		return "", fmt.Errorf("ProxyStartupReconcile: AnalyseZoneDelegation(%s): %w", zd.ZoneName, aerr)
+		return "", false, fmt.Errorf("ProxyStartupReconcile: AnalyseZoneDelegation(%s): %w", zd.ZoneName, aerr)
 	}
 	if dss.InSync {
 		lgDns.Info("parentsync-proxy: startup reconcile — parent already in sync", "zone", zd.ZoneName)
-		return "startup reconcile: parent already in sync; nothing sent", nil
+		return "startup reconcile: parent already in sync; nothing sent", dss.Complete(), nil
 	}
 
 	// NOTIFY needs to know WHICH signal to send, which the steady-state path
@@ -663,9 +668,9 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 		"zone", zd.ZoneName, "plan", plan.Summary())
 	msg, serr := zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis, &dss)
 	if serr != nil {
-		return "", fmt.Errorf("ProxyStartupReconcile: %w", serr)
+		return "", false, fmt.Errorf("ProxyStartupReconcile: %w", serr)
 	}
-	return "startup reconcile: " + msg, nil
+	return "startup reconcile: " + msg, dss.Complete(), nil
 }
 
 // ProxyDelegationSync is the steady-state dispatcher: on a detected change it

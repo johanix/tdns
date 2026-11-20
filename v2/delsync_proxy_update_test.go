@@ -249,9 +249,12 @@ ns1.upd.example.	3600 IN A 192.0.2.1
 func TestProxyStartupReconcileNotReady(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
-	msg, err := zd.ProxyStartupReconcile(context.Background(), kdb, nil, nil)
+	msg, inStep, err := zd.ProxyStartupReconcile(context.Background(), kdb, nil, nil)
 	if err != nil {
 		t.Fatalf("ProxyStartupReconcile (nil imr): unexpected error: %v", err)
+	}
+	if inStep {
+		t.Fatalf("a reconcile that sent nothing (no usable scheme) reported the parent in step: %q", msg)
 	}
 	if !strings.Contains(msg, "no usable scheme") {
 		t.Fatalf("expected a nothing-usable message, got %q", msg)
