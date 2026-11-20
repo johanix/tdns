@@ -299,20 +299,28 @@ const (
 	// AuthOptAddTransportSignal turns the zone option add-transport-signal on
 	// for every zone the server serves. tdns-auth only: tdns-agent refuses it.
 	AuthOptAddTransportSignal
+	// AuthOptDebugDo53QueriesRefused refuses queries over Do53, all but the
+	// ones a resolver needs to find and trust the server's encrypted
+	// transports; NOTIFY and UPDATE are handled as usual (#1066). For
+	// testing: it breaks RFC requirements on purpose. tdns-auth only:
+	// tdns-agent refuses it.
+	AuthOptDebugDo53QueriesRefused
 )
 
 var AuthOptionToString = map[AuthOption]string{
-	AuthOptParentUpdate:       "parent-update",
-	AuthOptMinimalResponses:   "minimal-responses",
-	AuthOptAllowAnyQueries:    "allow-any-queries",
-	AuthOptAddTransportSignal: "add-transport-signal",
+	AuthOptParentUpdate:            "parent-update",
+	AuthOptMinimalResponses:        "minimal-responses",
+	AuthOptAllowAnyQueries:         "allow-any-queries",
+	AuthOptAddTransportSignal:      "add-transport-signal",
+	AuthOptDebugDo53QueriesRefused: "debug-do53-queries-refused",
 }
 
 var StringToAuthOption = map[string]AuthOption{
-	"parent-update":        AuthOptParentUpdate,
-	"minimal-responses":    AuthOptMinimalResponses,
-	"allow-any-queries":    AuthOptAllowAnyQueries,
-	"add-transport-signal": AuthOptAddTransportSignal,
+	"parent-update":              AuthOptParentUpdate,
+	"minimal-responses":          AuthOptMinimalResponses,
+	"allow-any-queries":          AuthOptAllowAnyQueries,
+	"add-transport-signal":       AuthOptAddTransportSignal,
+	"debug-do53-queries-refused": AuthOptDebugDo53QueriesRefused,
 }
 
 // outbound-soa-serial mode values for DnsEngine.OutboundSoaSerial.

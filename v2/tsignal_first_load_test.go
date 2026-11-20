@@ -131,6 +131,11 @@ func TestTheTransportSignalIsDerivedAfterThePolicyBinds(t *testing.T) {
 				conf.Service.Transport.Type = "svcb"
 				conf.Service.Transport.Signal = "do53:0,dot:40,doq:40,doh:20"
 				conf.Listeners.Addresses = []string{"127.0.0.1:53"}
+				// The pass synthesizes only for an identity, in its home
+				// zone (S2): each zone is the home of its ns1.
+				for _, z := range tc.zones {
+					conf.Service.Identities = append(conf.Service.Identities, "ns1."+z)
+				}
 
 				// pre-registered, the way ParseZones leaves each zone before
 				// its first load

@@ -144,10 +144,10 @@ func (conf *Config) ParseAuthOptions() {
 				lg.Warn("Auth option has invalid value, defaulting to false", "option", key, "value", optval)
 				clean[authOpt] = "false"
 			}
-		case AuthOptAddTransportSignal:
+		case AuthOptAddTransportSignal, AuthOptDebugDo53QueriesRefused:
 			// Off on an invalid value, like allow-any-queries: a mistyped
 			// value must not start publishing into every zone the server
-			// serves.
+			// serves, nor stop it answering queries over Do53.
 			val := strings.ToLower(optval)
 			switch val {
 			case "", "true":
@@ -173,6 +173,10 @@ func (conf *Config) ParseAuthOptions() {
 // tdns-agent every zone may originate content, so a server-wide default would
 // publish transport signals into every secondary the agent serves. Any value,
 // "false" included, is refused, so the config says what the app does.
+//
+// debug-do53-queries-refused is tdns-auth's alone too. It is for a leaf
+// server under test; an agent talks to its peers and parents over DNS, and
+// has no business refusing their queries.
 func refuseAuthOptionsForApp(appType AppType, opts map[AuthOption]string) error {
 	if appType != AppTypeAgent {
 		return nil
@@ -180,6 +184,10 @@ func refuseAuthOptionsForApp(appType AppType, opts map[AuthOption]string) error 
 	if _, ok := opts[AuthOptAddTransportSignal]; ok {
 		return fmt.Errorf("authengine option %q is not supported by tdns-agent: it would publish transport signals into every zone the agent serves, secondaries included",
 			AuthOptionToString[AuthOptAddTransportSignal])
+	}
+	if _, ok := opts[AuthOptDebugDo53QueriesRefused]; ok {
+		return fmt.Errorf("authengine option %q is not supported by tdns-agent: it is for a tdns-auth leaf server under test",
+			AuthOptionToString[AuthOptDebugDo53QueriesRefused])
 	}
 	return nil
 }

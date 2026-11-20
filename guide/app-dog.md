@@ -32,8 +32,9 @@ $ dog @ns1.example.com www.example.com AAAA +dnssec +multi
 ```
 
 - **`@server`** accepts `@host`, `@host:port`, `@[ipv6]`, `@[ipv6]:port`, and
-  also URL forms — `dns://`, `tcp://`, `tls://`, `dot://`, `https://`, `doh://`,
-  `quic://`, `doq://` — which select the transport directly.
+  also URL forms — `dns://`, `udp://`, `tcp://`, `tls://`, `dot://`,
+  `https://`, `doh://`, `quic://`, `doq://` — which select the transport
+  directly. `udp://` is `dns://`: UDP, retried over TCP after truncation.
 - **The query type** is any name dog knows, including the experimental types
   above. Default is `A`.
 - **`IXFR=<serial>`** requests an IXFR from that serial. `AXFR`/`IXFR` run over

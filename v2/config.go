@@ -231,14 +231,30 @@ type ServiceConf struct {
 type TransportConf struct {
 	Type   string `yaml:"type" validate:"omitempty,oneof=tsync svcb none"`
 	Signal string `yaml:"signal"`
+	// Ports is the port published for a transport that is not on its
+	// standard one: keys udp, tcp, dot, doq and doh. tdns-auth gives each
+	// transport with a port an SVCB record of its own (transportSignalLayout).
+	// Publishing a port opens no socket; the listener is configured under
+	// listeners.ports. Only type svcb carries ports.
+	Ports map[string]uint16 `yaml:"ports"`
+	// Targets is the host that serves a transport when it is not the
+	// nameserver itself: keys dot and doq. tdns-auth gives each transport
+	// with a target an SVCB record of its own, the target as its TargetName
+	// and the transport's port, if it has one, beside it
+	// (transportSignalLayout). A resolver honours a target only from a
+	// validated signal, so a target in a zone whose signal is not signed is
+	// warned about. DoH on another host needs a path, which the signal does
+	// not carry, so a doh target is refused. "." is the nameserver itself
+	// and counts as absent. Only type svcb carries targets.
+	Targets map[string]string `yaml:"targets"`
 }
 
 // Validate refuses, at config load, a signal this server would publish (type
-// svcb or tsync) that does not parse or names a token other than do53, dot, doh
-// and doq. No tdns publisher may emit a new token, such as `udp` or `tcp`,
-// before every node that can re-pack the record keeps it (the alternative-
-// endpoint design, tdns #1043, section 8). With type none the signal is not
-// published and is not checked.
+// svcb or tsync) that does not parse or names a token other than udp, tcp,
+// dot, doh, doq and do53 (published as udp and tcp). No tdns publisher may
+// emit a token that is not defined, before every node that can re-pack the
+// record keeps it (the alternative-endpoint design, tdns #1043, section 8).
+// With type none the signal is not published and is not checked.
 func (t TransportConf) Validate() error {
 	switch strings.ToLower(t.Type) {
 	case "svcb", "tsync":
@@ -629,9 +645,10 @@ type AddressFamilyConf struct {
 type DiscoveryConf struct {
 	RetryAfterFailure time.Duration `yaml:"retry-after-failure" mapstructure:"retry-after-failure"`
 	MaxFailures       int           `yaml:"max-failures" mapstructure:"max-failures"`
-	// StrictWait bounds how long a strict-privacy query waits for the
-	// transport signals of servers it knows nothing about, before it gives
-	// up on them. The query's own deadline cuts it shorter. Default 2s.
+	// StrictWait bounds how long a query waits for the transport signals
+	// of servers it knows nothing about, before it gives up on them: a
+	// strict-privacy query, or any query left with no transport it may use
+	// (#1065). The query's own deadline cuts it shorter. Default 2s.
 	StrictWait time.Duration `yaml:"strict-wait" mapstructure:"strict-wait"`
 }
 
@@ -1122,6 +1139,7 @@ type InternalDnsConf struct {
 	APIStopCh           chan struct{}
 	StopOnce            sync.Once
 	stopFailed          atomic.Bool // set by Shutdowner: MainLoop exits 1, not 0 (#977)
+	do53QueriesRefused  atomic.Bool // debug-do53-queries-refused as DnsEngine started with it; a reload takes effect at the next start (#1066)
 	RefreshZoneCh       chan ZoneRefresher
 	BumpZoneCh          chan BumperData
 	ValidatorCh         chan ValidatorRequest
@@ -1363,6 +1381,20 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	// apply below then refuses the new block and keeps the running table,
 	// conf.Imr would otherwise go on describing zones that were rejected.
 	runningStubs, runningForward := conf.Imr.Stubs, conf.Imr.Forward
+	// The published transport signal, for the same reason: ParseConfig
+	// decodes service.transport into conf before it refuses a bad signal,
+	// and the zone refresh path publishes from conf.Service.Transport. A
+	// refused reload must leave the running signal in place.
+	runningTransport := conf.Service.Transport
+	// And the identities the signal is published for: ParseConfig decodes
+	// service.identities before it refuses the file too, and the preview and
+	// a zone's first-load pass would pair them with the running transport.
+	runningIdentities := slices.Clone(conf.Service.Identities)
+	// And the listener addresses, which the pass matches against the
+	// nameservers' addresses to find this server's names: decoded before
+	// the refusal too, and the next publish of the runtime-config snapshot
+	// (a single-zone reload) would put them in the signal readers' copy.
+	runningListenerAddresses := slices.Clone(conf.Listeners.Addresses)
 	// The template map in use, put back if the parse fails: ParseConfig
 	// installs a new map part-way through, and a check after that point
 	// can still refuse the reload. Adds and template re-expansion must not
@@ -1376,6 +1408,9 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
+		conf.Service.Transport = runningTransport
+		conf.Service.Identities = runningIdentities
+		conf.Listeners.Addresses = runningListenerAddresses
 		Templates, conf.Templates = runningTemplates, runningTemplateList
 		conf.Journal = runningJournal
 	}

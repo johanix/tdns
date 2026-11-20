@@ -102,7 +102,9 @@ interactive shell.
 that arrive in the Additional section are applied whether or not these options
 are set; the options control whether the resolver goes looking for them. A
 strict-privacy query goes looking regardless, for the servers it knows nothing
-about, and waits up to `tuning.discovery.strict-wait` for the answers.
+about, and waits up to `tuning.discovery.strict-wait` for the answers. So does
+any query left with no transport it may use, such as one whose only server
+answers only over encrypted transports and has not signalled them yet.
 
 ## Stub zones
 
@@ -289,7 +291,7 @@ imrengine:
       discovery:
          retry-after-failure: 30s # transport-signal discovery retry
          max-failures:        3   # give up discovery after this many
-         strict-wait:         2s  # how long a strict-privacy query waits for new servers' signals
+         strict-wait:         2s  # how long a query waits for new servers' signals (strict, or no usable transport)
       query-budget:              8s     # total wall-clock budget for one query
       upgrade-indirect-cache-hits: true # left unset in code; treated as true
       cache-max-ttl:             86400  # seconds; ceiling on cached lifetimes

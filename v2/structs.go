@@ -360,10 +360,29 @@ type ZoneData struct {
 	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
 	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
 	// snapshot in ensureWorkingSet so unrelated publishes preserve it.
-	wsSignalSynth  map[string]*core.RRset
-	publishCadence time.Duration
-	publishQueued  bool
-	publishUrgent  bool
+	wsSignalSynth map[string]*core.RRset
+	// signalStored is what the transport-signal pass itself stored as zone
+	// content: canonical "_dns.<ns>" owner -> signalDigest of the SVCB
+	// records it staged, the last first, then those it staged there before
+	// (transport_signal_stored.go). A stored signal is zone content like any other, so
+	// this is how a later run of the pass tells its own output from an
+	// operator's RRset, which it leaves alone. Written through to the KeyDB
+	// (TransportSignalStored), so a stored signal that comes back as content
+	// after a restart is still known as the pass's own. Guarded by
+	// signalStoredMu, not mu: a refresh reads it without mu
+	// (CollectDynamicRRs).
+	signalStoredMu sync.Mutex
+	signalStored   map[string][]string
+	// signalUnrecorded holds, per owner, the digests of signals the pass
+	// stored that the KeyDB did not take: the record could not be read, and
+	// the prepend that stands in for the write failed too. They are the
+	// pass's own in this process (signalStoredByPass), and the next store
+	// that reads the KeyDB's record puts them ahead of it. Guarded by
+	// signalStoredMu.
+	signalUnrecorded map[string][]string
+	publishCadence   time.Duration
+	publishQueued    bool
+	publishUrgent    bool
 	// tx is the zone's transactions: the publish hold, and what a zone created
 	// held remembers about its first content. See zone_tx.go. Guarded by mu.
 	tx zoneTxState
@@ -568,6 +587,11 @@ type ZoneData struct {
 	// Apps register these before RefreshEngine starts, and RefreshEngine clears the slice
 	// after executing them. Protected by zd.mu.
 	OnFirstLoad []func(*ZoneData)
+
+	// zoneSyncSetup is the delegation sync setup that a zone created at run
+	// time owes after its first load (registerZoneSyncSetup), or nil. Set once,
+	// while the ZoneData is still private; its done flag is atomic.
+	zoneSyncSetup *owedZoneSyncSetup
 
 	// OnZonePreRefresh callbacks run BEFORE the hard flip in FetchFromFile/FetchFromUpstream.
 	// They receive both old (zd, current, still served) and new (new_zd, incoming, not yet served)

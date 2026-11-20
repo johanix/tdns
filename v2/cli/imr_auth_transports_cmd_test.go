@@ -181,13 +181,33 @@ func TestFormatOOTSSignal(t *testing.T) {
 		{nil, "", "none"},
 		{nil, "oots", "empty"},
 		{map[string]uint8{"do53": 100, "dot": 10, "doq": 10, "doh": 1}, "oots", "do53:100 dot:10 doq:10 doh:1 (ignored)"},
+		// udp and tcp apart, cleartext first; a cleartext weight of 1 is
+		// not a share, so not marked.
+		{map[string]uint8{"udp": 100, "tcp": 1, "dot": 50}, "oots", "udp:100 tcp:1 dot:50"},
+		{map[string]uint8{"udp": 100, "tcp": 100, "doq": 100}, "alpn", "alpn:udp,tcp,doq"},
 		{map[string]uint8{"doq": 50, "doh": 30}, "oots", "doq:50 doh:30"},
 		{map[string]uint8{"doq": 100, "dot": 100}, "alpn", "alpn:dot,doq"},
 		{map[string]uint8{"dot": 50}, "operator", "set: dot:50"},
 	} {
-		if got := formatOOTSSignal(tc.signal, tc.source); got != tc.want {
+		if got := formatOOTSSignal(tc.signal, nil, tc.source); got != tc.want {
 			t.Errorf("formatOOTSSignal(%v, %q) = %q, want %q", tc.signal, tc.source, got, tc.want)
 		}
+	}
+	got := formatOOTSSignal(
+		map[string]uint8{"dot": 30, "doq": 20},
+		map[string]uint16{"dot": 1234, "doq": 1235},
+		"oots",
+	)
+	if got != "dot:30 port:1234 doq:20 port:1235" {
+		t.Errorf("formatOOTSSignal with ports = %q", got)
+	}
+	got = formatOOTSSignal(
+		map[string]uint8{"dot": 100, "doh": 100},
+		map[string]uint16{"dot": 1234},
+		"alpn",
+	)
+	if got != "alpn:dot port:1234,doh" {
+		t.Errorf("formatOOTSSignal alpn with ports = %q", got)
 	}
 }
 

@@ -46,7 +46,18 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	// receive the unwrapped authDNSHandler; DoT installs the wrapper itself in
 	// DnsDoTEngine, since it also carries a TsigProvider.
 	// udpTruncate sits inside TsigSigningHandler so TSIG MACs the truncated wire.
-	dnsMux.HandleFunc(".", TsigSigningHandler(udpTruncate(authDNSHandler)))
+	//
+	// With debug-do53-queries-refused, the refusal sits inside both: a
+	// refused query is answered as any other, truncated if need be and TSIG
+	// signed. It is decided here, once: a reload that changes the option
+	// takes effect at the next start (ParseConfig warns).
+	refuseQueries := do53QueriesRefusedConfigured(conf.AuthEngine.Options)
+	conf.Internal.do53QueriesRefused.Store(refuseQueries)
+	if refuseQueries {
+		lgDns.Warn("DnsEngine: debug-do53-queries-refused is set: queries over Do53 are REFUSED (EDE 18), except _dns SVCB and DNSKEY; NOTIFY and UPDATE are handled as usual. This breaks RFC requirements on purpose, for testing only",
+			"addresses", conf.Listeners.Addresses)
+	}
+	dnsMux.HandleFunc(".", do53Handler(refuseQueries, authDNSHandler))
 
 	addresses := conf.Listeners.Addresses
 	if !CaseFoldContains(conf.Listeners.Transports, "do53") {
@@ -209,6 +220,8 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	var keyPEM []byte
 	var cert tls.Certificate
 	var err error
+	// The encrypted transports whose engines started (debug-do53-queries-refused).
+	var encStarted []string
 
 	if certKey {
 		// A cert/key access failure (unreadable file, a directory, a race
@@ -285,6 +298,8 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 			err := DnsDoTEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoT), &cert, authDNSHandler, true)
 			if err != nil {
 				lgDns.Error("Failed to setup the DoT server", "err", err)
+			} else {
+				encStarted = append(encStarted, "dot")
 			}
 		}
 
@@ -292,6 +307,8 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), conf.Listeners.DoHPath, certFile, keyFile, authDNSHandler)
 			if err != nil {
 				lgDns.Error("Failed to setup the DoH server", "err", err)
+			} else {
+				encStarted = append(encStarted, "doh")
 			}
 		}
 
@@ -299,8 +316,24 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 			err := DnsDoQEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoQ), &cert, authDNSHandler)
 			if err != nil {
 				lgDns.Error("Failed to setup the DoQ server", "err", err)
+			} else {
+				encStarted = append(encStarted, "doq")
 			}
 		}
+	}
+	// With debug-do53-queries-refused, a server whose encrypted transports
+	// all failed to start would answer queries over nothing. It stops instead
+	// (Shutdowner, in its own goroutine: it waits for the engines, this one
+	// among them). ParseConfig has already refused the configs that cannot
+	// work; this catches what only the start shows. Each encrypted engine
+	// binds its listeners before it returns, and fails when none bound.
+	if refuseQueries {
+		if err := do53QueriesRefusedStartError(certKey, certReason, encStarted); err != nil {
+			lgDns.Error("DnsEngine: refusing to run", "err", err)
+			go Shutdowner(conf, err.Error())
+			return err
+		}
+		lgDns.Info("DnsEngine: debug-do53-queries-refused: queries are answered over the encrypted transports", "transports", encStarted)
 	}
 	// Transport/Cert: encrypted transports are configured but the cert/key
 	// could not be loaded, so those listeners did not start (owned here,
