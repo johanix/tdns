@@ -59,6 +59,7 @@ const (
 	// per (Category, Subtype), and these two must not read alike.
 	ErrSubImrForwardZone     // Config: a forward zone is quarantined; names under it SERVFAIL
 	ErrSubImrForwardUpstream // Config: forward upstreams are quarantined; their zones still serve
+	ErrSubApiSocket          // Transport: the local admin socket (apiserver.socket) is not served
 )
 
 var errSubtypeName = map[ErrorSubtype]string{
@@ -69,6 +70,7 @@ var errSubtypeName = map[ErrorSubtype]string{
 	ErrSubImrForward:         "ImrForward",
 	ErrSubImrForwardZone:     "ImrForwardZone",
 	ErrSubImrForwardUpstream: "ImrForwardUpstream",
+	ErrSubApiSocket:          "ApiSocket",
 }
 
 func (s ErrorSubtype) String() string {

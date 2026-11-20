@@ -807,6 +807,14 @@ type ApiServerConf struct {
 	Agent     ApiServerAppConf
 	// MSA       ApiServerAppConf
 	Combiner ApiServerAppConf
+
+	// Socket is the path of the local admin socket (apiserver.socket), or ""
+	// for none. The management API is served there as well as on Addresses,
+	// with no TLS and no API key: whoever can open the socket is admin, so
+	// file permissions are the authentication. The daemon creates the socket
+	// with mode 0600 and refuses a directory that group or others can enter.
+	// See api_socket.go and docs/2026-11-20-api-pinning-mtls-roles-design.md.
+	Socket string
 }
 
 type ApiServerAppConf struct {

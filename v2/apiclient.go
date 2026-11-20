@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"strings"
 
@@ -26,6 +27,24 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient 
 		BaseUrl:    baseurl,
 		apiKey:     apikey,
 		AuthMethod: authmethod,
+	}
+
+	// unix:///path is the daemon's local admin socket. Every request is
+	// dialled to that socket whatever the URL's host says, so the URL the rest
+	// of this client builds is plain http on a fixed host. No TLS, and no key
+	// is needed: the daemon authenticates the socket by file permissions.
+	if path, ok := unixSocketPath(baseurl); ok {
+		api.Socket = path
+		api.BaseUrl = "http://localhost/api/v1"
+		api.Client = &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var d net.Dialer
+					return d.DialContext(ctx, "unix", path)
+				},
+			},
+		}
+		return &api
 	}
 
 	tlsconfig := &tls.Config{}
@@ -105,6 +124,19 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient 
 	//	}
 
 	return &api
+}
+
+// unixSocketPath returns the socket path of a unix:///path base URL.
+func unixSocketPath(baseurl string) (string, bool) {
+	const prefix = "unix://"
+	if !strings.HasPrefix(baseurl, prefix) {
+		return "", false
+	}
+	p := strings.TrimPrefix(baseurl, prefix)
+	if !strings.HasPrefix(p, "/") {
+		return "", false
+	}
+	return p, true
 }
 
 // request helper function
@@ -356,6 +388,9 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		if strings.Contains(lastErr.Error(), "connection refused") {
 			// Show which URLs were tried for better debugging
 			msg = fmt.Sprintf("Connection refused. Server process probably not running.\nTried addresses: %v\nBase URL: %s%s", addressesToTry, api.BaseUrl, endpoint)
+			if api.Socket != "" {
+				msg = fmt.Sprintf("Cannot reach the local admin socket %s: %v\n(daemon not running, or the socket is not yours to open)", api.Socket, lastErr)
+			}
 		} else {
 			msg = fmt.Sprintf("Error from API request %s: %v", method, lastErr)
 		}
@@ -515,6 +550,9 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 		if strings.Contains(lastErr.Error(), "connection refused") {
 			// Show which URLs were tried for better debugging
 			msg = fmt.Sprintf("Connection refused. Server process probably not running.\nTried addresses: %v\nBase URL: %s%s", addressesToTry, api.BaseUrl, endpoint)
+			if api.Socket != "" {
+				msg = fmt.Sprintf("Cannot reach the local admin socket %s: %v\n(daemon not running, or the socket is not yours to open)", api.Socket, lastErr)
+			}
 		} else {
 			msg = fmt.Sprintf("Error from API request %s: %v", method, lastErr)
 		}
