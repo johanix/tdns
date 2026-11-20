@@ -463,8 +463,11 @@ the `.private` file:
 - **`bulk-export --format jwk` fails the run** on a key it cannot write.
   `--skip-unsupported` leaves such keys out instead. It is loud about it: one
   `WARNING` line per key on stderr, naming zone, keyid, algorithm and reason,
-  and a closing `WARNING: N key(s) NOT written` line, also when no key was
-  written at all. The exit status stays 0, since the skip was asked for. It
+  and a closing `WARNING: N key(s) NOT written by this run` line, also when
+  no key was written at all. Files already in the export directory from an
+  earlier export (a PEM or BIND file of the same key, say) are left as they
+  are: the line speaks for this run, not for the directory. The exit status
+  stays 0, since the skip was asked for. It
   is refused with any other format. A key whose private and
   public halves do not match is a broken row, not an unsupported one, and
   fails the run either way.

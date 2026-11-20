@@ -140,6 +140,51 @@ func privateKeyFromJWK(k *core.JSONWebKey) (crypto.PrivateKey, error) {
 	return k.PrivateKey()
 }
 
+// checkPQKeyFitsRR covers what checkKeyTypeMatchesAlgorithm leaves open,
+// the Ed448 and ML-DSA algorithms: the stored key must be of the type the
+// RR's algorithm uses, and its public key the RR's. Other algorithms pass;
+// the classical ones are checked by checkKeyTypeMatchesAlgorithm and, for a
+// key that gets as far as a JWK, by the import rules the export runs on its
+// own output.
+func checkPQKeyFitsRR(rr *dns.DNSKEY, priv crypto.PrivateKey) error {
+	var want string
+	var got []byte
+	switch rr.Algorithm {
+	case dns.ED448:
+		want = "an Ed448 key"
+		if p, ok := priv.(ed448.PrivateKey); ok {
+			got = p.Public().(ed448.PublicKey)
+		}
+	case 18:
+		want = "an ML-DSA-44 key"
+		if p, ok := priv.(*mldsa44.PrivateKey); ok {
+			got = p.Public().(*mldsa44.PublicKey).Bytes()
+		}
+	case 200:
+		want = "an ML-DSA-65 key"
+		if p, ok := priv.(*mldsa65.PrivateKey); ok {
+			got = p.Public().(*mldsa65.PublicKey).Bytes()
+		}
+	case 201:
+		want = "an ML-DSA-87 key"
+		if p, ok := priv.(*mldsa87.PrivateKey); ok {
+			got = p.Public().(*mldsa87.PublicKey).Bytes()
+		}
+	default:
+		return nil
+	}
+	if got == nil {
+		return fmt.Errorf("stored private key is %T, but the public RR declares algorithm %d, which needs %s: "+
+			"the keystore row is inconsistent", priv, rr.Algorithm, want)
+	}
+	pub, err := base64.StdEncoding.DecodeString(rr.PublicKey)
+	if err != nil || !bytes.Equal(pub, got) {
+		return fmt.Errorf("stored private key is not the key of the public RR (algorithm %d): "+
+			"the keystore row is inconsistent", rr.Algorithm)
+	}
+	return nil
+}
+
 // keyJWKFromRR builds the DNSSEC JWK of the right kind for wantType.
 func keyJWKFromRR(wantType uint16, rr *dns.DNSKEY, priv *core.JSONWebKey) (*core.DNSSECJWK, error) {
 	if wantType == dns.TypeKEY {
@@ -200,6 +245,12 @@ func JWKForExport(wantType uint16, keyRR, privPEM string) (string, error) {
 		return "", fmt.Errorf("unusable stored private key: %v", err)
 	}
 	if err := checkKeyTypeMatchesAlgorithm(rr.Algorithm, priv); err != nil {
+		return "", err
+	}
+	// Before privateJWKFromKey, which refuses a seedless ML-DSA key as
+	// "unsupported" (skippable): a row whose key is not the RR's is broken,
+	// and --skip-unsupported must not hide that.
+	if err := checkPQKeyFitsRR(rr, priv); err != nil {
 		return "", err
 	}
 	pj, err := privateJWKFromKey(priv)
