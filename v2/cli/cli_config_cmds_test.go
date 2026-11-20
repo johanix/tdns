@@ -74,6 +74,23 @@ func TestFreeName(t *testing.T) {
 	}
 }
 
+// TestDerivedNameIsValidated: a derived name that is taken gets a digit
+// appended, which can push it past 32 characters. It is refused like an
+// invalid --name, not written.
+func TestDerivedNameIsValidated(t *testing.T) {
+	long := strings.Repeat("a", 32) // valid, and the most a name may be
+	existing := []ApiDetails{{Name: "tdns-auth"}, {Name: long, Role: "auth"}}
+	var entry ApiDetails
+	var res AddResult
+	err := chooseEntryName(&entry, &res, "auth", existing, AddOptions{DaemonConfig: "/etc/tdns/tdns-" + long + ".yaml"})
+	if err == nil || !strings.Contains(err.Error(), "--name") {
+		t.Fatalf("err = %v, entry = %+v; want a refusal pointing at --name", err, entry)
+	}
+	if entry.Name != "" {
+		t.Errorf("entry.Name = %q, want it left empty", entry.Name)
+	}
+}
+
 func TestDetectDaemonRole(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -94,6 +111,10 @@ func TestDetectDaemonRole(t *testing.T) {
 		{name: "service.name wins over the file name", service: "TDNS-AGENT", hasService: true, path: "/etc/tdns/tdns-auth.yaml", want: "agent", wantWarn: true},
 		{name: "undecidable", path: "/etc/tdns/foo.yaml", wantErrIn: "use --role"},
 		{name: "mp daemon refused", service: "TDNS-MPAGENT", hasService: true, path: "/etc/tdns/tdns-mpagent.yaml", wantErrIn: "tdns-mp"},
+		// A hyphen splits "mp" off as a word of its own, which used to leave
+		// "agent" to be read as a tdns agent.
+		{name: "hyphenated mp service.name refused", service: "TDNS-MP-AGENT", hasService: true, path: "/etc/tdns/x.yaml", wantErrIn: "tdns-mp"},
+		{name: "hyphenated mp file name refused", path: "/etc/tdns/tdns-mp-agent.yaml", wantErrIn: "tdns-mp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, warn, err := detectDaemonRole(tc.service, tc.hasService, tc.hasImr, tc.path)
@@ -328,6 +349,19 @@ func TestReadDaemonApi(t *testing.T) {
 	writeFile(t, p3, "service:\n   name: TDNS-AUTH\ninclude:\n   - api.yaml\n")
 	if got, err = ReadDaemonApi(p3, ""); err != nil || got.Addresses[0] != "127.0.0.1:9000" {
 		t.Errorf("include: %+v, %v", got, err)
+	}
+
+	// An include that fails to load is named in the error when the key it
+	// would have supplied is missing: the addresses are only in the include.
+	// (A missing include is skipped as an optional overlay; a present but
+	// broken one is what fails.)
+	broken := filepath.Join(dir, "api-broken.yaml")
+	writeFile(t, broken, "apiserver:\n   addresses: [ 127.0.0.1:9001\n")
+	p5 := filepath.Join(dir, "tdns-auth5.yaml")
+	writeFile(t, p5, "service:\n   name: TDNS-AUTH\ninclude:\n   - api-broken.yaml\n")
+	_, err = ReadDaemonApi(p5, "")
+	if err == nil || !strings.Contains(err.Error(), "apiserver.addresses") || !strings.Contains(err.Error(), "include:") {
+		t.Errorf("failed include: err = %v, want it to name both the missing addresses and the include failure", err)
 	}
 
 	// Missing pieces are errors that say which.

@@ -54,6 +54,17 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 	}
 	out := &DaemonApi{ConfigFile: abs}
 
+	// fail returns err with the warnings collected so far attached. After a
+	// failed include they are the likeliest reason a key reads as unset (the
+	// addresses may live only in the include that did not load), and on an
+	// error return they would otherwise be lost with the result.
+	fail := func(err error) (*DaemonApi, error) {
+		if len(out.Warnings) == 0 {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w (%s)", err, strings.Join(out.Warnings, "; "))
+	}
+
 	v, err := readDaemonViper(abs)
 	if err != nil {
 		return nil, err
@@ -62,17 +73,17 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 		out.Warnings = append(out.Warnings, fmt.Sprintf(
 			"include: processing failed (%v); read the apiserver: block from the main file only", err))
 		if v, err = readDaemonViper(abs); err != nil {
-			return nil, err
+			return fail(err)
 		}
 	}
 
 	out.Addresses = v.GetStringSlice("apiserver.addresses")
 	if len(out.Addresses) == 0 {
-		return nil, fmt.Errorf("%s: apiserver.addresses is not set, so this daemon has no management API to address", abs)
+		return fail(fmt.Errorf("%s: apiserver.addresses is not set, so this daemon has no management API to address", abs))
 	}
 	out.ApiKey = v.GetString("apiserver.apikey")
 	if out.ApiKey == "" {
-		return nil, fmt.Errorf("%s: apiserver.apikey is not set", abs)
+		return fail(fmt.Errorf("%s: apiserver.apikey is not set", abs))
 	}
 	out.UseTLS = true
 	if v.IsSet("apiserver.usetls") {
@@ -86,7 +97,7 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 	role, warn, err := detectDaemonRole(
 		v.GetString("service.name"), v.IsSet("service"), v.IsSet("imrengine"), abs)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	if warn != "" {
 		out.Warnings = append(out.Warnings, warn)
@@ -117,7 +128,11 @@ func readDaemonViper(abs string) (*viper.Viper, error) {
 //
 // Words are matched whole, so TDNS-MPAGENT is not an agent. A tdns-mp daemon
 // is refused outright: tdns-ncli drives the tdns daemons only, and a wrong
-// guess here would file an mp daemon's API under the wrong command tree.
+// guess here would file an mp daemon's API under the wrong command tree. That
+// covers the glued names (TDNS-MPAGENT, the samples' form) and the word "mp"
+// on its own, because the split on hyphens turns TDNS-MP-AGENT and
+// tdns-mp-agent.yaml into "tdns", "mp", "agent", which would otherwise read as
+// an agent.
 //
 // When the evidence does not settle it the answer is an error asking for
 // --role, never a guess: a daemon filed under the wrong role gets the wrong
@@ -127,7 +142,7 @@ func detectDaemonRole(serviceName string, hasService, hasImrEngine bool, path st
 
 	for _, w := range append(splitWords(serviceName), splitWords(base)...) {
 		switch strings.TrimRight(w, "0123456789") {
-		case "mpagent", "mpsigner", "mpcombiner", "mpauditor":
+		case "mp", "mpagent", "mpsigner", "mpcombiner", "mpauditor":
 			return "", "", fmt.Errorf("%s looks like a tdns-mp daemon (%q); tdns-ncli drives the tdns daemons (auth, agent, imr) only -- use --role to override", path, w)
 		}
 	}

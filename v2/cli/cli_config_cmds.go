@@ -348,6 +348,12 @@ func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []
 			base = role
 		}
 		name := freeName(base, taken)
+		// freeName can push a derived name past what a command word may be
+		// (a 32-character name that is taken gets a digit appended). --name is
+		// checked below; the derived name must be held to the same rule.
+		if !validInstanceName(name) {
+			return fmt.Errorf("the name derived from the file name, %q, is not usable (lower-case letters, digits and hyphens, starting with a letter, at most 32 characters); choose one with --name", name)
+		}
 		if name != base {
 			res.Notes = append(res.Notes, fmt.Sprintf("the name %q is taken; using %q (--name chooses another)", base, name))
 		}
