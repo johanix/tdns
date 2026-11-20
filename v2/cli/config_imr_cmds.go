@@ -42,7 +42,7 @@ func NewImrConfigCmdFor(role string) *cobra.Command {
 		Short: "Validate or generate a tdns-imr configuration",
 	}
 	c.AddCommand(newImrConfigCheckCmd(role))
-	c.AddCommand(newImrConfigMweCmd())
+	c.AddCommand(newImrConfigMweCmd(role))
 	c.AddCommand(newImrConfigStatusCmd(role))
 	return c
 }
@@ -372,34 +372,66 @@ func correlateImrApiServer(cfg *tdns.Config, status tdns.ConfigResponse, rep *cc
 // imr config mwe
 // ---------------------------------------------------------------------------
 
-func newImrConfigMweCmd() *cobra.Command {
+func newImrConfigMweCmd(role string) *cobra.Command {
 	var dir string
 	c := &cobra.Command{
 		Use:   "mwe",
 		Short: "Generate a minimal working example config (+ cert) for tdns-imr",
 		Long: `Generate a Minimal Working Example configuration for tdns-imr.
 
-Writes a single self-contained YAML to <dir>/tdns-imr.yaml (or <dir>/tdns-imr.yaml.mwe
-if that file already exists), and generates a self-signed cert/key pair under
-<dir>/certs unless one is already there. The resolver listens on IPv4 and IPv6
-localhost; DNSSEC validation is disabled so it resolves out of the box (the
-config shows, commented, how to turn it into a validating resolver). The
-generated tree passes ` + "`tdns-cli imr config check`" + `.`,
+Writes a single self-contained YAML to this daemon's config file: the
+config-file: of its apiservers entry when it has one, else <dir>/tdns-imr.yaml.
+If that file already exists the MWE goes to <file>.mwe instead. A self-signed
+cert/key pair is generated under <dir>/certs unless one is already there. The
+resolver listens on IPv4 and IPv6 localhost; DNSSEC validation is disabled so it
+resolves out of the box (the config shows, commented, how to turn it into a
+validating resolver). The generated tree passes ` + "`tdns-cli imr config check`" + `.
+
+An extra instance (tdns-ncli imr2 config mwe) needs a config-file: on its entry,
+or --dir: without either the only name there is to write is the canonical
+resolver's tdns-imr.yaml.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			runImrConfigMwe(dir)
+			cfgPath, err := imrMwePath(role, dir, cmd.Flags().Changed("dir"))
+			if err != nil {
+				cliFatalf("%v", err)
+			}
+			runImrConfigMwe(role, cfgPath)
 		},
 	}
-	c.Flags().StringVar(&dir, "dir", "/etc/tdns", "base directory for the generated config and cert")
+	c.Flags().StringVar(&dir, "dir", "/etc/tdns", "base directory for the generated config and cert (default: the directory of this daemon's config-file:, else /etc/tdns)")
 	return c
 }
 
-func runImrConfigMwe(dir string) {
-	dir = filepath.Clean(dir)
-	cfgPath := filepath.Join(dir, "tdns-imr.yaml")
+// imrMwePath is the file `config mwe` writes for role. It is the entry's
+// config-file: when there is one (with --dir moving it to another directory),
+// else tdns-imr.yaml in dir.
+//
+// An extra instance with neither a config-file: nor --dir is refused: the
+// fallback name is the canonical resolver's file, so writing it would create
+// the wrong daemon's config (in /etc/tdns, next to the real one).
+func imrMwePath(role, dir string, dirGiven bool) (string, error) {
+	cf := ""
+	if ad := apiDetailsForRole(role); ad != nil {
+		cf = ad.ConfigFile
+	}
+	switch {
+	case cf != "":
+		if !dirGiven {
+			return filepath.Clean(cf), nil
+		}
+		return filepath.Join(filepath.Clean(dir), filepath.Base(cf)), nil
+	case role != "imr" && !dirGiven:
+		return "", fmt.Errorf("%s has no config-file: in the CLI config, so config mwe does not know where its config goes; set config-file: on its apiservers entry, or give --dir", role)
+	}
+	return filepath.Join(filepath.Clean(dir), "tdns-imr.yaml"), nil
+}
+
+func runImrConfigMwe(role, cfgPath string) {
+	dir := filepath.Dir(cfgPath)
 	if _, err := os.Stat(cfgPath); err == nil {
+		existing := cfgPath
 		cfgPath += ".mwe"
-		fmt.Printf("Config %s already exists; writing MWE to %s instead.\n",
-			filepath.Join(dir, "tdns-imr.yaml"), cfgPath)
+		fmt.Printf("Config %s already exists; writing MWE to %s instead.\n", existing, cfgPath)
 	}
 
 	certsDir := filepath.Join(dir, "certs")
@@ -436,12 +468,24 @@ func runImrConfigMwe(dir string) {
 		fmt.Printf("Reused cert/key:   %s , %s\n", certFile, keyFile)
 	}
 
-	fmt.Printf("\nTo let `tdns-cli imr ...` reach this server, add to your tdns-cli.yaml:\n\n")
-	fmt.Printf("  apiservers:\n")
-	fmt.Printf("     - name:       tdns-imr\n")
+	if role == "imr" {
+		fmt.Printf("\nTo let `tdns-cli imr ...` reach this server, add to your tdns-cli.yaml:\n\n")
+		fmt.Printf("  apiservers:\n")
+		fmt.Printf("     - name:       tdns-imr\n")
+	} else {
+		// An extra instance lives in tdns-ncli's own config, where its entry
+		// already exists; say what it should hold.
+		fmt.Printf("\nThe CLI entry for %s should read:\n\n", role)
+		fmt.Printf("     - name:        %s\n", role)
+		fmt.Printf("       role:        imr\n")
+		fmt.Printf("       config-file: %s\n", strings.TrimSuffix(cfgPath, ".mwe"))
+	}
 	fmt.Printf("       baseurl:    https://127.0.0.1:%s/api/v1\n", apiPort)
 	fmt.Printf("       apikey:     %s\n", apiKey)
 	fmt.Printf("       authmethod: X-API-Key\n")
+	if role != "imr" {
+		fmt.Printf("\nThe MWE uses API port %s and DNS port %s. A second resolver on the same\nhost needs ports of its own: change them before starting it.\n", apiPort, dnsPort)
+	}
 	fmt.Printf("\nNext steps:\n")
 	fmt.Printf("  tdns-imr --config %s        # start the resolver\n", cfgPath)
 	fmt.Printf("  tdns-cli imr config check --serverconfig %s   # validate\n", cfgPath)

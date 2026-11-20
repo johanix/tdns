@@ -458,8 +458,10 @@ func renderSignalFromWeights(weights map[core.Transport]uint8) string {
 // flushViaApi flushes the cache of a SEPARATE tdns-imr daemon, for the case
 // where this process has no cache of its own to flush.
 //
-// The role is "imr", the same one the forward and stub trees already use
-// against the standalone daemon.
+// The daemon is the one the command's tree targets (imrRoleFor(cmd)): "imr"
+// on the canonical tree and in the tdns-imr shell, the instance's own name on
+// an instance tree. Forward and stub reach the same daemon through the role
+// they were built with.
 
 // flushViaApiWanted reports whether this process has to ask a DAEMON to flush
 // rather than flushing a cache of its own.

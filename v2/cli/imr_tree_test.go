@@ -303,6 +303,45 @@ func TestImrInstanceConfigCheckUsesItsOwnConfigFile(t *testing.T) {
 	}
 }
 
+// `imr2 config mwe` writes imr2's own config file, never the canonical
+// tdns-imr.yaml; an instance with no config-file: and no --dir is refused.
+func TestImrConfigMwePathPerInstance(t *testing.T) {
+	saved := apiConfig
+	t.Cleanup(func() { apiConfig = saved })
+	withCleanRoleRegistry(t)
+	RegisterRole("imr2", "imr2")
+	RegisterRole("imr3", "imr3")
+	apiConfig = &CliConf{ApiServers: []ApiDetails{
+		{Name: "tdns-imr", BaseURL: "http://127.0.0.1:8080/api/v1"},
+		{Name: "imr2", Role: "imr", BaseURL: "http://127.0.0.1:8081/api/v1", ConfigFile: "/etc/tdns/tdns-imr2.yaml"},
+		{Name: "imr3", Role: "imr", BaseURL: "http://127.0.0.1:8082/api/v1"},
+	}}
+	for _, tc := range []struct {
+		role, dir string
+		dirGiven  bool
+		want      string
+		wantErr   bool
+	}{
+		{role: "imr", dir: "/etc/tdns", want: "/etc/tdns/tdns-imr.yaml"},
+		{role: "imr", dir: "/tmp/x", dirGiven: true, want: "/tmp/x/tdns-imr.yaml"},
+		{role: "imr2", dir: "/etc/tdns", want: "/etc/tdns/tdns-imr2.yaml"},
+		{role: "imr2", dir: "/tmp/x", dirGiven: true, want: "/tmp/x/tdns-imr2.yaml"},
+		{role: "imr3", dir: "/etc/tdns", wantErr: true},
+		{role: "imr3", dir: "/tmp/x", dirGiven: true, want: "/tmp/x/tdns-imr.yaml"},
+	} {
+		got, err := imrMwePath(tc.role, tc.dir, tc.dirGiven)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("imrMwePath(%q, %q, %v) = %q, want an error", tc.role, tc.dir, tc.dirGiven, got)
+			}
+			continue
+		}
+		if err != nil || got != tc.want {
+			t.Errorf("imrMwePath(%q, %q, %v) = %q, %v; want %q", tc.role, tc.dir, tc.dirGiven, got, err, tc.want)
+		}
+	}
+}
+
 // ---------------------------------------------------------------- source guards
 
 // The imr commands' API calls must never carry the literal role "imr" again:
