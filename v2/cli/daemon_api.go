@@ -29,6 +29,11 @@ type DaemonApi struct {
 	ApiKey string
 	// Socket is apiserver.socket, the daemon's local admin socket, or "".
 	Socket string
+	// CertFile is apiserver.certfile: the certificate the daemon presents,
+	// whose pin a TCP entry records.
+	CertFile string
+	// AccessFile is apiserver.access-file, or "".
+	AccessFile string
 	// UseTLS is apiserver.usetls, which the daemon defaults to true when the
 	// key is absent (v2/parseconfig.go), so absent must read as true here too.
 	UseTLS bool
@@ -81,6 +86,8 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 
 	out.Addresses = v.GetStringSlice("apiserver.addresses")
 	out.Socket = v.GetString("apiserver.socket")
+	out.CertFile = v.GetString("apiserver.certfile")
+	out.AccessFile = v.GetString("apiserver.access-file")
 	if len(out.Addresses) == 0 && out.Socket == "" {
 		return fail(fmt.Errorf("%s: neither apiserver.addresses nor apiserver.socket is set, so this daemon has no management API to address", abs))
 	}

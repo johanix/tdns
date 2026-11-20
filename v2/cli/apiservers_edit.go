@@ -161,23 +161,36 @@ func detectLayout(block []string) itemLayout {
 
 // renderEntry writes e as one "- key: value" list item in the given layout.
 func renderEntry(e ApiDetails, lay itemLayout) string {
-	type kv struct{ k, v string }
-	kvs := []kv{{"name", e.Name}}
-	if e.Role != "" {
-		kvs = append(kvs, kv{"role", e.Role})
+	type kv struct {
+		k, v string
+		raw  bool // already YAML (a flow list): written as it stands
 	}
-	kvs = append(kvs, kv{"baseurl", e.BaseURL})
+	kvs := []kv{{k: "name", v: e.Name}}
+	if e.Role != "" {
+		kvs = append(kvs, kv{k: "role", v: e.Role})
+	}
+	kvs = append(kvs, kv{k: "baseurl", v: e.BaseURL})
 	// A socket entry has no key: the daemon authenticates the socket by file
 	// permissions. An empty apikey: line would only invite filling it in.
 	if e.ApiKey != "" {
-		kvs = append(kvs, kv{"apikey", e.ApiKey})
+		kvs = append(kvs, kv{k: "apikey", v: e.ApiKey})
 	}
-	kvs = append(kvs, kv{"authmethod", e.AuthMethod})
+	kvs = append(kvs, kv{k: "authmethod", v: e.AuthMethod})
+	if e.TLSAuth != "" {
+		kvs = append(kvs, kv{k: "tlsauth", v: e.TLSAuth})
+	}
+	if len(e.Pins) > 0 {
+		q := make([]string, len(e.Pins))
+		for i, p := range e.Pins {
+			q[i] = `"` + p + `"` // base64: quoted, so a leading + or / reads as text
+		}
+		kvs = append(kvs, kv{k: "pins", v: "[ " + strings.Join(q, ", ") + " ]", raw: true})
+	}
 	if e.RootCA != "" {
-		kvs = append(kvs, kv{"rootca", e.RootCA})
+		kvs = append(kvs, kv{k: "rootca", v: e.RootCA})
 	}
 	if e.ConfigFile != "" {
-		kvs = append(kvs, kv{"config-file", e.ConfigFile})
+		kvs = append(kvs, kv{k: "config-file", v: e.ConfigFile})
 	}
 
 	var sb strings.Builder
@@ -192,7 +205,11 @@ func renderEntry(e ApiDetails, lay itemLayout) string {
 		if lay.valueCol > 0 && lay.valueCol > len(key) {
 			pad = lay.valueCol - len(key)
 		}
-		sb.WriteString(key + strings.Repeat(" ", pad) + yamlScalar(p.v) + "\n")
+		val := yamlScalar(p.v)
+		if p.raw {
+			val = p.v
+		}
+		sb.WriteString(key + strings.Repeat(" ", pad) + val + "\n")
 	}
 	return sb.String()
 }

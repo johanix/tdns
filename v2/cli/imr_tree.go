@@ -90,5 +90,8 @@ the CLI config.`, role, role),
 		cloneCmdTree(ImrFlushCmd),
 		stats,
 	)
+	// The daemon's access file, managed from its host (tdns-ncli only: the
+	// factories are only used for tdns-ncli's instance trees).
+	c.AddCommand(NewClientCmd(role))
 	return c
 }
