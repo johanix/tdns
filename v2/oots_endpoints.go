@@ -129,6 +129,29 @@ func (e errEndpointUnavailable) Error() string {
 	return fmt.Sprintf("%s: no usable address of the %s endpoint at %s", e.server, core.TransportToString[e.transport], e.target)
 }
 
+// errEndpointSuspectFamily is an attempt not made: the address it would dial
+// is of a family held suspect that selection reserved no probe for
+// (suspectWithoutProbe).
+type errEndpointSuspectFamily struct {
+	server, target string
+	transport      core.Transport
+}
+
+func (e errEndpointSuspectFamily) Error() string {
+	return fmt.Sprintf("%s: the %s endpoint at %s is of a suspect address family, with no probe reserved", e.server, core.TransportToString[e.transport], e.target)
+}
+
+// errEndpointTried is an attempt not made: an extra pass's tuple would dial
+// an endpoint the pass before tried (attemptSelection).
+type errEndpointTried struct {
+	server, target string
+	transport      core.Transport
+}
+
+func (e errEndpointTried) Error() string {
+	return fmt.Sprintf("%s: the %s endpoint at %s was tried in the pass before", e.server, core.TransportToString[e.transport], e.target)
+}
+
 // endpointFor is where an attempt for transport t at the server's own address
 // addr goes, for a query to zone (nil when none is known). At the server's
 // own name it is addr, at the endpoint's port. At a target it is the best
@@ -250,15 +273,19 @@ func (imr *Imr) clientDefaultPort(t core.Transport) uint16 {
 // chooseEndpointAddr picks among a target's addresses as prioritizeServers
 // does among a server's own: never one on this host unless
 // allow-loopback-nameservers is set, never one of an address family not in
-// use or held suspect, never one in the target's backoff or lame for zone at
-// this port and transport; of the rest the lowest RTT the target holds, an
-// address with no sample counting as unprobedRTTSentinel. "" when none is
-// left.
+// use, never one in the target's backoff or lame for zone at this port and
+// transport; of the rest the lowest RTT the target holds, an address with no
+// sample counting as unprobedRTTSentinel. An address of a family held suspect
+// is picked only when no other is left: selection then lets the tuple through
+// as that family's recovery probe (ShouldProbe), as it does a nameserver's own
+// address, and tryServer dials it only for a tuple selection decided on that
+// family. "" when none is left.
 func (imr *Imr) chooseEndpointAddr(target *cache.AuthServer, zone *cache.Zone, addrs []string, port uint16, t core.Transport) string {
 	allowHostLocal := imr.allowHostLocalServers()
 	type cand struct {
-		addr string
-		rtt  time.Duration
+		addr    string
+		rtt     time.Duration
+		suspect bool
 	}
 	var cands []cand
 	for _, a := range addrs {
@@ -268,9 +295,6 @@ func (imr *Imr) chooseEndpointAddr(target *cache.AuthServer, zone *cache.Zone, a
 		if !target.AllowsAddrFamily(a) {
 			continue
 		}
-		if imr.FamilyTracker != nil && imr.FamilyTracker.IsSuspect(cache.FamilyOf(a)) {
-			continue
-		}
 		if !endpointUsable(target, zone, a, port, t) {
 			continue
 		}
@@ -278,12 +302,17 @@ func (imr *Imr) chooseEndpointAddr(target *cache.AuthServer, zone *cache.Zone, a
 		if !ok {
 			rtt = unprobedRTTSentinel
 		}
-		cands = append(cands, cand{a, rtt})
+		cands = append(cands, cand{a, rtt, imr.FamilyTracker.IsSuspect(cache.FamilyOf(a))})
 	}
 	if len(cands) == 0 {
 		return ""
 	}
-	sort.SliceStable(cands, func(i, j int) bool { return cands[i].rtt < cands[j].rtt })
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].suspect != cands[j].suspect {
+			return !cands[i].suspect
+		}
+		return cands[i].rtt < cands[j].rtt
+	})
 	return cands[0].addr
 }
 
@@ -478,19 +507,25 @@ func (tr *endpointAddrTracker) get(target string, now time.Time) (srv *cache.Aut
 // query: every family but one that failed and whose retry time is still to
 // come, so that the refresh of one family does not retry the other early.
 // ok is false when a lookup is in flight, when the last one left the target
-// without a live address less than endpointAddrRetry ago, when no family is
-// left to query, or when the target has live addresses and no family of it is
-// due (endpointFamily.due): the caller read it stale before another lookup
-// refreshed it.
+// without a live address less than endpointAddrRetry ago and no family of it
+// is due (endpointFamily.due), when no family is left to query, or when the
+// target has live addresses and no family is due: the caller read it stale
+// before another lookup refreshed it. A family that is due is looked up
+// although a later lookup of the other family, denied, left the target
+// without a live address a moment ago.
 func (tr *endpointAddrTracker) begin(target string, now time.Time) (fams []cache.AddressFamily, ok bool) {
 	key := core.CanonicalizeName(target)
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
-	if tr.pending[key] != nil || now.Before(tr.retry[key]) {
+	if tr.pending[key] != nil {
 		return nil, false
 	}
 	e := tr.entries[key]
-	if e != nil && len(e.live(now)) > 0 && !e.due(now) {
+	due := e != nil && e.due(now)
+	if now.Before(tr.retry[key]) && !due {
+		return nil, false
+	}
+	if e != nil && len(e.live(now)) > 0 && !due {
 		return nil, false
 	}
 	for _, fam := range endpointFamilies {
@@ -816,21 +851,24 @@ func redirectTargetName(d endpointDial) string {
 }
 
 // targetLookupWatch follows the lookups of the targets that the servers in
-// serverMap that have an address send a transport to, a transport a query
-// for qname at privacy may use (candidateTransports): a strict query never
-// waits for the target of a udp endpoint, which it cannot dial. Each call
+// serverMap with an address selection may query (mayQueryAddr) send a
+// transport to, a transport a query for qname at privacy may use
+// (candidateTransports): a strict query never waits for the target of a udp
+// endpoint, which it cannot dial, nor any query for one reached only through
+// a nameserver on this host that it may not query. Each call
 // returns the lookups running then, a channel per target closed when its
 // lookup ends, and whether a lookup of one of the targets has ended since the
 // call before (endpointAddrTracker.lookupState). The first call reads where
 // things stand.
 func (imr *Imr) targetLookupWatch(serverMap map[string]*cache.AuthServer, qname string, privacy edns0.PrivacyLevel) func() (running map[string]<-chan struct{}, ended bool) {
 	last := map[string]uint64{}
+	allowHostLocal := imr.allowHostLocalServers()
 	return func() (map[string]<-chan struct{}, bool) {
 		running := map[string]<-chan struct{}{}
 		ended := false
 		seen := map[string]bool{}
 		for _, server := range serverMap {
-			if server == nil || len(server.GetAddrs()) == 0 {
+			if server == nil || !slices.ContainsFunc(server.GetAddrs(), func(a string) bool { return mayQueryAddr(server, a, allowHostLocal) }) {
 				continue
 			}
 			for _, t := range candidateTransports(server, qname, privacy) {

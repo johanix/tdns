@@ -112,7 +112,7 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	applyTransportMapWithPorts(s, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53: uint16(closed)})
 	m := new(dns.Msg)
 	m.SetQuestion("www.example.", dns.TypeA)
-	_, _, _, dial, err := imr.tryServer(context.Background(), s, nil, addr, core.TransportDo53, m, "www.example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown)
+	_, _, _, dial, err := imr.tryServer(context.Background(), s, nil, addr, core.TransportDo53, m, "www.example.", dns.TypeA, false, cache.ClassNone, attemptSelection{})
 	if err == nil {
 		t.Fatalf("tryServer to the closed port %d succeeded", closed)
 	}

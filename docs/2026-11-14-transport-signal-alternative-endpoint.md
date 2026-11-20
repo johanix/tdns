@@ -423,7 +423,9 @@ written; this section says how section 3's rules apply at a target.
   so it clears the family even when the other family's query fails. A
   lookup is claimed only while a family is due, checked when it is claimed,
   so a query that found the target due just before another lookup refreshed
-  it starts none. The
+  it starts none. A family that is due is looked up even when a later
+  lookup of the other family was denied and left the target without a live
+  address a moment ago. The
   target never takes glue, a same-named nameserver's addresses or a stub's,
   and it never carries a signal. The
   transport and port of an attempt still come from the redirecting
@@ -451,15 +453,26 @@ written; this section says how section 3's rules apply at a target.
   endpoint failed without a backoff (a refused DS query): the target is an
   endpoint the query has not tried. That includes a lookup the query's own
   server selection has just started, before or during the wait. It waits
-  only for targets that a transport the query may use is sent to: a strict
-  query never waits for a udp endpoint's target. A query held to the default
-  endpoints, as a target's address lookup is, never waits for a target.
+  only for targets that a transport the query may use is sent to, by a
+  nameserver it may query: a strict query never waits for a udp endpoint's
+  target, nor any query for a target reached only through a nameserver on
+  this host that it may not query. When nameservers with no signal yet are
+  waited for too, the two waits run side by side within the allowance, so
+  neither spends the other's time. An extra pass does not dial an endpoint
+  the pass before tried, even if a signal that changed since its selection
+  sends a tuple there. A query held to the default endpoints, as a target's
+  address lookup is, never waits for a target.
 - **The address family of an attempt.** Selection holds back a tuple whose
   address family is suspect, letting one through now and then as a probe,
   by the address the attempt would dial: a target's, not the glue's. If that
   changes before the attempt, as when a udp endpoint at a target whose
   address has gone into backoff gives way to the nameserver's own address,
-  an address of a suspect family is not dialed unless selection chose that
-  family.
+  or that family turns suspect in the meantime, an address of a suspect
+  family is dialed only as the probe selection reserved for that family. An
+  attempt refused this way sends nothing and does not count as tried, so an
+  extra pass decides on the family afresh. A target's address of a suspect
+  family is used only when the target has no other: selection then lets the
+  tuple through as that family's recovery probe, as it does a nameserver's
+  own address.
 - **Status output** lists each target on a line of its own, marked as a
   target.

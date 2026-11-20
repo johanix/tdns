@@ -94,7 +94,7 @@ func TestATargetSharedByTwoNameserversLearnsItsBackoffOnce(t *testing.T) {
 	}
 
 	// One answer through ns1: counted on the target, and as redirected on ns1.
-	if _, _, _, _, err := imr.tryServer(ctx, ns1, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err != nil {
+	if _, _, _, _, err := imr.tryServer(ctx, ns1, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{}); err != nil {
 		t.Fatalf("through ns1: %v", err)
 	}
 	if got := lastDial(dot); got != "192.0.2.53:1234" {
@@ -116,7 +116,7 @@ func TestATargetSharedByTwoNameserversLearnsItsBackoffOnce(t *testing.T) {
 
 	// The target's address fails through ns1.
 	dot.Set("example.", "192.0.2.53:1234", core.FakeResponse{Err: errors.New("i/o timeout")})
-	if _, _, _, _, err := imr.tryServer(ctx, ns1, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err == nil {
+	if _, _, _, _, err := imr.tryServer(ctx, ns1, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{}); err == nil {
 		t.Fatal("through ns1: want a failure")
 	}
 	for _, s := range []*cache.AuthServer{ns1, ns2} {
@@ -128,7 +128,7 @@ func TestATargetSharedByTwoNameserversLearnsItsBackoffOnce(t *testing.T) {
 		t.Fatal("the target's failure is not on its instance")
 	}
 	n := len(dot.Calls())
-	if _, _, _, _, err := imr.tryServer(ctx, ns2, nil, "192.0.2.2", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err == nil {
+	if _, _, _, _, err := imr.tryServer(ctx, ns2, nil, "192.0.2.2", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{}); err == nil {
 		t.Error("through ns2: an attempt at a target backed off through ns1")
 	}
 	if len(dot.Calls()) != n {
@@ -388,7 +388,7 @@ func TestAnotherPassWaitsForARunningTargetLookup(t *testing.T) {
 func TestAuthTransportsListsTargets(t *testing.T) {
 	imr, server, _, _, q := endpointTestRig(t)
 	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
-	if _, _, _, _, err := imr.tryServer(context.Background(), server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyUnknown); err != nil {
+	if _, _, _, _, err := imr.tryServer(context.Background(), server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{}); err != nil {
 		t.Fatal(err)
 	}
 	rep := imr.AuthTransportsSnapshot(nil, "", false)
@@ -863,10 +863,16 @@ func TestARefreshOfOneFamilyLeavesAFailedOneToItsRetry(t *testing.T) {
 
 	imr.endpointAddrs.finishLookup(dotTarget, first, failedAt, nil)
 
+	// The lookup is held until the test has its completion channel: one
+	// that ended first would leave no channel to take.
 	looked := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
 	saved := endpointAddrLookupHook
 	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) {
 		looked <- struct{}{}
+		<-release
 		return []string{"192.0.2.53", "2001:db8::54"}, time.Now().Add(time.Hour)
 	}
 	t.Cleanup(func() { endpointAddrLookupHook = saved })
@@ -875,8 +881,17 @@ func TestARefreshOfOneFamilyLeavesAFailedOneToItsRetry(t *testing.T) {
 	if running == nil {
 		t.Fatal("the refresh was not started")
 	}
-	<-looked
-	<-running
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-looked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refresh never queried")
+	}
+	select {
+	case <-running:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refresh never ended")
+	}
 	imr.endpointAddrs.mu.Lock()
 	v4 := *imr.endpointAddrs.entries[core.CanonicalizeName(dotTarget)].fams[cache.FamilyV4]
 	imr.endpointAddrs.mu.Unlock()
@@ -927,13 +942,13 @@ func TestAnAttemptWhoseFamilyTurnedSuspectIsNotMade(t *testing.T) {
 	targetServer(t, imr, dotTarget).RecordEndpointAddrFailure("192.0.2.53", 1234, core.TransportDo53, errors.New("read: connection refused"))
 
 	ctx := context.Background()
-	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "2001:db8::1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone, tuples[0].Family); err == nil {
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "2001:db8::1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{family: tuples[0].Family}); err == nil {
 		t.Error("the attempt was made")
 	}
 	if got := lastDial(do53); got != "" {
 		t.Errorf("dialed %s, an address of the suspect family", got)
 	}
-	_, _, _, ep, err := imr.tryServer(ctx, server, nil, "2001:db8::1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone, cache.FamilyV6)
+	_, _, _, ep, err := imr.tryServer(ctx, server, nil, "2001:db8::1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{family: cache.FamilyV6, probe: true})
 	if err != nil || ep.addr != "2001:db8::1" {
 		t.Errorf("the IPv6 probe: %+v %v, want it sent to the server's own address", ep, err)
 	}
@@ -952,4 +967,225 @@ func releaseOnWait(t *testing.T, release chan struct{}) {
 		anotherPassWaitHook = saved
 		once.Do(func() { close(release) })
 	})
+}
+
+// A target whose only address is of a suspect family is not dropped
+// (CodeRabbit on #1147): selection lets its tuple through as that family's
+// recovery probe, as it does a nameserver's own address, and the attempt
+// dials it. A tuple selection decided on another family does not.
+func TestASuspectTargetAddressIsProbed(t *testing.T) {
+	imr, server, dot, _, q := endpointTestRig(t)
+	server.SetAddrs([]string{"192.0.2.1"})
+	imr.FamilyTracker = cache.NewFamilyTracker(10*time.Minute, 10*time.Minute, time.Hour, 1)
+	imr.FamilyTracker.RecordResult("192.0.2.99", false)
+	if !imr.FamilyTracker.IsSuspect(cache.FamilyV4) {
+		t.Fatal("setup: IPv4 is not suspect")
+	}
+	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
+	serverMap := map[string]*cache.AuthServer{pathNS: server}
+
+	_, _, tuples := imr.prioritizeServers("example.", dns.TypeA, serverMap, edns0.PrivacyStrict)
+	if len(tuples) != 1 || tuples[0].Transport != core.TransportDoT || tuples[0].Family != cache.FamilyV4 {
+		t.Fatalf("selection %+v, want the DoT tuple to the target as the IPv4 probe", tuples)
+	}
+	if imr.FamilyTracker.ShouldProbe(cache.FamilyV4) {
+		t.Error("selection did not reserve the IPv4 probe")
+	}
+	ctx := context.Background()
+	if _, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{family: cache.FamilyV6}); err == nil {
+		t.Error("a tuple decided for IPv6 dialed the target's suspect IPv4 address")
+	}
+	_, _, _, ep, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{family: tuples[0].Family, probe: tuples[0].Probe})
+	if err != nil || ep.addr != "192.0.2.53" || lastDial(dot) != "192.0.2.53:1234" {
+		t.Errorf("the probe: %+v %v, dialed %q; want the target's address", ep, err, lastDial(dot))
+	}
+}
+
+// A signal wait keeps its time beside a target lookup (CodeRabbit on #1147):
+// with a redirected nameserver whose target's lookup runs past the budget,
+// and a nameserver with no signal yet, the two waits run side by side. The
+// signal lookup the wait starts comes in within the budget and is used,
+// rather than being started only once the target wait has spent it.
+func TestASignalWaitKeepsItsTimeBesideATargetLookup(t *testing.T) {
+	imr, server, serverMap := newStrictTestImr(t, time.Second)
+	ns1 := redirectedServerTo("ns1."+strictChildZone, "192.0.2.1", core.TransportDoT, dotTarget)
+	ns1.RecordEndpointAddrFailure("192.0.2.1", 0, core.TransportDoT, errors.New("read: connection refused"))
+	serverMap[cache.ServerKey(ns1.Name)] = ns1
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	saved := endpointAddrLookupHook
+	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) {
+		<-release
+		return nil, time.Time{}
+	}
+	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	imr.startEndpointLookup(dotTarget)
+	// The signal comes in a moment after the wait starts its lookup.
+	end := startSignalLookup(t, imr, server)
+	var once sync.Once
+	testHookSignalLookupStarted = func(owner string) {
+		if owner == strictChildOwner {
+			once.Do(func() { end(100*time.Millisecond, map[core.Transport]uint8{core.TransportDoT: 50}) })
+		}
+	}
+	t.Cleanup(func() { testHookSignalLookupStarted = nil })
+
+	sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "www."+strictChildZone, dns.TypeA, serverMap, edns0.PrivacyStrict, map[passTuple]bool{})
+	if sel == nil || len(sel.tuples) != 1 || sel.tuples[0].Server != server || sel.tuples[0].Transport != core.TransportDoT {
+		t.Fatalf("next pass %+v, want DoT to the nameserver whose signal came in", sel)
+	}
+}
+
+// An extra pass does not dial an endpoint the pass before tried (CodeRabbit on
+// #1147): its selection left that endpoint out, but the signal changed back
+// before the attempt, and the tuple would dial it again.
+func TestAnExtraPassDoesNotRedialAnEndpointTriedBefore(t *testing.T) {
+	imr, server, dot, _, q := endpointTestRig(t)
+	server.SetAddrs([]string{"192.0.2.1"})
+	serverMap := map[string]*cache.AuthServer{pathNS: server}
+	// The pass before tried the default endpoint; the target's address has
+	// come in since.
+	tried := map[passTuple]bool{{server, "192.0.2.1", 0, core.TransportDoT}: true}
+	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
+	ctx := context.Background()
+	sel := imr.anotherPassAfter(ctx, &signalWaitBudget{}, "example.", dns.TypeA, serverMap, edns0.PrivacyStrict, tried)
+	if sel == nil || len(sel.tuples) != 1 || len(sel.tried) != 1 || !sel.tried[passTuple{server, "192.0.2.1", 0, core.TransportDoT}] {
+		t.Fatalf("next pass %+v, want the DoT tuple to the target, with the endpoints the pass before tried", sel)
+	}
+	// The signal now sends DoT to the nameserver's own address again.
+	installTransportMap(server, map[string]uint8{"dot": 30}, nil, nil, cache.SignalViaLookup,
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+
+	_, _, _, _, err := imr.tryServer(ctx, server, sel.zone, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{family: sel.tuples[0].Family, tried: sel.tried})
+	var triedErr errEndpointTried
+	if !errors.As(err, &triedErr) {
+		t.Errorf("got %v, want the attempt refused as tried in the pass before", err)
+	}
+	if got := lastDial(dot); got != "" {
+		t.Errorf("dialed %s again", got)
+	}
+}
+
+// A family that failed is looked up at its retry time although a later
+// refresh of the other family was denied and left the target without a live
+// address (CodeRabbit on #1147): the target-wide retry that denial set holds
+// back only a target with no family due.
+func TestADueFamilyIsNotHeldBackByItsSiblingsDenial(t *testing.T) {
+	var tr endpointAddrTracker
+	t0 := time.Now()
+	tr.finishLookup(dotTarget, []familyLookup{
+		{family: cache.FamilyV4, failed: true},
+		{family: cache.FamilyV6, addrs: []string{"2001:db8::53"}, expire: t0.Add(5 * time.Second)},
+	}, t0, nil)
+	refresh := t0.Add(6 * time.Second)
+	if fams, ok := tr.begin(dotTarget, refresh); !ok || !slices.Equal(fams, []cache.AddressFamily{cache.FamilyV6}) {
+		t.Fatalf("setup: the AAAA's refresh claimed %v %v, want the AAAA alone", fams, ok)
+	}
+	tr.finishLookup(dotTarget, []familyLookup{{family: cache.FamilyV6}}, refresh, nil)
+	if began(tr.begin(dotTarget, t0.Add(20*time.Second))) {
+		t.Error("a lookup was claimed with no family due")
+	}
+	fams, ok := tr.begin(dotTarget, t0.Add(endpointAddrRetry))
+	if !ok || !slices.Contains(fams, cache.FamilyV4) {
+		t.Errorf("at the A's retry time: %v %v, want the A looked up", fams, ok)
+	}
+}
+
+// A pass does not wait for a target that only a nameserver selection may not
+// query sends a transport to (CodeRabbit on #1147): here one on this host,
+// with allow-loopback-nameservers not set.
+func TestAPassDoesNotWaitForATargetOnlyAnExcludedNameserverReaches(t *testing.T) {
+	imr, _, _, _, _ := endpointTestRig(t)
+	imr.Options[ImrOptAllowLoopbackNameservers] = "false"
+	imr.Tuning.Discovery.StrictWait = 300 * time.Millisecond
+	loop := redirectedServerTo("ns9.example.", "127.0.0.9", core.TransportDoT, dotTarget)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	saved := endpointAddrLookupHook
+	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) {
+		<-release
+		return []string{"192.0.2.53"}, time.Now().Add(time.Hour)
+	}
+	t.Cleanup(func() { endpointAddrLookupHook = saved })
+	imr.startEndpointLookup(dotTarget)
+	serverMap := map[string]*cache.AuthServer{"ns9.example.": loop}
+
+	waited := watchForWait(t)
+	if sel := imr.anotherPassAfter(context.Background(), &signalWaitBudget{}, "example.", dns.TypeA, serverMap, edns0.PrivacyStrict, map[passTuple]bool{}); sel != nil {
+		t.Errorf("next pass %+v, want none", sel.tuples)
+	}
+	if waited.Load() {
+		t.Error("the pass waited for a target only a nameserver it may not query reaches")
+	}
+}
+
+// A tuple selection decided on a family while it was healthy is not sent
+// once that family has turned suspect (CodeRabbit on #1147): no probe was
+// reserved for it. A tuple that holds the family's probe is.
+func TestAFamilyThatTurnedSuspectIsDialedOnlyAsAProbe(t *testing.T) {
+	imr, server, dot, _, q := endpointTestRig(t)
+	server.SetAddrs([]string{"192.0.2.1"})
+	imr.FamilyTracker = cache.NewFamilyTracker(10*time.Minute, 10*time.Minute, time.Hour, 1)
+	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
+	_, _, tuples := imr.prioritizeServers("example.", dns.TypeA, map[string]*cache.AuthServer{pathNS: server}, edns0.PrivacyStrict)
+	if len(tuples) != 1 || tuples[0].Family != cache.FamilyV4 || tuples[0].Probe {
+		t.Fatalf("selection %+v, want the DoT tuple decided for a healthy IPv4", tuples)
+	}
+	// Another query's failures make IPv4 suspect before the attempt.
+	imr.FamilyTracker.RecordResult("192.0.2.99", false)
+	if !imr.FamilyTracker.IsSuspect(cache.FamilyV4) {
+		t.Fatal("setup: IPv4 is not suspect")
+	}
+
+	ctx := context.Background()
+	_, _, _, _, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{family: tuples[0].Family, probe: tuples[0].Probe})
+	var suspect errEndpointSuspectFamily
+	if !errors.As(err, &suspect) {
+		t.Errorf("got %v, want the attempt refused for its suspect family", err)
+	}
+	if got := lastDial(dot); got != "" {
+		t.Errorf("dialed %s with no probe reserved", got)
+	}
+	if _, _, _, ep, err := imr.tryServer(ctx, server, nil, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{family: cache.FamilyV4, probe: true}); err != nil || ep.addr != "192.0.2.53" {
+		t.Errorf("the IPv4 probe: %+v %v, want it sent to the target", ep, err)
+	}
+}
+
+// An attempt refused for its suspect family does not count as tried
+// (CodeRabbit on #1147): nothing was sent, and the extra pass's selection
+// decides on that family afresh, here letting the tuple through as its probe.
+// Other attempts not made still count, under the server's own address.
+func TestARefusalForASuspectFamilyIsNotCountedAsTried(t *testing.T) {
+	imr, _, _, do53, q := endpointTestRig(t)
+	reply := new(dns.Msg)
+	reply.SetReply(q)
+	do53.Set("example.", "2001:db8::1", core.FakeResponse{Msg: reply})
+	server := redirectedServerTo("ns6.example.", "2001:db8::1", core.TransportDo53, dotTarget)
+	serverMap := map[string]*cache.AuthServer{"ns6.example.": server}
+	imr.FamilyTracker = cache.NewFamilyTracker(10*time.Minute, 10*time.Minute, time.Hour, 1)
+	imr.FamilyTracker.RecordResult("2001:db8::99", false)
+	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
+	_, _, tuples := imr.prioritizeServers("example.", dns.TypeA, serverMap, edns0.PrivacyNone)
+	if len(tuples) != 1 || tuples[0].Family != cache.FamilyV4 {
+		t.Fatalf("selection %+v, want the udp tuple decided for IPv4", tuples)
+	}
+	// The target's address goes into backoff: udp gives way to the server's
+	// own IPv6 address, whose family is suspect.
+	targetServer(t, imr, dotTarget).RecordEndpointAddrFailure("192.0.2.53", 1234, core.TransportDo53, errors.New("read: connection refused"))
+	ctx := context.Background()
+	_, _, _, ep, err := imr.tryServer(ctx, server, nil, "2001:db8::1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{family: tuples[0].Family, probe: tuples[0].Probe})
+	if key, ok := passTried(server, "2001:db8::1", core.TransportDo53, ep, err); ok {
+		t.Fatalf("the refusal (%v) counts as tried: %+v", err, key)
+	}
+	if key, ok := passTried(server, "2001:db8::1", core.TransportDo53, endpointDial{}, errEndpointUnavailable{}); !ok || key != (passTuple{server, "2001:db8::1", 0, core.TransportDo53}) {
+		t.Errorf("an endpoint not usable counts as %+v %v, want the server's own address tried", key, ok)
+	}
+
+	sel := imr.anotherPassAfter(ctx, &signalWaitBudget{}, "example.", dns.TypeA, serverMap, edns0.PrivacyNone, map[passTuple]bool{})
+	if sel == nil || len(sel.tuples) != 1 || !sel.tuples[0].Probe || sel.tuples[0].Family != cache.FamilyV6 {
+		t.Fatalf("next pass %+v, want the udp tuple as the IPv6 probe", sel)
+	}
+	if _, _, _, ep, err := imr.tryServer(ctx, server, sel.zone, "2001:db8::1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{family: sel.tuples[0].Family, probe: sel.tuples[0].Probe}); err != nil || ep.addr != "2001:db8::1" {
+		t.Errorf("the IPv6 probe: %+v %v, want it sent to the server's own address", ep, err)
+	}
 }
