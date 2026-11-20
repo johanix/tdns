@@ -473,6 +473,8 @@ written; this section says how section 3's rules apply at a target.
   extra pass decides on the family afresh. A target's address of a suspect
   family is used only when the target has no other: selection then lets the
   tuple through as that family's recovery probe, as it does a nameserver's
-  own address.
+  own address. For udp and tcp, the nameserver's own address on port 53
+  comes first when it is usable and of a healthy family: a healthy endpoint
+  before a probe.
 - **Status output** lists each target on a line of its own, marked as a
   target.

@@ -296,15 +296,20 @@ func TestSelectionStartsTheTargetLookupBehindABackedOffDefault(t *testing.T) {
 // not the key it was checked against beforehand: the two differ when a
 // target's addresses come in between, and recording the first would skip a
 // later attempt at an endpoint never dialed. With no endpoint chosen, the
-// key checked is recorded.
+// key checked is recorded, unless tryServer refused the attempt for its
+// suspect family (CodeRabbit on #1147): nothing was sent, and a later tuple
+// that holds the family's probe must not find the key taken.
 func TestDNSKEYTriedIsTheEndpointDialed(t *testing.T) {
 	pre := cache.AddrXport{Addr: epLameNSAddr, Port: 0, Transport: core.TransportDoT}
 	dialed := endpointDial{addr: "192.0.2.53", port: 1234, redirect: true, keyPort: 1234}
-	if got := dnskeyTried(pre, dialed, core.TransportDoT); got != (cache.AddrXport{Addr: "192.0.2.53", Port: 1234, Transport: core.TransportDoT}) {
-		t.Errorf("an attempt that dialed the target is recorded as %+v", got)
+	if got, ok := dnskeyTried(pre, dialed, core.TransportDoT, errors.New("i/o timeout")); !ok || got != (cache.AddrXport{Addr: "192.0.2.53", Port: 1234, Transport: core.TransportDoT}) {
+		t.Errorf("an attempt that dialed the target is recorded as %+v %v", got, ok)
 	}
-	if got := dnskeyTried(pre, endpointDial{}, core.TransportDoT); got != pre {
-		t.Errorf("an attempt with no endpoint is recorded as %+v, want %+v", got, pre)
+	if got, ok := dnskeyTried(pre, endpointDial{}, core.TransportDoT, errEndpointUnavailable{}); !ok || got != pre {
+		t.Errorf("an attempt with no endpoint is recorded as %+v %v, want %+v", got, ok, pre)
+	}
+	if got, ok := dnskeyTried(pre, endpointDial{}, core.TransportDoT, errEndpointSuspectFamily{}); ok {
+		t.Errorf("an attempt refused for its suspect family is recorded as %+v", got)
 	}
 }
 

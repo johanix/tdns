@@ -2282,8 +2282,11 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			if dnskeyBypass {
 				// Under the transport tryServer dialed: it reads the
 				// preference again, and a signal update in between may
-				// have changed it from effTransport.
-				dnskeyAttempted[dnskeyTried(dnskeyKey, ep, wireTransport)] = true
+				// have changed it from effTransport. An attempt refused for
+				// its suspect family is none (dnskeyTried).
+				if key, ok := dnskeyTried(dnskeyKey, ep, wireTransport, err); ok {
+					dnskeyAttempted[key] = true
+				}
 			}
 			// The endpoint tried: the one tryServer dialed, or the server's
 			// own address when it did not get as far as choosing one, kept
@@ -3465,12 +3468,20 @@ func (imr *Imr) dnskeyAttemptKey(ctx context.Context, server *cache.AuthServer, 
 // over the effective transport eff, or pre, the key the attempt was checked
 // against, when tryServer chose no endpoint. Recording pre for an attempt
 // that dialed elsewhere, as a target whose addresses came in between the two
-// readings, would skip a later attempt at an endpoint never dialed.
-func dnskeyTried(pre cache.AddrXport, ep endpointDial, eff core.Transport) cache.AddrXport {
-	if ep.addr == "" {
-		return pre
+// readings, would skip a later attempt at an endpoint never dialed. ok is
+// false for an attempt tryServer refused for its suspect family (err is an
+// errEndpointSuspectFamily), as passTried leaves it out of the pass's tried
+// set: nothing was sent, and a later tuple that holds the family's probe may
+// still make it.
+func dnskeyTried(pre cache.AddrXport, ep endpointDial, eff core.Transport, err error) (cache.AddrXport, bool) {
+	var suspect errEndpointSuspectFamily
+	if errors.As(err, &suspect) {
+		return cache.AddrXport{}, false
 	}
-	return cache.AddrXport{Addr: ep.addr, Port: ep.keyPort, Transport: eff}
+	if ep.addr == "" {
+		return pre, true
+	}
+	return cache.AddrXport{Addr: ep.addr, Port: ep.keyPort, Transport: eff}, true
 }
 
 func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {

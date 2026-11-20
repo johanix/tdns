@@ -159,7 +159,10 @@ func (e errEndpointTried) Error() string {
 // endpoint, addr at the usual port, and the lookup of the target's addresses
 // is started; it is started again when one family of them is due
 // (endpointFamily.due), and the other's are used meanwhile. A udp or tcp endpoint with no usable
-// address (fallsBackToPort53) gives way to addr on port 53. A context marked
+// address (fallsBackToPort53) gives way to addr on port 53, and so does one
+// whose target has only addresses of a suspect family, when addr on port 53
+// is usable and of a healthy family (healthyEndpoint): a healthy endpoint
+// before a probe, as selection orders them. A context marked
 // withDefaultEndpoints always gets the default endpoint. Forced TCP asks for Do53TCP, so it goes to the
 // tcp endpoint or port 53, never to the udp one.
 func (imr *Imr) endpointFor(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport) (endpointDial, error) {
@@ -202,13 +205,20 @@ func (imr *Imr) resolveEndpoint(server *cache.AuthServer, zone *cache.Zone, addr
 		return own, nil
 	}
 	pick := imr.chooseEndpointAddr(target, zone, addrs, ep.Port, t)
+	if fallsBackToPort53(t) && (pick == "" || (imr.FamilyTracker.IsSuspect(cache.FamilyOf(pick)) && imr.healthyEndpoint(server, zone, addr, t))) {
+		return own, nil
+	}
 	if pick == "" {
-		if fallsBackToPort53(t) {
-			return own, nil
-		}
 		return endpointDial{}, errEndpointUnavailable{server: server.Name, target: ep.Target, transport: t}
 	}
 	return endpointDial{server: target, addr: pick, port: ep.Port, redirect: true, keyPort: ep.Port}, nil
+}
+
+// healthyEndpoint reports whether the server's own address addr may be dialed
+// on the default port for t: it is usable there (endpointUsable), and its
+// address family is not held suspect.
+func (imr *Imr) healthyEndpoint(server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport) bool {
+	return endpointUsable(server, zone, addr, 0, t) && !imr.FamilyTracker.IsSuspect(cache.FamilyOf(addr))
 }
 
 // attemptKey is the endpoint an attempt for t at the server's own address
@@ -278,8 +288,9 @@ func (imr *Imr) clientDefaultPort(t core.Transport) uint16 {
 // sample counting as unprobedRTTSentinel. An address of a family held suspect
 // is picked only when no other is left: selection then lets the tuple through
 // as that family's recovery probe (ShouldProbe), as it does a nameserver's own
-// address, and tryServer dials it only for a tuple selection decided on that
-// family. "" when none is left.
+// address, and tryServer dials it only for a tuple that holds that probe. A
+// udp or tcp endpoint gives way to the nameserver's own healthy port 53
+// instead (resolveEndpoint). "" when none is left.
 func (imr *Imr) chooseEndpointAddr(target *cache.AuthServer, zone *cache.Zone, addrs []string, port uint16, t core.Transport) string {
 	allowHostLocal := imr.allowHostLocalServers()
 	type cand struct {

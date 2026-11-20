@@ -1189,3 +1189,27 @@ func TestARefusalForASuspectFamilyIsNotCountedAsTried(t *testing.T) {
 		t.Errorf("the IPv6 probe: %+v %v, want it sent to the server's own address", ep, err)
 	}
 }
+
+// A udp endpoint whose target has only addresses of a suspect family gives
+// way to the nameserver's own healthy address on port 53 (CodeRabbit on
+// #1147): here IPv6 is suspect and its probe already spent, so the target
+// cannot be let through, and the tuple used to be dropped instead.
+func TestAUdpTargetThatCannotBeProbedGivesWayToPort53(t *testing.T) {
+	imr, _, _, do53, q := endpointTestRig(t)
+	server := redirectedServerTo("ns4.example.", "192.0.2.1", core.TransportDo53, dotTarget)
+	imr.FamilyTracker = cache.NewFamilyTracker(10*time.Minute, 10*time.Minute, time.Hour, 1)
+	imr.FamilyTracker.RecordResult("2001:db8::99", false)
+	if !imr.FamilyTracker.IsSuspect(cache.FamilyV6) || !imr.FamilyTracker.ShouldProbe(cache.FamilyV6) {
+		t.Fatal("setup: IPv6 is not suspect with its probe to spend")
+	}
+	imr.endpointAddrs.set(dotTarget, []string{"2001:db8::53"}, time.Now().Add(time.Hour))
+
+	_, _, tuples := imr.prioritizeServers("example.", dns.TypeA, map[string]*cache.AuthServer{"ns4.example.": server}, edns0.PrivacyNone)
+	if len(tuples) != 1 || tuples[0].Transport != core.TransportDo53 || tuples[0].Family != cache.FamilyV4 || tuples[0].Probe {
+		t.Fatalf("selection %+v, want the udp tuple to the nameserver's healthy IPv4", tuples)
+	}
+	_, _, _, ep, err := imr.tryServer(context.Background(), server, nil, "192.0.2.1", core.TransportDo53, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{family: tuples[0].Family, probe: tuples[0].Probe})
+	if err != nil || ep.redirect || ep.addr != "192.0.2.1" || lastDial(do53) != "192.0.2.1" {
+		t.Errorf("the attempt: %+v %v, dialed %q; want the nameserver's own address on port 53", ep, err, lastDial(do53))
+	}
+}
