@@ -63,8 +63,14 @@ func (conf *Config) SetupSimpleAPIRouter(ctx context.Context) (*mux.Router, erro
 		return nil, fmt.Errorf("apiserver.apikey is not set")
 	}
 
+	// The key check goes on the ROOT router, not on this subrouter. A
+	// middleware on a subrouter covers only the routes registered on that
+	// subrouter, and callers add routes of their own afterwards on a second
+	// "/api/v1" subrouter of the router returned here (tdns-mp's
+	// Setup*Routes) or on the root router (RegisterAPIRoute callbacks). On
+	// the subrouter those routes answered without a key.
+	rtr.Use(apiKeyAuthMiddleware(apikey))
 	sr := rtr.PathPrefix("/api/v1").Subrouter()
-	sr.Use(apiKeyAuthMiddleware(apikey))
 
 	// Common endpoints
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
@@ -91,8 +97,14 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		return nil, fmt.Errorf("apiserver.apikey is not set")
 	}
 
+	// The key check goes on the ROOT router, not on this subrouter. A
+	// middleware on a subrouter covers only the routes registered on that
+	// subrouter, and callers add routes of their own afterwards on a second
+	// "/api/v1" subrouter of the router returned here (tdns-mp's
+	// Setup*Routes) or on the root router (RegisterAPIRoute callbacks). On
+	// the subrouter those routes answered without a key.
+	rtr.Use(apiKeyAuthMiddleware(apikey))
 	sr := rtr.PathPrefix("/api/v1").Subrouter()
-	sr.Use(apiKeyAuthMiddleware(apikey))
 
 	// Common endpoints
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
