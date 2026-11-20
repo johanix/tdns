@@ -496,11 +496,38 @@ func (as *AuthServer) SetTransportWeights(weights map[core.Transport]uint8) {
 // with the transports of another. The arguments are the caller's to give away.
 // Thread-safe.
 func (as *AuthServer) SetTransportSignal(transports []core.Transport, alpn []string, weights map[core.Transport]uint8, received *ReceivedSignal) {
+	as.SetTransportSignalIf(nil, transports, alpn, weights, received)
+}
+
+// HeldSignal is the signal a server holds when an install asks whether it
+// may replace it (SetTransportSignalIf).
+type HeldSignal struct {
+	Weights  map[core.Transport]uint8 // the weights selection reads; empty when the server has signalled nothing
+	Received *ReceivedSignal          // the signal as received or configured; nil when there was none
+}
+
+// Configured reports whether the signal held came from configuration: the
+// transports or ALPN list a stub's configuration gave its server. A stub
+// configured with neither holds no configured signal.
+func (h HeldSignal) Configured() bool {
+	return h.Received != nil && h.Received.Source == SignalSourceConfig
+}
+
+// SetTransportSignalIf is SetTransportSignal, done only when ok, called under
+// the same lock with the signal the server holds, says so; a nil ok always
+// does. It reports whether the signal was installed. An install decided on
+// from something read earlier rechecks here, so that a signal installed in
+// between is not overwritten. ok must not call the server's methods: the
+// lock is held. Thread-safe.
+func (as *AuthServer) SetTransportSignalIf(ok func(HeldSignal) bool, transports []core.Transport, alpn []string, weights map[core.Transport]uint8, received *ReceivedSignal) bool {
 	if as == nil {
-		return
+		return false
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
+	if ok != nil && !ok(HeldSignal{Weights: as.TransportWeights, Received: as.Received}) {
+		return false
+	}
 	as.Transports = transports
 	as.Alpn = alpn
 	as.TransportWeights = weights
@@ -509,6 +536,7 @@ func (as *AuthServer) SetTransportSignal(transports []core.Transport, alpn []str
 	// an ALPN list, a TSYNC string and an operator override, clears whatever
 	// the previous signal had assigned: the new signal replaces the old one.
 	as.TransportEndpoints = endpointsFromReceived(received)
+	return true
 }
 
 // SetReceivedSignal records the signal as received, for the paths that set the
