@@ -5,6 +5,7 @@
 package imr
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -160,7 +161,7 @@ func TestOOTSAliasLookupFetchesHop(t *testing.T) {
 	fetched := make(chan string, 1)
 	release := make(chan struct{})
 	saved := signalAliasHopLookupHook
-	signalAliasHopLookupHook = func(imr *Imr, target string) (*Response, error) {
+	signalAliasHopLookupHook = func(_ context.Context, imr *Imr, target string) (*Response, error) {
 		<-release
 		cacheSignal(imr, target, providerRecords(t), cache.ValidationStateSecure)
 		fetched <- target
@@ -197,7 +198,7 @@ func TestOOTSAliasLookupFetchesHop(t *testing.T) {
 func TestOOTSAliasLookupLoopAndCap(t *testing.T) {
 	imr := newTestImr(t)
 	saved := signalAliasHopLookupHook
-	signalAliasHopLookupHook = func(*Imr, string) (*Response, error) {
+	signalAliasHopLookupHook = func(context.Context, *Imr, string) (*Response, error) {
 		t.Error("a hop was looked up")
 		return nil, nil
 	}
@@ -248,7 +249,7 @@ func TestOOTSAliasDeniedHopNotRefollowed(t *testing.T) {
 	var calls atomic.Int32
 	first := make(chan struct{}, 1)
 	saved := signalAliasHopLookupHook
-	signalAliasHopLookupHook = func(*Imr, string) (*Response, error) {
+	signalAliasHopLookupHook = func(context.Context, *Imr, string) (*Response, error) {
 		if calls.Add(1) == 1 {
 			first <- struct{}{}
 		}
@@ -311,7 +312,7 @@ func hookAliasHop(t *testing.T, answer func(imr *Imr, target string) (*Response,
 	t.Helper()
 	var calls atomic.Int32
 	saved := signalAliasHopLookupHook
-	signalAliasHopLookupHook = func(imr *Imr, target string) (*Response, error) {
+	signalAliasHopLookupHook = func(_ context.Context, imr *Imr, target string) (*Response, error) {
 		calls.Add(1)
 		return answer(imr, target)
 	}

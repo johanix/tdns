@@ -50,6 +50,10 @@
 #       own), answers over DoT and DoQ, and validates both hops. Redirects
 #       ignored before the path is decided (a sighting in Additional ahead of
 #       the verifying lookup) are S6's design, so they are noted, not failed.
+#       A target is a server of its own (#1129): the DoT answers it carries
+#       are counted on its own row (dot.provider.test., marked target), and
+#       the nameserver counts them as redirected, so "answered over DoT" is
+#       either the nameserver's DoT count or its redirected one.
 #   Z6  run 2: the synthesized signal is in provider.test and nowhere else.
 #   Z7  a second customer's alias to the same target: ns1.customer2.test,
 #       like ns1.customer.test, holds the provider's signal, honours the DoT
@@ -136,8 +140,13 @@ _cz_run() { # 1|2
 	if [ "$_r" = 1 ]; then
 		check Z5 "run 1: the DoT target dot.provider.test. is honoured, so the path is Secure" [ "$(at_get ns1.customer.test. signal_targets.dot)" = dot.provider.test. -a "$(num "$(at_get ns1.customer.test. redirected.dot)")" -gt 0 ]
 	fi
-	check Z5 "run $_r: answered over DoT and DoQ" [ "$(num "$(at_get ns1.customer.test. counts.dot)")" -gt 0 -a "$(num "$(at_get ns1.customer.test. counts.doq)")" -gt 0 ]
+	check Z5 "run $_r: answered over DoT (itself or its target) and DoQ" _cz_dot_doq ns1.customer.test.
 	check Z5 "run $_r: no failures" [ "$(num "$(at_get ns1.customer.test. failed_total)")" -eq 0 ]
+	if [ "$_r" = 1 ]; then
+		note "dot.provider.test. (target) target=$(at_get dot.provider.test. target) counts=$(at_get dot.provider.test. counts) failed=$(at_get dot.provider.test. failed)"
+		check Z5 "run 1: the target dot.provider.test. has a row of its own, with DoT answers and no failures" \
+			[ "$(at_get dot.provider.test. target)" = True -a "$(num "$(at_get dot.provider.test. counts.dot)")" -gt 0 -a "$(num "$(at_get dot.provider.test. failed_total)")" -eq 0 ]
+	fi
 	check Z5 "run $_r: the resolver validates the alias (AD)" _cz_ad _dns.ns1.customer.test. SVCB
 	check Z5 "run $_r: the resolver validates the provider's signal (AD)" _cz_ad _dns.ns1.provider.test. SVCB
 
@@ -147,7 +156,7 @@ _cz_run() { # 1|2
 	if [ "$_r" = 1 ]; then
 		check Z7 "run 1: ns1.customer2.test. honours the same DoT target" [ "$(at_get ns1.customer2.test. signal_targets.dot)" = dot.provider.test. -a "$(num "$(at_get ns1.customer2.test. redirected.dot)")" -gt 0 ]
 	fi
-	check Z7 "run $_r: ns1.customer2.test. answered over DoT and DoQ" [ "$(num "$(at_get ns1.customer2.test. counts.dot)")" -gt 0 -a "$(num "$(at_get ns1.customer2.test. counts.doq)")" -gt 0 ]
+	check Z7 "run $_r: ns1.customer2.test. answered over DoT (itself or its target) and DoQ" _cz_dot_doq ns1.customer2.test.
 	check Z7 "run $_r: ns1.customer2.test. no failures" [ "$(num "$(at_get ns1.customer2.test. failed_total)")" -eq 0 ]
 
 	# Z1 and Z6: the zones at 60 s after the start, against their files.
@@ -240,6 +249,12 @@ _cz_has() { # response owner rdata-prefix : an SVCB at owner, its RDATA starting
 }
 
 _cz_same() { [ -s "$2" ] && cmp -s "$1" "$2"; } # file axfr : the AXFR is not empty and equal
+
+_cz_dot_doq() { # server : DoT answers, carried by the server or by its target, and DoQ answers
+	[ "$(num "$(at_get "$1" counts.dot)")" -ge 0 ] && [ "$(num "$(at_get "$1" redirected.dot)")" -ge 0 ] &&
+	[ $(($(num "$(at_get "$1" counts.dot)") + $(num "$(at_get "$1" redirected.dot)"))) -gt 0 ] &&
+	[ "$(num "$(at_get "$1" counts.doq)")" -gt 0 ]
+}
 
 _cz_ad() { # name type : NOERROR with AD from the resolver
 	dogq 127.0.0.100 "$1" "$2" +dnssec | awk '

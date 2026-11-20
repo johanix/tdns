@@ -1081,6 +1081,9 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// an API-created zone is entitled to the same hooks as a configured one
 	// (#500).
 	zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+	// And to the delegation sync setup a configured zone gets at first load
+	// (#1151). This zone first loads through an ordinary refresh.
+	zd.registerZoneSyncSetup(conf.Internal.DelegationSyncQ)
 
 	Zones.Set(name, zd)
 	if err := conf.AddDynamicZoneToConfig(zd); err != nil {
@@ -1135,19 +1138,70 @@ func (conf *Config) enqueueRefresh(ctx context.Context, zr ZoneRefresher) error 
 	}
 }
 
+// testHookSignalRecordTaken, when set, runs in RemoveDynamicZone once the
+// KeyDB's record of what the transport signal pass stored has been taken,
+// while the zone is still served. A test runs a release there, in the
+// window a real one can run in.
+var testHookSignalRecordTaken func()
+
+// testHookRemovalLocking, when set, runs in RemoveDynamicZone right before it
+// takes templateApplyMu. Tests only.
+var testHookRemovalLocking func()
+
 // RemoveDynamicZone is the shared *delete* core. It refuses to delete a static
 // or catalog-managed zone (guard on OptApiManagedZone), bumps the zone's
 // generation counter so any in-flight refresh self-aborts at its pre-persist
 // guard (B5b), removes it from the live map and the persisted config, and
 // best-effort removes the persisted zone file.
+//
+// The name is canonicalised first: the KeyDB rows and the zone file are kept
+// under the zone's canonical name, and a delete given the name in another
+// case would leave them behind.
+//
+// It holds templateApplyMu for the whole removal, as an add holds it until
+// the zone is in Zones: an add of the same name waits until the removal is
+// done, so the removal cannot drop records of the zone that add creates. The
+// record of what the transport-signal pass stored goes first, before
+// anything else is removed, and after the zone's own pass is retired, so
+// that no pass of the zone records anything after it. When the KeyDB cannot
+// drop it, nothing is removed and the delete fails: a zone created later
+// under the same name would take records that match the old record for the
+// pass's own (CodeRabbit on #1118). When the dynamic config cannot be
+// rewritten afterwards, the zone comes back on restart, from a zone file
+// that can hold the signal the pass stored, so the record is put back: the
+// pass would take that signal for the operator's without it.
 func (conf *Config) RemoveDynamicZone(name string) (string, error) {
-	name = dns.Fqdn(name)
+	name = core.CanonicalizeName(dns.Fqdn(name))
+	if testHookRemovalLocking != nil {
+		testHookRemovalLocking()
+	}
+	templateApplyMu.Lock()
+	defer templateApplyMu.Unlock()
 	zd, exists := Zones.Get(name)
 	if !exists {
 		return "", fmt.Errorf("zone %s not found", name)
 	}
 	if !zd.Options[OptApiManagedZone] {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be deleted here", name)
+	}
+
+	// The zone's pass, if one is running, finishes before this (it holds
+	// zd.mu throughout), and one that starts later does nothing.
+	zd.mu.Lock()
+	zd.signalPassRetired = true
+	zd.mu.Unlock()
+	var signalRecord []TransportSignalStoredRow
+	if conf.Internal.KeyDB != nil {
+		var err error
+		if signalRecord, err = conf.Internal.KeyDB.TakeTransportSignalStored(name); err != nil {
+			zd.mu.Lock()
+			zd.signalPassRetired = false
+			zd.mu.Unlock()
+			return "", fmt.Errorf("zone %s not deleted: the KeyDB could not drop the record of what the transport signal pass stored, which a zone added later under this name would inherit; nothing was removed, run the delete again: %w", name, err)
+		}
+	}
+	if testHookSignalRecordTaken != nil {
+		testHookSignalRecordTaken()
 	}
 
 	// Withdraw anything published at an RFC 9615 signal name on this zone's
@@ -1172,6 +1226,9 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	// zone is gone from memory but the stale config entry would resurrect it on
 	// restart — that's a failed delete, not a success.
 	if err := conf.RemoveDynamicZoneFromConfig(name); err != nil {
+		if rerr := conf.Internal.KeyDB.RestoreTransportSignalStored(name, signalRecord); rerr != nil {
+			return "", fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w; the record of what the transport signal pass stored could not be put back either, so after the restart the pass takes a signal it stored in the zone file for the operator's: %v", name, err, rerr)
+		}
 		return "", fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w", name, err)
 	}
 	// The zone has now left the dynamic config file, so the signal-name orphan
@@ -1203,12 +1260,6 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	if conf.Internal.KeyDB != nil {
 		if err := conf.Internal.KeyDB.DeleteZoneRefreshState(name); err != nil {
 			lg.Warn("RemoveDynamicZone: failed to remove refresh state", "zone", name, "error", err)
-		}
-		// And the record of what the signal pass stored: a zone created
-		// later under the same name must not take an operator's RRset for
-		// the pass's own.
-		if err := conf.Internal.KeyDB.DeleteTransportSignalStored(name); err != nil {
-			lg.Warn("RemoveDynamicZone: failed to remove the stored-signal record", "zone", name, "error", err)
 		}
 	}
 
@@ -1470,6 +1521,9 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// silently strips the hooks from a zone that had them -- and modify is
 	// what a reconciling caller runs routinely (#500).
 	newZd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
+	// The delegation sync setup too, for the options the zone has now, as a
+	// reload does for a static zone (#1151).
+	newZd.registerZoneSyncSetup(conf.Internal.DelegationSyncQ)
 
 	Zones.Set(name, newZd)
 
@@ -1486,6 +1540,9 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		// no-refresh-hooks: rollback republishes the PREVIOUS ZoneData, which
 		// already carries its hooks.
 		Zones.Set(name, oldZd)
+		// Its delegation sync setup may have been passed over while newZd was
+		// in Zones (#1151).
+		oldZd.resumeOwedZoneSyncSetup()
 		rollbackKey()
 		return "", fmt.Errorf("zone %s failed to persist; rolled back the in-memory modification: %w", name, err)
 	}

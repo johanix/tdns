@@ -94,7 +94,7 @@ type AuthServer struct {
 	UsedByClass        [NumTrafficClasses]map[core.Transport]uint64 // UsedCounters split by whose query it was
 	FailedCounters     map[core.Transport]uint64                    // attempts that ERRORED, by actual wire transport (see tryServer)
 	TruncatedCount     uint64                                       // Do53/UDP responses TC=1 truncated and retried over TCP
-	RedirectedCounters map[core.Transport]uint64                    // answers carried by a redirected endpoint, by actual wire transport
+	RedirectedCounters map[core.Transport]uint64                    // answers a redirect target carried for this server, by actual wire transport (the target's instance counts them as used)
 	IgnoredRedirects   uint64                                       // signal records with a target ignored for want of a Secure path
 	Src                string                                       // "answer", "glue", "hint", "priming", "stub", ...
 	// configuredAddrs holds the addresses the operator configured for this
@@ -691,14 +691,6 @@ func (as *AuthServer) IncrementTransportCounter(t core.Transport) {
 // class says whose query it was: a client's, by the PRIVACY level it carried,
 // or the resolver's own.
 func (as *AuthServer) IncrementUsedCounter(t core.Transport, class TrafficClass) {
-	as.CountAnswer(t, class, false)
-}
-
-// CountAnswer records an answer carried over t, as IncrementUsedCounter does,
-// and, when redirected, that a redirected endpoint carried it. Both counters
-// move under one lock, so a TakeTransportStats never finds the one without
-// the other: Redirected stays a subset of Used in every period.
-func (as *AuthServer) CountAnswer(t core.Transport, class TrafficClass, redirected bool) {
 	if as == nil {
 		return
 	}
@@ -708,9 +700,6 @@ func (as *AuthServer) CountAnswer(t core.Transport, class TrafficClass, redirect
 	now := time.Now()
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	if redirected {
-		as.incrementRedirectedLocked(t)
-	}
 	if as.UsedCounters == nil {
 		as.UsedCounters = make(map[core.Transport]uint64)
 		as.LastUsed = make(map[core.Transport]time.Time)
@@ -762,8 +751,9 @@ type TransportStats struct {
 	LastUsed    map[core.Transport]time.Time
 	Failed      map[core.Transport]uint64
 	Truncated   uint64
-	// Redirected is the part of Used carried by a redirected endpoint: a
-	// target other than the server's own name.
+	// Redirected counts the answers a redirect target, a name other than the
+	// server's own, carried for this server. They are counted as used on the
+	// target's own instance, not in this Used.
 	Redirected map[core.Transport]uint64
 	// IgnoredRedirects counts signal records with a target that were ignored
 	// because their path was not Secure (R1, R5).
@@ -1096,8 +1086,18 @@ func (as *AuthServer) RecordEndpointAddrRTT(addr string, port uint16, t core.Tra
 	// usual alpha=0.25 averaging (still slow — but now we know that
 	// recently). Frequency of re-exploration auto-scales with query
 	// rate: busy servers re-probe quickly, quiet ones slowly.
+	//
+	// A tuple whose last sample is older than the policy's MaxFailure is
+	// dropped instead: GetEndpointAddrRTT no longer uses it, and keeping it
+	// let the map grow by one key for every endpoint ever dialed, as a
+	// target whose addresses rotate does over a long uptime.
+	stale := GetBackoffPolicy().MaxFailure
 	for okey, or := range as.RTTEstimates {
 		if okey == key {
+			continue
+		}
+		if r.LastSampleAt.Sub(or.LastSampleAt) > stale {
+			delete(as.RTTEstimates, okey)
 			continue
 		}
 		or.EMA = time.Duration(float64(or.EMA) * rttDecayFactor)
