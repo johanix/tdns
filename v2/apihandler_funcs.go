@@ -492,7 +492,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "transport-signal":
 			// The bridge from synthesized to provisioned signals: what the
 			// start-up pass writes at _dns.<name>, as zone-file lines.
-			resp.TransportSignal, err = transportSignalPreview(conf, cp.Name)
+			resp.TransportSignal, err = transportSignalPreview(conf.transportSignalConfig(), cp.Name)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -501,7 +501,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "transport-signal-release":
 			// The pass hands _dns.<name> over to the operator: it drops its
 			// record of what it stored there, and returns the state after.
-			resp.TransportSignal, resp.Msg, err = transportSignalRelease(conf, cp.Name)
+			resp.TransportSignal, resp.Msg, err = transportSignalRelease(conf.transportSignalConfig(), cp.Name)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -512,7 +512,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Listeners = conf.Listeners
 			resp.AuthEngine = conf.AuthEngine
 			resp.ApiServer = conf.ApiServer
-			resp.Identities = conf.Service.Identities
+			resp.Identities = conf.transportSignalConfig().Service.Identities
 			resp.DBFile = conf.Db.File
 			resp.ServerErrors = conf.Internal.ServerErrors.List()
 			resp.Do53QueriesRefused = conf.Internal.do53QueriesRefused.Load()

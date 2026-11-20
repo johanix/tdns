@@ -112,7 +112,7 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	applyTransportMapWithPorts(s, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53: uint16(closed)})
 	m := new(dns.Msg)
 	m.SetQuestion("www.example.", dns.TypeA)
-	_, _, _, dial, err := imr.tryServer(context.Background(), s, nil, addr, core.TransportDo53, m, "www.example.", dns.TypeA, false, cache.ClassNone)
+	_, _, _, dial, err := imr.tryServer(context.Background(), s, nil, addr, core.TransportDo53, m, "www.example.", dns.TypeA, false, cache.ClassNone, attemptSelection{})
 	if err == nil {
 		t.Fatalf("tryServer to the closed port %d succeeded", closed)
 	}
@@ -149,8 +149,8 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	if !hasDo53() {
 		t.Error("prioritizeServers does not offer the fallback on port 53 while the signalled endpoint is backed off")
 	}
-	if a, p, ok := imr.attemptKey(context.Background(), s, nil, addr, core.TransportDo53, false); !ok || a != addr || p != 0 {
-		t.Errorf("the attempt goes to %s port %d (%v), want %s on port 53", a, p, ok, addr)
+	if d, ok := imr.attemptKey(context.Background(), s, nil, addr, core.TransportDo53, false); !ok || d.addr != addr || d.keyPort != 0 {
+		t.Errorf("the attempt goes to %s port %d (%v), want %s on port 53", d.addr, d.keyPort, ok, addr)
 	}
 	// The signal drops the port: the fallback on 53 is offered.
 	applyTransportMapWithPorts(s, map[string]uint8{"udp": 100}, nil)
@@ -159,8 +159,8 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	}
 	// Another port starts clean.
 	applyTransportMapWithPorts(s, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53: uint16(closed) ^ 1})
-	if _, p, _ := imr.attemptKey(context.Background(), s, nil, addr, core.TransportDo53, false); p != uint16(closed)^1 {
-		t.Errorf("the attempt goes to port %d, want the changed port %d", p, uint16(closed)^1)
+	if d, _ := imr.attemptKey(context.Background(), s, nil, addr, core.TransportDo53, false); d.keyPort != uint16(closed)^1 {
+		t.Errorf("the attempt goes to port %d, want the changed port %d", d.keyPort, uint16(closed)^1)
 	}
 	if !hasDo53() {
 		t.Error("prioritizeServers does not offer Do53 on a changed port")

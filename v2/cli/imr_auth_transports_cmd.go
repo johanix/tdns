@@ -115,7 +115,7 @@ func runAuthTransports(ctx context.Context, zone string) {
 			fmt.Printf("Error: %v\n", err)
 			return
 		}
-		rep = tdns.ImrAuthTransportsSnapshot(imr.Cache, filter, zone, authTransportsReset)
+		rep = imr.AuthTransportsSnapshot(filter, zone, authTransportsReset)
 	} else {
 		data := map[string]interface{}{"reset": authTransportsReset}
 		if len(authTransportsServers) > 0 {
@@ -250,7 +250,8 @@ func formatAuthTransports(rep tdns.ImrAuthTransportsReport, sortBy string, pct, 
 }
 
 // authServerLabel is the server's name, marked when the row is a stub zone's
-// private instance rather than the one resolution shares.
+// private instance or a redirect target's (Src "target") rather than the one
+// resolution shares.
 func authServerLabel(r tdns.ImrAuthTransportsRow) string {
 	if r.Shared {
 		return r.Server
