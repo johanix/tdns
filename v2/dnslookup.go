@@ -4086,19 +4086,20 @@ func notConfigured(held cache.HeldSignal) bool {
 
 // stillNeedsSignal is the rule a cached signal is replayed under
 // (applyCachedTransportSignal): only onto a server that, when the install
-// takes its lock, has signalled nothing, or holds a signal whose path was not
-// decided, one an Additional section could not validate and that waits for
-// the verifying lookup, whose answer is what the cache holds. A signal
-// installed after the replay read the cache stays, and so does a stub's
-// configured one.
+// takes its lock, has signalled nothing, whatever weights it holds (a stub
+// configured with no transports holds default ones), or holds a signal whose
+// path was not decided, one an Additional section could not validate and
+// that waits for the verifying lookup, whose answer is what the cache holds.
+// A signal installed after the replay read the cache stays, and so does a
+// stub's configured one.
 func stillNeedsSignal(held cache.HeldSignal) bool {
 	switch {
 	case held.Configured():
 		return false
-	case len(held.Weights) == 0:
+	case held.Received == nil || len(held.Weights) == 0:
 		return true
 	default:
-		return held.Received != nil && len(held.Received.Path) > 0 &&
+		return len(held.Received.Path) > 0 &&
 			cache.SignalPathState(held.Received.Path) == cache.SignalStateUnknown
 	}
 }

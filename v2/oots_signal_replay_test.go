@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -108,25 +109,48 @@ func TestAStrictWaitFollowsACachedAliasWhoseHopIsBeingLookedUp(t *testing.T) {
 	imr.Tuning.Discovery.StrictWait = 5 * time.Second
 	held := cache.NewAuthServer(pathNS)
 	serverMap := map[string]*cache.AuthServer{cache.ServerKey(pathNS): held}
+	releaseHop := holdHopLookupUntilWatched(t)
+	ready := func() bool { return held.GetTransportWeights()[core.TransportDoQ] > 0 }
+
+	ok := imr.awaitTransportSignalsUntil(context.Background(), serverMap, transportQueryReasonStrictPrivacy, ready)
+	if !releaseHop() {
+		t.Error("the wait did not wait for the hop's lookup")
+	}
+	if !ok {
+		t.Errorf("the wait ended without the alias's signal: weights %v", held.GetTransportWeights())
+	}
+	waitAliasHopsEnded(t, imr)
+}
+
+// holdHopLookupUntilWatched makes an alias hop's lookup find the provider's
+// signal, but only once a strict wait has started watching it, so that the
+// wait is sure to be the one that sees it end. The function it returns lets
+// the lookup go if nothing did, and reports whether the wait watched it.
+func holdHopLookupUntilWatched(t *testing.T) func() bool {
+	t.Helper()
 	found := foundProvider(t)
 	release := make(chan struct{})
+	letGo := sync.OnceFunc(func() { close(release) })
+	watched := false
 	signalAliasHopLookupHook = func(_ context.Context, imr *Imr, target string) (*ImrResponse, error) {
 		<-release
 		return found(imr, target)
 	}
-	t.Cleanup(func() {
-		signalAliasHopLookupHook = nil
-	})
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		close(release)
-	}()
-	ready := func() bool { return held.GetTransportWeights()[core.TransportDoQ] > 0 }
-
-	if !imr.awaitTransportSignalsUntil(context.Background(), serverMap, transportQueryReasonStrictPrivacy, ready) {
-		t.Errorf("the wait ended without the alias's signal: weights %v", held.GetTransportWeights())
+	testHookSignalWaitWatching = func(_, hop string) {
+		if hop != "" {
+			watched = true
+			letGo()
+		}
 	}
-	waitAliasHopsEnded(t, imr)
+	t.Cleanup(func() {
+		letGo()
+		signalAliasHopLookupHook = nil
+		testHookSignalWaitWatching = nil
+	})
+	return func() bool {
+		letGo()
+		return watched
+	}
 }
 
 // A strict query whose server holds a signal that came with a redirect the
@@ -144,13 +168,88 @@ func TestAStrictWaitJoinsTheLookupVerifyingARedirect(t *testing.T) {
 		t.Fatal("setup: could not mark the verifying lookup as running")
 	}
 	verified := []dns.RR{mustRR(t, strictChildOwner+` 3600 IN SVCB 1 . oots="dot:100"`)}
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cacheSignal(imr, strictChildOwner, verified, cache.ValidationStateSecure)
-		imr.TransportSignalDiscovery.Succeed(strictChildOwner)
-	}()
+	watched := false
+	testHookSignalWaitWatching = func(owner, hop string) {
+		if owner == strictChildOwner && hop == "" && !watched {
+			watched = true
+			cacheSignal(imr, strictChildOwner, verified, cache.ValidationStateSecure)
+			imr.TransportSignalDiscovery.Succeed(strictChildOwner)
+		}
+	}
+	t.Cleanup(func() {
+		testHookSignalWaitWatching = nil
+	})
 
-	if !imr.awaitTransportSignals(context.Background(), "www."+strictChildZone, serverMap) {
+	ok := imr.awaitTransportSignals(context.Background(), "www."+strictChildZone, serverMap)
+	if !watched {
+		t.Error("the wait did not wait for the verifying lookup")
+	}
+	if !ok {
 		t.Errorf("the wait ended without the verified signal: weights %v", held.GetTransportWeights())
+	}
+}
+
+// A strict query whose server holds a signal whose path is undecided, and
+// whose verifying lookup has already ended at an alias whose hop the cache
+// does not hold, waits for the hop's lookup, and takes the signal the alias
+// leads to.
+func TestAStrictWaitFollowsTheAliasThatEndedAVerifyingLookup(t *testing.T) {
+	imr, _, _ := aliasHopImr(t)
+	imr.Tuning.Discovery.StrictWait = 5 * time.Second
+	held := cache.NewAuthServer(pathNS)
+	installTransportMap(held, map[string]uint8{"udp": 100}, nil, nil, cache.SignalViaReferral,
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.SignalStateUnknown}}, notConfigured)
+	serverMap := map[string]*cache.AuthServer{cache.ServerKey(pathNS): held}
+	releaseHop := holdHopLookupUntilWatched(t)
+	ready := func() bool { return held.GetTransportWeights()[core.TransportDoQ] > 0 }
+
+	ok := imr.awaitTransportSignalsUntil(context.Background(), serverMap, transportQueryReasonStrictPrivacy, ready)
+	if !releaseHop() {
+		t.Error("the wait did not wait for the hop's lookup")
+	}
+	if !ok {
+		t.Errorf("the wait ended without the alias's signal: weights %v", held.GetTransportWeights())
+	}
+	waitAliasHopsEnded(t, imr)
+}
+
+// A stub configured with neither transports nor an ALPN list holds default
+// weights, but has signalled nothing: a strict wait gives it the signal the
+// cache holds for its name. A stub configured with transports keeps them.
+func TestAStrictWaitGivesACachedSignalToAStubConfiguredWithNoTransports(t *testing.T) {
+	const zone = "stubreplay.example."
+	bare, configured := "ns1."+zone, "ns2."+zone
+	imr := newTestImr(t)
+	imr.Quiet = true
+	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
+	if err := imr.Cache.AddStub(zone, []cache.AuthServer{
+		{Name: bare, Addrs: []string{"192.0.2.1"}},
+		{Name: configured, Addrs: []string{"192.0.2.2"}, TransportSignal: "dot:100"},
+	}); err != nil {
+		t.Fatalf("AddStub: %v", err)
+	}
+	imr.setZoneTable(nil, []string{zone}, nil)
+	serverMap := map[string]*cache.AuthServer{}
+	for _, s := range imr.stubServers(zone) {
+		serverMap[cache.ServerKey(s.Name)] = s
+	}
+	stub, kept := serverMap[cache.ServerKey(bare)], serverMap[cache.ServerKey(configured)]
+	if stub == nil || kept == nil {
+		t.Fatalf("stub servers %v", serverMap)
+	}
+	if w := stub.GetTransportWeights(); w[core.TransportDo53] != 100 {
+		t.Fatalf("setup: the bare stub's weights %v, want the default do53:100", w)
+	}
+	for _, ns := range []string{bare, configured} {
+		owner := transportOwnerForNS(ns)
+		cacheSignal(imr, owner, []dns.RR{mustRR(t, owner+` 3600 IN SVCB 1 . oots="doq:100"`)}, cache.ValidationStateSecure)
+	}
+	ready := func() bool { return stub.GetTransportWeights()[core.TransportDoQ] > 0 }
+
+	if !imr.awaitTransportSignalsUntil(context.Background(), serverMap, transportQueryReasonStrictPrivacy, ready) {
+		t.Errorf("the bare stub did not take the cached signal: weights %v", stub.GetTransportWeights())
+	}
+	if w := kept.GetTransportWeights(); w[core.TransportDoT] != 100 || w[core.TransportDoQ] != 0 {
+		t.Errorf("the configured stub's weights %v, want its dot:100 kept", w)
 	}
 }

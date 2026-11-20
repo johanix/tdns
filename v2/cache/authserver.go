@@ -502,8 +502,8 @@ func (as *AuthServer) SetTransportSignal(transports []core.Transport, alpn []str
 // HeldSignal is the signal a server holds when an install asks whether it
 // may replace it (SetTransportSignalIf).
 type HeldSignal struct {
-	Weights  map[core.Transport]uint8 // the weights selection reads; empty when the server has signalled nothing
-	Received *ReceivedSignal          // the signal as received or configured; nil when there was none
+	Weights  map[core.Transport]uint8 // the weights selection reads; a stub configured with no transports holds default ones
+	Received *ReceivedSignal          // the signal as received or configured; nil when the server has signalled nothing
 }
 
 // Configured reports whether the signal held came from configuration: the
@@ -511,6 +511,18 @@ type HeldSignal struct {
 // configured with neither holds no configured signal.
 func (h HeldSignal) Configured() bool {
 	return h.Received != nil && h.Received.Source == SignalSourceConfig
+}
+
+// GetHeldSignal returns a copy of the signal the server holds, read together
+// under the lock, as an install would see it (SetTransportSignalIf). An
+// install decided on from it must still recheck there. Thread-safe.
+func (as *AuthServer) GetHeldSignal() HeldSignal {
+	if as == nil {
+		return HeldSignal{}
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	return HeldSignal{Weights: copyMap(as.TransportWeights), Received: as.Received.clone()}
 }
 
 // SetTransportSignalIf is SetTransportSignal, done only when ok, called under

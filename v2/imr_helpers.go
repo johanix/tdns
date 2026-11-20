@@ -281,6 +281,12 @@ func (imr *Imr) applyCachedTransportSignal(walk aliasWalk, owner string, servers
 // can end in.
 var testHookSignalLookupStarted func(owner string)
 
+// testHookSignalWaitWatching, when set, runs in awaitTransportSignalsUntil
+// as the wait starts watching a lookup: of the signal at owner, or of its
+// alias hop hop. A test ends the lookup there, once the wait is sure to see
+// it end.
+var testHookSignalWaitWatching func(owner, hop string)
+
 // awaitTransportSignals learns the transports of the servers in serverMap
 // that have signalled none, for a strict-privacy query that has no server it
 // may use. It waits as awaitTransportSignalsUntil does, until a server can
@@ -307,15 +313,18 @@ func (imr *Imr) awaitTransportSignals(ctx context.Context, qname string, serverM
 // use-transport-signals: false turns them off; new-auth-server starts one
 // only with always-query-for-transport (awaitRunningSignalLookups).
 //
-// A server whose signal is known is not looked up again, whatever the signal
-// says, but a lookup of its signal that is already running is waited for:
-// the one verifying a redirect that came in an Additional section that could
-// not validate it, say. Nor is a server looked up whose signal the cache
-// holds a denial of, until the denial expires, or one whose lookup failed and
-// is cooling down. For a zone that signals nothing, only the first query
-// after each denial expires waits. A cached alias whose hop the cache does
-// not hold gives no signal until the hop's lookup has found it: that lookup
-// is waited for, and the alias followed again once it ends.
+// A server that holds weights is not looked up again, whatever they say, but
+// a lookup of its signal that is already running is waited for: the one
+// verifying a redirect that came in an Additional section that could not
+// validate it, say. With none running, such a server that still needs a
+// signal (stillNeedsSignal), a stub's default weights or a signal whose path
+// is undecided, takes the one the cache holds. Nor is a server looked up
+// whose signal the cache holds a denial of, until the denial expires, or one
+// whose lookup failed and is cooling down. For a zone that signals nothing,
+// only the first query after each denial expires waits. A cached alias whose
+// hop the cache does not hold gives no signal until the hop's lookup has
+// found it: that lookup is waited for, and the alias followed again once it
+// ends.
 //
 // A transport-signal lookup, and what it asks on the way, never waits here:
 // it could be waiting for itself, or for a lookup that waits for it. Strict
@@ -342,15 +351,23 @@ func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[st
 		if owner == "" {
 			continue
 		}
-		if len(server.GetTransportWeights()) > 0 {
-			// A server whose signal is known is not looked up again. A
-			// lookup of its signal that is already running is waited for:
-			// the signal may have come with a redirect whose path the
-			// Additional section could not validate, which waits for this
-			// lookup to verify it, and until then it may offer the query no
-			// transport it can use.
+		if held := server.GetHeldSignal(); len(held.Weights) > 0 {
+			// A server that holds weights is not looked up again. A lookup
+			// of its signal that is already running is waited for: the
+			// signal may have come with a redirect whose path the Additional
+			// section could not validate, which waits for this lookup to
+			// verify it, and until then it may offer the query no transport
+			// it can use. With none running, a server that still needs a
+			// signal takes the one the cache holds: that lookup may have
+			// ended, or the weights may be a stub's defaults, which no
+			// signal set. An alias in the cache whose hop is being looked up
+			// gives no signal yet: that lookup is waited for.
 			if ch := imr.TransportSignalDiscovery.Pending(owner); ch != nil {
 				pending = append(pending, lookup{server: server, owner: owner, done: ch})
+			} else if stillNeedsSignal(held) {
+				if c := imr.applyCachedTransportSignal(walk, owner, server); c.hop != nil {
+					pending = append(pending, lookup{server: server, owner: owner, hop: c.hop.target, done: c.hop.done})
+				}
 			}
 			continue
 		}
@@ -400,6 +417,9 @@ func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[st
 	stop := make(chan struct{})
 	defer close(stop)
 	watch := func(l lookup) {
+		if testHookSignalWaitWatching != nil {
+			testHookSignalWaitWatching(l.owner, l.hop)
+		}
 		go func() {
 			select {
 			case <-l.done:
