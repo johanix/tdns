@@ -448,23 +448,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	if options[OptOnlineSigning] || options[OptInlineSigning] {
 		zd.OnFirstLoad = append(zd.OnFirstLoad, (*ZoneData).registerForPeriodicResign)
 	}
-	// SetupZoneSync's parentsync path does an unbounded send to
-	// DelegationSyncQ, and OnFirstLoad callbacks run inside the RefreshEngine
-	// loop — dispatch async so a full/stopped consumer cannot stall it.
-	if options[OptChildSync] || options[OptParentSync] {
-		delegationSyncQ := conf.Internal.DelegationSyncQ
-		zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
-			if delegationSyncQ == nil {
-				lg.Error("DelegationSyncQ not available", "zone", z.ZoneName)
-				return
-			}
-			go func() {
-				if err := z.SetupZoneSync(delegationSyncQ); err != nil {
-					lg.Error("SetupZoneSync failed", "zone", z.ZoneName, "error", err)
-				}
-			}()
-		})
-	}
+	zd.registerZoneSyncSetup(conf.Internal.DelegationSyncQ)
 
 	// Commit the staged inline key just before registration/persistence (so
 	// the keystore holds it when the zone goes live), then register and

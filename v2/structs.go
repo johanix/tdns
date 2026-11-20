@@ -375,9 +375,15 @@ type ZoneData struct {
 	// that reads the KeyDB's record puts them ahead of it. Guarded by
 	// signalStoredMu.
 	signalUnrecorded map[string][]string
-	publishCadence   time.Duration
-	publishQueued    bool
-	publishUrgent    bool
+	// signalPassRetired is set when the zone is being removed
+	// (RemoveDynamicZone): the transport-signal pass then stores nothing and
+	// records nothing, so that no record of a removed zone outlives the
+	// delete of its records, and a release is refused (releaseSignal).
+	// Guarded by mu, which the pass and a release hold for their whole run.
+	signalPassRetired bool
+	publishCadence    time.Duration
+	publishQueued     bool
+	publishUrgent     bool
 	// tx is the zone's transactions: the publish hold, and what a zone created
 	// held remembers about its first content. See zone_tx.go. Guarded by mu.
 	tx zoneTxState
@@ -582,6 +588,11 @@ type ZoneData struct {
 	// Apps register these before RefreshEngine starts, and RefreshEngine clears the slice
 	// after executing them. Protected by zd.mu.
 	OnFirstLoad []func(*ZoneData)
+
+	// zoneSyncSetup is the delegation sync setup that a zone created at run
+	// time owes after its first load (registerZoneSyncSetup), or nil. Set once,
+	// while the ZoneData is still private; its done flag is atomic.
+	zoneSyncSetup *owedZoneSyncSetup
 
 	// OnZonePreRefresh callbacks run BEFORE the hard flip in FetchFromFile/FetchFromUpstream.
 	// They receive both old (zd, current, still served) and new (new_zd, incoming, not yet served)

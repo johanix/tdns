@@ -58,8 +58,10 @@ Features:
   An AliasMode record at `_dns.<ns>` delegates the whole signal: tdns-imr
   takes the signal of the RRset the alias leads to, from the Additional
   section when it was injected beside the alias, and otherwise by looking up
-  each hop in the background, at most three. A target at the end of that
-  path is honoured only when every RRset on it validated Secure; records
+  each hop in the background, at most three. A hop whose lookup failed is
+  looked up again once 30 seconds have passed, when a response or a query
+  next brings the alias. A target at the end of that path is honoured only
+  when every RRset on it validated Secure; records
   with TargetName `.` are inherited whatever the state. An alias to `.`, a
   loop, or a longer path gives no signal.
 
