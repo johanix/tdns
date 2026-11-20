@@ -21,9 +21,10 @@ type DelegationSyncHandler func(ctx context.Context, ds DelegationSyncRequest)
 
 // delegationSyncLaneWarnAt is the length of one parent's queue at which a
 // warning is logged, and again at each doubling. It is not a limit: nothing is
-// dropped. A queue is bounded by merging (mergeDelegationSyncRequests), so one
-// this long has many zones behind a parent that is slow or not answering. A
-// variable only so a test need not queue a hundred requests.
+// dropped. A queue holds compares, not stored changes, and a zone's compares
+// merge (mergeDelegationSyncRequests), so one this long has many zones behind
+// a parent that is slow or not answering. A variable only so a test need not
+// queue a hundred requests.
 var delegationSyncLaneWarnAt = 100
 
 // activeDelegationSyncLanes is the running syncher's lanes, for
@@ -51,21 +52,29 @@ var activeDelegationSyncLanes atomic.Pointer[delegationSyncLanes]
 //     meanwhile. A handler that starts work of its own and returns, as
 //     SYNC-DS starts its delivery, is done as far as the queue is concerned,
 //     as it was for the single loop.
-//   - Nothing gets a timeout it did not have. A handler runs to its own end,
-//     and its failure path, retries and backoff are what they were. A delayed
-//     re-enqueue (deferForImr, requeueSetupAfter, deferUntilHoldEnds) sends to
-//     intake as before, with its counts, and comes back through here.
+//   - Nothing gets a timeout it did not have. A handler runs to its own end.
+//     A delayed re-enqueue (deferForImr, requeueSetupAfter, requeueLookAfter,
+//     deferUntilHoldEnds) sends to intake, with its counts, and comes back
+//     through here.
 //   - intake is the same channel, so no sender changes. It just rarely fills.
 //
-// What is new: a request that arrives while one for the same zone with the
-// same command waits in the queue is merged into it where that does what
-// running both would (mergeDelegationSyncRequests). Without that a zone that
-// keeps changing behind a parent that does not answer would grow the queue
-// without limit, now that a full intake no longer holds its senders back. The
-// merged request runs where the waiting one stood, so it runs ahead of the
-// zone's requests that arrived between the two. Those may only be live
-// reconciliations, which see the merged change when they run after it
-// (delegationSyncMayBeOvertaken).
+// What is new:
+//
+//   - A stored change (SYNC-DELEGATION, PROXY-SYNC) is sent as it is only when
+//     it can start at once: nothing of the parent's queue waits or runs. Any
+//     other time it joins the queue as a compare of the zone with its parent
+//     (delegationSyncLook), which is right whenever it runs; a difference kept
+//     for later may not be. A stored change whose send fails is retried as a
+//     compare, and a compare that fails is retried until the parent answers.
+//   - A request that arrives while one for the same zone with the same command
+//     waits in the queue is merged into it (mergeDelegationSyncRequests). Only
+//     compares and setups merge, and two of them do what one does. Without
+//     that a zone that keeps changing behind a parent that does not answer
+//     would grow the queue without limit, now that a full intake no longer
+//     holds its senders back. The merged request runs where the waiting one
+//     stood, so it runs ahead of the zone's requests that arrived between the
+//     two. Those may only be live reconciliations, which see more when they
+//     run after it (delegationSyncMayBeOvertaken).
 //
 // The parent is the zone's cached parent (GetParent). While that is not known
 // yet, the zone's name less its first label stands in. The stand-in is only a
@@ -136,12 +145,20 @@ func newDelegationSyncLanes(handle DelegationSyncHandler) *delegationSyncLanes {
 
 // dispatch puts ds at the back of its zone's lane, or merges it into a
 // request of the zone's that waits there, and starts the lane's goroutine if
-// none serves it. It never waits on a handler.
+// none serves it. A stored change that cannot start at once goes in as a
+// compare (delegationSyncLook). It never waits on a handler.
 func (l *delegationSyncLanes) dispatch(ctx context.Context, ds DelegationSyncRequest) {
 	zone := delegationSyncZoneKey(ds)
 
 	l.mu.Lock()
 	pin := l.zones[zone]
+	stored := ds.Command
+	look, isStored := delegationSyncLook(ds)
+	if isStored && !l.startsAtOnce(pin, ds) {
+		ds = look
+		defer lgDns.Debug("DelegationSyncher: the parent's queue is busy; the change waits as a compare with the parent",
+			"zone", look.ZoneName, "change", stored, "queued", look.Command)
+	}
 	if pin != nil && pin.lane.merge(zone, ds) {
 		parent := pin.lane.parent
 		l.mu.Unlock()
@@ -183,19 +200,31 @@ func (l *delegationSyncLanes) dispatch(ctx context.Context, ds DelegationSyncReq
 	}
 }
 
+// startsAtOnce reports whether ds, a stored change, is to be sent as it is: it
+// would start as soon as it is queued, since its zone has nothing in a lane
+// (pin) and its parent's lane has nothing waiting or running, and the parent
+// is not known to lack an earlier change of the zone (delegationOutOfStep):
+// the difference assumes the parent holds what the zone held before it. Called
+// with l.mu held.
+func (l *delegationSyncLanes) startsAtOnce(pin *delegationSyncPin, ds DelegationSyncRequest) bool {
+	if pin != nil || (ds.ZoneData != nil && ds.ZoneData.delegationOutOfStep.Load()) {
+		return false
+	}
+	ln := l.lanes[delegationSyncLaneKey(ds)]
+	return ln == nil || (len(ln.queue) == 0 && ln.current == nil)
+}
+
 // merge merges ds into the latest request for zone with ds's command that
 // waits in ln, and reports whether it did. Never into the running request: it
 // may have read the zone already. Called with l.mu held.
 //
 // Merging moves ds ahead of the zone's requests that wait between the two,
 // so it stops at the first of them that may not be overtaken
-// (delegationSyncMayBeOvertaken): only live reconciliations may. That keeps a
-// SYNC-DELEGATION merging into the zone's waiting one past the SIGNALS-EDITED,
-// EXPLICIT-SYNC-DELEGATION and REFRESH-SYNC-DELEGATION between them, which
-// see the merged change when they run after it. Stopping at every request with
-// another command would keep a SYNC-DELEGATION and the SIGNALS-EDITED the same
-// zone update sends after it from ever merging, and the queue would grow with
-// each such update again.
+// (delegationSyncMayBeOvertaken): only live reconciliations may. That keeps
+// the compare a zone update queues merging into the zone's waiting one past
+// the SIGNALS-EDITED the update queued after it. Stopping at every request
+// with another command would keep the two from ever merging, and the queue
+// would grow with each such update again.
 func (ln *delegationSyncLane) merge(zone string, ds DelegationSyncRequest) bool {
 	if !delegationSyncMerges(ds) {
 		return false

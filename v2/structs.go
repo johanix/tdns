@@ -213,9 +213,16 @@ type ZoneData struct {
 	proxySig0ParentBootstrapped bool
 	// delegationLastSyncOK is when a delegation sync of this zone last
 	// succeeded: a parentsync-proxy sync, or a parentsync child's refresh sync
-	// (a zone is one or the other). A retry of a sync that failed before it is
-	// dropped (delegationSyncRetrySuperseded). Guarded by mu.
+	// or explicit sync, both compares with the parent (a zone is a proxy's or a
+	// child's). A retry of a sync that failed before it is dropped
+	// (delegationSyncRetrySuperseded). Guarded by mu.
 	delegationLastSyncOK time.Time
+	// delegationOutOfStep is set when a sync with the parent failed and no
+	// compare has found the parent in step since: the parent may lack changes
+	// the zone has made. A stored change is then queued as a compare instead of
+	// being sent as a difference (delegationSyncLanes.startsAtOnce). Cleared
+	// when delegationLastSyncOK is set.
+	delegationOutOfStep atomic.Bool
 	// childRefreshNSGlueChanged is what the child-mode pre-refresh hook saw:
 	// the incoming zone's NS or glue differs from the served zone's. Consumed
 	// and cleared by the post-refresh hook (delsync_refresh.go). Guarded by mu.
@@ -1367,19 +1374,20 @@ type DelegationSyncRequest struct {
 	Response     chan DelegationSyncStatus // used for API-based requests
 	// Attempt counts re-enqueues of a DELEGATION-SYNC-SETUP whose SIG(0)
 	// bootstrap was deferred because the parent's SVCB advertisement could not
-	// be looked up (errBootstrapAdvertisementLookup), and re-runs of a
-	// PROXY-SYNC or REFRESH-SYNC-DELEGATION that failed
-	// (nextDelegationSyncRetry). Zero on the first try.
+	// be looked up (errBootstrapAdvertisementLookup), and re-runs of a compare
+	// with the parent that failed (EXPLICIT-SYNC-DELEGATION,
+	// REFRESH-SYNC-DELEGATION, PROXY-UPDATE-SETUP; nextDelegationSyncRetry).
+	// Zero on the first try.
 	Attempt int
-	// FailedAt is when the PROXY-SYNC or REFRESH-SYNC-DELEGATION this request
-	// retries failed. Zero on the first try.
+	// FailedAt is when the sync this request retries failed. Zero on the first
+	// try.
 	FailedAt time.Time
 	// ReBootstrapRound counts re-enqueues of a DELEGATION-SYNC-SETUP after the
 	// parent reported the key's validation failed (errBootstrapValidationFailed),
 	// up to childReBootstrapRounds. Zero on the first try.
 	ReBootstrapRound int
-	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
-	// set the proxy NOTIFY action keys on (parentsync-proxy).
+	// ProxyAnalysis is set for PROXY-SYNC: the changed-dimension set the proxy
+	// NOTIFY action keys on (parentsync-proxy).
 	ProxyAnalysis *ProxyDelegationAnalysis
 	// SignalTypes is set for SIGNALS-EDITED: the apex RR types (CDS, CDNSKEY,
 	// CSYNC) an operator's update changed.

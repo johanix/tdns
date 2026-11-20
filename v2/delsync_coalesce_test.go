@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -41,9 +42,11 @@ func allDispatched(t *testing.T, q chan DelegationSyncRequest, marked <-chan str
 }
 
 // A zone that keeps changing behind a parent that does not answer must not
-// grow the parent's queue with each change: it keeps one waiting request per
-// command, and the merged requests still carry every change. The running
-// request is never merged into, since it may have read the zone already.
+// grow the parent's queue with each change. The first change starts at once
+// and is sent as it is. Every later one waits as a compare with the parent,
+// whatever it adds or removes, and the zone's compares merge: one waiting
+// request per command. The running request is never merged into, since it may
+// have read the zone already.
 func TestAZoneThatKeepsChangingDoesNotGrowItsParentsQueue(t *testing.T) {
 	zd := laneZone("busy.down.example.", "down.example.")
 	const changes = 250
@@ -70,15 +73,22 @@ func TestAZoneThatKeepsChangingDoesNotGrowItsParentsQueue(t *testing.T) {
 		}
 	})
 
+	// Changes that add and changes that remove, as an NS replaced again and
+	// again would send.
 	change := func(i int) DelegationSyncRequest {
 		ds := laneRequest(zd, "SYNC-DELEGATION")
-		ds.SyncStatus.NsAdds = []dns.RR{mustRR(t, fmt.Sprintf("busy.down.example. 3600 IN NS ns%d.example.", i))}
+		ns := mustRR(t, fmt.Sprintf("busy.down.example. 3600 IN NS ns%d.example.", i))
+		if i%2 == 0 {
+			ds.SyncStatus.NsRemoves = []dns.RR{ns}
+		} else {
+			ds.SyncStatus.NsAdds = []dns.RR{ns}
+		}
 		return ds
 	}
-	offer(t, q, change(0))
+	offer(t, q, change(1))
 	receive(t, started, "the first sync to start and stick")
 
-	for i := 1; i <= changes; i++ {
+	for i := 2; i <= changes+1; i++ {
 		offer(t, q, change(i))
 		se := laneRequest(zd, "SIGNALS-EDITED")
 		se.SignalTypes = []uint16{dns.TypeCDS}
@@ -90,9 +100,10 @@ func TestAZoneThatKeepsChangingDoesNotGrowItsParentsQueue(t *testing.T) {
 		offer(t, q, laneRequest(zd, "REFRESH-SYNC-DELEGATION"))
 	}
 	allDispatched(t, q, marked)
-	// The running sync, and one waiting request of each of the four commands.
-	if pos := waitingIn(t, zd.ZoneName); pos.Waiting != 5 {
-		t.Fatalf("the zone has %d requests in the queue, want 5: the running sync and one of each command", pos.Waiting)
+	// The running sync, one compare (the changes and the explicit syncs), one
+	// SIGNALS-EDITED and one refresh sync.
+	if pos := waitingIn(t, zd.ZoneName); pos.Waiting != 4 {
+		t.Fatalf("the zone has %d requests in the queue, want 4: the running sync and one of each command", pos.Waiting)
 	}
 
 	close(release)
@@ -107,86 +118,215 @@ func TestAZoneThatKeepsChangingDoesNotGrowItsParentsQueue(t *testing.T) {
 	for _, ds := range ran {
 		cmds = append(cmds, ds.Command)
 	}
-	want := []string{"SYNC-DELEGATION", "SYNC-DELEGATION", "SIGNALS-EDITED", "EXPLICIT-SYNC-DELEGATION", "REFRESH-SYNC-DELEGATION"}
+	want := []string{"SYNC-DELEGATION", "EXPLICIT-SYNC-DELEGATION", "SIGNALS-EDITED", "REFRESH-SYNC-DELEGATION"}
 	if !slices.Equal(cmds, want) {
 		t.Fatalf("ran %v, want %v", cmds, want)
 	}
 	if n := len(ran[0].SyncStatus.NsAdds); n != 1 {
 		t.Errorf("the running sync carries %d NS adds, want its own 1: nothing may merge into it", n)
 	}
-	if n := len(ran[1].SyncStatus.NsAdds); n != changes {
-		t.Errorf("the merged sync carries %d NS adds, want all %d changes", n, changes)
+	if d := ran[1].SyncStatus; len(d.NsAdds)+len(d.NsRemoves) != 0 {
+		t.Errorf("the compare carries a stored difference (%d adds, %d removes); it must read the zone when it runs",
+			len(d.NsAdds), len(d.NsRemoves))
 	}
-	if got := ran[2].SignalTypes; !slices.Equal(got, []uint16{dns.TypeCDS, dns.TypeCSYNC}) {
+	if got := slices.Sorted(slices.Values(ran[2].SignalTypes)); !slices.Equal(got, []uint16{dns.TypeCDS, dns.TypeCSYNC}) {
 		t.Errorf("the merged SIGNALS-EDITED names %v, want CDS and CSYNC", got)
 	}
 }
 
-// Two differences that only add merge into the union of their additions; DS
-// stays as older left it when newer has no opinion about it. A difference that
-// removes a record merges with none.
-func TestMergeDelegationSyncDiffsMergesOnlyAdditions(t *testing.T) {
-	ns1 := mustRR(t, "child.example. 3600 IN NS ns1.example.")
-	ns2 := mustRR(t, "child.example. 3600 IN NS ns2.example.")
-	ns3 := mustRR(t, "child.example. 3600 IN NS ns3.example.")
-	ds1 := mustRR(t, "child.example. 3600 IN DS 12345 15 2 0102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F20")
-
-	older := DelegationSyncStatus{
-		NsAdds:     []dns.RR{ns1, ns3},
-		NewDS:      []dns.RR{ds1},
-		NewDSKnown: true,
-		Unread:     []string{"DS"},
-	}
-	newer := DelegationSyncStatus{
-		NsAdds: []dns.RR{ns2, dns.Copy(ns3)},
-		NewNS:  []dns.RR{ns1, ns2, ns3},
-		Unread: []string{"DS", "ns2.example. A"},
-	}
-	m, ok := mergeDelegationSyncDiffs(older, newer)
-	if !ok {
-		t.Fatal("not merged; neither removes anything")
-	}
-	if len(m.NsAdds) != 3 || len(m.NsRemoves) != 0 {
-		t.Errorf("merged %d adds and %d removes, want ns1, ns2 and ns3 added once each", len(m.NsAdds), len(m.NsRemoves))
-	}
-	for _, rr := range []dns.RR{ns1, ns2, ns3} {
-		if !slices.ContainsFunc(m.NsAdds, func(x dns.RR) bool { return sameRecord(x, rr) }) {
-			t.Errorf("the merged difference does not add %s", rr)
-		}
-	}
-	if len(m.NewNS) != 3 {
-		t.Errorf("the complete new NS set is not newer's: %v", m.NewNS)
-	}
-	if !m.NewDSKnown || len(m.NewDS) != 1 {
-		t.Errorf("newer had no opinion about DS, so older's must stand: known %v, %d DS", m.NewDSKnown, len(m.NewDS))
-	}
-	if !slices.Equal(m.Unread, []string{"DS", "ns2.example. A"}) {
-		t.Errorf("Unread = %v, want both reads' gaps once each", m.Unread)
-	}
-
-	// A newer that withdraws the DS (known, empty) wins over older's DS.
-	newer.NewDSKnown, newer.NewDS = true, nil
-	if m, _ := mergeDelegationSyncDiffs(older, newer); !m.NewDSKnown || len(m.NewDS) != 0 {
-		t.Errorf("newer withdrew the DS, merged has known %v and %d DS", m.NewDSKnown, len(m.NewDS))
-	}
-
-	// A removal on either side, in any list, keeps the two apart.
-	glue := mustRR(t, "ns1.child.example. 3600 IN A 192.0.2.1")
-	glue6 := mustRR(t, "ns1.child.example. 3600 IN AAAA 2001:db8::1")
-	adds := DelegationSyncStatus{NsAdds: []dns.RR{ns2}}
+// A stored change is sent as it is only when it starts at once. Behind
+// another zone's request in its parent's queue, or while the parent is known
+// to lack an earlier change of the zone, it waits as a compare with the
+// parent: a SYNC-DELEGATION as an EXPLICIT-SYNC-DELEGATION, a PROXY-SYNC as the
+// proxy's compare. The compare carries no stored difference.
+func TestAStoredChangeIsSentOnlyWhenItStartsAtOnce(t *testing.T) {
 	for _, c := range []struct {
-		what         string
-		older, newer DelegationSyncStatus
+		name, change, want string
+		busy, outOfStep    bool
 	}{
-		{"newer removes what older adds", DelegationSyncStatus{NsAdds: []dns.RR{ns1}}, DelegationSyncStatus{NsRemoves: []dns.RR{removalOf(ns1)}}},
-		{"older removes, newer adds another", DelegationSyncStatus{ARemoves: []dns.RR{removalOf(glue)}}, adds},
-		{"older adds, newer removes another", adds, DelegationSyncStatus{AAAARemoves: []dns.RR{removalOf(glue6)}}},
-		{"both remove", DelegationSyncStatus{DSRemoves: []dns.RR{ds1}}, DelegationSyncStatus{Removes: []dns.RR{removalOf(glue)}}},
-		{"a DNSKEY removal", DelegationSyncStatus{DNSKEYRemoves: []dns.RR{ds1}}, adds},
+		{"an idle parent: sent as it is", "SYNC-DELEGATION", "SYNC-DELEGATION", false, false},
+		{"behind another zone of the parent", "SYNC-DELEGATION", "EXPLICIT-SYNC-DELEGATION", true, false},
+		{"a parent known to lack an earlier change", "SYNC-DELEGATION", "EXPLICIT-SYNC-DELEGATION", false, true},
+		{"a proxy's change, idle parent: sent as it is", "PROXY-SYNC", "PROXY-SYNC", false, false},
+		{"a proxy's change behind another zone", "PROXY-SYNC", "PROXY-UPDATE-SETUP", true, false},
 	} {
-		if _, ok := mergeDelegationSyncDiffs(c.older, c.newer); ok {
-			t.Errorf("%s: merged; a deletion the parent refuses would take the other's changes with it", c.what)
+		t.Run(c.name, func(t *testing.T) {
+			zd := laneZone("stored.down.example.", "down.example.")
+			other := laneZone("other.down.example.", "down.example.")
+			zd.delegationOutOfStep.Store(c.outOfStep)
+			release := make(chan struct{})
+			started := make(chan struct{}, 1)
+			marked := make(chan struct{}, 1)
+			got := make(chan DelegationSyncRequest, 1)
+			q, _, _ := startLanes(t, func(ctx context.Context, ds DelegationSyncRequest) {
+				if isLaneMarker(ds, marked) {
+					return
+				}
+				if ds.ZoneName == other.ZoneName {
+					started <- struct{}{}
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+					return
+				}
+				got <- ds
+			})
+			if c.busy {
+				offer(t, q, laneRequest(other, "first"))
+				receive(t, started, "the other zone's request to start and stick")
+			}
+			ds := laneRequest(zd, c.change)
+			ds.SyncStatus.NsAdds = []dns.RR{mustRR(t, "stored.down.example. 3600 IN NS ns1.example.")}
+			ds.ProxyAnalysis = &ProxyDelegationAnalysis{NsOrGlueChanged: true}
+			offer(t, q, ds)
+			allDispatched(t, q, marked)
+			close(release)
+
+			ran := receive(t, got, "the zone's request")
+			if ran.Command != c.want {
+				t.Fatalf("ran %s, want %s", ran.Command, c.want)
+			}
+			if c.want != c.change && (len(ran.SyncStatus.NsAdds) != 0 || ran.ProxyAnalysis != nil || ran.ZoneData != zd) {
+				t.Errorf("the compare carries the stored change, or lost its zone: %+v", ran)
+			}
+			if c.want == c.change && len(ran.SyncStatus.NsAdds) != 1 {
+				t.Errorf("the change sent as it is lost its difference: %+v", ran.SyncStatus)
+			}
+		})
+	}
+}
+
+// A stored change whose send fails is not sent again: the zone may change
+// before the parent answers, and the parent may then hold less than the
+// difference assumes. It is retried as a compare with the parent, after the
+// first retry wait. A parent that offers no usable scheme is not a failure,
+// and a success leaves nothing to retry.
+func TestAFailedStoredChangeIsRetriedAsACompare(t *testing.T) {
+	zd := laneZone("failed.down.example.", "down.example.")
+	ds := laneRequest(zd, "SYNC-DELEGATION")
+	ds.SyncStatus.NsRemoves = []dns.RR{mustRR(t, "failed.down.example. 3600 IN NS ns1.example.")}
+
+	type requeue struct {
+		ds    DelegationSyncRequest
+		delay time.Duration
+	}
+	run := func(resolveErr, syncErr error) (sent int, out []requeue) {
+		handleSyncDelegationWith(ds, syncDelegationSteps{
+			resolve: func() error { return resolveErr },
+			sync: func(DelegationSyncStatus) (string, uint8, UpdateResult, error) {
+				sent++
+				return "", 0, UpdateResult{}, syncErr
+			},
+			requeue: func(next DelegationSyncRequest, delay time.Duration) {
+				out = append(out, requeue{next, delay})
+			},
+		})
+		return sent, out
+	}
+	for _, c := range []struct {
+		name                string
+		resolveErr, syncErr error
+		sent                int
+	}{
+		{"the parent refused", nil, errors.New("the parent answered SERVFAIL"), 1},
+		{"the parent was not found", errors.New("no parent"), nil, 0},
+	} {
+		sent, out := run(c.resolveErr, c.syncErr)
+		if sent != c.sent || len(out) != 1 {
+			t.Fatalf("%s: %d sends and %d retries, want %d and 1", c.name, sent, len(out), c.sent)
 		}
+		next := out[0].ds
+		if next.Command != "EXPLICIT-SYNC-DELEGATION" || next.ZoneData != zd || next.Attempt != 1 ||
+			next.FailedAt.IsZero() || len(next.SyncStatus.NsRemoves) != 0 {
+			t.Errorf("%s: retry = {%s attempt %d failedAt %v, %d stored removes}, want a compare at attempt 1",
+				c.name, next.Command, next.Attempt, next.FailedAt, len(next.SyncStatus.NsRemoves))
+		}
+		if out[0].delay != delegationSyncRetryDelays[0] {
+			t.Errorf("%s: retried after %s, want %s", c.name, out[0].delay, delegationSyncRetryDelays[0])
+		}
+	}
+	for _, err := range []error{ErrNoUsableDsync, nil} {
+		if _, out := run(nil, err); len(out) != 0 {
+			t.Errorf("a send that returned %v was retried", err)
+		}
+	}
+
+	// The proxy's stored change is retried as the proxy's compare.
+	var out []requeue
+	lookAgainLater(DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName, ZoneData: zd,
+		ProxyAnalysis: &ProxyDelegationAnalysis{NsOrGlueChanged: true}}, "forward", errors.New("refused"),
+		func(next DelegationSyncRequest, delay time.Duration) { out = append(out, requeue{next, delay}) })
+	if len(out) != 1 || out[0].ds.Command != "PROXY-UPDATE-SETUP" || out[0].ds.ProxyAnalysis != nil || out[0].ds.Attempt != 1 {
+		t.Errorf("a failed PROXY-SYNC was retried as %+v, want one PROXY-UPDATE-SETUP at attempt 1", out)
+	}
+}
+
+// A compare nobody waits on must reach the parent. When it fails, or could not
+// read all of the parent's delegation, it is retried, however many times it
+// has failed, and the zone's parent is marked out of step meanwhile. A compare
+// someone waits on is answered and not retried, and one that found the parent
+// in step is done. A retry whose zone is no longer loaded is dropped when due.
+func TestACompareNobodyWaitsOnIsRetriedUntilTheParentAnswers(t *testing.T) {
+	saved := delegationSyncRetryDelays
+	delegationSyncRetryDelays = []time.Duration{time.Millisecond, 2 * time.Millisecond}
+	t.Cleanup(func() { delegationSyncRetryDelays = saved })
+
+	zd := laneZone("compare.down.example.", "down.example.")
+	Zones.Set(zd.ZoneName, zd)
+	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	q := make(chan DelegationSyncRequest, 1)
+
+	failed := func() DelegationSyncStatus { return DelegationSyncStatus{Error: true, ErrorMsg: "SERVFAIL"} }
+	unread := func() DelegationSyncStatus { return DelegationSyncStatus{InSync: true, Unread: []string{"ns1 A"}} }
+	inStep := func() DelegationSyncStatus { return DelegationSyncStatus{InSync: true} }
+
+	// Far past the schedule's end: the retries do not run out.
+	look := DelegationSyncRequest{Command: "EXPLICIT-SYNC-DELEGATION", ZoneName: zd.ZoneName, ZoneData: zd, Attempt: 7}
+	for _, c := range []struct {
+		name string
+		run  func() DelegationSyncStatus
+	}{{"a failure", failed}, {"an incomplete read", unread}} {
+		zd.delegationOutOfStep.Store(false)
+		if handleExplicitSyncWith(ctx, nil, q, look, c.run) == nil {
+			t.Fatalf("%s: not retried", c.name)
+		}
+		if !zd.delegationOutOfStep.Load() {
+			t.Errorf("%s: the zone's parent is not marked out of step", c.name)
+		}
+		next := receive(t, q, c.name+": the retry")
+		if next.Command != look.Command || next.Attempt != 8 || next.FailedAt.IsZero() || next.ZoneData != zd {
+			t.Errorf("%s: retry = {%s attempt %d failedAt %v}, want the compare at attempt 8",
+				c.name, next.Command, next.Attempt, next.FailedAt)
+		}
+	}
+	zd.noteDelegationSyncInStep()
+	if zd.delegationOutOfStep.Load() {
+		t.Error("a compare that brought the parent in step left it marked out of step")
+	}
+
+	if handleExplicitSyncWith(ctx, nil, q, look, inStep) != nil {
+		t.Error("a compare that found the parent in step was retried")
+	}
+	asked := look
+	asked.Response = make(chan DelegationSyncStatus, 1)
+	if handleExplicitSyncWith(ctx, nil, q, asked, failed) != nil {
+		t.Error("a compare an operator waits on was retried")
+	}
+	receive(t, asked.Response, "the operator's answer")
+
+	Zones.Remove(zd.ZoneName)
+	done := handleExplicitSyncWith(ctx, nil, q, look, failed)
+	if done == nil {
+		t.Fatal("not retried")
+	}
+	receive(t, done, "the retry worker to end")
+	select {
+	case ds := <-q:
+		t.Errorf("a retry for a zone no longer loaded was queued: %s attempt %d", ds.Command, ds.Attempt)
+	default:
 	}
 }
 
@@ -310,150 +450,11 @@ func TestAMergedRetryIsDroppedOnlyWhenBothWouldBe(t *testing.T) {
 	}
 }
 
-// glueChange is one SYNC-DELEGATION's change to ns1.child.parent.example.'s
-// A glue.
-type glueChange struct{ adds, removes []dns.RR }
-
-// syncsToADirectParent is the join with a tdns parent, which refuses an UPDATE
-// that deletes a record it does not hold, with everything in it (#843). It
-// queues each change as a SYNC-DELEGATION behind a request that sticks, as
-// behind a parent that does not answer, and then lets them run. Each sync that
-// runs is sent to a direct-backend parent (dsdParentZone) as the delta UPDATE
-// the child sends. It returns how many of the zone's requests were in the
-// queue once all were, the running one included; what the parent refused; and
-// the A glue it then serves for ns1.child.parent.example.
-func syncsToADirectParent(t *testing.T, changes []glueChange) (waiting int, refused []error, served []string) {
-	t.Helper()
-	parent, kdb := dsdParentZone(t)
-	child := laneZone(dsdChild, dsdParent)
-
-	release := make(chan struct{})
-	started := make(chan struct{}, 1)
-	marked := make(chan struct{}, 1)
-	var mu sync.Mutex
-	q, _, _ := startLanes(t, func(ctx context.Context, ds DelegationSyncRequest) {
-		if isLaneMarker(ds, marked) {
-			return
-		}
-		if ds.Command == "first" {
-			started <- struct{}{}
-			select {
-			case <-release:
-			case <-ctx.Done():
-			}
-			return
-		}
-		m, err := buildDelegationUpdate(dsdParent, dsdChild, ds.SyncStatus, UpdateModeDelta)
-		if err != nil {
-			t.Errorf("buildDelegationUpdate: %v", err)
-			return
-		}
-		wire, err := m.Pack()
-		if err != nil {
-			t.Errorf("packing the UPDATE: %v", err)
-			return
-		}
-		r := new(dns.Msg)
-		if err := r.Unpack(wire); err != nil {
-			t.Errorf("unpacking the UPDATE: %v", err)
-			return
-		}
-		if _, err := dsdApply(t, parent, kdb, r.Ns); err != nil {
-			mu.Lock()
-			refused = append(refused, err)
-			mu.Unlock()
-		}
-	})
-
-	offer(t, q, laneRequest(child, "first"))
-	receive(t, started, "the first request to start and stick")
-	for _, c := range changes {
-		ds := laneRequest(child, "SYNC-DELEGATION")
-		ds.SyncStatus = DelegationSyncStatus{ZoneName: dsdChild, AAdds: c.adds}
-		for _, rr := range c.removes {
-			ds.SyncStatus.ARemoves = append(ds.SyncStatus.ARemoves, removalOf(rr))
-		}
-		offer(t, q, ds)
-	}
-	allDispatched(t, q, marked)
-	waiting = waitingIn(t, child.ZoneName).Waiting
-
-	close(release)
-	waitFor(t, 2*time.Second, "the syncs to run", func() bool {
-		_, ok := DelegationSyncWaiting(child.ZoneName)
-		return !ok
-	})
-	od := getOwnerFrom(parent.publishedSnapshot(), "ns1.child.parent.example.")
-	if od == nil {
-		t.Fatal("the parent does not serve ns1.child.parent.example.")
-	}
-	for _, rr := range od.RRtypes.GetOnlyRRSet(dns.TypeA).RRs {
-		served = append(served, rr.(*dns.A).A.String())
-	}
-	slices.Sort(served)
-	mu.Lock()
-	defer mu.Unlock()
-	return waiting, refused, served
-}
-
-// One change adds the glue address X and the next replaces X with Y. The
-// parent has had neither. Merged, the two were one UPDATE deleting X, which
-// the parent refused with Y in it. A record removed and added back is two
-// requests as well: the removal merges with nothing.
-func TestGlueAddedThenReplacedReachesAParentThatRefusesAbsentDeletes(t *testing.T) {
-	held := mustRR(t, "ns1.child.parent.example. 3600 IN A 192.0.2.54") // the parent has it
-	x := mustRR(t, "ns1.child.parent.example. 3600 IN A 192.0.2.60")
-	y := mustRR(t, "ns1.child.parent.example. 3600 IN A 192.0.2.61")
-
-	waiting, refused, served := syncsToADirectParent(t, []glueChange{
-		{adds: []dns.RR{x}},
-		{adds: []dns.RR{y}, removes: []dns.RR{x}},
-		{removes: []dns.RR{held}},
-		{adds: []dns.RR{held}},
-	})
-	if waiting != 5 {
-		t.Errorf("%d of the zone's requests in the queue, want 5: the running one and four kept apart", waiting)
-	}
-	for _, err := range refused {
-		t.Errorf("the parent refused a sync: %v", err)
-	}
-	if want := []string{"192.0.2.54", "192.0.2.61"}; !slices.Equal(served, want) {
-		t.Errorf("the parent serves glue %v, want %v", served, want)
-	}
-}
-
-// A deletion the parent refuses takes nothing else with it, in either order:
-// an address added beside it, in a request of its own, still lands. Merged,
-// the two were one UPDATE, and the parent refused all of it.
-func TestADeletionTheParentRefusesTakesNothingElseWithIt(t *testing.T) {
-	z := mustRR(t, "ns1.child.parent.example. 3600 IN A 192.0.2.62")
-	absent := mustRR(t, "ns1.child.parent.example. 3600 IN A 192.0.2.99") // the parent never had it
-	for _, c := range []struct {
-		name    string
-		changes []glueChange
-	}{
-		{"the deletion second", []glueChange{{adds: []dns.RR{z}}, {removes: []dns.RR{absent}}}},
-		{"the deletion first", []glueChange{{removes: []dns.RR{absent}}, {adds: []dns.RR{z}}}},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			waiting, refused, served := syncsToADirectParent(t, c.changes)
-			if waiting != 3 {
-				t.Errorf("%d of the zone's requests in the queue, want 3: the running one and two kept apart", waiting)
-			}
-			if len(refused) != 1 {
-				t.Errorf("the parent refused %d syncs, want 1, the deletion: %v", len(refused), refused)
-			}
-			if want := []string{"192.0.2.54", "192.0.2.62"}; !slices.Equal(served, want) {
-				t.Errorf("the parent serves glue %v, want %v", served, want)
-			}
-		})
-	}
-}
-
 // A merge does not move a zone's request past one of the zone's that a caller
 // waits on. The status request reads the parent and answers what it finds:
-// that must be the parent after the sync that arrived before it, not after one
-// that arrived later.
+// that must be the parent after the change that arrived before it, not after
+// one that arrived later. Both changes wait as compares, behind the zone's
+// request that sticks.
 func TestAMergeDoesNotJumpARequestACallerWaitsOn(t *testing.T) {
 	zd := laneZone("order.down.example.", "down.example.")
 
@@ -507,7 +508,7 @@ func TestAMergeDoesNotJumpARequestACallerWaitsOn(t *testing.T) {
 	})
 	mu.Lock()
 	defer mu.Unlock()
-	if want := []string{"SYNC-DELEGATION ns1.example.", "DELEGATION-STATUS", "SYNC-DELEGATION ns2.example."}; !slices.Equal(ran, want) {
+	if want := []string{"EXPLICIT-SYNC-DELEGATION", "DELEGATION-STATUS", "EXPLICIT-SYNC-DELEGATION"}; !slices.Equal(ran, want) {
 		t.Errorf("ran %v, want %v", ran, want)
 	}
 }
@@ -528,10 +529,10 @@ func ranLabel(ds DelegationSyncRequest) string {
 
 // A merge moves a request ahead of the zone's requests that wait between it
 // and the one it joins, and only live reconciliations may be overtaken so. A
-// SIGNALS-EDITED merged ahead of a SYNC-DELEGATION would send the DS the keys
-// call for now, and the SYNC-DELEGATION's stored DS after it; a sync merged
-// ahead of the zone's setup could reach the parent before its key. A sync may
-// pass a live reconciliation, which then sees its change.
+// compare merged ahead of the zone's setup could reach the parent before its
+// key. A compare may pass a live reconciliation, and a live reconciliation a
+// compare: each sees more when it runs later. The changes wait as compares,
+// behind the zone's request that sticks.
 func TestAMergeOvertakesOnlyLiveReconciliations(t *testing.T) {
 	sd := func(zd *ZoneData, ns string) DelegationSyncRequest {
 		ds := laneRequest(zd, "SYNC-DELEGATION")
@@ -544,21 +545,21 @@ func TestAMergeOvertakesOnlyLiveReconciliations(t *testing.T) {
 		waiting int
 		ran     []string
 	}{
-		{"a live reconciliation past a stored sync",
+		{"a live reconciliation past a compare merges",
 			func(zd *ZoneData) []DelegationSyncRequest {
 				return []DelegationSyncRequest{laneRequest(zd, "SIGNALS-EDITED"), sd(zd, "ns1.example."), laneRequest(zd, "SIGNALS-EDITED")}
 			},
-			4, []string{"SIGNALS-EDITED", "SYNC-DELEGATION ns1.example.", "SIGNALS-EDITED"}},
-		{"a sync past the zone's setup",
+			3, []string{"SIGNALS-EDITED", "EXPLICIT-SYNC-DELEGATION"}},
+		{"a compare past the zone's setup",
 			func(zd *ZoneData) []DelegationSyncRequest {
 				return []DelegationSyncRequest{sd(zd, "ns1.example."), laneRequest(zd, "DELEGATION-SYNC-SETUP"), sd(zd, "ns2.example.")}
 			},
-			4, []string{"SYNC-DELEGATION ns1.example.", "DELEGATION-SYNC-SETUP", "SYNC-DELEGATION ns2.example."}},
-		{"a sync past a live reconciliation merges",
+			4, []string{"EXPLICIT-SYNC-DELEGATION", "DELEGATION-SYNC-SETUP", "EXPLICIT-SYNC-DELEGATION"}},
+		{"a compare past a live reconciliation merges",
 			func(zd *ZoneData) []DelegationSyncRequest {
 				return []DelegationSyncRequest{sd(zd, "ns1.example."), laneRequest(zd, "SIGNALS-EDITED"), sd(zd, "ns2.example.")}
 			},
-			3, []string{"SYNC-DELEGATION ns1.example.,ns2.example.", "SIGNALS-EDITED"}},
+			3, []string{"EXPLICIT-SYNC-DELEGATION", "SIGNALS-EDITED"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			zd := laneZone("overtake.down.example.", "down.example.")

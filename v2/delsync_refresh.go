@@ -209,7 +209,7 @@ func refreshSyncStepsFor(ctx context.Context, conf *Config, delsyncq chan Delega
 			return zd.SyncZoneDelegation(ctx, kdb, notifyq, dss, imr())
 		},
 		requeue: func(next DelegationSyncRequest, delay time.Duration) {
-			requeueSetupAfter(ctx, delsyncq, next, delay)
+			requeueLookAfter(ctx, delsyncq, next, delay)
 		},
 	}
 }
@@ -229,9 +229,10 @@ func refreshSyncStepsFor(ctx context.Context, conf *Config, delsyncq chan Delega
 //     that could not read the parent's glue (errParentGlueUnread) has failed:
 //     nothing is sent and it is retried, rather than called in sync.
 //  4. It stops if the parent is in sync, and otherwise sends the difference.
-//  5. A failure is retried on the proxy's schedule. A parent found in sync
-//     counts as a success, as a sent difference does, for dropping an older
-//     retry: either way the parent holds what the zone says.
+//  5. A failure is retried on the compares' schedule, until the parent
+//     answers (nextDelegationSyncRetry). A parent found in sync counts as a
+//     success, as a sent difference does, for dropping an older retry: either
+//     way the parent holds what the zone says.
 func handleRefreshSyncDelegationWith(ctx context.Context, ready *ImrReadiness, delsyncq chan DelegationSyncRequest,
 	zd *ZoneData, ds DelegationSyncRequest, steps refreshSyncSteps) <-chan struct{} {
 
@@ -250,21 +251,12 @@ func handleRefreshSyncDelegationWith(ctx context.Context, ready *ImrReadiness, d
 	}
 
 	retry := func(what string, err error) {
-		next, delay, ok := nextDelegationSyncRetry(ds, time.Now())
-		if !ok {
-			lgDns.Error("DelegationSyncher: refresh sync failed; no retries left, the next NS or glue change or a restart will try again",
-				"zone", ds.ZoneName, "step", what, "attempts", ds.Attempt+1, "err", err)
-			return
-		}
+		next, delay := nextDelegationSyncRetry(ds, time.Now())
 		lgDns.Error("DelegationSyncher: refresh sync failed; will retry", "zone", ds.ZoneName,
 			"step", what, "attempt", ds.Attempt+1, "retry_in", delay, "err", err)
 		steps.requeue(next, delay)
 	}
-	succeeded := func() {
-		zd.mu.Lock()
-		zd.delegationLastSyncOK = time.Now()
-		zd.mu.Unlock()
-	}
+	succeeded := zd.noteDelegationSyncInStep
 
 	dss, err := steps.analyse()
 	if err != nil {

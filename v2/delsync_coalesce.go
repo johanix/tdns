@@ -7,9 +7,51 @@ package tdns
 import (
 	"slices"
 	"time"
-
-	"github.com/miekg/dns"
 )
+
+// delegationSyncLook is the request a stored change becomes when it is not
+// sent at once: a compare of the zone with its parent, which sends whatever
+// differs then. ok is false for a request that is not a stored change.
+//
+// A stored change is SYNC-DELEGATION, the difference between two versions of
+// the zone, or PROXY-SYNC, what a transfer changed. Either is right only while
+// the parent holds what the zone held before the change. Sent at once it is,
+// and it is sent at once (RunDelegationSyncLanes). Kept for later it may not
+// be: the parent may have missed an earlier change, the zone may have changed
+// again, and nobody knows when the queue will reach it. A compare made when it
+// runs is right whenever that is, and two of them waiting do what one does.
+// So the parent's queue holds compares, never stored changes, and a stored
+// change whose send fails is retried as a compare too (lookAgainLater).
+//
+//   - SYNC-DELEGATION becomes EXPLICIT-SYNC-DELEGATION: the zone's NS, glue
+//     and DS against the parent's (AnalyseZoneDelegation), the difference sent
+//     through the parent's scheme. tdns-mp's syncher retries a leader's failed
+//     sync the same way.
+//   - PROXY-SYNC becomes PROXY-UPDATE-SETUP: the proxy's own compare
+//     (ProxyStartupReconcile), the one it makes at load.
+//
+// A request someone waits on is kept as it is: the answer is theirs.
+func delegationSyncLook(ds DelegationSyncRequest) (DelegationSyncRequest, bool) {
+	if ds.Response != nil || ds.DSResponse != nil {
+		return ds, false
+	}
+	var cmd string
+	switch ds.Command {
+	case "SYNC-DELEGATION":
+		cmd = "EXPLICIT-SYNC-DELEGATION"
+	case "PROXY-SYNC":
+		cmd = "PROXY-UPDATE-SETUP"
+	default:
+		return ds, false
+	}
+	return DelegationSyncRequest{
+		Command:  cmd,
+		ZoneName: ds.ZoneName,
+		ZoneData: ds.ZoneData,
+		Attempt:  ds.Attempt,
+		FailedAt: ds.FailedAt,
+	}, true
+}
 
 // mergeDelegationSyncRequests merges next, a request that has just arrived,
 // into waiting, a request for the same zone with the same command that still
@@ -18,29 +60,25 @@ import (
 // This is what bounds a parent's queue without dropping a request or making a
 // sender wait (#1002): a zone has at most one waiting request of each command
 // that merges, however often the zone changes while its parent is slow, so a
-// queue grows with the zones behind the parent, not with their changes. The
-// merged request does what running the two, one after the other, would have
-// done:
+// queue grows with the zones behind the parent, not with their changes.
 //
-//   - A command that works from the zone and the parent as they are when it
-//     runs carries nothing to merge: the waiting request runs after next
-//     arrived, so it sees whatever next was queued for. These are
-//     EXPLICIT-SYNC-DELEGATION, REFRESH-SYNC-DELEGATION,
-//     DELEGATION-SYNC-SETUP, PROXY-UPDATE-SETUP and PROXY-UPDATE-GATE.
-//   - SYNC-DELEGATION carries a difference: two merge only when neither
-//     removes a record (mergeDelegationSyncDiffs).
-//   - SIGNALS-EDITED takes the union of the edited types, and PROXY-SYNC the
-//     union of the changed dimensions, its differences merged as for
-//     SYNC-DELEGATION.
+// Only requests that work from the zone and the parent as they are when they
+// run merge: EXPLICIT-SYNC-DELEGATION, REFRESH-SYNC-DELEGATION,
+// DELEGATION-SYNC-SETUP, SIGNALS-EDITED, PROXY-UPDATE-SETUP and
+// PROXY-UPDATE-GATE. The waiting one runs after next arrived, so it sees
+// whatever next was queued for, and the two are one. SIGNALS-EDITED keeps the
+// union of the edited types, which say what the run looks at.
 //
-// A request someone waits on (Response, DSResponse) is never merged: each
-// waiter gets its own answer. Nor is SYNC-DNSKEY-RRSET, whose key sets are a
-// snapshot of a multi-signer exchange, or a command not listed above.
+// A stored change (SYNC-DELEGATION, PROXY-SYNC) never waits in the queue: it
+// is sent at once or queued as a compare (delegationSyncLook). A request
+// someone waits on (Response, DSResponse) is never merged: each waiter gets its
+// own answer. Nor is SYNC-DNSKEY-RRSET, whose key sets are a snapshot of a
+// multi-signer exchange, or a command not listed above.
 //
 // The merged request keeps the fresher retry counts of the two: a new trigger
-// that joins a retry close to its limit gives the zone its full retries again,
-// as it would have had if queued on its own. Its FailedAt is apart from that
-// budget: see mergedFailedAt.
+// that joins a retry gives the zone its shortest wait again, as it would have
+// had if queued on its own. Its FailedAt is apart from that: see
+// mergedFailedAt.
 func mergeDelegationSyncRequests(waiting, next DelegationSyncRequest) (DelegationSyncRequest, bool) {
 	if waiting.Command != next.Command || !delegationSyncMerges(waiting) || !delegationSyncMerges(next) {
 		return waiting, false
@@ -49,21 +87,8 @@ func mergeDelegationSyncRequests(waiting, next DelegationSyncRequest) (Delegatio
 	if next.ZoneData != nil {
 		merged.ZoneData = next.ZoneData
 	}
-	switch next.Command {
-	case "SYNC-DELEGATION":
-		diff, ok := mergeDelegationSyncDiffs(waiting.SyncStatus, next.SyncStatus)
-		if !ok {
-			return waiting, false
-		}
-		merged.SyncStatus = diff
-	case "SIGNALS-EDITED":
+	if next.Command == "SIGNALS-EDITED" {
 		merged.SignalTypes = unionSignalTypes(waiting.SignalTypes, next.SignalTypes)
-	case "PROXY-SYNC":
-		analysis, ok := mergeProxyAnalyses(waiting.ProxyAnalysis, next.ProxyAnalysis)
-		if !ok {
-			return waiting, false
-		}
-		merged.ProxyAnalysis = analysis
 	}
 	merged.Attempt = min(waiting.Attempt, next.Attempt)
 	merged.FailedAt = mergedFailedAt(waiting, next)
@@ -104,11 +129,7 @@ func mergedFailedAt(a, b DelegationSyncRequest) time.Time {
 // then, so running later only means they see more.
 //
 // Nothing else may be overtaken. Not a request a caller waits on: it answers
-// what it finds when it runs. Not one that carries what it sends
-// (SYNC-DELEGATION, PROXY-SYNC): its state was taken when it was queued, and
-// sent after newer state it would put the older back. A live reconciliation
-// merged ahead of a SYNC-DELEGATION would send the DS the keys call for now,
-// and the stored DS after it. And not a setup (DELEGATION-SYNC-SETUP,
+// what it finds when it runs. And not a setup (DELEGATION-SYNC-SETUP,
 // PROXY-UPDATE-SETUP, PROXY-UPDATE-GATE): what is moved ahead of it could go
 // to the parent before the key it needs is in place.
 func delegationSyncMayBeOvertaken(ds DelegationSyncRequest) bool {
@@ -129,80 +150,12 @@ func delegationSyncMerges(ds DelegationSyncRequest) bool {
 		return false
 	}
 	switch ds.Command {
-	case "SYNC-DELEGATION", "EXPLICIT-SYNC-DELEGATION", "REFRESH-SYNC-DELEGATION",
+	case "EXPLICIT-SYNC-DELEGATION", "REFRESH-SYNC-DELEGATION",
 		"DELEGATION-SYNC-SETUP", "SIGNALS-EDITED",
-		"PROXY-SYNC", "PROXY-UPDATE-SETUP", "PROXY-UPDATE-GATE":
+		"PROXY-UPDATE-SETUP", "PROXY-UPDATE-GATE":
 		return true
 	}
 	return false
-}
-
-// mergeDelegationSyncDiffs is one difference that does what sending older and
-// then newer does, and reports whether there is one: only when neither
-// removes anything. Two that only add merge into the union of what they add,
-// and a parent holds after the merged one what it would after the two.
-//
-// A difference that removes a record (an exact deletion, class NONE) is never
-// merged with another (ok false), and the two are sent one after the other. A
-// tdns parent refuses an UPDATE that deletes a record it does not hold, and
-// nothing in it is applied (absentChildDeletesLocked, #843). Merged, the
-// deletion and everything the other difference carries would go in one UPDATE,
-// and a deletion the parent refuses would take the rest with it, though the
-// rest would have been applied on its own. That holds for both orders: a
-// record older adds and newer removes would be a deletion sent to a parent that
-// never had older, since a request that waits has not been sent; and an
-// addition merged into a request that also deletes is lost if the parent does
-// not hold what is deleted. A retry sends the same UPDATE and fares no better.
-//
-// Whether a difference goes out as such a delta is decided when it is sent:
-// by the transport the parent sync plan picks, and for UPDATE by the
-// parent-update option (the API scheme and replace mode send whole RRsets). It
-// is not known where the queue merges, so a deletion is not merged whatever
-// the mode; that costs a queue entry, nothing else.
-//
-// The complete new delegation (replace mode) is newer's: it is computed from
-// the zone as it was when newer was made. The exception is DS when newer has
-// no opinion about it (NewDSKnown unset): older's DS then stands, as it would
-// have after both were sent.
-func mergeDelegationSyncDiffs(older, newer DelegationSyncStatus) (DelegationSyncStatus, bool) {
-	if removesARecord(older) || removesARecord(newer) {
-		return older, false
-	}
-	m := newer
-	m.Adds = unionRecords(older.Adds, newer.Adds)
-	m.NsAdds = unionRecords(older.NsAdds, newer.NsAdds)
-	m.AAdds = unionRecords(older.AAdds, newer.AAdds)
-	m.AAAAAdds = unionRecords(older.AAAAAdds, newer.AAAAAdds)
-	m.DNSKEYAdds = unionRecords(older.DNSKEYAdds, newer.DNSKEYAdds)
-	m.DSAdds = unionRecords(older.DSAdds, newer.DSAdds)
-	if !newer.NewDSKnown {
-		m.NewDS, m.NewDSKnown = older.NewDS, older.NewDSKnown
-	}
-	m.InSync = older.InSync && newer.InSync
-	m.Unread = older.Unread
-	for _, u := range newer.Unread {
-		if !slices.Contains(m.Unread, u) {
-			m.Unread = append(m.Unread, u)
-		}
-	}
-	return m, true
-}
-
-// removesARecord reports whether a difference removes anything.
-func removesARecord(d DelegationSyncStatus) bool {
-	return len(d.Removes)+len(d.NsRemoves)+len(d.ARemoves)+len(d.AAAARemoves)+
-		len(d.DNSKEYRemoves)+len(d.DSRemoves) > 0
-}
-
-// unionRecords is older's records that newer does not also have, then newer's.
-func unionRecords(older, newer []dns.RR) []dns.RR {
-	var out []dns.RR
-	for _, rr := range older {
-		if !slices.ContainsFunc(newer, func(x dns.RR) bool { return sameRecord(x, rr) }) {
-			out = append(out, rr)
-		}
-	}
-	return append(out, newer...)
 }
 
 func unionSignalTypes(a, b []uint16) []uint16 {
@@ -213,28 +166,4 @@ func unionSignalTypes(a, b []uint16) []uint16 {
 		}
 	}
 	return out
-}
-
-// mergeProxyAnalyses is the union of two PROXY-SYNC analyses: a dimension
-// changed if either saw it change. ok is false when their differences are
-// kept apart (mergeDelegationSyncDiffs).
-func mergeProxyAnalyses(older, newer *ProxyDelegationAnalysis) (*ProxyDelegationAnalysis, bool) {
-	if older == nil {
-		return newer, true
-	}
-	if newer == nil {
-		return older, true
-	}
-	diff, ok := mergeDelegationSyncDiffs(older.DelegationStatus, newer.DelegationStatus)
-	if !ok {
-		return older, false
-	}
-	m := *newer
-	m.CdsChanged = older.CdsChanged || newer.CdsChanged
-	m.CsyncChanged = older.CsyncChanged || newer.CsyncChanged
-	m.NsOrGlueChanged = older.NsOrGlueChanged || newer.NsOrGlueChanged
-	m.DnskeyChanged = older.DnskeyChanged || newer.DnskeyChanged
-	m.KeyChanged = older.KeyChanged || newer.KeyChanged
-	m.DelegationStatus = diff
-	return &m, true
 }

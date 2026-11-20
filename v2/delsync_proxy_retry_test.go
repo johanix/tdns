@@ -10,32 +10,32 @@ import (
 	"time"
 )
 
-// A failed proxy sync is re-run, a bounded number of times, with growing
-// waits (#722). Nothing else re-sends the change: the next transfer is compared
-// with a copy that already has it.
-func TestNextProxySyncRetry(t *testing.T) {
-	ds := DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: "child.test."}
+// A failed compare with the parent is re-run with growing waits, and the
+// retries do not run out: past the schedule's end the last wait repeats.
+// Nothing else re-sends what the parent lacks (#722): the next transfer is
+// compared with a copy that already has it, and the next change is a
+// difference against a zone that has it too.
+func TestACompareRetryNeverRunsOut(t *testing.T) {
+	ds := DelegationSyncRequest{Command: "PROXY-UPDATE-SETUP", ZoneName: "child.test."}
 	failedAt := time.Now()
 	var last time.Duration
-	for i := range delegationSyncRetryDelays {
-		next, delay, ok := nextDelegationSyncRetry(ds, failedAt)
-		if !ok {
-			t.Fatalf("attempt %d: retries ran out after %d of %d", i+1, i, len(delegationSyncRetryDelays))
-		}
+	for i := range len(delegationSyncRetryDelays) + 3 {
+		next, delay := nextDelegationSyncRetry(ds, failedAt)
 		if next.Attempt != ds.Attempt+1 || !next.FailedAt.Equal(failedAt) {
 			t.Errorf("attempt %d: next = {Attempt %d, FailedAt %v}", i+1, next.Attempt, next.FailedAt)
 		}
-		if next.Command != "PROXY-SYNC" || next.ZoneName != ds.ZoneName {
+		if next.Command != ds.Command || next.ZoneName != ds.ZoneName {
 			t.Errorf("attempt %d: the retry lost the request: %+v", i+1, next)
 		}
-		if delay <= last {
+		switch {
+		case i < len(delegationSyncRetryDelays) && delay <= last:
 			t.Errorf("attempt %d: wait %s does not grow from %s", i+1, delay, last)
+		case i >= len(delegationSyncRetryDelays) && delay != delegationSyncRetryDelays[len(delegationSyncRetryDelays)-1]:
+			t.Errorf("attempt %d, past the schedule: wait %s, want the last, %s", i+1, delay,
+				delegationSyncRetryDelays[len(delegationSyncRetryDelays)-1])
 		}
 		last = delay
 		ds = next
-	}
-	if _, _, ok := nextDelegationSyncRetry(ds, failedAt); ok {
-		t.Error("retries never run out")
 	}
 }
 
@@ -47,7 +47,7 @@ func TestProxyRetrySuperseded(t *testing.T) {
 	failedAt := time.Now()
 
 	first := DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName}
-	retry, _, _ := nextDelegationSyncRetry(first, failedAt)
+	retry, _ := nextDelegationSyncRetry(first, failedAt)
 
 	if delegationSyncRetrySuperseded(zd, first) {
 		t.Error("a first attempt was treated as a superseded retry")
@@ -95,7 +95,7 @@ func TestProxyNoopSyncDoesNotSupersedeARetry(t *testing.T) {
 	}
 
 	// And so a retry of an earlier failure still runs.
-	retry, _, _ := nextDelegationSyncRetry(DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName},
+	retry, _ := nextDelegationSyncRetry(DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName},
 		time.Now().Add(-time.Minute))
 	if delegationSyncRetrySuperseded(zd, retry) {
 		t.Error("a retry was dropped after a sync that forwarded nothing")

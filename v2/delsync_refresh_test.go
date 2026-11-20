@@ -567,8 +567,8 @@ func TestRefreshSyncSendsNoDS(t *testing.T) {
 	}
 }
 
-// T5. A failure is retried on the proxy's schedule, and a retry is dropped
-// once a later sync has succeeded. The proxy arm's use of the same helpers is
+// T5. A failure is retried on the compares' schedule, without end, and a
+// retry is dropped once a later sync has succeeded. The proxy arm's use of the same helpers is
 // pinned in delsync_proxy_retry_test.go.
 func TestRefreshSyncRetries(t *testing.T) {
 	withApp(t, AppTypeAuth)
@@ -596,9 +596,11 @@ func TestRefreshSyncRetries(t *testing.T) {
 	}
 
 	last := first
-	last.Attempt = len(delegationSyncRetryDelays)
-	if rec = runArm(t, zd, last, outOfSync, errors.New("still refused")); len(rec.requeued) != 0 {
-		t.Error("the retries never run out")
+	last.Attempt = len(delegationSyncRetryDelays) + 2
+	rec = runArm(t, zd, last, outOfSync, errors.New("still refused"))
+	if want := delegationSyncRetryDelays[len(delegationSyncRetryDelays)-1]; len(rec.requeued) != 1 || rec.delays[0] != want {
+		t.Errorf("past the schedule's end: %d retries after %v, want 1 after %s: a compare is retried until the parent answers",
+			len(rec.requeued), rec.delays, want)
 	}
 
 	runArm(t, zd, first, outOfSync, nil)

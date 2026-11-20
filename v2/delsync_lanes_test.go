@@ -214,10 +214,11 @@ func TestDelegationSyncZoneStaysInItsQueue(t *testing.T) {
 }
 
 // (c) A failed sync re-enqueued after its backoff comes back through the
-// lanes with its count and its failure time, no sooner than its delay, and
-// stops when its retries have run out, as it did with one loop. This drives
-// the refresh arm itself with the production requeue (requeueSetupAfter), and
-// keeps another parent stuck the whole time.
+// lanes with its count and its failure time, no sooner than its delay. Past
+// the schedule's end it keeps coming back after the last delay: a compare is
+// retried until the parent answers. This drives the refresh arm itself with
+// the production requeue (requeueLookAfter), and keeps another parent stuck
+// the whole time.
 func TestDelegationSyncRequeueKeepsItsBackoff(t *testing.T) {
 	withApp(t, AppTypeAuth)
 	old := delegationSyncRetryDelays
@@ -226,6 +227,8 @@ func TestDelegationSyncRequeueKeepsItsBackoff(t *testing.T) {
 
 	zd := childZone(t, ddcngServedZone(), OptParentSync)
 	zd.SetParent("example.")
+	Zones.Set(zd.ZoneName, zd) // a retry for a zone no longer loaded is dropped
+	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
 	stuck := laneZone("s.down.example.", "down.example.")
 	ready := NewImrReadiness()
 	ready.Publish()
@@ -247,7 +250,7 @@ func TestDelegationSyncRequeueKeepsItsBackoff(t *testing.T) {
 				return DelegationSyncStatus{}, errors.New("the parent did not answer")
 			},
 			requeue: func(next DelegationSyncRequest, delay time.Duration) {
-				requeueSetupAfter(ctx, q, next, delay)
+				requeueLookAfter(ctx, q, next, delay)
 			},
 		})
 	})
@@ -276,10 +279,13 @@ func TestDelegationSyncRequeueKeepsItsBackoff(t *testing.T) {
 			t.Errorf("retry %d came %v after the try before it, sooner than its backoff of %v", i, gap, want)
 		}
 	}
-	select {
-	case a := <-arrivals:
-		t.Errorf("a retry with attempt %d came after the retries ran out", a.ds.Attempt)
-	case <-time.After(4 * delegationSyncRetryDelays[len(delegationSyncRetryDelays)-1]):
+	lastDelay := delegationSyncRetryDelays[len(delegationSyncRetryDelays)-1]
+	more := receive(t, arrivals, "a retry past the schedule's end")
+	if more.ds.Attempt != len(got) {
+		t.Errorf("the retry past the schedule has attempt %d, want %d", more.ds.Attempt, len(got))
+	}
+	if gap := more.at.Sub(got[len(got)-1].at); gap < lastDelay {
+		t.Errorf("the retry past the schedule came %v after the try before it, sooner than the last backoff of %v", gap, lastDelay)
 	}
 }
 
