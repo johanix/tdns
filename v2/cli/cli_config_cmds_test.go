@@ -918,4 +918,50 @@ func TestAddPrefersTheLocalSocketForRoot(t *testing.T) {
 			t.Errorf("%d entries, want 1", len(got))
 		}
 	})
+
+	t.Run("--tcp against an existing socket entry says it kept the socket", func(t *testing.T) {
+		setRoot(t, true)
+		env := newAddEnv(t)
+		d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
+		if _, err := env.add(t, d, nil); err != nil { // as root: the socket entry
+			t.Fatal(err)
+		}
+		res, err := env.add(t, d, func(o *AddOptions) { o.TCP = true })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.AlreadyKnown != "tdns-auth" {
+			t.Errorf("AlreadyKnown = %q, want tdns-auth", res.AlreadyKnown)
+		}
+		if !strings.Contains(strings.Join(res.Notes, " "), "local admin socket, so --tcp adds nothing") {
+			t.Errorf("notes = %q, want one saying the kept entry is the socket", res.Notes)
+		}
+		if got := env.entries(t); len(got) != 1 || got[0].BaseURL != "unix://"+sock {
+			t.Errorf("entries = %+v, want the one socket entry", got)
+		}
+	})
+
+	t.Run("a relative socket path is not used", func(t *testing.T) {
+		setRoot(t, true)
+		env := newAddEnv(t)
+		p := filepath.Join(env.dir, "tdns-auth.yaml")
+		writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "the-key", "   socket: run/tdns-auth.sock\n"))
+		res, err := env.add(t, p, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Entry.BaseURL != "https://127.0.0.1:8989/api/v1" {
+			t.Errorf("entry = %+v, want the TCP one", res.Entry)
+		}
+		if !strings.Contains(strings.Join(res.Notes, " "), "not an absolute path") {
+			t.Errorf("notes = %q, want one saying the socket path is not absolute", res.Notes)
+		}
+
+		// With no TCP address there is nothing to add.
+		writeFile(t, p, "service:\n   name: TDNS-AUTH\napiserver:\n   socket: run/tdns-auth.sock\n")
+		env2 := newAddEnv(t)
+		if _, err := env2.add(t, p, nil); err == nil || !strings.Contains(err.Error(), "neither apiserver.addresses nor apiserver.socket") {
+			t.Errorf("err = %v, want one saying there is no management API to address", err)
+		}
+	})
 }
