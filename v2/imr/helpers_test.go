@@ -241,7 +241,7 @@ func signedSet(sign func(string, []dns.RR) dns.RR, zone string, set []dns.RR) []
 	return append(append([]dns.RR{}, set...), sign(zone, set))
 }
 
-// restoreProcessWideTuning puts back what NewImr sets for the whole process.
+// restoreProcessWideTuning puts back what New sets for the whole process.
 func restoreProcessWideTuning(t *testing.T) {
 	t.Helper()
 	policy, limits := cache.GetBackoffPolicy(), cache.GetTTLLimits()

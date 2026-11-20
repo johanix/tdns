@@ -27,7 +27,7 @@ type Imr struct {
 	ClientStats *ImrClientStats
 }
 
-// NewImr is imrcore.NewImr, returning the daemon's Imr. Unless opts says
+// NewImr is imrcore.New, returning the daemon's Imr. Unless opts says
 // otherwise, the resolver logs through the daemon's engine subsystem logger,
 // and its lookups through the dns one.
 func NewImr(ctx context.Context, ic ImrEngineConf, opts ImrOptions) (*Imr, error) {
@@ -37,7 +37,7 @@ func NewImr(ctx context.Context, ic ImrEngineConf, opts ImrOptions) (*Imr, error
 	if opts.LookupLogger == nil {
 		opts.LookupLogger = lgDns
 	}
-	r, err := imrcore.NewImr(ctx, ic, opts)
+	r, err := imrcore.New(ctx, ic, opts)
 	if err != nil {
 		return nil, err
 	}

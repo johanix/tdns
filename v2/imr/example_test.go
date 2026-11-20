@@ -25,11 +25,11 @@ func Example() {
 	// at Debug, so at Info it logs only what happens once or rarely.
 	lg := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	// NewImr sends nothing, and fails only on the configuration. The zero
+	// imr.New sends nothing, and fails only on the configuration. The zero
 	// Config resolves from the root, validating with the IANA root anchor.
-	r, err := imr.NewImr(ctx, imr.Config{}, imr.Options{Logger: lg})
+	r, err := imr.New(ctx, imr.Config{}, imr.Options{Logger: lg})
 	if err != nil {
-		fmt.Println("NewImr:", err)
+		fmt.Println("imr.New:", err)
 		return
 	}
 

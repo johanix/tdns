@@ -33,8 +33,8 @@ func TestTheResolverLogsThroughItsOwnLogger(t *testing.T) {
 	ic := Config{}
 	off := false
 	ic.Testing.Priming = &off // seeds from the hints, which the cache logs
-	if _, err := NewImr(context.Background(), ic, Options{Logger: lg}); err != nil {
-		t.Fatalf("NewImr: %v", err)
+	if _, err := New(context.Background(), ic, Options{Logger: lg}); err != nil {
+		t.Fatalf("New: %v", err)
 	}
 
 	logged := own.String()
@@ -63,9 +63,9 @@ func TestTheCachesPerRRsetLinesAreAtDebug(t *testing.T) {
 	for _, level := range []slog.Level{slog.LevelInfo, slog.LevelDebug} {
 		var own bytes.Buffer
 		lg := slog.New(slog.NewTextHandler(&own, &slog.HandlerOptions{Level: level}))
-		imr, err := NewImr(context.Background(), Config{}, Options{Logger: lg})
+		imr, err := New(context.Background(), Config{}, Options{Logger: lg})
 		if err != nil {
-			t.Fatalf("NewImr: %v", err)
+			t.Fatalf("New: %v", err)
 		}
 		_, _ = imr.Cache.ValidateRRset(context.Background(), rrset, nil)
 		logged := strings.Contains(own.String(), "ValidateRRset: start: owner=")
@@ -86,9 +86,9 @@ func TestTheDNSClientsPerExchangeLinesAreAtDebug(t *testing.T) {
 		var own bytes.Buffer
 		lg := slog.New(slog.NewTextHandler(&own, &slog.HandlerOptions{Level: level}))
 		ic := Config{Forward: []ImrForwardConf{fwdConf("fwd.example.", addr, port)}}
-		imr, err := NewImr(context.Background(), ic, Options{Logger: lg})
+		imr, err := New(context.Background(), ic, Options{Logger: lg})
 		if err != nil {
-			t.Fatalf("NewImr: %v", err)
+			t.Fatalf("New: %v", err)
 		}
 		fz := imr.forwardZoneFor("www.fwd.example.")
 		if fz == nil || len(fz.Upstreams) != 1 {

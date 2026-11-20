@@ -19,7 +19,7 @@ import (
 // listeners.imr-debug-address window.
 type Config struct {
 	// Active is the daemon's (tdns's ImrEngine): if nil or true, the IMR is
-	// active, and only false disables it. NewImr does not read it.
+	// active, and only false disables it. New does not read it.
 	Active    *bool  `yaml:"active" mapstructure:"active"`
 	RootHints string `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
 	// OutboundAddressFamilies is which address families the resolver sends its

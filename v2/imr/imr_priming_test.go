@@ -26,7 +26,7 @@ func primingErrorIn(sink *testErrorSink) string {
 	return ""
 }
 
-// unprimedImr is an Imr as NewImr leaves one whose root has to be primed.
+// unprimedImr is an Imr as New leaves one whose root has to be primed.
 func unprimedImr(sink ErrorSink) *Imr {
 	return &Imr{ready: make(chan struct{}), errorRegistry: sink}
 }
@@ -138,9 +138,9 @@ func TestPrimingRetryDelay(t *testing.T) {
 // hour, which is what an attempt made while the network comes up gets.
 func TestPrimingForgetsTheRootServersFailures(t *testing.T) {
 	restoreProcessWideTuning(t)
-	imr, err := NewImr(context.Background(), Config{}, Options{})
+	imr, err := New(context.Background(), Config{}, Options{})
 	if err != nil {
-		t.Fatalf("NewImr: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
 		t.Fatalf("seeding the hints: %v", err)
@@ -172,16 +172,16 @@ func TestPrimingForgetsTheRootServersFailures(t *testing.T) {
 	}
 }
 
-// NewImr sends nothing, so a root that cannot be primed is not its error but
+// New sends nothing, so a root that cannot be primed is not its error but
 // Start's, retried and visible. Until it is primed, Query waits, within its
 // context, and then says why it got no answer.
-func TestNewImrSendsNothing(t *testing.T) {
+func TestNewSendsNothing(t *testing.T) {
 	restoreProcessWideTuning(t)
 	sink := newTestErrorSink()
 	ic := Config{RootHints: filepath.Join(t.TempDir(), "no-such-hints")}
-	imr, err := NewImr(context.Background(), ic, Options{Errors: sink})
+	imr, err := New(context.Background(), ic, Options{Errors: sink})
 	if err != nil || imr == nil {
-		t.Fatalf("NewImr with no root hints to read: %v, %v; want an Imr, not yet Ready", imr, err)
+		t.Fatalf("New with no root hints to read: %v, %v; want an Imr, not yet Ready", imr, err)
 	}
 	if isReady(imr) {
 		t.Fatal("Ready before Start primed the root")
@@ -215,9 +215,9 @@ func TestNewImrSendsNothing(t *testing.T) {
 func TestStoppedBeforeReadyFailsAtOnce(t *testing.T) {
 	restoreProcessWideTuning(t)
 	ic := Config{RootHints: filepath.Join(t.TempDir(), "no-such-hints")}
-	imr, err := NewImr(context.Background(), ic, Options{})
+	imr, err := New(context.Background(), ic, Options{})
 	if err != nil {
-		t.Fatalf("NewImr: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	imr.Tuning.QueryBudget = time.Hour // only the stop can end the waits below
 
@@ -271,9 +271,9 @@ func TestQueryWaitsForReady(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
-	imr, err := NewImr(context.Background(), Config{Forward: rootForward(addr, port)}, Options{})
+	imr, err := New(context.Background(), Config{Forward: rootForward(addr, port)}, Options{})
 	if err != nil {
-		t.Fatalf("NewImr: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	// As if the root were still being primed.
 	imr.ready, imr.readyOnce = make(chan struct{}), sync.Once{}
@@ -309,9 +309,9 @@ func TestServeAnswersItsRequests(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
-	imr, err := NewImr(context.Background(), Config{Forward: rootForward(addr, port)}, Options{})
+	imr, err := New(context.Background(), Config{Forward: rootForward(addr, port)}, Options{})
 	if err != nil {
-		t.Fatalf("NewImr: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 
 	requests := make(chan Request)

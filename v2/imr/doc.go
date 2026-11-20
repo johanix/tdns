@@ -3,7 +3,7 @@
  */
 
 // Package imr is the tdns iterative, validating resolver, to run in an
-// application's own process. NewImr builds it and sends nothing; Start primes
+// application's own process. New builds it and sends nothing; Start primes
 // the root and keeps it going; WaitReady, or Ready, says when it can resolve;
 // Query looks a name up and validates what it finds, and Serve answers
 // requests that come on a channel. Example shows them in order.

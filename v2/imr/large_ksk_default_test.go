@@ -22,9 +22,9 @@ func TestLargeAlgorithmsDefault(t *testing.T) {
 	ic := Config{}
 	ic.Testing.Priming = &off
 
-	imr, err := NewImr(context.Background(), ic, Options{})
+	imr, err := New(context.Background(), ic, Options{})
 	if err != nil {
-		t.Fatalf("NewImr: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	if !imr.isLargeAlgorithm(mldsa44) {
 		t.Error("with no LargeAlgorithms, ML-DSA-44 is not large")
@@ -33,9 +33,9 @@ func TestLargeAlgorithmsDefault(t *testing.T) {
 		t.Error("with no LargeAlgorithms, ED25519 is large")
 	}
 
-	imr, err = NewImr(context.Background(), ic, Options{LargeAlgorithms: map[uint8]bool{}})
+	imr, err = New(context.Background(), ic, Options{LargeAlgorithms: map[uint8]bool{}})
 	if err != nil {
-		t.Fatalf("NewImr: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	if imr.isLargeAlgorithm(mldsa44) {
 		t.Error("with an empty LargeAlgorithms, ML-DSA-44 is large")

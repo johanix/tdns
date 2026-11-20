@@ -85,11 +85,11 @@ type Imr struct {
 	rootWake     chan struct{}
 	rootWakeOnce sync.Once
 	// anchorNotice says once which root anchor an anchorless config gets
-	// (parseTrustAnchorsFromConfig): NewImr and Start both read the anchors.
+	// (parseTrustAnchorsFromConfig): New and Start both read the anchors.
 	anchorNotice sync.Once
 	// errorRegistry is where the IMR reports the Config/ImrForward* and
 	// Upstream/ImrForward server errors it owns (Options.Errors), set at
-	// init. In the daemon it is the daemon-wide ServerErrorRegistry. NewImr
+	// init. In the daemon it is the daemon-wide ServerErrorRegistry. New
 	// never leaves it nil; an Imr built by hand may, and the users check.
 	errorRegistry ErrorSink
 	// pendingOwnZone is Options.PendingOwnZone. Nil: no own zones.
@@ -271,17 +271,17 @@ func (resp *Response) denied(kind cache.CacheContext, state cache.ValidationStat
 // all dancing recursive server. It is just intended to get the job done for the particular cases
 // that we need to support.
 
-// NewImr builds an Imr from ic alone: the cache, the forward table, the stubs
+// New builds an Imr from ic alone: the cache, the forward table, the stubs
 // and the configured trust anchors. It sends nothing, so it does not fail on
 // the network: Start primes the root and runs the rest, and Ready says when
 // the resolver is up. It publishes nothing either: the caller keeps the result,
 // and an application that wants a resolver needs no daemon Config. Query it
 // with Query, QueryFresh and IterativeDNSQuery, all reentrant.
 //
-// A resolver with nothing to prime is Ready when NewImr returns: one whose
+// A resolver with nothing to prime is Ready when New returns: one whose
 // root is forwarded, and one under imrengine.testing.priming: false.
 //
-// The Imr is not the daemon's: NewImr does not touch Globals.ImrEngine,
+// The Imr is not the daemon's: New does not touch Globals.ImrEngine,
 // conf.Internal or ImrReady, and enforces no singleton. That is
 // tdns's (*Config).InitImrEngine's.
 //
@@ -290,7 +290,7 @@ func (resp *Response) denied(kind cache.CacheContext, state cache.ValidationStat
 // cache.SetZoneStateRecheck and cache.SetNSEC3MaxIterations are set from
 // ic.Tuning, and the last one built wins; the data clock (ic.Testing) and the
 // debug log hooks (ic.Logging) are set up once, by the first.
-func NewImr(ctx context.Context, ic Config, opts Options) (*Imr, error) {
+func New(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 	lg := opts.Logger
 	if lg == nil {
 		lg = slog.Default()
@@ -498,10 +498,10 @@ func warnUnreadableRootHints(lg *slog.Logger, hintsfile string) {
 	}
 }
 
-// Start brings up an Imr built by NewImr and keeps it going: it primes the
+// Start brings up an Imr built by New and keeps it going: it primes the
 // root, retrying until that works (primeRetrying), and then fetches and
 // validates the trust anchors' DNSKEY RRsets and keeps the root NS refreshed.
-// It probes the forward upstreams at once. It reads the configuration NewImr
+// It probes the forward upstreams at once. It reads the configuration New
 // was given (bootConf), starts no listeners, and returns at once: the work runs
 // in goroutines that end when ctx does. Ready and WaitReady say when the
 // resolver is up; if ctx ends before that, WaitReady and Query fail at once.
@@ -523,7 +523,7 @@ func (imr *Imr) Start(ctx context.Context) {
 		// waited out those fetches before it bound its listeners. It runs
 		// beside them now, and beside the forward probe. The configured keys
 		// themselves are in the cache already (loadConfiguredTrustAnchors, in
-		// NewImr): a query that arrives first has its DNSKEY RRset fetched and
+		// New): a query that arrives first has its DNSKEY RRset fetched and
 		// validated against them on demand.
 		go func(ctx context.Context) {
 			if err := imr.initializeImrTrustAnchors(ctx, imr.bootConf); err != nil {
@@ -629,7 +629,7 @@ func (imr *Imr) primeFromHints(ctx context.Context) error {
 	return nil
 }
 
-// closedReady is what Ready returns for an Imr built by hand, not by NewImr:
+// closedReady is what Ready returns for an Imr built by hand, not by New:
 // there is no priming to wait for.
 var closedReady = func() chan struct{} {
 	c := make(chan struct{})
@@ -638,7 +638,7 @@ var closedReady = func() chan struct{} {
 }()
 
 // Ready returns a channel that is closed once the resolver can resolve: once
-// Start has primed the root, or when NewImr returns if there is nothing to
+// Start has primed the root, or when New returns if there is nothing to
 // prime. Until then Query and QueryFresh wait for it, and PrimingError says
 // what keeps it. It is never closed if Start's context ends first; WaitReady
 // says that too.
@@ -2063,7 +2063,7 @@ func appendSOAFromMsg(r *dns.Msg, msgoptions *edns0.MsgOptions, m *dns.Msg) {
 // config names no anchor at all, the compiled-in IANA root anchor is used if
 // the root is the IANA root, and no anchor otherwise (RootAnchorFallback).
 //
-// NewImr (loadConfiguredTrustAnchors) and Start (initializeImrTrustAnchors)
+// New (loadConfiguredTrustAnchors) and Start (initializeImrTrustAnchors)
 // both read the anchors through here, so they cannot disagree about them.
 func (imr *Imr) parseTrustAnchorsFromConfig(ic Config) (map[string][]*dns.DS, map[string][]*dns.DNSKEY, error) {
 	dsByName := map[string][]*dns.DS{}

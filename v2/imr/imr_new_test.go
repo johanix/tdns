@@ -44,9 +44,9 @@ func (s *recordingSink) ClearImrForwardUpstreamConfigError() { s.note("clear-con
 
 func (s *recordingSink) List() []ServerError { return nil }
 
-// The forward table's quarantine goes to the sink NewImr was given, whatever it
+// The forward table's quarantine goes to the sink New was given, whatever it
 // is; a nil sink, a typed nil registry and the daemon's registry are all fine.
-func TestNewImrReportsToTheErrorSink(t *testing.T) {
+func TestNewReportsToTheErrorSink(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
@@ -59,9 +59,9 @@ func TestNewImrReportsToTheErrorSink(t *testing.T) {
 		name string
 		sink ErrorSink
 	}{{"recording sink", rec}, {"registry", reg}, {"nil sink", nil}, {"typed nil registry", (*testErrorSink)(nil)}} {
-		imr, err := NewImr(context.Background(), ic, Options{Errors: tc.sink})
+		imr, err := New(context.Background(), ic, Options{Errors: tc.sink})
 		if err != nil {
-			t.Fatalf("%s: NewImr: %v", tc.name, err)
+			t.Fatalf("%s: New: %v", tc.name, err)
 		}
 		if imr.errorRegistry == nil {
 			t.Errorf("%s: the Imr has no sink", tc.name)
@@ -83,7 +83,7 @@ func TestNewImrReportsToTheErrorSink(t *testing.T) {
 // Options.PendingOwnZone keeps trust-anchor set-up from asking the network
 // for the keys of a zone this server hosts and has not loaded yet; without it,
 // the keys are fetched.
-func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
+func TestNewPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
@@ -94,9 +94,9 @@ func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 	}
 
 	pending := Options{PendingOwnZone: func(z string) bool { return z == zone }}
-	imr, err := NewImr(context.Background(), ic, pending)
+	imr, err := New(context.Background(), ic, pending)
 	if err != nil {
-		t.Fatalf("NewImr: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	if err := imr.initializeImrTrustAnchors(context.Background(), imr.bootConf); err != nil {
 		t.Errorf("trust-anchor set-up with %s pending: %v", zone, err)
@@ -105,9 +105,9 @@ func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 		t.Errorf("trust-anchor set-up asked the upstream for %s DNSKEY %d time(s) though the zone is pending", zone, n)
 	}
 
-	imr, err = NewImr(context.Background(), ic, Options{})
+	imr, err = New(context.Background(), ic, Options{})
 	if err != nil {
-		t.Fatalf("NewImr: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	_ = imr.initializeImrTrustAnchors(context.Background(), imr.bootConf) // the upstream has no such key
 	if len(logr.find(zone, dns.TypeDNSKEY)) == 0 {
@@ -117,7 +117,7 @@ func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 
 // Two resolvers in one process register one set of debug hooks between them,
 // not one each (which would log every query once per resolver).
-func TestNewImrRegistersItsDebugHooksOnce(t *testing.T) {
+func TestNewRegistersItsDebugHooksOnce(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
@@ -132,8 +132,8 @@ func TestNewImrRegistersItsDebugHooksOnce(t *testing.T) {
 	ic.Logging.File = filepath.Join(t.TempDir(), "imr-debug.log")
 	before := hooks()
 	for i := 0; i < 2; i++ {
-		if _, err := NewImr(context.Background(), ic, Options{}); err != nil {
-			t.Fatalf("NewImr %d: %v", i+1, err)
+		if _, err := New(context.Background(), ic, Options{}); err != nil {
+			t.Fatalf("New %d: %v", i+1, err)
 		}
 	}
 	if got := hooks() - before; got > 1 {

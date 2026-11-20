@@ -6,7 +6,7 @@ package imr
 
 import "log/slog"
 
-// Options is what NewImr takes besides the imrengine: configuration. They
+// Options is what New takes besides the imrengine: configuration. They
 // are the few things a resolver reads from outside it, so that an application
 // can build one without the daemon's Config. The zero value is a resolver with
 // the default large DNSSEC algorithms and DNSKEY transport, nowhere to report

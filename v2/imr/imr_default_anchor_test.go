@@ -44,7 +44,7 @@ func dsKeyTags(dss []*dns.DS) []uint16 {
 
 // No anchor configured and the compiled-in root hints: the resolver gets the
 // compiled-in IANA root anchor, both KSK DS records, and says so once -- both
-// NewImr and Start read the anchors.
+// New and Start read the anchors.
 func TestNoAnchorCompiledInHintsUsesCompiledInRootAnchor(t *testing.T) {
 	logbuf := captureImrLog(t)
 	imr := newForwardTestImr(t, nil)

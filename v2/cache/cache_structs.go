@@ -138,7 +138,7 @@ type RRsetCacheT struct {
 	Primed bool
 	Logger *log.Logger
 	// DebugLogger takes the per-RRset lines, which a resolver logs at level
-	// Debug (NewImr). Nil is Logger.
+	// Debug (imr.New). Nil is Logger.
 	DebugLogger          *log.Logger
 	LineWidth            int
 	Verbose              bool
