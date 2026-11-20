@@ -2,9 +2,9 @@
 
 **Date:** 2026-11-20
 **Status:** being implemented. Steps 0 and 1 (section 5) are #1163 and #1164,
-on main. Step 2, the local socket, is the PR that adds this document, stacked on
-the tdns-ncli PRs #1159, #1160 and #1161. Steps 3 and 4 follow. Section 9 lists
-what implementing changed or settled.
+on main. Step 2, the local socket, is #1165, stacked on the tdns-ncli PRs #1159,
+#1160 and #1161; step 3, the access file and the roles, is stacked on #1165.
+Step 4 follows. Section 9 lists what implementing changed or settled.
 
 Scope: the management API of every daemon that builds its router with
 `SetupAPIRouter` (tdns-auth, tdns-agent, ...) or `SetupSimpleAPIRouter`
@@ -610,3 +610,34 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   eight times without step 1. Still not tried against a running tdns-mp daemon.
   How NetBSD enforces a socket file's permissions is still open; the 0700
   directory is what the design relies on.
+
+**2026-11-20, implementing step 3.**
+
+- **The role table, settled against the handlers.** The guard test found what
+  the table in 3.4 had wrong or missed: `/zone/parentsync` has no publish or
+  unpublish (they are `/zone/childsync`'s, with advert and reconcile,
+  read-write, and proxy-status, read-only); `/catalog` also has
+  notify-add, notify-remove (read-write) and notify-list (read-only); `/debug`
+  also has show-rrsetcache and zone-txlog (read-only); `/scanner` has status
+  (read-only) and scan (read-write); `/scanner/delete` is read-write. Every
+  command of every handler is now listed explicitly; a non-admin `*` is kept
+  only for routes whose handler has no command (the rollover POSTs, `ping`).
+- **A certificate is the identity.** An unknown or disabled certificate is
+  refused even if the API key comes with it; it does not fall back to the key.
+- **A body too long to read (over 1 MiB)** has an unknown command, which needs
+  admin. The handler still gets the whole body.
+- **Commands are matched lower-cased and trimmed.** Matching only ever makes a
+  check stricter or equal: a command the handler does not know is refused by the
+  handler, and an unknown one needs admin here.
+- **Logging.** Every request needing read-write or admin is logged at info
+  with client, role, route and command; read-only ones at debug, so a polling
+  client does not fill the log. Refusals are logged at info.
+- **`apiserver.apikey` stays required.** `keyauth: false` turns it off; the key
+  itself is not made optional.
+- **Taking `access-file` out of the config** and reloading returns the TCP API
+  to key-as-admin, and the reload says so.
+- **TLS.** The TCP listeners always ask for a client certificate (never
+  require one); with an access file they are TLS 1.3 only.
+- **tdns-mp.** `RegisterApiRouteRoles` lets code outside the package declare
+  the roles of its routes; until tdns-mp does, its routes need admin when an
+  access file is set.
