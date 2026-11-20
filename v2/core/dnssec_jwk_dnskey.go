@@ -144,8 +144,49 @@ func (p *DNSKEYParam) check() error {
 	if _, ok := dns.IsDomainName(p.Name); !ok {
 		return fmt.Errorf("%w: %q is not a domain name in presentation format", ErrDNSKEYName, p.Name)
 	}
+	if err := checkOwnerOctets(p.Name); err != nil {
+		return fmt.Errorf("%w: %q: %v", ErrDNSKEYName, p.Name, err)
+	}
 	if p.Protocol != 3 {
 		return fmt.Errorf("%w: got %d", ErrDNSKEYProtocol, p.Protocol)
+	}
+	return nil
+}
+
+// checkOwnerOctets enforces what dns.IsDomainName leaves open: in
+// presentation format (draft section 2.2) an octet that is not printable
+// ASCII is written \DDD, so a raw control, space or non-ASCII byte is
+// refused. A name that carries one cannot survive the JSON text the owner
+// travels in (Go writes an invalid UTF-8 byte as U+FFFD), and the keytag,
+// which does not cover the owner, would not notice the change. \DDD
+// (000 to 255) and \X for a printable X are kept.
+func checkOwnerOctets(name string) error {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '\\' {
+			if i+1 >= len(name) {
+				return errors.New("a backslash ends the name")
+			}
+			n := name[i+1]
+			if n >= '0' && n <= '9' {
+				if i+3 >= len(name) || !isDigit(name[i+2]) || !isDigit(name[i+3]) {
+					return errors.New(`\DDD needs three digits`)
+				}
+				if v := int(n-'0')*100 + int(name[i+2]-'0')*10 + int(name[i+3]-'0'); v > 255 {
+					return fmt.Errorf(`\%s is above \255`, name[i+1:i+4])
+				}
+				i += 3
+				continue
+			}
+			if n < 0x20 || n >= 0x7f {
+				return fmt.Errorf("a backslash before byte 0x%02x; write it as \\DDD", n)
+			}
+			i++
+			continue
+		}
+		if c <= 0x20 || c >= 0x7f {
+			return fmt.Errorf("byte 0x%02x must be written as \\DDD", c)
+		}
 	}
 	return nil
 }
@@ -493,6 +534,11 @@ func (d *DNSSECJWK) ToDNSKEY() (*dns.DNSKEY, error) {
 // buildKeyRR is rules 2 to 5 for a parameter p, returning the DNSKEY
 // (its Hdr.Rrtype set to rrtype; a KEY RR wraps it).
 func buildKeyRR(k *JSONWebKey, p *DNSKEYParam, rrtype uint16) (*dns.DNSKEY, error) {
+	// A DNSSECJWK built by hand can carry a parameter and no key;
+	// MarshalJSON refuses that, and so does this, instead of dereferencing nil.
+	if k == nil {
+		return nil, fmt.Errorf("%w: the DNSSEC JWK has no key", ErrJWKMissingMember)
+	}
 	if _, err := formFor(p.Algorithm); err != nil {
 		return nil, err
 	}
