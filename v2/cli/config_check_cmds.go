@@ -1207,7 +1207,7 @@ func correlateRunningConfig(role string, cfg *tdns.Config, cfgPath, daemonDBPath
 	} else if resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"}); err != nil {
 		rep.warn(g, "status", fmt.Sprintf("could not fetch running status: %v — status drift not correlated", err), "")
 	} else {
-		correlateStatus(cfg, resp, rep, g)
+		correlateStatus(cfg, resp, acceptedApiKey(role), rep, g)
 	}
 
 	// Running zones vs config zones.
@@ -1234,7 +1234,22 @@ func correlateRunningConfig(role string, cfg *tdns.Config, cfgPath, daemonDBPath
 	}
 }
 
-func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, g string) {
+// acceptedApiKey is the API key this CLI sends to role's daemon, or "" when it
+// sends none (another auth method, or no entry).
+func acceptedApiKey(role string) string {
+	ad := apiDetailsForRole(role)
+	if ad == nil || ad.AuthMethod != "X-API-Key" {
+		return ""
+	}
+	return ad.ApiKey
+}
+
+// correlateStatus compares a config file with the running server's status.
+//
+// acceptedKey is the API key the status request was sent with. The reply came
+// back, so the running server accepted it: that is how the running key is
+// known, because the status reply no longer carries it (it is redacted).
+func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, acceptedKey string, rep *ccReport, g string) {
 	if !sameStringSet(cfg.Listeners.Addresses, resp.Listeners.Addresses) {
 		rep.warn(g, "listeners-addresses",
 			fmt.Sprintf("config listeners.addresses %v differ from running %v", cfg.Listeners.Addresses, resp.Listeners.Addresses),
@@ -1254,10 +1269,9 @@ func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, 
 			fmt.Sprintf("config has debug-do53-queries-refused %s, the running server has it %s", onOff(on), onOff(resp.Do53QueriesRefused)),
 			"the option takes effect at the next restart")
 	}
-	if resp.ApiServer.ApiKey.Value() != "" && cfg.ApiServer.ApiKey.Value() != "" &&
-		resp.ApiServer.ApiKey.Value() != cfg.ApiServer.ApiKey.Value() {
+	if acceptedKey != "" && cfg.ApiServer.ApiKey.Value() != "" && acceptedKey != cfg.ApiServer.ApiKey.Value() {
 		rep.warn(g, "apikey",
-			"apiserver.apikey in the file differs from the running server's apikey",
+			"apiserver.apikey in the file differs from the key the running server accepts",
 			"the running apikey changes only on restart")
 	}
 }
