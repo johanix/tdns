@@ -489,7 +489,7 @@ func flushViaApi(cmd *cobra.Command, args []string, keepStructural bool) {
 		return
 	}
 
-	if err := SendImrFlush(cmd.Context(), "imr", domain, keepStructural); err != nil {
+	if err := SendImrFlush(cmd.Context(), imrRoleFor(cmd), domain, keepStructural); err != nil {
 		fmt.Printf("%v\n", err)
 	}
 }

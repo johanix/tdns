@@ -29,13 +29,21 @@ import (
 // zone/tsig/keystore state, so this group carries check, mwe and status
 // (unlike auth's config group, which also has reload*).
 func NewImrConfigCmd() *cobra.Command {
+	return NewImrConfigCmdFor("imr")
+}
+
+// NewImrConfigCmdFor is NewImrConfigCmd for a given instance: role is the key
+// GetApiClient resolves, "imr" for the canonical tdns-imr and the instance's
+// own name for an extra one. check and status talk to THAT daemon, and check
+// reads that instance's config-file by default.
+func NewImrConfigCmdFor(role string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "config",
 		Short: "Validate or generate a tdns-imr configuration",
 	}
-	c.AddCommand(newImrConfigCheckCmd())
+	c.AddCommand(newImrConfigCheckCmd(role))
 	c.AddCommand(newImrConfigMweCmd())
-	c.AddCommand(newImrConfigStatusCmd())
+	c.AddCommand(newImrConfigStatusCmd(role))
 	return c
 }
 
@@ -43,7 +51,7 @@ func NewImrConfigCmd() *cobra.Command {
 // imr config status
 // ---------------------------------------------------------------------------
 
-func newImrConfigStatusCmd() *cobra.Command {
+func newImrConfigStatusCmd(role string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Report the running tdns-imr daemon's status, including priming and forward upstreams",
@@ -53,7 +61,7 @@ and how, and the configured stub and forward zones with per-upstream
 reachability (fed by the startup probe and live queries), plus the
 process's descriptor and goroutine counts (tdns#443).`,
 		Run: func(cmd *cobra.Command, args []string) {
-			resp, err := fetchImrStatus()
+			resp, err := fetchImrStatus(role)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
@@ -90,7 +98,7 @@ func init() {
 // imr config check
 // ---------------------------------------------------------------------------
 
-func newImrConfigCheckCmd() *cobra.Command {
+func newImrConfigCheckCmd(role string) *cobra.Command {
 	var (
 		serverConfig string
 		offline      bool
@@ -103,8 +111,8 @@ consistency, and (unless --offline) check that the daemon is reachable and its
 apiserver matches the file.
 
 tdns-imr exposes no GET /config/paths endpoint, so the target file is the
-positional arg / --serverconfig, else the compiled-in default
-(/etc/tdns/tdns-imr.yaml).
+positional arg / --serverconfig, else the config-file: recorded for this daemon
+in the CLI config, else the compiled-in default (/etc/tdns/tdns-imr.yaml).
 
 Exit status is non-zero if any check FAILs (WARNs do not fail the run).`,
 		Args: cobra.MaximumNArgs(1),
@@ -112,15 +120,15 @@ Exit status is non-zero if any check FAILs (WARNs do not fail the run).`,
 			if len(args) == 1 && serverConfig == "" {
 				serverConfig = args[0]
 			}
-			runImrConfigCheck(serverConfig, offline)
+			runImrConfigCheck(role, serverConfig, offline)
 		},
 	}
-	c.Flags().StringVar(&serverConfig, "serverconfig", "", "path to the tdns-imr config file to check (default: /etc/tdns/tdns-imr.yaml)")
+	c.Flags().StringVar(&serverConfig, "serverconfig", "", "path to the tdns-imr config file to check (default: this daemon's config-file:, else /etc/tdns/tdns-imr.yaml)")
 	c.Flags().BoolVar(&offline, "offline", false, "do not contact the daemon; run static checks only")
 	return c
 }
 
-func runImrConfigCheck(explicitPath string, offline bool) {
+func runImrConfigCheck(role, explicitPath string, offline bool) {
 	tdns.SetSubsystemLevel("config", slog.LevelError)
 	rep := newCCReport()
 
@@ -129,7 +137,7 @@ func runImrConfigCheck(explicitPath string, offline bool) {
 	online := !offline
 	var status tdns.ConfigResponse
 	if online {
-		if s, err := fetchImrStatus(); err == nil {
+		if s, err := fetchImrStatus(role); err == nil {
 			status = s
 		} else {
 			online = false
@@ -141,7 +149,8 @@ func runImrConfigCheck(explicitPath string, offline bool) {
 
 	cfgPath := explicitPath
 	if cfgPath == "" {
-		cfgPath = tdns.DefaultImrCfgFile
+		// The entry's config-file: if it has one, else tdns-imr's default.
+		cfgPath = defaultCfgFileForRole(role)
 	}
 	cfgPath = absClean(cfgPath)
 
@@ -172,7 +181,7 @@ func runImrConfigCheck(explicitPath string, offline bool) {
 	checkImrEngine(&cfg, rep)
 	checkImrTrustAnchors(&cfg, rep)
 	checkImrApiServer(&cfg, v, rep)
-	checkApiServerCorrelation("imr", &cfg, rep)
+	checkApiServerCorrelation(role, &cfg, rep)
 
 	if online {
 		correlateImrApiServer(&cfg, status, rep)
@@ -330,8 +339,8 @@ func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 // imr online correlation (thin: apiserver only)
 // ---------------------------------------------------------------------------
 
-func fetchImrStatus() (tdns.ConfigResponse, error) {
-	api, err := GetApiClient("imr", false)
+func fetchImrStatus(role string) (tdns.ConfigResponse, error) {
+	api, err := GetApiClient(role, false)
 	if err != nil {
 		return tdns.ConfigResponse{}, err
 	}

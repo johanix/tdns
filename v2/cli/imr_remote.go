@@ -33,6 +33,22 @@ import (
 // resolver over its API, rather than inside the resolver's own shell.
 func imrIsRemote() bool { return flushViaApiWanted() }
 
+// imrRoleFor is the role whose daemon an API-backed imr command talks to: the
+// target of the tree the command sits in, "imr" for the canonical tdns-imr and
+// the instance's own name for an extra one.
+//
+// It replaces the literal "imr" these commands used to pass. With one resolver
+// that was invisible; with a second, `tdns-ncli imr2 flush all x.` would have
+// flushed the FIRST resolver's cache and reported success. The fallback covers
+// a command run outside a tagged tree (the tdns-imr shell), where "imr" is what
+// it always meant.
+func imrRoleFor(cmd *cobra.Command) string {
+	if role := RoleForCmd(cmd); role != "" {
+		return role
+	}
+	return "imr"
+}
+
 // inProcessOnly refuses a command that can only describe the process it runs in
 // when that process is tdns-cli. Returns true when it refused.
 func inProcessOnly(w io.Writer, name, alternative string) bool {
@@ -97,7 +113,7 @@ func queryViaApi(cmd *cobra.Command, args []string) {
 		return
 	}
 
-	amr, err := SendImrMgmtCmd(cmd.Context(), "imr", &tdns.ImrMgmtPost{
+	amr, err := SendImrMgmtCmd(cmd.Context(), imrRoleFor(cmd), &tdns.ImrMgmtPost{
 		Command: "imr-resolve",
 		Data:    map[string]interface{}{"qname": qname, "qtype": dns.TypeToString[qtype]},
 	})
