@@ -931,9 +931,7 @@ func sig0KeyMgmt(role, cmd string) {
 		data.Force = singleKeyForce
 	}
 
-	if tdns.Globals.Debug {
-		log.Printf("sig0KeyMgmt: calling SendKeystoreCmd with data=%v", data)
-	}
+	logKeystoreRequest("sig0KeyMgmt", data)
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
@@ -1571,4 +1569,25 @@ func dsColumn(b *bool) string {
 		return "-"
 	}
 	return flagColumn(*b)
+}
+
+// keystoreRequestSummary describes a keystore request for the debug log
+// without any key material. The request carries private keys in every form
+// (PEM, a cached key, JWK, TSIG secrets, bulk imports), so "%v" of the
+// struct must never reach a log; this says what is being asked and whether
+// key material is attached, not what it is.
+func keystoreRequestSummary(d tdns.KeystorePost) string {
+	material := d.PrivateKey != "" || d.JWK != "" || d.PrivateKeyCache != nil ||
+		d.TsigSecret != "" || d.TsigImportData != "" ||
+		len(d.BulkDnssecKeys) > 0 || len(d.BulkSig0Keys) > 0 || len(d.BulkTsigKeys) > 0
+	return fmt.Sprintf("command=%q subcommand=%q zone=%q keyname=%q keyid=%d algorithm=%d state=%q keyformat=%q force=%t key-material=%t",
+		d.Command, d.SubCommand, d.Zone, d.Keyname, d.Keyid, d.Algorithm, d.State, d.KeyFormat, d.Force, material)
+}
+
+// logKeystoreRequest writes the debug line before a keystore command is
+// sent, when --debug is on.
+func logKeystoreRequest(label string, d tdns.KeystorePost) {
+	if tdns.Globals.Debug {
+		log.Printf("%s: calling SendKeystoreCmd with %s", label, keystoreRequestSummary(d))
+	}
 }
