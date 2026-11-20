@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"sync/atomic"
 	// "flag"
 	"context"
 	"errors"
@@ -951,6 +952,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 	return zones, broken, conf.queueZoneRefreshers(ctx, pending)
 }
 
+// parseSeq numbers the parses of the zones: block, so that a refresher that a newer
+// parse has overtaken can be told from the newest (ZoneRefresher.ParseSeq).
+var parseSeq atomic.Uint64
+
 // zoneRefresherSendProbe is nil, and is set by a test that has to look at the
 // daemon's state at the moment a refresher is about to be handed to the engine,
 // from the sender's side: it is called with each refresher just before its send.
@@ -989,6 +994,7 @@ func (conf *Config) parseZones(ctx context.Context, reload bool) ([]string, []st
 		lgConfig.Info("no authoritative zones defined")
 		return nil, nil, nil, nil
 	}
+	seq := parseSeq.Add(1)
 
 	lgConfig.Debug("parsing authoritative zones", "count", len(conf.Zones))
 	var all_zones []string
@@ -1715,6 +1721,7 @@ func (conf *Config) parseZones(ctx context.Context, reload bool) ([]string, []st
 				DownstreamAuth:   zconf.DownstreamAuth,
 				ConfigUpdate:     true, // config-bearing: lets reload clear removed ACLs
 				Registered:       zd,   // the zone is registered above, before this is queued
+				ParseSeq:         seq,
 				Zonefile:         zconf.Zonefile,
 				Options:          options,
 				UpdatePolicy:     policy,
@@ -1732,8 +1739,12 @@ func (conf *Config) parseZones(ctx context.Context, reload bool) ([]string, []st
 			}
 			if reload {
 				pending = append(pending, zr)
-			} else if qerr := conf.queueZoneRefreshers(ctx, []ZoneRefresher{zr}); qerr != nil {
-				return all_zones, broken_zones, nil, qerr
+			} else {
+				// An initial parse queues as it goes: this one is the zone's newest.
+				zr.Registered.latestParseSeq.Store(seq)
+				if qerr := conf.queueZoneRefreshers(ctx, []ZoneRefresher{zr}); qerr != nil {
+					return all_zones, broken_zones, nil, qerr
+				}
 			}
 		}
 	}
@@ -1741,6 +1752,14 @@ func (conf *Config) parseZones(ctx context.Context, reload bool) ([]string, []st
 	lgConfig.Info("zones parsed and refreshing", "count", len(all_zones), "zones", all_zones, "broken", broken_zones, "queued", len(conf.Internal.RefreshZoneCh), "pending", len(pending))
 
 	warnGlobalOutboundSerialSuppressed(conf, serialSuppressedZones)
+
+	// A reload has parsed: its refreshers are the newest for their zones, and the
+	// ones an earlier reload still has queued are overtaken (the engine drops them).
+	// Only now, and not as each zone is parsed: a parse that fails part way returns
+	// above, queues nothing, and overtakes nothing.
+	for _, zr := range pending {
+		zr.Registered.latestParseSeq.Store(zr.ParseSeq)
+	}
 
 	lgConfig.Debug("ParseZones complete")
 	return all_zones, broken_zones, pending, nil

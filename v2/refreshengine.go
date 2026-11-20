@@ -846,14 +846,20 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			//	Zones holds ...           the refresher is ...
 			//	no zone                   dropped, no zone created: a later reload
 			//	                          removed it
-			//	the same ZoneData         applied. Refreshers of one registration
-			//	                          are applied in the order they were queued,
-			//	                          so the newest config lands last, on what
-			//	                          the earlier ones left: a zone they gave
-			//	                          keys under one algorithm meets a newest
-			//	                          config with another as the algorithm
-			//	                          change it is (refused without a rollover
-			//	                          engine, as for any signed zone)
+			//	the same ZoneData         applied, unless a newer parse of the config
+			//	                          has produced a refresher for it (its
+			//	                          ParseSeq is below the zone's
+			//	                          latestParseSeq, set when that parse
+			//	                          succeeded, before it queues anything):
+			//	                          then dropped, and the newest config is
+			//	                          the one that lands, once, as the zone's
+			//	                          first bind if it has none yet. One that
+			//	                          was applied before the newer parse (the
+			//	                          zone has keys under its algorithm) leaves
+			//	                          the newest config's algorithm change as
+			//	                          the algorithm change it is: refused
+			//	                          without a rollover engine, as for any
+			//	                          signed zone
 			//	another ZoneData          dropped: a later reload removed the zone
 			//	                          and registered it again, and that
 			//	                          registration's own refresher, queued after
@@ -910,6 +916,15 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if zr.Response != nil {
 							resp.Error = true
 							resp.ErrorMsg = fmt.Sprintf("refresher for zone %s superseded: the zone was registered again after it was queued", zone)
+							zr.Response <- resp
+						}
+						continue
+					}
+					if zr.Registered != nil && zr.ParseSeq < zd.latestParseSeq.Load() {
+						lgEngine.Info("refresher overtaken by a newer reload of the zone; dropped", "zone", zone)
+						if zr.Response != nil {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("refresher for zone %s superseded: a newer reload of the zone is queued behind it", zone)
 							zr.Response <- resp
 						}
 						continue

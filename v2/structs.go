@@ -130,6 +130,11 @@ type ZoneData struct {
 	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map". An xfr zone only supports xfr related ops
 	ZoneType   ZoneType
 	ApexLen    int
+	// latestParseSeq is the number of the newest successful parse of the config
+	// that produced a refresher for this zone (ZoneRefresher.ParseSeq). A refresher
+	// of an older one is dropped by the engine, as the newer one carries the zone's
+	// whole config.
+	latestParseSeq atomic.Uint64
 	//	RRs            RRArray
 	Data *core.NameMap[OwnerData]
 	// 20260415 johani: MP    *ZoneMPExtension // Multi-provider state; nil for non-MP zones
@@ -1296,6 +1301,12 @@ type ZoneRefresher struct {
 	// catalog member) is the zone's first appearance, and creates it. The rules, and
 	// why, are at the head of RefreshEngine's dispatch.
 	Registered *ZoneData
+	// ParseSeq numbers the parse that produced the refresher (ParseZones sets it;
+	// 0 for a refresher of no parse). The zone records the newest parse that
+	// succeeded for it (ZoneData.latestParseSeq), and the engine drops a refresher
+	// that a newer parse of the same registration has overtaken: the latest
+	// reload's config wins.
+	ParseSeq uint64
 	// UpdatePolicySet marks a refresher whose UpdatePolicy is the zone's
 	// activated policy (ParseZones, a persisted dynamic primary), which then
 	// replaces the zone's even when it is empty. ConfigUpdate cannot mean

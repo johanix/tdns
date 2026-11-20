@@ -1881,3 +1881,203 @@ func TestTheStateWritersOfAZoneARealReloadRemovedDoNotRegisterItAgain(t *testing
 		Zones.Remove(raced)
 	}
 }
+
+// The latest reload wins. Two reloads of one new signing zone, with other
+// algorithms, while the first one's refresher is still queued: the engine used to
+// apply them in order, the first gave the zone keys under its algorithm, and the
+// second named another that no rollover engine carries, and was refused as the
+// algorithm change it then was; the zone signed with the older reload's. A
+// refresher that a newer successful parse of the same registration has overtaken is
+// dropped now, so the zone's first bind is the newest config's.
+//
+// What stays: a reload that changes the algorithms of a zone that already has keys
+// is refused (TestAReloadThatChangesTheAlgorithmsOfASigningZonesPolicyUnderItsNameIsRefused),
+// and a parse that fails part way overtakes nothing (the last test below).
+func TestTwoQuickReloadsOfOneNewZoneTheLatestWins(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "twoquick.config.example.", "online-signing")
+	const month = 30 * 86400
+	polA := map[string]DnssecPolicy{"base": named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "base")}
+	polB := map[string]DnssecPolicy{"base": named(validFor(kskzsk(dns.ECDSAP256SHA256, dns.ECDSAP256SHA256), month), "base")}
+	withLivePolicies(t, map[string]DnssecPolicy{})
+
+	parse := func(pols map[string]DnssecPolicy) ZoneRefresher {
+		t.Helper()
+		h.conf.Internal.DnssecPolicies = pols
+		h.conf.Zones = []ZoneConf{{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: "base", OptionsStrs: h.options}}
+		if _, _, err := h.conf.ParseZones(context.Background(), false); err != nil {
+			t.Fatalf("ParseZones: %v", err)
+		}
+		return <-h.parsed
+	}
+	zrA := parse(polA) // the first reload: queued, not yet applied
+	zrB := parse(polB) // the second, of the same registration, with another algorithm
+	if zrA.Registered != zrB.Registered {
+		t.Fatal("the two reloads did not reach the same registration; the test has lost its point")
+	}
+
+	h.engineConf.Internal.RefreshZoneCh <- zrA
+	h.engineConf.Internal.RefreshZoneCh <- zrB
+	h.answered(ZoneRefresher{Name: h.zone, ZoneStore: MapZone})
+
+	zd, ok := Zones.Get(h.zone)
+	if !ok {
+		t.Fatal("the zone is not registered")
+	}
+	if zd.HasServiceImpactingError() {
+		t.Errorf("the zone is in an error state: %s", zd.ErrorMsg)
+	}
+	if n, p, _ := policyState(zd); n != "base" || p == nil || p.KSKAlgorithm != dns.ECDSAP256SHA256 {
+		t.Errorf("the zone records %q bound to KSK algorithm %d; want %q bound to the latest reload's %d",
+			n, kskAlgOf(p), "base", dns.ECDSAP256SHA256)
+	}
+	sigs := servedRRset(t, zd, h.zone, dns.TypeSOA).RRSIGs
+	if len(sigs) == 0 {
+		t.Error("the SOA is unsigned")
+	}
+	for _, rr := range sigs {
+		if sig, ok := rr.(*dns.RRSIG); ok && sig.Algorithm != dns.ECDSAP256SHA256 {
+			t.Errorf("the SOA is signed with algorithm %d, want the latest reload's %d", sig.Algorithm, dns.ECDSAP256SHA256)
+		}
+	}
+}
+
+// The same with real reloads: the engine is held inside the first load of one zone
+// while a reload adds a second, and a second reload changes the second's algorithms
+// before the engine gets to it.
+func TestTwoRealReloadsOfOneNewZoneTheLatestWins(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	t.Cleanup(func() { policySyncProbe = nil })
+	h := newReloadHarness(t, kdb, "tworealblock.config.example.")
+	withLivePolicies(t, map[string]DnssecPolicy{})
+	prevSync := delegationSyncConf.Load()
+	t.Cleanup(func() { delegationSyncConf.Store(prevSync) })
+
+	const wanted = "tworealwanted.config.example."
+	wantedFile := filepath.Join(t.TempDir(), "zone")
+	body := wanted + "\t3600\tIN\tSOA\tns1." + wanted + " hostmaster." + wanted + " 1 7200 1800 604800 7200\n" +
+		wanted + "\t3600\tIN\tNS\tns1." + wanted + "\n" + "ns1." + wanted + "\t3600\tIN\tA\t192.0.2.53\n"
+	if err := os.WriteFile(wantedFile, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if z, ok := Zones.Get(wanted); ok {
+			z.stopPublisher()
+		}
+		Zones.Remove(wanted)
+	})
+
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	conf.Internal.RefreshZoneCh = h.engineConf.Internal.RefreshZoneCh // the harness's engine
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	policy := func(alg string) map[string]DnssecPolicyConf {
+		pol := DnssecPolicyConf{Algorithm: alg}
+		pol.KSK.Lifetime, pol.ZSK.Lifetime, pol.CSK.Lifetime = "forever", "forever", "none"
+		pol.SigValidity = DnssecPolicySigValidityConf{Default: "30d", Dnskey: "30d", Ds: "30d"}
+		return map[string]DnssecPolicyConf{"base": pol}
+	}
+	zones := func() []ZoneConf {
+		return []ZoneConf{
+			{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: "base", OptionsStrs: []string{"online-signing"}},
+			{Name: wanted, Type: "primary", Store: "map", Zonefile: wantedFile, DnssecPolicy: "base", OptionsStrs: []string{"online-signing"}},
+		}
+	}
+
+	// The engine is held inside the first load of the first zone, with the second's
+	// refresher queued behind it.
+	inFlight, release := make(chan struct{}), make(chan struct{})
+	var once, releaseOnce sync.Once
+	closeRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	defer closeRelease()
+	policySyncProbe = func(z *ZoneData, stage policySyncStage) {
+		if z.ZoneName != h.zone || stage != policySyncRead {
+			return
+		}
+		once.Do(func() {
+			close(inFlight)
+			<-release
+		})
+	}
+
+	conf.Dnssec.Policies, conf.Zones = policy("ED25519"), zones()
+	if _, err := conf.ReloadZoneConfig(context.Background()); err != nil {
+		t.Fatalf("the first reload: %v", err)
+	}
+	select {
+	case <-inFlight:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the engine did not reach the first load of the first zone")
+	}
+	conf.Dnssec.Policies = policy("ECDSAP256SHA256")
+	if _, err := conf.ReloadZoneConfig(context.Background()); err != nil {
+		t.Fatalf("the second reload: %v", err)
+	}
+	closeRelease()
+	marker := ZoneRefresher{Name: "marker.config.example.", Wait: true, Response: make(chan RefresherResponse, 1)}
+	h.engineConf.Internal.RefreshZoneCh <- marker
+	select {
+	case <-marker.Response:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the engine did not get through the refreshers")
+	}
+
+	zd, ok := Zones.Get(wanted)
+	if !ok {
+		t.Fatal("the second zone is not registered")
+	}
+	if zd.HasServiceImpactingError() {
+		t.Errorf("the zone is in an error state: %s", zd.ErrorMsg)
+	}
+	if n, p, _ := policyState(zd); n != "base" || p == nil || p.KSKAlgorithm != dns.ECDSAP256SHA256 {
+		t.Errorf("the zone records %q bound to KSK algorithm %d; want %q bound to the latest reload's %d",
+			n, kskAlgOf(p), "base", dns.ECDSAP256SHA256)
+	}
+	for _, rr := range servedRRset(t, zd, wanted, dns.TypeSOA).RRSIGs {
+		if sig, ok := rr.(*dns.RRSIG); ok && sig.Algorithm != dns.ECDSAP256SHA256 {
+			t.Errorf("the SOA is signed with algorithm %d, want the latest reload's %d", sig.Algorithm, dns.ECDSAP256SHA256)
+		}
+	}
+}
+
+// A parse that fails part way overtakes nothing: the refresher an earlier reload
+// queued for a zone is still applied, since the failed parse queued none of its own.
+func TestAParseThatFailsDoesNotOvertakeAnEarlierRefresher(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "failedparse.config.example.", "online-signing")
+	base := map[string]DnssecPolicy{"base": named(validFor(kskzsk(dns.ED25519, dns.ED25519), 30*86400), "base")}
+	withLivePolicies(t, map[string]DnssecPolicy{})
+	const bad = "failedparsebad.config.example."
+	t.Cleanup(func() {
+		if z, ok := Zones.Get(bad); ok {
+			z.stopPublisher()
+		}
+		Zones.Remove(bad)
+	})
+
+	h.conf.Internal.DnssecPolicies = base
+	h.conf.Zones = []ZoneConf{{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: "base", OptionsStrs: h.options}}
+	if _, _, err := h.conf.ParseZones(context.Background(), false); err != nil {
+		t.Fatalf("ParseZones: %v", err)
+	}
+	zr := <-h.parsed
+
+	// A reload whose second zone does not validate.
+	h.conf.Zones = []ZoneConf{
+		{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: "base", OptionsStrs: h.options},
+		{Name: bad, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: "base", TransferSrc: []string{"not-an-address"}},
+	}
+	if _, _, err := h.conf.ParseZones(context.Background(), true); err == nil {
+		t.Fatal("ParseZones accepted a zone that does not validate; the test has lost its point")
+	}
+
+	h.engineConf.Internal.RefreshZoneCh <- zr
+	h.answered(ZoneRefresher{Name: h.zone, ZoneStore: MapZone})
+	zd, _ := Zones.Get(h.zone)
+	if n, p, _ := policyState(zd); n != "base" || p == nil {
+		t.Errorf("the earlier reload's refresher was dropped by a parse that failed: the zone records %q, bound %v", n, p != nil)
+	}
+}
