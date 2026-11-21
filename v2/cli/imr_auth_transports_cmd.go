@@ -86,7 +86,18 @@ is counted apart from the same name found by resolution, and is marked (stub).
 that server and every server below it. With none, all servers are shown.
 --reset clears the counters after showing them -- ALL of them, every server,
 whatever [zone] and -s selected, including those transport-stats shows -- so
-the next run covers a new period.`,
+the next run covers a new period.
+
+--sort orders the rows (the TOTAL row is always last):
+  label   by the server's DNS labels from the right, TLD first, so that all
+          *.root-servers.net. rows are together, and so are all
+          *.gtld-servers.net. rows (the default)
+  oots    the servers that gave an OOTS signal (anything but "none" in the
+          OOTS column) first, then the rest; label order within each group
+  name    by name, plain alphabetical
+  total   the busiest server first (ties by name)
+  last    the most recently used server first (ties by name)
+--sort orders the table only; --json prints the rows as the resolver sends them.`,
 	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		var zone string
@@ -100,11 +111,9 @@ the next run covers a new period.`,
 // runAuthTransports fetches the report -- from the live cache in the tdns-imr
 // shell, over the /imr API from tdns-cli -- and prints it as the flags say.
 func runAuthTransports(ctx context.Context, zone string) {
-	switch authTransportsSort {
-	case "name", "total", "last":
-	default:
+	if err := checkAuthTransportsSort(authTransportsSort); err != nil {
 		// Refused before anything is fetched: a typo must not cost a --reset.
-		fmt.Printf("Error: --sort %q: use name, total or last\n", authTransportsSort)
+		fmt.Printf("Error: %v\n", err)
 		return
 	}
 	var rep tdns.ImrAuthTransportsReport
@@ -149,10 +158,80 @@ func runAuthTransports(ctx context.Context, zone string) {
 	fmt.Print(formatAuthTransports(rep, authTransportsSort, authTransportsPct, authTransportsPrivacy))
 }
 
-// formatAuthTransports renders a report as a table, sorted by name, total or
-// last used. With pct the transport columns are shares of each row's TOTAL,
-// and EXPECTED shows what selection would give; with privacy each server has a
-// row per class of query.
+// authTransportsSortModes are the values of --sort, the default first.
+var authTransportsSortModes = []string{"label", "oots", "name", "total", "last"}
+
+// checkAuthTransportsSort is nil for a --sort value, and otherwise an error
+// that names the values there are.
+func checkAuthTransportsSort(mode string) error {
+	for _, m := range authTransportsSortModes {
+		if m == mode {
+			return nil
+		}
+	}
+	last := len(authTransportsSortModes) - 1
+	return fmt.Errorf("--sort %q: use %s or %s", mode,
+		strings.Join(authTransportsSortModes[:last], ", "), authTransportsSortModes[last])
+}
+
+// advertisesOOTS reports whether the server gave a transport signal: anything
+// but "none" in the OOTS column. A signal that named no transport ("empty")
+// and a stub's configured or an operator's set one count.
+func advertisesOOTS(r tdns.ImrAuthTransportsRow) bool {
+	return len(r.Signal) > 0 || r.SignalSource != ""
+}
+
+// lessByLabel orders rows by server name from the right-hand label (TLD first),
+// as the "dump" listings do, so that every server of a parent domain is
+// together. Rows of one name: the shared instance, then the others in the order
+// they came.
+func lessByLabel(a, b tdns.ImrAuthTransportsRow) bool {
+	if lessByReverseLabels(a.Server, b.Server) {
+		return true
+	}
+	if lessByReverseLabels(b.Server, a.Server) {
+		return false
+	}
+	return a.Shared && !b.Shared
+}
+
+// lessByName orders rows by plain name, as the resolver lists them: the shared
+// instance of a name first.
+func lessByName(a, b tdns.ImrAuthTransportsRow) bool {
+	if a.Server != b.Server {
+		return a.Server < b.Server
+	}
+	return a.Shared && !b.Shared
+}
+
+// sortAuthTransportRows orders rows in place as --sort sortBy says (see
+// checkAuthTransportsSort); an unknown mode leaves them as they are.
+func sortAuthTransportRows(rows []tdns.ImrAuthTransportsRow, sortBy string) {
+	switch sortBy {
+	case "label":
+		sort.SliceStable(rows, func(i, j int) bool { return lessByLabel(rows[i], rows[j]) })
+	case "oots":
+		sort.SliceStable(rows, func(i, j int) bool {
+			if si, sj := advertisesOOTS(rows[i]), advertisesOOTS(rows[j]); si != sj {
+				return si
+			}
+			return lessByLabel(rows[i], rows[j])
+		})
+	case "name":
+		sort.SliceStable(rows, func(i, j int) bool { return lessByName(rows[i], rows[j]) })
+	case "total":
+		sortAuthTransportRows(rows, "name")
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].Total > rows[j].Total })
+	case "last":
+		sortAuthTransportRows(rows, "name")
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].LastAny.After(rows[j].LastAny) })
+	}
+}
+
+// formatAuthTransports renders a report as a table, sorted as sortBy says (by
+// label, oots signal, name, total or last used). With pct the transport columns
+// are shares of each row's TOTAL, and EXPECTED shows what selection would give;
+// with privacy each server has a row per class of query.
 func formatAuthTransports(rep tdns.ImrAuthTransportsReport, sortBy string, pct, privacy bool) string {
 	var b strings.Builder
 	var of string
@@ -163,12 +242,7 @@ func formatAuthTransports(rep tdns.ImrAuthTransportsReport, sortBy string, pct, 
 		of, rep.Since.Format("2006-01-02 15:04:05"), rep.Servers, len(rep.Rows))
 
 	rows := append([]tdns.ImrAuthTransportsRow(nil), rep.Rows...)
-	switch sortBy {
-	case "total":
-		sort.SliceStable(rows, func(i, j int) bool { return rows[i].Total > rows[j].Total })
-	case "last":
-		sort.SliceStable(rows, func(i, j int) bool { return rows[i].LastAny.After(rows[j].LastAny) })
-	}
+	sortAuthTransportRows(rows, sortBy)
 
 	tw := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
 	header := []string{"AUTH SERVER", "ZONES"}
@@ -339,7 +413,7 @@ func formatExpected(expected map[string]map[string]uint8, level string) string {
 func init() {
 	imrStatsAuthTransportsCmd.Flags().StringSliceVarP(&authTransportsServers, "server", "s", nil, "Server name, selecting it and every server below it; may be repeated")
 	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsReset, "reset", false, "Clear ALL auth-server counters after showing them")
-	imrStatsAuthTransportsCmd.Flags().StringVar(&authTransportsSort, "sort", "name", "Sort by name, total or last")
+	imrStatsAuthTransportsCmd.Flags().StringVar(&authTransportsSort, "sort", "label", "Sort the rows by label (DNS labels from the TLD down), oots (servers with an OOTS signal first), name, total or last")
 	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsJSON, "json", false, "Print the report as JSON")
 	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsPct, "pct", false, "Show each transport's share of the row's answers instead of counts, and what selection would give (EXPECTED)")
 	imrStatsAuthTransportsCmd.Flags().BoolVar(&authTransportsPrivacy, "privacy", false, "One row per class of query: a client's PRIVACY level (none, opp., strict) or internal")
