@@ -194,8 +194,10 @@ func initConfig() {
 		if os.IsNotExist(err) {
 			// tdns-ncli's config is its own file, so on a host that has only
 			// ever run tdns-cli it does not exist yet. Say how to make it.
-			log.Fatalf("No CLI config %s. Create it from the daemons' own configs with:\n    tdns-ncli config add /etc/tdns/tdns-auth.yaml",
-				viper.ConfigFileUsed())
+			// With --config if one was given: the advice has to create the
+			// file that is missing, not the default.
+			log.Fatalf("No CLI config %s. Create it from the daemons' own configs with:\n    %s /etc/tdns/tdns-auth.yaml",
+				viper.ConfigFileUsed(), cli.ConfigAddHint(cfgFile))
 		}
 		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
 	}
