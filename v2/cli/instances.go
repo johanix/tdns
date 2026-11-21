@@ -11,11 +11,21 @@ import (
 	"os"
 	"strings"
 
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
 	tdns "github.com/johanix/tdns/v2"
 )
+
+// DefaultCliConfigFile is the CLI config read when --config is not given.
+//
+// A variable rather than the tdns.DefaultCliCfgFile constant because two
+// binaries share this package and read two different files: tdns-cli reads
+// /etc/tdns/tdns-cli.yaml (this initial value, so it behaves exactly as it
+// always did) and tdns-ncli sets it to its own /etc/tdns/tdns-ncli.yaml in its
+// own init(), before anything here reads it.
+var DefaultCliConfigFile = tdns.DefaultCliCfgFile
 
 // knownInstanceRoles are the roles an apiservers entry may ask to be wired as.
 // Only "auth" for now: it is the only tree with a NewXxxTree factory. Adding
@@ -45,7 +55,7 @@ func ConfigPathFromArgs(args []string) string {
 			return args[i+1]
 		}
 	}
-	return tdns.DefaultCliCfgFile
+	return DefaultCliConfigFile
 }
 
 // EarlyApiServers reads just the apiservers: block from the CLI config.
@@ -60,13 +70,43 @@ func ConfigPathFromArgs(args []string) string {
 // that an apiservers: block living in an include: file is found here exactly
 // as it is by the real loader.
 func EarlyApiServers(cfgFile string) []ApiDetails {
+	entries, _ := ReadApiServers(cfgFile)
+	return entries
+}
+
+// ReadApiServers is EarlyApiServers with the errors kept, for the commands
+// (config list, config add) whose whole job is to report on the config and so
+// must not paper over a broken one.
+//
+// It reads the effective list, the way the real loader does: the main file,
+// then its include: files, then cli.localconfig merged on top. Viper merges
+// maps and REPLACES lists, so an apiservers: block in cli.localconfig hides
+// the one in the main file entirely, and this returns the one that wins.
+//
+// A failure merging cli.localconfig returns the entries already read together
+// with the error, which is what EarlyApiServers has always done: a broken
+// local overlay costs the overlay, not the entries beneath it.
+func ReadApiServers(cfgFile string) ([]ApiDetails, error) {
+	return readApiServers(cfgFile, nil)
+}
+
+// readApiServers is ReadApiServers reading through fs; nil is the real file
+// system. `config add --dry-run` passes the real file system with the edited
+// file laid over it, so the preview loads exactly what the add would write.
+func readApiServers(cfgFile string, fs afero.Fs) ([]ApiDetails, error) {
 	v := viper.New()
+	if fs != nil {
+		v.SetFs(fs)
+	}
+	// As initConfig does, so a setting the CLI takes from the environment
+	// (cli.localconfig among them) is taken from it here too.
+	v.AutomaticEnv()
 	v.SetConfigFile(cfgFile)
 	if err := v.ReadInConfig(); err != nil {
-		return nil
+		return nil, err
 	}
 	if err := tdns.MergeViperIncludes(v, cfgFile); err != nil {
-		return nil
+		return nil, err
 	}
 	// cli.localconfig, merged the same way the full load does (initConfig in
 	// each binary's root.go). Skipping it here would mean an apiservers entry
@@ -75,20 +115,148 @@ func EarlyApiServers(cfgFile string) []ApiDetails {
 	// resolve the command path by then, so the operator gets
 	// `unknown command "sectdns"` from a config that plainly defines it.
 	//
-	// Still best-effort: a local config that is named but absent is normal
-	// (that is what makes it local), and any error leaves the entries we
-	// already have rather than discarding them.
+	// A local config that is named but absent is normal (that is what makes it
+	// local). One that is there but cannot be read or checked -- a directory
+	// on the way that the operator may not enter, say -- stops the full load,
+	// so it is an error here too. Either error leaves the entries we already
+	// have rather than discarding them.
+	var localErr error
 	if local := v.GetString("cli.localconfig"); local != "" {
 		if _, err := os.Stat(local); err == nil {
 			v.SetConfigFile(local)
-			_ = v.MergeInConfig()
+			if err := v.MergeInConfig(); err != nil {
+				localErr = fmt.Errorf("cli.localconfig %s: %w", local, err)
+			}
+		} else if !os.IsNotExist(err) {
+			localErr = fmt.Errorf("cli.localconfig %s: %w", local, err)
 		}
 	}
 	var entries []ApiDetails
 	if err := v.UnmarshalKey("apiservers", &entries); err != nil {
-		return nil
+		return nil, fmt.Errorf("%s: apiservers: %w", cfgFile, err)
 	}
-	return entries
+	return entries, localErr
+}
+
+// instanceVerdict is the outcome of checking one apiservers entry for wiring.
+type instanceVerdict struct {
+	Entry ApiDetails
+	// Canonical: the entry has no role:, so it is the canonical target of a
+	// built-in tree (or of no tree at all) and is not an instance.
+	Canonical bool
+	// Wire: an instance tree would be wired for this entry.
+	Wire bool
+	// Why is the warning text for an instance entry that will not be wired.
+	Why string
+}
+
+// checkInstanceEntries decides, without changing anything, which entries
+// become instance trees and why the others do not. WireInstanceTrees acts on
+// the answer; `config list` shows it. One function for both, so what the list
+// reports is what the wiring does.
+//
+// registry is the role -> clientKey map to judge names against: the live one
+// (roleToClientKey) at wiring time, or builtinRoles() when `config list`
+// looks back at the situation before any instance was wired.
+func checkInstanceEntries(root *cobra.Command, entries []ApiDetails, registry map[string]string) []instanceVerdict {
+	// The API-client names that are already spoken for: the built-in roles'
+	// clients (tdns-auth, tdns-imr, ...) and every canonical entry. An
+	// instance sharing one of these would be the SAME client as that entry:
+	// InitApiClients keys tdns.Globals.ApiClients by entry name, so the later
+	// of the two silently replaces the earlier and a command meant for one
+	// daemon reaches the other. The role-name check below does not see this,
+	// because it compares against role names (auth), not client names
+	// (tdns-auth).
+	clientNames := map[string]bool{}
+	for _, ck := range registry {
+		clientNames[ck] = true
+	}
+	canonical := map[string]bool{}
+	for _, e := range entries {
+		if e.Role == "" {
+			canonical[e.Name] = true
+		}
+	}
+
+	// Instance names accepted by THIS call, so a duplicate can be reported as
+	// the duplicate it is rather than as a built-in-role collision.
+	claimed := map[string]bool{}
+
+	out := make([]instanceVerdict, 0, len(entries))
+	for _, e := range entries {
+		v := instanceVerdict{Entry: e}
+		if e.Role == "" {
+			v.Canonical = true // reached through its built-in tree
+			out = append(out, v)
+			continue
+		}
+		v.Why = instanceRefusal(root, e, registry, clientNames, canonical, claimed)
+		if v.Why == "" {
+			v.Wire = true
+			claimed[e.Name] = true
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
+// instanceRefusal returns why an instance entry cannot be wired, or "" if it
+// can.
+func instanceRefusal(root *cobra.Command, e ApiDetails, registry map[string]string, clientNames, canonical, claimed map[string]bool) string {
+	if _, known := knownInstanceRoles[e.Role]; !known {
+		return fmt.Sprintf(
+			"apiservers entry %q: role %q has no command tree (known: %s) -- entry ignored",
+			e.Name, e.Role, knownRoleList())
+	}
+	if e.Name == "" {
+		return "apiservers entry with role but no name -- entry ignored"
+	}
+	// A name that shadows a built-in role would silently retarget the
+	// canonical tree, which is the exact failure this feature exists to
+	// prevent. Refuse it.
+	if _, taken := registry[e.Name]; taken || claimed[e.Name] {
+		// Two different collisions land here and the operator needs to be
+		// told which: a built-in role (auth/agent/imr), or an earlier
+		// apiservers entry that already claimed this name. Reporting the
+		// second as "a built-in role" sends them looking for a conflict
+		// that is not there.
+		what := "a built-in role"
+		if claimed[e.Name] {
+			what = "an earlier apiservers entry with the same name"
+		}
+		return fmt.Sprintf(
+			"apiservers entry %q: name collides with %s -- entry ignored (choose another name)",
+			e.Name, what)
+	}
+	if clientNames[e.Name] || canonical[e.Name] {
+		what := "another apiservers entry"
+		if clientNames[e.Name] {
+			what = "the API client of a built-in role"
+		}
+		return fmt.Sprintf(
+			"apiservers entry %q: name is the API-client name of %s, so the two would share one client -- entry ignored (choose another name)",
+			e.Name, what)
+	}
+	if existing := findChild(root, e.Name); existing != nil {
+		return fmt.Sprintf(
+			"apiservers entry %q: name collides with the existing %q command -- entry ignored (choose another name)",
+			e.Name, existing.Name())
+	}
+	// show-cmds is attached AFTER instance wiring -- it walks the tree and
+	// gives every node with children its own copy, so it has to see the
+	// instance trees. That means findChild above cannot see it, and an
+	// instance called "show-cmds" would collide with a command that does
+	// not exist yet. Reserve the name explicitly.
+	//
+	// The caller is responsible for the same problem with cobra's lazily
+	// added "help" and "completion": it must call InitDefaultHelpCmd and
+	// InitDefaultCompletionCmd before this, so findChild can see them.
+	if e.Name == ShowCmdsName {
+		return fmt.Sprintf(
+			"apiservers entry %q: name is reserved -- entry ignored (choose another name)",
+			e.Name)
+	}
+	return ""
 }
 
 // WireInstanceTrees adds one command tree per apiservers entry carrying a
@@ -99,73 +267,72 @@ func EarlyApiServers(cfgFile string) []ApiDetails {
 // entry should cost that entry's subcommand, not the whole CLI.
 func WireInstanceTrees(root *cobra.Command, entries []ApiDetails) []string {
 	var warnings []string
-	// Instance names wired by THIS call, so a duplicate can be reported as the
-	// duplicate it is rather than as a built-in-role collision.
-	wired := map[string]bool{}
-
-	for _, e := range entries {
-		if e.Role == "" {
-			continue // canonical entry; reached through its built-in tree
+	for _, v := range checkInstanceEntries(root, entries, roleToClientKey) {
+		if v.Canonical {
+			continue // reached through its built-in tree
 		}
-		newTree, known := knownInstanceRoles[e.Role]
-		if !known {
-			warnings = append(warnings, fmt.Sprintf(
-				"apiservers entry %q: role %q has no command tree (known: %s) -- entry ignored",
-				e.Name, e.Role, knownRoleList()))
+		if !v.Wire {
+			warnings = append(warnings, v.Why)
 			continue
 		}
-		if e.Name == "" {
-			warnings = append(warnings, "apiservers entry with role but no name -- entry ignored")
-			continue
-		}
-		// A name that shadows a built-in role would silently retarget the
-		// canonical tree, which is the exact failure this feature exists to
-		// prevent. Refuse it.
-		if _, taken := roleToClientKey[e.Name]; taken {
-			// Two different collisions land here and the operator needs to be
-			// told which: a built-in role (auth/agent/imr), or an earlier
-			// apiservers entry that already claimed this name. Reporting the
-			// second as "a built-in role" sends them looking for a conflict
-			// that is not there.
-			what := "a built-in role"
-			if wired[e.Name] {
-				what = "an earlier apiservers entry with the same name"
-			}
-			warnings = append(warnings, fmt.Sprintf(
-				"apiservers entry %q: name collides with %s -- entry ignored (choose another name)",
-				e.Name, what))
-			continue
-		}
-		if existing := findChild(root, e.Name); existing != nil {
-			warnings = append(warnings, fmt.Sprintf(
-				"apiservers entry %q: name collides with the existing %q command -- entry ignored (choose another name)",
-				e.Name, existing.Name()))
-			continue
-		}
-		// show-cmds is attached AFTER instance wiring -- it walks the tree and
-		// gives every node with children its own copy, so it has to see the
-		// instance trees. That means findChild above cannot see it, and an
-		// instance called "show-cmds" would collide with a command that does
-		// not exist yet. Reserve the name explicitly.
-		//
-		// The caller is responsible for the same problem with cobra's lazily
-		// added "help" and "completion": it must call InitDefaultHelpCmd and
-		// InitDefaultCompletionCmd before this, so findChild can see them.
-		if e.Name == ShowCmdsName {
-			warnings = append(warnings, fmt.Sprintf(
-				"apiservers entry %q: name is reserved -- entry ignored (choose another name)",
-				e.Name))
-			continue
-		}
-
 		// The instance is addressed by its own name at both levels: the command
 		// word IS the role IS the clientKey. One name for the operator to know.
+		e := v.Entry
 		RegisterRole(e.Name, e.Name)
-		wired[e.Name] = true
-		root.AddCommand(newTree(e.Name, e.Name))
+		root.AddCommand(knownInstanceRoles[e.Role](e.Name, e.Name))
 	}
-
 	return warnings
+}
+
+// clientEntries returns the entries to build API clients for: every canonical
+// entry, and every instance entry whose name no client answers to yet -- a
+// built-in role's client (tdns-auth), a canonical entry, or an earlier
+// instance of the same name.
+//
+// tdns.Globals.ApiClients is keyed by entry name, so a client built for such
+// an instance replaces the one the name already stands for, and
+// `tdns-ncli auth ...` reaches the instance's daemon. checkInstanceEntries
+// refuses to wire these entries (the same three rules); this keeps them from
+// taking over the client as well.
+//
+// registry is the built-in role -> clientKey map, builtinRoles(): the
+// instances wired so far are registered as name -> name and are not built-in
+// clients.
+func clientEntries(entries []ApiDetails, registry map[string]string) []ApiDetails {
+	taken := map[string]bool{}
+	for _, ck := range registry {
+		taken[ck] = true
+	}
+	for _, e := range entries {
+		if e.Role == "" {
+			taken[e.Name] = true
+		}
+	}
+	out := make([]ApiDetails, 0, len(entries))
+	for _, e := range entries {
+		if e.Role != "" {
+			if taken[e.Name] {
+				continue
+			}
+			taken[e.Name] = true
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// builtinRoles returns the role -> clientKey registrations that are not
+// instances. WireInstanceTrees registers each instance as RegisterRole(n, n),
+// the one shape no built-in role has (auth -> tdns-auth), which is how the two
+// are told apart.
+func builtinRoles() map[string]string {
+	out := make(map[string]string, len(roleToClientKey))
+	for role, key := range roleToClientKey {
+		if role != key {
+			out[role] = key
+		}
+	}
+	return out
 }
 
 // findChild reports whether root already has a subcommand answering to name,
