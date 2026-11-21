@@ -249,6 +249,13 @@ The zone to update is mandatory to specify on the command line with the --zone f
 	// worked here -- there was just no way to reach it (#539). What existed
 	// was a second, hidden implementation hanging off "agent" directly.
 	AgentZoneCmd.AddCommand(newZoneParentSyncCmd(role))
+	// add, delete, modify and list-dynamic, for the same reason: /zone serves
+	// them for every app type, and the agent's dynamiczones config decides
+	// which zone types it accepts. Without them here, adding a zone to a
+	// running agent took an apiservers entry with role auth aimed at the
+	// agent's API, which wired the whole auth tree against the agent. Bound to
+	// this tree's role, so "agent2 zone add" adds to agent2.
+	AgentZoneCmd.AddCommand(newZoneDynamicCmds(role)...)
 
 	// Dsync subcommands
 	agentZoneDsyncCmd.AddCommand(agentZoneDsyncStatusCmd, agentZoneDsyncBootstrapCmd,
