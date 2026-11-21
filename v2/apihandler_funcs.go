@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -513,7 +514,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.AuthEngine = conf.AuthEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.transportSignalConfig().Service.Identities
-			resp.DBFile = conf.Db.File
+			resp.DBFile = reportedDBFile(conf.Db.File)
 			resp.ServerErrors = conf.Internal.ServerErrors.List()
 			resp.Do53QueriesRefused = conf.Internal.do53QueriesRefused.Load()
 			// Every daemon that carries an IMR — tdns-imr itself or the
@@ -1115,4 +1116,19 @@ func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
+}
+
+// reportedDBFile is the keystore path `config status` reports: absolute, as
+// the daemon resolved it. A relative db.file (agent2.db) is relative to the
+// daemon's working directory, and a CLI that opens the reported path to sign
+// an update (zone update create) would resolve it against its own. Empty
+// stays empty: filepath.Abs("") is the working directory, not "no keystore".
+func reportedDBFile(f string) string {
+	if f == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(f); err == nil {
+		return abs
+	}
+	return f
 }
