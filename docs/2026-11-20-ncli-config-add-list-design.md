@@ -110,9 +110,13 @@ exists for is `apiservers:` also defined in an include or in
 main file would be invisible. `--file` names the file that holds the list.
 `--dry-run` makes the same check without writing: it loads the real files with
 the edited one laid over them in memory, so the preview fails where the add
-would. The overlay answers for the edited file under any name -- through a
-symlink at `--file` (the add writes through it), or a symlink to it named in
-`cli.localconfig`.
+would. The overlay answers for the edited file under any name that resolves
+to the path the add's rename replaces -- through a symlink at `--file` (the add
+writes through it), or a symlink to it named in `cli.localconfig`. A hard link
+is another name: the rename leaves it reading the old file, so the add fails
+there, and the preview does too. The lock files are named by the same resolved
+path (through the parent directory for a file not created yet), so two aliases
+of one directory take one lock.
 
 **Output.** The entry is printed with the API key masked. The key is the one
 secret in it and has no place in terminal scrollback.
