@@ -75,11 +75,14 @@ different file naming an address another entry already uses (two daemons
 cannot listen on one address), is an error that says which entry.
 
 **One at a time.** An add takes an exclusive `flock` on `.<file>.lock` beside
-the file it edits, before it reads the current list, and holds it through the
-write, the reload and any undo. Two adds that both read the old list would
-otherwise both succeed while the second one's file drops the first one's entry.
-The lock file stays (removing it would race a waiting writer); a dry run takes
-no lock.
+the file it edits, and beside the CLI config when that is another file, before
+it reads the current list, and holds them through the write, the reload and any
+undo. Two adds that both read the old list would otherwise both succeed while
+the second one's file drops the first one's entry -- or, editing the main file
+and `cli.localconfig`, while one list hides the other's entry. The locks are
+taken in one order, so two adds cannot deadlock. The lock files stay (removing
+one would race a waiting writer); a dry run takes no lock. On a platform with
+no `flock` (none tdns builds for) the lock is a no-op.
 
 **Editing the file.** As text, not through viper's `WriteConfig` (which writes
 the *merged* config, folding includes and `cli.localconfig` into the main file
@@ -107,7 +110,9 @@ exists for is `apiservers:` also defined in an include or in
 main file would be invisible. `--file` names the file that holds the list.
 `--dry-run` makes the same check without writing: it loads the real files with
 the edited one laid over them in memory, so the preview fails where the add
-would.
+would. The overlay answers for the edited file under any name -- through a
+symlink at `--file` (the add writes through it), or a symlink to it named in
+`cli.localconfig`.
 
 **Output.** The entry is printed with the API key masked. The key is the one
 secret in it and has no place in terminal scrollback.
