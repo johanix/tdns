@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -293,6 +294,52 @@ func TestAPIimrResolveFollowsACNAMEForDSAndDNSKEY(t *testing.T) {
 				t.Errorf("state %v, want %q", got, want)
 			}
 		})
+	}
+}
+
+// The "imr query" in tdns-imr's own shell sends its question on RecursorCh
+// with AsClient set, and is answered as the API's "imr query" is: through the
+// CNAME. Without AsClient, as the embedded users ask, a DS or DNSKEY at a
+// CNAME owner is "none there".
+func TestRecursorRequestAsClientFollowsACNAME(t *testing.T) {
+	for _, c := range []struct {
+		qname, owner string
+		qtype        uint16
+	}{
+		{"s1." + sigChainZone, "s3." + sigChainZone, dns.TypeDS},
+		{"top." + sigChainZone, sigChainZone, dns.TypeDNSKEY},
+	} {
+		for _, asClient := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/AsClient=%v", dns.TypeToString[c.qtype], asClient), func(t *testing.T) {
+				imr, _ := sigChainImr(t)
+				ch := make(chan ImrResponse, 1)
+				imr.handleRecursorRequest(context.Background(), ImrRequest{Qname: c.qname, Qtype: c.qtype,
+					Qclass: dns.ClassINET, ResponseCh: ch, AsClient: asClient})
+				var r ImrResponse
+				select {
+				case r = <-ch:
+				default:
+					t.Fatal("no response")
+				}
+				if !asClient {
+					if r.RRset != nil || r.Denial != cache.ContextNoErrNoAns {
+						t.Errorf("RRset %v, denial %s; want none, NODATA", r.RRset, cache.CacheContextToString[r.Denial])
+					}
+					return
+				}
+				if r.RRset == nil || len(r.RRset.RRs) == 0 {
+					t.Fatalf("no records (%+v); want the %s at %s", r, dns.TypeToString[c.qtype], c.owner)
+				}
+				for _, rr := range r.RRset.RRs {
+					if rr.Header().Rrtype != c.qtype || !core.EqualNames(rr.Header().Name, c.owner) {
+						t.Errorf("record %v; want the %s at %s", rr, dns.TypeToString[c.qtype], c.owner)
+					}
+				}
+				if r.ValidationState != cache.ValidationStateSecure {
+					t.Errorf("state %s, want secure", cache.ValidationStateToString[r.ValidationState])
+				}
+			})
+		}
 	}
 }
 
