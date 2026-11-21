@@ -142,7 +142,10 @@ The zone to update is mandatory to specify on the command line with the --zone f
 		Use:   "roll-sig0-key",
 		Short: "Send dsync rollover command to the agent",
 		Run: func(cmd *cobra.Command, args []string) {
-			PrepArgs("zonename", "rollaction")
+			// The flag is bound to agentRollaction, not to the rollaction
+			// that PrepArgs("rollaction") checks, so check this one.
+			PrepArgs("zonename")
+			action := checkRollAction(agentRollaction)
 			alg := ResolveAlgorithm(role, useSIG0)
 
 			// The target is read off the command tree, so an extra agent instance's
@@ -156,7 +159,7 @@ The zone to update is mandatory to specify on the command line with the --zone f
 				Command:   "roll-sig0-key",
 				Zone:      dns.Fqdn(tdns.Globals.Zonename),
 				Algorithm: alg,
-				Action:    agentRollaction,
+				Action:    action,
 			})
 			PrintUpdateResult(resp.UpdateResult)
 			if err != nil {
