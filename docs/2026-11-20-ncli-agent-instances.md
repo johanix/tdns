@@ -69,6 +69,28 @@ carries a literal role.
 - `TestAgentInstanceConfigHasNoTransportSignal` fails with the old
   `role != "agent"` test restored.
 
+## Review fixes (CodeRabbit, 2026-11-21)
+
+- **`zone update create` on an instance signs with that instance's keys.** The
+  CLI config's `db.file` is one path for the whole CLI, so it is the canonical
+  daemon's. It still wins for the canonical role; for an instance the
+  database the instance reports comes first, and `db.file` is used only if it
+  reports none, with a warning (`updateKeyDB`). This was true of auth
+  instances before this PR too.
+- **`zone dsync roll-sig0-key --rollaction` is checked.** Its flag is bound to
+  `agentRollaction`, and `PrepArgs("rollaction")` checked another variable,
+  so an unknown action went to the daemon unchecked (on main too).
+- **A childsync-proxy refuses `publish` and `unpublish`** on `/zone/childsync`
+  (daemon side, `apihandler_zone.go`). They wrote into the proxy's own copy,
+  which the next transfer replaces, and reported success. The refusal points
+  at `zone childsync advert` and `reconcile`.
+- **`TestAgentInstanceCommandsRunAgainstTheirOwnDaemon`** runs `zone list` and
+  `zone list-dynamic` through both trees against two test servers. The tree
+  tests above check which client a command resolves; a Run callback passing
+  the literal `"agent"` would pass those, and fails this one.
+- `daemon start` with the entry's `config-file:` is #1161's
+  (`daemonStartFlags`, the shared path).
+
 ## Not done
 
 - `config mwe` is still "not implemented" for any instance, agent or auth.
