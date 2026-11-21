@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
@@ -86,7 +87,20 @@ func EarlyApiServers(cfgFile string) []ApiDetails {
 // with the error, which is what EarlyApiServers has always done: a broken
 // local overlay costs the overlay, not the entries beneath it.
 func ReadApiServers(cfgFile string) ([]ApiDetails, error) {
+	return readApiServers(cfgFile, nil)
+}
+
+// readApiServers is ReadApiServers reading through fs; nil is the real file
+// system. `config add --dry-run` passes the real file system with the edited
+// file laid over it, so the preview loads exactly what the add would write.
+func readApiServers(cfgFile string, fs afero.Fs) ([]ApiDetails, error) {
 	v := viper.New()
+	if fs != nil {
+		v.SetFs(fs)
+	}
+	// As initConfig does, so a setting the CLI takes from the environment
+	// (cli.localconfig among them) is taken from it here too.
+	v.AutomaticEnv()
 	v.SetConfigFile(cfgFile)
 	if err := v.ReadInConfig(); err != nil {
 		return nil, err
@@ -102,8 +116,10 @@ func ReadApiServers(cfgFile string) ([]ApiDetails, error) {
 	// `unknown command "sectdns"` from a config that plainly defines it.
 	//
 	// A local config that is named but absent is normal (that is what makes it
-	// local), and any error leaves the entries we already have rather than
-	// discarding them.
+	// local). One that is there but cannot be read or checked -- a directory
+	// on the way that the operator may not enter, say -- stops the full load,
+	// so it is an error here too. Either error leaves the entries we already
+	// have rather than discarding them.
 	var localErr error
 	if local := v.GetString("cli.localconfig"); local != "" {
 		if _, err := os.Stat(local); err == nil {
@@ -111,6 +127,8 @@ func ReadApiServers(cfgFile string) ([]ApiDetails, error) {
 			if err := v.MergeInConfig(); err != nil {
 				localErr = fmt.Errorf("cli.localconfig %s: %w", local, err)
 			}
+		} else if !os.IsNotExist(err) {
+			localErr = fmt.Errorf("cli.localconfig %s: %w", local, err)
 		}
 	}
 	var entries []ApiDetails
@@ -264,6 +282,43 @@ func WireInstanceTrees(root *cobra.Command, entries []ApiDetails) []string {
 		root.AddCommand(knownInstanceRoles[e.Role](e.Name, e.Name))
 	}
 	return warnings
+}
+
+// clientEntries returns the entries to build API clients for: every canonical
+// entry, and every instance entry whose name no client answers to yet -- a
+// built-in role's client (tdns-auth), a canonical entry, or an earlier
+// instance of the same name.
+//
+// tdns.Globals.ApiClients is keyed by entry name, so a client built for such
+// an instance replaces the one the name already stands for, and
+// `tdns-ncli auth ...` reaches the instance's daemon. checkInstanceEntries
+// refuses to wire these entries (the same three rules); this keeps them from
+// taking over the client as well.
+//
+// registry is the built-in role -> clientKey map, builtinRoles(): the
+// instances wired so far are registered as name -> name and are not built-in
+// clients.
+func clientEntries(entries []ApiDetails, registry map[string]string) []ApiDetails {
+	taken := map[string]bool{}
+	for _, ck := range registry {
+		taken[ck] = true
+	}
+	for _, e := range entries {
+		if e.Role == "" {
+			taken[e.Name] = true
+		}
+	}
+	out := make([]ApiDetails, 0, len(entries))
+	for _, e := range entries {
+		if e.Role != "" {
+			if taken[e.Name] {
+				continue
+			}
+			taken[e.Name] = true
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // builtinRoles returns the role -> clientKey registrations that are not

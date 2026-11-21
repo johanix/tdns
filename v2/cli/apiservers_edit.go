@@ -8,10 +8,13 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Why the file is edited as text, not loaded and written back through viper
@@ -196,26 +199,61 @@ func renderEntry(e ApiDetails, lay itemLayout) string {
 // a space or a '#' or a leading '*', say) is single-quoted.
 var reSafeScalar = regexp.MustCompile(`^[A-Za-z0-9_/.][A-Za-z0-9_/.:@+=\[\]-]*$`)
 
+// yamlScalar writes s as a YAML value that reads back as the string s.
+//
+// Plain when that is safe, single-quoted otherwise. Safe means the right
+// characters AND that YAML reads the plain form as that same string: plain
+// 001234 is the octal integer 668, 1e3 is a float and true a boolean, and
+// viper hands any of them back as a different string (an API key of 001234
+// would come back as "668", and the add would undo itself). The decoder asked
+// is the one viper reads the CLI config with, so the two cannot disagree.
 func yamlScalar(s string) string {
 	if reSafeScalar.MatchString(s) && !strings.HasSuffix(s, ":") {
 		switch strings.ToLower(s) {
 		case "true", "false", "yes", "no", "on", "off", "null", "y", "n":
-			// Plain, these would read back as booleans or null.
+			// Plain, these would read back as booleans or null (YAML 1.1
+			// readers take all of them; quoting costs nothing).
 		default:
-			return s
+			var v interface{}
+			if err := yaml.Unmarshal([]byte(s), &v); err == nil {
+				if str, ok := v.(string); ok && str == s {
+					return s
+				}
+			}
 		}
 	}
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
+// danglingSymlink returns an error if path is a symbolic link to something
+// that does not exist.
+//
+// Such a path does not stat, so it reads as "no file yet", and writing it by
+// renaming a new file over it would replace the link with a plain file: the
+// operator's link silently gone, and the file it was meant to point at never
+// made. Refuse instead, before anything is written.
+func danglingSymlink(path string) error {
+	_, err := os.Stat(path)
+	if err == nil {
+		return nil
+	}
+	if li, lerr := os.Lstat(path); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symbolic link to a file that does not exist (%v); create that file, or replace the link, and try again", path, err)
+	}
+	return nil
+}
+
 // writeFileAtomic replaces path with data without a window in which the file
 // is half-written, keeping its mode (0600 for a new file: it holds API keys).
 // A symlink is followed, so the file it points at is replaced and the link
-// stays a link.
+// stays a link; a link to nothing is refused (see danglingSymlink).
 //
 // The new file belongs to whoever runs this, not necessarily to the old file's
 // owner; the CLI config is the invoking operator's own file.
 func writeFileAtomic(path string, data []byte) error {
+	if err := danglingSymlink(path); err != nil {
+		return err
+	}
 	mode := os.FileMode(0o600)
 	target := path
 	if fi, err := os.Stat(path); err == nil {

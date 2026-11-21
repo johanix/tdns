@@ -104,10 +104,15 @@ func InitApiClients(c *CliConf) error {
 		return fmt.Errorf("InitApiClients: nil CliConf")
 	}
 
+	// An instance entry named like another client is left out: building it
+	// would replace that client (see clientEntries). The wiring has already
+	// warned about it, and refused it its command tree.
+	servers := clientEntries(c.ApiServers, builtinRoles())
+
 	if tdns.Globals.Debug {
 		fmt.Printf("InitApiClients: setting up API clients for:")
 	}
-	for _, val := range c.ApiServers {
+	for _, val := range servers {
 		rootCA := val.RootCA
 		if rootCA == "" {
 			rootCA = "insecure" // default: skip TLS verification
@@ -135,7 +140,12 @@ func InitApiClients(c *CliConf) error {
 		tdns.Globals.Api = authClient
 	}
 
-	apiConfig = c
+	// The config lookups by client name (config-file:, the daemon command)
+	// must find the entry whose client was built, not a left-out instance
+	// that happens to come first.
+	cc := *c
+	cc.ApiServers = servers
+	apiConfig = &cc
 
 	numtsigs, _ := tdns.ParseTsigKeys(&c.Keys)
 	if tdns.Globals.Debug {
