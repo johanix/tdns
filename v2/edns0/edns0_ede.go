@@ -132,6 +132,13 @@ const (
 	// holds the private half cannot bootstrap it back. Terminal: the child
 	// bootstraps a new key, or the parent's operator clears the tombstone.
 	EDESig0KeyRetired
+
+	// A re-bootstrap of a key whose verification failed, refused because the
+	// last verification of it ended less than the parent's cooldown ago
+	// (#1172). It used to get EDESig0KeyValidationFailed, whose text asks for
+	// the re-bootstrap it was refusing. Not terminal: the same re-bootstrap is
+	// accepted once the cooldown ends, and the EXTRA-TEXT says when.
+	EDESig0ReBootstrapTooSoon
 )
 
 // NOTE for anyone adding codes above: append at the END of the const block.
@@ -183,10 +190,18 @@ var EDECodeToString = map[uint16]string{
 	EDEDelegationIncoherent:             "the resulting delegation is not what the child's nameservers serve",
 	EDEDelegationUnverifiable:           "the parent could not verify the delegation against the child's nameservers; try again later",
 	EDESig0KeyRetired:                   "SIG(0) key was deleted by the child's own trusted UPDATE and will not be accepted again; bootstrap a new key",
+	EDESig0ReBootstrapTooSoon:           "SIG(0) key validation failed and the last verification ended too recently; re-bootstrap again after the parent's cooldown",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response
 func AttachEDEToResponse(msg *dns.Msg, edeCode uint16) {
+	AttachEDEWithExtraText(msg, edeCode, "")
+}
+
+// AttachEDEWithExtraText is AttachEDEToResponse with an EXTRA-TEXT of the
+// caller's: one that says more than the code's standard text, such as how long
+// to wait. An empty extraText gives the standard text.
+func AttachEDEWithExtraText(msg *dns.Msg, edeCode uint16, extraText string) {
 	opt := msg.IsEdns0()
 	if opt == nil {
 		msg.SetEdns0(4096, true)
@@ -195,8 +210,9 @@ func AttachEDEToResponse(msg *dns.Msg, edeCode uint16) {
 
 	ede := new(dns.EDNS0_EDE)
 	ede.InfoCode = edeCode
-	// ede.ExtraText = EDECodeToMsg[edeCode]
-	if s, ok := EDECodeToString[edeCode]; ok {
+	if extraText != "" {
+		ede.ExtraText = extraText
+	} else if s, ok := EDECodeToString[edeCode]; ok {
 		ede.ExtraText = s
 	} else if s, ok := dns.ExtendedErrorCodeToString[edeCode]; ok {
 		ede.ExtraText = s

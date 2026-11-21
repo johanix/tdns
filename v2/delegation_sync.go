@@ -1065,7 +1065,9 @@ var errBootstrapValidationFailed = errors.New("the parent's validation of the SI
 //     operator, not as an error.
 //   - a failed validation (EDE KeyValidationFailed): errBootstrapValidationFailed.
 //     Final now; the setup arm re-bootstraps later, when what the parent could
-//     not find may have appeared.
+//     not find may have appeared. A re-bootstrap the parent refused for its
+//     cooldown (EDE ReBootstrapTooSoon, #1172) is the same outcome, with the
+//     parent's word on when it will take the next one.
 //   - a retired key (EDE Sig0KeyRetired): ErrSig0KeyTombstoned. A trusted
 //     UPDATE from the zone deleted this key at the parent, which will not
 //     take it again. Final; only a new key can bootstrap.
@@ -1093,6 +1095,13 @@ func bootstrapOutcome(ur UpdateResult, err error) error {
 				return fmt.Errorf("%w (EDE %d)", errBootstrapManual, ur.EDECode)
 			case edns0.EDESig0KeyValidationFailed:
 				return fmt.Errorf("%w (EDE %d %q)", errBootstrapValidationFailed, ur.EDECode, ur.EDEMessage)
+			case edns0.EDESig0ReBootstrapTooSoon:
+				// The key's validation failed, and this re-bootstrap came
+				// within the parent's cooldown. The same outcome as a failed
+				// validation: re-bootstrap later, on a schedule that starts
+				// above the cooldown. The parent's text says when.
+				return fmt.Errorf("%w: the parent refused the re-bootstrap until its cooldown ends (EDE %d %q)",
+					errBootstrapValidationFailed, ur.EDECode, ur.EDEMessage)
 			case edns0.EDESig0KeyRetired:
 				return fmt.Errorf("%w (EDE %d %q); make a new SIG(0) key", ErrSig0KeyTombstoned, ur.EDECode, ur.EDEMessage)
 			}

@@ -1497,6 +1497,10 @@ type Sig0UpdateSigner struct {
 	Sig       *dns.SIG
 	Sig0Key   *Sig0Key // a key that matches the signer name and keyid
 	Validated bool     // true if this key validated the update
+	// ReBootstrapTooSoon is how long is left of the parent's re-bootstrap
+	// cooldown when this signer's update was a re-bootstrap refused for it
+	// alone (reBootstrapDecision); zero otherwise.
+	ReBootstrapTooSoon time.Duration
 }
 
 // The UpdateStatus is used to track the evolving status of
@@ -1525,10 +1529,13 @@ type UpdateStatus struct {
 	// child operator can diagnose without parent-side log access.
 	// Zero means "no specific reason recorded."
 	RejectionEDE uint16
-	Msg          string
-	Error        bool
-	ErrorMsg     string
-	Status       bool
+	// RejectionEDEText replaces the code's standard EXTRA-TEXT when it says
+	// more, such as how long to wait. Empty gives the standard text.
+	RejectionEDEText string
+	Msg              string
+	Error            bool
+	ErrorMsg         string
+	Status           bool
 
 	// verifications holds the completion channel of every child-key
 	// verification this update's validation started (see
