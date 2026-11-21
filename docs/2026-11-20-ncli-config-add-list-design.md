@@ -175,6 +175,28 @@ the same list. `TestCollidingInstanceGetsNoClient`.
 - A missing tdns-ncli config now says how to create it instead of a bare open
   error, with `--config` in the advice when one was given.
 
+## CodeRabbit round 2 (2026-11-21)
+
+- **Checked before written.** The edited config is loaded with the edit laid
+  over the real file before anything is written, for a real add as for
+  `--dry-run`. A failing add is refused untouched ("Nothing was written");
+  checking only after the write meant undoing it, and the undo cannot rejoin a
+  `--file` that was a hard link to the file the CLI reads. The check after the
+  write stays, with its undo.
+- **Ctrl-C ends the wait for another add's lock** (`LOCK_NB` polled against
+  the command's context), and a cancelled add edits nothing.
+- **Clients follow the wiring.** `clientEntries` asks `checkInstanceEntries`,
+  so the entry that owns a duplicated instance name is the one the wiring
+  wired, not the first in the file.
+- **Only a role-less row is the canonical entry.** A `tdns-auth` row with a
+  `role:` is ignored by the CLI, and an add that would become the canonical
+  entry now says so instead of filing the daemon as an extra instance.
+- The same daemon config reached through a symlink is "already known"; a
+  service.name or file name naming two roles asks for `--role`; an IPv6 zone
+  in a listen address is escaped in the URL; printed advice keeps `--config`;
+  a list written with bare `-` lines gets new items at its indentation; a
+  value with a line break is written double-quoted.
+
 ## Not done here
 
 - **Agent instances** (PR 2) and **imr instances** (PR 3): `knownInstanceRoles`

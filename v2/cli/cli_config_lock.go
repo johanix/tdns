@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"path/filepath"
 	"sort"
 )
@@ -49,7 +50,7 @@ func resolvedPath(p string) string {
 // once and all in one order, so two adds that need the same two locks cannot
 // each hold one and wait for the other. It returns the function that releases
 // them all.
-func lockCliConfigs(paths ...string) (func(), error) {
+func lockCliConfigs(ctx context.Context, paths ...string) (func(), error) {
 	byLock := map[string]string{}
 	for _, p := range paths {
 		byLock[cliConfigLockPath(p)] = p
@@ -67,7 +68,7 @@ func lockCliConfigs(paths ...string) (func(), error) {
 		}
 	}
 	for _, lp := range order {
-		u, err := lockCliConfig(byLock[lp])
+		u, err := lockCliConfig(ctx, byLock[lp])
 		if err != nil {
 			release()
 			return nil, err
