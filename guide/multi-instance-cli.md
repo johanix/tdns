@@ -71,7 +71,8 @@ For each file it:
 - works out which daemon it is for: `service.name` (`TDNS-AUTH`, `TDNS-AGENT`),
   or, for `tdns-imr`, an `imrengine:` block with no `service:` block, or
   failing both the file name. If it cannot tell it asks for `--role
-  auth|agent|imr` rather than guessing. A `tdns-mp` daemon is refused;
+  auth|agent|imr` rather than guessing. A `tdns-mp` daemon is refused
+  (`service.name` decides over the file name here too);
 - names the entry. The first daemon of a type is the canonical entry
   (`tdns-auth`, `tdns-agent`, `tdns-imr`), reached as `auth`, `agent`, `imr`.
   Each further one becomes an instance (`role:` set), named after its file:
@@ -84,16 +85,18 @@ It creates `/etc/tdns/tdns-ncli.yaml` (mode 0600, it holds API keys) if it does
 not exist, so the whole file can be built from the daemons' own configs. If it
 does exist, the new entry is spliced into the existing `apiservers:` list in
 the style of the entries already there; comments and everything else in the
-file are left alone. Adding a daemon that is already there changes nothing,
-and `--dry-run` shows the entry without writing it. The API key is never
-printed.
+file are left alone. Adding a daemon that is already there changes nothing;
+if its API key or `usetls` has changed since, the add says which, and the entry
+is yours to edit. `--dry-run` shows the entry without writing it. The API key
+is never printed.
 
 It checks its own work: after writing, the file is loaded the way the CLI loads
 it, and if the list is not exactly the old one plus the new entry the change is
 undone. That happens when `apiservers:` is also defined in an `include:` file or
 in `cli.localconfig`, which replaces the list in the main file; `--file` names
-the file that holds the list. An `apiservers:` written inline (`[ ... ]`) is
-not edited; the error prints the entry to add by hand.
+the file that holds the list. `--dry-run` makes the same check, so it fails
+where the add would. An `apiservers:` written inline (`[ ... ]`) is not edited;
+the error prints the entry to add by hand. Two adds at once take turns.
 
 A second agent or imr is refused until tdns-ncli has a command tree for it:
 today only `auth` has one.
@@ -114,7 +117,7 @@ the API it talks to, the daemon config it refers to (the compiled-in default,
 marked `(default)`, for a canonical entry with no `config-file:`), and whether
 `tdns-ncli` can use it. An entry that is ignored says why, with the same
 reasons the start-up warnings give. `--check` pings every API and exits
-non-zero if any does not answer.
+non-zero if any does not answer or could not be checked (`rootca: tlsa`).
 
 (This is the CLI's own config. `tdns-ncli auth config check` is the other
 `config`: it checks a *daemon's* config.)

@@ -115,6 +115,10 @@ func TestDetectDaemonRole(t *testing.T) {
 		// "agent" to be read as a tdns agent.
 		{name: "hyphenated mp service.name refused", service: "TDNS-MP-AGENT", hasService: true, path: "/etc/tdns/x.yaml", wantErrIn: "tdns-mp"},
 		{name: "hyphenated mp file name refused", path: "/etc/tdns/tdns-mp-agent.yaml", wantErrIn: "tdns-mp"},
+		// The file name only decides when service.name does not: a tdns-auth
+		// whose file happens to carry "mp" is a tdns-auth, with a warning.
+		{name: "service.name wins over an mp file name", service: "TDNS-AUTH", hasService: true, path: "/etc/tdns/west-mp-auth.yaml", want: "auth", wantWarn: true},
+		{name: "an mp service.name is refused whatever the file", service: "TDNS-MPSIGNER", hasService: true, path: "/etc/tdns/tdns-auth.yaml", wantErrIn: "tdns-mp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, warn, err := detectDaemonRole(tc.service, tc.hasService, tc.hasImr, tc.path)
@@ -284,6 +288,9 @@ func TestYamlScalar(t *testing.T) {
 		"trailing:":                     "'trailing:'",
 		"true":                          "'true'",
 		"":                              "''",
+		"001234":                        "'001234'", // plain, an octal integer
+		"1e3":                           "'1e3'",    // a float
+		".inf":                          "'.inf'",
 	} {
 		if got := yamlScalar(in); got != want {
 			t.Errorf("yamlScalar(%q) = %s, want %s", in, got, want)
@@ -293,6 +300,74 @@ func TestYamlScalar(t *testing.T) {
 		if err := yaml.Unmarshal([]byte("v: "+yamlScalar(in)+"\n"), &back); err != nil || back.V != in {
 			t.Errorf("yamlScalar(%q) does not round-trip: %q, %v", in, back.V, err)
 		}
+	}
+}
+
+// An API key YAML would read as something other than a string -- a number,
+// mostly -- must come back through the CLI's own reader exactly as written,
+// or the add would undo itself.
+func TestNumericLookingKeysReadBackAsWritten(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "tdns-ncli.yaml")
+	for _, key := range []string{"001234", "0x1F", "0o17", "1e3", "12", "1.50", "1_000", ".inf", "~", "null"} {
+		e := newEntry()
+		e.ApiKey = key
+		writeFile(t, p, "apiservers:\n"+renderEntry(e, itemLayout{indent: 3, gap: 1, valueCol: defValueCol}))
+		got, err := ReadApiServers(p)
+		if err != nil || len(got) != 1 || got[0].ApiKey != key {
+			t.Errorf("key %q read back as %+v, %v", key, got, err)
+		}
+	}
+}
+
+// A cli.localconfig that is there but cannot be checked stops the CLI's own
+// load, so `config list` and `config add` must not quietly read the main list
+// instead. One that is simply absent is still fine.
+func TestReadApiServersReportsAnUnreadableLocalConfig(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root enters every directory")
+	}
+	dir := t.TempDir()
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(locked, "local.yaml"), "x: 1\n")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o700) })
+
+	list := "apiservers:\n" + renderEntry(newEntry(), itemLayout{indent: 3, gap: 1, valueCol: defValueCol})
+	cfg := filepath.Join(dir, "tdns-ncli.yaml")
+	writeFile(t, cfg, "cli:\n   localconfig: "+filepath.Join(locked, "local.yaml")+"\n"+list)
+	got, err := ReadApiServers(cfg)
+	if err == nil || !strings.Contains(err.Error(), "cli.localconfig") {
+		t.Errorf("err = %v, want the cli.localconfig error", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("the main list was dropped with the error: %+v", got)
+	}
+
+	writeFile(t, cfg, "cli:\n   localconfig: "+filepath.Join(dir, "absent.yaml")+"\n"+list)
+	if got, err := ReadApiServers(cfg); err != nil || len(got) != 1 {
+		t.Errorf("absent local config: %+v, %v", got, err)
+	}
+}
+
+// The CLI reads its config with viper's AutomaticEnv, so a setting can come
+// from the environment; ReadApiServers must see the same list.
+func TestReadApiServersTakesSettingsFromTheEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	e := newEntry()
+	e.Name = "from-env"
+	local := filepath.Join(dir, "local.yaml")
+	writeFile(t, local, "apiservers:\n"+renderEntry(e, itemLayout{indent: 3, gap: 1, valueCol: defValueCol}))
+	cfg := filepath.Join(dir, "tdns-ncli.yaml")
+	writeFile(t, cfg, "apiservers:\n"+renderEntry(newEntry(), itemLayout{indent: 3, gap: 1, valueCol: defValueCol}))
+	t.Setenv("CLI.LOCALCONFIG", local)
+	got, err := ReadApiServers(cfg)
+	if err != nil || len(got) != 1 || got[0].Name != "from-env" {
+		t.Errorf("got %+v, %v; want the list from the local config the environment names", got, err)
 	}
 }
 
@@ -349,6 +424,15 @@ func TestReadDaemonApi(t *testing.T) {
 	writeFile(t, p3, "service:\n   name: TDNS-AUTH\ninclude:\n   - api.yaml\n")
 	if got, err = ReadDaemonApi(p3, ""); err != nil || got.Addresses[0] != "127.0.0.1:9000" {
 		t.Errorf("include: %+v, %v", got, err)
+	}
+
+	// However deep the include: chain, as in the daemon: main -> site -> api.
+	writeFile(t, filepath.Join(dir, "deep-api.yaml"), "apiserver:\n   addresses: [ 127.0.0.1:9002 ]\n   apikey: ik6\n")
+	writeFile(t, filepath.Join(dir, "site.yaml"), "include:\n   - deep-api.yaml\n")
+	p6 := filepath.Join(dir, "tdns-auth6.yaml")
+	writeFile(t, p6, "service:\n   name: TDNS-AUTH\ninclude:\n   - site.yaml\n")
+	if got, err = ReadDaemonApi(p6, ""); err != nil || len(got.Addresses) == 0 || got.Addresses[0] != "127.0.0.1:9002" || len(got.Warnings) != 0 {
+		t.Errorf("nested include: %+v, %v", got, err)
 	}
 
 	// An include that fails to load is named in the error when the key it
@@ -634,7 +718,24 @@ func TestAddUndoesWhenAnOverlayHidesTheEntry(t *testing.T) {
 	writeFile(t, env.cli, mainCfg)
 	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
 
-	_, err := env.add(t, d, nil)
+	// --dry-run sees it coming: it loads the config with the edit in place,
+	// without writing it.
+	_, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true })
+	if err == nil || !strings.Contains(err.Error(), "would not load") || !strings.Contains(err.Error(), "Nothing was written") {
+		t.Fatalf("dry run: err = %v", err)
+	}
+	if b, _ := os.ReadFile(env.cli); string(b) != mainCfg {
+		t.Errorf("the dry run changed the main file:\n%s", b)
+	}
+	// And accepts the file that holds the winning list.
+	if res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true; o.TargetFile = local }); err != nil || res.Wrote {
+		t.Fatalf("dry run with --file: %+v, %v", res, err)
+	}
+	if b, _ := os.ReadFile(local); strings.Contains(string(b), "auth2") {
+		t.Error("the dry run wrote the local file")
+	}
+
+	_, err = env.add(t, d, nil)
 	if err == nil || !strings.Contains(err.Error(), "--file") || !strings.Contains(err.Error(), "undone") {
 		t.Fatalf("err = %v", err)
 	}
@@ -668,6 +769,55 @@ func TestAddFollowsASymlink(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(real); !strings.Contains(string(b), "auth2") {
 		t.Error("the file behind the link was not updated")
+	}
+}
+
+// A link to a file not made yet reads as "no config", and writing it by
+// renaming over it would replace the link. Refused, dry run included.
+func TestAddRefusesADanglingSymlink(t *testing.T) {
+	env := newAddEnv(t)
+	if err := os.Symlink(filepath.Join(env.dir, "not-yet.yaml"), env.cli); err != nil {
+		t.Skip("no symlinks here")
+	}
+	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	for _, dry := range []bool{true, false} {
+		_, err := env.add(t, d, func(o *AddOptions) { o.DryRun = dry })
+		if err == nil || !strings.Contains(err.Error(), "symbolic link") {
+			t.Errorf("dry run %v: err = %v", dry, err)
+		}
+	}
+	if fi, err := os.Lstat(env.cli); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink was replaced")
+	}
+}
+
+// The same daemon, changed since it was added: a rotated key, or usetls
+// turned off on the same port. "Already known" would leave a dead entry.
+func TestAddSaysWhenTheDaemonChanged(t *testing.T) {
+	env := newAddEnv(t)
+	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	if _, err := env.add(t, d, nil); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(env.cli)
+
+	writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "rotated-key", ""))
+	_, err := env.add(t, d, nil)
+	if err == nil || !strings.Contains(err.Error(), "apikey") || !strings.Contains(err.Error(), "by hand") {
+		t.Errorf("rotated key: err = %v", err)
+	}
+	if err != nil && (strings.Contains(err.Error(), "rotated-key") || strings.Contains(err.Error(), "key-tdns-auth.yaml")) {
+		t.Errorf("a key is in the error text: %v", err)
+	}
+
+	writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "key-tdns-auth.yaml", "   usetls: false\n"))
+	_, err = env.add(t, d, nil)
+	if err == nil || !strings.Contains(err.Error(), "scheme") || strings.Contains(err.Error(), "apikey") {
+		t.Errorf("usetls off: err = %v", err)
+	}
+
+	if after, _ := os.ReadFile(env.cli); string(after) != string(before) {
+		t.Errorf("the refused adds changed the file:\n%s", after)
 	}
 }
 
@@ -714,6 +864,39 @@ func TestInstanceNameMayNotShareAnApiClient(t *testing.T) {
 				t.Error("the colliding instance was wired anyway")
 			}
 		})
+	}
+}
+
+// Refusing the colliding instance its tree is not enough: InitApiClients must
+// not build its client either, or the client replaces the canonical one and
+// `tdns-ncli auth ...` reaches the instance's daemon.
+func TestCollidingInstanceGetsNoClient(t *testing.T) {
+	withCleanRoleRegistry(t)
+	savedClients, savedApi, savedConf := tdns.Globals.ApiClients, tdns.Globals.Api, apiConfig
+	t.Cleanup(func() { tdns.Globals.ApiClients, tdns.Globals.Api, apiConfig = savedClients, savedApi, savedConf })
+	tdns.Globals.ApiClients = map[string]*tdns.ApiClient{}
+
+	c := &CliConf{ApiServers: []ApiDetails{
+		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1", ConfigFile: "/etc/tdns/tdns-auth.yaml"},
+		{Name: "tdns-auth", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1", ConfigFile: "/etc/tdns/other.yaml"},
+		{Name: "tdns-imr", Role: "auth", BaseURL: "https://127.0.0.1:8991/api/v1"},
+		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8992/api/v1"},
+		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8993/api/v1"},
+	}}
+	if err := InitApiClients(c); err != nil {
+		t.Fatal(err)
+	}
+	if ac := tdns.Globals.ApiClients["tdns-auth"]; ac == nil || ac.BaseUrl != "https://127.0.0.1:8989/api/v1" {
+		t.Errorf("tdns-auth client: %+v", ac)
+	}
+	if ac, ok := tdns.Globals.ApiClients["tdns-imr"]; ok {
+		t.Errorf("an auth instance named tdns-imr got the imr client: %+v", ac)
+	}
+	if ac := tdns.Globals.ApiClients["auth2"]; ac == nil || ac.BaseUrl != "https://127.0.0.1:8992/api/v1" {
+		t.Errorf("auth2 client (the first auth2 wins, as in the wiring): %+v", ac)
+	}
+	if d := getApiDetailsByClientKey("tdns-auth"); d == nil || d.ConfigFile != "/etc/tdns/tdns-auth.yaml" {
+		t.Errorf("config lookup for tdns-auth: %+v", d)
 	}
 }
 
@@ -771,32 +954,47 @@ func TestBuildListRows(t *testing.T) {
 }
 
 func TestCheckEntriesPingsEachAPI(t *testing.T) {
-	var gotKey string
+	// The handler hands over what it saw on a channel: the HTTP answer is no
+	// synchronisation edge between the handler's goroutine and this one.
+	gotKey := make(chan string, 8)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/ping" {
 			http.NotFound(w, r)
 			return
 		}
-		gotKey = r.Header.Get("X-API-Key")
+		gotKey <- r.Header.Get("X-API-Key")
 		json.NewEncoder(w).Encode(tdns.PingResponse{
 			Msg: "pong", Version: "v-test", BootTime: time.Now().Add(-90 * time.Minute), Pings: 1, Pongs: 1,
 		})
 	}))
 	defer srv.Close()
 
+	// A directory passes a stat but is no CA file; tdns.NewClient would end
+	// the process on it. So would a file with no certificate in it.
+	caDir := t.TempDir()
+	notPEM := filepath.Join(caDir, "not.pem")
+	writeFile(t, notPEM, "not a certificate\n")
+
 	entries := []ApiDetails{
 		{Name: "up", BaseURL: srv.URL + "/api/v1", ApiKey: "sekret", AuthMethod: "X-API-Key"},
 		{Name: "down", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key"},
 		{Name: "badca", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "/nonexistent/ca.pem"},
 		{Name: "tlsa", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "tlsa"},
+		{Name: "cadir", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: caDir},
+		{Name: "notpem", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: notPEM},
 	}
 	res := CheckEntries(entries, 5*time.Second)
 
 	if !strings.HasPrefix(res[0], "ok") || !strings.Contains(res[0], "v-test") || !strings.Contains(res[0], "up 1h30m") {
 		t.Errorf("up: %q", res[0])
 	}
-	if gotKey != "sekret" {
-		t.Errorf("server saw X-API-Key %q", gotKey)
+	select {
+	case k := <-gotKey:
+		if k != "sekret" {
+			t.Errorf("server saw X-API-Key %q", k)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("the server saw no ping")
 	}
 	if !strings.HasPrefix(res[1], "FAIL") {
 		t.Errorf("down: %q", res[1])
@@ -806,6 +1004,28 @@ func TestCheckEntriesPingsEachAPI(t *testing.T) {
 	}
 	if !strings.HasPrefix(res[3], "not checked") {
 		t.Errorf("tlsa: %q", res[3])
+	}
+	if !strings.HasPrefix(res[4], "FAIL: rootca") {
+		t.Errorf("cadir: %q", res[4])
+	}
+	if !strings.HasPrefix(res[5], "FAIL: rootca") || !strings.Contains(res[5], "no PEM certificate") {
+		t.Errorf("notpem: %q", res[5])
+	}
+}
+
+func TestConfigAddHint(t *testing.T) {
+	saved := DefaultCliConfigFile
+	t.Cleanup(func() { DefaultCliConfigFile = saved })
+	DefaultCliConfigFile = "/etc/tdns/tdns-ncli.yaml"
+	for cfg, want := range map[string]string{
+		"":                         "tdns-ncli config add",
+		"/etc/tdns/tdns-ncli.yaml": "tdns-ncli config add",
+		"/tmp/lab.yaml":            "tdns-ncli --config /tmp/lab.yaml config add",
+		"/tmp/my lab.yaml":         "tdns-ncli --config '/tmp/my lab.yaml' config add",
+	} {
+		if got := ConfigAddHint(cfg); got != want {
+			t.Errorf("ConfigAddHint(%q) = %q, want %q", cfg, got, want)
+		}
 	}
 }
 

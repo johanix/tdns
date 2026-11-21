@@ -38,12 +38,12 @@ type DaemonApi struct {
 // ReadDaemonApi reads the apiserver: block, and works out which kind of daemon
 // the config belongs to, from a daemon config file.
 //
-// It reads the file the way the daemon's own loader does -- viper plus
-// include: expansion -- so an apiserver: block that lives in an included file
-// is found. If an include cannot be processed the main file alone is used and
-// a warning says so: the daemon would refuse to start with that include, but
-// that is the daemon's complaint to make, and the apiserver: block is very
-// rarely in an include.
+// It reads the file with the daemon's own loader (tdns.LoadRawConfigMap), so
+// an apiserver: block that lives in an included file is found, however deep
+// the include: chain that brings it in. If the includes cannot be processed
+// the main file alone is used and a warning says so: the daemon would refuse
+// to start with that include, but that is the daemon's complaint to make, and
+// the apiserver: block is very rarely in an include.
 //
 // roleOverride, when non-empty, replaces the detection (and skips the check
 // that refuses tdns-mp daemons).
@@ -65,16 +65,17 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 		return nil, fmt.Errorf("%w (%s)", err, strings.Join(out.Warnings, "; "))
 	}
 
+	// The main file alone first, so a main file that does not parse is
+	// reported as itself and not as an include problem.
 	v, err := readDaemonViper(abs)
 	if err != nil {
 		return nil, err
 	}
-	if err := tdns.MergeViperIncludes(v, abs); err != nil {
+	if full, err := readDaemonConfig(abs); err != nil {
 		out.Warnings = append(out.Warnings, fmt.Sprintf(
 			"include: processing failed (%v); read the apiserver: block from the main file only", err))
-		if v, err = readDaemonViper(abs); err != nil {
-			return fail(err)
-		}
+	} else {
+		v = full
 	}
 
 	out.Addresses = v.GetStringSlice("apiserver.addresses")
@@ -115,6 +116,22 @@ func readDaemonViper(abs string) (*viper.Viper, error) {
 	return v, nil
 }
 
+// readDaemonConfig loads a daemon config the way the daemon does: the main
+// file and its include: files, followed to any depth (MergeViperIncludes, the
+// CLI's own shim, follows one level only, and says it is not for server
+// configs). The result goes into a viper for its case-insensitive lookups.
+func readDaemonConfig(abs string) (*viper.Viper, error) {
+	m, _, err := tdns.LoadRawConfigMap(abs)
+	if err != nil {
+		return nil, err
+	}
+	v := viper.New()
+	if err := v.MergeConfigMap(m); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
 // detectDaemonRole decides which daemon a config is for.
 //
 // Nothing in a daemon config states its type outright (the binary decides),
@@ -134,35 +151,56 @@ func readDaemonViper(abs string) (*viper.Viper, error) {
 // tdns-mp-agent.yaml into "tdns", "mp", "agent", which would otherwise read as
 // an agent.
 //
+// The tdns-mp check follows the same order as the evidence. A tdns-mp
+// service.name is refused whatever the file is called, but a file name only
+// counts when it is what decides: service.name TDNS-AUTH in west-mp-auth.yaml
+// is tdns-auth (with a warning), not a tdns-mp daemon.
+//
 // When the evidence does not settle it the answer is an error asking for
 // --role, never a guess: a daemon filed under the wrong role gets the wrong
 // command tree pointed at it.
 func detectDaemonRole(serviceName string, hasService, hasImrEngine bool, path string) (role, warning string, err error) {
 	base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-
-	for _, w := range append(splitWords(serviceName), splitWords(base)...) {
-		switch strings.TrimRight(w, "0123456789") {
-		case "mp", "mpagent", "mpsigner", "mpcombiner", "mpauditor":
-			return "", "", fmt.Errorf("%s looks like a tdns-mp daemon (%q); tdns-ncli drives the tdns daemons (auth, agent, imr) only -- use --role to override", path, w)
-		}
+	refuse := func(w string) (string, string, error) {
+		return "", "", fmt.Errorf("%s looks like a tdns-mp daemon (%q); tdns-ncli drives the tdns daemons (auth, agent, imr) only -- use --role to override", path, w)
 	}
 
+	if w := mpWord(serviceName); w != "" {
+		return refuse(w)
+	}
 	fromName := roleFromWords(serviceName)
 	fromFile := roleFromWords(base)
+	fileMp := mpWord(base)
 	switch {
 	case fromName != "":
-		if fromFile != "" && fromFile != fromName {
+		switch {
+		case fileMp != "":
+			warning = fmt.Sprintf("service.name says %s but the file name suggests a tdns-mp daemon (%q); using %s", fromName, fileMp, fromName)
+		case fromFile != "" && fromFile != fromName:
 			warning = fmt.Sprintf("service.name says %s but the file name suggests %s; using %s", fromName, fromFile, fromName)
 		}
 		return fromName, warning, nil
 	case !hasService && hasImrEngine:
 		return "imr", "", nil
+	case fileMp != "":
+		return refuse(fileMp)
 	case fromFile != "":
 		return fromFile, "", nil
 	}
 	return "", "", fmt.Errorf(
 		"cannot tell which daemon %s is for (service.name %q, file name %q); use --role auth|agent|imr",
 		path, serviceName, filepath.Base(path))
+}
+
+// mpWord returns the word of s that names a tdns-mp daemon, or "".
+func mpWord(s string) string {
+	for _, w := range splitWords(s) {
+		switch strings.TrimRight(w, "0123456789") {
+		case "mp", "mpagent", "mpsigner", "mpcombiner", "mpauditor":
+			return w
+		}
+	}
+	return ""
 }
 
 // splitWords lower-cases s and splits it into runs of letters and digits.
