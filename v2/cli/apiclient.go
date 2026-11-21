@@ -9,6 +9,8 @@ package cli
 import (
 	"fmt"
 	"log"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 
@@ -220,6 +222,20 @@ func GetApiClient(role string, dieOnError bool) (*tdns.ApiClient, error) {
 	return client, nil
 }
 
+// loopbackURL says whether rawURL's host is localhost or a loopback address.
+func loopbackURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	h := u.Hostname()
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
 // newApiClientFor builds the client for one apiservers entry: how it verifies
 // the daemon (pins, roots, or, said out loud, nothing) and how it
 // authenticates itself (key, certificate, or nothing on the local socket).
@@ -252,8 +268,16 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 		if o.RootCA == "insecure" && len(o.Pins) == 0 && RequireServerVerification {
 			warn = fmt.Sprintf("%s: the daemon's TLS certificate is not verified (rootca: insecure)", e.Name)
 		}
-	} else if o.RootCA == "" {
-		o.RootCA = "insecure" // plain http or the local socket: there is no certificate
+	} else {
+		if o.RootCA == "" {
+			o.RootCA = "insecure" // plain http or the local socket: there is no certificate
+		}
+		// Plain http verifies nothing and sends the key in clear. On
+		// loopback neither leaves the host; elsewhere, say so.
+		if RequireServerVerification && strings.HasPrefix(strings.ToLower(e.BaseURL), "http://") && !loopbackURL(e.BaseURL) {
+			warn = fmt.Sprintf("%s: plain http to %s: the daemon is not verified, and an API key goes in clear; use https with pins: (tdns-ncli config add writes them)",
+				e.Name, e.BaseURL)
+		}
 	}
 	switch o.RootCA {
 	case "", "insecure", "tlsa", "system":

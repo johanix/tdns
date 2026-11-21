@@ -240,7 +240,10 @@ func TestNewApiClientForVerification(t *testing.T) {
 		{name: "pin without pins", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin"}, wantErr: "no pins"},
 		{name: "pkix, system roots", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pkix"}},
 		{name: "unknown tlsauth", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "dane"}, wantErr: "unknown tlsauth"},
-		{name: "plain http needs nothing", e: ApiDetails{Name: "a", BaseURL: "http://127.0.0.1:1/api/v1"}},
+		{name: "plain http on loopback", e: ApiDetails{Name: "a", BaseURL: "http://127.0.0.1:1/api/v1"}},
+		{name: "plain http on localhost", e: ApiDetails{Name: "a", BaseURL: "http://localhost:1/api/v1"}},
+		{name: "plain http on ::1", e: ApiDetails{Name: "a", BaseURL: "http://[::1]:1/api/v1"}},
+		{name: "plain http elsewhere warns", e: ApiDetails{Name: "a", BaseURL: "http://192.0.2.1:1/api/v1"}, wantWarn: true},
 		{name: "the socket needs nothing", e: ApiDetails{Name: "a", BaseURL: "unix:///var/run/tdns/x.sock", AuthMethod: "none"}},
 		{name: "certificate without one", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin", Pins: []string{pinOf("d")}, AuthMethod: "certificate"}, wantErr: "client init"},
 	} {
@@ -265,6 +268,9 @@ func TestNewApiClientForVerification(t *testing.T) {
 	RequireServerVerification = false
 	if _, warn, err := newApiClientFor(ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1"}, CliClientConf{}); err != nil || warn != "" {
 		t.Errorf("tdns-cli default: %q %v, want no error and no warning", warn, err)
+	}
+	if _, warn, err := newApiClientFor(ApiDetails{Name: "a", BaseURL: "http://192.0.2.1:1/api/v1"}, CliClientConf{}); err != nil || warn != "" {
+		t.Errorf("tdns-cli plain http: %q %v, want no error and no warning", warn, err)
 	}
 }
 

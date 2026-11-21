@@ -674,6 +674,12 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
 - **`config list` warns when two entries pin the same key**, with or without
   `--check`: a pin that cannot tell two daemons apart is the shared-key hazard
   again.
+- **Plain `http://` gets a warning from tdns-ncli**, not a refusal, unless
+  the host is loopback: it verifies nothing and sends the key in clear.
+  Refusing it, the way an https entry that verifies nothing is refused, would
+  break existing plain-http entries on upgrade; a warning tells the operator
+  without locking anyone out. (Added after the external review, which found http:// passed
+  silently.)
 
 **2026-11-20, a live run of steps 2 to 4** (tdns-imr and tdns-ncli built from
 the step 4 branch, on macOS, in a scratch directory, not as root). A resolver

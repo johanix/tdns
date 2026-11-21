@@ -352,8 +352,10 @@ The pin is the daemon's key: no CA and no name check, and a list so a new key
 can be added before the daemon changes to it. `tlsauth: pkix` with a `rootca:`
 (or none, for the system roots) is the alternative for a daemon with a real CA.
 An https entry that verifies nothing is refused unless it says
-`rootca: insecure`, and then tdns-ncli warns when it uses it. (tdns-cli keeps
-its old default of not checking.)
+`rootca: insecure`, and then tdns-ncli warns when it uses it. A plain `http://`
+entry verifies nothing and sends its key in clear, so tdns-ncli warns about
+that too, unless the host is loopback (`localhost`, `127.0.0.1`, `::1`). (tdns-cli
+keeps its old default of not checking.)
 
 **Your own certificate** is made once:
 
