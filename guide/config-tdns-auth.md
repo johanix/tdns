@@ -1453,3 +1453,41 @@ key signing through the drain window. An unknown value is a hard config error.
 For the rollover machinery these policies drive, see
 [Automatic DNSSEC Rollovers](key-rollover.md) and
 [Rollover Timing Equations](rollover-timing-equations.md).
+
+### The re-signer: `resignerengine:`
+
+The re-signer keeps signatures from ageing out. It looks at the zones it has to
+keep signed on a schedule, renews the signatures that are due, and replaces a
+zone's signatures when its keys change.
+
+| Key | Default | Range | Meaning |
+|-----|---------|-------|---------|
+| `interval` | `60` | `60`..`3600`, clamped | Seconds between looks; the least time between two of them. |
+| `workers` | `3` | `1`..`64` | How many zones are renewed at the same time. |
+
+The zones are handed to a pool of `workers` workers, and the re-signer goes back
+to its schedule without waiting for them. A zone is worked on by one worker at a
+time and is never handed to a second one while it is in flight.
+
+A zone that is slow keeps its worker and nothing else: a large zone, one signed
+with an expensive algorithm, or one whose lock a long refresh holds. With `N`
+workers, `N-1` slow zones at once leave one worker, and every other zone is
+still renewed on the re-signer's schedule. `N` slow zones at once use every
+worker, and the other zones wait, in order, until one of them finishes. Raise
+`workers` if that can happen to you. A signer with very many zones to renew at
+once, on a host with idle cores, may also want more workers to put those cores
+to work; measure before settling on a number.
+
+More workers are not free. They share one keystore handle, so they queue there,
+and the NOTIFYs of the zones they publish go out side by side. How much a
+larger pool gains depends on how much of a renewal is signing and how much is
+resolving keys, and that is deployment-specific; the default of `3` is a safe
+place to start, not a measured optimum.
+
+`workers` accepts `1` to `64`. `0`, or leaving it out, means `3`. A value above
+`64` is clamped to `64`, and a value below `0` is ignored (`3` is used), each
+with a warning in the log at startup. The log line `ResignerEngine starting`
+shows the number in use.
+
+Both keys are read when the daemon starts. A change to either needs a restart;
+`tdns-cli daemon reload` does not apply it.

@@ -152,6 +152,21 @@ authengine:
 resignerengine:
    interval:  300    # seconds between runs. Reasonable value is likely ~3600
                      # clamped to the range 60..3600
+   # workers:  3     # optional. How many zones are renewed at the same time.
+                     # Default 3. Accepted range 1..64: more than 64 is clamped
+                     # to 64, and a negative value is ignored (3), each with a
+                     # warning at startup. 0 or absent means 3.
+                     # A zone that is slow (large, signed with an expensive
+                     # algorithm, or held by a long refresh) keeps one worker
+                     # and nothing else. N workers tolerate N-1 slow zones with
+                     # every other zone still renewed on time; N slow zones at
+                     # once make the others wait until one finishes. More
+                     # workers queue on the one keystore handle and send their
+                     # NOTIFYs side by side, so what is gained depends on how
+                     # much of a renewal is signing and how much is resolving
+                     # keys.
+                     # Read when the daemon starts: a change needs a restart,
+                     # "tdns-cli daemon reload" does not apply it.
    # NOTE: resignerengine.keygen is NOT read by the code. Key generation is
    # always internal. Left here only to document that the keys are not
    # produced by an external generator.
