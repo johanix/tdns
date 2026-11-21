@@ -413,6 +413,12 @@ func init() {
 	legacy.Hidden = true
 	legacy.Short = "Deprecated location of \"agent zone parentsync\""
 	AgentCmd.AddCommand(legacy)
+	// add, delete, modify and list-dynamic, for the same reason: /zone serves
+	// them for every app type, and the agent's dynamiczones config decides
+	// which zone types it accepts. Without them here, adding a zone to a
+	// running agent took an apiservers entry with role auth aimed at the
+	// agent's API, which wired the whole auth tree against the agent.
+	AgentZoneCmd.AddCommand(newZoneDynamicCmds("agent")...)
 
 	// New addrr/delrr commands
 	// 20260415 johani: AgentZoneCmd.AddCommand(agentZoneAddRRCmd, agentZoneDelRRCmd)

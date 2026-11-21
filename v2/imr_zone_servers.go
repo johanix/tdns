@@ -229,6 +229,11 @@ func (imr *Imr) nsLookup(ctx context.Context, nsname, zone string) <-chan struct
 	if inTransportSignalLookup(ctx) {
 		lctx = withTransportSignalLookup(lctx)
 	}
+	// So are a target lookup's: they go to every server's default endpoint,
+	// never through a redirected one (withDefaultEndpoints).
+	if defaultEndpointsOnly(ctx) {
+		lctx = withDefaultEndpoints(lctx)
+	}
 	// An alias hop's lookup's address lookups are part of it too: a cached alias
 	// they apply is followed through the cache only (aliasWalkFor).
 	if aliasWalkFor(ctx).cacheOnly {

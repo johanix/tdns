@@ -194,11 +194,7 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 		hasErrors := false
 		var lines []string
 
-		// Traverse AuthServerMap to find servers with backoff issues
-		for item := range Conf.Internal.RRsetCache.AuthServerMap.IterBuffered() {
-			nsname := item.Key
-			server := item.Val
-
+		list := func(nsname string, server *cache.AuthServer) {
 			// Get snapshot of (address, transport) tuples in backoff
 			backoffs := server.SnapshotAddressBackoffs(now)
 			if len(backoffs) > 0 {
@@ -234,6 +230,17 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 					line := fmt.Sprintf("%s | %s | %s | retry in %s | %s | %s", nsname, k.HostPort(), core.TransportToString[k.Transport], formatDuration(timeUntilRetry), failures, errorMsg)
 					lines = append(lines, line)
 				}
+			}
+		}
+		// Traverse AuthServerMap to find servers with backoff issues
+		for item := range Conf.Internal.RRsetCache.AuthServerMap.IterBuffered() {
+			list(item.Key, item.Val)
+		}
+		// The redirect targets' own instances, where the backoff of an
+		// attempt a transport signal sent to a target is kept.
+		if imr := tdns.Globals.ImrEngine; imr != nil {
+			for _, server := range imr.RedirectTargetServers() {
+				list(server.Name+" (target)", server)
 			}
 		}
 
