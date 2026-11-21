@@ -5,6 +5,7 @@
  * (RFC 2181 §5.2). The applier used to give the new RR the update-policy TTL
  * and append it next to members that kept the TTL they were loaded with, so a
  * child's delta UPDATE left the delegation NS RRset with mixed TTLs (#767).
+ * The TTL the RRset gets is the largest of its own and the added RR's (#996).
  */
 package tdns
 
@@ -48,57 +49,94 @@ func assertRRsetTTL(t *testing.T, zd *ZoneData, owner string, rrtype uint16, wan
 
 // ddnsTTLZone: the occlusion fixture (delegation NS and DS at 3600) with an
 // update-policy TTL that differs from the loaded one, as in the report.
-func ddnsTTLZone(t *testing.T) (*ZoneData, *KeyDB) {
+func ddnsTTLZone(t *testing.T, policyTTL uint32) (*ZoneData, *KeyDB) {
 	t.Helper()
 	kdb := newTestKeyDB(t)
 	zd := updatableOcclusionZone(t, kdb)
-	zd.UpdatePolicy.Zone.TTL = 120
+	zd.UpdatePolicy.Zone.TTL = policyTTL
 	return zd, kdb
 }
 
-// A DDNS add to the delegation NS RRset re-TTLs the existing members to the
-// policy TTL: the parent decides how long child data is cached.
+// A DDNS add to the delegation NS RRset at a policy TTL below the RRset's
+// leaves both members at the RRset's TTL, the larger; one above it raises the
+// existing member to the policy TTL.
 func TestDDNSAddToDelegationNSUnifiesTTL(t *testing.T) {
-	zd, kdb := ddnsTTLZone(t)
-	applyRR(t, zd, kdb, VerbAddRR, "child.occl.example. 3600 IN NS ns2.child.occl.example.")
-	assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeNS, 120, 2)
+	for _, tc := range []struct {
+		policy, want uint32
+	}{{120, 3600}, {7200, 7200}} {
+		zd, kdb := ddnsTTLZone(t, tc.policy)
+		applyRR(t, zd, kdb, VerbAddRR, "child.occl.example. 3600 IN NS ns2.child.occl.example.")
+		assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeNS, tc.want, 2)
+	}
 }
 
 // The DS RRset gets the same treatment, and is still signed afterwards.
 func TestDDNSAddToDSUnifiesTTL(t *testing.T) {
-	zd, kdb := ddnsTTLZone(t)
-	applyRR(t, zd, kdb, VerbAddRR,
-		"child.occl.example. 3600 IN DS 54321 15 2 202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40")
-	assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeDS, 120, 2)
-	if n := sigCount(t, zd, "child.occl.example.", dns.TypeDS); n == 0 {
-		t.Error("the re-TTLed DS RRset is unsigned")
+	for _, tc := range []struct {
+		policy, want uint32
+	}{{120, 3600}, {7200, 7200}} {
+		zd, kdb := ddnsTTLZone(t, tc.policy)
+		applyRR(t, zd, kdb, VerbAddRR,
+			"child.occl.example. 3600 IN DS 54321 15 2 202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40")
+		assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeDS, tc.want, 2)
+		if n := sigCount(t, zd, "child.occl.example.", dns.TypeDS); n == 0 {
+			t.Errorf("policy TTL %d: the DS RRset is unsigned", tc.policy)
+		}
 	}
 }
 
 // dns.IsDuplicate ignores the TTL, so re-adding an RR that is already there is
-// not a no-op when the TTL differs: it brings the RRset to the policy TTL.
+// not a no-op when its TTL is the larger: it raises the RRset to it. At a lower
+// TTL it changes nothing.
 func TestDDNSDuplicateAddNormalisesTTL(t *testing.T) {
-	zd, kdb := ddnsTTLZone(t)
-	applyRR(t, zd, kdb, VerbAddRR, "child.occl.example. 3600 IN NS ns1.child.occl.example.")
-	assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeNS, 120, 1)
+	for _, tc := range []struct {
+		policy, want uint32
+	}{{120, 3600}, {7200, 7200}} {
+		zd, kdb := ddnsTTLZone(t, tc.policy)
+		applyRR(t, zd, kdb, VerbAddRR, "child.occl.example. 3600 IN NS ns1.child.occl.example.")
+		assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeNS, tc.want, 1)
+	}
 }
 
 // On the API channel the policy TTL does not apply; the caller's TTL is kept
-// and the rest of the RRset follows it.
+// when it is the larger, and the rest of the RRset follows it. A smaller one
+// takes the RRset's.
 func TestPreAuthorizedAddUnifiesToCallerTTL(t *testing.T) {
-	zd, kdb := ddnsTTLZone(t)
+	for _, tc := range []struct {
+		caller, want uint32
+	}{{600, 3600}, {7200, 7200}} {
+		zd, kdb := ddnsTTLZone(t, 120)
+		actions, err := BuildZoneUpdateActions(zd.ZoneName, ZoneUpdateSpec{
+			Verb: VerbAddRR, RRs: []string{"child.occl.example. " + itoa(int(tc.caller)) + " IN NS ns2.child.occl.example."},
+		})
+		if err != nil {
+			t.Fatalf("building add: %v", err)
+		}
+		if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
+			Cmd: "ZONE-UPDATE", ZoneName: zd.ZoneName, Actions: actions, PreAuthorized: true,
+		}, kdb); err != nil {
+			t.Fatalf("applying add: %v", err)
+		}
+		assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeNS, tc.want, 2)
+	}
+}
+
+// Lowering an RRset's TTL takes a replacement: the RRset deleted and its
+// records added again, in one update.
+func TestReplacementLowersTheTTL(t *testing.T) {
+	zd, kdb := ddnsTTLZone(t, 120)
 	actions, err := BuildZoneUpdateActions(zd.ZoneName, ZoneUpdateSpec{
-		Verb: VerbAddRR, RRs: []string{"child.occl.example. 600 IN NS ns2.child.occl.example."},
+		Verb: VerbReplaceRRset, RRs: []string{"child.occl.example. 600 IN NS ns1.child.occl.example."},
 	})
 	if err != nil {
-		t.Fatalf("building add: %v", err)
+		t.Fatalf("building the replacement: %v", err)
 	}
 	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
 		Cmd: "ZONE-UPDATE", ZoneName: zd.ZoneName, Actions: actions, PreAuthorized: true,
 	}, kdb); err != nil {
-		t.Fatalf("applying add: %v", err)
+		t.Fatalf("applying the replacement: %v", err)
 	}
-	assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeNS, 600, 2)
+	assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeNS, 600, 1)
 }
 
 // The path the report actually hit: a child's delta UPDATE goes through the
@@ -116,19 +154,20 @@ func applyChildRR(t *testing.T, zd *ZoneData, kdb *KeyDB, rr string) {
 	}
 }
 
-func childTTLZone(t *testing.T) (*ZoneData, *KeyDB) {
+func childTTLZone(t *testing.T, policyTTL uint32) (*ZoneData, *KeyDB) {
 	t.Helper()
-	zd, kdb := ddnsTTLZone(t)
+	zd, kdb := ddnsTTLZone(t, policyTTL)
 	zd.UpdatePolicy.Child = UpdatePolicyDetail{
 		Type:    "selfsub",
 		RRtypes: map[uint16]bool{dns.TypeNS: true, dns.TypeA: true, dns.TypeDS: true},
-		TTL:     120,
+		TTL:     policyTTL,
 	}
 	return zd, kdb
 }
 
+// A child-policy TTL above the RRset's raises the existing members to it.
 func TestChildUpdateAddToDelegationNSUnifiesTTL(t *testing.T) {
-	zd, kdb := childTTLZone(t)
+	zd, kdb := childTTLZone(t, 7200)
 	// Hold on to the RRs the pre-update snapshot serves.
 	old, ok := getOwnerFrom(zd.publishedSnapshot(), "child.occl.example.").RRtypes.Get(dns.TypeNS)
 	if !ok {
@@ -136,7 +175,7 @@ func TestChildUpdateAddToDelegationNSUnifiesTTL(t *testing.T) {
 	}
 
 	applyChildRR(t, zd, kdb, "child.occl.example. 3600 IN NS ns2.child.occl.example.")
-	assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeNS, 120, 2)
+	assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeNS, 7200, 2)
 
 	// The re-TTL wrote into cloned RRs, not into the snapshot concurrent
 	// readers may still hold.
@@ -147,12 +186,13 @@ func TestChildUpdateAddToDelegationNSUnifiesTTL(t *testing.T) {
 	}
 }
 
+// One below it leaves the RRset at its own TTL, the new member included.
 func TestChildUpdateAddToDSUnifiesTTL(t *testing.T) {
-	zd, kdb := childTTLZone(t)
+	zd, kdb := childTTLZone(t, 120)
 	applyChildRR(t, zd, kdb,
 		"child.occl.example. 3600 IN DS 54321 15 2 202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40")
-	assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeDS, 120, 2)
+	assertRRsetTTL(t, zd, "child.occl.example.", dns.TypeDS, 3600, 2)
 	if n := sigCount(t, zd, "child.occl.example.", dns.TypeDS); n == 0 {
-		t.Error("the re-TTLed DS RRset is unsigned")
+		t.Error("the DS RRset is unsigned")
 	}
 }
