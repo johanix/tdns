@@ -70,7 +70,7 @@ apiservers:
 | key | meaning |
 |---|---|
 | `name` | the command word **and** the API-client name. `name: sectdns` gives you `tdns-ncli sectdns ...` |
-| `role` | which daemon's command tree to build. Currently only `auth`. |
+| `role` | which daemon's command tree to build: `auth` or `agent`. |
 | `config-file` | the instance's own daemon config, used by `config check` (see below) |
 
 `role:` is what marks an entry as an extra instance. An entry without it is a
@@ -78,7 +78,9 @@ canonical target, reached through its built-in command tree exactly as before â€
 which is why existing config files need no edit.
 
 There is no limit of two. Any number of entries may carry `role: auth`, each
-getting its own command word.
+getting its own command word, and likewise `role: agent` for a second
+`tdns-agent` (see "Agent instances" below). `tdns-imr` instances are not
+supported yet.
 
 ### Both configs can live in /etc/tdns
 
@@ -155,6 +157,33 @@ Two subtrees are deliberately absent from an instance:
 Everything else `tdns-cli auth` offers is available on an instance, including
 `zone`, `keystore`, `truststore`, `config`, `daemon`, `db`, `debug`, `catalog`,
 `ddns`, `del`, `dsync-api`, `imr`, `ping` and `stop`.
+
+## Agent instances
+
+A second `tdns-agent` is wired the same way, with `role: agent`:
+
+```yaml
+   - name:              agent2
+     role:              agent
+     baseurl:           https://127.0.0.1:8988/api/v1
+     apikey:            <the second agent's api key>
+     authmethod:        X-API-Key
+     config-file:       /etc/tdns/tdns-agent2.yaml
+```
+
+`tdns-ncli agent2 ...` then offers exactly what `tdns-ncli agent ...` does:
+`zone` (including `dsync` and `parentsync`), `config`, `daemon`, `db`, `debug`,
+`imr`, `keystore`, `truststore` and `ping`. Nothing is left out: every subtree
+of the agent's tree talks to the agent's management API.
+
+Two things differ from an auth instance, both because an agent instance is an
+agent. `config` has no `transport-signal` (the agent does not synthesize one),
+and `config check` checks the file as a tdns-agent config. The first is decided
+when the command tree is built, from the tree's kind, not from the name you
+chose.
+
+The rest of this guide (the config-file layout, the reserved names, running
+two daemons side by side) applies unchanged.
 
 ## Choosing instance names
 
