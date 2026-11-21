@@ -88,6 +88,15 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 	out.Socket = v.GetString("apiserver.socket")
 	out.CertFile = v.GetString("apiserver.certfile")
 	out.AccessFile = v.GetString("apiserver.access-file")
+	if out.Socket != "" {
+		// The daemon serves no socket on a path it refuses, so there is
+		// nothing there to address.
+		if err := tdns.CheckApiSocketPath(out.Socket); err != nil {
+			out.Warnings = append(out.Warnings, fmt.Sprintf(
+				"%v: the daemon does not serve it, so it is not used here", err))
+			out.Socket = ""
+		}
+	}
 	if len(out.Addresses) == 0 && out.Socket == "" {
 		return fail(fmt.Errorf("%s: neither apiserver.addresses nor apiserver.socket is set, so this daemon has no management API to address", abs))
 	}

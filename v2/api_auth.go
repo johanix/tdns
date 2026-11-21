@@ -81,31 +81,40 @@ func newAccessState(path string, af *AccessFile) *accessState {
 }
 
 // maxPeekBody caps how much of a request body the middleware reads to find its
-// Command. A body longer than this is still passed on whole; its command is
-// then unknown, which needs admin.
-const maxPeekBody = 1 << 20
+// Command: far more than any management request needs. A longer body is
+// refused to a network client with 413, since its command cannot be checked.
+// The local socket is admin, which needs no check, so its body is passed on
+// whole. A var so that tests can lower it.
+var maxPeekBody = 64 << 20
+
+// unknownCommand matches no entry in the role table, so it needs admin.
+const unknownCommand = "\x00unknown"
 
 // peekCommand returns the request body's Command field and puts the body back
 // for the handler. It decodes with encoding/json into a field named Command,
 // as every handler does, so both read the same value (the same case-insensitive
-// key match, the same last-one-wins on a repeated key).
-func peekCommand(r *http.Request) string {
+// key match, the same last-one-wins on a repeated key). tooLarge says the body
+// is over maxPeekBody; the command is then unknownCommand.
+func peekCommand(r *http.Request) (cmd string, tooLarge bool) {
 	if r.Body == nil || r.Body == http.NoBody {
-		return ""
+		return "", false
 	}
-	buf, err := io.ReadAll(io.LimitReader(r.Body, maxPeekBody+1))
+	buf, err := io.ReadAll(io.LimitReader(r.Body, int64(maxPeekBody)+1))
 	r.Body = struct {
 		io.Reader
 		io.Closer
 	}{io.MultiReader(bytes.NewReader(buf), r.Body), r.Body}
-	if err != nil || len(buf) > maxPeekBody {
-		return "\x00unknown" // matches nothing: needs admin
+	switch {
+	case len(buf) > maxPeekBody:
+		return unknownCommand, true
+	case err != nil:
+		return unknownCommand, false
 	}
 	var c struct{ Command string }
 	if json.Unmarshal(buf, &c) != nil {
-		return ""
+		return "", false
 	}
-	return c.Command
+	return c.Command, false
 }
 
 // authenticate decides who r is. A non-zero status means refuse it.
@@ -165,8 +174,14 @@ func (conf *Config) apiAuthMiddleware(apikey string) mux.MiddlewareFunc {
 					route = tpl
 				}
 			}
-			cmd := peekCommand(r)
+			cmd, tooLarge := peekCommand(r)
 			need := RequiredApiRole(route, cmd)
+			if tooLarge && id.Role < RoleAdmin {
+				lgApi.Info("api request refused: body too large", "client", id.Name, "role", id.Role, "route", route, "limit", maxPeekBody)
+				http.Error(w, fmt.Sprintf("%s: request body is over %d bytes, the most the management API reads to check a request; the daemon's local admin socket has no such limit",
+					route, maxPeekBody), http.StatusRequestEntityTooLarge)
+				return
+			}
 			if id.Role < need {
 				lgApi.Info("api request denied", "client", id.Name, "role", id.Role, "route", route, "command", cmd, "needs", need)
 				if need == RoleAdmin {

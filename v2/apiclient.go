@@ -59,12 +59,18 @@ func NewClientWithOptions(name, baseurl string, o ClientOptions) *ApiClient {
 	// dialled to that socket whatever the URL's host says, so the URL the rest
 	// of this client builds is plain http on a fixed host. No TLS, and no key
 	// is needed: the daemon authenticates the socket by file permissions.
-	if path, ok := unixSocketPath(baseurl); ok {
+	// A unix:// URL whose path is not absolute is still a socket URL: it must
+	// not fall through to the TCP client, so every request fails, saying why.
+	if strings.HasPrefix(baseurl, "unix://") {
+		path, ok := unixSocketPath(baseurl)
 		api.Socket = path
 		api.BaseUrl = "http://localhost/api/v1"
 		api.Client = &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					if !ok {
+						return nil, fmt.Errorf("baseurl %s: a local socket is unix:///absolute/path", baseurl)
+					}
 					var d net.Dialer
 					return d.DialContext(ctx, "unix", path)
 				},

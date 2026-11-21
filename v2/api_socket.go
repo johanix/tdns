@@ -32,6 +32,20 @@ func FromLocalSocket(ctx context.Context) bool {
 // bytes on the BSDs and macOS, 108 on Linux), with room to spare.
 const maxApiSocketPathLen = 100
 
+// CheckApiSocketPath says whether path can be an apiserver.socket at all: an
+// absolute path short enough for a unix socket. A daemon serves no socket on a
+// path this refuses, so a client must not expect one there either.
+func CheckApiSocketPath(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("apiserver.socket %q is not an absolute path", path)
+	}
+	if len(path) > maxApiSocketPathLen {
+		return fmt.Errorf("apiserver.socket %q is %d bytes; a unix socket path may be at most %d here",
+			path, len(path), maxApiSocketPathLen)
+	}
+	return nil
+}
+
 // prepareApiSocket checks that path is a place the admin socket may be served
 // from and clears a stale socket left by a crash.
 //
@@ -42,12 +56,8 @@ const maxApiSocketPathLen = 100
 // answers on it; a live one belongs to another process, and anything that is
 // not a socket is left alone.
 func prepareApiSocket(path string) error {
-	if !filepath.IsAbs(path) {
-		return fmt.Errorf("apiserver.socket %q is not an absolute path", path)
-	}
-	if len(path) > maxApiSocketPathLen {
-		return fmt.Errorf("apiserver.socket %q is %d bytes; a unix socket path may be at most %d here",
-			path, len(path), maxApiSocketPathLen)
+	if err := CheckApiSocketPath(path); err != nil {
+		return err
 	}
 
 	dir := filepath.Dir(path)

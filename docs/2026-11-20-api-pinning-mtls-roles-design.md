@@ -625,8 +625,11 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   only for routes whose handler has no command (the rollover POSTs, `ping`).
 - **A certificate is the identity.** An unknown or disabled certificate is
   refused even if the API key comes with it; it does not fall back to the key.
-- **A body too long to read (over 1 MiB)** has an unknown command, which needs
-  admin. The handler still gets the whole body.
+- **A body too long to read (over 64 MiB)** has a command that cannot be
+  checked: a network client gets 413, saying so. The local socket is admin and
+  needs no check, so its handler gets the whole body. (The first build capped
+  this at 1 MiB and answered "needs admin", which refused a large write to
+  every network client; changed after the external review.)
 - **Commands are matched lower-cased and trimmed.** Matching only ever makes a
   check stricter or equal: a command the handler does not know is refused by the
   handler, and an unknown one needs admin here.

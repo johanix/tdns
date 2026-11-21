@@ -287,9 +287,20 @@ func TestPeekCommandKeepsTheBody(t *testing.T) {
 		t.Errorf("small body: %d %q, want all %d bytes passed on", st, body, len(small))
 	}
 
+	// A large write (over the old 1 MiB cap) is judged like any other.
+	large := `{"Pad":"` + strings.Repeat("x", 2<<20) + `"}`
+	if st, body := e.call(t, "/api/v1/t-rw", "bob", false, large); st != 200 || !strings.Contains(body, fmt.Sprintf("body %d bytes", len(large))) {
+		t.Errorf("2 MiB body as read-write: %d %.80q, want all %d bytes passed on", st, body, len(large))
+	}
+
+	// Over the cap the command cannot be checked: 413 to a network client,
+	// saying so, while the socket (admin, no check needed) passes it whole.
+	saved := maxPeekBody
+	t.Cleanup(func() { maxPeekBody = saved })
+	maxPeekBody = 4096
 	big := `{"Pad":"` + strings.Repeat("x", maxPeekBody) + `"}`
-	if st, _ := e.call(t, "/api/v1/t-rw", "bob", false, big); st != 403 {
-		t.Errorf("oversized body as read-write: %d, want 403 (its command cannot be judged)", st)
+	if st, body := e.call(t, "/api/v1/t-rw", "bob", false, big); st != http.StatusRequestEntityTooLarge || !strings.Contains(body, "local admin socket") {
+		t.Errorf("oversized body as read-write: %d %q, want 413 naming the socket", st, body)
 	}
 	if st, body := e.callSocket(t, "/api/v1/t-rw", big); st != 200 || !strings.Contains(body, fmt.Sprintf("body %d bytes", len(big))) {
 		t.Errorf("oversized body on the socket: %d %.80q, want all %d bytes passed on", st, body, len(big))

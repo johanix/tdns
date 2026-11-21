@@ -123,6 +123,13 @@ func TestApiSocketServesWithoutKey(t *testing.T) {
 	if api.Socket != sock {
 		t.Errorf("client socket = %q", api.Socket)
 	}
+
+	// A unix:// URL with a relative path is still a socket URL: it fails,
+	// saying why, and is not sent on as an ordinary URL.
+	rel := NewClient("local", "unix://admin.sock", "", "none", "")
+	if _, _, err := rel.Post("/ping", []byte(`{}`)); err == nil || !strings.Contains(err.Error(), "unix:///absolute/path") {
+		t.Errorf("relative socket URL: err = %v, want one naming the unix:///absolute/path form", err)
+	}
 	status, body, err := api.Post("/ping", []byte(`{"Msg":"hello"}`))
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("ping over the socket, no key: status %d, err %v, body %s", status, err, body)

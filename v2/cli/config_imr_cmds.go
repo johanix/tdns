@@ -185,7 +185,7 @@ func runImrConfigCheck(role, explicitPath string, offline bool) {
 	checkApiServerCorrelation(role, &cfg, rep)
 
 	if online {
-		correlateImrApiServer(&cfg, status, rep)
+		correlateImrApiServer(&cfg, status, acceptedApiKey(role), rep)
 	}
 
 	finishCheckconf(rep)
@@ -352,14 +352,13 @@ func fetchImrStatus(role string) (tdns.ConfigResponse, error) {
 	return resp, nil
 }
 
-func correlateImrApiServer(cfg *tdns.Config, status tdns.ConfigResponse, rep *ccReport) {
+// correlateImrApiServer compares the file's apiserver block with the running
+// resolver's. acceptedKey is the API key the status request was sent with:
+// the reply came back, so the resolver accepted it. The reply itself no
+// longer carries the key (it is redacted).
+func correlateImrApiServer(cfg *tdns.Config, status tdns.ConfigResponse, acceptedKey string, rep *ccReport) {
 	const g = "Running-config drift"
-	if status.ApiServer.ApiKey.Value() != "" && cfg.ApiServer.ApiKey.Value() != "" &&
-		status.ApiServer.ApiKey.Value() != cfg.ApiServer.ApiKey.Value() {
-		rep.warn(g, "apikey",
-			"apiserver.apikey in the file differs from the running server's apikey",
-			"the running apikey changes only on restart")
-	}
+	warnApiKeyDrift(cfg, acceptedKey, rep, g)
 	if len(status.ApiServer.Addresses) > 0 && len(cfg.ApiServer.Addresses) > 0 &&
 		!sameStringSet(cfg.ApiServer.Addresses, status.ApiServer.Addresses) {
 		rep.warn(g, "apiserver-addresses",

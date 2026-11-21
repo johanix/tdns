@@ -259,6 +259,11 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 				"entry %q reaches this daemon over TCP; it also has a local admin socket -- change that entry's baseurl to %s, its authmethod to none and remove its apikey to use it",
 				e.Name, socketURL))
 		}
+		if sameAddr && o.TCP && socketURL != "" && e.BaseURL == socketURL {
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"entry %q reaches this daemon over its local admin socket, so --tcp adds nothing -- remove that entry and run config add --tcp again to use %s instead",
+				e.Name, tcpURL))
+		}
 		switch {
 		case sameFile && sameAddr:
 			res.AlreadyKnown = e.Name
