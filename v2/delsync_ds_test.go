@@ -18,6 +18,7 @@ import (
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -182,6 +183,10 @@ func TestSendDSViaUpdateReplacesTheWholeDSSet(t *testing.T) {
 	if res.Rcode != dns.RcodeSuccess || res.Scheme != "UPDATE" || res.Category != "" {
 		t.Fatalf("result %+v, want NOERROR over UPDATE", res)
 	}
+	// The parent accepted an UPDATE signed with the zone's key (tdns-mp #404).
+	if got := sig0ParentState(t, kdb, zd.ZoneName, onlySig0Keyid(t, kdb, zd.ZoneName)); got != edns0.KeyStateTrusted {
+		t.Errorf("parent_state %s after the parent took the DS UPDATE, want trusted", edns0.KeyStateToString(got))
+	}
 
 	m := sink.wait(t, 3*time.Second)
 	if m.Opcode != dns.OpcodeUpdate || len(m.Question) != 1 || m.Question[0].Name != "example." {
@@ -249,6 +254,19 @@ func TestSendDSViaUpdateReportsTheParentsRcode(t *testing.T) {
 	if sink.count() != 1 {
 		t.Errorf("the parent received %d UPDATEs, want exactly one: no retry loop here", sink.count())
 	}
+	if got := sig0ParentState(t, kdb, zd.ZoneName, onlySig0Keyid(t, kdb, zd.ZoneName)); got != 0 {
+		t.Errorf("parent_state %s after a refused DS UPDATE, want 0", edns0.KeyStateToString(got))
+	}
+}
+
+// onlySig0Keyid is the keyid of the zone's one active SIG(0) key.
+func onlySig0Keyid(t *testing.T, kdb *KeyDB, zone string) uint16 {
+	t.Helper()
+	sak, err := kdb.GetSig0Keys(zone, Sig0StateActive)
+	if err != nil || sak == nil || len(sak.Keys) != 1 {
+		t.Fatalf("one active SIG(0) key for %s: err=%v keys=%+v", zone, err, sak)
+	}
+	return sak.Keys[0].KeyRR.KeyTag()
 }
 
 // The engine's push is a SYNC-DS to the syncher, carrying the snapshot and
