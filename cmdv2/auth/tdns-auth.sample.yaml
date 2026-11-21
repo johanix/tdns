@@ -170,6 +170,11 @@ apiserver:
    apikey:     winter-is-coming-santa-stuck-in-chimney
    certfile:   /etc/tdns/certs/servers/localhost..crt
    keyfile:    /etc/tdns/certs/servers/localhost..key
+   # Local admin socket: the management API without TLS or a key, for root
+   # on this host (whoever can open the socket is admin). The directory is
+   # created 0700 if missing; one that group or others can enter is refused.
+   # tdns-ncli config add uses it when run as root.
+   socket:     /var/run/tdns/tdns-auth.sock
 
 # Statically declared TSIG keys.
 #

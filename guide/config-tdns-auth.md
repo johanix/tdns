@@ -86,6 +86,26 @@ one, say — note that an ordinary include **replaces** the `zones:` list rather
 than adding to it. Use `- {file: ..., merge: true}` to combine them; see
 [Includes](configuration.md#conventions-common-to-all-tdns-applications).
 
+## The local admin socket
+
+```yaml
+apiserver:
+   socket:     /var/run/tdns/tdns-auth.sock
+```
+
+`apiserver.socket` serves the management API on a unix socket as well, with no
+TLS and no API key. Whoever can open the socket is admin, so file permissions
+are the authentication: the daemon creates the socket with mode 0600, creates a
+missing directory with mode 0700, and refuses to serve it from a directory that
+group or others can enter (or that is a symlink). The socket is served even
+when `apiserver.addresses` is empty, and a socket the daemon cannot serve is
+reported as a server error (`config status` shows the daemon as degraded)
+rather than stopping it.
+
+`tdns-ncli config add` writes a socket entry (`baseurl:
+unix:///var/run/tdns/tdns-auth.sock`, `authmethod: none`) when run as root, so
+the CLI config on the daemon's own host needs no API key.
+
 ## TSIG configuration
 
 TSIG keys may be declared statically in the config file, or added at runtime to

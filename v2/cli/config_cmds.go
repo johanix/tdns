@@ -380,6 +380,9 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		} else {
 			fmt.Printf("ApiServer: not listening on any addresses\n")
 		}
+		if resp.ApiServer.Socket != "" {
+			fmt.Printf("ApiServer: local admin socket %s\n", resp.ApiServer.Socket)
+		}
 		if resp.ApiServer.ApiKey.Value() != "" {
 			ak := resp.ApiServer.ApiKey.Value()
 			// Reveal 3 chars at each end only when the key is long

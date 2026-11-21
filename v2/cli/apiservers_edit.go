@@ -169,7 +169,13 @@ func renderEntry(e ApiDetails, lay itemLayout) string {
 	if e.Role != "" {
 		kvs = append(kvs, kv{"role", e.Role})
 	}
-	kvs = append(kvs, kv{"baseurl", e.BaseURL}, kv{"apikey", e.ApiKey}, kv{"authmethod", e.AuthMethod})
+	kvs = append(kvs, kv{"baseurl", e.BaseURL})
+	// A socket entry has no key: the daemon authenticates the socket by file
+	// permissions. An empty apikey: line would only invite filling it in.
+	if e.ApiKey != "" {
+		kvs = append(kvs, kv{"apikey", e.ApiKey})
+	}
+	kvs = append(kvs, kv{"authmethod", e.AuthMethod})
 	if e.RootCA != "" {
 		kvs = append(kvs, kv{"rootca", e.RootCA})
 	}

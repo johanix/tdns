@@ -98,8 +98,25 @@ the file that holds the list. `--dry-run` makes the same check, so it fails
 where the add would. An `apiservers:` written inline (`[ ... ]`) is not edited;
 the error prints the entry to add by hand. Two adds at once take turns.
 
-A second agent or imr is refused until tdns-ncli has a command tree for it:
-today only `auth` has one.
+A second daemon of any of the three types becomes an instance: `auth`,
+`agent` and `imr` all have instance trees.
+
+**The local admin socket.** When the daemon config has `apiserver.socket` and
+`config add` runs as root, the entry uses the socket instead of TCP:
+
+```yaml
+   - name:        tdns-auth
+     baseurl:     unix:///var/run/tdns/tdns-auth.sock
+     authmethod:  none
+     config-file: /etc/tdns/tdns-auth.yaml
+```
+
+No API key and no TLS: the daemon authenticates the socket by file permissions
+(mode 0600 in a directory only root can enter), and whoever can open it is
+admin. Run as another user, who cannot open the socket, or with `--tcp`, the
+entry uses the daemon's TCP address and API key as before. If the daemon is
+already in the CLI config over TCP, `config add` says so and tells you which
+lines to change to use the socket.
 
 ### Listing: `config list`
 
@@ -144,7 +161,7 @@ apiservers:
 | key | meaning |
 |---|---|
 | `name` | the command word **and** the API-client name. `name: sectdns` gives you `tdns-ncli sectdns ...` |
-| `role` | which daemon's command tree to build: `auth` or `agent`. |
+| `role` | which daemon's command tree to build: `auth`, `agent` or `imr`. |
 | `config-file` | the instance's own daemon config, used by `config check` (see below) |
 
 `role:` is what marks an entry as an extra instance. An entry without it is a

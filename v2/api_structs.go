@@ -792,6 +792,10 @@ type ApiClient struct {
 	Email    string
 	Password string
 	TokViper *viper.Viper
+
+	// Socket is the unix socket path when the client was made from a
+	// unix:///path base URL (the daemon's local admin socket), else "".
+	Socket string
 }
 
 type MultiSignerPost struct {

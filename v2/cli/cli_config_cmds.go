@@ -95,6 +95,11 @@ name (tdns-auth, tdns-agent, tdns-imr) and is reached as "auth", "agent",
 file (tdns-auth2.yaml -> auth2) unless --name says otherwise, reached as
 "tdns-ncli auth2 ...".
 
+When the daemon has a local admin socket (apiserver.socket) and this runs as
+root, the entry uses it: baseurl unix:///path, no API key, admin access. Run
+as another user, or with --tcp, the entry uses the daemon's TCP address and
+API key instead.
+
 The new entry records the daemon config's path as config-file:, so
 "tdns-ncli auth2 config check" checks the right daemon. The CLI config is
 created, mode 0600, if it does not exist. Adding a daemon that is already
@@ -118,8 +123,13 @@ there changes nothing.`,
 	c.Flags().StringVar(&o.RootCA, "rootca", "", "rootca for the entry (default: none, which the CLI treats as insecure)")
 	c.Flags().StringVar(&o.TargetFile, "file", "", "file to add the entry to, if the apiservers: list is not in the CLI config itself (an include or cli.localconfig)")
 	c.Flags().BoolVar(&o.DryRun, "dry-run", false, "show what would be added; change nothing")
+	c.Flags().BoolVar(&o.TCP, "tcp", false, "use the daemon's TCP address even when it has a local admin socket")
 	return c
 }
+
+// runningAsRoot reports whether this process can open a root-only admin
+// socket. A variable so the tests, which do not run as root, can say yes.
+var runningAsRoot = func() bool { return os.Geteuid() == 0 }
 
 // AddOptions is the input to AddDaemonConfig.
 type AddOptions struct {
@@ -136,6 +146,9 @@ type AddOptions struct {
 	Name string
 	// RootCA is recorded as the entry's rootca, if non-empty.
 	RootCA string
+	// TCP makes the entry use the daemon's TCP address even when the daemon
+	// has a local admin socket (apiserver.socket).
+	TCP bool
 	// DryRun computes everything and writes nothing.
 	DryRun bool
 	// CommandWordTaken reports whether a name is already a command of the CLI.
@@ -185,11 +198,33 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	}
 	res := &AddResult{Notes: append([]string(nil), info.Warnings...)}
 
-	baseURL, err := apiBaseURL(info.Addresses[0], info.UseTLS)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", info.ConfigFile, err)
+	// The daemon's TCP address, if it has one.
+	tcpURL := ""
+	if len(info.Addresses) > 0 {
+		if tcpURL, err = apiBaseURL(info.Addresses[0], info.UseTLS); err != nil {
+			return nil, fmt.Errorf("%s: %w", info.ConfigFile, err)
+		}
 	}
-	if len(info.Addresses) > 1 {
+	// The local admin socket is preferred when there is one: no secret in the
+	// CLI config, and admin access. It is root-only (mode 0600 in a 0700
+	// directory), so anyone else gets the TCP entry, as does --tcp.
+	socketURL := ""
+	if info.Socket != "" {
+		socketURL = "unix://" + info.Socket
+	}
+	useSocket := socketURL != "" && !o.TCP && runningAsRoot()
+	switch {
+	case useSocket:
+	case tcpURL == "":
+		return nil, fmt.Errorf("%s has only a local admin socket (%s), which only root can open; run config add as root", info.ConfigFile, info.Socket)
+	case socketURL != "" && !o.TCP:
+		res.Notes = append(res.Notes, fmt.Sprintf(
+			"the daemon's local admin socket %s is root-only; using its TCP address", info.Socket))
+	}
+	baseURL := tcpURL
+	if useSocket {
+		baseURL = socketURL
+	} else if len(info.Addresses) > 1 {
 		res.Notes = append(res.Notes, fmt.Sprintf(
 			"apiserver.addresses lists %d addresses (%s); using the first",
 			len(info.Addresses), strings.Join(info.Addresses, ", ")))
@@ -230,16 +265,41 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return nil, fmt.Errorf("cannot read the CLI config %s: %w", o.CliConfig, err)
 	}
 
-	// Already there? By config file or by API address.
+	// Already there? By config file or by API address, where an address is
+	// either of the daemon's: its TCP address or its socket.
+	sameDaemonAddr := func(u string) bool {
+		if hp := hostPort(u); hp != "" && tcpURL != "" && hp == hostPort(tcpURL) {
+			return true
+		}
+		return socketURL != "" && u == socketURL
+	}
 	for _, e := range existing {
 		sameFile := e.ConfigFile != "" && filepath.Clean(e.ConfigFile) == info.ConfigFile
-		sameAddr := hostPort(e.BaseURL) != "" && hostPort(e.BaseURL) == hostPort(baseURL)
+		sameAddr := sameDaemonAddr(e.BaseURL)
+		if sameAddr && useSocket && e.BaseURL != socketURL {
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"entry %q reaches this daemon over TCP; it also has a local admin socket -- change that entry's baseurl to %s, its authmethod to none and remove its apikey to use it",
+				e.Name, socketURL))
+		}
+		if sameAddr && o.TCP && socketURL != "" && e.BaseURL == socketURL {
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"entry %q reaches this daemon over its local admin socket, so --tcp adds nothing -- remove that entry and run config add --tcp again to use %s instead",
+				e.Name, tcpURL))
+		}
+		// What the daemon config says an entry of e's kind should hold: a
+		// socket entry sends no key, a TCP entry the apikey over its TCP
+		// address. Compared against baseURL instead, a socket entry would
+		// read as a changed key and scheme whenever this add chose TCP.
+		wantKey, wantURL := info.ApiKey, tcpURL
+		if strings.HasPrefix(e.BaseURL, "unix://") {
+			wantKey, wantURL = "", socketURL
+		}
 		switch {
 		case sameFile && sameAddr:
 			// The same daemon, but it may have changed since: a new key, or
 			// usetls turned on or off on the same port. "Already known" would
 			// then leave the CLI with an entry that no longer works.
-			if diff := changedSettings(e, info.ApiKey, baseURL); diff != "" {
+			if diff := changedSettings(e, wantKey, wantURL); diff != "" {
 				return nil, fmt.Errorf("entry %q is this daemon, but its %s no longer match %s; edit that entry by hand (config add does not change an existing entry)",
 					e.Name, diff, info.ConfigFile)
 			}
@@ -254,7 +314,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			res.Notes = append(res.Notes, fmt.Sprintf(
 				"entry %q already uses %s; it has no config-file: -- add \"config-file: %s\" to it if it is this daemon",
 				e.Name, e.BaseURL, info.ConfigFile))
-			if diff := changedSettings(e, info.ApiKey, baseURL); diff != "" {
+			if diff := changedSettings(e, wantKey, wantURL); diff != "" {
 				res.Notes = append(res.Notes, fmt.Sprintf(
 					"entry %q: its %s do not match %s; if it is this daemon, edit them by hand",
 					e.Name, diff, info.ConfigFile))
@@ -272,6 +332,11 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		AuthMethod: "X-API-Key", // spelled exactly so: the client matches it case-sensitively
 		RootCA:     o.RootCA,
 		ConfigFile: info.ConfigFile,
+	}
+	if useSocket {
+		// No key and no TLS: the daemon authenticates the socket by file
+		// permissions, and the client sends nothing.
+		entry.ApiKey, entry.AuthMethod, entry.RootCA = "", "none", ""
 	}
 	if err := chooseEntryName(&entry, res, info.Role, existing, o); err != nil {
 		return nil, err
