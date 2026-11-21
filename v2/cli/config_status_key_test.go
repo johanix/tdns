@@ -42,3 +42,32 @@ func TestCorrelateStatusApiKeyUsesTheAcceptedKey(t *testing.T) {
 		})
 	}
 }
+
+// acceptedApiKey must name the key the status request was sent with, and
+// GetApiClient picks that client through the role mapping ("auth" ->
+// "tdns-auth"). An entry that happens to be named "auth" must not stand in
+// for it, and an instance (registered under its own name) gets its own key.
+func TestAcceptedApiKeyFollowsTheRoleMapping(t *testing.T) {
+	withCleanRoleRegistry(t)
+	RegisterRole("auth", "tdns-auth")
+	RegisterRole("sectdns", "sectdns")
+
+	saved := apiConfig
+	apiConfig = &CliConf{ApiServers: []ApiDetails{
+		{Name: "auth", AuthMethod: "X-API-Key", ApiKey: "the-entry-named-auth"},
+		{Name: "tdns-auth", AuthMethod: "X-API-Key", ApiKey: "the-client-key"},
+		{Name: "sectdns", Role: "auth", AuthMethod: "X-API-Key", ApiKey: "the-instance-key"},
+		{Name: "unmapped", AuthMethod: "X-API-Key", ApiKey: "the-raw-name"},
+	}}
+	t.Cleanup(func() { apiConfig = saved })
+
+	for role, want := range map[string]string{
+		"auth":     "the-client-key",
+		"sectdns":  "the-instance-key",
+		"unmapped": "the-raw-name",
+	} {
+		if got := acceptedApiKey(role); got != want {
+			t.Errorf("acceptedApiKey(%q) = %q, want %q", role, got, want)
+		}
+	}
+}
