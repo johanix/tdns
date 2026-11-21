@@ -26,29 +26,59 @@ import "fmt"
 //
 // SCOPE (load-bearing): the rule applies to the app types in
 // originationRuleAppTypes below: tdns-auth, and a derived app that registered
-// its own type. For every other app type this returns true, which makes every
-// gate built on it a complete no-op there. v2/ is a shared library and several
-// derived apps deliberately mutate a zone while holding the Secondary role —
-// tdns-mpcombiner edits zones as a secondary (that is its whole job),
-// tdns-mpagent has its own permissions, tdns-agent already carries secondary
-// special-cases. Their rules must survive the next time they bump their tdns
-// pin. Keeping the app-type test HERE, in one place, rather than repeating it
-// at each call site, means no future gate can forget it.
+// its own type. tdns-agent has a rule of its own (agentZoneMayOriginateContent).
+// For every other app type this returns true, which makes every gate built on
+// it a complete no-op there. v2/ is a shared library and several derived apps
+// deliberately mutate a zone while holding the Secondary role --
+// tdns-mpcombiner edits zones as a secondary (that is its whole job), and
+// tdns-mpagent has its own permissions. Their rules must survive the next time
+// they bump their tdns pin. Keeping the app-type test HERE, in one place,
+// rather than repeating it at each call site, means no future gate can forget
+// it.
 //
-// NOTE for tests: Globals.App.Type must be set to AppTypeAuth, or to a type
-// registered with RegisterOriginationRuleAppType, for any of the gates to
-// engage; an unset (zero) app type reads as "the rule does not apply" and
-// every gate stands down. That is deliberate — it is the same property that
-// protects the derived apps — but it means a test asserting a gate must set
+// NOTE for tests: Globals.App.Type must be set to AppTypeAuth, AppTypeAgent, or
+// a type registered with RegisterOriginationRuleAppType, for any of the gates
+// to engage; an unset (zero) app type reads as "the rule does not apply" and
+// every gate stands down. That is deliberate -- it is the same property that
+// protects the derived apps -- but it means a test asserting a gate must set
 // the app type explicitly.
 func zoneMayOriginateContent(zd *ZoneData) bool {
 	if zd == nil {
 		return true // nothing to protect; never gate on a nil zone
 	}
+	if Globals.App.Type == AppTypeAgent {
+		return agentZoneMayOriginateContent(zd)
+	}
 	if !originationRuleAppTypes[Globals.App.Type] {
 		return true
 	}
 	return zd.ZoneType == Primary || zd.Options[OptInlineSigning]
+}
+
+// agentZoneMayOriginateContent is the rule for tdns-agent. A primary or an
+// inline-signing secondary originates, as on tdns-auth. Any other secondary
+// originates only when its options give it content of its own to write: one of
+// the originationOptions, which the option normalizer strips from a tdns-auth
+// secondary and leaves on an agent's (parentsync publishes the zone's SIG(0)
+// KEY, childsync its DSYNC RRset, and so on).
+//
+// A secondary with none of them -- a parentsync-proxy zone, or a plain one --
+// writes nothing into the zone, so it serves what it received at the serial it
+// received it with (#1157). Before, every agent zone counted as originating:
+// each transfer advanced the served serial by one instead of taking the
+// received one, each restart lifted it past the highest one served, and the
+// zone copy on disk carried that serial, which the next start read back as
+// the received one.
+func agentZoneMayOriginateContent(zd *ZoneData) bool {
+	if zd.ZoneType == Primary || zd.Options[OptInlineSigning] {
+		return true
+	}
+	for _, opt := range originationOptions {
+		if zd.Options[opt] {
+			return true
+		}
+	}
+	return false
 }
 
 // originationRuleAppTypes are the app types whose zones follow the rule above.

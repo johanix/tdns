@@ -390,8 +390,25 @@ func TestNotifyDrivenFirstLoadBindsTheRegisteredPolicy(t *testing.T) {
 // one before the engine's restore looked, so a combiner came back from a
 // restart at a lower serial and its signer ignored its NOTIFYs.
 func TestFirstLoadRestoresThePersistedSerialForAnOriginatingSecondary(t *testing.T) {
+	firstLoadWithPersistedSerial(t, appTypeUngated, 1001,
+		"the persisted 1000 restored over the upstream's 7, one past it")
+}
+
+// The same first load in tdns-agent (#1157): a secondary that writes nothing
+// into the zone serves what it received, at the upstream's serial, whatever
+// serial it served before the restart.
+func TestFirstLoadAgentSecondaryServesTheUpstreamSerial(t *testing.T) {
+	firstLoadWithPersistedSerial(t, AppTypeAgent, 7,
+		"the upstream's 7: an agent secondary with no option that writes content relays")
+}
+
+// firstLoadWithPersistedSerial loads a secondary of example. from a primary
+// at serial 7, as app type app, with outbound-soa-serial=persist and a saved
+// outgoing serial of 1000, and waits for it to serve want.
+func firstLoadWithPersistedSerial(t *testing.T, app AppType, want uint32, why string) {
+	t.Helper()
 	authApp(t)
-	Globals.App.Type = AppTypeAgent // any originating role but tdns-auth
+	Globals.App.Type = app
 	kdb := Conf.Internal.KeyDB
 	if err := applyOutboundSoaSerial(kdb, OutboundSoaSerialPersist); err != nil {
 		t.Fatalf("persist mode: %v", err)
@@ -437,16 +454,16 @@ func TestFirstLoadRestoresThePersistedSerialForAnOriginatingSecondary(t *testing
 		zd.mu.Lock()
 		ready, cur := zd.Ready, zd.CurrentSerial
 		zd.mu.Unlock()
-		if ready && cur == 1001 {
+		if ready && cur == want {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("after the first load: Ready=%v CurrentSerial=%d, want 1001: the persisted 1000 restored over the upstream's 7, one past it", ready, cur)
+			t.Fatalf("after the first load: Ready=%v CurrentSerial=%d, want %d: %s", ready, cur, want, why)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if snap := zd.publishedSnapshot(); snap == nil || snap.Serial != 1001 {
-		t.Fatalf("the served snapshot is not at 1001: %+v", snap)
+	if snap := zd.publishedSnapshot(); snap == nil || snap.Serial != want {
+		t.Fatalf("the served snapshot is not at %d: %+v", want, snap)
 	}
 }
 
