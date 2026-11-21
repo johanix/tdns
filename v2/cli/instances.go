@@ -238,7 +238,10 @@ func instanceRefusal(root *cobra.Command, e ApiDetails, registry map[string]stri
 			"apiservers entry %q: name is the API-client name of %s, so the two would share one client -- entry ignored (choose another name)",
 			e.Name, what)
 	}
-	if existing := findChild(root, e.Name); existing != nil {
+	// root is nil when the question is only which entry owns a name
+	// (clientEntries): a command collision refuses every entry of that name
+	// alike, so it cannot change the owner.
+	if existing := findChildOrNil(root, e.Name); existing != nil {
 		return fmt.Sprintf(
 			"apiservers entry %q: name collides with the existing %q command -- entry ignored (choose another name)",
 			e.Name, existing.Name())
@@ -286,40 +289,37 @@ func WireInstanceTrees(root *cobra.Command, entries []ApiDetails) []string {
 }
 
 // clientEntries returns the entries to build API clients for: every canonical
-// entry, and every instance entry whose name no client answers to yet -- a
-// built-in role's client (tdns-auth), a canonical entry, or an earlier
-// instance of the same name.
+// entry, and every instance entry the wiring accepts (checkInstanceEntries,
+// the same rules and the same order).
 //
-// tdns.Globals.ApiClients is keyed by entry name, so a client built for such
-// an instance replaces the one the name already stands for, and
-// `tdns-ncli auth ...` reaches the instance's daemon. checkInstanceEntries
-// refuses to wire these entries (the same three rules); this keeps them from
-// taking over the client as well.
+// tdns.Globals.ApiClients is keyed by entry name, so a client built for an
+// instance the wiring refused can replace the one the name already stands
+// for (`tdns-ncli auth ...` then reaching the instance's daemon), or stand in
+// for the entry the wiring did accept under that name: with two auth2 entries
+// where the wiring refuses the first and wires the second, the client must be
+// the second's, or the auth2 tree drives the first one's daemon. Asking
+// checkInstanceEntries, not a copy of its rules, keeps the two from
+// disagreeing.
 //
 // registry is the built-in role -> clientKey map, builtinRoles(): the
 // instances wired so far are registered as name -> name and are not built-in
 // clients.
 func clientEntries(entries []ApiDetails, registry map[string]string) []ApiDetails {
-	taken := map[string]bool{}
-	for _, ck := range registry {
-		taken[ck] = true
-	}
-	for _, e := range entries {
-		if e.Role == "" {
-			taken[e.Name] = true
-		}
-	}
 	out := make([]ApiDetails, 0, len(entries))
-	for _, e := range entries {
-		if e.Role != "" {
-			if taken[e.Name] {
-				continue
-			}
-			taken[e.Name] = true
+	for _, v := range checkInstanceEntries(nil, entries, registry) {
+		if v.Canonical || v.Wire {
+			out = append(out, v.Entry)
 		}
-		out = append(out, e)
 	}
 	return out
+}
+
+// findChildOrNil is findChild, with no root meaning no command.
+func findChildOrNil(root *cobra.Command, name string) *cobra.Command {
+	if root == nil {
+		return nil
+	}
+	return findChild(root, name)
 }
 
 // builtinRoles returns the role -> clientKey registrations that are not

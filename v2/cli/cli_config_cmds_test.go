@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,7 +31,8 @@ func TestApiBaseURL(t *testing.T) {
 		{"[::]:8990", true, "https://[::1]:8990/api/v1", false},
 		{"[2001:db8::1]:8989", true, "https://[2001:db8::1]:8989/api/v1", false},
 		{"ns1.example.net:8989", true, "https://ns1.example.net:8989/api/v1", false},
-		{"127.0.0.1", true, "", true}, // no port
+		{"[fe80::1%eth0]:8990", true, "https://[fe80::1%25eth0]:8990/api/v1", false}, // a zone's % escaped, so the URL parses
+		{"127.0.0.1", true, "", true},                                                // no port
 		{"", true, "", true},
 	} {
 		got, err := apiBaseURL(tc.addr, tc.useTLS)
@@ -40,6 +42,11 @@ func TestApiBaseURL(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Errorf("apiBaseURL(%q, %v) = %q, want %q", tc.addr, tc.useTLS, got, tc.want)
+		}
+		if got != "" {
+			if _, err := url.Parse(got); err != nil {
+				t.Errorf("apiBaseURL(%q) = %q does not parse: %v", tc.addr, got, err)
+			}
 		}
 	}
 }
@@ -119,6 +126,11 @@ func TestDetectDaemonRole(t *testing.T) {
 		// whose file happens to carry "mp" is a tdns-auth, with a warning.
 		{name: "service.name wins over an mp file name", service: "TDNS-AUTH", hasService: true, path: "/etc/tdns/west-mp-auth.yaml", want: "auth", wantWarn: true},
 		{name: "an mp service.name is refused whatever the file", service: "TDNS-MPSIGNER", hasService: true, path: "/etc/tdns/tdns-auth.yaml", wantErrIn: "tdns-mp"},
+		// A deciding name with two roles in it is no evidence for either.
+		{name: "file name with two roles", service: "WEST", hasService: true, path: "/etc/tdns/west-agent-auth.yaml", wantErrIn: "more than one daemon type"},
+		{name: "service.name with two roles", service: "AGENT-AUTH", hasService: true, path: "/etc/tdns/x.yaml", wantErrIn: "more than one daemon type"},
+		{name: "the same role twice is one role", path: "/etc/tdns/auth-auth2.yaml", want: "auth"},
+		{name: "service.name decides over a two-role file name", service: "TDNS-AUTH", hasService: true, path: "/etc/tdns/west-agent-auth.yaml", want: "auth", wantWarn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, warn, err := detectDaemonRole(tc.service, tc.hasService, tc.hasImr, tc.path)
@@ -221,8 +233,11 @@ func TestSpliceMatchesTheNeighbours(t *testing.T) {
 	}
 
 	entries := parseApiservers(t, got)
-	if len(entries) != 3 || entries[2] != newEntry() {
-		t.Errorf("parsed %d entries, last = %+v", len(entries), entries[len(entries)-1])
+	if len(entries) != 3 {
+		t.Fatalf("parsed %d entries, want 3: %+v", len(entries), entries)
+	}
+	if entries[2] != newEntry() {
+		t.Errorf("third entry = %+v, want %+v", entries[2], newEntry())
 	}
 }
 
@@ -241,6 +256,24 @@ func TestSpliceDashAtColumnZero(t *testing.T) {
 	}
 	if n := len(parseApiservers(t, got)); n != 2 {
 		t.Errorf("parsed %d entries, want 2", n)
+	}
+}
+
+// A list whose items put "-" on a line of its own, mapping below, at a
+// two-space indentation: the new item must sit at the same indentation, or
+// the file no longer loads.
+func TestSpliceBareDashItems(t *testing.T) {
+	src := "apiservers:\n  -\n    name: a\n    baseurl: https://127.0.0.1:1/api/v1\n    apikey: k\n    authmethod: X-API-Key\nother: 1\n"
+	out, _, err := spliceApiserver([]byte(src), newEntry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+	if !strings.Contains(got, "\n  - name:") {
+		t.Errorf("the new item is not at the list's two-space indentation:\n%s", got)
+	}
+	if n := len(parseApiservers(t, got)); n != 2 {
+		t.Errorf("parsed %d entries, want 2:\n%s", n, got)
 	}
 }
 
@@ -291,6 +324,8 @@ func TestYamlScalar(t *testing.T) {
 		"001234":                        "'001234'", // plain, an octal integer
 		"1e3":                           "'1e3'",    // a float
 		".inf":                          "'.inf'",
+		"/etc/tdns/a\nb.yaml":           `"/etc/tdns/a\nb.yaml"`, // a line break folds in single quotes
+		"tab\there":                     `"tab\there"`,
 	} {
 		if got := yamlScalar(in); got != want {
 			t.Errorf("yamlScalar(%q) = %s, want %s", in, got, want)
@@ -698,7 +733,7 @@ func TestAddDryRunChangesNothing(t *testing.T) {
 	}
 	// And what it would print does not carry the key.
 	var sb strings.Builder
-	printAddResult(&sb, res, true)
+	printAddResult(&sb, res, true, env.cli)
 	if strings.Contains(sb.String(), "key-tdns-auth2.yaml") {
 		t.Errorf("the API key was printed:\n%s", sb.String())
 	}
@@ -760,18 +795,23 @@ func TestAddUndoesWhenAnOverlayHidesTheEntry(t *testing.T) {
 		if _, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true; o.TargetFile = hard }); err == nil || !strings.Contains(err.Error(), "would not load") {
 			t.Errorf("dry run with --file a hard link to the local config: err = %v, want the preview to fail as the add does", err)
 		}
-		if _, err := env.add(t, d, func(o *AddOptions) { o.TargetFile = hard }); err == nil || !strings.Contains(err.Error(), "undone") {
-			t.Errorf("add with --file a hard link to the local config: err = %v, want it undone", err)
+		// The add is refused before it writes: an undo after the rename could
+		// not join the two names again.
+		if _, err := env.add(t, d, func(o *AddOptions) { o.TargetFile = hard }); err == nil || !strings.Contains(err.Error(), "Nothing was written") {
+			t.Errorf("add with --file a hard link to the local config: err = %v, want it refused before writing", err)
+		}
+		if a, b := statOf(t, local), statOf(t, hard); !os.SameFile(a, b) {
+			t.Error("the refused add detached --file from the local config")
 		}
 		os.Remove(hard)
 	}
 
 	_, err = env.add(t, d, nil)
-	if err == nil || !strings.Contains(err.Error(), "--file") || !strings.Contains(err.Error(), "undone") {
+	if err == nil || !strings.Contains(err.Error(), "--file") || !strings.Contains(err.Error(), "Nothing was written") {
 		t.Fatalf("err = %v", err)
 	}
 	if b, _ := os.ReadFile(env.cli); string(b) != mainCfg {
-		t.Errorf("the main file was not restored:\n%s", b)
+		t.Errorf("the refused add changed the main file:\n%s", b)
 	}
 
 	// Naming the file that holds the winning list works.
@@ -913,6 +953,10 @@ func TestCollidingInstanceGetsNoClient(t *testing.T) {
 		{Name: "tdns-imr", Role: "auth", BaseURL: "https://127.0.0.1:8991/api/v1"},
 		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8992/api/v1"},
 		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8993/api/v1"},
+		// The wiring refuses the first auth3 (no tree for its role) and wires
+		// the second: the client must be the second's.
+		{Name: "auth3", Role: "nosuch", BaseURL: "https://127.0.0.1:8994/api/v1"},
+		{Name: "auth3", Role: "auth", BaseURL: "https://127.0.0.1:8995/api/v1"},
 	}}
 	if err := InitApiClients(c); err != nil {
 		t.Fatal(err)
@@ -925,6 +969,9 @@ func TestCollidingInstanceGetsNoClient(t *testing.T) {
 	}
 	if ac := tdns.Globals.ApiClients["auth2"]; ac == nil || ac.BaseUrl != "https://127.0.0.1:8992/api/v1" {
 		t.Errorf("auth2 client (the first auth2 wins, as in the wiring): %+v", ac)
+	}
+	if ac := tdns.Globals.ApiClients["auth3"]; ac == nil || ac.BaseUrl != "https://127.0.0.1:8995/api/v1" {
+		t.Errorf("auth3 client (the entry the wiring accepts, not the refused one before it): %+v", ac)
 	}
 	if d := getApiDetailsByClientKey("tdns-auth"); d == nil || d.ConfigFile != "/etc/tdns/tdns-auth.yaml" {
 		t.Errorf("config lookup for tdns-auth: %+v", d)
@@ -1077,5 +1124,77 @@ func TestIsCliConfigCmd(t *testing.T) {
 	}
 	if IsCliConfigCmd(other) || IsCliConfigCmd(root) {
 		t.Error("`auth config` (a daemon's config check) was taken for the CLI-config command")
+	}
+}
+
+func statOf(t *testing.T, p string) os.FileInfo {
+	t.Helper()
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi
+}
+
+// A row named tdns-auth that carries a role: is an instance using a reserved
+// name, which the CLI ignores. It is not the canonical entry: an add that
+// would become the canonical tdns-auth says so instead of filing the daemon
+// as an extra instance (which left `tdns-ncli auth` with no client), and an
+// add under a name of its own is not blocked by it.
+func TestRoleCarryingCanonicalNameIsNotTheCanonicalEntry(t *testing.T) {
+	existing := []ApiDetails{{Name: "tdns-auth", Role: "auth", BaseURL: "https://127.0.0.1:8989/api/v1"}}
+	var entry ApiDetails
+	var res AddResult
+	err := chooseEntryName(&entry, &res, "auth", existing, AddOptions{DaemonConfig: "/etc/tdns/tdns-auth.yaml"})
+	if err == nil || !strings.Contains(err.Error(), "role: auth") {
+		t.Fatalf("err = %v, entry = %+v; want the ignored tdns-auth row named", err, entry)
+	}
+	entry, res = ApiDetails{}, AddResult{}
+	if err := chooseEntryName(&entry, &res, "auth", existing, AddOptions{DaemonConfig: "/etc/tdns/x.yaml", Name: "auth3"}); err != nil || entry.Name != "auth3" {
+		t.Errorf("an add under its own name: %+v, %v", entry, err)
+	}
+}
+
+// The same daemon config reached through a symlink is the same daemon:
+// "already known", not two daemons on one address.
+func TestSameDaemonThroughASymlinkIsAlreadyKnown(t *testing.T) {
+	env := newAddEnv(t)
+	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	if _, err := env.add(t, d, nil); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "tdns-auth.yaml")
+	if err := os.Symlink(d, link); err != nil {
+		t.Skip("no symlinks here")
+	}
+	res, err := env.add(t, link, nil)
+	if err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote {
+		t.Fatalf("re-add through a symlink: %+v, %v; want it already known", res, err)
+	}
+}
+
+// Advice printed after an add, or for an empty list, reads the CLI config the
+// command read: with --config when that is not the default.
+func TestPrintedAdviceKeepsTheCliConfig(t *testing.T) {
+	saved := DefaultCliConfigFile
+	t.Cleanup(func() { DefaultCliConfigFile = saved })
+	DefaultCliConfigFile = "/etc/tdns/tdns-ncli.yaml"
+	cfg := "/tmp/lab config.yaml"
+
+	var sb strings.Builder
+	res := &AddResult{Entry: ApiDetails{Name: "auth2", Role: "auth"}, File: "/tmp/local.yaml"}
+	printAddResult(&sb, res, false, cfg)
+	if want := "Try it:  tdns-ncli --config '/tmp/lab config.yaml' auth2 ping"; !strings.Contains(sb.String(), want) {
+		t.Errorf("missing %q in:\n%s", want, sb.String())
+	}
+	sb.Reset()
+	printListRows(&sb, nil, false, cfg)
+	if want := "tdns-ncli --config '/tmp/lab config.yaml' config add <daemon-config.yaml>"; !strings.Contains(sb.String(), want) {
+		t.Errorf("missing %q in:\n%s", want, sb.String())
+	}
+	sb.Reset()
+	printAddResult(&sb, res, false, DefaultCliConfigFile)
+	if want := "Try it:  tdns-ncli auth2 ping"; !strings.Contains(sb.String(), want) {
+		t.Errorf("missing %q in:\n%s", want, sb.String())
 	}
 }
