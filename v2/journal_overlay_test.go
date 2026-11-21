@@ -477,25 +477,29 @@ func TestJournalOverlayOwnCopyWins(t *testing.T) {
 	}
 }
 
-// T8. Zones that are not overlay zones behave as before: a journalled CDS is
-// not overlaid and the journal is left as it was. The primary's reload merge
-// and replay are pinned by the zone_reload_reconcile tests.
+// T8. Zones that are not overlay zones get no overlay: a journalled CDS is not
+// overlaid. The journal is left as it was, except that a zone that journals
+// outside the overlay -- multi-provider, or an app other than tdns-auth --
+// discards a journal that does not start at the serial received when a full
+// transfer replaces its content (#919). The primary's reload merge and replay
+// are pinned by the zone_reload_reconcile tests.
 func TestJournalOverlayOnlyOverlayZones(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		setup func(t *testing.T, zd *ZoneData)
+		name      string
+		discarded bool
+		setup     func(t *testing.T, zd *ZoneData)
 	}{
-		{"plain secondary", func(t *testing.T, zd *ZoneData) {
+		{"plain secondary", false, func(t *testing.T, zd *ZoneData) {
 			zd.mu.Lock()
 			zd.Options[OptInlineSigning] = false
 			zd.mu.Unlock()
 		}},
-		{"multi-provider", func(t *testing.T, zd *ZoneData) {
+		{"multi-provider", true, func(t *testing.T, zd *ZoneData) {
 			zd.mu.Lock()
 			zd.Options[OptMultiProvider] = true
 			zd.mu.Unlock()
 		}},
-		{"not tdns-auth", func(t *testing.T, zd *ZoneData) {
+		{"not tdns-auth", true, func(t *testing.T, zd *ZoneData) {
 			prev := Globals.App.Type
 			Globals.App.Type = AppTypeAgent
 			t.Cleanup(func() { Globals.App.Type = prev })
@@ -512,7 +516,11 @@ func TestJournalOverlayOnlyOverlayZones(t *testing.T) {
 			if ovHas(ovServed(t, zd, ovZone, dns.TypeCDS), ovCDS(t, 1)) {
 				t.Error("a journalled CDS was overlaid on a zone that is not an overlay zone")
 			}
-			if after := ovJournalString(ovJournal(t, zd)); after != before {
+			after := ovJournalString(ovJournal(t, zd))
+			switch {
+			case tc.discarded && len(ovJournal(t, zd)) != 0:
+				t.Errorf("the journal was kept by a full transfer:\nbefore:%s\nafter:%s", before, after)
+			case !tc.discarded && after != before:
 				t.Errorf("the journal changed:\nbefore:%s\nafter:%s", before, after)
 			}
 		})

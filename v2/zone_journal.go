@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -72,6 +73,12 @@ type ZoneJournalInfo struct {
 	// restart, and Replayed does not apply.
 	Overlay bool
 
+	// FromTransfer is true when the zone's content came by transfer rather
+	// than from its file. FileSerial is then the serial received, and a
+	// journal that does not start there is discarded by a full transfer
+	// (#919).
+	FromTransfer bool
+
 	// PersistenceActive is false when the deployment-wide kill-switch
 	// (journal: active: false) is set. A server quietly not persisting is the
 	// thing this whole subsystem exists to prevent, so it is reported rather
@@ -113,6 +120,7 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 	served := zd.CurrentSerial
 	replayed := zd.deltasReplayed
 	overlay := zd.isOverlayZoneLocked()
+	fromTransfer := zd.contentFromTransfer
 	zd.mu.Unlock()
 
 	info := &ZoneJournalInfo{
@@ -124,6 +132,7 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 		Replayed:          replayed,
 		Replayable:        true,
 		Overlay:           overlay,
+		FromTransfer:      fromTransfer,
 		PersistenceActive: JournalActive(),
 	}
 
@@ -159,17 +168,34 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 
 		// The same check the load path runs, from the same function, so the
 		// answer here cannot drift away from what actually happens at startup.
-		// An overlay zone's load does not run it: its journal is applied to
-		// every full transfer instead, so it stays in effect across a restart.
-		if !overlay {
-			if err := validateDeltaChain(zd.ZoneName, deltas, fileSerial); err != nil {
-				info.Replayable = false
-				info.Diagnosis = err.Error()
-			}
-		}
+		info.Replayable, info.Diagnosis = journalReplayability(zd.ZoneName, deltas, fileSerial, overlay, fromTransfer)
 	}
 
 	return info, nil
+}
+
+// journalReplayability says whether a restart would replay deltas, and why not
+// when it would not. One judgement for `zone journal status` and for the purge's
+// confirmation gate, so that both decide on the rows they are given and cannot
+// differ about them. deltas is not empty.
+//
+// An overlay zone's load does not run the check: its journal is applied to every
+// full transfer instead, so it stays in effect across a restart. A transferred
+// zone whose journal predates the copy it received has it discarded by a full
+// transfer, not refused (discardJournalBehindTransferLocked).
+func journalReplayability(zone string, deltas []ZoneDeltaRecord, fileSerial uint32,
+	overlay, fromTransfer bool) (bool, string) {
+	switch {
+	case overlay:
+		// Applied to every full transfer; there is no chain to check.
+	case journalBehindTransfer(fromTransfer, deltas, fileSerial):
+		return false, journalBehindTransferDiagnosis(zone, deltas, fileSerial)
+	default:
+		if err := validateDeltaChain(zone, deltas, fileSerial); err != nil {
+			return false, err.Error()
+		}
+	}
+	return true, ""
 }
 
 // JournalInstructions flattens the journal into one instruction list, in
@@ -184,6 +210,13 @@ func (zd *ZoneData) JournalInstructions() ([]ZoneDeltaRR, int64, error) {
 	if err != nil {
 		return nil, 0, err
 	}
+	out, maxID := flattenJournal(deltas)
+	return out, maxID, nil
+}
+
+// flattenJournal is deltas as one instruction list, in replay order, and the
+// highest row id it covers.
+func flattenJournal(deltas []ZoneDeltaRecord) ([]ZoneDeltaRR, int64) {
 	var out []ZoneDeltaRR
 	var maxID int64
 	for _, d := range deltas {
@@ -192,7 +225,20 @@ func (zd *ZoneData) JournalInstructions() ([]ZoneDeltaRR, int64, error) {
 			maxID = d.MaxID
 		}
 	}
-	return out, maxID, nil
+	return out, maxID
+}
+
+// journalInfoOf describes deltas, which is not empty, for the artefact and the
+// log of a purge or a discard: what the rows themselves say, so that it is the
+// description of exactly what is deleted.
+func journalInfoOf(deltas []ZoneDeltaRecord, insns []ZoneDeltaRR, fileSerial uint32) *ZoneJournalInfo {
+	return &ZoneJournalInfo{
+		Deltas:       len(deltas),
+		Records:      len(insns),
+		AnchorSerial: deltas[0].FromSerial,
+		HeadSerial:   deltas[len(deltas)-1].ToSerial,
+		FileSerial:   fileSerial,
+	}
 }
 
 // ZoneJournalPurgeResult reports what a purge did.
@@ -205,6 +251,59 @@ type ZoneJournalPurgeResult struct {
 	// happens only when an update published DURING the purge. Those are not in
 	// the artefact and were deliberately not deleted.
 	Remaining int
+}
+
+// saveAndDeleteJournal is the part of a purge that touches the journal: it
+// writes what the journal holds to {zonefile}.{serial}.purged when the zone has
+// a file, then deletes exactly those rows. insns and maxID are what
+// JournalInstructions returned, info describes the journal they came from, and
+// why says in a few words what discarded it, for the artefact's first line. It
+// returns the result with Artefact empty for a zone with no file, which is
+// for the caller to say something about.
+//
+// Fails, and deletes nothing, when the artefact cannot be written.
+//
+// It does not take zd.mu, so a caller that holds it can use it.
+func (zd *ZoneData) saveAndDeleteJournal(info *ZoneJournalInfo, insns []ZoneDeltaRR, maxID int64, why string) (*ZoneJournalPurgeResult, error) {
+	res := &ZoneJournalPurgeResult{Deltas: info.Deltas, Instructions: insns}
+
+	// Preserve before destroying, and fail the purge if preserving fails. A
+	// purge whose artefact could not be written is exactly the `rm zone.jnl`
+	// this command exists to be better than.
+	if zd.Zonefile != "" {
+		path := fmt.Sprintf("%s.%d.purged", zd.Zonefile, info.HeadSerial)
+		if err := writeInstructionFile(path, []string{
+			"tdns: journal content discarded " + why,
+			fmt.Sprintf("zone:     %s", zd.ZoneName),
+			fmt.Sprintf("serials:  %d -> %d (%d deltas, %d records)",
+				info.AnchorSerial, info.HeadSerial, info.Deltas, info.Records),
+			fmt.Sprintf("file:     %s (serial %d)", zd.Zonefile, info.FileSerial),
+			fmt.Sprintf("purged:   %s", time.Now().Format(time.RFC3339)),
+			"",
+			"Replay what you want back with:",
+			fmt.Sprintf("  tdns-cli auth zone update from-file --file %s --zone %s --via api",
+				path, zd.ZoneName),
+		}, insns); err != nil {
+			return nil, fmt.Errorf("zone %s: refusing to purge the journal, because the discarded"+
+				" content could not be saved to %s: %v", zd.ZoneName, path, err)
+		}
+		res.Artefact = path
+	}
+
+	// Delete exactly what the artefact records, and not a row more.
+	//
+	// An update can publish between the read that produced insns and this
+	// delete. Its delta is not in the artefact -- it did not exist when the
+	// artefact was written
+	// -- so an unbounded delete would destroy content that was never saved
+	// anywhere, which is the one thing purge must not do. Bounding by the row
+	// id the snapshot covered leaves such a delta in place.
+	n, err := zd.KeyDB.DeleteZoneDeltasThroughID(zd.ZoneName, maxID)
+	if err != nil {
+		return nil, err
+	}
+	res.Rows = n
+	return res, nil
 }
 
 // JournalPurge discards the whole journal, having first written what it holds
@@ -225,15 +324,33 @@ type ZoneJournalPurgeResult struct {
 // so purging costs nothing that was not already lost, and requiring a flag
 // there would just be an obstacle in front of the one remedy.
 func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
-	info, err := zd.JournalInfo(false)
+	if zd == nil {
+		return nil, fmt.Errorf("no such zone")
+	}
+	if zd.KeyDB == nil || zd.KeyDB.DB == nil {
+		return nil, fmt.Errorf("zone %s: no database, so no journal", zd.ZoneName)
+	}
+
+	// One reading of the journal, and of the state of the zone it is judged
+	// against. The gates below and the delete both go by these rows: an update
+	// can publish between two readings, and a gate that had judged rows the
+	// delete then does not see, or the reverse, would delete a journal that
+	// replays without the confirmation that --force is.
+	deltas, err := zd.KeyDB.LoadZoneDeltas(zd.ZoneName)
 	if err != nil {
 		return nil, err
 	}
-	if info.Deltas == 0 {
+	if len(deltas) == 0 {
 		return &ZoneJournalPurgeResult{}, nil
 	}
+	insns, maxID := flattenJournal(deltas)
+	zd.mu.Lock()
+	fileSerial, overlay, fromTransfer := zd.fileSerial, zd.isOverlayZoneLocked(), zd.contentFromTransfer
+	zd.mu.Unlock()
+	info := journalInfoOf(deltas, insns, fileSerial)
+	replayable, _ := journalReplayability(zd.ZoneName, deltas, fileSerial, overlay, fromTransfer)
 
-	if info.Overlay && !force {
+	if overlay && !force {
 		// There is no zone file to sync them into: a secondary's content comes
 		// from its upstream, and these records exist only here.
 		return nil, fmt.Errorf("zone %s: the journal holds %d change(s) in %d delta(s), and"+
@@ -243,7 +360,7 @@ func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
 			" with --force if you really mean to discard them",
 			zd.ZoneName, info.Records, info.Deltas)
 	}
-	if info.Replayable && !force {
+	if replayable && !force {
 		return nil, fmt.Errorf("zone %s: the journal holds %d change(s) in %d delta(s) that are"+
 			" NOT in the zone file, and it would replay cleanly on restart. Purging discards them."+
 			" Use `zone sync` to fold them into the zone file instead (nothing is lost), or"+
@@ -251,35 +368,11 @@ func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
 			zd.ZoneName, info.Records, info.Deltas)
 	}
 
-	insns, maxID, err := zd.JournalInstructions()
+	res, err := zd.saveAndDeleteJournal(info, insns, maxID, "by `zone journal purge`")
 	if err != nil {
 		return nil, err
 	}
-
-	res := &ZoneJournalPurgeResult{Deltas: info.Deltas, Instructions: insns}
-
-	// Preserve before destroying, and fail the purge if preserving fails. A
-	// purge whose artefact could not be written is exactly the `rm zone.jnl`
-	// this command exists to be better than.
-	if zd.Zonefile != "" {
-		path := fmt.Sprintf("%s.%d.purged", zd.Zonefile, info.HeadSerial)
-		if err := writeInstructionFile(path, []string{
-			"tdns: journal content discarded by `zone journal purge`",
-			fmt.Sprintf("zone:     %s", zd.ZoneName),
-			fmt.Sprintf("serials:  %d -> %d (%d deltas, %d records)",
-				info.AnchorSerial, info.HeadSerial, info.Deltas, info.Records),
-			fmt.Sprintf("file:     %s (serial %d)", zd.Zonefile, info.FileSerial),
-			fmt.Sprintf("purged:   %s", time.Now().Format(time.RFC3339)),
-			"",
-			"Replay what you want back with:",
-			fmt.Sprintf("  tdns-cli auth zone update from-file --file %s --zone %s --via api",
-				path, zd.ZoneName),
-		}, insns); err != nil {
-			return nil, fmt.Errorf("zone %s: refusing to purge the journal, because the discarded"+
-				" content could not be saved to %s: %v", zd.ZoneName, path, err)
-		}
-		res.Artefact = path
-	} else {
+	if res.Artefact == "" {
 		// A zone with no file on disk has nowhere to put the artefact. The
 		// content still travels back in the response, so it is not lost -- but
 		// say so rather than let the operator assume a file was written.
@@ -287,19 +380,6 @@ func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
 			" the discarded content is in the response only, not saved to disk",
 			"zone", zd.ZoneName, "records", info.Records)
 	}
-
-	// Delete exactly what the artefact records, and not a row more.
-	//
-	// An update can publish between the read above and this delete. Its delta
-	// is not in the artefact -- it did not exist when the artefact was written
-	// -- so an unbounded delete would destroy content that was never saved
-	// anywhere, which is the one thing purge must not do. Bounding by the row
-	// id the snapshot covered leaves such a delta in place.
-	n, err := zd.KeyDB.DeleteZoneDeltasThroughID(zd.ZoneName, maxID)
-	if err != nil {
-		return nil, err
-	}
-	res.Rows = n
 
 	// Did anything arrive during the purge? Then the journal is not empty, and
 	// what remains no longer chains from the zone file -- its predecessors are
@@ -332,10 +412,225 @@ func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
 	zd.mu.Unlock()
 
 	lg.Info("zone journal purged", "zone", zd.ZoneName, "deltas", info.Deltas,
-		"records", info.Records, "rows", n, "artefact", res.Artefact,
+		"records", info.Records, "rows", res.Rows, "artefact", res.Artefact,
 		"remaining", res.Remaining)
 
 	return res, nil
+}
+
+// journalBehindTransfer reports whether a zone whose content came by transfer
+// holds a journal that does not chain from the serial it received (#919).
+//
+// Such a journal was recorded against the upstream's copy at an older serial,
+// and that copy is gone. A full transfer, at a restart or while the server
+// runs, replaces the zone, and a secondary's local changes do not survive one.
+// Only an overlay zone's own records do (journal_overlay.go), and an overlay
+// zone never gets here. Replaying the journal applies changes to content they
+// were not computed against. Refusing it, as a file-backed zone's journal is
+// refused, reports an edited zone file that may not exist.
+func journalBehindTransfer(fromTransfer bool, deltas []ZoneDeltaRecord, received uint32) bool {
+	return fromTransfer && len(deltas) > 0 && deltas[0].FromSerial != received
+}
+
+// journalBehindTransferDiagnosis says why such a journal will not replay.
+func journalBehindTransferDiagnosis(zone string, deltas []ZoneDeltaRecord, received uint32) string {
+	return fmt.Sprintf("zone %s: the zone was transferred at serial %d, and its persisted deltas"+
+		" start at serial %d: they were recorded against an older copy from the upstream."+
+		" A full transfer does not keep this server's local changes, so the next one,"+
+		" a restart included, discards them", zone, received, deltas[0].FromSerial)
+}
+
+// serialPastReceivedAnchorLocked is the serial a journalled change to a
+// transferred zone publishes at: next, or the serial after the one the journal
+// is anchored to when next is not past it (#919).
+//
+// The first delta of a journal is anchored to the serial the zone received, and
+// a delta has to advance the serial (PersistZoneDelta). A transferred zone
+// counts its own serials, one past the one it served, and the replacement a
+// full transfer publishes is not lifted to the upstream's serial: that is its
+// own count, not the upstream's. So an upstream that is ahead of it leaves the
+// journal anchored past the serial the first change would publish at, and the
+// change is refused as not advancing it, until the zone's own count has
+// caught up. Lifted here instead, once, at the change that needs it: the change
+// then runs forward from the serial received, which is the one a restart with an
+// upstream that has not moved starts its chain at.
+//
+// Only while the journal is empty, which is when its anchor is the serial
+// received: with a journal, the next delta chains from its tail and a tail
+// that is ahead is a different fault. Not for an overlay zone, whose journal
+// runs from the serial it serves. A zone loaded from its file keeps its own
+// floors. Caller holds zd.mu.
+func (zd *ZoneData) serialPastReceivedAnchorLocked(next uint32) uint32 {
+	if !zd.contentFromTransfer || zd.KeyDB == nil || zd.KeyDB.DB == nil ||
+		!JournalActive() || zd.isOverlayZoneLocked() {
+		return next
+	}
+	if _, have, err := zd.KeyDB.LastZoneDeltaSerial(zd.ZoneName); err != nil || have {
+		// An error is refused where the base is read for the delta.
+		return next
+	}
+	if serialNewer(next, zd.fileSerial) {
+		return next
+	}
+	return zd.fileSerial + 1
+}
+
+// journalDiscardWarning prefixes the ConfigWarning raised when the journal of a
+// transferred zone could not be discarded, so that a later discard that is done
+// clears that warning and no other.
+const journalDiscardWarning = "persisted zone deltas predate the transferred copy and could not be discarded"
+
+// raiseJournalDiscardWarningLocked raises the warning for a discard that failed,
+// keeping what it displaced (a zone has one ConfigWarning) for
+// clearJournalDiscardWarningLocked to put back. Caller holds zd.mu.
+func (zd *ZoneData) raiseJournalDiscardWarningLocked(err error) {
+	if !zd.journalDiscardFailed {
+		zd.journalDiscardPrevWarning = zd.snapshotErrorsLocked(ConfigWarning)
+		zd.journalDiscardFailed = true
+	}
+	zd.setErrorLocked(ConfigWarning, "%s: %v", journalDiscardWarning, err)
+}
+
+// clearJournalDiscardWarningLocked takes the warning back once a discard has
+// been done, or there was nothing left that needed one. Only the warning
+// raiseJournalDiscardWarningLocked raised: another ConfigWarning raised since
+// is not ours to clear, and the same check is made in recordPublishedSerialLocked.
+// Caller holds zd.mu.
+func (zd *ZoneData) clearJournalDiscardWarningLocked() {
+	if !zd.journalDiscardFailed {
+		return
+	}
+	if cur, ok := zd.Errors[ConfigWarning]; ok && strings.HasPrefix(cur.Msg, journalDiscardWarning) {
+		zd.restoreErrorsLocked(zd.journalDiscardPrevWarning, ConfigWarning)
+	}
+	zd.journalDiscardFailed = false
+	zd.journalDiscardPrevWarning = nil
+}
+
+// discardJournalBehindTransfer is discardJournalBehindTransferLocked for a
+// caller that does not hold zd.mu: the first load, from
+// reconcileZoneFileWithJournal.
+func (zd *ZoneData) discardJournalBehindTransfer() (bool, error) {
+	if zd == nil {
+		return false, nil
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.discardJournalBehindTransferLocked(false)
+}
+
+// discardJournalBehindTransferLocked discards the journal of a zone whose
+// content came by transfer. It reports whether there was a journal to discard,
+// and an error if it could not be discarded, or if it could not be read
+// (handled is false then, and the replay that follows reads the same journal
+// and reports it too). Caller holds zd.mu.
+//
+// Two callers, told apart by replaced.
+//
+// At the first load (replaced false) the transfer is the zone's first content
+// and the journal comes from an earlier run. Only a journal that does not chain
+// from the serial received is discarded: one that does is replayed, as the load
+// goes on to do.
+//
+// At a full transfer while the server runs (replaced true) the journal is
+// recorded against the content the transfer has just replaced, and all of it
+// goes, whether it chains from the serial received or not. A full transfer does
+// not keep local changes: the zone no longer serves them, and a journal that
+// stays would bring them back at the next restart, so the zone would serve one
+// thing while it ran and another after it. A journal that chains from the
+// serial received at runtime is the one a forced retransfer at the serial the
+// zone already holds leaves.
+//
+// Discarded, not kept with a warning. A journal that does not start at the
+// received serial can never replay, since the upstream's serial only moves
+// forward. Every change recorded after it chains from its tail, so keeping it
+// would lose those changes at the next restart too, even with an upstream
+// that has not moved. The warning would also come back at every restart until
+// someone purged the journal by hand.
+//
+// Under zd.mu for the whole of it, which is what closes the window a purge
+// through JournalPurge has: every writer of a new delta (publishWorkingSetLocked)
+// holds zd.mu, so none can land between the read and the delete, and no delta
+// is left behind anchored to the chain that was discarded. The read-back at the
+// end checks that anyway, and says so if one remains.
+//
+// Saved before it is deleted, as in a purge: a zone with a file gets the
+// .purged artefact beside it, and a zone without one gets the discarded
+// instructions in the log.
+//
+// A discard that fails raises a ConfigWarning, and one that is done, or that
+// finds nothing left to discard, takes it back (journalDiscardWarning).
+func (zd *ZoneData) discardJournalBehindTransferLocked(replaced bool) (bool, error) {
+	if zd == nil || zd.KeyDB == nil || zd.KeyDB.DB == nil {
+		return false, nil
+	}
+	// An overlay zone's journal is its own records, applied to every full
+	// transfer; it is not a chain from anything received.
+	if !zd.contentFromTransfer || zd.isOverlayZoneLocked() {
+		return false, nil
+	}
+	received := zd.fileSerial
+
+	deltas, err := zd.KeyDB.LoadZoneDeltas(zd.ZoneName)
+	if err != nil {
+		return false, err
+	}
+	if len(deltas) == 0 || (!replaced && !journalBehindTransfer(true, deltas, received)) {
+		// Nothing that needs discarding, so nothing a warning about a failed
+		// discard still holds.
+		zd.clearJournalDiscardWarningLocked()
+		return false, nil
+	}
+
+	insns, maxID := flattenJournal(deltas)
+	info := journalInfoOf(deltas, insns, received)
+
+	res, err := zd.saveAndDeleteJournal(info, insns, maxID,
+		"because a full transfer replaced the content it was recorded against")
+	if err != nil {
+		zd.raiseJournalDiscardWarningLocked(err)
+		return true, err
+	}
+	// Nothing remains to replay for this load.
+	zd.deltasReplayed = false
+
+	logArgs := []any{"zone", zd.ZoneName, "received_serial", received,
+		"journal_from_serial", info.AnchorSerial, "deltas", res.Deltas,
+		"records", len(res.Instructions)}
+	if res.Artefact != "" {
+		logArgs = append(logArgs, "saved_to", res.Artefact)
+	} else {
+		var buf bytes.Buffer
+		if werr := WriteUpdateInstructions(&buf, nil, res.Instructions); werr == nil {
+			logArgs = append(logArgs, "discarded", strings.TrimSpace(buf.String()))
+		}
+	}
+	if replaced {
+		lg.Warn("a full transfer replaced the content this zone's persisted deltas were recorded"+
+			" against, and it does not keep this server's local changes,"+
+			" so the deltas were discarded", logArgs...)
+	} else {
+		lg.Warn("the zone was transferred from an upstream that has moved on since its persisted"+
+			" deltas were recorded; a full transfer does not keep this server's local changes,"+
+			" so the deltas were discarded", logArgs...)
+	}
+
+	left, err := zd.KeyDB.LoadZoneDeltas(zd.ZoneName)
+	if err != nil {
+		err = fmt.Errorf("the deltas were discarded, but the journal could not be read"+
+			" back to check that none remain: %w", err)
+		zd.raiseJournalDiscardWarningLocked(err)
+		return true, err
+	}
+	if len(left) > 0 {
+		err = fmt.Errorf("the deltas were discarded, but %d delta(s) remain in the journal,"+
+			" starting at serial %d and not chaining from the serial received, %d",
+			len(left), left[0].FromSerial, received)
+		zd.raiseJournalDiscardWarningLocked(err)
+		return true, err
+	}
+	zd.clearJournalDiscardWarningLocked()
+	return true, nil
 }
 
 // JournalTruncate drops the journal's tail, keeping the chain through serial.

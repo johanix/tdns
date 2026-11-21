@@ -673,6 +673,23 @@ func (zd *ZoneData) reconcileZoneFileWithJournal(verdict ZoneFileVerdict, prev *
 		dealtWith = true
 	}
 
+	// A zone whose content came by transfer, from an upstream that has moved
+	// on since the journal was recorded (#919). The journal is obsolete, so it
+	// is discarded rather than refused: see discardJournalBehindTransfer. No
+	// ConfigWarning, since nothing about the zone needs fixing, and no claim
+	// that a zone file was edited: such a zone may have no file at all.
+	if handled, derr := zd.discardJournalBehindTransfer(); handled {
+		if derr != nil {
+			// The ConfigWarning for it is raised by the discard itself
+			// (journalDiscardWarning), where a later discard clears it.
+			lg.Error("could not discard persisted deltas recorded against an older copy"+
+				" from the upstream; they are NOT applied",
+				"zone", zd.ZoneName, "error", derr)
+			reconciled = false
+		}
+		return
+	}
+
 	// A CHANGED file takes the merge path, not the replay path. Replay asserts
 	// the chain starts at this file and refuses otherwise -- correct when the
 	// file is the one the journal was computed against, and destructive when it
