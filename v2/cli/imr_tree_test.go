@@ -312,7 +312,9 @@ func TestImrConfigMwePathPerInstance(t *testing.T) {
 	RegisterRole("imr2", "imr2")
 	RegisterRole("imr3", "imr3")
 	apiConfig = &CliConf{ApiServers: []ApiDetails{
-		{Name: "tdns-imr", BaseURL: "http://127.0.0.1:8080/api/v1"},
+		// The canonical resolver's config-file: does not move its MWE: it
+		// stays tdns-imr.yaml, as tdns-cli has always written it.
+		{Name: "tdns-imr", BaseURL: "http://127.0.0.1:8080/api/v1", ConfigFile: "/srv/imr/custom.yaml"},
 		{Name: "imr2", Role: "imr", BaseURL: "http://127.0.0.1:8081/api/v1", ConfigFile: "/etc/tdns/tdns-imr2.yaml"},
 		{Name: "imr3", Role: "imr", BaseURL: "http://127.0.0.1:8082/api/v1"},
 	}}
