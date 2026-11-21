@@ -190,6 +190,14 @@ type armRecord struct {
 func runArm(t *testing.T, zd *ZoneData, ds DelegationSyncRequest,
 	analyse func() (DelegationSyncStatus, error), syncErr error) *armRecord {
 	t.Helper()
+	return runArmBy(t, zd, ds, analyse, "", syncErr)
+}
+
+// runArmBy is runArm with a send that reports scheme as the one that carried
+// the difference.
+func runArmBy(t *testing.T, zd *ZoneData, ds DelegationSyncRequest,
+	analyse func() (DelegationSyncStatus, error), scheme string, syncErr error) *armRecord {
+	t.Helper()
 	rec := &armRecord{}
 	ready := NewImrReadiness()
 	ready.Publish()
@@ -198,9 +206,9 @@ func runArm(t *testing.T, zd *ZoneData, ds DelegationSyncRequest,
 			rec.analyses++
 			return analyse()
 		},
-		sync: func(dss DelegationSyncStatus) (string, uint8, UpdateResult, error) {
+		sync: func(dss DelegationSyncStatus) (string, uint8, UpdateResult, string, error) {
 			rec.synced = append(rec.synced, dss)
-			return "sent", dns.RcodeSuccess, UpdateResult{}, syncErr
+			return "sent", dns.RcodeSuccess, UpdateResult{}, scheme, syncErr
 		},
 		requeue: func(next DelegationSyncRequest, delay time.Duration) {
 			rec.requeued = append(rec.requeued, next)
@@ -386,36 +394,63 @@ func TestDelegationAnalysisNamesAnUnreadDS(t *testing.T) {
 	})
 }
 
+// An in-bailiwick nameserver the zone keeps in its NS RRset but serves no
+// address for still has the parent's glue for it compared, with none: the
+// parent's A and AAAA are to be removed, as a stored difference that removed
+// the addresses would have removed them. Skipping it, the compare called the
+// parent in step with the stale glue still there (CodeRabbit on 9c217184).
+func TestDelegationAnalysisComparesGlueTheZoneNoLongerHas(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	zd := childZone(t, ddcngZone(1, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS2A), OptParentSync)
+	fakeParent(t, zd, []string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A})
+
+	resp, err := zd.AnalyseZoneDelegation(nil)
+	if err != nil {
+		t.Fatalf("AnalyseZoneDelegation: %v", err)
+	}
+	if resp.InSync || !resp.Complete() {
+		t.Fatalf("in sync %v, unread %q; want a complete compare that differs", resp.InSync, resp.Unread)
+	}
+	if len(resp.ARemoves) != 1 || len(resp.AAAARemoves) != 1 || len(resp.AAdds) != 0 || len(resp.AAAAAdds) != 0 {
+		t.Errorf("A removes %v, AAAA removes %v, adds %v %v; want the parent's ns1 A and AAAA removed, nothing added",
+			resp.ARemoves, resp.AAAARemoves, resp.AAdds, resp.AAAAAdds)
+	}
+}
+
 // The DS step's deliberate absences of opinion are not reads that failed: a
 // zone in one of them is complete, so a caller asking again until the analysis
-// is complete does not ask a rolling or unmanaged zone forever.
+// is complete does not ask a rolling or unmanaged zone forever. Only while a
+// rollover owns the DS does the analysis say it did not compare it
+// (dsCompared), so that it does not clear the mark that the parent may lack a
+// change (CodeRabbit on bb87c26b).
 func TestDelegationAnalysisNoOpinionIsComplete(t *testing.T) {
 	withApp(t, AppTypeAuth)
 	inStep := []string{ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A}
 	unsigned := ddcngZone(1, ddcngNS1, ddcngNS2, ddcngNSOut, ddcngNS1A, ddcngNS1AAAA, ddcngNS2A)
 
 	for _, tc := range []struct {
-		name  string
-		setup func(t *testing.T) *ZoneData
+		name       string
+		dsCompared bool
+		setup      func(t *testing.T) *ZoneData
 	}{
-		{"a rollover owns the DS (its query would fail)", func(t *testing.T) *ZoneData {
+		{"a rollover owns the DS (its query would fail)", false, func(t *testing.T) *ZoneData {
 			zd := childZone(t, ddcngServedZone(), OptParentSync)
 			zd.KeyDB = gateTestKeyDB(t)
 			seedRolloverRow(t, zd.KeyDB, ddcngZoneName, 1)
 			fakeParent(t, zd, inStep, "deleg.example./DS")
 			return zd
 		}},
-		{"keys tdns does not manage", func(t *testing.T) *ZoneData {
+		{"keys tdns does not manage", true, func(t *testing.T) *ZoneData {
 			zd := childZone(t, ddcngServedZone(), OptParentSync)
 			fakeParent(t, zd, append(inStep, ddcngDS(t, ddcngKSK2)))
 			return zd
 		}},
-		{"a proxy zone serving no CDS", func(t *testing.T) *ZoneData {
+		{"a proxy zone serving no CDS", true, func(t *testing.T) *ZoneData {
 			zd := childZone(t, ddcngServedZone(), OptParentSyncProxy)
 			fakeParent(t, zd, append(inStep, ddcngDS(t, ddcngKSK2)))
 			return zd
 		}},
-		{"no keys and no parent DS", func(t *testing.T) *ZoneData {
+		{"no keys and no parent DS", true, func(t *testing.T) *ZoneData {
 			zd := childZone(t, unsigned, OptParentSync)
 			fakeParent(t, zd, inStep)
 			return zd
@@ -432,6 +467,9 @@ func TestDelegationAnalysisNoOpinionIsComplete(t *testing.T) {
 			}
 			if !resp.InSync {
 				t.Errorf("in sync = false (DS adds %v, removes %v), want the NS and glue verdict", resp.DSAdds, resp.DSRemoves)
+			}
+			if resp.dsCompared != tc.dsCompared {
+				t.Errorf("DS compared = %v, want %v", resp.dsCompared, tc.dsCompared)
 			}
 		})
 	}
@@ -567,8 +605,8 @@ func TestRefreshSyncSendsNoDS(t *testing.T) {
 	}
 }
 
-// T5. A failure is retried on the proxy's schedule, and a retry is dropped
-// once a later sync has succeeded. The proxy arm's use of the same helpers is
+// T5. A failure is retried on the compares' schedule, without end, and a
+// retry is dropped once a later sync has succeeded. The proxy arm's use of the same helpers is
 // pinned in delsync_proxy_retry_test.go.
 func TestRefreshSyncRetries(t *testing.T) {
 	withApp(t, AppTypeAuth)
@@ -596,9 +634,11 @@ func TestRefreshSyncRetries(t *testing.T) {
 	}
 
 	last := first
-	last.Attempt = len(delegationSyncRetryDelays)
-	if rec = runArm(t, zd, last, outOfSync, errors.New("still refused")); len(rec.requeued) != 0 {
-		t.Error("the retries never run out")
+	last.Attempt = len(delegationSyncRetryDelays) + 2
+	rec = runArm(t, zd, last, outOfSync, errors.New("still refused"))
+	if want := delegationSyncRetryDelays[len(delegationSyncRetryDelays)-1]; len(rec.requeued) != 1 || rec.delays[0] != want {
+		t.Errorf("past the schedule's end: %d retries after %v, want 1 after %s: a compare is retried until the parent answers",
+			len(rec.requeued), rec.delays, want)
 	}
 
 	runArm(t, zd, first, outOfSync, nil)
@@ -618,6 +658,90 @@ func TestRefreshSyncRetries(t *testing.T) {
 	retry.FailedAt = lastOK.Add(time.Minute)
 	if rec = runArm(t, zd, retry, outOfSync, nil); rec.analyses != 1 {
 		t.Error("a retry of a failure from after the last success was dropped")
+	}
+}
+
+// A refresh sync compares NS and glue, not DS. Its success, found in sync or
+// sent, does not clear the mark that the parent may lack an earlier change: a
+// difference sent next could assume a DS the parent never got (re-review 3,
+// F3). It still drops an older refresh retry (TestRefreshSyncRetries).
+func TestARefreshSyncSuccessLeavesTheParentOutOfStep(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	zd := childZone(t, ddcngServedZone(), OptParentSync)
+	inSync := func() (DelegationSyncStatus, error) {
+		return DelegationSyncStatus{ZoneName: zd.ZoneName, InSync: true}, nil
+	}
+	outOfSync := func() (DelegationSyncStatus, error) {
+		return DelegationSyncStatus{ZoneName: zd.ZoneName}, nil
+	}
+	for _, c := range []struct {
+		name    string
+		analyse func() (DelegationSyncStatus, error)
+		sends   int
+	}{{"found in sync", inSync, 0}, {"sent", outOfSync, 1}} {
+		zd.delegationOutOfStep.Store(true)
+		rec := runArm(t, zd, refreshRequest(zd), c.analyse, nil)
+		if len(rec.synced) != c.sends || len(rec.requeued) != 0 {
+			t.Fatalf("%s: %d sends and %d retries, want %d and 0", c.name, len(rec.synced), len(rec.requeued), c.sends)
+		}
+		if !zd.delegationOutOfStep.Load() {
+			t.Errorf("%s: a refresh sync's success cleared the out-of-step mark", c.name)
+		}
+	}
+}
+
+// A refresh sync that finds the parent without the zone's NS or glue, and
+// cannot send it because the parent offers no usable scheme, has nothing to
+// retry through, but marks the parent out of step: the next stored change
+// must not assume the parent has what this one found missing (CodeRabbit on
+// bb87c26b).
+func TestARefreshSyncWithNoUsableSchemeMarksTheParent(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	zd := childZone(t, ddcngServedZone(), OptParentSync)
+	zd.delegationOutOfStep.Store(false)
+	rec := runArm(t, zd, refreshRequest(zd), func() (DelegationSyncStatus, error) {
+		return DelegationSyncStatus{ZoneName: zd.ZoneName}, nil
+	}, ErrNoUsableDsync)
+	if len(rec.synced) != 1 || len(rec.requeued) != 0 {
+		t.Fatalf("%d sends and %d retries, want 1 and 0", len(rec.synced), len(rec.requeued))
+	}
+	if !zd.delegationOutOfStep.Load() {
+		t.Error("a difference not sent for want of a usable scheme left the parent marked in step")
+	}
+}
+
+// A refresh sync whose difference went by NOTIFY marks the parent: the
+// notifier took it, and the parent has yet to come and read the zone. Nor is
+// it a success that would drop an older refresh retry. One sent by UPDATE or
+// API leaves the mark as it was (CodeRabbit on 4d398b97 and 9c217184).
+func TestARefreshSyncByNotifyMarksTheParent(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	zd := childZone(t, ddcngServedZone(), OptParentSync)
+	for _, c := range []struct {
+		scheme string
+		mark   bool
+	}{{"NOTIFY", true}, {"UPDATE", false}, {"API", false}} {
+		zd.delegationOutOfStep.Store(false)
+		zd.mu.Lock()
+		zd.delegationLastSyncOK = time.Time{}
+		zd.mu.Unlock()
+		rec := runArmBy(t, zd, refreshRequest(zd), func() (DelegationSyncStatus, error) {
+			return DelegationSyncStatus{ZoneName: zd.ZoneName}, nil
+		}, c.scheme, nil)
+		if len(rec.synced) != 1 || len(rec.requeued) != 0 {
+			t.Fatalf("%s: %d sends and %d retries, want 1 and 0", c.scheme, len(rec.synced), len(rec.requeued))
+		}
+		if got := zd.delegationOutOfStep.Load(); got != c.mark {
+			t.Errorf("a refresh sync sent by %s: marked out of step %v, want %v", c.scheme, got, c.mark)
+		}
+		// A NOTIFY is not a success that drops an older refresh retry
+		// (CodeRabbit on 9c217184); an UPDATE or API call is.
+		zd.mu.Lock()
+		stamped := !zd.delegationLastSyncOK.IsZero()
+		zd.mu.Unlock()
+		if stamped == c.mark {
+			t.Errorf("a refresh sync sent by %s: recorded as a success %v, want %v", c.scheme, stamped, !c.mark)
+		}
 	}
 }
 

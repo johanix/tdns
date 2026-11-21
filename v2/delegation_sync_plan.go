@@ -561,24 +561,45 @@ func resolveDsyncTarget(ctx context.Context, imr *Imr, rr *core.DSYNC) (*DsyncTa
 // expected to work.
 func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest,
 	imr *Imr, plan *ParentSyncPlan, analysis *ProxyDelegationAnalysis, updateSync *DelegationSyncStatus) (string, error) {
+	msg, _, err := zd.syncWithParentVia(ctx, kdb, notifyq, imr, plan, analysis, updateSync)
+	return msg, err
+}
+
+// syncWithParentVia is SyncWithParent that also returns the scheme that
+// carried the change: "" when nothing was forwarded. Only an UPDATE or API
+// success says the parent applied it; a NOTIFY's says the notifier took it.
+func (zd *ZoneData) syncWithParentVia(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest,
+	imr *Imr, plan *ParentSyncPlan, analysis *ProxyDelegationAnalysis, updateSync *DelegationSyncStatus) (string, string, error) {
 
 	if !plan.Usable() {
 		lgDns.Info("parentsync-proxy: nothing forwarded", "zone", zd.ZoneName,
 			"parent", plan.Parent, "plan", plan.Summary())
-		return "no usable sync scheme; nothing forwarded (" + plan.Summary() + ")", nil
+		return "no usable sync scheme; nothing forwarded (" + plan.Summary() + ")", "", nil
 	}
 
-	return zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
+	var scheme string
+	msg, err := zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
+		var m string
+		var e error
 		switch cand.Scheme {
 		case "UPDATE":
-			return zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target, updateSync, analysis)
+			m, e = zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target, updateSync, analysis)
 		case "API":
-			return zd.ProxyApiParent(ctx, imr, cand.Target, analysis)
+			m, e = zd.ProxyApiParent(ctx, imr, cand.Target, analysis)
 		case "NOTIFY":
-			return zd.ProxyNotifyParent(ctx, notifyq, analysis, cand.Target)
+			m, e = zd.ProxyNotifyParent(ctx, notifyq, analysis, cand.Target)
+		default:
+			return "", fmt.Errorf("unknown scheme %q in plan", cand.Scheme)
 		}
-		return "", fmt.Errorf("unknown scheme %q in plan", cand.Scheme)
+		if e == nil {
+			scheme = cand.Scheme
+		}
+		return m, e
 	})
+	if err != nil {
+		scheme = ""
+	}
+	return msg, scheme, err
 }
 
 // walkSyncPlan tries each candidate via send, returning the first success.
