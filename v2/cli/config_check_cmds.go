@@ -1270,6 +1270,13 @@ func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, acceptedKey str
 			fmt.Sprintf("config has debug-do53-queries-refused %s, the running server has it %s", onOff(on), onOff(resp.Do53QueriesRefused)),
 			"the option takes effect at the next restart")
 	}
+	warnApiKeyDrift(cfg, acceptedKey, rep, g)
+}
+
+// warnApiKeyDrift warns when the file's apiserver.apikey is not the key the
+// running server accepted (acceptedKey, the key a request that succeeded was
+// sent with). It says nothing when either is unknown.
+func warnApiKeyDrift(cfg *tdns.Config, acceptedKey string, rep *ccReport, g string) {
 	if acceptedKey != "" && cfg.ApiServer.ApiKey.Value() != "" && acceptedKey != cfg.ApiServer.ApiKey.Value() {
 		rep.warn(g, "apikey",
 			"apiserver.apikey in the file differs from the key the running server accepts",

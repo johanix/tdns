@@ -32,6 +32,13 @@ func TestCorrelateStatusApiKeyUsesTheAcceptedKey(t *testing.T) {
 			if got := hasLevel(rep, "Running server", "apikey", ccWARN); got != tc.wantWarn {
 				t.Fatalf("warned = %v, want %v; report %+v", got, tc.wantWarn, rep.byGroup["Running server"])
 			}
+
+			// imr config check makes the same comparison.
+			rep = newCCReport()
+			correlateImrApiServer(cfg, resp, tc.accepted, rep)
+			if got := hasLevel(rep, "Running-config drift", "apikey", ccWARN); got != tc.wantWarn {
+				t.Fatalf("imr: warned = %v, want %v; report %+v", got, tc.wantWarn, rep.byGroup["Running-config drift"])
+			}
 		})
 	}
 }
