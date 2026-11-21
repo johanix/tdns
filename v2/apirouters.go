@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -13,27 +12,6 @@ import (
 
 	"github.com/gorilla/mux"
 )
-
-// apiKeyAuthMiddleware returns a middleware that validates the API key using
-// constant-time comparison to prevent timing side-channel attacks.
-func apiKeyAuthMiddleware(expectedKey string) mux.MiddlewareFunc {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// The local admin socket authenticates by file permissions: the
-			// connection got here, so the caller could open the socket. No key.
-			if FromLocalSocket(r.Context()) {
-				next.ServeHTTP(w, r)
-				return
-			}
-			providedKey := r.Header.Get("X-API-Key")
-			if subtle.ConstantTimeCompare([]byte(providedKey), []byte(expectedKey)) != 1 {
-				http.Error(w, "Forbidden", http.StatusForbidden)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}
 
 var lgApi = Logger("api")
 
@@ -63,8 +41,15 @@ func (conf *Config) SetupSimpleAPIRouter(ctx context.Context) (*mux.Router, erro
 		return nil, fmt.Errorf("apiserver.apikey is not set")
 	}
 
+	// The key check goes on the ROOT router, not on this subrouter. A
+	// middleware on a subrouter covers only the routes registered on that
+	// subrouter, and callers add routes of their own afterwards on a second
+	// "/api/v1" subrouter of the router returned here (tdns-mp's
+	// Setup*Routes) or on the root router (RegisterAPIRoute callbacks). On
+	// the subrouter those routes answered without a key.
+	conf.initApiAccess()
+	rtr.Use(conf.apiAuthMiddleware(apikey))
 	sr := rtr.PathPrefix("/api/v1").Subrouter()
-	sr.Use(apiKeyAuthMiddleware(apikey))
 
 	// Common endpoints
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
@@ -91,8 +76,15 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		return nil, fmt.Errorf("apiserver.apikey is not set")
 	}
 
+	// The key check goes on the ROOT router, not on this subrouter. A
+	// middleware on a subrouter covers only the routes registered on that
+	// subrouter, and callers add routes of their own afterwards on a second
+	// "/api/v1" subrouter of the router returned here (tdns-mp's
+	// Setup*Routes) or on the root router (RegisterAPIRoute callbacks). On
+	// the subrouter those routes answered without a key.
+	conf.initApiAccess()
+	rtr.Use(conf.apiAuthMiddleware(apikey))
 	sr := rtr.PathPrefix("/api/v1").Subrouter()
-	sr.Use(apiKeyAuthMiddleware(apikey))
 
 	// Common endpoints
 	sr.HandleFunc("/ping", APIping(conf)).Methods("POST")
@@ -228,6 +220,19 @@ func xxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 // Sync router setup functions (SetupAgentSyncRouter, SetupCombinerSyncRouter,
 // SetupSignerSyncRouter) have moved to tdns-mp/v2/apirouter_sync.go.
 
+// apiServerTLSConfig is the TLS setup of the TCP management API listeners
+// (the certificate itself comes from certfile/keyfile). A client certificate
+// is asked for, never required: the middleware decides, so key-only clients
+// keep working while the API key is accepted. With an access file the
+// listener is TLS 1.3 only, as the design says.
+func apiServerTLSConfig(conf *Config) *tls.Config {
+	c := &tls.Config{ClientAuth: tls.RequestClientCert}
+	if conf.ApiServer.AccessFile != "" {
+		c.MinVersion = tls.VersionTLS13
+	}
+	return c
+}
+
 func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error {
 	addresses := conf.ApiServer.Addresses
 	certFile := conf.ApiServer.CertFile
@@ -267,8 +272,9 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	for idx, address := range addresses {
 		idxCopy := idx
 		servers[idx] = &http.Server{
-			Addr:    address,
-			Handler: router,
+			Addr:      address,
+			Handler:   router,
+			TLSConfig: apiServerTLSConfig(conf),
 		}
 
 		go func(srv *http.Server, idx int) {

@@ -28,6 +28,10 @@ type PingResponse struct {
 	Msg        string
 	Pings      int
 	Pongs      int
+	// Auth is who the daemon thinks the caller is: "authenticated as anna
+	// (read-write) by certificate", "... by api key", or "on the local socket
+	// (admin)". The diagnostic when access does not work as expected.
+	Auth string `json:",omitempty"`
 }
 
 var pongs int = 0
@@ -60,6 +64,9 @@ func APIping(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			Msg:        fmt.Sprintf("%spong from %s @ %s", tls, Globals.App.Name, hostname),
 			Pings:      pp.Pings + 1,
 			Pongs:      pongs,
+		}
+		if id, ok := ApiIdentityFrom(r.Context()); ok {
+			response.Auth = id.Describe()
 		}
 
 		// select {

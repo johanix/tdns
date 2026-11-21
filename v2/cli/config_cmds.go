@@ -383,19 +383,14 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		if resp.ApiServer.Socket != "" {
 			fmt.Printf("ApiServer: local admin socket %s\n", resp.ApiServer.Socket)
 		}
+		// The daemon sends the key redacted (SensitiveString.MarshalJSON), so
+		// all there is to say is whether one is set.
 		if resp.ApiServer.ApiKey.Value() != "" {
-			ak := resp.ApiServer.ApiKey.Value()
-			// Reveal 3 chars at each end only when the key is long
-			// enough that the reveal doesn't expose the whole secret
-			// (>= 8 chars). Shorter keys are fully masked.
-			if len(ak) >= 8 {
-				fmt.Printf("ApiServer: api key (%d characters): %s***%s\n", len(ak), ak[:3], ak[len(ak)-3:])
-			} else {
-				fmt.Printf("ApiServer: api key (%d characters): ***\n", len(ak))
-			}
+			fmt.Printf("ApiServer: api key is set (not shown)\n")
 		} else {
 			fmt.Printf("ApiServer: api key is not set\n")
 		}
+		printAccessStatus(resp.Access)
 	}
 
 	if resp.Msg != "" {
@@ -456,4 +451,28 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	}
 
 	return cr, nil
+}
+
+// printAccessStatus prints the network API's access policy as the daemon is
+// running it, if it has one.
+func printAccessStatus(a *tdns.ApiAccessStatus) {
+	if a == nil {
+		return
+	}
+	if a.Error != "" {
+		fmt.Printf("Access file: %s CANNOT BE USED, so the TCP API answers 503 (the local socket works): %s\n", a.File, a.Error)
+		return
+	}
+	keyauth := "the API key is accepted (read-write)"
+	if !a.KeyAuth {
+		keyauth = "the API key is off"
+	}
+	fmt.Printf("Access file: %s; %s; %d client(s)\n", a.File, keyauth, len(a.Clients))
+	for _, c := range a.Clients {
+		state := ""
+		if c.Disabled {
+			state = ", disabled"
+		}
+		fmt.Printf("   %s (%s%s)\n", c.Name, c.Role, state)
+	}
 }

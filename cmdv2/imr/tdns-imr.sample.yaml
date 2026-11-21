@@ -228,6 +228,12 @@ apiserver:
    # created 0700 if missing; one that group or others can enter is refused.
    # tdns-ncli config add uses it when run as root.
    socket:     /var/run/tdns/tdns-imr.sock
+   # Network clients by certificate, with roles (read-only, read-write); with
+   # it the API key is read-write and admin is the socket's alone. Requires
+   # socket:. Managed with `tdns-ncli <daemon> client ...`; see
+   # guide/config-tdns-auth.md. A configured file that cannot be used closes
+   # the TCP API (503), so create it before enabling this line.
+   # access-file: /etc/tdns/tdns-imr-access.yaml
    # certfile:   /etc/tdns/certs/api.crt
    # keyfile:    /etc/tdns/certs/api.key
 

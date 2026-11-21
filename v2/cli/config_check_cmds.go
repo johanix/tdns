@@ -244,20 +244,24 @@ func instanceFlavour(role string) string {
 
 // apiDetailsForRole finds the apiservers entry a role targets.
 //
-// Two lookups, and both are needed. An extra instance's entry is named after
-// the role itself ("sectdns"), so the raw name matches. A built-in role is
-// not: "auth" resolves through RegisterRole to the entry named "tdns-auth".
-// Trying only the raw name silently ignored config-file: on every canonical
-// entry while honouring it on instances -- the same key working for one target
-// and quietly doing nothing for another.
+// Two lookups, and both are needed. A built-in role resolves through
+// RegisterRole: "auth" to the entry named "tdns-auth". An extra instance is
+// registered under its own name ("sectdns"), so the same lookup finds its
+// entry. Trying only the raw name silently ignored config-file: on every
+// canonical entry while honouring it on instances -- the same key working for
+// one target and quietly doing nothing for another.
+//
+// The mapping comes first, as in GetApiClient, which picks the client the
+// request is sent with: an entry that happens to be named "auth" must not
+// stand in for "tdns-auth", or acceptedApiKey reports a key the request did
+// not send. The raw name is the fallback for a role with no mapping.
 func apiDetailsForRole(role string) *ApiDetails {
-	if ad := getApiDetailsByClientKey(role); ad != nil {
-		return ad
+	if key := GetClientKeyFromParent(role); key != "" {
+		if ad := getApiDetailsByClientKey(key); ad != nil {
+			return ad
+		}
 	}
-	if key := GetClientKeyFromParent(role); key != "" && key != role {
-		return getApiDetailsByClientKey(key)
-	}
-	return nil
+	return getApiDetailsByClientKey(role)
 }
 
 // effectiveRole collapses an instance role onto the built-in role it behaves
@@ -671,6 +675,7 @@ func checkDoHPath(cfg *tdns.Config, rep *ccReport, g string, doh bool) {
 
 func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 	const g = "API server"
+	checkApiAccessFile(cfg, rep)
 	if len(cfg.ApiServer.Addresses) == 0 {
 		rep.fail(g, "addresses", "apiserver.addresses is empty",
 			"set at least one addr:port (loopback is fine, e.g. 127.0.0.1:8989)")
@@ -1207,7 +1212,7 @@ func correlateRunningConfig(role string, cfg *tdns.Config, cfgPath, daemonDBPath
 	} else if resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"}); err != nil {
 		rep.warn(g, "status", fmt.Sprintf("could not fetch running status: %v — status drift not correlated", err), "")
 	} else {
-		correlateStatus(cfg, resp, rep, g)
+		correlateStatus(cfg, resp, acceptedApiKey(role), rep, g)
 	}
 
 	// Running zones vs config zones.
@@ -1234,7 +1239,22 @@ func correlateRunningConfig(role string, cfg *tdns.Config, cfgPath, daemonDBPath
 	}
 }
 
-func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, g string) {
+// acceptedApiKey is the API key this CLI sends to role's daemon, or "" when it
+// sends none (another auth method, or no entry).
+func acceptedApiKey(role string) string {
+	ad := apiDetailsForRole(role)
+	if ad == nil || ad.AuthMethod != "X-API-Key" {
+		return ""
+	}
+	return ad.ApiKey
+}
+
+// correlateStatus compares a config file with the running server's status.
+//
+// acceptedKey is the API key the status request was sent with. The reply came
+// back, so the running server accepted it: that is how the running key is
+// known, because the status reply no longer carries it (it is redacted).
+func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, acceptedKey string, rep *ccReport, g string) {
 	if !sameStringSet(cfg.Listeners.Addresses, resp.Listeners.Addresses) {
 		rep.warn(g, "listeners-addresses",
 			fmt.Sprintf("config listeners.addresses %v differ from running %v", cfg.Listeners.Addresses, resp.Listeners.Addresses),
@@ -1254,10 +1274,16 @@ func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, 
 			fmt.Sprintf("config has debug-do53-queries-refused %s, the running server has it %s", onOff(on), onOff(resp.Do53QueriesRefused)),
 			"the option takes effect at the next restart")
 	}
-	if resp.ApiServer.ApiKey.Value() != "" && cfg.ApiServer.ApiKey.Value() != "" &&
-		resp.ApiServer.ApiKey.Value() != cfg.ApiServer.ApiKey.Value() {
+	warnApiKeyDrift(cfg, acceptedKey, rep, g)
+}
+
+// warnApiKeyDrift warns when the file's apiserver.apikey is not the key the
+// running server accepted (acceptedKey, the key a request that succeeded was
+// sent with). It says nothing when either is unknown.
+func warnApiKeyDrift(cfg *tdns.Config, acceptedKey string, rep *ccReport, g string) {
+	if acceptedKey != "" && cfg.ApiServer.ApiKey.Value() != "" && acceptedKey != cfg.ApiServer.ApiKey.Value() {
 		rep.warn(g, "apikey",
-			"apiserver.apikey in the file differs from the running server's apikey",
+			"apiserver.apikey in the file differs from the key the running server accepts",
 			"the running apikey changes only on restart")
 	}
 }
@@ -1950,4 +1976,25 @@ func checkDuplicateTemplates(cfg *tdns.Config, rep *ccReport) {
 		rep.pass("Zones", "duplicate template",
 			fmt.Sprintf("no duplicate names among %d template(s)", len(cfg.Templates)))
 	}
+}
+
+// checkApiAccessFile runs the daemon's own validator over the access file, so
+// a file the daemon would not use is found before the reload rather than by it.
+func checkApiAccessFile(cfg *tdns.Config, rep *ccReport) {
+	const g = "API access file"
+	path := cfg.ApiServer.AccessFile
+	if path == "" {
+		return
+	}
+	af, err := tdns.LoadAccessFile(path)
+	if err != nil {
+		rep.fail(g, "access-file", err.Error(),
+			"fix the file (tdns-ncli <daemon> client ... writes only files that pass this check), then reload over the local socket")
+		return
+	}
+	keyauth := "on"
+	if !af.KeyAuthOn() {
+		keyauth = "off"
+	}
+	rep.pass(g, "access-file", fmt.Sprintf("%s: %d client(s), keyauth %s", path, len(af.Clients), keyauth))
 }
