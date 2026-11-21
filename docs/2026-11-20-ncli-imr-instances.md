@@ -56,6 +56,23 @@ tree, i.e. in the tdns-imr shell) or take the role the factory was given
 `imr2`'s config; for the canonical entry that only matters if it has a
 `config-file:`.
 
+`imr2 config mwe` writes `imr2`'s `config-file:` (or `<file>.mwe` beside it),
+not the canonical `tdns-imr.yaml`, and refuses without a `config-file:` or
+`--dir`. The canonical resolver keeps writing `<dir>/tdns-imr.yaml` whatever
+its entry says (CodeRabbit round 1: tdns-cli runs the same command). The
+printed entry's `config-file:` is the file the printed start command uses, and
+the printed check is `tdns-ncli imr2 config check`.
+
+## Starting an instance's daemon
+
+`<instance> daemon start` and `restart` started the entry's `command:` with
+only the CLI's own flags, so the daemon read its compiled-in default config:
+the canonical daemon's file. They now pass `--config <config-file:>` when the
+entry has one and no `--config` was given (`daemonStartFlags`); an explicit
+`--config` still decides, as before. This lives in the shared `NewDaemonCmd`,
+so it covers auth instances as well, and a canonical entry with a
+`config-file:` (CodeRabbit round 1).
+
 ## Guarding it
 
 - `TestImrInstanceCommandsReachTheirOwnDaemon` runs each API-backed command

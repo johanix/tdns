@@ -378,9 +378,9 @@ func newImrConfigMweCmd(role string) *cobra.Command {
 		Short: "Generate a minimal working example config (+ cert) for tdns-imr",
 		Long: `Generate a Minimal Working Example configuration for tdns-imr.
 
-Writes a single self-contained YAML to this daemon's config file: the
-config-file: of its apiservers entry when it has one, else <dir>/tdns-imr.yaml.
-If that file already exists the MWE goes to <file>.mwe instead. A self-signed
+Writes a single self-contained YAML to <dir>/tdns-imr.yaml, or, for an extra
+instance, to the config-file: of its apiservers entry. If that file already
+exists the MWE goes to <file>.mwe instead. A self-signed
 cert/key pair is generated under <dir>/certs unless one is already there. The
 resolver listens on IPv4 and IPv6 localhost; DNSSEC validation is disabled so it
 resolves out of the box (the config shows, commented, how to turn it into a
@@ -397,20 +397,22 @@ resolver's tdns-imr.yaml.`,
 			runImrConfigMwe(role, cfgPath)
 		},
 	}
-	c.Flags().StringVar(&dir, "dir", "/etc/tdns", "base directory for the generated config and cert (default: the directory of this daemon's config-file:, else /etc/tdns)")
+	c.Flags().StringVar(&dir, "dir", "/etc/tdns", "base directory for the generated config and cert (for an extra instance the default is the directory of its config-file:)")
 	return c
 }
 
-// imrMwePath is the file `config mwe` writes for role. It is the entry's
-// config-file: when there is one (with --dir moving it to another directory),
-// else tdns-imr.yaml in dir.
+// imrMwePath is the file `config mwe` writes for role. For an extra instance
+// it is the entry's config-file: when there is one (with --dir moving it to
+// another directory), else tdns-imr.yaml in dir. The canonical resolver keeps
+// what `imr config mwe` has always written, tdns-imr.yaml in dir, whatever its
+// entry's config-file: says: tdns-cli runs this same command.
 //
 // An extra instance with neither a config-file: nor --dir is refused: the
 // fallback name is the canonical resolver's file, so writing it would create
 // the wrong daemon's config (in /etc/tdns, next to the real one).
 func imrMwePath(role, dir string, dirGiven bool) (string, error) {
 	cf := ""
-	if ad := apiDetailsForRole(role); ad != nil {
+	if ad := apiDetailsForRole(role); ad != nil && role != "imr" {
 		cf = ad.ConfigFile
 	}
 	switch {
@@ -427,8 +429,9 @@ func imrMwePath(role, dir string, dirGiven bool) (string, error) {
 
 func runImrConfigMwe(role, cfgPath string) {
 	dir := filepath.Dir(cfgPath)
+	existing := ""
 	if _, err := os.Stat(cfgPath); err == nil {
-		existing := cfgPath
+		existing = cfgPath
 		cfgPath += ".mwe"
 		fmt.Printf("Config %s already exists; writing MWE to %s instead.\n", existing, cfgPath)
 	}
@@ -474,10 +477,13 @@ func runImrConfigMwe(role, cfgPath string) {
 	} else {
 		// An extra instance lives in tdns-ncli's own config, where its entry
 		// already exists; say what it should hold.
+		// config-file: is the file the start command below uses, so a later
+		// `config check` reads the config this key and port came from. An
+		// existing file (with its own key and port) is left alone.
 		fmt.Printf("\nThe CLI entry for %s should read:\n\n", role)
 		fmt.Printf("     - name:        %s\n", role)
 		fmt.Printf("       role:        imr\n")
-		fmt.Printf("       config-file: %s\n", strings.TrimSuffix(cfgPath, ".mwe"))
+		fmt.Printf("       config-file: %s\n", cfgPath)
 	}
 	fmt.Printf("       baseurl:    https://127.0.0.1:%s/api/v1\n", apiPort)
 	fmt.Printf("       apikey:     %s\n", apiKey)
@@ -485,9 +491,18 @@ func runImrConfigMwe(role, cfgPath string) {
 	if role != "imr" {
 		fmt.Printf("\nThe MWE uses API port %s and DNS port %s. A second resolver on the same\nhost needs ports of its own: change them before starting it.\n", apiPort, dnsPort)
 	}
+	if existing != "" {
+		fmt.Printf("\n%s is left as it was. If you move the MWE over it, use that path instead.\n", existing)
+	}
+	// An instance is checked through its own entry: `imr config check` would
+	// compare the file with the canonical resolver's port and key.
+	check := "tdns-cli imr config check"
+	if role != "imr" {
+		check = "tdns-ncli " + role + " config check"
+	}
 	fmt.Printf("\nNext steps:\n")
 	fmt.Printf("  tdns-imr --config %s        # start the resolver\n", cfgPath)
-	fmt.Printf("  tdns-cli imr config check --serverconfig %s   # validate\n", cfgPath)
+	fmt.Printf("  %s --serverconfig %s   # validate\n", check, cfgPath)
 }
 
 func renderImrMweConfig(dir, certFile, keyFile, apiKey, apiPort, dnsPort string) string {
