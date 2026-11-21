@@ -37,7 +37,11 @@ carries a literal role.
   reads the target off the tree. `ResolveAlgorithm` and `CreateUpdate`, which
   took the literal, take `role`. The canonical tree is `NewAgentZoneCmd("agent")`
   from `init()`, so tdns-cli's behaviour is unchanged. The two blocks of
-  disabled `addrr`/`delrr` code are left as they were.
+  disabled `addrr`/`delrr` code are left as they were. #1170 (merged into
+  main first, 2026-11-21) added `add`, `delete`, `modify` and `list-dynamic` to
+  the old package-level group; with main merged in, `NewAgentZoneCmd` adds
+  them with `newZoneDynamicCmds(role)`, so an instance's `zone add` adds to
+  that instance (`TestAgentZoneDynamicCmds` checks both trees).
 - **The hidden legacy `agent parentsync`** is now `newLegacyAgentParentSync`, so
   an instance tree keeps it too (hidden, as on the canonical tree).
 - **`NewConfigCmdFor(role, flavour)`.** `config` omits `transport-signal` for an
