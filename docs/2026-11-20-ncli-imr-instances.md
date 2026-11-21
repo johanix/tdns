@@ -68,10 +68,12 @@ the printed check is `tdns-ncli imr2 config check`.
 `<instance> daemon start` and `restart` started the entry's `command:` with
 only the CLI's own flags, so the daemon read its compiled-in default config:
 the canonical daemon's file. They now pass `--config <config-file:>` when the
-entry has one and no `--config` was given (`daemonStartFlags`); an explicit
-`--config` still decides, as before. This lives in the shared `NewDaemonCmd`,
-so it covers auth instances as well, and a canonical entry with a
-`config-file:` (CodeRabbit round 1).
+entry has one (`daemonStartFlags`), and then do not pass on the CLI's own
+`--config`: on tdns-ncli that names `tdns-ncli.yaml`, not a daemon's config
+(external re-review F3; the first fix let it win). An entry with no
+`config-file:` gets the flags as before. This lives in the shared
+`NewDaemonCmd`, so it covers auth instances as well, and a canonical entry with
+a `config-file:` (CodeRabbit round 1).
 
 ## Guarding it
 
