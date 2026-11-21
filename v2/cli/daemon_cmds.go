@@ -30,13 +30,19 @@ var MaxWait int
 // extractDaemonFlags collects flags from the CLI command that should be
 // passed through to the daemon when it starts (e.g., --config, --debug, -v)
 func extractDaemonFlags(cmd *cobra.Command) []string {
+	return daemonFlagsFrom(cmd, true)
+}
+
+// daemonFlagsFrom is extractDaemonFlags, with the root --config passed on
+// only when withConfig is set.
+func daemonFlagsFrom(cmd *cobra.Command, withConfig bool) []string {
 	var flags []string
 
 	// Walk up to root command to collect all flags
 	root := cmd.Root()
 
 	// Check for --config flag
-	if configFlag := root.Flag("config"); configFlag != nil && configFlag.Changed {
+	if configFlag := root.Flag("config"); withConfig && configFlag != nil && configFlag.Changed {
 		flags = append(flags, "--config", configFlag.Value.String())
 	}
 
@@ -54,20 +60,20 @@ func extractDaemonFlags(cmd *cobra.Command) []string {
 }
 
 // daemonStartFlags is extractDaemonFlags for starting the daemon behind ad:
-// when ad has a config-file: and no --config was given, the daemon is started
-// with --config <config-file:>. Without it the daemon reads its compiled-in
-// default, which is the canonical daemon's file: `auth2 daemon start` would
-// start a second tdns-auth on the first one's config, and then wait in vain
-// for auth2's API. An explicit --config still decides, as it always has.
+// when ad has a config-file:, the daemon is started with --config
+// <config-file:>. Without it the daemon reads its compiled-in default, which
+// is the canonical daemon's file: `auth2 daemon start` would start a second
+// tdns-auth on the first one's config, and then wait in vain for auth2's API.
+//
+// The CLI's own --config is then not passed on. It names the CLI config
+// (tdns-ncli.yaml), not a daemon's, so it must neither replace the entry's
+// config-file: nor follow it. An entry with no config-file: gets the flags as
+// before.
 func daemonStartFlags(cmd *cobra.Command, ad *ApiDetails) []string {
-	flags := extractDaemonFlags(cmd)
 	if ad == nil || ad.ConfigFile == "" {
-		return flags
+		return extractDaemonFlags(cmd)
 	}
-	if f := cmd.Root().Flag("config"); f != nil && f.Changed {
-		return flags
-	}
-	return append([]string{"--config", ad.ConfigFile}, flags...)
+	return append([]string{"--config", ad.ConfigFile}, daemonFlagsFrom(cmd, false)...)
 }
 
 // NewDaemonCmd returns a fresh "daemon" command tree bound to the given
