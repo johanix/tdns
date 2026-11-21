@@ -42,8 +42,9 @@ var (
 	reApiserversKey = regexp.MustCompile(`^apiservers:[ \t]*(#.*)?$`)
 	reApiserversInl = regexp.MustCompile(`^apiservers:[ \t]*[^ \t#]`)
 	reItemStart     = regexp.MustCompile(`^([ \t]*)-([ \t]+)([A-Za-z_-]+):([ \t]*)`)
-	// reBareDash is a list item whose mapping starts on the next line.
-	reBareDash = regexp.MustCompile(`^([ \t]*)-[ \t]*$`)
+	// reBareDash is a list item whose mapping starts on the next line, the
+	// dash alone or followed by a comment.
+	reBareDash = regexp.MustCompile(`^([ \t]*)-[ \t]*(#.*)?$`)
 )
 
 // Layout defaults, taken from cmdv2/cli/tdns-cli.sample.yaml: three-space
@@ -234,10 +235,12 @@ func yamlScalar(s string) string {
 			}
 		}
 	}
-	// A line break or another control character does not survive single
-	// quotes (a line break folds into a space when read back); double
-	// quotes with escapes do, and strconv.Quote's escapes are YAML's.
-	if strings.IndexFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+	// A line break or another character that is not printable does not
+	// survive single quotes: a line break folds into a space when read back,
+	// and the reader refuses a C1 control (U+0080) outright. Double quotes
+	// with escapes do survive, and strconv.Quote escapes exactly the runes
+	// that are not printable, with escapes that are YAML's too.
+	if strings.IndexFunc(s, func(r rune) bool { return !strconv.IsPrint(r) }) >= 0 {
 		return strconv.Quote(s)
 	}
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
