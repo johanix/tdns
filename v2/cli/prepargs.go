@@ -199,11 +199,7 @@ func PrepArgs(args ...interface{}) {
 			}
 
 		case "rollaction":
-			rollaction = strings.ToLower(rollaction)
-			if rollaction != "complete" && rollaction != "add" && rollaction != "remove" && rollaction != "update-local" {
-				fmt.Printf("Error: roll action \"%s\" is not known\n", rollaction)
-				os.Exit(1)
-			}
+			rollaction = checkRollAction(rollaction)
 
 			/* 20260415 johani
 			case "identity":
@@ -383,4 +379,19 @@ func PrepArgs(args ...interface{}) {
 			os.Exit(1)
 		}
 	}
+}
+
+// checkRollAction lowercases a --rollaction value and exits on one the daemon
+// does not know. PrepArgs("rollaction") applies it to the shared rollaction
+// variable; a command with a flag variable of its own (the agent's
+// roll-sig0-key) applies it to that.
+func checkRollAction(a string) string {
+	a = strings.ToLower(a)
+	switch a {
+	case "complete", "add", "remove", "update-local":
+		return a
+	}
+	fmt.Printf("Error: roll action \"%s\" is not known\n", a)
+	os.Exit(1)
+	return ""
 }
