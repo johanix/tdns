@@ -65,7 +65,7 @@ func (b *DirectDelegationBackend) writeZoneFileAfterChildUpdate() error {
 	//   - no journal to carry it — `journal: active: false`, or no keystore —
 	//     where memory really would be the only copy.
 	b.zd.mu.Lock()
-	apiManaged := b.zd.Options[OptApiManagedZone]
+	apiManaged := b.zd.Option(OptApiManagedZone)
 	b.zd.mu.Unlock()
 	if !apiManaged && JournalActive() && b.kdb != nil {
 		lg.Debug("DirectDelegationBackend: change is in the journal; leaving the zone file to 'zone sync'",

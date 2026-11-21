@@ -126,7 +126,7 @@ func (imr *Imr) ownZonePending(conf *Config, zone string) bool {
 // goes where any other goes, and the answer is the published zone's, through
 // the parent's delegation and validated through the parent's DS (#863).
 func (zd *ZoneData) modifiedDownstream() bool {
-	return zd != nil && zd.Options[OptModifiedDownstream]
+	return zd != nil && zd.Option(OptModifiedDownstream)
 }
 
 // forgetResolverSource drops what the running resolver holds about zone, after

@@ -45,7 +45,7 @@ func configuredChildBootstrapMethods() []string {
 }
 
 func (zd *ZoneData) zoneChildBootstrapMethods() []string {
-	proxy := zd != nil && zd.Options[OptParentSyncProxy]
+	proxy := zd != nil && zd.Option(OptParentSyncProxy)
 	canSignal := !proxy && zd != nil && zd.canPublishSig0KeyAtSignal()
 	methods := childBootstrapMethods(proxy, canSignal)
 	if zd != nil && !proxy && !canSignal {

@@ -287,7 +287,7 @@ func (zd *ZoneData) switchToSigningLocked(ctx context.Context, minSerial uint32)
 
 	oldPol, oldName, oldSerial := zd.DnssecPolicy, zd.DnssecPolicyName, zd.CurrentSerial
 	oldErrs := zd.snapshotErrorsLocked(DnssecError, DnssecPolicyWarning)
-	oldOptions := zd.Options
+	oldOptions := zd.OptionsSnapshot()
 	oldWord, hadWord := zd.runtimeOptions[OptInlineSigning]
 	before := zd.snapshot.Load()
 
@@ -316,7 +316,7 @@ func (zd *ZoneData) switchToSigningLocked(ctx context.Context, minSerial uint32)
 		zd.restoreErrorsLocked(oldErrs, DnssecError, DnssecPolicyWarning)
 		// The daemon's word as it stood, or none. A word left behind would overrule
 		// the configuration at every config update from here on.
-		zd.Options = oldOptions
+		zd.setOptionsLocked(oldOptions)
 		if hadWord {
 			zd.runtimeOptions[OptInlineSigning] = oldWord
 		} else {

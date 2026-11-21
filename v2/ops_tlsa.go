@@ -65,7 +65,7 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 	zd.tlsaRequested[owner] = dns.Copy(tlsa)
 	lastAsked := !asked || (core.IsDuplicate(prev, tlsa) && prev.Header().Ttl == tlsa.Hdr.Ttl)
 	zd.mu.Lock()
-	signs := zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
+	signs := zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)
 	zd.mu.Unlock()
 	if cur, err := zd.GetRRset(tlsa.Hdr.Name, dns.TypeTLSA); err == nil && cur != nil && lastAsked &&
 		len(cur.RRs) == 1 && core.IsDuplicate(cur.RRs[0], tlsa) && cur.RRs[0].Header().Ttl == tlsa.Hdr.Ttl &&

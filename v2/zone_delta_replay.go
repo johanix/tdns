@@ -97,7 +97,7 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 	// inline-signing. Such a zone was already producing unsigned RRsets when
 	// the update was first applied, so this is not new damage -- but it is
 	// worth naming rather than leaving to be discovered by a validator.
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] && zoneLooksSigned(zd) {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) && zoneLooksSigned(zd) {
 		lg.Warn("replaying deltas on a signed zone that cannot re-sign;"+
 			" the replayed RRsets will have no valid RRSIGs",
 			"zone", zd.ZoneName, "deltas", len(deltas))
@@ -194,10 +194,7 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 		// grows without bound, and every restart replays the whole thing from
 		// the beginning. Observed as exactly that -- "zone sync" doing nothing
 		// on a zone whose changes had just been replayed.
-		if zd.Options == nil {
-			zd.Options = map[ZoneOption]bool{}
-		}
-		zd.Options[OptDirty] = true
+		zd.setOptionLocked(OptDirty, true)
 	}
 	zd.mu.Unlock()
 

@@ -27,10 +27,10 @@ func wantsZoneSyncSetup(opts map[ZoneOption]bool) bool {
 // callback set up delegation sync for the zone itself. Running the setup again
 // here would do it twice.
 func runZoneSyncSetup(zd *ZoneData, configured map[ZoneOption]bool, delsyncq chan<- DelegationSyncRequest) {
-	if zd.Options[OptParentSync] && !configured[OptParentSync] {
+	if zd.Option(OptParentSync) && !configured[OptParentSync] {
 		return
 	}
-	if zd.Options[OptChildSync] && !configured[OptChildSync] {
+	if zd.Option(OptChildSync) && !configured[OptChildSync] {
 		return
 	}
 	if delsyncq == nil {
@@ -76,12 +76,10 @@ func runZoneSyncSetup(zd *ZoneData, configured map[ZoneOption]bool, delsyncq cha
 // and before Zones.Set. The post-refresh callback is appended to
 // OnZonePostRefresh, which must not change once the zone is live.
 func (zd *ZoneData) registerZoneSyncSetup(delsyncq chan DelegationSyncRequest) {
-	if !wantsZoneSyncSetup(zd.Options) {
+	// The zone's own copy of its options, which is what is recorded.
+	configured := zd.OptionsSnapshot()
+	if !wantsZoneSyncSetup(configured) {
 		return
-	}
-	configured := make(map[ZoneOption]bool, len(zd.Options))
-	for opt, on := range zd.Options {
-		configured[opt] = on
 	}
 	zd.zoneSyncSetup = &owedZoneSyncSetup{configured: configured, delsyncq: delsyncq}
 	run := func(z *ZoneData) { z.runOwedZoneSyncSetup() }

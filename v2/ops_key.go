@@ -14,7 +14,7 @@ import (
 
 func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
 	lgHandler.Debug("PublishKeyRRs: received request to publish KEY records", "zone", zd.ZoneName)
-	if zd.Options[OptDontPublishKey] {
+	if zd.Option(OptDontPublishKey) {
 		return fmt.Errorf("zone %q does not allow KEY RR publication", zd.ZoneName)
 	}
 

@@ -126,7 +126,7 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 	// a nil dak can reach PublishDnskeyRRs, which locks zd.mu, so signing under
 	// the lock with an unresolved dak self-deadlocks during key bootstrap.
 	var dak *DnssecKeys
-	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
+	if zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning) {
 		var err error
 		if dak, err = zd.EnsureActiveDnssecKeys(zd.KeyDB, false); err != nil {
 			return err
@@ -873,7 +873,7 @@ func (zd *ZoneData) addsTransportSignal() bool {
 // when the server sets it too: that is what an operator chose for this zone,
 // and what the start-up pass's warning is about.
 func (zd *ZoneData) transportSignalSource() string {
-	if zd.Options[OptAddTransportSignal] {
+	if zd.Option(OptAddTransportSignal) {
 		return "zone"
 	}
 	if zd.KeyDB != nil {

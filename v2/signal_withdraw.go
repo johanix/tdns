@@ -203,7 +203,7 @@ func (zd *ZoneData) warrantedSignalOwners(nsNames []string) (keepHsync, keepAtNs
 func (zd *ZoneData) signalOptions() (useHsyncparam, delSyncChild bool) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return zd.Options[OptUseHsyncparam], zd.Options[OptParentSync]
+	return zd.Option(OptUseHsyncparam), zd.Option(OptParentSync)
 }
 
 // signalOrphanSweepArmed gates the target-side role below, and

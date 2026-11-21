@@ -356,7 +356,7 @@ func (zd *ZoneData) verifyZonemdOfWorkingData(opts VerifyZonemdOpts) (*ZonemdRep
 // zd is the LIVE zone (whose options and failure mode apply); incoming is the
 // scratch zone being considered.
 func (zd *ZoneData) gateIncomingZonemd(ctx context.Context, incoming *ZoneData, source string) error {
-	if zd == nil || incoming == nil || !zd.Options[OptVerifyZonemd] {
+	if zd == nil || incoming == nil || !zd.Option(OptVerifyZonemd) {
 		return nil
 	}
 
@@ -447,8 +447,8 @@ func (zd *ZoneData) ZonemdStatusReport(verify bool, opts VerifyZonemdOpts) (*Zon
 	}
 	st := &ZonemdStatus{
 		Zone:       zd.ZoneName,
-		Publishing: zd.Options[OptPublishZonemd],
-		Verifying:  zd.Options[OptVerifyZonemd],
+		Publishing: zd.Option(OptPublishZonemd),
+		Verifying:  zd.Option(OptVerifyZonemd),
 	}
 	zd.mu.Lock()
 	st.Scheme, st.Algorithms = zd.zonemdSchemeLocked(), zd.zonemdAlgsLocked()

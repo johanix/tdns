@@ -179,7 +179,7 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 	// DO answer from an unsigned zone served without one a SERVFAIL, the
 	// opposite of QueryResponder's "responding without DNSSEC". A missing
 	// KeyDB is an error only for a zone that must be signed.
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return rrset, nil
 	}
 	if kdb == nil {

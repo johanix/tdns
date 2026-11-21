@@ -435,7 +435,7 @@ func UpdateSigValidityFloor(zd *ZoneData, pol *DnssecPolicy, propagationDelay ti
 	if zd == nil || pol == nil {
 		return
 	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return
 	}
 

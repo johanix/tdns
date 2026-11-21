@@ -36,7 +36,7 @@ func overlayZonePredicate(app AppType, zoneType ZoneType, opts map[ZoneOption]bo
 // isOverlayZoneLocked asks the predicate for zd. The caller holds zd.mu: a
 // config reload replaces zd.Options wholesale under that lock.
 func (zd *ZoneData) isOverlayZoneLocked() bool {
-	return overlayZonePredicate(Globals.App.Type, zd.ZoneType, zd.Options)
+	return overlayZonePredicate(Globals.App.Type, zd.ZoneType, zd.OptionsSnapshot())
 }
 
 // isOverlayZone is isOverlayZoneLocked for a caller that does not hold zd.mu.

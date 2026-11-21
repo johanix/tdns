@@ -66,7 +66,7 @@ func zonemdDigestPlaceholder(alg uint8) string {
 // mirrors upstream content must not have a locally computed record injected
 // into it. Defence in depth behind the normalizer, not instead of it.
 func (zd *ZoneData) zoneManagesZonemd() bool {
-	if zd == nil || !zd.Options[OptPublishZonemd] {
+	if zd == nil || !zd.Option(OptPublishZonemd) {
 		return false
 	}
 	return zoneMayOriginateContent(zd)
@@ -293,7 +293,7 @@ func (zd *ZoneData) updateZonemdLocked(serial, prevSerial uint32, sm *signingMat
 		})
 	}
 
-	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
+	if zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning) {
 		// Resolved here with zdLocked=true and passed into SignRRset, so
 		// SignRRset does not reach its own EnsureActiveDnssecKeys -- that path
 		// gets to PublishDnskeyRRs and re-locks zd.mu. Same deadlock class as

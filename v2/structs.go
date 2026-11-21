@@ -221,6 +221,7 @@ type ZoneData struct {
 	Children          map[string]*ChildDelegationData
 	DelegationBackend DelegationBackend // parent-side: backend for storing child delegation data
 	Options           map[ZoneOption]bool
+	optionsMu         sync.RWMutex        // see Option, in zone_option_runtime.go: orders the replacement of Options against a reader holding no lock
 	runtimeOptions    map[ZoneOption]bool // set by the daemon itself, kept across a config update (SetRuntimeOption); guarded by mu
 	// SuppressedOptions records the origination options that were configured
 	// for this zone but stripped by normalizeOptionsForRole (a tdns-auth
@@ -409,10 +410,15 @@ type ZoneData struct {
 	ixfrDerived bool
 
 	// ixfrTouched is the owner set that delta reached, carried from the IXFR
-	// apply to applyRefreshReplacementLocked so it can stage wsSignOwners.
-	// Set only alongside ixfrDerived. A pre-refresh write into the draft adds
-	// the owner it writes (ownDraftOwnerLocked).
+	// apply to applyRefreshReplacementLocked as the start of what it stages in
+	// wsSignOwners (ixfrChangedOwners adds every owner of the content that is not
+	// the base's own, so this is a hint and not the truth). Set only alongside
+	// ixfrDerived. A pre-refresh write into the draft adds the owner it writes
+	// (ownDraftOwnerLocked).
 	ixfrTouched map[string]bool
+	// ixfrBase is the snapshot the delta was built on, kept by the IXFR apply
+	// for applyRefreshReplacementLocked (ixfrScopedPassHolds). Never written.
+	ixfrBase *zoneSnapshot
 
 	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale
 	// zone replacement): updateIxfrChainLocked clears the delta history
@@ -598,7 +604,10 @@ type ZoneData struct {
 	// They receive both old (zd, current, still served) and new (new_zd, incoming, not yet served)
 	// zone data. Used for: analysis (compare old vs new for HSYNC/DNSKEY/delegation changes),
 	// modification of new_zd (combiner contributions, signature TXT, MP data population),
-	// and agent RFIs (RequestAndWaitForKeyInventory). Options map is shared between zd and new_zd.
+	// and agent RFIs (RequestAndWaitForKeyInventory). new_zd's Options are a copy of zd's as of
+	// the start of the refresh and are discarded with new_zd: an option a callback writes there
+	// does not reach zd. An option to decide for good is set with zd.SetRuntimeOption on the
+	// served zone (the first argument): at once, and it survives a config update.
 	OnZonePreRefresh []func(zd, new_zd *ZoneData)
 
 	// OnZonePostRefresh callbacks run AFTER the hard flip (and after RepopulateDynamicRRs).

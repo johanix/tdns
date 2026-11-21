@@ -32,6 +32,20 @@ SELECT state, keyrr, ds
 FROM DnssecKeyStore
 WHERE zonename = ? AND (CAST(flags AS INTEGER) & ?) != 0`
 
+// ownedDSIntent is the DS intent of a zone whose key lifecycle is owned: the
+// owner's answer. The caller has established the ownership.
+func ownedDSIntent(zd *ZoneData, digest uint8) (DSIntent, error) {
+	o := currentKeyLifecycleOwner()
+	if o == nil {
+		return DSIntent{}, fmt.Errorf("DSIntentForZone: the owner of %s is gone", zd.ZoneName)
+	}
+	in, err := o.DSIntent(zd, digest)
+	if err != nil {
+		return DSIntent{}, fmt.Errorf("DSIntentForZone: the owner of %s: %w", zd.ZoneName, err)
+	}
+	return in, nil
+}
+
 // DSIntentForZone reads the zone's own KSKs and reports what DS the parent
 // should hold.
 //
@@ -66,11 +80,7 @@ func DSIntentForZone(kdb *KeyDB, zonename string, digest uint8) (DSIntent, error
 	// An owned zone's DS is its owner's answer (§4): the rows here are one
 	// provider's view, the owner's covers every signing provider.
 	if zd, owned := zoneOwnedByName(zonename); owned {
-		in, err := currentKeyLifecycleOwner().DSIntent(zd, digest)
-		if err != nil {
-			return DSIntent{}, fmt.Errorf("DSIntentForZone: the owner of %s: %w", zonename, err)
-		}
-		return in, nil
+		return ownedDSIntent(zd, digest)
 	}
 	var out DSIntent
 	if kdb == nil {

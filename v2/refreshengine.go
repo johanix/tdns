@@ -205,7 +205,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	})
 
 	// Check if this is a catalog zone and parse it
-	if zd.Options[OptCatalogZone] {
+	if zd.Option(OptCatalogZone) {
 		// A catalog this server originates: its member list is rebuilt from
 		// what it was loaded with (rebuildCatalogMembership), and again once
 		// the journal has been replayed (completeFirstZonePolicyAndLoad).
@@ -505,7 +505,7 @@ func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Con
 	// replayed content. The rebuild at the start of the load read the file
 	// alone, and a member added since the last write of the file is only in
 	// the journal; left out of the list, the next catalog edit would drop it.
-	if zd.Options[OptCatalogZone] {
+	if zd.Option(OptCatalogZone) {
 		if _, err := rebuildCatalogMembership(zd); err != nil {
 			lgEngine.Error("failed to rebuild the catalog's member list after the journal replay", "zone", zd.ZoneName, "error", err)
 		}
@@ -853,8 +853,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.ZoneType = zr.ZoneType
 							// Normalize AFTER ZoneType is assigned — the
 							// predicate depends on it (Fix B chokepoint).
-							zd.Options, zd.OutboundSoaSerial =
-								zd.applyOptionNormalization(zr.ZoneType, zr.Options, zr.OutboundSoaSerial)
+							normOpts, normSerial := zd.applyOptionNormalization(zr.ZoneType, zr.Options, zr.OutboundSoaSerial)
+							zd.setOptionsLocked(normOpts)
+							zd.OutboundSoaSerial = normSerial
 							zd.TransferSrc = zr.TransferSrc
 							zd.UpdatePolicy = zr.UpdatePolicy
 							if zr.DelegationPolicy != nil {
@@ -992,7 +993,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							if zr.ZoneType != 0 {
 								ztype = zr.ZoneType
 							}
-							newOpts := zd.Options
+							newOpts := zd.OptionsSnapshot()
 							if zr.Options != nil {
 								// The configured options, with the ones the
 								// daemon set by itself laid over them: those
@@ -1004,8 +1005,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							if zr.ConfigUpdate {
 								newSerial = zr.OutboundSoaSerial
 							}
-							zd.Options, zd.OutboundSoaSerial =
-								zd.applyOptionNormalization(ztype, newOpts, newSerial)
+							normOpts, normSerial := zd.applyOptionNormalization(ztype, newOpts, newSerial)
+							zd.setOptionsLocked(normOpts)
+							zd.OutboundSoaSerial = normSerial
 							// Same rule as newSerial above: a config update
 							// replaces the source, anything else keeps it.
 							if zr.ConfigUpdate {
@@ -1042,7 +1044,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// resolve→backfill→classify→apply. First-load OnFirstLoad
 						// completion retries on the ticker (hasPendingOnFirstLoad),
 						// not here.
-						if zr.ConfigUpdate && (zr.DnssecPolicy != "" || zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
+						if zr.ConfigUpdate && (zr.DnssecPolicy != "" || zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)) {
 							if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, zr.DnssecPolicy); err != nil {
 								lgEngine.Warn("DNSSEC policy sync on reload failed", "zone", zone, "err", err)
 								if zr.Response != nil {
@@ -1183,8 +1185,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// on the ZoneData and requires the lock. Nothing else holds
 					// it here, so this cannot deadlock.
 					zd.mu.Lock()
-					zd.Options, zd.OutboundSoaSerial =
-						zd.applyOptionNormalization(zd.ZoneType, zd.Options, zd.OutboundSoaSerial)
+					normOpts, normSerial := zd.applyOptionNormalization(zd.ZoneType, zd.OptionsSnapshot(), zd.OutboundSoaSerial)
+					zd.setOptionsLocked(normOpts)
+					zd.OutboundSoaSerial = normSerial
 					zd.mu.Unlock()
 
 					// Register the OnFirstLoad callbacks BEFORE the initial load:

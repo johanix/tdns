@@ -48,7 +48,7 @@ func zoneMayOriginateContent(zd *ZoneData) bool {
 	if !originationRuleAppTypes[Globals.App.Type] {
 		return true
 	}
-	return zd.ZoneType == Primary || zd.Options[OptInlineSigning]
+	return zd.ZoneType == Primary || zd.Option(OptInlineSigning)
 }
 
 // originationRuleAppTypes are the app types whose zones follow the rule above.

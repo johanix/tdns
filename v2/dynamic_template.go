@@ -439,7 +439,7 @@ func (conf *Config) ReapplyDynamicZoneTemplates() reapplyResult {
 			continue
 		}
 		zd.mu.Lock()
-		apiManaged := zd.Options[OptApiManagedZone]
+		apiManaged := zd.Option(OptApiManagedZone)
 		template, zt, zonefile, inlineKey := zd.Template, zd.ZoneType, zd.Zonefile, zd.InlineTsigKey
 		primaries := clonePeerConfs(zd.PrimariesConf)
 		legacyShell := zd.keepPersistedOutbound

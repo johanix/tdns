@@ -338,7 +338,7 @@ func (zd *ZoneData) updateGateBlockedFor(kdb *KeyDB, role SyncRole, report bool)
 // wrongly call an online-signing child unsigned and silently drop NOTIFY from
 // its plan.
 func zoneIsSigned(zd *ZoneData) bool {
-	return zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] || zoneLooksSigned(zd)
+	return zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning) || zoneLooksSigned(zd)
 }
 
 // findDsync returns the first advertised, usable DSYNC RR for a scheme, or

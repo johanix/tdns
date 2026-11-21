@@ -79,7 +79,17 @@ func currentKeyLifecycleOwner() KeyLifecycleOwner {
 // zoneOwned is the ownership test: OptMultiProvider, an owner, and its
 // answer. Every lifecycle path and every refused verb asks it.
 func zoneOwned(zd *ZoneData) bool {
-	if zd == nil || !zd.Options[OptMultiProvider] {
+	if zd == nil || !zd.Option(OptMultiProvider) {
+		return false
+	}
+	o := currentKeyLifecycleOwner()
+	return o != nil && o.Owns(zd)
+}
+
+// zoneOwnedIn is zoneOwned with OptMultiProvider read from opts, the options
+// the caller took, so that it agrees with the caller's other reads of them.
+func zoneOwnedIn(zd *ZoneData, opts map[ZoneOption]bool) bool {
+	if zd == nil || !opts[OptMultiProvider] {
 		return false
 	}
 	o := currentKeyLifecycleOwner()
@@ -194,7 +204,7 @@ func SetZonePolicyForOwner(ctx context.Context, zd *ZoneData, kdb *KeyDB, policy
 	if pol.Error != "" {
 		return "", fmt.Errorf("owner policy-set: DNSSEC policy %q is broken: %s", policyName, pol.Error)
 	}
-	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+	if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 		return "", fmt.Errorf("owner policy-set: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 	zd.mu.Lock()

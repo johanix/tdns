@@ -330,8 +330,8 @@ func dsyncApiParentZone(child string) (*ZoneData, error) {
 		}
 
 		zd.mu.Lock()
-		offersScheme := zd.Options[OptChildSync]
-		allowsChildUpdates := zd.Options[OptAllowChildUpdates]
+		offersScheme := zd.Option(OptChildSync)
+		allowsChildUpdates := zd.Option(OptAllowChildUpdates)
 		zd.mu.Unlock()
 
 		// A hosted ancestor that does not offer the facility is the answer,

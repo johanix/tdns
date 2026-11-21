@@ -66,7 +66,7 @@ func (zd *ZoneData) zoneMaintainsItsOwnChain(sm *signingMaterial) bool {
 	if zd == nil || zd.workingSet == nil || zd.KeyDB == nil {
 		return false
 	}
-	if zd.Options[OptBlackLies] {
+	if zd.Option(OptBlackLies) {
 		// Compact denial: no stored chain is generated, so there is none to
 		// keep in step.
 		return false
