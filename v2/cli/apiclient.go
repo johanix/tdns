@@ -104,10 +104,9 @@ func InitApiClients(c *CliConf) error {
 		return fmt.Errorf("InitApiClients: nil CliConf")
 	}
 
-	// An instance entry named like another client is left out: building it
-	// would replace that client (see clientEntries). The wiring has already
-	// warned about it, and refused it its command tree.
-	servers := clientEntries(c.ApiServers, builtinRoles())
+	// Only the instance entries the wiring gave a command tree get a client
+	// (see clientEntries); the wiring has already warned about the others.
+	servers := clientEntries(c.ApiServers)
 
 	if tdns.Globals.Debug {
 		fmt.Printf("InitApiClients: setting up API clients for:")

@@ -185,9 +185,12 @@ the same list. `TestCollidingInstanceGetsNoClient`.
   write stays, with its undo.
 - **Ctrl-C ends the wait for another add's lock** (`LOCK_NB` polled against
   the command's context), and a cancelled add edits nothing.
-- **Clients follow the wiring.** `clientEntries` asks `checkInstanceEntries`,
-  so the entry that owns a duplicated instance name is the one the wiring
-  wired, not the first in the file.
+- **Clients follow the wiring.** `WireInstanceTrees` records the entries it
+  gives a tree, and `clientEntries` builds clients for those and the canonical
+  entries only (round 3: deciding again without the command tree accepted an
+  entry named `config`, and a client for it exits the CLI on a bad rootca). A
+  duplicated name's client is the wired entry's; a binary that wires no
+  instances (tdns-cli) gets canonical clients only.
 - **Only a role-less row is the canonical entry.** A `tdns-auth` row with a
   `role:` is ignored by the CLI, and an add that would become the canonical
   entry now says so instead of filing the daemon as an extra instance.
