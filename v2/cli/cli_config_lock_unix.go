@@ -10,7 +10,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"syscall"
 )
 
@@ -19,19 +18,9 @@ import (
 // it. The lock is held through the read, the write, the reload and any undo:
 // two adds that both read the old list and then both wrote would otherwise
 // each report success while the second one's file drops the first one's
-// entry.
-//
-// The lock is on a file of its own beside the edited one (".<name>.lock"),
-// not on the edited file: an edit renames a new file over the old one, so a
-// lock on the old one would be on a file the next writer no longer opens. The
-// lock file is left in place afterwards. Removing it would let a waiting
-// writer lock a file that no longer has a name while a third one creates a
-// new lock file and locks that.
+// entry. The lock is an flock(2) on cliConfigLockPath(path).
 func lockCliConfig(path string) (func(), error) {
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		path = real // one lock for the file, however it is named
-	}
-	lp := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".lock")
+	lp := cliConfigLockPath(path)
 	f, err := os.OpenFile(lp, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("locking %s: %w", path, err)

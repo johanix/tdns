@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -237,10 +238,14 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return nil, err
 	}
 	// From before the read of what is there to after the last write: an add
-	// that ran in between would otherwise be overwritten (lockCliConfig). A
-	// dry run writes nothing and takes no lock.
+	// that ran in between would otherwise be overwritten (lockCliConfig). The
+	// CLI config is locked as well as the file edited, when they differ: two
+	// adds editing two files that feed one effective list (the main file and
+	// cli.localconfig, say) would otherwise both read the old list and both
+	// succeed, the one list then hiding the other's entry. A dry run writes
+	// nothing and takes no lock.
 	if !o.DryRun {
-		unlock, err := lockCliConfig(target)
+		unlock, err := lockCliConfigs(o.CliConfig, target)
 		if err != nil {
 			return nil, err
 		}
@@ -528,22 +533,73 @@ func urlScheme(baseURL string) string {
 	return strings.ToLower(u.Scheme)
 }
 
-// overlayFs is the real file system, read-only, with path reading as data:
-// what the file system would look like after the add, without the write. The
-// path is laid over both as given and made absolute, since the config may
-// name the file either way.
+// overlayFs is the real file system, read-only, with the file at path reading
+// as data: what the file system would look like after the add, without the
+// write.
+//
+// "The file at path" however the config names it: as given, made absolute,
+// the file a symlink at path points to (writeFileAtomic writes there), or any
+// other name for that same file, such as a symlink to it named in
+// cli.localconfig. A preview that missed one of those would read the old file
+// and fail where the add itself succeeds.
 func overlayFs(path string, data []byte) (afero.Fs, error) {
-	mem := afero.NewMemMapFs()
-	paths := []string{filepath.Clean(path)}
-	if abs, err := filepath.Abs(path); err == nil && abs != paths[0] {
-		paths = append(paths, abs)
+	o := &fileOverlay{Fs: afero.NewReadOnlyFs(afero.NewOsFs()), mem: afero.NewMemMapFs(), names: map[string]bool{}}
+	if err := afero.WriteFile(o.mem, "/overlay", data, 0o600); err != nil {
+		return nil, err
 	}
-	for _, p := range paths {
-		if err := afero.WriteFile(mem, p, data, 0o600); err != nil {
-			return nil, err
+	o.addName(path)
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		o.addName(real)
+	}
+	if fi, err := os.Stat(path); err == nil {
+		o.file = fi
+	}
+	return o, nil
+}
+
+// fileOverlay is an afero.Fs that opens one file's replacement instead of the
+// file. viper reads a config through Open only (afero.ReadFile).
+type fileOverlay struct {
+	afero.Fs
+	mem   afero.Fs
+	names map[string]bool // clean absolute names of the replaced file
+	file  os.FileInfo     // the replaced file, if it exists yet
+}
+
+func (o *fileOverlay) addName(p string) {
+	o.names[filepath.Clean(p)] = true
+	if abs, err := filepath.Abs(p); err == nil {
+		o.names[abs] = true
+	}
+}
+
+func (o *fileOverlay) replaces(name string) bool {
+	if o.names[filepath.Clean(name)] {
+		return true
+	}
+	if abs, err := filepath.Abs(name); err == nil && o.names[abs] {
+		return true
+	}
+	if o.file != nil {
+		if fi, err := os.Stat(name); err == nil && os.SameFile(fi, o.file) {
+			return true
 		}
 	}
-	return afero.NewCopyOnWriteFs(afero.NewReadOnlyFs(afero.NewOsFs()), mem), nil
+	return false
+}
+
+func (o *fileOverlay) Open(name string) (afero.File, error) {
+	if o.replaces(name) {
+		return o.mem.Open("/overlay")
+	}
+	return o.Fs.Open(name)
+}
+
+func (o *fileOverlay) OpenFile(name string, flag int, perm os.FileMode) (afero.File, error) {
+	if o.replaces(name) {
+		return o.mem.OpenFile("/overlay", flag, perm)
+	}
+	return o.Fs.OpenFile(name, flag, perm)
 }
 
 // ConfigAddHint is the `config add` command line that writes cfg, the CLI
@@ -553,10 +609,20 @@ func ConfigAddHint(cfg string) string {
 	if cfg == "" || cfg == DefaultCliConfigFile {
 		return "tdns-ncli config add"
 	}
-	if strings.ContainsAny(cfg, " \t'\"$\\`") {
-		cfg = "'" + strings.ReplaceAll(cfg, "'", `'\''`) + "'"
+	return "tdns-ncli --config " + shellQuote(cfg) + " config add"
+}
+
+// reShellSafe matches a word a POSIX shell takes as it stands: no expansion,
+// no splitting, no operator.
+var reShellSafe = regexp.MustCompile(`^[A-Za-z0-9_./:@%+=,-]+$`)
+
+// shellQuote returns s as one shell word: as it stands when that is safe,
+// single-quoted otherwise, so advice pasted into a shell runs as printed.
+func shellQuote(s string) string {
+	if reShellSafe.MatchString(s) {
+		return s
 	}
-	return "tdns-ncli --config " + cfg + " config add"
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // maskKey returns e with the API key hidden, for anything printed. The key is
