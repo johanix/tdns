@@ -27,3 +27,17 @@ func TestReportedDBFileIsAbsolute(t *testing.T) {
 		}
 	}
 }
+
+// config status reports the file the keystore was opened from, not db.file
+// as written: InitializeKeyDB trims and cleans it before opening it.
+func TestOpenedDBFileIsTheOneOpened(t *testing.T) {
+	conf := &Config{}
+	conf.Db.File = " agent2.db "
+	if got := openedDBFile(conf); got != "" {
+		t.Errorf("no keystore open: %q, want none", got)
+	}
+	conf.Internal.KeyDB = &KeyDB{DBFile: "agent2.db"}
+	if got := openedDBFile(conf); got != "agent2.db" {
+		t.Errorf("openedDBFile = %q, want the opened agent2.db", got)
+	}
+}
