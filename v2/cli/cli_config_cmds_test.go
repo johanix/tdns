@@ -752,6 +752,20 @@ func TestAddUndoesWhenAnOverlayHidesTheEntry(t *testing.T) {
 		writeFile(t, env.cli, mainCfg)
 	}
 
+	// --file a hard link to the local config: the add's rename replaces the
+	// link, cli.localconfig still reads the old file, and the add is undone.
+	// The preview must say the same, not read the edit through both names.
+	hard := filepath.Join(env.dir, "local-hard.yaml")
+	if err := os.Link(local, hard); err == nil {
+		if _, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true; o.TargetFile = hard }); err == nil || !strings.Contains(err.Error(), "would not load") {
+			t.Errorf("dry run with --file a hard link to the local config: err = %v, want the preview to fail as the add does", err)
+		}
+		if _, err := env.add(t, d, func(o *AddOptions) { o.TargetFile = hard }); err == nil || !strings.Contains(err.Error(), "undone") {
+			t.Errorf("add with --file a hard link to the local config: err = %v, want it undone", err)
+		}
+		os.Remove(hard)
+	}
+
 	_, err = env.add(t, d, nil)
 	if err == nil || !strings.Contains(err.Error(), "--file") || !strings.Contains(err.Error(), "undone") {
 		t.Fatalf("err = %v", err)

@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -37,6 +38,38 @@ func TestLockCliConfigTakesTurns(t *testing.T) {
 		u()
 	case <-time.After(5 * time.Second):
 		t.Fatal("the second lock was not granted once the first was released")
+	}
+}
+
+// A CLI config not created yet, named through two aliases of a symlinked
+// directory (--config one way, --file the other), is one lock, taken once.
+// Two lock names for one lock file would have the add wait on itself.
+func TestLockCliConfigsThroughADirectoryAlias(t *testing.T) {
+	dir := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(dir, alias); err != nil {
+		t.Skip("no symlinks here")
+	}
+	a := filepath.Join(dir, "tdns-ncli.yaml") // does not exist
+	b := filepath.Join(alias, "tdns-ncli.yaml")
+	if cliConfigLockPath(a) != cliConfigLockPath(b) {
+		t.Errorf("two lock names for one file: %s and %s", cliConfigLockPath(a), cliConfigLockPath(b))
+	}
+	done := make(chan error, 1)
+	go func() {
+		u, err := lockCliConfigs(a, b)
+		if err == nil {
+			u()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("lockCliConfigs waited on its own lock")
 	}
 }
 
