@@ -353,7 +353,9 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return nil, err
 	}
 
-	res.Entry, res.File, res.Created = entry, target, created && target == o.CliConfig
+	// Compared resolved, as the locks are: --config and --file may name the
+	// one (missing) CLI config through two aliases of its directory.
+	res.Entry, res.File, res.Created = entry, target, created && resolvedPath(target) == resolvedPath(o.CliConfig)
 
 	var src []byte
 	if !res.Created {
