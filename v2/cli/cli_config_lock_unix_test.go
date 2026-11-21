@@ -115,3 +115,25 @@ func TestAddToAnotherFileWaitsForTheCliConfigLock(t *testing.T) {
 	}
 	u()
 }
+
+// The CLI config does not exist yet, and --file names it through another
+// alias of its directory. It is the same file, so the add creates it, as it
+// would with no --file, instead of failing to read it.
+func TestAddCreatesTheCliConfigNamedThroughADirectoryAlias(t *testing.T) {
+	env := newAddEnv(t)
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(env.dir, alias); err != nil {
+		t.Skip("no symlinks here")
+	}
+	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	res, err := env.add(t, d, func(o *AddOptions) { o.TargetFile = filepath.Join(alias, "tdns-ncli.yaml") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Created {
+		t.Errorf("not reported as created: %+v", res)
+	}
+	if got := env.entries(t); len(got) != 1 || got[0].Name != "tdns-auth" {
+		t.Errorf("entries: %+v", got)
+	}
+}
