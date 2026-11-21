@@ -275,6 +275,15 @@ func TestSpliceBareDashItems(t *testing.T) {
 	if n := len(parseApiservers(t, got)); n != 2 {
 		t.Errorf("parsed %d entries, want 2:\n%s", n, got)
 	}
+
+	// The bare dash may carry a comment.
+	src = "apiservers:\n  - # the first one\n    name: a\n    baseurl: https://127.0.0.1:1/api/v1\n    apikey: k\n    authmethod: X-API-Key\n"
+	if out, _, err = spliceApiserver([]byte(src), newEntry()); err != nil {
+		t.Fatal(err)
+	}
+	if got = string(out); !strings.Contains(got, "\n  - name:") || len(parseApiservers(t, got)) != 2 {
+		t.Errorf("a commented bare dash:\n%s", got)
+	}
 }
 
 func TestSpliceWithoutApiserversKey(t *testing.T) {
@@ -326,6 +335,8 @@ func TestYamlScalar(t *testing.T) {
 		".inf":                          "'.inf'",
 		"/etc/tdns/a\nb.yaml":           `"/etc/tdns/a\nb.yaml"`, // a line break folds in single quotes
 		"tab\there":                     `"tab\there"`,
+		"c1\u0080control":               `"c1\u0080control"`, // the reader refuses a C1 control unescaped
+		"line\u2028sep":                 `"line\u2028sep"`,
 	} {
 		if got := yamlScalar(in); got != want {
 			t.Errorf("yamlScalar(%q) = %s, want %s", in, got, want)
