@@ -70,10 +70,14 @@ only the CLI's own flags, so the daemon read its compiled-in default config:
 the canonical daemon's file. They now pass `--config <config-file:>` when the
 entry has one (`daemonStartFlags`), and then do not pass on the CLI's own
 `--config`: on tdns-ncli that names `tdns-ncli.yaml`, not a daemon's config
-(external re-review F3; the first fix let it win). An entry with no
-`config-file:` gets the flags as before. This lives in the shared
-`NewDaemonCmd`, so it covers auth instances as well, and a canonical entry with
-a `config-file:` (CodeRabbit round 1).
+(external re-review F3; the first fix let it win). A named instance with no
+`config-file:` is refused: the compiled-in default is the canonical daemon's
+config and the CLI's `--config` is the CLI's, so neither is right. `restart`
+works this out before it stops the daemon, so the refusal leaves it running
+(CodeRabbit on #1160, 2026-11-21). A canonical entry with no `config-file:`
+gets the flags as before, the CLI's `--config` included, as on main. This
+lives in the shared `NewDaemonCmd`, so it covers auth and agent instances as
+well, and a canonical entry with a `config-file:` (CodeRabbit round 1).
 
 ## Guarding it
 

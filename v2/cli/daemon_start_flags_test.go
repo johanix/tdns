@@ -24,15 +24,23 @@ func TestDaemonStartFlagsCarryTheInstanceConfig(t *testing.T) {
 		return root, start
 	}
 	inst := &ApiDetails{Name: "imr2", Role: "imr", ConfigFile: "/etc/tdns/tdns-imr2.yaml"}
+	flags := func(start *cobra.Command, ad *ApiDetails) []string {
+		t.Helper()
+		f, err := daemonStartFlags(start, ad)
+		if err != nil {
+			t.Fatalf("daemonStartFlags(%+v): %v", ad, err)
+		}
+		return f
+	}
 
 	_, start := newTree()
-	if got, want := daemonStartFlags(start, inst), []string{"--config", "/etc/tdns/tdns-imr2.yaml"}; !reflect.DeepEqual(got, want) {
+	if got, want := flags(start, inst), []string{"--config", "/etc/tdns/tdns-imr2.yaml"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("instance: %q, want %q", got, want)
 	}
 
 	root, start := newTree()
 	root.PersistentFlags().Set("debug", "true")
-	if got, want := daemonStartFlags(start, inst), []string{"--config", "/etc/tdns/tdns-imr2.yaml", "--debug"}; !reflect.DeepEqual(got, want) {
+	if got, want := flags(start, inst), []string{"--config", "/etc/tdns/tdns-imr2.yaml", "--debug"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("instance with --debug: %q, want %q", got, want)
 	}
 
@@ -41,7 +49,7 @@ func TestDaemonStartFlagsCarryTheInstanceConfig(t *testing.T) {
 	root, start = newTree()
 	root.PersistentFlags().Set("config", "/etc/tdns/tdns-ncli.yaml")
 	root.PersistentFlags().Set("debug", "true")
-	if got, want := daemonStartFlags(start, inst), []string{"--config", "/etc/tdns/tdns-imr2.yaml", "--debug"}; !reflect.DeepEqual(got, want) {
+	if got, want := flags(start, inst), []string{"--config", "/etc/tdns/tdns-imr2.yaml", "--debug"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("with the CLI's --config: %q, want %q", got, want)
 	}
 
@@ -49,16 +57,30 @@ func TestDaemonStartFlagsCarryTheInstanceConfig(t *testing.T) {
 	// included.
 	root, start = newTree()
 	root.PersistentFlags().Set("config", "/tmp/explicit.yaml")
-	if got, want := daemonStartFlags(start, &ApiDetails{Name: "tdns-imr"}), []string{"--config", "/tmp/explicit.yaml"}; !reflect.DeepEqual(got, want) {
+	if got, want := flags(start, &ApiDetails{Name: "tdns-imr"}), []string{"--config", "/tmp/explicit.yaml"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("entry with no config-file: and --config: %q, want %q", got, want)
 	}
 
 	_, start = newTree()
-	if got := daemonStartFlags(start, &ApiDetails{Name: "tdns-imr"}); len(got) != 0 {
+	if got := flags(start, &ApiDetails{Name: "tdns-imr"}); len(got) != 0 {
 		t.Errorf("entry with no config-file: %q, want none", got)
 	}
-	if got := daemonStartFlags(start, nil); len(got) != 0 {
+	if got := flags(start, nil); len(got) != 0 {
 		t.Errorf("no entry: %q, want none", got)
+	}
+
+	// A named instance with no config-file: has nothing right to start on:
+	// the compiled-in default is the canonical daemon's config, and the
+	// CLI's --config is the CLI's. Refused, with or without --config.
+	for _, cfg := range []string{"", "/etc/tdns/tdns-ncli.yaml"} {
+		root, start = newTree()
+		if cfg != "" {
+			root.PersistentFlags().Set("config", cfg)
+		}
+		got, err := daemonStartFlags(start, &ApiDetails{Name: "imr2", Role: "imr"})
+		if err == nil || !strings.Contains(err.Error(), `"imr2" has no config-file:`) {
+			t.Errorf("instance with no config-file: (--config %q): %q, %v; want a refusal", cfg, got, err)
+		}
 	}
 }
 
