@@ -83,7 +83,8 @@ func init() {
 	// plain tdns-cli no longer carries those commands. See tdns-mp PR #27.
 
 	// ZoneCmd is now under AuthCmd (wired in cli/auth_cmds.go init).
-	// Agent uses AgentZoneCmd (wired in cli/agent_zone_cmds.go).
+	// Agent uses cli.NewAgentZoneCmd (wired in cli/agent_zone_cmds.go init, and
+	// once more per agent instance by cli.NewAgentTree).
 	// Combiner uses combinerZoneCmd (wired in cli/legacy_combiner_edits_cmds.go).
 
 	// From ../../v2/cli/base32_cmds.go: daemon-agnostic encode/decode helper

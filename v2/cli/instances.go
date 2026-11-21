@@ -28,11 +28,12 @@ import (
 // own init(), before anything here reads it.
 var DefaultCliConfigFile = tdns.DefaultCliCfgFile
 
-// knownInstanceRoles are the roles an apiservers entry may ask to be wired as.
-// Only "auth" for now: it is the only tree with a NewXxxTree factory. Adding
-// agent or imr is a matter of writing the equivalent factory.
+// knownInstanceRoles are the roles an apiservers entry may ask to be wired as:
+// the ones with a NewXxxTree factory (auth and agent here; imr registers itself
+// from imr_tree.go).
 var knownInstanceRoles = map[string]func(use, role string) *cobra.Command{
-	"auth": NewAuthTree,
+	"auth":  NewAuthTree,
+	"agent": NewAgentTree,
 }
 
 // ConfigPathFromArgs finds the config file the user asked for, WITHOUT running
