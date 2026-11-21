@@ -3,6 +3,7 @@ module github.com/johanix/tdns/v2/core
 go 1.25.0
 
 require (
+	github.com/cloudflare/circl v1.6.3
 	github.com/miekg/dns v1.1.68
 	github.com/quic-go/quic-go v0.59.1
 )
