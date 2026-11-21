@@ -537,22 +537,16 @@ func urlScheme(baseURL string) string {
 // as data: what the file system would look like after the add, without the
 // write.
 //
-// "The file at path" however the config names it: as given, made absolute,
-// the file a symlink at path points to (writeFileAtomic writes there), or any
-// other name for that same file, such as a symlink to it named in
-// cli.localconfig. A preview that missed one of those would read the old file
-// and fail where the add itself succeeds.
+// "The file at path" however the config names it: as given, relative, through
+// a symlink at path (writeFileAtomic writes where it points), or through a
+// symlink to it named in cli.localconfig. Names are compared resolved
+// (resolvedPath), which is what the add's rename replaces. Not by file
+// identity: a hard link to the file is another name, which the rename leaves
+// reading the old file, so the add would fail there and the preview must too.
 func overlayFs(path string, data []byte) (afero.Fs, error) {
-	o := &fileOverlay{Fs: afero.NewReadOnlyFs(afero.NewOsFs()), mem: afero.NewMemMapFs(), names: map[string]bool{}}
+	o := &fileOverlay{Fs: afero.NewReadOnlyFs(afero.NewOsFs()), mem: afero.NewMemMapFs(), target: resolvedPath(path)}
 	if err := afero.WriteFile(o.mem, "/overlay", data, 0o600); err != nil {
 		return nil, err
-	}
-	o.addName(path)
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		o.addName(real)
-	}
-	if fi, err := os.Stat(path); err == nil {
-		o.file = fi
 	}
 	return o, nil
 }
@@ -561,31 +555,12 @@ func overlayFs(path string, data []byte) (afero.Fs, error) {
 // file. viper reads a config through Open only (afero.ReadFile).
 type fileOverlay struct {
 	afero.Fs
-	mem   afero.Fs
-	names map[string]bool // clean absolute names of the replaced file
-	file  os.FileInfo     // the replaced file, if it exists yet
-}
-
-func (o *fileOverlay) addName(p string) {
-	o.names[filepath.Clean(p)] = true
-	if abs, err := filepath.Abs(p); err == nil {
-		o.names[abs] = true
-	}
+	mem    afero.Fs
+	target string // resolvedPath of the replaced file
 }
 
 func (o *fileOverlay) replaces(name string) bool {
-	if o.names[filepath.Clean(name)] {
-		return true
-	}
-	if abs, err := filepath.Abs(name); err == nil && o.names[abs] {
-		return true
-	}
-	if o.file != nil {
-		if fi, err := os.Stat(name); err == nil && os.SameFile(fi, o.file) {
-			return true
-		}
-	}
-	return false
+	return resolvedPath(name) == o.target
 }
 
 func (o *fileOverlay) Open(name string) (afero.File, error) {

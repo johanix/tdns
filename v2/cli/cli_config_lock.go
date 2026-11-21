@@ -20,13 +20,29 @@ import (
 // writer lock a file that no longer has a name while a third one creates a
 // new lock file and locks that.
 func cliConfigLockPath(path string) string {
-	if real, err := filepath.EvalSymlinks(path); err == nil {
-		path = real
-	}
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
+	path = resolvedPath(path)
 	return filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+".lock")
+}
+
+// resolvedPath is the absolute path p names with every symlink resolved:
+// the one name of a file, whatever alias reaches it. A file that does not
+// exist yet (config add is about to create it) has its directory resolved
+// instead, so two aliases of a symlinked directory still give one name.
+//
+// It is the path a rename onto p would replace, not the file's identity: two
+// hard links are two names, and a rename onto one leaves the other reading
+// the old file.
+func resolvedPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		p = abs
+	}
+	if real, err := filepath.EvalSymlinks(p); err == nil {
+		return real
+	}
+	if dir, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(dir, filepath.Base(p))
+	}
+	return filepath.Clean(p)
 }
 
 // lockCliConfigs takes the lock of each of paths (lockCliConfig), each lock
