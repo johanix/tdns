@@ -89,3 +89,28 @@ func TestFlushDomainKeepStructural(t *testing.T) {
 		}
 	})
 }
+
+// FlushDomain canonicalises the domain it is given, and the names in the cache
+// are spelled as the wire spelled them. An escape the canonical domain has
+// decoded -- \255 there, the octet 0xff here -- still has to match.
+func TestFlushDomainMatchesEveryEscapeSpelling(t *testing.T) {
+	c := NewRRsetCache(log.New(io.Discard, "", 0), false, false)
+	name := `www.x\255.example.`
+	rr, err := dns.NewRR(name + " 300 IN A 192.0.2.9")
+	if err != nil {
+		t.Fatalf("bad test record: %v", err)
+	}
+	c.Set(name, dns.TypeA, &CachedRRset{
+		Name: name, RRtype: dns.TypeA,
+		RRset:      &core.RRset{Name: name, RRtype: dns.TypeA, RRs: []dns.RR{rr}},
+		Expiration: time.Now().Add(time.Hour),
+	})
+
+	removed, err := c.FlushDomain(`X\255.example.`, false)
+	if err != nil {
+		t.Fatalf("FlushDomain: %v", err)
+	}
+	if removed != 1 || c.Get(name, dns.TypeA) != nil {
+		t.Errorf("removed %d and the record is still cached: %s is below the flushed domain", removed, name)
+	}
+}
