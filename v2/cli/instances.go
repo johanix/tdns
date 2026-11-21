@@ -9,6 +9,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/spf13/afero"
@@ -237,10 +238,7 @@ func instanceRefusal(root *cobra.Command, e ApiDetails, registry map[string]stri
 			"apiservers entry %q: name is the API-client name of %s, so the two would share one client -- entry ignored (choose another name)",
 			e.Name, what)
 	}
-	// root is nil when the question is only which entry owns a name
-	// (clientEntries): a command collision refuses every entry of that name
-	// alike, so it cannot change the owner.
-	if existing := findChildOrNil(root, e.Name); existing != nil {
+	if existing := findChild(root, e.Name); existing != nil {
 		return fmt.Sprintf(
 			"apiservers entry %q: name collides with the existing %q command -- entry ignored (choose another name)",
 			e.Name, existing.Name())
@@ -283,42 +281,44 @@ func WireInstanceTrees(root *cobra.Command, entries []ApiDetails) []string {
 		e := v.Entry
 		RegisterRole(e.Name, e.Name)
 		root.AddCommand(knownInstanceRoles[e.Role](e.Name, e.Name))
+		wiredInstances[e.Name] = e
 	}
 	return warnings
 }
 
+// wiredInstances holds the instance entries WireInstanceTrees gave a command
+// tree, by name. They and the canonical entries are the only entries
+// InitApiClients builds clients for.
+var wiredInstances = map[string]ApiDetails{}
+
 // clientEntries returns the entries to build API clients for: every canonical
-// entry, and every instance entry the wiring accepts (checkInstanceEntries,
-// the same rules and the same order).
+// entry, and each instance entry the wiring gave a command tree, once.
 //
 // tdns.Globals.ApiClients is keyed by entry name, so a client built for an
 // instance the wiring refused can replace the one the name already stands
 // for (`tdns-ncli auth ...` then reaching the instance's daemon), or stand in
-// for the entry the wiring did accept under that name: with two auth2 entries
-// where the wiring refuses the first and wires the second, the client must be
-// the second's, or the auth2 tree drives the first one's daemon. Asking
-// checkInstanceEntries, not a copy of its rules, keeps the two from
-// disagreeing.
-//
-// registry is the built-in role -> clientKey map, builtinRoles(): the
-// instances wired so far are registered as name -> name and are not built-in
-// clients.
-func clientEntries(entries []ApiDetails, registry map[string]string) []ApiDetails {
+// for the entry the wiring did accept under that name (two auth2 entries,
+// the first refused and the second wired). And a client for a refused entry
+// is not merely unused: tdns.NewClient exits on a rootca it cannot read, so an
+// ignored entry named "config" with a bad rootca would stop every command.
+// Only the wiring knows all of its decisions (a command collision needs the
+// command tree), so this takes them from it rather than deciding again. A
+// binary that wires no instance trees (tdns-cli) gets clients for its
+// canonical entries only: nothing in it reaches an instance.
+func clientEntries(entries []ApiDetails) []ApiDetails {
 	out := make([]ApiDetails, 0, len(entries))
-	for _, v := range checkInstanceEntries(nil, entries, registry) {
-		if v.Canonical || v.Wire {
-			out = append(out, v.Entry)
+	taken := map[string]bool{}
+	for _, e := range entries {
+		if e.Role == "" {
+			out = append(out, e)
+			continue
+		}
+		if w, ok := wiredInstances[e.Name]; ok && !taken[e.Name] && reflect.DeepEqual(w, e) {
+			taken[e.Name] = true
+			out = append(out, e)
 		}
 	}
 	return out
-}
-
-// findChildOrNil is findChild, with no root meaning no command.
-func findChildOrNil(root *cobra.Command, name string) *cobra.Command {
-	if root == nil {
-		return nil
-	}
-	return findChild(root, name)
 }
 
 // builtinRoles returns the role -> clientKey registrations that are not
