@@ -115,7 +115,7 @@ func TestApplierGateAllowsPrimaryAndNonAuth(t *testing.T) {
 		t.Error("primary must be allowed past the applier gate")
 	}
 
-	withAppType(t, AppTypeAgent)
+	withAppType(t, appTypeUngated)
 	secondary, _ := updaterTestZone(t, Secondary, map[ZoneOption]bool{})
 	if !zoneMayOriginateContent(secondary) {
 		t.Error("non-auth secondary must be ungated (§1.1 app-scope guarantee)")
