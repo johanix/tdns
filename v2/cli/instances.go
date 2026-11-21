@@ -87,6 +87,19 @@ func EarlyApiServers(cfgFile string) []ApiDetails {
 // A failure merging cli.localconfig returns the entries already read together
 // with the error, which is what EarlyApiServers has always done: a broken
 // local overlay costs the overlay, not the entries beneath it.
+// ReadCliClientConf reads the CLI config's client: block, or the zero value
+// when the file has none or cannot be read (the defaults then apply).
+func ReadCliClientConf(cfgFile string) CliClientConf {
+	v := viper.New()
+	v.SetConfigFile(cfgFile)
+	var cc CliClientConf
+	if err := v.ReadInConfig(); err != nil {
+		return cc
+	}
+	_ = v.UnmarshalKey("client", &cc)
+	return cc
+}
+
 func ReadApiServers(cfgFile string) ([]ApiDetails, error) {
 	return readApiServers(cfgFile, nil)
 }

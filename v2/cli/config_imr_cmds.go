@@ -81,6 +81,7 @@ process's descriptor and goroutine counts (tdns#443).`,
 			// init failed (the Upstream/ImrPriming husk) is precisely a
 			// moment to look at process resources, not to hide them.
 			renderProcStatus(resp.Proc)
+			printAccessStatus(resp.Access)
 			if resp.Imr == nil {
 				fmt.Println("IMR: no resolver state reported (engine not running)")
 				return

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -221,7 +222,7 @@ func TestSpliceMatchesTheNeighbours(t *testing.T) {
 	}
 
 	entries := parseApiservers(t, got)
-	if len(entries) != 3 || entries[2] != newEntry() {
+	if len(entries) != 3 || !reflect.DeepEqual(entries[2], newEntry()) {
 		t.Errorf("parsed %d entries, last = %+v", len(entries), entries[len(entries)-1])
 	}
 }
@@ -258,7 +259,7 @@ func TestSpliceWithoutApiserversKey(t *testing.T) {
 			if !strings.HasPrefix(string(out), src) {
 				t.Errorf("existing text was changed:\n%s", out)
 			}
-			if e := parseApiservers(t, string(out)); len(e) != 1 || e[0] != newEntry() {
+			if e := parseApiservers(t, string(out)); len(e) != 1 || !reflect.DeepEqual(e[0], newEntry()) {
 				t.Errorf("parsed %+v", e)
 			}
 		})
@@ -534,7 +535,7 @@ func TestAddTwoAuthDaemons(t *testing.T) {
 		Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1",
 		ApiKey: "key-tdns-auth2.yaml", AuthMethod: "X-API-Key", ConfigFile: second,
 	}
-	if got[1] != want {
+	if !reflect.DeepEqual(got[1], want) {
 		t.Errorf("entry = %+v\nwant    %+v", got[1], want)
 	}
 	if got[0].ConfigFile != first {
@@ -1014,7 +1015,7 @@ func TestCheckEntriesPingsEachAPI(t *testing.T) {
 		{Name: "cadir", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: caDir},
 		{Name: "notpem", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: notPEM},
 	}
-	res := CheckEntries(entries, 5*time.Second)
+	res := CheckEntries(entries, CliClientConf{}, 5*time.Second)
 
 	if !strings.HasPrefix(res[0], "ok") || !strings.Contains(res[0], "v-test") || !strings.Contains(res[0], "up 1h30m") {
 		t.Errorf("up: %q", res[0])
@@ -1030,16 +1031,18 @@ func TestCheckEntriesPingsEachAPI(t *testing.T) {
 	if !strings.HasPrefix(res[1], "FAIL") {
 		t.Errorf("down: %q", res[1])
 	}
-	if !strings.HasPrefix(res[2], "FAIL: rootca") {
+	if !strings.HasPrefix(res[2], "FAIL") || !strings.Contains(res[2], "rootca") {
 		t.Errorf("badca: %q", res[2])
 	}
 	if !strings.HasPrefix(res[3], "not checked") {
 		t.Errorf("tlsa: %q", res[3])
 	}
-	if !strings.HasPrefix(res[4], "FAIL: rootca") {
+	// newApiClientFor reads and parses the CA file, so a directory or a file
+	// with no certificate in it fails this entry, not the process.
+	if !strings.HasPrefix(res[4], "FAIL") || !strings.Contains(res[4], "rootca") {
 		t.Errorf("cadir: %q", res[4])
 	}
-	if !strings.HasPrefix(res[5], "FAIL: rootca") || !strings.Contains(res[5], "no PEM certificate") {
+	if !strings.HasPrefix(res[5], "FAIL") || !strings.Contains(res[5], "no PEM certificate") {
 		t.Errorf("notpem: %q", res[5])
 	}
 }
@@ -1103,7 +1106,7 @@ func TestAddPrefersTheLocalSocketForRoot(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := ApiDetails{Name: "tdns-auth", BaseURL: "unix://" + sock, AuthMethod: "none", ConfigFile: d}
-		if got := env.entries(t); len(got) != 1 || got[0] != want {
+		if got := env.entries(t); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 			t.Errorf("entries = %+v\nwant      [%+v]", got, want)
 		}
 		raw, _ := os.ReadFile(env.cli)

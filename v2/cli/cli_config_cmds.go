@@ -8,12 +8,14 @@ package cli
 
 import (
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -337,6 +339,15 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		// No key and no TLS: the daemon authenticates the socket by file
 		// permissions, and the client sends nothing.
 		entry.ApiKey, entry.AuthMethod, entry.RootCA = "", "none", ""
+	} else if strings.HasPrefix(entry.BaseURL, "https://") && entry.RootCA == "" {
+		// The daemon's own certificate, pinned: no CA, no name check, and
+		// nothing for the operator to do.
+		if pin, err := certFilePin(info.CertFile, info.ConfigFile); err != nil {
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"could not pin the daemon's certificate (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>), or tdns-ncli will refuse to connect", err))
+		} else {
+			entry.TLSAuth, entry.Pins = "pin", []string{pin}
+		}
 	}
 	if err := chooseEntryName(&entry, res, info.Role, existing, o); err != nil {
 		return nil, err
@@ -488,15 +499,36 @@ func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []
 }
 
 func sameEntries(a, b []ApiDetails) bool {
-	if len(a) != len(b) {
-		return false
+	return reflect.DeepEqual(a, b)
+}
+
+// certFilePin is the SPKI pin of the first certificate in the PEM file path
+// (relative to the daemon config's directory if not absolute).
+func certFilePin(path, daemonConfig string) (string, error) {
+	if path == "" {
+		return "", errors.New("the daemon config has no apiserver.certfile")
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(filepath.Dir(daemonConfig), path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for {
+		var b *pem.Block
+		b, data = pem.Decode(data)
+		if b == nil {
+			return "", fmt.Errorf("%s holds no certificate", path)
+		}
+		if b.Type == "CERTIFICATE" {
+			c, err := x509.ParseCertificate(b.Bytes)
+			if err != nil {
+				return "", fmt.Errorf("%s: %w", path, err)
+			}
+			return tdns.SPKISHA256(c), nil
 		}
 	}
-	return true
 }
 
 // hostPort returns the host:port of a base URL, lower-cased, or "".
@@ -671,7 +703,7 @@ of them does not answer, or could not be checked (rootca: tlsa).`,
 			rows := BuildListRows(cmd.Root(), entries)
 			failed := false
 			if check {
-				results := CheckEntries(entries, timeout)
+				results := CheckEntries(entries, ReadCliClientConf(cfg), timeout)
 				for i := range rows {
 					rows[i].Check = results[i]
 					// An API that was not checked is not one that answered:
@@ -683,6 +715,9 @@ of them does not answer, or could not be checked (rootca: tlsa).`,
 			}
 			fmt.Printf("CLI config: %s\n\n", cfg)
 			printListRows(os.Stdout, rows, check)
+			for _, w := range duplicatePins(entries) {
+				fmt.Printf("\nWarning: %s\n", w)
+			}
 			if failed {
 				os.Exit(1)
 			}
@@ -799,49 +834,33 @@ func printListRows(w io.Writer, rows []ListRow, check bool) {
 
 // CheckEntries pings each entry's API, concurrently, and returns one result
 // string per entry, in order: "ok ..." or "FAIL: ...".
-func CheckEntries(entries []ApiDetails, timeout time.Duration) []string {
+func CheckEntries(entries []ApiDetails, cc CliClientConf, timeout time.Duration) []string {
 	out := make([]string, len(entries))
 	var wg sync.WaitGroup
 	for i := range entries {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			out[i] = pingEntry(entries[i], timeout)
+			out[i] = pingEntry(entries[i], cc, timeout)
 		}(i)
 	}
 	wg.Wait()
 	return out
 }
 
-func pingEntry(e ApiDetails, timeout time.Duration) string {
-	rootCA := e.RootCA
-	if rootCA == "" {
-		rootCA = "insecure" // the CLI's own default for an entry with no rootca
+// pingEntry pings one entry with the client every other command would use
+// (its pins, roots and credentials), so a pass here means the entry works.
+func pingEntry(e ApiDetails, cc CliClientConf, timeout time.Duration) string {
+	api, _, err := newApiClientFor(e, cc)
+	if err != nil {
+		return "FAIL: " + err.Error()
 	}
-	switch rootCA {
-	case "insecure":
-	case "tlsa":
+	if e.RootCA == "tlsa" {
 		return "not checked (rootca: tlsa)"
-	default:
-		// NewClient exits the process on a CA file it cannot read -- and a
-		// directory passes a stat -- which would end the whole list. Read it
-		// here and report this entry instead.
-		pem, err := os.ReadFile(rootCA)
-		if err != nil {
-			return "FAIL: rootca: " + err.Error()
-		}
-		if !x509.NewCertPool().AppendCertsFromPEM(pem) {
-			return "FAIL: rootca: " + rootCA + " holds no PEM certificate"
-		}
 	}
 
 	done := make(chan string, 1)
 	go func() {
-		api := tdns.NewClient(e.Name, e.BaseURL, e.ApiKey, e.AuthMethod, rootCA)
-		if api == nil {
-			done <- "FAIL: could not set up an API client"
-			return
-		}
 		pr, err := api.SendPing(1, false)
 		if err != nil {
 			msg := strings.ReplaceAll(err.Error(), "\n", " ")
@@ -857,6 +876,9 @@ func pingEntry(e ApiDetails, timeout time.Duration) string {
 		}
 		if pr.Version != "" {
 			s += ", " + pr.Version
+		}
+		if pr.Auth != "" {
+			s += "; " + pr.Auth
 		}
 		done <- s
 	}()
@@ -877,4 +899,28 @@ func shortDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh%dm", d/time.Hour, d%time.Hour/time.Minute)
 	}
 	return fmt.Sprintf("%dm%ds", d/time.Minute, d%time.Minute/time.Second)
+}
+
+// duplicatePins reports entries that pin the same key. Two daemons with one
+// key cannot be told apart by their pins, so a command meant for one is
+// accepted by the other: the same hazard as a shared API key.
+func duplicatePins(entries []ApiDetails) []string {
+	by := map[string][]string{}
+	var order []string
+	for _, e := range entries {
+		for _, p := range e.Pins {
+			if _, seen := by[p]; !seen {
+				order = append(order, p)
+			}
+			by[p] = append(by[p], e.Name)
+		}
+	}
+	var out []string
+	for _, p := range order {
+		if names := by[p]; len(names) > 1 {
+			out = append(out, fmt.Sprintf("%s pin the same key (%s): each daemon should have a key of its own, or a command meant for one is accepted by the other",
+				strings.Join(names, " and "), p))
+		}
+	}
+	return out
 }
