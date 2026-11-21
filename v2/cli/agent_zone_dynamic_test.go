@@ -6,6 +6,8 @@ package cli
 
 import (
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // The agent's zone tree has the dynamic-zone verbs, as commands of its own:
@@ -22,11 +24,23 @@ func TestAgentZoneDynamicCmds(t *testing.T) {
 		}
 	}
 
-	add := findSub(t, AgentZoneCmd, "add")
 	for _, f := range []string{"zone", "primaries", "options", "template", "type"} {
-		if add.Flags().Lookup(f) == nil {
+		if findSub(t, AgentZoneCmd, "add").Flags().Lookup(f) == nil {
 			t.Errorf("agent zone add: no --%s flag", f)
 		}
+	}
+
+	// Parse on a fresh set, not AgentZoneCmd's: a parsed command keeps its
+	// flag values, and a string slice appends, so a second run in the same
+	// process (-count=2) would read the options twice.
+	var add *cobra.Command
+	for _, c := range newZoneDynamicCmds("agent") {
+		if c.Name() == "add" {
+			add = c
+		}
+	}
+	if add == nil {
+		t.Fatal("newZoneDynamicCmds: no add")
 	}
 	if err := add.ParseFlags([]string{"--primaries", "192.0.2.1:53", "--options", "parentsync-proxy"}); err != nil {
 		t.Fatalf("agent zone add: %v", err)
