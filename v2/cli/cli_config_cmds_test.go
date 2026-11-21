@@ -969,9 +969,19 @@ func TestCollidingInstanceGetsNoClient(t *testing.T) {
 		// the second: the client must be the second's.
 		{Name: "auth3", Role: "nosuch", BaseURL: "https://127.0.0.1:8994/api/v1"},
 		{Name: "auth3", Role: "auth", BaseURL: "https://127.0.0.1:8995/api/v1"},
+		// Refused for its name (a command), and its rootca does not exist:
+		// a client for it would make tdns.NewClient exit, stopping every
+		// command, not just this entry.
+		{Name: "config", Role: "auth", BaseURL: "https://127.0.0.1:8996/api/v1", RootCA: "/nonexistent/ca.pem"},
 	}}
+	root := &cobra.Command{Use: "tdns-ncli"}
+	root.AddCommand(&cobra.Command{Use: "config"})
+	WireInstanceTrees(root, c.ApiServers)
 	if err := InitApiClients(c); err != nil {
 		t.Fatal(err)
+	}
+	if ac, ok := tdns.Globals.ApiClients["config"]; ok {
+		t.Errorf("an entry the wiring refused got a client: %+v", ac)
 	}
 	if ac := tdns.Globals.ApiClients["tdns-auth"]; ac == nil || ac.BaseUrl != "https://127.0.0.1:8989/api/v1" {
 		t.Errorf("tdns-auth client: %+v", ac)
@@ -1379,5 +1389,28 @@ func TestPrintedAdviceKeepsTheCliConfig(t *testing.T) {
 	printAddResult(&sb, res, false, DefaultCliConfigFile)
 	if want := "Try it:  tdns-ncli auth2 ping"; !strings.Contains(sb.String(), want) {
 		t.Errorf("missing %q in:\n%s", want, sb.String())
+	}
+}
+
+// A binary that wires no instance trees (tdns-cli) builds clients for its
+// canonical entries only: nothing in it reaches an instance.
+func TestNoWiringNoInstanceClients(t *testing.T) {
+	withCleanRoleRegistry(t)
+	savedClients, savedApi, savedConf := tdns.Globals.ApiClients, tdns.Globals.Api, apiConfig
+	t.Cleanup(func() { tdns.Globals.ApiClients, tdns.Globals.Api, apiConfig = savedClients, savedApi, savedConf })
+	tdns.Globals.ApiClients = map[string]*tdns.ApiClient{}
+
+	c := &CliConf{ApiServers: []ApiDetails{
+		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1"},
+		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1", RootCA: "/nonexistent/ca.pem"},
+	}}
+	if err := InitApiClients(c); err != nil {
+		t.Fatal(err)
+	}
+	if tdns.Globals.ApiClients["tdns-auth"] == nil {
+		t.Error("no client for the canonical entry")
+	}
+	if ac, ok := tdns.Globals.ApiClients["auth2"]; ok {
+		t.Errorf("an instance nothing wired got a client: %+v", ac)
 	}
 }
