@@ -297,14 +297,17 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 		// NewClientWithOptions exits the process on a CA file it cannot read
 		// -- and a directory passes a stat -- which would take every other
 		// entry down with this one (config list --check stops printing).
-		// Read and parse it here and return the error instead.
+		// Read and parse it here, return the error instead, and hand the
+		// client the parsed roots so it does not read the file a second time.
 		data, err := os.ReadFile(o.RootCA)
 		if err != nil {
 			return nil, "", fmt.Errorf("entry %q: rootca: %w", e.Name, err)
 		}
-		if !x509.NewCertPool().AppendCertsFromPEM(data) {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(data) {
 			return nil, "", fmt.Errorf("entry %q: rootca: %s holds no PEM certificate", e.Name, o.RootCA)
 		}
+		o.RootCAs = pool
 	}
 	if e.AuthMethod == "certificate" {
 		cert, err := loadClientCert(cc)

@@ -36,6 +36,10 @@ type ClientOptions struct {
 	AuthMethod string
 	// RootCA is as for NewClient: "insecure", "tlsa", or a PEM file of roots.
 	RootCA string
+	// RootCAs, when set, are the roots of the PEM file RootCA names, already
+	// read and parsed by a caller that wants the errors returned: the file is
+	// then not read again (a read failure here exits the process).
+	RootCAs *x509.CertPool
 	// Pins, when set, replace PKIX verification of the daemon: its leaf
 	// certificate's SPKI SHA-256 must be one of these (no name, no expiry
 	// check; the pin is the trust anchor).
@@ -119,6 +123,10 @@ func NewClientWithOptions(name, baseurl string, o ClientOptions) *ApiClient {
 		//			}
 		//			return nil
 		//		}
+	} else if o.RootCAs != nil {
+		// The caller read and parsed rootcafile already, and handled its
+		// errors; reading it again here could only find a changed file.
+		tlsconfig.RootCAs = o.RootCAs
 	} else {
 		rootCAPool := x509.NewCertPool()
 		// rootCA, err := os.ReadFile(viper.GetString("musicd.rootCApem"))
