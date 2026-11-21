@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/ryanuber/columnize"
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -230,6 +231,24 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			len(info.Addresses), strings.Join(info.Addresses, ", ")))
 	}
 
+	target := o.TargetFile
+	if target == "" {
+		target = o.CliConfig
+	}
+	if err := danglingSymlink(target); err != nil {
+		return nil, err
+	}
+	// From before the read of what is there to after the last write: an add
+	// that ran in between would otherwise be overwritten (lockCliConfig). A
+	// dry run writes nothing and takes no lock.
+	if !o.DryRun {
+		unlock, err := lockCliConfig(target)
+		if err != nil {
+			return nil, err
+		}
+		defer unlock()
+	}
+
 	// What is there now. A CLI config that exists but does not load cleanly is
 	// not one to edit.
 	var existing []ApiDetails
@@ -264,8 +283,23 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 				"entry %q reaches this daemon over its local admin socket, so --tcp adds nothing -- remove that entry and run config add --tcp again to use %s instead",
 				e.Name, tcpURL))
 		}
+		// What the daemon config says an entry of e's kind should hold: a
+		// socket entry sends no key, a TCP entry the apikey over its TCP
+		// address. Compared against baseURL instead, a socket entry would
+		// read as a changed key and scheme whenever this add chose TCP.
+		wantKey, wantURL := info.ApiKey, tcpURL
+		if strings.HasPrefix(e.BaseURL, "unix://") {
+			wantKey, wantURL = "", socketURL
+		}
 		switch {
 		case sameFile && sameAddr:
+			// The same daemon, but it may have changed since: a new key, or
+			// usetls turned on or off on the same port. "Already known" would
+			// then leave the CLI with an entry that no longer works.
+			if diff := changedSettings(e, wantKey, wantURL); diff != "" {
+				return nil, fmt.Errorf("entry %q is this daemon, but its %s no longer match %s; edit that entry by hand (config add does not change an existing entry)",
+					e.Name, diff, info.ConfigFile)
+			}
 			res.AlreadyKnown = e.Name
 			return res, nil
 		case sameFile:
@@ -277,6 +311,11 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			res.Notes = append(res.Notes, fmt.Sprintf(
 				"entry %q already uses %s; it has no config-file: -- add \"config-file: %s\" to it if it is this daemon",
 				e.Name, e.BaseURL, info.ConfigFile))
+			if diff := changedSettings(e, wantKey, wantURL); diff != "" {
+				res.Notes = append(res.Notes, fmt.Sprintf(
+					"entry %q: its %s do not match %s; if it is this daemon, edit them by hand",
+					e.Name, diff, info.ConfigFile))
+			}
 			return res, nil
 		case sameAddr:
 			return nil, fmt.Errorf("entry %q (config-file %s) already uses the API address %s, which %s also names; two daemons cannot listen on one address",
@@ -309,10 +348,6 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return nil, err
 	}
 
-	target := o.TargetFile
-	if target == "" {
-		target = o.CliConfig
-	}
 	res.Entry, res.File, res.Created = entry, target, created && target == o.CliConfig
 
 	var src []byte
@@ -331,7 +366,30 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	if res.Created {
 		out = append([]byte(newCliConfigHeader), out...)
 	}
+
+	// The result must load, the way the CLI will read it, as exactly the old
+	// list plus the new entry. The case this exists for: apiservers: is ALSO
+	// defined in an include or in cli.localconfig, which hides this one (lists
+	// are replaced, not merged).
+	want := append(append([]ApiDetails(nil), existing...), entry)
+	hidden := func(gerr error, verb string) string {
+		msg := fmt.Sprintf("after adding the entry to %s the CLI config %s as the old list plus the new entry", target, verb)
+		if gerr != nil {
+			msg += fmt.Sprintf(" (%v)", gerr)
+		}
+		return msg + ". Is apiservers: also defined in an include: file or in cli.localconfig, which hides it? Use --file to name the file that holds the list."
+	}
+
 	if o.DryRun {
+		// Load it with the edited file laid over the real one, so the
+		// preview fails where the add would fail.
+		fs, err := overlayFs(target, out)
+		if err != nil {
+			return nil, err
+		}
+		if got, gerr := readApiServers(o.CliConfig, fs); gerr != nil || !sameEntries(got, want) {
+			return nil, fmt.Errorf("%s Nothing was written.", hidden(gerr, "would not load"))
+		}
 		return res, nil
 	}
 
@@ -340,12 +398,8 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	}
 	res.Wrote = true
 
-	// Check the result the way the CLI will read it, and undo the change if it
-	// is not exactly the old list plus the new entry. The case this exists for:
-	// apiservers: is ALSO defined in an include or in cli.localconfig, which
-	// hides this one (lists are replaced, not merged).
+	// Check the written result, and undo the change if it is not right.
 	got, gerr := ReadApiServers(o.CliConfig)
-	want := append(append([]ApiDetails(nil), existing...), entry)
 	if gerr != nil || !sameEntries(got, want) {
 		var uerr error
 		if res.Created {
@@ -353,11 +407,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		} else {
 			uerr = writeFileAtomic(target, src)
 		}
-		msg := fmt.Sprintf("after adding the entry to %s the CLI config does not load as the old list plus the new entry", target)
-		if gerr != nil {
-			msg += fmt.Sprintf(" (%v)", gerr)
-		}
-		msg += ". Is apiservers: also defined in an include: file or in cli.localconfig, which hides it? Use --file to name the file that holds the list."
+		msg := hidden(gerr, "does not load")
 		if uerr != nil {
 			return nil, fmt.Errorf("%s The change could NOT be undone (%v): restore %s by hand.", msg, uerr, target)
 		}
@@ -485,6 +535,62 @@ func hostPort(baseURL string) string {
 	return strings.ToLower(u.Host)
 }
 
+// changedSettings names the settings in which entry e no longer matches the
+// daemon config it points at -- the API key, and the URL scheme that
+// apiserver.usetls decides -- or returns "". Neither key is printed.
+func changedSettings(e ApiDetails, apiKey, baseURL string) string {
+	var what []string
+	if e.ApiKey != apiKey {
+		what = append(what, "apikey")
+	}
+	if a, b := urlScheme(e.BaseURL), urlScheme(baseURL); a != b {
+		what = append(what, fmt.Sprintf("baseurl scheme (%s; apiserver.usetls now means %s)", a, b))
+	}
+	if len(what) == 0 {
+		return ""
+	}
+	return strings.Join(what, " and ") + " settings"
+}
+
+func urlScheme(baseURL string) string {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Scheme)
+}
+
+// overlayFs is the real file system, read-only, with path reading as data:
+// what the file system would look like after the add, without the write. The
+// path is laid over both as given and made absolute, since the config may
+// name the file either way.
+func overlayFs(path string, data []byte) (afero.Fs, error) {
+	mem := afero.NewMemMapFs()
+	paths := []string{filepath.Clean(path)}
+	if abs, err := filepath.Abs(path); err == nil && abs != paths[0] {
+		paths = append(paths, abs)
+	}
+	for _, p := range paths {
+		if err := afero.WriteFile(mem, p, data, 0o600); err != nil {
+			return nil, err
+		}
+	}
+	return afero.NewCopyOnWriteFs(afero.NewReadOnlyFs(afero.NewOsFs()), mem), nil
+}
+
+// ConfigAddHint is the `config add` command line that writes cfg, the CLI
+// config the caller found missing: with --config when cfg is not the default,
+// so that following the advice creates the file that was missing.
+func ConfigAddHint(cfg string) string {
+	if cfg == "" || cfg == DefaultCliConfigFile {
+		return "tdns-ncli config add"
+	}
+	if strings.ContainsAny(cfg, " \t'\"$\\`") {
+		cfg = "'" + strings.ReplaceAll(cfg, "'", `'\''`) + "'"
+	}
+	return "tdns-ncli --config " + cfg + " config add"
+}
+
 // maskKey returns e with the API key hidden, for anything printed. The key is
 // the one secret in the entry and has no business in terminal scrollback.
 func maskKey(e ApiDetails) ApiDetails {
@@ -542,13 +648,13 @@ that reaches it, what kind of entry it is, its API address, the daemon config it
 refers to, and whether tdns-ncli can use it. An entry that is ignored says why.
 
 With --check each API is also pinged, and the exit status is non-zero if any
-of them does not answer.`,
+of them does not answer, or could not be checked (rootca: tlsa).`,
 		Args: cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			cfg := cliConfigPath(cmd)
 			entries, err := ReadApiServers(cfg)
 			if errors.Is(err, os.ErrNotExist) {
-				fatalf("no CLI config %s yet; create it from a daemon's config with: tdns-ncli config add <daemon-config.yaml>", cfg)
+				fatalf("no CLI config %s yet; create it from a daemon's config with: %s <daemon-config.yaml>", cfg, ConfigAddHint(cfg))
 			}
 			if err != nil {
 				fatalf("%v", err)
@@ -559,7 +665,9 @@ of them does not answer.`,
 				results := CheckEntries(entries, ReadCliClientConf(cfg), timeout)
 				for i := range rows {
 					rows[i].Check = results[i]
-					if strings.HasPrefix(results[i], "FAIL") {
+					// An API that was not checked is not one that answered:
+					// --check succeeds only when every one of them did.
+					if strings.HasPrefix(results[i], "FAIL") || strings.HasPrefix(results[i], "not checked") {
 						failed = true
 					}
 				}

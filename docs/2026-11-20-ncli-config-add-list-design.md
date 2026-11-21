@@ -35,8 +35,11 @@ Made by the maintainer when this was evaluated, 2026-11-20:
 adds one `apiservers:` entry.
 
 **What it reads.** `apiserver.addresses` (first one), `apiserver.apikey`,
-`apiserver.usetls`, through viper plus `include:` expansion, so an
-`apiserver:` block in an included file is found. `usetls` defaults to true when
+`apiserver.usetls`, through the daemon's own loader (`LoadRawConfigMap`), so an
+`apiserver:` block in an included file is found, however deep the `include:`
+chain (CodeRabbit round 1: the CLI's viper shim followed one level only). If
+the includes do not load, the main file alone is read and a warning says so.
+`usetls` defaults to true when
 absent, exactly as the daemon applies it (`v2/parseconfig.go`). A wildcard
 listen address (`0.0.0.0`, `::`, no host) becomes loopback: it is where the
 daemon listens, not where the CLI connects. `authmethod` is written `X-API-Key`,
@@ -47,7 +50,11 @@ decides. Evidence, strongest first: `service.name` (`TDNS-AUTH`, `TDNS-AGENT`,
 trailing digits ignored, whole words only); no `service:` block but an
 `imrengine:` block (tdns-imr); the file name. Undecidable gives an error asking
 for `--role`, never a guess: a daemon filed under the wrong role gets the wrong
-command tree pointed at it. `TDNS-MPAGENT` and its relatives are refused.
+command tree pointed at it. `TDNS-MPAGENT` and its relatives are refused. The
+tdns-mp check follows the same order: a tdns-mp `service.name` is refused
+whatever the file is called, but "mp" in a file name counts only when the file
+name is what decides, so `service.name: TDNS-AUTH` in `west-mp-auth.yaml` is a
+tdns-auth, with a warning.
 
 **Canonical or instance.** If the CLI config has no entry named for the role's
 built-in client (`tdns-auth`, `tdns-agent`, `tdns-imr`) the new entry is that
@@ -59,10 +66,20 @@ reserved word. An instance of a role with no instance tree is refused; today
 that is every role but `auth`.
 
 **Idempotence and clashes.** An entry with the same `config-file:` and the same
-API address means "already known", and nothing changes. The same file with a
-different address (the daemon was reconfigured), or a different file naming an
-address another entry already uses (two daemons cannot listen on one address),
-is an error that says which entry.
+API address means "already known", and nothing changes -- unless the entry's
+API key or URL scheme no longer matches the daemon config (a rotated key,
+`usetls` turned off on the same port). That is an error naming which setting,
+without printing either key: `config add` does not change an existing entry.
+The same file with a different address (the daemon was reconfigured), or a
+different file naming an address another entry already uses (two daemons
+cannot listen on one address), is an error that says which entry.
+
+**One at a time.** An add takes an exclusive `flock` on `.<file>.lock` beside
+the file it edits, before it reads the current list, and holds it through the
+write, the reload and any undo. Two adds that both read the old list would
+otherwise both succeed while the second one's file drops the first one's entry.
+The lock file stays (removing it would race a waiting writer); a dry run takes
+no lock.
 
 **Editing the file.** As text, not through viper's `WriteConfig` (which writes
 the *merged* config, folding includes and `cli.localconfig` into the main file
@@ -74,15 +91,23 @@ gap, value column, blank-line separation, plain or column-0 dashes. A missing
 0600, with a short header. An inline `apiservers: [...]` is not edited: the error
 prints the entry to add by hand. The write is atomic (temp file in the same
 directory, rename), keeps the mode, and follows a symlink so the link stays a
-link. Values that are not plain YAML scalars are single-quoted.
+link; a symlink to a file that does not exist is refused rather than replaced.
+A value is written plain only if YAML reads the plain form back as the same
+string; anything else is single-quoted (an API key `001234` plain is the octal
+integer 668).
 
 **Checking its own work.** After writing, the CLI config is loaded the way the
-CLI loads it (`ReadApiServers`: main file, includes, then `cli.localconfig`).
-If the effective list is not exactly the old list plus the new entry, the file
-is restored (or removed, if it was created) and the error says why. The case
-this exists for is `apiservers:` also defined in an include or in
+CLI loads it (`ReadApiServers`: main file, includes, then `cli.localconfig`,
+with viper's `AutomaticEnv` as `initConfig` has it; a `cli.localconfig` that is
+there but cannot be checked is an error, as it is at start-up). If the
+effective list is not exactly the old list plus the new entry, the file is
+restored (or removed, if it was created) and the error says why. The case this
+exists for is `apiservers:` also defined in an include or in
 `cli.localconfig`: lists are replaced, not merged, so an entry added to the
 main file would be invisible. `--file` names the file that holds the list.
+`--dry-run` makes the same check without writing: it loads the real files with
+the edited one laid over them in memory, so the preview fails where the add
+would.
 
 **Output.** The entry is printed with the API key masked. The key is the one
 secret in it and has no place in terminal scrollback.
@@ -99,9 +124,11 @@ stand-in root), since by the time `list` runs the instance trees are on the
 real root and would look like collisions with themselves.
 
 `--check` pings every API concurrently (default 5 s each) and exits non-zero if
-any fails. It sets up its own clients, so it works on a config that
-`initConfig` would refuse, and it does not exit the process on an unreadable
-`rootca` file the way `NewClient` does.
+any fails or could not be checked (`rootca: tlsa`): it succeeds only when every
+API answered. It sets up its own clients, so it works on a config that
+`initConfig` would refuse, and it does not exit the process on a `rootca` it
+cannot use (missing, a directory, no certificate in it) the way `NewClient`
+does: that entry says `FAIL: rootca` and the rest are still checked.
 
 `config` is a root-level command with an annotation; the root's
 `PersistentPreRun` skips config and API loading for it (`IsCliConfigCmd`),
@@ -120,6 +147,13 @@ daemon reached the other, with no message. Instance names are now also checked
 against the built-in roles' clients and every canonical entry.
 `TestInstanceNameMayNotShareAnApiClient` fails without the check.
 
+Refusing the tree was only half of it (CodeRabbit round 1): `InitApiClients`
+still built a client for every entry, so the refused instance still replaced
+the canonical client. It now leaves out an instance entry whose name a
+built-in client, a canonical entry or an earlier instance already holds
+(`clientEntries`, the same rules), and the config lookups by client name see
+the same list. `TestCollidingInstanceGetsNoClient`.
+
 ## Plumbing
 
 - `tdns.DefaultNcliCfgFile` (`/etc/tdns/tdns-ncli.yaml`).
@@ -130,7 +164,7 @@ against the built-in roles' clients and every canonical entry.
 - `cli.ReadApiServers` (the strict form of `EarlyApiServers`, which now wraps
   it) returns the effective list with errors.
 - A missing tdns-ncli config now says how to create it instead of a bare open
-  error.
+  error, with `--config` in the advice when one was given.
 
 ## Not done here
 
