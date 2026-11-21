@@ -588,9 +588,16 @@ type ZoneError struct {
 // after every change. zd.ErrorType reports the highest-priority active
 // category per errorTypeReportOrder.
 //
-// Holds zd.mu for the duration so the registry mutation, derived-field
-// recomputation, and Zones.Set are atomic against any concurrent
-// HasError/ErrorList reader.
+// Holds zd.mu for the duration so the registry mutation and the derived-field
+// recomputation are atomic against any concurrent HasError/ErrorList reader.
+//
+// It writes the zone's own error state and nothing in Zones. It used to end with
+// a Set of the zone under its own name, a no-op for the registered zone and an
+// insertion for any other: a ZoneData that a reload had removed, or another
+// registration had replaced, and that something still held (the engine in the
+// middle of a first load, a policy apply), put itself back, or put itself over the
+// registration that replaced it. A zone is registered where it is created,
+// explicitly.
 func (zd *ZoneData) SetError(errtype ErrorType, errmsg string, args ...interface{}) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
@@ -610,8 +617,6 @@ func (zd *ZoneData) setErrorLocked(errtype ErrorType, errmsg string, args ...int
 		zd.Errors[errtype] = ZoneError{Type: errtype, Msg: fmt.Sprintf(errmsg, args...)}
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
-	// no-refresh-hooks: republishes an existing ZoneData.
-	Zones.Set(zd.ZoneName, zd)
 }
 
 // snapshotErrorsLocked copies the current entries for the given categories, for
@@ -661,26 +666,19 @@ func (zd *ZoneData) clearErrorLocked(errtype ErrorType) {
 		}
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
-	// no-refresh-hooks: republishes an existing ZoneData.
-	Zones.Set(zd.ZoneName, zd)
 }
 
-// SetStatus sets the zone's positive-lifecycle status and republishes the zone
-// in the Zones map. Same lock discipline as SetError; no derived fields to
-// recompute. Orthogonal to the error registry.
+// SetStatus sets the zone's positive-lifecycle status. Same lock discipline as
+// SetError; no derived fields to recompute. Orthogonal to the error registry.
 //
-// The republish is guarded: an in-flight refresh on a deleted or replaced zone
-// (e.g. SetStatus(Loading) at the top of FetchFromUpstream) must NOT re-insert
-// the stale pointer into Zones — that would resurrect a zone the operator just
-// deleted. We only republish when zd is still the live entry for its name.
+// It writes the zone and nothing in Zones. The republish it used to end with was
+// guarded (only while zd was the registered entry), but the guard and the Set were
+// two steps, and a registration that replaced zd between them was replaced again
+// by zd: the stale pointer is not put back by something that merely holds it.
 func (zd *ZoneData) SetStatus(s ZoneStatus) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 	zd.Status = s
-	if cur, live := Zones.Get(zd.ZoneName); live && cur == zd {
-		// no-refresh-hooks: republishes an existing ZoneData.
-		Zones.Set(zd.ZoneName, zd)
-	}
 }
 
 // GetStatus returns the zone's positive-lifecycle status under the lock.

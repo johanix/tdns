@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"sync/atomic"
 	// "flag"
 	"context"
 	"errors"
@@ -1187,11 +1188,63 @@ func zoneNameKey(name string) string {
 // the Zones map with the error attached so they remain visible to the
 // zone-list API and survive reload-diffs, but are not sent to the
 // RefreshEngine.
+//
+// A reload queues its refreshers only when every zone has parsed: a parse that
+// fails part way queues none, so the engine never applies a config the reload
+// rejected. An initial parse queues each zone's as it is parsed, so that the
+// engine loads zones while the rest are still being parsed, and a failure ends
+// the process.
 func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []string, error) {
+	zones, broken, pending, err := conf.parseZones(ctx, reload)
+	if err != nil {
+		return zones, broken, err
+	}
+	return zones, broken, conf.queueZoneRefreshers(ctx, pending)
+}
+
+// parseSeq numbers the parses of the zones: block, so that a refresher that a newer
+// parse has overtaken can be told from the newest (ZoneRefresher.ParseSeq).
+var parseSeq atomic.Uint64
+
+// zoneRefresherSendProbe is nil, and is set by a test that has to look at the
+// daemon's state at the moment a refresher is about to be handed to the engine,
+// from the sender's side: it is called with each refresher just before its send.
+var zoneRefresherSendProbe func(zr ZoneRefresher)
+
+// queueZoneRefreshers hands refreshers to the RefreshEngine, in order, giving
+// up when ctx is done.
+func (conf *Config) queueZoneRefreshers(ctx context.Context, zrs []ZoneRefresher) error {
+	for _, zr := range zrs {
+		if zoneRefresherSendProbe != nil {
+			zoneRefresherSendProbe(zr)
+		}
+		select {
+		case conf.Internal.RefreshZoneCh <- zr:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// parseZones is ParseZones up to the queueing of a reload's refreshers: it
+// returns them, in zone order, for the caller to queue with queueZoneRefreshers
+// when it chooses. An initial parse (reload false) queues as it goes and returns
+// none.
+//
+// A reload's caller chooses to queue them after it has published the runtime-
+// config snapshot (reloadZoneConfig). The engine reads that snapshot -- the
+// DNSSEC policies, the multi-signer config, the refresh limits -- for what it
+// applies a refresher with, so a refresher that reaches it first is applied
+// against the config the reload replaces, and the zone ends up on a mixture of
+// the two: a policy name of the new config under the definition of the old.
+func (conf *Config) parseZones(ctx context.Context, reload bool) ([]string, []string, []ZoneRefresher, error) {
+	var pending []ZoneRefresher
 	if len(conf.Zones) == 0 {
 		lgConfig.Info("no authoritative zones defined")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
+	seq := parseSeq.Add(1)
 
 	lgConfig.Debug("parsing authoritative zones", "count", len(conf.Zones))
 	var all_zones []string
@@ -1231,6 +1284,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		}
 		seenZoneName[zkey] = true
 	}
+
+	// The policies this parse applies, for the refreshers it queues.
+	reloadPolicies := dnssecPoliciesOfConfig(conf)
 
 	// Process each zone configuration
 	for i := range conf.Zones {
@@ -1554,9 +1610,31 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			polName := zconf.DnssecPolicy
 			usable, errMsg := resolveZonePolicyRef(polName, conf.Internal.DnssecPolicies)
 			if errMsg != "" {
-				lgConfig.Error("zone DNSSEC policy unusable, zone will not be signed", "zone", zname, "policy", polName, "err", errMsg)
-				zconf.DnssecPolicy = ""
-				zd.SetError(DnssecError, "%s", errMsg)
+				// A policy the config names and the zone cannot use.
+				//
+				// A zone that signs, or asks to, and one that has not loaded, is
+				// quarantined with the reason, and the name is cleared so that
+				// nothing is bound under it (which also drops the signing option
+				// below: it is ignored without a policy).
+				//
+				// A zone that is loaded and does not sign is not: it serves as it
+				// did, and the policy is for a signing role it may learn later. It
+				// is told, and the name goes on to the engine as the config's, not
+				// as a removal: the engine keeps the policy bound to the zone, with
+				// the reload's warning, or, with none bound, records the name for
+				// the role that binds (recordPolicyOfNonSigningZone). Quarantining
+				// it here refused every refresh of the zone and answered its
+				// queries with SERVFAIL, and clearing the name was read by the
+				// engine as the policy removed (#1000).
+				if zoneKeepsServingWithoutPolicy(zd, zconf) {
+					lgConfig.Warn("zone DNSSEC policy unusable; the zone does not sign, so it keeps serving and keeps its policy binding",
+						"zone", zname, "policy", polName, "err", errMsg)
+					zd.SetError(DnssecPolicyWarning, "%s; the zone does not sign, so it keeps serving and keeps its policy binding", errMsg)
+				} else {
+					lgConfig.Error("zone DNSSEC policy unusable, zone will not be signed", "zone", zname, "policy", polName, "err", errMsg)
+					zconf.DnssecPolicy = ""
+					zd.SetError(DnssecError, "%s", errMsg)
+				}
 			} else if usable {
 				lgConfig.Info("DNSSEC policy accepted", "zone", zname, "policy", polName)
 			}
@@ -1587,7 +1665,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// more likely place for a typo, and it silently shadows a correct
 		// global list rather than falling back to it.
 		if err := ValidateTransferSrc(fmt.Sprintf("zone %s: transfer-src", zname), zconf.TransferSrc); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		zd.TransferSrc = zconf.TransferSrc
 
@@ -1865,7 +1943,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		default:
 			if conf.Internal.RefreshZoneCh == nil {
 				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")
-				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
+				return nil, nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
 				Name:             zname,
@@ -1879,12 +1957,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Downstreams:      zconf.Downstreams,
 				DownstreamAuth:   zconf.DownstreamAuth,
 				ConfigUpdate:     true, // config-bearing: lets reload clear removed ACLs
+				Registered:       zd,   // the zone is registered above, before this is queued
+				ParseSeq:         seq,
 				Zonefile:         zconf.Zonefile,
 				Options:          options,
 				UpdatePolicy:     policy,
 				UpdatePolicySet:  true,
 				DelegationPolicy: dpol,
 				DnssecPolicy:     zconf.DnssecPolicy,
+				DnssecPolicies:   reloadPolicies,
 				TransferSrc:      zconf.TransferSrc,
 				// Always carried (empty == inherit the global), so a config
 				// edit that REMOVES a per-zone mode actually reverts the zone
@@ -1893,20 +1974,32 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				NotifyRetries:       retries,
 				NotifyRetryInterval: retryInterval,
 			}
-			select {
-			case conf.Internal.RefreshZoneCh <- zr:
-			case <-ctx.Done():
-				return all_zones, broken_zones, ctx.Err()
+			if reload {
+				pending = append(pending, zr)
+			} else {
+				// An initial parse queues as it goes: this one is the zone's newest.
+				zr.Registered.latestParseSeq.Store(seq)
+				if qerr := conf.queueZoneRefreshers(ctx, []ZoneRefresher{zr}); qerr != nil {
+					return all_zones, broken_zones, nil, qerr
+				}
 			}
 		}
 	}
 
-	lgConfig.Info("zones parsed and refreshing", "count", len(all_zones), "zones", all_zones, "broken", broken_zones, "queued", len(conf.Internal.RefreshZoneCh))
+	lgConfig.Info("zones parsed and refreshing", "count", len(all_zones), "zones", all_zones, "broken", broken_zones, "queued", len(conf.Internal.RefreshZoneCh), "pending", len(pending))
 
 	warnGlobalOutboundSerialSuppressed(conf, serialSuppressedZones)
 
+	// A reload has parsed: its refreshers are the newest for their zones, and the
+	// ones an earlier reload still has queued are overtaken (the engine drops them).
+	// Only now, and not as each zone is parsed: a parse that fails part way returns
+	// above, queues nothing, and overtakes nothing.
+	for _, zr := range pending {
+		zr.Registered.latestParseSeq.Store(zr.ParseSeq)
+	}
+
 	lgConfig.Debug("ParseZones complete")
-	return all_zones, broken_zones, nil
+	return all_zones, broken_zones, pending, nil
 }
 
 // warnGlobalOutboundSerialSuppressed tells the operator, once per parse, that a
@@ -2763,6 +2856,29 @@ func (conf *Config) parseDnssecConfig() error {
 		conf.Internal.DnssecPolicies["default"] = BuiltinDefaultDnssecPolicy()
 	}
 	return nil
+}
+
+// zoneKeepsServingWithoutPolicy reports whether a zone whose configured DNSSEC
+// policy cannot be used is left in service, with a warning, rather than
+// quarantined: it has loaded, so it has a binding for a reload to keep, and it
+// does not sign. A zone signs here if the zone as it runs does (its options,
+// which a derived app's run-time options are among), or the config being parsed
+// asks it to. The zone's options are read as the previous parse and the daemon
+// left them: this parse has not applied its own yet.
+func zoneKeepsServingWithoutPolicy(zd *ZoneData, zconf *ZoneConf) bool {
+	zd.mu.Lock()
+	loaded, signs := !zd.FirstZoneLoad, zd.signsItsOwnContent()
+	zd.mu.Unlock()
+	if !loaded || signs {
+		return false
+	}
+	for _, o := range zconf.OptionsStrs {
+		switch StringToZoneOption[strings.ToLower(strings.TrimSpace(o))] {
+		case OptOnlineSigning, OptInlineSigning:
+			return false
+		}
+	}
+	return true
 }
 
 // resolveZonePolicyRef decides whether a zone's named DNSSEC policy is usable.
