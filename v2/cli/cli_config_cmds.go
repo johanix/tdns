@@ -7,6 +7,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
@@ -108,6 +109,7 @@ created, mode 0600, if it does not exist. Adding a daemon that is already
 there changes nothing.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
+			o.Ctx = cmd.Context()
 			o.DaemonConfig = args[0]
 			o.CliConfig = cliConfigPath(cmd)
 			root := cmd.Root()
@@ -117,7 +119,7 @@ there changes nothing.`,
 			if err != nil {
 				fatalf("%v", err)
 			}
-			printAddResult(os.Stdout, res, o.DryRun)
+			printAddResult(os.Stdout, res, o.DryRun, o.CliConfig)
 		},
 	}
 	c.Flags().StringVar(&o.Role, "role", "", "daemon type: auth, agent or imr (default: detect from the daemon config)")
@@ -135,6 +137,8 @@ var runningAsRoot = func() bool { return os.Geteuid() == 0 }
 
 // AddOptions is the input to AddDaemonConfig.
 type AddOptions struct {
+	// Ctx ends the wait for another add's lock (Ctrl-C). Nil means no end.
+	Ctx context.Context
 	// CliConfig is the CLI config to add to.
 	CliConfig string
 	// TargetFile is the file to edit when the apiservers: list lives in a file
@@ -247,11 +251,19 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	// succeed, the one list then hiding the other's entry. A dry run writes
 	// nothing and takes no lock.
 	if !o.DryRun {
-		unlock, err := lockCliConfigs(o.CliConfig, target)
+		ctx := o.Ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		unlock, err := lockCliConfigs(ctx, o.CliConfig, target)
 		if err != nil {
 			return nil, err
 		}
 		defer unlock()
+		// Cancelled while the lock was being taken: edit nothing.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
 
 	// What is there now. A CLI config that exists but does not load cleanly is
@@ -276,7 +288,10 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return socketURL != "" && u == socketURL
 	}
 	for _, e := range existing {
-		sameFile := e.ConfigFile != "" && filepath.Clean(e.ConfigFile) == info.ConfigFile
+		// Resolved, so the same daemon config reached through a symlink is
+		// the same daemon, not a second one on the same address. The stored
+		// path stays as written.
+		sameFile := e.ConfigFile != "" && resolvedPath(e.ConfigFile) == resolvedPath(info.ConfigFile)
 		sameAddr := sameDaemonAddr(e.BaseURL)
 		if sameAddr && useSocket && e.BaseURL != socketURL {
 			res.Notes = append(res.Notes, fmt.Sprintf(
@@ -387,16 +402,20 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return msg + ". Is apiservers: also defined in an include: file or in cli.localconfig, which hides it? Use --file to name the file that holds the list."
 	}
 
+	// Load it with the edited file laid over the real one, before anything is
+	// written, so the add is refused where it would fail and the preview
+	// (--dry-run) says the same. Only checking after the write meant undoing
+	// it, and an undo cannot always put back what the write changed: with
+	// --file a hard link to the file the CLI reads, the rename detaches the
+	// two names, and writing the old bytes back does not join them again.
+	fs, err := overlayFs(target, out)
+	if err != nil {
+		return nil, err
+	}
+	if got, gerr := readApiServers(o.CliConfig, fs); gerr != nil || !sameEntries(got, want) {
+		return nil, fmt.Errorf("%s Nothing was written.", hidden(gerr, "would not load"))
+	}
 	if o.DryRun {
-		// Load it with the edited file laid over the real one, so the
-		// preview fails where the add would fail.
-		fs, err := overlayFs(target, out)
-		if err != nil {
-			return nil, err
-		}
-		if got, gerr := readApiServers(o.CliConfig, fs); gerr != nil || !sameEntries(got, want) {
-			return nil, fmt.Errorf("%s Nothing was written.", hidden(gerr, "would not load"))
-		}
 		return res, nil
 	}
 
@@ -426,13 +445,28 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 // chooseEntryName fills in entry.Name (and Role for an instance).
 func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []ApiDetails, o AddOptions) error {
 	canonical := roleToClientKey[role] // tdns-auth, tdns-agent, tdns-imr
-	hasCanonical := false
+	// Only a role-less row is the canonical entry. A row named tdns-auth
+	// that carries a role: is an instance using a reserved name, which the
+	// CLI ignores (checkInstanceEntries): counting it would file the first
+	// real auth daemon as an extra instance, and leave `tdns-ncli auth` with
+	// no client.
+	hasCanonical, badRole := false, ""
 	used := map[string]bool{}
 	for _, e := range existing {
 		used[e.Name] = true
 		if e.Name == canonical {
-			hasCanonical = true
+			if e.Role == "" {
+				hasCanonical = true
+			} else {
+				badRole = e.Role
+			}
 		}
+	}
+	// That row also holds the name this daemon would take as the canonical
+	// one: say so, rather than write an entry the CLI would ignore too.
+	badCanonical := func() error {
+		return fmt.Errorf("the CLI config has an entry named %q with role: %s, which the CLI ignores: %q is the canonical %s's name. Remove its role: line to make it the canonical %s, or rename it, then add again",
+			canonical, badRole, canonical, role, role)
 	}
 	taken := func(n string) bool {
 		if used[n] || n == ShowCmdsName || n == "help" || n == "completion" {
@@ -466,6 +500,8 @@ func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []
 	}
 
 	switch {
+	case o.Name == "" && !hasCanonical && badRole != "":
+		return badCanonical()
 	case o.Name == "" && !hasCanonical:
 		asCanonical()
 	case o.Name == "":
@@ -489,6 +525,9 @@ func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []
 			return fmt.Errorf("--name %q is not usable: lower-case letters, digits and hyphens, starting with a letter, at most 32 characters", o.Name)
 		}
 		if o.Name == canonical && !hasCanonical {
+			if badRole != "" {
+				return badCanonical()
+			}
 			asCanonical()
 			return nil
 		}
@@ -615,10 +654,17 @@ func (o *fileOverlay) OpenFile(name string, flag int, perm os.FileMode) (afero.F
 // config the caller found missing: with --config when cfg is not the default,
 // so that following the advice creates the file that was missing.
 func ConfigAddHint(cfg string) string {
+	return ncliFor(cfg) + " config add"
+}
+
+// ncliFor is "tdns-ncli", with --config cfg when cfg is not the default: the
+// start of any command line printed as advice, so that it reads the CLI
+// config the command that printed it read.
+func ncliFor(cfg string) string {
 	if cfg == "" || cfg == DefaultCliConfigFile {
-		return "tdns-ncli config add"
+		return "tdns-ncli"
 	}
-	return "tdns-ncli --config " + shellQuote(cfg) + " config add"
+	return "tdns-ncli --config " + shellQuote(cfg)
 }
 
 // reShellSafe matches a word a POSIX shell takes as it stands: no expansion,
@@ -641,7 +687,7 @@ func maskKey(e ApiDetails) ApiDetails {
 	return e
 }
 
-func printAddResult(w io.Writer, r *AddResult, dryRun bool) {
+func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
 	for _, n := range r.Notes {
 		fmt.Fprintf(w, "Note: %s\n", n)
 	}
@@ -675,7 +721,9 @@ func printAddResult(w io.Writer, r *AddResult, dryRun bool) {
 			}
 		}
 	}
-	fmt.Fprintf(w, "\nTry it:  tdns-ncli %s ping\n", word)
+	// The CLI config the add read, not the --file it edited: --file only
+	// names where in that config the list lives.
+	fmt.Fprintf(w, "\nTry it:  %s %s ping\n", ncliFor(cfg), word)
 }
 
 // --------------------------------------------------------------- config list
@@ -716,7 +764,7 @@ of them does not answer, or could not be checked (rootca: tlsa).`,
 				}
 			}
 			fmt.Printf("CLI config: %s\n\n", cfg)
-			printListRows(os.Stdout, rows, check)
+			printListRows(os.Stdout, rows, check, cfg)
 			for _, w := range duplicatePins(entries) {
 				fmt.Printf("\nWarning: %s\n", w)
 			}
@@ -814,7 +862,7 @@ func trimEntryPrefix(why string) string {
 	return why
 }
 
-func printListRows(w io.Writer, rows []ListRow, check bool) {
+func printListRows(w io.Writer, rows []ListRow, check bool, cfg string) {
 	head := "NAME|COMMAND|KIND|API|DAEMON CONFIG|STATUS"
 	if check {
 		head += "|CHECK"
@@ -828,7 +876,7 @@ func printListRows(w io.Writer, rows []ListRow, check bool) {
 		lines = append(lines, l)
 	}
 	if len(rows) == 0 {
-		fmt.Fprintln(w, "No apiservers entries. Add one with: tdns-ncli config add <daemon-config.yaml>")
+		fmt.Fprintf(w, "No apiservers entries. Add one with: %s <daemon-config.yaml>\n", ConfigAddHint(cfg))
 		return
 	}
 	fmt.Fprintln(w, columnize.SimpleFormat(lines))

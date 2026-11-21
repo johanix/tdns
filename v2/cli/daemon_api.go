@@ -9,7 +9,9 @@ package cli
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -188,24 +190,35 @@ func detectDaemonRole(serviceName string, hasService, hasImrEngine bool, path st
 	if w := mpWord(serviceName); w != "" {
 		return refuse(w)
 	}
-	fromName := roleFromWords(serviceName)
-	fromFile := roleFromWords(base)
+	// A deciding name that names two roles (west-agent-auth) is no evidence
+	// for either: the first word is not better evidence than the second.
+	ambiguous := func(what, s string, roles []string) (string, string, error) {
+		return "", "", fmt.Errorf("%s %q names more than one daemon type (%s); use --role auth|agent|imr",
+			what, s, strings.Join(roles, ", "))
+	}
+	nameRoles, fileRoles := rolesFromWords(serviceName), rolesFromWords(base)
+	if len(nameRoles) > 1 {
+		return ambiguous("service.name", serviceName, nameRoles)
+	}
 	fileMp := mpWord(base)
 	switch {
-	case fromName != "":
+	case len(nameRoles) == 1:
+		fromName := nameRoles[0]
 		switch {
 		case fileMp != "":
 			warning = fmt.Sprintf("service.name says %s but the file name suggests a tdns-mp daemon (%q); using %s", fromName, fileMp, fromName)
-		case fromFile != "" && fromFile != fromName:
-			warning = fmt.Sprintf("service.name says %s but the file name suggests %s; using %s", fromName, fromFile, fromName)
+		case len(fileRoles) > 1 || len(fileRoles) == 1 && fileRoles[0] != fromName:
+			warning = fmt.Sprintf("service.name says %s but the file name suggests %s; using %s", fromName, strings.Join(fileRoles, " or "), fromName)
 		}
 		return fromName, warning, nil
 	case !hasService && hasImrEngine:
 		return "imr", "", nil
 	case fileMp != "":
 		return refuse(fileMp)
-	case fromFile != "":
-		return fromFile, "", nil
+	case len(fileRoles) > 1:
+		return ambiguous("the file name", filepath.Base(path), fileRoles)
+	case len(fileRoles) == 1:
+		return fileRoles[0], "", nil
 	}
 	return "", "", fmt.Errorf(
 		"cannot tell which daemon %s is for (service.name %q, file name %q); use --role auth|agent|imr",
@@ -230,20 +243,19 @@ func splitWords(s string) []string {
 	})
 }
 
-// roleFromWords returns the daemon role named by a whole word of s, ignoring
-// trailing digits (auth2), or "".
-func roleFromWords(s string) string {
+// rolesFromWords returns the distinct daemon roles named by whole words of s,
+// ignoring trailing digits (auth2), in the order they first appear.
+func rolesFromWords(s string) []string {
+	var roles []string
 	for _, w := range splitWords(s) {
-		switch strings.TrimRight(w, "0123456789") {
-		case "auth":
-			return "auth"
-		case "agent":
-			return "agent"
-		case "imr":
-			return "imr"
+		switch r := strings.TrimRight(w, "0123456789"); r {
+		case "auth", "agent", "imr":
+			if !slices.Contains(roles, r) {
+				roles = append(roles, r)
+			}
 		}
 	}
-	return ""
+	return roles
 }
 
 // apiBaseURL turns one apiserver.addresses entry into the base URL the CLI
@@ -270,7 +282,10 @@ func apiBaseURL(addr string, useTLS bool) (string, error) {
 	if !useTLS {
 		scheme = "http"
 	}
-	return scheme + "://" + net.JoinHostPort(host, port) + "/api/v1", nil
+	// Built as a url.URL, so an IPv6 zone (fe80::1%eth0) comes out as %25eth0,
+	// which is what a URL parser takes back; a raw % does not parse.
+	u := url.URL{Scheme: scheme, Host: net.JoinHostPort(host, port), Path: "/api/v1"}
+	return u.String(), nil
 }
 
 // deriveInstanceName proposes a command word for a daemon config from its file

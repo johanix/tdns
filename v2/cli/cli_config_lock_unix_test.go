@@ -3,6 +3,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,13 +15,13 @@ import (
 // first to release the lock, and then gets it.
 func TestLockCliConfigTakesTurns(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "tdns-ncli.yaml")
-	unlock, err := lockCliConfig(p)
+	unlock, err := lockCliConfig(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := make(chan func(), 1)
 	go func() {
-		u, err := lockCliConfig(p)
+		u, err := lockCliConfig(context.Background(), p)
 		if err != nil {
 			t.Error(err)
 			u = func() {}
@@ -57,7 +59,7 @@ func TestLockCliConfigsThroughADirectoryAlias(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		u, err := lockCliConfigs(a, b)
+		u, err := lockCliConfigs(context.Background(), a, b)
 		if err == nil {
 			u()
 		}
@@ -83,7 +85,7 @@ func TestAddToAnotherFileWaitsForTheCliConfigLock(t *testing.T) {
 	writeFile(t, env.cli, "cli:\n   localconfig: "+local+"\n")
 	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
 
-	unlock, err := lockCliConfig(env.cli) // another add, busy with the CLI config
+	unlock, err := lockCliConfig(context.Background(), env.cli) // another add, busy with the CLI config
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,12 +110,56 @@ func TestAddToAnotherFileWaitsForTheCliConfigLock(t *testing.T) {
 		t.Fatal("the add did not go ahead once the lock was released")
 	}
 
-	// Locks taken together are taken in one order, each once.
-	u, err := lockCliConfigs(local, env.cli, local)
+	// Locks taken together are taken in one order, each once: a path named
+	// twice must not wait on its own lock.
+	locked := make(chan error, 1)
+	go func() {
+		u, err := lockCliConfigs(context.Background(), local, env.cli, local)
+		if err == nil {
+			u()
+		}
+		locked <- err
+	}()
+	select {
+	case err := <-locked:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("lockCliConfigs waited on its own lock")
+	}
+}
+
+// Ctrl-C while an add waits for another add's lock: the wait ends, and the
+// add neither reads nor writes the config.
+func TestCancelledAddStopsWaitingForTheLock(t *testing.T) {
+	env := newAddEnv(t)
+	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	unlock, err := lockCliConfig(context.Background(), env.cli) // another add, busy
 	if err != nil {
 		t.Fatal(err)
 	}
-	u()
+	defer unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := AddDaemonConfig(AddOptions{Ctx: ctx, CliConfig: env.cli, DaemonConfig: d})
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want the cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the add kept waiting for the lock after its context was cancelled")
+	}
+	if _, err := os.Stat(env.cli); !os.IsNotExist(err) {
+		t.Errorf("the cancelled add wrote the CLI config (stat: %v)", err)
+	}
 }
 
 // The CLI config does not exist yet, and --file names it through another

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -41,6 +42,8 @@ var (
 	reApiserversKey = regexp.MustCompile(`^apiservers:[ \t]*(#.*)?$`)
 	reApiserversInl = regexp.MustCompile(`^apiservers:[ \t]*[^ \t#]`)
 	reItemStart     = regexp.MustCompile(`^([ \t]*)-([ \t]+)([A-Za-z_-]+):([ \t]*)`)
+	// reBareDash is a list item whose mapping starts on the next line.
+	reBareDash = regexp.MustCompile(`^([ \t]*)-[ \t]*$`)
 )
 
 // Layout defaults, taken from cmdv2/cli/tdns-cli.sample.yaml: three-space
@@ -142,6 +145,15 @@ func detectLayout(block []string) itemLayout {
 		}
 		m := reItemStart.FindStringSubmatch(l)
 		if m == nil {
+			// A bare "-" with its mapping on the lines below gives the
+			// list's indentation (a new item at another indentation does
+			// not load), though not the alignment of its keys.
+			if b := reBareDash.FindStringSubmatch(l); b != nil {
+				items++
+				if items == 1 {
+					lay.indent = len(strings.ReplaceAll(b[1], "\t", "    "))
+				}
+			}
 			continue
 		}
 		items++
@@ -244,6 +256,12 @@ func yamlScalar(s string) string {
 				}
 			}
 		}
+	}
+	// A line break or another control character does not survive single
+	// quotes (a line break folds into a space when read back); double
+	// quotes with escapes do, and strconv.Quote's escapes are YAML's.
+	if strings.IndexFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+		return strconv.Quote(s)
 	}
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }

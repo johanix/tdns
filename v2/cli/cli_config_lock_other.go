@@ -5,7 +5,9 @@
  */
 package cli
 
+import "context"
+
 // lockCliConfig is a no-op where there is no flock(2). See the unix version.
-func lockCliConfig(path string) (func(), error) {
+func lockCliConfig(_ context.Context, path string) (func(), error) {
 	return func() {}, nil
 }
