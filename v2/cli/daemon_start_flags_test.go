@@ -12,7 +12,8 @@ import (
 
 // `imr2 daemon start` (or auth2's) must start the daemon on the instance's own
 // config-file:, not on the daemon's compiled-in default, which is the
-// canonical daemon's file. An explicit --config still decides.
+// canonical daemon's file. The CLI's own --config names the CLI config, so it
+// is not passed to that daemon at all.
 func TestDaemonStartFlagsCarryTheInstanceConfig(t *testing.T) {
 	newTree := func() (*cobra.Command, *cobra.Command) {
 		root := &cobra.Command{Use: "tdns-ncli"}
@@ -35,10 +36,21 @@ func TestDaemonStartFlagsCarryTheInstanceConfig(t *testing.T) {
 		t.Errorf("instance with --debug: %q, want %q", got, want)
 	}
 
+	// tdns-ncli --config /etc/tdns/tdns-ncli.yaml imr2 daemon start: that
+	// --config is the CLI's config, not the daemon's.
+	root, start = newTree()
+	root.PersistentFlags().Set("config", "/etc/tdns/tdns-ncli.yaml")
+	root.PersistentFlags().Set("debug", "true")
+	if got, want := daemonStartFlags(start, inst), []string{"--config", "/etc/tdns/tdns-imr2.yaml", "--debug"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("with the CLI's --config: %q, want %q", got, want)
+	}
+
+	// An entry with no config-file: gets the flags as before, --config
+	// included.
 	root, start = newTree()
 	root.PersistentFlags().Set("config", "/tmp/explicit.yaml")
-	if got, want := daemonStartFlags(start, inst), []string{"--config", "/tmp/explicit.yaml"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("explicit --config: %q, want %q", got, want)
+	if got, want := daemonStartFlags(start, &ApiDetails{Name: "tdns-imr"}), []string{"--config", "/tmp/explicit.yaml"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("entry with no config-file: and --config: %q, want %q", got, want)
 	}
 
 	_, start = newTree()
