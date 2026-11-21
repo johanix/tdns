@@ -323,7 +323,7 @@ func (imr *Imr) answerFromOwnZone(ctx context.Context, qname string, qtype uint1
 	}
 	switch classifyResponse(qname, qtype, r) {
 	case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-		if cctx, rcode, handled := imr.handleNegative(qname, qtype, r, ownZoneTransport, zd.ZoneName); handled {
+		if cctx, rcode, handled := imr.handleNegative(ctx, qname, qtype, r, ownZoneTransport, zd.ZoneName); handled {
 			return nil, rcode, cctx, ownZoneTransport, nil, true
 		}
 	}

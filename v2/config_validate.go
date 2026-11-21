@@ -165,6 +165,16 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 
+	// The qmin tuning NewImr refuses at start, refused here too, so that
+	// config check and the daemon's load fail on it instead of the resolver
+	// failing to start. The defaults first, on a copy, so that absent keys
+	// get them, as NewImr would give them.
+	qminTuning := config.Imr.Tuning
+	LoadImrTuningDefaults(&qminTuning)
+	if err := validateQminTuning(&qminTuning); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+
 	// listeners.doh-path (#666). ParseConfig ends by calling this function, so
 	// the daemon refuses a bad path at load too, rather than when the DoH
 	// engine starts, where the error would only be logged and DoH not served.
