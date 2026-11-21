@@ -67,13 +67,32 @@ func daemonFlagsFrom(cmd *cobra.Command, withConfig bool) []string {
 //
 // The CLI's own --config is then not passed on. It names the CLI config
 // (tdns-ncli.yaml), not a daemon's, so it must neither replace the entry's
-// config-file: nor follow it. An entry with no config-file: gets the flags as
-// before.
-func daemonStartFlags(cmd *cobra.Command, ad *ApiDetails) []string {
-	if ad == nil || ad.ConfigFile == "" {
-		return extractDaemonFlags(cmd)
+// config-file: nor follow it.
+//
+// A named instance (an entry with a role:) with no config-file: is refused:
+// its daemon would read the compiled-in default, the canonical daemon's
+// config, and the CLI's --config is the CLI's. Neither is the instance's, so
+// there is nothing right to start it with. A canonical entry with no
+// config-file: gets the flags as before, the CLI's --config included.
+func daemonStartFlags(cmd *cobra.Command, ad *ApiDetails) ([]string, error) {
+	switch {
+	case ad != nil && ad.ConfigFile != "":
+		return append([]string{"--config", ad.ConfigFile}, daemonFlagsFrom(cmd, false)...), nil
+	case ad != nil && ad.Role != "":
+		return nil, fmt.Errorf("apiservers entry %q has no config-file:, so its daemon would start on the "+
+			"canonical daemon's config. Add config-file: <its daemon config> to the entry", ad.Name)
 	}
-	return append([]string{"--config", ad.ConfigFile}, daemonFlagsFrom(cmd, false)...)
+	return extractDaemonFlags(cmd), nil
+}
+
+// mustDaemonStartFlags is daemonStartFlags, exiting on its refusal.
+func mustDaemonStartFlags(cmd *cobra.Command, ad *ApiDetails) []string {
+	flags, err := daemonStartFlags(cmd, ad)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	return flags
 }
 
 // NewDaemonCmd returns a fresh "daemon" command tree bound to the given
@@ -135,9 +154,10 @@ Right now this doesn't do much, but later on various services will be able to re
 				daemonCommand = ad.Command
 			}
 
-			// Flags to pass to the daemon (--config, --debug, -v), and the
-			// entry's config-file: when --config was not given.
-			daemonFlags := daemonStartFlags(cmd, ad)
+			// Flags to pass to the daemon: --config <the entry's config-file:>
+			// (or the CLI's --config, for a canonical entry without one),
+			// --debug, -v.
+			daemonFlags := mustDaemonStartFlags(cmd, ad)
 
 			api.StartDaemon(maxwait, tdns.Globals.Slurp, daemonCommand, daemonFlags)
 		},
@@ -163,6 +183,17 @@ Right now this doesn't do much, but later on various services will be able to re
 		Run: func(cmd *cobra.Command, args []string) {
 			api, _ := GetApiClient(role, true)
 
+			clientKey := getClientKeyFromParent(role)
+			if clientKey == "" {
+				clientKey = "tdns-auth" // fallback for unknown roles
+			}
+			ad := getApiDetailsByClientKey(clientKey)
+
+			// The flags as for start, worked out before the stop, so that a
+			// refusal (a named instance with no config-file:) leaves the
+			// running daemon alone.
+			daemonFlags := mustDaemonStartFlags(cmd, ad)
+
 			api.StopDaemon()
 			time.Sleep(4 * time.Second)
 
@@ -181,12 +212,7 @@ Right now this doesn't do much, but later on various services will be able to re
 			}
 
 			// Get command from CLI config if available
-			clientKey := getClientKeyFromParent(role)
-			if clientKey == "" {
-				clientKey = "tdns-auth" // fallback for unknown roles
-			}
 			daemonCommand := ""
-			ad := getApiDetailsByClientKey(clientKey)
 			if ad != nil {
 				daemonCommand = ad.Command
 			}
@@ -234,10 +260,6 @@ Right now this doesn't do much, but later on various services will be able to re
 					fmt.Printf("%s is not newer than %s. No update.\n", srcbin, dstbin)
 				}
 			}
-
-			// Flags to pass to the daemon (--config, --debug, -v), and the
-			// entry's config-file: when --config was not given.
-			daemonFlags := daemonStartFlags(cmd, ad)
 
 			api.StartDaemon(maxwait, false, daemonCommand, daemonFlags) // no slurping on restart
 		},
