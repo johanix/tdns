@@ -736,6 +736,23 @@ func TestAddUndoesWhenAnOverlayHidesTheEntry(t *testing.T) {
 		t.Error("the dry run wrote the local file")
 	}
 
+	// --file naming a symlink to the local config: the add writes through the
+	// link, so the preview must read the edit through it too.
+	link := filepath.Join(env.dir, "local-link.yaml")
+	if err := os.Symlink(local, link); err == nil {
+		if res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true; o.TargetFile = link }); err != nil || res.Wrote {
+			t.Errorf("dry run with --file a symlink to the local config: %+v, %v", res, err)
+		}
+		// And the other way round: cli.localconfig names the link, --file the
+		// file itself.
+		viaLink := strings.Replace(mainCfg, "localconfig: "+local, "localconfig: "+link, 1)
+		writeFile(t, env.cli, viaLink)
+		if res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true; o.TargetFile = local }); err != nil || res.Wrote {
+			t.Errorf("dry run with cli.localconfig a symlink to --file: %+v, %v", res, err)
+		}
+		writeFile(t, env.cli, mainCfg)
+	}
+
 	_, err = env.add(t, d, nil)
 	if err == nil || !strings.Contains(err.Error(), "--file") || !strings.Contains(err.Error(), "undone") {
 		t.Fatalf("err = %v", err)
@@ -1025,6 +1042,10 @@ func TestConfigAddHint(t *testing.T) {
 		"/etc/tdns/tdns-ncli.yaml": "tdns-ncli config add",
 		"/tmp/lab.yaml":            "tdns-ncli --config /tmp/lab.yaml config add",
 		"/tmp/my lab.yaml":         "tdns-ncli --config '/tmp/my lab.yaml' config add",
+		"/tmp/lab;backup.yaml":     "tdns-ncli --config '/tmp/lab;backup.yaml' config add",
+		"/tmp/a&b|c.yaml":          "tdns-ncli --config '/tmp/a&b|c.yaml' config add",
+		"~/lab.yaml":               "tdns-ncli --config '~/lab.yaml' config add",
+		"/tmp/it's.yaml":           `tdns-ncli --config '/tmp/it'\''s.yaml' config add`,
 	} {
 		if got := ConfigAddHint(cfg); got != want {
 			t.Errorf("ConfigAddHint(%q) = %q, want %q", cfg, got, want)
