@@ -53,6 +53,23 @@ func extractDaemonFlags(cmd *cobra.Command) []string {
 	return flags
 }
 
+// daemonStartFlags is extractDaemonFlags for starting the daemon behind ad:
+// when ad has a config-file: and no --config was given, the daemon is started
+// with --config <config-file:>. Without it the daemon reads its compiled-in
+// default, which is the canonical daemon's file: `auth2 daemon start` would
+// start a second tdns-auth on the first one's config, and then wait in vain
+// for auth2's API. An explicit --config still decides, as it always has.
+func daemonStartFlags(cmd *cobra.Command, ad *ApiDetails) []string {
+	flags := extractDaemonFlags(cmd)
+	if ad == nil || ad.ConfigFile == "" {
+		return flags
+	}
+	if f := cmd.Root().Flag("config"); f != nil && f.Changed {
+		return flags
+	}
+	return append([]string{"--config", ad.ConfigFile}, flags...)
+}
+
 // NewDaemonCmd returns a fresh "daemon" command tree bound to the given
 // role. Each attachment point (auth, agent, imr, scanner in tdns-cli;
 // signer, combiner, agent in mpcli; plus root "server") gets its own
@@ -107,12 +124,14 @@ Right now this doesn't do much, but later on various services will be able to re
 				clientKey = "tdns-auth" // fallback for unknown roles
 			}
 			daemonCommand := ""
-			if ad := getApiDetailsByClientKey(clientKey); ad != nil {
+			ad := getApiDetailsByClientKey(clientKey)
+			if ad != nil {
 				daemonCommand = ad.Command
 			}
 
-			// Extract flags to pass to daemon (--config, --debug, -v, etc.)
-			daemonFlags := extractDaemonFlags(cmd)
+			// Flags to pass to the daemon (--config, --debug, -v), and the
+			// entry's config-file: when --config was not given.
+			daemonFlags := daemonStartFlags(cmd, ad)
 
 			api.StartDaemon(maxwait, tdns.Globals.Slurp, daemonCommand, daemonFlags)
 		},
@@ -161,7 +180,8 @@ Right now this doesn't do much, but later on various services will be able to re
 				clientKey = "tdns-auth" // fallback for unknown roles
 			}
 			daemonCommand := ""
-			if ad := getApiDetailsByClientKey(clientKey); ad != nil {
+			ad := getApiDetailsByClientKey(clientKey)
+			if ad != nil {
 				daemonCommand = ad.Command
 			}
 
@@ -209,8 +229,9 @@ Right now this doesn't do much, but later on various services will be able to re
 				}
 			}
 
-			// Extract flags to pass to daemon (--config, --debug, -v, etc.)
-			daemonFlags := extractDaemonFlags(cmd)
+			// Flags to pass to the daemon (--config, --debug, -v), and the
+			// entry's config-file: when --config was not given.
+			daemonFlags := daemonStartFlags(cmd, ad)
 
 			api.StartDaemon(maxwait, false, daemonCommand, daemonFlags) // no slurping on restart
 		},
