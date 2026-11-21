@@ -76,7 +76,11 @@ carries a literal role.
   daemon's. It still wins for the canonical role; for an instance the
   database the instance reports comes first, and `db.file` is used only if it
   reports none, with a warning (`updateKeyDB`). This was true of auth
-  instances before this PR too.
+  instances before this PR too. Round 2: the database is opened only without
+  `--key` (the keyfile path never reads it, so a database that cannot be
+  opened no longer stops a keyfile-signed update), and signing with no
+  active key in the keystore returns its error instead of indexing an empty
+  key list.
 - **`zone dsync roll-sig0-key --rollaction` is checked.** Its flag is bound to
   `agentRollaction`, and `PrepArgs("rollaction")` checked another variable,
   so an unknown action went to the daemon unchecked (on main too).
