@@ -1334,12 +1334,16 @@ func (imr *Imr) awaitTargetsAndSignals(ctx context.Context, targets map[string]<
 // holds the attempt to: the address family it decided on and whether it
 // reserved that family's probe (ServerAddrXportTuple.Family and Probe;
 // FamilyUnknown for no decision), and the endpoints the pass before tried,
-// which an extra pass's selection left out (tupleSelection.tried). The zero
-// value holds the attempt to nothing.
+// which an extra pass's selection left out (tupleSelection.tried). Under the
+// DNSKEY bypass it also carries the transport and endpoint the query loop
+// resolved for the attempt and deduplicated it by (dnskeyAttempt), which
+// tryServer dials rather than resolve them again. The zero value holds the
+// attempt to nothing.
 type attemptSelection struct {
 	family cache.AddressFamily
 	probe  bool
 	tried  map[passTuple]bool
+	dnskey *dnskeyAttempt
 }
 
 // suspectWithoutProbe reports whether addr, the address an attempt is about
@@ -2256,18 +2260,21 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			// tuple's probabilistic pick, or the policy-preferred transport
 			// under dnskeyBypass.
 			effTransport := transport
-			var dnskeyKey cache.AddrXport
+			var dnskey *dnskeyAttempt
 			if dnskeyBypass {
 				// All tuples for this (server, addr) collapse to the same
-				// preferred transport; skip the ones we've already tried.
-				// The attempt is recorded once made, under the endpoint
-				// tryServer dialed (dnskeyTried).
-				eff := imr.preferredDNSKEYTransport(server)
-				dnskeyKey = imr.dnskeyAttemptKey(ctx, server, zone, addr, eff)
-				if dnskeyAttempted[dnskeyKey] {
+				// preferred transport; skip the ones whose endpoint was
+				// tried. The transport and endpoint are resolved once, and
+				// the attempt dials what it was checked by; it is recorded
+				// once made (dnskeyTried).
+				a := imr.resolveDNSKEYAttempt(ctx, server, zone, addr)
+				if key, ok := a.key(); ok && dnskeyAttempted[key] {
 					continue
 				}
-				effTransport = eff
+				if a.transport != 0 {
+					effTransport = a.transport
+				}
+				dnskey = &a
 			}
 
 			lastNS, lastAddr, lastTransport = nsname, addr, transport
@@ -2278,13 +2285,11 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy), attemptSelection{family: tuple.Family, probe: tuple.Probe, tried: triedBefore})
+			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy), attemptSelection{family: tuple.Family, probe: tuple.Probe, tried: triedBefore, dnskey: dnskey})
 			if dnskeyBypass {
-				// Under the transport tryServer dialed: it reads the
-				// preference again, and a signal update in between may
-				// have changed it from effTransport. An attempt refused for
-				// its suspect family is none (dnskeyTried).
-				if key, ok := dnskeyTried(dnskeyKey, ep, wireTransport, err); ok {
+				// Under the endpoint tryServer dialed. An attempt that
+				// dialed none is not recorded (dnskeyTried).
+				if key, ok := dnskeyTried(ep, wireTransport, err); ok {
 					dnskeyAttempted[key] = true
 				}
 			}
@@ -2630,6 +2635,9 @@ func (set *svcbSignalSet) add(rr *dns.SVCB) {
 		set.alias = true
 		return
 	}
+	if !svcbMandatorySupported(rr) {
+		return
+	}
 	if rec, ok := ootsRecordFromSVCB(rr); ok {
 		set.recs = append(set.recs, rec)
 		return
@@ -2642,9 +2650,45 @@ func (set *svcbSignalSet) add(rr *dns.SVCB) {
 // svcbUsable reports whether rr is about the nameserver itself: rr is in
 // ServiceMode (SvcPriority above 0) and its TargetName is ".". SvcParams in
 // AliasMode are to be ignored (RFC 9460 section 2.4.2). The TLSA SvcParam is
-// read only from such a record.
+// read only from such a record, and not from one whose mandatory SvcParam
+// names a key tdns does not support (svcbMandatorySupported).
 func svcbUsable(rr *dns.SVCB) bool {
-	return svcbServiceMode(rr) && rr.Target == "."
+	return svcbServiceMode(rr) && rr.Target == "." && svcbMandatorySupported(rr)
+}
+
+// svcbMandatorySupported reports whether tdns supports every key rr's
+// mandatory SvcParam lists. RFC 9460 section 8 has a client ignore a
+// ServiceMode record whose mandatory names a key it does not support: the
+// record does not work for a client that ignores that key. The other records
+// of the RRset stay.
+func svcbMandatorySupported(rr *dns.SVCB) bool {
+	if rr == nil {
+		return false
+	}
+	for _, kv := range rr.Value {
+		m, ok := kv.(*dns.SVCBMandatory)
+		if !ok {
+			continue
+		}
+		for _, k := range m.Code {
+			if !svcbKeySupported(k) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// svcbKeySupported reports whether tdns acts on SvcParamKey k in a transport
+// signal: mandatory, alpn, port, oots and the TLSA key, and no-default-alpn,
+// which changes nothing for a transport that has no default ALPN. A key it
+// does not act on, such as dohpath or the address hints, is not supported.
+func svcbKeySupported(k dns.SVCBKey) bool {
+	switch k {
+	case dns.SVCB_MANDATORY, dns.SVCB_ALPN, dns.SVCB_NO_DEFAULT_ALPN, dns.SVCB_PORT, dns.SVCB_OOTS:
+		return true
+	}
+	return uint16(k) == SvcbTLSAKey
 }
 
 // svcbServiceMode reports whether rr is a ServiceMode record, whose SvcParams
@@ -2676,20 +2720,21 @@ func svcbPortValue(rr *dns.SVCB) uint16 {
 	return 0
 }
 
-// svcbAlpnCSV is rr's ALPN list, comma-separated. "" when rr has none, is
-// not in ServiceMode, or carries an oots SvcParam: a record with oots is read
-// by its oots alone, and one whose oots names no signal token is ignored, its
-// alpn not read in its place (hasOotsParam).
-func svcbAlpnCSV(rr *dns.SVCB) string {
+// svcbAlpnList is rr's ALPN list, each identifier as decoded from the wire,
+// one of which may hold a comma. nil when rr has none, is not in ServiceMode,
+// or carries an oots SvcParam: a record with oots is read by its oots alone,
+// and one whose oots names no signal token is ignored, its alpn not read in
+// its place (hasOotsParam).
+func svcbAlpnList(rr *dns.SVCB) []string {
 	if !svcbServiceMode(rr) || hasOotsParam(rr) {
-		return ""
+		return nil
 	}
 	for _, kv := range rr.Value {
 		if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
-			return strings.Join(a.Alpn, ",")
+			return a.Alpn
 		}
 	}
-	return ""
+	return nil
 }
 
 // ootsRecordFromSVCB is rr's oots SvcParam as a record, when rr carries one
@@ -2727,8 +2772,8 @@ func dropDo53WithEndpoint(raw map[string]uint8, port uint16, target string) bool
 // automatically mandatory for SVCB-DNS, so a client may not use the record
 // and drop the port.
 func alpnRecordFromSVCB(rr *dns.SVCB) (ootsRecord, bool) {
-	csv := svcbAlpnCSV(rr)
-	if csv == "" {
+	ids := svcbAlpnList(rr)
+	if len(ids) == 0 {
 		return ootsRecord{}, false
 	}
 	raw := map[string]uint8{}
@@ -2736,7 +2781,7 @@ func alpnRecordFromSVCB(rr *dns.SVCB) (ootsRecord, bool) {
 	// do53 in a record with a port or a target is skipped, as in oots
 	// (dropDo53WithEndpoint).
 	withEndpoint := svcbPortValue(rr) != 0 || svcbTarget(rr) != ""
-	for _, tok := range strings.Split(csv, ",") {
+	for _, tok := range ids {
 		tok = strings.ToLower(strings.TrimSpace(tok))
 		if _, dup := raw[tok]; tok == "" || dup || (withEndpoint && tok == "do53") {
 			continue
@@ -3450,36 +3495,53 @@ func replyMatchesQuery(r, query *dns.Msg) error {
 	return nil
 }
 
-// dnskeyAttemptKey is what a DNSKEY bypass attempt is deduplicated by: the
-// address and port the attempt would dial (attemptKey) and the transport. Two
-// servers that share an address but signal different ports or targets for
-// the transport are two endpoints, and a failure on one must not skip the
-// other.
-func (imr *Imr) dnskeyAttemptKey(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport) cache.AddrXport {
-	d, ok := imr.attemptKey(ctx, server, zone, addr, t, false)
-	if !ok {
-		return cache.AddrXport{Addr: addr, Transport: t}
+// dnskeyAttempt is a DNSKEY bypass attempt as the query loop resolves it,
+// once, for both its deduplication and its dial: the preferred transport
+// (preferredDNSKEYTransport), and the endpoint at it (endpointFor). Resolving
+// them twice, once to check the attempt and once to dial it, let a signal
+// installed in between send the attempt to an endpoint other than the one it
+// was checked by.
+type dnskeyAttempt struct {
+	transport core.Transport // 0 when force_encrypted leaves the server no transport
+	ep        endpointDial   // the zero endpointDial when none was chosen
+	err       error          // why no endpoint was chosen
+}
+
+// resolveDNSKEYAttempt is the DNSKEY bypass attempt at the server's own
+// address addr for a query to zone.
+func (imr *Imr) resolveDNSKEYAttempt(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string) dnskeyAttempt {
+	pref := imr.preferredDNSKEYTransport(server)
+	if pref == 0 {
+		return dnskeyAttempt{err: fmt.Errorf("dnssec.dnskey-query-transport=force_encrypted but server %s advertises no encrypted transport", server.Name)}
 	}
-	return cache.AddrXport{Addr: d.addr, Port: d.keyPort, Transport: t}
+	ep, err := imr.endpointFor(ctx, server, zone, addr, pref)
+	return dnskeyAttempt{transport: pref, ep: ep, err: err}
+}
+
+// key is what the attempt is deduplicated by: the address and port it dials
+// and its transport. Two servers that share an address but signal different
+// ports or targets for the transport are two endpoints, and a failure on one
+// must not skip the other. ok is false when the attempt dials no endpoint:
+// there is nothing to deduplicate it by.
+func (a dnskeyAttempt) key() (cache.AddrXport, bool) {
+	if a.err != nil || a.ep.addr == "" {
+		return cache.AddrXport{}, false
+	}
+	return cache.AddrXport{Addr: a.ep.addr, Port: a.ep.keyPort, Transport: a.transport}, true
 }
 
 // dnskeyTried is the key a DNSKEY bypass attempt is recorded under once it
 // has been made: the endpoint tryServer dialed, at its address and key port
-// over the effective transport eff, or pre, the key the attempt was checked
-// against, when tryServer chose no endpoint. Recording pre for an attempt
-// that dialed elsewhere, as a target whose addresses came in between the two
-// readings, would skip a later attempt at an endpoint never dialed. ok is
-// false for an attempt tryServer refused for its suspect family (err is an
-// errEndpointSuspectFamily), as passTried leaves it out of the pass's tried
-// set: nothing was sent, and a later tuple that holds the family's probe may
-// still make it.
-func dnskeyTried(pre cache.AddrXport, ep endpointDial, eff core.Transport, err error) (cache.AddrXport, bool) {
+// over the transport eff. ok is false for an attempt that dialed no endpoint
+// (ep is the zero endpointDial), whatever stopped it, a suspect family
+// (errEndpointSuspectFamily) included: nothing was sent, and recording the
+// endpoint it was checked by, for a target with no usable address the
+// nameserver's own address on the default port, would skip the attempt of
+// another nameserver at that address, never dialed.
+func dnskeyTried(ep endpointDial, eff core.Transport, err error) (cache.AddrXport, bool) {
 	var suspect errEndpointSuspectFamily
-	if errors.As(err, &suspect) {
+	if errors.As(err, &suspect) || ep.addr == "" {
 		return cache.AddrXport{}, false
-	}
-	if ep.addr == "" {
-		return pre, true
 	}
 	return cache.AddrXport{Addr: ep.addr, Port: ep.keyPort, Transport: eff}, true
 }
@@ -3511,17 +3573,22 @@ func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 // what selection decided for the attempt (attemptSelection).
 func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass, sel attemptSelection) (*dns.Msg, time.Duration, core.Transport, endpointDial, error) {
 	eff := t
+	dnskey := sel.dnskey
 	if dnskeyBypass {
 		// DNSKEY transport policy bypasses this server's probabilistic
-		// transport weights and picks the best advertised transport instead.
-		// Returns 0 only under force_encrypted when the server has no
-		// encrypted transport; in that case we must fail rather than fall
-		// back to cleartext.
-		pref := imr.preferredDNSKEYTransport(server)
-		if pref == 0 {
-			return nil, 0, t, endpointDial{}, fmt.Errorf("dnssec.dnskey-query-transport=force_encrypted but server %s advertises no encrypted transport", server.Name)
+		// transport weights and picks the best advertised transport instead,
+		// with its endpoint, as the query loop resolved them
+		// (resolveDNSKEYAttempt). None only under force_encrypted when the
+		// server has no encrypted transport; in that case we must fail
+		// rather than fall back to cleartext.
+		if dnskey == nil {
+			a := imr.resolveDNSKEYAttempt(ctx, server, zone, addr)
+			dnskey = &a
 		}
-		eff = pref
+		if dnskey.transport == 0 {
+			return nil, 0, t, endpointDial{}, dnskey.err
+		}
+		eff = dnskey.transport
 	}
 
 	select {
@@ -3541,7 +3608,15 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	// they are kept under the target's address and the endpoint's port, on
 	// the target's own instance (ep.server), as are the attempt's counters.
 	// The server keeps the count of answers its targets carried for it.
-	ep, eerr := imr.endpointFor(ctx, server, zone, addr, eff)
+	// Under the DNSKEY bypass the endpoint is the one the attempt was
+	// resolved with.
+	var ep endpointDial
+	var eerr error
+	if dnskeyBypass {
+		ep, eerr = dnskey.ep, dnskey.err
+	} else {
+		ep, eerr = imr.endpointFor(ctx, server, zone, addr, eff)
+	}
 	// The endpoint chosen now is checked again: selection checked the one
 	// an attempt would have dialed then, and an attempt earlier in the pass
 	// may since have made it, or the fallback it gives way to, lame or
@@ -3552,20 +3627,22 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	// endpoint at a target whose address has gone out of use gives way to
 	// the server's own address. And an extra pass does not dial an endpoint
 	// the pass before tried: a signal that changed since the selection may
-	// send the tuple there. None of this applies under the DNSKEY bypass,
-	// which dials the preferred transport whatever selection said, except
-	// that it dials a target's address of a suspect family only for a probe
-	// selection reserved: such an address is picked only when no other is
-	// left (chooseEndpointAddr).
+	// send the tuple there. The DNSKEY bypass dials the preferred transport
+	// whatever selection said, so neither the family selection decided on
+	// nor what the pass before tried holds it, except that it dials a
+	// target's address of a suspect family only for a probe selection
+	// reserved: such an address is picked only when no other is left
+	// (chooseEndpointAddr). Its endpoint is checked all the same: nothing
+	// else has, and it is not dialed while backed off or lame for the zone,
+	// a udp or tcp fallback to port 53 included.
 	if eerr == nil {
 		target := cache.JoinDialAddr(ep.addr, ep.port)
 		switch {
 		case (!dnskeyBypass || ep.redirect) && imr.suspectWithoutProbe(sel, ep.addr):
 			eerr = errEndpointSuspectFamily{server: server.Name, target: target, transport: eff}
-		case dnskeyBypass:
 		case !endpointUsable(ep.server, zone, ep.addr, ep.keyPort, eff):
 			eerr = errEndpointUnavailable{server: server.Name, target: target, transport: eff}
-		case sel.tried[passTuple{ep.server, ep.addr, ep.keyPort, eff}]:
+		case !dnskeyBypass && sel.tried[passTuple{ep.server, ep.addr, ep.keyPort, eff}]:
 			eerr = errEndpointTried{server: server.Name, target: target, transport: eff}
 		}
 	}

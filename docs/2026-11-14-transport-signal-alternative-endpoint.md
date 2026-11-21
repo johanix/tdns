@@ -476,5 +476,16 @@ written; this section says how section 3's rules apply at a target.
   own address. For udp and tcp, the nameserver's own address on port 53
   comes first when it is usable and of a healthy family: a healthy endpoint
   before a probe.
+- **The DNSKEY bypass.** A DNSKEY attempt that bypasses the weights picks its
+  transport from one reading of the server's signal, and resolves that
+  transport's endpoint once. It is deduplicated by the endpoint it dials, and
+  dials that endpoint, so a signal installed in between cannot split the two.
+  An attempt that dials nothing is not recorded: the endpoint it was checked
+  by may be another nameserver's. The bypass does not dial an endpoint that
+  is backed off or lame for the zone.
+- **SvcParams a record requires.** A record whose `mandatory` names a key
+  tdns does not act on is ignored, as RFC 9460 has a client do. tdns acts on
+  `alpn`, `no-default-alpn`, `port`, `oots` and the TLSA key. An ALPN
+  identifier is read as decoded, a comma inside it included.
 - **Status output** lists each target on a line of its own, marked as a
   target.
