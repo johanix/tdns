@@ -514,7 +514,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.AuthEngine = conf.AuthEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.transportSignalConfig().Service.Identities
-			resp.DBFile = reportedDBFile(conf.Db.File)
+			resp.DBFile = reportedDBFile(openedDBFile(conf))
 			resp.ServerErrors = conf.Internal.ServerErrors.List()
 			resp.Do53QueriesRefused = conf.Internal.do53QueriesRefused.Load()
 			// Every daemon that carries an IMR — tdns-imr itself or the
@@ -1117,6 +1117,17 @@ func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
+}
+
+// openedDBFile is the path the keystore was opened from, as NewKeyDB
+// recorded it: db.file after the trimming and cleaning InitializeKeyDB does
+// (" agent2.db " opens agent2.db), not as written. "" when no keystore file
+// is open (none configured, or one in memory).
+func openedDBFile(conf *Config) string {
+	if conf.Internal.KeyDB == nil {
+		return ""
+	}
+	return conf.Internal.KeyDB.DBFile
 }
 
 // reportedDBFile is the keystore path `config status` reports: absolute, as
