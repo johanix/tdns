@@ -1123,12 +1123,18 @@ func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request)
 // daemon's working directory, and a CLI that opens the reported path to sign
 // an update (zone update create) would resolve it against its own. Empty
 // stays empty: filepath.Abs("") is the working directory, not "no keystore".
+//
+// A relative path the daemon cannot resolve (filepath.Abs fails when there is
+// no working directory to read) is reported as none, not as written: the CLI
+// would resolve it against its own directory. With none reported, a named
+// instance's CLI falls back to its own db.file, with a warning.
 func reportedDBFile(f string) string {
 	if f == "" {
 		return ""
 	}
-	if abs, err := filepath.Abs(f); err == nil {
-		return abs
+	abs, err := filepath.Abs(f)
+	if err != nil {
+		return ""
 	}
-	return f
+	return abs
 }
