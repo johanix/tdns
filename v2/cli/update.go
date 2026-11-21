@@ -141,21 +141,20 @@ func init() {
 // session (for example "child" or "zone") and does not affect the format of the DNS UPDATE
 // messages produced.
 func CreateUpdate(role, updateType string) {
-	dbFile := viper.GetString("db.file")
-	if dbFile == "" {
-		// Local viper has no db.file (typical when the CLI's config does
-		// not duplicate the server's keystore path). Fall back to the
-		// configured server's reported DBFile via /config status.
+	reported := func() string {
 		api, err := GetApiClient(role, false)
-		if err == nil {
-			resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"})
-			if err == nil && resp.DBFile != "" {
-				dbFile = resp.DBFile
-				if tdns.Globals.Verbose {
-					fmt.Printf("Using DB file from %s server config: %s\n", role, dbFile)
-				}
-			}
+		if err != nil {
+			return ""
 		}
+		resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"})
+		if err != nil {
+			return ""
+		}
+		return resp.DBFile
+	}
+	dbFile, note := updateKeyDB(role, viper.GetString("db.file"), isInstanceRole(role), reported)
+	if note != "" && (tdns.Globals.Verbose || strings.HasPrefix(note, "Warning")) {
+		fmt.Println(note)
 	}
 	kdb, err := tdns.NewKeyDB(dbFile, false, nil)
 	if err != nil {
@@ -548,4 +547,34 @@ cmdloop:
 		}
 	}
 
+}
+
+// updateKeyDB picks the key database `zone update create` signs from, and a
+// line to print about the choice ("Warning..." lines are always printed).
+//
+// The CLI config's db.file is one path for the whole CLI, so it can only be
+// one daemon's database: the canonical daemon's. For the canonical role it
+// wins, as it always has, and the server's reported DBFile is the fallback.
+// For a named instance (agent2) the instance's own reported DBFile comes
+// first: db.file would sign agent2's update with another daemon's keys. Only
+// when the instance cannot report one is db.file used, with a warning.
+func updateKeyDB(role, shared string, instance bool, reported func() string) (string, string) {
+	if shared != "" && !instance {
+		return shared, ""
+	}
+	if f := reported(); f != "" {
+		return f, fmt.Sprintf("Using DB file from %s server config: %s", role, f)
+	}
+	if instance && shared != "" {
+		return shared, fmt.Sprintf("Warning: %s did not report its DB file; using db.file from the CLI config (%s), which may be another daemon's", role, shared)
+	}
+	return shared, ""
+}
+
+// isInstanceRole reports whether role is a named instance's tree (an
+// apiservers entry with a role:, wired under its own name) rather than a
+// built-in one.
+func isInstanceRole(role string) bool {
+	d := getApiDetailsByClientKey(getClientKeyFromParent(role))
+	return d != nil && d.Role != "" && d.Name == role
 }
