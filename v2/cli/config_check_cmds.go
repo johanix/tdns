@@ -244,20 +244,24 @@ func instanceFlavour(role string) string {
 
 // apiDetailsForRole finds the apiservers entry a role targets.
 //
-// Two lookups, and both are needed. An extra instance's entry is named after
-// the role itself ("sectdns"), so the raw name matches. A built-in role is
-// not: "auth" resolves through RegisterRole to the entry named "tdns-auth".
-// Trying only the raw name silently ignored config-file: on every canonical
-// entry while honouring it on instances -- the same key working for one target
-// and quietly doing nothing for another.
+// Two lookups, and both are needed. A built-in role resolves through
+// RegisterRole: "auth" to the entry named "tdns-auth". An extra instance is
+// registered under its own name ("sectdns"), so the same lookup finds its
+// entry. Trying only the raw name silently ignored config-file: on every
+// canonical entry while honouring it on instances -- the same key working for
+// one target and quietly doing nothing for another.
+//
+// The mapping comes first, as in GetApiClient, which picks the client the
+// request is sent with: an entry that happens to be named "auth" must not
+// stand in for "tdns-auth", or acceptedApiKey reports a key the request did
+// not send. The raw name is the fallback for a role with no mapping.
 func apiDetailsForRole(role string) *ApiDetails {
-	if ad := getApiDetailsByClientKey(role); ad != nil {
-		return ad
+	if key := GetClientKeyFromParent(role); key != "" {
+		if ad := getApiDetailsByClientKey(key); ad != nil {
+			return ad
+		}
 	}
-	if key := GetClientKeyFromParent(role); key != "" && key != role {
-		return getApiDetailsByClientKey(key)
-	}
-	return nil
+	return getApiDetailsByClientKey(role)
 }
 
 // effectiveRole collapses an instance role onto the built-in role it behaves
