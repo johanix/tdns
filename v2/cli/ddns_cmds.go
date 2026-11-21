@@ -64,7 +64,6 @@ func newDelStatusCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			fmt.Printf("%s\n", dr.Msg)
 			printDelegationDelta(os.Stdout, dr.SyncStatus)
 		},
 	}
@@ -107,7 +106,10 @@ func newDelSyncCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			fmt.Printf("%s\n", dr.Msg)
+			// The outcome is in SyncStatus, as for "parentsync sync".
+			if !printSyncResult(os.Stdout, dr.SyncStatus) {
+				os.Exit(1)
+			}
 		},
 	}
 }

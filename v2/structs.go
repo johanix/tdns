@@ -1243,6 +1243,13 @@ type DelegationSyncStatus struct {
 	Error        bool
 	ErrorMsg     string
 	UpdateResult UpdateResult // Experimental
+	// Scheme is the scheme an explicit sync sent the change by ("UPDATE",
+	// "NOTIFY", "API"), or, when every scheme failed, the last one tried;
+	// UpdateResult is then that scheme's answer. NothingSent: not in sync,
+	// and no scheme could carry the change; Msg says why, one line per
+	// scheme.
+	Scheme      string `json:",omitempty"`
+	NothingSent bool   `json:",omitempty"`
 	// Complete new delegation data for replace mode
 	NewNS   []dns.RR `json:"-"`
 	NewA    []dns.RR `json:"-"`

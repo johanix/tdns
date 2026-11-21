@@ -7,11 +7,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"sort"
-	"strings"
 
 	"github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -55,7 +53,7 @@ to print.`,
 			if err != nil {
 				log.Fatalf("Error: %v", err)
 			}
-			showParentSyncStatus(api, "Error from server")
+			showParentSyncStatus(api, "error from server")
 		},
 	}
 
@@ -74,17 +72,15 @@ to print.`,
 				Zone:    dns.Fqdn(tdns.Globals.Zonename),
 				Scheme:  bootstrapScheme,
 			})
-			PrintUpdateResult(resp.UpdateResult)
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				fmt.Printf("error: %s\n", err.Error())
 				os.Exit(1)
 			}
-			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
-				os.Exit(1)
+			if tdns.Globals.Verbose {
+				PrintUpdateResult(resp.UpdateResult)
 			}
-			if resp.Msg != "" {
-				fmt.Printf("%s\n", resp.Msg)
+			if !printBootstrapResult(os.Stdout, resp.KeyID, resp.UpdateResult, resp.Error, resp.ErrorMsg) {
+				os.Exit(1)
 			}
 		},
 	}
@@ -109,17 +105,16 @@ to print.`,
 				Algorithm: alg,
 				Action:    rollaction,
 			})
-			PrintUpdateResult(resp.UpdateResult)
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				fmt.Printf("error: %s\n", err.Error())
 				os.Exit(1)
 			}
-			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
-				os.Exit(1)
+			if tdns.Globals.Verbose {
+				PrintUpdateResult(resp.UpdateResult)
 			}
-			if resp.Msg != "" {
-				fmt.Printf("%s\n", resp.Msg)
+			if !printRollResult(os.Stdout, resp.OldKeyID, resp.NewKeyID, resp.UpdateResult,
+				resp.Error, resp.ErrorMsg, resp.Msg) {
+				os.Exit(1)
 			}
 		},
 	}
@@ -139,17 +134,14 @@ to print.`,
 			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 		})
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
+			fmt.Printf("error: %s\n", err.Error())
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+			fmt.Printf("error from server: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
-		fmt.Printf("KeyState Inquiry for %s\n", dns.Fqdn(tdns.Globals.Zonename))
-		fmt.Printf("  KeyID:        %d\n", resp.KeyID)
-		fmt.Printf("  Parent says:  %s (code %d)\n", resp.StateName, resp.KeyState)
-		fmt.Printf("  Authenticated: %v\n", resp.Authenticated)
+		printInquireResult(os.Stdout, resp.KeyID, resp.StateName, resp.Authenticated)
 	}
 
 	inquire := &cobra.Command{
@@ -182,14 +174,13 @@ to print.`,
 				Zone:    tdns.Globals.Zonename,
 			})
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				fmt.Printf("error: %v\n", err)
 				os.Exit(1)
 			}
-			if dr.Error {
-				fmt.Printf("Error: %s\n", dr.ErrorMsg)
+			if dr.SyncStatus.Error {
+				fmt.Printf("error: %s\n", dr.SyncStatus.ErrorMsg)
 				os.Exit(1)
 			}
-			fmt.Printf("%s\n", dr.Msg)
 			printDelegationDelta(os.Stdout, dr.SyncStatus)
 		},
 	}
@@ -208,14 +199,14 @@ to print.`,
 				Zone:    tdns.Globals.Zonename,
 			})
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				fmt.Printf("error: %v\n", err)
 				os.Exit(1)
 			}
-			if dr.Error {
-				fmt.Printf("Error: %s\n", dr.ErrorMsg)
+			// The outcome is in SyncStatus; Msg is not set for "sync", so
+			// this used to print one empty line whatever happened.
+			if !printSyncResult(os.Stdout, dr.SyncStatus) {
 				os.Exit(1)
 			}
-			fmt.Printf("%s\n", dr.Msg)
 		},
 	}
 
@@ -234,7 +225,7 @@ func showParentSyncStatus(api *tdns.ApiClient, errPrefix string) {
 		Zone:    dns.Fqdn(tdns.Globals.Zonename),
 	})
 	if err != nil {
-		fmt.Printf("Error: %s\n", err.Error())
+		fmt.Printf("error: %s\n", err.Error())
 		os.Exit(1)
 	}
 	if resp.Error {
@@ -246,192 +237,7 @@ func showParentSyncStatus(api *tdns.ApiClient, errPrefix string) {
 		printParentSyncStatus(resp)
 		return
 	}
-	printParentSyncReport(os.Stdout, resp.Zone, resp.Report, resp.Todo)
-}
-
-// printDelegationDelta renders a parent-vs-zone comparison: the verdict, and
-// when out of sync the changes the parent needs. Shared by "parentsync delta"
-// and "ddns del status". "parentsync status" reads the same DELEGATION-STATUS
-// answer and shares the change table, but words its own verdict
-// (printParentSyncReport).
-func printDelegationDelta(w io.Writer, dss tdns.DelegationSyncStatus) {
-	if dss.InSync {
-		// A semicolon, not a full stop: the names end in one already.
-		fmt.Fprintf(w, "Delegation information in parent %s is in sync with child %s; no action needed.\n",
-			dss.Parent, dss.ZoneName)
-		return
-	}
-	fmt.Fprintf(w, "Delegation information in parent %q is NOT in sync with child %q. Changes needed:\n",
-		dss.Parent, dss.ZoneName)
-	fmt.Fprintf(w, "%s\n", columnize.SimpleFormat(delegationChangeRows(dss)))
-}
-
-// delegationChangeRows is the change table, header first. DS is included: the
-// comparison has always computed it, and the table used to drop it.
-func delegationChangeRows(dss tdns.DelegationSyncStatus) []string {
-	out := []string{"Change|RR"}
-	add := func(label string, rrs []string) {
-		for _, rr := range rrs {
-			out = append(out, fmt.Sprintf("%s|%s", label, rr))
-		}
-	}
-	add("ADD NS", dss.NsAddsStr)
-	add("DEL NS", dss.NsRemovesStr)
-	add("ADD IPv4 GLUE", dss.AAddsStr)
-	add("DEL IPv4 GLUE", dss.ARemovesStr)
-	add("ADD IPv6 GLUE", dss.AAAAAddsStr)
-	add("DEL IPv6 GLUE", dss.AAAARemovesStr)
-	add("ADD DS", dss.DSAddsStr)
-	add("DEL DS", dss.DSRemovesStr)
-	return out
-}
-
-// printParentSyncReport renders the "status" report (#790), one section per
-// question, blank lines between them:
-//
-//	the parent and the schemes in preference order
-//	the detail for each configured scheme that has any
-//	the delegation: in sync with the parent, or the changes it needs
-//	the zone's delegation-sync-warning, and any TODO
-func printParentSyncReport(w io.Writer, zone string, r *tdns.ParentSyncReport, todo []string) {
-	var sections []string
-
-	var b strings.Builder
-	parent := r.Parent
-	if parent == "" {
-		parent = "(unknown)"
-	}
-	fmt.Fprintf(&b, "Zone %s (%s): parent %s", zone, r.Role, parent)
-	switch {
-	case r.PlanError != "":
-		fmt.Fprintf(&b, "; DSYNC discovery failed: %s\n", r.PlanError)
-	case r.PlanNote != "":
-		fmt.Fprintf(&b, "\nSchemes: none evaluated: %s\n", r.PlanNote)
-	default:
-		if r.Validated {
-			b.WriteString(", DSYNC validated\n")
-		} else {
-			b.WriteString(", DSYNC NOT validated\n")
-		}
-		b.WriteString("Schemes (in preference order):\n")
-		width := 0
-		for _, s := range r.Schemes {
-			width = max(width, len(s.Scheme))
-		}
-		for _, s := range r.Schemes {
-			if s.Usable {
-				fmt.Fprintf(&b, "  %-*s  %-8s %s\n", width, s.Scheme, "usable:", s.Target)
-			} else {
-				fmt.Fprintf(&b, "  %-*s  %-8s %s\n", width, s.Scheme, "skipped:", s.Reason)
-			}
-		}
-	}
-	sections = append(sections, b.String())
-
-	if u := r.Update; u != nil {
-		if u.ProxyReport != "" {
-			// Word for word what "zone proxy-key" prints.
-			sections = append(sections, u.ProxyReport)
-		} else if r.Role != "parentsync-proxy" {
-			sections = append(sections, childUpdateSection(u))
-		}
-	}
-
-	var other []string
-	if n := r.Notify; n != nil {
-		signed := "signed"
-		if !n.Signed {
-			signed = "unsigned"
-		}
-		other = append(other, fmt.Sprintf("NOTIFY: the zone is %s; it publishes CDS: %s, CSYNC: %s",
-			signed, yesNo(n.PublishesCDS), yesNo(n.PublishesCSYNC)))
-	}
-	if a := r.Api; a != nil {
-		line := fmt.Sprintf("API: a usable credential for parent %s is configured", parent)
-		if !a.CredentialConfigured {
-			line = fmt.Sprintf("API: no usable credential for parent %s (parentsync.api.credentials)", parent)
-		}
-		if a.AllowInsecure {
-			line += "; parentsync.api.allow-insecure is set"
-		}
-		other = append(other, line)
-	}
-	if len(other) > 0 {
-		sections = append(sections, strings.Join(other, "\n")+"\n")
-	}
-
-	// Its own verdict, not the delta commands' sentence: their "no action
-	// needed" is about the delegation alone, and here it sat next to the
-	// instruction to publish the KEY. No full stop after a name, which ends in
-	// one already.
-	b.Reset()
-	switch d := r.Delegation; {
-	case d == nil:
-		fmt.Fprintf(&b, "Delegation: could not compare with the parent: %s\n", r.DelegationError)
-	case d.InSync:
-		fmt.Fprintf(&b, "Delegation: parent %s is in sync with %s\n", d.Parent, d.ZoneName)
-	default:
-		fmt.Fprintf(&b, "Delegation: parent %s is NOT in sync with %s; changes needed:\n", d.Parent, d.ZoneName)
-		fmt.Fprintf(&b, "%s\n", columnize.SimpleFormat(delegationChangeRows(*d)))
-	}
-	sections = append(sections, b.String())
-
-	if r.Warning != "" {
-		sections = append(sections, fmt.Sprintf("Warning (delegation-sync-warning): %s\n", r.Warning))
-	}
-	if len(todo) > 0 {
-		b.Reset()
-		b.WriteString("TODO:\n")
-		for _, t := range todo {
-			fmt.Fprintf(&b, "--> %s\n", t)
-		}
-		sections = append(sections, b.String())
-	}
-
-	fmt.Fprint(w, strings.Join(sections, "\n"))
-}
-
-// childUpdateSection is the UPDATE detail for a zone syncing its own
-// delegation: its SIG(0) key, whether the KEY is at the apex, and what the
-// parent holds for it.
-func childUpdateSection(u *tdns.ParentSyncUpdateReport) string {
-	var b strings.Builder
-	if !u.HaveActiveKey {
-		b.WriteString("UPDATE: the zone has no active SIG(0) key\n")
-	} else {
-		published := false
-		for _, id := range u.ApexKeyIDs {
-			if id == u.ActiveKeyID {
-				published = true
-			}
-		}
-		switch {
-		case published:
-			fmt.Fprintf(&b, "UPDATE: SIG(0) key %d is active and its KEY is published at the apex\n", u.ActiveKeyID)
-		case len(u.ApexKeyIDs) == 0:
-			fmt.Fprintf(&b, "UPDATE: SIG(0) key %d is active; the apex has no KEY\n", u.ActiveKeyID)
-		default:
-			fmt.Fprintf(&b, "UPDATE: SIG(0) key %d is active; the apex has KEY %v, not this one\n",
-				u.ActiveKeyID, u.ApexKeyIDs)
-		}
-	}
-	if u.ParentKeyError != "" {
-		fmt.Fprintf(&b, "UPDATE: the parent's view of the key: %s\n", u.ParentKeyError)
-	} else {
-		auth := "authenticated"
-		if !u.ParentKeyAuthenticated {
-			auth = "NOT authenticated"
-		}
-		fmt.Fprintf(&b, "UPDATE: the parent's view of key %d: %s (%s)\n", u.ActiveKeyID, u.ParentKeyState, auth)
-	}
-	return b.String()
-}
-
-func yesNo(v bool) string {
-	if v {
-		return "yes"
-	}
-	return "no"
+	printParentSyncReport(os.Stdout, resp.Zone, resp.Report, resp.Todo, tdns.Globals.Verbose)
 }
 
 // printParentSyncStatus renders the Msg, Functions, and Todo from a

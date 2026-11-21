@@ -34,7 +34,7 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 			if err != nil {
 				log.Fatalf("Error: %v", err)
 			}
-			showParentSyncStatus(api, "Error from server")
+			showParentSyncStatus(api, "error from server")
 		},
 	}
 

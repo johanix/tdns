@@ -150,7 +150,7 @@ func TestPlanOutcomeSkipReasons(t *testing.T) {
 		{name: "API, no credential", zone: signed, role: SyncRoleChild, scheme: "api",
 			rdata: []*core.DSYNC{api}, validated: true, want: "no usable credential", advertised: true},
 		{name: "API, DSYNC not validated", zone: signed, role: SyncRoleChild, scheme: "api",
-			rdata: []*core.DSYNC{api}, want: "did not DNSSEC-validate", advertised: true},
+			rdata: []*core.DSYNC{api}, want: "DSYNC not validated", advertised: true},
 		{name: "target does not resolve", zone: signed, role: SyncRoleChild, scheme: "update",
 			rdata: []*core.DSYNC{update}, resolveErr: true, want: "no address", advertised: true},
 	} {
@@ -336,14 +336,13 @@ func TestSchemeReportsKeepOrderAndSpellReasonsOut(t *testing.T) {
 	}
 
 	// The proxy UPDATE gate's reason is a state name; the report says what it
-	// means and keeps the name.
+	// means.
 	for state, want := range map[ProxyUpdateState]string{
-		ProxyUpdateWaiting:    "not published at the primary yet",
-		ProxyUpdateForeignKey: "does not hold",
+		ProxyUpdateWaiting:    "waiting for the KEY at the primary",
+		ProxyUpdateForeignKey: "a KEY the agent does not hold is at the apex",
 	} {
-		r := describeSkipReason("UPDATE", string(state))
-		if !strings.Contains(r, want) || !strings.Contains(r, string(state)) {
-			t.Errorf("%s -> %q, want it to say %q and keep the state name", state, r, want)
+		if r := describeSkipReason("UPDATE", string(state)); r != want {
+			t.Errorf("%s -> %q, want %q", state, r, want)
 		}
 	}
 	if r := describeSkipReason("NOTIFY", string(ProxyUpdateWaiting)); r != string(ProxyUpdateWaiting) {
@@ -351,10 +350,11 @@ func TestSchemeReportsKeepOrderAndSpellReasonsOut(t *testing.T) {
 	}
 }
 
-// For a proxy the UPDATE detail is proxy-key's report, word for word, in each
-// state the parent's UPDATE receiver makes reachable; when the parent does not
-// advertise UPDATE there is no detail, only the scheme line.
-func TestUpdateReportProxyIsTheProxyKeyReport(t *testing.T) {
+// For a proxy the UPDATE detail is the state and the records proxy-key prints,
+// as data, in each state the parent's UPDATE receiver makes reachable; when
+// the parent does not advertise UPDATE there is no detail, only the scheme
+// line. Only "ready" asks the parent about the agent's key.
+func TestUpdateReportProxyCarriesProxyKeysRecords(t *testing.T) {
 	advertised := &ParentSyncPlan{Outcomes: []SchemeOutcome{{Scheme: "UPDATE", Advertised: true}}}
 	notAdvertised := &ParentSyncPlan{Outcomes: []SchemeOutcome{{Scheme: "UPDATE", Reason: "parent does not advertise it"}}}
 	foreign, _ := genForeignProxyKey(t)
@@ -384,12 +384,35 @@ func TestUpdateReportProxyIsTheProxyKeyReport(t *testing.T) {
 			if ur == nil {
 				t.Fatal("no UPDATE detail although the parent advertises UPDATE")
 			}
+			if ur.ProxyError != "" || ur.ProxyState != string(tc.state) {
+				t.Fatalf("state %q (error %q), want %q", ur.ProxyState, ur.ProxyError, tc.state)
+			}
+			// The same records proxy-key prints.
 			want, err := zd.proxyKeyStatusMessage(tc.state, kdb)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if ur.ProxyReport != want {
-				t.Errorf("ProxyReport differs from proxy-key's report:\n got: %s\nwant: %s", ur.ProxyReport, want)
+			if len(ur.ProxyRecords) != 2 {
+				t.Fatalf("records = %q, want the KEY and the HSYNCPARAM", ur.ProxyRecords)
+			}
+			for _, rr := range append(ur.ProxyRecords, ur.ProxyRFC3597) {
+				if !strings.Contains(want, rr) {
+					t.Errorf("%q is not in proxy-key's report:\n%s", rr, want)
+				}
+			}
+			if (ur.ProxyRFC3597 == "") != (tc.state == ProxyUpdateReady) {
+				t.Errorf("RFC 3597 form %q in state %s", ur.ProxyRFC3597, tc.state)
+			}
+			if (len(ur.ProxyForeignKeys) > 0) != (tc.state == ProxyUpdateForeignKey) {
+				t.Errorf("foreign KEYs %q in state %s", ur.ProxyForeignKeys, tc.state)
+			}
+			if !ur.HaveActiveKey || ur.ActiveKeyID == 0 {
+				t.Errorf("the agent's key is missing: %+v", ur)
+			}
+			// No IMR here: "ready" says why the parent was not asked; the
+			// other states do not ask.
+			if asked := ur.ParentKeyError != ""; asked != (tc.state == ProxyUpdateReady) {
+				t.Errorf("ParentKeyError %q in state %s", ur.ParentKeyError, tc.state)
 			}
 			if len(todo) != 0 {
 				t.Errorf("unexpected TODO for a proxy: %v", todo)
@@ -437,7 +460,7 @@ func TestUpdateReportChild(t *testing.T) {
 	sec.Options = map[ZoneOption]bool{OptParentSync: true}
 	sec.ZoneType = Secondary
 	if _, todo := sec.updateReport(context.Background(), kdb, nil, SyncRoleChild, notAdvertised); len(todo) != 1 ||
-		!strings.Contains(todo[0], "at the primary server") {
+		!strings.Contains(todo[0], "at the primary") {
 		t.Errorf("secondary without a KEY: TODO = %v", todo)
 	}
 }
@@ -608,5 +631,29 @@ func TestParentSyncStatusHandler(t *testing.T) {
 	if resp := postParentSync(t, ZoneParentSyncPost{Command: "inquire", Zone: proxyUpdZone}); !resp.Error ||
 		!strings.Contains(resp.ErrorMsg, "parent") {
 		t.Errorf("inquire with no known parent: %+v, want the parent named in an error", resp)
+	}
+}
+
+// A sync that sends nothing says why, one line per scheme, in the report's
+// words; a plan-wide reason stands on its own.
+func TestPlanSkipLines(t *testing.T) {
+	plan := &ParentSyncPlan{}
+	plan.skip("UPDATE", string(ProxyUpdateWaiting), true)
+	plan.skip("NOTIFY", "parent does not advertise it", false)
+	got := planSkipLines(plan)
+	want := []string{
+		"UPDATE skipped: waiting for the KEY at the primary",
+		"NOTIFY skipped: parent does not advertise it",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("got %q, want %q", got, want)
+	}
+
+	plan = &ParentSyncPlan{Skipped: []SkippedScheme{{Scheme: "all", Reason: "parent example. publishes no DSYNC records"}}}
+	if got := planSkipLines(plan); len(got) != 1 || got[0] != "parent example. publishes no DSYNC records" {
+		t.Errorf("plan-wide reason: %q", got)
+	}
+	if got := planSkipLines(&ParentSyncPlan{}); len(got) != 1 || got[0] != "no usable scheme" {
+		t.Errorf("empty plan: %q", got)
 	}
 }

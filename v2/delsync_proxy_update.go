@@ -187,7 +187,7 @@ func (zd *ZoneData) proxySig0PublicationStateFor(kdb *KeyDB, report bool) (Proxy
 	// Name the command that prints the records, with this zone filled in.
 	// It used to point at "keystore dnssec proxy-key", which does not exist,
 	// and then at "zone proxy-key", which is now a deprecated alias (#790).
-	msg := fmt.Sprintf("DSYNC UPDATE proxy waiting: publish the KEY + HSYNCPARAM pubkey at the primary (see log / `tdns-cli agent zone parentsync status -z %s`)", zd.ZoneName)
+	msg := fmt.Sprintf(proxyWaitingWarningPrefix+" publish the KEY + HSYNCPARAM pubkey at the primary (see log / `tdns-cli agent zone parentsync status -z %s`)", zd.ZoneName)
 	zd.SetError(DelegationSyncWarning, "%s", msg)
 	lgDns.Warn("proxy update precondition: waiting for KEY publication at primary",
 		"zone", zd.ZoneName, "instruction", instr)
@@ -317,6 +317,11 @@ func (zd *ZoneData) proxyKeyPublishBlock(kdb *KeyDB) (string, error) {
 	return zd.proxyKeyPublishBlockHeaded(kdb, proxyPublishHeading, false)
 }
 
+// proxyWaitingWarningPrefix starts the delegation-sync-warning a proxy waiting
+// for its KEY sets. "parentsync status" leaves that warning out: the report
+// itself says what to publish, and the warning points at the report.
+const proxyWaitingWarningPrefix = "DSYNC UPDATE proxy waiting:"
+
 const (
 	proxyPublishHeading = "Records for the primary to serve at the apex:"
 	// In READY the records are already there. They are shown to compare with
@@ -335,23 +340,11 @@ const (
 // 300. A record the apex does not serve -- no record there with the same
 // RDATA -- has no served TTL to show, and is printed without one.
 func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string, served bool) (string, error) {
-	keyRR, err := zd.proxyAgentKeyRR(kdb)
-	if err != nil {
+	records, unknown, _, err := zd.proxyPublishRecords(kdb, served)
+	if err != nil || records == nil {
 		return "", err
 	}
-	if keyRR == nil {
-		return "", nil
-	}
-	unknown, err := zd.proxyHsyncparamPubkeyRFC3597()
-	if err != nil {
-		return "", err
-	}
-	keyLine, hsyncLine := keyRR.String(), zd.proxyHsyncparamPubkeyRR()
 	if served {
-		ttl, ok := zd.proxyServedKeyTTL(keyRR)
-		keyLine = rrTextWithTTL(keyLine, ttl, ok)
-		ttl, ok = zd.proxyServedHsyncparamTTL()
-		hsyncLine = rrTextWithTTL(hsyncLine, ttl, ok)
 		// The records are already served, so they are shown only to compare
 		// with. The RFC 3597 form helps an operator who still has to put
 		// them on a primary that cannot parse the private type; in READY it
@@ -360,7 +353,7 @@ func (zd *ZoneData) proxyKeyPublishBlockHeaded(kdb *KeyDB, heading string, serve
 
 %s
 %s
-`, heading, keyLine, hsyncLine), nil
+`, heading, records[0], records[1]), nil
 	}
 	return fmt.Sprintf(`%s
 
@@ -371,7 +364,36 @@ HSYNCPARAM is a private type (%d). For a primary that cannot parse it, the same
 record in RFC 3597 form:
 
 %s
-`, heading, keyLine, hsyncLine, core.TypeHSYNCPARAM, unknown), nil
+`, heading, records[0], records[1], core.TypeHSYNCPARAM, unknown), nil
+}
+
+// proxyPublishRecords is what the primary should serve at its apex, as data:
+// the agent's KEY and the HSYNCPARAM pubkey flag in presentation form, and,
+// unless served, the same HSYNCPARAM in RFC 3597 form. served is READY, where
+// each record carries the TTL the zone serves it with (see
+// proxyKeyPublishBlockHeaded). records is nil, with no error, when the agent
+// holds no key; key is the agent's KEY otherwise.
+//
+// "zone proxy-key" renders these as text; "parentsync status" sends them to the
+// CLI, which lays them out for a terminal.
+func (zd *ZoneData) proxyPublishRecords(kdb *KeyDB, served bool) (records []string, rfc3597 string, key *dns.KEY, err error) {
+	keyRR, err := zd.proxyAgentKeyRR(kdb)
+	if err != nil || keyRR == nil {
+		return nil, "", nil, err
+	}
+	keyLine, hsyncLine := keyRR.String(), zd.proxyHsyncparamPubkeyRR()
+	if served {
+		ttl, ok := zd.proxyServedKeyTTL(keyRR)
+		keyLine = rrTextWithTTL(keyLine, ttl, ok)
+		ttl, ok = zd.proxyServedHsyncparamTTL()
+		hsyncLine = rrTextWithTTL(hsyncLine, ttl, ok)
+		return []string{keyLine, hsyncLine}, "", keyRR, nil
+	}
+	unknown, err := zd.proxyHsyncparamPubkeyRFC3597()
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return []string{keyLine, hsyncLine}, unknown, keyRR, nil
 }
 
 // proxyServedKeyTTL returns the TTL of the apex KEY that is the agent's key

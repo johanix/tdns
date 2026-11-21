@@ -463,6 +463,32 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 	// 	return fmt.Sprintf("Error from LookupDSYNCTarget(%s, %s): %v", zd.Parent, zd.ParentServers[0], err), err
 	// }
 
+	a := zd.syncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
+	if a.err != nil {
+		return "", 0, UpdateResult{}, a.err
+	}
+	return a.msg, a.rcode, a.ur, nil
+}
+
+// syncAttempt is what syncZoneDelegation did. On success: the scheme that
+// carried the change and the parent's answer. When every scheme failed: the
+// last scheme tried and its own answer -- never one scheme's answer under
+// another's name. When the parent offers nothing usable (ErrNoUsableDsync):
+// skipped, one line per scheme saying why.
+type syncAttempt struct {
+	msg     string
+	scheme  string
+	rcode   uint8
+	ur      UpdateResult
+	skipped []string
+	err     error
+}
+
+// syncZoneDelegation is SyncZoneDelegation, reporting which scheme it used:
+// "parentsync sync" says so.
+func (zd *ZoneData) syncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest,
+	syncstate DelegationSyncStatus, imr *Imr) syncAttempt {
+
 	// One discovery, then every usable transport in operator-preference order.
 	//
 	// This replaced BestSyncScheme, which picked ONE scheme and lived with it:
@@ -476,18 +502,18 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 	if err != nil {
 		lgDns.Error("DelegationSyncEngine: could not build the parent sync plan, ignoring sync request",
 			"zone", zd.ZoneName, "err", err)
-		return "", 0, UpdateResult{}, err
+		return syncAttempt{err: err}
 	}
 	// A parent that offers nothing this child can use is ErrNoUsableDsync:
 	// one warning per zone, not an error (planUsable).
 	if err := zd.planUsable(plan); err != nil {
-		return "", 0, UpdateResult{}, err
+		return syncAttempt{err: err, skipped: planSkipLines(plan)}
 	}
 
 	// rcode and ur are captured from whichever attempt succeeds; on total
-	// failure walkSyncPlan returns the error and they are not consulted.
-	var rcode uint8
-	var ur UpdateResult
+	// failure walkSyncPlan returns the error, and the last attempt's own
+	// scheme and answer are reported instead.
+	var a, last syncAttempt
 
 	msg, err := zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
 		var m string
@@ -510,13 +536,35 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 			// returns a POPULATED UpdateResult alongside its error, so assigning
 			// unconditionally paired a failed UPDATE's TargetStatus with a later
 			// transport's rcode, and the caller stored that as the outcome.
+			last = syncAttempt{scheme: cand.Scheme, rcode: candRcode, ur: candUr}
 			return m, e
 		}
-		rcode, ur = candRcode, candUr
+		a.scheme, a.rcode, a.ur = cand.Scheme, candRcode, candUr
 		return m, e
 	})
+	if err != nil {
+		last.err = err
+		return last
+	}
+	a.msg = msg
+	return a
+}
 
-	return msg, rcode, ur, err
+// planSkipLines is why a plan that offers nothing usable sends nothing: one
+// line per scheme, in the operator's words.
+func planSkipLines(plan *ParentSyncPlan) []string {
+	if plan == nil || len(plan.Skipped) == 0 {
+		return []string{"no usable scheme"}
+	}
+	out := make([]string, 0, len(plan.Skipped))
+	for _, s := range plan.Skipped {
+		if s.Scheme == "all" {
+			out = append(out, s.Reason)
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s skipped: %s", s.Scheme, describeSkipReason(s.Scheme, s.Reason)))
+	}
+	return out
 }
 
 func (zd *ZoneData) SyncZoneDelegationViaUpdate(ctx context.Context, kdb *KeyDB, syncstate DelegationSyncStatus,
@@ -1173,24 +1221,27 @@ func (zd *ZoneData) runExplicitSync(ctx context.Context, kdb *KeyDB, notifyq cha
 	}
 
 	// Not in sync, let's fix that.
-	msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
-	if errors.Is(err, ErrNoUsableDsync) {
+	a := zd.syncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
+	syncstate.Scheme = a.scheme
+	if errors.Is(a.err, ErrNoUsableDsync) {
 		// Not a failure: the answer says why nothing was sent, with no
 		// error (planUsable warned once)
-		lgDns.Debug("DelegationSyncher: nothing sent", "zone", zd.ZoneName, "reason", err)
-		syncstate.Msg = err.Error()
+		lgDns.Debug("DelegationSyncher: nothing sent", "zone", zd.ZoneName, "reason", a.err)
+		syncstate.NothingSent = true
+		syncstate.Msg = strings.Join(a.skipped, "\n")
 		return syncstate
 	}
-	if err != nil {
-		lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", zd.ZoneName, "err", err)
+	if a.err != nil {
+		lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", zd.ZoneName, "err", a.err)
 		syncstate.Error = true
-		syncstate.ErrorMsg = err.Error()
-		syncstate.UpdateResult = ur
+		syncstate.ErrorMsg = a.err.Error()
 	} else {
-		lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", zd.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
+		lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", zd.ZoneName, "msg", a.msg, "rcode", dns.RcodeToString[int(a.rcode)])
 	}
-	syncstate.Msg = msg
-	syncstate.Rcode = rcode
+	// On failure, the last scheme's own answer: what "parentsync sync" shows.
+	syncstate.UpdateResult = a.ur
+	syncstate.Msg = a.msg
+	syncstate.Rcode = a.rcode
 	return syncstate
 }
 

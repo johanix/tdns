@@ -522,7 +522,7 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// policy no re-bootstrap would help anyway.
 	if signer.ReBootstrapTooSoon > 0 && us.RejectionEDE != edns0.EDESig0ManualBootstrapRequired {
 		us.RejectionEDE = edns0.EDESig0ReBootstrapTooSoon
-		us.RejectionEDEText = reBootstrapTooSoonText(signer.KeyId, signer.ReBootstrapTooSoon)
+		us.RejectionEDEText = reBootstrapTooSoonText(signer.ReBootstrapTooSoon)
 		why = us.RejectionEDEText
 	}
 	return fmt.Errorf("update is signed by %s (keyid %d) which is known but not trusted (%s)",

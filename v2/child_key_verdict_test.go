@@ -294,7 +294,7 @@ func TestAReBootstrapWithinTheCooldownIsRefused(t *testing.T) {
 	if us.RejectionEDE != edns0.EDESig0ReBootstrapTooSoon {
 		t.Errorf("EDE %d, want %d (re-bootstrap too soon)", us.RejectionEDE, edns0.EDESig0ReBootstrapTooSoon)
 	}
-	if !strings.Contains(us.RejectionEDEText, "re-bootstrap again in") {
+	if !strings.Contains(us.RejectionEDEText, "retry in") {
 		t.Errorf("EXTRA-TEXT %q does not say when to re-bootstrap", us.RejectionEDEText)
 	}
 

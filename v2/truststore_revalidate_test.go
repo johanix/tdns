@@ -131,11 +131,11 @@ func TestRevalidateRefusals(t *testing.T) {
 // The text a refused re-bootstrap carries says how long to wait, never less
 // than a second.
 func TestReBootstrapTooSoonText(t *testing.T) {
-	got := reBootstrapTooSoonText(16282, 3*time.Minute+12*time.Second+400*time.Millisecond)
-	if !strings.Contains(got, "key 16282") || !strings.Contains(got, "re-bootstrap again in 3m12s") {
-		t.Errorf("%q", got)
+	if got, want := reBootstrapTooSoonText(3*time.Minute+12*time.Second+400*time.Millisecond),
+		"verification failed; retry in 3m12s"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
-	if got := reBootstrapTooSoonText(1, 10*time.Millisecond); !strings.Contains(got, "again in 1s") {
+	if got := reBootstrapTooSoonText(10 * time.Millisecond); !strings.HasSuffix(got, "retry in 1s") {
 		t.Errorf("%q", got)
 	}
 }

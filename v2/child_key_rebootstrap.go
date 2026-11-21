@@ -139,12 +139,13 @@ func reBootstrapDecision(ns []dns.RR, sig *dns.SIG, known *Sig0Key, now time.Tim
 	return &reupload, 0
 }
 
-// reBootstrapTooSoonText is the EXTRA-TEXT of EDESig0ReBootstrapTooSoon: what
-// the child was refused and when the same re-bootstrap will be accepted.
-func reBootstrapTooSoonText(keyid uint16, left time.Duration) string {
+// reBootstrapTooSoonText is the EXTRA-TEXT of EDESig0ReBootstrapTooSoon: when
+// the same re-bootstrap will be accepted. Short, because the child prints it
+// as it comes, after its own "key N: refused by parent (EDE 547)": the code
+// already says that the key's verification failed within the cooldown.
+func reBootstrapTooSoonText(left time.Duration) string {
 	if left < time.Second {
 		left = time.Second
 	}
-	return fmt.Sprintf("re-bootstrap of SIG(0) key %d refused: its last verification ended less than %s ago; re-bootstrap again in %s",
-		keyid, childKeyReBootstrapCooldown, left.Round(time.Second))
+	return fmt.Sprintf("verification failed; retry in %s", left.Round(time.Second))
 }
