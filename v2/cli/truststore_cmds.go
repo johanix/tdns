@@ -92,6 +92,25 @@ func newTruststoreSig0Cmd(role string) *cobra.Command {
 	}
 	untrust.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
 
+	revalidate := &cobra.Command{
+		Use:   "revalidate",
+		Short: "Verify a child SIG(0) key that is not trusted again, now",
+		Long: `Run the verification a child's re-bootstrap starts, at once: look for the
+child's KEY where the delegation policy says to (at the apex, at the signal
+names of its nameservers) and trust it if it is found and validates. Clears a
+recorded validation failure first.
+
+For a key whose verification failed and whose publication has since been fixed.
+A child's own re-bootstrap is refused for a while after a verification ends;
+this is not. Unlike "trust", which trusts a key without looking at it, this
+trusts it only if the verification accepts it.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("keyid", "child")
+			sig0TrustMgmt(role, "revalidate")
+		},
+	}
+	revalidate.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of the child SIG(0) key to verify again")
+
 	tombstone := &cobra.Command{
 		Use:   "tombstone",
 		Short: "List or clear the child SIG(0) keys their children have retired",
@@ -126,7 +145,7 @@ that child with that keyid), after which the key can be added like any new key.`
 	tsClear.Flags().IntVarP(&keyid, "keyid", "", 0, "Keyid of the tombstoned child SIG(0) key")
 	tombstone.AddCommand(tsList, tsClear)
 
-	c.AddCommand(add, del, list, trust, untrust, tombstone)
+	c.AddCommand(add, del, list, trust, untrust, revalidate, tombstone)
 	return c
 }
 
@@ -251,7 +270,7 @@ func sig0TrustMgmt(role, subcommand string) {
 		tsp.Keyname = tdns.Globals.Zonename
 	}
 
-	if subcommand == "trust" || subcommand == "untrust" {
+	if subcommand == "trust" || subcommand == "untrust" || subcommand == "revalidate" {
 		mapkey := fmt.Sprintf("%s::%d", tdns.Globals.Zonename, keyid)
 		if _, ok := tr.ChildSig0keys[mapkey]; !ok {
 			fmt.Printf("Error: no key with name %s and keyid %d is known.\n", tdns.Globals.Zonename, keyid)

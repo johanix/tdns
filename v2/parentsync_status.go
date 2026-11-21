@@ -87,6 +87,10 @@ func (zd *ZoneData) ParentSyncStatus(ctx context.Context, kdb *KeyDB, imr *Imr,
 	configured := configuredSchemes(ParentSyncConfig().Schemes)
 	if configured["update"] {
 		rep.Update, todo = zd.updateReport(ctx, kdb, imr, role, plan)
+		if u := rep.Update; u != nil && u.ProxyState == string(ProxyUpdateWaiting) &&
+			strings.HasPrefix(rep.Warning, proxyWaitingWarningPrefix) {
+			rep.Warning = ""
+		}
 	}
 	if configured["notify"] {
 		rep.Notify = zd.notifyReport()
@@ -168,17 +172,17 @@ func schemeReports(plan *ParentSyncPlan) []ParentSyncSchemeReport {
 }
 
 // describeSkipReason turns the proxy UPDATE gate's reason, which is the bare
-// §10.8 state name, into a sentence. The plan keeps the state name: it is what
-// the log line has always said.
+// §10.8 state name, into words. The plan keeps the state name: it is what the
+// log line has always said.
 func describeSkipReason(scheme, reason string) string {
 	if scheme != "UPDATE" {
 		return reason
 	}
 	switch ProxyUpdateState(reason) {
 	case ProxyUpdateWaiting:
-		return "the agent's KEY is not published at the primary yet (" + reason + ")"
+		return "waiting for the KEY at the primary"
 	case ProxyUpdateForeignKey:
-		return "a KEY the agent does not hold is published at the apex (" + reason + ")"
+		return "a KEY the agent does not hold is at the apex"
 	}
 	return reason
 }
@@ -216,10 +220,13 @@ func updateAdvertised(plan *ParentSyncPlan) bool {
 
 // updateReport is the UPDATE detail.
 //
-// For a proxy it is the §10.8 report, word for word what "zone proxy-key"
-// prints, and only when the parent advertises UPDATE. Otherwise the scheme line
-// already says the parent does not offer it, and instructions to publish a KEY
-// for a transport nobody will accept would mislead.
+// For a proxy it is the §10.8 state and the records for the primary's apex,
+// the ones "zone proxy-key" prints, and only when the parent advertises UPDATE.
+// Otherwise the scheme line already says the parent does not offer it, and
+// instructions to publish a KEY for a transport nobody will accept would
+// mislead. In "ready" the parent is asked about the agent's key: a KEY at the
+// primary that the parent has not verified carries no UPDATE the parent will
+// accept, and nothing else in the report would say so.
 //
 // For a child it is the zone's own SIG(0) key: whether one is active, whether
 // its KEY is at the apex, and what the parent holds for it.
@@ -233,16 +240,27 @@ func (zd *ZoneData) updateReport(ctx context.Context, kdb *KeyDB, imr *Imr,
 		}
 		state, err := zd.proxySig0PublicationStateFor(kdb, true)
 		if err != nil {
-			ur.ProxyReport = fmt.Sprintf("zone %s: UPDATE proxy state could not be determined: %v\n", zd.ZoneName, err)
+			ur.ProxyError = fmt.Sprintf("the UPDATE proxy state could not be determined: %v", err)
 			return ur, nil
 		}
-		msg, err := zd.proxyKeyStatusMessage(state, kdb)
+		ur.ProxyState = string(state)
+		records, unknown, key, err := zd.proxyPublishRecords(kdb, state == ProxyUpdateReady)
 		if err != nil {
-			ur.ProxyReport = fmt.Sprintf("zone %s: UPDATE proxy %s; the records could not be assembled: %v\n",
-				zd.ZoneName, state, err)
+			ur.ProxyError = fmt.Sprintf("the records for the primary could not be assembled: %v", err)
 			return ur, nil
 		}
-		ur.ProxyReport = msg
+		ur.ProxyRecords, ur.ProxyRFC3597 = records, unknown
+		if state == ProxyUpdateForeignKey {
+			for _, rr := range zd.proxyApexKEYs() {
+				ur.ProxyForeignKeys = append(ur.ProxyForeignKeys, rr.String())
+			}
+		}
+		if key != nil {
+			ur.HaveActiveKey, ur.ActiveKeyID = true, key.KeyTag()
+		}
+		if state == ProxyUpdateReady {
+			zd.askParentAboutKey(ctx, kdb, imr, plan, ur)
+		}
 		return ur, nil
 	}
 
@@ -259,8 +277,16 @@ func (zd *ZoneData) updateReport(ctx context.Context, kdb *KeyDB, imr *Imr,
 	var todo []string
 	// A secondary cannot put the KEY into the zone itself.
 	if len(ur.ApexKeyIDs) == 0 && zd.ZoneType == Secondary {
-		todo = append(todo, fmt.Sprintf("Add the zone's SIG(0) KEY record to %s at the primary server", zd.ZoneName))
+		todo = append(todo, fmt.Sprintf("add the zone's SIG(0) KEY to %s at the primary", zd.ZoneName))
 	}
+	zd.askParentAboutKey(ctx, kdb, imr, plan, ur)
+	return ur, todo
+}
+
+// askParentAboutKey fills in the parent's view of ur's active key, or why the
+// parent was not asked.
+func (zd *ZoneData) askParentAboutKey(ctx context.Context, kdb *KeyDB, imr *Imr,
+	plan *ParentSyncPlan, ur *ParentSyncUpdateReport) {
 
 	switch {
 	case !ur.HaveActiveKey:
@@ -278,7 +304,6 @@ func (zd *ZoneData) updateReport(ctx context.Context, kdb *KeyDB, imr *Imr,
 			ur.ParentKeyAuthenticated = authenticated
 		}
 	}
-	return ur, todo
 }
 
 // notifyReport is the NOTIFY detail. What the parent re-scans after a NOTIFY is

@@ -98,7 +98,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 
 	if Globals.App.Type == AppTypeAuth || Globals.App.Type == AppTypeAgent {
 		sr.HandleFunc("/keystore", kdb.APIkeystore(conf)).Methods("POST")
-		sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
+		sr.HandleFunc("/truststore", kdb.APItruststoreWith(ctx)).Methods("POST")
 		sr.HandleFunc("/zone/parentsync", APIzoneParentSyncWith(ctx, &Globals.App, conf.Internal.RefreshZoneCh, kdb,
 			conf.Internal.DelegationSyncQ)).Methods("POST")
 		sr.HandleFunc("/zone/childsync", APIzoneChildSync(ctx, &Globals.App)).Methods("POST")

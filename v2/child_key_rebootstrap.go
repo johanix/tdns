@@ -52,16 +52,23 @@ func noteChildKeyVerificationEnded(child string, keyid uint16, now func() time.T
 // ended less than childKeyReBootstrapCooldown before now. An entry older than
 // that is removed as it is found.
 func childKeyCoolingDown(child string, keyid uint16, now time.Time) bool {
+	return childKeyCooldownLeft(child, keyid, now) > 0
+}
+
+// childKeyCooldownLeft is how long until a re-bootstrap of child's key keyid
+// may start a verification: zero when none ended within
+// childKeyReBootstrapCooldown before now.
+func childKeyCooldownLeft(child string, keyid uint16, now time.Time) time.Duration {
 	id := childKeyVerificationID(child, keyid)
 	v, ok := childKeyVerificationsEnded.Load(id)
 	if !ok {
-		return false
+		return 0
 	}
-	if now.Sub(v.(time.Time)) < childKeyReBootstrapCooldown {
-		return true
+	if left := childKeyReBootstrapCooldown - now.Sub(v.(time.Time)); left > 0 {
+		return left
 	}
 	childKeyVerificationsEnded.CompareAndDelete(id, v)
-	return false
+	return 0
 }
 
 // childKeyVerificationRunning reports whether a verification of child's key
@@ -94,30 +101,51 @@ func childKeyVerificationRunning(child string, keyid uint16) bool {
 //     underneath it would reset the row it is about to write;
 //   - none ended within childKeyReBootstrapCooldown.
 func reBootstrapOfKnownKey(ns []dns.RR, sig *dns.SIG, known *Sig0Key) *Sig0Key {
+	reupload, _ := reBootstrapDecision(ns, sig, known, time.Now())
+	return reupload
+}
+
+// reBootstrapDecision is reBootstrapOfKnownKey, and also says how long is left
+// of the cooldown when that alone refused a genuine re-upload. The refusal
+// then tells the child when to try again (EDESig0ReBootstrapTooSoon) rather
+// than to re-bootstrap, which it just did (#1172).
+func reBootstrapDecision(ns []dns.RR, sig *dns.SIG, known *Sig0Key, now time.Time) (*Sig0Key, time.Duration) {
 	if known == nil || known.Trusted || sig == nil {
-		return nil
+		return nil, 0
 	}
 	addKey, _, ok := bootstrapCeremony(ns)
 	if !ok || addKey.KeyTag() != sig.RRSIG.KeyTag || addKey.Algorithm != sig.RRSIG.Algorithm ||
 		!core.EqualNames(addKey.Header().Name, sig.RRSIG.SignerName) {
-		return nil
+		return nil, 0
 	}
 	if addKey.Flags != known.Key.Flags || addKey.Protocol != known.Key.Protocol ||
 		addKey.Algorithm != known.Key.Algorithm || addKey.PublicKey != known.Key.PublicKey {
-		return nil
+		return nil, 0
 	}
 	if childKeyVerificationRunning(sig.RRSIG.SignerName, sig.RRSIG.KeyTag) {
-		return nil
+		return nil, 0
 	}
-	if childKeyCoolingDown(sig.RRSIG.SignerName, sig.RRSIG.KeyTag, time.Now()) {
+	if left := childKeyCooldownLeft(sig.RRSIG.SignerName, sig.RRSIG.KeyTag, now); left > 0 {
 		lgSigner.Info("re-bootstrap of a child key refused: its last verification ended less than the cooldown ago",
-			"zone", sig.RRSIG.SignerName, "keyid", sig.RRSIG.KeyTag, "cooldown", childKeyReBootstrapCooldown)
-		return nil
+			"zone", sig.RRSIG.SignerName, "keyid", sig.RRSIG.KeyTag, "cooldown", childKeyReBootstrapCooldown,
+			"left", left.Round(time.Second))
+		return nil, left
 	}
 	reupload := *known
 	reupload.Key = *addKey
 	reupload.Source = "child-key-upload"
 	reupload.ValidationFailed = false
 	reupload.ValidationError = ""
-	return &reupload
+	return &reupload, 0
+}
+
+// reBootstrapTooSoonText is the EXTRA-TEXT of EDESig0ReBootstrapTooSoon: when
+// the same re-bootstrap will be accepted. Short, because the child prints it
+// as it comes, after its own "key N: refused by parent (EDE 547)": the code
+// already says that the key's verification failed within the cooldown.
+func reBootstrapTooSoonText(left time.Duration) string {
+	if left < time.Second {
+		left = time.Second
+	}
+	return fmt.Sprintf("verification failed; retry in %s", left.Round(time.Second))
 }

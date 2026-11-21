@@ -417,8 +417,8 @@ func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 	// its own requireDnssec, so one setting governs the whole path rather than
 	// half of it.
 	if !res.Validated && !ParentSyncConfig().Api.AllowInsecure {
-		plan.skip("API", "the DSYNC lookup did not DNSSEC-validate and"+
-			" parentsync.api.allow-insecure is not set", true)
+		plan.skip("API", "DSYNC not validated and parentsync.api.allow-insecure"+
+			" is not set", true)
 		return
 	}
 	// The credential arrives out of band by definition (§10), so its absence
@@ -426,8 +426,7 @@ func (zd *ZoneData) planConsiderApi(res DsyncResult, plan *ParentSyncPlan) {
 	// for and nothing to retry.
 	cred, ok := ParentSyncConfig().Api.CredentialForChild(zd.GetParent(), zd.ZoneName)
 	if !ok || !cred.Usable() {
-		plan.skip("API", fmt.Sprintf("no usable credential for parent %s (parentsync.api.credentials)",
-			zd.GetParent()), true)
+		plan.skip("API", "no usable credential (parentsync.api.credentials)", true)
 		return
 	}
 	// No address resolution for API (§16.7): the DSYNC target is a service
@@ -473,7 +472,8 @@ func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncR
 	// tried. So it is removed from the list, not merely ranked below the
 	// others.
 	if !zoneIsSigned(zd) {
-		plan.skip("NOTIFY", "zone is unsigned; a NOTIFY would leave the parent nothing it can validate", true)
+		// A NOTIFY would leave the parent nothing it can validate.
+		plan.skip("NOTIFY", "zone is unsigned", true)
 		return
 	}
 	// The other half of the same gate, and the one the proxy actually meets.
@@ -494,7 +494,8 @@ func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncR
 	// is none to point at, so the same test there would only race that
 	// publication.
 	if role == SyncRoleProxy && !zoneHasCdsOrCsync(zd) {
-		plan.skip("NOTIFY", "proxied zone publishes neither CDS nor CSYNC; a NOTIFY would leave the parent nothing to read", true)
+		// A NOTIFY would leave the parent nothing to read.
+		plan.skip("NOTIFY", "zone publishes neither CDS nor CSYNC", true)
 		return
 	}
 	target, terr := plan.resolveTarget(ctx, imr, drr)

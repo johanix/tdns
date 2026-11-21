@@ -102,7 +102,7 @@ func applyValidationFailure(m *dns.Msg, us *UpdateStatus) {
 	}
 	m.SetRcode(m, rcode)
 	if us.RejectionEDE != 0 {
-		edns0.AttachEDEToResponse(m, us.RejectionEDE)
+		edns0.AttachEDEWithExtraText(m, us.RejectionEDE, us.RejectionEDEText)
 	}
 	// BADSIG(16)/BADKEY(17)/BADTIME(18) are extended rcodes: the header field
 	// is 4 bits, and Pack() refuses Rcode > 0xF unless an OPT RR is present

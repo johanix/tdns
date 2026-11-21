@@ -526,7 +526,7 @@ func TestPlanApiRequiresAValidatedDsyncLookup(t *testing.T) {
 			" the bearer credential could be posted to an attacker-chosen endpoint")
 	}
 	reason, _ := skipReason(plan, "API")
-	if !strings.Contains(reason, "DNSSEC-validate") {
+	if !strings.Contains(reason, "DSYNC not validated") {
 		t.Errorf("skip reason %q should say the lookup did not validate", reason)
 	}
 

@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -264,9 +265,16 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 	}
 }
 
+// APItruststore is APItruststoreWith(context.Background()), kept for the
+// callers that have no daemon context to give it (tdns-mp's agent routes).
 func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
+	return kdb.APItruststoreWith(context.Background())
+}
 
-	// kdb := conf.Internal.KeyDB
+// APItruststoreWith is the /truststore handler. ctx is the daemon's: a
+// "revalidate" starts a child key verification that runs under it, not under
+// the request, which ends before a verification that retries.
+func (kdb *KeyDB) APItruststoreWith(ctx context.Context) func(w http.ResponseWriter, r *http.Request) {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -347,6 +355,16 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 			// leaves none, whatever Src the client sent.
 			if tp.SubCommand == "delete" {
 				tp.Src = ""
+			}
+			// revalidate (#1172) ends the transaction itself: the row is
+			// committed before the verification it starts writes it again.
+			if tp.SubCommand == "revalidate" {
+				resp, err = kdb.revalidateChildKey(tx, tp.Keyname, uint16(tp.Keyid), kdb.triggerFor(ctx), revalidateWait)
+				tx = nil
+				if err != nil {
+					lgApi.Warn("truststore revalidate refused", "zone", tp.Keyname, "keyid", tp.Keyid, "err", err)
+				}
+				return
 			}
 			resp, err = kdb.Sig0TrustMgmt(tx, tp)
 			if err != nil {

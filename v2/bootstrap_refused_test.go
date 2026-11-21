@@ -71,6 +71,7 @@ func TestTheCeremonyReportsARefusalAsAnError(t *testing.T) {
 		{"retired key", dns.RcodeRefused, edns0.EDESig0KeyRetired, ErrSig0KeyTombstoned, false},
 		{"still verifying", dns.RcodeRefused, edns0.EDESig0KeyKnownButNotTrusted, errBootstrapTransient, true},
 		{"validation failed", dns.RcodeRefused, edns0.EDESig0KeyValidationFailed, errBootstrapValidationFailed, false},
+		{"re-bootstrap too soon", dns.RcodeRefused, edns0.EDESig0ReBootstrapTooSoon, errBootstrapValidationFailed, false},
 		{"plain REFUSED", dns.RcodeRefused, 0, nil, false},
 		{"SERVFAIL", dns.RcodeServerFailure, 0, errBootstrapTransient, true},
 	} {

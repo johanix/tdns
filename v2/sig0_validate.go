@@ -163,7 +163,8 @@ func (zd *ZoneData) ValidateUpdate(ctx context.Context, r *dns.Msg, wire []byte,
 				"signer", signername, "keyid", keyid, "validated", sig0key.Validated, "trusted", sig0key.Trusted)
 			// Known, untrusted, and uploading itself again: a re-bootstrap,
 			// which starts verification over exactly as a first upload does.
-			if reupload := reBootstrapOfKnownKey(r.Ns, sig, sig0key); reupload != nil {
+			reupload, tooSoon := reBootstrapDecision(r.Ns, sig, sig0key, time.Now())
+			if reupload != nil {
 				lgDns.Info("ValidateUpdate: untrusted key re-uploaded through the bootstrap ceremony; verification starts over",
 					"signer", signername, "keyid", keyid, "validation_failed", sig0key.ValidationFailed)
 				us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: reupload})
@@ -171,7 +172,8 @@ func (zd *ZoneData) ValidateUpdate(ctx context.Context, r *dns.Msg, wire []byte,
 				us.Type = "TRUSTSTORE-UPDATE"
 				continue
 			}
-			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key})
+			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key,
+				ReBootstrapTooSoon: tooSoon})
 			continue // key found
 		} else {
 			lgDns.Debug("ValidateUpdate: SIG(0) key NOT found in TrustStore", "signer", signername, "keyid", keyid)
@@ -514,8 +516,17 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	}
 	us.ValidationRcode = dns.RcodeRefused
 	us.RejectionEDE = knownUntrustedKeyEDE(signer.Sig0Key, zd.boundDelegationPolicy().Manual)
+	why := edns0.EDECodeToString[us.RejectionEDE]
+	// A re-bootstrap refused for the cooldown alone says so, and when to try
+	// again. Only in place of the automatic-bootstrap answers: under a manual
+	// policy no re-bootstrap would help anyway.
+	if signer.ReBootstrapTooSoon > 0 && us.RejectionEDE != edns0.EDESig0ManualBootstrapRequired {
+		us.RejectionEDE = edns0.EDESig0ReBootstrapTooSoon
+		us.RejectionEDEText = reBootstrapTooSoonText(signer.ReBootstrapTooSoon)
+		why = us.RejectionEDEText
+	}
 	return fmt.Errorf("update is signed by %s (keyid %d) which is known but not trusted (%s)",
-		signer.Name, signer.KeyId, edns0.EDECodeToString[us.RejectionEDE])
+		signer.Name, signer.KeyId, why)
 }
 
 // knownUntrustedKeyEDE picks the ddns-02 §"Communication in Case of Errors"

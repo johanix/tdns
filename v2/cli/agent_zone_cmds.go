@@ -90,7 +90,7 @@ var agentZoneDsyncStatusCmd = &cobra.Command{
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
-		showParentSyncStatus(api, "Error from agent")
+		showParentSyncStatus(api, "error from agent")
 	},
 }
 

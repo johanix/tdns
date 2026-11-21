@@ -583,19 +583,29 @@ type ParentSyncSchemeReport struct {
 	Reason string `json:",omitempty"` // why not, when not
 }
 
-// ParentSyncUpdateReport is the UPDATE detail.
+// ParentSyncUpdateReport is the UPDATE detail. Absent for a parentsync-proxy
+// zone whose parent does not advertise UPDATE.
 type ParentSyncUpdateReport struct {
-	// ProxyReport (parentsync-proxy): the same text as the deprecated
-	// "zone proxy-key" -- the §10.8 state and the records to publish at the
-	// primary. Empty when the parent does not advertise UPDATE.
-	ProxyReport string `json:",omitempty"`
+	// The parentsync-proxy role: the §10.8 state (a ProxyUpdateState), the
+	// records for the primary's apex -- the agent's KEY and the HSYNCPARAM
+	// pubkey flag, then outside "ready" the HSYNCPARAM in RFC 3597 form --
+	// and in "foreign-key" the KEYs at the apex now. The same records the
+	// deprecated "zone proxy-key" prints. ProxyError when the state or the
+	// records could not be determined.
+	ProxyState       string   `json:",omitempty"`
+	ProxyRecords     []string `json:",omitempty"`
+	ProxyRFC3597     string   `json:",omitempty"`
+	ProxyForeignKeys []string `json:",omitempty"`
+	ProxyError       string   `json:",omitempty"`
 
-	// The rest is the parentsync (child) role: the zone's own SIG(0) key.
+	// The zone's SIG(0) key: the zone's own (parentsync), or the agent's
+	// (parentsync-proxy).
 	HaveActiveKey bool
 	ActiveKeyID   uint16
-	ApexKeyIDs    []uint16 // keytags of the KEY RRs published at the apex
+	ApexKeyIDs    []uint16 // parentsync: keytags of the KEY RRs at the apex
 	// The parent's view of the active key, as "parentsync inquire" reports it.
-	// ParentKeyError when the inquiry was not made or failed.
+	// For a proxy, asked only in "ready". ParentKeyError when the inquiry was
+	// not made or failed; both empty when it was not called for.
 	ParentKeyState         string `json:",omitempty"`
 	ParentKeyAuthenticated bool
 	ParentKeyError         string `json:",omitempty"`

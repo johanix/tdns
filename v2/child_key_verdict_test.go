@@ -270,8 +270,9 @@ func TestChildKeyCoolingDown(t *testing.T) {
 }
 
 // The cooldown, through the real update path. A re-bootstrap straight after a
-// failed verification is refused the way a failed key is (KEY-VALIDATION-
-// FAILED) and starts nothing; once the cooldown has passed it starts over.
+// failed verification is refused, starts nothing, and says when the next one
+// will be taken (#1172: it used to get KEY-VALIDATION-FAILED, which asks for
+// a re-bootstrap); once the cooldown has passed it starts over.
 func TestAReBootstrapWithinTheCooldownIsRefused(t *testing.T) {
 	zd, key := rebootstrapParent(t, true)
 	stubSig0Verify(t)
@@ -290,8 +291,11 @@ func TestAReBootstrapWithinTheCooldownIsRefused(t *testing.T) {
 	if err == nil {
 		t.Fatal("a re-bootstrap within the cooldown started a verification over")
 	}
-	if us.RejectionEDE != edns0.EDESig0KeyValidationFailed {
-		t.Errorf("EDE %d, want %d", us.RejectionEDE, edns0.EDESig0KeyValidationFailed)
+	if us.RejectionEDE != edns0.EDESig0ReBootstrapTooSoon {
+		t.Errorf("EDE %d, want %d (re-bootstrap too soon)", us.RejectionEDE, edns0.EDESig0ReBootstrapTooSoon)
+	}
+	if !strings.Contains(us.RejectionEDEText, "retry in") {
+		t.Errorf("EXTRA-TEXT %q does not say when to re-bootstrap", us.RejectionEDEText)
 	}
 
 	noteChildKeyVerificationEnded(key.Hdr.Name, key.KeyTag(),

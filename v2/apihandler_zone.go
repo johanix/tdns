@@ -1265,6 +1265,11 @@ func APIzoneParentSyncWith(ctx context.Context, app *AppDetails, refreshq chan Z
 			switch req.Scheme {
 			case "update":
 				resp.Msg, resp.UpdateResult, err = zd.BootstrapSig0KeyWithParent(ctx, req.Algorithm)
+				// The key it sent, for the CLI's "key N: ...": the zone's
+				// active key, which the bootstrap generates if there is none.
+				if sak, kerr := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive); kerr == nil && sak != nil && len(sak.Keys) > 0 {
+					resp.KeyID = sak.Keys[0].KeyId
+				}
 				if err != nil {
 					resp.Error = true
 					resp.ErrorMsg = err.Error()
