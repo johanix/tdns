@@ -18,6 +18,7 @@ package tdns
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -266,6 +267,14 @@ func handleRefreshSyncDelegationWith(ctx context.Context, ready *ImrReadiness, d
 	}
 
 	dss, err := steps.analyse()
+	// An incomplete comparison is a failed one, as in the explicit sync and
+	// the proxy compare. Unread parent glue comes back as an error; unread
+	// glue of the zone's own is only named in Unread. Either way a nameserver
+	// was not compared: "in sync" would record a success and could drop an
+	// older retry, and a difference would be a partial one.
+	if err == nil && !dss.Complete() {
+		err = fmt.Errorf("%w: %v", errDelegationNotAllRead, dss.Unread)
+	}
 	if err != nil {
 		retry("compare with the parent", err)
 		return nil

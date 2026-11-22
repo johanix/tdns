@@ -314,6 +314,53 @@ func TestRefreshSyncUnreadParentGlueIsAFailure(t *testing.T) {
 	}
 }
 
+// F7. A failed read of the zone's own glue leaves the comparison incomplete
+// with no error: analyseNSAndGlue names the nameserver in Unread and carries
+// on. The arm must treat it as it treats unread parent glue, as a failed
+// compare: nothing is sent, no success is recorded, and it retries. That holds
+// whether the rest matched or differed.
+func TestRefreshSyncUnreadChildGlueIsAFailure(t *testing.T) {
+	withApp(t, AppTypeAuth)
+	for _, tc := range []struct {
+		name   string
+		inSync bool
+	}{
+		{"the rest matches", true},
+		{"the rest differs", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := childZone(t, ddcngServedZone(), OptParentSync)
+			dss := DelegationSyncStatus{
+				ZoneName: zd.ZoneName,
+				Parent:   "example.",
+				InSync:   tc.inSync,
+				Unread:   []string{"ns1.deleg.example. A (child)", "ns1.deleg.example. AAAA (child)"},
+			}
+			if !tc.inSync {
+				rr, err := dns.NewRR(zd.ZoneName + " 3600 IN NS ns9.other.example.")
+				if err != nil {
+					t.Fatalf("fixture: %v", err)
+				}
+				dss.NsRemoves = []dns.RR{rr}
+			}
+
+			rec := runArm(t, zd, refreshRequest(zd), func() (DelegationSyncStatus, error) { return dss, nil }, nil)
+			if len(rec.synced) != 0 {
+				t.Errorf("an incomplete comparison was sent %d times, want none", len(rec.synced))
+			}
+			if len(rec.requeued) != 1 {
+				t.Errorf("an incomplete comparison was re-queued %d times, want 1", len(rec.requeued))
+			}
+			zd.mu.Lock()
+			lastOK := zd.delegationLastSyncOK
+			zd.mu.Unlock()
+			if !lastOK.IsZero() {
+				t.Error("an incomplete comparison was recorded as a success")
+			}
+		})
+	}
+}
+
 // A failed A glue query does not skip the AAAA one: each is compared, or named
 // in Unread, on its own.
 func TestDelegationAnalysisNamesEachUnreadGlueQuery(t *testing.T) {
