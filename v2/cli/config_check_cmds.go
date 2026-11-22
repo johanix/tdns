@@ -676,11 +676,16 @@ func checkDoHPath(cfg *tdns.Config, rep *ccReport, g string, doh bool) {
 func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 	const g = "API server"
 	checkApiAccessFile(cfg, rep)
-	if len(cfg.ApiServer.Addresses) == 0 {
-		rep.fail(g, "addresses", "apiserver.addresses is empty",
-			"set at least one addr:port (loopback is fine, e.g. 127.0.0.1:8989)")
-	} else {
+	switch {
+	case len(cfg.ApiServer.Addresses) > 0:
 		rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.ApiServer.Addresses))
+	case cfg.ApiServer.Socket != "":
+		// A socket-only daemon is valid: the socket is served without
+		// any TCP listener (APIdispatcher).
+		rep.pass(g, "addresses", fmt.Sprintf("apiserver.addresses is empty: the API is served only on the local admin socket %s", cfg.ApiServer.Socket))
+	default:
+		rep.fail(g, "addresses", "apiserver.addresses is empty and there is no apiserver.socket",
+			"set at least one addr:port (loopback is fine, e.g. 127.0.0.1:8989), or apiserver.socket")
 	}
 	if cfg.ApiServer.ApiKey.Value() == "" {
 		rep.fail(g, "apikey", "apiserver.apikey is empty — the API router refuses to start without it",

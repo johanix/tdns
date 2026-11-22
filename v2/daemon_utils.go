@@ -19,23 +19,29 @@ import (
 	"github.com/spf13/viper"
 )
 
-func (api *ApiClient) StopDaemon() {
+// StopDaemon asks the daemon to stop. It returns nil when the daemon is
+// winding down or was not running (stop is then a no-op), and an error when
+// the daemon is running and did not agree to stop, for instance a 403
+// because stop needs admin. The outcome is printed here, once; callers only
+// decide on the exit status.
+func (api *ApiClient) StopDaemon() error {
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "stop"}, false)
 	if err != nil {
-		fmt.Printf("Error from stop command: %v\n", err.Error())
-		if err.Error() == "Connection refused" {
+		if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
 			fmt.Printf("Daemon seems to not be running.\n")
-		} else {
-			fmt.Printf("there is some other problem: %v\n", err)
+			return nil
 		}
-	} else { // we got a response, so deamon appears to be running
-		if resp.Status == "stopping" {
-			fmt.Printf("Daemon acknowledged stop command and is winding down.\n")
-		} else {
-			fmt.Printf("Daemon is running, but status is strange. Status: %v. Message: %v\n",
-				resp.Status, resp.Msg)
-		}
+		fmt.Printf("Stop failed: %v\n", err)
+		return err
 	}
+	// We got a response, so the daemon appears to be running.
+	if resp.Status == "stopping" {
+		fmt.Printf("Daemon acknowledged stop command and is winding down.\n")
+		return nil
+	}
+	fmt.Printf("Daemon is running, but status is strange. Status: %v. Message: %v\n",
+		resp.Status, resp.Msg)
+	return fmt.Errorf("daemon did not acknowledge stop (status %q)", resp.Status)
 }
 
 // slurp means that we'll connect to stdout and stderr on the underlying
