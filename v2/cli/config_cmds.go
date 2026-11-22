@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -430,9 +429,10 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
+	// The caller prints the returned error; printing it here as well showed
+	// a daemon's refusal twice.
 	status, buf, err := api.Post("/config", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
 	if tdns.Globals.Verbose {
