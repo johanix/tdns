@@ -20,6 +20,18 @@ import (
 // NewConfigCmd returns a fresh "config" command tree bound to the given
 // role. Each attachment point gets its own *cobra.Command.
 func NewConfigCmd(role string) *cobra.Command {
+	return NewConfigCmdFor(role, role)
+}
+
+// NewConfigCmdFor is NewConfigCmd for a tree whose role is not the daemon type:
+// an extra instance, whose role is its own name ("sectagent") while the daemon
+// it is an instance OF is the flavour ("agent").
+//
+// The flavour has to be passed, not looked up: which commands exist is decided
+// here, at construction, before the CLI config is loaded, and an instance's
+// flavour lives in that config. The tree factory (NewAgentTree, NewAuthTree)
+// knows what it is building.
+func NewConfigCmdFor(role, flavour string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "config",
 		Short: "Commands to reload config, reload zones, etc",
@@ -70,9 +82,9 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 	}
 
 	c.AddCommand(reload, reloadZones, reloadTsig, status)
-	if role != "agent" {
+	if flavour != "agent" {
 		// tdns-auth (and named auth instances) synthesize the transport
-		// signal; tdns-agent does not.
+		// signal; tdns-agent (and named agent instances) does not.
 		c.AddCommand(newConfigTransportSignalCmd(role))
 	}
 	c.AddCommand(newConfigCheckCmd(role))

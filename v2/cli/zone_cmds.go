@@ -248,6 +248,54 @@ would roll, whether the parent DS would break) and changes nothing; add
 	}
 	nsec.AddCommand(nsecShow)
 
+	// `zone dnssec`: every DNSSEC operation for a zone — signing, policy, and
+	// automated rollover. auto-rollover + policy-change moved here from
+	// `keystore dnssec` (they act on a zone's signing state, not on key
+	// material); policy-set/sign/resign/nsec moved down from the top-level
+	// `zone` tree so all DNSSEC verbs live together.
+	dnssecCmd := &cobra.Command{
+		Use:   "dnssec",
+		Short: "Zone DNSSEC operations: signing, policy, and automated rollover",
+	}
+	dnssecCmd.AddCommand(setPolicy, policyReset, newAutoRolloverPolicyChangeCmd(), newAutoRolloverCmd(role),
+		sign, resign, nsec)
+
+	c.AddCommand(list, desc, dnssecCmd, reload, bump, write, sync, freeze, thaw, proxyKey)
+	c.AddCommand(newZoneDynamicCmds(role)...)
+	// Role-independent extras attached to every zone tree. Each is built
+	// fresh so the command pointer is unique per NewZoneCmd invocation.
+	dsyncCmd := newZoneDsyncCmd(role)
+	dsyncCmd.Hidden = true
+	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), dsyncCmd, newZoneParentSyncCmd(role), newZoneChildSyncCmd(role))
+	// The delta journal's operator surface. Under "zone", not under
+	// "zone update": it inspects and manages what is stored about the zone,
+	// which is not a way of changing the zone's content.
+	AttachZoneJournalCmds(c, role)
+	// Likewise for ZONEMD: it inspects and verifies what the zone asserts
+	// about itself, rather than changing the zone.
+	AttachZoneZonemdCmds(c, role)
+	// The read half of "zone update": what the parent holds for a child.
+	AttachZoneDelegationCmds(c, role)
+	// ...and for an ordinary name in the zone.
+	AttachZoneNameCmds(c, role)
+	for _, e := range extras {
+		c.AddCommand(e)
+	}
+	return c
+}
+
+// newZoneDynamicCmds returns FRESH add, delete, modify and list-dynamic
+// commands bound to one role: the runtime management of dynamic
+// (API-managed) zones.
+//
+// A constructor of its own because the agent's zone subtree is built by hand
+// in agent_zone_cmds.go and attaches these too. The daemon serves the verbs
+// on /zone for every app type, and the dynamiczones config decides which
+// zone types a daemon accepts, so they always worked against tdns-agent --
+// there was just no command for it. A new set per call: a *cobra.Command
+// records its parent and cannot have two, and each set has its own flag
+// variables.
+func newZoneDynamicCmds(role string) []*cobra.Command {
 	// Dynamic-zones management (add/delete/modify/list-dynamic). No --store
 	// flag: dynamic zones are map-only. The --tsig-* flags are accepted now but
 	// inert in Improvement 1 (a non-NOKEY key is rejected server-side).
@@ -334,39 +382,7 @@ would roll, whether the parent DS would break) and changes nothing; add
 		},
 	}
 
-	// `zone dnssec`: every DNSSEC operation for a zone — signing, policy, and
-	// automated rollover. auto-rollover + policy-change moved here from
-	// `keystore dnssec` (they act on a zone's signing state, not on key
-	// material); policy-set/sign/resign/nsec moved down from the top-level
-	// `zone` tree so all DNSSEC verbs live together.
-	dnssecCmd := &cobra.Command{
-		Use:   "dnssec",
-		Short: "Zone DNSSEC operations: signing, policy, and automated rollover",
-	}
-	dnssecCmd.AddCommand(setPolicy, policyReset, newAutoRolloverPolicyChangeCmd(), newAutoRolloverCmd(role),
-		sign, resign, nsec)
-
-	c.AddCommand(list, desc, dnssecCmd, reload, bump, write, sync, freeze, thaw, proxyKey, add, del, modify, listDynamic)
-	// Role-independent extras attached to every zone tree. Each is built
-	// fresh so the command pointer is unique per NewZoneCmd invocation.
-	dsyncCmd := newZoneDsyncCmd(role)
-	dsyncCmd.Hidden = true
-	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), dsyncCmd, newZoneParentSyncCmd(role), newZoneChildSyncCmd(role))
-	// The delta journal's operator surface. Under "zone", not under
-	// "zone update": it inspects and manages what is stored about the zone,
-	// which is not a way of changing the zone's content.
-	AttachZoneJournalCmds(c, role)
-	// Likewise for ZONEMD: it inspects and verifies what the zone asserts
-	// about itself, rather than changing the zone.
-	AttachZoneZonemdCmds(c, role)
-	// The read half of "zone update": what the parent holds for a child.
-	AttachZoneDelegationCmds(c, role)
-	// ...and for an ordinary name in the zone.
-	AttachZoneNameCmds(c, role)
-	for _, e := range extras {
-		c.AddCommand(e)
-	}
-	return c
+	return []*cobra.Command{add, del, modify, listDynamic}
 }
 
 // runZoneSimpleCmd runs a ZonePost command after PrepArgs("childzone")

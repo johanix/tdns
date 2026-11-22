@@ -47,9 +47,19 @@ func paths(root *cobra.Command) map[string]bool {
 // Lives here rather than in v2/cli because the canonical AuthCmd is only
 // FULLY wired once this binary's init()s have run.
 func TestInstanceTreeMatchesCanonicalAuthTree(t *testing.T) {
-	canonical := paths(cli.AuthCmd)
-	instance := paths(cli.NewAuthTree("sectdns", "sectdns"))
+	assertTreeParity(t, "auth", "cli.NewAuthTree",
+		paths(cli.AuthCmd), paths(cli.NewAuthTree("sectdns", "sectdns")), deliberatelyAbsent)
+}
 
+// The same property for an agent instance. Nothing is deliberately absent from
+// it: every subtree of the canonical agent tree talks to the agent's API.
+func TestInstanceTreeMatchesCanonicalAgentTree(t *testing.T) {
+	assertTreeParity(t, "agent", "cli.NewAgentTree",
+		paths(cli.AgentCmd), paths(cli.NewAgentTree("sectagent", "sectagent")), nil)
+}
+
+func assertTreeParity(t *testing.T, label, factory string, canonical, instance map[string]bool, absent map[string]string) {
+	t.Helper()
 	if len(canonical) == 0 || len(instance) == 0 {
 		t.Fatalf("empty tree: canonical=%d instance=%d", len(canonical), len(instance))
 	}
@@ -62,18 +72,18 @@ func TestInstanceTreeMatchesCanonicalAuthTree(t *testing.T) {
 			continue
 		}
 		top := strings.SplitN(p, " ", 2)[0]
-		if _, ok := deliberatelyAbsent[top]; ok {
+		if _, ok := absent[top]; ok {
 			continue
 		}
 		unexpectedlyMissing = append(unexpectedlyMissing, p)
 	}
 	if len(unexpectedlyMissing) > 0 {
 		sort.Strings(unexpectedlyMissing)
-		t.Errorf("%d command(s) on the canonical auth tree are missing from an instance tree:\n  %s\n\n"+
-			"A command wired only into shared_cmds.go reaches `auth` but no instance. Add it to "+
-			"cli.NewAuthTree, or -- if it genuinely has no management-API target -- to "+
-			"deliberatelyAbsent here with the reason.",
-			len(unexpectedlyMissing), strings.Join(unexpectedlyMissing, "\n  "))
+		t.Errorf("%d command(s) on the canonical %s tree are missing from an instance tree:\n  %s\n\n"+
+			"A command wired only into shared_cmds.go reaches `%s` but no instance. Add it to "+
+			"%s, or -- if it genuinely has no management-API target -- to "+
+			"the deliberately-absent list here with the reason.",
+			len(unexpectedlyMissing), label, strings.Join(unexpectedlyMissing, "\n  "), label, factory)
 	}
 
 	// In an instance but not canonical: always wrong.
@@ -85,22 +95,22 @@ func TestInstanceTreeMatchesCanonicalAuthTree(t *testing.T) {
 	}
 	if len(extra) > 0 {
 		sort.Strings(extra)
-		t.Errorf("%d command(s) exist on an instance tree but not on the canonical auth tree:\n  %s",
-			len(extra), strings.Join(extra, "\n  "))
+		t.Errorf("%d command(s) exist on an instance tree but not on the canonical %s tree:\n  %s",
+			len(extra), label, strings.Join(extra, "\n  "))
 	}
 
 	// And the exclusions must still be real, not stale entries masking a gap.
-	for name := range deliberatelyAbsent {
+	for name := range absent {
 		if !canonical[name] {
 			t.Errorf("%q is listed as deliberately absent but is not on the canonical tree either; "+
 				"drop the entry", name)
 		}
 		if instance[name] {
 			t.Errorf("%q is listed as deliberately absent but IS on the instance tree; "+
-				"either it gained an API target (drop the entry) or NewAuthTree changed", name)
+				"either it gained an API target (drop the entry) or %s changed", name, factory)
 		}
 	}
 
-	t.Logf("canonical %d, instance %d, deliberately absent %d subtrees",
-		len(canonical), len(instance), len(deliberatelyAbsent))
+	t.Logf("%s: canonical %d, instance %d, deliberately absent %d subtrees",
+		label, len(canonical), len(instance), len(absent))
 }

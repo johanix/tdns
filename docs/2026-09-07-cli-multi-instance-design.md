@@ -325,3 +325,10 @@ Independent, and this one should land first. The `tdns-signer` scoping
 (same session, 2026-09-07) needs no CLI change to be useful, but if a signer
 instance is ever added to a host that already runs `tdns-auth`, it inherits
 this addressing scheme for free.
+
+## Amendment 2026-11-20: tdns-ncli has its own config file
+
+This document describes one CLI config, `tdns-cli.yaml`, serving both binaries.
+Since then `tdns-ncli` reads its own `/etc/tdns/tdns-ncli.yaml`, built with
+`tdns-ncli config add <daemon-config.yaml>`, and `tdns-cli` is unchanged. See
+`docs/2026-11-20-ncli-config-add-list-design.md`.
