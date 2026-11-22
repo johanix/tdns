@@ -383,16 +383,10 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		if resp.ApiServer.Socket != "" {
 			fmt.Printf("ApiServer: local admin socket %s\n", resp.ApiServer.Socket)
 		}
+		// The daemon sends the key redacted (SensitiveString.MarshalJSON), so
+		// all there is to say is whether one is set.
 		if resp.ApiServer.ApiKey.Value() != "" {
-			ak := resp.ApiServer.ApiKey.Value()
-			// Reveal 3 chars at each end only when the key is long
-			// enough that the reveal doesn't expose the whole secret
-			// (>= 8 chars). Shorter keys are fully masked.
-			if len(ak) >= 8 {
-				fmt.Printf("ApiServer: api key (%d characters): %s***%s\n", len(ak), ak[:3], ak[len(ak)-3:])
-			} else {
-				fmt.Printf("ApiServer: api key (%d characters): ***\n", len(ak))
-			}
+			fmt.Printf("ApiServer: api key is set (not shown)\n")
 		} else {
 			fmt.Printf("ApiServer: api key is not set\n")
 		}
