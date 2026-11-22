@@ -654,7 +654,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				// stats, with the do53 shorthand read as udp and tcp.
 				if raw, err := core.ParseTransportStringRaw(server.TransportSignal); err == nil {
 					core.ExpandDo53Shorthand(raw)
-					received := &ReceivedSignal{Source: "config", Weights: map[core.Transport]uint8{}}
+					received := &ReceivedSignal{Source: SignalSourceConfig, Weights: map[core.Transport]uint8{}}
 					for k, v := range raw {
 						if t, err := core.StringToTransport(k); err == nil {
 							received.Weights[t] = v
@@ -681,7 +681,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				}
 				tmpauthserver.SetTransports(transports)
 				tmpauthserver.MergeTransportWeights(weights)
-				tmpauthserver.SetReceivedSignal(&ReceivedSignal{Source: "config", Weights: copyMap(weights)})
+				tmpauthserver.SetReceivedSignal(&ReceivedSignal{Source: SignalSourceConfig, Weights: copyMap(weights)})
 			}
 		}
 		authservers[ServerKey(server.Name)] = tmpauthserver
