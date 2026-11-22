@@ -161,6 +161,11 @@ func TestAgentSecondarySerial(t *testing.T) {
 	}{
 		{"plain secondary mirrors", map[ZoneOption]bool{}, 40},
 		{"parentsync-proxy mirrors", map[ZoneOption]bool{OptParentSyncProxy: true}, 40},
+		// The effective set parseZoneOptions builds: childsync-proxy implies
+		// childsync, and the proxy receives with allow-child-updates.
+		{"childsync-proxy mirrors", map[ZoneOption]bool{
+			OptChildSyncProxy: true, OptChildSync: true, OptAllowChildUpdates: true}, 40},
+		{"childsync originates", map[ZoneOption]bool{OptChildSync: true}, 6},
 		{"parentsync originates", map[ZoneOption]bool{OptParentSync: true}, 6},
 		{"inline-signing originates", map[ZoneOption]bool{OptInlineSigning: true}, 6},
 	} {
@@ -239,6 +244,15 @@ func TestZoneMayOriginateContent(t *testing.T) {
 	proxy := &ZoneData{ZoneType: Secondary, Options: map[ZoneOption]bool{OptParentSyncProxy: true}}
 	if zoneMayOriginateContent(proxy) {
 		t.Error("agent parentsync-proxy secondary must NOT originate")
+	}
+	childProxy := &ZoneData{ZoneType: Secondary, Options: map[ZoneOption]bool{
+		OptChildSyncProxy: true, OptChildSync: true, OptAllowChildUpdates: true}}
+	if zoneMayOriginateContent(childProxy) {
+		t.Error("agent childsync-proxy secondary must NOT originate: its child updates go to the parent primary")
+	}
+	childProxy.Options[OptAllowUpdates] = true
+	if !zoneMayOriginateContent(childProxy) {
+		t.Error("agent childsync-proxy secondary with allow-updates must originate: that writes its own copy")
 	}
 	if !zoneMayOriginateContent(primary) || !zoneMayOriginateContent(inline) {
 		t.Error("agent primary and inline-signing secondary must originate")

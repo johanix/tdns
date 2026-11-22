@@ -69,16 +69,32 @@ func zoneMayOriginateContent(zd *ZoneData) bool {
 // received one, each restart lifted it past the highest one served, and the
 // zone copy on disk carried that serial, which the next start read back as
 // the received one.
+//
+// A childsync-proxy zone is one of these too, although it carries childsync
+// (implied) and allow-child-updates: see childUpdatesLeaveTheZone.
 func agentZoneMayOriginateContent(zd *ZoneData) bool {
 	if zd.ZoneType == Primary || zd.Options[OptInlineSigning] {
 		return true
 	}
 	for _, opt := range originationOptions {
-		if zd.Options[opt] {
+		if zd.Options[opt] && !childUpdatesLeaveTheZone(zd, opt) {
 			return true
 		}
 	}
 	return false
+}
+
+// childUpdatesLeaveTheZone reports whether opt, on this zone, only receives
+// child updates that are written somewhere else. A childsync-proxy implies
+// childsync and carries allow-child-updates to receive on every scheme, but it
+// publishes nothing into its own copy of the zone (SetupZoneSync), and what it
+// accepts goes to the parent primary through its delegation backend, which
+// config validation keeps off the served zone (store direct is refused for a
+// proxy). The proxy flag wins over both options, or the zone would count as
+// originating: each transfer would advance the served serial and a restart
+// would lift it.
+func childUpdatesLeaveTheZone(zd *ZoneData, opt ZoneOption) bool {
+	return zd.Options[OptChildSyncProxy] && (opt == OptChildSync || opt == OptAllowChildUpdates)
 }
 
 // originationRuleAppTypes are the app types whose zones follow the rule above.

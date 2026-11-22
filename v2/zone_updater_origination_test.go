@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,8 +146,55 @@ func TestApplierGateScopedToZoneContentCommands(t *testing.T) {
 		"PING":              false, // handled before the zone is resolved
 	}
 	for cmd, want := range gated {
-		if got := updaterCmdMutatesZoneContent(cmd); got != want {
+		if got := updaterCmdMutatesZoneContent(zd, cmd); got != want {
 			t.Errorf("updaterCmdMutatesZoneContent(%q) = %v, want %v", cmd, got, want)
 		}
+	}
+
+	// A childsync-proxy's backend stores outside the served zone, so its
+	// child updates are not zone content; its own edits still are.
+	zd.Options[OptChildSyncProxy] = true
+	if updaterCmdMutatesZoneContent(zd, "CHILD-UPDATE") {
+		t.Error("CHILD-UPDATE on a childsync-proxy counted as zone content")
+	}
+	if !updaterCmdMutatesZoneContent(zd, "ZONE-UPDATE") {
+		t.Error("ZONE-UPDATE on a childsync-proxy not counted as zone content")
+	}
+}
+
+// countingBackend counts the child updates that reach it.
+type countingBackend struct {
+	trustBackend
+	applied int
+}
+
+func (b *countingBackend) ApplyChildUpdate(string, UpdateRequest) error {
+	b.applied++
+	return nil
+}
+
+// A tdns-agent childsync-proxy secondary does not originate content (#1157),
+// and its child updates must still reach its delegation backend: the
+// origination gate at the head of the updater loop must not drop them.
+func TestChildUpdateOnAnAgentChildsyncProxyReachesTheBackend(t *testing.T) {
+	withAppType(t, AppTypeAgent)
+	zd, kdb := updaterTestZone(t, Secondary, map[ZoneOption]bool{
+		OptChildSyncProxy: true, OptChildSync: true, OptAllowChildUpdates: true})
+	if zoneMayOriginateContent(zd) {
+		t.Fatal("setup: a childsync-proxy secondary should not be an originator")
+	}
+	backend := &countingBackend{}
+	zd.DelegationBackend = backend
+
+	res := runUpdaterForResult(t, kdb, UpdateRequest{
+		Cmd:      "CHILD-UPDATE",
+		ZoneName: zd.ZoneName,
+		Actions:  []dns.RR{mustDsyncRR(t, "child.example.test. 3600 IN NS ns1.child.example.test.")},
+	})
+	if res.Err != nil && strings.Contains(res.Err.Error(), "may not originate content") {
+		t.Fatalf("the origination gate dropped the proxy's child update: %v", res.Err)
+	}
+	if backend.applied != 1 {
+		t.Fatalf("backend received %d child updates, want 1 (result %+v)", backend.applied, res)
 	}
 }

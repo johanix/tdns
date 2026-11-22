@@ -2099,11 +2099,11 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		zd.seedDelegationStore()
 
 		// A childsync-proxy publishes nothing into its OWN copy of the zone.
-		// That copy is replaced by the next transfer, and
-		// zoneMayOriginateContent is true for tdns-agent by design, so no
-		// gate below would stop the update: it would be applied and silently
-		// lost (design §3.1). The advertisement, receiver key included,
-		// reaches the parent primary through the proxy reconciler (§5.3).
+		// That copy is replaced by the next transfer, so an update applied
+		// here would be silently lost (design §3.1); and such a zone does not
+		// originate content (childUpdatesLeaveTheZone), so the updater would
+		// refuse it. The advertisement, receiver key included, reaches the
+		// parent primary through the proxy reconciler (§5.3).
 		if zd.Options[OptChildSyncProxy] {
 			lg.Debug("SetupZoneSync: childsync-proxy zone; the advertisement is reconciled towards the parent primary, not published here",
 				"zone", zd.ZoneName)
