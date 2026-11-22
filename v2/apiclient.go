@@ -39,6 +39,11 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient 
 		path, ok := unixSocketPath(baseurl)
 		api.Socket = path
 		api.BaseUrl = "http://localhost/api/v1"
+		// Whatever the entry says, a socket request carries no key: none is
+		// needed, and an entry with authmethod X-API-Key and no key would
+		// otherwise fail every request before dialling.
+		api.AuthMethod = "none"
+		api.apiKey = ""
 		api.Client = &http.Client{
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {

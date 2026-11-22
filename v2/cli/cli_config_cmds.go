@@ -224,6 +224,13 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		res.Notes = append(res.Notes, fmt.Sprintf(
 			"the daemon's local admin socket %s is root-only; using its TCP address", info.Socket))
 	}
+	// ReadDaemonApi lets an empty key through when there is a socket, as a
+	// socket entry sends none. A TCP entry without one would fail every
+	// request, so refuse it here.
+	if !useSocket && info.ApiKey == "" {
+		return nil, fmt.Errorf("%s: apiserver.apikey is not set, so a TCP entry would have no key to send; set it, or run config add as root without --tcp to use the local admin socket %s",
+			info.ConfigFile, info.Socket)
+	}
 	baseURL := tcpURL
 	if useSocket {
 		baseURL = socketURL
