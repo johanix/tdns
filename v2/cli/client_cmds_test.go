@@ -339,4 +339,20 @@ func TestDuplicatePins(t *testing.T) {
 	if len(w) != 1 || !strings.Contains(w[0], "x and y") {
 		t.Errorf("shared pin: %v", w)
 	}
+
+	// A key entry and a certificate entry of ONE daemon pin its key; that
+	// is not two daemons sharing a key.
+	one := []ApiDetails{
+		{Name: "tdns-auth", BaseURL: "https://192.0.2.1:8989/api/v1", Pins: []string{a}},
+		{Name: "authkey", BaseURL: "https://192.0.2.1:8989/api/v1", Pins: []string{a}},
+	}
+	if w := duplicatePins(one); len(w) != 0 {
+		t.Errorf("two entries of one daemon warned: %v", w)
+	}
+	// A third entry for another daemon with the same key still warns, and
+	// names each daemon once.
+	w = duplicatePins(append(one, ApiDetails{Name: "other", BaseURL: "https://192.0.2.2:8989/api/v1", Pins: []string{a}}))
+	if len(w) != 1 || !strings.Contains(w[0], "tdns-auth and other") {
+		t.Errorf("two daemons sharing a key: %v", w)
+	}
 }

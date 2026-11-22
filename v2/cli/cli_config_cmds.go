@@ -956,12 +956,22 @@ func shortDuration(d time.Duration) string {
 // accepted by the other: the same hazard as a shared API key.
 func duplicatePins(entries []ApiDetails) []string {
 	by := map[string][]string{}
+	// Entries of one daemon (a key entry and a certificate entry with the
+	// same baseurl) pin its key as a matter of course; only distinct daemons
+	// sharing a key are worth a warning. daemons[pin] holds the daemons seen.
+	daemons := map[string]map[string]bool{}
 	var order []string
 	for _, e := range entries {
+		d := pinDaemon(e)
 		for _, p := range e.Pins {
 			if _, seen := by[p]; !seen {
 				order = append(order, p)
+				daemons[p] = map[string]bool{}
 			}
+			if daemons[p][d] {
+				continue
+			}
+			daemons[p][d] = true
 			by[p] = append(by[p], e.Name)
 		}
 	}
@@ -973,4 +983,16 @@ func duplicatePins(entries []ApiDetails) []string {
 		}
 	}
 	return out
+}
+
+// pinDaemon says which daemon an entry reaches, for duplicatePins: the
+// baseurl's host:port, lower-cased, so that two entries of one daemon
+// count once. An entry whose baseurl has no host (unparseable, empty, a
+// unix socket) stands for itself.
+func pinDaemon(e ApiDetails) string {
+	u, err := url.Parse(e.BaseURL)
+	if err != nil || u.Host == "" {
+		return "entry " + e.Name
+	}
+	return "host " + strings.ToLower(u.Host)
 }
