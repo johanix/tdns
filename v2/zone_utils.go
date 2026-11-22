@@ -143,9 +143,12 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 // ahead of the upstream's, and DoTransfer's serialNewer test then never asks
 // for a transfer: the relay would serve that copy, and miss every upstream
 // change, until the upstream's serial climbed past it. Such a copy is replaced
-// by a transfer at the first upstream answer, whatever its serial. Only a
-// copy from disk: the normal serial comparison is untouched once a transfer,
-// or an upstream serial equal to the copy's, has confirmed it.
+// by a transfer at the first usable SOA, whatever its serial, and never by an
+// IXFR (shouldRequestIxfr). Only a copy from disk: the normal serial
+// comparison is untouched once a transfer, or an upstream serial equal to the
+// copy's, has confirmed it. The caller passes only a usable SOA's serial: the
+// placeholder 0 that comes with no usable SOA neither confirms a copy nor
+// forces a transfer.
 func (zd *ZoneData) relayCopyIsAheadOfUpstream(upstreamSerial uint32) bool {
 	if !zd.relayCopyUnconfirmed {
 		return false
@@ -211,11 +214,11 @@ func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, con
 				lg.Warn("zone refresh: no primary resolved this cycle, will retry next refresh", "zone", zd.ZoneName, "unresolved", res.Unresolved)
 			}
 		}
-		do_transfer, upstream_serial, err := zd.DoTransfer(ctx, conf)
+		do_transfer, upstream_serial, usableSOA, err := zd.doTransfer(ctx, conf)
 		if err != nil {
 			return false, err
 		}
-		if !do_transfer && !force && zd.relayCopyIsAheadOfUpstream(upstream_serial) {
+		if usableSOA && !do_transfer && !force && zd.relayCopyIsAheadOfUpstream(upstream_serial) {
 			lg.Warn("relayed zone: the copy adopted from disk is not the upstream's; transferring the upstream's copy",
 				"zone", zd.ZoneName, "copy_serial", zd.IncomingSerial, "upstream_serial", upstream_serial)
 			force = true
@@ -399,12 +402,21 @@ func setUpstreamFailure(failures []upstreamFailure, f upstreamFailure) []upstrea
 // probeRetryPolicy). It comes after the whole first pass, so a quiet upstream
 // never holds up a healthy sibling.
 func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32, error) {
+	transfer, serial, _, err := zd.doTransfer(ctx, conf)
+	return transfer, serial, err
+}
+
+// doTransfer is DoTransfer that also reports whether a primary gave a usable
+// SOA. Without one the serial is a placeholder 0, not a serial: every primary
+// answering with an unusable rcode returns (false, 0, false, nil), and a
+// genuine SOA can carry serial 0.
+func (zd *ZoneData) doTransfer(ctx context.Context, conf *Config) (bool, uint32, bool, error) {
 	if zd == nil {
 		panic("DoTransfer: zd == nil")
 	}
 
 	if len(zd.Upstreams) == 0 {
-		return false, 0, fmt.Errorf("DoTransfer: zone %s has no upstreams configured", zd.ZoneName)
+		return false, 0, false, fmt.Errorf("DoTransfer: zone %s has no upstreams configured", zd.ZoneName)
 	}
 
 	// zd.Upstreams is mutated in place under zd.mu by the refresh engine, so
@@ -519,7 +531,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 			}
 			// Nobody is waiting for this result any more; stop walking upstreams.
 			if cerr := ctx.Err(); cerr != nil {
-				return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
+				return false, 0, false, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
 			}
 
 			// Fresh message per attempt: TSIG signing adds an RR with a per-attempt
@@ -583,7 +595,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 				// the walk. Testing errors.Is(err, DeadlineExceeded) here would
 				// abandon every remaining sibling the moment one primary went quiet.
 				if cerr := ctx.Err(); cerr != nil {
-					return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
+					return false, 0, false, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
 				}
 				// Transport failure (or a TSIG response-verify failure) — try the next sibling.
 				lg.Warn("DoTransfer: SOA probe failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
@@ -622,10 +634,10 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 					// helper; this one did not.
 					if !serialNewer(soa.Serial, zd.IncomingSerial) {
 						zd.noteSuccessfulRefresh(zd.IncomingSerial)
-						return false, soa.Serial, nil
+						return false, soa.Serial, true, nil
 					}
 					zd.noteSuccessfulRefresh(zd.IncomingSerial)
-					return true, soa.Serial, nil
+					return true, soa.Serial, true, nil
 				}
 				// NOERROR but the first answer is not a SOA — try the next sibling.
 				continue
@@ -650,7 +662,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
-			return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, ctx.Err())
+			return false, 0, false, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, ctx.Err())
 		}
 		pending = unanswered
 	}
@@ -658,7 +670,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	if sawResponse {
 		// At least one primary answered, but none gave a usable SOA (e.g. all
 		// REFUSED). Back off quietly — no transfer this cycle, not an error.
-		return false, 0, nil
+		return false, 0, false, nil
 	}
 	// No primary was even reachable.
 	//
@@ -671,7 +683,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	// refresh, and it names every upstream with its own error.
 	lg.Debug("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName,
 		"count", len(upstreams), "upstreams", strings.Join(tried, ", "), "err", lastErr)
-	return false, 0, &upstreamsFailedError{stage: refreshStageProbe, failures: failures,
+	return false, 0, false, &upstreamsFailedError{stage: refreshStageProbe, failures: failures,
 		err: fmt.Errorf("SOA probe of %s failed: no response from any of %d upstream(s) [%s]: %w",
 			zd.ZoneName, len(upstreams), strings.Join(tried, ", "), lastErr)}
 }
@@ -1123,10 +1135,15 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 // deployment this is for. The delta's signatures are not adopted because the
 // apply never succeeds when they appear, not because a later pass discards
 // them.
+//
+// Nor from a relay copy that is still unconfirmed (relayCopyIsAheadOfUpstream):
+// its serial need not name its content, and a delta from that serial would be
+// applied to the wrong base. A full transfer replaces it instead.
 func (zd *ZoneData) shouldRequestIxfr(force bool) bool {
 	return zd.requestIxfr() &&
 		zd.IncomingSerial != 0 &&
 		zd.publishedSnapshot() != nil &&
+		!zd.relayCopyUnconfirmed &&
 		!force
 }
 
