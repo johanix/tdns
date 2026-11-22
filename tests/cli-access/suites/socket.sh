@@ -11,10 +11,11 @@ variant() {
 }
 sockline() { echo "s|^   socket: .*|   socket:     $1|"; }
 
-# A server error about the socket, as config status shows it (over TCP, as
-# the ordinary user: the socket is what is broken).
+# A server error about the socket, as config status -v shows it (over TCP,
+# as the ordinary user: the socket is what is broken). Without -v, config
+# status prints only the count of active errors.
 socket_error_shown() {   # socket_error_shown OUTFILE
-	ncli_user local auth config status > "$1" 2>&1
+	ncli_user local auth config status -v > "$1" 2>&1
 	grep -qi 'ApiSocket\|admin socket.*not served' "$1"
 }
 
@@ -110,10 +111,11 @@ suite_socket() {
 	[ "$(grep -c '^FAIL S5a' "$RES")" = 0 ] && pass S5a "loopback TCP with 8 spoofing headers: every one 403"
 
 	# ---- config status shows the socket -------------------------------------------
-	o=$(out S6-status-auth); ncli_root root auth config status > "$o"
+	# The ApiServer lines are part of config status -v.
+	o=$(out S6-status-auth); ncli_root root auth config status -v > "$o"
 	grep -q "local admin socket $AUTH_SOCK" "$o"
 	judge S6a "config status (tdns-auth) shows the socket" $? "$o"
-	o=$(out S6-status-imr); ncli_root root imr config status > "$o"
+	o=$(out S6-status-imr); ncli_root root imr config status -v > "$o"
 	grep -q "local admin socket $IMR_SOCK" "$o"
 	judge S6b "config status (tdns-imr) shows the socket" $? "$o"
 
@@ -216,10 +218,13 @@ suite_socket() {
 	daemon_stop auth
 	variant noaddr '/^   addresses: .*8991/d'
 	o=$(out S11-noaddr)
-	daemon_start auth "$RIG/auth/v-noaddr.yaml"
-	ncli_root root auth ping > "$o"
+	if daemon_start auth "$RIG/auth/v-noaddr.yaml"; then
+		ncli_root root auth ping > "$o"
+	else
+		sed -n '/=== .* start .*auth\/v-noaddr/,$p' "$LOG/tdns-auth.stdout" > "$o"
+	fi
 	[ "$(rc_of "$o")" = 0 ] && grep -q 'pongs:' "$o"
-	judge S11a "no apiserver.addresses: root still reaches the daemon on the socket" $? "$o" "$LOG/tdns-auth.stdout"
+	judge S11a "no apiserver.addresses (tdns-auth): root still reaches the daemon on the socket" $? "$o"
 	o=$(out S11-notcp); raw_local -k -b empty 127.0.0.1:$AUTH_API /api/v1/ping > "$o" 2>&1
 	[ "$(status_of "$o")" = none ]
 	judge S11b "...and nothing listens on TCP" $? "$o"
@@ -227,6 +232,18 @@ suite_socket() {
 	o=$(out S11-add-user); ncli_user home/add-user2 config add "$RIG/auth/v-noaddr.yaml" > "$o" 2>&1
 	[ "$(rc_of "$o")" != 0 ] && grep -qi 'only a local admin socket' "$o"
 	judge S11c "...config add as non-root: refused, saying only root can use it" $? "$o"
+	# The same for tdns-imr, whose config validation and router builder differ.
+	daemon_stop imr
+	sed '/^   addresses: .*8992/d' "$RIG/imr/tdns-imr.yaml" > "$RIG/imr/v-noaddr.yaml"
+	o=$(out S11-imr-noaddr)
+	if daemon_start imr "$RIG/imr/v-noaddr.yaml"; then
+		ncli_root root imr ping > "$o"
+	else
+		sed -n '/=== .* start .*imr\/v-noaddr/,$p' "$LOG/tdns-imr.stdout" > "$o"
+	fi
+	[ "$(rc_of "$o")" = 0 ] && grep -q 'pongs:' "$o"
+	judge S11d "no apiserver.addresses (tdns-imr): root still reaches the daemon on the socket" $? "$o"
+	daemon_stop imr
 
 	# ---- stop is admin, and the socket has it -----------------------------------------------
 	daemon_stop auth

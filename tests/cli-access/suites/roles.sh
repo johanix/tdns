@@ -24,9 +24,9 @@ suite_roles() {
 	daemon_stop auth; daemon_stop imr
 	access_variants; access_seed
 	daemon_start auth "$RIG/auth/v-access.yaml" || { fail R0 "tdns-auth starts with an access file" "$LOG/tdns-auth.stdout"; return; }
-	o=$(out R0); ncli_root root auth config status > "$o"
+	o=$(out R0); ncli_root root auth config status -v > "$o"
 	grep -q "Access file: $ACC; the API key is accepted (read-write); 3 client(s)" "$o"
-	judge R0 "tdns-auth runs the access file: key read-write, 3 clients (config status)" $? "$o"
+	judge R0 "tdns-auth runs the access file: key read-write, 3 clients (config status -v)" $? "$o"
 
 	# ---- read-only ------------------------------------------------------------------
 	if remote_or_skip R1 "read-only client: reads, refused writes"; then
@@ -128,7 +128,7 @@ suite_roles() {
 	[ -n "$(pids_of auth)" ] && dns_answers auth
 	judge R8a "a broken access file at start: the daemon runs and answers DNS" $? "$o" "$LOG/tdns-auth.stdout"
 	o=$(out R8-sock); ncli_root root auth ping > "$o"
-	o2=$(out R8-status); ncli_root root auth config status > "$o2"
+	o2=$(out R8-status); ncli_root root auth config status -v > "$o2"
 	grep -q 'pongs:' "$o" && grep -q 'CANNOT BE USED' "$o2"
 	judge R8b "...the socket works, and config status says the access file cannot be used" $? "$o" "$o2"
 	o=$(out R8-local); raw_local -k -b empty 127.0.0.1:$AUTH_API /api/v1/ping > "$o" 2>&1

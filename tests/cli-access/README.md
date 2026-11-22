@@ -20,12 +20,12 @@ against one build; #1165 is verdicted on the socket suite alone.
 | A non-root user cannot open the socket and gets an error naming it, not a silent fall-back to TCP | S3a S3b |
 | TCP without a key, or with a wrong one, gets 403 (loopback and from the CLI host, both daemons) | S4a–S4e (S4f is the control: with the key it answers) |
 | Nothing sent over TCP passes as a socket request (spoofed headers, absolute-form URL) | S5a S5b S5c |
-| `config status` shows the socket | S6a S6b |
+| `config status -v` shows the socket | S6a S6b |
 | `config add` picks the socket entry for root, the TCP entry with `--tcp` or as non-root, and the entries work | S7a–S7e |
 | A stale socket file is replaced at start | S8 |
-| A socket that cannot be served (a regular file in the way, a directory open to others) leaves the daemon running and shows as a server error | S9a S9b |
+| A socket that cannot be served (a regular file in the way, a directory open to others) leaves the daemon running and shows as a server error (`config status -v`) | S9a S9b |
 | A relative or too-long socket path is refused, the daemon keeps running, `config add` warns | S10a S10b S10c |
-| A daemon with no `apiserver.addresses` still serves the socket | S11a S11b S11c |
+| A daemon with no `apiserver.addresses` still serves the socket (tdns-auth, tdns-imr) | S11a S11b S11c S11d |
 
 ### #1167, access roles: `run.sh verify roles`
 
