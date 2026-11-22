@@ -819,8 +819,8 @@ type ApiServerConf struct {
 	// not CertFile and KeyFile, which only the TCP listeners use.
 	Addresses []string        `validate:"required_without=Socket"`
 	ApiKey    SensitiveString `validate:"required"`
-	CertFile  string          `validate:"required_with=Addresses,omitempty,file,certkey"`
-	KeyFile   string          `validate:"required_with=Addresses,omitempty,file"`
+	CertFile  string          `validate:"required_with_listener,omitempty,file,certkey"`
+	KeyFile   string          `validate:"required_with_listener,omitempty,file"`
 	UseTLS    bool
 	Server    ApiServerAppConf
 	Agent     ApiServerAppConf
