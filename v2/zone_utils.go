@@ -125,11 +125,36 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 	}
 	lg.Info("adopted persisted zone copy at first bind",
 		"zone", zd.ZoneName, "file", fname, "serial", zd.IncomingSerial)
+	zd.relayCopyUnconfirmed = Globals.App.Type == AppTypeAgent && !zoneMayOriginateContent(zd)
 
 	// The copy is in memory, so its serial is known and the recorded
 	// confirmation can be matched against it. Only on this path: a copy that
 	// arrives by transfer is stamped fresh by DoTransfer instead.
 	zd.restoreRefreshStateAtFirstBind()
+}
+
+// relayCopyIsAheadOfUpstream reports whether a tdns-agent relay still serves
+// the copy it adopted from disk at first bind while the upstream serves a
+// serial that is not newer and not the copy's -- one the copy is ahead of.
+//
+// A relay serves what it received at the serial it received it with (#1157),
+// so its copy on disk normally carries the upstream's serial. A copy written
+// by an agent from before #1157 carries a serial the agent counted itself,
+// ahead of the upstream's, and DoTransfer's serialNewer test then never asks
+// for a transfer: the relay would serve that copy, and miss every upstream
+// change, until the upstream's serial climbed past it. Such a copy is replaced
+// by a transfer at the first upstream answer, whatever its serial. Only a
+// copy from disk: the normal serial comparison is untouched once a transfer,
+// or an upstream serial equal to the copy's, has confirmed it.
+func (zd *ZoneData) relayCopyIsAheadOfUpstream(upstreamSerial uint32) bool {
+	if !zd.relayCopyUnconfirmed {
+		return false
+	}
+	if upstreamSerial == zd.IncomingSerial {
+		zd.relayCopyUnconfirmed = false // the copy is the upstream's
+		return false
+	}
+	return true
 }
 
 func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, conf *Config) (bool, error) {
@@ -190,6 +215,11 @@ func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, con
 		if err != nil {
 			return false, err
 		}
+		if !do_transfer && !force && zd.relayCopyIsAheadOfUpstream(upstream_serial) {
+			lg.Warn("relayed zone: the copy adopted from disk is not the upstream's; transferring the upstream's copy",
+				"zone", zd.ZoneName, "copy_serial", zd.IncomingSerial, "upstream_serial", upstream_serial)
+			force = true
+		}
 
 		if do_transfer || force {
 			if do_transfer {
@@ -213,6 +243,7 @@ func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, con
 			// discard a perfectly good confirmation and restart the whole
 			// expire budget from load time.
 			zd.noteSuccessfulRefresh(zd.IncomingSerial)
+			zd.relayCopyUnconfirmed = false
 			return updated, nil // zone updated, no error
 		}
 

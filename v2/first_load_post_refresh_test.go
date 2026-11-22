@@ -608,3 +608,87 @@ func TestFirstLoadFailsWhenThePersistedSerialCannotBeRead(t *testing.T) {
 	conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: "example.", ZoneStore: MapZone} // a retry, as the ticker sends
 	waitServing(t, zd, 1001)
 }
+
+// An agent upgraded from before #1157 holds a zone copy on disk at a serial it
+// counted itself (100), ahead of the upstream's (40). DoTransfer's serialNewer
+// test asks for no transfer, so the relay served 100, and missed every upstream
+// change until the upstream's serial passed it. The relay replaces such a copy
+// at the first upstream answer: at first bind, or at a later refresh when the
+// upstream was down at first bind. tdns-auth is unchanged: its secondary keeps
+// the copy, as the serial comparison says.
+func TestAgentRelayReplacesAPersistedCopyAheadOfTheUpstream(t *testing.T) {
+	const ahead = `example.	3600	IN	SOA	ns.example. hostmaster.example. 100 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+stale.example.	3600	IN	A	10.0.0.100
+`
+	const upstream = `example.	3600	IN	SOA	ns.example. hostmaster.example. 40 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+fresh.example.	3600	IN	A	10.0.0.40
+`
+	for _, tc := range []struct {
+		name      string
+		app       AppType
+		firstDown bool
+		want      uint32
+	}{
+		{"agent, upstream up at first bind", AppTypeAgent, false, 40},
+		{"agent, upstream down at first bind", AppTypeAgent, true, 40},
+		{"auth keeps its copy", AppTypeAuth, false, 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kdb := newTestKeyDB(t)
+			conf, dir := persistentConf(t, kdb)
+			withAppType(t, tc.app)
+
+			addr, stop := startTestPrimary(t, upstream)
+			defer stop()
+			if err := os.WriteFile(filepath.Join(dir, "example.zone"), []byte(ahead), 0644); err != nil {
+				t.Fatalf("write zone file: %v", err)
+			}
+			first := addr
+			if tc.firstDown {
+				first = "127.0.0.1:1" // nothing listening
+			}
+			zd := &ZoneData{
+				ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
+				Logger: discardLogger(), KeyDB: kdb,
+				Options:   map[ZoneOption]bool{OptApiManagedZone: true},
+				Upstreams: []PeerConf{{Addr: first}},
+			}
+			registerZones(t, zd)
+			t.Cleanup(zd.stopPublisher)
+			if zoneMayOriginateContent(zd) {
+				t.Fatal("setup: the zone should relay")
+			}
+
+			_, err := zd.Refresh(context.Background(), false, false, false, conf)
+			if tc.firstDown {
+				if err == nil {
+					t.Fatal("expected the refresh against a dead primary to fail")
+				}
+				if zd.IncomingSerial != 100 {
+					t.Fatalf("IncomingSerial = %d, want 100: the adopted copy serves while the upstream is down", zd.IncomingSerial)
+				}
+				zd.Upstreams = []PeerConf{{Addr: addr}}
+				_, err = zd.Refresh(context.Background(), false, false, false, conf)
+			}
+			if err != nil {
+				t.Fatalf("Refresh: %v", err)
+			}
+
+			if zd.IncomingSerial != tc.want || zd.CurrentSerial != tc.want {
+				t.Fatalf("IncomingSerial %d, CurrentSerial %d, want %d", zd.IncomingSerial, zd.CurrentSerial, tc.want)
+			}
+			fresh, _ := zd.GetOwner("fresh.example.")
+			stale, _ := zd.GetOwner("stale.example.")
+			if tc.want == 40 && (fresh == nil || stale != nil) {
+				t.Errorf("the upstream's copy is not the one served (fresh %v, stale %v)", fresh != nil, stale != nil)
+			}
+			if zd.relayCopyUnconfirmed {
+				t.Error("the copy is still unconfirmed after the refresh")
+			}
+		})
+	}
+}
