@@ -142,18 +142,21 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 			transport := tuple.Transport
 
 			effTransport := transport
-			var dnskeyKey cache.AddrXport
+			var dnskey *dnskeyAttempt
 			if dnskeyBypass {
 				// All tuples for this (server, addr) collapse to the same
-				// preferred transport; skip the ones we've already tried.
-				// The attempt is recorded once made, under the endpoint
-				// tryServer dialed (dnskeyTried).
-				eff := imr.preferredDNSKEYTransport(server)
-				dnskeyKey = imr.dnskeyAttemptKey(ctx, server, zone, addr, eff)
-				if dnskeyAttempted[dnskeyKey] {
+				// preferred transport; skip the ones whose endpoint was
+				// tried. The transport and endpoint are resolved once, and
+				// the attempt dials what it was checked by; it is recorded
+				// once made (dnskeyTried).
+				a := imr.resolveDNSKEYAttempt(ctx, server, zone, addr)
+				if key, ok := a.key(); ok && dnskeyAttempted[key] {
 					continue
 				}
-				effTransport = eff
+				if a.transport != 0 {
+					effTransport = a.transport
+				}
+				dnskey = &a
 			}
 
 			lastNS, lastAddr, lastTransport = nsname, addr, transport
@@ -164,13 +167,11 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy), attemptSelection{family: tuple.Family, probe: tuple.Probe, tried: triedBefore})
+			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy), attemptSelection{family: tuple.Family, probe: tuple.Probe, tried: triedBefore, dnskey: dnskey})
 			if dnskeyBypass {
-				// Under the transport tryServer dialed: it reads the
-				// preference again, and a signal update in between may
-				// have changed it from effTransport. An attempt refused for
-				// its suspect family is none (dnskeyTried).
-				if key, ok := dnskeyTried(dnskeyKey, ep, wireTransport, err); ok {
+				// Under the endpoint tryServer dialed. An attempt that
+				// dialed none is not recorded (dnskeyTried).
+				if key, ok := dnskeyTried(ep, wireTransport, err); ok {
 					dnskeyAttempted[key] = true
 				}
 			}

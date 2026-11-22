@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -47,6 +48,19 @@ func (s SensitiveString) String() string {
 		return ""
 	}
 	return "[REDACTED]"
+}
+
+// MarshalJSON writes the redacted form too. encoding/json does not call
+// String(), so without this a struct holding a SensitiveString carried the
+// secret in clear whenever it was sent as JSON: `config status` returned
+// apiserver.apikey to every caller.
+//
+// Nothing reads a secret back out of JSON. The daemon's config is decoded from
+// YAML through mapstructure, which this does not touch, and the CLI learns
+// what it needs about the running key without being sent it (see
+// correlateStatus in cli/config_check_cmds.go).
+func (s SensitiveString) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
 }
 
 type Config struct {
