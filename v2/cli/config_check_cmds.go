@@ -673,19 +673,35 @@ func checkDoHPath(cfg *tdns.Config, rep *ccReport, g string, doh bool) {
 	}
 }
 
+// socketPathHint is the fix for an apiserver.socket the daemon refuses
+// (tdns.CheckApiSocketPath).
+const socketPathHint = "make apiserver.socket an absolute path of at most 100 bytes, e.g. /var/run/tdns/tdns-auth.sock"
+
 func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 	const g = "API server"
 	checkApiAccessFile(cfg, rep)
+	tcp := len(cfg.ApiServer.Addresses) > 0
+	sock := cfg.ApiServer.Socket
+	var sockErr error
+	if sock != "" {
+		sockErr = tdns.CheckApiSocketPath(sock)
+	}
 	switch {
-	case len(cfg.ApiServer.Addresses) > 0:
+	case tcp:
 		rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.ApiServer.Addresses))
-	case cfg.ApiServer.Socket != "":
+	case sock != "" && sockErr == nil:
 		// A socket-only daemon is valid: the socket is served without
 		// any TCP listener (APIdispatcher).
-		rep.pass(g, "addresses", fmt.Sprintf("apiserver.addresses is empty: the API is served only on the local admin socket %s", cfg.ApiServer.Socket))
+		rep.pass(g, "addresses", fmt.Sprintf("apiserver.addresses is empty: the API is served only on the local admin socket %s", sock))
+	case sock != "":
+		rep.fail(g, "addresses", fmt.Sprintf("apiserver.addresses is empty and the daemon refuses the socket (%v), so there is no management API", sockErr),
+			socketPathHint)
 	default:
 		rep.fail(g, "addresses", "apiserver.addresses is empty and there is no apiserver.socket",
 			"set at least one addr:port (loopback is fine, e.g. 127.0.0.1:8989), or apiserver.socket")
+	}
+	if tcp && sockErr != nil {
+		rep.warn(g, "socket", fmt.Sprintf("%v: the daemon does not serve the local admin socket", sockErr), socketPathHint)
 	}
 	if cfg.ApiServer.ApiKey.Value() == "" {
 		rep.fail(g, "apikey", "apiserver.apikey is empty — the API router refuses to start without it",
@@ -693,9 +709,12 @@ func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 	} else {
 		rep.pass(g, "apikey", "apiserver.apikey is set")
 	}
-	// certfile/keyfile are required even with usetls:false; the required-fields
-	// check validates the pair, but surface the plain existence here too.
-	if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
+	// certfile/keyfile are required with a TCP listener, even with
+	// usetls:false; the required-fields check validates the pair, but surface
+	// the plain existence here too. The socket alone needs neither.
+	if !tcp && cfg.ApiServer.CertFile == "" && cfg.ApiServer.KeyFile == "" {
+		rep.info(g, "cert", "no apiserver.certfile/keyfile: none is needed without apiserver.addresses")
+	} else if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
 		rep.fail(g, "cert", "apiserver.certfile/keyfile must be set (required even when usetls:false)",
 			"generate a cert/key pair (see `tdns-cli auth config mwe`) and point certfile/keyfile at it")
 	} else {
