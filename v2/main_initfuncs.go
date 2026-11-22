@@ -50,6 +50,9 @@ func (conf *Config) MainLoop(ctx context.Context, cancel context.CancelFunc) {
 		select {
 		case <-ctx.Done():
 			lgConfig.Info("mainloop: context cancelled, cleaning up")
+			// Before the process exits: nothing else closes the admin
+			// socket after a signal, so its file would be left behind.
+			closeApiSockets()
 			// A signal can land while Shutdowner waits to close APIStopCh;
 			// the stop is still a failed one.
 			if conf.Internal.stopFailed.Load() {
@@ -59,6 +62,8 @@ func (conf *Config) MainLoop(ctx context.Context, cancel context.CancelFunc) {
 		case <-conf.Internal.APIStopCh:
 			lgConfig.Info("mainloop: stop command received, cleaning up")
 			cancel()
+			// The socket server's own shutdown may not run before exit.
+			closeApiSockets()
 			if conf.Internal.stopFailed.Load() {
 				exitAfterFailedStop()
 			}
@@ -453,5 +458,6 @@ func Shutdowner(conf *Config, msg string) {
 	engineWg.Wait() // Wait for all engines to finish (let's see if this works
 	lgConfig.Info("all engines finished", "app", Globals.App.Name)
 	time.Sleep(200 * time.Millisecond)
+	closeApiSockets()
 	os.Exit(1)
 }

@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -112,21 +114,66 @@ func prepareApiSocket(path string) error {
 	return nil
 }
 
+// apiSocketListener is the admin socket's listener. Closing it unlinks the
+// socket file. It may be closed twice, by closeApiSockets on the way out and
+// by the server's Shutdown, so only the first close does anything.
+type apiSocketListener struct {
+	net.Listener
+	once   sync.Once
+	closed atomic.Bool
+	err    error
+}
+
+func (l *apiSocketListener) Close() error {
+	l.once.Do(func() {
+		l.closed.Store(true)
+		l.err = l.Listener.Close()
+	})
+	return l.err
+}
+
+// apiSockets are the admin sockets this process serves.
+var apiSockets struct {
+	sync.Mutex
+	lns []*apiSocketListener
+}
+
+// closeApiSockets closes every admin socket this process serves, which
+// unlinks the socket files. The daemon calls it on its way out (MainLoop,
+// Shutdowner). It cannot leave that to the servers' own shutdown: after an
+// API stop the process exits before that shutdown gets to run, and after a
+// signal it never starts. Connections in progress are left alone; the
+// process is about to end them anyway.
+func closeApiSockets() {
+	apiSockets.Lock()
+	lns := apiSockets.lns
+	apiSockets.lns = nil
+	apiSockets.Unlock()
+	for _, l := range lns {
+		l.Close()
+	}
+}
+
 // serveApiSocket serves router on the unix socket at path until done is
 // closed. Requests on it carry FromLocalSocket, which the key check honours in
-// place of a key. The socket file is mode 0600 and goes away at shutdown.
+// place of a key. The socket file is mode 0600 and goes away when the daemon
+// stops (closeApiSockets) or done is closed, whichever comes first.
 func serveApiSocket(path string, router http.Handler, done <-chan struct{}) error {
 	if err := prepareApiSocket(path); err != nil {
 		return err
 	}
-	ln, err := net.Listen("unix", path)
+	raw, err := net.Listen("unix", path)
 	if err != nil {
 		return err
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
-		ln.Close()
+		raw.Close()
 		return fmt.Errorf("chmod %s: %w", path, err)
 	}
+	ln := &apiSocketListener{Listener: raw}
+	apiSockets.Lock()
+	apiSockets.lns = append(apiSockets.lns, ln)
+	apiSockets.Unlock()
 	srv := &http.Server{
 		Handler:           router,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -135,7 +182,8 @@ func serveApiSocket(path string, router http.Handler, done <-chan struct{}) erro
 		},
 	}
 	go func() {
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		// A listener closed by closeApiSockets is a stop, not a failure.
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed && !ln.closed.Load() {
 			lgApi.Error("local admin socket stopped", "socket", path, "err", err)
 		}
 	}()
@@ -145,10 +193,11 @@ func serveApiSocket(path string, router http.Handler, done <-chan struct{}) erro
 			lgApi.Error("local admin socket shutdown failed", "socket", path, "err", err)
 		}
 		// No os.Remove here: closing the listener (first thing Shutdown
-		// does) unlinks the socket. Shutdown then waits for active
-		// requests, and a replacement daemon may bind the path meanwhile;
-		// a remove after the wait would delete its socket. A crash leaves
-		// a stale socket, which prepareApiSocket clears at the next start.
+		// does, unless closeApiSockets got there first) unlinks the
+		// socket. Shutdown then waits for active requests, and a
+		// replacement daemon may bind the path meanwhile; a remove after
+		// the wait would delete its socket. A crash leaves a stale socket,
+		// which prepareApiSocket clears at the next start.
 	}()
 	lgApi.Info("serving the management API on the local admin socket", "socket", path)
 	return nil
