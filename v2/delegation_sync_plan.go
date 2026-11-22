@@ -55,6 +55,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -615,6 +616,13 @@ func (zd *ZoneData) syncWithParentVia(ctx context.Context, kdb *KeyDB, notifyq c
 //
 // All failures are returned together. A caller shown only the last one cannot
 // tell which transport was even expected to work.
+//
+// One error does end the walk: errDelegationNotAllRead, from an analysis that
+// could not read all of the parent's delegation. That is not a transport
+// failing. What the parent lacks is not known, and the next transport would
+// know no more. A NOTIFY sent after it counted as forwarded, so the proxy sync
+// scheduled no compare to look again. The walk returns the error instead, and
+// the caller retries the compare.
 func (zd *ZoneData) walkSyncPlan(ctx context.Context, plan *ParentSyncPlan,
 	send func(SyncCandidate) (string, error)) (string, error) {
 
@@ -639,6 +647,13 @@ func (zd *ZoneData) walkSyncPlan(ctx context.Context, plan *ParentSyncPlan,
 				return fmt.Sprintf("%s (after %s)", msg, strings.Join(failures, "; ")), nil
 			}
 			return msg, nil
+		}
+		if errors.Is(err, errDelegationNotAllRead) {
+			if len(failures) > 0 {
+				return "", fmt.Errorf("zone %s: sync stopped at %s (after %s): %w",
+					zd.ZoneName, cand.Scheme, strings.Join(failures, "; "), err)
+			}
+			return "", fmt.Errorf("zone %s: sync stopped at %s: %w", zd.ZoneName, cand.Scheme, err)
 		}
 		lgDns.Warn("delegation sync: scheme failed, trying the next one",
 			"zone", zd.ZoneName, "scheme", cand.Scheme, "err", err)
