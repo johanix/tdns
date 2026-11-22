@@ -1,0 +1,13 @@
+# root on the daemon host: the local admin sockets. No key, no TLS, written
+# by hand so the cases that use it do not depend on "config add" (which the
+# socket suite checks on files of its own). The roles and pins suites use a
+# copy whose tdns-auth config-file: is the access-file variant (rootacc).
+apiservers:
+   - name:        tdns-auth
+     baseurl:     unix:///var/run/tdns/tdns-auth.sock
+     authmethod:  none
+     config-file: /var/tmp/cli-access/auth/tdns-auth.yaml
+   - name:        tdns-imr
+     baseurl:     unix:///var/run/tdns/tdns-imr.sock
+     authmethod:  none
+     config-file: /var/tmp/cli-access/imr/tdns-imr.yaml

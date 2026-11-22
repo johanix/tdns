@@ -1,0 +1,16 @@
+# The access file the roles suite starts from (tdns-auth's apiserver.access-file).
+# @PIN_*@ are the SPKI pins of client certificates setup.sh mints; nothing
+# here is secret. "unknown" is minted too but listed nowhere.
+keyauth: true
+clients:
+   - name: ro-client
+     pin: "@PIN_RO@"
+     role: read-only
+   - name: rw-client
+     pin: "@PIN_RW@"
+     role: read-write
+   - name: off-client
+     pin: "@PIN_OFF@"
+     role: read-write
+     disabled: true
+     comment: "revoked: must be refused"

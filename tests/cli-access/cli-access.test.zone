@@ -1,0 +1,9 @@
+$TTL 120
+cli-access.test.	120	IN	SOA	ns.cli-access.test. hostmaster.cli-access.test. (
+				2026112201	; serial
+				3600		; refresh
+				600		; retry
+				604800		; expire
+				120 )		; minimum
+cli-access.test.	120	IN	NS	ns.cli-access.test.
+ns.cli-access.test.	120	IN	A	192.0.2.53

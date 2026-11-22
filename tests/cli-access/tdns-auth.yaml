@@ -1,0 +1,42 @@
+# The daemon host's tdns-auth. Run as root by run.sh, from /var/tmp/cli-access/auth.
+#
+# Its management API has two ways in: TLS on 8991 (loopback and the address
+# the CLI host reaches, @DAEMON@ filled in by setup.sh) and the local admin
+# socket. DNS on a high port, loopback only: the rig never queries it from
+# outside, it only checks that DNS keeps answering.
+#
+# The roles and pins suites start from a copy of this file with the
+# access-file line uncommented; the socket suite's variants are this file
+# with one apiserver line changed (see suites/socket.sh).
+service:
+   name:       TDNS-AUTH  # tdns-ncli config add reads the daemon type from here
+   verbose:    true
+   debug:      false
+
+log:
+   file:       /var/tmp/cli-access/log/tdns-auth.log
+   level:      debug      # read-only API requests are logged at debug
+
+db:
+   file:       /var/tmp/cli-access/auth/auth.db
+
+listeners:
+   addresses:  [ 127.0.0.1:5391 ]
+   transports: [ do53 ]
+
+apiserver:
+   addresses:  [ 127.0.0.1:8991, "@DAEMON@:8991" ]
+   apikey:     cli-access-rig-test-key
+   certfile:   /var/tmp/cli-access/certs/daemon.crt
+   keyfile:    /var/tmp/cli-access/certs/daemon.key
+   socket:     /var/run/tdns/tdns-auth.sock
+#  access-file: /var/tmp/cli-access/auth/access.yaml
+
+imrengine:
+   active:     false
+
+zones:
+   - name:      cli-access.test.
+     type:      primary
+     zonefile:  /var/tmp/cli-access/auth/cli-access.test.zone
+     store:     map

@@ -1,0 +1,12 @@
+# The ordinary user on the daemon host: TCP over loopback, with the key.
+# Loopback is not the socket: this user must never get admin.
+apiservers:
+   - name:        tdns-auth
+     baseurl:     https://127.0.0.1:8991/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
+     rootca:      /var/tmp/cli-access/certs/ca.crt
+   - name:        tdns-imr
+     baseurl:     http://127.0.0.1:8992/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
