@@ -118,6 +118,50 @@ func TestPrepareApiSocket(t *testing.T) {
 	}
 }
 
+// A daemon that stops leaves no socket file behind. After a signal only ctx is
+// cancelled, and after an API stop the process exits as MainLoop returns; in
+// neither case does the socket server's own shutdown get to run, so MainLoop
+// closes the socket itself. Then the server's late Shutdown is harmless.
+func TestMainLoopRemovesTheAdminSocket(t *testing.T) {
+	for _, how := range []string{"signal", "api stop"} {
+		t.Run(how, func(t *testing.T) {
+			dir := shortTempDir(t)
+			sock := filepath.Join(dir, "admin.sock")
+			conf := &Config{}
+			conf.ApiServer.ApiKey = "the-api-key"
+			conf.ApiServer.Socket = sock
+			conf.Internal.ServerErrors = NewServerErrorRegistry()
+			conf.Internal.APIStopCh = make(chan struct{})
+			rtr, err := conf.SetupSimpleAPIRouter(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The server's own shutdown waits on a channel nothing closes
+			// until after the check, as when the process has already gone.
+			late := make(chan struct{})
+			if err := serveApiSocket(sock, rtr, late); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(sock); err != nil {
+				t.Fatalf("no socket while serving: %v", err)
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			if how == "signal" {
+				cancel()
+			} else {
+				close(conf.Internal.APIStopCh)
+			}
+			conf.MainLoop(ctx, cancel)
+			if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+				t.Errorf("socket file still there after MainLoop returned: %v", err)
+			}
+			close(late) // Shutdown on an already closed listener
+			cancel()
+		})
+	}
+}
+
 // The socket serves the same router with no key; the same router over TCP
 // still wants one. A client made from a unix:/// base URL reaches it.
 func TestApiSocketServesWithoutKey(t *testing.T) {

@@ -603,7 +603,8 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   changes with the access file in step 3. `apiserver.certfile` and `keyfile`
   are required only with `apiserver.addresses`: the socket uses no TLS. A
   stale socket is removed only when connecting to it is refused; any other
-  probe failure leaves it alone. A socket that cannot be served is a
+  probe failure leaves it alone. A daemon removes its own socket on the way
+  out (MainLoop, Shutdowner), after a signal as well as after an API stop. A socket that cannot be served is a
   server error (Transport/ApiSocket), so `config status` shows the daemon as
   degraded, and the daemon keeps running.
 - **Things to verify, settled.** The `required` tags on `ApiDetails` are not
