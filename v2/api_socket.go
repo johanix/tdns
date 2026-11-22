@@ -9,11 +9,13 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -54,7 +56,8 @@ func CheckApiSocketPath(path string) error {
 // group and others cannot enter. A missing directory is created with mode
 // 0700. An existing socket file is removed only if it is a socket and nothing
 // answers on it; a live one belongs to another process, and anything that is
-// not a socket is left alone.
+// not a socket is left alone, as is a socket the probe gets anything but a
+// refused connection from.
 func prepareApiSocket(path string) error {
 	if err := CheckApiSocketPath(path); err != nil {
 		return err
@@ -89,9 +92,19 @@ func prepareApiSocket(path string) error {
 	case fi.Mode()&os.ModeSocket == 0:
 		return fmt.Errorf("%s exists and is not a socket; not removing it", path)
 	}
-	if c, err := net.DialTimeout("unix", path, time.Second); err == nil {
+	c, err := net.DialTimeout("unix", path, time.Second)
+	switch {
+	case err == nil:
 		c.Close()
 		return fmt.Errorf("%s is in use by another process", path)
+	case errors.Is(err, os.ErrNotExist):
+		return nil // gone since the Lstat
+	case !errors.Is(err, syscall.ECONNREFUSED):
+		// Only a refused connection says nobody listens there. Any other
+		// failure (out of file descriptors, a busy listener) says nothing
+		// about the socket, and removing a live daemon's socket would leave
+		// that daemon running and unreachable.
+		return fmt.Errorf("%s could not be probed (%v); not removing it", path, err)
 	}
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("removing the stale socket %s: %w", path, err)
@@ -131,7 +144,11 @@ func serveApiSocket(path string, router http.Handler, done <-chan struct{}) erro
 		if err := srv.Shutdown(context.Background()); err != nil {
 			lgApi.Error("local admin socket shutdown failed", "socket", path, "err", err)
 		}
-		os.Remove(path) // the listener normally unlinks it; this is belt and braces
+		// No os.Remove here: closing the listener (first thing Shutdown
+		// does) unlinks the socket. Shutdown then waits for active
+		// requests, and a replacement daemon may bind the path meanwhile;
+		// a remove after the wait would delete its socket. A crash leaves
+		// a stale socket, which prepareApiSocket clears at the next start.
 	}()
 	lgApi.Info("serving the management API on the local admin socket", "socket", path)
 	return nil

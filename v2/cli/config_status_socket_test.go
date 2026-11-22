@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/viper"
+
 	tdns "github.com/johanix/tdns/v2"
 )
 
@@ -57,24 +59,83 @@ func TestConfigCheckAcceptsASocketOnlyApiServer(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		socket   string
+		addrs    []string
 		wantFail bool
+		certFail bool // no certfile/keyfile is a failure only with addresses
+		sockWarn bool
 	}{
 		{name: "socket, no addresses", socket: "/var/run/tdns/tdns-auth.sock"},
 		{name: "no socket, no addresses", wantFail: true},
+		// The daemon refuses a relative path, so nothing is served.
+		{name: "relative socket, no addresses", socket: "admin.sock", wantFail: true},
+		{name: "relative socket, addresses", socket: "admin.sock", addrs: []string{"127.0.0.1:8989"}, certFail: true, sockWarn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &tdns.Config{}
 			cfg.ApiServer.Socket = tc.socket
+			cfg.ApiServer.Addresses = tc.addrs
 			rep := newCCReport()
 			checkApiServer(cfg, "", rep)
-			var addrFail bool
+			var addrFail, certFail, sockWarn bool
 			for _, r := range rep.byGroup["API server"] {
-				if r.check == "addresses" && r.level == ccFAIL {
+				switch {
+				case r.check == "addresses" && r.level == ccFAIL:
 					addrFail = true
+				case r.check == "cert" && r.level == ccFAIL:
+					certFail = true
+				case r.check == "socket" && r.level == ccWARN:
+					sockWarn = true
 				}
 			}
 			if addrFail != tc.wantFail {
 				t.Errorf("addresses check failed = %v, want %v", addrFail, tc.wantFail)
+			}
+			if certFail != tc.certFail {
+				t.Errorf("cert check failed = %v, want %v", certFail, tc.certFail)
+			}
+			if sockWarn != tc.sockWarn {
+				t.Errorf("socket warning = %v, want %v", sockWarn, tc.sockWarn)
+			}
+		})
+	}
+}
+
+// tdns-imr builds its API router, and stops if that fails, whatever the
+// addresses say: the key is needed for a socket-only resolver too. A socket
+// path the daemon refuses is not reported as served.
+func TestImrConfigCheckSocketOnly(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		socket     string
+		key        string
+		keyFail    bool
+		sockWarn   bool
+		servedInfo bool
+	}{
+		{name: "socket and key", socket: "/var/run/tdns/tdns-imr.sock", key: "k", servedInfo: true},
+		{name: "socket, no key", socket: "/var/run/tdns/tdns-imr.sock", keyFail: true, servedInfo: true},
+		{name: "relative socket", socket: "imr.sock", key: "k", sockWarn: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &tdns.Config{}
+			cfg.ApiServer.Socket = tc.socket
+			cfg.ApiServer.ApiKey = tdns.SensitiveString(tc.key)
+			rep := newCCReport()
+			checkImrApiServer(cfg, viper.New(), rep)
+			var keyFail, sockWarn, servedInfo bool
+			for _, r := range rep.byGroup["API server"] {
+				switch {
+				case r.check == "apikey" && r.level == ccFAIL:
+					keyFail = true
+				case r.check == "socket" && r.level == ccWARN:
+					sockWarn = true
+				case r.check == "addresses" && strings.Contains(r.msg, "served only on the local admin socket"):
+					servedInfo = true
+				}
+			}
+			if keyFail != tc.keyFail || sockWarn != tc.sockWarn || servedInfo != tc.servedInfo {
+				t.Errorf("key fail %v, socket warning %v, served on the socket %v; want %v, %v, %v",
+					keyFail, sockWarn, servedInfo, tc.keyFail, tc.sockWarn, tc.servedInfo)
 			}
 		})
 	}

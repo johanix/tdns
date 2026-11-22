@@ -97,6 +97,25 @@ func TestPrepareApiSocket(t *testing.T) {
 	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
 		t.Errorf("stale socket still there: %v", err)
 	}
+
+	// A probe that fails for any other reason than a refused connection
+	// proves nothing, so the socket stays. Here: no permission to connect.
+	if os.Geteuid() != 0 {
+		odd := filepath.Join(priv, "odd.sock")
+		ol, err := net.ListenUnix("unix", &net.UnixAddr{Name: odd, Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ol.SetUnlinkOnClose(false)
+		ol.Close()
+		os.Chmod(odd, 0)
+		if err := prepareApiSocket(odd); err == nil || !strings.Contains(err.Error(), "could not be probed") {
+			t.Errorf("unprobeable socket: err = %v", err)
+		}
+		if _, err := os.Lstat(odd); err != nil {
+			t.Errorf("a socket the probe could not judge was removed: %v", err)
+		}
+	}
 }
 
 // The socket serves the same router with no key; the same router over TCP
@@ -196,6 +215,15 @@ func TestAPIdispatcherServesTheSocket(t *testing.T) {
 	status, body, err := NewClient("local", "unix://"+sock, "", "none", "").Post("/ping", []byte(`{}`))
 	if err != nil || status != http.StatusOK {
 		t.Fatalf("ping over the socket with no TCP addresses: status %d, err %v, body %s", status, err, body)
+	}
+	// An entry that says X-API-Key but has no key still works on the socket:
+	// a socket client sends no key and asks for none.
+	keyless := NewClient("local", "unix://"+sock, "", "X-API-Key", "")
+	if keyless.AuthMethod != "none" || keyless.apiKey != "" {
+		t.Errorf("socket client: authmethod %q, key set %v; want none and no key", keyless.AuthMethod, keyless.apiKey != "")
+	}
+	if status, body, err := keyless.Post("/ping", []byte(`{}`)); err != nil || status != http.StatusOK {
+		t.Errorf("ping over the socket from an X-API-Key entry with no key: status %d, err %v, body %s", status, err, body)
 	}
 	if n := len(conf.Internal.ServerErrors.List()); n != 0 {
 		t.Errorf("%d server errors, want none: %v", n, conf.Internal.ServerErrors.List())

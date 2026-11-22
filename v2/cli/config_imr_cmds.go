@@ -307,8 +307,23 @@ func checkImrTrustAnchors(cfg *tdns.Config, rep *ccReport) {
 
 func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 	const g = "API server"
+	// tdns-imr builds its API router whatever the addresses say, and stops
+	// at startup if that fails, so the key is checked first, for every case.
+	if cfg.ApiServer.ApiKey.Value() == "" {
+		rep.fail(g, "apikey", "apiserver.apikey is empty — the imr API router refuses to start without it",
+			"set a long random apiserver.apikey")
+	} else {
+		rep.pass(g, "apikey", "apiserver.apikey is set")
+	}
+	sock := cfg.ApiServer.Socket
+	var sockErr error
+	if sock != "" {
+		if sockErr = tdns.CheckApiSocketPath(sock); sockErr != nil {
+			rep.warn(g, "socket", fmt.Sprintf("%v: the daemon does not serve the local admin socket", sockErr), socketPathHint)
+		}
+	}
 	if len(cfg.ApiServer.Addresses) == 0 {
-		if sock := cfg.ApiServer.Socket; sock != "" {
+		if sock != "" && sockErr == nil {
 			rep.info(g, "addresses", fmt.Sprintf("apiserver.addresses is empty: the management API is served only on the local admin socket %s", sock))
 		} else {
 			rep.info(g, "addresses", "apiserver.addresses is empty — the management API will not listen (the resolver still runs)")
@@ -316,13 +331,6 @@ func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 		return
 	}
 	rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.ApiServer.Addresses))
-
-	if cfg.ApiServer.ApiKey.Value() == "" {
-		rep.fail(g, "apikey", "apiserver.apikey is empty — the imr API router refuses to start without it",
-			"set a long random apiserver.apikey")
-	} else {
-		rep.pass(g, "apikey", "apiserver.apikey is set")
-	}
 
 	// usetls defaults TRUE for imr unless explicitly set false.
 	usetls := true
