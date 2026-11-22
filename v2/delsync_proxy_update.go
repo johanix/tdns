@@ -19,6 +19,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -633,25 +634,34 @@ func (zd *ZoneData) proxyReplaceSyncState(analysis *ProxyDelegationAnalysis, par
 // startup reconcile at all and its drift went uncorrected until the next
 // transfer happened to change something. It now uses whatever transport is
 // available, via the same plan the steady-state path uses.
+//
+// inStep reports whether the parent holds what the zone says afterwards: the
+// compare read all of the parent's delegation and found it in sync, or the
+// difference was sent and the parent said it applied it (an UPDATE or an API
+// call: a NOTIFY's success says only that the notifier took it). A plan with
+// no usable scheme is not an error, and is not in step either. A compare that
+// could not read all of the parent's delegation returns errDelegationNotAllRead
+// after doing what it could, so that it is retried.
 func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
-	notifyq chan NotifyRequest, imr *Imr) (string, error) {
+	notifyq chan NotifyRequest, imr *Imr) (msg string, inStep bool, err error) {
 	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr, SyncRoleProxy)
 	if err != nil {
-		return "", fmt.Errorf("ProxyStartupReconcile: %w", err)
+		return "", false, fmt.Errorf("ProxyStartupReconcile: %w", err)
 	}
 	if !plan.Usable() {
 		// Degraded, not broken: the zone is served either way, and the reasons
 		// are in the summary rather than in a shrug.
-		return "startup reconcile: " + plan.Summary(), nil
+		return "startup reconcile: " + plan.Summary(), false, nil
 	}
 
 	dss, aerr := zd.AnalyseZoneDelegation(imr)
 	if aerr != nil {
-		return "", fmt.Errorf("ProxyStartupReconcile: AnalyseZoneDelegation(%s): %w", zd.ZoneName, aerr)
+		return "", false, fmt.Errorf("ProxyStartupReconcile: AnalyseZoneDelegation(%s): %w", zd.ZoneName, aerr)
 	}
 	if dss.InSync {
 		lgDns.Info("parentsync-proxy: startup reconcile — parent already in sync", "zone", zd.ZoneName)
-		return "startup reconcile: parent already in sync; nothing sent", nil
+		inStep, err = zd.proxyCompareOutcome(dss, "")
+		return "startup reconcile: parent already in sync; nothing sent", inStep, err
 	}
 
 	// NOTIFY needs to know WHICH signal to send, which the steady-state path
@@ -661,12 +671,31 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 
 	lgDns.Info("parentsync-proxy: startup reconcile — parent out of sync",
 		"zone", zd.ZoneName, "plan", plan.Summary())
-	msg, serr := zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis, &dss)
+	msg, scheme, serr := zd.syncWithParentVia(ctx, kdb, notifyq, imr, plan, analysis, &dss)
 	if serr != nil {
-		return "", fmt.Errorf("ProxyStartupReconcile: %w", serr)
+		return "", false, fmt.Errorf("ProxyStartupReconcile: %w", serr)
 	}
-	return "startup reconcile: " + msg, nil
+	inStep, err = zd.proxyCompareOutcome(dss, scheme)
+	return "startup reconcile: " + msg, inStep, err
 }
+
+// proxyCompareOutcome is what a proxy compare that found dss, and sent by
+// scheme ("" for nothing sent), reports: whether the parent is known to hold
+// the whole delegation (inStepAfter), or errDelegationNotAllRead when the
+// compare could not read all of it, so that it is retried. A send by NOTIFY
+// marks the parent as possibly lacking it (noteDelegationSyncSentBy).
+func (zd *ZoneData) proxyCompareOutcome(dss DelegationSyncStatus, scheme string) (inStep bool, err error) {
+	zd.noteDelegationSyncSentBy(scheme)
+	if !dss.Complete() {
+		return false, fmt.Errorf("%w: %v", errDelegationNotAllRead, dss.Unread)
+	}
+	return dss.inStepAfter(scheme), nil
+}
+
+// errDelegationNotAllRead says a compare could not read all of the parent's
+// delegation (DelegationSyncStatus.Unread): whatever it found, it must run
+// again, like a compare that failed.
+var errDelegationNotAllRead = errors.New("the parent's delegation was not all read")
 
 // ProxyDelegationSync is the steady-state dispatcher: on a detected change it
 // forwards to the parent over whichever transport is actually usable.
@@ -683,12 +712,19 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 // returns "nothing forwarded" with a nil error -- but nothing was sent, and a
 // caller counting successes must not count it.
 func (zd *ZoneData) ProxyDelegationSync(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, imr *Imr, analysis *ProxyDelegationAnalysis) (msg string, forwarded bool, err error) {
+	msg, scheme, err := zd.proxyDelegationSyncVia(ctx, kdb, notifyq, imr, analysis)
+	return msg, scheme != "", err
+}
+
+// proxyDelegationSyncVia is ProxyDelegationSync that returns the scheme that
+// forwarded the change ("" for none) in place of forwarded.
+func (zd *ZoneData) proxyDelegationSyncVia(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, imr *Imr,
+	analysis *ProxyDelegationAnalysis) (msg string, scheme string, err error) {
 	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr, SyncRoleProxy)
 	if err != nil {
-		return "", false, fmt.Errorf("ProxyDelegationSync: %w", err)
+		return "", "", fmt.Errorf("ProxyDelegationSync: %w", err)
 	}
-	msg, err = zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis, nil)
-	return msg, err == nil && plan.Usable(), err
+	return zd.syncWithParentVia(ctx, kdb, notifyq, imr, plan, analysis, nil)
 }
 
 // proxyUpdateMode returns the parent-update form for the proxy: the operator's
@@ -729,6 +765,13 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
 			if aerr != nil {
 				return "", fmt.Errorf("ProxyUpdateParent: analyse delegation (delta): %w", aerr)
 			}
+		}
+		// A difference from an analysis that could not read all of the
+		// parent's delegation is not sent, and nor is "in sync" taken from
+		// it: either would report an UPDATE that brought the parent in step
+		// (noteProxySyncForwarded). The error makes the caller look again.
+		if !dss.Complete() {
+			return "", fmt.Errorf("ProxyUpdateParent: delta: %w: %v", errDelegationNotAllRead, dss.Unread)
 		}
 		if dss.InSync {
 			return "delta: parent already in sync; nothing sent", nil

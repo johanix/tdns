@@ -16,10 +16,11 @@
  * crash, a rollover executed against the other server. All 24 now resolve off
  * the command tree instead. See docs/2026-09-07-cli-multi-instance-design.md.
  *
- * The equivalent "agent" and "scanner" sites (parentsync_cmds.go,
- * agent_zone_cmds.go, scanner_cmds.go) are untouched: those daemons have no
- * per-instance tree factory yet, so their role is still correct by
- * construction. They become the same conversion the day one is wanted.
+ * The agent's sites (agent_zone_cmds.go) have since had the same conversion,
+ * when the agent got a per-instance tree (NewAgentTree). The "scanner" sites
+ * (scanner_cmds.go) are untouched: that daemon has no per-instance tree factory
+ * yet, so their role is still correct by construction. They become the same
+ * conversion the day one is wanted.
  *
  * A closure gets its *cobra.Command for free, so GetApiClientForCmd cannot be
  * forgotten in the way a threaded parameter can. Prefer it in new code.

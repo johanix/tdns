@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -249,15 +250,44 @@ ns1.upd.example.	3600 IN A 192.0.2.1
 func TestProxyStartupReconcileNotReady(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
-	msg, err := zd.ProxyStartupReconcile(context.Background(), kdb, nil, nil)
+	msg, inStep, err := zd.ProxyStartupReconcile(context.Background(), kdb, nil, nil)
 	if err != nil {
 		t.Fatalf("ProxyStartupReconcile (nil imr): unexpected error: %v", err)
+	}
+	if inStep {
+		t.Fatalf("a reconcile that sent nothing (no usable scheme) reported the parent in step: %q", msg)
 	}
 	if !strings.Contains(msg, "no usable scheme") {
 		t.Fatalf("expected a nothing-usable message, got %q", msg)
 	}
 	if !strings.Contains(msg, "IMR") {
 		t.Fatalf("message does not name the obstacle (no IMR): %q", msg)
+	}
+}
+
+// In delta form, an analysis that could not read all of the parent's
+// delegation is neither sent nor taken as "in sync": either way the proxy sync
+// would record an UPDATE that brought the parent in step, clear the mark and
+// drop an older retry, with the glue never checked. It returns
+// errDelegationNotAllRead, so the caller looks again (CodeRabbit on 9c217184).
+// A complete analysis that finds the parent in sync sends nothing, as before.
+func TestProxyDeltaUpdateNeedsACompleteAnalysis(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	kdb.SetOptions(map[AuthOption]string{AuthOptParentUpdate: UpdateModeDelta})
+	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
+	for _, dss := range []DelegationSyncStatus{
+		{ZoneName: zd.ZoneName, InSync: true, Unread: []string{"ns1 A"}},
+		{ZoneName: zd.ZoneName, Unread: []string{"ns1 A"}},
+	} {
+		msg, err := zd.ProxyUpdateParent(context.Background(), kdb, nil, nil, &dss, nil)
+		if !errors.Is(err, errDelegationNotAllRead) {
+			t.Errorf("in sync %v with %q unread: %q, %v; want errDelegationNotAllRead", dss.InSync, dss.Unread, msg, err)
+		}
+	}
+	msg, err := zd.ProxyUpdateParent(context.Background(), kdb, nil, nil,
+		&DelegationSyncStatus{ZoneName: zd.ZoneName, InSync: true}, nil)
+	if err != nil || !strings.Contains(msg, "nothing sent") {
+		t.Errorf("a complete analysis in sync: %q, %v; want nothing sent", msg, err)
 	}
 }
 
