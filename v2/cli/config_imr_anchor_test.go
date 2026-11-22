@@ -8,12 +8,14 @@ import (
 	"testing"
 
 	"github.com/johanix/tdns/v2"
+	"github.com/johanix/tdns/v2/cache"
 )
 
 // `config check` says which trust anchor the resolver will use: the compiled-in
 // IANA root anchor when none is configured and the root hints are the
-// compiled-in ones, and none -- a failure, with validation on -- when the root
-// may be a private one.
+// compiled-in ones, and, when the root may be another one (a hints file, a
+// forward or a stub for "."), a warning with validation on: the resolver
+// decides at start, from the keys the root serves, and a check cannot.
 func TestConfigCheckImrTrustAnchors(t *testing.T) {
 	const g = "Trust anchors"
 	off := false
@@ -27,10 +29,13 @@ func TestConfigCheckImrTrustAnchors(t *testing.T) {
 			c.Imr.TrustAnchorDS = ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
 		}, ccPASS, "is configured"},
 		{"nothing set", func(*tdns.Config) {}, ccPASS, "compiled-in IANA root anchor is used"},
-		{"root-hints file", func(c *tdns.Config) { c.Imr.RootHints = "/etc/tdns/root.hints" }, ccFAIL, "root-hints is set"},
+		{"root-hints file", func(c *tdns.Config) { c.Imr.RootHints = "/etc/tdns/root.hints" }, ccWARN, "root-hints is set"},
 		{"forwarded root", func(c *tdns.Config) {
 			c.Imr.Forward = []tdns.ImrForwardConf{{Zone: ".", Upstreams: []tdns.ImrUpstreamConf{{Addr: "192.0.2.53"}}}}
-		}, ccFAIL, "root is forwarded"},
+		}, ccWARN, "root is forwarded"},
+		{"stubbed root", func(c *tdns.Config) {
+			c.Imr.Stubs = []tdns.ImrStubConf{{Zone: ".", Servers: []cache.AuthServer{{Name: "a.root.test.", Addrs: []string{"192.0.2.1"}}}}}
+		}, ccWARN, "root is a stub zone"},
 		{"root-hints file, validation not enforced", func(c *tdns.Config) {
 			c.Imr.RootHints = "/etc/tdns/root.hints"
 			c.Imr.RequireDnssecValidation = &off

@@ -96,6 +96,9 @@ type Imr struct {
 	// anchorNotice says once which root anchor an anchorless config gets
 	// (parseTrustAnchorsFromConfig): NewImr and Start both read the anchors.
 	anchorNotice sync.Once
+	// anchorKeysFetch replaces the network fetch of an anchor zone's DNSKEY
+	// RRset (fetchAnchorKeys). Tests only: nil in every real resolver.
+	anchorKeysFetch func(ctx context.Context, anchorName string) (*core.RRset, map[string]*cache.AuthServer, string, error)
 	// errorRegistry is where the IMR reports the Config/ImrForward* and
 	// Upstream/ImrForward server errors it owns (ImrOptions.Errors), set at
 	// init. In the daemon it is the daemon-wide ServerErrorRegistry. NewImr
@@ -2204,7 +2207,10 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 // trust-anchor-ds and trust-anchor-dnskey may each hold several records, one
 // per line (a YAML block scalar), and trust-anchor-file any number. When the
 // config names no anchor at all, the compiled-in IANA root anchor is used if
-// the root is the IANA root, and no anchor otherwise (RootAnchorFallback).
+// the root is the IANA root as far as the config can tell (RootAnchorFallback).
+// Where the config may lead to another root (a root-hints file, a forward or a
+// stub for "."), nothing is returned: initializeImrTrustAnchors decides, from
+// the keys that root serves (rootAnchorByProbe).
 //
 // NewImr (loadConfiguredTrustAnchors) and Start (initializeImrTrustAnchors)
 // both read the anchors through here, so they cannot disagree about them.
@@ -2219,14 +2225,18 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic ImrEngineConf) (map[string][]*dns
 	if !ic.AnchorConfigured() {
 		use, why := ic.RootAnchorFallback()
 		if !use {
+			// Not decided here: whether the root is the IANA root is a fact
+			// about the keys it serves, not about how the config reaches it.
+			// initializeImrTrustAnchors fetches them and uses the compiled-in
+			// anchor if they match it (rootAnchorByProbe).
 			imr.anchorNotice.Do(func() {
-				lgImr.Warn("no trust anchor configured, and the root may not be the IANA root, so the compiled-in"+
-					" root anchor is not used: nothing will validate (answers are Indeterminate)."+
-					" Configure trust-anchor-ds or trust-anchor-file for the root in use", "reason", why)
+				lgImr.Info("no trust anchor configured, and the root may not be the IANA root:"+
+					" the compiled-in IANA root anchor is used if the keys the root serves match it,"+
+					" which is checked once the root has been fetched", "reason", why)
 			})
 			return dsByName, dnskeysByName, nil
 		}
-		dss, keys, err := compiledInRootAnchors()
+		dss, keys, err := rootAnchorSource()
 		if err != nil {
 			return nil, nil, err
 		}
@@ -2615,6 +2625,44 @@ func (imr *Imr) validateNSRRsetForAnchor(ctx context.Context, anchorName string,
 	}
 }
 
+// fetchAnchorKeys fetches the DNSKEY RRset of an anchor zone, from the servers
+// the resolver would ask for it: the zone's own, or the root's when none are
+// known yet. It returns them with the server map used and the zone that map
+// serves (both nil and "" when the zone is forwarded or hosted here, which
+// need no servers).
+//
+// processTrustAnchorZone fetches the keys it validates this way, and so does
+// the root probe (rootAnchorByProbe), which asks the root exactly as
+// resolution will.
+func (imr *Imr) fetchAnchorKeys(ctx context.Context, anchorName string) (*core.RRset, map[string]*cache.AuthServer, string, error) {
+	if imr.anchorKeysFetch != nil {
+		return imr.anchorKeysFetch(ctx, anchorName)
+	}
+	var serverMap map[string]*cache.AuthServer
+	var serversZone string // the zone serverMap serves
+	if imr.ownZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil && imr.forwardZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil {
+		var ok bool
+		serversZone = anchorName
+		serverMap, ok = imr.Cache.ServerMapCopy(anchorName)
+		if !ok || len(serverMap) == 0 {
+			// fallback to root servers if we do not have a server mapping for this name yet
+			serversZone = "."
+			serverMap, ok = imr.Cache.ServerMapCopy(".")
+			if !ok || len(serverMap) == 0 {
+				return nil, nil, "", fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
+			}
+		}
+	}
+	rrset, _, _, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), anchorName, dns.TypeDNSKEY, serverMap, serversZone, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("failed to fetch %s DNSKEY: %v", anchorName, err)
+	}
+	if rrset == nil || len(rrset.RRs) == 0 {
+		return nil, nil, "", noAnchorKeysError{zone: anchorName}
+	}
+	return rrset, serverMap, serversZone, nil
+}
+
 // processTrustAnchorZone processes a single trust anchor zone: fetches, validates, and caches DNSKEY and NS RRsets.
 func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, dsByName map[string][]*dns.DS, dnskeysByName map[string][]*dns.DNSKEY) error {
 	lgImr.Info("processing trust anchor zone", "zone", anchorName)
@@ -2631,27 +2679,9 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 	// does an anchor zone this server is authoritative for, which
 	// IterativeDNSQuery answers from the zone (#842). Otherwise use the
 	// current known servers.
-	var serverMap map[string]*cache.AuthServer
-	var serversZone string // the zone serverMap serves
-	if imr.ownZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil && imr.forwardZoneForQuestion(anchorName, dns.TypeDNSKEY) == nil {
-		var ok bool
-		serversZone = anchorName
-		serverMap, ok = imr.Cache.ServerMapCopy(anchorName)
-		if !ok || len(serverMap) == 0 {
-			// fallback to root servers if we do not have a server mapping for this name yet
-			serversZone = "."
-			serverMap, ok = imr.Cache.ServerMapCopy(".")
-			if !ok || len(serverMap) == 0 {
-				return fmt.Errorf("no known servers for %q to fetch DNSKEY", anchorName)
-			}
-		}
-	}
-	rrset, _, _, _, err := imr.IterativeDNSQueryInZone(withOwnTraffic(ctx), anchorName, dns.TypeDNSKEY, serverMap, serversZone, true, edns0.PrivacyNone) // privacy is a client signal; trust-anchor init is our own traffic
+	rrset, serverMap, serversZone, err := imr.fetchAnchorKeys(ctx, anchorName)
 	if err != nil {
-		return fmt.Errorf("failed to fetch %s DNSKEY: %v", anchorName, err)
-	}
-	if rrset == nil || len(rrset.RRs) == 0 {
-		return fmt.Errorf("no %s DNSKEY RRset found", anchorName)
+		return err
 	}
 
 	minTTL := cache.GetMinTTL(rrset.RRs)
@@ -2697,7 +2727,8 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 //   - DS/DNSKEY strings (one RR or several, one per line)
 //   - trust-anchor-file (multiple lines)
 //   - with none of those, the compiled-in IANA root anchor, if the root is the
-//     IANA root (RootAnchorFallback)
+//     IANA root (RootAnchorFallback), or, where the config may lead to another
+//     root, if the keys the root serves match it (rootAnchorByProbe)
 //
 // For each anchored name, it loads direct DNSKEY TAs (trusted), matches DS→DNSKEY(s),
 // validates the anchored DNSKEY RRset and then validates the NS RRset for that name.
@@ -2706,6 +2737,18 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, ic ImrEngineConf)
 	dsByName, dnskeysByName, err := imr.parseTrustAnchorsFromConfig(ic)
 	if err != nil {
 		return err
+	}
+	// No anchor configured and a root that may not be the IANA root: the
+	// compiled-in anchor is used if that root serves the IANA root's keys. A
+	// stub or a forward for "." that leads to a real root is still the real
+	// root, and its keys are validated by the anchor like any other.
+	if len(dsByName) == 0 && len(dnskeysByName) == 0 {
+		if probe, why := ic.RootAnchorProbe(); probe {
+			for _, ds := range imr.rootAnchorByProbe(ctx, why) {
+				name := anchorZone(ds.Hdr.Name)
+				dsByName[name] = append(dsByName[name], ds)
+			}
+		}
 	}
 	// No anchor configured, and the compiled-in one not used: nothing to do.
 	if len(dsByName) == 0 && len(dnskeysByName) == 0 {

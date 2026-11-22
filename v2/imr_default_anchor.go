@@ -19,14 +19,18 @@ import (
 // trust-anchor-file used to load no anchor at all, and so validated nothing:
 // every answer Indeterminate, the root's own included, and nothing said so.
 // It now uses the IANA root anchor compiled into the binary
-// (cache.CompiledInRootTrustAnchor), as dog already did -- but only where the
-// root it reaches is the IANA root, as far as the config can tell.
+// (cache.CompiledInRootTrustAnchor), as dog already did -- where the root it
+// reaches is the IANA root.
 //
 // A private root (test labs run their own) is reached through a root-hints
 // file, a forward for "." or a stub for ".". Against such a root the IANA
-// anchor makes every signed answer Bogus instead of Indeterminate, so with any
-// of the three and no anchor configured the resolver keeps the old behaviour,
-// and says that nothing will validate.
+// anchor would make every signed answer Bogus instead of Indeterminate. But
+// the three are also how the IANA root is reached by hand (a stub for "." that
+// names b.root-servers.net), and the config cannot tell the two apart. So
+// with any of the three and no anchor configured, the resolver asks the root:
+// it fetches its DNSKEY RRset and uses the compiled-in anchor if the keys
+// match it (imr_root_anchor_probe.go). A root that does not match gets no
+// anchor, as before, and a warning that nothing will validate.
 
 // AnchorConfigured reports whether the config names a trust anchor of its own,
 // in any of the three forms.
@@ -66,10 +70,24 @@ func (ic *ImrEngineConf) NonDefaultRoot() string {
 	return ""
 }
 
+// RootAnchorProbe reports whether the compiled-in IANA root anchor is up to the
+// root's keys: the config names no anchor, and the root may not be the IANA
+// root (NonDefaultRoot says how it is reached). The resolver then fetches the
+// root's DNSKEY RRset and uses the anchor if the keys match
+// (rootAnchorByProbe).
+func (ic *ImrEngineConf) RootAnchorProbe() (probe bool, why string) {
+	if ic.AnchorConfigured() {
+		return false, ""
+	}
+	why = ic.NonDefaultRoot()
+	return why != "", why
+}
+
 // RootAnchorFallback reports whether the resolver uses the compiled-in IANA
-// root anchor: when the config names no anchor, and the root is the IANA root
-// (NonDefaultRoot is ""). When the config names no anchor and the root may be
-// a private one, why says how; the resolver then has no anchor at all.
+// root anchor without asking the root: when the config names no anchor, and
+// the root is the IANA root as far as the config can tell (NonDefaultRoot is
+// ""). When the config names no anchor and the root may be another one, why
+// says how it is reached, and the choice is the root's (RootAnchorProbe).
 func (ic *ImrEngineConf) RootAnchorFallback() (use bool, why string) {
 	if ic.AnchorConfigured() {
 		return false, ""

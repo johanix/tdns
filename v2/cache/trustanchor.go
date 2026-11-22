@@ -17,10 +17,12 @@ import (
 //
 //   - the IMR, when its config names no trust anchor (none of
 //     trust-anchor-ds, trust-anchor-dnskey, trust-anchor-file) and the
-//     root it reaches is the IANA root: the compiled-in root hints, and
-//     the root neither forwarded nor stubbed. With a root-hints file or a
+//     root it reaches is the IANA root: at once with the compiled-in root
+//     hints and the root neither forwarded nor stubbed (ImrEngineConf.
+//     RootAnchorFallback in the tdns package). With a root-hints file or a
 //     "." forward or stub the root may be a private one, and the IMR uses
-//     no anchor (ImrEngineConf.RootAnchorFallback in the tdns package).
+//     the anchor if the keys that root serves match it, and none if not
+//     (ImrEngineConf.RootAnchorProbe).
 //   - dog +sigchase, when neither --trust-anchor nor the IMR config names
 //     an anchor (LoadDefaultTrustAnchors).
 //
