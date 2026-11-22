@@ -52,7 +52,7 @@ func redirectedServerTo(name, addr string, t core.Transport, target string) *cac
 	token := map[core.Transport]string{core.TransportDoT: "dot", core.TransportDo53: "udp"}[t]
 	installTransportMap(server, map[string]uint8{token: 30}, map[core.Transport]uint16{t: 1234},
 		map[core.Transport]string{t: target}, cache.SignalViaLookup,
-		[]cache.SignalHop{{Owner: "_dns." + name, State: cache.ValidationStateSecure}})
+		[]cache.SignalHop{{Owner: "_dns." + name, State: cache.ValidationStateSecure}}, notConfigured)
 	return server
 }
 
@@ -167,7 +167,7 @@ func TestATargetNamedLikeANameserverKeepsSeparateState(t *testing.T) {
 	ns.SetAddrs([]string{"192.0.2.53"})
 	installTransportMap(ns, map[string]uint8{"dot": 50}, map[core.Transport]uint16{core.TransportDoT: 9853},
 		map[core.Transport]string{core.TransportDoT: "elsewhere.example."}, cache.SignalViaLookup,
-		[]cache.SignalHop{{Owner: "_dns." + dotTarget, State: cache.ValidationStateSecure}})
+		[]cache.SignalHop{{Owner: "_dns." + dotTarget, State: cache.ValidationStateSecure}}, notConfigured)
 	ns.RecordEndpointAddrFailure("192.0.2.53", 0, core.TransportDoT, errors.New("i/o timeout"))
 	redirecting := redirectedServer("ns.redirecting.example.", "192.0.2.1")
 	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
@@ -733,7 +733,7 @@ func TestAStrictPassDoesNotWaitForAUdpTarget(t *testing.T) {
 	server.SetAddrs([]string{"192.0.2.1"})
 	installTransportMap(server, map[string]uint8{"dot": 30, "udp": 10}, map[core.Transport]uint16{core.TransportDo53: 1234},
 		map[core.Transport]string{core.TransportDo53: udpTarget}, cache.SignalViaLookup,
-		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}}, notConfigured)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 	saved := endpointAddrLookupHook
@@ -1054,7 +1054,7 @@ func TestAnExtraPassDoesNotRedialAnEndpointTriedBefore(t *testing.T) {
 	}
 	// The signal now sends DoT to the nameserver's own address again.
 	installTransportMap(server, map[string]uint8{"dot": 30}, nil, nil, cache.SignalViaLookup,
-		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}}, notConfigured)
 
 	_, _, _, _, err := imr.tryServer(ctx, server, sel.zone, "192.0.2.1", core.TransportDoT, q, "example.", dns.TypeA, false, cache.ClassNone, attemptSelection{family: sel.tuples[0].Family, tried: sel.tried})
 	var triedErr errEndpointTried

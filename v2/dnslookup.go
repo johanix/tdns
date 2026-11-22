@@ -2619,6 +2619,9 @@ type svcbSignalSet struct {
 	// when it was read (decideAdditionalPath, followLookupAlias). It is what
 	// the alias delegates the signal to.
 	final *svcbSignalSet
+	// hop is the lookup of the hop followLookupAlias stopped at, the cache
+	// not holding it, when that lookup is in flight.
+	hop *hopWait
 }
 
 // add collects one SVCB of the set's RRset. All three paths a signal arrives
@@ -2968,9 +2971,11 @@ func (imr *Imr) collectSVCBSignal(pending map[string]*svcbSignalSet, serverName 
 // replaces the whole previous signal, ports included: the combined oots
 // records, or the combined ALPN-only records when no record carried oots. A
 // set that held an AliasMode record installs nothing. It reports whether a
-// signal was installed and whether the set had oots records. Promotion and
-// the follow-up lookups are the caller's.
-func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) (installed, oots bool) {
+// signal was installed and whether the set had oots records. guard says,
+// under the server's lock, whether the signal may replace the one the server
+// holds (cache.AuthServer.SetTransportSignalIf). Promotion and the follow-up
+// lookups are the caller's.
+func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet, guard signalGuard) (installed, oots bool) {
 	if server == nil || set == nil {
 		return false, false
 	}
@@ -2985,7 +2990,7 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 				lgDns.Debug("SVCB signal through an AliasMode record", "servername", server.Name,
 					"via", set.via, "state", pathState, "path", pathText)
 			}
-			installed, oots = imr.installSVCBSignal(server, set.final)
+			installed, oots = imr.installSVCBSignal(server, set.final, guard)
 			if set.final.awaitsLookup {
 				set.awaitsLookup = true
 			}
@@ -3005,7 +3010,7 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 			lgDns.Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports,
 				"targets", targets, "via", set.via, "state", pathState, "path", pathText)
 		}
-		return installTransportMap(server, raw, ports, targets, set.via, set.pathCopy()), true
+		return installTransportMap(server, raw, ports, targets, set.via, set.pathCopy(), guard), true
 	}
 	if len(alpnRecs) > 0 {
 		_, ports, targets := combineOOTSEndpoints(alpnRecs)
@@ -3014,7 +3019,7 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 			lgDns.Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports,
 				"targets", targets, "via", set.via, "state", pathState, "path", pathText)
 		}
-		return installAlpnSignal(server, order, ports, targets, set.via, set.pathCopy()), false
+		return installAlpnSignal(server, order, ports, targets, set.via, set.pathCopy(), guard), false
 	}
 	return false, false
 }
@@ -3023,7 +3028,7 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 // section. After an oots signal it promotes the server to opportunistic and
 // repeats the observation lookups.
 func (imr *Imr) applySVCBSignalSet(ctx context.Context, server *cache.AuthServer, set *svcbSignalSet) {
-	installed, oots := imr.installSVCBSignal(server, set)
+	installed, oots := imr.installSVCBSignal(server, set, notConfigured)
 	if set != nil && set.awaitsLookup && server != nil {
 		if owner := transportOwnerForNS(server.Name); owner != "" {
 			imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonVerify)
@@ -3781,6 +3786,12 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 // them is not applied. Returns true if at least one transport entry was
 // applied.
 func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string) bool {
+	return imr.installTransportString(server, s, notConfigured)
+}
+
+// installTransportString is applyTransportSignalToServer under guard
+// (installTransportMap).
+func (imr *Imr) installTransportString(server *cache.AuthServer, s string, guard signalGuard) bool {
 	if server == nil || s == "" {
 		return false
 	}
@@ -3789,7 +3800,7 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 		lgDns.Debug("applyTransportSignalToServer: invalid transport string for :", "name", server.Name, "s", s, "q", err)
 		return false
 	}
-	return applyTransportMapToServer(server, kvMap)
+	return installTransportMap(server, kvMap, nil, nil, "", nil, guard)
 }
 
 // applyTransportMapToServer installs a decoded weight map on server, keeping
@@ -3825,15 +3836,17 @@ func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8)
 // oots rule assigned. A nil or empty ports map clears any port the previous
 // signal had stored: the new signal replaces the whole set.
 func applyTransportMapWithPorts(server *cache.AuthServer, kvMap map[string]uint8, ports map[core.Transport]uint16) bool {
-	return installTransportMap(server, kvMap, ports, nil, "", nil)
+	return installTransportMap(server, kvMap, ports, nil, "", nil, notConfigured)
 }
 
 // installTransportMap is applyTransportMapWithPorts for a signal read from an
 // SVCB RRset, with the targets its validated records assigned, where it
 // arrived and the validation state of its path, which are stored with it
-// (ReceivedSignal.Targets, ReceivedSignal.Via, ReceivedSignal.Path).
+// (ReceivedSignal.Targets, ReceivedSignal.Via, ReceivedSignal.Path). It
+// installs only where guard, called under the server's lock with the signal
+// the server holds, allows it, and reports whether it did.
 func installTransportMap(server *cache.AuthServer, kvMap map[string]uint8, ports map[core.Transport]uint16, targets map[core.Transport]string,
-	via string, path []cache.SignalHop) bool {
+	via string, path []cache.SignalHop, guard signalGuard) bool {
 	if server == nil || kvMap == nil {
 		return false
 	}
@@ -3855,8 +3868,7 @@ func installTransportMap(server *cache.AuthServer, kvMap map[string]uint8, ports
 	if len(weights) == 0 {
 		return false
 	}
-	server.SetTransportSignal(transports, alpnOrder, weights, received)
-	return true
+	return server.SetTransportSignalIf(guard, transports, alpnOrder, weights, received)
 }
 
 // signalSelection maps a signal's weights, the do53 shorthand expanded, to
@@ -3905,14 +3917,14 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) bool {
 // do53 is the shorthand for udp and tcp, as in oots. It reports whether a
 // signal was applied.
 func applyAlpnSignalWithPorts(server *cache.AuthServer, tokens []string, ports map[core.Transport]uint16) bool {
-	return installAlpnSignal(server, tokens, ports, nil, "", nil)
+	return installAlpnSignal(server, tokens, ports, nil, "", nil, notConfigured)
 }
 
 // installAlpnSignal is applyAlpnSignalWithPorts with the targets, where the
 // signal arrived and the validation state of its path, as installTransportMap
-// stores them.
+// stores them, under guard as installTransportMap installs.
 func installAlpnSignal(server *cache.AuthServer, tokens []string, ports map[core.Transport]uint16, targets map[core.Transport]string,
-	via string, path []cache.SignalHop) bool {
+	via string, path []cache.SignalHop, guard signalGuard) bool {
 	if server == nil {
 		return false
 	}
@@ -3947,8 +3959,7 @@ func installAlpnSignal(server *cache.AuthServer, tokens []string, ports map[core
 	}
 	received := &cache.ReceivedSignal{Source: "alpn", Weights: maps.Clone(weights), Ports: cache.DialPorts(ports),
 		Targets: targets, Via: via, Path: path}
-	server.SetTransportSignal(transports, order, weights, received)
-	return true
+	return server.SetTransportSignalIf(guard, transports, order, weights, received)
 }
 
 // parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section.
@@ -4024,26 +4035,51 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 }
 
 // applyTransportRRsetWalk is applyTransportRRsetFromAnswer, with walk for how
-// an AliasMode record in rrset is followed (followLookupAlias).
+// an AliasMode record in rrset is followed (followLookupAlias). The signal
+// replaces whatever each server holds, except a stub's configured transports
+// (notConfigured).
 func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *core.RRset, vstate cache.ValidationState, also ...*cache.AuthServer) {
-	if imr.Cache == nil || rrset == nil || len(rrset.RRs) == 0 {
-		return
+	imr.installTransportRRset(walk, qname, rrset, vstate, notConfigured, also...)
+}
+
+// rrsetInstall is what installTransportRRset found the signal RRset to lead
+// to.
+type rrsetInstall struct {
+	// signal reports that the RRset gives a signal: its own records, or the
+	// RRset its alias path ends at. Each server took it, or kept what it held
+	// where the guard said so.
+	signal bool
+	// hop is the lookup of the alias hop the RRset's path stopped at, when
+	// one is in flight: once it ends, the alias may lead to a signal.
+	hop *hopWait
+}
+
+// installTransportRRset installs the transport signal rrset, an answer for
+// qname (_dns.<nameserver>), on that nameserver's servers in the cache's zone
+// server maps and on those of also, under guard (installSVCBSignal). With
+// transport signals turned off it installs nothing: the RRset is an answer
+// like any other, cached and returned, but no signal.
+func (imr *Imr) installTransportRRset(walk aliasWalk, qname string, rrset *core.RRset, vstate cache.ValidationState, guard signalGuard, also ...*cache.AuthServer) rrsetInstall {
+	if imr.Cache == nil || rrset == nil || len(rrset.RRs) == 0 || imr.Options[ImrOptUseTransportSignals] == "false" {
+		return rrsetInstall{}
 	}
 	owner := dns.Fqdn(qname)
 	if !strings.HasPrefix(core.CanonicalizeName(owner), oobTransportPrefix) {
-		return
+		return rrsetInstall{}
 	}
 	// Sliced, not TrimPrefix'd: see parseOwnerName.
 	base := owner[len(oobTransportPrefix):]
 	if base == "" {
-		return
+		return rrsetInstall{}
 	}
 	targetMode := cache.ConnModeOpportunistic
 	if vstate == cache.ValidationStateSecure {
 		targetMode = cache.ConnModeValidated
 	}
+	var found rrsetInstall
 	set := &svcbSignalSet{}
-	if rrset.RRtype == dns.TypeSVCB {
+	switch rrset.RRtype {
+	case dns.TypeSVCB:
 		for _, rr := range rrset.RRs {
 			if svcb, ok := rr.(*dns.SVCB); ok {
 				set.add(svcb)
@@ -4051,6 +4087,12 @@ func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *cor
 		}
 		set.decideLookupPath(vstate)
 		imr.followLookupAlias(set, walk)
+		found.signal = !set.alias || (set.final != nil && !set.final.alias)
+		found.hop = set.hop
+	case core.TypeTSYNC:
+		found.signal = true
+	default:
+		return rrsetInstall{}
 	}
 	// The shared instance of a nameserver is listed under every zone it
 	// serves: it takes the signal once, and its ignored redirects count once.
@@ -4084,20 +4126,18 @@ func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *cor
 					}
 				}
 			}
-			applied, _ = imr.installSVCBSignal(server, set)
+			applied, _ = imr.installSVCBSignal(server, set, guard)
 		case core.TypeTSYNC:
 			for _, rr := range rrset.RRs {
 				if priv, ok := rr.(*dns.PrivateRR); ok {
 					if ts, ok := priv.Data.(*core.TSYNC); ok && ts != nil && ts.Transports != "" {
 						val := strings.TrimPrefix(ts.Transports, "transport=")
-						if imr.applyTransportSignalToServer(server, val) {
+						if imr.installTransportString(server, val, guard) {
 							applied = true
 						}
 					}
 				}
 			}
-		default:
-			continue
 		}
 		if applied {
 			// server is the shared instance, updated in place. Storing sm
@@ -4105,6 +4145,39 @@ func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *cor
 			// had just replaced.
 			server.PromoteConnMode(targetMode)
 		}
+	}
+	return found
+}
+
+// signalGuard says, under a server's lock, whether a signal may replace the
+// one the server holds (cache.AuthServer.SetTransportSignalIf).
+type signalGuard func(cache.HeldSignal) bool
+
+// notConfigured is the rule every received signal is installed under: it
+// never replaces a stub's configured transports. A stub's private instance
+// of a nameserver is listed in the zone server maps like any other, and a
+// signal for that name reaches every instance listed.
+func notConfigured(held cache.HeldSignal) bool {
+	return !held.Configured()
+}
+
+// stillNeedsSignal is the rule a cached signal is replayed under
+// (applyCachedTransportSignal): only onto a server that, when the install
+// takes its lock, has signalled nothing, whatever weights it holds (a stub
+// configured with no transports holds default ones), or holds a signal whose
+// path was not decided, one an Additional section could not validate and
+// that waits for the verifying lookup, whose answer is what the cache holds.
+// A signal installed after the replay read the cache stays, and so does a
+// stub's configured one.
+func stillNeedsSignal(held cache.HeldSignal) bool {
+	switch {
+	case held.Configured():
+		return false
+	case held.Received == nil || len(held.Weights) == 0:
+		return true
+	default:
+		return len(held.Received.Path) > 0 &&
+			cache.SignalPathState(held.Received.Path) == cache.SignalStateUnknown
 	}
 }
 

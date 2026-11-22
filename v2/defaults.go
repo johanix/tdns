@@ -11,7 +11,12 @@ const (
 	// Legacy constants for backward compatibility
 	// New code should use GetDefaultConfigFile() instead
 	DefaultCliCfgFile = "/etc/tdns/tdns-cli.yaml"
-	DefaultImrCfgFile = "/etc/tdns/tdns-imr.yaml"
+	// DefaultNcliCfgFile is tdns-ncli's own CLI config. It is deliberately not
+	// tdns-cli's file: only tdns-ncli understands the role: key and the
+	// instances it names. When tdns-ncli replaces tdns-cli, both the binary
+	// name and this file name change.
+	DefaultNcliCfgFile = "/etc/tdns/tdns-ncli.yaml"
+	DefaultImrCfgFile  = "/etc/tdns/tdns-imr.yaml"
 
 	DefaultAuthCfgFile = "/etc/tdns/tdns-auth.yaml"
 

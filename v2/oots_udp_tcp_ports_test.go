@@ -228,7 +228,7 @@ func TestUDPPortConfigReachesTheDial(t *testing.T) {
 		}
 		imr.collectSVCBSignal(pending, pathNS, svcb)
 	}
-	if installed, _ := imr.installSVCBSignal(sm[cache.ServerKey(pathNS)], pending[cache.ServerKey(pathNS)]); !installed {
+	if installed, _ := imr.installSVCBSignal(sm[cache.ServerKey(pathNS)], pending[cache.ServerKey(pathNS)], notConfigured); !installed {
 		t.Fatalf("the published signal %v was not installed", rrs)
 	}
 	for tr, want := range map[core.Transport]string{

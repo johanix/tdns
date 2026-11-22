@@ -151,7 +151,7 @@ func TestAnALPNIdentifierWithACommaStaysOne(t *testing.T) {
 	server := cache.NewAuthServer("ns.alpn.example.")
 	set := &svcbSignalSet{}
 	set.add(rr)
-	newTestImr(t).installSVCBSignal(server, set)
+	newTestImr(t).installSVCBSignal(server, set, notConfigured)
 	if w := server.GetTransportWeights(); w[core.TransportDoT] != 0 {
 		t.Errorf("weights %v: DoT from the identifier x,dot", w)
 	}

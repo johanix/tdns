@@ -53,7 +53,7 @@ func epLameZoneImr(t *testing.T) (*Imr, *cache.AuthServer, *cache.Zone, map[stri
 func redirectTo(server *cache.AuthServer, weights map[string]uint8, t core.Transport, port uint16) {
 	installTransportMap(server, weights, map[core.Transport]uint16{t: port},
 		map[core.Transport]string{t: epLameTarget}, cache.SignalViaLookup,
-		[]cache.SignalHop{{Owner: epLameOwner, State: cache.ValidationStateSecure}})
+		[]cache.SignalHop{{Owner: epLameOwner, State: cache.ValidationStateSecure}}, notConfigured)
 }
 
 func refusedReply(qname string, qtype uint16) *dns.Msg {
