@@ -812,7 +812,10 @@ type ImrUpstreamConf struct {
 }
 
 type ApiServerConf struct {
-	Addresses []string        `validate:"required"` // Must be in addr:port format
+	// Addresses must be in addr:port format. They may be left out when
+	// Socket is set: the local admin socket is served without them (see
+	// APIdispatcher), so a socket-only daemon is a valid config.
+	Addresses []string        `validate:"required_without=Socket"`
 	ApiKey    SensitiveString `validate:"required"`
 	CertFile  string          `validate:"required,file,certkey"`
 	KeyFile   string          `validate:"required,file"`

@@ -77,6 +77,9 @@ process's descriptor and goroutine counts (tdns#443).`,
 					fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
 				}
 			}
+			if line := apiSocketStatusLine(resp); line != "" {
+				fmt.Println(line)
+			}
 			// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
 			// init failed (the Upstream/ImrPriming husk) is precisely a
 			// moment to look at process resources, not to hide them.
@@ -305,7 +308,11 @@ func checkImrTrustAnchors(cfg *tdns.Config, rep *ccReport) {
 func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 	const g = "API server"
 	if len(cfg.ApiServer.Addresses) == 0 {
-		rep.info(g, "addresses", "apiserver.addresses is empty — the management API will not listen (the resolver still runs)")
+		if sock := cfg.ApiServer.Socket; sock != "" {
+			rep.info(g, "addresses", fmt.Sprintf("apiserver.addresses is empty: the management API is served only on the local admin socket %s", sock))
+		} else {
+			rep.info(g, "addresses", "apiserver.addresses is empty — the management API will not listen (the resolver still runs)")
+		}
 		return
 	}
 	rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.ApiServer.Addresses))
