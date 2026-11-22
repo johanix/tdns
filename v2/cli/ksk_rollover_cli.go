@@ -166,7 +166,7 @@ Use --dry-run to print the DS set and the UPDATE without sending.`,
 
 			cfg := viper.ConfigFileUsed()
 			if cfg == "" {
-				cfg = tdns.DefaultCliCfgFile
+				cfg = DefaultCliConfigFile
 			}
 			if err := Conf.MainInit(ctx, cfg); err != nil {
 				log.Fatalf("config init: %v", err)
@@ -260,7 +260,7 @@ or 2s / 60s / 1h when those are unset.
 
 			cfg := viper.ConfigFileUsed()
 			if cfg == "" {
-				cfg = tdns.DefaultCliCfgFile
+				cfg = DefaultCliConfigFile
 			}
 			if err := Conf.MainInit(ctx, cfg); err != nil {
 				log.Fatalf("config init: %v", err)
@@ -368,7 +368,7 @@ func dnssecPolicyForZone(conf *tdns.Config, kdb *tdns.KeyDB, zname string) *tdns
 func openKeystoreForCli() (*tdns.KeyDB, string, *tdns.DnssecPolicy, error) {
 	cfg := viper.ConfigFileUsed()
 	if cfg == "" {
-		cfg = tdns.DefaultCliCfgFile
+		cfg = DefaultCliConfigFile
 	}
 	if err := Conf.MainInit(context.Background(), cfg); err != nil {
 		return nil, "", nil, fmt.Errorf("config init: %w", err)
