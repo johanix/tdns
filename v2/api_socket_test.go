@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // shortTempDir is a 0700 directory with a short path: a unix socket path is
@@ -159,6 +161,45 @@ func TestMainLoopRemovesTheAdminSocket(t *testing.T) {
 			close(late) // Shutdown on an already closed listener
 			cancel()
 		})
+	}
+}
+
+// acceptFails is a listener whose Accept fails for good.
+type acceptFails struct{}
+
+func (acceptFails) Accept() (net.Conn, error) { return nil, errors.New("accept failed for good") }
+func (acceptFails) Close() error              { return nil }
+func (acceptFails) Addr() net.Addr            { return &net.UnixAddr{Name: "fails", Net: "unix"} }
+
+// A socket that stops serving because Accept failed is a failure to log, even
+// though Serve closes the listener on its way out. Only a stop asked for by
+// closeApiSockets is quiet.
+func TestApiSocketServeFailureIsReported(t *testing.T) {
+	ln := &apiSocketListener{Listener: acceptFails{}}
+	err := (&http.Server{}).Serve(ln)
+	if ln.serveFailure(err) == nil {
+		t.Errorf("Serve ended with %v when Accept failed, and it was not reported", err)
+	}
+
+	dir := shortTempDir(t)
+	raw, err := net.Listen("unix", filepath.Join(dir, "stop.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped := &apiSocketListener{Listener: raw}
+	apiSockets.Lock()
+	apiSockets.lns = append(apiSockets.lns, stopped)
+	apiSockets.Unlock()
+	served := make(chan error, 1)
+	go func() { served <- (&http.Server{}).Serve(stopped) }()
+	closeApiSockets()
+	select {
+	case err := <-served:
+		if f := stopped.serveFailure(err); f != nil {
+			t.Errorf("a stop asked for by closeApiSockets was reported as a failure: %v", f)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after closeApiSockets")
 	}
 }
 

@@ -119,17 +119,28 @@ func prepareApiSocket(path string) error {
 // by the server's Shutdown, so only the first close does anything.
 type apiSocketListener struct {
 	net.Listener
-	once   sync.Once
-	closed atomic.Bool
-	err    error
+	once sync.Once
+	err  error
+	// stopping is set by closeApiSockets before it closes the listener. A
+	// close alone does not say the daemon is stopping: Serve also closes
+	// the listener itself when Accept fails for good.
+	stopping atomic.Bool
 }
 
 func (l *apiSocketListener) Close() error {
 	l.once.Do(func() {
-		l.closed.Store(true)
 		l.err = l.Listener.Close()
 	})
 	return l.err
+}
+
+// serveFailure is the error to log when Serve on l returns err, or nil when
+// Serve ended because the daemon is stopping.
+func (l *apiSocketListener) serveFailure(err error) error {
+	if err == nil || err == http.ErrServerClosed || l.stopping.Load() {
+		return nil
+	}
+	return err
 }
 
 // apiSockets are the admin sockets this process serves.
@@ -150,6 +161,7 @@ func closeApiSockets() {
 	apiSockets.lns = nil
 	apiSockets.Unlock()
 	for _, l := range lns {
+		l.stopping.Store(true)
 		l.Close()
 	}
 }
@@ -182,8 +194,7 @@ func serveApiSocket(path string, router http.Handler, done <-chan struct{}) erro
 		},
 	}
 	go func() {
-		// A listener closed by closeApiSockets is a stop, not a failure.
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed && !ln.closed.Load() {
+		if err := ln.serveFailure(srv.Serve(ln)); err != nil {
 			lgApi.Error("local admin socket stopped", "socket", path, "err", err)
 		}
 	}()
