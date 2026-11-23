@@ -228,12 +228,24 @@ func xxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 // (the certificate itself comes from certfile/keyfile). A client certificate
 // is asked for, never required: the middleware decides, so key-only clients
 // keep working while the API key is accepted. With an access file the
-// listener is TLS 1.3 only, as the design says. That is fixed at start; an
-// access file a reload adds is held to TLS 1.3 by authenticateApiRequest.
+// listener is TLS 1.3 only, as the design says.
+//
+// MinVersion is fixed when the listener starts, and a reload can add an
+// access file later. So every handshake also asks the running policy:
+// while an access file is in force, a client that does not offer TLS 1.3 is
+// turned away at the handshake. (A client that offers it gets it: the
+// server always picks the highest version both sides have.)
 func apiServerTLSConfig(conf *Config) *tls.Config {
 	c := &tls.Config{ClientAuth: tls.RequestClientCert}
 	if conf.ApiServer.AccessFile != "" {
 		c.MinVersion = tls.VersionTLS13
+	}
+	c.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+		if st := conf.Internal.ApiAccess.load(); st != nil && st.Enabled &&
+			!slices.Contains(hello.SupportedVersions, tls.VersionTLS13) {
+			return nil, fmt.Errorf("the access file requires TLS 1.3 on the management API")
+		}
+		return nil, nil // the config as it is
 	}
 	return c
 }

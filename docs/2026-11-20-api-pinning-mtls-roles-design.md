@@ -645,10 +645,13 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   to key-as-admin, and the reload says so.
 - **TLS.** The TCP listeners always ask for a client certificate (never
   require one); with an access file they are TLS 1.3 only. A listener's
-  minimum is fixed when it starts, so while an access file is in force a
-  request over an older TLS version is refused (403); that covers an access
-  file a reload added. With `usetls: false` and an access file the daemon and
-  `config check` warn, as 3.6 says.
+  MinVersion is fixed when it starts, so every handshake also asks the running
+  policy: while an access file is in force, a client that does not offer TLS
+  1.3 fails the handshake (and a request over older TLS would get 403). That
+  covers an access file a reload added. With `usetls: false` and an access
+  file the daemon and `config check` warn, as 3.6 says.
+- **`daemon start`, `stop`, `restart`** treat a missing socket file like a
+  refused connection: nothing is running (and, while starting, not up yet).
 - **Reloads.** The SIGHUP path (zone reload) re-reads the access file too, so
   a removed or disabled client loses its access without a full config reload.
   A full reload that changes `apiserver.addresses`, `socket`, `usetls` or
