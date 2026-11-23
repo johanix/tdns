@@ -192,7 +192,9 @@ and not in the CLI config.** The owner's rulings:
   is an error the daemon reports and runs on without, as before.
 - **The CLI config does not hold the socket's path.** The socket is root's,
   and root can read the daemon config, so tdns-ncli finds the socket through
-  the entry's `config-file:` each time it builds the client, and uses it when it
+  the entry's `config-file:` when a command first uses the entry (not for every
+  entry at start: that asked every daemon in the CLI config, one round trip
+  each, for a command that uses one), and uses it when it
   answers (admin, no key); otherwise the entry's TCP address. Only when the
   entry's address is one that daemon config lists, or the entry has none: the
   same `config-file:` path exists on every host, so an entry for a daemon
@@ -210,7 +212,9 @@ and not in the CLI config.** The owner's rulings:
   its one line which way it went and as whom, from the daemon's reply (role,
   via and identity, in parts): `pong (admin socket /var/run/tdns/etc_tdns_tdns-auth.yaml.sock)
   from tdns-auth @ host: ...`, `pong (TLS, admin) from ...` for the key,
-  `pong (TLS, read-write, certificate anna) from ...`. An entry tdns-ncli
+  `pong (TLS, read-write, certificate anna) from ...`. With `-v` the line ends
+  in the client the daemon saw: its address over TCP, `admin socket` on the
+  socket (which has no remote address). An entry tdns-ncli
   refuses (no pin) is reported as an error with its fix on lines of its own,
   not as a log line. `config add` writes
   the TCP entry with `config-file:` whoever runs it (no more `unix://` entries,

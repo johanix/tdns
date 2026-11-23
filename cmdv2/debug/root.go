@@ -128,5 +128,5 @@ func apiClientFor(name string) *tdns.ApiClient {
 	if name == "" {
 		return nil
 	}
-	return tdns.Globals.ApiClients[name]
+	return cli.ApiClientByName(name)
 }

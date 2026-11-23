@@ -1194,3 +1194,94 @@ func TestDuplicatePins(t *testing.T) {
 		t.Errorf("two daemons sharing a key: %v", w)
 	}
 }
+
+// A daemon's local admin socket is asked which config it runs when its entry
+// is first used, not when the CLI starts: a command uses one entry, and asking
+// every daemon in the CLI config first cost a round trip each (and printed a
+// status line each under -v).
+func TestSocketCheckedOnFirstUse(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ncli") // short: a socket path has a limit
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	savedDir, savedTCP, savedVerbose := tdns.DefaultApiSocketDir, ForceTCP, tdns.Globals.Verbose
+	savedClients, savedPending, savedConfig := tdns.Globals.ApiClients, socketPending, apiConfig
+	t.Cleanup(func() {
+		tdns.DefaultApiSocketDir, ForceTCP, tdns.Globals.Verbose = savedDir, savedTCP, savedVerbose
+		tdns.Globals.ApiClients, socketPending, apiConfig = savedClients, savedPending, savedConfig
+	})
+	tdns.DefaultApiSocketDir, ForceTCP, tdns.Globals.Verbose = dir, false, true
+	tdns.Globals.ApiClients, socketPending = map[string]*tdns.ApiClient{}, map[string]pendingClient{}
+
+	var mu sync.Mutex
+	asked := map[string]int{}
+	serve := func(cfg, addr string) {
+		writeFile(t, cfg, daemonYAML("", addr, "k", ""))
+		ln, err := net.Listen("unix", tdns.ApiSocketPath("", cfg))
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			asked[cfg]++
+			mu.Unlock()
+			json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: cfg})
+		})}
+		go srv.Serve(ln)
+		t.Cleanup(func() { srv.Close() })
+	}
+	authCfg, imrCfg := filepath.Join(dir, "tdns-auth.yaml"), filepath.Join(dir, "tdns-imr.yaml")
+	serve(authCfg, "127.0.0.1:8989")
+	serve(imrCfg, "127.0.0.1:8085")
+	count := func(cfg string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return asked[cfg]
+	}
+
+	withCleanRoleRegistry(t)
+	RegisterRole("auth", "tdns-auth")
+	RegisterRole("imr", "tdns-imr")
+	conf := &CliConf{ApiServers: []ApiDetails{
+		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", TLSAuth: "pin", Pins: []string{pinOf("a")}, ConfigFile: authCfg},
+		{Name: "tdns-imr", AuthMethod: "none", ConfigFile: imrCfg}, // no baseurl: the socket or nothing
+	}}
+	out := captureStdout(t, func() {
+		if err := InitApiClients(conf); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if n, m := count(authCfg), count(imrCfg); n != 0 || m != 0 {
+		t.Fatalf("at start: %d and %d identity requests, want none", n, m)
+	}
+	// Until first use, code reading the client table directly has the TCP
+	// client; an entry with no TCP address has none yet.
+	if c := tdns.Globals.ApiClients["tdns-auth"]; c == nil || c.Socket != "" {
+		t.Errorf("before use: tdns-auth client %+v, want the TCP one", c)
+	}
+	if c := tdns.Globals.ApiClients["tdns-imr"]; c != nil {
+		t.Errorf("before use: tdns-imr client over %q, want none", c.BaseUrl)
+	}
+
+	out += captureStdout(t, func() {
+		for range 2 {
+			c, err := GetApiClient("auth", false)
+			if err != nil || c.Socket != tdns.ApiSocketPath("", authCfg) {
+				t.Errorf("auth: client %+v, err %v; want the socket", c, err)
+			}
+		}
+	})
+	if n, m := count(authCfg), count(imrCfg); n != 1 || m != 0 {
+		t.Errorf("after two uses of auth: %d and %d identity requests, want 1 and 0", n, m)
+	}
+	if c := ApiClientByName("tdns-imr"); c == nil || c.Socket != tdns.ApiSocketPath("", imrCfg) {
+		t.Errorf("tdns-imr by name: %+v, want the socket", c)
+	}
+	if m := count(imrCfg); m != 1 {
+		t.Errorf("tdns-imr: %d identity requests, want 1", m)
+	}
+	if strings.Contains(out, "Status:") {
+		t.Errorf("the socket check printed under -v: %q", out)
+	}
+}
