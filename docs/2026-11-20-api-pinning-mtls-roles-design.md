@@ -724,7 +724,12 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   (Johan, 2026-11-23: "Stop the listener"), so no client sends its key in
   clear any more; they stay closed until a restart with TLS, the reload and
   `config status` say so, and the socket is still served. (A request that
-  still reaches a plaintext listener is refused, 403, as a backstop.)
+  still reaches a plaintext listener is refused, 403, as a backstop.) The
+  same holds for a reload while the daemon starts: the reload closes the
+  listeners and puts the policy in force under one lock, the dispatcher
+  registers and starts its listeners under the same lock and starts no
+  plaintext one once a policy is in force, and it reads `usetls` once, so
+  a listener is recorded by the transport it started with.
 - **`daemon start`, `stop`, `restart`** treat a missing socket file like a
   refused connection: nothing is running (and, while starting, not up yet).
 - **Reloads.** The SIGHUP path (zone reload) re-reads the access file too, so

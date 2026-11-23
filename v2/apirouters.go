@@ -296,6 +296,31 @@ func registerApiTCPServers(srvs []*http.Server, plaintext bool) {
 	apiTCPServers.srvs, apiTCPServers.plaintext = srvs, plaintext
 }
 
+// activateApiAccess puts an access policy in force (store) after closing the
+// plaintext TCP listeners, both under apiTCPServers' lock, and returns the
+// addresses it closed. APIdispatcher registers and starts its TCP servers
+// under the same lock, and starts no plaintext one once a policy is in force,
+// so a reload while the daemon starts can neither miss a plaintext listener
+// nor be followed by one.
+func activateApiAccess(store func()) []string {
+	apiTCPServers.Lock()
+	defer apiTCPServers.Unlock()
+	addrs := stopPlaintextLocked()
+	store()
+	return addrs
+}
+
+// apiAccessInForce says whether an access policy is in force. Read under
+// apiTCPServers' lock, it cannot change before the lock is released
+// (activateApiAccess).
+func apiAccessInForce(conf *Config) bool {
+	if conf.Internal.ApiAccess == nil {
+		return false
+	}
+	st := conf.Internal.ApiAccess.load()
+	return st != nil && st.Enabled
+}
+
 // stopPlaintextApiListeners closes the TCP management API servers, with their
 // connections, if they speak plaintext, and returns their addresses (nil when
 // there are none, or they speak TLS). An access file requires TLS on TCP, and
@@ -305,6 +330,12 @@ func registerApiTCPServers(srvs []*http.Server, plaintext bool) {
 func stopPlaintextApiListeners() []string {
 	apiTCPServers.Lock()
 	defer apiTCPServers.Unlock()
+	return stopPlaintextLocked()
+}
+
+// stopPlaintextLocked is stopPlaintextApiListeners for a caller that holds
+// apiTCPServers' lock.
+func stopPlaintextLocked() []string {
 	if !apiTCPServers.plaintext || len(apiTCPServers.srvs) == 0 {
 		return nil
 	}
@@ -369,6 +400,9 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	addresses := conf.ApiServer.Addresses
 	certFile := conf.ApiServer.CertFile
 	keyFile := conf.ApiServer.KeyFile
+	// Read once: a reload may change conf.ApiServer while the listeners
+	// start, and a running listener keeps the transport it started with.
+	useTLS := conf.ApiServer.UseTLS
 
 	lgApi.Debug("dispatcher config", "addresses", addresses, "certFile", certFile, "keyFile", keyFile)
 
@@ -381,7 +415,7 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	// An access file requires TLS on TCP (validateAccessSettings refuses
 	// the config). A caller that did not validate still gets no plaintext
 	// TCP API: the listeners stay off, and the socket below is served.
-	if len(addresses) > 0 && conf.ApiServer.AccessFile != "" && !conf.ApiServer.UseTLS {
+	if len(addresses) > 0 && conf.ApiServer.AccessFile != "" && !useTLS {
 		lgApi.Error("management API: TCP listeners NOT started: apiserver.access-file requires TLS and usetls is false; the local admin socket is still served",
 			"addresses", addresses, "access-file", conf.ApiServer.AccessFile)
 		addresses = nil
@@ -414,7 +448,6 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	servers := make([]*http.Server, len(addresses))
 
 	for idx, address := range addresses {
-		idxCopy := idx
 		servers[idx] = &http.Server{
 			Addr:      address,
 			Handler:   router,
@@ -424,24 +457,39 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 			// bodies and slow handlers are legitimate here.
 			ReadHeaderTimeout: 10 * time.Second,
 		}
-
-		go func(srv *http.Server, idx int) {
-			lgApi.Info("starting API dispatcher", "index", idx, "address", srv.Addr)
-			if conf.ApiServer.UseTLS {
-				if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
-					lgApi.Error("ListenAndServeTLS failed", "err", err)
-				}
-			} else {
-				lgApi.Info("serving HTTP", "address", srv.Addr)
-				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					lgApi.Error("ListenAndServe failed", "err", err)
-				}
-			}
-		}(servers[idx], idxCopy)
 	}
-	// So that an access file a reload puts in force can close them if they
-	// are plaintext (stopPlaintextApiListeners).
-	registerApiTCPServers(servers, !conf.ApiServer.UseTLS)
+	serve := func(srv *http.Server, idx int) {
+		lgApi.Info("starting API dispatcher", "index", idx, "address", srv.Addr)
+		if useTLS {
+			if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+				lgApi.Error("ListenAndServeTLS failed", "err", err)
+			}
+		} else {
+			lgApi.Info("serving HTTP", "address", srv.Addr)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				lgApi.Error("ListenAndServe failed", "err", err)
+			}
+		}
+	}
+	// Registered before they start, and under the lock a reload holds while
+	// it puts an access file in force (activateApiAccess), so that the reload
+	// can close them if they are plaintext. A reload that came first has its
+	// policy in force already: plaintext servers are then not started at all.
+	// One that comes after finds them registered. A server closed before its
+	// goroutine runs returns ErrServerClosed from ListenAndServe.
+	apiTCPServers.Lock()
+	if !useTLS && apiAccessInForce(conf) {
+		apiTCPServers.stopped = append(apiTCPServers.stopped, addresses...)
+		apiTCPServers.Unlock()
+		lgApi.Error("management API: plaintext TCP listeners NOT started: an access file came into force while the daemon started, and it requires TLS; restart the daemon with usetls: true to serve TCP (the local admin socket is still served)",
+			"addresses", addresses)
+		return nil
+	}
+	apiTCPServers.srvs, apiTCPServers.plaintext = servers, !useTLS
+	for idx, srv := range servers {
+		go serve(srv, idx)
+	}
+	apiTCPServers.Unlock()
 
 	go func() {
 		<-done
