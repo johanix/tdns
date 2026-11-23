@@ -304,9 +304,14 @@ func resolveAccessTarget(role string) (*accessTarget, error) {
 }
 
 // entryAddressesDaemon says whether entry e reaches the daemon whose API is
-// info: its local socket, or one of its listen addresses on an address of
-// this host (local: loopback, or one of the host's interface addresses). A
-// listen address on the wildcard (0.0.0.0, ::) takes any local address.
+// info: its local socket, or one of its listen addresses at an address of
+// this host (local: loopback, or one of the host's interface addresses).
+//
+// The address must be the one the daemon listens on: 127.0.0.1 and ::1 are
+// two addresses, and another daemon may hold the same port on the other. A
+// listen address on the wildcard (0.0.0.0, ::, or none) takes any local
+// address. "localhost" may be dialled as either loopback address, so it
+// counts only when both reach this daemon.
 func entryAddressesDaemon(e ApiDetails, info *DaemonApi, local func(net.IP) bool) bool {
 	u, err := url.Parse(e.BaseURL)
 	if err != nil {
@@ -319,26 +324,27 @@ func entryAddressesDaemon(e ApiDetails, info *DaemonApi, local func(net.IP) bool
 	if port == "" {
 		return false
 	}
-	var ip net.IP
+	listens := func(ip net.IP) bool {
+		for _, a := range info.Addresses {
+			lh, lp, err := net.SplitHostPort(a)
+			if err != nil || lp != port {
+				continue
+			}
+			lip := net.ParseIP(lh)
+			if lh == "" || (lip != nil && (lip.IsUnspecified() || lip.Equal(ip))) {
+				return true
+			}
+		}
+		return false
+	}
 	if strings.EqualFold(host, "localhost") {
-		ip = net.IPv6loopback
-	} else if ip = net.ParseIP(host); ip == nil || !(ip.IsLoopback() || local(ip)) {
+		return listens(net.IPv4(127, 0, 0, 1)) && listens(net.IPv6loopback)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !(ip.IsLoopback() || local(ip)) {
 		return false // a name other than localhost, or another host's address
 	}
-	for _, a := range info.Addresses {
-		lh, lp, err := net.SplitHostPort(a)
-		if err != nil || lp != port {
-			continue
-		}
-		lip := net.ParseIP(lh)
-		switch {
-		case lh == "" || (lip != nil && lip.IsUnspecified()):
-			return true
-		case lip != nil && (lip.Equal(ip) || (lip.IsLoopback() && ip.IsLoopback())):
-			return true
-		}
-	}
-	return false
+	return listens(ip)
 }
 
 // localHostAddrs is "is this an address of this host", from its interfaces.

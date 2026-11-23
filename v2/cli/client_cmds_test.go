@@ -623,8 +623,13 @@ func TestEntryAddressesDaemon(t *testing.T) {
 		{"unix:///var/run/tdns/tdns-auth.sock", true},
 		{"unix:///var/run/tdns/other.sock", false},
 		{"https://127.0.0.1:8989/api/v1", true},
-		{"https://localhost:8989/api/v1", true},
-		{"https://[::1]:8989/api/v1", true},
+		// 8989 listens on 127.0.0.1 only: ::1 is another address, where
+		// another daemon may hold the port, and localhost may be dialled
+		// as ::1.
+		{"https://[::1]:8989/api/v1", false},
+		{"https://localhost:8989/api/v1", false},
+		{"https://localhost:8990/api/v1", true},   // wildcard: both loopbacks reach it
+		{"https://[::1]:8990/api/v1", true},       // wildcard
 		{"https://192.0.2.10:8990/api/v1", true},  // wildcard listener, this host's address
 		{"https://192.0.2.10:8989/api/v1", false}, // 8989 listens on loopback only
 		{"https://192.0.2.99:8990/api/v1", false}, // another host
