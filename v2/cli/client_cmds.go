@@ -309,9 +309,13 @@ func resolveAccessTarget(role string) (*accessTarget, error) {
 //
 // The address must be the one the daemon listens on: 127.0.0.1 and ::1 are
 // two addresses, and another daemon may hold the same port on the other. A
-// listen address on the wildcard (0.0.0.0, ::, or none) takes any local
-// address. "localhost" may be dialled as either loopback address, so it
-// counts only when both reach this daemon.
+// wildcard listen address takes the local addresses of its own family only:
+// 0.0.0.0 (and an empty host) IPv4, :: IPv6. Whether Go makes a wildcard
+// listener dual-stack depends on the platform (not on NetBSD, where
+// IPV6_V6ONLY is the default), so the narrower reading is the safe one; an
+// entry it refuses can still be given config-file:. "localhost" may be
+// dialled as either loopback address, so it counts only when both reach
+// this daemon.
 func entryAddressesDaemon(e ApiDetails, info *DaemonApi, local func(net.IP) bool) bool {
 	u, err := url.Parse(e.BaseURL)
 	if err != nil {
@@ -331,7 +335,17 @@ func entryAddressesDaemon(e ApiDetails, info *DaemonApi, local func(net.IP) bool
 				continue
 			}
 			lip := net.ParseIP(lh)
-			if lh == "" || (lip != nil && (lip.IsUnspecified() || lip.Equal(ip))) {
+			v4 := ip.To4() != nil
+			switch {
+			case lh == "" || (lip != nil && lip.Equal(net.IPv4zero)):
+				if v4 {
+					return true
+				}
+			case lip != nil && lip.Equal(net.IPv6unspecified):
+				if !v4 {
+					return true
+				}
+			case lip != nil && lip.Equal(ip):
 				return true
 			}
 		}

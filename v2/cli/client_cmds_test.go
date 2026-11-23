@@ -613,9 +613,10 @@ func TestClientInitNamesACustomPair(t *testing.T) {
 // config-file: must address that daemon: its socket, or one of its listen
 // ports on an address of this host. A remote entry is refused.
 func TestEntryAddressesDaemon(t *testing.T) {
-	info := &DaemonApi{Socket: "/var/run/tdns/tdns-auth.sock", Addresses: []string{"127.0.0.1:8989", "0.0.0.0:8990"}}
-	thisHost := net.ParseIP("192.0.2.10")
-	local := func(ip net.IP) bool { return ip.Equal(thisHost) }
+	info := &DaemonApi{Socket: "/var/run/tdns/tdns-auth.sock",
+		Addresses: []string{"127.0.0.1:8989", "0.0.0.0:8990", "[::]:8991", "0.0.0.0:8992", "[::]:8992"}}
+	thisHost, thisHost6 := net.ParseIP("192.0.2.10"), net.ParseIP("2001:db8::10")
+	local := func(ip net.IP) bool { return ip.Equal(thisHost) || ip.Equal(thisHost6) }
 	for _, tc := range []struct {
 		url  string
 		want bool
@@ -628,9 +629,18 @@ func TestEntryAddressesDaemon(t *testing.T) {
 		// as ::1.
 		{"https://[::1]:8989/api/v1", false},
 		{"https://localhost:8989/api/v1", false},
-		{"https://localhost:8990/api/v1", true},   // wildcard: both loopbacks reach it
-		{"https://[::1]:8990/api/v1", true},       // wildcard
-		{"https://192.0.2.10:8990/api/v1", true},  // wildcard listener, this host's address
+		// A wildcard covers its own family only: 0.0.0.0 is IPv4 (on NetBSD
+		// it is not dual-stack, and another daemon may hold [::1]:8990), ::
+		// IPv6. localhost needs both.
+		{"https://[::1]:8990/api/v1", false},
+		{"https://localhost:8990/api/v1", false},
+		{"https://192.0.2.10:8990/api/v1", true}, // IPv4 wildcard, this host's IPv4 address
+		{"https://127.0.0.1:8990/api/v1", true},
+		{"https://[2001:db8::10]:8990/api/v1", false},
+		{"https://[::1]:8991/api/v1", true}, // IPv6 wildcard
+		{"https://[2001:db8::10]:8991/api/v1", true},
+		{"https://127.0.0.1:8991/api/v1", false},
+		{"https://localhost:8992/api/v1", true},   // both wildcards: both loopbacks reach it
 		{"https://192.0.2.10:8989/api/v1", false}, // 8989 listens on loopback only
 		{"https://192.0.2.99:8990/api/v1", false}, // another host
 		{"https://auth.example.net:8990/api/v1", false},
