@@ -153,7 +153,7 @@ func newAccessEnv(t *testing.T, withAccessFile bool, apiURL string) *accessEnv {
 		t.Fatal(err)
 	}
 	// Explicitly: the umask applied to WriteFile (0077 would give 0600),
-	// and the tests compare a new access file's mode with this one.
+	// and the tests check that a new access file is 0600 all the same.
 	if err := os.Chmod(e.daemonCfg, 0o640); err != nil {
 		t.Fatal(err)
 	}
@@ -205,9 +205,10 @@ func TestClientCommandsEditTheAccessFile(t *testing.T) {
 	if err := add("anna", pinOf("anna"), "read-write"); err != nil {
 		t.Fatal(err)
 	}
-	// A new file takes the daemon config's mode, so the daemon can read it.
-	if fi, err := os.Stat(e.access); err != nil || fi.Mode().Perm() != 0o640 {
-		t.Errorf("new access file mode %v, want the daemon config's 0640", fi.Mode().Perm())
+	// A new file is 0600 whatever the daemon config's mode (0640 here): the
+	// daemon's access policy is for root and the daemon alone.
+	if fi, err := os.Stat(e.access); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("new access file mode %v, want 0600", fi.Mode().Perm())
 	}
 	if err := add("bob", pinOf("bob"), "read-only"); err != nil {
 		t.Fatal(err)

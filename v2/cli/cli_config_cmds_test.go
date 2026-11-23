@@ -2654,13 +2654,13 @@ func serveFakeTCPDaemon(t *testing.T, enrolled string, keyTaken bool) *fakeTCPDa
 // addr is the fake's host:port, for apiserver.addresses.
 func (f *fakeTCPDaemon) addr() string { return strings.TrimPrefix(f.srv.URL, "https://") }
 
-// An access file a non-root operator cannot read (it is 0600) does not stop
-// config add: it asks the daemon over its TCP API, pinned, with the client
-// certificate and with the key. An operator whose pin root has enrolled is
+// A daemon whose socket a non-root operator cannot open, and whose access
+// file it cannot read (0600), is asked over its TCP API, pinned, with the
+// client certificate and with the key. An operator whose pin root has enrolled is
 // switched to the certificate; a key the daemon takes is kept, and an
 // unpinned entry re-pinned; a key it refuses is refused (after the pin is
 // written: re-pinning does not wait on the key).
-func TestAddAsksTheDaemonWhenTheAccessFileIsUnreadable(t *testing.T) {
+func TestAddAsksTheDaemonOverTCP(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads the access file")
 	}
@@ -2675,6 +2675,14 @@ func TestAddAsksTheDaemonWhenTheAccessFileIsUnreadable(t *testing.T) {
 		af := filepath.Join(env.dir, "tdns-auth-access.yaml")
 		writeFile(t, af, "keyauth: true\nclients: []\n")
 		os.Chmod(af, 0)
+		// Its local admin socket is there, and not ours to open, as for a
+		// non-root operator on the daemon's host.
+		ln, err := net.Listen("unix", env.socket())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ln.Close() })
+		os.Chmod(env.socket(), 0)
 		d := filepath.Join(env.dir, "tdns-auth.yaml")
 		writeFile(t, d, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+f.addr()+" ]\n   apikey: the-key\n   certfile: "+f.certFile+"\n   socket: "+env.socket()+"\n   access-file: "+af+"\n")
 		return env, d, f
@@ -2719,11 +2727,8 @@ func TestAddAsksTheDaemonWhenTheAccessFileIsUnreadable(t *testing.T) {
 		}
 		// The reason is said once.
 		out := printed(res, false, env.cli)
-		if n := strings.Count(out, "cannot read"); n != 1 {
-			t.Errorf("the unreadable file is named %d times:\n%s", n, out)
-		}
-		if !strings.Contains(out, "does not take your certificate") {
-			t.Errorf("printed:\n%s", out)
+		if n := strings.Count(out, "does not take your certificate"); n != 1 {
+			t.Errorf("the reason is said %d times:\n%s", n, out)
 		}
 	})
 

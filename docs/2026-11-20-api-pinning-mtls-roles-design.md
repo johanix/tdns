@@ -832,7 +832,9 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
 - **The `client` commands** are added to the canonical auth, agent and imr
   trees by tdns-ncli itself and to the instance trees by their factories, so
   tdns-cli and tdns-imr's own shell do not get them. `client init` needs no CLI
-  config. A new access file takes the daemon config's mode.
+  config. A new access file takes the daemon config's mode. (Revised
+  2026-11-23, the owner's ruling: a new access file is 0600, made by `client
+  add` or `config add`, with the daemon config's owner and group.)
 - **`config list` warns when two entries pin the same key**, with or without
   `--check`: a pin that cannot tell two daemons apart is the shared-key hazard
   again.

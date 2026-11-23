@@ -695,10 +695,11 @@ func renderAccessFile(af *tdns.AccessFile, daemonConfig string) ([]byte, error) 
 
 // writeAccessFile replaces path atomically (following a symlink, keeping the
 // file's mode, owner and group), after saving the previous content as
-// path.prev. A new file takes the daemon config's mode, owner and group, so
-// the daemon can read it as it reads that. Atomic for a new file too: the
-// daemon reads this file at start and at every reload, and a truncated one
-// parses (keyauth on, no clients).
+// path.prev. A new file is mode 0600, the daemon's access policy being for
+// root and the daemon alone, with the daemon config's owner and group, so a
+// daemon that runs as the config's owner reads it. Atomic for a new file
+// too: the daemon reads this file at start and at every reload, and a
+// truncated one parses (keyauth on, no clients).
 func writeAccessFile(path string, old, data []byte, daemonConfig string) error {
 	if old != nil {
 		// Atomically, so a failed write leaves the previous .prev, the
@@ -709,11 +710,24 @@ func writeAccessFile(path string, old, data []byte, daemonConfig string) error {
 		}
 		return writeFileAtomicLike(path, data, nil)
 	}
-	var like os.FileInfo
+	var like os.FileInfo = privateFileInfo{}
 	if fi, err := os.Stat(daemonConfig); err == nil {
-		like = fi
+		like = privateFileInfo{fi}
 	}
 	return writeFileAtomicLike(path, data, like)
+}
+
+// privateFileInfo is a FileInfo, its owner and group as they are, its mode
+// 0600. With no FileInfo in it, it gives no owner (fileOwner says so).
+type privateFileInfo struct{ os.FileInfo }
+
+func (p privateFileInfo) Mode() os.FileMode { return 0o600 }
+
+func (p privateFileInfo) Sys() any {
+	if p.FileInfo == nil {
+		return nil
+	}
+	return p.FileInfo.Sys()
 }
 
 func findClient(af *tdns.AccessFile, name string) *tdns.AccessClient {
