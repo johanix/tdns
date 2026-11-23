@@ -457,9 +457,16 @@ func verifyRunningDaemon(role string, t *accessTarget) error {
 	}
 	// Nothing on the socket. A daemon may still run without it (it refuses
 	// a socket another process holds): ask through the role's entry.
+	// No entry for the role: nobody else to ask. An entry that cannot be
+	// built (a CA file or client certificate it cannot read) is not that:
+	// its daemon may well be running, and it is not identified.
+	if apiDetailsForRole(role) == nil {
+		return nil
+	}
 	api, err := GetApiClient(role, false)
 	if err != nil {
-		return nil // no entry to ask: nothing known to be running
+		return fmt.Errorf("cannot ask the daemon of %s's entry which config it runs (%v), so it is not known whose file this is; not editing %s",
+			role, err, t.File)
 	}
 	resp, err := SendConfigCommand(api, post)
 	switch {

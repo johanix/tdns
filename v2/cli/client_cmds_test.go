@@ -159,6 +159,11 @@ func newAccessEnv(t *testing.T, withAccessFile bool, apiURL string) *accessEnv {
 		apiURL = "https://127.0.0.1:1/api/v1"
 	}
 	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: apiURL, ApiKey: "k", AuthMethod: "X-API-Key", ConfigFile: e.daemonCfg}}}
+	// As the CLI does at start: an edit asks the entry's daemon which
+	// config it runs, through the client built here.
+	if err := InitApiClients(apiConfig); err != nil {
+		t.Fatal(err)
+	}
 	return e
 }
 
@@ -343,6 +348,29 @@ func TestClientEditReloadsTheDaemon(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "runs "+runs) {
 		t.Errorf("--no-reload with another daemon answering: err = %v, want a refusal", err)
+	}
+}
+
+// An entry that cannot be built (here: a CA file that is gone) is not the
+// same as no entry: its daemon may be running, so the edit is refused and
+// nothing is written.
+func TestUnbuildableEntryRefusesTheEdit(t *testing.T) {
+	e := newAccessEnv(t, true, "")
+	apiConfig.ApiServers[0].TLSAuth = "pkix"
+	apiConfig.ApiServers[0].RootCA = filepath.Join(e.dir, "gone-ca.pem")
+	if err := InitApiClients(apiConfig); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(e.access)
+	err := editAccessFile(context.Background(), "auth", accessEditOpts{NoReload: true}, true, func(af *tdns.AccessFile) (string, error) {
+		af.Clients = append(af.Clients, tdns.AccessClient{Name: "anna", Pin: pinOf("anna"), Role: "read-only"})
+		return "added", nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot ask the daemon of auth's entry") {
+		t.Errorf("entry with an unreadable CA file: err = %v, want a refusal", err)
+	}
+	if after, _ := os.ReadFile(e.access); string(after) != string(before) {
+		t.Error("the access file was written though the entry's daemon was not identified")
 	}
 }
 
