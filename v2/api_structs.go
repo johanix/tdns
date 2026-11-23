@@ -718,9 +718,24 @@ type ConfigResponse struct {
 	// certificate. They stay off until a restart, also once the pair is there.
 	ApiTCPNotStarted []string `json:"apitcpnotstarted,omitempty"`
 	ApiTCPNoCert     string   `json:"apitcpnocert,omitempty"`
+	// ApiTCPListening are the TCP API addresses that listen now: those the
+	// dispatcher bound and serves, less any an access file stopped or that
+	// stopped serving with an error since. The ApiServer line prints these.
+	ApiTCPListening []string `json:"apitcplistening,omitempty"`
+	// ApiTCPFailed are the TCP API addresses the daemon could not listen on,
+	// each with why: the bind failed at start, or the server stopped with an
+	// error. They stay off until a restart.
+	ApiTCPFailed []ApiTCPFailure `json:"apitcpfailed,omitempty"`
 	// transport-signal: what synthesis writes at _dns.<name> per name, for
 	// an operator to provision in the zone instead.
 	TransportSignal []TransportSignalPreview `json:"transportsignal,omitempty"`
+}
+
+// ApiTCPFailure is a TCP API address the daemon could not listen on, and the
+// error, short (ConfigResponse.ApiTCPFailed).
+type ApiTCPFailure struct {
+	Address string `json:"address"`
+	Error   string `json:"error"`
 }
 
 // ReloadGuardrailZone is one signed zone a config reload would strand: its bound

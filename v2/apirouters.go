@@ -6,6 +6,7 @@ package tdns
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -292,7 +293,9 @@ type apiTCPServer struct {
 
 // apiTCPServers are the TCP management API servers APIdispatcher started and
 // whether they speak plaintext; stopped are the addresses of plaintext ones
-// closed because an access file came into force. One set per process.
+// closed because an access file came into force. One set per process. srvs
+// are the listeners that run: config status reports their addresses as
+// listening, so a server that stops is taken out of it.
 var apiTCPServers struct {
 	sync.Mutex
 	srvs      []apiTCPServer
@@ -304,6 +307,10 @@ var apiTCPServers struct {
 	// noCertFile is that certificate, for config status. Until a restart.
 	noCert     []string
 	noCertFile string
+	// failed are the addresses that could not be bound, or whose server
+	// stopped with an error, with the error, for config status. Until a
+	// restart.
+	failed []ApiTCPFailure
 }
 
 // Test hooks, nil outside tests.
@@ -413,13 +420,55 @@ func apiTCPStoppedBy() string {
 	return apiTCPServers.stoppedBy
 }
 
-// apiTCPNoCert are the addresses APIdispatcher started no TCP listener on
-// because it had no certificate, and the certificate it could not write, for
-// `config status`. They stay off until a restart, also once the pair is there.
-func apiTCPNoCert() ([]string, string) {
+// fillApiTCPStatus puts the TCP API listeners' state in a `config status`
+// reply, all of it read under one hold of apiTCPServers' lock, so that an
+// address an access file stops meanwhile is in exactly one of the lists:
+//   - listening: the servers that run (bound, served, not stopped);
+//   - stopped, and by which access file (stoppedPlaintextApiListeners);
+//   - not started for want of a certificate, and that certificate; they
+//     stay off until a restart, also once the pair is there;
+//   - failed: not bound, or stopped serving with an error.
+func fillApiTCPStatus(resp *ConfigResponse) {
 	apiTCPServers.Lock()
 	defer apiTCPServers.Unlock()
-	return slices.Clone(apiTCPServers.noCert), apiTCPServers.noCertFile
+	resp.ApiTCPListening = nil
+	for _, s := range apiTCPServers.srvs {
+		resp.ApiTCPListening = append(resp.ApiTCPListening, s.srv.Addr)
+	}
+	resp.ApiTCPStopped = slices.Clone(apiTCPServers.stopped)
+	resp.ApiTCPStoppedBy = apiTCPServers.stoppedBy
+	resp.ApiTCPNotStarted = slices.Clone(apiTCPServers.noCert)
+	resp.ApiTCPNoCert = apiTCPServers.noCertFile
+	resp.ApiTCPFailed = slices.Clone(apiTCPServers.failed)
+}
+
+// apiTCPErrorText is err, short, for config status: a bind failure without
+// the "listen tcp <address>:" that the status already says.
+func apiTCPErrorText(err error) string {
+	var op *net.OpError
+	if errors.As(err, &op) && op.Err != nil {
+		return op.Err.Error()
+	}
+	return err.Error()
+}
+
+// apiTCPServeFailed records that s stopped serving with err, rather than
+// being closed (an access file or the shutdown closes it, which is
+// ErrServerClosed). It closes the socket first (ServeTLS returns before Serve
+// would have when the certificate does not load), so that once s is no longer
+// listed as listening, nothing answers there; then it is reported failed.
+// srvs is replaced, not changed in place: APIdispatcher's shutdown goroutine
+// reads the slice it registered.
+func apiTCPServeFailed(s apiTCPServer, err error) {
+	if s.ln != nil {
+		s.ln.Close()
+	}
+	apiTCPServers.Lock()
+	defer apiTCPServers.Unlock()
+	apiTCPServers.srvs = slices.DeleteFunc(slices.Clone(apiTCPServers.srvs),
+		func(r apiTCPServer) bool { return r.srv == s.srv })
+	apiTCPServers.failed = append(apiTCPServers.failed,
+		ApiTCPFailure{Address: s.srv.Addr, Error: apiTCPErrorText(err)})
 }
 
 func listenerSettingsOf(a ApiServerConf) *apiListenerSettings {
@@ -527,16 +576,21 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 
 	WalkRoutes(router, addresses[0])
 
+	// A server that returns with an error (ServeTLS does when the
+	// certificate does not load) is taken out of what config status reports
+	// as listening, and reported failed.
 	serve := func(s apiTCPServer, idx int) {
 		lgApi.Info("starting API dispatcher", "index", idx, "address", s.srv.Addr)
 		if useTLS {
 			if err := s.srv.ServeTLS(s.ln, certFile, keyFile); err != nil && err != http.ErrServerClosed {
-				lgApi.Error("ListenAndServeTLS failed", "err", err)
+				lgApi.Error("ListenAndServeTLS failed", "address", s.srv.Addr, "err", err)
+				apiTCPServeFailed(s, err)
 			}
 		} else {
 			lgApi.Info("serving HTTP", "address", s.srv.Addr)
 			if err := s.srv.Serve(s.ln); err != nil && err != http.ErrServerClosed {
-				lgApi.Error("ListenAndServe failed", "err", err)
+				lgApi.Error("ListenAndServe failed", "address", s.srv.Addr, "err", err)
+				apiTCPServeFailed(s, err)
 			}
 		}
 	}
@@ -580,12 +634,15 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 		ln, err := net.Listen("tcp", address)
 		if err != nil {
 			// As when ListenAndServe failed to bind: logged, and the other
-			// listeners and the daemon carry on.
+			// listeners and the daemon carry on. Recorded too, for config
+			// status, which would otherwise list it nowhere.
 			if useTLS {
 				lgApi.Error("ListenAndServeTLS failed", "err", err)
 			} else {
 				lgApi.Error("ListenAndServe failed", "err", err)
 			}
+			apiTCPServers.failed = append(apiTCPServers.failed,
+				ApiTCPFailure{Address: address, Error: apiTCPErrorText(err)})
 			continue
 		}
 		s := apiTCPServer{ln: ln, srv: &http.Server{

@@ -228,7 +228,7 @@ func TestConfigStatusReportsListenersNotStartedForWantOfACert(t *testing.T) {
 	if !slices.Equal(cr.ApiTCPNotStarted, addrs) || cr.ApiTCPNoCert != cert {
 		t.Errorf("status: not started %v for want of %q; want %v and %s", cr.ApiTCPNotStarted, cr.ApiTCPNoCert, addrs, cert)
 	}
-	if len(cr.ApiTCPStopped) != 0 {
-		t.Errorf("status: stopped %v, want none (nothing was started to stop)", cr.ApiTCPStopped)
+	if len(cr.ApiTCPStopped) != 0 || len(cr.ApiTCPListening) != 0 || len(cr.ApiTCPFailed) != 0 {
+		t.Errorf("status: stopped %v, listening %v, failed %+v; want none (nothing was started)", cr.ApiTCPStopped, cr.ApiTCPListening, cr.ApiTCPFailed)
 	}
 }
