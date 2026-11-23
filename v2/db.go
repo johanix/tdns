@@ -6,6 +6,7 @@ package tdns
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -24,6 +25,12 @@ const keystoreBusyTimeoutMs = 5000
 // keystoreBeginWait is how long Begin waits for an in-progress transaction.
 // Tests may shorten it; production keeps the busy-timeout bound.
 var keystoreBeginWait = time.Duration(keystoreBusyTimeoutMs) * time.Millisecond
+
+// ErrKeyDBBusy is Begin's error when another transaction did not end within
+// keystoreBeginWait. It says nothing about the request that waited: the same
+// request may well succeed once the holder is done, so a caller that can retry
+// later should.
+var ErrKeyDBBusy = errors.New("KeyDB.Begin timed out waiting")
 
 // keystoreDSN is the DSN NewKeyDB opens the sqlite keystore at path with.
 // The options apply to every connection the pool opens:
@@ -142,7 +149,7 @@ func (db *KeyDB) Begin(context string) (*Tx, error) {
 			db.mu.Unlock()
 			lgConfig.Error("KeyDB.Begin timed out waiting for in-progress transaction",
 				"holder", holder, "waiter", context)
-			return nil, fmt.Errorf("KeyDB.Begin timed out waiting for transaction %q (waiter %q)", holder, context)
+			return nil, fmt.Errorf("%w for transaction %q (waiter %q)", ErrKeyDBBusy, holder, context)
 		}
 		lgConfig.Info("KeyDB.Begin waiting for in-progress transaction",
 			"holder", holder, "waiter", context)

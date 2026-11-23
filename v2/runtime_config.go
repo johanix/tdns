@@ -4,6 +4,8 @@
 package tdns
 
 import (
+	"maps"
+	"slices"
 	"sync/atomic"
 
 	"github.com/spf13/viper"
@@ -53,6 +55,33 @@ type RuntimeConfig struct {
 	// Built from conf.Journal, which therefore has to hold only an accepted
 	// value: reloadConfig puts the running one back when it refuses a reload.
 	JournalOff bool
+
+	// TransportSignal is the transport signal's configuration as last
+	// accepted, for the readers that run outside the parse/API paths or
+	// race a reload (transportSignalConfig).
+	TransportSignal transportSignalConf
+
+	// src is the Config the snapshot was built from.
+	src *Config
+}
+
+// transportSignalConf is the part of the config the transport signal's
+// readers use: the signal pass, the preview and release API, and config
+// status.
+type transportSignalConf struct {
+	Transport         TransportConf
+	Identities        []string
+	ListenerAddresses []string
+}
+
+// clone is a copy that shares no map or slice with t.
+func (t transportSignalConf) clone() transportSignalConf {
+	c := t
+	c.Transport.Ports = maps.Clone(t.Transport.Ports)
+	c.Transport.Targets = maps.Clone(t.Transport.Targets)
+	c.Identities = slices.Clone(t.Identities)
+	c.ListenerAddresses = slices.Clone(t.ListenerAddresses)
+	return c
 }
 
 // liveConfig holds the current published snapshot. Seeded with an empty snapshot
@@ -94,7 +123,45 @@ func (conf *Config) buildRuntimeConfig() *RuntimeConfig {
 		ScannerPollConcurrency: viper.GetInt("scanner.poll.concurrency"),
 
 		JournalOff: conf.Journal.Active != nil && !*conf.Journal.Active,
+
+		TransportSignal: transportSignalConf{
+			Transport:         conf.Service.Transport,
+			Identities:        conf.Service.Identities,
+			ListenerAddresses: conf.Listeners.Addresses,
+		}.clone(),
+		src: conf,
 	}
+}
+
+// transportSignalConfig is the Config the transport signal's readers use:
+// the pass at a zone's first load (runTransportSignalPass), the preview and
+// release API, and config status. It holds service.transport,
+// service.identities and listeners.addresses as last accepted, from the
+// published runtime-config snapshot, and nothing else.
+//
+// Not conf itself: a reload decodes those fields into conf in place, under
+// confMu, clearing service.transport first, and puts the running values back
+// only once it has refused the file. A reader of conf in between sees a
+// cleared or a refused value (CodeRabbit on #1118). Nor conf read under
+// confMu.RLock: the pass runs on the refresh engine's goroutine, which drains
+// RefreshZoneCh, and a zone reload holds confMu while it queues every zone's
+// refresh there (ParseZones), so a pass waiting for the lock could leave
+// both stuck. The snapshot is built under confMu by the writer, at startup
+// before any engine starts and after every reload that is accepted, never
+// after one that is refused, and read here without a lock.
+//
+// A conf the snapshot was not built from, a test's, is read as it is.
+func (conf *Config) transportSignalConfig() *Config {
+	rc := ConfLive()
+	if rc.src != conf {
+		return conf
+	}
+	t := rc.TransportSignal.clone()
+	c := &Config{}
+	c.Service.Transport = t.Transport
+	c.Service.Identities = t.Identities
+	c.Listeners.Addresses = t.ListenerAddresses
+	return c
 }
 
 // publishRuntimeConfig builds a fresh snapshot and atomically publishes it. Call

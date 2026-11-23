@@ -767,6 +767,10 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// runs a few INSERTs in one transaction and calls nothing back. So the cost
 	// here is latency, not deadlock, and latency is the cheaper thing to pay
 	// for durability.
+	// The _dns. owners whose SVCB RRset the delta journalled below changes,
+	// for the record of what the transport signal pass stored: a restart
+	// replays what the journal holds there (noteSignalsJournaled).
+	var journaledSignalOwners []string
 	if zd.wsPersistDelta {
 		zd.wsPersistDelta = false
 		// The kill-switch (journal: active: false). Checked HERE, at the single
@@ -867,6 +871,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 						"to_serial", serial, "error", err)
 					return
 				}
+				journaledSignalOwners = signalOwnersInDelta(removed, added)
 			}
 		}
 	}
@@ -893,6 +898,9 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// snapshot carries it from then on.
 	snap.signed = sm != nil && (fullPass || scoped || (oldSnap != nil && oldSnap.signed))
 	zd.snapshot.Store(snap)
+	if len(journaledSignalOwners) > 0 {
+		zd.noteSignalsJournaled(journaledSignalOwners, snap, serial)
+	}
 
 	zd.workingSet = nil
 	zd.wsFromReplacement = false

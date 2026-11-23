@@ -112,7 +112,7 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	applyTransportMapWithPorts(s, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53: uint16(closed)})
 	m := new(dns.Msg)
 	m.SetQuestion("www.example.", dns.TypeA)
-	_, _, _, dial, err := imr.tryServer(context.Background(), s, nil, addr, core.TransportDo53, m, "www.example.", dns.TypeA, false, cache.ClassNone)
+	_, _, _, dial, err := imr.tryServer(context.Background(), s, nil, addr, core.TransportDo53, m, "www.example.", dns.TypeA, false, cache.ClassNone, attemptSelection{})
 	if err == nil {
 		t.Fatalf("tryServer to the closed port %d succeeded", closed)
 	}
@@ -149,8 +149,8 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	if !hasDo53() {
 		t.Error("prioritizeServers does not offer the fallback on port 53 while the signalled endpoint is backed off")
 	}
-	if a, p, ok := imr.attemptKey(context.Background(), s, nil, addr, core.TransportDo53, false); !ok || a != addr || p != 0 {
-		t.Errorf("the attempt goes to %s port %d (%v), want %s on port 53", a, p, ok, addr)
+	if d, ok := imr.attemptKey(context.Background(), s, nil, addr, core.TransportDo53, false); !ok || d.addr != addr || d.keyPort != 0 {
+		t.Errorf("the attempt goes to %s port %d (%v), want %s on port 53", d.addr, d.keyPort, ok, addr)
 	}
 	// The signal drops the port: the fallback on 53 is offered.
 	applyTransportMapWithPorts(s, map[string]uint8{"udp": 100}, nil)
@@ -159,8 +159,8 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 	}
 	// Another port starts clean.
 	applyTransportMapWithPorts(s, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53: uint16(closed) ^ 1})
-	if _, p, _ := imr.attemptKey(context.Background(), s, nil, addr, core.TransportDo53, false); p != uint16(closed)^1 {
-		t.Errorf("the attempt goes to port %d, want the changed port %d", p, uint16(closed)^1)
+	if d, _ := imr.attemptKey(context.Background(), s, nil, addr, core.TransportDo53, false); d.keyPort != uint16(closed)^1 {
+		t.Errorf("the attempt goes to port %d, want the changed port %d", d.keyPort, uint16(closed)^1)
 	}
 	if !hasDo53() {
 		t.Error("prioritizeServers does not offer Do53 on a changed port")
@@ -228,7 +228,7 @@ func TestUDPPortConfigReachesTheDial(t *testing.T) {
 		}
 		imr.collectSVCBSignal(pending, pathNS, svcb)
 	}
-	if installed, _ := imr.installSVCBSignal(sm[cache.ServerKey(pathNS)], pending[cache.ServerKey(pathNS)]); !installed {
+	if installed, _ := imr.installSVCBSignal(sm[cache.ServerKey(pathNS)], pending[cache.ServerKey(pathNS)], notConfigured); !installed {
 		t.Fatalf("the published signal %v was not installed", rrs)
 	}
 	for tr, want := range map[core.Transport]string{
@@ -250,6 +250,7 @@ func TestUDPPortConfigReachesTheDial(t *testing.T) {
 func TestDNSKEYAttemptKeyIsTheEndpoint(t *testing.T) {
 	const addr = "192.0.2.1"
 	imr := newTestImr(t)
+	imr.dnskeyTransport = DNSKEYTransportTryEncrypted
 	ctx := context.Background()
 	a := cache.NewAuthServer("ns1.example.")
 	applyTransportMapWithPorts(a, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53TCP: 5354})
@@ -257,11 +258,19 @@ func TestDNSKEYAttemptKeyIsTheEndpoint(t *testing.T) {
 	applyTransportMapWithPorts(b, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53TCP: 5355})
 	c := cache.NewAuthServer("ns3.example.")
 	applyTransportMapWithPorts(c, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53TCP: 5354})
-	ka := imr.dnskeyAttemptKey(ctx, a, nil, addr, core.TransportDo53TCP)
-	if ka == imr.dnskeyAttemptKey(ctx, b, nil, addr, core.TransportDo53TCP) {
+	key := func(s *cache.AuthServer) cache.AddrXport {
+		t.Helper()
+		k, ok := imr.resolveDNSKEYAttempt(ctx, s, nil, addr).key()
+		if !ok || k.Transport != core.TransportDo53TCP {
+			t.Fatalf("%s: key %+v %v, want one over tcp", s.Name, k, ok)
+		}
+		return k
+	}
+	ka := key(a)
+	if ka == key(b) {
 		t.Errorf("one key for two tcp endpoints: %v", ka)
 	}
-	if kc := imr.dnskeyAttemptKey(ctx, c, nil, addr, core.TransportDo53TCP); ka != kc {
+	if kc := key(c); ka != kc {
 		t.Errorf("two keys for one endpoint: %v and %v", ka, kc)
 	}
 }

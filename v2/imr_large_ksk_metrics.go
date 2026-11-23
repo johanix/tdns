@@ -182,15 +182,17 @@ func (imr *Imr) dnskeyDSSignalsLarge(qname string) bool {
 }
 
 // preferredDNSKEYTransportHook, when set, stands in for
-// preferredDNSKEYTransport: tests set it to change the preference between
-// the query loop's reading and tryServer's.
+// preferredDNSKEYTransport: tests set it to change the preference from one
+// attempt's reading to the next's.
 var preferredDNSKEYTransportHook func(imr *Imr, server *cache.AuthServer) core.Transport
 
 // preferredDNSKEYTransport picks the transport for a DNSKEY query that has been
 // selected to bypass probabilistic transport weights. It honors the server's
 // advertised capabilities (server.Transports, less any signalled at weight 0;
-// see serverAdvertises) but not the size of the weights. The preference order
-// is DoQ > DoT > DoH > TCP.
+// see advertisedIn) but not the size of the weights. The preference order
+// is DoQ > DoT > DoH > TCP. The order is checked against one reading of the
+// server's signal: a signal installed while it is checked must not leave it
+// with the DoQ of one signal and the DoT of another, both refused.
 //
 // Returns 0 (no transport) when the policy is force_encrypted and the server
 // advertises no encrypted transport; the caller must fail the query in that
@@ -199,9 +201,14 @@ func (imr *Imr) preferredDNSKEYTransport(server *cache.AuthServer) core.Transpor
 	if preferredDNSKEYTransportHook != nil {
 		return preferredDNSKEYTransportHook(imr, server)
 	}
+	var transports []core.Transport
+	var weights map[core.Transport]uint8
+	if server != nil {
+		transports, weights = server.GetTransportSignal()
+	}
 	order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH}
 	for _, pref := range order {
-		if serverAdvertises(server, pref) {
+		if advertisedIn(transports, weights, pref) {
 			return pref
 		}
 	}
@@ -219,17 +226,14 @@ func (imr *Imr) preferredDNSKEYTransport(server *cache.AuthServer) core.Transpor
 	return core.TransportDo53TCP
 }
 
-// serverAdvertises reports whether the server offers transport t: listed in
-// its advertised Transports and not signalled at weight 0. Weight 0 means
-// "send none", and the absence defaults put dot, doh and doq at 0 for a
-// signal that leaves them out, so a cleartext-only signal must not send the
-// DNSKEY query to an encrypted endpoint the server never offered. A listed
-// transport with no weight at all is offered.
-func serverAdvertises(server *cache.AuthServer, t core.Transport) bool {
-	if server == nil {
-		return false
-	}
-	transports, weights := server.GetTransportSignal()
+// advertisedIn reports whether a server whose signal, read once
+// (cache.AuthServer.GetTransportSignal), holds transports and weights offers
+// transport t: listed in its advertised transports and not signalled at
+// weight 0. Weight 0 means "send none", and the absence defaults put dot, doh
+// and doq at 0 for a signal that leaves them out, so a cleartext-only signal
+// must not send the DNSKEY query to an encrypted endpoint the server never
+// offered. A listed transport with no weight at all is offered.
+func advertisedIn(transports []core.Transport, weights map[core.Transport]uint8, t core.Transport) bool {
 	if w, ok := weights[t]; ok && w == 0 {
 		return false
 	}

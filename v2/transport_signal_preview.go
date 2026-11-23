@@ -179,28 +179,43 @@ func transportSignalRelease(conf *Config, name string) ([]TransportSignalPreview
 // record of what it stored, so a pass in progress cannot record the owner
 // again after the release. It refuses an owner that holds nothing: a release
 // then would only let synthesis start over. released is false when the pass
-// had no record of the owner. A failed KeyDB delete is an error: the
-// revocation holds in this process (forgetSignalStored), but the KeyDB's
-// record would outlive a restart, and the pass would take the records for
-// its own again. A release run again tries the delete again, since the
-// pending revocation keeps the owner in signalStoredOwners.
+// had no record of the owner. A KeyDB that cannot be asked whether there is
+// a record is an error, not "no record": the release would report that there
+// was nothing to release while the KeyDB's record stays and counts again. A
+// failed KeyDB delete is an error too: the revocation holds in this process
+// (forgetSignalStored), but the KeyDB's record would outlive a restart, and
+// the pass would take the records for its own again. A release run again
+// tries the delete again, since the pending revocation keeps the record
+// (signalStoredRecorded).
 //
 // It also refuses while a change to the SVCB RRset at owner is staged and
 // not published (stagedSignalChangeLocked): its guards read the published
 // zone, and the staged change publishes after the release all the same. A
 // withdrawal the pass staged would then remove the RRset the release just
 // handed to the operator.
+//
+// It refuses in a zone whose removal has started (signalPassRetired, which
+// RemoveDynamicZone sets under zd.mu before it takes the KeyDB's record). A
+// removal whose config rewrite fails puts that record back, and would undo
+// a release made in between.
 func (zd *ZoneData) releaseSignal(owner string) (released bool, err error) {
 	owner = core.CanonicalizeName(owner)
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	if zd.signalPassRetired {
+		return false, fmt.Errorf("zone %s is being removed, so %s cannot be released: a removal that fails puts the record of what the pass stored back", zd.ZoneName, owner)
+	}
 	if zd.stagedSignalChangeLocked(owner) {
 		return false, fmt.Errorf("%s in %s has a change staged that is not published yet (the publish cadence holds it back, or the publish was refused); run the release again after the next publish", owner, zd.ZoneName)
 	}
 	if od := getOwnerFrom(zd.publishedSnapshot(), owner); od == nil || ownerRRsetCount(od) == 0 {
 		return false, fmt.Errorf("%s holds nothing in %s; put the records there first (a release with nothing there would only let synthesis start over)", owner, zd.ZoneName)
 	}
-	if !slices.Contains(zd.signalStoredOwners(), owner) {
+	recorded, err := zd.signalStoredRecorded(owner)
+	if err != nil {
+		return false, fmt.Errorf("%s: could not read whether the transport signal pass has a record of it, so nothing was released; run the release again: %w", owner, err)
+	}
+	if !recorded {
 		return false, nil
 	}
 	if err := zd.forgetSignalStored(owner); err != nil {
