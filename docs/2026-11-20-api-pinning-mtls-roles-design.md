@@ -2,9 +2,9 @@
 
 **Date:** 2026-11-20
 **Status:** being implemented. Steps 0 and 1 (section 5) are #1163 and #1164,
-on main. Step 2, the local socket, is the PR that adds this document, stacked on
-the tdns-ncli PRs #1159, #1160 and #1161. Steps 3 and 4 follow. Section 9 lists
-what implementing changed or settled.
+on main. Step 2, the local socket, is #1165, stacked on the tdns-ncli PRs #1159,
+#1160 and #1161; step 3, the access file and the roles, is stacked on #1165.
+Step 4 follows. Section 9 lists what implementing changed or settled.
 
 Scope: the management API of every daemon that builds its router with
 `SetupAPIRouter` (tdns-auth, tdns-agent, ...) or `SetupSimpleAPIRouter`
@@ -614,3 +614,80 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   eight times without step 1. Still not tried against a running tdns-mp daemon.
   How NetBSD enforces a socket file's permissions is still open; the 0700
   directory is what the design relies on.
+
+**2026-11-20, implementing step 3.**
+
+- **The role table, settled against the handlers.** The guard test found what
+  the table in 3.4 had wrong or missed: `/zone/parentsync` has no publish or
+  unpublish (they are `/zone/childsync`'s, with advert and reconcile,
+  read-write, and proxy-status, read-only); `/catalog` also has
+  notify-add, notify-remove (read-write) and notify-list (read-only); `/debug`
+  also has show-rrsetcache and zone-txlog (read-only); `/scanner` has status
+  (read-only) and scan (read-write); `/scanner/delete` is read-write. Every
+  command of every handler is now listed explicitly; a non-admin `*` is kept
+  only for routes whose handler has no command (the rollover POSTs, `ping`).
+- **A certificate is the identity.** An unknown or disabled certificate is
+  refused even if the API key comes with it; it does not fall back to the key.
+- **A body too long to read (over 64 MiB)** has a command that cannot be
+  checked: a network client gets 413, saying so. The local socket is admin and
+  needs no check, so its handler gets the whole body. (The first build capped
+  this at 1 MiB and answered "needs admin", which refused a large write to
+  every network client; changed after the external review.)
+- **Commands are matched lower-cased and trimmed.** Matching only ever makes a
+  check stricter or equal: a command the handler does not know is refused by the
+  handler, and an unknown one needs admin here.
+- **Logging.** Every request needing read-write or admin is logged at info
+  with client, role, route and command; read-only ones at debug, so a polling
+  client does not fill the log. Refusals are logged at info.
+- **`apiserver.apikey` stays required.** `keyauth: false` turns it off; the key
+  itself is not made optional.
+- **Taking `access-file` out of the config** and reloading returns the TCP API
+  to key-as-admin, and the reload says so.
+- **TLS.** The TCP listeners always ask for a client certificate (never
+  require one); with an access file they are TLS 1.3 only. A listener's
+  MinVersion is fixed when it starts, so every handshake also asks the running
+  policy: while an access file is in force, a client that does not offer TLS
+  1.3 fails the handshake (and a request over older TLS would get 403). That
+  covers an access file a reload added.
+- **`usetls: false` with an access file is refused (changed 2026-11-23,
+  replacing the warning 3.6 describes).** With TCP addresses, the config is
+  invalid at start and at reload, and `config check` fails it.
+  `usetls: false` was the way in when the TLS setup was broken; the local
+  admin socket is that way in now, so the network API never needs plaintext.
+  Loopback has no exception: the socket covers local use. A socket-only
+  daemon leaves out `apiserver.addresses` instead (the 3.6 case of
+  `keyauth: false` with `usetls: false`). Without an access file
+  `usetls: false` is unchanged for now. A listener keeps what it started
+  with, so a reload can put an access file in force on a plaintext one. That
+  reload closes the plaintext TCP listeners before the policy takes effect
+  (Johan, 2026-11-23: "Stop the listener"), so no client sends its key in
+  clear any more; they stay closed until a restart with TLS, the reload and
+  `config status` say so, and the socket is still served. (A request that
+  still reaches a plaintext listener is refused, 403, as a backstop.)
+  Removing the access file again does not reopen them: the reload that
+  removes it says they stay stopped until a restart, and `config status`
+  keeps reporting them, now beside no access policy.
+  The same holds for a reload while the daemon starts: the reload closes the
+  listeners and puts the policy in force under one lock, the dispatcher
+  binds, registers and starts its listeners under the same lock and starts
+  no plaintext one once a policy is in force. It binds each socket there,
+  before its server starts, and the reload closes the socket with the
+  server, so no socket is bound after the policy is in force (binding in
+  the server's goroutine left a window between its shutdown check and the
+  bind). It reads `usetls` and `access-file` once, so a listener is
+  recorded by the transport and TLS minimum it started with.
+- **`daemon start`, `stop`, `restart`** treat a missing socket file like a
+  refused connection: nothing is running (and, while starting, not up yet).
+- **Reloads.** The SIGHUP path (zone reload) re-reads the access file too, so
+  a removed or disabled client loses its access without a full config reload.
+  A full reload that changes `apiserver.addresses`, `socket`, `usetls` or
+  `certfile`/`keyfile` says those are NOT applied until a restart: the
+  listeners keep what they started with.
+- **A body that is not one JSON value needs admin.** A handler's decoder runs
+  the first value and ignores the rest, so it is not treated as commandless.
+- **Pins are canonical base64 only.** Another spelling of the same digest
+  (unused padding bits, embedded newlines) would never match the string
+  lookup, and would let one key be two clients.
+- **tdns-mp.** `RegisterApiRouteRoles` lets code outside the package declare
+  the roles of its routes; until tdns-mp does, its routes need admin when an
+  access file is set.

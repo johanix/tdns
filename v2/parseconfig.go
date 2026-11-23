@@ -179,6 +179,13 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 	// service.transport as a whole: a signal, or a key of ports, that the new
 	// file removes would otherwise stay published.
 	conf.Service.Transport = TransportConf{}
+	// apiserver: as a whole, for the same reason: an access-file: or socket:
+	// line the operator took out would otherwise stay set, so a reload
+	// would go on enforcing an access file the config no longer names, and
+	// say "reloaded". The usetls default is already in configMap above. What
+	// the running listeners use was fixed when they started (APIdispatcher);
+	// a reload that changes it says so (apiListenerReloadNote).
+	conf.ApiServer = ApiServerConf{}
 
 	if derr := decoder.Decode(configMap); derr != nil {
 		return fmt.Errorf("error decoding config: %v", derr)

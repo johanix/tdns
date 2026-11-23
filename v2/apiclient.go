@@ -191,7 +191,25 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 		lgApi.Debug("received response data", "bytes", len(buf), "data", prettyJSON.String())
 	}
 
+	// A refusal made before any handler runs (the access check's 401, 403,
+	// 413 or 503) has a plain-text body, not the JSON the callers decode.
+	// Return it as an error, so that the operator sees the daemon's own
+	// words instead of a JSON parse error. A non-2xx reply with a JSON body
+	// is a handler's own and goes back as before.
+	if err == nil && (resp.StatusCode < 200 || resp.StatusCode >= 300) && !json.Valid(buf) {
+		return resp.StatusCode, buf, plainHTTPError(resp.StatusCode, buf)
+	}
+
 	return resp.StatusCode, buf, err
+}
+
+// plainHTTPError is the error for a non-2xx reply whose body is plain text.
+func plainHTTPError(status int, body []byte) error {
+	msg := strings.TrimSpace(string(body))
+	if msg == "" {
+		msg = http.StatusText(status)
+	}
+	return fmt.Errorf("HTTP %d from the daemon: %s", status, msg)
 }
 
 func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {

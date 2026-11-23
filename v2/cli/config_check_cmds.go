@@ -439,6 +439,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 			fmt.Sprintf("could not fully decode config into structs: %v", err),
 			"structural checks below may be incomplete; often caused by legacy bare-string primaries:/downstreams:")
 	}
+	applyDaemonDefaults(v, &cfg)
 
 	checkListeners(&cfg, rep)
 	checkDo53QueriesRefused(&cfg, rep, effectiveRole(role) == "agent")
@@ -673,12 +674,23 @@ func checkDoHPath(cfg *tdns.Config, rep *ccReport, g string, doh bool) {
 	}
 }
 
+// applyDaemonDefaults gives cfg the defaults the daemon's own decoder applies
+// before it decodes (ParseConfig) and a viper Unmarshal does not, so the
+// checks judge the config the daemon will run. apiserver.usetls defaults to
+// true when the apiserver block leaves it out.
+func applyDaemonDefaults(v *viper.Viper, cfg *tdns.Config) {
+	if v.IsSet("apiserver") && !v.IsSet("apiserver.usetls") {
+		cfg.ApiServer.UseTLS = true
+	}
+}
+
 // socketPathHint is the fix for an apiserver.socket the daemon refuses
 // (tdns.CheckApiSocketPath).
 const socketPathHint = "make apiserver.socket an absolute path of at most 100 bytes, e.g. /var/run/tdns/tdns-auth.sock"
 
 func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 	const g = "API server"
+	checkApiAccessFile(cfg, rep)
 	tcp := len(cfg.ApiServer.Addresses) > 0
 	sock := cfg.ApiServer.Socket
 	var sockErr error
@@ -1998,5 +2010,36 @@ func checkDuplicateTemplates(cfg *tdns.Config, rep *ccReport) {
 	if dups == 0 {
 		rep.pass("Zones", "duplicate template",
 			fmt.Sprintf("no duplicate names among %d template(s)", len(cfg.Templates)))
+	}
+}
+
+// checkApiAccessFile runs the daemon's own validator over the access file, so
+// a file the daemon would not use is found before the reload rather than by it.
+func checkApiAccessFile(cfg *tdns.Config, rep *ccReport) {
+	const g = "API access file"
+	path := cfg.ApiServer.AccessFile
+	if path == "" {
+		return
+	}
+	af, err := tdns.LoadAccessFile(path)
+	if err != nil {
+		rep.fail(g, "access-file", err.Error(),
+			"fix the file (tdns-ncli <daemon> client ... writes only files that pass this check), then reload over the local socket")
+		return
+	}
+	keyauth := "on"
+	if !af.KeyAuthOn() {
+		keyauth = "off"
+	}
+	rep.pass(g, "access-file", fmt.Sprintf("%s: %d client(s), keyauth %s", path, len(af.Clients), keyauth))
+	// The daemon refuses this (validateAccessSettings): an access file
+	// requires TLS on TCP; the local admin socket is the way in when TLS is
+	// broken. Said here with the fix, in this group.
+	if len(cfg.ApiServer.Addresses) > 0 && !cfg.ApiServer.UseTLS {
+		msg := "apiserver.usetls is false: with an access file the daemon refuses a plaintext TCP API (certificate clients could not authenticate"
+		if af.KeyAuthOn() {
+			msg += ", and the API key would cross the network in clear"
+		}
+		rep.fail(g, "usetls", msg+")", "set apiserver.usetls: true; when TLS is broken use the local admin socket, or drop apiserver.addresses for a socket-only daemon")
 	}
 }

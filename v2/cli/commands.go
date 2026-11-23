@@ -50,9 +50,10 @@ func SendCommandNG(api *tdns.ApiClient, data tdns.CommandPost) (tdns.CommandResp
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
+	// The caller prints the returned error; printing it here as well showed
+	// a daemon's refusal twice.
 	status, buf, err := api.Post("/command", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
 	// Only print status if it's not 200 (success) - useful for debugging errors

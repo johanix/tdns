@@ -150,6 +150,9 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	if err := config.DynamicZones.Validate(); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
+	if err := config.ApiServer.validateAccessSettings(); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
 	if err := config.DynamicZones.ValidateDefaultTemplates(config.Templates); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}

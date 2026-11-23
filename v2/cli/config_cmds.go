@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -390,6 +389,8 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		} else {
 			fmt.Printf("ApiServer: api key is not set\n")
 		}
+		printAccessStatus(resp.Access)
+		printApiTCPStopped(resp.ApiTCPStopped, resp.ApiTCPStoppedBy, resp.Access != nil)
 	}
 
 	if resp.Msg != "" {
@@ -447,9 +448,10 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
+	// The caller prints the returned error; printing it here as well showed
+	// a daemon's refusal twice.
 	status, buf, err := api.Post("/config", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
 	if tdns.Globals.Verbose {
@@ -468,4 +470,58 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	}
 
 	return cr, nil
+}
+
+// printApiTCPStopped prints the plaintext TCP listeners an access file
+// closed. They stay closed until a restart, also once the access file is
+// removed, so this is printed whether the daemon runs a policy or not. by is
+// the access file that stopped them, on a line of its own (a path can be
+// long); a daemon that does not say gets the text without it.
+func printApiTCPStopped(stopped []string, by string, policy bool) {
+	if len(stopped) == 0 {
+		return
+	}
+	fmt.Printf("TCP API STOPPED on %s:\n", strings.Join(stopped, ", "))
+	switch {
+	case policy && by != "":
+		fmt.Println("  it was plaintext, and the access file requires TLS:")
+		fmt.Printf("    %s\n", by)
+		fmt.Println("  restart the daemon with usetls: true (the local socket works)")
+	case policy:
+		fmt.Println("  it was plaintext, and the access file requires TLS;")
+		fmt.Println("  restart the daemon with usetls: true (the local socket works)")
+	case by != "":
+		fmt.Println("  it was plaintext when the access file came into force:")
+		fmt.Printf("    %s\n", by)
+		fmt.Println("  no access file is set now, but it stays closed until the daemon")
+		fmt.Println("  restarts (the local socket works)")
+	default:
+		fmt.Println("  it was plaintext when an access file came into force; no access")
+		fmt.Println("  file is set now, but it stays closed until the daemon restarts")
+		fmt.Println("  (the local socket works)")
+	}
+}
+
+// printAccessStatus prints the network API's access policy as the daemon is
+// running it, if it has one.
+func printAccessStatus(a *tdns.ApiAccessStatus) {
+	if a == nil {
+		return
+	}
+	if a.Error != "" {
+		fmt.Printf("Access file: %s CANNOT BE USED, so the TCP API answers 503 (the local socket works): %s\n", a.File, a.Error)
+		return
+	}
+	keyauth := "the API key is accepted (read-write)"
+	if !a.KeyAuth {
+		keyauth = "the API key is off"
+	}
+	fmt.Printf("Access file: %s; %s; %d client(s)\n", a.File, keyauth, len(a.Clients))
+	for _, c := range a.Clients {
+		state := ""
+		if c.Disabled {
+			state = ", disabled"
+		}
+		fmt.Printf("   %s (%s%s)\n", c.Name, c.Role, state)
+	}
 }

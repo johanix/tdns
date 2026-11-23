@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -138,5 +140,109 @@ func TestImrConfigCheckSocketOnly(t *testing.T) {
 					keyFail, sockWarn, servedInfo, tc.keyFail, tc.sockWarn, tc.servedInfo)
 			}
 		})
+	}
+}
+
+// config check decodes with viper, which does not apply the daemon's own
+// default usetls: true. Without applyDaemonDefaults an access-file config with
+// no usetls: line was reported as plaintext while the daemon served TLS. An
+// explicit usetls: false with an access file is a failure: the daemon refuses
+// it.
+func TestConfigCheckUseTLSDefault(t *testing.T) {
+	dir := t.TempDir()
+	access := filepath.Join(dir, "access.yaml")
+	if err := os.WriteFile(access, []byte("clients: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, usetls string
+		fail         bool
+	}{
+		{"no usetls line", "", false},
+		{"usetls: true", "   usetls: true\n", false},
+		{"usetls: false", "   usetls: false\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := viper.New()
+			v.SetConfigType("yaml")
+			doc := "apiserver:\n   addresses: [ 127.0.0.1:8989 ]\n   socket: /var/run/tdns/tdns-auth.sock\n   access-file: " + access + "\n" + tc.usetls
+			if err := v.ReadConfig(strings.NewReader(doc)); err != nil {
+				t.Fatal(err)
+			}
+			var cfg tdns.Config
+			if err := v.Unmarshal(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			applyDaemonDefaults(v, &cfg)
+			rep := newCCReport()
+			checkApiAccessFile(&cfg, rep)
+			var failed bool
+			for _, r := range rep.byGroup["API access file"] {
+				if r.check == "usetls" && r.level == ccFAIL {
+					failed = true
+				}
+			}
+			if failed != tc.fail {
+				t.Errorf("usetls failure = %v, want %v (UseTLS decoded as %v)", failed, tc.fail, cfg.ApiServer.UseTLS)
+			}
+		})
+	}
+}
+
+// `config status` reports the plaintext TCP listeners an access file closed
+// whether the daemon still runs a policy or not (removing the file does not
+// reopen them), and says which of the two it is.
+func TestConfigStatusReportsStoppedListeners(t *testing.T) {
+	stopped := []string{"192.0.2.1:8080"}
+	if out := captureStdout(t, func() { printApiTCPStopped(nil, "", true) }); out != "" {
+		t.Errorf("nothing stopped: printed %q", out)
+	}
+	const file = "/etc/tdns/tdns-auth-access.yaml"
+	for _, tc := range []struct {
+		name   string
+		by     string
+		policy bool
+		want   string
+	}{
+		{"policy in force", file, true, "access file requires TLS:\n    " + file + "\n"},
+		{"access file removed", file, false, "came into force:\n    " + file + "\n  no access file is set now"},
+		{"a daemon that does not name the file", "", true, "access file requires TLS;"},
+		{"removed, file not named", "", false, "no access\n  file is set now"},
+	} {
+		out := captureStdout(t, func() { printApiTCPStopped(stopped, tc.by, tc.policy) })
+		if !strings.HasPrefix(out, "TCP API STOPPED on 192.0.2.1:8080:\n") || !strings.Contains(out, tc.want) {
+			t.Errorf("%s: printed %q, want it to contain %q", tc.name, out, tc.want)
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+			if len(line) > 72 {
+				t.Errorf("%s: line over 72 characters: %q", tc.name, line)
+			}
+		}
+	}
+}
+
+// tdns-imr has its own `config status` printer, which must report the TCP
+// API an access file stopped too, with the file, with the policy in force and
+// after the file is removed.
+func TestImrConfigStatusReportsStoppedListeners(t *testing.T) {
+	const file = "/etc/tdns/tdns-imr-access.yaml"
+	base := tdns.ConfigResponse{Msg: "tdns-imr: Configuration is ok", ApiTCPStopped: []string{"192.0.2.1:8080"}, ApiTCPStoppedBy: file}
+	withPolicy := base
+	withPolicy.Access = &tdns.ApiAccessStatus{File: file, KeyAuth: true}
+	for _, tc := range []struct {
+		name string
+		resp tdns.ConfigResponse
+		want string
+	}{
+		{"policy in force", withPolicy, "access file requires TLS:\n    " + file + "\n"},
+		{"access file removed", base, "came into force:\n    " + file + "\n  no access file is set now"},
+	} {
+		out := captureStdout(t, func() { printImrConfigStatus(tc.resp) })
+		if !strings.Contains(out, "TCP API STOPPED on 192.0.2.1:8080:\n") || !strings.Contains(out, tc.want) {
+			t.Errorf("%s: printed %q, want the stopped listener and %q", tc.name, out, tc.want)
+		}
+	}
+	if out := captureStdout(t, func() { printImrConfigStatus(tdns.ConfigResponse{Msg: "ok"}) }); strings.Contains(out, "STOPPED") {
+		t.Errorf("nothing stopped: printed %q", out)
 	}
 }
