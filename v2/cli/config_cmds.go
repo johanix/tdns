@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -374,11 +375,7 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 			fmt.Printf("Identities: not set\n")
 		}
 
-		if len(resp.ApiServer.Addresses) > 0 {
-			fmt.Printf("ApiServer: listening on %v\n", resp.ApiServer.Addresses)
-		} else {
-			fmt.Printf("ApiServer: not listening on any addresses\n")
-		}
+		fmt.Println(apiListeningLine(resp))
 		if line := apiSocketStatusLine(resp); line != "" {
 			fmt.Println(line)
 		}
@@ -390,12 +387,33 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 			fmt.Printf("ApiServer: api key is not set\n")
 		}
 		printAccessStatus(resp.Access)
+		printApiTCPNotStarted(resp.ApiTCPNotStarted, resp.ApiTCPNoCert)
 		printApiTCPStopped(resp.ApiTCPStopped, resp.ApiTCPStoppedBy, resp.Access != nil)
 	}
 
 	if resp.Msg != "" {
 		fmt.Printf("%s\n", resp.Msg)
 	}
+}
+
+// apiListeningLine is the `config status` line for the TCP API: the
+// configured addresses less those the daemon did not start for want of a
+// certificate or an access file stopped, which printApiTCPNotStarted and
+// printApiTCPStopped report.
+func apiListeningLine(resp tdns.ConfigResponse) string {
+	if len(resp.ApiServer.Addresses) == 0 {
+		return "ApiServer: not listening on any addresses"
+	}
+	var up []string
+	for _, a := range resp.ApiServer.Addresses {
+		if !slices.Contains(resp.ApiTCPNotStarted, a) && !slices.Contains(resp.ApiTCPStopped, a) {
+			up = append(up, a)
+		}
+	}
+	if len(up) == 0 {
+		return "ApiServer: NOT listening on any TCP address (see TCP API below)"
+	}
+	return fmt.Sprintf("ApiServer: listening on %v", up)
 }
 
 // apiSocketStatusLine is the `config status` line for the daemon's local
@@ -502,6 +520,26 @@ func printApiTCPStopped(stopped []string, by string, policy bool) {
 		fmt.Println("  file is set now, but it stays closed until the daemon restarts")
 		fmt.Println("  (the local socket works)")
 	}
+}
+
+// printApiTCPNotStarted prints the TCP listeners the daemon did not start
+// because it had no API certificate (it could not write its default pair).
+// cert is that certificate, on a line of its own (a path can be long); a
+// daemon that does not say gets the text without it. They stay off until a
+// restart, also once the pair is there.
+func printApiTCPNotStarted(addrs []string, cert string) {
+	if len(addrs) == 0 {
+		return
+	}
+	fmt.Printf("TCP API NOT STARTED on %s:\n", strings.Join(addrs, ", "))
+	if cert != "" {
+		fmt.Println("  no API certificate; the daemon could not write its default pair:")
+		fmt.Printf("    %s\n", cert)
+	} else {
+		fmt.Println("  no API certificate; the daemon could not write its default pair")
+	}
+	fmt.Println("  the daemon's log says why; fix that and restart the daemon")
+	fmt.Println("  (the local socket works)")
 }
 
 // printAccessStatus prints the network API's access policy as the daemon is

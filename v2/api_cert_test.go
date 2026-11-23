@@ -3,13 +3,17 @@ package tdns
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gorilla/mux"
 )
 
 // The default pair is named after the config file, next to it: one per
@@ -190,5 +194,41 @@ func TestEnsureDefaultApiCert(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(key); string(after) != string(before) {
 		t.Error("the remaining key was rewritten")
+	}
+}
+
+// A daemon that could not write its default pair starts no TCP listener, and
+// config status says so, with the certificate. The status takes it from the
+// dispatcher's record, not from the config, which a reload re-reads while the
+// listeners stay off until a restart.
+func TestConfigStatusReportsListenersNotStartedForWantOfACert(t *testing.T) {
+	resetApiDispatch(t)
+	e := newAuthEnv(t, "-", nil)
+	addrs := []string{freeTCPAddr(t), freeTCPAddr(t)}
+	dc := &Config{}
+	dc.ApiServer = ApiServerConf{Addresses: addrs, ApiKey: "k", UseTLS: true, CertPending: true}
+	dc.Internal.CfgFile = filepath.Join(t.TempDir(), "tdns-auth.yaml")
+	dc.Internal.ServerErrors = NewServerErrorRegistry()
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	if err := APIdispatcher(dc, mux.NewRouter(), done); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range addrs {
+		if listening(a) {
+			t.Errorf("%s listens without a certificate", a)
+		}
+	}
+	cert, _ := ApiCertPaths(dc.Internal.CfgFile)
+	st, body := e.callSocket(t, "/api/v1/config", `{"Command":"status"}`)
+	var cr ConfigResponse
+	if err := json.Unmarshal([]byte(body), &cr); st != http.StatusOK || err != nil {
+		t.Fatalf("config status: %d %v %q", st, err, body)
+	}
+	if !slices.Equal(cr.ApiTCPNotStarted, addrs) || cr.ApiTCPNoCert != cert {
+		t.Errorf("status: not started %v for want of %q; want %v and %s", cr.ApiTCPNotStarted, cr.ApiTCPNoCert, addrs, cert)
+	}
+	if len(cr.ApiTCPStopped) != 0 {
+		t.Errorf("status: stopped %v, want none (nothing was started to stop)", cr.ApiTCPStopped)
 	}
 }

@@ -42,6 +42,7 @@ func resetApiDispatch(t *testing.T) {
 	t.Cleanup(func() {
 		apiTCPServers.Lock()
 		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped, apiTCPServers.stoppedBy = nil, false, nil, ""
+		apiTCPServers.noCert, apiTCPServers.noCertFile = nil, ""
 		apiTCPServers.Unlock()
 		apiListenersStarted.Store(nil)
 		apiDispatchBeforeLockHook, apiDispatchLockedHook, apiActivateBeforeLockHook, apiServeHook = nil, nil, nil, nil

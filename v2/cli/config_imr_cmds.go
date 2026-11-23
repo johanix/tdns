@@ -89,6 +89,8 @@ func printImrConfigStatus(resp tdns.ConfigResponse) {
 	}
 	// As in the auth printer: a TCP API an access file stopped stays
 	// stopped after the file is removed, so this does not depend on Access.
+	// Listeners not started for want of a certificate are reported as well.
+	printApiTCPNotStarted(resp.ApiTCPNotStarted, resp.ApiTCPNoCert)
 	printApiTCPStopped(resp.ApiTCPStopped, resp.ApiTCPStoppedBy, resp.Access != nil)
 	// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
 	// init failed (the Upstream/ImrPriming husk) is precisely a

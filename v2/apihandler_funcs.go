@@ -524,6 +524,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Access = conf.apiAccessStatus()
 			resp.ApiTCPStopped = stoppedPlaintextApiListeners()
 			resp.ApiTCPStoppedBy = apiTCPStoppedBy()
+			resp.ApiTCPNotStarted, resp.ApiTCPNoCert = apiTCPNoCert()
 			health := "Configuration is ok"
 			if len(resp.ServerErrors) > 0 {
 				health = fmt.Sprintf("DEGRADED: %d active error(s)", len(resp.ServerErrors))

@@ -246,3 +246,68 @@ func TestImrConfigStatusReportsStoppedListeners(t *testing.T) {
 		t.Errorf("nothing stopped: printed %q", out)
 	}
 }
+
+// `config status` reports the TCP listeners the daemon did not start because
+// it could not write its default API pair, with the certificate, instead of
+// listing them as listening. Both printers (auth/agent and imr) do.
+func TestConfigStatusReportsListenersNotStarted(t *testing.T) {
+	addrs := []string{"127.0.0.1:8991", "10.6.0.4:8991"}
+	const cert = "/etc/tdns/certs/tdns-auth-api.crt"
+	if out := captureStdout(t, func() { printApiTCPNotStarted(nil, cert) }); out != "" {
+		t.Errorf("nothing not started: printed %q", out)
+	}
+	for _, tc := range []struct {
+		name, cert, want string
+	}{
+		{"cert named", cert, "TCP API NOT STARTED on 127.0.0.1:8991, 10.6.0.4:8991:\n" +
+			"  no API certificate; the daemon could not write its default pair:\n" +
+			"    " + cert + "\n" +
+			"  the daemon's log says why; fix that and restart the daemon\n" +
+			"  (the local socket works)\n"},
+		{"a daemon that does not name the cert", "", "TCP API NOT STARTED on 127.0.0.1:8991, 10.6.0.4:8991:\n" +
+			"  no API certificate; the daemon could not write its default pair\n" +
+			"  the daemon's log says why; fix that and restart the daemon\n" +
+			"  (the local socket works)\n"},
+	} {
+		out := captureStdout(t, func() { printApiTCPNotStarted(addrs, tc.cert) })
+		if out != tc.want {
+			t.Errorf("%s: printed\n%s\nwant\n%s", tc.name, out, tc.want)
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+			if len(line) > 72 {
+				t.Errorf("%s: line over 72 characters: %q", tc.name, line)
+			}
+		}
+	}
+
+	resp := tdns.ConfigResponse{Msg: "tdns-imr: Configuration is ok", ApiTCPNotStarted: addrs, ApiTCPNoCert: cert}
+	if out := captureStdout(t, func() { printImrConfigStatus(resp) }); !strings.Contains(out, "TCP API NOT STARTED on 127.0.0.1:8991, 10.6.0.4:8991:\n") || !strings.Contains(out, "    "+cert+"\n") {
+		t.Errorf("imr: printed %q, want the listeners not started and %s", out, cert)
+	}
+}
+
+// The ApiServer line lists only the TCP listeners that run: not those the
+// daemon did not start for want of a certificate, nor those an access file
+// stopped.
+func TestConfigStatusListeningLine(t *testing.T) {
+	addrs := []string{"127.0.0.1:8991", "10.6.0.4:8991"}
+	for _, tc := range []struct {
+		name string
+		resp tdns.ConfigResponse
+		want string
+	}{
+		{"no addresses", tdns.ConfigResponse{}, "ApiServer: not listening on any addresses"},
+		{"all started", tdns.ConfigResponse{ApiServer: tdns.ApiServerConf{Addresses: addrs}},
+			"ApiServer: listening on [127.0.0.1:8991 10.6.0.4:8991]"},
+		{"no certificate", tdns.ConfigResponse{ApiServer: tdns.ApiServerConf{Addresses: addrs}, ApiTCPNotStarted: addrs},
+			"ApiServer: NOT listening on any TCP address (see TCP API below)"},
+		{"stopped by an access file", tdns.ConfigResponse{ApiServer: tdns.ApiServerConf{Addresses: addrs}, ApiTCPStopped: addrs},
+			"ApiServer: NOT listening on any TCP address (see TCP API below)"},
+		{"one stopped", tdns.ConfigResponse{ApiServer: tdns.ApiServerConf{Addresses: addrs}, ApiTCPStopped: addrs[1:]},
+			"ApiServer: listening on [127.0.0.1:8991]"},
+	} {
+		if got := apiListeningLine(tc.resp); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
