@@ -44,7 +44,7 @@ func resetApiDispatch(t *testing.T) {
 		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped, apiTCPServers.stoppedBy = nil, false, nil, ""
 		apiTCPServers.Unlock()
 		apiListenersStarted.Store(nil)
-		apiDispatchLockedHook, apiServeHook = nil, nil
+		apiDispatchBeforeLockHook, apiDispatchLockedHook, apiActivateBeforeLockHook, apiServeHook = nil, nil, nil, nil
 	})
 }
 
@@ -143,18 +143,25 @@ func TestReloadHeldAtTheRegistrationBoundary(t *testing.T) {
 	conf := plaintextApiConf(addr)
 
 	reloaded := make(chan string, 1)
+	reloading := make(chan struct{})
 	held := false
+	// Signalled in activateApiAccess just before it takes the lock, so the
+	// window below starts when the reload is about to wait on it, however
+	// late its goroutine gets to run.
+	apiActivateBeforeLockHook = func() { close(reloading) }
 	apiDispatchLockedHook = func() {
 		held = true
-		reloading := make(chan struct{})
-		go func() {
-			close(reloading)
-			reloaded <- reloadAddingAccessFile(conf, accessFile)
-		}()
-		<-reloading
+		go func() { reloaded <- reloadAddingAccessFile(conf, accessFile) }()
+		select {
+		case <-reloading:
+		case <-time.After(5 * time.Second):
+			t.Error("the reload never got to the lock")
+			return
+		}
 		// Proving that something does not happen takes a window. Unheld,
-		// the reload finishes in well under it; a slow machine can only
-		// make this miss a regression, never fail a correct build.
+		// the reload, at the lock already, finishes in well under it; a
+		// slow machine can only make this miss a regression, never fail a
+		// correct build.
 		select {
 		case msg := <-reloaded:
 			reloaded <- msg
@@ -185,6 +192,32 @@ func TestReloadHeldAtTheRegistrationBoundary(t *testing.T) {
 	}
 	if listening(addr) {
 		t.Errorf("a plaintext listener answers on %s with the access file in force", addr)
+	}
+}
+
+// A reload that completes after everything APIdispatcher does before it
+// takes apiTCPServers' lock, and before it takes it, is seen by the policy
+// check: no plaintext listener starts. A check made before the lock (as an
+// early read of the policy would be) misses that reload and starts one,
+// which TestReloadHeldAtTheRegistrationBoundary cannot see: its reload comes
+// once the lock is held.
+func TestReloadJustBeforeTheLockStartsNoPlaintextListener(t *testing.T) {
+	resetApiDispatch(t)
+	accessFile := dispatchTestAccessFile(t)
+	addr := freeTCPAddr(t)
+	conf := plaintextApiConf(addr)
+	msg := ""
+	apiDispatchBeforeLockHook = func() { msg = reloadAddingAccessFile(conf, accessFile) }
+	startDispatcher(t, conf)
+	apiDispatchBeforeLockHook = nil
+	if !strings.Contains(msg, "Access file reloaded") {
+		t.Fatalf("the reload before the lock: %q", msg)
+	}
+	if listening(addr) {
+		t.Errorf("a plaintext listener runs on %s though the access file came into force before the dispatcher took the lock", addr)
+	}
+	if !slices.Contains(stoppedPlaintextApiListeners(), addr) || apiTCPStoppedBy() != accessFile {
+		t.Errorf("%s not reported as stopped by %s: %v by %q", addr, accessFile, stoppedPlaintextApiListeners(), apiTCPStoppedBy())
 	}
 }
 
