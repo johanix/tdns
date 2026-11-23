@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -513,7 +514,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.AuthEngine = conf.AuthEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.transportSignalConfig().Service.Identities
-			resp.DBFile = conf.Db.File
+			resp.DBFile = reportedDBFile(openedDBFile(conf))
 			resp.ServerErrors = conf.Internal.ServerErrors.List()
 			resp.Do53QueriesRefused = conf.Internal.do53QueriesRefused.Load()
 			// Every daemon that carries an IMR — tdns-imr itself or the
@@ -1115,4 +1116,36 @@ func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
+}
+
+// openedDBFile is the path the keystore was opened from, as NewKeyDB
+// recorded it: db.file after the trimming and cleaning InitializeKeyDB does
+// (" agent2.db " opens agent2.db), not as written. "" when no keystore file
+// is open (none configured, or one in memory).
+func openedDBFile(conf *Config) string {
+	if conf.Internal.KeyDB == nil {
+		return ""
+	}
+	return conf.Internal.KeyDB.DBFile
+}
+
+// reportedDBFile is the keystore path `config status` reports: absolute, as
+// the daemon resolved it. A relative db.file (agent2.db) is relative to the
+// daemon's working directory, and a CLI that opens the reported path to sign
+// an update (zone update create) would resolve it against its own. Empty
+// stays empty: filepath.Abs("") is the working directory, not "no keystore".
+//
+// A relative path the daemon cannot resolve (filepath.Abs fails when there is
+// no working directory to read) is reported as none, not as written: the CLI
+// would resolve it against its own directory. With none reported, a named
+// instance's CLI falls back to its own db.file, with a warning.
+func reportedDBFile(f string) string {
+	if f == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(f)
+	if err != nil {
+		return ""
+	}
+	return abs
 }

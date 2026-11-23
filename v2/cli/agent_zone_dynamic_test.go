@@ -14,8 +14,9 @@ import (
 // not the auth tree's, and not sharing its flag variables.
 func TestAgentZoneDynamicCmds(t *testing.T) {
 	auth := NewZoneCmd("auth")
+	agentZone := findSub(t, AgentCmd, "zone")
 	for _, name := range []string{"add", "delete", "modify", "list-dynamic"} {
-		a := findSub(t, AgentZoneCmd, name)
+		a := findSub(t, agentZone, name)
 		if u := findSub(t, auth, name); a == u {
 			t.Errorf("%s: the agent and auth trees share one command", name)
 		}
@@ -25,12 +26,26 @@ func TestAgentZoneDynamicCmds(t *testing.T) {
 	}
 
 	for _, f := range []string{"zone", "primaries", "options", "template", "type"} {
-		if findSub(t, AgentZoneCmd, "add").Flags().Lookup(f) == nil {
+		if findSub(t, agentZone, "add").Flags().Lookup(f) == nil {
 			t.Errorf("agent zone add: no --%s flag", f)
 		}
 	}
 
-	// Parse on a fresh set, not AgentZoneCmd's: a parsed command keeps its
+	// An agent instance has them too, as commands of its own (NewAgentZoneCmd
+	// builds them with the instance's role): "agent2 zone add" adds to agent2.
+	inst := NewAgentTree("sectagent", "sectagent")
+	instZone := findSub(t, inst, "zone")
+	for _, name := range []string{"add", "delete", "modify", "list-dynamic"} {
+		c := findSub(t, instZone, name)
+		if c == findSub(t, agentZone, name) {
+			t.Errorf("%s: the instance and the canonical agent share one command", name)
+		}
+		if want := "sectagent zone " + name; c.CommandPath() != want {
+			t.Errorf("%s: command path %q, want %q", name, c.CommandPath(), want)
+		}
+	}
+
+	// Parse on a fresh set, not the tree's: a parsed command keeps its
 	// flag values, and a string slice appends, so a second run in the same
 	// process (-count=2) would read the options twice.
 	var add *cobra.Command

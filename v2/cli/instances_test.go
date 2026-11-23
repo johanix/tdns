@@ -114,8 +114,13 @@ func withCleanRoleRegistry(t *testing.T) {
 	for k, v := range roleToClientKey {
 		saved[k] = v
 	}
+	// What the wiring recorded is part of the same state: InitApiClients
+	// reads it.
+	savedWired := wiredInstances
+	wiredInstances = map[string]ApiDetails{}
 	t.Cleanup(func() {
 		roleToClientKey = saved
+		wiredInstances = savedWired
 	})
 }
 

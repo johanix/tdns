@@ -104,13 +104,14 @@ the next run covers a new period.
 		if len(args) == 1 {
 			zone = dns.Fqdn(args[0])
 		}
-		runAuthTransports(cmd.Context(), zone)
+		runAuthTransports(cmd.Context(), imrRoleFor(cmd), zone)
 	},
 }
 
 // runAuthTransports fetches the report -- from the live cache in the tdns-imr
 // shell, over the /imr API from tdns-cli -- and prints it as the flags say.
-func runAuthTransports(ctx context.Context, zone string) {
+// role names the daemon the API call goes to.
+func runAuthTransports(ctx context.Context, role, zone string) {
 	if err := checkAuthTransportsSort(authTransportsSort); err != nil {
 		// Refused before anything is fetched: a typo must not cost a --reset.
 		fmt.Printf("Error: %v\n", err)
@@ -133,7 +134,7 @@ func runAuthTransports(ctx context.Context, zone string) {
 		if zone != "" {
 			data["zone"] = zone
 		}
-		amr, err := SendImrMgmtCmd(ctx, "imr", &tdns.ImrMgmtPost{Command: "imr-auth-transports", Data: data})
+		amr, err := SendImrMgmtCmd(ctx, role, &tdns.ImrMgmtPost{Command: "imr-auth-transports", Data: data})
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
