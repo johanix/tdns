@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 
@@ -187,6 +188,16 @@ func (conf *Config) apiAuthMiddleware(apikey string) mux.MiddlewareFunc {
 				http.Error(w, msg, status)
 				return
 			}
+			// A client that names the config it means (tdns-ncli on the local
+			// socket it found through that config) is refused here, before
+			// the request does anything, when this daemon runs another: the
+			// socket path may be held by a daemon other than the one the
+			// client checked earlier.
+			if want := r.Header.Get(ExpectConfigFileHeader); want != "" && !sameConfigFile(want, conf.Internal.CfgFile) {
+				lgApi.Info("api request refused: for another daemon's config", "from", r.RemoteAddr, "path", r.URL.Path, "wanted", want)
+				http.Error(w, fmt.Sprintf("this daemon runs %s, not %s", absConfigFile(conf.Internal.CfgFile), want), http.StatusPreconditionFailed)
+				return
+			}
 			route := r.URL.Path
 			if cr := mux.CurrentRoute(r); cr != nil {
 				if tpl, err := cr.GetPathTemplate(); err == nil {
@@ -335,4 +346,27 @@ func (conf *Config) apiAccessStatus() *ApiAccessStatus {
 		out.Clients = append(out.Clients, ApiAccessStatusClient{Name: c.Name, Pin: c.Pin, Role: c.Role, Disabled: c.Disabled})
 	}
 	return out
+}
+
+// absConfigFile is cfg made absolute from this daemon's working directory.
+func absConfigFile(cfg string) string {
+	if abs, err := filepath.Abs(cfg); err == nil {
+		return abs
+	}
+	return cfg
+}
+
+// sameConfigFile says whether want, the config file a client means, is
+// cfg, this daemon's: as given, cleaned, or with symlinks resolved.
+func sameConfigFile(want, cfg string) bool {
+	if cfg == "" {
+		return false
+	}
+	a, b := filepath.Clean(want), absConfigFile(cfg)
+	if a == b {
+		return true
+	}
+	ra, erra := filepath.EvalSymlinks(a)
+	rb, errb := filepath.EvalSymlinks(b)
+	return erra == nil && errb == nil && ra == rb
 }

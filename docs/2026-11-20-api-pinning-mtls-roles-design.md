@@ -172,14 +172,21 @@ and not in the CLI config.** The owner's rulings:
   `usetls: false` as the way in when TLS is broken, and a fallback that has to
   be configured beforehand is missing exactly when it is needed: none of the
   test servers had a `socket:` line. Unset, the path is in `/var/run/tdns`,
-  named after the config file's whole path, always:
-  `/etc/tdns/tdns-auth.yaml` serves `etc-tdns-tdns-auth.sock`,
-  `/etc/tdns-site/tdns-auth.yaml` serves `etc-tdns-site-tdns-auth.sock`. The
-  name says at once which config the socket belongs to (the owner's reason),
-  and two daemons never share a socket, even when instances in different
-  directories share a file name (testor runs three `tdns-auth.yaml`). A path
-  too long for a socket becomes the file name plus a hash of the path.
-  `socket: none` turns it off.
+  named after the config file's whole path, extension included, always:
+  `/etc/tdns/tdns-auth.yaml` serves `etc_tdns_tdns-auth.yaml.sock`,
+  `/etc/tdns-site/tdns-auth.yaml` serves `etc_tdns-site_tdns-auth.yaml.sock`.
+  The name says at once which config the socket belongs to (the owner's
+  reason), and no two config paths give one name: `/` becomes `_`, and a `_`,
+  `%` or any character but a letter, digit, `.` or `-` in the path is
+  %-escaped (the owner chose this over `-` for `/`, which let
+  `/etc/tdns-site/x.yaml` and `/etc/tdns/site/x.yaml` collide). Two daemons
+  then never share a socket, even when instances in different directories
+  share a file name (testor runs three `tdns-auth.yaml`). A path too long for
+  a socket becomes the escaped file name, `%%` and a hash of the path.
+  `socket: none` turns it off. A socket client that found the socket through
+  an entry's `config-file:` names that file in every request
+  (`X-Tdns-Config-File`), and a daemon that runs another config refuses the
+  request (412) before acting on it.
   `tdns.ApiSocketPath` does this, in the daemon's load (`ParseConfig`, and the
   decode `config check` uses) and in tdns-ncli. A socket that cannot be served
   is an error the daemon reports and runs on without, as before.
@@ -201,7 +208,7 @@ and not in the CLI config.** The owner's rulings:
   address even then, to see what a remote operator sees. Since the choice is
   made at run time, `ping` (the test of how access is authenticated) says on
   its one line which way it went and as whom, from the daemon's reply (role,
-  via and identity, in parts): `pong (admin socket /var/run/tdns/etc-tdns-tdns-auth.sock)
+  via and identity, in parts): `pong (admin socket /var/run/tdns/etc_tdns_tdns-auth.yaml.sock)
   from tdns-auth @ host: ...`, `pong (TLS, admin) from ...` for the key,
   `pong (TLS, read-write, certificate anna) from ...`. An entry tdns-ncli
   refuses (no pin) is reported as an error with its fix on lines of its own,

@@ -53,22 +53,19 @@ const ApiSocketNone = "none"
 // no socket ("") for "none", and, when it is not set, the default in
 // DefaultApiSocketDir, named after the config file's whole path:
 //
-//	/etc/tdns/tdns-auth.yaml       -> /var/run/tdns/etc-tdns-tdns-auth.sock
-//	/etc/tdns-site/tdns-auth.yaml  -> /var/run/tdns/etc-tdns-site-tdns-auth.sock
+//	/etc/tdns/tdns-auth.yaml       -> /var/run/tdns/etc_tdns_tdns-auth.yaml.sock
+//	/etc/tdns-site/tdns-auth.yaml  -> /var/run/tdns/etc_tdns-site_tdns-auth.yaml.sock
 //
-// The whole path, always: the socket's name says at once which config it
-// belongs to, and two daemons never share a socket, even when instances in
-// different directories share a file name (testor runs tdns-auth.yaml from
-// /etc/tdns, /etc/tdns-site and /etc/tdns-enc). A shared socket would leave
-// the second daemon without one, and tdns-ncli would reach the first through
-// the second's entry. A path too long for a socket is shortened to the file
-// name and a hash of the path.
-//
-// Every daemon has the socket unless told otherwise. It is the way in when the
-// network API is not (a broken TLS setup, a lost key), and a way in that has
-// to be configured beforehand is missing exactly then. tdns-ncli works the
-// socket out the same way from an entry's config-file:, so no CLI config
-// repeats the path.
+// The whole path, always, extension included: the socket's name says at once
+// which config it belongs to (the owner's ruling), and two configs never
+// share a socket, even when instances in different directories share a file
+// name (testor runs tdns-auth.yaml from /etc/tdns, /etc/tdns-site and
+// /etc/tdns-enc). A shared socket would leave the second daemon without its
+// way in. "/" becomes "_", and a "_", "%" or any character but a letter,
+// digit, "." or "-" in the path itself is %-escaped, so no two paths give one
+// name (/etc/tdns-site/x.yaml and /etc/tdns/site/x.yaml stay apart). A path
+// too long for a socket becomes the escaped file name, "%%" (which no escaped
+// path contains) and a hash of the path.
 func ApiSocketPath(configured, cfgfile string) string {
 	switch {
 	case strings.EqualFold(configured, ApiSocketNone):
@@ -82,22 +79,40 @@ func ApiSocketPath(configured, cfgfile string) string {
 	if err != nil {
 		return ""
 	}
-	noExt := strings.TrimSuffix(abs, filepath.Ext(abs))
-	base := filepath.Base(noExt)
-	if base == "" || base == "." || base == string(filepath.Separator) {
+	rel := strings.TrimPrefix(filepath.ToSlash(abs), "/")
+	if rel == "" {
 		return ""
 	}
-	name := strings.ReplaceAll(strings.TrimPrefix(noExt, string(filepath.Separator)), string(filepath.Separator), "-")
-	p := filepath.Join(DefaultApiSocketDir, name+".sock")
+	p := filepath.Join(DefaultApiSocketDir, socketNameEscape(rel)+".sock")
 	if len(p) > maxApiSocketPathLen {
 		sum := sha256.Sum256([]byte(abs))
-		tail := "-" + hex.EncodeToString(sum[:4]) + ".sock"
+		tail := "%%" + hex.EncodeToString(sum[:4]) + ".sock"
+		base := socketNameEscape(filepath.Base(abs))
 		if room := maxApiSocketPathLen - len(DefaultApiSocketDir) - 1 - len(tail); len(base) > room {
 			base = base[:max(room, 0)]
 		}
 		p = filepath.Join(DefaultApiSocketDir, base+tail)
 	}
 	return p
+}
+
+// socketNameEscape is path (slash-separated, no leading slash) as one file
+// name: "/" becomes "_"; letters, digits, "." and "-" stay; anything else,
+// "_" and "%" included, becomes %XX. Different paths give different names.
+func socketNameEscape(path string) string {
+	var b strings.Builder
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		switch {
+		case c == '/':
+			b.WriteByte('_')
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '-':
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
 }
 
 // CheckApiSocketPath says whether path can be an apiserver.socket at all: an

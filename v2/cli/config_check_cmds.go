@@ -689,7 +689,7 @@ func applyDaemonDefaults(v *viper.Viper, cfg *tdns.Config, cfgPath string) {
 
 // socketPathHint is the fix for an apiserver.socket the daemon refuses
 // (tdns.CheckApiSocketPath).
-const socketPathHint = "make apiserver.socket an absolute path of at most 100 bytes, e.g. /var/run/tdns/etc-tdns-tdns-auth.sock, or leave it out for that default"
+const socketPathHint = "make apiserver.socket an absolute path of at most 100 bytes, e.g. /var/run/tdns/etc_tdns_tdns-auth.yaml.sock, or leave it out for that default"
 
 func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 	const g = "API server"

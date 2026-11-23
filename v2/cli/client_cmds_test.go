@@ -662,7 +662,7 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: /nonexistent/api.crt\n"))
 		before, _ := os.ReadFile(env.cli)
 		res, err := env.add(t, d, nil)
-		if err != nil || res.Pinned || res.Wrote || !strings.Contains(strings.Join(res.Notes, " "), "has no pin") {
+		if err != nil || res.Pinned || res.Wrote || !strings.Contains(strings.Join(res.Notes, " "), "refuses it over TCP (root still reaches the daemon over its local admin socket)") {
 			t.Errorf("%+v, %v", res, err)
 		}
 		if after, _ := os.ReadFile(env.cli); string(after) != string(before) {
@@ -690,7 +690,7 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 	writeFile(t, cfg, daemonYAML("", "127.0.0.1:8085", "k", "")) // no socket: line
 	// Outside /etc/tdns the default is named after the whole path.
 	sock := tdns.ApiSocketPath("", cfg)
-	if filepath.Dir(sock) != dir || !strings.HasSuffix(sock, "-tdns-imr.sock") {
+	if filepath.Dir(sock) != dir || !strings.HasSuffix(sock, "_tdns-imr.yaml.sock") {
 		t.Fatalf("default socket %q, want one in %s named after %s", sock, dir, cfg)
 	}
 	if got, addrs := daemonSocket(cfg); got != sock || len(addrs) != 1 || addrs[0] != "127.0.0.1:8085" {
@@ -719,9 +719,11 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 	// The daemon on the socket says which config it runs (identity).
 	var mu sync.Mutex
 	runs := cfg
+	var sent []string // the expected config each request named
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
+		sent = append(sent, r.Header.Get(tdns.ExpectConfigFileHeader))
 		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: runs})
 	})}
 	go srv.Serve(ln)
@@ -729,6 +731,23 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 	if s := socketOf(t, e); s != sock {
 		t.Errorf("socket answering: socket %q, want %s", s, sock)
 	}
+	// A command over the chosen socket names the entry's config, so that a
+	// daemon that took the socket since the check refuses it.
+	c, _, err := newApiClientFor(e, CliClientConf{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	sent = nil
+	mu.Unlock()
+	if _, err := SendConfigCommand(c, tdns.ConfigPost{Command: "status"}); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	if len(sent) != 1 || sent[0] != cfg {
+		t.Errorf("the command named %q, want %s", sent, cfg)
+	}
+	mu.Unlock()
 
 	// Another daemon holds the socket: its identity is not this entry's
 	// config, so the entry goes over TCP and says why; one with no TCP
@@ -1130,7 +1149,7 @@ func TestStatusGoesOverTheSocket(t *testing.T) {
 	if err := InitApiClients(apiConfig); err != nil {
 		t.Fatal(err)
 	}
-	resp, err := configToDaemon("auth", sock, tdns.ConfigPost{Command: "status"})
+	resp, err := configToDaemon("auth", sock, "", tdns.ConfigPost{Command: "status"})
 	if err != nil || resp.Msg != "via the socket: status" {
 		t.Errorf("status: %q, %v; want it over the socket", resp.Msg, err)
 	}

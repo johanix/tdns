@@ -364,6 +364,12 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 		return nil, "", fmt.Errorf("entry %q is a local socket entry (baseurl %s), so it has no TCP address for --tcp", e.Name, e.BaseURL)
 	}
 	o := tdns.ClientOptions{ApiKey: e.ApiKey, AuthMethod: e.AuthMethod, RootCA: e.RootCA}
+	if sock != "" {
+		// Checked above, and on every request too: the daemon refuses one
+		// meant for another config, so a daemon that took the socket after
+		// the check cannot run the command.
+		o.ExpectConfigFile = e.ConfigFile
+	}
 	warn := ""
 	if strings.HasPrefix(strings.ToLower(e.BaseURL), "https://") {
 		switch strings.ToLower(e.TLSAuth) {
