@@ -31,6 +31,9 @@ type DaemonApi struct {
 	ApiKey string
 	// Socket is apiserver.socket, the daemon's local admin socket, or "".
 	Socket string
+	// SocketError says why Socket is "" although apiserver.socket names a
+	// path: one the daemon refuses to serve.
+	SocketError string
 	// CertFile is apiserver.certfile: the certificate the daemon presents,
 	// whose pin a TCP entry records.
 	CertFile string
@@ -99,7 +102,7 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 		if err := tdns.CheckApiSocketPath(out.Socket); err != nil {
 			out.Warnings = append(out.Warnings, fmt.Sprintf(
 				"%v: the daemon does not serve it, so it is not used here", err))
-			out.Socket = ""
+			out.Socket, out.SocketError = "", err.Error()
 		}
 	}
 	if len(out.Addresses) == 0 && out.Socket == "" {

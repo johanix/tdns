@@ -565,7 +565,9 @@ func TestAddPinsTheDaemonCertificate(t *testing.T) {
 // same daemon fixes it in place: tlsauth: pin and the pin added, a rootca:
 // line removed, the rest of the file as it was. An entry pinning an earlier
 // certificate keeps its pins and gets the current one too. Run again, the add
-// changes nothing.
+// changes nothing. (The daemon here serves no local admin socket, so it can
+// have no access file: the entries keep their key, and the pin is all that
+// changes. The switch to the certificate is TestAddSwitchesAKeyEntry.)
 func TestAddPinsAKnownEntry(t *testing.T) {
 	saved := runningAsRoot
 	t.Cleanup(func() { runningAsRoot = saved })
@@ -582,7 +584,7 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 		certFile := filepath.Join(env.dir, "api.crt")
 		writeFile(t, certFile, string(certPEM))
 		d := filepath.Join(env.dir, "tdns-imr.yaml")
-		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: "+certFile+"\n"))
+		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: "+certFile+"\n   socket: none\n"))
 		writeFile(t, env.cli, strings.ReplaceAll(entry, "@D@", d))
 		return env, d
 	}
@@ -620,10 +622,14 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 			t.Errorf("the pinned entry is still refused: %v", err)
 		}
 
+		if !res.KeyKept || res.Switched {
+			t.Errorf("result = %+v; want the key kept (the daemon can have no access file)", res)
+		}
 		var sb strings.Builder
 		printAddResult(&sb, res, false, env.cli)
-		if !strings.Contains(sb.String(), "pinned the daemon's certificate") || strings.Contains(sb.String(), "nothing changed") {
-			t.Errorf("printed:\n%s", sb.String())
+		if out := sb.String(); !strings.Contains(out, "pinned the daemon's certificate") || strings.Contains(out, "nothing changed") ||
+			!strings.Contains(out, "keeps the API key") || !strings.Contains(out, "local admin socket") {
+			t.Errorf("printed:\n%s", out)
 		}
 
 		res, err = env.add(t, d, nil)
@@ -649,7 +655,7 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 
 	t.Run("an unreadable certificate, a pkix entry: its verification unchanged", func(t *testing.T) {
 		env, d := setup(t, "apiservers:\n   - name: tdns-imr\n     baseurl: https://127.0.0.1:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     tlsauth: pkix\n     config-file: @D@\n")
-		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: /nonexistent/api.crt\n"))
+		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: /nonexistent/api.crt\n   socket: none\n"))
 		res, err := env.add(t, d, nil)
 		notes := strings.Join(res.Notes, " ")
 		if err != nil || res.Pinned || strings.Contains(notes, "refuses") || !strings.Contains(notes, "verification is unchanged") {
@@ -659,7 +665,7 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 
 	t.Run("an unreadable certificate: a note, nothing changed", func(t *testing.T) {
 		env, d := setup(t, "apiservers:\n   - name: tdns-imr\n     baseurl: https://127.0.0.1:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     config-file: @D@\n")
-		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: /nonexistent/api.crt\n"))
+		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: /nonexistent/api.crt\n   socket: none\n"))
 		before, _ := os.ReadFile(env.cli)
 		res, err := env.add(t, d, nil)
 		if err != nil || res.Pinned || res.Wrote || !strings.Contains(strings.Join(res.Notes, " "), "refuses it over TCP (root may still reach the daemon over its local admin socket, while the daemon serves one and --tcp is not given)") {

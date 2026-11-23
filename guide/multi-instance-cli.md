@@ -65,9 +65,10 @@ tdns-ncli config add /etc/tdns/tdns-auth2.yaml    # a second one
 
 For each file it:
 
-- reads the `apiserver:` block (`addresses`, `apikey`, `usetls`, which defaults
-  to true as in the daemon) and builds the base URL; a wildcard listen address
-  such as `0.0.0.0` becomes `127.0.0.1`, since that is where the CLI connects;
+- reads the `apiserver:` block (`addresses`, `usetls`, which defaults to true
+  as in the daemon, `certfile`, `socket`, `access-file`) and builds the base
+  URL; a wildcard listen address such as `0.0.0.0` becomes `127.0.0.1`, since
+  that is where the CLI connects;
 - works out which daemon it is for: `service.name` (`TDNS-AUTH`, `TDNS-AGENT`),
   or, for `tdns-imr`, an `imrengine:` block with no `service:` block, or
   failing both the file name. If it cannot tell it asks for `--role
@@ -79,16 +80,59 @@ For each file it:
   `tdns-auth2.yaml` gives `auth2`, reached as `tdns-ncli auth2 ...`. `--name`
   chooses another; a name that is a role, an existing entry, or an existing
   command is refused;
+- pins the daemon's certificate (`tlsauth: pin`, `pins:`);
+- makes the entry authenticate with **your client certificate**
+  (`authmethod: certificate`, no `apikey:` line), and sets that up, below;
 - records the daemon config's path as `config-file:`.
 
-It creates `/etc/tdns/tdns-ncli.yaml` (mode 0600, it holds API keys) if it does
-not exist, so the whole file can be built from the daemons' own configs. If it
-does exist, the new entry is spliced into the existing `apiservers:` list in
-the style of the entries already there; comments and everything else in the
-file are left alone. Adding a daemon that is already there changes nothing;
-if its API key or `usetls` has changed since, the add says which, and the entry
-is yours to edit. `--dry-run` shows the entry without writing it. The API key
-is never printed.
+**Your certificate, at both ends.** The entry presents your pair: the one the
+CLI config's `client:` block names, else the default (`~/.config/tdns/certs/`,
+for root `/etc/tdns/certs/tdns-ncli-client.crt`). If you have none, `config
+add` makes it, as `tdns-ncli client init` does, and prints its pin. The daemon
+accepts it only once its access file lists that pin, so when `config add` can
+write the daemon's files (run as root on the daemon's host) it:
+
+- enrolls the pin in the daemon's access file, read-write, under your
+  certificate's name, as `tdns-ncli <daemon> client add` would. A pin already
+  there, under any name, is left as it is; one there but disabled is reported,
+  not enabled;
+- if the daemon config names no access file, creates one next to it
+  (`tdns-auth.yaml` gets `tdns-auth-access.yaml`) and adds one line under
+  `apiserver:` in the daemon config, leaving the rest of the file as it was:
+
+  ```yaml
+     access-file: /etc/tdns/tdns-auth-access.yaml
+  ```
+
+  That changes the daemon's TCP API, and `config add` says so: the API key
+  over TCP is read-write, no longer admin; TCP clients need TLS 1.3; admin is
+  the local admin socket's alone. It does not do this for a daemon with
+  `usetls: false` on its TCP addresses (it refuses an access file then), nor
+  for one with `socket: none`;
+- reloads the daemon over its local admin socket and checks that it now runs
+  your pin. A reload that does not take puts every file back. A daemon that
+  is not running gets the files, and reads them when it next starts.
+
+When it cannot do that (you are not root on the daemon's host, say), a new
+entry is refused, with the lines that fix it: the exact `client add` line,
+with your pin, for an admin to run on the daemon's host, and the
+`access-file:` line if the daemon config needs one. Run `config add` again
+once that is done; reading the access file is enough then.
+
+It creates `/etc/tdns/tdns-ncli.yaml` (mode 0600) if it does not exist, so the
+whole file can be built from the daemons' own configs. If it does exist, the
+new entry is spliced into the existing `apiservers:` list in the style of the
+entries already there; comments and everything else in the file are left
+alone. **Adding a daemon that is already there** keeps its entry, brought up to
+date: it is pinned if it does not pin the daemon's current certificate, and an
+entry that uses the API key is switched to your certificate
+(`authmethod: certificate` where that line stands, the `apikey:` line removed)
+once the daemon accepts it. If the certificate cannot be set up, the entry
+keeps the key, provided the key still works (the daemon's key, and not turned
+off by `keyauth: false`), and `config add` prints what the certificate still
+needs. If a key entry's API key or `usetls` has changed since, the add says
+which, and the entry is yours to edit. `--dry-run` shows what it would do
+without changing anything. An API key is never printed.
 
 It checks its own work: after writing, the file is loaded the way the CLI loads
 it, and if the list is not exactly the old one plus the new entry the change is
@@ -101,22 +145,14 @@ the error prints the entry to add by hand. Two adds at once take turns.
 A second daemon of any of the three types becomes an instance: `auth`,
 `agent` and `imr` all have instance trees.
 
-**The local admin socket.** When the daemon config has `apiserver.socket` and
-`config add` runs as root, the entry uses the socket instead of TCP:
-
-```yaml
-   - name:        tdns-auth
-     baseurl:     unix:///var/run/tdns/tdns-auth.sock
-     authmethod:  none
-     config-file: /etc/tdns/tdns-auth.yaml
-```
-
-No API key and no TLS: the daemon authenticates the socket by file permissions
-(mode 0600 in a directory only root can enter), and whoever can open it is
-admin. Run as another user, who cannot open the socket, or with `--tcp`, the
-entry uses the daemon's TCP address and API key as before. If the daemon is
-already in the CLI config over TCP, `config add` says so and tells you which
-lines to change to use the socket.
+**The local admin socket.** The entry is always the TCP one, with
+`config-file:`. Run as root, `tdns-ncli` finds the daemon's local admin socket
+through that file and uses it instead of TCP: no credentials and no TLS (the
+daemon authenticates the socket by file permissions, mode 0600 in a directory
+only root can enter), and whoever can open it is admin. `tdns-ncli --tcp`
+uses the TCP address even then, to see what a remote operator sees. A daemon
+with no TCP address gets an entry with `config-file:` alone, which only root
+can use. An entry written as `baseurl: unix://...` still works.
 
 ### Listing: `config list`
 
@@ -345,10 +381,10 @@ daemon's own certificate (`apiserver.certfile`), so there is nothing to do:
 ```yaml
    - name:        tdns-auth
      baseurl:     https://127.0.0.1:8989/api/v1
-     apikey:      ...
-     authmethod:  X-API-Key
+     authmethod:  certificate
      tlsauth:     pin
      pins:        [ "<SPKI SHA-256 of the daemon's key>" ]
+     config-file: /etc/tdns/tdns-auth.yaml
 ```
 
 The pin is the daemon's key: no CA and no name check, and a list so a new key
@@ -368,11 +404,12 @@ tdns-ncli client init
 
 It writes a self-signed certificate and its key (mode 0600) to
 `~/.config/tdns/certs/` (for root, `/etc/tdns/certs/tdns-ncli-client.crt` and `.key`) and
-prints its pin and the line that enrolls it on a daemon. An entry with
-`authmethod: certificate` presents it, and sends no key; a top-level `client:`
-block (`cert:`, `key:`) names other files. Only such entries present it: a
-daemon that does not know your certificate refuses it even with a valid key,
-so an entry that should keep using the key must not offer the certificate.
+prints its pin and the line that enrolls it on a daemon. (`config add` makes
+it too, when you have none.) An entry with `authmethod: certificate` presents
+it, and sends no key; a top-level `client:` block (`cert:`, `key:`) names
+other files. Only such entries present it: a daemon that does not know your
+certificate refuses it even with a valid key, so an entry that should keep
+using the key must not offer the certificate.
 
 **On the daemon's host**, `tdns-ncli <daemon> client ...` manages the daemon's
 access file:
@@ -392,6 +429,8 @@ shows the result). The commands edit files on the daemon's host and refuse an
 entry whose daemon config is not there. If the daemon config does not name an
 access file yet, `client add` creates one next to it and prints the
 `access-file:` (and `socket:`) lines to add; until then the daemon ignores it.
+(`config add`, which enrolls your own certificate, adds the `access-file:`
+line itself.)
 Roles and the rules behind them: `guide/config-tdns-auth.md`, "Network clients
 and roles".
 
@@ -416,7 +455,8 @@ identities. Two things are worth knowing:
 
 1. Install `tdns-ncli` alongside `tdns-cli` (`make -C cmdv2/ncli install`).
 2. Build its config from the daemons' own: `tdns-ncli config add
-   /etc/tdns/tdns-auth.yaml`, then once for each further daemon or instance.
+   /etc/tdns/tdns-auth.yaml`, then once for each further daemon or instance,
+   as root on the daemons' host, so it can enroll your certificate.
    `/etc/tdns/tdns-cli.yaml` is not touched.
 3. Check it with `tdns-ncli config list --check`, or one daemon with
    `tdns-ncli --debug <name> ping`.

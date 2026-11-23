@@ -145,14 +145,43 @@ func findApiserversKey(lines []string) (int, error) {
 // reKeyLine is a "key: rest" line of a mapping, the indentation removed.
 var reKeyLine = regexp.MustCompile(`^([A-Za-z_-]+):(.*)$`)
 
-// repinEntryText returns src with the apiservers: item named name verifying
-// by pin: its tlsauth:, pins: and rootca: lines removed, each with any lines
-// of its value below it, and "tlsauth: pin" and up's pins added at the end of
-// the item, aligned like the list's first item. Nothing else in the file
-// changes, comments and alignment included. An item it cannot edit with
-// confidence (tabs, one of those keys on the item's first line) it refuses.
-// The caller checks the result by loading it.
+// entryEdit says what editEntryText changes in an apiservers: item.
+type entryEdit struct {
+	// repin: verify the daemon by pin. The item's tlsauth:, pins: and rootca:
+	// lines go, and "tlsauth: pin" and the new entry's pins are added.
+	repin bool
+	// toCert: authenticate with the client certificate. The item's apikey:
+	// line goes, and its authmethod: becomes certificate where it stands (or
+	// is added, if it has none).
+	toCert bool
+}
+
+// reAuthMethodValue splits the rest of an "authmethod:" line into the space
+// before the value and any comment after it.
+var reAuthMethodValue = regexp.MustCompile(`^([ \t]*)[^#]*?([ \t]+#.*)?$`)
+
+// repinEntryText is editEntryText making the item verify by pin, and nothing
+// else.
 func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
+	return editEntryText(src, name, up, entryEdit{repin: true})
+}
+
+// editEntryText returns src with the apiservers: item named name changed as
+// ed says: the lines of the keys it replaces removed, each with any lines of
+// its value below it, an authmethod: line given its new value in place, and
+// the new lines (tlsauth: and pins:, or authmethod: if the item had none)
+// added at the end of the item, aligned like the list's first item. Nothing
+// else in the file changes, comments and alignment included. An item it
+// cannot edit with confidence (tabs, one of those keys on the item's first
+// line) it refuses. The caller checks the result by loading it.
+func editEntryText(src []byte, name string, up ApiDetails, ed entryEdit) ([]byte, error) {
+	drops := map[string]bool{}
+	if ed.repin {
+		drops["tlsauth"], drops["pins"], drops["rootca"] = true, true, true
+	}
+	if ed.toCert {
+		drops["apikey"] = true
+	}
 	lines := strings.Split(string(src), "\n")
 	start, err := findApiserversKey(lines)
 	if err != nil {
@@ -218,8 +247,7 @@ func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
 		if strings.Contains(m[2], "\t") {
 			return nil, errors.New("the entry is indented with tabs")
 		}
-		switch strings.ToLower(m[3]) {
-		case "tlsauth", "pins", "rootca":
+		if k := strings.ToLower(m[3]); drops[k] || (ed.toCert && k == "authmethod") {
 			return nil, fmt.Errorf("its %s: is on its first line", m[3])
 		}
 		keyCol = len(m[1]) + 1 + len(m[2])
@@ -228,6 +256,7 @@ func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
 	kept := []string{lines[it.from]}
 	lastContent := 0 // index in kept of the item's last line of content
 	dropping := false
+	hasAuthMethod := false
 	for j := it.from + 1; j < it.to; j++ {
 		l := strings.TrimRight(lines[j], "\r")
 		body := strings.TrimLeft(l, " ")
@@ -251,14 +280,33 @@ func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
 			continue
 		}
 		dropping = false
+		line := lines[j]
 		if m := reKeyLine.FindStringSubmatch(body); m != nil && ind == keyCol {
-			switch strings.ToLower(m[1]) {
-			case "tlsauth", "pins", "rootca":
+			k := strings.ToLower(m[1])
+			if drops[k] {
 				dropping = true
 				continue
 			}
+			if ed.toCert && k == "authmethod" {
+				// The value replaced where it stands, its spacing and any
+				// comment kept. A value on the lines below would be a
+				// multi-line scalar nobody writes for this key: refused.
+				hasAuthMethod = true
+				v := reAuthMethodValue.FindStringSubmatch(m[2])
+				if v == nil || strings.TrimSpace(strings.TrimSuffix(m[2], v[2])) == "" {
+					return nil, errors.New("its authmethod: has no value on its line")
+				}
+				pad := v[1]
+				if pad == "" {
+					pad = " "
+				}
+				line = l[:ind] + m[1] + ":" + pad + "certificate" + v[2]
+				if strings.HasSuffix(lines[j], "\r") {
+					line += "\r"
+				}
+			}
 		}
-		kept = append(kept, lines[j])
+		kept = append(kept, line)
 		lastContent = len(kept) - 1
 	}
 	if keyCol < 0 {
@@ -266,9 +314,14 @@ func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
 	}
 
 	valueCol := detectLayout(lines[start+1 : last+1]).valueCol
-	add := []string{
-		kvLine(keyCol, valueCol, "tlsauth", "pin"),
-		kvLine(keyCol, valueCol, "pins", pinsFlow(up.Pins)),
+	var add []string
+	if ed.toCert && !hasAuthMethod {
+		add = append(add, kvLine(keyCol, valueCol, "authmethod", "certificate"))
+	}
+	if ed.repin {
+		add = append(add,
+			kvLine(keyCol, valueCol, "tlsauth", "pin"),
+			kvLine(keyCol, valueCol, "pins", pinsFlow(up.Pins)))
 	}
 	edited := make([]string, 0, len(kept)+len(add))
 	edited = append(edited, kept[:lastContent+1]...)

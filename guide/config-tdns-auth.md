@@ -102,9 +102,9 @@ when `apiserver.addresses` is empty, and a socket the daemon cannot serve is
 reported as a server error (`config status` shows the daemon as degraded)
 rather than stopping it.
 
-`tdns-ncli config add` writes a socket entry (`baseurl:
-unix:///var/run/tdns/tdns-auth.sock`, `authmethod: none`) when run as root, so
-the CLI config on the daemon's own host needs no API key.
+`tdns-ncli config add` writes the daemon's TCP entry with `config-file:`;
+run as root, `tdns-ncli` finds the socket through that file and uses it, so
+root on the daemon's own host needs no credentials at all.
 
 ## Network clients and roles: the access file
 
@@ -152,6 +152,11 @@ clients:
 - `tdns-ncli <daemon> ping` says who the daemon took you for, and `config
   status` shows the running policy. `config check` validates the file with the
   daemon's own code.
+- `tdns-ncli config add <this config>`, run as root on the daemon's host,
+  sets this up for the operator's own certificate: it enrolls the pin
+  (read-write), creates the access file and adds the `access-file:` line
+  when the config names none, and reloads the daemon over the socket. See
+  [config add](multi-instance-cli.md#adding-a-daemon-config-add).
 
 ## TSIG configuration
 

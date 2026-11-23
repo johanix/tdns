@@ -53,8 +53,12 @@ func DefaultClientCertPaths() (cert, key string) {
 	return filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
 }
 
+// defaultClientCertPaths is DefaultClientCertPaths, as a variable so the tests
+// keep the operator's real pair (in the home directory) out of their way.
+var defaultClientCertPaths = DefaultClientCertPaths
+
 func clientCertPaths(cc CliClientConf) (string, string) {
-	cert, key := DefaultClientCertPaths()
+	cert, key := defaultClientCertPaths()
 	if cc.Cert != "" {
 		cert = cc.Cert
 	}
@@ -297,12 +301,24 @@ func resolveAccessTarget(role string) (*accessTarget, error) {
 		return nil, fmt.Errorf("%s's entry %s (%s) has no config-file:, so nothing says it is the daemon of %s; the client commands edit a daemon's own files, and an address does not tell which daemon answers on it. Add \"config-file: %s\" to that entry by hand (config add does not add it to an entry it already knows)",
 			role, ad.Name, ad.BaseURL, cfg, cfg)
 	}
+	return accessTargetOf(info), nil
+}
+
+// accessTargetOf is the access file of the daemon whose API info describes:
+// the one its config names, or the path suggested for it when none is named.
+func accessTargetOf(info *DaemonApi) *accessTarget {
 	t := &accessTarget{DaemonConfig: info.ConfigFile, File: info.AccessFile, Configured: info.AccessFile != "", HasSocket: info.Socket != "", Socket: info.Socket}
 	if !t.Configured {
-		base := strings.TrimSuffix(filepath.Base(info.ConfigFile), filepath.Ext(info.ConfigFile))
-		t.File = filepath.Join(filepath.Dir(info.ConfigFile), base+"-access.yaml")
+		t.File = suggestedAccessFile(info.ConfigFile)
 	}
-	return t, nil
+	return t
+}
+
+// suggestedAccessFile is where a daemon's access file goes when its config
+// names none: next to the config, tdns-auth.yaml -> tdns-auth-access.yaml.
+func suggestedAccessFile(daemonConfig string) string {
+	base := strings.TrimSuffix(filepath.Base(daemonConfig), filepath.Ext(daemonConfig))
+	return filepath.Join(filepath.Dir(daemonConfig), base+"-access.yaml")
 }
 
 // entryIsDaemonSocket says whether entry e is the local socket of the daemon
@@ -346,19 +362,9 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 		}
 		defer unlock()
 	}
-	af := &tdns.AccessFile{}
-	old, rerr := os.ReadFile(t.File)
-	switch {
-	case rerr == nil:
-		if af, err = tdns.ParseAccessFile(old); err != nil {
-			return fmt.Errorf("%s does not parse (%v); fix it by hand first", t.File, err)
-		}
-	case os.IsNotExist(rerr) && create:
-		old = nil
-	case os.IsNotExist(rerr):
-		return fmt.Errorf("%s does not exist yet; `client add` creates it", t.File)
-	default:
-		return rerr
+	af, old, err := readAccessFile(t, create)
+	if err != nil {
+		return err
 	}
 
 	msg, err := change(af)
@@ -401,6 +407,36 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 	return reloadForAccess(role, t)
 }
 
+// readAccessFile reads and parses t's access file, returning its bytes as
+// well (nil when it does not exist). A missing file is an empty one when
+// create is set, and an error otherwise.
+func readAccessFile(t *accessTarget, create bool) (*tdns.AccessFile, []byte, error) {
+	old, err := os.ReadFile(t.File)
+	switch {
+	case err == nil:
+		af, perr := tdns.ParseAccessFile(old)
+		if perr != nil {
+			return nil, nil, fmt.Errorf("%s does not parse (%v); fix it by hand first", t.File, perr)
+		}
+		return af, old, nil
+	case os.IsNotExist(err) && create:
+		return &tdns.AccessFile{}, nil, nil
+	case os.IsNotExist(err):
+		return nil, nil, fmt.Errorf("%s does not exist yet; `client add` creates it", t.File)
+	}
+	return nil, nil, err
+}
+
+// clientByPin is the client af lists with pin, or nil.
+func clientByPin(af *tdns.AccessFile, pin string) *tdns.AccessClient {
+	for i := range af.Clients {
+		if af.Clients[i].Pin == pin {
+			return &af.Clients[i]
+		}
+	}
+	return nil
+}
+
 // notConfiguredAdvice is what to do when the daemon config does not name the
 // access file yet: name it, and reload over the local socket. With
 // socket: none the socket must come back first, and a reload does not start
@@ -425,14 +461,25 @@ func notConfiguredAdvice(role string, t *accessTarget) string {
 // it. Its reply says which config it runs; any other is a reload the
 // operator's daemon did not get.
 func reloadForAccess(role string, t *accessTarget) error {
+	msg, err := reloadAccess(role, t)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Reloaded: %s\n", msg)
+	return nil
+}
+
+// reloadAccess is reloadForAccess without the printing: the daemon's reply
+// when the reload put the access file in force.
+func reloadAccess(role string, t *accessTarget) (string, error) {
 	resp, err := configToDaemon(role, t.Socket, t.DaemonConfig, tdns.ConfigPost{Command: "reload"})
 	if err != nil {
-		return fmt.Errorf("written, but the reload failed: %v", err)
+		return "", fmt.Errorf("written, but the reload failed: %v", err)
 	}
 	if err := runsConfig(resp, t); err != nil {
-		return fmt.Errorf("written, but %v: the daemon of %s did NOT apply it; reload it over its own socket or entry", err, t.DaemonConfig)
+		return "", fmt.Errorf("written, but %v: the daemon of %s did NOT apply it; reload it over its own socket or entry", err, t.DaemonConfig)
 	}
-	return accessReloadVerdict(resp)
+	return accessReloadMsg(resp)
 }
 
 // configToDaemon sends post to role's daemon over its local socket first, when
@@ -472,13 +519,8 @@ func configToDaemon(role, socket, daemonConfig string, post tdns.ConfigPost) (td
 func verifyRunningDaemon(role string, t *accessTarget) error {
 	post := tdns.ConfigPost{Command: "status"}
 	if t.Socket != "" {
-		resp, err := SendConfigCommand(tdns.NewClient(role, "unix://"+t.Socket, "", "none", ""), post)
-		switch {
-		case err == nil:
-			return editRunsConfig(resp, t)
-		case !nothingListening(err):
-			return fmt.Errorf("cannot ask the daemon on %s which config it runs (%v), so it is not known whose file this is; not editing %s (run as root, or as the daemon's user)",
-				t.Socket, err, t.File)
+		if running, err := socketDaemon(role, t); err != nil || running {
+			return err
 		}
 	}
 	// Nothing on the socket. A daemon may still run without it (it refuses
@@ -503,6 +545,24 @@ func verifyRunningDaemon(role string, t *accessTarget) error {
 	}
 	return fmt.Errorf("cannot ask the daemon at %s which config it runs (%v), so it is not known whose file this is; not editing %s",
 		api.BaseUrl, err, t.File)
+}
+
+// socketDaemon asks the daemon on t's local admin socket which config it runs.
+// running: it answered, and runs t's config. Not running and no error:
+// nothing listens there (no socket file, or a refused connection). Anything
+// else is an error: a daemon that runs another config or does not say which,
+// and a socket that is there but cannot be asked (not ours to open), as that
+// daemon is not identified.
+func socketDaemon(role string, t *accessTarget) (running bool, err error) {
+	resp, err := SendConfigCommand(tdns.NewClient(role, "unix://"+t.Socket, "", "none", ""), tdns.ConfigPost{Command: "status"})
+	switch {
+	case err == nil:
+		return true, editRunsConfig(resp, t)
+	case nothingListening(err):
+		return false, nil
+	}
+	return false, fmt.Errorf("cannot ask the daemon on %s which config it runs (%v), so it is not known whose file this is; not editing %s (run as root, or as the daemon's user)",
+		t.Socket, err, t.File)
 }
 
 // nothingListening says whether err means nobody is there: no socket file,
@@ -549,14 +609,24 @@ func socketUnusable(err error) bool {
 // (it keeps the running policy), so its reply text is the only sign; a
 // `client disable` must not report success while the client keeps its access.
 func accessReloadVerdict(resp tdns.ConfigResponse) error {
+	msg, err := accessReloadMsg(resp)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Reloaded: %s\n", msg)
+	return nil
+}
+
+// accessReloadMsg is accessReloadVerdict's judgement, with the daemon's reply
+// returned instead of printed.
+func accessReloadMsg(resp tdns.ConfigResponse) (string, error) {
 	if resp.Error {
-		return fmt.Errorf("written, but the daemon refused the reload: %s", resp.ErrorMsg)
+		return "", fmt.Errorf("written, but the daemon refused the reload: %s", resp.ErrorMsg)
 	}
 	if strings.Contains(resp.Msg, tdns.AccessFileNotReloaded) {
-		return fmt.Errorf("written, but the daemon did NOT apply it and keeps the previous policy: %s", strings.TrimSpace(resp.Msg))
+		return "", fmt.Errorf("written, but the daemon did NOT apply it and keeps the previous policy: %s", strings.TrimSpace(resp.Msg))
 	}
-	fmt.Printf("Reloaded: %s\n", strings.TrimSpace(resp.Msg))
-	return nil
+	return strings.TrimSpace(resp.Msg), nil
 }
 
 // renderAccessFile writes the file as tdns-ncli owns it: a header, keyauth
