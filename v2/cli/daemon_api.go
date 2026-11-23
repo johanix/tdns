@@ -31,6 +31,11 @@ type DaemonApi struct {
 	ApiKey string
 	// Socket is apiserver.socket, the daemon's local admin socket, or "".
 	Socket string
+	// CertFile is apiserver.certfile: the certificate the daemon presents,
+	// whose pin a TCP entry records.
+	CertFile string
+	// AccessFile is apiserver.access-file, or "".
+	AccessFile string
 	// UseTLS is apiserver.usetls, which the daemon defaults to true when the
 	// key is absent (v2/parseconfig.go), so absent must read as true here too.
 	UseTLS bool
@@ -83,7 +88,11 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 	}
 
 	out.Addresses = v.GetStringSlice("apiserver.addresses")
-	out.Socket = v.GetString("apiserver.socket")
+	// The socket the daemon serves: apiserver.socket, or by default one named
+	// after its config file (tdns.ApiSocketPath, which the daemon uses too).
+	out.Socket = tdns.ApiSocketPath(v.GetString("apiserver.socket"), abs)
+	out.CertFile = v.GetString("apiserver.certfile")
+	out.AccessFile = v.GetString("apiserver.access-file")
 	if out.Socket != "" {
 		// The daemon serves no socket on a path it refuses, so there is
 		// nothing there to address.
@@ -129,6 +138,34 @@ func readDaemonViper(abs string) (*viper.Viper, error) {
 		return nil, fmt.Errorf("reading %s: %w", abs, err)
 	}
 	return v, nil
+}
+
+// daemonSocket is the local admin socket the daemon on config file cfg
+// serves (tdns.ApiSocketPath, as the daemon works it out), or "" when it
+// serves none or the file cannot be read -- by anyone but root, typically,
+// who could not open the socket anyway. hostPorts are its TCP addresses as an
+// entry names them (apiBaseURL, then hostPort).
+func daemonSocket(cfg string) (sock string, hostPorts []string) {
+	abs, err := filepath.Abs(cfg)
+	if err != nil {
+		return "", nil
+	}
+	v, err := readDaemonConfig(abs)
+	if err != nil {
+		if v, err = readDaemonViper(abs); err != nil {
+			return "", nil
+		}
+	}
+	sock = tdns.ApiSocketPath(v.GetString("apiserver.socket"), abs)
+	if sock == "" || tdns.CheckApiSocketPath(sock) != nil {
+		return "", nil
+	}
+	for _, a := range v.GetStringSlice("apiserver.addresses") {
+		if u, err := apiBaseURL(a, true); err == nil {
+			hostPorts = append(hostPorts, hostPort(u))
+		}
+	}
+	return sock, hostPorts
 }
 
 // readDaemonConfig loads a daemon config the way the daemon does: the main

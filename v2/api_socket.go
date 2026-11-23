@@ -9,12 +9,15 @@ package tdns
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -35,6 +38,84 @@ func FromLocalSocket(ctx context.Context) bool {
 // maxApiSocketPathLen keeps the path inside the smallest sun_path in use (104
 // bytes on the BSDs and macOS, 108 on Linux), with room to spare.
 const maxApiSocketPathLen = 100
+
+// DefaultApiSocketDir is the directory of a daemon's local admin socket when
+// apiserver.socket is not set (ApiSocketPath). "" turns the default off,
+// which the tests do, so that a daemon under test serves no socket in
+// /var/run.
+var DefaultApiSocketDir = "/var/run/tdns"
+
+// ApiSocketNone is the apiserver.socket value that turns the socket off.
+const ApiSocketNone = "none"
+
+// ApiSocketPath is the local admin socket of the daemon whose config file is
+// cfgfile and whose apiserver.socket is configured: that path when it is set,
+// no socket ("") for "none", and, when it is not set, the default in
+// DefaultApiSocketDir, named after the config file's whole path:
+//
+//	/etc/tdns/tdns-auth.yaml       -> /var/run/tdns/etc_tdns_tdns-auth.yaml.sock
+//	/etc/tdns-site/tdns-auth.yaml  -> /var/run/tdns/etc_tdns-site_tdns-auth.yaml.sock
+//
+// The whole path, always, extension included: the socket's name says at once
+// which config it belongs to (the owner's ruling), and two configs never
+// share a socket, even when instances in different directories share a file
+// name (testor runs tdns-auth.yaml from /etc/tdns, /etc/tdns-site and
+// /etc/tdns-enc). A shared socket would leave the second daemon without its
+// way in. "/" becomes "_", and a "_", "%" or any character but a letter,
+// digit, "." or "-" in the path itself is %-escaped, so no two paths give one
+// name (/etc/tdns-site/x.yaml and /etc/tdns/site/x.yaml stay apart). A path
+// too long for a socket becomes the escaped file name, "%%" (which no escaped
+// path contains) and 128 bits of the path's SHA-256: one-to-one no longer by
+// construction, only as far as SHA-256 is (32 bits gave a collision within
+// half a million paths).
+func ApiSocketPath(configured, cfgfile string) string {
+	switch {
+	case strings.EqualFold(configured, ApiSocketNone):
+		return ""
+	case configured != "":
+		return configured
+	case cfgfile == "" || DefaultApiSocketDir == "":
+		return ""
+	}
+	abs, err := filepath.Abs(cfgfile)
+	if err != nil {
+		return ""
+	}
+	rel := strings.TrimPrefix(filepath.ToSlash(abs), "/")
+	if rel == "" {
+		return ""
+	}
+	p := filepath.Join(DefaultApiSocketDir, socketNameEscape(rel)+".sock")
+	if len(p) > maxApiSocketPathLen {
+		sum := sha256.Sum256([]byte(abs))
+		tail := "%%" + hex.EncodeToString(sum[:16]) + ".sock"
+		base := socketNameEscape(filepath.Base(abs))
+		if room := maxApiSocketPathLen - len(DefaultApiSocketDir) - 1 - len(tail); len(base) > room {
+			base = base[:max(room, 0)]
+		}
+		p = filepath.Join(DefaultApiSocketDir, base+tail)
+	}
+	return p
+}
+
+// socketNameEscape is path (slash-separated, no leading slash) as one file
+// name: "/" becomes "_"; letters, digits, "." and "-" stay; anything else,
+// "_" and "%" included, becomes %XX. Different paths give different names.
+func socketNameEscape(path string) string {
+	var b strings.Builder
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		switch {
+		case c == '/':
+			b.WriteByte('_')
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '-':
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
 
 // CheckApiSocketPath says whether path can be an apiserver.socket at all: an
 // absolute path short enough for a unix socket. A daemon serves no socket on a

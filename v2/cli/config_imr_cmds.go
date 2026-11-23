@@ -94,6 +94,7 @@ func printImrConfigStatus(resp tdns.ConfigResponse) {
 	// init failed (the Upstream/ImrPriming husk) is precisely a
 	// moment to look at process resources, not to hide them.
 	renderProcStatus(resp.Proc)
+	printAccessStatus(resp.Access)
 	if resp.Imr == nil {
 		fmt.Println("IMR: no resolver state reported (engine not running)")
 		return
@@ -188,6 +189,8 @@ func runImrConfigCheck(role, explicitPath string, offline bool) {
 		rep.warn("Config file", "decode",
 			fmt.Sprintf("could not fully decode config into structs: %v", err), "")
 	}
+	// The socket the daemon serves, as ParseConfig fills it in.
+	cfg.ApiServer.Socket = tdns.ApiSocketPath(cfg.ApiServer.Socket, cfgPath)
 
 	checkImrEngine(&cfg, rep)
 	checkImrTrustAnchors(&cfg, rep)

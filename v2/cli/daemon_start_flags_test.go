@@ -110,3 +110,59 @@ func TestImrConfigMweOutputForAnInstance(t *testing.T) {
 		t.Error("the existing config was changed")
 	}
 }
+
+// command: may carry arguments, as an operator writes it: split as a shell
+// would, and a --config in it agreeing with config-file: passed once.
+func TestDaemonCommandLine(t *testing.T) {
+	for _, tc := range []struct {
+		name, command string
+		flags         []string
+		bin           string
+		args          []string
+		err           string
+	}{
+		{"binary only", "/usr/local/libexec/tdns-auth", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"},
+			"/usr/local/libexec/tdns-auth", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"}, ""},
+		{"testor's auth2", "/usr/local/libexec/tdns-auth --config /etc/tdns-enc/tdns-auth.yaml", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml", "--debug"},
+			"/usr/local/libexec/tdns-auth", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml", "--debug"}, ""},
+		{"--config= spelling", "/usr/local/libexec/tdns-auth --config=/etc/tdns-enc/tdns-auth.yaml", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"},
+			"/usr/local/libexec/tdns-auth", []string{"--config=/etc/tdns-enc/tdns-auth.yaml"}, ""},
+		{"no config-file", "/usr/local/libexec/tdns-auth --config /etc/tdns-enc/tdns-auth.yaml", nil,
+			"/usr/local/libexec/tdns-auth", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"}, ""},
+		{"disagreeing --config", "/usr/local/libexec/tdns-auth --config /etc/tdns-site/tdns-auth.yaml", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"},
+			"", nil, "make them the same"},
+		{"quoted", `'/opt/my tdns/tdns-auth' -v "--config" /etc/a\ b.yaml`, nil,
+			"/opt/my tdns/tdns-auth", []string{"-v", "--config", "/etc/a b.yaml"}, ""},
+		{"unclosed quote", `/usr/local/libexec/tdns-auth 'x`, nil, "", nil, "not closed"},
+		{"empty", "", []string{"--debug"}, "", []string{"--debug"}, ""},
+		// After "--" an option is an argument: the generated flags go
+		// before it, where the daemon reads them as options.
+		{"ends in --", "/usr/local/libexec/tdns-imr --", []string{"--config", "/etc/instance.yaml"},
+			"/usr/local/libexec/tdns-imr", []string{"--config", "/etc/instance.yaml", "--"}, ""},
+		{"arguments after --", "/usr/local/libexec/tdns-imr -v -- --config /etc/x.yaml", []string{"--config", "/etc/instance.yaml"},
+			"/usr/local/libexec/tdns-imr", []string{"-v", "--config", "/etc/instance.yaml", "--", "--config", "/etc/x.yaml"}, ""},
+		// The daemon takes the last --config: every one in command: counts.
+		{"two config files", "/usr/local/libexec/tdns-imr --config /etc/a.yaml --config /etc/b.yaml", []string{"--config", "/etc/a.yaml"},
+			"", nil, "names two config files"},
+		{"the same file twice", "/usr/local/libexec/tdns-imr --config /etc/a.yaml --config=/etc/a.yaml", []string{"--config", "/etc/a.yaml"},
+			"/usr/local/libexec/tdns-imr", []string{"--config", "/etc/a.yaml", "--config=/etc/a.yaml"}, ""},
+		// The daemons parse with pflag, which refuses a one-dash -config:
+		// refused here, before anything is stopped (Johan, 2026-11-23).
+		{"one-dash -config", "/usr/local/libexec/tdns-auth -config /etc/tdns-enc/tdns-auth.yaml", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"},
+			"", nil, "with one dash"},
+		{"one-dash -config=", "/usr/local/libexec/tdns-auth --config /etc/a.yaml -config=/etc/a.yaml --", []string{"--config", "/etc/a.yaml"},
+			"", nil, "with one dash"},
+		{"one-dash after --", "/usr/local/libexec/tdns-imr -- -config x", []string{"--config", "/etc/a.yaml"},
+			"/usr/local/libexec/tdns-imr", []string{"--config", "/etc/a.yaml", "--", "-config", "x"}, ""},
+	} {
+		bin, args, err := daemonCommandLine(tc.command, tc.flags)
+		switch {
+		case tc.err != "":
+			if err == nil || !strings.Contains(err.Error(), tc.err) {
+				t.Errorf("%s: err = %v, want %q", tc.name, err, tc.err)
+			}
+		case err != nil || bin != tc.bin || !reflect.DeepEqual(args, tc.args):
+			t.Errorf("%s: %q %q %v, want %q %q", tc.name, bin, args, err, tc.bin, tc.args)
+		}
+	}
+}

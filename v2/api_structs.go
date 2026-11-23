@@ -704,6 +704,7 @@ type ConfigResponse struct {
 	Imr                  *ImrStatus            `json:"imr,omitempty"`                // IMR priming + stub/forward state, when this daemon carries one
 	Proc                 *ProcStatus           `json:"proc,omitempty"`               // process resources (open fds, goroutines), for leak visibility (#443)
 	Access               *ApiAccessStatus      `json:"access,omitempty"`             // the network API's access policy as running, when apiserver.access-file is set
+	ConfigFile           string                `json:"configfile,omitempty"`         // the config file this daemon runs, absolute (every /config reply)
 	// ApiTCPStopped are the plaintext TCP API listeners an access file
 	// closed (it requires TLS). They stay closed until a restart, also once
 	// the access file is removed, so they are reported whether Access is

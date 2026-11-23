@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -65,5 +66,23 @@ func TestConfigStatusDoesNotReturnTheApiKey(t *testing.T) {
 	}
 	if len(resp.ApiServer.Addresses) != 1 {
 		t.Errorf("addresses lost: %+v", resp.ApiServer)
+	}
+}
+
+// `config status` says which config file the daemon runs, absolute: a client
+// editing the daemon's files checks that it reaches the daemon it edits.
+func TestConfigStatusNamesTheConfigFile(t *testing.T) {
+	conf := &Config{}
+	conf.Internal.CfgFile = "tdns-auth.yaml" // relative, as from the command line
+	body, _ := json.Marshal(ConfigPost{Command: "status"})
+	rec := httptest.NewRecorder()
+	APIconfig(conf)(rec, httptest.NewRequest(http.MethodPost, "/api/v1/config", bytes.NewReader(body)))
+	var resp ConfigResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.Abs("tdns-auth.yaml")
+	if resp.ConfigFile != want {
+		t.Errorf("ConfigFile %q, want %q", resp.ConfigFile, want)
 	}
 }

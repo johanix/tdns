@@ -71,18 +71,10 @@ func spliceApiserver(src []byte, e ApiDetails) (out []byte, block string, err er
 	text := string(src)
 	lines := strings.Split(text, "\n")
 
-	start := -1
-	for i, l := range lines {
-		l = strings.TrimRight(l, "\r")
-		if reApiserversKey.MatchString(l) {
-			start = i
-			break
-		}
-		if reApiserversInl.MatchString(l) {
-			return nil, "", errFlowApiservers
-		}
+	start, err := findApiserversKey(lines)
+	if err != nil {
+		return nil, "", err
 	}
-
 	if start < 0 {
 		lay := itemLayout{indent: defItemIndent, gap: defDashGap, valueCol: defValueCol}
 		block = renderEntry(e, lay)
@@ -97,9 +89,26 @@ func spliceApiserver(src []byte, e ApiDetails) (out []byte, block string, err er
 		}
 	}
 
-	// The block is every following line that is blank, indented, a "- " item
-	// at column 0, or a column-0 comment. last is the final line that is
-	// really part of it: a column-0 comment after it belongs to what follows.
+	last := apiserversBlockEnd(lines, start)
+	lay := detectLayout(lines[start+1 : last+1])
+	block = renderEntry(e, lay)
+	if lay.spaced {
+		block = "\n" + block
+	}
+	insert := strings.Split(strings.TrimSuffix(block, "\n"), "\n")
+	merged := make([]string, 0, len(lines)+len(insert))
+	merged = append(merged, lines[:last+1]...)
+	merged = append(merged, insert...)
+	merged = append(merged, lines[last+1:]...)
+	return []byte(strings.Join(merged, "\n")), strings.TrimPrefix(block, "\n"), nil
+}
+
+// apiserversBlockEnd returns the last line of the apiservers: block whose key
+// is on line start. The block is every following line that is blank,
+// indented, a "- " item at column 0, or a column-0 comment; the last line
+// really part of it is the last that is not blank or such a comment, which
+// belongs to what follows.
+func apiserversBlockEnd(lines []string, start int) int {
 	last := start
 	for j := start + 1; j < len(lines); j++ {
 		l := strings.TrimRight(lines[j], "\r")
@@ -115,18 +124,200 @@ func spliceApiserver(src []byte, e ApiDetails) (out []byte, block string, err er
 		}
 		break
 	}
+	return last
+}
 
-	lay := detectLayout(lines[start+1 : last+1])
-	block = renderEntry(e, lay)
-	if lay.spaced {
-		block = "\n" + block
+// findApiserversKey returns the line of the apiservers: key in lines, -1 if
+// there is none, or errFlowApiservers.
+func findApiserversKey(lines []string) (int, error) {
+	for i, l := range lines {
+		l = strings.TrimRight(l, "\r")
+		if reApiserversKey.MatchString(l) {
+			return i, nil
+		}
+		if reApiserversInl.MatchString(l) {
+			return -1, errFlowApiservers
+		}
 	}
-	insert := strings.Split(strings.TrimSuffix(block, "\n"), "\n")
-	merged := make([]string, 0, len(lines)+len(insert))
-	merged = append(merged, lines[:last+1]...)
-	merged = append(merged, insert...)
-	merged = append(merged, lines[last+1:]...)
-	return []byte(strings.Join(merged, "\n")), strings.TrimPrefix(block, "\n"), nil
+	return -1, nil
+}
+
+// reKeyLine is a "key: rest" line of a mapping, the indentation removed.
+var reKeyLine = regexp.MustCompile(`^([A-Za-z_-]+):(.*)$`)
+
+// repinEntryText returns src with the apiservers: item named name verifying
+// by pin: its tlsauth:, pins: and rootca: lines removed, each with any lines
+// of its value below it, and "tlsauth: pin" and up's pins added at the end of
+// the item, aligned like the list's first item. Nothing else in the file
+// changes, comments and alignment included. An item it cannot edit with
+// confidence (tabs, one of those keys on the item's first line) it refuses.
+// The caller checks the result by loading it.
+func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
+	lines := strings.Split(string(src), "\n")
+	start, err := findApiserversKey(lines)
+	if err != nil {
+		return nil, err
+	}
+	if start < 0 {
+		return nil, errors.New("it has no apiservers: list")
+	}
+	last := apiserversBlockEnd(lines, start)
+
+	// The items: each from its "-" line at the list's indentation to the
+	// next one. A "-" deeper in starts a nested list, not an item.
+	type item struct{ from, to int }
+	var items []item
+	listIndent := -1
+	for j := start + 1; j <= last; j++ {
+		l := strings.TrimRight(lines[j], "\r")
+		var ind string
+		if m := reItemStart.FindStringSubmatch(l); m != nil {
+			ind = m[1]
+		} else if b := reBareDash.FindStringSubmatch(l); b != nil {
+			ind = b[1]
+		} else {
+			continue
+		}
+		if strings.Contains(ind, "\t") {
+			return nil, errors.New("the apiservers: list is indented with tabs")
+		}
+		if listIndent < 0 {
+			listIndent = len(ind)
+		}
+		if len(ind) != listIndent {
+			continue
+		}
+		if n := len(items); n > 0 {
+			items[n-1].to = j
+		}
+		items = append(items, item{from: j, to: last + 1})
+	}
+
+	found := -1
+	for k, it := range items {
+		var v []map[string]interface{}
+		if err := yaml.Unmarshal([]byte(dedentLines(lines[it.from:it.to], listIndent)), &v); err != nil || len(v) != 1 {
+			continue
+		}
+		if n, ok := v[0]["name"].(string); ok && n == name {
+			if found >= 0 {
+				return nil, fmt.Errorf("two entries in it are named %q", name)
+			}
+			found = k
+		}
+	}
+	if found < 0 {
+		return nil, fmt.Errorf("no entry named %q is in it", name)
+	}
+	it := items[found]
+
+	// The item's keys start in keyCol: after "- " on its first line, or, for a
+	// "-" alone on its line, where its first key below starts.
+	keyCol := -1
+	if m := reItemStart.FindStringSubmatch(strings.TrimRight(lines[it.from], "\r")); m != nil {
+		if strings.Contains(m[2], "\t") {
+			return nil, errors.New("the entry is indented with tabs")
+		}
+		switch strings.ToLower(m[3]) {
+		case "tlsauth", "pins", "rootca":
+			return nil, fmt.Errorf("its %s: is on its first line", m[3])
+		}
+		keyCol = len(m[1]) + 1 + len(m[2])
+	}
+
+	kept := []string{lines[it.from]}
+	lastContent := 0 // index in kept of the item's last line of content
+	dropping := false
+	for j := it.from + 1; j < it.to; j++ {
+		l := strings.TrimRight(lines[j], "\r")
+		body := strings.TrimLeft(l, " ")
+		ind := len(l) - len(body)
+		if strings.TrimSpace(l) == "" || strings.HasPrefix(body, "#") {
+			kept = append(kept, lines[j]) // blank lines and comments stay
+			if ind > listIndent && strings.TrimSpace(l) != "" {
+				lastContent = len(kept) - 1
+			}
+			continue
+		}
+		if strings.HasPrefix(body, "\t") {
+			return nil, errors.New("the entry is indented with tabs")
+		}
+		if keyCol < 0 {
+			keyCol = ind
+		}
+		// Lines deeper than the keys, or a "-" at their column, after a
+		// removed key are its value: they go with it.
+		if dropping && (ind > keyCol || (ind == keyCol && strings.HasPrefix(body, "-"))) {
+			continue
+		}
+		dropping = false
+		if m := reKeyLine.FindStringSubmatch(body); m != nil && ind == keyCol {
+			switch strings.ToLower(m[1]) {
+			case "tlsauth", "pins", "rootca":
+				dropping = true
+				continue
+			}
+		}
+		kept = append(kept, lines[j])
+		lastContent = len(kept) - 1
+	}
+	if keyCol < 0 {
+		return nil, errors.New("the entry has no keys")
+	}
+
+	valueCol := detectLayout(lines[start+1 : last+1]).valueCol
+	add := []string{
+		kvLine(keyCol, valueCol, "tlsauth", "pin"),
+		kvLine(keyCol, valueCol, "pins", pinsFlow(up.Pins)),
+	}
+	edited := make([]string, 0, len(kept)+len(add))
+	edited = append(edited, kept[:lastContent+1]...)
+	edited = append(edited, add...)
+	edited = append(edited, kept[lastContent+1:]...)
+
+	out := make([]string, 0, len(lines)+len(add))
+	out = append(out, lines[:it.from]...)
+	out = append(out, edited...)
+	out = append(out, lines[it.to:]...)
+	return []byte(strings.Join(out, "\n")), nil
+}
+
+// dedentLines joins lines, each with up to n leading spaces removed.
+func dedentLines(lines []string, n int) string {
+	var sb strings.Builder
+	for _, l := range lines {
+		l = strings.TrimRight(l, "\r")
+		k := 0
+		for k < n && k < len(l) && l[k] == ' ' {
+			k++
+		}
+		sb.WriteString(l[k:] + "\n")
+	}
+	return sb.String()
+}
+
+// kvLine is one "key: value" line with the key in column col and, when
+// valueCol says so, the value aligned (valueCol counts from the key's start;
+// 0 is one space after the colon). The value is written as it stands.
+func kvLine(col, valueCol int, key, val string) string {
+	key += ":"
+	pad := 1
+	if valueCol > len(key) {
+		pad = valueCol - len(key)
+	}
+	return strings.Repeat(" ", col) + key + strings.Repeat(" ", pad) + val
+}
+
+// pinsFlow writes pins as a YAML flow list, each double-quoted: base64, so a
+// leading + or / reads as text, and escaped (strconv.Quote, whose escapes are
+// YAML's too), so a pin read from a hand-written file with a quote or a
+// backslash in it reads back as itself.
+func pinsFlow(pins []string) string {
+	q := make([]string, len(pins))
+	for i, p := range pins {
+		q[i] = strconv.Quote(p)
+	}
+	return "[ " + strings.Join(q, ", ") + " ]"
 }
 
 func isColZeroDash(l string) bool {
@@ -177,23 +368,36 @@ func detectLayout(block []string) itemLayout {
 
 // renderEntry writes e as one "- key: value" list item in the given layout.
 func renderEntry(e ApiDetails, lay itemLayout) string {
-	type kv struct{ k, v string }
-	kvs := []kv{{"name", e.Name}}
-	if e.Role != "" {
-		kvs = append(kvs, kv{"role", e.Role})
+	type kv struct {
+		k, v string
+		raw  bool // already YAML (a flow list): written as it stands
 	}
-	kvs = append(kvs, kv{"baseurl", e.BaseURL})
+	kvs := []kv{{k: "name", v: e.Name}}
+	if e.Role != "" {
+		kvs = append(kvs, kv{k: "role", v: e.Role})
+	}
+	// No baseurl for a daemon with only the local admin socket, which
+	// tdns-ncli finds through config-file:.
+	if e.BaseURL != "" {
+		kvs = append(kvs, kv{k: "baseurl", v: e.BaseURL})
+	}
 	// A socket entry has no key: the daemon authenticates the socket by file
 	// permissions. An empty apikey: line would only invite filling it in.
 	if e.ApiKey != "" {
-		kvs = append(kvs, kv{"apikey", e.ApiKey})
+		kvs = append(kvs, kv{k: "apikey", v: e.ApiKey})
 	}
-	kvs = append(kvs, kv{"authmethod", e.AuthMethod})
+	kvs = append(kvs, kv{k: "authmethod", v: e.AuthMethod})
+	if e.TLSAuth != "" {
+		kvs = append(kvs, kv{k: "tlsauth", v: e.TLSAuth})
+	}
+	if len(e.Pins) > 0 {
+		kvs = append(kvs, kv{k: "pins", v: pinsFlow(e.Pins), raw: true})
+	}
 	if e.RootCA != "" {
-		kvs = append(kvs, kv{"rootca", e.RootCA})
+		kvs = append(kvs, kv{k: "rootca", v: e.RootCA})
 	}
 	if e.ConfigFile != "" {
-		kvs = append(kvs, kv{"config-file", e.ConfigFile})
+		kvs = append(kvs, kv{k: "config-file", v: e.ConfigFile})
 	}
 
 	var sb strings.Builder
@@ -208,7 +412,11 @@ func renderEntry(e ApiDetails, lay itemLayout) string {
 		if lay.valueCol > 0 && lay.valueCol > len(key) {
 			pad = lay.valueCol - len(key)
 		}
-		sb.WriteString(key + strings.Repeat(" ", pad) + yamlScalar(p.v) + "\n")
+		val := yamlScalar(p.v)
+		if p.raw {
+			val = p.v
+		}
+		sb.WriteString(key + strings.Repeat(" ", pad) + val + "\n")
 	}
 	return sb.String()
 }
@@ -276,18 +484,36 @@ func danglingSymlink(path string) error {
 // stays a link; a link to nothing is refused (see danglingSymlink).
 //
 // The new file belongs to whoever runs this, not necessarily to the old file's
-// owner; the CLI config is the invoking operator's own file.
+// owner; the CLI config is the invoking operator's own file. A file a daemon
+// reads goes through writeFileAtomicLike instead.
 func writeFileAtomic(path string, data []byte) error {
+	return replaceFile(path, data, false, nil)
+}
+
+// writeFileAtomicLike is writeFileAtomic for a file a daemon reads (the access
+// file): the replacement keeps the old file's owner and group, so root editing
+// a file the daemon's user owns does not leave one the daemon cannot read. A
+// new file takes its mode, owner and group from like (the daemon config), or
+// is 0600 and the invoking user's when like is nil.
+func writeFileAtomicLike(path string, data []byte, like os.FileInfo) error {
+	return replaceFile(path, data, true, like)
+}
+
+func replaceFile(path string, data []byte, keepOwner bool, like os.FileInfo) error {
 	if err := danglingSymlink(path); err != nil {
 		return err
 	}
 	mode := os.FileMode(0o600)
 	target := path
+	owner := like
 	if fi, err := os.Stat(path); err == nil {
 		mode = fi.Mode().Perm()
+		owner = fi
 		if real, err := filepath.EvalSymlinks(path); err == nil {
 			target = real
 		}
+	} else if like != nil {
+		mode = like.Mode().Perm()
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".tdns-ncli-*")
 	if err != nil {
@@ -302,8 +528,31 @@ func writeFileAtomic(path string, data []byte) error {
 		tmp.Close()
 		return err
 	}
+	if keepOwner && owner != nil {
+		if err := chownLike(tmp, owner); err != nil {
+			tmp.Close()
+			return fmt.Errorf("%s: giving the new file its owner and group: %w", path, err)
+		}
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), target)
+}
+
+// chownLike gives f the owner and group of like when they differ from f's.
+// Nothing to do where the platform has no owners (fileOwner).
+func chownLike(f *os.File, like os.FileInfo) error {
+	uid, gid, ok := fileOwner(like)
+	if !ok {
+		return nil
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if cu, cg, ok := fileOwner(fi); ok && cu == uid && cg == gid {
+		return nil
+	}
+	return f.Chown(uid, gid)
 }

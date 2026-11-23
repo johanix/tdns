@@ -827,8 +827,11 @@ type ApiServerConf struct {
 	// MSA       ApiServerAppConf
 	Combiner ApiServerAppConf
 
-	// Socket is the path of the local admin socket (apiserver.socket), or ""
-	// for none. The management API is served there as well as on Addresses,
+	// Socket is the path of the local admin socket. apiserver.socket sets it;
+	// "none" there means no socket; unset, it is named after the config file
+	// path (/etc/tdns/tdns-auth.yaml serves /var/run/tdns/etc_tdns_tdns-auth.yaml.sock), which
+	// ParseConfig fills in (ApiSocketPath). After the load "" means no socket.
+	// The management API is served there as well as on Addresses,
 	// with no TLS and no API key: whoever can open the socket is admin, so
 	// file permissions are the authentication. The daemon creates the socket
 	// with mode 0600 and refuses a directory that group or others can enter.

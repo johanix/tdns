@@ -439,7 +439,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 			fmt.Sprintf("could not fully decode config into structs: %v", err),
 			"structural checks below may be incomplete; often caused by legacy bare-string primaries:/downstreams:")
 	}
-	applyDaemonDefaults(v, &cfg)
+	applyDaemonDefaults(v, &cfg, cfgPath)
 
 	checkListeners(&cfg, rep)
 	checkDo53QueriesRefused(&cfg, rep, effectiveRole(role) == "agent")
@@ -678,15 +678,18 @@ func checkDoHPath(cfg *tdns.Config, rep *ccReport, g string, doh bool) {
 // before it decodes (ParseConfig) and a viper Unmarshal does not, so the
 // checks judge the config the daemon will run. apiserver.usetls defaults to
 // true when the apiserver block leaves it out.
-func applyDaemonDefaults(v *viper.Viper, cfg *tdns.Config) {
+func applyDaemonDefaults(v *viper.Viper, cfg *tdns.Config, cfgPath string) {
 	if v.IsSet("apiserver") && !v.IsSet("apiserver.usetls") {
 		cfg.ApiServer.UseTLS = true
 	}
+	// The socket the daemon serves: apiserver.socket, none, or by default one
+	// named after the config file, as ParseConfig fills it in.
+	cfg.ApiServer.Socket = tdns.ApiSocketPath(cfg.ApiServer.Socket, cfgPath)
 }
 
 // socketPathHint is the fix for an apiserver.socket the daemon refuses
 // (tdns.CheckApiSocketPath).
-const socketPathHint = "make apiserver.socket an absolute path of at most 100 bytes, e.g. /var/run/tdns/tdns-auth.sock"
+const socketPathHint = "make apiserver.socket an absolute path of at most 100 bytes, e.g. /var/run/tdns/etc_tdns_tdns-auth.yaml.sock, or leave it out for that default"
 
 func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 	const g = "API server"

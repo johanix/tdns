@@ -75,7 +75,7 @@ func TestValidateAccessSettings(t *testing.T) {
 	}{
 		{name: "nothing", conf: ApiServerConf{}},
 		{name: "access file and socket", conf: ApiServerConf{AccessFile: access, Socket: sock}},
-		{name: "access file, no socket", conf: ApiServerConf{AccessFile: access}, wantErr: "requires apiserver.socket"},
+		{name: "access file, no socket", conf: ApiServerConf{AccessFile: access}, wantErr: "requires the local admin socket"},
 		{name: "relative access file", conf: ApiServerConf{AccessFile: "access.yaml", Socket: sock}, wantErr: "absolute"},
 		{name: "socket only", conf: ApiServerConf{Socket: sock}},
 		// An access file requires TLS on TCP, loopback included: the

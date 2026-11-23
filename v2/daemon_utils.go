@@ -85,6 +85,10 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string, daemo
 				fmt.Printf("Name of server process not set (see api name in apiservers block in tdns-cli.yaml)\n")
 				daemonname = "undefined-server"
 			}
+			if daemonbinary == "" {
+				fmt.Printf("Error: no daemon binary to start: give the entry command: <path to the binary> (or set common.command)\n")
+				os.Exit(1)
+			}
 			fi, err := os.Stat(daemonbinary)
 			if err != nil {
 				fmt.Printf("Daemon binary %q does not exist. Exit.\n", daemonbinary)

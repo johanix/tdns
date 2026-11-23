@@ -36,6 +36,7 @@ var apiRouteRoles = map[string]map[string]ApiRole{
 	},
 	"/api/v1/config": {
 		"status":                   RoleReadOnly,
+		"identity":                 RoleReadOnly, // which daemon this is
 		"transport-signal":         RoleReadOnly, // a preview
 		"reload":                   RoleReadWrite,
 		"reload-zones":             RoleReadWrite,

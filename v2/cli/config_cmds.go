@@ -452,7 +452,9 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	// a daemon's refusal twice.
 	status, buf, err := api.Post("/config", bytebuf.Bytes())
 	if err != nil {
-		return cr, fmt.Errorf("error from api post: %v", err)
+		// Wrapped, so a caller can tell a socket it may not open (EACCES)
+		// or a daemon that is not there (ENOENT) from a refusal.
+		return cr, fmt.Errorf("error from api post: %w", err)
 	}
 	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)

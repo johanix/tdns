@@ -531,9 +531,23 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Msg = fmt.Sprintf("%s: %s, boot time: %s, last config reload: %s",
 				Globals.App.Name, health, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
 
+		case "identity":
+			// Which daemon this is: the ConfigFile every reply carries, and
+			// nothing else to compute. tdns-ncli asks before it uses a local
+			// admin socket, which another daemon could hold.
+			resp.Msg = Globals.App.Name
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown config command: %s", cp.Command)
 			resp.Error = true
+		}
+
+		// Every reply says which daemon gave it: its config file, absolute
+		// from its own working directory. A client on its host checks that
+		// the daemon it reached (for a reload, the one that reloaded) is the
+		// one whose config it means.
+		if cfg := conf.Internal.CfgFile; cfg != "" {
+			resp.ConfigFile = absConfigFile(cfg)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

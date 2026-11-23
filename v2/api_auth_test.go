@@ -684,3 +684,48 @@ func TestApiListenerReloadNote(t *testing.T) {
 		t.Errorf("access file added: note %q, want none", note)
 	}
 }
+
+// A socket client that names the config it means (tdns-ncli, which found the
+// socket through that config) is refused, before anything runs, by a daemon
+// that runs another: the check rides on the request that does the work.
+func TestRequestForAnotherConfigIsRefused(t *testing.T) {
+	e := newAuthEnv(t, "-", nil)
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "tdns-auth.yaml")
+	if err := os.WriteFile(cfg, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.conf.Internal.CfgFile = cfg
+	post := func(expect string) (int, string) {
+		c := NewClientWithOptions("local", "unix://"+e.sock, ClientOptions{AuthMethod: "none", ExpectConfigFile: expect})
+		status, b, err := c.Post("/t-admin", nil)
+		if err != nil && status == 0 {
+			t.Fatal(err)
+		}
+		return status, string(b)
+	}
+	if st, body := post(cfg); st != 200 {
+		t.Errorf("for this daemon's config: %d %q, want 200", st, body)
+	}
+	if st, body := post(filepath.Join(dir, "other.yaml")); st != http.StatusPreconditionFailed || !strings.Contains(body, "this daemon runs "+cfg) {
+		t.Errorf("for another config: %d %q, want 412 naming this daemon's config", st, body)
+	}
+	// Through a symlink: the same file.
+	link := filepath.Join(dir, "link.yaml")
+	if err := os.Symlink(cfg, link); err == nil {
+		if st, body := post(link); st != 200 {
+			t.Errorf("through a symlink: %d %q, want 200", st, body)
+		}
+	}
+	// A relative config-file:, as the client's working directory reads it:
+	// the client sends it absolute, so the daemon (whose working directory
+	// is its own) compares like with like.
+	t.Chdir(dir)
+	if st, body := post("tdns-auth.yaml"); st != 200 {
+		t.Errorf("a relative path from the client's directory: %d %q, want 200", st, body)
+	}
+	// No header: as before.
+	if st, body := e.callSocket(t, "/api/v1/t-admin", ""); st != 200 {
+		t.Errorf("no expected config: %d %q, want 200", st, body)
+	}
+}

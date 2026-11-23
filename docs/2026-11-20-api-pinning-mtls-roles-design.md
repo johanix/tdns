@@ -3,8 +3,9 @@
 **Date:** 2026-11-20
 **Status:** being implemented. Steps 0 and 1 (section 5) are #1163 and #1164,
 on main. Step 2, the local socket, is #1165, stacked on the tdns-ncli PRs #1159,
-#1160 and #1161; step 3, the access file and the roles, is stacked on #1165.
-Step 4 follows. Section 9 lists what implementing changed or settled.
+#1160 and #1161; step 3, the access file and the roles, is #1167, stacked on
+#1165; step 4, tdns-ncli's side, is stacked on #1167. Section 9 lists what
+implementing changed or settled.
 
 Scope: the management API of every daemon that builds its router with
 `SetupAPIRouter` (tdns-auth, tdns-agent, ...) or `SetupSimpleAPIRouter`
@@ -124,7 +125,8 @@ its container.
 `tdns-ncli config add <daemon.yaml>` already reads the daemon's config for the
 address and the key; it would also read `apiserver.certfile` and write the pin.
 The operator does nothing. (For a daemon with a socket it writes a socket entry
-instead, section 3.2.)
+instead, section 3.2. Revised 2026-11-23: it writes the TCP entry, and
+tdns-ncli finds the socket through `config-file:`; see the end of 3.2.)
 
 `tlsauth: pkix` (system roots or a `rootca:` file) stays for anyone with a real
 CA. `insecure` is accepted only when spelled out, and tdns-ncli warns each time.
@@ -136,6 +138,8 @@ its own config file and is a prototype; tdns-cli's defaults do not change.)
 ```yaml
 apiserver:
    socket: /var/run/tdns/tdns-auth.sock    # unset = no socket, as today
+                                           # (revised 2026-11-23: unset = the
+                                           # default, none = no socket; below)
 ```
 
 - **Authentication is the file system.** The daemon creates the socket with mode
@@ -161,13 +165,72 @@ apiserver:
   this entry when the daemon config has `apiserver.socket`, so a local daemon
   needs no secret in any CLI config.
 
+**Revised 2026-11-23, after the first install on test servers: on by default,
+and not in the CLI config.** The owner's rulings:
+
+- **Every daemon serves the socket unless told not to.** The socket replaced
+  `usetls: false` as the way in when TLS is broken, and a fallback that has to
+  be configured beforehand is missing exactly when it is needed: none of the
+  test servers had a `socket:` line. Unset, the path is in `/var/run/tdns`,
+  named after the config file's whole path, extension included, always:
+  `/etc/tdns/tdns-auth.yaml` serves `etc_tdns_tdns-auth.yaml.sock`,
+  `/etc/tdns-site/tdns-auth.yaml` serves `etc_tdns-site_tdns-auth.yaml.sock`.
+  The name says at once which config the socket belongs to (the owner's
+  reason), and no two config paths give one name: `/` becomes `_`, and a `_`,
+  `%` or any character but a letter, digit, `.` or `-` in the path is
+  %-escaped (the owner chose this over `-` for `/`, which let
+  `/etc/tdns-site/x.yaml` and `/etc/tdns/site/x.yaml` collide). Two daemons
+  then never share a socket, even when instances in different directories
+  share a file name (testor runs three `tdns-auth.yaml`). A path too long for
+  a socket becomes the escaped file name, `%%` and a hash of the path.
+  `socket: none` turns it off. A socket client that found the socket through
+  an entry's `config-file:` names that file in every request
+  (`X-Tdns-Config-File`), and a daemon that runs another config refuses the
+  request (412) before acting on it.
+  `tdns.ApiSocketPath` does this, in the daemon's load (`ParseConfig`, and the
+  decode `config check` uses) and in tdns-ncli. A socket that cannot be served
+  is an error the daemon reports and runs on without, as before.
+- **The CLI config does not hold the socket's path.** The socket is root's,
+  and root can read the daemon config, so tdns-ncli finds the socket through
+  the entry's `config-file:` when a command first uses the entry (not for every
+  entry at start: that asked every daemon in the CLI config, one round trip
+  each, for a command that uses one), and uses it when it
+  answers (admin, no key); otherwise the entry's TCP address. Only when the
+  entry's address is one that daemon config lists, or the entry has none: the
+  same `config-file:` path exists on every host, so an entry for a daemon
+  elsewhere would otherwise reach the daemon on this one. And only when the
+  daemon on the socket says it runs that config: every `/config` reply now
+  carries the daemon's config file (absolute), and a cheap `identity` command
+  asks for nothing else. Another daemon could hold the path (an explicit
+  `socket:` naming it), and a command for one daemon must not run, as admin,
+  on another; a socket that answers for another config is not used, and the
+  entry says why. The reload after an access-file edit is checked the same
+  way, from its own reply. Two configs saying
+  the same thing could disagree; one cannot. `tdns-ncli --tcp` uses the TCP
+  address even then, to see what a remote operator sees. Since the choice is
+  made at run time, `ping` (the test of how access is authenticated) says on
+  its one line which way it went and as whom, from the daemon's reply (role,
+  via and identity, in parts): `pong (/var/run/tdns/etc_tdns_tdns-auth.yaml.sock)
+  from tdns-auth @ host: ...` on the socket (its path), `pong (TLS, admin) from ...` for the key,
+  `pong (TLS, read-write, certificate anna) from ...`. With `-v` the line ends
+  in the client the daemon saw: its address over TCP, `admin socket` on the
+  socket (which has no remote address). An entry tdns-ncli
+  refuses (no pin) is reported as an error with its fix on lines of its own,
+  not as a log line. `config add` writes
+  the TCP entry with `config-file:` whoever runs it (no more `unix://` entries,
+  and no `--tcp` on `config add`); a daemon with no TCP address gets an entry
+  with `config-file:` alone, which only root can use. An entry written as
+  `baseurl: unix://...` still works.
+
 ### 3.3 The daemon verifies the remote operator (network API)
 
 **The operator's identity** is one key pair per person, used for every daemon: a
 self-signed certificate (ECDSA P-256), the key in a file with mode 0600. The
-default location is per user: `~/.config/tdns/client.crt` and `client.key`; for
-root, `/etc/tdns/tdns-ncli-client.crt` and `.key`, next to `tdns-ncli.yaml`,
-where it can be tracked and is not scattered over `/root/.config/` on many hosts.
+default location is per user: `~/.config/tdns/certs/client.crt` and `client.key`;
+for root, `/etc/tdns/certs/tdns-ncli-client.crt` and `.key`, with the daemons'
+certificates, where it can be tracked and is not scattered over `/root/.config/`
+on many hosts. Certificates and keys always go in a `certs/` directory, never
+loose next to the configs (Johan, 2026-11-23).
 It is expanded when the tool runs, so the system-wide config needs no entry for
 it; a top-level `client:` block can name other files. `tdns-ncli client init`
 creates the pair if it is absent and never overwrites one. Root on a daemon host
@@ -691,3 +754,84 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
 - **tdns-mp.** `RegisterApiRouteRoles` lets code outside the package declare
   the roles of its routes; until tdns-mp does, its routes need admin when an
   access file is set.
+
+**2026-11-20, implementing step 4.**
+
+- **The client certificate is presented only by entries that ask for it**
+  (`authmethod: certificate`, which then sends no key). The design had the
+  certificate on every connection. But a certificate is the identity (step 3):
+  a daemon that does not know it refuses it even with a valid key, so offering
+  it everywhere would lock an operator out of every daemon they are not
+  enrolled on the moment they run `client init`.
+- **Strict verification is tdns-ncli's alone** (`RequireServerVerification`).
+  tdns-cli shares the client code and keeps its default (no rootca: no
+  check), as the design said. A `tlsauth: pkix` entry without a rootca uses the
+  system roots.
+- **One bad entry no longer stops the others.** An entry that cannot be built
+  (no pins for `tlsauth: pin`, a missing rootca file, a certificate entry
+  without a certificate) is reported when it is used, not at start-up.
+- **`config add` pins the daemon's certificate** from `apiserver.certfile`. If
+  that file cannot be read the entry is written without pins and a note says
+  what to add; tdns-ncli then refuses that entry rather than connecting
+  unverified.
+- **`config add` also pins an entry it already knows** (2026-11-23, after the
+  testor install). An https entry with no pin is broken, and entries written
+  before pinning existed had none, so "Already known; nothing changed" left
+  them refused. Now the add of a known daemon gives its entry `tlsauth: pin` and
+  the pin, removes a `rootca:` line, and changes nothing else in the file. An
+  entry pinning an earlier certificate keeps its pins and gets the current one
+  too. The refusal of an unpinned entry says to run `tdns-ncli config add
+  <daemon config>`; it no longer offers `rootca:`, since pinning is the model
+  (`tlsauth: pkix` is still accepted for a real CA, but not suggested).
+- **`config list --check`** uses the same client as every other command and
+  shows who each daemon took the CLI for (from `ping`).
+- **The `client` commands** are added to the canonical auth, agent and imr
+  trees by tdns-ncli itself and to the instance trees by their factories, so
+  tdns-cli and tdns-imr's own shell do not get them. `client init` needs no CLI
+  config. A new access file takes the daemon config's mode.
+- **`config list` warns when two entries pin the same key**, with or without
+  `--check`: a pin that cannot tell two daemons apart is the shared-key hazard
+  again.
+- **Plain `http://` gets a warning from tdns-ncli**, not a refusal, unless
+  the host is loopback: it verifies nothing and sends the key in clear.
+  Refusing it, the way an https entry that verifies nothing is refused, would
+  break existing plain-http entries on upgrade; a warning tells the operator
+  without locking anyone out. (Added after the external review, which found http:// passed
+  silently.)
+
+**2026-11-20, a live run of steps 2 to 4** (tdns-imr and tdns-ncli built from
+the step 4 branch, on macOS, in a scratch directory, not as root). A resolver
+with a socket and, later, an access file:
+
+- `config add` as non-root wrote a TCP entry with the daemon's pin; `ping`
+  over it said "authenticated as apikey (admin) by api key". A hand-written
+  socket entry said "on the local socket (admin)". `config list --check`
+  showed both.
+- `client init`, then `client add` while the daemon config named no access
+  file: the file was created and the lines to add were printed. With the line
+  added, a `client` edit over the socket reloaded it ("Access file reloaded:
+  1 client(s)"), and `client list` said the daemon runs the file.
+- With the access file: the key was read-write; the certificate entry was "me
+  (read-write)"; a flush worked; `daemon stop` over TCP got 403 naming the
+  socket, and the daemon kept running. After `keyauth off` the key got 403 and
+  the certificate still worked. A hand-broken file at a reload was refused with
+  the validator's reasons, and the running policy carried on.
+- `daemon stop` over the socket stopped it. **The socket file outlives a
+  stop**: the daemon exits before the listener's cleanup runs. The next start
+  removes it as a stale socket (seen working on the restart), so this is
+  cosmetic; noted here rather than fixed.
+
+**2026-11-20, the same on NetBSD 10.1, as root** (both binaries built from
+#1168's head with make):
+
+- **NetBSD enforces a socket file's own permissions**, which section 7 left
+  open: `nobody` could not connect to a root-owned 0600 socket in a 0755
+  directory, and could once it was 0666. The 0700 directory is a second layer,
+  not the only one.
+- The daemon created `run/` 0700 and the socket 0600, both root's. `config add`
+  run as root wrote a socket entry (`unix:///...`, `authmethod: none`, no key),
+  and `ping` over it was admin; `nobody` could not open it.
+- `config add --tcp` wrote a pinned TCP entry. Its key was admin before the
+  access file and read-write after it; a certificate entry was "me
+  (read-write)"; `daemon stop` over TCP got 403; `client list` matched the
+  running policy; stop over the socket worked.

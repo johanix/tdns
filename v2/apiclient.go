@@ -8,6 +8,7 @@ package tdns
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -22,6 +23,58 @@ import (
 )
 
 func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient {
+	return NewClientWithOptions(name, baseurl, ClientOptions{ApiKey: apikey, AuthMethod: authmethod, RootCA: rootcafile})
+}
+
+// ClientOptions is how a management API client authenticates the daemon and
+// itself. NewClient covers the key-and-rootca case; this adds pinning and a
+// client certificate.
+type ClientOptions struct {
+	ApiKey string
+	// AuthMethod is "X-API-Key", "Authorization", "none" (the local socket)
+	// or "certificate" (ClientCert, and no key).
+	AuthMethod string
+	// RootCA is as for NewClient: "insecure", "tlsa", or a PEM file of roots.
+	RootCA string
+	// RootCAs, when set, are the roots of the PEM file RootCA names, already
+	// read and parsed by a caller that wants the errors returned: the file is
+	// then not read again (a read failure here exits the process).
+	RootCAs *x509.CertPool
+	// Pins, when set, replace PKIX verification of the daemon: its leaf
+	// certificate's SPKI SHA-256 must be one of these (no name, no expiry
+	// check; the pin is the trust anchor).
+	Pins []string
+	// ClientCert is presented on the TLS connection when AuthMethod is
+	// "certificate".
+	ClientCert *tls.Certificate
+	// ExpectConfigFile, for a local socket client, is the config file the
+	// daemon must run. Every request carries it (ExpectConfigFileHeader), and
+	// a daemon that runs another config refuses the request before acting
+	// on it: the check is part of the very request that does the work, so a
+	// daemon that took the socket after an earlier check cannot run it.
+	ExpectConfigFile string
+}
+
+// ExpectConfigFileHeader carries ClientOptions.ExpectConfigFile. A daemon
+// refuses a request whose header names another config file than its own
+// (412), whatever the request.
+const ExpectConfigFileHeader = "X-Tdns-Config-File"
+
+// expectConfigTransport adds the ExpectConfigFileHeader to every request.
+type expectConfigTransport struct {
+	base http.RoundTripper
+	file string
+}
+
+func (t expectConfigTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set(ExpectConfigFileHeader, t.file)
+	return t.base.RoundTrip(r)
+}
+
+// NewClientWithOptions builds a management API client for baseurl.
+func NewClientWithOptions(name, baseurl string, o ClientOptions) *ApiClient {
+	apikey, authmethod, rootcafile := o.ApiKey, o.AuthMethod, o.RootCA
 	api := ApiClient{
 		Name:       name,
 		BaseUrl:    baseurl,
@@ -44,23 +97,41 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient 
 		// otherwise fail every request before dialling.
 		api.AuthMethod = "none"
 		api.apiKey = ""
-		api.Client = &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					if !ok {
-						return nil, fmt.Errorf("baseurl %s: a local socket is unix:///absolute/path", baseurl)
-					}
-					var d net.Dialer
-					return d.DialContext(ctx, "unix", path)
-				},
+		var tr http.RoundTripper = &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				if !ok {
+					return nil, fmt.Errorf("baseurl %s: a local socket is unix:///absolute/path", baseurl)
+				}
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", path)
 			},
 		}
+		if o.ExpectConfigFile != "" {
+			// Absolute, from this process's working directory: the daemon
+			// has another one, and compares with its own absolute path.
+			tr = expectConfigTransport{base: tr, file: absConfigFile(o.ExpectConfigFile)}
+		}
+		api.Client = &http.Client{Transport: tr}
 		return &api
 	}
 
 	tlsconfig := &tls.Config{}
+	if authmethod == "certificate" && o.ClientCert != nil {
+		tlsconfig.Certificates = []tls.Certificate{*o.ClientCert}
+	}
 
-	if rootcafile == "insecure" {
+	if len(o.Pins) > 0 {
+		// Pinning replaces chain building: InsecureSkipVerify turns off the
+		// default verification and VerifyConnection, which still runs (on
+		// resumed connections too), is the gate.
+		pins := append([]string(nil), o.Pins...)
+		tlsconfig.InsecureSkipVerify = true
+		tlsconfig.VerifyConnection = func(cs tls.ConnectionState) error {
+			return verifyServerPin(cs, pins)
+		}
+	} else if rootcafile == "system" {
+		// tlsauth: pkix with no rootca: the system roots (RootCAs nil).
+	} else if rootcafile == "insecure" {
 		tlsconfig.InsecureSkipVerify = true
 	} else if rootcafile == "tlsa" {
 
@@ -84,6 +155,10 @@ func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient 
 		//			}
 		//			return nil
 		//		}
+	} else if o.RootCAs != nil {
+		// The caller read and parsed rootcafile already, and handled its
+		// errors; reading it again here could only find a changed file.
+		tlsconfig.RootCAs = o.RootCAs
 	} else {
 		rootCAPool := x509.NewCertPool()
 		// rootCA, err := os.ReadFile(viper.GetString("musicd.rootCApem"))
@@ -150,12 +225,27 @@ func unixSocketPath(baseurl string) (string, bool) {
 	return p, true
 }
 
+// verifyServerPin is the VerifyConnection gate for a pinned daemon: the leaf
+// certificate's SPKI SHA-256 must match one of pins.
+func verifyServerPin(cs tls.ConnectionState, pins []string) error {
+	if len(cs.PeerCertificates) == 0 {
+		return fmt.Errorf("the daemon presented no certificate")
+	}
+	got := SPKISHA256(cs.PeerCertificates[0])
+	for _, want := range pins {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 {
+			return nil
+		}
+	}
+	return fmt.Errorf("the daemon's certificate has pin %s, which is not one of the %d pinned for this entry (a new key on the daemon, or not the daemon you meant)", got, len(pins))
+}
+
 // request helper function
 func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 
 	req.Header.Add("Content-Type", "application/json")
 
-	if api.AuthMethod == "" || api.AuthMethod == "none" {
+	if api.AuthMethod == "" || api.AuthMethod == "none" || api.AuthMethod == "certificate" {
 		// no auth needed
 	} else if api.AuthMethod == "X-API-Key" {
 		if api.apiKey == "" {
