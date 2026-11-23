@@ -301,14 +301,24 @@ var apiTCPServers struct {
 	stoppedBy string // the access file that stopped them, for config status
 }
 
-// Test hooks, nil outside tests. apiDispatchLockedHook runs inside
-// APIdispatcher's locked region, between the policy check and the
-// registration, so a test can hold start-up there. apiServeHook, if set, is
-// handed each TCP server's serve call (and may hold it, or not run it at
-// all); APIdispatcher reads both before its goroutines start.
+// Test hooks, nil outside tests.
+//   - apiDispatchBeforeLockHook runs in APIdispatcher just before it takes
+//     apiTCPServers' lock, so a test can put a reload after everything the
+//     dispatcher did before the lock.
+//   - apiDispatchLockedHook runs inside APIdispatcher's locked region,
+//     between the policy check and the registration, so a test can hold
+//     start-up there.
+//   - apiActivateBeforeLockHook runs in activateApiAccess just before it
+//     takes the lock, so a test knows when a reload is about to wait on it.
+//   - apiServeHook, if set, is handed each TCP server's serve call (and may
+//     hold it, or not run it at all).
+//
+// APIdispatcher reads its hooks before its goroutines start.
 var (
-	apiDispatchLockedHook func()
-	apiServeHook          func(addr string, serve func())
+	apiDispatchBeforeLockHook func()
+	apiDispatchLockedHook     func()
+	apiActivateBeforeLockHook func()
+	apiServeHook              func(addr string, serve func())
 )
 
 func registerApiTCPServers(srvs []apiTCPServer, plaintext bool) {
@@ -324,6 +334,9 @@ func registerApiTCPServers(srvs []apiTCPServer, plaintext bool) {
 // so a reload while the daemon starts can neither miss a plaintext listener
 // nor be followed by one.
 func activateApiAccess(path string, store func()) []string {
+	if apiActivateBeforeLockHook != nil {
+		apiActivateBeforeLockHook()
+	}
 	apiTCPServers.Lock()
 	defer apiTCPServers.Unlock()
 	addrs := stopPlaintextLocked()
@@ -530,6 +543,9 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	// is bound after the policy is in force (ListenAndServe binds in the
 	// goroutine, where a close can come between its check and the bind). A
 	// server closed before its goroutine runs returns ErrServerClosed.
+	if apiDispatchBeforeLockHook != nil {
+		apiDispatchBeforeLockHook()
+	}
 	apiTCPServers.Lock()
 	if !useTLS && apiAccessInForce(conf) {
 		apiTCPServers.stopped = append(apiTCPServers.stopped, addresses...)
