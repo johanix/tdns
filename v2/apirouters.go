@@ -249,6 +249,13 @@ func apiServerTLSConfig(conf *Config) *tls.Config {
 	c.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 		if st := conf.Internal.ApiAccess.load(); st != nil && st.Enabled &&
 			!slices.Contains(hello.SupportedVersions, tls.VersionTLS13) {
+			// Go's own log line says only "client offered only
+			// unsupported versions"; say why here.
+			from := "unknown"
+			if hello.Conn != nil {
+				from = hello.Conn.RemoteAddr().String()
+			}
+			lgApi.Info("management API: TLS handshake refused: the access file requires TLS 1.3", "client", from)
 			return tls13Only, nil
 		}
 		return nil, nil // the config as it is
@@ -263,6 +270,9 @@ type apiListenerSettings struct {
 	Addresses                 []string
 	Socket, CertFile, KeyFile string
 	UseTLS                    bool
+	// TLS13Only: started with an access file, so MinVersion is TLS 1.3
+	// (apiServerTLSConfig), and stays so until a restart.
+	TLS13Only bool
 }
 
 // apiListenersStarted is what the running listeners were started with; nil
@@ -271,7 +281,7 @@ var apiListenersStarted atomic.Pointer[apiListenerSettings]
 
 func listenerSettingsOf(a ApiServerConf) *apiListenerSettings {
 	return &apiListenerSettings{Addresses: slices.Clone(a.Addresses), Socket: a.Socket,
-		CertFile: a.CertFile, KeyFile: a.KeyFile, UseTLS: a.UseTLS}
+		CertFile: a.CertFile, KeyFile: a.KeyFile, UseTLS: a.UseTLS, TLS13Only: a.AccessFile != ""}
 }
 
 // apiListenerReloadNote is the part of a reload's report that names the
@@ -295,6 +305,11 @@ func (conf *Config) apiListenerReloadNote() string {
 	}
 	if was.CertFile != now.CertFile || was.KeyFile != now.KeyFile {
 		changed = append(changed, "apiserver.certfile/keyfile")
+	}
+	// The other way round needs no restart: an access file a reload adds is
+	// held to TLS 1.3 at every handshake (apiServerTLSConfig).
+	if was.TLS13Only && !now.TLS13Only {
+		changed = append(changed, "apiserver.access-file (the listeners stay TLS 1.3 only)")
 	}
 	if len(changed) == 0 {
 		return ""
