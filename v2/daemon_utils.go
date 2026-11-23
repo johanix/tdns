@@ -20,6 +20,15 @@ import (
 	"github.com/spf13/viper"
 )
 
+// daemonNotRunning says whether err, from a request to the daemon, means that
+// nothing is running there: the connection was refused (TCP, or a stale
+// socket), or the local admin socket does not exist. A socket that is there
+// but not ours to open (EACCES) is not this.
+func daemonNotRunning(err error) bool {
+	return err != nil && (strings.Contains(strings.ToLower(err.Error()), "connection refused") ||
+		errors.Is(err, syscall.ENOENT))
+}
+
 // StopDaemon asks the daemon to stop. It returns nil when the daemon is
 // winding down or was not running (stop is then a no-op), and an error when
 // the daemon is running and did not agree to stop, for instance a 403
@@ -28,10 +37,7 @@ import (
 func (api *ApiClient) StopDaemon() error {
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "stop"}, false)
 	if err != nil {
-		// Refused (TCP, or a stale socket) or no socket file at all: nothing
-		// is running. A socket that is there but not ours to open (EACCES)
-		// is not this, and stays an error.
-		if strings.Contains(strings.ToLower(err.Error()), "connection refused") || errors.Is(err, syscall.ENOENT) {
+		if daemonNotRunning(err) {
 			fmt.Printf("Daemon seems to not be running.\n")
 			return nil
 		}
@@ -67,7 +73,7 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string, daemo
 
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "status"}, false) // don't die
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
+		if daemonNotRunning(err) {
 			fmt.Printf("Daemon not responding. Starting new daemon (timeout: %d seconds)\n", maxwait)
 
 			daemonbinary := command
@@ -151,9 +157,11 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string, daemo
 							r.Status, r.Msg)
 						os.Exit(0)
 					} else {
-						if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
+						// Until the daemon has created its socket, the
+						// socket file is missing: not up yet, keep waiting.
+						if daemonNotRunning(err) {
 							if Globals.Verbose {
-								fmt.Printf("Status: connection refused, but not yet giving up\n")
+								fmt.Printf("Status: not answering yet (%v), but not yet giving up\n", err)
 							}
 							continue // with the for loop
 						} else {

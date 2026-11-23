@@ -379,6 +379,47 @@ func TestAccessFileRequiresTLS13(t *testing.T) {
 	}
 }
 
+// A listener started without an access file, which a reload then adds: from
+// the reload on, a client that cannot do TLS 1.3 fails the handshake itself,
+// before it can send a request. A TLS 1.3 client still gets through.
+func TestReloadedAccessFileRequiresTLS13AtTheHandshake(t *testing.T) {
+	conf := &Config{}
+	conf.Internal.ApiAccess = &apiAccessHolder{} // no access file at start
+	conf.Internal.ServerErrors = NewServerErrorRegistry()
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.TLS = apiServerTLSConfig(conf)
+	srv.StartTLS()
+	defer srv.Close()
+
+	handshake := func(maxVersion uint16) error {
+		c, err := tls.Dial("tcp", srv.Listener.Addr().String(),
+			&tls.Config{InsecureSkipVerify: true, MaxVersion: maxVersion})
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		return c.Handshake()
+	}
+	if err := handshake(tls.VersionTLS12); err != nil {
+		t.Fatalf("TLS 1.2 before any access file: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "access.yaml")
+	if err := os.WriteFile(path, []byte("clients: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conf.ApiServer.AccessFile = path
+	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "Access file reloaded") {
+		t.Fatalf("reload: %q", msg)
+	}
+	if err := handshake(tls.VersionTLS12); err == nil {
+		t.Error("TLS 1.2 handshake succeeded after a reload added the access file")
+	}
+	if err := handshake(tls.VersionTLS13); err != nil {
+		t.Errorf("TLS 1.3 after the reload: %v", err)
+	}
+}
+
 // A reload cannot move a listener; it says which listener settings it left
 // for the next restart.
 func TestApiListenerReloadNote(t *testing.T) {

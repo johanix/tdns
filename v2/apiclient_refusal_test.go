@@ -2,8 +2,10 @@ package tdns
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -77,8 +79,50 @@ func TestStopDaemonReportsARefusal(t *testing.T) {
 	}
 
 	// The local socket of a daemon that is not running: no socket file.
+	// (StartDaemon asks the same daemonNotRunning before it starts one, and
+	// while it waits for the new one to answer; see TestDaemonNotRunning.)
 	noSocket := NewClient("local", "unix://"+filepath.Join(shortTempDir(t), "absent.sock"), "", "none", "")
 	if err := noSocket.StopDaemon(); err != nil {
 		t.Errorf("StopDaemon with no socket file: %v (want nil: stop is a no-op)", err)
+	}
+}
+
+// What start, stop and restart treat as "no daemon there": a refused
+// connection, or no socket file. A socket that is not ours to open is
+// something else, and so is no error at all.
+func TestDaemonNotRunning(t *testing.T) {
+	dir := shortTempDir(t)
+	status := func(baseurl string) error {
+		_, _, err := NewClient("local", baseurl, "", "none", "").UpdateDaemon(CommandPost{Command: "status"}, false)
+		return err
+	}
+
+	if err := status("unix://" + filepath.Join(dir, "absent.sock")); !daemonNotRunning(err) {
+		t.Errorf("no socket file: %v, want not running", err)
+	}
+
+	gone := httptest.NewServer(http.NotFoundHandler())
+	url := gone.URL
+	gone.Close()
+	notRunning := &ApiClient{BaseUrl: url, AuthMethod: "none", Client: &http.Client{}}
+	if _, _, err := notRunning.UpdateDaemon(CommandPost{Command: "status"}, false); !daemonNotRunning(err) {
+		t.Errorf("refused TCP: %v, want not running", err)
+	}
+
+	if os.Geteuid() != 0 {
+		locked := filepath.Join(dir, "locked.sock")
+		ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: locked, Net: "unix"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		os.Chmod(locked, 0)
+		if err := status("unix://" + locked); err == nil || daemonNotRunning(err) {
+			t.Errorf("a socket we may not open: %v, want an error that is not \"not running\"", err)
+		}
+	}
+
+	if daemonNotRunning(nil) {
+		t.Error("no error counted as not running")
 	}
 }
