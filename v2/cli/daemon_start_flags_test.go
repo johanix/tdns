@@ -146,9 +146,14 @@ func TestDaemonCommandLine(t *testing.T) {
 			"", nil, "names two config files"},
 		{"the same file twice", "/usr/local/libexec/tdns-imr --config /etc/a.yaml --config=/etc/a.yaml", []string{"--config", "/etc/a.yaml"},
 			"/usr/local/libexec/tdns-imr", []string{"--config", "/etc/a.yaml", "--config=/etc/a.yaml"}, ""},
-		// tdns-auth parses with Go's flag package, which takes one dash too.
-		{"one-dash -config", "/usr/local/libexec/tdns-auth -config /etc/tdns-site/tdns-auth.yaml", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"},
-			"", nil, "make them the same"},
+		// The daemons parse with pflag, which refuses a one-dash -config:
+		// refused here, before anything is stopped (Johan, 2026-11-23).
+		{"one-dash -config", "/usr/local/libexec/tdns-auth -config /etc/tdns-enc/tdns-auth.yaml", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"},
+			"", nil, "with one dash"},
+		{"one-dash -config=", "/usr/local/libexec/tdns-auth --config /etc/a.yaml -config=/etc/a.yaml --", []string{"--config", "/etc/a.yaml"},
+			"", nil, "with one dash"},
+		{"one-dash after --", "/usr/local/libexec/tdns-imr -- -config x", []string{"--config", "/etc/a.yaml"},
+			"/usr/local/libexec/tdns-imr", []string{"--config", "/etc/a.yaml", "--", "-config", "x"}, ""},
 	} {
 		bin, args, err := daemonCommandLine(tc.command, tc.flags)
 		switch {

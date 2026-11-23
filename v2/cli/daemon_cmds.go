@@ -96,8 +96,9 @@ func daemonStartFlags(cmd *cobra.Command, ad *ApiDetails) ([]string, error) {
 // "--" an option is an argument to the daemon. A --config in both is passed
 // once when the two name the same file, and refused when they do not: the
 // daemon would start on the one while the entry waits for the other. So is a
-// command: naming two different config files (the daemon takes the last). All
-// of it is decided before anything is stopped. An empty command gives an
+// command: naming two different config files (the daemon takes the last), and
+// one with a one-dash -config, which the daemons (pflag) do not take: the new
+// daemon would exit at once. All of it is decided before anything is stopped. An empty command gives an
 // empty binary, which StartDaemon refuses if it has to start anything.
 func daemonCommandLine(command string, flags []string) (string, []string, error) {
 	words, err := splitCommandLine(command)
@@ -111,6 +112,11 @@ func daemonCommandLine(command string, flags []string) (string, []string, error)
 	opts, rest := own, []string(nil)
 	if i := slices.Index(own, "--"); i >= 0 {
 		opts, rest = own[:i], own[i:]
+	}
+	for _, a := range opts {
+		if a == "-config" || strings.HasPrefix(a, "-config=") {
+			return "", nil, fmt.Errorf("command: has %s with one dash; the daemons take --config (two dashes)", a)
+		}
 	}
 	if cmdCfgs := configArgs(opts); len(cmdCfgs) > 0 {
 		for _, c := range cmdCfgs[1:] {
@@ -131,8 +137,8 @@ func daemonCommandLine(command string, flags []string) (string, []string, error)
 }
 
 // configArgs are the values of the --config arguments in args, in order, up
-// to a "--": --config x, --config=x, and the one-dash forms Go's flag package
-// takes as well (tdns-auth parses its flags with it).
+// to a "--": --config x and --config=x, the forms pflag takes (the daemons
+// parse their flags with it; a one-dash -config is refused before this).
 func configArgs(args []string) []string {
 	var out []string
 	for i := 0; i < len(args); i++ {
@@ -140,13 +146,11 @@ func configArgs(args []string) []string {
 		switch {
 		case a == "--":
 			return out
-		case (a == "--config" || a == "-config") && i+1 < len(args):
+		case a == "--config" && i+1 < len(args):
 			out = append(out, args[i+1])
 			i++
 		case strings.HasPrefix(a, "--config="):
 			out = append(out, strings.TrimPrefix(a, "--config="))
-		case strings.HasPrefix(a, "-config="):
-			out = append(out, strings.TrimPrefix(a, "-config="))
 		}
 	}
 	return out
