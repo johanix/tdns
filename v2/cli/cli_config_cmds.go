@@ -674,10 +674,10 @@ func defaultApiCert(o AddOptions, res *AddResult, info *DaemonApi) (string, erro
 	case cerr == nil && kerr == nil:
 		return "", nil // there: pinned as any certificate is
 	case cerr == nil || kerr == nil:
-		// EnsureDefaultApiCert refuses half a pair before it writes
-		// anything, a dry run included.
-		_, _, err := tdns.EnsureDefaultApiCert(info.ConfigFile, info.Addresses)
-		return "", refuseAdd(info, fmt.Sprintf("%v", err),
+		// Refused from what is there, never through EnsureDefaultApiCert:
+		// if the remaining file went meanwhile, it would write a pair (a dry
+		// run included) and leave no refusal to give.
+		return "", refuseAdd(info, tdns.HalfApiCertPairError(cert, key, cerr == nil).Error(),
 			"put back the missing file, or remove the other (the daemon then makes a new pair, which config add pins), then run config add again")
 	case !errors.Is(cerr, os.ErrNotExist) || !errors.Is(kerr, os.ErrNotExist):
 		return "", refuseAdd(info, fmt.Sprintf("the daemon's API certificate %s cannot be looked for (%v)", cert, errors.Join(cerr, kerr)),

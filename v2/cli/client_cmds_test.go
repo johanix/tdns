@@ -1278,10 +1278,14 @@ func TestAddPinsTheDefaultApiCert(t *testing.T) {
 		if err != nil || res.ApiCertCreated != cert {
 			t.Fatalf("%+v, %v; want the pair made", res, err)
 		}
-		for p, mode := range map[string]os.FileMode{key: 0o600, cert: 0o644} {
-			if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != mode {
-				t.Errorf("%s: %v, want mode %v", p, err, mode)
-			}
+		// The umask narrows the modes (077 leaves the certificate 0600): no
+		// bit outside 0644, and the key no group or other bit at all, and
+		// readable and writable by its owner.
+		if fi, err := os.Stat(cert); err != nil || fi.Mode().Perm()&^0o644 != 0 {
+			t.Errorf("%s: %v, want mode 0644 or narrower", cert, err)
+		}
+		if fi, err := os.Stat(key); err != nil || fi.Mode().Perm()&0o077 != 0 || fi.Mode().Perm()&0o600 != 0o600 {
+			t.Errorf("%s: %v, want mode 0600", key, err)
 		}
 		data, _ := os.ReadFile(cert)
 		block, _ := pem.Decode(data)
@@ -1317,6 +1321,31 @@ func TestAddPinsTheDefaultApiCert(t *testing.T) {
 		absent(t, key, env.cli)
 		if _, err := os.Stat(cert); err != nil {
 			t.Error("the remaining certificate was removed")
+		}
+	})
+
+	// A dry run refuses either half from what is there, in
+	// EnsureDefaultApiCert's words, and writes nothing: it never calls
+	// EnsureDefaultApiCert, which writes a pair if the remaining file went
+	// meanwhile.
+	t.Run("half a pair, dry run: refused from what is there", func(t *testing.T) {
+		for _, certThere := range []bool{true, false} {
+			env, d, cert, key := setup(t)
+			if _, _, err := tdns.EnsureDefaultApiCert(d, nil); err != nil {
+				t.Fatal(err)
+			}
+			kept, gone := cert, key
+			if !certThere {
+				kept, gone = key, cert
+			}
+			os.Remove(gone)
+			before, _ := os.ReadFile(kept)
+			_, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true })
+			refusal(t, err, "not adding "+d+": ", tdns.HalfApiCertPairError(cert, key, certThere).Error(), "Fix: put back the missing file")
+			absent(t, gone, env.cli)
+			if after, rerr := os.ReadFile(kept); rerr != nil || string(after) != string(before) {
+				t.Errorf("certThere %v: the remaining %s was changed or removed (%v)", certThere, kept, rerr)
+			}
 		}
 	})
 
