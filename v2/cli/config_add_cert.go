@@ -472,36 +472,63 @@ func pingAs(base, pin string, o tdns.ClientOptions) pingReply {
 	return r
 }
 
+// testHookRollbackRestore, when set, runs in rollback for each file it is
+// about to put back: after it found the file still holds what apply wrote,
+// before the restore, with the file's lock held. A test tries a concurrent
+// edit there, in the window one could otherwise slip into. Tests only.
+var testHookRollbackRestore func(path string)
+
+// lockPaths are the files apply and rollback lock (lockCliConfigs, which
+// takes each lock once and all in one order): the access file, whose lock
+// every `client` edit takes too; and the daemon config when apply adds
+// access-file: to it. Apply is the only writer of the daemon config here,
+// so its lock is the daemon config's own, as for any file config add edits:
+// two adds that reach one daemon config through two paths (a symlink) wait
+// for each other on it, though they suggest two access files. A hand edit
+// takes no lock; rollback's compare is all that protects it.
+func (c *CertSetup) lockPaths() []string {
+	if c.nameIt {
+		return []string{c.t.File, c.t.DaemonConfig}
+	}
+	return []string{c.t.File}
+}
+
 // apply makes the daemon accept the certificate: the pin added to the access
 // file (created if need be), the file named in the daemon config if it was
 // not, and the daemon reloaded over its local socket when it runs, the
 // running policy then checked for the pin. Each step as `client add` takes it
 // (the access file's lock, the daemon's own validator, the write with .prev,
 // the check of whose daemon answers); the daemon config is written the way
-// the access file is, its old bytes kept as .prev and the new file renamed
-// over it with its owner, group and mode. A step that fails puts back what
-// the steps before it changed (rollback; the .prev files stay); c.failed is
-// set to why. After a success, rollback stays possible until the caller has
-// written the CLI config.
+// the access file is, under its own lock, its old bytes kept as .prev and
+// the new file renamed over it with its owner, group and mode. The locks
+// (lockPaths) are held from the reads to the reload. A step that fails puts
+// back what the steps before it changed, still under those locks, which
+// are then released before the daemon is reloaded with the files put back
+// (undoLocked; the .prev files stay); c.failed is set to why. After a
+// success, rollback stays possible until the caller has written the CLI
+// config.
 func (c *CertSetup) apply(ctx context.Context) error {
-	err := c.applySteps(ctx)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	unlock, err := lockCliConfigs(ctx, c.lockPaths()...)
 	if err != nil {
-		err = fmt.Errorf("%v; %s", err, c.rollback())
+		c.failed = err
+		return err
+	}
+	if err = c.applySteps(); err != nil {
+		// Put back under the locks apply holds: rollback would take them
+		// again, and a second flock in this process waits for the first.
+		err = fmt.Errorf("%v; %s", err, c.undoLocked(unlock))
+	} else {
+		unlock()
 	}
 	c.failed = err
 	return err
 }
 
-func (c *CertSetup) applySteps(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	unlock, err := lockCliConfig(ctx, c.t.File)
-	if err != nil {
-		return err
-	}
-	defer unlock()
-
+// applySteps is apply's work. The caller holds the locks (lockPaths).
+func (c *CertSetup) applySteps() error {
 	// The daemon config must still name what it named when config add read
 	// it: an operator may have pointed it at another access file since, and
 	// enrolling the pin in this one would then do nothing.
@@ -561,10 +588,11 @@ func (c *CertSetup) applySteps(ctx context.Context) error {
 				return fmt.Errorf("cannot add access-file: to %s (%v)", c.t.DaemonConfig, err)
 			}
 		}
-		// As the access file is written (writeAccessFile): the old bytes
-		// kept as .prev first, then the new file renamed over the config,
-		// with its owner, group and mode. A rollback puts the old bytes
-		// back the same way, and leaves the .prev.
+		// As the access file is written (writeAccessFile), under the
+		// daemon config's own lock (lockPaths): the old bytes kept as
+		// .prev first, then the new file renamed over the config, with its
+		// owner, group and mode. A rollback puts the old bytes back the
+		// same way, under the same lock, and leaves the .prev.
 		if err := writeFileAtomic(c.t.DaemonConfig+".prev", cur); err != nil {
 			return fmt.Errorf("saving %s.prev: %w", c.t.DaemonConfig, err)
 		}
@@ -602,16 +630,50 @@ func (c *CertSetup) applySteps(ctx context.Context) error {
 	return nil
 }
 
-// rollback puts back what apply changed, and says how that went: each file
-// as it was before (removed, if apply created it), unless it has changed
-// since apply wrote it, which is then left as it is; and, when apply
-// reloaded the daemon, a reload over its socket so that it runs the files as
-// they are again, checked by asking it what it runs. The .prev files stay.
-// Done at most once.
-func (c *CertSetup) rollback() string {
+// rollback puts back what apply changed, after apply returned, and says how
+// that went: each file as it was before (removed, if apply created it),
+// unless it has changed since apply wrote it, which is then left as it is;
+// and, when apply reloaded the daemon, a reload over its socket so that it
+// runs the files as they are again, checked by asking it what it runs. The
+// .prev files stay. Done at most once.
+//
+// The files are compared and put back under the locks apply took
+// (lockPaths), ctx ending the wait for them: a `client` edit, or another
+// config add, that comes between the compare and the restore waits, and is
+// made on the file put back, rather than lost to it. The reload comes after
+// the locks are released. Never called while apply holds them (apply puts
+// back with undoLocked).
+func (c *CertSetup) rollback(ctx context.Context) string {
+	unlock := func() {}
+	if len(c.undo) > 0 {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		u, err := lockCliConfigs(ctx, c.lockPaths()...)
+		if err != nil {
+			c.undo = nil
+			return c.reloadBack(fmt.Sprintf("putting the files back FAILED (%v): check %s and %s by hand", err, c.t.File, c.t.DaemonConfig))
+		}
+		unlock = u
+	}
+	return c.undoLocked(unlock)
+}
+
+// undoLocked is rollback for a caller that holds the locks (lockPaths): the
+// files put back, the locks released (unlock), and then the daemon reloaded.
+func (c *CertSetup) undoLocked(unlock func()) string {
 	if len(c.undo) == 0 && !c.didReload {
+		unlock()
 		return "nothing on the daemon's side was changed"
 	}
+	files := c.restoreFiles()
+	unlock()
+	return c.reloadBack(files)
+}
+
+// restoreFiles puts back the files apply wrote, the last first, and says
+// how that went. The caller holds their locks.
+func (c *CertSetup) restoreFiles() string {
 	var left, failed []string
 	for i := len(c.undo) - 1; i >= 0; i-- {
 		u := c.undo[i]
@@ -621,30 +683,39 @@ func (c *CertSetup) rollback() string {
 			failed = append(failed, err.Error())
 		case err == nil && !bytes.Equal(cur, u.wrote):
 			left = append(left, u.path)
-		case err == nil && u.old == nil:
-			if rerr := os.Remove(u.path); rerr != nil {
-				failed = append(failed, rerr.Error())
-			}
 		case err == nil:
-			if werr := writeFileAtomicLike(u.path, u.old, nil); werr != nil {
+			if testHookRollbackRestore != nil {
+				testHookRollbackRestore(u.path)
+			}
+			if u.old == nil {
+				if rerr := os.Remove(u.path); rerr != nil {
+					failed = append(failed, rerr.Error())
+				}
+			} else if werr := writeFileAtomicLike(u.path, u.old, nil); werr != nil {
 				failed = append(failed, werr.Error())
 			}
 		}
 	}
 	c.undo = nil
-	var sb strings.Builder
 	switch {
 	case len(failed) > 0:
-		fmt.Fprintf(&sb, "putting the files back FAILED (%s): check %s and %s by hand", strings.Join(failed, "; "), c.t.File, c.t.DaemonConfig)
+		return fmt.Sprintf("putting the files back FAILED (%s): check %s and %s by hand", strings.Join(failed, "; "), c.t.File, c.t.DaemonConfig)
 	case len(left) > 0:
-		fmt.Fprintf(&sb, "the files are put back, except %s, changed since config add wrote it, and left as it is", strings.Join(left, " and "))
-	default:
-		sb.WriteString("the files are as they were")
+		return fmt.Sprintf("the files are put back, except %s, changed since config add wrote it, and left as it is", strings.Join(left, " and "))
 	}
+	return "the files are as they were"
+}
+
+// reloadBack ends a rollback whose files went as files says: when apply
+// reloaded the daemon, it is reloaded again, so that it runs the files as
+// they are now. Done without the files' locks.
+func (c *CertSetup) reloadBack(files string) string {
 	if !c.didReload {
-		return sb.String()
+		return files
 	}
 	c.didReload = false
+	var sb strings.Builder
+	sb.WriteString(files)
 	// The daemon was reloaded with the new files: it must run the old ones
 	// again.
 	if _, err := reloadAccess(c.role, c.t); err != nil {

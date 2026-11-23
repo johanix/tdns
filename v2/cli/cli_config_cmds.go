@@ -500,7 +500,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		if cert == nil || !cert.changesDaemon() {
 			return ""
 		}
-		return " On the daemon's side, " + cert.rollback() + "."
+		return " On the daemon's side, " + cert.rollback(o.Ctx) + "."
 	}
 	if err := writeFileAtomic(target, out); err != nil {
 		return nil, fmt.Errorf("%v.%s", err, daemonBack())
@@ -812,7 +812,7 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 			// The daemon's side changed for an entry that was not
 			// written: put it back too.
 			if res.Cert != nil && (res.Cert.didReload || len(res.Cert.undo) > 0) {
-				return nil, fmt.Errorf("%v; on the daemon's side, %s", err, res.Cert.rollback())
+				return nil, fmt.Errorf("%v; on the daemon's side, %s", err, res.Cert.rollback(o.Ctx))
 			}
 			return nil, err
 		}

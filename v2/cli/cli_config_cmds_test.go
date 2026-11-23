@@ -2523,6 +2523,276 @@ func TestAddRollsBackWhenTheCliConfigCannotBeWritten(t *testing.T) {
 	}
 }
 
+// clientCommandsFor makes the `client` commands of role auth edit daemon
+// config d, as on the daemon's host: the role's entry names d. Its address
+// is port 1, where nothing listens, so an edit's check of the running daemon
+// finds none.
+func clientCommandsFor(t *testing.T, d string) {
+	t.Helper()
+	RegisterRole("auth", "tdns-auth")
+	saved := apiConfig
+	t.Cleanup(func() { apiConfig = saved })
+	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", ConfigFile: d}}}
+	if err := InitApiClients(apiConfig); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// appliedCert is a config add whose apply enrolled the pin in an access file
+// that was there (anna in it) and named it in the daemon config: both files
+// written, a rollback still to come.
+type appliedCert struct {
+	c          *CertSetup
+	d, af      string
+	cfg, acc   string // the daemon config and the access file before apply
+	accApplied string // the access file as apply wrote it
+}
+
+func applyForRollback(t *testing.T) appliedCert {
+	t.Helper()
+	env := newAddEnv(t)
+	env.pin(t)
+	d, _ := env.certDaemon(t, env.dir, "")
+	a := appliedCert{d: d, af: accessFileOf(d), cfg: readBytes(t, d),
+		acc: "keyauth: true\nclients:\n   - name: anna\n     pin: " + pinOf("anna") + "\n     role: read-only\n"}
+	writeFile(t, a.af, a.acc)
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.c = planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	if a.c.state != certCanEnable || !a.c.nameIt || !a.c.addPin {
+		t.Fatalf("plan %+v", a.c)
+	}
+	if err := a.c.apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.c.undo) != 2 || readBytes(t, d) == a.cfg {
+		t.Fatalf("apply did not write both files: %+v", a.c.undo)
+	}
+	a.accApplied = readBytes(t, a.af)
+	clientCommandsFor(t, d)
+	return a
+}
+
+// rollback compares each file with what apply wrote and puts it back as one
+// step, under the locks apply takes: the access file's, which the `client`
+// edits take, and the daemon config's. An edit that comes between the
+// compare and the restore waits for the lock, and is then made on the file
+// put back: neither change is lost. A file changed before the compare is
+// left as it is. Apply's own rollback runs under the locks apply holds,
+// without taking them again (which would wait for itself).
+func TestRollbackHoldsTheFileLocks(t *testing.T) {
+	t.Run("an edit between compare and restore waits, and is kept", func(t *testing.T) {
+		a := applyForRollback(t)
+		var restored []string
+		var done chan struct{}
+		var editErr error
+		testHookRollbackRestore = func(path string) {
+			restored = append(restored, path)
+			switch path {
+			case a.d:
+				// Another add, which would write access-file: here,
+				// waits for the daemon config's lock.
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				defer cancel()
+				if unlock, err := lockCliConfig(ctx, a.d); err == nil {
+					unlock()
+					t.Error("the daemon config's lock is free between rollback's compare and its restore")
+				}
+			case a.af:
+				done = make(chan struct{})
+				go func() {
+					defer close(done)
+					editErr = editAccessFile(context.Background(), "auth", accessEditOpts{NoReload: true}, true, func(af *tdns.AccessFile) (string, error) {
+						af.Clients = append(af.Clients, tdns.AccessClient{Name: "late", Pin: pinOf("late"), Role: "read-only"})
+						return "added late", nil
+					})
+				}()
+				select {
+				case <-done:
+					t.Errorf("the client edit did not wait for rollback's lock (err %v)", editErr)
+				case <-time.After(300 * time.Millisecond):
+				}
+				if got := readBytes(t, a.af); got != a.accApplied {
+					t.Errorf("the access file changed between rollback's compare and its restore:\n%s", got)
+				}
+			}
+		}
+		t.Cleanup(func() { testHookRollbackRestore = nil })
+		msg := a.c.rollback(context.Background())
+		testHookRollbackRestore = nil
+		if !reflect.DeepEqual(restored, []string{a.d, a.af}) {
+			t.Fatalf("rollback put back %v, want %s, then %s", restored, a.d, a.af)
+		}
+		<-done
+		if editErr != nil {
+			t.Fatalf("the client edit, once rollback let go: %v", editErr)
+		}
+		if msg != "the files are as they were" {
+			t.Errorf("rollback says %q", msg)
+		}
+		if readBytes(t, a.d) != a.cfg {
+			t.Errorf("the daemon config was not put back:\n%s", readBytes(t, a.d))
+		}
+		// The edit was made on the file put back: its .prev is that file,
+		// and the result is anna and late, without the pin apply enrolled.
+		if prev := readBytes(t, a.af+".prev"); prev != a.acc {
+			t.Errorf("the edit read %q, want the file put back", prev)
+		}
+		acc, err := tdns.LoadAccessFile(a.af)
+		if err != nil || len(acc.Clients) != 2 || acc.Clients[0].Name != "anna" || acc.Clients[1].Name != "late" {
+			t.Errorf("access file %+v (%v), want anna, then late", acc, err)
+		}
+	})
+
+	t.Run("a file changed before the compare is left as it is", func(t *testing.T) {
+		a := applyForRollback(t)
+		if err := editAccessFile(context.Background(), "auth", accessEditOpts{NoReload: true}, false, func(af *tdns.AccessFile) (string, error) {
+			af.Clients = append(af.Clients, tdns.AccessClient{Name: "early", Pin: pinOf("early"), Role: "read-only"})
+			return "added early", nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		edited := readBytes(t, a.af)
+		var restored []string
+		testHookRollbackRestore = func(path string) { restored = append(restored, path) }
+		t.Cleanup(func() { testHookRollbackRestore = nil })
+		msg := a.c.rollback(context.Background())
+		testHookRollbackRestore = nil
+		if !reflect.DeepEqual(restored, []string{a.d}) {
+			t.Errorf("rollback went on to put back %v, want only %s", restored, a.d)
+		}
+		if readBytes(t, a.af) != edited {
+			t.Errorf("rollback overwrote the access file changed since apply:\n%s", readBytes(t, a.af))
+		}
+		if !strings.Contains(msg, "except "+a.af+", changed since config add wrote it, and left as it is") {
+			t.Errorf("rollback says %q", msg)
+		}
+		if readBytes(t, a.d) != a.cfg {
+			t.Error("the daemon config was not put back")
+		}
+	})
+
+	t.Run("apply's own rollback: under the locks it holds, taken once", func(t *testing.T) {
+		env := newAddEnv(t)
+		env.pin(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		cfg := readBytes(t, d)
+		f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+		f.mu.Lock()
+		f.forget = true // the reload leaves the pin out: apply fails after both writes
+		f.mu.Unlock()
+		info, err := ReadDaemonApi(d, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+		if c.state != certCanEnable || !c.nameIt {
+			t.Fatalf("plan %+v", c)
+		}
+		var held []string
+		testHookRollbackRestore = func(path string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if unlock, err := lockCliConfig(ctx, path); err == nil {
+				unlock()
+				return
+			}
+			held = append(held, path)
+		}
+		t.Cleanup(func() { testHookRollbackRestore = nil })
+		done := make(chan error, 1)
+		go func() { done <- c.apply(context.Background()) }()
+		select {
+		case err = <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatal("apply hangs: its rollback waits for the locks apply holds")
+		}
+		if err == nil || !strings.Contains(err.Error(), "does not have your certificate") || !strings.Contains(err.Error(), "the files are as they were") {
+			t.Errorf("err = %v, want the failure and the files put back", err)
+		}
+		if want := []string{d, accessFileOf(d)}; !reflect.DeepEqual(held, want) {
+			t.Errorf("files put back with their lock held: %v, want %v", held, want)
+		}
+		if readBytes(t, d) != cfg {
+			t.Error("the daemon config was not put back")
+		}
+		if _, err := os.Stat(accessFileOf(d)); err == nil {
+			t.Error("the new access file was not removed")
+		}
+	})
+}
+
+// A socket that answers for another daemon config is not this daemon, told
+// apart from a socket config add may not open (asked over TCP then): neither
+// that daemon nor the access file is taken, though the file lists your pin.
+// A key entry keeps its key, saying the daemon could not be told, and is not
+// switched to the certificate; a new entry is refused. Nothing is written,
+// and nothing reloaded.
+func TestAddSocketRunningAnotherConfig(t *testing.T) {
+	type world struct {
+		env         *addEnv
+		d, dpin, af string
+		cfg, acc    string
+		f           *fakeSocketDaemon
+	}
+	setup := func(t *testing.T) world {
+		env := newAddEnv(t)
+		w := world{env: env, af: filepath.Join(env.dir, "access.yaml")}
+		w.acc = "keyauth: true\nclients:\n   - name: laptop\n     pin: " + env.pin(t) + "\n     role: read-write\n"
+		writeFile(t, w.af, w.acc)
+		w.d, w.dpin = env.certDaemon(t, env.dir, "\n   access-file: "+w.af)
+		w.cfg = readBytes(t, w.d)
+		w.f = serveFakeDaemon(t, env.socket(), w.d, w.af)
+		w.f.mu.Lock()
+		w.f.runs = "/etc/tdns/other.yaml"
+		w.f.mu.Unlock()
+		return w
+	}
+	unchanged := func(t *testing.T, w world) {
+		t.Helper()
+		if readBytes(t, w.af) != w.acc || readBytes(t, w.d) != w.cfg {
+			t.Error("the access file or the daemon config changed")
+		}
+		if n := w.f.reloadCount(); n != 0 {
+			t.Errorf("%d reloads sent to the other daemon", n)
+		}
+	}
+
+	t.Run("a key entry: kept, not switched", func(t *testing.T) {
+		w := setup(t)
+		writeFile(t, w.env.cli, keyEntry(w.d, w.dpin))
+		res, err := w.env.add(t, w.d, nil)
+		if err != nil || !res.KeyKept || res.Switched || res.Cert == nil || res.Cert.state != certCannot || res.Cert.listedAs != "" {
+			t.Fatalf("%+v, %v; want the key kept, the certificate not taken", res, err)
+		}
+		if readBytes(t, w.env.cli) != keyEntry(w.d, w.dpin) {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, w.env.cli))
+		}
+		if notes := strings.Join(res.Notes, " "); !strings.Contains(notes, "could not be told") || !strings.Contains(notes, "runs /etc/tdns/other.yaml") {
+			t.Errorf("notes %q, want the key's acceptance not told, for the other config", notes)
+		}
+		if out := printed(res, false, w.env.cli); !strings.Contains(out, "keeps the API key") || !strings.Contains(out, "runs /etc/tdns/other.yaml") || strings.Contains(out, "lists your certificate") {
+			t.Errorf("printed:\n%s", out)
+		}
+		unchanged(t, w)
+	})
+
+	t.Run("a new entry: refused", func(t *testing.T) {
+		w := setup(t)
+		_, err := w.env.add(t, w.d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), "runs /etc/tdns/other.yaml") || strings.Contains(err.Error(), "lists your certificate") {
+			t.Errorf("err = %v, want a refusal naming the other config", err)
+		}
+		if _, err := os.Stat(w.env.cli); err == nil {
+			t.Error("the refused add wrote the CLI config")
+		}
+		unchanged(t, w)
+	})
+}
+
 // When the daemon's socket cannot be used, a request through the role's entry
 // names the daemon config it is for, so a daemon that runs another refuses it
 // before acting on it.
