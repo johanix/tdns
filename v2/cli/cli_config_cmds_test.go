@@ -1113,6 +1113,23 @@ func TestCheckEntriesPingsEachAPI(t *testing.T) {
 	if !strings.HasPrefix(res[5], "FAIL") || !strings.Contains(res[5], "no PEM certificate") {
 		t.Errorf("notpem: %q", res[5])
 	}
+
+	// The warning every other command would give for an entry (here: an
+	// unverified daemon) is in the check's result too, after the verdict, so
+	// the leading ok or FAIL that sets the exit status stays first.
+	saved := RequireServerVerification
+	t.Cleanup(func() { RequireServerVerification = saved })
+	RequireServerVerification = true
+	warned := CheckEntries([]ApiDetails{
+		{Name: "insecure", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"},
+		{Name: "insecuredown", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"},
+	}, CliClientConf{}, 5*time.Second)
+	if !strings.HasPrefix(warned[0], "ok") || !strings.Contains(warned[0], "warning:") || !strings.Contains(warned[0], "not verified") {
+		t.Errorf("insecure entry that answers: %q, want ok with the warning", warned[0])
+	}
+	if !strings.HasPrefix(warned[1], "FAIL") || !strings.Contains(warned[1], "warning:") {
+		t.Errorf("insecure entry that does not answer: %q, want FAIL with the warning", warned[1])
+	}
 }
 
 func TestConfigAddHint(t *testing.T) {

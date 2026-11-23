@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 )
@@ -42,10 +44,75 @@ func TestEnsureClientCert(t *testing.T) {
 	if err != nil || created || pin2 != pin {
 		t.Errorf("second: %q %v %v, want %q unchanged", pin2, created, err, pin)
 	}
+	// A certificate whose key is another one, or gone, is not a pair: no
+	// pin, and neither file touched.
+	goodKey, _ := os.ReadFile(key)
+	other := filepath.Join(dir, "other")
+	if _, _, err := ensureClientCert(filepath.Join(other, "o.crt"), filepath.Join(other, "o.key"), "otto"); err != nil {
+		t.Fatal(err)
+	}
+	otherKey, _ := os.ReadFile(filepath.Join(other, "o.key"))
+	certBefore, _ := os.ReadFile(cert)
+	os.WriteFile(key, otherKey, 0o600)
+	if _, _, err := ensureClientCert(cert, key, "anna"); err == nil || !strings.Contains(err.Error(), "not a usable pair") {
+		t.Errorf("mismatched key: err = %v", err)
+	}
+	if k, _ := os.ReadFile(key); string(k) != string(otherKey) {
+		t.Error("the mismatched key was overwritten")
+	}
+	if c, _ := os.ReadFile(cert); string(c) != string(certBefore) {
+		t.Error("the certificate was overwritten")
+	}
+	os.Remove(key)
+	if _, _, err := ensureClientCert(cert, key, "anna"); err == nil || !strings.Contains(err.Error(), "not a usable pair") {
+		t.Errorf("missing key: err = %v", err)
+	}
+	os.WriteFile(key, goodKey, 0o600)
+
 	// A key without its certificate is not replaced.
 	os.Remove(cert)
 	if _, _, err := ensureClientCert(cert, key, "anna"); err == nil || !strings.Contains(err.Error(), "not overwriting") {
 		t.Errorf("key without cert: err = %v", err)
+	}
+}
+
+// createNewFile never replaces a file: the second of two client inits fails
+// instead of overwriting the first one's key.
+func TestCreateNewFileIsExclusive(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "k.key")
+	if err := createNewFile(p, []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := createNewFile(p, []byte("second"), 0o600); err == nil {
+		t.Error("a second create succeeded")
+	}
+	if b, _ := os.ReadFile(p); string(b) != "first" {
+		t.Errorf("content %q, want the first write kept", b)
+	}
+}
+
+// Every access-file edit holds the lock from its read to its write: while
+// another edit has it, this one waits (here until its context ends) and
+// writes nothing.
+func TestAccessFileEditWaitsForTheLock(t *testing.T) {
+	e := newAccessEnv(t, true, "")
+	unlock, err := lockCliConfig(context.Background(), e.access)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	before, _ := os.ReadFile(e.access)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err = editAccessFile(ctx, "auth", accessEditOpts{NoReload: true}, true, func(af *tdns.AccessFile) (string, error) {
+		af.Clients = append(af.Clients, tdns.AccessClient{Name: "late", Pin: pinOf("late"), Role: "read-only"})
+		return "added", nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "waiting for the lock") {
+		t.Errorf("edit while the lock is held: err = %v, want it to wait for the lock", err)
+	}
+	if after, _ := os.ReadFile(e.access); string(after) != string(before) {
+		t.Error("the access file changed while another edit held the lock")
 	}
 }
 
@@ -98,7 +165,7 @@ func TestClientCommandsEditTheAccessFile(t *testing.T) {
 	e := newAccessEnv(t, true, "")
 	o := accessEditOpts{NoReload: true}
 	add := func(name, pin, role string) error {
-		return editAccessFile("auth", o, true, func(af *tdns.AccessFile) (string, error) {
+		return editAccessFile(context.Background(), "auth", o, true, func(af *tdns.AccessFile) (string, error) {
 			if findClient(af, name) != nil {
 				return "", os.ErrExist
 			}
@@ -131,7 +198,7 @@ func TestClientCommandsEditTheAccessFile(t *testing.T) {
 
 	// The daemon's validator refuses what the daemon would: nothing written.
 	before, _ := os.ReadFile(e.access)
-	err := editAccessFile("auth", o, false, func(af *tdns.AccessFile) (string, error) {
+	err := editAccessFile(context.Background(), "auth", o, false, func(af *tdns.AccessFile) (string, error) {
 		findClient(af, "anna").Role = "admin"
 		return "", nil
 	})
@@ -143,7 +210,7 @@ func TestClientCommandsEditTheAccessFile(t *testing.T) {
 	}
 
 	// disable, keyauth off.
-	if err := editAccessFile("auth", o, false, func(af *tdns.AccessFile) (string, error) {
+	if err := editAccessFile(context.Background(), "auth", o, false, func(af *tdns.AccessFile) (string, error) {
 		findClient(af, "bob").Disabled = true
 		off := false
 		af.KeyAuth = &off
@@ -157,7 +224,7 @@ func TestClientCommandsEditTheAccessFile(t *testing.T) {
 
 	// --dry-run writes nothing.
 	before, _ = os.ReadFile(e.access)
-	if err := editAccessFile("auth", accessEditOpts{DryRun: true}, false, func(af *tdns.AccessFile) (string, error) {
+	if err := editAccessFile(context.Background(), "auth", accessEditOpts{DryRun: true}, false, func(af *tdns.AccessFile) (string, error) {
 		af.Clients = nil
 		return "", nil
 	}); err != nil {
@@ -179,7 +246,7 @@ func TestClientAddWithoutAccessFileConfigured(t *testing.T) {
 	if tg.Configured || tg.File != e.access {
 		t.Errorf("target = %+v, want the unconfigured %s", tg, e.access)
 	}
-	if err := editAccessFile("auth", accessEditOpts{}, true, func(af *tdns.AccessFile) (string, error) {
+	if err := editAccessFile(context.Background(), "auth", accessEditOpts{}, true, func(af *tdns.AccessFile) (string, error) {
 		af.Clients = append(af.Clients, tdns.AccessClient{Name: "anna", Pin: pinOf("anna"), Role: "read-only"})
 		return "added", nil
 	}); err != nil {
@@ -190,7 +257,7 @@ func TestClientAddWithoutAccessFileConfigured(t *testing.T) {
 	}
 	// Other edits need the file to exist.
 	os.Remove(e.access)
-	if err := editAccessFile("auth", accessEditOpts{}, false, func(*tdns.AccessFile) (string, error) { return "", nil }); err == nil {
+	if err := editAccessFile(context.Background(), "auth", accessEditOpts{}, false, func(*tdns.AccessFile) (string, error) { return "", nil }); err == nil {
 		t.Error("an edit of a missing file succeeded")
 	}
 }
@@ -211,7 +278,7 @@ func TestClientEditReloadsTheDaemon(t *testing.T) {
 	if err := InitApiClients(apiConfig); err != nil {
 		t.Fatal(err)
 	}
-	if err := editAccessFile("auth", accessEditOpts{}, true, func(af *tdns.AccessFile) (string, error) {
+	if err := editAccessFile(context.Background(), "auth", accessEditOpts{}, true, func(af *tdns.AccessFile) (string, error) {
 		af.Clients = append(af.Clients, tdns.AccessClient{Name: "anna", Pin: pinOf("anna"), Role: "read-only"})
 		return "added", nil
 	}); err != nil {
@@ -314,6 +381,58 @@ func TestAddPinsTheDaemonCertificate(t *testing.T) {
 	}
 	if len(res.Entry.Pins) != 0 || !strings.Contains(strings.Join(res.Notes, " "), "could not pin") {
 		t.Errorf("unreadable cert: entry %+v notes %q", res.Entry, res.Notes)
+	}
+
+	// A relative certfile is opened from the daemon's working directory,
+	// which config add cannot know: no pin, even though a file of that name
+	// sits next to the daemon config, and the note says why.
+	env3 := newAddEnv(t)
+	writeFile(t, filepath.Join(env3.dir, "api.crt"), string(certPEM))
+	d3 := filepath.Join(env3.dir, "tdns-auth.yaml")
+	writeFile(t, d3, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   certfile: api.crt\n"))
+	res, err = env3.add(t, d3, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notes := strings.Join(res.Notes, " "); len(res.Entry.Pins) != 0 || !strings.Contains(notes, "relative path") || !strings.Contains(notes, "could not pin") {
+		t.Errorf("relative certfile: entry %+v notes %q", res.Entry, res.Notes)
+	}
+}
+
+// With pins, the client ignores rootca, so a rootca: file that is gone does
+// not fail an entry that verifies by pin.
+func TestPinnedEntryIgnoresRootCA(t *testing.T) {
+	e := ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin", Pins: []string{pinOf("a")},
+		RootCA: "/nonexistent/ca.pem", AuthMethod: "none"}
+	if _, _, err := newApiClientFor(e, CliClientConf{}); err != nil {
+		t.Errorf("pinned entry with a stale rootca: %v", err)
+	}
+	e.TLSAuth, e.Pins = "pkix", nil
+	if _, _, err := newApiClientFor(e, CliClientConf{}); err == nil {
+		t.Error("a pkix entry with a missing rootca file was accepted")
+	}
+}
+
+// ReadCliClientConf sees what the CLI loads: a client: block that lives only
+// in an include: file, or in cli.localconfig.
+func TestReadCliClientConfMerges(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "tdns-ncli.yaml")
+	writeFile(t, filepath.Join(dir, "client.yaml"), "client:\n   cert: /etc/tdns/inc.crt\n   key: /etc/tdns/inc.key\n")
+	writeFile(t, main, "include:\n   - client.yaml\n")
+	if cc := ReadCliClientConf(main); cc.Cert != "/etc/tdns/inc.crt" || cc.Key != "/etc/tdns/inc.key" {
+		t.Errorf("client: from an include: %+v", cc)
+	}
+
+	local := filepath.Join(dir, "local.yaml")
+	writeFile(t, local, "client:\n   cert: /etc/tdns/local.crt\n   key: /etc/tdns/local.key\n")
+	writeFile(t, main, "cli:\n   localconfig: "+local+"\n")
+	if cc := ReadCliClientConf(main); cc.Cert != "/etc/tdns/local.crt" {
+		t.Errorf("client: from cli.localconfig: %+v", cc)
+	}
+
+	if cc := ReadCliClientConf(filepath.Join(dir, "absent.yaml")); cc != (CliClientConf{}) {
+		t.Errorf("no file: %+v, want the zero value", cc)
 	}
 }
 

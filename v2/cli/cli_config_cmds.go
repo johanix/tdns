@@ -364,7 +364,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	} else if strings.HasPrefix(entry.BaseURL, "https://") && entry.RootCA == "" {
 		// The daemon's own certificate, pinned: no CA, no name check, and
 		// nothing for the operator to do.
-		if pin, err := certFilePin(info.CertFile, info.ConfigFile); err != nil {
+		if pin, err := certFilePin(info.CertFile); err != nil {
 			res.Notes = append(res.Notes, fmt.Sprintf(
 				"could not pin the daemon's certificate (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>), or tdns-ncli will refuse to connect", err))
 		} else {
@@ -550,14 +550,16 @@ func sameEntries(a, b []ApiDetails) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-// certFilePin is the SPKI pin of the first certificate in the PEM file path
-// (relative to the daemon config's directory if not absolute).
-func certFilePin(path, daemonConfig string) (string, error) {
+// certFilePin is the SPKI pin of the first certificate in the PEM file path.
+// Only an absolute path: the daemon opens a relative certfile from its own
+// working directory, which is not knowable from here, and pinning some other
+// file of the same name would make an entry that never connects.
+func certFilePin(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("the daemon config has no apiserver.certfile")
 	}
 	if !filepath.IsAbs(path) {
-		path = filepath.Join(filepath.Dir(daemonConfig), path)
+		return "", fmt.Errorf("apiserver.certfile %q is a relative path, which the daemon resolves from its working directory, so it is not known which file it serves", path)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -908,12 +910,19 @@ func CheckEntries(entries []ApiDetails, cc CliClientConf, timeout time.Duration)
 // pingEntry pings one entry with the client every other command would use
 // (its pins, roots and credentials), so a pass here means the entry works.
 func pingEntry(e ApiDetails, cc CliClientConf, timeout time.Duration) string {
-	api, _, err := newApiClientFor(e, cc)
+	api, warn, err := newApiClientFor(e, cc)
 	if err != nil {
 		return "FAIL: " + err.Error()
 	}
 	if e.RootCA == "tlsa" {
 		return "not checked (rootca: tlsa)"
+	}
+	// What every other command would say when it uses this entry (no
+	// verification, a key in clear): the check says it too, after its
+	// verdict, so the leading ok/FAIL that sets the exit status stays first.
+	suffix := ""
+	if warn != "" {
+		suffix = " (warning: " + warn + ")"
 	}
 
 	done := make(chan string, 1)
@@ -941,9 +950,9 @@ func pingEntry(e ApiDetails, cc CliClientConf, timeout time.Duration) string {
 	}()
 	select {
 	case s := <-done:
-		return s
+		return s + suffix
 	case <-time.After(timeout):
-		return fmt.Sprintf("FAIL: no answer within %s", timeout)
+		return fmt.Sprintf("FAIL: no answer within %s", timeout) + suffix
 	}
 }
 

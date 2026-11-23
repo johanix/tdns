@@ -10,6 +10,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -156,6 +157,13 @@ func ensureClientCert(certPath, keyPath, cn string) (pin string, created bool, e
 		if perr != nil {
 			return "", false, fmt.Errorf("%s exists but %v", certPath, perr)
 		}
+		// The pair, not the certificate alone: a pin for a certificate
+		// whose key is gone or another one would enrol a client that can
+		// never connect. Touch neither file.
+		if _, kerr := tls.LoadX509KeyPair(certPath, keyPath); kerr != nil {
+			return "", false, fmt.Errorf("%s exists, but it and %s are not a usable pair (%v); not touching either: fix the key, or remove both and run client init again",
+				certPath, keyPath, kerr)
+		}
 		return p, false, nil
 	}
 	if _, err := os.Stat(keyPath); err == nil {
@@ -192,11 +200,15 @@ func ensureClientCert(certPath, keyPath, cn string) (pin string, created bool, e
 		return "", false, err
 	}
 	// The key first: a certificate without its key would make the next run
-	// believe the pair exists.
-	if err := os.WriteFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kder}), 0o600); err != nil {
+	// believe the pair exists. Both created exclusively: two client inits at
+	// once both pass the checks above, and with a plain write the second
+	// would replace the first one's key, or leave one run's key with the
+	// other's certificate. With O_EXCL the second fails instead.
+	if err := createNewFile(keyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: kder}), 0o600); err != nil {
 		return "", false, err
 	}
-	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+	if err := createNewFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		os.Remove(keyPath) // this call created it
 		return "", false, err
 	}
 	leaf, err := x509.ParseCertificate(der)
@@ -204,6 +216,25 @@ func ensureClientCert(certPath, keyPath, cn string) (pin string, created bool, e
 		return "", false, err
 	}
 	return tdns.SPKISHA256(leaf), true, nil
+}
+
+// createNewFile writes data to path, which must not exist yet. A write that
+// fails removes the file it created, and nothing else.
+func createNewFile(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func pemCertPin(data []byte) (string, error) {
@@ -261,10 +292,26 @@ type accessEditOpts struct {
 // editAccessFile is the one way the client commands change an access file:
 // read it, apply change, validate the result with the daemon's own validator,
 // write it atomically keeping the previous one as .prev, and reload.
-func editAccessFile(role string, o accessEditOpts, create bool, change func(af *tdns.AccessFile) (string, error)) error {
+func editAccessFile(ctx context.Context, role string, o accessEditOpts, create bool, change func(af *tdns.AccessFile) (string, error)) error {
 	t, err := resolveAccessTarget(role)
 	if err != nil {
 		return err
+	}
+	// From before the read to after the write (and the reload): two edits
+	// that both read the old file would each write their own change over
+	// the other's, so a `client disable` could be undone by a `client add`
+	// that started earlier, and both would report success. The lock
+	// `config add` uses, on the access file. A dry run writes nothing and
+	// takes no lock.
+	if !o.DryRun {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		unlock, err := lockCliConfig(ctx, t.File)
+		if err != nil {
+			return err
+		}
+		defer unlock()
 	}
 	af := &tdns.AccessFile{}
 	old, rerr := os.ReadFile(t.File)
@@ -373,10 +420,12 @@ func writeAccessFile(path string, old, data []byte, daemonConfig string) error {
 	if fi, err := os.Stat(daemonConfig); err == nil {
 		mode = fi.Mode().Perm()
 	}
-	if err := os.WriteFile(path, data, mode); err != nil {
+	// Atomic here too: the daemon reads this file at start and at every
+	// reload, and a truncated one parses (keyauth on, no clients).
+	if err := writeFileAtomic(path, data); err != nil {
 		return err
 	}
-	return os.Chmod(path, mode) // the umask applied to WriteFile
+	return os.Chmod(path, mode) // writeFileAtomic made it 0600
 }
 
 func findClient(af *tdns.AccessFile, name string) *tdns.AccessClient {
@@ -432,7 +481,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 			if strings.ContainsAny(name, " \t") {
 				fatalf("a client name has no spaces")
 			}
-			err := editAccessFile(role, o, true, func(af *tdns.AccessFile) (string, error) {
+			err := editAccessFile(cmd.Context(), role, o, true, func(af *tdns.AccessFile) (string, error) {
 				if findClient(af, name) != nil {
 					return "", fmt.Errorf("%q is already there; use set-role, enable or disable", name)
 				}
@@ -455,7 +504,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 			Short: short,
 			Args:  cobra.ExactArgs(1),
 			Run: func(cmd *cobra.Command, args []string) {
-				err := editAccessFile(role, o, false, func(af *tdns.AccessFile) (string, error) {
+				err := editAccessFile(cmd.Context(), role, o, false, func(af *tdns.AccessFile) (string, error) {
 					cl := findClient(af, args[0])
 					if cl == nil {
 						return "", fmt.Errorf("no client %q", args[0])
@@ -475,7 +524,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 		Short: "Change a client's role",
 		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
-			err := editAccessFile(role, o, false, func(af *tdns.AccessFile) (string, error) {
+			err := editAccessFile(cmd.Context(), role, o, false, func(af *tdns.AccessFile) (string, error) {
 				cl := findClient(af, args[0])
 				if cl == nil {
 					return "", fmt.Errorf("no client %q", args[0])
@@ -506,7 +555,7 @@ depend on it. keyauth on brings the key back.`,
 			default:
 				fatalf("keyauth on or off")
 			}
-			err := editAccessFile(role, o, true, func(af *tdns.AccessFile) (string, error) {
+			err := editAccessFile(cmd.Context(), role, o, true, func(af *tdns.AccessFile) (string, error) {
 				af.KeyAuth = &on
 				if on {
 					return "keyauth on: the API key works on the TCP API (as read-write).", nil

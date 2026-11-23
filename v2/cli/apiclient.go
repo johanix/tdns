@@ -289,9 +289,12 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 				e.Name, e.BaseURL)
 		}
 	}
-	switch o.RootCA {
-	case "", "insecure", "tlsa", "system":
-		// "" only with pins, which replace the roots.
+	switch {
+	case len(o.Pins) > 0:
+		// tlsauth: pin. The pins replace the roots, and the client ignores
+		// rootca, so a rootca: line left over from before must not be read
+		// (a file that is gone would fail an entry that verifies fine).
+	case o.RootCA == "", o.RootCA == "insecure", o.RootCA == "tlsa", o.RootCA == "system":
 	default:
 		// NewClientWithOptions exits the process on a CA file it cannot read
 		// -- and a directory passes a stat -- which would take every other
