@@ -393,7 +393,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	} else if strings.HasPrefix(entry.BaseURL, "https://") && entry.RootCA == "" {
 		// The daemon's own certificate, pinned: no CA, no name check, and
 		// nothing for the operator to do.
-		if pin, err := certFilePin(info.CertFile); err != nil {
+		if pin, err := daemonCertPin(info); err != nil {
 			res.Notes = append(res.Notes, fmt.Sprintf(
 				"could not pin the daemon's certificate (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>), or tdns-ncli will refuse to connect", err))
 		} else {
@@ -665,7 +665,7 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 	}
 	up, repin := e, false
 	if https {
-		up, repin = pinnedEntry(res, e, info.CertFile)
+		up, repin = pinnedEntry(res, e, info)
 	}
 
 	c := planCert(o, info, commandWord(e, info.Role))
@@ -722,9 +722,9 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 // pinnedEntry is e verifying the daemon by the pin of the certificate in
 // certFile, and whether that changes e. When the certificate cannot be read,
 // e stays as it is and a note says what that means for it.
-func pinnedEntry(res *AddResult, e ApiDetails, certFile string) (ApiDetails, bool) {
+func pinnedEntry(res *AddResult, e ApiDetails, info *DaemonApi) (ApiDetails, bool) {
 	byPin := strings.EqualFold(e.TLSAuth, "pin") && len(e.Pins) > 0
-	pin, err := certFilePin(certFile)
+	pin, err := daemonCertPin(info)
 	if err != nil {
 		switch {
 		case byPin:

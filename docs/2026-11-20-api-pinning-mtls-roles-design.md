@@ -133,6 +133,27 @@ CA. `insecure` is accepted only when spelled out, and tdns-ncli warns each time.
 A tdns-ncli TCP entry with none of the three refuses to connect. (tdns-ncli has
 its own config file and is a prototype; tdns-cli's defaults do not change.)
 
+**Revised 2026-11-23: the daemon's API certificate has a default.** Nothing
+made the API certificate: `tdns-cli cert init` writes the DNS listeners' pair
+(`listeners.certfile`), and the API pair was made by hand and named
+`{confdir}/certs/api.{crt,key}` in every config, so daemons whose configs
+share a directory (tdns-auth and tdns-imr in `/etc/tdns`) shared a key, and a
+client pinned to one would accept the other (`config list --check` warns). The
+owner's rulings: with neither `apiserver.certfile` nor `keyfile` set, the pair
+is `{confdir}/certs/{config name}-api.crt` and `.key`
+(`/etc/tdns/tdns-auth.yaml` has `/etc/tdns/certs/tdns-auth-api.crt`), one per
+config file (`tdns.ApiCertPaths`); and the daemon writes it, self-signed
+(ECDSA P-256, `localhost`, this host, loopback and the API listen addresses,
+ten years: the pin is what is checked), at its first start when neither file
+is there, and never overwrites one. Paths a config names are used as they
+are and never written. A config check before the first start reports the
+pair as pending (the validator lets that pass); one default file without the
+other is refused; a pair that cannot be written starts no TLS listener (the
+socket is still served). `tdns-ncli config add` pins the default pair, and
+before the first start says to start the daemon first. A new key is
+deliberate: remove the pair, restart, run `config add` again (old pins stay
+next to the new one).
+
 ### 3.2 The local socket
 
 ```yaml
@@ -733,12 +754,19 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   (Johan, 2026-11-23: "Stop the listener"), so no client sends its key in
   clear any more; they stay closed until a restart with TLS, the reload and
   `config status` say so, and the socket is still served. (A request that
-  still reaches a plaintext listener is refused, 403, as a backstop.) The
-  same holds for a reload while the daemon starts: the reload closes the
+  still reaches a plaintext listener is refused, 403, as a backstop.)
+  Removing the access file again does not reopen them: the reload that
+  removes it says they stay stopped until a restart, and `config status`
+  keeps reporting them, now beside no access policy.
+  The same holds for a reload while the daemon starts: the reload closes the
   listeners and puts the policy in force under one lock, the dispatcher
-  registers and starts its listeners under the same lock and starts no
-  plaintext one once a policy is in force, and it reads `usetls` once, so
-  a listener is recorded by the transport it started with.
+  binds, registers and starts its listeners under the same lock and starts
+  no plaintext one once a policy is in force. It binds each socket there,
+  before its server starts, and the reload closes the socket with the
+  server, so no socket is bound after the policy is in force (binding in
+  the server's goroutine left a window between its shutdown check and the
+  bind). It reads `usetls` and `access-file` once, so a listener is
+  recorded by the transport and TLS minimum it started with.
 - **`daemon start`, `stop`, `restart`** treat a missing socket file like a
   refused connection: nothing is running (and, while starting, not up yet).
 - **Reloads.** The SIGHUP path (zone reload) re-reads the access file too, so
