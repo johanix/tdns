@@ -154,7 +154,9 @@ func newAccessEnv(t *testing.T, withAccessFile bool, apiURL string) *accessEnv {
 	saved := apiConfig
 	t.Cleanup(func() { apiConfig = saved })
 	if apiURL == "" {
-		apiURL = "https://127.0.0.1:8989/api/v1"
+		// Port 1: nothing listens there, so an edit's check of the running
+		// daemon finds none, whatever runs on this host.
+		apiURL = "https://127.0.0.1:1/api/v1"
 	}
 	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: apiURL, ApiKey: "k", AuthMethod: "X-API-Key", ConfigFile: e.daemonCfg}}}
 	return e
@@ -330,6 +332,56 @@ func TestClientEditReloadsTheDaemon(t *testing.T) {
 	runs = ""
 	if err := add("carl"); err == nil || !strings.Contains(err.Error(), "does not say") {
 		t.Errorf("a daemon that does not say: err = %v", err)
+	}
+
+	// --no-reload as well: writing the file of a daemon that is not the one
+	// that answers changes nothing the operator meant, reload or not.
+	runs = filepath.Join(e.dir, "other-daemon.yaml")
+	err := editAccessFile(context.Background(), "auth", accessEditOpts{NoReload: true}, true, func(af *tdns.AccessFile) (string, error) {
+		af.Clients = append(af.Clients, tdns.AccessClient{Name: "dora", Pin: pinOf("dora"), Role: "read-only"})
+		return "added", nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "runs "+runs) {
+		t.Errorf("--no-reload with another daemon answering: err = %v, want a refusal", err)
+	}
+}
+
+// A socket that is there but not ours to open is someone we cannot ask:
+// not "nothing running". No socket file and a refused connection are.
+func TestVerifyRunningDaemonNeedsAnAnswer(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root opens any socket")
+	}
+	dir, err := os.MkdirTemp("/tmp", "ncli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	withCleanRoleRegistry(t)
+	RegisterRole("auth", "tdns-auth")
+	saved := apiConfig
+	t.Cleanup(func() { apiConfig = saved })
+	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"}}}
+	if err := InitApiClients(apiConfig); err != nil {
+		t.Fatal(err)
+	}
+
+	locked := filepath.Join(dir, "locked.sock")
+	ln, err := net.Listen("unix", locked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	os.Chmod(locked, 0)
+	tg := &accessTarget{Socket: locked, DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml"}
+	if err := verifyRunningDaemon("auth", tg); err == nil || !strings.Contains(err.Error(), "cannot ask") {
+		t.Errorf("a socket we may not open: err = %v, want a refusal", err)
+	}
+
+	// No socket file, and the entry's port refuses: nothing is running.
+	tg.Socket = filepath.Join(dir, "absent.sock")
+	if err := verifyRunningDaemon("auth", tg); err != nil {
+		t.Errorf("nothing running: %v, want the edit allowed", err)
 	}
 }
 

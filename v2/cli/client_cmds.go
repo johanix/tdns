@@ -376,15 +376,12 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 		fmt.Printf("Would write %s:\n\n%s", t.File, out)
 		return nil
 	}
-	// The reload goes to whatever answers on the daemon's socket (or the
-	// role's entry). If that is another daemon (one that holds this
-	// config's socket path, say), writing here and reloading there would
-	// change nothing the operator meant. So before writing, the daemon
-	// that would be reloaded must say it runs this config.
-	if t.Configured && !o.NoReload {
-		if err := verifyRunningDaemon(role, t); err != nil {
-			return err
-		}
+	// Whatever answers on the daemon's socket (or the role's entry) may be
+	// another daemon (one that holds this config's socket path, say):
+	// writing this file then changes nothing the operator meant, reload or
+	// not. So before writing, the daemon there must say it runs this config.
+	if err := verifyRunningDaemon(role, t); err != nil {
+		return err
 	}
 	if err := writeAccessFile(t.File, old, out, t.DaemonConfig); err != nil {
 		return err
@@ -439,18 +436,50 @@ func configToDaemon(role, socket string, post tdns.ConfigPost) (tdns.ConfigRespo
 	return SendConfigCommand(api, post)
 }
 
-// verifyRunningDaemon checks that the daemon a reload would reach (socket
-// first, as configToDaemon) runs t's daemon config. Nothing running at all is
-// fine: the next start reads the file. A daemon that answers but runs another
-// config, or does not say which, is refused before anything is written.
+// verifyRunningDaemon checks that the daemon on t's socket, and the one the
+// role's entry reaches, runs t's daemon config. Nothing running is fine (the
+// next start reads the file): that is no socket file or a refused
+// connection, on the socket and then on the entry. Anything else is refused
+// before a byte is written: a daemon that runs another config or does not
+// say which, and one that is there but cannot be asked (a socket that is not
+// ours to open, a TCP entry it refuses), as that one is not identified.
 func verifyRunningDaemon(role string, t *accessTarget) error {
-	resp, err := configToDaemon(role, t.Socket, tdns.ConfigPost{Command: "status"})
-	if err != nil {
-		if socketUnusable(err) {
-			return nil
+	post := tdns.ConfigPost{Command: "status"}
+	if t.Socket != "" {
+		resp, err := SendConfigCommand(tdns.NewClient(role, "unix://"+t.Socket, "", "none", ""), post)
+		switch {
+		case err == nil:
+			return runsConfig(resp, t)
+		case !nothingListening(err):
+			return fmt.Errorf("cannot ask the daemon on %s which config it runs (%v), so it is not known whose file this is; not editing %s (run as root, or as the daemon's user)",
+				t.Socket, err, t.File)
 		}
-		return fmt.Errorf("cannot ask the daemon which config it runs (%v); not editing %s", err, t.File)
 	}
+	// Nothing on the socket. A daemon may still run without it (it refuses
+	// a socket another process holds): ask through the role's entry.
+	api, err := GetApiClient(role, false)
+	if err != nil {
+		return nil // no entry to ask: nothing known to be running
+	}
+	resp, err := SendConfigCommand(api, post)
+	switch {
+	case err == nil:
+		return runsConfig(resp, t)
+	case nothingListening(err):
+		return nil
+	}
+	return fmt.Errorf("cannot ask the daemon at %s which config it runs (%v), so it is not known whose file this is; not editing %s",
+		api.BaseUrl, err, t.File)
+}
+
+// nothingListening says whether err means nobody is there: no socket file,
+// or a refused connection. Not a socket we may not open, which someone holds.
+func nothingListening(err error) bool {
+	return errors.Is(err, syscall.ENOENT) || strings.Contains(strings.ToLower(err.Error()), "connection refused")
+}
+
+// runsConfig checks that the daemon whose status is resp runs t's config.
+func runsConfig(resp tdns.ConfigResponse, t *accessTarget) error {
 	if resp.ConfigFile == "" {
 		return fmt.Errorf("the daemon that answers does not say which config it runs; not editing %s", t.File)
 	}
