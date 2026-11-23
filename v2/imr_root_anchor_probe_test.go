@@ -96,6 +96,10 @@ func TestRootKeysMatchAnchor(t *testing.T) {
 	zskOnly := &core.RRset{Name: ".", RRtype: dns.TypeDNSKEY, RRs: root.rrset.RRs,
 		RRSIGs: []dns.RR{root.sign(t, root.zsk, root.kskCS, now.Add(-time.Hour), now.Add(time.Hour))}}
 
+	// Signed for an hour from now: a host whose clock is behind sees it so.
+	notYet := &core.RRset{Name: ".", RRtype: dns.TypeDNSKEY, RRs: root.rrset.RRs,
+		RRSIGs: []dns.RR{root.sign(t, root.ksk, root.kskCS, now.Add(time.Hour), now.Add(2*time.Hour))}}
+
 	// The RRSIG was made over a smaller RRset than the one served.
 	extra := *other.zsk
 	grown := &core.RRset{Name: ".", RRtype: dns.TypeDNSKEY,
@@ -112,26 +116,28 @@ func TestRootKeysMatchAnchor(t *testing.T) {
 		name  string
 		rrset *core.RRset
 		dss   []*dns.DS
-		want  bool
-		why   string // part of the reason when not
+		want  rootVerdict
+		why   string // part of the reason when not a match
 	}{
-		{"the root the DS anchors", root.rrset, []*dns.DS{root.ds}, true, ""},
-		{"one of several DS", root.rrset, []*dns.DS{other.ds, root.ds}, true, ""},
-		{"another root's keys", other.rrset, []*dns.DS{root.ds}, false, "hashes to a compiled-in root DS"},
-		{"a DS with another digest", root.rrset, []*dns.DS{&tampered}, false, "hashes to a compiled-in root DS"},
-		{"signature expired", expired, []*dns.DS{root.ds}, false, "is valid from"},
-		{"no signature by the anchored key", zskOnly, []*dns.DS{root.ds}, false, "does not verify"},
-		{"RRset changed after it was signed", grown, []*dns.DS{root.ds}, false, "does not verify"},
-		{"keys of another zone", notRoot, []*dns.DS{root.ds}, false, "hashes to a compiled-in root DS"},
-		{"no RRset", nil, []*dns.DS{root.ds}, false, "no DNSKEY RRset"},
-		{"an empty RRset", &core.RRset{Name: "."}, []*dns.DS{root.ds}, false, "no DNSKEY RRset"},
+		{"the root the DS anchors", root.rrset, []*dns.DS{root.ds}, rootMatches, ""},
+		{"one of several DS", root.rrset, []*dns.DS{other.ds, root.ds}, rootMatches, ""},
+		{"another root's keys", other.rrset, []*dns.DS{root.ds}, rootDiffers, "hashes to a compiled-in root DS"},
+		{"a DS with another digest", root.rrset, []*dns.DS{&tampered}, rootDiffers, "hashes to a compiled-in root DS"},
+		// The same root, by a clock that is wrong: asked again, not a different root.
+		{"signature expired", expired, []*dns.DS{root.ds}, rootUnverifiable, "is valid from"},
+		{"signature not valid yet", notYet, []*dns.DS{root.ds}, rootUnverifiable, "is this host's clock right"},
+		{"no signature by the anchored key", zskOnly, []*dns.DS{root.ds}, rootDiffers, "does not verify"},
+		{"RRset changed after it was signed", grown, []*dns.DS{root.ds}, rootDiffers, "does not verify"},
+		{"keys of another zone", notRoot, []*dns.DS{root.ds}, rootDiffers, "hashes to a compiled-in root DS"},
+		{"no RRset", nil, []*dns.DS{root.ds}, rootDiffers, "no DNSKEY RRset"},
+		{"an empty RRset", &core.RRset{Name: "."}, []*dns.DS{root.ds}, rootDiffers, "no DNSKEY RRset"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tag, ok, why := rootKeysMatchAnchor(tc.rrset, tc.dss, now)
-			if ok != tc.want {
-				t.Fatalf("match = %v (%s), want %v", ok, why, tc.want)
+			tag, verdict, why := rootKeysMatchAnchor(tc.rrset, tc.dss, now)
+			if verdict != tc.want {
+				t.Fatalf("verdict = %d (%s), want %d", verdict, why, tc.want)
 			}
-			if ok {
+			if verdict == rootMatches {
 				if tag != root.ksk.KeyTag() {
 					t.Errorf("key tag = %d, want the KSK's %d", tag, root.ksk.KeyTag())
 				}
@@ -399,5 +405,126 @@ func TestRootIsNotProbedWhenTheConfigDecides(t *testing.T) {
 	}
 	if got := fetches.Load(); got != 1 {
 		t.Errorf("the default root's keys were fetched %d times, want 1 (processTrustAnchorZone's)", got)
+	}
+}
+
+// A root whose signature is out of date by this host's clock is asked again,
+// as an unreachable one is, and gets the anchor once the signature verifies. It
+// is not another root: a clock that is stepped to the right time, or a
+// signature that is replaced, makes the same keys verify.
+func TestRootProbeRetriesASignatureOutsideItsValidity(t *testing.T) {
+	logbuf := captureImrLog(t)
+	now := time.Now()
+	root := newTestRoot(t, now)
+	useTestRootAnchor(t, root)
+	prev := rootProbeRetry
+	rootProbeRetry = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { rootProbeRetry = prev })
+
+	stale := &core.RRset{Name: ".", Class: dns.ClassINET, RRtype: dns.TypeDNSKEY, RRs: root.rrset.RRs,
+		RRSIGs: []dns.RR{root.sign(t, root.ksk, root.kskCS, now.Add(-3*time.Hour), now.Add(-2*time.Hour))}}
+	imr := newAnchorTestImr(t)
+	var n atomic.Int32
+	imr.anchorKeysFetch = func(context.Context, string) (*core.RRset, map[string]*cache.AuthServer, string, error) {
+		// Two answers with a stale signature; the probe's third, and
+		// processTrustAnchorZone's fetch after it, are right.
+		if n.Add(1) <= 2 {
+			return stale, nil, "", nil
+		}
+		return root.rrset, nil, "", nil
+	}
+	ic := ImrEngineConf{Stubs: []ImrStubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}
+	done := make(chan error, 1)
+	go func() { done <- imr.initializeImrTrustAnchors(t.Context(), ic) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("initializeImrTrustAnchors: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a signature outside its validity is waited on for good")
+	}
+	if crr := imr.Cache.Peek(".", dns.TypeDS); crr == nil || crr.RRset == nil {
+		t.Fatal("no root DS RRset once the signature verified")
+	}
+	logged := logbuf.String()
+	if got := strings.Count(logged, "cannot be verified yet"); got != 2 {
+		t.Errorf("warned %d times that the keys cannot be verified yet, want 2:\n%s", got, logged)
+	}
+	if !strings.Contains(logged, "is this host's clock right") {
+		t.Errorf("the warning does not point at the clock:\n%s", logged)
+	}
+	if strings.Contains(logged, "does not serve the IANA root keys") {
+		t.Errorf("a stale signature was called a different root:\n%s", logged)
+	}
+}
+
+// Which anchor an anchorless config gets from the root's keys was decided for
+// the root the servers named for "." led to at start. A reload applies a changed
+// stub or forward at once and leaves that decision, so naming other servers for
+// "." is a restart, which asks the new root. What leaves the root where it was
+// is not: a server's name, its transports and their weights are applied live.
+func TestRestartRequiredWhenTheRootServersChange(t *testing.T) {
+	const key = "the root the compiled-in trust anchor was checked against"
+	hasKey := func(keys []string) bool {
+		for _, k := range keys {
+			if strings.HasPrefix(k, key) {
+				return true
+			}
+		}
+		return false
+	}
+	stubAt := func(addr string) ImrEngineConf {
+		return ImrEngineConf{Stubs: []ImrStubConf{stubConf(".", "a.root.test.", addr)}}
+	}
+	fwdAt := func(addr string) ImrEngineConf {
+		return ImrEngineConf{Forward: []ImrForwardConf{fwdConf(".", addr, 0)}}
+	}
+	// The same server, renamed, with its transports and weights set.
+	retuned := stubAt("192.0.2.1")
+	retuned.Stubs[0].Servers[0].Name = "b.root.test."
+	retuned.Stubs[0].Servers[0].TransportSignal = "doq:80, udp:5"
+	twoServers := stubAt("192.0.2.1")
+	twoServers.Stubs[0].Servers = append(twoServers.Stubs[0].Servers,
+		stubConf(".", "b.root.test.", "192.0.2.9").Servers...)
+	anchored := func(ic ImrEngineConf) ImrEngineConf { ic.TrustAnchorDS = rootDS20326; return ic }
+
+	for _, tc := range []struct {
+		name          string
+		boot, current ImrEngineConf
+		want          bool
+	}{
+		{"another server for the stub", stubAt("192.0.2.1"), stubAt("192.0.2.2"), true},
+		{"a server added to the stub", stubAt("192.0.2.1"), twoServers, true},
+		{"the stub unchanged", stubAt("192.0.2.1"), stubAt("192.0.2.1"), false},
+		{"the server renamed and its transports set", stubAt("192.0.2.1"), retuned, false},
+		{"another upstream for the forward", fwdAt("192.0.2.53"), fwdAt("192.0.2.54"), true},
+		{"the forward unchanged", fwdAt("192.0.2.53"), fwdAt("192.0.2.53"), false},
+		{"a forward replaced by a stub", fwdAt("192.0.2.53"), stubAt("192.0.2.1"), true},
+		{"a stub replaced by a forward", stubAt("192.0.2.1"), fwdAt("192.0.2.53"), true},
+		{"an anchor is configured", anchored(stubAt("192.0.2.1")), anchored(stubAt("192.0.2.2")), false},
+		{"a stub below the root", ImrEngineConf{Stubs: []ImrStubConf{stubConf("stub.example.", "ns.stub.example.", "192.0.2.1")}},
+			ImrEngineConf{Stubs: []ImrStubConf{stubConf("stub.example.", "ns.stub.example.", "192.0.2.2")}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			keys := imrRestartRequiredKeys(tc.boot, tc.current)
+			if got := hasKey(keys); got != tc.want {
+				t.Errorf("restart-required keys %v: has the root-servers key = %v, want %v", keys, got, tc.want)
+			}
+		})
+	}
+
+	// A hints file is the other way to name the root, and it asks for its own
+	// restart; the servers rule adds nothing to it.
+	keys := imrRestartRequiredKeys(ImrEngineConf{RootHints: "/etc/tdns/a.hints"}, ImrEngineConf{RootHints: "/etc/tdns/b.hints"})
+	if hasKey(keys) {
+		t.Errorf("a changed hints file also named the root-servers key: %v", keys)
+	}
+	found := false
+	for _, k := range keys {
+		found = found || k == "imrengine.root-hints"
+	}
+	if !found {
+		t.Errorf("a changed hints file did not ask for a restart: %v", keys)
 	}
 }

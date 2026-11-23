@@ -6,6 +6,7 @@ package tdns
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	cache "github.com/johanix/tdns/v2/cache"
@@ -53,21 +54,54 @@ func (ic *ImrEngineConf) NonDefaultRoot() string {
 	if hints := strings.TrimSpace(ic.RootHints); hints != "" {
 		return fmt.Sprintf("root-hints is set (%s)", hints)
 	}
-	isRoot := func(zone string) bool {
-		zone = strings.TrimSpace(zone)
-		return zone != "" && dns.Fqdn(core.CanonicalizeName(zone)) == "."
-	}
 	for _, fc := range ic.Forward {
-		if isRoot(fc.Zone) {
+		if isRootZone(fc.Zone) {
 			return `the root is forwarded (forward zone ".")`
 		}
 	}
 	for _, sc := range ic.Stubs {
-		if isRoot(sc.Zone) {
+		if isRootZone(sc.Zone) {
 			return `the root is a stub zone (stub zone ".")`
 		}
 	}
 	return ""
+}
+
+// isRootZone reports whether a configured zone name is the root.
+func isRootZone(zone string) bool {
+	zone = strings.TrimSpace(zone)
+	return zone != "" && dns.Fqdn(core.CanonicalizeName(zone)) == "."
+}
+
+// rootServers names the servers the config reaches "." through: the addresses
+// of every stub for "." and the address and port of every upstream of a forward
+// for ".", sorted, so that two configs that ask the same servers give the same
+// string. It is what the root probe's choice of anchor was made about
+// (RootAnchorProbe): the choice stands only while the root is asked of the same
+// servers. A server's name, its transports and their weights are left out, as
+// they do not change which root it is, and a reload applies them.
+func (ic *ImrEngineConf) rootServers() string {
+	var servers []string
+	for _, fc := range ic.Forward {
+		if !isRootZone(fc.Zone) {
+			continue
+		}
+		for _, u := range fc.Upstreams {
+			servers = append(servers, fmt.Sprintf("forward %s port %d", strings.TrimSpace(u.Addr), u.Port))
+		}
+	}
+	for _, sc := range ic.Stubs {
+		if !isRootZone(sc.Zone) {
+			continue
+		}
+		for i := range sc.Servers {
+			for _, addr := range sc.Servers[i].Addrs {
+				servers = append(servers, "stub "+strings.TrimSpace(addr))
+			}
+		}
+	}
+	sort.Strings(servers)
+	return strings.Join(servers, ", ")
 }
 
 // RootAnchorProbe reports whether the compiled-in IANA root anchor is up to the

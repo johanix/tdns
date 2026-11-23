@@ -330,8 +330,13 @@ func TestRestartRequiredWhenTheDefaultRootAnchorChanges(t *testing.T) {
 	if keys := imrRestartRequiredKeys(plain, fwdBelow); len(keys) != 0 {
 		t.Errorf("a forward below the root: restart-required keys %v, want none", keys)
 	}
-	if keys := imrRestartRequiredKeys(fwdRoot, stubRoot); len(keys) != 0 {
-		t.Errorf("a . forward replaced by a . stub: restart-required keys %v, want none", keys)
+	// A "." forward replaced by a "." stub leaves the anchor chosen the same way
+	// (from the root's keys) but names other servers for ".", and the choice was
+	// about the first (TestRestartRequiredWhenTheRootServersChange): a restart,
+	// and not for the reason that the compiled-in anchor changed.
+	keys := imrRestartRequiredKeys(fwdRoot, stubRoot)
+	if len(keys) != 1 || !strings.HasPrefix(keys[0], "the root the compiled-in trust anchor was checked against") {
+		t.Errorf("a . forward replaced by a . stub: restart-required keys %v, want only the root-servers key", keys)
 	}
 	anchored := ImrEngineConf{TrustAnchorDS: rootDS20326}
 	anchoredFwd := anchored
