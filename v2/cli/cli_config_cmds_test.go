@@ -803,9 +803,7 @@ func TestAddDryRunChangesNothing(t *testing.T) {
 		}
 	}
 	// What it would print carries no key, and says what it would do.
-	var sb strings.Builder
-	printAddResult(&sb, res, true, env.cli)
-	out := sb.String()
+	out := printed(res, true, env.cli)
 	if strings.Contains(out, "key-tdns-auth2.yaml") || strings.Contains(out, "apikey") {
 		t.Errorf("the API key was printed:\n%s", out)
 	}
@@ -815,7 +813,7 @@ func TestAddDryRunChangesNothing(t *testing.T) {
 		}
 	}
 	// A masked key, where an entry has one.
-	sb.Reset()
+	var sb strings.Builder
 	printAddResult(&sb, &AddResult{Entry: ApiDetails{Name: "x", Role: "auth", ApiKey: "sekret", AuthMethod: "X-API-Key"}}, true, env.cli)
 	if strings.Contains(sb.String(), "sekret") || !strings.Contains(sb.String(), "********") {
 		t.Errorf("expected a masked key:\n%s", sb.String())
@@ -1516,9 +1514,10 @@ func (e *addEnv) certDaemon(t *testing.T, dir, extra string) (string, string) {
 func (e *addEnv) socket() string { return filepath.Join(e.sockDir, "auth.sock") }
 
 // withAccessLine is daemon config d as certDaemonCfg wrote it with
-// "access-file: af" added after the commented-out line, as config add adds it.
+// "access-file: af" added after the commented-out line, as config add adds it
+// (quoted, as a path with a comma in it is).
 func withAccessLine(cfg, af string) string {
-	return strings.Replace(cfg, "   # access-file: comes later\n", "   # access-file: comes later\n   access-file: "+af+"\n", 1)
+	return strings.Replace(cfg, "   # access-file: comes later\n", "   # access-file: comes later\n   access-file: "+yamlScalar(af)+"\n", 1)
 }
 
 func readBytes(t *testing.T, p string) string {
@@ -1530,11 +1529,17 @@ func readBytes(t *testing.T, p string) string {
 	return string(b)
 }
 
+// printed is what config add prints for r, its whitespace flattened: the
+// wrapping depends on the lengths of the test's paths. The layout itself is
+// TestAddOutputLayout's.
 func printed(r *AddResult, dryRun bool, cfg string) string {
 	var sb strings.Builder
 	printAddResult(&sb, r, dryRun, cfg)
-	return sb.String()
+	return flat(sb.String())
 }
+
+// flat is s with every run of white space one space.
+func flat(s string) string { return strings.Join(strings.Fields(s), " ") }
 
 // A new entry authenticates by certificate. The daemon config names no access
 // file, so config add creates one with the operator's pin (read-write), adds
@@ -2059,4 +2064,202 @@ func TestEditEntryTextToCert(t *testing.T) {
 	if _, err := editEntryText([]byte("apiservers:\n   - authmethod: X-API-Key\n     name: tdns-auth\n"), "tdns-auth", up, entryEdit{toCert: true}); err == nil {
 		t.Error("authmethod: on the item's first line was edited")
 	}
+}
+
+// The daemon config is edited the way the access file is: its old bytes kept
+// as .prev, the new file renamed over it with the old one's mode and group
+// (the owner too, which a test that is not root cannot vary). A reload that
+// fails puts the old bytes back the same way and leaves the .prev.
+func TestAddKeepsTheDaemonConfigsPrevModeAndGroup(t *testing.T) {
+	// A group of the test's user other than the one a new file gets, if it
+	// has one: the one change of owner an unprivileged process may make.
+	altGroup := func(t *testing.T, dir string) int {
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, dirGid, ok := fileOwner(fi)
+		if !ok {
+			return -1
+		}
+		groups, _ := os.Getgroups()
+		for _, g := range groups {
+			if g != dirGid && g != os.Getegid() {
+				return g
+			}
+		}
+		return -1
+	}
+	setup := func(t *testing.T) (*addEnv, string, string, int) {
+		env := newAddEnv(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		if err := os.Chmod(d, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		gid := -1
+		if g := altGroup(t, env.dir); g >= 0 && os.Chown(d, -1, g) == nil {
+			gid = g
+		}
+		return env, d, readBytes(t, d), gid
+	}
+	check := func(t *testing.T, d string, gid int, uid int) {
+		t.Helper()
+		fi := statOf(t, d)
+		if fi.Mode().Perm() != 0o640 {
+			t.Errorf("%s has mode %v, want the old 0640", d, fi.Mode().Perm())
+		}
+		if u, g, ok := fileOwner(fi); ok {
+			if u != uid {
+				t.Errorf("%s has owner %d, want %d", d, u, uid)
+			}
+			if gid >= 0 && g != gid {
+				t.Errorf("%s has group %d, want the old %d", d, g, gid)
+			}
+		}
+	}
+
+	t.Run("edited: .prev, mode and group", func(t *testing.T) {
+		env, d, orig, gid := setup(t)
+		uid, _, _ := fileOwner(statOf(t, d))
+		if _, err := env.add(t, d, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := readBytes(t, d); got != withAccessLine(orig, accessFileOf(d)) {
+			t.Errorf("daemon config =\n%s", got)
+		}
+		if prev := readBytes(t, d+".prev"); prev != orig {
+			t.Errorf(".prev =\n%s\nwant the old bytes\n%s", prev, orig)
+		}
+		check(t, d, gid, uid)
+		if gid < 0 {
+			t.Log("no second group to give the daemon config: its group not varied")
+		}
+	})
+
+	t.Run("a failed reload: restored, .prev left", func(t *testing.T) {
+		env, d, orig, gid := setup(t)
+		uid, _, _ := fileOwner(statOf(t, d))
+		f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+		f.forget = true // the reload does not put the pin in force
+		if _, err := env.add(t, d, nil); err == nil || !strings.Contains(err.Error(), "as they were") {
+			t.Fatalf("err = %v, want the add refused, the files put back", err)
+		}
+		if got := readBytes(t, d); got != orig {
+			t.Errorf("daemon config not restored:\n%s", got)
+		}
+		if prev := readBytes(t, d+".prev"); prev != orig {
+			t.Errorf(".prev =\n%s\nwant the old bytes", prev)
+		}
+		check(t, d, gid, uid)
+	})
+}
+
+// What config add prints keeps to textWidth (a command line or the entry's
+// pins: line, with a pin in it, aside): a note's continuation lines are indented two spaces, the socket's
+// path on a line of its own; the daemon's reload reply a sentence to a line;
+// an entry that keeps the key says so once, in the verdict; a refusal is
+// wrapped too. Paths as short as /etc/tdns ones, so the widths are real.
+func TestAddOutputLayout(t *testing.T) {
+	short := func(t *testing.T) *addEnv {
+		env := newAddEnv(t)
+		dir, err := os.MkdirTemp("/tmp", "n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(dir) })
+		env.dir, env.cli = dir, filepath.Join(dir, "tdns-ncli.yaml")
+		env.cert, env.key = filepath.Join(dir, "certs", "client.crt"), filepath.Join(dir, "certs", "client.key")
+		return env
+	}
+	lines := func(t *testing.T, out string) []string {
+		t.Helper()
+		ls := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+		for _, l := range ls {
+			if body := strings.TrimLeft(l, " "); len(l) > textWidth && !strings.HasPrefix(body, "tdns-ncli ") && !strings.HasPrefix(body, "pins:") {
+				t.Errorf("a line of %d characters: %q", len(l), l)
+			}
+		}
+		return ls
+	}
+	follows := func(t *testing.T, ls []string, want ...string) {
+		t.Helper()
+		for i := range ls {
+			if ls[i] == want[0] {
+				for j := 1; j < len(want); j++ {
+					if i+j >= len(ls) || ls[i+j] != want[j] {
+						t.Errorf("after %q, want %q, got\n%s", want[0], want[j], strings.Join(ls, "\n"))
+						return
+					}
+				}
+				return
+			}
+		}
+		t.Errorf("no line %q in\n%s", want[0], strings.Join(ls, "\n"))
+	}
+
+	t.Run("a new entry, reloaded", func(t *testing.T) {
+		env := short(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+		res, err := env.add(t, d, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sb strings.Builder
+		printAddResult(&sb, res, false, env.cli)
+		ls := lines(t, sb.String())
+		follows(t, ls,
+			"Note: as root, tdns-ncli uses this daemon's local admin socket",
+			"  "+env.socket()+" (admin, no key);",
+			"  tdns-ncli --tcp uses the TCP address")
+		follows(t, ls,
+			"Note: there was no tdns-auth entry yet, so this is the canonical one",
+			"  (tdns-ncli auth ...); --name adds an extra instance instead")
+		follows(t, ls,
+			"Reloaded: Config reloaded.",
+			"  Access file reloaded: 1 client(s), keyauth on.")
+	})
+
+	t.Run("the key kept, said once; a refusal", func(t *testing.T) {
+		env := short(t)
+		pin := env.pin(t)
+		dir := readOnlyDaemonDir(t, env)
+		d, dpin := env.certDaemon(t, dir, "")
+		os.Chmod(dir, 0o555)
+
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) {
+			t.Fatalf("new entry: err = %v, want a refusal", err)
+		}
+		var sb strings.Builder
+		printRefusal(&sb, r)
+		ls := lines(t, sb.String())
+		if !strings.HasPrefix(ls[0], "Error: not adding "+d+": ") {
+			t.Errorf("refusal begins %q", ls[0])
+		}
+		follows(t, ls, "  Fix: on the daemon's host, as root:",
+			"          tdns-ncli auth client add tester --pin "+pin+" --role read-write")
+
+		writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     apikey: the-key\n     authmethod: X-API-Key\n     tlsauth: pin\n     pins: [ \""+dpin+"\" ]\n     config-file: "+d+"\n")
+		res, err := env.add(t, d, nil)
+		if err != nil || !res.KeyKept {
+			t.Fatalf("%+v, %v", res, err)
+		}
+		sb.Reset()
+		printAddResult(&sb, res, false, env.cli)
+		out := sb.String()
+		ls = lines(t, out)
+		if n := strings.Count(flat(out), "keeps the API key"); n != 1 {
+			t.Errorf("says it keeps the key %d times:\n%s", n, out)
+		}
+		if !strings.HasPrefix(ls[0], `Already known as "tdns-auth"; it keeps the API key: your`) {
+			t.Errorf("verdict %q", ls[0])
+		}
+		follows(t, ls, "To use the certificate instead, on the daemon's host, as root:",
+			"   tdns-ncli auth client add tester --pin "+pin+" --role read-write",
+			"and add under apiserver: in "+d+":",
+			"   access-file: "+accessFileOf(d),
+			"and reload the daemon; then run config add again.")
+	})
 }

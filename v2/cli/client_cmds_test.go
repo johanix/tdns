@@ -627,7 +627,7 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 		}
 		var sb strings.Builder
 		printAddResult(&sb, res, false, env.cli)
-		if out := sb.String(); !strings.Contains(out, "pinned the daemon's certificate") || strings.Contains(out, "nothing changed") ||
+		if out := flat(sb.String()); !strings.Contains(out, "pinned the daemon's certificate") || strings.Contains(out, "nothing changed") ||
 			!strings.Contains(out, "keeps the API key") || !strings.Contains(out, "local admin socket") {
 			t.Errorf("printed:\n%s", out)
 		}

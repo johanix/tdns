@@ -861,12 +861,17 @@ admin socket (root on the daemon host, admin, no credentials). So
   `apiserver:` in the daemon config: one line, after the block's last line,
   at its keys' column; the rest of the file stays byte for byte (comments,
   order, indentation), and the result is read back, as YAML and through the
-  daemon loader. It does not do this, and falls back (below), when the daemon
-  config has TCP addresses with `usetls: false` (the daemon refuses an access
-  file then), when the daemon serves no local admin socket, or when the
-  `apiserver:` block is not in the file itself. The output says loudly what
-  the access file changes: the API key over TCP drops from admin to
-  read-write, TCP clients need TLS 1.3, and admin is the local socket's alone.
+  daemon loader. The daemon config is written as the access file is (the
+  owner's ruling, the same day): its old bytes kept as `.prev`, then the new
+  file renamed over it with the old one's owner, group and mode; a failure
+  later in the add (a refused or failed reload) puts the old bytes back the
+  same way and leaves the `.prev`. It does not do this, and falls back
+  (below), when the daemon config has TCP addresses with `usetls: false` (the
+  daemon refuses an access file then), when the daemon serves no local admin
+  socket, or when the `apiserver:` block is not in the file itself. The
+  output says loudly what the access file changes: the API key over TCP
+  drops from admin to read-write, TCP clients need TLS 1.3, and admin is the
+  local socket's alone.
 - **The reload** goes over the local socket, and the policy then running is
   asked for the pin: a reload that does not put it in force puts every file
   back as it was. A daemon that is not running gets the files, and the output

@@ -263,7 +263,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return nil, fmt.Errorf("%s: apiserver.apikey is not set, so the entry would have no key to send over TCP; set it", info.ConfigFile)
 	case info.Socket != "" && tcpURL != "":
 		res.Notes = append(res.Notes, fmt.Sprintf(
-			"run as root, tdns-ncli reaches this daemon over its local admin socket %s (admin, no key), found through config-file:; tdns-ncli --tcp uses the TCP address", info.Socket))
+			"as root, tdns-ncli uses this daemon's local admin socket\n%s (admin, no key);\ntdns-ncli --tcp uses the TCP address", info.Socket))
 	}
 	baseURL := tcpURL
 	if len(info.Addresses) > 1 {
@@ -547,7 +547,7 @@ func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []
 		entry.Name = canonical
 		res.Canonical = true
 		res.Notes = append(res.Notes, fmt.Sprintf(
-			"there was no %s entry yet, so this daemon is the canonical one (tdns-ncli %s ...); --name adds it as an extra instance instead",
+			"there was no %s entry yet, so this is the canonical one (tdns-ncli %s ...); --name adds an extra instance instead",
 			canonical, role))
 	}
 	asInstance := func(name string) error {
@@ -982,6 +982,8 @@ func maskKey(e ApiDetails) ApiDetails {
 
 // printAddResult says what config add did: the verdict first, then the entry
 // as written, what was done about the client certificate, and the notes.
+// Lines are wrapped to textWidth, notes with their continuation lines
+// indented, and a "\n" in a note begins a line of its own.
 func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
 	usesCert := strings.EqualFold(r.Entry.AuthMethod, "certificate")
 	notes := func() {
@@ -989,12 +991,16 @@ func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
 			fmt.Fprintln(w)
 		}
 		for _, n := range r.Notes {
-			fmt.Fprintf(w, "Note: %s\n", n)
+			writeWrapped(w, "Note: ", "  ", strings.Split(n, "\n")...)
 		}
 	}
 	if r.AlreadyKnown != "" && !r.Pinned && !r.Switched {
 		daemonSide := r.Cert != nil && r.Cert.changesDaemon() && r.Cert.failed == nil && usesCert
+		trouble := r.KeyKept && r.Cert != nil && (r.Cert.failed != nil || !r.Cert.usable())
 		switch {
+		case trouble:
+			// The verdict and why, said once.
+			r.Cert.writeTrouble(w, fmt.Sprintf("Already known as %q; it keeps the API key: your certificate does not work here", r.AlreadyKnown), true)
 		case r.KeyKept:
 			fmt.Fprintf(w, "Already known as %q; it keeps the API key.\n", r.AlreadyKnown)
 		case daemonSide:
@@ -1002,7 +1008,7 @@ func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
 		default:
 			fmt.Fprintf(w, "Already known as %q; nothing changed.\n", r.AlreadyKnown)
 		}
-		printCert(w, r.Cert, usesCert, r.KeyKept, dryRun)
+		printCert(w, r.Cert, usesCert, r.KeyKept, dryRun, trouble)
 		notes()
 		return
 	}
@@ -1017,26 +1023,29 @@ func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
 	case r.Switched:
 		what = "switched it to your client certificate"
 	}
+	var verdict string
 	switch {
 	case dryRun && r.Switched:
-		fmt.Fprintf(w, "Already known as %q (%s); would have %s in %s:\n\n", r.AlreadyKnown, kind, what, r.File)
+		verdict = fmt.Sprintf("Already known as %q (%s); would have %s in %s:", r.AlreadyKnown, kind, what, r.File)
 	case r.Switched:
-		fmt.Fprintf(w, "Already known as %q (%s); %s in %s:\n\n", r.AlreadyKnown, kind, what, r.File)
+		verdict = fmt.Sprintf("Already known as %q (%s); %s in %s:", r.AlreadyKnown, kind, what, r.File)
 	case dryRun && r.Pinned:
-		fmt.Fprintf(w, "Already known as %q (%s); would pin the daemon's certificate in %s:\n\n", r.AlreadyKnown, kind, r.File)
+		verdict = fmt.Sprintf("Already known as %q (%s); would pin the daemon's certificate in %s:", r.AlreadyKnown, kind, r.File)
 	case r.Pinned:
-		fmt.Fprintf(w, "Already known as %q (%s); pinned the daemon's certificate in %s:\n\n", r.AlreadyKnown, kind, r.File)
+		verdict = fmt.Sprintf("Already known as %q (%s); pinned the daemon's certificate in %s:", r.AlreadyKnown, kind, r.File)
 	case dryRun && r.Created:
-		fmt.Fprintf(w, "Would create %s with %q (%s):\n\n", r.File, r.Entry.Name, kind)
+		verdict = fmt.Sprintf("Would create %s with %q (%s):", r.File, r.Entry.Name, kind)
 	case dryRun:
-		fmt.Fprintf(w, "Would add %q (%s) to %s:\n\n", r.Entry.Name, kind, r.File)
+		verdict = fmt.Sprintf("Would add %q (%s) to %s:", r.Entry.Name, kind, r.File)
 	case r.Created:
-		fmt.Fprintf(w, "Created %s with %q (%s):\n\n", r.File, r.Entry.Name, kind)
+		verdict = fmt.Sprintf("Created %s with %q (%s):", r.File, r.Entry.Name, kind)
 	default:
-		fmt.Fprintf(w, "Added %q (%s) to %s:\n\n", r.Entry.Name, kind, r.File)
+		verdict = fmt.Sprintf("Added %q (%s) to %s:", r.Entry.Name, kind, r.File)
 	}
+	writeWrapped(w, "", "", verdict)
+	fmt.Fprintln(w)
 	fmt.Fprint(w, renderEntry(maskKey(r.Entry), itemLayout{indent: 3, gap: 1, valueCol: defValueCol}))
-	printCert(w, r.Cert, usesCert, r.KeyKept, dryRun)
+	printCert(w, r.Cert, usesCert, r.KeyKept, dryRun, false)
 	notes()
 	if dryRun {
 		return

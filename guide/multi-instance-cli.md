@@ -98,7 +98,9 @@ write the daemon's files (run as root on the daemon's host) it:
   not enabled;
 - if the daemon config names no access file, creates one next to it
   (`tdns-auth.yaml` gets `tdns-auth-access.yaml`) and adds one line under
-  `apiserver:` in the daemon config, leaving the rest of the file as it was:
+  `apiserver:` in the daemon config, leaving the rest of the file as it was
+  (the old file is kept as `tdns-auth.yaml.prev`, and the new one keeps its
+  owner, group and mode):
 
   ```yaml
      access-file: /etc/tdns/tdns-auth-access.yaml

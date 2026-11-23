@@ -119,7 +119,7 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 	} else {
 		pin, created, err := ensureClientCert(c.cert, c.key, defaultClientName())
 		if err != nil {
-			return c.cannot(fmt.Sprintf("your client certificate: %v", err))
+			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", err))
 		}
 		c.pin, c.pairNew, c.name = pin, created, clientNameOf(c.cert)
 	}
@@ -129,7 +129,7 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 	}
 	af, old, err := readAccessFile(c.t, true)
 	if err != nil {
-		return c.cannot(err.Error())
+		return c.cannot(cannotRead(c.t.File, err))
 	}
 	c.accessOld, c.keyAuthOff = old, !af.KeyAuthOn()
 	if cl := clientByPin(af, c.pin); c.pin != "" && cl != nil {
@@ -147,25 +147,29 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 
 	// It takes changes on the daemon's side. Can they be made from here?
 	if err := canReplace(c.t.File); err != nil {
-		return c.cannot(fmt.Sprintf("config add cannot write %s here (%v)", c.t.File, err))
+		return c.cannot(fmt.Sprintf("config add cannot write %s (%v)", c.t.File, err))
 	}
 	if c.nameIt {
 		cur, err := os.ReadFile(info.ConfigFile)
 		if err != nil {
-			return c.cannot(err.Error())
+			return c.cannot(cannotRead(info.ConfigFile, err))
 		}
 		next, err := addAccessFileLine(cur, c.t.File)
 		if err != nil {
 			return c.cannot(fmt.Sprintf("config add cannot add access-file: to %s (%v)", info.ConfigFile, err))
 		}
 		if err := canReplace(info.ConfigFile); err != nil {
-			return c.cannot(fmt.Sprintf("config add cannot write %s here (%v)", info.ConfigFile, err))
+			return c.cannot(fmt.Sprintf("config add cannot write %s (%v)", info.ConfigFile, err))
 		}
 		c.daemonOld, c.daemonNew = cur, next
 	}
 	running, err := socketDaemon(c.role, c.t)
 	if err != nil {
-		return c.cannot(err.Error())
+		why := err.Error()
+		if strings.HasPrefix(why, "cannot ") {
+			why = "config add " + why // read after "because"
+		}
+		return c.cannot(why)
 	}
 	c.running, c.state = running, certCanEnable
 	return c
@@ -176,8 +180,10 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 // not, and the daemon reloaded over its local socket when it runs, the
 // running policy then checked for the pin. Each step as `client add` takes it
 // (the access file's lock, the daemon's own validator, the write with .prev,
-// the check of whose daemon answers). A step that fails puts back what the
-// steps before it changed; c.failed is set to why.
+// the check of whose daemon answers); the daemon config is written the way
+// the access file is, its old bytes kept as .prev and the new file renamed
+// over it with its owner, group and mode. A step that fails puts back what
+// the steps before it changed (the .prev files stay); c.failed is set to why.
 func (c *CertSetup) apply(ctx context.Context) error {
 	err := c.applySteps(ctx)
 	c.failed = err
@@ -262,6 +268,13 @@ func (c *CertSetup) applySteps(ctx context.Context) error {
 				return putBack(fmt.Errorf("cannot add access-file: to %s (%v)", c.t.DaemonConfig, err))
 			}
 		}
+		// As the access file is written (writeAccessFile): the old bytes
+		// kept as .prev first, then the new file renamed over the config,
+		// with its owner, group and mode. An undo puts the old bytes back
+		// the same way, and leaves the .prev.
+		if err := writeFileAtomic(c.t.DaemonConfig+".prev", cur); err != nil {
+			return putBack(fmt.Errorf("saving %s.prev: %w", c.t.DaemonConfig, err))
+		}
 		if err := writeFileAtomicLike(c.t.DaemonConfig, next, nil); err != nil {
 			return putBack(err)
 		}
@@ -286,6 +299,17 @@ func (c *CertSetup) applySteps(ctx context.Context) error {
 	}
 	c.reloaded = msg
 	return nil
+}
+
+// cannotRead is why config add cannot use file, as a clause: the cause of a
+// file-system error (permission denied) rather than its whole text, which
+// repeats the path.
+func cannotRead(file string, err error) string {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return fmt.Sprintf("config add cannot read %s (%v)", file, pe.Err)
+	}
+	return err.Error()
 }
 
 // sameApiApartFromAccess says whether a and b, two reads of one daemon
@@ -548,25 +572,98 @@ func (r addRefusal) Error() string {
 	return r.why + "; fix: " + strings.Join(fix, " ")
 }
 
-// printRefusal prints r as a refusal, the way dieOn does.
+// printRefusal prints r as a refusal, the way dieOn does: the why, then the
+// fix on lines of its own, wrapped to textWidth.
 func printRefusal(w io.Writer, r addRefusal) {
-	fmt.Fprintf(w, "Error: %s.\n", r.why)
+	writeWrapped(w, "Error: ", "  ", r.why+".")
 	for _, n := range r.notes {
-		fmt.Fprintf(w, "  %s\n", n)
+		writeWrapped(w, "  ", "  ", n)
 	}
-	for i, l := range r.fix {
-		lead := "       "
-		if i == 0 {
-			lead = "  Fix: "
+	writeFix(w, "", "  Fix: ", "       ", r.fix)
+}
+
+// textWidth is the widest line config add prints, when no single word (a
+// path, a pin) is wider.
+const textWidth = 72
+
+// writeWrapped writes segments as one paragraph: the first line begins with
+// first and every other line with rest; each segment begins a new line, and
+// one too long for a line is wrapped at its spaces. A word too wide for any
+// line (a path) stays on the line it would begin, rather than leave a short
+// word alone on the line before it.
+func writeWrapped(w io.Writer, first, rest string, segments ...string) {
+	prefix := first
+	emit := func(line string) {
+		fmt.Fprintf(w, "%s%s\n", prefix, line)
+		prefix = rest
+	}
+	for _, seg := range segments {
+		line := ""
+		for _, word := range strings.Fields(seg) {
+			switch {
+			case line == "":
+				line = word
+			case len(prefix)+len(line)+1+len(word) <= textWidth, len(rest)+len(word) > textWidth:
+				line += " " + word
+			default:
+				emit(line)
+				line = word
+			}
 		}
-		fmt.Fprintf(w, "%s%s\n", lead, l)
+		if line != "" {
+			emit(line)
+		}
 	}
+}
+
+// writeFix writes fix lines (CertSetup.fixLines) after lead: each run of
+// prose joined and wrapped, the first beginning with lead; command and config
+// lines (indented three spaces) as they stand. The first line begins with
+// first, every other with rest.
+func writeFix(w io.Writer, lead, first, rest string, lines []string) {
+	prefix := first
+	var prose []string
+	if lead != "" {
+		prose = append(prose, lead)
+	}
+	flush := func() {
+		if len(prose) > 0 {
+			writeWrapped(w, prefix, rest, strings.Join(prose, " "))
+			prefix, prose = rest, nil
+		}
+	}
+	for _, l := range lines {
+		if strings.HasPrefix(l, "   ") {
+			flush()
+			fmt.Fprintf(w, "%s%s\n", prefix, l)
+			prefix = rest
+			continue
+		}
+		prose = append(prose, l)
+	}
+	flush()
+}
+
+// writeTrouble writes why the certificate does not work, as one paragraph
+// beginning with head, and then what would make it work.
+func (c *CertSetup) writeTrouble(w io.Writer, head string, keyKept bool) {
+	reason := ", because " + c.whyNot()
+	if c.failed != nil {
+		reason = ": setting it up on the daemon failed (" + c.failed.Error() + ")"
+	}
+	writeWrapped(w, "", "", head+reason+".")
+	lead := "To make it work,"
+	if keyKept {
+		lead = "To use the certificate instead,"
+	}
+	writeFix(w, lead, "", "", c.fixLines())
 }
 
 // printCert says what config add did (or would do) about the certificate.
 // usesCert: the entry written authenticates by certificate. keyKept: the
 // known entry keeps the API key because the certificate could not be set up.
-func printCert(w io.Writer, c *CertSetup, usesCert, keyKept, dryRun bool) {
+// troubleSaid: the verdict has said why the certificate does not work.
+func printCert(w io.Writer, c *CertSetup, usesCert, keyKept, dryRun, troubleSaid bool) {
 	if c == nil {
 		return
 	}
@@ -578,7 +675,8 @@ func printCert(w io.Writer, c *CertSetup, usesCert, keyKept, dryRun bool) {
 	}
 	if c.pairNew {
 		if dryRun {
-			fmt.Fprintf(w, "\nWould create your client certificate %s.\n", c.cert)
+			fmt.Fprintln(w)
+			writeWrapped(w, "", "", "Would create your client certificate "+c.cert+".")
 		} else {
 			fmt.Fprintf(w, "\nCreated your client certificate %s\n(key %s, mode 0600). Its pin:\n   %s\n", c.cert, c.key, c.pin)
 		}
@@ -586,34 +684,34 @@ func printCert(w io.Writer, c *CertSetup, usesCert, keyKept, dryRun bool) {
 
 	// It does not work: why, and what would make it.
 	if c.failed != nil || !c.usable() {
+		if troubleSaid {
+			return
+		}
+		head := "Your certificate does not work here"
 		if keyKept {
-			fmt.Fprintf(w, "\nThe entry keeps the API key. Your certificate does not work here:\n%s.\nTo use the certificate instead,\n", c.whyNot())
-		} else {
-			fmt.Fprintf(w, "\nYour certificate does not work here:\n%s.\nTo make it work,\n", c.whyNot())
+			head = "The entry keeps the API key: your certificate does not work here"
 		}
-		for _, l := range c.fixLines() {
-			fmt.Fprintf(w, "%s\n", l)
-		}
+		fmt.Fprintln(w)
+		c.writeTrouble(w, head, keyKept)
 		return
 	}
 	if !usesCert {
 		return
 	}
 
+	fmt.Fprintln(w)
 	switch {
 	case c.listedAs != "":
-		fmt.Fprintf(w, "\n%s lists your certificate as %s.\n", c.t.File, c.listedAs)
+		writeWrapped(w, "", "", c.t.File+" lists your certificate as "+c.listedAs+".")
 	default:
 		name := c.enrolledAs
 		if name == "" {
 			name = c.name
 		}
-		verb := would("Enrolled", "Would enroll")
 		if c.createFile {
-			verb = would("Created "+c.t.File+",\nenrolling", "Would create "+c.t.File+",\nenrolling")
-			fmt.Fprintf(w, "\n%s your certificate as %s (read-write).\n", verb, name)
+			fmt.Fprintf(w, "%s %s,\nenrolling your certificate as %s (read-write).\n", would("Created", "Would create"), c.t.File, name)
 		} else {
-			fmt.Fprintf(w, "\n%s your certificate in %s\nas %s (read-write).\n", verb, c.t.File, name)
+			fmt.Fprintf(w, "%s your certificate in %s\nas %s (read-write).\n", would("Enrolled", "Would enroll"), c.t.File, name)
 		}
 	}
 	if c.state == certCanEnable && c.nameIt {
@@ -624,19 +722,26 @@ func printCert(w io.Writer, c *CertSetup, usesCert, keyKept, dryRun bool) {
 		fmt.Fprintf(w, "   - TCP clients need TLS 1.3\n")
 		fmt.Fprintf(w, "   - admin is the local admin socket's alone (root on its host)\n")
 	}
-	if c.state != certCanEnable || dryRun {
-		if dryRun && c.state == certCanEnable {
-			if c.running {
-				fmt.Fprintf(w, "Would reload the daemon over %s.\n", c.t.Socket)
-			} else {
-				fmt.Fprintf(w, "The daemon is not running (nothing on %s);\nits next start would read the files.\n", c.t.Socket)
-			}
-		}
+	if c.state != certCanEnable {
 		return
 	}
-	if c.running {
-		fmt.Fprintf(w, "Reloaded: %s\n", c.reloaded)
-	} else {
-		fmt.Fprintf(w, "The daemon is not running (nothing on %s);\nits next start reads the new files.\n", c.t.Socket)
+	switch {
+	case c.running && dryRun:
+		writeWrapped(w, "", "", "Would reload the daemon over "+c.t.Socket+".")
+	case c.running:
+		// The daemon's reply, a sentence to a line.
+		writeWrapped(w, "Reloaded: ", "  ", sentences(c.reloaded)...)
+	default:
+		fmt.Fprintf(w, "The daemon is not running: its next start %s.\n", would("reads the new files", "would read the files"))
+		writeWrapped(w, "", "", "Nothing answers on "+c.t.Socket+".")
 	}
+}
+
+// sentences splits s into its sentences, each with its full stop.
+func sentences(s string) []string {
+	parts := strings.Split(strings.TrimSpace(s), ". ")
+	for i := range parts[:len(parts)-1] {
+		parts[i] += "."
+	}
+	return parts
 }
