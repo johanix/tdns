@@ -712,6 +712,12 @@ type ConfigResponse struct {
 	ApiTCPStopped []string `json:"apitcpstopped,omitempty"`
 	// ApiTCPStoppedBy is the access file that stopped them.
 	ApiTCPStoppedBy string `json:"apitcpstoppedby,omitempty"`
+	// ApiTCPNotStarted are the TCP API listeners the daemon did not start
+	// because it had no API certificate (it could not write the default
+	// pair), as its dispatcher decided at start; ApiTCPNoCert is that
+	// certificate. They stay off until a restart, also once the pair is there.
+	ApiTCPNotStarted []string `json:"apitcpnotstarted,omitempty"`
+	ApiTCPNoCert     string   `json:"apitcpnocert,omitempty"`
 	// transport-signal: what synthesis writes at _dns.<name> per name, for
 	// an operator to provision in the zone instead.
 	TransportSignal []TransportSignalPreview `json:"transportsignal,omitempty"`

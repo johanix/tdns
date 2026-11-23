@@ -299,6 +299,11 @@ var apiTCPServers struct {
 	plaintext bool
 	stopped   []string
 	stoppedBy string // the access file that stopped them, for config status
+	// noCert are the addresses APIdispatcher started no listener on because
+	// it had no certificate (the default pair could not be written), and
+	// noCertFile is that certificate, for config status. Until a restart.
+	noCert     []string
+	noCertFile string
 }
 
 // Test hooks, nil outside tests.
@@ -408,6 +413,15 @@ func apiTCPStoppedBy() string {
 	return apiTCPServers.stoppedBy
 }
 
+// apiTCPNoCert are the addresses APIdispatcher started no TCP listener on
+// because it had no certificate, and the certificate it could not write, for
+// `config status`. They stay off until a restart, also once the pair is there.
+func apiTCPNoCert() ([]string, string) {
+	apiTCPServers.Lock()
+	defer apiTCPServers.Unlock()
+	return slices.Clone(apiTCPServers.noCert), apiTCPServers.noCertFile
+}
+
 func listenerSettingsOf(a ApiServerConf) *apiListenerSettings {
 	return &apiListenerSettings{Addresses: slices.Clone(a.Addresses), Socket: a.Socket,
 		CertFile: a.CertFile, KeyFile: a.KeyFile, UseTLS: a.UseTLS, TLS13Only: a.AccessFile != ""}
@@ -483,6 +497,9 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 		cert, _ := ApiCertPaths(conf.Internal.CfgFile)
 		lgApi.Error("management API: TCP listeners NOT started: no API certificate (the default pair could not be written); the local admin socket is still served",
 			"addresses", addresses, "cert", cert)
+		apiTCPServers.Lock()
+		apiTCPServers.noCert, apiTCPServers.noCertFile = slices.Clone(addresses), cert
+		apiTCPServers.Unlock()
 		addresses = nil
 	}
 
