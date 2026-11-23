@@ -308,12 +308,14 @@ func kvLine(col, valueCol int, key, val string) string {
 	return strings.Repeat(" ", col) + key + strings.Repeat(" ", pad) + val
 }
 
-// pinsFlow writes pins as a YAML flow list, each quoted: base64, so a
-// leading + or / reads as text.
+// pinsFlow writes pins as a YAML flow list, each double-quoted: base64, so a
+// leading + or / reads as text, and escaped (strconv.Quote, whose escapes are
+// YAML's too), so a pin read from a hand-written file with a quote or a
+// backslash in it reads back as itself.
 func pinsFlow(pins []string) string {
 	q := make([]string, len(pins))
 	for i, p := range pins {
-		q[i] = `"` + p + `"`
+		q[i] = strconv.Quote(p)
 	}
 	return "[ " + strings.Join(q, ", ") + " ]"
 }
