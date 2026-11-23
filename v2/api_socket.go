@@ -48,24 +48,21 @@ var DefaultApiSocketDir = "/var/run/tdns"
 // ApiSocketNone is the apiserver.socket value that turns the socket off.
 const ApiSocketNone = "none"
 
-// defaultConfigDir is where the daemons' config files are by default. A config
-// file there names its default socket by its file name alone.
-const defaultConfigDir = "/etc/tdns"
-
 // ApiSocketPath is the local admin socket of the daemon whose config file is
 // cfgfile and whose apiserver.socket is configured: that path when it is set,
 // no socket ("") for "none", and, when it is not set, the default in
-// DefaultApiSocketDir, named after the config file:
+// DefaultApiSocketDir, named after the config file's whole path:
 //
-//	/etc/tdns/tdns-auth.yaml       -> /var/run/tdns/tdns-auth.sock
+//	/etc/tdns/tdns-auth.yaml       -> /var/run/tdns/etc-tdns-tdns-auth.sock
 //	/etc/tdns-site/tdns-auth.yaml  -> /var/run/tdns/etc-tdns-site-tdns-auth.sock
 //
-// A file in /etc/tdns by its name; any other by its whole path, because
-// instances in other directories commonly share a file name (testor runs
-// tdns-auth.yaml from /etc/tdns, /etc/tdns-site and /etc/tdns-enc), and two
-// daemons must never share a socket: the second would serve none, and
-// tdns-ncli would reach the first through the second's entry. A path too long
-// for a socket is shortened to the file name and a hash of the path.
+// The whole path, always: the socket's name says at once which config it
+// belongs to, and two daemons never share a socket, even when instances in
+// different directories share a file name (testor runs tdns-auth.yaml from
+// /etc/tdns, /etc/tdns-site and /etc/tdns-enc). A shared socket would leave
+// the second daemon without one, and tdns-ncli would reach the first through
+// the second's entry. A path too long for a socket is shortened to the file
+// name and a hash of the path.
 //
 // Every daemon has the socket unless told otherwise. It is the way in when the
 // network API is not (a broken TLS setup, a lost key), and a way in that has
@@ -90,10 +87,7 @@ func ApiSocketPath(configured, cfgfile string) string {
 	if base == "" || base == "." || base == string(filepath.Separator) {
 		return ""
 	}
-	name := base
-	if filepath.Dir(abs) != defaultConfigDir {
-		name = strings.ReplaceAll(strings.TrimPrefix(noExt, string(filepath.Separator)), string(filepath.Separator), "-")
-	}
+	name := strings.ReplaceAll(strings.TrimPrefix(noExt, string(filepath.Separator)), string(filepath.Separator), "-")
 	p := filepath.Join(DefaultApiSocketDir, name+".sock")
 	if len(p) > maxApiSocketPathLen {
 		sum := sha256.Sum256([]byte(abs))
