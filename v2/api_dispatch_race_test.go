@@ -2,11 +2,14 @@ package tdns
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -43,6 +46,7 @@ func resetApiDispatch(t *testing.T) {
 		apiTCPServers.Lock()
 		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped, apiTCPServers.stoppedBy = nil, false, nil, ""
 		apiTCPServers.noCert, apiTCPServers.noCertFile = nil, ""
+		apiTCPServers.failed = nil
 		apiTCPServers.Unlock()
 		apiListenersStarted.Store(nil)
 		apiDispatchBeforeLockHook, apiDispatchLockedHook, apiActivateBeforeLockHook, apiServeHook = nil, nil, nil, nil
@@ -307,10 +311,25 @@ func TestClosedByActivationNeverAccepts(t *testing.T) {
 	}
 }
 
+// configStatusOverSocket is the daemon's `config status` reply, asked for
+// over e's local admin socket, as tdns-cli asks.
+func configStatusOverSocket(t *testing.T, e *authEnv) ConfigResponse {
+	t.Helper()
+	st, body := e.callSocket(t, "/api/v1/config", `{"Command":"status"}`)
+	var cr ConfigResponse
+	if err := json.Unmarshal([]byte(body), &cr); st != http.StatusOK || err != nil {
+		t.Fatalf("config status: %d %v %q", st, err, body)
+	}
+	return cr
+}
+
 // An address that cannot be bound is logged, as ListenAndServe's failure was,
-// and the other listeners start; the dispatcher returns no error.
+// and the other listeners start; the dispatcher returns no error. config
+// status lists only the bound one as listening, and the other as failed, with
+// the bind error, so it is neither listed as listening nor left out.
 func TestBindFailureLeavesTheOtherListeners(t *testing.T) {
 	resetApiDispatch(t)
+	e := newAuthEnv(t, "-", nil)
 	busy, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -332,5 +351,49 @@ func TestBindFailureLeavesTheOtherListeners(t *testing.T) {
 	apiTCPServers.Unlock()
 	if n != 1 || got != free {
 		t.Errorf("registered %d server(s) (%q), want the one on %s", n, got, free)
+	}
+
+	cr := configStatusOverSocket(t, e)
+	if !slices.Equal(cr.ApiTCPListening, []string{free}) {
+		t.Errorf("status: listening %v, want [%s]", cr.ApiTCPListening, free)
+	}
+	want := []ApiTCPFailure{{Address: busy.Addr().String(), Error: "bind: " + syscall.EADDRINUSE.Error()}}
+	if !slices.Equal(cr.ApiTCPFailed, want) {
+		t.Errorf("status: failed %+v, want %+v", cr.ApiTCPFailed, want)
+	}
+	if len(cr.ApiTCPStopped) != 0 || len(cr.ApiTCPNotStarted) != 0 {
+		t.Errorf("status: stopped %v, not started %v; want neither", cr.ApiTCPStopped, cr.ApiTCPNotStarted)
+	}
+}
+
+// A TLS listener whose certificate does not load is bound, but ServeTLS
+// returns at once: config status does not list it as listening, reports it
+// failed with the error, and nothing answers there any more.
+func TestServeFailureIsNotReportedAsListening(t *testing.T) {
+	resetApiDispatch(t)
+	e := newAuthEnv(t, "-", nil)
+	addr := freeTCPAddr(t)
+	conf := plaintextApiConf(addr)
+	conf.ApiServer.UseTLS = true
+	dir := t.TempDir()
+	conf.ApiServer.CertFile = filepath.Join(dir, "missing.crt")
+	conf.ApiServer.KeyFile = filepath.Join(dir, "missing.key")
+	startDispatcher(t, conf)
+
+	// ServeTLS fails in the server's goroutine, after APIdispatcher returned.
+	var cr ConfigResponse
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if cr = configStatusOverSocket(t, e); len(cr.ApiTCPFailed) > 0 || time.Now().After(deadline) {
+			break
+		}
+	}
+	if len(cr.ApiTCPListening) != 0 {
+		t.Errorf("status: listening %v, want none", cr.ApiTCPListening)
+	}
+	if len(cr.ApiTCPFailed) != 1 || cr.ApiTCPFailed[0].Address != addr || !strings.Contains(cr.ApiTCPFailed[0].Error, "missing.crt") {
+		t.Errorf("status: failed %+v, want %s with the certificate's error", cr.ApiTCPFailed, addr)
+	}
+	if listening(addr) {
+		t.Errorf("%s still accepts connections after its server failed", addr)
 	}
 }

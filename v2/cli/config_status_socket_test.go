@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -286,25 +287,72 @@ func TestConfigStatusReportsListenersNotStarted(t *testing.T) {
 	}
 }
 
-// The ApiServer line lists only the TCP listeners that run: not those the
-// daemon did not start for want of a certificate, nor those an access file
-// stopped.
+// `config status` reports the TCP listeners the daemon could not bind (or
+// whose server stopped with an error), each with its error, rather than
+// leaving them out. Both printers (auth/agent and imr) do.
+func TestConfigStatusReportsFailedListeners(t *testing.T) {
+	if out := captureStdout(t, func() { printApiTCPFailed(nil) }); out != "" {
+		t.Errorf("nothing failed: printed %q", out)
+	}
+	one := []tdns.ApiTCPFailure{{Address: "127.0.0.1:8991", Error: "bind: address already in use"}}
+	two := append(slices.Clone(one), tdns.ApiTCPFailure{Address: "10.6.0.4:8991", Error: "bind: can't assign requested address"})
+	for _, tc := range []struct {
+		name   string
+		failed []tdns.ApiTCPFailure
+		want   string
+	}{
+		{"one", one, "TCP API FAILED on 127.0.0.1:8991:\n" +
+			"  bind: address already in use\n" +
+			"  fix that and restart the daemon (the local socket works)\n"},
+		{"two", two, "TCP API FAILED on 127.0.0.1:8991, 10.6.0.4:8991:\n" +
+			"  127.0.0.1:8991: bind: address already in use\n" +
+			"  10.6.0.4:8991: bind: can't assign requested address\n" +
+			"  fix that and restart the daemon (the local socket works)\n"},
+	} {
+		out := captureStdout(t, func() { printApiTCPFailed(tc.failed) })
+		if out != tc.want {
+			t.Errorf("%s: printed\n%s\nwant\n%s", tc.name, out, tc.want)
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+			if len(line) > 72 {
+				t.Errorf("%s: line over 72 characters: %q", tc.name, line)
+			}
+		}
+	}
+
+	resp := tdns.ConfigResponse{Msg: "tdns-imr: Configuration is ok", ApiTCPFailed: one}
+	if out := captureStdout(t, func() { printImrConfigStatus(resp) }); !strings.Contains(out, "TCP API FAILED on 127.0.0.1:8991:\n  bind: address already in use\n") {
+		t.Errorf("imr: printed %q, want the failed listener and its error", out)
+	}
+}
+
+// The ApiServer line lists the TCP listeners the daemon says listen, not the
+// configured addresses: not those it did not start for want of a
+// certificate, nor those an access file stopped, nor one that failed to bind.
 func TestConfigStatusListeningLine(t *testing.T) {
 	addrs := []string{"127.0.0.1:8991", "10.6.0.4:8991"}
+	conf := tdns.ApiServerConf{Addresses: addrs}
+	failed := []tdns.ApiTCPFailure{{Address: addrs[1], Error: "bind: address already in use"}}
 	for _, tc := range []struct {
 		name string
 		resp tdns.ConfigResponse
 		want string
 	}{
 		{"no addresses", tdns.ConfigResponse{}, "ApiServer: not listening on any addresses"},
-		{"all started", tdns.ConfigResponse{ApiServer: tdns.ApiServerConf{Addresses: addrs}},
+		{"all started", tdns.ConfigResponse{ApiServer: conf, ApiTCPListening: addrs},
 			"ApiServer: listening on [127.0.0.1:8991 10.6.0.4:8991]"},
-		{"no certificate", tdns.ConfigResponse{ApiServer: tdns.ApiServerConf{Addresses: addrs}, ApiTCPNotStarted: addrs},
+		{"no certificate", tdns.ConfigResponse{ApiServer: conf, ApiTCPNotStarted: addrs},
 			"ApiServer: NOT listening on any TCP address (see TCP API below)"},
-		{"stopped by an access file", tdns.ConfigResponse{ApiServer: tdns.ApiServerConf{Addresses: addrs}, ApiTCPStopped: addrs},
+		{"stopped by an access file", tdns.ConfigResponse{ApiServer: conf, ApiTCPStopped: addrs},
 			"ApiServer: NOT listening on any TCP address (see TCP API below)"},
-		{"one stopped", tdns.ConfigResponse{ApiServer: tdns.ApiServerConf{Addresses: addrs}, ApiTCPStopped: addrs[1:]},
+		{"one stopped", tdns.ConfigResponse{ApiServer: conf, ApiTCPListening: addrs[:1], ApiTCPStopped: addrs[1:]},
 			"ApiServer: listening on [127.0.0.1:8991]"},
+		{"one failed to bind", tdns.ConfigResponse{ApiServer: conf, ApiTCPListening: addrs[:1], ApiTCPFailed: failed},
+			"ApiServer: listening on [127.0.0.1:8991]"},
+		{"none listening, one failed", tdns.ConfigResponse{ApiServer: conf, ApiTCPFailed: failed},
+			"ApiServer: NOT listening on any TCP address (see TCP API below)"},
+		{"configured, but none started (added by a reload)", tdns.ConfigResponse{ApiServer: conf},
+			"ApiServer: not listening on any addresses"},
 	} {
 		if got := apiListeningLine(tc.resp); got != tc.want {
 			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
