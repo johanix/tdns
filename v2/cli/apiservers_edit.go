@@ -374,7 +374,11 @@ func renderEntry(e ApiDetails, lay itemLayout) string {
 	if e.Role != "" {
 		kvs = append(kvs, kv{k: "role", v: e.Role})
 	}
-	kvs = append(kvs, kv{k: "baseurl", v: e.BaseURL})
+	// No baseurl for a daemon with only the local admin socket, which
+	// tdns-ncli finds through config-file:.
+	if e.BaseURL != "" {
+		kvs = append(kvs, kv{k: "baseurl", v: e.BaseURL})
+	}
 	// A socket entry has no key: the daemon authenticates the socket by file
 	// permissions. An empty apikey: line would only invite filling it in.
 	if e.ApiKey != "" {

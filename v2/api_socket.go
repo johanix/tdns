@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -35,6 +36,44 @@ func FromLocalSocket(ctx context.Context) bool {
 // maxApiSocketPathLen keeps the path inside the smallest sun_path in use (104
 // bytes on the BSDs and macOS, 108 on Linux), with room to spare.
 const maxApiSocketPathLen = 100
+
+// DefaultApiSocketDir is the directory of a daemon's local admin socket when
+// apiserver.socket is not set (ApiSocketPath). "" turns the default off,
+// which the tests do, so that a daemon under test serves no socket in
+// /var/run.
+var DefaultApiSocketDir = "/var/run/tdns"
+
+// ApiSocketNone is the apiserver.socket value that turns the socket off.
+const ApiSocketNone = "none"
+
+// ApiSocketPath is the local admin socket of the daemon whose config file is
+// cfgfile and whose apiserver.socket is configured: that path when it is set,
+// no socket ("") for "none", and, when it is not set, the default:
+// DefaultApiSocketDir/<cfgfile's name without its extension>.sock, so
+// /etc/tdns/tdns-auth.yaml serves /var/run/tdns/tdns-auth.sock.
+//
+// Every daemon has the socket unless told otherwise. It is the way in when the
+// network API is not (a broken TLS setup, a lost key), and a way in that has
+// to be configured beforehand is missing exactly then. The name comes from the
+// config file, so two daemons on one host get two sockets. tdns-ncli works the
+// socket out the same way from an entry's config-file:, so no CLI config
+// repeats the path.
+func ApiSocketPath(configured, cfgfile string) string {
+	switch {
+	case strings.EqualFold(configured, ApiSocketNone):
+		return ""
+	case configured != "":
+		return configured
+	case cfgfile == "" || DefaultApiSocketDir == "":
+		return ""
+	}
+	base := filepath.Base(cfgfile)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	return filepath.Join(DefaultApiSocketDir, base+".sock")
+}
 
 // CheckApiSocketPath says whether path can be an apiserver.socket at all: an
 // absolute path short enough for a unix socket. A daemon serves no socket on a

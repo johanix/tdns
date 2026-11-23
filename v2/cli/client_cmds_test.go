@@ -655,6 +655,94 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 	})
 }
 
+// An entry with config-file: reaches its daemon over the local admin socket
+// when that answers: the socket the daemon config names, or by default the one
+// named after the config file. Over TCP when it does not answer, when the
+// daemon config says socket: none, or with --tcp (ForceTCP). The CLI config
+// holds no socket path.
+func TestEntryUsesTheDaemonSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ncli") // short: a socket path has a limit
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	savedDir, savedTCP := tdns.DefaultApiSocketDir, ForceTCP
+	t.Cleanup(func() { tdns.DefaultApiSocketDir, ForceTCP = savedDir, savedTCP })
+	tdns.DefaultApiSocketDir = dir
+
+	cfg := filepath.Join(dir, "tdns-imr.yaml")
+	writeFile(t, cfg, daemonYAML("", "127.0.0.1:8085", "k", "")) // no socket: line
+	sock := filepath.Join(dir, "tdns-imr.sock")
+	if got, addrs := daemonSocket(cfg); got != sock || len(addrs) != 1 || addrs[0] != "127.0.0.1:8085" {
+		t.Fatalf("daemonSocket = %q %q, want the default %s and 127.0.0.1:8085", got, addrs, sock)
+	}
+	e := ApiDetails{Name: "tdns-imr", BaseURL: "https://127.0.0.1:8085/api/v1", ApiKey: "k", AuthMethod: "X-API-Key",
+		TLSAuth: "pin", Pins: []string{pinOf("x")}, ConfigFile: cfg}
+	socketOf := func(t *testing.T, e ApiDetails) string {
+		t.Helper()
+		c, _, err := newApiClientFor(e, CliClientConf{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.Socket
+	}
+
+	if s := socketOf(t, e); s != "" {
+		t.Errorf("nothing listening: socket %q, want TCP", s)
+	}
+
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	if s := socketOf(t, e); s != sock {
+		t.Errorf("socket answering: socket %q, want %s", s, sock)
+	}
+	ForceTCP = true
+	if s := socketOf(t, e); s != "" {
+		t.Errorf("--tcp: socket %q, want TCP", s)
+	}
+	ForceTCP = false
+
+	// An entry for a daemon on another host whose config-file: path happens
+	// to exist here too is not this daemon.
+	elsewhere := e
+	elsewhere.BaseURL = "https://192.0.2.1:8085/api/v1"
+	if s := socketOf(t, elsewhere); s != "" {
+		t.Errorf("an entry for another address: socket %q, want TCP", s)
+	}
+	// An entry with no TCP address at all is the socket's.
+	if s := socketOf(t, ApiDetails{Name: "tdns-imr", AuthMethod: "none", ConfigFile: cfg}); s != sock {
+		t.Errorf("a socket-only entry: socket %q, want %s", s, sock)
+	}
+
+	noCfg := e
+	noCfg.ConfigFile = ""
+	if s := socketOf(t, noCfg); s != "" {
+		t.Errorf("no config-file: socket %q, want TCP", s)
+	}
+
+	writeFile(t, cfg, daemonYAML("", "127.0.0.1:8085", "k", "   socket: none\n"))
+	if s := socketOf(t, e); s != "" {
+		t.Errorf("socket: none: socket %q, want TCP", s)
+	}
+	// A socket-only entry (no baseurl) whose socket is off cannot be used.
+	sockOnly := ApiDetails{Name: "tdns-imr", AuthMethod: "none", ConfigFile: cfg}
+	if _, _, err := newApiClientFor(sockOnly, CliClientConf{}); err == nil || !strings.Contains(err.Error(), "no baseurl") {
+		t.Errorf("socket-only entry, socket off: err = %v, want one saying it has no baseurl", err)
+	}
+}
+
 // With pins, the client ignores rootca, so a rootca: file that is gone does
 // not fail an entry that verifies by pin.
 func TestPinnedEntryIgnoresRootCA(t *testing.T) {

@@ -13,7 +13,9 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 )
@@ -246,6 +248,39 @@ func loopbackURL(rawURL string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// ForceTCP makes every entry use its TCP address, never its daemon's local
+// admin socket (tdns-ncli --tcp): to see what a remote operator sees, roles
+// and all, from the daemon's own host.
+var ForceTCP bool
+
+// usableDaemonSocket is the local admin socket of the daemon e's config-file:
+// names, when it answers, or "". Not for an entry that is already a socket
+// entry, nor with ForceTCP. Answering takes root (the socket is 0600 in a 0700
+// directory) and a running daemon; anything less leaves the TCP address.
+//
+// Only when the entry's TCP address is one that daemon config lists, or the
+// entry has none: the same config-file: path exists on every host
+// (/etc/tdns/tdns-auth.yaml), so an entry for a daemon on another host would
+// otherwise reach the daemon on this one.
+func usableDaemonSocket(e ApiDetails) string {
+	if ForceTCP || e.ConfigFile == "" || strings.HasPrefix(e.BaseURL, "unix://") {
+		return ""
+	}
+	sock, addrs := daemonSocket(e.ConfigFile)
+	if sock == "" {
+		return ""
+	}
+	if e.BaseURL != "" && !slices.Contains(addrs, hostPort(e.BaseURL)) {
+		return ""
+	}
+	c, err := net.DialTimeout("unix", sock, time.Second)
+	if err != nil {
+		return ""
+	}
+	c.Close()
+	return sock
+}
+
 // newApiClientFor builds the client for one apiservers entry: how it verifies
 // the daemon (pins, roots, or, said out loud, nothing) and how it
 // authenticates itself (key, certificate, or nothing on the local socket).
@@ -256,6 +291,19 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 	// process ended on it). The scheme is case-insensitive, the path is not.
 	if len(e.BaseURL) >= 7 && strings.EqualFold(e.BaseURL[:7], "unix://") {
 		e.BaseURL = "unix://" + e.BaseURL[7:]
+	}
+	// The daemon's local admin socket, when the entry names the daemon's
+	// config and the socket answers: admin, no key, no TLS. Its path is in the
+	// daemon config (tdns.ApiSocketPath), not in the CLI config, so the two
+	// cannot disagree. Otherwise the entry's TCP address.
+	if sock := usableDaemonSocket(e); sock != "" {
+		if tdns.Globals.Debug {
+			fmt.Printf("%s: using the daemon's local admin socket %s\n", e.Name, sock)
+		}
+		e.BaseURL, e.ApiKey, e.AuthMethod = "unix://"+sock, "", "none"
+	}
+	if e.BaseURL == "" {
+		return nil, "", fmt.Errorf("entry %q has no baseurl, and the local admin socket of its daemon (config-file: %s) cannot be used: only root can open it, and the daemon must be running", e.Name, e.ConfigFile)
 	}
 	o := tdns.ClientOptions{ApiKey: e.ApiKey, AuthMethod: e.AuthMethod, RootCA: e.RootCA}
 	warn := ""

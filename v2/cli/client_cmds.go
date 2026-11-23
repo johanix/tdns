@@ -292,8 +292,8 @@ func resolveAccessTarget(role string) (*accessTarget, error) {
 	// runs on its socket alone), so only the daemon's own socket identifies
 	// it; any other entry needs config-file:, which config add writes.
 	if ad := apiDetailsForRole(role); ad != nil && ad.ConfigFile == "" && !entryIsDaemonSocket(*ad, info) {
-		return nil, fmt.Errorf("%s's entry %s (%s) has no config-file:, so nothing says it is the daemon of %s; the client commands edit a daemon's own files, and an address does not tell which daemon answers on it. Give the entry config-file: (tdns-ncli config add writes it), or use the daemon's local socket entry",
-			role, ad.Name, ad.BaseURL, cfg)
+		return nil, fmt.Errorf("%s's entry %s (%s) has no config-file:, so nothing says it is the daemon of %s; the client commands edit a daemon's own files, and an address does not tell which daemon answers on it. Give the entry config-file: (tdns-ncli config add %s writes it)",
+			role, ad.Name, ad.BaseURL, cfg, shellQuote(cfg))
 	}
 	t := &accessTarget{DaemonConfig: info.ConfigFile, File: info.AccessFile, Configured: info.AccessFile != "", HasSocket: info.Socket != "", Socket: info.Socket}
 	if !t.Configured {

@@ -170,7 +170,7 @@ func LoadAccessFile(path string) (*AccessFile, error) {
 // leave nothing able to do admin work.
 func (a ApiServerConf) validateAccessSettings() error {
 	if a.AccessFile != "" && a.Socket == "" {
-		return fmt.Errorf("apiserver.access-file %s requires apiserver.socket: with an access file, admin is available only on the local socket", a.AccessFile)
+		return fmt.Errorf("apiserver.access-file %s requires the local admin socket, which apiserver.socket: none turns off: with an access file, admin is available only on the local socket", a.AccessFile)
 	}
 	if a.AccessFile != "" && !filepath.IsAbs(a.AccessFile) {
 		return fmt.Errorf("apiserver.access-file %q is not an absolute path", a.AccessFile)
