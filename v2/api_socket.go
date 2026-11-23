@@ -9,6 +9,8 @@ package tdns
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -46,16 +48,28 @@ var DefaultApiSocketDir = "/var/run/tdns"
 // ApiSocketNone is the apiserver.socket value that turns the socket off.
 const ApiSocketNone = "none"
 
+// defaultConfigDir is where the daemons' config files are by default. A config
+// file there names its default socket by its file name alone.
+const defaultConfigDir = "/etc/tdns"
+
 // ApiSocketPath is the local admin socket of the daemon whose config file is
 // cfgfile and whose apiserver.socket is configured: that path when it is set,
-// no socket ("") for "none", and, when it is not set, the default:
-// DefaultApiSocketDir/<cfgfile's name without its extension>.sock, so
-// /etc/tdns/tdns-auth.yaml serves /var/run/tdns/tdns-auth.sock.
+// no socket ("") for "none", and, when it is not set, the default in
+// DefaultApiSocketDir, named after the config file:
+//
+//	/etc/tdns/tdns-auth.yaml       -> /var/run/tdns/tdns-auth.sock
+//	/etc/tdns-site/tdns-auth.yaml  -> /var/run/tdns/etc-tdns-site-tdns-auth.sock
+//
+// A file in /etc/tdns by its name; any other by its whole path, because
+// instances in other directories commonly share a file name (testor runs
+// tdns-auth.yaml from /etc/tdns, /etc/tdns-site and /etc/tdns-enc), and two
+// daemons must never share a socket: the second would serve none, and
+// tdns-ncli would reach the first through the second's entry. A path too long
+// for a socket is shortened to the file name and a hash of the path.
 //
 // Every daemon has the socket unless told otherwise. It is the way in when the
 // network API is not (a broken TLS setup, a lost key), and a way in that has
-// to be configured beforehand is missing exactly then. The name comes from the
-// config file, so two daemons on one host get two sockets. tdns-ncli works the
+// to be configured beforehand is missing exactly then. tdns-ncli works the
 // socket out the same way from an entry's config-file:, so no CLI config
 // repeats the path.
 func ApiSocketPath(configured, cfgfile string) string {
@@ -67,12 +81,29 @@ func ApiSocketPath(configured, cfgfile string) string {
 	case cfgfile == "" || DefaultApiSocketDir == "":
 		return ""
 	}
-	base := filepath.Base(cfgfile)
-	base = strings.TrimSuffix(base, filepath.Ext(base))
+	abs, err := filepath.Abs(cfgfile)
+	if err != nil {
+		return ""
+	}
+	noExt := strings.TrimSuffix(abs, filepath.Ext(abs))
+	base := filepath.Base(noExt)
 	if base == "" || base == "." || base == string(filepath.Separator) {
 		return ""
 	}
-	return filepath.Join(DefaultApiSocketDir, base+".sock")
+	name := base
+	if filepath.Dir(abs) != defaultConfigDir {
+		name = strings.ReplaceAll(strings.TrimPrefix(noExt, string(filepath.Separator)), string(filepath.Separator), "-")
+	}
+	p := filepath.Join(DefaultApiSocketDir, name+".sock")
+	if len(p) > maxApiSocketPathLen {
+		sum := sha256.Sum256([]byte(abs))
+		tail := "-" + hex.EncodeToString(sum[:4]) + ".sock"
+		if room := maxApiSocketPathLen - len(DefaultApiSocketDir) - 1 - len(tail); len(base) > room {
+			base = base[:max(room, 0)]
+		}
+		p = filepath.Join(DefaultApiSocketDir, base+tail)
+	}
+	return p
 }
 
 // CheckApiSocketPath says whether path can be an apiserver.socket at all: an
