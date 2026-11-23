@@ -147,13 +147,15 @@ func (conf *Config) authenticateApiRequest(r *http.Request, apikey string) (ApiI
 		return ApiIdentity{}, http.StatusServiceUnavailable,
 			"management API disabled by a configuration error; see the daemon log, or use the local socket"
 	}
-	// An access file means TLS 1.3 (design 3.6). The listener's minimum is
-	// fixed when it starts, so after a reload that added the access file an
-	// older handshake still gets through; refuse its requests here. (No TLS
-	// at all is usetls: false, which design 3.6 allows: certificate clients
-	// cannot authenticate, only the key works, and the daemon warns at
-	// start; see APIdispatcher.)
-	if r.TLS != nil && r.TLS.Version < tls.VersionTLS13 {
+	// An access file means TLS 1.3 on TCP. What a listener speaks is fixed
+	// when it starts, and a reload can put an access file in force on a
+	// listener started without one: plaintext (usetls: false then), or a TLS
+	// minimum below 1.3. Refuse such requests here, whatever the listener let
+	// through. (The local socket returned above.)
+	if r.TLS == nil {
+		return ApiIdentity{}, http.StatusForbidden, "the access file requires TLS on the management API; this listener is plaintext (restart the daemon with usetls: true, or use the local admin socket)"
+	}
+	if r.TLS.Version < tls.VersionTLS13 {
 		return ApiIdentity{}, http.StatusForbidden, "the access file requires TLS 1.3 on the management API"
 	}
 	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
