@@ -1194,3 +1194,44 @@ func TestDuplicatePins(t *testing.T) {
 		t.Errorf("two daemons sharing a key: %v", w)
 	}
 }
+
+// A daemon config with no certfile/keyfile: config add pins the default
+// pair the daemon writes at its first start, and before that says to start
+// it first.
+func TestAddPinsTheDefaultApiCert(t *testing.T) {
+	saved := runningAsRoot
+	t.Cleanup(func() { runningAsRoot = saved })
+	runningAsRoot = func() bool { return false }
+
+	env := newAddEnv(t)
+	d := filepath.Join(env.dir, "tdns-auth.yaml")
+	writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", ""))
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, _ := tdns.ApiCertPaths(d)
+	if info.CertFile != cert || !info.CertDefault {
+		t.Fatalf("CertFile %q (default %v), want %s", info.CertFile, info.CertDefault, cert)
+	}
+
+	// Not written yet: the entry is added without a pin, and the note says
+	// to start the daemon first.
+	res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true })
+	if err != nil || !strings.Contains(strings.Join(res.Notes, " "), "not there yet") {
+		t.Errorf("before the first start: %+v, %v; want a note saying the daemon writes it", res, err)
+	}
+
+	// Written (here: any certificate at that path): pinned.
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	srv.Close()
+	if err := os.MkdirAll(filepath.Dir(cert), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, cert, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})))
+	leaf, _ := x509.ParseCertificate(srv.Certificate().Raw)
+	res, err = env.add(t, d, nil)
+	if err != nil || res.Entry.TLSAuth != "pin" || len(res.Entry.Pins) != 1 || res.Entry.Pins[0] != tdns.SPKISHA256(leaf) {
+		t.Errorf("after the first start: %+v, %v; want the default certificate pinned", res, err)
+	}
+}
