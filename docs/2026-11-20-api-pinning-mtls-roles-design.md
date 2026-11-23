@@ -133,6 +133,27 @@ CA. `insecure` is accepted only when spelled out, and tdns-ncli warns each time.
 A tdns-ncli TCP entry with none of the three refuses to connect. (tdns-ncli has
 its own config file and is a prototype; tdns-cli's defaults do not change.)
 
+**Revised 2026-11-23: the daemon's API certificate has a default.** Nothing
+made the API certificate: `tdns-cli cert init` writes the DNS listeners' pair
+(`listeners.certfile`), and the API pair was made by hand and named
+`{confdir}/certs/api.{crt,key}` in every config, so daemons whose configs
+share a directory (tdns-auth and tdns-imr in `/etc/tdns`) shared a key, and a
+client pinned to one would accept the other (`config list --check` warns). The
+owner's rulings: with neither `apiserver.certfile` nor `keyfile` set, the pair
+is `{confdir}/certs/{config name}-api.crt` and `.key`
+(`/etc/tdns/tdns-auth.yaml` has `/etc/tdns/certs/tdns-auth-api.crt`), one per
+config file (`tdns.ApiCertPaths`); and the daemon writes it, self-signed
+(ECDSA P-256, `localhost`, this host, loopback and the API listen addresses,
+ten years: the pin is what is checked), at its first start when neither file
+is there, and never overwrites one. Paths a config names are used as they
+are and never written. A config check before the first start reports the
+pair as pending (the validator lets that pass); one default file without the
+other is refused; a pair that cannot be written starts no TLS listener (the
+socket is still served). `tdns-ncli config add` pins the default pair, and
+before the first start says to start the daemon first. A new key is
+deliberate: remove the pair, restart, run `config add` again (old pins stay
+next to the new one).
+
 ### 3.2 The local socket
 
 ```yaml

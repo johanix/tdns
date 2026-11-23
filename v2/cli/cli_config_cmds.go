@@ -323,7 +323,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 					e.Name, diff, info.ConfigFile)
 			}
 			res.AlreadyKnown = e.Name
-			return repinKnownEntry(o, res, e, existing, target, info.CertFile)
+			return repinKnownEntry(o, res, e, existing, target, info)
 		case sameFile:
 			return nil, fmt.Errorf("entry %q already points at %s but with a different API address (%s, the config says %s); edit or remove that entry by hand",
 				e.Name, info.ConfigFile, e.BaseURL, baseURL)
@@ -341,7 +341,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			}
 			// Its key and scheme are this daemon's, on this daemon's address:
 			// pin it as the daemon's own entry would be.
-			return repinKnownEntry(o, res, e, existing, target, info.CertFile)
+			return repinKnownEntry(o, res, e, existing, target, info)
 		case sameAddr:
 			return nil, fmt.Errorf("entry %q (config-file %s) already uses the API address %s, which %s also names; two daemons cannot listen on one address",
 				e.Name, e.ConfigFile, e.BaseURL, info.ConfigFile)
@@ -362,7 +362,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	} else if strings.HasPrefix(entry.BaseURL, "https://") && entry.RootCA == "" {
 		// The daemon's own certificate, pinned: no CA, no name check, and
 		// nothing for the operator to do.
-		if pin, err := certFilePin(info.CertFile); err != nil {
+		if pin, err := daemonCertPin(info); err != nil {
 			res.Notes = append(res.Notes, fmt.Sprintf(
 				"could not pin the daemon's certificate (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>), or tdns-ncli will refuse to connect", err))
 		} else {
@@ -591,12 +591,12 @@ func certFilePin(path string) (string, error) {
 // replaced on disk but not yet served still connects.
 //
 // The caller holds the CLI config's lock (unless o.DryRun).
-func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiDetails, target, certFile string) (*AddResult, error) {
+func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiDetails, target string, info *DaemonApi) (*AddResult, error) {
 	if !strings.HasPrefix(strings.ToLower(e.BaseURL), "https://") {
 		return res, nil // the socket, or plain http: no certificate to pin
 	}
 	byPin := strings.EqualFold(e.TLSAuth, "pin") && len(e.Pins) > 0
-	pin, err := certFilePin(certFile)
+	pin, err := daemonCertPin(info)
 	if err != nil {
 		switch {
 		case byPin:

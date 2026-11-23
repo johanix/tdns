@@ -685,6 +685,9 @@ func applyDaemonDefaults(v *viper.Viper, cfg *tdns.Config, cfgPath string) {
 	// The socket the daemon serves: apiserver.socket, none, or by default one
 	// named after the config file, as ParseConfig fills it in.
 	cfg.ApiServer.Socket = tdns.ApiSocketPath(cfg.ApiServer.Socket, cfgPath)
+	// The API certificate: certfile/keyfile, or the config file's default
+	// pair (looked for, not written).
+	cfg.ApiServer.LookupCertDefaults(cfgPath)
 }
 
 // socketPathHint is the fix for an apiserver.socket the daemon refuses
@@ -728,6 +731,9 @@ func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 	// the plain existence here too. The socket alone needs neither.
 	if !tcp && cfg.ApiServer.CertFile == "" && cfg.ApiServer.KeyFile == "" {
 		rep.info(g, "cert", "no apiserver.certfile/keyfile: none is needed without apiserver.addresses")
+	} else if cfg.ApiServer.CertPending {
+		cert, _ := tdns.ApiCertPaths(cfgPath)
+		rep.info(g, "cert", fmt.Sprintf("no apiserver.certfile/keyfile: the daemon writes a self-signed pair at %s (and .key) when it first starts", cert))
 	} else if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
 		rep.fail(g, "cert", "apiserver.certfile/keyfile must be set (required even when usetls:false)",
 			"generate a cert/key pair (see `tdns-cli auth config mwe`) and point certfile/keyfile at it")
