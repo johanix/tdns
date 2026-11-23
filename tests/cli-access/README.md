@@ -23,13 +23,14 @@ against one build; #1165 is verdicted on the socket suite alone.
 | Nothing sent over TCP passes as a socket request (spoofed headers, absolute-form URL) | S5a S5b S5c |
 | `config status -v` shows the socket | S6a S6b |
 | `config add` picks the socket entry for root, the TCP entry with `--tcp` or as non-root, and the entries work. From #1168 6afcc580 (a build with `tdns-ncli --tcp`): it writes the TCP entry with `config-file:` for everyone; root's ping over it goes over the socket, and over TCP with `--tcp` | S7a–S7e, S7f (#1168) |
+| From #1184 (config add sets up the client certificate): as root a certificate entry with no key, its pin enrolled in a new access file, one `access-file:` line added to the daemon config, reloaded; the same pair is not enrolled twice; tdns-imr (no TLS) is refused; a non-root user is refused with the `client add` line as the fix, and once root runs it, config add gives the user a working certificate entry. The seeded config is put back after | S7a–S7g (#1184) |
 | A stale socket file is replaced at start | S8 |
 | A socket that cannot be served (a regular file in the way, a directory open to others) leaves the daemon running and shows as a server error (`config status -v`) | S9a S9b |
 | A relative or too-long socket path is refused, the daemon keeps running, `config add` warns | S10a S10b S10c |
 | A daemon with no `apiserver.addresses` still serves the socket (tdns-auth, tdns-imr) | S11a S11b S11c S11d |
-| A socket-only config needs the key but no certfile/keyfile (no `addresses` line, or `addresses: []`); with addresses it needs both | S13a–S13d |
+| A socket-only config needs the key but no certfile/keyfile (no `addresses` line, or `addresses: []`); with addresses it needs both (from #1182: with addresses and neither, the daemon writes its default pair) | S13a–S13d |
 | A socket entry sends no key, whatever its authmethod says | S14 |
-| `config add` refuses a TCP entry (`--tcp`, or non-root) when the daemon config has no key; root still gets the socket entry (from #1168 6afcc580: root is refused too, as it gets the TCP entry) | S15a–S15c |
+| `config add` refuses a TCP entry (`--tcp`, or non-root) when the daemon config has no key; root still gets the socket entry (from #1168 6afcc580: root is refused too, as it gets the TCP entry; so it stays with #1184, as the daemon requires the key) | S15a–S15c |
 | `config check`: a socket-only config with a relative or too-long socket path fails, with addresses it warns; no certificate is needed without addresses; tdns-imr needs the key in every case | S16a–S16e |
 
 ### #1167, access roles: `run.sh verify roles`
@@ -61,7 +62,8 @@ against one build; #1165 is verdicted on the socket suite alone.
 | Root's TCP entry with `config-file:` goes over the daemon's socket (admin), and over TCP with `--tcp` (read-write); `--tcp` on a `unix://` entry is refused | P8a P8b P8c |
 | It stays on TCP when the entry's address is not one the daemon config lists, or when the daemon on the socket runs another config (said); the daemon refuses a socket request naming another config (412) | P8d P8e P8f |
 | `config add` pins a known entry that has no pin (drops `rootca:`, changes nothing else); run again it changes nothing | P9a P9b |
-| Every daemon serves a socket by default, named after its config path, gone after a stop; `socket: none` serves none and root's entry uses TCP | P10a P10b P10c |
+| Every daemon serves a socket by default, named after its config path, gone after a stop; `socket: none` serves none and root's entry uses TCP (from #1184 a new entry for it is refused: no socket, no access file) | P10a P10b P10c |
+| #1182: with neither `certfile` nor `keyfile`, `config check` says the daemon will write `{confdir}/certs/{name}-api.crt`; `config add` before the first start makes the pair (key 0600) and pins it; the daemon uses it and writes none; the entry works; a restart keeps the pair; half a pair is refused and not rewritten; a `certfile:` the config names that is missing is refused by `config add` | P11a–P11g |
 | `http://` to a non-loopback host warns once; loopback stays quiet | P5a P5b |
 | `config list` warns about duplicate pins | P6 |
 | tdns-cli's behaviour is unchanged | P7 |
