@@ -184,6 +184,8 @@ func init() {
 		false, "verbose output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H",
 		false, "show headers")
+	rootCmd.PersistentFlags().BoolVar(&cli.ForceTCP, "tcp", false,
+		"reach daemons over TCP even where their local admin socket can be used")
 }
 
 // initConfig reads in config file and ENV variables if set.

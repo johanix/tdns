@@ -125,7 +125,8 @@ its container.
 `tdns-ncli config add <daemon.yaml>` already reads the daemon's config for the
 address and the key; it would also read `apiserver.certfile` and write the pin.
 The operator does nothing. (For a daemon with a socket it writes a socket entry
-instead, section 3.2.)
+instead, section 3.2. Revised 2026-11-23: it writes the TCP entry, and
+tdns-ncli finds the socket through `config-file:`; see the end of 3.2.)
 
 `tlsauth: pkix` (system roots or a `rootca:` file) stays for anyone with a real
 CA. `insecure` is accepted only when spelled out, and tdns-ncli warns each time.
@@ -137,6 +138,8 @@ its own config file and is a prototype; tdns-cli's defaults do not change.)
 ```yaml
 apiserver:
    socket: /var/run/tdns/tdns-auth.sock    # unset = no socket, as today
+                                           # (revised 2026-11-23: unset = the
+                                           # default, none = no socket; below)
 ```
 
 - **Authentication is the file system.** The daemon creates the socket with mode
@@ -161,6 +164,33 @@ apiserver:
   be relaxed for such an entry). `tdns-ncli config add <daemon.yaml>` writes
   this entry when the daemon config has `apiserver.socket`, so a local daemon
   needs no secret in any CLI config.
+
+**Revised 2026-11-23, after the first install on test servers: on by default,
+and not in the CLI config.** The owner's rulings:
+
+- **Every daemon serves the socket unless told not to.** The socket replaced
+  `usetls: false` as the way in when TLS is broken, and a fallback that has to
+  be configured beforehand is missing exactly when it is needed: none of the
+  test servers had a `socket:` line. Unset, the path is named after the config
+  file, `/var/run/tdns/<config file name without extension>.sock`
+  (`/etc/tdns/tdns-auth.yaml` serves `/var/run/tdns/tdns-auth.sock`), so the
+  instances on one host get one each. `socket: none` turns it off.
+  `tdns.ApiSocketPath` does this, in the daemon's load (`ParseConfig`, and the
+  decode `config check` uses) and in tdns-ncli. A socket that cannot be served
+  is an error the daemon reports and runs on without, as before.
+- **The CLI config does not hold the socket's path.** The socket is root's,
+  and root can read the daemon config, so tdns-ncli finds the socket through
+  the entry's `config-file:` each time it builds the client, and uses it when it
+  answers (admin, no key); otherwise the entry's TCP address. Only when the
+  entry's address is one that daemon config lists, or the entry has none: the
+  same `config-file:` path exists on every host, so an entry for a daemon
+  elsewhere would otherwise reach the daemon on this one. Two configs saying
+  the same thing could disagree; one cannot. `tdns-ncli --tcp` uses the TCP
+  address even then, to see what a remote operator sees. `config add` writes
+  the TCP entry with `config-file:` whoever runs it (no more `unix://` entries,
+  and no `--tcp` on `config add`); a daemon with no TCP address gets an entry
+  with `config-file:` alone, which only root can use. An entry written as
+  `baseurl: unix://...` still works.
 
 ### 3.3 The daemon verifies the remote operator (network API)
 
@@ -700,6 +730,15 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   that file cannot be read the entry is written without pins and a note says
   what to add; tdns-ncli then refuses that entry rather than connecting
   unverified.
+- **`config add` also pins an entry it already knows** (2026-11-23, after the
+  testor install). An https entry with no pin is broken, and entries written
+  before pinning existed had none, so "Already known; nothing changed" left
+  them refused. Now the add of a known daemon gives its entry `tlsauth: pin` and
+  the pin, removes a `rootca:` line, and changes nothing else in the file. An
+  entry pinning an earlier certificate keeps its pins and gets the current one
+  too. The refusal of an unpinned entry says to run `tdns-ncli config add
+  <daemon config>`; it no longer offers `rootca:`, since pinning is the model
+  (`tlsauth: pkix` is still accepted for a real CA, but not suggested).
 - **`config list --check`** uses the same client as every other command and
   shows who each daemon took the CLI for (from `ping`).
 - **The `client` commands** are added to the canonical auth, agent and imr

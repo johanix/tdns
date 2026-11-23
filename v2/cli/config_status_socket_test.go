@@ -173,7 +173,7 @@ func TestConfigCheckUseTLSDefault(t *testing.T) {
 			if err := v.Unmarshal(&cfg); err != nil {
 				t.Fatal(err)
 			}
-			applyDaemonDefaults(v, &cfg)
+			applyDaemonDefaults(v, &cfg, "")
 			rep := newCCReport()
 			checkApiAccessFile(&cfg, rep)
 			var failed bool

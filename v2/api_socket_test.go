@@ -343,3 +343,31 @@ func TestAPIdispatcherServesTheSocket(t *testing.T) {
 		t.Errorf("a socket was created in a 0755 directory: %v", err)
 	}
 }
+
+// Every daemon has the admin socket unless its config says socket: none: by
+// default one named after the config file, so two daemons on a host get two.
+func TestApiSocketPath(t *testing.T) {
+	saved := DefaultApiSocketDir
+	t.Cleanup(func() { DefaultApiSocketDir = saved })
+	DefaultApiSocketDir = "/var/run/tdns"
+	for _, tc := range []struct {
+		configured, cfgfile, want string
+	}{
+		{"", "/etc/tdns/tdns-auth.yaml", "/var/run/tdns/tdns-auth.sock"},
+		{"", "/etc/tdns/tdns-site.yaml", "/var/run/tdns/tdns-site.sock"},
+		{"", "tdns-imr.yaml", "/var/run/tdns/tdns-imr.sock"}, // relative, from the command line
+		{"", "/etc/tdns/noext", "/var/run/tdns/noext.sock"},
+		{"/run/x.sock", "/etc/tdns/tdns-auth.yaml", "/run/x.sock"},
+		{"none", "/etc/tdns/tdns-auth.yaml", ""},
+		{"NONE", "/etc/tdns/tdns-auth.yaml", ""},
+		{"", "", ""}, // no config file: nothing to name it after
+	} {
+		if got := ApiSocketPath(tc.configured, tc.cfgfile); got != tc.want {
+			t.Errorf("ApiSocketPath(%q, %q) = %q, want %q", tc.configured, tc.cfgfile, got, tc.want)
+		}
+	}
+	DefaultApiSocketDir = ""
+	if got := ApiSocketPath("", "/etc/tdns/tdns-auth.yaml"); got != "" {
+		t.Errorf("default off: %q, want none", got)
+	}
+}

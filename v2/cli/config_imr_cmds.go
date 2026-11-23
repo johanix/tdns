@@ -181,6 +181,8 @@ func runImrConfigCheck(role, explicitPath string, offline bool) {
 		rep.warn("Config file", "decode",
 			fmt.Sprintf("could not fully decode config into structs: %v", err), "")
 	}
+	// The socket the daemon serves, as ParseConfig fills it in.
+	cfg.ApiServer.Socket = tdns.ApiSocketPath(cfg.ApiServer.Socket, cfgPath)
 
 	checkImrEngine(&cfg, rep)
 	checkImrTrustAnchors(&cfg, rep)

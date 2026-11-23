@@ -457,6 +457,7 @@ func TestNewApiClientForVerification(t *testing.T) {
 		wantWarn bool
 	}{
 		{name: "https verifying nothing", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1"}, wantErr: "does not verify the daemon"},
+		{name: "the refusal says how to pin", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", ConfigFile: "/etc/tdns/tdns-imr.yaml"}, wantErr: "Pin it with: tdns-ncli config add /etc/tdns/tdns-imr.yaml"},
 		{name: "insecure said out loud", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", RootCA: "insecure"}, wantWarn: true},
 		{name: "pinned", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin", Pins: []string{pinOf("d")}}},
 		{name: "pin without pins", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin"}, wantErr: "no pins"},
@@ -551,6 +552,194 @@ func TestAddPinsTheDaemonCertificate(t *testing.T) {
 	}
 	if notes := strings.Join(res.Notes, " "); len(res.Entry.Pins) != 0 || !strings.Contains(notes, "relative path") || !strings.Contains(notes, "could not pin") {
 		t.Errorf("relative certfile: entry %+v notes %q", res.Entry, res.Notes)
+	}
+}
+
+// An entry with no pin is broken (tdns-ncli refuses it), and config add of the
+// same daemon fixes it in place: tlsauth: pin and the pin added, a rootca:
+// line removed, the rest of the file as it was. An entry pinning an earlier
+// certificate keeps its pins and gets the current one too. Run again, the add
+// changes nothing.
+func TestAddPinsAKnownEntry(t *testing.T) {
+	saved := runningAsRoot
+	t.Cleanup(func() { runningAsRoot = saved })
+	runningAsRoot = func() bool { return false }
+
+	srv := httptest.NewTLSServer(http.NotFoundHandler()) // only for a certificate
+	srv.Close()
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	leaf, _ := x509.ParseCertificate(srv.Certificate().Raw)
+	pin := tdns.SPKISHA256(leaf)
+
+	setup := func(t *testing.T, entry string) (*addEnv, string) {
+		env := newAddEnv(t)
+		certFile := filepath.Join(env.dir, "api.crt")
+		writeFile(t, certFile, string(certPEM))
+		d := filepath.Join(env.dir, "tdns-imr.yaml")
+		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: "+certFile+"\n"))
+		writeFile(t, env.cli, strings.ReplaceAll(entry, "@D@", d))
+		return env, d
+	}
+
+	t.Run("no pin, rootca insecure", func(t *testing.T) {
+		const head = "# CLI config\ncli:\n   tdns-imr:\n      foo: bar\n\napiservers:\n   # the auth server\n   - name:          tdns-auth\n     baseurl:       https://127.0.0.1:8989/api/v1\n     apikey:        a\n     authmethod:    X-API-Key\n\n"
+		const imr = "   - name:          tdns-imr\n     baseurl:       https://127.0.0.1:8085/api/v1\n     apikey:        k\n     authmethod:    X-API-Key\n     rootca:        insecure\n     config-file:   @D@\n"
+		const tail = "\n# end\n"
+		env, d := setup(t, head+imr+tail)
+
+		res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true })
+		if err != nil || !res.Pinned || res.Wrote {
+			t.Fatalf("dry run: %+v, %v; want it pinned, nothing written", res, err)
+		}
+		if got, _ := os.ReadFile(env.cli); !strings.Contains(string(got), "rootca:        insecure") {
+			t.Fatalf("the dry run wrote:\n%s", got)
+		}
+
+		res, err = env.add(t, d, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.AlreadyKnown != "tdns-imr" || !res.Pinned || !res.Wrote || !res.Canonical {
+			t.Errorf("result = %+v", res)
+		}
+		want := head + "   - name:          tdns-imr\n     baseurl:       https://127.0.0.1:8085/api/v1\n     apikey:        k\n     authmethod:    X-API-Key\n     config-file:   " + d + "\n     tlsauth:       pin\n     pins:          [ \"" + pin + "\" ]\n" + tail
+		if got, _ := os.ReadFile(env.cli); string(got) != want {
+			t.Errorf("file =\n%s\nwant\n%s", got, want)
+		}
+		got := env.entries(t)
+		if len(got) != 2 || got[1].TLSAuth != "pin" || len(got[1].Pins) != 1 || got[1].Pins[0] != pin || got[1].RootCA != "" {
+			t.Errorf("entries = %+v", got)
+		}
+		if _, _, err := newApiClientFor(got[1], CliClientConf{}); err != nil {
+			t.Errorf("the pinned entry is still refused: %v", err)
+		}
+
+		var sb strings.Builder
+		printAddResult(&sb, res, false, env.cli)
+		if !strings.Contains(sb.String(), "pinned the daemon's certificate") || strings.Contains(sb.String(), "nothing changed") {
+			t.Errorf("printed:\n%s", sb.String())
+		}
+
+		res, err = env.add(t, d, nil)
+		if err != nil || res.Pinned || res.Wrote || res.AlreadyKnown != "tdns-imr" {
+			t.Errorf("second add: %+v, %v; want already known, nothing changed", res, err)
+		}
+	})
+
+	t.Run("an earlier pin, in block style", func(t *testing.T) {
+		env, d := setup(t, "apiservers:\n   -\n     name: tdns-imr\n     baseurl: https://127.0.0.1:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     tlsauth: pin\n     pins:\n       - \""+pinOf("old")+"\"\n     config-file: @D@\n")
+		res, err := env.add(t, d, nil)
+		if err != nil || !res.Pinned {
+			t.Fatalf("%+v, %v", res, err)
+		}
+		got := env.entries(t)
+		if len(got) != 1 || len(got[0].Pins) != 2 || got[0].Pins[0] != pinOf("old") || got[0].Pins[1] != pin {
+			t.Errorf("entries = %+v; want the old pin kept and the new one added", got)
+		}
+		if !strings.Contains(strings.Join(res.Notes, " "), "earlier certificate") {
+			t.Errorf("notes = %q", res.Notes)
+		}
+	})
+
+	t.Run("an unreadable certificate: a note, nothing changed", func(t *testing.T) {
+		env, d := setup(t, "apiservers:\n   - name: tdns-imr\n     baseurl: https://127.0.0.1:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     config-file: @D@\n")
+		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: /nonexistent/api.crt\n"))
+		before, _ := os.ReadFile(env.cli)
+		res, err := env.add(t, d, nil)
+		if err != nil || res.Pinned || res.Wrote || !strings.Contains(strings.Join(res.Notes, " "), "has no pin") {
+			t.Errorf("%+v, %v", res, err)
+		}
+		if after, _ := os.ReadFile(env.cli); string(after) != string(before) {
+			t.Errorf("the file changed:\n%s", after)
+		}
+	})
+}
+
+// An entry with config-file: reaches its daemon over the local admin socket
+// when that answers: the socket the daemon config names, or by default the one
+// named after the config file. Over TCP when it does not answer, when the
+// daemon config says socket: none, or with --tcp (ForceTCP). The CLI config
+// holds no socket path.
+func TestEntryUsesTheDaemonSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ncli") // short: a socket path has a limit
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	savedDir, savedTCP := tdns.DefaultApiSocketDir, ForceTCP
+	t.Cleanup(func() { tdns.DefaultApiSocketDir, ForceTCP = savedDir, savedTCP })
+	tdns.DefaultApiSocketDir = dir
+
+	cfg := filepath.Join(dir, "tdns-imr.yaml")
+	writeFile(t, cfg, daemonYAML("", "127.0.0.1:8085", "k", "")) // no socket: line
+	sock := filepath.Join(dir, "tdns-imr.sock")
+	if got, addrs := daemonSocket(cfg); got != sock || len(addrs) != 1 || addrs[0] != "127.0.0.1:8085" {
+		t.Fatalf("daemonSocket = %q %q, want the default %s and 127.0.0.1:8085", got, addrs, sock)
+	}
+	e := ApiDetails{Name: "tdns-imr", BaseURL: "https://127.0.0.1:8085/api/v1", ApiKey: "k", AuthMethod: "X-API-Key",
+		TLSAuth: "pin", Pins: []string{pinOf("x")}, ConfigFile: cfg}
+	socketOf := func(t *testing.T, e ApiDetails) string {
+		t.Helper()
+		c, _, err := newApiClientFor(e, CliClientConf{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.Socket
+	}
+
+	if s := socketOf(t, e); s != "" {
+		t.Errorf("nothing listening: socket %q, want TCP", s)
+	}
+
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	if s := socketOf(t, e); s != sock {
+		t.Errorf("socket answering: socket %q, want %s", s, sock)
+	}
+	ForceTCP = true
+	if s := socketOf(t, e); s != "" {
+		t.Errorf("--tcp: socket %q, want TCP", s)
+	}
+	ForceTCP = false
+
+	// An entry for a daemon on another host whose config-file: path happens
+	// to exist here too is not this daemon.
+	elsewhere := e
+	elsewhere.BaseURL = "https://192.0.2.1:8085/api/v1"
+	if s := socketOf(t, elsewhere); s != "" {
+		t.Errorf("an entry for another address: socket %q, want TCP", s)
+	}
+	// An entry with no TCP address at all is the socket's.
+	if s := socketOf(t, ApiDetails{Name: "tdns-imr", AuthMethod: "none", ConfigFile: cfg}); s != sock {
+		t.Errorf("a socket-only entry: socket %q, want %s", s, sock)
+	}
+
+	noCfg := e
+	noCfg.ConfigFile = ""
+	if s := socketOf(t, noCfg); s != "" {
+		t.Errorf("no config-file: socket %q, want TCP", s)
+	}
+
+	writeFile(t, cfg, daemonYAML("", "127.0.0.1:8085", "k", "   socket: none\n"))
+	if s := socketOf(t, e); s != "" {
+		t.Errorf("socket: none: socket %q, want TCP", s)
+	}
+	// A socket-only entry (no baseurl) whose socket is off cannot be used.
+	sockOnly := ApiDetails{Name: "tdns-imr", AuthMethod: "none", ConfigFile: cfg}
+	if _, _, err := newApiClientFor(sockOnly, CliClientConf{}); err == nil || !strings.Contains(err.Error(), "no baseurl") {
+		t.Errorf("socket-only entry, socket off: err = %v, want one saying it has no baseurl", err)
 	}
 }
 
