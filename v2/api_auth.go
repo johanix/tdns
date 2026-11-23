@@ -251,6 +251,12 @@ func (conf *Config) initApiAccess() {
 // and returns a line for the reload's reply. A file that does not load leaves
 // the running policy as it was (still closed, after a failed start) and says
 // so; like a refused forward table it does not fail the rest of the reload.
+// AccessFileNotReloaded begins the part of a reload's reply that says the
+// access file did not load and the running policy is unchanged. The reload as
+// a whole still succeeds, so a client that edited the file (tdns-ncli's
+// client commands) looks for this to know its change was not applied.
+const AccessFileNotReloaded = "Access file NOT reloaded"
+
 func (conf *Config) reloadApiAccess() string {
 	h := conf.Internal.ApiAccess
 	if h == nil {
@@ -270,7 +276,7 @@ func (conf *Config) reloadApiAccess() string {
 	if err != nil {
 		lgApi.Error("management API: access file NOT reloaded; the running policy is unchanged", "file", path, "err", err)
 		conf.Internal.ServerErrors.set(ErrCatConfig, ErrSubApiAccess, fmt.Sprintf("access file %s: %v", path, err))
-		return fmt.Sprintf(" Access file NOT reloaded (the running policy is unchanged): %v", err)
+		return fmt.Sprintf(" %s (the running policy is unchanged): %v", AccessFileNotReloaded, err)
 	}
 	conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
 	h.p.Store(newAccessState(path, af))

@@ -533,4 +533,19 @@ func TestApiListenerReloadNote(t *testing.T) {
 	if strings.Contains(note, "apiserver.addresses") {
 		t.Errorf("note %q names addresses, which did not change", note)
 	}
+
+	// Started with an access file: the listeners are TLS 1.3 only until a
+	// restart, so a reload that takes the access file out says so. Adding
+	// one needs no note: the handshake check applies it at once.
+	conf.ApiServer.AccessFile = "/etc/tdns/access.yaml"
+	apiListenersStarted.Store(listenerSettingsOf(conf.ApiServer))
+	conf.ApiServer.AccessFile = ""
+	if note := conf.apiListenerReloadNote(); !strings.Contains(note, "access-file") || !strings.Contains(note, "TLS 1.3") {
+		t.Errorf("access file removed: note %q, want it to say the listeners stay TLS 1.3 only", note)
+	}
+	apiListenersStarted.Store(listenerSettingsOf(conf.ApiServer))
+	conf.ApiServer.AccessFile = "/etc/tdns/access.yaml"
+	if note := conf.apiListenerReloadNote(); note != "" {
+		t.Errorf("access file added: note %q, want none", note)
+	}
 }
