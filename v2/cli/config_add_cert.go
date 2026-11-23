@@ -77,6 +77,9 @@ type CertSetup struct {
 
 	state certState
 	why   string // why it cannot work (certCannot)
+	// pairProblem: it cannot work because the operator's own pair cannot be
+	// used (0: not that), which the fix is about (there is no pin to enrol).
+	pairProblem clientPairProblem
 
 	// What apply did.
 	enrolledAs string     // the name the pin was added under
@@ -107,6 +110,18 @@ func (c *CertSetup) changesDaemon() bool {
 func (c *CertSetup) cannot(why string) *CertSetup {
 	c.state, c.why = certCannot, why
 	return c
+}
+
+// pairCannot is cannot for the operator's own pair, which err says cannot be
+// used: problem is what is wrong with it, unless err is a clientPairError,
+// which says.
+func (c *CertSetup) pairCannot(problem clientPairProblem, err error) *CertSetup {
+	var pe *clientPairError
+	if errors.As(err, &pe) {
+		problem = pe.problem
+	}
+	c.pairProblem = problem
+	return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", err))
 }
 
 // planCert finds out where the operator's certificate stands with the daemon
@@ -199,14 +214,14 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 	_, cerr := os.Stat(c.cert)
 	switch {
 	case o.DryRun && cerr != nil && !errors.Is(cerr, fs.ErrNotExist):
-		return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", cerr))
+		return c.pairCannot(pairBadCert, cerr)
 	case o.DryRun && cerr != nil:
 		_, kerr := os.Stat(c.key)
 		switch {
 		case kerr == nil:
-			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", clientKeyWithoutCertError(c.cert, c.key)))
+			return c.pairCannot(pairKeyOnly, clientKeyWithoutCertError(c.cert, c.key))
 		case !errors.Is(kerr, fs.ErrNotExist):
-			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", kerr))
+			return c.pairCannot(pairOther, kerr)
 		}
 		c.pairNew = true
 	case o.DryRun:
@@ -216,13 +231,13 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 			pin, err = clientPairPin(c.cert, c.key, data)
 		}
 		if err != nil {
-			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", err))
+			return c.pairCannot(pairBadCert, err) // unreadable, unless clientPairPin says
 		}
 		c.pin, c.name = pin, clientNameOf(c.cert)
 	default:
 		pin, created, err := ensureClientCert(c.cert, c.key, defaultClientName())
 		if err != nil {
-			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", err))
+			return c.pairCannot(pairOther, err) // making it failed, unless it says
 		}
 		c.pin, c.pairNew, c.name = pin, created, clientNameOf(c.cert)
 	}
@@ -873,6 +888,8 @@ func (c *CertSetup) fixLines() []string {
 			"   tdns-ncli " + c.word + " client enable " + shellQuote(c.listedAs),
 			"then run config add again.",
 		}
+	case c.pairProblem != 0:
+		return c.pairFixLines()
 	}
 	if c.listedAs != "" {
 		// The pin is there already: what is left is the daemon reading it.
@@ -902,6 +919,37 @@ func (c *CertSetup) fixLines() []string {
 		lines = append(lines, "then run config add again.")
 	}
 	return lines
+}
+
+// pairFixLines say what makes the operator's own pair usable, when it is
+// not: until it is, there is no pin to enrol. config add makes a new pair
+// when neither file is there, and never overwrites one that is.
+func (c *CertSetup) pairFixLines() []string {
+	switch c.pairProblem {
+	case pairKeyOnly:
+		return []string{
+			"put back your certificate " + c.cert + ",",
+			"or remove your key " + c.key + " so config add makes a new pair;",
+			"then run config add again.",
+		}
+	case pairNoMatch:
+		return []string{
+			"make your certificate " + c.cert + " and your key " + c.key + " one pair again,",
+			"or remove both so config add makes a new pair;",
+			"then run config add again.",
+		}
+	case pairBadCert:
+		return []string{
+			"fix your certificate " + c.cert + " so it can be read,",
+			"or remove it and your key " + c.key + " so config add makes a new pair;",
+			"then run config add again.",
+		}
+	}
+	return []string{
+		"fix what stops config add reading or making your pair,",
+		c.cert + " and " + c.key + " (the error says what);",
+		"then run config add again.",
+	}
 }
 
 // listedEnrollment is how the access file lists the pin: its name and its

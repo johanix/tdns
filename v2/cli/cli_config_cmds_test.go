@@ -2616,6 +2616,134 @@ func TestCertFixLines(t *testing.T) {
 	}
 }
 
+// When the operator's own pair cannot be used there is no pin, so the fix is
+// not the enrolment (client add --pin): it is to put the pair right, or to
+// remove it so config add makes a new one, with the paths named. The dry run
+// and the add say the same.
+func TestAddOwnPairUnusableFix(t *testing.T) {
+	keyOnly := func(cert, key string) []string {
+		return []string{
+			"put back your certificate " + cert + ",",
+			"or remove your key " + key + " so config add makes a new pair;",
+			"then run config add again.",
+		}
+	}
+	noMatch := func(cert, key string) []string {
+		return []string{
+			"make your certificate " + cert + " and your key " + key + " one pair again,",
+			"or remove both so config add makes a new pair;",
+			"then run config add again.",
+		}
+	}
+	badCert := func(cert, key string) []string {
+		return []string{
+			"fix your certificate " + cert + " so it can be read,",
+			"or remove it and your key " + key + " so config add makes a new pair;",
+			"then run config add again.",
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		notRoot bool // root reads anything
+		setup   func(t *testing.T, env *addEnv)
+		want    func(cert, key string) []string
+		whyHas  string
+	}{
+		{
+			name: "a key without its certificate",
+			setup: func(t *testing.T, env *addEnv) {
+				os.MkdirAll(filepath.Dir(env.key), 0o700)
+				writeFile(t, env.key, "a key without its certificate\n")
+			},
+			want: keyOnly, whyHas: "without its certificate",
+		},
+		{
+			name: "a certificate with another pair's key",
+			setup: func(t *testing.T, env *addEnv) {
+				env.pin(t)
+				other := filepath.Join(env.dir, "other")
+				if _, _, err := ensureClientCert(filepath.Join(other, "o.crt"), filepath.Join(other, "o.key"), "otto"); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, env.key, readBytes(t, filepath.Join(other, "o.key")))
+			},
+			want: noMatch, whyHas: "not a usable pair",
+		},
+		{
+			name: "a certificate without its key",
+			setup: func(t *testing.T, env *addEnv) {
+				env.pin(t)
+				os.Remove(env.key)
+			},
+			want: noMatch, whyHas: "not a usable pair",
+		},
+		{
+			name:    "an unreadable certificate",
+			notRoot: true,
+			setup: func(t *testing.T, env *addEnv) {
+				env.pin(t)
+				os.Chmod(env.cert, 0)
+			},
+			want: badCert, whyHas: "permission denied",
+		},
+	} {
+		for _, dry := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, dry run %v", tc.name, dry), func(t *testing.T) {
+				if tc.notRoot && os.Geteuid() == 0 {
+					t.Skip("root reads anything")
+				}
+				env := newAddEnv(t)
+				d, _ := env.certDaemon(t, env.dir, "")
+				tc.setup(t, env)
+				res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = dry })
+				var r addRefusal
+				if !errors.As(err, &r) {
+					t.Fatalf("%+v, %v; want a refusal", res, err)
+				}
+				if want := tc.want(env.cert, env.key); !reflect.DeepEqual(r.fix, want) {
+					t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(r.fix, "\n"), strings.Join(want, "\n"))
+				}
+				if !strings.Contains(r.why, tc.whyHas) {
+					t.Errorf("why %q, want it to say %q", r.why, tc.whyHas)
+				}
+				var sb strings.Builder
+				printRefusal(&sb, r)
+				if out := sb.String(); strings.Contains(out, "client add") || !strings.Contains(out, "  Fix: ") {
+					t.Errorf("printed:\n%s", out)
+				}
+				if _, err := os.Stat(accessFileOf(d)); err == nil {
+					t.Error("an access file was written")
+				}
+			})
+		}
+	}
+}
+
+// The fix for the operator's pair names it, whatever else the setup says;
+// any other pair trouble (the error says what) is not the enrolment either.
+func TestCertFixLinesOwnPair(t *testing.T) {
+	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml"}
+	c := &CertSetup{word: "auth", cert: "/root/.config/tdns/client.crt", key: "/root/.config/tdns/client.key", state: certCannot, t: tg, pairProblem: pairOther}
+	want := []string{
+		"fix what stops config add reading or making your pair,",
+		"/root/.config/tdns/client.crt and /root/.config/tdns/client.key (the error says what);",
+		"then run config add again.",
+	}
+	if got := c.fixLines(); !reflect.DeepEqual(got, want) {
+		t.Errorf("other pair trouble; fix:\n%s", strings.Join(got, "\n"))
+	}
+	var sb strings.Builder
+	printRefusal(&sb, c.refusal("your client certificate cannot be used (mkdir: permission denied)"))
+	wantOut := "Error: your client certificate cannot be used (mkdir: permission\n" +
+		"  denied).\n" +
+		"  Fix: fix what stops config add reading or making your pair,\n" +
+		"       /root/.config/tdns/client.crt and /root/.config/tdns/client.key\n" +
+		"       (the error says what); then run config add again.\n"
+	if out := sb.String(); out != wantOut {
+		t.Errorf("printed:\n%s\nwant:\n%s", out, wantOut)
+	}
+}
+
 // fakeTCPDaemon is a daemon's TCP API that answers pings: as the access
 // file would, a client certificate with the enrolled pin is taken (as
 // tester, read-write), the API key when keyTaken, anything else refused

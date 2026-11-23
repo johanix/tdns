@@ -20,6 +20,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -166,9 +167,15 @@ func defaultClientName() string {
 // ensureClientCert creates the key pair if the certificate does not exist and
 // returns its pin. It never overwrites.
 func ensureClientCert(certPath, keyPath, cn string) (pin string, created bool, err error) {
-	if data, err := os.ReadFile(certPath); err == nil {
+	data, err := os.ReadFile(certPath)
+	switch {
+	case err == nil:
 		p, err := clientPairPin(certPath, keyPath, data)
 		return p, false, err
+	case !errors.Is(err, fs.ErrNotExist):
+		// There, but not readable: not a pair to make (O_EXCL would refuse
+		// it anyway), nor a key without its certificate.
+		return "", false, &clientPairError{problem: pairBadCert, err: err}
 	}
 	if _, err := os.Stat(keyPath); err == nil {
 		return "", false, clientKeyWithoutCertError(certPath, keyPath)
@@ -229,14 +236,14 @@ func ensureClientCert(certPath, keyPath, cn string) (pin string, created bool, e
 func clientPairPin(certPath, keyPath string, data []byte) (string, error) {
 	p, perr := pemCertPin(data)
 	if perr != nil {
-		return "", fmt.Errorf("%s exists but %v", certPath, perr)
+		return "", &clientPairError{problem: pairBadCert, err: fmt.Errorf("%s exists but %v", certPath, perr)}
 	}
 	// The pair, not the certificate alone: a pin for a certificate whose key
 	// is gone or another one would enrol a client that can never connect.
 	// Touch neither file.
 	if _, kerr := tls.LoadX509KeyPair(certPath, keyPath); kerr != nil {
-		return "", fmt.Errorf("%s exists, but it and %s are not a usable pair (%v); not touching either: fix the key, or remove both and run client init again",
-			certPath, keyPath, kerr)
+		return "", &clientPairError{problem: pairNoMatch, err: fmt.Errorf("%s exists, but it and %s are not a usable pair (%v); not touching either: fix the key, or remove both and run client init again",
+			certPath, keyPath, kerr)}
 	}
 	return p, nil
 }
@@ -245,8 +252,29 @@ func clientPairPin(certPath, keyPath string, data []byte) (string, error) {
 // without its certificate at certPath: ensureClientCert's, and a dry run of
 // config add's in the same words.
 func clientKeyWithoutCertError(certPath, keyPath string) error {
-	return fmt.Errorf("%s exists without its certificate %s; not overwriting a key", keyPath, certPath)
+	return &clientPairError{problem: pairKeyOnly, err: fmt.Errorf("%s exists without its certificate %s; not overwriting a key", keyPath, certPath)}
 }
+
+// clientPairProblem is what is wrong with the operator's client pair when
+// it is there, or partly there, and cannot be used. config add's fix for it
+// depends on which (CertSetup.fixLines): there is no pin to enrol.
+type clientPairProblem int
+
+const (
+	pairOther   clientPairProblem = iota + 1 // something else: the error says
+	pairKeyOnly                              // the key, without its certificate
+	pairNoMatch                              // the certificate, without a key that goes with it
+	pairBadCert                              // the certificate, unreadable or not one
+)
+
+// clientPairError is a client pair that cannot be used, and why (problem).
+type clientPairError struct {
+	problem clientPairProblem
+	err     error
+}
+
+func (e *clientPairError) Error() string { return e.err.Error() }
+func (e *clientPairError) Unwrap() error { return e.err }
 
 // createNewFile writes data to path, which must not exist yet. A write that
 // fails removes the file it created, and nothing else.
