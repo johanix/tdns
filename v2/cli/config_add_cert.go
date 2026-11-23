@@ -12,17 +12,21 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -54,6 +58,7 @@ type CertSetup struct {
 	t          *accessTarget
 	listedAs   string // the access file already lists the pin, as this name
 	listedRole string // and with this role
+	byDaemon   bool   // the daemon said so (the access file could not be read)
 	noTLS      bool   // the daemon's TCP API has no TLS
 	noSocket   bool   // the daemon serves no local admin socket
 
@@ -129,7 +134,9 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 	case relative:
 		c.keyUnknown = fmt.Sprintf("apiserver.access-file %q is not an absolute path", c.t.File)
 	case aerr != nil:
-		c.keyUnknown = cannotRead(c.t.File, aerr)
+		// Not readable here (it is 0600, and this is not root): the
+		// daemon is asked instead, with the key.
+		c.askKey(info)
 	case old == nil:
 		c.keyOff, c.keyWhy = true, fmt.Sprintf("%s, which the daemon config names, does not exist (the daemon closes its TCP API then)", c.t.File)
 	case !af.KeyAuthOn():
@@ -181,7 +188,10 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 		return c.cannot(fmt.Sprintf("apiserver.access-file %q is not an absolute path, which the daemon refuses", c.t.File))
 	}
 	if aerr != nil {
-		return c.cannot(cannotRead(c.t.File, aerr))
+		// The daemon is asked whether it takes the certificate: an
+		// operator whose pin root has enrolled gets the certificate entry
+		// without reading root's file.
+		return c.askCert(info, aerr)
 	}
 	if cl := clientByPin(af, c.pin); c.pin != "" && cl != nil {
 		c.listedAs, c.listedRole = cl.Name, cl.Role
@@ -242,6 +252,103 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 	}
 	c.running, c.state = running, certCanEnable
 	return c
+}
+
+// daemonTCP is the daemon's TCP API (its first address) and the pin of the
+// certificate it presents there: how config add asks it, verified, when it
+// cannot read the daemon's access file.
+func daemonTCP(info *DaemonApi) (string, string, error) {
+	if len(info.Addresses) == 0 || !info.UseTLS {
+		return "", "", errors.New("it has no TLS TCP API")
+	}
+	base, err := apiBaseURL(info.Addresses[0], true)
+	if err != nil {
+		return "", "", err
+	}
+	pin, err := daemonCertPin(info)
+	if err != nil {
+		return "", "", err
+	}
+	return base, pin, nil
+}
+
+// pingReply is what a daemon's TCP API said to a ping: taken (pr says with
+// which role, how and as whom), refused (401, 403) or closed (503) when
+// answered without taken, or no answer at all.
+type pingReply struct {
+	answered, taken bool
+	status          int
+	pr              tdns.PingResponse
+}
+
+// pingAs pings the TCP API at base, the daemon verified by pin, with the
+// credentials in o: the client certificate, or the API key.
+func pingAs(base, pin string, o tdns.ClientOptions) pingReply {
+	o.Pins = []string{pin}
+	api := tdns.NewClientWithOptions("config add", base, o)
+	api.Client.Timeout = 5 * time.Second
+	body, err := json.Marshal(tdns.PingPost{Msg: "config add", Pings: 1})
+	if err != nil {
+		return pingReply{}
+	}
+	status, buf, err := api.Post("/ping", body)
+	r := pingReply{status: status}
+	switch {
+	case err == nil && status == http.StatusOK:
+		r.answered = true
+		r.taken = json.Unmarshal(buf, &r.pr) == nil
+	case status == http.StatusUnauthorized, status == http.StatusForbidden, status == http.StatusServiceUnavailable:
+		r.answered = true
+	}
+	return r
+}
+
+// askKey finds whether the daemon takes the API key by asking it, over its
+// TCP API with the key, when its access file cannot be read here.
+func (c *CertSetup) askKey(info *DaemonApi) {
+	base, pin, err := daemonTCP(info)
+	if err != nil {
+		c.keyUnknown = fmt.Sprintf("the daemon cannot be asked (%v)", err)
+		return
+	}
+	r := pingAs(base, pin, tdns.ClientOptions{AuthMethod: "X-API-Key", ApiKey: info.ApiKey})
+	switch {
+	case r.taken:
+	case r.status == http.StatusServiceUnavailable:
+		c.keyOff, c.keyWhy = true, "its TCP API is closed, as it cannot use its access file"
+	case r.answered:
+		c.keyOff, c.keyWhy = true, "asked over TCP, it refuses the key"
+	default:
+		c.keyUnknown = "the daemon does not answer on " + base
+	}
+}
+
+// askCert finds whether the daemon takes the operator's certificate by
+// asking it, over its TCP API with the certificate, when its access file
+// cannot be read here (aerr): the role and name it answers with are the
+// enrollment.
+func (c *CertSetup) askCert(info *DaemonApi, aerr error) *CertSetup {
+	unread := cannotRead(c.t.File, aerr)
+	if c.pin == "" {
+		return c.cannot(unread) // a dry run, before the pair exists
+	}
+	pair, err := tls.LoadX509KeyPair(c.cert, c.key)
+	if err != nil {
+		return c.cannot(unread)
+	}
+	base, pin, err := daemonTCP(info)
+	if err != nil {
+		return c.cannot(fmt.Sprintf("%s, and the daemon cannot be asked (%v)", unread, err))
+	}
+	r := pingAs(base, pin, tdns.ClientOptions{AuthMethod: "certificate", ClientCert: &pair})
+	switch {
+	case r.taken && strings.EqualFold(r.pr.Via, "certificate"):
+		c.listedAs, c.listedRole, c.byDaemon, c.state = r.pr.Identity, r.pr.Role, true, certWorks
+		return c
+	case r.answered:
+		return c.cannot(unread + ", and the daemon does not take your certificate")
+	}
+	return c.cannot(fmt.Sprintf("%s, and the daemon does not answer on %s to say whether it takes your certificate", unread, base))
 }
 
 // apply makes the daemon accept the certificate: the pin added to the access
@@ -899,6 +1006,8 @@ func printCert(w io.Writer, c *CertSetup, usesCert, keyKept, dryRun, troubleSaid
 
 	fmt.Fprintln(w)
 	switch {
+	case c.byDaemon:
+		writeWrapped(w, "", "", "The daemon takes your certificate, as "+c.listedEnrollment()+".")
 	case c.listedAs != "":
 		writeWrapped(w, "", "", c.t.File+" lists your certificate as "+c.listedEnrollment()+".")
 	default:
