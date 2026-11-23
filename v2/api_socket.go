@@ -65,7 +65,9 @@ const ApiSocketNone = "none"
 // digit, "." or "-" in the path itself is %-escaped, so no two paths give one
 // name (/etc/tdns-site/x.yaml and /etc/tdns/site/x.yaml stay apart). A path
 // too long for a socket becomes the escaped file name, "%%" (which no escaped
-// path contains) and a hash of the path.
+// path contains) and 128 bits of the path's SHA-256: one-to-one no longer by
+// construction, only as far as SHA-256 is (32 bits gave a collision within
+// half a million paths).
 func ApiSocketPath(configured, cfgfile string) string {
 	switch {
 	case strings.EqualFold(configured, ApiSocketNone):
@@ -86,7 +88,7 @@ func ApiSocketPath(configured, cfgfile string) string {
 	p := filepath.Join(DefaultApiSocketDir, socketNameEscape(rel)+".sock")
 	if len(p) > maxApiSocketPathLen {
 		sum := sha256.Sum256([]byte(abs))
-		tail := "%%" + hex.EncodeToString(sum[:4]) + ".sock"
+		tail := "%%" + hex.EncodeToString(sum[:16]) + ".sock"
 		base := socketNameEscape(filepath.Base(abs))
 		if room := maxApiSocketPathLen - len(DefaultApiSocketDir) - 1 - len(tail); len(base) > room {
 			base = base[:max(room, 0)]
