@@ -61,13 +61,19 @@ func APIping(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}
 		pongs += 1
 		hostname, _ := os.Hostname()
+		// A connection on the local admin socket has no remote address ("",
+		// or "@" on some systems): say which way it came instead.
+		client := r.RemoteAddr
+		if client == "" || client == "@" {
+			client = "admin socket"
+		}
 		response := PingResponse{
 			Time:       time.Now(),
 			BootTime:   Globals.App.ServerBootTime,
 			Version:    Globals.App.Version,
 			Daemon:     Globals.App.Name,
 			ServerHost: hostname,
-			Client:     r.RemoteAddr,
+			Client:     client,
 			Msg:        fmt.Sprintf("%spong from %s @ %s", tls, Globals.App.Name, hostname),
 			Pings:      pp.Pings + 1,
 			Pongs:      pongs,
