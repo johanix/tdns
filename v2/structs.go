@@ -253,9 +253,28 @@ type ZoneData struct {
 	proxySig0ParentBootstrapped bool
 	// delegationLastSyncOK is when a delegation sync of this zone last
 	// succeeded: a parentsync-proxy sync, or a parentsync child's refresh sync
-	// (a zone is one or the other). A retry of a sync that failed before it is
-	// dropped (delegationSyncRetrySuperseded). Guarded by mu.
+	// or explicit sync, both compares with the parent (a zone is a proxy's or a
+	// child's). A retry of a sync that failed before it is dropped
+	// (delegationSyncRetrySuperseded). Guarded by mu.
 	delegationLastSyncOK time.Time
+	// delegationOutOfStep is set when a change of the zone may not have reached
+	// the parent -- its sync failed, the parent offered no usable scheme, or it
+	// went by NOTIFY, which the parent has yet to act on -- and
+	// no compare has found the parent in step since: the parent may lack
+	// changes the zone has made. A stored change is then queued as a compare
+	// instead of being sent as a difference (delegationSyncLanes.startsAtOnce).
+	// Cleared only by what covers all a stored difference assumes
+	// (noteDelegationSyncInStep): a compare that found the parent in step, or a
+	// send of the whole delegation that the parent said it applied (UPDATE or
+	// API). That is an explicit sync's compare of NS, glue and DS, complete,
+	// in step or followed by such a send of its difference; a proxy compare
+	// the same way; or a proxy sync by UPDATE or API, which sends the whole
+	// delegation (replace form) or the difference from a complete compare
+	// (delta form). Not by a stored change's or a refresh sync's send, which
+	// carry a part, nor by a refresh's compare, which reads no DS, nor by a
+	// compare while a rollover owns the DS, nor by a NOTIFY, which the parent
+	// has yet to act on.
+	delegationOutOfStep atomic.Bool
 	// childRefreshNSGlueChanged is what the child-mode pre-refresh hook saw:
 	// the incoming zone's NS or glue differs from the served zone's. Consumed
 	// and cleared by the post-refresh hook (delsync_refresh.go). Guarded by mu.
@@ -385,9 +404,45 @@ type ZoneData struct {
 	// that reads the KeyDB's record puts them ahead of it. Guarded by
 	// signalStoredMu.
 	signalUnrecorded map[string][]string
-	publishCadence   time.Duration
-	publishQueued    bool
-	publishUrgent    bool
+	// signalOnDisk holds, per owner the pass stored at in this process or
+	// the record held when the zone file was last adopted, the digest of the
+	// pass's signal the zone file holds there, "" for none
+	// (signalOnDiskDigest, noteZoneFileAdopted, noteZoneFileWritten). Every
+	// store keeps it in the record. Guarded by signalStoredMu.
+	signalOnDisk map[string]string
+	// signalOnDiskPrev holds, per owner, the digests of the pass's signals
+	// that zone files held which writes replaced with a rename not yet on
+	// disk: a crash can bring one back. Every store keeps them in the
+	// record until a write whose rename is on disk (noteZoneFileWritten).
+	// Guarded by signalStoredMu.
+	signalOnDiskPrev map[string][]string
+	// zoneFileMu is held across each rename of the zone's file into place
+	// and noteZoneFileWritten for it, so that what the record keeps for the
+	// zone file follows the renames in their order.
+	zoneFileMu sync.Mutex
+	// signalWriting holds, per write of the zone's own file in progress,
+	// the digest of the pass's signal at each owner of signalOnDisk in the
+	// snapshot being written (holdSignalsWritten). Every store keeps them
+	// in the record until the write ends, so that the record still knows
+	// the signal the file comes to hold when noteZoneFileWritten looks.
+	// Guarded by signalStoredMu.
+	signalWriting    map[uint64]map[string]string
+	signalWritingSeq uint64
+	// signalJournaled holds, per owner, the pass's signals a replay of the
+	// zone's journal can yield there, each with the serial of the newest
+	// journal delta that set it (noteSignalsJournaled). Every store keeps
+	// them in the record until a zone write drops those deltas
+	// (noteJournalDropped). Guarded by signalStoredMu.
+	signalJournaled map[string][]signalJournalPin
+	// signalPassRetired is set when the zone is being removed
+	// (RemoveDynamicZone): the transport-signal pass then stores nothing and
+	// records nothing, so that no record of a removed zone outlives the
+	// delete of its records, and a release is refused (releaseSignal).
+	// Guarded by mu, which the pass and a release hold for their whole run.
+	signalPassRetired bool
+	publishCadence    time.Duration
+	publishQueued     bool
+	publishUrgent     bool
 	// tx is the zone's transactions: the publish hold, and what a zone created
 	// held remembers about its first content. See zone_tx.go. Guarded by mu.
 	tx zoneTxState
@@ -1239,14 +1294,25 @@ type DelegationSyncStatus struct {
 	// slice, so the flag travels with the field and must be read first.
 	NewDSKnown bool `json:"-"`
 	// Unread names what the analysis asked the parent (or the keystore) and
-	// got no answer to: "<ns> A", "<ns> AAAA", "DS", "DS intent". InSync says
+	// got no answer to: "<ns> A", "<ns> AAAA", "DS", "DS intent"; or the
+	// zone's own glue that could not be read: "<ns> A (child)". InSync says
 	// nothing about those, so an analysis with Unread set must not be taken as
 	// the parent in step. Deliberate absences of opinion -- a rollover owning
 	// the DS, keys tdns does not manage -- are not reads and are not listed.
-	Unread       []string `json:",omitempty"`
-	Error        bool
-	ErrorMsg     string
-	UpdateResult UpdateResult // Experimental
+	Unread []string `json:",omitempty"`
+	// dsCompared says the analysis compared the parent's DS with the zone's
+	// (AnalyseZoneDelegation), where it was asked to: not while a rollover
+	// owns the DS. Only such a compare may say the parent holds all a stored
+	// difference assumes (noteDelegationSyncInStep). Unread says whether the
+	// DS read itself succeeded.
+	dsCompared bool
+	// noUsableScheme says the explicit sync found a difference and sent
+	// nothing, because the parent offers no usable scheme: there is nothing
+	// to retry it through (runExplicitSyncWith).
+	noUsableScheme bool
+	Error          bool
+	ErrorMsg       string
+	UpdateResult   UpdateResult // Experimental
 	// Complete new delegation data for replace mode
 	NewNS   []dns.RR `json:"-"`
 	NewA    []dns.RR `json:"-"`
@@ -1473,19 +1539,20 @@ type DelegationSyncRequest struct {
 	Response     chan DelegationSyncStatus // used for API-based requests
 	// Attempt counts re-enqueues of a DELEGATION-SYNC-SETUP whose SIG(0)
 	// bootstrap was deferred because the parent's SVCB advertisement could not
-	// be looked up (errBootstrapAdvertisementLookup), and re-runs of a
-	// PROXY-SYNC or REFRESH-SYNC-DELEGATION that failed
-	// (nextDelegationSyncRetry). Zero on the first try.
+	// be looked up (errBootstrapAdvertisementLookup), and re-runs of a compare
+	// with the parent that failed (EXPLICIT-SYNC-DELEGATION,
+	// REFRESH-SYNC-DELEGATION, PROXY-UPDATE-SETUP; nextDelegationSyncRetry).
+	// Zero on the first try.
 	Attempt int
-	// FailedAt is when the PROXY-SYNC or REFRESH-SYNC-DELEGATION this request
-	// retries failed. Zero on the first try.
+	// FailedAt is when the sync this request retries failed. Zero on the first
+	// try.
 	FailedAt time.Time
 	// ReBootstrapRound counts re-enqueues of a DELEGATION-SYNC-SETUP after the
 	// parent reported the key's validation failed (errBootstrapValidationFailed),
 	// up to childReBootstrapRounds. Zero on the first try.
 	ReBootstrapRound int
-	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
-	// set the proxy NOTIFY action keys on (parentsync-proxy).
+	// ProxyAnalysis is set for PROXY-SYNC: the changed-dimension set the proxy
+	// NOTIFY action keys on (parentsync-proxy).
 	ProxyAnalysis *ProxyDelegationAnalysis
 	// SignalTypes is set for SIGNALS-EDITED: the apex RR types (CDS, CDNSKEY,
 	// CSYNC) an operator's update changed.

@@ -654,7 +654,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				// stats, with the do53 shorthand read as udp and tcp.
 				if raw, err := core.ParseTransportStringRaw(server.TransportSignal); err == nil {
 					core.ExpandDo53Shorthand(raw)
-					received := &ReceivedSignal{Source: "config", Weights: map[core.Transport]uint8{}}
+					received := &ReceivedSignal{Source: SignalSourceConfig, Weights: map[core.Transport]uint8{}}
 					for k, v := range raw {
 						if t, err := core.StringToTransport(k); err == nil {
 							received.Weights[t] = v
@@ -681,7 +681,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				}
 				tmpauthserver.SetTransports(transports)
 				tmpauthserver.MergeTransportWeights(weights)
-				tmpauthserver.SetReceivedSignal(&ReceivedSignal{Source: "config", Weights: copyMap(weights)})
+				tmpauthserver.SetReceivedSignal(&ReceivedSignal{Source: SignalSourceConfig, Weights: copyMap(weights)})
 			}
 		}
 		authservers[ServerKey(server.Name)] = tmpauthserver
@@ -770,6 +770,20 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 	}
 	rrcache.ServerMap.Set(zone, serverMap)
 	return nil
+}
+
+// NewTargetAuthServer returns an AuthServer for a transport signal's
+// redirect target name: a server of its own, under the cache's address-family
+// policy, with Src "target". It is in neither AuthServerMap nor any zone's
+// ServerMap; the resolver holds it, apart from a nameserver of the same name.
+func (rrcache *RRsetCacheT) NewTargetAuthServer(name string) *AuthServer {
+	as := NewAuthServer(name)
+	if as == nil {
+		return nil
+	}
+	as.families = rrcache.families
+	as.ForceSetSrc("target")
+	return as
 }
 
 // GetOrCreateAuthServer returns an existing AuthServer instance for the given nameserver name,

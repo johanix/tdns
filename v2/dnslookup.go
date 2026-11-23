@@ -797,13 +797,20 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 // ServerAddrXportTuple represents one prioritized query candidate: a server,
 // one of its addresses, and the transport to use for the attempt.
 // Rank is the index of Transport in candidateTransports for this
-// (qname, server) — 0 is the OOTS share-weighted winner.
+// (qname, server) — 0 is the OOTS share-weighted winner. Family is the
+// address family selection decided on: that of the address the attempt
+// would dial then (attemptKey), a redirect target's or the server's own.
+// FamilyUnknown for a tuple made elsewhere. Probe is whether selection let
+// the tuple through as that family's recovery probe (ShouldProbe), the
+// family being suspect.
 type ServerAddrXportTuple struct {
 	Server    *cache.AuthServer
 	Addr      string
 	NSName    string
 	Transport core.Transport
 	Rank      int
+	Family    cache.AddressFamily
+	Probe     bool
 }
 
 // hostLocalAddr reports whether addr, a bare IP literal, reaches this host: a
@@ -864,8 +871,9 @@ func (imr *Imr) prioritizeServersFor(ctx context.Context, qname string, qtype ui
 }
 
 // tupleSkip, when given to selectServerTuples, leaves out a tuple whose
-// attempt would dial addr at port over t for server: an endpoint a pass has
-// already tried (anotherPassAfter). It is asked after the backoff tests and
+// attempt would dial addr at port over t at server, the instance dialed (the
+// nameserver's own, or a redirect target's): an endpoint a pass has already
+// tried (anotherPassAfter). It is asked after the backoff tests and
 // before the family test, so that a suspect family's probe is not reserved
 // for a tuple that is left out.
 type tupleSkip func(server *cache.AuthServer, addr string, port uint16, t core.Transport) bool
@@ -918,38 +926,42 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 			}
 			for rank, t := range transports {
 				// What the attempt would dial (attemptKey): the endpoint's
-				// address and port, where both the server's backoff and the
+				// address and port, where both the backoff of the instance
+				// dialed (the server's own, or a redirect target's) and the
 				// zone's lameness are read. A target whose addresses are not
 				// known is looked up from here, so that the default
 				// endpoint's backoff does not keep it from being found.
-				a, p, ok := imr.attemptKey(ctx, server, zone, addr, t, true)
-				if !ok || !server.IsEndpointAddrAvailable(a, p, t) {
+				d, ok := imr.attemptKey(ctx, server, zone, addr, t, true)
+				if !ok || !d.server.IsEndpointAddrAvailable(d.addr, d.keyPort, t) {
 					if Globals.Debug {
 						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to server backoff",
-							"addr", addr, "dial", cache.JoinDialAddr(a, p), "transport", core.TransportToString[t], "ns", nsname)
+							"addr", addr, "dial", cache.JoinDialAddr(d.addr, d.keyPort), "transport", core.TransportToString[t], "ns", nsname)
 					}
 					continue
 				}
-				if zone != nil && !zone.IsZoneEndpointAvailable(a, p, t) {
+				if zone != nil && !zone.IsZoneEndpointAvailable(d.addr, d.keyPort, t) {
 					if Globals.Debug {
 						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to zone backoff",
-							"addr", addr, "dial", cache.JoinDialAddr(a, p), "transport", core.TransportToString[t], "ns", nsname, "zone", zoneName)
+							"addr", addr, "dial", cache.JoinDialAddr(d.addr, d.keyPort), "transport", core.TransportToString[t], "ns", nsname, "zone", zoneName)
 					}
 					continue
 				}
-				if skip != nil && skip(server, a, p, t) {
+				if skip != nil && skip(d.server, d.addr, d.keyPort, t) {
 					continue
 				}
 				// Address-family deprioritization (W8). If the local host's
 				// v4 or v6 path is currently suspect, suppress those tuples
 				// — but let one through per ProbeInterval as a recovery
-				// probe, appended after the healthy bucket.
-				fam := cache.FamilyOf(addr)
+				// probe, appended after the healthy bucket. The family is
+				// that of the address dialed: a redirect target's may not be
+				// the glue's.
+				fam := cache.FamilyOf(d.addr)
 				tup := ServerAddrXportTuple{
-					Server: server, Addr: addr, NSName: nsname, Transport: t, Rank: rank,
+					Server: server, Addr: addr, NSName: nsname, Transport: t, Rank: rank, Family: fam,
 				}
 				if imr.FamilyTracker.IsSuspect(fam) {
 					if imr.FamilyTracker.ShouldProbe(fam) {
+						tup.Probe = true
 						suspectTuples = append(suspectTuples, tup)
 					} else if Globals.Debug {
 						lgDns.Debug("prioritizeServers: skipping suspect-family (addr,transport)",
@@ -1086,6 +1098,10 @@ type tupleSelection struct {
 	zoneName string
 	zone     *cache.Zone
 	tuples   []ServerAddrXportTuple
+	// tried is the endpoints the pass before tried, which the selection
+	// left out (anotherPassAfter): the next pass's attempts do not dial
+	// them either (attemptSelection).
+	tried map[passTuple]bool
 }
 
 // signalWaitBudget is what a query may spend waiting for transport signals:
@@ -1144,16 +1160,27 @@ func (imr *Imr) strictWait() time.Duration {
 }
 
 // passTuple is an endpoint a pass of the query loop has tried
-// (anotherPassAfter): the server, and the address and port the attempt
-// dialed (endpointDial) over the tuple's transport. A tuple whose attempt
-// would now dial elsewhere, as a udp endpoint on 5353 that failed gives way
-// to port 53, is not one the pass tried.
+// (anotherPassAfter): the instance the attempt went to, the nameserver or a
+// redirect target, and the address and port it dialed (endpointDial) over the
+// tuple's transport. A tuple whose attempt would now dial elsewhere, as a udp
+// endpoint on 5353 that failed gives way to port 53 at the nameserver, is not
+// one the pass tried.
 type passTuple struct {
 	server    *cache.AuthServer
 	addr      string
 	port      uint16
 	transport core.Transport
 }
+
+// anotherPassSelectedHook, when set, runs in anotherPassAfter after the pass's
+// first selection, before the target lookups are looked at again: tests end
+// or allow a lookup there.
+var anotherPassSelectedHook func()
+
+// anotherPassWaitHook, when set, runs in anotherPassAfter when its wait
+// begins, once the running target lookups are collected and no tuple is
+// usable: tests end a lookup there, so that the wait is what sees it.
+var anotherPassWaitHook func()
 
 // anotherPassAfter decides whether a pass of the query loop that ran out of
 // tuples without an answer is worth another, given the tuples it tried, and
@@ -1163,10 +1190,22 @@ type passTuple struct {
 // server's transport signal came in during the pass, while the query's own
 // Do53 attempt to it was being refused: the server has transports the pass
 // never had (#1065). Only tried tuples left: they failed without a backoff,
-// and another pass would repeat them. No tuple left at all: every one it
-// tried went into backoff, and a server without a signal may have nothing
-// else yet. It then waits, within the query's budget, for the signals of the
-// servers that have an address and none, until an untried tuple appears.
+// and another pass would repeat them, unless a redirect target's lookup is
+// running, whose addresses are tuples the pass never had. No tuple left at
+// all: every one it tried went into backoff, and a server without a signal
+// may have nothing else yet. It then waits, within the query's budget, until
+// an untried tuple appears: for the running lookups of the redirect targets
+// the servers' signals send a transport the query may use to
+// (targetLookupWatch), and, unless tried tuples are left, for the signals of
+// the servers that have an address and none, the two side by side
+// (awaitTargetsAndSignals). A query held to the default
+// endpoints (withDefaultEndpoints), as a target's own address lookup is,
+// never dials a target, and waits for none. A transport
+// redirected to a target whose addresses are still being looked up goes to
+// its default endpoint, the nameserver's own address, which may not serve
+// it; once that attempt has failed, the target is the one thing left, and the
+// first strict query to a cold target used to fail although its addresses
+// came in a moment later.
 //
 // The next pass uses the selection made here rather than selecting again:
 // selecting reserves a suspect family's probe tuple (ShouldProbe), and a
@@ -1175,7 +1214,7 @@ type passTuple struct {
 // probe, so the next pass holds only the tuples it did not try, and a probe
 // is not used up on a tuple that would be left out.
 func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, privacy edns0.PrivacyLevel, tried map[passTuple]bool) *tupleSelection {
-	var sel tupleSelection
+	sel := tupleSelection{tried: tried}
 	triedLeft := false
 	skip := func(server *cache.AuthServer, addr string, port uint16, t core.Transport) bool {
 		if tried[passTuple{server, addr, port, t}] {
@@ -1189,27 +1228,153 @@ func (imr *Imr) anotherPassAfter(ctx context.Context, budget *signalWaitBudget, 
 		sel.zoneName, sel.zone, sel.tuples = imr.selectServerTuples(ctx, qname, qtype, serverMap, privacy, false, skip)
 		return len(sel.tuples) > 0
 	}
+	// Where the target lookups stand is read before the first selection,
+	// so that one ending after it shows (targetLookupWatch).
+	var watch func() (map[string]<-chan struct{}, bool)
+	if !defaultEndpointsOnly(ctx) {
+		watch = imr.targetLookupWatch(serverMap, qname, privacy)
+		watch()
+	}
 	if untried() {
 		return &sel
 	}
-	if triedLeft {
+	if anotherPassSelectedHook != nil {
+		anotherPassSelectedHook()
+	}
+	// The running target lookups are collected, to be waited for, and the
+	// selection made again: a target's retry mark may have run out since the
+	// last one, and a selection starts the lookup of such a target itself.
+	// It is made again for as long as a lookup has ended since the selection
+	// before, whose tuples that selection may not have seen.
+	targets := map[string]<-chan struct{}{}
+	for reselected := false; watch != nil; reselected = true {
+		running, ended := watch()
+		maps.Copy(targets, running)
+		if reselected && !ended {
+			break
+		}
+		if untried() {
+			return &sel
+		}
+	}
+	if triedLeft && len(targets) == 0 {
 		return nil
 	}
 	unsignalled := map[string]*cache.AuthServer{}
-	for key, server := range serverMap {
-		if server != nil && len(server.GetAddrs()) > 0 && len(server.GetTransportWeights()) == 0 {
-			unsignalled[key] = server
+	if !triedLeft {
+		for key, server := range serverMap {
+			if server != nil && len(server.GetAddrs()) > 0 && len(server.GetTransportWeights()) == 0 {
+				unsignalled[key] = server
+			}
 		}
 	}
-	if len(unsignalled) == 0 {
+	if len(unsignalled) == 0 && len(targets) == 0 {
 		return nil
 	}
 	if budget.run(ctx, imr.strictWait(), func(wctx context.Context) bool {
-		return imr.awaitTransportSignalsUntil(wctx, unsignalled, transportQueryReasonNoUsableTransport, untried)
+		if anotherPassWaitHook != nil {
+			anotherPassWaitHook()
+		}
+		switch {
+		case len(targets) > 0 && len(unsignalled) > 0:
+			return imr.awaitTargetsAndSignals(wctx, targets, watch, unsignalled, untried)
+		case len(targets) > 0:
+			return awaitTargetLookups(wctx, targets, watch, untried)
+		default:
+			return imr.awaitTransportSignalsUntil(wctx, unsignalled, transportQueryReasonNoUsableTransport, untried)
+		}
 	}) {
 		return &sel
 	}
 	return nil
+}
+
+// awaitTargetsAndSignals waits for the target lookups in targets
+// (awaitTargetLookups) and the signals of the servers in unsignalled
+// (awaitTransportSignalsUntil) side by side, both within ctx, so that neither
+// spends the other's time: a target lookup that runs to its own deadline
+// would otherwise leave a signal wait made after it no time at all, and a
+// signal lookup it starts would never be waited for. The first wait that
+// ready says yes to ends the other. ready is asked by one wait at a time, and
+// once it has said yes it is not asked again: the selection it made stands.
+func (imr *Imr) awaitTargetsAndSignals(ctx context.Context, targets map[string]<-chan struct{}, watch func() (map[string]<-chan struct{}, bool), unsignalled map[string]*cache.AuthServer, ready func() bool) bool {
+	var mu sync.Mutex
+	found := false
+	readyOnce := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if !found {
+			found = ready()
+		}
+		return found
+	}
+	wctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		if awaitTargetLookups(wctx, targets, watch, readyOnce) {
+			cancel()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if imr.awaitTransportSignalsUntil(wctx, unsignalled, transportQueryReasonNoUsableTransport, readyOnce) {
+			cancel()
+		}
+	}()
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	return found
+}
+
+// attemptSelection is what selection decided for an attempt, which tryServer
+// holds the attempt to: the address family it decided on and whether it
+// reserved that family's probe (ServerAddrXportTuple.Family and Probe;
+// FamilyUnknown for no decision), and the endpoints the pass before tried,
+// which an extra pass's selection left out (tupleSelection.tried). Under the
+// DNSKEY bypass it also carries the transport and endpoint the query loop
+// resolved for the attempt and deduplicated it by (dnskeyAttempt), which
+// tryServer dials rather than resolve them again. The zero value holds the
+// attempt to nothing.
+type attemptSelection struct {
+	family cache.AddressFamily
+	probe  bool
+	tried  map[passTuple]bool
+	dnskey *dnskeyAttempt
+}
+
+// suspectWithoutProbe reports whether addr, the address an attempt is about
+// to dial, is of a family held suspect that selection reserved no probe for:
+// it decided on another family, or on this one while it was healthy.
+// FamilyUnknown is no decision, and holds nothing back.
+func (imr *Imr) suspectWithoutProbe(sel attemptSelection, addr string) bool {
+	fam := cache.FamilyOf(addr)
+	if sel.family == cache.FamilyUnknown || !imr.FamilyTracker.IsSuspect(fam) {
+		return false
+	}
+	return !sel.probe || fam != sel.family
+}
+
+// passTried is the endpoint a pass's attempt counts as tried, which
+// anotherPassAfter leaves out of the next selection: the one tryServer
+// dialed, or the server's own address when it did not get as far as choosing
+// one, under the tuple's transport t. An attempt refused because the address
+// it would dial is of a suspect family with no probe reserved
+// (errEndpointSuspectFamily) counts as none: nothing was sent, and the next
+// selection decides on that family afresh, letting the tuple through as its
+// probe when one is due and leaving it out otherwise.
+func passTried(server *cache.AuthServer, addr string, t core.Transport, ep endpointDial, err error) (passTuple, bool) {
+	if ep.addr != "" {
+		return passTuple{ep.server, ep.addr, ep.keyPort, t}, true
+	}
+	var suspect errEndpointSuspectFamily
+	if errors.As(err, &suspect) {
+		return passTuple{}, false
+	}
+	return passTuple{server, addr, 0, t}, true
 }
 
 // unprobedRTTSentinel is the RTT used for sort when no usable sample exists
@@ -1272,12 +1437,12 @@ func explainNoTuples(serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 func (imr *Imr) explainNoTuplesFor(ctx context.Context, serverMap map[string]*cache.AuthServer, zone *cache.Zone,
 	qname string, privacy edns0.PrivacyLevel, allowHostLocal bool) string {
 	serverAllows := func(server *cache.AuthServer, addr string, t core.Transport) bool {
-		a, p, ok := imr.attemptKey(ctx, server, zone, addr, t, false)
-		return ok && server.IsEndpointAddrAvailable(a, p, t)
+		d, ok := imr.attemptKey(ctx, server, zone, addr, t, false)
+		return ok && d.server.IsEndpointAddrAvailable(d.addr, d.keyPort, t)
 	}
 	zoneAllows := func(server *cache.AuthServer, addr string, t core.Transport) bool {
-		a, p, ok := imr.attemptKey(ctx, server, zone, addr, t, false)
-		return ok && zone.IsZoneEndpointAvailable(a, p, t)
+		d, ok := imr.attemptKey(ctx, server, zone, addr, t, false)
+		return ok && zone.IsZoneEndpointAvailable(d.addr, d.keyPort, t)
 	}
 	return explainNoTuplesWith(serverMap, zone, imr.FamilyTracker, qname, privacy, allowHostLocal, serverAllows, zoneAllows)
 }
@@ -2067,8 +2232,10 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	extraPassAdded := false
 	var nextPass *tupleSelection
 	for attempt := 0; attempt < maxPasses; attempt++ {
+		var triedBefore map[passTuple]bool
 		if nextPass != nil {
 			zoneName, zone, prioritized = nextPass.zoneName, nextPass.zone, nextPass.tuples
+			triedBefore = nextPass.tried
 			nextPass = nil
 		} else {
 			zoneName, zone, prioritized = imr.awaitUsableTuples(ctx, budget, qname, qtype, serverMap, privacy)
@@ -2093,18 +2260,21 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			// tuple's probabilistic pick, or the policy-preferred transport
 			// under dnskeyBypass.
 			effTransport := transport
-			var dnskeyKey cache.AddrXport
+			var dnskey *dnskeyAttempt
 			if dnskeyBypass {
 				// All tuples for this (server, addr) collapse to the same
-				// preferred transport; skip the ones we've already tried.
-				// The attempt is recorded once made, under the endpoint
-				// tryServer dialed (dnskeyTried).
-				eff := imr.preferredDNSKEYTransport(server)
-				dnskeyKey = imr.dnskeyAttemptKey(ctx, server, zone, addr, eff)
-				if dnskeyAttempted[dnskeyKey] {
+				// preferred transport; skip the ones whose endpoint was
+				// tried. The transport and endpoint are resolved once, and
+				// the attempt dials what it was checked by; it is recorded
+				// once made (dnskeyTried).
+				a := imr.resolveDNSKEYAttempt(ctx, server, zone, addr)
+				if key, ok := a.key(); ok && dnskeyAttempted[key] {
 					continue
 				}
-				effTransport = eff
+				if a.transport != 0 {
+					effTransport = a.transport
+				}
+				dnskey = &a
 			}
 
 			lastNS, lastAddr, lastTransport = nsname, addr, transport
@@ -2115,12 +2285,13 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy))
+			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy), attemptSelection{family: tuple.Family, probe: tuple.Probe, tried: triedBefore, dnskey: dnskey})
 			if dnskeyBypass {
-				// Under the transport tryServer dialed: it reads the
-				// preference again, and a signal update in between may
-				// have changed it from effTransport.
-				dnskeyAttempted[dnskeyTried(dnskeyKey, ep, wireTransport)] = true
+				// Under the endpoint tryServer dialed. An attempt that
+				// dialed none is not recorded (dnskeyTried).
+				if key, ok := dnskeyTried(ep, wireTransport, err); ok {
+					dnskeyAttempted[key] = true
+				}
 			}
 			// The endpoint tried: the one tryServer dialed, or the server's
 			// own address when it did not get as far as choosing one, kept
@@ -2129,11 +2300,10 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			// when the tuple dialed itself. Under the DNSKEY bypass the
 			// endpoint is the preferred transport's, which anotherPassAfter
 			// may not see as tried; dnskeyAttempted, which lasts the whole
-			// query, is what keeps the extra pass from dialing it again.
-			if ep.addr != "" {
-				tried[passTuple{server, ep.addr, ep.keyPort, transport}] = true
-			} else {
-				tried[passTuple{server, addr, 0, transport}] = true
+			// query, is what keeps the extra pass from dialing it again. An
+			// attempt refused for its suspect family is none (passTried).
+			if key, ok := passTried(server, addr, transport, ep, err); ok {
+				tried[key] = true
 			}
 			lastTransport = wireTransport
 			if err != nil {
@@ -2203,7 +2373,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				if zone != nil {
 					zone.RecordZoneEndpointFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode), Globals.Debug)
 				} else {
-					server.RecordEndpointAddrFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode))
+					ep.server.RecordEndpointAddrFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode))
 				}
 				continue
 			case dns.RcodeSuccess:
@@ -2449,6 +2619,9 @@ type svcbSignalSet struct {
 	// when it was read (decideAdditionalPath, followLookupAlias). It is what
 	// the alias delegates the signal to.
 	final *svcbSignalSet
+	// hop is the lookup of the hop followLookupAlias stopped at, the cache
+	// not holding it, when that lookup is in flight.
+	hop *hopWait
 }
 
 // add collects one SVCB of the set's RRset. All three paths a signal arrives
@@ -2465,6 +2638,9 @@ func (set *svcbSignalSet) add(rr *dns.SVCB) {
 		set.alias = true
 		return
 	}
+	if !svcbMandatorySupported(rr) {
+		return
+	}
 	if rec, ok := ootsRecordFromSVCB(rr); ok {
 		set.recs = append(set.recs, rec)
 		return
@@ -2477,9 +2653,45 @@ func (set *svcbSignalSet) add(rr *dns.SVCB) {
 // svcbUsable reports whether rr is about the nameserver itself: rr is in
 // ServiceMode (SvcPriority above 0) and its TargetName is ".". SvcParams in
 // AliasMode are to be ignored (RFC 9460 section 2.4.2). The TLSA SvcParam is
-// read only from such a record.
+// read only from such a record, and not from one whose mandatory SvcParam
+// names a key tdns does not support (svcbMandatorySupported).
 func svcbUsable(rr *dns.SVCB) bool {
-	return svcbServiceMode(rr) && rr.Target == "."
+	return svcbServiceMode(rr) && rr.Target == "." && svcbMandatorySupported(rr)
+}
+
+// svcbMandatorySupported reports whether tdns supports every key rr's
+// mandatory SvcParam lists. RFC 9460 section 8 has a client ignore a
+// ServiceMode record whose mandatory names a key it does not support: the
+// record does not work for a client that ignores that key. The other records
+// of the RRset stay.
+func svcbMandatorySupported(rr *dns.SVCB) bool {
+	if rr == nil {
+		return false
+	}
+	for _, kv := range rr.Value {
+		m, ok := kv.(*dns.SVCBMandatory)
+		if !ok {
+			continue
+		}
+		for _, k := range m.Code {
+			if !svcbKeySupported(k) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// svcbKeySupported reports whether tdns acts on SvcParamKey k in a transport
+// signal: mandatory, alpn, port, oots and the TLSA key, and no-default-alpn,
+// which changes nothing for a transport that has no default ALPN. A key it
+// does not act on, such as dohpath or the address hints, is not supported.
+func svcbKeySupported(k dns.SVCBKey) bool {
+	switch k {
+	case dns.SVCB_MANDATORY, dns.SVCB_ALPN, dns.SVCB_NO_DEFAULT_ALPN, dns.SVCB_PORT, dns.SVCB_OOTS:
+		return true
+	}
+	return uint16(k) == SvcbTLSAKey
 }
 
 // svcbServiceMode reports whether rr is a ServiceMode record, whose SvcParams
@@ -2511,20 +2723,21 @@ func svcbPortValue(rr *dns.SVCB) uint16 {
 	return 0
 }
 
-// svcbAlpnCSV is rr's ALPN list, comma-separated. "" when rr has none, is
-// not in ServiceMode, or carries an oots SvcParam: a record with oots is read
-// by its oots alone, and one whose oots names no signal token is ignored, its
-// alpn not read in its place (hasOotsParam).
-func svcbAlpnCSV(rr *dns.SVCB) string {
+// svcbAlpnList is rr's ALPN list, each identifier as decoded from the wire,
+// one of which may hold a comma. nil when rr has none, is not in ServiceMode,
+// or carries an oots SvcParam: a record with oots is read by its oots alone,
+// and one whose oots names no signal token is ignored, its alpn not read in
+// its place (hasOotsParam).
+func svcbAlpnList(rr *dns.SVCB) []string {
 	if !svcbServiceMode(rr) || hasOotsParam(rr) {
-		return ""
+		return nil
 	}
 	for _, kv := range rr.Value {
 		if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
-			return strings.Join(a.Alpn, ",")
+			return a.Alpn
 		}
 	}
-	return ""
+	return nil
 }
 
 // ootsRecordFromSVCB is rr's oots SvcParam as a record, when rr carries one
@@ -2562,8 +2775,8 @@ func dropDo53WithEndpoint(raw map[string]uint8, port uint16, target string) bool
 // automatically mandatory for SVCB-DNS, so a client may not use the record
 // and drop the port.
 func alpnRecordFromSVCB(rr *dns.SVCB) (ootsRecord, bool) {
-	csv := svcbAlpnCSV(rr)
-	if csv == "" {
+	ids := svcbAlpnList(rr)
+	if len(ids) == 0 {
 		return ootsRecord{}, false
 	}
 	raw := map[string]uint8{}
@@ -2571,7 +2784,7 @@ func alpnRecordFromSVCB(rr *dns.SVCB) (ootsRecord, bool) {
 	// do53 in a record with a port or a target is skipped, as in oots
 	// (dropDo53WithEndpoint).
 	withEndpoint := svcbPortValue(rr) != 0 || svcbTarget(rr) != ""
-	for _, tok := range strings.Split(csv, ",") {
+	for _, tok := range ids {
 		tok = strings.ToLower(strings.TrimSpace(tok))
 		if _, dup := raw[tok]; tok == "" || dup || (withEndpoint && tok == "do53") {
 			continue
@@ -2758,9 +2971,11 @@ func (imr *Imr) collectSVCBSignal(pending map[string]*svcbSignalSet, serverName 
 // replaces the whole previous signal, ports included: the combined oots
 // records, or the combined ALPN-only records when no record carried oots. A
 // set that held an AliasMode record installs nothing. It reports whether a
-// signal was installed and whether the set had oots records. Promotion and
-// the follow-up lookups are the caller's.
-func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) (installed, oots bool) {
+// signal was installed and whether the set had oots records. guard says,
+// under the server's lock, whether the signal may replace the one the server
+// holds (cache.AuthServer.SetTransportSignalIf). Promotion and the follow-up
+// lookups are the caller's.
+func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet, guard signalGuard) (installed, oots bool) {
 	if server == nil || set == nil {
 		return false, false
 	}
@@ -2775,7 +2990,7 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 				lgDns.Debug("SVCB signal through an AliasMode record", "servername", server.Name,
 					"via", set.via, "state", pathState, "path", pathText)
 			}
-			installed, oots = imr.installSVCBSignal(server, set.final)
+			installed, oots = imr.installSVCBSignal(server, set.final, guard)
 			if set.final.awaitsLookup {
 				set.awaitsLookup = true
 			}
@@ -2795,7 +3010,7 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 			lgDns.Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports,
 				"targets", targets, "via", set.via, "state", pathState, "path", pathText)
 		}
-		return installTransportMap(server, raw, ports, targets, set.via, set.pathCopy()), true
+		return installTransportMap(server, raw, ports, targets, set.via, set.pathCopy(), guard), true
 	}
 	if len(alpnRecs) > 0 {
 		_, ports, targets := combineOOTSEndpoints(alpnRecs)
@@ -2804,7 +3019,7 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 			lgDns.Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports,
 				"targets", targets, "via", set.via, "state", pathState, "path", pathText)
 		}
-		return installAlpnSignal(server, order, ports, targets, set.via, set.pathCopy()), false
+		return installAlpnSignal(server, order, ports, targets, set.via, set.pathCopy(), guard), false
 	}
 	return false, false
 }
@@ -2813,7 +3028,7 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 // section. After an oots signal it promotes the server to opportunistic and
 // repeats the observation lookups.
 func (imr *Imr) applySVCBSignalSet(ctx context.Context, server *cache.AuthServer, set *svcbSignalSet) {
-	installed, oots := imr.installSVCBSignal(server, set)
+	installed, oots := imr.installSVCBSignal(server, set, notConfigured)
 	if set != nil && set.awaitsLookup && server != nil {
 		if owner := transportOwnerForNS(server.Name); owner != "" {
 			imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonVerify)
@@ -3285,30 +3500,55 @@ func replyMatchesQuery(r, query *dns.Msg) error {
 	return nil
 }
 
-// dnskeyAttemptKey is what a DNSKEY bypass attempt is deduplicated by: the
-// address and port the attempt would dial (attemptKey) and the transport. Two
-// servers that share an address but signal different ports or targets for
-// the transport are two endpoints, and a failure on one must not skip the
-// other.
-func (imr *Imr) dnskeyAttemptKey(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport) cache.AddrXport {
-	a, p, ok := imr.attemptKey(ctx, server, zone, addr, t, false)
-	if !ok {
-		return cache.AddrXport{Addr: addr, Transport: t}
+// dnskeyAttempt is a DNSKEY bypass attempt as the query loop resolves it,
+// once, for both its deduplication and its dial: the preferred transport
+// (preferredDNSKEYTransport), and the endpoint at it (endpointFor). Resolving
+// them twice, once to check the attempt and once to dial it, let a signal
+// installed in between send the attempt to an endpoint other than the one it
+// was checked by.
+type dnskeyAttempt struct {
+	transport core.Transport // 0 when force_encrypted leaves the server no transport
+	ep        endpointDial   // the zero endpointDial when none was chosen
+	err       error          // why no endpoint was chosen
+}
+
+// resolveDNSKEYAttempt is the DNSKEY bypass attempt at the server's own
+// address addr for a query to zone.
+func (imr *Imr) resolveDNSKEYAttempt(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string) dnskeyAttempt {
+	pref := imr.preferredDNSKEYTransport(server)
+	if pref == 0 {
+		return dnskeyAttempt{err: fmt.Errorf("dnssec.dnskey-query-transport=force_encrypted but server %s advertises no encrypted transport", server.Name)}
 	}
-	return cache.AddrXport{Addr: a, Port: p, Transport: t}
+	ep, err := imr.endpointFor(ctx, server, zone, addr, pref)
+	return dnskeyAttempt{transport: pref, ep: ep, err: err}
+}
+
+// key is what the attempt is deduplicated by: the address and port it dials
+// and its transport. Two servers that share an address but signal different
+// ports or targets for the transport are two endpoints, and a failure on one
+// must not skip the other. ok is false when the attempt dials no endpoint:
+// there is nothing to deduplicate it by.
+func (a dnskeyAttempt) key() (cache.AddrXport, bool) {
+	if a.err != nil || a.ep.addr == "" {
+		return cache.AddrXport{}, false
+	}
+	return cache.AddrXport{Addr: a.ep.addr, Port: a.ep.keyPort, Transport: a.transport}, true
 }
 
 // dnskeyTried is the key a DNSKEY bypass attempt is recorded under once it
 // has been made: the endpoint tryServer dialed, at its address and key port
-// over the effective transport eff, or pre, the key the attempt was checked
-// against, when tryServer chose no endpoint. Recording pre for an attempt
-// that dialed elsewhere, as a target whose addresses came in between the two
-// readings, would skip a later attempt at an endpoint never dialed.
-func dnskeyTried(pre cache.AddrXport, ep endpointDial, eff core.Transport) cache.AddrXport {
-	if ep.addr == "" {
-		return pre
+// over the transport eff. ok is false for an attempt that dialed no endpoint
+// (ep is the zero endpointDial), whatever stopped it, a suspect family
+// (errEndpointSuspectFamily) included: nothing was sent, and recording the
+// endpoint it was checked by, for a target with no usable address the
+// nameserver's own address on the default port, would skip the attempt of
+// another nameserver at that address, never dialed.
+func dnskeyTried(ep endpointDial, eff core.Transport, err error) (cache.AddrXport, bool) {
+	var suspect errEndpointSuspectFamily
+	if errors.As(err, &suspect) || ep.addr == "" {
+		return cache.AddrXport{}, false
 	}
-	return cache.AddrXport{Addr: ep.addr, Port: ep.keyPort, Transport: eff}
+	return cache.AddrXport{Addr: ep.addr, Port: ep.keyPort, Transport: eff}, true
 }
 
 func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
@@ -3323,7 +3563,8 @@ func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 
 // tryServer executes one query attempt for an explicit (server, addr,
 // transport) tuple selected upstream by prioritizeServers. It records the
-// outcome against the server's per-(addr, transport) backoff map.
+// outcome against the per-(addr, port, transport) backoff map of the instance
+// it dialed: the server's own, or a redirect target's (endpointDial.server).
 //
 // It returns the transport it attempted and the endpoint it tried, whose
 // address and port its backoff and RTT went under (the zero endpointDial
@@ -3333,20 +3574,26 @@ func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 // endpoint tried. zone is the zone the query is for (nil when none is
 // known): an endpoint lame for it is not chosen (endpointFor).
 //
-// class is whose query it is, for the per-class answer counters.
-func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass) (*dns.Msg, time.Duration, core.Transport, endpointDial, error) {
+// class is whose query it is, for the per-class answer counters. sel is
+// what selection decided for the attempt (attemptSelection).
+func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass, sel attemptSelection) (*dns.Msg, time.Duration, core.Transport, endpointDial, error) {
 	eff := t
+	dnskey := sel.dnskey
 	if dnskeyBypass {
 		// DNSKEY transport policy bypasses this server's probabilistic
-		// transport weights and picks the best advertised transport instead.
-		// Returns 0 only under force_encrypted when the server has no
-		// encrypted transport; in that case we must fail rather than fall
-		// back to cleartext.
-		pref := imr.preferredDNSKEYTransport(server)
-		if pref == 0 {
-			return nil, 0, t, endpointDial{}, fmt.Errorf("dnssec.dnskey-query-transport=force_encrypted but server %s advertises no encrypted transport", server.Name)
+		// transport weights and picks the best advertised transport instead,
+		// with its endpoint, as the query loop resolved them
+		// (resolveDNSKEYAttempt). None only under force_encrypted when the
+		// server has no encrypted transport; in that case we must fail
+		// rather than fall back to cleartext.
+		if dnskey == nil {
+			a := imr.resolveDNSKEYAttempt(ctx, server, zone, addr)
+			dnskey = &a
 		}
-		eff = pref
+		if dnskey.transport == 0 {
+			return nil, 0, t, endpointDial{}, dnskey.err
+		}
+		eff = dnskey.transport
 	}
 
 	select {
@@ -3363,16 +3610,46 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	// gave it, or an address of the target the signal sent the transport to
 	// (oots_endpoints.go). At the server's own address backoff, RTT and the
 	// family tracker stay on the bare IP, as they always were; at a target
-	// they are kept under the target's address and the endpoint's port.
-	ep, eerr := imr.endpointFor(ctx, server, zone, addr, eff)
+	// they are kept under the target's address and the endpoint's port, on
+	// the target's own instance (ep.server), as are the attempt's counters.
+	// The server keeps the count of answers its targets carried for it.
+	// Under the DNSKEY bypass the endpoint is the one the attempt was
+	// resolved with.
+	var ep endpointDial
+	var eerr error
+	if dnskeyBypass {
+		ep, eerr = dnskey.ep, dnskey.err
+	} else {
+		ep, eerr = imr.endpointFor(ctx, server, zone, addr, eff)
+	}
 	// The endpoint chosen now is checked again: selection checked the one
 	// an attempt would have dialed then, and an attempt earlier in the pass
 	// may since have made it, or the fallback it gives way to, lame or
 	// backed off, as a target that refused does for the next tuple sent to
-	// it. Not under the DNSKEY bypass, which dials the preferred transport
-	// whatever selection said.
-	if eerr == nil && !dnskeyBypass && !endpointUsable(server, zone, ep.addr, ep.keyPort, eff) {
-		eerr = errEndpointUnavailable{server: server.Name, target: cache.JoinDialAddr(ep.addr, ep.port), transport: eff}
+	// it. So is its address family: one held suspect is dialed only as the
+	// probe selection reserved for it, whether the family turned suspect
+	// since, or the endpoint moved to another family, as a udp or tcp
+	// endpoint at a target whose address has gone out of use gives way to
+	// the server's own address. And an extra pass does not dial an endpoint
+	// the pass before tried: a signal that changed since the selection may
+	// send the tuple there. The DNSKEY bypass dials the preferred transport
+	// whatever selection said, so neither the family selection decided on
+	// nor what the pass before tried holds it, except that it dials a
+	// target's address of a suspect family only for a probe selection
+	// reserved: such an address is picked only when no other is left
+	// (chooseEndpointAddr). Its endpoint is checked all the same: nothing
+	// else has, and it is not dialed while backed off or lame for the zone,
+	// a udp or tcp fallback to port 53 included.
+	if eerr == nil {
+		target := cache.JoinDialAddr(ep.addr, ep.port)
+		switch {
+		case (!dnskeyBypass || ep.redirect) && imr.suspectWithoutProbe(sel, ep.addr):
+			eerr = errEndpointSuspectFamily{server: server.Name, target: target, transport: eff}
+		case !endpointUsable(ep.server, zone, ep.addr, ep.keyPort, eff):
+			eerr = errEndpointUnavailable{server: server.Name, target: target, transport: eff}
+		case !dnskeyBypass && sel.tried[passTuple{ep.server, ep.addr, ep.keyPort, eff}]:
+			eerr = errEndpointTried{server: server.Name, target: target, transport: eff}
+		}
 	}
 	if eerr != nil {
 		if Globals.Debug {
@@ -3380,7 +3657,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 		}
 		return nil, 0, eff, endpointDial{}, eerr
 	}
-	server.IncrementTransportCounter(eff)
+	ep.server.IncrementTransportCounter(eff)
 	dial := ep.dialAddr()
 	if Globals.Debug {
 		lgDns.Debug("*** tryServer: calling c.Exchange",
@@ -3390,6 +3667,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 			"addr", addr,
 			"dial", dial,
 			"redirect", ep.redirect,
+			"target", redirectTargetName(ep),
 			"qname", qname,
 			"qtype", dns.TypeToString[qtype])
 	}
@@ -3434,7 +3712,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	// A TC=1 truncation upgrade is a size-driven fact about this exchange (not a
 	// failure); record it regardless of the subsequent TCP outcome.
 	if xres.Truncated {
-		server.IncrementTruncated()
+		ep.server.IncrementTruncated()
 	}
 	// An abandoned exchange is not evidence about this server (#435). Since a
 	// cancel now interrupts a query already on the wire, recording one would
@@ -3459,17 +3737,17 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 			"dial", dial,
 			"transport", core.TransportToString[eff],
 			"error", err)
-		server.RecordEndpointAddrFailure(ep.addr, ep.keyPort, eff, err)
+		ep.server.RecordEndpointAddrFailure(ep.addr, ep.keyPort, eff, err)
 		// Stats: key failed on the ACTUAL wire transport (symmetric with used on
 		// success). A TC=1-then-TCP failure is thus attributed to Do53TCP, and
 		// failed[Do53] stays 0 — preserving "failed[Do53]=0 => size upgrade".
 		// (The backoff and RTT stay on eff: they are keyed by the attempted
 		// address, port and transport, a separate concern from usage stats.)
-		server.IncrementFailedCounter(xres.WireTransport)
+		ep.server.IncrementFailedCounter(xres.WireTransport)
 		// Penalty RTT: record the full elapsed time so a slow-failing path
 		// naturally sorts to the bottom of prioritizeServers even after the
 		// backoff lifts.
-		server.RecordEndpointAddrRTT(ep.addr, ep.keyPort, eff, rtt)
+		ep.server.RecordEndpointAddrRTT(ep.addr, ep.keyPort, eff, rtt)
 		return nil, rtt, eff, ep, err
 	}
 	if r != nil {
@@ -3482,13 +3760,16 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 				"addr", addr,
 				"transport", core.TransportToString[eff],
 				"error", qerr)
-			server.RecordEndpointAddrFailure(ep.addr, ep.keyPort, eff, qerr)
-			server.IncrementFailedCounter(xres.WireTransport)
+			ep.server.RecordEndpointAddrFailure(ep.addr, ep.keyPort, eff, qerr)
+			ep.server.IncrementFailedCounter(xres.WireTransport)
 			return nil, rtt, eff, ep, qerr
 		}
-		server.RecordEndpointAddrSuccess(ep.addr, ep.keyPort, eff)
-		server.CountAnswer(xres.WireTransport, class, ep.redirect)
-		server.RecordEndpointAddrRTT(ep.addr, ep.keyPort, eff, rtt)
+		ep.server.RecordEndpointAddrSuccess(ep.addr, ep.keyPort, eff)
+		ep.server.IncrementUsedCounter(xres.WireTransport, class)
+		if ep.redirect {
+			server.IncrementRedirectedCounter(xres.WireTransport)
+		}
+		ep.server.RecordEndpointAddrRTT(ep.addr, ep.keyPort, eff, rtt)
 	} else if Globals.Debug {
 		lgDns.Debug("*** tryServer: query returned no response",
 			"qname", qname,
@@ -3505,6 +3786,12 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 // them is not applied. Returns true if at least one transport entry was
 // applied.
 func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string) bool {
+	return imr.installTransportString(server, s, notConfigured)
+}
+
+// installTransportString is applyTransportSignalToServer under guard
+// (installTransportMap).
+func (imr *Imr) installTransportString(server *cache.AuthServer, s string, guard signalGuard) bool {
 	if server == nil || s == "" {
 		return false
 	}
@@ -3513,7 +3800,7 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 		lgDns.Debug("applyTransportSignalToServer: invalid transport string for :", "name", server.Name, "s", s, "q", err)
 		return false
 	}
-	return applyTransportMapToServer(server, kvMap)
+	return installTransportMap(server, kvMap, nil, nil, "", nil, guard)
 }
 
 // applyTransportMapToServer installs a decoded weight map on server, keeping
@@ -3549,15 +3836,17 @@ func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8)
 // oots rule assigned. A nil or empty ports map clears any port the previous
 // signal had stored: the new signal replaces the whole set.
 func applyTransportMapWithPorts(server *cache.AuthServer, kvMap map[string]uint8, ports map[core.Transport]uint16) bool {
-	return installTransportMap(server, kvMap, ports, nil, "", nil)
+	return installTransportMap(server, kvMap, ports, nil, "", nil, notConfigured)
 }
 
 // installTransportMap is applyTransportMapWithPorts for a signal read from an
 // SVCB RRset, with the targets its validated records assigned, where it
 // arrived and the validation state of its path, which are stored with it
-// (ReceivedSignal.Targets, ReceivedSignal.Via, ReceivedSignal.Path).
+// (ReceivedSignal.Targets, ReceivedSignal.Via, ReceivedSignal.Path). It
+// installs only where guard, called under the server's lock with the signal
+// the server holds, allows it, and reports whether it did.
 func installTransportMap(server *cache.AuthServer, kvMap map[string]uint8, ports map[core.Transport]uint16, targets map[core.Transport]string,
-	via string, path []cache.SignalHop) bool {
+	via string, path []cache.SignalHop, guard signalGuard) bool {
 	if server == nil || kvMap == nil {
 		return false
 	}
@@ -3579,8 +3868,7 @@ func installTransportMap(server *cache.AuthServer, kvMap map[string]uint8, ports
 	if len(weights) == 0 {
 		return false
 	}
-	server.SetTransportSignal(transports, alpnOrder, weights, received)
-	return true
+	return server.SetTransportSignalIf(guard, transports, alpnOrder, weights, received)
 }
 
 // signalSelection maps a signal's weights, the do53 shorthand expanded, to
@@ -3629,14 +3917,14 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) bool {
 // do53 is the shorthand for udp and tcp, as in oots. It reports whether a
 // signal was applied.
 func applyAlpnSignalWithPorts(server *cache.AuthServer, tokens []string, ports map[core.Transport]uint16) bool {
-	return installAlpnSignal(server, tokens, ports, nil, "", nil)
+	return installAlpnSignal(server, tokens, ports, nil, "", nil, notConfigured)
 }
 
 // installAlpnSignal is applyAlpnSignalWithPorts with the targets, where the
 // signal arrived and the validation state of its path, as installTransportMap
-// stores them.
+// stores them, under guard as installTransportMap installs.
 func installAlpnSignal(server *cache.AuthServer, tokens []string, ports map[core.Transport]uint16, targets map[core.Transport]string,
-	via string, path []cache.SignalHop) bool {
+	via string, path []cache.SignalHop, guard signalGuard) bool {
 	if server == nil {
 		return false
 	}
@@ -3671,8 +3959,7 @@ func installAlpnSignal(server *cache.AuthServer, tokens []string, ports map[core
 	}
 	received := &cache.ReceivedSignal{Source: "alpn", Weights: maps.Clone(weights), Ports: cache.DialPorts(ports),
 		Targets: targets, Via: via, Path: path}
-	server.SetTransportSignal(transports, order, weights, received)
-	return true
+	return server.SetTransportSignalIf(guard, transports, order, weights, received)
 }
 
 // parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section.
@@ -3748,26 +4035,51 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 }
 
 // applyTransportRRsetWalk is applyTransportRRsetFromAnswer, with walk for how
-// an AliasMode record in rrset is followed (followLookupAlias).
+// an AliasMode record in rrset is followed (followLookupAlias). The signal
+// replaces whatever each server holds, except a stub's configured transports
+// (notConfigured).
 func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *core.RRset, vstate cache.ValidationState, also ...*cache.AuthServer) {
-	if imr.Cache == nil || rrset == nil || len(rrset.RRs) == 0 {
-		return
+	imr.installTransportRRset(walk, qname, rrset, vstate, notConfigured, also...)
+}
+
+// rrsetInstall is what installTransportRRset found the signal RRset to lead
+// to.
+type rrsetInstall struct {
+	// signal reports that the RRset gives a signal: its own records, or the
+	// RRset its alias path ends at. Each server took it, or kept what it held
+	// where the guard said so.
+	signal bool
+	// hop is the lookup of the alias hop the RRset's path stopped at, when
+	// one is in flight: once it ends, the alias may lead to a signal.
+	hop *hopWait
+}
+
+// installTransportRRset installs the transport signal rrset, an answer for
+// qname (_dns.<nameserver>), on that nameserver's servers in the cache's zone
+// server maps and on those of also, under guard (installSVCBSignal). With
+// transport signals turned off it installs nothing: the RRset is an answer
+// like any other, cached and returned, but no signal.
+func (imr *Imr) installTransportRRset(walk aliasWalk, qname string, rrset *core.RRset, vstate cache.ValidationState, guard signalGuard, also ...*cache.AuthServer) rrsetInstall {
+	if imr.Cache == nil || rrset == nil || len(rrset.RRs) == 0 || imr.Options[ImrOptUseTransportSignals] == "false" {
+		return rrsetInstall{}
 	}
 	owner := dns.Fqdn(qname)
 	if !strings.HasPrefix(core.CanonicalizeName(owner), oobTransportPrefix) {
-		return
+		return rrsetInstall{}
 	}
 	// Sliced, not TrimPrefix'd: see parseOwnerName.
 	base := owner[len(oobTransportPrefix):]
 	if base == "" {
-		return
+		return rrsetInstall{}
 	}
 	targetMode := cache.ConnModeOpportunistic
 	if vstate == cache.ValidationStateSecure {
 		targetMode = cache.ConnModeValidated
 	}
+	var found rrsetInstall
 	set := &svcbSignalSet{}
-	if rrset.RRtype == dns.TypeSVCB {
+	switch rrset.RRtype {
+	case dns.TypeSVCB:
 		for _, rr := range rrset.RRs {
 			if svcb, ok := rr.(*dns.SVCB); ok {
 				set.add(svcb)
@@ -3775,6 +4087,12 @@ func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *cor
 		}
 		set.decideLookupPath(vstate)
 		imr.followLookupAlias(set, walk)
+		found.signal = !set.alias || (set.final != nil && !set.final.alias)
+		found.hop = set.hop
+	case core.TypeTSYNC:
+		found.signal = true
+	default:
+		return rrsetInstall{}
 	}
 	// The shared instance of a nameserver is listed under every zone it
 	// serves: it takes the signal once, and its ignored redirects count once.
@@ -3808,20 +4126,18 @@ func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *cor
 					}
 				}
 			}
-			applied, _ = imr.installSVCBSignal(server, set)
+			applied, _ = imr.installSVCBSignal(server, set, guard)
 		case core.TypeTSYNC:
 			for _, rr := range rrset.RRs {
 				if priv, ok := rr.(*dns.PrivateRR); ok {
 					if ts, ok := priv.Data.(*core.TSYNC); ok && ts != nil && ts.Transports != "" {
 						val := strings.TrimPrefix(ts.Transports, "transport=")
-						if imr.applyTransportSignalToServer(server, val) {
+						if imr.installTransportString(server, val, guard) {
 							applied = true
 						}
 					}
 				}
 			}
-		default:
-			continue
 		}
 		if applied {
 			// server is the shared instance, updated in place. Storing sm
@@ -3829,6 +4145,39 @@ func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *cor
 			// had just replaced.
 			server.PromoteConnMode(targetMode)
 		}
+	}
+	return found
+}
+
+// signalGuard says, under a server's lock, whether a signal may replace the
+// one the server holds (cache.AuthServer.SetTransportSignalIf).
+type signalGuard func(cache.HeldSignal) bool
+
+// notConfigured is the rule every received signal is installed under: it
+// never replaces a stub's configured transports. A stub's private instance
+// of a nameserver is listed in the zone server maps like any other, and a
+// signal for that name reaches every instance listed.
+func notConfigured(held cache.HeldSignal) bool {
+	return !held.Configured()
+}
+
+// stillNeedsSignal is the rule a cached signal is replayed under
+// (applyCachedTransportSignal): only onto a server that, when the install
+// takes its lock, has signalled nothing, whatever weights it holds (a stub
+// configured with no transports holds default ones), or holds a signal whose
+// path was not decided, one an Additional section could not validate and
+// that waits for the verifying lookup, whose answer is what the cache holds.
+// A signal installed after the replay read the cache stays, and so does a
+// stub's configured one.
+func stillNeedsSignal(held cache.HeldSignal) bool {
+	switch {
+	case held.Configured():
+		return false
+	case held.Received == nil || len(held.Weights) == 0:
+		return true
+	default:
+		return len(held.Received.Path) > 0 &&
+			cache.SignalPathState(held.Received.Path) == cache.SignalStateUnknown
 	}
 }
 

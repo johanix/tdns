@@ -53,7 +53,7 @@ func epLameZoneImr(t *testing.T) (*Imr, *cache.AuthServer, *cache.Zone, map[stri
 func redirectTo(server *cache.AuthServer, weights map[string]uint8, t core.Transport, port uint16) {
 	installTransportMap(server, weights, map[core.Transport]uint16{t: port},
 		map[core.Transport]string{t: epLameTarget}, cache.SignalViaLookup,
-		[]cache.SignalHop{{Owner: epLameOwner, State: cache.ValidationStateSecure}})
+		[]cache.SignalHop{{Owner: epLameOwner, State: cache.ValidationStateSecure}}, notConfigured)
 }
 
 func refusedReply(qname string, qtype uint16) *dns.Msg {
@@ -143,8 +143,8 @@ func TestALameSignalledUDPPortFallsBackToPort53(t *testing.T) {
 	ctx := context.Background()
 
 	zone.RecordZoneEndpointFailureForRcode(epLameNSAddr, 5353, core.TransportDo53, dns.RcodeRefused, false)
-	if a, p, ok := imr.attemptKey(ctx, server, zone, epLameNSAddr, core.TransportDo53, false); !ok || a != epLameNSAddr || p != 0 {
-		t.Errorf("the attempt goes to %s port %d (%v), want %s on port 53", a, p, ok, epLameNSAddr)
+	if d, ok := imr.attemptKey(ctx, server, zone, epLameNSAddr, core.TransportDo53, false); !ok || d.addr != epLameNSAddr || d.keyPort != 0 {
+		t.Errorf("the attempt goes to %s port %d (%v), want %s on port 53", d.addr, d.keyPort, ok, epLameNSAddr)
 	}
 	if !hasTuple(imr, serverMap, epLameNSAddr, core.TransportDo53) {
 		t.Error("selection does not offer port 53 while 5353 is lame")
@@ -180,8 +180,8 @@ func TestAnotherPassAfterAFailedSignalledPortTriesPort53(t *testing.T) {
 		t.Fatal("no further pass, although port 53 was never tried")
 	}
 	for _, tup := range sel.tuples {
-		if a, p, _ := imr.attemptKey(context.Background(), tup.Server, sel.zone, tup.Addr, tup.Transport, false); tried[passTuple{tup.Server, a, p, tup.Transport}] {
-			t.Errorf("the next pass holds a tried endpoint: %s port %d", a, p)
+		if d, _ := imr.attemptKey(context.Background(), tup.Server, sel.zone, tup.Addr, tup.Transport, false); tried[passTuple{d.server, d.addr, d.keyPort, tup.Transport}] {
+			t.Errorf("the next pass holds a tried endpoint: %s port %d", d.addr, d.keyPort)
 		}
 	}
 }
@@ -217,8 +217,8 @@ func TestAnExplicitDefaultPortIsTheDefaultEndpoint(t *testing.T) {
 	applyTransportMapWithPorts(server, map[string]uint8{"udp": 100, "dot": 50},
 		map[core.Transport]uint16{core.TransportDo53: 53, core.TransportDoT: 853})
 	for _, tr := range []core.Transport{core.TransportDo53, core.TransportDoT} {
-		if a, p, ok := imr.attemptKey(ctx, server, nil, epLameNSAddr, tr, false); !ok || a != epLameNSAddr || p != 0 {
-			t.Errorf("%s: kept under %s port %d (%v), want port 0", core.TransportToString[tr], a, p, ok)
+		if d, ok := imr.attemptKey(ctx, server, nil, epLameNSAddr, tr, false); !ok || d.addr != epLameNSAddr || d.keyPort != 0 {
+			t.Errorf("%s: kept under %s port %d (%v), want port 0", core.TransportToString[tr], d.addr, d.keyPort, ok)
 		}
 	}
 	server.RecordEndpointAddrFailure(epLameNSAddr, 0, core.TransportDoT, nil)
@@ -227,12 +227,12 @@ func TestAnExplicitDefaultPortIsTheDefaultEndpoint(t *testing.T) {
 	}
 
 	imr.Cache.DNSClient[core.TransportDoT] = core.NewDNSClient(core.TransportDoT, "8853", nil)
-	if _, p, _ := imr.attemptKey(ctx, server, nil, epLameNSAddr, core.TransportDoT, false); p != 853 {
-		t.Errorf("a client on 8853: port 853 kept under %d, want 853", p)
+	if d, _ := imr.attemptKey(ctx, server, nil, epLameNSAddr, core.TransportDoT, false); d.keyPort != 853 {
+		t.Errorf("a client on 8853: port 853 kept under %d, want 853", d.keyPort)
 	}
 	applyTransportMapWithPorts(server, map[string]uint8{"dot": 50}, map[core.Transport]uint16{core.TransportDoT: 8853})
-	if _, p, _ := imr.attemptKey(ctx, server, nil, epLameNSAddr, core.TransportDoT, false); p != 0 {
-		t.Errorf("a client on 8853: port 8853 kept under %d, want 0", p)
+	if d, _ := imr.attemptKey(ctx, server, nil, epLameNSAddr, core.TransportDoT, false); d.keyPort != 0 {
+		t.Errorf("a client on 8853: port 8853 kept under %d, want 0", d.keyPort)
 	}
 }
 
@@ -292,19 +292,20 @@ func TestSelectionStartsTheTargetLookupBehindABackedOffDefault(t *testing.T) {
 	}
 }
 
-// A DNSKEY bypass attempt is recorded under the endpoint tryServer dialed,
-// not the key it was checked against beforehand: the two differ when a
-// target's addresses come in between, and recording the first would skip a
-// later attempt at an endpoint never dialed. With no endpoint chosen, the
-// key checked is recorded.
+// A DNSKEY bypass attempt is recorded under the endpoint tryServer dialed.
+// One that dialed none is not recorded, whatever stopped it: nothing was
+// sent, and recording the endpoint it was checked by would skip another
+// nameserver's attempt at that endpoint (CodeRabbit on #1118, on #1147).
 func TestDNSKEYTriedIsTheEndpointDialed(t *testing.T) {
-	pre := cache.AddrXport{Addr: epLameNSAddr, Port: 0, Transport: core.TransportDoT}
 	dialed := endpointDial{addr: "192.0.2.53", port: 1234, redirect: true, keyPort: 1234}
-	if got := dnskeyTried(pre, dialed, core.TransportDoT); got != (cache.AddrXport{Addr: "192.0.2.53", Port: 1234, Transport: core.TransportDoT}) {
-		t.Errorf("an attempt that dialed the target is recorded as %+v", got)
+	if got, ok := dnskeyTried(dialed, core.TransportDoT, errors.New("i/o timeout")); !ok || got != (cache.AddrXport{Addr: "192.0.2.53", Port: 1234, Transport: core.TransportDoT}) {
+		t.Errorf("an attempt that dialed the target is recorded as %+v %v", got, ok)
 	}
-	if got := dnskeyTried(pre, endpointDial{}, core.TransportDoT); got != pre {
-		t.Errorf("an attempt with no endpoint is recorded as %+v, want %+v", got, pre)
+	if got, ok := dnskeyTried(endpointDial{}, core.TransportDoT, errEndpointUnavailable{}); ok {
+		t.Errorf("an attempt with no endpoint is recorded as %+v", got)
+	}
+	if got, ok := dnskeyTried(endpointDial{}, core.TransportDoT, errEndpointSuspectFamily{}); ok {
+		t.Errorf("an attempt refused for its suspect family is recorded as %+v", got)
 	}
 }
 
@@ -330,25 +331,26 @@ func TestTryServerRechecksTheFinalEndpoint(t *testing.T) {
 	server.RecordEndpointAddrFailure(epLameNSAddr, 0, core.TransportDo53, errors.New("i/o timeout"))
 	ctx := context.Background()
 
-	_, _, _, _, err := imr.tryServer(ctx, server, zone, epLameNSAddr, core.TransportDo53, q, "www."+epLameZone, dns.TypeA, false, cache.ClassNone)
+	_, _, _, _, err := imr.tryServer(ctx, server, zone, epLameNSAddr, core.TransportDo53, q, "www."+epLameZone, dns.TypeA, false, cache.ClassNone, attemptSelection{})
 	if _, ok := err.(errEndpointUnavailable); !ok {
 		t.Errorf("port 53 backed off: err %v, want errEndpointUnavailable", err)
 	}
 	if n := len(do53.Calls()); n != 0 {
 		t.Fatalf("%d dial(s) to an endpoint that is backed off", n)
 	}
-	_, _, _, ep, err := imr.tryServer(ctx, server, zone, "192.0.2.2", core.TransportDo53, q, "www."+epLameZone, dns.TypeA, false, cache.ClassNone)
+	_, _, _, ep, err := imr.tryServer(ctx, server, zone, "192.0.2.2", core.TransportDo53, q, "www."+epLameZone, dns.TypeA, false, cache.ClassNone, attemptSelection{})
 	if err != nil || ep.addr != "192.0.2.2" || ep.port != 0 || lastDial(do53) != "192.0.2.2" {
 		t.Errorf("port 53 usable: %+v %v, dialed %q, want 192.0.2.2 on port 53", ep, err, lastDial(do53))
 	}
 }
 
-// A DNSKEY bypass attempt is recorded under the transport tryServer dialed,
-// which reads the preference again: a change between the query loop's reading
-// and tryServer's must not leave the attempt recorded under a transport never
-// dialed, so that the next tuple, which reads the new preference, dials the
-// same endpoint again.
-func TestDNSKEYAttemptIsRecordedUnderTheTransportDialed(t *testing.T) {
+// A DNSKEY bypass attempt dials the transport and endpoint it was checked
+// by: they are resolved once. With the preference flipping between DoT and
+// DoQ from one reading to the next, as a signal update can make it, each
+// endpoint is dialed once. Resolving them again in tryServer let an attempt
+// checked against DoT dial DoQ, and the next do the same, so DoQ was dialed
+// again and again.
+func TestDNSKEYAttemptDialsTheEndpointItWasCheckedBy(t *testing.T) {
 	const ns = "ns.dnskey.example."
 	const addr = "192.0.2.53"
 	imr := newTestImr(t)
@@ -370,7 +372,7 @@ func TestDNSKEYAttemptIsRecordedUnderTheTransportDialed(t *testing.T) {
 	saved := preferredDNSKEYTransportHook
 	preferredDNSKEYTransportHook = func(*Imr, *cache.AuthServer) core.Transport {
 		reads++
-		if reads == 1 {
+		if reads%2 == 1 {
 			return core.TransportDoT
 		}
 		return core.TransportDoQ
@@ -379,10 +381,9 @@ func TestDNSKEYAttemptIsRecordedUnderTheTransportDialed(t *testing.T) {
 
 	_, _, _, _, _ = imr.IterativeDNSQuery(context.Background(), "dnskey.example.", dns.TypeDNSKEY, serverMap, true, edns0.PrivacyNone)
 
-	if n := len(clients[core.TransportDoQ].Calls()); n != 1 {
-		t.Errorf("DoQ dialed %d times, want 1: the attempt was recorded under a transport never dialed", n)
-	}
-	if n := len(clients[core.TransportDoT].Calls()); n != 0 {
-		t.Errorf("DoT dialed %d times, want 0", n)
+	for _, tr := range []core.Transport{core.TransportDoT, core.TransportDoQ} {
+		if n := len(clients[tr].Calls()); n != 1 {
+			t.Errorf("%s dialed %d times, want 1", core.TransportToString[tr], n)
+		}
 	}
 }

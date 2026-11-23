@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -111,7 +112,7 @@ func (kdb *KeyDB) DeleteZoneRefreshState(zone string) error {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
-	if _, err := kdb.DB.Exec(`DELETE FROM ZoneRefreshState WHERE zone=?`, dns.Fqdn(zone)); err != nil {
+	if _, err := kdb.DB.Exec(`DELETE FROM ZoneRefreshState WHERE zone=?`, core.CanonicalizeName(dns.Fqdn(zone))); err != nil {
 		return fmt.Errorf("DeleteZoneRefreshState: %v", err)
 	}
 	return nil

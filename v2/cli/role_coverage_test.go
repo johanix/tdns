@@ -113,15 +113,16 @@ func TestNoHardcodedAuthRoleRemains(t *testing.T) {
 			if !ok || lit.Kind != token.STRING {
 				return true
 			}
-			// Roles that have a per-instance tree factory. "agent", "scanner"
-			// and "imr" are deliberately absent: those daemons have no
-			// instance factory yet, so a literal there is still correct by
-			// construction. Add them here when they get one.
-			if lit.Value != `"auth"` {
+			// Roles that have a per-instance tree factory (auth: NewAuthTree,
+			// agent: NewAgentTree). "scanner" and "imr" are deliberately
+			// absent: those daemons have no instance factory yet, so a literal
+			// there is still correct by construction. Add them here when they
+			// get one.
+			if lit.Value != `"auth"` && lit.Value != `"agent"` {
 				return true
 			}
 			pos := fset.Position(call.Pos())
-			t.Errorf(`%s:%d hardcodes the "auth" role.
+			t.Errorf(`%s:%d hardcodes the `+lit.Value+` role.
 
 Use GetApiClientForCmd(cmd, ...) instead. A Run closure already has its
 *cobra.Command, and the target is read off the tree -- so a command reached

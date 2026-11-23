@@ -12,6 +12,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -387,6 +388,41 @@ func TestWalkSyncPlanContinuesPastAFailure(t *testing.T) {
 	// it -- an operator seeing only "sent via API" would not know UPDATE broke.
 	if !strings.Contains(msg, "sent via API") || !strings.Contains(msg, "UPDATE failed") {
 		t.Errorf("message %q should carry both the success and the earlier failure", msg)
+	}
+}
+
+// An analysis that could not read all of the parent's delegation ends the
+// walk. It is not a transport failing: what the parent lacks is not known, and
+// the next transport would know no more. A NOTIFY sent after it counted as
+// forwarded, and the proxy sync then scheduled no compare to look again.
+// Failures before it are still named.
+func TestWalkSyncPlanStopsAtAnIncompleteRead(t *testing.T) {
+	zd := &ZoneData{ZoneName: "child.example."}
+	plan := &ParentSyncPlan{
+		Parent:     "example.",
+		Candidates: []SyncCandidate{{Scheme: "API"}, {Scheme: "UPDATE"}, {Scheme: "NOTIFY"}},
+	}
+
+	var tried []string
+	_, err := zd.walkSyncPlan(context.Background(), plan, func(c SyncCandidate) (string, error) {
+		tried = append(tried, c.Scheme)
+		switch c.Scheme {
+		case "API":
+			return "", fmt.Errorf("API unreachable")
+		case "UPDATE":
+			return "", fmt.Errorf("ProxyUpdateParent: delta: %w: %v",
+				errDelegationNotAllRead, []string{"ns1.child.example. A"})
+		}
+		return "sent via NOTIFY", nil
+	})
+	if strings.Join(tried, ",") != "API,UPDATE" {
+		t.Errorf("tried %v, want API then UPDATE and no NOTIFY", tried)
+	}
+	if !errors.Is(err, errDelegationNotAllRead) {
+		t.Fatalf("err = %v, want errDelegationNotAllRead so the caller looks again", err)
+	}
+	if !strings.Contains(err.Error(), "API failed") {
+		t.Errorf("error %q should still name the API failure before it", err)
 	}
 }
 
