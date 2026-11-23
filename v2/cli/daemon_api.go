@@ -29,6 +29,13 @@ type DaemonApi struct {
 	Addresses []string
 	// ApiKey is apiserver.apikey.
 	ApiKey string
+	// Socket is apiserver.socket, the daemon's local admin socket, or "".
+	Socket string
+	// CertFile is apiserver.certfile: the certificate the daemon presents,
+	// whose pin a TCP entry records.
+	CertFile string
+	// AccessFile is apiserver.access-file, or "".
+	AccessFile string
 	// UseTLS is apiserver.usetls, which the daemon defaults to true when the
 	// key is absent (v2/parseconfig.go), so absent must read as true here too.
 	UseTLS bool
@@ -81,11 +88,24 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 	}
 
 	out.Addresses = v.GetStringSlice("apiserver.addresses")
-	if len(out.Addresses) == 0 {
-		return fail(fmt.Errorf("%s: apiserver.addresses is not set, so this daemon has no management API to address", abs))
+	out.Socket = v.GetString("apiserver.socket")
+	out.CertFile = v.GetString("apiserver.certfile")
+	out.AccessFile = v.GetString("apiserver.access-file")
+	if out.Socket != "" {
+		// The daemon serves no socket on a path it refuses, so there is
+		// nothing there to address.
+		if err := tdns.CheckApiSocketPath(out.Socket); err != nil {
+			out.Warnings = append(out.Warnings, fmt.Sprintf(
+				"%v: the daemon does not serve it, so it is not used here", err))
+			out.Socket = ""
+		}
 	}
+	if len(out.Addresses) == 0 && out.Socket == "" {
+		return fail(fmt.Errorf("%s: neither apiserver.addresses nor apiserver.socket is set, so this daemon has no management API to address", abs))
+	}
+	// The key is what a TCP entry sends; a socket entry sends none.
 	out.ApiKey = v.GetString("apiserver.apikey")
-	if out.ApiKey == "" {
+	if out.ApiKey == "" && out.Socket == "" {
 		return fail(fmt.Errorf("%s: apiserver.apikey is not set", abs))
 	}
 	out.UseTLS = true

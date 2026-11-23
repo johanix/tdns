@@ -177,17 +177,36 @@ func detectLayout(block []string) itemLayout {
 
 // renderEntry writes e as one "- key: value" list item in the given layout.
 func renderEntry(e ApiDetails, lay itemLayout) string {
-	type kv struct{ k, v string }
-	kvs := []kv{{"name", e.Name}}
-	if e.Role != "" {
-		kvs = append(kvs, kv{"role", e.Role})
+	type kv struct {
+		k, v string
+		raw  bool // already YAML (a flow list): written as it stands
 	}
-	kvs = append(kvs, kv{"baseurl", e.BaseURL}, kv{"apikey", e.ApiKey}, kv{"authmethod", e.AuthMethod})
+	kvs := []kv{{k: "name", v: e.Name}}
+	if e.Role != "" {
+		kvs = append(kvs, kv{k: "role", v: e.Role})
+	}
+	kvs = append(kvs, kv{k: "baseurl", v: e.BaseURL})
+	// A socket entry has no key: the daemon authenticates the socket by file
+	// permissions. An empty apikey: line would only invite filling it in.
+	if e.ApiKey != "" {
+		kvs = append(kvs, kv{k: "apikey", v: e.ApiKey})
+	}
+	kvs = append(kvs, kv{k: "authmethod", v: e.AuthMethod})
+	if e.TLSAuth != "" {
+		kvs = append(kvs, kv{k: "tlsauth", v: e.TLSAuth})
+	}
+	if len(e.Pins) > 0 {
+		q := make([]string, len(e.Pins))
+		for i, p := range e.Pins {
+			q[i] = `"` + p + `"` // base64: quoted, so a leading + or / reads as text
+		}
+		kvs = append(kvs, kv{k: "pins", v: "[ " + strings.Join(q, ", ") + " ]", raw: true})
+	}
 	if e.RootCA != "" {
-		kvs = append(kvs, kv{"rootca", e.RootCA})
+		kvs = append(kvs, kv{k: "rootca", v: e.RootCA})
 	}
 	if e.ConfigFile != "" {
-		kvs = append(kvs, kv{"config-file", e.ConfigFile})
+		kvs = append(kvs, kv{k: "config-file", v: e.ConfigFile})
 	}
 
 	var sb strings.Builder
@@ -202,7 +221,11 @@ func renderEntry(e ApiDetails, lay itemLayout) string {
 		if lay.valueCol > 0 && lay.valueCol > len(key) {
 			pad = lay.valueCol - len(key)
 		}
-		sb.WriteString(key + strings.Repeat(" ", pad) + yamlScalar(p.v) + "\n")
+		val := yamlScalar(p.v)
+		if p.raw {
+			val = p.v
+		}
+		sb.WriteString(key + strings.Repeat(" ", pad) + val + "\n")
 	}
 	return sb.String()
 }
@@ -270,18 +293,36 @@ func danglingSymlink(path string) error {
 // stays a link; a link to nothing is refused (see danglingSymlink).
 //
 // The new file belongs to whoever runs this, not necessarily to the old file's
-// owner; the CLI config is the invoking operator's own file.
+// owner; the CLI config is the invoking operator's own file. A file a daemon
+// reads goes through writeFileAtomicLike instead.
 func writeFileAtomic(path string, data []byte) error {
+	return replaceFile(path, data, false, nil)
+}
+
+// writeFileAtomicLike is writeFileAtomic for a file a daemon reads (the access
+// file): the replacement keeps the old file's owner and group, so root editing
+// a file the daemon's user owns does not leave one the daemon cannot read. A
+// new file takes its mode, owner and group from like (the daemon config), or
+// is 0600 and the invoking user's when like is nil.
+func writeFileAtomicLike(path string, data []byte, like os.FileInfo) error {
+	return replaceFile(path, data, true, like)
+}
+
+func replaceFile(path string, data []byte, keepOwner bool, like os.FileInfo) error {
 	if err := danglingSymlink(path); err != nil {
 		return err
 	}
 	mode := os.FileMode(0o600)
 	target := path
+	owner := like
 	if fi, err := os.Stat(path); err == nil {
 		mode = fi.Mode().Perm()
+		owner = fi
 		if real, err := filepath.EvalSymlinks(path); err == nil {
 			target = real
 		}
+	} else if like != nil {
+		mode = like.Mode().Perm()
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".tdns-ncli-*")
 	if err != nil {
@@ -296,8 +337,31 @@ func writeFileAtomic(path string, data []byte) error {
 		tmp.Close()
 		return err
 	}
+	if keepOwner && owner != nil {
+		if err := chownLike(tmp, owner); err != nil {
+			tmp.Close()
+			return fmt.Errorf("%s: giving the new file its owner and group: %w", path, err)
+		}
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), target)
+}
+
+// chownLike gives f the owner and group of like when they differ from f's.
+// Nothing to do where the platform has no owners (fileOwner).
+func chownLike(f *os.File, like os.FileInfo) error {
+	uid, gid, ok := fileOwner(like)
+	if !ok {
+		return nil
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if cu, cg, ok := fileOwner(fi); ok && cu == uid && cg == gid {
+		return nil
+	}
+	return f.Chown(uid, gid)
 }

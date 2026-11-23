@@ -86,6 +86,73 @@ one, say — note that an ordinary include **replaces** the `zones:` list rather
 than adding to it. Use `- {file: ..., merge: true}` to combine them; see
 [Includes](configuration.md#conventions-common-to-all-tdns-applications).
 
+## The local admin socket
+
+```yaml
+apiserver:
+   socket:     /var/run/tdns/tdns-auth.sock
+```
+
+`apiserver.socket` serves the management API on a unix socket as well, with no
+TLS and no API key. Whoever can open the socket is admin, so file permissions
+are the authentication: the daemon creates the socket with mode 0600, creates a
+missing directory with mode 0700, and refuses to serve it from a directory that
+group or others can enter (or that is a symlink). The socket is served even
+when `apiserver.addresses` is empty, and a socket the daemon cannot serve is
+reported as a server error (`config status` shows the daemon as degraded)
+rather than stopping it.
+
+`tdns-ncli config add` writes a socket entry (`baseurl:
+unix:///var/run/tdns/tdns-auth.sock`, `authmethod: none`) when run as root, so
+the CLI config on the daemon's own host needs no API key.
+
+## Network clients and roles: the access file
+
+```yaml
+apiserver:
+   socket:      /var/run/tdns/tdns-auth.sock
+   access-file: /etc/tdns/tdns-auth-access.yaml
+```
+
+Without `access-file` the TCP management API works as it always has: the API
+key, with full access. With it, the TCP API follows the access file:
+
+```yaml
+keyauth: true            # false: the API key is no longer accepted
+clients:
+   - name: anna
+     pin: "<base64 SHA-256 of the client certificate's public key>"
+     role: read-write    # read-only | read-write
+     comment: "laptop"
+   - name: nightly-report
+     pin: "..."
+     role: read-only
+     disabled: true      # keeps the entry, refuses the client
+```
+
+- A client is a certificate, identified by its pin (the value `tdns-cli cert
+  pin` prints). It presents the certificate on the TLS connection; the daemon
+  asks for one on every TCP API connection.
+- There are three roles, a ladder. **read-only** may do everything that only
+  reports. **read-write** may also operate: zones, reloads, syncs, catalog,
+  the resolver's flush and forwarders, and the key lifecycle as the zone
+  machinery runs it (rollover, roll-key). **admin** may do everything,
+  including reading or changing stored key material, the truststore,
+  credentials and `stop`, and **exists only on the local socket**. An access
+  file entry with `role: admin` is refused.
+- With an access file the API key is **read-write**, not admin, and
+  `keyauth: false` turns it off.
+- Anything the daemon does not know a role for needs admin. The role of every
+  command is in `v2/api_roles.go`.
+- `access-file` requires `socket`, so admin always has a way in. A file that
+  cannot be used at start-up leaves DNS and the socket running and closes the
+  TCP API (503) until it is fixed and reloaded over the socket. It never falls
+  back to the key. A file that does not load at a reload leaves the running
+  policy as it was.
+- `tdns-ncli <daemon> ping` says who the daemon took you for, and `config
+  status` shows the running policy. `config check` validates the file with the
+  daemon's own code.
+
 ## TSIG configuration
 
 TSIG keys may be declared statically in the config file, or added at runtime to

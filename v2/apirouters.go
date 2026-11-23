@@ -5,29 +5,17 @@ package tdns
 
 import (
 	"context"
-	"crypto/subtle"
 	"crypto/tls"
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/mux"
 )
-
-// apiKeyAuthMiddleware returns a middleware that validates the API key using
-// constant-time comparison to prevent timing side-channel attacks.
-func apiKeyAuthMiddleware(expectedKey string) mux.MiddlewareFunc {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			providedKey := r.Header.Get("X-API-Key")
-			if subtle.ConstantTimeCompare([]byte(providedKey), []byte(expectedKey)) != 1 {
-				http.Error(w, "Forbidden", http.StatusForbidden)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}
 
 var lgApi = Logger("api")
 
@@ -63,7 +51,8 @@ func (conf *Config) SetupSimpleAPIRouter(ctx context.Context) (*mux.Router, erro
 	// "/api/v1" subrouter of the router returned here (tdns-mp's
 	// Setup*Routes) or on the root router (RegisterAPIRoute callbacks). On
 	// the subrouter those routes answered without a key.
-	rtr.Use(apiKeyAuthMiddleware(apikey))
+	conf.initApiAccess()
+	rtr.Use(conf.apiAuthMiddleware(apikey))
 	sr := rtr.PathPrefix("/api/v1").Subrouter()
 
 	// Common endpoints
@@ -97,7 +86,8 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	// "/api/v1" subrouter of the router returned here (tdns-mp's
 	// Setup*Routes) or on the root router (RegisterAPIRoute callbacks). On
 	// the subrouter those routes answered without a key.
-	rtr.Use(apiKeyAuthMiddleware(apikey))
+	conf.initApiAccess()
+	rtr.Use(conf.apiAuthMiddleware(apikey))
 	sr := rtr.PathPrefix("/api/v1").Subrouter()
 
 	// Common endpoints
@@ -234,6 +224,100 @@ func xxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 // Sync router setup functions (SetupAgentSyncRouter, SetupCombinerSyncRouter,
 // SetupSignerSyncRouter) have moved to tdns-mp/v2/apirouter_sync.go.
 
+// apiServerTLSConfig is the TLS setup of the TCP management API listeners
+// (the certificate itself comes from certfile/keyfile). A client certificate
+// is asked for, never required: the middleware decides, so key-only clients
+// keep working while the API key is accepted. With an access file the
+// listener is TLS 1.3 only, as the design says.
+//
+// MinVersion is fixed when the listener starts, and a reload can add an
+// access file later. So every handshake also asks the running policy:
+// while an access file is in force, a client that does not offer TLS 1.3 is
+// handed a TLS 1.3-only config, and the version negotiation turns it away
+// with a protocol_version alert, as a listener started with the access file
+// does. (Returning an error instead would send internal_error, which points
+// an operator the wrong way.) That config needs no certificate: the
+// handshake fails on the version before one is chosen. A client that offers
+// TLS 1.3 gets it, as the server picks the highest version both sides have.
+func apiServerTLSConfig(conf *Config) *tls.Config {
+	c := &tls.Config{ClientAuth: tls.RequestClientCert}
+	if conf.ApiServer.AccessFile != "" {
+		c.MinVersion = tls.VersionTLS13
+	}
+	tls13Only := c.Clone()
+	tls13Only.MinVersion = tls.VersionTLS13
+	c.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+		if st := conf.Internal.ApiAccess.load(); st != nil && st.Enabled &&
+			!slices.Contains(hello.SupportedVersions, tls.VersionTLS13) {
+			// Go's own log line says only "client offered only
+			// unsupported versions"; say why here.
+			from := "unknown"
+			if hello.Conn != nil {
+				from = hello.Conn.RemoteAddr().String()
+			}
+			lgApi.Info("management API: TLS handshake refused: the access file requires TLS 1.3", "client", from)
+			return tls13Only, nil
+		}
+		return nil, nil // the config as it is
+	}
+	return c
+}
+
+// apiListenerSettings are the apiserver: keys APIdispatcher acts on once, when
+// it starts the listeners. A reload cannot change what is listening, so it
+// says when they differ (apiListenerReloadNote).
+type apiListenerSettings struct {
+	Addresses                 []string
+	Socket, CertFile, KeyFile string
+	UseTLS                    bool
+	// TLS13Only: started with an access file, so MinVersion is TLS 1.3
+	// (apiServerTLSConfig), and stays so until a restart.
+	TLS13Only bool
+}
+
+// apiListenersStarted is what the running listeners were started with; nil
+// before APIdispatcher has run. One per process, as the listeners are.
+var apiListenersStarted atomic.Pointer[apiListenerSettings]
+
+func listenerSettingsOf(a ApiServerConf) *apiListenerSettings {
+	return &apiListenerSettings{Addresses: slices.Clone(a.Addresses), Socket: a.Socket,
+		CertFile: a.CertFile, KeyFile: a.KeyFile, UseTLS: a.UseTLS, TLS13Only: a.AccessFile != ""}
+}
+
+// apiListenerReloadNote is the part of a reload's report that names the
+// listener settings the reload changed but could not apply: they take effect
+// at the next restart. "" when none changed.
+func (conf *Config) apiListenerReloadNote() string {
+	was := apiListenersStarted.Load()
+	if was == nil {
+		return ""
+	}
+	now := listenerSettingsOf(conf.ApiServer)
+	var changed []string
+	if !slices.Equal(was.Addresses, now.Addresses) {
+		changed = append(changed, "apiserver.addresses")
+	}
+	if was.Socket != now.Socket {
+		changed = append(changed, "apiserver.socket")
+	}
+	if was.UseTLS != now.UseTLS {
+		changed = append(changed, "apiserver.usetls")
+	}
+	if was.CertFile != now.CertFile || was.KeyFile != now.KeyFile {
+		changed = append(changed, "apiserver.certfile/keyfile")
+	}
+	// The other way round needs no restart: an access file a reload adds is
+	// held to TLS 1.3 at every handshake (apiServerTLSConfig).
+	if was.TLS13Only && !now.TLS13Only {
+		changed = append(changed, "apiserver.access-file (the listeners stay TLS 1.3 only)")
+	}
+	if len(changed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" NOT applied: %s changed, and the management API listeners keep what they started with; restart the daemon to apply it.",
+		strings.Join(changed, ", "))
+}
+
 func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error {
 	addresses := conf.ApiServer.Addresses
 	certFile := conf.ApiServer.CertFile
@@ -241,14 +325,40 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 
 	lgApi.Debug("dispatcher config", "addresses", addresses, "certFile", certFile, "keyFile", keyFile)
 
+	if router == nil {
+		lgApi.Warn("API router is nil, not starting")
+		return nil
+	}
+	apiListenersStarted.Store(listenerSettingsOf(conf.ApiServer))
+
+	// An access file requires TLS on TCP (validateAccessSettings refuses
+	// the config). A caller that did not validate still gets no plaintext
+	// TCP API: the listeners stay off, and the socket below is served.
+	if len(addresses) > 0 && conf.ApiServer.AccessFile != "" && !conf.ApiServer.UseTLS {
+		lgApi.Error("management API: TCP listeners NOT started: apiserver.access-file requires TLS and usetls is false; the local admin socket is still served",
+			"addresses", addresses, "access-file", conf.ApiServer.AccessFile)
+		addresses = nil
+	}
+
+	// The local admin socket first, and independently of the TCP listeners:
+	// it is the way in that nothing else can take away, so a daemon with no
+	// apiserver.addresses still serves it, and a socket that cannot be served
+	// is an error the operator sees, not a reason to stop the daemon.
+	// A socket that stops serving later is such an error too (apiSocketFailed).
+	if sock := conf.ApiServer.Socket; sock != "" {
+		// Cleared before the socket starts, not after: a failure the server
+		// reports once it runs must not be undone by a late clear here.
+		conf.Internal.ServerErrors.clear(ErrCatTransport, ErrSubApiSocket)
+		if err := serveApiSocket(sock, router, done, apiSocketFailed(conf, sock)); err != nil {
+			lgApi.Error("management API: the local socket is not served", "socket", sock, "err", err)
+			conf.Internal.ServerErrors.set(ErrCatTransport, ErrSubApiSocket,
+				fmt.Sprintf("local admin socket %s not served: %v", sock, err))
+		}
+	}
+
 	if len(addresses) == 0 {
 		lgApi.Warn("no addresses to listen on (key 'apiserver.addresses' not set), not starting")
 		// return fmt.Errorf("no addresses to listen on")
-		return nil
-	}
-
-	if router == nil {
-		lgApi.Warn("API router is nil, not starting")
 		return nil
 	}
 
@@ -259,8 +369,13 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	for idx, address := range addresses {
 		idxCopy := idx
 		servers[idx] = &http.Server{
-			Addr:    address,
-			Handler: router,
+			Addr:      address,
+			Handler:   router,
+			TLSConfig: apiServerTLSConfig(conf),
+			// Bounds a client that never finishes its headers (slowloris),
+			// as on the local socket. Not a read or write timeout: large
+			// bodies and slow handlers are legitimate here.
+			ReadHeaderTimeout: 10 * time.Second,
 		}
 
 		go func(srv *http.Server, idx int) {

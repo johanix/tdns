@@ -92,11 +92,42 @@ func ReadApiServers(cfgFile string) ([]ApiDetails, error) {
 	return readApiServers(cfgFile, nil)
 }
 
+// ReadCliClientConf reads the CLI config's client: block from the same merged
+// view the CLI itself loads (the main file, its include: files,
+// cli.localconfig), or returns the zero value when there is none or it cannot
+// be read (the defaults then apply). A client.cert set only in an include or
+// the local config is the one the CLI uses, so it is the one checked.
+func ReadCliClientConf(cfgFile string) CliClientConf {
+	var cc CliClientConf
+	v, _, err := loadCliViper(cfgFile, nil)
+	if err != nil {
+		return cc
+	}
+	_ = v.UnmarshalKey("client", &cc)
+	return cc
+}
+
 // readApiServers is ReadApiServers reading through fs; nil is the real file
 // system. `config add --dry-run` passes the real file system with the edited
 // file laid over it, so the preview loads exactly what the add would write.
 func readApiServers(cfgFile string, fs afero.Fs) ([]ApiDetails, error) {
-	v := viper.New()
+	v, localErr, err := loadCliViper(cfgFile, fs)
+	if err != nil {
+		return nil, err
+	}
+	var entries []ApiDetails
+	if err := v.UnmarshalKey("apiservers", &entries); err != nil {
+		return nil, fmt.Errorf("%s: apiservers: %w", cfgFile, err)
+	}
+	return entries, localErr
+}
+
+// loadCliViper loads the CLI config the way the full load does (initConfig in
+// each binary's root.go): the environment, the main file, its include: files,
+// then cli.localconfig merged on top. localErr is a cli.localconfig that is
+// there but could not be merged; the view without it is still returned.
+func loadCliViper(cfgFile string, fs afero.Fs) (v *viper.Viper, localErr error, err error) {
+	v = viper.New()
 	if fs != nil {
 		v.SetFs(fs)
 	}
@@ -105,10 +136,10 @@ func readApiServers(cfgFile string, fs afero.Fs) ([]ApiDetails, error) {
 	v.AutomaticEnv()
 	v.SetConfigFile(cfgFile)
 	if err := v.ReadInConfig(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := tdns.MergeViperIncludes(v, cfgFile); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// cli.localconfig, merged the same way the full load does (initConfig in
 	// each binary's root.go). Skipping it here would mean an apiservers entry
@@ -122,7 +153,6 @@ func readApiServers(cfgFile string, fs afero.Fs) ([]ApiDetails, error) {
 	// on the way that the operator may not enter, say -- stops the full load,
 	// so it is an error here too. Either error leaves the entries we already
 	// have rather than discarding them.
-	var localErr error
 	if local := v.GetString("cli.localconfig"); local != "" {
 		if _, err := os.Stat(local); err == nil {
 			v.SetConfigFile(local)
@@ -133,11 +163,7 @@ func readApiServers(cfgFile string, fs afero.Fs) ([]ApiDetails, error) {
 			localErr = fmt.Errorf("cli.localconfig %s: %w", local, err)
 		}
 	}
-	var entries []ApiDetails
-	if err := v.UnmarshalKey("apiservers", &entries); err != nil {
-		return nil, fmt.Errorf("%s: apiservers: %w", cfgFile, err)
-	}
-	return entries, localErr
+	return v, localErr, nil
 }
 
 // instanceVerdict is the outcome of checking one apiservers entry for wiring.

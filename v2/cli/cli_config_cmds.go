@@ -9,11 +9,14 @@ package cli
 import (
 	"context"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -95,6 +98,11 @@ name (tdns-auth, tdns-agent, tdns-imr) and is reached as "auth", "agent",
 file (tdns-auth2.yaml -> auth2) unless --name says otherwise, reached as
 "tdns-ncli auth2 ...".
 
+When the daemon has a local admin socket (apiserver.socket) and this runs as
+root, the entry uses it: baseurl unix:///path, no API key, admin access. Run
+as another user, or with --tcp, the entry uses the daemon's TCP address and
+API key instead.
+
 The new entry records the daemon config's path as config-file:, so
 "tdns-ncli auth2 config check" checks the right daemon. The CLI config is
 created, mode 0600, if it does not exist. Adding a daemon that is already
@@ -119,8 +127,13 @@ there changes nothing.`,
 	c.Flags().StringVar(&o.RootCA, "rootca", "", "rootca for the entry (default: none, which the CLI treats as insecure)")
 	c.Flags().StringVar(&o.TargetFile, "file", "", "file to add the entry to, if the apiservers: list is not in the CLI config itself (an include or cli.localconfig)")
 	c.Flags().BoolVar(&o.DryRun, "dry-run", false, "show what would be added; change nothing")
+	c.Flags().BoolVar(&o.TCP, "tcp", false, "use the daemon's TCP address even when it has a local admin socket")
 	return c
 }
+
+// runningAsRoot reports whether this process can open a root-only admin
+// socket. A variable so the tests, which do not run as root, can say yes.
+var runningAsRoot = func() bool { return os.Geteuid() == 0 }
 
 // AddOptions is the input to AddDaemonConfig.
 type AddOptions struct {
@@ -139,6 +152,9 @@ type AddOptions struct {
 	Name string
 	// RootCA is recorded as the entry's rootca, if non-empty.
 	RootCA string
+	// TCP makes the entry use the daemon's TCP address even when the daemon
+	// has a local admin socket (apiserver.socket).
+	TCP bool
 	// DryRun computes everything and writes nothing.
 	DryRun bool
 	// CommandWordTaken reports whether a name is already a command of the CLI.
@@ -188,11 +204,40 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	}
 	res := &AddResult{Notes: append([]string(nil), info.Warnings...)}
 
-	baseURL, err := apiBaseURL(info.Addresses[0], info.UseTLS)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", info.ConfigFile, err)
+	// The daemon's TCP address, if it has one.
+	tcpURL := ""
+	if len(info.Addresses) > 0 {
+		if tcpURL, err = apiBaseURL(info.Addresses[0], info.UseTLS); err != nil {
+			return nil, fmt.Errorf("%s: %w", info.ConfigFile, err)
+		}
 	}
-	if len(info.Addresses) > 1 {
+	// The local admin socket is preferred when there is one: no secret in the
+	// CLI config, and admin access. It is root-only (mode 0600 in a 0700
+	// directory), so anyone else gets the TCP entry, as does --tcp.
+	socketURL := ""
+	if info.Socket != "" {
+		socketURL = "unix://" + info.Socket
+	}
+	useSocket := socketURL != "" && !o.TCP && runningAsRoot()
+	switch {
+	case useSocket:
+	case tcpURL == "":
+		return nil, fmt.Errorf("%s has only a local admin socket (%s), which only root can open; run config add as root", info.ConfigFile, info.Socket)
+	case socketURL != "" && !o.TCP:
+		res.Notes = append(res.Notes, fmt.Sprintf(
+			"the daemon's local admin socket %s is root-only; using its TCP address", info.Socket))
+	}
+	// ReadDaemonApi lets an empty key through when there is a socket, as a
+	// socket entry sends none. A TCP entry without one would fail every
+	// request, so refuse it here.
+	if !useSocket && info.ApiKey == "" {
+		return nil, fmt.Errorf("%s: apiserver.apikey is not set, so a TCP entry would have no key to send; set it, or run config add as root without --tcp to use the local admin socket %s",
+			info.ConfigFile, info.Socket)
+	}
+	baseURL := tcpURL
+	if useSocket {
+		baseURL = socketURL
+	} else if len(info.Addresses) > 1 {
 		res.Notes = append(res.Notes, fmt.Sprintf(
 			"apiserver.addresses lists %d addresses (%s); using the first",
 			len(info.Addresses), strings.Join(info.Addresses, ", ")))
@@ -241,19 +286,44 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return nil, fmt.Errorf("cannot read the CLI config %s: %w", o.CliConfig, err)
 	}
 
-	// Already there? By config file or by API address.
+	// Already there? By config file or by API address, where an address is
+	// either of the daemon's: its TCP address or its socket.
+	sameDaemonAddr := func(u string) bool {
+		if hp := hostPort(u); hp != "" && tcpURL != "" && hp == hostPort(tcpURL) {
+			return true
+		}
+		return socketURL != "" && u == socketURL
+	}
 	for _, e := range existing {
 		// Resolved, so the same daemon config reached through a symlink is
 		// the same daemon, not a second one on the same address. The stored
 		// path stays as written.
 		sameFile := e.ConfigFile != "" && resolvedPath(e.ConfigFile) == resolvedPath(info.ConfigFile)
-		sameAddr := hostPort(e.BaseURL) != "" && hostPort(e.BaseURL) == hostPort(baseURL)
+		sameAddr := sameDaemonAddr(e.BaseURL)
+		if sameAddr && useSocket && e.BaseURL != socketURL {
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"entry %q reaches this daemon over TCP; it also has a local admin socket -- change that entry's baseurl to %s, its authmethod to none and remove its apikey to use it",
+				e.Name, socketURL))
+		}
+		if sameAddr && o.TCP && socketURL != "" && e.BaseURL == socketURL {
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"entry %q reaches this daemon over its local admin socket, so --tcp adds nothing -- remove that entry and run config add --tcp again to use %s instead",
+				e.Name, tcpURL))
+		}
+		// What the daemon config says an entry of e's kind should hold: a
+		// socket entry sends no key, a TCP entry the apikey over its TCP
+		// address. Compared against baseURL instead, a socket entry would
+		// read as a changed key and scheme whenever this add chose TCP.
+		wantKey, wantURL := info.ApiKey, tcpURL
+		if strings.HasPrefix(e.BaseURL, "unix://") {
+			wantKey, wantURL = "", socketURL
+		}
 		switch {
 		case sameFile && sameAddr:
 			// The same daemon, but it may have changed since: a new key, or
 			// usetls turned on or off on the same port. "Already known" would
 			// then leave the CLI with an entry that no longer works.
-			if diff := changedSettings(e, info.ApiKey, baseURL); diff != "" {
+			if diff := changedSettings(e, wantKey, wantURL); diff != "" {
 				return nil, fmt.Errorf("entry %q is this daemon, but its %s no longer match %s; edit that entry by hand (config add does not change an existing entry)",
 					e.Name, diff, info.ConfigFile)
 			}
@@ -268,7 +338,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			res.Notes = append(res.Notes, fmt.Sprintf(
 				"entry %q already uses %s; it has no config-file: -- add \"config-file: %s\" to it if it is this daemon",
 				e.Name, e.BaseURL, info.ConfigFile))
-			if diff := changedSettings(e, info.ApiKey, baseURL); diff != "" {
+			if diff := changedSettings(e, wantKey, wantURL); diff != "" {
 				res.Notes = append(res.Notes, fmt.Sprintf(
 					"entry %q: its %s do not match %s; if it is this daemon, edit them by hand",
 					e.Name, diff, info.ConfigFile))
@@ -286,6 +356,20 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		AuthMethod: "X-API-Key", // spelled exactly so: the client matches it case-sensitively
 		RootCA:     o.RootCA,
 		ConfigFile: info.ConfigFile,
+	}
+	if useSocket {
+		// No key and no TLS: the daemon authenticates the socket by file
+		// permissions, and the client sends nothing.
+		entry.ApiKey, entry.AuthMethod, entry.RootCA = "", "none", ""
+	} else if strings.HasPrefix(entry.BaseURL, "https://") && entry.RootCA == "" {
+		// The daemon's own certificate, pinned: no CA, no name check, and
+		// nothing for the operator to do.
+		if pin, err := certFilePin(info.CertFile); err != nil {
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"could not pin the daemon's certificate (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>), or tdns-ncli will refuse to connect", err))
+		} else {
+			entry.TLSAuth, entry.Pins = "pin", []string{pin}
+		}
 	}
 	if err := chooseEntryName(&entry, res, info.Role, existing, o); err != nil {
 		return nil, err
@@ -463,15 +547,38 @@ func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []
 }
 
 func sameEntries(a, b []ApiDetails) bool {
-	if len(a) != len(b) {
-		return false
+	return reflect.DeepEqual(a, b)
+}
+
+// certFilePin is the SPKI pin of the first certificate in the PEM file path.
+// Only an absolute path: the daemon opens a relative certfile from its own
+// working directory, which is not knowable from here, and pinning some other
+// file of the same name would make an entry that never connects.
+func certFilePin(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("the daemon config has no apiserver.certfile")
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("apiserver.certfile %q is a relative path, which the daemon resolves from its working directory, so it is not known which file it serves", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for {
+		var b *pem.Block
+		b, data = pem.Decode(data)
+		if b == nil {
+			return "", fmt.Errorf("%s holds no certificate", path)
+		}
+		if b.Type == "CERTIFICATE" {
+			c, err := x509.ParseCertificate(b.Bytes)
+			if err != nil {
+				return "", fmt.Errorf("%s: %w", path, err)
+			}
+			return tdns.SPKISHA256(c), nil
 		}
 	}
-	return true
 }
 
 // hostPort returns the host:port of a base URL, lower-cased, or "".
@@ -655,7 +762,7 @@ of them does not answer, or could not be checked (rootca: tlsa).`,
 			rows := BuildListRows(cmd.Root(), entries)
 			failed := false
 			if check {
-				results := CheckEntries(entries, timeout)
+				results := CheckEntries(entries, ReadCliClientConf(cfg), timeout)
 				for i := range rows {
 					rows[i].Check = results[i]
 					// An API that was not checked is not one that answered:
@@ -667,6 +774,9 @@ of them does not answer, or could not be checked (rootca: tlsa).`,
 			}
 			fmt.Printf("CLI config: %s\n\n", cfg)
 			printListRows(os.Stdout, rows, check, cfg)
+			for _, w := range duplicatePins(entries) {
+				fmt.Printf("\nWarning: %s\n", w)
+			}
 			if failed {
 				os.Exit(1)
 			}
@@ -783,49 +893,42 @@ func printListRows(w io.Writer, rows []ListRow, check bool, cfg string) {
 
 // CheckEntries pings each entry's API, concurrently, and returns one result
 // string per entry, in order: "ok ..." or "FAIL: ...".
-func CheckEntries(entries []ApiDetails, timeout time.Duration) []string {
+func CheckEntries(entries []ApiDetails, cc CliClientConf, timeout time.Duration) []string {
 	out := make([]string, len(entries))
 	var wg sync.WaitGroup
 	for i := range entries {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			out[i] = pingEntry(entries[i], timeout)
+			out[i] = pingEntry(entries[i], cc, timeout)
 		}(i)
 	}
 	wg.Wait()
 	return out
 }
 
-func pingEntry(e ApiDetails, timeout time.Duration) string {
-	rootCA := e.RootCA
-	if rootCA == "" {
-		rootCA = "insecure" // the CLI's own default for an entry with no rootca
+// pingEntry pings one entry with the client every other command would use
+// (its pins, roots and credentials), so a pass here means the entry works.
+func pingEntry(e ApiDetails, cc CliClientConf, timeout time.Duration) string {
+	api, warn, err := newApiClientFor(e, cc)
+	if err != nil {
+		return "FAIL: " + err.Error()
 	}
-	switch rootCA {
-	case "insecure":
-	case "tlsa":
+	// Only when TLSA is what verifies the daemon: with pins (tlsauth: pin),
+	// a leftover rootca: tlsa is ignored and the entry can be checked.
+	if e.RootCA == "tlsa" && !(strings.EqualFold(e.TLSAuth, "pin") && len(e.Pins) > 0) {
 		return "not checked (rootca: tlsa)"
-	default:
-		// NewClient exits the process on a CA file it cannot read -- and a
-		// directory passes a stat -- which would end the whole list. Read it
-		// here and report this entry instead.
-		pem, err := os.ReadFile(rootCA)
-		if err != nil {
-			return "FAIL: rootca: " + err.Error()
-		}
-		if !x509.NewCertPool().AppendCertsFromPEM(pem) {
-			return "FAIL: rootca: " + rootCA + " holds no PEM certificate"
-		}
+	}
+	// What every other command would say when it uses this entry (no
+	// verification, a key in clear): the check says it too, after its
+	// verdict, so the leading ok/FAIL that sets the exit status stays first.
+	suffix := ""
+	if warn != "" {
+		suffix = " (warning: " + warn + ")"
 	}
 
 	done := make(chan string, 1)
 	go func() {
-		api := tdns.NewClient(e.Name, e.BaseURL, e.ApiKey, e.AuthMethod, rootCA)
-		if api == nil {
-			done <- "FAIL: could not set up an API client"
-			return
-		}
 		pr, err := api.SendPing(1, false)
 		if err != nil {
 			msg := strings.ReplaceAll(err.Error(), "\n", " ")
@@ -842,13 +945,16 @@ func pingEntry(e ApiDetails, timeout time.Duration) string {
 		if pr.Version != "" {
 			s += ", " + pr.Version
 		}
+		if pr.Auth != "" {
+			s += "; " + pr.Auth
+		}
 		done <- s
 	}()
 	select {
 	case s := <-done:
-		return s
+		return s + suffix
 	case <-time.After(timeout):
-		return fmt.Sprintf("FAIL: no answer within %s", timeout)
+		return fmt.Sprintf("FAIL: no answer within %s", timeout) + suffix
 	}
 }
 
@@ -861,4 +967,50 @@ func shortDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh%dm", d/time.Hour, d%time.Hour/time.Minute)
 	}
 	return fmt.Sprintf("%dm%ds", d/time.Minute, d%time.Minute/time.Second)
+}
+
+// duplicatePins reports entries that pin the same key. Two daemons with one
+// key cannot be told apart by their pins, so a command meant for one is
+// accepted by the other: the same hazard as a shared API key.
+func duplicatePins(entries []ApiDetails) []string {
+	by := map[string][]string{}
+	// Entries of one daemon (a key entry and a certificate entry with the
+	// same baseurl) pin its key as a matter of course; only distinct daemons
+	// sharing a key are worth a warning. daemons[pin] holds the daemons seen.
+	daemons := map[string]map[string]bool{}
+	var order []string
+	for _, e := range entries {
+		d := pinDaemon(e)
+		for _, p := range e.Pins {
+			if _, seen := by[p]; !seen {
+				order = append(order, p)
+				daemons[p] = map[string]bool{}
+			}
+			if daemons[p][d] {
+				continue
+			}
+			daemons[p][d] = true
+			by[p] = append(by[p], e.Name)
+		}
+	}
+	var out []string
+	for _, p := range order {
+		if names := by[p]; len(names) > 1 {
+			out = append(out, fmt.Sprintf("%s pin the same key (%s): each daemon should have a key of its own, or a command meant for one is accepted by the other",
+				strings.Join(names, " and "), p))
+		}
+	}
+	return out
+}
+
+// pinDaemon says which daemon an entry reaches, for duplicatePins: the
+// baseurl's host:port, lower-cased, so that two entries of one daemon
+// count once. An entry whose baseurl has no host (unparseable, empty, a
+// unix socket) stands for itself.
+func pinDaemon(e ApiDetails) string {
+	u, err := url.Parse(e.BaseURL)
+	if err != nil || u.Host == "" {
+		return "entry " + e.Name
+	}
+	return "host " + strings.ToLower(u.Host)
 }

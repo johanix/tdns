@@ -7,8 +7,13 @@
 package cli
 
 import (
+	"crypto/x509"
 	"fmt"
 	"log"
+	"net"
+	"net/url"
+	"os"
+	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
 )
@@ -40,6 +45,14 @@ type ApiDetails struct {
 	// viper.Unmarshal, which never consults yaml tags. "config-file" does not
 	// match the field name, so without this tag it decodes to "" in silence.
 	ConfigFile string `yaml:"config-file,omitempty" mapstructure:"config-file"`
+	// TLSAuth says how the CLI verifies the daemon over TLS: "pin" (Pins),
+	// "pkix" (RootCA, or the system roots), or "" for the old behaviour
+	// (RootCA if set, else no verification). tdns-ncli refuses an https entry
+	// that verifies nothing unless it says rootca: insecure.
+	TLSAuth string `yaml:"tlsauth,omitempty" mapstructure:"tlsauth"`
+	// Pins are the daemon's SPKI SHA-256 pins for tlsauth: pin: its current
+	// key, and the next one during a key change.
+	Pins []string `yaml:"pins,omitempty" mapstructure:"pins"`
 }
 
 // CliConf is the parsed CLI config. Each CLI binary's root.go populates
@@ -48,7 +61,30 @@ type ApiDetails struct {
 type CliConf struct {
 	ApiServers []ApiDetails
 	Keys       tdns.KeyConf
+	// Client names the operator's own certificate, presented by entries with
+	// authmethod: certificate. Unset, the default location is used
+	// (DefaultClientCertPaths).
+	Client CliClientConf
 }
+
+// CliClientConf is the CLI config's client: block.
+type CliClientConf struct {
+	Cert string `yaml:"cert" mapstructure:"cert"`
+	Key  string `yaml:"key" mapstructure:"key"`
+}
+
+// RequireServerVerification makes an https entry that verifies nothing about
+// the daemon an error rather than an unverified connection. tdns-ncli sets it
+// in its init(); tdns-cli leaves it false and keeps its long-standing
+// default (no rootca: no verification).
+var RequireServerVerification bool
+
+// apiClientErrors records why an entry has no client; GetApiClient reports it
+// when that entry is used, so one bad entry does not stop the others.
+var apiClientErrors = map[string]error{}
+
+// apiClientWarnings are said once, when the entry is first used.
+var apiClientWarnings = map[string]string{}
 
 // roleToClientKey maps Cobra-tree role names (e.g. "agent", "signer")
 // to the clientKey used to look up the ApiClient in
@@ -112,14 +148,15 @@ func InitApiClients(c *CliConf) error {
 		fmt.Printf("InitApiClients: setting up API clients for:")
 	}
 	for _, val := range servers {
-		rootCA := val.RootCA
-		if rootCA == "" {
-			rootCA = "insecure" // default: skip TLS verification
+		ac, warn, err := newApiClientFor(val, c.Client)
+		if err != nil {
+			apiClientErrors[val.Name] = err
+			delete(tdns.Globals.ApiClients, val.Name)
+			continue
 		}
-		ac := tdns.NewClient(val.Name, val.BaseURL, val.ApiKey, val.AuthMethod, rootCA)
-		if ac == nil {
-			return fmt.Errorf("InitApiClients: failed to setup API client for %q (baseurl: %s, rootca: %s)",
-				val.Name, val.BaseURL, rootCA)
+		delete(apiClientErrors, val.Name)
+		if warn != "" {
+			apiClientWarnings[val.Name] = warn
 		}
 		tdns.Globals.ApiClients[val.Name] = ac
 		if tdns.Globals.Debug {
@@ -169,6 +206,12 @@ func GetApiClient(role string, dieOnError bool) (*tdns.ApiClient, error) {
 
 	client := tdns.Globals.ApiClients[clientKey]
 	if client == nil {
+		if err := apiClientErrors[clientKey]; err != nil {
+			if dieOnError {
+				log.Fatalf("%v", err)
+			}
+			return nil, err
+		}
 		if dieOnError {
 			keys := make([]string, 0, len(tdns.Globals.ApiClients))
 			for k := range tdns.Globals.ApiClients {
@@ -179,10 +222,114 @@ func GetApiClient(role string, dieOnError bool) (*tdns.ApiClient, error) {
 		return nil, fmt.Errorf("no API client found for %s", clientKey)
 	}
 
+	if w := apiClientWarnings[clientKey]; w != "" {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+		delete(apiClientWarnings, clientKey)
+	}
 	if tdns.Globals.Debug {
 		fmt.Printf("Using API client for %q:\nBaseUrl: %s\n", clientKey, client.BaseUrl)
 	}
 	return client, nil
+}
+
+// loopbackURL says whether rawURL's host is localhost or a loopback address.
+func loopbackURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	h := u.Hostname()
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+// newApiClientFor builds the client for one apiservers entry: how it verifies
+// the daemon (pins, roots, or, said out loud, nothing) and how it
+// authenticates itself (key, certificate, or nothing on the local socket).
+// The warning, if any, is for the operator when the entry is used.
+func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, error) {
+	// The client recognises the socket scheme only as "unix://"; spelled
+	// any other way it would be taken for TCP (and its rootca read, or the
+	// process ended on it). The scheme is case-insensitive, the path is not.
+	if len(e.BaseURL) >= 7 && strings.EqualFold(e.BaseURL[:7], "unix://") {
+		e.BaseURL = "unix://" + e.BaseURL[7:]
+	}
+	o := tdns.ClientOptions{ApiKey: e.ApiKey, AuthMethod: e.AuthMethod, RootCA: e.RootCA}
+	warn := ""
+	if strings.HasPrefix(strings.ToLower(e.BaseURL), "https://") {
+		switch strings.ToLower(e.TLSAuth) {
+		case "pin":
+			if len(e.Pins) == 0 {
+				return nil, "", fmt.Errorf("entry %q has tlsauth: pin but no pins:", e.Name)
+			}
+			o.Pins = e.Pins
+		case "pkix":
+			if o.RootCA == "" {
+				o.RootCA = "system"
+			}
+		case "":
+			if o.RootCA == "" {
+				if RequireServerVerification {
+					return nil, "", fmt.Errorf("entry %q (%s) does not verify the daemon: give it tlsauth: pin and the daemon's pins: (tdns-ncli config add writes them), or a rootca:, or say rootca: insecure",
+						e.Name, e.BaseURL)
+				}
+				o.RootCA = "insecure" // tdns-cli's long-standing default
+			}
+		default:
+			return nil, "", fmt.Errorf("entry %q: unknown tlsauth %q (pin or pkix)", e.Name, e.TLSAuth)
+		}
+		if o.RootCA == "insecure" && len(o.Pins) == 0 && RequireServerVerification {
+			warn = fmt.Sprintf("%s: the daemon's TLS certificate is not verified (rootca: insecure)", e.Name)
+		}
+	} else {
+		if o.RootCA == "" {
+			o.RootCA = "insecure" // plain http or the local socket: there is no certificate
+		}
+		// Plain http verifies nothing and sends the key in clear. On
+		// loopback neither leaves the host; elsewhere, say so.
+		if RequireServerVerification && strings.HasPrefix(strings.ToLower(e.BaseURL), "http://") && !loopbackURL(e.BaseURL) {
+			warn = fmt.Sprintf("%s: plain http to %s: the daemon is not verified, and an API key goes in clear; use https with pins: (tdns-ncli config add writes them)",
+				e.Name, e.BaseURL)
+		}
+	}
+	// The local socket has no TLS, and the client sends no credentials on
+	// it (NewClientWithOptions): a leftover rootca: or authmethod:
+	// certificate must not stop the entry before it is built.
+	socket := strings.HasPrefix(e.BaseURL, "unix://")
+	switch {
+	case socket:
+	case len(o.Pins) > 0:
+		// tlsauth: pin. The pins replace the roots, and the client ignores
+		// rootca, so a rootca: line left over from before must not be read
+		// (a file that is gone would fail an entry that verifies fine).
+	case o.RootCA == "", o.RootCA == "insecure", o.RootCA == "tlsa", o.RootCA == "system":
+	default:
+		// NewClientWithOptions exits the process on a CA file it cannot read
+		// -- and a directory passes a stat -- which would take every other
+		// entry down with this one (config list --check stops printing).
+		// Read and parse it here, return the error instead, and hand the
+		// client the parsed roots so it does not read the file a second time.
+		data, err := os.ReadFile(o.RootCA)
+		if err != nil {
+			return nil, "", fmt.Errorf("entry %q: rootca: %w", e.Name, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(data) {
+			return nil, "", fmt.Errorf("entry %q: rootca: %s holds no PEM certificate", e.Name, o.RootCA)
+		}
+		o.RootCAs = pool
+	}
+	if e.AuthMethod == "certificate" && !socket {
+		cert, err := loadClientCert(cc)
+		if err != nil {
+			return nil, "", fmt.Errorf("entry %q has authmethod: certificate, but %w (tdns-ncli client init makes one)", e.Name, err)
+		}
+		o.ClientCert = cert
+	}
+	return tdns.NewClientWithOptions(e.Name, e.BaseURL, o), warn, nil
 }
 
 func getClientKeyFromParent(role string) string {

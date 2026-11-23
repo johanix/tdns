@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -380,6 +379,9 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		} else {
 			fmt.Printf("ApiServer: not listening on any addresses\n")
 		}
+		if line := apiSocketStatusLine(resp); line != "" {
+			fmt.Println(line)
+		}
 		// The daemon sends the key redacted (SensitiveString.MarshalJSON), so
 		// all there is to say is whether one is set.
 		if resp.ApiServer.ApiKey.Value() != "" {
@@ -387,11 +389,30 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		} else {
 			fmt.Printf("ApiServer: api key is not set\n")
 		}
+		printAccessStatus(resp.Access)
 	}
 
 	if resp.Msg != "" {
 		fmt.Printf("%s\n", resp.Msg)
 	}
+}
+
+// apiSocketStatusLine is the `config status` line for the daemon's local
+// admin socket, or "" when it has none. Both status printers use it (the
+// auth/agent one above and imr's). A socket the daemon is configured with
+// but could not serve is said to be so, so the line does not read as if the
+// socket were there; the Transport/ApiSocket error carries the reason.
+func apiSocketStatusLine(resp tdns.ConfigResponse) string {
+	sock := resp.ApiServer.Socket
+	if sock == "" {
+		return ""
+	}
+	for _, e := range resp.ServerErrors {
+		if e.Category == tdns.ErrCatTransport && e.Subtype == tdns.ErrSubApiSocket {
+			return fmt.Sprintf("ApiServer: local admin socket %s is configured but NOT served (see the active errors)", sock)
+		}
+	}
+	return fmt.Sprintf("ApiServer: local admin socket %s", sock)
 }
 
 // renderReloadGuardrail prints the DNSSEC policy-change guardrail refusal returned
@@ -426,10 +447,13 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
+	// The caller prints the returned error; printing it here as well showed
+	// a daemon's refusal twice.
 	status, buf, err := api.Post("/config", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
-		return cr, fmt.Errorf("error from api post: %v", err)
+		// Wrapped, so a caller can tell a socket it may not open (EACCES)
+		// or a daemon that is not there (ENOENT) from a refusal.
+		return cr, fmt.Errorf("error from api post: %w", err)
 	}
 	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -447,4 +471,28 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	}
 
 	return cr, nil
+}
+
+// printAccessStatus prints the network API's access policy as the daemon is
+// running it, if it has one.
+func printAccessStatus(a *tdns.ApiAccessStatus) {
+	if a == nil {
+		return
+	}
+	if a.Error != "" {
+		fmt.Printf("Access file: %s CANNOT BE USED, so the TCP API answers 503 (the local socket works): %s\n", a.File, a.Error)
+		return
+	}
+	keyauth := "the API key is accepted (read-write)"
+	if !a.KeyAuth {
+		keyauth = "the API key is off"
+	}
+	fmt.Printf("Access file: %s; %s; %d client(s)\n", a.File, keyauth, len(a.Clients))
+	for _, c := range a.Clients {
+		state := ""
+		if c.Disabled {
+			state = ", disabled"
+		}
+		fmt.Printf("   %s (%s%s)\n", c.Name, c.Role, state)
+	}
 }

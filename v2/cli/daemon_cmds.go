@@ -173,7 +173,9 @@ Right now this doesn't do much, but later on various services will be able to re
 		Long:  `Stop the management daemon. If it was not running, then this is a no-op.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			api, _ := GetApiClient(role, true)
-			api.StopDaemon()
+			if err := api.StopDaemon(); err != nil {
+				os.Exit(1)
+			}
 		},
 	}
 
@@ -194,7 +196,11 @@ Right now this doesn't do much, but later on various services will be able to re
 			// running daemon alone.
 			daemonFlags := mustDaemonStartFlags(cmd, ad)
 
-			api.StopDaemon()
+			// A daemon that refused to stop (a 403: stop needs admin) is
+			// still running; starting another would only fail, so stop here.
+			if err := api.StopDaemon(); err != nil {
+				os.Exit(1)
+			}
 			time.Sleep(4 * time.Second)
 
 			if clearLogFile != "" {
