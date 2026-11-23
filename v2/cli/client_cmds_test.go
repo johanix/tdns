@@ -351,6 +351,35 @@ func TestClientEditReloadsTheDaemon(t *testing.T) {
 	}
 }
 
+// client list says what the daemon runs only when the daemon that answered
+// is this config's: another daemon with the same policy is not "running this
+// file".
+func TestClientListChecksWhoAnswered(t *testing.T) {
+	var runs string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: runs,
+			Access: &tdns.ApiAccessStatus{KeyAuth: true, Clients: []tdns.ApiAccessStatusClient{}}})
+	}))
+	defer srv.Close()
+	e := newAccessEnv(t, true, srv.URL+"/api/v1")
+	apiConfig.ApiServers[0].TLSAuth = "pin"
+	apiConfig.ApiServers[0].Pins = []string{tdns.SPKISHA256(srv.Certificate())}
+	if err := InitApiClients(apiConfig); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, e.access, "keyauth: true\nclients: []\n")
+
+	runs = e.daemonCfg
+	if out := captureStdout(t, func() { listAccessClients("auth") }); !strings.Contains(out, "The daemon runs this file") {
+		t.Errorf("this config's daemon with this policy:\n%s", out)
+	}
+	runs = filepath.Join(e.dir, "other-daemon.yaml")
+	out := captureStdout(t, func() { listAccessClients("auth") })
+	if strings.Contains(out, "runs this file") || !strings.Contains(out, "Running policy unknown") {
+		t.Errorf("another daemon with the same policy:\n%s", out)
+	}
+}
+
 // An entry that cannot be built (here: a CA file that is gone) is not the
 // same as no entry: its daemon may be running, so the edit is refused and
 // nothing is written.

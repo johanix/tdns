@@ -773,6 +773,13 @@ func listAccessClients(role string) error {
 		fmt.Printf("\nRunning policy unknown: %v %s\n", err, resp.ErrorMsg)
 		return nil
 	}
+	// Whoever answered must be this config's daemon: another one on the
+	// socket would report its own policy, and a match would say "runs
+	// this file" of a daemon that does not.
+	if err := runsConfig(resp, t); err != nil {
+		fmt.Printf("\nRunning policy unknown: %v\n", err)
+		return nil
+	}
 	if resp.Access == nil {
 		fmt.Printf("\nThe daemon runs no access file (pending reload?).\n")
 		return nil
