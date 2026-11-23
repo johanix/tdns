@@ -150,9 +150,9 @@ are and never written. A config check before the first start reports the
 pair as pending (the validator lets that pass); one default file without the
 other is refused; a pair that cannot be written starts no TLS listener (the
 socket is still served). `tdns-ncli config add` pins the default pair, and
-before the first start refuses the new entry, saying to start the daemon
-first (revised the same day, below: it no longer writes the entry unpinned
-with a note). A new key is
+before the first start makes it itself, exactly as the daemon would (one
+function, `tdns.EnsureDefaultApiCert`, for both), and pins that: the daemon
+uses it when it starts (revised the same day, below). A new key is
 deliberate: remove the pair, restart, run `config add` again (old pins stay
 next to the new one).
 
@@ -803,13 +803,20 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
 - **`config add` pins the daemon's certificate** from `apiserver.certfile`. If
   that file cannot be read the entry is written without pins and a note says
   what to add; tdns-ncli then refuses that entry rather than connecting
-  unverified. (Revised 2026-11-23, the owner's ruling "Yes, refuse": config
-  add does not write a new https entry it cannot pin. It refuses, writes
-  nothing, and says why and how to fix it: for the default API pair of a
-  daemon not started yet, "start the daemon (it writes its API certificate
-  at first start), then run config add again"; for a missing, relative or
-  unreadable `apiserver.certfile`, a fix to match. An entry config add
-  already knows and cannot re-pin is left as it was, with the notes as
+  unverified. (Revised 2026-11-23, the owner's rulings: config add does not
+  write a new https entry it cannot pin. A daemon on its default API pair
+  that has not started yet has no certificate, and refusing it would leave
+  `daemon start`, which needs the entry, waiting on the entry: so config add
+  makes the pair itself, exactly as the daemon does at its first start (the
+  same paths, `tdns.EnsureDefaultApiCert`: ECDSA P-256, the same names, the
+  key 0600, the certificate 0644, `certs/` made 0755), pins it, and says
+  "Created the daemon's API certificate <path> (key <path>, mode 0600); the
+  daemon uses it when it starts." A dry run says it would, and makes
+  nothing. Half a pair is refused, as the daemon refuses it, and so is a
+  pair config add cannot write (the fix: run it as root on the daemon's
+  host). For a missing, relative or unreadable `apiserver.certfile` it
+  refuses, writes nothing, and says why and how to fix it. An entry config
+  add already knows and cannot re-pin is left as it was, with the notes as
   before.)
 - **`config add` also pins an entry it already knows** (2026-11-23, after the
   testor install). An https entry with no pin is broken, and entries written

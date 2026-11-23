@@ -76,16 +76,56 @@ func (a *ApiServerConf) applyCertDefaults(cfgfile string, write bool) {
 		a.CertPending = len(a.Addresses) > 0
 		return
 	}
-	pin, err := writeApiCert(cert, key, a.Addresses)
+	pin, created, err := EnsureDefaultApiCert(cfgfile, a.Addresses)
 	if err != nil {
 		lgApi.Error("management API: could not write the default API certificate; the TCP API will not start",
 			"cert", cert, "key", key, "err", err)
 		a.CertPending = true
 		return
 	}
-	lgApi.Info("management API: wrote a self-signed API certificate (clients pin its key; tdns-ncli config add writes the pin)",
-		"cert", cert, "key", key, "pin", pin)
+	if created {
+		lgApi.Info("management API: wrote a self-signed API certificate (clients pin its key; tdns-ncli config add writes the pin)",
+			"cert", cert, "key", key, "pin", pin)
+	}
 	a.CertFile, a.KeyFile = cert, key
+}
+
+// EnsureDefaultApiCert writes the default API certificate and key of the
+// daemon whose config file is cfgfile (ApiCertPaths) when neither is there,
+// as the daemon does at its first start, and returns the key's pin when it
+// wrote them. addresses are the API's listen addresses, which the
+// certificate names (apiCertSANs). The one way the pair is made: the daemon
+// (applyCertDefaults) and tdns-ncli config add, which pins a daemon that has
+// not started yet, both call it.
+//
+// A pair that is there is left as it is (created false). One file without
+// the other is an error, as the validator refuses it: something removed half
+// a pair, and writing over the other half would replace a key someone may
+// have pinned.
+func EnsureDefaultApiCert(cfgfile string, addresses []string) (pin string, created bool, err error) {
+	cert, key := ApiCertPaths(cfgfile)
+	if cert == "" {
+		return "", false, errors.New("no config file to name the default API certificate after")
+	}
+	_, cerr := os.Stat(cert)
+	_, kerr := os.Stat(key)
+	switch {
+	case cerr == nil && kerr == nil:
+		return "", false, nil
+	case cerr == nil:
+		return "", false, fmt.Errorf("%s is there without its key %s: one file of the default API pair, which the daemon refuses", cert, key)
+	case kerr == nil:
+		return "", false, fmt.Errorf("%s is there without its certificate %s: one file of the default API pair, which the daemon refuses", key, cert)
+	case !errors.Is(cerr, os.ErrNotExist):
+		return "", false, cerr
+	case !errors.Is(kerr, os.ErrNotExist):
+		return "", false, kerr
+	}
+	pin, err = writeApiCert(cert, key, addresses)
+	if err != nil {
+		return "", false, err
+	}
+	return pin, true, nil
 }
 
 // LookupCertDefaults is applyCertDefaults without writing anything: for a
