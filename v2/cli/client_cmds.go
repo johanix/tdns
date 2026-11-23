@@ -411,7 +411,7 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 // it. Its reply says which config it runs; any other is a reload the
 // operator's daemon did not get.
 func reloadForAccess(role string, t *accessTarget) error {
-	resp, err := configToDaemon(role, t.Socket, tdns.ConfigPost{Command: "reload"})
+	resp, err := configToDaemon(role, t.Socket, t.DaemonConfig, tdns.ConfigPost{Command: "reload"})
 	if err != nil {
 		return fmt.Errorf("written, but the reload failed: %v", err)
 	}
@@ -427,9 +427,13 @@ func reloadForAccess(role string, t *accessTarget) error {
 // answers 503 on TCP until a reload fixes it; with keyauth off the role's key
 // entry is refused). Only when the socket cannot be used from here (not root:
 // EACCES; or nothing is running) does the role's own entry get it instead.
-func configToDaemon(role, socket string, post tdns.ConfigPost) (tdns.ConfigResponse, error) {
+//
+// The socket client names daemonConfig in every request, so a daemon that
+// runs another config refuses it before acting on it.
+func configToDaemon(role, socket, daemonConfig string, post tdns.ConfigPost) (tdns.ConfigResponse, error) {
 	if socket != "" {
-		resp, err := SendConfigCommand(tdns.NewClient(role, "unix://"+socket, "", "none", ""), post)
+		c := tdns.NewClientWithOptions(role, "unix://"+socket, tdns.ClientOptions{AuthMethod: "none", ExpectConfigFile: daemonConfig})
+		resp, err := SendConfigCommand(c, post)
 		if err == nil {
 			return resp, nil
 		}
@@ -792,7 +796,7 @@ func listAccessClients(role string) error {
 	}
 	// Over the socket first, as the reload: after `client keyauth off` the
 	// role's key entry is refused, but the socket still answers.
-	resp, err := configToDaemon(role, t.Socket, tdns.ConfigPost{Command: "status"})
+	resp, err := configToDaemon(role, t.Socket, t.DaemonConfig, tdns.ConfigPost{Command: "status"})
 	if err != nil || resp.Error {
 		fmt.Printf("\nRunning policy unknown: %v %s\n", err, resp.ErrorMsg)
 		return nil

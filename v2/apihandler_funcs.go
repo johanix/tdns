@@ -545,10 +545,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		// the daemon it reached (for a reload, the one that reloaded) is the
 		// one whose config it means.
 		if cfg := conf.Internal.CfgFile; cfg != "" {
-			if abs, err := filepath.Abs(cfg); err == nil {
-				cfg = abs
-			}
-			resp.ConfigFile = cfg
+			resp.ConfigFile = absConfigFile(cfg)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

@@ -47,6 +47,29 @@ type ClientOptions struct {
 	// ClientCert is presented on the TLS connection when AuthMethod is
 	// "certificate".
 	ClientCert *tls.Certificate
+	// ExpectConfigFile, for a local socket client, is the config file the
+	// daemon must run. Every request carries it (ExpectConfigFileHeader), and
+	// a daemon that runs another config refuses the request before acting
+	// on it: the check is part of the very request that does the work, so a
+	// daemon that took the socket after an earlier check cannot run it.
+	ExpectConfigFile string
+}
+
+// ExpectConfigFileHeader carries ClientOptions.ExpectConfigFile. A daemon
+// refuses a request whose header names another config file than its own
+// (412), whatever the request.
+const ExpectConfigFileHeader = "X-Tdns-Config-File"
+
+// expectConfigTransport adds the ExpectConfigFileHeader to every request.
+type expectConfigTransport struct {
+	base http.RoundTripper
+	file string
+}
+
+func (t expectConfigTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set(ExpectConfigFileHeader, t.file)
+	return t.base.RoundTrip(r)
 }
 
 // NewClientWithOptions builds a management API client for baseurl.
@@ -74,17 +97,19 @@ func NewClientWithOptions(name, baseurl string, o ClientOptions) *ApiClient {
 		// otherwise fail every request before dialling.
 		api.AuthMethod = "none"
 		api.apiKey = ""
-		api.Client = &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					if !ok {
-						return nil, fmt.Errorf("baseurl %s: a local socket is unix:///absolute/path", baseurl)
-					}
-					var d net.Dialer
-					return d.DialContext(ctx, "unix", path)
-				},
+		var tr http.RoundTripper = &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				if !ok {
+					return nil, fmt.Errorf("baseurl %s: a local socket is unix:///absolute/path", baseurl)
+				}
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", path)
 			},
 		}
+		if o.ExpectConfigFile != "" {
+			tr = expectConfigTransport{base: tr, file: o.ExpectConfigFile}
+		}
+		api.Client = &http.Client{Transport: tr}
 		return &api
 	}
 

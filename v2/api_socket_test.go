@@ -345,9 +345,9 @@ func TestAPIdispatcherServesTheSocket(t *testing.T) {
 }
 
 // Every daemon has the admin socket unless its config says socket: none: by
-// default one named after the config file's whole path, which says which config
-// it belongs to and gives instances sharing a file name in different
-// directories (testor: three tdns-auth.yaml) one socket each.
+// default one named after the config file's whole path, extension included,
+// which says which config it belongs to, and which no other config path
+// gives (testor: three tdns-auth.yaml in different directories).
 func TestApiSocketPath(t *testing.T) {
 	saved := DefaultApiSocketDir
 	t.Cleanup(func() { DefaultApiSocketDir = saved })
@@ -355,11 +355,12 @@ func TestApiSocketPath(t *testing.T) {
 	for _, tc := range []struct {
 		configured, cfgfile, want string
 	}{
-		{"", "/etc/tdns/tdns-auth.yaml", "/var/run/tdns/etc-tdns-tdns-auth.sock"},
-		{"", "/etc/tdns/auth-enc.yaml", "/var/run/tdns/etc-tdns-auth-enc.sock"},
-		{"", "/etc/tdns-site/tdns-auth.yaml", "/var/run/tdns/etc-tdns-site-tdns-auth.sock"},
-		{"", "/etc/tdns-enc/tdns-auth.yaml", "/var/run/tdns/etc-tdns-enc-tdns-auth.sock"},
-		{"", "/etc/tdns/noext", "/var/run/tdns/etc-tdns-noext.sock"},
+		{"", "/etc/tdns/tdns-auth.yaml", "/var/run/tdns/etc_tdns_tdns-auth.yaml.sock"},
+		{"", "/etc/tdns/auth-enc.yaml", "/var/run/tdns/etc_tdns_auth-enc.yaml.sock"},
+		{"", "/etc/tdns-site/tdns-auth.yaml", "/var/run/tdns/etc_tdns-site_tdns-auth.yaml.sock"},
+		{"", "/etc/tdns-enc/tdns-auth.yaml", "/var/run/tdns/etc_tdns-enc_tdns-auth.yaml.sock"},
+		{"", "/etc/tdns/noext", "/var/run/tdns/etc_tdns_noext.sock"},
+		{"", "/etc/tdns_x/a b.yaml", "/var/run/tdns/etc_tdns%5Fx_a%20b.yaml.sock"},
 		{"/run/x.sock", "/etc/tdns/tdns-auth.yaml", "/run/x.sock"},
 		{"none", "/etc/tdns/tdns-auth.yaml", ""},
 		{"NONE", "/etc/tdns/tdns-auth.yaml", ""},
@@ -370,14 +371,28 @@ func TestApiSocketPath(t *testing.T) {
 		}
 	}
 
-	// Too long for a socket: the file name and a hash of the path, short
-	// enough, and different for two such paths.
+	// Paths that "/" -> "-", or dropping the extension, or "/" -> "_"
+	// without escaping "_", would give one name: each gets its own.
+	for _, pair := range [][2]string{
+		{"/etc/tdns-site/server.yaml", "/etc/tdns/site/server.yaml"},
+		{"/etc/tdns/server.yaml", "/etc/tdns/server.yml"},
+		{"/etc/tdns/server.yaml", "/etc/tdns/server"},
+		{"/etc/tdns_site/server.yaml", "/etc/tdns/site/server.yaml"},
+		{"/etc/a%5Fb/x.yaml", "/etc/a_b/x.yaml"},
+	} {
+		if a, b := ApiSocketPath("", pair[0]), ApiSocketPath("", pair[1]); a == b {
+			t.Errorf("%s and %s both get %s", pair[0], pair[1], a)
+		}
+	}
+
+	// Too long for a socket: the file name, %% and a hash of the path,
+	// short enough, and different for two such paths.
 	deep := "/" + strings.Repeat("very-long-directory-name/", 5)
 	a := ApiSocketPath("", deep+"a/tdns-auth.yaml")
 	b := ApiSocketPath("", deep+"b/tdns-auth.yaml")
 	if a == b || CheckApiSocketPath(a) != nil || CheckApiSocketPath(b) != nil ||
-		!strings.HasPrefix(a, "/var/run/tdns/tdns-auth-") || !strings.HasSuffix(a, ".sock") {
-		t.Errorf("long paths: %q and %q, want two short, distinct tdns-auth-<hash>.sock", a, b)
+		!strings.HasPrefix(a, "/var/run/tdns/tdns-auth.yaml%%") || !strings.HasSuffix(a, ".sock") {
+		t.Errorf("long paths: %q and %q, want two short, distinct tdns-auth.yaml%%%%<hash>.sock", a, b)
 	}
 
 	DefaultApiSocketDir = ""
