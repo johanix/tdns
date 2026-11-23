@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -158,7 +159,9 @@ func apiCertSANs(hostname string, addresses []string) ([]string, []net.IP) {
 		switch {
 		case ip == nil && host != "" && host != "localhost":
 			dnsNames = append(dnsNames, host)
-		case ip == nil, ip.IsUnspecified(), ip.IsLoopback():
+		case ip == nil, ip.IsUnspecified(), slices.ContainsFunc(ips, ip.Equal):
+			// A loopback address other than 127.0.0.1 and ::1 (127.0.0.2) is
+			// one the API listens on, and the certificate must cover it.
 		default:
 			ips = append(ips, ip)
 		}
