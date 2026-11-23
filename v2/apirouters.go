@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
+	"strings"
+	"sync/atomic"
 
 	"github.com/gorilla/mux"
 )
@@ -224,13 +227,61 @@ func xxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 // (the certificate itself comes from certfile/keyfile). A client certificate
 // is asked for, never required: the middleware decides, so key-only clients
 // keep working while the API key is accepted. With an access file the
-// listener is TLS 1.3 only, as the design says.
+// listener is TLS 1.3 only, as the design says. That is fixed at start; an
+// access file a reload adds is held to TLS 1.3 by authenticateApiRequest.
 func apiServerTLSConfig(conf *Config) *tls.Config {
 	c := &tls.Config{ClientAuth: tls.RequestClientCert}
 	if conf.ApiServer.AccessFile != "" {
 		c.MinVersion = tls.VersionTLS13
 	}
 	return c
+}
+
+// apiListenerSettings are the apiserver: keys APIdispatcher acts on once, when
+// it starts the listeners. A reload cannot change what is listening, so it
+// says when they differ (apiListenerReloadNote).
+type apiListenerSettings struct {
+	Addresses                 []string
+	Socket, CertFile, KeyFile string
+	UseTLS                    bool
+}
+
+// apiListenersStarted is what the running listeners were started with; nil
+// before APIdispatcher has run. One per process, as the listeners are.
+var apiListenersStarted atomic.Pointer[apiListenerSettings]
+
+func listenerSettingsOf(a ApiServerConf) *apiListenerSettings {
+	return &apiListenerSettings{Addresses: slices.Clone(a.Addresses), Socket: a.Socket,
+		CertFile: a.CertFile, KeyFile: a.KeyFile, UseTLS: a.UseTLS}
+}
+
+// apiListenerReloadNote is the part of a reload's report that names the
+// listener settings the reload changed but could not apply: they take effect
+// at the next restart. "" when none changed.
+func (conf *Config) apiListenerReloadNote() string {
+	was := apiListenersStarted.Load()
+	if was == nil {
+		return ""
+	}
+	now := listenerSettingsOf(conf.ApiServer)
+	var changed []string
+	if !slices.Equal(was.Addresses, now.Addresses) {
+		changed = append(changed, "apiserver.addresses")
+	}
+	if was.Socket != now.Socket {
+		changed = append(changed, "apiserver.socket")
+	}
+	if was.UseTLS != now.UseTLS {
+		changed = append(changed, "apiserver.usetls")
+	}
+	if was.CertFile != now.CertFile || was.KeyFile != now.KeyFile {
+		changed = append(changed, "apiserver.certfile/keyfile")
+	}
+	if len(changed) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" NOT applied: %s changed, and the management API listeners keep what they started with; restart the daemon to apply it.",
+		strings.Join(changed, ", "))
 }
 
 func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error {
@@ -243,6 +294,14 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	if router == nil {
 		lgApi.Warn("API router is nil, not starting")
 		return nil
+	}
+	apiListenersStarted.Store(listenerSettingsOf(conf.ApiServer))
+
+	// Design 3.6 allows an access file with usetls: false (a socket-only
+	// daemon with keyauth off, say), but it should not go unnoticed.
+	if len(addresses) > 0 && conf.ApiServer.AccessFile != "" && !conf.ApiServer.UseTLS {
+		lgApi.Warn("management API: usetls is false, so the access file's certificate clients cannot authenticate on TCP, and the API key, if keyauth allows it, crosses the network in clear",
+			"addresses", addresses, "access-file", conf.ApiServer.AccessFile)
 	}
 
 	// The local admin socket first, and independently of the TCP listeners:

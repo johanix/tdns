@@ -645,7 +645,21 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
 - **Taking `access-file` out of the config** and reloading returns the TCP API
   to key-as-admin, and the reload says so.
 - **TLS.** The TCP listeners always ask for a client certificate (never
-  require one); with an access file they are TLS 1.3 only.
+  require one); with an access file they are TLS 1.3 only. A listener's
+  minimum is fixed when it starts, so while an access file is in force a
+  request over an older TLS version is refused (403); that covers an access
+  file a reload added. With `usetls: false` and an access file the daemon and
+  `config check` warn, as 3.6 says.
+- **Reloads.** The SIGHUP path (zone reload) re-reads the access file too, so
+  a removed or disabled client loses its access without a full config reload.
+  A full reload that changes `apiserver.addresses`, `socket`, `usetls` or
+  `certfile`/`keyfile` says those are NOT applied until a restart: the
+  listeners keep what they started with.
+- **A body that is not one JSON value needs admin.** A handler's decoder runs
+  the first value and ignores the rest, so it is not treated as commandless.
+- **Pins are canonical base64 only.** Another spelling of the same digest
+  (unused padding bits, embedded newlines) would never match the string
+  lookup, and would let one key be two clients.
 - **tdns-mp.** `RegisterApiRouteRoles` lets code outside the package declare
   the roles of its routes; until tdns-mp does, its routes need admin when an
   access file is set.
