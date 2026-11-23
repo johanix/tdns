@@ -1444,6 +1444,13 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	// runtime-config snapshot (a single-zone reload) would put it in force.
 	// Keep the accepted one and put it back on a refusal.
 	runningJournal := conf.Journal.Clone()
+	// The apiserver: block, for the same reason, and more so: the decode
+	// resets it first (decodeConfigMap), so a refused file without an
+	// access-file: line would leave AccessFile empty, and the next SIGHUP
+	// (reloadZoneConfig) would drop the running access policy: key as
+	// admin again, from a config that was refused.
+	runningApiServer := conf.ApiServer
+	runningApiServer.Addresses = slices.Clone(conf.ApiServer.Addresses)
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
@@ -1452,6 +1459,7 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 		conf.Listeners.Addresses = runningListenerAddresses
 		Templates, conf.Templates = runningTemplates, runningTemplateList
 		conf.Journal = runningJournal
+		conf.ApiServer = runningApiServer
 	}
 	// Rebuild the TSIG store ONLY after a successful parse. With KeyDB, reconcile
 	// config keys in place (§6).

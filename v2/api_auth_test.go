@@ -466,6 +466,48 @@ func TestReloadForgetsARemovedAccessFile(t *testing.T) {
 	}
 }
 
+// A refused full reload puts the running apiserver: block back. The decode
+// resets the block first, so a refused file without an access-file: line
+// would otherwise leave AccessFile empty, and the next SIGHUP (which reloads
+// the access file from conf.ApiServer.AccessFile) would drop the policy and
+// make the key admin again, from a config that was refused.
+func TestARefusedReloadKeepsTheAccessFile(t *testing.T) {
+	keepLiveConfig(t)
+	access := filepath.Join(t.TempDir(), "access.yaml")
+	if err := os.WriteFile(access, []byte("clients: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conf := &Config{}
+	conf.Internal.KeyDB = newTestKeyDB(t)
+	conf.Internal.ApiAccess = &apiAccessHolder{}
+	conf.Internal.ServerErrors = NewServerErrorRegistry()
+	conf.ApiServer = ApiServerConf{ApiKey: "k", Socket: "/var/run/tdns/tdns-auth.sock", AccessFile: access, UseTLS: true}
+	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "Access file reloaded") {
+		t.Fatalf("access file at start: %q", msg)
+	}
+	conf.publishRuntimeConfig()
+	// No access-file: line, and a debug address that is refused (it must be
+	// loopback) after the decode.
+	conf.Internal.CfgFile = writeCfg(t, `apiserver:
+   apikey: k
+listeners:
+   imr-debug-address: "192.0.2.1:5353"
+`)
+	if _, err := conf.ReloadConfig(); err == nil || !strings.Contains(err.Error(), "imr-debug-address") {
+		t.Fatalf("the reload was not refused for its debug address: %v", err)
+	}
+	if conf.ApiServer.AccessFile != access || conf.ApiServer.Socket != "/var/run/tdns/tdns-auth.sock" {
+		t.Errorf("the refused reload left access-file %q, socket %q", conf.ApiServer.AccessFile, conf.ApiServer.Socket)
+	}
+	// What a SIGHUP does next: the access file stays in force.
+	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "Access file reloaded") {
+		t.Errorf("SIGHUP after the refused reload: %q, want the access file still in force", msg)
+	}
+	if st := conf.Internal.ApiAccess.load(); st == nil || !st.Enabled {
+		t.Errorf("running policy after the refused reload and a SIGHUP: %+v", st)
+	}
+}
+
 // A reload cannot move a listener; it says which listener settings it left
 // for the next restart.
 func TestApiListenerReloadNote(t *testing.T) {
