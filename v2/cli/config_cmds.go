@@ -488,6 +488,10 @@ func printAccessStatus(a *tdns.ApiAccessStatus) {
 		keyauth = "the API key is off"
 	}
 	fmt.Printf("Access file: %s; %s; %d client(s)\n", a.File, keyauth, len(a.Clients))
+	if len(a.TCPStopped) > 0 {
+		fmt.Printf("TCP API STOPPED on %s: it was plaintext, and the access file requires TLS; restart the daemon with usetls: true (the local socket works)\n",
+			strings.Join(a.TCPStopped, ", "))
+	}
 	for _, c := range a.Clients {
 		state := ""
 		if c.Disabled {

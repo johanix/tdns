@@ -659,8 +659,12 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   daemon leaves out `apiserver.addresses` instead (the 3.6 case of
   `keyauth: false` with `usetls: false`). Without an access file
   `usetls: false` is unchanged for now. A listener keeps what it started
-  with, so a reload can put an access file in force on a plaintext one: from
-  then on its requests are refused (403), until a restart with TLS.
+  with, so a reload can put an access file in force on a plaintext one. That
+  reload closes the plaintext TCP listeners before the policy takes effect
+  (Johan, 2026-11-23: "Stop the listener"), so no client sends its key in
+  clear any more; they stay closed until a restart with TLS, the reload and
+  `config status` say so, and the socket is still served. (A request that
+  still reaches a plaintext listener is refused, 403, as a backstop.)
 - **`daemon start`, `stop`, `restart`** treat a missing socket file like a
   refused connection: nothing is running (and, while starting, not up yet).
 - **Reloads.** The SIGHUP path (zone reload) re-reads the access file too, so
