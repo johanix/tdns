@@ -70,28 +70,36 @@ process's descriptor and goroutine counts (tdns#443).`,
 				fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 				os.Exit(1)
 			}
-			fmt.Println(resp.Msg)
-			if len(resp.ServerErrors) > 0 {
-				fmt.Printf("Active errors:\n")
-				for _, e := range resp.ServerErrors {
-					fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
-				}
-			}
-			if line := apiSocketStatusLine(resp); line != "" {
-				fmt.Println(line)
-			}
-			// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
-			// init failed (the Upstream/ImrPriming husk) is precisely a
-			// moment to look at process resources, not to hide them.
-			renderProcStatus(resp.Proc)
-			printAccessStatus(resp.Access)
-			if resp.Imr == nil {
-				fmt.Println("IMR: no resolver state reported (engine not running)")
-				return
-			}
-			renderImrStatus(resp.Imr)
+			printImrConfigStatus(resp)
 		},
 	}
+}
+
+// printImrConfigStatus prints a tdns-imr daemon's `config status` reply.
+func printImrConfigStatus(resp tdns.ConfigResponse) {
+	fmt.Println(resp.Msg)
+	if len(resp.ServerErrors) > 0 {
+		fmt.Printf("Active errors:\n")
+		for _, e := range resp.ServerErrors {
+			fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
+		}
+	}
+	if line := apiSocketStatusLine(resp); line != "" {
+		fmt.Println(line)
+	}
+	// As in the auth printer: a TCP API an access file stopped stays
+	// stopped after the file is removed, so this does not depend on Access.
+	printApiTCPStopped(resp.ApiTCPStopped, resp.ApiTCPStoppedBy, resp.Access != nil)
+	// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
+	// init failed (the Upstream/ImrPriming husk) is precisely a
+	// moment to look at process resources, not to hide them.
+	renderProcStatus(resp.Proc)
+	printAccessStatus(resp.Access)
+	if resp.Imr == nil {
+		fmt.Println("IMR: no resolver state reported (engine not running)")
+		return
+	}
+	renderImrStatus(resp.Imr)
 }
 
 func init() {
