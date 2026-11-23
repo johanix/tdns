@@ -345,9 +345,9 @@ func TestAPIdispatcherServesTheSocket(t *testing.T) {
 }
 
 // Every daemon has the admin socket unless its config says socket: none: by
-// default one named after the config file, by its name in /etc/tdns and by its
-// whole path elsewhere, so that instances sharing a file name in different
-// directories (testor: three tdns-auth.yaml) get one socket each.
+// default one named after the config file's whole path, which says which config
+// it belongs to and gives instances sharing a file name in different
+// directories (testor: three tdns-auth.yaml) one socket each.
 func TestApiSocketPath(t *testing.T) {
 	saved := DefaultApiSocketDir
 	t.Cleanup(func() { DefaultApiSocketDir = saved })
@@ -355,11 +355,11 @@ func TestApiSocketPath(t *testing.T) {
 	for _, tc := range []struct {
 		configured, cfgfile, want string
 	}{
-		{"", "/etc/tdns/tdns-auth.yaml", "/var/run/tdns/tdns-auth.sock"},
-		{"", "/etc/tdns/tdns-imr.yaml", "/var/run/tdns/tdns-imr.sock"},
+		{"", "/etc/tdns/tdns-auth.yaml", "/var/run/tdns/etc-tdns-tdns-auth.sock"},
+		{"", "/etc/tdns/auth-enc.yaml", "/var/run/tdns/etc-tdns-auth-enc.sock"},
 		{"", "/etc/tdns-site/tdns-auth.yaml", "/var/run/tdns/etc-tdns-site-tdns-auth.sock"},
 		{"", "/etc/tdns-enc/tdns-auth.yaml", "/var/run/tdns/etc-tdns-enc-tdns-auth.sock"},
-		{"", "/etc/tdns/noext", "/var/run/tdns/noext.sock"},
+		{"", "/etc/tdns/noext", "/var/run/tdns/etc-tdns-noext.sock"},
 		{"/run/x.sock", "/etc/tdns/tdns-auth.yaml", "/run/x.sock"},
 		{"none", "/etc/tdns/tdns-auth.yaml", ""},
 		{"NONE", "/etc/tdns/tdns-auth.yaml", ""},

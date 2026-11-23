@@ -172,13 +172,14 @@ and not in the CLI config.** The owner's rulings:
   `usetls: false` as the way in when TLS is broken, and a fallback that has to
   be configured beforehand is missing exactly when it is needed: none of the
   test servers had a `socket:` line. Unset, the path is in `/var/run/tdns`,
-  named after the config file: by its name for a file in `/etc/tdns`
-  (`/etc/tdns/tdns-auth.yaml` serves `tdns-auth.sock`), by its whole path for
-  any other (`/etc/tdns-site/tdns-auth.yaml` serves
-  `etc-tdns-site-tdns-auth.sock`), because instances in other directories
-  commonly share a file name (testor runs three `tdns-auth.yaml`), and two
-  daemons must never share a socket. A path too long for a socket becomes the
-  file name plus a hash of the path. `socket: none` turns it off.
+  named after the config file's whole path, always:
+  `/etc/tdns/tdns-auth.yaml` serves `etc-tdns-tdns-auth.sock`,
+  `/etc/tdns-site/tdns-auth.yaml` serves `etc-tdns-site-tdns-auth.sock`. The
+  name says at once which config the socket belongs to (the owner's reason),
+  and two daemons never share a socket, even when instances in different
+  directories share a file name (testor runs three `tdns-auth.yaml`). A path
+  too long for a socket becomes the file name plus a hash of the path.
+  `socket: none` turns it off.
   `tdns.ApiSocketPath` does this, in the daemon's load (`ParseConfig`, and the
   decode `config check` uses) and in tdns-ncli. A socket that cannot be served
   is an error the daemon reports and runs on without, as before.
