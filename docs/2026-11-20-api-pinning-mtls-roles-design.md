@@ -700,6 +700,15 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   that file cannot be read the entry is written without pins and a note says
   what to add; tdns-ncli then refuses that entry rather than connecting
   unverified.
+- **`config add` also pins an entry it already knows** (2026-11-23, after the
+  testor install). An https entry with no pin is broken, and entries written
+  before pinning existed had none, so "Already known; nothing changed" left
+  them refused. Now the add of a known daemon gives its entry `tlsauth: pin` and
+  the pin, removes a `rootca:` line, and changes nothing else in the file. An
+  entry pinning an earlier certificate keeps its pins and gets the current one
+  too. The refusal of an unpinned entry says to run `tdns-ncli config add
+  <daemon config>`; it no longer offers `rootca:`, since pinning is the model
+  (`tlsauth: pkix` is still accepted for a real CA, but not suggested).
 - **`config list --check`** uses the same client as every other command and
   shows who each daemon took the CLI for (from `ping`).
 - **The `client` commands** are added to the canonical auth, agent and imr

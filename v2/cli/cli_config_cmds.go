@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -106,7 +107,9 @@ API key instead.
 The new entry records the daemon config's path as config-file:, so
 "tdns-ncli auth2 config check" checks the right daemon. The CLI config is
 created, mode 0600, if it does not exist. Adding a daemon that is already
-there changes nothing.`,
+there changes nothing, except that an https entry that does not pin the
+daemon's current certificate is given that pin (tlsauth: pin): an entry
+without one is refused, so this is how an old entry is fixed.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			o.Ctx = cmd.Context()
@@ -172,6 +175,10 @@ type AddResult struct {
 	// AlreadyKnown is the name of the existing entry for this daemon; when set
 	// nothing was added.
 	AlreadyKnown string
+	// Pinned: the entry AlreadyKnown names did not pin the daemon's current
+	// certificate, so it was (or, with DryRun, would be) given tlsauth: pin
+	// and that pin. Entry is the entry as rewritten.
+	Pinned bool
 	// File is the file the entry was (or would be) added to.
 	File string
 	// Created: File did not exist and was created.
@@ -324,11 +331,11 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			// usetls turned on or off on the same port. "Already known" would
 			// then leave the CLI with an entry that no longer works.
 			if diff := changedSettings(e, wantKey, wantURL); diff != "" {
-				return nil, fmt.Errorf("entry %q is this daemon, but its %s no longer match %s; edit that entry by hand (config add does not change an existing entry)",
+				return nil, fmt.Errorf("entry %q is this daemon, but its %s no longer match %s; edit that entry by hand (config add changes only an existing entry's pins)",
 					e.Name, diff, info.ConfigFile)
 			}
 			res.AlreadyKnown = e.Name
-			return res, nil
+			return repinKnownEntry(o, res, e, existing, target, info.CertFile)
 		case sameFile:
 			return nil, fmt.Errorf("entry %q already points at %s but with a different API address (%s, the config says %s); edit or remove that entry by hand",
 				e.Name, info.ConfigFile, e.BaseURL, baseURL)
@@ -342,8 +349,11 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 				res.Notes = append(res.Notes, fmt.Sprintf(
 					"entry %q: its %s do not match %s; if it is this daemon, edit them by hand",
 					e.Name, diff, info.ConfigFile))
+				return res, nil
 			}
-			return res, nil
+			// Its key and scheme are this daemon's, on this daemon's address:
+			// pin it as the daemon's own entry would be.
+			return repinKnownEntry(o, res, e, existing, target, info.CertFile)
 		case sameAddr:
 			return nil, fmt.Errorf("entry %q (config-file %s) already uses the API address %s, which %s also names; two daemons cannot listen on one address",
 				e.Name, e.ConfigFile, e.BaseURL, info.ConfigFile)
@@ -581,6 +591,99 @@ func certFilePin(path string) (string, error) {
 	}
 }
 
+// repinKnownEntry gives e, the existing entry for this daemon, the pin of the
+// daemon's certificate when it does not have it. An https entry with no pin is
+// broken: tdns-ncli refuses it. So is one whose pins are all of an earlier
+// certificate: every connection fails. Running config add again is how either
+// is fixed, the same way a new entry gets its pin.
+//
+// The entry keeps its other lines. tlsauth: becomes pin, and a rootca: line
+// goes (with pins the client does not read it). An entry that already
+// verified by pin keeps its old pins next to the new one, so a certificate
+// replaced on disk but not yet served still connects.
+//
+// The caller holds the CLI config's lock (unless o.DryRun).
+func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiDetails, target, certFile string) (*AddResult, error) {
+	if !strings.HasPrefix(strings.ToLower(e.BaseURL), "https://") {
+		return res, nil // the socket, or plain http: no certificate to pin
+	}
+	byPin := strings.EqualFold(e.TLSAuth, "pin") && len(e.Pins) > 0
+	pin, err := certFilePin(certFile)
+	if err != nil {
+		if byPin {
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"the daemon's certificate could not be read (%v), so entry %q's pins were not checked", err, e.Name))
+		} else {
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"entry %q has no pin, so tdns-ncli refuses it, and the daemon's certificate could not be pinned (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>)", e.Name, err))
+		}
+		return res, nil
+	}
+	if byPin && slices.Contains(e.Pins, pin) {
+		return res, nil
+	}
+
+	up := e
+	up.TLSAuth, up.RootCA, up.Pins = "pin", "", []string{pin}
+	if byPin {
+		up.Pins = append(append([]string(nil), e.Pins...), pin)
+		res.Notes = append(res.Notes, fmt.Sprintf(
+			"entry %q pinned an earlier certificate; its old pins stay until the daemon serves the new one -- remove them then", e.Name))
+	}
+	if e.RootCA != "" {
+		res.Notes = append(res.Notes, fmt.Sprintf(
+			"entry %q: its rootca: %s is removed; the pin replaces it", e.Name, e.RootCA))
+	}
+	res.Pinned, res.Entry, res.File, res.Canonical = true, up, target, up.Role == ""
+
+	byHand := func(why error) error {
+		return fmt.Errorf("entry %q does not pin the daemon's certificate, and config add cannot rewrite it in %s (%v). Use --file to name the file that holds it, or give it these lines by hand:\n\n   tlsauth: pin\n   pins:    %s\n",
+			e.Name, target, why, pinsFlow(up.Pins))
+	}
+	src, err := os.ReadFile(target)
+	if err != nil {
+		return nil, byHand(err)
+	}
+	out, err := repinEntryText(src, e.Name, up)
+	if err != nil {
+		return nil, byHand(err)
+	}
+
+	// The result must load as exactly the old list with this one entry
+	// changed: checked before anything is written, and again after.
+	want := append([]ApiDetails(nil), existing...)
+	for i := range want {
+		if reflect.DeepEqual(want[i], e) {
+			want[i] = up
+			break
+		}
+	}
+	fs, err := overlayFs(target, out)
+	if err != nil {
+		return nil, err
+	}
+	if got, gerr := readApiServers(o.CliConfig, fs); gerr != nil || !sameEntries(got, want) {
+		if gerr == nil {
+			gerr = errors.New("the edited file does not load as that entry pinned")
+		}
+		return nil, byHand(gerr)
+	}
+	if o.DryRun {
+		return res, nil
+	}
+	if err := writeFileAtomic(target, out); err != nil {
+		return nil, err
+	}
+	res.Wrote = true
+	if got, gerr := ReadApiServers(o.CliConfig); gerr != nil || !sameEntries(got, want) {
+		if uerr := writeFileAtomic(target, src); uerr != nil {
+			return nil, fmt.Errorf("pinning entry %q in %s left a CLI config that does not load as intended, and the change could NOT be undone (%v): restore %s by hand", e.Name, target, uerr, target)
+		}
+		return nil, fmt.Errorf("pinning entry %q in %s left a CLI config that does not load as intended; the change was undone", e.Name, target)
+	}
+	return res, nil
+}
+
 // hostPort returns the host:port of a base URL, lower-cased, or "".
 func hostPort(baseURL string) string {
 	u, err := url.Parse(baseURL)
@@ -700,7 +803,7 @@ func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
 	for _, n := range r.Notes {
 		fmt.Fprintf(w, "Note: %s\n", n)
 	}
-	if r.AlreadyKnown != "" {
+	if r.AlreadyKnown != "" && !r.Pinned {
 		fmt.Fprintf(w, "Already known as %q; nothing changed.\n", r.AlreadyKnown)
 		return
 	}
@@ -709,6 +812,10 @@ func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
 		kind = "canonical"
 	}
 	switch {
+	case dryRun && r.Pinned:
+		fmt.Fprintf(w, "Already known as %q (%s); would pin the daemon's certificate in %s:\n\n", r.AlreadyKnown, kind, r.File)
+	case r.Pinned:
+		fmt.Fprintf(w, "Already known as %q (%s); pinned the daemon's certificate in %s:\n\n", r.AlreadyKnown, kind, r.File)
 	case dryRun && r.Created:
 		fmt.Fprintf(w, "Would create %s with %q (%s):\n\n", r.File, r.Entry.Name, kind)
 	case dryRun:

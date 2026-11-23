@@ -273,8 +273,14 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 		case "":
 			if o.RootCA == "" {
 				if RequireServerVerification {
-					return nil, "", fmt.Errorf("entry %q (%s) does not verify the daemon: give it tlsauth: pin and the daemon's pins: (tdns-ncli config add writes them), or a rootca:, or say rootca: insecure",
-						e.Name, e.BaseURL)
+					// Pinning is how tdns-ncli verifies a daemon, and config
+					// add is how an entry gets its pin, a known one included.
+					daemon := "<the daemon's config file>"
+					if e.ConfigFile != "" {
+						daemon = shellQuote(e.ConfigFile)
+					}
+					return nil, "", fmt.Errorf("entry %q (%s) does not verify the daemon: it has no pin of the daemon's certificate. Pin it with: tdns-ncli config add %s",
+						e.Name, e.BaseURL, daemon)
 				}
 				o.RootCA = "insecure" // tdns-cli's long-standing default
 			}
