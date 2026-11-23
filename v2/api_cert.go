@@ -112,10 +112,8 @@ func EnsureDefaultApiCert(cfgfile string, addresses []string) (pin string, creat
 	switch {
 	case cerr == nil && kerr == nil:
 		return "", false, nil
-	case cerr == nil:
-		return "", false, fmt.Errorf("%s is there without its key %s: one file of the default API pair, which the daemon refuses", cert, key)
-	case kerr == nil:
-		return "", false, fmt.Errorf("%s is there without its certificate %s: one file of the default API pair, which the daemon refuses", key, cert)
+	case cerr == nil || kerr == nil:
+		return "", false, HalfApiCertPairError(cert, key, cerr == nil)
 	case !errors.Is(cerr, os.ErrNotExist):
 		return "", false, cerr
 	case !errors.Is(kerr, os.ErrNotExist):
@@ -126,6 +124,19 @@ func EnsureDefaultApiCert(cfgfile string, addresses []string) (pin string, creat
 		return "", false, err
 	}
 	return pin, true, nil
+}
+
+// HalfApiCertPairError is the refusal of one file of the default API pair
+// cert and key without the other: the certificate without its key when
+// certThere, else the key without its certificate. EnsureDefaultApiCert
+// returns it, and tdns-ncli config add, which must not call
+// EnsureDefaultApiCert for it (it writes a pair if the remaining file went
+// meanwhile), says the same.
+func HalfApiCertPairError(cert, key string, certThere bool) error {
+	if certThere {
+		return fmt.Errorf("%s is there without its key %s: one file of the default API pair, which the daemon refuses", cert, key)
+	}
+	return fmt.Errorf("%s is there without its certificate %s: one file of the default API pair, which the daemon refuses", key, cert)
 }
 
 // LookupCertDefaults is applyCertDefaults without writing anything: for a

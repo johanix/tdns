@@ -152,15 +152,24 @@ func TestEnsureDefaultApiCert(t *testing.T) {
 	if err != nil || !created || len(pin) != 44 {
 		t.Fatalf("first: %q %v %v", pin, created, err)
 	}
-	for p, want := range map[string]os.FileMode{filepath.Dir(cert): 0o755, key: 0o600, cert: 0o644} {
+	// The umask narrows the modes asked for (077 leaves 0700 and 0600): no
+	// bit outside them, and the key no group or other bit at all, and
+	// readable and writable by its owner.
+	for p, want := range map[string]os.FileMode{filepath.Dir(cert): 0o755, cert: 0o644} {
 		fi, err := os.Stat(p)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// The directory's mode is the umask's to narrow; the files' are not.
-		if got := fi.Mode().Perm(); got != want && !(p == filepath.Dir(cert) && got&^want == 0) {
-			t.Errorf("%s: mode %v, want %v", p, got, want)
+		if got := fi.Mode().Perm(); got&^want != 0 {
+			t.Errorf("%s: mode %v, want %v or narrower", p, got, want)
 		}
+	}
+	fi, err := os.Stat(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got&0o077 != 0 || got&0o600 != 0o600 {
+		t.Errorf("%s: mode %v, want 0600", key, got)
 	}
 	data, _ := os.ReadFile(cert)
 	block, _ := pem.Decode(data)
@@ -176,7 +185,7 @@ func TestEnsureDefaultApiCert(t *testing.T) {
 		t.Errorf("again: %q %v %v, want nothing done", pin, created, err)
 	}
 	os.Remove(cert)
-	if _, _, err := EnsureDefaultApiCert(cfg, nil); err == nil || !strings.Contains(err.Error(), "without its certificate") {
+	if _, _, err := EnsureDefaultApiCert(cfg, nil); err == nil || err.Error() != HalfApiCertPairError(cert, key, false).Error() || !strings.Contains(err.Error(), "without its certificate") {
 		t.Errorf("half a pair: err = %v", err)
 	}
 	if after, _ := os.ReadFile(key); string(after) != string(before) {
