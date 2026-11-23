@@ -477,6 +477,15 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 		addresses = nil
 	}
 
+	// No certificate (the default pair could not be written): no TLS
+	// listener, which could not start anyway; the socket below is served.
+	if len(addresses) > 0 && conf.ApiServer.UseTLS && conf.ApiServer.CertPending {
+		cert, _ := ApiCertPaths(conf.Internal.CfgFile)
+		lgApi.Error("management API: TCP listeners NOT started: no API certificate (the default pair could not be written); the local admin socket is still served",
+			"addresses", addresses, "cert", cert)
+		addresses = nil
+	}
+
 	// The local admin socket first, and independently of the TCP listeners:
 	// it is the way in that nothing else can take away, so a daemon with no
 	// apiserver.addresses still serves it, and a socket that cannot be served

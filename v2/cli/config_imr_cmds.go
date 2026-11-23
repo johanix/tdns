@@ -189,8 +189,10 @@ func runImrConfigCheck(role, explicitPath string, offline bool) {
 		rep.warn("Config file", "decode",
 			fmt.Sprintf("could not fully decode config into structs: %v", err), "")
 	}
-	// The socket the daemon serves, as ParseConfig fills it in.
+	// The socket the daemon serves, and its API certificate (looked for, not
+	// written), as ParseConfig fills them in.
 	cfg.ApiServer.Socket = tdns.ApiSocketPath(cfg.ApiServer.Socket, cfgPath)
+	cfg.ApiServer.LookupCertDefaults(cfgPath)
 
 	checkImrEngine(&cfg, rep)
 	checkImrTrustAnchors(&cfg, rep)
@@ -349,7 +351,9 @@ func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 		usetls = v.GetBool("apiserver.usetls")
 	}
 	if usetls {
-		if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
+		if cfg.ApiServer.CertPending {
+			rep.info(g, "cert", "no apiserver.certfile/keyfile: the daemon writes a self-signed pair (certs/<config name>-api.crt and .key, next to its config) when it first starts")
+		} else if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
 			rep.fail(g, "cert", "apiserver.usetls is true (the imr default) but certfile/keyfile are not set — the API listener fails to start",
 				"set apiserver.certfile/keyfile (see `tdns-cli imr config mwe`) or set usetls: false")
 		} else {

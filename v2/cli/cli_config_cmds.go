@@ -100,19 +100,34 @@ name (tdns-auth, tdns-agent, tdns-imr) and is reached as "auth", "agent",
 file (tdns-auth2.yaml -> auth2) unless --name says otherwise, reached as
 "tdns-ncli auth2 ...".
 
-The entry is the daemon's TCP address, its API key, and the pin of its
-certificate. It also records the daemon config's path as config-file:, so
-"tdns-ncli auth2 config check" checks the right daemon, and so that tdns-ncli,
-run as root, reaches the daemon over its local admin socket instead (admin, no
-key), which it finds in the daemon config: the CLI config does not repeat the
-socket's path. tdns-ncli --tcp uses the TCP address even then. A daemon with no
-TCP address gets an entry with config-file: only, which only root can use.
+The entry is the daemon's TCP address, the pin of its certificate, and
+authmethod: certificate: it authenticates with your client certificate (the
+CLI config's client: block, else the default pair; created, as by
+"tdns-ncli client init", if there is none). It also records the daemon
+config's path as config-file:, so "tdns-ncli auth2 config check" checks the
+right daemon, and so that tdns-ncli, run as root, reaches the daemon over its
+local admin socket instead (admin, no credentials), which it finds in the
+daemon config. tdns-ncli --tcp uses the TCP address even then. A daemon with
+no TCP address gets an entry with config-file: only, which only root can use.
 
-The CLI config is
-created, mode 0600, if it does not exist. Adding a daemon that is already
-there changes nothing, except that an https entry that does not pin the
-daemon's current certificate is given that pin (tlsauth: pin): an entry
-without one is refused, so this is how an old entry is fixed.`,
+The certificate works only once the daemon's access file lists its pin. When
+config add can write the daemon's files (root on its host, in practice), it
+enrolls the pin there (read-write), as "<daemon> client add" does; creates the
+access file and adds access-file: to the daemon config's apiserver: block if
+it names none (with an access file the API key over TCP is read-write, not
+admin, TCP clients need TLS 1.3, and admin is the local socket's alone); and
+reloads the daemon over its local socket. A daemon that is not running reads
+the files when it next starts. When the certificate cannot be set up from
+here, a new entry is refused with the lines that fix it (to run on the
+daemon's host), and no entry is written with the API key.
+
+The CLI config is created, mode 0600, if it does not exist. Adding a daemon
+that is already there keeps its entry, brought up to date: an https entry
+that does not pin the daemon's current certificate is given that pin
+(tlsauth: pin), and an entry that uses the API key is switched to the
+certificate (authmethod: certificate, its apikey: line removed) once the
+daemon accepts it. If it cannot be set up, the entry keeps the key, and
+config add says what the certificate still needs.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			o.Ctx = cmd.Context()
@@ -122,7 +137,12 @@ without one is refused, so this is how an old entry is fixed.`,
 			o.CommandWordTaken = func(n string) bool { return findChild(root, n) != nil }
 
 			res, err := AddDaemonConfig(o)
-			if err != nil {
+			var r addRefusal
+			switch {
+			case errors.As(err, &r):
+				printRefusal(os.Stderr, r)
+				os.Exit(1)
+			case err != nil:
 				fatalf("%v", err)
 			}
 			printAddResult(os.Stdout, res, o.DryRun, o.CliConfig)
@@ -178,6 +198,15 @@ type AddResult struct {
 	// certificate, so it was (or, with DryRun, would be) given tlsauth: pin
 	// and that pin. Entry is the entry as rewritten.
 	Pinned bool
+	// Cert is what config add found, and did, about the operator's client
+	// certificate on the daemon's side; nil for an entry with no TCP address.
+	Cert *CertSetup
+	// Switched: the entry AlreadyKnown names used the API key, and now uses
+	// the client certificate (authmethod: certificate, no apikey: line).
+	Switched bool
+	// KeyKept: the entry AlreadyKnown names keeps the API key, because the
+	// certificate could not be made to work (Cert says why, and what would).
+	KeyKept bool
 	// File is the file the entry was (or would be) added to.
 	File string
 	// Created: File did not exist and was created.
@@ -230,11 +259,12 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return nil, fmt.Errorf("%s has only a local admin socket (%s), which only root can open; run config add as root", info.ConfigFile, info.Socket)
 	case tcpURL != "" && info.ApiKey == "":
 		// ReadDaemonApi lets an empty key through when there is a socket.
-		// A TCP entry without one would fail every request.
-		return nil, fmt.Errorf("%s: apiserver.apikey is not set, so the entry would have no key to send over TCP; set it", info.ConfigFile)
+		// The entry sends no key (it is a certificate entry), but the daemon
+		// requires apiserver.apikey with a TCP API.
+		return nil, fmt.Errorf("%s: apiserver.apikey is not set, which the daemon requires; set it", info.ConfigFile)
 	case info.Socket != "" && tcpURL != "":
 		res.Notes = append(res.Notes, fmt.Sprintf(
-			"run as root, tdns-ncli reaches this daemon over its local admin socket %s (admin, no key), found through config-file:; tdns-ncli --tcp uses the TCP address", info.Socket))
+			"as root, tdns-ncli uses this daemon's local admin socket\n%s (admin, no key);\ntdns-ncli --tcp uses the TCP address", info.Socket))
 	}
 	baseURL := tcpURL
 	if len(info.Addresses) > 1 {
@@ -312,6 +342,8 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			wantKey, wantURL = "", socketURL
 		case e.BaseURL == "" && sameAddr:
 			wantKey = "" // a socket-only entry: no key
+		case strings.EqualFold(e.AuthMethod, "certificate"):
+			wantKey = e.ApiKey // it sends no key, so the daemon's is not its concern
 		}
 		switch {
 		case sameFile && sameAddr:
@@ -323,7 +355,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 					e.Name, diff, info.ConfigFile)
 			}
 			res.AlreadyKnown = e.Name
-			return repinKnownEntry(o, res, e, existing, target, info.CertFile)
+			return repinKnownEntry(o, res, e, existing, target, info)
 		case sameFile:
 			return nil, fmt.Errorf("entry %q already points at %s but with a different API address (%s, the config says %s); edit or remove that entry by hand",
 				e.Name, info.ConfigFile, e.BaseURL, baseURL)
@@ -341,7 +373,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			}
 			// Its key and scheme are this daemon's, on this daemon's address:
 			// pin it as the daemon's own entry would be.
-			return repinKnownEntry(o, res, e, existing, target, info.CertFile)
+			return repinKnownEntry(o, res, e, existing, target, info)
 		case sameAddr:
 			return nil, fmt.Errorf("entry %q (config-file %s) already uses the API address %s, which %s also names; two daemons cannot listen on one address",
 				e.Name, e.ConfigFile, e.BaseURL, info.ConfigFile)
@@ -362,7 +394,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	} else if strings.HasPrefix(entry.BaseURL, "https://") && entry.RootCA == "" {
 		// The daemon's own certificate, pinned: no CA, no name check, and
 		// nothing for the operator to do.
-		if pin, err := certFilePin(info.CertFile); err != nil {
+		if pin, err := daemonCertPin(info); err != nil {
 			res.Notes = append(res.Notes, fmt.Sprintf(
 				"could not pin the daemon's certificate (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>), or tdns-ncli will refuse to connect", err))
 		} else {
@@ -371,6 +403,21 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	}
 	if err := chooseEntryName(&entry, res, info.Role, existing, o); err != nil {
 		return nil, err
+	}
+
+	// A new TCP entry authenticates with the operator's client certificate,
+	// never with the API key: the daemon must accept the certificate, or
+	// config add must be able to make it (planCert; done below, once the
+	// entry is known to fit in the CLI config).
+	var cert *CertSetup
+	if tcpURL != "" {
+		cert = planCert(o, info, commandWord(entry, info.Role))
+		res.Cert = cert
+		if !cert.usable() {
+			return nil, cert.refusal(fmt.Sprintf("not adding %s: a new entry uses your client certificate, and %s",
+				info.ConfigFile, cert.whyNot()))
+		}
+		entry.ApiKey, entry.AuthMethod = "", "certificate"
 	}
 
 	// Compared resolved, as the locks are: --config and --file may name the
@@ -424,8 +471,25 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return res, nil
 	}
 
+	// The daemon's side first: an entry that names a certificate the
+	// daemon does not accept would only be refused.
+	if cert != nil && cert.changesDaemon() {
+		if err := cert.apply(o.Ctx); err != nil {
+			return nil, cert.refusal(fmt.Sprintf("not adding %s: setting up your client certificate on the daemon failed: %v",
+				info.ConfigFile, err))
+		}
+	}
+
+	// What the daemon's side got for an entry that is not written after
+	// all is put back as well.
+	daemonBack := func() string {
+		if cert == nil || !cert.changesDaemon() {
+			return ""
+		}
+		return " On the daemon's side, " + cert.rollback() + "."
+	}
 	if err := writeFileAtomic(target, out); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%v.%s", err, daemonBack())
 	}
 	res.Wrote = true
 
@@ -440,9 +504,9 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		}
 		msg := hidden(gerr, "does not load")
 		if uerr != nil {
-			return nil, fmt.Errorf("%s The change could NOT be undone (%v): restore %s by hand.", msg, uerr, target)
+			return nil, fmt.Errorf("%s The change could NOT be undone (%v): restore %s by hand.%s", msg, uerr, target, daemonBack())
 		}
-		return nil, fmt.Errorf("%s The change was undone.", msg)
+		return nil, fmt.Errorf("%s The change was undone.%s", msg, daemonBack())
 	}
 	return res, nil
 }
@@ -492,7 +556,7 @@ func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []
 		entry.Name = canonical
 		res.Canonical = true
 		res.Notes = append(res.Notes, fmt.Sprintf(
-			"there was no %s entry yet, so this daemon is the canonical one (tdns-ncli %s ...); --name adds it as an extra instance instead",
+			"there was no %s entry yet, so this is the canonical one (tdns-ncli %s ...); --name adds an extra instance instead",
 			canonical, role))
 	}
 	asInstance := func(name string) error {
@@ -579,24 +643,109 @@ func certFilePin(path string) (string, error) {
 	}
 }
 
-// repinKnownEntry gives e, the existing entry for this daemon, the pin of the
-// daemon's certificate when it does not have it. An https entry with no pin is
-// broken: tdns-ncli refuses it. So is one whose pins are all of an earlier
-// certificate: every connection fails. Running config add again is how either
-// is fixed, the same way a new entry gets its pin.
+// repinKnownEntry brings e, the existing entry for this daemon, up to date.
 //
-// The entry keeps its other lines. tlsauth: becomes pin, and a rootca: line
+// The pin: an https entry with no pin of the daemon's certificate is broken
+// (tdns-ncli refuses it), and so is one whose pins are all of an earlier
+// certificate (every connection fails). It gets the pin of the certificate the
+// daemon serves, as a new entry does. tlsauth: becomes pin, and a rootca: line
 // goes (with pins the client does not read it). An entry that already
 // verified by pin keeps its old pins next to the new one, so a certificate
 // replaced on disk but not yet served still connects.
 //
+// The client certificate: an entry that uses the API key is switched to it
+// (authmethod: certificate, its apikey: line gone) when the daemon accepts the
+// certificate, or config add can make it (planCert). Otherwise it keeps the
+// key, which works at both ends (changedSettings checked that the key is the
+// daemon's), and the result says what the certificate still needs. An entry
+// that already uses the certificate is kept working the same way.
+//
+// The entry keeps its other lines. The edit is made and checked before the
+// daemon's side is touched, so an entry config add cannot rewrite leaves the
+// daemon as it was.
+//
 // The caller holds the CLI config's lock (unless o.DryRun).
-func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiDetails, target, certFile string) (*AddResult, error) {
-	if !strings.HasPrefix(strings.ToLower(e.BaseURL), "https://") {
-		return res, nil // the socket, or plain http: no certificate to pin
+func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiDetails, target string, info *DaemonApi) (*AddResult, error) {
+	res.Entry = e
+	lower := strings.ToLower(e.BaseURL)
+	https := strings.HasPrefix(lower, "https://")
+	if !https && !strings.HasPrefix(lower, "http://") {
+		return res, nil // the local socket: no certificate to pin, and none to present
 	}
+	up, repin := e, false
+	if https {
+		up, repin = pinnedEntry(res, e, info)
+	}
+
+	c := planCert(o, info, commandWord(e, info.Role))
+	res.Cert = c
+	isCert := strings.EqualFold(e.AuthMethod, "certificate")
+	toCert := !isCert && c.usable()
+	if !isCert && !toCert {
+		if err := keyFallback(e, c); err != nil {
+			return nil, err
+		}
+		res.KeyKept = true
+	}
+
+	write, err := knownEdit(o, res, e, up, existing, target, entryEdit{repin: repin, toCert: toCert})
+	if err != nil && toCert && c.state != certWorks {
+		// The entry cannot be rewritten to use the certificate: it keeps
+		// the key, if the daemon takes it, and the daemon's side is left as
+		// it is.
+		if ferr := keyFallback(e, c); ferr != nil {
+			return nil, ferr
+		}
+		res.Notes = append(res.Notes, fmt.Sprintf("entry %q cannot be switched to your certificate in %s (%v); it keeps the API key", e.Name, target, err))
+		toCert, res.KeyKept, res.Cert = false, true, nil
+		write, err = knownEdit(o, res, e, up, existing, target, entryEdit{repin: repin})
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if !o.DryRun && res.Cert != nil && c.changesDaemon() && (isCert || toCert) {
+		if aerr := c.apply(o.Ctx); aerr != nil && toCert {
+			// The key, then, which works.
+			if err := keyFallback(e, c); err != nil {
+				return nil, err
+			}
+			toCert, res.KeyKept = false, true
+			if write, err = knownEdit(o, res, e, up, existing, target, entryEdit{repin: repin}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if repin {
+		res.Pinned = true
+	}
+	if toCert {
+		up.AuthMethod, up.ApiKey = "certificate", ""
+		res.Switched = true
+	}
+	if repin || toCert {
+		res.Entry, res.File, res.Canonical = up, target, up.Role == ""
+	}
+	if write == nil || o.DryRun {
+		return res, nil
+	}
+	if err := write(); err != nil {
+		// The daemon's side changed for an entry that was not written:
+		// put it back too.
+		if res.Cert != nil && (res.Cert.didReload || len(res.Cert.undo) > 0) {
+			return nil, fmt.Errorf("%v; on the daemon's side, %s", err, res.Cert.rollback())
+		}
+		return nil, err
+	}
+	return res, nil
+}
+
+// pinnedEntry is e verifying the daemon by the pin of the certificate in
+// certFile, and whether that changes e. When the certificate cannot be read,
+// e stays as it is and a note says what that means for it.
+func pinnedEntry(res *AddResult, e ApiDetails, info *DaemonApi) (ApiDetails, bool) {
 	byPin := strings.EqualFold(e.TLSAuth, "pin") && len(e.Pins) > 0
-	pin, err := certFilePin(certFile)
+	pin, err := daemonCertPin(info)
 	if err != nil {
 		switch {
 		case byPin:
@@ -616,12 +765,11 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 			res.Notes = append(res.Notes, fmt.Sprintf(
 				"entry %q does not pin the daemon's certificate, and config add could not pin it (%v); the entry's verification is unchanged", e.Name, err))
 		}
-		return res, nil
+		return e, false
 	}
 	if byPin && slices.Contains(e.Pins, pin) {
-		return res, nil
+		return e, false
 	}
-
 	up := e
 	up.TLSAuth, up.RootCA, up.Pins = "pin", "", []string{pin}
 	if byPin {
@@ -633,23 +781,63 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 		res.Notes = append(res.Notes, fmt.Sprintf(
 			"entry %q: its rootca: %s is removed; the pin replaces it", e.Name, e.RootCA))
 	}
-	res.Pinned, res.Entry, res.File, res.Canonical = true, up, target, up.Role == ""
+	return up, true
+}
 
+// keyFallback says whether known entry e may keep the API key now that the
+// certificate does not work: only when the key works at both ends. That it is
+// the daemon's key the caller has checked (changedSettings); here, that the
+// daemon takes the key at all: not when its access file turns it off or is
+// named but missing, and not when that cannot be told (an access file
+// config add cannot read).
+func keyFallback(e ApiDetails, c *CertSetup) error {
+	switch {
+	case c.keyOff:
+		return c.refusal(fmt.Sprintf("entry %q uses the API key, which the daemon does not take (%s), and %s",
+			e.Name, c.keyWhy, c.whyNot()))
+	case c.keyUnknown != "":
+		return c.refusal(fmt.Sprintf("entry %q uses the API key, and whether the daemon takes it cannot be told (%s), and %s",
+			e.Name, c.keyUnknown, c.whyNot()))
+	}
+	return nil
+}
+
+// knownEdit prepares the rewrite of e, the entry for this daemon, as up with
+// what ed says changed (with ed.toCert: authmethod: certificate, no key). The
+// edit is made, and the CLI config loaded with it laid over the file, before
+// anything is written: it must load as the old list with that one entry
+// changed. It returns the write, which checks again after writing and undoes
+// a change that does not load as intended; nil when ed changes nothing.
+func knownEdit(o AddOptions, res *AddResult, e, up ApiDetails, existing []ApiDetails, target string, ed entryEdit) (func() error, error) {
+	if !ed.repin && !ed.toCert {
+		return nil, nil
+	}
+	if ed.toCert {
+		up.AuthMethod, up.ApiKey = "certificate", ""
+	}
 	byHand := func(why error) error {
-		return fmt.Errorf("entry %q does not pin the daemon's certificate, and config add cannot rewrite it in %s (%v). Use --file to name the file that holds it, or give it these lines by hand:\n\n   tlsauth: pin\n   pins:    %s\n",
-			e.Name, target, why, pinsFlow(up.Pins))
+		var lines []string
+		if ed.toCert {
+			lines = append(lines, "   authmethod: certificate")
+		}
+		if ed.repin {
+			lines = append(lines, "   tlsauth: pin", "   pins:    "+pinsFlow(up.Pins))
+		}
+		if ed.toCert {
+			lines = append(lines, "and take out its apikey: line.")
+		}
+		return fmt.Errorf("entry %q needs changing, and config add cannot rewrite it in %s (%v), so nothing was changed. Use --file to name the file that holds it, or give it these lines by hand:\n\n%s\n",
+			e.Name, target, why, strings.Join(lines, "\n"))
 	}
 	src, err := os.ReadFile(target)
 	if err != nil {
 		return nil, byHand(err)
 	}
-	out, err := repinEntryText(src, e.Name, up)
+	out, err := editEntryText(src, e.Name, up, ed)
 	if err != nil {
 		return nil, byHand(err)
 	}
 
-	// The result must load as exactly the old list with this one entry
-	// changed: checked before anything is written, and again after.
 	want := append([]ApiDetails(nil), existing...)
 	for i := range want {
 		if reflect.DeepEqual(want[i], e) {
@@ -663,24 +851,32 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 	}
 	if got, gerr := readApiServers(o.CliConfig, fs); gerr != nil || !sameEntries(got, want) {
 		if gerr == nil {
-			gerr = errors.New("the edited file does not load as that entry pinned")
+			gerr = errors.New("the edited file does not load as that entry changed")
 		}
 		return nil, byHand(gerr)
 	}
-	if o.DryRun {
-		return res, nil
-	}
-	if err := writeFileAtomic(target, out); err != nil {
-		return nil, err
-	}
-	res.Wrote = true
-	if got, gerr := ReadApiServers(o.CliConfig); gerr != nil || !sameEntries(got, want) {
-		if uerr := writeFileAtomic(target, src); uerr != nil {
-			return nil, fmt.Errorf("pinning entry %q in %s left a CLI config that does not load as intended, and the change could NOT be undone (%v): restore %s by hand", e.Name, target, uerr, target)
+	return func() error {
+		if err := writeFileAtomic(target, out); err != nil {
+			return err
 		}
-		return nil, fmt.Errorf("pinning entry %q in %s left a CLI config that does not load as intended; the change was undone", e.Name, target)
+		res.Wrote = true
+		if got, gerr := ReadApiServers(o.CliConfig); gerr != nil || !sameEntries(got, want) {
+			if uerr := writeFileAtomic(target, src); uerr != nil {
+				return fmt.Errorf("changing entry %q in %s left a CLI config that does not load as intended, and the change could NOT be undone (%v): restore %s by hand", e.Name, target, uerr, target)
+			}
+			return fmt.Errorf("changing entry %q in %s left a CLI config that does not load as intended; the change was undone", e.Name, target)
+		}
+		return nil
+	}, nil
+}
+
+// commandWord is the word that reaches entry e of a role daemon: the role
+// for the canonical entry, the entry's name for an instance.
+func commandWord(e ApiDetails, role string) string {
+	if e.Role == "" {
+		return role
 	}
-	return res, nil
+	return e.Name
 }
 
 // hostPort returns the host:port of a base URL, lower-cased, or "". A URL
@@ -802,39 +998,82 @@ func shellQuote(s string) string {
 }
 
 // maskKey returns e with the API key hidden, for anything printed. The key is
-// the one secret in the entry and has no business in terminal scrollback.
+// the one secret in the entry and has no business in terminal scrollback. An
+// entry without one (a certificate entry) shows no apikey: line at all.
 func maskKey(e ApiDetails) ApiDetails {
-	e.ApiKey = "********"
+	if e.ApiKey != "" {
+		e.ApiKey = "********"
+	}
 	return e
 }
 
+// printAddResult says what config add did: the verdict first, then the entry
+// as written, what was done about the client certificate, and the notes.
+// Lines are wrapped to textWidth, notes with their continuation lines
+// indented, and a "\n" in a note begins a line of its own.
 func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
-	for _, n := range r.Notes {
-		fmt.Fprintf(w, "Note: %s\n", n)
+	usesCert := strings.EqualFold(r.Entry.AuthMethod, "certificate")
+	notes := func() {
+		if len(r.Notes) > 0 {
+			fmt.Fprintln(w)
+		}
+		for _, n := range r.Notes {
+			writeWrapped(w, "Note: ", "  ", strings.Split(n, "\n")...)
+		}
 	}
-	if r.AlreadyKnown != "" && !r.Pinned {
-		fmt.Fprintf(w, "Already known as %q; nothing changed.\n", r.AlreadyKnown)
+	if r.AlreadyKnown != "" && !r.Pinned && !r.Switched {
+		daemonSide := r.Cert != nil && r.Cert.changesDaemon() && r.Cert.failed == nil && usesCert
+		trouble := r.KeyKept && r.Cert != nil && (r.Cert.failed != nil || !r.Cert.usable())
+		switch {
+		case trouble:
+			// The verdict and why, said once.
+			r.Cert.writeTrouble(w, fmt.Sprintf("Already known as %q; it keeps the API key: your certificate does not work here", r.AlreadyKnown), true)
+		case r.KeyKept:
+			fmt.Fprintf(w, "Already known as %q; it keeps the API key.\n", r.AlreadyKnown)
+		case daemonSide:
+			fmt.Fprintf(w, "Already known as %q; the entry is unchanged.\n", r.AlreadyKnown)
+		default:
+			fmt.Fprintf(w, "Already known as %q; nothing changed.\n", r.AlreadyKnown)
+		}
+		printCert(w, r.Cert, usesCert, r.KeyKept, dryRun, trouble)
+		notes()
 		return
 	}
 	kind := "instance of " + r.Entry.Role
 	if r.Canonical {
 		kind = "canonical"
 	}
+	what := "pinned the daemon's certificate"
 	switch {
-	case dryRun && r.Pinned:
-		fmt.Fprintf(w, "Already known as %q (%s); would pin the daemon's certificate in %s:\n\n", r.AlreadyKnown, kind, r.File)
-	case r.Pinned:
-		fmt.Fprintf(w, "Already known as %q (%s); pinned the daemon's certificate in %s:\n\n", r.AlreadyKnown, kind, r.File)
-	case dryRun && r.Created:
-		fmt.Fprintf(w, "Would create %s with %q (%s):\n\n", r.File, r.Entry.Name, kind)
-	case dryRun:
-		fmt.Fprintf(w, "Would add %q (%s) to %s:\n\n", r.Entry.Name, kind, r.File)
-	case r.Created:
-		fmt.Fprintf(w, "Created %s with %q (%s):\n\n", r.File, r.Entry.Name, kind)
-	default:
-		fmt.Fprintf(w, "Added %q (%s) to %s:\n\n", r.Entry.Name, kind, r.File)
+	case r.Switched && r.Pinned:
+		what = "switched it to your client certificate, and pinned the daemon's,"
+	case r.Switched:
+		what = "switched it to your client certificate"
 	}
+	var verdict string
+	switch {
+	case dryRun && r.Switched:
+		verdict = fmt.Sprintf("Already known as %q (%s); would have %s in %s:", r.AlreadyKnown, kind, what, r.File)
+	case r.Switched:
+		verdict = fmt.Sprintf("Already known as %q (%s); %s in %s:", r.AlreadyKnown, kind, what, r.File)
+	case dryRun && r.Pinned:
+		verdict = fmt.Sprintf("Already known as %q (%s); would pin the daemon's certificate in %s:", r.AlreadyKnown, kind, r.File)
+	case r.Pinned:
+		verdict = fmt.Sprintf("Already known as %q (%s); pinned the daemon's certificate in %s:", r.AlreadyKnown, kind, r.File)
+	case dryRun && r.Created:
+		verdict = fmt.Sprintf("Would create %s with %q (%s):", r.File, r.Entry.Name, kind)
+	case dryRun:
+		verdict = fmt.Sprintf("Would add %q (%s) to %s:", r.Entry.Name, kind, r.File)
+	case r.Created:
+		verdict = fmt.Sprintf("Created %s with %q (%s):", r.File, r.Entry.Name, kind)
+	default:
+		verdict = fmt.Sprintf("Added %q (%s) to %s:", r.Entry.Name, kind, r.File)
+	}
+	writeWrapped(w, "", "", verdict)
+	fmt.Fprintln(w)
 	fmt.Fprint(w, renderEntry(maskKey(r.Entry), itemLayout{indent: 3, gap: 1, valueCol: defValueCol}))
+	printCert(w, r.Cert, usesCert, r.KeyKept, dryRun, false)
+	notes()
 	if dryRun {
 		return
 	}

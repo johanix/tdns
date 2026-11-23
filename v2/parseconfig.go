@@ -91,8 +91,10 @@ func decodeConfigFile(cfgfile string, conf *Config) (mapstructure.Metadata, []st
 	if err := decodeConfigMap(configMap, conf, &md); err != nil {
 		return md, includedFiles, aliasConflicts, err
 	}
-	// As ParseConfig does: the socket a daemon on this file serves.
+	// As ParseConfig does: the socket a daemon on this file serves, and its
+	// API certificate (only looked for here, never written).
 	conf.ApiServer.Socket = ApiSocketPath(conf.ApiServer.Socket, cfgfile)
+	conf.ApiServer.applyCertDefaults(cfgfile, false)
 	return md, includedFiles, aliasConflicts, nil
 }
 
@@ -606,6 +608,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// The local admin socket: apiserver.socket, none for no socket, or by
 	// default one named after this config file (ApiSocketPath).
 	conf.ApiServer.Socket = ApiSocketPath(conf.ApiServer.Socket, cfgfile)
+	// The API certificate: certfile/keyfile, or the config file's default
+	// pair, written self-signed at the daemon's first start (not on a
+	// reload: the running listeners keep the key they started with).
+	conf.ApiServer.applyCertDefaults(cfgfile, !reload)
 
 	// peers: block — validate/normalize definitions; a broken peer does not
 	// abort (zones referencing it are quarantined at expansion in ParseZones).
