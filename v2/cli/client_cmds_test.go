@@ -280,11 +280,13 @@ func TestClientAddWithoutAccessFileConfigured(t *testing.T) {
 // After a change the daemon is asked to reload, through the entry's client.
 func TestClientEditReloadsTheDaemon(t *testing.T) {
 	var got []string
+	var runs string // the config the fake daemon says it runs
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var cp tdns.ConfigPost
 		json.NewDecoder(r.Body).Decode(&cp)
 		got = append(got, r.URL.Path+" "+cp.Command)
-		json.NewEncoder(w).Encode(tdns.ConfigResponse{Msg: "Config reloaded. Access file reloaded: 1 client(s), keyauth on."})
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: runs,
+			Msg: "Config reloaded. Access file reloaded: 1 client(s), keyauth on."})
 	}))
 	defer srv.Close()
 	e := newAccessEnv(t, true, srv.URL+"/api/v1")
@@ -293,16 +295,42 @@ func TestClientEditReloadsTheDaemon(t *testing.T) {
 	if err := InitApiClients(apiConfig); err != nil {
 		t.Fatal(err)
 	}
-	if err := editAccessFile(context.Background(), "auth", accessEditOpts{}, true, func(af *tdns.AccessFile) (string, error) {
-		af.Clients = append(af.Clients, tdns.AccessClient{Name: "anna", Pin: pinOf("anna"), Role: "read-only"})
-		return "added", nil
-	}); err != nil {
+	add := func(name string) error {
+		return editAccessFile(context.Background(), "auth", accessEditOpts{}, true, func(af *tdns.AccessFile) (string, error) {
+			af.Clients = append(af.Clients, tdns.AccessClient{Name: name, Pin: pinOf(name), Role: "read-only"})
+			return "added", nil
+		})
+	}
+
+	// The daemon that answers says it runs this config: checked, written,
+	// reloaded.
+	runs = e.daemonCfg
+	if err := add("anna"); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0] != "/api/v1/config reload" {
-		t.Errorf("daemon saw %v, want one config reload", got)
+	if len(got) != 2 || got[0] != "/api/v1/config status" || got[1] != "/api/v1/config reload" {
+		t.Errorf("daemon saw %v, want a status check, then one config reload", got)
 	}
-	_ = e
+
+	// Another daemon answers (one that holds this config's address, say):
+	// refused before anything is written, and nothing is reloaded.
+	before, _ := os.ReadFile(e.access)
+	got, runs = nil, filepath.Join(e.dir, "other-daemon.yaml")
+	if err := add("bob"); err == nil || !strings.Contains(err.Error(), "runs "+runs) {
+		t.Errorf("another daemon answering: err = %v, want a refusal naming its config", err)
+	}
+	if after, _ := os.ReadFile(e.access); string(after) != string(before) {
+		t.Error("the access file was written though another daemon answered")
+	}
+	if len(got) != 1 {
+		t.Errorf("daemon saw %v, want only the status check", got)
+	}
+
+	// A daemon that does not say which config it runs is refused too.
+	runs = ""
+	if err := add("carl"); err == nil || !strings.Contains(err.Error(), "does not say") {
+		t.Errorf("a daemon that does not say: err = %v", err)
+	}
 }
 
 func TestNewApiClientForVerification(t *testing.T) {

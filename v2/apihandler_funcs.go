@@ -522,6 +522,15 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Imr = Globals.ImrEngine.StatusReport()
 			resp.Proc = CollectProcStatus()
 			resp.Access = conf.apiAccessStatus()
+			// Absolute, from this daemon's own working directory: a client
+			// that edits this daemon's files on its host checks that the
+			// daemon it reaches is the one whose config it edits.
+			if cfg := conf.Internal.CfgFile; cfg != "" {
+				if abs, err := filepath.Abs(cfg); err == nil {
+					cfg = abs
+				}
+				resp.ConfigFile = cfg
+			}
 			health := "Configuration is ok"
 			if len(resp.ServerErrors) > 0 {
 				health = fmt.Sprintf("DEGRADED: %d active error(s)", len(resp.ServerErrors))

@@ -376,6 +376,16 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 		fmt.Printf("Would write %s:\n\n%s", t.File, out)
 		return nil
 	}
+	// The reload goes to whatever answers on the daemon's socket (or the
+	// role's entry). If that is another daemon (one that holds this
+	// config's socket path, say), writing here and reloading there would
+	// change nothing the operator meant. So before writing, the daemon
+	// that would be reloaded must say it runs this config.
+	if t.Configured && !o.NoReload {
+		if err := verifyRunningDaemon(role, t); err != nil {
+			return err
+		}
+	}
 	if err := writeAccessFile(t.File, old, out, t.DaemonConfig); err != nil {
 		return err
 	}
@@ -427,6 +437,28 @@ func configToDaemon(role, socket string, post tdns.ConfigPost) (tdns.ConfigRespo
 		return tdns.ConfigResponse{}, err
 	}
 	return SendConfigCommand(api, post)
+}
+
+// verifyRunningDaemon checks that the daemon a reload would reach (socket
+// first, as configToDaemon) runs t's daemon config. Nothing running at all is
+// fine: the next start reads the file. A daemon that answers but runs another
+// config, or does not say which, is refused before anything is written.
+func verifyRunningDaemon(role string, t *accessTarget) error {
+	resp, err := configToDaemon(role, t.Socket, tdns.ConfigPost{Command: "status"})
+	if err != nil {
+		if socketUnusable(err) {
+			return nil
+		}
+		return fmt.Errorf("cannot ask the daemon which config it runs (%v); not editing %s", err, t.File)
+	}
+	if resp.ConfigFile == "" {
+		return fmt.Errorf("the daemon that answers does not say which config it runs; not editing %s", t.File)
+	}
+	if resolvedPath(resp.ConfigFile) != resolvedPath(t.DaemonConfig) {
+		return fmt.Errorf("the daemon that answers runs %s, not %s (do two daemons share a socket or an address?); not editing %s",
+			resp.ConfigFile, t.DaemonConfig, t.File)
+	}
+	return nil
 }
 
 // socketUnusable says whether a request over the local socket failed because
