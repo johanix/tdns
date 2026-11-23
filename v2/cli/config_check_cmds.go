@@ -2032,12 +2032,14 @@ func checkApiAccessFile(cfg *tdns.Config, rep *ccReport) {
 		keyauth = "off"
 	}
 	rep.pass(g, "access-file", fmt.Sprintf("%s: %d client(s), keyauth %s", path, len(af.Clients), keyauth))
-	// Allowed (design 3.6), but worth saying: the TCP listener is plaintext.
+	// The daemon refuses this (validateAccessSettings): an access file
+	// requires TLS on TCP; the local admin socket is the way in when TLS is
+	// broken. Said here with the fix, in this group.
 	if len(cfg.ApiServer.Addresses) > 0 && !cfg.ApiServer.UseTLS {
-		msg := "apiserver.usetls is false: the access file's certificate clients cannot authenticate on TCP"
+		msg := "apiserver.usetls is false: with an access file the daemon refuses a plaintext TCP API (certificate clients could not authenticate"
 		if af.KeyAuthOn() {
-			msg += ", and the API key crosses the network in clear"
+			msg += ", and the API key would cross the network in clear"
 		}
-		rep.warn(g, "usetls", msg, "set apiserver.usetls: true, or drop apiserver.addresses to use the local admin socket only")
+		rep.fail(g, "usetls", msg+")", "set apiserver.usetls: true; when TLS is broken use the local admin socket, or drop apiserver.addresses for a socket-only daemon")
 	}
 }

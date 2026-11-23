@@ -145,7 +145,9 @@ func TestImrConfigCheckSocketOnly(t *testing.T) {
 
 // config check decodes with viper, which does not apply the daemon's own
 // default usetls: true. Without applyDaemonDefaults an access-file config with
-// no usetls: line was warned about as plaintext while the daemon served TLS.
+// no usetls: line was reported as plaintext while the daemon served TLS. An
+// explicit usetls: false with an access file is a failure: the daemon refuses
+// it.
 func TestConfigCheckUseTLSDefault(t *testing.T) {
 	dir := t.TempDir()
 	access := filepath.Join(dir, "access.yaml")
@@ -154,7 +156,7 @@ func TestConfigCheckUseTLSDefault(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		name, usetls string
-		warn         bool
+		fail         bool
 	}{
 		{"no usetls line", "", false},
 		{"usetls: true", "   usetls: true\n", false},
@@ -174,14 +176,14 @@ func TestConfigCheckUseTLSDefault(t *testing.T) {
 			applyDaemonDefaults(v, &cfg)
 			rep := newCCReport()
 			checkApiAccessFile(&cfg, rep)
-			var warned bool
+			var failed bool
 			for _, r := range rep.byGroup["API access file"] {
-				if r.check == "usetls" && r.level == ccWARN {
-					warned = true
+				if r.check == "usetls" && r.level == ccFAIL {
+					failed = true
 				}
 			}
-			if warned != tc.warn {
-				t.Errorf("usetls warning = %v, want %v (UseTLS decoded as %v)", warned, tc.warn, cfg.ApiServer.UseTLS)
+			if failed != tc.fail {
+				t.Errorf("usetls failure = %v, want %v (UseTLS decoded as %v)", failed, tc.fail, cfg.ApiServer.UseTLS)
 			}
 		})
 	}

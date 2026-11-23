@@ -66,19 +66,28 @@ func TestAccessFileKeyAuth(t *testing.T) {
 }
 
 func TestValidateAccessSettings(t *testing.T) {
+	const access, sock = "/etc/tdns/tdns-auth-access.yaml", "/var/run/tdns/tdns-auth.sock"
+	tcp := []string{"127.0.0.1:8989"}
 	for _, tc := range []struct {
-		access, socket string
-		wantErr        string
+		name    string
+		conf    ApiServerConf
+		wantErr string
 	}{
-		{},
-		{access: "/etc/tdns/tdns-auth-access.yaml", socket: "/var/run/tdns/tdns-auth.sock"},
-		{access: "/etc/tdns/tdns-auth-access.yaml", wantErr: "requires apiserver.socket"},
-		{access: "access.yaml", socket: "/var/run/tdns/tdns-auth.sock", wantErr: "absolute"},
-		{socket: "/var/run/tdns/tdns-auth.sock"},
+		{name: "nothing", conf: ApiServerConf{}},
+		{name: "access file and socket", conf: ApiServerConf{AccessFile: access, Socket: sock}},
+		{name: "access file, no socket", conf: ApiServerConf{AccessFile: access}, wantErr: "requires apiserver.socket"},
+		{name: "relative access file", conf: ApiServerConf{AccessFile: "access.yaml", Socket: sock}, wantErr: "absolute"},
+		{name: "socket only", conf: ApiServerConf{Socket: sock}},
+		// An access file requires TLS on TCP, loopback included: the
+		// socket, not plaintext, is the way in when TLS is broken.
+		{name: "access file, TCP with TLS", conf: ApiServerConf{AccessFile: access, Socket: sock, Addresses: tcp, UseTLS: true}},
+		{name: "access file, TCP without TLS", conf: ApiServerConf{AccessFile: access, Socket: sock, Addresses: tcp}, wantErr: "requires TLS"},
+		{name: "access file, no TCP, usetls false", conf: ApiServerConf{AccessFile: access, Socket: sock}},
+		{name: "no access file, TCP without TLS", conf: ApiServerConf{Socket: sock, Addresses: tcp}},
 	} {
-		err := ApiServerConf{AccessFile: tc.access, Socket: tc.socket}.validateAccessSettings()
+		err := tc.conf.validateAccessSettings()
 		if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
-			t.Errorf("access %q socket %q: err = %v, want %q", tc.access, tc.socket, err, tc.wantErr)
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.wantErr)
 		}
 	}
 }

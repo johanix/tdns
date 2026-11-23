@@ -331,11 +331,13 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	}
 	apiListenersStarted.Store(listenerSettingsOf(conf.ApiServer))
 
-	// Design 3.6 allows an access file with usetls: false (a socket-only
-	// daemon with keyauth off, say), but it should not go unnoticed.
+	// An access file requires TLS on TCP (validateAccessSettings refuses
+	// the config). A caller that did not validate still gets no plaintext
+	// TCP API: the listeners stay off, and the socket below is served.
 	if len(addresses) > 0 && conf.ApiServer.AccessFile != "" && !conf.ApiServer.UseTLS {
-		lgApi.Warn("management API: usetls is false, so the access file's certificate clients cannot authenticate on TCP, and the API key, if keyauth allows it, crosses the network in clear",
+		lgApi.Error("management API: TCP listeners NOT started: apiserver.access-file requires TLS and usetls is false; the local admin socket is still served",
 			"addresses", addresses, "access-file", conf.ApiServer.AccessFile)
+		addresses = nil
 	}
 
 	// The local admin socket first, and independently of the TCP listeners:

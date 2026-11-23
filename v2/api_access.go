@@ -175,5 +175,14 @@ func (a ApiServerConf) validateAccessSettings() error {
 	if a.AccessFile != "" && !filepath.IsAbs(a.AccessFile) {
 		return fmt.Errorf("apiserver.access-file %q is not an absolute path", a.AccessFile)
 	}
+	// No plaintext network API with an access file: its certificate clients
+	// could not authenticate, and the API key would cross the network in
+	// clear. usetls: false was the way in when the TLS setup was broken; the
+	// local admin socket is that way in now. (Loopback too: the rule is
+	// simpler without an exception, and the socket covers the local case.)
+	if a.AccessFile != "" && len(a.Addresses) > 0 && !a.UseTLS {
+		return fmt.Errorf("apiserver.access-file %s requires TLS on the TCP API, and apiserver.usetls is false: certificate clients could not authenticate, and the API key would cross the network in clear. When TLS is broken, use the local admin socket; for a daemon without TCP, leave out apiserver.addresses",
+			a.AccessFile)
+	}
 	return nil
 }
