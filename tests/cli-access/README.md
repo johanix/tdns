@@ -17,6 +17,7 @@ against one build; #1165 is verdicted on the socket suite alone.
 |---|---|
 | Root gets admin over the socket with no key (tdns-auth and tdns-imr; an admin command; stop) | S1a S1b S1c S12 |
 | The socket is 0600 root's in a 0700 directory | S2 |
+| The socket file is gone after a stop over the socket, and after SIGTERM | S12b S12c |
 | A non-root user cannot open the socket and gets an error naming it, not a silent fall-back to TCP | S3a S3b |
 | TCP without a key, or with a wrong one, gets 403 (loopback and from the CLI host, both daemons) | S4a–S4e (S4f is the control: with the key it answers) |
 | Nothing sent over TCP passes as a socket request (spoofed headers, absolute-form URL) | S5a S5b S5c |
@@ -26,6 +27,10 @@ against one build; #1165 is verdicted on the socket suite alone.
 | A socket that cannot be served (a regular file in the way, a directory open to others) leaves the daemon running and shows as a server error (`config status -v`) | S9a S9b |
 | A relative or too-long socket path is refused, the daemon keeps running, `config add` warns | S10a S10b S10c |
 | A daemon with no `apiserver.addresses` still serves the socket (tdns-auth, tdns-imr) | S11a S11b S11c S11d |
+| A socket-only config needs the key but no certfile/keyfile (no `addresses` line, or `addresses: []`); with addresses it needs both | S13a–S13d |
+| A socket entry sends no key, whatever its authmethod says | S14 |
+| `config add` refuses a TCP entry (`--tcp`, or non-root) when the daemon config has no key; root still gets the socket entry | S15a–S15c |
+| `config check`: a socket-only config with a relative or too-long socket path fails, with addresses it warns; no certificate is needed without addresses; tdns-imr needs the key in every case | S16a–S16e |
 
 ### #1167, access roles: `run.sh verify roles`
 

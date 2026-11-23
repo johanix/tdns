@@ -25,9 +25,13 @@ case $ADDR in *:*) HP="[$ADDR]" ;; *) HP=$ADDR ;; esac
 CLI="$BIN/tdns-cli"
 [ -x "$CLI" ] || die "no $CLI: run.sh use ARMDIR first"
 
-# The rig's own files, wherever this was run from.
-mkdir -p "$SRC"
-[ "$HERE" = "$SRC" ] || cp -R "$HERE"/. "$SRC"/
+# The rig's own files, wherever this was run from. $SRC is replaced, not
+# merged into: a REVISION left from an earlier copy would label this one.
+if [ "$HERE" != "$SRC" ]; then
+	rm -rf "$SRC"
+	mkdir -p "$SRC"
+	cp -R "$HERE"/. "$SRC"/
+fi
 
 rm -rf "$RIG/auth" "$RIG/imr" "$RIG/ncli" "$CERTS" "$LOG" "$RIG/home"
 mkdir -p "$RIG/auth" "$RIG/imr" "$RIG/ncli" "$CERTS" "$LOG" "$RIG/runs" "$RIG/home"

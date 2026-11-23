@@ -252,7 +252,89 @@ suite_socket() {
 	sleep 3
 	[ -z "$(pids_of auth)" ]
 	judge S12 "root: stop over the socket stops the daemon" $? "$o"
-	[ -S "$AUTH_SOCK" ] && echo "INFO socket file left behind by a stop (cosmetic; the design notes it)" | tee -a "$RES"
+	o2=$(out S12b-gone); ls -l /var/run/tdns/ > "$o2" 2>&1
+	[ ! -e "$AUTH_SOCK" ]
+	judge S12b "...and the socket file is gone after it" $? "$o2"
+	daemon_start auth; daemon_stop auth
+	o2=$(out S12c-gone-term); ls -l /var/run/tdns/ > "$o2" 2>&1
+	[ ! -e "$AUTH_SOCK" ]
+	judge S12c "after SIGTERM the socket file is gone too" $? "$o2"
+
+	# ---- socket-only configs need the key but no certificate -------------------------
+	daemon_stop auth; daemon_stop imr
+	variant nocert-noaddr '/^   addresses: .*8991/d; /^   certfile: /d; /^   keyfile: /d'
+	variant nocert-empty 's|^   addresses: .*8991.*|   addresses:  []|; /^   certfile: /d; /^   keyfile: /d'
+	for v in noaddr:S13a empty:S13b; do
+		c=$RIG/auth/v-nocert-${v%%:*}.yaml
+		o=$(out "${v#*:}-nocert-${v%%:*}")
+		if daemon_start auth "$c"; then
+			{ grep -n 'addresses\|certfile\|keyfile' "$c"; ncli_root root auth ping; } > "$o" 2>&1
+		else
+			sed -n "\\|=== .* start $c|,\$p" "$LOG/tdns-auth.stdout" > "$o"
+		fi
+		[ "$(rc_of "$o")" = 0 ] && grep -q 'pongs:' "$o"
+		judge "${v#*:}" "socket-only ($([ "${v%%:*}" = empty ] && echo 'addresses: []' || echo 'no addresses line')), no certfile/keyfile: tdns-auth starts and serves the socket" $? "$o"
+		daemon_stop auth
+	done
+	variant nocert '/^   certfile: /d; /^   keyfile: /d'
+	o=$(out S13c-nocert)
+	if daemon_start auth "$RIG/auth/v-nocert.yaml"; then r=1; echo "tdns-auth started" > "$o"; daemon_stop auth
+	else sed -n "\\|=== .* start $RIG/auth/v-nocert.yaml|,\$p" "$LOG/tdns-auth.stdout" > "$o"; grep -q 'CertFile' "$o"; r=$?; fi
+	judge S13c "addresses but no certfile/keyfile: tdns-auth refuses the config" $r "$o"
+	variant nokey-sockonly '/^   addresses: .*8991/d; /^   certfile: /d; /^   keyfile: /d; /^   apikey: /d'
+	o=$(out S13d-nokey-sockonly)
+	if daemon_start auth "$RIG/auth/v-nokey-sockonly.yaml"; then r=1; echo "tdns-auth started" > "$o"; daemon_stop auth
+	else sed -n "\\|=== .* start $RIG/auth/v-nokey-sockonly.yaml|,\$p" "$LOG/tdns-auth.stdout" > "$o"; grep -q 'ApiKey' "$o"; r=$?; fi
+	judge S13d "socket-only with no apikey: tdns-auth refuses the config" $r "$o"
+
+	# ---- a socket entry sends no key, whatever its authmethod says --------------------
+	daemon_start auth
+	f=$RIG/ncli/sockkey.yaml
+	printf 'apiservers:\n   - name:        tdns-auth\n     baseurl:     unix://%s\n     authmethod:  X-API-Key\n     config-file: %s\n' \
+		"$AUTH_SOCK" "$RIG/auth/tdns-auth.yaml" > "$f"; chmod 0600 "$f"
+	o=$(out S14-sockkey)
+	{ cat "$f"; ncli_root sockkey auth ping; ncli_root sockkey auth config reload-tsig; } > "$o" 2>&1
+	[ "$(grep -c '^RC=0$' "$o")" = 2 ] && grep -q 'pongs:' "$o"
+	judge S14 "root: a socket entry with authmethod X-API-Key and no apikey works (ping, reload-tsig)" $? "$o"
+	daemon_stop auth
+
+	# ---- config add refuses a TCP entry with no key to send ---------------------------
+	variant nokey '/^   apikey: /d'
+	f=$RIG/ncli/add-nokey.yaml; rm -f "$f"
+	o=$(out S15-nokey-root); ncli_root add-nokey config add "$RIG/auth/v-nokey.yaml" > "$o" 2>&1
+	cat "$f" >> "$o" 2>/dev/null
+	[ "$(rc_of "$o")" = 0 ] && grep -q "baseurl: *unix://$AUTH_SOCK" "$f" && ! grep -qi 'apikey' "$f"
+	judge S15a "config add as root, daemon config with no apikey: the socket entry, no key" $? "$o"
+	f=$RIG/ncli/add-nokey-tcp.yaml; rm -f "$f"
+	o=$(out S15-nokey-tcp); ncli_root add-nokey-tcp config add --tcp "$RIG/auth/v-nokey.yaml" > "$o" 2>&1
+	[ "$(rc_of "$o")" != 0 ] && grep -qi 'apikey is not set' "$o" && [ ! -e "$f" ]
+	judge S15b "...with --tcp: refused, naming apiserver.apikey, nothing written" $? "$o"
+	f=$RIG/home/add-nokey.yaml; rm -f "$f"
+	o=$(out S15-nokey-user); ncli_user home/add-nokey config add "$RIG/auth/v-nokey.yaml" > "$o" 2>&1
+	[ "$(rc_of "$o")" != 0 ] && grep -qi 'apikey is not set' "$o" && [ ! -e "$f" ]
+	judge S15c "...as a non-root user: refused, naming apiserver.apikey, nothing written" $? "$o"
+
+	# ---- config check on the socket path and the key ----------------------------------
+	long=/var/run/tdns/$(printf '%0100d' 0).sock
+	variant chk-sorel "/^   addresses: .*8991/d; $(sockline tdns-auth.sock)"
+	variant chk-solong "/^   addresses: .*8991/d; $(sockline "$long")"
+	variant chk-addrrel "$(sockline tdns-auth.sock)"
+	sed '/^   apikey: /d; /^   addresses: .*8992/d' "$RIG/imr/tdns-imr.yaml" > "$RIG/imr/v-chk-nokey.yaml"
+	o=$(out S16a-sorel); ncli_root root auth config check --offline --serverconfig "$RIG/auth/v-chk-sorel.yaml" > "$o" 2>&1
+	[ "$(rc_of "$o")" != 0 ] && grep -q 'FAIL *addresses.*not an absolute path' "$o"
+	judge S16a "config check: socket-only with a relative socket path FAILs" $? "$o"
+	o=$(out S16b-solong); ncli_root root auth config check --offline --serverconfig "$RIG/auth/v-chk-solong.yaml" > "$o" 2>&1
+	[ "$(rc_of "$o")" != 0 ] && grep -q 'FAIL *addresses.*bytes' "$o"
+	judge S16b "config check: socket-only with a socket path over 100 bytes FAILs" $? "$o"
+	o=$(out S16c-addrrel); ncli_root root auth config check --offline --serverconfig "$RIG/auth/v-chk-addrrel.yaml" > "$o" 2>&1
+	grep -q 'WARN *socket.*not an absolute path' "$o" && ! grep -q 'FAIL *addresses' "$o"
+	judge S16c "config check: with addresses, a relative socket path WARNs" $? "$o"
+	o=$(out S16d-nocert); ncli_root root auth config check --offline --serverconfig "$RIG/auth/v-nocert-noaddr.yaml" > "$o" 2>&1
+	grep -q 'INFO *cert' "$o" && ! grep -q 'FAIL *cert' "$o"
+	judge S16d "config check: socket-only with no certfile/keyfile is not a failure" $? "$o"
+	o=$(out S16e-imr-nokey); ncli_root root imr config check --offline --serverconfig "$RIG/imr/v-chk-nokey.yaml" > "$o" 2>&1
+	[ "$(rc_of "$o")" != 0 ] && grep -q 'FAIL *apikey' "$o"
+	judge S16e "config check (tdns-imr): no apikey FAILs, also with no addresses" $? "$o"
 
 	daemon_stop auth; daemon_stop imr
 	rm -rf "$VDIR"
