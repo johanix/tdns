@@ -449,7 +449,7 @@ func verifyRunningDaemon(role string, t *accessTarget) error {
 		resp, err := SendConfigCommand(tdns.NewClient(role, "unix://"+t.Socket, "", "none", ""), post)
 		switch {
 		case err == nil:
-			return runsConfig(resp, t)
+			return editRunsConfig(resp, t)
 		case !nothingListening(err):
 			return fmt.Errorf("cannot ask the daemon on %s which config it runs (%v), so it is not known whose file this is; not editing %s (run as root, or as the daemon's user)",
 				t.Socket, err, t.File)
@@ -471,7 +471,7 @@ func verifyRunningDaemon(role string, t *accessTarget) error {
 	resp, err := SendConfigCommand(api, post)
 	switch {
 	case err == nil:
-		return runsConfig(resp, t)
+		return editRunsConfig(resp, t)
 	case nothingListening(err):
 		return nil
 	}
@@ -486,13 +486,23 @@ func nothingListening(err error) bool {
 }
 
 // runsConfig checks that the daemon whose status is resp runs t's config.
+// It says only what was found; an edit adds that it is not editing
+// (editRunsConfig), a read-only list does not.
 func runsConfig(resp tdns.ConfigResponse, t *accessTarget) error {
 	if resp.ConfigFile == "" {
-		return fmt.Errorf("the daemon that answers does not say which config it runs; not editing %s", t.File)
+		return fmt.Errorf("the daemon that answers does not say which config it runs")
 	}
 	if resolvedPath(resp.ConfigFile) != resolvedPath(t.DaemonConfig) {
-		return fmt.Errorf("the daemon that answers runs %s, not %s (do two daemons share a socket or an address?); not editing %s",
-			resp.ConfigFile, t.DaemonConfig, t.File)
+		return fmt.Errorf("the daemon that answers runs %s, not %s (do two daemons share a socket or an address?)",
+			resp.ConfigFile, t.DaemonConfig)
+	}
+	return nil
+}
+
+// editRunsConfig is runsConfig for an edit: a mismatch refuses it.
+func editRunsConfig(resp tdns.ConfigResponse, t *accessTarget) error {
+	if err := runsConfig(resp, t); err != nil {
+		return fmt.Errorf("%v; not editing %s", err, t.File)
 	}
 	return nil
 }

@@ -378,6 +378,9 @@ func TestClientListChecksWhoAnswered(t *testing.T) {
 	if strings.Contains(out, "runs this file") || !strings.Contains(out, "Running policy unknown") {
 		t.Errorf("another daemon with the same policy:\n%s", out)
 	}
+	if strings.Contains(out, "not editing") {
+		t.Errorf("a read-only list says it is not editing:\n%s", out)
+	}
 }
 
 // An entry that cannot be built (here: a CA file that is gone) is not the
