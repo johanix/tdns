@@ -169,8 +169,9 @@ func closeApiSockets() {
 // serveApiSocket serves router on the unix socket at path until done is
 // closed. Requests on it carry FromLocalSocket, which the key check honours in
 // place of a key. The socket file is mode 0600 and goes away when the daemon
-// stops (closeApiSockets) or done is closed, whichever comes first.
-func serveApiSocket(path string, router http.Handler, done <-chan struct{}) error {
+// stops (closeApiSockets) or done is closed, whichever comes first. A failure
+// to serve after it has started is passed to failed, if set; a stop is not.
+func serveApiSocket(path string, router http.Handler, done <-chan struct{}, failed func(error)) error {
 	if err := prepareApiSocket(path); err != nil {
 		return err
 	}
@@ -193,11 +194,7 @@ func serveApiSocket(path string, router http.Handler, done <-chan struct{}) erro
 			return context.WithValue(ctx, localSocketKey{}, true)
 		},
 	}
-	go func() {
-		if err := ln.serveFailure(srv.Serve(ln)); err != nil {
-			lgApi.Error("local admin socket stopped", "socket", path, "err", err)
-		}
-	}()
+	go serveOn(srv, ln, path, failed)
 	go func() {
 		<-done
 		if err := srv.Shutdown(context.Background()); err != nil {
@@ -212,4 +209,25 @@ func serveApiSocket(path string, router http.Handler, done <-chan struct{}) erro
 	}()
 	lgApi.Info("serving the management API on the local admin socket", "socket", path)
 	return nil
+}
+
+// serveOn runs srv on ln until it ends. A failure, as opposed to a stop
+// (serveFailure), is logged and passed to failed, if set.
+func serveOn(srv *http.Server, ln *apiSocketListener, path string, failed func(error)) {
+	if err := ln.serveFailure(srv.Serve(ln)); err != nil {
+		lgApi.Error("local admin socket stopped", "socket", path, "err", err)
+		if failed != nil {
+			failed(err)
+		}
+	}
+}
+
+// apiSocketFailed records that the admin socket at sock stopped serving after
+// it had started: a server error (Transport/ApiSocket), so `config status`
+// shows the daemon as degraded and no longer as serving the socket.
+func apiSocketFailed(conf *Config, sock string) func(error) {
+	return func(err error) {
+		conf.Internal.ServerErrors.set(ErrCatTransport, ErrSubApiSocket,
+			fmt.Sprintf("local admin socket %s stopped serving: %v", sock, err))
+	}
 }

@@ -249,13 +249,15 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	// it is the way in that nothing else can take away, so a daemon with no
 	// apiserver.addresses still serves it, and a socket that cannot be served
 	// is an error the operator sees, not a reason to stop the daemon.
+	// A socket that stops serving later is such an error too (apiSocketFailed).
 	if sock := conf.ApiServer.Socket; sock != "" {
-		if err := serveApiSocket(sock, router, done); err != nil {
+		// Cleared before the socket starts, not after: a failure the server
+		// reports once it runs must not be undone by a late clear here.
+		conf.Internal.ServerErrors.clear(ErrCatTransport, ErrSubApiSocket)
+		if err := serveApiSocket(sock, router, done, apiSocketFailed(conf, sock)); err != nil {
 			lgApi.Error("management API: the local socket is not served", "socket", sock, "err", err)
 			conf.Internal.ServerErrors.set(ErrCatTransport, ErrSubApiSocket,
 				fmt.Sprintf("local admin socket %s not served: %v", sock, err))
-		} else {
-			conf.Internal.ServerErrors.clear(ErrCatTransport, ErrSubApiSocket)
 		}
 	}
 

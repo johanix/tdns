@@ -141,7 +141,7 @@ func TestMainLoopRemovesTheAdminSocket(t *testing.T) {
 			// The server's own shutdown waits on a channel nothing closes
 			// until after the check, as when the process has already gone.
 			late := make(chan struct{})
-			if err := serveApiSocket(sock, rtr, late); err != nil {
+			if err := serveApiSocket(sock, rtr, late, nil); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Lstat(sock); err != nil {
@@ -171,16 +171,26 @@ func (acceptFails) Accept() (net.Conn, error) { return nil, errors.New("accept f
 func (acceptFails) Close() error              { return nil }
 func (acceptFails) Addr() net.Addr            { return &net.UnixAddr{Name: "fails", Net: "unix"} }
 
-// A socket that stops serving because Accept failed is a failure to log, even
-// though Serve closes the listener on its way out. Only a stop asked for by
-// closeApiSockets is quiet.
+// A socket that stops serving because Accept failed is a failure: a server
+// error (Transport/ApiSocket) that `config status` shows, even though Serve
+// closes the listener on its way out. Only a stop asked for by
+// closeApiSockets leaves no error.
 func TestApiSocketServeFailureIsReported(t *testing.T) {
-	ln := &apiSocketListener{Listener: acceptFails{}}
-	err := (&http.Server{}).Serve(ln)
-	if ln.serveFailure(err) == nil {
-		t.Errorf("Serve ended with %v when Accept failed, and it was not reported", err)
+	newConf := func() *Config {
+		conf := &Config{}
+		conf.Internal.ServerErrors = NewServerErrorRegistry()
+		return conf
 	}
 
+	failing := newConf()
+	ln := &apiSocketListener{Listener: acceptFails{}}
+	serveOn(&http.Server{}, ln, "fails", apiSocketFailed(failing, "fails"))
+	errs := failing.Internal.ServerErrors.List()
+	if len(errs) != 1 || errs[0].Category != ErrCatTransport || errs[0].Subtype != ErrSubApiSocket {
+		t.Errorf("after Accept failed for good: server errors = %v, want one Transport/ApiSocket", errs)
+	}
+
+	stopping := newConf()
 	dir := shortTempDir(t)
 	raw, err := net.Listen("unix", filepath.Join(dir, "stop.sock"))
 	if err != nil {
@@ -190,13 +200,16 @@ func TestApiSocketServeFailureIsReported(t *testing.T) {
 	apiSockets.Lock()
 	apiSockets.lns = append(apiSockets.lns, stopped)
 	apiSockets.Unlock()
-	served := make(chan error, 1)
-	go func() { served <- (&http.Server{}).Serve(stopped) }()
+	served := make(chan struct{})
+	go func() {
+		serveOn(&http.Server{}, stopped, "stop.sock", apiSocketFailed(stopping, "stop.sock"))
+		close(served)
+	}()
 	closeApiSockets()
 	select {
-	case err := <-served:
-		if f := stopped.serveFailure(err); f != nil {
-			t.Errorf("a stop asked for by closeApiSockets was reported as a failure: %v", f)
+	case <-served:
+		if errs := stopping.Internal.ServerErrors.List(); len(errs) != 0 {
+			t.Errorf("a stop asked for by closeApiSockets left server errors: %v", errs)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Serve did not return after closeApiSockets")
@@ -216,7 +229,7 @@ func TestApiSocketServesWithoutKey(t *testing.T) {
 	sock := filepath.Join(shortTempDir(t), "admin.sock")
 	done := make(chan struct{})
 	t.Cleanup(func() { close(done) })
-	if err := serveApiSocket(sock, rtr, done); err != nil {
+	if err := serveApiSocket(sock, rtr, done, nil); err != nil {
 		t.Fatal(err)
 	}
 	if fi, err := os.Lstat(sock); err != nil || fi.Mode().Perm() != 0o600 {

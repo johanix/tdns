@@ -98,7 +98,7 @@ func newAuthEnv(t *testing.T, accessYAML string, certs map[string]tls.Certificat
 
 	done := make(chan struct{})
 	t.Cleanup(func() { close(done) })
-	if err := serveApiSocket(e.sock, rtr, done); err != nil {
+	if err := serveApiSocket(e.sock, rtr, done, nil); err != nil {
 		t.Fatal(err)
 	}
 	return e
