@@ -91,13 +91,14 @@ func runPing(role string, cmd *cobra.Command, args []string) {
 }
 
 // pingHow is how api reached its daemon and who the daemon took it for:
-// "admin socket <path>" on the local admin socket (always admin), else
+// the socket's path on the local admin socket (always admin; with -v the
+// daemon's "client: admin socket" says it is the socket), else
 // "TLS" (or "no TLS") and the role, and for a certificate client its name:
 // "TLS, admin", "TLS, read-write, certificate anna". A daemon that does not
 // report the role in parts gets its own sentence instead.
 func pingHow(api *tdns.ApiClient, pr tdns.PingResponse) string {
 	if api.Socket != "" {
-		return "admin socket " + api.Socket
+		return api.Socket
 	}
 	parts := []string{"no TLS"}
 	if strings.HasPrefix(strings.ToLower(api.BaseUrl), "https://") {

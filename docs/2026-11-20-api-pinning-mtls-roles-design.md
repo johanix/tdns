@@ -210,8 +210,8 @@ and not in the CLI config.** The owner's rulings:
   address even then, to see what a remote operator sees. Since the choice is
   made at run time, `ping` (the test of how access is authenticated) says on
   its one line which way it went and as whom, from the daemon's reply (role,
-  via and identity, in parts): `pong (admin socket /var/run/tdns/etc_tdns_tdns-auth.yaml.sock)
-  from tdns-auth @ host: ...`, `pong (TLS, admin) from ...` for the key,
+  via and identity, in parts): `pong (/var/run/tdns/etc_tdns_tdns-auth.yaml.sock)
+  from tdns-auth @ host: ...` on the socket (its path), `pong (TLS, admin) from ...` for the key,
   `pong (TLS, read-write, certificate anna) from ...`. With `-v` the line ends
   in the client the daemon saw: its address over TCP, `admin socket` on the
   socket (which has no remote address). An entry tdns-ncli
