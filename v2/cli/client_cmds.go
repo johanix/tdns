@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"net/url"
 	"os"
 	"os/user"
@@ -506,7 +507,47 @@ func configToDaemon(role, socket, daemonConfig string, post tdns.ConfigPost) (td
 	if err != nil {
 		return tdns.ConfigResponse{}, err
 	}
+	// The entry's daemon may be another one: it must refuse the request
+	// before acting on it (a reload, say) unless it runs daemonConfig.
+	if daemonConfig != "" {
+		api = expectingConfig(api, daemonConfig)
+	}
 	return SendConfigCommand(api, post)
+}
+
+// expectingConfig is a copy of api whose every request names cfg as the
+// config the daemon must run (tdns.ExpectConfigFileHeader), as a socket
+// client made with ExpectConfigFile does. A daemon that runs another refuses
+// the request (412) before acting on it. api itself is not changed: it is
+// the client every other command of the role uses.
+func expectingConfig(api *tdns.ApiClient, cfg string) *tdns.ApiClient {
+	if abs, err := filepath.Abs(cfg); err == nil {
+		cfg = abs
+	}
+	c := *api
+	hc := http.Client{}
+	if api.Client != nil {
+		hc = *api.Client
+	}
+	base := hc.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	hc.Transport = headerTransport{base: base, key: tdns.ExpectConfigFileHeader, value: cfg}
+	c.Client = &hc
+	return &c
+}
+
+// headerTransport sets one header on every request.
+type headerTransport struct {
+	base       http.RoundTripper
+	key, value string
+}
+
+func (t headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set(t.key, t.value)
+	return t.base.RoundTrip(r)
 }
 
 // verifyRunningDaemon checks that the daemon on t's socket, and the one the

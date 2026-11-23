@@ -259,8 +259,9 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return nil, fmt.Errorf("%s has only a local admin socket (%s), which only root can open; run config add as root", info.ConfigFile, info.Socket)
 	case tcpURL != "" && info.ApiKey == "":
 		// ReadDaemonApi lets an empty key through when there is a socket.
-		// A TCP entry without one would fail every request.
-		return nil, fmt.Errorf("%s: apiserver.apikey is not set, so the entry would have no key to send over TCP; set it", info.ConfigFile)
+		// The entry sends no key (it is a certificate entry), but the daemon
+		// requires apiserver.apikey with a TCP API.
+		return nil, fmt.Errorf("%s: apiserver.apikey is not set, which the daemon requires; set it", info.ConfigFile)
 	case info.Socket != "" && tcpURL != "":
 		res.Notes = append(res.Notes, fmt.Sprintf(
 			"as root, tdns-ncli uses this daemon's local admin socket\n%s (admin, no key);\ntdns-ncli --tcp uses the TCP address", info.Socket))
@@ -479,8 +480,16 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		}
 	}
 
+	// What the daemon's side got for an entry that is not written after
+	// all is put back as well.
+	daemonBack := func() string {
+		if cert == nil || !cert.changesDaemon() {
+			return ""
+		}
+		return " On the daemon's side, " + cert.rollback() + "."
+	}
 	if err := writeFileAtomic(target, out); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%v.%s", err, daemonBack())
 	}
 	res.Wrote = true
 
@@ -495,9 +504,9 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		}
 		msg := hidden(gerr, "does not load")
 		if uerr != nil {
-			return nil, fmt.Errorf("%s The change could NOT be undone (%v): restore %s by hand.", msg, uerr, target)
+			return nil, fmt.Errorf("%s The change could NOT be undone (%v): restore %s by hand.%s", msg, uerr, target, daemonBack())
 		}
-		return nil, fmt.Errorf("%s The change was undone.", msg)
+		return nil, fmt.Errorf("%s The change was undone.%s", msg, daemonBack())
 	}
 	return res, nil
 }
@@ -682,7 +691,11 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 	write, err := knownEdit(o, res, e, up, existing, target, entryEdit{repin: repin, toCert: toCert})
 	if err != nil && toCert && c.state != certWorks {
 		// The entry cannot be rewritten to use the certificate: it keeps
-		// the key, and the daemon's side is left as it is.
+		// the key, if the daemon takes it, and the daemon's side is left as
+		// it is.
+		if ferr := keyFallback(e, c); ferr != nil {
+			return nil, ferr
+		}
 		res.Notes = append(res.Notes, fmt.Sprintf("entry %q cannot be switched to your certificate in %s (%v); it keeps the API key", e.Name, target, err))
 		toCert, res.KeyKept, res.Cert = false, true, nil
 		write, err = knownEdit(o, res, e, up, existing, target, entryEdit{repin: repin})
@@ -716,7 +729,15 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 	if write == nil || o.DryRun {
 		return res, nil
 	}
-	return res, write()
+	if err := write(); err != nil {
+		// The daemon's side changed for an entry that was not written:
+		// put it back too.
+		if res.Cert != nil && (res.Cert.didReload || len(res.Cert.undo) > 0) {
+			return nil, fmt.Errorf("%v; on the daemon's side, %s", err, res.Cert.rollback())
+		}
+		return nil, err
+	}
+	return res, nil
 }
 
 // pinnedEntry is e verifying the daemon by the pin of the certificate in
@@ -766,13 +787,19 @@ func pinnedEntry(res *AddResult, e ApiDetails, info *DaemonApi) (ApiDetails, boo
 // keyFallback says whether known entry e may keep the API key now that the
 // certificate does not work: only when the key works at both ends. That it is
 // the daemon's key the caller has checked (changedSettings); here, that the
-// daemon's access file does not turn the key off.
+// daemon takes the key at all: not when its access file turns it off or is
+// named but missing, and not when that cannot be told (an access file
+// config add cannot read).
 func keyFallback(e ApiDetails, c *CertSetup) error {
-	if !c.keyAuthOff {
-		return nil
+	switch {
+	case c.keyOff:
+		return c.refusal(fmt.Sprintf("entry %q uses the API key, which the daemon does not take (%s), and %s",
+			e.Name, c.keyWhy, c.whyNot()))
+	case c.keyUnknown != "":
+		return c.refusal(fmt.Sprintf("entry %q uses the API key, and whether the daemon takes it cannot be told (%s), and %s",
+			e.Name, c.keyUnknown, c.whyNot()))
 	}
-	return c.refusal(fmt.Sprintf("entry %q uses the API key, which %s turns off (keyauth: false), and %s",
-		e.Name, c.t.File, c.whyNot()))
+	return nil
 }
 
 // knownEdit prepares the rewrite of e, the entry for this daemon, as up with

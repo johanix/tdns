@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -51,24 +52,39 @@ type CertSetup struct {
 	name      string // the name the access file gets for it
 
 	t          *accessTarget
-	accessOld  []byte // the access file as read; nil when it does not exist
-	keyAuthOff bool   // the access file says keyauth: false
 	listedAs   string // the access file already lists the pin, as this name
+	listedRole string // and with this role
 	noTLS      bool   // the daemon's TCP API has no TLS
 	noSocket   bool   // the daemon serves no local admin socket
+
+	// Whether the daemon takes the API key on TCP: keyOff (keyWhy says
+	// why not), or keyUnknown (why it cannot be told). Neither: it does.
+	keyOff     bool
+	keyWhy     string
+	keyUnknown string
 
 	// What making it work takes.
 	addPin, createFile, nameIt bool
 	daemonOld, daemonNew       []byte // the daemon config, and with access-file: added
 	running                    bool   // the daemon on the socket runs this config
+	dryRun                     bool
 
 	state certState
 	why   string // why it cannot work (certCannot)
 
 	// What apply did.
-	enrolledAs string // the name the pin was added under
-	reloaded   string // the daemon's reply to the reload
-	failed     error  // apply failed, and put everything back
+	enrolledAs string     // the name the pin was added under
+	reloaded   string     // the daemon's reply to the reload
+	failed     error      // apply failed, and put everything back
+	undo       []fileUndo // how to put back the files apply wrote
+	didReload  bool       // apply reloaded the daemon
+}
+
+// fileUndo puts back one file apply wrote: old, or no file when old is nil;
+// only while the file still holds wrote, so a later edit is not lost.
+type fileUndo struct {
+	path       string
+	wrote, old []byte
 }
 
 // usable says whether the certificate works, or config add can make it work.
@@ -76,8 +92,8 @@ func (c *CertSetup) usable() bool {
 	return c.state == certWorks || c.state == certCanEnable
 }
 
-// changesDaemon says whether making the certificate work changes the daemon's
-// files.
+// changesDaemon says whether making the certificate work takes config add
+// doing something on the daemon's side (writing its files, reloading it).
 func (c *CertSetup) changesDaemon() bool {
 	return c.state == certCanEnable
 }
@@ -90,11 +106,35 @@ func (c *CertSetup) cannot(why string) *CertSetup {
 // planCert finds out where the operator's certificate stands with the daemon
 // whose API info describes, and whether config add can make the daemon accept
 // it. It changes nothing on the daemon's side; the operator's pair is created
-// here when there is none (not in a dry run), as `client init` does.
+// here when there is none (not in a dry run), as `client init` does. It also
+// finds whether the daemon takes the API key (keyOff, keyUnknown), whatever
+// becomes of the certificate: a known entry may keep the key only if it does.
 //
 // word is the command word the advice it prints uses for the daemon.
 func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
-	c := &CertSetup{info: info, role: info.Role, word: word, t: accessTargetOf(info)}
+	c := &CertSetup{info: info, role: info.Role, word: word, t: accessTargetOf(info), dryRun: o.DryRun}
+
+	// The access file, and with it whether the key works. Without one named
+	// in the daemon config the key works (admin), whatever a file at the
+	// suggested path says: the daemon does not read it.
+	relative := c.t.Configured && !filepath.IsAbs(c.t.File)
+	var af *tdns.AccessFile
+	var old []byte
+	var aerr error
+	if !relative {
+		af, old, aerr = readAccessFile(c.t, true)
+	}
+	switch {
+	case !c.t.Configured:
+	case relative:
+		c.keyUnknown = fmt.Sprintf("apiserver.access-file %q is not an absolute path", c.t.File)
+	case aerr != nil:
+		c.keyUnknown = cannotRead(c.t.File, aerr)
+	case old == nil:
+		c.keyOff, c.keyWhy = true, fmt.Sprintf("%s, which the daemon config names, does not exist (the daemon closes its TCP API then)", c.t.File)
+	case !af.KeyAuthOn():
+		c.keyOff, c.keyWhy = true, fmt.Sprintf("%s turns it off (keyauth: false)", c.t.File)
+	}
 
 	// Nothing to set up when a certificate cannot work on this daemon at
 	// all: no pair is made for it.
@@ -112,11 +152,24 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 	}
 
 	// The operator's pair: the CLI config's client: block, else the default.
+	// A dry run predicts it made only when neither file is there, as
+	// ensureClientCert would make it (it never overwrites a key).
 	c.cert, c.key = clientCertPaths(ReadCliClientConf(o.CliConfig))
 	c.name = defaultClientName()
-	if _, err := os.Stat(c.cert); err != nil && o.DryRun {
+	_, cerr := os.Stat(c.cert)
+	switch {
+	case o.DryRun && cerr != nil && !errors.Is(cerr, fs.ErrNotExist):
+		return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", cerr))
+	case o.DryRun && cerr != nil:
+		_, kerr := os.Stat(c.key)
+		switch {
+		case kerr == nil:
+			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%s exists without its certificate %s)", c.key, c.cert))
+		case !errors.Is(kerr, fs.ErrNotExist):
+			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", kerr))
+		}
 		c.pairNew = true
-	} else {
+	default:
 		pin, created, err := ensureClientCert(c.cert, c.key, defaultClientName())
 		if err != nil {
 			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", err))
@@ -124,16 +177,14 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 		c.pin, c.pairNew, c.name = pin, created, clientNameOf(c.cert)
 	}
 
-	if c.t.Configured && !filepath.IsAbs(c.t.File) {
+	if relative {
 		return c.cannot(fmt.Sprintf("apiserver.access-file %q is not an absolute path, which the daemon refuses", c.t.File))
 	}
-	af, old, err := readAccessFile(c.t, true)
-	if err != nil {
-		return c.cannot(cannotRead(c.t.File, err))
+	if aerr != nil {
+		return c.cannot(cannotRead(c.t.File, aerr))
 	}
-	c.accessOld, c.keyAuthOff = old, !af.KeyAuthOn()
 	if cl := clientByPin(af, c.pin); c.pin != "" && cl != nil {
-		c.listedAs = cl.Name
+		c.listedAs, c.listedRole = cl.Name, cl.Role
 		if cl.Disabled {
 			c.state = certDisabled
 			return c
@@ -141,13 +192,29 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 	}
 	c.addPin, c.createFile, c.nameIt = c.listedAs == "", old == nil, !c.t.Configured
 	if !c.addPin && !c.createFile && !c.nameIt {
+		// The file has the pin. Whether the daemon runs it is another
+		// matter (a `client add --no-reload`): when it answers, its policy
+		// is asked, and a daemon that does not have the pin yet is
+		// reloaded (apply). One that is not running reads the file when it
+		// starts; one that cannot be asked from here is taken at its file.
+		if running, err := socketDaemon(c.role, c.t); err == nil && running {
+			c.running = true
+			if c.inForce() != nil {
+				c.state = certCanEnable // a reload, and nothing to write
+				return c
+			}
+		}
 		c.state = certWorks
 		return c
 	}
 
 	// It takes changes on the daemon's side. Can they be made from here?
-	if err := canReplace(c.t.File); err != nil {
-		return c.cannot(fmt.Sprintf("config add cannot write %s (%v)", c.t.File, err))
+	// Not tried in a dry run, which writes nothing, not even a probe: the
+	// real add finds out.
+	if !o.DryRun {
+		if err := canReplace(c.t.File); err != nil {
+			return c.cannot(fmt.Sprintf("config add cannot write %s (%v)", c.t.File, err))
+		}
 	}
 	if c.nameIt {
 		cur, err := os.ReadFile(info.ConfigFile)
@@ -158,8 +225,10 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 		if err != nil {
 			return c.cannot(fmt.Sprintf("config add cannot add access-file: to %s (%v)", info.ConfigFile, err))
 		}
-		if err := canReplace(info.ConfigFile); err != nil {
-			return c.cannot(fmt.Sprintf("config add cannot write %s (%v)", info.ConfigFile, err))
+		if !o.DryRun {
+			if err := canReplace(info.ConfigFile); err != nil {
+				return c.cannot(fmt.Sprintf("config add cannot write %s (%v)", info.ConfigFile, err))
+			}
 		}
 		c.daemonOld, c.daemonNew = cur, next
 	}
@@ -183,9 +252,14 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 // the check of whose daemon answers); the daemon config is written the way
 // the access file is, its old bytes kept as .prev and the new file renamed
 // over it with its owner, group and mode. A step that fails puts back what
-// the steps before it changed (the .prev files stay); c.failed is set to why.
+// the steps before it changed (rollback; the .prev files stay); c.failed is
+// set to why. After a success, rollback stays possible until the caller has
+// written the CLI config.
 func (c *CertSetup) apply(ctx context.Context) error {
 	err := c.applySteps(ctx)
+	if err != nil {
+		err = fmt.Errorf("%v; %s", err, c.rollback())
+	}
 	c.failed = err
 	return err
 }
@@ -200,6 +274,17 @@ func (c *CertSetup) applySteps(ctx context.Context) error {
 	}
 	defer unlock()
 
+	// The daemon config must still name what it named when config add read
+	// it: an operator may have pointed it at another access file since, and
+	// enrolling the pin in this one would then do nothing.
+	now, err := ReadDaemonApi(c.t.DaemonConfig, c.role)
+	if err != nil {
+		return err
+	}
+	if planned := map[bool]string{true: c.t.File, false: ""}[c.t.Configured]; now.AccessFile != planned {
+		return fmt.Errorf("%s now names access-file %q, not %q as when config add read it; run config add again", c.t.DaemonConfig, now.AccessFile, planned)
+	}
+
 	// Again under the lock: a `client` edit may have changed it since.
 	af, old, err := readAccessFile(c.t, true)
 	if err != nil {
@@ -210,7 +295,7 @@ func (c *CertSetup) applySteps(ctx context.Context) error {
 		if cl.Disabled {
 			return fmt.Errorf("%s now lists your certificate as %q, disabled", c.t.File, cl.Name)
 		}
-		c.listedAs = cl.Name
+		c.listedAs, c.listedRole = cl.Name, cl.Role
 	} else {
 		name := freeName(c.name, func(n string) bool { return findClient(af, n) != nil })
 		af.Clients = append(af.Clients, tdns.AccessClient{Name: name, Pin: c.pin, Role: "read-write"})
@@ -230,75 +315,153 @@ func (c *CertSetup) applySteps(ctx context.Context) error {
 		return err
 	}
 
-	var undo []func() error
-	putBack := func(cause error) error {
-		var failed []string
-		for i := len(undo) - 1; i >= 0; i-- {
-			if uerr := undo[i](); uerr != nil {
-				failed = append(failed, uerr.Error())
-			}
-		}
-		if len(failed) > 0 {
-			return fmt.Errorf("%v; putting the files back FAILED (%s): check %s and %s by hand",
-				cause, strings.Join(failed, "; "), c.t.File, c.t.DaemonConfig)
-		}
-		return fmt.Errorf("%v; the files are as they were", cause)
-	}
-
 	if accessNew != nil {
-		if err := writeAccessFile(c.t.File, old, accessNew, c.t.DaemonConfig); err != nil {
+		if err := c.writeAccess(old, accessNew); err != nil {
 			return err
 		}
-		undo = append(undo, func() error {
-			if old == nil {
-				return os.Remove(c.t.File)
-			}
-			return writeFileAtomicLike(c.t.File, old, nil)
-		})
+		c.undo = append(c.undo, fileUndo{path: c.t.File, wrote: accessNew, old: old})
 	}
 
 	if c.nameIt {
 		cur, err := os.ReadFile(c.t.DaemonConfig)
 		if err != nil {
-			return putBack(err)
+			return err
 		}
 		next := c.daemonNew
 		if !bytes.Equal(cur, c.daemonOld) {
 			if next, err = addAccessFileLine(cur, c.t.File); err != nil {
-				return putBack(fmt.Errorf("cannot add access-file: to %s (%v)", c.t.DaemonConfig, err))
+				return fmt.Errorf("cannot add access-file: to %s (%v)", c.t.DaemonConfig, err)
 			}
 		}
 		// As the access file is written (writeAccessFile): the old bytes
 		// kept as .prev first, then the new file renamed over the config,
-		// with its owner, group and mode. An undo puts the old bytes back
-		// the same way, and leaves the .prev.
+		// with its owner, group and mode. A rollback puts the old bytes
+		// back the same way, and leaves the .prev.
 		if err := writeFileAtomic(c.t.DaemonConfig+".prev", cur); err != nil {
-			return putBack(fmt.Errorf("saving %s.prev: %w", c.t.DaemonConfig, err))
+			return fmt.Errorf("saving %s.prev: %w", c.t.DaemonConfig, err)
 		}
 		if err := writeFileAtomicLike(c.t.DaemonConfig, next, nil); err != nil {
-			return putBack(err)
+			return err
 		}
-		undo = append(undo, func() error { return writeFileAtomicLike(c.t.DaemonConfig, cur, nil) })
+		c.undo = append(c.undo, fileUndo{path: c.t.DaemonConfig, wrote: next, old: cur})
 		// Read back the way config add read it: the daemon must now name
 		// this access file, and say everything else as it did.
 		after, err := ReadDaemonApi(c.t.DaemonConfig, c.role)
 		if err != nil || !sameApiApartFromAccess(c.info, after) || after.AccessFile != c.t.File {
-			return putBack(fmt.Errorf("%s does not read back as before plus access-file: %s (does an include: file set apiserver:?)", c.t.DaemonConfig, c.t.File))
+			return fmt.Errorf("%s does not read back as before plus access-file: %s (does an include: file set apiserver:?)", c.t.DaemonConfig, c.t.File)
 		}
 	}
 
+	// Asked again now the files are written: a daemon that started since
+	// the check above read the old ones, and needs the reload too.
 	if !c.running {
-		return nil // the next start reads the files
+		if c.running, err = socketDaemon(c.role, c.t); err != nil {
+			return err
+		}
+		if !c.running {
+			return nil // the next start reads the files
+		}
 	}
+	c.didReload = true
 	msg, err := reloadAccess(c.role, c.t)
 	if err != nil {
-		return putBack(err)
+		return err
 	}
 	if err := c.inForce(); err != nil {
-		return putBack(err)
+		return err
 	}
 	c.reloaded = msg
 	return nil
+}
+
+// writeAccess writes the access file as `client add` does (writeAccessFile),
+// except that a new one is mode 0600: it is the daemon's access policy, for
+// root and the daemon only. It takes the daemon config's owner and group, so
+// a daemon that runs as the config's owner reads it. An existing file keeps
+// its mode, owner and group.
+func (c *CertSetup) writeAccess(old, data []byte) error {
+	if old != nil {
+		return writeAccessFile(c.t.File, old, data, c.t.DaemonConfig)
+	}
+	var like os.FileInfo = privateFileInfo{}
+	if fi, err := os.Stat(c.t.DaemonConfig); err == nil {
+		like = privateFileInfo{fi}
+	}
+	return writeFileAtomicLike(c.t.File, data, like)
+}
+
+// privateFileInfo is a FileInfo, its owner and group as they are, its mode
+// 0600. With no FileInfo in it, it gives no owner (fileOwner says so).
+type privateFileInfo struct{ os.FileInfo }
+
+func (p privateFileInfo) Mode() os.FileMode { return 0o600 }
+
+func (p privateFileInfo) Sys() any {
+	if p.FileInfo == nil {
+		return nil
+	}
+	return p.FileInfo.Sys()
+}
+
+// rollback puts back what apply changed, and says how that went: each file
+// as it was before (removed, if apply created it), unless it has changed
+// since apply wrote it, which is then left as it is; and, when apply
+// reloaded the daemon, a reload over its socket so that it runs the files as
+// they are again, checked by asking it what it runs. The .prev files stay.
+// Done at most once.
+func (c *CertSetup) rollback() string {
+	if len(c.undo) == 0 && !c.didReload {
+		return "nothing on the daemon's side was changed"
+	}
+	var left, failed []string
+	for i := len(c.undo) - 1; i >= 0; i-- {
+		u := c.undo[i]
+		cur, err := os.ReadFile(u.path)
+		switch {
+		case err != nil && !(u.old == nil && errors.Is(err, fs.ErrNotExist)):
+			failed = append(failed, err.Error())
+		case err == nil && !bytes.Equal(cur, u.wrote):
+			left = append(left, u.path)
+		case err == nil && u.old == nil:
+			if rerr := os.Remove(u.path); rerr != nil {
+				failed = append(failed, rerr.Error())
+			}
+		case err == nil:
+			if werr := writeFileAtomicLike(u.path, u.old, nil); werr != nil {
+				failed = append(failed, werr.Error())
+			}
+		}
+	}
+	c.undo = nil
+	var sb strings.Builder
+	switch {
+	case len(failed) > 0:
+		fmt.Fprintf(&sb, "putting the files back FAILED (%s): check %s and %s by hand", strings.Join(failed, "; "), c.t.File, c.t.DaemonConfig)
+	case len(left) > 0:
+		fmt.Fprintf(&sb, "the files are put back, except %s, changed since config add wrote it, and left as it is", strings.Join(left, " and "))
+	default:
+		sb.WriteString("the files are as they were")
+	}
+	if !c.didReload {
+		return sb.String()
+	}
+	c.didReload = false
+	// The daemon was reloaded with the new files: it must run the old ones
+	// again.
+	if _, err := reloadAccess(c.role, c.t); err != nil {
+		fmt.Fprintf(&sb, "; the daemon could NOT be reloaded with them (%v): it may still run the new policy, reload it over its socket", err)
+		return sb.String()
+	}
+	resp, err := configToDaemon(c.role, c.t.Socket, c.t.DaemonConfig, tdns.ConfigPost{Command: "status"})
+	switch {
+	case err != nil:
+		fmt.Fprintf(&sb, "; the daemon was reloaded with them, but what it runs now could not be asked (%v)", err)
+	case resp.Access != nil && (c.nameIt || c.enrolledAs != "" && policyHasPin(resp.Access, c.pin)):
+		sb.WriteString("; the daemon was reloaded with them, but it still runs the new policy: check it")
+	default:
+		sb.WriteString(", and the daemon runs them again")
+	}
+	return sb.String()
 }
 
 // cannotRead is why config add cannot use file, as a clause: the cause of a
@@ -319,6 +482,16 @@ func sameApiApartFromAccess(a, b *DaemonApi) bool {
 		a.ApiKey == b.ApiKey && a.Socket == b.Socket && a.CertFile == b.CertFile && a.UseTLS == b.UseTLS
 }
 
+// policyHasPin says whether the running policy a has pin, enabled.
+func policyHasPin(a *tdns.ApiAccessStatus, pin string) bool {
+	for _, cl := range a.Clients {
+		if cl.Pin == pin && !cl.Disabled {
+			return true
+		}
+	}
+	return false
+}
+
 // inForce checks that the daemon runs a policy in which the pin is enabled.
 func (c *CertSetup) inForce() error {
 	resp, err := configToDaemon(c.role, c.t.Socket, c.t.DaemonConfig, tdns.ConfigPost{Command: "status"})
@@ -334,13 +507,10 @@ func (c *CertSetup) inForce() error {
 		return errors.New("reloaded, but the daemon runs no access file")
 	case a.Error != "":
 		return fmt.Errorf("reloaded, but the daemon cannot use its access file: %s", a.Error)
+	case !policyHasPin(a, c.pin):
+		return errors.New("reloaded, but the policy the daemon runs does not have your certificate")
 	}
-	for _, cl := range a.Clients {
-		if cl.Pin == c.pin && !cl.Disabled {
-			return nil
-		}
-	}
-	return errors.New("reloaded, but the policy the daemon runs does not have your certificate")
+	return nil
 }
 
 // canReplace says whether this process may replace path the way the writes
@@ -516,13 +686,28 @@ func (c *CertSetup) fixLines() []string {
 	case c.state == certDisabled:
 		return []string{
 			"on the daemon's host, as root:",
-			"   tdns-ncli " + c.word + " client enable " + c.listedAs,
+			"   tdns-ncli " + c.word + " client enable " + shellQuote(c.listedAs),
+			"then run config add again.",
+		}
+	}
+	if c.listedAs != "" {
+		// The pin is there already: what is left is the daemon reading it.
+		if !c.t.Configured {
+			return []string{
+				"on the daemon's host, as root, add under apiserver: in " + c.t.DaemonConfig + ":",
+				"   access-file: " + c.t.File,
+				"and reload the daemon; then run config add again.",
+			}
+		}
+		return []string{
+			"on the daemon's host, as root:",
+			"   tdns-ncli " + c.word + " config reload",
 			"then run config add again.",
 		}
 	}
 	lines := []string{
 		"on the daemon's host, as root:",
-		fmt.Sprintf("   tdns-ncli %s client add %s --pin %s --role read-write", c.word, c.name, c.pinOrHint()),
+		fmt.Sprintf("   tdns-ncli %s client add %s --pin %s --role read-write", c.word, shellQuote(c.name), c.pinOrHint()),
 	}
 	if !c.t.Configured {
 		lines = append(lines,
@@ -533,6 +718,19 @@ func (c *CertSetup) fixLines() []string {
 		lines = append(lines, "then run config add again.")
 	}
 	return lines
+}
+
+// listedEnrollment is how the access file lists the pin: its name and its
+// role, said plainly when it is read-only. config add does not change an
+// enrollment it finds, so a read-only one stays read-only.
+func (c *CertSetup) listedEnrollment() string {
+	switch c.listedRole {
+	case "read-only":
+		return c.listedAs + ", read-only: write commands will be refused (tdns-ncli " + c.word + " client set-role " + shellQuote(c.listedAs) + " read-write changes that)"
+	case "":
+		return c.listedAs
+	}
+	return c.listedAs + " (" + c.listedRole + ")"
 }
 
 // whyNot is the one-line reason the certificate does not work.
@@ -702,7 +900,7 @@ func printCert(w io.Writer, c *CertSetup, usesCert, keyKept, dryRun, troubleSaid
 	fmt.Fprintln(w)
 	switch {
 	case c.listedAs != "":
-		writeWrapped(w, "", "", c.t.File+" lists your certificate as "+c.listedAs+".")
+		writeWrapped(w, "", "", c.t.File+" lists your certificate as "+c.listedEnrollment()+".")
 	default:
 		name := c.enrolledAs
 		if name == "" {
@@ -734,6 +932,9 @@ func printCert(w io.Writer, c *CertSetup, usesCert, keyKept, dryRun, troubleSaid
 	default:
 		fmt.Fprintf(w, "The daemon is not running: its next start %s.\n", would("reads the new files", "would read the files"))
 		writeWrapped(w, "", "", "Nothing answers on "+c.t.Socket+".")
+	}
+	if dryRun && (c.addPin || c.createFile || c.nameIt) {
+		writeWrapped(w, "", "", "(A dry run writes nothing, so whether config add may write these files is found out when it runs.)")
 	}
 }
 
