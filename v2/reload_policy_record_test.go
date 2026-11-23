@@ -1264,7 +1264,7 @@ func TestAReloadHandsItsRefreshersToTheEngineOnlyAfterPublishingItsSnapshot(t *t
 	// test's read.
 	var atFirstSend uint8
 	var probed bool
-	zoneRefresherSendProbe = func(zr ZoneRefresher) {
+	zoneRefresherSendProbe = func(_ context.Context, zr ZoneRefresher) {
 		if probed {
 			return
 		}
@@ -1401,6 +1401,22 @@ func TestAReloadDeliversEveryRefresherAfterItPublishedWhateverItsCallersContextD
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// The caller goes away at the second send's probe, which runs on the reload's
+	// goroutine just before that send: nothing can have received the refresher
+	// yet, so the send waits on a context that either the caller's cancellation
+	// has reached or not, and the test reads which, instead of racing the
+	// receive against it.
+	t.Cleanup(func() { zoneRefresherSendProbe = nil })
+	atSecond := make(chan struct{})
+	var deliveryErr error
+	zoneRefresherSendProbe = func(dctx context.Context, zr ZoneRefresher) {
+		if zr.Name != names[1] {
+			return
+		}
+		cancel()
+		deliveryErr = dctx.Err()
+		close(atSecond)
+	}
 	reloaded := make(chan error, 1)
 	go func() {
 		_, err := conf.ReloadZoneConfig(ctx)
@@ -1431,9 +1447,19 @@ func TestAReloadDeliversEveryRefresherAfterItPublishedWhateverItsCallersContextD
 		t.Fatalf("the first refresher is for %q, want %q; the test has lost its point", first.Name, names[0])
 	}
 
-	// The reload has published, and is blocked on the second refresher. The caller
-	// goes away.
-	cancel()
+	// The reload has published, and is at the second refresher. The caller goes
+	// away, in the probe; the context the send waits on is not the caller's.
+	select {
+	case <-atSecond:
+	case err := <-reloaded:
+		ended = true
+		t.Fatalf("the reload ended (%v) before the second refresher's send", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reload did not reach the second refresher")
+	}
+	if deliveryErr != nil {
+		t.Errorf("the second refresher's send waits on a context that is done (%v) once the caller has cancelled: the delivery follows the caller", deliveryErr)
+	}
 
 	select {
 	case second := <-conf.Internal.RefreshZoneCh:
@@ -2035,7 +2061,11 @@ func TestTwoRealReloadsOfOneNewZoneTheLatestWins(t *testing.T) {
 		t.Errorf("the zone records %q bound to KSK algorithm %d; want %q bound to the latest reload's %d",
 			n, kskAlgOf(p), "base", dns.ECDSAP256SHA256)
 	}
-	for _, rr := range servedRRset(t, zd, wanted, dns.TypeSOA).RRSIGs {
+	sigs := servedRRset(t, zd, wanted, dns.TypeSOA).RRSIGs
+	if len(sigs) == 0 {
+		t.Error("the SOA is unsigned")
+	}
+	for _, rr := range sigs {
 		if sig, ok := rr.(*dns.RRSIG); ok && sig.Algorithm != dns.ECDSAP256SHA256 {
 			t.Errorf("the SOA is signed with algorithm %d, want the latest reload's %d", sig.Algorithm, dns.ECDSAP256SHA256)
 		}
@@ -2079,5 +2109,168 @@ func TestAParseThatFailsDoesNotOvertakeAnEarlierRefresher(t *testing.T) {
 	zd, _ := Zones.Get(h.zone)
 	if n, p, _ := policyState(zd); n != "base" || p == nil {
 		t.Errorf("the earlier reload's refresher was dropped by a parse that failed: the zone records %q, bound %v", n, p != nil)
+	}
+}
+
+// A reload whose refreshers are not delivered overtakes nothing, as a parse that
+// fails does not. ParseZones takes each zone's sequence number before it queues
+// anything, so that a refresher an earlier parse still has queued is dropped and
+// the newest config lands; when the delivery is then cancelled with the queue
+// full, the newer refresher never reaches the engine, and the earlier one, dropped
+// for it, was the zone's only config: the zone would keep none until the next
+// reload.
+func TestAReloadWhoseRefreshersAreNotDeliveredDoesNotOvertakeAnEarlierOne(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	h := newReloadHarness(t, kdb, "undelivered.config.example.", "online-signing")
+	const month = 30 * 86400
+	polA := map[string]DnssecPolicy{"base": named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "base")}
+	polB := map[string]DnssecPolicy{"base": named(validFor(kskzsk(dns.ECDSAP256SHA256, dns.ECDSAP256SHA256), month), "base")}
+	withLivePolicies(t, map[string]DnssecPolicy{})
+	zones := []ZoneConf{{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: "base", OptionsStrs: h.options}}
+
+	// The first parse: its refresher is queued, and not yet applied.
+	h.conf.Internal.DnssecPolicies, h.conf.Zones = polA, zones
+	if _, _, err := h.conf.ParseZones(context.Background(), false); err != nil {
+		t.Fatalf("ParseZones: %v", err)
+	}
+	zrA := <-h.parsed
+
+	// A reload of the same zone, whose caller has gone away and whose queue takes
+	// nothing: its send can end only one way.
+	blocked := &Config{}
+	blocked.Internal.KeyDB = kdb
+	blocked.Internal.RefreshZoneCh = make(chan ZoneRefresher) // nobody receives
+	blocked.Internal.DnssecPolicies, blocked.Zones = polB, zones
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := blocked.ParseZones(gone, true); err == nil {
+		t.Fatal("the reload delivered its refresher with nobody to receive it; the test has lost its point")
+	}
+	zd, ok := Zones.Get(h.zone)
+	if !ok {
+		t.Fatal("the zone is not registered")
+	}
+	if !zd.refresherOwed() {
+		t.Error("the engine is owed nothing for the zone while the first parse's refresher is still queued")
+	}
+
+	// The engine gets the first refresher. It is not overtaken: the delivery that
+	// would have overtaken it did not happen.
+	zrA.Response = make(chan RefresherResponse, 1)
+	h.engineConf.Internal.RefreshZoneCh <- zrA
+	h.answered(ZoneRefresher{Name: h.zone, ZoneStore: MapZone})
+	select {
+	case r := <-zrA.Response:
+		if r.Error {
+			t.Errorf("the first refresher was refused: %s", r.ErrorMsg)
+		}
+	default:
+	}
+	if zd.HasServiceImpactingError() {
+		t.Errorf("the zone is in an error state: %s", zd.ErrorMsg)
+	}
+	if n, p, _ := policyState(zd); n != "base" || p == nil || p.KSKAlgorithm != dns.ED25519 {
+		t.Errorf("the zone records %q bound to KSK algorithm %d; want %q bound to the first parse's %d, the only config the engine was given",
+			n, kskAlgOf(p), "base", dns.ED25519)
+	}
+	if zd.refresherOwed() {
+		t.Error("the engine is still owed a refresher for the zone after it handled the only one it was given")
+	}
+}
+
+// A ticker retry of a first load, which carries no refresher, resolves the policy
+// name the zone has stored. A reload publishes its snapshot before its refresher
+// reaches the engine, and a name the reload replaced is not in that snapshot: the
+// retry quarantined the zone for a policy that the queued refresher was about to
+// replace, and the engine skips a refresher for a zone in that state, so nothing
+// cleared it. The retry now waits for a refresher it is owed.
+//
+// The reload is parsed and its snapshot published, and its refreshers are not
+// queued yet: the state the ticker meets between the two. The first load of the
+// zone has failed (no zone file yet) and the ticker retries it every second.
+func TestATickersFirstLoadRetryWaitsForTheRefresherOfAReloadThatOwesOne(t *testing.T) {
+	authApp(t)
+	kdb := Conf.Internal.KeyDB
+	prevRetry := firstLoadRetrySeconds
+	firstLoadRetrySeconds = 1
+	t.Cleanup(func() { firstLoadRetrySeconds = prevRetry })
+	h := newReloadHarness(t, kdb, "tickerwaits.config.example.", "online-signing")
+	const month = 30 * 86400
+	polOld := map[string]DnssecPolicy{"old": named(validFor(kskzsk(dns.ED25519, dns.ED25519), month), "old")}
+	polNew := map[string]DnssecPolicy{"new": named(validFor(kskzsk(dns.ED25519, dns.ED25519), 2*month), "new")}
+	withLivePolicies(t, map[string]DnssecPolicy{}) // restores the snapshot the test publishes
+	prevSync := delegationSyncConf.Load()
+	t.Cleanup(func() { delegationSyncConf.Store(prevSync) })
+	zones := func(policy string) []ZoneConf {
+		return []ZoneConf{{Name: h.zone, Type: "primary", Store: "map", Zonefile: h.file, DnssecPolicy: policy, OptionsStrs: h.options}}
+	}
+
+	// The first load: no zone file, so it fails, the zone is left waiting for its
+	// first load with the name "old" stored, and the ticker retries it.
+	zoneFile, err := os.ReadFile(h.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(h.file); err != nil {
+		t.Fatal(err)
+	}
+	h.conf.Internal.DnssecPolicies, h.conf.Zones = polOld, zones("old")
+	if _, _, err := h.conf.ParseZones(context.Background(), false); err != nil {
+		t.Fatalf("ParseZones: %v", err)
+	}
+	h.engineConf.Internal.RefreshZoneCh <- <-h.parsed
+	var zd *ZoneData
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if z, ok := Zones.Get(h.zone); ok && z.HasError(RefreshError) {
+			zd = z
+			break
+		}
+	}
+	if zd == nil || !zd.FirstZoneLoad || zd.publishedSnapshot() != nil {
+		t.Fatal("the zone is not waiting for its first load; the test has lost its point")
+	}
+
+	// A reload that names "new", and no longer defines "old", has parsed and
+	// published its snapshot. Its refreshers are not queued. Then the zone file
+	// appears, which the next retry would load. It comes last, so that no retry
+	// before this point can.
+	h.conf.Internal.DnssecPolicies, h.conf.Zones = polNew, zones("new")
+	_, _, pending, err := h.conf.parseZones(context.Background(), true)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("parseZones: %d refreshers, err %v", len(pending), err)
+	}
+	liveConfig.Store(&RuntimeConfig{DnssecPolicies: polNew})
+	if !zd.refresherOwed() {
+		t.Fatal("the zone is not owed a refresher after the reload parsed; the test has lost its point")
+	}
+	if err := os.WriteFile(h.file, zoneFile, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The ticker runs, twice, before the reload's refresher gets to the engine.
+	time.Sleep(2500 * time.Millisecond)
+	if zd.HasError(DnssecError) {
+		zd.mu.Lock()
+		msg := zd.Errors[DnssecError].Msg
+		zd.mu.Unlock()
+		t.Fatalf("the ticker's retry quarantined the zone for the policy the reload replaced: %s", msg)
+	}
+	if !zd.FirstZoneLoad {
+		t.Error("the ticker retried the first load while the reload's refresher was owed")
+	}
+
+	// The refresher arrives: it does the first load, with the reload's name and
+	// policies.
+	h.engineConf.Internal.RefreshZoneCh <- pending[0]
+	h.answered(ZoneRefresher{Name: h.zone, ZoneStore: MapZone})
+	if zd.refresherOwed() {
+		t.Error("the engine is still owed a refresher after it handled the reload's")
+	}
+	if zd.HasServiceImpactingError() {
+		t.Errorf("the zone is in an error state: %s", zd.ErrorMsg)
+	}
+	if n, p, _ := policyState(zd); n != "new" || p == nil || validityOf(p) != 2*month {
+		t.Errorf("after the first load: %q bound with signature validity %d; want %q bound to the reload's definition", n, validityOf(p), "new")
 	}
 }

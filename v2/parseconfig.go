@@ -1208,23 +1208,66 @@ var parseSeq atomic.Uint64
 
 // zoneRefresherSendProbe is nil, and is set by a test that has to look at the
 // daemon's state at the moment a refresher is about to be handed to the engine,
-// from the sender's side: it is called with each refresher just before its send.
-var zoneRefresherSendProbe func(zr ZoneRefresher)
+// from the sender's side: it is called with each refresher, and the context its
+// send waits on, just before the send.
+var zoneRefresherSendProbe func(ctx context.Context, zr ZoneRefresher)
 
 // queueZoneRefreshers hands refreshers to the RefreshEngine, in order, giving
-// up when ctx is done.
+// up when ctx is done. The refreshers it did not hand over give back the parse
+// sequence their parse took (abandonRefreshers).
 func (conf *Config) queueZoneRefreshers(ctx context.Context, zrs []ZoneRefresher) error {
-	for _, zr := range zrs {
+	for i, zr := range zrs {
 		if zoneRefresherSendProbe != nil {
-			zoneRefresherSendProbe(zr)
+			zoneRefresherSendProbe(ctx, zr)
 		}
 		select {
 		case conf.Internal.RefreshZoneCh <- zr:
 		case <-ctx.Done():
+			abandonRefreshers(zrs[i:])
 			return ctx.Err()
 		}
 	}
 	return nil
+}
+
+// abandonRefreshers is for refreshers that will not reach the engine. A parse
+// takes the sequence number of each zone it produced a refresher for before any of
+// them is queued, so that a refresher an earlier parse still has queued is
+// overtaken and dropped, and the newest config is the one that lands. A refresher
+// that is never delivered overtakes nothing, as a parse that failed does not: the
+// zone gets back the number it had, and the earlier refresher is applied. A zone a
+// still newer parse has taken the number of keeps that one.
+//
+// What this cannot undo is an earlier refresher the engine dropped between the
+// parse taking the number and this giving it back; the zone then keeps its config
+// until the next reload. The window is the time a send waits on a full queue, in
+// a call whose context is cancelled in it.
+func abandonRefreshers(zrs []ZoneRefresher) {
+	for _, zr := range zrs {
+		if zr.Registered != nil && zr.ParseSeq != 0 {
+			zr.Registered.latestParseSeq.CompareAndSwap(zr.ParseSeq, zr.supersedes)
+		}
+	}
+}
+
+// refresherOwed reports whether the engine is owed a refresher for this
+// registration that it has not dequeued: a parse took the zone's sequence number,
+// so its refresher is queued or about to be (a reload publishes its snapshot
+// between the two), and the engine has not yet handled it. A zone's stored policy
+// name is the previous config's until the engine does.
+func (zd *ZoneData) refresherOwed() bool {
+	return zd.latestParseSeq.Load() > zd.handledParseSeq.Load()
+}
+
+// noteRefresherHandled records that the engine dequeued a refresher of parse seq
+// for this registration, whatever it did with it.
+func (zd *ZoneData) noteRefresherHandled(seq uint64) {
+	for {
+		cur := zd.handledParseSeq.Load()
+		if seq <= cur || zd.handledParseSeq.CompareAndSwap(cur, seq) {
+			return
+		}
+	}
 }
 
 // parseZones is ParseZones up to the queueing of a reload's refreshers: it
@@ -1978,7 +2021,7 @@ func (conf *Config) parseZones(ctx context.Context, reload bool) ([]string, []st
 				pending = append(pending, zr)
 			} else {
 				// An initial parse queues as it goes: this one is the zone's newest.
-				zr.Registered.latestParseSeq.Store(seq)
+				zr.supersedes = zr.Registered.latestParseSeq.Swap(seq)
 				if qerr := conf.queueZoneRefreshers(ctx, []ZoneRefresher{zr}); qerr != nil {
 					return all_zones, broken_zones, nil, qerr
 				}
@@ -1993,9 +2036,11 @@ func (conf *Config) parseZones(ctx context.Context, reload bool) ([]string, []st
 	// A reload has parsed: its refreshers are the newest for their zones, and the
 	// ones an earlier reload still has queued are overtaken (the engine drops them).
 	// Only now, and not as each zone is parsed: a parse that fails part way returns
-	// above, queues nothing, and overtakes nothing.
-	for _, zr := range pending {
-		zr.Registered.latestParseSeq.Store(zr.ParseSeq)
+	// above, queues nothing, and overtakes nothing. Nor does a refresher that
+	// is not delivered: queueZoneRefreshers gives the number back
+	// (abandonRefreshers), which is why each zone's previous one is kept.
+	for i := range pending {
+		pending[i].supersedes = pending[i].Registered.latestParseSeq.Swap(pending[i].ParseSeq)
 	}
 
 	lgConfig.Debug("ParseZones complete")

@@ -830,6 +830,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			}
 			// log.Printf("***** RefreshEngine: zonerefch: zone %s", zr.Name)
 			zone = zr.Name
+			// Handled from here, whatever becomes of it. The ticker's retries of a
+			// first load run on this goroutine, so none runs while the refresher is
+			// applied; what they have to wait for is one that is still queued
+			// (refresherOwed, the ticker below).
+			if zr.Registered != nil {
+				zr.Registered.noteRefresherHandled(zr.ParseSeq)
+			}
 			resp := RefresherResponse{
 				Zone: zr.Name,
 			}
@@ -852,7 +859,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			//	                          has produced a refresher for it (its
 			//	                          ParseSeq is below the zone's
 			//	                          latestParseSeq, set when that parse
-			//	                          succeeded, before it queues anything):
+			//	                          succeeded, before it queues anything, and
+			//	                          given back if its refreshers are not
+			//	                          delivered):
 			//	                          then dropped, and the newest config is
 			//	                          the one that lands, once, as the zone's
 			//	                          first bind if it has none yet. One that
@@ -1481,6 +1490,21 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// tick, so a zone in a persistent error state is walked and
 					// logged once a second until it clears.
 					rc.CurRefresh = refreshCounterRetry(rc)
+					continue
+				}
+
+				// A first load, or the policy sync that completes it, resolves the
+				// policy name the zone has stored, and a ticker retry carries no
+				// refresher to say otherwise. A reload publishes its snapshot before
+				// the engine dequeues its refreshers, and a name the reload replaced
+				// is not in that snapshot: resolved there, it quarantines the zone
+				// (DnssecError) for a policy that the queued refresher is about to
+				// replace, and the engine then skips that refresher, as it does for
+				// any zone in that state. The refresher does the first load itself,
+				// with its own name and policies, so the retry leaves it to it. The
+				// counter is not touched: the zone is due again on the next tick.
+				if (zd.FirstZoneLoad || hasPendingOnFirstLoad(zd)) && zd.refresherOwed() {
+					lgEngine.Debug("ticker: a config refresher for the zone is queued, its first-load retry waits for it", "zone", zone)
 					continue
 				}
 
