@@ -433,7 +433,20 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// daemonYAML is a daemon config with an apiserver: block. It presents
+// testDaemonCert, so config add can pin it, unless extra names a certfile:
+// or keyfile: of its own.
 func daemonYAML(service, addr, key string, extra string) string {
+	if !strings.Contains(extra, "certfile:") && !strings.Contains(extra, "keyfile:") {
+		extra = "   certfile: " + testDaemonCert + "\n" + extra
+	}
+	return daemonYAMLDefaultCert(service, addr, key, extra)
+}
+
+// daemonYAMLDefaultCert is daemonYAML without a certfile: the daemon then
+// serves its default API pair (tdns.ApiCertPaths), written at its first
+// start.
+func daemonYAMLDefaultCert(service, addr, key string, extra string) string {
 	s := ""
 	if service != "" {
 		s += "service:\n   name: " + service + "\n"
@@ -621,6 +634,7 @@ func TestAddTwoAuthDaemons(t *testing.T) {
 	want := ApiDetails{
 		Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1",
 		AuthMethod: "certificate", ConfigFile: second,
+		TLSAuth: "pin", Pins: []string{testDaemonPin},
 	}
 	if !reflect.DeepEqual(got[1], want) {
 		t.Errorf("entry = %+v\nwant    %+v", got[1], want)
@@ -1279,7 +1293,8 @@ func TestAddWritesTheTCPEntryWithConfigFile(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := ApiDetails{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1",
-				AuthMethod: "certificate", ConfigFile: d}
+				AuthMethod: "certificate", ConfigFile: d,
+				TLSAuth: "pin", Pins: []string{testDaemonPin}}
 			if got := env.entries(t); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 				t.Errorf("entries = %+v\nwant      [%+v]", got, want)
 			}
