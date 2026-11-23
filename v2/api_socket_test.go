@@ -394,6 +394,14 @@ func TestApiSocketPath(t *testing.T) {
 		!strings.HasPrefix(a, "/var/run/tdns/tdns-auth.yaml%%") || !strings.HasSuffix(a, ".sock") {
 		t.Errorf("long paths: %q and %q, want two short, distinct tdns-auth.yaml%%%%<hash>.sock", a, b)
 	}
+	// Two paths whose SHA-256 share their first 32 bits (de311e32), which
+	// the fallback once used alone, still get two sockets.
+	long := "/etc/tdns/" + strings.Repeat("long-directory-", 6)
+	a = ApiSocketPath("", long+"009357/server.yaml")
+	b = ApiSocketPath("", long+"01b313/server.yaml")
+	if a == b || CheckApiSocketPath(a) != nil || CheckApiSocketPath(b) != nil || !strings.Contains(a, "%%de311e32") {
+		t.Errorf("paths sharing 32 bits of hash: %q and %q, want two sockets", a, b)
+	}
 
 	DefaultApiSocketDir = ""
 	if got := ApiSocketPath("", "/etc/tdns/tdns-auth.yaml"); got != "" {

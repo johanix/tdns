@@ -662,7 +662,7 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: /nonexistent/api.crt\n"))
 		before, _ := os.ReadFile(env.cli)
 		res, err := env.add(t, d, nil)
-		if err != nil || res.Pinned || res.Wrote || !strings.Contains(strings.Join(res.Notes, " "), "refuses it over TCP (root still reaches the daemon over its local admin socket)") {
+		if err != nil || res.Pinned || res.Wrote || !strings.Contains(strings.Join(res.Notes, " "), "refuses it over TCP (root may still reach the daemon over its local admin socket, while the daemon serves one and --tcp is not given)") {
 			t.Errorf("%+v, %v", res, err)
 		}
 		if after, _ := os.ReadFile(env.cli); string(after) != string(before) {
