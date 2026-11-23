@@ -220,3 +220,29 @@ func TestConfigStatusReportsStoppedListeners(t *testing.T) {
 		}
 	}
 }
+
+// tdns-imr has its own `config status` printer, which must report the TCP
+// API an access file stopped too, with the file, with the policy in force and
+// after the file is removed.
+func TestImrConfigStatusReportsStoppedListeners(t *testing.T) {
+	const file = "/etc/tdns/tdns-imr-access.yaml"
+	base := tdns.ConfigResponse{Msg: "tdns-imr: Configuration is ok", ApiTCPStopped: []string{"192.0.2.1:8080"}, ApiTCPStoppedBy: file}
+	withPolicy := base
+	withPolicy.Access = &tdns.ApiAccessStatus{File: file, KeyAuth: true}
+	for _, tc := range []struct {
+		name string
+		resp tdns.ConfigResponse
+		want string
+	}{
+		{"policy in force", withPolicy, "access file requires TLS:\n    " + file + "\n"},
+		{"access file removed", base, "came into force:\n    " + file + "\n  no access file is set now"},
+	} {
+		out := captureStdout(t, func() { printImrConfigStatus(tc.resp) })
+		if !strings.Contains(out, "TCP API STOPPED on 192.0.2.1:8080:\n") || !strings.Contains(out, tc.want) {
+			t.Errorf("%s: printed %q, want the stopped listener and %q", tc.name, out, tc.want)
+		}
+	}
+	if out := captureStdout(t, func() { printImrConfigStatus(tdns.ConfigResponse{Msg: "ok"}) }); strings.Contains(out, "STOPPED") {
+		t.Errorf("nothing stopped: printed %q", out)
+	}
+}
