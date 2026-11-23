@@ -1332,3 +1332,14 @@ func TestClientListHoldsTheEditLock(t *testing.T) {
 		t.Error("an edit could take the lock while client list asked the daemon")
 	}
 }
+
+// The operator's pair defaults to a certs/ directory, where certificates and
+// keys are looked for, never loose next to the configs.
+func TestDefaultClientCertPathsAreInCerts(t *testing.T) {
+	cert, key := DefaultClientCertPaths()
+	for _, p := range []string{cert, key} {
+		if filepath.Base(filepath.Dir(p)) != "certs" {
+			t.Errorf("default %s is not in a certs/ directory", p)
+		}
+	}
+}

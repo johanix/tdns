@@ -226,9 +226,11 @@ and not in the CLI config.** The owner's rulings:
 
 **The operator's identity** is one key pair per person, used for every daemon: a
 self-signed certificate (ECDSA P-256), the key in a file with mode 0600. The
-default location is per user: `~/.config/tdns/client.crt` and `client.key`; for
-root, `/etc/tdns/tdns-ncli-client.crt` and `.key`, next to `tdns-ncli.yaml`,
-where it can be tracked and is not scattered over `/root/.config/` on many hosts.
+default location is per user: `~/.config/tdns/certs/client.crt` and `client.key`;
+for root, `/etc/tdns/certs/tdns-ncli-client.crt` and `.key`, with the daemons'
+certificates, where it can be tracked and is not scattered over `/root/.config/`
+on many hosts. Certificates and keys always go in a `certs/` directory, never
+loose next to the configs (Johan, 2026-11-23).
 It is expanded when the tool runs, so the system-wide config needs no entry for
 it; a top-level `client:` block can name other files. `tdns-ncli client init`
 creates the pair if it is absent and never overwrites one. Root on a daemon host

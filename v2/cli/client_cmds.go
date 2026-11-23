@@ -37,17 +37,19 @@ import (
 
 // DefaultClientCertPaths is where the operator's certificate lives when the
 // CLI config's client: block does not say: per user, so the key is a person's,
-// except for root, whose key is kept in /etc/tdns where it can be tracked
-// rather than in /root/.config on every host.
+// except for root, whose key is kept in /etc/tdns/certs where it can be
+// tracked rather than in /root/.config on every host. Always in a certs/
+// directory, where certificates and keys are looked for, never loose next to
+// the configs.
 func DefaultClientCertPaths() (cert, key string) {
 	if os.Geteuid() == 0 {
-		return "/etc/tdns/tdns-ncli-client.crt", "/etc/tdns/tdns-ncli-client.key"
+		return "/etc/tdns/certs/tdns-ncli-client.crt", "/etc/tdns/certs/tdns-ncli-client.key"
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "."
 	}
-	dir := filepath.Join(home, ".config", "tdns")
+	dir := filepath.Join(home, ".config", "tdns", "certs")
 	return filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
 }
 
@@ -90,8 +92,8 @@ func newClientInitCmd() *cobra.Command {
 		Use:   "init",
 		Short: "Create your client certificate (once) and print its pin",
 		Long: `Create the key pair a daemon knows you by: a self-signed certificate (ECDSA
-P-256) and its key (mode 0600). The default location is ~/.config/tdns/
-(for root: /etc/tdns/tdns-ncli-client.crt and .key). An existing pair is never
+P-256) and its key (mode 0600). The default location is ~/.config/tdns/certs/
+(for root: /etc/tdns/certs/tdns-ncli-client.crt and .key). An existing pair is never
 overwritten; its pin is printed again.
 
 The pin is public. Give it to whoever runs the daemon (or run the printed line
