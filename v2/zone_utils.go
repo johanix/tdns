@@ -133,31 +133,26 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 	zd.restoreRefreshStateAtFirstBind()
 }
 
-// relayCopyIsAheadOfUpstream reports whether a tdns-agent relay still serves
-// the copy it adopted from disk at first bind while the upstream serves a
-// serial that is not newer and not the copy's -- one the copy is ahead of.
+// relayCopyNeedsTransfer reports whether a tdns-agent relay still serves the
+// copy it adopted from disk at first bind. Such a copy is replaced by a forced
+// transfer at the first usable SOA, whatever the serials say, and only an
+// applied transfer confirms it.
 //
 // A relay serves what it received at the serial it received it with (#1157),
-// so its copy on disk normally carries the upstream's serial. A copy written
-// by an agent from before #1157 carries a serial the agent counted itself,
-// ahead of the upstream's, and DoTransfer's serialNewer test then never asks
-// for a transfer: the relay would serve that copy, and miss every upstream
-// change, until the upstream's serial climbed past it. Such a copy is replaced
-// by a transfer at the first usable SOA, whatever its serial, and never by an
-// IXFR (shouldRequestIxfr). Only a copy from disk: the normal serial
-// comparison is untouched once a transfer, or an upstream serial equal to the
-// copy's, has confirmed it. The caller passes only a usable SOA's serial: the
-// placeholder 0 that comes with no usable SOA neither confirms a copy nor
-// forces a transfer.
-func (zd *ZoneData) relayCopyIsAheadOfUpstream(upstreamSerial uint32) bool {
-	if !zd.relayCopyUnconfirmed {
-		return false
-	}
-	if upstreamSerial == zd.IncomingSerial {
-		zd.relayCopyUnconfirmed = false // the copy is the upstream's
-		return false
-	}
-	return true
+// but a copy written by an agent from before #1157 carries a serial the agent
+// counted itself, which names none of the upstream's versions. Compared with
+// the upstream's serial it misleads every way. Ahead, DoTransfer never asks
+// for a transfer, and the relay misses every upstream change until the
+// upstream's serial passes it. Behind, an IXFR from it applies a delta to the
+// wrong base. Equal, the copy looks current, and a transfer at that serial is
+// discarded as unchanged. A forced transfer is a full one, never discarded.
+//
+// The cost is one full transfer per relayed zone after each start, also for a
+// copy that did carry the upstream's serial: nothing in a copy says which
+// agent wrote it. The caller asks only after a usable SOA: the placeholder 0
+// that comes without one is no serial, and forces nothing.
+func (zd *ZoneData) relayCopyNeedsTransfer() bool {
+	return zd.relayCopyUnconfirmed
 }
 
 func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, conf *Config) (bool, error) {
@@ -218,8 +213,8 @@ func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, con
 		if err != nil {
 			return false, err
 		}
-		if usableSOA && !do_transfer && !force && zd.relayCopyIsAheadOfUpstream(upstream_serial) {
-			lg.Warn("relayed zone: the copy adopted from disk is not the upstream's; transferring the upstream's copy",
+		if usableSOA && !force && zd.relayCopyNeedsTransfer() {
+			lg.Info("relayed zone: replacing the copy adopted from disk with a full transfer",
 				"zone", zd.ZoneName, "copy_serial", zd.IncomingSerial, "upstream_serial", upstream_serial)
 			force = true
 		}
@@ -1136,7 +1131,7 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 // apply never succeeds when they appear, not because a later pass discards
 // them.
 //
-// Nor from a relay copy that is still unconfirmed (relayCopyIsAheadOfUpstream):
+// Nor from a relay copy that is still unconfirmed (relayCopyNeedsTransfer):
 // its serial need not name its content, and a delta from that serial would be
 // applied to the wrong base. A full transfer replaces it instead.
 func (zd *ZoneData) shouldRequestIxfr(force bool) bool {

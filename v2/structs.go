@@ -621,8 +621,8 @@ type ZoneData struct {
 	// (childsync_proxy.go); protected by zd.mu.
 	childSyncProxy *ChildSyncProxyStatus
 	// relayCopyUnconfirmed: a tdns-agent relay adopted its persisted copy at
-	// first bind, and no transfer or matching upstream serial has confirmed
-	// it yet (relayCopyIsAheadOfUpstream). Touched only by the zone's
+	// first bind, and no applied transfer has replaced it yet
+	// (relayCopyNeedsTransfer). Touched only by the zone's
 	// refresh, like IncomingSerial.
 	relayCopyUnconfirmed bool
 }

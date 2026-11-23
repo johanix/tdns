@@ -617,9 +617,12 @@ func TestFirstLoadFailsWhenThePersistedSerialCannotBeRead(t *testing.T) {
 // upstream was down at first bind. tdns-auth is unchanged: its secondary keeps
 // the copy, as the serial comparison says.
 //
-// An upstream newer than the copy transfers anyway, but must not be asked for
-// a delta from the copy's serial, which does not name the copy's content: the
-// copy stays out of IXFR until it is confirmed.
+// The copy's serial names none of the upstream's versions, so no serial
+// comparison may stand in for the transfer. An upstream newer than the copy
+// must not be asked for a delta from the copy's serial: the copy stays out of
+// IXFR until a transfer replaces it. An upstream at the copy's own serial must
+// still replace it, and so must a fallback upstream at that serial when the
+// first upstream's transfer fails, rather than be discarded as unchanged.
 func TestAgentRelayReplacesAPersistedCopyAheadOfTheUpstream(t *testing.T) {
 	const ahead = `example.	3600	IN	SOA	ns.example. hostmaster.example. 100 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
@@ -638,12 +641,19 @@ fresh.example.	3600	IN	A	10.0.0.40
 		app       AppType
 		upstream  uint32
 		firstDown bool
+		soaOnly   uint32 // a first upstream that answers this SOA serial, but no transfer
 		want      uint32
+		replaced  bool
 	}{
-		{"agent, upstream up at first bind", AppTypeAgent, 40, false, 40},
-		{"agent, upstream down at first bind", AppTypeAgent, 40, true, 40},
-		{"agent, upstream newer than the copy", AppTypeAgent, 150, true, 150},
-		{"auth keeps its copy", AppTypeAuth, 40, false, 100},
+		{"agent, upstream up at first bind", AppTypeAgent, 40, false, 0, 40, true},
+		{"agent, upstream down at first bind", AppTypeAgent, 40, true, 0, 40, true},
+		{"agent, upstream newer than the copy", AppTypeAgent, 150, true, 0, 150, true},
+		{"agent, upstream at the copy's serial", AppTypeAgent, 100, false, 0, 100, true},
+		{"agent, fallback upstream at the copy's serial", AppTypeAgent, 100, false, 150, 100, true},
+		{"auth keeps its copy", AppTypeAuth, 40, false, 0, 100, false},
+		// Confirmed (tdns-auth never marks a copy): an unchanged transfer is
+		// still discarded, so the copy at that serial stays.
+		{"auth, fallback upstream at the copy's serial", AppTypeAuth, 100, false, 150, 100, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			kdb := newTestKeyDB(t)
@@ -659,11 +669,19 @@ fresh.example.	3600	IN	A	10.0.0.40
 			if tc.firstDown {
 				first = "127.0.0.1:1" // nothing listening
 			}
+			upstreams := []PeerConf{{Addr: first}}
+			if tc.soaOnly != 0 {
+				// UDP only: its SOA starts the transfer, its AXFR (TCP) fails,
+				// and the transfer falls back to the primary behind it.
+				soaAddr, stopSOA := startTestSOAServer(t, "example.", tc.soaOnly, dns.RcodeSuccess)
+				defer stopSOA()
+				upstreams = []PeerConf{{Addr: soaAddr}, {Addr: addr}}
+			}
 			zd := &ZoneData{
 				ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
 				Logger: discardLogger(), KeyDB: kdb,
 				Options:   map[ZoneOption]bool{OptApiManagedZone: true},
-				Upstreams: []PeerConf{{Addr: first}},
+				Upstreams: upstreams,
 			}
 			registerZones(t, zd)
 			t.Cleanup(zd.stopPublisher)
@@ -694,8 +712,11 @@ fresh.example.	3600	IN	A	10.0.0.40
 			}
 			fresh, _ := zd.GetOwner("fresh.example.")
 			stale, _ := zd.GetOwner("stale.example.")
-			if tc.want != 100 && (fresh == nil || stale != nil) {
+			if tc.replaced && (fresh == nil || stale != nil) {
 				t.Errorf("the upstream's copy is not the one served (fresh %v, stale %v)", fresh != nil, stale != nil)
+			}
+			if !tc.replaced && (fresh != nil || stale == nil) {
+				t.Errorf("the copy was replaced (fresh %v, stale %v)", fresh != nil, stale != nil)
 			}
 			if zd.relayCopyUnconfirmed {
 				t.Error("the copy is still unconfirmed after the refresh")
