@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"gopkg.in/yaml.v3"
 )
 
 // testClientCert makes a self-signed client certificate and returns it with
@@ -412,11 +413,56 @@ func TestReloadedAccessFileRequiresTLS13AtTheHandshake(t *testing.T) {
 	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "Access file reloaded") {
 		t.Fatalf("reload: %q", msg)
 	}
-	if err := handshake(tls.VersionTLS12); err == nil {
-		t.Error("TLS 1.2 handshake succeeded after a reload added the access file")
+	// Refused the way a listener started with the access file refuses it:
+	// protocol_version, not internal_error.
+	if err := handshake(tls.VersionTLS12); err == nil || !strings.Contains(err.Error(), "protocol version") {
+		t.Errorf("TLS 1.2 handshake after a reload added the access file: %v, want a protocol version alert", err)
 	}
 	if err := handshake(tls.VersionTLS13); err != nil {
 		t.Errorf("TLS 1.3 after the reload: %v", err)
+	}
+}
+
+// A reload decodes the file into the running Config, and mapstructure keeps a
+// key the new file leaves out. apiserver: is reset before the decode, so
+// taking the access-file: line out takes the access file out (rig F5): the
+// reload says so and the policy goes back to key-as-admin.
+func TestReloadForgetsARemovedAccessFile(t *testing.T) {
+	access := filepath.Join(t.TempDir(), "access.yaml")
+	if err := os.WriteFile(access, []byte("clients: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conf := &Config{}
+	conf.Internal.ApiAccess = &apiAccessHolder{}
+	conf.Internal.ServerErrors = NewServerErrorRegistry()
+	decode := func(doc string) {
+		t.Helper()
+		var raw map[string]interface{}
+		if err := yaml.Unmarshal([]byte(doc), &raw); err != nil {
+			t.Fatal(err)
+		}
+		if err := decodeConfigMap(raw, conf, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	decode("apiserver:\n   apikey: k\n   socket: /var/run/tdns/tdns-auth.sock\n   access-file: " + access + "\n")
+	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "Access file reloaded") {
+		t.Fatalf("first reload: %q", msg)
+	}
+
+	decode("apiserver:\n   apikey: k\n") // access-file: and socket: taken out
+	if conf.ApiServer.AccessFile != "" || conf.ApiServer.Socket != "" {
+		t.Errorf("after the reload: access-file %q, socket %q; want both gone", conf.ApiServer.AccessFile, conf.ApiServer.Socket)
+	}
+	if !conf.ApiServer.UseTLS {
+		t.Error("the usetls default was lost in the reset")
+	}
+	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "no longer configured") {
+		t.Errorf("reload without access-file: %q, want it to say the access file is gone", msg)
+	}
+	if st := conf.Internal.ApiAccess.load(); st == nil || st.Enabled {
+		t.Errorf("running policy after the reload: %+v, want no access file", st)
 	}
 }
 
