@@ -392,7 +392,7 @@ func TestAccessFileRequiresTLS13(t *testing.T) {
 func TestReloadedAccessFileStopsAPlaintextListener(t *testing.T) {
 	t.Cleanup(func() {
 		apiTCPServers.Lock()
-		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped = nil, false, nil
+		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped, apiTCPServers.stoppedBy = nil, false, nil, ""
 		apiTCPServers.Unlock()
 	})
 	conf := &Config{}
@@ -457,7 +457,7 @@ func TestReloadedAccessFileStopsAPlaintextListener(t *testing.T) {
 func TestStoppedListenerOutlivesTheAccessFile(t *testing.T) {
 	t.Cleanup(func() {
 		apiTCPServers.Lock()
-		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped = nil, false, nil
+		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped, apiTCPServers.stoppedBy = nil, false, nil, ""
 		apiTCPServers.Unlock()
 	})
 	e := newAuthEnv(t, "-", nil)
@@ -486,8 +486,8 @@ func TestStoppedListenerOutlivesTheAccessFile(t *testing.T) {
 	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "STOPPED") || !strings.Contains(msg, srv.Addr) {
 		t.Fatalf("reload with the access file: %q, want %s stopped", msg, srv.Addr)
 	}
-	if cr := status("access file in force"); cr.Access == nil || !slices.Equal(cr.ApiTCPStopped, []string{srv.Addr}) {
-		t.Errorf("access file in force: status access %+v, stopped %v; want a policy and [%s]", cr.Access, cr.ApiTCPStopped, srv.Addr)
+	if cr := status("access file in force"); cr.Access == nil || !slices.Equal(cr.ApiTCPStopped, []string{srv.Addr}) || cr.ApiTCPStoppedBy != path {
+		t.Errorf("access file in force: status access %+v, stopped %v by %q; want a policy and [%s] by %s", cr.Access, cr.ApiTCPStopped, cr.ApiTCPStoppedBy, srv.Addr, path)
 	}
 
 	e.conf.ApiServer.AccessFile = ""
@@ -496,8 +496,8 @@ func TestStoppedListenerOutlivesTheAccessFile(t *testing.T) {
 		!strings.Contains(msg, "stay stopped until the daemon restarts") {
 		t.Errorf("reload without the access file: %q, want it to say %s stays stopped until a restart", msg, srv.Addr)
 	}
-	if cr := status("access file removed"); cr.Access != nil || !slices.Equal(cr.ApiTCPStopped, []string{srv.Addr}) {
-		t.Errorf("access file removed: status access %+v, stopped %v; want no policy and [%s]", cr.Access, cr.ApiTCPStopped, srv.Addr)
+	if cr := status("access file removed"); cr.Access != nil || !slices.Equal(cr.ApiTCPStopped, []string{srv.Addr}) || cr.ApiTCPStoppedBy != path {
+		t.Errorf("access file removed: status access %+v, stopped %v by %q; want no policy and [%s] by %s", cr.Access, cr.ApiTCPStopped, cr.ApiTCPStoppedBy, srv.Addr, path)
 	}
 	if listening(srv.Addr) {
 		t.Errorf("the plaintext listener on %s answers again after the access file was removed", srv.Addr)

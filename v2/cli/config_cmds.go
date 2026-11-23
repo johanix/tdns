@@ -390,7 +390,7 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 			fmt.Printf("ApiServer: api key is not set\n")
 		}
 		printAccessStatus(resp.Access)
-		printApiTCPStopped(resp.ApiTCPStopped, resp.Access != nil)
+		printApiTCPStopped(resp.ApiTCPStopped, resp.ApiTCPStoppedBy, resp.Access != nil)
 	}
 
 	if resp.Msg != "" {
@@ -474,20 +474,32 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 
 // printApiTCPStopped prints the plaintext TCP listeners an access file
 // closed. They stay closed until a restart, also once the access file is
-// removed, so this is printed whether the daemon runs a policy or not.
-func printApiTCPStopped(stopped []string, policy bool) {
+// removed, so this is printed whether the daemon runs a policy or not. by is
+// the access file that stopped them, on a line of its own (a path can be
+// long); a daemon that does not say gets the text without it.
+func printApiTCPStopped(stopped []string, by string, policy bool) {
 	if len(stopped) == 0 {
 		return
 	}
 	fmt.Printf("TCP API STOPPED on %s:\n", strings.Join(stopped, ", "))
-	if policy {
+	switch {
+	case policy && by != "":
+		fmt.Println("  it was plaintext, and the access file requires TLS:")
+		fmt.Printf("    %s\n", by)
+		fmt.Println("  restart the daemon with usetls: true (the local socket works)")
+	case policy:
 		fmt.Println("  it was plaintext, and the access file requires TLS;")
 		fmt.Println("  restart the daemon with usetls: true (the local socket works)")
-		return
+	case by != "":
+		fmt.Println("  it was plaintext when the access file came into force:")
+		fmt.Printf("    %s\n", by)
+		fmt.Println("  no access file is set now, but it stays closed until the daemon")
+		fmt.Println("  restarts (the local socket works)")
+	default:
+		fmt.Println("  it was plaintext when an access file came into force; no access")
+		fmt.Println("  file is set now, but it stays closed until the daemon restarts")
+		fmt.Println("  (the local socket works)")
 	}
-	fmt.Println("  it was plaintext when an access file came into force; no access")
-	fmt.Println("  file is set now, but it stays closed until the daemon restarts")
-	fmt.Println("  (the local socket works)")
 }
 
 // printAccessStatus prints the network API's access policy as the daemon is

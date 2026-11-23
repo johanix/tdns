@@ -709,6 +709,8 @@ type ConfigResponse struct {
 	// the access file is removed, so they are reported whether Access is
 	// set or not.
 	ApiTCPStopped []string `json:"apitcpstopped,omitempty"`
+	// ApiTCPStoppedBy is the access file that stopped them.
+	ApiTCPStoppedBy string `json:"apitcpstoppedby,omitempty"`
 	// transport-signal: what synthesis writes at _dns.<name> per name, for
 	// an operator to provision in the zone instead.
 	TransportSignal []TransportSignalPreview `json:"transportsignal,omitempty"`
