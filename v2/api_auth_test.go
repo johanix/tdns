@@ -330,3 +330,78 @@ func TestRequiredApiRole(t *testing.T) {
 		}
 	}
 }
+
+// A body that is not one JSON value is not a commandless request: the
+// handler's Decoder would run the first value's command.
+func TestPeekCommandMalformedBody(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{`{"command":"off"}{}`, unknownCommand}, // the handler would run "off"
+		{`{"command":`, unknownCommand},
+		{`{"command":5}`, unknownCommand},
+		{" \n", ""}, // empty: the commandless request it looks like
+		{`{"Command":"status"}` + "\n", "status"},
+		{`{}`, ""},
+	} {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/scanner/poll", strings.NewReader(tc.body))
+		if got, _ := peekCommand(r); got != tc.want {
+			t.Errorf("peekCommand(%q) = %q, want %q", tc.body, got, tc.want)
+		}
+	}
+}
+
+// With an access file in force, a request over TLS older than 1.3 is
+// refused, whatever the listener let through: a reload can add the access
+// file to a listener started without the TLS 1.3 minimum.
+func TestAccessFileRequiresTLS13(t *testing.T) {
+	af, err := ParseAccessFile([]byte("clients: []\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := &Config{}
+	conf.Internal.ApiAccess = &apiAccessHolder{}
+	conf.Internal.ApiAccess.p.Store(newAccessState("/etc/tdns/access.yaml", af))
+	for _, tc := range []struct {
+		name string
+		tls  *tls.ConnectionState
+		want int
+	}{
+		{"TLS 1.2", &tls.ConnectionState{Version: tls.VersionTLS12}, http.StatusForbidden},
+		{"TLS 1.3", &tls.ConnectionState{Version: tls.VersionTLS13}, 0},
+		{"no TLS (usetls: false)", nil, 0},
+	} {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/ping", nil)
+		r.TLS = tc.tls
+		r.Header.Set("X-API-Key", "the-key")
+		_, status, msg := conf.authenticateApiRequest(r, "the-key")
+		if status != tc.want {
+			t.Errorf("%s: status %d (%s), want %d", tc.name, status, msg, tc.want)
+		}
+	}
+}
+
+// A reload cannot move a listener; it says which listener settings it left
+// for the next restart.
+func TestApiListenerReloadNote(t *testing.T) {
+	saved := apiListenersStarted.Load()
+	t.Cleanup(func() { apiListenersStarted.Store(saved) })
+
+	conf := &Config{}
+	conf.ApiServer.Addresses = []string{"127.0.0.1:8989"}
+	conf.ApiServer.Socket = "/var/run/tdns/tdns-auth.sock"
+	conf.ApiServer.UseTLS = true
+	apiListenersStarted.Store(listenerSettingsOf(conf.ApiServer))
+	if note := conf.apiListenerReloadNote(); note != "" {
+		t.Errorf("nothing changed, note = %q", note)
+	}
+	conf.ApiServer.Socket = "/var/run/tdns/other.sock"
+	conf.ApiServer.UseTLS = false
+	note := conf.apiListenerReloadNote()
+	for _, want := range []string{"NOT applied", "apiserver.socket", "apiserver.usetls", "restart"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note %q does not say %q", note, want)
+		}
+	}
+	if strings.Contains(note, "apiserver.addresses") {
+		t.Errorf("note %q names addresses, which did not change", note)
+	}
+}

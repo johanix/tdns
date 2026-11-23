@@ -1490,6 +1490,7 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 		// config: its own loader reads it, and a file that does not load
 		// leaves the running policy in place (api_auth.go).
 		msg += conf.reloadApiAccess()
+		msg += conf.apiListenerReloadNote()
 	}
 	Globals.App.ServerConfigTime = time.Now()
 	return msg, err
@@ -1640,6 +1641,12 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 	// reloaded DnssecPolicies (via reloadDnssecFromFile above) are now final.
 	conf.publishRuntimeConfig()
 
+	// The access file too: this is the SIGHUP path, and a client removed or
+	// disabled there must lose its access without waiting for a full config
+	// reload. apiserver.access-file itself is not re-read here, only the
+	// file it names.
+	accessMsg := conf.reloadApiAccess()
+
 	// Snapshot the configured zone names while conf.Zones is still under the
 	// lock. The set is rebuilt from them below, after the unlock, because
 	// building it reads the dynamic config file and that must not happen under
@@ -1676,5 +1683,5 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 	// this reload. Off confMu: the template lookup takes it.
 	templateMsg := conf.ReapplyDynamicZoneTemplates().summary()
 
-	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s%s", prezones, zonelist, imrReloadMsg, templateMsg), err
+	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s%s%s", prezones, zonelist, imrReloadMsg, templateMsg, accessMsg), err
 }

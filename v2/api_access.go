@@ -132,13 +132,17 @@ func ValidateAccessFile(af *AccessFile) error {
 }
 
 // checkSpkiPin checks that s is a SPKI pin: base64 of a SHA-256 digest, the form
-// SPKISHA256 produces and `tdns-cli cert pin` prints.
+// SPKISHA256 produces and `tdns-cli cert pin` prints. Only the canonical
+// spelling: the decoder also takes embedded newlines and nonzero padding
+// bits, so several strings name one key. Pins are looked up and compared for
+// duplicates as strings, so a variant would never match, and two variants
+// would let one key be two clients.
 func checkSpkiPin(s string) error {
 	if s == "" {
 		return errors.New("pin is required")
 	}
 	b, err := base64.StdEncoding.DecodeString(s)
-	if err != nil || len(b) != 32 {
+	if err != nil || len(b) != 32 || base64.StdEncoding.EncodeToString(b) != s {
 		return fmt.Errorf("pin %q is not a SPKI SHA-256 pin (44 characters of base64)", s)
 	}
 	return nil

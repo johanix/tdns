@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -110,9 +111,16 @@ func peekCommand(r *http.Request) (cmd string, tooLarge bool) {
 	case err != nil:
 		return unknownCommand, false
 	}
+	if len(bytes.TrimSpace(buf)) == 0 {
+		return "", false
+	}
+	// A body that does not decode as one JSON value is not a commandless
+	// request: a handler's Decoder reads the first value and ignores the
+	// rest, so `{"command":"off"}{}` would run "off" with only the role a
+	// commandless request needs. It needs admin instead.
 	var c struct{ Command string }
 	if json.Unmarshal(buf, &c) != nil {
-		return "", false
+		return unknownCommand, false
 	}
 	return c.Command, false
 }
@@ -138,6 +146,15 @@ func (conf *Config) authenticateApiRequest(r *http.Request, apikey string) (ApiI
 	if st.Err != nil {
 		return ApiIdentity{}, http.StatusServiceUnavailable,
 			"management API disabled by a configuration error; see the daemon log, or use the local socket"
+	}
+	// An access file means TLS 1.3 (design 3.6). The listener's minimum is
+	// fixed when it starts, so after a reload that added the access file an
+	// older handshake still gets through; refuse its requests here. (No TLS
+	// at all is usetls: false, which design 3.6 allows: certificate clients
+	// cannot authenticate, only the key works, and the daemon warns at
+	// start; see APIdispatcher.)
+	if r.TLS != nil && r.TLS.Version < tls.VersionTLS13 {
+		return ApiIdentity{}, http.StatusForbidden, "the access file requires TLS 1.3 on the management API"
 	}
 	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 		pin := SPKISHA256(r.TLS.PeerCertificates[0])

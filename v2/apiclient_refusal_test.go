@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -73,5 +74,11 @@ func TestStopDaemonReportsARefusal(t *testing.T) {
 	notRunning := &ApiClient{BaseUrl: gone, AuthMethod: "none", Client: &http.Client{}}
 	if err := notRunning.StopDaemon(); err != nil {
 		t.Errorf("StopDaemon with no daemon running: %v (want nil: stop is a no-op)", err)
+	}
+
+	// The local socket of a daemon that is not running: no socket file.
+	noSocket := NewClient("local", "unix://"+filepath.Join(shortTempDir(t), "absent.sock"), "", "none", "")
+	if err := noSocket.StopDaemon(); err != nil {
+		t.Errorf("StopDaemon with no socket file: %v (want nil: stop is a no-op)", err)
 	}
 }

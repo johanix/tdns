@@ -82,3 +82,30 @@ func TestValidateAccessSettings(t *testing.T) {
 		}
 	}
 }
+
+// Only the canonical spelling of a pin is a pin. The decoder also takes a
+// last character that differs in its two unused bits, and embedded newlines;
+// each would be a second string for one key.
+func TestCheckSpkiPinIsCanonical(t *testing.T) {
+	sum := sha256.Sum256([]byte("a public key"))
+	pin := base64.StdEncoding.EncodeToString(sum[:])
+	if err := checkSpkiPin(pin); err != nil {
+		t.Fatalf("canonical pin refused: %v", err)
+	}
+	// The 43rd character carries 4 data bits and 2 unused ones: flip the
+	// lowest unused bit and the string still decodes to the same digest.
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	last := strings.IndexByte(alphabet, pin[42])
+	variant := pin[:42] + string(alphabet[last^1]) + pin[43:]
+	if b, err := base64.StdEncoding.DecodeString(variant); err != nil || string(b) != string(sum[:]) {
+		t.Fatalf("test setup: %q should decode to the same digest (err %v)", variant, err)
+	}
+	for name, s := range map[string]string{
+		"padding bits": variant,
+		"newline":      pin[:20] + "\n" + pin[20:],
+	} {
+		if err := checkSpkiPin(s); err == nil {
+			t.Errorf("%s variant %q accepted", name, s)
+		}
+	}
+}

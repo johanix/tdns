@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/viper"
@@ -27,7 +28,10 @@ import (
 func (api *ApiClient) StopDaemon() error {
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "stop"}, false)
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
+		// Refused (TCP, or a stale socket) or no socket file at all: nothing
+		// is running. A socket that is there but not ours to open (EACCES)
+		// is not this, and stays an error.
+		if strings.Contains(strings.ToLower(err.Error()), "connection refused") || errors.Is(err, syscall.ENOENT) {
 			fmt.Printf("Daemon seems to not be running.\n")
 			return nil
 		}
