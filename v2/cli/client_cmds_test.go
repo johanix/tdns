@@ -7,11 +7,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -446,6 +448,151 @@ func TestAccessMatchesRunning(t *testing.T) {
 	run.Clients[0].Role = "read-write"
 	if accessMatchesRunning(af, run) {
 		t.Error("a changed role was not noticed")
+	}
+}
+
+// The reload after an access-file edit goes over the daemon's local socket
+// when it can, not over the role's TCP entry: a daemon that started with a
+// broken access file answers 503 on TCP until this very reload. And a reply
+// saying the access file was NOT reloaded is a failure, not "Reloaded".
+func TestAccessReloadPrefersTheSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ncli") // short: a socket path has a length limit
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "admin.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	reply := "Config reloaded. Access file reloaded: 1 client(s), keyauth on."
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{Msg: reply})
+	})}
+	go srv.Serve(ln)
+	defer srv.Close()
+
+	// The role's own entry reaches nothing: only the socket can answer.
+	withCleanRoleRegistry(t)
+	RegisterRole("auth", "tdns-auth")
+	saved := apiConfig
+	t.Cleanup(func() { apiConfig = saved })
+	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"}}}
+	if err := InitApiClients(apiConfig); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reloadForAccess("auth", sock); err != nil {
+		t.Errorf("reload with the socket there: %v", err)
+	}
+	mu.Lock()
+	reply = "Config reloaded. " + tdns.AccessFileNotReloaded + " (the running policy is unchanged): bad pin"
+	mu.Unlock()
+	if err := reloadForAccess("auth", sock); err == nil || !strings.Contains(err.Error(), "did NOT apply") {
+		t.Errorf("a reply saying the access file was not reloaded: err = %v, want a failure", err)
+	}
+	// No socket file: the role's entry gets the reload, and here it fails.
+	if err := reloadForAccess("auth", filepath.Join(dir, "absent.sock")); err == nil || !strings.Contains(err.Error(), "reload failed") {
+		t.Errorf("no socket: err = %v, want the TCP entry's failure", err)
+	}
+}
+
+// A replaced access file keeps its owner and group, and a new one takes the
+// daemon config's, so the daemon can still read it after root edits it.
+// Exercised with a second group of the test's user: the one change of owner
+// an unprivileged process may make.
+func TestAccessFileKeepsItsGroup(t *testing.T) {
+	dir := t.TempDir()
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, dirGid, ok := fileOwner(fi)
+	if !ok {
+		t.Skip("no file owners on this platform")
+	}
+	groups, _ := os.Getgroups()
+	alt := -1
+	for _, g := range groups {
+		if g != dirGid && g != os.Getegid() {
+			alt = g
+			break
+		}
+	}
+	if alt < 0 {
+		t.Skip("the test user has no second group to give a file")
+	}
+	daemonCfg := filepath.Join(dir, "tdns-auth.yaml")
+	writeFile(t, daemonCfg, "service:\n   name: TDNS-AUTH\n")
+	os.Chmod(daemonCfg, 0o640)
+	if err := os.Chown(daemonCfg, -1, alt); err != nil {
+		t.Skipf("cannot give the daemon config group %d: %v", alt, err)
+	}
+	gidOf := func(p string) int {
+		t.Helper()
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, gid, _ := fileOwner(fi)
+		return gid
+	}
+
+	access := filepath.Join(dir, "access.yaml")
+	if err := writeAccessFile(access, nil, []byte("clients: []\n"), daemonCfg); err != nil {
+		t.Fatal(err)
+	}
+	if g := gidOf(access); g != alt {
+		t.Errorf("new access file has group %d, want the daemon config's %d", g, alt)
+	}
+	if err := writeAccessFile(access, []byte("clients: []\n"), []byte("keyauth: false\nclients: []\n"), daemonCfg); err != nil {
+		t.Fatal(err)
+	}
+	if g := gidOf(access); g != alt {
+		t.Errorf("replaced access file has group %d, want the old file's %d", g, alt)
+	}
+}
+
+// A socket entry has no TLS and sends no credentials, so a leftover rootca:
+// or authmethod: certificate does not stop it. A pinned entry with a leftover
+// rootca: tlsa is checked, not skipped as a TLSA entry.
+func TestLeftoverSettingsDoNotStopAnEntry(t *testing.T) {
+	sockEntry := ApiDetails{Name: "s", BaseURL: "unix:///var/run/tdns/tdns-auth.sock", AuthMethod: "certificate", RootCA: "/nonexistent/ca.pem"}
+	if _, _, err := newApiClientFor(sockEntry, CliClientConf{Cert: "/nonexistent/c.crt", Key: "/nonexistent/c.key"}); err != nil {
+		t.Errorf("socket entry with leftover TLS settings: %v", err)
+	}
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tdns.PingResponse{Msg: "pong", Pings: 1, Pongs: 1})
+	}))
+	defer srv.Close()
+	pinned := ApiDetails{Name: "p", BaseURL: srv.URL + "/api/v1", AuthMethod: "none", TLSAuth: "pin",
+		Pins: []string{tdns.SPKISHA256(srv.Certificate())}, RootCA: "tlsa"}
+	if res := CheckEntries([]ApiDetails{pinned}, CliClientConf{}, 5*time.Second); !strings.HasPrefix(res[0], "ok") {
+		t.Errorf("pinned entry with a leftover rootca: tlsa: %q, want it checked", res[0])
+	}
+}
+
+// client init with a pair outside the default place says where it is: the
+// client loads the default pair unless client: names another.
+func TestClientInitNamesACustomPair(t *testing.T) {
+	dir := t.TempDir()
+	cert, key := filepath.Join(dir, "me.crt"), filepath.Join(dir, "me.key")
+	out := captureStdout(t, func() {
+		c := newClientInitCmd()
+		c.SetArgs([]string{"--cert", cert, "--key", key, "--name", "me"})
+		if err := c.Execute(); err != nil {
+			t.Error(err)
+		}
+	})
+	for _, want := range []string{"client:", "cert: " + cert, "key:  " + key} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output does not say %q:\n%s", want, out)
+		}
 	}
 }
 

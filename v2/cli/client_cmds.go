@@ -25,6 +25,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -121,6 +122,11 @@ daemon's entry in your CLI config.`,
 			fmt.Printf("To let a daemon know you, run on its host (as root):\n\n")
 			fmt.Printf("   tdns-ncli <daemon> client add %s --pin %s --role read-write\n\n", name, pin)
 			fmt.Printf("Then give that daemon's entry in your CLI config:\n\n   authmethod: certificate\n")
+			// The client loads the default pair unless client: names
+			// another, so a pair made elsewhere needs saying where.
+			if certPath != defCert || keyPath != defKey {
+				fmt.Printf("\nand, at the top level of the CLI config (the pair is not in the default place):\n\n   client:\n      cert: %s\n      key:  %s\n", certPath, keyPath)
+			}
 		},
 	}
 	c.Flags().StringVar(&certPath, "cert", "", "certificate file (default: see above)")
@@ -262,6 +268,7 @@ type accessTarget struct {
 	File         string // apiserver.access-file, or the suggested path when unset
 	Configured   bool   // the daemon config names it, so the daemon reads it
 	HasSocket    bool
+	Socket       string // apiserver.socket, the daemon's local admin socket, or ""
 }
 
 // resolveAccessTarget finds role's daemon config and its access file. The
@@ -276,7 +283,7 @@ func resolveAccessTarget(role string) (*accessTarget, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &accessTarget{DaemonConfig: info.ConfigFile, File: info.AccessFile, Configured: info.AccessFile != "", HasSocket: info.Socket != ""}
+	t := &accessTarget{DaemonConfig: info.ConfigFile, File: info.AccessFile, Configured: info.AccessFile != "", HasSocket: info.Socket != "", Socket: info.Socket}
 	if !t.Configured {
 		base := strings.TrimSuffix(filepath.Base(info.ConfigFile), filepath.Ext(info.ConfigFile))
 		t.File = filepath.Join(filepath.Dir(info.ConfigFile), base+"-access.yaml")
@@ -362,12 +369,28 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 		fmt.Printf("Not reloaded (--no-reload): the daemon still runs the previous file.\n")
 		return nil
 	}
-	return reloadForAccess(role)
+	return reloadForAccess(role, t.Socket)
 }
 
 // reloadForAccess asks role's daemon to reload its config, and with it the
 // access file. A refused reload changes nothing in the daemon.
-func reloadForAccess(role string) error {
+func reloadForAccess(role, socket string) error {
+	// The daemon's local socket first, when there is one: it is admin, needs
+	// no network credentials, and answers when the TCP API does not (a
+	// daemon that started with a broken access file answers 503 on TCP
+	// until a reload fixes it, the reload this is). Only when the socket
+	// cannot be used from here (not root: EACCES; or the daemon is not
+	// running) does the role's own entry get the reload instead.
+	if socket != "" {
+		sock := tdns.NewClient(role, "unix://"+socket, "", "none", "")
+		resp, err := SendConfigCommand(sock, tdns.ConfigPost{Command: "reload"})
+		if err == nil {
+			return accessReloadVerdict(resp)
+		}
+		if !socketUnusable(err) {
+			return fmt.Errorf("written, but the reload over the local socket %s failed: %v", socket, err)
+		}
+	}
 	api, err := GetApiClient(role, false)
 	if err != nil {
 		return fmt.Errorf("written, but not reloaded: %v", err)
@@ -376,8 +399,27 @@ func reloadForAccess(role string) error {
 	if err != nil {
 		return fmt.Errorf("written, but the reload failed: %v", err)
 	}
+	return accessReloadVerdict(resp)
+}
+
+// socketUnusable says whether a request over the local socket failed because
+// the socket cannot be used from here (not ours to open, or no daemon on it),
+// not because the daemon answered.
+func socketUnusable(err error) bool {
+	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ENOENT) ||
+		strings.Contains(strings.ToLower(err.Error()), "connection refused")
+}
+
+// accessReloadVerdict says whether the reload put the edited access file in
+// force. The daemon's reload succeeds even when the access file does not load
+// (it keeps the running policy), so its reply text is the only sign; a
+// `client disable` must not report success while the client keeps its access.
+func accessReloadVerdict(resp tdns.ConfigResponse) error {
 	if resp.Error {
 		return fmt.Errorf("written, but the daemon refused the reload: %s", resp.ErrorMsg)
+	}
+	if strings.Contains(resp.Msg, tdns.AccessFileNotReloaded) {
+		return fmt.Errorf("written, but the daemon did NOT apply it and keeps the previous policy: %s", strings.TrimSpace(resp.Msg))
 	}
 	fmt.Printf("Reloaded: %s\n", strings.TrimSpace(resp.Msg))
 	return nil
@@ -407,25 +449,23 @@ func renderAccessFile(af *tdns.AccessFile, daemonConfig string) ([]byte, error) 
 }
 
 // writeAccessFile replaces path atomically (following a symlink, keeping the
-// file's mode), after saving the previous content as path.prev. A new file
-// takes the daemon config's mode, so the daemon can read it as it reads that.
+// file's mode, owner and group), after saving the previous content as
+// path.prev. A new file takes the daemon config's mode, owner and group, so
+// the daemon can read it as it reads that. Atomic for a new file too: the
+// daemon reads this file at start and at every reload, and a truncated one
+// parses (keyauth on, no clients).
 func writeAccessFile(path string, old, data []byte, daemonConfig string) error {
 	if old != nil {
 		if err := os.WriteFile(path+".prev", old, 0o600); err != nil {
 			return fmt.Errorf("saving %s.prev: %w", path, err)
 		}
-		return writeFileAtomic(path, data)
+		return writeFileAtomicLike(path, data, nil)
 	}
-	mode := os.FileMode(0o600)
+	var like os.FileInfo
 	if fi, err := os.Stat(daemonConfig); err == nil {
-		mode = fi.Mode().Perm()
+		like = fi
 	}
-	// Atomic here too: the daemon reads this file at start and at every
-	// reload, and a truncated one parses (keyauth on, no clients).
-	if err := writeFileAtomic(path, data); err != nil {
-		return err
-	}
-	return os.Chmod(path, mode) // writeFileAtomic made it 0600
+	return writeFileAtomicLike(path, data, like)
 }
 
 func findClient(af *tdns.AccessFile, name string) *tdns.AccessClient {

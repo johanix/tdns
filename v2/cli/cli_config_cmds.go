@@ -914,7 +914,9 @@ func pingEntry(e ApiDetails, cc CliClientConf, timeout time.Duration) string {
 	if err != nil {
 		return "FAIL: " + err.Error()
 	}
-	if e.RootCA == "tlsa" {
+	// Only when TLSA is what verifies the daemon: with pins (tlsauth: pin),
+	// a leftover rootca: tlsa is ignored and the entry can be checked.
+	if e.RootCA == "tlsa" && !(strings.EqualFold(e.TLSAuth, "pin") && len(e.Pins) > 0) {
 		return "not checked (rootca: tlsa)"
 	}
 	// What every other command would say when it uses this entry (no

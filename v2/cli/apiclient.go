@@ -289,7 +289,12 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 				e.Name, e.BaseURL)
 		}
 	}
+	// The local socket has no TLS, and the client sends no credentials on
+	// it (NewClientWithOptions): a leftover rootca: or authmethod:
+	// certificate must not stop the entry before it is built.
+	socket := strings.HasPrefix(strings.ToLower(e.BaseURL), "unix://")
 	switch {
+	case socket:
 	case len(o.Pins) > 0:
 		// tlsauth: pin. The pins replace the roots, and the client ignores
 		// rootca, so a rootca: line left over from before must not be read
@@ -311,7 +316,7 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 		}
 		o.RootCAs = pool
 	}
-	if e.AuthMethod == "certificate" {
+	if e.AuthMethod == "certificate" && !socket {
 		cert, err := loadClientCert(cc)
 		if err != nil {
 			return nil, "", fmt.Errorf("entry %q has authmethod: certificate, but %w (tdns-ncli client init makes one)", e.Name, err)
