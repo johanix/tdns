@@ -223,6 +223,11 @@ apiserver:
    # certfile/keyfile, or the API listener fails to start (the resolver itself
    # keeps running). Set it false for a plaintext API on loopback.
    usetls:     false
+   # Local admin socket: the management API without TLS or a key, for root
+   # on this host (whoever can open the socket is admin). The directory is
+   # created 0700 if missing; one that group or others can enter is refused.
+   # tdns-ncli config add uses it when run as root.
+   socket:     /var/run/tdns/tdns-imr.sock
    # certfile:   /etc/tdns/certs/api.crt
    # keyfile:    /etc/tdns/certs/api.key
 

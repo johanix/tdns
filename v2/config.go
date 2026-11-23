@@ -812,15 +812,28 @@ type ImrUpstreamConf struct {
 }
 
 type ApiServerConf struct {
-	Addresses []string        `validate:"required"` // Must be in addr:port format
+	// Addresses must be in addr:port format. They may be left out when
+	// Socket is set: the local admin socket is served without them (see
+	// APIdispatcher), so a socket-only daemon is a valid config. It still
+	// needs ApiKey (the router builders refuse to start without one), but
+	// not CertFile and KeyFile, which only the TCP listeners use.
+	Addresses []string        `validate:"required_without=Socket"`
 	ApiKey    SensitiveString `validate:"required"`
-	CertFile  string          `validate:"required,file,certkey"`
-	KeyFile   string          `validate:"required,file"`
+	CertFile  string          `validate:"required_with_listener,omitempty,file,certkey"`
+	KeyFile   string          `validate:"required_with_listener,omitempty,file"`
 	UseTLS    bool
 	Server    ApiServerAppConf
 	Agent     ApiServerAppConf
 	// MSA       ApiServerAppConf
 	Combiner ApiServerAppConf
+
+	// Socket is the path of the local admin socket (apiserver.socket), or ""
+	// for none. The management API is served there as well as on Addresses,
+	// with no TLS and no API key: whoever can open the socket is admin, so
+	// file permissions are the authentication. The daemon creates the socket
+	// with mode 0600 and refuses a directory that group or others can enter.
+	// See api_socket.go and docs/2026-11-20-api-pinning-mtls-roles-design.md.
+	Socket string
 }
 
 type ApiServerAppConf struct {

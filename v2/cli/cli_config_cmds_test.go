@@ -1148,6 +1148,207 @@ func TestIsCliConfigCmd(t *testing.T) {
 	}
 }
 
+// A daemon with a local admin socket gets a socket entry when root adds it: no
+// key, no TLS, admin. Anyone else, or --tcp, gets the TCP entry.
+func TestAddPrefersTheLocalSocketForRoot(t *testing.T) {
+	const sock = "/var/run/tdns/tdns-auth.sock"
+	setRoot := func(t *testing.T, root bool) {
+		saved := runningAsRoot
+		t.Cleanup(func() { runningAsRoot = saved })
+		runningAsRoot = func() bool { return root }
+	}
+	withSocket := func(env *addEnv, t *testing.T, file, addr string) string {
+		p := filepath.Join(env.dir, file)
+		writeFile(t, p, daemonYAML("TDNS-AUTH", addr, "key-"+file, "   socket: "+sock+"\n"))
+		return p
+	}
+
+	t.Run("root gets the socket", func(t *testing.T) {
+		setRoot(t, true)
+		env := newAddEnv(t)
+		d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
+		if _, err := env.add(t, d, nil); err != nil {
+			t.Fatal(err)
+		}
+		want := ApiDetails{Name: "tdns-auth", BaseURL: "unix://" + sock, AuthMethod: "none", ConfigFile: d}
+		if got := env.entries(t); len(got) != 1 || got[0] != want {
+			t.Errorf("entries = %+v\nwant      [%+v]", got, want)
+		}
+		raw, _ := os.ReadFile(env.cli)
+		if strings.Contains(string(raw), "apikey") {
+			t.Errorf("a socket entry should have no apikey line:\n%s", raw)
+		}
+	})
+
+	t.Run("anyone else gets TCP, with a note", func(t *testing.T) {
+		setRoot(t, false)
+		env := newAddEnv(t)
+		d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
+		res, err := env.add(t, d, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Entry.BaseURL != "https://127.0.0.1:8989/api/v1" || res.Entry.ApiKey == "" {
+			t.Errorf("entry = %+v, want the TCP one", res.Entry)
+		}
+		if !strings.Contains(strings.Join(res.Notes, " "), "root-only") {
+			t.Errorf("notes = %q, want one saying the socket is root-only", res.Notes)
+		}
+	})
+
+	t.Run("--tcp as root gets TCP", func(t *testing.T) {
+		setRoot(t, true)
+		env := newAddEnv(t)
+		d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
+		res, err := env.add(t, d, func(o *AddOptions) { o.TCP = true })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Entry.BaseURL != "https://127.0.0.1:8989/api/v1" || res.Entry.AuthMethod != "X-API-Key" {
+			t.Errorf("entry = %+v, want the TCP one", res.Entry)
+		}
+	})
+
+	t.Run("a TCP entry needs the key", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			root bool
+			tcp  bool
+		}{{"not root", false, false}, {"--tcp as root", true, true}} {
+			t.Run(tc.name, func(t *testing.T) {
+				setRoot(t, tc.root)
+				env := newAddEnv(t)
+				p := filepath.Join(env.dir, "tdns-auth.yaml")
+				writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "", "   socket: "+sock+"\n"))
+				_, err := env.add(t, p, func(o *AddOptions) { o.TCP = tc.tcp })
+				if err == nil || !strings.Contains(err.Error(), "apiserver.apikey is not set") {
+					t.Errorf("err = %v, want one naming apiserver.apikey", err)
+				}
+				if _, err := os.Stat(env.cli); err == nil {
+					if got := env.entries(t); len(got) != 0 {
+						t.Errorf("entries = %+v, want none", got)
+					}
+				}
+			})
+		}
+		// Root without --tcp gets the socket entry, which needs no key.
+		setRoot(t, true)
+		env := newAddEnv(t)
+		p := filepath.Join(env.dir, "tdns-auth.yaml")
+		writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "", "   socket: "+sock+"\n"))
+		if _, err := env.add(t, p, nil); err != nil {
+			t.Errorf("socket entry for a daemon with no key: %v", err)
+		}
+	})
+
+	t.Run("socket-only daemon needs root", func(t *testing.T) {
+		setRoot(t, false)
+		env := newAddEnv(t)
+		p := filepath.Join(env.dir, "tdns-auth.yaml")
+		writeFile(t, p, "service:\n   name: TDNS-AUTH\napiserver:\n   socket: "+sock+"\n")
+		if _, err := env.add(t, p, nil); err == nil || !strings.Contains(err.Error(), "only root") {
+			t.Errorf("err = %v, want one saying only root can use the socket", err)
+		}
+	})
+
+	t.Run("an existing TCP entry is the same daemon", func(t *testing.T) {
+		setRoot(t, false)
+		env := newAddEnv(t)
+		d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
+		if _, err := env.add(t, d, nil); err != nil { // as non-root: a TCP entry
+			t.Fatal(err)
+		}
+		setRoot(t, true)
+		res, err := env.add(t, d, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.AlreadyKnown != "tdns-auth" {
+			t.Errorf("AlreadyKnown = %q, want tdns-auth (one daemon, not a second instance)", res.AlreadyKnown)
+		}
+		if !strings.Contains(strings.Join(res.Notes, " "), "unix://"+sock) {
+			t.Errorf("notes = %q, want one saying how to switch to the socket", res.Notes)
+		}
+		if got := env.entries(t); len(got) != 1 {
+			t.Errorf("%d entries, want 1", len(got))
+		}
+	})
+
+	t.Run("--tcp against an existing socket entry says it kept the socket", func(t *testing.T) {
+		setRoot(t, true)
+		env := newAddEnv(t)
+		d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
+		if _, err := env.add(t, d, nil); err != nil { // as root: the socket entry
+			t.Fatal(err)
+		}
+		res, err := env.add(t, d, func(o *AddOptions) { o.TCP = true })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.AlreadyKnown != "tdns-auth" {
+			t.Errorf("AlreadyKnown = %q, want tdns-auth", res.AlreadyKnown)
+		}
+		if !strings.Contains(strings.Join(res.Notes, " "), "local admin socket, so --tcp adds nothing") {
+			t.Errorf("notes = %q, want one saying the kept entry is the socket", res.Notes)
+		}
+		if got := env.entries(t); len(got) != 1 || got[0].BaseURL != "unix://"+sock {
+			t.Errorf("entries = %+v, want the one socket entry", got)
+		}
+	})
+
+	// A socket entry holds no key, so a rotated key leaves it as it was; a TCP
+	// entry for the same daemon holds the key, and is told it is stale.
+	t.Run("a rotated key: the socket entry stands, the TCP entry is stale", func(t *testing.T) {
+		setRoot(t, true)
+		env := newAddEnv(t)
+		d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
+		if _, err := env.add(t, d, nil); err != nil { // the socket entry
+			t.Fatal(err)
+		}
+		writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "rotated-key", "   socket: "+sock+"\n"))
+		res, err := env.add(t, d, nil)
+		if err != nil || res.AlreadyKnown != "tdns-auth" {
+			t.Errorf("socket entry after a key rotation: %+v, %v", res, err)
+		}
+
+		setRoot(t, false)
+		env2 := newAddEnv(t)
+		d2 := withSocket(env2, t, "tdns-auth.yaml", "127.0.0.1:8989")
+		if _, err := env2.add(t, d2, nil); err != nil { // the TCP entry
+			t.Fatal(err)
+		}
+		writeFile(t, d2, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "rotated-key", "   socket: "+sock+"\n"))
+		setRoot(t, true)
+		if _, err := env2.add(t, d2, nil); err == nil || !strings.Contains(err.Error(), "apikey") || strings.Contains(err.Error(), "scheme") {
+			t.Errorf("TCP entry after a key rotation: err = %v, want the apikey named, and only it", err)
+		}
+	})
+
+	t.Run("a relative socket path is not used", func(t *testing.T) {
+		setRoot(t, true)
+		env := newAddEnv(t)
+		p := filepath.Join(env.dir, "tdns-auth.yaml")
+		writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "the-key", "   socket: run/tdns-auth.sock\n"))
+		res, err := env.add(t, p, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Entry.BaseURL != "https://127.0.0.1:8989/api/v1" {
+			t.Errorf("entry = %+v, want the TCP one", res.Entry)
+		}
+		if !strings.Contains(strings.Join(res.Notes, " "), "not an absolute path") {
+			t.Errorf("notes = %q, want one saying the socket path is not absolute", res.Notes)
+		}
+
+		// With no TCP address there is nothing to add.
+		writeFile(t, p, "service:\n   name: TDNS-AUTH\napiserver:\n   socket: run/tdns-auth.sock\n")
+		env2 := newAddEnv(t)
+		if _, err := env2.add(t, p, nil); err == nil || !strings.Contains(err.Error(), "neither apiserver.addresses nor apiserver.socket") {
+			t.Errorf("err = %v, want one saying there is no management API to address", err)
+		}
+	})
+}
+
 func statOf(t *testing.T, p string) os.FileInfo {
 	t.Helper()
 	fi, err := os.Stat(p)

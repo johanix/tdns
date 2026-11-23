@@ -19,6 +19,12 @@ import (
 func apiKeyAuthMiddleware(expectedKey string) mux.MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The local admin socket authenticates by file permissions: the
+			// connection got here, so the caller could open the socket. No key.
+			if FromLocalSocket(r.Context()) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			providedKey := r.Header.Get("X-API-Key")
 			if subtle.ConstantTimeCompare([]byte(providedKey), []byte(expectedKey)) != 1 {
 				http.Error(w, "Forbidden", http.StatusForbidden)
@@ -241,14 +247,30 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 
 	lgApi.Debug("dispatcher config", "addresses", addresses, "certFile", certFile, "keyFile", keyFile)
 
-	if len(addresses) == 0 {
-		lgApi.Warn("no addresses to listen on (key 'apiserver.addresses' not set), not starting")
-		// return fmt.Errorf("no addresses to listen on")
+	if router == nil {
+		lgApi.Warn("API router is nil, not starting")
 		return nil
 	}
 
-	if router == nil {
-		lgApi.Warn("API router is nil, not starting")
+	// The local admin socket first, and independently of the TCP listeners:
+	// it is the way in that nothing else can take away, so a daemon with no
+	// apiserver.addresses still serves it, and a socket that cannot be served
+	// is an error the operator sees, not a reason to stop the daemon.
+	// A socket that stops serving later is such an error too (apiSocketFailed).
+	if sock := conf.ApiServer.Socket; sock != "" {
+		// Cleared before the socket starts, not after: a failure the server
+		// reports once it runs must not be undone by a late clear here.
+		conf.Internal.ServerErrors.clear(ErrCatTransport, ErrSubApiSocket)
+		if err := serveApiSocket(sock, router, done, apiSocketFailed(conf, sock)); err != nil {
+			lgApi.Error("management API: the local socket is not served", "socket", sock, "err", err)
+			conf.Internal.ServerErrors.set(ErrCatTransport, ErrSubApiSocket,
+				fmt.Sprintf("local admin socket %s not served: %v", sock, err))
+		}
+	}
+
+	if len(addresses) == 0 {
+		lgApi.Warn("no addresses to listen on (key 'apiserver.addresses' not set), not starting")
+		// return fmt.Errorf("no addresses to listen on")
 		return nil
 	}
 

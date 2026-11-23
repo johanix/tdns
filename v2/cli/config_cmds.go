@@ -380,6 +380,9 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		} else {
 			fmt.Printf("ApiServer: not listening on any addresses\n")
 		}
+		if line := apiSocketStatusLine(resp); line != "" {
+			fmt.Println(line)
+		}
 		// The daemon sends the key redacted (SensitiveString.MarshalJSON), so
 		// all there is to say is whether one is set.
 		if resp.ApiServer.ApiKey.Value() != "" {
@@ -392,6 +395,24 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 	if resp.Msg != "" {
 		fmt.Printf("%s\n", resp.Msg)
 	}
+}
+
+// apiSocketStatusLine is the `config status` line for the daemon's local
+// admin socket, or "" when it has none. Both status printers use it (the
+// auth/agent one above and imr's). A socket the daemon is configured with
+// but could not serve is said to be so, so the line does not read as if the
+// socket were there; the Transport/ApiSocket error carries the reason.
+func apiSocketStatusLine(resp tdns.ConfigResponse) string {
+	sock := resp.ApiServer.Socket
+	if sock == "" {
+		return ""
+	}
+	for _, e := range resp.ServerErrors {
+		if e.Category == tdns.ErrCatTransport && e.Subtype == tdns.ErrSubApiSocket {
+			return fmt.Sprintf("ApiServer: local admin socket %s is configured but NOT served (see the active errors)", sock)
+		}
+	}
+	return fmt.Sprintf("ApiServer: local admin socket %s", sock)
 }
 
 // renderReloadGuardrail prints the DNSSEC policy-change guardrail refusal returned
