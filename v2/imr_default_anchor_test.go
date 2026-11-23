@@ -84,19 +84,14 @@ func TestNoAnchorCompiledInHintsUsesCompiledInRootAnchor(t *testing.T) {
 	}
 }
 
-// No anchor configured, and the root may be a private one: a root-hints file,
-// a forward for "." or a stub for ".". No anchor at all, as before, and a
-// warning that nothing will validate.
-func TestNoAnchorNonDefaultRootGetsNoAnchor(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		ic     ImrEngineConf
-		reason string
-	}{
-		{"root-hints file", ImrEngineConf{RootHints: "/etc/tdns/root.hints"}, "root-hints is set"},
-		{"forwarded root", ImrEngineConf{Forward: []ImrForwardConf{fwdConf(".", "192.0.2.53", 0)}}, "root is forwarded"},
-		{"stubbed root", ImrEngineConf{Stubs: []ImrStubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}, "root is a stub zone"},
-	} {
+// No anchor configured, and the root may be another one: a root-hints file, a
+// forward for "." or a stub for ".". Which anchor it gets is the root's to say,
+// by the keys it serves (imr_root_anchor_probe.go), so parsing the config loads
+// none, before priming or at Start, and the log says that the choice is made
+// once the root has been fetched. It does not say that nothing will validate:
+// that is only known when the root's keys do not match.
+func TestNoAnchorNonDefaultRootLeavesTheChoiceToTheRoot(t *testing.T) {
+	for _, tc := range nonDefaultRoots {
 		t.Run(tc.name, func(t *testing.T) {
 			logbuf := captureImrLog(t)
 			imr := newForwardTestImr(t, nil)
@@ -108,17 +103,18 @@ func TestNoAnchorNonDefaultRootGetsNoAnchor(t *testing.T) {
 				t.Fatalf("want no anchor, got DS %v, DNSKEY %v", dsByName, keysByName)
 			}
 			logged := logbuf.String()
-			if !strings.Contains(logged, "level=WARN") || !strings.Contains(logged, "nothing will validate") ||
+			if !strings.Contains(logged, "level=INFO") || !strings.Contains(logged, "may not be the IANA root") ||
 				!strings.Contains(logged, tc.reason) {
-				t.Errorf("want a WARN saying nothing will validate, because %q; got:\n%s", tc.reason, logged)
+				t.Errorf("want an INFO saying the choice is the root's, because %q; got:\n%s", tc.reason, logged)
 			}
-			// And Start's half has nothing to fetch: it returns at once,
-			// without asking anyone for a DNSKEY RRset.
-			if err := imr.initializeImrTrustAnchors(t.Context(), tc.ic); err != nil {
-				t.Errorf("initializeImrTrustAnchors: %v", err)
+			if strings.Contains(logged, "nothing will validate") {
+				t.Errorf("said that nothing will validate before the root was asked:\n%s", logged)
 			}
+			// The preload before priming reads the same anchors: none, so no
+			// root DS RRset is seeded.
+			imr.loadConfiguredTrustAnchors(tc.ic)
 			if crr := imr.Cache.Peek(".", dns.TypeDS); crr != nil {
-				t.Errorf("a root DS RRset was seeded: %+v", crr)
+				t.Errorf("a root DS RRset was seeded before the root was asked: %+v", crr)
 			}
 		})
 	}

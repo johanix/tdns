@@ -539,14 +539,15 @@ func imrRestartRequiredKeys(boot, current ImrEngineConf) []string {
 	check("trust-anchor-dnskey", boot.TrustAnchorDNSKEY == current.TrustAnchorDNSKEY)
 	check("trust-anchor-file", boot.TrustAnchorFile == current.TrustAnchorFile)
 	// The anchors are loaded once, and an anchorless config's depends on the
-	// root: the compiled-in IANA anchor only while no root-hints file, "."
-	// forward or "." stub may lead elsewhere (RootAnchorFallback). Forwards
-	// and stubs are reloadable, and a reload that adds or drops one for "."
-	// does not load or unload the anchor.
+	// root: the compiled-in IANA anchor at once while no root-hints file, "."
+	// forward or "." stub may lead elsewhere (RootAnchorFallback), and from the
+	// keys that root serves once one may (RootAnchorProbe). Forwards and stubs
+	// are reloadable, and a reload that adds or drops one for "." does not
+	// load, unload or re-choose the anchor.
 	bootDefault, _ := boot.RootAnchorFallback()
 	curDefault, _ := current.RootAnchorFallback()
 	if bootDefault != curDefault {
-		inUse := map[bool]string{true: "in use", false: "not in use"}
+		inUse := map[bool]string{true: "in use", false: "decided from the root's keys"}
 		keys = append(keys, fmt.Sprintf("the compiled-in root trust anchor (%s at start, %s for this config)",
 			inUse[bootDefault], inUse[curDefault]))
 	}
