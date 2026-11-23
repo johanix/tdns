@@ -167,21 +167,11 @@ func defaultClientName() string {
 // returns its pin. It never overwrites.
 func ensureClientCert(certPath, keyPath, cn string) (pin string, created bool, err error) {
 	if data, err := os.ReadFile(certPath); err == nil {
-		p, perr := pemCertPin(data)
-		if perr != nil {
-			return "", false, fmt.Errorf("%s exists but %v", certPath, perr)
-		}
-		// The pair, not the certificate alone: a pin for a certificate
-		// whose key is gone or another one would enrol a client that can
-		// never connect. Touch neither file.
-		if _, kerr := tls.LoadX509KeyPair(certPath, keyPath); kerr != nil {
-			return "", false, fmt.Errorf("%s exists, but it and %s are not a usable pair (%v); not touching either: fix the key, or remove both and run client init again",
-				certPath, keyPath, kerr)
-		}
-		return p, false, nil
+		p, err := clientPairPin(certPath, keyPath, data)
+		return p, false, err
 	}
 	if _, err := os.Stat(keyPath); err == nil {
-		return "", false, fmt.Errorf("%s exists without its certificate %s; not overwriting a key", keyPath, certPath)
+		return "", false, clientKeyWithoutCertError(certPath, keyPath)
 	}
 	for _, d := range []string{filepath.Dir(certPath), filepath.Dir(keyPath)} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -230,6 +220,32 @@ func ensureClientCert(certPath, keyPath, cn string) (pin string, created bool, e
 		return "", false, err
 	}
 	return tdns.SPKISHA256(leaf), true, nil
+}
+
+// clientPairPin is the pin of the client certificate data, read from
+// certPath, whose key is keyPath. It writes nothing: ensureClientCert uses
+// it for a pair that is there, and a dry run of config add, which must not
+// call ensureClientCert (it makes a pair if the certificate went meanwhile).
+func clientPairPin(certPath, keyPath string, data []byte) (string, error) {
+	p, perr := pemCertPin(data)
+	if perr != nil {
+		return "", fmt.Errorf("%s exists but %v", certPath, perr)
+	}
+	// The pair, not the certificate alone: a pin for a certificate whose key
+	// is gone or another one would enrol a client that can never connect.
+	// Touch neither file.
+	if _, kerr := tls.LoadX509KeyPair(certPath, keyPath); kerr != nil {
+		return "", fmt.Errorf("%s exists, but it and %s are not a usable pair (%v); not touching either: fix the key, or remove both and run client init again",
+			certPath, keyPath, kerr)
+	}
+	return p, nil
+}
+
+// clientKeyWithoutCertError is the refusal of a client key at keyPath
+// without its certificate at certPath: ensureClientCert's, and a dry run of
+// config add's in the same words.
+func clientKeyWithoutCertError(certPath, keyPath string) error {
+	return fmt.Errorf("%s exists without its certificate %s; not overwriting a key", keyPath, certPath)
 }
 
 // createNewFile writes data to path, which must not exist yet. A write that

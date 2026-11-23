@@ -191,7 +191,9 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 
 	// The operator's pair: the CLI config's client: block, else the default.
 	// A dry run predicts it made only when neither file is there, as
-	// ensureClientCert would make it (it never overwrites a key).
+	// ensureClientCert would make it (it never overwrites a key), and reads
+	// a pair that is there without ensureClientCert, which makes a pair if
+	// the certificate went meanwhile.
 	c.cert, c.key = clientCertPaths(ReadCliClientConf(o.CliConfig))
 	c.name = defaultClientName()
 	_, cerr := os.Stat(c.cert)
@@ -202,11 +204,21 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 		_, kerr := os.Stat(c.key)
 		switch {
 		case kerr == nil:
-			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%s exists without its certificate %s)", c.key, c.cert))
+			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", clientKeyWithoutCertError(c.cert, c.key)))
 		case !errors.Is(kerr, fs.ErrNotExist):
 			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", kerr))
 		}
 		c.pairNew = true
+	case o.DryRun:
+		data, err := os.ReadFile(c.cert)
+		pin := ""
+		if err == nil {
+			pin, err = clientPairPin(c.cert, c.key, data)
+		}
+		if err != nil {
+			return c.cannot(fmt.Sprintf("your client certificate cannot be used (%v)", err))
+		}
+		c.pin, c.name = pin, clientNameOf(c.cert)
 	default:
 		pin, created, err := ensureClientCert(c.cert, c.key, defaultClientName())
 		if err != nil {

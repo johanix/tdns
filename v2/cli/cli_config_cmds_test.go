@@ -2567,13 +2567,19 @@ func TestConfigToDaemonFallbackNamesTheConfig(t *testing.T) {
 // key without its certificate is refused, as ensureClientCert refuses it.
 func TestAddDryRunProbesNothing(t *testing.T) {
 	env := newAddEnv(t)
-	env.pin(t)
+	pin := env.pin(t)
+	certBefore, keyBefore := readBytes(t, env.cert), readBytes(t, env.key)
 	dir := readOnlyDaemonDir(t, env)
 	d, _ := env.certDaemon(t, dir, "")
 	os.Chmod(dir, 0o555)
 	res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true })
 	if err != nil || res.Cert.state != certCanEnable {
 		t.Fatalf("%+v, %v; want the edit predicted", res, err)
+	}
+	// The pair that is there is read, not made again (not through
+	// ensureClientCert, which makes one if the certificate went meanwhile).
+	if res.Cert.pin != pin || res.Cert.pairNew || readBytes(t, env.cert) != certBefore || readBytes(t, env.key) != keyBefore {
+		t.Errorf("the dry run did not read your pair as it is: pin %q (want %q), new %v", res.Cert.pin, pin, res.Cert.pairNew)
 	}
 	if out := printed(res, true, env.cli); !strings.Contains(out, "found out when it runs") {
 		t.Errorf("printed:\n%s", out)
@@ -2583,7 +2589,7 @@ func TestAddDryRunProbesNothing(t *testing.T) {
 	d2, _ := env2.certDaemon(t, env2.dir, "")
 	os.MkdirAll(filepath.Dir(env2.key), 0o700)
 	writeFile(t, env2.key, "a key without its certificate\n")
-	if _, err := env2.add(t, d2, func(o *AddOptions) { o.DryRun = true }); err == nil || !strings.Contains(err.Error(), "without its certificate") {
+	if _, err := env2.add(t, d2, func(o *AddOptions) { o.DryRun = true }); err == nil || !strings.Contains(err.Error(), clientKeyWithoutCertError(env2.cert, env2.key).Error()) {
 		t.Errorf("dry run, an orphan key: err = %v, want the refusal the add gives", err)
 	}
 	if _, err := os.Stat(env2.cert); err == nil {
