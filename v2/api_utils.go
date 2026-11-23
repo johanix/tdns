@@ -32,6 +32,13 @@ type PingResponse struct {
 	// (read-write) by certificate", "... by api key", or "on the local socket
 	// (admin)". The diagnostic when access does not work as expected.
 	Auth string `json:",omitempty"`
+	// The same, in parts, for a client to put in a line of its own: the role
+	// ("admin", "read-write", "read-only"), how the caller was
+	// authenticated ("local socket", "certificate", "api key") and who it is
+	// (the access-file client, "apikey" or "local").
+	Role     string `json:",omitempty"`
+	Via      string `json:",omitempty"`
+	Identity string `json:",omitempty"`
 }
 
 var pongs int = 0
@@ -67,6 +74,7 @@ func APIping(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		}
 		if id, ok := ApiIdentityFrom(r.Context()); ok {
 			response.Auth = id.Describe()
+			response.Role, response.Via, response.Identity = id.Role.String(), id.Via, id.Name
 		}
 
 		// select {

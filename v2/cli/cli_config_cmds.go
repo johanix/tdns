@@ -1035,15 +1035,13 @@ func pingEntry(e ApiDetails, cc CliClientConf, timeout time.Duration) string {
 			done <- "FAIL: " + msg
 			return
 		}
-		s := "ok"
+		// How it was reached and as whom, as ping says it.
+		s := "ok (" + pingHow(api, pr) + ")"
 		if !pr.BootTime.IsZero() {
 			s += ", up " + shortDuration(time.Since(pr.BootTime))
 		}
 		if pr.Version != "" {
 			s += ", " + pr.Version
-		}
-		if pr.Auth != "" {
-			s += "; " + pr.Auth
 		}
 		done <- s
 	}()
