@@ -120,3 +120,20 @@ func TestPendingCertValidates(t *testing.T) {
 		t.Error("no certfile, not pending: validated")
 	}
 }
+
+// The default certificate covers every address the API listens on, a loopback
+// address other than 127.0.0.1 and ::1 included, once each; wildcards are no
+// names.
+func TestApiCertSANs(t *testing.T) {
+	dns, ips := apiCertSANs("ns1.example", []string{"127.0.0.1:8989", "127.0.0.2:8989", "[::1]:8989", "0.0.0.0:8989", "192.0.2.1:8989", "api.example:8989"})
+	var got []string
+	for _, ip := range ips {
+		got = append(got, ip.String())
+	}
+	if w := "127.0.0.1 ::1 127.0.0.2 192.0.2.1"; strings.Join(got, " ") != w {
+		t.Errorf("IP SANs %v, want %s", got, w)
+	}
+	if w := "localhost ns1.example api.example"; strings.Join(dns, " ") != w {
+		t.Errorf("DNS SANs %v, want %s", dns, w)
+	}
+}

@@ -8,6 +8,7 @@ package cli
 
 import (
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -88,6 +89,18 @@ var apiClientErrors = map[string]error{}
 // apiClientWarnings are said once, when the entry is first used.
 var apiClientWarnings = map[string]string{}
 
+// socketPending holds the entries whose daemon's local admin socket is checked
+// when the entry is first used (GetApiClient), not when the CLI starts. The
+// check asks the daemon which config it runs, and a command uses one entry:
+// asking every daemon in the CLI config first cost a round trip each, and a
+// daemon that hangs would hold up commands for the others.
+var socketPending = map[string]pendingClient{}
+
+type pendingClient struct {
+	e  ApiDetails
+	cc CliClientConf
+}
+
 // roleToClientKey maps Cobra-tree role names (e.g. "agent", "signer")
 // to the clientKey used to look up the ApiClient in
 // tdns.Globals.ApiClients (e.g. "tdns-agent", "tdns-mpsigner").
@@ -150,6 +163,22 @@ func InitApiClients(c *CliConf) error {
 		fmt.Printf("InitApiClients: setting up API clients for:")
 	}
 	for _, val := range servers {
+		delete(socketPending, val.Name)
+		if socketCandidate(val) {
+			// Its socket is checked on first use (resolvePending). Until
+			// then, the TCP client, for code that reads the client table
+			// without GetApiClient (the tdns.Globals.Api shim below).
+			socketPending[val.Name] = pendingClient{e: val, cc: c.Client}
+			delete(apiClientErrors, val.Name)
+			delete(apiClientWarnings, val.Name)
+			delete(tdns.Globals.ApiClients, val.Name)
+			if val.BaseURL != "" {
+				if ac, _, err := buildApiClient(val, c.Client, "", ""); err == nil {
+					tdns.Globals.ApiClients[val.Name] = ac
+				}
+			}
+			continue
+		}
 		ac, warn, err := newApiClientFor(val, c.Client)
 		if err != nil {
 			apiClientErrors[val.Name] = err
@@ -206,6 +235,7 @@ func GetApiClient(role string, dieOnError bool) (*tdns.ApiClient, error) {
 		return nil, fmt.Errorf("unknown role: %s", role)
 	}
 
+	resolvePending(clientKey)
 	client := tdns.Globals.ApiClients[clientKey]
 	if client == nil {
 		if err := apiClientErrors[clientKey]; err != nil {
@@ -232,6 +262,52 @@ func GetApiClient(role string, dieOnError bool) (*tdns.ApiClient, error) {
 		fmt.Printf("Using API client for %q:\nBaseUrl: %s\n", clientKey, client.BaseUrl)
 	}
 	return client, nil
+}
+
+// resolvePending builds the client of an entry whose socket check
+// InitApiClients left for first use: over the daemon's local admin socket when
+// it answers and is that daemon, else over TCP. Once per entry.
+func resolvePending(name string) {
+	p, ok := socketPending[name]
+	if !ok {
+		return
+	}
+	delete(socketPending, name)
+	delete(apiClientWarnings, name)
+	ac, warn, err := newApiClientFor(p.e, p.cc)
+	if err != nil {
+		apiClientErrors[name] = err
+		delete(tdns.Globals.ApiClients, name)
+		return
+	}
+	delete(apiClientErrors, name)
+	if warn != "" {
+		apiClientWarnings[name] = warn
+	}
+	tdns.Globals.ApiClients[name] = ac
+	if name == "tdns-auth" {
+		tdns.Globals.Api = ac
+	}
+}
+
+// ApiClientByName is the client of the apiservers entry called name, its
+// daemon's local admin socket checked as GetApiClient does, or nil: for tools
+// that pick an entry by name, not by role (tdns-debug --target).
+func ApiClientByName(name string) *tdns.ApiClient {
+	resolvePending(name)
+	return tdns.Globals.ApiClients[name]
+}
+
+// isUnixURL says whether baseurl is a local socket URL, its scheme in any case.
+func isUnixURL(baseurl string) bool {
+	return len(baseurl) >= 7 && strings.EqualFold(baseurl[:7], "unix://")
+}
+
+// socketCandidate says whether e may reach its daemon over the daemon's local
+// admin socket: it names the daemon's config, it is not a socket entry, and
+// --tcp was not given.
+func socketCandidate(e ApiDetails) bool {
+	return !ForceTCP && e.ConfigFile != "" && !isUnixURL(e.BaseURL)
 }
 
 // loopbackURL says whether rawURL's host is localhost or a loopback address.
@@ -303,7 +379,7 @@ var ForceTCP bool
 // and a command for one daemon must not run, as admin, on another. note says
 // why a socket that answered was not used.
 func usableDaemonSocket(e ApiDetails) (sock, note string) {
-	if ForceTCP || e.ConfigFile == "" || strings.HasPrefix(e.BaseURL, "unix://") {
+	if !socketCandidate(e) {
 		return "", ""
 	}
 	sock, addrs := daemonSocket(e.ConfigFile)
@@ -320,7 +396,7 @@ func usableDaemonSocket(e ApiDetails) (sock, note string) {
 	c.Close()
 	probe := tdns.NewClientWithOptions(e.Name, "unix://"+sock, tdns.ClientOptions{AuthMethod: "none"})
 	probe.Client.Timeout = 5 * time.Second
-	resp, err := SendConfigCommand(probe, tdns.ConfigPost{Command: "identity"})
+	resp, err := askIdentity(probe)
 	switch {
 	case err != nil:
 		return "", fmt.Sprintf("%s: the local admin socket %s did not say which daemon it is (%v); not using it", e.Name, sock, err)
@@ -332,6 +408,28 @@ func usableDaemonSocket(e ApiDetails) (sock, note string) {
 	return sock, ""
 }
 
+// askIdentity asks the daemon on probe which config it runs. Quietly: it is
+// how tdns-ncli picks its route, not the command the operator gave, so -v does
+// not print its status (SendConfigCommand would).
+func askIdentity(probe *tdns.ApiClient) (tdns.ConfigResponse, error) {
+	var cr tdns.ConfigResponse
+	body, err := json.Marshal(tdns.ConfigPost{Command: "identity"})
+	if err != nil {
+		return cr, err
+	}
+	status, buf, err := probe.Post("/config", body)
+	if err != nil {
+		return cr, err
+	}
+	if err := json.Unmarshal(buf, &cr); err != nil {
+		return cr, fmt.Errorf("status %d, and a reply that is not JSON: %v", status, err)
+	}
+	if cr.Error {
+		return cr, errors.New(cr.ErrorMsg)
+	}
+	return cr, nil
+}
+
 // newApiClientFor builds the client for one apiservers entry: how it verifies
 // the daemon (pins, roots, or, said out loud, nothing) and how it
 // authenticates itself (key, certificate, or nothing on the local socket).
@@ -340,7 +438,7 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 	// The client recognises the socket scheme only as "unix://"; spelled
 	// any other way it would be taken for TCP (and its rootca read, or the
 	// process ended on it). The scheme is case-insensitive, the path is not.
-	if len(e.BaseURL) >= 7 && strings.EqualFold(e.BaseURL[:7], "unix://") {
+	if isUnixURL(e.BaseURL) {
 		e.BaseURL = "unix://" + e.BaseURL[7:]
 	}
 	// The daemon's local admin socket, when the entry names the daemon's
@@ -348,6 +446,16 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 	// daemon config (tdns.ApiSocketPath), not in the CLI config, so the two
 	// cannot disagree. Otherwise the entry's TCP address.
 	sock, sockNote := usableDaemonSocket(e)
+	return buildApiClient(e, cc, sock, sockNote)
+}
+
+// buildApiClient builds e's client, over sock when that is set (the daemon's
+// local admin socket, checked by usableDaemonSocket), else over e's own
+// baseurl. sockNote says why a socket that answered was not used.
+func buildApiClient(e ApiDetails, cc CliClientConf, sock, sockNote string) (*tdns.ApiClient, string, error) {
+	if isUnixURL(e.BaseURL) {
+		e.BaseURL = "unix://" + e.BaseURL[7:]
+	}
 	if sock != "" {
 		if tdns.Globals.Debug {
 			fmt.Printf("%s: using the daemon's local admin socket %s\n", e.Name, sock)
