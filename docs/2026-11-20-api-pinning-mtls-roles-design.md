@@ -648,8 +648,16 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   MinVersion is fixed when it starts, so every handshake also asks the running
   policy: while an access file is in force, a client that does not offer TLS
   1.3 fails the handshake (and a request over older TLS would get 403). That
-  covers an access file a reload added. With `usetls: false` and an access
-  file the daemon and `config check` warn, as 3.6 says.
+  covers an access file a reload added.
+- **`usetls: false` with an access file is refused (changed 2026-11-23,
+  replacing the warning 3.6 describes).** With TCP addresses, the config is
+  invalid at start and at reload, and `config check` fails it.
+  `usetls: false` was the way in when the TLS setup was broken; the local
+  admin socket is that way in now, so the network API never needs plaintext.
+  Loopback has no exception: the socket covers local use. A socket-only
+  daemon leaves out `apiserver.addresses` instead (the 3.6 case of
+  `keyauth: false` with `usetls: false`). Without an access file
+  `usetls: false` is unchanged for now.
 - **`daemon start`, `stop`, `restart`** treat a missing socket file like a
   refused connection: nothing is running (and, while starting, not up yet).
 - **Reloads.** The SIGHUP path (zone reload) re-reads the access file too, so
