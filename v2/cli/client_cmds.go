@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"net"
 	"net/url"
 	"os"
 	"os/user"
@@ -286,14 +285,15 @@ func resolveAccessTarget(role string) (*accessTarget, error) {
 		return nil, err
 	}
 	// Without config-file: the daemon config above is only this host's
-	// default for the role, and the role's entry may address another daemon
-	// altogether (a remote one): editing and reloading the local daemon
-	// would then leave the one the operator meant unchanged. So the entry
-	// must address this daemon: its socket, or one of its listen ports on
-	// an address of this host.
-	if ad := apiDetailsForRole(role); ad != nil && ad.ConfigFile == "" && !entryAddressesDaemon(*ad, info, localHostAddrs()) {
-		return nil, fmt.Errorf("%s's entry %s (%s) has no config-file:, and it does not address the daemon of %s on this host (socket %q, addresses %v); the client commands edit a daemon's own files, so run them on that daemon's host, or give the entry config-file:",
-			role, ad.Name, ad.BaseURL, cfg, info.Socket, info.Addresses)
+	// default for the role, and the role's entry may reach another daemon
+	// altogether: editing and reloading the local daemon would then leave
+	// the one the operator meant unchanged. A TCP address cannot settle
+	// which daemon answers on it (another one may hold it while this one
+	// runs on its socket alone), so only the daemon's own socket identifies
+	// it; any other entry needs config-file:, which config add writes.
+	if ad := apiDetailsForRole(role); ad != nil && ad.ConfigFile == "" && !entryIsDaemonSocket(*ad, info) {
+		return nil, fmt.Errorf("%s's entry %s (%s) has no config-file:, so nothing says it is the daemon of %s; the client commands edit a daemon's own files, and an address does not tell which daemon answers on it. Give the entry config-file: (tdns-ncli config add writes it), or use the daemon's local socket entry",
+			role, ad.Name, ad.BaseURL, cfg)
 	}
 	t := &accessTarget{DaemonConfig: info.ConfigFile, File: info.AccessFile, Configured: info.AccessFile != "", HasSocket: info.Socket != "", Socket: info.Socket}
 	if !t.Configured {
@@ -303,75 +303,16 @@ func resolveAccessTarget(role string) (*accessTarget, error) {
 	return t, nil
 }
 
-// entryAddressesDaemon says whether entry e reaches the daemon whose API is
-// info: its local socket, or one of its listen addresses at an address of
-// this host (local: loopback, or one of the host's interface addresses).
-//
-// The address must be the one the daemon listens on: 127.0.0.1 and ::1 are
-// two addresses, and another daemon may hold the same port on the other. A
-// wildcard listen address takes the local addresses of its own family only:
-// 0.0.0.0 (and an empty host) IPv4, :: IPv6. Whether Go makes a wildcard
-// listener dual-stack depends on the platform (not on NetBSD, where
-// IPV6_V6ONLY is the default), so the narrower reading is the safe one; an
-// entry it refuses can still be given config-file:. "localhost" may be
-// dialled as either loopback address, so it counts only when both reach
-// this daemon.
-func entryAddressesDaemon(e ApiDetails, info *DaemonApi, local func(net.IP) bool) bool {
+// entryIsDaemonSocket says whether entry e is the local socket of the daemon
+// whose API is info. The socket is the daemon's own: it creates it, in a
+// directory only it may use, and refuses one that another process holds. A
+// TCP address is not like that, so it identifies no daemon by itself.
+func entryIsDaemonSocket(e ApiDetails, info *DaemonApi) bool {
 	u, err := url.Parse(e.BaseURL)
-	if err != nil {
+	if err != nil || !strings.EqualFold(u.Scheme, "unix") {
 		return false
 	}
-	if strings.EqualFold(u.Scheme, "unix") {
-		return info.Socket != "" && u.Path == info.Socket
-	}
-	host, port := u.Hostname(), u.Port()
-	if port == "" {
-		return false
-	}
-	listens := func(ip net.IP) bool {
-		for _, a := range info.Addresses {
-			lh, lp, err := net.SplitHostPort(a)
-			if err != nil || lp != port {
-				continue
-			}
-			lip := net.ParseIP(lh)
-			v4 := ip.To4() != nil
-			switch {
-			case lh == "" || (lip != nil && lip.Equal(net.IPv4zero)):
-				if v4 {
-					return true
-				}
-			case lip != nil && lip.Equal(net.IPv6unspecified):
-				if !v4 {
-					return true
-				}
-			case lip != nil && lip.Equal(ip):
-				return true
-			}
-		}
-		return false
-	}
-	if strings.EqualFold(host, "localhost") {
-		return listens(net.IPv4(127, 0, 0, 1)) && listens(net.IPv6loopback)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !(ip.IsLoopback() || local(ip)) {
-		return false // a name other than localhost, or another host's address
-	}
-	return listens(ip)
-}
-
-// localHostAddrs is "is this an address of this host", from its interfaces.
-func localHostAddrs() func(net.IP) bool {
-	addrs, _ := net.InterfaceAddrs()
-	return func(ip net.IP) bool {
-		for _, a := range addrs {
-			if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
-				return true
-			}
-		}
-		return false
-	}
+	return info.Socket != "" && u.Path == info.Socket
 }
 
 type accessEditOpts struct {

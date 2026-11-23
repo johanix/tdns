@@ -610,45 +610,28 @@ func TestClientInitNamesACustomPair(t *testing.T) {
 }
 
 // The client commands edit the local daemon's files, so a role entry without
-// config-file: must address that daemon: its socket, or one of its listen
-// ports on an address of this host. A remote entry is refused.
-func TestEntryAddressesDaemon(t *testing.T) {
-	info := &DaemonApi{Socket: "/var/run/tdns/tdns-auth.sock",
-		Addresses: []string{"127.0.0.1:8989", "0.0.0.0:8990", "[::]:8991", "0.0.0.0:8992", "[::]:8992"}}
-	thisHost, thisHost6 := net.ParseIP("192.0.2.10"), net.ParseIP("2001:db8::10")
-	local := func(ip net.IP) bool { return ip.Equal(thisHost) || ip.Equal(thisHost6) }
+// config-file: must be that daemon's own socket. A TCP address identifies no
+// daemon by itself (another may hold it while this one serves its socket
+// alone), not even this host's loopback on the daemon's configured port.
+func TestEntryIsDaemonSocket(t *testing.T) {
+	info := &DaemonApi{Socket: "/var/run/tdns/tdns-auth.sock", Addresses: []string{"127.0.0.1:8989"}}
 	for _, tc := range []struct {
 		url  string
 		want bool
 	}{
 		{"unix:///var/run/tdns/tdns-auth.sock", true},
+		{"UNIX:///var/run/tdns/tdns-auth.sock", true},
 		{"unix:///var/run/tdns/other.sock", false},
-		{"https://127.0.0.1:8989/api/v1", true},
-		// 8989 listens on 127.0.0.1 only: ::1 is another address, where
-		// another daemon may hold the port, and localhost may be dialled
-		// as ::1.
-		{"https://[::1]:8989/api/v1", false},
+		{"https://127.0.0.1:8989/api/v1", false},
 		{"https://localhost:8989/api/v1", false},
-		// A wildcard covers its own family only: 0.0.0.0 is IPv4 (on NetBSD
-		// it is not dual-stack, and another daemon may hold [::1]:8990), ::
-		// IPv6. localhost needs both.
-		{"https://[::1]:8990/api/v1", false},
-		{"https://localhost:8990/api/v1", false},
-		{"https://192.0.2.10:8990/api/v1", true}, // IPv4 wildcard, this host's IPv4 address
-		{"https://127.0.0.1:8990/api/v1", true},
-		{"https://[2001:db8::10]:8990/api/v1", false},
-		{"https://[::1]:8991/api/v1", true}, // IPv6 wildcard
-		{"https://[2001:db8::10]:8991/api/v1", true},
-		{"https://127.0.0.1:8991/api/v1", false},
-		{"https://localhost:8992/api/v1", true},   // both wildcards: both loopbacks reach it
-		{"https://192.0.2.10:8989/api/v1", false}, // 8989 listens on loopback only
-		{"https://192.0.2.99:8990/api/v1", false}, // another host
-		{"https://auth.example.net:8990/api/v1", false},
-		{"https://127.0.0.1:9999/api/v1", false},
+		{"https://192.0.2.99:8989/api/v1", false},
 	} {
-		if got := entryAddressesDaemon(ApiDetails{Name: "tdns-auth", BaseURL: tc.url}, info, local); got != tc.want {
+		if got := entryIsDaemonSocket(ApiDetails{Name: "tdns-auth", BaseURL: tc.url}, info); got != tc.want {
 			t.Errorf("%s: %v, want %v", tc.url, got, tc.want)
 		}
+	}
+	if entryIsDaemonSocket(ApiDetails{BaseURL: "unix:///var/run/tdns/tdns-auth.sock"}, &DaemonApi{}) {
+		t.Error("a daemon config with no socket matched a socket entry")
 	}
 }
 
