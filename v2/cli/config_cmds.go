@@ -390,6 +390,7 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 			fmt.Printf("ApiServer: api key is not set\n")
 		}
 		printAccessStatus(resp.Access)
+		printApiTCPStopped(resp.ApiTCPStopped, resp.Access != nil)
 	}
 
 	if resp.Msg != "" {
@@ -471,6 +472,24 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	return cr, nil
 }
 
+// printApiTCPStopped prints the plaintext TCP listeners an access file
+// closed. They stay closed until a restart, also once the access file is
+// removed, so this is printed whether the daemon runs a policy or not.
+func printApiTCPStopped(stopped []string, policy bool) {
+	if len(stopped) == 0 {
+		return
+	}
+	fmt.Printf("TCP API STOPPED on %s:\n", strings.Join(stopped, ", "))
+	if policy {
+		fmt.Println("  it was plaintext, and the access file requires TLS;")
+		fmt.Println("  restart the daemon with usetls: true (the local socket works)")
+		return
+	}
+	fmt.Println("  it was plaintext when an access file came into force; no access")
+	fmt.Println("  file is set now, but it stays closed until the daemon restarts")
+	fmt.Println("  (the local socket works)")
+}
+
 // printAccessStatus prints the network API's access policy as the daemon is
 // running it, if it has one.
 func printAccessStatus(a *tdns.ApiAccessStatus) {
@@ -486,10 +505,6 @@ func printAccessStatus(a *tdns.ApiAccessStatus) {
 		keyauth = "the API key is off"
 	}
 	fmt.Printf("Access file: %s; %s; %d client(s)\n", a.File, keyauth, len(a.Clients))
-	if len(a.TCPStopped) > 0 {
-		fmt.Printf("TCP API STOPPED on %s: it was plaintext, and the access file requires TLS; restart the daemon with usetls: true (the local socket works)\n",
-			strings.Join(a.TCPStopped, ", "))
-	}
 	for _, c := range a.Clients {
 		state := ""
 		if c.Disabled {

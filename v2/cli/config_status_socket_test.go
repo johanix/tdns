@@ -188,3 +188,31 @@ func TestConfigCheckUseTLSDefault(t *testing.T) {
 		})
 	}
 }
+
+// `config status` reports the plaintext TCP listeners an access file closed
+// whether the daemon still runs a policy or not (removing the file does not
+// reopen them), and says which of the two it is.
+func TestConfigStatusReportsStoppedListeners(t *testing.T) {
+	stopped := []string{"192.0.2.1:8080"}
+	if out := captureStdout(t, func() { printApiTCPStopped(nil, true) }); out != "" {
+		t.Errorf("nothing stopped: printed %q", out)
+	}
+	for _, tc := range []struct {
+		name   string
+		policy bool
+		want   string
+	}{
+		{"policy in force", true, "access file requires TLS"},
+		{"access file removed", false, "no access\n  file is set now"},
+	} {
+		out := captureStdout(t, func() { printApiTCPStopped(stopped, tc.policy) })
+		if !strings.HasPrefix(out, "TCP API STOPPED on 192.0.2.1:8080:\n") || !strings.Contains(out, tc.want) {
+			t.Errorf("%s: printed %q, want it to contain %q", tc.name, out, tc.want)
+		}
+		for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+			if len(line) > 72 {
+				t.Errorf("%s: line over 72 characters: %q", tc.name, line)
+			}
+		}
+	}
+}
