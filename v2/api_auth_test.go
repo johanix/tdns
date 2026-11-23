@@ -650,6 +650,13 @@ func TestRequestForAnotherConfigIsRefused(t *testing.T) {
 			t.Errorf("through a symlink: %d %q, want 200", st, body)
 		}
 	}
+	// A relative config-file:, as the client's working directory reads it:
+	// the client sends it absolute, so the daemon (whose working directory
+	// is its own) compares like with like.
+	t.Chdir(dir)
+	if st, body := post("tdns-auth.yaml"); st != 200 {
+		t.Errorf("a relative path from the client's directory: %d %q, want 200", st, body)
+	}
 	// No header: as before.
 	if st, body := e.callSocket(t, "/api/v1/t-admin", ""); st != 200 {
 		t.Errorf("no expected config: %d %q, want 200", st, body)

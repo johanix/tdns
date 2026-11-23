@@ -107,7 +107,9 @@ func NewClientWithOptions(name, baseurl string, o ClientOptions) *ApiClient {
 			},
 		}
 		if o.ExpectConfigFile != "" {
-			tr = expectConfigTransport{base: tr, file: o.ExpectConfigFile}
+			// Absolute, from this process's working directory: the daemon
+			// has another one, and compares with its own absolute path.
+			tr = expectConfigTransport{base: tr, file: absConfigFile(o.ExpectConfigFile)}
 		}
 		api.Client = &http.Client{Transport: tr}
 		return &api

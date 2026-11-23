@@ -367,7 +367,7 @@ tdns-ncli client init
 ```
 
 It writes a self-signed certificate and its key (mode 0600) to
-`~/.config/tdns/` (for root, `/etc/tdns/tdns-ncli-client.crt` and `.key`) and
+`~/.config/tdns/certs/` (for root, `/etc/tdns/certs/tdns-ncli-client.crt` and `.key`) and
 prints its pin and the line that enrolls it on a daemon. An entry with
 `authmethod: certificate` presents it, and sends no key; a top-level `client:`
 block (`cert:`, `key:`) names other files. Only such entries present it: a
