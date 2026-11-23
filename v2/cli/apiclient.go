@@ -251,6 +251,12 @@ func loopbackURL(rawURL string) bool {
 // authenticates itself (key, certificate, or nothing on the local socket).
 // The warning, if any, is for the operator when the entry is used.
 func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, error) {
+	// The client recognises the socket scheme only as "unix://"; spelled
+	// any other way it would be taken for TCP (and its rootca read, or the
+	// process ended on it). The scheme is case-insensitive, the path is not.
+	if len(e.BaseURL) >= 7 && strings.EqualFold(e.BaseURL[:7], "unix://") {
+		e.BaseURL = "unix://" + e.BaseURL[7:]
+	}
 	o := tdns.ClientOptions{ApiKey: e.ApiKey, AuthMethod: e.AuthMethod, RootCA: e.RootCA}
 	warn := ""
 	if strings.HasPrefix(strings.ToLower(e.BaseURL), "https://") {
@@ -292,7 +298,7 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 	// The local socket has no TLS, and the client sends no credentials on
 	// it (NewClientWithOptions): a leftover rootca: or authmethod:
 	// certificate must not stop the entry before it is built.
-	socket := strings.HasPrefix(strings.ToLower(e.BaseURL), "unix://")
+	socket := strings.HasPrefix(e.BaseURL, "unix://")
 	switch {
 	case socket:
 	case len(o.Pins) > 0:

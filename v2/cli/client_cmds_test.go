@@ -131,11 +131,24 @@ func newAccessEnv(t *testing.T, withAccessFile bool, apiURL string) *accessEnv {
 	e := &accessEnv{dir: t.TempDir()}
 	e.daemonCfg = filepath.Join(e.dir, "tdns-auth.yaml")
 	e.access = filepath.Join(e.dir, "tdns-auth-access.yaml")
-	cfg := "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ 127.0.0.1:8989 ]\n   apikey: k\n   socket: /var/run/tdns/tdns-auth.sock\n"
+	// The socket is in the test's own directory and does not exist: a reload
+	// tries the socket first, and must never reach a daemon running on this
+	// host. (A short directory: a socket path has a length limit.)
+	sockDir, err := os.MkdirTemp("/tmp", "ncli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	cfg := "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ 127.0.0.1:8989 ]\n   apikey: k\n   socket: " + filepath.Join(sockDir, "tdns-auth.sock") + "\n"
 	if withAccessFile {
 		cfg += "   access-file: " + e.access + "\n"
 	}
 	if err := os.WriteFile(e.daemonCfg, []byte(cfg), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// Explicitly: the umask applied to WriteFile (0077 would give 0600),
+	// and the tests compare a new access file's mode with this one.
+	if err := os.Chmod(e.daemonCfg, 0o640); err != nil {
 		t.Fatal(err)
 	}
 	saved := apiConfig
@@ -593,6 +606,82 @@ func TestClientInitNamesACustomPair(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("output does not say %q:\n%s", want, out)
 		}
+	}
+}
+
+// The client commands edit the local daemon's files, so a role entry without
+// config-file: must address that daemon: its socket, or one of its listen
+// ports on an address of this host. A remote entry is refused.
+func TestEntryAddressesDaemon(t *testing.T) {
+	info := &DaemonApi{Socket: "/var/run/tdns/tdns-auth.sock", Addresses: []string{"127.0.0.1:8989", "0.0.0.0:8990"}}
+	thisHost := net.ParseIP("192.0.2.10")
+	local := func(ip net.IP) bool { return ip.Equal(thisHost) }
+	for _, tc := range []struct {
+		url  string
+		want bool
+	}{
+		{"unix:///var/run/tdns/tdns-auth.sock", true},
+		{"unix:///var/run/tdns/other.sock", false},
+		{"https://127.0.0.1:8989/api/v1", true},
+		{"https://localhost:8989/api/v1", true},
+		{"https://[::1]:8989/api/v1", true},
+		{"https://192.0.2.10:8990/api/v1", true},  // wildcard listener, this host's address
+		{"https://192.0.2.10:8989/api/v1", false}, // 8989 listens on loopback only
+		{"https://192.0.2.99:8990/api/v1", false}, // another host
+		{"https://auth.example.net:8990/api/v1", false},
+		{"https://127.0.0.1:9999/api/v1", false},
+	} {
+		if got := entryAddressesDaemon(ApiDetails{Name: "tdns-auth", BaseURL: tc.url}, info, local); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.url, got, tc.want)
+		}
+	}
+}
+
+// configToDaemon asks the socket first, so `client list` still sees the
+// running policy after `client keyauth off` has made the role's key entry
+// useless.
+func TestStatusGoesOverTheSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ncli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "admin.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var cp tdns.ConfigPost
+		json.NewDecoder(r.Body).Decode(&cp)
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{Msg: "via the socket: " + cp.Command})
+	})}
+	go srv.Serve(ln)
+	defer srv.Close()
+	withCleanRoleRegistry(t)
+	RegisterRole("auth", "tdns-auth")
+	saved := apiConfig
+	t.Cleanup(func() { apiConfig = saved })
+	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"}}}
+	if err := InitApiClients(apiConfig); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := configToDaemon("auth", sock, tdns.ConfigPost{Command: "status"})
+	if err != nil || resp.Msg != "via the socket: status" {
+		t.Errorf("status: %q, %v; want it over the socket", resp.Msg, err)
+	}
+}
+
+// A socket URL spelled with another case is still the socket: the client
+// knows only "unix://", and taking it for TCP would read its rootca.
+func TestUnixSchemeAnyCase(t *testing.T) {
+	e := ApiDetails{Name: "s", BaseURL: "UNIX:///var/run/tdns/Admin.sock", AuthMethod: "none", RootCA: "/nonexistent/ca.pem"}
+	api, _, err := newApiClientFor(e, CliClientConf{})
+	if err != nil {
+		t.Fatalf("UNIX:// entry: %v", err)
+	}
+	if api.Socket != "/var/run/tdns/Admin.sock" {
+		t.Errorf("socket %q, want the path with its case kept", api.Socket)
 	}
 }
 

@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -283,12 +285,73 @@ func resolveAccessTarget(role string) (*accessTarget, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Without config-file: the daemon config above is only this host's
+	// default for the role, and the role's entry may address another daemon
+	// altogether (a remote one): editing and reloading the local daemon
+	// would then leave the one the operator meant unchanged. So the entry
+	// must address this daemon: its socket, or one of its listen ports on
+	// an address of this host.
+	if ad := apiDetailsForRole(role); ad != nil && ad.ConfigFile == "" && !entryAddressesDaemon(*ad, info, localHostAddrs()) {
+		return nil, fmt.Errorf("%s's entry %s (%s) has no config-file:, and it does not address the daemon of %s on this host (socket %q, addresses %v); the client commands edit a daemon's own files, so run them on that daemon's host, or give the entry config-file:",
+			role, ad.Name, ad.BaseURL, cfg, info.Socket, info.Addresses)
+	}
 	t := &accessTarget{DaemonConfig: info.ConfigFile, File: info.AccessFile, Configured: info.AccessFile != "", HasSocket: info.Socket != "", Socket: info.Socket}
 	if !t.Configured {
 		base := strings.TrimSuffix(filepath.Base(info.ConfigFile), filepath.Ext(info.ConfigFile))
 		t.File = filepath.Join(filepath.Dir(info.ConfigFile), base+"-access.yaml")
 	}
 	return t, nil
+}
+
+// entryAddressesDaemon says whether entry e reaches the daemon whose API is
+// info: its local socket, or one of its listen addresses on an address of
+// this host (local: loopback, or one of the host's interface addresses). A
+// listen address on the wildcard (0.0.0.0, ::) takes any local address.
+func entryAddressesDaemon(e ApiDetails, info *DaemonApi, local func(net.IP) bool) bool {
+	u, err := url.Parse(e.BaseURL)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(u.Scheme, "unix") {
+		return info.Socket != "" && u.Path == info.Socket
+	}
+	host, port := u.Hostname(), u.Port()
+	if port == "" {
+		return false
+	}
+	var ip net.IP
+	if strings.EqualFold(host, "localhost") {
+		ip = net.IPv6loopback
+	} else if ip = net.ParseIP(host); ip == nil || !(ip.IsLoopback() || local(ip)) {
+		return false // a name other than localhost, or another host's address
+	}
+	for _, a := range info.Addresses {
+		lh, lp, err := net.SplitHostPort(a)
+		if err != nil || lp != port {
+			continue
+		}
+		lip := net.ParseIP(lh)
+		switch {
+		case lh == "" || (lip != nil && lip.IsUnspecified()):
+			return true
+		case lip != nil && (lip.Equal(ip) || (lip.IsLoopback() && ip.IsLoopback())):
+			return true
+		}
+	}
+	return false
+}
+
+// localHostAddrs is "is this an address of this host", from its interfaces.
+func localHostAddrs() func(net.IP) bool {
+	addrs, _ := net.InterfaceAddrs()
+	return func(ip net.IP) bool {
+		for _, a := range addrs {
+			if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+				return true
+			}
+		}
+		return false
+	}
 }
 
 type accessEditOpts struct {
@@ -375,31 +438,34 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 // reloadForAccess asks role's daemon to reload its config, and with it the
 // access file. A refused reload changes nothing in the daemon.
 func reloadForAccess(role, socket string) error {
-	// The daemon's local socket first, when there is one: it is admin, needs
-	// no network credentials, and answers when the TCP API does not (a
-	// daemon that started with a broken access file answers 503 on TCP
-	// until a reload fixes it, the reload this is). Only when the socket
-	// cannot be used from here (not root: EACCES; or the daemon is not
-	// running) does the role's own entry get the reload instead.
-	if socket != "" {
-		sock := tdns.NewClient(role, "unix://"+socket, "", "none", "")
-		resp, err := SendConfigCommand(sock, tdns.ConfigPost{Command: "reload"})
-		if err == nil {
-			return accessReloadVerdict(resp)
-		}
-		if !socketUnusable(err) {
-			return fmt.Errorf("written, but the reload over the local socket %s failed: %v", socket, err)
-		}
-	}
-	api, err := GetApiClient(role, false)
-	if err != nil {
-		return fmt.Errorf("written, but not reloaded: %v", err)
-	}
-	resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "reload"})
+	resp, err := configToDaemon(role, socket, tdns.ConfigPost{Command: "reload"})
 	if err != nil {
 		return fmt.Errorf("written, but the reload failed: %v", err)
 	}
 	return accessReloadVerdict(resp)
+}
+
+// configToDaemon sends post to role's daemon over its local socket first, when
+// there is one: it is admin, needs no network credentials, and answers when
+// the TCP API does not (a daemon that started with a broken access file
+// answers 503 on TCP until a reload fixes it; with keyauth off the role's key
+// entry is refused). Only when the socket cannot be used from here (not root:
+// EACCES; or nothing is running) does the role's own entry get it instead.
+func configToDaemon(role, socket string, post tdns.ConfigPost) (tdns.ConfigResponse, error) {
+	if socket != "" {
+		resp, err := SendConfigCommand(tdns.NewClient(role, "unix://"+socket, "", "none", ""), post)
+		if err == nil {
+			return resp, nil
+		}
+		if !socketUnusable(err) {
+			return resp, fmt.Errorf("over the local socket %s: %w", socket, err)
+		}
+	}
+	api, err := GetApiClient(role, false)
+	if err != nil {
+		return tdns.ConfigResponse{}, err
+	}
+	return SendConfigCommand(api, post)
 }
 
 // socketUnusable says whether a request over the local socket failed because
@@ -671,12 +737,9 @@ func listAccessClients(role string) error {
 	if !t.Configured {
 		return nil
 	}
-	api, err := GetApiClient(role, false)
-	if err != nil {
-		fmt.Printf("\nRunning policy unknown: %v\n", err)
-		return nil
-	}
-	resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"})
+	// Over the socket first, as the reload: after `client keyauth off` the
+	// role's key entry is refused, but the socket still answers.
+	resp, err := configToDaemon(role, t.Socket, tdns.ConfigPost{Command: "status"})
 	if err != nil || resp.Error {
 		fmt.Printf("\nRunning policy unknown: %v %s\n", err, resp.ErrorMsg)
 		return nil
