@@ -604,10 +604,12 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 				"the daemon's certificate could not be read (%v), so entry %q's pins were not checked", err, e.Name))
 		case e.TLSAuth == "" && e.RootCA == "":
 			// The entry tdns-ncli refuses (it verifies nothing).
-			// Over TCP, that is: root reaches the daemon over its local
-			// admin socket, which needs no pin, whatever the entry says.
+			// Over TCP, that is: root may reach the daemon over its local
+			// admin socket, which needs no pin, whatever the entry says --
+			// when the daemon serves one (config add writes config-file:,
+			// so the CLI can find it) and --tcp is not given.
 			res.Notes = append(res.Notes, fmt.Sprintf(
-				"entry %q has no pin, so tdns-ncli refuses it over TCP (root still reaches the daemon over its local admin socket), and the daemon's certificate could not be pinned (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>)", e.Name, err))
+				"entry %q has no pin, so tdns-ncli refuses it over TCP (root may still reach the daemon over its local admin socket, while the daemon serves one and --tcp is not given), and the daemon's certificate could not be pinned (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>)", e.Name, err))
 		default:
 			// pkix, a rootca: file or rootca: insecure: it connects as it
 			// did, and stays as it is.

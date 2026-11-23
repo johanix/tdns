@@ -280,8 +280,16 @@ func (conf *Config) reloadApiAccess() string {
 		if st := h.load(); st != nil && st.Enabled {
 			h.p.Store(&accessState{})
 			conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
+			msg := " The access file is no longer configured: the API key is admin on the TCP API again."
+			// Removing the file does not reopen what it closed: a closed
+			// listener is not started again until a restart.
+			if addrs := stoppedPlaintextApiListeners(); len(addrs) > 0 {
+				lgApi.Info("management API: the access file is no longer configured; the API key is admin on the TCP API again, but the plaintext TCP listeners an access file STOPPED stay stopped until a restart (the local admin socket is still served)",
+					"addresses", addrs)
+				return msg + fmt.Sprintf(" The plaintext TCP listeners %v that an access file STOPPED stay stopped until the daemon restarts (the local admin socket is still served).", addrs)
+			}
 			lgApi.Info("management API: the access file is no longer configured; the API key is admin on the TCP API again")
-			return " The access file is no longer configured: the API key is admin on the TCP API again."
+			return msg
 		}
 		return ""
 	}
@@ -295,13 +303,14 @@ func (conf *Config) reloadApiAccess() string {
 	// Before the policy goes in force: a plaintext TCP listener started
 	// without an access file cannot take up TLS, and while it listens,
 	// clients send their API key to it in clear. Close it until a restart.
+	// Closed and the policy stored under one lock, which APIdispatcher also
+	// holds while it registers and starts its servers (activateApiAccess).
 	stopped := ""
-	if addrs := stopPlaintextApiListeners(); len(addrs) > 0 {
+	if addrs := activateApiAccess(path, func() { h.p.Store(newAccessState(path, af)) }); len(addrs) > 0 {
 		lgApi.Error("management API: plaintext TCP listeners STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served)",
 			"addresses", addrs, "file", path)
 		stopped = fmt.Sprintf(" The plaintext TCP listeners %v are STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served).", addrs)
 	}
-	h.p.Store(newAccessState(path, af))
 	keyauth := "on"
 	if !af.KeyAuthOn() {
 		keyauth = "off"
@@ -318,9 +327,9 @@ type ApiAccessStatus struct {
 	Error   string `json:",omitempty"` // set when the file could not be used at start-up: the TCP API answers 503
 	KeyAuth bool
 	Clients []ApiAccessStatusClient
-	// TCPStopped are plaintext TCP listeners closed when the access file
-	// came into force (it requires TLS); they stay closed until a restart.
-	TCPStopped []string `json:",omitempty"`
+	// The plaintext TCP listeners an access file closed are not here but in
+	// ConfigResponse.ApiTCPStopped: they stay closed after the access file
+	// is removed, when there is no policy to report.
 }
 
 // ApiAccessStatusClient is one client of the running policy.
@@ -338,7 +347,7 @@ func (conf *Config) apiAccessStatus() *ApiAccessStatus {
 	if st == nil || !st.Enabled {
 		return nil
 	}
-	out := &ApiAccessStatus{File: st.File, KeyAuth: st.KeyAuth, TCPStopped: stoppedPlaintextApiListeners()}
+	out := &ApiAccessStatus{File: st.File, KeyAuth: st.KeyAuth}
 	if st.Err != nil {
 		out.Error = st.Err.Error()
 	}

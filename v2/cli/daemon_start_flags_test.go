@@ -135,6 +135,25 @@ func TestDaemonCommandLine(t *testing.T) {
 			"/opt/my tdns/tdns-auth", []string{"-v", "--config", "/etc/a b.yaml"}, ""},
 		{"unclosed quote", `/usr/local/libexec/tdns-auth 'x`, nil, "", nil, "not closed"},
 		{"empty", "", []string{"--debug"}, "", []string{"--debug"}, ""},
+		// After "--" an option is an argument: the generated flags go
+		// before it, where the daemon reads them as options.
+		{"ends in --", "/usr/local/libexec/tdns-imr --", []string{"--config", "/etc/instance.yaml"},
+			"/usr/local/libexec/tdns-imr", []string{"--config", "/etc/instance.yaml", "--"}, ""},
+		{"arguments after --", "/usr/local/libexec/tdns-imr -v -- --config /etc/x.yaml", []string{"--config", "/etc/instance.yaml"},
+			"/usr/local/libexec/tdns-imr", []string{"-v", "--config", "/etc/instance.yaml", "--", "--config", "/etc/x.yaml"}, ""},
+		// The daemon takes the last --config: every one in command: counts.
+		{"two config files", "/usr/local/libexec/tdns-imr --config /etc/a.yaml --config /etc/b.yaml", []string{"--config", "/etc/a.yaml"},
+			"", nil, "names two config files"},
+		{"the same file twice", "/usr/local/libexec/tdns-imr --config /etc/a.yaml --config=/etc/a.yaml", []string{"--config", "/etc/a.yaml"},
+			"/usr/local/libexec/tdns-imr", []string{"--config", "/etc/a.yaml", "--config=/etc/a.yaml"}, ""},
+		// The daemons parse with pflag, which refuses a one-dash -config:
+		// refused here, before anything is stopped (Johan, 2026-11-23).
+		{"one-dash -config", "/usr/local/libexec/tdns-auth -config /etc/tdns-enc/tdns-auth.yaml", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"},
+			"", nil, "with one dash"},
+		{"one-dash -config=", "/usr/local/libexec/tdns-auth --config /etc/a.yaml -config=/etc/a.yaml --", []string{"--config", "/etc/a.yaml"},
+			"", nil, "with one dash"},
+		{"one-dash after --", "/usr/local/libexec/tdns-imr -- -config x", []string{"--config", "/etc/a.yaml"},
+			"/usr/local/libexec/tdns-imr", []string{"--config", "/etc/a.yaml", "--", "-config", "x"}, ""},
 	} {
 		bin, args, err := daemonCommandLine(tc.command, tc.flags)
 		switch {

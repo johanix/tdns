@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/big"
@@ -16,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -94,7 +96,7 @@ func newAuthEnv(t *testing.T, accessYAML string, certs map[string]tls.Certificat
 	e.rtr = rtr
 
 	e.srv = httptest.NewUnstartedServer(rtr)
-	e.srv.TLS = apiServerTLSConfig(e.conf)
+	e.srv.TLS = apiServerTLSConfig(e.conf, e.conf.ApiServer.AccessFile != "")
 	e.srv.StartTLS()
 	t.Cleanup(e.srv.Close)
 
@@ -390,7 +392,7 @@ func TestAccessFileRequiresTLS13(t *testing.T) {
 func TestReloadedAccessFileStopsAPlaintextListener(t *testing.T) {
 	t.Cleanup(func() {
 		apiTCPServers.Lock()
-		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped = nil, false, nil
+		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped, apiTCPServers.stoppedBy = nil, false, nil, ""
 		apiTCPServers.Unlock()
 	})
 	conf := &Config{}
@@ -407,7 +409,7 @@ func TestReloadedAccessFileStopsAPlaintextListener(t *testing.T) {
 		}
 	})}
 	go srv.Serve(ln)
-	registerApiTCPServers([]*http.Server{srv}, true)
+	registerApiTCPServers([]apiTCPServer{{srv: srv, ln: ln}}, true)
 	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 	call := func() (int, error) {
 		req, _ := http.NewRequest(http.MethodPost, "http://"+srv.Addr+"/api/v1/ping", nil)
@@ -436,15 +438,80 @@ func TestReloadedAccessFileStopsAPlaintextListener(t *testing.T) {
 	if st, err := call(); err == nil {
 		t.Errorf("the plaintext listener still answered after the reload (%d): the key was sent in clear", st)
 	}
-	if st := conf.apiAccessStatus(); st == nil || len(st.TCPStopped) != 1 || st.TCPStopped[0] != srv.Addr {
-		t.Errorf("status TCPStopped = %+v, want [%s]", st, srv.Addr)
+	if got := stoppedPlaintextApiListeners(); len(got) != 1 || got[0] != srv.Addr {
+		t.Errorf("stopped listeners = %v, want [%s]", got, srv.Addr)
 	}
 
 	// A TLS listener is not touched by an access file coming into force.
 	tlsSrv := &http.Server{Addr: "127.0.0.1:1"}
-	registerApiTCPServers([]*http.Server{tlsSrv}, false)
+	registerApiTCPServers([]apiTCPServer{{srv: tlsSrv}}, false)
 	if addrs := stopPlaintextApiListeners(); addrs != nil {
 		t.Errorf("TLS listeners stopped: %v", addrs)
+	}
+}
+
+// Removing the access file again does not reopen the plaintext listener it
+// closed: the reload that removes it says the listener stays stopped until a
+// restart, and config status (here over the socket, as tdns-cli asks) still
+// reports it, now with no access policy beside it.
+func TestStoppedListenerOutlivesTheAccessFile(t *testing.T) {
+	t.Cleanup(func() {
+		apiTCPServers.Lock()
+		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped, apiTCPServers.stoppedBy = nil, false, nil, ""
+		apiTCPServers.Unlock()
+	})
+	e := newAuthEnv(t, "-", nil)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Addr: ln.Addr().String(), Handler: e.rtr}
+	go srv.Serve(ln)
+	registerApiTCPServers([]apiTCPServer{{srv: srv, ln: ln}}, true)
+	status := func(when string) *ConfigResponse {
+		t.Helper()
+		st, body := e.callSocket(t, "/api/v1/config", `{"Command":"status"}`)
+		var cr ConfigResponse
+		if err := json.Unmarshal([]byte(body), &cr); st != http.StatusOK || err != nil {
+			t.Fatalf("%s: config status: %d %v %q", when, st, err, body)
+		}
+		return &cr
+	}
+
+	path := filepath.Join(t.TempDir(), "access.yaml")
+	if err := os.WriteFile(path, []byte("clients: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.conf.ApiServer.AccessFile = path
+	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "STOPPED") || !strings.Contains(msg, srv.Addr) {
+		t.Fatalf("reload with the access file: %q, want %s stopped", msg, srv.Addr)
+	}
+	if cr := status("access file in force"); cr.Access == nil || !slices.Equal(cr.ApiTCPStopped, []string{srv.Addr}) || cr.ApiTCPStoppedBy != path {
+		t.Errorf("access file in force: status access %+v, stopped %v by %q; want a policy and [%s] by %s", cr.Access, cr.ApiTCPStopped, cr.ApiTCPStoppedBy, srv.Addr, path)
+	}
+
+	e.conf.ApiServer.AccessFile = ""
+	msg := e.conf.reloadApiAccess()
+	if !strings.Contains(msg, "no longer configured") || !strings.Contains(msg, srv.Addr) ||
+		!strings.Contains(msg, "stay stopped until the daemon restarts") {
+		t.Errorf("reload without the access file: %q, want it to say %s stays stopped until a restart", msg, srv.Addr)
+	}
+	if cr := status("access file removed"); cr.Access != nil || !slices.Equal(cr.ApiTCPStopped, []string{srv.Addr}) || cr.ApiTCPStoppedBy != path {
+		t.Errorf("access file removed: status access %+v, stopped %v by %q; want no policy and [%s] by %s", cr.Access, cr.ApiTCPStopped, cr.ApiTCPStoppedBy, srv.Addr, path)
+	}
+	if listening(srv.Addr) {
+		t.Errorf("the plaintext listener on %s answers again after the access file was removed", srv.Addr)
+	}
+
+	// With nothing stopped, removing the file says nothing about listeners.
+	apiTCPServers.Lock()
+	apiTCPServers.stopped = nil
+	apiTCPServers.Unlock()
+	e.conf.ApiServer.AccessFile = path
+	e.conf.reloadApiAccess()
+	e.conf.ApiServer.AccessFile = ""
+	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "no longer configured") || strings.Contains(msg, "STOPPED") {
+		t.Errorf("reload without the access file, nothing stopped: %q", msg)
 	}
 }
 
@@ -456,7 +523,7 @@ func TestReloadedAccessFileRequiresTLS13AtTheHandshake(t *testing.T) {
 	conf.Internal.ApiAccess = &apiAccessHolder{} // no access file at start
 	conf.Internal.ServerErrors = NewServerErrorRegistry()
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	srv.TLS = apiServerTLSConfig(conf)
+	srv.TLS = apiServerTLSConfig(conf, conf.ApiServer.AccessFile != "")
 	srv.StartTLS()
 	defer srv.Close()
 
@@ -649,6 +716,13 @@ func TestRequestForAnotherConfigIsRefused(t *testing.T) {
 		if st, body := post(link); st != 200 {
 			t.Errorf("through a symlink: %d %q, want 200", st, body)
 		}
+	}
+	// A relative config-file:, as the client's working directory reads it:
+	// the client sends it absolute, so the daemon (whose working directory
+	// is its own) compares like with like.
+	t.Chdir(dir)
+	if st, body := post("tdns-auth.yaml"); st != 200 {
+		t.Errorf("a relative path from the client's directory: %d %q, want 200", st, body)
 	}
 	// No header: as before.
 	if st, body := e.callSocket(t, "/api/v1/t-admin", ""); st != 200 {
