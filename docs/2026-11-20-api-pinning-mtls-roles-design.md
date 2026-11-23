@@ -192,10 +192,13 @@ and not in the CLI config.** The owner's rulings:
   elsewhere would otherwise reach the daemon on this one. Two configs saying
   the same thing could disagree; one cannot. `tdns-ncli --tcp` uses the TCP
   address even then, to see what a remote operator sees. Since the choice is
-  made at run time, `ping` (the test of how access is authenticated) prints
-  which way it went, `via the local admin socket <path>` or `via TCP <url>`,
-  above the daemon's own `on the local socket (admin)` or `authenticated as
-  ...`. `config add` writes
+  made at run time, `ping` (the test of how access is authenticated) says on
+  its one line which way it went and as whom, from the daemon's reply (role,
+  via and identity, in parts): `pong (admin socket /var/run/tdns/etc-tdns-tdns-auth.sock)
+  from tdns-auth @ host: ...`, `pong (TLS, admin) from ...` for the key,
+  `pong (TLS, read-write, certificate anna) from ...`. An entry tdns-ncli
+  refuses (no pin) is reported as an error with its fix on lines of its own,
+  not as a log line. `config add` writes
   the TCP entry with `config-file:` whoever runs it (no more `unix://` entries,
   and no `--tcp` on `config add`); a daemon with no TCP address gets an entry
   with `config-file:` alone, which only root can use. An entry written as

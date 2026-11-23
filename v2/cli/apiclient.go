@@ -8,8 +8,8 @@ package cli
 
 import (
 	"crypto/x509"
+	"errors"
 	"fmt"
-	"log"
 	"net"
 	"net/url"
 	"os"
@@ -201,7 +201,7 @@ func GetApiClient(role string, dieOnError bool) (*tdns.ApiClient, error) {
 	clientKey := getClientKeyFromParent(role)
 	if clientKey == "" {
 		if dieOnError {
-			log.Fatalf("Unknown role: %s", role)
+			fatalf("unknown role: %s", role)
 		}
 		return nil, fmt.Errorf("unknown role: %s", role)
 	}
@@ -210,7 +210,7 @@ func GetApiClient(role string, dieOnError bool) (*tdns.ApiClient, error) {
 	if client == nil {
 		if err := apiClientErrors[clientKey]; err != nil {
 			if dieOnError {
-				log.Fatalf("%v", err)
+				dieOn(err)
 			}
 			return nil, err
 		}
@@ -219,7 +219,7 @@ func GetApiClient(role string, dieOnError bool) (*tdns.ApiClient, error) {
 			for k := range tdns.Globals.ApiClients {
 				keys = append(keys, k)
 			}
-			log.Fatalf("No API client found for %s (have clients for: %v)", clientKey, keys)
+			fatalf("no API client found for %s (have clients for: %v)", clientKey, keys)
 		}
 		return nil, fmt.Errorf("no API client found for %s", clientKey)
 	}
@@ -246,6 +246,41 @@ func loopbackURL(rawURL string) bool {
 	}
 	ip := net.ParseIP(h)
 	return ip != nil && ip.IsLoopback()
+}
+
+// clientRefusal is an entry tdns-ncli will not connect through: why, and the
+// command that fixes it. GetApiClient prints it as a refusal, on lines of its
+// own; Error() is the one-line form, for config list.
+type clientRefusal struct {
+	entry, why, fix string
+}
+
+func (r clientRefusal) Error() string {
+	return fmt.Sprintf("not connecting to %s: %s; fix: %s", r.entry, r.why, r.fix)
+}
+
+// pinRefusal refuses entry e for want of a pin. Pinning is how tdns-ncli
+// verifies a daemon, and config add is how an entry gets its pin, a known
+// one included.
+func pinRefusal(e ApiDetails, why string) clientRefusal {
+	daemon := "<the daemon's config file>"
+	if e.ConfigFile != "" {
+		daemon = shellQuote(e.ConfigFile)
+	}
+	return clientRefusal{entry: e.Name, why: why, fix: "tdns-ncli config add " + daemon}
+}
+
+// dieOn ends the process on err, which GetApiClient could not get past. A
+// refusal says so plainly, with its fix on a line of its own; anything else
+// is an error. Neither goes through the log: it is the answer to the
+// command, not a log line.
+func dieOn(err error) {
+	var r clientRefusal
+	if errors.As(err, &r) {
+		fmt.Fprintf(os.Stderr, "Error: not connecting to %s:\n  %s.\n  Fix: %s\n", r.entry, r.why, r.fix)
+		os.Exit(1)
+	}
+	fatalf("%v", err)
 }
 
 // ForceTCP makes every entry use its TCP address, never its daemon's local
@@ -311,7 +346,7 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 		switch strings.ToLower(e.TLSAuth) {
 		case "pin":
 			if len(e.Pins) == 0 {
-				return nil, "", fmt.Errorf("entry %q has tlsauth: pin but no pins:", e.Name)
+				return nil, "", pinRefusal(e, "its entry has tlsauth: pin but no pins:")
 			}
 			o.Pins = e.Pins
 		case "pkix":
@@ -321,14 +356,7 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 		case "":
 			if o.RootCA == "" {
 				if RequireServerVerification {
-					// Pinning is how tdns-ncli verifies a daemon, and config
-					// add is how an entry gets its pin, a known one included.
-					daemon := "<the daemon's config file>"
-					if e.ConfigFile != "" {
-						daemon = shellQuote(e.ConfigFile)
-					}
-					return nil, "", fmt.Errorf("entry %q (%s) does not verify the daemon: it has no pin of the daemon's certificate. Pin it with: tdns-ncli config add %s",
-						e.Name, e.BaseURL, daemon)
+					return nil, "", pinRefusal(e, "its entry has no pin of the daemon's certificate, so the daemon cannot be verified")
 				}
 				o.RootCA = "insecure" // tdns-cli's long-standing default
 			}
