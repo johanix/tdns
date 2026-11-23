@@ -124,12 +124,27 @@ suite_socket() {
 	o=$(out S7-add-root); ncli_root add-root config add "$RIG/auth/tdns-auth.yaml" > "$o"
 	ncli_root add-root config add "$RIG/imr/tdns-imr.yaml" >> "$o"
 	cat "$f" >> "$o" 2>/dev/null
-	grep -q "baseurl: *unix://$AUTH_SOCK" "$f" && grep -q "baseurl: *unix://$IMR_SOCK" "$f" \
-		&& ! grep -qi 'apikey' "$f" && [ "$(grep -c 'authmethod: *none' "$f")" = 2 ]
-	judge S7a "config add as root writes socket entries: unix://, authmethod none, no key" $? "$o"
+	if newcli; then
+		# #1168: the TCP entry with config-file:, whoever runs it; root reaches
+		# the daemon over its socket, found through config-file:.
+		grep -q "baseurl: *https://127.0.0.1:$AUTH_API" "$f" && grep -q "baseurl: *http://127.0.0.1:$IMR_API" "$f" \
+			&& ! grep -q 'unix://' "$f" && [ "$(grep -c 'config-file:' "$f")" = 2 ] && grep -q 'tlsauth: *pin' "$f" \
+			&& grep -q "over its local admin socket $AUTH_SOCK" "$o"
+		judge S7a "config add as root writes TCP entries with config-file: (key, pin), no unix://, and says root gets the socket" $? "$o"
+	else
+		grep -q "baseurl: *unix://$AUTH_SOCK" "$f" && grep -q "baseurl: *unix://$IMR_SOCK" "$f" \
+			&& ! grep -qi 'apikey' "$f" && [ "$(grep -c 'authmethod: *none' "$f")" = 2 ]
+		judge S7a "config add as root writes socket entries: unix://, authmethod none, no key" $? "$o"
+	fi
 	o2=$(out S7-add-root-use); ncli_root add-root auth ping > "$o2"
-	[ "$(rc_of "$o2")" = 0 ] && grep -q 'pongs:' "$o2"
-	judge S7b "...and the entry it wrote works" $? "$o2"
+	if newcli; then grep -q "pong ($AUTH_SOCK) from" "$o2"; else grep -q 'pongs:' "$o2"; fi
+	[ $? = 0 ] && [ "$(rc_of "$o2")" = 0 ]
+	judge S7b "...and the entry it wrote works (#1168: as root, over the socket)" $? "$o2"
+	if newcli; then
+		o2=$(out S7f-add-root-tcp); ncli_root add-root --tcp auth ping > "$o2"
+		[ "$(rc_of "$o2")" = 0 ] && grep -q 'pong (TLS, admin) from' "$o2"
+		judge S7f "...tdns-ncli --tcp: the same entry over TCP with the key (admin: no access file)" $? "$o2"
+	fi
 
 	f=$RIG/ncli/add-tcp.yaml; rm -f "$f"
 	o=$(out S7-add-tcp); ncli_root add-tcp config add --tcp "$RIG/auth/tdns-auth.yaml" > "$o"
@@ -141,8 +156,13 @@ suite_socket() {
 	f=$RIG/home/add-user.yaml; rm -f "$f"
 	o=$(out S7-add-user); ncli_user home/add-user config add "$RIG/auth/tdns-auth.yaml" > "$o" 2>&1
 	cat "$f" >> "$o" 2>/dev/null
-	grep -q "baseurl: *https://127.0.0.1:$AUTH_API" "$f" && ! grep -q 'unix://' "$f" && grep -qi 'root-only' "$o"
-	judge S7d "config add as a non-root user writes the TCP entry and says why" $? "$o"
+	if newcli; then
+		grep -q "baseurl: *https://127.0.0.1:$AUTH_API" "$f" && ! grep -q 'unix://' "$f" && grep -q 'config-file:' "$f"
+		judge S7d "config add as a non-root user writes the same TCP entry, with config-file:" $? "$o"
+	else
+		grep -q "baseurl: *https://127.0.0.1:$AUTH_API" "$f" && ! grep -q 'unix://' "$f" && grep -qi 'root-only' "$o"
+		judge S7d "config add as a non-root user writes the TCP entry and says why" $? "$o"
+	fi
 	o2=$(out S7-add-user-use); ncli_user home/add-user auth ping > "$o2"
 	[ "$(rc_of "$o2")" = 0 ] && grep -q 'pongs:' "$o2"
 	judge S7e "...and the user's entry works" $? "$o2"
@@ -303,8 +323,14 @@ suite_socket() {
 	f=$RIG/ncli/add-nokey.yaml; rm -f "$f"
 	o=$(out S15-nokey-root); ncli_root add-nokey config add "$RIG/auth/v-nokey.yaml" > "$o" 2>&1
 	cat "$f" >> "$o" 2>/dev/null
-	[ "$(rc_of "$o")" = 0 ] && grep -q "baseurl: *unix://$AUTH_SOCK" "$f" && ! grep -qi 'apikey' "$f"
-	judge S15a "config add as root, daemon config with no apikey: the socket entry, no key" $? "$o"
+	if newcli; then
+		# #1168: root gets the TCP entry too, so no key is refused for root as well.
+		[ "$(rc_of "$o")" != 0 ] && grep -qi 'apikey is not set' "$o" && [ ! -e "$f" ]
+		judge S15a "config add as root, daemon config with no apikey: refused, naming apiserver.apikey, nothing written" $? "$o"
+	else
+		[ "$(rc_of "$o")" = 0 ] && grep -q "baseurl: *unix://$AUTH_SOCK" "$f" && ! grep -qi 'apikey' "$f"
+		judge S15a "config add as root, daemon config with no apikey: the socket entry, no key" $? "$o"
+	fi
 	f=$RIG/ncli/add-nokey-tcp.yaml; rm -f "$f"
 	o=$(out S15-nokey-tcp); ncli_root add-nokey-tcp config add --tcp "$RIG/auth/v-nokey.yaml" > "$o" 2>&1
 	[ "$(rc_of "$o")" != 0 ] && grep -qi 'apikey is not set' "$o" && [ ! -e "$f" ]

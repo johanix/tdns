@@ -76,6 +76,19 @@ raw_local() { su "$RIGUSER" -c "sh $SRC/raw.sh $*"; }
 # HTTP status from raw.sh output ("STATUS 403").
 status_of() { sed -n 's/^STATUS //p' "$1" | head -1; }
 
+# newcli: the build under test has #1168's revised routing (tdns-ncli --tcp,
+# 2026-11-23): every daemon serves an admin socket unless told "socket: none",
+# by default named after its config file's whole path; root's TCP entry with
+# config-file: reaches the daemon over that socket; config add always writes
+# the TCP entry; ping says on one line how it got in, over the socket the
+# socket's path alone ("pong (/var/run/tdns/x.sock) from ..."). The rig
+# follows #1168 heads from 2bab8aa3 on; a build between 6afcc580 and
+# 2bab8aa3 is neither.
+newcli() { "$BIN/tdns-ncli" --help 2>&1 | grep -q -- '--tcp'; }
+# The default socket of a config file (tdns.ApiSocketPath, for the rig's
+# paths: letters, digits, ".", "-" and "/" only).
+default_sock() { echo "/var/run/tdns/$(echo "$1" | sed 's|^/||; s|/|_|g').sock"; }
+
 # ---- daemons --------------------------------------------------------------------
 # [t]dns-...: the pattern does not match the command line it is written on.
 pids_of() { pgrep -f "[t]dns-$1 --config $RIG/" 2>/dev/null; }

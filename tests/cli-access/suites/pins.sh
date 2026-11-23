@@ -33,8 +33,12 @@ suite_pins() {
 	[ "$(rc_of "$o")" = 0 ] && grep -q 'pongs:' "$o"
 	judge P1d "tlsauth: pkix with the rig's CA: accepted" $? "$o"
 	o=$(out P1-noverify); ncli_remote pins authnoverify ping > "$o" 2>&1
-	[ "$(rc_of "$o")" != 0 ] && grep -q 'does not verify the daemon' "$o" && ! grep -q 'pongs:' "$o"
-	judge P1e "an https entry that verifies nothing: tdns-ncli refuses it" $? "$o"
+	if newcli; then
+		[ "$(rc_of "$o")" = 1 ] && grep -q '^Error: not connecting to authnoverify:' "$o" && grep -q 'Fix: tdns-ncli config add' "$o" && ! grep -q 'pongs:' "$o"
+	else
+		[ "$(rc_of "$o")" != 0 ] && grep -q 'does not verify the daemon' "$o" && ! grep -q 'pongs:' "$o"
+	fi
+	judge P1e "an https entry that verifies nothing: tdns-ncli refuses it (an error, with config add as the fix)" $? "$o"
 
 	# ---- the operator's client certificate ----------------------------------------------
 	o=$(out P2-init)
@@ -46,11 +50,11 @@ suite_pins() {
 	[ "$(rc_of "$o")" = 0 ] && grep -q 'reloaded' "$o" && grep -q 'operator' "$ACC" && [ -f "$ACC.prev" ]
 	judge P2b "client add as root on the daemon host: written (with .prev) and reloaded over the socket" $? "$o"
 	o=$(out P2-cert); ncli_remote cert auth ping > "$o" 2>&1
-	grep -q 'authenticated as operator (read-write) by certificate' "$o"
-	judge P2c "authmethod: certificate: \"authenticated as operator (read-write) by certificate\"" $? "$o"
+	if newcli; then grep -q 'pong (TLS, read-write, certificate operator) from' "$o"; else grep -q 'authenticated as operator (read-write) by certificate' "$o"; fi
+	judge P2c "authmethod: certificate: read-write as operator (ping: \"TLS, read-write, certificate operator\")" $? "$o"
 	o=$(out P2-certkey); ncli_remote cert authkey ping > "$o" 2>&1
-	grep -q 'authenticated as apikey (read-write) by api key' "$o"
-	judge P2d "an entry without authmethod: certificate does not present it (\"by api key\")" $? "$o"
+	if newcli; then grep -q 'pong (TLS, read-write) from' "$o"; else grep -q 'authenticated as apikey (read-write) by api key' "$o"; fi
+	judge P2d "an entry without authmethod: certificate does not present it (the key, read-write)" $? "$o"
 	o=$(out P2-unknown); ncli_remote unknown auth ping > "$o" 2>&1
 	[ "$(rc_of "$o")" != 0 ] && grep -qi '403\|forbidden' "$o" && ! grep -q 'pongs:' "$o"
 	judge P2e "an unknown client certificate: refused" $? "$o"
@@ -72,7 +76,7 @@ suite_pins() {
 	judge P3c "client disable: the operator is refused" $? "$o" "$o2"
 	o=$(out P3-en); ncli_root rootacc auth client enable operator > "$o"
 	o2=$(out P3-en-ping); ncli_remote cert auth ping > "$o2" 2>&1
-	grep -q 'authenticated as operator (read-only) by certificate' "$o2"
+	if newcli; then grep -q 'pong (TLS, read-only, certificate operator) from' "$o2"; else grep -q 'authenticated as operator (read-only) by certificate' "$o2"; fi
 	judge P3d "client enable: the operator is back (read-only)" $? "$o" "$o2"
 	o=$(out P3-koff); ncli_root rootacc auth client keyauth off > "$o"
 	o2=$(out P3-koff-key); ncli_remote pins auth ping > "$o2" 2>&1
@@ -119,5 +123,112 @@ suite_pins() {
 		&& [ "$(rc_of "$o2")" = 0 ] && ! grep -qi 'warning' "$o2"
 	judge P7 "tdns-cli: an unverified https entry and an http:// entry work as before, no warnings" $? "$o" "$o2"
 
+	newcli && routing
 	daemon_stop auth; daemon_stop imr
+}
+
+# A TCP entry for tdns-auth with config-file: CFG: entry FILE URL CFG
+tcp_entry() {
+	printf 'apiservers:\n   - name:        tdns-auth\n     baseurl:     %s/api/v1\n     apikey:      cli-access-rig-test-key\n     authmethod:  X-API-Key\n     tlsauth:     pin\n     pins:        [ "%s" ]\n     config-file: %s\n' \
+		"$2" "$(pinof daemon)" "$3" > "$1"
+	chmod 0600 "$1"
+}
+# A ping over tdns-auth's socket whose request names config file CFG.
+sockping() {
+	printf 'POST /api/v1/ping HTTP/1.1\r\nHost: localhost\r\nX-Tdns-Config-File: %s\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}' "$1" \
+		| nc -U "$AUTH_SOCK" 2>&1 | tr -d '\r'
+}
+
+# routing: #1168's revised routing (2026-11-23), on a build with tdns-ncli
+# --tcp. Root's TCP entry with config-file: reaches the daemon over its admin
+# socket, only when the entry's address is that daemon's and the daemon on the
+# socket runs that config; --tcp keeps TCP; config add pins a known entry;
+# every daemon serves a socket by default, named after its config path, and
+# "socket: none" turns it off. Runs with tdns-auth on the access-file variant
+# (the key is read-write over TCP), then on variants without an access file.
+routing() {
+	f=$RIG/ncli/add-route.yaml; rm -f "$f"
+	o=$(out P8-add); ncli_root add-route config add "$RIG/auth/v-access.yaml" > "$o"; cat "$f" >> "$o" 2>/dev/null
+	o2=$(out P8a-ping); ncli_root add-route auth ping > "$o2"
+	o3=$(out P8a-tsig); ncli_root add-route auth config reload-tsig > "$o3"
+	[ "$(rc_of "$o2")" = 0 ] && grep -q "pong ($AUTH_SOCK) from" "$o2" && [ "$(rc_of "$o3")" = 0 ] && ! grep -q 'needs admin' "$o3"
+	judge P8a "root, the TCP entry config add wrote: over the socket (ping says so), admin (reload-tsig works)" $? "$o" "$o2" "$o3"
+	o2=$(out P8b-ping); ncli_root add-route --tcp auth ping > "$o2"
+	o3=$(out P8b-tsig); ncli_root add-route --tcp auth config reload-tsig > "$o3"
+	[ "$(rc_of "$o2")" = 0 ] && grep -q 'pong (TLS, read-write) from' "$o2" && [ "$(rc_of "$o3")" != 0 ] && grep -q 'needs admin' "$o3"
+	judge P8b "...with --tcp: over TCP with the key, read-write (reload-tsig 403, needs admin)" $? "$o2" "$o3"
+	o=$(out P8b-unix); ncli_root rootacc --tcp auth ping > "$o"
+	[ "$(rc_of "$o")" != 0 ] && grep -q 'no TCP address for --tcp' "$o"
+	judge P8c "--tcp on a unix:// entry: refused, it has no TCP address" $? "$o"
+
+	f=$RIG/home/route-other.yaml
+	tcp_entry "$f" https://localhost:$AUTH_API "$RIG/auth/v-access.yaml"
+	o=$(out P8d-addr); ncli_root home/route-other auth ping > "$o"
+	[ "$(rc_of "$o")" = 0 ] && grep -q 'pong (TLS, read-write) from' "$o"
+	judge P8d "root, an entry whose address the daemon config does not list (localhost:$AUTH_API): stays on TCP" $? "$o"
+	cp "$RIG/auth/v-access.yaml" "$RIG/auth/v-other.yaml"; chmod 0644 "$RIG/auth/v-other.yaml"
+	tcp_entry "$f" https://127.0.0.1:$AUTH_API "$RIG/auth/v-other.yaml"
+	o=$(out P8e-cfg); ncli_root home/route-other auth ping > "$o"
+	[ "$(rc_of "$o")" = 0 ] && grep -q "runs $RIG/auth/v-access.yaml, not $RIG/auth/v-other.yaml; not using its socket" "$o" \
+		&& grep -q 'pong (TLS, read-write) from' "$o"
+	judge P8e "root, an entry naming another config with the same socket: the socket is not used (said), TCP is" $? "$o"
+	rm -f "$f" "$RIG/auth/v-other.yaml"
+	o=$(out P8f-412); sockping /etc/tdns/tdns-auth.yaml > "$o"
+	o2=$(out P8f-200); sockping "$RIG/auth/v-access.yaml" > "$o2"
+	head -1 "$o" | grep -q ' 412 ' && grep -q "this daemon runs $RIG/auth/v-access.yaml" "$o" && head -1 "$o2" | grep -q ' 200 '
+	judge P8f "the daemon refuses a socket request naming another config (412), and serves one naming its own" $? "$o" "$o2"
+
+	# config add pins an entry it already knows (one written before pinning), as the user.
+	f=$RIG/home/repin.yaml
+	printf 'apiservers:\n   - name:        tdns-auth\n     baseurl:     https://127.0.0.1:%s/api/v1\n     apikey:      cli-access-rig-test-key\n     authmethod:  X-API-Key\n     rootca:      %s\n     config-file: %s\n   - name:        tdns-imr\n     baseurl:     http://127.0.0.1:%s/api/v1\n     apikey:      cli-access-rig-test-key\n     authmethod:  X-API-Key\n' \
+		$AUTH_API "$CERTS/ca.crt" "$RIG/auth/v-access.yaml" $IMR_API > "$f"
+	chown "$RIGUSER" "$f"; chmod 0600 "$f"; cp "$f" "$RUNDIR/repin-before.yaml"
+	o=$(out P9a-repin); ncli_user home/repin config add "$RIG/auth/v-access.yaml" > "$o" 2>&1
+	diff "$RUNDIR/repin-before.yaml" "$f" >> "$o"
+	[ "$(rc_of "$o")" = 0 ] && grep -q 'pinned the daemon' "$o" && grep -q 'tlsauth: *pin' "$f" && grep -q "$(pinof daemon)" "$f" \
+		&& ! grep -q 'rootca:' "$f" && [ "$(diff "$RUNDIR/repin-before.yaml" "$f" | grep -c '^[<>]')" = 3 ]
+	judge P9a "config add on a known entry with no pin (rootca:): pins it, drops rootca:, changes nothing else" $? "$o"
+	o=$(out P9b-again); ncli_user home/repin config add "$RIG/auth/v-access.yaml" > "$o" 2>&1
+	o2=$(out P9b-ping); ncli_user home/repin auth ping > "$o2"
+	[ "$(rc_of "$o")" = 0 ] && grep -q 'nothing changed' "$o" && grep -q 'pong (TLS, read-write) from' "$o2"
+	judge P9b "...run again: nothing changed; and the user's re-pinned entry works" $? "$o" "$o2"
+	rm -f "$f"
+
+	# A socket by default, named after the config path; socket: none.
+	daemon_stop auth
+	sed '/^   socket:/d' "$RIG/auth/tdns-auth.yaml" > "$RIG/auth/v-default.yaml"
+	sed 's|^   socket: .*|   socket:     none|' "$RIG/auth/tdns-auth.yaml" > "$RIG/auth/v-none.yaml"
+	chmod 0644 "$RIG/auth/v-default.yaml" "$RIG/auth/v-none.yaml"
+	ds=$(default_sock "$RIG/auth/v-default.yaml")
+	o=$(out P10a-default); o2=$(out P10a-ping)
+	if daemon_start auth "$RIG/auth/v-default.yaml"; then
+		ls -l /var/run/tdns/ > "$o" 2>&1
+		f=$RIG/ncli/add-default.yaml; rm -f "$f"
+		ncli_root add-default config add "$RIG/auth/v-default.yaml" >> "$o"
+		ncli_root add-default auth ping > "$o2"
+		[ "$(ls -l "$ds" 2>/dev/null | awk '{print substr($1,1,10), $3}')" = "srw------- root" ] \
+			&& grep -q "pong ($ds) from" "$o2"; r=$?
+		rm -f "$f"
+	else
+		sed -n '/=== .* start .*v-default/,$p' "$LOG/tdns-auth.stdout" > "$o"; r=1
+	fi
+	judge P10a "no socket line: the daemon serves $ds (0600), and root's config add entry finds it" $r "$o" "$o2"
+	daemon_stop auth
+	o=$(out P10b-gone); ls -l /var/run/tdns/ > "$o" 2>&1
+	[ ! -e "$ds" ]
+	judge P10b "...and the default socket is gone after the daemon stops" $? "$o"
+	o=$(out P10c-none); o2=$(out P10c-ping)
+	if daemon_start auth "$RIG/auth/v-none.yaml"; then
+		ls -l /var/run/tdns/ > "$o" 2>&1
+		f=$RIG/ncli/add-none.yaml; rm -f "$f"
+		ncli_root add-none config add "$RIG/auth/v-none.yaml" >> "$o"
+		ncli_root add-none auth ping > "$o2"
+		[ -z "$(ls /var/run/tdns/ | grep -v '^tdns-imr.sock$')" ] && ! grep -q 'local admin socket' "$o" && grep -q 'pong (TLS, admin) from' "$o2"; r=$?
+		rm -f "$f"
+	else
+		sed -n '/=== .* start .*v-none/,$p' "$LOG/tdns-auth.stdout" > "$o"; r=1
+	fi
+	judge P10c "socket: none: no socket is served; root's entry goes over TCP (admin: no access file)" $r "$o" "$o2"
+	daemon_stop auth
+	rm -f "$RIG/auth/v-default.yaml" "$RIG/auth/v-none.yaml"
 }

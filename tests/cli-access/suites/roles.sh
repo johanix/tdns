@@ -45,8 +45,8 @@ suite_roles() {
 	# ---- read-write: the key, and a read-write certificate ----------------------------
 	if remote_or_skip R2 "the key is read-write"; then
 		o=$(out R2-ping); ncli_remote remote auth ping > "$o" 2>&1
-		grep -q 'authenticated as apikey (read-write) by api key' "$o"
-		judge R2a "the API key, from the CLI host: \"authenticated as apikey (read-write)\"" $? "$o"
+		if newcli; then grep -q 'pong (TLS, read-write) from' "$o"; else grep -q 'authenticated as apikey (read-write) by api key' "$o"; fi
+		judge R2a "the API key, from the CLI host: read-write (ping: \"TLS, read-write\", or \"authenticated as apikey (read-write)\")" $? "$o"
 		o=$(out R2-bump); ncli_remote remote auth zone bump -z $ZONE > "$o" 2>&1
 		[ "$(rc_of "$o")" = 0 ] && ! grep -qi 'forbidden\|403\|needs' "$o"
 		judge R2b "the key: zone bump works" $? "$o"
@@ -66,8 +66,8 @@ suite_roles() {
 
 	# ---- admin is the socket's alone ---------------------------------------------------
 	o=$(out R3-sock-ping); ncli_root root auth ping > "$o"
-	grep -q 'on the local socket (admin)' "$o"
-	judge R3a "root on the socket: \"on the local socket (admin)\"" $? "$o"
+	if newcli; then grep -q "pong ($AUTH_SOCK) from" "$o"; else grep -q 'on the local socket (admin)' "$o"; fi
+	judge R3a "root on the socket: admin (ping: \"pong (<socket path>)\", or \"on the local socket (admin)\")" $? "$o"
 	o=$(out R3-sock-tsig); ncli_root root auth config reload-tsig > "$o"
 	[ "$(rc_of "$o")" = 0 ] && ! grep -q 'needs admin' "$o"
 	judge R3b "root on the socket: config reload-tsig works" $? "$o"
@@ -148,6 +148,32 @@ suite_roles() {
 
 	# ---- access-file without socket is refused ---------------------------------------------
 	daemon_stop auth
+	if newcli; then
+		# #1168: no socket line is the default socket, so the access file has its
+		# socket; only "socket: none" leaves it without one.
+		ds=$(default_sock "$RIG/auth/v-nosock.yaml")
+		o=$(out R9-default)
+		if daemon_start auth "$RIG/auth/v-nosock.yaml"; then
+			ls -l "$ds" > "$o" 2>&1
+			[ "$(ls -l "$ds" 2>/dev/null | awk '{print substr($1,1,10), $3}')" = "srw------- root" ]; r=$?
+			daemon_stop auth
+		else
+			sed -n '/=== .* start .*v-nosock/,$p' "$LOG/tdns-auth.stdout" > "$o"; r=1
+		fi
+		judge R9 "access-file and no socket line: the daemon starts and serves the default socket $ds" $r "$o"
+		sed 's|^   socket: .*|   socket:     none|' "$RIG/auth/v-access.yaml" > "$RIG/auth/v-socknone.yaml"
+		chmod 0644 "$RIG/auth/v-socknone.yaml"
+		o=$(out R9b-none)
+		if daemon_start auth "$RIG/auth/v-socknone.yaml"; then
+			echo "tdns-auth is running with access-file and socket: none" > "$o"; daemon_stop auth; r=1
+		else
+			sed -n '/=== .* start .*v-socknone/,$p' "$LOG/tdns-auth.stdout" > "$o"
+			grep -q 'requires the local admin socket' "$o" "$LOG/tdns-auth.log"; r=$?
+		fi
+		judge R9b "access-file with socket: none: the daemon refuses to start, saying why" $r "$o"
+		daemon_stop auth
+		return
+	fi
 	o=$(out R9-nosock)
 	if daemon_start auth "$RIG/auth/v-nosock.yaml"; then
 		echo "tdns-auth is running with access-file and no socket" > "$o"

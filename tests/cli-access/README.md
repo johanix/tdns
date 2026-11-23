@@ -22,14 +22,14 @@ against one build; #1165 is verdicted on the socket suite alone.
 | TCP without a key, or with a wrong one, gets 403 (loopback and from the CLI host, both daemons) | S4a–S4e (S4f is the control: with the key it answers) |
 | Nothing sent over TCP passes as a socket request (spoofed headers, absolute-form URL) | S5a S5b S5c |
 | `config status -v` shows the socket | S6a S6b |
-| `config add` picks the socket entry for root, the TCP entry with `--tcp` or as non-root, and the entries work | S7a–S7e |
+| `config add` picks the socket entry for root, the TCP entry with `--tcp` or as non-root, and the entries work. From #1168 6afcc580 (a build with `tdns-ncli --tcp`): it writes the TCP entry with `config-file:` for everyone; root's ping over it goes over the socket, and over TCP with `--tcp` | S7a–S7e, S7f (#1168) |
 | A stale socket file is replaced at start | S8 |
 | A socket that cannot be served (a regular file in the way, a directory open to others) leaves the daemon running and shows as a server error (`config status -v`) | S9a S9b |
 | A relative or too-long socket path is refused, the daemon keeps running, `config add` warns | S10a S10b S10c |
 | A daemon with no `apiserver.addresses` still serves the socket (tdns-auth, tdns-imr) | S11a S11b S11c S11d |
 | A socket-only config needs the key but no certfile/keyfile (no `addresses` line, or `addresses: []`); with addresses it needs both | S13a–S13d |
 | A socket entry sends no key, whatever its authmethod says | S14 |
-| `config add` refuses a TCP entry (`--tcp`, or non-root) when the daemon config has no key; root still gets the socket entry | S15a–S15c |
+| `config add` refuses a TCP entry (`--tcp`, or non-root) when the daemon config has no key; root still gets the socket entry (from #1168 6afcc580: root is refused too, as it gets the TCP entry) | S15a–S15c |
 | `config check`: a socket-only config with a relative or too-long socket path fails, with addresses it warns; no certificate is needed without addresses; tdns-imr needs the key in every case | S16a–S16e |
 
 ### #1167, access roles: `run.sh verify roles`
@@ -45,7 +45,7 @@ against one build; #1165 is verdicted on the socket suite alone.
 | `keyauth: false` turns the key off; certificates keep working | R6a R6b |
 | A broken access file at a reload changes nothing | R7a R7b |
 | A broken access file at start leaves DNS and the socket running, with TCP answering 503 (key or certificate), until a reload over the socket fixes it | R8a–R8e |
-| `access-file` without `socket` is refused | R9 |
+| `access-file` without `socket` is refused. From #1168 6afcc580 no `socket` line is the default socket, which the daemon serves; `socket: none` with an access file is refused | R9, R9b (#1168) |
 | The access file is managed by a local tdns-ncli | in the pins suite (P3a–P3h): the `client` commands ship in #1168 |
 
 ### #1168, client pins: `run.sh verify pins`
@@ -58,6 +58,10 @@ against one build; #1165 is verdicted on the socket suite alone.
 | An unknown client certificate is refused, even with a valid key | P2e P2f |
 | A local tdns-ncli manages the access file: list, set-role, disable, enable, keyauth; admin refused; no change from a remote host | P3a–P3h |
 | `config add` writes the daemon's pin | P4 |
+| Root's TCP entry with `config-file:` goes over the daemon's socket (admin), and over TCP with `--tcp` (read-write); `--tcp` on a `unix://` entry is refused | P8a P8b P8c |
+| It stays on TCP when the entry's address is not one the daemon config lists, or when the daemon on the socket runs another config (said); the daemon refuses a socket request naming another config (412) | P8d P8e P8f |
+| `config add` pins a known entry that has no pin (drops `rootca:`, changes nothing else); run again it changes nothing | P9a P9b |
+| Every daemon serves a socket by default, named after its config path, gone after a stop; `socket: none` serves none and root's entry uses TCP | P10a P10b P10c |
 | `http://` to a non-loopback host warns once; loopback stays quiet | P5a P5b |
 | `config list` warns about duplicate pins | P6 |
 | tdns-cli's behaviour is unchanged | P7 |
