@@ -171,10 +171,14 @@ and not in the CLI config.** The owner's rulings:
 - **Every daemon serves the socket unless told not to.** The socket replaced
   `usetls: false` as the way in when TLS is broken, and a fallback that has to
   be configured beforehand is missing exactly when it is needed: none of the
-  test servers had a `socket:` line. Unset, the path is named after the config
-  file, `/var/run/tdns/<config file name without extension>.sock`
-  (`/etc/tdns/tdns-auth.yaml` serves `/var/run/tdns/tdns-auth.sock`), so the
-  instances on one host get one each. `socket: none` turns it off.
+  test servers had a `socket:` line. Unset, the path is in `/var/run/tdns`,
+  named after the config file: by its name for a file in `/etc/tdns`
+  (`/etc/tdns/tdns-auth.yaml` serves `tdns-auth.sock`), by its whole path for
+  any other (`/etc/tdns-site/tdns-auth.yaml` serves
+  `etc-tdns-site-tdns-auth.sock`), because instances in other directories
+  commonly share a file name (testor runs three `tdns-auth.yaml`), and two
+  daemons must never share a socket. A path too long for a socket becomes the
+  file name plus a hash of the path. `socket: none` turns it off.
   `tdns.ApiSocketPath` does this, in the daemon's load (`ParseConfig`, and the
   decode `config check` uses) and in tdns-ncli. A socket that cannot be served
   is an error the daemon reports and runs on without, as before.
@@ -186,7 +190,11 @@ and not in the CLI config.** The owner's rulings:
   same `config-file:` path exists on every host, so an entry for a daemon
   elsewhere would otherwise reach the daemon on this one. Two configs saying
   the same thing could disagree; one cannot. `tdns-ncli --tcp` uses the TCP
-  address even then, to see what a remote operator sees. `config add` writes
+  address even then, to see what a remote operator sees. Since the choice is
+  made at run time, `ping` (the test of how access is authenticated) prints
+  which way it went, `via the local admin socket <path>` or `via TCP <url>`,
+  above the daemon's own `on the local socket (admin)` or `authenticated as
+  ...`. `config add` writes
   the TCP entry with `config-file:` whoever runs it (no more `unix://` entries,
   and no `--tcp` on `config add`); a daemon with no TCP address gets an entry
   with `config-file:` alone, which only root can use. An entry written as

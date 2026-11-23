@@ -345,7 +345,9 @@ func TestAPIdispatcherServesTheSocket(t *testing.T) {
 }
 
 // Every daemon has the admin socket unless its config says socket: none: by
-// default one named after the config file, so two daemons on a host get two.
+// default one named after the config file, by its name in /etc/tdns and by its
+// whole path elsewhere, so that instances sharing a file name in different
+// directories (testor: three tdns-auth.yaml) get one socket each.
 func TestApiSocketPath(t *testing.T) {
 	saved := DefaultApiSocketDir
 	t.Cleanup(func() { DefaultApiSocketDir = saved })
@@ -354,8 +356,9 @@ func TestApiSocketPath(t *testing.T) {
 		configured, cfgfile, want string
 	}{
 		{"", "/etc/tdns/tdns-auth.yaml", "/var/run/tdns/tdns-auth.sock"},
-		{"", "/etc/tdns/tdns-site.yaml", "/var/run/tdns/tdns-site.sock"},
-		{"", "tdns-imr.yaml", "/var/run/tdns/tdns-imr.sock"}, // relative, from the command line
+		{"", "/etc/tdns/tdns-imr.yaml", "/var/run/tdns/tdns-imr.sock"},
+		{"", "/etc/tdns-site/tdns-auth.yaml", "/var/run/tdns/etc-tdns-site-tdns-auth.sock"},
+		{"", "/etc/tdns-enc/tdns-auth.yaml", "/var/run/tdns/etc-tdns-enc-tdns-auth.sock"},
 		{"", "/etc/tdns/noext", "/var/run/tdns/noext.sock"},
 		{"/run/x.sock", "/etc/tdns/tdns-auth.yaml", "/run/x.sock"},
 		{"none", "/etc/tdns/tdns-auth.yaml", ""},
@@ -366,6 +369,17 @@ func TestApiSocketPath(t *testing.T) {
 			t.Errorf("ApiSocketPath(%q, %q) = %q, want %q", tc.configured, tc.cfgfile, got, tc.want)
 		}
 	}
+
+	// Too long for a socket: the file name and a hash of the path, short
+	// enough, and different for two such paths.
+	deep := "/" + strings.Repeat("very-long-directory-name/", 5)
+	a := ApiSocketPath("", deep+"a/tdns-auth.yaml")
+	b := ApiSocketPath("", deep+"b/tdns-auth.yaml")
+	if a == b || CheckApiSocketPath(a) != nil || CheckApiSocketPath(b) != nil ||
+		!strings.HasPrefix(a, "/var/run/tdns/tdns-auth-") || !strings.HasSuffix(a, ".sock") {
+		t.Errorf("long paths: %q and %q, want two short, distinct tdns-auth-<hash>.sock", a, b)
+	}
+
 	DefaultApiSocketDir = ""
 	if got := ApiSocketPath("", "/etc/tdns/tdns-auth.yaml"); got != "" {
 		t.Errorf("default off: %q, want none", got)

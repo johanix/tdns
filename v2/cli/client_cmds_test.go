@@ -672,7 +672,11 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 
 	cfg := filepath.Join(dir, "tdns-imr.yaml")
 	writeFile(t, cfg, daemonYAML("", "127.0.0.1:8085", "k", "")) // no socket: line
-	sock := filepath.Join(dir, "tdns-imr.sock")
+	// Outside /etc/tdns the default is named after the whole path.
+	sock := tdns.ApiSocketPath("", cfg)
+	if filepath.Dir(sock) != dir || !strings.HasSuffix(sock, "-tdns-imr.sock") {
+		t.Fatalf("default socket %q, want one in %s named after %s", sock, dir, cfg)
+	}
 	if got, addrs := daemonSocket(cfg); got != sock || len(addrs) != 1 || addrs[0] != "127.0.0.1:8085" {
 		t.Fatalf("daemonSocket = %q %q, want the default %s and 127.0.0.1:8085", got, addrs, sock)
 	}
@@ -707,6 +711,10 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 	}()
 	if s := socketOf(t, e); s != sock {
 		t.Errorf("socket answering: socket %q, want %s", s, sock)
+	}
+	// ping says which way it went: the socket is chosen at run time.
+	if c, _, err := newApiClientFor(e, CliClientConf{}); err != nil || pingVia(c) != "via the local admin socket "+sock {
+		t.Errorf("ping's via line: %v", err)
 	}
 	ForceTCP = true
 	if s := socketOf(t, e); s != "" {
