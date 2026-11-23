@@ -26,13 +26,27 @@ import (
 // WriteDynamicZoneFile writes a zone file to the dynamic zones directory using atomic writes
 // Returns the full path to the written file, or an error
 func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
+	fname, _, err := zd.WriteDynamicZoneFileWithSerial(zoneDirectory)
+	return fname, err
+}
+
+// WriteDynamicZoneFileWithSerial is WriteDynamicZoneFile that also reports the
+// SOA serial it wrote. The write after a refresh needs it, to bound the journal
+// deltas it drops (recordZoneFileWritten), as WriteFileWithSerial does for a
+// zone's own file.
+//
+// A success here is licence to drop those deltas, so it means what it does in
+// WriteFileWithSerial: the file is on disk. The temporary file is synced before
+// the rename, and the directory after it, and a failure of either is an error.
+// Without the syncs a power cut leaves the old file and, by then, no journal.
+func (zd *ZoneData) WriteDynamicZoneFileWithSerial(zoneDirectory string) (string, uint32, error) {
 	if zoneDirectory == "" {
-		return "", fmt.Errorf("zone directory is required")
+		return "", 0, fmt.Errorf("zone directory is required")
 	}
 
 	// Ensure zone directory exists
 	if err := os.MkdirAll(zoneDirectory, 0755); err != nil {
-		return "", fmt.Errorf("failed to create zone directory %s: %v", zoneDirectory, err)
+		return "", 0, fmt.Errorf("failed to create zone directory %s: %v", zoneDirectory, err)
 	}
 
 	// Generate zone file name: {zonedirectory}/{zone-name}.zone
@@ -43,32 +57,53 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 	// Create temp file in the same directory for atomic write
 	tempFile, err := os.CreateTemp(zoneDirectory, fmt.Sprintf(".%s.tmp", zoneFileName))
 	if err != nil {
-		return "", fmt.Errorf("failed to create temp file: %v", err)
+		return "", 0, fmt.Errorf("failed to create temp file: %v", err)
 	}
 	tempFilePath := tempFile.Name()
 
 	// Write zone data to temp file
-	_, err = zd.WriteZoneToFile(tempFile)
+	wrote, err := zd.WriteZoneToFile(tempFile)
 	if err != nil {
 		tempFile.Close()
 		os.Remove(tempFilePath) // Clean up temp file on error
-		return "", fmt.Errorf("failed to write zone data to temp file: %v", err)
+		return "", 0, fmt.Errorf("failed to write zone data to temp file: %v", err)
+	}
+
+	// WriteZoneToFile flushes its buffer; the data is still in the page cache.
+	if err := tempFile.Sync(); err != nil {
+		tempFile.Close()
+		os.Remove(tempFilePath)
+		return "", 0, fmt.Errorf("failed to sync temp file: %v", err)
 	}
 
 	// Close temp file before rename (WriteZoneToFile flushes but doesn't close)
 	if err := tempFile.Close(); err != nil {
 		os.Remove(tempFilePath)
-		return "", fmt.Errorf("failed to close temp file: %v", err)
+		return "", 0, fmt.Errorf("failed to close temp file: %v", err)
 	}
 
 	// Atomic rename: temp file -> final file
 	if err := os.Rename(tempFilePath, zoneFilePath); err != nil {
 		os.Remove(tempFilePath) // Clean up temp file on error
-		return "", fmt.Errorf("failed to rename temp file to final file: %v", err)
+		return "", 0, fmt.Errorf("failed to rename temp file to final file: %v", err)
+	}
+
+	// Persist the rename itself, and fail if that cannot be done: see
+	// WriteFileWithSerial. The file is in place, so there is nothing to clean up.
+	d, err := os.Open(zoneDirectory)
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to open %s to sync the rename: %v", zoneDirectory, err)
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return "", 0, fmt.Errorf("failed to sync %s after renaming %s into place: %v", zoneDirectory, zoneFilePath, err)
+	}
+	if err := d.Close(); err != nil {
+		return "", 0, fmt.Errorf("failed to close %s after syncing: %v", zoneDirectory, err)
 	}
 
 	lg.Info("wrote zone file", "zone", zd.ZoneName, "path", zoneFilePath)
-	return zoneFilePath, nil
+	return zoneFilePath, wrote, nil
 }
 
 // GetDynamicZoneFilePath returns the expected file path for a dynamic zone file

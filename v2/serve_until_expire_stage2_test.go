@@ -542,15 +542,15 @@ www.example.	3600	IN	A	10.0.0.3
 //
 // The brief wants the confirmation checked against the recorded ZONEMD identity
 // as well as the serial, to catch a file regenerated or restored reusing its
-// serial. That check is not made, because the identity is not maintained on
-// this path: WriteDynamicZoneFile, which is what the refresh engine calls for a
-// persistable dynamic zone, does not record what it writes. Consulting a stale
-// record would reject a good confirmation on every restart after a
-// content-changing transfer.
+// serial. That check is not made. It was left out because the identity was not
+// maintained on this path: the refresh engine's write of a persistable dynamic
+// zone did not record what it wrote, and a stale record would have rejected a
+// good confirmation on every restart after a content-changing transfer. That
+// write records it now (recordZoneFileWritten, #919), so the digest check could
+// come back; it has not, and is its own change.
 //
-// So: a stale, mismatched file identity does NOT stop the stamp being restored,
-// and this test exists to fail loudly if WriteDynamicZoneFile ever starts
-// recording -- at which point the digest check should come back.
+// So: a stale, mismatched file identity does NOT stop the stamp being restored.
+// If the check does come back, this test is the one to change with it.
 func TestRestoreIgnoresTheRecordedFileIdentity(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	conf, dir := persistentConf(t, kdb)
@@ -572,9 +572,8 @@ func TestRestoreIgnoresTheRecordedFileIdentity(t *testing.T) {
 	}
 	if !zd.LatestRefresh.Equal(hourAgo) {
 		t.Errorf("LatestRefresh = %v, want the recorded %v. If this now fails "+
-			"because the identity was consulted, WriteDynamicZoneFile has "+
-			"presumably started recording -- restore the digest check in "+
-			"restoreRefreshStateAtFirstBind.", zd.LatestRefresh, hourAgo)
+			"because the identity was consulted, the digest check has come back "+
+			"in restoreRefreshStateAtFirstBind -- change this test with it.", zd.LatestRefresh, hourAgo)
 	}
 }
 
