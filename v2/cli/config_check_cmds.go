@@ -439,6 +439,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 			fmt.Sprintf("could not fully decode config into structs: %v", err),
 			"structural checks below may be incomplete; often caused by legacy bare-string primaries:/downstreams:")
 	}
+	applyDaemonDefaults(v, &cfg)
 
 	checkListeners(&cfg, rep)
 	checkDo53QueriesRefused(&cfg, rep, effectiveRole(role) == "agent")
@@ -670,6 +671,16 @@ func checkDoHPath(cfg *tdns.Config, rep *ccReport, g string, doh bool) {
 	case path != "":
 		rep.warn(g, "doh-path", fmt.Sprintf("listeners.doh-path %q is set but doh is not in listeners.transports", path),
 			"add doh to listeners.transports, or remove doh-path")
+	}
+}
+
+// applyDaemonDefaults gives cfg the defaults the daemon's own decoder applies
+// before it decodes (ParseConfig) and a viper Unmarshal does not, so the
+// checks judge the config the daemon will run. apiserver.usetls defaults to
+// true when the apiserver block leaves it out.
+func applyDaemonDefaults(v *viper.Viper, cfg *tdns.Config) {
+	if v.IsSet("apiserver") && !v.IsSet("apiserver.usetls") {
+		cfg.ApiServer.UseTLS = true
 	}
 }
 

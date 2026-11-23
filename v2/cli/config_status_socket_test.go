@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -136,6 +138,50 @@ func TestImrConfigCheckSocketOnly(t *testing.T) {
 			if keyFail != tc.keyFail || sockWarn != tc.sockWarn || servedInfo != tc.servedInfo {
 				t.Errorf("key fail %v, socket warning %v, served on the socket %v; want %v, %v, %v",
 					keyFail, sockWarn, servedInfo, tc.keyFail, tc.sockWarn, tc.servedInfo)
+			}
+		})
+	}
+}
+
+// config check decodes with viper, which does not apply the daemon's own
+// default usetls: true. Without applyDaemonDefaults an access-file config with
+// no usetls: line was warned about as plaintext while the daemon served TLS.
+func TestConfigCheckUseTLSDefault(t *testing.T) {
+	dir := t.TempDir()
+	access := filepath.Join(dir, "access.yaml")
+	if err := os.WriteFile(access, []byte("clients: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, usetls string
+		warn         bool
+	}{
+		{"no usetls line", "", false},
+		{"usetls: true", "   usetls: true\n", false},
+		{"usetls: false", "   usetls: false\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := viper.New()
+			v.SetConfigType("yaml")
+			doc := "apiserver:\n   addresses: [ 127.0.0.1:8989 ]\n   socket: /var/run/tdns/tdns-auth.sock\n   access-file: " + access + "\n" + tc.usetls
+			if err := v.ReadConfig(strings.NewReader(doc)); err != nil {
+				t.Fatal(err)
+			}
+			var cfg tdns.Config
+			if err := v.Unmarshal(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			applyDaemonDefaults(v, &cfg)
+			rep := newCCReport()
+			checkApiAccessFile(&cfg, rep)
+			var warned bool
+			for _, r := range rep.byGroup["API access file"] {
+				if r.check == "usetls" && r.level == ccWARN {
+					warned = true
+				}
+			}
+			if warned != tc.warn {
+				t.Errorf("usetls warning = %v, want %v (UseTLS decoded as %v)", warned, tc.warn, cfg.ApiServer.UseTLS)
 			}
 		})
 	}

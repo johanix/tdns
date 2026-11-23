@@ -261,6 +261,7 @@ func (conf *Config) reloadApiAccess() string {
 		if st := h.load(); st != nil && st.Enabled {
 			h.p.Store(&accessState{})
 			conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
+			lgApi.Info("management API: the access file is no longer configured; the API key is admin on the TCP API again")
 			return " The access file is no longer configured: the API key is admin on the TCP API again."
 		}
 		return ""
@@ -277,6 +278,8 @@ func (conf *Config) reloadApiAccess() string {
 	if !af.KeyAuthOn() {
 		keyauth = "off"
 	}
+	// Logged as well as returned: after a SIGHUP nobody reads the message.
+	lgApi.Info("management API: access file reloaded", "file", path, "clients", len(af.Clients), "keyauth", keyauth)
 	return fmt.Sprintf(" Access file reloaded: %d client(s), keyauth %s.", len(af.Clients), keyauth)
 }
 
