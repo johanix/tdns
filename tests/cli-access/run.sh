@@ -63,9 +63,11 @@ ship() {
 
 start() {
 	seeded
-	daemon_start auth || echo "tdns-auth did not come up: see $LOG/tdns-auth.stdout"
-	daemon_start imr || echo "tdns-imr did not come up: see $LOG/tdns-imr.stdout"
+	_rc=0
+	daemon_start auth || { echo "tdns-auth did not come up: see $LOG/tdns-auth.stdout"; _rc=1; }
+	daemon_start imr || { echo "tdns-imr did not come up: see $LOG/tdns-imr.stdout"; _rc=1; }
 	status
+	return $_rc
 }
 
 stop() { daemon_stop auth; daemon_stop imr; echo "stopped"; }
@@ -77,7 +79,7 @@ status() {
 		s=/var/run/tdns/tdns-$d.sock
 		printf "tdns-%-4s pid %-7s socket %s\n" "$d" "${p:-none}" "$( [ -S $s ] && ls -l $s | cut -c1-10 || echo absent)"
 	done
-	[ -n "$CLI_SSH" ] && echo "CLI host: $(on_cli "hostname; sed -n 1p $RIG/bin/BUILD" | tr '\n' ' ')"
+	if [ -n "$CLI_SSH" ]; then echo "CLI host: $(on_cli "hostname; sed -n 1p $RIG/bin/BUILD" | tr '\n' ' ')"; fi
 }
 
 clean() {
