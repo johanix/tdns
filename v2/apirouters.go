@@ -233,17 +233,23 @@ func xxxSetupAgentAPIRouter(conf *Config) (*mux.Router, error) {
 // MinVersion is fixed when the listener starts, and a reload can add an
 // access file later. So every handshake also asks the running policy:
 // while an access file is in force, a client that does not offer TLS 1.3 is
-// turned away at the handshake. (A client that offers it gets it: the
-// server always picks the highest version both sides have.)
+// handed a TLS 1.3-only config, and the version negotiation turns it away
+// with a protocol_version alert, as a listener started with the access file
+// does. (Returning an error instead would send internal_error, which points
+// an operator the wrong way.) That config needs no certificate: the
+// handshake fails on the version before one is chosen. A client that offers
+// TLS 1.3 gets it, as the server picks the highest version both sides have.
 func apiServerTLSConfig(conf *Config) *tls.Config {
 	c := &tls.Config{ClientAuth: tls.RequestClientCert}
 	if conf.ApiServer.AccessFile != "" {
 		c.MinVersion = tls.VersionTLS13
 	}
+	tls13Only := c.Clone()
+	tls13Only.MinVersion = tls.VersionTLS13
 	c.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 		if st := conf.Internal.ApiAccess.load(); st != nil && st.Enabled &&
 			!slices.Contains(hello.SupportedVersions, tls.VersionTLS13) {
-			return nil, fmt.Errorf("the access file requires TLS 1.3 on the management API")
+			return tls13Only, nil
 		}
 		return nil, nil // the config as it is
 	}

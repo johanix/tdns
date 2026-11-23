@@ -191,8 +191,11 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string, daemo
 			}
 
 		} else {
-			// there is some error, but not "connection refused"
+			// Something answers, or fails, that is not "nothing running":
+			// a socket that is not ours to open, say. No daemon was started,
+			// so this is a failure.
 			fmt.Printf("StartDaemon: Error: there is some other problem: %v\n", err)
+			os.Exit(1)
 		}
 	} else { // we got a response, so daemon appears to be running
 		if resp.Status == "ok" {
