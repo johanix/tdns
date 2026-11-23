@@ -57,6 +57,17 @@ func readOptionsUntil(t *testing.T, zd *ZoneData, extra ...func(*ZoneData) bool)
 	readers = append(readers, extra...)
 	done := make(chan struct{})
 	var wg, started sync.WaitGroup
+	var stopOnce sync.Once
+	// Stopped at the end of the test whether or not the caller got to stop them: a
+	// t.Fatal between the start and the stop would otherwise leave every reader
+	// running through the teardown and into the tests after it.
+	shutdown := func() {
+		stopOnce.Do(func() {
+			close(done)
+			wg.Wait()
+		})
+	}
+	t.Cleanup(shutdown)
 	var reads atomic.Int64
 	for _, read := range readers {
 		wg.Add(1)
@@ -81,8 +92,7 @@ func readOptionsUntil(t *testing.T, zd *ZoneData, extra ...func(*ZoneData) bool)
 	}
 	started.Wait()
 	return func() int64 {
-		close(done)
-		wg.Wait()
+		shutdown()
 		return reads.Load()
 	}
 }
@@ -379,5 +389,72 @@ func TestCollectDynamicRRsTakesCDSAndKeyFromOneSetOfOptions(t *testing.T) {
 	}
 	if swaps.Load() == before {
 		t.Fatal("the options were not swapped while the collections ran: the test proved nothing")
+	}
+}
+
+// flipOptions runs the swap writer (swapOptions) between two option maps while
+// the test goroutine calls read, and says how many answers were neither wantA,
+// which a read of the first map gives, nor wantB, which a read of the second does.
+// A look at the options that is two reads gives one now and then; so, on code that
+// reads them one look at a time, this fails often, not every run.
+func flipOptions[T comparable](t *testing.T, zd *ZoneData, a, b map[ZoneOption]bool, wantA, wantB T, read func() T) (torn, reads int) {
+	t.Helper()
+	swaps, stop := swapOptions(t, zd, []map[ZoneOption]bool{a, b})
+	for reads = 0; reads < 300000; reads++ {
+		if got := read(); got != wantA && got != wantB {
+			torn++
+		}
+	}
+	stop()
+	if swaps.Load() == 0 {
+		t.Fatal("the writer made no swap")
+	}
+	return torn, reads
+}
+
+// johanix/tdns#981 review: signsHere asked for the two signing options in two
+// reads. A map replaced between them, by one with the other signing mode, gave
+// false for a zone that signs in both.
+func TestSignsHereReadsBothSigningOptionsFromOneMap(t *testing.T) {
+	zd := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{OptOnlineSigning: true}}
+	torn, reads := flipOptions(t, zd,
+		map[ZoneOption]bool{OptOnlineSigning: true},
+		map[ZoneOption]bool{OptInlineSigning: true},
+		true, true, zd.signsHere)
+	if torn != 0 {
+		t.Errorf("signsHere said the zone does not sign %d times in %d reads, while every map the zone had signs", torn, reads)
+	}
+}
+
+// The same for the answer that follows it: a zone that signs with black lies,
+// then one that does not sign at all (and has no data to say otherwise). An
+// answer from the first signing question and the second map's black-lies is the
+// NSEC chain, which neither map has.
+func TestDenialSourceForReadsItsOptionsFromOneMap(t *testing.T) {
+	zd := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{OptOnlineSigning: true, OptBlackLies: true}}
+	torn, reads := flipOptions(t, zd,
+		map[ZoneOption]bool{OptOnlineSigning: true, OptBlackLies: true},
+		map[ZoneOption]bool{},
+		denialCompact, denialUnsigned,
+		func() denialSource { return zd.denialSourceFor(nil) })
+	if torn != 0 {
+		t.Errorf("denialSourceFor gave an answer neither map has %d times in %d reads", torn, reads)
+	}
+}
+
+// A test that stops with t.Fatal never calls the stop it was given. The readers
+// are stopped by the test's cleanup, which a subtest's end runs: here, before the
+// check below.
+func TestReadOptionsUntilStopsItsReadersWhenTheTestEnds(t *testing.T) {
+	zd := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{OptAllowUpdates: true}}
+	var reads atomic.Int64
+	t.Run("abandoned", func(t *testing.T) {
+		// No stop: the subtest ends as one that failed on the line after.
+		readOptionsUntil(t, zd, func(*ZoneData) bool { reads.Add(1); return false })
+	})
+	before := reads.Load()
+	time.Sleep(50 * time.Millisecond)
+	if after := reads.Load(); after != before {
+		t.Errorf("a reader was still running after its test ended (%d reads, then %d)", before, after)
 	}
 }

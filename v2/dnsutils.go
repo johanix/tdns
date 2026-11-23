@@ -540,7 +540,7 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 	// (yet / any longer) signed — refuse rather than hand a secondary a zone it
 	// would serve BOGUS. Catches both a persistent sign failure and the reload
 	// re-sign window. (Surfacing WHY is deferred to the DnssecError redesign.)
-	if (zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)) && len(soaRRset.RRSIGs) == 0 {
+	if zd.signsHere() && len(soaRRset.RRSIGs) == 0 {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone is configured to be signed but the SOA has no RRSIG (unsigned/broken)", zone)
 		return zd.refuseTransfer(w, r)
 	}

@@ -71,8 +71,18 @@ var errDenialUnproven = errors.New("zone must be signed but its NSEC chain canno
 
 // signsHere reports whether this server signs zd, the test signRRsetForZone
 // applies as well.
+//
+// Both options come from one map. Two Option calls take the lock one after the
+// other, and a refresh or reload that replaces the whole map between them, with
+// one that flips the signing mode (inline to online, say), gives an answer that
+// neither map has: false, for a zone that signs.
 func (zd *ZoneData) signsHere() bool {
-	return zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)
+	return signsFrom(zd.optionsMap())
+}
+
+// signsFrom is signsHere for a set of options already read.
+func signsFrom(opts map[ZoneOption]bool) bool {
+	return opts[OptOnlineSigning] || opts[OptInlineSigning]
 }
 
 // denialSourceFor says where zd's negative answers get their proof, given the
@@ -84,8 +94,10 @@ func (zd *ZoneData) signsHere() bool {
 // black-lies on a zone that is not signed here changes nothing: there is no
 // key to sign a synthesized NSEC with.
 func (zd *ZoneData) denialSourceFor(apex *OwnerData) denialSource {
-	if zd.signsHere() {
-		if zd.Option(OptBlackLies) {
+	// One map for both questions, as in signsHere.
+	opts := zd.optionsMap()
+	if signsFrom(opts) {
+		if opts[OptBlackLies] {
 			return denialCompact
 		}
 		return denialChain
