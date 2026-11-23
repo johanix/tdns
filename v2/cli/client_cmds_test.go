@@ -772,7 +772,7 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 	}
 	ForceTCP = false
 	// ping says which way it went: the socket is chosen at run time.
-	if c, _, err := newApiClientFor(e, CliClientConf{}); err != nil || pingHow(c, tdns.PingResponse{}) != "admin socket "+sock {
+	if c, _, err := newApiClientFor(e, CliClientConf{}); err != nil || pingHow(c, tdns.PingResponse{}) != sock {
 		t.Errorf("ping's parentheses: %v", err)
 	}
 	ForceTCP = true
@@ -862,7 +862,7 @@ func TestPingHow(t *testing.T) {
 		pr   tdns.PingResponse
 		want string
 	}{
-		{"socket", sock, tdns.PingResponse{Role: "admin", Via: "local socket", Identity: "local"}, "admin socket /var/run/tdns/etc-tdns-tdns-auth.sock"},
+		{"socket", sock, tdns.PingResponse{Role: "admin", Via: "local socket", Identity: "local"}, "/var/run/tdns/etc-tdns-tdns-auth.sock"},
 		{"key over TLS", tlsc, tdns.PingResponse{Role: "admin", Via: "api key", Identity: "apikey"}, "TLS, admin"},
 		{"certificate", tlsc, tdns.PingResponse{Role: "read-write", Via: "certificate", Identity: "anna"}, "TLS, read-write, certificate anna"},
 		{"plain http", plain, tdns.PingResponse{Role: "admin", Via: "api key", Identity: "apikey"}, "no TLS, admin"},
