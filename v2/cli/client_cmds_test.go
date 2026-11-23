@@ -532,33 +532,37 @@ func TestAddPinsTheDaemonCertificate(t *testing.T) {
 		t.Errorf("read back: %+v", got)
 	}
 
-	// An unreadable certificate: the entry is written without pins, and a note
-	// says what to add.
+	// A certificate config add cannot read: the new entry is refused, with a
+	// fix, and nothing is written (the owner's ruling: no new https entry it
+	// cannot pin).
+	refused := func(t *testing.T, env *addEnv, d string, want ...string) {
+		t.Helper()
+		res, err := env.add(t, d, nil)
+		if err == nil {
+			t.Fatalf("added %+v; want a refusal", res.Entry)
+		}
+		for _, w := range append([]string{"not adding " + d + ": ", "\n  Fix: "}, want...) {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("refusal lacks %q:\n%v", w, err)
+			}
+		}
+		if _, serr := os.Stat(env.cli); serr == nil {
+			t.Error("the refused add wrote the CLI config")
+		}
+	}
 	env2 := newAddEnv(t)
 	d2 := filepath.Join(env2.dir, "tdns-auth.yaml")
 	writeFile(t, d2, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   certfile: /nonexistent/api.crt\n"))
-	res, err = env2.add(t, d2, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Entry.Pins) != 0 || !strings.Contains(strings.Join(res.Notes, " "), "could not pin") {
-		t.Errorf("unreadable cert: entry %+v notes %q", res.Entry, res.Notes)
-	}
+	refused(t, env2, d2, "cannot be pinned", "put the daemon's certificate at /nonexistent/api.crt")
 
 	// A relative certfile is opened from the daemon's working directory,
-	// which config add cannot know: no pin, even though a file of that name
-	// sits next to the daemon config, and the note says why.
+	// which config add cannot know: refused, even though a file of that name
+	// sits next to the daemon config, and the refusal says why.
 	env3 := newAddEnv(t)
 	writeFile(t, filepath.Join(env3.dir, "api.crt"), string(certPEM))
 	d3 := filepath.Join(env3.dir, "tdns-auth.yaml")
 	writeFile(t, d3, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   certfile: api.crt\n"))
-	res, err = env3.add(t, d3, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if notes := strings.Join(res.Notes, " "); len(res.Entry.Pins) != 0 || !strings.Contains(notes, "relative path") || !strings.Contains(notes, "could not pin") {
-		t.Errorf("relative certfile: entry %+v notes %q", res.Entry, res.Notes)
-	}
+	refused(t, env3, d3, "relative path", "absolute path")
 }
 
 // An entry with no pin is broken (tdns-ncli refuses it), and config add of the
@@ -1196,8 +1200,8 @@ func TestDuplicatePins(t *testing.T) {
 }
 
 // A daemon config with no certfile/keyfile: config add pins the default
-// pair the daemon writes at its first start, and before that says to start
-// it first.
+// pair the daemon writes at its first start, and before that refuses, saying
+// to start it first.
 func TestAddPinsTheDefaultApiCert(t *testing.T) {
 	saved := runningAsRoot
 	t.Cleanup(func() { runningAsRoot = saved })
@@ -1205,7 +1209,7 @@ func TestAddPinsTheDefaultApiCert(t *testing.T) {
 
 	env := newAddEnv(t)
 	d := filepath.Join(env.dir, "tdns-auth.yaml")
-	writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", ""))
+	writeFile(t, d, daemonYAMLDefaultCert("TDNS-AUTH", "127.0.0.1:8989", "k", ""))
 	info, err := ReadDaemonApi(d, "")
 	if err != nil {
 		t.Fatal(err)
@@ -1215,11 +1219,17 @@ func TestAddPinsTheDefaultApiCert(t *testing.T) {
 		t.Fatalf("CertFile %q (default %v), want %s", info.CertFile, info.CertDefault, cert)
 	}
 
-	// Not written yet: the entry is added without a pin, and the note says
-	// to start the daemon first.
-	res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true })
-	if err != nil || !strings.Contains(strings.Join(res.Notes, " "), "not there yet") {
-		t.Errorf("before the first start: %+v, %v; want a note saying the daemon writes it", res, err)
+	// Not written yet: refused, dry run or not, saying to start the daemon
+	// first; nothing is written.
+	for _, dry := range []bool{true, false} {
+		_, err := env.add(t, d, func(o *AddOptions) { o.DryRun = dry })
+		want := "not adding " + d + ": " + cert + " is not there yet: the daemon writes its API certificate there when it first starts.\n  Fix: start the daemon (it writes its API certificate at first start), then run config add again"
+		if err == nil || err.Error() != want {
+			t.Errorf("before the first start, dry run %v: err = %v\nwant %s", dry, err, want)
+		}
+	}
+	if _, err := os.Stat(env.cli); err == nil {
+		t.Error("the refused add wrote the CLI config")
 	}
 
 	// Written (here: any certificate at that path): pinned.
@@ -1230,7 +1240,7 @@ func TestAddPinsTheDefaultApiCert(t *testing.T) {
 	}
 	writeFile(t, cert, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})))
 	leaf, _ := x509.ParseCertificate(srv.Certificate().Raw)
-	res, err = env.add(t, d, nil)
+	res, err := env.add(t, d, nil)
 	if err != nil || res.Entry.TLSAuth != "pin" || len(res.Entry.Pins) != 1 || res.Entry.Pins[0] != tdns.SPKISHA256(leaf) {
 		t.Errorf("after the first start: %+v, %v; want the default certificate pinned", res, err)
 	}

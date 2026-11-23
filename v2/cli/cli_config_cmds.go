@@ -361,13 +361,14 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		entry.ApiKey, entry.AuthMethod, entry.RootCA = "", "none", ""
 	} else if strings.HasPrefix(entry.BaseURL, "https://") && entry.RootCA == "" {
 		// The daemon's own certificate, pinned: no CA, no name check, and
-		// nothing for the operator to do.
-		if pin, err := daemonCertPin(info); err != nil {
-			res.Notes = append(res.Notes, fmt.Sprintf(
-				"could not pin the daemon's certificate (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>), or tdns-ncli will refuse to connect", err))
-		} else {
-			entry.TLSAuth, entry.Pins = "pin", []string{pin}
+		// nothing for the operator to do. A new entry that cannot be pinned
+		// is not written: tdns-ncli would refuse it (the owner's ruling,
+		// 2026-11-23).
+		pin, err := daemonCertPin(info)
+		if err != nil {
+			return nil, unpinnableRefusal(info, err)
 		}
+		entry.TLSAuth, entry.Pins = "pin", []string{pin}
 	}
 	if err := chooseEntryName(&entry, res, info.Role, existing, o); err != nil {
 		return nil, err
@@ -577,6 +578,30 @@ func certFilePin(path string) (string, error) {
 			return tdns.SPKISHA256(c), nil
 		}
 	}
+}
+
+// unpinnableRefusal is the refusal of a new https entry whose daemon
+// certificate config add cannot pin (err, from daemonCertPin): why, and a
+// Fix line that fits. Most often it is the default API pair of a daemon that
+// has not started yet, which writes it at its first start.
+func unpinnableRefusal(info *DaemonApi, err error) error {
+	why := fmt.Sprintf("the daemon's certificate cannot be pinned (%v)", err)
+	var fix string
+	_, serr := os.Stat(info.CertFile)
+	switch {
+	case info.CertDefault && errors.Is(serr, os.ErrNotExist):
+		why = fmt.Sprintf("%s is not there yet: the daemon writes its API certificate there when it first starts", info.CertFile)
+		fix = "start the daemon (it writes its API certificate at first start), then run config add again"
+	case info.CertFile == "":
+		fix = "set apiserver.certfile to the certificate the daemon serves, then run config add again"
+	case !filepath.IsAbs(info.CertFile):
+		fix = "give apiserver.certfile as an absolute path, then run config add again"
+	case errors.Is(serr, os.ErrNotExist):
+		fix = fmt.Sprintf("put the daemon's certificate at %s, or correct apiserver.certfile, then run config add again", info.CertFile)
+	default:
+		fix = fmt.Sprintf("make %s a readable PEM certificate here (run config add as root on the daemon's host), then run config add again", info.CertFile)
+	}
+	return fmt.Errorf("not adding %s: %s.\n  Fix: %s", info.ConfigFile, why, fix)
 }
 
 // repinKnownEntry gives e, the existing entry for this daemon, the pin of the
