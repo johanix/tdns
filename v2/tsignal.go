@@ -620,6 +620,16 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		// its presence and not by matching what the configuration gives: an
 		// operator may write exactly that, and a later configuration must
 		// not replace it.
+		//
+		// The pass reads the working set, which may hold an operator's
+		// change the publish cadence has not published yet. While the
+		// published owner still holds only the pass's signal, the record is
+		// kept: the change is not served, and a stop before it is published
+		// loses it, after which the pass's signal comes back and must still
+		// be known for the pass's (CodeRabbit on #1118). The pass leaves the
+		// owner alone meanwhile, and a run after the publish forgets the
+		// record.
+		var replaced []dns.RR
 		if od := zd.stagedOwner(owner); od != nil && ownerRRsetCount(od) > 0 {
 			own, err := zd.ownerHoldsOnlyPassSignal(owner, od)
 			if err != nil {
@@ -628,14 +638,25 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 				continue
 			}
 			if !own {
+				kept++
+				pending, err := zd.publishedHoldsOnlyPassSignal(owner)
+				if err != nil {
+					zd.warnSignalRecordUnreadable(owner, err)
+					continue
+				}
+				if pending {
+					lgDns.Info("createTransportSignalSVCB: a change at the signal owner is staged and not published yet, and the published owner still holds only the pass's signal; leaving the owner alone and keeping the record until the change is published",
+						"zone", zd.ZoneName, "owner", owner)
+					continue
+				}
 				lgDns.Info("createTransportSignalSVCB: leaving the operator's records at the signal owner alone; the transport configuration does not apply to this name",
 					"zone", zd.ZoneName, "owner", owner, "alias", svcbHasAlias(od.RRtypes.GetOnlyRRSet(dns.TypeSVCB)), "rrsets", ownerRRsetCount(od))
-				kept++
 				if err := zd.forgetSignalStored(owner); err != nil {
 					zd.warnSignalForgetFailed(owner, err)
 				}
 				continue
 			}
+			replaced = od.RRtypes.GetOnlyRRSet(dns.TypeSVCB).RRs
 		}
 		stored, err := zd.buildServerSVCB(conf, id, nil, nil)
 		if err != nil {
@@ -657,7 +678,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys, bar
 		lgDns.Debug("createTransportSignalSVCB: stored synthesized server SVCB",
 			"zone", zd.ZoneName, "identity", id, "owner", owner)
 		zd.stageRRsetLocked(owner, *stored)
-		zd.noteSignalStored(owner, stored.RRs)
+		zd.noteSignalStoredOver(owner, stored.RRs, replaced)
 		unsignedTarget = unsignedTarget || (dak == nil && svcbHasTarget(stored))
 		changed++
 	}
@@ -724,17 +745,28 @@ func (zd *ZoneData) signalMayWrite(apex *OwnerData, dak *DnssecKeys) bool {
 // the record. A revocation whose KeyDB delete failed earlier in this process
 // is tried again, whatever is at the owner now.
 //
-// A withdrawal staged by an earlier run whose publish was refused (signing
-// or the NSEC repair failed) is published again. The publisher keeps the
-// working set and drops the queue flag, so the owner is gone from the
-// working set while the published snapshot still serves the pass's signal
-// there, and nothing else would publish it.
+// Where the working set holds no signal of the pass's at the owner and the
+// published zone still serves one, the change is staged and not published,
+// and the record stays (CodeRabbit on #1118). With no SVCB RRset staged
+// there, it is a withdrawal: one by an earlier run whose publish was refused
+// (signing or the NSEC repair failed), which the publisher keeps staged and
+// nothing else would publish, or an operator's deletion the publish cadence
+// holds back. Either takes the pass's signal out, so it is published again,
+// whatever else is staged at the owner (a TXT there, say). With an SVCB
+// RRset of the operator's staged, it is their change, left to the cadence:
+// a stop before it is published loses it, and the pass's signal that comes
+// back must still be known for the pass's.
 //
 // It returns the number of owners withdrawn now, and the number whose
 // earlier withdrawal is still unpublished; either calls for a publish.
 // Caller holds zd.mu.
 func (zd *ZoneData) withdrawStaleSignalsLocked(want map[string]bool) (withdrawn, unpublished int) {
-	for _, owner := range zd.signalStoredOwners() {
+	owners, err := zd.signalStoredOwners()
+	if err != nil {
+		lgDns.Warn("transport signal pass: could not list the stored-signal records; owners known only to the KeyDB are left as they are until the pass next runs",
+			"zone", zd.ZoneName, "error", err)
+	}
+	for _, owner := range owners {
 		if want[owner] {
 			continue
 		}
@@ -745,25 +777,12 @@ func (zd *ZoneData) withdrawStaleSignalsLocked(want map[string]bool) (withdrawn,
 			continue
 		}
 		od := zd.stagedOwner(owner)
-		if od == nil || ownerRRsetCount(od) == 0 {
-			if po := getOwnerFrom(zd.publishedSnapshot(), owner); po != nil {
-				if rs := po.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 {
-					own, err := zd.signalStoredByPass(owner, rs.RRs)
-					if err != nil {
-						zd.warnSignalRecordUnreadable(owner, err)
-						continue
-					}
-					if own {
-						lgDns.Info("transport signal pass: a withdrawal staged earlier is not published yet; publishing it again",
-							"zone", zd.ZoneName, "owner", owner)
-						unpublished++
-					}
-				}
-			}
-			continue
+		var staged []dns.RR
+		if od != nil {
+			staged = od.RRtypes.GetOnlyRRSet(dns.TypeSVCB).RRs
 		}
-		if rs := od.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 {
-			own, err := zd.signalStoredByPass(owner, rs.RRs)
+		if len(staged) > 0 {
+			own, err := zd.signalStoredByPass(owner, staged)
 			if err != nil {
 				zd.warnSignalRecordUnreadable(owner, err)
 				continue
@@ -778,6 +797,30 @@ func (zd *ZoneData) withdrawStaleSignalsLocked(want map[string]bool) (withdrawn,
 				withdrawn++
 				continue
 			}
+		}
+		// No signal of the pass's is staged at the owner.
+		if po := getOwnerFrom(zd.publishedSnapshot(), owner); po != nil {
+			if rs := po.RRtypes.GetOnlyRRSet(dns.TypeSVCB); len(rs.RRs) > 0 {
+				own, err := zd.signalStoredByPass(owner, rs.RRs)
+				if err != nil {
+					zd.warnSignalRecordUnreadable(owner, err)
+					continue
+				}
+				if own && len(staged) == 0 {
+					lgDns.Info("transport signal pass: a withdrawal staged earlier is not published yet; publishing it again",
+						"zone", zd.ZoneName, "owner", owner)
+					unpublished++
+					continue
+				}
+				if own {
+					lgDns.Info("transport signal pass: an operator's change at the signal owner is staged and not published yet, and the published zone still serves the pass's signal; keeping the record until the change is published",
+						"zone", zd.ZoneName, "owner", owner)
+					continue
+				}
+			}
+		}
+		if od == nil || ownerRRsetCount(od) == 0 {
+			continue
 		}
 		if err := zd.forgetSignalStored(owner); err != nil {
 			zd.warnSignalForgetFailed(owner, err)
@@ -826,6 +869,17 @@ func (zd *ZoneData) ownerHoldsOnlyPassSignal(owner string, od *OwnerData) (bool,
 		return false, nil
 	}
 	return zd.signalStoredByPass(owner, rs.RRs)
+}
+
+// publishedHoldsOnlyPassSignal reports whether the published owner holds
+// nothing but a signal the pass stored there (ownerHoldsOnlyPassSignal on
+// the published zone rather than the working set).
+func (zd *ZoneData) publishedHoldsOnlyPassSignal(owner string) (bool, error) {
+	po := getOwnerFrom(zd.publishedSnapshot(), owner)
+	if po == nil {
+		return false, nil
+	}
+	return zd.ownerHoldsOnlyPassSignal(owner, po)
 }
 
 // nsNamesWithASignalHere counts the zone's NS names whose signal a response
