@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -336,6 +337,10 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 			Addr:      address,
 			Handler:   router,
 			TLSConfig: apiServerTLSConfig(conf),
+			// Bounds a client that never finishes its headers (slowloris),
+			// as on the local socket. Not a read or write timeout: large
+			// bodies and slow handlers are legitimate here.
+			ReadHeaderTimeout: 10 * time.Second,
 		}
 
 		go func(srv *http.Server, idx int) {
