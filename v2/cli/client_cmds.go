@@ -389,11 +389,7 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 	fmt.Println(msg)
 
 	if !t.Configured {
-		fmt.Printf("\n%s does not read %s yet. Add under apiserver: in %s:\n\n", role, t.File, t.DaemonConfig)
-		if !t.HasSocket {
-			fmt.Printf("   (and take out socket: none: the access file needs the local admin socket)\n")
-		}
-		fmt.Printf("   access-file: %s\n\nthen reload the daemon over its local socket. Until then the clients here do nothing.\n", t.File)
+		fmt.Print(notConfiguredAdvice(role, t))
 		return nil
 	}
 	if o.NoReload {
@@ -401,6 +397,22 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 		return nil
 	}
 	return reloadForAccess(role, t)
+}
+
+// notConfiguredAdvice is what to do when the daemon config does not name the
+// access file yet: name it, and reload over the local socket. With
+// socket: none the socket must come back first, and a reload does not start
+// it (a listener setting), so the daemon must be restarted instead.
+func notConfiguredAdvice(role string, t *accessTarget) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n%s does not read %s yet. Add under apiserver: in %s:\n\n", role, t.File, t.DaemonConfig)
+	if !t.HasSocket {
+		fmt.Fprintf(&b, "   (and take out socket: none: the access file needs the local admin socket)\n")
+		fmt.Fprintf(&b, "   access-file: %s\n\nthen restart the daemon: a reload does not start the local admin socket. Until then the clients here do nothing.\n", t.File)
+		return b.String()
+	}
+	fmt.Fprintf(&b, "   access-file: %s\n\nthen reload the daemon over its local socket. Until then the clients here do nothing.\n", t.File)
+	return b.String()
 }
 
 // reloadForAccess asks role's daemon to reload its config, and with it the
@@ -765,6 +777,15 @@ func listAccessClients(role string) error {
 	t, err := resolveAccessTarget(role)
 	if err != nil {
 		return err
+	}
+	// The lock the edits take (editAccessFile), from the read to the reread
+	// below: an edit and its undo (client disable, then client enable
+	// --no-reload) could otherwise put the same bytes back while the daemon
+	// was asked, and the daemon's answer would be about the policy between.
+	// Only tdns-ncli's own edits take it. Who cannot take it (cannot create
+	// the lock file next to the access file) still gets the byte compare.
+	if unlock, err := lockCliConfig(context.Background(), t.File); err == nil {
+		defer unlock()
 	}
 	data, err := os.ReadFile(t.File)
 	if err != nil {

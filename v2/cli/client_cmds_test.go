@@ -1285,3 +1285,50 @@ func TestSocketCheckedOnFirstUse(t *testing.T) {
 		t.Errorf("the socket check printed under -v: %q", out)
 	}
 }
+
+// An access file the daemon config does not name yet: name it and reload
+// over the socket; with socket: none, restart, since a reload does not start
+// the socket.
+func TestNotConfiguredAdvice(t *testing.T) {
+	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml", HasSocket: true}
+	if a := notConfiguredAdvice("auth", tg); !strings.Contains(a, "reload the daemon over its local socket") || strings.Contains(a, "restart") {
+		t.Errorf("with the socket: %q", a)
+	}
+	tg.HasSocket = false
+	if a := notConfiguredAdvice("auth", tg); !strings.Contains(a, "take out socket: none") || !strings.Contains(a, "restart the daemon") || strings.Contains(a, "reload the daemon over") {
+		t.Errorf("with socket: none: %q", a)
+	}
+}
+
+// client list holds the edits' lock while it asks the daemon, so no edit (and
+// its undo) can slip in between its read of the file and its reread.
+func TestClientListHoldsTheEditLock(t *testing.T) {
+	var e *accessEnv
+	var lockedOut error
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// What an edit would do while the daemon is asked.
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		if unlock, err := lockCliConfig(ctx, e.access); err == nil {
+			unlock()
+		} else {
+			lockedOut = err
+		}
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: e.daemonCfg,
+			Access: &tdns.ApiAccessStatus{KeyAuth: true, Clients: []tdns.ApiAccessStatusClient{}}})
+	}))
+	defer srv.Close()
+	e = newAccessEnv(t, true, srv.URL+"/api/v1")
+	apiConfig.ApiServers[0].TLSAuth = "pin"
+	apiConfig.ApiServers[0].Pins = []string{tdns.SPKISHA256(srv.Certificate())}
+	if err := InitApiClients(apiConfig); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, e.access, "keyauth: true\nclients: []\n")
+	if out := captureStdout(t, func() { listAccessClients("auth") }); !strings.Contains(out, "The daemon runs this file") {
+		t.Errorf("client list:\n%s", out)
+	}
+	if lockedOut == nil {
+		t.Error("an edit could take the lock while client list asked the daemon")
+	}
+}

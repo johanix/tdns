@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -91,11 +92,13 @@ func daemonStartFlags(cmd *cobra.Command, ad *ApiDetails) ([]string, error) {
 // command is the entry's command: (or common.command), split as a shell
 // splits a command line, so that it may carry arguments, as in
 // "/usr/local/libexec/tdns-auth --config /etc/tdns-enc/tdns-auth.yaml".
-// flags (daemonStartFlags) follow its own arguments. A --config in both is
-// passed once when the two name the same file, and refused when they do not:
-// the daemon would start on the one while the entry waits for the other. An
-// empty command gives an empty binary, which StartDaemon refuses if it has
-// to start anything.
+// flags (daemonStartFlags) follow its own options, before a "--" in it: after
+// "--" an option is an argument to the daemon. A --config in both is passed
+// once when the two name the same file, and refused when they do not: the
+// daemon would start on the one while the entry waits for the other. So is a
+// command: naming two different config files (the daemon takes the last). All
+// of it is decided before anything is stopped. An empty command gives an
+// empty binary, which StartDaemon refuses if it has to start anything.
 func daemonCommandLine(command string, flags []string) (string, []string, error) {
 	words, err := splitCommandLine(command)
 	if err != nil {
@@ -105,27 +108,54 @@ func daemonCommandLine(command string, flags []string) (string, []string, error)
 		return "", flags, nil
 	}
 	bin, own := words[0], words[1:]
-	if cmdCfg, ok := configArg(own); ok {
+	opts, rest := own, []string(nil)
+	if i := slices.Index(own, "--"); i >= 0 {
+		opts, rest = own[:i], own[i:]
+	}
+	if cmdCfgs := configArgs(opts); len(cmdCfgs) > 0 {
+		for _, c := range cmdCfgs[1:] {
+			if resolvedPath(c) != resolvedPath(cmdCfgs[0]) {
+				return "", nil, fmt.Errorf("command: names two config files, %s and %s; the daemon would start on the last. Keep one", cmdCfgs[0], c)
+			}
+		}
 		if flagCfg, ok := configArg(flags); ok {
-			if resolvedPath(cmdCfg) != resolvedPath(flagCfg) {
+			if resolvedPath(cmdCfgs[0]) != resolvedPath(flagCfg) {
 				return "", nil, fmt.Errorf("command: starts the daemon with --config %s, but its entry's config file is %s; make them the same (or take --config out of command:)",
-					cmdCfg, flagCfg)
+					cmdCfgs[0], flagCfg)
 			}
 			flags = withoutConfigArg(flags)
 		}
 	}
-	return bin, append(append([]string(nil), own...), flags...), nil
+	args := append(append([]string(nil), opts...), flags...)
+	return bin, append(args, rest...), nil
 }
 
-// configArg is the value of a --config (or --config=) argument in args.
-func configArg(args []string) (string, bool) {
-	for i, a := range args {
+// configArgs are the values of the --config arguments in args, in order, up
+// to a "--": --config x, --config=x, and the one-dash forms Go's flag package
+// takes as well (tdns-auth parses its flags with it).
+func configArgs(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
 		switch {
-		case a == "--config" && i+1 < len(args):
-			return args[i+1], true
+		case a == "--":
+			return out
+		case (a == "--config" || a == "-config") && i+1 < len(args):
+			out = append(out, args[i+1])
+			i++
 		case strings.HasPrefix(a, "--config="):
-			return strings.TrimPrefix(a, "--config="), true
+			out = append(out, strings.TrimPrefix(a, "--config="))
+		case strings.HasPrefix(a, "-config="):
+			out = append(out, strings.TrimPrefix(a, "-config="))
 		}
+	}
+	return out
+}
+
+// configArg is the value of the first --config argument in args (configArgs).
+func configArg(args []string) (string, bool) {
+	if c := configArgs(args); len(c) > 0 {
+		return c[0], true
 	}
 	return "", false
 }
