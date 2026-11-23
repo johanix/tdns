@@ -4,8 +4,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -135,5 +137,49 @@ func TestApiCertSANs(t *testing.T) {
 	}
 	if w := "localhost ns1.example api.example"; strings.Join(dns, " ") != w {
 		t.Errorf("DNS SANs %v, want %s", dns, w)
+	}
+}
+
+// EnsureDefaultApiCert is the one way the default pair is made (the daemon
+// at its first start, tdns-ncli config add before it): the certs directory
+// made 0755, the key 0600, the certificate 0644, the pin returned; a pair
+// that is there left alone; half a pair refused, its file not touched.
+func TestEnsureDefaultApiCert(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "tdns-auth.yaml")
+	cert, key := ApiCertPaths(cfg)
+	pin, created, err := EnsureDefaultApiCert(cfg, []string{"192.0.2.1:8989"})
+	if err != nil || !created || len(pin) != 44 {
+		t.Fatalf("first: %q %v %v", pin, created, err)
+	}
+	for p, want := range map[string]os.FileMode{filepath.Dir(cert): 0o755, key: 0o600, cert: 0o644} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The directory's mode is the umask's to narrow; the files' are not.
+		if got := fi.Mode().Perm(); got != want && !(p == filepath.Dir(cert) && got&^want == 0) {
+			t.Errorf("%s: mode %v, want %v", p, got, want)
+		}
+	}
+	data, _ := os.ReadFile(cert)
+	block, _ := pem.Decode(data)
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil || SPKISHA256(leaf) != pin {
+		t.Fatalf("the certificate does not have the pin returned: %v", err)
+	}
+	if !slices.ContainsFunc(leaf.IPAddresses, net.ParseIP("192.0.2.1").Equal) {
+		t.Errorf("SANs %v lack the listen address", leaf.IPAddresses)
+	}
+	before, _ := os.ReadFile(key)
+	if pin, created, err := EnsureDefaultApiCert(cfg, nil); err != nil || created || pin != "" {
+		t.Errorf("again: %q %v %v, want nothing done", pin, created, err)
+	}
+	os.Remove(cert)
+	if _, _, err := EnsureDefaultApiCert(cfg, nil); err == nil || !strings.Contains(err.Error(), "without its certificate") {
+		t.Errorf("half a pair: err = %v", err)
+	}
+	if after, _ := os.ReadFile(key); string(after) != string(before) {
+		t.Error("the remaining key was rewritten")
 	}
 }
