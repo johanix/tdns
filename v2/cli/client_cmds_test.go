@@ -14,10 +14,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	tdns "github.com/johanix/tdns/v2"
 )
@@ -643,6 +647,16 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 		}
 	})
 
+	t.Run("an unreadable certificate, a pkix entry: its verification unchanged", func(t *testing.T) {
+		env, d := setup(t, "apiservers:\n   - name: tdns-imr\n     baseurl: https://127.0.0.1:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     tlsauth: pkix\n     config-file: @D@\n")
+		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: /nonexistent/api.crt\n"))
+		res, err := env.add(t, d, nil)
+		notes := strings.Join(res.Notes, " ")
+		if err != nil || res.Pinned || strings.Contains(notes, "refuses") || !strings.Contains(notes, "verification is unchanged") {
+			t.Errorf("%+v, %v; want a note that the pkix entry is unchanged, not that it is refused", res, err)
+		}
+	})
+
 	t.Run("an unreadable certificate: a note, nothing changed", func(t *testing.T) {
 		env, d := setup(t, "apiservers:\n   - name: tdns-imr\n     baseurl: https://127.0.0.1:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     config-file: @D@\n")
 		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: /nonexistent/api.crt\n"))
@@ -702,18 +716,42 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			c.Close()
-		}
-	}()
+	// The daemon on the socket says which config it runs (identity).
+	var mu sync.Mutex
+	runs := cfg
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: runs})
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
 	if s := socketOf(t, e); s != sock {
 		t.Errorf("socket answering: socket %q, want %s", s, sock)
 	}
+
+	// Another daemon holds the socket: its identity is not this entry's
+	// config, so the entry goes over TCP and says why; one with no TCP
+	// address is refused.
+	mu.Lock()
+	runs = "/etc/tdns/other.yaml"
+	mu.Unlock()
+	if c, warn, err := newApiClientFor(e, CliClientConf{}); err != nil || c.Socket != "" || !strings.Contains(warn, "runs /etc/tdns/other.yaml") {
+		t.Errorf("another daemon on the socket: socket %q, warning %q, err %v; want TCP and a warning naming it", c.Socket, warn, err)
+	}
+	if _, _, err := newApiClientFor(ApiDetails{Name: "tdns-imr", AuthMethod: "none", ConfigFile: cfg}, CliClientConf{}); err == nil || !strings.Contains(err.Error(), "runs /etc/tdns/other.yaml") {
+		t.Errorf("another daemon, socket-only entry: err = %v, want a refusal naming it", err)
+	}
+	mu.Lock()
+	runs = cfg
+	mu.Unlock()
+
+	// --tcp with an entry written as a socket entry: no TCP address to use.
+	ForceTCP = true
+	if _, _, err := newApiClientFor(ApiDetails{Name: "old", BaseURL: "unix://" + sock, AuthMethod: "none"}, CliClientConf{}); err == nil || !strings.Contains(err.Error(), "no TCP address for --tcp") {
+		t.Errorf("--tcp, socket entry: err = %v, want a refusal", err)
+	}
+	ForceTCP = false
 	// ping says which way it went: the socket is chosen at run time.
 	if c, _, err := newApiClientFor(e, CliClientConf{}); err != nil || pingHow(c, tdns.PingResponse{}) != "admin socket "+sock {
 		t.Errorf("ping's parentheses: %v", err)
@@ -750,6 +788,46 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 	sockOnly := ApiDetails{Name: "tdns-imr", AuthMethod: "none", ConfigFile: cfg}
 	if _, _, err := newApiClientFor(sockOnly, CliClientConf{}); err == nil || !strings.Contains(err.Error(), "no baseurl") {
 		t.Errorf("socket-only entry, socket off: err = %v, want one saying it has no baseurl", err)
+	}
+}
+
+// Pins are written escaped, so one read from a hand-written file with a quote
+// or a backslash in it reads back as itself.
+func TestPinsFlowEscapes(t *testing.T) {
+	pins := []string{pinOf("a"), `odd"pin\x`}
+	var got struct{ Pins []string }
+	if err := yaml.Unmarshal([]byte("pins: "+pinsFlow(pins)), &got); err != nil || !reflect.DeepEqual(got.Pins, pins) {
+		t.Errorf("pinsFlow %s read back as %q (%v)", pinsFlow(pins), got.Pins, err)
+	}
+}
+
+// A URL without a port has its scheme's, so it matches a daemon address
+// that spells the port out; other ports stay apart.
+func TestHostPortDefaultPorts(t *testing.T) {
+	for _, tc := range []struct{ url, want string }{
+		{"https://127.0.0.1/api/v1", "127.0.0.1:443"},
+		{"https://127.0.0.1:443/api/v1", "127.0.0.1:443"},
+		{"http://Localhost/api/v1", "localhost:80"},
+		{"https://[::1]/api/v1", "[::1]:443"},
+		{"https://127.0.0.1:8989/api/v1", "127.0.0.1:8989"},
+		{"unix:///var/run/tdns/x.sock", ""},
+		{"", ""},
+	} {
+		if got := hostPort(tc.url); got != tc.want {
+			t.Errorf("hostPort(%q) = %q, want %q", tc.url, got, tc.want)
+		}
+	}
+}
+
+// "Nobody there" is decided by the error's cause, not its words: a daemon's
+// reply that says "connection refused" is a daemon that is there.
+func TestNothingListeningByCause(t *testing.T) {
+	refused := fmt.Errorf("error from api post: %w", &net.OpError{Op: "dial", Net: "tcp", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)})
+	if !nothingListening(refused) || !socketUnusable(refused) {
+		t.Errorf("a refused dial is nobody there: %v", refused)
+	}
+	if nothingListening(fmt.Errorf("error from the daemon: upstream connection refused")) {
+		t.Error("a daemon's reply mentioning connection refused was taken for nobody there")
 	}
 }
 
@@ -858,10 +936,11 @@ func TestAccessReloadPrefersTheSocket(t *testing.T) {
 	}
 	var mu sync.Mutex
 	reply := "Config reloaded. Access file reloaded: 1 client(s), keyauth on."
+	runs := "/etc/tdns/tdns-auth.yaml" // the config the daemon on the socket says it runs
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
-		json.NewEncoder(w).Encode(tdns.ConfigResponse{Msg: reply})
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{Msg: reply, ConfigFile: runs})
 	})}
 	go srv.Serve(ln)
 	defer srv.Close()
@@ -876,17 +955,27 @@ func TestAccessReloadPrefersTheSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := reloadForAccess("auth", sock); err != nil {
+	target := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", Socket: sock}
+	if err := reloadForAccess("auth", target); err != nil {
 		t.Errorf("reload with the socket there: %v", err)
 	}
+	// Another daemon took the reload: it says which config it runs, and the
+	// edit is reported as not applied, though its reply is a success.
 	mu.Lock()
+	runs = "/etc/tdns/other.yaml"
+	mu.Unlock()
+	if err := reloadForAccess("auth", target); err == nil || !strings.Contains(err.Error(), "runs /etc/tdns/other.yaml") || !strings.Contains(err.Error(), "did NOT apply") {
+		t.Errorf("a reload another daemon took: err = %v, want it reported as not applied", err)
+	}
+	mu.Lock()
+	runs = "/etc/tdns/tdns-auth.yaml"
 	reply = "Config reloaded. " + tdns.AccessFileNotReloaded + " (the running policy is unchanged): bad pin"
 	mu.Unlock()
-	if err := reloadForAccess("auth", sock); err == nil || !strings.Contains(err.Error(), "did NOT apply") {
+	if err := reloadForAccess("auth", target); err == nil || !strings.Contains(err.Error(), "did NOT apply") {
 		t.Errorf("a reply saying the access file was not reloaded: err = %v, want a failure", err)
 	}
 	// No socket file: the role's entry gets the reload, and here it fails.
-	if err := reloadForAccess("auth", filepath.Join(dir, "absent.sock")); err == nil || !strings.Contains(err.Error(), "reload failed") {
+	if err := reloadForAccess("auth", &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", Socket: filepath.Join(dir, "absent.sock")}); err == nil || !strings.Contains(err.Error(), "reload failed") {
 		t.Errorf("no socket: err = %v, want the TCP entry's failure", err)
 	}
 }

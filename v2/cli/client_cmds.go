@@ -126,7 +126,7 @@ daemon's entry in your CLI config.`,
 			// The client loads the default pair unless client: names
 			// another, so a pair made elsewhere needs saying where.
 			if certPath != defCert || keyPath != defKey {
-				fmt.Printf("\nand, at the top level of the CLI config (the pair is not in the default place):\n\n   client:\n      cert: %s\n      key:  %s\n", certPath, keyPath)
+				fmt.Printf("\nand, at the top level of the CLI config (the pair is not in the default place):\n\n   client:\n      cert: %s\n      key:  %s\n", yamlScalar(certPath), yamlScalar(keyPath))
 			}
 		},
 	}
@@ -292,8 +292,8 @@ func resolveAccessTarget(role string) (*accessTarget, error) {
 	// runs on its socket alone), so only the daemon's own socket identifies
 	// it; any other entry needs config-file:, which config add writes.
 	if ad := apiDetailsForRole(role); ad != nil && ad.ConfigFile == "" && !entryIsDaemonSocket(*ad, info) {
-		return nil, fmt.Errorf("%s's entry %s (%s) has no config-file:, so nothing says it is the daemon of %s; the client commands edit a daemon's own files, and an address does not tell which daemon answers on it. Give the entry config-file: (tdns-ncli config add %s writes it)",
-			role, ad.Name, ad.BaseURL, cfg, shellQuote(cfg))
+		return nil, fmt.Errorf("%s's entry %s (%s) has no config-file:, so nothing says it is the daemon of %s; the client commands edit a daemon's own files, and an address does not tell which daemon answers on it. Add \"config-file: %s\" to that entry by hand (config add does not add it to an entry it already knows)",
+			role, ad.Name, ad.BaseURL, cfg, cfg)
 	}
 	t := &accessTarget{DaemonConfig: info.ConfigFile, File: info.AccessFile, Configured: info.AccessFile != "", HasSocket: info.Socket != "", Socket: info.Socket}
 	if !t.Configured {
@@ -391,7 +391,7 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 	if !t.Configured {
 		fmt.Printf("\n%s does not read %s yet. Add under apiserver: in %s:\n\n", role, t.File, t.DaemonConfig)
 		if !t.HasSocket {
-			fmt.Printf("   socket:      /var/run/tdns/%s.sock\n", strings.TrimSuffix(filepath.Base(t.DaemonConfig), filepath.Ext(t.DaemonConfig)))
+			fmt.Printf("   (and take out socket: none: the access file needs the local admin socket)\n")
 		}
 		fmt.Printf("   access-file: %s\n\nthen reload the daemon over its local socket. Until then the clients here do nothing.\n", t.File)
 		return nil
@@ -400,15 +400,23 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 		fmt.Printf("Not reloaded (--no-reload): the daemon still runs the previous file.\n")
 		return nil
 	}
-	return reloadForAccess(role, t.Socket)
+	return reloadForAccess(role, t)
 }
 
 // reloadForAccess asks role's daemon to reload its config, and with it the
-// access file. A refused reload changes nothing in the daemon.
-func reloadForAccess(role, socket string) error {
-	resp, err := configToDaemon(role, socket, tdns.ConfigPost{Command: "reload"})
+// access file. A refused reload changes nothing in the daemon. The daemon
+// that took the reload must be t's: it was checked before the write
+// (verifyRunningDaemon), but over the entry when the socket was not there,
+// and the reload goes to the socket first, so another daemon could answer
+// it. Its reply says which config it runs; any other is a reload the
+// operator's daemon did not get.
+func reloadForAccess(role string, t *accessTarget) error {
+	resp, err := configToDaemon(role, t.Socket, tdns.ConfigPost{Command: "reload"})
 	if err != nil {
 		return fmt.Errorf("written, but the reload failed: %v", err)
+	}
+	if err := runsConfig(resp, t); err != nil {
+		return fmt.Errorf("written, but %v: the daemon of %s did NOT apply it; reload it over its own socket or entry", err, t.DaemonConfig)
 	}
 	return accessReloadVerdict(resp)
 }
@@ -481,8 +489,12 @@ func verifyRunningDaemon(role string, t *accessTarget) error {
 
 // nothingListening says whether err means nobody is there: no socket file,
 // or a refused connection. Not a socket we may not open, which someone holds.
+//
+// By the error's cause, never its text: a daemon's reply can contain the
+// words "connection refused", and taking that for "nobody there" would let an
+// edit through unverified.
 func nothingListening(err error) bool {
-	return errors.Is(err, syscall.ENOENT) || strings.Contains(strings.ToLower(err.Error()), "connection refused")
+	return errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED)
 }
 
 // runsConfig checks that the daemon whose status is resp runs t's config.
@@ -511,8 +523,7 @@ func editRunsConfig(resp tdns.ConfigResponse, t *accessTarget) error {
 // the socket cannot be used from here (not ours to open, or no daemon on it),
 // not because the daemon answered.
 func socketUnusable(err error) bool {
-	return errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.ENOENT) ||
-		strings.Contains(strings.ToLower(err.Error()), "connection refused")
+	return errors.Is(err, os.ErrPermission) || nothingListening(err)
 }
 
 // accessReloadVerdict says whether the reload put the edited access file in
@@ -561,7 +572,10 @@ func renderAccessFile(af *tdns.AccessFile, daemonConfig string) ([]byte, error) 
 // parses (keyauth on, no clients).
 func writeAccessFile(path string, old, data []byte, daemonConfig string) error {
 	if old != nil {
-		if err := os.WriteFile(path+".prev", old, 0o600); err != nil {
+		// Atomically, so a failed write leaves the previous .prev, the
+		// operator's way back, as it was; and the live file is not touched
+		// unless the backup is in place.
+		if err := writeFileAtomic(path+".prev", old); err != nil {
 			return fmt.Errorf("saving %s.prev: %w", path, err)
 		}
 		return writeFileAtomicLike(path, data, nil)
@@ -796,6 +810,13 @@ func listAccessClients(role string) error {
 	}
 	if resp.Access.Error != "" {
 		fmt.Printf("\nThe daemon could not use its access file at start-up: %s\n", resp.Access.Error)
+		return nil
+	}
+	// The file as it is now: another command may have changed it (with
+	// --no-reload) while the daemon was asked, and the verdict is about the
+	// file on disk.
+	if now, err := os.ReadFile(t.File); err != nil || !bytes.Equal(now, data) {
+		fmt.Printf("\nRunning policy not compared: %s changed while the daemon was asked; run client list again.\n", t.File)
 		return nil
 	}
 	if accessMatchesRunning(af, resp.Access) {

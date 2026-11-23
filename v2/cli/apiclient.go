@@ -289,31 +289,47 @@ func dieOn(err error) {
 var ForceTCP bool
 
 // usableDaemonSocket is the local admin socket of the daemon e's config-file:
-// names, when it answers, or "". Not for an entry that is already a socket
-// entry, nor with ForceTCP. Answering takes root (the socket is 0600 in a 0700
-// directory) and a running daemon; anything less leaves the TCP address.
+// names, when it answers and is that daemon, or "". Not for an entry that is
+// already a socket entry, nor with ForceTCP. Answering takes root (the socket
+// is 0600 in a 0700 directory) and a running daemon; anything less leaves the
+// TCP address.
 //
 // Only when the entry's TCP address is one that daemon config lists, or the
 // entry has none: the same config-file: path exists on every host
 // (/etc/tdns/tdns-auth.yaml), so an entry for a daemon on another host would
-// otherwise reach the daemon on this one.
-func usableDaemonSocket(e ApiDetails) string {
+// otherwise reach the daemon on this one. And only when the daemon that
+// answers on the socket says it runs that config file: the path comes from
+// the config, but another daemon may hold it (one whose socket: names it),
+// and a command for one daemon must not run, as admin, on another. note says
+// why a socket that answered was not used.
+func usableDaemonSocket(e ApiDetails) (sock, note string) {
 	if ForceTCP || e.ConfigFile == "" || strings.HasPrefix(e.BaseURL, "unix://") {
-		return ""
+		return "", ""
 	}
 	sock, addrs := daemonSocket(e.ConfigFile)
 	if sock == "" {
-		return ""
+		return "", ""
 	}
 	if e.BaseURL != "" && !slices.Contains(addrs, hostPort(e.BaseURL)) {
-		return ""
+		return "", ""
 	}
 	c, err := net.DialTimeout("unix", sock, time.Second)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	c.Close()
-	return sock
+	probe := tdns.NewClientWithOptions(e.Name, "unix://"+sock, tdns.ClientOptions{AuthMethod: "none"})
+	probe.Client.Timeout = 5 * time.Second
+	resp, err := SendConfigCommand(probe, tdns.ConfigPost{Command: "identity"})
+	switch {
+	case err != nil:
+		return "", fmt.Sprintf("%s: the local admin socket %s did not say which daemon it is (%v); not using it", e.Name, sock, err)
+	case resp.ConfigFile == "":
+		return "", fmt.Sprintf("%s: the daemon on %s does not say which config it runs; not using its socket", e.Name, sock)
+	case resolvedPath(resp.ConfigFile) != resolvedPath(e.ConfigFile):
+		return "", fmt.Sprintf("%s: the daemon on %s runs %s, not %s; not using its socket", e.Name, sock, resp.ConfigFile, e.ConfigFile)
+	}
+	return sock, ""
 }
 
 // newApiClientFor builds the client for one apiservers entry: how it verifies
@@ -331,14 +347,21 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 	// config and the socket answers: admin, no key, no TLS. Its path is in the
 	// daemon config (tdns.ApiSocketPath), not in the CLI config, so the two
 	// cannot disagree. Otherwise the entry's TCP address.
-	if sock := usableDaemonSocket(e); sock != "" {
+	sock, sockNote := usableDaemonSocket(e)
+	if sock != "" {
 		if tdns.Globals.Debug {
 			fmt.Printf("%s: using the daemon's local admin socket %s\n", e.Name, sock)
 		}
 		e.BaseURL, e.ApiKey, e.AuthMethod = "unix://"+sock, "", "none"
 	}
-	if e.BaseURL == "" {
+	switch {
+	case e.BaseURL == "" && sockNote != "":
+		return nil, "", errors.New(sockNote)
+	case e.BaseURL == "":
 		return nil, "", fmt.Errorf("entry %q has no baseurl, and the local admin socket of its daemon (config-file: %s) cannot be used: only root can open it, and the daemon must be running", e.Name, e.ConfigFile)
+	case ForceTCP && strings.HasPrefix(e.BaseURL, "unix://"):
+		// An entry written as a socket entry has no TCP address to use.
+		return nil, "", fmt.Errorf("entry %q is a local socket entry (baseurl %s), so it has no TCP address for --tcp", e.Name, e.BaseURL)
 	}
 	o := tdns.ClientOptions{ApiKey: e.ApiKey, AuthMethod: e.AuthMethod, RootCA: e.RootCA}
 	warn := ""
@@ -410,6 +433,14 @@ func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, e
 			return nil, "", fmt.Errorf("entry %q has authmethod: certificate, but %w (tdns-ncli client init makes one)", e.Name, err)
 		}
 		o.ClientCert = cert
+	}
+	// A socket that answered for another daemon: said, after any warning
+	// about the route taken instead.
+	if sockNote != "" {
+		if warn != "" {
+			warn += "; "
+		}
+		warn += sockNote
 	}
 	return tdns.NewClientWithOptions(e.Name, e.BaseURL, o), warn, nil
 }

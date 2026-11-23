@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -597,12 +598,19 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 	byPin := strings.EqualFold(e.TLSAuth, "pin") && len(e.Pins) > 0
 	pin, err := certFilePin(certFile)
 	if err != nil {
-		if byPin {
+		switch {
+		case byPin:
 			res.Notes = append(res.Notes, fmt.Sprintf(
 				"the daemon's certificate could not be read (%v), so entry %q's pins were not checked", err, e.Name))
-		} else {
+		case e.TLSAuth == "" && e.RootCA == "":
+			// The entry tdns-ncli refuses (it verifies nothing).
 			res.Notes = append(res.Notes, fmt.Sprintf(
 				"entry %q has no pin, so tdns-ncli refuses it, and the daemon's certificate could not be pinned (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>)", e.Name, err))
+		default:
+			// pkix, a rootca: file or rootca: insecure: it connects as it
+			// did, and stays as it is.
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"entry %q does not pin the daemon's certificate, and config add could not pin it (%v); the entry's verification is unchanged", e.Name, err))
 		}
 		return res, nil
 	}
@@ -671,11 +679,21 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 	return res, nil
 }
 
-// hostPort returns the host:port of a base URL, lower-cased, or "".
+// hostPort returns the host:port of a base URL, lower-cased, or "". A URL
+// without a port gets its scheme's (443 for https, 80 for http), so
+// https://127.0.0.1/api/v1 and a daemon on 127.0.0.1:443 compare equal.
 func hostPort(baseURL string) string {
 	u, err := url.Parse(baseURL)
-	if err != nil {
+	if err != nil || u.Host == "" {
 		return ""
+	}
+	if u.Port() == "" {
+		switch strings.ToLower(u.Scheme) {
+		case "https":
+			return strings.ToLower(net.JoinHostPort(u.Hostname(), "443"))
+		case "http":
+			return strings.ToLower(net.JoinHostPort(u.Hostname(), "80"))
+		}
 	}
 	return strings.ToLower(u.Host)
 }

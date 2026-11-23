@@ -189,7 +189,14 @@ and not in the CLI config.** The owner's rulings:
   answers (admin, no key); otherwise the entry's TCP address. Only when the
   entry's address is one that daemon config lists, or the entry has none: the
   same `config-file:` path exists on every host, so an entry for a daemon
-  elsewhere would otherwise reach the daemon on this one. Two configs saying
+  elsewhere would otherwise reach the daemon on this one. And only when the
+  daemon on the socket says it runs that config: every `/config` reply now
+  carries the daemon's config file (absolute), and a cheap `identity` command
+  asks for nothing else. Another daemon could hold the path (an explicit
+  `socket:` naming it), and a command for one daemon must not run, as admin,
+  on another; a socket that answers for another config is not used, and the
+  entry says why. The reload after an access-file edit is checked the same
+  way, from its own reply. Two configs saying
   the same thing could disagree; one cannot. `tdns-ncli --tcp` uses the TCP
   address even then, to see what a remote operator sees. Since the choice is
   made at run time, `ping` (the test of how access is authenticated) says on

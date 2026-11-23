@@ -522,15 +522,6 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Imr = Globals.ImrEngine.StatusReport()
 			resp.Proc = CollectProcStatus()
 			resp.Access = conf.apiAccessStatus()
-			// Absolute, from this daemon's own working directory: a client
-			// that edits this daemon's files on its host checks that the
-			// daemon it reaches is the one whose config it edits.
-			if cfg := conf.Internal.CfgFile; cfg != "" {
-				if abs, err := filepath.Abs(cfg); err == nil {
-					cfg = abs
-				}
-				resp.ConfigFile = cfg
-			}
 			health := "Configuration is ok"
 			if len(resp.ServerErrors) > 0 {
 				health = fmt.Sprintf("DEGRADED: %d active error(s)", len(resp.ServerErrors))
@@ -538,9 +529,26 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Msg = fmt.Sprintf("%s: %s, boot time: %s, last config reload: %s",
 				Globals.App.Name, health, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
 
+		case "identity":
+			// Which daemon this is: the ConfigFile every reply carries, and
+			// nothing else to compute. tdns-ncli asks before it uses a local
+			// admin socket, which another daemon could hold.
+			resp.Msg = Globals.App.Name
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown config command: %s", cp.Command)
 			resp.Error = true
+		}
+
+		// Every reply says which daemon gave it: its config file, absolute
+		// from its own working directory. A client on its host checks that
+		// the daemon it reached (for a reload, the one that reloaded) is the
+		// one whose config it means.
+		if cfg := conf.Internal.CfgFile; cfg != "" {
+			if abs, err := filepath.Abs(cfg); err == nil {
+				cfg = abs
+			}
+			resp.ConfigFile = cfg
 		}
 
 		w.Header().Set("Content-Type", "application/json")
