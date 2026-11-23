@@ -2791,6 +2791,109 @@ func TestAddSocketRunningAnotherConfig(t *testing.T) {
 		}
 		unchanged(t, w)
 	})
+
+	// The fix is about the daemon that answers, naming both configs, not
+	// the enrolment (there is no name or pin to give it, and enrolling does
+	// not help while another daemon answers): the dry run and the add alike.
+	fixFor := func(w world) []string {
+		return []string{
+			"stop the daemon that runs /etc/tdns/other.yaml,",
+			"or give /etc/tdns/other.yaml and " + w.d,
+			"their own admin socket and API addresses",
+			"(apiserver.socket, apiserver.addresses);",
+			"then run config add again.",
+		}
+	}
+	noEnrol := func(t *testing.T, out string) {
+		t.Helper()
+		for _, l := range strings.Split(out, "\n") {
+			if strings.Contains(l, "client add ''") || strings.Contains(l, "<your pin>") || strings.Contains(l, "client add") {
+				t.Errorf("printed the enrolment: %q", l)
+			}
+		}
+	}
+	for _, dry := range []bool{true, false} {
+		t.Run(fmt.Sprintf("a key entry, dry run %v: the fix", dry), func(t *testing.T) {
+			w := setup(t)
+			writeFile(t, w.env.cli, keyEntry(w.d, w.dpin))
+			res, err := w.env.add(t, w.d, func(o *AddOptions) { o.DryRun = dry })
+			if err != nil || res.Cert == nil {
+				t.Fatalf("%+v, %v", res, err)
+			}
+			want := fixFor(w)
+			if got := res.Cert.fixLines(); !reflect.DeepEqual(got, want) {
+				t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+			var sb strings.Builder
+			printAddResult(&sb, res, dry, w.env.cli)
+			out := sb.String()
+			if !strings.Contains(flat(out), "To use the certificate instead, "+flat(strings.Join(want, " "))) {
+				t.Errorf("printed:\n%s", out)
+			}
+			noEnrol(t, out)
+			unchanged(t, w)
+		})
+		t.Run(fmt.Sprintf("a new entry, dry run %v: the fix", dry), func(t *testing.T) {
+			w := setup(t)
+			_, err := w.env.add(t, w.d, func(o *AddOptions) { o.DryRun = dry })
+			var r addRefusal
+			if !errors.As(err, &r) {
+				t.Fatalf("err = %v, want a refusal", err)
+			}
+			if want := fixFor(w); !reflect.DeepEqual(r.fix, want) {
+				t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(r.fix, "\n"), strings.Join(want, "\n"))
+			}
+			var sb strings.Builder
+			printRefusal(&sb, r)
+			noEnrol(t, sb.String())
+			unchanged(t, w)
+		})
+	}
+}
+
+// A daemon on the socket that is not told to be this one for another reason
+// gets a fix about that too; and a dry run before your pair exists names no
+// pin it does not have.
+func TestCertFixLinesUnidentifiedAndNoPin(t *testing.T) {
+	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml", Socket: "/var/run/tdns-auth.sock", Configured: true}
+	for _, tc := range []struct {
+		name string
+		c    *CertSetup
+		want []string
+	}{
+		{
+			name: "it does not say which config it runs",
+			c:    &CertSetup{word: "auth", state: certCannot, t: tg, unidentified: true, other: &otherConfigError{want: tg.DaemonConfig}},
+			want: []string{
+				"stop the daemon that answers on /var/run/tdns-auth.sock if it does",
+				"not run /etc/tdns/tdns-auth.yaml, or give the two configs their own",
+				"admin socket and API addresses; if it does, upgrade it so it",
+				"says which config it runs; then run config add again.",
+			},
+		},
+		{
+			name: "it cannot be asked",
+			c:    &CertSetup{word: "auth", state: certCannot, t: tg, unidentified: true},
+			want: []string{
+				"fix what stops the daemon on /var/run/tdns-auth.sock saying",
+				"which config it runs (the error says what);",
+				"then run config add again.",
+			},
+		},
+		{
+			name: "a dry run before your pair exists",
+			c:    &CertSetup{word: "auth", name: "ops-laptop", state: certCannot, t: tg, pairNew: true},
+			want: []string{
+				"your client certificate does not exist yet, so it has no pin",
+				"to enrol; config add makes it when run without --dry-run,",
+				"and then says how to enrol it.",
+			},
+		},
+	} {
+		if got := tc.c.fixLines(); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s; fix:\n%s\nwant:\n%s", tc.name, strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
+		}
+	}
 }
 
 // When the daemon's socket cannot be used, a request through the role's entry

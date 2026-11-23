@@ -664,14 +664,24 @@ func nothingListening(err error) bool {
 // It says only what was found; an edit adds that it is not editing
 // (editRunsConfig), a read-only list does not.
 func runsConfig(resp tdns.ConfigResponse, t *accessTarget) error {
-	if resp.ConfigFile == "" {
-		return fmt.Errorf("the daemon that answers does not say which config it runs")
-	}
-	if resolvedPath(resp.ConfigFile) != resolvedPath(t.DaemonConfig) {
-		return fmt.Errorf("the daemon that answers runs %s, not %s (do two daemons share a socket or an address?)",
-			resp.ConfigFile, t.DaemonConfig)
+	if resp.ConfigFile == "" || resolvedPath(resp.ConfigFile) != resolvedPath(t.DaemonConfig) {
+		return &otherConfigError{runs: resp.ConfigFile, want: t.DaemonConfig}
 	}
 	return nil
+}
+
+// otherConfigError is a daemon that answers for a daemon config, want, it
+// does not run: it runs runs, or does not say which config it runs ("").
+type otherConfigError struct {
+	runs, want string
+}
+
+func (e *otherConfigError) Error() string {
+	if e.runs == "" {
+		return "the daemon that answers does not say which config it runs"
+	}
+	return fmt.Sprintf("the daemon that answers runs %s, not %s (do two daemons share a socket or an address?)",
+		e.runs, e.want)
 }
 
 // editRunsConfig is runsConfig for an edit: a mismatch refuses it.

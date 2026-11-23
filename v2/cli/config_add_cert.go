@@ -80,6 +80,12 @@ type CertSetup struct {
 	// pairProblem: it cannot work because the operator's own pair cannot be
 	// used (0: not that), which the fix is about (there is no pin to enrol).
 	pairProblem clientPairProblem
+	// unidentified: it cannot work because the daemon on the local admin
+	// socket could not be told to be this one (sockOther), which the fix is
+	// about (enrolling does not help then); other is what it answered, nil
+	// when it did not answer.
+	unidentified bool
+	other        *otherConfigError
 
 	// What apply did.
 	enrolledAs string     // the name the pin was added under
@@ -157,7 +163,8 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 		if strings.HasPrefix(why, "cannot ") {
 			why = "config add " + why // read after "because"
 		}
-		c.keyUnknown = why
+		c.keyUnknown, c.unidentified = why, true
+		errors.As(serr, &c.other)
 		return c.cannot(why)
 	}
 
@@ -931,17 +938,11 @@ func addAccessFileLine(src []byte, path string) ([]byte, error) {
 
 // ---------------------------------------------------------------- printing
 
-// pinOrHint is the pin, or what stands for it before the pair exists.
-func (c *CertSetup) pinOrHint() string {
-	if c.pin == "" {
-		return "<your pin>"
-	}
-	return c.pin
-}
-
 // fixLines say what makes the certificate work when config add could not.
 func (c *CertSetup) fixLines() []string {
 	switch {
+	case c.unidentified:
+		return c.sockFixLines()
 	case c.noTLS:
 		return []string{
 			"turn on TLS for the daemon's TCP API (apiserver.usetls: true,",
@@ -977,9 +978,17 @@ func (c *CertSetup) fixLines() []string {
 			"then run config add again.",
 		}
 	}
+	if c.pin == "" {
+		// A dry run, before the pair exists: there is no pin to name yet.
+		return []string{
+			"your client certificate does not exist yet, so it has no pin",
+			"to enrol; config add makes it when run without --dry-run,",
+			"and then says how to enrol it.",
+		}
+	}
 	lines := []string{
 		"on the daemon's host, as root:",
-		fmt.Sprintf("   tdns-ncli %s client add %s --pin %s --role read-write", c.word, shellQuote(c.name), c.pinOrHint()),
+		fmt.Sprintf("   tdns-ncli %s client add %s --pin %s --role read-write", c.word, shellQuote(c.name), c.pin),
 	}
 	if !c.t.Configured {
 		lines = append(lines,
@@ -990,6 +999,35 @@ func (c *CertSetup) fixLines() []string {
 		lines = append(lines, "then run config add again.")
 	}
 	return lines
+}
+
+// sockFixLines say what makes config add able to tell that the daemon on
+// the local admin socket is this one, when it could not (unidentified):
+// until it can, enrolling the pin does not help, as another daemon may
+// answer there.
+func (c *CertSetup) sockFixLines() []string {
+	switch o := c.other; {
+	case o != nil && o.runs != "":
+		return []string{
+			"stop the daemon that runs " + o.runs + ",",
+			"or give " + o.runs + " and " + o.want,
+			"their own admin socket and API addresses",
+			"(apiserver.socket, apiserver.addresses);",
+			"then run config add again.",
+		}
+	case o != nil:
+		return []string{
+			"stop the daemon that answers on " + c.t.Socket + " if it does",
+			"not run " + o.want + ", or give the two configs their own",
+			"admin socket and API addresses; if it does, upgrade it so it",
+			"says which config it runs; then run config add again.",
+		}
+	}
+	return []string{
+		"fix what stops the daemon on " + c.t.Socket + " saying",
+		"which config it runs (the error says what);",
+		"then run config add again.",
+	}
 }
 
 // pairFixLines say what makes the operator's own pair usable, when it is
