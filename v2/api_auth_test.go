@@ -368,7 +368,7 @@ func TestAccessFileRequiresTLS13(t *testing.T) {
 	}{
 		{"TLS 1.2", &tls.ConnectionState{Version: tls.VersionTLS12}, http.StatusForbidden},
 		{"TLS 1.3", &tls.ConnectionState{Version: tls.VersionTLS13}, 0},
-		{"no TLS (usetls: false)", nil, 0},
+		{"no TLS", nil, http.StatusForbidden},
 	} {
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/ping", nil)
 		r.TLS = tc.tls
@@ -377,6 +377,50 @@ func TestAccessFileRequiresTLS13(t *testing.T) {
 		if status != tc.want {
 			t.Errorf("%s: status %d (%s), want %d", tc.name, status, msg, tc.want)
 		}
+	}
+}
+
+// A listener started plaintext with no access file (usetls: false then), and
+// a reload that adds an access file (and usetls: true, which the running
+// listener cannot take up): from the reload on, the key is refused on that
+// plaintext listener. Before it, the key worked there as admin.
+func TestReloadedAccessFileRefusesAPlaintextListener(t *testing.T) {
+	conf := &Config{}
+	conf.Internal.ApiAccess = &apiAccessHolder{}
+	conf.Internal.ApiAccess.p.Store(&accessState{}) // no access file at start
+	conf.Internal.ServerErrors = NewServerErrorRegistry()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, status, msg := conf.authenticateApiRequest(r, "the-key"); status != 0 {
+			http.Error(w, msg, status)
+		}
+	}))
+	defer srv.Close()
+	call := func() int {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/ping", nil)
+		req.Header.Set("X-API-Key", "the-key")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if st := call(); st != http.StatusOK {
+		t.Fatalf("plaintext key request before the access file: %d", st)
+	}
+
+	path := filepath.Join(t.TempDir(), "access.yaml")
+	if err := os.WriteFile(path, []byte("clients: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conf.ApiServer.AccessFile = path
+	conf.ApiServer.UseTLS = true // the new config says TLS; the listener does not
+	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "Access file reloaded") {
+		t.Fatalf("reload: %q", msg)
+	}
+	if st := call(); st != http.StatusForbidden {
+		t.Errorf("plaintext key request after a reload added the access file: %d, want 403", st)
 	}
 }
 

@@ -657,7 +657,9 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
   Loopback has no exception: the socket covers local use. A socket-only
   daemon leaves out `apiserver.addresses` instead (the 3.6 case of
   `keyauth: false` with `usetls: false`). Without an access file
-  `usetls: false` is unchanged for now.
+  `usetls: false` is unchanged for now. A listener keeps what it started
+  with, so a reload can put an access file in force on a plaintext one: from
+  then on its requests are refused (403), until a restart with TLS.
 - **`daemon start`, `stop`, `restart`** treat a missing socket file like a
   refused connection: nothing is running (and, while starting, not up yet).
 - **Reloads.** The SIGHUP path (zone reload) re-reads the access file too, so
