@@ -281,6 +281,15 @@ func (conf *Config) reloadApiAccess() string {
 		return fmt.Sprintf(" %s (the running policy is unchanged): %v", AccessFileNotReloaded, err)
 	}
 	conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
+	// Before the policy goes in force: a plaintext TCP listener started
+	// without an access file cannot take up TLS, and while it listens,
+	// clients send their API key to it in clear. Close it until a restart.
+	stopped := ""
+	if addrs := stopPlaintextApiListeners(); len(addrs) > 0 {
+		lgApi.Error("management API: plaintext TCP listeners STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served)",
+			"addresses", addrs, "file", path)
+		stopped = fmt.Sprintf(" The plaintext TCP listeners %v are STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served).", addrs)
+	}
 	h.p.Store(newAccessState(path, af))
 	keyauth := "on"
 	if !af.KeyAuthOn() {
@@ -288,7 +297,7 @@ func (conf *Config) reloadApiAccess() string {
 	}
 	// Logged as well as returned: after a SIGHUP nobody reads the message.
 	lgApi.Info("management API: access file reloaded", "file", path, "clients", len(af.Clients), "keyauth", keyauth)
-	return fmt.Sprintf(" Access file reloaded: %d client(s), keyauth %s.", len(af.Clients), keyauth)
+	return fmt.Sprintf(" Access file reloaded: %d client(s), keyauth %s.%s", len(af.Clients), keyauth, stopped)
 }
 
 // ApiAccessStatus is the running access policy as `config status` reports it.
@@ -298,6 +307,9 @@ type ApiAccessStatus struct {
 	Error   string `json:",omitempty"` // set when the file could not be used at start-up: the TCP API answers 503
 	KeyAuth bool
 	Clients []ApiAccessStatusClient
+	// TCPStopped are plaintext TCP listeners closed when the access file
+	// came into force (it requires TLS); they stay closed until a restart.
+	TCPStopped []string `json:",omitempty"`
 }
 
 // ApiAccessStatusClient is one client of the running policy.
@@ -315,7 +327,7 @@ func (conf *Config) apiAccessStatus() *ApiAccessStatus {
 	if st == nil || !st.Enabled {
 		return nil
 	}
-	out := &ApiAccessStatus{File: st.File, KeyAuth: st.KeyAuth}
+	out := &ApiAccessStatus{File: st.File, KeyAuth: st.KeyAuth, TCPStopped: stoppedPlaintextApiListeners()}
 	if st.Err != nil {
 		out.Error = st.Err.Error()
 	}

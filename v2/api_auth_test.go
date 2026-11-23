@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -382,32 +383,44 @@ func TestAccessFileRequiresTLS13(t *testing.T) {
 
 // A listener started plaintext with no access file (usetls: false then), and
 // a reload that adds an access file (and usetls: true, which the running
-// listener cannot take up): from the reload on, the key is refused on that
-// plaintext listener. Before it, the key worked there as admin.
-func TestReloadedAccessFileRefusesAPlaintextListener(t *testing.T) {
+// listener cannot take up): the reload closes that listener before the policy
+// is in force, so no client can send its key to it in clear any more; refusing
+// the requests would still have had the key sent. config status says so. A
+// TLS listener is left alone.
+func TestReloadedAccessFileStopsAPlaintextListener(t *testing.T) {
+	t.Cleanup(func() {
+		apiTCPServers.Lock()
+		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped = nil, false, nil
+		apiTCPServers.Unlock()
+	})
 	conf := &Config{}
 	conf.Internal.ApiAccess = &apiAccessHolder{}
 	conf.Internal.ApiAccess.p.Store(&accessState{}) // no access file at start
 	conf.Internal.ServerErrors = NewServerErrorRegistry()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Addr: ln.Addr().String(), Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, status, msg := conf.authenticateApiRequest(r, "the-key"); status != 0 {
 			http.Error(w, msg, status)
 		}
-	}))
-	defer srv.Close()
-	call := func() int {
-		t.Helper()
-		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/ping", nil)
+	})}
+	go srv.Serve(ln)
+	registerApiTCPServers([]*http.Server{srv}, true)
+	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+	call := func() (int, error) {
+		req, _ := http.NewRequest(http.MethodPost, "http://"+srv.Addr+"/api/v1/ping", nil)
 		req.Header.Set("X-API-Key", "the-key")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
-			t.Fatal(err)
+			return 0, err
 		}
 		resp.Body.Close()
-		return resp.StatusCode
+		return resp.StatusCode, nil
 	}
-	if st := call(); st != http.StatusOK {
-		t.Fatalf("plaintext key request before the access file: %d", st)
+	if st, err := call(); err != nil || st != http.StatusOK {
+		t.Fatalf("plaintext key request before the access file: %d, %v", st, err)
 	}
 
 	path := filepath.Join(t.TempDir(), "access.yaml")
@@ -416,11 +429,22 @@ func TestReloadedAccessFileRefusesAPlaintextListener(t *testing.T) {
 	}
 	conf.ApiServer.AccessFile = path
 	conf.ApiServer.UseTLS = true // the new config says TLS; the listener does not
-	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "Access file reloaded") {
-		t.Fatalf("reload: %q", msg)
+	msg := conf.reloadApiAccess()
+	if !strings.Contains(msg, "Access file reloaded") || !strings.Contains(msg, "STOPPED") || !strings.Contains(msg, srv.Addr) {
+		t.Fatalf("reload: %q, want it to say the plaintext listener is stopped", msg)
 	}
-	if st := call(); st != http.StatusForbidden {
-		t.Errorf("plaintext key request after a reload added the access file: %d, want 403", st)
+	if st, err := call(); err == nil {
+		t.Errorf("the plaintext listener still answered after the reload (%d): the key was sent in clear", st)
+	}
+	if st := conf.apiAccessStatus(); st == nil || len(st.TCPStopped) != 1 || st.TCPStopped[0] != srv.Addr {
+		t.Errorf("status TCPStopped = %+v, want [%s]", st, srv.Addr)
+	}
+
+	// A TLS listener is not touched by an access file coming into force.
+	tlsSrv := &http.Server{Addr: "127.0.0.1:1"}
+	registerApiTCPServers([]*http.Server{tlsSrv}, false)
+	if addrs := stopPlaintextApiListeners(); addrs != nil {
+		t.Errorf("TLS listeners stopped: %v", addrs)
 	}
 }
 

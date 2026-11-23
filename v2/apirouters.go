@@ -11,6 +11,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -279,6 +280,52 @@ type apiListenerSettings struct {
 // before APIdispatcher has run. One per process, as the listeners are.
 var apiListenersStarted atomic.Pointer[apiListenerSettings]
 
+// apiTCPServers are the TCP management API servers APIdispatcher started and
+// whether they speak plaintext; stopped are the addresses of plaintext ones
+// closed because an access file came into force. One set per process.
+var apiTCPServers struct {
+	sync.Mutex
+	srvs      []*http.Server
+	plaintext bool
+	stopped   []string
+}
+
+func registerApiTCPServers(srvs []*http.Server, plaintext bool) {
+	apiTCPServers.Lock()
+	defer apiTCPServers.Unlock()
+	apiTCPServers.srvs, apiTCPServers.plaintext = srvs, plaintext
+}
+
+// stopPlaintextApiListeners closes the TCP management API servers, with their
+// connections, if they speak plaintext, and returns their addresses (nil when
+// there are none, or they speak TLS). An access file requires TLS on TCP, and
+// a running plaintext listener cannot take it up: refusing its requests would
+// still have clients send their key in clear, so it is closed instead, until
+// a restart with TLS. The local admin socket is not touched.
+func stopPlaintextApiListeners() []string {
+	apiTCPServers.Lock()
+	defer apiTCPServers.Unlock()
+	if !apiTCPServers.plaintext || len(apiTCPServers.srvs) == 0 {
+		return nil
+	}
+	var addrs []string
+	for _, s := range apiTCPServers.srvs {
+		s.Close()
+		addrs = append(addrs, s.Addr)
+	}
+	apiTCPServers.srvs = nil
+	apiTCPServers.stopped = append(apiTCPServers.stopped, addrs...)
+	return addrs
+}
+
+// stoppedPlaintextApiListeners are the addresses stopPlaintextApiListeners
+// closed, for `config status`.
+func stoppedPlaintextApiListeners() []string {
+	apiTCPServers.Lock()
+	defer apiTCPServers.Unlock()
+	return slices.Clone(apiTCPServers.stopped)
+}
+
 func listenerSettingsOf(a ApiServerConf) *apiListenerSettings {
 	return &apiListenerSettings{Addresses: slices.Clone(a.Addresses), Socket: a.Socket,
 		CertFile: a.CertFile, KeyFile: a.KeyFile, UseTLS: a.UseTLS, TLS13Only: a.AccessFile != ""}
@@ -392,6 +439,9 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 			}
 		}(servers[idx], idxCopy)
 	}
+	// So that an access file a reload puts in force can close them if they
+	// are plaintext (stopPlaintextApiListeners).
+	registerApiTCPServers(servers, !conf.ApiServer.UseTLS)
 
 	go func() {
 		<-done
