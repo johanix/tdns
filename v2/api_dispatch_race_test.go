@@ -41,7 +41,7 @@ func listening(addr string) bool {
 func resetApiDispatch(t *testing.T) {
 	t.Cleanup(func() {
 		apiTCPServers.Lock()
-		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped = nil, false, nil
+		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped, apiTCPServers.stoppedBy = nil, false, nil, ""
 		apiTCPServers.Unlock()
 		apiListenersStarted.Store(nil)
 		apiDispatchLockedHook, apiServeHook = nil, nil
@@ -111,8 +111,8 @@ func TestReloadDuringStartLeavesNoPlaintextListener(t *testing.T) {
 	if listening(addr) {
 		t.Errorf("reload before registration: a plaintext listener runs on %s with the access file in force", addr)
 	}
-	if !slices.Contains(stoppedPlaintextApiListeners(), addr) {
-		t.Errorf("reload before registration: %s not reported as stopped: %v", addr, stoppedPlaintextApiListeners())
+	if !slices.Contains(stoppedPlaintextApiListeners(), addr) || apiTCPStoppedBy() != accessFile {
+		t.Errorf("reload before registration: %s not reported as stopped by %s: %v by %q", addr, accessFile, stoppedPlaintextApiListeners(), apiTCPStoppedBy())
 	}
 
 	// The dispatcher first: the server is registered as plaintext, as it

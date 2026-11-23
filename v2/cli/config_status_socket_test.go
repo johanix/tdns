@@ -194,18 +194,22 @@ func TestConfigCheckUseTLSDefault(t *testing.T) {
 // reopen them), and says which of the two it is.
 func TestConfigStatusReportsStoppedListeners(t *testing.T) {
 	stopped := []string{"192.0.2.1:8080"}
-	if out := captureStdout(t, func() { printApiTCPStopped(nil, true) }); out != "" {
+	if out := captureStdout(t, func() { printApiTCPStopped(nil, "", true) }); out != "" {
 		t.Errorf("nothing stopped: printed %q", out)
 	}
+	const file = "/etc/tdns/tdns-auth-access.yaml"
 	for _, tc := range []struct {
 		name   string
+		by     string
 		policy bool
 		want   string
 	}{
-		{"policy in force", true, "access file requires TLS"},
-		{"access file removed", false, "no access\n  file is set now"},
+		{"policy in force", file, true, "access file requires TLS:\n    " + file + "\n"},
+		{"access file removed", file, false, "came into force:\n    " + file + "\n  no access file is set now"},
+		{"a daemon that does not name the file", "", true, "access file requires TLS;"},
+		{"removed, file not named", "", false, "no access\n  file is set now"},
 	} {
-		out := captureStdout(t, func() { printApiTCPStopped(stopped, tc.policy) })
+		out := captureStdout(t, func() { printApiTCPStopped(stopped, tc.by, tc.policy) })
 		if !strings.HasPrefix(out, "TCP API STOPPED on 192.0.2.1:8080:\n") || !strings.Contains(out, tc.want) {
 			t.Errorf("%s: printed %q, want it to contain %q", tc.name, out, tc.want)
 		}

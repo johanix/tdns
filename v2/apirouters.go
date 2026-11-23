@@ -298,6 +298,7 @@ var apiTCPServers struct {
 	srvs      []apiTCPServer
 	plaintext bool
 	stopped   []string
+	stoppedBy string // the access file that stopped them, for config status
 }
 
 // Test hooks, nil outside tests. apiDispatchLockedHook runs inside
@@ -322,10 +323,13 @@ func registerApiTCPServers(srvs []apiTCPServer, plaintext bool) {
 // under the same lock, and starts no plaintext one once a policy is in force,
 // so a reload while the daemon starts can neither miss a plaintext listener
 // nor be followed by one.
-func activateApiAccess(store func()) []string {
+func activateApiAccess(path string, store func()) []string {
 	apiTCPServers.Lock()
 	defer apiTCPServers.Unlock()
 	addrs := stopPlaintextLocked()
+	if len(addrs) > 0 {
+		apiTCPServers.stoppedBy = path
+	}
 	store()
 	return addrs
 }
@@ -381,6 +385,14 @@ func stoppedPlaintextApiListeners() []string {
 	apiTCPServers.Lock()
 	defer apiTCPServers.Unlock()
 	return slices.Clone(apiTCPServers.stopped)
+}
+
+// apiTCPStoppedBy is the access file that stopped the plaintext TCP
+// listeners (stoppedPlaintextApiListeners), or "" if none was stopped.
+func apiTCPStoppedBy() string {
+	apiTCPServers.Lock()
+	defer apiTCPServers.Unlock()
+	return apiTCPServers.stoppedBy
 }
 
 func listenerSettingsOf(a ApiServerConf) *apiListenerSettings {
@@ -512,6 +524,7 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	apiTCPServers.Lock()
 	if !useTLS && apiAccessInForce(conf) {
 		apiTCPServers.stopped = append(apiTCPServers.stopped, addresses...)
+		apiTCPServers.stoppedBy = conf.Internal.ApiAccess.load().File
 		apiTCPServers.Unlock()
 		lgApi.Error("management API: plaintext TCP listeners NOT started: an access file came into force while the daemon started, and it requires TLS; restart the daemon with usetls: true to serve TCP (the local admin socket is still served)",
 			"addresses", addresses)

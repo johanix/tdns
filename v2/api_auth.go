@@ -306,7 +306,7 @@ func (conf *Config) reloadApiAccess() string {
 	// Closed and the policy stored under one lock, which APIdispatcher also
 	// holds while it registers and starts its servers (activateApiAccess).
 	stopped := ""
-	if addrs := activateApiAccess(func() { h.p.Store(newAccessState(path, af)) }); len(addrs) > 0 {
+	if addrs := activateApiAccess(path, func() { h.p.Store(newAccessState(path, af)) }); len(addrs) > 0 {
 		lgApi.Error("management API: plaintext TCP listeners STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served)",
 			"addresses", addrs, "file", path)
 		stopped = fmt.Sprintf(" The plaintext TCP listeners %v are STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served).", addrs)
