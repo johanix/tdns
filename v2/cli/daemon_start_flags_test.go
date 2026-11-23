@@ -110,3 +110,40 @@ func TestImrConfigMweOutputForAnInstance(t *testing.T) {
 		t.Error("the existing config was changed")
 	}
 }
+
+// command: may carry arguments, as an operator writes it: split as a shell
+// would, and a --config in it agreeing with config-file: passed once.
+func TestDaemonCommandLine(t *testing.T) {
+	for _, tc := range []struct {
+		name, command string
+		flags         []string
+		bin           string
+		args          []string
+		err           string
+	}{
+		{"binary only", "/usr/local/libexec/tdns-auth", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"},
+			"/usr/local/libexec/tdns-auth", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"}, ""},
+		{"testor's auth2", "/usr/local/libexec/tdns-auth --config /etc/tdns-enc/tdns-auth.yaml", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml", "--debug"},
+			"/usr/local/libexec/tdns-auth", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml", "--debug"}, ""},
+		{"--config= spelling", "/usr/local/libexec/tdns-auth --config=/etc/tdns-enc/tdns-auth.yaml", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"},
+			"/usr/local/libexec/tdns-auth", []string{"--config=/etc/tdns-enc/tdns-auth.yaml"}, ""},
+		{"no config-file", "/usr/local/libexec/tdns-auth --config /etc/tdns-enc/tdns-auth.yaml", nil,
+			"/usr/local/libexec/tdns-auth", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"}, ""},
+		{"disagreeing --config", "/usr/local/libexec/tdns-auth --config /etc/tdns-site/tdns-auth.yaml", []string{"--config", "/etc/tdns-enc/tdns-auth.yaml"},
+			"", nil, "make them the same"},
+		{"quoted", `'/opt/my tdns/tdns-auth' -v "--config" /etc/a\ b.yaml`, nil,
+			"/opt/my tdns/tdns-auth", []string{"-v", "--config", "/etc/a b.yaml"}, ""},
+		{"unclosed quote", `/usr/local/libexec/tdns-auth 'x`, nil, "", nil, "not closed"},
+		{"empty", "", []string{"--debug"}, "", []string{"--debug"}, ""},
+	} {
+		bin, args, err := daemonCommandLine(tc.command, tc.flags)
+		switch {
+		case tc.err != "":
+			if err == nil || !strings.Contains(err.Error(), tc.err) {
+				t.Errorf("%s: err = %v, want %q", tc.name, err, tc.err)
+			}
+		case err != nil || bin != tc.bin || !reflect.DeepEqual(args, tc.args):
+			t.Errorf("%s: %q %q %v, want %q %q", tc.name, bin, args, err, tc.bin, tc.args)
+		}
+	}
+}
