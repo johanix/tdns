@@ -540,10 +540,12 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 	// config that was broken at startup. A failure here is non-fatal: the zones
 	// loaded fine; only the on-disk normalization didn't happen this pass.
 	if needsRepersist {
-		if err := conf.writeDynamicConfigFile(cf.Zones); err != nil {
+		if wrote, err := conf.repersistDynamicConfig(cf); err != nil {
 			lg.Warn("could not re-persist dynamic config in canonical form; will retry on next load or zone change", "err", err)
-		} else {
+		} else if wrote {
 			lg.Info("re-persisted dynamic config in canonical form (normalized legacy store tokens and/or stripped migrated keys: block)")
+		} else {
+			lg.Info("dynamic config not re-persisted at load: a later write already put it in canonical form")
 		}
 	}
 	return nil
@@ -554,6 +556,24 @@ type DynamicConfigFile struct {
 	Zones []ZoneConf `yaml:"zones"`
 	// Keys is read for one-shot migration only (§13); new writes omit the block.
 	Keys *KeyConf `yaml:"keys,omitempty"`
+	// readAfterWrites is dynamicConfigWrites when the file was read
+	// (loadDynamicConfigFile); repersistDynamicConfig compares it.
+	readAfterWrites uint64
+}
+
+// repersistDynamicConfig writes cf, the dynamic config as read and
+// normalized at load, back in canonical form, unless the file was written
+// since it was read. The API serves while the zones load, so a zone add,
+// delete or setowner can write the file in between; writing cf would put
+// back what that write replaced. A write from the live zones is already in
+// canonical form, so skipping loses nothing. It reports whether it wrote.
+func (conf *Config) repersistDynamicConfig(cf *DynamicConfigFile) (bool, error) {
+	dynamicConfigMutex.Lock()
+	defer dynamicConfigMutex.Unlock()
+	if dynamicConfigWrites != cf.readAfterWrites {
+		return false, nil
+	}
+	return true, conf.writeDynamicConfigFileLocked(cf.Zones)
 }
 
 var (
@@ -561,6 +581,10 @@ var (
 	// Used by both loadDynamicConfigFile() and writeDynamicConfigFile() to prevent
 	// race conditions and ensure consistency between read/write operations
 	dynamicConfigMutex sync.Mutex
+	// dynamicConfigWrites counts the writes of the dynamic config file
+	// (under dynamicConfigMutex), so that a write prepared from an earlier
+	// read can tell that the file has moved on (repersistDynamicConfig).
+	dynamicConfigWrites uint64
 	// dynamicConfigBroken is set (under dynamicConfigMutex) when the dynamic config
 	// file could not be parsed at startup. While set, writeDynamicConfigFile refuses
 	// to write, so an unreadable file is never overwritten with the (incomplete)
@@ -669,7 +693,7 @@ func (conf *Config) loadDynamicConfigFile() (*DynamicConfigFile, error) {
 	// Check if file exists
 	if _, err := os.Stat(conf.DynamicZones.ConfigFile); os.IsNotExist(err) {
 		lg.Debug("dynamic config file does not exist, starting with empty config", "path", conf.DynamicZones.ConfigFile)
-		return &DynamicConfigFile{}, nil
+		return &DynamicConfigFile{readAfterWrites: dynamicConfigWrites}, nil
 	}
 
 	// Read file
@@ -689,6 +713,7 @@ func (conf *Config) loadDynamicConfigFile() (*DynamicConfigFile, error) {
 	}
 
 	lg.Info("loaded zones from dynamic config file", "count", len(configFile.Zones), "path", conf.DynamicZones.ConfigFile)
+	configFile.readAfterWrites = dynamicConfigWrites
 	return &configFile, nil
 }
 
@@ -763,6 +788,7 @@ func (conf *Config) writeDynamicConfigFileLocked(zones []ZoneConf) error {
 		return fmt.Errorf("failed to rename temp file to final file: %v", err)
 	}
 
+	dynamicConfigWrites++
 	lg.Info("wrote dynamic config file", "path", conf.DynamicZones.ConfigFile, "zones", len(zones))
 	return nil
 }
