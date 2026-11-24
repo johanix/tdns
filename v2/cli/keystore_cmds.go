@@ -356,7 +356,7 @@ func tsigForceInteractiveConflict(force, interactive bool) bool {
 // those refused, which need the caller's attention), then its summary.
 func printTsigImportResult(tr tdns.KeystoreResponse, verbose bool) {
 	if tr.Error {
-		fmt.Println(keystoreErrorText(fmt.Errorf("%s", tr.ErrorMsg)))
+		fmt.Println(daemonErrorText(tr.AppName, &daemonError{msg: tr.ErrorMsg}))
 	}
 	printTsigImportDispositions(tr.TsigImport, verbose)
 	if tr.Msg != "" {
@@ -1339,34 +1339,26 @@ func dnssecGenDS(role string) {
 
 }
 
-// keystoreRefused is a refusal by the daemon's access check (a role or an
-// application client's limit), already worded as the CLI prints it:
-// tdns.ApiRefusal.Report, verdict first.
-type keystoreRefused struct{ report string }
+// keystoreError is a keystore command's failed exchange with the daemon
+// called daemon (the API client's name): the access check's refusal, the
+// handler's error, or a failure to talk to it. keystoreErrorText prints it
+// through the printer every other command uses (daemonErrorText).
+type keystoreError struct {
+	daemon string
+	err    error
+}
 
-func (e keystoreRefused) Error() string { return e.report }
+func (e keystoreError) Error() string { return e.err.Error() }
+func (e keystoreError) Unwrap() error { return e.err }
 
 // keystoreErrorText is err as a keystore command prints it: verdict first,
-// once, in lines of at most 72 characters. A refusal by the access check
-// is printed as the daemon worded it; any other error, the daemon's
-// included, after "Error:", wrapped, with the daemon's own second lines
-// (what to do about it) kept on lines of their own.
+// once, in lines of at most 72 characters (daemonErrorText).
 func keystoreErrorText(err error) string {
-	var ref keystoreRefused
-	if errors.As(err, &ref) {
-		return ref.report
+	var ke keystoreError
+	if errors.As(err, &ke) {
+		return daemonErrorText(ke.daemon, ke.err)
 	}
-	paras := strings.Split(strings.TrimSpace(err.Error()), "\n")
-	out := wrapText("Error: "+strings.TrimSpace(paras[0]), 70)
-	for i := 1; i < len(out); i++ {
-		out[i] = "  " + out[i]
-	}
-	for _, p := range paras[1:] {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, indentedLines(p, 2, 72))
-		}
-	}
-	return strings.Join(out, "\n")
+	return daemonErrorText("", err)
 }
 
 // dieKeystore prints err as keystoreErrorText does and exits 1.
@@ -1396,12 +1388,8 @@ func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.Keystore
 
 	status, buf, err := api.Post("/keystore", bytebuf.Bytes())
 	if err != nil {
-		if rerr, ok := refusalError(err); ok {
-			kr.AppName = api.Name
-			return kr, keystoreRefused{rerr.Error()}
-		}
-		log.Println("Error from Api Post:", err)
-		return kr, fmt.Errorf("error from api post: %v", err)
+		kr.AppName = api.Name
+		return kr, keystoreError{api.Name, err}
 	}
 	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -1409,11 +1397,11 @@ func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.Keystore
 
 	err = json.Unmarshal(buf, &kr)
 	if err != nil {
-		return kr, fmt.Errorf("error from unmarshal: %v", err)
+		return kr, keystoreError{api.Name, fmt.Errorf("error from unmarshal: %v", err)}
 	}
 
 	if kr.Error {
-		return kr, fmt.Errorf("%s", kr.ErrorMsg)
+		return kr, keystoreError{api.Name, &daemonError{msg: kr.ErrorMsg}}
 	}
 
 	return kr, nil

@@ -6,7 +6,6 @@ package cli
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,9 +24,9 @@ func checkLines72(t *testing.T, what, text string) {
 }
 
 // A keystore refusal prints once, verdict first, in lines of at most 72
-// characters: the access check's 403 as the daemon worded it (not after
-// "Error:"), and the handler's own refusal after "Error:" with its hint on
-// a line of its own.
+// characters, through the printer every command uses: the access check's
+// 403 after "Refused by <client> (HTTP 403):", the handler's own refusal
+// after "Error from <client>:", with its hint on a line of its own.
 func TestKeystoreRefusalsPrintReadably(t *testing.T) {
 	const needsAdmin = "/api/v1/keystore tsig-mgmt purge needs admin, which is available only on the daemon's local admin socket"
 	handlerMsg := "zone ops.example.: API owner is api, not cert:provisioner\n  an operator can hand it over with zone setowner"
@@ -46,22 +45,22 @@ func TestKeystoreRefusalsPrintReadably(t *testing.T) {
 
 	_, err := SendKeystoreCmd(api, tdns.KeystorePost{Command: "tsig-mgmt", SubCommand: "purge"})
 	got := keystoreErrorText(err)
-	if !strings.HasPrefix(got, "refused (HTTP 403):\n  /api/v1/keystore tsig-mgmt purge needs admin") || strings.Contains(got, "Error:") {
+	if !strings.HasPrefix(got, "Refused by tdns-auth (HTTP 403):\n  /api/v1/keystore tsig-mgmt purge needs admin") || strings.Contains(got, "Error") {
 		t.Errorf("an access check refusal prints\n%s", got)
 	}
 	checkLines72(t, "access check refusal", got)
 
 	_, err = SendKeystoreCmd(api, tdns.KeystorePost{Command: "dnssec-mgmt", SubCommand: "export", Zone: "ops.example."})
 	got = keystoreErrorText(err)
-	want := "Error: zone ops.example.: API owner is api, not cert:provisioner\n  an operator can hand it over with zone setowner"
+	want := "Error from tdns-auth:\n  zone ops.example.: API owner is api, not cert:provisioner\n    an operator can hand it over with zone setowner"
 	if got != want {
 		t.Errorf("a handler refusal prints\n%s\nwant\n%s", got, want)
 	}
 
-	long := errors.New("zone a-rather-long-zone-name-for-a-customer.example.: API owner is api, not cert:provisioner\n" +
-		"  an operator can hand it over with zone setowner, or an operator grants it in the config")
+	long := keystoreError{"tdns-auth", &daemonError{msg: "zone a-rather-long-zone-name-for-a-customer.example.: API owner is api, not cert:provisioner\n" +
+		"  an operator can hand it over with zone setowner, or an operator grants it in the config"}}
 	got = keystoreErrorText(long)
-	if !strings.HasPrefix(got, "Error: zone a-rather-long") || strings.Count(got, "\n") < 2 {
+	if !strings.HasPrefix(got, "Error from tdns-auth:\n  zone a-rather-long") || strings.Count(got, "\n") < 3 {
 		t.Errorf("a long error prints\n%s", got)
 	}
 	checkLines72(t, "long error", got)

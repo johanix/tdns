@@ -71,8 +71,9 @@ func fetchServerAlgorithms(role string) ([]algregistry.AlgorithmInfo, error) {
 	}
 	resp, err := SendKeystoreCmd(api, tdns.KeystorePost{Command: "list-algorithms"})
 	if err != nil {
-		var ref keystoreRefused
-		if errors.As(err, &ref) {
+		var ref *tdns.ApiRefusal
+		var de *daemonError
+		if errors.As(err, &ref) || errors.As(err, &de) {
 			return nil, err // it answered: printed as the daemon worded it
 		}
 		return nil, fmt.Errorf("cannot reach %s server to determine supported algorithms: %v", role, err)
