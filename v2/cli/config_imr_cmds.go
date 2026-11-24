@@ -70,24 +70,40 @@ process's descriptor and goroutine counts (tdns#443).`,
 				fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 				os.Exit(1)
 			}
-			fmt.Println(resp.Msg)
-			if len(resp.ServerErrors) > 0 {
-				fmt.Printf("Active errors:\n")
-				for _, e := range resp.ServerErrors {
-					fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
-				}
-			}
-			// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
-			// init failed (the Upstream/ImrPriming husk) is precisely a
-			// moment to look at process resources, not to hide them.
-			renderProcStatus(resp.Proc)
-			if resp.Imr == nil {
-				fmt.Println("IMR: no resolver state reported (engine not running)")
-				return
-			}
-			renderImrStatus(resp.Imr)
+			printImrConfigStatus(resp)
 		},
 	}
+}
+
+// printImrConfigStatus prints a tdns-imr daemon's `config status` reply.
+func printImrConfigStatus(resp tdns.ConfigResponse) {
+	fmt.Println(resp.Msg)
+	if len(resp.ServerErrors) > 0 {
+		fmt.Printf("Active errors:\n")
+		for _, e := range resp.ServerErrors {
+			fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
+		}
+	}
+	if line := apiSocketStatusLine(resp); line != "" {
+		fmt.Println(line)
+	}
+	// As in the auth printer: a TCP API an access file stopped stays
+	// stopped after the file is removed, so this does not depend on Access.
+	// Listeners not started for want of a certificate, and those that
+	// failed (not bound, or the server stopped), are reported as well.
+	printApiTCPNotStarted(resp.ApiTCPNotStarted, resp.ApiTCPNoCert)
+	printApiTCPStopped(resp.ApiTCPStopped, resp.ApiTCPStoppedBy, resp.Access != nil)
+	printApiTCPFailed(resp.ApiTCPFailed)
+	// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
+	// init failed (the Upstream/ImrPriming husk) is precisely a
+	// moment to look at process resources, not to hide them.
+	renderProcStatus(resp.Proc)
+	printAccessStatus(resp.Access)
+	if resp.Imr == nil {
+		fmt.Println("IMR: no resolver state reported (engine not running)")
+		return
+	}
+	renderImrStatus(resp.Imr)
 }
 
 func init() {
@@ -177,6 +193,10 @@ func runImrConfigCheck(role, explicitPath string, offline bool) {
 		rep.warn("Config file", "decode",
 			fmt.Sprintf("could not fully decode config into structs: %v", err), "")
 	}
+	// The socket the daemon serves, and its API certificate (looked for, not
+	// written), as ParseConfig fills them in.
+	cfg.ApiServer.Socket = tdns.ApiSocketPath(cfg.ApiServer.Socket, cfgPath)
+	cfg.ApiServer.LookupCertDefaults(cfgPath)
 
 	checkImrEngine(&cfg, rep)
 	checkImrTrustAnchors(&cfg, rep)
@@ -304,18 +324,30 @@ func checkImrTrustAnchors(cfg *tdns.Config, rep *ccReport) {
 
 func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 	const g = "API server"
-	if len(cfg.ApiServer.Addresses) == 0 {
-		rep.info(g, "addresses", "apiserver.addresses is empty — the management API will not listen (the resolver still runs)")
-		return
-	}
-	rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.ApiServer.Addresses))
-
+	// tdns-imr builds its API router whatever the addresses say, and stops
+	// at startup if that fails, so the key is checked first, for every case.
 	if cfg.ApiServer.ApiKey.Value() == "" {
 		rep.fail(g, "apikey", "apiserver.apikey is empty — the imr API router refuses to start without it",
 			"set a long random apiserver.apikey")
 	} else {
 		rep.pass(g, "apikey", "apiserver.apikey is set")
 	}
+	sock := cfg.ApiServer.Socket
+	var sockErr error
+	if sock != "" {
+		if sockErr = tdns.CheckApiSocketPath(sock); sockErr != nil {
+			rep.warn(g, "socket", fmt.Sprintf("%v: the daemon does not serve the local admin socket", sockErr), socketPathHint)
+		}
+	}
+	if len(cfg.ApiServer.Addresses) == 0 {
+		if sock != "" && sockErr == nil {
+			rep.info(g, "addresses", fmt.Sprintf("apiserver.addresses is empty: the management API is served only on the local admin socket %s", sock))
+		} else {
+			rep.info(g, "addresses", "apiserver.addresses is empty — the management API will not listen (the resolver still runs)")
+		}
+		return
+	}
+	rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.ApiServer.Addresses))
 
 	// usetls defaults TRUE for imr unless explicitly set false.
 	usetls := true
@@ -323,7 +355,9 @@ func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 		usetls = v.GetBool("apiserver.usetls")
 	}
 	if usetls {
-		if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
+		if cfg.ApiServer.CertPending {
+			rep.info(g, "cert", "no apiserver.certfile/keyfile: the daemon writes a self-signed pair (certs/<config name>-api.crt and .key, next to its config) when it first starts")
+		} else if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
 			rep.fail(g, "cert", "apiserver.usetls is true (the imr default) but certfile/keyfile are not set — the API listener fails to start",
 				"set apiserver.certfile/keyfile (see `tdns-cli imr config mwe`) or set usetls: false")
 		} else {

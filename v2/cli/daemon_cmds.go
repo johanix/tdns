@@ -4,10 +4,13 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/johanix/tdns/v2"
@@ -85,6 +88,162 @@ func daemonStartFlags(cmd *cobra.Command, ad *ApiDetails) ([]string, error) {
 	return extractDaemonFlags(cmd), nil
 }
 
+// daemonCommandLine is how to start the daemon: the binary and its arguments.
+// command is the entry's command: (or common.command), split as a shell
+// splits a command line, so that it may carry arguments, as in
+// "/usr/local/libexec/tdns-auth --config /etc/tdns-enc/tdns-auth.yaml".
+// flags (daemonStartFlags) follow its own options, before a "--" in it: after
+// "--" an option is an argument to the daemon. A --config in both is passed
+// once when the two name the same file, and refused when they do not: the
+// daemon would start on the one while the entry waits for the other. So is a
+// command: naming two different config files (the daemon takes the last), and
+// one with a one-dash -config, which the daemons (pflag) do not take: the new
+// daemon would exit at once. All of it is decided before anything is stopped. An empty command gives an
+// empty binary, which StartDaemon refuses if it has to start anything.
+func daemonCommandLine(command string, flags []string) (string, []string, error) {
+	words, err := splitCommandLine(command)
+	if err != nil {
+		return "", nil, fmt.Errorf("command: %q: %v", command, err)
+	}
+	if len(words) == 0 {
+		return "", flags, nil
+	}
+	bin, own := words[0], words[1:]
+	opts, rest := own, []string(nil)
+	if i := slices.Index(own, "--"); i >= 0 {
+		opts, rest = own[:i], own[i:]
+	}
+	for _, a := range opts {
+		if a == "-config" || strings.HasPrefix(a, "-config=") {
+			return "", nil, fmt.Errorf("command: has %s with one dash; the daemons take --config (two dashes)", a)
+		}
+	}
+	if cmdCfgs := configArgs(opts); len(cmdCfgs) > 0 {
+		for _, c := range cmdCfgs[1:] {
+			if resolvedPath(c) != resolvedPath(cmdCfgs[0]) {
+				return "", nil, fmt.Errorf("command: names two config files, %s and %s; the daemon would start on the last. Keep one", cmdCfgs[0], c)
+			}
+		}
+		if flagCfg, ok := configArg(flags); ok {
+			if resolvedPath(cmdCfgs[0]) != resolvedPath(flagCfg) {
+				return "", nil, fmt.Errorf("command: starts the daemon with --config %s, but its entry's config file is %s; make them the same (or take --config out of command:)",
+					cmdCfgs[0], flagCfg)
+			}
+			flags = withoutConfigArg(flags)
+		}
+	}
+	args := append(append([]string(nil), opts...), flags...)
+	return bin, append(args, rest...), nil
+}
+
+// configArgs are the values of the --config arguments in args, in order, up
+// to a "--": --config x and --config=x, the forms pflag takes (the daemons
+// parse their flags with it; a one-dash -config is refused before this).
+func configArgs(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return out
+		case a == "--config" && i+1 < len(args):
+			out = append(out, args[i+1])
+			i++
+		case strings.HasPrefix(a, "--config="):
+			out = append(out, strings.TrimPrefix(a, "--config="))
+		}
+	}
+	return out
+}
+
+// configArg is the value of the first --config argument in args (configArgs).
+func configArg(args []string) (string, bool) {
+	if c := configArgs(args); len(c) > 0 {
+		return c[0], true
+	}
+	return "", false
+}
+
+// withoutConfigArg is args without its --config argument.
+func withoutConfigArg(args []string) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "--config" && i+1 < len(args):
+			i++
+		case strings.HasPrefix(args[i], "--config="):
+		default:
+			out = append(out, args[i])
+		}
+	}
+	return out
+}
+
+// splitCommandLine splits s into words as a POSIX shell does, without
+// expanding anything: blanks separate words; single quotes keep everything
+// up to the next one; double quotes keep everything but \" and \\, which a
+// backslash escapes; outside quotes a backslash escapes the next character.
+func splitCommandLine(s string) ([]string, error) {
+	var words []string
+	var cur strings.Builder
+	inWord := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n':
+			if inWord {
+				words = append(words, cur.String())
+				cur.Reset()
+				inWord = false
+			}
+		case c == '\'':
+			j := strings.IndexByte(s[i+1:], '\'')
+			if j < 0 {
+				return nil, errors.New("a single quote is not closed")
+			}
+			cur.WriteString(s[i+1 : i+1+j])
+			i += j + 1
+			inWord = true
+		case c == '"':
+			i++
+			for ; i < len(s) && s[i] != '"'; i++ {
+				if s[i] == '\\' && i+1 < len(s) && (s[i+1] == '"' || s[i+1] == '\\') {
+					i++
+				}
+				cur.WriteByte(s[i])
+			}
+			if i >= len(s) {
+				return nil, errors.New("a double quote is not closed")
+			}
+			inWord = true
+		case c == '\\':
+			if i+1 < len(s) {
+				i++
+				cur.WriteByte(s[i])
+			}
+			inWord = true
+		default:
+			cur.WriteByte(c)
+			inWord = true
+		}
+	}
+	if inWord {
+		words = append(words, cur.String())
+	}
+	return words, nil
+}
+
+// mustDaemonCommandLine is daemonCommandLine, exiting on its refusal: before
+// anything is stopped or started.
+func mustDaemonCommandLine(command string, flags []string) (string, []string) {
+	bin, args, err := daemonCommandLine(command, flags)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	return bin, args
+}
+
 // mustDaemonStartFlags is daemonStartFlags, exiting on its refusal.
 func mustDaemonStartFlags(cmd *cobra.Command, ad *ApiDetails) []string {
 	flags, err := daemonStartFlags(cmd, ad)
@@ -158,8 +317,13 @@ Right now this doesn't do much, but later on various services will be able to re
 			// (or the CLI's --config, for a canonical entry without one),
 			// --debug, -v.
 			daemonFlags := mustDaemonStartFlags(cmd, ad)
+			if daemonCommand == "" {
+				daemonCommand = viper.GetString("common.command")
+			}
+			// command: may carry arguments of its own, --config among them.
+			daemonBinary, daemonArgs := mustDaemonCommandLine(daemonCommand, daemonFlags)
 
-			api.StartDaemon(maxwait, tdns.Globals.Slurp, daemonCommand, daemonFlags)
+			api.StartDaemon(maxwait, tdns.Globals.Slurp, daemonBinary, daemonArgs)
 		},
 	}
 	start.Flags().BoolVarP(&tdns.Globals.Slurp, "slurp", "", false,
@@ -173,7 +337,9 @@ Right now this doesn't do much, but later on various services will be able to re
 		Long:  `Stop the management daemon. If it was not running, then this is a no-op.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			api, _ := GetApiClient(role, true)
-			api.StopDaemon()
+			if err := api.StopDaemon(); err != nil {
+				os.Exit(1)
+			}
 		},
 	}
 
@@ -193,8 +359,22 @@ Right now this doesn't do much, but later on various services will be able to re
 			// refusal (a named instance with no config-file:) leaves the
 			// running daemon alone.
 			daemonFlags := mustDaemonStartFlags(cmd, ad)
+			// The command line too: command: (or common.command), which may
+			// carry arguments of its own, --config among them.
+			daemonCommand := ""
+			if ad != nil {
+				daemonCommand = ad.Command
+			}
+			if daemonCommand == "" {
+				daemonCommand = viper.GetString("common.command")
+			}
+			daemonBinary, daemonArgs := mustDaemonCommandLine(daemonCommand, daemonFlags)
 
-			api.StopDaemon()
+			// A daemon that refused to stop (a 403: stop needs admin) is
+			// still running; starting another would only fail, so stop here.
+			if err := api.StopDaemon(); err != nil {
+				os.Exit(1)
+			}
 			time.Sleep(4 * time.Second)
 
 			if clearLogFile != "" {
@@ -211,19 +391,8 @@ Right now this doesn't do much, but later on various services will be able to re
 				maxwait = MaxWait
 			}
 
-			// Get command from CLI config if available
-			daemonCommand := ""
-			if ad != nil {
-				daemonCommand = ad.Command
-			}
-
-			// Fallback to viper for backward compatibility
-			if daemonCommand == "" {
-				daemonCommand = viper.GetString("common.command")
-			}
-
 			if updateBinary {
-				dstbin := daemonCommand
+				dstbin := daemonBinary
 				if dstbin == "" {
 					fmt.Printf("Update binary: destination unspecified (key: apiservers[].command or common.command)\n")
 					os.Exit(1)
@@ -261,7 +430,7 @@ Right now this doesn't do much, but later on various services will be able to re
 				}
 			}
 
-			api.StartDaemon(maxwait, false, daemonCommand, daemonFlags) // no slurping on restart
+			api.StartDaemon(maxwait, false, daemonBinary, daemonArgs) // no slurping on restart
 		},
 	}
 	restart.Flags().BoolVarP(&updateBinary, "update", "", false,

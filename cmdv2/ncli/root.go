@@ -147,6 +147,9 @@ func init() {
 	// understands the role: key. Set before anything reads the default (the
 	// flag help below, ConfigPathFromArgs, initConfig).
 	cli.DefaultCliConfigFile = tdns.DefaultNcliCfgFile
+	// An https entry must verify the daemon (pins, a rootca, or rootca:
+	// insecure said out loud); tdns-cli keeps its old default of not checking.
+	cli.RequireServerVerification = true
 
 	// Config/API init moved to rootCmd.PersistentPreRun (skipped for root-level "keys")
 
@@ -158,6 +161,16 @@ func init() {
 	// here, before wireInstances runs, so an instance named "config" is
 	// refused as the collision it is.
 	rootCmd.AddCommand(cli.NewCliConfigCmd())
+
+	// "client init": the operator's own certificate. And each daemon's
+	// "client ..." subtree, which edits that daemon's access file. Added to
+	// the canonical trees here, not in the shared cli package, so tdns-cli and
+	// tdns-imr's own shell are unchanged; the instance trees get theirs from
+	// their factories.
+	rootCmd.AddCommand(cli.NewClientTopCmd())
+	cli.AuthCmd.AddCommand(cli.NewClientCmd("auth"))
+	cli.AgentCmd.AddCommand(cli.NewClientCmd("agent"))
+	cli.ImrCmd.AddCommand(cli.NewClientCmd("imr"))
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
 		fmt.Sprintf("config file (default is %s)", cli.DefaultCliConfigFile))
@@ -171,6 +184,8 @@ func init() {
 		false, "verbose output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H",
 		false, "show headers")
+	rootCmd.PersistentFlags().BoolVar(&cli.ForceTCP, "tcp", false,
+		"reach daemons over TCP even where their local admin socket can be used")
 }
 
 // initConfig reads in config file and ENV variables if set.

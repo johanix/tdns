@@ -7,9 +7,11 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -29,6 +31,16 @@ type DaemonApi struct {
 	Addresses []string
 	// ApiKey is apiserver.apikey.
 	ApiKey string
+	// Socket is apiserver.socket, the daemon's local admin socket, or "".
+	Socket string
+	// CertFile is apiserver.certfile: the certificate the daemon presents,
+	// whose pin a TCP entry records. With neither certfile nor keyfile set,
+	// the config file's default (tdns.ApiCertPaths), which the daemon
+	// writes at its first start; CertDefault says so.
+	CertFile    string
+	CertDefault bool
+	// AccessFile is apiserver.access-file, or "".
+	AccessFile string
 	// UseTLS is apiserver.usetls, which the daemon defaults to true when the
 	// key is absent (v2/parseconfig.go), so absent must read as true here too.
 	UseTLS bool
@@ -81,11 +93,30 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 	}
 
 	out.Addresses = v.GetStringSlice("apiserver.addresses")
-	if len(out.Addresses) == 0 {
-		return fail(fmt.Errorf("%s: apiserver.addresses is not set, so this daemon has no management API to address", abs))
+	// The socket the daemon serves: apiserver.socket, or by default one named
+	// after its config file (tdns.ApiSocketPath, which the daemon uses too).
+	out.Socket = tdns.ApiSocketPath(v.GetString("apiserver.socket"), abs)
+	out.CertFile = v.GetString("apiserver.certfile")
+	if out.CertFile == "" && v.GetString("apiserver.keyfile") == "" {
+		out.CertFile, _ = tdns.ApiCertPaths(abs)
+		out.CertDefault = true
 	}
+	out.AccessFile = v.GetString("apiserver.access-file")
+	if out.Socket != "" {
+		// The daemon serves no socket on a path it refuses, so there is
+		// nothing there to address.
+		if err := tdns.CheckApiSocketPath(out.Socket); err != nil {
+			out.Warnings = append(out.Warnings, fmt.Sprintf(
+				"%v: the daemon does not serve it, so it is not used here", err))
+			out.Socket = ""
+		}
+	}
+	if len(out.Addresses) == 0 && out.Socket == "" {
+		return fail(fmt.Errorf("%s: neither apiserver.addresses nor apiserver.socket is set, so this daemon has no management API to address", abs))
+	}
+	// The key is what a TCP entry sends; a socket entry sends none.
 	out.ApiKey = v.GetString("apiserver.apikey")
-	if out.ApiKey == "" {
+	if out.ApiKey == "" && out.Socket == "" {
 		return fail(fmt.Errorf("%s: apiserver.apikey is not set", abs))
 	}
 	out.UseTLS = true
@@ -116,6 +147,34 @@ func readDaemonViper(abs string) (*viper.Viper, error) {
 		return nil, fmt.Errorf("reading %s: %w", abs, err)
 	}
 	return v, nil
+}
+
+// daemonSocket is the local admin socket the daemon on config file cfg
+// serves (tdns.ApiSocketPath, as the daemon works it out), or "" when it
+// serves none or the file cannot be read -- by anyone but root, typically,
+// who could not open the socket anyway. hostPorts are its TCP addresses as an
+// entry names them (apiBaseURL, then hostPort).
+func daemonSocket(cfg string) (sock string, hostPorts []string) {
+	abs, err := filepath.Abs(cfg)
+	if err != nil {
+		return "", nil
+	}
+	v, err := readDaemonConfig(abs)
+	if err != nil {
+		if v, err = readDaemonViper(abs); err != nil {
+			return "", nil
+		}
+	}
+	sock = tdns.ApiSocketPath(v.GetString("apiserver.socket"), abs)
+	if sock == "" || tdns.CheckApiSocketPath(sock) != nil {
+		return "", nil
+	}
+	for _, a := range v.GetStringSlice("apiserver.addresses") {
+		if u, err := apiBaseURL(a, true); err == nil {
+			hostPorts = append(hostPorts, hostPort(u))
+		}
+	}
+	return sock, hostPorts
 }
 
 // readDaemonConfig loads a daemon config the way the daemon does: the main
@@ -320,4 +379,15 @@ func freeName(base string, taken func(string) bool) string {
 			return cand
 		}
 	}
+}
+
+// daemonCertPin is the pin of the certificate the daemon behind info
+// presents (certFilePin), saying so when it is the default one the daemon
+// has not written yet.
+func daemonCertPin(info *DaemonApi) (string, error) {
+	pin, err := certFilePin(info.CertFile)
+	if err != nil && info.CertDefault && errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("%s is not there yet: the daemon writes its API certificate there when it first starts; start it, then run config add again", info.CertFile)
+	}
+	return pin, err
 }

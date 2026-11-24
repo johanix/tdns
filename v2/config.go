@@ -812,15 +812,46 @@ type ImrUpstreamConf struct {
 }
 
 type ApiServerConf struct {
-	Addresses []string        `validate:"required"` // Must be in addr:port format
+	// Addresses must be in addr:port format. They may be left out when
+	// Socket is set: the local admin socket is served without them (see
+	// APIdispatcher), so a socket-only daemon is a valid config. It still
+	// needs ApiKey (the router builders refuse to start without one), but
+	// not CertFile and KeyFile, which only the TCP listeners use.
+	Addresses []string        `validate:"required_without=Socket"`
 	ApiKey    SensitiveString `validate:"required"`
-	CertFile  string          `validate:"required,file,certkey"`
-	KeyFile   string          `validate:"required,file"`
-	UseTLS    bool
-	Server    ApiServerAppConf
-	Agent     ApiServerAppConf
+	// CertFile and KeyFile, when neither is set, are the config file's
+	// default pair, {confdir}/certs/{config name}-api.crt and .key, which
+	// the daemon writes, self-signed, at its first start (applyCertDefaults).
+	CertFile string `validate:"required_with_listener,omitempty,file,certkey"`
+	KeyFile  string `validate:"required_with_listener,omitempty,file"`
+	// CertPending: the default pair is not there yet (config check, before
+	// the daemon's first start), or could not be written. Not a config key.
+	CertPending bool `yaml:"-" mapstructure:"-" json:"-"`
+
+	UseTLS bool
+	Server ApiServerAppConf
+	Agent  ApiServerAppConf
 	// MSA       ApiServerAppConf
 	Combiner ApiServerAppConf
+
+	// Socket is the path of the local admin socket. apiserver.socket sets it;
+	// "none" there means no socket; unset, it is named after the config file
+	// path (/etc/tdns/tdns-auth.yaml serves /var/run/tdns/etc_tdns_tdns-auth.yaml.sock), which
+	// ParseConfig fills in (ApiSocketPath). After the load "" means no socket.
+	// The management API is served there as well as on Addresses,
+	// with no TLS and no API key: whoever can open the socket is admin, so
+	// file permissions are the authentication. The daemon creates the socket
+	// with mode 0600 and refuses a directory that group or others can enter.
+	// See api_socket.go and docs/2026-11-20-api-pinning-mtls-roles-design.md.
+	Socket string
+
+	// AccessFile is the network API's access policy (apiserver.access-file):
+	// the clients, by certificate pin, with their roles, and whether the API
+	// key still works. Unset, the network API works as before: the API key,
+	// as admin. Set, it requires Socket, because admin then exists only there.
+	// The file is read by its own loader (api_access.go), not decoded with
+	// this config, and tdns-ncli manages it.
+	AccessFile string `yaml:"access-file" mapstructure:"access-file"`
 }
 
 type ApiServerAppConf struct {
@@ -1232,6 +1263,10 @@ type InternalConf struct {
 	// once and preserved across config reloads (so boot-scoped Transport
 	// errors survive a reload).
 	ServerErrors *ServerErrorRegistry
+	// ApiAccess is the network management API's access policy as running,
+	// built from apiserver.access-file by the router builders and replaced
+	// whole by a successful reload. See api_auth.go.
+	ApiAccess *apiAccessHolder
 
 	// LargeAlgorithms is the derived lookup set from Dnssec.LargeAlgorithms.
 	LargeAlgorithms map[uint8]bool
@@ -1419,6 +1454,13 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	// runtime-config snapshot (a single-zone reload) would put it in force.
 	// Keep the accepted one and put it back on a refusal.
 	runningJournal := conf.Journal.Clone()
+	// The apiserver: block, for the same reason, and more so: the decode
+	// resets it first (decodeConfigMap), so a refused file without an
+	// access-file: line would leave AccessFile empty, and the next SIGHUP
+	// (reloadZoneConfig) would drop the running access policy: key as
+	// admin again, from a config that was refused.
+	runningApiServer := conf.ApiServer
+	runningApiServer.Addresses = slices.Clone(conf.ApiServer.Addresses)
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
@@ -1427,6 +1469,7 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 		conf.Listeners.Addresses = runningListenerAddresses
 		Templates, conf.Templates = runningTemplates, runningTemplateList
 		conf.Journal = runningJournal
+		conf.ApiServer = runningApiServer
 	}
 	// Rebuild the TSIG store ONLY after a successful parse. With KeyDB, reconcile
 	// config keys in place (§6).
@@ -1461,6 +1504,11 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 			msg += " " + summary
 		}
 		conf.publishRuntimeConfig()
+		// The network API's access policy is not part of the decoded
+		// config: its own loader reads it, and a file that does not load
+		// leaves the running policy in place (api_auth.go).
+		msg += conf.reloadApiAccess()
+		msg += conf.apiListenerReloadNote()
 	}
 	Globals.App.ServerConfigTime = time.Now()
 	return msg, err
@@ -1631,6 +1679,12 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 	// reloaded DnssecPolicies (via reloadDnssecFromFile above) are now final.
 	conf.publishRuntimeConfig()
 
+	// The access file too: this is the SIGHUP path, and a client removed or
+	// disabled there must lose its access without waiting for a full config
+	// reload. apiserver.access-file itself is not re-read here, only the
+	// file it names.
+	accessMsg := conf.reloadApiAccess()
+
 	// Only now hand the engine the refreshers of the zones this reload kept. It
 	// reads the snapshot for what it applies them with, and until now that was the
 	// previous config's: a zone could be given a policy name of this reload and
@@ -1687,5 +1741,5 @@ func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string,
 	// this reload. Off confMu: the template lookup takes it.
 	templateMsg := conf.ReapplyDynamicZoneTemplates().summary()
 
-	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s%s", prezones, zonelist, imrReloadMsg, templateMsg), err
+	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v.%s%s%s", prezones, zonelist, imrReloadMsg, templateMsg, accessMsg), err
 }

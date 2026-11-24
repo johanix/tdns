@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -375,10 +374,9 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 			fmt.Printf("Identities: not set\n")
 		}
 
-		if len(resp.ApiServer.Addresses) > 0 {
-			fmt.Printf("ApiServer: listening on %v\n", resp.ApiServer.Addresses)
-		} else {
-			fmt.Printf("ApiServer: not listening on any addresses\n")
+		fmt.Println(apiListeningLine(resp))
+		if line := apiSocketStatusLine(resp); line != "" {
+			fmt.Println(line)
 		}
 		// The daemon sends the key redacted (SensitiveString.MarshalJSON), so
 		// all there is to say is whether one is set.
@@ -387,11 +385,50 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		} else {
 			fmt.Printf("ApiServer: api key is not set\n")
 		}
+		printAccessStatus(resp.Access)
+		printApiTCPNotStarted(resp.ApiTCPNotStarted, resp.ApiTCPNoCert)
+		printApiTCPStopped(resp.ApiTCPStopped, resp.ApiTCPStoppedBy, resp.Access != nil)
+		printApiTCPFailed(resp.ApiTCPFailed)
 	}
 
 	if resp.Msg != "" {
 		fmt.Printf("%s\n", resp.Msg)
 	}
+}
+
+// apiListeningLine is the `config status` line for the TCP API: the
+// addresses the daemon says listen now, not the configured ones (a reload
+// re-reads those, and an address may have failed to bind). Those that do
+// not listen are reported by printApiTCPNotStarted, printApiTCPStopped and
+// printApiTCPFailed; with nothing listening and nothing reported, the daemon
+// has no TCP API.
+func apiListeningLine(resp tdns.ConfigResponse) string {
+	switch {
+	case len(resp.ApiTCPListening) > 0:
+		return fmt.Sprintf("ApiServer: listening on %v", resp.ApiTCPListening)
+	case len(resp.ApiTCPNotStarted) > 0 || len(resp.ApiTCPStopped) > 0 || len(resp.ApiTCPFailed) > 0:
+		return "ApiServer: NOT listening on any TCP address (see TCP API below)"
+	default:
+		return "ApiServer: not listening on any addresses"
+	}
+}
+
+// apiSocketStatusLine is the `config status` line for the daemon's local
+// admin socket, or "" when it has none. Both status printers use it (the
+// auth/agent one above and imr's). A socket the daemon is configured with
+// but could not serve is said to be so, so the line does not read as if the
+// socket were there; the Transport/ApiSocket error carries the reason.
+func apiSocketStatusLine(resp tdns.ConfigResponse) string {
+	sock := resp.ApiServer.Socket
+	if sock == "" {
+		return ""
+	}
+	for _, e := range resp.ServerErrors {
+		if e.Category == tdns.ErrCatTransport && e.Subtype == tdns.ErrSubApiSocket {
+			return fmt.Sprintf("ApiServer: local admin socket %s is configured but NOT served (see the active errors)", sock)
+		}
+	}
+	return fmt.Sprintf("ApiServer: local admin socket %s", sock)
 }
 
 // renderReloadGuardrail prints the DNSSEC policy-change guardrail refusal returned
@@ -426,10 +463,13 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
+	// The caller prints the returned error; printing it here as well showed
+	// a daemon's refusal twice.
 	status, buf, err := api.Post("/config", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
-		return cr, fmt.Errorf("error from api post: %v", err)
+		// Wrapped, so a caller can tell a socket it may not open (EACCES)
+		// or a daemon that is not there (ENOENT) from a refusal.
+		return cr, fmt.Errorf("error from api post: %w", err)
 	}
 	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -447,4 +487,101 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	}
 
 	return cr, nil
+}
+
+// printApiTCPStopped prints the plaintext TCP listeners an access file
+// closed. They stay closed until a restart, also once the access file is
+// removed, so this is printed whether the daemon runs a policy or not. by is
+// the access file that stopped them, on a line of its own (a path can be
+// long); a daemon that does not say gets the text without it.
+func printApiTCPStopped(stopped []string, by string, policy bool) {
+	if len(stopped) == 0 {
+		return
+	}
+	fmt.Printf("TCP API STOPPED on %s:\n", strings.Join(stopped, ", "))
+	switch {
+	case policy && by != "":
+		fmt.Println("  it was plaintext, and the access file requires TLS:")
+		fmt.Printf("    %s\n", by)
+		fmt.Println("  restart the daemon with usetls: true (the local socket works)")
+	case policy:
+		fmt.Println("  it was plaintext, and the access file requires TLS;")
+		fmt.Println("  restart the daemon with usetls: true (the local socket works)")
+	case by != "":
+		fmt.Println("  it was plaintext when the access file came into force:")
+		fmt.Printf("    %s\n", by)
+		fmt.Println("  no access file is set now, but it stays closed until the daemon")
+		fmt.Println("  restarts (the local socket works)")
+	default:
+		fmt.Println("  it was plaintext when an access file came into force; no access")
+		fmt.Println("  file is set now, but it stays closed until the daemon restarts")
+		fmt.Println("  (the local socket works)")
+	}
+}
+
+// printApiTCPNotStarted prints the TCP listeners the daemon did not start
+// because it had no API certificate (it could not write its default pair).
+// cert is that certificate, on a line of its own (a path can be long); a
+// daemon that does not say gets the text without it. They stay off until a
+// restart, also once the pair is there.
+func printApiTCPNotStarted(addrs []string, cert string) {
+	if len(addrs) == 0 {
+		return
+	}
+	fmt.Printf("TCP API NOT STARTED on %s:\n", strings.Join(addrs, ", "))
+	if cert != "" {
+		fmt.Println("  no API certificate; the daemon could not write its default pair:")
+		fmt.Printf("    %s\n", cert)
+	} else {
+		fmt.Println("  no API certificate; the daemon could not write its default pair")
+	}
+	fmt.Println("  the daemon's log says why; fix that and restart the daemon")
+	fmt.Println("  (the local socket works)")
+}
+
+// printApiTCPFailed prints the TCP listeners the daemon could not bind, or
+// whose server stopped with an error, each with that error; with one, the
+// error alone, as the address is in the line above. They stay off until a
+// restart.
+func printApiTCPFailed(failed []tdns.ApiTCPFailure) {
+	if len(failed) == 0 {
+		return
+	}
+	addrs := make([]string, 0, len(failed))
+	for _, f := range failed {
+		addrs = append(addrs, f.Address)
+	}
+	fmt.Printf("TCP API FAILED on %s:\n", strings.Join(addrs, ", "))
+	for _, f := range failed {
+		if len(failed) > 1 {
+			fmt.Printf("  %s: %s\n", f.Address, f.Error)
+		} else {
+			fmt.Printf("  %s\n", f.Error)
+		}
+	}
+	fmt.Println("  fix that and restart the daemon (the local socket works)")
+}
+
+// printAccessStatus prints the network API's access policy as the daemon is
+// running it, if it has one.
+func printAccessStatus(a *tdns.ApiAccessStatus) {
+	if a == nil {
+		return
+	}
+	if a.Error != "" {
+		fmt.Printf("Access file: %s CANNOT BE USED, so the TCP API answers 503 (the local socket works): %s\n", a.File, a.Error)
+		return
+	}
+	keyauth := "the API key is accepted (read-write)"
+	if !a.KeyAuth {
+		keyauth = "the API key is off"
+	}
+	fmt.Printf("Access file: %s; %s; %d client(s)\n", a.File, keyauth, len(a.Clients))
+	for _, c := range a.Clients {
+		state := ""
+		if c.Disabled {
+			state = ", disabled"
+		}
+		fmt.Printf("   %s (%s%s)\n", c.Name, c.Role, state)
+	}
 }
