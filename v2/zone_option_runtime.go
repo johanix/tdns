@@ -57,7 +57,9 @@ func (zd *ZoneData) setRuntimeOptionLocked(opt ZoneOption, on bool) {
 		next[o] = v
 	}
 	next[opt] = on
+	wasOriginating := zoneMayOriginateContent(zd)
 	zd.Options = next
+	zd.markRelayCopyIfOriginationEnded(wasOriginating)
 }
 
 // withRuntimeOptionsLocked is opts with the zone's run-time options laid over

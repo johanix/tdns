@@ -669,6 +669,18 @@ type ZoneData struct {
 	// childSyncProxy is the last advertisement reconcile's outcome
 	// (childsync_proxy.go); protected by zd.mu.
 	childSyncProxy *ChildSyncProxyStatus
+	// relayCopyUnconfirmed: a tdns-agent relay serves a copy no installed
+	// transfer has replaced yet (relayCopyNeedsTransfer): the one it adopted
+	// at first bind, or the one it wrote itself before an options change ended
+	// its origination. Atomic: the refresh engine sets it on that change
+	// while a refresh of the zone may be reading it.
+	relayCopyUnconfirmed atomic.Bool
+	// relayCopyMarks counts the marks markRelayCopyUnconfirmedLocked made. A
+	// refresh clears relayCopyUnconfirmed only if the count has not moved
+	// since it began: one that began before a mark can still carry what the
+	// zone wrote itself (an IXFR applied to its own copy, dynamic records
+	// collected under the old options).
+	relayCopyMarks atomic.Uint64
 }
 
 // Lock and Unlock expose the mutex for code that moves to

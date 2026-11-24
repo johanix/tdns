@@ -12,9 +12,15 @@ import (
 // These tests drive applyRefreshReplacementLocked directly, which is where the
 // historical unconditional `CurrentSerial++` lived.
 
+// appTypeUngated is an app type the origination rule does not cover, for the
+// tests of the §1.1 guarantee that the gates stand down there. tdns-agent was
+// the stand-in until it got a rule of its own (#1157); the scanner is a type
+// no zone code looks at.
+const appTypeUngated = AppTypeScanner
+
 // withAppType sets the process-wide app type for the duration of a test. The
-// origination predicate stands down off tdns-auth (that is what protects
-// tdns-mp/tdns-agent), so a test asserting a gate must opt in explicitly.
+// origination predicate stands down off tdns-auth and tdns-agent (that is what
+// protects tdns-mp), so a test asserting a gate must opt in explicitly.
 func withAppType(t *testing.T, at AppType) {
 	t.Helper()
 	prev := Globals.App.Type
@@ -125,11 +131,11 @@ func TestInlineSigningSecondaryStillBumpsSerial(t *testing.T) {
 }
 
 // TestNonAuthAppSecondaryStillBumpsSerial is the §1.1 app-scope guarantee, the
-// property that keeps tdns-mpcombiner / tdns-mpagent / tdns-agent working when
-// they next bump their tdns pin: off tdns-auth the gate stands down entirely
+// property that keeps tdns-mpcombiner / tdns-mpagent working when they next
+// bump their tdns pin: off the rule's app types the gate stands down entirely
 // and a Secondary advances its serial exactly as it always did.
 func TestNonAuthAppSecondaryStillBumpsSerial(t *testing.T) {
-	withAppType(t, AppTypeAgent)
+	withAppType(t, appTypeUngated)
 
 	zd := loadIxfrTestZone(t, basicZone)
 	zd.ZoneType = Secondary
@@ -139,6 +145,41 @@ func TestNonAuthAppSecondaryStillBumpsSerial(t *testing.T) {
 	refreshTo(t, zd, "40")
 	if zd.CurrentSerial != 6 {
 		t.Fatalf("non-auth app: CurrentSerial = %d, want 6 (gate must be a no-op)", zd.CurrentSerial)
+	}
+}
+
+// TestAgentSecondarySerial is #1157: a tdns-agent secondary that writes
+// nothing into the zone -- a plain one, or a parentsync-proxy zone -- serves
+// the serial it received. One with an option that writes content of its own
+// (parentsync publishes the zone's SIG(0) KEY) keeps a serial of its own.
+func TestAgentSecondarySerial(t *testing.T) {
+	withAppType(t, AppTypeAgent)
+	for _, tc := range []struct {
+		name string
+		opts map[ZoneOption]bool
+		want uint32
+	}{
+		{"plain secondary mirrors", map[ZoneOption]bool{}, 40},
+		{"parentsync-proxy mirrors", map[ZoneOption]bool{OptParentSyncProxy: true}, 40},
+		// The effective set parseZoneOptions builds: childsync-proxy implies
+		// childsync, and the proxy receives with allow-child-updates.
+		{"childsync-proxy mirrors", map[ZoneOption]bool{
+			OptChildSyncProxy: true, OptChildSync: true, OptAllowChildUpdates: true}, 40},
+		{"childsync originates", map[ZoneOption]bool{OptChildSync: true}, 6},
+		{"parentsync originates", map[ZoneOption]bool{OptParentSync: true}, 6},
+		{"inline-signing originates", map[ZoneOption]bool{OptInlineSigning: true}, 6},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := loadIxfrTestZone(t, basicZone)
+			zd.ZoneType = Secondary
+			zd.Options = tc.opts
+			zd.CurrentSerial = 5
+
+			refreshTo(t, zd, "40")
+			if zd.CurrentSerial != tc.want {
+				t.Fatalf("CurrentSerial = %d, want %d", zd.CurrentSerial, tc.want)
+			}
+		})
 	}
 }
 
@@ -188,9 +229,38 @@ func TestZoneMayOriginateContent(t *testing.T) {
 		t.Error("nil zone must not be gated")
 	}
 
-	// Off tdns-auth every case is permitted — the §1.1 guarantee.
-	withAppType(t, AppTypeAgent)
+	// Off the rule's app types every case is permitted — the §1.1 guarantee.
+	withAppType(t, appTypeUngated)
 	if !zoneMayOriginateContent(secondary) {
 		t.Error("non-auth secondary must be ungated")
+	}
+
+	// tdns-agent (#1157): a secondary originates only with inline-signing or
+	// an option that writes content of its own.
+	withAppType(t, AppTypeAgent)
+	if zoneMayOriginateContent(secondary) {
+		t.Error("agent secondary with no options must NOT originate")
+	}
+	proxy := &ZoneData{ZoneType: Secondary, Options: map[ZoneOption]bool{OptParentSyncProxy: true}}
+	if zoneMayOriginateContent(proxy) {
+		t.Error("agent parentsync-proxy secondary must NOT originate")
+	}
+	childProxy := &ZoneData{ZoneType: Secondary, Options: map[ZoneOption]bool{
+		OptChildSyncProxy: true, OptChildSync: true, OptAllowChildUpdates: true}}
+	if zoneMayOriginateContent(childProxy) {
+		t.Error("agent childsync-proxy secondary must NOT originate: its child updates go to the parent primary")
+	}
+	childProxy.Options[OptAllowUpdates] = true
+	if !zoneMayOriginateContent(childProxy) {
+		t.Error("agent childsync-proxy secondary with allow-updates must originate: that writes its own copy")
+	}
+	if !zoneMayOriginateContent(primary) || !zoneMayOriginateContent(inline) {
+		t.Error("agent primary and inline-signing secondary must originate")
+	}
+	for _, opt := range originationOptions {
+		zd := &ZoneData{ZoneType: Secondary, Options: map[ZoneOption]bool{opt: true}}
+		if !zoneMayOriginateContent(zd) {
+			t.Errorf("agent secondary with %s must originate", ZoneOptionToString[opt])
+		}
 	}
 }
