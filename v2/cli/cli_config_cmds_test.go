@@ -2571,23 +2571,23 @@ func serveSilent(t *testing.T, network, addr string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var mu sync.Mutex
-	var conns []net.Conn
+	var conns []net.Conn // the accept loop's alone, until it is done
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
-			mu.Lock()
 			conns = append(conns, c)
-			mu.Unlock()
 		}
 	}()
 	t.Cleanup(func() {
+		// The loop ends once the listener is closed; a connection it took
+		// just before is in conns by then.
 		ln.Close()
-		mu.Lock()
-		defer mu.Unlock()
+		<-done
 		for _, c := range conns {
 			c.Close()
 		}
@@ -3506,22 +3506,24 @@ func tcpKeyEntry(d, addr, dpin string) string {
 func TestAddAsksTCPWhenNothingAnswersOnTheSocket(t *testing.T) {
 	// The pin is enrolled in the access file on disk; whether the daemon
 	// that runs takes it is enrolled (the fake's own policy).
-	world := func(t *testing.T, addr, certFile string) (*addEnv, string) {
-		env := newAddEnv(t)
+	world := func(t *testing.T, env *addEnv, addr, certFile string) string {
 		pin := env.pin(t)
 		af := filepath.Join(env.dir, "access.yaml")
 		writeFile(t, af, "keyauth: true\nclients:\n   - name: tester\n     pin: "+pin+"\n     role: read-write\n")
 		d := filepath.Join(env.dir, "tdns-auth.yaml")
 		writeFile(t, d, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+addr+" ]\n   apikey: the-key\n   certfile: "+certFile+"\n   socket: "+env.socket()+"\n   access-file: "+af+"\n")
-		return env, d
+		return d
 	}
+	// The fake takes the pin it is given from its start: the operator's,
+	// or another.
 	setup := func(t *testing.T, enrolledSelf bool) (*addEnv, string, *fakeTCPDaemon) {
-		f := serveFakeTCPDaemon(t, pinOf("someone else"), true)
-		env, d := world(t, f.addr(), f.certFile)
+		env := newAddEnv(t)
+		enrolled := pinOf("someone else")
 		if enrolledSelf {
-			f.enrolled = env.pin(t)
+			enrolled = env.pin(t)
 		}
-		return env, d, f
+		f := serveFakeTCPDaemon(t, enrolled, true)
+		return env, world(t, env, f.addr(), f.certFile), f
 	}
 
 	t.Run("it runs without the pin: the key kept, a new entry refused", func(t *testing.T) {
@@ -3577,7 +3579,8 @@ func TestAddAsksTCPWhenNothingAnswersOnTheSocket(t *testing.T) {
 		srv.Close()
 		certFile := filepath.Join(t.TempDir(), "api.crt")
 		writeFile(t, certFile, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})))
-		env, d := world(t, ln.Addr().String(), certFile)
+		env := newAddEnv(t)
+		d := world(t, env, ln.Addr().String(), certFile)
 		key := tcpKeyEntry(d, ln.Addr().String(), tdns.SPKISHA256(srv.Certificate()))
 		writeFile(t, env.cli, key)
 		var r addRefusal
