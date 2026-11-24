@@ -778,7 +778,8 @@ func RunZoneDelete(role string, keepKeys bool) {
 	}
 }
 
-// zoneDeleteLineWidth is the widest line zoneDeleteLines prints.
+// zoneDeleteLineWidth is the widest line zoneDeleteLines wraps to. A
+// command to copy is never wrapped, so a long zone name can pass it.
 const zoneDeleteLineWidth = 72
 
 // zoneDeleteLines is a zone delete's outcome as printed: the server's
@@ -786,7 +787,13 @@ const zoneDeleteLineWidth = 72
 func zoneDeleteLines(cr tdns.ZoneResponse) []string {
 	var out []string
 	for _, line := range strings.Split(cr.Msg, "\n") {
-		if line != "" {
+		switch {
+		case line == "":
+		// An indented line is a command to copy (Msg indents only those): a
+		// wrapped one would run without the rest of its arguments.
+		case strings.HasPrefix(line, "  "):
+			out = append(out, line)
+		default:
 			out = append(out, wrapIndented(line, zoneDeleteLineWidth)...)
 		}
 	}

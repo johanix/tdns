@@ -746,6 +746,15 @@ func (conf *Config) writeDynamicConfigFile(zones []ZoneConf) error {
 		return fmt.Errorf("failed to write temp file: %v", err)
 	}
 
+	// Durable before the rename, and the rename durable before this returns:
+	// a zone delete deletes the zone's keys once this succeeds, and a crash
+	// that brought the old entry back would bring the zone back without them.
+	if err := tempFile.Sync(); err != nil {
+		tempFile.Close()
+		os.Remove(tempFilePath)
+		return fmt.Errorf("failed to sync temp file: %v", err)
+	}
+
 	// Close temp file before rename
 	if err := tempFile.Close(); err != nil {
 		os.Remove(tempFilePath)
@@ -756,6 +765,9 @@ func (conf *Config) writeDynamicConfigFile(zones []ZoneConf) error {
 	if err := os.Rename(tempFilePath, conf.DynamicZones.ConfigFile); err != nil {
 		os.Remove(tempFilePath)
 		return fmt.Errorf("failed to rename temp file to final file: %v", err)
+	}
+	if err := syncZoneDirectory(configDir); err != nil {
+		return fmt.Errorf("syncing %s after renaming %s into place: %v", configDir, conf.DynamicZones.ConfigFile, err)
 	}
 
 	lg.Info("wrote dynamic config file", "path", conf.DynamicZones.ConfigFile, "zones", len(zones))
@@ -1343,6 +1355,7 @@ func (conf *Config) RemoveDynamicZoneFor(app, name string, keepKeys bool) (*Zone
 
 	stopZonePublisher(name)
 	Zones.Remove(name)
+	zd.removed.Store(true)
 	// Bump generation AFTER removing from the map so any refresh goroutine that
 	// snapshotted the old generation fails the pre-persist guard (B5b) and does
 	// not resurrect the files we are about to remove.

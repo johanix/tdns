@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -82,17 +83,29 @@ func waitLoaded(t *testing.T, zone string) *ZoneData {
 }
 
 // refreshAndWait runs the refresh a NOTIFY starts and waits for its answer.
+//
+// A refresh the engine is still running (the first transfer's, or one a
+// NOTIFY started) makes it refuse a second one rather than queue it; that
+// is the engine's rule, not a failure, so this asks again until it runs.
 func refreshAndWait(t *testing.T, conf *Config, zone string) {
 	t.Helper()
-	resp := make(chan RefresherResponse, 1)
-	conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: zone, ZoneStore: MapZone, Wait: true, Response: resp}
-	select {
-	case r := <-resp:
-		if r.Error {
-			t.Fatalf("refresh: %s", r.ErrorMsg)
+	deadline := time.After(10 * time.Second)
+	for {
+		resp := make(chan RefresherResponse, 1)
+		conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: zone, ZoneStore: MapZone, Wait: true, Response: resp}
+		select {
+		case r := <-resp:
+			if r.Error && strings.HasPrefix(r.ErrorMsg, "refresh already in progress") {
+				time.Sleep(20 * time.Millisecond)
+				continue
+			}
+			if r.Error {
+				t.Fatalf("refresh: %s", r.ErrorMsg)
+			}
+			return
+		case <-deadline:
+			t.Fatal("the refresh was not answered")
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the refresh was not answered")
 	}
 }
 
