@@ -293,13 +293,93 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 	return resp.StatusCode, buf, err
 }
 
+// ApiRefusal is a non-2xx reply whose body is plain text: a refusal made
+// before any handler ran (the access check), or a handler's own plain-text
+// error. A client can tell it from a failed exchange and print the daemon's
+// words as they are.
+type ApiRefusal struct {
+	Status int
+	Msg    string
+}
+
+func (e *ApiRefusal) Error() string {
+	return fmt.Sprintf("HTTP %d from the daemon: %s", e.Status, e.Msg)
+}
+
+// Report is the refusal worded for a caller that prints it after its own
+// "Error from <daemon>: " prefix: "refused (HTTP 403):", then the daemon's
+// words (ErrorReport). A CLI that names the daemon itself uses ReportFrom.
+func (e *ApiRefusal) Report() string {
+	verdict := fmt.Sprintf("refused (HTTP %d):", e.Status)
+	if e.Status != http.StatusForbidden {
+		verdict = fmt.Sprintf("HTTP %d from the daemon:", e.Status)
+	}
+	return ErrorReport(verdict, e.msg())
+}
+
+// ReportFrom is the refusal as a CLI prints it, from the daemon called
+// daemon: one verdict that names it, "Refused by tdns-auth (HTTP 403):"
+// ("Error from tdns-auth (HTTP 500):" for another status), then the
+// daemon's words (ErrorReport).
+func (e *ApiRefusal) ReportFrom(daemon string) string {
+	if daemon == "" {
+		daemon = "the daemon"
+	}
+	verdict := fmt.Sprintf("Refused by %s (HTTP %d):", daemon, e.Status)
+	if e.Status != http.StatusForbidden {
+		verdict = fmt.Sprintf("Error from %s (HTTP %d):", daemon, e.Status)
+	}
+	return ErrorReport(verdict, e.msg())
+}
+
+func (e *ApiRefusal) msg() string {
+	if strings.TrimSpace(e.Msg) == "" {
+		return http.StatusText(e.Status)
+	}
+	return e.Msg
+}
+
+// ErrorReportWidth is the widest line ErrorReport wraps to.
+const ErrorReportWidth = 72
+
+// ErrorReport is a daemon's error as a CLI prints it, verdict first: the
+// verdict on a line of its own, then msg, indented two spaces and wrapped
+// within ErrorReportWidth. Each of msg's own lines stays a line, with its
+// own indent on top of the two, so that a hint the daemon puts on an
+// indented line of its own (appRefusal) stays one; a wrapped line goes on
+// at its own indent. A word wider than its line (a long zone name) is left
+// whole.
+func ErrorReport(verdict, msg string) string {
+	lines := []string{verdict}
+	for _, para := range strings.Split(msg, "\n") {
+		text := strings.TrimLeft(para, " ")
+		indent := "  " + para[:len(para)-len(text)]
+		line := ""
+		for _, w := range strings.Fields(text) {
+			switch {
+			case line == "":
+				line = w
+			case len(indent)+len(line)+1+len(w) > ErrorReportWidth:
+				lines = append(lines, indent+line)
+				line = w
+			default:
+				line += " " + w
+			}
+		}
+		if line != "" {
+			lines = append(lines, indent+line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // plainHTTPError is the error for a non-2xx reply whose body is plain text.
 func plainHTTPError(status int, body []byte) error {
 	msg := strings.TrimSpace(string(body))
 	if msg == "" {
 		msg = http.StatusText(status)
 	}
-	return fmt.Errorf("HTTP %d from the daemon: %s", status, msg)
+	return &ApiRefusal{Status: status, Msg: msg}
 }
 
 func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {
@@ -555,6 +635,13 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 	// Report non-2xx status codes clearly
 	if status < 200 || status >= 300 {
 		body := strings.TrimSpace(string(buf))
+		// A plain-text reply is the daemon's own sentence (a refusal by
+		// the access check, or a handler's error): printed once, as such,
+		// not after the URL.
+		if dieOnError && !json.Valid(buf) {
+			fmt.Println((&ApiRefusal{Status: status, Msg: body}).ReportFrom(api.Name))
+			os.Exit(1)
+		}
 		msg := fmt.Sprintf("API %s %s%s returned HTTP %d: %s", method, api.BaseUrl, endpoint, status, body)
 		if dieOnError {
 			fmt.Println(msg)
@@ -717,6 +804,13 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 	// Report non-2xx status codes clearly
 	if status < 200 || status >= 300 {
 		body := strings.TrimSpace(string(buf))
+		// A plain-text reply is the daemon's own sentence (a refusal by
+		// the access check, or a handler's error): printed once, as such,
+		// not after the URL.
+		if dieOnError && !json.Valid(buf) {
+			fmt.Println((&ApiRefusal{Status: status, Msg: body}).ReportFrom(api.Name))
+			os.Exit(1)
+		}
 		msg := fmt.Sprintf("API %s %s%s returned HTTP %d: %s", method, api.BaseUrl, endpoint, status, body)
 		if dieOnError {
 			fmt.Println(msg)

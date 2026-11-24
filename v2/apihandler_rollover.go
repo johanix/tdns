@@ -29,6 +29,9 @@ func APIRolloverStatus(conf *Config) func(w http.ResponseWriter, r *http.Request
 			return
 		}
 		zone = dns.Fqdn(zone)
+		if !rolloverZoneAllowed(w, r, zone) {
+			return
+		}
 
 		kdb := conf.Internal.KeyDB
 		if kdb == nil {
@@ -90,7 +93,7 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
 			return
 		}
-		zone, kdb, pol, ok := resolveRolloverWriteRequest(conf, w, req.Zone, true)
+		zone, kdb, pol, ok := resolveRolloverWriteRequest(conf, w, r, req.Zone, true)
 		if !ok {
 			return
 		}
@@ -238,7 +241,7 @@ func APIRolloverCancel(conf *Config) func(w http.ResponseWriter, r *http.Request
 			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
 			return
 		}
-		zone, kdb, _, ok := resolveRolloverWriteRequest(conf, w, req.Zone, false)
+		zone, kdb, _, ok := resolveRolloverWriteRequest(conf, w, r, req.Zone, false)
 		if !ok {
 			return
 		}
@@ -299,7 +302,7 @@ func APIRolloverReset(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			http.Error(w, "keyid must be 1..65535", http.StatusBadRequest)
 			return
 		}
-		zone, kdb, _, ok := resolveRolloverWriteRequest(conf, w, req.Zone, false)
+		zone, kdb, _, ok := resolveRolloverWriteRequest(conf, w, r, req.Zone, false)
 		if !ok {
 			return
 		}
@@ -328,7 +331,7 @@ func APIRolloverUnstick(conf *Config) func(w http.ResponseWriter, r *http.Reques
 			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
 			return
 		}
-		zone, kdb, _, ok := resolveRolloverWriteRequest(conf, w, req.Zone, false)
+		zone, kdb, _, ok := resolveRolloverWriteRequest(conf, w, r, req.Zone, false)
 		if !ok {
 			return
 		}
@@ -350,14 +353,18 @@ func APIRolloverUnstick(conf *Config) func(w http.ResponseWriter, r *http.Reques
 // kdb / DnssecPolicy from the loaded ZoneData. requirePolicy=true
 // for handlers like asap that compute against the policy; cancel,
 // reset, and unstick do not need a policy. Returns false (and
-// writes the HTTP error) if validation fails.
-func resolveRolloverWriteRequest(conf *Config, w http.ResponseWriter, rawZone string, requirePolicy bool) (string, *KeyDB, *DnssecPolicy, bool) {
+// writes the HTTP error) if validation fails, or if an application client
+// does not own the zone.
+func resolveRolloverWriteRequest(conf *Config, w http.ResponseWriter, r *http.Request, rawZone string, requirePolicy bool) (string, *KeyDB, *DnssecPolicy, bool) {
 	zone := strings.TrimSpace(rawZone)
 	if zone == "" {
 		http.Error(w, "missing zone", http.StatusBadRequest)
 		return "", nil, nil, false
 	}
 	zone = dns.Fqdn(zone)
+	if !rolloverZoneAllowed(w, r, zone) {
+		return "", nil, nil, false
+	}
 	kdb := conf.Internal.KeyDB
 	if kdb == nil {
 		http.Error(w, "keystore not initialized", http.StatusServiceUnavailable)
@@ -396,6 +403,11 @@ func APIRolloverWhen(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		zone = dns.Fqdn(zone)
+		// A refusal is not one of the states "when" answers with a note: the
+		// caller may not ask about this zone at all.
+		if !rolloverZoneAllowed(w, r, zone) {
+			return
+		}
 
 		kdb := conf.Internal.KeyDB
 		if kdb == nil {
@@ -435,4 +447,16 @@ func APIRolloverWhen(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 		}
 		_ = json.NewEncoder(w).Encode(out)
 	}
+}
+
+// rolloverZoneAllowed refuses (403, plain text) an application client a
+// rollover command on a zone that is not its own, and says whether the
+// handler may go on. The rollover handlers work on a zone's keys by name,
+// so the zone they will act on is the name, looked up as they look it up.
+func rolloverZoneAllowed(w http.ResponseWriter, r *http.Request, zone string) bool {
+	if err := appZoneRefusalByName(AppClientOf(r.Context()), zone); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return false
+	}
+	return true
 }

@@ -419,7 +419,9 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 	}
 
 	if len(f.selExact) == 0 && len(f.selSubtre) == 0 {
-		fmt.Printf("No selector given: exporting every %s key in the keystore.\n", classLabel(class))
+		// An application client gets its own keys only, so "every key in
+		// the keystore" is not what it gets.
+		fmt.Printf("No selector given: exporting every %s key this client may export.\n", classLabel(class))
 	}
 
 	tr, err := SendKeystoreCmd(api, tdns.KeystorePost{
@@ -430,12 +432,7 @@ func bulkExportRun(role, class string, f *bulkFlags) {
 		SelectSubtree: f.selSubtre,
 	})
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	if tr.Error {
-		fmt.Printf("Error from the daemon: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
 	// 0700: this directory is about to hold private keys.
@@ -640,33 +637,35 @@ func bulkImportRun(role, class string, f *bulkFlags) {
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	if tr.Error {
-		fmt.Printf("Error from the daemon: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
-	printBulkDispositions(tr.BulkDispositions)
+	if out := formatBulkDispositions(tr.BulkDispositions); out != "" {
+		fmt.Println(out)
+	}
 	if tr.Msg != "" {
 		fmt.Printf("%s\n", tr.Msg)
 	}
-	// A conflict means the operator's file is not what the server is running.
-	// That is worth a non-zero exit: it is the case a script must not treat as
-	// a successful restore.
+	// A conflict means the operator's file is not what the server is running,
+	// and a refused key (an application client's key of a zone it does not
+	// own) was not imported either. Both are worth a non-zero exit: the case
+	// a script must not treat as a successful restore.
 	for _, d := range tr.BulkDispositions {
-		if d.Status == tdns.BulkStatusConflict {
+		if d.Status == tdns.BulkStatusConflict || d.Status == tdns.BulkStatusRefused {
 			os.Exit(2)
 		}
 	}
 }
 
-func printBulkDispositions(ds []tdns.BulkKeyDisposition) {
-	var lines []string
+// formatBulkDispositions renders a bulk import's dispositions, one key per
+// line, verdict first, sorted: unchanged keys are left out (the boring
+// majority of any re-import; listing them buries the lines that matter).
+// A refused key's reason goes on the lines below it, indented under the
+// name, so that no line passes 72 characters.
+func formatBulkDispositions(ds []tdns.BulkKeyDisposition) string {
+	type entry struct{ line, reason string }
+	var entries []entry
 	for _, d := range ds {
-		// Unchanged keys are the boring majority of any re-import; listing
-		// them buries the two lines that matter.
 		if d.Status == tdns.BulkStatusUnchanged {
 			continue
 		}
@@ -674,17 +673,25 @@ func printBulkDispositions(ds []tdns.BulkKeyDisposition) {
 		if d.Keyid != 0 {
 			name = fmt.Sprintf("%s keyid %d", d.Name, d.Keyid)
 		}
-		line := fmt.Sprintf("  %-9s %s", d.Status, name)
-		if d.Detail != "" {
-			line += fmt.Sprintf("  (differs: %s)", d.Detail)
+		e := entry{line: fmt.Sprintf("  %-9s %s", d.Status, name)}
+		switch {
+		case d.Detail == "":
+		case d.Status == tdns.BulkStatusRefused:
+			e.reason = indentedLines(d.Detail, 12, 72)
+		default:
+			e.line += fmt.Sprintf("  (differs: %s)", d.Detail)
 		}
-		lines = append(lines, line)
+		entries = append(entries, e)
 	}
-	if len(lines) == 0 {
-		return
+	sort.Slice(entries, func(i, j int) bool { return entries[i].line < entries[j].line })
+	var lines []string
+	for _, e := range entries {
+		lines = append(lines, e.line)
+		if e.reason != "" {
+			lines = append(lines, e.reason)
+		}
 	}
-	sort.Strings(lines)
-	fmt.Printf("%s\n", strings.Join(lines, "\n"))
+	return strings.Join(lines, "\n")
 }
 
 // printConvertDispositions renders one line per key and returns the converted

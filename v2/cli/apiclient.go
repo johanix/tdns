@@ -590,3 +590,73 @@ func getApiDetailsByClientKey(clientKey string) *ApiDetails {
 func GetApiDetailsByClientKey(clientKey string) *ApiDetails {
 	return getApiDetailsByClientKey(clientKey)
 }
+
+// refusalError is a daemon's plain-text refusal (tdns.ApiRefusal: the access
+// check's 403, or an application client refused something it may not do),
+// for the senders to return. printDaemonError finds the ApiRefusal in it;
+// its text is worded for a caller that prints it after its own "Error from
+// <daemon>: " (ApiRefusal.Report). ok is false for any other error, which
+// the caller reports as before.
+func refusalError(err error) (error, bool) {
+	var ref *tdns.ApiRefusal
+	if !errors.As(err, &ref) {
+		return err, false
+	}
+	return refusal{ref}, true
+}
+
+type refusal struct{ ref *tdns.ApiRefusal }
+
+func (r refusal) Error() string { return r.ref.Report() }
+func (r refusal) Unwrap() error { return r.ref }
+
+// daemonError is the error message a daemon's JSON reply carried (Error
+// set, ErrorMsg), as a sender returns it. Error() is lead and the message,
+// worded as the sender always worded it; printDaemonError prints msg.
+type daemonError struct {
+	lead, msg string
+}
+
+func (e *daemonError) Error() string { return e.lead + e.msg }
+
+// printDaemonError prints a command's failed exchange with the daemon called
+// daemon (the API client's name), once, verdict first, as every command
+// that an application client can be refused on prints it
+// (daemonErrorText). The caller exits as it did before.
+func printDaemonError(daemon string, err error) {
+	fmt.Println(daemonErrorText(daemon, err))
+}
+
+// printDaemonErrorMsg is printDaemonError for a reply's ErrorMsg.
+func printDaemonErrorMsg(daemon, msg string) {
+	printDaemonError(daemon, &daemonError{msg: msg})
+}
+
+// daemonErrorText is err as printDaemonError prints it: the verdict, which
+// names the daemon, on a line of its own, then the daemon's words, indented
+// two spaces and wrapped within 72 characters, each of its own lines kept
+// (tdns.ErrorReport):
+//
+//	Refused by tdns-auth (HTTP 403):     a plain-text refusal (ApiRefusal)
+//	Error from tdns-auth (HTTP 500):     another plain-text error
+//	Error from tdns-auth:                a JSON reply's ErrorMsg (daemonError)
+//	Error talking to tdns-auth:          anything else: no reply, or not one
+//	                                     this CLI could read
+func daemonErrorText(daemon string, err error) string {
+	if daemon == "" {
+		daemon = "the daemon"
+	}
+	var ref *tdns.ApiRefusal
+	if errors.As(err, &ref) {
+		return ref.ReportFrom(daemon)
+	}
+	var de *daemonError
+	if errors.As(err, &de) {
+		msg := de.msg
+		if strings.TrimSpace(msg) == "" {
+			msg = "(no message)"
+		}
+		return tdns.ErrorReport("Error from "+daemon+":", msg)
+	}
+	return tdns.ErrorReport("Error talking to "+daemon+":", err.Error())
+}

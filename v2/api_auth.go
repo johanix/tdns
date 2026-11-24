@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -26,13 +27,27 @@ import (
 type ApiIdentity struct {
 	Name string  // the access-file client, "apikey", or "local"
 	Role ApiRole // what it may do
-	Via  string  // "local socket", "certificate" or "api key"
+	Via  string  // ApiViaSocket, ApiViaCertificate or ApiViaKey
+	// App: a certificate client that apiserver.app-clients names. On top
+	// of its role it sees and manages only what it owns (api_app.go).
+	App bool
 }
+
+// How a caller was authenticated (ApiIdentity.Via). Only a certificate
+// names its caller: Name is then an access-file client.
+const (
+	ApiViaSocket      = "local socket"
+	ApiViaCertificate = "certificate"
+	ApiViaKey         = "api key"
+)
 
 // Describe is the sentence `ping` answers with.
 func (id ApiIdentity) Describe() string {
-	if id.Via == "local socket" {
+	if id.Via == ApiViaSocket {
 		return fmt.Sprintf("on the local socket (%s)", id.Role)
+	}
+	if id.App {
+		return fmt.Sprintf("authenticated as %s (%s, application client) by %s", id.Name, id.Role, id.Via)
 	}
 	return fmt.Sprintf("authenticated as %s (%s) by %s", id.Name, id.Role, id.Via)
 }
@@ -59,6 +74,11 @@ type accessState struct {
 	KeyAuth bool
 	byPin   map[string]AccessClient
 	Clients []AccessClient
+	// AppClients is apiserver.app-clients as it went into force with this
+	// file; appClients the same as a set. Kept here, in the one pointer,
+	// so that a request sees the list and the file of the same reload.
+	AppClients []string
+	appClients map[string]bool
 }
 
 // apiAccessHolder holds the running policy. A pointer in InternalConf, so a
@@ -72,12 +92,17 @@ func (h *apiAccessHolder) load() *accessState {
 	return h.p.Load()
 }
 
-// newAccessState builds the running policy from a validated file.
-func newAccessState(path string, af *AccessFile) *accessState {
+// newAccessState builds the running policy from a validated file and the
+// application clients (apiserver.app-clients) that go into force with it.
+func newAccessState(path string, af *AccessFile, appClients []string) *accessState {
 	st := &accessState{Enabled: true, File: path, KeyAuth: af.KeyAuthOn(),
-		byPin: map[string]AccessClient{}, Clients: append([]AccessClient(nil), af.Clients...)}
+		byPin: map[string]AccessClient{}, Clients: append([]AccessClient(nil), af.Clients...),
+		AppClients: append([]string(nil), appClients...), appClients: map[string]bool{}}
 	for _, c := range af.Clients {
 		st.byPin[c.Pin] = c
+	}
+	for _, name := range appClients {
+		st.appClients[name] = true
 	}
 	return st
 }
@@ -92,14 +117,17 @@ var maxPeekBody = 64 << 20
 // unknownCommand matches no entry in the role table, so it needs admin.
 const unknownCommand = "\x00unknown"
 
-// peekCommand returns the request body's Command field and puts the body back
-// for the handler. It decodes with encoding/json into a field named Command,
-// as every handler does, so both read the same value (the same case-insensitive
-// key match, the same last-one-wins on a repeated key). tooLarge says the body
-// is over maxPeekBody; the command is then unknownCommand.
-func peekCommand(r *http.Request) (cmd string, tooLarge bool) {
+// peekCommand returns the request body's Command and SubCommand fields and
+// puts the body back for the handler. It decodes with encoding/json into
+// fields of those names, as every handler does, so both read the same values
+// (the same case-insensitive key match, the same last-one-wins on a repeated
+// key). tooLarge says the body is over maxPeekBody; the command is then
+// unknownCommand. SubCommand matters only on a route that apiAppSubScopes
+// splits by it (the keystore); a SubCommand that is not a string is
+// unknownCommand there, and is left for the handler to refuse elsewhere.
+func peekCommand(r *http.Request) (cmd, sub string, tooLarge bool) {
 	if r.Body == nil || r.Body == http.NoBody {
-		return "", false
+		return "", "", false
 	}
 	buf, err := io.ReadAll(io.LimitReader(r.Body, int64(maxPeekBody)+1))
 	r.Body = struct {
@@ -108,28 +136,34 @@ func peekCommand(r *http.Request) (cmd string, tooLarge bool) {
 	}{io.MultiReader(bytes.NewReader(buf), r.Body), r.Body}
 	switch {
 	case len(buf) > maxPeekBody:
-		return unknownCommand, true
+		return unknownCommand, unknownCommand, true
 	case err != nil:
-		return unknownCommand, false
+		return unknownCommand, unknownCommand, false
 	}
 	if len(bytes.TrimSpace(buf)) == 0 {
-		return "", false
+		return "", "", false
 	}
 	// A body that does not decode as one JSON value is not a commandless
 	// request: a handler's Decoder reads the first value and ignores the
 	// rest, so `{"command":"off"}{}` would run "off" with only the role a
 	// commandless request needs. It needs admin instead.
-	var c struct{ Command string }
-	if json.Unmarshal(buf, &c) != nil {
-		return unknownCommand, false
+	var c struct {
+		Command    string
+		SubCommand json.RawMessage
 	}
-	return c.Command, false
+	if json.Unmarshal(buf, &c) != nil {
+		return unknownCommand, unknownCommand, false
+	}
+	if len(c.SubCommand) > 0 && json.Unmarshal(c.SubCommand, &sub) != nil {
+		sub = unknownCommand
+	}
+	return c.Command, sub, false
 }
 
 // authenticate decides who r is. A non-zero status means refuse it.
 func (conf *Config) authenticateApiRequest(r *http.Request, apikey string) (ApiIdentity, int, string) {
 	if FromLocalSocket(r.Context()) {
-		return ApiIdentity{Name: "local", Role: RoleAdmin, Via: "local socket"}, 0, ""
+		return ApiIdentity{Name: "local", Role: RoleAdmin, Via: ApiViaSocket}, 0, ""
 	}
 	keyOK := func() bool {
 		k := r.Header.Get("X-API-Key")
@@ -140,7 +174,7 @@ func (conf *Config) authenticateApiRequest(r *http.Request, apikey string) (ApiI
 	if st == nil || !st.Enabled {
 		// No access file: the key, as admin, exactly as before.
 		if keyOK() {
-			return ApiIdentity{Name: "apikey", Role: RoleAdmin, Via: "api key"}, 0, ""
+			return ApiIdentity{Name: "apikey", Role: RoleAdmin, Via: ApiViaKey}, 0, ""
 		}
 		return ApiIdentity{}, http.StatusForbidden, "Forbidden"
 	}
@@ -163,14 +197,16 @@ func (conf *Config) authenticateApiRequest(r *http.Request, apikey string) (ApiI
 		pin := SPKISHA256(r.TLS.PeerCertificates[0])
 		if c, ok := st.byPin[pin]; ok && !c.Disabled {
 			role, _ := parseNetworkRole(c.Role) // validated when loaded
-			return ApiIdentity{Name: c.Name, Role: role, Via: "certificate"}, 0, ""
+			// The name makes an application client only here, on its
+			// certificate: over the key or the socket it means nothing.
+			return ApiIdentity{Name: c.Name, Role: role, Via: ApiViaCertificate, App: st.appClients[c.Name]}, 0, ""
 		}
 		// An unknown or disabled certificate does not fall through to the key:
 		// a client that presents a certificate is that certificate.
 		return ApiIdentity{}, http.StatusForbidden, "Forbidden"
 	}
 	if st.KeyAuth && keyOK() {
-		return ApiIdentity{Name: "apikey", Role: RoleReadWrite, Via: "api key"}, 0, ""
+		return ApiIdentity{Name: "apikey", Role: RoleReadWrite, Via: ApiViaKey}, 0, ""
 	}
 	return ApiIdentity{}, http.StatusForbidden, "Forbidden"
 }
@@ -204,27 +240,37 @@ func (conf *Config) apiAuthMiddleware(apikey string) mux.MiddlewareFunc {
 					route = tpl
 				}
 			}
-			cmd, tooLarge := peekCommand(r)
-			need := RequiredApiRole(route, cmd)
+			cmd, sub, tooLarge := peekCommand(r)
+			need := RequiredApiRole(route, cmd, sub, id.App)
 			if tooLarge && id.Role < RoleAdmin {
 				lgApi.Info("api request refused: body too large", "client", id.Name, "role", id.Role, "route", route, "limit", maxPeekBody)
 				http.Error(w, fmt.Sprintf("%s: request body is over %d bytes, the most the management API reads to check a request; the daemon's local admin socket has no such limit",
 					route, maxPeekBody), http.StatusRequestEntityTooLarge)
 				return
 			}
+			named := apiCommandLabel(route, cmd, sub)
 			if id.Role < need {
-				lgApi.Info("api request denied", "client", id.Name, "role", id.Role, "route", route, "command", cmd, "needs", need)
+				lgApi.Info("api request denied", "client", id.Name, "role", id.Role, "route", route, "command", named, "needs", need)
 				if need == RoleAdmin {
-					http.Error(w, fmt.Sprintf("%s %s needs admin, which is available only on the daemon's local admin socket", route, cmd), http.StatusForbidden)
+					http.Error(w, fmt.Sprintf("%s %s needs admin, which is available only on the daemon's local admin socket", route, named), http.StatusForbidden)
 				} else {
-					http.Error(w, fmt.Sprintf("%s %s needs %s; %s is %s", route, cmd, need, id.Name, id.Role), http.StatusForbidden)
+					http.Error(w, fmt.Sprintf("%s %s needs %s; %s is %s", route, named, need, id.Name, id.Role), http.StatusForbidden)
 				}
 				return
 			}
+			// After the role, which still applies: a read-only application
+			// client stays read-only. The table only says whether the
+			// command is open to application clients at all; which zone it
+			// may act on, the handler checks once it has resolved it.
+			if id.App && ApiAppScopeOf(route, cmd, sub) == AppRefused {
+				lgApi.Info("api request denied: not available to application clients", "client", id.Name, "route", route, "command", named)
+				http.Error(w, fmt.Sprintf("%s: not available to application clients", apiCommandName(route, cmd, sub)), http.StatusForbidden)
+				return
+			}
 			if need >= RoleReadWrite {
-				lgApi.Info("api request", "client", id.Name, "role", id.Role, "via", id.Via, "route", route, "command", strings.TrimSpace(cmd))
+				lgApi.Info("api request", "client", id.Name, "role", id.Role, "via", id.Via, "app", id.App, "route", route, "command", named)
 			} else {
-				lgApi.Debug("api request", "client", id.Name, "role", id.Role, "via", id.Via, "route", route, "command", strings.TrimSpace(cmd))
+				lgApi.Debug("api request", "client", id.Name, "role", id.Role, "via", id.Via, "app", id.App, "route", route, "command", named)
 			}
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), apiIdentityKey{}, id)))
 		})
@@ -256,8 +302,9 @@ func (conf *Config) initApiAccess() {
 		return
 	}
 	conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
-	conf.Internal.ApiAccess.p.Store(newAccessState(path, af))
-	lgApi.Info("management API: access file loaded", "file", path, "clients", len(af.Clients), "keyauth", af.KeyAuthOn())
+	conf.Internal.ApiAccess.p.Store(newAccessState(path, af, conf.ApiServer.AppClients))
+	lgApi.Info("management API: access file loaded", "file", path, "clients", len(af.Clients), "keyauth", af.KeyAuthOn(),
+		"app-clients", conf.ApiServer.AppClients)
 }
 
 // reloadApiAccess re-reads the access file after a successful config reload
@@ -303,7 +350,14 @@ func (conf *Config) reloadApiAccess() string {
 	if err != nil {
 		lgApi.Error("management API: access file NOT reloaded; the running policy is unchanged", "file", path, "err", err)
 		conf.Internal.ServerErrors.set(ErrCatConfig, ErrSubApiAccess, fmt.Sprintf("access file %s: %v", path, err))
-		return fmt.Sprintf(" %s (the running policy is unchanged): %v", AccessFileNotReloaded, err)
+		// The application clients go into force with the file, never
+		// without it: a new list against the old file could make a
+		// client an application client that the new file does not have.
+		appNote := ""
+		if st := h.load(); st != nil && st.Enabled && !slices.Equal(st.AppClients, conf.ApiServer.AppClients) {
+			appNote = ". apiserver.app-clients is NOT applied either: it goes into force with the access file"
+		}
+		return fmt.Sprintf(" %s (the running policy is unchanged): %v%s", AccessFileNotReloaded, err, appNote)
 	}
 	conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
 	// Before the policy goes in force: a plaintext TCP listener started
@@ -312,7 +366,8 @@ func (conf *Config) reloadApiAccess() string {
 	// Closed and the policy stored under one lock, which APIdispatcher also
 	// holds while it registers and starts its servers (activateApiAccess).
 	stopped := ""
-	if addrs := activateApiAccess(path, func() { h.p.Store(newAccessState(path, af)) }); len(addrs) > 0 {
+	appClients := slices.Clone(conf.ApiServer.AppClients)
+	if addrs := activateApiAccess(path, func() { h.p.Store(newAccessState(path, af, appClients)) }); len(addrs) > 0 {
 		lgApi.Error("management API: plaintext TCP listeners STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served)",
 			"addresses", addrs, "file", path)
 		stopped = fmt.Sprintf(" The plaintext TCP listeners %v are STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served).", addrs)
@@ -322,8 +377,12 @@ func (conf *Config) reloadApiAccess() string {
 		keyauth = "off"
 	}
 	// Logged as well as returned: after a SIGHUP nobody reads the message.
-	lgApi.Info("management API: access file reloaded", "file", path, "clients", len(af.Clients), "keyauth", keyauth)
-	return fmt.Sprintf(" Access file reloaded: %d client(s), keyauth %s.%s", len(af.Clients), keyauth, stopped)
+	lgApi.Info("management API: access file reloaded", "file", path, "clients", len(af.Clients), "keyauth", keyauth, "app-clients", appClients)
+	apps := ""
+	if len(appClients) > 0 {
+		apps = fmt.Sprintf(", app-clients %s", strings.Join(appClients, " "))
+	}
+	return fmt.Sprintf(" Access file reloaded: %d client(s), keyauth %s%s.%s", len(af.Clients), keyauth, apps, stopped)
 }
 
 // ApiAccessStatus is the running access policy as `config status` reports it.
@@ -333,6 +392,9 @@ type ApiAccessStatus struct {
 	Error   string `json:",omitempty"` // set when the file could not be used at start-up: the TCP API answers 503
 	KeyAuth bool
 	Clients []ApiAccessStatusClient
+	// AppClients is apiserver.app-clients as in force with this file; a
+	// name the file has no client for grants nothing.
+	AppClients []string `json:",omitempty"`
 	// The plaintext TCP listeners an access file closed are not here but in
 	// ConfigResponse.ApiTCPStopped: they stay closed after the access file
 	// is removed, when there is no policy to report.
@@ -353,7 +415,7 @@ func (conf *Config) apiAccessStatus() *ApiAccessStatus {
 	if st == nil || !st.Enabled {
 		return nil
 	}
-	out := &ApiAccessStatus{File: st.File, KeyAuth: st.KeyAuth}
+	out := &ApiAccessStatus{File: st.File, KeyAuth: st.KeyAuth, AppClients: slices.Clone(st.AppClients)}
 	if st.Err != nil {
 		out.Error = st.Err.Error()
 	}

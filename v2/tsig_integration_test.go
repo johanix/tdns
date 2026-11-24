@@ -213,7 +213,7 @@ func TestCommitStagedTsigKey_WithKeyDB(t *testing.T) {
 	conf.Internal.TsigKeyStore = NewTsigKeyStore()
 
 	staged := &TsigDetails{Name: "inline.", Algorithm: "hmac-sha256", Secret: b64Secret16}
-	rollback, err := conf.commitStagedTsigKey(staged)
+	rollback, err := conf.commitStagedTsigKey(staged, "")
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestCommitStagedTsigKey_IdempotentWhenUnchanged(t *testing.T) {
 
 	rollback, err := conf.commitStagedTsigKey(&TsigDetails{
 		Name: "exists.", Algorithm: "hmac-sha256", Secret: b64Secret16,
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("commit: %v", err)
 	}

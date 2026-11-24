@@ -281,6 +281,10 @@ func SendTruststore(api *tdns.ApiClient, data tdns.TruststorePost) (tdns.Trustst
 
 	status, buf, err := api.Post("/truststore", bytebuf.Bytes())
 	if err != nil {
+		if rerr, ok := refusalError(err); ok {
+			tr.AppName = api.Name
+			return tr, rerr
+		}
 		log.Println("Error from Api Post:", err)
 		return tr, fmt.Errorf("error from api post: %v", err)
 	}

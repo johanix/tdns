@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -131,6 +132,23 @@ func ValidateAccessFile(af *AccessFile) error {
 	return nil
 }
 
+// CheckAccessClientName checks a client name as an access file and an API
+// owner ("cert:<name>") spell it: not empty, and no white space or control
+// characters, since names are typed on command lines and printed in columns.
+// ValidateAccessFile asks only for a name: a file written by hand before
+// this rule must keep loading.
+func CheckAccessClientName(name string) error {
+	if name == "" {
+		return errors.New("the client name is empty")
+	}
+	for _, r := range name {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("client name %q has white space or a control character", name)
+		}
+	}
+	return nil
+}
+
 // checkSpkiPin checks that s is a SPKI pin: base64 of a SHA-256 digest, the form
 // SPKISHA256 produces and `tdns-cli cert pin` prints. Only the canonical
 // spelling: the decoder also takes embedded newlines and nonzero padding
@@ -183,6 +201,15 @@ func (a ApiServerConf) validateAccessSettings() error {
 	if a.AccessFile != "" && len(a.Addresses) > 0 && !a.UseTLS {
 		return fmt.Errorf("apiserver.access-file %s requires TLS on the TCP API, and apiserver.usetls is false: certificate clients could not authenticate, and the API key would cross the network in clear. When TLS is broken, use the local admin socket; for a daemon without TCP, leave out apiserver.addresses",
 			a.AccessFile)
+	}
+	// A name an API owner could not spell (cert:<name>) names no client
+	// whose zones could be checked; refused rather than silently granting
+	// nothing. A name the access file lacks is only a config check warning:
+	// the client may be enrolled after the list is written.
+	for _, name := range a.AppClients {
+		if err := CheckAccessClientName(name); err != nil {
+			return fmt.Errorf("apiserver.app-clients: %v", err)
+		}
 	}
 	return nil
 }

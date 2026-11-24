@@ -34,7 +34,7 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 			if err != nil {
 				log.Fatalf("Error: %v", err)
 			}
-			showParentSyncStatus(api, "Error from server")
+			showParentSyncStatus(api)
 		},
 	}
 
@@ -56,11 +56,11 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 			})
 			PrintUpdateResult(resp.UpdateResult)
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {
@@ -90,11 +90,11 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 			})
 			PrintUpdateResult(resp.UpdateResult)
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {
@@ -122,11 +122,11 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 				Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			})
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {
@@ -150,11 +150,11 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 				Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			})
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {

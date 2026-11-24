@@ -329,7 +329,7 @@ func TestRequiredApiRole(t *testing.T) {
 		{"/api/v1/rollover/asap", "", RoleReadWrite},
 		{"/api/v1/no-such-route", "", RoleAdmin},
 	} {
-		if got := RequiredApiRole(tc.route, tc.cmd); got != tc.want {
+		if got := RequiredApiRole(tc.route, tc.cmd, "", false); got != tc.want {
 			t.Errorf("RequiredApiRole(%q, %q) = %s, want %s", tc.route, tc.cmd, got, tc.want)
 		}
 	}
@@ -347,7 +347,7 @@ func TestPeekCommandMalformedBody(t *testing.T) {
 		{`{}`, ""},
 	} {
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/scanner/poll", strings.NewReader(tc.body))
-		if got, _ := peekCommand(r); got != tc.want {
+		if got, _, _ := peekCommand(r); got != tc.want {
 			t.Errorf("peekCommand(%q) = %q, want %q", tc.body, got, tc.want)
 		}
 	}
@@ -363,7 +363,7 @@ func TestAccessFileRequiresTLS13(t *testing.T) {
 	}
 	conf := &Config{}
 	conf.Internal.ApiAccess = &apiAccessHolder{}
-	conf.Internal.ApiAccess.p.Store(newAccessState("/etc/tdns/access.yaml", af))
+	conf.Internal.ApiAccess.p.Store(newAccessState("/etc/tdns/access.yaml", af, nil))
 	for _, tc := range []struct {
 		name string
 		tls  *tls.ConnectionState
