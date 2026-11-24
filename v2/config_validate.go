@@ -23,7 +23,22 @@ func NewCustomValidator() (*CustomValidator, error) {
 	if err := v.RegisterValidation("certkey", ValidateCertAndKeyFiles); err != nil {
 		return nil, fmt.Errorf("NewCustomValidator: error registering certkey validation: %v", err)
 	}
+	if err := v.RegisterValidation("required_with_listener", requiredWithListener); err != nil {
+		return nil, fmt.Errorf("NewCustomValidator: error registering required_with_listener validation: %v", err)
+	}
 	return &CustomValidator{v}, nil
+}
+
+// requiredWithListener requires the field when the struct it is in has at
+// least one entry in Addresses, i.e. when there is a TCP listener. The
+// built-in required_with=Addresses is not that: an explicit `addresses: []`
+// is a non-nil slice, so it would demand a certificate no listener uses.
+func requiredWithListener(fl validator.FieldLevel) bool {
+	addrs := fl.Parent().FieldByName("Addresses")
+	if !addrs.IsValid() || addrs.Len() == 0 {
+		return true
+	}
+	return !fl.Field().IsZero()
 }
 
 // validateZonePeersAndAcls checks the per-zone peer lists and ACLs the daemon
@@ -133,6 +148,9 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	// Same dynamiczones: value validation the daemon loader applies
 	// (ParseConfig), so `config check` and the daemon cannot disagree.
 	if err := config.DynamicZones.Validate(); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+	if err := config.ApiServer.validateAccessSettings(); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 	if err := config.DynamicZones.ValidateDefaultTemplates(config.Templates); err != nil {

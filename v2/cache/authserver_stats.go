@@ -38,13 +38,17 @@ func (c TrafficClass) String() string {
 	return "unknown"
 }
 
+// SignalSourceConfig is the ReceivedSignal.Source of a stub's configured
+// transports.
+const SignalSourceConfig = "config"
+
 // ReceivedSignal is a transport signal as it was given, before the absence
 // defaults (do53 100, the others 0) that the weights used for selection carry:
 // only the transports it named, with the weights it gave them. An explicit
 // dot:0 and a signal that does not mention DoT are the same to selection, but
 // not to someone checking what a server publishes.
 type ReceivedSignal struct {
-	Source  string                   // "oots" (SVCB oots or TSYNC weights), "alpn" (SVCB ALPN only: 100 each), "config" (a stub), "operator" (set server transport)
+	Source  string                   // "oots" (SVCB oots or TSYNC weights), "alpn" (SVCB ALPN only: 100 each), SignalSourceConfig (a stub), "operator" (set server transport)
 	Weights map[core.Transport]uint8 // the transports named, with their weights
 	// Ports is the non-default port assigned to a transport this signal
 	// named, udp (TransportDo53) and tcp (TransportDo53TCP) included. Absent

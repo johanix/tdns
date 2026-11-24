@@ -60,6 +60,15 @@ func TestChildSyncProxyAPICommands(t *testing.T) {
 	if st.Error || st.ProxyStatus == nil || st.ProxyStatus.Delta != 11 || st.ProxyStatus.Instruction == "" {
 		t.Fatalf("proxy-status: %+v", st)
 	}
+
+	// publish and unpublish would write into the proxy's own copy, which the
+	// next transfer replaces: refused, naming the proxy.
+	for _, c := range []string{"publish", "unpublish"} {
+		resp := postChildSync(t, ZoneChildSyncPost{Command: c, Zone: "example."})
+		if !resp.Error || !strings.Contains(resp.ErrorMsg, "is a childsync-proxy") {
+			t.Errorf("%s on a childsync-proxy: %+v", c, resp)
+		}
+	}
 	if len(zd.KeyDB.UpdateQ) != 0 {
 		t.Fatal("an operator command published into the agent's own copy of the zone")
 	}

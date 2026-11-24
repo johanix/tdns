@@ -613,6 +613,19 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 		return nil, 0, fmt.Errorf("failed to write DNS message: %v", err)
 	}
 
+	// RFC 9250 4.2: the client MUST mark the end of the query with a STREAM
+	// FIN, and does so BEFORE it reads the response. A server that reads the
+	// stream to its end (H root, for one) does not answer a query whose stream
+	// is still open: it waits until the read below gives up and the deadline
+	// closes the connection. tdns-auth answers after the length-prefixed
+	// message alone, which is why a client that forgot this worked against it.
+	// Close shuts only the write direction; the read direction stays open for
+	// the response. The deferred Close above is then a no-op.
+	if err := stream.Close(); err != nil {
+		logFailure("*** DoQ failed to close the query stream: %v", err)
+		return nil, 0, fmt.Errorf("failed to close the query stream: %v", err)
+	}
+
 	// Read the response length
 	if _, err := io.ReadFull(stream, lenBuf); err != nil {
 		logFailure("*** DoQ failed to read response length: %v", err)

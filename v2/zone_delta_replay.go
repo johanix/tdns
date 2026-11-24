@@ -182,6 +182,12 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 	// chain check against a serial this pass has already moved.
 	zd.mu.Lock()
 	zd.deltasReplayed = true
+	// What the replay put at the transport signal's owners, for the record
+	// of what the pass stored: the journal yields it again at every restart
+	// until a zone write drops these deltas (noteSignalsJournaled).
+	if owners := signalOwnersInActions(actions); len(owners) > 0 {
+		zd.noteSignalsJournaled(owners, zd.publishedSnapshot(), tailSerial)
+	}
 	if applied {
 		// And mark the zone DIRTY. The file demonstrably lacks what was just
 		// applied -- that is what the journal was for -- and dirty is exactly

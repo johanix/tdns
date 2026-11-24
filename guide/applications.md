@@ -88,9 +88,14 @@ words rather than by passing `--config` on every invocation:
     tdns-ncli auth    zone list
     tdns-ncli sectdns zone list
 
+It reads its own config, `/etc/tdns/tdns-ncli.yaml`, which it builds
+from the daemons' own config files:
+
+    tdns-ncli config add /etc/tdns/tdns-auth2.yaml
+    tdns-ncli config list --check
+
 Installed alongside `tdns-cli`, which is unaffected and
-remains the supported management tool. Both read the same
-config file.
+remains the supported management tool.
 
 [Full documentation](multi-instance-cli.md)
 

@@ -6,36 +6,37 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
 
-// A failed proxy sync is re-run, a bounded number of times, with growing
-// waits (#722). Nothing else re-sends the change: the next transfer is compared
-// with a copy that already has it.
-func TestNextProxySyncRetry(t *testing.T) {
-	ds := DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: "child.test."}
+// A failed compare with the parent is re-run with growing waits, and the
+// retries do not run out: past the schedule's end the last wait repeats.
+// Nothing else re-sends what the parent lacks (#722): the next transfer is
+// compared with a copy that already has it, and the next change is a
+// difference against a zone that has it too.
+func TestACompareRetryNeverRunsOut(t *testing.T) {
+	ds := DelegationSyncRequest{Command: "PROXY-UPDATE-SETUP", ZoneName: "child.test."}
 	failedAt := time.Now()
 	var last time.Duration
-	for i := range delegationSyncRetryDelays {
-		next, delay, ok := nextDelegationSyncRetry(ds, failedAt)
-		if !ok {
-			t.Fatalf("attempt %d: retries ran out after %d of %d", i+1, i, len(delegationSyncRetryDelays))
-		}
+	for i := range len(delegationSyncRetryDelays) + 3 {
+		next, delay := nextDelegationSyncRetry(ds, failedAt)
 		if next.Attempt != ds.Attempt+1 || !next.FailedAt.Equal(failedAt) {
 			t.Errorf("attempt %d: next = {Attempt %d, FailedAt %v}", i+1, next.Attempt, next.FailedAt)
 		}
-		if next.Command != "PROXY-SYNC" || next.ZoneName != ds.ZoneName {
+		if next.Command != ds.Command || next.ZoneName != ds.ZoneName {
 			t.Errorf("attempt %d: the retry lost the request: %+v", i+1, next)
 		}
-		if delay <= last {
+		switch {
+		case i < len(delegationSyncRetryDelays) && delay <= last:
 			t.Errorf("attempt %d: wait %s does not grow from %s", i+1, delay, last)
+		case i >= len(delegationSyncRetryDelays) && delay != delegationSyncRetryDelays[len(delegationSyncRetryDelays)-1]:
+			t.Errorf("attempt %d, past the schedule: wait %s, want the last, %s", i+1, delay,
+				delegationSyncRetryDelays[len(delegationSyncRetryDelays)-1])
 		}
 		last = delay
 		ds = next
-	}
-	if _, _, ok := nextDelegationSyncRetry(ds, failedAt); ok {
-		t.Error("retries never run out")
 	}
 }
 
@@ -47,7 +48,7 @@ func TestProxyRetrySuperseded(t *testing.T) {
 	failedAt := time.Now()
 
 	first := DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName}
-	retry, _, _ := nextDelegationSyncRetry(first, failedAt)
+	retry, _ := nextDelegationSyncRetry(first, failedAt)
 
 	if delegationSyncRetrySuperseded(zd, first) {
 		t.Error("a first attempt was treated as a superseded retry")
@@ -93,11 +94,99 @@ func TestProxyNoopSyncDoesNotSupersedeARetry(t *testing.T) {
 	if stamped {
 		t.Error("a sync that forwarded nothing was recorded as a success")
 	}
+	if !zd.delegationOutOfStep.Load() {
+		t.Error("a sync that forwarded nothing left the parent marked in step; the next change would assume it")
+	}
 
 	// And so a retry of an earlier failure still runs.
-	retry, _, _ := nextDelegationSyncRetry(DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName},
+	retry, _ := nextDelegationSyncRetry(DelegationSyncRequest{Command: "PROXY-SYNC", ZoneName: zd.ZoneName},
 		time.Now().Add(-time.Minute))
 	if delegationSyncRetrySuperseded(zd, retry) {
 		t.Error("a retry was dropped after a sync that forwarded nothing")
+	}
+}
+
+// The proxy's compare clears the out-of-step mark only when it reached the
+// parent: found it in step, or brought it there. One that sent nothing for want
+// of a usable scheme returns no error and leaves the mark, and one that failed
+// is retried (re-review 3, F4). Before, no proxy compare cleared it, so after
+// one failed PROXY-SYNC every later change went as a compare.
+func TestAProxyCompareClearsOutOfStepOnlyWhenItReachedTheParent(t *testing.T) {
+	zd := &ZoneData{ZoneName: "child.test."}
+	ds := DelegationSyncRequest{Command: "PROXY-UPDATE-SETUP", ZoneName: zd.ZoneName, ZoneData: zd}
+	for _, c := range []struct {
+		name     string
+		inStep   bool
+		err      error
+		wantMark bool
+		retries  int
+	}{
+		{"reached the parent", true, nil, false, 0},
+		{"no usable scheme", false, nil, true, 0},
+		{"failed", false, errors.New("the parent refused"), true, 1},
+	} {
+		zd.delegationOutOfStep.Store(true)
+		var requeued []DelegationSyncRequest
+		handleProxyCompareWith(zd, ds,
+			func() (string, bool, error) { return "", c.inStep, c.err },
+			func(next DelegationSyncRequest, _ time.Duration) { requeued = append(requeued, next) })
+		if got := zd.delegationOutOfStep.Load(); got != c.wantMark {
+			t.Errorf("%s: marked out of step %v, want %v", c.name, got, c.wantMark)
+		}
+		if len(requeued) != c.retries {
+			t.Errorf("%s: %d retries, want %d", c.name, len(requeued), c.retries)
+		}
+	}
+}
+
+// What a proxy compare reports (proxyCompareOutcome): one that could not read
+// all of the parent's delegation is retried, found in sync or sent, as an
+// explicit sync's is; otherwise the parent is in step only when the compare
+// compared the DS and found it in sync, or the send was one the parent said it
+// applied, UPDATE or API. And what a proxy sync records (noteProxySyncForwarded):
+// in step after an UPDATE or API, and out of step when nothing was forwarded
+// or it went by NOTIFY, whatever the mark was (CodeRabbit on bb87c26b and
+// 4d398b97). A proxy compare that sent by NOTIFY marks the parent too.
+func TestAProxyCompareOrSyncCountsOnlyWhatTheParentApplied(t *testing.T) {
+	complete := DelegationSyncStatus{dsCompared: true}
+	unread := DelegationSyncStatus{dsCompared: true, Unread: []string{"ns1 A"}}
+	for _, c := range []struct {
+		name   string
+		dss    DelegationSyncStatus
+		scheme string
+		inStep bool
+		unread bool
+	}{
+		{"found in sync", complete, "", true, false},
+		{"sent by UPDATE", complete, "UPDATE", true, false},
+		{"sent by API", complete, "API", true, false},
+		{"taken by the notifier", complete, "NOTIFY", false, false},
+		{"found in sync without all of the glue", unread, "", false, true},
+		{"sent without all of the glue", unread, "UPDATE", false, true},
+	} {
+		cmp := &ZoneData{ZoneName: "child.test."}
+		inStep, err := cmp.proxyCompareOutcome(c.dss, c.scheme)
+		if inStep != c.inStep || errors.Is(err, errDelegationNotAllRead) != c.unread || (err != nil && !c.unread) {
+			t.Errorf("%s: in step %v, err %v; want in step %v, not-all-read %v", c.name, inStep, err, c.inStep, c.unread)
+		}
+		// From a clear mark: only a NOTIFY sets it.
+		if got := cmp.delegationOutOfStep.Load(); got != (c.scheme == "NOTIFY") {
+			t.Errorf("%s: from a clear mark, marked out of step %v, want %v", c.name, got, c.scheme == "NOTIFY")
+		}
+	}
+
+	zd := &ZoneData{ZoneName: "child.test."}
+	for _, c := range []struct {
+		scheme       string
+		before, want bool
+	}{
+		{"UPDATE", true, false}, {"API", true, false}, {"", false, true},
+		{"NOTIFY", true, true}, {"NOTIFY", false, true},
+	} {
+		zd.delegationOutOfStep.Store(c.before)
+		zd.noteProxySyncForwarded(c.scheme)
+		if got := zd.delegationOutOfStep.Load(); got != c.want {
+			t.Errorf("a proxy sync forwarded by %q with the mark %v: marked %v, want %v", c.scheme, c.before, got, c.want)
+		}
 	}
 }

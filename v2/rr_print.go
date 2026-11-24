@@ -536,6 +536,21 @@ func digStyleServer(host, port string) string {
 	return fmt.Sprintf("%s#%s(%s)", host, port, host)
 }
 
+// paddingOptionString formats an EDNS(0) Padding option (RFC 7830) as its
+// name and length. The generic dns.EDNS0_PADDING.String() is a bare hex dump
+// of the payload, which for the all-zero padding the RFC asks for is a long
+// run of zeros with no hint of what option it is or how big. RFC 7830 says
+// the payload SHOULD be zero, so a payload that is not is flagged.
+func paddingOptionString(p *dns.EDNS0_PADDING) string {
+	s := fmt.Sprintf("PADDING: %d octets", len(p.Padding))
+	for _, b := range p.Padding {
+		if b != 0 {
+			return s + " (not all zero)"
+		}
+	}
+	return s
+}
+
 func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, options map[string]string) {
 	if short {
 		// dig-compatible +short: print only the RDATA of each Answer RR,
@@ -634,6 +649,8 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 						}
 					}
 					fmt.Printf(";; EDNS: option: %d (%s)\n", ede.InfoCode, edeText)
+				} else if pad, ok := option.(*dns.EDNS0_PADDING); ok {
+					fmt.Printf(";; EDNS: option: %s\n", paddingOptionString(pad))
 				} else {
 					fmt.Printf(";; EDNS: option: %s\n", option.String())
 				}
