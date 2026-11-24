@@ -94,3 +94,20 @@ func TestBulkImportDispositionsShowRefusals(t *testing.T) {
 	}
 	checkLines72(t, "dispositions", out)
 }
+
+// A truststore refusal prints through the same printer as the keystore's.
+func TestTruststoreRefusalPrintsReadably(t *testing.T) {
+	const needsAdmin = "/api/v1/truststore child-sig0-mgmt needs admin, which is available only on the daemon's local admin socket"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, needsAdmin, http.StatusForbidden)
+	}))
+	defer srv.Close()
+	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: srv.URL, AuthMethod: "none", Client: srv.Client()}
+
+	_, err := SendTruststore(api, tdns.TruststorePost{Command: "child-sig0-mgmt", SubCommand: "list"})
+	got := keystoreErrorText(err)
+	if !strings.HasPrefix(got, "Refused by tdns-auth (HTTP 403):\n  /api/v1/truststore child-sig0-mgmt needs admin") || strings.Contains(got, "Error") {
+		t.Errorf("a truststore refusal prints\n%s", got)
+	}
+	checkLines72(t, "truststore refusal", got)
+}
