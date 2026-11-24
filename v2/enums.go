@@ -610,8 +610,7 @@ func (zd *ZoneData) setErrorLocked(errtype ErrorType, errmsg string, args ...int
 		zd.Errors[errtype] = ZoneError{Type: errtype, Msg: fmt.Sprintf(errmsg, args...)}
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
-	// no-refresh-hooks: republishes an existing ZoneData.
-	Zones.Set(zd.ZoneName, zd)
+	zd.republishLocked()
 }
 
 // snapshotErrorsLocked copies the current entries for the given categories, for
@@ -661,6 +660,21 @@ func (zd *ZoneData) clearErrorLocked(errtype ErrorType) {
 		}
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
+	zd.republishLocked()
+}
+
+// republishLocked puts zd back in Zones after an error change, as SetError
+// and ClearError always have, except for a zone that RemoveDynamicZone took
+// out (zd.removed). A refresh of a zone deleted while it ran clears or sets
+// an error when it ends; republishing then brought the zone back, without
+// its keys, and the next rewrite of the dynamic config persisted it.
+// Otherwise unchanged: callers that build a zone in error state rely on the
+// registration, and some replace a live entry of the same name through it.
+// The caller MUST hold zd.mu.
+func (zd *ZoneData) republishLocked() {
+	if zd.removed.Load() {
+		return
+	}
 	// no-refresh-hooks: republishes an existing ZoneData.
 	Zones.Set(zd.ZoneName, zd)
 }

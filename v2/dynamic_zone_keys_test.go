@@ -450,3 +450,31 @@ func TestRolloverTickSkipsARemovedZone(t *testing.T) {
 		t.Fatalf("no rollover state after a tick on a served zone: %+v %v", row, err)
 	}
 }
+
+// A refresh of a zone deleted while it ran sets or clears an error when it
+// ends. That must not put the zone back in Zones (it came back without its
+// keys, and the next rewrite persisted it). A zone not registered yet is
+// still registered by SetError, as before.
+func TestAnErrorChangeDoesNotResurrectADeletedZone(t *testing.T) {
+	conf, _ := keysFixture(t)
+	zd, ok := Zones.Get(keysZone)
+	if !ok {
+		t.Fatal("fixture zone not registered")
+	}
+	if _, err := conf.RemoveDynamicZone(keysZone, false); err != nil {
+		t.Fatal(err)
+	}
+	zd.SetError(RefreshError, "the refresh that ran across the delete failed")
+	zd.ClearError(RefreshError)
+	if _, back := Zones.Get(keysZone); back {
+		t.Fatal("an error change on the deleted zone put it back in Zones")
+	}
+
+	const fresh = "fresh.example."
+	t.Cleanup(func() { Zones.Remove(fresh) })
+	fz := &ZoneData{ZoneName: fresh}
+	fz.SetError(ConfigError, "built in error state")
+	if cur, ok := Zones.Get(fresh); !ok || cur != fz {
+		t.Error("SetError no longer registers a zone that is not in Zones yet")
+	}
+}
