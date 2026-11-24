@@ -47,7 +47,7 @@ func runPing(role string, cmd *cobra.Command, args []string) {
 			fmt.Printf("Error: connection refused. Most likely the daemon is not running\n")
 			os.Exit(1)
 		} else {
-			log.Fatalf("Error from SendPing: %v", err)
+			fatalf("ping: %v", err)
 		}
 	}
 
@@ -73,13 +73,46 @@ func runPing(role string, cmd *cobra.Command, args []string) {
 		uptimeStr = fmt.Sprintf("%dm%ds", minutes, seconds)
 	}
 
+	// One line, saying in the parentheses how this CLI reached the daemon and
+	// who the daemon took it for: the first thing to look at when access does
+	// not work as expected. The local admin socket is chosen at run time
+	// (through config-file:), so the CLI config alone does not say which.
+	from := pr.Msg // a daemon that does not say who it is: its own words
+	if pr.Daemon != "" {
+		from = "pong (" + pingHow(api, pr) + ") from " + pr.Daemon + " @ " + pr.ServerHost
+	}
 	if tdns.Globals.Verbose {
 		fmt.Printf("%s (version %s): pings: %d, pongs: %d, uptime: %s, time: %s, client: %s\n",
-			pr.Msg, pr.Version, pr.Pings, pr.Pongs, uptimeStr, pr.Time.Format(timelayout), pr.Client)
+			from, pr.Version, pr.Pings, pr.Pongs, uptimeStr, pr.Time.Format(timelayout), pr.Client)
 	} else {
 		fmt.Printf("%s: pings: %d, pongs: %d, uptime: %s, time: %s\n",
-			pr.Msg, pr.Pings, pr.Pongs, uptimeStr, pr.Time.Format(timelayout))
+			from, pr.Pings, pr.Pongs, uptimeStr, pr.Time.Format(timelayout))
 	}
+}
+
+// pingHow is how api reached its daemon and who the daemon took it for:
+// the socket's path on the local admin socket (always admin; with -v the
+// daemon's "client: admin socket" says it is the socket), else
+// "TLS" (or "no TLS") and the role, and for a certificate client its name:
+// "TLS, admin", "TLS, read-write, certificate anna". A daemon that does not
+// report the role in parts gets its own sentence instead.
+func pingHow(api *tdns.ApiClient, pr tdns.PingResponse) string {
+	if api.Socket != "" {
+		return api.Socket
+	}
+	parts := []string{"no TLS"}
+	if strings.HasPrefix(strings.ToLower(api.BaseUrl), "https://") {
+		parts[0] = "TLS"
+	}
+	switch {
+	case pr.Role != "" && pr.Via == "certificate":
+		parts = append(parts, pr.Role, "certificate "+pr.Identity)
+	case pr.Role != "":
+		parts = append(parts, pr.Role)
+	case pr.Auth != "":
+		parts = append(parts, pr.Auth)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func init() {

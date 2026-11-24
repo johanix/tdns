@@ -1367,6 +1367,19 @@ func APIzoneChildSync(ctx context.Context, app *AppDetails) func(w http.Response
 			return
 		}
 
+		// A childsync-proxy publishes nothing into its own copy of the zone
+		// (SetupZoneSync, design §3.1): the next transfer replaces that copy,
+		// and the origination gate below lets a tdns-agent through, so the
+		// update would be applied, reported as done, and lost. Its
+		// advertisement reaches the parent primary through the reconciler.
+		if zd.Options[OptChildSyncProxy] && (req.Command == "publish" || req.Command == "unpublish") {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Zone %q is a childsync-proxy: %q refused. It publishes nothing into its own copy, "+
+				"which the next transfer replaces; its advertisement goes to the parent primary "+
+				"(see \"zone childsync advert\" and \"zone childsync reconcile\")", zd.ZoneName, req.Command)
+			return
+		}
+
 		// Origination gate: publish/unpublish write into the zone.
 		if originationAPICommands[req.Command] {
 			if msg := zoneOriginationRefusal(zd, req.Command); msg != "" {

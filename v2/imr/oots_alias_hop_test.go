@@ -102,7 +102,7 @@ func TestOOTSAliasHopFoundBetweenMissAndJoin(t *testing.T) {
 		// Another owner's lookup of the hop ends here: it has cached the hop
 		// and recorded its end, and has followed its own owners again.
 		cacheSignal(imr, target, recs, cache.ValidationStateSecure)
-		if got := imr.signalAliasHops.join(target, "_dns.ns.other.example.", time.Now()); got != hopStarted {
+		if got, _ := imr.signalAliasHops.join(target, "_dns.ns.other.example.", time.Now()); got != hopStarted {
 			t.Errorf("the other owner's join: %v", got)
 		}
 		imr.signalAliasHops.done(target, time.Now())

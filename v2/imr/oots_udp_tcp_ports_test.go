@@ -170,6 +170,7 @@ func TestBackoffAndRTTKeyedByEndpoint(t *testing.T) {
 func TestDNSKEYAttemptKeyIsTheEndpoint(t *testing.T) {
 	const addr = "192.0.2.1"
 	imr := newTestImr(t)
+	imr.dnskeyTransport = DNSKEYTransportTryEncrypted
 	ctx := context.Background()
 	a := cache.NewAuthServer("ns1.example.")
 	applyTransportMapWithPorts(a, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53TCP: 5354})
@@ -177,11 +178,19 @@ func TestDNSKEYAttemptKeyIsTheEndpoint(t *testing.T) {
 	applyTransportMapWithPorts(b, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53TCP: 5355})
 	c := cache.NewAuthServer("ns3.example.")
 	applyTransportMapWithPorts(c, map[string]uint8{"udp": 100}, map[core.Transport]uint16{core.TransportDo53TCP: 5354})
-	ka := imr.dnskeyAttemptKey(ctx, a, nil, addr, core.TransportDo53TCP)
-	if ka == imr.dnskeyAttemptKey(ctx, b, nil, addr, core.TransportDo53TCP) {
+	key := func(s *cache.AuthServer) cache.AddrXport {
+		t.Helper()
+		k, ok := imr.resolveDNSKEYAttempt(ctx, s, nil, addr).key()
+		if !ok || k.Transport != core.TransportDo53TCP {
+			t.Fatalf("%s: key %+v %v, want one over tcp", s.Name, k, ok)
+		}
+		return k
+	}
+	ka := key(a)
+	if ka == key(b) {
 		t.Errorf("one key for two tcp endpoints: %v", ka)
 	}
-	if kc := imr.dnskeyAttemptKey(ctx, c, nil, addr, core.TransportDo53TCP); ka != kc {
+	if kc := key(c); ka != kc {
 		t.Errorf("two keys for one endpoint: %v and %v", ka, kc)
 	}
 }

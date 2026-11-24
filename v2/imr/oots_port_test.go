@@ -348,8 +348,10 @@ func TestProbeStubServersDialsSignalPort(t *testing.T) {
 		delete(imr.Cache.DNSClient, tr)
 	}
 	imr.Cache.DNSClient[core.TransportDoT] = dot
+	// A stub configured with no transports or ALPN list: a configured one
+	// takes no received signal (notConfigured).
 	if err := imr.Cache.AddStub(zone, []cache.AuthServer{
-		{Name: "ns." + zone, Addrs: []string{"192.0.2.1"}, Alpn: []string{"dot"}},
+		{Name: "ns." + zone, Addrs: []string{"192.0.2.1"}},
 	}); err != nil {
 		t.Fatalf("AddStub: %v", err)
 	}

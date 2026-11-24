@@ -252,12 +252,15 @@ func (imr *Imr) followLookupAlias(set *svcbSignalSet, walk aliasWalk) {
 			if testHookAliasHopMissed != nil {
 				testHookAliasHopMissed(target)
 			}
-			if imr.lookupSignalAliasHop(set.owner, target) == hopCoolingDown {
+			switch got, wait := imr.lookupSignalAliasHop(set.owner, target); got {
+			case hopCoolingDown:
 				// The hop's last lookup ended less than signalAliasHopRetry
 				// ago, perhaps between the miss and the join, too late to
 				// follow this owner again. Whatever it found is in the
 				// cache by now.
 				rrs, state, held = imr.cachedSignalHop(target, grace)
+			case hopStarted, hopJoined:
+				set.hop = &hopWait{target: target, done: wait}
 			}
 		}
 		if len(rrs) == 0 {
@@ -318,6 +321,7 @@ const signalAliasHopRetry = 30 * time.Second
 type aliasHopTracker struct {
 	mu      sync.Mutex
 	waiting map[string]map[string]string // target -> owners waiting (canonical -> as given); present while a lookup is in flight
+	ended   map[string]chan struct{}     // target -> closed when its lookup in flight ends (done)
 	next    map[string]time.Time         // target -> when it may be looked up again
 	retry   time.Duration                // signalAliasHopRetry when zero; tests set it
 	// running counts the lookups in flight, each until the owners that
@@ -340,19 +344,20 @@ const (
 
 // join enters owner among those waiting for target's lookup, and reports
 // whether the caller is to start that lookup (hopStarted). When a lookup is
-// in flight, owner waits for it (hopJoined). When target was looked up less
-// than signalAliasHopRetry ago, owner is not entered (hopCoolingDown): no
-// lookup is coming, and what the last one found is in the cache.
-func (tr *aliasHopTracker) join(target, owner string, now time.Time) hopLookup {
+// in flight, owner waits for it (hopJoined). Either way it returns a channel
+// that is closed when the lookup ends. When target was looked up less than
+// signalAliasHopRetry ago, owner is not entered (hopCoolingDown): no lookup
+// is coming, and what the last one found is in the cache.
+func (tr *aliasHopTracker) join(target, owner string, now time.Time) (hopLookup, <-chan struct{}) {
 	key := core.CanonicalizeName(target)
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
 	if w, ok := tr.waiting[key]; ok {
 		w[core.CanonicalizeName(owner)] = owner
-		return hopJoined
+		return hopJoined, tr.ended[key]
 	}
 	if now.Before(tr.next[key]) {
-		return hopCoolingDown
+		return hopCoolingDown, nil
 	}
 	for k, at := range tr.next {
 		if !now.Before(at) {
@@ -362,8 +367,13 @@ func (tr *aliasHopTracker) join(target, owner string, now time.Time) hopLookup {
 	if tr.waiting == nil {
 		tr.waiting = map[string]map[string]string{}
 	}
+	if tr.ended == nil {
+		tr.ended = map[string]chan struct{}{}
+	}
 	tr.waiting[key] = map[string]string{core.CanonicalizeName(owner): owner}
-	return hopStarted
+	ch := make(chan struct{})
+	tr.ended[key] = ch
+	return hopStarted, ch
 }
 
 // done ends target's lookup. It returns the owners that waited for it, and
@@ -377,6 +387,10 @@ func (tr *aliasHopTracker) done(target string, now time.Time) []string {
 		owners = append(owners, owner)
 	}
 	delete(tr.waiting, key)
+	if ch, ok := tr.ended[key]; ok {
+		close(ch)
+		delete(tr.ended, key)
+	}
 	if tr.next == nil {
 		tr.next = map[string]time.Time{}
 	}
@@ -406,12 +420,17 @@ var signalAliasHopLookupHook func(ctx context.Context, imr *Imr, target string) 
 // signal in its answer follows its own alias through the cache only
 // (aliasWalkFor): the next hop is for the waiting owners' walks to look up,
 // each within its maxSignalAliasDepth.
-func (imr *Imr) lookupSignalAliasHop(owner, target string) hopLookup {
+//
+// For hopStarted and hopJoined it also returns a channel that is closed when
+// the lookup ends, once what it found is in the cache: a query waiting for a
+// signal the alias may lead to waits on it (awaitTransportSignalsUntil).
+func (imr *Imr) lookupSignalAliasHop(owner, target string) (hopLookup, <-chan struct{}) {
 	if imr.TransportSignalDiscovery == nil {
-		return hopNoLookup
+		return hopNoLookup, nil
 	}
-	if joined := imr.signalAliasHops.join(target, owner, time.Now()); joined != hopStarted {
-		return joined
+	joined, wait := imr.signalAliasHops.join(target, owner, time.Now())
+	if joined != hopStarted {
+		return joined, wait
 	}
 	lookup := func(ctx context.Context, imr *Imr, target string) (*Response, error) {
 		return imr.imrQuery(ctx, target, dns.TypeSVCB, dns.ClassINET, false)
@@ -434,7 +453,14 @@ func (imr *Imr) lookupSignalAliasHop(owner, target string) hopLookup {
 			imr.refollowAliasOwner(aliasWalk{fresh: target}, owner)
 		}
 	}()
-	return hopStarted
+	return hopStarted, wait
+}
+
+// hopWait is the lookup of an alias hop that a signal waits for: the hop, and
+// a channel closed when the lookup ends (lookupSignalAliasHop).
+type hopWait struct {
+	target string
+	done   <-chan struct{}
 }
 
 // maxSignalRefollows bounds how often refollowAliasOwner installs again

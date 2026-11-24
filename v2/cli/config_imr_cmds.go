@@ -29,13 +29,21 @@ import (
 // zone/tsig/keystore state, so this group carries check, mwe and status
 // (unlike auth's config group, which also has reload*).
 func NewImrConfigCmd() *cobra.Command {
+	return NewImrConfigCmdFor("imr")
+}
+
+// NewImrConfigCmdFor is NewImrConfigCmd for a given instance: role is the key
+// GetApiClient resolves, "imr" for the canonical tdns-imr and the instance's
+// own name for an extra one. check and status talk to THAT daemon, and check
+// reads that instance's config-file by default.
+func NewImrConfigCmdFor(role string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "config",
 		Short: "Validate or generate a tdns-imr configuration",
 	}
-	c.AddCommand(newImrConfigCheckCmd())
-	c.AddCommand(newImrConfigMweCmd())
-	c.AddCommand(newImrConfigStatusCmd())
+	c.AddCommand(newImrConfigCheckCmd(role))
+	c.AddCommand(newImrConfigMweCmd(role))
+	c.AddCommand(newImrConfigStatusCmd(role))
 	return c
 }
 
@@ -43,7 +51,7 @@ func NewImrConfigCmd() *cobra.Command {
 // imr config status
 // ---------------------------------------------------------------------------
 
-func newImrConfigStatusCmd() *cobra.Command {
+func newImrConfigStatusCmd(role string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Report the running tdns-imr daemon's status, including priming and forward upstreams",
@@ -53,7 +61,7 @@ and how, and the configured stub and forward zones with per-upstream
 reachability (fed by the startup probe and live queries), plus the
 process's descriptor and goroutine counts (tdns#443).`,
 		Run: func(cmd *cobra.Command, args []string) {
-			resp, err := fetchImrStatus()
+			resp, err := fetchImrStatus(role)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
@@ -62,24 +70,36 @@ process's descriptor and goroutine counts (tdns#443).`,
 				fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 				os.Exit(1)
 			}
-			fmt.Println(resp.Msg)
-			if len(resp.ServerErrors) > 0 {
-				fmt.Printf("Active errors:\n")
-				for _, e := range resp.ServerErrors {
-					fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
-				}
-			}
-			// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
-			// init failed (the Upstream/ImrPriming husk) is precisely a
-			// moment to look at process resources, not to hide them.
-			renderProcStatus(resp.Proc)
-			if resp.Imr == nil {
-				fmt.Println("IMR: no resolver state reported (engine not running)")
-				return
-			}
-			renderImrStatus(resp.Imr)
+			printImrConfigStatus(resp)
 		},
 	}
+}
+
+// printImrConfigStatus prints a tdns-imr daemon's `config status` reply.
+func printImrConfigStatus(resp tdns.ConfigResponse) {
+	fmt.Println(resp.Msg)
+	if len(resp.ServerErrors) > 0 {
+		fmt.Printf("Active errors:\n")
+		for _, e := range resp.ServerErrors {
+			fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
+		}
+	}
+	if line := apiSocketStatusLine(resp); line != "" {
+		fmt.Println(line)
+	}
+	// As in the auth printer: a TCP API an access file stopped stays
+	// stopped after the file is removed, so this does not depend on Access.
+	printApiTCPStopped(resp.ApiTCPStopped, resp.ApiTCPStoppedBy, resp.Access != nil)
+	// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
+	// init failed (the Upstream/ImrPriming husk) is precisely a
+	// moment to look at process resources, not to hide them.
+	renderProcStatus(resp.Proc)
+	printAccessStatus(resp.Access)
+	if resp.Imr == nil {
+		fmt.Println("IMR: no resolver state reported (engine not running)")
+		return
+	}
+	renderImrStatus(resp.Imr)
 }
 
 func init() {
@@ -90,7 +110,7 @@ func init() {
 // imr config check
 // ---------------------------------------------------------------------------
 
-func newImrConfigCheckCmd() *cobra.Command {
+func newImrConfigCheckCmd(role string) *cobra.Command {
 	var (
 		serverConfig string
 		offline      bool
@@ -103,8 +123,8 @@ consistency, and (unless --offline) check that the daemon is reachable and its
 apiserver matches the file.
 
 tdns-imr exposes no GET /config/paths endpoint, so the target file is the
-positional arg / --serverconfig, else the compiled-in default
-(/etc/tdns/tdns-imr.yaml).
+positional arg / --serverconfig, else the config-file: recorded for this daemon
+in the CLI config, else the compiled-in default (/etc/tdns/tdns-imr.yaml).
 
 Exit status is non-zero if any check FAILs (WARNs do not fail the run).`,
 		Args: cobra.MaximumNArgs(1),
@@ -112,15 +132,15 @@ Exit status is non-zero if any check FAILs (WARNs do not fail the run).`,
 			if len(args) == 1 && serverConfig == "" {
 				serverConfig = args[0]
 			}
-			runImrConfigCheck(serverConfig, offline)
+			runImrConfigCheck(role, serverConfig, offline)
 		},
 	}
-	c.Flags().StringVar(&serverConfig, "serverconfig", "", "path to the tdns-imr config file to check (default: /etc/tdns/tdns-imr.yaml)")
+	c.Flags().StringVar(&serverConfig, "serverconfig", "", "path to the tdns-imr config file to check (default: this daemon's config-file:, else /etc/tdns/tdns-imr.yaml)")
 	c.Flags().BoolVar(&offline, "offline", false, "do not contact the daemon; run static checks only")
 	return c
 }
 
-func runImrConfigCheck(explicitPath string, offline bool) {
+func runImrConfigCheck(role, explicitPath string, offline bool) {
 	tdns.SetSubsystemLevel("config", slog.LevelError)
 	rep := newCCReport()
 
@@ -129,7 +149,7 @@ func runImrConfigCheck(explicitPath string, offline bool) {
 	online := !offline
 	var status tdns.ConfigResponse
 	if online {
-		if s, err := fetchImrStatus(); err == nil {
+		if s, err := fetchImrStatus(role); err == nil {
 			status = s
 		} else {
 			online = false
@@ -141,7 +161,8 @@ func runImrConfigCheck(explicitPath string, offline bool) {
 
 	cfgPath := explicitPath
 	if cfgPath == "" {
-		cfgPath = tdns.DefaultImrCfgFile
+		// The entry's config-file: if it has one, else tdns-imr's default.
+		cfgPath = defaultCfgFileForRole(role)
 	}
 	cfgPath = absClean(cfgPath)
 
@@ -168,14 +189,16 @@ func runImrConfigCheck(explicitPath string, offline bool) {
 		rep.warn("Config file", "decode",
 			fmt.Sprintf("could not fully decode config into structs: %v", err), "")
 	}
+	// The socket the daemon serves, as ParseConfig fills it in.
+	cfg.ApiServer.Socket = tdns.ApiSocketPath(cfg.ApiServer.Socket, cfgPath)
 
 	checkImrEngine(&cfg, rep)
 	checkImrTrustAnchors(&cfg, rep)
 	checkImrApiServer(&cfg, v, rep)
-	checkApiServerCorrelation("imr", &cfg, rep)
+	checkApiServerCorrelation(role, &cfg, rep)
 
 	if online {
-		correlateImrApiServer(&cfg, status, rep)
+		correlateImrApiServer(&cfg, status, acceptedApiKey(role), rep)
 	}
 
 	finishCheckconf(rep)
@@ -295,18 +318,30 @@ func checkImrTrustAnchors(cfg *tdns.Config, rep *ccReport) {
 
 func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 	const g = "API server"
-	if len(cfg.ApiServer.Addresses) == 0 {
-		rep.info(g, "addresses", "apiserver.addresses is empty — the management API will not listen (the resolver still runs)")
-		return
-	}
-	rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.ApiServer.Addresses))
-
+	// tdns-imr builds its API router whatever the addresses say, and stops
+	// at startup if that fails, so the key is checked first, for every case.
 	if cfg.ApiServer.ApiKey.Value() == "" {
 		rep.fail(g, "apikey", "apiserver.apikey is empty — the imr API router refuses to start without it",
 			"set a long random apiserver.apikey")
 	} else {
 		rep.pass(g, "apikey", "apiserver.apikey is set")
 	}
+	sock := cfg.ApiServer.Socket
+	var sockErr error
+	if sock != "" {
+		if sockErr = tdns.CheckApiSocketPath(sock); sockErr != nil {
+			rep.warn(g, "socket", fmt.Sprintf("%v: the daemon does not serve the local admin socket", sockErr), socketPathHint)
+		}
+	}
+	if len(cfg.ApiServer.Addresses) == 0 {
+		if sock != "" && sockErr == nil {
+			rep.info(g, "addresses", fmt.Sprintf("apiserver.addresses is empty: the management API is served only on the local admin socket %s", sock))
+		} else {
+			rep.info(g, "addresses", "apiserver.addresses is empty — the management API will not listen (the resolver still runs)")
+		}
+		return
+	}
+	rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.ApiServer.Addresses))
 
 	// usetls defaults TRUE for imr unless explicitly set false.
 	usetls := true
@@ -330,8 +365,8 @@ func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 // imr online correlation (thin: apiserver only)
 // ---------------------------------------------------------------------------
 
-func fetchImrStatus() (tdns.ConfigResponse, error) {
-	api, err := GetApiClient("imr", false)
+func fetchImrStatus(role string) (tdns.ConfigResponse, error) {
+	api, err := GetApiClient(role, false)
 	if err != nil {
 		return tdns.ConfigResponse{}, err
 	}
@@ -342,14 +377,13 @@ func fetchImrStatus() (tdns.ConfigResponse, error) {
 	return resp, nil
 }
 
-func correlateImrApiServer(cfg *tdns.Config, status tdns.ConfigResponse, rep *ccReport) {
+// correlateImrApiServer compares the file's apiserver block with the running
+// resolver's. acceptedKey is the API key the status request was sent with:
+// the reply came back, so the resolver accepted it. The reply itself no
+// longer carries the key (it is redacted).
+func correlateImrApiServer(cfg *tdns.Config, status tdns.ConfigResponse, acceptedKey string, rep *ccReport) {
 	const g = "Running-config drift"
-	if status.ApiServer.ApiKey.Value() != "" && cfg.ApiServer.ApiKey.Value() != "" &&
-		status.ApiServer.ApiKey.Value() != cfg.ApiServer.ApiKey.Value() {
-		rep.warn(g, "apikey",
-			"apiserver.apikey in the file differs from the running server's apikey",
-			"the running apikey changes only on restart")
-	}
+	warnApiKeyDrift(cfg, acceptedKey, rep, g)
 	if len(status.ApiServer.Addresses) > 0 && len(cfg.ApiServer.Addresses) > 0 &&
 		!sameStringSet(cfg.ApiServer.Addresses, status.ApiServer.Addresses) {
 		rep.warn(g, "apiserver-addresses",
@@ -363,34 +397,69 @@ func correlateImrApiServer(cfg *tdns.Config, status tdns.ConfigResponse, rep *cc
 // imr config mwe
 // ---------------------------------------------------------------------------
 
-func newImrConfigMweCmd() *cobra.Command {
+func newImrConfigMweCmd(role string) *cobra.Command {
 	var dir string
 	c := &cobra.Command{
 		Use:   "mwe",
 		Short: "Generate a minimal working example config (+ cert) for tdns-imr",
 		Long: `Generate a Minimal Working Example configuration for tdns-imr.
 
-Writes a single self-contained YAML to <dir>/tdns-imr.yaml (or <dir>/tdns-imr.yaml.mwe
-if that file already exists), and generates a self-signed cert/key pair under
-<dir>/certs unless one is already there. The resolver listens on IPv4 and IPv6
-localhost; DNSSEC validation is disabled so it resolves out of the box (the
-config shows, commented, how to turn it into a validating resolver). The
-generated tree passes ` + "`tdns-cli imr config check`" + `.`,
+Writes a single self-contained YAML to <dir>/tdns-imr.yaml, or, for an extra
+instance, to the config-file: of its apiservers entry. If that file already
+exists the MWE goes to <file>.mwe instead. A self-signed
+cert/key pair is generated under <dir>/certs unless one is already there. The
+resolver listens on IPv4 and IPv6 localhost; DNSSEC validation is disabled so it
+resolves out of the box (the config shows, commented, how to turn it into a
+validating resolver). The generated tree passes ` + "`tdns-cli imr config check`" + `.
+
+An extra instance (tdns-ncli imr2 config mwe) needs a config-file: on its entry,
+or --dir: without either the only name there is to write is the canonical
+resolver's tdns-imr.yaml.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			runImrConfigMwe(dir)
+			cfgPath, err := imrMwePath(role, dir, cmd.Flags().Changed("dir"))
+			if err != nil {
+				cliFatalf("%v", err)
+			}
+			runImrConfigMwe(role, cfgPath)
 		},
 	}
-	c.Flags().StringVar(&dir, "dir", "/etc/tdns", "base directory for the generated config and cert")
+	c.Flags().StringVar(&dir, "dir", "/etc/tdns", "base directory for the generated config and cert (for an extra instance the default is the directory of its config-file:)")
 	return c
 }
 
-func runImrConfigMwe(dir string) {
-	dir = filepath.Clean(dir)
-	cfgPath := filepath.Join(dir, "tdns-imr.yaml")
+// imrMwePath is the file `config mwe` writes for role. For an extra instance
+// it is the entry's config-file: when there is one (with --dir moving it to
+// another directory), else tdns-imr.yaml in dir. The canonical resolver keeps
+// what `imr config mwe` has always written, tdns-imr.yaml in dir, whatever its
+// entry's config-file: says: tdns-cli runs this same command.
+//
+// An extra instance with neither a config-file: nor --dir is refused: the
+// fallback name is the canonical resolver's file, so writing it would create
+// the wrong daemon's config (in /etc/tdns, next to the real one).
+func imrMwePath(role, dir string, dirGiven bool) (string, error) {
+	cf := ""
+	if ad := apiDetailsForRole(role); ad != nil && role != "imr" {
+		cf = ad.ConfigFile
+	}
+	switch {
+	case cf != "":
+		if !dirGiven {
+			return filepath.Clean(cf), nil
+		}
+		return filepath.Join(filepath.Clean(dir), filepath.Base(cf)), nil
+	case role != "imr" && !dirGiven:
+		return "", fmt.Errorf("%s has no config-file: in the CLI config, so config mwe does not know where its config goes; set config-file: on its apiservers entry, or give --dir", role)
+	}
+	return filepath.Join(filepath.Clean(dir), "tdns-imr.yaml"), nil
+}
+
+func runImrConfigMwe(role, cfgPath string) {
+	dir := filepath.Dir(cfgPath)
+	existing := ""
 	if _, err := os.Stat(cfgPath); err == nil {
+		existing = cfgPath
 		cfgPath += ".mwe"
-		fmt.Printf("Config %s already exists; writing MWE to %s instead.\n",
-			filepath.Join(dir, "tdns-imr.yaml"), cfgPath)
+		fmt.Printf("Config %s already exists; writing MWE to %s instead.\n", existing, cfgPath)
 	}
 
 	certsDir := filepath.Join(dir, "certs")
@@ -427,15 +496,39 @@ func runImrConfigMwe(dir string) {
 		fmt.Printf("Reused cert/key:   %s , %s\n", certFile, keyFile)
 	}
 
-	fmt.Printf("\nTo let `tdns-cli imr ...` reach this server, add to your tdns-cli.yaml:\n\n")
-	fmt.Printf("  apiservers:\n")
-	fmt.Printf("     - name:       tdns-imr\n")
+	if role == "imr" {
+		fmt.Printf("\nTo let `tdns-cli imr ...` reach this server, add to your tdns-cli.yaml:\n\n")
+		fmt.Printf("  apiservers:\n")
+		fmt.Printf("     - name:       tdns-imr\n")
+	} else {
+		// An extra instance lives in tdns-ncli's own config, where its entry
+		// already exists; say what it should hold.
+		// config-file: is the file the start command below uses, so a later
+		// `config check` reads the config this key and port came from. An
+		// existing file (with its own key and port) is left alone.
+		fmt.Printf("\nThe CLI entry for %s should read:\n\n", role)
+		fmt.Printf("     - name:        %s\n", role)
+		fmt.Printf("       role:        imr\n")
+		fmt.Printf("       config-file: %s\n", cfgPath)
+	}
 	fmt.Printf("       baseurl:    https://127.0.0.1:%s/api/v1\n", apiPort)
 	fmt.Printf("       apikey:     %s\n", apiKey)
 	fmt.Printf("       authmethod: X-API-Key\n")
+	if role != "imr" {
+		fmt.Printf("\nThe MWE uses API port %s and DNS port %s. A second resolver on the same\nhost needs ports of its own: change them before starting it.\n", apiPort, dnsPort)
+	}
+	if existing != "" {
+		fmt.Printf("\n%s is left as it was. If you move the MWE over it, use that path instead.\n", existing)
+	}
+	// An instance is checked through its own entry: `imr config check` would
+	// compare the file with the canonical resolver's port and key.
+	check := "tdns-cli imr config check"
+	if role != "imr" {
+		check = "tdns-ncli " + role + " config check"
+	}
 	fmt.Printf("\nNext steps:\n")
 	fmt.Printf("  tdns-imr --config %s        # start the resolver\n", cfgPath)
-	fmt.Printf("  tdns-cli imr config check --serverconfig %s   # validate\n", cfgPath)
+	fmt.Printf("  %s --serverconfig %s   # validate\n", check, cfgPath)
 }
 
 func renderImrMweConfig(dir, certFile, keyFile, apiKey, apiPort, dnsPort string) string {

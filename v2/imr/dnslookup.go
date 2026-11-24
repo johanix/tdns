@@ -1105,12 +1105,16 @@ func (imr *Imr) awaitTargetsAndSignals(ctx context.Context, targets map[string]<
 // holds the attempt to: the address family it decided on and whether it
 // reserved that family's probe (ServerAddrXportTuple.Family and Probe;
 // FamilyUnknown for no decision), and the endpoints the pass before tried,
-// which an extra pass's selection left out (tupleSelection.tried). The zero
-// value holds the attempt to nothing.
+// which an extra pass's selection left out (tupleSelection.tried). Under the
+// DNSKEY bypass it also carries the transport and endpoint the query loop
+// resolved for the attempt and deduplicated it by (dnskeyAttempt), which
+// tryServer dials rather than resolve them again. The zero value holds the
+// attempt to nothing.
 type attemptSelection struct {
 	family cache.AddressFamily
 	probe  bool
 	tried  map[passTuple]bool
+	dnskey *dnskeyAttempt
 }
 
 // suspectWithoutProbe reports whether addr, the address an attempt is about
@@ -2027,18 +2031,21 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			// tuple's probabilistic pick, or the policy-preferred transport
 			// under dnskeyBypass.
 			effTransport := transport
-			var dnskeyKey cache.AddrXport
+			var dnskey *dnskeyAttempt
 			if dnskeyBypass {
 				// All tuples for this (server, addr) collapse to the same
-				// preferred transport; skip the ones we've already tried.
-				// The attempt is recorded once made, under the endpoint
-				// tryServer dialed (dnskeyTried).
-				eff := imr.preferredDNSKEYTransport(server)
-				dnskeyKey = imr.dnskeyAttemptKey(ctx, server, zone, addr, eff)
-				if dnskeyAttempted[dnskeyKey] {
+				// preferred transport; skip the ones whose endpoint was
+				// tried. The transport and endpoint are resolved once, and
+				// the attempt dials what it was checked by; it is recorded
+				// once made (dnskeyTried).
+				a := imr.resolveDNSKEYAttempt(ctx, server, zone, addr)
+				if key, ok := a.key(); ok && dnskeyAttempted[key] {
 					continue
 				}
-				effTransport = eff
+				if a.transport != 0 {
+					effTransport = a.transport
+				}
+				dnskey = &a
 			}
 
 			lastNS, lastAddr, lastTransport = nsname, addr, transport
@@ -2049,13 +2056,11 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy), attemptSelection{family: tuple.Family, probe: tuple.Probe, tried: triedBefore})
+			r, _, wireTransport, ep, err := imr.tryServer(ctx, server, zone, addr, transport, m, qname, qtype, dnskeyBypass, trafficClass(ctx, privacy), attemptSelection{family: tuple.Family, probe: tuple.Probe, tried: triedBefore, dnskey: dnskey})
 			if dnskeyBypass {
-				// Under the transport tryServer dialed: it reads the
-				// preference again, and a signal update in between may
-				// have changed it from effTransport. An attempt refused for
-				// its suspect family is none (dnskeyTried).
-				if key, ok := dnskeyTried(dnskeyKey, ep, wireTransport, err); ok {
+				// Under the endpoint tryServer dialed. An attempt that
+				// dialed none is not recorded (dnskeyTried).
+				if key, ok := dnskeyTried(ep, wireTransport, err); ok {
 					dnskeyAttempted[key] = true
 				}
 			}
@@ -2385,6 +2390,9 @@ type svcbSignalSet struct {
 	// when it was read (decideAdditionalPath, followLookupAlias). It is what
 	// the alias delegates the signal to.
 	final *svcbSignalSet
+	// hop is the lookup of the hop followLookupAlias stopped at, the cache
+	// not holding it, when that lookup is in flight.
+	hop *hopWait
 }
 
 // add collects one SVCB of the set's RRset. All three paths a signal arrives
@@ -2401,6 +2409,9 @@ func (set *svcbSignalSet) add(rr *dns.SVCB) {
 		set.alias = true
 		return
 	}
+	if !svcbMandatorySupported(rr) {
+		return
+	}
 	if rec, ok := ootsRecordFromSVCB(rr); ok {
 		set.recs = append(set.recs, rec)
 		return
@@ -2413,9 +2424,45 @@ func (set *svcbSignalSet) add(rr *dns.SVCB) {
 // svcbUsable reports whether rr is about the nameserver itself: rr is in
 // ServiceMode (SvcPriority above 0) and its TargetName is ".". SvcParams in
 // AliasMode are to be ignored (RFC 9460 section 2.4.2). The TLSA SvcParam is
-// read only from such a record.
+// read only from such a record, and not from one whose mandatory SvcParam
+// names a key tdns does not support (svcbMandatorySupported).
 func svcbUsable(rr *dns.SVCB) bool {
-	return svcbServiceMode(rr) && rr.Target == "."
+	return svcbServiceMode(rr) && rr.Target == "." && svcbMandatorySupported(rr)
+}
+
+// svcbMandatorySupported reports whether tdns supports every key rr's
+// mandatory SvcParam lists. RFC 9460 section 8 has a client ignore a
+// ServiceMode record whose mandatory names a key it does not support: the
+// record does not work for a client that ignores that key. The other records
+// of the RRset stay.
+func svcbMandatorySupported(rr *dns.SVCB) bool {
+	if rr == nil {
+		return false
+	}
+	for _, kv := range rr.Value {
+		m, ok := kv.(*dns.SVCBMandatory)
+		if !ok {
+			continue
+		}
+		for _, k := range m.Code {
+			if !svcbKeySupported(k) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// svcbKeySupported reports whether tdns acts on SvcParamKey k in a transport
+// signal: mandatory, alpn, port, oots and the TLSA key, and no-default-alpn,
+// which changes nothing for a transport that has no default ALPN. A key it
+// does not act on, such as dohpath or the address hints, is not supported.
+func svcbKeySupported(k dns.SVCBKey) bool {
+	switch k {
+	case dns.SVCB_MANDATORY, dns.SVCB_ALPN, dns.SVCB_NO_DEFAULT_ALPN, dns.SVCB_PORT, dns.SVCB_OOTS:
+		return true
+	}
+	return uint16(k) == SvcbTLSAKey
 }
 
 // svcbServiceMode reports whether rr is a ServiceMode record, whose SvcParams
@@ -2447,20 +2494,21 @@ func svcbPortValue(rr *dns.SVCB) uint16 {
 	return 0
 }
 
-// svcbAlpnCSV is rr's ALPN list, comma-separated. "" when rr has none, is
-// not in ServiceMode, or carries an oots SvcParam: a record with oots is read
-// by its oots alone, and one whose oots names no signal token is ignored, its
-// alpn not read in its place (hasOotsParam).
-func svcbAlpnCSV(rr *dns.SVCB) string {
+// svcbAlpnList is rr's ALPN list, each identifier as decoded from the wire,
+// one of which may hold a comma. nil when rr has none, is not in ServiceMode,
+// or carries an oots SvcParam: a record with oots is read by its oots alone,
+// and one whose oots names no signal token is ignored, its alpn not read in
+// its place (hasOotsParam).
+func svcbAlpnList(rr *dns.SVCB) []string {
 	if !svcbServiceMode(rr) || hasOotsParam(rr) {
-		return ""
+		return nil
 	}
 	for _, kv := range rr.Value {
 		if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
-			return strings.Join(a.Alpn, ",")
+			return a.Alpn
 		}
 	}
-	return ""
+	return nil
 }
 
 // ootsRecordFromSVCB is rr's oots SvcParam as a record, when rr carries one
@@ -2498,8 +2546,8 @@ func dropDo53WithEndpoint(raw map[string]uint8, port uint16, target string) bool
 // automatically mandatory for SVCB-DNS, so a client may not use the record
 // and drop the port.
 func alpnRecordFromSVCB(rr *dns.SVCB) (ootsRecord, bool) {
-	csv := svcbAlpnCSV(rr)
-	if csv == "" {
+	ids := svcbAlpnList(rr)
+	if len(ids) == 0 {
 		return ootsRecord{}, false
 	}
 	raw := map[string]uint8{}
@@ -2507,7 +2555,7 @@ func alpnRecordFromSVCB(rr *dns.SVCB) (ootsRecord, bool) {
 	// do53 in a record with a port or a target is skipped, as in oots
 	// (dropDo53WithEndpoint).
 	withEndpoint := svcbPortValue(rr) != 0 || svcbTarget(rr) != ""
-	for _, tok := range strings.Split(csv, ",") {
+	for _, tok := range ids {
 		tok = strings.ToLower(strings.TrimSpace(tok))
 		if _, dup := raw[tok]; tok == "" || dup || (withEndpoint && tok == "do53") {
 			continue
@@ -2694,9 +2742,11 @@ func (imr *Imr) collectSVCBSignal(pending map[string]*svcbSignalSet, serverName 
 // replaces the whole previous signal, ports included: the combined oots
 // records, or the combined ALPN-only records when no record carried oots. A
 // set that held an AliasMode record installs nothing. It reports whether a
-// signal was installed and whether the set had oots records. Promotion and
-// the follow-up lookups are the caller's.
-func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) (installed, oots bool) {
+// signal was installed and whether the set had oots records. guard says,
+// under the server's lock, whether the signal may replace the one the server
+// holds (cache.AuthServer.SetTransportSignalIf). Promotion and the follow-up
+// lookups are the caller's.
+func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet, guard signalGuard) (installed, oots bool) {
 	if server == nil || set == nil {
 		return false, false
 	}
@@ -2709,7 +2759,7 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 		if set.final != nil && !set.final.alias {
 			imr.lgDns().Debug("SVCB signal through an AliasMode record", "servername", server.Name,
 				"via", set.via, "state", pathState, "path", pathText)
-			installed, oots = imr.installSVCBSignal(server, set.final)
+			installed, oots = imr.installSVCBSignal(server, set.final, guard)
 			if set.final.awaitsLookup {
 				set.awaitsLookup = true
 			}
@@ -2725,14 +2775,14 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 		raw, ports, targets := combineOOTSEndpoints(recs)
 		imr.lgDns().Debug("SVCB oots for", "servername", server.Name, "value", MarshalTransport(raw), "ports", ports,
 			"targets", targets, "via", set.via, "state", pathState, "path", pathText)
-		return installTransportMap(server, raw, ports, targets, set.via, set.pathCopy()), true
+		return installTransportMap(server, raw, ports, targets, set.via, set.pathCopy(), guard), true
 	}
 	if len(alpnRecs) > 0 {
 		_, ports, targets := combineOOTSEndpoints(alpnRecs)
 		order := alpnOrder(alpnRecs)
 		imr.lgDns().Debug("SVCB ALPN for", "servername", server.Name, "alpn", strings.Join(order, ","), "ports", ports,
 			"targets", targets, "via", set.via, "state", pathState, "path", pathText)
-		return installAlpnSignal(server, order, ports, targets, set.via, set.pathCopy()), false
+		return installAlpnSignal(server, order, ports, targets, set.via, set.pathCopy(), guard), false
 	}
 	return false, false
 }
@@ -2741,7 +2791,7 @@ func (imr *Imr) installSVCBSignal(server *cache.AuthServer, set *svcbSignalSet) 
 // section. After an oots signal it promotes the server to opportunistic and
 // repeats the observation lookups.
 func (imr *Imr) applySVCBSignalSet(ctx context.Context, server *cache.AuthServer, set *svcbSignalSet) {
-	installed, oots := imr.installSVCBSignal(server, set)
+	installed, oots := imr.installSVCBSignal(server, set, notConfigured)
 	if set != nil && set.awaitsLookup && server != nil {
 		if owner := transportOwnerForNS(server.Name); owner != "" {
 			imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonVerify)
@@ -3087,36 +3137,53 @@ func replyMatchesQuery(r, query *dns.Msg) error {
 	return nil
 }
 
-// dnskeyAttemptKey is what a DNSKEY bypass attempt is deduplicated by: the
-// address and port the attempt would dial (attemptKey) and the transport. Two
-// servers that share an address but signal different ports or targets for
-// the transport are two endpoints, and a failure on one must not skip the
-// other.
-func (imr *Imr) dnskeyAttemptKey(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport) cache.AddrXport {
-	d, ok := imr.attemptKey(ctx, server, zone, addr, t, false)
-	if !ok {
-		return cache.AddrXport{Addr: addr, Transport: t}
+// dnskeyAttempt is a DNSKEY bypass attempt as the query loop resolves it,
+// once, for both its deduplication and its dial: the preferred transport
+// (preferredDNSKEYTransport), and the endpoint at it (endpointFor). Resolving
+// them twice, once to check the attempt and once to dial it, let a signal
+// installed in between send the attempt to an endpoint other than the one it
+// was checked by.
+type dnskeyAttempt struct {
+	transport core.Transport // 0 when force_encrypted leaves the server no transport
+	ep        endpointDial   // the zero endpointDial when none was chosen
+	err       error          // why no endpoint was chosen
+}
+
+// resolveDNSKEYAttempt is the DNSKEY bypass attempt at the server's own
+// address addr for a query to zone.
+func (imr *Imr) resolveDNSKEYAttempt(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string) dnskeyAttempt {
+	pref := imr.preferredDNSKEYTransport(server)
+	if pref == 0 {
+		return dnskeyAttempt{err: fmt.Errorf("dnssec.dnskey-query-transport=force_encrypted but server %s advertises no encrypted transport", server.Name)}
 	}
-	return cache.AddrXport{Addr: d.addr, Port: d.keyPort, Transport: t}
+	ep, err := imr.endpointFor(ctx, server, zone, addr, pref)
+	return dnskeyAttempt{transport: pref, ep: ep, err: err}
+}
+
+// key is what the attempt is deduplicated by: the address and port it dials
+// and its transport. Two servers that share an address but signal different
+// ports or targets for the transport are two endpoints, and a failure on one
+// must not skip the other. ok is false when the attempt dials no endpoint:
+// there is nothing to deduplicate it by.
+func (a dnskeyAttempt) key() (cache.AddrXport, bool) {
+	if a.err != nil || a.ep.addr == "" {
+		return cache.AddrXport{}, false
+	}
+	return cache.AddrXport{Addr: a.ep.addr, Port: a.ep.keyPort, Transport: a.transport}, true
 }
 
 // dnskeyTried is the key a DNSKEY bypass attempt is recorded under once it
 // has been made: the endpoint tryServer dialed, at its address and key port
-// over the effective transport eff, or pre, the key the attempt was checked
-// against, when tryServer chose no endpoint. Recording pre for an attempt
-// that dialed elsewhere, as a target whose addresses came in between the two
-// readings, would skip a later attempt at an endpoint never dialed. ok is
-// false for an attempt tryServer refused for its suspect family (err is an
-// errEndpointSuspectFamily), as passTried leaves it out of the pass's tried
-// set: nothing was sent, and a later tuple that holds the family's probe may
-// still make it.
-func dnskeyTried(pre cache.AddrXport, ep endpointDial, eff core.Transport, err error) (cache.AddrXport, bool) {
+// over the transport eff. ok is false for an attempt that dialed no endpoint
+// (ep is the zero endpointDial), whatever stopped it, a suspect family
+// (errEndpointSuspectFamily) included: nothing was sent, and recording the
+// endpoint it was checked by, for a target with no usable address the
+// nameserver's own address on the default port, would skip the attempt of
+// another nameserver at that address, never dialed.
+func dnskeyTried(ep endpointDial, eff core.Transport, err error) (cache.AddrXport, bool) {
 	var suspect errEndpointSuspectFamily
-	if errors.As(err, &suspect) {
+	if errors.As(err, &suspect) || ep.addr == "" {
 		return cache.AddrXport{}, false
-	}
-	if ep.addr == "" {
-		return pre, true
 	}
 	return cache.AddrXport{Addr: ep.addr, Port: ep.keyPort, Transport: eff}, true
 }
@@ -3148,17 +3215,22 @@ func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 // what selection decided for the attempt (attemptSelection).
 func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *cache.Zone, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool, class cache.TrafficClass, sel attemptSelection) (*dns.Msg, time.Duration, core.Transport, endpointDial, error) {
 	eff := t
+	dnskey := sel.dnskey
 	if dnskeyBypass {
 		// DNSKEY transport policy bypasses this server's probabilistic
-		// transport weights and picks the best advertised transport instead.
-		// Returns 0 only under force_encrypted when the server has no
-		// encrypted transport; in that case we must fail rather than fall
-		// back to cleartext.
-		pref := imr.preferredDNSKEYTransport(server)
-		if pref == 0 {
-			return nil, 0, t, endpointDial{}, fmt.Errorf("dnssec.dnskey-query-transport=force_encrypted but server %s advertises no encrypted transport", server.Name)
+		// transport weights and picks the best advertised transport instead,
+		// with its endpoint, as the query loop resolved them
+		// (resolveDNSKEYAttempt). None only under force_encrypted when the
+		// server has no encrypted transport; in that case we must fail
+		// rather than fall back to cleartext.
+		if dnskey == nil {
+			a := imr.resolveDNSKEYAttempt(ctx, server, zone, addr)
+			dnskey = &a
 		}
-		eff = pref
+		if dnskey.transport == 0 {
+			return nil, 0, t, endpointDial{}, dnskey.err
+		}
+		eff = dnskey.transport
 	}
 
 	select {
@@ -3178,7 +3250,15 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	// they are kept under the target's address and the endpoint's port, on
 	// the target's own instance (ep.server), as are the attempt's counters.
 	// The server keeps the count of answers its targets carried for it.
-	ep, eerr := imr.endpointFor(ctx, server, zone, addr, eff)
+	// Under the DNSKEY bypass the endpoint is the one the attempt was
+	// resolved with.
+	var ep endpointDial
+	var eerr error
+	if dnskeyBypass {
+		ep, eerr = dnskey.ep, dnskey.err
+	} else {
+		ep, eerr = imr.endpointFor(ctx, server, zone, addr, eff)
+	}
 	// The endpoint chosen now is checked again: selection checked the one
 	// an attempt would have dialed then, and an attempt earlier in the pass
 	// may since have made it, or the fallback it gives way to, lame or
@@ -3189,20 +3269,22 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	// endpoint at a target whose address has gone out of use gives way to
 	// the server's own address. And an extra pass does not dial an endpoint
 	// the pass before tried: a signal that changed since the selection may
-	// send the tuple there. None of this applies under the DNSKEY bypass,
-	// which dials the preferred transport whatever selection said, except
-	// that it dials a target's address of a suspect family only for a probe
-	// selection reserved: such an address is picked only when no other is
-	// left (chooseEndpointAddr).
+	// send the tuple there. The DNSKEY bypass dials the preferred transport
+	// whatever selection said, so neither the family selection decided on
+	// nor what the pass before tried holds it, except that it dials a
+	// target's address of a suspect family only for a probe selection
+	// reserved: such an address is picked only when no other is left
+	// (chooseEndpointAddr). Its endpoint is checked all the same: nothing
+	// else has, and it is not dialed while backed off or lame for the zone,
+	// a udp or tcp fallback to port 53 included.
 	if eerr == nil {
 		target := cache.JoinDialAddr(ep.addr, ep.port)
 		switch {
 		case (!dnskeyBypass || ep.redirect) && imr.suspectWithoutProbe(sel, ep.addr):
 			eerr = errEndpointSuspectFamily{server: server.Name, target: target, transport: eff}
-		case dnskeyBypass:
 		case !endpointUsable(ep.server, zone, ep.addr, ep.keyPort, eff):
 			eerr = errEndpointUnavailable{server: server.Name, target: target, transport: eff}
-		case sel.tried[passTuple{ep.server, ep.addr, ep.keyPort, eff}]:
+		case !dnskeyBypass && sel.tried[passTuple{ep.server, ep.addr, ep.keyPort, eff}]:
 			eerr = errEndpointTried{server: server.Name, target: target, transport: eff}
 		}
 	}
@@ -3339,6 +3421,12 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 // them is not applied. Returns true if at least one transport entry was
 // applied.
 func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string) bool {
+	return imr.installTransportString(server, s, notConfigured)
+}
+
+// installTransportString is applyTransportSignalToServer under guard
+// (installTransportMap).
+func (imr *Imr) installTransportString(server *cache.AuthServer, s string, guard signalGuard) bool {
 	if server == nil || s == "" {
 		return false
 	}
@@ -3347,7 +3435,7 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 		imr.lgDns().Debug("applyTransportSignalToServer: invalid transport string for :", "name", server.Name, "s", s, "q", err)
 		return false
 	}
-	return applyTransportMapToServer(server, kvMap)
+	return installTransportMap(server, kvMap, nil, nil, "", nil, guard)
 }
 
 // applyTransportMapToServer installs a decoded weight map on server, keeping
@@ -3383,15 +3471,17 @@ func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8)
 // oots rule assigned. A nil or empty ports map clears any port the previous
 // signal had stored: the new signal replaces the whole set.
 func applyTransportMapWithPorts(server *cache.AuthServer, kvMap map[string]uint8, ports map[core.Transport]uint16) bool {
-	return installTransportMap(server, kvMap, ports, nil, "", nil)
+	return installTransportMap(server, kvMap, ports, nil, "", nil, notConfigured)
 }
 
 // installTransportMap is applyTransportMapWithPorts for a signal read from an
 // SVCB RRset, with the targets its validated records assigned, where it
 // arrived and the validation state of its path, which are stored with it
-// (ReceivedSignal.Targets, ReceivedSignal.Via, ReceivedSignal.Path).
+// (ReceivedSignal.Targets, ReceivedSignal.Via, ReceivedSignal.Path). It
+// installs only where guard, called under the server's lock with the signal
+// the server holds, allows it, and reports whether it did.
 func installTransportMap(server *cache.AuthServer, kvMap map[string]uint8, ports map[core.Transport]uint16, targets map[core.Transport]string,
-	via string, path []cache.SignalHop) bool {
+	via string, path []cache.SignalHop, guard signalGuard) bool {
 	if server == nil || kvMap == nil {
 		return false
 	}
@@ -3413,8 +3503,7 @@ func installTransportMap(server *cache.AuthServer, kvMap map[string]uint8, ports
 	if len(weights) == 0 {
 		return false
 	}
-	server.SetTransportSignal(transports, alpnOrder, weights, received)
-	return true
+	return server.SetTransportSignalIf(guard, transports, alpnOrder, weights, received)
 }
 
 // signalSelection maps a signal's weights, the do53 shorthand expanded, to
@@ -3463,14 +3552,14 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) bool {
 // do53 is the shorthand for udp and tcp, as in oots. It reports whether a
 // signal was applied.
 func applyAlpnSignalWithPorts(server *cache.AuthServer, tokens []string, ports map[core.Transport]uint16) bool {
-	return installAlpnSignal(server, tokens, ports, nil, "", nil)
+	return installAlpnSignal(server, tokens, ports, nil, "", nil, notConfigured)
 }
 
 // installAlpnSignal is applyAlpnSignalWithPorts with the targets, where the
 // signal arrived and the validation state of its path, as installTransportMap
-// stores them.
+// stores them, under guard as installTransportMap installs.
 func installAlpnSignal(server *cache.AuthServer, tokens []string, ports map[core.Transport]uint16, targets map[core.Transport]string,
-	via string, path []cache.SignalHop) bool {
+	via string, path []cache.SignalHop, guard signalGuard) bool {
 	if server == nil {
 		return false
 	}
@@ -3505,8 +3594,7 @@ func installAlpnSignal(server *cache.AuthServer, tokens []string, ports map[core
 	}
 	received := &cache.ReceivedSignal{Source: "alpn", Weights: maps.Clone(weights), Ports: cache.DialPorts(ports),
 		Targets: targets, Via: via, Path: path}
-	server.SetTransportSignal(transports, order, weights, received)
-	return true
+	return server.SetTransportSignalIf(guard, transports, order, weights, received)
 }
 
 // parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section.
@@ -3582,26 +3670,51 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 }
 
 // applyTransportRRsetWalk is applyTransportRRsetFromAnswer, with walk for how
-// an AliasMode record in rrset is followed (followLookupAlias).
+// an AliasMode record in rrset is followed (followLookupAlias). The signal
+// replaces whatever each server holds, except a stub's configured transports
+// (notConfigured).
 func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *core.RRset, vstate cache.ValidationState, also ...*cache.AuthServer) {
-	if imr.Cache == nil || rrset == nil || len(rrset.RRs) == 0 {
-		return
+	imr.installTransportRRset(walk, qname, rrset, vstate, notConfigured, also...)
+}
+
+// rrsetInstall is what installTransportRRset found the signal RRset to lead
+// to.
+type rrsetInstall struct {
+	// signal reports that the RRset gives a signal: its own records, or the
+	// RRset its alias path ends at. Each server took it, or kept what it held
+	// where the guard said so.
+	signal bool
+	// hop is the lookup of the alias hop the RRset's path stopped at, when
+	// one is in flight: once it ends, the alias may lead to a signal.
+	hop *hopWait
+}
+
+// installTransportRRset installs the transport signal rrset, an answer for
+// qname (_dns.<nameserver>), on that nameserver's servers in the cache's zone
+// server maps and on those of also, under guard (installSVCBSignal). With
+// transport signals turned off it installs nothing: the RRset is an answer
+// like any other, cached and returned, but no signal.
+func (imr *Imr) installTransportRRset(walk aliasWalk, qname string, rrset *core.RRset, vstate cache.ValidationState, guard signalGuard, also ...*cache.AuthServer) rrsetInstall {
+	if imr.Cache == nil || rrset == nil || len(rrset.RRs) == 0 || imr.Options[OptUseTransportSignals] == "false" {
+		return rrsetInstall{}
 	}
 	owner := dns.Fqdn(qname)
 	if !strings.HasPrefix(core.CanonicalizeName(owner), OOBTransportPrefix) {
-		return
+		return rrsetInstall{}
 	}
 	// Sliced, not TrimPrefix'd: see parseOwnerName.
 	base := owner[len(OOBTransportPrefix):]
 	if base == "" {
-		return
+		return rrsetInstall{}
 	}
 	targetMode := cache.ConnModeOpportunistic
 	if vstate == cache.ValidationStateSecure {
 		targetMode = cache.ConnModeValidated
 	}
+	var found rrsetInstall
 	set := &svcbSignalSet{}
-	if rrset.RRtype == dns.TypeSVCB {
+	switch rrset.RRtype {
+	case dns.TypeSVCB:
 		for _, rr := range rrset.RRs {
 			if svcb, ok := rr.(*dns.SVCB); ok {
 				set.add(svcb)
@@ -3609,6 +3722,12 @@ func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *cor
 		}
 		set.decideLookupPath(vstate)
 		imr.followLookupAlias(set, walk)
+		found.signal = !set.alias || (set.final != nil && !set.final.alias)
+		found.hop = set.hop
+	case core.TypeTSYNC:
+		found.signal = true
+	default:
+		return rrsetInstall{}
 	}
 	// The shared instance of a nameserver is listed under every zone it
 	// serves: it takes the signal once, and its ignored redirects count once.
@@ -3642,20 +3761,18 @@ func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *cor
 					}
 				}
 			}
-			applied, _ = imr.installSVCBSignal(server, set)
+			applied, _ = imr.installSVCBSignal(server, set, guard)
 		case core.TypeTSYNC:
 			for _, rr := range rrset.RRs {
 				if priv, ok := rr.(*dns.PrivateRR); ok {
 					if ts, ok := priv.Data.(*core.TSYNC); ok && ts != nil && ts.Transports != "" {
 						val := strings.TrimPrefix(ts.Transports, "transport=")
-						if imr.applyTransportSignalToServer(server, val) {
+						if imr.installTransportString(server, val, guard) {
 							applied = true
 						}
 					}
 				}
 			}
-		default:
-			continue
 		}
 		if applied {
 			// server is the shared instance, updated in place. Storing sm
@@ -3663,6 +3780,39 @@ func (imr *Imr) applyTransportRRsetWalk(walk aliasWalk, qname string, rrset *cor
 			// had just replaced.
 			server.PromoteConnMode(targetMode)
 		}
+	}
+	return found
+}
+
+// signalGuard says, under a server's lock, whether a signal may replace the
+// one the server holds (cache.AuthServer.SetTransportSignalIf).
+type signalGuard func(cache.HeldSignal) bool
+
+// notConfigured is the rule every received signal is installed under: it
+// never replaces a stub's configured transports. A stub's private instance
+// of a nameserver is listed in the zone server maps like any other, and a
+// signal for that name reaches every instance listed.
+func notConfigured(held cache.HeldSignal) bool {
+	return !held.Configured()
+}
+
+// stillNeedsSignal is the rule a cached signal is replayed under
+// (applyCachedTransportSignal): only onto a server that, when the install
+// takes its lock, has signalled nothing, whatever weights it holds (a stub
+// configured with no transports holds default ones), or holds a signal whose
+// path was not decided, one an Additional section could not validate and
+// that waits for the verifying lookup, whose answer is what the cache holds.
+// A signal installed after the replay read the cache stays, and so does a
+// stub's configured one.
+func stillNeedsSignal(held cache.HeldSignal) bool {
+	switch {
+	case held.Configured():
+		return false
+	case held.Received == nil || len(held.Weights) == 0:
+		return true
+	default:
+		return len(held.Received.Path) > 0 &&
+			cache.SignalPathState(held.Received.Path) == cache.SignalStateUnknown
 	}
 }
 

@@ -59,7 +59,7 @@ func TestOOTSAliasAdditionalR5(t *testing.T) {
 			}
 			imr.decideAdditionalPath(set, tc.section, cache.SignalViaResponse)
 			server := cache.NewAuthServer(pathNS)
-			if installed, _ := imr.installSVCBSignal(server, set); !installed {
+			if installed, _ := imr.installSVCBSignal(server, set, notConfigured); !installed {
 				t.Fatal("nothing installed through the alias")
 			}
 			rec := server.GetReceivedSignal()
@@ -94,7 +94,7 @@ func TestOOTSAliasToNothing(t *testing.T) {
 			set.add(rr.(*dns.SVCB))
 		}
 		imr.decideAdditionalPath(set, section, cache.SignalViaResponse)
-		if installed, _ := imr.installSVCBSignal(cache.NewAuthServer(pathNS), set); installed {
+		if installed, _ := imr.installSVCBSignal(cache.NewAuthServer(pathNS), set, notConfigured); installed {
 			t.Errorf("%v: installed", section)
 		}
 	}

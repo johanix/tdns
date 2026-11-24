@@ -29,7 +29,7 @@ func ApplyTransportSignal(server *cache.AuthServer, kvMap map[string]uint8) bool
 // signal assigned, where it arrived and the validation state of its path.
 func InstallTransportSignal(server *cache.AuthServer, kvMap map[string]uint8, ports map[core.Transport]uint16,
 	targets map[core.Transport]string, via string, path []cache.SignalHop) bool {
-	return installTransportMap(server, kvMap, ports, targets, via, path)
+	return installTransportMap(server, kvMap, ports, targets, via, path, notConfigured)
 }
 
 // TransportSignalFromAdditional reads server's transport signal from the
@@ -46,7 +46,7 @@ func (imr *Imr) InstallSVCBSignal(server *cache.AuthServer, svcbs []*dns.SVCB) b
 	for _, svcb := range svcbs {
 		imr.collectSVCBSignal(pending, server.Name, svcb)
 	}
-	installed, _ := imr.installSVCBSignal(server, pending[cache.ServerKey(server.Name)])
+	installed, _ := imr.installSVCBSignal(server, pending[cache.ServerKey(server.Name)], notConfigured)
 	return installed
 }
 

@@ -476,5 +476,34 @@ written; this section says how section 3's rules apply at a target.
   own address. For udp and tcp, the nameserver's own address on port 53
   comes first when it is usable and of a healthy family: a healthy endpoint
   before a probe.
+- **Waiting for a signal on its way.** A query that has no server it may
+  use waits, within its signal-wait allowance, for a signal lookup already
+  running for a server that holds a signal too: the redirect that came with
+  it in an Additional section that could not validate it waits for that
+  lookup to verify it, and until then the server may offer the query
+  nothing. If that lookup has already ended, the server takes the cached
+  signal instead, as below. It waits likewise for the lookup of an alias hop
+  when the server's cached signal is an alias whose hop the cache does not
+  hold, and follows the alias again when that lookup ends.
+- **Replaying a cached signal.** A server that missed a signal, being in no
+  zone server map when it came, takes the cached one later. It takes it only
+  if, when the install takes the server's lock, it has signalled nothing, or
+  holds a signal whose path is undecided and waits for the verifying lookup.
+  A stub configured with no transports has signalled nothing, though it
+  holds default weights. A signal installed since the cache was read stays.
+- **Stubs and signals off.** No received signal replaces the transports a
+  stub's configuration gives its server. With `use-transport-signals: false`
+  an answer for `_dns.<ns>` is cached and returned, but installs no signal.
+- **The DNSKEY bypass.** A DNSKEY attempt that bypasses the weights picks its
+  transport from one reading of the server's signal, and resolves that
+  transport's endpoint once. It is deduplicated by the endpoint it dials, and
+  dials that endpoint, so a signal installed in between cannot split the two.
+  An attempt that dials nothing is not recorded: the endpoint it was checked
+  by may be another nameserver's. The bypass does not dial an endpoint that
+  is backed off or lame for the zone.
+- **SvcParams a record requires.** A record whose `mandatory` names a key
+  tdns does not act on is ignored, as RFC 9460 has a client do. tdns acts on
+  `alpn`, `no-default-alpn`, `port`, `oots` and the TLSA key. An ALPN
+  identifier is read as decoded, a comma inside it included.
 - **Status output** lists each target on a line of its own, marked as a
   target.

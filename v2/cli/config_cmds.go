@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"time"
@@ -20,6 +19,18 @@ import (
 // NewConfigCmd returns a fresh "config" command tree bound to the given
 // role. Each attachment point gets its own *cobra.Command.
 func NewConfigCmd(role string) *cobra.Command {
+	return NewConfigCmdFor(role, role)
+}
+
+// NewConfigCmdFor is NewConfigCmd for a tree whose role is not the daemon type:
+// an extra instance, whose role is its own name ("sectagent") while the daemon
+// it is an instance OF is the flavour ("agent").
+//
+// The flavour has to be passed, not looked up: which commands exist is decided
+// here, at construction, before the CLI config is loaded, and an instance's
+// flavour lives in that config. The tree factory (NewAgentTree, NewAuthTree)
+// knows what it is building.
+func NewConfigCmdFor(role, flavour string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "config",
 		Short: "Commands to reload config, reload zones, etc",
@@ -70,9 +81,9 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 	}
 
 	c.AddCommand(reload, reloadZones, reloadTsig, status)
-	if role != "agent" {
+	if flavour != "agent" {
 		// tdns-auth (and named auth instances) synthesize the transport
-		// signal; tdns-agent does not.
+		// signal; tdns-agent (and named agent instances) does not.
 		c.AddCommand(newConfigTransportSignalCmd(role))
 	}
 	c.AddCommand(newConfigCheckCmd(role))
@@ -368,24 +379,41 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 		} else {
 			fmt.Printf("ApiServer: not listening on any addresses\n")
 		}
+		if line := apiSocketStatusLine(resp); line != "" {
+			fmt.Println(line)
+		}
+		// The daemon sends the key redacted (SensitiveString.MarshalJSON), so
+		// all there is to say is whether one is set.
 		if resp.ApiServer.ApiKey.Value() != "" {
-			ak := resp.ApiServer.ApiKey.Value()
-			// Reveal 3 chars at each end only when the key is long
-			// enough that the reveal doesn't expose the whole secret
-			// (>= 8 chars). Shorter keys are fully masked.
-			if len(ak) >= 8 {
-				fmt.Printf("ApiServer: api key (%d characters): %s***%s\n", len(ak), ak[:3], ak[len(ak)-3:])
-			} else {
-				fmt.Printf("ApiServer: api key (%d characters): ***\n", len(ak))
-			}
+			fmt.Printf("ApiServer: api key is set (not shown)\n")
 		} else {
 			fmt.Printf("ApiServer: api key is not set\n")
 		}
+		printAccessStatus(resp.Access)
+		printApiTCPStopped(resp.ApiTCPStopped, resp.ApiTCPStoppedBy, resp.Access != nil)
 	}
 
 	if resp.Msg != "" {
 		fmt.Printf("%s\n", resp.Msg)
 	}
+}
+
+// apiSocketStatusLine is the `config status` line for the daemon's local
+// admin socket, or "" when it has none. Both status printers use it (the
+// auth/agent one above and imr's). A socket the daemon is configured with
+// but could not serve is said to be so, so the line does not read as if the
+// socket were there; the Transport/ApiSocket error carries the reason.
+func apiSocketStatusLine(resp tdns.ConfigResponse) string {
+	sock := resp.ApiServer.Socket
+	if sock == "" {
+		return ""
+	}
+	for _, e := range resp.ServerErrors {
+		if e.Category == tdns.ErrCatTransport && e.Subtype == tdns.ErrSubApiSocket {
+			return fmt.Sprintf("ApiServer: local admin socket %s is configured but NOT served (see the active errors)", sock)
+		}
+	}
+	return fmt.Sprintf("ApiServer: local admin socket %s", sock)
 }
 
 // renderReloadGuardrail prints the DNSSEC policy-change guardrail refusal returned
@@ -420,10 +448,13 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
+	// The caller prints the returned error; printing it here as well showed
+	// a daemon's refusal twice.
 	status, buf, err := api.Post("/config", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
-		return cr, fmt.Errorf("error from api post: %v", err)
+		// Wrapped, so a caller can tell a socket it may not open (EACCES)
+		// or a daemon that is not there (ENOENT) from a refusal.
+		return cr, fmt.Errorf("error from api post: %w", err)
 	}
 	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -441,4 +472,58 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	}
 
 	return cr, nil
+}
+
+// printApiTCPStopped prints the plaintext TCP listeners an access file
+// closed. They stay closed until a restart, also once the access file is
+// removed, so this is printed whether the daemon runs a policy or not. by is
+// the access file that stopped them, on a line of its own (a path can be
+// long); a daemon that does not say gets the text without it.
+func printApiTCPStopped(stopped []string, by string, policy bool) {
+	if len(stopped) == 0 {
+		return
+	}
+	fmt.Printf("TCP API STOPPED on %s:\n", strings.Join(stopped, ", "))
+	switch {
+	case policy && by != "":
+		fmt.Println("  it was plaintext, and the access file requires TLS:")
+		fmt.Printf("    %s\n", by)
+		fmt.Println("  restart the daemon with usetls: true (the local socket works)")
+	case policy:
+		fmt.Println("  it was plaintext, and the access file requires TLS;")
+		fmt.Println("  restart the daemon with usetls: true (the local socket works)")
+	case by != "":
+		fmt.Println("  it was plaintext when the access file came into force:")
+		fmt.Printf("    %s\n", by)
+		fmt.Println("  no access file is set now, but it stays closed until the daemon")
+		fmt.Println("  restarts (the local socket works)")
+	default:
+		fmt.Println("  it was plaintext when an access file came into force; no access")
+		fmt.Println("  file is set now, but it stays closed until the daemon restarts")
+		fmt.Println("  (the local socket works)")
+	}
+}
+
+// printAccessStatus prints the network API's access policy as the daemon is
+// running it, if it has one.
+func printAccessStatus(a *tdns.ApiAccessStatus) {
+	if a == nil {
+		return
+	}
+	if a.Error != "" {
+		fmt.Printf("Access file: %s CANNOT BE USED, so the TCP API answers 503 (the local socket works): %s\n", a.File, a.Error)
+		return
+	}
+	keyauth := "the API key is accepted (read-write)"
+	if !a.KeyAuth {
+		keyauth = "the API key is off"
+	}
+	fmt.Printf("Access file: %s; %s; %d client(s)\n", a.File, keyauth, len(a.Clients))
+	for _, c := range a.Clients {
+		state := ""
+		if c.Disabled {
+			state = ", disabled"
+		}
+		fmt.Printf("   %s (%s%s)\n", c.Name, c.Role, state)
+	}
 }
