@@ -339,6 +339,9 @@ func apiCommandName(route, cmd, sub string) string {
 	case cmd == unknownCommand:
 		return name + " (a command that cannot be read)"
 	case cmd != "":
+		// "imr imr-flush" reads "imr flush": some routes repeat their
+		// own name in their commands.
+		cmd = strings.TrimPrefix(cmd, name[strings.LastIndex(name, " ")+1:]+"-")
 		return name + " " + apiCommandLabel(route, cmd, strings.ToLower(sub))
 	}
 	return name
@@ -359,9 +362,27 @@ func AppClientOf(ctx context.Context) string {
 // prints it after a prefix keeps both readable.
 func appRefusal(verdict, hint string) error {
 	if hint == "" {
-		return errors.New(verdict)
+		return &appRefusedError{verdict}
 	}
-	return fmt.Errorf("%s\n  %s", verdict, hint)
+	return &appRefusedError{fmt.Sprintf("%s\n  %s", verdict, hint)}
+}
+
+// appRefusedError is an application client's request refused because of
+// what it may do (appRefusal): the client's doing, not the server's
+// failure, so the keystore logs it at Info, not at Error.
+type appRefusedError struct{ msg string }
+
+func (e *appRefusedError) Error() string { return e.msg }
+
+// logKeyMgmtFailure logs a failed keystore command: at Info when it was an
+// application client's request refused (appRefusedError), else at Error.
+func logKeyMgmtFailure(what string, err error) {
+	var refused *appRefusedError
+	if errors.As(err, &refused) {
+		lgApi.Info(what+": refused to an application client", "err", err)
+		return
+	}
+	lgApi.Error(what+" failed", "err", err)
 }
 
 // appOwnsZone says whether app may see and manage zd: when app is "" (not an

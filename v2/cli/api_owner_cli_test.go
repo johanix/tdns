@@ -54,6 +54,31 @@ func TestZoneListDynamicShowsTheApiOwner(t *testing.T) {
 	}
 }
 
+// A long zone error under a list-dynamic row wraps within 72 characters,
+// its continuation lines indented two more.
+func TestZoneListDynamicWrapsALongError(t *testing.T) {
+	msg := "catalog zone cat.example. failed validation: member m1.example. has no version property and the zone is not a valid catalog"
+	got := formatZoneListDynamic(map[string]tdns.ZoneConf{
+		"cat.example.": {Type: "secondary", Provisioning: "error", ApiOwner: "api",
+			Primaries: []tdns.PeerConf{{Addr: "192.0.2.1:53"}},
+			Error:     true, ErrorType: tdns.ConfigError, ErrorMsg: msg},
+	})
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	if len(lines) < 4 || !strings.HasPrefix(lines[2], "    config: catalog zone") || !strings.HasPrefix(lines[3], "      ") {
+		t.Errorf("a long error:\n%s", got)
+	}
+	var words []string
+	for _, l := range lines[2:] {
+		if len(l) > 72 {
+			t.Errorf("line over 72 characters: %q", l)
+		}
+		words = append(words, strings.Fields(l)...)
+	}
+	if strings.Join(words, " ") != "config: "+msg {
+		t.Errorf("the error lost words:\n%s", got)
+	}
+}
+
 // zone setowner prints the verdict first, then any warning.
 func TestZoneSetOwnerOutput(t *testing.T) {
 	got := formatZoneSetOwner(tdns.ZoneResponse{

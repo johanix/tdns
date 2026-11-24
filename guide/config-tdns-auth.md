@@ -166,7 +166,11 @@ operators: over their certificate they see and manage only the zones whose
 API owner they are (`zone list-dynamic` shows it). Lists are filtered to those
 zones, a command on any other zone is refused, a zone they add is theirs, and
 commands that act on the whole server (config, scanner, the resolver, the
-keystore, and others) are refused to them. Their role still applies first. An
+truststore, and others) are refused to them. In the keystore a read-write
+application client manages its own keys only: TSIG keys whose API owner it
+is, and the SIG(0) and DNSSEC keys of its own zones (list, export, add,
+import, generate, delete, setstate, rollover); setowner, purge, clear and
+the other commands across owners stay admin. Their role still applies first. An
 operator hands a zone over with `zone setowner <zone> cert:<name>` (zones made
 over the API), or with `api-owner: cert:<name>` in a config-file zone's config.
 The list is in the daemon config, not the access file, because tdns-ncli

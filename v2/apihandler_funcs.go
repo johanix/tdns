@@ -195,7 +195,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		case "sig0-mgmt":
 			resp, err = kdb.Sig0KeyMgmt(tx, kp)
 			if err != nil {
-				lgApi.Error("Sig0Mgmt failed", "err", err)
+				logKeyMgmtFailure("Sig0Mgmt", err)
 				resp = &KeystoreResponse{
 					Error:    true,
 					ErrorMsg: err.Error(),
@@ -212,7 +212,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 				dnssecStrip = resp.stagedStrip
 			}
 			if err != nil {
-				lgApi.Error("DnssecKeyMgmt failed", "err", err)
+				logKeyMgmtFailure("DnssecKeyMgmt", err)
 				resp = &KeystoreResponse{
 					Error:    true,
 					ErrorMsg: err.Error(),
