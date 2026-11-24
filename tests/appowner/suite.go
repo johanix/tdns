@@ -402,6 +402,20 @@ func (s *suite) member(cat, zone string, want bool) state {
 	}
 }
 
+// memberGroup: zone, a member of catalog cat, has (or has not) group.
+func (s *suite) memberGroup(cat, zone, group string, want bool) state {
+	return func() string {
+		gs, err := s.au.memberGroups(cat, zone)
+		if err != nil {
+			return err.Error()
+		}
+		if slices.Contains(gs, group) != want {
+			return fmt.Sprintf("%s in catalog %s has groups %v", zone, cat, gs)
+		}
+		return ""
+	}
+}
+
 func (s *suite) polling(want bool) state {
 	return func() string {
 		on, err := s.au.scannerPolling()

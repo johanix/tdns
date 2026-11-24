@@ -41,8 +41,10 @@ const (
 	OZ1  = "oz1.test."    // op's, added over its certificate: API owner cert:op
 	KZ   = "kz.test."     // added by a caller on the API key: API owner api
 	SUB  = "sub.s2.test." // app1's zone inside S2 (question Q2)
-	Z7   = "z7.test."     // app1's zone on app2's key (question Q4)
-	KSP2 = "spare.app2."  // app2's unused key (question Q4)
+	Z6   = "z6.test."     // app1's zone on its own existing key, given inline
+	Z7   = "z7.test."     // app1's attempt with app2's key inline: never created
+	KSP2 = "spare.app2."  // app2's unused key, which app1 tries to name inline
+	GRP  = "svc1"         // a group in C1
 	K1   = "k1.app1."     // app1's inline key on Z1
 	K2   = "k2.app1."     // app1's key from tsig-mgmt add
 	K3   = "k3.app1."     // tsig-mgmt add naming another owner
@@ -254,6 +256,13 @@ func (s *suite) check4Catalog() {
 		s.zoneOwner(C1, app1Owner))
 	_, o = s.app1.catalog(tdns.CatalogPost{Command: "delete", CatalogZone: C3})
 	s.ok("4.8", "app1 catalog delete of its own "+C3, o, s.zoneAbsent(C3))
+
+	// A group on Z1 in C1, while app1 owns both: group 9 removes it after
+	// Z1 has gone to app2.
+	_, o = s.app1.catalog(tdns.CatalogPost{Command: "group-add", CatalogZone: C1, Group: GRP})
+	s.ok("4.9", "app1 catalog group-add "+GRP+" to its own "+C1, o)
+	_, o = s.app1.catalog(tdns.CatalogPost{Command: "zone-group-add", CatalogZone: C1, Zone: Z1, Group: GRP})
+	s.ok("4.10", "app1 catalog zone-group-add "+GRP+" to its "+Z1+" in "+C1, o, s.memberGroup(C1, Z1, GRP, true))
 }
 
 // 5. Whole-server commands are refused (design 4.5).
@@ -369,6 +378,41 @@ func (s *suite) check6Tsig() {
 	s.expect("6.19", "app1 tsig bulk-import: its new "+K6+" in as its own, "+KAP2+" refused",
 		disp[K6] == "imported" && disp[KAP2] == "refused" && bad == "",
 		fmt.Sprintf("dispositions %v; %s", disp, orNone(bad)), o.Msg)
+
+	s.inlineKeys()
+}
+
+// inlineKeys: Johan's ruling of 2026-11-24, "refuse an inline tsig key that
+// someone else owns". An application's zone add or modify whose inline key
+// exists under another API owner is refused, even when it is identical: the
+// no-op would attach the key to the application's zone and then block its
+// owner's delete ("in use"). The application's own key, given inline again,
+// is fine.
+func (s *suite) inlineKeys() {
+	othersKey := []string{"exists and is not a key of API owner cert:app1"}
+	_, o := s.app2.keystore(tsigPost("add", KSP2, s.secret(KSP2)))
+	s.ok("6.20", "app2 tsig add "+KSP2+" (unused)", o, s.tsigOwner(KSP2, app2Owner))
+
+	_, o = s.app1.zone(tdns.ZonePost{Command: "add", Zone: Z7, Primaries: s.secondary(), TsigName: KSP2, TsigSecret: s.secrets[KSP2]})
+	s.refused("6.21", "app1 zone add "+Z7+" with app2's "+KSP2+" inline, identical secret", o, othersKey,
+		s.zoneAbsent(Z7), s.tsigOwner(KSP2, app2Owner))
+	z1Prim := s.o.Primary2 + "/" + K1 // as 3.1 left it
+	_, o = s.app1.zone(tdns.ZonePost{Command: "modify", Zone: Z1, Primaries: []tdns.PeerConf{{Addr: s.o.Primary2, Key: tdns.NOKEY}},
+		TsigName: KSP2, TsigSecret: s.secrets[KSP2]})
+	s.refused("6.22", "app1 zone modify "+Z1+" with app2's "+KSP2+" inline, identical secret", o, othersKey,
+		s.primariesAre(Z1, z1Prim), s.tsigOwner(KSP2, app2Owner))
+	_, o = s.app2.keystore(tsigPost("delete", KSP2, ""))
+	s.ok("6.23", "app2 tsig delete of its "+KSP2+": no zone of app1's holds it", o, s.tsigAbsent(KSP2))
+
+	_, o = s.app1.zone(tdns.ZonePost{Command: "add", Zone: Z6, Primaries: s.secondary(), TsigName: K3, TsigSecret: s.secrets[K3]})
+	s.ok("6.24", "app1 zone add "+Z6+" with its own "+K3+" inline, identical secret", o,
+		s.zoneOwner(Z6, app1Owner), s.primariesAre(Z6, s.o.Primary+"/"+K3), s.tsigOwner(K3, app1Owner))
+	_, o = s.app1.zone(tdns.ZonePost{Command: "modify", Zone: Z1, Primaries: []tdns.PeerConf{{Addr: s.o.Primary2, Key: tdns.NOKEY}},
+		TsigName: K1, TsigSecret: s.secrets[K1]})
+	s.ok("6.25", "app1 zone modify "+Z1+" with its own "+K1+" inline, identical secret", o,
+		s.primariesAre(Z1, z1Prim), s.tsigOwner(K1, app1Owner))
+	_, o = s.app1.zone(tdns.ZonePost{Command: "delete", Zone: Z6})
+	s.ok("6.26", "app1 zone delete of its own "+Z6, o, s.zoneAbsent(Z6))
 }
 
 // 7. DNSSEC and SIG(0) keys (design 4.4, 4.6, decision 3, R9).
@@ -629,14 +673,21 @@ func (s *suite) check9Isolation() {
 	_, o = s.app1.keystore(tsigPost("delete", K1, ""))
 	s.ok("9.10", "app1 tsig delete "+K1+", unused since app2's modify", o, s.tsigAbsent(K1))
 
-	// Z1 is still a member of app1's catalog C1 (4.1). zone-delete needs
-	// the member and the catalog zone both (4.5), so neither application
-	// can take it out now: README.md, question Q3.
-	_, o = s.app1.catalog(tdns.CatalogPost{Command: "zone-delete", CatalogZone: C1, Zone: Z1})
-	s.refused("9.11", "app1 catalog zone-delete of "+Z1+" (now app2's) from its own "+C1, o, notOwnCert, s.member(C1, Z1, true))
+	// Z1, now app2's, is still a member of app1's catalog C1 (4.1, 4.10).
+	// Johan's ruling of 2026-11-24, "catalog owner may remove any member":
+	// zone-delete and zone-group-delete need only the catalog zone, and the
+	// member zone itself stays. Adding a member still needs both.
+	_, o = s.app1.catalog(tdns.CatalogPost{Command: "zone-group-delete", CatalogZone: C1, Zone: Z1, Group: GRP})
+	s.ok("9.11", "app1 catalog zone-group-delete "+GRP+" of "+Z1+" (now app2's) in its own "+C1, o,
+		s.memberGroup(C1, Z1, GRP, false), s.member(C1, Z1, true))
 	_, o = s.app2.catalog(tdns.CatalogPost{Command: "zone-delete", CatalogZone: C1, Zone: Z1})
 	s.refused("9.12", "app2 catalog zone-delete of its "+Z1+" from "+C1+" (app1's)", o,
 		[]string{"not a zone of API owner cert:app2"}, s.member(C1, Z1, true))
+	_, o = s.app1.catalog(tdns.CatalogPost{Command: "zone-delete", CatalogZone: C1, Zone: Z1})
+	s.ok("9.13", "app1 catalog zone-delete of "+Z1+" (now app2's) from its own "+C1+"; the zone stays", o,
+		s.member(C1, Z1, false), s.zoneOwner(Z1, app2Owner))
+	_, o = s.app1.catalog(tdns.CatalogPost{Command: "zone-add", CatalogZone: C1, Zone: Z1})
+	s.refused("9.14", "app1 catalog zone-add of "+Z1+" (app2's) back into its own "+C1, o, notOwnCert, s.member(C1, Z1, false))
 }
 
 // 10. The operator's certificate stays unscoped (design 4.8).
@@ -707,10 +758,11 @@ func (s *suite) check11ApiKey() {
 // notesDesignSilent: cases the design does not decide. What the daemon did
 // is printed, not judged (README.md, questions).
 func (s *suite) notesDesignSilent() {
-	// Q2: a zone inside another API owner's zone. An add is "allowed if the
-	// zone doesn't exist" (4.5), and the most specific zone answers. The
-	// operator's record below the new zone's apex, asked over DNS before,
-	// while and after app1's zone is there.
+	// Q2: a zone inside another API owner's zone. Johan, 2026-11-24: nested
+	// zones with another owner are allowed. Still open: one that the parent
+	// does not delegate (no NS at the cut), as here. The operator's record
+	// below the new zone's apex, asked over DNS before, while and after
+	// app1's zone is there.
 	name := "www." + SUB
 	_, o := s.op.zone(tdns.ZonePost{Command: "update", Zone: S2, UpdateVerb: "addrr", UpdateRRs: []string{name + " 300 IN A 192.0.2.99"}})
 	if !o.OK {
@@ -731,31 +783,9 @@ func (s *suite) notesDesignSilent() {
 	s.app1.zone(tdns.ZonePost{Command: "delete", Zone: SUB})
 	waitFor(func() bool { return s.query(name, dns.TypeA) == before })
 	after := s.query(name, dns.TypeA)
-	s.note("Q2", fmt.Sprintf("app1 zone add of primary %s (inside the config's %s): ACCEPTED, API owner %s. "+
-		"DNS %s A: before %q; with app1's zone %q; after app1 deleted it %q", SUB, S2, owner, name, before, during, after))
-
-	// Q4: another owner's TSIG key, given inline with its secret, on an
-	// add (4.7: an identical key is a no-op and keeps its owner). Can the
-	// key's owner still delete it?
-	_, o = s.app2.keystore(tsigPost("add", KSP2, s.secret(KSP2)))
-	if !o.OK {
-		s.note("Q4", "app2 could not add "+KSP2+": "+firstLine(o.Msg))
-		return
-	}
-	_, o = s.app1.zone(tdns.ZonePost{Command: "add", Zone: Z7, Primaries: s.secondary(), TsigName: KSP2, TsigSecret: s.secrets[KSP2]})
-	if !o.OK {
-		s.note("Q4", fmt.Sprintf("app1 zone add %s with app2's %s inline (same secret): refused: %s", Z7, KSP2, firstLine(o.Msg)))
-		return
-	}
-	keyOwner := strings.Join(s.tsigOf(app2Owner), " ")
-	_, od := s.app2.keystore(tsigPost("delete", KSP2, ""))
-	res := "deleted"
-	if !od.OK {
-		res = "refused: " + firstLine(od.Msg)
-	}
-	s.app1.zone(tdns.ZonePost{Command: "delete", Zone: Z7})
-	s.note("Q4", fmt.Sprintf("app1 zone add %s with app2's unused %s inline (same secret): ACCEPTED (app2's keys: %s). "+
-		"app2's tsig delete of its own %s while app1's zone uses it: %s", Z7, KSP2, keyOwner, KSP2, res))
+	s.note("Q2", fmt.Sprintf("app1 zone add of primary %s (inside the config's %s, which has no NS at the cut): "+
+		"ACCEPTED, API owner %s. DNS %s A: before %q; with app1's zone %q; after app1 deleted it %q",
+		SUB, S2, owner, name, before, during, after))
 }
 
 // waitFor polls cond for up to five seconds.

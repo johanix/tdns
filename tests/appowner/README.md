@@ -59,12 +59,12 @@ passed, 1 on any FAIL, 2 when the rig could not be set up.
 | 1 | app1 adds a secondary with an inline TSIG key: zone and key are `cert:app1` | 4.3, 4.4 | `/zone add` (`TsigName`, `TsigSecret`) |
 | 2 | app1 sees its own zones only; reads of other zones refused; list-algorithms and list-policies open | 4.5, 4.6 | `/zone list-zones`, `list-dynamic`, `get-name`, `show-nsec-chain`; `GET /rollover/status`; `/keystore list-algorithms`, `list-policies` |
 | 3 | writes: own zone yes; RR outside the zone, static delete, other owners' zones no; however the name is spelt | 4.3, 4.5, R1 | `/zone modify`, `update`, `delete`, `bump`, `add`; `/delegation`; `/rollover/asap` |
-| 4 | catalog: member and catalog zone both own | 4.5 | `/catalog zone-add`, `zone-list`, `create`, `delete` |
+| 4 | catalog: adding a member needs member and catalog zone both own | 4.5 | `/catalog zone-add`, `zone-list`, `create`, `delete`, `group-add`, `zone-group-add` |
 | 5 | whole-server commands refused | 4.5 | `/config reload`, `/scanner/poll on`, `/imr imr-flush` |
-| 6 | TSIG keys: own only, no secret in lists, conflicts refused, identical key a no-op, in-use and foreign deletes refused, new keys always the caller's | 4.4, 4.6, 4.7 | `/keystore tsig-mgmt list`, `add`, `delete`, `export`, `setowner`, `purge`, `generate`, `import`, `bulk-import` |
+| 6 | TSIG keys: own only, no secret in lists, conflicts refused, identical key a no-op, in-use and foreign deletes refused, new keys always the caller's; another owner's key refused inline on zone add and modify, even identical | 4.4, 4.6, 4.7, ruling Q4 | `/keystore tsig-mgmt list`, `add`, `delete`, `export`, `setowner`, `purge`, `generate`, `import`, `bulk-import`; `/zone add`, `modify` (`TsigName`) |
 | 7 | DNSSEC and SIG(0): own zone yes (private key export included), others no; bulk-export filtered; clear, policy-cleanup, check, truststore refused; exports logged | 4.4, 4.6, decision 3, R1, R9 | `/keystore dnssec-mgmt` and `sig0-mgmt` `generate`, `export`, `bulk-export`, `setstate`, `clear`, `policy-cleanup`, `check`; `/truststore` |
 | 8 | zone delete takes the keys; `--keep-keys` refused to apps; kept keys block an app's re-add, not the operator's | 4.10, decisions 4, 7 | `/zone delete` (`KeepKeys`); tdns-ncli `zone delete --keep-keys`, `zone add`, `zone setowner` |
-| 9 | app2 sees nothing of app1's; `zone setowner` hands Z1 over | 4.5, 4.8 | `/zone`, `/keystore`, `/catalog zone-delete`; tdns-ncli `zone setowner` |
+| 9 | app2 sees nothing of app1's; `zone setowner` hands Z1 over; the catalog zone's owner removes the member it no longer owns | 4.5, 4.8, ruling Q3 | `/zone`, `/keystore`, `/catalog zone-group-delete`, `zone-delete`, `zone-add`; tdns-ncli `zone setowner` |
 | 10 | op stays unscoped, the keystore still admin-only | 4.8 | `/zone`, `/keystore`, `/config status` |
 | 11 | the API key: unscoped, and `config check` warns while keyauth is on | 4.9, R5 | X-API-Key; tdns-ncli `config check`, `client keyauth off` |
 
@@ -91,7 +91,20 @@ passed, 1 on any FAIL, 2 when the rig could not be set up.
 Since then (2026-11-24, api-owner-c f27b4075): 7.21 is fixed by bf69f00b (an
 application's key command acts only on a `Zone` it owns) and 8.12 by
 8a136d9b (an error-state change no longer re-registers a deleted zone). The
-rerun has 134 PASS and one FAIL, 3.16, which waits for a ruling, as do Q1-Q4.
+rerun has 134 PASS and one FAIL, 3.16, which waits for a ruling.
+
+## Rulings (Johan, 2026-11-24)
+
+- **Q3, "catalog owner may remove any member":** an application that owns a
+  catalog zone may remove any member (`zone-delete`, `zone-group-delete`)
+  without owning it; the member zone stays. Adding still needs both. Checks
+  9.11 to 9.14 (and 4.9, 4.10, which give Z1 a group first).
+- **Q4, "refuse an inline tsig key that someone else owns":** an
+  application's `zone add` or `modify` whose inline key exists under another
+  API owner is refused, even when identical; its own identical key is fine.
+  Checks 6.20 to 6.26.
+- **Q2:** nested zones with another owner are allowed. NOTE Q2 stays while
+  the case below is open.
 
 ## Open questions
 
@@ -99,15 +112,8 @@ rerun has 134 PASS and one FAIL, 3.16, which waits for a ruling, as do Q1-Q4.
   section 2 keeps the truststore admin. In the code `list-dnskey` is a
   truststore command (the DNSKEY cache of other zones) and is refused. The
   suite expects the refusal (7.18). Which is meant?
-- **Q2:** an application may add a zone inside another owner's zone
-  (`sub.s2.test.` inside the config's `s2.test.`), and that zone then answers
-  for those names instead of the operator's records (NOTE Q2). Should an add
-  below, or above, another API owner's zone be refused?
-- **Q3:** after `zone setowner`, the zone stays a member of the old owner's
-  catalog zone, and neither application can take it out: `zone-delete` needs
-  both the member and the catalog zone (9.11, 9.12). Should one of them be
-  able to, or should setowner say so?
-- **Q4:** an application that knows another owner's TSIG secret can name
-  that key inline on its own zone add (an identical key is a no-op, 4.7);
-  the key's owner can then not delete it while that zone uses it (NOTE Q4).
-  Intended?
+- **Q2, what is left of it:** should a nested zone that the parent does not
+  delegate (no NS at the cut, as `sub.s2.test.` inside `s2.test.` here) be
+  refused? It answers for those names instead of the operator's records
+  (NOTE Q2).
+- **3.16:** delegation export, above.

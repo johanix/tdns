@@ -167,6 +167,19 @@ func (a audit) members(cat string) ([]string, error) {
 	return out, nil
 }
 
+// memberGroups is the groups of zone in the catalog zone cat.
+func (a audit) memberGroups(cat, zone string) ([]string, error) {
+	resp, o := a.c.catalog(tdns.CatalogPost{Command: "zone-list", CatalogZone: cat})
+	if !o.OK {
+		return nil, fmt.Errorf("audit catalog zone-list %s: %s", cat, o.Msg)
+	}
+	m, ok := resp.Zones[zone]
+	if !ok || m == nil {
+		return nil, fmt.Errorf("%s is not a member of catalog %s", zone, cat)
+	}
+	return m.ServiceGroups, nil
+}
+
 // scannerPolling says whether the scanner's poll scan is on.
 func (a audit) scannerPolling() (bool, error) {
 	resp, o := a.c.scannerPoll("status")
