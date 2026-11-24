@@ -485,7 +485,7 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 	// may name another by now. The policy it runs must be this file's,
 	// with the change.
 	if err := runsEdit(role, t, af); err != nil {
-		return fmt.Errorf("%s written and the daemon reloaded, but %v", t.File, err)
+		return fmt.Errorf("%s written and the daemon reloaded, but %w", t.File, err)
 	}
 	fmt.Println(msg)
 	fmt.Printf("Reloaded: %s\n", reply)
@@ -498,7 +498,11 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 func runsEdit(role string, t *accessTarget, af *tdns.AccessFile) error {
 	resp, err := configToDaemon(role, t.Socket, t.DaemonConfig, tdns.ConfigPost{Command: "status"})
 	if err != nil {
-		return fmt.Errorf("what it runs now could not be asked (%v)", err)
+		var te *daemonTimeoutError
+		if errors.As(err, &te) {
+			te.afterWrite = true
+		}
+		return fmt.Errorf("what it runs now could not be asked (%w)", err)
 	}
 	switch a := resp.Access; {
 	case a == nil:
@@ -695,6 +699,10 @@ type daemonTimeoutError struct {
 	command   string
 	limit     time.Duration
 	connected bool
+	// afterWrite: the status ask after an edit's write and reload (runsEdit),
+	// to check that the daemon runs the file written. The edit is done,
+	// unchecked: running it again is not the fix (editTimeoutRefusal).
+	afterWrite bool
 }
 
 func (e *daemonTimeoutError) Error() string {
@@ -727,7 +735,10 @@ func daemonWhere(api *tdns.ApiClient) string {
 // before the write, so the command can just be run again; the reload comes
 // after it, and a restart reads the file written: client list then shows
 // what the daemon runs, of the daemon config the edit named (daemonCfg,
-// --daemon-config) when it named one, as the role's would be another's.
+// --daemon-config) when it named one, as the role's would be another's. The
+// status ask after the reload (afterWrite) is of an edit written and
+// reloaded, only unchecked: client list shows it, and the command run
+// again would only find its change made.
 func editTimeoutRefusal(err error, role, daemonCfg string) (addRefusal, bool) {
 	var te *daemonTimeoutError
 	if !errors.As(err, &te) {
@@ -735,6 +746,11 @@ func editTimeoutRefusal(err error, role, daemonCfg string) (addRefusal, bool) {
 	}
 	fix := []string{daemonWedgedFix + ";", "then run the command again."}
 	switch {
+	case te.afterWrite && daemonCfg != "":
+		fix = append([]string{"the edit is written and the reload answered: do not run it", "again; see the policy the daemon runs:"},
+			fixCommand([]string{"tdns-ncli", role, "client", "list"}, daemonCfg)...)
+	case te.afterWrite:
+		fix = []string{"the edit is written and the reload answered: do not run it", "again; run client list to see the policy the daemon runs."}
 	case te.command == "reload" && daemonCfg != "":
 		fix = append([]string{daemonWedgedFix, "(a restart reads the file written); then see the policy it runs:"},
 			fixCommand([]string{"tdns-ncli", role, "client", "list"}, daemonCfg)...)
@@ -1245,6 +1261,13 @@ func listAccessClients(role, daemonCfg string) error {
 	}
 	if resp.Access.Error != "" {
 		fmt.Printf("\nThe daemon could not use its access file at start-up: %s\n", resp.Access.Error)
+		return nil
+	}
+	// This config's daemon, but the policy of another file (its config named
+	// that one when it last loaded one): the same clients in it do not make
+	// it run this one.
+	if resolvedPath(resp.Access.File) != resolvedPath(t.File) {
+		fmt.Printf("\nPENDING RELOAD: the daemon runs another access file:\n   %s\n", resp.Access.File)
 		return nil
 	}
 	// The file as it is now: another command may have changed it (with

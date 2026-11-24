@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -406,12 +407,14 @@ func TestClientEditReloadsTheDaemon(t *testing.T) {
 
 // client list says what the daemon runs only when the daemon that answered
 // is this config's: another daemon with the same policy is not "running this
-// file".
+// file". Nor is this config's daemon running another access file with the
+// same policy (its config named that one when it last loaded): the path it
+// runs is said instead.
 func TestClientListChecksWhoAnswered(t *testing.T) {
-	var runs string
+	var runs, runsFile string
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: runs,
-			Access: &tdns.ApiAccessStatus{KeyAuth: true, Clients: []tdns.ApiAccessStatusClient{}}})
+			Access: &tdns.ApiAccessStatus{File: runsFile, KeyAuth: true, Clients: []tdns.ApiAccessStatusClient{}}})
 	}))
 	defer srv.Close()
 	e := newAccessEnv(t, true, srv.URL+"/api/v1")
@@ -422,10 +425,15 @@ func TestClientListChecksWhoAnswered(t *testing.T) {
 	}
 	writeFile(t, e.access, "keyauth: true\nclients: []\n")
 
-	runs = e.daemonCfg
+	runs, runsFile = e.daemonCfg, e.access
 	if out := captureStdout(t, func() { listAccessClients("auth", "") }); !strings.Contains(out, "The daemon runs this file") {
 		t.Errorf("this config's daemon with this policy:\n%s", out)
 	}
+	runsFile = filepath.Join(e.dir, "old-access.yaml")
+	if out := captureStdout(t, func() { listAccessClients("auth", "") }); strings.Contains(out, "runs this file") || !strings.Contains(flat(out), "PENDING RELOAD: the daemon runs another access file: "+runsFile) {
+		t.Errorf("this config's daemon, another access file with this policy:\n%s", out)
+	}
+	runsFile = e.access
 	runs = filepath.Join(e.dir, "other-daemon.yaml")
 	out := captureStdout(t, func() { listAccessClients("auth", "") })
 	if strings.Contains(out, "runs this file") || !strings.Contains(out, "Running policy unknown") {
@@ -581,6 +589,71 @@ func TestClientEditWedgedDaemon(t *testing.T) {
 		}
 		if n := reloads.Load(); n != 1 {
 			t.Errorf("%d reloads, want 1", n)
+		}
+		if af := e.read(t); len(af.Clients) != 1 || af.Clients[0].Name != "anna" {
+			t.Errorf("access file %+v, want anna written", af)
+		}
+	})
+
+	// The reload answered, and the status ask after it, to check that the
+	// daemon runs the file written, does not: the edit is written and in
+	// force as far as the reload said, only unchecked. Running it again
+	// would only find anna there; the fix is client list, which shows the
+	// policy the daemon runs.
+	t.Run("the status after the reload", func(t *testing.T) {
+		e := newAccessEnv(t, true, "")
+		ask, _ := shortDaemonLimits(t)
+		tg, err := resolveAccessTarget("auth", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reloaded atomic.Bool
+		stop := make(chan struct{})
+		ln, err := net.Listen("unix", tg.Socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var cp tdns.ConfigPost
+			json.NewDecoder(r.Body).Decode(&cp)
+			switch {
+			case cp.Command == "reload":
+				reloaded.Store(true)
+				json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: e.daemonCfg, Msg: "Config reloaded. Access file reloaded: 1 client(s), keyauth on."})
+			case reloaded.Load():
+				select { // wedged since the reload
+				case <-r.Context().Done():
+				case <-stop:
+				}
+			default:
+				json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: e.daemonCfg})
+			}
+		})}
+		go srv.Serve(ln)
+		t.Cleanup(func() {
+			close(stop)
+			srv.Close()
+		})
+		var took time.Duration
+		out := captureStdout(t, func() { err, took = edit(t) })
+		if took > 5*time.Second {
+			t.Errorf("client add took %v, with a limit of %v", took, ask)
+		}
+		want := fmt.Sprintf("%s written and the daemon reloaded, but what it runs now could not be asked (the daemon on %s accepted but did not answer within %v)", e.access, tg.Socket, ask)
+		if err == nil || err.Error() != want {
+			t.Errorf("err = %v, want %q", err, want)
+		}
+		if strings.Contains(out, "added") {
+			t.Errorf("the change was said as done unchecked: %q", out)
+		}
+		r, ok := editTimeoutRefusal(err, "auth", "")
+		fix := oneLine(strings.Join(r.fix, "\n"))
+		if !ok || !strings.Contains(fix, "run client list") || strings.Contains(fix, "run the command again") {
+			t.Errorf("refusal %+v (%v), want the fix: client list, not the edit again", r, ok)
+		}
+		r, _ = editTimeoutRefusal(err, "auth", "/etc/tdns/tdns-auth2.yaml")
+		if fix := oneLine(strings.Join(r.fix, "\n")); !strings.Contains(fix, "tdns-ncli auth client list --daemon-config /etc/tdns/tdns-auth2.yaml") {
+			t.Errorf("fix %q; want client list with the daemon config", r.fix)
 		}
 		if af := e.read(t); len(af.Clients) != 1 || af.Clients[0].Name != "anna" {
 			t.Errorf("access file %+v, want anna written", af)
@@ -1672,7 +1745,7 @@ func TestClientListHoldsTheEditLock(t *testing.T) {
 			lockedOut = err
 		}
 		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: e.daemonCfg,
-			Access: &tdns.ApiAccessStatus{KeyAuth: true, Clients: []tdns.ApiAccessStatusClient{}}})
+			Access: &tdns.ApiAccessStatus{File: e.access, KeyAuth: true, Clients: []tdns.ApiAccessStatusClient{}}})
 	}))
 	defer srv.Close()
 	e = newAccessEnv(t, true, srv.URL+"/api/v1")
