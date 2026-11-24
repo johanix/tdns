@@ -181,6 +181,9 @@ func (imr *Imr) ReloadZones(stubconf []StubConf, fwdconf []ForwardConf) (ZoneRel
 	// a config that would quarantine anything changes nothing at all. At
 	// startup there is no such state, so the same input quarantines and the
 	// daemon serves what is left.
+	if imr.Cache == nil {
+		return res, fmt.Errorf("IMR has no cache; cannot reload stub and forward zones")
+	}
 	newForwards, diags := buildImrForwards(fwdconf, imr.Cache.DebugLog())
 	if err := forwardDiagsError(diags); err != nil {
 		return res, fmt.Errorf("imrengine.forward: %v", err)
@@ -190,10 +193,6 @@ func (imr *Imr) ReloadZones(stubconf []StubConf, fwdconf []ForwardConf) (ZoneRel
 	// One reload at a time: two concurrent reloads would each diff against
 	// the table the other is replacing, and the loser's cache-side stub work
 	// would outlive the table that describes it.
-	if imr.Cache == nil {
-		return res, fmt.Errorf("IMR has no cache; cannot reload stub and forward zones")
-	}
-
 	imr.reloadMu.Lock()
 	defer imr.reloadMu.Unlock()
 

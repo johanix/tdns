@@ -364,7 +364,6 @@ func (rrcache *RRsetCacheT) ValidateRRset(ctx context.Context, rrset *core.RRset
 // (unsignedRRsetState).
 func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrset *core.RRset, fetcher RRsetFetcher, parentZoneFinder ParentZoneFinder) (ValidationState, error) {
 	if rrcache == nil {
-		rrcache.Logger.Printf("ValidateRRset: rrcache is nil; nothing to validate")
 		return ValidationStateNone, fmt.Errorf("rrcache is nil; nothing to validate")
 	}
 	if rrset == nil {

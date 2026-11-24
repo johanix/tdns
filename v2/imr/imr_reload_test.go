@@ -422,3 +422,11 @@ func TestReloadProbesTheZonesItAddedOrChanged(t *testing.T) {
 		})
 	})
 }
+
+// A resolver with no cache refuses a reload with its error, before anything
+// reads the cache.
+func TestReloadZonesWithoutACache(t *testing.T) {
+	if _, err := (&Imr{}).ReloadZones(nil, nil); err == nil {
+		t.Error("ReloadZones without a cache: no error")
+	}
+}
