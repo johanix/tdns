@@ -3502,7 +3502,10 @@ func tcpKeyEntry(d, addr, dpin string) string {
 // open; the access file decides only when nothing answers there either. A
 // TCP API that neither refuses nor answers leaves the daemon unknown: the
 // file is not taken for its policy, and a key entry is refused, its key
-// kept as it is.
+// kept as it is. A daemon that runs, its socket's path gone (removed while
+// it ran), is said to: nothing can reload it until a restart, which is the
+// fix. One silent on TCP is wedged, as one silent on its socket is
+// (TestAddRefusesAWedgedDaemon): the same verdict, and the same fix.
 func TestAddAsksTCPWhenNothingAnswersOnTheSocket(t *testing.T) {
 	// The pin is enrolled in the access file on disk; whether the daemon
 	// that runs takes it is enrolled (the fake's own policy).
@@ -3526,7 +3529,7 @@ func TestAddAsksTCPWhenNothingAnswersOnTheSocket(t *testing.T) {
 		return env, world(t, env, f.addr(), f.certFile), f
 	}
 
-	t.Run("it runs without the pin: the key kept, a new entry refused", func(t *testing.T) {
+	t.Run("it runs without the pin, its socket gone: the key kept, a new entry refused", func(t *testing.T) {
 		env, d, f := setup(t, false)
 		key := tcpKeyEntry(d, f.addr(), tdns.SPKISHA256(f.srv.Certificate()))
 		writeFile(t, env.cli, key)
@@ -3537,17 +3540,57 @@ func TestAddAsksTCPWhenNothingAnswersOnTheSocket(t *testing.T) {
 		if readBytes(t, env.cli) != key {
 			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
 		}
-		if out := printed(res, false, env.cli); !strings.Contains(out, "does not take it yet") {
+		gone := "its local admin socket " + env.socket() + " does not exist, so nothing can reload it"
+		fix := []string{
+			"restart the daemon: it makes its local admin socket " + env.socket(),
+			"when it starts, and reads its access file again;",
+			"then run config add again.",
+		}
+		if out := printed(res, false, env.cli); !strings.Contains(out, gone) || !strings.Contains(out, flat(strings.Join(fix, " "))) || strings.Contains(out, "client add") {
 			t.Errorf("printed:\n%s", out)
 		}
 		env.cli = filepath.Join(env.dir, "new-cli.yaml")
 		_, err = env.add(t, d, nil)
 		var r addRefusal
-		if !errors.As(err, &r) || !strings.Contains(err.Error(), "does not take it yet") {
-			t.Errorf("new entry: err = %v, want a refusal", err)
+		if !errors.As(err, &r) || !strings.Contains(r.why, gone) || !reflect.DeepEqual(r.fix, fix) {
+			t.Errorf("new entry: err = %v, want a refusal saying the socket is gone", err)
 		}
 		if _, err := os.Stat(env.cli); err == nil {
 			t.Error("the refused add wrote the CLI config")
+		}
+	})
+
+	t.Run("silent on TCP: wedged, as on the socket", func(t *testing.T) {
+		saved := pingLimit
+		t.Cleanup(func() { pingLimit = saved })
+		pingLimit = 200 * time.Millisecond
+		addr := serveSilent(t, "tcp", "127.0.0.1:0")
+		srv := httptest.NewTLSServer(http.NotFoundHandler()) // only for a certificate
+		srv.Close()
+		certFile := filepath.Join(t.TempDir(), "api.crt")
+		writeFile(t, certFile, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})))
+		env := newAddEnv(t)
+		d := world(t, env, addr, certFile)
+		want := fmt.Sprintf("the daemon at %s accepted but did not answer within %v", addr, pingLimit)
+		wedged := []string{daemonWedgedFix + ";", "then run config add again."}
+
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, want) || !reflect.DeepEqual(r.fix, wedged) || strings.Contains(r.why, "deadline") {
+			t.Errorf("new entry: err = %v; want %q, and the fix %q", err, want, wedged)
+		}
+		key := tcpKeyEntry(d, addr, tdns.SPKISHA256(srv.Certificate()))
+		writeFile(t, env.cli, key)
+		start := time.Now()
+		_, err = env.add(t, d, nil)
+		if took := time.Since(start); took > 2*time.Second {
+			t.Errorf("config add took %v, with a ping limit of %v", took, pingLimit)
+		}
+		if !errors.As(err, &r) || !strings.Contains(r.why, "keeps its API key") || !strings.Contains(r.why, want) || !reflect.DeepEqual(r.fix, wedged) {
+			t.Errorf("key entry: err = %v; want a refusal saying %q, and the fix %q", err, want, wedged)
+		}
+		if readBytes(t, env.cli) != key {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
 		}
 	})
 

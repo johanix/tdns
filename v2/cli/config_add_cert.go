@@ -22,12 +22,14 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -95,6 +97,11 @@ type CertSetup struct {
 	// fileInvalid: it cannot work because the access file is not one the
 	// daemon would load (ValidateAccessFile), whatever it lists.
 	fileInvalid bool
+	// sockMissing: the local admin socket's path does not exist (askDaemon).
+	// sockGone: it cannot work because the daemon runs without it (removed
+	// while it ran?), so nothing can reload it until it is restarted, which
+	// the fix is about.
+	sockMissing, sockGone bool
 	// changed: it cannot work as planned because what planCert found had
 	// changed when confirm looked again; config add, run again, plans anew.
 	changed bool
@@ -252,6 +259,10 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 		// Not in force: config add makes it so, from the file (root reads
 		// it), below.
 	case sockShut:
+		if c.timedOut != nil {
+			// The key's ping got no answer: no second wait for this one.
+			return c.cannot(c.timedOut.Error())
+		}
 		r := pingReply{}
 		if c.pin != "" {
 			if pair, err := tls.LoadX509KeyPair(c.cert, c.key); err == nil {
@@ -262,6 +273,12 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 		case r.taken && strings.EqualFold(r.pr.Via, "certificate"):
 			c.listedAs, c.listedRole, c.byDaemon, c.state = r.pr.Identity, r.pr.Role, true, certWorks
 			return c
+		case r.answered && c.sockMissing:
+			// It runs without the socket it makes when it starts (removed
+			// since?): nothing can reload it until it is restarted, which
+			// reads the access file again.
+			c.sockGone = true
+			return c.cannot(fmt.Sprintf("the daemon runs (it answers over TCP, and does not take your certificate), but its local admin socket %s does not exist, so nothing can reload it", c.t.Socket))
 		case r.answered:
 			// It runs, and does not take it. Nothing can be changed from
 			// here (its socket is not ours to use, or it does not answer
@@ -279,6 +296,8 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 			return c.cannot("asked over TCP, the daemon does not take your certificate")
 		case r.down:
 			view = sockAbsent // not running: the file, below
+		case c.pingTimedOut(r):
+			return c.cannot(c.timedOut.Error())
 		default:
 			if c.pin == "" {
 				return c.cannot("your client certificate does not exist yet, so the daemon cannot be asked whether it takes it")
@@ -365,6 +384,10 @@ const (
 func (c *CertSetup) askDaemon() (sockView, tdns.ConfigResponse, error) {
 	view, status, serr := c.askSocket()
 	if view == sockAbsent {
+		if errors.Is(serr, syscall.ENOENT) {
+			c.sockMissing = true
+			return sockShut, status, fmt.Errorf("its local admin socket %s does not exist", c.t.Socket)
+		}
 		return sockShut, status, fmt.Errorf("nothing answers on its local admin socket %s", c.t.Socket)
 	}
 	return view, status, serr
@@ -414,6 +437,8 @@ func (c *CertSetup) findKey(view sockView, status tdns.ConfigResponse, serr erro
 			c.keyOff, c.keyWhy = true, "asked over TCP, it refuses the key"
 		case r.down:
 			return sockAbsent // nothing on its socket we may open, nothing on TCP: not running
+		case c.pingTimedOut(r):
+			c.keyUnknown = c.timedOut.Error()
 		default:
 			c.keyUnknown = c.unasked(serr, r)
 		}
@@ -461,7 +486,7 @@ func (c *CertSetup) askSocket() (sockView, tdns.ConfigResponse, error) {
 		}
 		return sockRunning, resp, nil
 	case nothingListening(err):
-		return sockAbsent, resp, nil
+		return sockAbsent, resp, err // which: no socket file, or a refused connection
 	case errors.Is(err, os.ErrPermission):
 		return sockShut, resp, fmt.Errorf("its local admin socket %s is not ours to open", c.t.Socket)
 	case daemonTimedOut(err):
@@ -572,17 +597,47 @@ type pingReply struct {
 	err             error  // why there was no answer
 }
 
+// pingLimit bounds config add's ping of a daemon's TCP API (pingAs); a
+// variable, which tests shorten.
+var pingLimit = 5 * time.Second
+
+// pingTimedOut says whether r is a ping the daemon did not answer within
+// pingLimit, and if so takes it for c's (timedOut): a daemon silent on TCP
+// is wedged, as one silent on its socket is, with the same verdict and fix.
+func (c *CertSetup) pingTimedOut(r pingReply) bool {
+	var te *daemonTimeoutError
+	if !errors.As(r.err, &te) {
+		return false
+	}
+	c.timedOut = te
+	return true
+}
+
 // pingAs pings the TCP API at base, the daemon verified by pin, with the
-// credentials in o: the client certificate, or the API key.
+// credentials in o: the client certificate, or the API key. A daemon that
+// does not answer within pingLimit is a *daemonTimeoutError, as for
+// sendBounded.
 func pingAs(base, pin string, o tdns.ClientOptions) pingReply {
 	o.Pins = []string{pin}
 	api := tdns.NewClientWithOptions("config add", base, o)
-	api.Client.Timeout = 5 * time.Second
 	body, err := json.Marshal(tdns.PingPost{Msg: "config add", Pings: 1})
 	if err != nil {
 		return pingReply{}
 	}
-	status, buf, err := api.Post("/ping", body)
+	ctx, cancel := context.WithTimeout(context.Background(), pingLimit)
+	defer cancel()
+	var connected atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		ConnectDone: func(_, _ string, err error) {
+			if err == nil {
+				connected.Store(true)
+			}
+		},
+	})
+	status, buf, err := api.PostContext(ctx, "/ping", body)
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		err = &daemonTimeoutError{where: daemonWhere(api), command: "ping", limit: pingLimit, connected: connected.Load()}
+	}
 	r := pingReply{status: status, err: err, down: errors.Is(err, syscall.ECONNREFUSED)}
 	switch {
 	case err == nil && status == http.StatusOK:
@@ -1195,6 +1250,12 @@ func (c *CertSetup) fixLines() []string {
 		return []string{daemonWedgedFix + ";", "then run config add again."}
 	case c.changed:
 		return []string{"run config add again."}
+	case c.sockGone:
+		return []string{
+			"restart the daemon: it makes its local admin socket " + c.t.Socket,
+			"when it starts, and reads its access file again;",
+			"then run config add again.",
+		}
 	case c.unidentified:
 		return c.sockFixLines()
 	case c.noTLS:

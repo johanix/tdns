@@ -447,17 +447,27 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 	if err := writeAccessFile(t.File, old, out, t.DaemonConfig); err != nil {
 		return err
 	}
-	fmt.Println(msg)
 
 	if !t.Configured {
+		fmt.Println(msg)
 		fmt.Print(notConfiguredAdvice(role, t))
 		return nil
 	}
 	if o.NoReload {
+		fmt.Println(msg)
 		fmt.Printf("Not reloaded (--no-reload): the daemon still runs the previous file.\n")
 		return nil
 	}
-	return reloadForAccess(role, t)
+	// The change is said once the reload has put it in force. A reload
+	// that fails, or does not answer, is the verdict instead: the file
+	// written, not reloaded.
+	reply, err := reloadAccess(role, t)
+	if err != nil {
+		return fmt.Errorf("%s %w", t.File, err)
+	}
+	fmt.Println(msg)
+	fmt.Printf("Reloaded: %s\n", reply)
+	return nil
 }
 
 // readAccessFile reads and parses t's access file, returning its bytes as
@@ -506,24 +516,14 @@ func notConfiguredAdvice(role string, t *accessTarget) string {
 	return b.String()
 }
 
-// reloadForAccess asks role's daemon to reload its config, and with it the
-// access file. A refused reload changes nothing in the daemon. The daemon
+// reloadAccess asks role's daemon to reload its config, and with it the
+// access file, and returns the daemon's reply when the reload put the access
+// file in force. A refused reload changes nothing in the daemon. The daemon
 // that took the reload must be t's: it was checked before the write
 // (verifyRunningDaemon), but over the entry when the socket was not there,
 // and the reload goes to the socket first, so another daemon could answer
 // it. Its reply says which config it runs; any other is a reload the
 // operator's daemon did not get.
-func reloadForAccess(role string, t *accessTarget) error {
-	msg, err := reloadAccess(role, t)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("Reloaded: %s\n", msg)
-	return nil
-}
-
-// reloadAccess is reloadForAccess without the printing: the daemon's reply
-// when the reload put the access file in force.
 func reloadAccess(role string, t *accessTarget) (string, error) {
 	resp, err := configToDaemon(role, t.Socket, t.DaemonConfig, tdns.ConfigPost{Command: "reload"})
 	if err != nil {

@@ -488,7 +488,8 @@ func TestVerifyRunningDaemonNeedsAnAnswer(t *testing.T) {
 // A client command's requests to the daemon are bounded (sendBounded): a
 // daemon that accepts and never answers, on its socket or on the entry's TCP
 // address, is a refusal with a fix, before anything is written; one that
-// takes the reload and never answers it fails the reload, the file written.
+// takes the reload and never answers it fails the reload, the file written,
+// which is the verdict: the change is not said as done before it.
 func TestClientEditWedgedDaemon(t *testing.T) {
 	anna := func(af *tdns.AccessFile) (string, error) {
 		af.Clients = append(af.Clients, tdns.AccessClient{Name: "anna", Pin: pinOf("anna"), Role: "read-only"})
@@ -549,13 +550,17 @@ func TestClientEditWedgedDaemon(t *testing.T) {
 			t.Fatal(err)
 		}
 		reloads := serveHangingReload(t, tg.Socket, e.daemonCfg)
-		err, took := edit(t)
+		var took time.Duration
+		out := captureStdout(t, func() { err, took = edit(t) })
 		if took > 5*time.Second {
 			t.Errorf("client add took %v, with a reload limit of %v", took, reload)
 		}
-		want := fmt.Sprintf("written, but the reload failed: the daemon on %s accepted but did not answer within %v", tg.Socket, reload)
+		want := fmt.Sprintf("%s written, but the reload failed: the daemon on %s accepted but did not answer within %v", e.access, tg.Socket, reload)
 		if err == nil || err.Error() != want {
 			t.Errorf("err = %v, want %q", err, want)
+		}
+		if strings.Contains(out, "added") {
+			t.Errorf("the change was said as done before the reload failed: %q", out)
 		}
 		r, ok := editTimeoutRefusal(err)
 		if !ok || len(r.fix) == 0 || !strings.Contains(strings.Join(r.fix, " "), "(a restart reads the file written)") {
@@ -1114,7 +1119,7 @@ func TestAccessReloadPrefersTheSocket(t *testing.T) {
 	}
 
 	target := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", Socket: sock}
-	if err := reloadForAccess("auth", target); err != nil {
+	if _, err := reloadAccess("auth", target); err != nil {
 		t.Errorf("reload with the socket there: %v", err)
 	}
 	// Another daemon took the reload: it says which config it runs, and the
@@ -1122,18 +1127,18 @@ func TestAccessReloadPrefersTheSocket(t *testing.T) {
 	mu.Lock()
 	runs = "/etc/tdns/other.yaml"
 	mu.Unlock()
-	if err := reloadForAccess("auth", target); err == nil || !strings.Contains(err.Error(), "runs /etc/tdns/other.yaml") || !strings.Contains(err.Error(), "did NOT apply") {
+	if _, err := reloadAccess("auth", target); err == nil || !strings.Contains(err.Error(), "runs /etc/tdns/other.yaml") || !strings.Contains(err.Error(), "did NOT apply") {
 		t.Errorf("a reload another daemon took: err = %v, want it reported as not applied", err)
 	}
 	mu.Lock()
 	runs = "/etc/tdns/tdns-auth.yaml"
 	reply = "Config reloaded. " + tdns.AccessFileNotReloaded + " (the running policy is unchanged): bad pin"
 	mu.Unlock()
-	if err := reloadForAccess("auth", target); err == nil || !strings.Contains(err.Error(), "did NOT apply") {
+	if _, err := reloadAccess("auth", target); err == nil || !strings.Contains(err.Error(), "did NOT apply") {
 		t.Errorf("a reply saying the access file was not reloaded: err = %v, want a failure", err)
 	}
 	// No socket file: the role's entry gets the reload, and here it fails.
-	if err := reloadForAccess("auth", &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", Socket: filepath.Join(dir, "absent.sock")}); err == nil || !strings.Contains(err.Error(), "reload failed") {
+	if _, err := reloadAccess("auth", &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", Socket: filepath.Join(dir, "absent.sock")}); err == nil || !strings.Contains(err.Error(), "reload failed") {
 		t.Errorf("no socket: err = %v, want the TCP entry's failure", err)
 	}
 }
