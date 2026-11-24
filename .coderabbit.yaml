@@ -13,11 +13,6 @@ reviews:
     - "!**/vendor/**"
     - "!knot-dns-v3.5.2/**"
     - "!labconfig/**"
-    # TEMPORARY, for the review of the IMR module stack (#1120, #1121) only.
-    # CodeRabbit's 100-file limit counts the files left after path_filters,
-    # and with their tests both PRs are over it. Reverted on the stack's
-    # branches before they merge, so this line never reaches main.
-    - "!**/*_test.go"
 
   tools:
     # golangci-lint is disabled: CodeRabbit invokes it as `golangci-lint ./...`
