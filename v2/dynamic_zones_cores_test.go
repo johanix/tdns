@@ -121,7 +121,7 @@ func TestRemoveDynamicZone_GuardAndGenerationBump(t *testing.T) {
 	// A static (non-API-managed) zone cannot be deleted here.
 	static := &ZoneData{ZoneName: "static.example.", ZoneType: Secondary, Options: map[ZoneOption]bool{}}
 	Zones.Set("static.example.", static)
-	if _, err := conf.RemoveDynamicZone("static.example"); err == nil {
+	if _, err := conf.RemoveDynamicZone("static.example", false); err == nil {
 		t.Error("expected refusal to delete a non-API-managed zone")
 	}
 
@@ -132,7 +132,7 @@ func TestRemoveDynamicZone_GuardAndGenerationBump(t *testing.T) {
 	}
 	zd, _ := Zones.Get("del.example.")
 	gen0 := zd.generation.Load()
-	if _, err := conf.RemoveDynamicZone("del.example"); err != nil {
+	if _, err := conf.RemoveDynamicZone("del.example", false); err != nil {
 		t.Fatalf("delete failed: %v", err)
 	}
 	if _, ok := Zones.Get("del.example."); ok {
@@ -143,7 +143,7 @@ func TestRemoveDynamicZone_GuardAndGenerationBump(t *testing.T) {
 	}
 
 	// Deleting a missing zone errors.
-	if _, err := conf.RemoveDynamicZone("nope.example"); err == nil {
+	if _, err := conf.RemoveDynamicZone("nope.example", false); err == nil {
 		t.Error("expected error deleting a non-existent zone")
 	}
 }

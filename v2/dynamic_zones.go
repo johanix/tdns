@@ -728,6 +728,15 @@ func (conf *Config) writeDynamicConfigFile(zones []ZoneConf) error {
 		return fmt.Errorf("failed to write temp file: %v", err)
 	}
 
+	// Durable before the rename, and the rename durable before this returns:
+	// a zone delete deletes the zone's keys once this succeeds, and a crash
+	// that brought the old entry back would bring the zone back without them.
+	if err := tempFile.Sync(); err != nil {
+		tempFile.Close()
+		os.Remove(tempFilePath)
+		return fmt.Errorf("failed to sync temp file: %v", err)
+	}
+
 	// Close temp file before rename
 	if err := tempFile.Close(); err != nil {
 		os.Remove(tempFilePath)
@@ -738,6 +747,9 @@ func (conf *Config) writeDynamicConfigFile(zones []ZoneConf) error {
 	if err := os.Rename(tempFilePath, conf.DynamicZones.ConfigFile); err != nil {
 		os.Remove(tempFilePath)
 		return fmt.Errorf("failed to rename temp file to final file: %v", err)
+	}
+	if err := syncZoneDirectory(configDir); err != nil {
+		return fmt.Errorf("syncing %s after renaming %s into place: %v", configDir, conf.DynamicZones.ConfigFile, err)
 	}
 
 	lg.Info("wrote dynamic config file", "path", conf.DynamicZones.ConfigFile, "zones", len(zones))
@@ -1234,7 +1246,14 @@ var testHookRemovalLocking func()
 // rewritten afterwards, the zone comes back on restart, from a zone file
 // that can hold the signal the pass stored, so the record is put back: the
 // pass would take that signal for the operator's without it.
-func (conf *Config) RemoveDynamicZone(name string) (string, error) {
+//
+// The zone's DNSSEC and SIG(0) keys go last, unless keepKeys is set
+// (removeZoneKeys): only once the zone is out of the dynamic config, since a
+// zone that comes back on restart needs them, and still under
+// templateApplyMu, so an add of the same name cannot mint keys that this
+// delete then takes. A failure there leaves the zone deleted and is
+// reported in the returned ZoneRemoval, not as an error.
+func (conf *Config) RemoveDynamicZone(name string, keepKeys bool) (*ZoneRemoval, error) {
 	name = core.CanonicalizeName(dns.Fqdn(name))
 	if testHookRemovalLocking != nil {
 		testHookRemovalLocking()
@@ -1243,10 +1262,10 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	defer templateApplyMu.Unlock()
 	zd, exists := Zones.Get(name)
 	if !exists {
-		return "", fmt.Errorf("zone %s not found", name)
+		return nil, fmt.Errorf("zone %s not found", name)
 	}
 	if !zd.Options[OptApiManagedZone] {
-		return "", fmt.Errorf("zone %s is not API-managed and cannot be deleted here", name)
+		return nil, fmt.Errorf("zone %s is not API-managed and cannot be deleted here", name)
 	}
 
 	// The zone's pass, if one is running, finishes before this (it holds
@@ -1261,7 +1280,7 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 			zd.mu.Lock()
 			zd.signalPassRetired = false
 			zd.mu.Unlock()
-			return "", fmt.Errorf("zone %s not deleted: the KeyDB could not drop the record of what the transport signal pass stored, which a zone added later under this name would inherit; nothing was removed, run the delete again: %w", name, err)
+			return nil, fmt.Errorf("zone %s not deleted: the KeyDB could not drop the record of what the transport signal pass stored, which a zone added later under this name would inherit; nothing was removed, run the delete again: %w", name, err)
 		}
 	}
 	if testHookSignalRecordTaken != nil {
@@ -1279,6 +1298,7 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 
 	stopZonePublisher(name)
 	Zones.Remove(name)
+	zd.removed.Store(true)
 	// Bump generation AFTER removing from the map so any refresh goroutine that
 	// snapshotted the old generation fails the pre-persist guard (B5b) and does
 	// not resurrect the files we are about to remove.
@@ -1291,9 +1311,9 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	// restart — that's a failed delete, not a success.
 	if err := conf.RemoveDynamicZoneFromConfig(name); err != nil {
 		if rerr := conf.Internal.KeyDB.RestoreTransportSignalStored(name, signalRecord); rerr != nil {
-			return "", fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w; the record of what the transport signal pass stored could not be put back either, so after the restart the pass takes a signal it stored in the zone file for the operator's: %v", name, err, rerr)
+			return nil, fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w; the record of what the transport signal pass stored could not be put back either, so after the restart the pass takes a signal it stored in the zone file for the operator's: %v", name, err, rerr)
 		}
-		return "", fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w", name, err)
+		return nil, fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w", name, err)
 	}
 	// The zone has now left the dynamic config file, so the signal-name orphan
 	// sweep must stop counting it as configured -- otherwise a withdrawal that
@@ -1336,7 +1356,7 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 		}
 	}
 
-	return fmt.Sprintf("zone %s deleted", name), nil
+	return conf.removeZoneKeys(name, keepKeys), nil
 }
 
 // ModifyDynamicZone is the shared *modify* core. Implemented as

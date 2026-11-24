@@ -134,6 +134,12 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	}
 	defer release()
 
+	// A zone delete takes this lock to delete the zone's keys and rollover
+	// state; a tick that waited for it must not write that state back.
+	if zd.removed.Load() {
+		return nil
+	}
+
 	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
 		return err
 	}

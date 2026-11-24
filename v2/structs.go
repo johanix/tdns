@@ -204,6 +204,11 @@ type ZoneData struct {
 	// own zone file (regenerateCatalogZone). Atomic: ParseZones sets it on a
 	// live zone when the config takes one over, and readers hold no lock.
 	fromStaticConfig atomic.Bool
+	// removed is set by RemoveDynamicZone when the zone leaves Zones, before
+	// the zone's keys and rollover state are deleted under its rollover lock.
+	// A KSK rollover tick that got the zone before that, and takes the lock
+	// after, would otherwise write that state back for a zone that is gone.
+	removed atomic.Bool
 	// catalogWriteMu serializes a configured catalog's write-backs to its own
 	// zone file (writeBackCatalogZone). Never taken with zd.mu held: WriteZone
 	// takes zd.mu itself.

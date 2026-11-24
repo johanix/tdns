@@ -381,13 +381,23 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			resp.Warnings = Conf.zoneDaneWarnings(lgApi, zp.Zone)
 
 		case "delete":
-			msg, err := Conf.RemoveDynamicZone(zp.Zone)
+			removal, err := Conf.RemoveDynamicZone(zp.Zone, zp.KeepKeys)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 				return
 			}
-			resp.Msg = msg
+			resp.Zone = removal.Zone
+			resp.Removal = removal
+			resp.Msg = removal.Msg()
+			resp.Warnings = removal.Warnings()
+			// The zone is gone, but keys left behind are a delete that did
+			// not finish: a client that reads only Error must not take it
+			// for a success.
+			if removal.KeysError != "" && !removal.KeepKeys {
+				resp.Error = true
+				resp.ErrorMsg = resp.Msg
+			}
 
 		case "modify":
 			msg, err := Conf.ModifyDynamicZone(r.Context(), DynamicZoneInput{
