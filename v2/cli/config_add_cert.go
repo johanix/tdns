@@ -1098,12 +1098,27 @@ func (c *CertSetup) reloadBack(files string) string {
 		fmt.Fprintf(&sb, "; the daemon could NOT be reloaded with them (%v): it may still run the new policy, reload it over its socket", err)
 		return sb.String()
 	}
+	// Recovered only when it runs what the files say now: no policy for a
+	// daemon config that names no access file; that file's, without the
+	// pin apply enrolled, for one that does.
 	resp, err := configToDaemon(c.role, c.t.Socket, c.t.DaemonConfig, tdns.ConfigPost{Command: "status"})
+	a := resp.Access
+	const reloaded = "; the daemon was reloaded with them, but "
 	switch {
 	case err != nil:
-		fmt.Fprintf(&sb, "; the daemon was reloaded with them, but what it runs now could not be asked (%v)", err)
-	case resp.Access != nil && (c.nameIt || c.enrolledAs != "" && policyHasPin(resp.Access, c.pin)):
-		sb.WriteString("; the daemon was reloaded with them, but it still runs the new policy: check it")
+		fmt.Fprintf(&sb, "%swhat it runs now could not be asked (%v)", reloaded, err)
+	case runsConfig(resp, c.t) != nil:
+		fmt.Fprintf(&sb, "%s%v: check it", reloaded, runsConfig(resp, c.t))
+	case !named && a != nil:
+		sb.WriteString(reloaded + "it still runs an access file's policy: check it")
+	case named && a == nil:
+		sb.WriteString(reloaded + "it runs no access file: check it")
+	case named && a.Error != "":
+		fmt.Fprintf(&sb, "%sit cannot use its access file (%s): check it", reloaded, a.Error)
+	case named && resolvedPath(a.File) != resolvedPath(c.t.File):
+		fmt.Fprintf(&sb, "%sit runs the access file %s: check it", reloaded, a.File)
+	case named && c.enrolledAs != "" && policyHasPin(a, c.pin):
+		sb.WriteString(reloaded + "it still runs the new policy: check it")
 	default:
 		sb.WriteString(", and the daemon runs them again")
 	}
@@ -1153,6 +1168,8 @@ func (c *CertSetup) inForce() error {
 		return errors.New("reloaded, but the daemon runs no access file")
 	case a.Error != "":
 		return fmt.Errorf("reloaded, but the daemon cannot use its access file: %s", a.Error)
+	case resolvedPath(a.File) != resolvedPath(c.t.File):
+		return fmt.Errorf("reloaded, but the daemon runs the access file %s, not %s", a.File, c.t.File)
 	case !policyHasPin(a, c.pin):
 		return errors.New("reloaded, but the policy the daemon runs does not have your certificate")
 	}

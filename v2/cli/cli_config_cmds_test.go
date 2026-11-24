@@ -1969,9 +1969,9 @@ func TestAddWithoutTLSCreatesNoAccessFile(t *testing.T) {
 
 // fakeSocketDaemon answers /config on a daemon's local admin socket: it says
 // it runs cfg (or runs, when set), and a reload loads the access file into the
-// policy status reports (without its clients, when forget is set); when cfg
-// names no access file any more, a reload drops the policy, saying so in the
-// daemon's words.
+// policy status reports (without its clients, when forget is set); one that
+// does not load leaves the policy as it was, and says so; when cfg names no
+// access file any more, a reload drops the policy. In the daemon's words.
 type fakeSocketDaemon struct {
 	mu          sync.Mutex
 	cfg, access string
@@ -2005,20 +2005,27 @@ func serveFakeDaemon(t *testing.T, sock, cfg, access string) *fakeSocketDaemon {
 			if f.onReload != nil {
 				f.onReload()
 			}
+			// As the daemon does (reloadApiAccess): the access file its
+			// config names now is loaded; one that does not load leaves the
+			// policy as it was; none named drops the policy.
 			resp.Msg = "Config reloaded."
-			named := true
+			named, file := true, f.access
 			if info, err := ReadDaemonApi(f.cfg, ""); err == nil {
 				named = info.AccessFile != ""
+				if named {
+					file = info.AccessFile
+				}
 			}
-			if !named && f.policy != nil {
-				// As the daemon says it, when its config no longer
-				// names the access file it ran (reloadApiAccess).
-				f.policy = nil
-				resp.Msg += " " + tdns.AccessFileNoLongerConfigured + ": the API key is admin on the TCP API again."
-			} else if _, err := os.Stat(f.access); errors.Is(err, os.ErrNotExist) {
-				f.policy = nil // no access file: the key is admin again
-			} else if af, err := tdns.LoadAccessFile(f.access); err == nil {
-				st := &tdns.ApiAccessStatus{File: f.access, KeyAuth: af.KeyAuthOn(), Clients: []tdns.ApiAccessStatusClient{}}
+			switch af, err := tdns.LoadAccessFile(file); {
+			case !named:
+				if f.policy != nil {
+					f.policy = nil
+					resp.Msg += " " + tdns.AccessFileNoLongerConfigured + ": the API key is admin on the TCP API again."
+				}
+			case err != nil:
+				resp.Msg += fmt.Sprintf(" %s (the running policy is unchanged): %v", tdns.AccessFileNotReloaded, err)
+			default:
+				st := &tdns.ApiAccessStatus{File: file, KeyAuth: af.KeyAuthOn(), Clients: []tdns.ApiAccessStatusClient{}}
 				for _, c := range af.Clients {
 					if !f.forget {
 						st.Clients = append(st.Clients, tdns.ApiAccessStatusClient{Name: c.Name, Pin: c.Pin, Role: c.Role, Disabled: c.Disabled})
@@ -4472,5 +4479,72 @@ func TestFixCommandWrapsALongDaemonConfig(t *testing.T) {
 	tg.DaemonConfig = long
 	if fix := c.fixLines(); !alone(fix, long) {
 		t.Errorf("a path wider than a line:\n%s", strings.Join(fix, "\n"))
+	}
+}
+
+// After apply's reload, the daemon must run the access file apply wrote;
+// one whose config came to name another meanwhile is not taken for it.
+func TestApplyChecksTheFileTheDaemonRuns(t *testing.T) {
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	af := filepath.Join(env.dir, "access.yaml")
+	writeFile(t, af, "keyauth: true\nclients: []\n")
+	other := filepath.Join(env.dir, "other-access.yaml")
+	writeFile(t, other, "keyauth: true\nclients:\n   - name: tester\n     pin: "+pin+"\n     role: read-write\n")
+	d, _ := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+	f := serveFakeDaemon(t, env.socket(), d, af)
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := planCert(AddOptions{CliConfig: env.cli}, info)
+	if c.state != certCanEnable || !c.addPin {
+		t.Fatalf("plan %+v", c)
+	}
+	f.mu.Lock()
+	f.onReload = func() {
+		writeFile(t, d, strings.Replace(readBytes(t, d), "access-file: "+af, "access-file: "+other, 1))
+		f.onReload = nil
+	}
+	f.mu.Unlock()
+	if err := c.apply(context.Background()); err == nil || !strings.Contains(err.Error(), "runs the access file "+other) {
+		t.Errorf("err = %v; want apply failed: the daemon runs %s", err, other)
+	}
+}
+
+// A rollback's reload has recovered only when the daemon runs what the
+// files say now: a status with no policy, or one it cannot use, for a
+// daemon config that names an access file, is not that.
+func TestRollbackChecksWhatTheDaemonRuns(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy func(af string) *tdns.ApiAccessStatus
+		want   string
+	}{
+		{"no policy", func(string) *tdns.ApiAccessStatus { return nil }, "it runs no access file: check it"},
+		{"one it cannot use", func(af string) *tdns.ApiAccessStatus { return &tdns.ApiAccessStatus{File: af, Error: "bad pin"} }, "it cannot use its access file (bad pin): check it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newAddEnv(t)
+			env.pin(t)
+			af := filepath.Join(env.dir, "access.yaml")
+			writeFile(t, af, "keyauth: true\nclients: []\n")
+			d, _ := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+			f := serveFakeDaemon(t, env.socket(), d, af)
+			info, err := ReadDaemonApi(d, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := planCert(AddOptions{CliConfig: env.cli}, info)
+			if err := c.apply(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			f.mu.Lock()
+			f.onStatus = func() { f.policy = tc.policy(af) }
+			f.mu.Unlock()
+			if msg := c.rollback(context.Background()); !strings.Contains(msg, tc.want) || strings.Contains(msg, "runs them again") {
+				t.Errorf("rollback says %q; want %q", msg, tc.want)
+			}
+		})
 	}
 }

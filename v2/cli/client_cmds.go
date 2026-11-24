@@ -481,8 +481,35 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 	if err != nil {
 		return fmt.Errorf("%s %w", t.File, err)
 	}
+	// Its reply says a reload loaded an access file, not which: its config
+	// may name another by now. The policy it runs must be this file's,
+	// with the change.
+	if err := runsEdit(role, t, af); err != nil {
+		return fmt.Errorf("%s written and the daemon reloaded, but %v", t.File, err)
+	}
 	fmt.Println(msg)
 	fmt.Printf("Reloaded: %s\n", reply)
+	return nil
+}
+
+// runsEdit says why the daemon of t, just reloaded, does not run af, the
+// access file t.File as an edit wrote it: no policy, one it cannot use,
+// another file's, or another policy. nil when it runs it.
+func runsEdit(role string, t *accessTarget, af *tdns.AccessFile) error {
+	resp, err := configToDaemon(role, t.Socket, t.DaemonConfig, tdns.ConfigPost{Command: "status"})
+	if err != nil {
+		return fmt.Errorf("what it runs now could not be asked (%v)", err)
+	}
+	switch a := resp.Access; {
+	case a == nil:
+		return errors.New("it runs no access file")
+	case a.Error != "":
+		return fmt.Errorf("it cannot use its access file (%s)", a.Error)
+	case resolvedPath(a.File) != resolvedPath(t.File):
+		return fmt.Errorf("it runs the access file %s, not this one (its config names that one now?)", a.File)
+	case !accessMatchesRunning(af, a):
+		return errors.New("the policy it runs is not the file written")
+	}
 	return nil
 }
 
