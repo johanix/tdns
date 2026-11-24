@@ -810,8 +810,9 @@ func (c *CertSetup) release() {
 // usable(): changed, or the enrolment not in the file, with its key verdict
 // as found again), and the caller does not write the entry; the error is
 // only for locks that could not be taken. A lock this process may not take
-// (not root: the lock file is the daemon's) is gone without, and so is a
-// file it may not read: such an add relies on what the daemon says over
+// (not root: the lock file is the daemon's) is gone without, the file still
+// checked where it can be read; a file it may not read is gone without too
+// (the owner's design): such an add relies on what the daemon says over
 // TCP, and cannot enrol, nor put back, anything itself.
 func (c *CertSetup) confirm(o AddOptions) error {
 	if c.state != certWorks || c.held != nil {
@@ -824,6 +825,10 @@ func (c *CertSetup) confirm(o AddOptions) error {
 	unlock, err := lockCliConfigs(ctx, c.lockPaths()...)
 	switch {
 	case errors.Is(err, fs.ErrPermission), errors.Is(err, fs.ErrNotExist):
+		// No lock to take, nor any add of ours to wait for. The enrolment
+		// must last all the same, as far as this process can read the
+		// access file.
+		c.failsInFile(c)
 		return nil
 	case err != nil:
 		return err
@@ -850,24 +855,35 @@ func (c *CertSetup) confirm(o AddOptions) error {
 		}
 		return nil
 	}
-	if why, disabled, invalid := again.notInFile(); why != "" {
+	if c.failsInFile(again) {
 		unlock()
-		c.cannot(why)
-		c.listedAs, c.listedRole, c.byDaemon = "", "", false
-		switch {
-		case invalid:
-			c.fileInvalid = true // the fix: the file
-		case disabled != nil:
-			// Listed, disabled: the fix is to enable it (adding the pin
-			// again is refused: one key, one client).
-			c.state, c.listedAs, c.listedRole = certDisabled, disabled.Name, disabled.Role
-		}
-		// Otherwise not listed: the fix is to enrol it (fixLines).
-		c.keyOff, c.keyWhy, c.keyUnknown = again.keyOff, again.keyWhy, again.keyUnknown
 		return nil
 	}
 	c.held = unlock
 	return nil
+}
+
+// failsInFile makes c no longer usable when from (c planned again, or c
+// itself) finds the pin not enrolled where it lasts (notInFile), with what
+// fixes that and from's key verdict, and says whether it did.
+func (c *CertSetup) failsInFile(from *CertSetup) bool {
+	why, disabled, invalid := from.notInFile()
+	if why == "" {
+		return false
+	}
+	c.cannot(why)
+	c.listedAs, c.listedRole, c.byDaemon = "", "", false
+	switch {
+	case invalid:
+		c.fileInvalid = true // the fix: the file
+	case disabled != nil:
+		// Listed, disabled: the fix is to enable it (adding the pin
+		// again is refused: one key, one client).
+		c.state, c.listedAs, c.listedRole = certDisabled, disabled.Name, disabled.Role
+	}
+	// Otherwise not listed: the fix is to enrol it (fixLines).
+	c.keyOff, c.keyWhy, c.keyUnknown = from.keyOff, from.keyWhy, from.keyUnknown
+	return true
 }
 
 // notInFile says why the pin, which the daemon takes, is not enrolled in
@@ -956,6 +972,9 @@ func (c *CertSetup) applySteps() error {
 	var accessNew []byte
 	if cl := clientByPin(af, c.pin); cl != nil {
 		if cl.Disabled {
+			// Listed since, disabled: the fix is to enable it (client add
+			// refuses the pin again: one key, one client).
+			c.state, c.listedAs, c.listedRole = certDisabled, cl.Name, cl.Role
 			return fmt.Errorf("%s now lists your certificate as %q, disabled", c.t.File, cl.Name)
 		}
 		c.listedAs, c.listedRole = cl.Name, cl.Role
@@ -1377,7 +1396,8 @@ func (c *CertSetup) fixLines() []string {
 	case c.noTLS:
 		return c.withSilentPort([]string{
 			"turn on TLS for the daemon's TCP API (apiserver.usetls: true,",
-			"with certfile and keyfile), then run config add again.",
+			"with certfile and keyfile) and restart the daemon: a reload does",
+			"not make its TCP listener TLS; then run config add again.",
 		})
 	case c.noSocket:
 		return c.withSilentPort([]string{
@@ -1460,8 +1480,14 @@ const fixCmdWidth = textWidth - len("  Fix: ")
 // line and its path stands alone on the next, where only a path wider than
 // a line runs over.
 func (c *CertSetup) daemonCmd(args ...string) []string {
+	return fixCommand(append([]string{"tdns-ncli", c.role}, args...), c.t.DaemonConfig)
+}
+
+// fixCommand is the command words, and --daemon-config daemonCfg, as fix
+// lines (daemonCmd says how they are wrapped).
+func fixCommand(words []string, daemonCfg string) []string {
 	var lines []string
-	line := "   tdns-ncli"
+	line := "   " + words[0]
 	put := func(w string, last bool) {
 		room := fixCmdWidth
 		if !last {
@@ -1474,10 +1500,10 @@ func (c *CertSetup) daemonCmd(args ...string) []string {
 		lines = append(lines, line+" \\")
 		line = "      " + w
 	}
-	for _, w := range append([]string{c.role}, args...) {
+	for _, w := range words[1:] {
 		put(w, false)
 	}
-	flag, path := "--daemon-config", shellQuote(c.t.DaemonConfig)
+	flag, path := "--daemon-config", shellQuote(daemonCfg)
 	if pair := flag + " " + path; len(line)+len(" ")+len(pair) <= fixCmdWidth || len("      ")+len(pair) <= fixCmdWidth {
 		put(pair, true)
 	} else {

@@ -4351,7 +4351,8 @@ func TestAddNoTLSFixBeforeASilentPort(t *testing.T) {
 	}
 	want := []string{
 		"turn on TLS for the daemon's TCP API (apiserver.usetls: true,",
-		"with certfile and keyfile), then run config add again.",
+		"with certfile and keyfile) and restart the daemon: a reload does",
+		"not make its TCP listener TLS; then run config add again.",
 		"Its TCP port took the connection but did not answer: a wedged",
 		"daemon (its log), or another program on that port.",
 	}
@@ -4614,5 +4615,57 @@ func TestAddSendsNoKeyForANewEntry(t *testing.T) {
 		if k != "" {
 			t.Errorf("the daemon was sent the key %q", k)
 		}
+	}
+}
+
+// A pin enrolled since the plan, disabled (found by apply under its lock):
+// the fix is client enable for that name, not client add, which refuses the
+// pin again (one key, one client); for the daemon named, as fixes do.
+func TestApplyFindsThePinDisabled(t *testing.T) {
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	af := filepath.Join(env.dir, "access.yaml")
+	writeFile(t, af, "keyauth: true\nclients: []\n")
+	d, _ := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := planCert(AddOptions{CliConfig: env.cli}, info, false)
+	if c.state != certCanEnable || !c.addPin {
+		t.Fatalf("plan %+v", c)
+	}
+	writeFile(t, af, "keyauth: true\nclients:\n   - name: h38c\n     pin: "+pin+"\n     role: read-write\n     disabled: true\n")
+	if err := c.apply(context.Background()); err == nil || !strings.Contains(err.Error(), `as "h38c", disabled`) {
+		t.Fatalf("err = %v; want apply refused: the pin is listed disabled", err)
+	}
+	fix := oneLine(strings.Join(c.fixLines(), "\n"))
+	if !strings.Contains(fix, "tdns-ncli auth client enable h38c --daemon-config "+d) || strings.Contains(fix, "client add") {
+		t.Errorf("fix %q; want client enable h38c for %s", fix, d)
+	}
+}
+
+// Where config add may not take the access file's lock (its directory is
+// not its to write), the enrolment must still be one that lasts, as far as
+// it can read the file: a pin in force but not listed is not written on.
+func TestConfirmWithoutTheLockStillNeedsTheFile(t *testing.T) {
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	dir := readOnlyDaemonDir(t, env)
+	af := filepath.Join(dir, "access.yaml")
+	writeFile(t, af, "keyauth: true\nclients: []\n")
+	d, _ := env.certDaemon(t, dir, "\n   access-file: "+af)
+	f := serveFakeDaemon(t, env.socket(), d, af)
+	f.mu.Lock()
+	f.policy = &tdns.ApiAccessStatus{File: af, KeyAuth: true, Clients: []tdns.ApiAccessStatusClient{{Name: "tester", Pin: pin, Role: "read-write"}}}
+	f.mu.Unlock()
+	os.Chmod(dir, 0o555)
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(r.why, "does not list it") {
+		t.Fatalf("err = %v; want a refusal: the pin is in force, not in %s", err, af)
+	}
+	if _, err := os.Stat(env.cli); err == nil {
+		t.Error("the refused add wrote the CLI config")
 	}
 }

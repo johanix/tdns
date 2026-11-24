@@ -520,7 +520,7 @@ func TestClientEditWedgedDaemon(t *testing.T) {
 		if err == nil || err.Error() != want {
 			t.Errorf("err = %v, want %q", err, want)
 		}
-		r, ok := editTimeoutRefusal(err)
+		r, ok := editTimeoutRefusal(err, "auth", "")
 		if wantFix := []string{daemonWedgedFix + ";", "then run the command again."}; !ok || !reflect.DeepEqual(r.fix, wantFix) {
 			t.Errorf("refusal %+v (%v), want the fix %q", r, ok, wantFix)
 		}
@@ -575,7 +575,7 @@ func TestClientEditWedgedDaemon(t *testing.T) {
 		if strings.Contains(out, "added") {
 			t.Errorf("the change was said as done before the reload failed: %q", out)
 		}
-		r, ok := editTimeoutRefusal(err)
+		r, ok := editTimeoutRefusal(err, "auth", "")
 		if !ok || len(r.fix) == 0 || !strings.Contains(strings.Join(r.fix, " "), "(a restart reads the file written)") {
 			t.Errorf("refusal %+v (%v), want the fix for a written file", r, ok)
 		}
@@ -1815,5 +1815,20 @@ func TestClientEditChecksTheFileTheDaemonRuns(t *testing.T) {
 	}
 	if strings.Contains(out, "Added anna") {
 		t.Errorf("the edit was said as done: %q", out)
+	}
+}
+
+// After a reload that did not answer, the fix of an edit that named its
+// daemon config (--daemon-config) shows that daemon's policy, not the
+// role's entry's, which may be another's.
+func TestEditTimeoutFixKeepsTheDaemonConfig(t *testing.T) {
+	te := &daemonTimeoutError{where: "the daemon on /var/run/tdns/auth2.sock", command: "reload", limit: 30 * time.Second, connected: true}
+	err := fmt.Errorf("written, but the reload failed: %w", te)
+	r, ok := editTimeoutRefusal(err, "auth", "/etc/tdns/tdns-auth2.yaml")
+	if fix := oneLine(strings.Join(r.fix, "\n")); !ok || !strings.Contains(fix, "tdns-ncli auth client list --daemon-config /etc/tdns/tdns-auth2.yaml") {
+		t.Errorf("fix %q (%v); want client list with the daemon config", r.fix, ok)
+	}
+	if r, _ := editTimeoutRefusal(err, "auth", ""); strings.Contains(strings.Join(r.fix, " "), "--daemon-config") {
+		t.Errorf("no daemon config named: fix %q", r.fix)
 	}
 }
