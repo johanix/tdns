@@ -89,7 +89,11 @@ func printImrConfigStatus(resp tdns.ConfigResponse) {
 	}
 	// As in the auth printer: a TCP API an access file stopped stays
 	// stopped after the file is removed, so this does not depend on Access.
+	// Listeners not started for want of a certificate, and those that
+	// failed (not bound, or the server stopped), are reported as well.
+	printApiTCPNotStarted(resp.ApiTCPNotStarted, resp.ApiTCPNoCert)
 	printApiTCPStopped(resp.ApiTCPStopped, resp.ApiTCPStoppedBy, resp.Access != nil)
+	printApiTCPFailed(resp.ApiTCPFailed)
 	// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
 	// init failed (the Upstream/ImrPriming husk) is precisely a
 	// moment to look at process resources, not to hide them.
@@ -189,8 +193,10 @@ func runImrConfigCheck(role, explicitPath string, offline bool) {
 		rep.warn("Config file", "decode",
 			fmt.Sprintf("could not fully decode config into structs: %v", err), "")
 	}
-	// The socket the daemon serves, as ParseConfig fills it in.
+	// The socket the daemon serves, and its API certificate (looked for, not
+	// written), as ParseConfig fills them in.
 	cfg.ApiServer.Socket = tdns.ApiSocketPath(cfg.ApiServer.Socket, cfgPath)
+	cfg.ApiServer.LookupCertDefaults(cfgPath)
 
 	checkImrEngine(&cfg, rep)
 	checkImrTrustAnchors(&cfg, rep)
@@ -349,7 +355,9 @@ func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 		usetls = v.GetBool("apiserver.usetls")
 	}
 	if usetls {
-		if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
+		if cfg.ApiServer.CertPending {
+			rep.info(g, "cert", "no apiserver.certfile/keyfile: the daemon writes a self-signed pair (certs/<config name>-api.crt and .key, next to its config) when it first starts")
+		} else if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
 			rep.fail(g, "cert", "apiserver.usetls is true (the imr default) but certfile/keyfile are not set — the API listener fails to start",
 				"set apiserver.certfile/keyfile (see `tdns-cli imr config mwe`) or set usetls: false")
 		} else {

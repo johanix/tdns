@@ -7,9 +7,11 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -32,8 +34,11 @@ type DaemonApi struct {
 	// Socket is apiserver.socket, the daemon's local admin socket, or "".
 	Socket string
 	// CertFile is apiserver.certfile: the certificate the daemon presents,
-	// whose pin a TCP entry records.
-	CertFile string
+	// whose pin a TCP entry records. With neither certfile nor keyfile set,
+	// the config file's default (tdns.ApiCertPaths), which the daemon
+	// writes at its first start; CertDefault says so.
+	CertFile    string
+	CertDefault bool
 	// AccessFile is apiserver.access-file, or "".
 	AccessFile string
 	// UseTLS is apiserver.usetls, which the daemon defaults to true when the
@@ -92,6 +97,10 @@ func ReadDaemonApi(path, roleOverride string) (*DaemonApi, error) {
 	// after its config file (tdns.ApiSocketPath, which the daemon uses too).
 	out.Socket = tdns.ApiSocketPath(v.GetString("apiserver.socket"), abs)
 	out.CertFile = v.GetString("apiserver.certfile")
+	if out.CertFile == "" && v.GetString("apiserver.keyfile") == "" {
+		out.CertFile, _ = tdns.ApiCertPaths(abs)
+		out.CertDefault = true
+	}
 	out.AccessFile = v.GetString("apiserver.access-file")
 	if out.Socket != "" {
 		// The daemon serves no socket on a path it refuses, so there is
@@ -370,4 +379,15 @@ func freeName(base string, taken func(string) bool) string {
 			return cand
 		}
 	}
+}
+
+// daemonCertPin is the pin of the certificate the daemon behind info
+// presents (certFilePin), saying so when it is the default one the daemon
+// has not written yet.
+func daemonCertPin(info *DaemonApi) (string, error) {
+	pin, err := certFilePin(info.CertFile)
+	if err != nil && info.CertDefault && errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("%s is not there yet: the daemon writes its API certificate there when it first starts; start it, then run config add again", info.CertFile)
+	}
+	return pin, err
 }
