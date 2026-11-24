@@ -764,3 +764,60 @@ ns.example.	3600	IN	A	10.0.0.1
 		t.Error("the copy was confirmed with no usable SOA")
 	}
 }
+
+// A transfer whose publish is dropped leaves the zone serving the copy it
+// adopted, so it must not confirm that copy: the next refresh forces a full
+// transfer again, and the copy stays out of IXFR.
+func TestAgentRelayCopyStaysUnconfirmedWhenThePublishIsDropped(t *testing.T) {
+	const ahead = `example.	3600	IN	SOA	ns.example. hostmaster.example. 100 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+stale.example.	3600	IN	A	10.0.0.100
+`
+	const upstream = `example.	3600	IN	SOA	ns.example. hostmaster.example. 40 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+fresh.example.	3600	IN	A	10.0.0.40
+`
+	kdb := newTestKeyDB(t)
+	conf, dir := persistentConf(t, kdb)
+	withAppType(t, AppTypeAgent)
+
+	addr, stop := startTestPrimary(t, upstream)
+	defer stop()
+	if err := os.WriteFile(filepath.Join(dir, "example.zone"), []byte(ahead), 0644); err != nil {
+		t.Fatalf("write zone file: %v", err)
+	}
+	zd := &ZoneData{
+		ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
+		Logger: discardLogger(), KeyDB: kdb,
+		Options:   map[ZoneOption]bool{OptApiManagedZone: true},
+		Upstreams: []PeerConf{{Addr: "127.0.0.1:1"}}, // nothing listening
+	}
+	registerZones(t, zd)
+	t.Cleanup(zd.stopPublisher)
+
+	if _, err := zd.Refresh(context.Background(), false, false, false, conf); err == nil {
+		t.Fatal("expected the refresh against a dead primary to fail")
+	}
+	if !zd.relayCopyUnconfirmed {
+		t.Fatal("setup: the adopted copy should be unconfirmed")
+	}
+
+	// Another ZoneData now holds the name, so this one's publish drops the
+	// transferred working set.
+	Zones.Set(zd.ZoneName, &ZoneData{ZoneName: zd.ZoneName})
+	zd.Upstreams = []PeerConf{{Addr: addr}}
+	_, err := zd.Refresh(context.Background(), false, false, false, conf)
+	t.Logf("refresh with the publish dropped: err %v", err)
+
+	if stale, _ := zd.GetOwner("stale.example."); stale == nil {
+		t.Fatal("setup: the dropped publish should leave the adopted copy served")
+	}
+	if !zd.relayCopyUnconfirmed {
+		t.Error("a dropped publish confirmed the relay copy")
+	}
+	if zd.shouldRequestIxfr(false) {
+		t.Error("the unconfirmed copy is IXFR-eligible after a dropped publish")
+	}
+}

@@ -135,8 +135,8 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 
 // relayCopyNeedsTransfer reports whether a tdns-agent relay still serves the
 // copy it adopted from disk at first bind. Such a copy is replaced by a forced
-// transfer at the first usable SOA, whatever the serials say, and only an
-// applied transfer confirms it.
+// transfer at the first usable SOA, whatever the serials say, and only a
+// transfer whose publish installed it confirms the copy.
 //
 // A relay serves what it received at the serial it received it with (#1157),
 // but a copy written by an agent from before #1157 carries a serial the agent
@@ -241,7 +241,6 @@ func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, con
 			// discard a perfectly good confirmation and restart the whole
 			// expire budget from load time.
 			zd.noteSuccessfulRefresh(zd.IncomingSerial)
-			zd.relayCopyUnconfirmed = false
 			return updated, nil // zone updated, no error
 		}
 
@@ -1424,6 +1423,7 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 	// Publish replacement: working set from transferred data + dynamic RRs.
 	zd.mu.Lock()
 	firstLoad := zd.FirstZoneLoad
+	before := zd.snapshot.Load()
 	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad, false); err != nil {
 		zd.mu.Unlock()
 		// Nothing was published: the zone serves what it did before, so its
@@ -1436,6 +1436,14 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 			lg.Error("could not apply the refreshed zone; nothing was published", "zone", zd.ZoneName, "err", err)
 		}
 		return false, err
+	}
+	// A nil return does not mean the transfer is served: the publish can drop
+	// the replacement (the zone is no longer live) or refuse it, and the zone
+	// then serves its previous copy. Only an installed snapshot confirms a
+	// relay copy (relayCopyNeedsTransfer); until then every refresh forces a
+	// full transfer again.
+	if zd.snapshot.Load() != before {
+		zd.relayCopyUnconfirmed = false
 	}
 	if firstLoad {
 		zd.postRefreshOwed = true
