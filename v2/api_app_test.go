@@ -878,3 +878,31 @@ func TestApiCommandNameDropsTheRepeatedRouteName(t *testing.T) {
 		}
 	}
 }
+
+// The same refusal on the primary path (template-provisioned), which
+// stages the inline key apart from the secondary path: an application's
+// primary add whose inline key exists under another API owner is refused,
+// identical secret and all, and leaves no zone.
+func TestAppPrimaryAddRefusesAnotherOwnersInlineKey(t *testing.T) {
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, _ := newTestConfigForCores(t)
+	conf.Internal.KeyDB = newTestKeyDB(t)
+	conf.Internal.TsigKeyStore = NewTsigKeyStore()
+	withTestTemplates(t, map[string]ZoneConf{"dyn-test": dynPrimaryTestTemplate(t.TempDir())})
+	if _, err := conf.Internal.KeyDB.TsigKeyMgmt(conf, nil, KeystorePost{SubCommand: "add", TsigKeyname: "theirs.",
+		TsigAlgorithm: "hmac-sha256", TsigSecret: b64Secret16, Owner: "cert:other", Creator: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := conf.ProvisionDynamicZone(context.Background(), DynamicZoneInput{
+		Name: "p2.example", Type: Primary, Template: "dyn-test",
+		TsigName: "theirs.", TsigSecret: b64Secret16,
+		AppClient: "provisioner", ApiOwner: "cert:provisioner",
+	}, true)
+	if err == nil || !strings.Contains(err.Error(), "TSIG key theirs. exists and is not a key of API owner cert:provisioner") {
+		t.Errorf("an application's primary add with another's key inline: %v, want it refused", err)
+	}
+	if _, ok := Zones.Get("p2.example."); ok {
+		t.Error("the refused primary add left its zone")
+	}
+}

@@ -367,6 +367,11 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	if serr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, serr)
 	}
+	// An application client's inline key must not be another owner's
+	// (appTsigKeyRefusal; a primary has no primaries, so only that).
+	if err := conf.appTsigKeyRefusal(in.AppClient, name, in.Primaries, staged); err != nil {
+		return "", err
+	}
 
 	// From the expansion until the zone is in Zones: see templateApplyMu.
 	templateApplyMu.Lock()
