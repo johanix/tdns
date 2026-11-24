@@ -204,6 +204,10 @@ func LargeKskImrMetricsSnapshot() LargeKskImrMetrics {
 	return imrcore.LargeKskImrMetricsSnapshot()
 }
 
+func LargeAlgDSMetrics() uint64 {
+	return imrcore.LargeAlgDSMetrics()
+}
+
 func LoadImrTuningDefaults(t *ImrTuningConf) {
 	imrcore.LoadImrTuningDefaults(t)
 }
