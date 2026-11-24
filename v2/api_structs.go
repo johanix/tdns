@@ -60,6 +60,14 @@ type KeystorePost struct {
 	BulkDnssecKeys []BulkDnssecKey `json:"bulkdnsseckeys,omitempty"`
 	BulkSig0Keys   []BulkSig0Key   `json:"bulksig0keys,omitempty"`
 	BulkTsigKeys   []BulkTsigKey   `json:"bulktsigkeys,omitempty"`
+
+	// appClient is the application client the request runs for
+	// (AppClientOf), set by APIkeystore from the request's identity and
+	// never from the body: unexported, so JSON cannot reach it. The
+	// *KeyMgmt functions limit it to its own keys where they resolve the
+	// key or zone they act on. "" (every other caller, and every caller
+	// inside the daemon) is unlimited.
+	appClient string
 }
 
 type TsigKeyInfo struct {
@@ -74,8 +82,14 @@ type TsigKeyInfo struct {
 // TsigKeyDisposition reports per-key outcome for import (and similar batch ops).
 type TsigKeyDisposition struct {
 	Name   string `json:"name"`
-	Status string `json:"status"` // imported | unchanged | conflict
+	Status string `json:"status"`           // imported | unchanged | conflict | refused
+	Detail string `json:"detail,omitempty"` // why, for refused
 }
+
+// TsigImportRefused is the import disposition of a key an application client
+// may not write: another API owner's key with another secret or algorithm.
+// Unlike a conflict, neither force nor --interactive overwrites it.
+const TsigImportRefused = "refused"
 
 // TsigCacheDelta records in-memory cache patches to apply after a successful DB
 // commit (§4). Not echoed on the API wire.

@@ -1,10 +1,10 @@
 # Owners for zones and keys: scoped API access for applications
 
 Date: 2026-11-23
-Status: r2, decided (section 8). Implementation in progress, as four PRs
-(section 6): Z (`zone delete` deletes the zone's keys), A (owners recorded),
-B (application clients and zone scope), C (keystore for application
-clients). Builds on 2026-11-20-api-pinning-mtls-roles-design.md (pinned
+Status: r2, decided (section 8). Implemented as four PRs (section 6), not
+all merged yet: Z (`zone delete` deletes the zone's keys), A (owners
+recorded), B (application clients and zone scope), C (keystore for
+application clients). Decisions taken while building them: section 10. Builds on 2026-11-20-api-pinning-mtls-roles-design.md (pinned
 certificates, the access file, the three roles, admin on the local socket
 only).
 
@@ -536,3 +536,63 @@ Part B (application clients and zone scope):
   the daemon's words wrapped below it (`tdns.ApiRefusal.Report`); the
   senders no longer log it first. `catalog` commands print the daemon's
   error message instead of the raw reply.
+
+Part C (keystore for application clients):
+
+- For an application client, what the application table opens on the
+  keystore needs read-write, lists and exports included: a read-only
+  application client gets no keystore. What it does not open needs admin,
+  so the refusal is "needs admin" and names the subcommand
+  (`/api/v1/keystore tsig-mgmt purge needs admin ...`). Every other caller
+  needs admin for all of it, as before.
+- The application table marks the keystore "by subcommand" and splits it
+  by Command and SubCommand in a second table (`apiAppSubScopes`). A test
+  holds it to the handler's commands and to the subcommands of the
+  `*KeyMgmt` function each command calls. The middleware reads SubCommand
+  in the same single read of the body; one that is not a string needs
+  admin.
+- `list-dnskey` stays admin, unlike table 4.6 says. It is a truststore
+  command (section 3 counted it with the keystore by mistake) and lists
+  the DNSKEYs the server has cached for its children, not keys an
+  application owns.
+- The own-key filters are in the SQL: TSIG by `owner`, SIG(0) and DNSSEC
+  by the zone name folded to lower case, against the served zones whose
+  API owner is the caller, passed as one JSON array (`json_each`), so the
+  number of zones does not run into SQL variable limits.
+- The checks are made in the `*KeyMgmt` functions, on the name each
+  subcommand acts on; the request carries the application client's name
+  in an unexported field that only the handler sets. `sig0-mgmt delete`
+  looks the key up by Zone and deletes by Keyname, so both must be the
+  caller's. `add` takes the zone from the key record's owner name.
+- One answer: a SIG(0) or DNSSEC key command on another's zone, or on a
+  zone not served here, gets B's zone refusal before any lookup, whether
+  or not the key exists. A TSIG key of another API owner reads as "not
+  found", like a key that does not exist.
+- TSIG add, generate and import record the caller as the API owner,
+  whatever the request names. An identical key of another API owner is
+  unchanged, keeps its owner, and the answer says so. Another secret
+  under another owner's name, the config's included, is refused, force or
+  not. On its own keys force works as before. The bind/nsd import reports
+  such a key as `refused`, with the reason, which `--interactive` does not
+  offer to overwrite.
+- Bulk import has a new disposition, `refused`, with the reason in
+  Detail. A refused key is skipped before it is validated, so the import
+  says nothing about others' keys, and the rest are imported. The summary
+  counts them; the CLI prints the reason under the key and exits 2, as
+  for a conflict. A TSIG bulk import by an application client records it
+  as the owner, with origin api.
+- Every private key and TSIG secret that a successful export or
+  bulk-export hands out is logged at Info, one line per key, for every
+  caller (operators and the socket too): client, how it authenticated,
+  whether it is an application client, the kind, the zone or key name and
+  the key ID.
+- The keystore handler also refuses an application client what the table
+  refuses, so a path that skips the middleware does not skip the table.
+- The reference count in an application's TSIG list counts every zone
+  that uses the key, others' included: delete's "not in use" rule needs
+  the same number.
+- The keystore CLI prints a refusal once, verdict first, in lines of at
+  most 72 characters: the access check's 403 as the daemon worded it, a
+  handler's error after "Error:", with its hint on a line of its own.
+  `bulk-export` without a selector says it exports every key "this client
+  may export".

@@ -84,11 +84,20 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 	lgSigner.Debug("Sig0KeyMgmt request", "subcommand", kp.SubCommand)
 
+	// An application client's own keys only (design 4.6): the keys of its
+	// own zones, checked on the name each subcommand acts on.
+	app := kp.appClient
+
 	switch kp.SubCommand {
 	case "list":
-		rows, err := tx.Query(getAllSig0KeysSql)
+		q, args := getAllSig0KeysSql, []any(nil)
+		if app != "" {
+			where, arg := appOwnZonesFilter(app)
+			q, args = q+" WHERE "+where, []any{arg}
+		}
+		rows, err := tx.Query(q, args...)
 		if err != nil {
-			return &resp, fmt.Errorf("error from tx.Query(%s): %v", getAllSig0KeysSql, err)
+			return &resp, fmt.Errorf("error from tx.Query(%s): %v", q, err)
 		}
 		defer rows.Close()
 
@@ -121,6 +130,16 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	// XXX: FIXME: "add" should also add the public key to the TrustStore.
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
+		if app != "" {
+			if pkc == nil {
+				return &resp, fmt.Errorf("add: no key in the request")
+			}
+			// The key's own name is the zone it goes in, and the name
+			// the TrustStore copy gets.
+			if err := appKeyZoneRefusal(app, pkc.KeyRR.Header().Name); err != nil {
+				return &resp, err
+			}
+		}
 		lgSigner.Info("importing private key", "type", fmt.Sprintf("%T", pkc.K))
 
 		privkey, err := reconstructSigningKey(pkc, pkc.KeyRR.String(), dns.TypeKEY)
@@ -171,7 +190,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			resp.ErrorMsg = err.Error()
 			return &resp, err
 		}
-		keys, err := kdb.BulkExportSig0(tx, sel)
+		keys, err := kdb.bulkExportSig0(tx, sel, app)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
@@ -194,7 +213,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		return &resp, nil
 
 	case "bulk-import":
-		dispositions, err := kdb.BulkImportSig0(tx, kp.BulkSig0Keys, kp.Force)
+		dispositions, err := kdb.bulkImportSig0(tx, kp.BulkSig0Keys, kp.Force, app)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
@@ -266,6 +285,9 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		if kp.Keyname == "" {
 			kp.Keyname = kp.Zone
 		}
+		if err := appKeyZoneRefusal(app, kp.Keyname); err != nil {
+			return &resp, err
+		}
 		pkc, msg, err := kdb.GenerateKeypair(kp.Keyname, kp.Creator, kp.State, dns.TypeKEY, kp.Algorithm, "", tx)
 		if err != nil {
 			lgSigner.Error("GenerateKeypair failed", "err", err)
@@ -297,6 +319,11 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		return &resp, err
 
 	case "export":
+		// Before the lookup: a key of someone else's zone and no key at
+		// all get the same answer.
+		if err := appKeyZoneRefusal(app, kp.Zone); err != nil {
+			return &resp, err
+		}
 		row := tx.QueryRow(getSig0KeySql, kp.Zone, kp.Keyid)
 		var zonename, state, algorithm, creator, privatekey, keyrrstr string
 		var keyid int
@@ -330,6 +357,9 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		resp.Msg = fmt.Sprintf("Exported SIG(0) key %s keyid %d", zonename, keyid)
 
 	case "setstate":
+		if err := appKeyZoneRefusal(app, kp.Keyname); err != nil {
+			return &resp, err
+		}
 		res, err = tx.Exec(setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
 			lgSigner.Error("failed to set SIG(0) key state", "err", err)
@@ -349,6 +379,9 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 	case "setparentstate":
 		const setParentStateSql = "UPDATE Sig0KeyStore SET parent_state=? WHERE zonename=? AND keyid=?"
+		if err := appKeyZoneRefusal(app, kp.Keyname); err != nil {
+			return &resp, err
+		}
 		res, err = tx.Exec(setParentStateSql, kp.ParentState, kp.Keyname, kp.Keyid)
 		if err != nil {
 			lgSigner.Error("failed to set SIG(0) key parent_state", "err", err)
@@ -364,6 +397,12 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	case "delete":
 		const getSig0KeySql = `
 SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
+
+		// The key is looked up by Zone and deleted by Keyname, from the
+		// keystore and the TrustStore: both must be the application's.
+		if err := appKeyZonesRefusal(app, kp.Zone, kp.Keyname); err != nil {
+			return &resp, err
+		}
 
 		// 1. Find key, if not --> error
 		row := tx.QueryRow(getSig0KeySql, kp.Zone, kp.Keyid)
@@ -516,11 +555,20 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 	var resp = KeystoreResponse{Time: time.Now()}
 
+	// An application client's own keys only (design 4.6): the keys of its
+	// own zones, checked on the name each subcommand acts on.
+	app := kp.appClient
+
 	switch kp.SubCommand {
 	case "list":
-		rows, err := tx.Query(getAllDnskeysSql)
+		q, args := getAllDnskeysSql, []any(nil)
+		if app != "" {
+			where, arg := appOwnZonesFilter(app)
+			q, args = q+" WHERE "+where, []any{arg}
+		}
+		rows, err := tx.Query(q, args...)
 		if err != nil {
-			return nil, fmt.Errorf("error from tx.Query(%s): %v", getAllDnskeysSql, err)
+			return nil, fmt.Errorf("error from tx.Query(%s): %v", q, err)
 		}
 		defer rows.Close()
 
@@ -558,6 +606,15 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
+		if app != "" {
+			if pkc == nil {
+				return &resp, fmt.Errorf("add: no key in the request")
+			}
+			// The DNSKEY's owner name is the zone the row goes in.
+			if err := appKeyZoneRefusal(app, pkc.DnskeyRR.Header().Name); err != nil {
+				return &resp, err
+			}
+		}
 
 		// Convert private key to PEM format for storage
 		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey
@@ -591,7 +648,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			resp.ErrorMsg = err.Error()
 			return &resp, err
 		}
-		keys, err := kdb.BulkExportDnssec(tx, sel)
+		keys, err := kdb.bulkExportDnssec(tx, sel, app)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
@@ -629,7 +686,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		// the zone stops using the superseded key, and the RRSIGs are refreshed
 		// on the resigner's next scheduled pass rather than at once. A caller
 		// that needs it sooner should go through the API, which does both.
-		dispositions, err := kdb.BulkImportDnssec(tx, kp.BulkDnssecKeys, kp.Force)
+		dispositions, err := kdb.bulkImportDnssec(tx, kp.BulkDnssecKeys, kp.Force, app)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
@@ -643,6 +700,11 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		return &resp, nil
 
 	case "generate":
+		if err := appKeyZoneRefusal(app, kp.Zone); err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
 		// On a zone whose key lifecycle is owned, generate names the key
 		// columns like setstate (design Q4): a state alone would have the
 		// store fill them from tdns's table, minting a key the owner did
@@ -686,6 +748,9 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		// state write would bypass it. With the columns the write goes
 		// through setKeyRowTx like every other, and any state is the owner's
 		// to name.
+		if err := appKeyZoneRefusal(app, kp.Keyname); err != nil {
+			return &resp, err
+		}
 		var stateFlags KeyRowFlags
 		zd, owned := zoneOwnedByName(kp.Keyname)
 		if owned && kp.Pub != nil && kp.Sign != nil && kp.DS != nil {
@@ -723,6 +788,11 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		needsRepublish = true
 
 	case "rollover":
+		if err := appKeyZoneRefusal(app, kp.Zone); err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
 		keytype := kp.KeyType
 		if keytype == "" {
 			keytype = "ZSK"
@@ -739,6 +809,11 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	case "export":
 		const getDnskeySql = `
 SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
+		// Before the lookup: a key of someone else's zone and no key at
+		// all get the same answer.
+		if err := appKeyZoneRefusal(app, kp.Zone); err != nil {
+			return &resp, err
+		}
 		row := tx.QueryRow(getDnskeySql, kp.Zone, kp.Keyid)
 		var zonename, state, algorithm, creator, privatekey, keyrrstr string
 		var keyid, flags int
@@ -777,6 +852,10 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	case "delete":
 		const getDnskeySql = `
 SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
+
+		if err := appKeyZoneRefusal(app, kp.Zone); err != nil {
+			return &resp, err
+		}
 
 		// 1. Find key, if not --> error
 		row := tx.QueryRow(getDnskeySql, kp.Zone, kp.Keyid)

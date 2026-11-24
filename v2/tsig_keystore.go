@@ -21,9 +21,11 @@ const getTsigKeystoreByNameSql = `
 SELECT keyname, algorithm, secret, origin, owner, creator, created_at, comment
 FROM TsigKeystore WHERE keyname=?`
 
-const listTsigKeystoreSql = `
+const listTsigKeystoreBaseSql = `
 SELECT keyname, algorithm, secret, origin, owner, creator, created_at, comment
-FROM TsigKeystore ORDER BY keyname`
+FROM TsigKeystore`
+
+const listTsigKeystoreSql = listTsigKeystoreBaseSql + ` ORDER BY keyname`
 
 const deleteTsigKeystoreSql = `DELETE FROM TsigKeystore WHERE keyname=?`
 
@@ -163,7 +165,17 @@ func scanTsigKeystoreRow(rows *sql.Rows) (TsigKeystoreRow, error) {
 }
 
 func listTsigKeystore(q rowsQuerier) ([]TsigKeystoreRow, error) {
-	rows, err := q.Query(listTsigKeystoreSql)
+	return listTsigKeystoreWhere(q, "")
+}
+
+// listTsigKeystoreWhere is listTsigKeystore limited by the SQL condition
+// where, with its arguments ("" lists every key).
+func listTsigKeystoreWhere(q rowsQuerier, where string, args ...any) ([]TsigKeystoreRow, error) {
+	query := listTsigKeystoreSql
+	if where != "" {
+		query = listTsigKeystoreBaseSql + " WHERE " + where + " ORDER BY keyname"
+	}
+	rows, err := q.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

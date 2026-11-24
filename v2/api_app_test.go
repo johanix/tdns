@@ -124,11 +124,13 @@ func TestApiAppTableMatchesTheRoleTable(t *testing.T) {
 		}
 		cmds := commandsOf(fd)
 		star, hasStar := app["*"]
-		if hasStar && star != AppRefused && len(cmds) > 0 {
+		// "*" by subcommand is apiAppSubScopes', which
+		// TestApiAppKeystoreTableMatchesTheHandlers holds to the handler.
+		if hasStar && star != AppRefused && star != AppBySubCommand && len(cmds) > 0 {
 			t.Errorf("route %s: \"*\" opens a handler with commands %v; list them instead", route, cmds)
 		}
 		for _, c := range cmds {
-			if _, ok := app[c]; !ok && !(hasStar && star == AppRefused) {
+			if _, ok := app[c]; !ok && !(hasStar && (star == AppRefused || star == AppBySubCommand)) {
 				t.Errorf("route %s: command %q (in %s) has no entry in apiAppScopes", route, c, handler)
 			}
 		}
@@ -145,14 +147,14 @@ func TestApiAppTableMatchesTheRoleTable(t *testing.T) {
 		{"/api/v1/zone", "setowner"}, {"/api/v1/zone", "no-such-command"}, {"/api/v1/no-such-route", ""},
 		{"/api/v1/zone", unknownCommand},
 	} {
-		if got := ApiAppScopeOf(tc.route, tc.cmd); got != AppRefused {
+		if got := ApiAppScopeOf(tc.route, tc.cmd, ""); got != AppRefused {
 			t.Errorf("%s %q: %s, want refused", tc.route, tc.cmd, got)
 		}
 	}
-	if got := ApiAppScopeOf("/api/v1/ping", ""); got != AppOpen {
+	if got := ApiAppScopeOf("/api/v1/ping", "", ""); got != AppOpen {
 		t.Errorf("ping: %s, want open", got)
 	}
-	if got := ApiAppScopeOf("/api/v1/zone", " UPDATE "); got != AppOwnZone {
+	if got := ApiAppScopeOf("/api/v1/zone", " UPDATE ", ""); got != AppOwnZone {
 		t.Errorf("zone UPDATE: %s, want own zone (case and space do not matter)", got)
 	}
 }

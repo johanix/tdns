@@ -117,14 +117,17 @@ var maxPeekBody = 64 << 20
 // unknownCommand matches no entry in the role table, so it needs admin.
 const unknownCommand = "\x00unknown"
 
-// peekCommand returns the request body's Command field and puts the body back
-// for the handler. It decodes with encoding/json into a field named Command,
-// as every handler does, so both read the same value (the same case-insensitive
-// key match, the same last-one-wins on a repeated key). tooLarge says the body
-// is over maxPeekBody; the command is then unknownCommand.
-func peekCommand(r *http.Request) (cmd string, tooLarge bool) {
+// peekCommand returns the request body's Command and SubCommand fields and
+// puts the body back for the handler. It decodes with encoding/json into
+// fields of those names, as every handler does, so both read the same values
+// (the same case-insensitive key match, the same last-one-wins on a repeated
+// key). tooLarge says the body is over maxPeekBody; the command is then
+// unknownCommand. SubCommand matters only on a route that apiAppSubScopes
+// splits by it (the keystore); a SubCommand that is not a string is
+// unknownCommand there, and is left for the handler to refuse elsewhere.
+func peekCommand(r *http.Request) (cmd, sub string, tooLarge bool) {
 	if r.Body == nil || r.Body == http.NoBody {
-		return "", false
+		return "", "", false
 	}
 	buf, err := io.ReadAll(io.LimitReader(r.Body, int64(maxPeekBody)+1))
 	r.Body = struct {
@@ -133,22 +136,28 @@ func peekCommand(r *http.Request) (cmd string, tooLarge bool) {
 	}{io.MultiReader(bytes.NewReader(buf), r.Body), r.Body}
 	switch {
 	case len(buf) > maxPeekBody:
-		return unknownCommand, true
+		return unknownCommand, unknownCommand, true
 	case err != nil:
-		return unknownCommand, false
+		return unknownCommand, unknownCommand, false
 	}
 	if len(bytes.TrimSpace(buf)) == 0 {
-		return "", false
+		return "", "", false
 	}
 	// A body that does not decode as one JSON value is not a commandless
 	// request: a handler's Decoder reads the first value and ignores the
 	// rest, so `{"command":"off"}{}` would run "off" with only the role a
 	// commandless request needs. It needs admin instead.
-	var c struct{ Command string }
-	if json.Unmarshal(buf, &c) != nil {
-		return unknownCommand, false
+	var c struct {
+		Command    string
+		SubCommand json.RawMessage
 	}
-	return c.Command, false
+	if json.Unmarshal(buf, &c) != nil {
+		return unknownCommand, unknownCommand, false
+	}
+	if len(c.SubCommand) > 0 && json.Unmarshal(c.SubCommand, &sub) != nil {
+		sub = unknownCommand
+	}
+	return c.Command, sub, false
 }
 
 // authenticate decides who r is. A non-zero status means refuse it.
@@ -231,20 +240,21 @@ func (conf *Config) apiAuthMiddleware(apikey string) mux.MiddlewareFunc {
 					route = tpl
 				}
 			}
-			cmd, tooLarge := peekCommand(r)
-			need := RequiredApiRole(route, cmd)
+			cmd, sub, tooLarge := peekCommand(r)
+			need := RequiredApiRole(route, cmd, sub, id.App)
 			if tooLarge && id.Role < RoleAdmin {
 				lgApi.Info("api request refused: body too large", "client", id.Name, "role", id.Role, "route", route, "limit", maxPeekBody)
 				http.Error(w, fmt.Sprintf("%s: request body is over %d bytes, the most the management API reads to check a request; the daemon's local admin socket has no such limit",
 					route, maxPeekBody), http.StatusRequestEntityTooLarge)
 				return
 			}
+			named := apiCommandLabel(route, cmd, sub)
 			if id.Role < need {
-				lgApi.Info("api request denied", "client", id.Name, "role", id.Role, "route", route, "command", cmd, "needs", need)
+				lgApi.Info("api request denied", "client", id.Name, "role", id.Role, "route", route, "command", named, "needs", need)
 				if need == RoleAdmin {
-					http.Error(w, fmt.Sprintf("%s %s needs admin, which is available only on the daemon's local admin socket", route, cmd), http.StatusForbidden)
+					http.Error(w, fmt.Sprintf("%s %s needs admin, which is available only on the daemon's local admin socket", route, named), http.StatusForbidden)
 				} else {
-					http.Error(w, fmt.Sprintf("%s %s needs %s; %s is %s", route, cmd, need, id.Name, id.Role), http.StatusForbidden)
+					http.Error(w, fmt.Sprintf("%s %s needs %s; %s is %s", route, named, need, id.Name, id.Role), http.StatusForbidden)
 				}
 				return
 			}
@@ -252,15 +262,15 @@ func (conf *Config) apiAuthMiddleware(apikey string) mux.MiddlewareFunc {
 			// client stays read-only. The table only says whether the
 			// command is open to application clients at all; which zone it
 			// may act on, the handler checks once it has resolved it.
-			if id.App && ApiAppScopeOf(route, cmd) == AppRefused {
-				lgApi.Info("api request denied: not available to application clients", "client", id.Name, "route", route, "command", cmd)
-				http.Error(w, fmt.Sprintf("%s: not available to application clients", apiCommandName(route, cmd)), http.StatusForbidden)
+			if id.App && ApiAppScopeOf(route, cmd, sub) == AppRefused {
+				lgApi.Info("api request denied: not available to application clients", "client", id.Name, "route", route, "command", named)
+				http.Error(w, fmt.Sprintf("%s: not available to application clients", apiCommandName(route, cmd, sub)), http.StatusForbidden)
 				return
 			}
 			if need >= RoleReadWrite {
-				lgApi.Info("api request", "client", id.Name, "role", id.Role, "via", id.Via, "app", id.App, "route", route, "command", strings.TrimSpace(cmd))
+				lgApi.Info("api request", "client", id.Name, "role", id.Role, "via", id.Via, "app", id.App, "route", route, "command", named)
 			} else {
-				lgApi.Debug("api request", "client", id.Name, "role", id.Role, "via", id.Via, "app", id.App, "route", route, "command", strings.TrimSpace(cmd))
+				lgApi.Debug("api request", "client", id.Name, "role", id.Role, "via", id.Via, "app", id.App, "route", route, "command", named)
 			}
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), apiIdentityKey{}, id)))
 		})

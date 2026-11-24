@@ -132,21 +132,22 @@ func parseApiRoutes(t *testing.T) (map[string]string, map[string]*ast.FuncDecl) 
 // commandsOf collects the string cases of every switch in fd whose tag reads a
 // field named Command, lower-cased and trimmed as RequiredApiRole does.
 func commandsOf(fd *ast.FuncDecl) []string {
+	return switchCases(fd, "Command")
+}
+
+// switchCases collects the string cases of every switch in fd whose tag
+// reads a field named field (Command, SubCommand), lower-cased and trimmed.
+func switchCases(fd *ast.FuncDecl, field string) []string {
 	seen := map[string]bool{}
 	ast.Inspect(fd, func(n ast.Node) bool {
 		sw, ok := n.(*ast.SwitchStmt)
-		if !ok || sw.Tag == nil || !readsCommand(sw.Tag) {
+		if !ok || sw.Tag == nil || !readsField(sw.Tag, field) {
 			return true
 		}
 		for _, st := range sw.Body.List {
-			cc, ok := st.(*ast.CaseClause)
-			if !ok {
-				continue
-			}
-			for _, e := range cc.List {
-				if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					s, _ := strconv.Unquote(lit.Value)
-					seen[strings.ToLower(strings.TrimSpace(s))] = true
+			if cc, ok := st.(*ast.CaseClause); ok {
+				for _, c := range caseStrings(cc) {
+					seen[c] = true
 				}
 			}
 		}
@@ -160,10 +161,23 @@ func commandsOf(fd *ast.FuncDecl) []string {
 	return out
 }
 
-func readsCommand(e ast.Expr) bool {
+// caseStrings is the string constants of one case clause, lower-cased and
+// trimmed.
+func caseStrings(cc *ast.CaseClause) []string {
+	var out []string
+	for _, e := range cc.List {
+		if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			s, _ := strconv.Unquote(lit.Value)
+			out = append(out, strings.ToLower(strings.TrimSpace(s)))
+		}
+	}
+	return out
+}
+
+func readsField(e ast.Expr, field string) bool {
 	found := false
 	ast.Inspect(e, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Command" {
+		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == field {
 			found = true
 		}
 		return !found

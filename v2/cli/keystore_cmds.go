@@ -5,6 +5,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -210,12 +211,7 @@ func tsigKeyMgmt(role, subcmd, name, algo, secret, owner string, force bool) {
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	if tr.Error {
-		fmt.Printf("Error from server: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
 	switch subcmd {
@@ -261,11 +257,8 @@ func tsigKeyExport(role, name string, asBind, asNsd bool) {
 		Creator:     "tdns-cli",
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if tr.Error {
-		fmt.Fprintf(os.Stderr, "Error from server: %s\n", tr.ErrorMsg)
+		// stderr: stdout carries the secret alone.
+		fmt.Fprintln(os.Stderr, keystoreErrorText(err))
 		os.Exit(1)
 	}
 	if tr.TsigExport == nil {
@@ -313,12 +306,11 @@ func tsigKeyImport(role, file, format, owner string, force, interactive, verbose
 			return
 		}
 		if tsigImportConflictCount(probe.TsigImport) == 0 {
-			if probe.ErrorMsg != "" {
-				fmt.Printf("Error: %s\n", probe.ErrorMsg)
-			} else {
-				fmt.Printf("Error: %v\n", err)
+			if !probe.Error {
+				dieKeystore(err) // refused, or no answer
 			}
-			os.Exit(1)
+			printTsigImportResult(probe, verbose) // and exits
+			return
 		}
 		var overwrite []string
 		for _, d := range probe.TsigImport {
@@ -339,12 +331,8 @@ func tsigKeyImport(role, file, format, owner string, force, interactive, verbose
 		post.TsigOverwrite = overwrite
 	}
 	tr, err := tsigKeystorePost(role, post)
-	if err != nil {
-		if tr.Error || len(tr.TsigImport) > 0 || tr.Msg != "" {
-			printTsigImportResult(tr, verbose)
-		}
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
+	if err != nil && !tr.Error {
+		dieKeystore(err) // refused, or no answer: nothing was imported
 	}
 	printTsigImportResult(tr, verbose)
 }
@@ -363,20 +351,34 @@ func tsigForceInteractiveConflict(force, interactive bool) bool {
 	return force && interactive
 }
 
+// printTsigImportResult prints an import's outcome, verdict first: the
+// daemon's error, if any, then the keys (every key under verbose, else only
+// those refused, which need the caller's attention), then its summary.
 func printTsigImportResult(tr tdns.KeystoreResponse, verbose bool) {
 	if tr.Error {
-		fmt.Printf("Error from server: %s\n", tr.ErrorMsg)
+		fmt.Println(keystoreErrorText(fmt.Errorf("%s", tr.ErrorMsg)))
 	}
-	if verbose {
-		for _, d := range tr.TsigImport {
-			fmt.Printf("%s: %s\n", d.Name, d.Status)
-		}
-	}
+	printTsigImportDispositions(tr.TsigImport, verbose)
 	if tr.Msg != "" {
 		fmt.Println(tr.Msg)
 	}
 	if tr.Error {
 		os.Exit(1)
+	}
+}
+
+// printTsigImportDispositions prints one line per key, verdict first (all
+// of them under verbose, else the refused ones), and the reason for a
+// refusal on the lines below it.
+func printTsigImportDispositions(ds []tdns.TsigKeyDisposition, verbose bool) {
+	for _, d := range ds {
+		if !verbose && d.Status != tdns.TsigImportRefused {
+			continue
+		}
+		fmt.Printf("  %-9s %s\n", d.Status, d.Name)
+		if d.Detail != "" {
+			fmt.Println(indentedLines(d.Detail, 12, 72))
+		}
 	}
 }
 
@@ -394,8 +396,7 @@ func tsigKeyPurge(role string, force, interactive, yes bool) {
 		requireInteractiveTTY()
 		probe, err := tsigKeystorePost(role, post)
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
+			dieKeystore(err)
 		}
 		if len(probe.TsigKeys) == 0 {
 			fmt.Println(probe.Msg)
@@ -428,12 +429,7 @@ func tsigKeyPurge(role string, force, interactive, yes bool) {
 	}
 	tr, err := tsigKeystorePost(role, post)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	if tr.Error {
-		fmt.Printf("Error from server: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 	if len(tr.TsigKeys) > 0 && !force && len(post.TsigOverwrite) == 0 {
 		var out, rows []string
@@ -907,13 +903,7 @@ func sig0KeyMgmt(role, cmd string) {
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if tr.Error {
-		fmt.Printf("Error from the daemon: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
 	switch cmd {
@@ -1099,13 +1089,7 @@ func dnssecKeyMgmt(role, cmd string) {
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if tr.Error {
-		fmt.Printf("Error from the daemon: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
 	switch cmd {
@@ -1184,12 +1168,7 @@ func dnssecKeyPurgeCmd(role string, cmd *cobra.Command) {
 		Force:      force,
 	})
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	if tr.Error {
-		fmt.Printf("Error from the daemon: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
 	if len(tr.Dnskeys) > 0 {
@@ -1251,11 +1230,7 @@ func dnssecGenDS(role string) {
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
-		log.Fatalf("Error listing DNSSEC keys: %v", err)
-	}
-
-	if tr.Error {
-		log.Fatalf("Error from keystore: %s", tr.ErrorMsg)
+		dieKeystore(err)
 	}
 
 	if len(tr.Dnskeys) == 0 {
@@ -1364,6 +1339,52 @@ func dnssecGenDS(role string) {
 
 }
 
+// keystoreRefused is a refusal by the daemon's access check (a role or an
+// application client's limit), already worded as the CLI prints it:
+// tdns.ApiRefusal.Report, verdict first.
+type keystoreRefused struct{ report string }
+
+func (e keystoreRefused) Error() string { return e.report }
+
+// keystoreErrorText is err as a keystore command prints it: verdict first,
+// once, in lines of at most 72 characters. A refusal by the access check
+// is printed as the daemon worded it; any other error, the daemon's
+// included, after "Error:", wrapped, with the daemon's own second lines
+// (what to do about it) kept on lines of their own.
+func keystoreErrorText(err error) string {
+	var ref keystoreRefused
+	if errors.As(err, &ref) {
+		return ref.report
+	}
+	paras := strings.Split(strings.TrimSpace(err.Error()), "\n")
+	out := wrapText("Error: "+strings.TrimSpace(paras[0]), 70)
+	for i := 1; i < len(out); i++ {
+		out[i] = "  " + out[i]
+	}
+	for _, p := range paras[1:] {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, indentedLines(p, 2, 72))
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// dieKeystore prints err as keystoreErrorText does and exits 1.
+func dieKeystore(err error) {
+	fmt.Println(keystoreErrorText(err))
+	os.Exit(1)
+}
+
+// indentedLines wraps s into lines of at most width characters, each
+// indented by indent spaces.
+func indentedLines(s string, indent, width int) string {
+	lines := wrapText(s, width-indent)
+	for i := range lines {
+		lines[i] = strings.Repeat(" ", indent) + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
 func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.KeystoreResponse, error) {
 
 	// fmt.Printf("Sending keystore command: %v\n", data)
@@ -1377,7 +1398,7 @@ func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.Keystore
 	if err != nil {
 		if rerr, ok := refusalError(err); ok {
 			kr.AppName = api.Name
-			return kr, rerr
+			return kr, keystoreRefused{rerr.Error()}
 		}
 		log.Println("Error from Api Post:", err)
 		return kr, fmt.Errorf("error from api post: %v", err)

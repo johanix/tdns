@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -70,6 +71,10 @@ func fetchServerAlgorithms(role string) ([]algregistry.AlgorithmInfo, error) {
 	}
 	resp, err := SendKeystoreCmd(api, tdns.KeystorePost{Command: "list-algorithms"})
 	if err != nil {
+		var ref keystoreRefused
+		if errors.As(err, &ref) {
+			return nil, err // it answered: printed as the daemon worded it
+		}
 		return nil, fmt.Errorf("cannot reach %s server to determine supported algorithms: %v", role, err)
 	}
 	serverAlgCache[role] = resp.Algorithms
@@ -265,8 +270,7 @@ func ResolveAlgorithm(role string, use algUse) uint8 {
 	if raw == "" {
 		algs, err := fetchServerAlgorithms(role)
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
+			dieKeystore(err)
 		}
 		fmt.Printf("Error: no algorithm given (-a). Algorithms supported by the %s server: %s\n",
 			role, strings.Join(serverAlgNames(algs, use), ", "))
@@ -274,8 +278,7 @@ func ResolveAlgorithm(role string, use algUse) uint8 {
 	}
 	num, err := resolveServerAlgorithm(role, strings.ToUpper(raw), use)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 	return num
 }

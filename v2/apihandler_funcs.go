@@ -47,6 +47,16 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 
 		lgApi.Debug("received /keystore request", "cmd", kp.Command, "subcmd", kp.SubCommand, "from", r.RemoteAddr)
 
+		// An application client gets its own keys only (design 4.6): the
+		// *KeyMgmt functions check each key or zone they resolve against
+		// kp.appClient.
+		kp.appClient = AppClientOf(r.Context())
+		if err := appKeystoreGate(kp.appClient, kp); err != nil {
+			lgApi.Info("keystore request refused: not available to application clients", "client", kp.appClient, "cmd", kp.Command, "subcmd", kp.SubCommand)
+			writeKeystoreRefusal(w, err)
+			return
+		}
+
 		var resp *KeystoreResponse
 		var tsigCacheDelta *TsigCacheDelta
 		tsigMgmt := kp.Command == "tsig-mgmt"
@@ -135,6 +145,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						if dnssecResignZone != "" {
 							triggerResign(conf, dnssecResignZone)
 						}
+						logKeyExports(r.Context(), kp, resp)
 						// SIG(0) bulk import owns no transaction of its own on
 						// this path, so it cannot drop its own cache entries --
 						// the commit that makes the new rows visible is the one
@@ -220,11 +231,12 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 
 		case "tsig-mgmt":
 			// A new key is the caller's unless the request names its owner
-			// (an admin may). Inside TsigKeyMgmt the default is "api", for
-			// the callers in the daemon, which have no request.
+			// (an admin may; an application client may not, whatever it
+			// names: design 4.6). Inside TsigKeyMgmt the default is "api",
+			// for the callers in the daemon, which have no request.
 			switch kp.SubCommand {
 			case "add", "import", "generate":
-				if kp.Owner == "" {
+				if kp.Owner == "" || kp.appClient != "" {
 					kp.Owner = CallerApiOwner(r.Context())
 				}
 			}

@@ -151,7 +151,9 @@ var apiRouteRoles = map[string]map[string]ApiRole{
 	},
 	"/api/v1/scanner/status": {"": RoleReadOnly},
 
-	// Admin, said out loud: key material, trust, and credentials.
+	// Admin, said out loud: key material, trust, and credentials. An
+	// application client gets its own keys in the keystore without admin
+	// (apiAppSubRoles); nobody else does.
 	"/api/v1/keystore":                  {"*": RoleAdmin, "": RoleAdmin},
 	"/api/v1/truststore":                {"*": RoleAdmin, "": RoleAdmin},
 	"/api/v1/dsync-api/credential":      {"*": RoleAdmin, "": RoleAdmin},
@@ -180,10 +182,29 @@ func RegisterApiRouteRoles(route string, roles map[string]ApiRole) {
 	extraRoles[route] = m
 }
 
+// apiAppSubRoles is the role an application client needs on a route whose
+// commands the application table splits by SubCommand (apiAppSubScopes), for
+// what that table opens to it. What it does not open needs what
+// apiRouteRoles says, and so does everything for every other caller.
+//
+// The keystore is admin (above) for everyone but an application client: an
+// application manages its own keys over TCP, without admin (design
+// docs/2026-11-23-tdns-api-ownership-design.md 4.6). Read-write for all of
+// it, lists and exports included: only a read-write application client gets
+// the keystore, as only a read-write operator gets the zones' writes.
+var apiAppSubRoles = map[string]ApiRole{
+	"/api/v1/keystore": RoleReadWrite,
+}
+
 // RequiredApiRole is the role a request needs: route is the matched mux path
-// template, cmd the body's Command (any case). Anything not declared needs
-// admin.
-func RequiredApiRole(route, cmd string) ApiRole {
+// template, cmd the body's Command and sub its SubCommand (any case), app
+// whether the caller is an application client. sub matters only to an
+// application client on a route of apiAppSubRoles. Anything not declared
+// needs admin.
+func RequiredApiRole(route, cmd, sub string, app bool) ApiRole {
+	if r, ok := apiAppSubRoles[route]; ok && app && ApiAppScopeOf(route, cmd, sub) != AppRefused {
+		return r
+	}
 	cmd = strings.ToLower(strings.TrimSpace(cmd))
 	cmds, ok := apiRouteRoles[route]
 	if !ok {
@@ -203,4 +224,18 @@ func RequiredApiRole(route, cmd string) ApiRole {
 		}
 	}
 	return RoleAdmin
+}
+
+// apiCommandLabel is cmd as a refusal or a log line names it: with sub on a
+// route that splits its commands by SubCommand, where cmd alone does not say
+// which command was refused ("keystore tsig-mgmt" is list and purge alike).
+func apiCommandLabel(route, cmd, sub string) string {
+	cmd, sub = strings.TrimSpace(cmd), strings.TrimSpace(sub)
+	if !splitBySubCommand(route) || sub == "" {
+		return cmd
+	}
+	if sub == unknownCommand {
+		return cmd + " (a subcommand that cannot be read)"
+	}
+	return cmd + " " + sub
 }

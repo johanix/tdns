@@ -40,6 +40,17 @@ const (
 	// AppMemberAndCatalog: the member zone and the catalog zone must both
 	// be the caller's.
 	AppMemberAndCatalog
+	// AppOwnKey: a keystore command on one key, which the handler refuses
+	// unless the key is the caller's: a TSIG key of that API owner, a
+	// SIG(0) or DNSSEC key of a zone of that API owner (design 4.4).
+	AppOwnKey
+	// AppNewKey: adds keys, each the caller's: a TSIG key takes the
+	// caller as its API owner, a SIG(0) or DNSSEC key must be for a zone
+	// of the caller's (design 4.7).
+	AppNewKey
+	// AppBySubCommand: the command is scoped by the body's SubCommand too,
+	// in apiAppSubScopes.
+	AppBySubCommand
 )
 
 func (s AppScope) String() string {
@@ -56,6 +67,12 @@ func (s AppScope) String() string {
 		return "own catalog zone"
 	case AppMemberAndCatalog:
 		return "own member and catalog zone"
+	case AppOwnKey:
+		return "own key"
+	case AppNewKey:
+		return "new key"
+	case AppBySubCommand:
+		return "by subcommand"
 	}
 	return "refused"
 }
@@ -73,9 +90,11 @@ func (s AppScope) String() string {
 //
 // Refused because they act on the whole server (design 4.5), or because
 // they say things about it beyond the caller's zones: command status/api,
-// config *, debug *, scanner *, imr *. Refused because they are key material
-// or trust: keystore, truststore, the DSYNC credentials (part C opens part of
-// the keystore). zone setowner is the operator's.
+// config *, debug *, scanner *, imr *. Refused because they are trust or
+// credentials: truststore (list-dnskey included: it lists the DNSKEYs the
+// server holds for other zones, not keys an application owns), the DSYNC
+// credentials. The keystore is split by SubCommand (apiAppSubScopes). zone
+// setowner is the operator's.
 var apiAppScopes = map[string]map[string]AppScope{
 	"/api/v1/ping": {"*": AppOpen, "": AppOpen},
 
@@ -198,42 +217,129 @@ var apiAppScopes = map[string]map[string]AppScope{
 	},
 	"/api/v1/scanner/status": {"": AppRefused},
 
-	"/api/v1/keystore":                  {"*": AppRefused, "": AppRefused},
+	"/api/v1/keystore":                  {"*": AppBySubCommand, "": AppRefused},
 	"/api/v1/truststore":                {"*": AppRefused, "": AppRefused},
 	"/api/v1/dsync-api/credential":      {"*": AppRefused, "": AppRefused},
 	"/api/v1/dsync-api/cert-credential": {"*": AppRefused, "": AppRefused},
 }
 
-// ApiAppScopeOf is how the command cmd (any case) on route is scoped for an
-// application client. A route or command with no entry is AppRefused,
-// routes added outside this package (RegisterApiRouteRoles) included.
-func ApiAppScopeOf(route, cmd string) AppScope {
+// apiAppSubScopes splits the commands that apiAppScopes marks
+// AppBySubCommand by the body's SubCommand: route, then Command, then
+// SubCommand, with "*" and "" as in apiAppScopes. It fails closed in the
+// same way: a command or subcommand with no entry is refused.
+// TestApiAppKeystoreTableMatchesTheHandlers fails when the keystore handler
+// or one of its *KeyMgmt functions has a command or subcommand that is not
+// here, or when one listed here is gone.
+//
+// The keystore for application clients (design 4.6): its own keys only.
+// Lists and exports are filtered to them in the DB query, adds take the
+// caller as the key's API owner (TSIG) or need a zone of its own (SIG(0),
+// DNSSEC), and a key command on one key needs a key of its own. Refused
+// because they act across API owners: setowner, purge, clear,
+// policy-cleanup, check. The handler checks the key or zone once it has
+// resolved it (appKeystoreRefusal and its callers in keystore.go and
+// tsig_keystore_mgmt.go); this table only lets the request reach it.
+var apiAppSubScopes = map[string]map[string]map[string]AppScope{
+	"/api/v1/keystore": {
+		"tsig-mgmt": {
+			"list":        AppOwnList,
+			"bulk-export": AppOwnList,
+			"export":      AppOwnKey,
+			"delete":      AppOwnKey,
+			"add":         AppNewKey,
+			"generate":    AppNewKey,
+			"import":      AppNewKey,
+			"bulk-import": AppNewKey,
+			"setowner":    AppRefused,
+			"purge":       AppRefused,
+		},
+		"sig0-mgmt": {
+			"list":           AppOwnList,
+			"bulk-export":    AppOwnList,
+			"export":         AppOwnKey,
+			"delete":         AppOwnKey,
+			"setstate":       AppOwnKey,
+			"setparentstate": AppOwnKey,
+			"add":            AppNewKey,
+			"generate":       AppNewKey,
+			"bulk-import":    AppNewKey,
+		},
+		"dnssec-mgmt": {
+			"list":           AppOwnList,
+			"bulk-export":    AppOwnList,
+			"export":         AppOwnKey,
+			"delete":         AppOwnKey,
+			"setstate":       AppOwnKey,
+			"rollover":       AppOwnKey,
+			"add":            AppNewKey,
+			"generate":       AppNewKey,
+			"bulk-import":    AppNewKey,
+			"clear":          AppRefused,
+			"policy-cleanup": AppRefused,
+			"purge":          AppRefused,
+			"check":          AppRefused,
+		},
+		// No key material: what this server can sign with and the
+		// policies it has loaded.
+		"list-algorithms": {"*": AppOpen, "": AppOpen},
+		"list-policies":   {"*": AppOpen, "": AppOpen},
+	},
+}
+
+// ApiAppScopeOf is how the command cmd with the subcommand sub (any case)
+// on route is scoped for an application client. sub matters only where the
+// command is AppBySubCommand. A route or command with no entry is
+// AppRefused, routes added outside this package (RegisterApiRouteRoles)
+// included.
+func ApiAppScopeOf(route, cmd, sub string) AppScope {
 	cmd = strings.ToLower(strings.TrimSpace(cmd))
-	cmds, ok := apiAppScopes[route]
+	s := lookupAppScope(apiAppScopes[route], cmd)
+	if s != AppBySubCommand {
+		return s
+	}
+	subs, ok := apiAppSubScopes[route][cmd]
 	if !ok {
 		return AppRefused
 	}
-	if s, ok := cmds[cmd]; ok {
+	s = lookupAppScope(subs, strings.ToLower(strings.TrimSpace(sub)))
+	if s == AppBySubCommand {
+		return AppRefused // a subcommand is not split again
+	}
+	return s
+}
+
+// lookupAppScope is key's entry in m: its own, else "*" for a non-empty
+// key, else AppRefused.
+func lookupAppScope(m map[string]AppScope, key string) AppScope {
+	if s, ok := m[key]; ok {
 		return s
 	}
-	if cmd != "" {
-		if s, ok := cmds["*"]; ok {
+	if key != "" {
+		if s, ok := m["*"]; ok {
 			return s
 		}
 	}
 	return AppRefused
 }
 
-// apiCommandName is route and cmd as an operator knows the command: "zone
-// bump", "rollover asap".
-func apiCommandName(route, cmd string) string {
+// splitBySubCommand says whether some command on route is scoped by the
+// body's SubCommand for application clients.
+func splitBySubCommand(route string) bool {
+	_, ok := apiAppSubScopes[route]
+	return ok
+}
+
+// apiCommandName is route, cmd and (where it decides) sub as an operator
+// knows the command: "zone bump", "rollover asap", "keystore tsig-mgmt
+// purge".
+func apiCommandName(route, cmd, sub string) string {
 	name := strings.ReplaceAll(strings.Trim(strings.TrimPrefix(route, "/api/v1"), "/"), "/", " ")
 	cmd = strings.ToLower(strings.TrimSpace(cmd))
 	switch {
 	case cmd == unknownCommand:
 		return name + " (a command that cannot be read)"
 	case cmd != "":
-		return name + " " + cmd
+		return name + " " + apiCommandLabel(route, cmd, strings.ToLower(sub))
 	}
 	return name
 }

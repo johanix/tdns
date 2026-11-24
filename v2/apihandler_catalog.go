@@ -133,7 +133,7 @@ func catalogAppRefusal(app string, data CatalogPost) error {
 		}
 		return appZoneRefusalByName(app, dns.Fqdn(name))
 	}
-	switch ApiAppScopeOf("/api/v1/catalog", data.Command) {
+	switch ApiAppScopeOf("/api/v1/catalog", data.Command, "") {
 	case AppNewZone:
 		// catalog create: an existing zone is refused by the handler,
 		// and the new catalog zone records the caller as its owner.
