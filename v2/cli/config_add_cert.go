@@ -1090,8 +1090,14 @@ func (c *CertSetup) reloadBack(files string) string {
 	var sb strings.Builder
 	sb.WriteString(files)
 	// The daemon was reloaded with the new files: it must run the old ones
-	// again.
-	if _, err := reloadAccess(c.role, c.t); err != nil {
+	// again. A daemon config put back without its access-file: line names
+	// none, and its reload drops the policy ("no longer configured"), as it
+	// should; one that still names it must load it.
+	named := true
+	if now, err := ReadDaemonApi(c.t.DaemonConfig, c.role); err == nil {
+		named = now.AccessFile != ""
+	}
+	if _, err := reloadAccessNamed(c.role, c.t, named); err != nil {
 		fmt.Fprintf(&sb, "; the daemon could NOT be reloaded with them (%v): it may still run the new policy, reload it over its socket", err)
 		return sb.String()
 	}
@@ -1306,7 +1312,21 @@ func addAccessFileLine(src []byte, path string) ([]byte, error) {
 
 // fixLines say what makes the certificate work when config add could not.
 func (c *CertSetup) fixLines() []string {
+	// What the daemon config lacks decides first: neither a restart nor
+	// waiting gives the daemon TLS or a socket. A silent TCP port, if the
+	// ping met one, comes after it.
 	switch {
+	case c.noTLS:
+		return c.withSilentPort([]string{
+			"turn on TLS for the daemon's TCP API (apiserver.usetls: true,",
+			"with certfile and keyfile), then run config add again.",
+		})
+	case c.noSocket:
+		return c.withSilentPort([]string{
+			"give the daemon its local admin socket (leave apiserver.socket",
+			"out for the default, or give it an absolute path; not none),",
+			"restart the daemon, then run config add again.",
+		})
 	case c.timedOut != nil:
 		// Asking it again does not help while it is wedged; whatever apply
 		// wrote is put back, so config add plans anew.
@@ -1321,17 +1341,6 @@ func (c *CertSetup) fixLines() []string {
 		}
 	case c.unidentified:
 		return c.sockFixLines()
-	case c.noTLS:
-		return []string{
-			"turn on TLS for the daemon's TCP API (apiserver.usetls: true,",
-			"with certfile and keyfile), then run config add again.",
-		}
-	case c.noSocket:
-		return []string{
-			"give the daemon its local admin socket (leave apiserver.socket",
-			"out for the default, or give it an absolute path; not none),",
-			"restart the daemon, then run config add again.",
-		}
 	case c.state == certDisabled:
 		return []string{
 			"on the daemon's host, as root:",
@@ -1382,6 +1391,21 @@ func (c *CertSetup) fixLines() []string {
 		lines = append(lines, "then run config add again.")
 	}
 	return lines
+}
+
+// withSilentPort is fix lines for what the daemon config lacks, followed,
+// when the ping of its TCP port got a connection and no answer (timedOut),
+// by what that may be: second, as it is not what keeps the certificate out.
+func (c *CertSetup) withSilentPort(lines []string) []string {
+	switch {
+	case c.timedOut == nil:
+		return lines
+	case !c.timedOut.connected:
+		return append(lines, "Its TCP port did not take the connection in time either.")
+	}
+	return append(lines,
+		"Its TCP port took the connection but did not answer: a wedged",
+		"daemon (its log), or another program on that port.")
 }
 
 // sockFixLines say what makes config add able to tell that the daemon on

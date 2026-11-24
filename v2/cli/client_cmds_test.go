@@ -1639,13 +1639,18 @@ func TestDefaultClientCertPathsAreInCerts(t *testing.T) {
 
 // A reload whose reply says the daemon config names no access file any
 // more did not apply the file just written: the daemon reads none. As the
-// daemon words it (tdns.AccessFileNoLongerConfigured begins it).
+// daemon words it (tdns.AccessFileNoLongerConfigured begins it). For a
+// reload of a daemon config that names none (a rollback took the line
+// out), that reply is the reload done.
 func TestAccessReloadMsgNoLongerConfigured(t *testing.T) {
 	reply := tdns.ConfigResponse{Msg: "Config reloaded. The access file is no longer configured: the API key is admin on the TCP API again."}
-	if msg, err := accessReloadMsg(reply); err == nil || !strings.Contains(err.Error(), "did NOT apply it") || !strings.Contains(err.Error(), "no longer configured") {
+	if msg, err := accessReloadMsg(reply, true); err == nil || !strings.Contains(err.Error(), "did NOT apply it") || !strings.Contains(err.Error(), "no longer configured") {
 		t.Errorf("accessReloadMsg = %q, %v; want the edit reported as not applied, with the daemon's reply", msg, err)
 	}
-	if msg, err := accessReloadMsg(tdns.ConfigResponse{Msg: "Config reloaded. Access file reloaded: 1 client(s), keyauth on."}); err != nil || msg == "" {
+	if msg, err := accessReloadMsg(reply, false); err != nil || !strings.Contains(msg, "no longer configured") {
+		t.Errorf("the reload of a config that names no access file: %q, %v; want it done", msg, err)
+	}
+	if msg, err := accessReloadMsg(tdns.ConfigResponse{Msg: "Config reloaded. Access file reloaded: 1 client(s), keyauth on."}, true); err != nil || msg == "" {
 		t.Errorf("a reload that loaded the file: %q, %v", msg, err)
 	}
 }

@@ -1965,7 +1965,9 @@ func TestAddWithoutTLSCreatesNoAccessFile(t *testing.T) {
 
 // fakeSocketDaemon answers /config on a daemon's local admin socket: it says
 // it runs cfg (or runs, when set), and a reload loads the access file into the
-// policy status reports (without its clients, when forget is set).
+// policy status reports (without its clients, when forget is set); when cfg
+// names no access file any more, a reload drops the policy, saying so in the
+// daemon's words.
 type fakeSocketDaemon struct {
 	mu          sync.Mutex
 	cfg, access string
@@ -2000,7 +2002,16 @@ func serveFakeDaemon(t *testing.T, sock, cfg, access string) *fakeSocketDaemon {
 				f.onReload()
 			}
 			resp.Msg = "Config reloaded."
-			if _, err := os.Stat(f.access); errors.Is(err, os.ErrNotExist) {
+			named := true
+			if info, err := ReadDaemonApi(f.cfg, ""); err == nil {
+				named = info.AccessFile != ""
+			}
+			if !named && f.policy != nil {
+				// As the daemon says it, when its config no longer
+				// names the access file it ran (reloadApiAccess).
+				f.policy = nil
+				resp.Msg += " " + tdns.AccessFileNoLongerConfigured + ": the API key is admin on the TCP API again."
+			} else if _, err := os.Stat(f.access); errors.Is(err, os.ErrNotExist) {
 				f.policy = nil // no access file: the key is admin again
 			} else if af, err := tdns.LoadAccessFile(f.access); err == nil {
 				st := &tdns.ApiAccessStatus{File: f.access, KeyAuth: af.KeyAuthOn(), Clients: []tdns.ApiAccessStatusClient{}}
@@ -4294,5 +4305,35 @@ func TestAddRechecksYourPair(t *testing.T) {
 	}
 	if fix := c.fixLines(); !reflect.DeepEqual(fix, []string{"run config add again."}) {
 		t.Errorf("fix %q, want to run config add again", fix)
+	}
+}
+
+// A daemon whose TCP API has no TLS cannot take a certificate: that decides
+// a new entry, and its fix comes first, though the ping of its TCP port met
+// something silent there (a wedged daemon, or nc -kl on its port while it
+// is stopped). A restart does not give it TLS; the silent port is said
+// second.
+func TestAddNoTLSFixBeforeASilentPort(t *testing.T) {
+	saved := pingLimit
+	t.Cleanup(func() { pingLimit = saved })
+	pingLimit = 200 * time.Millisecond
+	addr := serveSilent(t, "tcp", "127.0.0.1:0")
+	env := newAddEnv(t)
+	env.pin(t)
+	d := filepath.Join(env.dir, "tdns-imr.yaml")
+	writeFile(t, d, "imrengine:\n   x: 1\napiserver:\n   addresses: [ "+addr+" ]\n   apikey: the-key\n   usetls: false\n   socket: "+env.socket()+"\n")
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(r.why, "has no TLS") {
+		t.Fatalf("err = %v; want a refusal: no TLS", err)
+	}
+	want := []string{
+		"turn on TLS for the daemon's TCP API (apiserver.usetls: true,",
+		"with certfile and keyfile), then run config add again.",
+		"Its TCP port took the connection but did not answer: a wedged",
+		"daemon (its log), or another program on that port.",
+	}
+	if !reflect.DeepEqual(r.fix, want) {
+		t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(r.fix, "\n"), strings.Join(want, "\n"))
 	}
 }

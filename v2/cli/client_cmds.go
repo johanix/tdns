@@ -538,6 +538,14 @@ func notConfiguredAdvice(role string, t *accessTarget) string {
 // it. Its reply says which config it runs; any other is a reload the
 // operator's daemon did not get.
 func reloadAccess(role string, t *accessTarget) (string, error) {
+	return reloadAccessNamed(role, t, true)
+}
+
+// reloadAccessNamed is reloadAccess for a daemon config that names an access
+// file (named), whose reload must put it in force, or names none (a
+// rollback took its access-file: line out), whose reload must drop the
+// policy: the daemon's "no longer configured" is then the reload done.
+func reloadAccessNamed(role string, t *accessTarget, named bool) (string, error) {
 	resp, err := configToDaemon(role, t.Socket, t.DaemonConfig, tdns.ConfigPost{Command: "reload"})
 	if err != nil {
 		return "", fmt.Errorf("written, but the reload failed: %w", err)
@@ -545,7 +553,7 @@ func reloadAccess(role string, t *accessTarget) (string, error) {
 	if err := runsConfig(resp, t); err != nil {
 		return "", fmt.Errorf("written, but %v: the daemon of %s did NOT apply it; reload it over its own socket or entry", err, t.DaemonConfig)
 	}
-	return accessReloadMsg(resp)
+	return accessReloadMsg(resp, named)
 }
 
 // configToDaemon sends post to role's daemon over its local socket first, when
@@ -847,7 +855,7 @@ func socketUnusable(err error) bool {
 // (it keeps the running policy), so its reply text is the only sign; a
 // `client disable` must not report success while the client keeps its access.
 func accessReloadVerdict(resp tdns.ConfigResponse) error {
-	msg, err := accessReloadMsg(resp)
+	msg, err := accessReloadMsg(resp, true)
 	if err != nil {
 		return err
 	}
@@ -856,15 +864,16 @@ func accessReloadVerdict(resp tdns.ConfigResponse) error {
 }
 
 // accessReloadMsg is accessReloadVerdict's judgement, with the daemon's reply
-// returned instead of printed.
-func accessReloadMsg(resp tdns.ConfigResponse) (string, error) {
+// returned instead of printed: of a reload that was to put an access file in
+// force (named), or to drop the policy, the daemon config naming none.
+func accessReloadMsg(resp tdns.ConfigResponse, named bool) (string, error) {
 	if resp.Error {
 		return "", fmt.Errorf("written, but the daemon refused the reload: %s", resp.ErrorMsg)
 	}
 	if strings.Contains(resp.Msg, tdns.AccessFileNotReloaded) {
 		return "", fmt.Errorf("written, but the daemon did NOT apply it and keeps the previous policy: %s", strings.TrimSpace(resp.Msg))
 	}
-	if strings.Contains(resp.Msg, tdns.AccessFileNoLongerConfigured) {
+	if named && strings.Contains(resp.Msg, tdns.AccessFileNoLongerConfigured) {
 		// Its config names no access file now: the file written is not
 		// one it reads.
 		return "", fmt.Errorf("written, but the daemon did NOT apply it, as it reads no access file now: %s", strings.TrimSpace(resp.Msg))
