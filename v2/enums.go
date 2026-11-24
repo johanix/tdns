@@ -68,11 +68,12 @@ const (
 	OptAllowApiUpdates
 	// OptOnConflictDBWins / OptOnConflictZonefileWins select who wins when the
 	// zone file has been replaced behind the server and its content contests a
-	// record the delta journal changed. On a zone that may originate content
+	// record the delta journal changed. On a zone that can change itself
 	// exactly one is always set: the parser materialises db-wins when neither is
 	// given (see activateUpdatePolicy), so no code downstream has to carry a
-	// default of its own. A tdns-auth secondary that may not originate content
-	// has neither: it makes no changes of its own to contest a file with.
+	// default of its own. A secondary that makes no changes of its own has
+	// neither (a tdns-auth one that may not originate content, a tdns-agent one
+	// with no origination option): it has nothing to contest a file with.
 	//
 	// Appended at the end for the same reason allow-api-updates was: ZoneOption
 	// values are positional, so inserting mid-list renumbers everything after.

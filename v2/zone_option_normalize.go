@@ -103,6 +103,39 @@ func optionsMayOriginate(appType AppType, ztype ZoneType, opts map[ZoneOption]bo
 	return appType != AppTypeAuth || ztype == Primary || opts[OptInlineSigning]
 }
 
+// optionsChangeTheZone says whether the zone can have changes of its own, which
+// is what the conflict policy exists to arbitrate: a contest between the zone
+// file and the journal of THIS server's changes. It is the question
+// activateUpdatePolicy asks, and it is NOT optionsMayOriginate, for one reason:
+// the origination rule is tdns-auth's, but a plain mirror is not.
+//
+//   - tdns-auth: the origination rule, as optionsMayOriginate has it.
+//   - tdns-agent: every zone MAY originate content there (zoneMayOriginateContent
+//     is true for it, by design), so what a secondary does is the options it has.
+//     It changes its copy when it is multi-provider or carries an origination
+//     option (allow-updates, childsync, parentsync, ...). One without any is a
+//     mirror, and so is a proxy: parentsync-proxy and childsync-proxy publish
+//     nothing into the agent's own copy, they act towards the parent. An
+//     explicit on-conflict-zonefile-wins counts too, because it is the operator
+//     asking for a policy and tdns-agent has no normalizer to strip it.
+//   - every other app: true. A derived app may mutate a zone while holding the
+//     Secondary role (tdns-mpcombiner does, as its whole job), and the options say
+//     nothing about it.
+func optionsChangeTheZone(appType AppType, ztype ZoneType, opts map[ZoneOption]bool) bool {
+	if !optionsMayOriginate(appType, ztype, opts) {
+		return false
+	}
+	if appType != AppTypeAgent || ztype != Secondary || opts[OptMultiProvider] {
+		return true
+	}
+	for _, opt := range originationOptions {
+		if opts[opt] {
+			return true
+		}
+	}
+	return false
+}
+
 // normalizeOptionsForRole strips origination settings a zone may not act on,
 // and reports what it stripped so the caller can tell the operator.
 //

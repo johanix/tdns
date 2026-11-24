@@ -123,6 +123,76 @@ func TestConflictPolicyPersistedDBWinsDroppedOnPlainAuthSecondary(t *testing.T) 
 	}
 }
 
+// A tdns-agent secondary is a mirror unless its options say otherwise. The
+// origination rule does not apply to tdns-agent (every zone MAY originate there),
+// so the normalizer leaves it alone and its origination is the options it has.
+// Neither a bare secondary nor a proxy (parentsync-proxy and childsync-proxy
+// publish nothing into the agent's own copy) has changes to contest a file with.
+func TestConflictPolicyNotMaterialisedOnPlainAgentSecondary(t *testing.T) {
+	withAppType(t, AppTypeAgent)
+	for name, options := range map[string]map[ZoneOption]bool{
+		"no options":       {},
+		"parentsync-proxy": {OptParentSyncProxy: true},
+		"childsync-proxy":  {OptChildSyncProxy: true},
+	} {
+		zconf := &ZoneConf{Name: "mirror.example.", Type: "secondary"}
+		if _, err := activateUpdatePolicy(zconf, options); err != nil {
+			t.Fatalf("%s: activateUpdatePolicy: %v", name, err)
+		}
+		if options[OptOnConflictDBWins] || options[OptOnConflictZonefileWins] {
+			t.Errorf("%s: a tdns-agent secondary with no changes of its own was given a conflict policy: %v",
+				name, options)
+		}
+	}
+}
+
+// A persisted db-wins on such a secondary is dropped too, quietly: tdns-agent
+// has no normalizer to warn about it, and nobody wrote it.
+func TestConflictPolicyPersistedDBWinsDroppedOnPlainAgentSecondary(t *testing.T) {
+	withAppType(t, AppTypeAgent)
+	zconf := &ZoneConf{Name: "mirror.example.", Type: "secondary"}
+	options := map[ZoneOption]bool{OptOnConflictDBWins: true, OptParentSyncProxy: true}
+
+	if _, err := activateUpdatePolicy(zconf, options); err != nil {
+		t.Fatalf("activateUpdatePolicy: %v", err)
+	}
+	if options[OptOnConflictDBWins] {
+		t.Fatal("db-wins stayed on a tdns-agent secondary with no changes of its own")
+	}
+	if !options[OptParentSyncProxy] {
+		t.Fatal("an unrelated option was lost")
+	}
+}
+
+// A tdns-agent secondary that DOES change its copy keeps the policy: any
+// origination option says it may, as does multi-provider. An explicit
+// zonefile-wins is the operator's own choice of policy and is kept, with no
+// db-wins beside it.
+func TestConflictPolicyKeptOnAgentSecondaryThatChangesItsCopy(t *testing.T) {
+	withAppType(t, AppTypeAgent)
+	for _, opt := range append([]ZoneOption{OptMultiProvider}, originationOptions...) {
+		if !optionsChangeTheZone(AppTypeAgent, Secondary, map[ZoneOption]bool{opt: true}) {
+			t.Errorf("%s: an agent secondary carrying it was taken for a mirror", ZoneOptionToString[opt])
+		}
+	}
+	for _, opt := range []ZoneOption{OptMultiProvider, OptAllowUpdates, OptChildSync, OptOnConflictZonefileWins} {
+		zconf := &ZoneConf{Name: "example.", Type: "secondary"}
+		options := map[ZoneOption]bool{opt: true}
+		if _, err := activateUpdatePolicy(zconf, options); err != nil {
+			t.Fatalf("%s: activateUpdatePolicy: %v", ZoneOptionToString[opt], err)
+		}
+		if opt == OptOnConflictZonefileWins {
+			if options[OptOnConflictDBWins] || !options[OptOnConflictZonefileWins] {
+				t.Errorf("explicit zonefile-wins was not left alone: %v", options)
+			}
+			continue
+		}
+		if !options[OptOnConflictDBWins] {
+			t.Errorf("%s: db-wins was not materialised: %v", ZoneOptionToString[opt], options)
+		}
+	}
+}
+
 // Every zone that may originate content keeps the materialised default: a
 // primary, an inline-signing secondary (the sanctioned exception), and any zone
 // of an app the origination rule does not apply to.
@@ -136,7 +206,9 @@ func TestConflictPolicyMaterialisedWhereZoneMayOriginate(t *testing.T) {
 		{"auth primary", AppTypeAuth, "primary", map[ZoneOption]bool{}},
 		{"auth inline-signing secondary", AppTypeAuth, "secondary",
 			map[ZoneOption]bool{OptInlineSigning: true}},
-		{"agent secondary", AppTypeAgent, "secondary", map[ZoneOption]bool{}},
+		// A derived app (the tdns-mp range) may change a zone it holds as a
+		// secondary, and nothing in the options says so.
+		{"derived app secondary", TdnsAppTypeMax + 1, "secondary", map[ZoneOption]bool{}},
 		// Only a zone KNOWN to be a secondary is treated as one.
 		{"auth, type unset", AppTypeAuth, "", map[ZoneOption]bool{}},
 	} {

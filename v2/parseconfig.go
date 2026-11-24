@@ -2031,14 +2031,16 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 	// than three, and `zone status` reports what the zone actually runs under
 	// instead of a blank the operator has to interpret.
 	//
-	// Not on a secondary that may not originate content. The policy decides a
-	// contest between the zone file and the journal of THIS server's changes,
-	// and such a secondary makes none: it serves what upstream sent. Giving it
-	// db-wins made `zone list` show a mirror as having a policy for edits it
-	// cannot have, and persisted the option into its config. Only a zone known
-	// to be a secondary is treated so; an unset type keeps the default.
-	// on-conflict-zonefile-wins on such a secondary has already been stripped,
-	// with a warning, by normalizeOptionsForRole, which runs first.
+	// Not on a secondary that makes no changes of its own (optionsChangeTheZone:
+	// a tdns-auth secondary that may not originate content, or a tdns-agent
+	// secondary with no origination option, multi-provider or not). The policy
+	// decides a contest between the zone file and the journal of THIS server's
+	// changes, and such a secondary makes none: it serves what upstream sent.
+	// Giving it db-wins made `zone list` show a mirror as having a policy for
+	// edits it cannot have, and persisted the option into its config. Only a zone
+	// known to be a secondary is treated so; an unset type keeps the default.
+	// on-conflict-zonefile-wins on a tdns-auth secondary has already been
+	// stripped, with a warning, by normalizeOptionsForRole, which runs first.
 	if options[OptOnConflictDBWins] && options[OptOnConflictZonefileWins] {
 		return UpdatePolicy{}, fmt.Errorf(
 			"zone options on-conflict-db-wins and on-conflict-zonefile-wins are mutually exclusive;" +
@@ -2049,7 +2051,7 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 		ztype = Secondary
 	}
 	switch {
-	case !optionsMayOriginate(Globals.App.Type, ztype, options):
+	case !optionsChangeTheZone(Globals.App.Type, ztype, options):
 		delete(options, OptOnConflictDBWins)
 	case !options[OptOnConflictZonefileWins]:
 		options[OptOnConflictDBWins] = true

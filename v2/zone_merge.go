@@ -523,13 +523,14 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 
 // zoneConflictPolicy reads the policy the zone runs under.
 //
-// On a zone that may originate content, exactly one of the two options is
-// always set: the config parser materialises db-wins when neither is given, and
+// On a zone that can change itself, exactly one of the two options is always
+// set: the config parser materialises db-wins when neither is given, and
 // rejects both together. So this is a question with two answers, not three, and
-// there is no default to remember here. A secondary that may not originate has
-// neither option and never reaches a merge with a journal of its own changes;
-// were it asked, it would read db-wins, the parser's default. The fallback
-// below also serves a ZoneData built outside the config parser (tests, mainly).
+// there is no default to remember here. A secondary that makes no changes of its
+// own (optionsChangeTheZone) has neither option and has no journal of its own
+// changes to merge; were it asked, it would read db-wins, the parser's default.
+// The fallback below also serves a ZoneData built outside the config parser
+// (tests, mainly).
 func zoneConflictPolicy(zd *ZoneData) ZoneConflictPolicy {
 	if zd == nil {
 		return ConflictDBWins
