@@ -1078,7 +1078,7 @@ func (c *CertSetup) fixLines() []string {
 		if !c.t.Configured {
 			return []string{
 				"on the daemon's host, as root, add under apiserver: in " + c.t.DaemonConfig + ":",
-				"   access-file: " + c.t.File,
+				"   access-file: " + yamlScalar(c.t.File),
 				"and reload the daemon; then run config add again.",
 			}
 		}
@@ -1103,7 +1103,7 @@ func (c *CertSetup) fixLines() []string {
 	if !c.t.Configured {
 		lines = append(lines,
 			"and add under apiserver: in "+c.t.DaemonConfig+":",
-			"   access-file: "+c.t.File,
+			"   access-file: "+yamlScalar(c.t.File),
 			"and reload the daemon; then run config add again.")
 	} else {
 		lines = append(lines, "then run config add again.")
@@ -1366,8 +1366,9 @@ func printCert(w io.Writer, c *CertSetup, usesCert, keyKept, dryRun, troubleSaid
 		}
 	}
 	if c.state == certCanEnable && c.nameIt {
+		// The line as it is written (addAccessFileLine), quoted if need be.
 		fmt.Fprintf(w, "%s under apiserver: in %s:\n   access-file: %s\n",
-			would("Added", "Would add"), c.t.DaemonConfig, c.t.File)
+			would("Added", "Would add"), c.t.DaemonConfig, yamlScalar(c.t.File))
 		fmt.Fprintf(w, "\n%s an access file. This changes its TCP API:\n", would("The daemon now has", "The daemon would then have"))
 		fmt.Fprintf(w, "   - the API key is read-write there, no longer admin\n")
 		fmt.Fprintf(w, "   - TCP clients need TLS 1.3\n")

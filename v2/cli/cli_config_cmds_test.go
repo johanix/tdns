@@ -3495,3 +3495,28 @@ func TestAddRefusesACertEntryItCannotSetUp(t *testing.T) {
 		t.Error("the access file apply created was not removed")
 	}
 }
+
+// The access-file: line a fix gives is one to paste into the daemon config:
+// a path that YAML would not read as it stands (": " in it) is quoted, as
+// config add writes it, whether the pin is listed already or not.
+func TestCertFixLinesQuoteTheAccessFile(t *testing.T) {
+	const af = "/etc/tdns/site: east/tdns-auth-access.yaml"
+	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: af}
+	for _, c := range []*CertSetup{
+		{word: "auth", listedAs: "laptop", pin: pinOf("p"), state: certCannot, t: tg},
+		{word: "auth", name: "laptop", pin: pinOf("p"), state: certCannot, t: tg},
+	} {
+		var line string
+		for _, l := range c.fixLines() {
+			if strings.HasPrefix(l, "   access-file:") {
+				line = l
+			}
+		}
+		var got struct {
+			AccessFile string `yaml:"access-file"`
+		}
+		if err := yaml.Unmarshal([]byte(strings.TrimSpace(line)), &got); err != nil || got.AccessFile != af {
+			t.Errorf("listed %q: the line %q reads back as %q (%v), want %q", c.listedAs, line, got.AccessFile, err, af)
+		}
+	}
+}
