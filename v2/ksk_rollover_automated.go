@@ -2217,10 +2217,10 @@ func rolloverAutomatedForAllZones(ctx context.Context, conf *Config, kdb *KeyDB,
 	imr := conf.Internal.ImrEngine
 	nowFn := func() time.Time { return now }
 	for _, zd := range Zones.Items() {
-		if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 			continue
 		}
-		if zd.Options[OptMultiProvider] {
+		if zd.Option(OptMultiProvider) {
 			continue
 		}
 		if zd.DnssecPolicy == nil {
@@ -2451,10 +2451,10 @@ func healBootstrapActiveAt(kdb *KeyDB, zone string, pol *DnssecPolicy) {
 
 func promoteStandbyKskBootstrapAll(conf *Config, kdb *KeyDB) {
 	for zoneName, zd := range Zones.Items() {
-		if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 			continue
 		}
-		if zd.Options[OptMultiProvider] || zd.DnssecPolicy == nil {
+		if zd.Option(OptMultiProvider) || zd.DnssecPolicy == nil {
 			continue
 		}
 		if zd.DnssecPolicy.Rollover.Method != RolloverMethodMultiDS {

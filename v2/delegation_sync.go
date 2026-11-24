@@ -123,7 +123,7 @@ func (kdb *KeyDB) handleDelegationSyncRequest(ctx context.Context, delsyncq chan
 
 	case "SYNC-DNSKEY-RRSET":
 		lgDns.Info("DelegationSyncher: request for DNSKEY RRset sync", "zone", ds.ZoneName)
-		if zd.Options[OptMultiProvider] {
+		if zd.Option(OptMultiProvider) {
 			lgDns.Info("DelegationSyncher: multisigner zone, notifying controller", "zone", ds.ZoneName)
 			if !sendNotifyRequest(ctx, notifyq, NotifyRequest{
 				ZoneName: zd.ZoneName,
@@ -141,7 +141,7 @@ func (kdb *KeyDB) handleDelegationSyncRequest(ctx context.Context, delsyncq chan
 		// the CDS RRset and asks the zone's DS model what goes in it. For a
 		// multi-provider zone it writes none: that DS set is the
 		// multi-provider agent's to coordinate.
-		if zd.Options[OptParentSync] {
+		if zd.Option(OptParentSync) {
 			res := kdb.askDSEngine(ctx, DSEngineRequest{cmd: dsCmdEnsureCDS, zd: zd})
 			switch {
 			case res.err != nil:
@@ -212,7 +212,7 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 // parent accepted the bootstrap ceremony (bootstrapAccepted), and the key
 // algorithm it was run with.
 func (zd *ZoneData) delegationSyncSetup(ctx context.Context, kdb *KeyDB) (accepted bool, alg uint8, err error) {
-	if !zd.Options[OptParentSync] {
+	if !zd.Option(OptParentSync) {
 		lgDns.Debug("DelegationSyncSetup: zone does not have child-side delegation sync enabled, skipping", "zone", zd.ZoneName)
 		return false, 0, nil
 	}
@@ -314,7 +314,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 	// clears allow-updates, so refusing inbound DDNS disabled the parent's own
 	// key. Restating the callers' gate here says what actually permits the
 	// publish, and cannot be switched off by an unrelated policy decision.
-	if !zd.Options[OptChildSync] && !zd.Options[OptParentSync] {
+	if !zd.Option(OptChildSync) && !zd.Option(OptParentSync) {
 		lgDns.Warn("Sig0KeyPreparation: zone has neither childsync nor parentsync, no SIG(0) key will be generated or published",
 			"zone", zd.ZoneName, "name", name, "keyrrexist", keyrrexist)
 		return nil
@@ -344,7 +344,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 	// remained published could neither sign updates nor bootstrap, said so in
 	// its own log, and did not recover on restart: the same two lines every
 	// time, until an operator deleted the published record by hand (#576).
-	if keyrrexist && !zd.Options[OptDontPublishKey] {
+	if keyrrexist && !zd.Option(OptDontPublishKey) {
 		usable, err := zd.verifyPublishedKeyRRs(name)
 		if err != nil {
 			lgDns.Error("error from VerifyPublishedKeyRRs", "name", name, "err", err)
@@ -368,7 +368,7 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 	// 3. The per-zone opt-out for this specific publish. Checked again inside
 	// PublishKeyRRs, which refuses outright; saying so here keeps the reason
 	// visible at default log level rather than only as a Debug non-event.
-	if zd.Options[OptDontPublishKey] {
+	if zd.Option(OptDontPublishKey) {
 		lgDns.Info("Sig0KeyPreparation: dont-publish-key is set, no KEY RR will be published",
 			"zone", zd.ZoneName, "name", name, "keyrrexist", keyrrexist)
 		return nil
@@ -567,7 +567,7 @@ func sendNotifyRequest(ctx context.Context, notifyq chan NotifyRequest, req Noti
 func (zd *ZoneData) SyncZoneDelegationViaNotify(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest,
 	syncstate DelegationSyncStatus, dsynctarget *DsyncTarget) (string, uint8, error) {
 
-	if zd.Options[OptAllowUpdates] {
+	if zd.Option(OptAllowUpdates) {
 		// 1. Publish the CSYNC, and WAIT for it.
 		//
 		// The whole of this scheme is telling the parent to come and fetch a

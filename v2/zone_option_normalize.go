@@ -217,12 +217,14 @@ func (zd *ZoneData) applyOptionNormalization(ztype ZoneType, opts map[ZoneOption
 // dynamic zones the file is written from state, so state has to remember what
 // was asked for.
 func (zd *ZoneData) asConfiguredOptions() map[ZoneOption]bool {
+	// A copy, as OptionsSnapshot's answer is, whether or not anything was
+	// suppressed: the caller's to write to.
+	out := zd.OptionsSnapshot()
 	if len(zd.SuppressedOptions) == 0 {
-		return zd.Options
+		return out
 	}
-	out := make(map[ZoneOption]bool, len(zd.Options)+len(zd.SuppressedOptions))
-	for k, v := range zd.Options {
-		out[k] = v
+	if out == nil {
+		out = make(map[ZoneOption]bool, len(zd.SuppressedOptions))
 	}
 	for k := range zd.SuppressedOptions {
 		out[k] = true

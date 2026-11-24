@@ -519,10 +519,10 @@ func rolloverZsksForAllZones(ctx context.Context, conf *Config, kdb *KeyDB, prop
 		if ctx.Err() != nil {
 			return
 		}
-		if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 			continue
 		}
-		if zd.Options[OptMultiProvider] {
+		if zd.Option(OptMultiProvider) {
 			continue
 		}
 		pol := zd.DnssecPolicy

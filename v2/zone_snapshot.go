@@ -36,6 +36,14 @@ type zoneSnapshot struct {
 	// ruling on plan step S2, 2026-11-15). The TSYNC path still may.
 	signalSynth map[string]*core.RRset
 	IxfrChain   []Ixfr
+	// signed: every owner of this snapshot carries signatures of ours. Set by
+	// publishWorkingSetLocked before the snapshot is stored, and never changed:
+	// a reader that has the snapshot has this beside it, with no lock. False
+	// for a snapshot published unsigned, and for one nobody has marked. The
+	// scoped signing pass of an IXFR refresh signs only what the delta touched
+	// and shares the rest with the snapshot the delta was built on, so what it
+	// may assume is this flag of THAT snapshot; see applyRefreshReplacementLocked.
+	signed bool
 	// ents holds the zone's empty non-terminals: names that own no records
 	// but have descendants that do. They are NOT owners -- putting synthetic
 	// entries in Data would make every path that diffs a published snapshot

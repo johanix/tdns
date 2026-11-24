@@ -155,7 +155,7 @@ func pollParents(zones map[string]*ZoneData) []*ZoneData {
 			continue
 		}
 		zd.mu.Lock()
-		allowChildUpdates := zd.Options[OptAllowChildUpdates]
+		allowChildUpdates := zd.Option(OptAllowChildUpdates)
 		hasBackend := zd.DelegationBackend != nil
 		zd.mu.Unlock()
 		if !allowChildUpdates || !hasBackend || zd.HasServiceImpactingError() {

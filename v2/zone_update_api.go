@@ -42,8 +42,8 @@ func (zd *ZoneData) ApiZoneUpdate(ctx context.Context, zp ZonePost) (string, err
 	// a data race, and reading the two independently would let a reload flip
 	// one between the checks. Matches the CHILD-UPDATE handling in the updater.
 	zd.mu.Lock()
-	allowApi := zd.Options[OptAllowApiUpdates]
-	frozen := zd.Options[OptFrozen]
+	allowApi := zd.Option(OptAllowApiUpdates)
+	frozen := zd.Option(OptFrozen)
 	zd.mu.Unlock()
 
 	if !allowApi {

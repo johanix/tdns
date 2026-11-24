@@ -59,7 +59,7 @@ func (zd *ZoneData) ParentSyncStatus(ctx context.Context, kdb *KeyDB, imr *Imr,
 		Parent:  parent,
 		Warning: warning,
 	}
-	if zd.Options[OptParentSyncProxy] {
+	if zd.Option(OptParentSyncProxy) {
 		role = SyncRoleProxy
 		rep.Role = ZoneOptionToString[OptParentSyncProxy]
 	}

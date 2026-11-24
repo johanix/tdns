@@ -42,7 +42,7 @@ func childDelegationSyncPredicate(app AppType, opts map[ZoneOption]bool) bool {
 func (zd *ZoneData) childDelegationSyncEnabled() bool {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return childDelegationSyncPredicate(Globals.App.Type, zd.Options)
+	return childDelegationSyncPredicate(Globals.App.Type, zd.OptionsSnapshot())
 }
 
 type delegationChangeMode int
@@ -61,9 +61,9 @@ func (zd *ZoneData) delegationChangeModeOf() delegationChangeMode {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 	switch {
-	case zd.Options[OptParentSyncProxy]:
+	case zd.Option(OptParentSyncProxy):
 		return delegationChangeProxy
-	case childDelegationSyncPredicate(Globals.App.Type, zd.Options):
+	case childDelegationSyncPredicate(Globals.App.Type, zd.OptionsSnapshot()):
 		return delegationChangeChild
 	}
 	return delegationChangeNone

@@ -277,7 +277,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		// (one this server produces, or only reads) needs none, and has
 		// nothing to configure: with no group prefixes no member names a
 		// config group.
-		if !catalogZd.Options[OptCatalogMemberAutoCreate] {
+		if !catalogZd.Option(OptCatalogMemberAutoCreate) {
 			return nil
 		}
 		lg.Warn("CATALOG: conf.Catalog is nil, cannot auto-configure zones")
@@ -285,7 +285,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 	}
 
 	// Check if auto-create is enabled for this catalog zone
-	autoConfigureEnabled := catalogZd.Options[OptCatalogMemberAutoCreate]
+	autoConfigureEnabled := catalogZd.Option(OptCatalogMemberAutoCreate)
 	lg.Info("CATALOG: AutoConfigureZonesFromCatalog: policy check", "catalog", update.CatalogZone, "autoCreate", autoConfigureEnabled)
 
 	// VALIDATION: Check all member zones for configuration errors (applies regardless of policy)
@@ -447,6 +447,19 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			}
 		}
 
+		// Normalize them for the zone's role here, while the zone is private
+		// to this goroutine, and not in the refresh engine through the refresh
+		// request below: a request that carries options replaces the zone's
+		// whole map with them, and a store made on the zone between building
+		// the request and the engine taking it (`zone freeze` over the API)
+		// would be undone. Under zd.mu, which applyOptionNormalization needs;
+		// nothing else holds it yet.
+		zd.mu.Lock()
+		normOpts, normSerial := zd.applyOptionNormalization(zd.ZoneType, zd.OptionsSnapshot(), zd.OutboundSoaSerial)
+		zd.setOptionsLocked(normOpts)
+		zd.OutboundSoaSerial = normSerial
+		zd.mu.Unlock()
+
 		// (TSIG for the upstream is now carried by primariesConf[].Key above and
 		// resolved by name from the keys: store at transfer time.)
 
@@ -473,11 +486,12 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 
 		// Trigger initial zone transfer (non-blocking with timeout and context support)
 		lg.Info("CATALOG: triggering initial zone transfer", "zone", zoneName, "upstream", configGroupConfig.Upstream)
+		// No Options: the zone's are settled above, and the engine leaves a
+		// zone's options alone for a request that has none.
 		zr := ZoneRefresher{
 			Name:      zoneName,
 			ZoneType:  Secondary,
 			ZoneStore: zd.ZoneStore,
-			Options:   zd.Options,
 		}
 
 		// Attempt non-blocking send with timeout and context cancellation support
@@ -601,7 +615,7 @@ var (
 // A secondary's catalog is not touched: it mirrors its upstream and has no
 // member list to keep.
 func rebuildCatalogMembership(zd *ZoneData) (int, error) {
-	if zd == nil || !zd.Options[OptCatalogZone] || !zoneMayOriginateContent(zd) {
+	if zd == nil || !zd.Option(OptCatalogZone) || !zoneMayOriginateContent(zd) {
 		return 0, nil
 	}
 	// The list may be ahead of the zone: a member change made through the

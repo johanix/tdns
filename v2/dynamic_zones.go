@@ -158,17 +158,17 @@ func (conf *Config) ShouldPersistZone(zd *ZoneData) bool {
 	}
 
 	// Check zone type and storage setting
-	if zd.Options[OptCatalogZone] {
+	if zd.Option(OptCatalogZone) {
 		// Catalog zone
 		return conf.DynamicZones.CatalogZones.Storage == "persistent" && conf.DynamicZones.CatalogZones.Allowed
 	}
 
-	if zd.Options[OptAutomaticZone] {
+	if zd.Option(OptAutomaticZone) {
 		// Catalog member zone (auto-configured)
 		return conf.DynamicZones.CatalogMembers.Storage == "persistent" && conf.DynamicZones.CatalogMembers.Allowed
 	}
 
-	if zd.Options[OptApiManagedZone] {
+	if zd.Option(OptApiManagedZone) {
 		// API-managed zone (zone add/delete/modify); the allowed: gate is
 		// per zone type since the dynamic-primary extension
 		return conf.DynamicZones.Dynamic.Storage == "persistent" && conf.DynamicZones.Dynamic.Allows(zd.ZoneType)
@@ -613,7 +613,7 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		OptionsStrs:       optionsStrs,
 		Template:          zd.Template,
 		SourceCatalog:     zd.SourceCatalog,
-		ApiManaged:        zd.Options[OptApiManagedZone],
+		ApiManaged:        zd.Option(OptApiManagedZone),
 		// Note: We don't serialize Frozen, Dirty, Error, ErrorType, ErrorMsg, RefreshCount
 		// as these are runtime state, not configuration
 	}
@@ -627,7 +627,7 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 	// keyless downstreams are bound to is persisted in their place. (An
 	// error-state shell of an entry from before this rule keeps what it was
 	// loaded with; see keepPersistedOutbound.)
-	if zd.Template != "" && zd.Options[OptApiManagedZone] && !zd.keepPersistedOutbound {
+	if zd.Template != "" && zd.Option(OptApiManagedZone) && !zd.keepPersistedOutbound {
 		clearTemplateOwned(&zconf)
 		zconf.InlineTsigKey = zd.InlineTsigKey
 	}
@@ -1245,7 +1245,7 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	if !exists {
 		return "", fmt.Errorf("zone %s not found", name)
 	}
-	if !zd.Options[OptApiManagedZone] {
+	if !zd.Option(OptApiManagedZone) {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be deleted here", name)
 	}
 
@@ -1374,7 +1374,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	if !exists {
 		return "", fmt.Errorf("zone %s not found", name)
 	}
-	if !oldZd.Options[OptApiManagedZone] {
+	if !oldZd.Option(OptApiManagedZone) {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be modified here", name)
 	}
 	// v1: modify is secondary-only. Modify-for-primary has murky semantics

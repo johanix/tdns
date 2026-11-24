@@ -50,9 +50,9 @@ func (ur *UpdateRequest) typeAllowed(zd *ZoneData, owner string, rrtype uint16) 
 // data, by mechanism: allow-tsig-updates for TSIG, allow-updates for SIG(0).
 func zoneUpdatesAdmitted(zd *ZoneData, viaTsig bool) bool {
 	if viaTsig {
-		return zd.Options[OptAllowTsigUpdates]
+		return zd.Option(OptAllowTsigUpdates)
 	}
-	return zd.Options[OptAllowUpdates]
+	return zd.Option(OptAllowUpdates)
 }
 
 // hasSigRR reports whether an additional section carries a SIG RR (SIG(0)).

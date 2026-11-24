@@ -452,7 +452,7 @@ func (zd *ZoneData) clearProxyUpdateWarning() {
 // none, as the agent's next sync would, so that there are records to print.
 // Every other state reports the absence of a key rather than filling it.
 func (zd *ZoneData) ProxyKeyStatus(ctx context.Context, kdb *KeyDB, imr *Imr) (string, error) {
-	if !zd.Options[OptParentSyncProxy] {
+	if !zd.Option(OptParentSyncProxy) {
 		return "", fmt.Errorf("zone %s does not have the parentsync-proxy option", zd.ZoneName)
 	}
 	state, err := zd.proxyUpdatePrecondition(ctx, kdb, imr, true)

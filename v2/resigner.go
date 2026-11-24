@@ -127,7 +127,7 @@ func nextResignWake(zones map[string]*ZoneData, floor time.Duration) time.Durati
 		if zd == nil {
 			continue
 		}
-		if !zd.Options[OptInlineSigning] && !zd.Options[OptOnlineSigning] {
+		if !zd.Option(OptInlineSigning) && !zd.Option(OptOnlineSigning) {
 			continue
 		}
 		if zd.resignPendingSet() {
@@ -325,7 +325,7 @@ func resignSweepZone(ctx context.Context, zd *ZoneData) {
 	// Skip zones where signing has been disabled since they were added to the
 	// list. MP zones can toggle OptInlineSigning dynamically based on HSYNC
 	// analysis.
-	if !zd.Options[OptInlineSigning] && !zd.Options[OptOnlineSigning] {
+	if !zd.Option(OptInlineSigning) && !zd.Option(OptOnlineSigning) {
 		return
 	}
 	// A replace that never happened comes first: the request was dropped by a

@@ -350,7 +350,7 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 	model := dsModelForZone(zd)
 	var cds []dns.RR
 	switch {
-	case zd.Options[OptMultiProvider]:
+	case zd.Option(OptMultiProvider):
 		// A multi-provider zone's DS set is its owner's (§4). On the signer
 		// of an owned zone the CDS is the owner's DS set (arrow 1): the
 		// owner knows which of its own and the other providers' KSKs
@@ -451,7 +451,7 @@ func (kdb *KeyDB) ensureCDS(ctx context.Context, zd *ZoneData) dsEngineResult {
 // kdb.dsSyncPending.
 func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
 	owned := ownedZoneSignedHere(zd)
-	if !owned && (zd.Options[OptMultiProvider] || dsModelForZone(zd) != DSModelNone) {
+	if !owned && (zd.Option(OptMultiProvider) || dsModelForZone(zd) != DSModelNone) {
 		return
 	}
 	current, err := currentCdsTuples(zd)
@@ -538,11 +538,11 @@ func (kdb *KeyDB) followKeysWithCDS(ctx context.Context, zd *ZoneData) {
 func cdsAlwaysPublishedLocked(zd *ZoneData) (always, settingIgnored bool) {
 	// A multi-provider zone's CDS is its owner's DS set (ownedZoneCDS), not
 	// this rule's.
-	if !(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) || zd.Options[OptMultiProvider] || dsModelForZone(zd) != DSModelNone {
+	if !(zd.Option(OptOnlineSigning) || zd.Option(OptInlineSigning)) || zd.Option(OptMultiProvider) || dsModelForZone(zd) != DSModelNone {
 		return false, false
 	}
 	if zd.DnssecPolicy != nil && zd.DnssecPolicy.SuppressCDS {
-		if childDelegationSyncPredicate(Globals.App.Type, zd.Options) {
+		if childDelegationSyncPredicate(Globals.App.Type, zd.OptionsSnapshot()) {
 			return true, true
 		}
 		return false, false
@@ -644,7 +644,7 @@ func (zd *ZoneData) dsEngineFollows() bool {
 	always, _ := cdsAlwaysPublishedLocked(zd)
 	zd.mu.Unlock()
 	switch {
-	case zd.Options[OptMultiProvider]:
+	case zd.Option(OptMultiProvider):
 		return ownedZoneSignedHere(zd)
 	case model != DSModelNone:
 		return false
@@ -780,16 +780,38 @@ func cdsDeleteRR(zone string) dns.RR {
 // owner's DS set says (key lifecycle ownership design §4.1, arrow 1). The
 // agent of the same zone signs nothing and serves nothing the parent reads.
 func ownedZoneSignedHere(zd *ZoneData) bool {
-	return zd != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && zoneOwned(zd)
+	return zd != nil && ownedZoneSignedHereIn(zd, zd.OptionsSnapshot())
+}
+
+// ownedZoneSignedHereIn is ownedZoneSignedHere asked of the options opts, the
+// ones the caller took, for a caller that asks other questions of the same set
+// and must get one answer from it: every zd.Option is a look at the zone's
+// options of its own, and a config update between two looks answers from the
+// old set and the new at once. The signing options and the ownership test
+// (zoneOwnedIn) are read from opts; what the registered owner decides in Owns
+// is not an option of the zone and is asked as it is.
+func ownedZoneSignedHereIn(zd *ZoneData, opts map[ZoneOption]bool) bool {
+	return zd != nil && (opts[OptOnlineSigning] || opts[OptInlineSigning]) && zoneOwnedIn(zd, opts)
 }
 
 // ownedZoneCDS is the CDS such a zone serves: the owner's DS set as CDS,
 // nothing while the set is unknown.
 func ownedZoneCDS(zd *ZoneData) []dns.RR {
-	if !ownedZoneSignedHere(zd) || zd.KeyDB == nil {
+	if zd == nil {
 		return nil
 	}
-	intent, err := DSIntentForZone(zd.KeyDB, zd.ZoneName, dns.SHA256)
+	return ownedZoneCDSIn(zd, zd.OptionsSnapshot())
+}
+
+// ownedZoneCDSIn is ownedZoneCDS under the options opts (ownedZoneSignedHereIn).
+func ownedZoneCDSIn(zd *ZoneData, opts map[ZoneOption]bool) []dns.RR {
+	if !ownedZoneSignedHereIn(zd, opts) || zd.KeyDB == nil {
+		return nil
+	}
+	// The owner's answer, asked directly: ownership was just decided from opts,
+	// and DSIntentForZone would decide it again from the zone's options as they
+	// are by now.
+	intent, err := ownedDSIntent(zd, dns.SHA256)
 	if err != nil {
 		lgDSEngine.Warn("could not determine the DS intent; serving no CDS from it", "zone", zd.ZoneName, "err", err)
 		return nil

@@ -273,7 +273,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 	// dump.P(zd.Options)
 	// dump.P(zd.UpdatePolicy)
 
-	if zd.Options[OptFrozen] {
+	if zd.Option(OptFrozen) {
 		lgHandler.Warn("zone is frozen, ignoring update", "zone", zd.ZoneName, "owner", qname)
 		m.SetRcode(r, dns.RcodeRefused)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneFrozen)
@@ -319,7 +319,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 			lgHandler.Info("update targets child delegation", "child", childDel)
 			dur.Status.Type = "CHILD-UPDATE"
 			slw.setChild(zd.ZoneName, childDel, SyncMechUpdate, r.Ns)
-			if !zd.Options[OptAllowChildUpdates] {
+			if !zd.Option(OptAllowChildUpdates) {
 				lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "child", childDel)
 				m.SetRcode(r, dns.RcodeRefused)
 				edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
@@ -356,7 +356,7 @@ func UpdateResponder(ctx context.Context, dur *DnsUpdateRequest, updateq chan Up
 			zd.ZoneName, qname)
 		dur.Status.Type = "CHILD-UPDATE"
 		slw.setChild(zd.ZoneName, qname, SyncMechUpdate, r.Ns)
-		if !zd.Options[OptAllowChildUpdates] {
+		if !zd.Option(OptAllowChildUpdates) {
 			lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "qname", qname)
 			m.SetRcode(r, dns.RcodeRefused)
 			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)

@@ -673,7 +673,7 @@ func newTransferScratchZone(zd *ZoneData) ZoneData {
 		Logger:          zd.Logger,
 		Verbose:         zd.Verbose,
 		Debug:           zd.Debug,
-		Options:         zd.Options,
+		Options:         zd.optionsForIncoming(),
 		TransferSrc:     srcs,
 		TransferSrcTier: tier,
 		Ready:           true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
@@ -793,7 +793,7 @@ func (zd *ZoneData) FetchFromFile(ctx context.Context, verbose, debug, force boo
 		Logger:         zd.Logger,
 		Verbose:        zd.Verbose,
 		Debug:          zd.Debug,
-		Options:        zd.Options,
+		Options:        zd.optionsForIncoming(),
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
@@ -1085,7 +1085,8 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 // verbatim onto re-signed data -- the delete section names RRSIGs we do not
 // hold. What removes it is that the apply no longer works that way: the delta
 // is staged and the publish re-signs exactly the owners it touched
-// (wsSignOwners = new_zd.ixfrTouched, zone_mutation.go), and restitchNsecLocked
+// (wsSignOwners = ixfrChangedOwners, which starts from the touched set and adds
+// whatever else differs from the base, zone_mutation.go), and restitchNsecLocked
 // repairs the chain around those same names -- and further, since it diffs
 // owner content rather than reading the touched set.
 //
@@ -1452,7 +1453,7 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 			return err.Error(), err
 		}
 	}
-	if !zd.Options[OptDirty] && !force {
+	if !zd.Option(OptDirty) && !force {
 		return fmt.Sprintf("Zone %s not modified, writing to disk not needed", zd.ZoneName), nil
 	}
 	_, wroteSerial, err := zd.WriteFileWithSerial(fname)
@@ -1472,7 +1473,7 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 		// delta is bounded by serial, so it survives the drop below and replays
 		// -- but the operator is told the file is current when it is not.)
 		if fileIsCurrent {
-			zd.Options[OptDirty] = false
+			zd.setOptionLocked(OptDirty, false)
 		}
 		// The file now carries this serial, so that is what a future journal
 		// anchors to. Without this the next change would chain from the serial
@@ -1581,9 +1582,11 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 	return fmt.Sprintf("Zone %s written to %s", zd.ZoneName, fname), err
 }
 
+// SetOption turns one option of the zone on or off. The zone gets a new
+// options map with it set (setOptionLocked); the one it had is not written to.
 func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
 	zd.mu.Lock()
-	zd.Options[option] = value
+	zd.setOptionLocked(option, value)
 	zd.mu.Unlock()
 }
 
@@ -2057,7 +2060,7 @@ func RegisterMultiProviderAgentAppType(t AppType) { multiProviderAgentAppTypes[t
 func multiProviderAgentApp(t AppType) bool { return multiProviderAgentAppTypes[t] }
 
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
-	wantsSync := wantsZoneSyncSetup(zd.Options)
+	wantsSync := wantsZoneSyncSetup(zd.OptionsSnapshot())
 
 	// Dynamic parentsync=agent detection removed — handled by tdns-mp
 	// MPPostRefresh (hsync_utils.go) and OnFirstLoad (start_agent.go).
@@ -2071,7 +2074,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	// childsync-proxy: a tdns-agent acting as a SECONDARY for a PARENT zone
 	// whose primary is DSYNC-unaware. Valid only for agent + secondary, and
 	// loud otherwise, exactly as parentsync-proxy below.
-	if zd.Options[OptChildSyncProxy] {
+	if zd.Option(OptChildSyncProxy) {
 		if Globals.App.Type != AppTypeAgent || zd.ZoneType != Secondary {
 			lg.Error("SetupZoneSync: childsync-proxy is only valid for a tdns-agent secondary zone",
 				"zone", zd.ZoneName, "app", AppTypeToString[Globals.App.Type], "zonetype", ZoneTypeToString[zd.ZoneType])
@@ -2082,7 +2085,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	}
 
 	// Is this a parent zone and should we then publish a DSYNC RRset?
-	if zd.Options[OptChildSync] {
+	if zd.Option(OptChildSync) {
 		// For the moment we receive both updates and notifies on the same address as the rest of
 		// the DNS service. Doesn't have to be that way, but for now it is.
 
@@ -2114,7 +2117,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		// gate below would stop the update: it would be applied and silently
 		// lost (design §3.1). The advertisement, receiver key included,
 		// reaches the parent primary through the proxy reconciler (§5.3).
-		if zd.Options[OptChildSyncProxy] {
+		if zd.Option(OptChildSyncProxy) {
 			lg.Debug("SetupZoneSync: childsync-proxy zone; the advertisement is reconciled towards the parent primary, not published here",
 				"zone", zd.ZoneName)
 			// The refresh hook already ran once for the first transfer,
@@ -2128,7 +2131,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 			// tdns-agent. The option gate cannot see this case; say it here.
 			// Multi-provider zones are tdns-mp's and excluded, as in the
 			// parentsync branch below.
-			if Globals.App.Type == AppTypeAgent && zd.ZoneType == Secondary && !zd.Options[OptMultiProvider] {
+			if Globals.App.Type == AppTypeAgent && zd.ZoneType == Secondary && !zd.Option(OptMultiProvider) {
 				lg.Warn("SetupZoneSync: childsync on an agent secondary publishes the DSYNC advertisement into a copy"+
 					" the next transfer replaces; set childsync-proxy instead", "zone", zd.ZoneName)
 				zd.SetError(ConfigWarning, "childsync on an agent secondary publishes the DSYNC advertisement into a copy"+
@@ -2168,9 +2171,9 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	// ensure that there is a SIG(0) keypair and that the public key is published in the zone.
 	// parentsync is valid for auth (standalone) or agent+multi-provider zones.
 	// Combiner and signer roles don't do child delegation sync.
-	if zd.Options[OptParentSync] &&
-		((Globals.App.Type == AppTypeAuth && !zd.Options[OptMultiProvider]) ||
-			(multiProviderAgentApp(Globals.App.Type) && zd.Options[OptMultiProvider])) {
+	if zd.Option(OptParentSync) &&
+		((Globals.App.Type == AppTypeAuth && !zd.Option(OptMultiProvider)) ||
+			(multiProviderAgentApp(Globals.App.Type) && zd.Option(OptMultiProvider))) {
 		schemes := ParentSyncConfig().Schemes
 		if len(schemes) == 0 {
 			lg.Error("SetupZoneSync: zone has parentsync enabled but parentsync.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
@@ -2224,7 +2227,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	// KEY is published at the apex, DNS UPDATEs — to the parent on the primary's
 	// behalf. Valid only for agent + secondary zones; reject other combinations
 	// so a misconfiguration is loud rather than silently inert.
-	if zd.Options[OptParentSyncProxy] {
+	if zd.Option(OptParentSyncProxy) {
 		if Globals.App.Type != AppTypeAgent || zd.ZoneType != Secondary {
 			lg.Error("SetupZoneSync: parentsync-proxy is only valid for a tdns-agent secondary zone",
 				"zone", zd.ZoneName, "app", Globals.App.Type, "zonetype", zd.ZoneType)
@@ -2259,12 +2262,16 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	var dynamicRRs []*core.RRset
 
-	if (!zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning]) || zd.KeyDB == nil {
+	// One look at the options, for every question below: each zd.Option is a
+	// look of its own, and a config update between two of them would answer
+	// from the old set and the new at once.
+	opts := zd.OptionsSnapshot()
+	if (!opts[OptAllowUpdates] && !opts[OptOnlineSigning] && !opts[OptInlineSigning]) || zd.KeyDB == nil {
 		return dynamicRRs
 	}
 
 	// 1. Collect DNSKEY records (if signing enabled)
-	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
+	if opts[OptOnlineSigning] || opts[OptInlineSigning] {
 		dak, err := zd.KeyDB.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil {
 			lg.Error("CollectDynamicRRs: failed to get DNSSEC keys", "zone", zd.ZoneName, "err", err)
@@ -2292,7 +2299,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	// owned serves the CDS of its DS set (key lifecycle ownership design
 	// §4.1, arrow 1): the DS engine owns the content, and a transfer from
 	// the combiner is where it would be lost.
-	if cds := ownedZoneCDS(zd); len(cds) > 0 {
+	if cds := ownedZoneCDSIn(zd, opts); len(cds) > 0 {
 		dynamicRRs = append(dynamicRRs, &core.RRset{
 			Name:   zd.ZoneName,
 			Class:  dns.ClassINET,
@@ -2315,7 +2322,7 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 		}
 	}
 
-	if !zd.Options[OptDontPublishKey] {
+	if !opts[OptDontPublishKey] {
 		sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 		if err != nil {
 			// Not an error if no SIG(0) keys exist
@@ -2378,6 +2385,20 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	return dynamicRRs
 }
 
+// withoutCollectedSig0Key is dynamicRRs without the SIG(0) KEY RRset
+// CollectDynamicRRs put there (the only KEY RRset it collects). dynamicRRs
+// itself, the caller's, is not changed.
+func withoutCollectedSig0Key(dynamicRRs []*core.RRset) []*core.RRset {
+	out := make([]*core.RRset, 0, len(dynamicRRs))
+	for _, rrset := range dynamicRRs {
+		if rrset != nil && rrset.RRtype == dns.TypeKEY {
+			continue
+		}
+		out = append(out, rrset)
+	}
+	return out
+}
+
 // carriedSignalSVCBs is the transport signal a refresh carries over from
 // snap: a copy of each SVCB RRset at a _dns. owner that carries carries
 // (refreshCarriesSignal when CollectDynamicRRs collects, signalCarryNowLocked's
@@ -2435,8 +2456,9 @@ func (zd *ZoneData) carriedSignalSVCBs(snap *zoneSnapshot, carries func(owner st
 // keeps one out (repopulateWorkingSetLocked), not another RRset carried
 // there (CodeRabbit on #1145). Caller holds zd.mu.
 func (zd *ZoneData) signalCarryNowLocked(dynamicRRs []*core.RRset) []*core.RRset {
+	opts := zd.optionsMap() // one map, so the three options are read together
 	carries := zd.KeyDB != nil && zd.addsTransportSignal() &&
-		(zd.Options[OptAllowUpdates] || zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning])
+		(opts[OptAllowUpdates] || opts[OptOnlineSigning] || opts[OptInlineSigning])
 	out := make([]*core.RRset, 0, len(dynamicRRs))
 	collected := map[string]string{}
 	for _, rs := range dynamicRRs {
@@ -2587,7 +2609,7 @@ func (zd *ZoneData) registerForPeriodicResign() {
 		return // this zone should not be signed (at least not by us)
 	}
 
-	if zd.ZoneType != Primary && !zd.Options[OptInlineSigning] {
+	if zd.ZoneType != Primary && !zd.Option(OptInlineSigning) {
 		return // non-primary zones require inline-signing to be signed
 	}
 
@@ -2622,7 +2644,7 @@ func reloadWouldLoseChanges(zd *ZoneData) bool {
 	// access, which Go turns into a process-wide fatal error rather than a
 	// stale answer.
 	zd.mu.Lock()
-	dirty := zd.Options[OptDirty]
+	dirty := zd.Option(OptDirty)
 	zd.mu.Unlock()
 	if !dirty {
 		return false

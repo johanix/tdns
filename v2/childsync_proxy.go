@@ -298,5 +298,5 @@ func (zdp *ZoneData) registerChildSyncProxyHook() {
 func (zd *ZoneData) childSyncProxyEnabled() bool {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return zd.Options[OptChildSyncProxy]
+	return zd.Option(OptChildSyncProxy)
 }

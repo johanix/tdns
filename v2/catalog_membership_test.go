@@ -378,3 +378,100 @@ func TestConfiguredCatalogWriteBacksEndAtTheNewestSerial(t *testing.T) {
 		return err == nil && strings.Contains(string(b), fmt.Sprintf(" %d ", want))
 	})
 }
+
+// A catalog member is registered with its options and then handed to the
+// refresh engine, which fetches the zone. The request must not carry the
+// options as they were when it was built: the engine replaces the zone's whole
+// options map with the request's, so a freeze stored on the zone in between
+// (`zone freeze` over the API) would be undone. The options are normalized for
+// the zone's role when the zone is registered instead, and the request carries
+// none (johanix/tdns#981 review).
+func TestCatalogMemberRefreshRequestDoesNotReplaceTheZonesOptions(t *testing.T) {
+	const zone = "catalog.members.example."
+	const member = "m1.example."
+	authApp(t) // tdns-auth, with a keystore
+	kdb := Conf.Internal.KeyDB
+	catalogZd := newTestCatalog(t, zone)
+	catalogZd.mu.Lock()
+	catalogZd.ZoneType = Secondary
+	catalogZd.mu.Unlock()
+	catalogZd.SetOption(OptCatalogMemberAutoCreate, true)
+	t.Cleanup(func() { Zones.Remove(member) })
+
+	conf := &Config{Catalog: &CatalogConf{
+		GroupPrefixes: GroupPrefixesConf{Config: "config", Signing: "sign"},
+		ConfigGroups: map[string]*ConfigGroupConfig{
+			// allow-updates is origination, which a tdns-auth secondary that
+			// does not sign may not do: normalization strips it.
+			"config-blue": {Upstream: "127.0.0.1:1", Options: []string{"allow-updates", "fold-case"}},
+		},
+	}}
+	conf.Internal.KeyDB = kdb
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 1)
+	conf.Internal.BumpZoneCh = make(chan BumperData, 1)
+	update := &CatalogZoneUpdate{
+		CatalogZone: zone,
+		MemberZones: map[string]*MemberZone{member: {ZoneName: member, MetaGroup: "config-blue"}},
+	}
+	if err := AutoConfigureZonesFromCatalog(context.Background(), update, conf); err != nil {
+		t.Fatalf("AutoConfigureZonesFromCatalog: %v", err)
+	}
+	zd, ok := Zones.Get(member)
+	if !ok {
+		t.Fatal("the member was not registered")
+	}
+
+	// Normalized at registration: before any request is taken.
+	if !zd.Option(OptFoldCase) || !zd.Option(OptAutomaticZone) {
+		t.Errorf("the registered zone's options are %v, want the group's fold-case and the automatic-zone mark", zd.OptionsSnapshot())
+	}
+	if zd.Option(OptAllowUpdates) {
+		t.Error("the registered zone has allow-updates on: a tdns-auth secondary may not originate, so it is stripped at registration")
+	}
+	zd.mu.Lock()
+	suppressed := zd.SuppressedOptions[OptAllowUpdates]
+	zd.mu.Unlock()
+	if !suppressed {
+		t.Error("the suppressed allow-updates is not recorded on the zone")
+	}
+
+	var zr ZoneRefresher
+	select {
+	case zr = <-conf.Internal.RefreshZoneCh:
+	default:
+		t.Fatal("no refresh request was enqueued for the member")
+	}
+	if zr.Options != nil {
+		t.Errorf("the refresh request carries the options %v: the engine would replace the zone's with them", zr.Options)
+	}
+
+	// The window: a freeze stored after the request was built and before the
+	// engine takes it. Run the engine on the request, as the daemon does.
+	zd.SetOption(OptFrozen, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); RefreshEngine(ctx, conf) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("RefreshEngine did not shut down")
+		}
+		zd.stopPublisher()
+	})
+	zr.Wait = true
+	zr.Response = make(chan RefresherResponse, 1)
+	conf.Internal.RefreshZoneCh <- zr
+	select {
+	case <-zr.Response: // the fetch itself fails, nothing listens upstream; the options were settled before it
+	case <-time.After(10 * time.Second):
+		t.Fatal("the refresh was not answered")
+	}
+	if !zd.Option(OptFrozen) {
+		t.Error("the freeze stored before the engine took the request was undone by it")
+	}
+	if !zd.Option(OptFoldCase) || zd.Option(OptAllowUpdates) {
+		t.Errorf("after the engine took the request the options are %v", zd.OptionsSnapshot())
+	}
+}

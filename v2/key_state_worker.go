@@ -327,7 +327,7 @@ func maintainStandbyKeys(ctx context.Context, kdb *KeyDB, propagationDelay time.
 			lgSigner.Info("KeyStateWorker: stopping standby-key maintenance on context cancellation")
 			return
 		}
-		if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		if !zd.Option(OptOnlineSigning) && !zd.Option(OptInlineSigning) {
 			continue
 		}
 		if zoneOwned(zd) {

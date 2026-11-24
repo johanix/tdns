@@ -68,7 +68,7 @@ func (zd *ZoneData) carrySignaturesLocked(old *zoneSnapshot) int {
 	// SOA's TTL and with it the negative TTL. So no NSEC is carried then
 	// either.
 	newNegTTL := negativeTTLOf(apexFromSnapshotData(zd, zd.workingSet))
-	carryNsec := !zd.Options[OptBlackLies] &&
+	carryNsec := !zd.Option(OptBlackLies) &&
 		negativeTTLOf(apexFromSnapshotData(zd, old.Data)) == newNegTTL &&
 		!zd.clampMayLowerLocked(newNegTTL)
 	dak := zd.ActiveDnssecKeys()

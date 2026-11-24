@@ -540,7 +540,7 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 	// (yet / any longer) signed — refuse rather than hand a secondary a zone it
 	// would serve BOGUS. Catches both a persistent sign failure and the reload
 	// re-sign window. (Surfacing WHY is deferred to the DnssecError redesign.)
-	if (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && len(soaRRset.RRSIGs) == 0 {
+	if zd.signsHere() && len(soaRRset.RRSIGs) == 0 {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone is configured to be signed but the SOA has no RRSIG (unsigned/broken)", zone)
 		return zd.refuseTransfer(w, r)
 	}
@@ -839,7 +839,7 @@ func (zd *ZoneData) ParseZoneFromReader(ctx context.Context, r io.Reader, force 
 	// opts a primary out when it intentionally uses doubled names.
 	// A nil report checks nothing.
 	var doubled *DoubledSuffixReport
-	if zd.ZoneType != Secondary && !zd.Options[OptAllowDoubledSuffix] {
+	if zd.ZoneType != Secondary && !zd.Option(OptAllowDoubledSuffix) {
 		doubled = NewDoubledSuffixReport(zd.ZoneName)
 	}
 
