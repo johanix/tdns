@@ -1343,6 +1343,54 @@ func TestAddPinsTheDefaultApiCert(t *testing.T) {
 		refusal(t, err, "cannot be created at "+cert, "\n  Fix: run config add as root on the daemon's host")
 		absent(t, cert, key)
 	})
+
+	// The pair is written only with the entry that pins it: an add refused
+	// before its write leaves none, and says that nothing was written.
+	t.Run("a hidden list: refused, no pair", func(t *testing.T) {
+		env, d, cert, key := setup(t)
+		local := filepath.Join(env.dir, "local.yaml")
+		// cli.localconfig has a list of its own, which hides the main one.
+		writeFile(t, local, "apiservers:\n   - name: tdns-imr\n     baseurl: http://192.0.2.1:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n")
+		writeFile(t, env.cli, "cli:\n   localconfig: "+local+"\napiservers:\n   - name: other\n     baseurl: http://192.0.2.2:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n")
+		_, err := env.add(t, d, nil)
+		if err == nil || !strings.Contains(err.Error(), "Nothing was written") {
+			t.Fatalf("err = %v, want a refusal saying nothing was written", err)
+		}
+		absent(t, cert, key)
+	})
+
+	t.Run("the CLI config cannot be written: the pair removed again", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root writes anywhere")
+		}
+		env, d, cert, key := setup(t)
+		cliDir := filepath.Join(env.dir, "cli")
+		os.Mkdir(cliDir, 0o755)
+		env.cli = filepath.Join(cliDir, "tdns-ncli.yaml")
+		// The lock file is there, so the add gets as far as its write.
+		unlock, err := lockCliConfig(context.Background(), env.cli)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unlock()
+		os.Chmod(cliDir, 0o555)
+		t.Cleanup(func() { os.Chmod(cliDir, 0o755) })
+		_, err = env.add(t, d, nil)
+		if err == nil || !strings.Contains(err.Error(), "is removed again") {
+			t.Errorf("err = %v, want the write's failure, and the pair said removed", err)
+		}
+		absent(t, cert, key)
+	})
+
+	t.Run("a flow-style list: refused, no pair", func(t *testing.T) {
+		env, d, cert, key := setup(t)
+		writeFile(t, env.cli, "apiservers: []\n")
+		_, err := env.add(t, d, nil)
+		if err == nil || !strings.Contains(err.Error(), "nothing was written") || strings.Contains(err.Error(), "by hand") {
+			t.Fatalf("err = %v, want a refusal saying nothing was written, and no entry to add by hand (its pin would be of a pair nobody has)", err)
+		}
+		absent(t, cert, key)
+	})
 }
 
 // A daemon's local admin socket is asked which config it runs when its entry
