@@ -66,7 +66,7 @@ func newStubFlushResolver(t *testing.T) *stubFlushResolver {
 // does, and fails the test unless the lookup succeeded.
 func (s *stubFlushResolver) childSOA(t *testing.T, when string) *ImrResponse {
 	t.Helper()
-	resp, err := s.imr.ImrQuery(context.Background(), stubFlushChild, dns.TypeSOA, dns.ClassINET, nil)
+	resp, err := s.imr.ImrQuery(context.Background(), stubFlushChild, dns.TypeSOA, dns.ClassINET)
 	if err != nil {
 		t.Fatalf("%s: ImrQuery(%s SOA): %v", when, stubFlushChild, err)
 	}

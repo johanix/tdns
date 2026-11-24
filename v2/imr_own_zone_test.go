@@ -164,7 +164,7 @@ func TestOwnZoneTrustAnchorBeforeTheZoneLoads(t *testing.T) {
 	requireUpstreamNotAsked(t, rig.upLog, ownParent)
 
 	Zones.Set(ownParent, rig.parent) // loaded
-	resp, err := rig.imr.ImrQuery(context.Background(), ownParent, dns.TypeDNSKEY, dns.ClassINET, nil)
+	resp, err := rig.imr.ImrQuery(context.Background(), ownParent, dns.TypeDNSKEY, dns.ClassINET)
 	if err != nil || resp.RRset == nil || !resp.Validated {
 		t.Fatalf("%s DNSKEY once the zone has loaded: %+v (err %v), want it from the zone, secure", ownParent, resp, err)
 	}
@@ -214,7 +214,7 @@ func TestOwnZoneQuestionsAreAnsweredFromTheZone(t *testing.T) {
 	}
 	for _, c := range cases {
 		what := c.qname + " " + dns.TypeToString[c.qtype]
-		resp, err := rig.imr.ImrQuery(ctx, c.qname, c.qtype, dns.ClassINET, nil)
+		resp, err := rig.imr.ImrQuery(ctx, c.qname, c.qtype, dns.ClassINET)
 		if err != nil {
 			t.Errorf("%s: %v", what, err)
 			continue
@@ -248,7 +248,7 @@ func TestOwnZoneQuestionsAreAnsweredFromTheZone(t *testing.T) {
 
 	// Below the cut: the child's data, which the parent would answer with a
 	// referral. It goes to the child's server.
-	resp, err := rig.imr.ImrQuery(ctx, "www."+ownChild, dns.TypeA, dns.ClassINET, nil)
+	resp, err := rig.imr.ImrQuery(ctx, "www."+ownChild, dns.TypeA, dns.ClassINET)
 	if err != nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 || rdataOf(resp.RRset.RRs[0]) != "192.0.2.55" {
 		t.Errorf("www.%s A: %+v (err %v), want the child server's 192.0.2.55", ownChild, resp, err)
 	}
@@ -266,7 +266,7 @@ func resolverDnskeyFetcher(imr *Imr) dnskeyFetcher {
 	return func(child string, _ childServers) ([]dnskeyCopy, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		resp, err := imr.ImrQuery(ctx, dns.Fqdn(child), dns.TypeDNSKEY, dns.ClassINET, nil)
+		resp, err := imr.ImrQuery(ctx, dns.Fqdn(child), dns.TypeDNSKEY, dns.ClassINET)
 		if err != nil {
 			return nil, err
 		}
@@ -348,14 +348,14 @@ www.plain.example.	3600	IN	A	192.0.2.9
 	imr := newForwardTestImrWith(t, ImrEngineConf{Forward: rootForward(upAddr, upPort)}, ImrOptions{OwnZones: hostedZones{}})
 	ctx := context.Background()
 
-	resp, err := imr.ImrQuery(ctx, "www."+plain, dns.TypeA, dns.ClassINET, nil)
+	resp, err := imr.ImrQuery(ctx, "www."+plain, dns.TypeA, dns.ClassINET)
 	if err != nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 || rdataOf(resp.RRset.RRs[0]) != "192.0.2.9" {
 		t.Fatalf("www.%s A: %+v (err %v), want 192.0.2.9 from the zone", plain, resp, err)
 	}
 	if resp.Validated || resp.ValidationState != cache.ValidationStateInsecure {
 		t.Errorf("www.%s A: validation state %s, want insecure", plain, cache.ValidationStateToString[resp.ValidationState])
 	}
-	resp, err = imr.ImrQuery(ctx, "nosuch."+plain, dns.TypeA, dns.ClassINET, nil)
+	resp, err = imr.ImrQuery(ctx, "nosuch."+plain, dns.TypeA, dns.ClassINET)
 	if err != nil || resp.Denial != cache.ContextNXDOMAIN {
 		t.Errorf("nosuch.%s A: %+v (err %v), want NXDOMAIN from the zone", plain, resp, err)
 	} else if resp.Validated {

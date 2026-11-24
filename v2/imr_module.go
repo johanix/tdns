@@ -93,10 +93,9 @@ func (imr *Imr) TransportSignalCached(owner string) bool {
 }
 
 // ImrQuery and ImrQueryFresh are the module's Query and QueryFresh, under the
-// names they have here. ImrQuery keeps the respch parameter for its callers in
-// tdns-mp and tdns-transport, which pass nil; it is not used.
+// names they have here.
 
-func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
+func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16) (*ImrResponse, error) {
 	return imr.Imr.Query(ctx, qname, qtype, qclass)
 }
 

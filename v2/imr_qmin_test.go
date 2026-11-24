@@ -18,7 +18,7 @@ func TestQminForwardAndOwnZoneSendTheFullName(t *testing.T) {
 		rig.imr.Options = map[ImrOption]string{}
 	}
 	rig.imr.Options[ImrOptQnameMinimisation] = "true"
-	resp, err := rig.imr.ImrQuery(context.Background(), "www."+ownParent, dns.TypeA, dns.ClassINET, nil)
+	resp, err := rig.imr.ImrQuery(context.Background(), "www."+ownParent, dns.TypeA, dns.ClassINET)
 	if err != nil || resp.RRset == nil || rdataOf(resp.RRset.RRs[0]) != "192.0.2.2" {
 		t.Fatalf("own zone: %+v err %v", resp, err)
 	}

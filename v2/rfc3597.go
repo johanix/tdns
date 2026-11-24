@@ -23,7 +23,7 @@ func (zd *ZoneData) FetchParentData(imr *Imr) error {
 		//m.SetQuestion(zd.Parent, dns.TypeNS)
 
 		ctx := context.Background()
-		resp, err := imr.ImrQuery(ctx, parent, dns.TypeNS, dns.ClassINET, nil)
+		resp, err := imr.ImrQuery(ctx, parent, dns.TypeNS, dns.ClassINET)
 		if err != nil {
 			return err
 		}
@@ -41,7 +41,7 @@ func (zd *ZoneData) FetchParentData(imr *Imr) error {
 		ctx := context.Background()
 		for _, ns := range zd.ParentNS {
 			for _, rrtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-				resp, err := imr.ImrQuery(ctx, ns, rrtype, dns.ClassINET, nil)
+				resp, err := imr.ImrQuery(ctx, ns, rrtype, dns.ClassINET)
 				if err != nil {
 					return err
 				}

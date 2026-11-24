@@ -65,7 +65,7 @@ func TestNewImrFromImrEngineConfAlone(t *testing.T) {
 	imr.Start(ctx)
 	waitUntil(t, "Start to run the root refresh", func() bool { return goroutinesIn("(*Imr).refreshRootLoop(") > refreshing })
 
-	resp, err := imr.ImrQuery(ctx, "www.fwd.example.", dns.TypeA, dns.ClassINET, nil)
+	resp, err := imr.ImrQuery(ctx, "www.fwd.example.", dns.TypeA, dns.ClassINET)
 	if err != nil || resp == nil || resp.RRset == nil || len(resp.RRset.RRs) != 1 {
 		t.Fatalf("www.fwd.example. A: %+v (err %v), want the upstream's answer", resp, err)
 	}

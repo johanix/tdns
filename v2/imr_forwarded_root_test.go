@@ -52,7 +52,7 @@ func TestForwardedRootStartsWithoutRootHints(t *testing.T) {
 		t.Errorf("start-up sent %d query(ies) to the upstream: %+v", len(sent), sent)
 	}
 
-	resp, err := imr.ImrQuery(context.Background(), "www.fwd.example.", dns.TypeA, dns.ClassINET, nil)
+	resp, err := imr.ImrQuery(context.Background(), "www.fwd.example.", dns.TypeA, dns.ClassINET)
 	if err != nil || resp.RRset == nil || len(resp.RRset.RRs) != 1 {
 		t.Fatalf("no answer through the forward: resp=%+v err=%v", resp, err)
 	}

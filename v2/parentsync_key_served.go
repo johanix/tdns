@@ -215,7 +215,7 @@ func imrKeyServedCheck(imr *Imr, zone, keyRR string) keyServedCheck {
 		addresses: func(ctx context.Context, ns string) []string {
 			var out []string
 			for _, rrtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-				resp, err := imr.ImrQuery(ctx, ns, rrtype, dns.ClassINET, nil)
+				resp, err := imr.ImrQuery(ctx, ns, rrtype, dns.ClassINET)
 				if err != nil || resp == nil || resp.RRset == nil {
 					continue
 				}

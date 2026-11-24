@@ -86,7 +86,7 @@ func DiscoverDsyncApiEndpoint(ctx context.Context, imr *Imr, target string, requ
 	}
 	target = dns.Fqdn(strings.TrimSpace(target))
 
-	uriResp, err := imr.ImrQuery(ctx, target, dns.TypeURI, dns.ClassINET, nil)
+	uriResp, err := imr.ImrQuery(ctx, target, dns.TypeURI, dns.ClassINET)
 	if err != nil {
 		return nil, fmt.Errorf("looking up URI at %s: %v", target, err)
 	}
@@ -98,7 +98,7 @@ func DiscoverDsyncApiEndpoint(ctx context.Context, imr *Imr, target string, requ
 			"the URI record at %s did not DNSSEC-validate; refusing to send credentials to an unauthenticated endpoint", target)
 	}
 
-	txtResp, err := imr.ImrQuery(ctx, target, dns.TypeTXT, dns.ClassINET, nil)
+	txtResp, err := imr.ImrQuery(ctx, target, dns.TypeTXT, dns.ClassINET)
 	if err != nil {
 		return nil, fmt.Errorf("looking up TXT at %s: %v", target, err)
 	}
@@ -153,7 +153,7 @@ func resolveDsyncApiEndpointAddrs(ctx context.Context, imr *Imr, endpoint string
 	var unvalidated []string
 	var lookupErr error
 	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		resp, qerr := imr.ImrQuery(ctx, fqdn, qtype, dns.ClassINET, nil)
+		resp, qerr := imr.ImrQuery(ctx, fqdn, qtype, dns.ClassINET)
 		if qerr != nil {
 			// Kept, not just logged: a resolver that could not answer has not
 			// said the name has no address, and reporting "the parent

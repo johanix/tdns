@@ -518,7 +518,7 @@ func resolveDsyncTarget(ctx context.Context, imr *Imr, rr *core.DSYNC) (*DsyncTa
 	target := dns.Fqdn(rr.Target)
 	var addrs []string
 	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		resp, qerr := imr.ImrQuery(ctx, target, qtype, dns.ClassINET, nil)
+		resp, qerr := imr.ImrQuery(ctx, target, qtype, dns.ClassINET)
 		if qerr != nil {
 			continue
 		}
