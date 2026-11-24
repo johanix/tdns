@@ -313,6 +313,9 @@ func runConfigCmdAt(role, daemonCfg, command string, showVerboseStatus, confirm 
 	post := tdns.ConfigPost{Command: command, Confirm: confirm}
 	var resp tdns.ConfigResponse
 	var err error
+	// The daemon's name in error output: configAtDaemon's client is named
+	// after the role; an entry's client after the entry.
+	name := role
 	if daemonCfg != "" {
 		resp, err = configAtDaemon(role, daemonCfg, post)
 	} else {
@@ -321,6 +324,7 @@ func runConfigCmdAt(role, daemonCfg, command string, showVerboseStatus, confirm 
 			fmt.Printf("Error creating API client: %v\n", aerr)
 			os.Exit(1)
 		}
+		name = api.Name
 		resp, err = SendConfigCommand(api, post)
 	}
 	// A daemon-side error is carried structurally on resp (resp.Error, and for a
@@ -329,7 +333,7 @@ func runConfigCmdAt(role, daemonCfg, command string, showVerboseStatus, confirm 
 	// refusal renders; only bail here on a transport-level error (err set, resp not
 	// populated by the daemon).
 	if err != nil && !resp.Error {
-		printDaemonError(api.Name, err)
+		printDaemonError(name, err)
 		os.Exit(1)
 	}
 	if resp.Error {
@@ -337,7 +341,7 @@ func runConfigCmdAt(role, daemonCfg, command string, showVerboseStatus, confirm 
 			renderReloadGuardrail(resp)
 			os.Exit(1)
 		}
-		printDaemonErrorMsg(api.Name, resp.ErrorMsg)
+		printDaemonErrorMsg(name, resp.ErrorMsg)
 		os.Exit(1)
 	}
 
