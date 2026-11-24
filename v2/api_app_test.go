@@ -821,3 +821,17 @@ func TestApiRefusalReport(t *testing.T) {
 		t.Errorf("an empty 400: %q", got)
 	}
 }
+
+// A refusal names the command once: "imr flush", not "imr imr-flush".
+func TestApiCommandNameDropsTheRepeatedRouteName(t *testing.T) {
+	for _, tc := range []struct{ route, cmd, want string }{
+		{"/api/v1/imr", "imr-flush", "imr flush"},
+		{"/api/v1/zone", "bump", "zone bump"},
+		{"/api/v1/scanner/poll", "status", "scanner poll status"},
+		{"/api/v1/config/paths", "", "config paths"},
+	} {
+		if got := apiCommandName(tc.route, tc.cmd, ""); got != tc.want {
+			t.Errorf("apiCommandName(%q, %q) = %q, want %q", tc.route, tc.cmd, got, tc.want)
+		}
+	}
+}

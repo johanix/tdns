@@ -534,6 +534,31 @@ func TestAppKeystoreKeyCommandsOnOwnKeysOnly(t *testing.T) {
 		t.Error("the other zone's SIG(0) key is gone")
 	}
 
+	// The handler republishes and re-signs the zone a request names in Zone,
+	// while setstate checks the key by Keyname and add by its DNSKEY: an own
+	// key with someone else's Zone is refused, and nothing changes.
+	for _, kind := range []string{"other", "api", "config", "gone"} {
+		mixed := dnssec("setstate", "own")
+		mixed.Zone = z[kind]
+		if resp, _ := postKeystore(t, mixed, &appCaller); !resp.Error || !refusedForApp(resp.ErrorMsg) {
+			t.Errorf("dnssec setstate of an own key naming the %s zone: %q, want refused", kind, resp.ErrorMsg)
+		}
+		dk := testDnssecKey(t, z["own"], 256)
+		dpkc, err := PrepareKeyCache(dk.PrivateKey, dk.KeyRR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		add := KeystorePost{Command: "dnssec-mgmt", SubCommand: "add", Zone: z[kind], PrivateKeyCache: dpkc, State: DnskeyStateCreated}
+		if resp, _ := postKeystore(t, add, &appCaller); !resp.Error || !refusedForApp(resp.ErrorMsg) {
+			t.Errorf("dnssec add of an own-zone key naming the %s zone: %q, want refused", kind, resp.ErrorMsg)
+		}
+	}
+	var ownState string
+	Conf.Internal.KeyDB.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, z["own"], zoneKeyID(t, "dnssec", z["own"])).Scan(&ownState)
+	if ownState == DnskeyStateRetired {
+		t.Error("a refused setstate with another's Zone changed the own key's state")
+	}
+
 	for _, kp := range []KeystorePost{sig0("setstate", "own"), sig0("setparentstate", "own"), sig0("delete", "granted"), dnssec("setstate", "own")} {
 		if resp, _ := postKeystore(t, kp, &appCaller); resp.Error {
 			t.Errorf("%s %s on an own key: %s", kp.Command, kp.SubCommand, resp.ErrorMsg)

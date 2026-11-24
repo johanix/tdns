@@ -56,7 +56,9 @@ func TestApiOwnerValues(t *testing.T) {
 		{"cert:provisioner", "cert:provisioner", true},
 		{"api", "", false},
 		{"cert:", "", false},
-		{"cert:two words", "", false},
+		// A hand-written access file may name a client so; read back
+		// as written (readCertApiOwner).
+		{"cert:two words", "cert:two words", true},
 		{"provisioner", "", false},
 	} {
 		got, err := StaticApiOwner(tc.in)
@@ -69,7 +71,7 @@ func TestApiOwnerValues(t *testing.T) {
 		ok bool
 	}{
 		{"api", true}, {"cert:provisioner", true},
-		{"config", false}, {"", false}, {"cert:", false}, {"cert:a\tb", false}, {"cert", false},
+		{"config", false}, {"", false}, {"cert:", false}, {"cert:a\tb", false}, {"cert:two words", false}, {"cert", false},
 	} {
 		if err := CheckSettableApiOwner(tc.in); (err == nil) != tc.ok {
 			t.Errorf("CheckSettableApiOwner(%q) = %v, want ok=%v", tc.in, err, tc.ok)
@@ -84,6 +86,9 @@ func TestApiOwnerValues(t *testing.T) {
 		{"cert:provisioner", "cert:provisioner", true},
 		{"config", ApiOwnerApi, false}, // reported, and grants nothing
 		{"cert:", ApiOwnerApi, false},
+		// Recorded by a client a hand-written access file names so: kept,
+		// or a rewrite would hand its zone to api.
+		{"cert:batch client", "cert:batch client", true},
 	} {
 		got, err := dynamicApiOwner(tc.in)
 		if (err == nil) != tc.ok || got != tc.want {
@@ -649,5 +654,64 @@ func TestKeystoreListsCarryTheZonesApiOwner(t *testing.T) {
 		if k.ApiOwner != want[k.Name] {
 			t.Errorf("DNSSEC key of %s: API owner %q, want %q", k.Name, k.ApiOwner, want[k.Name])
 		}
+	}
+}
+
+// The load's one rewrite in canonical form (repersistDynamicConfig) writes
+// the file as it read it. The API serves while the zones load, so a write in
+// between (a setowner, an add) must win: the load's rewrite is skipped, not
+// written over it. Without a write in between, it is written.
+func TestLoadRepersistNeverOverwritesALaterWrite(t *testing.T) {
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, _ := newTestConfigForCores(t)
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic-zones.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	entry := func(owner string) string {
+		return "zones:\n  - name: dyn.example.\n    type: secondary\n    store: map\n    apimanaged: true\n" +
+			"    api-owner: " + owner + "\n    primaries:\n      - addr: 198.51.100.1:53\n        key: NOKEY\n"
+	}
+	ownerOnDisk := func() string {
+		cf, err := conf.loadDynamicConfigFile()
+		if err != nil || len(cf.Zones) != 1 {
+			t.Fatalf("reading the dynamic config: %v, %+v", err, cf)
+		}
+		return cf.Zones[0].ApiOwner
+	}
+	if err := os.WriteFile(conf.DynamicZones.ConfigFile, []byte(entry("api")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The load reads the file; a setowner then writes it before the load's
+	// rewrite runs.
+	read, err := conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := *read
+	later.Zones = append([]ZoneConf(nil), read.Zones...)
+	later.Zones[0].ApiOwner = "cert:provisioner"
+	if err := conf.writeDynamicConfigFile(later.Zones); err != nil {
+		t.Fatal(err)
+	}
+	if wrote, err := conf.repersistDynamicConfig(read); err != nil || wrote {
+		t.Fatalf("the load's rewrite after a later write: wrote=%v err=%v, want skipped", wrote, err)
+	}
+	if got := ownerOnDisk(); got != "cert:provisioner" {
+		t.Errorf("API owner on disk %q, want the later write's cert:provisioner", got)
+	}
+
+	// Nothing written in between: the rewrite goes ahead.
+	read, err = conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read.Zones[0].ApiOwner = "cert:other"
+	if wrote, err := conf.repersistDynamicConfig(read); err != nil || !wrote {
+		t.Fatalf("the load's rewrite with no write in between: wrote=%v err=%v, want written", wrote, err)
+	}
+	if got := ownerOnDisk(); got != "cert:other" {
+		t.Errorf("API owner on disk %q, want cert:other", got)
 	}
 }
