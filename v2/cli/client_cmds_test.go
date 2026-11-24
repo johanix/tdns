@@ -175,7 +175,10 @@ func newAccessEnv(t *testing.T, withAccessFile bool, apiURL string) *accessEnv {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(sockDir) })
-	cfg := "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ 127.0.0.1:8989 ]\n   apikey: k\n   socket: " + filepath.Join(sockDir, "tdns-auth.sock") + "\n"
+	// Its TCP address is not the entry's, and not dialled here (only config
+	// add dials a daemon config's): closed all the same (closedAddrs).
+	closed := closedAddrs(t, 2)
+	cfg := "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ " + closed[0] + " ]\n   apikey: k\n   socket: " + filepath.Join(sockDir, "tdns-auth.sock") + "\n"
 	if withAccessFile {
 		cfg += "   access-file: " + e.access + "\n"
 	}
@@ -190,9 +193,9 @@ func newAccessEnv(t *testing.T, withAccessFile bool, apiURL string) *accessEnv {
 	saved := apiConfig
 	t.Cleanup(func() { apiConfig = saved })
 	if apiURL == "" {
-		// Port 1: nothing listens there, so an edit's check of the running
-		// daemon finds none, whatever runs on this host.
-		apiURL = "https://127.0.0.1:1/api/v1"
+		// Nothing listens there (closedAddr), so an edit's check of the
+		// running daemon finds none, whatever runs on this host.
+		apiURL = "https://" + closed[1] + "/api/v1"
 	}
 	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: apiURL, ApiKey: "k", AuthMethod: "X-API-Key", ConfigFile: e.daemonCfg}}}
 	// As the CLI does at start: an edit asks the entry's daemon which
@@ -458,7 +461,7 @@ func TestVerifyRunningDaemonNeedsAnAnswer(t *testing.T) {
 	RegisterRole("auth", "tdns-auth")
 	saved := apiConfig
 	t.Cleanup(func() { apiConfig = saved })
-	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"}}}
+	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://" + closedAddr(t) + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"}}}
 	if err := InitApiClients(apiConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +553,7 @@ func TestAddPinsTheDaemonCertificate(t *testing.T) {
 	want := tdns.SPKISHA256(leaf)
 
 	d := filepath.Join(env.dir, "tdns-auth.yaml")
-	writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   certfile: "+certFile+"\n"))
+	writeFile(t, d, daemonYAML("TDNS-AUTH", env.at(8989), "k", "   certfile: "+certFile+"\n"))
 	res, err := env.add(t, d, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -590,7 +593,7 @@ func TestAddPinsTheDaemonCertificate(t *testing.T) {
 	}
 	env2 := newAddEnv(t)
 	d2 := filepath.Join(env2.dir, "tdns-auth.yaml")
-	writeFile(t, d2, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   certfile: /nonexistent/api.crt\n"))
+	writeFile(t, d2, daemonYAML("TDNS-AUTH", env2.at(8989), "k", "   certfile: /nonexistent/api.crt\n"))
 	refused(t, env2, d2, "cannot be pinned", "put the daemon's certificate at /nonexistent/api.crt")
 
 	// A relative certfile is opened from the daemon's working directory,
@@ -599,7 +602,7 @@ func TestAddPinsTheDaemonCertificate(t *testing.T) {
 	env3 := newAddEnv(t)
 	writeFile(t, filepath.Join(env3.dir, "api.crt"), string(certPEM))
 	d3 := filepath.Join(env3.dir, "tdns-auth.yaml")
-	writeFile(t, d3, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   certfile: api.crt\n"))
+	writeFile(t, d3, daemonYAML("TDNS-AUTH", env3.at(8989), "k", "   certfile: api.crt\n"))
 	refused(t, env3, d3, "relative path", "absolute path")
 }
 
@@ -621,19 +624,22 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 	leaf, _ := x509.ParseCertificate(srv.Certificate().Raw)
 	pin := tdns.SPKISHA256(leaf)
 
+	// In entry, @D@ is the daemon config, @IMR@ its base URL (env.url(8085),
+	// where nothing listens: it serves no socket, so it is asked over TCP)
+	// and @AUTH@ another daemon's.
 	setup := func(t *testing.T, entry string) (*addEnv, string) {
 		env := newAddEnv(t)
 		certFile := filepath.Join(env.dir, "api.crt")
 		writeFile(t, certFile, string(certPEM))
 		d := filepath.Join(env.dir, "tdns-imr.yaml")
-		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: "+certFile+"\n   socket: none\n"))
-		writeFile(t, env.cli, strings.ReplaceAll(entry, "@D@", d))
+		writeFile(t, d, daemonYAML("TDNS-IMR", env.at(8085), "k", "   certfile: "+certFile+"\n   socket: none\n"))
+		writeFile(t, env.cli, strings.NewReplacer("@D@", d, "@IMR@", env.url(8085), "@AUTH@", env.url(8989)).Replace(entry))
 		return env, d
 	}
 
 	t.Run("no pin, rootca insecure", func(t *testing.T) {
-		const head = "# CLI config\ncli:\n   tdns-imr:\n      foo: bar\n\napiservers:\n   # the auth server\n   - name:          tdns-auth\n     baseurl:       https://127.0.0.1:8989/api/v1\n     apikey:        a\n     authmethod:    X-API-Key\n\n"
-		const imr = "   - name:          tdns-imr\n     baseurl:       https://127.0.0.1:8085/api/v1\n     apikey:        k\n     authmethod:    X-API-Key\n     rootca:        insecure\n     config-file:   @D@\n"
+		const head = "# CLI config\ncli:\n   tdns-imr:\n      foo: bar\n\napiservers:\n   # the auth server\n   - name:          tdns-auth\n     baseurl:       @AUTH@\n     apikey:        a\n     authmethod:    X-API-Key\n\n"
+		const imr = "   - name:          tdns-imr\n     baseurl:       @IMR@\n     apikey:        k\n     authmethod:    X-API-Key\n     rootca:        insecure\n     config-file:   @D@\n"
 		const tail = "\n# end\n"
 		env, d := setup(t, head+imr+tail)
 
@@ -652,7 +658,7 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 		if res.AlreadyKnown != "tdns-imr" || !res.Pinned || !res.Wrote || !res.Canonical {
 			t.Errorf("result = %+v", res)
 		}
-		want := head + "   - name:          tdns-imr\n     baseurl:       https://127.0.0.1:8085/api/v1\n     apikey:        k\n     authmethod:    X-API-Key\n     config-file:   " + d + "\n     tlsauth:       pin\n     pins:          [ \"" + pin + "\" ]\n" + tail
+		want := strings.ReplaceAll(head, "@AUTH@", env.url(8989)) + "   - name:          tdns-imr\n     baseurl:       " + env.url(8085) + "\n     apikey:        k\n     authmethod:    X-API-Key\n     config-file:   " + d + "\n     tlsauth:       pin\n     pins:          [ \"" + pin + "\" ]\n" + tail
 		if got, _ := os.ReadFile(env.cli); string(got) != want {
 			t.Errorf("file =\n%s\nwant\n%s", got, want)
 		}
@@ -681,7 +687,7 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 	})
 
 	t.Run("an earlier pin, in block style", func(t *testing.T) {
-		env, d := setup(t, "apiservers:\n   -\n     name: tdns-imr\n     baseurl: https://127.0.0.1:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     tlsauth: pin\n     pins:\n       - \""+pinOf("old")+"\"\n     config-file: @D@\n")
+		env, d := setup(t, "apiservers:\n   -\n     name: tdns-imr\n     baseurl: @IMR@\n     apikey: k\n     authmethod: X-API-Key\n     tlsauth: pin\n     pins:\n       - \""+pinOf("old")+"\"\n     config-file: @D@\n")
 		res, err := env.add(t, d, nil)
 		if err != nil || !res.Pinned {
 			t.Fatalf("%+v, %v", res, err)
@@ -696,8 +702,8 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 	})
 
 	t.Run("an unreadable certificate, a pkix entry: its verification unchanged", func(t *testing.T) {
-		env, d := setup(t, "apiservers:\n   - name: tdns-imr\n     baseurl: https://127.0.0.1:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     tlsauth: pkix\n     config-file: @D@\n")
-		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: /nonexistent/api.crt\n   socket: none\n"))
+		env, d := setup(t, "apiservers:\n   - name: tdns-imr\n     baseurl: @IMR@\n     apikey: k\n     authmethod: X-API-Key\n     tlsauth: pkix\n     config-file: @D@\n")
+		writeFile(t, d, daemonYAML("TDNS-IMR", env.at(8085), "k", "   certfile: /nonexistent/api.crt\n   socket: none\n"))
 		res, err := env.add(t, d, nil)
 		notes := strings.Join(res.Notes, " ")
 		if err != nil || res.Pinned || strings.Contains(notes, "refuses") || !strings.Contains(notes, "verification is unchanged") {
@@ -706,8 +712,8 @@ func TestAddPinsAKnownEntry(t *testing.T) {
 	})
 
 	t.Run("an unreadable certificate: a note, nothing changed", func(t *testing.T) {
-		env, d := setup(t, "apiservers:\n   - name: tdns-imr\n     baseurl: https://127.0.0.1:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     config-file: @D@\n")
-		writeFile(t, d, daemonYAML("TDNS-IMR", "127.0.0.1:8085", "k", "   certfile: /nonexistent/api.crt\n   socket: none\n"))
+		env, d := setup(t, "apiservers:\n   - name: tdns-imr\n     baseurl: @IMR@\n     apikey: k\n     authmethod: X-API-Key\n     config-file: @D@\n")
+		writeFile(t, d, daemonYAML("TDNS-IMR", env.at(8085), "k", "   certfile: /nonexistent/api.crt\n   socket: none\n"))
 		before, _ := os.ReadFile(env.cli)
 		res, err := env.add(t, d, nil)
 		if err != nil || res.Pinned || res.Wrote || !strings.Contains(strings.Join(res.Notes, " "), "refuses it over TCP (root may still reach the daemon over its local admin socket, while the daemon serves one and --tcp is not given)") {
@@ -1017,7 +1023,7 @@ func TestAccessReloadPrefersTheSocket(t *testing.T) {
 	RegisterRole("auth", "tdns-auth")
 	saved := apiConfig
 	t.Cleanup(func() { apiConfig = saved })
-	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"}}}
+	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://" + closedAddr(t) + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"}}}
 	if err := InitApiClients(apiConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -1193,7 +1199,7 @@ func TestStatusGoesOverTheSocket(t *testing.T) {
 	RegisterRole("auth", "tdns-auth")
 	saved := apiConfig
 	t.Cleanup(func() { apiConfig = saved })
-	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"}}}
+	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://" + closedAddr(t) + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"}}}
 	if err := InitApiClients(apiConfig); err != nil {
 		t.Fatal(err)
 	}
@@ -1257,7 +1263,7 @@ func TestAddPinsTheDefaultApiCert(t *testing.T) {
 	setup := func(t *testing.T) (*addEnv, string, string, string) {
 		env := newAddEnv(t)
 		d := filepath.Join(env.dir, "tdns-auth.yaml")
-		writeFile(t, d, daemonYAMLDefaultCert("TDNS-AUTH", "127.0.0.1:8989", "k", ""))
+		writeFile(t, d, daemonYAMLDefaultCert("TDNS-AUTH", env.at(8989), "k", ""))
 		info, err := ReadDaemonApi(d, "")
 		if err != nil {
 			t.Fatal(err)

@@ -81,9 +81,9 @@ func TestLockCliConfigsThroughADirectoryAlias(t *testing.T) {
 func TestAddToAnotherFileWaitsForTheCliConfigLock(t *testing.T) {
 	env := newAddEnv(t)
 	local := filepath.Join(env.dir, "local.yaml")
-	writeFile(t, local, "apiservers:\n   - name: tdns-auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     apikey: k\n     authmethod: X-API-Key\n")
+	writeFile(t, local, "apiservers:\n   - name: tdns-auth\n     baseurl: "+env.url(8989)+"\n     apikey: k\n     authmethod: X-API-Key\n")
 	writeFile(t, env.cli, "cli:\n   localconfig: "+local+"\n")
-	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
+	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", env.at(8990))
 
 	unlock, err := lockCliConfig(context.Background(), env.cli) // another add, busy with the CLI config
 	if err != nil {
@@ -134,7 +134,7 @@ func TestAddToAnotherFileWaitsForTheCliConfigLock(t *testing.T) {
 // add neither reads nor writes the config.
 func TestCancelledAddStopsWaitingForTheLock(t *testing.T) {
 	env := newAddEnv(t)
-	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", env.at(8989))
 	unlock, err := lockCliConfig(context.Background(), env.cli) // another add, busy
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +171,7 @@ func TestAddCreatesTheCliConfigNamedThroughADirectoryAlias(t *testing.T) {
 	if err := os.Symlink(env.dir, alias); err != nil {
 		t.Skip("no symlinks here")
 	}
-	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", env.at(8989))
 	res, err := env.add(t, d, func(o *AddOptions) { o.TargetFile = filepath.Join(alias, "tdns-ncli.yaml") })
 	if err != nil {
 		t.Fatal(err)
