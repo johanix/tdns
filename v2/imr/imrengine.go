@@ -118,6 +118,9 @@ type Imr struct {
 	// nsAddrLookups tracks the background address lookups for out-of-
 	// bailiwick nameservers (resolveZoneServersInBackground).
 	nsAddrLookups nsAddrLookups
+	// unusableServers are the unusable-server reports this resolver has
+	// made, each repeated at most once an hour (noteServerProblem).
+	unusableServers unusableServers
 	// ready is closed once the resolver can resolve (Ready, markReady). Nil
 	// in an Imr built by hand, which Ready counts as ready.
 	ready     chan struct{}

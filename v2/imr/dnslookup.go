@@ -1286,42 +1286,48 @@ const (
 	unusableServerMaxKeys = 1024
 )
 
-var (
-	unusableServersMu sync.Mutex
-	unusableServers   = map[string]time.Time{}
-)
+// unusableServers is the table of reports a resolver has made: its own, so
+// that one resolver's report does not silence another's.
+type unusableServers struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+}
 
 // noteServerProblem reports, once per zone/server per repeat interval, that a
 // server in the map cannot be queried and why.
 func (imr *Imr) noteServerProblem(zoneName, nsname, reason string) {
 	key := zoneName + "|" + nsname + "|" + reason
 
-	unusableServersMu.Lock()
+	u := &imr.unusableServers
+	u.mu.Lock()
+	if u.seen == nil {
+		u.seen = map[string]time.Time{}
+	}
 	now := time.Now()
-	if last, seen := unusableServers[key]; seen && now.Sub(last) < unusableServerRepeat {
-		unusableServersMu.Unlock()
+	if last, seen := u.seen[key]; seen && now.Sub(last) < unusableServerRepeat {
+		u.mu.Unlock()
 		return
 	}
-	unusableServers[key] = now
-	if len(unusableServers) > unusableServerMaxKeys {
+	u.seen[key] = now
+	if len(u.seen) > unusableServerMaxKeys {
 		// Drop what has aged out first; if that is not enough, drop arbitrary
 		// entries until the table is back under the cap. Go randomises map
 		// iteration, so this is effectively random eviction -- the worst it
 		// costs is a repeated warning, which is much cheaper than unbounded
 		// growth in an error path.
-		for k, t := range unusableServers {
+		for k, t := range u.seen {
 			if now.Sub(t) >= unusableServerRepeat {
-				delete(unusableServers, k)
+				delete(u.seen, k)
 			}
 		}
-		for k := range unusableServers {
-			if len(unusableServers) <= unusableServerMaxKeys {
+		for k := range u.seen {
+			if len(u.seen) <= unusableServerMaxKeys {
 				break
 			}
-			delete(unusableServers, k)
+			delete(u.seen, k)
 		}
 	}
-	unusableServersMu.Unlock()
+	u.mu.Unlock()
 
 	imr.lgDns().Warn("prioritizeServers: server cannot be queried",
 		"ns", nsname, "zone", zoneName, "reason", reason,

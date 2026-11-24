@@ -77,36 +77,34 @@ func TestExplainNoTuplesNamesTheServer(t *testing.T) {
 }
 
 // An unusable server must be reported once per interval, not per query: it is a
-// standing state, not an event.
+// standing state, not an event. The interval is each resolver's own: one
+// resolver's report does not silence another's.
 func TestNoteServerProblemIsReportedOncePerInterval(t *testing.T) {
 	zone, ns, reason := "dedupe-test.example.", "ns1.dedupe-test.example.", "no addresses"
 	key := zone + "|" + ns + "|" + reason
+	seen := func(imr *Imr) (time.Time, bool) {
+		imr.unusableServers.mu.Lock()
+		defer imr.unusableServers.mu.Unlock()
+		at, ok := imr.unusableServers.seen[key]
+		return at, ok
+	}
 
-	unusableServersMu.Lock()
-	delete(unusableServers, key)
-	unusableServersMu.Unlock()
-	t.Cleanup(func() {
-		unusableServersMu.Lock()
-		delete(unusableServers, key)
-		unusableServersMu.Unlock()
-	})
-
-	new(Imr).noteServerProblem(zone, ns, reason)
-	unusableServersMu.Lock()
-	first, ok := unusableServers[key]
-	unusableServersMu.Unlock()
+	imr := new(Imr)
+	imr.noteServerProblem(zone, ns, reason)
+	first, ok := seen(imr)
 	if !ok {
 		t.Fatal("first report did not record the pair")
 	}
 
 	// A second call inside the interval must not refresh the timestamp, or a
 	// server reported continuously would never be re-reported.
-	new(Imr).noteServerProblem(zone, ns, reason)
-	unusableServersMu.Lock()
-	second := unusableServers[key]
-	unusableServersMu.Unlock()
-	if !second.Equal(first) {
+	imr.noteServerProblem(zone, ns, reason)
+	if second, _ := seen(imr); !second.Equal(first) {
 		t.Error("a suppressed report still refreshed the timestamp")
+	}
+
+	if _, ok := seen(new(Imr)); ok {
+		t.Error("another resolver holds this resolver's report")
 	}
 }
 
@@ -118,21 +116,14 @@ func TestNoteServerProblemSeparatesReasons(t *testing.T) {
 		zone + "|" + ns + "|no addresses",
 		zone + "|" + ns + "|nil server entry in the server map",
 	}
-	t.Cleanup(func() {
-		unusableServersMu.Lock()
-		for _, k := range keys {
-			delete(unusableServers, k)
-		}
-		unusableServersMu.Unlock()
-	})
+	imr := new(Imr)
+	imr.noteServerProblem(zone, ns, "no addresses")
+	imr.noteServerProblem(zone, ns, "nil server entry in the server map")
 
-	new(Imr).noteServerProblem(zone, ns, "no addresses")
-	new(Imr).noteServerProblem(zone, ns, "nil server entry in the server map")
-
-	unusableServersMu.Lock()
-	defer unusableServersMu.Unlock()
+	imr.unusableServers.mu.Lock()
+	defer imr.unusableServers.mu.Unlock()
 	for _, k := range keys {
-		if _, ok := unusableServers[k]; !ok {
+		if _, ok := imr.unusableServers.seen[k]; !ok {
 			t.Errorf("reason not tracked separately: %s", k)
 		}
 	}
@@ -142,23 +133,14 @@ func TestNoteServerProblemSeparatesReasons(t *testing.T) {
 // delegations, and a dedup cache that never evicts is a slow leak on an error
 // path.
 func TestNoteServerProblemBoundsItsState(t *testing.T) {
-	unusableServersMu.Lock()
-	saved := unusableServers
-	unusableServers = map[string]time.Time{}
-	unusableServersMu.Unlock()
-	t.Cleanup(func() {
-		unusableServersMu.Lock()
-		unusableServers = saved
-		unusableServersMu.Unlock()
-	})
-
+	imr := new(Imr)
 	for i := 0; i < unusableServerMaxKeys*2; i++ {
-		new(Imr).noteServerProblem(fmt.Sprintf("zone%d.example.", i), "ns1.example.", "no addresses")
+		imr.noteServerProblem(fmt.Sprintf("zone%d.example.", i), "ns1.example.", "no addresses")
 	}
 
-	unusableServersMu.Lock()
-	n := len(unusableServers)
-	unusableServersMu.Unlock()
+	imr.unusableServers.mu.Lock()
+	n := len(imr.unusableServers.seen)
+	imr.unusableServers.mu.Unlock()
 	if n > unusableServerMaxKeys {
 		t.Errorf("dedup table holds %d entries, cap is %d; it grows without bound",
 			n, unusableServerMaxKeys)
