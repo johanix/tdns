@@ -939,7 +939,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						zd.mu.Lock()
 						// Before the options and the type change: a tdns-agent zone
 						// whose origination this update ends must not keep serving
-						// what it wrote itself (markRelayCopyIfOriginationEnded).
+						// what it wrote itself (markRelayCopyIfOriginationEnded). A
+						// config reload has swapped the options already, in
+						// ParseZones, and marked the copy there.
 						wasOriginating := zoneMayOriginateContent(zd)
 						// Notify + ACLs. For a config-bearing refresher (reload),
 						// assign even when nil/empty so a config that REMOVES a notify

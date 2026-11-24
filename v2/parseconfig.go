@@ -1696,9 +1696,14 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// Likewise whether the resolver's source for the zone changes: what it
 		// holds about the zone came from the source it no longer uses.
 		sourceChanged := zdp.Options[OptModifiedDownstream] != newOpts[OptModifiedDownstream]
+		// Before the swap: a tdns-agent zone whose origination this reload
+		// ends must not keep serving what it wrote itself. The refresher
+		// queued below finds the new options already in place.
+		wasOriginating := zoneMayOriginateContent(zdp)
 		// An option the daemon set by itself is not in the file; a reload
 		// must not take it away (SetRuntimeOption).
 		zdp.Options = zdp.withRuntimeOptionsLocked(newOpts)
+		zdp.markRelayCopyIfOriginationEnded(wasOriginating)
 		zdp.publishCadence = publishCadence
 		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
 		retries, retryInterval := zoneNotifyRetrySettings(zname, zconf)

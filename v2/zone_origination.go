@@ -85,16 +85,23 @@ func agentZoneMayOriginateContent(zd *ZoneData) bool {
 }
 
 // markRelayCopyIfOriginationEnded marks a running tdns-agent zone's copy
-// unconfirmed when an options change (a config reload, or a zone type change)
-// ends its origination. The copy then holds content and a serial the zone
-// wrote itself, which a relay must not serve, and the upstream need not move
-// for a probe to see that. The next refresh with a usable SOA replaces it with
-// a full transfer (relayCopyNeedsTransfer), also when the forced refresh a
-// reload queues was skipped or failed. Any other change leaves the mark as it
-// is, so a confirmed relay copy is not transferred again at every reload.
-// wasOriginating is zoneMayOriginateContent before the change.
+// unconfirmed when a change ends its origination. The copy then holds content
+// and a serial the zone wrote itself, which a relay must not serve, and the
+// upstream need not move for a probe to see that. The next refresh with a
+// usable SOA replaces it with a full transfer (relayCopyNeedsTransfer), also
+// when the forced refresh a reload queues was skipped or failed. Any other
+// change leaves the mark as it is, so a confirmed relay copy is not
+// transferred again at every reload. A zone that has never published has no
+// copy of its own to replace.
+//
+// Called, under zd.mu, wherever a running zone's options or type are replaced:
+// ParseZones (a config reload swaps the options before it queues the
+// refresher), the refresh engine (options and type from a refresher), and
+// setRuntimeOptionLocked. wasOriginating is zoneMayOriginateContent before
+// the change.
 func (zd *ZoneData) markRelayCopyIfOriginationEnded(wasOriginating bool) {
-	if wasOriginating && Globals.App.Type == AppTypeAgent && !zoneMayOriginateContent(zd) {
+	if wasOriginating && Globals.App.Type == AppTypeAgent && zd.snapshot.Load() != nil &&
+		!zoneMayOriginateContent(zd) {
 		zd.relayCopyUnconfirmed.Store(true)
 		lg.Info("zone stopped originating content: its copy is replaced by a full transfer at the next refresh",
 			"zone", zd.ZoneName)
