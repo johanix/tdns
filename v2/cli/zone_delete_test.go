@@ -124,9 +124,31 @@ func TestZoneDeleteLinesWidth(t *testing.T) {
 			t.Errorf("%+v: the first line is not the verdict:\n%s", r, strings.Join(lines, "\n"))
 		}
 		for _, l := range lines {
-			if len(l) > zoneDeleteLineWidth {
+			// A command to copy stays whole (TestZoneDeleteCommandsStayWhole).
+			if len(l) > zoneDeleteLineWidth && !strings.HasPrefix(l, "  keystore ") {
 				t.Errorf("%+v: line of %d characters: %q", r, len(l), l)
 			}
+		}
+	}
+}
+
+// The commands that finish a failed key delete are printed whole, however
+// long the zone's name: a wrapped one would run without its zone.
+func TestZoneDeleteCommandsStayWhole(t *testing.T) {
+	zone := "a-rather-long-label.customer-zones.provisioning.example.com."
+	lines := zoneDeleteOutput(tdns.ZoneRemoval{Zone: zone, KeysError: "KeyDB.Begin timed out waiting"})
+	for _, want := range []string{
+		"  keystore dnssec clear --zone " + zone + " --force",
+		"  keystore sig0 delete --zone " + zone + " --keyid <keyid>",
+	} {
+		found := false
+		for _, l := range lines {
+			if l == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("no line %q in:\n%s", want, strings.Join(lines, "\n"))
 		}
 	}
 }
