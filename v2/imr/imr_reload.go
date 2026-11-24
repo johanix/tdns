@@ -51,6 +51,10 @@ type imrZoneTable struct {
 	forwards []*ForwardZone    // most-specific first (BuildForwards sorts)
 	stubs    []string          // canonical FQDNs, config order
 	stubFP   map[string]string // stub zone -> fingerprint of the applied config
+	// rootStub is the configured servers of an applied "." stub, nil when
+	// the root is not stubbed. Seeding the root from the hints replaces the
+	// servers under "."; keepRootStub puts these back.
+	rootStub []cache.AuthServer
 	// loadedAt is when this table was published. Reported by config status,
 	// so "did my reload actually reach this daemon" is a question the
 	// operator can answer without reading the log.
@@ -109,10 +113,26 @@ func (imr *Imr) attachCacheHooks() {
 
 // setZoneTable publishes a table directly. Init and tests only; a reload goes
 // through ReloadZones, which reconciles rather than replaces.
-func (imr *Imr) setZoneTable(forwards []*ForwardZone, stubs []string, stubFP map[string]string) {
+func (imr *Imr) setZoneTable(forwards []*ForwardZone, stubs []string, stubFP map[string]string, rootStub []cache.AuthServer) {
 	imr.zones.Store(&imrZoneTable{
-		forwards: forwards, stubs: stubs, stubFP: stubFP, loadedAt: time.Now(),
+		forwards: forwards, stubs: stubs, stubFP: stubFP, rootStub: rootStub, loadedAt: time.Now(),
 	})
+}
+
+// keepRootStub puts a configured "." stub back as the root's servers, after
+// something seeded the root from the hints: priming at Start, a re-prime once
+// the root NS has expired, priming when a reload removes a "." forward. The
+// hints replace the servers under ".", and the stub is what the configuration
+// says they are. Priming itself still asks the hints' servers, as it did when
+// the stubs were installed after it.
+func (imr *Imr) keepRootStub() {
+	servers := imr.zoneTable().rootStub
+	if len(servers) == 0 {
+		return
+	}
+	if err := imr.Cache.AddStub(".", servers); err != nil {
+		imr.lgImr().Error("could not put the root stub back after seeding the root from the hints", "err", err)
+	}
 }
 
 // ZoneReloadResult reports what an imrengine: reload actually changed, so
@@ -223,8 +243,18 @@ func (imr *Imr) ReloadZones(stubconf []StubConf, fwdconf []ForwardConf) (ZoneRel
 		}
 	}
 
+	// The root stub's servers as applied: the new ones, or the old ones
+	// when the new "." stub was refused above, or none.
+	var rootStub []cache.AuthServer
+	if fp, ok := appliedFP["."]; ok {
+		if fp == newFP["."] {
+			rootStub = newServers["."]
+		} else {
+			rootStub = old.rootStub
+		}
+	}
 	rootWasForwarded := imr.forwardZoneFor(".") != nil
-	imr.setZoneTable(newForwards, newStubs, appliedFP)
+	imr.setZoneTable(newForwards, newStubs, appliedFP, rootStub)
 	// RefreshRoot idles while "." is forwarded and primes when it no longer
 	// is; the reload only tells it that the answer has changed.
 	if (imr.forwardZoneFor(".") != nil) != rootWasForwarded {

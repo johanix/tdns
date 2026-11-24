@@ -129,7 +129,7 @@ func TestProbeCancellation(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddStub: %v", err)
 	}
-	imr.setZoneTable(imr.ForwardZones(), []string{"stub.example."}, nil)
+	imr.setZoneTable(imr.ForwardZones(), []string{"stub.example."}, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -203,7 +203,7 @@ func TestStubListStatusProbe(t *testing.T) {
 		FamilyTracker: cache.NewFamilyTracker(
 			10*time.Minute, 10*time.Minute, 30*time.Second, 5),
 	}
-	imr.setZoneTable(nil, []string{zone}, nil)
+	imr.setZoneTable(nil, []string{zone}, nil, nil)
 
 	// list: config view.
 	list := imr.StubZoneList()

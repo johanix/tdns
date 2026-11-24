@@ -412,11 +412,11 @@ func New(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 		}
 		lg.Error("forward config quarantined", "problem", d.String())
 	}
-	stubZones, stubFP, _ := canonicalStubs(lg, ic.Stubs)
+	stubZones, stubFP, stubServers := canonicalStubs(lg, ic.Stubs)
 	// Published before priming: PrimeWithHints resolves through the
 	// iterative path, and forwardZoneFor below has to see the table.
 	// stubFP is filled in as the stubs are actually applied, further down.
-	imr.setZoneTable(forwards, stubZones, map[string]string{})
+	imr.setZoneTable(forwards, stubZones, map[string]string{}, nil)
 	imr.bootConf = ic
 	imr.errorRegistry = errs
 	// After errorRegistry is set, or the aggregate has nowhere to go.
@@ -493,8 +493,13 @@ func New(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 			applied[zone] = stubFP[zone]
 		}
 		// Record what was actually applied, so the first reload can tell an
-		// untouched stub from an edited one.
-		imr.setZoneTable(forwards, stubZones, applied)
+		// untouched stub from an edited one, and the root stub's servers, so
+		// that priming at Start keeps them (keepRootStub).
+		var rootStub []cache.AuthServer
+		if _, ok := applied["."]; ok {
+			rootStub = stubServers["."]
+		}
+		imr.setZoneTable(forwards, stubZones, applied, rootStub)
 	}
 
 	return imr, nil
@@ -640,6 +645,7 @@ func (imr *Imr) primeFromHints(ctx context.Context) error {
 	if err := imr.Cache.PrimeWithHints(ctx, imr.bootConf.RootHints, imr.IterativeDNSQueryFetcher()); err != nil {
 		return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
 	}
+	imr.keepRootStub()
 	imr.PrimedVia = "hints+fetch"
 	imr.PrimedAt = time.Now()
 	return nil

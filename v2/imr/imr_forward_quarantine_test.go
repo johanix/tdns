@@ -89,7 +89,7 @@ func TestForwardQuarantineNotCarriedAcrossTrustADRemoval(t *testing.T) {
 	if len(diags) != 1 || !forwards[0].isQuarantined() {
 		t.Fatalf("setup: want a quarantined zone, got diags=%v", diags)
 	}
-	imr.setZoneTable(forwards, nil, map[string]string{})
+	imr.setZoneTable(forwards, nil, map[string]string{}, nil)
 
 	// The operator drops `trust-ad:` and reloads. Same upstream, same key.
 	if _, err := imr.ReloadZones(nil, []ForwardConf{
@@ -125,7 +125,7 @@ func TestForwardQuarantinedUpstreamIsNotAlsoUnreachable(t *testing.T) {
 	// Pretend the plaintext upstream had been failing before the config that
 	// quarantined it landed.
 	forwards[0].Upstreams[1].failing = true
-	imr.setZoneTable(forwards, nil, map[string]string{})
+	imr.setZoneTable(forwards, nil, map[string]string{}, nil)
 	imr.updateForwardUpstreamError()
 	imr.updateForwardQuarantineError()
 
@@ -155,7 +155,7 @@ func TestForwardQuarantineAggregateClears(t *testing.T) {
 	forwards, _ := BuildForwards([]ForwardConf{
 		{Zone: "a.example.", TrustAD: true, Upstreams: []UpstreamConf{{Addr: "192.0.2.1"}}},
 	})
-	imr.setZoneTable(forwards, nil, map[string]string{})
+	imr.setZoneTable(forwards, nil, map[string]string{}, nil)
 	imr.updateForwardQuarantineError()
 	if len(imr.errorRegistry.List()) == 0 {
 		t.Fatal("setup: no aggregate for a quarantined zone")
@@ -179,7 +179,7 @@ func TestForwardProbeReportsQuarantinedWithoutDialling(t *testing.T) {
 			{Addr: "not-an-ip.example.com", Transport: "dot"},
 		}},
 	})
-	imr.setZoneTable(forwards, nil, map[string]string{})
+	imr.setZoneTable(forwards, nil, map[string]string{}, nil)
 	imr.errorRegistry = newTestErrorSink()
 
 	results, err := imr.ProbeForwardUpstreamsReport(context.Background(), "")
@@ -282,7 +282,7 @@ func TestForwardQueryNeverDialsAQuarantinedUpstream(t *testing.T) {
 	// (probeForwardUpstream keeps its guard: separate function, separate
 	// filter, operator-triggered rather than the query hot path.)
 	imr := newReloadTestImr(t)
-	imr.setZoneTable(forwards, nil, nil)
+	imr.setZoneTable(forwards, nil, nil, nil)
 
 	_, _, _, _, err := imr.forwardQuery(context.Background(), "www.fwd.example.", dns.TypeA, fz, false, edns0.PrivacyNone)
 	if err != nil {

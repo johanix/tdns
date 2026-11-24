@@ -202,7 +202,7 @@ func TestHandleNegativeRefusesAnSOAFromAboveTheServersZone(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			imr, sign := validatorImr(t, parent)
 			if c.stub {
-				imr.setZoneTable(imr.ForwardZones(), []string{child}, nil)
+				imr.setZoneTable(imr.ForwardZones(), []string{child}, nil, nil)
 			}
 			ns := append(signedSet(sign, parent, soa), signedSet(sign, parent, apex)...)
 			o := handleDenial(t, imr, c.qname, dns.TypeA, denialReply(c.qname, dns.TypeA, dns.RcodeNameError, ns), c.serversZone)
