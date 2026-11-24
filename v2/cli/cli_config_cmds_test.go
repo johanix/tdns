@@ -3957,3 +3957,85 @@ func TestAddRefusesACertEntryWhoseCertificateDoesNotWork(t *testing.T) {
 		}
 	})
 }
+
+// An enrolment the daemon has in force, but its access file does not list
+// (a rollback took it out and its reload failed, or a `client remove
+// --no-reload` is pending), lasts until the daemon's next reload or start:
+// config add does not write a certificate entry on it. A new entry is
+// refused, its fix the enrolment; a key entry keeps its key (the daemon
+// takes it), and says why the certificate does not work.
+func TestAddNeedsTheEnrolmentInTheFile(t *testing.T) {
+	setup := func(t *testing.T) (*addEnv, string, string, string) {
+		env := newAddEnv(t)
+		pin := env.pin(t)
+		af := filepath.Join(env.dir, "access.yaml")
+		writeFile(t, af, "keyauth: true\nclients: []\n")
+		d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+		f := serveFakeDaemon(t, env.socket(), d, af)
+		f.mu.Lock()
+		f.policy = &tdns.ApiAccessStatus{File: af, KeyAuth: true, Clients: []tdns.ApiAccessStatusClient{{Name: "tester", Pin: pin, Role: "read-write"}}}
+		f.mu.Unlock()
+		return env, d, dpin, pin
+	}
+
+	t.Run("a new entry: refused", func(t *testing.T) {
+		env, d, _, pin := setup(t)
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, "takes your certificate now, but") || !strings.Contains(r.why, "does not list it") {
+			t.Fatalf("err = %v; want a refusal: the pin is not in the access file", err)
+		}
+		if fix := strings.Join(r.fix, "\n"); !strings.Contains(fix, "tdns-ncli auth client add tester --pin "+pin+" --role read-write") {
+			t.Errorf("fix:\n%s\nwant the enrolment", fix)
+		}
+		if _, err := os.Stat(env.cli); err == nil {
+			t.Error("the refused add wrote the CLI config")
+		}
+	})
+
+	t.Run("a key entry: kept, not switched", func(t *testing.T) {
+		env, d, dpin, _ := setup(t)
+		writeFile(t, env.cli, env.keyEntry(d, dpin))
+		res, err := env.add(t, d, nil)
+		if err != nil || !res.KeyKept || res.Switched {
+			t.Fatalf("%+v, %v; want the key kept", res, err)
+		}
+		if readBytes(t, env.cli) != env.keyEntry(d, dpin) {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+		}
+		if out := printed(res, false, env.cli); !strings.Contains(out, "keeps the API key") || !strings.Contains(out, "does not list it") {
+			t.Errorf("printed:\n%s", out)
+		}
+	})
+}
+
+// Between config add's plan and apply, the daemon config may come to say
+// something else about its API (its port moved, while config add waited for
+// the lock): nothing is enrolled for an entry made for the old one, and the
+// fix is to run config add again.
+func TestAddRechecksTheApiSettings(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	af := filepath.Join(env.dir, "access.yaml")
+	acc := "keyauth: true\nclients: []\n"
+	writeFile(t, af, acc)
+	d, _ := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	if c.state != certCanEnable || c.nameIt || !c.addPin {
+		t.Fatalf("plan %+v", c)
+	}
+	writeFile(t, d, strings.Replace(readBytes(t, d), env.at(8989), env.at(8990), 1))
+	if err := c.apply(context.Background()); err == nil || !strings.Contains(err.Error(), "other apiserver: settings") || !strings.Contains(err.Error(), "run config add again") {
+		t.Errorf("err = %v, want apply refused: the API settings changed", err)
+	}
+	if readBytes(t, af) != acc {
+		t.Errorf("the access file was written:\n%s", readBytes(t, af))
+	}
+	if fix := c.fixLines(); !reflect.DeepEqual(fix, []string{"run config add again."}) {
+		t.Errorf("fix %q, want to run config add again", fix)
+	}
+}

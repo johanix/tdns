@@ -497,9 +497,8 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 					info.ConfigFile, err))
 			}
 		} else if err := cert.confirm(o); err != nil {
-			if !cert.changed {
-				return nil, err
-			}
+			return nil, err
+		} else if !cert.usable() {
 			return nil, cert.refusal(fmt.Sprintf("not adding %s: a new entry uses your client certificate, and %s",
 				info.ConfigFile, cert.whyNot()))
 		}
@@ -807,8 +806,11 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 		case c.changesDaemon():
 			aerr = c.apply(o.Ctx)
 		case toCert:
-			if aerr = c.confirm(o); aerr != nil && !c.changed {
-				return nil, aerr
+			if err := c.confirm(o); err != nil {
+				return nil, err
+			}
+			if !c.usable() {
+				aerr = errors.New(c.whyNot())
 			}
 		}
 		switch {

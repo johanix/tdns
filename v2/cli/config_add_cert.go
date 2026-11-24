@@ -679,11 +679,19 @@ func (c *CertSetup) release() {
 // before it lets go of the locks. They stay held (c.held) until the caller
 // has written the CLI config (release), so none is made meanwhile either.
 //
-// When the plan no longer holds, c can no longer work as planned (changed;
-// its key verdict as found again), and confirm says why. A lock this
-// process may not take (not root: the lock file is the daemon's) is gone
-// without: such an add relies on what the daemon says over TCP, and cannot
-// enrol, nor put back, anything itself.
+// The enrolment must also be one that lasts: listed, enabled, in the access
+// file the daemon config names. One only in force (a rollback took it out
+// of the file and its reload failed, or a `client remove --no-reload` is
+// pending) is gone at the daemon's next reload or start, and the entry with
+// it.
+//
+// When the plan no longer holds, c can no longer work as planned (not
+// usable(): changed, or the enrolment not in the file, with its key verdict
+// as found again), and the caller does not write the entry; the error is
+// only for locks that could not be taken. A lock this process may not take
+// (not root: the lock file is the daemon's) is gone without, and so is a
+// file it may not read: such an add relies on what the daemon says over
+// TCP, and cannot enrol, nor put back, anything itself.
 func (c *CertSetup) confirm(o AddOptions) error {
 	if c.state != certWorks || c.held != nil {
 		return nil
@@ -719,10 +727,39 @@ func (c *CertSetup) confirm(o AddOptions) error {
 				c.timedOut = again.timedOut
 			}
 		}
-		return errors.New(c.why)
+		return nil
+	}
+	if why := again.notInFile(); why != "" {
+		unlock()
+		// Not listed where it lasts: the fix is to enrol it there.
+		c.cannot(why)
+		c.listedAs, c.listedRole, c.byDaemon = "", "", false
+		c.keyOff, c.keyWhy, c.keyUnknown = again.keyOff, again.keyWhy, again.keyUnknown
+		return nil
 	}
 	c.held = unlock
 	return nil
+}
+
+// notInFile says why the pin, which the daemon takes, is not enrolled in
+// the access file it reads at its next reload or start: the daemon config
+// names none, or the file does not list the pin, enabled. "" when it does,
+// or when this process may not read the file (not root).
+func (c *CertSetup) notInFile() string {
+	if !c.t.Configured {
+		return fmt.Sprintf("the daemon takes your certificate now, but %s names no access file, so it will not after its next start", c.t.DaemonConfig)
+	}
+	af, _, err := readAccessFile(c.t, false)
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return ""
+	case err != nil:
+		return fmt.Sprintf("the daemon takes your certificate, but %s", cannotRead(c.t.File, err))
+	}
+	if cl := clientByPin(af, c.pin); cl == nil || cl.Disabled {
+		return fmt.Sprintf("the daemon takes your certificate now, but %s does not list it, enabled, so it will not after its next reload or start", c.t.File)
+	}
+	return ""
 }
 
 // applySteps is apply's work. The caller holds the locks (lockPaths).
@@ -735,7 +772,15 @@ func (c *CertSetup) applySteps() error {
 		return err
 	}
 	if planned := map[bool]string{true: c.t.File, false: ""}[c.t.Configured]; now.AccessFile != planned {
+		c.changed = true
 		return fmt.Errorf("%s now names access-file %q, not %q as when config add read it; run config add again", c.t.DaemonConfig, now.AccessFile, planned)
+	}
+	// Nor anything else about its API, which the entry is made from: a
+	// daemon moved to another port meanwhile would be enrolled all the
+	// same, and the entry written for the old one.
+	if !sameApiApartFromAccess(c.info, now) {
+		c.changed = true
+		return fmt.Errorf("%s now has other apiserver: settings than when config add read it; run config add again", c.t.DaemonConfig)
 	}
 
 	// Again under the lock: a `client` edit may have changed it since.
