@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
@@ -201,6 +202,11 @@ func readExactWithContext(ctx context.Context, s *quic.Stream, buf []byte) error
 					// continue reading
 					continue
 				}
+			}
+			// As io.ReadFull: a stream that ends after some of the bytes but
+			// before all of them is an unexpected end, not a clean one.
+			if err == io.EOF && total > 0 {
+				return io.ErrUnexpectedEOF
 			}
 			return err
 		}

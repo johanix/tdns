@@ -13,6 +13,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
+	"io"
 	"math/big"
 	"net"
 	"sync"
@@ -211,10 +213,19 @@ func TestReadExactWithContextLastBytesArriveWithTheFIN(t *testing.T) {
 	}
 }
 
-// The stream ends before the buffer is full: that is still an error.
-func TestReadExactWithContextTruncatedStreamIsAnError(t *testing.T) {
+// The stream ends after some of the bytes but before all of them: an
+// unexpected end, as io.ReadFull reports it.
+func TestReadExactWithContextTruncatedStreamIsAnUnexpectedEOF(t *testing.T) {
 	_, err := readFromDoQStream(t, []byte("012"), 5)
-	if err == nil {
-		t.Fatal("readExactWithContext returned no error for a stream that ended 2 bytes short")
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("a stream that ended 2 bytes short: got %v, want io.ErrUnexpectedEOF", err)
+	}
+}
+
+// The stream ends before any byte: a clean end, as io.ReadFull reports it.
+func TestReadExactWithContextEmptyStreamIsEOF(t *testing.T) {
+	_, err := readFromDoQStream(t, nil, 2)
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("a stream that ended before any byte: got %v, want io.EOF", err)
 	}
 }
