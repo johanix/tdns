@@ -751,9 +751,13 @@ func unpinnableRefusal(info *DaemonApi, err error) addRefusal {
 // The client certificate: an entry that uses the API key is switched to it
 // (authmethod: certificate, its apikey: line gone) when the daemon accepts the
 // certificate, or config add can make it (planCert). Otherwise it keeps the
-// key, which works at both ends (changedSettings checked that the key is the
-// daemon's), and the result says what the certificate still needs. An entry
-// that already uses the certificate is kept working the same way.
+// key when that works at both ends (changedSettings checked that the key is
+// the daemon's, planCert that the daemon takes it), and the result says what
+// the certificate still needs; when the daemon does not take the key, or
+// whether it does cannot be told, the entry keeps it all the same and the
+// add is refused (keyRefusal). An entry that already uses the certificate is
+// kept working the same way, and refused when its certificate does not work
+// and cannot be made to: it has no key to fall back on.
 //
 // The entry keeps its other lines. The edit is made and checked before the
 // daemon's side is touched, so an entry config add cannot rewrite leaves the
@@ -827,13 +831,11 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 	}
 	// It keeps the key. Whether the daemon takes it does not hold back the
 	// pin, which the entry needs either way: an entry whose key the daemon
-	// refuses is refused below, after its pin is written.
+	// refuses, or may refuse (it could not be told), is refused below,
+	// after its pin is written.
 	keepsKey := !isCert && !toCert
 	if keepsKey {
 		res.KeyKept = true
-		if c.keyUnknown != "" && !c.keyOff {
-			res.Notes = append(res.Notes, fmt.Sprintf("whether the daemon takes that key could not be told: %s", c.keyUnknown))
-		}
 	}
 	if repin {
 		res.Pinned = true
@@ -855,10 +857,15 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 			return nil, err
 		}
 	}
-	if certFailed {
+	switch {
+	case certFailed:
 		return nil, certRefusal(e, c, repin)
-	}
-	if keepsKey && c.keyOff {
+	case isCert && !c.usable():
+		// A certificate entry whose certificate does not work, and config
+		// add cannot make it: no key to fall back on either.
+		return nil, c.refusal(fmt.Sprintf("%s: your certificate does not work here (%s)",
+			cannotAuthenticate(e, repin, o.DryRun), c.whyNot()))
+	case keepsKey && (c.keyOff || c.keyUnknown != ""):
 		return nil, keyRefusal(e, c, repin, o.DryRun)
 	}
 	return res, nil
@@ -909,12 +916,30 @@ func pinnedEntry(res *AddResult, e ApiDetails, info *DaemonApi) (ApiDetails, boo
 }
 
 // keyRefusal refuses known entry e, which keeps the API key because the
-// certificate does not work, when the daemon does not take that key either:
-// the entry cannot authenticate. Its pin, which config add has written
-// (repinned) all the same, is said first.
+// certificate does not work, when the daemon does not take that key either
+// (keyOff: the entry cannot authenticate), or whether it does could not be
+// told (keyUnknown: the entry keeps its key, but that it works is not
+// known). Its pin, which config add has written (repinned) all the same, is
+// said first.
 func keyRefusal(e ApiDetails, c *CertSetup, repinned, dryRun bool) addRefusal {
-	return c.refusal(fmt.Sprintf("%s: the daemon does not take its API key (%s), and your certificate does not work here (%s)",
-		cannotAuthenticate(e, repinned, dryRun), c.keyWhy, c.whyNot()))
+	if c.keyOff {
+		return c.refusal(fmt.Sprintf("%s: the daemon does not take its API key (%s), and your certificate does not work here (%s)",
+			cannotAuthenticate(e, repinned, dryRun), c.keyWhy, c.whyNot()))
+	}
+	lead := fmt.Sprintf("entry %q keeps its API key", e.Name)
+	switch {
+	case repinned && dryRun:
+		lead = fmt.Sprintf("entry %q would be re-pinned and keep its API key", e.Name)
+	case repinned:
+		lead = fmt.Sprintf("entry %q is re-pinned and keeps its API key", e.Name)
+	}
+	if c.keyUnknown == c.whyNot() {
+		// One reason for both, said once.
+		return c.refusal(fmt.Sprintf("%s, but whether the daemon takes it, or your certificate, cannot be told (%s)",
+			lead, c.keyUnknown))
+	}
+	return c.refusal(fmt.Sprintf("%s, but whether the daemon takes it cannot be told (%s), and your certificate does not work here (%s)",
+		lead, c.keyUnknown, c.whyNot()))
 }
 
 // certRefusal refuses known entry e, which uses the certificate, when

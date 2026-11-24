@@ -2377,8 +2377,9 @@ func (e *addEnv) keyEntry(d, dpin string) string {
 // out whatever becomes of the certificate: with a client pair that cannot be
 // used, and when the entry cannot be rewritten for the certificate. When it
 // cannot be found out (the access file unreadable, the daemon not answering)
-// the entry keeps the key, and the result says so. An access file the daemon
-// config does not name says nothing about the key.
+// the entry keeps the key, as it is, but the add is refused: that the key
+// works is not known. An access file the daemon config does not name says
+// nothing about the key.
 func TestAddKeyFallbackNeedsAKeyTheDaemonTakes(t *testing.T) {
 	t.Run("keyauth off, the pair unusable: refused", func(t *testing.T) {
 		env := newAddEnv(t)
@@ -2398,7 +2399,7 @@ func TestAddKeyFallbackNeedsAKeyTheDaemonTakes(t *testing.T) {
 		}
 	})
 
-	t.Run("the access file unreadable, the daemon not answering: kept, said", func(t *testing.T) {
+	t.Run("the access file unreadable, the daemon not answering: refused, kept", func(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root reads anything")
 		}
@@ -2409,9 +2410,13 @@ func TestAddKeyFallbackNeedsAKeyTheDaemonTakes(t *testing.T) {
 		os.Chmod(af, 0)
 		d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
 		writeFile(t, env.cli, env.keyEntry(d, dpin))
-		res, err := env.add(t, d, nil)
-		if err != nil || !res.KeyKept || !strings.Contains(strings.Join(res.Notes, " "), "could not be told") {
-			t.Errorf("%+v, %v; want the key kept, with a note that its acceptance could not be told", res, err)
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), `entry "tdns-auth" keeps its API key, but whether the daemon takes it`) {
+			t.Errorf("err = %v, want a refusal: the key's acceptance could not be told", err)
+		}
+		if readBytes(t, env.cli) != env.keyEntry(d, dpin) {
+			t.Error("the CLI config changed")
 		}
 	})
 
@@ -2960,9 +2965,10 @@ func TestRollbackHoldsTheFileLocks(t *testing.T) {
 // A socket that answers for another daemon config is not this daemon, told
 // apart from a socket config add may not open (asked over TCP then): neither
 // that daemon nor the access file is taken, though the file lists your pin.
-// A key entry keeps its key, saying the daemon could not be told, and is not
-// switched to the certificate; a new entry is refused. Nothing is written,
-// and nothing reloaded.
+// A key entry keeps its key as it is, and is not switched to the
+// certificate, but the add is refused: whether the daemon takes the key
+// could not be told. A new entry is refused. Nothing is written, and
+// nothing reloaded.
 func TestAddSocketRunningAnotherConfig(t *testing.T) {
 	type world struct {
 		env         *addEnv
@@ -2993,21 +2999,20 @@ func TestAddSocketRunningAnotherConfig(t *testing.T) {
 		}
 	}
 
-	t.Run("a key entry: kept, not switched", func(t *testing.T) {
+	t.Run("a key entry: kept as it is, not switched, refused", func(t *testing.T) {
 		w := setup(t)
 		writeFile(t, w.env.cli, w.env.keyEntry(w.d, w.dpin))
-		res, err := w.env.add(t, w.d, nil)
-		if err != nil || !res.KeyKept || res.Switched || res.Cert == nil || res.Cert.state != certCannot || res.Cert.listedAs != "" {
-			t.Fatalf("%+v, %v; want the key kept, the certificate not taken", res, err)
+		_, err := w.env.add(t, w.d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), "keeps its API key, but whether the daemon takes it, or your certificate, cannot be told") ||
+			!strings.Contains(err.Error(), "runs /etc/tdns/other.yaml") || strings.Contains(err.Error(), "lists your certificate") {
+			t.Fatalf("err = %v; want a refusal: neither the key nor the certificate can be told to work", err)
+		}
+		if n := strings.Count(r.why, "runs /etc/tdns/other.yaml"); n != 1 {
+			t.Errorf("the reason is said %d times: %s", n, r.why)
 		}
 		if readBytes(t, w.env.cli) != w.env.keyEntry(w.d, w.dpin) {
 			t.Errorf("the CLI config changed:\n%s", readBytes(t, w.env.cli))
-		}
-		if notes := strings.Join(res.Notes, " "); !strings.Contains(notes, "could not be told") || !strings.Contains(notes, "runs /etc/tdns/other.yaml") {
-			t.Errorf("notes %q, want the key's acceptance not told, for the other config", notes)
-		}
-		if out := printed(res, false, w.env.cli); !strings.Contains(out, "keeps the API key") || !strings.Contains(out, "runs /etc/tdns/other.yaml") || strings.Contains(out, "lists your certificate") {
-			t.Errorf("printed:\n%s", out)
 		}
 		unchanged(t, w)
 	})
@@ -3049,21 +3054,17 @@ func TestAddSocketRunningAnotherConfig(t *testing.T) {
 		t.Run(fmt.Sprintf("a key entry, dry run %v: the fix", dry), func(t *testing.T) {
 			w := setup(t)
 			writeFile(t, w.env.cli, w.env.keyEntry(w.d, w.dpin))
-			res, err := w.env.add(t, w.d, func(o *AddOptions) { o.DryRun = dry })
-			if err != nil || res.Cert == nil {
-				t.Fatalf("%+v, %v", res, err)
+			_, err := w.env.add(t, w.d, func(o *AddOptions) { o.DryRun = dry })
+			var r addRefusal
+			if !errors.As(err, &r) {
+				t.Fatalf("err = %v, want a refusal", err)
 			}
-			want := fixFor(w)
-			if got := res.Cert.fixLines(); !reflect.DeepEqual(got, want) {
-				t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			if want := fixFor(w); !reflect.DeepEqual(r.fix, want) {
+				t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(r.fix, "\n"), strings.Join(want, "\n"))
 			}
 			var sb strings.Builder
-			printAddResult(&sb, res, dry, w.env.cli)
-			out := sb.String()
-			if !strings.Contains(flat(out), "To use the certificate instead, "+flat(strings.Join(want, " "))) {
-				t.Errorf("printed:\n%s", out)
-			}
-			noEnrol(t, out)
+			printRefusal(&sb, r)
+			noEnrol(t, sb.String())
 			unchanged(t, w)
 		})
 		t.Run(fmt.Sprintf("a new entry, dry run %v: the fix", dry), func(t *testing.T) {
@@ -3499,8 +3500,9 @@ func tcpKeyEntry(d, addr, dpin string) string {
 // serves its TCP API all the same, with the policy it loaded, not the one
 // on disk. config add asks it over TCP, as when its socket is not ours to
 // open; the access file decides only when nothing answers there either. A
-// TCP API that neither refuses nor answers leaves the daemon unknown, and
-// the file is not taken for its policy.
+// TCP API that neither refuses nor answers leaves the daemon unknown: the
+// file is not taken for its policy, and a key entry is refused, its key
+// kept as it is.
 func TestAddAsksTCPWhenNothingAnswersOnTheSocket(t *testing.T) {
 	// The pin is enrolled in the access file on disk; whether the daemon
 	// that runs takes it is enrolled (the fake's own policy).
@@ -3578,9 +3580,9 @@ func TestAddAsksTCPWhenNothingAnswersOnTheSocket(t *testing.T) {
 		env, d := world(t, ln.Addr().String(), certFile)
 		key := tcpKeyEntry(d, ln.Addr().String(), tdns.SPKISHA256(srv.Certificate()))
 		writeFile(t, env.cli, key)
-		res, err := env.add(t, d, nil)
-		if err != nil || !res.KeyKept || res.Switched || !strings.Contains(strings.Join(res.Notes, " "), "could not be told") {
-			t.Fatalf("%+v, %v; want the key kept, its acceptance not told", res, err)
+		var r addRefusal
+		if _, err := env.add(t, d, nil); !errors.As(err, &r) || !strings.Contains(err.Error(), "keeps its API key, but whether the daemon takes it") || !strings.Contains(err.Error(), "cannot be asked") {
+			t.Fatalf("err = %v; want a refusal, the key kept: its acceptance not told", err)
 		}
 		if readBytes(t, env.cli) != key {
 			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
@@ -3896,6 +3898,62 @@ func TestAnotherAddWaitsForAnEnrolmentInFlight(t *testing.T) {
 		defer f.mu.Unlock()
 		if f.reloads != 2 || len(free) != 0 {
 			t.Errorf("%d reloads, the lock free during %v; want the rollback's reload under the lock", f.reloads, free)
+		}
+	})
+}
+
+// ---------------------------------------- review round 3 (CodeRabbit, 11-24)
+
+// An entry that uses the certificate already, which does not work and which
+// config add cannot make work, has no key to fall back on: it is refused,
+// after its pin is written, saying why and what fixes it. One whose
+// certificate works is left as it is (TestAddEnrollsTheCertificate).
+func TestAddRefusesACertEntryWhoseCertificateDoesNotWork(t *testing.T) {
+	certEntry := func(env *addEnv, d, pins string) string {
+		return "apiservers:\n   - name: tdns-auth\n     baseurl: " + env.url(8989) + "\n     authmethod: certificate\n" + pins + "     config-file: " + d + "\n"
+	}
+
+	t.Run("listed disabled: re-pinned, refused", func(t *testing.T) {
+		env := newAddEnv(t)
+		pin := env.pin(t)
+		af := filepath.Join(env.dir, "access.yaml")
+		acc := "keyauth: true\nclients:\n   - name: laptop\n     pin: " + pin + "\n     role: read-write\n     disabled: true\n"
+		writeFile(t, af, acc)
+		d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+		writeFile(t, env.cli, certEntry(env, d, "     rootca: insecure\n"))
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, `entry "tdns-auth" is re-pinned, but it cannot authenticate: your certificate does not work here`) ||
+			!strings.Contains(r.why, "disabled") || !strings.Contains(strings.Join(r.fix, "\n"), "tdns-ncli auth client enable laptop") {
+			t.Fatalf("err = %v; want a refusal naming the disabled pin, with client enable", err)
+		}
+		if got := env.entries(t)[0]; got.AuthMethod != "certificate" || got.TLSAuth != "pin" || !reflect.DeepEqual(got.Pins, []string{dpin}) {
+			t.Errorf("entry %+v; want it re-pinned all the same", got)
+		}
+		if readBytes(t, af) != acc {
+			t.Error("the access file changed")
+		}
+	})
+
+	t.Run("your pair unusable: refused, nothing changed", func(t *testing.T) {
+		env := newAddEnv(t)
+		env.pin(t)
+		os.Remove(env.key)
+		d, dpin := env.certDaemon(t, env.dir, "")
+		entry := certEntry(env, d, "     tlsauth: pin\n     pins: [ \""+dpin+"\" ]\n")
+		writeFile(t, env.cli, entry)
+		for _, dry := range []bool{true, false} {
+			_, err := env.add(t, d, func(o *AddOptions) { o.DryRun = dry })
+			var r addRefusal
+			if !errors.As(err, &r) || !strings.Contains(r.why, `entry "tdns-auth" cannot authenticate: your certificate does not work here`) || !strings.Contains(r.why, "not a usable pair") {
+				t.Errorf("dry run %v: err = %v; want a refusal naming your pair", dry, err)
+			}
+		}
+		if readBytes(t, env.cli) != entry {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+		}
+		if _, err := os.Stat(accessFileOf(d)); err == nil {
+			t.Error("an access file was written")
 		}
 	})
 }
