@@ -2017,7 +2017,8 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 		return UpdatePolicy{}, fmt.Errorf("allow-child-updates requires delegationbackend to be configured (e.g. 'delegationbackend: direct')")
 	}
 
-	// Conflict resolution: exactly one of the two is always set on the zone.
+	// Conflict resolution: on a zone that may originate content, exactly one of
+	// the two is always set.
 	//
 	// Setting both is a contradiction, not a preference order, so it is a hard
 	// config error rather than a silent pick.
@@ -2029,12 +2030,28 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 	// Setting it once means the merge faces a question with two answers rather
 	// than three, and `zone status` reports what the zone actually runs under
 	// instead of a blank the operator has to interpret.
+	//
+	// Not on a secondary that may not originate content. The policy decides a
+	// contest between the zone file and the journal of THIS server's changes,
+	// and such a secondary makes none: it serves what upstream sent. Giving it
+	// db-wins made `zone list` show a mirror as having a policy for edits it
+	// cannot have, and persisted the option into its config. Only a zone known
+	// to be a secondary is treated so; an unset type keeps the default.
+	// on-conflict-zonefile-wins on such a secondary has already been stripped,
+	// with a warning, by normalizeOptionsForRole, which runs first.
 	if options[OptOnConflictDBWins] && options[OptOnConflictZonefileWins] {
 		return UpdatePolicy{}, fmt.Errorf(
 			"zone options on-conflict-db-wins and on-conflict-zonefile-wins are mutually exclusive;" +
 				" set one or neither (neither means on-conflict-db-wins)")
 	}
-	if !options[OptOnConflictZonefileWins] {
+	ztype := Primary
+	if strings.EqualFold(zconf.Type, "secondary") {
+		ztype = Secondary
+	}
+	switch {
+	case !optionsMayOriginate(Globals.App.Type, ztype, options):
+		delete(options, OptOnConflictDBWins)
+	case !options[OptOnConflictZonefileWins]:
 		options[OptOnConflictDBWins] = true
 	}
 
