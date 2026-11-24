@@ -9,6 +9,7 @@
 package tdns
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -119,11 +120,80 @@ func EnsureDefaultApiCert(cfgfile string, addresses []string) (pin string, creat
 	case !errors.Is(kerr, os.ErrNotExist):
 		return "", false, kerr
 	}
-	pin, err = writeApiCert(cert, key, addresses)
+	p, err := NewDefaultApiCert(cfgfile, addresses)
 	if err != nil {
 		return "", false, err
 	}
-	return pin, true, nil
+	if err := p.Write(); err != nil {
+		return "", false, err
+	}
+	return p.Pin, true, nil
+}
+
+// DefaultApiCert is a default API pair made in memory (NewDefaultApiCert)
+// and not yet written: its pin is known before anything is on disk, so a
+// caller can pin it first and write it only once the rest of its work will
+// succeed (tdns-ncli config add, which writes no pair for an entry it does
+// not write).
+type DefaultApiCert struct {
+	Cert, Key string // where it goes (ApiCertPaths)
+	Pin       string // its key's pin
+	leaf      *PKICert
+}
+
+// NewDefaultApiCert makes the default API pair of the daemon whose config
+// file is cfgfile, its certificate naming addresses (apiCertSANs), in
+// memory. Nothing is written; whether the files are there is not looked
+// at (EnsureDefaultApiCert does that).
+func NewDefaultApiCert(cfgfile string, addresses []string) (*DefaultApiCert, error) {
+	cert, key := ApiCertPaths(cfgfile)
+	if cert == "" {
+		return nil, errors.New("no config file to name the default API certificate after")
+	}
+	leaf, err := apiCertLeaf(cert, addresses)
+	if err != nil {
+		return nil, err
+	}
+	return &DefaultApiCert{Cert: cert, Key: key, Pin: SPKISHA256(leaf.Cert), leaf: leaf}, nil
+}
+
+// Write writes the pair: the key (mode 0600) and then the certificate, each
+// only if it is not there (one made meanwhile, by the daemon's first start
+// say, is an error wrapping os.ErrExist, and nothing of this pair is left).
+func (p *DefaultApiCert) Write() error {
+	if err := os.MkdirAll(filepath.Dir(p.Cert), 0o755); err != nil {
+		return err
+	}
+	if err := writeNewFile(p.Key, p.leaf.KeyPEM, 0o600); err != nil {
+		return err
+	}
+	if err := writeNewFile(p.Cert, p.leaf.CertPEM, 0o644); err != nil {
+		os.Remove(p.Key)
+		return err
+	}
+	return nil
+}
+
+// Remove takes out the pair Write wrote, each file only while it still
+// holds what Write wrote into it, for a caller whose work failed after it.
+func (p *DefaultApiCert) Remove() error {
+	var errs []error
+	for _, f := range []struct {
+		path string
+		data []byte
+	}{{p.Cert, p.leaf.CertPEM}, {p.Key, p.leaf.KeyPEM}} {
+		cur, err := os.ReadFile(f.path)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			errs = append(errs, err)
+		case bytes.Equal(cur, f.data):
+			if err := os.Remove(f.path); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // HalfApiCertPairError is the refusal of one file of the default API pair
@@ -145,37 +215,19 @@ func (a *ApiServerConf) LookupCertDefaults(cfgfile string) {
 	a.applyCertDefaults(cfgfile, false)
 }
 
-// writeApiCert writes a self-signed API certificate and its key to cert and
-// key, which must not exist, and returns the key's pin. The certificate names
-// this host, localhost, loopback and the API's listen addresses. The key is
-// mode 0600; neither file is ever overwritten, and a key written without its
-// certificate is removed again.
-func writeApiCert(cert, key string, addresses []string) (string, error) {
+// apiCertLeaf is a self-signed API certificate for cert's name, naming this
+// host, localhost, loopback and the API's listen addresses (apiCertSANs).
+func apiCertLeaf(cert string, addresses []string) (*PKICert, error) {
 	hostname, _ := os.Hostname()
-	name := strings.TrimSuffix(filepath.Base(cert), ".crt")
 	dnsNames, ips := apiCertSANs(hostname, addresses)
-	leaf, err := CreateSelfSignedLeaf(LeafOptions{
-		Name:     name,
+	return CreateSelfSignedLeaf(LeafOptions{
+		Name:     strings.TrimSuffix(filepath.Base(cert), ".crt"),
 		DNSNames: dnsNames,
 		IPs:      ips,
 		Server:   true,
 		Validity: apiCertValidity,
 		Alg:      CertAlgECDSAP256, // what every TLS client takes
 	})
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(filepath.Dir(cert), 0o755); err != nil {
-		return "", err
-	}
-	if err := writeNewFile(key, leaf.KeyPEM, 0o600); err != nil {
-		return "", err
-	}
-	if err := writeNewFile(cert, leaf.CertPEM, 0o644); err != nil {
-		os.Remove(key)
-		return "", err
-	}
-	return SPKISHA256(leaf.Cert), nil
 }
 
 // writeNewFile writes data to path, which must not exist.

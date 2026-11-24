@@ -456,9 +456,10 @@ func apiTCPErrorText(err error) string {
 // being closed (an access file or the shutdown closes it, which is
 // ErrServerClosed). It closes the socket first (ServeTLS returns before Serve
 // would have when the certificate does not load), so that once s is no longer
-// listed as listening, nothing answers there; then it is reported failed.
-// srvs is replaced, not changed in place: APIdispatcher's shutdown goroutine
-// reads the slice it registered.
+// listed as listening, nothing answers there; then it is reported failed,
+// and the shutdown (shutdownApiTCPServers) leaves it alone. srvs is
+// replaced, not changed in place, so that a slice read from it under the
+// lock stays as it was read.
 func apiTCPServeFailed(s apiTCPServer, err error) {
 	if s.ln != nil {
 		s.ln.Close()
@@ -663,14 +664,30 @@ func APIdispatcher(conf *Config, router *mux.Router, done <-chan struct{}) error
 	go func() {
 		<-done
 		lgApi.Info("shutting down API servers")
-		for _, s := range servers {
-			if err := s.srv.Shutdown(context.Background()); err != nil {
-				lgApi.Error("API server shutdown failed", "err", err)
-			}
-		}
+		shutdownApiTCPServers(servers)
 	}()
 
 	return nil
+}
+
+// shutdownApiTCPServers shuts down those of servers (one dispatcher's TCP
+// servers) still listed as listening: one that stopped by itself
+// (apiTCPServeFailed) is closed already, and its closing is not a failed
+// shutdown, nor is a server's closing meanwhile (ErrServerClosed).
+func shutdownApiTCPServers(servers []apiTCPServer) {
+	apiTCPServers.Lock()
+	var live []apiTCPServer
+	for _, s := range servers {
+		if slices.ContainsFunc(apiTCPServers.srvs, func(r apiTCPServer) bool { return r.srv == s.srv }) {
+			live = append(live, s)
+		}
+	}
+	apiTCPServers.Unlock()
+	for _, s := range live {
+		if err := s.srv.Shutdown(context.Background()); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			lgApi.Error("API server shutdown failed", "address", s.srv.Addr, "err", err)
+		}
+	}
 }
 
 // APIdispatcherNG differs from APIdispatcher in that it allows for a different
