@@ -778,8 +778,17 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 		return nil, err
 	}
 
+	// A certificate entry has no key to fall back on: when setting up the
+	// certificate fails, it cannot authenticate, and it is refused below
+	// (certRefusal), after its pin is written, as a key entry whose key the
+	// daemon refuses is.
+	certFailed := false
 	if !o.DryRun && res.Cert != nil && c.changesDaemon() && (isCert || toCert) {
-		if aerr := c.apply(o.Ctx); aerr != nil && toCert {
+		switch aerr := c.apply(o.Ctx); {
+		case aerr == nil:
+		case isCert:
+			certFailed = true
+		default:
 			// The key, then, as the daemon takes it now: after a reload,
 			// the rollback reloaded it with the files put back, which may
 			// have put in force a key setting planCert did not find in
@@ -822,6 +831,9 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 			}
 			return nil, err
 		}
+	}
+	if certFailed {
+		return nil, certRefusal(e, c, repin)
 	}
 	if keepsKey && c.keyOff {
 		return nil, keyRefusal(e, c, repin, o.DryRun)
@@ -878,15 +890,30 @@ func pinnedEntry(res *AddResult, e ApiDetails, info *DaemonApi) (ApiDetails, boo
 // the entry cannot authenticate. Its pin, which config add has written
 // (repinned) all the same, is said first.
 func keyRefusal(e ApiDetails, c *CertSetup, repinned, dryRun bool) addRefusal {
-	lead := fmt.Sprintf("entry %q cannot authenticate", e.Name)
+	return c.refusal(fmt.Sprintf("%s: the daemon does not take its API key (%s), and your certificate does not work here (%s)",
+		cannotAuthenticate(e, repinned, dryRun), c.keyWhy, c.whyNot()))
+}
+
+// certRefusal refuses known entry e, which uses the certificate, when
+// setting it up on the daemon failed (apply, which put back what it had
+// changed, as its error says): with no key to fall back on, the entry cannot
+// authenticate. Its pin, which config add has written (repinned) all the
+// same, is said first.
+func certRefusal(e ApiDetails, c *CertSetup, repinned bool) addRefusal {
+	return c.refusal(fmt.Sprintf("%s: setting up your client certificate on the daemon failed: %v",
+		cannotAuthenticate(e, repinned, false), c.failed))
+}
+
+// cannotAuthenticate is how the refusal of known entry e begins: it cannot
+// authenticate, and, when it was (or would be) re-pinned, that it was.
+func cannotAuthenticate(e ApiDetails, repinned, dryRun bool) string {
 	switch {
 	case repinned && dryRun:
-		lead = fmt.Sprintf("entry %q would be re-pinned, but it cannot authenticate", e.Name)
+		return fmt.Sprintf("entry %q would be re-pinned, but it cannot authenticate", e.Name)
 	case repinned:
-		lead = fmt.Sprintf("entry %q is re-pinned, but it cannot authenticate", e.Name)
+		return fmt.Sprintf("entry %q is re-pinned, but it cannot authenticate", e.Name)
 	}
-	return c.refusal(fmt.Sprintf("%s: the daemon does not take its API key (%s), and your certificate does not work here (%s)",
-		lead, c.keyWhy, c.whyNot()))
+	return fmt.Sprintf("entry %q cannot authenticate", e.Name)
 }
 
 // knownEdit prepares the rewrite of e, the entry for this daemon, as up with

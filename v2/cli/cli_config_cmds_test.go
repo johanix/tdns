@@ -3461,3 +3461,37 @@ func TestAddValidatesTheAccessFileItReliesOn(t *testing.T) {
 		}
 	})
 }
+
+// An entry that uses the certificate already has no key to fall back on:
+// when setting up the certificate on the daemon fails (here the reload does
+// not put the pin in force), config add refuses, saying the daemon's side
+// was put back, rather than succeed with an entry that cannot authenticate.
+// Its pin is written all the same, as for a key entry whose key is refused.
+func TestAddRefusesACertEntryItCannotSetUp(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	d, dpin := env.certDaemon(t, env.dir, "")
+	cfg := readBytes(t, d)
+	f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+	f.mu.Lock()
+	f.forget = true
+	f.mu.Unlock()
+	writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     authmethod: certificate\n     rootca: insecure\n     config-file: "+d+"\n")
+
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) ||
+		!strings.Contains(err.Error(), `entry "tdns-auth" is re-pinned, but it cannot authenticate: setting up your client certificate on the daemon failed`) ||
+		!strings.Contains(err.Error(), "does not have your certificate") || !strings.Contains(err.Error(), "the files are as they were") {
+		t.Errorf("err = %v, want a refusal saying the setup failed and was put back", err)
+	}
+	if got := env.entries(t)[0]; got.AuthMethod != "certificate" || got.TLSAuth != "pin" || !reflect.DeepEqual(got.Pins, []string{dpin}) {
+		t.Errorf("entry %+v; want it re-pinned all the same, on the certificate", got)
+	}
+	if readBytes(t, d) != cfg {
+		t.Errorf("the daemon config was not put back:\n%s", readBytes(t, d))
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("the access file apply created was not removed")
+	}
+}
