@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	imrcore "github.com/johanix/tdns/v2/imr"
 	"github.com/miekg/dns"
@@ -86,6 +87,14 @@ func (imr *Imr) TransportSignalRRType() uint16 { return imr.core().TransportSign
 
 func (imr *Imr) TransportSignalCached(owner string) bool {
 	return imr.core().TransportSignalCached(owner)
+}
+
+func (imr *Imr) ForwardZones() []*ForwardZone { return imr.core().ForwardZones() }
+
+func (imr *Imr) StubZones() []string { return imr.core().StubZones() }
+
+func (imr *Imr) RedirectTargetServers() []*cache.AuthServer {
+	return imr.core().RedirectTargetServers()
 }
 
 // The resolver's names, as they have always been in this package.
