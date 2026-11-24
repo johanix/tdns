@@ -426,10 +426,14 @@ config_add_cert() {
 	grep -q 'authmethod: *certificate' "$f" && grep -q 'lists your certificate' "$o" && [ "$(grep -c 'pin:' "$A")" = 1 ]
 	judge S7c "config add again with the same pair: the pin is already listed and is not added twice" $? "$o"
 	# The user cannot write the daemon's side: a new entry is refused, with the
-	# client add line as the fix. Root runs that line; config add then works.
+	# client add command as the fix. Root runs that command; config add then
+	# works. The command may span lines, each but the last ending in a
+	# backslash (#1184 from 62c74645 on: --daemon-config): they are joined.
 	f=$RIG/home/add-user.yaml; addfile "$f" user
 	o=$(out S7-add-user); ncli_user home/add-user config add "$RIG/auth/tdns-auth.yaml" > "$o" 2>&1
-	fix=$(sed -n 's/^ *\(tdns-ncli auth client add .* --role read-write\) *$/\1/p' "$o" | head -1)
+	fix=$(awk '/tdns-ncli auth client add / {f = 1} f {sub(/^ */, ""); s = s (s == "" ? "" : " ") $0; if ($0 !~ /\\$/) exit}
+		END {gsub(/ *\\ +/, " ", s); sub(/ *\\$/, "", s); print s}' "$o")
+	case "$fix" in *" --role read-write"*) ;; *) fix="" ;; esac
 	[ "$(rc_of "$o")" != 0 ] && [ -n "$fix" ] && ! grep -q 'apiservers' "$f"
 	judge S7d "config add as a non-root user: refused (cannot write the daemon's side), the client add line as the fix, no entry written" $? "$o"
 	o2=$(out S7-add-user-use)
