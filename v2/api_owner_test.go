@@ -715,3 +715,117 @@ func TestLoadRepersistNeverOverwritesALaterWrite(t *testing.T) {
 		t.Errorf("API owner on disk %q, want cert:other", got)
 	}
 }
+
+// The same under concurrency: an API write started after the load read the
+// file races the load's rewrite. Whichever takes the lock first, the file
+// ends with the API write's owner: the rewrite either runs first and is
+// overwritten, or runs second and sees the newer write and skips.
+func TestLoadRepersistRacesAnApiWrite(t *testing.T) {
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, _ := newTestConfigForCores(t)
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic-zones.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	file := "zones:\n  - name: dyn.example.\n    type: secondary\n    store: map\n    apimanaged: true\n" +
+		"    api-owner: api\n    primaries:\n      - addr: 198.51.100.1:53\n        key: NOKEY\n"
+	for i := range 50 {
+		if err := os.WriteFile(conf.DynamicZones.ConfigFile, []byte(file), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		read, err := conf.loadDynamicConfigFile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		api := append([]ZoneConf(nil), read.Zones...)
+		api[0].ApiOwner = "cert:provisioner"
+		done := make(chan error, 2)
+		go func() { done <- conf.writeDynamicConfigFile(api) }()
+		go func() { _, err := conf.repersistDynamicConfig(read); done <- err }()
+		for range 2 {
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		}
+		cf, err := conf.loadDynamicConfigFile()
+		if err != nil || len(cf.Zones) != 1 || cf.Zones[0].ApiOwner != "cert:provisioner" {
+			t.Fatalf("round %d: the file ends with %+v (%v), want the API write's cert:provisioner", i, cf, err)
+		}
+	}
+}
+
+// The legacy keys: migration rewrites the file from the load's snapshot
+// too: an API write made since wins (it already dropped the keys: block),
+// the keys are still migrated, and a load whose own migration wrote the file
+// can still normalize it afterwards.
+func TestTsigMigrationNeverOverwritesALaterWrite(t *testing.T) {
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, _ := newTestConfigForCores(t)
+	conf.Internal.KeyDB = newTestKeyDB(t)
+	conf.Internal.TsigKeyStore = NewTsigKeyStore()
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic-zones.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	file := "zones:\n  - name: dyn.example.\n    type: secondary\n    store: map\n    apimanaged: true\n" +
+		"    api-owner: api\n    primaries:\n      - addr: 198.51.100.1:53\n        key: NOKEY\n" +
+		"keys:\n  tsig:\n    - name: legacy.\n      algorithm: hmac-sha256\n      secret: " + b64Secret16 + "\n"
+	reset := func() {
+		if err := os.WriteFile(conf.DynamicZones.ConfigFile, []byte(file), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	onDisk := func() (string, string) {
+		data, err := os.ReadFile(conf.DynamicZones.ConfigFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cf, err := conf.loadDynamicConfigFile()
+		if err != nil || len(cf.Zones) != 1 {
+			t.Fatalf("reading the dynamic config: %v, %+v", err, cf)
+		}
+		return cf.Zones[0].ApiOwner, string(data)
+	}
+
+	reset()
+	read, err := conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := append([]ZoneConf(nil), read.Zones...)
+	api[0].ApiOwner = "cert:provisioner"
+	if err := conf.writeDynamicConfigFile(api); err != nil {
+		t.Fatal(err)
+	}
+	if err := conf.migrateDynamicConfigTsigKeys(read); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	owner, data := onDisk()
+	if owner != "cert:provisioner" || strings.Contains(data, "\nkeys:") {
+		t.Errorf("after a migration that followed an API write: owner %q, file:\n%s", owner, data)
+	}
+	if !conf.Internal.TsigKeyStore.Has("legacy.") {
+		t.Error("the legacy key was not migrated")
+	}
+
+	// No write in between: the migration writes, and the load's own
+	// normalization after it still goes ahead.
+	reset()
+	read, err = conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conf.migrateDynamicConfigTsigKeys(read); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, data := onDisk(); strings.Contains(data, "\nkeys:") {
+		t.Errorf("the migration did not drop the keys: block:\n%s", data)
+	}
+	read.Zones[0].ApiOwner = "cert:normalized"
+	if wrote, err := conf.repersistDynamicConfig(read); err != nil || !wrote {
+		t.Fatalf("the load's normalization after its own migration: wrote=%v err=%v, want written", wrote, err)
+	}
+	if owner, _ := onDisk(); owner != "cert:normalized" {
+		t.Errorf("owner %q after the normalization, want cert:normalized", owner)
+	}
+}

@@ -413,6 +413,28 @@ func TestAppClientZoneModify(t *testing.T) {
 	if resp := postZone(t, inline, &appCaller); resp.Error {
 		t.Errorf("modify with an inline key: %s", resp.ErrorMsg)
 	}
+	// Its own inline key again, identical: still fine.
+	if resp := postZone(t, inline, &appCaller); resp.Error {
+		t.Errorf("modify with its own inline key again: %s", resp.ErrorMsg)
+	}
+	// Another owner's key given inline, identical secret and all: refused
+	// (Johan, 2026-11-24), for add and modify; an operator's is a no-op.
+	theirsInline := inline
+	theirsInline.TsigName = "theirs."
+	if resp := postZone(t, theirsInline, &appCaller); !resp.Error || !strings.Contains(resp.ErrorMsg, "TSIG key theirs. exists and is not a key of API owner cert:provisioner") {
+		t.Errorf("modify with another's key inline: %q, want it refused", resp.ErrorMsg)
+	}
+	inlineAdd := secondaryAdd("inline-theirs.example.")
+	inlineAdd.TsigName, inlineAdd.TsigSecret = "theirs.", b64Secret16
+	if resp := postZone(t, inlineAdd, &appCaller); !resp.Error || !strings.Contains(resp.ErrorMsg, "exists and is not a key of API owner") {
+		t.Errorf("add with another's key inline: %q, want it refused", resp.ErrorMsg)
+	}
+	if _, ok := Zones.Get("inline-theirs.example."); ok {
+		t.Error("the refused add left its zone")
+	}
+	if resp := postZone(t, theirsInline, &certCaller); resp.Error {
+		t.Errorf("an operator's modify with another's key inline: %s", resp.ErrorMsg)
+	}
 	add := secondaryAdd("withkey.example.")
 	add.Primaries[0].Key = "theirs."
 	if resp := postZone(t, add, &appCaller); !resp.Error || !strings.Contains(resp.ErrorMsg, "not a key of API owner") {
@@ -586,6 +608,12 @@ func TestAppClientCatalogScope(t *testing.T) {
 		{CatalogPost{Command: "zone-list", CatalogZone: "ocat.example."}, true},
 		{CatalogPost{Command: "notify-list", CatalogZone: z["missing"]}, true},
 		{CatalogPost{Command: "zone-delete", CatalogZone: "cat.example.", Zone: z["own"]}, false},
+		// The catalog zone's owner may remove any member; adding needs both.
+		{CatalogPost{Command: "zone-delete", CatalogZone: "cat.example.", Zone: z["other"]}, false},
+		{CatalogPost{Command: "zone-delete", CatalogZone: "cat.example.", Zone: z["missing"]}, false},
+		{CatalogPost{Command: "zone-group-delete", CatalogZone: "cat.example.", Zone: z["api"], Group: "g1"}, false},
+		{CatalogPost{Command: "zone-delete", CatalogZone: "ocat.example.", Zone: z["own"]}, true},
+		{CatalogPost{Command: "zone-group-delete", CatalogZone: "ocat.example.", Zone: z["own"], Group: "g1"}, true},
 		{CatalogPost{Command: "delete", CatalogZone: "ocat.example."}, true},
 		{CatalogPost{Command: "delete", CatalogZone: "cat.example."}, false},
 	} {
@@ -599,6 +627,23 @@ func TestAppClientCatalogScope(t *testing.T) {
 	}
 	if msg := catalog(&certCaller, CatalogPost{Command: "group-add", CatalogZone: "ocat.example.", Group: "g2"}); msg != "" {
 		t.Errorf("an operator's group-add: %s", msg)
+	}
+
+	// An operator puts its own zone into the application's catalog zone
+	// (or did before a setowner handed the catalog over); the application
+	// may take it out. The zone itself stays: only an automatic member the
+	// catalog created goes with its entry.
+	if msg := catalog(&appCaller, CatalogPost{Command: "create", CatalogZone: "cat3.example."}); msg != "" {
+		t.Fatalf("create: %s", msg)
+	}
+	if msg := catalog(&certCaller, CatalogPost{Command: "zone-add", CatalogZone: "cat3.example.", Zone: z["api"]}); msg != "" {
+		t.Fatalf("an operator's zone-add to the application's catalog: %s", msg)
+	}
+	if msg := catalog(&appCaller, CatalogPost{Command: "zone-delete", CatalogZone: "cat3.example.", Zone: z["api"]}); msg != "" {
+		t.Errorf("the catalog owner removing an operator's member: %s", msg)
+	}
+	if _, ok := Zones.Get(z["api"]); !ok {
+		t.Error("removing the member from the catalog deleted the operator's zone")
 	}
 
 	granted := &ZoneData{ZoneName: "scat.example.", Options: map[ZoneOption]bool{OptCatalogZone: true}}
