@@ -56,7 +56,9 @@ func TestApiOwnerValues(t *testing.T) {
 		{"cert:provisioner", "cert:provisioner", true},
 		{"api", "", false},
 		{"cert:", "", false},
-		{"cert:two words", "", false},
+		// A hand-written access file may name a client so; read back
+		// as written (readCertApiOwner).
+		{"cert:two words", "cert:two words", true},
 		{"provisioner", "", false},
 	} {
 		got, err := StaticApiOwner(tc.in)
@@ -69,7 +71,7 @@ func TestApiOwnerValues(t *testing.T) {
 		ok bool
 	}{
 		{"api", true}, {"cert:provisioner", true},
-		{"config", false}, {"", false}, {"cert:", false}, {"cert:a\tb", false}, {"cert", false},
+		{"config", false}, {"", false}, {"cert:", false}, {"cert:a\tb", false}, {"cert:two words", false}, {"cert", false},
 	} {
 		if err := CheckSettableApiOwner(tc.in); (err == nil) != tc.ok {
 			t.Errorf("CheckSettableApiOwner(%q) = %v, want ok=%v", tc.in, err, tc.ok)
@@ -84,6 +86,9 @@ func TestApiOwnerValues(t *testing.T) {
 		{"cert:provisioner", "cert:provisioner", true},
 		{"config", ApiOwnerApi, false}, // reported, and grants nothing
 		{"cert:", ApiOwnerApi, false},
+		// Recorded by a client a hand-written access file names so: kept,
+		// or a rewrite would hand its zone to api.
+		{"cert:batch client", "cert:batch client", true},
 	} {
 		got, err := dynamicApiOwner(tc.in)
 		if (err == nil) != tc.ok || got != tc.want {
