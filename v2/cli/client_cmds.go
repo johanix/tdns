@@ -23,11 +23,13 @@ import (
 	"io/fs"
 	"math/big"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -525,7 +527,7 @@ func reloadForAccess(role string, t *accessTarget) error {
 func reloadAccess(role string, t *accessTarget) (string, error) {
 	resp, err := configToDaemon(role, t.Socket, t.DaemonConfig, tdns.ConfigPost{Command: "reload"})
 	if err != nil {
-		return "", fmt.Errorf("written, but the reload failed: %v", err)
+		return "", fmt.Errorf("written, but the reload failed: %w", err)
 	}
 	if err := runsConfig(resp, t); err != nil {
 		return "", fmt.Errorf("written, but %v: the daemon of %s did NOT apply it; reload it over its own socket or entry", err, t.DaemonConfig)
@@ -545,11 +547,13 @@ func reloadAccess(role string, t *accessTarget) (string, error) {
 func configToDaemon(role, socket, daemonConfig string, post tdns.ConfigPost) (tdns.ConfigResponse, error) {
 	if socket != "" {
 		c := tdns.NewClientWithOptions(role, "unix://"+socket, tdns.ClientOptions{AuthMethod: "none", ExpectConfigFile: daemonConfig})
-		resp, err := SendConfigCommand(c, post)
-		if err == nil {
+		resp, err := sendBounded(c, post)
+		switch {
+		case err == nil:
 			return resp, nil
-		}
-		if !socketUnusable(err) {
+		case daemonTimedOut(err):
+			return resp, err // it names the socket
+		case !socketUnusable(err):
 			return resp, fmt.Errorf("over the local socket %s: %w", socket, err)
 		}
 	}
@@ -562,7 +566,123 @@ func configToDaemon(role, socket, daemonConfig string, post tdns.ConfigPost) (td
 	if daemonConfig != "" {
 		api = expectingConfig(api, daemonConfig)
 	}
-	return SendConfigCommand(api, post)
+	return sendBounded(api, post)
+}
+
+// How long config add and the client commands wait for a daemon to answer
+// one request, on its local admin socket or over the role's entry. Bounded
+// per request (sendBounded), not by a timeout on the client: other commands
+// over the same socket (signing a zone, a big reload) may rightly take
+// longer.
+const (
+	// daemonAskTimeout bounds asking the daemon which config it runs and
+	// what policy (status): any request but a reload.
+	daemonAskTimeout = 10 * time.Second
+	// daemonReloadTimeout bounds a reload, which reads the whole config.
+	daemonReloadTimeout = 30 * time.Second
+)
+
+// daemonAskLimit and daemonReloadLimit are the bounds in force: the
+// constants, which tests shorten.
+var (
+	daemonAskLimit    = daemonAskTimeout
+	daemonReloadLimit = daemonReloadTimeout
+)
+
+// daemonWedgedFix is what to do about a daemon that did not answer in time
+// (daemonTimeoutError), before saying what to run then.
+const daemonWedgedFix = "check whether the daemon is wedged (its log), or restart it"
+
+// sendBounded is SendConfigCommand for config add and the client commands:
+// the request is given daemonReloadLimit for a reload and daemonAskLimit for
+// anything else. A daemon that does not answer within it is a
+// *daemonTimeoutError, which callers treat as a failed request: a failed
+// reload, for a reload.
+func sendBounded(api *tdns.ApiClient, post tdns.ConfigPost) (tdns.ConfigResponse, error) {
+	limit := daemonAskLimit
+	if post.Command == "reload" {
+		limit = daemonReloadLimit
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	// Whether the connection was made: a daemon that accepts and then says
+	// nothing is told apart from one that does not accept.
+	var connected atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		ConnectDone: func(_, _ string, err error) {
+			if err == nil {
+				connected.Store(true)
+			}
+		},
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	})
+	resp, err := SendConfigCommandContext(ctx, api, post)
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return resp, &daemonTimeoutError{where: daemonWhere(api), command: post.Command, limit: limit, connected: connected.Load()}
+	}
+	return resp, err
+}
+
+// daemonTimeoutError is a daemon that did not answer a request (command)
+// within limit: it accepted the connection and said nothing (connected), or
+// did not accept it.
+type daemonTimeoutError struct {
+	where     string // "the daemon on <socket>", "the daemon at <host:port>"
+	command   string
+	limit     time.Duration
+	connected bool
+}
+
+func (e *daemonTimeoutError) Error() string {
+	if e.connected {
+		return fmt.Sprintf("%s accepted but did not answer within %v", e.where, e.limit)
+	}
+	return fmt.Sprintf("%s did not accept a connection within %v", e.where, e.limit)
+}
+
+// daemonTimedOut says whether err is, or wraps, a daemonTimeoutError.
+func daemonTimedOut(err error) bool {
+	var te *daemonTimeoutError
+	return errors.As(err, &te)
+}
+
+// daemonWhere is where api reaches its daemon, as a timeout names it.
+func daemonWhere(api *tdns.ApiClient) string {
+	if api.Socket != "" {
+		return "the daemon on " + api.Socket
+	}
+	if u, err := url.Parse(api.BaseUrl); err == nil && u.Host != "" {
+		return "the daemon at " + u.Host
+	}
+	return "the daemon at " + api.BaseUrl
+}
+
+// editTimeoutRefusal is err, from a client command's edit, as a refusal with
+// a fix when a daemon did not answer it in time; false for any other error.
+// The fix depends on the request: the check of whose daemon answers comes
+// before the write, so the command can just be run again; the reload comes
+// after it, and a restart reads the file written.
+func editTimeoutRefusal(err error) (addRefusal, bool) {
+	var te *daemonTimeoutError
+	if !errors.As(err, &te) {
+		return addRefusal{}, false
+	}
+	fix := []string{daemonWedgedFix + ";", "then run the command again."}
+	if te.command == "reload" {
+		fix = []string{daemonWedgedFix, "(a restart reads the file written); then run client list", "to see the policy it runs."}
+	}
+	return addRefusal{why: err.Error(), fix: fix}, true
+}
+
+// dieEdit ends a client command on err from its edit: a daemon that did not
+// answer in time as a refusal with its fix (editTimeoutRefusal), anything
+// else as an error.
+func dieEdit(err error) {
+	if r, ok := editTimeoutRefusal(err); ok {
+		printRefusal(os.Stderr, r)
+		os.Exit(1)
+	}
+	fatalf("%v", err)
 }
 
 // expectingConfig is a copy of api whose every request names cfg as the
@@ -627,12 +747,14 @@ func verifyRunningDaemon(role string, t *accessTarget) error {
 		return fmt.Errorf("cannot ask the daemon of %s's entry which config it runs (%v), so it is not known whose file this is; not editing %s",
 			role, err, t.File)
 	}
-	resp, err := SendConfigCommand(api, post)
+	resp, err := sendBounded(api, post)
 	switch {
 	case err == nil:
 		return editRunsConfig(resp, t)
 	case nothingListening(err):
 		return nil
+	case daemonTimedOut(err):
+		return fmt.Errorf("%w, so it is not known whose file this is; not editing %s", err, t.File)
 	}
 	return fmt.Errorf("cannot ask the daemon at %s which config it runs (%v), so it is not known whose file this is; not editing %s",
 		api.BaseUrl, err, t.File)
@@ -645,12 +767,14 @@ func verifyRunningDaemon(role string, t *accessTarget) error {
 // and a socket that is there but cannot be asked (not ours to open), as that
 // daemon is not identified.
 func socketDaemon(role string, t *accessTarget) (running bool, err error) {
-	resp, err := SendConfigCommand(tdns.NewClient(role, "unix://"+t.Socket, "", "none", ""), tdns.ConfigPost{Command: "status"})
+	resp, err := sendBounded(tdns.NewClient(role, "unix://"+t.Socket, "", "none", ""), tdns.ConfigPost{Command: "status"})
 	switch {
 	case err == nil:
 		return true, editRunsConfig(resp, t)
 	case nothingListening(err):
 		return false, nil
+	case daemonTimedOut(err):
+		return false, fmt.Errorf("%w, so it is not known whose file this is; not editing %s", err, t.File)
 	}
 	return false, fmt.Errorf("cannot ask the daemon on %s which config it runs (%v), so it is not known whose file this is; not editing %s (run as root, or as the daemon's user)",
 		t.Socket, err, t.File)
@@ -851,7 +975,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 				return fmt.Sprintf("Added %s (%s).", name, roleName), nil
 			})
 			if err != nil {
-				fatalf("%v", err)
+				dieEdit(err)
 			}
 		},
 	}
@@ -875,7 +999,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 					return fmt.Sprintf("%s: %s.", args[0], map[bool]string{true: "disabled", false: "enabled"}[disabled]), nil
 				})
 				if err != nil {
-					fatalf("%v", err)
+					dieEdit(err)
 				}
 			},
 		}
@@ -895,7 +1019,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 				return fmt.Sprintf("%s is now %s.", args[0], args[1]), nil
 			})
 			if err != nil {
-				fatalf("%v", err)
+				dieEdit(err)
 			}
 		},
 	}
@@ -935,7 +1059,7 @@ depend on it. keyauth on brings the key back.`,
 				return msg, nil
 			})
 			if err != nil {
-				fatalf("%v", err)
+				dieEdit(err)
 			}
 		},
 	}

@@ -485,6 +485,91 @@ func TestVerifyRunningDaemonNeedsAnAnswer(t *testing.T) {
 	}
 }
 
+// A client command's requests to the daemon are bounded (sendBounded): a
+// daemon that accepts and never answers, on its socket or on the entry's TCP
+// address, is a refusal with a fix, before anything is written; one that
+// takes the reload and never answers it fails the reload, the file written.
+func TestClientEditWedgedDaemon(t *testing.T) {
+	anna := func(af *tdns.AccessFile) (string, error) {
+		af.Clients = append(af.Clients, tdns.AccessClient{Name: "anna", Pin: pinOf("anna"), Role: "read-only"})
+		return "added", nil
+	}
+	edit := func(t *testing.T) (error, time.Duration) {
+		t.Helper()
+		start := time.Now()
+		err := editAccessFile(context.Background(), "auth", accessEditOpts{}, true, anna)
+		return err, time.Since(start)
+	}
+	beforeTheWrite := func(t *testing.T, e *accessEnv, err error, where string, ask time.Duration) {
+		t.Helper()
+		want := fmt.Sprintf("%s accepted but did not answer within %v, so it is not known whose file this is; not editing %s", where, ask, e.access)
+		if err == nil || err.Error() != want {
+			t.Errorf("err = %v, want %q", err, want)
+		}
+		r, ok := editTimeoutRefusal(err)
+		if wantFix := []string{daemonWedgedFix + ";", "then run the command again."}; !ok || !reflect.DeepEqual(r.fix, wantFix) {
+			t.Errorf("refusal %+v (%v), want the fix %q", r, ok, wantFix)
+		}
+		if _, err := os.Stat(e.access); err == nil {
+			t.Error("the access file was written though the daemon was not identified")
+		}
+	}
+
+	t.Run("on the socket", func(t *testing.T) {
+		e := newAccessEnv(t, true, "")
+		ask, _ := shortDaemonLimits(t)
+		tg, err := resolveAccessTarget("auth")
+		if err != nil {
+			t.Fatal(err)
+		}
+		serveSilent(t, "unix", tg.Socket)
+		err, took := edit(t)
+		if took > 5*time.Second {
+			t.Errorf("client add took %v, with a limit of %v", took, ask)
+		}
+		beforeTheWrite(t, e, err, "the daemon on "+tg.Socket, ask)
+	})
+
+	t.Run("on the entry's TCP address", func(t *testing.T) {
+		addr := serveSilent(t, "tcp", "127.0.0.1:0")
+		e := newAccessEnv(t, true, "https://"+addr+"/api/v1")
+		ask, _ := shortDaemonLimits(t)
+		err, took := edit(t)
+		if took > 5*time.Second {
+			t.Errorf("client add took %v, with a limit of %v", took, ask)
+		}
+		beforeTheWrite(t, e, err, "the daemon at "+addr, ask)
+	})
+
+	t.Run("the reload", func(t *testing.T) {
+		e := newAccessEnv(t, true, "")
+		_, reload := shortDaemonLimits(t)
+		tg, err := resolveAccessTarget("auth")
+		if err != nil {
+			t.Fatal(err)
+		}
+		reloads := serveHangingReload(t, tg.Socket, e.daemonCfg)
+		err, took := edit(t)
+		if took > 5*time.Second {
+			t.Errorf("client add took %v, with a reload limit of %v", took, reload)
+		}
+		want := fmt.Sprintf("written, but the reload failed: the daemon on %s accepted but did not answer within %v", tg.Socket, reload)
+		if err == nil || err.Error() != want {
+			t.Errorf("err = %v, want %q", err, want)
+		}
+		r, ok := editTimeoutRefusal(err)
+		if !ok || len(r.fix) == 0 || !strings.Contains(strings.Join(r.fix, " "), "(a restart reads the file written)") {
+			t.Errorf("refusal %+v (%v), want the fix for a written file", r, ok)
+		}
+		if n := reloads.Load(); n != 1 {
+			t.Errorf("%d reloads, want 1", n)
+		}
+		if af := e.read(t); len(af.Clients) != 1 || af.Clients[0].Name != "anna" {
+			t.Errorf("access file %+v, want anna written", af)
+		}
+	})
+}
+
 func TestNewApiClientForVerification(t *testing.T) {
 	saved := RequireServerVerification
 	t.Cleanup(func() { RequireServerVerification = saved })

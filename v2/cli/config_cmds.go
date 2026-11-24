@@ -6,6 +6,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -459,13 +460,19 @@ func renderReloadGuardrail(resp tdns.ConfigResponse) {
 }
 
 func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigResponse, error) {
+	return SendConfigCommandContext(context.Background(), api, data)
+}
+
+// SendConfigCommandContext is SendConfigCommand with ctx bounding the
+// request (sendBounded gives it a deadline).
+func SendConfigCommandContext(ctx context.Context, api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigResponse, error) {
 	var cr tdns.ConfigResponse
 	bytebuf := new(bytes.Buffer)
 	json.NewEncoder(bytebuf).Encode(data)
 
 	// The caller prints the returned error; printing it here as well showed
 	// a daemon's refusal twice.
-	status, buf, err := api.Post("/config", bytebuf.Bytes())
+	status, buf, err := api.PostContext(ctx, "/config", bytebuf.Bytes())
 	if err != nil {
 		// Wrapped, so a caller can tell a socket it may not open (EACCES)
 		// or a daemon that is not there (ENOENT) from a refusal.

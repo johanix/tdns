@@ -88,6 +88,10 @@ type CertSetup struct {
 	// when it did not answer.
 	unidentified bool
 	other        *otherConfigError
+	// timedOut: it cannot work, or apply failed, because the daemon did not
+	// answer config add in time (a wedged daemon), which the fix is about;
+	// nil when not that.
+	timedOut *daemonTimeoutError
 	// fileInvalid: it cannot work because the access file is not one the
 	// daemon would load (ValidateAccessFile), whatever it lists.
 	fileInvalid bool
@@ -172,6 +176,7 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 		why := sockOtherWhy(serr)
 		c.keyUnknown, c.unidentified = why, true
 		errors.As(serr, &c.other)
+		errors.As(serr, &c.timedOut)
 		return c.cannot(why)
 	}
 
@@ -442,12 +447,13 @@ func invalidAccessFile(file string, err error) string {
 }
 
 // askSocket asks the daemon on its local admin socket which config it runs,
-// and the policy in force.
+// and the policy in force. A daemon that does not answer in time
+// (sendBounded) is not identified either (sockOther), the timeout the error.
 func (c *CertSetup) askSocket() (sockView, tdns.ConfigResponse, error) {
 	if c.t.Socket == "" {
 		return sockShut, tdns.ConfigResponse{}, errors.New("it serves no local admin socket")
 	}
-	resp, err := SendConfigCommand(tdns.NewClient(c.role, "unix://"+c.t.Socket, "", "none", ""), tdns.ConfigPost{Command: "status"})
+	resp, err := sendBounded(tdns.NewClient(c.role, "unix://"+c.t.Socket, "", "none", ""), tdns.ConfigPost{Command: "status"})
 	switch {
 	case err == nil:
 		if rerr := runsConfig(resp, c.t); rerr != nil {
@@ -458,6 +464,8 @@ func (c *CertSetup) askSocket() (sockView, tdns.ConfigResponse, error) {
 		return sockAbsent, resp, nil
 	case errors.Is(err, os.ErrPermission):
 		return sockShut, resp, fmt.Errorf("its local admin socket %s is not ours to open", c.t.Socket)
+	case daemonTimedOut(err):
+		return sockOther, resp, err
 	}
 	return sockOther, resp, fmt.Errorf("cannot ask the daemon on %s which config it runs (%v)", c.t.Socket, err)
 }
@@ -634,6 +642,9 @@ func (c *CertSetup) apply(ctx context.Context) error {
 		return err
 	}
 	if err = c.applySteps(); err != nil {
+		// A daemon that did not answer in time: a failed step like any
+		// other, put back below; the fix is about the daemon.
+		errors.As(err, &c.timedOut)
 		// Put back under the locks apply holds: rollback would take them
 		// again, and a second flock in this process waits for the first.
 		err = fmt.Errorf("%v; %s", err, c.undoLocked(unlock))
@@ -702,6 +713,11 @@ func (c *CertSetup) confirm(o AddOptions) error {
 		c.changed = true
 		if again != nil {
 			c.keyOff, c.keyWhy, c.keyUnknown = again.keyOff, again.keyWhy, again.keyUnknown
+			if again.timedOut != nil {
+				// Not a change: the daemon no longer answers.
+				c.cannot(again.why)
+				c.timedOut = again.timedOut
+			}
 		}
 		return errors.New(c.why)
 	}
@@ -960,7 +976,7 @@ func policyHasPin(a *tdns.ApiAccessStatus, pin string) bool {
 func (c *CertSetup) inForce() error {
 	resp, err := configToDaemon(c.role, c.t.Socket, c.t.DaemonConfig, tdns.ConfigPost{Command: "status"})
 	if err != nil {
-		return fmt.Errorf("reloaded, but asking the daemon what it runs failed: %v", err)
+		return fmt.Errorf("reloaded, but asking the daemon what it runs failed: %w", err)
 	}
 	if err := runsConfig(resp, c.t); err != nil {
 		return err
@@ -1128,6 +1144,10 @@ func addAccessFileLine(src []byte, path string) ([]byte, error) {
 // fixLines say what makes the certificate work when config add could not.
 func (c *CertSetup) fixLines() []string {
 	switch {
+	case c.timedOut != nil:
+		// Asking it again does not help while it is wedged; whatever apply
+		// wrote is put back, so config add plans anew.
+		return []string{daemonWedgedFix + ";", "then run config add again."}
 	case c.changed:
 		return []string{"run config add again."}
 	case c.unidentified:

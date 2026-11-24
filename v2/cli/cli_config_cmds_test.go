@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2543,6 +2544,181 @@ func TestAddRollbackReloadsTheDaemon(t *testing.T) {
 	defer f.mu.Unlock()
 	if f.policy != nil {
 		t.Errorf("the daemon still runs a policy: %+v", f.policy)
+	}
+}
+
+// shortDaemonLimits shortens the bounds on a daemon's answer (sendBounded)
+// for the test, so a daemon that never answers does not cost it 10 seconds.
+func shortDaemonLimits(t *testing.T) (ask, reload time.Duration) {
+	t.Helper()
+	savedAsk, savedReload := daemonAskLimit, daemonReloadLimit
+	t.Cleanup(func() { daemonAskLimit, daemonReloadLimit = savedAsk, savedReload })
+	daemonAskLimit, daemonReloadLimit = 150*time.Millisecond, 250*time.Millisecond
+	return daemonAskLimit, daemonReloadLimit
+}
+
+// serveSilent listens on network and addr, accepts every connection and
+// keeps it open without a byte in reply, as nc -kl does: a wedged daemon.
+// It returns the address it listens on.
+func serveSilent(t *testing.T, network, addr string) string {
+	t.Helper()
+	ln, err := net.Listen(network, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range conns {
+			c.Close()
+		}
+	})
+	return ln.Addr().String()
+}
+
+// serveHangingReload serves a daemon's local admin socket sock: it answers
+// status as the daemon of cfg (no access policy), and takes a reload without
+// ever answering it, as a daemon the reload wedges. It counts the reloads.
+func serveHangingReload(t *testing.T, sock, cfg string) *atomic.Int32 {
+	t.Helper()
+	var reloads atomic.Int32
+	stop := make(chan struct{})
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var cp tdns.ConfigPost
+		json.NewDecoder(r.Body).Decode(&cp)
+		if cp.Command == "reload" {
+			reloads.Add(1)
+			select {
+			case <-r.Context().Done():
+			case <-stop:
+			}
+			return
+		}
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: cfg})
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() {
+		close(stop)
+		srv.Close()
+	})
+	return &reloads
+}
+
+// A daemon that accepts on its local admin socket and never answers (H70:
+// nc -klU on the socket hung config add --dry-run for 79 minutes): the
+// status ask is bounded, and config add refuses, dry run or not, saying so
+// with a fix about the daemon. Nothing is written.
+func TestAddRefusesAWedgedDaemon(t *testing.T) {
+	for _, dry := range []bool{true, false} {
+		t.Run(fmt.Sprintf("dry run %v", dry), func(t *testing.T) {
+			env := newAddEnv(t)
+			ask, _ := shortDaemonLimits(t)
+			d, _ := env.certDaemon(t, env.dir, "")
+			cfg := readBytes(t, d)
+			serveSilent(t, "unix", env.socket())
+
+			start := time.Now()
+			_, err := env.add(t, d, func(o *AddOptions) { o.DryRun = dry })
+			if took := time.Since(start); took > 5*time.Second {
+				t.Errorf("config add took %v, with a limit of %v", took, ask)
+			}
+			var r addRefusal
+			want := fmt.Sprintf("the daemon on %s accepted but did not answer within %v", env.socket(), ask)
+			if !errors.As(err, &r) || !strings.Contains(r.why, want) {
+				t.Fatalf("err = %v, want a refusal saying %q", err, want)
+			}
+			if wantFix := []string{daemonWedgedFix + ";", "then run config add again."}; !reflect.DeepEqual(r.fix, wantFix) {
+				t.Errorf("fix %q, want %q", r.fix, wantFix)
+			}
+			var sb strings.Builder
+			printRefusal(&sb, r)
+			if out := flat(sb.String()); !strings.Contains(out, "Fix: check whether the daemon is wedged (its log), or restart it; then run config add again.") {
+				t.Errorf("printed:\n%s", sb.String())
+			}
+			if readBytes(t, d) != cfg {
+				t.Error("the daemon config changed")
+			}
+			if _, err := os.Stat(accessFileOf(d)); err == nil {
+				t.Error("an access file was created")
+			}
+			if _, err := os.Stat(env.cli); err == nil {
+				t.Error("the CLI config was written")
+			}
+		})
+	}
+}
+
+// A reload the daemon takes and never answers is a failed reload: bounded,
+// and the rollback runs as for any other failed reload. The files are put
+// back, the daemon is sent the reload again (bounded too), and the refusal
+// says what happened, with the fix about the daemon.
+func TestAddReloadThatTimesOutIsPutBack(t *testing.T) {
+	env := newAddEnv(t)
+	_, reload := shortDaemonLimits(t)
+	d, _ := env.certDaemon(t, env.dir, "")
+	cfg := readBytes(t, d)
+	reloads := serveHangingReload(t, env.socket(), d)
+
+	start := time.Now()
+	_, err := env.add(t, d, nil)
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("config add took %v, with a reload limit of %v", took, reload)
+	}
+	var r addRefusal
+	want := fmt.Sprintf("written, but the reload failed: the daemon on %s accepted but did not answer within %v", env.socket(), reload)
+	if !errors.As(err, &r) || !strings.Contains(r.why, want) || !strings.Contains(r.why, "the files are as they were") {
+		t.Fatalf("err = %v, want a refusal saying %q and that the files are put back", err, want)
+	}
+	if !strings.Contains(r.why, "the daemon could NOT be reloaded with them") {
+		t.Errorf("err = %v, want it to say the undoing reload failed too", err)
+	}
+	if wantFix := []string{daemonWedgedFix + ";", "then run config add again."}; !reflect.DeepEqual(r.fix, wantFix) {
+		t.Errorf("fix %q, want %q", r.fix, wantFix)
+	}
+	if n := reloads.Load(); n != 2 {
+		t.Errorf("%d reloads, want 2 (the edit, and its undo)", n)
+	}
+	if readBytes(t, d) != cfg {
+		t.Errorf("the daemon config was not put back:\n%s", readBytes(t, d))
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("the new access file was not removed")
+	}
+	if _, err := os.Stat(env.cli); err == nil {
+		t.Error("the CLI config was written")
+	}
+}
+
+// A timeout names where the daemon is, and whether it accepted at all.
+func TestDaemonTimeoutError(t *testing.T) {
+	e := &daemonTimeoutError{where: "the daemon at 127.0.0.1:8989", command: "status", limit: 10 * time.Second}
+	if got, want := e.Error(), "the daemon at 127.0.0.1:8989 did not accept a connection within 10s"; got != want {
+		t.Errorf("%q, want %q", got, want)
+	}
+	e.connected = true
+	if got, want := e.Error(), "the daemon at 127.0.0.1:8989 accepted but did not answer within 10s"; got != want {
+		t.Errorf("%q, want %q", got, want)
+	}
+	if !daemonTimedOut(fmt.Errorf("written, but the reload failed: %w", e)) {
+		t.Error("a wrapped timeout is not found")
 	}
 }
 
