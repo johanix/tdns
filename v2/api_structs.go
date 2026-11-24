@@ -377,6 +377,10 @@ type ZonePost struct {
 	// On modify, a nil slice leaves the current value alone; an explicitly
 	// empty one clears it. See ModifyDynamicZone.
 	TransferSrc []string
+	// KeepKeys (delete only) leaves the zone's DNSSEC and SIG(0) keys in the
+	// keystore, for a re-add of the zone to take back. By default they are
+	// deleted with the zone.
+	KeepKeys bool `json:"keepkeys,omitempty"`
 }
 
 type ZoneResponse struct {
@@ -411,6 +415,29 @@ type ZoneResponse struct {
 	Delegation *ChildDelegationReport `json:"delegation,omitempty"`
 	// Name carries the report for "get-name".
 	Name *ZoneNameReport `json:"name,omitempty"`
+	// Removal carries what "delete" did with the zone's keys. Msg and
+	// Warnings say the same in words.
+	Removal *ZoneRemoval `json:"removal,omitempty"`
+}
+
+// ZoneRemoval is what a zone delete did with the zone's DNSSEC and SIG(0)
+// keys. TSIG keys are never deleted with a zone.
+type ZoneRemoval struct {
+	Zone string `json:"zone"`
+	// KeepKeys: the keys were left in the keystore, and the counts below
+	// are of the keys kept rather than deleted.
+	KeepKeys   bool `json:"keepkeys,omitempty"`
+	DnssecKeys int  `json:"dnsseckeys"`
+	Sig0Keys   int  `json:"sig0keys"`
+	// ParentDS is what the KSK rollover engine saw of a DS for the zone at
+	// the parent at its last poll (ParentDSSeen, ParentDSNone), and
+	// ParentDSAt when; empty when that tells nothing. Read only when the
+	// keys are deleted.
+	ParentDS   string `json:"parentds,omitempty"`
+	ParentDSAt string `json:"parentdsat,omitempty"`
+	// KeysError is set when the zone was deleted but its keys could not be
+	// deleted (or, with KeepKeys, counted). The zone stays deleted.
+	KeysError string `json:"keyserror,omitempty"`
 }
 
 // ZoneNameReport is what a zone publishes at one owner name.
