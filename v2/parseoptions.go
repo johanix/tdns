@@ -38,7 +38,7 @@ func (conf *Config) parseImrOptions() {
 
 		switch imrOpt {
 		case ImrOptRevalidateNS, ImrOptQueryForTransport, ImrOptAlwaysQueryForTransport, ImrOptQueryForTransportTLSA,
-			ImrOptAllowLoopbackNameservers:
+			ImrOptAllowLoopbackNameservers, ImrOptQnameMinimisation:
 			if optval != "" {
 				lg.Warn("IMR option does not accept a value, ignoring provided value", "option", key, "value", optval)
 			}

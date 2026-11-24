@@ -476,11 +476,18 @@ type ApiServerConf struct {
 	// not CertFile and KeyFile, which only the TCP listeners use.
 	Addresses []string        `validate:"required_without=Socket"`
 	ApiKey    SensitiveString `validate:"required"`
-	CertFile  string          `validate:"required_with_listener,omitempty,file,certkey"`
-	KeyFile   string          `validate:"required_with_listener,omitempty,file"`
-	UseTLS    bool
-	Server    ApiServerAppConf
-	Agent     ApiServerAppConf
+	// CertFile and KeyFile, when neither is set, are the config file's
+	// default pair, {confdir}/certs/{config name}-api.crt and .key, which
+	// the daemon writes, self-signed, at its first start (applyCertDefaults).
+	CertFile string `validate:"required_with_listener,omitempty,file,certkey"`
+	KeyFile  string `validate:"required_with_listener,omitempty,file"`
+	// CertPending: the default pair is not there yet (config check, before
+	// the daemon's first start), or could not be written. Not a config key.
+	CertPending bool `yaml:"-" mapstructure:"-" json:"-"`
+
+	UseTLS bool
+	Server ApiServerAppConf
+	Agent  ApiServerAppConf
 	// MSA       ApiServerAppConf
 	Combiner ApiServerAppConf
 

@@ -178,6 +178,10 @@ type AddResult struct {
 	// certificate, so it was (or, with DryRun, would be) given tlsauth: pin
 	// and that pin. Entry is the entry as rewritten.
 	Pinned bool
+	// ApiCertCreated is the daemon's default API certificate, which config
+	// add made (the daemon had not started yet, so there was none to pin);
+	// ApiCertWould the one a dry run would make. ApiCertKey is its key.
+	ApiCertCreated, ApiCertWould, ApiCertKey string
 	// File is the file the entry was (or would be) added to.
 	File string
 	// Created: File did not exist and was created.
@@ -323,7 +327,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 					e.Name, diff, info.ConfigFile)
 			}
 			res.AlreadyKnown = e.Name
-			return repinKnownEntry(o, res, e, existing, target, info.CertFile)
+			return repinKnownEntry(o, res, e, existing, target, info)
 		case sameFile:
 			return nil, fmt.Errorf("entry %q already points at %s but with a different API address (%s, the config says %s); edit or remove that entry by hand",
 				e.Name, info.ConfigFile, e.BaseURL, baseURL)
@@ -341,7 +345,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			}
 			// Its key and scheme are this daemon's, on this daemon's address:
 			// pin it as the daemon's own entry would be.
-			return repinKnownEntry(o, res, e, existing, target, info.CertFile)
+			return repinKnownEntry(o, res, e, existing, target, info)
 		case sameAddr:
 			return nil, fmt.Errorf("entry %q (config-file %s) already uses the API address %s, which %s also names; two daemons cannot listen on one address",
 				e.Name, e.ConfigFile, e.BaseURL, info.ConfigFile)
@@ -359,18 +363,35 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		// Only the socket, found through config-file:. No key and no TLS: the
 		// daemon authenticates the socket by file permissions.
 		entry.ApiKey, entry.AuthMethod, entry.RootCA = "", "none", ""
-	} else if strings.HasPrefix(entry.BaseURL, "https://") && entry.RootCA == "" {
-		// The daemon's own certificate, pinned: no CA, no name check, and
-		// nothing for the operator to do.
-		if pin, err := certFilePin(info.CertFile); err != nil {
-			res.Notes = append(res.Notes, fmt.Sprintf(
-				"could not pin the daemon's certificate (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>), or tdns-ncli will refuse to connect", err))
-		} else {
-			entry.TLSAuth, entry.Pins = "pin", []string{pin}
-		}
 	}
 	if err := chooseEntryName(&entry, res, info.Role, existing, o); err != nil {
 		return nil, err
+	}
+	// The daemon's default API pair, made for the entry to pin, and written
+	// only once the entry will be.
+	var pending *tdns.DefaultApiCert
+	if strings.HasPrefix(entry.BaseURL, "https://") && entry.RootCA == "" {
+		// The daemon's own certificate, pinned: no CA, no name check, and
+		// nothing for the operator to do. A new entry that cannot be pinned
+		// is not written: tdns-ncli would refuse it (the owner's ruling,
+		// 2026-11-23). A daemon on its default API pair that has not
+		// started yet has none: config add makes it, as the daemon would.
+		var err error
+		if pending, err = defaultApiCert(o, res, info); err != nil {
+			return nil, err
+		}
+		pin := ""
+		switch {
+		case pending != nil:
+			pin = pending.Pin // written once the entry will be (writeApiCert)
+		case res.ApiCertWould == "":
+			if pin, err = daemonCertPin(info); err != nil {
+				return nil, unpinnableRefusal(info, err)
+			}
+		}
+		if pin != "" {
+			entry.TLSAuth, entry.Pins = "pin", []string{pin}
+		}
 	}
 
 	// Compared resolved, as the locks are: --config and --file may name the
@@ -384,6 +405,11 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		}
 	}
 	out, _, err := spliceApiserver(src, entry)
+	if errors.Is(err, errFlowApiservers) && pending != nil {
+		// The entry pins a pair that is not written: given to add by hand,
+		// it would pin a key nobody has.
+		return nil, fmt.Errorf("%s: %w; nothing was written. Make the list block style (or name its file with --file), then run config add again: it creates the daemon's API certificate %s and pins it", target, err, pending.Cert)
+	}
 	if errors.Is(err, errFlowApiservers) {
 		return nil, fmt.Errorf("%s: %w; add this entry by hand:\n\n%s", target, err, renderEntry(maskKey(entry), itemLayout{indent: defItemIndent, gap: defDashGap, valueCol: defValueCol}))
 	}
@@ -424,8 +450,12 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return res, nil
 	}
 
-	if err := writeFileAtomic(target, out); err != nil {
+	// The entry will be written: the pair it pins first.
+	if err := writeApiCert(pending, res, info); err != nil {
 		return nil, err
+	}
+	if err := writeFileAtomic(target, out); err != nil {
+		return nil, fmt.Errorf("%v.%s", err, unwriteApiCert(pending, res))
 	}
 	res.Wrote = true
 
@@ -440,9 +470,9 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		}
 		msg := hidden(gerr, "does not load")
 		if uerr != nil {
-			return nil, fmt.Errorf("%s The change could NOT be undone (%v): restore %s by hand.", msg, uerr, target)
+			return nil, fmt.Errorf("%s The change could NOT be undone (%v): restore %s by hand.%s", msg, uerr, target, unwriteApiCert(pending, res))
 		}
-		return nil, fmt.Errorf("%s The change was undone.", msg)
+		return nil, fmt.Errorf("%s The change was undone.%s", msg, unwriteApiCert(pending, res))
 	}
 	return res, nil
 }
@@ -579,6 +609,106 @@ func certFilePin(path string) (string, error) {
 	}
 }
 
+// defaultApiCert makes, in memory, the default API pair of a daemon that
+// names no certfile or keyfile and has not started yet (neither file is
+// there), as the daemon makes it at its first start
+// (tdns.NewDefaultApiCert): the entry pins it, and the caller writes it
+// once the entry will be written (writeApiCert), and not otherwise. With
+// o.DryRun it says it would (res.ApiCertWould) and makes nothing. nil and
+// no error when there is nothing to make. Half a pair is a refusal.
+func defaultApiCert(o AddOptions, res *AddResult, info *DaemonApi) (*tdns.DefaultApiCert, error) {
+	if !info.CertDefault {
+		return nil, nil
+	}
+	cert, key := tdns.ApiCertPaths(info.ConfigFile)
+	_, cerr := os.Stat(cert)
+	_, kerr := os.Stat(key)
+	switch {
+	case cerr == nil && kerr == nil:
+		return nil, nil // there: pinned as any certificate is
+	case cerr == nil || kerr == nil:
+		// Refused from what is there, never through EnsureDefaultApiCert:
+		// if the remaining file went meanwhile, it would write a pair (a dry
+		// run included) and leave no refusal to give.
+		return nil, refuseAdd(info, tdns.HalfApiCertPairError(cert, key, cerr == nil).Error(),
+			"put back the missing file, or remove the other (the daemon then makes a new pair, which config add pins), then run config add again")
+	case !errors.Is(cerr, os.ErrNotExist) || !errors.Is(kerr, os.ErrNotExist):
+		return nil, refuseAdd(info, fmt.Sprintf("the daemon's API certificate %s cannot be looked for (%v)", cert, errors.Join(cerr, kerr)),
+			"run config add as root on the daemon's host")
+	case o.DryRun:
+		res.ApiCertWould, res.ApiCertKey = cert, key
+		return nil, nil
+	}
+	p, err := tdns.NewDefaultApiCert(info.ConfigFile, info.Addresses)
+	if err != nil {
+		return nil, refuseAdd(info, fmt.Sprintf("the daemon's API certificate cannot be made for %s (%v)", cert, err),
+			"run config add as root on the daemon's host")
+	}
+	return p, nil
+}
+
+// writeApiCert writes p, the default API pair defaultApiCert made, for
+// res's entry, which pins it and is about to be written; nil writes
+// nothing. A pair that cannot be written, or that the daemon wrote first
+// (it started meanwhile), is a refusal, and nothing is written.
+func writeApiCert(p *tdns.DefaultApiCert, res *AddResult, info *DaemonApi) error {
+	if p == nil {
+		return nil
+	}
+	if err := p.Write(); err != nil {
+		fix := "run config add as root on the daemon's host"
+		if errors.Is(err, os.ErrExist) {
+			fix = "the daemon wrote its own (it started meanwhile?): run config add again, which pins that"
+		}
+		return refuseAdd(info, fmt.Sprintf("the daemon's API certificate cannot be created at %s (%v); nothing was written", p.Cert, err), fix)
+	}
+	res.ApiCertCreated, res.ApiCertKey = p.Cert, p.Key
+	return nil
+}
+
+// unwriteApiCert takes out p, the pair writeApiCert wrote, for an entry
+// that was not written after all, and says so, as a sentence to add to the
+// error ("" when there was none).
+func unwriteApiCert(p *tdns.DefaultApiCert, res *AddResult) string {
+	if p == nil || res.ApiCertCreated == "" {
+		return ""
+	}
+	res.ApiCertCreated = ""
+	if err := p.Remove(); err != nil {
+		return fmt.Sprintf(" The daemon's API certificate it had created, %s, could NOT be removed (%v): remove it and %s by hand.", p.Cert, err, p.Key)
+	}
+	return fmt.Sprintf(" The daemon's API certificate it had created, %s, is removed again.", p.Cert)
+}
+
+// refuseAdd is config add's refusal of daemon config info: why, and the fix.
+func refuseAdd(info *DaemonApi, why, fix string) error {
+	return fmt.Errorf("not adding %s: %s.\n  Fix: %s", info.ConfigFile, why, fix)
+}
+
+// unpinnableRefusal is the refusal of a new https entry whose daemon
+// certificate config add cannot pin (err, from daemonCertPin): why, and a
+// Fix line that fits. Most often it is the default API pair of a daemon that
+// has not started yet, which writes it at its first start.
+func unpinnableRefusal(info *DaemonApi, err error) error {
+	why := fmt.Sprintf("the daemon's certificate cannot be pinned (%v)", err)
+	var fix string
+	_, serr := os.Stat(info.CertFile)
+	switch {
+	case info.CertDefault && errors.Is(serr, os.ErrNotExist):
+		why = fmt.Sprintf("%s is not there yet: the daemon writes its API certificate there when it first starts", info.CertFile)
+		fix = "start the daemon (it writes its API certificate at first start), then run config add again"
+	case info.CertFile == "":
+		fix = "set apiserver.certfile to the certificate the daemon serves, then run config add again"
+	case !filepath.IsAbs(info.CertFile):
+		fix = "give apiserver.certfile as an absolute path, then run config add again"
+	case errors.Is(serr, os.ErrNotExist):
+		fix = fmt.Sprintf("put the daemon's certificate at %s, or correct apiserver.certfile, then run config add again", info.CertFile)
+	default:
+		fix = fmt.Sprintf("make %s a readable PEM certificate here (run config add as root on the daemon's host), then run config add again", info.CertFile)
+	}
+	return refuseAdd(info, why, fix)
+}
+
 // repinKnownEntry gives e, the existing entry for this daemon, the pin of the
 // daemon's certificate when it does not have it. An https entry with no pin is
 // broken: tdns-ncli refuses it. So is one whose pins are all of an earlier
@@ -591,12 +721,12 @@ func certFilePin(path string) (string, error) {
 // replaced on disk but not yet served still connects.
 //
 // The caller holds the CLI config's lock (unless o.DryRun).
-func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiDetails, target, certFile string) (*AddResult, error) {
+func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiDetails, target string, info *DaemonApi) (*AddResult, error) {
 	if !strings.HasPrefix(strings.ToLower(e.BaseURL), "https://") {
 		return res, nil // the socket, or plain http: no certificate to pin
 	}
 	byPin := strings.EqualFold(e.TLSAuth, "pin") && len(e.Pins) > 0
-	pin, err := certFilePin(certFile)
+	pin, err := daemonCertPin(info)
 	if err != nil {
 		switch {
 		case byPin:
@@ -835,6 +965,12 @@ func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
 		fmt.Fprintf(w, "Added %q (%s) to %s:\n\n", r.Entry.Name, kind, r.File)
 	}
 	fmt.Fprint(w, renderEntry(maskKey(r.Entry), itemLayout{indent: 3, gap: 1, valueCol: defValueCol}))
+	switch {
+	case r.ApiCertCreated != "":
+		fmt.Fprintf(w, "\nCreated the daemon's API certificate %s\n(key %s, mode 0600); the daemon uses it when it starts.\n", r.ApiCertCreated, r.ApiCertKey)
+	case r.ApiCertWould != "":
+		fmt.Fprintf(w, "\nWould create the daemon's API certificate %s\n(key %s, mode 0600) and pin it; the daemon uses it when it starts.\n", r.ApiCertWould, r.ApiCertKey)
+	}
 	if dryRun {
 		return
 	}

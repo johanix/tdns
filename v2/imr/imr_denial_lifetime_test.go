@@ -6,6 +6,7 @@
 package imr
 
 import (
+	"context"
 	"crypto"
 	"testing"
 	"time"
@@ -74,7 +75,7 @@ func TestHandleNegativeCachesForTheNegativeTTL(t *testing.T) {
 		{zone, dns.TypeTXT, dns.RcodeSuccess},
 	} {
 		ns := append(append([]dns.RR{}, soa...), apex...)
-		if _, _, ok := imr.handleNegative(c.qname, c.qtype, lifetimeReply(c.qname, c.qtype, c.rcode, ns), core.TransportDo53, zone); !ok {
+		if _, _, ok := imr.handleNegative(context.Background(), c.qname, c.qtype, lifetimeReply(c.qname, c.qtype, c.rcode, ns), core.TransportDo53, zone); !ok {
 			t.Fatalf("%s %s: not used", c.qname, dns.TypeToString[c.qtype])
 		}
 		e := imr.Cache.Get(c.qname, c.qtype)

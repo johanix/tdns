@@ -523,11 +523,14 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 
 // zoneConflictPolicy reads the policy the zone runs under.
 //
-// Exactly one of the two options is always set: the config parser materialises
-// db-wins when neither is given, and rejects both together. So this is a
-// question with two answers, not three, and there is no default to remember
-// here. The fallback below exists only for a ZoneData built outside the config
-// parser (tests, mainly) and agrees with the parser's default.
+// On a zone that can change itself, exactly one of the two options is always
+// set: the config parser materialises db-wins when neither is given, and
+// rejects both together. So this is a question with two answers, not three, and
+// there is no default to remember here. A secondary that makes no changes of its
+// own (optionsChangeTheZone) has neither option and has no journal of its own
+// changes to merge; were it asked, it would read db-wins, the parser's default.
+// The fallback below also serves a ZoneData built outside the config parser
+// (tests, mainly).
 func zoneConflictPolicy(zd *ZoneData) ZoneConflictPolicy {
 	if zd == nil {
 		return ConflictDBWins

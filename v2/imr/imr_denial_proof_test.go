@@ -7,6 +7,7 @@
 package imr
 
 import (
+	"context"
 	"testing"
 
 	"github.com/johanix/tdns/v2/cache"
@@ -35,7 +36,7 @@ type denialOutcome struct {
 
 func handleDenial(t *testing.T, imr *Imr, qname string, qtype uint16, r *dns.Msg, serversZone string) denialOutcome {
 	t.Helper()
-	_, _, used := imr.handleNegative(qname, qtype, r, core.TransportDo53, serversZone)
+	_, _, used := imr.handleNegative(context.Background(), qname, qtype, r, core.TransportDo53, serversZone)
 	return denialOutcome{used: used, cached: imr.Cache.Get(qname, qtype)}
 }
 

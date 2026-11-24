@@ -13,4 +13,5 @@ const (
 	ImrOptQueryForTransportTLSA
 	ImrOptUseTransportSignals
 	ImrOptAllowLoopbackNameservers
+	ImrOptQnameMinimisation
 )
