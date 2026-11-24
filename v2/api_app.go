@@ -233,7 +233,9 @@ func apiCommandName(route, cmd string) string {
 	case cmd == unknownCommand:
 		return name + " (a command that cannot be read)"
 	case cmd != "":
-		return name + " " + cmd
+		// "imr imr-flush" reads "imr flush": some routes repeat their
+		// own name in their commands.
+		return name + " " + strings.TrimPrefix(cmd, name[strings.LastIndex(name, " ")+1:]+"-")
 	}
 	return name
 }
