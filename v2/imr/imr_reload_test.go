@@ -12,6 +12,7 @@ package imr
 import (
 	"log"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -253,6 +254,30 @@ func TestImrRestartRequiredKeys(t *testing.T) {
 	for _, k := range keys {
 		if !want[k] {
 			t.Errorf("unexpected key %q", k)
+		}
+	}
+}
+
+// The options are compared as the resolver runs them: an embedder's Options,
+// or the strings while either config is a daemon's block read raw from its
+// file, which has no Options yet.
+func TestImrRestartRequiredKeysOptions(t *testing.T) {
+	on := map[ImrOption]string{ImrOptQnameMinimisation: "true"}
+	for _, tc := range []struct {
+		name      string
+		boot, cur Config
+		restart   bool
+	}{
+		{"embedder, option turned off", Config{Options: on}, Config{Options: map[ImrOption]string{}}, true},
+		{"embedder, option value changed", Config{Options: on}, Config{Options: map[ImrOption]string{ImrOptQnameMinimisation: "false"}}, true},
+		{"embedder, same options", Config{Options: on}, Config{Options: map[ImrOption]string{ImrOptQnameMinimisation: "true"}}, false},
+		{"daemon, parsed at start, raw on reload, same strings",
+			Config{OptionsStrs: []string{"qname-minimisation"}, Options: on}, Config{OptionsStrs: []string{"qname-minimisation"}}, false},
+		{"daemon, raw strings changed", Config{OptionsStrs: []string{"qname-minimisation"}}, Config{OptionsStrs: []string{"revalidate-ns"}}, true},
+		{"no options on either side", Config{Options: map[ImrOption]string{}}, Config{}, false},
+	} {
+		if got := slices.Contains(imrRestartRequiredKeys(tc.boot, tc.cur), "imrengine.options"); got != tc.restart {
+			t.Errorf("%s: options need a restart %v, want %v", tc.name, got, tc.restart)
 		}
 	}
 }

@@ -28,6 +28,7 @@ package imr
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -491,7 +492,7 @@ func imrRestartRequiredKeys(boot, current Config) []string {
 	check("active", bothNil(boot.Active, current.Active))
 	check("root-hints", boot.RootHints == current.RootHints)
 	check("outbound-address-families", sameAddressFamilies(boot.OutboundAddressFamilies, current.OutboundAddressFamilies))
-	check("options", slices.Equal(boot.OptionsStrs, current.OptionsStrs))
+	check("options", sameOptions(boot, current))
 	check("trust-anchor-ds", boot.TrustAnchorDS == current.TrustAnchorDS)
 	check("trust-anchor-dnskey", boot.TrustAnchorDNSKEY == current.TrustAnchorDNSKEY)
 	check("trust-anchor-file", boot.TrustAnchorFile == current.TrustAnchorFile)
@@ -514,6 +515,19 @@ func imrRestartRequiredKeys(boot, current Config) []string {
 	check("tuning", imrTuningEqual(effective(boot.Tuning), effective(current.Tuning)))
 	check("testing", imrTestingEqual(boot.Testing, current.Testing))
 	return keys
+}
+
+// sameOptions reports whether boot and current give the resolver the same
+// options. The resolver runs on Options. A daemon's imrengine: block read
+// raw from its file has only the strings (OptionsStrs), which root turns
+// into Options, and the zone-reload path compares exactly such a block: the
+// strings are compared while either config is raw, the options otherwise.
+func sameOptions(boot, current Config) bool {
+	raw := func(c Config) bool { return len(c.Options) == 0 && len(c.OptionsStrs) > 0 }
+	if raw(boot) || raw(current) {
+		return slices.Equal(boot.OptionsStrs, current.OptionsStrs)
+	}
+	return maps.Equal(boot.Options, current.Options)
 }
 
 // imrTuningEqual compares two tuning blocks by value. Written out rather than
