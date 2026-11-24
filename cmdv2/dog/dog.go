@@ -37,6 +37,8 @@ var cfgFile string
 var trustAnchorFile string // -k / --trust-anchor
 var tsigKeyFlag string     // -y / --tsig : [algorithm:]name:secret (dig-compatible)
 var showVersion bool       // --version : print version + supported algorithms, then exit
+var ipv4Only bool          // -4 : use IPv4 only (dig-compatible)
+var ipv6Only bool          // -6 : use IPv6 only (dig-compatible)
 
 var options = make(map[string]string, 2)
 
@@ -55,7 +57,7 @@ var rootCmd = &cobra.Command{
 	Long: `dog issues DNS queries and presents the result. The CLI is as close to
 dig's as possible; arguments are case-insensitive and may appear in any order.
 
-  dog [@server] [name] [type] [+option ...]
+  dog [-4 | -6] [@server] [name] [type] [+option ...]
 
 @server takes @host, @host:port, @[ipv6], @[ipv6]:port, or a URL form that
 selects the transport directly: dns:// udp:// tcp:// tls:// dot:// https://
@@ -91,6 +93,16 @@ Transport:
   +tls, +dot              DoT (default port 853)
   +https, +doh            DoH (default port 443)
   +quic, +doq             DoQ (default port 853)
+
+Address family:
+  -4, --ipv4              use IPv4 only: a server name is resolved to its A
+                          records only, and with no @server the first IPv4
+                          nameserver in /etc/resolv.conf is used
+  -6, --ipv6              the same for IPv6 and AAAA
+                          Both at once is an error, as in dig. An @server that
+                          is an address of the other family is refused. Holds
+                          for every transport, zone transfers, +sigchase,
+                          +tlsa and +showpin.
 
 Timeouts and retries:
   +time=T, +timeout=T     per-attempt timeout in seconds (below 1 becomes 1,
@@ -193,13 +205,30 @@ See guide/app-dog.md for the long form.
 			options["transport"] = "Do53"
 		}
 
+		// -4 / -6: one family for every connection this run makes. Stored in
+		// the option map for the code that is only handed the map.
+		addrFamily, ferr := addrFamilyFromFlags(ipv4Only, ipv6Only)
+		if ferr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", ferr)
+			os.Exit(1)
+		}
+		if addrFamily != core.FamilyAny {
+			options[core.OptionAddrFamily] = addrFamily.Suffix()
+		}
+
 		if options["server"] == "" {
-			server, err = ParseResolvConf()
+			// With -4/-6 the default server is the first nameserver of that
+			// family: dig does the same with its resolv.conf list.
+			server, err = ParseResolvConfFamily(addrFamily)
 			if err != nil {
 				fmt.Println(err)
 				os.Exit(1)
 			}
 			options["server"] = server
+		}
+		if ferr := checkServerFamily(addrFamily, options["server"]); ferr != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", ferr)
+			os.Exit(1)
 		}
 
 		// If -p/--port was explicitly provided, let it override any other port source
@@ -289,7 +318,11 @@ See guide/app-dog.md for the long form.
 				// +tries and +adflag do not reach it: retries and the outgoing
 				// AD bit are the chaser's own to decide, and neither is
 				// reachable from here without changing its API.
-				chaserClient := core.NewDNSClient(chaserTransport, options["port"], nil, timeoutOptions(options)...)
+				//
+				// -4/-6 reaches it for the same reason: every query of the
+				// walk goes through this one client.
+				chaserOpts := append(timeoutOptions(options), familyOptions(options)...)
+				chaserClient := core.NewDNSClient(chaserTransport, options["port"], nil, chaserOpts...)
 				dss, taSource := loadChaserAnchors()
 				chaser := tdns.NewChaser(chaserClient, options["server"], dss)
 				chaser.TrustAnchorSource = taSource
@@ -542,6 +575,8 @@ See guide/app-dog.md for the long form.
 				// default applies and there is no way to shorten it from the
 				// command line.
 				clientOpts = append(clientOpts, timeoutOptions(options)...)
+				// -4/-6, likewise applied again to the TCP retry below.
+				clientOpts = append(clientOpts, familyOptions(options)...)
 				client := core.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
 
 				tries := triesFrom(options)
@@ -567,6 +602,7 @@ See guide/app-dog.md for the long form.
 					// Without it the timeout silently stopped applying at
 					// exactly the point a query got slower.
 					tcpOpts = append(tcpOpts, timeoutOptions(options)...)
+					tcpOpts = append(tcpOpts, familyOptions(options)...)
 					tcpClient := core.NewDNSClient(core.TransportDo53, options["port"], tlsConfig, tcpOpts...)
 					// dig's +tries is "the number of times to try UDP AND TCP
 					// queries"; the fallback is a second client on a path that
@@ -637,6 +673,72 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
 	rootCmd.PersistentFlags().StringVarP(&trustAnchorFile, "trust-anchor", "k", "", "Path to DNSSEC trust anchor file (zone-file format DS or DNSKEY records). Used by +sigchase, which prints the source it used. Default: read from "+tdns.DefaultImrCfgFile+" or fall back to compiled-in root KSK DS records.")
 	rootCmd.PersistentFlags().StringVarP(&tsigKeyFlag, "tsig", "y", "", "TSIG-sign the query. Format [algorithm:]name:secret (dig-compatible); algorithm defaults to hmac-sha256. Do53/Do53-TCP/DoT only.")
+	rootCmd.PersistentFlags().BoolVarP(&ipv4Only, "ipv4", "4", false, "Use IPv4 only (dig-compatible); cannot be combined with -6")
+	rootCmd.PersistentFlags().BoolVarP(&ipv6Only, "ipv6", "6", false, "Use IPv6 only (dig-compatible); cannot be combined with -4")
+}
+
+// addrFamilyFromFlags turns -4 and -6 into the family every connection of this
+// run is restricted to. Giving both is an error, as in dig ("only one of -4 and
+// -6 allowed"): neither "the last one wins" nor "both, so no restriction" is
+// what a script that passed both meant, and a silent guess would send queries
+// over a family the caller had just excluded.
+func addrFamilyFromFlags(v4, v6 bool) (core.AddrFamily, error) {
+	switch {
+	case v4 && v6:
+		return core.FamilyAny, fmt.Errorf("only one of -4 and -6 allowed")
+	case v4:
+		return core.FamilyIPv4, nil
+	case v6:
+		return core.FamilyIPv6, nil
+	}
+	return core.FamilyAny, nil
+}
+
+// addrFamilyFromOptions is the family addrFamilyFromFlags stored in the option
+// map, where the code that is handed only the map (the zone-transfer printer in
+// package tdns, the TLSA lookup) finds it. Absent means no restriction. Run
+// writes it from a validated family, so a bad value is a bug; it stops dog
+// rather than fall back to dual-stack, which is the one thing -4/-6 must never
+// do silently.
+func addrFamilyFromOptions(options map[string]string) core.AddrFamily {
+	fam, err := core.ParseAddrFamily(options[core.OptionAddrFamily])
+	if err != nil {
+		log.Fatalf("Error: %v", err)
+	}
+	return fam
+}
+
+// familyOptions is the client option that carries -4/-6, or nil when neither
+// was given.
+//
+// Like timeoutOptions it is shared because dog builds several clients (the
+// query, its TCP retry after truncation, the +sigchase client, the +tlsa
+// resolver client) from separate option lists. A -6 that reached the first and
+// not the retry is a query that stays on IPv6 until the response is large
+// enough to need TCP, and then leaves over IPv4.
+func familyOptions(options map[string]string) []core.DNSClientOption {
+	fam := addrFamilyFromOptions(options)
+	if fam == core.FamilyAny {
+		return nil
+	}
+	return []core.DNSClientOption{core.WithAddrFamily(fam)}
+}
+
+// checkServerFamily refuses a server that is an address literal of the family
+// the run excludes (-4 with @2001:db8::53). dig reaches the same end by finding
+// no address of the right family; saying so up front names the flag and the
+// server instead of leaving "no suitable address found" from the dialler. A
+// name is not checked: it is resolved for the family when it is dialled.
+func checkServerFamily(fam core.AddrFamily, host string) error {
+	allowed, literal := fam.Allows(host)
+	if !literal || allowed {
+		return nil
+	}
+	other := core.FamilyIPv6
+	if fam == core.FamilyIPv6 {
+		other = core.FamilyIPv4
+	}
+	return fmt.Errorf("%s given, but server %s is an %s address", fam.Flag(), host, other)
 }
 
 // parseTsigFlag parses a dig-style -y value "[algorithm:]name:secret". The
@@ -843,7 +945,7 @@ func dogServerVerifyConfig(options map[string]string) (*tls.Config, error) {
 	}
 
 	if options["tlsa"] == "true" {
-		return dogDaneTLSConfig(server, port)
+		return dogDaneTLSConfig(server, port, options)
 	}
 
 	peer := tdns.PeerConf{
@@ -873,15 +975,19 @@ func dogServerVerifyConfig(options map[string]string) (*tls.Config, error) {
 // the chain is not provably secure. The lookup goes through the system
 // resolver rather than @server because @server is typically the
 // authoritative primary being transferred from, not a recursive.
-func dogDaneTLSConfig(server, port string) (*tls.Config, error) {
+//
+// -4/-6 applies to that lookup too, in options: the resolver is the first
+// nameserver of the family and the queries to it stay on the family. A -6 run
+// that sent its TLSA lookups over IPv4 would not be IPv6-only.
+func dogDaneTLSConfig(server, port string, options map[string]string) (*tls.Config, error) {
 	if net.ParseIP(server) != nil {
 		return nil, fmt.Errorf("+tlsa needs a server NAME for the TLSA base; got IP literal %s (use +pin= or +cafile=)", server)
 	}
-	resolver, err := ParseResolvConf()
+	resolver, err := ParseResolvConfFamily(addrFamilyFromOptions(options))
 	if err != nil {
 		return nil, fmt.Errorf("+tlsa: cannot determine system resolver: %v", err)
 	}
-	client := core.NewDNSClient(core.TransportDo53, "53", nil)
+	client := core.NewDNSClient(core.TransportDo53, "53", nil, familyOptions(options)...)
 	dss, taSource := loadChaserAnchors()
 	chaser := tdns.NewChaser(client, resolver, dss)
 	chaser.TrustAnchorSource = taSource
@@ -933,7 +1039,8 @@ func showServerPin(options map[string]string) {
 		fmt.Fprintf(os.Stderr, ";; +showpin: assuming DoT on port %s (use +dot with -p to override)\n", port)
 	}
 	addr := net.JoinHostPort(server, port)
-	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr,
+	// "tcp4" / "tcp6" under -4 / -6, "tcp" otherwise.
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, addrFamilyFromOptions(options).Network("tcp"), addr,
 		&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12, NextProtos: []string{"dot"}})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: cannot fetch server certificate from %s: %v\n", addr, err)
@@ -1287,27 +1394,48 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 }
 
 func ParseResolvConf() (string, error) {
+	return ParseResolvConfFamily(core.FamilyAny)
+}
+
+// ParseResolvConfFamily is ParseResolvConf for -4 / -6: the first nameserver in
+// /etc/resolv.conf that is an address of the family. FamilyAny takes the first
+// one, as ParseResolvConf always has.
+func ParseResolvConfFamily(fam core.AddrFamily) (string, error) {
 	// Read /etc/resolv.conf to get the default nameserver
 	content, err := os.ReadFile("/etc/resolv.conf")
 	if err != nil {
 		return "", fmt.Errorf("unable to read /etc/resolv.conf: %w", err)
 	}
-	lines := strings.Split(string(content), "\n")
-	foundNameserver := false
-	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "nameserver") {
-			fields := strings.Fields(line)
-			if len(fields) == 2 {
-				server = fields[1]
-				foundNameserver = true
-				break
-			}
+	return pickNameserver(string(content), fam)
+}
+
+// pickNameserver is the parsing half of ParseResolvConfFamily, on the file's
+// text so a test can feed it any resolv.conf.
+func pickNameserver(content string, fam core.AddrFamily) (string, error) {
+	sawNameserver := false
+	for _, line := range strings.Split(content, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "nameserver") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		sawNameserver = true
+		if fam == core.FamilyAny {
+			return fields[1], nil
+		}
+		// A nameserver that is a name rather than an address cannot be placed
+		// in a family without resolving it, and resolv.conf takes addresses
+		// only, so it does not count.
+		if allowed, literal := fam.Allows(fields[1]); literal && allowed {
+			return fields[1], nil
 		}
 	}
-	if !foundNameserver {
+	if !sawNameserver {
 		return "", fmt.Errorf("no nameserver entry found in /etc/resolv.conf")
 	}
-	return server, nil
+	return "", fmt.Errorf("no %s nameserver found in /etc/resolv.conf (needed by %s); name one with @server", fam, fam.Flag())
 }
 
 // bracketBareIPv6URL rewrites "<scheme>://<bare-ipv6>[/path]" as

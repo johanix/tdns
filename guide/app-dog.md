@@ -45,9 +45,32 @@ $ dog @ns1.example.com www.example.com AAAA +dnssec +multi
   argument; queries are always class IN.
 
 Flags: `-v`/`--verbose`, `-d`/`--debug`, `--version`, `--short`, `-p`/`--port`,
-`-k`/`--trust-anchor <file>`, and `-y [algorithm:]name:secret` for TSIG
+`-k`/`--trust-anchor <file>`, `-4`/`--ipv4`, `-6`/`--ipv6`, and
+`-y [algorithm:]name:secret` for TSIG
 (dig-compatible; algorithm defaults to `hmac-sha256`, and TSIG works on Do53,
 Do53-TCP and DoT only).
+
+### `-4` and `-6`
+
+As in dig, `-4` makes dog use IPv4 only and `-6` IPv6 only:
+
+```console
+$ dog -6 @ns1.example.com www.example.com AAAA
+$ dog -4 @ns1.example.com www.example.com AAAA
+```
+
+- A server given by **name** is resolved for that family only, so a name with
+  both an A and an AAAA record is queried at the address `-4` or `-6` picks.
+- With **no `@server`**, dog takes the first nameserver of that family in
+  `/etc/resolv.conf`. If there is none, it says so and sends nothing.
+- A server given as an **address of the other family** (`-4 @2001:db8::53`) is
+  refused up front, naming the flag and the server.
+- `-4` and `-6` together is an error (dig's "only one of -4 and -6 allowed"),
+  not "the last one wins".
+- The restriction holds for **everything** the run sends, not just the query:
+  every transport (Do53 over UDP and TCP, DoT, DoH, DoQ), the TCP retry after a
+  truncated answer, zone transfers, the `+sigchase` walk, the `+tlsa` lookup
+  and `+showpin`.
 
 ## `+options`
 

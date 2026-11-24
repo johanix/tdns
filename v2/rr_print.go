@@ -307,6 +307,12 @@ func xfrErrorRcode(errstr string) (string, bool) {
 	return fmt.Sprintf("rcode %d", rcode), true
 }
 
+// xfrDialTimeout bounds the connect of a zone transfer dialled by
+// ZoneTransferPrint itself (a restricted address family). It is miekg's own
+// default for Transfer.In, so choosing -4 or -6 does not change how long a
+// transfer waits to connect.
+const xfrDialTimeout = 2 * time.Second
+
 // ZoneTransferPrint fetches and prints an AXFR/IXFR. When tsigName is non-empty
 // the request is TSIG-signed with that key (algorithm tsigAlgo, base64 secret
 // tsigSecret) and the response envelope MACs are verified -- so a transfer gated
@@ -343,6 +349,29 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 	if tsigName != "" {
 		msg.SetTsig(dns.Fqdn(tsigName), tsigAlgo, 300, time.Now().Unix())
 		transfer.TsigSecret = map[string]string{dns.Fqdn(tsigName): tsigSecret}
+	}
+	// -4/-6 (options[core.OptionAddrFamily]). Transfer.In dials for itself, as
+	// "tcp" or "tcp-tls", and takes no network name, so a restricted transfer
+	// dials first, on the family, and hands the connection over. It is the one
+	// place dog's zone-transfer path would otherwise ignore the flag: a -6
+	// AXFR that went out over IPv4 would look exactly like one that did not.
+	fam, ferr := core.ParseAddrFamily(options[core.OptionAddrFamily])
+	if ferr != nil {
+		fmt.Printf("Error: %v\n", ferr)
+		return ferr
+	}
+	if fam != core.FamilyAny {
+		var conn *dns.Conn
+		if tlsConfig != nil {
+			conn, err = dns.DialTimeoutWithTLS(fam.Network("tcp"), upstream, tlsConfig, xfrDialTimeout)
+		} else {
+			conn, err = dns.DialTimeout(fam.Network("tcp"), upstream, xfrDialTimeout)
+		}
+		if err != nil {
+			fmt.Printf("Error from transfer.In: %v\n", err)
+			return err
+		}
+		transfer.Conn = conn
 	}
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {

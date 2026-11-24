@@ -34,6 +34,13 @@ import (
 // FIN. A test against it would pass with or without the fix.
 func startStrictDoQServer(t *testing.T) (string, func()) {
 	t.Helper()
+	return startStrictDoQServerOn(t, "127.0.0.1:0")
+}
+
+// startStrictDoQServerOn is startStrictDoQServer on a chosen listen address,
+// which is what lets a test put the same server on ::1.
+func startStrictDoQServerOn(t *testing.T, listen string) (string, func()) {
+	t.Helper()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -53,7 +60,7 @@ func startStrictDoQServer(t *testing.T) (string, func()) {
 		t.Fatalf("create certificate: %v", err)
 	}
 
-	l, err := quic.ListenAddr("127.0.0.1:0", &tls.Config{
+	l, err := quic.ListenAddr(listen, &tls.Config{
 		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
 		NextProtos:   []string{"doq"},
 		MinVersion:   tls.VersionTLS13,
