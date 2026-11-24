@@ -133,3 +133,62 @@ func TestARuntimeOptionThatEndsOriginationMarksTheCopy(t *testing.T) {
 		t.Error("switching the last origination option off did not mark the copy")
 	}
 }
+
+// A mark made while a refresh is under way, after it began and before its
+// publish, must outlive that refresh: it may have applied an IXFR to the
+// zone's own copy, or restored dynamic records collected under the options
+// that ended. The next refresh, which began after the mark, replaces the copy
+// with a full transfer and clears it.
+func TestAMarkMadeDuringARefreshOutlivesItsInstall(t *testing.T) {
+	const upstream = `example.	3600	IN	SOA	ns.example. hostmaster.example. 40 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+`
+	kdb := newTestKeyDB(t)
+	conf, _ := persistentConf(t, kdb)
+	withAppType(t, AppTypeAgent)
+	addr, stop := startTestPrimary(t, upstream)
+	defer stop()
+	zd := &ZoneData{
+		ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
+		Logger: discardLogger(), KeyDB: kdb,
+		Options:   map[ZoneOption]bool{OptApiManagedZone: true},
+		Upstreams: []PeerConf{{Addr: addr}},
+	}
+	registerZones(t, zd)
+	t.Cleanup(zd.stopPublisher)
+	if _, err := zd.Refresh(context.Background(), false, false, false, conf); err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+	if zd.relayCopyUnconfirmed.Load() {
+		t.Fatal("setup: the first load should leave a confirmed copy")
+	}
+
+	marked := false
+	zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(served, _ *ZoneData) {
+		if marked {
+			return
+		}
+		marked = true
+		served.mu.Lock()
+		served.markRelayCopyUnconfirmedLocked()
+		served.mu.Unlock()
+	})
+	before := zd.publishedSnapshot()
+	if _, err := zd.Refresh(context.Background(), false, false, true, conf); err != nil {
+		t.Fatalf("refresh during which the mark is made: %v", err)
+	}
+	if !marked || zd.publishedSnapshot() == before {
+		t.Fatalf("setup: the forced refresh should run its hooks and install (hooks %v)", marked)
+	}
+	if !zd.relayCopyUnconfirmed.Load() {
+		t.Error("a refresh that began before the mark cleared it")
+	}
+
+	if _, err := zd.Refresh(context.Background(), false, false, false, conf); err != nil {
+		t.Fatalf("refresh after the mark: %v", err)
+	}
+	if zd.relayCopyUnconfirmed.Load() {
+		t.Error("the refresh that began after the mark did not clear it")
+	}
+}

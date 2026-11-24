@@ -165,6 +165,10 @@ func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, con
 func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, conf *Config, gate *transferGate) (bool, error) {
 	var updated bool
 
+	// Before anything this refresh reads: a relay-copy mark made after this
+	// point must outlive the refresh (relayCopyMarks).
+	marks := zd.relayCopyMarks.Load()
+
 	// Collect dynamic RRs before refresh (they will be lost during refresh)
 	dynamicRRs := zd.CollectDynamicRRs(conf)
 
@@ -214,8 +218,8 @@ func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, con
 			return false, err
 		}
 		if usableSOA && !force && zd.relayCopyNeedsTransfer() {
-			lg.Info("relayed zone: replacing the copy adopted from disk with a full transfer",
-				"zone", zd.ZoneName, "copy_serial", zd.IncomingSerial, "upstream_serial", upstream_serial)
+			lg.Info("relayed zone: replacing an unconfirmed copy with a full transfer",
+				"zone", zd.ZoneName, "incoming_serial", zd.IncomingSerial, "upstream_serial", upstream_serial)
 			force = true
 		}
 
@@ -225,7 +229,7 @@ func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, con
 			} else if force {
 				lg.Debug("forced retransfer regardless of SOA serial", "zone", zd.ZoneName)
 			}
-			updated, err = zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, gate)
+			updated, err = zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, gate, marks)
 			if err != nil {
 				// DEBUG: the caller's noteRefreshFailure logs the one ERROR
 				// for this refresh, with every upstream and its error.
@@ -1248,11 +1252,12 @@ func (zd *ZoneData) gateZonemdUnlessAlreadyGated(ctx context.Context, newZd *Zon
 // from our own serial would answer with a single SOA rather than the zone the
 // operator asked for.
 func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
-	return zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, nil)
+	return zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, nil, zd.relayCopyMarks.Load())
 }
 
-// fetchFromUpstream is FetchFromUpstream with the pool's transfer gate.
-func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config, gate *transferGate) (bool, error) {
+// fetchFromUpstream is FetchFromUpstream with the pool's transfer gate. marks
+// is relayCopyMarks when the caller's refresh began.
+func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config, gate *transferGate, marks uint64) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {
 		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
@@ -1441,8 +1446,10 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 	// the replacement (the zone is no longer live) or refuse it, and the zone
 	// then serves its previous copy. Only an installed snapshot confirms a
 	// relay copy (relayCopyNeedsTransfer); until then every refresh forces a
-	// full transfer again.
-	if zd.snapshot.Load() != before {
+	// full transfer again. Nor does a refresh that began before the last mark:
+	// it may have applied an IXFR to the zone's own copy, or restored dynamic
+	// records collected under the options that ended (relayCopyMarks).
+	if zd.snapshot.Load() != before && zd.relayCopyMarks.Load() == marks {
 		zd.relayCopyUnconfirmed.Store(false)
 	}
 	if firstLoad {

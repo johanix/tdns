@@ -102,10 +102,18 @@ func agentZoneMayOriginateContent(zd *ZoneData) bool {
 func (zd *ZoneData) markRelayCopyIfOriginationEnded(wasOriginating bool) {
 	if wasOriginating && Globals.App.Type == AppTypeAgent && zd.snapshot.Load() != nil &&
 		!zoneMayOriginateContent(zd) {
-		zd.relayCopyUnconfirmed.Store(true)
+		zd.markRelayCopyUnconfirmedLocked()
 		lg.Info("zone stopped originating content: its copy is replaced by a full transfer at the next refresh",
 			"zone", zd.ZoneName)
 	}
+}
+
+// markRelayCopyUnconfirmedLocked sets the relay-copy mark and counts it, so a
+// refresh that began before this mark does not clear it (relayCopyMarks).
+// Called with zd.mu held: the refresh checks the count under it.
+func (zd *ZoneData) markRelayCopyUnconfirmedLocked() {
+	zd.relayCopyMarks.Add(1)
+	zd.relayCopyUnconfirmed.Store(true)
 }
 
 // childUpdatesLeaveTheZone reports whether opt, on this zone, only receives
