@@ -192,3 +192,70 @@ ns.example.	3600	IN	A	10.0.0.1
 		t.Error("the refresh that began after the mark did not clear it")
 	}
 }
+
+// The IXFR case of the test above, end to end. The agent's copy holds a record
+// it wrote itself while allow-api-updates made it originate. A refresh chooses
+// IXFR and applies the upstream's delta to that copy; before its publish, a
+// reload ends the zone's origination. That install keeps the zone's own
+// record, so it must not confirm the copy. The next refresh forces a full
+// transfer, which removes the record and confirms the copy.
+func TestAnIxfrBegunBeforeOriginationEndedDoesNotConfirmTheCopy(t *testing.T) {
+	asDerivedApp(t, AppTypeAgent)
+	pzd, addr, stop := ixfrTestPrimary(t, ixApplyZone)
+	defer stop()
+	base := pzd.publishedSnapshot().Serial
+	// Registered only while the primary builds its chain: see
+	// TestIxfrInConvergesViaDelta.
+	Zones.Set("example.", pzd)
+	t.Cleanup(func() { Zones.Remove("example.") })
+	stageAndPublish(t, pzd, stageAddA(t, pzd, "one.example.", "10.1.0.1"))
+	Zones.Remove("example.")
+
+	own := ixApplyZone + "own.example.\t3600\tIN\tA\t10.9.9.9\n"
+	zd := ixfrTestSecondary(t, own, addr, map[ZoneOption]bool{OptAllowApiUpdates: true})
+	zd.IncomingSerial, zd.CurrentSerial = base, base
+	if !zoneMayOriginateContent(zd) {
+		t.Fatal("setup: the allow-api-updates zone should originate")
+	}
+
+	ended, viaIxfr := false, false
+	zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(served, incoming *ZoneData) {
+		if ended {
+			return
+		}
+		ended, viaIxfr = true, incoming.ixfrDerived
+		served.mu.Lock()
+		was := zoneMayOriginateContent(served)
+		served.Options = map[ZoneOption]bool{}
+		served.markRelayCopyIfOriginationEnded(was)
+		served.mu.Unlock()
+	})
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
+		t.Fatalf("refresh during which origination ends: %v", err)
+	}
+	if !ended || !viaIxfr {
+		t.Fatalf("setup: the refresh should apply an IXFR (hooks ran %v, ixfr %v)", ended, viaIxfr)
+	}
+	if o, _ := zd.GetOwner("own.example."); o == nil {
+		t.Fatal("setup: the delta should apply to the zone's own copy, keeping own.example.")
+	}
+	if !zd.relayCopyUnconfirmed.Load() {
+		t.Fatal("the IXFR begun before origination ended confirmed the copy with the zone's own record in it")
+	}
+
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
+		t.Fatalf("refresh after origination ended: %v", err)
+	}
+	if o, _ := zd.GetOwner("own.example."); o != nil {
+		t.Error("the full transfer kept the record the zone wrote itself")
+	}
+	if o, _ := zd.GetOwner("one.example."); o == nil {
+		t.Error("the upstream's one.example. is missing")
+	}
+	if zd.relayCopyUnconfirmed.Load() {
+		t.Error("the full transfer after origination ended did not confirm the copy")
+	}
+	if got, want := zd.IncomingSerial, pzd.publishedSnapshot().Serial; got != want {
+		t.Errorf("serial %d, want the upstream's %d", got, want)
+	}
+}
