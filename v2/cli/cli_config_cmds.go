@@ -425,7 +425,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	// entry is known to fit in the CLI config).
 	var cert *CertSetup
 	if tcpURL != "" {
-		cert = planCert(o, info, commandWord(entry, info.Role))
+		cert = planCert(o, info)
 		res.Cert = cert
 		if !cert.usable() {
 			return nil, cert.refusal(fmt.Sprintf("not adding %s: a new entry uses your client certificate, and %s",
@@ -775,7 +775,7 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 		up, repin = pinnedEntry(res, e, info)
 	}
 
-	c := planCert(o, info, commandWord(e, info.Role))
+	c := planCert(o, info)
 	res.Cert = c
 	defer c.release() // what apply or confirm keeps locked, once the entry is written
 	isCert := strings.EqualFold(e.AuthMethod, "certificate")
@@ -1037,15 +1037,6 @@ func knownEdit(o AddOptions, res *AddResult, e, up ApiDetails, existing []ApiDet
 		}
 		return nil
 	}, nil
-}
-
-// commandWord is the word that reaches entry e of a role daemon: the role
-// for the canonical entry, the entry's name for an instance.
-func commandWord(e ApiDetails, role string) string {
-	if e.Role == "" {
-		return role
-	}
-	return e.Name
 }
 
 // hostPort returns the host:port of a base URL, lower-cased, or "". A URL

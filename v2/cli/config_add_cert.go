@@ -52,8 +52,7 @@ const (
 // on one daemon, and what it did (or, in a dry run, would do) about it.
 type CertSetup struct {
 	info *DaemonApi // the daemon config, as config add read it
-	role string     // the daemon type: auth, agent, imr
-	word string     // the command word the advice uses: auth, auth2, ...
+	role string     // the daemon type, and the command word the advice uses: auth, agent, imr
 
 	cert, key string // the operator's pair
 	pin       string // its pin; "" in a dry run before the pair exists
@@ -169,10 +168,8 @@ func (c *CertSetup) pairCannot(problem clientPairProblem, err error) *CertSetup 
 // only when the daemon is not running, its access file, which its next start
 // reads. Nothing on its socket does not say it is not running (askDaemon):
 // nothing on TCP either does.
-//
-// word is the command word the advice it prints uses for the daemon.
-func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
-	c := &CertSetup{info: info, role: info.Role, word: word, t: accessTargetOf(info), dryRun: o.DryRun}
+func planCert(o AddOptions, info *DaemonApi) *CertSetup {
+	c := &CertSetup{info: info, role: info.Role, t: accessTargetOf(info), dryRun: o.DryRun}
 
 	relative := c.t.Configured && !filepath.IsAbs(c.t.File)
 	af, old, aerr := c.readFile(relative)
@@ -792,7 +789,7 @@ func (c *CertSetup) confirm(o AddOptions) error {
 	var again *CertSetup
 	same := false
 	if now, err := ReadDaemonApi(c.t.DaemonConfig, c.role); err == nil {
-		again = planCert(o, now, c.word)
+		again = planCert(o, now)
 		same = now.AccessFile == c.info.AccessFile && sameApiApartFromAccess(c.info, now)
 	}
 	if !same || again.state != certWorks || again.pin != c.pin {
@@ -1342,11 +1339,9 @@ func (c *CertSetup) fixLines() []string {
 	case c.unidentified:
 		return c.sockFixLines()
 	case c.state == certDisabled:
-		return []string{
-			"on the daemon's host, as root:",
-			"   tdns-ncli " + c.word + " client enable " + shellQuote(c.listedAs),
-			"then run config add again.",
-		}
+		return fixWith("on the daemon's host, as root:",
+			c.daemonCmd("client", "enable", shellQuote(c.listedAs)),
+			"then run config add again.")
 	case c.pairProblem != 0:
 		return c.pairFixLines()
 	case c.fileInvalid:
@@ -1364,11 +1359,9 @@ func (c *CertSetup) fixLines() []string {
 				"and reload the daemon; then run config add again.",
 			}
 		}
-		return []string{
-			"on the daemon's host, as root:",
-			"   tdns-ncli " + c.word + " config reload",
-			"then run config add again.",
-		}
+		return fixWith("on the daemon's host, as root:",
+			c.daemonCmd("config", "reload"),
+			"then run config add again.")
 	}
 	if c.pin == "" {
 		// A dry run, before the pair exists: there is no pin to name yet.
@@ -1378,10 +1371,8 @@ func (c *CertSetup) fixLines() []string {
 			"and then says how to enrol it.",
 		}
 	}
-	lines := []string{
-		"on the daemon's host, as root:",
-		fmt.Sprintf("   tdns-ncli %s client add %s --pin %s --role read-write", c.word, shellQuote(c.name), c.pin),
-	}
+	lines := fixWith("on the daemon's host, as root:",
+		c.daemonCmd("client", "add", shellQuote(c.name), "--pin "+c.pin, "--role read-write"))
 	if !c.t.Configured {
 		lines = append(lines,
 			"and add under apiserver: in "+c.t.DaemonConfig+":",
@@ -1389,6 +1380,51 @@ func (c *CertSetup) fixLines() []string {
 			"and reload the daemon; then run config add again.")
 	} else {
 		lines = append(lines, "then run config add again.")
+	}
+	return lines
+}
+
+// fixCmdWidth is the widest a command line of a fix may be, its indent
+// included: printed after "  Fix: " (printRefusal), it then fits textWidth.
+const fixCmdWidth = textWidth - len("  Fix: ")
+
+// daemonCmd is a tdns-ncli command for this daemon as a fix gives it, run
+// on the daemon's host: the role word, which every tdns-ncli has, and
+// --daemon-config naming the daemon config. So it reaches this daemon
+// before the CLI config has an entry for it, and whatever root's CLI config
+// calls it (the role word alone reaches the role's default daemon, which
+// may be another). Command lines, indented three spaces, wrapped with a
+// trailing backslash to fixCmdWidth: a word too wide stays whole.
+func (c *CertSetup) daemonCmd(args ...string) []string {
+	words := append([]string{"tdns-ncli", c.role}, args...)
+	words = append(words, "--daemon-config "+shellQuote(c.t.DaemonConfig))
+	var lines []string
+	line := "   " + words[0]
+	for i, w := range words[1:] {
+		room := fixCmdWidth // the last word needs no " \\" after it
+		if i < len(words)-2 {
+			room -= len(" \\")
+		}
+		if len(line)+len(" ")+len(w) <= room {
+			line += " " + w
+			continue
+		}
+		lines = append(lines, line+" \\")
+		line = "      " + w
+	}
+	return append(lines, line)
+}
+
+// fixWith is fix lines made of prose and commands (daemonCmd), in order.
+func fixWith(parts ...any) []string {
+	var lines []string
+	for _, p := range parts {
+		switch p := p.(type) {
+		case string:
+			lines = append(lines, p)
+		case []string:
+			lines = append(lines, p...)
+		}
 	}
 	return lines
 }
@@ -1474,7 +1510,7 @@ func (c *CertSetup) pairFixLines() []string {
 func (c *CertSetup) listedEnrollment() string {
 	switch c.listedRole {
 	case "read-only":
-		return c.listedAs + ", read-only: write commands will be refused (tdns-ncli " + c.word + " client set-role " + shellQuote(c.listedAs) + " read-write changes that)"
+		return c.listedAs + ", read-only: write commands will be refused (tdns-ncli " + c.role + " client set-role " + shellQuote(c.listedAs) + " read-write --daemon-config " + shellQuote(c.t.DaemonConfig) + " changes that)"
 	case "":
 		return c.listedAs
 	}

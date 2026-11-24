@@ -1614,6 +1614,10 @@ func printed(r *AddResult, dryRun bool, cfg string) string {
 // flat is s with every run of white space one space.
 func flat(s string) string { return strings.Join(strings.Fields(s), " ") }
 
+// oneLine is fix lines, or printed output, flat, with the commands'
+// backslash continuations joined: what a shell runs.
+func oneLine(s string) string { return strings.ReplaceAll(flat(s), ` \ `, " ") }
+
 // A new entry authenticates by certificate. The daemon config names no access
 // file, so config add creates one with the operator's pin (read-write), adds
 // access-file: to the daemon config (nothing else in it changes), and, the
@@ -1877,8 +1881,8 @@ func TestAddKeepsTheKeyWhenItCannotWriteTheDaemonSide(t *testing.T) {
 	if !errors.As(err, &r) {
 		t.Fatalf("new entry: err = %v, want a refusal", err)
 	}
-	fix := strings.Join(r.fix, "\n")
-	for _, w := range []string{"tdns-ncli auth client add tester --pin " + pin + " --role read-write", "access-file: " + accessFileOf(d)} {
+	fix := oneLine(strings.Join(r.fix, "\n"))
+	for _, w := range []string{"tdns-ncli auth client add tester --pin " + pin + " --role read-write --daemon-config " + d, "access-file: " + accessFileOf(d)} {
 		if !strings.Contains(fix, w) {
 			t.Errorf("fix lacks %q:\n%s", w, fix)
 		}
@@ -1905,8 +1909,8 @@ func TestAddKeepsTheKeyWhenItCannotWriteTheDaemonSide(t *testing.T) {
 	if _, err := os.Stat(accessFileOf(d)); err == nil {
 		t.Error("an access file was created")
 	}
-	out := printed(res, false, env.cli)
-	for _, w := range []string{"keeps the API key", "tdns-ncli auth client add tester --pin " + pin + " --role read-write", "access-file: " + accessFileOf(d)} {
+	out := oneLine(printed(res, false, env.cli))
+	for _, w := range []string{"keeps the API key", "tdns-ncli auth client add tester --pin " + pin + " --role read-write --daemon-config " + d, "access-file: " + accessFileOf(d)} {
 		if !strings.Contains(out, w) {
 			t.Errorf("output lacks %q:\n%s", w, out)
 		}
@@ -2356,7 +2360,10 @@ func TestAddOutputLayout(t *testing.T) {
 			t.Errorf("refusal begins %q", ls[0])
 		}
 		follows(t, ls, "  Fix: on the daemon's host, as root:",
-			"          tdns-ncli auth client add tester --pin "+pin+" --role read-write")
+			"          tdns-ncli auth client add tester \\",
+			"             --pin "+pin+" \\",
+			"             --role read-write \\",
+			"             --daemon-config "+d)
 
 		writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: "+env.url(8989)+"\n     apikey: the-key\n     authmethod: X-API-Key\n     tlsauth: pin\n     pins: [ \""+dpin+"\" ]\n     config-file: "+d+"\n")
 		res, err := env.add(t, d, nil)
@@ -2374,7 +2381,10 @@ func TestAddOutputLayout(t *testing.T) {
 			t.Errorf("verdict %q", ls[0])
 		}
 		follows(t, ls, "To use the certificate instead, on the daemon's host, as root:",
-			"   tdns-ncli auth client add tester --pin "+pin+" --role read-write",
+			"   tdns-ncli auth client add tester \\",
+			"      --pin "+pin+" \\",
+			"      --role read-write \\",
+			"      --daemon-config "+d,
 			"and add under apiserver: in "+d+":",
 			"   access-file: "+accessFileOf(d),
 			"and reload the daemon; then run config add again.")
@@ -2507,7 +2517,7 @@ func TestAddRechecksTheAccessFileBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	c := planCert(AddOptions{CliConfig: env.cli}, info)
 	if c.state != certCanEnable || !c.nameIt {
 		t.Fatalf("plan %+v", c)
 	}
@@ -2533,7 +2543,7 @@ func TestAddReloadsADaemonThatStartedMeanwhile(t *testing.T) {
 	env.pin(t)
 	d, _ := env.certDaemon(t, env.dir, "")
 	info, _ := ReadDaemonApi(d, "")
-	c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	c := planCert(AddOptions{CliConfig: env.cli}, info)
 	if c.state != certCanEnable || c.running {
 		t.Fatalf("plan %+v", c)
 	}
@@ -2815,7 +2825,7 @@ func applyForRollback(t *testing.T) appliedCert {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.c = planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	a.c = planCert(AddOptions{CliConfig: env.cli}, info)
 	if a.c.state != certCanEnable || !a.c.nameIt || !a.c.addPin {
 		t.Fatalf("plan %+v", a.c)
 	}
@@ -2941,7 +2951,7 @@ func TestRollbackHoldsTheFileLocks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+		c := planCert(AddOptions{CliConfig: env.cli}, info)
 		if c.state != certCanEnable || !c.nameIt {
 			t.Fatalf("plan %+v", c)
 		}
@@ -3113,7 +3123,7 @@ func TestCertFixLinesUnidentifiedAndNoPin(t *testing.T) {
 	}{
 		{
 			name: "it does not say which config it runs",
-			c:    &CertSetup{word: "auth", state: certCannot, t: tg, unidentified: true, other: &otherConfigError{want: tg.DaemonConfig}},
+			c:    &CertSetup{role: "auth", state: certCannot, t: tg, unidentified: true, other: &otherConfigError{want: tg.DaemonConfig}},
 			want: []string{
 				"stop the daemon that answers on /var/run/tdns-auth.sock if it does",
 				"not run /etc/tdns/tdns-auth.yaml, or give the two configs their own",
@@ -3123,7 +3133,7 @@ func TestCertFixLinesUnidentifiedAndNoPin(t *testing.T) {
 		},
 		{
 			name: "it cannot be asked",
-			c:    &CertSetup{word: "auth", state: certCannot, t: tg, unidentified: true},
+			c:    &CertSetup{role: "auth", state: certCannot, t: tg, unidentified: true},
 			want: []string{
 				"fix what stops the daemon on /var/run/tdns-auth.sock saying",
 				"which config it runs (the error says what);",
@@ -3132,7 +3142,7 @@ func TestCertFixLinesUnidentifiedAndNoPin(t *testing.T) {
 		},
 		{
 			name: "a dry run before your pair exists",
-			c:    &CertSetup{word: "auth", name: "ops-laptop", state: certCannot, t: tg, pairNew: true},
+			c:    &CertSetup{role: "auth", name: "ops-laptop", state: certCannot, t: tg, pairNew: true},
 			want: []string{
 				"your client certificate does not exist yet, so it has no pin",
 				"to enrol; config add makes it when run without --dry-run,",
@@ -3224,17 +3234,17 @@ func TestAddDryRunProbesNothing(t *testing.T) {
 // is quoted; and a pin already listed is not enrolled again.
 func TestCertFixLines(t *testing.T) {
 	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml"}
-	c := &CertSetup{word: "auth", listedAs: "Ops Laptop", state: certDisabled, t: tg}
+	c := &CertSetup{role: "auth", listedAs: "Ops Laptop", state: certDisabled, t: tg}
 	if fix := strings.Join(c.fixLines(), "\n"); !strings.Contains(fix, "client enable 'Ops Laptop'") {
 		t.Errorf("fix:\n%s", fix)
 	}
-	c = &CertSetup{word: "auth", listedAs: "laptop", pin: pinOf("p"), state: certCannot, t: tg}
+	c = &CertSetup{role: "auth", listedAs: "laptop", pin: pinOf("p"), state: certCannot, t: tg}
 	fix := strings.Join(c.fixLines(), "\n")
 	if strings.Contains(fix, "client add") || !strings.Contains(fix, "access-file: "+tg.File) {
 		t.Errorf("a listed pin, the file not named; fix:\n%s", fix)
 	}
 	tg.Configured = true
-	if fix := strings.Join(c.fixLines(), "\n"); strings.Contains(fix, "client add") || !strings.Contains(fix, "tdns-ncli auth config reload") {
+	if fix := oneLine(strings.Join(c.fixLines(), "\n")); strings.Contains(fix, "client add") || !strings.Contains(fix, "tdns-ncli auth config reload --daemon-config /etc/tdns/tdns-auth.yaml") {
 		t.Errorf("a listed pin, the file named; fix:\n%s", fix)
 	}
 }
@@ -3346,7 +3356,7 @@ func TestAddOwnPairUnusableFix(t *testing.T) {
 // any other pair trouble (the error says what) is not the enrolment either.
 func TestCertFixLinesOwnPair(t *testing.T) {
 	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml"}
-	c := &CertSetup{word: "auth", cert: "/root/.config/tdns/client.crt", key: "/root/.config/tdns/client.key", state: certCannot, t: tg, pairProblem: pairOther}
+	c := &CertSetup{role: "auth", cert: "/root/.config/tdns/client.crt", key: "/root/.config/tdns/client.key", state: certCannot, t: tg, pairProblem: pairOther}
 	want := []string{
 		"fix what stops config add reading or making your pair,",
 		"/root/.config/tdns/client.crt and /root/.config/tdns/client.key (the error says what);",
@@ -3745,7 +3755,7 @@ func TestAddValidatesTheAccessFileItReliesOn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+		c := planCert(AddOptions{CliConfig: env.cli}, info)
 		if c.state != certCanEnable || !c.nameIt || c.addPin {
 			t.Fatalf("plan %+v", c)
 		}
@@ -3800,8 +3810,8 @@ func TestCertFixLinesQuoteTheAccessFile(t *testing.T) {
 	const af = "/etc/tdns/site: east/tdns-auth-access.yaml"
 	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: af}
 	for _, c := range []*CertSetup{
-		{word: "auth", listedAs: "laptop", pin: pinOf("p"), state: certCannot, t: tg},
-		{word: "auth", name: "laptop", pin: pinOf("p"), state: certCannot, t: tg},
+		{role: "auth", listedAs: "laptop", pin: pinOf("p"), state: certCannot, t: tg},
+		{role: "auth", name: "laptop", pin: pinOf("p"), state: certCannot, t: tg},
 	} {
 		var line string
 		for _, l := range c.fixLines() {
@@ -3837,7 +3847,7 @@ func TestAnotherAddWaitsForAnEnrolmentInFlight(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		a := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+		a := planCert(AddOptions{CliConfig: env.cli}, info)
 		if a.state != certCanEnable || !a.addPin {
 			t.Fatalf("plan %+v", a)
 		}
@@ -4082,7 +4092,7 @@ func TestAddNeedsTheEnrolmentInTheFile(t *testing.T) {
 		if !errors.As(err, &r) || !strings.Contains(r.why, "takes your certificate now, but") || !strings.Contains(r.why, "does not list it") {
 			t.Fatalf("err = %v; want a refusal: the pin is not in the access file", err)
 		}
-		if fix := strings.Join(r.fix, "\n"); !strings.Contains(fix, "tdns-ncli auth client add tester --pin "+pin+" --role read-write") {
+		if fix := oneLine(strings.Join(r.fix, "\n")); !strings.Contains(fix, "tdns-ncli auth client add tester --pin "+pin+" --role read-write --daemon-config "+d) {
 			t.Errorf("fix:\n%s\nwant the enrolment", fix)
 		}
 		if _, err := os.Stat(env.cli); err == nil {
@@ -4121,7 +4131,7 @@ func TestAddRechecksTheApiSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	c := planCert(AddOptions{CliConfig: env.cli}, info)
 	if c.state != certCanEnable || c.nameIt || !c.addPin {
 		t.Fatalf("plan %+v", c)
 	}
@@ -4231,11 +4241,11 @@ func TestAddUnparseableAccessFile(t *testing.T) {
 func TestRefusalNamesTheNewPin(t *testing.T) {
 	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml", Socket: "/var/run/tdns/auth.sock", Configured: true}
 	pin := pinOf("new")
-	gone := &CertSetup{word: "auth", name: "tester", cert: "/root/c.crt", pin: pin, pairNew: true, state: certCannot, t: tg, sockGone: true}
+	gone := &CertSetup{role: "auth", name: "tester", cert: "/root/c.crt", pin: pin, pairNew: true, state: certCannot, t: tg, sockGone: true}
 	if notes := strings.Join(gone.refusal("x").notes, " "); !strings.Contains(notes, pin) || strings.Contains(notes, "in the fix") {
 		t.Errorf("socket gone: notes %q, want the pin itself", notes)
 	}
-	enrol := &CertSetup{word: "auth", name: "tester", cert: "/root/c.crt", pin: pin, pairNew: true, state: certCannot, t: tg}
+	enrol := &CertSetup{role: "auth", name: "tester", cert: "/root/c.crt", pin: pin, pairNew: true, state: certCannot, t: tg}
 	r := enrol.refusal("x")
 	if notes := strings.Join(r.notes, " "); !strings.Contains(notes, "its pin is in the fix") || !strings.Contains(strings.Join(r.fix, " "), pin) {
 		t.Errorf("enrolment: notes %q, fix %q; want the pin in the fix, and said so", notes, r.fix)
@@ -4285,7 +4295,7 @@ func TestAddRechecksYourPair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	c := planCert(AddOptions{CliConfig: env.cli}, info)
 	if c.state != certCanEnable || !c.addPin {
 		t.Fatalf("plan %+v", c)
 	}
@@ -4335,5 +4345,60 @@ func TestAddNoTLSFixBeforeASilentPort(t *testing.T) {
 	}
 	if !reflect.DeepEqual(r.fix, want) {
 		t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(r.fix, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// A second auth daemon (tdns-auth2.yaml, an instance in the CLI config) that
+// config add cannot enrol you in: its fix names a command that reaches that
+// daemon before its entry exists, whatever root's CLI config calls it: the
+// role word and --daemon-config. Run as printed (here, the directory made
+// writable, as for root), it enrols you there, not in the role's default
+// daemon; config add then writes the entry.
+func TestAddFixReachesAnInstanceBeforeItsEntry(t *testing.T) {
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	dir := readOnlyDaemonDir(t, env)
+	af := filepath.Join(dir, "tdns-auth2-access.yaml")
+	writeFile(t, af, "keyauth: true\nclients: []\n")
+	d, _ := env.certDaemon(t, dir, "\n   access-file: "+af)
+	d2 := filepath.Join(dir, "tdns-auth2.yaml")
+	if err := os.Rename(d, d2); err != nil {
+		t.Fatal(err)
+	}
+	f := serveFakeDaemon(t, env.socket(), d2, af)
+	// The canonical tdns-auth is another daemon.
+	d1 := filepath.Join(env.dir, "tdns-auth.yaml")
+	writeFile(t, d1, daemonYAML("TDNS-AUTH", env.at(8990), "k", ""))
+	writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: "+env.url(8990)+"\n     authmethod: certificate\n     config-file: "+d1+"\n")
+	os.Chmod(dir, 0o555)
+
+	_, err := env.add(t, d2, nil)
+	var r addRefusal
+	if !errors.As(err, &r) {
+		t.Fatalf("err = %v, want a refusal", err)
+	}
+	cmd := "tdns-ncli auth client add tester --pin " + pin + " --role read-write --daemon-config " + d2
+	if fix := oneLine(strings.Join(r.fix, "\n")); !strings.Contains(fix, cmd) || strings.Contains(fix, "tdns-ncli auth2") {
+		t.Fatalf("fix:\n%s\nwant %q", strings.Join(r.fix, "\n"), cmd)
+	}
+	for _, l := range r.fix {
+		if len("       "+l) > textWidth && !strings.Contains(l, d2) && !strings.Contains(l, af) {
+			t.Errorf("a fix line wider than %d: %q", textWidth, l)
+		}
+	}
+
+	// As printed, as root on the daemon's host.
+	os.Chmod(dir, 0o755)
+	clientCommandsFor(t, d1)
+	runCmd(t, strings.Fields(cmd)[1:]...)
+	if acc, err := tdns.LoadAccessFile(af); err != nil || clientByPin(acc, pin) == nil {
+		t.Fatalf("%s: %+v (%v), want your pin enrolled", af, acc, err)
+	}
+	if n := f.reloadCount(); n != 1 {
+		t.Errorf("%d reloads of the daemon of %s, want 1", n, d2)
+	}
+	res, err := env.add(t, d2, nil)
+	if err != nil || res.Entry.Name != "auth2" || res.Entry.AuthMethod != "certificate" {
+		t.Errorf("config add again: %+v, %v; want the auth2 certificate entry", res, err)
 	}
 }
