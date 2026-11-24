@@ -736,8 +736,8 @@ func (imr *Imr) Serve(ctx context.Context, requests <-chan Request) {
 }
 
 // handleRecursorRequest answers a single request for Serve, on its own
-// goroutine. Cache hits are answered directly; everything else falls through
-// to Query.
+// goroutine, once the resolver is Ready. Cache hits are answered directly;
+// everything else falls through to Query.
 //
 // Defensive: a top-level recover ensures that any panic in this
 // goroutine logs and reports an error to the caller rather than
@@ -778,6 +778,26 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq Request) {
 			imr.lgImr().Warn("HandleRecursorRequest: ctx cancelled before response delivered", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
 		case <-time.After(2 * time.Second):
 			imr.lgImr().Warn("HandleRecursorRequest: timed out sending response", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+		}
+	}
+
+	// A request waits for the resolver to be Ready, within the query
+	// budget, and fails as Query does when it stopped before it was ready
+	// (Serve): the cache is not answered from before then either. The
+	// lookup below inherits the deadline, so the wait and the lookup share
+	// one budget, as in Query.
+	qctx := ctx
+	select {
+	case <-imr.Ready():
+	default:
+		if budget := imr.Tuning.QueryBudget; budget > 0 {
+			var cancel context.CancelFunc
+			qctx, cancel = context.WithTimeout(ctx, budget)
+			defer cancel()
+		}
+		if err := imr.WaitReady(qctx); err != nil {
+			sendResp(buildImrResponse(nil, err))
+			return
 		}
 	}
 
@@ -836,7 +856,7 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq Request) {
 	}
 
 	imr.lgImr().Debug("not in cache, querying", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
-	resp, err := imr.Query(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass)
+	resp, err := imr.Query(qctx, rrq.Qname, rrq.Qtype, rrq.Qclass)
 	if err != nil {
 		imr.lgImr().Error("ImrQuery failed",
 			"qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "err", err)

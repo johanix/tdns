@@ -337,3 +337,36 @@ func TestServeAnswersItsRequests(t *testing.T) {
 		t.Fatal("Serve did not return when its channel was closed")
 	}
 }
+
+// A request Serve answers waits for the resolver to be Ready even when the
+// cache already holds the answer, and is answered from the cache once it is.
+func TestServeAnswersNoCacheHitBeforeReady(t *testing.T) {
+	imr := newTestImr(t)
+	const qname = "cached.example."
+	imr.Cache.Set(qname, dns.TypeA, &cache.CachedRRset{
+		Name: qname, RRtype: dns.TypeA, Context: cache.ContextAnswer,
+		RRset: &core.RRset{Name: qname, Class: dns.ClassINET, RRtype: dns.TypeA,
+			RRs: []dns.RR{mustRR(t, qname+" 3600 IN A 192.0.2.7")}},
+	})
+	// As if the root were still being primed.
+	imr.ready, imr.readyOnce = make(chan struct{}), sync.Once{}
+
+	respch := make(chan Response, 1)
+	go imr.handleRecursorRequest(context.Background(), Request{
+		Qname: qname, Qtype: dns.TypeA, Qclass: dns.ClassINET, ResponseCh: respch,
+	})
+	select {
+	case resp := <-respch:
+		t.Fatalf("answered before the resolver was Ready: %+v", resp)
+	case <-time.After(50 * time.Millisecond):
+	}
+	imr.markReady()
+	select {
+	case resp := <-respch:
+		if resp.Error || resp.RRset == nil || len(resp.RRset.RRs) != 1 {
+			t.Errorf("once Ready: %+v; want the cached answer", resp)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("not answered once Ready")
+	}
+}
