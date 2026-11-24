@@ -2524,7 +2524,7 @@ func TestAddRechecksTheAccessFileBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := planCert(AddOptions{CliConfig: env.cli}, info)
+	c := planCert(AddOptions{CliConfig: env.cli}, info, false)
 	if c.state != certCanEnable || !c.nameIt {
 		t.Fatalf("plan %+v", c)
 	}
@@ -2550,7 +2550,7 @@ func TestAddReloadsADaemonThatStartedMeanwhile(t *testing.T) {
 	env.pin(t)
 	d, _ := env.certDaemon(t, env.dir, "")
 	info, _ := ReadDaemonApi(d, "")
-	c := planCert(AddOptions{CliConfig: env.cli}, info)
+	c := planCert(AddOptions{CliConfig: env.cli}, info, false)
 	if c.state != certCanEnable || c.running {
 		t.Fatalf("plan %+v", c)
 	}
@@ -2832,7 +2832,7 @@ func applyForRollback(t *testing.T) appliedCert {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.c = planCert(AddOptions{CliConfig: env.cli}, info)
+	a.c = planCert(AddOptions{CliConfig: env.cli}, info, false)
 	if a.c.state != certCanEnable || !a.c.nameIt || !a.c.addPin {
 		t.Fatalf("plan %+v", a.c)
 	}
@@ -2958,7 +2958,7 @@ func TestRollbackHoldsTheFileLocks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		c := planCert(AddOptions{CliConfig: env.cli}, info)
+		c := planCert(AddOptions{CliConfig: env.cli}, info, false)
 		if c.state != certCanEnable || !c.nameIt {
 			t.Fatalf("plan %+v", c)
 		}
@@ -3762,7 +3762,7 @@ func TestAddValidatesTheAccessFileItReliesOn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		c := planCert(AddOptions{CliConfig: env.cli}, info)
+		c := planCert(AddOptions{CliConfig: env.cli}, info, false)
 		if c.state != certCanEnable || !c.nameIt || c.addPin {
 			t.Fatalf("plan %+v", c)
 		}
@@ -3854,7 +3854,7 @@ func TestAnotherAddWaitsForAnEnrolmentInFlight(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		a := planCert(AddOptions{CliConfig: env.cli}, info)
+		a := planCert(AddOptions{CliConfig: env.cli}, info, false)
 		if a.state != certCanEnable || !a.addPin {
 			t.Fatalf("plan %+v", a)
 		}
@@ -4108,13 +4108,18 @@ func TestAddNeedsTheEnrolmentInTheFile(t *testing.T) {
 	})
 
 	t.Run("a key entry: kept, not switched", func(t *testing.T) {
-		env, d, dpin, _ := setup(t)
-		writeFile(t, env.cli, env.keyEntry(d, dpin))
+		env, d, _, _ := setup(t)
+		// Its TCP API takes the key (asked, as the daemon runs).
+		tcp := serveFakeTCPDaemon(t, pinOf("someone else"), true)
+		cfg := strings.Replace(readBytes(t, d), env.at(8989), tcp.addr(), 1)
+		writeFile(t, d, strings.Replace(cfg, filepath.Join(env.dir, "api.crt"), tcp.certFile, 1))
+		key := tcpKeyEntry(d, tcp.addr(), tdns.SPKISHA256(tcp.srv.Certificate()))
+		writeFile(t, env.cli, key)
 		res, err := env.add(t, d, nil)
 		if err != nil || !res.KeyKept || res.Switched {
 			t.Fatalf("%+v, %v; want the key kept", res, err)
 		}
-		if readBytes(t, env.cli) != env.keyEntry(d, dpin) {
+		if readBytes(t, env.cli) != key {
 			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
 		}
 		if out := printed(res, false, env.cli); !strings.Contains(out, "keeps the API key") || !strings.Contains(out, "does not list it") {
@@ -4138,7 +4143,7 @@ func TestAddRechecksTheApiSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := planCert(AddOptions{CliConfig: env.cli}, info)
+	c := planCert(AddOptions{CliConfig: env.cli}, info, false)
 	if c.state != certCanEnable || c.nameIt || !c.addPin {
 		t.Fatalf("plan %+v", c)
 	}
@@ -4302,7 +4307,7 @@ func TestAddRechecksYourPair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := planCert(AddOptions{CliConfig: env.cli}, info)
+	c := planCert(AddOptions{CliConfig: env.cli}, info, false)
 	if c.state != certCanEnable || !c.addPin {
 		t.Fatalf("plan %+v", c)
 	}
@@ -4497,7 +4502,7 @@ func TestApplyChecksTheFileTheDaemonRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := planCert(AddOptions{CliConfig: env.cli}, info)
+	c := planCert(AddOptions{CliConfig: env.cli}, info, false)
 	if c.state != certCanEnable || !c.addPin {
 		t.Fatalf("plan %+v", c)
 	}
@@ -4535,7 +4540,7 @@ func TestRollbackChecksWhatTheDaemonRuns(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			c := planCert(AddOptions{CliConfig: env.cli}, info)
+			c := planCert(AddOptions{CliConfig: env.cli}, info, false)
 			if err := c.apply(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -4546,5 +4551,68 @@ func TestRollbackChecksWhatTheDaemonRuns(t *testing.T) {
 				t.Errorf("rollback says %q; want %q", msg, tc.want)
 			}
 		})
+	}
+}
+
+// The daemon runs the key it loaded at its start: the policy it runs (on
+// its socket) letting a key in does not say it takes this one, the key its
+// config says now. A key entry kept is asked over TCP: taken, kept; refused,
+// refused, the entry as it was.
+func TestAddChecksTheKeptKeyOverTCP(t *testing.T) {
+	for _, taken := range []bool{true, false} {
+		t.Run(fmt.Sprintf("taken %v", taken), func(t *testing.T) {
+			env := newAddEnv(t)
+			env.pin(t)
+			dir := readOnlyDaemonDir(t, env) // config add cannot set up the certificate
+			tcp := serveFakeTCPDaemon(t, pinOf("someone else"), taken)
+			d := filepath.Join(dir, "tdns-auth.yaml")
+			writeFile(t, d, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+tcp.addr()+" ]\n   apikey: the-key\n   certfile: "+tcp.certFile+"\n   socket: "+env.socket()+"\n")
+			serveFakeDaemon(t, env.socket(), d, accessFileOf(d)) // runs, no policy: the key is admin
+			os.Chmod(dir, 0o555)
+			key := tcpKeyEntry(d, tcp.addr(), tdns.SPKISHA256(tcp.srv.Certificate()))
+			writeFile(t, env.cli, key)
+			res, err := env.add(t, d, nil)
+			var r addRefusal
+			switch {
+			case taken && (err != nil || !res.KeyKept):
+				t.Errorf("%+v, %v; want the key kept", res, err)
+			case !taken && (!errors.As(err, &r) || !strings.Contains(r.why, "asked over TCP, it refuses the key")):
+				t.Errorf("err = %v; want a refusal: the daemon refuses the key over TCP", err)
+			}
+			if readBytes(t, env.cli) != key {
+				t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+			}
+		})
+	}
+}
+
+// A new entry has no key to keep: config add sends none to the daemon to
+// ask it (here a plain http one, which it would cross in the clear).
+func TestAddSendsNoKeyForANewEntry(t *testing.T) {
+	var mu sync.Mutex
+	var keys []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		keys = append(keys, r.Header.Get("X-API-Key"))
+		mu.Unlock()
+		http.Error(w, "refused", http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	env := newAddEnv(t)
+	env.pin(t)
+	d := filepath.Join(env.dir, "tdns-auth.yaml")
+	writeFile(t, d, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+strings.TrimPrefix(srv.URL, "http://")+" ]\n   apikey: the-key\n   usetls: false\n   socket: "+env.socket()+"\n")
+	if _, err := env.add(t, d, nil); err == nil || !strings.Contains(err.Error(), "has no TLS") {
+		t.Fatalf("err = %v, want the new entry refused: no TLS", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(keys) == 0 {
+		t.Fatal("the daemon was not asked whether it runs")
+	}
+	for _, k := range keys {
+		if k != "" {
+			t.Errorf("the daemon was sent the key %q", k)
+		}
 	}
 }

@@ -53,6 +53,11 @@ const (
 type CertSetup struct {
 	info *DaemonApi // the daemon config, as config add read it
 	role string     // the daemon type, and the command word the advice uses: auth, agent, imr
+	// keyEntry: the add is for an existing entry on the API key, which
+	// keeps it only if the daemon takes it. Only then is the key sent to
+	// the daemon to ask; a new entry, or one on the certificate, has no
+	// key to keep.
+	keyEntry bool
 
 	cert, key string // the operator's pair
 	pin       string // its pin; "" in a dry run before the pair exists
@@ -168,8 +173,10 @@ func (c *CertSetup) pairCannot(problem clientPairProblem, err error) *CertSetup 
 // only when the daemon is not running, its access file, which its next start
 // reads. Nothing on its socket does not say it is not running (askDaemon):
 // nothing on TCP either does.
-func planCert(o AddOptions, info *DaemonApi) *CertSetup {
-	c := &CertSetup{info: info, role: info.Role, t: accessTargetOf(info), dryRun: o.DryRun}
+//
+// keyEntry says the add is for an existing entry on the API key (keyEntry).
+func planCert(o AddOptions, info *DaemonApi, keyEntry bool) *CertSetup {
+	c := &CertSetup{info: info, role: info.Role, keyEntry: keyEntry, t: accessTargetOf(info), dryRun: o.DryRun}
 
 	relative := c.t.Configured && !filepath.IsAbs(c.t.File)
 	af, old, aerr := c.readFile(relative)
@@ -428,23 +435,56 @@ func (c *CertSetup) findKey(view sockView, status tdns.ConfigResponse, serr erro
 		case !a.KeyAuth:
 			c.keyOff, c.keyWhy = true, "the access file it runs turns it off (keyauth: false)"
 		}
+		if c.keyEntry && !c.keyOff {
+			c.keyOverTCP()
+		}
 	case sockShut:
-		r := c.ping(c.info, tdns.ClientOptions{AuthMethod: "X-API-Key", ApiKey: c.info.ApiKey})
+		r := c.ping(c.info, c.keyPing())
 		switch {
+		case r.down:
+			return sockAbsent // nothing on its socket we may open, nothing on TCP: not running
+		case c.pingTimedOut(r):
+			c.keyUnknown = c.timedOut.Error()
+		case !c.keyEntry:
+			// No key was sent, and none is to be kept: only whether it
+			// runs, or is silent, was asked.
 		case r.taken:
 		case r.status == http.StatusServiceUnavailable:
 			c.keyOff, c.keyWhy = true, "its TCP API is closed, as it cannot use its access file"
 		case r.answered:
 			c.keyOff, c.keyWhy = true, "asked over TCP, it refuses the key"
-		case r.down:
-			return sockAbsent // nothing on its socket we may open, nothing on TCP: not running
-		case c.pingTimedOut(r):
-			c.keyUnknown = c.timedOut.Error()
 		default:
 			c.keyUnknown = c.unasked(serr, r)
 		}
 	}
 	return view
+}
+
+// keyPing is how config add pings the daemon's TCP API to find whether it
+// takes the key: with the key, for an existing key entry; without any
+// credentials otherwise (keyEntry), when only whether it runs is asked,
+// so a key is not sent, in the clear on a plain http API, for nothing.
+func (c *CertSetup) keyPing() tdns.ClientOptions {
+	if c.keyEntry {
+		return tdns.ClientOptions{AuthMethod: "X-API-Key", ApiKey: c.info.ApiKey}
+	}
+	return tdns.ClientOptions{AuthMethod: "none"}
+}
+
+// keyOverTCP finds, for a daemon whose socket answered with a policy that
+// lets a key in, whether it takes this one, asking it over TCP: it runs the
+// key it loaded at its start, which the daemon config (the entry's key,
+// changedSettings checked) may no longer say.
+func (c *CertSetup) keyOverTCP() {
+	switch r := c.ping(c.info, c.keyPing()); {
+	case r.taken:
+	case r.status == http.StatusServiceUnavailable:
+		c.keyOff, c.keyWhy = true, "its TCP API is closed, as it cannot use its access file"
+	case r.answered:
+		c.keyOff, c.keyWhy = true, "asked over TCP, it refuses the key (it runs the key it loaded at its start: reload it?)"
+	default:
+		c.keyUnknown = "the daemon answers on its socket, but over TCP, " + r.tcpWhy()
+	}
 }
 
 // recheckKey finds again whether the daemon takes the API key, as planCert
@@ -528,16 +568,20 @@ func (c *CertSetup) ping(info *DaemonApi, o tdns.ClientOptions) pingReply {
 // unasked says why the daemon could not be asked: not on its socket (serr),
 // and not over TCP (r).
 func (c *CertSetup) unasked(serr error, r pingReply) string {
-	tcp := "no TCP API to ask"
+	return fmt.Sprintf("the daemon cannot be asked: %v, and over TCP, %s", serr, r.tcpWhy())
+}
+
+// tcpWhy is why a ping got no answer, as a clause.
+func (r pingReply) tcpWhy() string {
 	switch {
 	case r.base != "" && r.err != nil:
-		tcp = fmt.Sprintf("no answer on %s (%v)", r.base, r.err)
+		return fmt.Sprintf("no answer on %s (%v)", r.base, r.err)
 	case r.base != "":
-		tcp = "no answer on " + r.base
+		return "no answer on " + r.base
 	case r.err != nil:
-		tcp = fmt.Sprintf("config add could not ask it (%v)", r.err)
+		return fmt.Sprintf("config add could not ask it (%v)", r.err)
 	}
-	return fmt.Sprintf("the daemon cannot be asked: %v, and over TCP, %s", serr, tcp)
+	return "no TCP API to ask"
 }
 
 // keyFromFile is whether the daemon takes the key, by its access file: for a
@@ -789,7 +833,7 @@ func (c *CertSetup) confirm(o AddOptions) error {
 	var again *CertSetup
 	same := false
 	if now, err := ReadDaemonApi(c.t.DaemonConfig, c.role); err == nil {
-		again = planCert(o, now)
+		again = planCert(o, now, c.keyEntry)
 		same = now.AccessFile == c.info.AccessFile && sameApiApartFromAccess(c.info, now)
 	}
 	if !same || again.state != certWorks || again.pin != c.pin {
