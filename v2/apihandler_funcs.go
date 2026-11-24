@@ -651,11 +651,14 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 				resp.ErrorMsg = "Timeout waiting for delegation sync response"
 			}
 
+		// The data goes back in the reply and the client writes it where
+		// it wants. The daemon writes no file: a path in the request would
+		// be one a read-only caller chose, written as the daemon's user.
 		case "export":
-			lgApi.Info("delegation data export", "zone", dp.Zone, "outfile", dp.Outfile)
-			if dp.Outfile == "" {
+			if dp.Outfile != "" {
+				lgApi.Warn("delegation export: outfile refused", "zone", dp.Zone, "from", r.RemoteAddr)
 				resp.Error = true
-				resp.ErrorMsg = "export requires outfile parameter"
+				resp.ErrorMsg = "outfile refused: export returns the data, the client writes it"
 				return
 			}
 			if zd.DelegationBackend == nil {
@@ -663,13 +666,14 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 				resp.ErrorMsg = fmt.Sprintf("zone %s has no delegation backend configured", dp.Zone)
 				return
 			}
-			err := ExportDelegationData(zd.DelegationBackend, dp.Zone, dp.Outfile, zd.UpdatePolicy.Child.TTL)
+			data, err := ExportDelegationData(zd.DelegationBackend, dp.Zone, zd.UpdatePolicy.Child.TTL)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("export failed: %v", err)
 				return
 			}
-			resp.Msg = fmt.Sprintf("Delegation data for %s exported to %s", dp.Zone, dp.Outfile)
+			resp.Export = data
+			resp.Msg = fmt.Sprintf("delegation data for %s exported", dp.Zone)
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown delegation command: %s", dp.Command)

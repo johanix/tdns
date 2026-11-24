@@ -23,7 +23,7 @@ Delegation prefix command. Only usable via sub-commands.
 ### SEE ALSO
 
 * [tdns-cli auth](tdns-cli_auth.md)	 - Interact with tdns-auth (authoritative) via API
-* [tdns-cli auth del export](tdns-cli_auth_del_export.md)	 - Export delegation data from a parent zone's backend to a zone file
+* [tdns-cli auth del export](tdns-cli_auth_del_export.md)	 - Export a parent zone's delegation data as zone file text
 * [tdns-cli auth del status](tdns-cli_auth_del_status.md)	 - Make an API call to request the daemon to analyse whether delegation is in sync or not
 * [tdns-cli auth del sync](tdns-cli_auth_del_sync.md)	 - Make an API call to request the daemon to send a DDNS update to sync parent delegation info with child data
 
