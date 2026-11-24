@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	imrcore "github.com/johanix/tdns/v2/imr"
@@ -106,6 +107,14 @@ func (imr *Imr) ImrQueryFresh(ctx context.Context, qname string, qtype uint16, q
 // ImrResponder is the module's Responder, under the name it has here.
 func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions) {
 	imr.Imr.Responder(ctx, w, r, qname, qtype, msgoptions)
+}
+
+func (imr *Imr) ForwardZones() []*ForwardZone { return imr.core().ForwardZones() }
+
+func (imr *Imr) StubZones() []string { return imr.core().StubZones() }
+
+func (imr *Imr) RedirectTargetServers() []*cache.AuthServer {
+	return imr.core().RedirectTargetServers()
 }
 
 // The resolver's names, as they have always been in this package.
@@ -222,6 +231,10 @@ func GetTransportParamRaw(svcb *dns.SVCB) (map[string]uint8, bool, error) {
 
 func LargeKskImrMetricsSnapshot() LargeKskImrMetrics {
 	return imrcore.LargeKskMetricsSnapshot()
+}
+
+func LargeAlgDSMetrics() uint64 {
+	return imrcore.LargeAlgDSMetrics()
 }
 
 func LoadImrTuningDefaults(t *ImrTuningConf) {

@@ -140,3 +140,12 @@ func TestNewRegistersItsDebugHooksOnce(t *testing.T) {
 		t.Errorf("%d debug hooks registered by two resolvers, want at most one", got)
 	}
 }
+
+// The resolver reads Options, not the daemon's option strings: a Config
+// with strings and no Options is refused.
+func TestNewRefusesOptionStringsWithoutOptions(t *testing.T) {
+	_, err := New(context.Background(), Config{OptionsStrs: []string{"qname-minimisation"}}, Options{})
+	if err == nil || !strings.Contains(err.Error(), "OptionsStrs") {
+		t.Fatalf("New = %v, want the option strings refused", err)
+	}
+}

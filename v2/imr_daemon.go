@@ -77,7 +77,14 @@ func (conf *Config) InitImrEngine(ctx context.Context) error {
 	if conf.Internal.ServerErrors != nil {
 		opts.Errors = conf.Internal.ServerErrors
 	}
-	imr, err := NewImr(ctx, conf.Imr, opts)
+	// Only tdns-imr turns imrengine.options into Options (parseImrOptions).
+	// The resolver in the other daemons runs on the defaults, as it always
+	// has; NewImr refuses option strings with no Options.
+	ic := conf.Imr
+	if ic.Options == nil {
+		ic.Options = map[ImrOption]string{}
+	}
+	imr, err := NewImr(ctx, ic, opts)
 	if err != nil {
 		return err
 	}

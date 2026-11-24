@@ -44,6 +44,15 @@ func TestImrNilSafeMethods(t *testing.T) {
 			if imr.TransportSignalCached("example.") {
 				t.Error("TransportSignalCached = true, want false")
 			}
+			if l := imr.ForwardZones(); len(l) != 0 {
+				t.Errorf("ForwardZones = %v, want none", l)
+			}
+			if l := imr.StubZones(); len(l) != 0 {
+				t.Errorf("StubZones = %v, want none", l)
+			}
+			if l := imr.RedirectTargetServers(); l != nil {
+				t.Errorf("RedirectTargetServers = %v, want nil", l)
+			}
 		})
 	}
 }

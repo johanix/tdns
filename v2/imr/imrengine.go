@@ -295,6 +295,12 @@ func (resp *Response) denied(kind cache.CacheContext, state cache.ValidationStat
 // ic.Tuning, and the last one built wins; the data clock (ic.Testing) and the
 // debug log hooks (ic.Logging) are set up once, by the first.
 func New(ctx context.Context, ic Config, opts Options) (*Imr, error) {
+	// Option strings are the daemon's to translate (Config.OptionsStrs).
+	// Strings with no Options would be dropped without a word.
+	if len(ic.OptionsStrs) > 0 && ic.Options == nil {
+		return nil, fmt.Errorf("imrengine.options: the resolver does not read option strings (Config.OptionsStrs %q); set Config.Options", ic.OptionsStrs)
+	}
+
 	lg := opts.Logger
 	if lg == nil {
 		lg = slog.Default()
