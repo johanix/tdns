@@ -2660,7 +2660,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}
 		rr := rrset.RRs[0]
 		if imr.Debug {
-			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, A> (adding glue unless a live answer is cached)\n", nsname)
+			imr.lgDns().Debug("ParseAdditionalForNSAddrs: calling rrcache.Set (adding glue unless a live answer is cached)", "name", nsname, "type", "A")
 		}
 		imr.Cache.SetUnless(nsname, dns.TypeA, &cache.CachedRRset{
 			Name:       nsname,
@@ -2679,7 +2679,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}
 		rr := rrset.RRs[0]
 		if imr.Debug {
-			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, AAAA> (adding glue unless a live answer is cached)\n", nsname)
+			imr.lgDns().Debug("ParseAdditionalForNSAddrs: calling rrcache.Set (adding glue unless a live answer is cached)", "name", nsname, "type", "AAAA")
 		}
 		imr.Cache.SetUnless(nsname, dns.TypeAAAA, &cache.CachedRRset{
 			Name:       nsname,
@@ -3686,7 +3686,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		nsRRset.Class = dns.ClassINET
 		nsRRset.RRtype = dns.TypeNS
 		if imr.Debug {
-			fmt.Printf("handleReferral: Calling rrcache.Set for <%s, NS>\n", zonename)
+			imr.lgDns().Debug("handleReferral: calling rrcache.Set", "name", zonename, "type", "NS")
 		}
 		// Validate NS RRset if signatures are present
 		vstate := cache.ValidationStateNone

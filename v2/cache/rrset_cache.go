@@ -206,7 +206,7 @@ func (rrcache *RRsetCacheT) SetUnless(qname string, qtype uint16, crrset *Cached
 func (rrcache *RRsetCacheT) set(qname string, qtype uint16, crrset *CachedRRset, keep func(stored CachedRRset) bool) bool {
 	lookupKey := rrsetKey(qname, qtype)
 	if rrcache.Debug {
-		fmt.Printf("rrcache: Adding key %s (%s) to cache\n", lookupKey, dns.TypeToString[qtype])
+		rrcache.DebugLog().Printf("rrcache: Adding key %s (%s) to cache", lookupKey, dns.TypeToString[qtype])
 	}
 
 	if crrset == nil {
@@ -704,7 +704,7 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 		authservers[ServerKey(server.Name)] = tmpauthserver
 	}
 	if rrcache.Debug {
-		fmt.Printf("rrcache: Adding stubs for zone %s to cache\n", zone)
+		rrcache.DebugLog().Printf("rrcache: Adding stubs for zone %s to cache", zone)
 	}
 	rrcache.serverMapMu.Lock()
 	rrcache.ServerMap.Set(zone, authservers)
@@ -783,7 +783,7 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 		serverMap[ServerKey(name)] = sharedServer
 	}
 	if rrcache.Debug {
-		fmt.Printf("rrcache: Adding servers for zone %s to cache\n", zone)
+		rrcache.DebugLog().Printf("rrcache: Adding servers for zone %s to cache", zone)
 	}
 	rrcache.ServerMap.Set(zone, serverMap)
 	return nil

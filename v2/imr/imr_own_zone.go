@@ -119,7 +119,7 @@ func (imr *Imr) holdOwnZoneKeys(ctx context.Context, zone OwnZone) *dns.Msg {
 		if dk.Flags&dns.ZONE == 0 {
 			continue
 		}
-		if ok, _ := cache.ValidateDNSKEYRRsetSignature(keys, dk.KeyTag(), apex, dk, imr.Verbose); ok {
+		if ok, _ := cache.ValidateDNSKEYRRsetSignatureWithLogger(imr.Cache.Logger, keys, dk.KeyTag(), apex, dk, imr.Verbose); ok {
 			state = cache.ValidationStateSecure
 			break
 		}

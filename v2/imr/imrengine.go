@@ -2325,7 +2325,7 @@ func (imr *Imr) validateDNSKEYRRsetUsingSeededDS(anchorName string, rrset *core.
 		if !ok {
 			continue
 		}
-		valid, _ := cache.ValidateDNSKEYRRsetUsingDS(rrset, ds, name, verbose)
+		valid, _ := cache.ValidateDNSKEYRRsetUsingDSWithLogger(imr.Cache.Logger, rrset, ds, name, verbose)
 		if valid {
 			imr.lgImr().Debug("DNSKEY RRset validated using DS trust anchor", "zone", anchorName, "keytag", ds.KeyTag)
 			return true
@@ -2341,7 +2341,7 @@ func (imr *Imr) validateDNSKEYRRsetUsingDirectTA(anchorName string, rrset *core.
 	dkc := imr.DnskeyCache
 	for item := range dkc.Map.IterBuffered() {
 		if core.EqualNames(item.Val.Name, name) && item.Val.TrustAnchor && item.Val.State == cache.ValidationStateSecure {
-			valid, _ := cache.ValidateDNSKEYRRsetSignature(rrset, item.Val.Keyid, name, &item.Val.Dnskey, verbose)
+			valid, _ := cache.ValidateDNSKEYRRsetSignatureWithLogger(imr.Cache.Logger, rrset, item.Val.Keyid, name, &item.Val.Dnskey, verbose)
 			if valid {
 				imr.lgImr().Debug("DNSKEY RRset validated using direct DNSKEY trust anchor", "zone", anchorName, "keytag", item.Val.Keyid)
 				return true

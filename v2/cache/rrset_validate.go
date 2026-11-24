@@ -461,7 +461,7 @@ func (rrcache *RRsetCacheT) reusableVerdict(rrset *core.RRset) (ValidationState,
 			// Check if the RRset content has changed by comparing RRs and RRSIGs
 			// Use RRsetDiffer for RRs (it skips RRSIGs, which is what we want for data comparison)
 			// Then separately compare RRSIGs
-			rrsetDiffer, _, _ := cached.RRset.RRsetDiffer(rrset, log.Default(), false, false)
+			rrsetDiffer, _, _ := cached.RRset.RRsetDiffer(rrset, rrcache.DebugLog(), false, false)
 			// XXX: Should we really care about comparing RRSIGs? Or perhaps only compare inception?
 			rrsigDiffer := cached.RRset.RRSIGsDiffer(rrset)
 
@@ -550,6 +550,12 @@ func (rrcache *RRsetCacheT) validateSignatures(ctx context.Context, rrset *core.
 // Returns true if validation succeeds, false otherwise. Also returns the candidate DNSKEY if found.
 // The function may modify the TTLs of RRs in rrset (capping them to signature expiration) but does not modify any caches.
 func ValidateDNSKEYRRsetUsingDS(rrset *core.RRset, ds *dns.DS, signerName string, verbose bool) (bool, *dns.DNSKEY) {
+	return ValidateDNSKEYRRsetUsingDSWithLogger(log.Default(), rrset, ds, signerName, verbose)
+}
+
+// ValidateDNSKEYRRsetUsingDSWithLogger is ValidateDNSKEYRRsetUsingDS, its
+// verbose lines written to lg: a resolver passes its cache's logger.
+func ValidateDNSKEYRRsetUsingDSWithLogger(lg *log.Logger, rrset *core.RRset, ds *dns.DS, signerName string, verbose bool) (bool, *dns.DNSKEY) {
 	if rrset == nil || ds == nil {
 		return false, nil
 	}
@@ -585,13 +591,13 @@ func ValidateDNSKEYRRsetUsingDS(rrset *core.RRset, ds *dns.DS, signerName string
 	}
 	if candidateKey == nil {
 		if verbose {
-			log.Printf("validateDNSKEYRRsetUsingDS: no DNSKEY with keytag=%d and matching DS digest at %s", keyid, name)
+			lg.Printf("validateDNSKEYRRsetUsingDS: no DNSKEY with keytag=%d and matching DS digest at %s", keyid, name)
 		}
 		return false, nil
 	}
 
 	// Validate DNSKEY RRset signature using candidateKey
-	valid, _ := ValidateDNSKEYRRsetSignature(rrset, keyid, name, candidateKey, verbose)
+	valid, _ := ValidateDNSKEYRRsetSignatureWithLogger(lg, rrset, keyid, name, candidateKey, verbose)
 	if !valid {
 		return false, candidateKey
 	}
@@ -605,6 +611,12 @@ func ValidateDNSKEYRRsetUsingDS(rrset *core.RRset, ds *dns.DS, signerName string
 // Returns true if validation succeeds, false otherwise. Also returns the RRSIG if found.
 // signature's expiration; it does not modify any caches.
 func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName string, dnskey *dns.DNSKEY, verbose bool) (bool, *dns.RRSIG) {
+	return ValidateDNSKEYRRsetSignatureWithLogger(log.Default(), rrset, keyid, signerName, dnskey, verbose)
+}
+
+// ValidateDNSKEYRRsetSignatureWithLogger is ValidateDNSKEYRRsetSignature, its
+// verbose lines written to lg: a resolver passes its cache's logger.
+func ValidateDNSKEYRRsetSignatureWithLogger(lg *log.Logger, rrset *core.RRset, keyid uint16, signerName string, dnskey *dns.DNSKEY, verbose bool) (bool, *dns.RRSIG) {
 	if rrset == nil || dnskey == nil {
 		return false, nil
 	}
@@ -624,7 +636,7 @@ func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName st
 	}
 	if sigForKey == nil {
 		if verbose {
-			log.Printf("validateDNSKEYRRsetSignature: no RRSIG(DNSKEY) found for keytag=%d at %s", keyid, name)
+			lg.Printf("validateDNSKEYRRsetSignature: no RRSIG(DNSKEY) found for keytag=%d at %s", keyid, name)
 		}
 		return false, nil
 	}
@@ -632,7 +644,7 @@ func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName st
 	// Verify the DNSKEY RRset signature
 	if err := sigForKey.Verify(dnskey, rrset.RRs); err != nil {
 		if verbose {
-			log.Printf("validateDNSKEYRRsetSignature: signature verify FAILED for %s with keytag=%d: %v", name, keyid, err)
+			lg.Printf("validateDNSKEYRRsetSignature: signature verify FAILED for %s with keytag=%d: %v", name, keyid, err)
 		}
 		return false, sigForKey
 	}
@@ -642,7 +654,7 @@ func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName st
 	now := Now()
 	if !WithinValidityPeriod(sigForKey.Inception, sigForKey.Expiration, now.UTC()) {
 		if verbose {
-			log.Printf("validateDNSKEYRRsetSignature: signature time INVALID for %s with keytag=%d (inc=%d exp=%d now=%d)",
+			lg.Printf("validateDNSKEYRRsetSignature: signature time INVALID for %s with keytag=%d (inc=%d exp=%d now=%d)",
 				name, keyid, sigForKey.Inception, sigForKey.Expiration, now.UTC().Unix())
 		}
 		return false, sigForKey
@@ -661,7 +673,7 @@ func ValidateDNSKEYRRsetSignature(rrset *core.RRset, keyid uint16, signerName st
 	}
 
 	if verbose {
-		log.Printf("validateDNSKEYRRsetSignature: SUCCESS for %s with keytag=%d", name, keyid)
+		lg.Printf("validateDNSKEYRRsetSignature: SUCCESS for %s with keytag=%d", name, keyid)
 	}
 	return true, sigForKey
 }
@@ -805,7 +817,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	if dsRRs != nil && len(dsRecs) > 0 && dsRRs.State == ValidationStateSecure {
 		// Use DS-based validation (common case)
 		for _, ds := range dsRecs {
-			valid, _ := ValidateDNSKEYRRsetUsingDS(rrset, ds, name, rrcache.Verbose)
+			valid, _ := ValidateDNSKEYRRsetUsingDSWithLogger(rrcache.Logger, rrset, ds, name, rrcache.Verbose)
 			if !valid {
 				continue
 			}
@@ -894,7 +906,7 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 				if !ok {
 					continue
 				}
-				valid, _ := ValidateDNSKEYRRsetUsingDS(rrset, ds, name, rrcache.Verbose)
+				valid, _ := ValidateDNSKEYRRsetUsingDSWithLogger(rrcache.Logger, rrset, ds, name, rrcache.Verbose)
 				if !valid {
 					continue
 				}
@@ -967,7 +979,7 @@ func (rrcache *RRsetCacheT) trustAnchorKeys(zone string) []*CachedDnskeyRRset {
 func (rrcache *RRsetCacheT) validateWithTrustAnchorKeys(rrset *core.RRset, zone string, taKeys []*CachedDnskeyRRset) bool {
 	dkc := rrcache.DnskeyCache
 	for _, taKey := range taKeys {
-		if valid, _ := ValidateDNSKEYRRsetSignature(rrset, taKey.Keyid, zone, &taKey.Dnskey, rrcache.Verbose); !valid {
+		if valid, _ := ValidateDNSKEYRRsetSignatureWithLogger(rrcache.Logger, rrset, taKey.Keyid, zone, &taKey.Dnskey, rrcache.Verbose); !valid {
 			continue
 		}
 		exp := Now().Add(GetMinTTL(rrset.RRs))
@@ -1288,7 +1300,7 @@ func (rrcache *RRsetCacheT) ValidateDenial(ctx context.Context, qname string, qt
 	if len(nsecs) > 0 || nsec3Present {
 		var logf func(format string, args ...any)
 		if rrcache.Debug {
-			logf = log.Printf
+			logf = rrcache.DebugLog().Printf
 		}
 		return proveDenial(qname, qtype, rcode, zoneName, nsecs, provenNsec3s, logf), nil
 	}

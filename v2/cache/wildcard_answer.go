@@ -6,7 +6,6 @@ package cache
 import (
 	"context"
 	"fmt"
-	"log"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -70,7 +69,7 @@ func (rrcache *RRsetCacheT) keptProof(rrset *core.RRset) []*core.RRset {
 	if c == nil || c.RRset == nil || len(c.WildcardProof) == 0 {
 		return nil
 	}
-	if differ, _, _ := c.RRset.RRsetDiffer(rrset, log.Default(), false, false); differ || c.RRset.RRSIGsDiffer(rrset) {
+	if differ, _, _ := c.RRset.RRsetDiffer(rrset, rrcache.DebugLog(), false, false); differ || c.RRset.RRSIGsDiffer(rrset) {
 		return nil
 	}
 	return c.WildcardProof
