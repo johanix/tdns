@@ -734,11 +734,11 @@ func (c *CertSetup) release() {
 // before it lets go of the locks. They stay held (c.held) until the caller
 // has written the CLI config (release), so none is made meanwhile either.
 //
-// The enrolment must also be one that lasts: listed, enabled, in the access
-// file the daemon config names. One only in force (a rollback took it out
-// of the file and its reload failed, or a `client remove --no-reload` is
-// pending) is gone at the daemon's next reload or start, and the entry with
-// it.
+// The enrolment must also be one that lasts: listed, enabled, in a valid
+// access file the daemon config names. One only in force (a rollback took
+// it out of the file and its reload failed, or a `client disable
+// --no-reload` is pending) is gone at the daemon's next reload or start, and
+// the entry with it.
 //
 // When the plan no longer holds, c can no longer work as planned (not
 // usable(): changed, or the enrolment not in the file, with its key verdict
@@ -784,11 +784,19 @@ func (c *CertSetup) confirm(o AddOptions) error {
 		}
 		return nil
 	}
-	if why := again.notInFile(); why != "" {
+	if why, disabled, invalid := again.notInFile(); why != "" {
 		unlock()
-		// Not listed where it lasts: the fix is to enrol it there.
 		c.cannot(why)
 		c.listedAs, c.listedRole, c.byDaemon = "", "", false
+		switch {
+		case invalid:
+			c.fileInvalid = true // the fix: the file
+		case disabled != nil:
+			// Listed, disabled: the fix is to enable it (adding the pin
+			// again is refused: one key, one client).
+			c.state, c.listedAs, c.listedRole = certDisabled, disabled.Name, disabled.Role
+		}
+		// Otherwise not listed: the fix is to enrol it (fixLines).
 		c.keyOff, c.keyWhy, c.keyUnknown = again.keyOff, again.keyWhy, again.keyUnknown
 		return nil
 	}
@@ -798,23 +806,32 @@ func (c *CertSetup) confirm(o AddOptions) error {
 
 // notInFile says why the pin, which the daemon takes, is not enrolled in
 // the access file it reads at its next reload or start: the daemon config
-// names none, or the file does not list the pin, enabled. "" when it does,
-// or when this process may not read the file (not root).
-func (c *CertSetup) notInFile() string {
+// names none; the file is not one the daemon would load (invalid); or it
+// does not list the pin, or lists it disabled (as disabled, whose fix is to
+// enable it, not to add it again). "" when it is enrolled, or when this
+// process may not read the file (not root).
+func (c *CertSetup) notInFile() (why string, disabled *tdns.AccessClient, invalid bool) {
+	const now = "the daemon takes your certificate now, but "
 	if !c.t.Configured {
-		return fmt.Sprintf("the daemon takes your certificate now, but %s names no access file, so it will not after its next start", c.t.DaemonConfig)
+		return now + fmt.Sprintf("%s names no access file, so it will not after its next start", c.t.DaemonConfig), nil, false
 	}
 	af, _, err := readAccessFile(c.t, false)
 	switch {
 	case errors.Is(err, fs.ErrPermission):
-		return ""
+		return "", nil, false
 	case err != nil:
-		return fmt.Sprintf("the daemon takes your certificate, but %s", cannotRead(c.t.File, err))
+		return now + cannotRead(c.t.File, err), nil, false
 	}
-	if cl := clientByPin(af, c.pin); cl == nil || cl.Disabled {
-		return fmt.Sprintf("the daemon takes your certificate now, but %s does not list it, enabled, so it will not after its next reload or start", c.t.File)
+	if verr := tdns.ValidateAccessFile(af); verr != nil {
+		return now + invalidAccessFile(c.t.File, verr) + ", so it will not after its next reload or start", nil, true
 	}
-	return ""
+	switch cl := clientByPin(af, c.pin); {
+	case cl == nil:
+		return now + fmt.Sprintf("%s does not list it, so it will not after its next reload or start", c.t.File), nil, false
+	case cl.Disabled:
+		return now + fmt.Sprintf("%s lists it as %q, disabled, so it will not after its next reload or start", c.t.File, cl.Name), cl, false
+	}
+	return "", nil, false
 }
 
 // applySteps is apply's work. The caller holds the locks (lockPaths).
@@ -1399,7 +1416,7 @@ func (c *CertSetup) whyNot() string {
 	switch {
 	case c.failed != nil:
 		return c.failed.Error()
-	case c.state == certDisabled:
+	case c.state == certDisabled && c.why == "":
 		return fmt.Sprintf("%s lists your certificate as %q, disabled, and config add does not enable it", c.t.File, c.listedAs)
 	}
 	return c.why

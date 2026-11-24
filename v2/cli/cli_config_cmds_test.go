@@ -4005,17 +4005,19 @@ func TestAddRefusesACertEntryWhoseCertificateDoesNotWork(t *testing.T) {
 }
 
 // An enrolment the daemon has in force, but its access file does not list
-// (a rollback took it out and its reload failed, or a `client remove
+// (a rollback took it out and its reload failed, or a `client disable
 // --no-reload` is pending), lasts until the daemon's next reload or start:
 // config add does not write a certificate entry on it. A new entry is
 // refused, its fix the enrolment; a key entry keeps its key (the daemon
-// takes it), and says why the certificate does not work.
+// takes it), and says why the certificate does not work. A file that lists
+// the pin disabled is fixed by enabling it (client add refuses the pin
+// again: one key, one client); one the daemon would not load, by fixing it.
 func TestAddNeedsTheEnrolmentInTheFile(t *testing.T) {
-	setup := func(t *testing.T) (*addEnv, string, string, string) {
+	setupWith := func(t *testing.T, acc func(pin string) string) (*addEnv, string, string, string) {
 		env := newAddEnv(t)
 		pin := env.pin(t)
 		af := filepath.Join(env.dir, "access.yaml")
-		writeFile(t, af, "keyauth: true\nclients: []\n")
+		writeFile(t, af, acc(pin))
 		d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
 		f := serveFakeDaemon(t, env.socket(), d, af)
 		f.mu.Lock()
@@ -4023,6 +4025,39 @@ func TestAddNeedsTheEnrolmentInTheFile(t *testing.T) {
 		f.mu.Unlock()
 		return env, d, dpin, pin
 	}
+	setup := func(t *testing.T) (*addEnv, string, string, string) {
+		return setupWith(t, func(string) string { return "keyauth: true\nclients: []\n" })
+	}
+
+	t.Run("listed disabled: client enable, not client add", func(t *testing.T) {
+		env, d, _, _ := setupWith(t, func(pin string) string {
+			return "keyauth: true\nclients:\n   - name: h38c\n     pin: " + pin + "\n     role: read-write\n     disabled: true\n"
+		})
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, `lists it as "h38c", disabled`) {
+			t.Fatalf("err = %v; want a refusal: the pin is listed disabled", err)
+		}
+		fix := strings.Join(r.fix, "\n")
+		if !strings.Contains(fix, "tdns-ncli auth client enable h38c") || strings.Contains(fix, "client add") {
+			t.Errorf("fix:\n%s\nwant client enable h38c, not client add", fix)
+		}
+	})
+
+	t.Run("a file the daemon would not load: fix the file", func(t *testing.T) {
+		env, d, _, _ := setupWith(t, accessWithAdmin)
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, "not an access file the daemon would load") {
+			t.Fatalf("err = %v; want a refusal: the file does not validate", err)
+		}
+		if fix := strings.Join(r.fix, "\n"); !strings.Contains(fix, "so the daemon would load it") || strings.Contains(fix, "client add") {
+			t.Errorf("fix:\n%s\nwant the file fixed", fix)
+		}
+		if _, err := os.Stat(env.cli); err == nil {
+			t.Error("the refused add wrote the CLI config")
+		}
+	})
 
 	t.Run("a new entry: refused", func(t *testing.T) {
 		env, d, _, pin := setup(t)
