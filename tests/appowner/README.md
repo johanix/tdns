@@ -90,8 +90,9 @@ passed, 1 on any FAIL, 2 when the rig could not be set up.
 
 Since then (2026-11-24, api-owner-c f27b4075): 7.21 is fixed by bf69f00b (an
 application's key command acts only on a `Zone` it owns) and 8.12 by
-8a136d9b (an error-state change no longer re-registers a deleted zone). The
-rerun has 134 PASS and one FAIL, 3.16, which waits for a ruling.
+8a136d9b (an error-state change no longer re-registers a deleted zone). With
+the rulings below (api-owner-c 67cbfccb) the run has 146 checks, 145 PASS
+and one FAIL, 3.16, which waits for a ruling.
 
 ## Rulings (Johan, 2026-11-24)
 
