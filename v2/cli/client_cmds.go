@@ -329,19 +329,32 @@ type accessTarget struct {
 	Configured   bool   // the daemon config names it, so the daemon reads it
 	HasSocket    bool
 	Socket       string // apiserver.socket, the daemon's local admin socket, or ""
+	// Explicit: the daemon config was named (--daemon-config), not found
+	// through the role's entry, which may be another daemon's.
+	Explicit bool
 }
 
-// resolveAccessTarget finds role's daemon config and its access file. The
-// client commands edit files on this host, so a daemon whose config is not
-// here is refused.
-func resolveAccessTarget(role string) (*accessTarget, error) {
-	cfg := defaultCfgFileForRole(role)
+// resolveAccessTarget finds role's daemon config and its access file: the
+// daemon config daemonCfg names (--daemon-config), else the one the role's
+// entry names (config-file:), else the role's default. The client commands
+// edit files on this host, so a daemon whose config is not here is refused.
+func resolveAccessTarget(role, daemonCfg string) (*accessTarget, error) {
+	cfg := daemonCfg
+	if cfg == "" {
+		cfg = defaultCfgFileForRole(role)
+	}
 	if _, err := os.Stat(cfg); err != nil {
 		return nil, fmt.Errorf("cannot read %s's daemon config %s (%v); the client commands edit the daemon's files, so run them on its host", role, cfg, err)
 	}
 	info, err := ReadDaemonApi(cfg, effectiveRole(role))
 	if err != nil {
 		return nil, err
+	}
+	if daemonCfg != "" {
+		// Named: it is the daemon meant, whatever the role's entry is.
+		t := accessTargetOf(info)
+		t.Explicit = true
+		return t, nil
 	}
 	// Without config-file: the daemon config above is only this host's
 	// default for the role, and the role's entry may reach another daemon
@@ -389,13 +402,16 @@ func entryIsDaemonSocket(e ApiDetails, info *DaemonApi) bool {
 type accessEditOpts struct {
 	DryRun   bool
 	NoReload bool
+	// DaemonConfig names the daemon config (--daemon-config); "" for the
+	// role's entry's.
+	DaemonConfig string
 }
 
 // editAccessFile is the one way the client commands change an access file:
 // read it, apply change, validate the result with the daemon's own validator,
 // write it atomically keeping the previous one as .prev, and reload.
 func editAccessFile(ctx context.Context, role string, o accessEditOpts, create bool, change func(af *tdns.AccessFile) (string, error)) error {
-	t, err := resolveAccessTarget(role)
+	t, err := resolveAccessTarget(role, o.DaemonConfig)
 	if err != nil {
 		return err
 	}
@@ -706,6 +722,23 @@ func dieEdit(err error) {
 	fatalf("%v", err)
 }
 
+// configAtDaemon sends post to the daemon of daemonCfg over its local admin
+// socket, naming daemonCfg in the request, so that a daemon that runs
+// another config refuses it: --daemon-config's way to a daemon, which needs
+// no entry in the CLI config (root on its host). Not bounded: as any command
+// over the socket, a big reload may rightly take long.
+func configAtDaemon(role, daemonCfg string, post tdns.ConfigPost) (tdns.ConfigResponse, error) {
+	info, err := ReadDaemonApi(daemonCfg, effectiveRole(role))
+	if err != nil {
+		return tdns.ConfigResponse{}, err
+	}
+	if info.Socket == "" {
+		return tdns.ConfigResponse{}, fmt.Errorf("%s serves no local admin socket, which --daemon-config reaches the daemon by", daemonCfg)
+	}
+	c := tdns.NewClientWithOptions(role, "unix://"+info.Socket, tdns.ClientOptions{AuthMethod: "none", ExpectConfigFile: info.ConfigFile})
+	return SendConfigCommand(c, post)
+}
+
 // expectingConfig is a copy of api whose every request names cfg as the
 // config the daemon must run (tdns.ExpectConfigFileHeader), as a socket
 // client made with ExpectConfigFile does. A daemon that runs another refuses
@@ -759,8 +792,12 @@ func verifyRunningDaemon(role string, t *accessTarget) error {
 	// a socket another process holds): ask through the role's entry.
 	// No entry for the role: nobody else to ask. An entry that cannot be
 	// built (a CA file or client certificate it cannot read) is not that:
-	// its daemon may well be running, and it is not identified.
-	if apiDetailsForRole(role) == nil {
+	// its daemon may well be running, and it is not identified. For a
+	// daemon config named (--daemon-config), the role's entry is asked
+	// only if it is that daemon's: another daemon's answer says nothing
+	// about whose file this is.
+	ad := apiDetailsForRole(role)
+	if ad == nil || t.Explicit && (ad.ConfigFile == "" || resolvedPath(ad.ConfigFile) != resolvedPath(t.DaemonConfig)) {
 		return nil
 	}
 	api, err := GetApiClient(role, false)
@@ -965,6 +1002,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 	}
 	c.PersistentFlags().BoolVar(&o.DryRun, "dry-run", false, "show the resulting file; change nothing")
 	c.PersistentFlags().BoolVar(&o.NoReload, "no-reload", false, "write the file but do not ask the daemon to reload it")
+	c.PersistentFlags().StringVar(&o.DaemonConfig, "daemon-config", "", "the daemon's config file (default: the one the role's entry names)")
 
 	var pin, certFile, roleName, comment string
 	add := &cobra.Command{
@@ -1096,7 +1134,7 @@ depend on it. keyauth on brings the key back.`,
 		Short: "List the clients in the access file, and whether the daemon runs that file",
 		Args:  cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
-			if err := listAccessClients(role); err != nil {
+			if err := listAccessClients(role, o.DaemonConfig); err != nil {
 				fatalf("%v", err)
 			}
 		},
@@ -1110,9 +1148,10 @@ depend on it. keyauth on brings the key back.`,
 }
 
 // listAccessClients prints the file and compares it with what the daemon is
-// running (config status), so an edit that was not reloaded shows.
-func listAccessClients(role string) error {
-	t, err := resolveAccessTarget(role)
+// running (config status), so an edit that was not reloaded shows: the
+// daemon of daemonCfg (--daemon-config), or of the role's entry.
+func listAccessClients(role, daemonCfg string) error {
+	t, err := resolveAccessTarget(role, daemonCfg)
 	if err != nil {
 		return err
 	}

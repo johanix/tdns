@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -301,7 +302,7 @@ func TestClientCommandsEditTheAccessFile(t *testing.T) {
 // conventional path, and the daemon does not read it yet.
 func TestClientAddWithoutAccessFileConfigured(t *testing.T) {
 	e := newAccessEnv(t, false, "")
-	tg, err := resolveAccessTarget("auth")
+	tg, err := resolveAccessTarget("auth", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -410,11 +411,11 @@ func TestClientListChecksWhoAnswered(t *testing.T) {
 	writeFile(t, e.access, "keyauth: true\nclients: []\n")
 
 	runs = e.daemonCfg
-	if out := captureStdout(t, func() { listAccessClients("auth") }); !strings.Contains(out, "The daemon runs this file") {
+	if out := captureStdout(t, func() { listAccessClients("auth", "") }); !strings.Contains(out, "The daemon runs this file") {
 		t.Errorf("this config's daemon with this policy:\n%s", out)
 	}
 	runs = filepath.Join(e.dir, "other-daemon.yaml")
-	out := captureStdout(t, func() { listAccessClients("auth") })
+	out := captureStdout(t, func() { listAccessClients("auth", "") })
 	if strings.Contains(out, "runs this file") || !strings.Contains(out, "Running policy unknown") {
 		t.Errorf("another daemon with the same policy:\n%s", out)
 	}
@@ -519,7 +520,7 @@ func TestClientEditWedgedDaemon(t *testing.T) {
 	t.Run("on the socket", func(t *testing.T) {
 		e := newAccessEnv(t, true, "")
 		ask, _ := shortDaemonLimits(t)
-		tg, err := resolveAccessTarget("auth")
+		tg, err := resolveAccessTarget("auth", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -545,7 +546,7 @@ func TestClientEditWedgedDaemon(t *testing.T) {
 	t.Run("the reload", func(t *testing.T) {
 		e := newAccessEnv(t, true, "")
 		_, reload := shortDaemonLimits(t)
-		tg, err := resolveAccessTarget("auth")
+		tg, err := resolveAccessTarget("auth", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1618,7 +1619,7 @@ func TestClientListHoldsTheEditLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFile(t, e.access, "keyauth: true\nclients: []\n")
-	if out := captureStdout(t, func() { listAccessClients("auth") }); !strings.Contains(out, "The daemon runs this file") {
+	if out := captureStdout(t, func() { listAccessClients("auth", "") }); !strings.Contains(out, "The daemon runs this file") {
 		t.Errorf("client list:\n%s", out)
 	}
 	if lockedOut == nil {
@@ -1652,5 +1653,122 @@ func TestAccessReloadMsgNoLongerConfigured(t *testing.T) {
 	}
 	if msg, err := accessReloadMsg(tdns.ConfigResponse{Msg: "Config reloaded. Access file reloaded: 1 client(s), keyauth on."}, true); err != nil || msg == "" {
 		t.Errorf("a reload that loaded the file: %q, %v", msg, err)
+	}
+}
+
+// daemonTree is tdns-ncli with role auth's client and config commands, as
+// the CLI wires them, for a test to run a command line through.
+func daemonTree() *cobra.Command {
+	root := &cobra.Command{Use: "tdns-ncli", SilenceUsage: true, SilenceErrors: true}
+	auth := &cobra.Command{Use: "auth"}
+	auth.AddCommand(NewClientCmd("auth"), NewConfigCmd("auth"))
+	root.AddCommand(auth)
+	return root
+}
+
+// runCmd runs args through tdns-ncli's tree (daemonTree), and returns what
+// it printed.
+func runCmd(t *testing.T, args ...string) string {
+	t.Helper()
+	root := daemonTree()
+	root.SetArgs(args)
+	var err error
+	out := captureStdout(t, func() { err = root.Execute() })
+	if err != nil {
+		t.Fatalf("tdns-ncli %s: %v", strings.Join(args, " "), err)
+	}
+	return out
+}
+
+// twoDaemons is two auth daemon configs, each naming its own access file,
+// and the role's entry for the first: the client commands reach d1, and
+// d2 only by --daemon-config. Nothing listens on either socket, nor on the
+// entry's address.
+func twoDaemons(t *testing.T) (d1, af1, d2, af2 string) {
+	t.Helper()
+	dir := t.TempDir()
+	sockDir, err := os.MkdirTemp("/tmp", "ncli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	write := func(name string) (string, string) {
+		d := filepath.Join(dir, name+".yaml")
+		af := filepath.Join(dir, name+"-access.yaml")
+		writeFile(t, af, "keyauth: true\nclients: []\n")
+		writeFile(t, d, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+closedAddr(t)+" ]\n   apikey: k\n   socket: "+filepath.Join(sockDir, name+".sock")+"\n   access-file: "+af+"\n")
+		return d, af
+	}
+	d1, af1 = write("tdns-auth")
+	d2, af2 = write("tdns-auth2")
+	clientCommandsFor(t, d1)
+	return d1, af1, d2, af2
+}
+
+// --daemon-config makes the client commands edit, and list, the access file
+// of the daemon config it names, not the role's entry's; without it they
+// edit the role's entry's, as before.
+func TestClientCommandsTakeADaemonConfig(t *testing.T) {
+	_, af1, d2, af2 := twoDaemons(t)
+	listed := func(af, name string) bool {
+		acc, err := tdns.LoadAccessFile(af)
+		return err == nil && findClient(acc, name) != nil
+	}
+
+	runCmd(t, "auth", "client", "add", "anna", "--pin", pinOf("anna"), "--role", "read-only", "--daemon-config", d2, "--no-reload")
+	if !listed(af2, "anna") || listed(af1, "anna") {
+		t.Errorf("--daemon-config %s: anna in %s %v, in %s %v; want her in the second only", d2, af2, listed(af2, "anna"), af1, listed(af1, "anna"))
+	}
+	runCmd(t, "auth", "client", "add", "bert", "--pin", pinOf("bert"), "--role", "read-only", "--no-reload")
+	if !listed(af1, "bert") || listed(af2, "bert") {
+		t.Errorf("no flag: bert in %s %v, in %s %v; want him in the role's entry's only", af1, listed(af1, "bert"), af2, listed(af2, "bert"))
+	}
+	runCmd(t, "auth", "client", "disable", "anna", "--daemon-config", d2, "--no-reload")
+	if acc, err := tdns.LoadAccessFile(af2); err != nil || findClient(acc, "anna") == nil || !findClient(acc, "anna").Disabled {
+		t.Errorf("disable --daemon-config: %+v (%v), want anna disabled in %s", acc, err, af2)
+	}
+	if out := runCmd(t, "auth", "client", "list", "--daemon-config", d2); !strings.Contains(out, "anna") || strings.Contains(out, "bert") || !strings.Contains(out, af2) {
+		t.Errorf("list --daemon-config %s printed:\n%s", d2, out)
+	}
+}
+
+// A daemon config named by --daemon-config is the daemon meant: the role's
+// entry, another daemon's that runs, is not asked whose file this is (its
+// answer would refuse the edit, for a config it does not run).
+func TestDaemonConfigEditIgnoresAnotherDaemonsEntry(t *testing.T) {
+	_, _, d2, af2 := twoDaemons(t)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: "/etc/tdns/tdns-auth.yaml"})
+	}))
+	t.Cleanup(srv.Close)
+	apiConfig.ApiServers[0].BaseURL = srv.URL + "/api/v1"
+	apiConfig.ApiServers[0].TLSAuth, apiConfig.ApiServers[0].Pins = "pin", []string{tdns.SPKISHA256(srv.Certificate())}
+	if err := InitApiClients(apiConfig); err != nil {
+		t.Fatal(err)
+	}
+	err := editAccessFile(context.Background(), "auth", accessEditOpts{NoReload: true, DaemonConfig: d2}, true, func(af *tdns.AccessFile) (string, error) {
+		af.Clients = append(af.Clients, tdns.AccessClient{Name: "anna", Pin: pinOf("anna"), Role: "read-only"})
+		return "added", nil
+	})
+	if err != nil {
+		t.Fatalf("edit of %s: %v; want it made, the role's entry being another daemon's", d2, err)
+	}
+	if acc, err := tdns.LoadAccessFile(af2); err != nil || findClient(acc, "anna") == nil {
+		t.Errorf("access file %+v (%v), want anna", acc, err)
+	}
+}
+
+// config reload --daemon-config reloads the daemon of that config over its
+// local admin socket, naming the config: no entry in the CLI config needed.
+func TestConfigReloadTakesADaemonConfig(t *testing.T) {
+	_, _, d2, af2 := twoDaemons(t)
+	info, err := ReadDaemonApi(d2, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := serveFakeDaemon(t, info.Socket, d2, af2)
+	runCmd(t, "auth", "config", "reload", "--daemon-config", d2)
+	if n := f.reloadCount(); n != 1 {
+		t.Errorf("%d reloads of the daemon of %s, want 1", n, d2)
 	}
 }
