@@ -780,8 +780,14 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 
 	if !o.DryRun && res.Cert != nil && c.changesDaemon() && (isCert || toCert) {
 		if aerr := c.apply(o.Ctx); aerr != nil && toCert {
-			// The key, then.
+			// The key, then, as the daemon takes it now: after a reload,
+			// the rollback reloaded it with the files put back, which may
+			// have put in force a key setting planCert did not find in
+			// force (recheckKey).
 			toCert = false
+			if c.reloadSent {
+				c.recheckKey()
+			}
 			if write, err = knownEdit(o, res, e, up, existing, target, entryEdit{repin: repin}); err != nil {
 				return nil, err
 			}
