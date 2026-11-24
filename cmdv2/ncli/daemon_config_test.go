@@ -4,13 +4,16 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 )
@@ -54,18 +57,42 @@ func TestDaemonConfigRunsWithoutACliConfig(t *testing.T) {
 	if err := os.WriteFile(d, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The daemon of d, on its local admin socket.
+	// The daemon of d, on its local admin socket. It runs the policy it
+	// loaded from af, at its start and at each reload, and says so on
+	// status, as a daemon does: an edit checks that it runs the file
+	// written.
+	load := func() *tdns.ApiAccessStatus {
+		data, err := os.ReadFile(af)
+		if err != nil {
+			return &tdns.ApiAccessStatus{File: af, Error: err.Error()}
+		}
+		a, err := tdns.ParseAccessFile(data)
+		if err != nil {
+			return &tdns.ApiAccessStatus{File: af, Error: err.Error()}
+		}
+		st := &tdns.ApiAccessStatus{File: af, KeyAuth: a.KeyAuthOn(), Clients: []tdns.ApiAccessStatusClient{}}
+		for _, c := range a.Clients {
+			st.Clients = append(st.Clients, tdns.ApiAccessStatusClient{Name: c.Name, Pin: c.Pin, Role: c.Role, Disabled: c.Disabled})
+		}
+		return st
+	}
+	var mu sync.Mutex
+	running := load()
 	uln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var cp tdns.ConfigPost
 		json.NewDecoder(r.Body).Decode(&cp)
+		mu.Lock()
+		defer mu.Unlock()
 		resp := tdns.ConfigResponse{ConfigFile: d}
 		if cp.Command == "reload" {
-			resp.Msg = "Config reloaded. Access file reloaded: 1 client(s), keyauth on."
+			running = load()
+			resp.Msg = fmt.Sprintf("Config reloaded. Access file reloaded: %d client(s), keyauth on.", len(running.Clients))
 		}
+		resp.Access = running
 		json.NewEncoder(w).Encode(resp)
 	})}
 	go srv.Serve(uln)
