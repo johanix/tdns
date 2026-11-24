@@ -472,14 +472,15 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 
 // readAccessFile reads and parses t's access file, returning its bytes as
 // well (nil when it does not exist). A missing file is an empty one when
-// create is set, and an error otherwise.
+// create is set, and an error otherwise. One that does not parse is an
+// *accessParseError.
 func readAccessFile(t *accessTarget, create bool) (*tdns.AccessFile, []byte, error) {
 	old, err := os.ReadFile(t.File)
 	switch {
 	case err == nil:
 		af, perr := tdns.ParseAccessFile(old)
 		if perr != nil {
-			return nil, nil, fmt.Errorf("%s does not parse (%v); fix it by hand first", t.File, perr)
+			return nil, nil, &accessParseError{file: t.File, err: perr}
 		}
 		return af, old, nil
 	case os.IsNotExist(err) && create:
@@ -488,6 +489,18 @@ func readAccessFile(t *accessTarget, create bool) (*tdns.AccessFile, []byte, err
 		return nil, nil, fmt.Errorf("%s does not exist yet; `client add` creates it", t.File)
 	}
 	return nil, nil, err
+}
+
+// accessParseError is an access file that does not parse (err): the daemon
+// would not load it either. (A directory on a system where it reads as
+// bytes, NetBSD, is one.)
+type accessParseError struct {
+	file string
+	err  error
+}
+
+func (e *accessParseError) Error() string {
+	return fmt.Sprintf("%s does not parse (%v); fix it by hand first", e.file, e.err)
 }
 
 // clientByPin is the client af lists with pin, or nil.

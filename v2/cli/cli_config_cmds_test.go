@@ -4110,8 +4110,15 @@ func TestAddRechecksTheApiSettings(t *testing.T) {
 		t.Fatalf("plan %+v", c)
 	}
 	writeFile(t, d, strings.Replace(readBytes(t, d), env.at(8989), env.at(8990), 1))
-	if err := c.apply(context.Background()); err == nil || !strings.Contains(err.Error(), "other apiserver: settings") || !strings.Contains(err.Error(), "run config add again") {
-		t.Errorf("err = %v, want apply refused: the API settings changed", err)
+	err = c.apply(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "other apiserver: settings") {
+		t.Fatalf("err = %v, want apply refused: the API settings changed", err)
+	}
+	// What to do is said once, in the fix.
+	var sb strings.Builder
+	printRefusal(&sb, c.refusal("not adding "+d+": setting up your client certificate on the daemon failed: "+err.Error()))
+	if n := strings.Count(flat(sb.String()), "run config add again"); n != 1 {
+		t.Errorf("the refusal says to run config add again %d times:\n%s", n, sb.String())
 	}
 	if readBytes(t, af) != acc {
 		t.Errorf("the access file was written:\n%s", readBytes(t, af))
@@ -4176,4 +4183,45 @@ func TestAddAsksAPlainHTTPDaemonWithItsKey(t *testing.T) {
 			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
 		}
 	})
+}
+
+// An access file that does not parse is one the daemon would not load
+// (a directory on NetBSD reads as bytes, and does not parse either): its
+// fix is the file, not the enrolment; and a key entry is refused, as the
+// daemon's next start closes its TCP API.
+func TestAddUnparseableAccessFile(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	af := filepath.Join(env.dir, "access.yaml")
+	writeFile(t, af, "keyauth: true\nclients: [ oops\n")
+	d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(r.why, "not an access file the daemon would load") {
+		t.Fatalf("new entry: err = %v; want a refusal: the file does not parse", err)
+	}
+	if fix := strings.Join(r.fix, "\n"); !strings.Contains(fix, "fix "+af+" so the daemon would load it") || strings.Contains(fix, "client add") {
+		t.Errorf("fix:\n%s\nwant the file fixed, not the enrolment", fix)
+	}
+	writeFile(t, env.cli, env.keyEntry(d, dpin))
+	if _, err := env.add(t, d, nil); !errors.As(err, &r) || !strings.Contains(r.why, "closes its TCP API") {
+		t.Errorf("key entry: err = %v; want a refusal: the key does not work either", err)
+	}
+}
+
+// A refusal made with your new pair names its pin where the fix does not
+// carry it (a restart, a wedged daemon), and says it is in the fix where it
+// is (the enrolment).
+func TestRefusalNamesTheNewPin(t *testing.T) {
+	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml", Socket: "/var/run/tdns/auth.sock", Configured: true}
+	pin := pinOf("new")
+	gone := &CertSetup{word: "auth", name: "tester", cert: "/root/c.crt", pin: pin, pairNew: true, state: certCannot, t: tg, sockGone: true}
+	if notes := strings.Join(gone.refusal("x").notes, " "); !strings.Contains(notes, pin) || strings.Contains(notes, "in the fix") {
+		t.Errorf("socket gone: notes %q, want the pin itself", notes)
+	}
+	enrol := &CertSetup{word: "auth", name: "tester", cert: "/root/c.crt", pin: pin, pairNew: true, state: certCannot, t: tg}
+	r := enrol.refusal("x")
+	if notes := strings.Join(r.notes, " "); !strings.Contains(notes, "its pin is in the fix") || !strings.Contains(strings.Join(r.fix, " "), pin) {
+		t.Errorf("enrolment: notes %q, fix %q; want the pin in the fix, and said so", notes, r.fix)
+	}
 }

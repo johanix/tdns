@@ -390,7 +390,7 @@ func freeName(base string, taken func(string) bool) string {
 func daemonCertPin(info *DaemonApi) (string, error) {
 	pin, err := certFilePin(info.CertFile)
 	if err != nil && info.CertDefault && errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("%s is not there yet: the daemon writes its API certificate there when it first starts; start it, then run config add again", info.CertFile)
+		return "", fmt.Errorf("%s is not there yet: the daemon writes its API certificate there when it first starts", info.CertFile)
 	}
 	return pin, err
 }

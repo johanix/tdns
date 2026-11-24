@@ -311,6 +311,10 @@ func planCert(o AddOptions, info *DaemonApi, word string) *CertSetup {
 	if relative {
 		return c.cannot(fmt.Sprintf("apiserver.access-file %q is not an absolute path, which the daemon refuses", c.t.File))
 	}
+	if pe := (*accessParseError)(nil); errors.As(aerr, &pe) {
+		c.fileInvalid = true
+		return c.cannot(invalidAccessFile(c.t.File, pe.err))
+	}
 	if aerr != nil {
 		return c.cannot(cannotRead(c.t.File, aerr) + ", and the daemon is not running to be asked")
 	}
@@ -548,6 +552,8 @@ func (c *CertSetup) keyFromFile(relative bool, old []byte, af *tdns.AccessFile, 
 	case !c.t.Configured:
 	case relative:
 		c.keyUnknown = fmt.Sprintf("apiserver.access-file %q is not an absolute path", c.t.File)
+	case errors.As(aerr, new(*accessParseError)):
+		c.keyOff, c.keyWhy = true, fmt.Sprintf("%s, which the daemon config names, is not an access file it would load (it closes its TCP API then)", c.t.File)
 	case aerr != nil:
 		c.keyUnknown = cannotRead(c.t.File, aerr) + ", and the daemon is not running to be asked"
 	case old == nil:
@@ -835,9 +841,12 @@ func (c *CertSetup) notInFile() (why string, disabled *tdns.AccessClient, invali
 		return now + fmt.Sprintf("%s names no access file, so it will not after its next start", c.t.DaemonConfig), nil, false
 	}
 	af, _, err := readAccessFile(c.t, false)
+	var pe *accessParseError
 	switch {
 	case errors.Is(err, fs.ErrPermission):
 		return "", nil, false
+	case errors.As(err, &pe):
+		return now + invalidAccessFile(c.t.File, pe.err) + ", so it will not after its next reload or start", nil, true
 	case err != nil:
 		return now + cannotRead(c.t.File, err), nil, false
 	}
@@ -864,18 +873,22 @@ func (c *CertSetup) applySteps() error {
 	}
 	if planned := map[bool]string{true: c.t.File, false: ""}[c.t.Configured]; now.AccessFile != planned {
 		c.changed = true
-		return fmt.Errorf("%s now names access-file %q, not %q as when config add read it; run config add again", c.t.DaemonConfig, now.AccessFile, planned)
+		return fmt.Errorf("%s now names access-file %q, not %q as when config add read it", c.t.DaemonConfig, now.AccessFile, planned)
 	}
 	// Nor anything else about its API, which the entry is made from: a
 	// daemon moved to another port meanwhile would be enrolled all the
 	// same, and the entry written for the old one.
 	if !sameApiApartFromAccess(c.info, now) {
 		c.changed = true
-		return fmt.Errorf("%s now has other apiserver: settings than when config add read it; run config add again", c.t.DaemonConfig)
+		return fmt.Errorf("%s now has other apiserver: settings than when config add read it", c.t.DaemonConfig)
 	}
 
 	// Again under the lock: a `client` edit may have changed it since.
 	af, old, err := readAccessFile(c.t, true)
+	if pe := (*accessParseError)(nil); errors.As(err, &pe) {
+		c.fileInvalid = true
+		return errors.New(invalidAccessFile(c.t.File, pe.err))
+	}
 	if err != nil {
 		return err
 	}
@@ -1454,7 +1467,12 @@ type addRefusal struct {
 func (c *CertSetup) refusal(why string) addRefusal {
 	r := addRefusal{why: why, fix: c.fixLines()}
 	if c.pairNew && c.pin != "" {
-		r.notes = []string{"Created your client certificate " + c.cert + "; its pin is in the fix."}
+		// The pin said where the fix does not carry it.
+		note := "Created your client certificate " + c.cert + "; its pin is in the fix."
+		if !strings.Contains(strings.Join(r.fix, " "), c.pin) {
+			note = "Created your client certificate " + c.cert + ", pin " + c.pin + "."
+		}
+		r.notes = []string{note}
 	}
 	return r
 }
