@@ -78,9 +78,12 @@ func (conf *Config) migrateDynamicConfigTsigKeys(cf *DynamicConfigFile) error {
 		}
 	}
 
-	zones := cf.Zones
+	// Through repersistDynamicConfig: a zone add, delete or setowner that
+	// wrote the file since the load read it already dropped the keys: block
+	// (writes never carry one), and writing the snapshot read before it
+	// would put back what that write replaced.
 	cf.Keys = nil
-	if err := conf.writeDynamicConfigFile(zones); err != nil {
+	if _, err := conf.repersistDynamicConfig(cf); err != nil {
 		return fmt.Errorf("migrated %d key(s) but failed to rewrite dynamic config: %w", migrated, err)
 	}
 	if migrated > 0 {
