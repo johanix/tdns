@@ -133,8 +133,10 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 	zd.restoreRefreshStateAtFirstBind()
 }
 
-// relayCopyNeedsTransfer reports whether a tdns-agent relay still serves the
-// copy it adopted from disk at first bind. Such a copy is replaced by a forced
+// relayCopyNeedsTransfer reports whether a tdns-agent relay still serves a
+// copy no installed transfer has replaced: the one it adopted from disk at
+// first bind, or the one it wrote itself before a change ended its origination
+// (markRelayCopyIfOriginationEnded). Such a copy is replaced by a forced
 // transfer at the first usable SOA, whatever the serials say, and only a
 // transfer whose publish installed it confirms the copy.
 //
