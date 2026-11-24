@@ -18,6 +18,7 @@ import (
 	"strconv"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -178,14 +179,28 @@ func newDelExportCmd() *cobra.Command {
 The daemon returns the data. With --outfile it is written to that file
 on this host, with your permissions; without it, it goes to stdout.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			PrepArgs("zonename")
-			outfile, _ := cmd.Flags().GetString("outfile")
-			if err := runDelExport(cmd, tdns.Globals.Zonename, outfile); err != nil {
+			// Not PrepArgs: it reports a missing zone on stdout, where
+			// the export's data goes.
+			zone, err := delExportZone(tdns.Globals.Zonename)
+			if err == nil {
+				outfile, _ := cmd.Flags().GetString("outfile")
+				err = runDelExport(cmd, zone, outfile)
+			}
+			if err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
 				os.Exit(1)
 			}
 		},
 	}
+}
+
+// delExportZone is the zone del export exports: the --zone value, fully
+// qualified, or an error when none was given.
+func delExportZone(zone string) (string, error) {
+	if zone == "" {
+		return "", errors.New("zone name not specified using --zone flag")
+	}
+	return dns.Fqdn(zone), nil
 }
 
 func runDelExport(cmd *cobra.Command, zone, outfile string) error {
@@ -305,7 +320,8 @@ func SendDelegationCmd(api *tdns.ApiClient, data tdns.DelegationPost) (tdns.Dele
 		return dr, fmt.Errorf("error from api post: %v", err)
 	}
 	if tdns.Globals.Verbose {
-		fmt.Printf("Status: %d\n", status)
+		// stderr: del export's data goes to stdout.
+		fmt.Fprintf(os.Stderr, "Status: %d\n", status)
 	}
 
 	err = json.Unmarshal(buf, &dr)

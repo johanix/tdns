@@ -126,3 +126,18 @@ func TestDelExportWithoutOutfilePrintsTheData(t *testing.T) {
 		t.Errorf("%d files written to the working directory", len(ents))
 	}
 }
+
+// del export reports a missing zone itself, on stderr, never through
+// PrepArgs, which prints on stdout where the export's data goes.
+func TestDelExportZone(t *testing.T) {
+	if _, err := delExportZone(""); err == nil {
+		t.Fatal("no zone: want an error, got none")
+	}
+	got, err := delExportZone("parent.example")
+	if err != nil {
+		t.Fatalf("parent.example: %v", err)
+	}
+	if got != "parent.example." {
+		t.Fatalf("parent.example: got %q, want %q", got, "parent.example.")
+	}
+}
