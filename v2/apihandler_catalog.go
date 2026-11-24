@@ -50,7 +50,7 @@ func APICatalog(app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
 
 		switch data.Command {
 		case "create":
-			err = handleCatalogCreate(data.CatalogZone, &resp)
+			err = handleCatalogCreate(data.CatalogZone, CallerApiOwner(r.Context()), &resp)
 
 		case "delete":
 			err = handleCatalogDelete(data.CatalogZone, &resp)
@@ -109,7 +109,9 @@ func APICatalog(app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
+// handleCatalogCreate creates a catalog zone over the API, recording apiOwner,
+// the caller's API owner, as the zone's: its members follow it.
+func handleCatalogCreate(catalogZoneName, apiOwner string, resp *CatalogResponse) error {
 	if catalogZoneName == "" {
 		return fmt.Errorf("catalog zone name is required")
 	}
@@ -158,6 +160,7 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 
 	// Mark it as a catalog zone
 	zd.Options[OptCatalogZone] = true
+	zd.setApiOwner(inputApiOwner(apiOwner))
 
 	zd.mu.Lock()
 	zd.ensureWorkingSet()

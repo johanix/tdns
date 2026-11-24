@@ -86,7 +86,7 @@ for keys created here; config keys are managed via keys.tsig.`,
 	add.Flags().StringVar(&tsigAlgo, "algorithm", "hmac-sha256", "HMAC algorithm")
 	add.Flags().StringVar(&tsigSecretFile, "secret-file", "", "File containing the base64 TSIG secret; preferred over --secret")
 	add.Flags().StringVar(&tsigSecret, "secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --secret-file")
-	add.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label (default api)")
+	add.Flags().StringVar(&tsigOwner, "owner", "", "API owner of the key (default: yours; api over the socket)")
 	add.Flags().BoolVar(&tsigForce, "force", false, "Overwrite on secret/algorithm conflict")
 	add.MarkFlagRequired("name")
 
@@ -99,7 +99,7 @@ for keys created here; config keys are managed via keys.tsig.`,
 	}
 	generate.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
 	generate.Flags().StringVar(&tsigAlgo, "algorithm", "hmac-sha256", "HMAC algorithm")
-	generate.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label (default api)")
+	generate.Flags().StringVar(&tsigOwner, "owner", "", "API owner of the key (default: yours; api over the socket)")
 	generate.MarkFlagRequired("name")
 
 	importCmd := &cobra.Command{
@@ -114,7 +114,7 @@ Default: import new keys and skip conflicts. --force overwrites all conflicts;
 	}
 	importCmd.Flags().StringVarP(&tsigImportFile, "file", "f", "", "File containing TSIG key declarations")
 	importCmd.Flags().StringVar(&tsigImportFormat, "format", "bind", "Key syntax: bind or nsd")
-	importCmd.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label for imported keys")
+	importCmd.Flags().StringVar(&tsigOwner, "owner", "", "API owner of the new keys (default: yours; api over the socket)")
 	importCmd.Flags().BoolVar(&tsigForce, "force", false, "Overwrite all secret/algorithm conflicts")
 	importCmd.Flags().BoolVar(&tsigInteractive, "interactive", false, "Prompt per conflict before overwriting")
 	importCmd.Flags().BoolVarP(&tsigVerbose, "verbose", "v", false, "List per-key disposition")
@@ -136,13 +136,13 @@ candidates, or --interactive to prompt per key.`,
 
 	setowner := &cobra.Command{
 		Use:   "setowner",
-		Short: "Change owner on an api-origin TSIG key",
+		Short: "Change the API owner of an api-origin TSIG key",
 		Run: func(cmd *cobra.Command, args []string) {
 			tsigKeyMgmt(role, "setowner", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
 		},
 	}
 	setowner.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
-	setowner.Flags().StringVar(&tsigOwner, "owner", "", "New owner label")
+	setowner.Flags().StringVar(&tsigOwner, "owner", "", "New API owner")
 	setowner.MarkFlagRequired("name")
 	setowner.MarkFlagRequired("owner")
 
@@ -222,7 +222,7 @@ func tsigKeyMgmt(role, subcmd, name, algo, secret, owner string, force bool) {
 	case "list":
 		var out, rows []string
 		if tdns.Globals.ShowHeaders {
-			out = append(out, "Name|Algorithm|Origin|Owner|Refs|Created")
+			out = append(out, "Name|Algorithm|Origin|API owner|Refs|Created")
 		}
 		for _, k := range tr.TsigKeys {
 			rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%d|%s",
@@ -438,7 +438,7 @@ func tsigKeyPurge(role string, force, interactive, yes bool) {
 	if len(tr.TsigKeys) > 0 && !force && len(post.TsigOverwrite) == 0 {
 		var out, rows []string
 		if tdns.Globals.ShowHeaders {
-			out = append(out, "Name|Algorithm|Origin|Owner|Created")
+			out = append(out, "Name|Algorithm|Origin|API owner|Created")
 		}
 		for _, k := range tr.TsigKeys {
 			rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%s", k.Name, k.Algorithm, k.Origin, k.Owner, k.Created))
@@ -920,13 +920,13 @@ func sig0KeyMgmt(role, cmd string) {
 	case "list":
 		var out, tmplist []string
 		if tdns.Globals.ShowHeaders {
-			out = append(out, "Signer|State|KeyID|Algorithm|KEY Record")
+			out = append(out, "Signer|API owner|State|KeyID|Algorithm|KEY Record")
 		}
 		if len(tr.Sig0keys) > 0 {
 			for k, v := range tr.Sig0keys {
 				tmp := strings.Split(k, "::")
-				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%s|%v|%.50s...\n",
-					tmp[0], v.State, tmp[1], v.Algorithm, v.Keystr))
+				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%s|%s|%v|%.50s...\n",
+					tmp[0], dashIfEmpty(v.ApiOwner), v.State, tmp[1], v.Algorithm, v.Keystr))
 			}
 			sort.Strings(tmplist)
 			out = append(out, tmplist...)
@@ -1395,8 +1395,9 @@ func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.Keystore
 }
 
 // formatDnssecKeyList renders "keystore dnssec list": one line per key,
-// sorted by zone, state and keyid, with the mechanism columns pub, sign and
-// ds beside the state; ds is "-" while unknown. A state is shown as the
+// sorted by zone, state and keyid, with the zone's API owner ("-" when the
+// zone is not served here) and the mechanism columns pub, sign and ds beside
+// the state; ds is "-" while unknown. A state is shown as the
 // daemon reports it, an owner's states included: the columns say what the
 // key does, whatever its state is called.
 func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) string {
@@ -1404,7 +1405,7 @@ func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) strin
 		return "No DNSSEC key pairs found\n"
 	}
 	type entry struct {
-		zone, state, keyid         string
+		zone, owner, state, keyid  string
 		flags                      uint16
 		alg, pub, sign, ds, keystr string
 	}
@@ -1412,7 +1413,7 @@ func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) strin
 	for k, v := range keys {
 		tmp := strings.Split(k, "::")
 		entries = append(entries, entry{
-			zone: tmp[0], state: v.State, keyid: tmp[1],
+			zone: tmp[0], owner: dashIfEmpty(v.ApiOwner), state: v.State, keyid: tmp[1],
 			flags: v.Flags, alg: v.Algorithm, keystr: v.Keystr,
 			pub: flagColumn(v.Pub), sign: flagColumn(v.Sign), ds: dsColumn(v.DS),
 		})
@@ -1434,11 +1435,11 @@ func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) strin
 	})
 	var out []string
 	for _, e := range entries {
-		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%s|%.50s...\n",
-			e.zone, e.state, e.pub, e.sign, e.ds, e.keyid, e.flags, e.alg, e.keystr))
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%s|%.50s...\n",
+			e.zone, e.owner, e.state, e.pub, e.sign, e.ds, e.keyid, e.flags, e.alg, e.keystr))
 	}
 	if showHeaders {
-		out = append([]string{"Signer|State|Pub|Sign|DS|KeyID|Flags|Algorithm|DNSKEY Record"}, out...)
+		out = append([]string{"Signer|API owner|State|Pub|Sign|DS|KeyID|Flags|Algorithm|DNSKEY Record"}, out...)
 	}
 	return "Known DNSSEC key pairs:\n" + columnize.SimpleFormat(out) + "\n"
 }

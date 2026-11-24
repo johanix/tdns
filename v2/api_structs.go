@@ -377,6 +377,8 @@ type ZonePost struct {
 	// On modify, a nil slice leaves the current value alone; an explicitly
 	// empty one clears it. See ModifyDynamicZone.
 	TransferSrc []string
+	// ApiOwner is the new API owner for "setowner": api or cert:<name>.
+	ApiOwner string `json:"apiowner,omitempty"`
 }
 
 type ZoneResponse struct {

@@ -1156,6 +1156,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						Zonefile:          zr.Zonefile,
 						Template:          zr.Template,
 						InlineTsigKey:     zr.InlineTsigKey,
+						SourceCatalog:     zr.SourceCatalog,
 						ZoneType:          zr.ZoneType,
 						Options:           zr.Options,
 						OutboundSoaSerial: zr.OutboundSoaSerial,
@@ -1173,6 +1174,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 						notifyRetries:       zr.NotifyRetries,
 						notifyRetryInterval: zr.NotifyRetryInterval,
+					}
+					if zr.ApiOwner != "" {
+						zd.setApiOwner(zr.ApiOwner)
 					}
 
 					// Strip origination settings this zone may not act on. The

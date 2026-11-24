@@ -282,6 +282,15 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		if zconf.ApiManaged {
 			options[OptApiManagedZone] = true
 		}
+		// The API owner the entry records. A catalog member records none:
+		// it follows its catalog zone, whatever its entry says.
+		apiOwner := ""
+		if zconf.SourceCatalog == "" {
+			var oerr error
+			if apiOwner, oerr = dynamicApiOwner(zconf.ApiOwner); oerr != nil {
+				lg.Error("dynamic zone: invalid api-owner, read as api", "zone", zoneName, "err", oerr)
+			}
+		}
 
 		// Dynamic PRIMARY with a template: re-expand the template and
 		// re-activate the update policy through the same shared helper the
@@ -321,6 +330,9 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 					zd.DownstreamAuth = zconf.DownstreamAuth
 					zd.keepPersistedOutbound = true
 				}
+				// Kept, so that the next rewrite of the dynamic config does
+				// not lose it.
+				zd.setApiOwner(apiOwner)
 				// no-refresh-hooks: an error-state shell registered only to
 				// carry the ConfigError. It never refreshes, so a hook would
 				// have nothing to run on.
@@ -357,6 +369,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				Zonefile:         spec.Zconf.Zonefile,
 				Template:         zconf.Template,
 				InlineTsigKey:    spec.InlineTsigKey,
+				ApiOwner:         apiOwner,
 				PublishCadence:   spec.PublishCadence,
 				Notify:           spec.Zconf.Notify,
 				AllowNotify:      spec.Zconf.AllowNotify,
@@ -497,6 +510,8 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 
 			Template:        zconf.Template,
 			TemplateWarning: templateWarning,
+			ApiOwner:        apiOwner,
+			SourceCatalog:   zconf.SourceCatalog,
 		}
 
 		// Blocking send, exactly like the static-zone enqueue in ParseZones.
@@ -614,6 +629,9 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		Template:          zd.Template,
 		SourceCatalog:     zd.SourceCatalog,
 		ApiManaged:        zd.Options[OptApiManagedZone],
+		// The owner the zone records, not its effective one: a catalog
+		// member records none, so that it follows its catalog zone.
+		ApiOwner: zd.recordedApiOwner(),
 		// Note: We don't serialize Frozen, Dirty, Error, ErrorType, ErrorMsg, RefreshCount
 		// as these are runtime state, not configuration
 	}
@@ -875,6 +893,11 @@ type DynamicZoneInput struct {
 	// because the caller built this struct, so the distinction is honest here
 	// in a way a JSON round-trip alone would not be.
 	TransferSrc []string
+	// ApiOwner is the caller's API owner (CallerApiOwner): the owner an
+	// add gives the zone, and the owner of an inline TSIG key that an add
+	// or a modify puts into the keystore. A modify never changes the zone's
+	// owner; `zone setowner` does. Empty is "api".
+	ApiOwner string
 }
 
 // stageInlineTsigKey validates an inline TSIG key supplied with an add/modify
@@ -910,7 +933,9 @@ func (conf *Config) stageInlineTsigKey(in *DynamicZoneInput) (*TsigDetails, erro
 // commitStagedTsigKey adds a staged inline key via the keystore when absent, or
 // no-ops when an identical key already exists. A differing secret/algorithm is
 // rejected (create-if-absent; §7). Returns rollback to undo a newly inserted key.
-func (conf *Config) commitStagedTsigKey(staged *TsigDetails) (rollback func(), err error) {
+// A new key gets owner, the caller's API owner; an identical existing key keeps
+// the owner it has, so that a caller cannot take over a key by naming it.
+func (conf *Config) commitStagedTsigKey(staged *TsigDetails, owner string) (rollback func(), err error) {
 	if staged == nil {
 		return func() {}, nil
 	}
@@ -931,7 +956,7 @@ func (conf *Config) commitStagedTsigKey(staged *TsigDetails) (rollback func(), e
 		TsigKeyname:   staged.Name,
 		TsigAlgorithm: staged.Algorithm,
 		TsigSecret:    staged.Secret,
-		Owner:         "api",
+		Owner:         inputApiOwner(owner),
 		Creator:       "inline-zone",
 	})
 	if err != nil {
@@ -1127,6 +1152,8 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 
 		SuppressedOptions: suppressedOptions,
 	}
+	// Before Zones.Set and the persist below, which writes it.
+	zd.setApiOwner(inputApiOwner(in.ApiOwner))
 	zd.setOutboundLocked(outbound) // zd is still private to this goroutine
 	if normMsg != "" {
 		lg.Warn("zone option normalization", "zone", name, "detail", normMsg)
@@ -1137,7 +1164,7 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// persisted keys: block includes it), then register and persist. On persist
 	// failure, roll back BOTH the registration and the key so a failed add leaves
 	// no live-but-unpersisted zone and no orphaned live key.
-	rollbackKey, cerr := conf.commitStagedTsigKey(staged)
+	rollbackKey, cerr := conf.commitStagedTsigKey(staged, in.ApiOwner)
 	if cerr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, cerr)
 	}
@@ -1570,9 +1597,11 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		notifyRetries:       notifyRetries,
 		notifyRetryInterval: notifyRetryInterval,
 	}
+	// The zone keeps its owner across a modify, whoever modifies it.
+	newZd.apiOwner.Store(oldZd.apiOwner.Load())
 	// Commit the staged inline key just before persistence so the rewritten file
 	// includes it; roll it back if persistence fails.
-	rollbackKey, cerr := conf.commitStagedTsigKey(staged)
+	rollbackKey, cerr := conf.commitStagedTsigKey(staged, in.ApiOwner)
 	if cerr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, cerr)
 	}

@@ -112,6 +112,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 				Creator:    creator,
 				PrivateKey: "-***-",
 				Keystr:     keyrrstr,
+				ApiOwner:   keystoreApiOwner(keyname),
 			}
 		}
 		resp.Sig0keys = tmp2
@@ -548,6 +549,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 				Pub:        pub.Valid && pub.Int64 != 0,
 				Sign:       sign.Valid && sign.Int64 != 0,
 				DS:         nullBoolPtr(ds),
+				ApiOwner:   keystoreApiOwner(keyname),
 			}
 			tmp2[mapkey] = dk
 		}

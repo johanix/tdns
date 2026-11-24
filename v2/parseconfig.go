@@ -1316,6 +1316,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			// catalog among them writes its own zonefile.
 			zd.fromStaticConfig.Store(true)
 		}
+		// Stored on every parse, before anything below can quarantine the
+		// zone: a reload that removes a grant, or breaks it, must not leave
+		// the previous grant in force. An unusable value is the config's
+		// owner, and the zone is quarantined over it further down.
+		apiOwner, apiOwnerErr := StaticApiOwner(zconf.ApiOwner)
+		if apiOwnerErr != nil {
+			apiOwner = ApiOwnerConfig
+		}
+		zd.setApiOwner(apiOwner)
 
 		// A zone defined more than once is served under NEITHER definition.
 		// Quarantining it rather than refusing the whole config is the same
@@ -1346,6 +1355,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		if strings.Contains(zconf.Name, "..") || strings.Contains(zconf.Name, "//") {
 			lgConfig.Error("zone name contains invalid characters, ignoring", "zone", zconf.Name)
 			zd.SetError(ConfigError, "zone name contains invalid characters: %q", zconf.Name)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
+		if apiOwnerErr != nil {
+			lgConfig.Error("zone api-owner invalid, zone in error state", "zone", zname, "err", apiOwnerErr)
+			zd.SetError(ConfigError, "%v", apiOwnerErr)
 			broken_zones = append(broken_zones, zname)
 			continue
 		}
@@ -2201,6 +2217,10 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		// A dynamic zone's own inline TSIG key (persisted by the daemon),
 		// never a template's to hand out.
 		"InlineTsigKey": true,
+		// Handing a zone to an application is said of that zone, in the
+		// zone's own config: a template would hand over every zone stamped
+		// from it, the dynamic zones included.
+		"ApiOwner": true,
 	}
 	gapFillStruct(reflect.ValueOf(&zconf).Elem(), reflect.ValueOf(tmpl).Elem(), bespoke, false)
 	return zconf, nil

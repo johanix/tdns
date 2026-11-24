@@ -29,7 +29,7 @@ func newTestCatalog(t *testing.T, zone string) *ZoneData {
 		Zones.Remove(zone)
 		forgetCatalogMembership(zone)
 	})
-	if err := handleCatalogCreate(zone, &CatalogResponse{}); err != nil {
+	if err := handleCatalogCreate(zone, "", &CatalogResponse{}); err != nil {
 		t.Fatalf("handleCatalogCreate: %v", err)
 	}
 	zd, ok := Zones.Get(zone)
