@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -421,4 +422,31 @@ BEGIN SELECT RAISE(ABORT, 'delete refused by the test'); END`); err != nil {
 			t.Error("the zone came back")
 		}
 	})
+}
+
+// A KSK rollover tick that got the zone before a delete and takes the
+// rollover lock after it writes nothing: the delete has just taken the
+// zone's rollover state, and the tick would put it back.
+func TestRolloverTickSkipsARemovedZone(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	const zone = "removed.ds.example."
+	zd := dsTestZone(t, kdb, zone, RolloverMethodMultiDS)
+	if row, err := LoadRolloverZoneRow(kdb, zone); err != nil || row != nil {
+		t.Fatalf("rollover state before the tick: %+v %v", row, err)
+	}
+	zd.removed.Store(true)
+	if err := RolloverAutomatedTick(context.Background(), ktDeps(zd, kdb, time.Now())); err != nil {
+		t.Fatalf("tick on a removed zone: %v", err)
+	}
+	if row, err := LoadRolloverZoneRow(kdb, zone); err != nil || row != nil {
+		t.Fatalf("the tick wrote rollover state for a removed zone: %+v %v", row, err)
+	}
+	// The same tick on the zone still served does write it.
+	zd.removed.Store(false)
+	if err := RolloverAutomatedTick(context.Background(), ktDeps(zd, kdb, time.Now())); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if row, err := LoadRolloverZoneRow(kdb, zone); err != nil || row == nil {
+		t.Fatalf("no rollover state after a tick on a served zone: %+v %v", row, err)
+	}
 }
