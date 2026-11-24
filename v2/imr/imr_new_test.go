@@ -140,3 +140,15 @@ func TestNewImrRegistersItsDebugHooksOnce(t *testing.T) {
 		t.Errorf("%d debug hooks registered over two starts, want at most one", got)
 	}
 }
+
+// The resolver reads Options, not the daemon's option strings: a Config
+// with strings and no Options is refused, before anything is started (the
+// context is already cancelled).
+func TestNewImrRefusesOptionStringsWithoutOptions(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := NewImr(ctx, Config{OptionsStrs: []string{"qname-minimisation"}}, ImrOptions{})
+	if err == nil || !strings.Contains(err.Error(), "OptionsStrs") {
+		t.Fatalf("NewImr = %v, want the option strings refused", err)
+	}
+}

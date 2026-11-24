@@ -275,6 +275,11 @@ func (resp *ImrResponse) denied(kind cache.CacheContext, state cache.ValidationS
 // ic.Tuning, and the last one built wins; the data clock (ic.Testing) and the
 // debug log hooks (ic.Logging) are set up once, by the first.
 func NewImr(ctx context.Context, ic Config, opts ImrOptions) (*Imr, error) {
+	// Option strings are the daemon's to translate (Config.OptionsStrs).
+	// Strings with no Options would be dropped without a word.
+	if len(ic.OptionsStrs) > 0 && ic.Options == nil {
+		return nil, fmt.Errorf("imrengine.options: the resolver does not read option strings (Config.OptionsStrs %q); set Config.Options", ic.OptionsStrs)
+	}
 	// The test clock, if one is asked for, before anything is cached: priming
 	// stamps expirations in data time.
 	if err := startDataClock(ctx, ic.Testing); err != nil {

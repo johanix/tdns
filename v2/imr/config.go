@@ -23,11 +23,16 @@ type Config struct {
 	// OutboundAddressFamilies is which address families the resolver sends its
 	// queries to authoritative servers over: ipv4, ipv6, or both (the default).
 	// What it listens on is listeners.addresses. See ParseAddressFamilies.
-	OutboundAddressFamilies []string             `yaml:"outbound-address-families" mapstructure:"outbound-address-families"`
-	Stubs                   []ImrStubConf        `yaml:"stubs"`
-	Forward                 []ImrForwardConf     `yaml:"forward" mapstructure:"forward"`
-	OptionsStrs             []string             `yaml:"options" mapstructure:"options"`
-	Options                 map[ImrOption]string `yaml:"-" mapstructure:"-"`
+	OutboundAddressFamilies []string         `yaml:"outbound-address-families" mapstructure:"outbound-address-families"`
+	Stubs                   []ImrStubConf    `yaml:"stubs"`
+	Forward                 []ImrForwardConf `yaml:"forward" mapstructure:"forward"`
+	// OptionsStrs is the options: list of a daemon's config file, as read.
+	// The resolver does not read it: the daemon turns the strings into
+	// Options (root's parseImrOptions), and an embedder sets Options.
+	// NewImr refuses a Config that has strings but no Options.
+	OptionsStrs []string `yaml:"options" mapstructure:"options"`
+	// Options are the resolver's options. Nil or empty: the defaults.
+	Options map[ImrOption]string `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
 	// full RR text (zonefile format). DS is preferred as it is more convenient.
 	// Both tags are load bearing, because the daemon's Config is decoded by two different
