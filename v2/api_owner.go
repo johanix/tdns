@@ -67,6 +67,20 @@ func checkCertApiOwner(owner string) error {
 	return nil
 }
 
+// readCertApiOwner checks a "cert:<name>" API owner read from a config
+// file, the daemon's dynamic config or the operator's: only that it names
+// a client, as ValidateAccessFile asks only for a name. A hand-written
+// access file may hold a name `client add` would refuse ("batch client"),
+// and that client records its owner like any other; reading it back as
+// anything else would hand its zones to someone else. CheckAccessClientName
+// is for names given now (setowner, client add).
+func readCertApiOwner(owner string) error {
+	if name, _ := ApiOwnerClient(owner); name == "" {
+		return fmt.Errorf("API owner %q: the client name is empty", owner)
+	}
+	return nil
+}
+
 // StaticApiOwner is the API owner of a config-file zone whose api-owner: is
 // v: "config" when unset. A zone there belongs to the config or to a
 // certificate client the operator hands it to; "api" is what an operator's
@@ -76,7 +90,7 @@ func StaticApiOwner(v string) (string, error) {
 	case v == "" || v == ApiOwnerConfig:
 		return ApiOwnerConfig, nil
 	case strings.HasPrefix(v, ApiOwnerCertPrefix):
-		if err := checkCertApiOwner(v); err != nil {
+		if err := readCertApiOwner(v); err != nil {
 			return "", fmt.Errorf("api-owner: %v", err)
 		}
 		return v, nil
@@ -101,13 +115,16 @@ func CheckSettableApiOwner(v string) error {
 // would not have written is reported and read as "api", so that a damaged
 // entry hands its zone to no certificate client.
 func dynamicApiOwner(v string) (string, error) {
-	if v == "" {
+	switch {
+	case v == "" || v == ApiOwnerApi:
 		return ApiOwnerApi, nil
+	case strings.HasPrefix(v, ApiOwnerCertPrefix):
+		if err := readCertApiOwner(v); err != nil {
+			return ApiOwnerApi, err
+		}
+		return v, nil
 	}
-	if err := CheckSettableApiOwner(v); err != nil {
-		return ApiOwnerApi, err
-	}
-	return v, nil
+	return ApiOwnerApi, fmt.Errorf("API owner %q: use api or cert:<name>", v)
 }
 
 // recordedApiOwner is the API owner the zone itself records: "" for a

@@ -694,12 +694,17 @@ func (conf *Config) loadDynamicConfigFile() (*DynamicConfigFile, error) {
 
 // writeDynamicConfigFile writes the dynamic config file with atomic writes.
 func (conf *Config) writeDynamicConfigFile(zones []ZoneConf) error {
+	dynamicConfigMutex.Lock()
+	defer dynamicConfigMutex.Unlock()
+	return conf.writeDynamicConfigFileLocked(zones)
+}
+
+// writeDynamicConfigFileLocked is writeDynamicConfigFile for a caller that
+// holds dynamicConfigMutex.
+func (conf *Config) writeDynamicConfigFileLocked(zones []ZoneConf) error {
 	if conf.DynamicZones.ConfigFile == "" {
 		return fmt.Errorf("dynamic config file path not configured")
 	}
-
-	dynamicConfigMutex.Lock()
-	defer dynamicConfigMutex.Unlock()
 
 	// Refuse to write if the file was unreadable at startup: the in-memory state is
 	// incomplete (it never loaded the persisted zones/keys), so writing now would
@@ -809,8 +814,13 @@ func (conf *Config) WriteDynamicConfigFile() error {
 		return nil // No config file configured, nothing to write
 	}
 
-	dynamicZones := conf.getDynamicZonesFromZonesMap()
-	return conf.writeDynamicConfigFile(dynamicZones)
+	// The snapshot is taken under the lock the write holds, so a write can
+	// never put back a snapshot older than one already written (a zone
+	// setowner that persisted in between would be lost on disk). Collecting
+	// it takes no zone lock.
+	dynamicConfigMutex.Lock()
+	defer dynamicConfigMutex.Unlock()
+	return conf.writeDynamicConfigFileLocked(conf.getDynamicZonesFromZonesMap())
 }
 
 // AddDynamicZoneToConfig adds or updates a zone in the dynamic config file
