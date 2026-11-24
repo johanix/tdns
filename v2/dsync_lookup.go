@@ -202,7 +202,7 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 	var dsynctarget DsyncTarget
 
 	// Use internal IMR to discover DSYNC records
-	dsync_res, err := imr.DsyncDiscovery(ctx, childzone, Globals.Verbose)
+	dsync_res, err := imr.DsyncDiscovery(ctx, childzone, imr.Verbose)
 	if err != nil {
 		return nil, err
 	}

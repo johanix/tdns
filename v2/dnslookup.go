@@ -470,7 +470,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 		}
 		rcode = r.MsgHdr.Rcode
 		if len(r.Answer) != 0 {
-			if Globals.Debug {
+			if imr.Debug {
 				lg.Printf("*** AuthDNSQuery: there is stuff in Answer section")
 			}
 			for _, rr := range r.Answer {
@@ -569,7 +569,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 			return &rrset, rcode, cache.ContextAnswer, nil
 		} else if len(r.Ns) != 0 {
 			// This is likely either a negative response or a referral
-			if Globals.Debug {
+			if imr.Debug {
 				lg.Printf("*** AuthDNSQuery: there is stuff in Authority section")
 			}
 			switch rcode {
@@ -933,14 +933,14 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 				// endpoint's backoff does not keep it from being found.
 				d, ok := imr.attemptKey(ctx, server, zone, addr, t, true)
 				if !ok || !d.server.IsEndpointAddrAvailable(d.addr, d.keyPort, t) {
-					if Globals.Debug {
+					if imr.Debug {
 						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to server backoff",
 							"addr", addr, "dial", cache.JoinDialAddr(d.addr, d.keyPort), "transport", core.TransportToString[t], "ns", nsname)
 					}
 					continue
 				}
 				if zone != nil && !zone.IsZoneEndpointAvailable(d.addr, d.keyPort, t) {
-					if Globals.Debug {
+					if imr.Debug {
 						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to zone backoff",
 							"addr", addr, "dial", cache.JoinDialAddr(d.addr, d.keyPort), "transport", core.TransportToString[t], "ns", nsname, "zone", zoneName)
 					}
@@ -963,7 +963,7 @@ func (imr *Imr) selectServerTuples(ctx context.Context, qname string, qtype uint
 					if imr.FamilyTracker.ShouldProbe(fam) {
 						tup.Probe = true
 						suspectTuples = append(suspectTuples, tup)
-					} else if Globals.Debug {
+					} else if imr.Debug {
 						lgDns.Debug("prioritizeServers: skipping suspect-family (addr,transport)",
 							"addr", addr, "transport", core.TransportToString[t], "family", int(fam))
 					}
@@ -1897,7 +1897,7 @@ func (imr *Imr) expandServerMapWithMissingNSSince(ctx context.Context, qname str
 		if addrs := l.srv.GetAddrs(); len(addrs) > 0 {
 			added++
 			usable[cache.ServerKey(l.nsname)] = l.srv
-			if Globals.Debug {
+			if imr.Debug {
 				lgDns.Debug("expandServerMapWithMissingNS: resolved addresses for previously-unresolved NS",
 					"ns", l.nsname, "zone", zonename, "addresses", addrs)
 			}
@@ -1981,7 +1981,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		defer cancel()
 	}
 
-	if Globals.Debug {
+	if imr.Debug {
 		lg.Printf("IterativeDNSQuery: looking up <%s, %s> using %d servers", qname, dns.TypeToString[qtype], len(serverMap))
 	}
 
@@ -1997,7 +1997,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	for k := range serverMap {
 		servernames = append(servernames, k)
 	}
-	if Globals.Debug {
+	if imr.Debug {
 		lg.Printf("IterativeDNSQuery: servers for %q: %+v", qname, servernames)
 	}
 
@@ -2016,12 +2016,12 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 				// cache hit rather than paying for a re-query it did not ask
 				// for.
 				if privacy == edns0.PrivacyStrict && !core.IsEncryptedTransport(crrset.Transport) {
-					if Globals.Debug {
+					if imr.Debug {
 						lg.Printf("IterativeDNSQuery: strict privacy requested but cached data for %s %s came over unencrypted transport (%s), skipping cache", qname, dns.TypeToString[qtype], core.TransportToString[crrset.Transport])
 					}
 					crrset = nil // Force query over encrypted transport
 				} else {
-					if Globals.Debug {
+					if imr.Debug {
 						lg.Printf("IterativeDNSQuery: found answer to <%s, %s> in cache (result=%s)", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
 					}
 					// A NEGATIVE entry's RRset is the SOA that PROVES the
@@ -2057,34 +2057,34 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 						// Strict privacy still wins -- need encrypted transport
 						crrset = nil
 					} else {
-						if Globals.Debug {
+						if imr.Debug {
 							lg.Printf("IterativeDNSQuery: returning cached indirect data for <%s, %s> (UpgradeIndirectCacheHits=false, context=%s)", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
 						}
 						return crrset.RRset, int(crrset.Rcode), crrset.Context, crrset.Transport, nil
 					}
-				} else if Globals.Debug {
+				} else if imr.Debug {
 					lg.Printf("IterativeDNSQuery: found <%s, %s> in cache with context=%s, but issuing direct query to upgrade quality and get DNSSEC signatures", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
 				}
 				// Fall through to issue query
 			case cache.ContextPriming, cache.ContextFailure:
-				if Globals.Debug {
+				if imr.Debug {
 					lg.Printf("IterativeDNSQuery: found <%s, %s> in cache with context=%s, issuing direct query", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
 				}
 				// Fall through to issue query
 			default:
 				// Unknown context - be safe and issue query
-				if Globals.Debug {
+				if imr.Debug {
 					lg.Printf("IterativeDNSQuery: found <%s, %s> in cache with unknown context=%s, issuing query", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
 				}
 				// Fall through to issue query
 			}
 		} else {
-			if Globals.Debug {
+			if imr.Debug {
 				lg.Printf("IterativeDNSQuery: answer to <%s, %s> not present in cache", qname, dns.TypeToString[qtype])
 			}
 		}
 	} else {
-		if Globals.Debug {
+		if imr.Debug {
 			lg.Printf("IterativeDNSQuery: forcing re-query of <%s, %s>, bypassing cache", qname, dns.TypeToString[qtype])
 		}
 	}
@@ -2727,7 +2727,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		return serverMap, nil
 	}
 
-	if Globals.Debug && !imr.Quiet {
+	if imr.Debug && !imr.Quiet {
 		lgDns.Debug("*** ParseAdditionalForNSAddrs: zonename: \nnsMap", "zonename", zonename, "nnsmap", nsMap)
 	}
 
@@ -2748,7 +2748,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	for name, srv := range serverMap {
 		if expire := srv.GetExpire(); !expire.IsZero() && expire.Before(now) {
 			delete(serverMap, name)
-			if Globals.Debug && !imr.Quiet {
+			if imr.Debug && !imr.Quiet {
 				lgDns.Debug("ParseAdditionalForNSAddrs: pruned expired server for zone", "server", name, "zone", zonename)
 			}
 		}
@@ -2902,7 +2902,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
-		if Globals.Debug && !imr.Quiet {
+		if imr.Debug && !imr.Quiet {
 			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, A> (adding glue unless a live answer is cached)\n", nsname)
 		}
 		imr.Cache.SetUnless(nsname, dns.TypeA, &cache.CachedRRset{
@@ -2921,7 +2921,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 			continue
 		}
 		rr := rrset.RRs[0]
-		if Globals.Debug && !imr.Quiet {
+		if imr.Debug && !imr.Quiet {
 			fmt.Printf("ParseAdditionalForNSAddrs: Calling rrcache.Set for <%s, AAAA> (adding glue unless a live answer is cached)\n", nsname)
 		}
 		imr.Cache.SetUnless(nsname, dns.TypeAAAA, &cache.CachedRRset{
@@ -2935,7 +2935,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}, glueKeeps) // not over a live answer (glueMayReplace)
 	}
 
-	if Globals.Debug && !imr.Quiet {
+	if imr.Debug && !imr.Quiet {
 		lgDns.Debug("*** ParseAdditionalForNSAddrs: adding servers for zone to cache",
 			"adding", len(serverMap),
 			"zone", zonename)
@@ -2943,7 +2943,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	// rrcache.Servers.Set(zonename, servers)
 	imr.Cache.AddServers(zonename, serverMap)
 
-	if Globals.Debug && !imr.Quiet {
+	if imr.Debug && !imr.Quiet {
 		lgDns.Debug("ParseAdditionalForNSAddrs: serverMap:")
 		for n, as := range serverMap {
 			lgDns.Debug("server: : (addrs: )", "server", n, "s", as.Name, "addrs", as.GetAddrs())
@@ -3274,14 +3274,14 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 		}
 	}
 	if eerr != nil {
-		if Globals.Debug {
+		if imr.Debug {
 			lgDns.Debug("tryServer: no attempt", "server", server.Name, "addr", addr, "transport", core.TransportToString[eff], "error", eerr)
 		}
 		return nil, 0, eff, endpointDial{}, eerr
 	}
 	ep.server.IncrementTransportCounter(eff)
 	dial := ep.dialAddr()
-	if Globals.Debug {
+	if imr.Debug {
 		lgDns.Debug("*** tryServer: calling c.Exchange",
 			"transport", core.TransportToString[eff],
 			"server", server.Name,
@@ -3329,7 +3329,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 	// rtt and hides any preceding UDP-timeout cost. The wall-clock value is
 	// what we actually care about for prioritization.
 	start := time.Now()
-	r, _, xres, err := core.ExchangeCtxWithResult(ctx, c, m, dial, Globals.Debug && !imr.Quiet)
+	r, _, xres, err := core.ExchangeCtxWithResult(ctx, c, m, dial, imr.Debug && !imr.Quiet)
 	rtt := time.Since(start)
 	// A TC=1 truncation upgrade is a size-driven fact about this exchange (not a
 	// failure); record it regardless of the subsequent TCP outcome.
@@ -3392,7 +3392,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, zone *c
 			server.IncrementRedirectedCounter(xres.WireTransport)
 		}
 		ep.server.RecordEndpointAddrRTT(ep.addr, ep.keyPort, eff, rtt)
-	} else if Globals.Debug {
+	} else if imr.Debug {
 		lgDns.Debug("*** tryServer: query returned no response",
 			"qname", qname,
 			"qtype", dns.TypeToString[qtype],
@@ -3841,13 +3841,13 @@ func (imr *Imr) storeTLSAFromSVCB(base string, owners []string, svcb *dns.SVCB, 
 
 func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, transport core.Transport, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
 	if r == nil {
-		if Globals.Debug {
+		if imr.Debug {
 			imr.Cache.Logger.Printf("*** handleAnswer: nil response for qname=%s, qtype=%s", qname, dns.TypeToString[qtype])
 		}
 		return nil, dns.RcodeServerFailure, cache.ContextFailure, transport, fmt.Errorf("nil response in handleAnswer"), false
 	}
 
-	if Globals.Debug {
+	if imr.Debug {
 		imr.Cache.Logger.Printf("*** handleAnswer: qname=%s, qtype=%s, rcode=%s, r: %s", qname, dns.TypeToString[qtype], dns.RcodeToString[r.MsgHdr.Rcode], PrintMsgFull(r, imr.LineWidth))
 	}
 	// qname is a CNAME: cache the link and follow the chain. Decided before
@@ -3894,7 +3894,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 		// Validate the RRset (if possible) using DnskeyCache
 		// Always call ValidateRRset - it will check zone state even when there are no RRSIGs
 		var vstate cache.ValidationState
-		if Globals.Debug {
+		if imr.Debug {
 			imr.Cache.Logger.Printf("*** handleAnswer: validating RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
 		}
 		// With the authority section: an answer synthesized from a wildcard
@@ -3905,7 +3905,7 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 			lgDns.Error("handleAnswer: failed to validate RRset", "rrset", err)
 			return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, err, false
 		}
-		if Globals.Debug {
+		if imr.Debug {
 			imr.Cache.Logger.Printf("*** handleAnswer: validated RRset for %s %s:\n%s", qname, dns.TypeToString[qtype], rrset.String(imr.LineWidth))
 		}
 		cr := &cache.CachedRRset{
@@ -4017,7 +4017,7 @@ func zoneHasVerdict(z *cache.Zone) bool {
 // NS RRset, its DS, and the glue and transport signals that may be used
 // (ParseAdditionalForNSAddrs).
 func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, r *dns.Msg, force bool, visitedZones map[string]bool, serversZone string, transport core.Transport, privacy edns0.PrivacyLevel, adopt *referralAdopt) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
-	if Globals.Debug && !imr.Quiet {
+	if imr.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: rcode=NOERROR, this is a referral or neg resp")
 	}
 	nsRRset, zonename, nsMap := extractReferral(r, qname, qtype)
@@ -4026,25 +4026,25 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 	if zonename != "" {
 		referralKey := fmt.Sprintf("%s:%s", qname, zonename)
 		if visitedZones[referralKey] {
-			if Globals.Debug {
+			if imr.Debug {
 				imr.Cache.Logger.Printf("handleReferral: detected referral loop - already referred to zone %q for qname %q, aborting", zonename, qname)
 			}
 			return nil, r.MsgHdr.Rcode, cache.ContextFailure, transport, fmt.Errorf("referral loop detected: already referred to zone %q for qname %q", zonename, qname)
 		}
 		visitedZones[referralKey] = true
-		if Globals.Debug {
+		if imr.Debug {
 			imr.Cache.Logger.Printf("handleReferral: tracking referral to zone %q for qname %q", zonename, qname)
 		}
 	}
 
-	if Globals.Debug && !imr.Quiet {
+	if imr.Debug && !imr.Quiet {
 		imr.Cache.Logger.Printf("*** handleReferral: zone name is %q, nsRRset: %+v", zonename, nsRRset)
 	}
 	if len(nsRRset.RRs) != 0 {
 		nsRRset.Name = zonename
 		nsRRset.Class = dns.ClassINET
 		nsRRset.RRtype = dns.TypeNS
-		if Globals.Debug && !imr.Quiet {
+		if imr.Debug && !imr.Quiet {
 			fmt.Printf("handleReferral: Calling rrcache.Set for <%s, NS>\n", zonename)
 		}
 		// Validate NS RRset if signatures are present
@@ -4274,7 +4274,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 					picked = append(picked, ns.Ns)
 				}
 			}
-			if Globals.Debug {
+			if imr.Debug {
 				lgDns.Debug("handleReferral: OOB resolution budget",
 					"zone", zonename, "depth", zoneDepth(zonename),
 					"budget", budget, "picked", picked)

@@ -74,6 +74,7 @@ func newOwnZoneRig(t *testing.T) *ownZoneRig {
 
 	imr := newForwardTestImr(t, rootForward(upAddr, upPort))
 	imr.DnskeyCache = imr.Cache.DnskeyCache // as InitImrEngine wires it
+	imr.ownZones = hostedZones{}
 	imr.FamilyTracker = cache.NewFamilyTracker(10*time.Minute, 10*time.Minute, 30*time.Second, 5)
 	// The stub's server is reached through the cache's shared per-transport
 	// clients (fixed port); the forward has its own client.
@@ -152,7 +153,7 @@ func TestOwnZoneTrustAnchorBeforeTheZoneLoads(t *testing.T) {
 	conf := &Config{}
 	conf.Imr.TrustAnchorDS = ds.String()
 	conf.Internal.AllZones = []string{ownParent}
-	rig.imr.pendingOwnZone = func(zone string) bool { return rig.imr.ownZonePending(conf, zone) } // as InitImrEngine binds it
+	rig.imr.pendingOwnZone = func(zone string) bool { return ownZonePending(conf, zone) } // as InitImrEngine binds it
 	if err := rig.imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
 		t.Fatalf("trust anchor initialization before the server's own zone has loaded: %v", err)
 	}
@@ -173,6 +174,7 @@ func TestOwnZoneTrustAnchorNeedsNoServers(t *testing.T) {
 	parent, _ := signedTestZone(t, ownParent, ownParentZone, false)
 	imr := newForwardTestImr(t, nil)
 	imr.DnskeyCache = imr.Cache.DnskeyCache // as InitImrEngine wires it
+	imr.ownZones = hostedZones{}
 
 	conf := &Config{}
 	conf.Imr.TrustAnchorDS = kskDS(t, parent).String()
@@ -317,14 +319,14 @@ func TestOwnZoneForQuestion(t *testing.T) {
 		{ownParent, dns.TypeANY, false},
 	}
 	for _, c := range cases {
-		if got := rig.imr.ownZoneForQuestion(c.qname, c.qtype) != nil; got != c.own {
+		if got := ownZoneForQuestion(c.qname, c.qtype) != nil; got != c.own {
 			t.Errorf("ownZoneForQuestion(%s %s) = %v, want %v", c.qname, dns.TypeToString[c.qtype], got, c.own)
 		}
 	}
 
 	rig.parent.SetError(ConfigError, "test: a service-impacting error")
 	defer rig.parent.SetError(NoError, "")
-	if rig.imr.ownZoneForQuestion("www."+ownParent, dns.TypeA) != nil {
+	if ownZoneForQuestion("www."+ownParent, dns.TypeA) != nil {
 		t.Error("a zone the query handler would SERVFAIL for is still answered from")
 	}
 }
@@ -341,6 +343,7 @@ www.plain.example.	3600	IN	A	192.0.2.9
 	upLog := &upstreamLog{}
 	upAddr, upPort := startLoggedSignedForwardUpstream(t, nil, upLog)
 	imr := newForwardTestImr(t, rootForward(upAddr, upPort))
+	imr.ownZones = hostedZones{}
 	ctx := context.Background()
 
 	resp, err := imr.ImrQuery(ctx, "www."+plain, dns.TypeA, dns.ClassINET, nil)

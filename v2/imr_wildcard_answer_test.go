@@ -371,6 +371,7 @@ func TestOwnNSEC3ZoneWildcardAnswerValidates(t *testing.T) {
 	imr := newForwardTestImr(t, rootForward(upAddr, upPort))
 	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 	imr.DnskeyCache = imr.Cache.DnskeyCache
+	imr.ownZones = hostedZones{}
 
 	m := askWith(t, imr, "x.wild.example.", dns.TypeTXT, true)
 	if m.Rcode != dns.RcodeSuccess || !m.AuthenticatedData || countType(m.Answer, dns.TypeTXT) != 1 {

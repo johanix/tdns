@@ -72,7 +72,7 @@ func TestModifiedDownstreamZoneIsResolved(t *testing.T) {
 		{"www." + ownChild, dns.TypeA},
 	} {
 		what := q.qname + " " + dns.TypeToString[q.qtype]
-		if zd := rig.imr.ownZoneForQuestion(q.qname, q.qtype); zd != nil {
+		if zd := ownZoneForQuestion(q.qname, q.qtype); zd != nil {
 			t.Errorf("%s: answered from %s, a zone modified downstream", what, zd.ZoneName)
 		}
 		resp, err := rig.imr.ImrQueryFresh(ctx, q.qname, q.qtype, dns.ClassINET)
@@ -91,7 +91,7 @@ func TestModifiedDownstreamZoneIsResolved(t *testing.T) {
 		}
 	}
 
-	if zd := rig.imr.ownZoneForQuestion(ownChild, dns.TypeDS); zd != rig.parent {
+	if zd := ownZoneForQuestion(ownChild, dns.TypeDS); zd != rig.parent {
 		t.Errorf("%s DS: own zone %v, want %s: the DS is the parent's", ownChild, zd, ownParent)
 	}
 
@@ -111,7 +111,7 @@ func TestChildCopyIsAnsweredFromWithoutTheOption(t *testing.T) {
 	child := hostChildCopy(t, false)
 
 	for _, qtype := range []uint16{dns.TypeDNSKEY, dns.TypeKEY, dns.TypeSOA} {
-		if zd := rig.imr.ownZoneForQuestion(ownChild, qtype); zd != child {
+		if zd := ownZoneForQuestion(ownChild, qtype); zd != child {
 			t.Errorf("%s %s: own zone %v, want the copy", ownChild, dns.TypeToString[qtype], zd)
 		}
 	}
@@ -171,7 +171,7 @@ func TestModifiedDownstreamTakesEffectOnReload(t *testing.T) {
 // Which questions a zone modified downstream leaves to the resolver: all of
 // its own, a DS below it included. The DS at its apex is its parent's.
 func TestOwnZoneForQuestionModifiedDownstream(t *testing.T) {
-	rig := newOwnZoneRig(t)
+	newOwnZoneRig(t)
 	hostChildCopy(t, true)
 	cases := []struct {
 		qname string
@@ -187,7 +187,7 @@ func TestOwnZoneForQuestionModifiedDownstream(t *testing.T) {
 		{"www." + ownParent, dns.TypeA, true},
 	}
 	for _, c := range cases {
-		if got := rig.imr.ownZoneForQuestion(c.qname, c.qtype) != nil; got != c.own {
+		if got := ownZoneForQuestion(c.qname, c.qtype) != nil; got != c.own {
 			t.Errorf("ownZoneForQuestion(%s %s) = %v, want %v", c.qname, dns.TypeToString[c.qtype], got, c.own)
 		}
 	}
@@ -198,7 +198,6 @@ func TestOwnZoneForQuestionModifiedDownstream(t *testing.T) {
 // answered from: its anchor is processed at start, whether the zone is
 // registered but not yet answering, or only in the configuration.
 func TestModifiedDownstreamZoneIsNotPending(t *testing.T) {
-	imr := &Imr{}
 	const loaded, configured = "loaded.example.", "configured.example."
 
 	zd := testSnapshotZone(t, loaded, `loaded.example.	3600	IN	SOA	ns.loaded.example. hostmaster.loaded.example. 1 7200 1800 604800 300
@@ -206,21 +205,21 @@ loaded.example.	3600	IN	NS	ns.loaded.example.
 ns.loaded.example.	3600	IN	A	192.0.2.1
 `)
 	zd.SetError(ConfigError, "test: not answering yet")
-	if !imr.ownZonePending(nil, loaded) {
+	if !ownZonePending(nil, loaded) {
 		t.Fatalf("%s: a registered zone that does not answer yet is not pending", loaded)
 	}
 	zd.Options = map[ZoneOption]bool{OptModifiedDownstream: true}
-	if imr.ownZonePending(nil, loaded) {
+	if ownZonePending(nil, loaded) {
 		t.Errorf("%s: pending, although it is modified downstream", loaded)
 	}
 
 	conf := &Config{Zones: []ZoneConf{{Name: configured}}}
 	conf.Internal.AllZones = []string{loaded, configured}
-	if !imr.ownZonePending(conf, configured) {
+	if !ownZonePending(conf, configured) {
 		t.Fatalf("%s: a configured zone that has not loaded is not pending", configured)
 	}
 	conf.Zones[0].OptionsStrs = []string{" Modified-Downstream "}
-	if imr.ownZonePending(conf, configured) {
+	if ownZonePending(conf, configured) {
 		t.Errorf("%s: pending, although its configuration says modified-downstream", configured)
 	}
 }

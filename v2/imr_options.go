@@ -22,6 +22,10 @@ type ImrOptions struct {
 	// but does not yet. Trust-anchor set-up asks it, and does not fetch the keys
 	// of such a zone. Nil is a server that has no zones of its own.
 	PendingOwnZone func(zone string) bool
+	// OwnZones is the zones of the server the resolver runs in: questions
+	// about them are answered from them, in process (imr_own_zone.go). Nil
+	// is a server that has no zones of its own.
+	OwnZones OwnZones
 	// Quiet suppresses informational logging (useful for CLI tools).
 	Quiet bool
 }

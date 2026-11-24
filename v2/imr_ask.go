@@ -126,7 +126,7 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 			zoneName, zone, prioritized = imr.awaitUsableTuples(ctx, budget, qname, qtype, serverMap, privacy)
 		}
 		tried := map[passTuple]bool{}
-		if Globals.Debug {
+		if imr.Debug {
 			lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers) attempt=%d", len(prioritized), len(serverMap), attempt+1)
 		}
 
@@ -162,7 +162,7 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 			lastNS, lastAddr, lastTransport = nsname, addr, transport
 			attempts++
 
-			if Globals.Debug {
+			if imr.Debug {
 				lg.Printf("IterativeDNSQuery: using nameserver %s@%s over %s (ALPN: %v) for <%s, %s> query\n",
 					addr, nsname, core.TransportToString[effTransport], server.GetAlpn(), qname, dns.TypeToString[qtype])
 			}
@@ -193,12 +193,12 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 				continue
 			}
 			if r == nil {
-				if Globals.Debug {
+				if imr.Debug {
 					lg.Printf("IterativeDNSQuery: nil response from tryServer(dns.Exchange) qname=%s, qtype=%s", qname, dns.TypeToString[qtype])
 				}
 				continue
 			}
-			if Globals.Debug {
+			if imr.Debug {
 				lg.Printf("IterativeDNSQuery: response from tryServer(dns.Exchange) qname=%s, qtype=%s:\n%s", qname, dns.TypeToString[qtype], PrintMsgFull(r, imr.LineWidth))
 			}
 
@@ -214,13 +214,13 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 					continue
 				}
 				if !refusalIndicatesLameness(qtype, rcode) {
-					if Globals.Debug {
+					if imr.Debug {
 						lg.Printf("IterativeDNSQuery: %s from %s@%s for a DS query (%s) — parent-side data, not evidence of lameness; not recording a backoff",
 							dns.RcodeToString[rcode], addr, nsname, qname)
 					}
 					continue
 				}
-				if Globals.Debug {
+				if imr.Debug {
 					lg.Printf("IterativeDNSQuery: %s response from %s@%s over %s for %s %s (likely lame delegation for zone %q)",
 						dns.RcodeToString[rcode], addr, nsname, core.TransportToString[wireTransport], qname, dns.TypeToString[qtype], zoneName)
 				}
@@ -233,7 +233,7 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 				// tried, not a fresh reading, which a signal update during
 				// the exchange may have moved.
 				if zone != nil {
-					zone.RecordZoneEndpointFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode), Globals.Debug)
+					zone.RecordZoneEndpointFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode), imr.Debug)
 				} else {
 					ep.server.RecordEndpointAddrFailureForRcode(ep.addr, ep.keyPort, wireTransport, uint8(rcode))
 				}
@@ -256,7 +256,7 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 		if attempt == 0 {
 			added := imr.expandServerMapWithMissingNSSince(ctx, qname, qtype, serverMap, addresslessAtStart)
 			if added > 0 {
-				if Globals.Debug {
+				if imr.Debug {
 					lg.Printf("IterativeDNSQuery: expanded serverMap with %d previously-unresolved NS addresses; retrying", added)
 				}
 				continue
@@ -273,7 +273,7 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 		if nextPass != nil {
 			extraPassAdded = true
 			maxPasses++
-			if Globals.Debug {
+			if imr.Debug {
 				lg.Printf("IterativeDNSQuery: tuples the pass did not try are available after it ran out; retrying qname=%s", qname)
 			}
 			continue

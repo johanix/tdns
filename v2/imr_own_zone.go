@@ -36,6 +36,58 @@ import (
 // holds it Secure when the zone's own keys sign it (holdOwnZoneKeys), and the
 // rest of the zone validates against it, locally, as data validates against
 // any validated DNSKEY RRset. Nobody above the zone is asked to vouch for it.
+//
+// The resolver reaches the zones through OwnZones (ImrOptions.OwnZones). The
+// daemon's is hostedZones, over the Zones map; an Imr without one answers
+// nothing locally.
+
+// OwnZones is how a resolver reaches the zones of the server it runs in. Nil
+// is a server with no zones of its own.
+type OwnZones interface {
+	// ZoneFor returns the zone the server answers <qname, qtype> from, or
+	// nil when there is none: the zone that holds the answer, answering
+	// queries, not modified downstream, and qname not at or below one of its
+	// cuts (a DS at the cut excepted).
+	ZoneFor(qname string, qtype uint16) OwnZone
+}
+
+// OwnZone is one zone a resolver answers from (OwnZones.ZoneFor).
+type OwnZone interface {
+	// Apex is the zone's name.
+	Apex() string
+	// Response is the zone's response to <qname, qtype> asked with DO set,
+	// as the server would send it, or nil when it gives none. A copy: the
+	// resolver caches what it is given and caps TTLs in place.
+	Response(ctx context.Context, qname string, qtype uint16) *dns.Msg
+}
+
+// ownZoneFor returns the zone the server answers <qname, qtype> from, or nil
+// (OwnZones.ZoneFor).
+func (imr *Imr) ownZoneFor(qname string, qtype uint16) OwnZone {
+	if imr.ownZones == nil {
+		return nil
+	}
+	return imr.ownZones.ZoneFor(qname, qtype)
+}
+
+// hostedZones is the daemon's OwnZones: the zones in Zones.
+type hostedZones struct{}
+
+func (hostedZones) ZoneFor(qname string, qtype uint16) OwnZone {
+	if zd := ownZoneForQuestion(qname, qtype); zd != nil {
+		return hostedZone{zd}
+	}
+	return nil
+}
+
+// hostedZone is a zone in Zones as an OwnZone.
+type hostedZone struct{ zd *ZoneData }
+
+func (z hostedZone) Apex() string { return z.zd.ZoneName }
+
+func (z hostedZone) Response(ctx context.Context, qname string, qtype uint16) *dns.Msg {
+	return z.zd.localResponse(ctx, qname, qtype)
+}
 
 // ownZoneTransport is what an answer from the server's own zone is reported,
 // and cached, as having arrived over. It crossed no wire; Do53 claims no
@@ -52,7 +104,7 @@ const ownZoneTransport = core.TransportDo53
 //
 // Own data comes before any forward or stub: the server does not ask anyone
 // about a zone it is authoritative for.
-func (imr *Imr) ownZoneForQuestion(qname string, qtype uint16) *ZoneData {
+func ownZoneForQuestion(qname string, qtype uint16) *ZoneData {
 	// The standalone resolver, and every other daemon without zones.
 	if Zones.IsEmpty() {
 		return nil
@@ -89,15 +141,15 @@ func (imr *Imr) ownZoneForQuestion(qname string, qtype uint16) *ZoneData {
 // a zone this server is authoritative for. The cache's validator asks, through
 // RRsetCacheT.AnsweredLocally.
 func (imr *Imr) answeredLocally(qname string, qtype uint16) bool {
-	return imr.ownZoneForQuestion(qname, qtype) != nil
+	return imr.ownZoneFor(qname, qtype) != nil
 }
 
 // ownZonePending reports whether zone is one this server is to answer from
 // but does not yet: it is registered, or listed in the configuration, and not
 // answering queries. Every configured zone is in that state while the daemon
 // starts, as the resolver starts before the zones load.
-func (imr *Imr) ownZonePending(conf *Config, zone string) bool {
-	if Globals.App.Type == AppTypeAgent || imr.ownZoneForQuestion(zone, dns.TypeDNSKEY) != nil {
+func ownZonePending(conf *Config, zone string) bool {
+	if Globals.App.Type == AppTypeAgent || ownZoneForQuestion(zone, dns.TypeDNSKEY) != nil {
 		return false
 	}
 	// A zone modified downstream is never answered from, loaded or not.
@@ -205,8 +257,8 @@ func (w *localResponseWriter) TsigStatus() error   { return nil }
 func (w *localResponseWriter) TsigTimersOnly(bool) {}
 func (w *localResponseWriter) Hijack()             {}
 
-// holdOwnZoneKeys makes zd's own DNSKEY RRset the resolver's trust point for
-// the zone, and returns zd's response to the DNSKEY question at its apex. The
+// holdOwnZoneKeys makes zone's own DNSKEY RRset the resolver's trust point
+// for it, and returns zone's response to the DNSKEY question at its apex. The
 // RRset is Secure when one of its own keys signs it: its keys go into the
 // DNSKEY cache as a validated RRset's do, and the zone is held Secure. A zone
 // with no DNSKEY RRset, or with one that none of its keys signs, is held
@@ -218,9 +270,9 @@ func (w *localResponseWriter) Hijack()             {}
 //
 // Done before every answer from the zone, so a key rollover is followed as soon
 // as it is published.
-func (imr *Imr) holdOwnZoneKeys(ctx context.Context, zd *ZoneData) *dns.Msg {
-	apex := zd.ZoneName
-	r := zd.localResponse(ctx, apex, dns.TypeDNSKEY)
+func (imr *Imr) holdOwnZoneKeys(ctx context.Context, zone OwnZone) *dns.Msg {
+	apex := zone.Apex()
+	r := zone.Response(ctx, apex, dns.TypeDNSKEY)
 	keys := &core.RRset{Name: apex, Class: dns.ClassINET, RRtype: dns.TypeDNSKEY}
 	if r != nil {
 		for _, rr := range r.Answer {
@@ -295,23 +347,23 @@ func (imr *Imr) holdOwnZoneKeys(ctx context.Context, zd *ZoneData) *dns.Msg {
 
 // answerFromOwnZone answers <qname, qtype> from the zone this server is
 // authoritative for that holds the answer, if there is one
-// (ownZoneForQuestion). The response is processed as an authoritative server's
+// (OwnZones.ZoneFor). The response is processed as an authoritative server's
 // is -- validated, cached, a CNAME followed -- once holdOwnZoneKeys has made
 // the zone's own keys the ones it validates against. ok is false when the zone
 // has no authoritative answer to give; the question then goes where it would
 // have gone without the zone.
 func (imr *Imr) answerFromOwnZone(ctx context.Context, qname string, qtype uint16, force bool, privacy edns0.PrivacyLevel) (*core.RRset, int, cache.CacheContext, core.Transport, error, bool) {
-	zd := imr.ownZoneForQuestion(qname, qtype)
-	if zd == nil {
+	z := imr.ownZoneFor(qname, qtype)
+	if z == nil {
 		return nil, 0, cache.ContextFailure, ownZoneTransport, nil, false
 	}
-	r := imr.holdOwnZoneKeys(ctx, zd)
-	if qtype != dns.TypeDNSKEY || !core.EqualNames(qname, zd.ZoneName) {
-		r = zd.localResponse(ctx, qname, qtype)
+	r := imr.holdOwnZoneKeys(ctx, z)
+	if qtype != dns.TypeDNSKEY || !core.EqualNames(qname, z.Apex()) {
+		r = z.Response(ctx, qname, qtype)
 	}
 	if r == nil || !r.Authoritative || (r.Rcode != dns.RcodeSuccess && r.Rcode != dns.RcodeNameError) {
 		lgImr.Debug("own zone has no authoritative answer; asking elsewhere",
-			"zone", zd.ZoneName, "qname", qname, "qtype", dns.TypeToString[qtype])
+			"zone", z.Apex(), "qname", qname, "qtype", dns.TypeToString[qtype])
 		return nil, 0, cache.ContextFailure, ownZoneTransport, nil, false
 	}
 	if len(r.Answer) > 0 {
@@ -323,7 +375,7 @@ func (imr *Imr) answerFromOwnZone(ctx context.Context, qname string, qtype uint1
 	}
 	switch classifyResponse(qname, qtype, r) {
 	case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-		if cctx, rcode, handled := imr.handleNegative(ctx, qname, qtype, r, ownZoneTransport, zd.ZoneName); handled {
+		if cctx, rcode, handled := imr.handleNegative(ctx, qname, qtype, r, ownZoneTransport, z.Apex()); handled {
 			return nil, rcode, cctx, ownZoneTransport, nil, true
 		}
 	}
