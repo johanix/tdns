@@ -817,6 +817,11 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 		case aerr == nil:
 		case isCert:
 			certFailed = true
+		case c.changed && c.failed != nil:
+			// apply found the daemon config, or your pair, changed since
+			// the plan: what it says about the key is of the config as it
+			// was. The entry is left as it is.
+			return nil, c.refusal(fmt.Sprintf("entry %q is left as it is: %v", e.Name, c.failed))
 		default:
 			// The key, then, as the daemon takes it now: after a reload,
 			// the rollback reloaded it with the files put back, which may

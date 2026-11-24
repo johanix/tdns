@@ -864,6 +864,11 @@ func accessReloadMsg(resp tdns.ConfigResponse) (string, error) {
 	if strings.Contains(resp.Msg, tdns.AccessFileNotReloaded) {
 		return "", fmt.Errorf("written, but the daemon did NOT apply it and keeps the previous policy: %s", strings.TrimSpace(resp.Msg))
 	}
+	if strings.Contains(resp.Msg, tdns.AccessFileNoLongerConfigured) {
+		// Its config names no access file now: the file written is not
+		// one it reads.
+		return "", fmt.Errorf("written, but the daemon did NOT apply it, as it reads no access file now: %s", strings.TrimSpace(resp.Msg))
+	}
 	return strings.TrimSpace(resp.Msg), nil
 }
 

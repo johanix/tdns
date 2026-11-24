@@ -1974,6 +1974,7 @@ type fakeSocketDaemon struct {
 	policy      *tdns.ApiAccessStatus
 	reloads     int
 	onReload    func() // when set, runs at each reload, before it loads the file
+	onStatus    func() // when set, runs at the next status ask, once
 }
 
 func serveFakeDaemon(t *testing.T, sock, cfg, access string) *fakeSocketDaemon {
@@ -2012,6 +2013,10 @@ func serveFakeDaemon(t *testing.T, sock, cfg, access string) *fakeSocketDaemon {
 				resp.Msg += fmt.Sprintf(" Access file reloaded: %d client(s), keyauth on.", len(st.Clients))
 			}
 		case "status":
+			if f.onStatus != nil {
+				f.onStatus()
+				f.onStatus = nil
+			}
 			resp.Access = f.policy
 		}
 		json.NewEncoder(w).Encode(resp)
@@ -4223,5 +4228,71 @@ func TestRefusalNamesTheNewPin(t *testing.T) {
 	r := enrol.refusal("x")
 	if notes := strings.Join(r.notes, " "); !strings.Contains(notes, "its pin is in the fix") || !strings.Contains(strings.Join(r.fix, " "), pin) {
 		t.Errorf("enrolment: notes %q, fix %q; want the pin in the fix, and said so", notes, r.fix)
+	}
+}
+
+// When apply finds the daemon config changed since the plan (here its key,
+// rotated while config add asked the daemon), what config add found about
+// the key is of the config as it was: a key entry is left as it is, and
+// the add refused, to be run again; nothing is written on the daemon's side.
+func TestAddRefusesAKeyFallbackOnAChangedConfig(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	d, dpin := env.certDaemon(t, env.dir, "")
+	f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+	f.mu.Lock()
+	f.onStatus = func() { writeFile(t, d, strings.Replace(readBytes(t, d), "the-key", "rotated-key", 1)) }
+	f.mu.Unlock()
+	writeFile(t, env.cli, env.keyEntry(d, dpin))
+
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(r.why, `entry "tdns-auth" is left as it is`) || !strings.Contains(r.why, "other apiserver: settings") ||
+		!reflect.DeepEqual(r.fix, []string{"run config add again."}) {
+		t.Fatalf("err = %v; want the entry left as it is, and config add run again", err)
+	}
+	if readBytes(t, env.cli) != env.keyEntry(d, dpin) {
+		t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("an access file was written")
+	}
+	if n := f.reloadCount(); n != 0 {
+		t.Errorf("%d reloads, want none", n)
+	}
+}
+
+// Your pair, read again under apply's locks, must be the one the plan read
+// (the pin enrolled is its): one changed meanwhile is not enrolled, and the
+// fix is to run config add again.
+func TestAddRechecksYourPair(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	d, _ := env.certDaemon(t, env.dir, "")
+	cfg := readBytes(t, d)
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	if c.state != certCanEnable || !c.addPin {
+		t.Fatalf("plan %+v", c)
+	}
+	os.Remove(env.cert)
+	os.Remove(env.key)
+	if pin := env.pin(t); pin == c.pin {
+		t.Fatal("the new pair has the old pin")
+	}
+	if err := c.apply(context.Background()); err == nil || !strings.Contains(err.Error(), "your client certificate "+env.cert+" is not the one config add read") {
+		t.Errorf("err = %v, want apply refused: your pair changed", err)
+	}
+	if readBytes(t, d) != cfg {
+		t.Errorf("the daemon config was changed:\n%s", readBytes(t, d))
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("an access file was written")
+	}
+	if fix := c.fixLines(); !reflect.DeepEqual(fix, []string{"run config add again."}) {
+		t.Errorf("fix %q, want to run config add again", fix)
 	}
 }

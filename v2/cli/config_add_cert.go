@@ -882,6 +882,20 @@ func (c *CertSetup) applySteps() error {
 		c.changed = true
 		return fmt.Errorf("%s now has other apiserver: settings than when config add read it", c.t.DaemonConfig)
 	}
+	// Nor your pair, whose pin is the one enrolled: the entry presents the
+	// files, and a pair changed meanwhile would not be the one let in.
+	// Read under the locks, before anything is written.
+	data, err := os.ReadFile(c.cert)
+	if err == nil {
+		var pin string
+		if pin, err = clientPairPin(c.cert, c.key, data); err == nil && pin != c.pin {
+			err = errors.New("its pin is another")
+		}
+	}
+	if err != nil {
+		c.changed = true
+		return fmt.Errorf("your client certificate %s is not the one config add read (%v)", c.cert, err)
+	}
 
 	// Again under the lock: a `client` edit may have changed it since.
 	af, old, err := readAccessFile(c.t, true)

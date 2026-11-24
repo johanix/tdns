@@ -1636,3 +1636,16 @@ func TestDefaultClientCertPathsAreInCerts(t *testing.T) {
 		}
 	}
 }
+
+// A reload whose reply says the daemon config names no access file any
+// more did not apply the file just written: the daemon reads none. As the
+// daemon words it (tdns.AccessFileNoLongerConfigured begins it).
+func TestAccessReloadMsgNoLongerConfigured(t *testing.T) {
+	reply := tdns.ConfigResponse{Msg: "Config reloaded. The access file is no longer configured: the API key is admin on the TCP API again."}
+	if msg, err := accessReloadMsg(reply); err == nil || !strings.Contains(err.Error(), "did NOT apply it") || !strings.Contains(err.Error(), "no longer configured") {
+		t.Errorf("accessReloadMsg = %q, %v; want the edit reported as not applied, with the daemon's reply", msg, err)
+	}
+	if msg, err := accessReloadMsg(tdns.ConfigResponse{Msg: "Config reloaded. Access file reloaded: 1 client(s), keyauth on."}); err != nil || msg == "" {
+		t.Errorf("a reload that loaded the file: %q, %v", msg, err)
+	}
+}
