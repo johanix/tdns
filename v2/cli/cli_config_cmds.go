@@ -486,11 +486,22 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	}
 
 	// The daemon's side first: an entry that names a certificate the
-	// daemon does not accept would only be refused.
-	if cert != nil && cert.changesDaemon() {
-		if err := cert.apply(o.Ctx); err != nil {
-			return nil, cert.refusal(fmt.Sprintf("not adding %s: setting up your client certificate on the daemon failed: %v",
-				info.ConfigFile, err))
+	// daemon does not accept would only be refused. What config add
+	// changes there (apply), or relies on (confirm), stays locked until the
+	// entry is written or the daemon's side put back (release, rollback).
+	if cert != nil {
+		defer cert.release()
+		if cert.changesDaemon() {
+			if err := cert.apply(o.Ctx); err != nil {
+				return nil, cert.refusal(fmt.Sprintf("not adding %s: setting up your client certificate on the daemon failed: %v",
+					info.ConfigFile, err))
+			}
+		} else if err := cert.confirm(o); err != nil {
+			if !cert.changed {
+				return nil, err
+			}
+			return nil, cert.refusal(fmt.Sprintf("not adding %s: a new entry uses your client certificate, and %s",
+				info.ConfigFile, cert.whyNot()))
 		}
 	}
 
@@ -763,6 +774,7 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 
 	c := planCert(o, info, commandWord(e, info.Role))
 	res.Cert = c
+	defer c.release() // what apply or confirm keeps locked, once the entry is written
 	isCert := strings.EqualFold(e.AuthMethod, "certificate")
 	toCert := !isCert && c.usable()
 
@@ -778,13 +790,24 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 		return nil, err
 	}
 
-	// A certificate entry has no key to fall back on: when setting up the
+	// The daemon's side: set up (apply), or, for an entry switched to an
+	// enrolment config add did not make, made sure of (confirm). A
+	// certificate entry has no key to fall back on: when setting up the
 	// certificate fails, it cannot authenticate, and it is refused below
 	// (certRefusal), after its pin is written, as a key entry whose key the
 	// daemon refuses is.
 	certFailed := false
-	if !o.DryRun && res.Cert != nil && c.changesDaemon() && (isCert || toCert) {
-		switch aerr := c.apply(o.Ctx); {
+	if !o.DryRun && res.Cert != nil && (isCert || toCert) {
+		var aerr error
+		switch {
+		case c.changesDaemon():
+			aerr = c.apply(o.Ctx)
+		case toCert:
+			if aerr = c.confirm(o); aerr != nil && !c.changed {
+				return nil, aerr
+			}
+		}
+		switch {
 		case aerr == nil:
 		case isCert:
 			certFailed = true
@@ -792,7 +815,7 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 			// The key, then, as the daemon takes it now: after a reload,
 			// the rollback reloaded it with the files put back, which may
 			// have put in force a key setting planCert did not find in
-			// force (recheckKey).
+			// force (recheckKey; confirm found it again already).
 			toCert = false
 			if c.reloadSent {
 				c.recheckKey()

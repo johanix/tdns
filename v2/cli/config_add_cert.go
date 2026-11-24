@@ -91,6 +91,9 @@ type CertSetup struct {
 	// fileInvalid: it cannot work because the access file is not one the
 	// daemon would load (ValidateAccessFile), whatever it lists.
 	fileInvalid bool
+	// changed: it cannot work as planned because what planCert found had
+	// changed when confirm looked again; config add, run again, plans anew.
+	changed bool
 
 	// What apply did.
 	enrolledAs string     // the name the pin was added under
@@ -99,6 +102,11 @@ type CertSetup struct {
 	undo       []fileUndo // how to put back the files apply wrote
 	didReload  bool       // apply reloaded the daemon
 	reloadSent bool       // apply sent the daemon a reload (kept after a rollback)
+
+	// held releases the locks (lockPaths) that a successful apply, or
+	// confirm, keeps until the caller has written the CLI config (release)
+	// or put the daemon's side back (rollback); nil when none are held.
+	held func()
 }
 
 // fileUndo puts back one file apply wrote: old, or no file when old is nil;
@@ -584,9 +592,9 @@ func pingAs(base, pin string, o tdns.ClientOptions) pingReply {
 // edit there, in the window one could otherwise slip into. Tests only.
 var testHookRollbackRestore func(path string)
 
-// lockPaths are the files apply and rollback lock (lockCliConfigs, which
-// takes each lock once and all in one order): the access file, whose lock
-// every `client` edit takes too; and the daemon config when apply adds
+// lockPaths are the files apply, rollback and confirm lock (lockCliConfigs,
+// which takes each lock once and all in one order): the access file, whose
+// lock every `client` edit takes too; and the daemon config when apply adds
 // access-file: to it. Apply is the only writer of the daemon config here,
 // so its lock is the daemon config's own, as for any file config add edits:
 // two adds that reach one daemon config through two paths (a symlink) wait
@@ -606,13 +614,16 @@ func (c *CertSetup) lockPaths() []string {
 // (the access file's lock, the daemon's own validator, the write with .prev,
 // the check of whose daemon answers); the daemon config is written the way
 // the access file is, under its own lock, its old bytes kept as .prev and
-// the new file renamed over it with its owner, group and mode. The locks
-// (lockPaths) are held from the reads to the reload. A step that fails puts
-// back what the steps before it changed, still under those locks, which
-// are then released before the daemon is reloaded with the files put back
-// (undoLocked; the .prev files stay); c.failed is set to why. After a
-// success, rollback stays possible until the caller has written the CLI
-// config.
+// the new file renamed over it with its owner, group and mode.
+//
+// The locks (lockPaths) are held from the reads on. A step that fails puts
+// back what the steps before it changed and reloads the daemon with the
+// files put back, still under them, and then releases them (undoLocked;
+// the .prev files stay); c.failed is set to why. After a success they stay
+// held (c.held) until the caller has written the CLI config (release) or
+// put the daemon's side back (rollback): until then the enrolment may yet
+// be put back, so another add must not rely on it, and waits for them
+// (confirm).
 func (c *CertSetup) apply(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -627,10 +638,75 @@ func (c *CertSetup) apply(ctx context.Context) error {
 		// again, and a second flock in this process waits for the first.
 		err = fmt.Errorf("%v; %s", err, c.undoLocked(unlock))
 	} else {
-		unlock()
+		c.held = unlock
 	}
 	c.failed = err
 	return err
+}
+
+// release releases the locks a successful apply, or confirm, kept (held):
+// for a caller that has written the CLI config, or will not. Nil-safe, and
+// a no-op when nothing is held (after a rollback, say).
+func (c *CertSetup) release() {
+	if c != nil && c.held != nil {
+		c.held()
+		c.held = nil
+	}
+}
+
+// confirm is for an add about to write a CLI entry that relies on the
+// certificate working as planCert found it, with nothing for config add to
+// do (certWorks): an enrolment in the access file, or in force, that this
+// add did not make. It may be another add's, not yet kept: that add may
+// still fail to write its CLI config and put the enrolment back, its file
+// still holding just what it wrote. So confirm takes the locks such an add
+// holds from its writes until it has written its CLI config or put the
+// daemon's side back, the reload included (apply, rollback), and plans
+// again under them: the daemon config must say what it said, and the
+// certificate must still work. An enrolment found so is no add's to put
+// back, as a rollback puts back only what its own add wrote, and does so
+// before it lets go of the locks. They stay held (c.held) until the caller
+// has written the CLI config (release), so none is made meanwhile either.
+//
+// When the plan no longer holds, c can no longer work as planned (changed;
+// its key verdict as found again), and confirm says why. A lock this
+// process may not take (not root: the lock file is the daemon's) is gone
+// without: such an add relies on what the daemon says over TCP, and cannot
+// enrol, nor put back, anything itself.
+func (c *CertSetup) confirm(o AddOptions) error {
+	if c.state != certWorks || c.held != nil {
+		return nil
+	}
+	ctx := o.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	unlock, err := lockCliConfigs(ctx, c.lockPaths()...)
+	switch {
+	case errors.Is(err, fs.ErrPermission), errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return err
+	}
+	// Planned again from the daemon config as it is now, which must say
+	// what it said: the access file it names and the API the entry is for.
+	var again *CertSetup
+	same := false
+	if now, err := ReadDaemonApi(c.t.DaemonConfig, c.role); err == nil {
+		again = planCert(o, now, c.word)
+		same = now.AccessFile == c.info.AccessFile && sameApiApartFromAccess(c.info, now)
+	}
+	if !same || again.state != certWorks || again.pin != c.pin {
+		unlock()
+		c.cannot("what config add found on the daemon's side changed while it ran (another config add put back what it had enrolled?)")
+		c.changed = true
+		if again != nil {
+			c.keyOff, c.keyWhy, c.keyUnknown = again.keyOff, again.keyWhy, again.keyUnknown
+		}
+		return errors.New(c.why)
+	}
+	c.held = unlock
+	return nil
 }
 
 // applySteps is apply's work. The caller holds the locks (lockPaths).
@@ -749,38 +825,43 @@ func (c *CertSetup) applySteps() error {
 // runs the files as they are again, checked by asking it what it runs. The
 // .prev files stay. Done at most once.
 //
-// The files are compared and put back under the locks apply took
-// (lockPaths), ctx ending the wait for them: a `client` edit, or another
-// config add, that comes between the compare and the restore waits, and is
-// made on the file put back, rather than lost to it. The reload comes after
-// the locks are released. Never called while apply holds them (apply puts
-// back with undoLocked).
+// The files are compared and put back, and the daemon reloaded, under the
+// locks apply took (lockPaths) and kept (c.held), which are then released;
+// were they released already, they are taken again, ctx ending the wait. A
+// `client` edit, or another config add, that comes between the compare and
+// the restore waits, and is made on the file put back, rather than lost to
+// it; and another add that would rely on the enrolment (confirm) finds the
+// daemon as it was, the reload included. Never called while apply is still
+// running (apply puts back with undoLocked).
 func (c *CertSetup) rollback(ctx context.Context) string {
-	unlock := func() {}
-	if len(c.undo) > 0 {
-		if ctx == nil {
-			ctx = context.Background()
+	unlock := c.held
+	c.held = nil
+	if unlock == nil {
+		unlock = func() {}
+		if len(c.undo) > 0 {
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			u, err := lockCliConfigs(ctx, c.lockPaths()...)
+			if err != nil {
+				c.undo = nil
+				return c.reloadBack(fmt.Sprintf("putting the files back FAILED (%v): check %s and %s by hand", err, c.t.File, c.t.DaemonConfig))
+			}
+			unlock = u
 		}
-		u, err := lockCliConfigs(ctx, c.lockPaths()...)
-		if err != nil {
-			c.undo = nil
-			return c.reloadBack(fmt.Sprintf("putting the files back FAILED (%v): check %s and %s by hand", err, c.t.File, c.t.DaemonConfig))
-		}
-		unlock = u
 	}
 	return c.undoLocked(unlock)
 }
 
 // undoLocked is rollback for a caller that holds the locks (lockPaths): the
-// files put back, the locks released (unlock), and then the daemon reloaded.
+// files put back, the daemon reloaded with them, and then the locks
+// released (unlock).
 func (c *CertSetup) undoLocked(unlock func()) string {
+	defer unlock()
 	if len(c.undo) == 0 && !c.didReload {
-		unlock()
 		return "nothing on the daemon's side was changed"
 	}
-	files := c.restoreFiles()
-	unlock()
-	return c.reloadBack(files)
+	return c.reloadBack(c.restoreFiles())
 }
 
 // restoreFiles puts back the files apply wrote, the last first, and says
@@ -820,7 +901,8 @@ func (c *CertSetup) restoreFiles() string {
 
 // reloadBack ends a rollback whose files went as files says: when apply
 // reloaded the daemon, it is reloaded again, so that it runs the files as
-// they are now. Done without the files' locks.
+// they are now. Done under the files' locks (undoLocked), unless they could
+// not be taken.
 func (c *CertSetup) reloadBack(files string) string {
 	if !c.didReload {
 		return files
@@ -1046,6 +1128,8 @@ func addAccessFileLine(src []byte, path string) ([]byte, error) {
 // fixLines say what makes the certificate work when config add could not.
 func (c *CertSetup) fixLines() []string {
 	switch {
+	case c.changed:
+		return []string{"run config add again."}
 	case c.unidentified:
 		return c.sockFixLines()
 	case c.noTLS:
