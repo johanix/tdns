@@ -1008,8 +1008,10 @@ func pinnedEntry(res *AddResult, e ApiDetails, info *DaemonApi) (ApiDetails, boo
 // said first.
 func keyRefusal(e ApiDetails, c *CertSetup, repinned, dryRun bool) addRefusal {
 	if c.keyOff {
-		return c.refusal(fmt.Sprintf("%s: the daemon does not take its API key (%s), and your certificate does not work here (%s)",
+		r := c.refusal(fmt.Sprintf("%s: the daemon does not take its API key (%s), and your certificate does not work here (%s)",
 			cannotAuthenticate(e, repinned, dryRun), c.keyWhy, c.whyNot()))
+		r.fix = append(r.fix, c.keyFixLines()...) // a key the daemon would take after a reload
+		return r
 	}
 	lead := fmt.Sprintf("entry %q keeps its API key", e.Name)
 	switch {

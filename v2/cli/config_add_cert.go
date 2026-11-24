@@ -76,6 +76,10 @@ type CertSetup struct {
 	keyOff     bool
 	keyWhy     string
 	keyUnknown string
+	// keyStale: keyOff because the daemon, asked over TCP, refuses the key
+	// its config says, as it runs the one it loaded at its start: a reload
+	// makes the key work (keyFixLines).
+	keyStale bool
 
 	// What making it work takes.
 	addPin, createFile, nameIt bool
@@ -481,7 +485,7 @@ func (c *CertSetup) keyOverTCP() {
 	case r.status == http.StatusServiceUnavailable:
 		c.keyOff, c.keyWhy = true, "its TCP API is closed, as it cannot use its access file"
 	case r.answered:
-		c.keyOff, c.keyWhy = true, "asked over TCP, it refuses the key (it runs the key it loaded at its start: reload it?)"
+		c.keyOff, c.keyWhy, c.keyStale = true, "asked over TCP, it refuses the key (it runs the key it loaded at its start: reload it?)", true
 	default:
 		c.keyUnknown = "the daemon answers on its socket, but over TCP, " + r.tcpWhy()
 	}
@@ -1512,6 +1516,19 @@ func fixCommand(words []string, daemonCfg string) []string {
 		line = "      " + path
 	}
 	return append(lines, line)
+}
+
+// keyFixLines are what makes the key work, for a key entry refused as the
+// daemon does not take it: a reload, when it runs another key than its
+// config's (keyStale); none otherwise. Said after the certificate's fix.
+func (c *CertSetup) keyFixLines() []string {
+	if !c.keyStale {
+		return nil
+	}
+	return fixWith("Or keep the API key: the daemon runs the key it loaded at its",
+		"start, not its config's; reload it:",
+		c.daemonCmd("config", "reload"),
+		"then run config add again.")
 }
 
 // fixWith is fix lines made of prose and commands (daemonCmd), in order.

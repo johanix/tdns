@@ -4579,6 +4579,17 @@ func TestAddChecksTheKeptKeyOverTCP(t *testing.T) {
 				t.Errorf("%+v, %v; want the key kept", res, err)
 			case !taken && (!errors.As(err, &r) || !strings.Contains(r.why, "asked over TCP, it refuses the key")):
 				t.Errorf("err = %v; want a refusal: the daemon refuses the key over TCP", err)
+			case !taken:
+				// Its remedy is a fix line, not only in the reason: a
+				// reload, of this daemon.
+				if fix := oneLine(strings.Join(r.fix, "\n")); !strings.Contains(fix, "Or keep the API key") || !strings.Contains(fix, "tdns-ncli auth config reload --daemon-config "+d) {
+					t.Errorf("fix:\n%s\nwant the reload, as a command", strings.Join(r.fix, "\n"))
+				}
+				for _, l := range r.fix {
+					if len("       "+l) > textWidth && !strings.Contains(l, filepath.Dir(d)) {
+						t.Errorf("a fix line wider than %d: %q", textWidth, l)
+					}
+				}
 			}
 			if readBytes(t, env.cli) != key {
 				t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
