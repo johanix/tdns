@@ -623,6 +623,14 @@ type ImrTuningConf struct {
 	// would prove is not judged. Default 10 (cache.DefaultNSEC3MaxIterations);
 	// 0 is allowed, and then only zones with no extra iterations validate.
 	NSEC3MaxIterations *uint16 `yaml:"nsec3-max-iterations" mapstructure:"nsec3-max-iterations"`
+	// QminMaxIterations is how many probe rounds one name may send
+	// (RFC 9156 MAX_MINIMISE_COUNT). QminOneLabel is how many of those
+	// rounds add a single label (MINIMISE_ONE_LAB). Nil means the
+	// defaults, 10 and 4. An explicit 0 is a value, and it is rejected:
+	// the maximum is at least 1, and the one-label count is at least 0
+	// and less than the maximum.
+	QminMaxIterations *int `yaml:"qmin-max-iterations" mapstructure:"qmin-max-iterations"`
+	QminOneLabel      *int `yaml:"qmin-one-label" mapstructure:"qmin-one-label"`
 }
 
 // DefaultCacheMaxTTL is Unbound's cache-max-ttl default: one day.
@@ -748,6 +756,16 @@ func LoadImrTuningDefaults(t *ImrTuningConf) {
 		n := uint16(cache.DefaultNSEC3MaxIterations)
 		t.NSEC3MaxIterations = &n
 	}
+	// Absent qmin knobs get the RFC 9156 numbers. 0 is a value, so a
+	// pointer: an explicit 0 is left for validateQminTuning to reject.
+	if t.QminMaxIterations == nil {
+		n := defaultQminMaxIterations
+		t.QminMaxIterations = &n
+	}
+	if t.QminOneLabel == nil {
+		n := defaultQminOneLabel
+		t.QminOneLabel = &n
+	}
 }
 
 type ImrLoggingConf struct {
@@ -819,11 +837,18 @@ type ApiServerConf struct {
 	// not CertFile and KeyFile, which only the TCP listeners use.
 	Addresses []string        `validate:"required_without=Socket"`
 	ApiKey    SensitiveString `validate:"required"`
-	CertFile  string          `validate:"required_with_listener,omitempty,file,certkey"`
-	KeyFile   string          `validate:"required_with_listener,omitempty,file"`
-	UseTLS    bool
-	Server    ApiServerAppConf
-	Agent     ApiServerAppConf
+	// CertFile and KeyFile, when neither is set, are the config file's
+	// default pair, {confdir}/certs/{config name}-api.crt and .key, which
+	// the daemon writes, self-signed, at its first start (applyCertDefaults).
+	CertFile string `validate:"required_with_listener,omitempty,file,certkey"`
+	KeyFile  string `validate:"required_with_listener,omitempty,file"`
+	// CertPending: the default pair is not there yet (config check, before
+	// the daemon's first start), or could not be written. Not a config key.
+	CertPending bool `yaml:"-" mapstructure:"-" json:"-"`
+
+	UseTLS bool
+	Server ApiServerAppConf
+	Agent  ApiServerAppConf
 	// MSA       ApiServerAppConf
 	Combiner ApiServerAppConf
 

@@ -532,33 +532,37 @@ func TestAddPinsTheDaemonCertificate(t *testing.T) {
 		t.Errorf("read back: %+v", got)
 	}
 
-	// An unreadable certificate: the entry is written without pins, and a note
-	// says what to add.
+	// A certificate config add cannot read: the new entry is refused, with a
+	// fix, and nothing is written (the owner's ruling: no new https entry it
+	// cannot pin).
+	refused := func(t *testing.T, env *addEnv, d string, want ...string) {
+		t.Helper()
+		res, err := env.add(t, d, nil)
+		if err == nil {
+			t.Fatalf("added %+v; want a refusal", res.Entry)
+		}
+		for _, w := range append([]string{"not adding " + d + ": ", "\n  Fix: "}, want...) {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("refusal lacks %q:\n%v", w, err)
+			}
+		}
+		if _, serr := os.Stat(env.cli); serr == nil {
+			t.Error("the refused add wrote the CLI config")
+		}
+	}
 	env2 := newAddEnv(t)
 	d2 := filepath.Join(env2.dir, "tdns-auth.yaml")
 	writeFile(t, d2, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   certfile: /nonexistent/api.crt\n"))
-	res, err = env2.add(t, d2, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Entry.Pins) != 0 || !strings.Contains(strings.Join(res.Notes, " "), "could not pin") {
-		t.Errorf("unreadable cert: entry %+v notes %q", res.Entry, res.Notes)
-	}
+	refused(t, env2, d2, "cannot be pinned", "put the daemon's certificate at /nonexistent/api.crt")
 
 	// A relative certfile is opened from the daemon's working directory,
-	// which config add cannot know: no pin, even though a file of that name
-	// sits next to the daemon config, and the note says why.
+	// which config add cannot know: refused, even though a file of that name
+	// sits next to the daemon config, and the refusal says why.
 	env3 := newAddEnv(t)
 	writeFile(t, filepath.Join(env3.dir, "api.crt"), string(certPEM))
 	d3 := filepath.Join(env3.dir, "tdns-auth.yaml")
 	writeFile(t, d3, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   certfile: api.crt\n"))
-	res, err = env3.add(t, d3, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if notes := strings.Join(res.Notes, " "); len(res.Entry.Pins) != 0 || !strings.Contains(notes, "relative path") || !strings.Contains(notes, "could not pin") {
-		t.Errorf("relative certfile: entry %+v notes %q", res.Entry, res.Notes)
-	}
+	refused(t, env3, d3, "relative path", "absolute path")
 }
 
 // An entry with no pin is broken (tdns-ncli refuses it), and config add of the
@@ -1193,6 +1197,200 @@ func TestDuplicatePins(t *testing.T) {
 	if len(w) != 1 || !strings.Contains(w[0], "tdns-auth and other") {
 		t.Errorf("two daemons sharing a key: %v", w)
 	}
+}
+
+// A daemon config with no certfile/keyfile: the daemon serves its default
+// API pair, which it writes at its first start. config add pins it, and
+// before the first start makes it itself, exactly as the daemon would
+// (tdns.EnsureDefaultApiCert): the daemon then uses it when it starts. A dry
+// run says it would, and makes nothing. Half a pair, or a pair config add
+// cannot write, is refused, and nothing is written.
+func TestAddPinsTheDefaultApiCert(t *testing.T) {
+	saved := runningAsRoot
+	t.Cleanup(func() { runningAsRoot = saved })
+	runningAsRoot = func() bool { return false }
+
+	setup := func(t *testing.T) (*addEnv, string, string, string) {
+		env := newAddEnv(t)
+		d := filepath.Join(env.dir, "tdns-auth.yaml")
+		writeFile(t, d, daemonYAMLDefaultCert("TDNS-AUTH", "127.0.0.1:8989", "k", ""))
+		info, err := ReadDaemonApi(d, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		cert, key := tdns.ApiCertPaths(d)
+		if info.CertFile != cert || !info.CertDefault {
+			t.Fatalf("CertFile %q (default %v), want %s", info.CertFile, info.CertDefault, cert)
+		}
+		return env, d, cert, key
+	}
+	absent := func(t *testing.T, paths ...string) {
+		t.Helper()
+		for _, p := range paths {
+			if _, err := os.Stat(p); err == nil {
+				t.Errorf("%s was written", p)
+			}
+		}
+	}
+	refusal := func(t *testing.T, err error, want ...string) {
+		t.Helper()
+		if err == nil {
+			t.Fatal("added; want a refusal")
+		}
+		for _, w := range want {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("refusal lacks %q:\n%v", w, err)
+			}
+		}
+	}
+
+	t.Run("before the first start: made, pinned", func(t *testing.T) {
+		env, d, cert, key := setup(t)
+		res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true })
+		if err != nil || res.ApiCertWould != cert || len(res.Entry.Pins) != 0 {
+			t.Fatalf("dry run: %+v, %v; want it to say it would make the pair", res, err)
+		}
+		var sb strings.Builder
+		printAddResult(&sb, res, true, env.cli)
+		if !strings.Contains(sb.String(), "Would create the daemon's API certificate "+cert) {
+			t.Errorf("dry run printed:\n%s", sb.String())
+		}
+		absent(t, cert, key, env.cli)
+
+		res, err = env.add(t, d, nil)
+		if err != nil || res.ApiCertCreated != cert {
+			t.Fatalf("%+v, %v; want the pair made", res, err)
+		}
+		// The umask narrows the modes (077 leaves the certificate 0600): no
+		// bit outside 0644, and the key no group or other bit at all, and
+		// readable and writable by its owner.
+		if fi, err := os.Stat(cert); err != nil || fi.Mode().Perm()&^0o644 != 0 {
+			t.Errorf("%s: %v, want mode 0644 or narrower", cert, err)
+		}
+		if fi, err := os.Stat(key); err != nil || fi.Mode().Perm()&0o077 != 0 || fi.Mode().Perm()&0o600 != 0o600 {
+			t.Errorf("%s: %v, want mode 0600", key, err)
+		}
+		data, _ := os.ReadFile(cert)
+		block, _ := pem.Decode(data)
+		leaf, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := env.entries(t); len(got) != 1 || got[0].TLSAuth != "pin" || len(got[0].Pins) != 1 || got[0].Pins[0] != tdns.SPKISHA256(leaf) {
+			t.Errorf("entries %+v; want the pair made pinned", got)
+		}
+		sb.Reset()
+		printAddResult(&sb, res, false, env.cli)
+		if want := "Created the daemon's API certificate " + cert + "\n(key " + key + ", mode 0600); the daemon uses it when it starts."; !strings.Contains(sb.String(), want) {
+			t.Errorf("printed:\n%s\nwant %q", sb.String(), want)
+		}
+
+		// After the first start (here: the pair as made): already known.
+		if res, err := env.add(t, d, nil); err != nil || res.AlreadyKnown == "" || res.Wrote || res.ApiCertCreated != "" {
+			t.Errorf("again: %+v, %v; want it already known, nothing made", res, err)
+		}
+	})
+
+	t.Run("half a pair: refused", func(t *testing.T) {
+		env, d, cert, key := setup(t)
+		if _, _, err := tdns.EnsureDefaultApiCert(d, nil); err != nil {
+			t.Fatal(err)
+		}
+		os.Remove(key)
+		for _, dry := range []bool{true, false} {
+			_, err := env.add(t, d, func(o *AddOptions) { o.DryRun = dry })
+			refusal(t, err, "not adding "+d+": ", "without its key", "\n  Fix: put back the missing file")
+		}
+		absent(t, key, env.cli)
+		if _, err := os.Stat(cert); err != nil {
+			t.Error("the remaining certificate was removed")
+		}
+	})
+
+	// A dry run refuses either half from what is there, in
+	// EnsureDefaultApiCert's words, and writes nothing: it never calls
+	// EnsureDefaultApiCert, which writes a pair if the remaining file went
+	// meanwhile.
+	t.Run("half a pair, dry run: refused from what is there", func(t *testing.T) {
+		for _, certThere := range []bool{true, false} {
+			env, d, cert, key := setup(t)
+			if _, _, err := tdns.EnsureDefaultApiCert(d, nil); err != nil {
+				t.Fatal(err)
+			}
+			kept, gone := cert, key
+			if !certThere {
+				kept, gone = key, cert
+			}
+			os.Remove(gone)
+			before, _ := os.ReadFile(kept)
+			_, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true })
+			refusal(t, err, "not adding "+d+": ", tdns.HalfApiCertPairError(cert, key, certThere).Error(), "Fix: put back the missing file")
+			absent(t, gone, env.cli)
+			if after, rerr := os.ReadFile(kept); rerr != nil || string(after) != string(before) {
+				t.Errorf("certThere %v: the remaining %s was changed or removed (%v)", certThere, kept, rerr)
+			}
+		}
+	})
+
+	t.Run("not writable here: refused", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root writes anywhere")
+		}
+		env, d, cert, key := setup(t)
+		os.Chmod(env.dir, 0o555)
+		t.Cleanup(func() { os.Chmod(env.dir, 0o755) })
+		_, err := env.add(t, d, func(o *AddOptions) { o.TargetFile = filepath.Join(t.TempDir(), "cli.yaml"); o.CliConfig = o.TargetFile })
+		refusal(t, err, "cannot be created at "+cert, "\n  Fix: run config add as root on the daemon's host")
+		absent(t, cert, key)
+	})
+
+	// The pair is written only with the entry that pins it: an add refused
+	// before its write leaves none, and says that nothing was written.
+	t.Run("a hidden list: refused, no pair", func(t *testing.T) {
+		env, d, cert, key := setup(t)
+		local := filepath.Join(env.dir, "local.yaml")
+		// cli.localconfig has a list of its own, which hides the main one.
+		writeFile(t, local, "apiservers:\n   - name: tdns-imr\n     baseurl: http://192.0.2.1:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n")
+		writeFile(t, env.cli, "cli:\n   localconfig: "+local+"\napiservers:\n   - name: other\n     baseurl: http://192.0.2.2:8085/api/v1\n     apikey: k\n     authmethod: X-API-Key\n")
+		_, err := env.add(t, d, nil)
+		if err == nil || !strings.Contains(err.Error(), "Nothing was written") {
+			t.Fatalf("err = %v, want a refusal saying nothing was written", err)
+		}
+		absent(t, cert, key)
+	})
+
+	t.Run("the CLI config cannot be written: the pair removed again", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root writes anywhere")
+		}
+		env, d, cert, key := setup(t)
+		cliDir := filepath.Join(env.dir, "cli")
+		os.Mkdir(cliDir, 0o755)
+		env.cli = filepath.Join(cliDir, "tdns-ncli.yaml")
+		// The lock file is there, so the add gets as far as its write.
+		unlock, err := lockCliConfig(context.Background(), env.cli)
+		if err != nil {
+			t.Fatal(err)
+		}
+		unlock()
+		os.Chmod(cliDir, 0o555)
+		t.Cleanup(func() { os.Chmod(cliDir, 0o755) })
+		_, err = env.add(t, d, nil)
+		if err == nil || !strings.Contains(err.Error(), "is removed again") {
+			t.Errorf("err = %v, want the write's failure, and the pair said removed", err)
+		}
+		absent(t, cert, key)
+	})
+
+	t.Run("a flow-style list: refused, no pair", func(t *testing.T) {
+		env, d, cert, key := setup(t)
+		writeFile(t, env.cli, "apiservers: []\n")
+		_, err := env.add(t, d, nil)
+		if err == nil || !strings.Contains(err.Error(), "nothing was written") || strings.Contains(err.Error(), "by hand") {
+			t.Fatalf("err = %v, want a refusal saying nothing was written, and no entry to add by hand (its pin would be of a pair nobody has)", err)
+		}
+		absent(t, cert, key)
+	})
 }
 
 // A daemon's local admin socket is asked which config it runs when its entry
