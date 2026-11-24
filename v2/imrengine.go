@@ -125,6 +125,10 @@ type Imr struct {
 	// nsAddrLookups tracks the background address lookups for out-of-
 	// bailiwick nameservers (resolveZoneServersInBackground).
 	nsAddrLookups nsAddrLookups
+	// qminProbeOwnDNSKEY is for tests only. It minimises the resolver's own
+	// DNSKEY fetches like any other query (resolveMinimised), to show that
+	// the query's cap alone bounds the validation path.
+	qminProbeOwnDNSKEY bool
 }
 
 func (imr *Imr) isLargeAlgorithm(alg uint8) bool {
@@ -368,6 +372,9 @@ func NewImr(ctx context.Context, ic ImrEngineConf, opts ImrOptions) (*Imr, error
 		requireDnssec = *ic.RequireDnssecValidation
 	}
 	LoadImrTuningDefaults(&ic.Tuning)
+	if err := validateQminTuning(&ic.Tuning); err != nil {
+		return nil, err
+	}
 	cache.SetBackoffPolicy(cache.BackoffPolicy{
 		FirstFailure:   ic.Tuning.Backoff.FirstFailure,
 		MaxFailure:     ic.Tuning.Backoff.MaxFailure,
@@ -848,6 +855,14 @@ func (imr *Imr) imrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		ctx, cancel = context.WithTimeout(ctx, budget)
 		defer cancel()
 	}
+	// One set of minimisation counters for the whole request (design
+	// section 6). The lookups below each start a walk of their own: the
+	// referral loop, an NS address continuation, the validation of the
+	// answer. Created here, they all count against the same name and
+	// request. withQmin keeps a set already on ctx.
+	if imr.qminOn() {
+		ctx = imr.withQmin(ctx)
+	}
 	// What the lookups below run as: the resolver's own lookup, or a DNS
 	// client's when the caller asked for that (asClientQuery).
 	lookupCtx := imrQueryContext(ctx)
@@ -1264,6 +1279,11 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	// level (see trafficClass), except those of the resolver's own lookups
 	// inside it, which mark themselves.
 	ctx = withClientQuery(ctx)
+	// One set of minimisation counters for the client's request, shared by
+	// every lookup below (design section 6), as in imrQuery.
+	if imr.qminOn() {
+		ctx = imr.withQmin(ctx)
+	}
 	m := new(dns.Msg)
 	m.RecursionAvailable = true
 
