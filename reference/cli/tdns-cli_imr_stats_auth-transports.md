@@ -13,12 +13,17 @@ signal the server gave (OOTS), so that the two can be compared.
 OOTS is the signal as the server gave it: only the transports it named, with
 their weights. "none" means it gave none. "alpn:" is an SVCB with an ALPN list
 and no weights (each counts as 100), and "set:" an operator's override (imr set
-server transport). A stub's row shows its configured signal. A weight of 1 is
-marked (ignored): selection uses only weights above 1. Nor is the do53 weight
-a share: Do53 gets what the encrypted weights leave of 100. A port the signal
-assigns follows that transport (dot:30 port:1234). Do53 never has one:
-cleartext stays on port 53. A record's port applies to every encrypted
-transport the record names.
+server transport). A stub's row shows its configured signal. Cleartext is udp
+and tcp, apart; an older signal's do53:N is shown as what it means, udp:N
+tcp:N, and an explicit udp or tcp wins over it. A weight of 1 is marked
+(ignored): selection uses only weights above 1. Nor are the udp and tcp
+weights shares: Do53 gets what the encrypted weights leave of 100, and tcp
+only caps the TCP the resolver would choose on its own, which is none (TCP
+after truncation, or forced, ignores it). A port the signal assigns follows
+that transport (dot:30 port:1234), udp and tcp included. A record's port
+applies to every transport the record names; an older signal's do53 never
+takes one. The retry over TCP after truncation goes to the address and port
+that truncated, and forced TCP to the tcp port, or 53 when there is none.
 
 --pct shows each transport's share of the row's answers instead of a count,
 and adds EXPECTED: the shares selection gives a query without PRIVACY (with
@@ -51,6 +56,17 @@ that server and every server below it. With none, all servers are shown.
 whatever [zone] and -s selected, including those transport-stats shows -- so
 the next run covers a new period.
 
+--sort orders the rows (the TOTAL row is always last):
+  label   by the server's DNS labels from the right, TLD first, so that all
+          *.root-servers.net. rows are together, and so are all
+          *.gtld-servers.net. rows (the default)
+  oots    the servers that gave an OOTS signal (anything but "none" in the
+          OOTS column) first, then the rest; label order within each group
+  name    by name, plain alphabetical
+  total   the busiest server first (ties by name)
+  last    the most recently used server first (ties by name)
+--sort orders the table only; --json prints the rows as the resolver sends them.
+
 ```
 tdns-cli imr stats auth-transports [zone] [flags]
 ```
@@ -64,7 +80,7 @@ tdns-cli imr stats auth-transports [zone] [flags]
       --privacy          One row per class of query: a client's PRIVACY level (none, opp., strict) or internal
       --reset            Clear ALL auth-server counters after showing them
   -s, --server strings   Server name, selecting it and every server below it; may be repeated
-      --sort string      Sort by name, total or last (default "name")
+      --sort string      Sort the rows by label (DNS labels from the TLD down), oots (servers with an OOTS signal first), name, total or last (default "label")
 ```
 
 ### Options inherited from parent commands

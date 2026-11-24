@@ -86,7 +86,7 @@ func applySVCBForNS(imr *Imr, rr *dns.SVCB, serverName string, sm map[string]*ca
 	pending := map[string]*svcbSignalSet{}
 	imr.collectSVCBSignal(pending, serverName, rr)
 	key := cache.ServerKey(serverName)
-	installed, _ := imr.installSVCBSignal(sm[key], pending[key])
+	installed, _ := imr.installSVCBSignal(sm[key], pending[key], notConfigured)
 	return installed
 }
 

@@ -150,6 +150,8 @@ const (
 	ErrCatOther                    = imrcore.ErrCatOther
 	ErrCatTransport                = imrcore.ErrCatTransport
 	ErrCatUpstream                 = imrcore.ErrCatUpstream
+	ErrSubApiAccess                = imrcore.ErrSubApiAccess
+	ErrSubApiSocket                = imrcore.ErrSubApiSocket
 	ErrSubCert                     = imrcore.ErrSubCert
 	ErrSubCertMissing              = imrcore.ErrSubCertMissing
 	ErrSubImrForward               = imrcore.ErrSubImrForward

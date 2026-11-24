@@ -16,5 +16,7 @@ import (
 // gate's own tests set a cadence on their zones.
 func TestMain(m *testing.M) {
 	DefaultPublishCadence = 0
+	// No default admin socket: a test that wants one sets apiserver.socket.
+	DefaultApiSocketDir = ""
 	os.Exit(m.Run())
 }

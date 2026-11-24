@@ -158,7 +158,7 @@ func TestOOTSUndecidedRedirectAwaitsLookup(t *testing.T) {
 		}
 		set.via = cache.SignalViaResponse
 		set.path = []cache.SignalHop{{Owner: pathOwner, State: tc.state}}
-		imr.installSVCBSignal(cache.NewAuthServer(pathNS), set)
+		imr.installSVCBSignal(cache.NewAuthServer(pathNS), set, notConfigured)
 		if set.awaitsLookup != tc.want {
 			t.Errorf("state %s: awaits lookup %v, want %v", cache.SignalStateString(tc.state), set.awaitsLookup, tc.want)
 		}
@@ -186,7 +186,7 @@ func endpointTestRig(t *testing.T) (*Imr, *cache.AuthServer, *core.FakeDNSClient
 	server := cache.NewAuthServer(pathNS)
 	installTransportMap(server, map[string]uint8{"dot": 30}, map[core.Transport]uint16{core.TransportDoT: 1234},
 		map[core.Transport]string{core.TransportDoT: dotTarget}, cache.SignalViaLookup,
-		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}}, notConfigured)
 	return imr, server, dot, do53, q
 }
 
@@ -440,7 +440,7 @@ func TestAlpnOrderTargetCarriesNoDo53(t *testing.T) {
 	server := cache.NewAuthServer(pathNS)
 	_, ports, targets := combineOOTSEndpoints([]ootsRecord{targeted})
 	installAlpnSignal(server, alpnOrder([]ootsRecord{targeted}), ports, targets, cache.SignalViaLookup,
-		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}}, notConfigured)
 	if w, ok := server.GetReceivedSignal().Weights[core.TransportDo53]; ok {
 		t.Errorf("the targeted record's do53 reached the signal, weight %d", w)
 	}
@@ -504,8 +504,10 @@ func TestProbeStubServersFollowsRedirect(t *testing.T) {
 		delete(imr.Cache.DNSClient, tr)
 	}
 	imr.Cache.DNSClient[core.TransportDoT] = dot
+	// A stub configured with no transports or ALPN list: a configured one
+	// takes no received signal (notConfigured).
 	if err := imr.Cache.AddStub(zone, []cache.AuthServer{
-		{Name: "ns." + zone, Addrs: []string{"192.0.2.1"}, Alpn: []string{"dot"}},
+		{Name: "ns." + zone, Addrs: []string{"192.0.2.1"}},
 	}); err != nil {
 		t.Fatalf("AddStub: %v", err)
 	}
@@ -516,7 +518,7 @@ func TestProbeStubServersFollowsRedirect(t *testing.T) {
 	}
 	installTransportMap(servers[0], map[string]uint8{"dot": 100}, map[core.Transport]uint16{core.TransportDoT: 1234},
 		map[core.Transport]string{core.TransportDoT: dotTarget}, cache.SignalViaLookup,
-		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}}, notConfigured)
 	saved := endpointAddrLookupHook
 	endpointAddrLookupHook = func(*Imr, string) ([]string, time.Time) { return nil, time.Time{} }
 	t.Cleanup(func() { endpointAddrLookupHook = saved })
@@ -713,7 +715,7 @@ func TestOOTSUDPAndTCPRedirected(t *testing.T) {
 	}
 	server := cache.NewAuthServer(pathNS)
 	installTransportMap(server, raw, ports, targets, cache.SignalViaLookup,
-		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}}, notConfigured)
 	if ep := server.GetTransportEndpoint(core.TransportDo53); ep.Target != dotTarget || ep.Port != 5353 {
 		t.Errorf("udp endpoint %v", ep)
 	}
@@ -731,7 +733,7 @@ func TestEndpointFallsBackToPort53(t *testing.T) {
 	installTransportMap(server, map[string]uint8{"udp": 100, "dot": 30},
 		map[core.Transport]uint16{core.TransportDo53: 5353, core.TransportDoT: 1234},
 		map[core.Transport]string{core.TransportDo53: dotTarget, core.TransportDoT: dotTarget}, cache.SignalViaLookup,
-		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}})
+		[]cache.SignalHop{{Owner: pathOwner, State: cache.ValidationStateSecure}}, notConfigured)
 	imr.endpointAddrs.set(dotTarget, []string{"192.0.2.53"}, time.Now().Add(time.Hour))
 	target := targetServer(t, imr, dotTarget)
 	target.RecordEndpointAddrFailure("192.0.2.53", 5353, core.TransportDo53, nil)

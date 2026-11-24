@@ -334,7 +334,7 @@ func TestOOTSSignalStateAliasHops(t *testing.T) {
 			wantInstall := !map[string]bool{
 				"target not in the section": true, "a loop ends the path": true, "the depth cap ends the path": true,
 			}[tc.name]
-			if installed, _ := imr.installSVCBSignal(cache.NewAuthServer(pathNS), set); installed != wantInstall {
+			if installed, _ := imr.installSVCBSignal(cache.NewAuthServer(pathNS), set, notConfigured); installed != wantInstall {
 				t.Errorf("installed %v, want %v", installed, wantInstall)
 			}
 		})
