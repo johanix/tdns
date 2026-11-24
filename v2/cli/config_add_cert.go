@@ -501,7 +501,7 @@ func (c *CertSetup) keyOverTCP() {
 // one planCert asked (a keyauth: false that was in the file, but not yet in
 // force, is in force now).
 func (c *CertSetup) recheckKey() {
-	c.keyOff, c.keyWhy, c.keyUnknown = false, "", ""
+	c.keyVerdictOf(&CertSetup{}) // none yet: stale only if found so again
 	relative := c.t.Configured && !filepath.IsAbs(c.t.File)
 	af, old, aerr := c.readFile(relative)
 	view, status, serr := c.askDaemon()
@@ -860,7 +860,7 @@ func (c *CertSetup) confirm(o AddOptions) error {
 		c.cannot("what config add found on the daemon's side changed while it ran (another config add put back what it had enrolled?)")
 		c.changed = true
 		if again != nil {
-			c.keyOff, c.keyWhy, c.keyUnknown = again.keyOff, again.keyWhy, again.keyUnknown
+			c.keyVerdictOf(again)
 			if again.timedOut != nil {
 				// Not a change: the daemon no longer answers.
 				c.cannot(again.why)
@@ -897,8 +897,14 @@ func (c *CertSetup) failsInFile(from *CertSetup) bool {
 		c.state, c.listedAs, c.listedRole = certDisabled, disabled.Name, disabled.Role
 	}
 	// Otherwise not listed: the fix is to enrol it (fixLines).
-	c.keyOff, c.keyWhy, c.keyUnknown = from.keyOff, from.keyWhy, from.keyUnknown
+	c.keyVerdictOf(from)
 	return true
+}
+
+// keyVerdictOf makes from's verdict on the key c's, all of it: a key off
+// for another reason than a stale one (keyStale) gets no reload to fix it.
+func (c *CertSetup) keyVerdictOf(from *CertSetup) {
+	c.keyOff, c.keyWhy, c.keyUnknown, c.keyStale = from.keyOff, from.keyWhy, from.keyUnknown, from.keyStale
 }
 
 // notInFile says why the pin, which the daemon takes, is not enrolled in
@@ -1544,7 +1550,7 @@ func fixCommand(words []string, daemonCfg string) []string {
 // daemon does not take it: a reload, when it runs another key than its
 // config's (keyStale); none otherwise. Said after the certificate's fix.
 func (c *CertSetup) keyFixLines() []string {
-	if !c.keyStale {
+	if !c.keyOff || !c.keyStale {
 		return nil
 	}
 	return fixWith("Or keep the API key: the daemon runs the key it loaded at its",

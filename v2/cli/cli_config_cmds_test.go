@@ -3715,6 +3715,43 @@ func TestAddRechecksTheKeyAfterAFailedReload(t *testing.T) {
 	}
 }
 
+// The same, the daemon having refused the key over TCP when config add
+// planned (stale: it runs the key it loaded at its start, which a reload
+// would fix). After the rollback's reload it runs keyauth: false, which no
+// reload fixes: the refusal says that, and offers no reload.
+func TestAddRecheckedKeyOffIsNotStale(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	tcp := serveFakeTCPDaemon(t, pinOf("someone else"), false)
+	af := filepath.Join(env.dir, "access.yaml")
+	acc := "keyauth: false\nclients: []\n"
+	writeFile(t, af, acc)
+	d := filepath.Join(env.dir, "tdns-auth.yaml")
+	writeFile(t, d, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+tcp.addr()+" ]\n   apikey: the-key\n   certfile: "+tcp.certFile+"\n   socket: "+env.socket()+"\n   access-file: "+af+"\n")
+	f := serveFakeDaemon(t, env.socket(), d, af)
+	f.mu.Lock()
+	f.policy = &tdns.ApiAccessStatus{File: af, KeyAuth: true, Clients: []tdns.ApiAccessStatusClient{}}
+	f.forget = true
+	f.mu.Unlock()
+	key := tcpKeyEntry(d, tcp.addr(), tdns.SPKISHA256(tcp.srv.Certificate()))
+	writeFile(t, env.cli, key)
+
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(err.Error(), "keyauth: false") || strings.Contains(err.Error(), "refuses the key") {
+		t.Fatalf("err = %v, want the key entry refused: the daemon now runs keyauth: false", err)
+	}
+	if fix := oneLine(strings.Join(r.fix, "\n")); strings.Contains(fix, "Or keep the API key") || strings.Contains(fix, "config reload") {
+		t.Errorf("fix:\n%s\nwant no reload: keyauth: false is not a stale key", strings.Join(r.fix, "\n"))
+	}
+	if n := f.reloadCount(); n != 2 {
+		t.Errorf("%d reloads, want 2 (the edit, and its undo)", n)
+	}
+	if readBytes(t, env.cli) != key || readBytes(t, af) != acc {
+		t.Error("a file was left changed")
+	}
+}
+
 // accessWithAdmin is an access file that lists pin, enabled, beside a
 // client the daemon refuses (admin is the local socket's alone): the daemon
 // would not load it, so the pin in it does not work.
