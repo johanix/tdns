@@ -718,7 +718,7 @@ fresh.example.	3600	IN	A	10.0.0.40
 			if !tc.replaced && (fresh != nil || stale == nil) {
 				t.Errorf("the copy was replaced (fresh %v, stale %v)", fresh != nil, stale != nil)
 			}
-			if zd.relayCopyUnconfirmed {
+			if zd.relayCopyUnconfirmed.Load() {
 				t.Error("the copy is still unconfirmed after the refresh")
 			}
 			if !zd.shouldRequestIxfr(false) {
@@ -760,7 +760,7 @@ ns.example.	3600	IN	A	10.0.0.1
 	if zd.IncomingSerial != 100 {
 		t.Errorf("IncomingSerial = %d, want 100: the adopted copy stands", zd.IncomingSerial)
 	}
-	if !zd.relayCopyUnconfirmed {
+	if !zd.relayCopyUnconfirmed.Load() {
 		t.Error("the copy was confirmed with no usable SOA")
 	}
 }
@@ -800,7 +800,7 @@ fresh.example.	3600	IN	A	10.0.0.40
 	if _, err := zd.Refresh(context.Background(), false, false, false, conf); err == nil {
 		t.Fatal("expected the refresh against a dead primary to fail")
 	}
-	if !zd.relayCopyUnconfirmed {
+	if !zd.relayCopyUnconfirmed.Load() {
 		t.Fatal("setup: the adopted copy should be unconfirmed")
 	}
 
@@ -808,13 +808,21 @@ fresh.example.	3600	IN	A	10.0.0.40
 	// transferred working set.
 	Zones.Set(zd.ZoneName, &ZoneData{ZoneName: zd.ZoneName})
 	zd.Upstreams = []PeerConf{{Addr: addr}}
-	_, err := zd.Refresh(context.Background(), false, false, false, conf)
-	t.Logf("refresh with the publish dropped: err %v", err)
+	// The transfer must get as far as the publish: the pre-refresh hooks run
+	// after it and before the publish, and a dropped publish returns nil.
+	analysed := false
+	zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(_, _ *ZoneData) { analysed = true })
+	if _, err := zd.Refresh(context.Background(), false, false, false, conf); err != nil {
+		t.Fatalf("refresh with the publish dropped: %v", err)
+	}
+	if !analysed {
+		t.Fatal("setup: the refresh returned before the transfer reached the publish")
+	}
 
 	if stale, _ := zd.GetOwner("stale.example."); stale == nil {
 		t.Fatal("setup: the dropped publish should leave the adopted copy served")
 	}
-	if !zd.relayCopyUnconfirmed {
+	if !zd.relayCopyUnconfirmed.Load() {
 		t.Error("a dropped publish confirmed the relay copy")
 	}
 	if zd.shouldRequestIxfr(false) {

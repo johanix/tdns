@@ -93,6 +93,23 @@ func agentZoneMayOriginateContent(zd *ZoneData) bool {
 // proxy). The proxy flag wins over both options, or the zone would count as
 // originating: each transfer would advance the served serial and a restart
 // would lift it.
+// markRelayCopyIfOriginationEnded marks a running tdns-agent zone's copy
+// unconfirmed when an options change (a config reload, or a zone type change)
+// ends its origination. The copy then holds content and a serial the zone
+// wrote itself, which a relay must not serve, and the upstream need not move
+// for a probe to see that. The next refresh with a usable SOA replaces it with
+// a full transfer (relayCopyNeedsTransfer), also when the forced refresh a
+// reload queues was skipped or failed. Any other change leaves the mark as it
+// is, so a confirmed relay copy is not transferred again at every reload.
+// wasOriginating is zoneMayOriginateContent before the change.
+func (zd *ZoneData) markRelayCopyIfOriginationEnded(wasOriginating bool) {
+	if wasOriginating && Globals.App.Type == AppTypeAgent && !zoneMayOriginateContent(zd) {
+		zd.relayCopyUnconfirmed.Store(true)
+		lg.Info("zone stopped originating content: its copy is replaced by a full transfer at the next refresh",
+			"zone", zd.ZoneName)
+	}
+}
+
 func childUpdatesLeaveTheZone(zd *ZoneData, opt ZoneOption) bool {
 	return zd.Options[OptChildSyncProxy] && (opt == OptChildSync || opt == OptAllowChildUpdates)
 }

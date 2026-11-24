@@ -125,7 +125,7 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 	}
 	lg.Info("adopted persisted zone copy at first bind",
 		"zone", zd.ZoneName, "file", fname, "serial", zd.IncomingSerial)
-	zd.relayCopyUnconfirmed = Globals.App.Type == AppTypeAgent && !zoneMayOriginateContent(zd)
+	zd.relayCopyUnconfirmed.Store(Globals.App.Type == AppTypeAgent && !zoneMayOriginateContent(zd))
 
 	// The copy is in memory, so its serial is known and the recorded
 	// confirmation can be matched against it. Only on this path: a copy that
@@ -152,7 +152,7 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 // agent wrote it. The caller asks only after a usable SOA: the placeholder 0
 // that comes without one is no serial, and forces nothing.
 func (zd *ZoneData) relayCopyNeedsTransfer() bool {
-	return zd.relayCopyUnconfirmed
+	return zd.relayCopyUnconfirmed.Load()
 }
 
 func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, conf *Config) (bool, error) {
@@ -1137,7 +1137,7 @@ func (zd *ZoneData) shouldRequestIxfr(force bool) bool {
 	return zd.requestIxfr() &&
 		zd.IncomingSerial != 0 &&
 		zd.publishedSnapshot() != nil &&
-		!zd.relayCopyUnconfirmed &&
+		!zd.relayCopyUnconfirmed.Load() &&
 		!force
 }
 
@@ -1443,7 +1443,7 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 	// relay copy (relayCopyNeedsTransfer); until then every refresh forces a
 	// full transfer again.
 	if zd.snapshot.Load() != before {
-		zd.relayCopyUnconfirmed = false
+		zd.relayCopyUnconfirmed.Store(false)
 	}
 	if firstLoad {
 		zd.postRefreshOwed = true
