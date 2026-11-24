@@ -184,6 +184,13 @@ func readExactWithContext(ctx context.Context, s *quic.Stream, buf []byte) error
 		if n > 0 {
 			total += n
 		}
+		// A Read that returns the last bytes of the stream returns them
+		// together with io.EOF: the client's STREAM FIN (RFC 9250 4.2) arrives
+		// with, or before, the end of the query. The buffer is full, so the read
+		// has succeeded; returning the error would drop a complete query.
+		if total == len(buf) {
+			return nil
+		}
 		if err != nil {
 			// handle deadline expiry to check ctx.Done()
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
