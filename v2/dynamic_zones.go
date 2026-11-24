@@ -898,6 +898,12 @@ type DynamicZoneInput struct {
 	// or a modify puts into the keystore. A modify never changes the zone's
 	// owner; `zone setowner` does. Empty is "api".
 	ApiOwner string
+	// AppClient is the application client the request runs for
+	// (AppClientOf), "" for every other caller. A modify then acts only on
+	// the client's own zone, an add is refused while keys of an earlier
+	// zone of the name remain, and a primary's TSIG key must be the
+	// client's own or the inline one (api_app.go).
+	AppClient string
 }
 
 // stageInlineTsigKey validates an inline TSIG key supplied with an add/modify
@@ -1054,6 +1060,13 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		return "", fmt.Errorf("zone %s: %w", name, serr)
 	}
 
+	// Before the check that the keys exist, so that an application client
+	// gets one answer for a key it does not own and for one that is not
+	// there at all.
+	if err := conf.appTsigKeyRefusal(in.AppClient, name, in.Primaries, staged); err != nil {
+		return "", err
+	}
+
 	// Validate every primary's key: NOKEY (no TSIG), a name defined in the keys:
 	// store, or the staged inline key. An unknown name is rejected.
 	if in.Type == Secondary {
@@ -1115,6 +1128,9 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// reload's re-expansion from landing in between.
 	templateApplyMu.Lock()
 	defer templateApplyMu.Unlock()
+	if err := conf.appAddRefusal(in.AppClient, name); err != nil {
+		return "", err
+	}
 	var outbound templateOutbound
 	if in.Template != "" {
 		stagedName := ""
@@ -1269,13 +1285,27 @@ var testHookRemovalLocking func()
 // delete then takes. A failure there leaves the zone deleted and is
 // reported in the returned ZoneRemoval, not as an error.
 func (conf *Config) RemoveDynamicZone(name string, keepKeys bool) (*ZoneRemoval, error) {
+	return conf.RemoveDynamicZoneFor("", name, keepKeys)
+}
+
+// RemoveDynamicZoneFor is RemoveDynamicZone for the application client app
+// ("" for any other caller): the zone it resolves, under the same lock as
+// the removal, must be the client's own (appZoneRefusal), and the keys go
+// with it.
+func (conf *Config) RemoveDynamicZoneFor(app, name string, keepKeys bool) (*ZoneRemoval, error) {
 	name = core.CanonicalizeName(dns.Fqdn(name))
+	if app != "" && keepKeys {
+		return nil, errKeepKeysForApp
+	}
 	if testHookRemovalLocking != nil {
 		testHookRemovalLocking()
 	}
 	templateApplyMu.Lock()
 	defer templateApplyMu.Unlock()
 	zd, exists := Zones.Get(name)
+	if err := appZoneRefusal(app, name, zd); err != nil {
+		return nil, err
+	}
 	if !exists {
 		return nil, fmt.Errorf("zone %s not found", name)
 	}
@@ -1405,6 +1435,9 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	templateApplyMu.Lock()
 	defer templateApplyMu.Unlock()
 	oldZd, exists := Zones.Get(name)
+	if err := appZoneRefusal(in.AppClient, name, oldZd); err != nil {
+		return "", err
+	}
 	if !exists {
 		return "", fmt.Errorf("zone %s not found", name)
 	}
@@ -1427,6 +1460,9 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	staged, serr := conf.stageInlineTsigKey(&in)
 	if serr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, serr)
+	}
+	if err := conf.appTsigKeyRefusal(in.AppClient, name, in.Primaries, staged); err != nil {
+		return "", err
 	}
 	// When primaries are supplied they REPLACE the set, so every entry must be
 	// complete (empty in.Primaries means "keep the old set" and skips this).

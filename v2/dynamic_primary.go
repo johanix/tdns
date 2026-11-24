@@ -371,6 +371,9 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	// From the expansion until the zone is in Zones: see templateApplyMu.
 	templateApplyMu.Lock()
 	defer templateApplyMu.Unlock()
+	if err := conf.appAddRefusal(in.AppClient, name); err != nil {
+		return "", err
+	}
 	spec, perr := conf.prepareDynamicPrimary(ZoneConf{Name: name, Template: in.Template}, staged, fromAPI)
 	if perr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, perr)

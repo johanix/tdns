@@ -384,7 +384,7 @@ func TestZoneSetOwner(t *testing.T) {
 	Zones.Set("dyn2.example.", dyn)
 	Conf.Internal.ApiAccess = &apiAccessHolder{}
 	Conf.Internal.ApiAccess.p.Store(newAccessState("/access.yaml", &AccessFile{Clients: []AccessClient{
-		{Name: "provisioner", Pin: "pin1", Role: "read-write"}}}))
+		{Name: "provisioner", Pin: "pin1", Role: "read-write"}}}, nil))
 	if resp := setowner("dyn2.example.", "cert:provisioner"); resp.Error || len(resp.Warnings) != 0 {
 		t.Errorf("an enrolled client: %q %q %q", resp.Msg, resp.ErrorMsg, resp.Warnings)
 	}

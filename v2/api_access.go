@@ -202,5 +202,14 @@ func (a ApiServerConf) validateAccessSettings() error {
 		return fmt.Errorf("apiserver.access-file %s requires TLS on the TCP API, and apiserver.usetls is false: certificate clients could not authenticate, and the API key would cross the network in clear. When TLS is broken, use the local admin socket; for a daemon without TCP, leave out apiserver.addresses",
 			a.AccessFile)
 	}
+	// A name an API owner could not spell (cert:<name>) names no client
+	// whose zones could be checked; refused rather than silently granting
+	// nothing. A name the access file lacks is only a config check warning:
+	// the client may be enrolled after the list is written.
+	for _, name := range a.AppClients {
+		if err := CheckAccessClientName(name); err != nil {
+			return fmt.Errorf("apiserver.app-clients: %v", err)
+		}
+	}
 	return nil
 }

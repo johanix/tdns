@@ -590,3 +590,16 @@ func getApiDetailsByClientKey(clientKey string) *ApiDetails {
 func GetApiDetailsByClientKey(clientKey string) *ApiDetails {
 	return getApiDetailsByClientKey(clientKey)
 }
+
+// refusalError is a daemon's plain-text refusal (tdns.ApiRefusal: the access
+// check's 403, or an application client refused something it may not do),
+// worded for the "Error from <daemon>: ..." and "Error: ..." lines its
+// callers print once (ApiRefusal.Report). ok is false for any other error,
+// which the caller reports as before.
+func refusalError(err error) (error, bool) {
+	var ref *tdns.ApiRefusal
+	if !errors.As(err, &ref) {
+		return err, false
+	}
+	return errors.New(ref.Report()), true
+}

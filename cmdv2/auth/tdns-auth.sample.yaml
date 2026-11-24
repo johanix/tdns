@@ -181,6 +181,9 @@ apiserver:
    # guide/config-tdns-auth.md. A configured file that cannot be used closes
    # the TCP API (503), so create it before enabling this line.
    # access-file: /etc/tdns/tdns-auth-access.yaml
+   # Access-file clients that are applications: they see and manage only
+   # the zones whose API owner they are (guide/config-tdns-auth.md).
+   # app-clients: [ provisioner ]
 
 # Statically declared TSIG keys.
 #

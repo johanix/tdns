@@ -959,6 +959,10 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 
 	status, buf, err := api.Post("/zone", bytebuf.Bytes())
 	if err != nil {
+		if rerr, ok := refusalError(err); ok {
+			cr.AppName = api.Name
+			return cr, rerr
+		}
 		log.Println("Error from Api Post:", err)
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}

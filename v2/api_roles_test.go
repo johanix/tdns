@@ -24,6 +24,52 @@ import (
 //     switch at all (it then means "this route");
 //   - every command listed must still exist in its handler.
 func TestApiRoleTableMatchesTheHandlers(t *testing.T) {
+	routes, funcs := parseApiRoutes(t)
+
+	for route, handler := range routes {
+		table, ok := apiRouteRoles[route]
+		if !ok {
+			t.Errorf("route %s (%s) has no entry in apiRouteRoles: decide its roles", route, handler)
+			continue
+		}
+		fd := funcs[handler]
+		if fd == nil {
+			t.Errorf("route %s: handler %s not found", route, handler)
+			continue
+		}
+		cmds := commandsOf(fd)
+		star, hasStar := table["*"]
+		allAdmin := hasStar && star == RoleAdmin
+		if hasStar && !allAdmin && len(cmds) > 0 {
+			t.Errorf("route %s: a non-admin \"*\" on a handler with commands %v; list them instead", route, cmds)
+		}
+		for _, c := range cmds {
+			if _, ok := table[c]; !ok && !allAdmin {
+				t.Errorf("route %s: command %q (in %s) is not in apiRouteRoles; decide its role", route, c, handler)
+			}
+		}
+		known := map[string]bool{}
+		for _, c := range cmds {
+			known[c] = true
+		}
+		for c := range table {
+			if c != "" && c != "*" && !known[c] {
+				t.Errorf("route %s: apiRouteRoles lists %q, which %s no longer has", route, c, handler)
+			}
+		}
+	}
+	for route := range apiRouteRoles {
+		if _, ok := routes[route]; !ok {
+			t.Errorf("apiRouteRoles has %s, which no router builder registers", route)
+		}
+	}
+}
+
+// parseApiRoutes parses this package and returns every route the two router
+// builders register with the name of the handler each one calls, and the
+// package's functions by name.
+func parseApiRoutes(t *testing.T) (map[string]string, map[string]*ast.FuncDecl) {
+	t.Helper()
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
 		return !strings.HasSuffix(fi.Name(), "_test.go")
@@ -80,43 +126,7 @@ func TestApiRoleTableMatchesTheHandlers(t *testing.T) {
 		t.Fatalf("found only %d routes; the parse is broken: %v", len(routes), routes)
 	}
 
-	for route, handler := range routes {
-		table, ok := apiRouteRoles[route]
-		if !ok {
-			t.Errorf("route %s (%s) has no entry in apiRouteRoles: decide its roles", route, handler)
-			continue
-		}
-		fd := funcs[handler]
-		if fd == nil {
-			t.Errorf("route %s: handler %s not found", route, handler)
-			continue
-		}
-		cmds := commandsOf(fd)
-		star, hasStar := table["*"]
-		allAdmin := hasStar && star == RoleAdmin
-		if hasStar && !allAdmin && len(cmds) > 0 {
-			t.Errorf("route %s: a non-admin \"*\" on a handler with commands %v; list them instead", route, cmds)
-		}
-		for _, c := range cmds {
-			if _, ok := table[c]; !ok && !allAdmin {
-				t.Errorf("route %s: command %q (in %s) is not in apiRouteRoles; decide its role", route, c, handler)
-			}
-		}
-		known := map[string]bool{}
-		for _, c := range cmds {
-			known[c] = true
-		}
-		for c := range table {
-			if c != "" && c != "*" && !known[c] {
-				t.Errorf("route %s: apiRouteRoles lists %q, which %s no longer has", route, c, handler)
-			}
-		}
-	}
-	for route := range apiRouteRoles {
-		if _, ok := routes[route]; !ok {
-			t.Errorf("apiRouteRoles has %s, which no router builder registers", route)
-		}
-	}
+	return routes, funcs
 }
 
 // commandsOf collects the string cases of every switch in fd whose tag reads a

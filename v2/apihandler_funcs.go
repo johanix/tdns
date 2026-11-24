@@ -600,7 +600,13 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 
 		var zd *ZoneData
 		var exist bool
-		if zd, exist = Zones.Get(dp.Zone); !exist {
+		zd, exist = Zones.Get(dp.Zone)
+		if err := appZoneRefusal(AppClientOf(r.Context()), dp.Zone, zd); err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return
+		}
+		if !exist {
 			msg := fmt.Sprintf("Zone \"%s\" is unknown.", dp.Zone)
 			lgApi.Warn("unknown zone", "zone", dp.Zone)
 			resp.Error = true

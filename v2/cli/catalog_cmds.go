@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -486,8 +485,19 @@ func newCatalogZoneGroupDeleteCmd() *cobra.Command {
 
 // SendCatalogCommand sends a catalog command to the API
 func SendCatalogCommand(api *tdns.ApiClient, data tdns.CatalogPost) (*tdns.CatalogResponse, error) {
-	status, buf, err := api.RequestNG(http.MethodPost, "/catalog", data, true)
+	// Post, not RequestNG: the catalog handler answers an error with a
+	// non-2xx status and its JSON body, which RequestNG printed whole (the
+	// URL, the status and the raw JSON) before it exited. Post hands the
+	// body back, so the daemon's ErrorMsg is what the operator reads.
+	body, err := json.Marshal(data)
 	if err != nil {
+		return nil, err
+	}
+	status, buf, err := api.Post("/catalog", body)
+	if err != nil {
+		if rerr, ok := refusalError(err); ok {
+			return &tdns.CatalogResponse{}, rerr
+		}
 		return nil, fmt.Errorf("error from API request: %v", err)
 	}
 

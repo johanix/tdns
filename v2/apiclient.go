@@ -293,13 +293,59 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 	return resp.StatusCode, buf, err
 }
 
+// ApiRefusal is a non-2xx reply whose body is plain text: a refusal made
+// before any handler ran (the access check), or a handler's own plain-text
+// error. A client can tell it from a failed exchange and print the daemon's
+// words as they are.
+type ApiRefusal struct {
+	Status int
+	Msg    string
+}
+
+func (e *ApiRefusal) Error() string {
+	return fmt.Sprintf("HTTP %d from the daemon: %s", e.Status, e.Msg)
+}
+
+// Report is the refusal as a CLI prints it: the verdict on a line of its
+// own, then the daemon's words, indented and wrapped at 68 columns, so that
+// no line passes 72 after an "Error from <daemon>: " style prefix.
+func (e *ApiRefusal) Report() string {
+	verdict := fmt.Sprintf("refused (HTTP %d):", e.Status)
+	if e.Status != http.StatusForbidden {
+		verdict = fmt.Sprintf("HTTP %d from the daemon:", e.Status)
+	}
+	msg := e.Msg
+	if strings.TrimSpace(msg) == "" {
+		msg = http.StatusText(e.Status)
+	}
+	lines := []string{verdict}
+	for _, para := range strings.Split(msg, "\n") {
+		line := ""
+		for _, w := range strings.Fields(para) {
+			switch {
+			case line == "":
+				line = w
+			case len(line)+1+len(w) > 68:
+				lines = append(lines, "  "+line)
+				line = w
+			default:
+				line += " " + w
+			}
+		}
+		if line != "" {
+			lines = append(lines, "  "+line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // plainHTTPError is the error for a non-2xx reply whose body is plain text.
 func plainHTTPError(status int, body []byte) error {
 	msg := strings.TrimSpace(string(body))
 	if msg == "" {
 		msg = http.StatusText(status)
 	}
-	return fmt.Errorf("HTTP %d from the daemon: %s", status, msg)
+	return &ApiRefusal{Status: status, Msg: msg}
 }
 
 func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {
@@ -548,6 +594,13 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 	// Report non-2xx status codes clearly
 	if status < 200 || status >= 300 {
 		body := strings.TrimSpace(string(buf))
+		// A plain-text reply is the daemon's own sentence (a refusal by
+		// the access check, or a handler's error): printed once, as such,
+		// not after the URL.
+		if dieOnError && !json.Valid(buf) {
+			fmt.Println((&ApiRefusal{Status: status, Msg: body}).Report())
+			os.Exit(1)
+		}
 		msg := fmt.Sprintf("API %s %s%s returned HTTP %d: %s", method, api.BaseUrl, endpoint, status, body)
 		if dieOnError {
 			fmt.Println(msg)
@@ -710,6 +763,13 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 	// Report non-2xx status codes clearly
 	if status < 200 || status >= 300 {
 		body := strings.TrimSpace(string(buf))
+		// A plain-text reply is the daemon's own sentence (a refusal by
+		// the access check, or a handler's error): printed once, as such,
+		// not after the URL.
+		if dieOnError && !json.Valid(buf) {
+			fmt.Println((&ApiRefusal{Status: status, Msg: body}).Report())
+			os.Exit(1)
+		}
 		msg := fmt.Sprintf("API %s %s%s returned HTTP %d: %s", method, api.BaseUrl, endpoint, status, body)
 		if dieOnError {
 			fmt.Println(msg)

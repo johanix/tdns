@@ -253,6 +253,10 @@ func SendDelegationCmd(api *tdns.ApiClient, data tdns.DelegationPost) (tdns.Dele
 
 	status, buf, err := api.Post("/delegation", bytebuf.Bytes())
 	if err != nil {
+		if rerr, ok := refusalError(err); ok {
+			dr.AppName = api.Name
+			return dr, rerr
+		}
 		log.Println("Error from Api Post:", err)
 		return dr, fmt.Errorf("error from api post: %v", err)
 	}

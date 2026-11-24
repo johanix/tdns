@@ -68,6 +68,9 @@ func (zd *ZoneData) ApiZoneUpdate(ctx context.Context, zp ZonePost) (string, err
 	if len(actions) == 0 {
 		return "", fmt.Errorf("statement produced no changes")
 	}
+	if err := appUpdateRefusal(AppClientOf(ctx), zd.ZoneName, actions); err != nil {
+		return "", err
+	}
 
 	if zd.KeyDB == nil || zd.KeyDB.UpdateQ == nil {
 		return "", fmt.Errorf("zone updater is not available")

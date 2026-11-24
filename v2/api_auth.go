@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 
@@ -27,6 +28,9 @@ type ApiIdentity struct {
 	Name string  // the access-file client, "apikey", or "local"
 	Role ApiRole // what it may do
 	Via  string  // ApiViaSocket, ApiViaCertificate or ApiViaKey
+	// App: a certificate client that apiserver.app-clients names. On top
+	// of its role it sees and manages only what it owns (api_app.go).
+	App bool
 }
 
 // How a caller was authenticated (ApiIdentity.Via). Only a certificate
@@ -41,6 +45,9 @@ const (
 func (id ApiIdentity) Describe() string {
 	if id.Via == ApiViaSocket {
 		return fmt.Sprintf("on the local socket (%s)", id.Role)
+	}
+	if id.App {
+		return fmt.Sprintf("authenticated as %s (%s, application client) by %s", id.Name, id.Role, id.Via)
 	}
 	return fmt.Sprintf("authenticated as %s (%s) by %s", id.Name, id.Role, id.Via)
 }
@@ -67,6 +74,11 @@ type accessState struct {
 	KeyAuth bool
 	byPin   map[string]AccessClient
 	Clients []AccessClient
+	// AppClients is apiserver.app-clients as it went into force with this
+	// file; appClients the same as a set. Kept here, in the one pointer,
+	// so that a request sees the list and the file of the same reload.
+	AppClients []string
+	appClients map[string]bool
 }
 
 // apiAccessHolder holds the running policy. A pointer in InternalConf, so a
@@ -80,12 +92,17 @@ func (h *apiAccessHolder) load() *accessState {
 	return h.p.Load()
 }
 
-// newAccessState builds the running policy from a validated file.
-func newAccessState(path string, af *AccessFile) *accessState {
+// newAccessState builds the running policy from a validated file and the
+// application clients (apiserver.app-clients) that go into force with it.
+func newAccessState(path string, af *AccessFile, appClients []string) *accessState {
 	st := &accessState{Enabled: true, File: path, KeyAuth: af.KeyAuthOn(),
-		byPin: map[string]AccessClient{}, Clients: append([]AccessClient(nil), af.Clients...)}
+		byPin: map[string]AccessClient{}, Clients: append([]AccessClient(nil), af.Clients...),
+		AppClients: append([]string(nil), appClients...), appClients: map[string]bool{}}
 	for _, c := range af.Clients {
 		st.byPin[c.Pin] = c
+	}
+	for _, name := range appClients {
+		st.appClients[name] = true
 	}
 	return st
 }
@@ -171,7 +188,9 @@ func (conf *Config) authenticateApiRequest(r *http.Request, apikey string) (ApiI
 		pin := SPKISHA256(r.TLS.PeerCertificates[0])
 		if c, ok := st.byPin[pin]; ok && !c.Disabled {
 			role, _ := parseNetworkRole(c.Role) // validated when loaded
-			return ApiIdentity{Name: c.Name, Role: role, Via: ApiViaCertificate}, 0, ""
+			// The name makes an application client only here, on its
+			// certificate: over the key or the socket it means nothing.
+			return ApiIdentity{Name: c.Name, Role: role, Via: ApiViaCertificate, App: st.appClients[c.Name]}, 0, ""
 		}
 		// An unknown or disabled certificate does not fall through to the key:
 		// a client that presents a certificate is that certificate.
@@ -229,10 +248,19 @@ func (conf *Config) apiAuthMiddleware(apikey string) mux.MiddlewareFunc {
 				}
 				return
 			}
+			// After the role, which still applies: a read-only application
+			// client stays read-only. The table only says whether the
+			// command is open to application clients at all; which zone it
+			// may act on, the handler checks once it has resolved it.
+			if id.App && ApiAppScopeOf(route, cmd) == AppRefused {
+				lgApi.Info("api request denied: not available to application clients", "client", id.Name, "route", route, "command", cmd)
+				http.Error(w, fmt.Sprintf("%s: not available to application clients", apiCommandName(route, cmd)), http.StatusForbidden)
+				return
+			}
 			if need >= RoleReadWrite {
-				lgApi.Info("api request", "client", id.Name, "role", id.Role, "via", id.Via, "route", route, "command", strings.TrimSpace(cmd))
+				lgApi.Info("api request", "client", id.Name, "role", id.Role, "via", id.Via, "app", id.App, "route", route, "command", strings.TrimSpace(cmd))
 			} else {
-				lgApi.Debug("api request", "client", id.Name, "role", id.Role, "via", id.Via, "route", route, "command", strings.TrimSpace(cmd))
+				lgApi.Debug("api request", "client", id.Name, "role", id.Role, "via", id.Via, "app", id.App, "route", route, "command", strings.TrimSpace(cmd))
 			}
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), apiIdentityKey{}, id)))
 		})
@@ -264,8 +292,9 @@ func (conf *Config) initApiAccess() {
 		return
 	}
 	conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
-	conf.Internal.ApiAccess.p.Store(newAccessState(path, af))
-	lgApi.Info("management API: access file loaded", "file", path, "clients", len(af.Clients), "keyauth", af.KeyAuthOn())
+	conf.Internal.ApiAccess.p.Store(newAccessState(path, af, conf.ApiServer.AppClients))
+	lgApi.Info("management API: access file loaded", "file", path, "clients", len(af.Clients), "keyauth", af.KeyAuthOn(),
+		"app-clients", conf.ApiServer.AppClients)
 }
 
 // reloadApiAccess re-reads the access file after a successful config reload
@@ -305,7 +334,14 @@ func (conf *Config) reloadApiAccess() string {
 	if err != nil {
 		lgApi.Error("management API: access file NOT reloaded; the running policy is unchanged", "file", path, "err", err)
 		conf.Internal.ServerErrors.set(ErrCatConfig, ErrSubApiAccess, fmt.Sprintf("access file %s: %v", path, err))
-		return fmt.Sprintf(" %s (the running policy is unchanged): %v", AccessFileNotReloaded, err)
+		// The application clients go into force with the file, never
+		// without it: a new list against the old file could make a
+		// client an application client that the new file does not have.
+		appNote := ""
+		if st := h.load(); st != nil && st.Enabled && !slices.Equal(st.AppClients, conf.ApiServer.AppClients) {
+			appNote = ". apiserver.app-clients is NOT applied either: it goes into force with the access file"
+		}
+		return fmt.Sprintf(" %s (the running policy is unchanged): %v%s", AccessFileNotReloaded, err, appNote)
 	}
 	conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
 	// Before the policy goes in force: a plaintext TCP listener started
@@ -314,7 +350,8 @@ func (conf *Config) reloadApiAccess() string {
 	// Closed and the policy stored under one lock, which APIdispatcher also
 	// holds while it registers and starts its servers (activateApiAccess).
 	stopped := ""
-	if addrs := activateApiAccess(path, func() { h.p.Store(newAccessState(path, af)) }); len(addrs) > 0 {
+	appClients := slices.Clone(conf.ApiServer.AppClients)
+	if addrs := activateApiAccess(path, func() { h.p.Store(newAccessState(path, af, appClients)) }); len(addrs) > 0 {
 		lgApi.Error("management API: plaintext TCP listeners STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served)",
 			"addresses", addrs, "file", path)
 		stopped = fmt.Sprintf(" The plaintext TCP listeners %v are STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served).", addrs)
@@ -324,8 +361,12 @@ func (conf *Config) reloadApiAccess() string {
 		keyauth = "off"
 	}
 	// Logged as well as returned: after a SIGHUP nobody reads the message.
-	lgApi.Info("management API: access file reloaded", "file", path, "clients", len(af.Clients), "keyauth", keyauth)
-	return fmt.Sprintf(" Access file reloaded: %d client(s), keyauth %s.%s", len(af.Clients), keyauth, stopped)
+	lgApi.Info("management API: access file reloaded", "file", path, "clients", len(af.Clients), "keyauth", keyauth, "app-clients", appClients)
+	apps := ""
+	if len(appClients) > 0 {
+		apps = fmt.Sprintf(", app-clients %s", strings.Join(appClients, " "))
+	}
+	return fmt.Sprintf(" Access file reloaded: %d client(s), keyauth %s%s.%s", len(af.Clients), keyauth, apps, stopped)
 }
 
 // ApiAccessStatus is the running access policy as `config status` reports it.
@@ -335,6 +376,9 @@ type ApiAccessStatus struct {
 	Error   string `json:",omitempty"` // set when the file could not be used at start-up: the TCP API answers 503
 	KeyAuth bool
 	Clients []ApiAccessStatusClient
+	// AppClients is apiserver.app-clients as in force with this file; a
+	// name the file has no client for grants nothing.
+	AppClients []string `json:",omitempty"`
 	// The plaintext TCP listeners an access file closed are not here but in
 	// ConfigResponse.ApiTCPStopped: they stay closed after the access file
 	// is removed, when there is no policy to report.
@@ -355,7 +399,7 @@ func (conf *Config) apiAccessStatus() *ApiAccessStatus {
 	if st == nil || !st.Enabled {
 		return nil
 	}
-	out := &ApiAccessStatus{File: st.File, KeyAuth: st.KeyAuth}
+	out := &ApiAccessStatus{File: st.File, KeyAuth: st.KeyAuth, AppClients: slices.Clone(st.AppClients)}
 	if st.Err != nil {
 		out.Error = st.Err.Error()
 	}

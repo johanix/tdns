@@ -519,11 +519,28 @@ func printAccessStatus(a *tdns.ApiAccessStatus) {
 		keyauth = "the API key is off"
 	}
 	fmt.Printf("Access file: %s; %s; %d client(s)\n", a.File, keyauth, len(a.Clients))
+	app := map[string]bool{}
+	for _, name := range a.AppClients {
+		app[name] = true
+	}
+	enrolled := map[string]bool{}
 	for _, c := range a.Clients {
+		enrolled[c.Name] = true
 		state := ""
+		if app[c.Name] {
+			state = ", application client"
+		}
 		if c.Disabled {
-			state = ", disabled"
+			state += ", disabled"
 		}
 		fmt.Printf("   %s (%s%s)\n", c.Name, c.Role, state)
+	}
+	// apiserver.app-clients as running: the names above marked application
+	// client, and any the access file has no client for (they grant
+	// nothing), on lines of their own.
+	for _, name := range a.AppClients {
+		if !enrolled[name] {
+			fmt.Printf("   %s (in app-clients; not in the access file)\n", name)
+		}
 	}
 }

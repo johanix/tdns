@@ -1375,6 +1375,10 @@ func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.Keystore
 
 	status, buf, err := api.Post("/keystore", bytebuf.Bytes())
 	if err != nil {
+		if rerr, ok := refusalError(err); ok {
+			kr.AppName = api.Name
+			return kr, rerr
+		}
 		log.Println("Error from Api Post:", err)
 		return kr, fmt.Errorf("error from api post: %v", err)
 	}

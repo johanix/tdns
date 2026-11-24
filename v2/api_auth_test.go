@@ -363,7 +363,7 @@ func TestAccessFileRequiresTLS13(t *testing.T) {
 	}
 	conf := &Config{}
 	conf.Internal.ApiAccess = &apiAccessHolder{}
-	conf.Internal.ApiAccess.p.Store(newAccessState("/etc/tdns/access.yaml", af))
+	conf.Internal.ApiAccess.p.Store(newAccessState("/etc/tdns/access.yaml", af, nil))
 	for _, tc := range []struct {
 		name string
 		tls  *tls.ConnectionState
