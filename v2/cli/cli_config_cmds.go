@@ -536,6 +536,9 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			return nil, alsoSaid(cert.refusal(fmt.Sprintf("not adding %s: a new entry uses your client certificate, and %s",
 				info.ConfigFile, cert.whyNot())), unwriteApiCert(pending, res))
 		}
+		if cert.unreadFile {
+			res.Notes = append(res.Notes, cert.unreadNote())
+		}
 	}
 
 	// What the daemon's side got for an entry that is not written after
@@ -889,6 +892,8 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 			}
 			if !c.usable() {
 				aerr = errors.New(c.whyNot())
+			} else if c.unreadFile {
+				res.Notes = append(res.Notes, c.unreadNote())
 			}
 		}
 		switch {

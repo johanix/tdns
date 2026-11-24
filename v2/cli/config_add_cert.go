@@ -76,6 +76,10 @@ type CertSetup struct {
 	keyOff     bool
 	keyWhy     string
 	keyUnknown string
+	// unreadFile: confirm could not read the access file (not root) to
+	// check that the pin the daemon takes is enrolled there, and so stays
+	// after a reload; the entry relies on the daemon's word (unreadNote).
+	unreadFile bool
 	// keyStale: keyOff because the daemon, asked over TCP, refuses the key
 	// its config says, as it runs the one it loaded at its start: a reload
 	// makes the key work (keyFixLines).
@@ -719,6 +723,12 @@ func pingAs(base, pin string, o tdns.ClientOptions) pingReply {
 	return r
 }
 
+// testHookAfterWrites, when set, runs in applySteps after the files are
+// written and before the daemon, found not running before them, is asked
+// again: a test starts one there, in the window the second ask is for.
+// Tests only.
+var testHookAfterWrites func()
+
 // testHookRollbackRestore, when set, runs in rollback for each file it is
 // about to put back: after it found the file still holds what apply wrote,
 // before the restore, with the file's lock held. A test tries a concurrent
@@ -871,8 +881,9 @@ func (c *CertSetup) confirm(o AddOptions) error {
 // itself) finds the pin not enrolled where it lasts (notInFile), with what
 // fixes that and from's key verdict, and says whether it did.
 func (c *CertSetup) failsInFile(from *CertSetup) bool {
-	why, disabled, invalid := from.notInFile()
+	why, disabled, invalid, unread := from.notInFile()
 	if why == "" {
+		c.unreadFile = unread
 		return false
 	}
 	c.cannot(why)
@@ -895,32 +906,40 @@ func (c *CertSetup) failsInFile(from *CertSetup) bool {
 // names none; the file is not one the daemon would load (invalid); or it
 // does not list the pin, or lists it disabled (as disabled, whose fix is to
 // enable it, not to add it again). "" when it is enrolled, or when this
-// process may not read the file (not root).
-func (c *CertSetup) notInFile() (why string, disabled *tdns.AccessClient, invalid bool) {
+// process may not read the file (not root: unread).
+func (c *CertSetup) notInFile() (why string, disabled *tdns.AccessClient, invalid, unread bool) {
 	const now = "the daemon takes your certificate now, but "
 	if !c.t.Configured {
-		return now + fmt.Sprintf("%s names no access file, so it will not after its next start", c.t.DaemonConfig), nil, false
+		return now + fmt.Sprintf("%s names no access file, so it will not after its next start", c.t.DaemonConfig), nil, false, false
 	}
 	af, _, err := readAccessFile(c.t, false)
 	var pe *accessParseError
 	switch {
 	case errors.Is(err, fs.ErrPermission):
-		return "", nil, false
+		return "", nil, false, true
 	case errors.As(err, &pe):
-		return now + invalidAccessFile(c.t.File, pe.err) + ", so it will not after its next reload or start", nil, true
+		return now + invalidAccessFile(c.t.File, pe.err) + ", so it will not after its next reload or start", nil, true, false
 	case err != nil:
-		return now + cannotRead(c.t.File, err), nil, false
+		return now + cannotRead(c.t.File, err), nil, false, false
 	}
 	if verr := tdns.ValidateAccessFile(af); verr != nil {
-		return now + invalidAccessFile(c.t.File, verr) + ", so it will not after its next reload or start", nil, true
+		return now + invalidAccessFile(c.t.File, verr) + ", so it will not after its next reload or start", nil, true, false
 	}
 	switch cl := clientByPin(af, c.pin); {
 	case cl == nil:
-		return now + fmt.Sprintf("%s does not list it, so it will not after its next reload or start", c.t.File), nil, false
+		return now + fmt.Sprintf("%s does not list it, so it will not after its next reload or start", c.t.File), nil, false, false
 	case cl.Disabled:
-		return now + fmt.Sprintf("%s lists it as %q, disabled, so it will not after its next reload or start", c.t.File, cl.Name), cl, false
+		return now + fmt.Sprintf("%s lists it as %q, disabled, so it will not after its next reload or start", c.t.File, cl.Name), cl, false, false
 	}
-	return "", nil, false
+	return "", nil, false, false
+}
+
+// unreadNote is what the result says when confirm could not read the
+// access file to check the pin (unreadFile): the entry rests on the
+// daemon's word over TCP, which a reload may change; root can check.
+func (c *CertSetup) unreadNote() string {
+	return fmt.Sprintf("config add could not read %s (not yours to read) to check that your certificate stays enrolled after a reload; it relies on the daemon's word. Ask root on its host to check:\n   tdns-ncli %s client list --daemon-config %s",
+		c.t.File, c.role, shellQuote(c.t.DaemonConfig))
 }
 
 // applySteps is apply's work. The caller holds the locks (lockPaths).
@@ -1042,6 +1061,9 @@ func (c *CertSetup) applySteps() error {
 	// Asked again now the files are written: a daemon that started since
 	// the check above read the old ones, and needs the reload too.
 	if !c.running {
+		if testHookAfterWrites != nil {
+			testHookAfterWrites()
+		}
 		if c.running, err = socketDaemon(c.role, c.t); err != nil {
 			return err
 		}

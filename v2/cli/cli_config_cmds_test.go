@@ -3480,6 +3480,11 @@ func TestAddAsksTheDaemonOverTCP(t *testing.T) {
 		if out := printed(res, false, env.cli); !strings.Contains(out, "The daemon takes your certificate, as tester (read-write).") {
 			t.Errorf("printed:\n%s", out)
 		}
+		// The access file is not ours to read: config add says the pin's
+		// staying enrolled after a reload went unchecked, and how root checks.
+		if out := flat(printed(res, false, env.cli)); !strings.Contains(out, "could not read "+filepath.Join(env.dir, "tdns-auth-access.yaml")) || !strings.Contains(out, "tdns-ncli auth client list --daemon-config "+d) {
+			t.Errorf("printed %q; want the unread note", out)
+		}
 		// A new entry too: the loop the rig found (refused, enrolled by root,
 		// refused again) is gone.
 		env.cli = filepath.Join(env.dir, "new-cli.yaml")
@@ -4678,5 +4683,112 @@ func TestConfirmWithoutTheLockStillNeedsTheFile(t *testing.T) {
 	}
 	if _, err := os.Stat(env.cli); err == nil {
 		t.Error("the refused add wrote the CLI config")
+	}
+}
+
+// ---------------------------------------- CodeRabbit follow-ups (11-24)
+
+// The access file the daemon config names changes, from A to B, between
+// config add's plan and its apply (which waits for A's lock), the config
+// naming one all along (nameIt false): apply refuses, to be run again, and
+// writes nothing, neither A nor B nor the daemon config.
+func TestAddRechecksAnAccessFileRenamed(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	a, b := filepath.Join(env.dir, "a-access.yaml"), filepath.Join(env.dir, "b-access.yaml")
+	acc := "keyauth: true\nclients: []\n"
+	writeFile(t, a, acc)
+	writeFile(t, b, acc)
+	d, _ := env.certDaemon(t, env.dir, "\n   access-file: "+a)
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := planCert(AddOptions{CliConfig: env.cli}, info, false)
+	if c.state != certCanEnable || c.nameIt || !c.addPin {
+		t.Fatalf("plan %+v", c)
+	}
+	moved := strings.Replace(readBytes(t, d), "access-file: "+a, "access-file: "+b, 1)
+	writeFile(t, d, moved)
+	err = c.apply(context.Background())
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("now names access-file %q, not %q", b, a)) {
+		t.Fatalf("err = %v; want apply refused: the config names %s now", err, b)
+	}
+	if fix := c.fixLines(); !reflect.DeepEqual(fix, []string{"run config add again."}) {
+		t.Errorf("fix %q, want to run config add again", fix)
+	}
+	if readBytes(t, a) != acc || readBytes(t, b) != acc || readBytes(t, d) != moved {
+		t.Error("a file was written")
+	}
+}
+
+// A daemon that starts after apply found none, while it writes the files
+// (testHookAfterWrites: after the writes, before apply asks again), read
+// the old ones: apply's second ask finds it, reloads it, and checks that
+// it runs the pin.
+func TestAddReloadsADaemonThatStartsDuringApply(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	d, _ := env.certDaemon(t, env.dir, "")
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := planCert(AddOptions{CliConfig: env.cli}, info, false)
+	if c.state != certCanEnable || c.running {
+		t.Fatalf("plan %+v", c)
+	}
+	var f *fakeSocketDaemon
+	testHookAfterWrites = func() { f = serveFakeDaemon(t, env.socket(), d, accessFileOf(d)) }
+	t.Cleanup(func() { testHookAfterWrites = nil })
+	err = c.apply(context.Background())
+	c.release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f == nil {
+		t.Fatal("apply did not get to its second ask")
+	}
+	if !c.running || f.reloadCount() != 1 || c.reloaded == "" {
+		t.Errorf("running %v, %d reloads, reply %q; want it found, reloaded and checked", c.running, f.reloadCount(), c.reloaded)
+	}
+}
+
+// An access file config add may not read, whose lock it may not take
+// either (not root): the daemon, asked over TCP, takes your certificate,
+// and the entry is written on its word (the owner's design), saying that
+// whether the enrolment stays after a reload could not be checked, and
+// how root checks it.
+func TestAddUnreadableAccessFileReliesOnTheDaemon(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads the access file")
+	}
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	f := serveFakeTCPDaemon(t, pin, true)
+	dir := readOnlyDaemonDir(t, env)
+	af := filepath.Join(dir, "access.yaml")
+	writeFile(t, af, "keyauth: true\nclients: []\n")
+	os.Chmod(af, 0)
+	d := filepath.Join(dir, "tdns-auth.yaml")
+	writeFile(t, d, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+f.addr()+" ]\n   apikey: the-key\n   certfile: "+f.certFile+"\n   socket: "+env.socket()+"\n   access-file: "+af+"\n")
+	os.Chmod(dir, 0o555) // no lock file can be made beside the access file
+	res, err := env.add(t, d, nil)
+	if err != nil || res.Entry.AuthMethod != "certificate" || !res.Cert.byDaemon {
+		t.Fatalf("%+v, %v; want the certificate entry, on the daemon's word", res, err)
+	}
+	notes := flat(strings.Join(res.Notes, " "))
+	if !strings.Contains(notes, "could not read "+af) || !strings.Contains(notes, "tdns-ncli auth client list --daemon-config "+d) {
+		t.Errorf("notes %q; want it said that %s could not be read, and how root checks", notes, af)
+	}
+	var sb strings.Builder
+	printAddResult(&sb, res, false, env.cli)
+	if out := flat(sb.String()); !strings.Contains(out, "could not read "+af) {
+		t.Errorf("printed %q; want the note", out)
+	}
+	for _, l := range strings.Split(sb.String(), "\n") {
+		if len(l) > textWidth && !strings.Contains(l, env.dir) && !strings.HasPrefix(strings.TrimLeft(l, " "), "pins:") {
+			t.Errorf("a line wider than %d: %q", textWidth, l)
+		}
 	}
 }
