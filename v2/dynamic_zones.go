@@ -561,19 +561,26 @@ type DynamicConfigFile struct {
 	readAfterWrites uint64
 }
 
-// repersistDynamicConfig writes cf, the dynamic config as read and
-// normalized at load, back in canonical form, unless the file was written
-// since it was read. The API serves while the zones load, so a zone add,
-// delete or setowner can write the file in between; writing cf would put
-// back what that write replaced. A write from the live zones is already in
-// canonical form, so skipping loses nothing. It reports whether it wrote.
+// repersistDynamicConfig writes cf, the dynamic config as the load read it
+// (normalized, the legacy keys: block migrated out), back in canonical
+// form, unless the file was written by anyone else since it was read. The
+// API serves while the zones load, so a zone add, delete or setowner can
+// write the file in between; writing cf would put back what that write
+// replaced. A write from the live zones is canonical and has no keys:
+// block, so skipping loses nothing. A write it makes itself moves cf's
+// mark on, so the load's next rewrite of cf (normalization after the
+// migration) still goes ahead. It reports whether it wrote.
 func (conf *Config) repersistDynamicConfig(cf *DynamicConfigFile) (bool, error) {
 	dynamicConfigMutex.Lock()
 	defer dynamicConfigMutex.Unlock()
 	if dynamicConfigWrites != cf.readAfterWrites {
 		return false, nil
 	}
-	return true, conf.writeDynamicConfigFileLocked(cf.Zones)
+	if err := conf.writeDynamicConfigFileLocked(cf.Zones); err != nil {
+		return true, err
+	}
+	cf.readAfterWrites = dynamicConfigWrites
+	return true, nil
 }
 
 var (
