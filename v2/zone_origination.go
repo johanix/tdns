@@ -84,15 +84,6 @@ func agentZoneMayOriginateContent(zd *ZoneData) bool {
 	return false
 }
 
-// childUpdatesLeaveTheZone reports whether opt, on this zone, only receives
-// child updates that are written somewhere else. A childsync-proxy implies
-// childsync and carries allow-child-updates to receive on every scheme, but it
-// publishes nothing into its own copy of the zone (SetupZoneSync), and what it
-// accepts goes to the parent primary through its delegation backend, which
-// config validation keeps off the served zone (store direct is refused for a
-// proxy). The proxy flag wins over both options, or the zone would count as
-// originating: each transfer would advance the served serial and a restart
-// would lift it.
 // markRelayCopyIfOriginationEnded marks a running tdns-agent zone's copy
 // unconfirmed when an options change (a config reload, or a zone type change)
 // ends its origination. The copy then holds content and a serial the zone
@@ -110,6 +101,15 @@ func (zd *ZoneData) markRelayCopyIfOriginationEnded(wasOriginating bool) {
 	}
 }
 
+// childUpdatesLeaveTheZone reports whether opt, on this zone, only receives
+// child updates that are written somewhere else. A childsync-proxy implies
+// childsync and carries allow-child-updates to receive on every scheme, but it
+// publishes nothing into its own copy of the zone (SetupZoneSync), and what it
+// accepts goes to the parent primary through its delegation backend, which
+// config validation keeps off the served zone (store direct is refused for a
+// proxy). The proxy flag wins over both options, or the zone would count as
+// originating: each transfer would advance the served serial and a restart
+// would lift it.
 func childUpdatesLeaveTheZone(zd *ZoneData, opt ZoneOption) bool {
 	return zd.Options[OptChildSyncProxy] && (opt == OptChildSync || opt == OptAllowChildUpdates)
 }
