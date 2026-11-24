@@ -181,6 +181,7 @@ const (
 	ErrSubImrPriming               = imrcore.ErrSubImrPriming
 	ErrSubPort                     = imrcore.ErrSubPort
 	ImrOptAllowLoopbackNameservers = imrcore.OptAllowLoopbackNameservers
+	ImrOptQnameMinimisation        = imrcore.OptQnameMinimisation
 	ImrOptAlwaysQueryForTransport  = imrcore.OptAlwaysQueryForTransport
 	ImrOptQueryForTransport        = imrcore.OptQueryForTransport
 	ImrOptQueryForTransportTLSA    = imrcore.OptQueryForTransportTLSA

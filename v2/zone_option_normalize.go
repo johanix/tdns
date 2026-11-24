@@ -75,6 +75,65 @@ var originationOptions = []ZoneOption{
 	// the usual reason -- it re-signs what it receives and therefore already
 	// originates, and any ZONEMD from upstream is invalid for what it serves.
 	OptPublishZonemd,
+	// on-conflict-zonefile-wins says who wins when a replaced zone file contests
+	// the delta journal, and the journal holds the changes THIS server made. A
+	// secondary that may not originate content makes none, so the choice has
+	// nothing to decide there. Naming it is a config mistake worth a warning.
+	//
+	// on-conflict-db-wins is NOT here, on purpose: it is the default the parser
+	// materialises (activateUpdatePolicy), and a dynamic zone persists the
+	// as-configured set, so a config file written before this rule carries it for
+	// secondaries as though the operator had written it. Suppressing it here would
+	// warn about an option nobody wrote on every reload, and asConfiguredOptions
+	// would write it straight back. activateUpdatePolicy drops it quietly instead.
+	OptOnConflictZonefileWins,
+}
+
+// optionsMayOriginate is the origination rule on loose values: a zone may
+// originate content when it is a primary, or an inline-signing secondary, or
+// when the app is not one the rule applies to.
+//
+// It is the one place the rule is spelled out for code that runs during config
+// parsing, before a ZoneData necessarily exists: normalizeOptionsForRole and
+// activateUpdatePolicy both ask it, so the options a secondary is stripped of
+// and the options it is never given cannot drift apart. It mirrors
+// zoneMayOriginateContent, for tdns-auth alone, deliberately: see
+// RegisterOriginationRuleAppType.
+func optionsMayOriginate(appType AppType, ztype ZoneType, opts map[ZoneOption]bool) bool {
+	return appType != AppTypeAuth || ztype == Primary || opts[OptInlineSigning]
+}
+
+// optionsChangeTheZone says whether the zone can have changes of its own, which
+// is what the conflict policy exists to arbitrate: a contest between the zone
+// file and the journal of THIS server's changes. It is the question
+// activateUpdatePolicy asks, and it is NOT optionsMayOriginate, for one reason:
+// the origination rule is tdns-auth's, but a plain mirror is not.
+//
+//   - tdns-auth: the origination rule, as optionsMayOriginate has it.
+//   - tdns-agent: every zone MAY originate content there (zoneMayOriginateContent
+//     is true for it, by design), so what a secondary does is the options it has.
+//     It changes its copy when it is multi-provider or carries an origination
+//     option (allow-updates, childsync, parentsync, ...). One without any is a
+//     mirror, and so is a proxy: parentsync-proxy and childsync-proxy publish
+//     nothing into the agent's own copy, they act towards the parent. An
+//     explicit on-conflict-zonefile-wins counts too, because it is the operator
+//     asking for a policy and tdns-agent has no normalizer to strip it.
+//   - every other app: true. A derived app may mutate a zone while holding the
+//     Secondary role (tdns-mpcombiner does, as its whole job), and the options say
+//     nothing about it.
+func optionsChangeTheZone(appType AppType, ztype ZoneType, opts map[ZoneOption]bool) bool {
+	if !optionsMayOriginate(appType, ztype, opts) {
+		return false
+	}
+	if appType != AppTypeAgent || ztype != Secondary || opts[OptMultiProvider] {
+		return true
+	}
+	for _, opt := range originationOptions {
+		if opts[opt] {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeOptionsForRole strips origination settings a zone may not act on,
@@ -100,11 +159,7 @@ var originationOptions = []ZoneOption{
 func normalizeOptionsForRole(appType AppType, ztype ZoneType, opts map[ZoneOption]bool, serialMode string) (
 	effective map[ZoneOption]bool, effectiveSerialMode string, suppressed map[ZoneOption]bool, msg string) {
 
-	// Mirrors zoneMayOriginateContent, but on loose values: this runs during
-	// config parsing, before a ZoneData necessarily exists. For tdns-auth
-	// alone, deliberately: see RegisterOriginationRuleAppType.
-	mayOriginate := appType != AppTypeAuth || ztype == Primary || opts[OptInlineSigning]
-	if mayOriginate {
+	if optionsMayOriginate(appType, ztype, opts) {
 		return opts, serialMode, nil, ""
 	}
 

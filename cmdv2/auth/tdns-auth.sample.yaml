@@ -168,6 +168,9 @@ imrengine:
 apiserver:
    addresses:  [ 127.0.0.1:8989 ]
    apikey:     winter-is-coming-santa-stuck-in-chimney
+   # The API's TLS pair. Leave both out to get certs/tdns-auth-api.crt and
+   # .key next to this file, which the daemon writes (self-signed) at its
+   # first start; clients verify it by pin (tdns-ncli config add writes it).
    certfile:   /etc/tdns/certs/servers/localhost..crt
    keyfile:    /etc/tdns/certs/servers/localhost..key
    # Local admin socket: the management API without TLS or a key, for root

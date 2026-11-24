@@ -14,4 +14,5 @@ const (
 	OptQueryForTransportTLSA
 	OptUseTransportSignals
 	OptAllowLoopbackNameservers
+	OptQnameMinimisation
 )
