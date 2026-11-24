@@ -84,6 +84,36 @@ func TestEnsureClientCert(t *testing.T) {
 	}
 }
 
+// The pin is of the certificate as read once, and the key is checked
+// against those bytes, not against the file read again: when the pair is
+// replaced in between (B where A was), A's certificate is not taken for a
+// usable pair with B's key.
+func TestClientPairPinChecksTheBytesItPins(t *testing.T) {
+	dir := t.TempDir()
+	certA, keyA := filepath.Join(dir, "a.crt"), filepath.Join(dir, "a.key")
+	certB, keyB := filepath.Join(dir, "b.crt"), filepath.Join(dir, "b.key")
+	pinA, _, err := ensureClientCert(certA, keyA, "anna")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ensureClientCert(certB, keyB, "bert"); err != nil {
+		t.Fatal(err)
+	}
+	dataA, err := os.ReadFile(certA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Read: A. On disk by now: B.
+	pin, err := clientPairPin(certB, keyB, dataA)
+	var pe *clientPairError
+	if !errors.As(err, &pe) || pe.problem != pairNoMatch {
+		t.Errorf("A's certificate, B's files: pin %q, err %v; want it refused, not a usable pair", pin, err)
+	}
+	if pin, err := clientPairPin(certA, keyA, dataA); err != nil || pin != pinA {
+		t.Errorf("the pair as read: pin %q, err %v; want %q", pin, err, pinA)
+	}
+}
+
 // createNewFile never replaces a file: the second of two client inits fails
 // instead of overwriting the first one's key.
 func TestCreateNewFileIsExclusive(t *testing.T) {

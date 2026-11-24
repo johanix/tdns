@@ -240,8 +240,14 @@ func clientPairPin(certPath, keyPath string, data []byte) (string, error) {
 	}
 	// The pair, not the certificate alone: a pin for a certificate whose key
 	// is gone or another one would enrol a client that can never connect.
-	// Touch neither file.
-	if _, kerr := tls.LoadX509KeyPair(certPath, keyPath); kerr != nil {
+	// The key is checked against data, the bytes the pin is of: the file,
+	// read again, may hold another certificate by then (a pair replaced
+	// meanwhile), whose key would pass for this one's. Touch neither file.
+	key, kerr := os.ReadFile(keyPath)
+	if kerr == nil {
+		_, kerr = tls.X509KeyPair(data, key)
+	}
+	if kerr != nil {
 		return "", &clientPairError{problem: pairNoMatch, err: fmt.Errorf("%s exists, but it and %s are not a usable pair (%v); not touching either: fix the key, or remove both and run client init again",
 			certPath, keyPath, kerr)}
 	}
