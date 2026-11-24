@@ -867,8 +867,15 @@ func formatZoneListDynamic(zones map[string]tdns.ZoneConf) string {
 	b.WriteString(table[0] + "\n")
 	for i := range names {
 		b.WriteString(table[i+1] + "\n")
+		// A detail (a zone's error, say) wraps within 72 characters; its
+		// continuation lines are indented two more.
 		for _, d := range details[i] {
-			b.WriteString("    " + d + "\n")
+			for j, l := range wrapText(d, 72-4-2) {
+				if j > 0 {
+					l = "  " + l
+				}
+				b.WriteString("    " + l + "\n")
+			}
 		}
 	}
 	return b.String()
