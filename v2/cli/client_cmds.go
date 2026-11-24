@@ -20,12 +20,16 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math/big"
+	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -53,8 +57,12 @@ func DefaultClientCertPaths() (cert, key string) {
 	return filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
 }
 
+// defaultClientCertPaths is DefaultClientCertPaths, as a variable so the tests
+// keep the operator's real pair (in the home directory) out of their way.
+var defaultClientCertPaths = DefaultClientCertPaths
+
 func clientCertPaths(cc CliClientConf) (string, string) {
-	cert, key := DefaultClientCertPaths()
+	cert, key := defaultClientCertPaths()
 	if cc.Cert != "" {
 		cert = cc.Cert
 	}
@@ -161,22 +169,18 @@ func defaultClientName() string {
 // ensureClientCert creates the key pair if the certificate does not exist and
 // returns its pin. It never overwrites.
 func ensureClientCert(certPath, keyPath, cn string) (pin string, created bool, err error) {
-	if data, err := os.ReadFile(certPath); err == nil {
-		p, perr := pemCertPin(data)
-		if perr != nil {
-			return "", false, fmt.Errorf("%s exists but %v", certPath, perr)
-		}
-		// The pair, not the certificate alone: a pin for a certificate
-		// whose key is gone or another one would enrol a client that can
-		// never connect. Touch neither file.
-		if _, kerr := tls.LoadX509KeyPair(certPath, keyPath); kerr != nil {
-			return "", false, fmt.Errorf("%s exists, but it and %s are not a usable pair (%v); not touching either: fix the key, or remove both and run client init again",
-				certPath, keyPath, kerr)
-		}
-		return p, false, nil
+	data, err := os.ReadFile(certPath)
+	switch {
+	case err == nil:
+		p, err := clientPairPin(certPath, keyPath, data)
+		return p, false, err
+	case !errors.Is(err, fs.ErrNotExist):
+		// There, but not readable: not a pair to make (O_EXCL would refuse
+		// it anyway), nor a key without its certificate.
+		return "", false, &clientPairError{problem: pairBadCert, err: err}
 	}
 	if _, err := os.Stat(keyPath); err == nil {
-		return "", false, fmt.Errorf("%s exists without its certificate %s; not overwriting a key", keyPath, certPath)
+		return "", false, clientKeyWithoutCertError(certPath, keyPath)
 	}
 	for _, d := range []string{filepath.Dir(certPath), filepath.Dir(keyPath)} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
@@ -226,6 +230,59 @@ func ensureClientCert(certPath, keyPath, cn string) (pin string, created bool, e
 	}
 	return tdns.SPKISHA256(leaf), true, nil
 }
+
+// clientPairPin is the pin of the client certificate data, read from
+// certPath, whose key is keyPath. It writes nothing: ensureClientCert uses
+// it for a pair that is there, and a dry run of config add, which must not
+// call ensureClientCert (it makes a pair if the certificate went meanwhile).
+func clientPairPin(certPath, keyPath string, data []byte) (string, error) {
+	p, perr := pemCertPin(data)
+	if perr != nil {
+		return "", &clientPairError{problem: pairBadCert, err: fmt.Errorf("%s exists but %v", certPath, perr)}
+	}
+	// The pair, not the certificate alone: a pin for a certificate whose key
+	// is gone or another one would enrol a client that can never connect.
+	// The key is checked against data, the bytes the pin is of: the file,
+	// read again, may hold another certificate by then (a pair replaced
+	// meanwhile), whose key would pass for this one's. Touch neither file.
+	key, kerr := os.ReadFile(keyPath)
+	if kerr == nil {
+		_, kerr = tls.X509KeyPair(data, key)
+	}
+	if kerr != nil {
+		return "", &clientPairError{problem: pairNoMatch, err: fmt.Errorf("%s exists, but it and %s are not a usable pair (%v); not touching either: fix the key, or remove both and run client init again",
+			certPath, keyPath, kerr)}
+	}
+	return p, nil
+}
+
+// clientKeyWithoutCertError is the refusal of a client key at keyPath
+// without its certificate at certPath: ensureClientCert's, and a dry run of
+// config add's in the same words.
+func clientKeyWithoutCertError(certPath, keyPath string) error {
+	return &clientPairError{problem: pairKeyOnly, err: fmt.Errorf("%s exists without its certificate %s; not overwriting a key", keyPath, certPath)}
+}
+
+// clientPairProblem is what is wrong with the operator's client pair when
+// it is there, or partly there, and cannot be used. config add's fix for it
+// depends on which (CertSetup.fixLines): there is no pin to enrol.
+type clientPairProblem int
+
+const (
+	pairOther   clientPairProblem = iota + 1 // something else: the error says
+	pairKeyOnly                              // the key, without its certificate
+	pairNoMatch                              // the certificate, without a key that goes with it
+	pairBadCert                              // the certificate, unreadable or not one
+)
+
+// clientPairError is a client pair that cannot be used, and why (problem).
+type clientPairError struct {
+	problem clientPairProblem
+	err     error
+}
+
+func (e *clientPairError) Error() string { return e.err.Error() }
+func (e *clientPairError) Unwrap() error { return e.err }
 
 // createNewFile writes data to path, which must not exist yet. A write that
 // fails removes the file it created, and nothing else.
@@ -297,12 +354,24 @@ func resolveAccessTarget(role string) (*accessTarget, error) {
 		return nil, fmt.Errorf("%s's entry %s (%s) has no config-file:, so nothing says it is the daemon of %s; the client commands edit a daemon's own files, and an address does not tell which daemon answers on it. Add \"config-file: %s\" to that entry by hand (config add does not add it to an entry it already knows)",
 			role, ad.Name, ad.BaseURL, cfg, cfg)
 	}
+	return accessTargetOf(info), nil
+}
+
+// accessTargetOf is the access file of the daemon whose API info describes:
+// the one its config names, or the path suggested for it when none is named.
+func accessTargetOf(info *DaemonApi) *accessTarget {
 	t := &accessTarget{DaemonConfig: info.ConfigFile, File: info.AccessFile, Configured: info.AccessFile != "", HasSocket: info.Socket != "", Socket: info.Socket}
 	if !t.Configured {
-		base := strings.TrimSuffix(filepath.Base(info.ConfigFile), filepath.Ext(info.ConfigFile))
-		t.File = filepath.Join(filepath.Dir(info.ConfigFile), base+"-access.yaml")
+		t.File = suggestedAccessFile(info.ConfigFile)
 	}
-	return t, nil
+	return t
+}
+
+// suggestedAccessFile is where a daemon's access file goes when its config
+// names none: next to the config, tdns-auth.yaml -> tdns-auth-access.yaml.
+func suggestedAccessFile(daemonConfig string) string {
+	base := strings.TrimSuffix(filepath.Base(daemonConfig), filepath.Ext(daemonConfig))
+	return filepath.Join(filepath.Dir(daemonConfig), base+"-access.yaml")
 }
 
 // entryIsDaemonSocket says whether entry e is the local socket of the daemon
@@ -346,19 +415,9 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 		}
 		defer unlock()
 	}
-	af := &tdns.AccessFile{}
-	old, rerr := os.ReadFile(t.File)
-	switch {
-	case rerr == nil:
-		if af, err = tdns.ParseAccessFile(old); err != nil {
-			return fmt.Errorf("%s does not parse (%v); fix it by hand first", t.File, err)
-		}
-	case os.IsNotExist(rerr) && create:
-		old = nil
-	case os.IsNotExist(rerr):
-		return fmt.Errorf("%s does not exist yet; `client add` creates it", t.File)
-	default:
-		return rerr
+	af, old, err := readAccessFile(t, create)
+	if err != nil {
+		return err
 	}
 
 	msg, err := change(af)
@@ -388,17 +447,70 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 	if err := writeAccessFile(t.File, old, out, t.DaemonConfig); err != nil {
 		return err
 	}
-	fmt.Println(msg)
 
 	if !t.Configured {
+		fmt.Println(msg)
 		fmt.Print(notConfiguredAdvice(role, t))
 		return nil
 	}
 	if o.NoReload {
+		fmt.Println(msg)
 		fmt.Printf("Not reloaded (--no-reload): the daemon still runs the previous file.\n")
 		return nil
 	}
-	return reloadForAccess(role, t)
+	// The change is said once the reload has put it in force. A reload
+	// that fails, or does not answer, is the verdict instead: the file
+	// written, not reloaded.
+	reply, err := reloadAccess(role, t)
+	if err != nil {
+		return fmt.Errorf("%s %w", t.File, err)
+	}
+	fmt.Println(msg)
+	fmt.Printf("Reloaded: %s\n", reply)
+	return nil
+}
+
+// readAccessFile reads and parses t's access file, returning its bytes as
+// well (nil when it does not exist). A missing file is an empty one when
+// create is set, and an error otherwise. One that does not parse is an
+// *accessParseError.
+func readAccessFile(t *accessTarget, create bool) (*tdns.AccessFile, []byte, error) {
+	old, err := os.ReadFile(t.File)
+	switch {
+	case err == nil:
+		af, perr := tdns.ParseAccessFile(old)
+		if perr != nil {
+			return nil, nil, &accessParseError{file: t.File, err: perr}
+		}
+		return af, old, nil
+	case os.IsNotExist(err) && create:
+		return &tdns.AccessFile{}, nil, nil
+	case os.IsNotExist(err):
+		return nil, nil, fmt.Errorf("%s does not exist yet; `client add` creates it", t.File)
+	}
+	return nil, nil, err
+}
+
+// accessParseError is an access file that does not parse (err): the daemon
+// would not load it either. (A directory on a system where it reads as
+// bytes, NetBSD, is one.)
+type accessParseError struct {
+	file string
+	err  error
+}
+
+func (e *accessParseError) Error() string {
+	return fmt.Sprintf("%s does not parse (%v); fix it by hand first", e.file, e.err)
+}
+
+// clientByPin is the client af lists with pin, or nil.
+func clientByPin(af *tdns.AccessFile, pin string) *tdns.AccessClient {
+	for i := range af.Clients {
+		if af.Clients[i].Pin == pin {
+			return &af.Clients[i]
+		}
+	}
+	return nil
 }
 
 // notConfiguredAdvice is what to do when the daemon config does not name the
@@ -417,22 +529,31 @@ func notConfiguredAdvice(role string, t *accessTarget) string {
 	return b.String()
 }
 
-// reloadForAccess asks role's daemon to reload its config, and with it the
-// access file. A refused reload changes nothing in the daemon. The daemon
+// reloadAccess asks role's daemon to reload its config, and with it the
+// access file, and returns the daemon's reply when the reload put the access
+// file in force. A refused reload changes nothing in the daemon. The daemon
 // that took the reload must be t's: it was checked before the write
 // (verifyRunningDaemon), but over the entry when the socket was not there,
 // and the reload goes to the socket first, so another daemon could answer
 // it. Its reply says which config it runs; any other is a reload the
 // operator's daemon did not get.
-func reloadForAccess(role string, t *accessTarget) error {
+func reloadAccess(role string, t *accessTarget) (string, error) {
+	return reloadAccessNamed(role, t, true)
+}
+
+// reloadAccessNamed is reloadAccess for a daemon config that names an access
+// file (named), whose reload must put it in force, or names none (a
+// rollback took its access-file: line out), whose reload must drop the
+// policy: the daemon's "no longer configured" is then the reload done.
+func reloadAccessNamed(role string, t *accessTarget, named bool) (string, error) {
 	resp, err := configToDaemon(role, t.Socket, t.DaemonConfig, tdns.ConfigPost{Command: "reload"})
 	if err != nil {
-		return fmt.Errorf("written, but the reload failed: %v", err)
+		return "", fmt.Errorf("written, but the reload failed: %w", err)
 	}
 	if err := runsConfig(resp, t); err != nil {
-		return fmt.Errorf("written, but %v: the daemon of %s did NOT apply it; reload it over its own socket or entry", err, t.DaemonConfig)
+		return "", fmt.Errorf("written, but %v: the daemon of %s did NOT apply it; reload it over its own socket or entry", err, t.DaemonConfig)
 	}
-	return accessReloadVerdict(resp)
+	return accessReloadMsg(resp, named)
 }
 
 // configToDaemon sends post to role's daemon over its local socket first, when
@@ -447,11 +568,13 @@ func reloadForAccess(role string, t *accessTarget) error {
 func configToDaemon(role, socket, daemonConfig string, post tdns.ConfigPost) (tdns.ConfigResponse, error) {
 	if socket != "" {
 		c := tdns.NewClientWithOptions(role, "unix://"+socket, tdns.ClientOptions{AuthMethod: "none", ExpectConfigFile: daemonConfig})
-		resp, err := SendConfigCommand(c, post)
-		if err == nil {
+		resp, err := sendBounded(c, post)
+		switch {
+		case err == nil:
 			return resp, nil
-		}
-		if !socketUnusable(err) {
+		case daemonTimedOut(err):
+			return resp, err // it names the socket
+		case !socketUnusable(err):
 			return resp, fmt.Errorf("over the local socket %s: %w", socket, err)
 		}
 	}
@@ -459,7 +582,163 @@ func configToDaemon(role, socket, daemonConfig string, post tdns.ConfigPost) (td
 	if err != nil {
 		return tdns.ConfigResponse{}, err
 	}
-	return SendConfigCommand(api, post)
+	// The entry's daemon may be another one: it must refuse the request
+	// before acting on it (a reload, say) unless it runs daemonConfig.
+	if daemonConfig != "" {
+		api = expectingConfig(api, daemonConfig)
+	}
+	return sendBounded(api, post)
+}
+
+// How long config add and the client commands wait for a daemon to answer
+// one request, on its local admin socket or over the role's entry. Bounded
+// per request (sendBounded), not by a timeout on the client: other commands
+// over the same socket (signing a zone, a big reload) may rightly take
+// longer.
+const (
+	// daemonAskTimeout bounds asking the daemon which config it runs and
+	// what policy (status): any request but a reload.
+	daemonAskTimeout = 10 * time.Second
+	// daemonReloadTimeout bounds a reload, which reads the whole config.
+	daemonReloadTimeout = 30 * time.Second
+)
+
+// daemonAskLimit and daemonReloadLimit are the bounds in force: the
+// constants, which tests shorten.
+var (
+	daemonAskLimit    = daemonAskTimeout
+	daemonReloadLimit = daemonReloadTimeout
+)
+
+// daemonWedgedFix is what to do about a daemon that did not answer in time
+// (daemonTimeoutError), before saying what to run then.
+const daemonWedgedFix = "check whether the daemon is wedged (its log), or restart it"
+
+// sendBounded is SendConfigCommand for config add and the client commands:
+// the request is given daemonReloadLimit for a reload and daemonAskLimit for
+// anything else. A daemon that does not answer within it is a
+// *daemonTimeoutError, which callers treat as a failed request: a failed
+// reload, for a reload.
+func sendBounded(api *tdns.ApiClient, post tdns.ConfigPost) (tdns.ConfigResponse, error) {
+	limit := daemonAskLimit
+	if post.Command == "reload" {
+		limit = daemonReloadLimit
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	// Whether the connection was made: a daemon that accepts and then says
+	// nothing is told apart from one that does not accept.
+	var connected atomic.Bool
+	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		ConnectDone: func(_, _ string, err error) {
+			if err == nil {
+				connected.Store(true)
+			}
+		},
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	})
+	resp, err := SendConfigCommandContext(ctx, api, post)
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return resp, &daemonTimeoutError{where: daemonWhere(api), command: post.Command, limit: limit, connected: connected.Load()}
+	}
+	return resp, err
+}
+
+// daemonTimeoutError is a daemon that did not answer a request (command)
+// within limit: it accepted the connection and said nothing (connected), or
+// did not accept it.
+type daemonTimeoutError struct {
+	where     string // "the daemon on <socket>", "the daemon at <host:port>"
+	command   string
+	limit     time.Duration
+	connected bool
+}
+
+func (e *daemonTimeoutError) Error() string {
+	if e.connected {
+		return fmt.Sprintf("%s accepted but did not answer within %v", e.where, e.limit)
+	}
+	return fmt.Sprintf("%s did not accept a connection within %v", e.where, e.limit)
+}
+
+// daemonTimedOut says whether err is, or wraps, a daemonTimeoutError.
+func daemonTimedOut(err error) bool {
+	var te *daemonTimeoutError
+	return errors.As(err, &te)
+}
+
+// daemonWhere is where api reaches its daemon, as a timeout names it.
+func daemonWhere(api *tdns.ApiClient) string {
+	if api.Socket != "" {
+		return "the daemon on " + api.Socket
+	}
+	if u, err := url.Parse(api.BaseUrl); err == nil && u.Host != "" {
+		return "the daemon at " + u.Host
+	}
+	return "the daemon at " + api.BaseUrl
+}
+
+// editTimeoutRefusal is err, from a client command's edit, as a refusal with
+// a fix when a daemon did not answer it in time; false for any other error.
+// The fix depends on the request: the check of whose daemon answers comes
+// before the write, so the command can just be run again; the reload comes
+// after it, and a restart reads the file written.
+func editTimeoutRefusal(err error) (addRefusal, bool) {
+	var te *daemonTimeoutError
+	if !errors.As(err, &te) {
+		return addRefusal{}, false
+	}
+	fix := []string{daemonWedgedFix + ";", "then run the command again."}
+	if te.command == "reload" {
+		fix = []string{daemonWedgedFix, "(a restart reads the file written); then run client list", "to see the policy it runs."}
+	}
+	return addRefusal{why: err.Error(), fix: fix}, true
+}
+
+// dieEdit ends a client command on err from its edit: a daemon that did not
+// answer in time as a refusal with its fix (editTimeoutRefusal), anything
+// else as an error.
+func dieEdit(err error) {
+	if r, ok := editTimeoutRefusal(err); ok {
+		printRefusal(os.Stderr, r)
+		os.Exit(1)
+	}
+	fatalf("%v", err)
+}
+
+// expectingConfig is a copy of api whose every request names cfg as the
+// config the daemon must run (tdns.ExpectConfigFileHeader), as a socket
+// client made with ExpectConfigFile does. A daemon that runs another refuses
+// the request (412) before acting on it. api itself is not changed: it is
+// the client every other command of the role uses.
+func expectingConfig(api *tdns.ApiClient, cfg string) *tdns.ApiClient {
+	if abs, err := filepath.Abs(cfg); err == nil {
+		cfg = abs
+	}
+	c := *api
+	hc := http.Client{}
+	if api.Client != nil {
+		hc = *api.Client
+	}
+	base := hc.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	hc.Transport = headerTransport{base: base, key: tdns.ExpectConfigFileHeader, value: cfg}
+	c.Client = &hc
+	return &c
+}
+
+// headerTransport sets one header on every request.
+type headerTransport struct {
+	base       http.RoundTripper
+	key, value string
+}
+
+func (t headerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set(t.key, t.value)
+	return t.base.RoundTrip(r)
 }
 
 // verifyRunningDaemon checks that the daemon on t's socket, and the one the
@@ -472,13 +751,8 @@ func configToDaemon(role, socket, daemonConfig string, post tdns.ConfigPost) (td
 func verifyRunningDaemon(role string, t *accessTarget) error {
 	post := tdns.ConfigPost{Command: "status"}
 	if t.Socket != "" {
-		resp, err := SendConfigCommand(tdns.NewClient(role, "unix://"+t.Socket, "", "none", ""), post)
-		switch {
-		case err == nil:
-			return editRunsConfig(resp, t)
-		case !nothingListening(err):
-			return fmt.Errorf("cannot ask the daemon on %s which config it runs (%v), so it is not known whose file this is; not editing %s (run as root, or as the daemon's user)",
-				t.Socket, err, t.File)
+		if running, err := socketDaemon(role, t); err != nil || running {
+			return err
 		}
 	}
 	// Nothing on the socket. A daemon may still run without it (it refuses
@@ -494,15 +768,37 @@ func verifyRunningDaemon(role string, t *accessTarget) error {
 		return fmt.Errorf("cannot ask the daemon of %s's entry which config it runs (%v), so it is not known whose file this is; not editing %s",
 			role, err, t.File)
 	}
-	resp, err := SendConfigCommand(api, post)
+	resp, err := sendBounded(api, post)
 	switch {
 	case err == nil:
 		return editRunsConfig(resp, t)
 	case nothingListening(err):
 		return nil
+	case daemonTimedOut(err):
+		return fmt.Errorf("%w, so it is not known whose file this is; not editing %s", err, t.File)
 	}
 	return fmt.Errorf("cannot ask the daemon at %s which config it runs (%v), so it is not known whose file this is; not editing %s",
 		api.BaseUrl, err, t.File)
+}
+
+// socketDaemon asks the daemon on t's local admin socket which config it runs.
+// running: it answered, and runs t's config. Not running and no error:
+// nothing listens there (no socket file, or a refused connection). Anything
+// else is an error: a daemon that runs another config or does not say which,
+// and a socket that is there but cannot be asked (not ours to open), as that
+// daemon is not identified.
+func socketDaemon(role string, t *accessTarget) (running bool, err error) {
+	resp, err := sendBounded(tdns.NewClient(role, "unix://"+t.Socket, "", "none", ""), tdns.ConfigPost{Command: "status"})
+	switch {
+	case err == nil:
+		return true, editRunsConfig(resp, t)
+	case nothingListening(err):
+		return false, nil
+	case daemonTimedOut(err):
+		return false, fmt.Errorf("%w, so it is not known whose file this is; not editing %s", err, t.File)
+	}
+	return false, fmt.Errorf("cannot ask the daemon on %s which config it runs (%v), so it is not known whose file this is; not editing %s (run as root, or as the daemon's user)",
+		t.Socket, err, t.File)
 }
 
 // nothingListening says whether err means nobody is there: no socket file,
@@ -519,14 +815,24 @@ func nothingListening(err error) bool {
 // It says only what was found; an edit adds that it is not editing
 // (editRunsConfig), a read-only list does not.
 func runsConfig(resp tdns.ConfigResponse, t *accessTarget) error {
-	if resp.ConfigFile == "" {
-		return fmt.Errorf("the daemon that answers does not say which config it runs")
-	}
-	if resolvedPath(resp.ConfigFile) != resolvedPath(t.DaemonConfig) {
-		return fmt.Errorf("the daemon that answers runs %s, not %s (do two daemons share a socket or an address?)",
-			resp.ConfigFile, t.DaemonConfig)
+	if resp.ConfigFile == "" || resolvedPath(resp.ConfigFile) != resolvedPath(t.DaemonConfig) {
+		return &otherConfigError{runs: resp.ConfigFile, want: t.DaemonConfig}
 	}
 	return nil
+}
+
+// otherConfigError is a daemon that answers for a daemon config, want, it
+// does not run: it runs runs, or does not say which config it runs ("").
+type otherConfigError struct {
+	runs, want string
+}
+
+func (e *otherConfigError) Error() string {
+	if e.runs == "" {
+		return "the daemon that answers does not say which config it runs"
+	}
+	return fmt.Sprintf("the daemon that answers runs %s, not %s (do two daemons share a socket or an address?)",
+		e.runs, e.want)
 }
 
 // editRunsConfig is runsConfig for an edit: a mismatch refuses it.
@@ -549,14 +855,30 @@ func socketUnusable(err error) bool {
 // (it keeps the running policy), so its reply text is the only sign; a
 // `client disable` must not report success while the client keeps its access.
 func accessReloadVerdict(resp tdns.ConfigResponse) error {
+	msg, err := accessReloadMsg(resp, true)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Reloaded: %s\n", msg)
+	return nil
+}
+
+// accessReloadMsg is accessReloadVerdict's judgement, with the daemon's reply
+// returned instead of printed: of a reload that was to put an access file in
+// force (named), or to drop the policy, the daemon config naming none.
+func accessReloadMsg(resp tdns.ConfigResponse, named bool) (string, error) {
 	if resp.Error {
-		return fmt.Errorf("written, but the daemon refused the reload: %s", resp.ErrorMsg)
+		return "", fmt.Errorf("written, but the daemon refused the reload: %s", resp.ErrorMsg)
 	}
 	if strings.Contains(resp.Msg, tdns.AccessFileNotReloaded) {
-		return fmt.Errorf("written, but the daemon did NOT apply it and keeps the previous policy: %s", strings.TrimSpace(resp.Msg))
+		return "", fmt.Errorf("written, but the daemon did NOT apply it and keeps the previous policy: %s", strings.TrimSpace(resp.Msg))
 	}
-	fmt.Printf("Reloaded: %s\n", strings.TrimSpace(resp.Msg))
-	return nil
+	if named && strings.Contains(resp.Msg, tdns.AccessFileNoLongerConfigured) {
+		// Its config names no access file now: the file written is not
+		// one it reads.
+		return "", fmt.Errorf("written, but the daemon did NOT apply it, as it reads no access file now: %s", strings.TrimSpace(resp.Msg))
+	}
+	return strings.TrimSpace(resp.Msg), nil
 }
 
 // renderAccessFile writes the file as tdns-ncli owns it: a header, keyauth
@@ -584,10 +906,11 @@ func renderAccessFile(af *tdns.AccessFile, daemonConfig string) ([]byte, error) 
 
 // writeAccessFile replaces path atomically (following a symlink, keeping the
 // file's mode, owner and group), after saving the previous content as
-// path.prev. A new file takes the daemon config's mode, owner and group, so
-// the daemon can read it as it reads that. Atomic for a new file too: the
-// daemon reads this file at start and at every reload, and a truncated one
-// parses (keyauth on, no clients).
+// path.prev. A new file is mode 0600, the daemon's access policy being for
+// root and the daemon alone, with the daemon config's owner and group, so a
+// daemon that runs as the config's owner reads it. Atomic for a new file
+// too: the daemon reads this file at start and at every reload, and a
+// truncated one parses (keyauth on, no clients).
 func writeAccessFile(path string, old, data []byte, daemonConfig string) error {
 	if old != nil {
 		// Atomically, so a failed write leaves the previous .prev, the
@@ -598,11 +921,24 @@ func writeAccessFile(path string, old, data []byte, daemonConfig string) error {
 		}
 		return writeFileAtomicLike(path, data, nil)
 	}
-	var like os.FileInfo
+	var like os.FileInfo = privateFileInfo{}
 	if fi, err := os.Stat(daemonConfig); err == nil {
-		like = fi
+		like = privateFileInfo{fi}
 	}
 	return writeFileAtomicLike(path, data, like)
+}
+
+// privateFileInfo is a FileInfo, its owner and group as they are, its mode
+// 0600. With no FileInfo in it, it gives no owner (fileOwner says so).
+type privateFileInfo struct{ os.FileInfo }
+
+func (p privateFileInfo) Mode() os.FileMode { return 0o600 }
+
+func (p privateFileInfo) Sys() any {
+	if p.FileInfo == nil {
+		return nil
+	}
+	return p.FileInfo.Sys()
 }
 
 func findClient(af *tdns.AccessFile, name string) *tdns.AccessClient {
@@ -666,7 +1002,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 				return fmt.Sprintf("Added %s (%s).", name, roleName), nil
 			})
 			if err != nil {
-				fatalf("%v", err)
+				dieEdit(err)
 			}
 		},
 	}
@@ -690,7 +1026,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 					return fmt.Sprintf("%s: %s.", args[0], map[bool]string{true: "disabled", false: "enabled"}[disabled]), nil
 				})
 				if err != nil {
-					fatalf("%v", err)
+					dieEdit(err)
 				}
 			},
 		}
@@ -710,7 +1046,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 				return fmt.Sprintf("%s is now %s.", args[0], args[1]), nil
 			})
 			if err != nil {
-				fatalf("%v", err)
+				dieEdit(err)
 			}
 		},
 	}
@@ -750,7 +1086,7 @@ depend on it. keyauth on brings the key back.`,
 				return msg, nil
 			})
 			if err != nil {
-				fatalf("%v", err)
+				dieEdit(err)
 			}
 		},
 	}

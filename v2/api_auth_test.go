@@ -478,6 +478,10 @@ func TestStoppedListenerOutlivesTheAccessFile(t *testing.T) {
 		return &cr
 	}
 
+	if cr := status("before the access file"); !slices.Equal(cr.ApiTCPListening, []string{srv.Addr}) || len(cr.ApiTCPStopped) != 0 {
+		t.Errorf("before the access file: status listening %v, stopped %v; want [%s] and none", cr.ApiTCPListening, cr.ApiTCPStopped, srv.Addr)
+	}
+
 	path := filepath.Join(t.TempDir(), "access.yaml")
 	if err := os.WriteFile(path, []byte("clients: []\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -488,6 +492,8 @@ func TestStoppedListenerOutlivesTheAccessFile(t *testing.T) {
 	}
 	if cr := status("access file in force"); cr.Access == nil || !slices.Equal(cr.ApiTCPStopped, []string{srv.Addr}) || cr.ApiTCPStoppedBy != path {
 		t.Errorf("access file in force: status access %+v, stopped %v by %q; want a policy and [%s] by %s", cr.Access, cr.ApiTCPStopped, cr.ApiTCPStoppedBy, srv.Addr, path)
+	} else if len(cr.ApiTCPListening) != 0 {
+		t.Errorf("access file in force: status listening %v, want none (it was stopped)", cr.ApiTCPListening)
 	}
 
 	e.conf.ApiServer.AccessFile = ""

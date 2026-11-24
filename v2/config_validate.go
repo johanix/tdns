@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
@@ -33,9 +34,15 @@ func NewCustomValidator() (*CustomValidator, error) {
 // least one entry in Addresses, i.e. when there is a TCP listener. The
 // built-in required_with=Addresses is not that: an explicit `addresses: []`
 // is a non-nil slice, so it would demand a certificate no listener uses.
+//
+// A default API certificate the daemon has not written yet (CertPending) is
+// not missing: the daemon writes it when it starts.
 func requiredWithListener(fl validator.FieldLevel) bool {
 	addrs := fl.Parent().FieldByName("Addresses")
 	if !addrs.IsValid() || addrs.Len() == 0 {
+		return true
+	}
+	if p := fl.Parent().FieldByName("CertPending"); p.IsValid() && p.Kind() == reflect.Bool && p.Bool() {
 		return true
 	}
 	return !fl.Field().IsZero()

@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"context"
+	"crypto/tls"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +15,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -428,7 +435,20 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// daemonYAML is a daemon config with an apiserver: block. It presents
+// testDaemonCert, so config add can pin it, unless extra names a certfile:
+// or keyfile: of its own.
 func daemonYAML(service, addr, key string, extra string) string {
+	if !strings.Contains(extra, "certfile:") && !strings.Contains(extra, "keyfile:") {
+		extra = "   certfile: " + testDaemonCert + "\n" + extra
+	}
+	return daemonYAMLDefaultCert(service, addr, key, extra)
+}
+
+// daemonYAMLDefaultCert is daemonYAML without a certfile: the daemon then
+// serves its default API pair (tdns.ApiCertPaths), written at its first
+// start.
+func daemonYAMLDefaultCert(service, addr, key string, extra string) string {
 	s := ""
 	if service != "" {
 		s += "service:\n   name: " + service + "\n"
@@ -510,16 +530,100 @@ func TestReadDaemonApi(t *testing.T) {
 
 // --------------------------------------------------------------- config add
 
+// addEnv is a directory for daemon configs and a CLI config, with the
+// operator's client pair and the daemons' default admin sockets in places of
+// the test's own: config add sets the certificate up, and must touch neither
+// the real home directory nor /var/run.
 type addEnv struct {
-	dir, cli string
+	t         *testing.T
+	dir, cli  string
+	cert, key string // the operator's pair (made by the first add)
+	sockDir   string // tdns.DefaultApiSocketDir: no socket in it exists
+	ports     map[int]string
 }
+
+// closedAddrs is n loopback addresses, each another, that nothing listens
+// on: ports bound together (127.0.0.1:0) and let go again at once. A test
+// that needs a connection refused uses one rather than a port of its own
+// choosing: a refused connection is how config add tells a daemon that is
+// not running, and the test hosts run daemons on 8989 and up.
+func closedAddrs(t *testing.T, n int) []string {
+	t.Helper()
+	addrs := make([]string, n)
+	for i := range addrs {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		addrs[i] = ln.Addr().String()
+	}
+	return addrs
+}
+
+// closedAddr is one closedAddrs.
+func closedAddr(t *testing.T) string {
+	t.Helper()
+	return closedAddrs(t, 1)[0]
+}
+
+// at is the address that stands in env for the API port p a test names
+// (8989, 8990, ...): a closed one (closedAddr), the same for p throughout
+// the test, and another for each p.
+func (e *addEnv) at(p int) string {
+	if a, ok := e.ports[p]; ok {
+		return a
+	}
+	for {
+		a := closedAddr(e.t)
+		taken := false
+		for _, b := range e.ports {
+			taken = taken || a == b
+		}
+		if !taken {
+			e.ports[p] = a
+			return a
+		}
+	}
+}
+
+// url is the base URL of an entry for the daemon at e.at(p).
+func (e *addEnv) url(p int) string { return "https://" + e.at(p) + "/api/v1" }
 
 func newAddEnv(t *testing.T) *addEnv {
 	t.Helper()
 	withCleanRoleRegistry(t)
 	dir := t.TempDir()
-	return &addEnv{dir: dir, cli: filepath.Join(dir, "tdns-ncli.yaml")}
+	e := &addEnv{t: t, dir: dir, cli: filepath.Join(dir, "tdns-ncli.yaml"), ports: map[int]string{}}
+	e.cert, e.key = filepath.Join(dir, "certs", "client.crt"), filepath.Join(dir, "certs", "client.key")
+	// Short: a socket path has a length limit.
+	sockDir, err := os.MkdirTemp("/tmp", "ncli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.sockDir = sockDir
+	savedPaths, savedDir := defaultClientCertPaths, tdns.DefaultApiSocketDir
+	t.Cleanup(func() {
+		defaultClientCertPaths, tdns.DefaultApiSocketDir = savedPaths, savedDir
+		os.RemoveAll(sockDir)
+	})
+	defaultClientCertPaths = func() (string, string) { return e.cert, e.key }
+	tdns.DefaultApiSocketDir = sockDir
+	return e
 }
+
+// pin is the operator's pin, the pair made if need be.
+func (e *addEnv) pin(t *testing.T) string {
+	t.Helper()
+	pin, _, err := ensureClientCert(e.cert, e.key, "tester")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pin
+}
+
+// accessFile is the access file config add suggests for daemon config d.
+func accessFileOf(d string) string { return suggestedAccessFile(d) }
 
 func (e *addEnv) daemon(t *testing.T, file, service, addr string) string {
 	t.Helper()
@@ -550,8 +654,8 @@ func (e *addEnv) entries(t *testing.T) []ApiDetails {
 // CLI config built from them.
 func TestAddTwoAuthDaemons(t *testing.T) {
 	env := newAddEnv(t)
-	first := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
-	second := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
+	first := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", env.at(8989))
+	second := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", env.at(8990))
 
 	// The CLI config does not exist yet: the first add creates it, 0600 (it
 	// holds API keys), as the canonical tdns-auth.
@@ -578,15 +682,30 @@ func TestAddTwoAuthDaemons(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("%d entries: %+v", len(got), got)
 	}
+	// By certificate, no key: each daemon's access file lists the pin.
 	want := ApiDetails{
-		Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1",
-		ApiKey: "key-tdns-auth2.yaml", AuthMethod: "X-API-Key", ConfigFile: second,
+		Name: "auth2", Role: "auth", BaseURL: env.url(8990),
+		AuthMethod: "certificate", ConfigFile: second,
+		TLSAuth: "pin", Pins: []string{testDaemonPin},
 	}
 	if !reflect.DeepEqual(got[1], want) {
 		t.Errorf("entry = %+v\nwant    %+v", got[1], want)
 	}
 	if got[0].ConfigFile != first {
 		t.Errorf("canonical entry lost its config-file: %+v", got[0])
+	}
+	for _, d := range []string{first, second} {
+		info, err := ReadDaemonApi(d, "")
+		if err != nil {
+			t.Fatalf("%s does not read back: %v", d, err)
+		}
+		if info.AccessFile != accessFileOf(d) {
+			t.Errorf("%s: access-file %q, want %s", d, info.AccessFile, accessFileOf(d))
+		}
+		af, err := tdns.LoadAccessFile(accessFileOf(d))
+		if err != nil || len(af.Clients) != 1 || af.Clients[0].Pin != env.pin(t) || af.Clients[0].Role != "read-write" {
+			t.Errorf("%s: access file %+v (%v), want the pin, read-write", d, af, err)
+		}
 	}
 
 	// Adding either again changes nothing.
@@ -614,7 +733,7 @@ func TestAddTwoAuthDaemons(t *testing.T) {
 func TestAddPreservesTheRestOfTheFile(t *testing.T) {
 	env := newAddEnv(t)
 	writeFile(t, env.cli, sampleCli)
-	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
+	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", env.at(8990))
 	// tdns-auth exists in sampleCli, so this is an instance.
 	if _, err := env.add(t, d, nil); err != nil {
 		t.Fatal(err)
@@ -638,7 +757,7 @@ func TestAddPreservesTheRestOfTheFile(t *testing.T) {
 
 func TestAddNaming(t *testing.T) {
 	env := newAddEnv(t)
-	first := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	first := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", env.at(8989))
 	if _, err := env.add(t, first, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -650,7 +769,7 @@ func TestAddNaming(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := filepath.Join(sub, "tdns-auth.yaml")
-	writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8991", "k", ""))
+	writeFile(t, p, daemonYAML("TDNS-AUTH", env.at(8991), "k", ""))
 	res, err := env.add(t, p, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -670,7 +789,7 @@ func TestAddNaming(t *testing.T) {
 		"9lives":    "must start with a letter",
 	} {
 		q := filepath.Join(env.dir, "q.yaml")
-		writeFile(t, q, daemonYAML("TDNS-AUTH", "127.0.0.1:8999", "k", ""))
+		writeFile(t, q, daemonYAML("TDNS-AUTH", env.at(8999), "k", ""))
 		_, err := env.add(t, q, func(o *AddOptions) {
 			o.Name = name
 			o.CommandWordTaken = func(n string) bool { return n == "config" }
@@ -693,29 +812,29 @@ func TestAddNaming(t *testing.T) {
 
 func TestAddRefusesClashes(t *testing.T) {
 	env := newAddEnv(t)
-	first := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	first := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", env.at(8989))
 	if _, err := env.add(t, first, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	// A different daemon config naming the same API address.
-	clash := env.daemon(t, "tdns-auth9.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	clash := env.daemon(t, "tdns-auth9.yaml", "TDNS-AUTH", env.at(8989))
 	if _, err := env.add(t, clash, nil); err == nil || !strings.Contains(err.Error(), "already uses the API address") {
 		t.Errorf("address clash: err = %v", err)
 	}
 
 	// The same file, but its API address has since moved.
-	writeFile(t, first, daemonYAML("TDNS-AUTH", "127.0.0.1:7777", "k", ""))
+	writeFile(t, first, daemonYAML("TDNS-AUTH", env.at(7777), "k", ""))
 	if _, err := env.add(t, first, nil); err == nil || !strings.Contains(err.Error(), "different API address") {
 		t.Errorf("moved address: err = %v", err)
 	}
 
 	// A second agent: there is no instance tree for it yet.
-	a1 := env.daemon(t, "tdns-agent.yaml", "TDNS-AGENT", "127.0.0.1:8987")
+	a1 := env.daemon(t, "tdns-agent.yaml", "TDNS-AGENT", env.at(8987))
 	if _, err := env.add(t, a1, nil); err != nil {
 		t.Fatal(err)
 	}
-	a2 := env.daemon(t, "tdns-agent2.yaml", "TDNS-AGENT", "127.0.0.1:8986")
+	a2 := env.daemon(t, "tdns-agent2.yaml", "TDNS-AGENT", env.at(8986))
 	_, err := env.add(t, a2, nil)
 	if _, has := knownInstanceRoles["agent"]; !has {
 		if err == nil || !strings.Contains(err.Error(), "no command tree") {
@@ -727,7 +846,7 @@ func TestAddRefusesClashes(t *testing.T) {
 	if _, err := env.add(t, first, func(o *AddOptions) { o.Role = "combiner" }); err == nil {
 		t.Error("--role combiner was accepted")
 	}
-	foo := env.daemon(t, "foo.yaml", "", "127.0.0.1:1")
+	foo := env.daemon(t, "foo.yaml", "", env.at(1))
 	if _, err := env.add(t, foo, nil); err == nil || !strings.Contains(err.Error(), "--role") {
 		t.Errorf("undecidable daemon: err = %v", err)
 	}
@@ -736,7 +855,7 @@ func TestAddRefusesClashes(t *testing.T) {
 func TestAddDryRunChangesNothing(t *testing.T) {
 	env := newAddEnv(t)
 	writeFile(t, env.cli, sampleCli)
-	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
+	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", env.at(8990))
 	res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true })
 	if err != nil || res.Wrote {
 		t.Fatalf("%+v, %v", res, err)
@@ -744,13 +863,29 @@ func TestAddDryRunChangesNothing(t *testing.T) {
 	if b, _ := os.ReadFile(env.cli); string(b) != sampleCli {
 		t.Error("dry run changed the file")
 	}
-	// And what it would print does not carry the key.
-	var sb strings.Builder
-	printAddResult(&sb, res, true, env.cli)
-	if strings.Contains(sb.String(), "key-tdns-auth2.yaml") {
-		t.Errorf("the API key was printed:\n%s", sb.String())
+	// Nor anything on the daemon's side, nor the operator's pair.
+	if b, _ := os.ReadFile(d); string(b) != daemonYAML("TDNS-AUTH", env.at(8990), "key-tdns-auth2.yaml", "") {
+		t.Errorf("dry run changed the daemon config:\n%s", b)
 	}
-	if !strings.Contains(sb.String(), "********") {
+	for _, p := range []string{accessFileOf(d), env.cert, env.key} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("dry run created %s", p)
+		}
+	}
+	// What it would print carries no key, and says what it would do.
+	out := printed(res, true, env.cli)
+	if strings.Contains(out, "key-tdns-auth2.yaml") || strings.Contains(out, "apikey") {
+		t.Errorf("the API key was printed:\n%s", out)
+	}
+	for _, want := range []string{"authmethod:", "certificate", "Would create your client certificate", "Would create " + accessFileOf(d), "Would add under apiserver:", "access-file: " + accessFileOf(d)} {
+		if !strings.Contains(out, want) {
+			t.Errorf("dry run output lacks %q:\n%s", want, out)
+		}
+	}
+	// A masked key, where an entry has one.
+	var sb strings.Builder
+	printAddResult(&sb, &AddResult{Entry: ApiDetails{Name: "x", Role: "auth", ApiKey: "sekret", AuthMethod: "X-API-Key"}}, true, env.cli)
+	if strings.Contains(sb.String(), "sekret") || !strings.Contains(sb.String(), "********") {
 		t.Errorf("expected a masked key:\n%s", sb.String())
 	}
 }
@@ -761,10 +896,10 @@ func TestAddDryRunChangesNothing(t *testing.T) {
 func TestAddUndoesWhenAnOverlayHidesTheEntry(t *testing.T) {
 	env := newAddEnv(t)
 	local := filepath.Join(env.dir, "local.yaml")
-	writeFile(t, local, "apiservers:\n   - name: tdns-auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     apikey: k\n     authmethod: X-API-Key\n")
-	mainCfg := "cli:\n   localconfig: " + local + "\napiservers:\n   - name: tdns-imr\n     baseurl: http://127.0.0.1:8080/api/v1\n     apikey: k\n     authmethod: X-API-Key\n"
+	writeFile(t, local, "apiservers:\n   - name: tdns-auth\n     baseurl: "+env.url(8989)+"\n     apikey: k\n     authmethod: X-API-Key\n")
+	mainCfg := "cli:\n   localconfig: " + local + "\napiservers:\n   - name: tdns-imr\n     baseurl: http://" + env.at(8080) + "/api/v1\n     apikey: k\n     authmethod: X-API-Key\n"
 	writeFile(t, env.cli, mainCfg)
-	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
+	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", env.at(8990))
 
 	// --dry-run sees it coming: it loads the config with the edit in place,
 	// without writing it.
@@ -844,7 +979,7 @@ func TestAddFollowsASymlink(t *testing.T) {
 	if err := os.Symlink(real, env.cli); err != nil {
 		t.Skip("no symlinks here")
 	}
-	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
+	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", env.at(8990))
 	if _, err := env.add(t, d, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -863,7 +998,7 @@ func TestAddRefusesADanglingSymlink(t *testing.T) {
 	if err := os.Symlink(filepath.Join(env.dir, "not-yet.yaml"), env.cli); err != nil {
 		t.Skip("no symlinks here")
 	}
-	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", env.at(8989))
 	for _, dry := range []bool{true, false} {
 		_, err := env.add(t, d, func(o *AddOptions) { o.DryRun = dry })
 		if err == nil || !strings.Contains(err.Error(), "symbolic link") {
@@ -879,13 +1014,13 @@ func TestAddRefusesADanglingSymlink(t *testing.T) {
 // turned off on the same port. "Already known" would leave a dead entry.
 func TestAddSaysWhenTheDaemonChanged(t *testing.T) {
 	env := newAddEnv(t)
-	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
-	if _, err := env.add(t, d, nil); err != nil {
-		t.Fatal(err)
-	}
+	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", env.at(8989))
+	// An entry that uses the key (a certificate entry sends none, so a new
+	// key on the daemon is nothing to it).
+	writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: "+env.url(8989)+"\n     apikey: key-tdns-auth.yaml\n     authmethod: X-API-Key\n     config-file: "+d+"\n")
 	before, _ := os.ReadFile(env.cli)
 
-	writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "rotated-key", ""))
+	writeFile(t, d, daemonYAML("TDNS-AUTH", env.at(8989), "rotated-key", ""))
 	_, err := env.add(t, d, nil)
 	if err == nil || !strings.Contains(err.Error(), "apikey") || !strings.Contains(err.Error(), "by hand") {
 		t.Errorf("rotated key: err = %v", err)
@@ -894,7 +1029,7 @@ func TestAddSaysWhenTheDaemonChanged(t *testing.T) {
 		t.Errorf("a key is in the error text: %v", err)
 	}
 
-	writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "key-tdns-auth.yaml", "   usetls: false\n"))
+	writeFile(t, d, daemonYAML("TDNS-AUTH", env.at(8989), "key-tdns-auth.yaml", "   usetls: false\n"))
 	_, err = env.add(t, d, nil)
 	if err == nil || !strings.Contains(err.Error(), "scheme") || strings.Contains(err.Error(), "apikey") {
 		t.Errorf("usetls off: err = %v", err)
@@ -903,12 +1038,24 @@ func TestAddSaysWhenTheDaemonChanged(t *testing.T) {
 	if after, _ := os.ReadFile(env.cli); string(after) != string(before) {
 		t.Errorf("the refused adds changed the file:\n%s", after)
 	}
+
+	// A certificate entry sends no key: the daemon's new key is nothing to it.
+	env2 := newAddEnv(t)
+	d2 := env2.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", env2.at(8989))
+	if _, err := env2.add(t, d2, nil); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := os.ReadFile(d2) // now with its access-file: line
+	writeFile(t, d2, strings.Replace(string(cfg), "apikey: key-tdns-auth.yaml", "apikey: rotated-key", 1))
+	if res, err := env2.add(t, d2, nil); err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote {
+		t.Errorf("certificate entry, rotated key: %+v, %v; want it already known, unchanged", res, err)
+	}
 }
 
 func TestAddFlowStyleTellsYouWhatToAdd(t *testing.T) {
 	env := newAddEnv(t)
 	writeFile(t, env.cli, "apiservers: []\n")
-	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
+	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", env.at(8990))
 	_, err := env.add(t, d, nil)
 	if err == nil || !strings.Contains(err.Error(), "by hand") || !strings.Contains(err.Error(), "- name:") {
 		t.Fatalf("err = %v", err)
@@ -1076,9 +1223,10 @@ func TestCheckEntriesPingsEachAPI(t *testing.T) {
 	notPEM := filepath.Join(caDir, "not.pem")
 	writeFile(t, notPEM, "not a certificate\n")
 
+	down := "https://" + closedAddr(t) + "/api/v1" // nothing listens there
 	entries := []ApiDetails{
 		{Name: "up", BaseURL: srv.URL + "/api/v1", ApiKey: "sekret", AuthMethod: "X-API-Key"},
-		{Name: "down", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key"},
+		{Name: "down", BaseURL: down, ApiKey: "k", AuthMethod: "X-API-Key"},
 		{Name: "badca", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "/nonexistent/ca.pem"},
 		{Name: "tlsa", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "tlsa"},
 		{Name: "cadir", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: caDir},
@@ -1123,7 +1271,7 @@ func TestCheckEntriesPingsEachAPI(t *testing.T) {
 	RequireServerVerification = true
 	warned := CheckEntries([]ApiDetails{
 		{Name: "insecure", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"},
-		{Name: "insecuredown", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"},
+		{Name: "insecuredown", BaseURL: down, ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"},
 	}, CliClientConf{}, 5*time.Second)
 	if !strings.HasPrefix(warned[0], "ok") || !strings.Contains(warned[0], "warning:") || !strings.Contains(warned[0], "not verified") {
 		t.Errorf("insecure entry that answers: %q, want ok with the warning", warned[0])
@@ -1175,15 +1323,16 @@ func TestIsCliConfigCmd(t *testing.T) {
 // config never holds its path. A daemon with only the socket gets an entry
 // with config-file: alone, which root adds.
 func TestAddWritesTheTCPEntryWithConfigFile(t *testing.T) {
-	const sock = "/var/run/tdns/tdns-auth.sock"
 	setRoot := func(t *testing.T, root bool) {
 		saved := runningAsRoot
 		t.Cleanup(func() { runningAsRoot = saved })
 		runningAsRoot = func() bool { return root }
 	}
+	// The socket is the test's own, and nothing listens on it.
+	sockOf := func(env *addEnv) string { return filepath.Join(env.sockDir, "tdns-auth.sock") }
 	withSocket := func(env *addEnv, t *testing.T, file, addr string) string {
 		p := filepath.Join(env.dir, file)
-		writeFile(t, p, daemonYAML("TDNS-AUTH", addr, "key-"+file, "   socket: "+sock+"\n"))
+		writeFile(t, p, daemonYAML("TDNS-AUTH", addr, "key-"+file, "   socket: "+sockOf(env)+"\n"))
 		return p
 	}
 
@@ -1191,21 +1340,22 @@ func TestAddWritesTheTCPEntryWithConfigFile(t *testing.T) {
 		t.Run(fmt.Sprintf("root=%v gets the TCP entry", root), func(t *testing.T) {
 			setRoot(t, root)
 			env := newAddEnv(t)
-			d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
+			d := withSocket(env, t, "tdns-auth.yaml", env.at(8989))
 			res, err := env.add(t, d, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := ApiDetails{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1",
-				ApiKey: "key-tdns-auth.yaml", AuthMethod: "X-API-Key", ConfigFile: d}
+			want := ApiDetails{Name: "tdns-auth", BaseURL: env.url(8989),
+				AuthMethod: "certificate", ConfigFile: d,
+				TLSAuth: "pin", Pins: []string{testDaemonPin}}
 			if got := env.entries(t); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 				t.Errorf("entries = %+v\nwant      [%+v]", got, want)
 			}
-			if raw, _ := os.ReadFile(env.cli); strings.Contains(string(raw), sock) {
+			if raw, _ := os.ReadFile(env.cli); strings.Contains(string(raw), sockOf(env)) {
 				t.Errorf("the CLI config repeats the socket's path:\n%s", raw)
 			}
-			if !strings.Contains(strings.Join(res.Notes, " "), sock) {
-				t.Errorf("notes = %q, want one saying root reaches the daemon over %s", res.Notes, sock)
+			if !strings.Contains(strings.Join(res.Notes, " "), sockOf(env)) {
+				t.Errorf("notes = %q, want one saying root reaches the daemon over %s", res.Notes, sockOf(env))
 			}
 		})
 	}
@@ -1215,8 +1365,8 @@ func TestAddWritesTheTCPEntryWithConfigFile(t *testing.T) {
 			setRoot(t, root)
 			env := newAddEnv(t)
 			p := filepath.Join(env.dir, "tdns-auth.yaml")
-			writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "", "   socket: "+sock+"\n"))
-			if _, err := env.add(t, p, nil); err == nil || !strings.Contains(err.Error(), "apiserver.apikey is not set") {
+			writeFile(t, p, daemonYAML("TDNS-AUTH", env.at(8989), "", "   socket: "+sockOf(env)+"\n"))
+			if _, err := env.add(t, p, nil); err == nil || !strings.Contains(err.Error(), "apiserver.apikey is not set, which the daemon requires") || strings.Contains(err.Error(), "no key to send") {
 				t.Errorf("root=%v: err = %v, want one naming apiserver.apikey", root, err)
 			}
 		}
@@ -1226,8 +1376,9 @@ func TestAddWritesTheTCPEntryWithConfigFile(t *testing.T) {
 		setRoot(t, true)
 		env := newAddEnv(t)
 		p := filepath.Join(env.dir, "tdns-auth.yaml")
-		writeFile(t, p, "service:\n   name: TDNS-AUTH\napiserver:\n   apikey: k\n   socket: "+sock+"\n")
-		if _, err := env.add(t, p, nil); err != nil {
+		writeFile(t, p, "service:\n   name: TDNS-AUTH\napiserver:\n   apikey: k\n   socket: "+sockOf(env)+"\n")
+		res, err := env.add(t, p, nil)
+		if err != nil {
 			t.Fatal(err)
 		}
 		want := ApiDetails{Name: "tdns-auth", AuthMethod: "none", ConfigFile: p}
@@ -1237,6 +1388,10 @@ func TestAddWritesTheTCPEntryWithConfigFile(t *testing.T) {
 		raw, _ := os.ReadFile(env.cli)
 		if s := string(raw); strings.Contains(s, "baseurl") || strings.Contains(s, "apikey") {
 			t.Errorf("a socket-only entry has no baseurl or apikey line:\n%s", raw)
+		}
+		// No TCP: no certificate, and nothing done on the daemon's side.
+		if _, err := os.Stat(accessFileOf(p)); res.Cert != nil || err == nil {
+			t.Errorf("socket-only daemon: cert %+v, access file there: %v", res.Cert, err == nil)
 		}
 		if res, err := env.add(t, p, nil); err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote {
 			t.Errorf("re-add: %+v, %v; want it already known", res, err)
@@ -1252,22 +1407,20 @@ func TestAddWritesTheTCPEntryWithConfigFile(t *testing.T) {
 	t.Run("a socket entry written before is the same daemon", func(t *testing.T) {
 		setRoot(t, true)
 		env := newAddEnv(t)
-		d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
-		writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: unix://"+sock+"\n     authmethod: none\n     config-file: "+d+"\n")
+		d := withSocket(env, t, "tdns-auth.yaml", env.at(8989))
+		writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: unix://"+sockOf(env)+"\n     authmethod: none\n     config-file: "+d+"\n")
 		res, err := env.add(t, d, nil)
 		if err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote {
 			t.Errorf("%+v, %v; want it already known", res, err)
 		}
 	})
 
-	t.Run("a rotated key: the TCP entry is stale", func(t *testing.T) {
+	t.Run("a rotated key: the key entry is stale", func(t *testing.T) {
 		setRoot(t, true)
 		env := newAddEnv(t)
-		d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
-		if _, err := env.add(t, d, nil); err != nil {
-			t.Fatal(err)
-		}
-		writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "rotated-key", "   socket: "+sock+"\n"))
+		d := withSocket(env, t, "tdns-auth.yaml", env.at(8989))
+		writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: "+env.url(8989)+"\n     apikey: key-tdns-auth.yaml\n     authmethod: X-API-Key\n     config-file: "+d+"\n")
+		writeFile(t, d, daemonYAML("TDNS-AUTH", env.at(8989), "rotated-key", "   socket: "+sockOf(env)+"\n"))
 		if _, err := env.add(t, d, nil); err == nil || !strings.Contains(err.Error(), "apikey") || strings.Contains(err.Error(), "scheme") {
 			t.Errorf("err = %v, want the apikey named, and only it", err)
 		}
@@ -1277,16 +1430,16 @@ func TestAddWritesTheTCPEntryWithConfigFile(t *testing.T) {
 		setRoot(t, true)
 		env := newAddEnv(t)
 		p := filepath.Join(env.dir, "tdns-auth.yaml")
-		writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "the-key", "   socket: run/tdns-auth.sock\n"))
-		res, err := env.add(t, p, nil)
-		if err != nil {
-			t.Fatal(err)
+		writeFile(t, p, daemonYAML("TDNS-AUTH", env.at(8989), "the-key", "   socket: run/tdns-auth.sock\n"))
+		// No socket the daemon serves, so no access file: a new entry, which
+		// would need one for the certificate, is refused, and says why.
+		_, err := env.add(t, p, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), "local admin socket") || !strings.Contains(err.Error(), "not an absolute path") {
+			t.Errorf("err = %v, want a refusal naming the socket, and why there is none", err)
 		}
-		if res.Entry.BaseURL != "https://127.0.0.1:8989/api/v1" {
-			t.Errorf("entry = %+v, want the TCP one", res.Entry)
-		}
-		if !strings.Contains(strings.Join(res.Notes, " "), "not an absolute path") {
-			t.Errorf("notes = %q, want one saying the socket path is not absolute", res.Notes)
+		if _, serr := os.Stat(env.cli); serr == nil {
+			t.Error("the refused add wrote the CLI config")
 		}
 
 		// With no TCP address there is nothing to add.
@@ -1330,7 +1483,7 @@ func TestRoleCarryingCanonicalNameIsNotTheCanonicalEntry(t *testing.T) {
 // "already known", not two daemons on one address.
 func TestSameDaemonThroughASymlinkIsAlreadyKnown(t *testing.T) {
 	env := newAddEnv(t)
-	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
+	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", env.at(8989))
 	if _, err := env.add(t, d, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -1390,5 +1543,2797 @@ func TestNoWiringNoInstanceClients(t *testing.T) {
 	}
 	if ac, ok := tdns.Globals.ApiClients["auth2"]; ok {
 		t.Errorf("an instance nothing wired got a client: %+v", ac)
+	}
+}
+
+// ------------------------------------------- config add and the certificate
+
+// certDaemonCfg is a tdns-auth config as an operator writes it: comments, an
+// aligned apiserver: block, the access-file: line still commented out, and
+// another section after it. @ADDR@, @CERT@, @SOCK@ and @EXTRA@ (more
+// apiserver: lines) are filled in by certDaemon; the address is
+// env.at(8989), where nothing listens.
+const certDaemonCfg = `# a tdns-auth, as an operator writes it
+service:
+   name: TDNS-AUTH
+
+apiserver:
+   addresses:  [ @ADDR@ ]
+   apikey:     the-key
+   certfile:   @CERT@
+   socket:     @SOCK@@EXTRA@
+   # access-file: comes later
+
+db:
+   file: /var/tmp/tdns-auth.db
+`
+
+// certDaemon writes certDaemonCfg to dir/tdns-auth.yaml, with a certificate
+// for the daemon to serve and a socket in env.sockDir (nothing listens there
+// unless a test serves it). It returns the config's path and the daemon's
+// pin.
+func (e *addEnv) certDaemon(t *testing.T, dir, extra string) (string, string) {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.NotFoundHandler()) // only for a certificate
+	srv.Close()
+	certFile := filepath.Join(e.dir, "api.crt")
+	writeFile(t, certFile, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})))
+	d := filepath.Join(dir, "tdns-auth.yaml")
+	cfg := strings.NewReplacer("@ADDR@", e.at(8989), "@CERT@", certFile, "@SOCK@", e.socket(), "@EXTRA@", extra).Replace(certDaemonCfg)
+	writeFile(t, d, cfg)
+	return d, tdns.SPKISHA256(srv.Certificate())
+}
+
+func (e *addEnv) socket() string { return filepath.Join(e.sockDir, "auth.sock") }
+
+// withAccessLine is daemon config d as certDaemonCfg wrote it with
+// "access-file: af" added after the commented-out line, as config add adds it
+// (quoted, as a path with a comma in it is).
+func withAccessLine(cfg, af string) string {
+	return strings.Replace(cfg, "   # access-file: comes later\n", "   # access-file: comes later\n   access-file: "+yamlScalar(af)+"\n", 1)
+}
+
+func readBytes(t *testing.T, p string) string {
+	t.Helper()
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// printed is what config add prints for r, its whitespace flattened: the
+// wrapping depends on the lengths of the test's paths. The layout itself is
+// TestAddOutputLayout's.
+func printed(r *AddResult, dryRun bool, cfg string) string {
+	var sb strings.Builder
+	printAddResult(&sb, r, dryRun, cfg)
+	return flat(sb.String())
+}
+
+// flat is s with every run of white space one space.
+func flat(s string) string { return strings.Join(strings.Fields(s), " ") }
+
+// A new entry authenticates by certificate. The daemon config names no access
+// file, so config add creates one with the operator's pin (read-write), adds
+// access-file: to the daemon config (nothing else in it changes), and, the
+// daemon not running, says its next start reads them. The operator had no
+// pair: it is made, and its pin printed. Run again, nothing changes.
+func TestAddEnrollsTheCertificate(t *testing.T) {
+	env := newAddEnv(t)
+	d, daemonPin := env.certDaemon(t, env.dir, "")
+	// A daemon config others may read: the access file is the daemon's
+	// policy all the same, 0600.
+	if err := os.Chmod(d, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := readBytes(t, d)
+	af := accessFileOf(d)
+
+	res, err := env.add(t, d, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := env.pin(t) // made by the add
+	want := ApiDetails{Name: "tdns-auth", BaseURL: env.url(8989), AuthMethod: "certificate",
+		TLSAuth: "pin", Pins: []string{daemonPin}, ConfigFile: d}
+	if got := env.entries(t); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
+		t.Errorf("entries = %+v\nwant      [%+v]", got, want)
+	}
+	if raw := readBytes(t, env.cli); strings.Contains(raw, "apikey") || strings.Contains(raw, "the-key") {
+		t.Errorf("a certificate entry has no apikey: line:\n%s", raw)
+	}
+	if got := readBytes(t, d); got != withAccessLine(orig, af) {
+		t.Errorf("daemon config =\n%s\nwant\n%s", got, withAccessLine(orig, af))
+	}
+	if fi := statOf(t, af); fi.Mode().Perm() != 0o600 {
+		t.Errorf("the new access file has mode %v, want 0600", fi.Mode().Perm())
+	}
+	if fi := statOf(t, d); fi.Mode().Perm() != 0o644 {
+		t.Errorf("the daemon config has mode %v, want its 0644 kept", fi.Mode().Perm())
+	}
+	acc, err := tdns.LoadAccessFile(af)
+	if err != nil || !acc.KeyAuthOn() || len(acc.Clients) != 1 || acc.Clients[0].Pin != pin ||
+		acc.Clients[0].Role != "read-write" || acc.Clients[0].Name != clientNameOf(env.cert) {
+		t.Errorf("access file %+v (%v), want the pin as %s, read-write", acc, err, clientNameOf(env.cert))
+	}
+	// The entry builds: the pair it names is there.
+	if _, _, err := newApiClientFor(env.entries(t)[0], ReadCliClientConf(env.cli)); err != nil {
+		t.Errorf("the entry does not build: %v", err)
+	}
+
+	out := printed(res, false, env.cli)
+	for _, w := range []string{
+		`Created ` + env.cli + ` with "tdns-auth"`,
+		"Created your client certificate " + env.cert, pin,
+		"Created " + af, "access-file: " + af,
+		"read-write there, no longer admin", "TLS 1.3", "local admin socket's alone",
+		"not running", "next start",
+	} {
+		if !strings.Contains(out, w) {
+			t.Errorf("output lacks %q:\n%s", w, out)
+		}
+	}
+	if strings.Index(out, "Created "+env.cli) != 0 {
+		t.Errorf("the verdict is not first:\n%s", out)
+	}
+
+	cliBefore, accBefore, cfgBefore := readBytes(t, env.cli), readBytes(t, af), readBytes(t, d)
+	res, err = env.add(t, d, nil)
+	if err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote || res.Cert.state != certWorks {
+		t.Errorf("second add: %+v, %v; want it already known, nothing to do", res, err)
+	}
+	if readBytes(t, env.cli) != cliBefore || readBytes(t, af) != accBefore || readBytes(t, d) != cfgBefore {
+		t.Error("the second add changed a file")
+	}
+	if out := printed(res, false, env.cli); !strings.Contains(out, "nothing changed") || strings.Contains(out, "Created your client") {
+		t.Errorf("second add printed:\n%s", out)
+	}
+}
+
+// A daemon config that names its access file: the pin is added to it, the
+// other clients and keyauth as they were, the old file kept as .prev, and the
+// daemon config not touched.
+func TestAddEnrollsInTheAccessFileThere(t *testing.T) {
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	af := filepath.Join(env.dir, "access.yaml")
+	d, _ := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+	old := "keyauth: true\nclients:\n   - name: anna\n     pin: " + pinOf("anna") + "\n     role: read-only\n"
+	writeFile(t, af, old)
+	cfg := readBytes(t, d)
+
+	res, err := env.add(t, d, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Entry.AuthMethod != "certificate" || res.Cert.nameIt || res.Cert.createFile {
+		t.Errorf("result %+v, cert %+v", res, res.Cert)
+	}
+	acc, err := tdns.LoadAccessFile(af)
+	if err != nil || len(acc.Clients) != 2 || acc.Clients[0].Name != "anna" || acc.Clients[0].Role != "read-only" ||
+		acc.Clients[1].Name != "tester" || acc.Clients[1].Pin != pin || acc.Clients[1].Role != "read-write" {
+		t.Errorf("access file %+v (%v), want anna as she was, then tester", acc, err)
+	}
+	if prev := readBytes(t, af+".prev"); prev != old {
+		t.Errorf(".prev = %q, want the file before", prev)
+	}
+	if readBytes(t, d) != cfg {
+		t.Error("the daemon config changed, though it named its access file")
+	}
+	if out := printed(res, false, env.cli); !strings.Contains(out, "Enrolled your certificate in "+af) || strings.Contains(out, "no longer admin") {
+		t.Errorf("printed:\n%s", out)
+	}
+}
+
+// The pin is listed already, under another name: not added again, the file
+// not rewritten, and the entry uses the certificate.
+func TestAddFindsThePinListed(t *testing.T) {
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	af := filepath.Join(env.dir, "access.yaml")
+	d, _ := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+	old := "keyauth: true\nclients:\n   - name: laptop\n     pin: " + pin + "\n     role: read-only\n"
+	writeFile(t, af, old)
+
+	res, err := env.add(t, d, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Entry.AuthMethod != "certificate" || res.Cert.state != certWorks || res.Cert.listedAs != "laptop" {
+		t.Errorf("result %+v, cert %+v", res, res.Cert)
+	}
+	if readBytes(t, af) != old {
+		t.Errorf("the access file was rewritten:\n%s", readBytes(t, af))
+	}
+	if _, err := os.Stat(af + ".prev"); err == nil {
+		t.Error("a .prev was written, though nothing changed")
+	}
+	// It is listed read-only, and config add does not change that: it says
+	// so, plainly.
+	if out := printed(res, false, env.cli); !strings.Contains(out, "lists your certificate as laptop, read-only: write commands will be refused") ||
+		!strings.Contains(out, "tdns-ncli auth client set-role laptop read-write") {
+		t.Errorf("printed:\n%s", out)
+	}
+	// Read-write: the role named, nothing more.
+	writeFile(t, af, strings.Replace(old, "read-only", "read-write", 1))
+	if res, err = env.add(t, d, nil); err != nil {
+		t.Fatal(err)
+	}
+	if out := printed(res, false, env.cli); !strings.Contains(out, "lists your certificate as laptop (read-write).") {
+		t.Errorf("read-write, printed:\n%s", out)
+	}
+}
+
+// The pin is listed, disabled: config add does not enable it. A new entry is
+// refused, saying how to enable it; a key entry keeps the key and says so.
+func TestAddReportsADisabledPin(t *testing.T) {
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	af := filepath.Join(env.dir, "access.yaml")
+	d, _ := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+	old := "keyauth: true\nclients:\n   - name: laptop\n     pin: " + pin + "\n     role: read-write\n     disabled: true\n"
+	writeFile(t, af, old)
+
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(err.Error(), "disabled") || !strings.Contains(strings.Join(r.fix, "\n"), "tdns-ncli auth client enable laptop") {
+		t.Errorf("new entry: err = %v, want a refusal with client enable", err)
+	}
+	if _, err := os.Stat(env.cli); err == nil {
+		t.Error("the refused add wrote the CLI config")
+	}
+
+	key := "apiservers:\n   - name: tdns-auth\n     baseurl: " + env.url(8989) + "\n     apikey: the-key\n     authmethod: X-API-Key\n     config-file: " + d + "\n"
+	writeFile(t, env.cli, key)
+	res, err := env.add(t, d, nil)
+	if err != nil || !res.KeyKept || res.Switched {
+		t.Fatalf("key entry: %+v, %v; want the key kept", res, err)
+	}
+	if got := env.entries(t); got[0].AuthMethod != "X-API-Key" || got[0].ApiKey != "the-key" {
+		t.Errorf("entry %+v, want it on the key", got[0])
+	}
+	out := printed(res, false, env.cli)
+	if !strings.Contains(out, "keeps the API key") || !strings.Contains(out, "disabled") || !strings.Contains(out, "client enable laptop") {
+		t.Errorf("printed:\n%s", out)
+	}
+	if readBytes(t, af) != old {
+		t.Error("the access file changed")
+	}
+}
+
+// An entry that uses the key is switched to the certificate once the daemon
+// accepts it: authmethod: certificate where the line stands (its comment
+// kept), its apikey: line gone, every other line as it was.
+func TestAddSwitchesAKeyEntry(t *testing.T) {
+	env := newAddEnv(t)
+	d, daemonPin := env.certDaemon(t, env.dir, "")
+	head := "# CLI config\napiservers:\n   # the auth server\n   - name:          tdns-auth\n     baseurl:       " + env.url(8989) + "\n"
+	tail := "     tlsauth:       pin\n     pins:          [ \"" + daemonPin + "\" ]\n     config-file:   " + d + "\n\n# end\n"
+	writeFile(t, env.cli, head+"     apikey:        the-key\n     authmethod:    X-API-Key     # the key, for now\n"+tail)
+
+	res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true })
+	if err != nil || !res.Switched || res.Wrote {
+		t.Fatalf("dry run: %+v, %v", res, err)
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("the dry run created the access file")
+	}
+
+	res, err = env.add(t, d, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Switched || res.Pinned || !res.Wrote || res.KeyKept {
+		t.Errorf("result = %+v", res)
+	}
+	want := head + "     authmethod:    certificate     # the key, for now\n" + tail
+	if got := readBytes(t, env.cli); got != want {
+		t.Errorf("file =\n%s\nwant\n%s", got, want)
+	}
+	if got := env.entries(t); got[0].AuthMethod != "certificate" || got[0].ApiKey != "" {
+		t.Errorf("entry = %+v", got[0])
+	}
+	if acc, err := tdns.LoadAccessFile(accessFileOf(d)); err != nil || len(acc.Clients) != 1 || acc.Clients[0].Pin != env.pin(t) {
+		t.Errorf("access file %+v (%v)", acc, err)
+	}
+	if out := printed(res, false, env.cli); !strings.Contains(out, "switched it to your client certificate") {
+		t.Errorf("printed:\n%s", out)
+	}
+}
+
+// readOnlyDaemonDir is a directory for daemon configs that the test cannot
+// write in: config add cannot make the daemon's side, as for anyone but root
+// on a daemon host.
+func readOnlyDaemonDir(t *testing.T, env *addEnv) string {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root writes anywhere")
+	}
+	dir := filepath.Join(env.dir, "daemon")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) }) // before TempDir's cleanup removes it
+	return dir
+}
+
+// When config add cannot write the daemon's side, an entry whose key works at
+// both ends keeps it, and the result says what the certificate still needs:
+// the exact client add line, and the access-file: line. A new entry is
+// refused with that fix. A key the access file turns off does not work: the
+// key entry is refused too.
+func TestAddKeepsTheKeyWhenItCannotWriteTheDaemonSide(t *testing.T) {
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	dir := readOnlyDaemonDir(t, env)
+	d, daemonPin := env.certDaemon(t, dir, "")
+	os.Chmod(dir, 0o555)
+	cfg := readBytes(t, d)
+
+	// New: refused, with the fix, and nothing written.
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) {
+		t.Fatalf("new entry: err = %v, want a refusal", err)
+	}
+	fix := strings.Join(r.fix, "\n")
+	for _, w := range []string{"tdns-ncli auth client add tester --pin " + pin + " --role read-write", "access-file: " + accessFileOf(d)} {
+		if !strings.Contains(fix, w) {
+			t.Errorf("fix lacks %q:\n%s", w, fix)
+		}
+	}
+	if _, err := os.Stat(env.cli); err == nil {
+		t.Error("the refused add wrote the CLI config")
+	}
+	var sb strings.Builder
+	printRefusal(&sb, r)
+	if out := sb.String(); !strings.HasPrefix(out, "Error: not adding "+d) || !strings.Contains(out, "\n  Fix: ") {
+		t.Errorf("refusal printed:\n%s", out)
+	}
+
+	// Known, on the key: kept, and the fix printed.
+	key := "apiservers:\n   - name: tdns-auth\n     baseurl: " + env.url(8989) + "\n     apikey: the-key\n     authmethod: X-API-Key\n     tlsauth: pin\n     pins: [ \"" + daemonPin + "\" ]\n     config-file: " + d + "\n"
+	writeFile(t, env.cli, key)
+	res, err := env.add(t, d, nil)
+	if err != nil || !res.KeyKept || res.Switched || res.Wrote {
+		t.Fatalf("key entry: %+v, %v; want the key kept, nothing written", res, err)
+	}
+	if readBytes(t, env.cli) != key || readBytes(t, d) != cfg {
+		t.Error("a file changed")
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("an access file was created")
+	}
+	out := printed(res, false, env.cli)
+	for _, w := range []string{"keeps the API key", "tdns-ncli auth client add tester --pin " + pin + " --role read-write", "access-file: " + accessFileOf(d)} {
+		if !strings.Contains(out, w) {
+			t.Errorf("output lacks %q:\n%s", w, out)
+		}
+	}
+	if strings.Contains(out, "the-key") {
+		t.Errorf("the key was printed:\n%s", out)
+	}
+
+	// The access file turns the key off: neither works, so it is refused.
+	os.Chmod(dir, 0o755)
+	af := filepath.Join(dir, "access.yaml")
+	writeFile(t, af, "keyauth: false\nclients: []\n")
+	writeFile(t, d, withAccessLine(cfg, af))
+	os.Chmod(dir, 0o555)
+	if _, err := env.add(t, d, nil); !errors.As(err, &r) || !strings.Contains(err.Error(), "keyauth: false") {
+		t.Errorf("keyauth off: err = %v, want a refusal naming it", err)
+	}
+	if readBytes(t, env.cli) != key {
+		t.Error("the refused add changed the CLI config")
+	}
+}
+
+// usetls: false with TCP addresses: the daemon refuses an access file then,
+// and a certificate needs TLS anyway. No access file is created, the daemon
+// config is not touched; a new entry is refused, a key entry keeps its key,
+// and both say TLS is what is missing.
+func TestAddWithoutTLSCreatesNoAccessFile(t *testing.T) {
+	env := newAddEnv(t)
+	d, _ := env.certDaemon(t, env.dir, "\n   usetls:     false")
+	cfg := readBytes(t, d)
+
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(err.Error(), "usetls") {
+		t.Errorf("new entry: err = %v, want a refusal naming usetls", err)
+	}
+	key := "apiservers:\n   - name: tdns-auth\n     baseurl: http://" + env.at(8989) + "/api/v1\n     apikey: the-key\n     authmethod: X-API-Key\n     config-file: " + d + "\n"
+	writeFile(t, env.cli, key)
+	res, err := env.add(t, d, nil)
+	if err != nil || !res.KeyKept || res.Switched || res.Wrote {
+		t.Fatalf("http key entry: %+v, %v; want the key kept", res, err)
+	}
+	if out := printed(res, false, env.cli); !strings.Contains(out, "keeps the API key") || !strings.Contains(out, "usetls") {
+		t.Errorf("printed:\n%s", out)
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("an access file was created for a daemon without TLS")
+	}
+	if readBytes(t, d) != cfg || readBytes(t, env.cli) != key {
+		t.Error("a file changed")
+	}
+	if _, err := os.Stat(env.cert); err == nil {
+		t.Error("a client pair was made for a daemon that cannot use it")
+	}
+}
+
+// fakeSocketDaemon answers /config on a daemon's local admin socket: it says
+// it runs cfg (or runs, when set), and a reload loads the access file into the
+// policy status reports (without its clients, when forget is set); when cfg
+// names no access file any more, a reload drops the policy, saying so in the
+// daemon's words.
+type fakeSocketDaemon struct {
+	mu          sync.Mutex
+	cfg, access string
+	runs        string
+	forget      bool
+	policy      *tdns.ApiAccessStatus
+	reloads     int
+	onReload    func() // when set, runs at each reload, before it loads the file
+	onStatus    func() // when set, runs at the next status ask, once
+}
+
+func serveFakeDaemon(t *testing.T, sock, cfg, access string) *fakeSocketDaemon {
+	t.Helper()
+	f := &fakeSocketDaemon{cfg: cfg, access: access}
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var cp tdns.ConfigPost
+		json.NewDecoder(r.Body).Decode(&cp)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		resp := tdns.ConfigResponse{ConfigFile: f.cfg}
+		if f.runs != "" {
+			resp.ConfigFile = f.runs
+		}
+		switch cp.Command {
+		case "reload":
+			f.reloads++
+			if f.onReload != nil {
+				f.onReload()
+			}
+			resp.Msg = "Config reloaded."
+			named := true
+			if info, err := ReadDaemonApi(f.cfg, ""); err == nil {
+				named = info.AccessFile != ""
+			}
+			if !named && f.policy != nil {
+				// As the daemon says it, when its config no longer
+				// names the access file it ran (reloadApiAccess).
+				f.policy = nil
+				resp.Msg += " " + tdns.AccessFileNoLongerConfigured + ": the API key is admin on the TCP API again."
+			} else if _, err := os.Stat(f.access); errors.Is(err, os.ErrNotExist) {
+				f.policy = nil // no access file: the key is admin again
+			} else if af, err := tdns.LoadAccessFile(f.access); err == nil {
+				st := &tdns.ApiAccessStatus{File: f.access, KeyAuth: af.KeyAuthOn(), Clients: []tdns.ApiAccessStatusClient{}}
+				for _, c := range af.Clients {
+					if !f.forget {
+						st.Clients = append(st.Clients, tdns.ApiAccessStatusClient{Name: c.Name, Pin: c.Pin, Role: c.Role, Disabled: c.Disabled})
+					}
+				}
+				f.policy = st
+				resp.Msg += fmt.Sprintf(" Access file reloaded: %d client(s), keyauth on.", len(st.Clients))
+			}
+		case "status":
+			if f.onStatus != nil {
+				f.onStatus()
+				f.onStatus = nil
+			}
+			resp.Access = f.policy
+		}
+		json.NewEncoder(w).Encode(resp)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return f
+}
+
+func (f *fakeSocketDaemon) reloadCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.reloads
+}
+
+// A running daemon is reloaded over its local socket, and the policy it then
+// runs is checked for the pin. A reload that does not put the pin in force
+// fails the add, and every file is put back as it was. Another daemon on the
+// socket is not this one's: nothing is written.
+func TestAddReloadsARunningDaemon(t *testing.T) {
+	t.Run("reloaded, the pin in force", func(t *testing.T) {
+		env := newAddEnv(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+		res, err := env.add(t, d, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := f.reloadCount(); n != 1 || !res.Cert.running {
+			t.Errorf("%d reloads, running %v; want one reload", n, res.Cert.running)
+		}
+		if out := printed(res, false, env.cli); !strings.Contains(out, "Reloaded: Config reloaded. Access file reloaded: 1 client(s)") {
+			t.Errorf("printed:\n%s", out)
+		}
+	})
+
+	t.Run("the reload leaves the pin out: put back", func(t *testing.T) {
+		env := newAddEnv(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		cfg := readBytes(t, d)
+		f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+		f.forget = true
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), "does not have your certificate") || !strings.Contains(err.Error(), "as they were") {
+			t.Errorf("err = %v, want a refusal saying the files are put back", err)
+		}
+		if readBytes(t, d) != cfg {
+			t.Errorf("the daemon config was not put back:\n%s", readBytes(t, d))
+		}
+		if _, err := os.Stat(accessFileOf(d)); err == nil {
+			t.Error("the new access file was not removed")
+		}
+		if _, err := os.Stat(env.cli); err == nil {
+			t.Error("the CLI config was written")
+		}
+	})
+
+	t.Run("another daemon on the socket: nothing written", func(t *testing.T) {
+		env := newAddEnv(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		cfg := readBytes(t, d)
+		f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+		f.runs = "/etc/tdns/other.yaml"
+		_, err := env.add(t, d, nil)
+		if err == nil || !strings.Contains(err.Error(), "runs /etc/tdns/other.yaml") {
+			t.Errorf("err = %v, want a refusal naming the other config", err)
+		}
+		if readBytes(t, d) != cfg || f.reloadCount() != 0 {
+			t.Error("the daemon config changed, or a reload was sent")
+		}
+		if _, err := os.Stat(accessFileOf(d)); err == nil {
+			t.Error("an access file was created")
+		}
+	})
+}
+
+// The access-file: line goes at the end of the daemon config's apiserver:
+// block, at its keys' column, aligned like its first key; the rest of the
+// file stays byte for byte. What config add cannot edit with confidence it
+// refuses.
+func TestAddAccessFileLine(t *testing.T) {
+	const af = "/etc/tdns/tdns-auth-access.yaml"
+	for _, tc := range []struct{ name, src, want string }{
+		{
+			name: "aligned, after a trailing comment",
+			src:  "apiserver:\n   addresses:  [ 127.0.0.1:8989 ]\n   apikey:     k\n   # access-file: " + af + "\n\nkeys:\n   tsig: []\n",
+			want: "apiserver:\n   addresses:  [ 127.0.0.1:8989 ]\n   apikey:     k\n   # access-file: " + af + "\n   access-file: " + af + "\n\nkeys:\n   tsig: []\n",
+		},
+		{
+			name: "wider alignment",
+			src:  "# x\napiserver:\n  addresses:      [ 127.0.0.1:8989 ]\n  apikey:         k\n",
+			want: "# x\napiserver:\n  addresses:      [ 127.0.0.1:8989 ]\n  apikey:         k\n  access-file:    " + af + "\n",
+		},
+		{
+			name: "tabs after the colons: one space",
+			src:  "apiserver:\n   addresses:     \t[ 127.0.0.1:8987 ]\n   apikey:\tk\nserver:\n   id: x\n",
+			want: "apiserver:\n   addresses:     \t[ 127.0.0.1:8987 ]\n   apikey:\tk\n   access-file: " + af + "\nserver:\n   id: x\n",
+		},
+		{
+			name: "a list value last",
+			src:  "apiserver:\n   apikey: k\n   addresses:\n      - 127.0.0.1:8989\n      - '[::1]:8989'\ndb:\n   file: x\n",
+			want: "apiserver:\n   apikey: k\n   addresses:\n      - 127.0.0.1:8989\n      - '[::1]:8989'\n   access-file: " + af + "\ndb:\n   file: x\n",
+		},
+		{
+			name: "CRLF",
+			src:  "apiserver:\r\n   apikey: k\r\n",
+			want: "apiserver:\r\n   apikey: k\r\n   access-file: " + af + "\r\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := addAccessFileLine([]byte(tc.src), af)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("got\n%q\nwant\n%q", got, tc.want)
+			}
+		})
+	}
+	for name, src := range map[string]string{
+		"in an include":   "include:\n   - api.yaml\nservice:\n   name: TDNS-AUTH\n",
+		"flow style":      "apiserver: { apikey: k }\n",
+		"there already":   "apiserver:\n   apikey: k\n   access-file: \"\"\n",
+		"tabs":            "apiserver:\n\tapikey: k\n",
+		"two blocks":      "apiserver:\n   apikey: k\napiserver:\n   apikey: l\n",
+		"an empty block":  "apiserver:\nservice:\n   name: x\n",
+		"not YAML at all": "apiserver:\n   apikey: [ k\n",
+	} {
+		if out, err := addAccessFileLine([]byte(src), af); err == nil {
+			t.Errorf("%s: edited, want a refusal:\n%s", name, out)
+		}
+	}
+}
+
+// Switching an entry to the certificate rewrites authmethod: where it stands
+// and takes out apikey: (with any lines of its value); an entry with no
+// authmethod: line gets one at its end.
+func TestEditEntryTextToCert(t *testing.T) {
+	up := ApiDetails{Name: "tdns-auth", AuthMethod: "certificate"}
+	src := "apiservers:\n   - name: tdns-auth\n     apikey: >\n        folded-key\n     authmethod: \"X-API-Key\"  # note\n     config-file: /etc/tdns/tdns-auth.yaml\n"
+	want := "apiservers:\n   - name: tdns-auth\n     authmethod: certificate  # note\n     config-file: /etc/tdns/tdns-auth.yaml\n"
+	if got, err := editEntryText([]byte(src), "tdns-auth", up, entryEdit{toCert: true}); err != nil || string(got) != want {
+		t.Errorf("got %q (%v)\nwant %q", got, err, want)
+	}
+	src = "apiservers:\n   - name:       tdns-auth\n     apikey:     k\n     baseurl:    https://127.0.0.1:8989/api/v1\n"
+	want = "apiservers:\n   - name:       tdns-auth\n     baseurl:    https://127.0.0.1:8989/api/v1\n     authmethod: certificate\n"
+	if got, err := editEntryText([]byte(src), "tdns-auth", up, entryEdit{toCert: true}); err != nil || string(got) != want {
+		t.Errorf("no authmethod line: got %q (%v)\nwant %q", got, err, want)
+	}
+	if _, err := editEntryText([]byte("apiservers:\n   - authmethod: X-API-Key\n     name: tdns-auth\n"), "tdns-auth", up, entryEdit{toCert: true}); err == nil {
+		t.Error("authmethod: on the item's first line was edited")
+	}
+}
+
+// The daemon config is edited the way the access file is: its old bytes kept
+// as .prev, the new file renamed over it with the old one's mode and group
+// (the owner too, which a test that is not root cannot vary). A reload that
+// fails puts the old bytes back the same way and leaves the .prev.
+func TestAddKeepsTheDaemonConfigsPrevModeAndGroup(t *testing.T) {
+	// A group of the test's user other than the one a new file gets, if it
+	// has one: the one change of owner an unprivileged process may make.
+	altGroup := func(t *testing.T, dir string) int {
+		fi, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, dirGid, ok := fileOwner(fi)
+		if !ok {
+			return -1
+		}
+		groups, _ := os.Getgroups()
+		for _, g := range groups {
+			if g != dirGid && g != os.Getegid() {
+				return g
+			}
+		}
+		return -1
+	}
+	setup := func(t *testing.T) (*addEnv, string, string, int) {
+		env := newAddEnv(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		if err := os.Chmod(d, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		gid := -1
+		if g := altGroup(t, env.dir); g >= 0 && os.Chown(d, -1, g) == nil {
+			gid = g
+		}
+		return env, d, readBytes(t, d), gid
+	}
+	check := func(t *testing.T, d string, gid int, uid int) {
+		t.Helper()
+		fi := statOf(t, d)
+		if fi.Mode().Perm() != 0o640 {
+			t.Errorf("%s has mode %v, want the old 0640", d, fi.Mode().Perm())
+		}
+		if u, g, ok := fileOwner(fi); ok {
+			if u != uid {
+				t.Errorf("%s has owner %d, want %d", d, u, uid)
+			}
+			if gid >= 0 && g != gid {
+				t.Errorf("%s has group %d, want the old %d", d, g, gid)
+			}
+		}
+	}
+
+	t.Run("edited: .prev, mode and group", func(t *testing.T) {
+		env, d, orig, gid := setup(t)
+		uid, _, _ := fileOwner(statOf(t, d))
+		if _, err := env.add(t, d, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := readBytes(t, d); got != withAccessLine(orig, accessFileOf(d)) {
+			t.Errorf("daemon config =\n%s", got)
+		}
+		if prev := readBytes(t, d+".prev"); prev != orig {
+			t.Errorf(".prev =\n%s\nwant the old bytes\n%s", prev, orig)
+		}
+		check(t, d, gid, uid)
+		if gid < 0 {
+			t.Log("no second group to give the daemon config: its group not varied")
+		}
+	})
+
+	t.Run("a failed reload: restored, .prev left", func(t *testing.T) {
+		env, d, orig, gid := setup(t)
+		uid, _, _ := fileOwner(statOf(t, d))
+		f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+		f.forget = true // the reload does not put the pin in force
+		if _, err := env.add(t, d, nil); err == nil || !strings.Contains(err.Error(), "as they were") {
+			t.Fatalf("err = %v, want the add refused, the files put back", err)
+		}
+		if got := readBytes(t, d); got != orig {
+			t.Errorf("daemon config not restored:\n%s", got)
+		}
+		if prev := readBytes(t, d+".prev"); prev != orig {
+			t.Errorf(".prev =\n%s\nwant the old bytes", prev)
+		}
+		check(t, d, gid, uid)
+	})
+}
+
+// What config add prints keeps to textWidth (a command line or the entry's
+// pins: line, with a pin in it, aside): a note's continuation lines are indented two spaces, the socket's
+// path on a line of its own; the daemon's reload reply a sentence to a line;
+// an entry that keeps the key says so once, in the verdict; a refusal is
+// wrapped too. Paths as short as /etc/tdns ones, so the widths are real.
+func TestAddOutputLayout(t *testing.T) {
+	short := func(t *testing.T) *addEnv {
+		env := newAddEnv(t)
+		dir, err := os.MkdirTemp("/tmp", "n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.RemoveAll(dir) })
+		env.dir, env.cli = dir, filepath.Join(dir, "tdns-ncli.yaml")
+		env.cert, env.key = filepath.Join(dir, "certs", "client.crt"), filepath.Join(dir, "certs", "client.key")
+		return env
+	}
+	lines := func(t *testing.T, out string) []string {
+		t.Helper()
+		ls := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+		for _, l := range ls {
+			if body := strings.TrimLeft(l, " "); len(l) > textWidth && !strings.HasPrefix(body, "tdns-ncli ") && !strings.HasPrefix(body, "pins:") {
+				t.Errorf("a line of %d characters: %q", len(l), l)
+			}
+		}
+		return ls
+	}
+	follows := func(t *testing.T, ls []string, want ...string) {
+		t.Helper()
+		for i := range ls {
+			if ls[i] == want[0] {
+				for j := 1; j < len(want); j++ {
+					if i+j >= len(ls) || ls[i+j] != want[j] {
+						t.Errorf("after %q, want %q, got\n%s", want[0], want[j], strings.Join(ls, "\n"))
+						return
+					}
+				}
+				return
+			}
+		}
+		t.Errorf("no line %q in\n%s", want[0], strings.Join(ls, "\n"))
+	}
+
+	t.Run("a new entry, reloaded", func(t *testing.T) {
+		env := short(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+		res, err := env.add(t, d, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sb strings.Builder
+		printAddResult(&sb, res, false, env.cli)
+		ls := lines(t, sb.String())
+		follows(t, ls,
+			"Note: as root, tdns-ncli uses this daemon's local admin socket",
+			"  "+env.socket()+" (admin, no key);",
+			"  tdns-ncli --tcp uses the TCP address")
+		follows(t, ls,
+			"Note: there was no tdns-auth entry yet, so this is the canonical one",
+			"  (tdns-ncli auth ...); --name adds an extra instance instead")
+		follows(t, ls,
+			"Reloaded: Config reloaded.",
+			"  Access file reloaded: 1 client(s), keyauth on.")
+	})
+
+	t.Run("the key kept, said once; a refusal", func(t *testing.T) {
+		env := short(t)
+		pin := env.pin(t)
+		dir := readOnlyDaemonDir(t, env)
+		d, dpin := env.certDaemon(t, dir, "")
+		os.Chmod(dir, 0o555)
+
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) {
+			t.Fatalf("new entry: err = %v, want a refusal", err)
+		}
+		var sb strings.Builder
+		printRefusal(&sb, r)
+		ls := lines(t, sb.String())
+		if !strings.HasPrefix(ls[0], "Error: not adding "+d+": ") {
+			t.Errorf("refusal begins %q", ls[0])
+		}
+		follows(t, ls, "  Fix: on the daemon's host, as root:",
+			"          tdns-ncli auth client add tester --pin "+pin+" --role read-write")
+
+		writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: "+env.url(8989)+"\n     apikey: the-key\n     authmethod: X-API-Key\n     tlsauth: pin\n     pins: [ \""+dpin+"\" ]\n     config-file: "+d+"\n")
+		res, err := env.add(t, d, nil)
+		if err != nil || !res.KeyKept {
+			t.Fatalf("%+v, %v", res, err)
+		}
+		sb.Reset()
+		printAddResult(&sb, res, false, env.cli)
+		out := sb.String()
+		ls = lines(t, out)
+		if n := strings.Count(flat(out), "keeps the API key"); n != 1 {
+			t.Errorf("says it keeps the key %d times:\n%s", n, out)
+		}
+		if !strings.HasPrefix(ls[0], `Already known as "tdns-auth"; it keeps the API key: your`) {
+			t.Errorf("verdict %q", ls[0])
+		}
+		follows(t, ls, "To use the certificate instead, on the daemon's host, as root:",
+			"   tdns-ncli auth client add tester --pin "+pin+" --role read-write",
+			"and add under apiserver: in "+d+":",
+			"   access-file: "+accessFileOf(d),
+			"and reload the daemon; then run config add again.")
+	})
+}
+
+// ------------------------------------------- review round (CodeRabbit, 11-23)
+
+// keyEntry is a hand-written key entry for daemon config d (certDaemon's,
+// at e.at(8989)), pinned.
+func (e *addEnv) keyEntry(d, dpin string) string {
+	return "apiservers:\n   - name: tdns-auth\n     baseurl: " + e.url(8989) + "\n     apikey: the-key\n     authmethod: X-API-Key\n     tlsauth: pin\n     pins: [ \"" + dpin + "\" ]\n     config-file: " + d + "\n"
+}
+
+// A known entry keeps the key only if the daemon takes it, and that is found
+// out whatever becomes of the certificate: with a client pair that cannot be
+// used, and when the entry cannot be rewritten for the certificate. When it
+// cannot be found out (the access file unreadable, the daemon not answering)
+// the entry keeps the key, as it is, but the add is refused: that the key
+// works is not known. An access file the daemon config does not name says
+// nothing about the key.
+func TestAddKeyFallbackNeedsAKeyTheDaemonTakes(t *testing.T) {
+	t.Run("keyauth off, the pair unusable: refused", func(t *testing.T) {
+		env := newAddEnv(t)
+		af := filepath.Join(env.dir, "access.yaml")
+		writeFile(t, af, "keyauth: false\nclients: []\n")
+		d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+		os.MkdirAll(filepath.Dir(env.key), 0o700)
+		writeFile(t, env.key, "a key without its certificate\n")
+		writeFile(t, env.cli, env.keyEntry(d, dpin))
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), "keyauth: false") || !strings.Contains(err.Error(), "without its certificate") {
+			t.Errorf("err = %v, want a refusal naming keyauth and the pair", err)
+		}
+		if readBytes(t, env.cli) != env.keyEntry(d, dpin) {
+			t.Error("the CLI config changed")
+		}
+	})
+
+	t.Run("the access file unreadable, the daemon not answering: refused, kept", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root reads anything")
+		}
+		env := newAddEnv(t)
+		env.pin(t)
+		af := filepath.Join(env.dir, "access.yaml")
+		writeFile(t, af, "keyauth: true\nclients: []\n")
+		os.Chmod(af, 0)
+		d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+		writeFile(t, env.cli, env.keyEntry(d, dpin))
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), `entry "tdns-auth" keeps its API key, but whether the daemon takes it`) {
+			t.Errorf("err = %v, want a refusal: the key's acceptance could not be told", err)
+		}
+		if readBytes(t, env.cli) != env.keyEntry(d, dpin) {
+			t.Error("the CLI config changed")
+		}
+	})
+
+	t.Run("the entry cannot be rewritten, keyauth off: refused", func(t *testing.T) {
+		env := newAddEnv(t)
+		env.pin(t)
+		af := filepath.Join(env.dir, "access.yaml")
+		writeFile(t, af, "keyauth: false\nclients: []\n")
+		d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+		first := "apiservers:\n   - authmethod: X-API-Key\n     name: tdns-auth\n     baseurl: " + env.url(8989) + "\n     apikey: the-key\n     tlsauth: pin\n     pins: [ \"" + dpin + "\" ]\n     config-file: " + d + "\n"
+		writeFile(t, env.cli, first)
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), "keyauth: false") {
+			t.Errorf("err = %v, want a refusal", err)
+		}
+		if readBytes(t, env.cli) != first || readBytes(t, af) != "keyauth: false\nclients: []\n" {
+			t.Error("a file changed")
+		}
+	})
+
+	t.Run("a file the daemon config does not name: the key works", func(t *testing.T) {
+		env := newAddEnv(t)
+		env.pin(t)
+		dir := readOnlyDaemonDir(t, env)
+		d, dpin := env.certDaemon(t, dir, "")
+		writeFile(t, accessFileOf(d), "keyauth: false\nclients: []\n")
+		os.Chmod(dir, 0o555)
+		writeFile(t, env.cli, env.keyEntry(d, dpin))
+		if res, err := env.add(t, d, nil); err != nil || !res.KeyKept {
+			t.Errorf("%+v, %v; want the key kept", res, err)
+		}
+	})
+}
+
+// The pin in the access file is not enough when the running daemon does not
+// have it (a `client add --no-reload`): config add reloads it, checks, and
+// only then switches the entry. Nothing is written to the access file.
+func TestAddReloadsAPendingPolicy(t *testing.T) {
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	af := filepath.Join(env.dir, "access.yaml")
+	acc := "keyauth: true\nclients:\n   - name: laptop\n     pin: " + pin + "\n     role: read-write\n"
+	writeFile(t, af, acc)
+	d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+	f := serveFakeDaemon(t, env.socket(), d, af) // runs no policy yet
+	writeFile(t, env.cli, env.keyEntry(d, dpin))
+	res, err := env.add(t, d, nil)
+	if err != nil || !res.Switched || res.Cert.state != certCanEnable {
+		t.Fatalf("%+v, %v; want it switched after a reload", res, err)
+	}
+	if n := f.reloadCount(); n != 1 {
+		t.Errorf("%d reloads, want 1", n)
+	}
+	if readBytes(t, af) != acc {
+		t.Error("the access file was rewritten")
+	}
+	// Run again: the daemon now has the pin, so nothing more.
+	if res, err = env.add(t, d, nil); err != nil || res.Cert.state != certWorks || f.reloadCount() != 1 {
+		t.Errorf("again: %+v, %v, %d reloads", res, err, f.reloadCount())
+	}
+}
+
+// Between config add's read of the daemon config and its write, the config
+// may come to name another access file: the enrollment is not made in the
+// old one.
+func TestAddRechecksTheAccessFileBinding(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	d, _ := env.certDaemon(t, env.dir, "")
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	if c.state != certCanEnable || !c.nameIt {
+		t.Fatalf("plan %+v", c)
+	}
+	other := filepath.Join(env.dir, "other-access.yaml")
+	moved := withAccessLine(readBytes(t, d), other)
+	writeFile(t, d, moved)
+	if err := c.apply(nil); err == nil || !strings.Contains(err.Error(), "now names") {
+		t.Errorf("err = %v, want a refusal saying the binding changed", err)
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("the planned access file was written")
+	}
+	if readBytes(t, d) != moved {
+		t.Error("the daemon config was changed")
+	}
+}
+
+// A daemon that starts after config add found none, but before the files
+// are written, read the old ones: it is reloaded and checked like one that
+// was running.
+func TestAddReloadsADaemonThatStartedMeanwhile(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	d, _ := env.certDaemon(t, env.dir, "")
+	info, _ := ReadDaemonApi(d, "")
+	c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	if c.state != certCanEnable || c.running {
+		t.Fatalf("plan %+v", c)
+	}
+	f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+	if err := c.apply(nil); err != nil {
+		t.Fatal(err)
+	}
+	c.release()
+	if !c.running || f.reloadCount() != 1 || c.reloaded == "" {
+		t.Errorf("running %v, %d reloads, reply %q; want it reloaded", c.running, f.reloadCount(), c.reloaded)
+	}
+}
+
+// A reload that does not put the pin in force is undone in the daemon too:
+// the files put back, and the daemon reloaded again so it runs them.
+func TestAddRollbackReloadsTheDaemon(t *testing.T) {
+	env := newAddEnv(t)
+	d, _ := env.certDaemon(t, env.dir, "")
+	f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+	f.forget = true
+	_, err := env.add(t, d, nil)
+	if err == nil || !strings.Contains(err.Error(), "the files are as they were, and the daemon runs them again") {
+		t.Errorf("err = %v, want the files and the daemon put back", err)
+	}
+	if n := f.reloadCount(); n != 2 {
+		t.Errorf("%d reloads, want 2 (the edit, and its undo)", n)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.policy != nil {
+		t.Errorf("the daemon still runs a policy: %+v", f.policy)
+	}
+}
+
+// shortDaemonLimits shortens the bounds on a daemon's answer (sendBounded)
+// for the test, so a daemon that never answers does not cost it 10 seconds.
+func shortDaemonLimits(t *testing.T) (ask, reload time.Duration) {
+	t.Helper()
+	savedAsk, savedReload := daemonAskLimit, daemonReloadLimit
+	t.Cleanup(func() { daemonAskLimit, daemonReloadLimit = savedAsk, savedReload })
+	daemonAskLimit, daemonReloadLimit = 150*time.Millisecond, 250*time.Millisecond
+	return daemonAskLimit, daemonReloadLimit
+}
+
+// serveSilent listens on network and addr, accepts every connection and
+// keeps it open without a byte in reply, as nc -kl does: a wedged daemon.
+// It returns the address it listens on.
+func serveSilent(t *testing.T, network, addr string) string {
+	t.Helper()
+	ln, err := net.Listen(network, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var conns []net.Conn // the accept loop's alone, until it is done
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			conns = append(conns, c)
+		}
+	}()
+	t.Cleanup(func() {
+		// The loop ends once the listener is closed; a connection it took
+		// just before is in conns by then.
+		ln.Close()
+		<-done
+		for _, c := range conns {
+			c.Close()
+		}
+	})
+	return ln.Addr().String()
+}
+
+// serveHangingReload serves a daemon's local admin socket sock: it answers
+// status as the daemon of cfg (no access policy), and takes a reload without
+// ever answering it, as a daemon the reload wedges. It counts the reloads.
+func serveHangingReload(t *testing.T, sock, cfg string) *atomic.Int32 {
+	t.Helper()
+	var reloads atomic.Int32
+	stop := make(chan struct{})
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var cp tdns.ConfigPost
+		json.NewDecoder(r.Body).Decode(&cp)
+		if cp.Command == "reload" {
+			reloads.Add(1)
+			select {
+			case <-r.Context().Done():
+			case <-stop:
+			}
+			return
+		}
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: cfg})
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() {
+		close(stop)
+		srv.Close()
+	})
+	return &reloads
+}
+
+// A daemon that accepts on its local admin socket and never answers (H70:
+// nc -klU on the socket hung config add --dry-run for 79 minutes): the
+// status ask is bounded, and config add refuses, dry run or not, saying so
+// with a fix about the daemon. Nothing is written.
+func TestAddRefusesAWedgedDaemon(t *testing.T) {
+	for _, dry := range []bool{true, false} {
+		t.Run(fmt.Sprintf("dry run %v", dry), func(t *testing.T) {
+			env := newAddEnv(t)
+			ask, _ := shortDaemonLimits(t)
+			d, _ := env.certDaemon(t, env.dir, "")
+			cfg := readBytes(t, d)
+			serveSilent(t, "unix", env.socket())
+
+			start := time.Now()
+			_, err := env.add(t, d, func(o *AddOptions) { o.DryRun = dry })
+			if took := time.Since(start); took > 5*time.Second {
+				t.Errorf("config add took %v, with a limit of %v", took, ask)
+			}
+			var r addRefusal
+			want := fmt.Sprintf("the daemon on %s accepted but did not answer within %v", env.socket(), ask)
+			if !errors.As(err, &r) || !strings.Contains(r.why, want) {
+				t.Fatalf("err = %v, want a refusal saying %q", err, want)
+			}
+			if wantFix := []string{daemonWedgedFix + ";", "then run config add again."}; !reflect.DeepEqual(r.fix, wantFix) {
+				t.Errorf("fix %q, want %q", r.fix, wantFix)
+			}
+			var sb strings.Builder
+			printRefusal(&sb, r)
+			if out := flat(sb.String()); !strings.Contains(out, "Fix: check whether the daemon is wedged (its log), or restart it; then run config add again.") {
+				t.Errorf("printed:\n%s", sb.String())
+			}
+			if readBytes(t, d) != cfg {
+				t.Error("the daemon config changed")
+			}
+			if _, err := os.Stat(accessFileOf(d)); err == nil {
+				t.Error("an access file was created")
+			}
+			if _, err := os.Stat(env.cli); err == nil {
+				t.Error("the CLI config was written")
+			}
+		})
+	}
+}
+
+// A reload the daemon takes and never answers is a failed reload: bounded,
+// and the rollback runs as for any other failed reload. The files are put
+// back, the daemon is sent the reload again (bounded too), and the refusal
+// says what happened, with the fix about the daemon.
+func TestAddReloadThatTimesOutIsPutBack(t *testing.T) {
+	env := newAddEnv(t)
+	_, reload := shortDaemonLimits(t)
+	d, _ := env.certDaemon(t, env.dir, "")
+	cfg := readBytes(t, d)
+	reloads := serveHangingReload(t, env.socket(), d)
+
+	start := time.Now()
+	_, err := env.add(t, d, nil)
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("config add took %v, with a reload limit of %v", took, reload)
+	}
+	var r addRefusal
+	want := fmt.Sprintf("written, but the reload failed: the daemon on %s accepted but did not answer within %v", env.socket(), reload)
+	if !errors.As(err, &r) || !strings.Contains(r.why, want) || !strings.Contains(r.why, "the files are as they were") {
+		t.Fatalf("err = %v, want a refusal saying %q and that the files are put back", err, want)
+	}
+	if !strings.Contains(r.why, "the daemon could NOT be reloaded with them") {
+		t.Errorf("err = %v, want it to say the undoing reload failed too", err)
+	}
+	if wantFix := []string{daemonWedgedFix + ";", "then run config add again."}; !reflect.DeepEqual(r.fix, wantFix) {
+		t.Errorf("fix %q, want %q", r.fix, wantFix)
+	}
+	if n := reloads.Load(); n != 2 {
+		t.Errorf("%d reloads, want 2 (the edit, and its undo)", n)
+	}
+	if readBytes(t, d) != cfg {
+		t.Errorf("the daemon config was not put back:\n%s", readBytes(t, d))
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("the new access file was not removed")
+	}
+	if _, err := os.Stat(env.cli); err == nil {
+		t.Error("the CLI config was written")
+	}
+}
+
+// A timeout names where the daemon is, and whether it accepted at all.
+func TestDaemonTimeoutError(t *testing.T) {
+	e := &daemonTimeoutError{where: "the daemon at 127.0.0.1:8989", command: "status", limit: 10 * time.Second}
+	if got, want := e.Error(), "the daemon at 127.0.0.1:8989 did not accept a connection within 10s"; got != want {
+		t.Errorf("%q, want %q", got, want)
+	}
+	e.connected = true
+	if got, want := e.Error(), "the daemon at 127.0.0.1:8989 accepted but did not answer within 10s"; got != want {
+		t.Errorf("%q, want %q", got, want)
+	}
+	if !daemonTimedOut(fmt.Errorf("written, but the reload failed: %w", e)) {
+		t.Error("a wrapped timeout is not found")
+	}
+}
+
+// When the CLI config cannot be written after the daemon's side was set up,
+// the daemon's side is put back too: no access policy for an entry that does
+// not exist.
+func TestAddRollsBackWhenTheCliConfigCannotBeWritten(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes anywhere")
+	}
+	env := newAddEnv(t)
+	env.pin(t)
+	d, _ := env.certDaemon(t, env.dir, "")
+	orig := readBytes(t, d)
+	cliDir := filepath.Join(env.dir, "cli")
+	os.Mkdir(cliDir, 0o755)
+	env.cli = filepath.Join(cliDir, "tdns-ncli.yaml")
+	// The lock file is there, so the add gets as far as its write.
+	unlock, err := lockCliConfig(context.Background(), env.cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	os.Chmod(cliDir, 0o555)
+	t.Cleanup(func() { os.Chmod(cliDir, 0o755) })
+
+	_, err = env.add(t, d, nil)
+	if err == nil || !strings.Contains(err.Error(), "On the daemon's side, the files are as they were") {
+		t.Errorf("err = %v, want the daemon's side put back", err)
+	}
+	if readBytes(t, d) != orig {
+		t.Error("the daemon config was not put back")
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("the access file was not removed")
+	}
+}
+
+// clientCommandsFor makes the `client` commands of role auth edit daemon
+// config d, as on the daemon's host: the role's entry names d. Its address
+// is one nothing listens on (closedAddr), so an edit's check of the running
+// daemon finds none.
+func clientCommandsFor(t *testing.T, d string) {
+	t.Helper()
+	RegisterRole("auth", "tdns-auth")
+	saved := apiConfig
+	t.Cleanup(func() { apiConfig = saved })
+	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://" + closedAddr(t) + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", ConfigFile: d}}}
+	if err := InitApiClients(apiConfig); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// appliedCert is a config add whose apply enrolled the pin in an access file
+// that was there (anna in it) and named it in the daemon config: both files
+// written, a rollback still to come.
+type appliedCert struct {
+	c          *CertSetup
+	d, af      string
+	cfg, acc   string // the daemon config and the access file before apply
+	accApplied string // the access file as apply wrote it
+}
+
+func applyForRollback(t *testing.T) appliedCert {
+	t.Helper()
+	env := newAddEnv(t)
+	env.pin(t)
+	d, _ := env.certDaemon(t, env.dir, "")
+	a := appliedCert{d: d, af: accessFileOf(d), cfg: readBytes(t, d),
+		acc: "keyauth: true\nclients:\n   - name: anna\n     pin: " + pinOf("anna") + "\n     role: read-only\n"}
+	writeFile(t, a.af, a.acc)
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.c = planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	if a.c.state != certCanEnable || !a.c.nameIt || !a.c.addPin {
+		t.Fatalf("plan %+v", a.c)
+	}
+	if err := a.c.apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.c.release) // a no-op once rolled back
+	if len(a.c.undo) != 2 || readBytes(t, d) == a.cfg {
+		t.Fatalf("apply did not write both files: %+v", a.c.undo)
+	}
+	a.accApplied = readBytes(t, a.af)
+	clientCommandsFor(t, d)
+	return a
+}
+
+// rollback compares each file with what apply wrote and puts it back as one
+// step, under the locks apply takes: the access file's, which the `client`
+// edits take, and the daemon config's. An edit that comes between the
+// compare and the restore waits for the lock, and is then made on the file
+// put back: neither change is lost. A file changed before the compare is
+// left as it is. Apply's own rollback runs under the locks apply holds,
+// without taking them again (which would wait for itself).
+func TestRollbackHoldsTheFileLocks(t *testing.T) {
+	t.Run("an edit between compare and restore waits, and is kept", func(t *testing.T) {
+		a := applyForRollback(t)
+		var restored []string
+		var done chan struct{}
+		var editErr error
+		testHookRollbackRestore = func(path string) {
+			restored = append(restored, path)
+			switch path {
+			case a.d:
+				// Another add, which would write access-file: here,
+				// waits for the daemon config's lock.
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				defer cancel()
+				if unlock, err := lockCliConfig(ctx, a.d); err == nil {
+					unlock()
+					t.Error("the daemon config's lock is free between rollback's compare and its restore")
+				}
+			case a.af:
+				done = make(chan struct{})
+				go func() {
+					defer close(done)
+					editErr = editAccessFile(context.Background(), "auth", accessEditOpts{NoReload: true}, true, func(af *tdns.AccessFile) (string, error) {
+						af.Clients = append(af.Clients, tdns.AccessClient{Name: "late", Pin: pinOf("late"), Role: "read-only"})
+						return "added late", nil
+					})
+				}()
+				select {
+				case <-done:
+					t.Errorf("the client edit did not wait for rollback's lock (err %v)", editErr)
+				case <-time.After(300 * time.Millisecond):
+				}
+				if got := readBytes(t, a.af); got != a.accApplied {
+					t.Errorf("the access file changed between rollback's compare and its restore:\n%s", got)
+				}
+			}
+		}
+		t.Cleanup(func() { testHookRollbackRestore = nil })
+		msg := a.c.rollback(context.Background())
+		testHookRollbackRestore = nil
+		if !reflect.DeepEqual(restored, []string{a.d, a.af}) {
+			t.Fatalf("rollback put back %v, want %s, then %s", restored, a.d, a.af)
+		}
+		<-done
+		if editErr != nil {
+			t.Fatalf("the client edit, once rollback let go: %v", editErr)
+		}
+		if msg != "the files are as they were" {
+			t.Errorf("rollback says %q", msg)
+		}
+		if readBytes(t, a.d) != a.cfg {
+			t.Errorf("the daemon config was not put back:\n%s", readBytes(t, a.d))
+		}
+		// The edit was made on the file put back: its .prev is that file,
+		// and the result is anna and late, without the pin apply enrolled.
+		if prev := readBytes(t, a.af+".prev"); prev != a.acc {
+			t.Errorf("the edit read %q, want the file put back", prev)
+		}
+		acc, err := tdns.LoadAccessFile(a.af)
+		if err != nil || len(acc.Clients) != 2 || acc.Clients[0].Name != "anna" || acc.Clients[1].Name != "late" {
+			t.Errorf("access file %+v (%v), want anna, then late", acc, err)
+		}
+	})
+
+	t.Run("a file changed before the compare is left as it is", func(t *testing.T) {
+		a := applyForRollback(t)
+		// A hand edit, which takes no lock: a `client` edit waits for the
+		// locks apply keeps until the add is done
+		// (TestAnotherAddWaitsForAnEnrolmentInFlight).
+		edited := a.accApplied + "# edited by hand\n"
+		writeFile(t, a.af, edited)
+		var restored []string
+		testHookRollbackRestore = func(path string) { restored = append(restored, path) }
+		t.Cleanup(func() { testHookRollbackRestore = nil })
+		msg := a.c.rollback(context.Background())
+		testHookRollbackRestore = nil
+		if !reflect.DeepEqual(restored, []string{a.d}) {
+			t.Errorf("rollback went on to put back %v, want only %s", restored, a.d)
+		}
+		if readBytes(t, a.af) != edited {
+			t.Errorf("rollback overwrote the access file changed since apply:\n%s", readBytes(t, a.af))
+		}
+		if !strings.Contains(msg, "except "+a.af+", changed since config add wrote it, and left as it is") {
+			t.Errorf("rollback says %q", msg)
+		}
+		if readBytes(t, a.d) != a.cfg {
+			t.Error("the daemon config was not put back")
+		}
+	})
+
+	t.Run("apply's own rollback: under the locks it holds, taken once", func(t *testing.T) {
+		env := newAddEnv(t)
+		env.pin(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		cfg := readBytes(t, d)
+		f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+		f.mu.Lock()
+		f.forget = true // the reload leaves the pin out: apply fails after both writes
+		f.mu.Unlock()
+		info, err := ReadDaemonApi(d, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+		if c.state != certCanEnable || !c.nameIt {
+			t.Fatalf("plan %+v", c)
+		}
+		var held []string
+		testHookRollbackRestore = func(path string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			if unlock, err := lockCliConfig(ctx, path); err == nil {
+				unlock()
+				return
+			}
+			held = append(held, path)
+		}
+		t.Cleanup(func() { testHookRollbackRestore = nil })
+		done := make(chan error, 1)
+		go func() { done <- c.apply(context.Background()) }()
+		select {
+		case err = <-done:
+		case <-time.After(20 * time.Second):
+			t.Fatal("apply hangs: its rollback waits for the locks apply holds")
+		}
+		if err == nil || !strings.Contains(err.Error(), "does not have your certificate") || !strings.Contains(err.Error(), "the files are as they were") {
+			t.Errorf("err = %v, want the failure and the files put back", err)
+		}
+		if want := []string{d, accessFileOf(d)}; !reflect.DeepEqual(held, want) {
+			t.Errorf("files put back with their lock held: %v, want %v", held, want)
+		}
+		if readBytes(t, d) != cfg {
+			t.Error("the daemon config was not put back")
+		}
+		if _, err := os.Stat(accessFileOf(d)); err == nil {
+			t.Error("the new access file was not removed")
+		}
+	})
+}
+
+// A socket that answers for another daemon config is not this daemon, told
+// apart from a socket config add may not open (asked over TCP then): neither
+// that daemon nor the access file is taken, though the file lists your pin.
+// A key entry keeps its key as it is, and is not switched to the
+// certificate, but the add is refused: whether the daemon takes the key
+// could not be told. A new entry is refused. Nothing is written, and
+// nothing reloaded.
+func TestAddSocketRunningAnotherConfig(t *testing.T) {
+	type world struct {
+		env         *addEnv
+		d, dpin, af string
+		cfg, acc    string
+		f           *fakeSocketDaemon
+	}
+	setup := func(t *testing.T) world {
+		env := newAddEnv(t)
+		w := world{env: env, af: filepath.Join(env.dir, "access.yaml")}
+		w.acc = "keyauth: true\nclients:\n   - name: laptop\n     pin: " + env.pin(t) + "\n     role: read-write\n"
+		writeFile(t, w.af, w.acc)
+		w.d, w.dpin = env.certDaemon(t, env.dir, "\n   access-file: "+w.af)
+		w.cfg = readBytes(t, w.d)
+		w.f = serveFakeDaemon(t, env.socket(), w.d, w.af)
+		w.f.mu.Lock()
+		w.f.runs = "/etc/tdns/other.yaml"
+		w.f.mu.Unlock()
+		return w
+	}
+	unchanged := func(t *testing.T, w world) {
+		t.Helper()
+		if readBytes(t, w.af) != w.acc || readBytes(t, w.d) != w.cfg {
+			t.Error("the access file or the daemon config changed")
+		}
+		if n := w.f.reloadCount(); n != 0 {
+			t.Errorf("%d reloads sent to the other daemon", n)
+		}
+	}
+
+	t.Run("a key entry: kept as it is, not switched, refused", func(t *testing.T) {
+		w := setup(t)
+		writeFile(t, w.env.cli, w.env.keyEntry(w.d, w.dpin))
+		_, err := w.env.add(t, w.d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), "keeps its API key, but whether the daemon takes it, or your certificate, cannot be told") ||
+			!strings.Contains(err.Error(), "runs /etc/tdns/other.yaml") || strings.Contains(err.Error(), "lists your certificate") {
+			t.Fatalf("err = %v; want a refusal: neither the key nor the certificate can be told to work", err)
+		}
+		if n := strings.Count(r.why, "runs /etc/tdns/other.yaml"); n != 1 {
+			t.Errorf("the reason is said %d times: %s", n, r.why)
+		}
+		if readBytes(t, w.env.cli) != w.env.keyEntry(w.d, w.dpin) {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, w.env.cli))
+		}
+		unchanged(t, w)
+	})
+
+	t.Run("a new entry: refused", func(t *testing.T) {
+		w := setup(t)
+		_, err := w.env.add(t, w.d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), "runs /etc/tdns/other.yaml") || strings.Contains(err.Error(), "lists your certificate") {
+			t.Errorf("err = %v, want a refusal naming the other config", err)
+		}
+		if _, err := os.Stat(w.env.cli); err == nil {
+			t.Error("the refused add wrote the CLI config")
+		}
+		unchanged(t, w)
+	})
+
+	// The fix is about the daemon that answers, naming both configs, not
+	// the enrolment (there is no name or pin to give it, and enrolling does
+	// not help while another daemon answers): the dry run and the add alike.
+	fixFor := func(w world) []string {
+		return []string{
+			"stop the daemon that runs /etc/tdns/other.yaml,",
+			"or give /etc/tdns/other.yaml and " + w.d,
+			"their own admin socket and API addresses",
+			"(apiserver.socket, apiserver.addresses);",
+			"then run config add again.",
+		}
+	}
+	noEnrol := func(t *testing.T, out string) {
+		t.Helper()
+		for _, l := range strings.Split(out, "\n") {
+			if strings.Contains(l, "client add ''") || strings.Contains(l, "<your pin>") || strings.Contains(l, "client add") {
+				t.Errorf("printed the enrolment: %q", l)
+			}
+		}
+	}
+	for _, dry := range []bool{true, false} {
+		t.Run(fmt.Sprintf("a key entry, dry run %v: the fix", dry), func(t *testing.T) {
+			w := setup(t)
+			writeFile(t, w.env.cli, w.env.keyEntry(w.d, w.dpin))
+			_, err := w.env.add(t, w.d, func(o *AddOptions) { o.DryRun = dry })
+			var r addRefusal
+			if !errors.As(err, &r) {
+				t.Fatalf("err = %v, want a refusal", err)
+			}
+			if want := fixFor(w); !reflect.DeepEqual(r.fix, want) {
+				t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(r.fix, "\n"), strings.Join(want, "\n"))
+			}
+			var sb strings.Builder
+			printRefusal(&sb, r)
+			noEnrol(t, sb.String())
+			unchanged(t, w)
+		})
+		t.Run(fmt.Sprintf("a new entry, dry run %v: the fix", dry), func(t *testing.T) {
+			w := setup(t)
+			_, err := w.env.add(t, w.d, func(o *AddOptions) { o.DryRun = dry })
+			var r addRefusal
+			if !errors.As(err, &r) {
+				t.Fatalf("err = %v, want a refusal", err)
+			}
+			if want := fixFor(w); !reflect.DeepEqual(r.fix, want) {
+				t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(r.fix, "\n"), strings.Join(want, "\n"))
+			}
+			var sb strings.Builder
+			printRefusal(&sb, r)
+			noEnrol(t, sb.String())
+			unchanged(t, w)
+		})
+	}
+}
+
+// A daemon on the socket that is not told to be this one for another reason
+// gets a fix about that too; and a dry run before your pair exists names no
+// pin it does not have.
+func TestCertFixLinesUnidentifiedAndNoPin(t *testing.T) {
+	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml", Socket: "/var/run/tdns-auth.sock", Configured: true}
+	for _, tc := range []struct {
+		name string
+		c    *CertSetup
+		want []string
+	}{
+		{
+			name: "it does not say which config it runs",
+			c:    &CertSetup{word: "auth", state: certCannot, t: tg, unidentified: true, other: &otherConfigError{want: tg.DaemonConfig}},
+			want: []string{
+				"stop the daemon that answers on /var/run/tdns-auth.sock if it does",
+				"not run /etc/tdns/tdns-auth.yaml, or give the two configs their own",
+				"admin socket and API addresses; if it does, upgrade it so it",
+				"says which config it runs; then run config add again.",
+			},
+		},
+		{
+			name: "it cannot be asked",
+			c:    &CertSetup{word: "auth", state: certCannot, t: tg, unidentified: true},
+			want: []string{
+				"fix what stops the daemon on /var/run/tdns-auth.sock saying",
+				"which config it runs (the error says what);",
+				"then run config add again.",
+			},
+		},
+		{
+			name: "a dry run before your pair exists",
+			c:    &CertSetup{word: "auth", name: "ops-laptop", state: certCannot, t: tg, pairNew: true},
+			want: []string{
+				"your client certificate does not exist yet, so it has no pin",
+				"to enrol; config add makes it when run without --dry-run,",
+				"and then says how to enrol it.",
+			},
+		},
+	} {
+		if got := tc.c.fixLines(); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%s; fix:\n%s\nwant:\n%s", tc.name, strings.Join(got, "\n"), strings.Join(tc.want, "\n"))
+		}
+	}
+}
+
+// When the daemon's socket cannot be used, a request through the role's entry
+// names the daemon config it is for, so a daemon that runs another refuses it
+// before acting on it.
+func TestConfigToDaemonFallbackNamesTheConfig(t *testing.T) {
+	got := make(chan string, 4)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Get(tdns.ExpectConfigFileHeader)
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{})
+	}))
+	defer srv.Close()
+	e := newAccessEnv(t, true, srv.URL+"/api/v1")
+	apiConfig.ApiServers[0].TLSAuth = "pin"
+	apiConfig.ApiServers[0].Pins = []string{tdns.SPKISHA256(srv.Certificate())}
+	if err := InitApiClients(apiConfig); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp("/tmp", "ncli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	absent := filepath.Join(dir, "absent.sock")
+	if _, err := configToDaemon("auth", absent, e.daemonCfg, tdns.ConfigPost{Command: "reload"}); err != nil {
+		t.Fatal(err)
+	}
+	if h := <-got; h != e.daemonCfg {
+		t.Errorf("the request named %q, want %s", h, e.daemonCfg)
+	}
+	// The role's client itself is unchanged.
+	api, _ := GetApiClient("auth", false)
+	if _, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"}); err != nil {
+		t.Fatal(err)
+	}
+	if h := <-got; h != "" {
+		t.Errorf("the role's own client now names %q", h)
+	}
+}
+
+// A dry run writes nothing, not even a probe: it predicts the access file's
+// edit in a directory it could not write, and says that is found out when
+// config add runs. Its prediction of a new pair matches what the add does: a
+// key without its certificate is refused, as ensureClientCert refuses it.
+func TestAddDryRunProbesNothing(t *testing.T) {
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	certBefore, keyBefore := readBytes(t, env.cert), readBytes(t, env.key)
+	dir := readOnlyDaemonDir(t, env)
+	d, _ := env.certDaemon(t, dir, "")
+	os.Chmod(dir, 0o555)
+	res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = true })
+	if err != nil || res.Cert.state != certCanEnable {
+		t.Fatalf("%+v, %v; want the edit predicted", res, err)
+	}
+	// The pair that is there is read, not made again (not through
+	// ensureClientCert, which makes one if the certificate went meanwhile).
+	if res.Cert.pin != pin || res.Cert.pairNew || readBytes(t, env.cert) != certBefore || readBytes(t, env.key) != keyBefore {
+		t.Errorf("the dry run did not read your pair as it is: pin %q (want %q), new %v", res.Cert.pin, pin, res.Cert.pairNew)
+	}
+	if out := printed(res, true, env.cli); !strings.Contains(out, "found out when it runs") {
+		t.Errorf("printed:\n%s", out)
+	}
+
+	env2 := newAddEnv(t)
+	d2, _ := env2.certDaemon(t, env2.dir, "")
+	os.MkdirAll(filepath.Dir(env2.key), 0o700)
+	writeFile(t, env2.key, "a key without its certificate\n")
+	if _, err := env2.add(t, d2, func(o *AddOptions) { o.DryRun = true }); err == nil || !strings.Contains(err.Error(), clientKeyWithoutCertError(env2.cert, env2.key).Error()) {
+		t.Errorf("dry run, an orphan key: err = %v, want the refusal the add gives", err)
+	}
+	if _, err := os.Stat(env2.cert); err == nil {
+		t.Error("the dry run made a certificate")
+	}
+}
+
+// The advice is a command that runs as printed: a client name with a space
+// is quoted; and a pin already listed is not enrolled again.
+func TestCertFixLines(t *testing.T) {
+	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml"}
+	c := &CertSetup{word: "auth", listedAs: "Ops Laptop", state: certDisabled, t: tg}
+	if fix := strings.Join(c.fixLines(), "\n"); !strings.Contains(fix, "client enable 'Ops Laptop'") {
+		t.Errorf("fix:\n%s", fix)
+	}
+	c = &CertSetup{word: "auth", listedAs: "laptop", pin: pinOf("p"), state: certCannot, t: tg}
+	fix := strings.Join(c.fixLines(), "\n")
+	if strings.Contains(fix, "client add") || !strings.Contains(fix, "access-file: "+tg.File) {
+		t.Errorf("a listed pin, the file not named; fix:\n%s", fix)
+	}
+	tg.Configured = true
+	if fix := strings.Join(c.fixLines(), "\n"); strings.Contains(fix, "client add") || !strings.Contains(fix, "tdns-ncli auth config reload") {
+		t.Errorf("a listed pin, the file named; fix:\n%s", fix)
+	}
+}
+
+// When the operator's own pair cannot be used there is no pin, so the fix is
+// not the enrolment (client add --pin): it is to put the pair right, or to
+// remove it so config add makes a new one, with the paths named. The dry run
+// and the add say the same.
+func TestAddOwnPairUnusableFix(t *testing.T) {
+	keyOnly := func(cert, key string) []string {
+		return []string{
+			"put back your certificate " + cert + ",",
+			"or remove your key " + key + " so config add makes a new pair;",
+			"then run config add again.",
+		}
+	}
+	noMatch := func(cert, key string) []string {
+		return []string{
+			"make your certificate " + cert + " and your key " + key + " one pair again,",
+			"or remove both so config add makes a new pair;",
+			"then run config add again.",
+		}
+	}
+	badCert := func(cert, key string) []string {
+		return []string{
+			"fix your certificate " + cert + " so it can be read,",
+			"or remove it and your key " + key + " so config add makes a new pair;",
+			"then run config add again.",
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		notRoot bool // root reads anything
+		setup   func(t *testing.T, env *addEnv)
+		want    func(cert, key string) []string
+		whyHas  string
+	}{
+		{
+			name: "a key without its certificate",
+			setup: func(t *testing.T, env *addEnv) {
+				os.MkdirAll(filepath.Dir(env.key), 0o700)
+				writeFile(t, env.key, "a key without its certificate\n")
+			},
+			want: keyOnly, whyHas: "without its certificate",
+		},
+		{
+			name: "a certificate with another pair's key",
+			setup: func(t *testing.T, env *addEnv) {
+				env.pin(t)
+				other := filepath.Join(env.dir, "other")
+				if _, _, err := ensureClientCert(filepath.Join(other, "o.crt"), filepath.Join(other, "o.key"), "otto"); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, env.key, readBytes(t, filepath.Join(other, "o.key")))
+			},
+			want: noMatch, whyHas: "not a usable pair",
+		},
+		{
+			name: "a certificate without its key",
+			setup: func(t *testing.T, env *addEnv) {
+				env.pin(t)
+				os.Remove(env.key)
+			},
+			want: noMatch, whyHas: "not a usable pair",
+		},
+		{
+			name:    "an unreadable certificate",
+			notRoot: true,
+			setup: func(t *testing.T, env *addEnv) {
+				env.pin(t)
+				os.Chmod(env.cert, 0)
+			},
+			want: badCert, whyHas: "permission denied",
+		},
+	} {
+		for _, dry := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, dry run %v", tc.name, dry), func(t *testing.T) {
+				if tc.notRoot && os.Geteuid() == 0 {
+					t.Skip("root reads anything")
+				}
+				env := newAddEnv(t)
+				d, _ := env.certDaemon(t, env.dir, "")
+				tc.setup(t, env)
+				res, err := env.add(t, d, func(o *AddOptions) { o.DryRun = dry })
+				var r addRefusal
+				if !errors.As(err, &r) {
+					t.Fatalf("%+v, %v; want a refusal", res, err)
+				}
+				if want := tc.want(env.cert, env.key); !reflect.DeepEqual(r.fix, want) {
+					t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(r.fix, "\n"), strings.Join(want, "\n"))
+				}
+				if !strings.Contains(r.why, tc.whyHas) {
+					t.Errorf("why %q, want it to say %q", r.why, tc.whyHas)
+				}
+				var sb strings.Builder
+				printRefusal(&sb, r)
+				if out := sb.String(); strings.Contains(out, "client add") || !strings.Contains(out, "  Fix: ") {
+					t.Errorf("printed:\n%s", out)
+				}
+				if _, err := os.Stat(accessFileOf(d)); err == nil {
+					t.Error("an access file was written")
+				}
+			})
+		}
+	}
+}
+
+// The fix for the operator's pair names it, whatever else the setup says;
+// any other pair trouble (the error says what) is not the enrolment either.
+func TestCertFixLinesOwnPair(t *testing.T) {
+	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml"}
+	c := &CertSetup{word: "auth", cert: "/root/.config/tdns/client.crt", key: "/root/.config/tdns/client.key", state: certCannot, t: tg, pairProblem: pairOther}
+	want := []string{
+		"fix what stops config add reading or making your pair,",
+		"/root/.config/tdns/client.crt and /root/.config/tdns/client.key (the error says what);",
+		"then run config add again.",
+	}
+	if got := c.fixLines(); !reflect.DeepEqual(got, want) {
+		t.Errorf("other pair trouble; fix:\n%s", strings.Join(got, "\n"))
+	}
+	var sb strings.Builder
+	printRefusal(&sb, c.refusal("your client certificate cannot be used (mkdir: permission denied)"))
+	wantOut := "Error: your client certificate cannot be used (mkdir: permission\n" +
+		"  denied).\n" +
+		"  Fix: fix what stops config add reading or making your pair,\n" +
+		"       /root/.config/tdns/client.crt and /root/.config/tdns/client.key\n" +
+		"       (the error says what); then run config add again.\n"
+	if out := sb.String(); out != wantOut {
+		t.Errorf("printed:\n%s\nwant:\n%s", out, wantOut)
+	}
+}
+
+// fakeTCPDaemon is a daemon's TCP API that answers pings: as the access
+// file would, a client certificate with the enrolled pin is taken (as
+// tester, read-write), the API key when keyTaken, anything else refused
+// (403). It asks for client certificates, as the daemon does.
+type fakeTCPDaemon struct {
+	srv      *httptest.Server
+	enrolled string // the pin taken
+	keyTaken bool
+	certFile string // its certificate, for apiserver.certfile
+}
+
+func serveFakeTCPDaemon(t *testing.T, enrolled string, keyTaken bool) *fakeTCPDaemon {
+	t.Helper()
+	f := &fakeTCPDaemon{enrolled: enrolled, keyTaken: keyTaken}
+	f.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/ping" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			if tdns.SPKISHA256(r.TLS.PeerCertificates[0]) == f.enrolled {
+				json.NewEncoder(w).Encode(tdns.PingResponse{Msg: "pong", Role: "read-write", Via: "certificate", Identity: "tester"})
+				return
+			}
+			http.Error(w, "unknown client certificate", http.StatusForbidden)
+			return
+		}
+		if r.Header.Get("X-API-Key") == "the-key" && f.keyTaken {
+			json.NewEncoder(w).Encode(tdns.PingResponse{Msg: "pong", Role: "read-write", Via: "api key", Identity: "apikey"})
+			return
+		}
+		http.Error(w, "refused", http.StatusForbidden)
+	}))
+	f.srv.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
+	f.srv.StartTLS()
+	t.Cleanup(f.srv.Close)
+	f.certFile = filepath.Join(t.TempDir(), "api.crt")
+	writeFile(t, f.certFile, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: f.srv.Certificate().Raw})))
+	return f
+}
+
+// addr is the fake's host:port, for apiserver.addresses.
+func (f *fakeTCPDaemon) addr() string { return strings.TrimPrefix(f.srv.URL, "https://") }
+
+// A daemon whose socket a non-root operator cannot open, and whose access
+// file it cannot read (0600), is asked over its TCP API, pinned, with the
+// client certificate and with the key. An operator whose pin root has enrolled is
+// switched to the certificate; a key the daemon takes is kept, and an
+// unpinned entry re-pinned; a key it refuses is refused (after the pin is
+// written: re-pinning does not wait on the key).
+func TestAddAsksTheDaemonOverTCP(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads the access file")
+	}
+	setup := func(t *testing.T, enrolledSelf, keyTaken bool) (*addEnv, string, *fakeTCPDaemon) {
+		env := newAddEnv(t)
+		pin := env.pin(t)
+		enrolled := pinOf("someone else")
+		if enrolledSelf {
+			enrolled = pin
+		}
+		f := serveFakeTCPDaemon(t, enrolled, keyTaken)
+		af := filepath.Join(env.dir, "tdns-auth-access.yaml")
+		writeFile(t, af, "keyauth: true\nclients: []\n")
+		os.Chmod(af, 0)
+		// Its local admin socket is there, and not ours to open, as for a
+		// non-root operator on the daemon's host.
+		ln, err := net.Listen("unix", env.socket())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ln.Close() })
+		os.Chmod(env.socket(), 0)
+		d := filepath.Join(env.dir, "tdns-auth.yaml")
+		writeFile(t, d, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+f.addr()+" ]\n   apikey: the-key\n   certfile: "+f.certFile+"\n   socket: "+env.socket()+"\n   access-file: "+af+"\n")
+		return env, d, f
+	}
+	// An entry with no pin (rootca: insecure), as written before pinning.
+	unpinned := func(d, addr string) string {
+		return "apiservers:\n   - name: tdns-auth\n     baseurl: https://" + addr + "/api/v1\n     apikey: the-key\n     authmethod: X-API-Key\n     rootca: insecure\n     config-file: " + d + "\n"
+	}
+
+	t.Run("enrolled: switched", func(t *testing.T) {
+		env, d, f := setup(t, true, true)
+		writeFile(t, env.cli, unpinned(d, f.addr()))
+		res, err := env.add(t, d, nil)
+		if err != nil || !res.Switched || !res.Pinned || !res.Cert.byDaemon {
+			t.Fatalf("%+v, %v; want it switched and pinned", res, err)
+		}
+		got := env.entries(t)[0]
+		if got.AuthMethod != "certificate" || got.ApiKey != "" || got.TLSAuth != "pin" {
+			t.Errorf("entry %+v", got)
+		}
+		if out := printed(res, false, env.cli); !strings.Contains(out, "The daemon takes your certificate, as tester (read-write).") {
+			t.Errorf("printed:\n%s", out)
+		}
+		// A new entry too: the loop the rig found (refused, enrolled by root,
+		// refused again) is gone.
+		env.cli = filepath.Join(env.dir, "new-cli.yaml")
+		if res, err := env.add(t, d, nil); err != nil || res.Entry.AuthMethod != "certificate" {
+			t.Errorf("new entry: %+v, %v; want a certificate entry", res, err)
+		}
+	})
+
+	t.Run("not enrolled, the key taken: kept and re-pinned", func(t *testing.T) {
+		env, d, f := setup(t, false, true)
+		writeFile(t, env.cli, unpinned(d, f.addr()))
+		res, err := env.add(t, d, nil)
+		if err != nil || !res.KeyKept || !res.Pinned || res.Switched {
+			t.Fatalf("%+v, %v; want the key kept and the entry pinned", res, err)
+		}
+		got := env.entries(t)[0]
+		if got.AuthMethod != "X-API-Key" || got.ApiKey != "the-key" || got.TLSAuth != "pin" || len(got.Pins) != 1 || got.RootCA != "" {
+			t.Errorf("entry %+v", got)
+		}
+		// The reason is said once.
+		out := printed(res, false, env.cli)
+		if n := strings.Count(out, "does not take your certificate"); n != 1 {
+			t.Errorf("the reason is said %d times:\n%s", n, out)
+		}
+	})
+
+	t.Run("not enrolled, the key refused: re-pinned, then refused", func(t *testing.T) {
+		env, d, f := setup(t, false, false)
+		writeFile(t, env.cli, unpinned(d, f.addr()))
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), "is re-pinned, but it cannot authenticate") || !strings.Contains(err.Error(), "refuses the key") {
+			t.Fatalf("err = %v, want a refusal after the re-pin", err)
+		}
+		if got := env.entries(t)[0]; got.TLSAuth != "pin" || len(got.Pins) != 1 {
+			t.Errorf("entry %+v; want it pinned all the same", got)
+		}
+	})
+}
+
+// --------------------------------------- review round 2 (CodeRabbit, 11-24)
+
+// tcpKeyEntry is a key entry for daemon config d on its TCP address addr,
+// pinned to dpin.
+func tcpKeyEntry(d, addr, dpin string) string {
+	return "apiservers:\n   - name: tdns-auth\n     baseurl: https://" + addr + "/api/v1\n     apikey: the-key\n     authmethod: X-API-Key\n     tlsauth: pin\n     pins: [ \"" + dpin + "\" ]\n     config-file: " + d + "\n"
+}
+
+// Nothing on the daemon's local admin socket does not make it a daemon that
+// is not running: one started before its config named another socket:
+// serves its TCP API all the same, with the policy it loaded, not the one
+// on disk. config add asks it over TCP, as when its socket is not ours to
+// open; the access file decides only when nothing answers there either. A
+// TCP API that neither refuses nor answers leaves the daemon unknown: the
+// file is not taken for its policy, and a key entry is refused, its key
+// kept as it is. A daemon that runs, its socket's path gone (removed while
+// it ran), is said to: nothing can reload it until a restart, which is the
+// fix. One silent on TCP is wedged, as one silent on its socket is
+// (TestAddRefusesAWedgedDaemon): the same verdict, and the same fix.
+func TestAddAsksTCPWhenNothingAnswersOnTheSocket(t *testing.T) {
+	// The pin is enrolled in the access file on disk; whether the daemon
+	// that runs takes it is enrolled (the fake's own policy).
+	world := func(t *testing.T, env *addEnv, addr, certFile string) string {
+		pin := env.pin(t)
+		af := filepath.Join(env.dir, "access.yaml")
+		writeFile(t, af, "keyauth: true\nclients:\n   - name: tester\n     pin: "+pin+"\n     role: read-write\n")
+		d := filepath.Join(env.dir, "tdns-auth.yaml")
+		writeFile(t, d, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+addr+" ]\n   apikey: the-key\n   certfile: "+certFile+"\n   socket: "+env.socket()+"\n   access-file: "+af+"\n")
+		return d
+	}
+	// The fake takes the pin it is given from its start: the operator's,
+	// or another.
+	setup := func(t *testing.T, enrolledSelf bool) (*addEnv, string, *fakeTCPDaemon) {
+		env := newAddEnv(t)
+		enrolled := pinOf("someone else")
+		if enrolledSelf {
+			enrolled = env.pin(t)
+		}
+		f := serveFakeTCPDaemon(t, enrolled, true)
+		return env, world(t, env, f.addr(), f.certFile), f
+	}
+
+	t.Run("it runs without the pin, its socket gone: the key kept, a new entry refused", func(t *testing.T) {
+		env, d, f := setup(t, false)
+		key := tcpKeyEntry(d, f.addr(), tdns.SPKISHA256(f.srv.Certificate()))
+		writeFile(t, env.cli, key)
+		res, err := env.add(t, d, nil)
+		if err != nil || !res.KeyKept || res.Switched || res.Cert.state == certWorks {
+			t.Fatalf("%+v, %v; want the key kept, the certificate not taken", res, err)
+		}
+		if readBytes(t, env.cli) != key {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+		}
+		gone := "its local admin socket " + env.socket() + " does not exist, so nothing can reload it"
+		fix := []string{
+			"restart the daemon: it makes its local admin socket " + env.socket(),
+			"when it starts, and reads its access file again;",
+			"then run config add again.",
+		}
+		if out := printed(res, false, env.cli); !strings.Contains(out, gone) || !strings.Contains(out, flat(strings.Join(fix, " "))) || strings.Contains(out, "client add") {
+			t.Errorf("printed:\n%s", out)
+		}
+		env.cli = filepath.Join(env.dir, "new-cli.yaml")
+		_, err = env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, gone) || !reflect.DeepEqual(r.fix, fix) {
+			t.Errorf("new entry: err = %v, want a refusal saying the socket is gone", err)
+		}
+		if _, err := os.Stat(env.cli); err == nil {
+			t.Error("the refused add wrote the CLI config")
+		}
+	})
+
+	t.Run("silent on TCP: wedged, as on the socket", func(t *testing.T) {
+		saved := pingLimit
+		t.Cleanup(func() { pingLimit = saved })
+		pingLimit = 200 * time.Millisecond
+		addr := serveSilent(t, "tcp", "127.0.0.1:0")
+		srv := httptest.NewTLSServer(http.NotFoundHandler()) // only for a certificate
+		srv.Close()
+		certFile := filepath.Join(t.TempDir(), "api.crt")
+		writeFile(t, certFile, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})))
+		env := newAddEnv(t)
+		d := world(t, env, addr, certFile)
+		want := fmt.Sprintf("the daemon at %s accepted but did not answer within %v", addr, pingLimit)
+		wedged := []string{daemonWedgedFix + ";", "then run config add again."}
+
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, want) || !reflect.DeepEqual(r.fix, wedged) || strings.Contains(r.why, "deadline") {
+			t.Errorf("new entry: err = %v; want %q, and the fix %q", err, want, wedged)
+		}
+		key := tcpKeyEntry(d, addr, tdns.SPKISHA256(srv.Certificate()))
+		writeFile(t, env.cli, key)
+		start := time.Now()
+		_, err = env.add(t, d, nil)
+		if took := time.Since(start); took > 2*time.Second {
+			t.Errorf("config add took %v, with a ping limit of %v", took, pingLimit)
+		}
+		if !errors.As(err, &r) || !strings.Contains(r.why, "keeps its API key") || !strings.Contains(r.why, want) || !reflect.DeepEqual(r.fix, wedged) {
+			t.Errorf("key entry: err = %v; want a refusal saying %q, and the fix %q", err, want, wedged)
+		}
+		if readBytes(t, env.cli) != key {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+		}
+	})
+
+	t.Run("it takes the certificate: switched", func(t *testing.T) {
+		env, d, f := setup(t, true)
+		writeFile(t, env.cli, tcpKeyEntry(d, f.addr(), tdns.SPKISHA256(f.srv.Certificate())))
+		res, err := env.add(t, d, nil)
+		if err != nil || !res.Switched || !res.Cert.byDaemon {
+			t.Fatalf("%+v, %v; want it switched, as the daemon said", res, err)
+		}
+	})
+
+	t.Run("TCP neither refuses nor answers: not taken for stopped", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ln.Close() })
+		go func() {
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				conn.Close()
+			}
+		}()
+		srv := httptest.NewTLSServer(http.NotFoundHandler()) // only for a certificate
+		srv.Close()
+		certFile := filepath.Join(t.TempDir(), "api.crt")
+		writeFile(t, certFile, string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})))
+		env := newAddEnv(t)
+		d := world(t, env, ln.Addr().String(), certFile)
+		key := tcpKeyEntry(d, ln.Addr().String(), tdns.SPKISHA256(srv.Certificate()))
+		writeFile(t, env.cli, key)
+		var r addRefusal
+		if _, err := env.add(t, d, nil); !errors.As(err, &r) || !strings.Contains(err.Error(), "keeps its API key, but whether the daemon takes it") || !strings.Contains(err.Error(), "cannot be asked") {
+			t.Fatalf("err = %v; want a refusal, the key kept: its acceptance not told", err)
+		}
+		if readBytes(t, env.cli) != key {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+		}
+		env.cli = filepath.Join(env.dir, "new-cli.yaml")
+		if _, err := env.add(t, d, nil); err == nil || !strings.Contains(err.Error(), "cannot be asked") {
+			t.Errorf("new entry: err = %v, want a refusal: the daemon cannot be asked", err)
+		}
+	})
+}
+
+// When a reload config add sent does not put the pin in force, the rollback
+// reloads the daemon with the files put back, and they may turn the key off:
+// a keyauth: false in the access file that was not yet in force when config
+// add asked. The key entry keeps the key only if the daemon takes it after
+// that, which is asked again; here it does not, so it is refused.
+func TestAddRechecksTheKeyAfterAFailedReload(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	af := filepath.Join(env.dir, "access.yaml")
+	acc := "keyauth: false\nclients: []\n"
+	writeFile(t, af, acc)
+	d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+	f := serveFakeDaemon(t, env.socket(), d, af)
+	f.mu.Lock()
+	// It runs the policy from before the file turned the key off, and its
+	// reload leaves the pin out.
+	f.policy = &tdns.ApiAccessStatus{File: af, KeyAuth: true, Clients: []tdns.ApiAccessStatusClient{}}
+	f.forget = true
+	f.mu.Unlock()
+	writeFile(t, env.cli, env.keyEntry(d, dpin))
+
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(err.Error(), "cannot authenticate") || !strings.Contains(err.Error(), "keyauth: false") {
+		t.Errorf("err = %v, want the key entry refused: the daemon now runs keyauth: false", err)
+	}
+	if readBytes(t, env.cli) != env.keyEntry(d, dpin) {
+		t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+	}
+	if readBytes(t, af) != acc {
+		t.Errorf("the access file was not put back:\n%s", readBytes(t, af))
+	}
+	if n := f.reloadCount(); n != 2 {
+		t.Errorf("%d reloads, want 2 (the edit, and its undo)", n)
+	}
+}
+
+// accessWithAdmin is an access file that lists pin, enabled, beside a
+// client the daemon refuses (admin is the local socket's alone): the daemon
+// would not load it, so the pin in it does not work.
+func accessWithAdmin(pin string) string {
+	return "keyauth: true\nclients:\n   - name: tester\n     pin: " + pin + "\n     role: read-write\n" +
+		"   - name: root-laptop\n     pin: " + pinOf("root") + "\n     role: admin\n"
+}
+
+// A pin listed in an access file the daemon would not load is not taken to
+// work: with the daemon not running, a new entry is refused and a key entry
+// too (its next start closes the TCP API, so the key does not work either);
+// and apply, which finds the pin listed, does not name such a file in the
+// daemon config.
+func TestAddValidatesTheAccessFileItReliesOn(t *testing.T) {
+	t.Run("the daemon not running: refused", func(t *testing.T) {
+		env := newAddEnv(t)
+		pin := env.pin(t)
+		af := filepath.Join(env.dir, "access.yaml")
+		writeFile(t, af, accessWithAdmin(pin))
+		d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(err.Error(), "not an access file the daemon would load") || !strings.Contains(err.Error(), `role "admin"`) {
+			t.Fatalf("new entry: err = %v, want a refusal naming the file and why", err)
+		}
+		want := []string{"fix " + af + " so the daemon would load it", "(the error says what), then run config add again."}
+		if !reflect.DeepEqual(r.fix, want) {
+			t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(r.fix, "\n"), strings.Join(want, "\n"))
+		}
+		if _, err := os.Stat(env.cli); err == nil {
+			t.Error("the refused add wrote the CLI config")
+		}
+		writeFile(t, env.cli, env.keyEntry(d, dpin))
+		if _, err := env.add(t, d, nil); !errors.As(err, &r) || !strings.Contains(err.Error(), "cannot authenticate") || !strings.Contains(err.Error(), "closes its TCP API") {
+			t.Errorf("key entry: err = %v, want it refused", err)
+		}
+		if readBytes(t, env.cli) != env.keyEntry(d, dpin) || readBytes(t, af) != accessWithAdmin(pin) {
+			t.Error("a file changed")
+		}
+	})
+
+	t.Run("apply: the file lists the pin, and does not validate", func(t *testing.T) {
+		env := newAddEnv(t)
+		pin := env.pin(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		af := accessFileOf(d)
+		writeFile(t, af, "keyauth: true\nclients:\n   - name: tester\n     pin: "+pin+"\n     role: read-write\n")
+		cfg := readBytes(t, d)
+		info, err := ReadDaemonApi(d, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+		if c.state != certCanEnable || !c.nameIt || c.addPin {
+			t.Fatalf("plan %+v", c)
+		}
+		writeFile(t, af, accessWithAdmin(pin))
+		if err := c.apply(context.Background()); err == nil || !strings.Contains(err.Error(), "not an access file the daemon would load") {
+			t.Errorf("err = %v, want apply refused", err)
+		}
+		if readBytes(t, d) != cfg {
+			t.Errorf("the daemon config was changed:\n%s", readBytes(t, d))
+		}
+	})
+}
+
+// An entry that uses the certificate already has no key to fall back on:
+// when setting up the certificate on the daemon fails (here the reload does
+// not put the pin in force), config add refuses, saying the daemon's side
+// was put back, rather than succeed with an entry that cannot authenticate.
+// Its pin is written all the same, as for a key entry whose key is refused.
+func TestAddRefusesACertEntryItCannotSetUp(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	d, dpin := env.certDaemon(t, env.dir, "")
+	cfg := readBytes(t, d)
+	f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+	f.mu.Lock()
+	f.forget = true
+	f.mu.Unlock()
+	writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: "+env.url(8989)+"\n     authmethod: certificate\n     rootca: insecure\n     config-file: "+d+"\n")
+
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) ||
+		!strings.Contains(err.Error(), `entry "tdns-auth" is re-pinned, but it cannot authenticate: setting up your client certificate on the daemon failed`) ||
+		!strings.Contains(err.Error(), "does not have your certificate") || !strings.Contains(err.Error(), "the files are as they were") {
+		t.Errorf("err = %v, want a refusal saying the setup failed and was put back", err)
+	}
+	if got := env.entries(t)[0]; got.AuthMethod != "certificate" || got.TLSAuth != "pin" || !reflect.DeepEqual(got.Pins, []string{dpin}) {
+		t.Errorf("entry %+v; want it re-pinned all the same, on the certificate", got)
+	}
+	if readBytes(t, d) != cfg {
+		t.Errorf("the daemon config was not put back:\n%s", readBytes(t, d))
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("the access file apply created was not removed")
+	}
+}
+
+// The access-file: line a fix gives is one to paste into the daemon config:
+// a path that YAML would not read as it stands (": " in it) is quoted, as
+// config add writes it, whether the pin is listed already or not.
+func TestCertFixLinesQuoteTheAccessFile(t *testing.T) {
+	const af = "/etc/tdns/site: east/tdns-auth-access.yaml"
+	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: af}
+	for _, c := range []*CertSetup{
+		{word: "auth", listedAs: "laptop", pin: pinOf("p"), state: certCannot, t: tg},
+		{word: "auth", name: "laptop", pin: pinOf("p"), state: certCannot, t: tg},
+	} {
+		var line string
+		for _, l := range c.fixLines() {
+			if strings.HasPrefix(l, "   access-file:") {
+				line = l
+			}
+		}
+		var got struct {
+			AccessFile string `yaml:"access-file"`
+		}
+		if err := yaml.Unmarshal([]byte(strings.TrimSpace(line)), &got); err != nil || got.AccessFile != af {
+			t.Errorf("listed %q: the line %q reads back as %q (%v), want %q", c.listedAs, line, got.AccessFile, err, af)
+		}
+	}
+}
+
+// Two config adds of one daemon with one client pair, into CLI configs of
+// their own. A has enrolled the pin and not yet written its CLI config; B
+// finds the pin enrolled, and changes nothing on the daemon's side. Should
+// A then fail to write its CLI config, its rollback finds the access file
+// just as it wrote it and takes the pin out, so B must not write an entry
+// that relies on the pin until A has kept it or put it back: B waits for
+// the locks A keeps (confirm). When A puts it back, B is refused, to be run
+// again; when A keeps it, B uses it. A's rollback reloads the daemon before
+// it lets go of the locks, so B cannot find the pin still in force after
+// the files are put back.
+func TestAnotherAddWaitsForAnEnrolmentInFlight(t *testing.T) {
+	// A, applied: the access file created with the pin and named in the
+	// daemon config, the locks kept.
+	applyA := func(t *testing.T, env *addEnv, d string) *CertSetup {
+		t.Helper()
+		info, err := ReadDaemonApi(d, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+		if a.state != certCanEnable || !a.addPin {
+			t.Fatalf("plan %+v", a)
+		}
+		if err := a.apply(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(a.release)
+		return a
+	}
+	type outcome struct {
+		res *AddResult
+		err error
+	}
+	// B, the same daemon and pair into CLI config cli: started, and not
+	// done while A's enrolment is in flight.
+	startB := func(t *testing.T, d, cli string) <-chan outcome {
+		t.Helper()
+		done := make(chan outcome, 1)
+		go func() {
+			res, err := AddDaemonConfig(AddOptions{CliConfig: cli, DaemonConfig: d})
+			done <- outcome{res, err}
+		}()
+		select {
+		case o := <-done:
+			t.Fatalf("B was done (%+v, %v) while A's enrolment was in flight", o.res, o.err)
+		case <-time.After(500 * time.Millisecond):
+		}
+		return done
+	}
+	wait := func(t *testing.T, done <-chan outcome) outcome {
+		t.Helper()
+		select {
+		case o := <-done:
+			return o
+		case <-time.After(20 * time.Second):
+			t.Fatal("B is still waiting after A was done")
+		}
+		return outcome{}
+	}
+
+	t.Run("A puts it back: B does not rely on it", func(t *testing.T) {
+		env := newAddEnv(t)
+		env.pin(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		a := applyA(t, env, d)
+		cliB := filepath.Join(env.dir, "b-cli.yaml")
+		done := startB(t, d, cliB)
+		if msg := a.rollback(context.Background()); msg != "the files are as they were" {
+			t.Errorf("A's rollback says %q", msg)
+		}
+		o := wait(t, done)
+		var r addRefusal
+		if !errors.As(o.err, &r) || !strings.Contains(o.err.Error(), "changed while it ran") || !reflect.DeepEqual(r.fix, []string{"run config add again."}) {
+			t.Errorf("B: %+v, %v; want it refused, to be run again", o.res, o.err)
+		}
+		if _, err := os.Stat(cliB); err == nil {
+			t.Errorf("B wrote an entry on the enrolment A put back:\n%s", readBytes(t, cliB))
+		}
+	})
+
+	t.Run("A puts it back: B, a key entry, keeps the key", func(t *testing.T) {
+		env := newAddEnv(t)
+		env.pin(t)
+		d, dpin := env.certDaemon(t, env.dir, "")
+		a := applyA(t, env, d)
+		cliB := filepath.Join(env.dir, "b-cli.yaml")
+		writeFile(t, cliB, env.keyEntry(d, dpin))
+		done := startB(t, d, cliB)
+		a.rollback(context.Background())
+		o := wait(t, done)
+		if o.err != nil || !o.res.KeyKept || o.res.Switched {
+			t.Fatalf("B: %+v, %v; want the key kept", o.res, o.err)
+		}
+		if readBytes(t, cliB) != env.keyEntry(d, dpin) {
+			t.Errorf("B's CLI config changed:\n%s", readBytes(t, cliB))
+		}
+		if out := printed(o.res, false, cliB); !strings.Contains(out, "changed while it ran") || !strings.Contains(out, "To use the certificate instead, run config add again.") {
+			t.Errorf("B printed:\n%s", out)
+		}
+	})
+
+	t.Run("A keeps it: B uses it", func(t *testing.T) {
+		env := newAddEnv(t)
+		pin := env.pin(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		a := applyA(t, env, d)
+		cliB := filepath.Join(env.dir, "b-cli.yaml")
+		done := startB(t, d, cliB)
+		a.release() // A has written its CLI config
+		o := wait(t, done)
+		if o.err != nil || o.res.Entry.AuthMethod != "certificate" || o.res.Cert.state != certWorks {
+			t.Fatalf("B: %+v, %v; want a certificate entry on the enrolment A kept", o.res, o.err)
+		}
+		if acc, err := tdns.LoadAccessFile(accessFileOf(d)); err != nil || clientByPin(acc, pin) == nil {
+			t.Errorf("access file %+v (%v), want the pin enrolled", acc, err)
+		}
+	})
+
+	t.Run("A's rollback reloads the daemon before it lets go", func(t *testing.T) {
+		env := newAddEnv(t)
+		env.pin(t)
+		d, _ := env.certDaemon(t, env.dir, "")
+		f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+		a := applyA(t, env, d)
+		var free []int // the reloads during which the access file's lock was free
+		f.mu.Lock()
+		f.onReload = func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			if unlock, err := lockCliConfig(ctx, accessFileOf(d)); err == nil {
+				unlock()
+				free = append(free, f.reloads)
+			}
+		}
+		f.mu.Unlock()
+		if msg := a.rollback(context.Background()); !strings.Contains(msg, "the daemon runs them again") {
+			t.Errorf("A's rollback says %q", msg)
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.reloads != 2 || len(free) != 0 {
+			t.Errorf("%d reloads, the lock free during %v; want the rollback's reload under the lock", f.reloads, free)
+		}
+	})
+}
+
+// ---------------------------------------- review round 3 (CodeRabbit, 11-24)
+
+// An entry that uses the certificate already, which does not work and which
+// config add cannot make work, has no key to fall back on: it is refused,
+// after its pin is written, saying why and what fixes it. One whose
+// certificate works is left as it is (TestAddEnrollsTheCertificate).
+func TestAddRefusesACertEntryWhoseCertificateDoesNotWork(t *testing.T) {
+	certEntry := func(env *addEnv, d, pins string) string {
+		return "apiservers:\n   - name: tdns-auth\n     baseurl: " + env.url(8989) + "\n     authmethod: certificate\n" + pins + "     config-file: " + d + "\n"
+	}
+
+	t.Run("listed disabled: re-pinned, refused", func(t *testing.T) {
+		env := newAddEnv(t)
+		pin := env.pin(t)
+		af := filepath.Join(env.dir, "access.yaml")
+		acc := "keyauth: true\nclients:\n   - name: laptop\n     pin: " + pin + "\n     role: read-write\n     disabled: true\n"
+		writeFile(t, af, acc)
+		d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+		writeFile(t, env.cli, certEntry(env, d, "     rootca: insecure\n"))
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, `entry "tdns-auth" is re-pinned, but it cannot authenticate: your certificate does not work here`) ||
+			!strings.Contains(r.why, "disabled") || !strings.Contains(strings.Join(r.fix, "\n"), "tdns-ncli auth client enable laptop") {
+			t.Fatalf("err = %v; want a refusal naming the disabled pin, with client enable", err)
+		}
+		if got := env.entries(t)[0]; got.AuthMethod != "certificate" || got.TLSAuth != "pin" || !reflect.DeepEqual(got.Pins, []string{dpin}) {
+			t.Errorf("entry %+v; want it re-pinned all the same", got)
+		}
+		if readBytes(t, af) != acc {
+			t.Error("the access file changed")
+		}
+	})
+
+	t.Run("your pair unusable: refused, nothing changed", func(t *testing.T) {
+		env := newAddEnv(t)
+		env.pin(t)
+		os.Remove(env.key)
+		d, dpin := env.certDaemon(t, env.dir, "")
+		entry := certEntry(env, d, "     tlsauth: pin\n     pins: [ \""+dpin+"\" ]\n")
+		writeFile(t, env.cli, entry)
+		for _, dry := range []bool{true, false} {
+			_, err := env.add(t, d, func(o *AddOptions) { o.DryRun = dry })
+			var r addRefusal
+			if !errors.As(err, &r) || !strings.Contains(r.why, `entry "tdns-auth" cannot authenticate: your certificate does not work here`) || !strings.Contains(r.why, "not a usable pair") {
+				t.Errorf("dry run %v: err = %v; want a refusal naming your pair", dry, err)
+			}
+		}
+		if readBytes(t, env.cli) != entry {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+		}
+		if _, err := os.Stat(accessFileOf(d)); err == nil {
+			t.Error("an access file was written")
+		}
+	})
+}
+
+// An enrolment the daemon has in force, but its access file does not list
+// (a rollback took it out and its reload failed, or a `client disable
+// --no-reload` is pending), lasts until the daemon's next reload or start:
+// config add does not write a certificate entry on it. A new entry is
+// refused, its fix the enrolment; a key entry keeps its key (the daemon
+// takes it), and says why the certificate does not work. A file that lists
+// the pin disabled is fixed by enabling it (client add refuses the pin
+// again: one key, one client); one the daemon would not load, by fixing it.
+func TestAddNeedsTheEnrolmentInTheFile(t *testing.T) {
+	setupWith := func(t *testing.T, acc func(pin string) string) (*addEnv, string, string, string) {
+		env := newAddEnv(t)
+		pin := env.pin(t)
+		af := filepath.Join(env.dir, "access.yaml")
+		writeFile(t, af, acc(pin))
+		d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+		f := serveFakeDaemon(t, env.socket(), d, af)
+		f.mu.Lock()
+		f.policy = &tdns.ApiAccessStatus{File: af, KeyAuth: true, Clients: []tdns.ApiAccessStatusClient{{Name: "tester", Pin: pin, Role: "read-write"}}}
+		f.mu.Unlock()
+		return env, d, dpin, pin
+	}
+	setup := func(t *testing.T) (*addEnv, string, string, string) {
+		return setupWith(t, func(string) string { return "keyauth: true\nclients: []\n" })
+	}
+
+	t.Run("listed disabled: client enable, not client add", func(t *testing.T) {
+		env, d, _, _ := setupWith(t, func(pin string) string {
+			return "keyauth: true\nclients:\n   - name: h38c\n     pin: " + pin + "\n     role: read-write\n     disabled: true\n"
+		})
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, `lists it as "h38c", disabled`) {
+			t.Fatalf("err = %v; want a refusal: the pin is listed disabled", err)
+		}
+		fix := strings.Join(r.fix, "\n")
+		if !strings.Contains(fix, "tdns-ncli auth client enable h38c") || strings.Contains(fix, "client add") {
+			t.Errorf("fix:\n%s\nwant client enable h38c, not client add", fix)
+		}
+	})
+
+	t.Run("a file the daemon would not load: fix the file", func(t *testing.T) {
+		env, d, _, _ := setupWith(t, accessWithAdmin)
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, "not an access file the daemon would load") {
+			t.Fatalf("err = %v; want a refusal: the file does not validate", err)
+		}
+		if fix := strings.Join(r.fix, "\n"); !strings.Contains(fix, "so the daemon would load it") || strings.Contains(fix, "client add") {
+			t.Errorf("fix:\n%s\nwant the file fixed", fix)
+		}
+		if _, err := os.Stat(env.cli); err == nil {
+			t.Error("the refused add wrote the CLI config")
+		}
+	})
+
+	t.Run("a new entry: refused", func(t *testing.T) {
+		env, d, _, pin := setup(t)
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, "takes your certificate now, but") || !strings.Contains(r.why, "does not list it") {
+			t.Fatalf("err = %v; want a refusal: the pin is not in the access file", err)
+		}
+		if fix := strings.Join(r.fix, "\n"); !strings.Contains(fix, "tdns-ncli auth client add tester --pin "+pin+" --role read-write") {
+			t.Errorf("fix:\n%s\nwant the enrolment", fix)
+		}
+		if _, err := os.Stat(env.cli); err == nil {
+			t.Error("the refused add wrote the CLI config")
+		}
+	})
+
+	t.Run("a key entry: kept, not switched", func(t *testing.T) {
+		env, d, dpin, _ := setup(t)
+		writeFile(t, env.cli, env.keyEntry(d, dpin))
+		res, err := env.add(t, d, nil)
+		if err != nil || !res.KeyKept || res.Switched {
+			t.Fatalf("%+v, %v; want the key kept", res, err)
+		}
+		if readBytes(t, env.cli) != env.keyEntry(d, dpin) {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+		}
+		if out := printed(res, false, env.cli); !strings.Contains(out, "keeps the API key") || !strings.Contains(out, "does not list it") {
+			t.Errorf("printed:\n%s", out)
+		}
+	})
+}
+
+// Between config add's plan and apply, the daemon config may come to say
+// something else about its API (its port moved, while config add waited for
+// the lock): nothing is enrolled for an entry made for the old one, and the
+// fix is to run config add again.
+func TestAddRechecksTheApiSettings(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	af := filepath.Join(env.dir, "access.yaml")
+	acc := "keyauth: true\nclients: []\n"
+	writeFile(t, af, acc)
+	d, _ := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	if c.state != certCanEnable || c.nameIt || !c.addPin {
+		t.Fatalf("plan %+v", c)
+	}
+	writeFile(t, d, strings.Replace(readBytes(t, d), env.at(8989), env.at(8990), 1))
+	err = c.apply(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "other apiserver: settings") {
+		t.Fatalf("err = %v, want apply refused: the API settings changed", err)
+	}
+	// What to do is said once, in the fix.
+	var sb strings.Builder
+	printRefusal(&sb, c.refusal("not adding "+d+": setting up your client certificate on the daemon failed: "+err.Error()))
+	if n := strings.Count(flat(sb.String()), "run config add again"); n != 1 {
+		t.Errorf("the refusal says to run config add again %d times:\n%s", n, sb.String())
+	}
+	if readBytes(t, af) != acc {
+		t.Errorf("the access file was written:\n%s", readBytes(t, af))
+	}
+	if fix := c.fixLines(); !reflect.DeepEqual(fix, []string{"run config add again."}) {
+		t.Errorf("fix %q, want to run config add again", fix)
+	}
+}
+
+// A daemon whose TCP API has no TLS (usetls: false) is asked over plain
+// http with the key, as its entry reaches it: the entry sends that key in
+// the clear on every command, so the ping adds nothing. A key it takes is
+// kept, a success (config add cannot set up a certificate for it, and says
+// so); one it refuses is refused. Run as root or with the daemon stopped,
+// the same entry got the same answer before.
+func TestAddAsksAPlainHTTPDaemonWithItsKey(t *testing.T) {
+	setup := func(t *testing.T, keyTaken bool) (*addEnv, string, string) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v1/ping" {
+				http.NotFound(w, r)
+				return
+			}
+			if keyTaken && r.Header.Get("X-API-Key") == "the-key" {
+				json.NewEncoder(w).Encode(tdns.PingResponse{Msg: "pong", Role: "admin", Via: "api key", Identity: "apikey"})
+				return
+			}
+			http.Error(w, "refused", http.StatusForbidden)
+		}))
+		t.Cleanup(srv.Close)
+		env := newAddEnv(t)
+		env.pin(t)
+		addr := strings.TrimPrefix(srv.URL, "http://")
+		d := filepath.Join(env.dir, "tdns-auth.yaml")
+		writeFile(t, d, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+addr+" ]\n   apikey: the-key\n   usetls: false\n   socket: "+env.socket()+"\n")
+		key := "apiservers:\n   - name: tdns-auth\n     baseurl: http://" + addr + "/api/v1\n     apikey: the-key\n     authmethod: X-API-Key\n     config-file: " + d + "\n"
+		writeFile(t, env.cli, key)
+		return env, d, key
+	}
+
+	t.Run("the key taken: kept, a success", func(t *testing.T) {
+		env, d, key := setup(t, true)
+		res, err := env.add(t, d, nil)
+		if err != nil || !res.KeyKept || res.Switched {
+			t.Fatalf("%+v, %v; want the key kept, no refusal", res, err)
+		}
+		if readBytes(t, env.cli) != key {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+		}
+		if out := printed(res, false, env.cli); !strings.Contains(out, "keeps the API key") || !strings.Contains(out, "usetls") {
+			t.Errorf("printed:\n%s", out)
+		}
+	})
+
+	t.Run("the key refused: refused", func(t *testing.T) {
+		env, d, key := setup(t, false)
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, "the daemon does not take its API key (asked over TCP, it refuses the key)") {
+			t.Errorf("err = %v; want a refusal: the daemon refuses the key", err)
+		}
+		if readBytes(t, env.cli) != key {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+		}
+	})
+}
+
+// An access file that does not parse is one the daemon would not load
+// (a directory on NetBSD reads as bytes, and does not parse either): its
+// fix is the file, not the enrolment; and a key entry is refused, as the
+// daemon's next start closes its TCP API.
+func TestAddUnparseableAccessFile(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	af := filepath.Join(env.dir, "access.yaml")
+	writeFile(t, af, "keyauth: true\nclients: [ oops\n")
+	d, dpin := env.certDaemon(t, env.dir, "\n   access-file: "+af)
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(r.why, "not an access file the daemon would load") {
+		t.Fatalf("new entry: err = %v; want a refusal: the file does not parse", err)
+	}
+	if fix := strings.Join(r.fix, "\n"); !strings.Contains(fix, "fix "+af+" so the daemon would load it") || strings.Contains(fix, "client add") {
+		t.Errorf("fix:\n%s\nwant the file fixed, not the enrolment", fix)
+	}
+	writeFile(t, env.cli, env.keyEntry(d, dpin))
+	if _, err := env.add(t, d, nil); !errors.As(err, &r) || !strings.Contains(r.why, "closes its TCP API") {
+		t.Errorf("key entry: err = %v; want a refusal: the key does not work either", err)
+	}
+}
+
+// A refusal made with your new pair names its pin where the fix does not
+// carry it (a restart, a wedged daemon), and says it is in the fix where it
+// is (the enrolment).
+func TestRefusalNamesTheNewPin(t *testing.T) {
+	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml", Socket: "/var/run/tdns/auth.sock", Configured: true}
+	pin := pinOf("new")
+	gone := &CertSetup{word: "auth", name: "tester", cert: "/root/c.crt", pin: pin, pairNew: true, state: certCannot, t: tg, sockGone: true}
+	if notes := strings.Join(gone.refusal("x").notes, " "); !strings.Contains(notes, pin) || strings.Contains(notes, "in the fix") {
+		t.Errorf("socket gone: notes %q, want the pin itself", notes)
+	}
+	enrol := &CertSetup{word: "auth", name: "tester", cert: "/root/c.crt", pin: pin, pairNew: true, state: certCannot, t: tg}
+	r := enrol.refusal("x")
+	if notes := strings.Join(r.notes, " "); !strings.Contains(notes, "its pin is in the fix") || !strings.Contains(strings.Join(r.fix, " "), pin) {
+		t.Errorf("enrolment: notes %q, fix %q; want the pin in the fix, and said so", notes, r.fix)
+	}
+}
+
+// When apply finds the daemon config changed since the plan (here its key,
+// rotated while config add asked the daemon), what config add found about
+// the key is of the config as it was: a key entry is left as it is, and
+// the add refused, to be run again; nothing is written on the daemon's side.
+func TestAddRefusesAKeyFallbackOnAChangedConfig(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	d, dpin := env.certDaemon(t, env.dir, "")
+	f := serveFakeDaemon(t, env.socket(), d, accessFileOf(d))
+	f.mu.Lock()
+	f.onStatus = func() { writeFile(t, d, strings.Replace(readBytes(t, d), "the-key", "rotated-key", 1)) }
+	f.mu.Unlock()
+	writeFile(t, env.cli, env.keyEntry(d, dpin))
+
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(r.why, `entry "tdns-auth" is left as it is`) || !strings.Contains(r.why, "other apiserver: settings") ||
+		!reflect.DeepEqual(r.fix, []string{"run config add again."}) {
+		t.Fatalf("err = %v; want the entry left as it is, and config add run again", err)
+	}
+	if readBytes(t, env.cli) != env.keyEntry(d, dpin) {
+		t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("an access file was written")
+	}
+	if n := f.reloadCount(); n != 0 {
+		t.Errorf("%d reloads, want none", n)
+	}
+}
+
+// Your pair, read again under apply's locks, must be the one the plan read
+// (the pin enrolled is its): one changed meanwhile is not enrolled, and the
+// fix is to run config add again.
+func TestAddRechecksYourPair(t *testing.T) {
+	env := newAddEnv(t)
+	env.pin(t)
+	d, _ := env.certDaemon(t, env.dir, "")
+	cfg := readBytes(t, d)
+	info, err := ReadDaemonApi(d, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := planCert(AddOptions{CliConfig: env.cli}, info, "auth")
+	if c.state != certCanEnable || !c.addPin {
+		t.Fatalf("plan %+v", c)
+	}
+	os.Remove(env.cert)
+	os.Remove(env.key)
+	if pin := env.pin(t); pin == c.pin {
+		t.Fatal("the new pair has the old pin")
+	}
+	if err := c.apply(context.Background()); err == nil || !strings.Contains(err.Error(), "your client certificate "+env.cert+" is not the one config add read") {
+		t.Errorf("err = %v, want apply refused: your pair changed", err)
+	}
+	if readBytes(t, d) != cfg {
+		t.Errorf("the daemon config was changed:\n%s", readBytes(t, d))
+	}
+	if _, err := os.Stat(accessFileOf(d)); err == nil {
+		t.Error("an access file was written")
+	}
+	if fix := c.fixLines(); !reflect.DeepEqual(fix, []string{"run config add again."}) {
+		t.Errorf("fix %q, want to run config add again", fix)
+	}
+}
+
+// A daemon whose TCP API has no TLS cannot take a certificate: that decides
+// a new entry, and its fix comes first, though the ping of its TCP port met
+// something silent there (a wedged daemon, or nc -kl on its port while it
+// is stopped). A restart does not give it TLS; the silent port is said
+// second.
+func TestAddNoTLSFixBeforeASilentPort(t *testing.T) {
+	saved := pingLimit
+	t.Cleanup(func() { pingLimit = saved })
+	pingLimit = 200 * time.Millisecond
+	addr := serveSilent(t, "tcp", "127.0.0.1:0")
+	env := newAddEnv(t)
+	env.pin(t)
+	d := filepath.Join(env.dir, "tdns-imr.yaml")
+	writeFile(t, d, "imrengine:\n   x: 1\napiserver:\n   addresses: [ "+addr+" ]\n   apikey: the-key\n   usetls: false\n   socket: "+env.socket()+"\n")
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(r.why, "has no TLS") {
+		t.Fatalf("err = %v; want a refusal: no TLS", err)
+	}
+	want := []string{
+		"turn on TLS for the daemon's TCP API (apiserver.usetls: true,",
+		"with certfile and keyfile), then run config add again.",
+		"Its TCP port took the connection but did not answer: a wedged",
+		"daemon (its log), or another program on that port.",
+	}
+	if !reflect.DeepEqual(r.fix, want) {
+		t.Errorf("fix:\n%s\nwant:\n%s", strings.Join(r.fix, "\n"), strings.Join(want, "\n"))
 	}
 }

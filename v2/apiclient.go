@@ -303,6 +303,13 @@ func plainHTTPError(status int, body []byte) error {
 }
 
 func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {
+	return api.PostContext(context.Background(), endpoint, data)
+}
+
+// PostContext is Post with ctx bounding the request: the dial, the wait for
+// the reply and the read of its body. For a caller that bounds one request
+// without giving every request of the client a timeout.
+func (api *ApiClient) PostContext(ctx context.Context, endpoint string, data []byte) (int, []byte, error) {
 	if api == nil {
 		return 501, nil, fmt.Errorf("api client is nil")
 	}
@@ -316,7 +323,7 @@ func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {
 		lgApi.Debug("posting data", "url", api.BaseUrl+endpoint, "bytes", len(data), "data", prettyJSON.String())
 	}
 
-	req, err := http.NewRequest(http.MethodPost, api.BaseUrl+endpoint,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, api.BaseUrl+endpoint,
 		bytes.NewBuffer(data))
 	if err != nil {
 		lgApi.Error("http.NewRequest failed", "err", err)

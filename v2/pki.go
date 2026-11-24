@@ -121,6 +121,47 @@ func CreateCA(opts CAOptions) (*PKICert, error) {
 	return assemblePKICert(der, key)
 }
 
+// CreateSelfSignedLeaf makes an end-entity certificate signed by its own,
+// freshly generated key: no CA. For a daemon's management API, whose clients
+// verify it by the pin of that key, a CA would add nothing.
+func CreateSelfSignedLeaf(opts LeafOptions) (*PKICert, error) {
+	if opts.Name == "" {
+		return nil, fmt.Errorf("pki: leaf needs a name")
+	}
+	if !opts.Server && !opts.Client {
+		return nil, fmt.Errorf("pki: leaf needs Server and/or Client usage")
+	}
+	key, err := generateKey(opts.Alg)
+	if err != nil {
+		return nil, err
+	}
+	serial, err := randomSerial()
+	if err != nil {
+		return nil, err
+	}
+	tmpl := x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: opts.Name},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(opts.Validity),
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		DNSNames:              opts.DNSNames,
+		IPAddresses:           opts.IPs,
+	}
+	if opts.Server {
+		tmpl.ExtKeyUsage = append(tmpl.ExtKeyUsage, x509.ExtKeyUsageServerAuth)
+	}
+	if opts.Client {
+		tmpl.ExtKeyUsage = append(tmpl.ExtKeyUsage, x509.ExtKeyUsageClientAuth)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, key.Public(), key)
+	if err != nil {
+		return nil, fmt.Errorf("pki: create self-signed certificate: %v", err)
+	}
+	return assemblePKICert(der, key)
+}
+
 // IssueLeaf signs an end-entity certificate (freshly generated key) with the
 // CA. At least one of Server/Client must be set; a daemon that both serves
 // DoT and presents a client cert for mutual XoT wants both.

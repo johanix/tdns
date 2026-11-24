@@ -270,6 +270,12 @@ func (conf *Config) initApiAccess() {
 // client commands) looks for this to know its change was not applied.
 const AccessFileNotReloaded = "Access file NOT reloaded"
 
+// AccessFileNoLongerConfigured begins the part of a reload's reply that says
+// the daemon config names no access file any more: the running policy is
+// dropped, and an access file a client just wrote is not one the daemon
+// reads, so that edit was not applied either.
+const AccessFileNoLongerConfigured = "The access file is no longer configured"
+
 func (conf *Config) reloadApiAccess() string {
 	h := conf.Internal.ApiAccess
 	if h == nil {
@@ -280,7 +286,7 @@ func (conf *Config) reloadApiAccess() string {
 		if st := h.load(); st != nil && st.Enabled {
 			h.p.Store(&accessState{})
 			conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
-			msg := " The access file is no longer configured: the API key is admin on the TCP API again."
+			msg := " " + AccessFileNoLongerConfigured + ": the API key is admin on the TCP API again."
 			// Removing the file does not reopen what it closed: a closed
 			// listener is not started again until a restart.
 			if addrs := stoppedPlaintextApiListeners(); len(addrs) > 0 {

@@ -133,6 +133,29 @@ CA. `insecure` is accepted only when spelled out, and tdns-ncli warns each time.
 A tdns-ncli TCP entry with none of the three refuses to connect. (tdns-ncli has
 its own config file and is a prototype; tdns-cli's defaults do not change.)
 
+**Revised 2026-11-23: the daemon's API certificate has a default.** Nothing
+made the API certificate: `tdns-cli cert init` writes the DNS listeners' pair
+(`listeners.certfile`), and the API pair was made by hand and named
+`{confdir}/certs/api.{crt,key}` in every config, so daemons whose configs
+share a directory (tdns-auth and tdns-imr in `/etc/tdns`) shared a key, and a
+client pinned to one would accept the other (`config list --check` warns). The
+owner's rulings: with neither `apiserver.certfile` nor `keyfile` set, the pair
+is `{confdir}/certs/{config name}-api.crt` and `.key`
+(`/etc/tdns/tdns-auth.yaml` has `/etc/tdns/certs/tdns-auth-api.crt`), one per
+config file (`tdns.ApiCertPaths`); and the daemon writes it, self-signed
+(ECDSA P-256, `localhost`, this host, loopback and the API listen addresses,
+ten years: the pin is what is checked), at its first start when neither file
+is there, and never overwrites one. Paths a config names are used as they
+are and never written. A config check before the first start reports the
+pair as pending (the validator lets that pass); one default file without the
+other is refused; a pair that cannot be written starts no TLS listener (the
+socket is still served). `tdns-ncli config add` pins the default pair, and
+before the first start makes it itself, exactly as the daemon would (one
+function, `tdns.EnsureDefaultApiCert`, for both), and pins that: the daemon
+uses it when it starts (revised the same day, below). A new key is
+deliberate: remove the pair, restart, run `config add` again (old pins stay
+next to the new one).
+
 ### 3.2 The local socket
 
 ```yaml
@@ -399,7 +422,9 @@ break.
 **The tool may change one thing: the access file.** It never touches the main
 daemon config, `apikey`, the daemon's certificate or any other file. Its `client`
 commands edit files on this host, so they work on an entry that names a local
-daemon and refuse a remote one ("run this on the daemon host").
+daemon and refuse a remote one ("run this on the daemon host"). (Revised
+2026-11-23: `config add` also adds the one `access-file:` line to a daemon
+config that names no access file, and nothing else in that file; section 9.)
 
 ```
 tdns-ncli client init                                  # a remote operator's key pair
@@ -441,9 +466,11 @@ socket does not depend on it. The tool says what it means ("remote access will
 then need a client certificate") and, if no enabled client exists, that the TCP
 API will then be unusable for everyone but the socket.
 
-**What stays a hand edit:** the `socket:` and `access-file:` lines in the daemon
-config, once per daemon (the sample configs carry them). Everything an operator
-does day to day goes through the tool.
+**What stays a hand edit:** the `socket:` line in the daemon config, where the
+default socket is not wanted (the sample configs carry it). Everything an
+operator does day to day goes through the tool. (Revised 2026-11-23: this said
+`access-file:` too. `tdns-ncli config add` now adds that line, once per daemon,
+when it sets up the operator's certificate; section 9.)
 
 ## 4. No lock-out
 
@@ -486,7 +513,8 @@ does day to day goes through the tool.
    a revocation shows up in a diff and re-enabling is one word.
 9. **The tool is held to the same rules** (section 3.7): it writes only the
    access file, only a file the shared validator accepts, atomically, with a
-   `.prev`.
+   `.prev`. (Revised 2026-11-23: and `config add` the one `access-file:` line
+   of the daemon config, checked by reading it back; section 9.)
 
 ## 5. Rollout
 
@@ -569,6 +597,8 @@ Decided (2026-11-20):
   `/etc/tdns/`, not `/root/.config/`.
 - `reload-tsig` is admin; `stop` is admin.
 - A local tdns-ncli may change the access file and nothing else, as in 3.7.
+  (Revised 2026-11-23: and `config add` the daemon config's `access-file:`
+  line.)
 - A broken access file at start-up: DNS starts, the TCP API is down (503), the
   socket works.
 - The access file lives at `/etc/tdns/<daemon>-access.yaml`, next to the daemon
@@ -773,7 +803,21 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
 - **`config add` pins the daemon's certificate** from `apiserver.certfile`. If
   that file cannot be read the entry is written without pins and a note says
   what to add; tdns-ncli then refuses that entry rather than connecting
-  unverified.
+  unverified. (Revised 2026-11-23, the owner's rulings: config add does not
+  write a new https entry it cannot pin. A daemon on its default API pair
+  that has not started yet has no certificate, and refusing it would leave
+  `daemon start`, which needs the entry, waiting on the entry: so config add
+  makes the pair itself, exactly as the daemon does at its first start (the
+  same paths, `tdns.EnsureDefaultApiCert`: ECDSA P-256, the same names, the
+  key 0600, the certificate 0644, `certs/` made 0755), pins it, and says
+  "Created the daemon's API certificate <path> (key <path>, mode 0600); the
+  daemon uses it when it starts." A dry run says it would, and makes
+  nothing. Half a pair is refused, as the daemon refuses it, and so is a
+  pair config add cannot write (the fix: run it as root on the daemon's
+  host). For a missing, relative or unreadable `apiserver.certfile` it
+  refuses, writes nothing, and says why and how to fix it. An entry config
+  add already knows and cannot re-pin is left as it was, with the notes as
+  before.)
 - **`config add` also pins an entry it already knows** (2026-11-23, after the
   testor install). An https entry with no pin is broken, and entries written
   before pinning existed had none, so "Already known; nothing changed" left
@@ -788,7 +832,9 @@ cumbersomeness this design is meant to remove. Nothing else is separable.
 - **The `client` commands** are added to the canonical auth, agent and imr
   trees by tdns-ncli itself and to the instance trees by their factories, so
   tdns-cli and tdns-imr's own shell do not get them. `client init` needs no CLI
-  config. A new access file takes the daemon config's mode.
+  config. A new access file takes the daemon config's mode. (Revised
+  2026-11-23, the owner's ruling: a new access file is 0600, made by `client
+  add` or `config add`, with the daemon config's owner and group.)
 - **`config list` warns when two entries pin the same key**, with or without
   `--check`: a pin that cannot tell two daemons apart is the shared-key hazard
   again.
@@ -835,3 +881,63 @@ with a socket and, later, an access file:
   access file and read-write after it; a certificate entry was "me
   (read-write)"; `daemon stop` over TCP got 403; `client list` matched the
   running policy; stop over the socket worked.
+
+**2026-11-23, `config add` sets up the client certificate** (the owner's
+rulings, the same day). The management API is moving to mTLS altogether: CLI
+tools authenticate with a client certificate, except on the daemon's local
+admin socket (root on the daemon host, admin, no credentials). So
+`tdns-ncli config add <daemon config>` sets up certificate access by default:
+
+- **The CLI end.** It uses the operator's pair: the CLI config's `client:`
+  block, else `DefaultClientCertPaths()`. When there is none it makes it, as
+  `client init` does, and says so with its pin.
+- **The daemon end.** The certificate works only once the daemon's access file
+  lists its pin, enabled. When config add can write the daemon's side (root on
+  the daemon host, in practice: it tries the directories, and asks the daemon
+  on its socket which config it runs), it enrolls the pin with role
+  read-write, through the pieces `client add` uses: the access file's lock,
+  `ValidateAccessFile`, the write with `.prev`, the check of whose daemon
+  answers, the reload over the socket. A pin already listed, under any name,
+  is not added again; one listed but disabled is reported and not enabled.
+  The client's name is the certificate's CN, else user-host. A pin it can read
+  in the access file needs no write, so an operator whose pin an admin has
+  enrolled gets the certificate entry without being root.
+- **No access file yet.** config add creates it at the path `client add`
+  suggests (keyauth on, this client), and adds `access-file:` under
+  `apiserver:` in the daemon config: one line, after the block's last line,
+  at its keys' column; the rest of the file stays byte for byte (comments,
+  order, indentation), and the result is read back, as YAML and through the
+  daemon loader. The daemon config is written as the access file is (the
+  owner's ruling, the same day): its old bytes kept as `.prev`, then the new
+  file renamed over it with the old one's owner, group and mode; a failure
+  later in the add (a refused or failed reload) puts the old bytes back the
+  same way and leaves the `.prev`. It does not do this, and falls back
+  (below), when the daemon config has TCP addresses with `usetls: false` (the
+  daemon refuses an access file then), when the daemon serves no local admin
+  socket, or when the `apiserver:` block is not in the file itself. The
+  output says loudly what the access file changes: the API key over TCP
+  drops from admin to read-write, TCP clients need TLS 1.3, and admin is the
+  local socket's alone.
+- **The reload** goes over the local socket, and the policy then running is
+  asked for the pin: a reload that does not put it in force puts every file
+  back as it was. A daemon that is not running gets the files, and the output
+  says its next start reads them.
+- **The entry** then has `authmethod: certificate`, its `pins:` and
+  `config-file:`, and no `apikey:` line. An existing entry that uses the key
+  is switched in place (`authmethod: certificate` where its line stands, the
+  `apikey:` line removed) once the enrollment has succeeded. A certificate
+  entry sends no key, so a key changed on the daemon is no longer "changed
+  settings" for it.
+- **The API key is the fallback for an existing entry only**, when the
+  certificate cannot be made to work and the key is right at both ends (the
+  entry's key is the daemon's `apiserver.apikey`, and the access file, if
+  any, does not have keyauth off). The entry keeps the key, and config add
+  prints what the certificate still needs: the exact `tdns-ncli <daemon>
+  client add <name> --pin <pin> --role read-write` line, and the
+  `access-file:` line when the daemon config lacks one. A new entry never
+  gets a key: config add refuses it, as `Error:` with that fix.
+
+This makes `access-file:` no longer a hand edit (section 3.7), and the tool
+now writes that one line of a daemon config besides the access file.
+`socket:` stays a hand edit. The pinning, `rootca:` never being suggested, TCP
+entries with `config-file:` and no `unix://` entries are as before.
