@@ -86,19 +86,24 @@ func TestConfigStatusShowsAppClients(t *testing.T) {
 	}
 }
 
-// A plain-text 403 reaches the shared CLI error path once: the senders hand
-// back the verdict and the daemon's words, wrapped, with the daemon's
-// name for "Error from %q", instead of logging it and wrapping it again. A
-// catalog handler's JSON error is the daemon's message, not the raw body.
+// A plain-text 403 reaches the shared printer once: the senders hand back
+// the refusal, which prints as one verdict naming the daemon and the
+// daemon's words, wrapped, instead of being logged and wrapped again. A
+// handler's JSON error (a zone of another client, the catalog's non-2xx
+// reply) prints the daemon's message the same way, not the raw body.
 func TestARefusalPrintsOnceAndReadably(t *testing.T) {
 	const refusal = "zone bump: not available to application clients"
+	const notOwn = "zone other.example.: not a zone of API owner cert:provisioner"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/catalog":
+		var post struct{ Command string }
+		_ = json.NewDecoder(r.Body).Decode(&post)
+		switch {
+		case r.URL.Path == "/catalog":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
-			json.NewEncoder(w).Encode(tdns.CatalogResponse{Error: true,
-				ErrorMsg: "zone other.example.: not a zone of API owner cert:provisioner"})
+			json.NewEncoder(w).Encode(tdns.CatalogResponse{Error: true, ErrorMsg: notOwn})
+		case r.URL.Path == "/zone" && post.Command == "freeze":
+			json.NewEncoder(w).Encode(tdns.ZoneResponse{AppName: "tdns-auth", Error: true, ErrorMsg: notOwn})
 		default:
 			http.Error(w, refusal, http.StatusForbidden)
 		}
@@ -106,27 +111,38 @@ func TestARefusalPrintsOnceAndReadably(t *testing.T) {
 	defer srv.Close()
 	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: srv.URL, AuthMethod: "none", Client: srv.Client()}
 
-	cr, err := SendZoneCommand(api, tdns.ZonePost{Command: "bump", Zone: "own.example."})
-	if err == nil {
-		t.Fatal("no error for a 403")
-	}
-	printed := "Error from \"" + cr.AppName + "\": " + err.Error()
-	want := "Error from \"tdns-auth\": refused (HTTP 403):\n  " + refusal
-	if printed != want {
-		t.Errorf("printed\n%s\nwant\n%s", printed, want)
-	}
-	for _, l := range strings.Split(printed, "\n") {
-		if len(l) > 72 {
-			t.Errorf("line over 72 columns: %q", l)
+	check := func(what string, err error, want string) {
+		t.Helper()
+		if err == nil {
+			t.Errorf("%s: no error", what)
+			return
+		}
+		printed := captureStdout(t, func() { printDaemonError(api.Name, err) })
+		if printed != want {
+			t.Errorf("%s: printed\n%s\nwant\n%s", what, printed, want)
+		}
+		for _, l := range strings.Split(printed, "\n") {
+			if len(l) > 72 {
+				t.Errorf("%s: line over 72 columns: %q", what, l)
+			}
 		}
 	}
-	if _, err := SendParentSyncCommand(api, tdns.ZoneParentSyncPost{Command: "status", Zone: "own.example."}); err == nil ||
-		!strings.HasPrefix(err.Error(), "refused (HTTP 403):\n  ") {
-		t.Errorf("parentsync: %v", err)
-	}
+	refused := "Refused by tdns-auth (HTTP 403):\n  " + refusal + "\n"
+	errorFrom := "Error from tdns-auth:\n  " + notOwn + "\n"
 
+	_, err := SendZoneCommand(api, tdns.ZonePost{Command: "bump", Zone: "own.example."})
+	check("zone bump", err, refused)
+	_, err = SendZoneCommand(api, tdns.ZonePost{Command: "freeze", Zone: "other.example."})
+	check("zone freeze", err, errorFrom)
+	_, err = SendParentSyncCommand(api, tdns.ZoneParentSyncPost{Command: "status", Zone: "own.example."})
+	check("parentsync", err, refused)
 	resp, err := SendCatalogCommand(api, tdns.CatalogPost{Command: "zone-list", CatalogZone: "other.example."})
-	if err == nil || err.Error() != "zone other.example.: not a zone of API owner cert:provisioner" || resp == nil {
+	check("catalog", err, errorFrom)
+	if resp == nil {
+		t.Error("catalog: no response")
+	}
+	// What a caller that prints err.Error() itself reads is unchanged.
+	if err == nil || err.Error() != notOwn {
 		t.Errorf("catalog: %v, want the daemon's message", err)
 	}
 }

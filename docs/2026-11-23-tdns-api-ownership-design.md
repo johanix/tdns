@@ -536,3 +536,12 @@ Part B (application clients and zone scope):
   the daemon's words wrapped below it (`tdns.ApiRefusal.Report`); the
   senders no longer log it first. `catalog` commands print the daemon's
   error message instead of the raw reply.
+- After the rig run: every command an application can be refused on (zone,
+  catalog, parentsync, childsync, delegation, rollover, config, debug,
+  ddns, dsync-api, command and daemon status) prints a daemon's error
+  through one printer (`printDaemonError` in `v2/cli`, the layout in
+  `tdns.ErrorReport`): one verdict naming the client entry, "Refused by
+  tdns-auth (HTTP 403):" for a plain-text refusal, "Error from tdns-auth:"
+  for a JSON reply's error, then the daemon's words indented two spaces,
+  within 72 characters, a hint line kept as its own indented line. No log
+  line, no second lead; exit codes as before.
