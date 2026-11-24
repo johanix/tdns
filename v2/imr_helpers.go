@@ -543,7 +543,7 @@ func baseFromTLSAOwner(owner string) string {
 	canon := core.CanonicalizeName(owner)
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(canon, prefix) {
-			return owner[len(prefix):]
+			return core.TrimLeadingLabels(owner, dns.CountLabel(prefix))
 		}
 	}
 	return ""

@@ -217,6 +217,23 @@ func TestEntNamesFrom(t *testing.T) {
 	}
 }
 
+// A dot inside a label is part of the label. www.a\.b.example. has one
+// ancestor below the apex, a\.b.example.; b.example. is no name in the zone,
+// and a walk that splits a\.b at its escaped dot makes it an ENT.
+func TestEntNamesFromRespectsEscapedDots(t *testing.T) {
+	zd := testSnapshotZone(t, "example.", entZone+`www.a\.b.example. 3600 IN A 10.0.0.5`+"\n")
+	snap := zd.publishedSnapshot()
+
+	for _, spelling := range []string{`a\.b.example.`, `A\.B.EXAMPLE.`} {
+		if !isEmptyNonTerminal(snap, spelling) {
+			t.Errorf("isEmptyNonTerminal(%q) = false: www.a\\.b.example. hangs below it", spelling)
+		}
+	}
+	if isEmptyNonTerminal(snap, "b.example.") {
+		t.Error("b.example. is an empty non-terminal: the walk split a\\.b at its escaped dot")
+	}
+}
+
 // An owner can exist in Data holding no records — an UPDATE that deleted its
 // last RRset without deleting the node. With descendants beneath it that is an
 // empty non-terminal like any other, and it must not become a signed denial
