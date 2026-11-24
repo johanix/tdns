@@ -154,6 +154,11 @@ type entryEdit struct {
 	// line goes, and its authmethod: becomes certificate where it stands (or
 	// is added, if it has none).
 	toCert bool
+	// bindTo: the daemon config the item names from now on, its
+	// config-file: line (added; one it has goes). For a key entry found by
+	// its address alone, switched to the certificate enrolled on that
+	// daemon.
+	bindTo string
 }
 
 // reAuthMethodValue splits the rest of an "authmethod:" line into the space
@@ -181,6 +186,9 @@ func editEntryText(src []byte, name string, up ApiDetails, ed entryEdit) ([]byte
 	}
 	if ed.toCert {
 		drops["apikey"] = true
+	}
+	if ed.bindTo != "" {
+		drops["config-file"] = true
 	}
 	lines := strings.Split(string(src), "\n")
 	start, err := findApiserversKey(lines)
@@ -322,6 +330,9 @@ func editEntryText(src []byte, name string, up ApiDetails, ed entryEdit) ([]byte
 		add = append(add,
 			kvLine(keyCol, valueCol, "tlsauth", "pin"),
 			kvLine(keyCol, valueCol, "pins", pinsFlow(up.Pins)))
+	}
+	if ed.bindTo != "" {
+		add = append(add, kvLine(keyCol, valueCol, "config-file", yamlScalar(ed.bindTo)))
 	}
 	edited := make([]string, 0, len(kept)+len(add))
 	edited = append(edited, kept[:lastContent+1]...)

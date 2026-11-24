@@ -1756,7 +1756,7 @@ func TestAddFindsThePinListed(t *testing.T) {
 	// It is listed read-only, and config add does not change that: it says
 	// so, plainly.
 	if out := printed(res, false, env.cli); !strings.Contains(out, "lists your certificate as laptop, read-only: write commands will be refused") ||
-		!strings.Contains(out, "tdns-ncli auth client set-role laptop read-write") {
+		!strings.Contains(oneLine(out), "tdns-ncli auth client set-role --daemon-config "+d+" -- laptop read-write") {
 		t.Errorf("printed:\n%s", out)
 	}
 	// Read-write: the role named, nothing more.
@@ -1781,7 +1781,7 @@ func TestAddReportsADisabledPin(t *testing.T) {
 
 	_, err := env.add(t, d, nil)
 	var r addRefusal
-	if !errors.As(err, &r) || !strings.Contains(err.Error(), "disabled") || !strings.Contains(strings.Join(r.fix, "\n"), "tdns-ncli auth client enable laptop") {
+	if !errors.As(err, &r) || !strings.Contains(err.Error(), "disabled") || !strings.Contains(oneLine(strings.Join(r.fix, "\n")), "tdns-ncli auth client enable --daemon-config "+d+" -- laptop") {
 		t.Errorf("new entry: err = %v, want a refusal with client enable", err)
 	}
 	if _, err := os.Stat(env.cli); err == nil {
@@ -1798,7 +1798,7 @@ func TestAddReportsADisabledPin(t *testing.T) {
 		t.Errorf("entry %+v, want it on the key", got[0])
 	}
 	out := printed(res, false, env.cli)
-	if !strings.Contains(out, "keeps the API key") || !strings.Contains(out, "disabled") || !strings.Contains(out, "client enable laptop") {
+	if !strings.Contains(out, "keeps the API key") || !strings.Contains(out, "disabled") || !strings.Contains(oneLine(out), "client enable --daemon-config "+d+" -- laptop") {
 		t.Errorf("printed:\n%s", out)
 	}
 	if readBytes(t, af) != old {
@@ -1843,6 +1843,68 @@ func TestAddSwitchesAKeyEntry(t *testing.T) {
 	}
 	if out := printed(res, false, env.cli); !strings.Contains(out, "switched it to your client certificate") {
 		t.Errorf("printed:\n%s", out)
+	}
+}
+
+// A key entry written before config-file: existed, found by its address
+// (and its key and scheme, this daemon's): switched to the certificate
+// enrolled on this daemon, it is bound to it too, config-file: written
+// and read back, so the entry is the daemon config add checked. Said so,
+// not that config-file: is the operator's to add.
+func TestAddSwitchesALegacyKeyEntryAndBindsIt(t *testing.T) {
+	env := newAddEnv(t)
+	d, daemonPin := env.certDaemon(t, env.dir, "")
+	head := "apiservers:\n   - name:          tdns-auth\n     baseurl:       " + env.url(8989) + "\n"
+	pins := "     tlsauth:       pin\n     pins:          [ \"" + daemonPin + "\" ]\n"
+	writeFile(t, env.cli, head+"     apikey:        the-key\n     authmethod:    X-API-Key\n"+pins)
+
+	res, err := env.add(t, d, nil)
+	if err != nil || !res.Switched || !res.Wrote {
+		t.Fatalf("%+v, %v; want it switched", res, err)
+	}
+	want := head + "     authmethod:    certificate\n" + pins + "     config-file:   " + d + "\n"
+	if got := readBytes(t, env.cli); got != want {
+		t.Errorf("file =\n%s\nwant\n%s", got, want)
+	}
+	if got := env.entries(t)[0]; got.AuthMethod != "certificate" || got.ApiKey != "" || got.ConfigFile != d {
+		t.Errorf("entry = %+v", got)
+	}
+	out := flat(printed(res, false, env.cli))
+	if !strings.Contains(out, "now names config-file: "+d) || strings.Contains(out, "add \"config-file:") {
+		t.Errorf("printed %q; want the binding said as made", out)
+	}
+}
+
+// The daemon takes your certificate now (it runs the pin), but its config
+// names a relative access-file:, which it refuses at its next start. The
+// enrolment does not last: a new entry is refused, with the path to fix,
+// though a file of that name in the CLI's working directory lists the pin.
+func TestConfirmRefusesARelativeAccessFile(t *testing.T) {
+	env := newAddEnv(t)
+	pin := env.pin(t)
+	t.Chdir(env.dir)
+	listed := "keyauth: true\nclients:\n   - name: tester\n     pin: " + pin + "\n     role: read-write\n"
+	writeFile(t, filepath.Join(env.dir, "access.yaml"), listed)
+	d, _ := env.certDaemon(t, env.dir, "\n   access-file: access.yaml")
+	f := serveFakeDaemon(t, env.socket(), d, filepath.Join(env.dir, "access.yaml"))
+	f.mu.Lock()
+	f.policy = &tdns.ApiAccessStatus{File: filepath.Join(env.dir, "access.yaml"), KeyAuth: true,
+		Clients: []tdns.ApiAccessStatusClient{{Name: "tester", Pin: pin, Role: "read-write"}}}
+	f.mu.Unlock()
+
+	_, err := env.add(t, d, nil)
+	var r addRefusal
+	if !errors.As(err, &r) || !strings.Contains(err.Error(), `apiserver.access-file "access.yaml"`) || !strings.Contains(err.Error(), "not an absolute path") {
+		t.Fatalf("err = %v; want the new entry refused: the access-file path is relative", err)
+	}
+	if fix := oneLine(strings.Join(r.fix, "\n")); !strings.Contains(fix, "absolute path") {
+		t.Errorf("fix %q; want the path made absolute", r.fix)
+	}
+	if _, err := os.Stat(env.cli); err == nil {
+		t.Errorf("an entry was written:\n%s", readBytes(t, env.cli))
+	}
+	if _, err := os.Stat(cliConfigLockPath("access.yaml")); err == nil {
+		t.Error("a lock was taken beside the relative path, in the working directory")
 	}
 }
 
@@ -3238,12 +3300,22 @@ func TestAddDryRunProbesNothing(t *testing.T) {
 }
 
 // The advice is a command that runs as printed: a client name with a space
-// is quoted; and a pin already listed is not enrolled again.
+// is quoted, and one that reads as an option (--help, which an access file
+// may list) comes after "--", so it is the name; and a pin already listed
+// is not enrolled again.
 func TestCertFixLines(t *testing.T) {
 	tg := &accessTarget{DaemonConfig: "/etc/tdns/tdns-auth.yaml", File: "/etc/tdns/tdns-auth-access.yaml"}
 	c := &CertSetup{role: "auth", listedAs: "Ops Laptop", state: certDisabled, t: tg}
-	if fix := strings.Join(c.fixLines(), "\n"); !strings.Contains(fix, "client enable 'Ops Laptop'") {
+	if fix := oneLine(strings.Join(c.fixLines(), "\n")); !strings.Contains(fix, "client enable --daemon-config /etc/tdns/tdns-auth.yaml -- 'Ops Laptop'") {
 		t.Errorf("fix:\n%s", fix)
+	}
+	c = &CertSetup{role: "auth", listedAs: "--help", state: certDisabled, t: tg}
+	if fix := oneLine(strings.Join(c.fixLines(), "\n")); !strings.HasSuffix(fix, "tdns-ncli auth client enable --daemon-config /etc/tdns/tdns-auth.yaml -- --help then run config add again.") {
+		t.Errorf("fix:\n%s", fix)
+	}
+	c = &CertSetup{role: "auth", listedAs: "--help", listedRole: "read-only", t: tg}
+	if got := c.listedEnrollment(); !strings.Contains(got, "tdns-ncli auth client set-role --daemon-config /etc/tdns/tdns-auth.yaml -- --help read-write changes that") {
+		t.Errorf("listed: %q", got)
 	}
 	c = &CertSetup{role: "auth", listedAs: "laptop", pin: pinOf("p"), state: certCannot, t: tg}
 	fix := strings.Join(c.fixLines(), "\n")
@@ -3978,6 +4050,31 @@ func TestAnotherAddWaitsForAnEnrolmentInFlight(t *testing.T) {
 		}
 	})
 
+	// The daemon config's key rotated (K1 to K2) while B waited: what B
+	// finds about the key under the locks is of K2, and its entry holds
+	// K1, which a stopped daemon will not start with. B keeps nothing on
+	// that: it is refused, to be run again, its entry as it was.
+	t.Run("the key rotated meanwhile: B, a key entry, is refused", func(t *testing.T) {
+		env := newAddEnv(t)
+		env.pin(t)
+		d, dpin := env.certDaemon(t, env.dir, "")
+		a := applyA(t, env, d)
+		cliB := filepath.Join(env.dir, "b-cli.yaml")
+		writeFile(t, cliB, env.keyEntry(d, dpin))
+		done := startB(t, d, cliB)
+		writeFile(t, d, strings.Replace(readBytes(t, d), "the-key", "rotated-key", 1))
+		a.release()
+		o := wait(t, done)
+		var r addRefusal
+		if !errors.As(o.err, &r) || !strings.Contains(r.why, `entry "tdns-auth" is left as it is`) || !strings.Contains(r.why, "changed while it ran") ||
+			!reflect.DeepEqual(r.fix, []string{"run config add again."}) {
+			t.Fatalf("B: %+v, %v; want it refused, to be run again", o.res, o.err)
+		}
+		if readBytes(t, cliB) != env.keyEntry(d, dpin) {
+			t.Errorf("B's CLI config changed:\n%s", readBytes(t, cliB))
+		}
+	})
+
 	t.Run("A keeps it: B uses it", func(t *testing.T) {
 		env := newAddEnv(t)
 		pin := env.pin(t)
@@ -4045,7 +4142,7 @@ func TestAddRefusesACertEntryWhoseCertificateDoesNotWork(t *testing.T) {
 		_, err := env.add(t, d, nil)
 		var r addRefusal
 		if !errors.As(err, &r) || !strings.Contains(r.why, `entry "tdns-auth" is re-pinned, but it cannot authenticate: your certificate does not work here`) ||
-			!strings.Contains(r.why, "disabled") || !strings.Contains(strings.Join(r.fix, "\n"), "tdns-ncli auth client enable laptop") {
+			!strings.Contains(r.why, "disabled") || !strings.Contains(oneLine(strings.Join(r.fix, "\n")), "tdns-ncli auth client enable --daemon-config "+d+" -- laptop") {
 			t.Fatalf("err = %v; want a refusal naming the disabled pin, with client enable", err)
 		}
 		if got := env.entries(t)[0]; got.AuthMethod != "certificate" || got.TLSAuth != "pin" || !reflect.DeepEqual(got.Pins, []string{dpin}) {
@@ -4114,7 +4211,7 @@ func TestAddNeedsTheEnrolmentInTheFile(t *testing.T) {
 			t.Fatalf("err = %v; want a refusal: the pin is listed disabled", err)
 		}
 		fix := strings.Join(r.fix, "\n")
-		if !strings.Contains(fix, "tdns-ncli auth client enable h38c") || strings.Contains(fix, "client add") {
+		if !strings.Contains(oneLine(fix), "tdns-ncli auth client enable --daemon-config "+d+" -- h38c") || strings.Contains(fix, "client add") {
 			t.Errorf("fix:\n%s\nwant client enable h38c, not client add", fix)
 		}
 	})
@@ -4461,7 +4558,8 @@ func TestAddFixReachesAnInstanceBeforeItsEntry(t *testing.T) {
 // A command given --daemon-config (the client commands, config reload)
 // names the daemon itself, so it runs without a CLI config when there is
 // none: the binary's PersistentPreRun asks NoCliConfigNeeded. Without the
-// flag, or with the CLI config there, the CLI config is loaded as always.
+// flag, with it empty, or with the CLI config there, the CLI config is
+// loaded as always.
 func TestNoCliConfigNeeded(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "tdns-ncli.yaml")
 	present := filepath.Join(t.TempDir(), "tdns-ncli.yaml")
@@ -4488,6 +4586,10 @@ func TestNoCliConfigNeeded(t *testing.T) {
 		{[]string{"auth", "client", "add", "x", "--pin", pinOf("x"), "--role", "read-only", "--daemon-config", "/etc/tdns/tdns-auth2.yaml"}, present, false},
 		{[]string{"auth", "client", "list"}, missing, false},
 		{[]string{"auth", "config", "reload"}, missing, false},
+		// An empty path (an unset shell variable) names no daemon: the
+		// role's default would be edited, so it stops as without the flag.
+		{[]string{"auth", "client", "disable", "laptop", "--no-reload", "--daemon-config", ""}, missing, false},
+		{[]string{"auth", "client", "list", "--daemon-config="}, missing, false},
 	} {
 		if got := NoCliConfigNeeded(parsed(t, tc.args...), tc.cfg); got != tc.want {
 			t.Errorf("%s, CLI config %s: %v, want %v", strings.Join(tc.args, " "), tc.cfg, got, tc.want)
@@ -4693,7 +4795,7 @@ func TestApplyFindsThePinDisabled(t *testing.T) {
 		t.Fatalf("err = %v; want apply refused: the pin is listed disabled", err)
 	}
 	fix := oneLine(strings.Join(c.fixLines(), "\n"))
-	if !strings.Contains(fix, "tdns-ncli auth client enable h38c --daemon-config "+d) || strings.Contains(fix, "client add") {
+	if !strings.Contains(fix, "tdns-ncli auth client enable --daemon-config "+d+" -- h38c") || strings.Contains(fix, "client add") {
 		t.Errorf("fix %q; want client enable h38c for %s", fix, d)
 	}
 }

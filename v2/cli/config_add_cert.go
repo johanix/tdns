@@ -80,6 +80,11 @@ type CertSetup struct {
 	// check that the pin the daemon takes is enrolled there, and so stays
 	// after a reload; the entry relies on the daemon's word (unreadNote).
 	unreadFile bool
+	// apiChanged: confirm found the daemon config's apiserver: settings, its
+	// key among them, other than when config add read them: what it found
+	// about the key then is of another key than the entry's, and a key
+	// entry is not kept on it (changed is set too).
+	apiChanged bool
 	// keyStale: keyOff because the daemon, asked over TCP, refuses the key
 	// its config says, as it runs the one it loaded at its start: a reload
 	// makes the key work (keyFixLines).
@@ -832,6 +837,13 @@ func (c *CertSetup) confirm(o AddOptions) error {
 	if c.state != certWorks || c.held != nil {
 		return nil
 	}
+	if c.t.Configured && !filepath.IsAbs(c.t.File) {
+		// A path the daemon refuses at its next start: the enrolment does
+		// not last (notInFile), and no lock is taken beside it, wherever
+		// it would resolve from here.
+		c.failsInFile(c)
+		return nil
+	}
 	ctx := o.Ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -850,15 +862,16 @@ func (c *CertSetup) confirm(o AddOptions) error {
 	// Planned again from the daemon config as it is now, which must say
 	// what it said: the access file it names and the API the entry is for.
 	var again *CertSetup
-	same := false
+	same, sameApi := false, false
 	if now, err := ReadDaemonApi(c.t.DaemonConfig, c.role); err == nil {
 		again = planCert(o, now, c.keyEntry)
-		same = now.AccessFile == c.info.AccessFile && sameApiApartFromAccess(c.info, now)
+		sameApi = sameApiApartFromAccess(c.info, now)
+		same = now.AccessFile == c.info.AccessFile && sameApi
 	}
 	if !same || again.state != certWorks || again.pin != c.pin {
 		unlock()
 		c.cannot("what config add found on the daemon's side changed while it ran (another config add put back what it had enrolled?)")
-		c.changed = true
+		c.changed, c.apiChanged = true, !sameApi
 		if again != nil {
 			c.keyVerdictOf(again)
 			if again.timedOut != nil {
@@ -917,6 +930,11 @@ func (c *CertSetup) notInFile() (why string, disabled *tdns.AccessClient, invali
 	const now = "the daemon takes your certificate now, but "
 	if !c.t.Configured {
 		return now + fmt.Sprintf("%s names no access file, so it will not after its next start", c.t.DaemonConfig), nil, false, false
+	}
+	if !filepath.IsAbs(c.t.File) {
+		// Not read: from here it would be a file in this process's working
+		// directory, not one the daemon reads (fixLines: the path).
+		return now + fmt.Sprintf("apiserver.access-file %q in %s is not an absolute path, which the daemon refuses, so it will not after its next start", c.t.File, c.t.DaemonConfig), nil, true, false
 	}
 	af, _, err := readAccessFile(c.t, false)
 	var pe *accessParseError
@@ -1453,10 +1471,15 @@ func (c *CertSetup) fixLines() []string {
 		return c.sockFixLines()
 	case c.state == certDisabled:
 		return fixWith("on the daemon's host, as root:",
-			c.daemonCmd("client", "enable", shellQuote(c.listedAs)),
+			c.daemonCmdForName([]string{"client", "enable"}, c.listedAs),
 			"then run config add again.")
 	case c.pairProblem != 0:
 		return c.pairFixLines()
+	case c.fileInvalid && !filepath.IsAbs(c.t.File):
+		return []string{
+			"give apiserver.access-file in " + c.t.DaemonConfig,
+			"as an absolute path, then run config add again.",
+		}
 	case c.fileInvalid:
 		return []string{
 			"fix " + c.t.File + " so the daemon would load it",
@@ -1515,9 +1538,18 @@ func (c *CertSetup) daemonCmd(args ...string) []string {
 	return fixCommand(append([]string{"tdns-ncli", c.role}, args...), c.t.DaemonConfig)
 }
 
-// fixCommand is the command words, and --daemon-config daemonCfg, as fix
-// lines (daemonCmd says how they are wrapped).
-func fixCommand(words []string, daemonCfg string) []string {
+// daemonCmdForName is daemonCmd for a command on a client the access file
+// lists as name (enable): the name after the options and "--", so a name
+// that reads as an option (--help, which the daemon's validator allows) is
+// the name.
+func (c *CertSetup) daemonCmdForName(args []string, name string) []string {
+	return fixCommand(append([]string{"tdns-ncli", c.role}, args...), c.t.DaemonConfig, "-- "+shellQuote(name))
+}
+
+// fixCommand is the command words, --daemon-config daemonCfg, and the words
+// after it (positional ones after "--"), as fix lines (daemonCmd says how
+// they are wrapped).
+func fixCommand(words []string, daemonCfg string, after ...string) []string {
 	var lines []string
 	line := "   " + words[0]
 	put := func(w string, last bool) {
@@ -1536,12 +1568,20 @@ func fixCommand(words []string, daemonCfg string) []string {
 		put(w, false)
 	}
 	flag, path := "--daemon-config", shellQuote(daemonCfg)
-	if pair := flag + " " + path; len(line)+len(" ")+len(pair) <= fixCmdWidth || len("      ")+len(pair) <= fixCmdWidth {
-		put(pair, true)
+	last := len(after) == 0
+	room := fixCmdWidth
+	if !last {
+		room -= len(" \\")
+	}
+	if pair := flag + " " + path; len(line)+len(" ")+len(pair) <= room || len("      ")+len(pair) <= room {
+		put(pair, last)
 	} else {
 		put(flag, false)
 		lines = append(lines, line+" \\")
 		line = "      " + path
+	}
+	for i, w := range after {
+		put(w, i == len(after)-1)
 	}
 	return append(lines, line)
 }
@@ -1654,7 +1694,7 @@ func (c *CertSetup) pairFixLines() []string {
 func (c *CertSetup) listedEnrollment() string {
 	switch c.listedRole {
 	case "read-only":
-		return c.listedAs + ", read-only: write commands will be refused (tdns-ncli " + c.role + " client set-role " + shellQuote(c.listedAs) + " read-write --daemon-config " + shellQuote(c.t.DaemonConfig) + " changes that)"
+		return c.listedAs + ", read-only: write commands will be refused (tdns-ncli " + c.role + " client set-role --daemon-config " + shellQuote(c.t.DaemonConfig) + " -- " + shellQuote(c.listedAs) + " read-write changes that)"
 	case "":
 		return c.listedAs
 	}

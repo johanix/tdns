@@ -53,10 +53,12 @@ func IsCliConfigCmd(cmd *cobra.Command) bool {
 // without): when it was given --daemon-config (the client commands, config
 // reload), which names the daemon itself, and the file does not exist. That
 // is how a fix config add prints reaches a daemon on a host where root has
-// no CLI config yet. With the file there, it is loaded as always.
+// no CLI config yet. With the file there, it is loaded as always. An empty
+// --daemon-config (an unset shell variable) names no daemon, and the role's
+// default would be the one edited: it is as if not given.
 func NoCliConfigNeeded(cmd *cobra.Command, cliConfig string) bool {
 	f := cmd.Flags().Lookup("daemon-config")
-	if f == nil || !f.Changed {
+	if f == nil || !f.Changed || f.Value.String() == "" {
 		return false
 	}
 	_, err := os.Stat(cliConfig)
@@ -381,18 +383,28 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		case sameAddr && e.ConfigFile == "":
 			// Typically the canonical entry written before config-file: existed.
 			res.AlreadyKnown = e.Name
-			res.Notes = append(res.Notes, fmt.Sprintf(
-				"entry %q already uses %s; it has no config-file: -- add \"config-file: %s\" to it if it is this daemon",
-				e.Name, e.BaseURL, info.ConfigFile))
+			unbound := fmt.Sprintf("entry %q already uses %s; it has no config-file: -- add \"config-file: %s\" to it if it is this daemon",
+				e.Name, e.BaseURL, info.ConfigFile)
 			if diff := changedSettings(e, wantKey, wantURL); diff != "" {
-				res.Notes = append(res.Notes, fmt.Sprintf(
+				res.Notes = append(res.Notes, unbound, fmt.Sprintf(
 					"entry %q: its %s do not match %s; if it is this daemon, edit them by hand",
 					e.Name, diff, info.ConfigFile))
 				return res, nil
 			}
 			// Its key and scheme are this daemon's, on this daemon's address:
-			// pin it as the daemon's own entry would be.
-			return repinKnownEntry(o, res, e, existing, target, info)
+			// pin it as the daemon's own entry would be. Switched to your
+			// certificate, enrolled on this daemon, it is bound to it too
+			// (repinKnownEntry), which is said instead.
+			r, err := repinKnownEntry(o, res, e, existing, target, info)
+			if r != nil {
+				note := unbound
+				if r.Entry.ConfigFile != "" {
+					note = fmt.Sprintf("entry %q had no config-file:; it %s config-file: %s, the daemon your certificate is enrolled on",
+						e.Name, map[bool]string{true: "would name", false: "now names"}[o.DryRun], info.ConfigFile)
+				}
+				r.Notes = append([]string{note}, r.Notes...)
+			}
+			return r, err
 		case sameAddr:
 			return nil, fmt.Errorf("entry %q (config-file %s) already uses the API address %s, which %s also names; two daemons cannot listen on one address",
 				e.Name, e.ConfigFile, e.BaseURL, info.ConfigFile)
@@ -861,13 +873,21 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 	res.Cert = c
 	defer c.release() // what apply or confirm keeps locked, once the entry is written
 	toCert := !isCert && c.usable()
+	// A key entry found by its address alone (written before config-file:
+	// existed) is switched only bound to this daemon too: the certificate
+	// is enrolled on it, and the binding is written and read back with the
+	// rest. One that keeps the key keeps its lines, and the note to bind it.
+	bindTo := ""
+	if e.ConfigFile == "" {
+		bindTo = info.ConfigFile
+	}
 
-	write, err := knownEdit(o, res, e, up, existing, target, entryEdit{repin: repin, toCert: toCert})
+	write, err := knownEdit(o, res, e, up, existing, target, entryEdit{repin: repin, toCert: toCert, bindTo: bindTo})
 	if err != nil && toCert && c.state != certWorks {
 		// The entry cannot be rewritten to use the certificate: it keeps
 		// the key, and the daemon's side is left as it is.
 		res.Notes = append(res.Notes, fmt.Sprintf("entry %q cannot be switched to your certificate in %s (%v); it keeps the API key", e.Name, target, err))
-		toCert, res.Cert = false, nil
+		toCert, res.Cert, bindTo = false, nil, ""
 		write, err = knownEdit(o, res, e, up, existing, target, entryEdit{repin: repin})
 	}
 	if err != nil {
@@ -900,11 +920,12 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 		case aerr == nil:
 		case isCert:
 			certFailed = true
-		case c.changed && c.failed != nil:
+		case c.changed && (c.failed != nil || c.apiChanged):
 			// apply found the daemon config, or your pair, changed since
-			// the plan: what it says about the key is of the config as it
-			// was. The entry is left as it is.
-			return nil, c.refusal(fmt.Sprintf("entry %q is left as it is: %v", e.Name, c.failed))
+			// the plan, or confirm found its apiserver: settings changed:
+			// what was found about the key is of another config, or
+			// another key, than the entry's. The entry is left as it is.
+			return nil, c.refusal(fmt.Sprintf("entry %q is left as it is: %s", e.Name, c.whyNot()))
 		default:
 			// The key, then, as the daemon takes it now: after a reload,
 			// the rollback reloaded it with the files put back, which may
@@ -933,6 +954,9 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 	if toCert {
 		up.AuthMethod, up.ApiKey = "certificate", ""
 		res.Switched = true
+		if bindTo != "" {
+			up.ConfigFile = bindTo
+		}
 	}
 	if repin || toCert {
 		res.Entry, res.File, res.Canonical = up, target, up.Role == ""
@@ -1069,6 +1093,9 @@ func knownEdit(o AddOptions, res *AddResult, e, up ApiDetails, existing []ApiDet
 	if ed.toCert {
 		up.AuthMethod, up.ApiKey = "certificate", ""
 	}
+	if ed.bindTo != "" {
+		up.ConfigFile = ed.bindTo
+	}
 	byHand := func(why error) error {
 		var lines []string
 		if ed.toCert {
@@ -1076,6 +1103,9 @@ func knownEdit(o AddOptions, res *AddResult, e, up ApiDetails, existing []ApiDet
 		}
 		if ed.repin {
 			lines = append(lines, "   tlsauth: pin", "   pins:    "+pinsFlow(up.Pins))
+		}
+		if ed.bindTo != "" {
+			lines = append(lines, "   config-file: "+yamlScalar(ed.bindTo))
 		}
 		if ed.toCert {
 			lines = append(lines, "and take out its apikey: line.")
