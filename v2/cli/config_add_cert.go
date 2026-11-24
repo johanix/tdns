@@ -53,6 +53,11 @@ const (
 type CertSetup struct {
 	info *DaemonApi // the daemon config, as config add read it
 	role string     // the daemon type, and the command word the advice uses: auth, agent, imr
+	// keyEntry: the add is for an existing entry on the API key, which
+	// keeps it only if the daemon takes it. Only then is the key sent to
+	// the daemon to ask; a new entry, or one on the certificate, has no
+	// key to keep.
+	keyEntry bool
 
 	cert, key string // the operator's pair
 	pin       string // its pin; "" in a dry run before the pair exists
@@ -168,8 +173,10 @@ func (c *CertSetup) pairCannot(problem clientPairProblem, err error) *CertSetup 
 // only when the daemon is not running, its access file, which its next start
 // reads. Nothing on its socket does not say it is not running (askDaemon):
 // nothing on TCP either does.
-func planCert(o AddOptions, info *DaemonApi) *CertSetup {
-	c := &CertSetup{info: info, role: info.Role, t: accessTargetOf(info), dryRun: o.DryRun}
+//
+// keyEntry says the add is for an existing entry on the API key (keyEntry).
+func planCert(o AddOptions, info *DaemonApi, keyEntry bool) *CertSetup {
+	c := &CertSetup{info: info, role: info.Role, keyEntry: keyEntry, t: accessTargetOf(info), dryRun: o.DryRun}
 
 	relative := c.t.Configured && !filepath.IsAbs(c.t.File)
 	af, old, aerr := c.readFile(relative)
@@ -428,23 +435,56 @@ func (c *CertSetup) findKey(view sockView, status tdns.ConfigResponse, serr erro
 		case !a.KeyAuth:
 			c.keyOff, c.keyWhy = true, "the access file it runs turns it off (keyauth: false)"
 		}
+		if c.keyEntry && !c.keyOff {
+			c.keyOverTCP()
+		}
 	case sockShut:
-		r := c.ping(c.info, tdns.ClientOptions{AuthMethod: "X-API-Key", ApiKey: c.info.ApiKey})
+		r := c.ping(c.info, c.keyPing())
 		switch {
+		case r.down:
+			return sockAbsent // nothing on its socket we may open, nothing on TCP: not running
+		case c.pingTimedOut(r):
+			c.keyUnknown = c.timedOut.Error()
+		case !c.keyEntry:
+			// No key was sent, and none is to be kept: only whether it
+			// runs, or is silent, was asked.
 		case r.taken:
 		case r.status == http.StatusServiceUnavailable:
 			c.keyOff, c.keyWhy = true, "its TCP API is closed, as it cannot use its access file"
 		case r.answered:
 			c.keyOff, c.keyWhy = true, "asked over TCP, it refuses the key"
-		case r.down:
-			return sockAbsent // nothing on its socket we may open, nothing on TCP: not running
-		case c.pingTimedOut(r):
-			c.keyUnknown = c.timedOut.Error()
 		default:
 			c.keyUnknown = c.unasked(serr, r)
 		}
 	}
 	return view
+}
+
+// keyPing is how config add pings the daemon's TCP API to find whether it
+// takes the key: with the key, for an existing key entry; without any
+// credentials otherwise (keyEntry), when only whether it runs is asked,
+// so a key is not sent, in the clear on a plain http API, for nothing.
+func (c *CertSetup) keyPing() tdns.ClientOptions {
+	if c.keyEntry {
+		return tdns.ClientOptions{AuthMethod: "X-API-Key", ApiKey: c.info.ApiKey}
+	}
+	return tdns.ClientOptions{AuthMethod: "none"}
+}
+
+// keyOverTCP finds, for a daemon whose socket answered with a policy that
+// lets a key in, whether it takes this one, asking it over TCP: it runs the
+// key it loaded at its start, which the daemon config (the entry's key,
+// changedSettings checked) may no longer say.
+func (c *CertSetup) keyOverTCP() {
+	switch r := c.ping(c.info, c.keyPing()); {
+	case r.taken:
+	case r.status == http.StatusServiceUnavailable:
+		c.keyOff, c.keyWhy = true, "its TCP API is closed, as it cannot use its access file"
+	case r.answered:
+		c.keyOff, c.keyWhy = true, "asked over TCP, it refuses the key (it runs the key it loaded at its start: reload it?)"
+	default:
+		c.keyUnknown = "the daemon answers on its socket, but over TCP, " + r.tcpWhy()
+	}
 }
 
 // recheckKey finds again whether the daemon takes the API key, as planCert
@@ -528,16 +568,20 @@ func (c *CertSetup) ping(info *DaemonApi, o tdns.ClientOptions) pingReply {
 // unasked says why the daemon could not be asked: not on its socket (serr),
 // and not over TCP (r).
 func (c *CertSetup) unasked(serr error, r pingReply) string {
-	tcp := "no TCP API to ask"
+	return fmt.Sprintf("the daemon cannot be asked: %v, and over TCP, %s", serr, r.tcpWhy())
+}
+
+// tcpWhy is why a ping got no answer, as a clause.
+func (r pingReply) tcpWhy() string {
 	switch {
 	case r.base != "" && r.err != nil:
-		tcp = fmt.Sprintf("no answer on %s (%v)", r.base, r.err)
+		return fmt.Sprintf("no answer on %s (%v)", r.base, r.err)
 	case r.base != "":
-		tcp = "no answer on " + r.base
+		return "no answer on " + r.base
 	case r.err != nil:
-		tcp = fmt.Sprintf("config add could not ask it (%v)", r.err)
+		return fmt.Sprintf("config add could not ask it (%v)", r.err)
 	}
-	return fmt.Sprintf("the daemon cannot be asked: %v, and over TCP, %s", serr, tcp)
+	return "no TCP API to ask"
 }
 
 // keyFromFile is whether the daemon takes the key, by its access file: for a
@@ -766,8 +810,9 @@ func (c *CertSetup) release() {
 // usable(): changed, or the enrolment not in the file, with its key verdict
 // as found again), and the caller does not write the entry; the error is
 // only for locks that could not be taken. A lock this process may not take
-// (not root: the lock file is the daemon's) is gone without, and so is a
-// file it may not read: such an add relies on what the daemon says over
+// (not root: the lock file is the daemon's) is gone without, the file still
+// checked where it can be read; a file it may not read is gone without too
+// (the owner's design): such an add relies on what the daemon says over
 // TCP, and cannot enrol, nor put back, anything itself.
 func (c *CertSetup) confirm(o AddOptions) error {
 	if c.state != certWorks || c.held != nil {
@@ -780,6 +825,10 @@ func (c *CertSetup) confirm(o AddOptions) error {
 	unlock, err := lockCliConfigs(ctx, c.lockPaths()...)
 	switch {
 	case errors.Is(err, fs.ErrPermission), errors.Is(err, fs.ErrNotExist):
+		// No lock to take, nor any add of ours to wait for. The enrolment
+		// must last all the same, as far as this process can read the
+		// access file.
+		c.failsInFile(c)
 		return nil
 	case err != nil:
 		return err
@@ -789,7 +838,7 @@ func (c *CertSetup) confirm(o AddOptions) error {
 	var again *CertSetup
 	same := false
 	if now, err := ReadDaemonApi(c.t.DaemonConfig, c.role); err == nil {
-		again = planCert(o, now)
+		again = planCert(o, now, c.keyEntry)
 		same = now.AccessFile == c.info.AccessFile && sameApiApartFromAccess(c.info, now)
 	}
 	if !same || again.state != certWorks || again.pin != c.pin {
@@ -806,24 +855,35 @@ func (c *CertSetup) confirm(o AddOptions) error {
 		}
 		return nil
 	}
-	if why, disabled, invalid := again.notInFile(); why != "" {
+	if c.failsInFile(again) {
 		unlock()
-		c.cannot(why)
-		c.listedAs, c.listedRole, c.byDaemon = "", "", false
-		switch {
-		case invalid:
-			c.fileInvalid = true // the fix: the file
-		case disabled != nil:
-			// Listed, disabled: the fix is to enable it (adding the pin
-			// again is refused: one key, one client).
-			c.state, c.listedAs, c.listedRole = certDisabled, disabled.Name, disabled.Role
-		}
-		// Otherwise not listed: the fix is to enrol it (fixLines).
-		c.keyOff, c.keyWhy, c.keyUnknown = again.keyOff, again.keyWhy, again.keyUnknown
 		return nil
 	}
 	c.held = unlock
 	return nil
+}
+
+// failsInFile makes c no longer usable when from (c planned again, or c
+// itself) finds the pin not enrolled where it lasts (notInFile), with what
+// fixes that and from's key verdict, and says whether it did.
+func (c *CertSetup) failsInFile(from *CertSetup) bool {
+	why, disabled, invalid := from.notInFile()
+	if why == "" {
+		return false
+	}
+	c.cannot(why)
+	c.listedAs, c.listedRole, c.byDaemon = "", "", false
+	switch {
+	case invalid:
+		c.fileInvalid = true // the fix: the file
+	case disabled != nil:
+		// Listed, disabled: the fix is to enable it (adding the pin
+		// again is refused: one key, one client).
+		c.state, c.listedAs, c.listedRole = certDisabled, disabled.Name, disabled.Role
+	}
+	// Otherwise not listed: the fix is to enrol it (fixLines).
+	c.keyOff, c.keyWhy, c.keyUnknown = from.keyOff, from.keyWhy, from.keyUnknown
+	return true
 }
 
 // notInFile says why the pin, which the daemon takes, is not enrolled in
@@ -912,6 +972,9 @@ func (c *CertSetup) applySteps() error {
 	var accessNew []byte
 	if cl := clientByPin(af, c.pin); cl != nil {
 		if cl.Disabled {
+			// Listed since, disabled: the fix is to enable it (client add
+			// refuses the pin again: one key, one client).
+			c.state, c.listedAs, c.listedRole = certDisabled, cl.Name, cl.Role
 			return fmt.Errorf("%s now lists your certificate as %q, disabled", c.t.File, cl.Name)
 		}
 		c.listedAs, c.listedRole = cl.Name, cl.Role
@@ -1098,12 +1161,27 @@ func (c *CertSetup) reloadBack(files string) string {
 		fmt.Fprintf(&sb, "; the daemon could NOT be reloaded with them (%v): it may still run the new policy, reload it over its socket", err)
 		return sb.String()
 	}
+	// Recovered only when it runs what the files say now: no policy for a
+	// daemon config that names no access file; that file's, without the
+	// pin apply enrolled, for one that does.
 	resp, err := configToDaemon(c.role, c.t.Socket, c.t.DaemonConfig, tdns.ConfigPost{Command: "status"})
+	a := resp.Access
+	const reloaded = "; the daemon was reloaded with them, but "
 	switch {
 	case err != nil:
-		fmt.Fprintf(&sb, "; the daemon was reloaded with them, but what it runs now could not be asked (%v)", err)
-	case resp.Access != nil && (c.nameIt || c.enrolledAs != "" && policyHasPin(resp.Access, c.pin)):
-		sb.WriteString("; the daemon was reloaded with them, but it still runs the new policy: check it")
+		fmt.Fprintf(&sb, "%swhat it runs now could not be asked (%v)", reloaded, err)
+	case runsConfig(resp, c.t) != nil:
+		fmt.Fprintf(&sb, "%s%v: check it", reloaded, runsConfig(resp, c.t))
+	case !named && a != nil:
+		sb.WriteString(reloaded + "it still runs an access file's policy: check it")
+	case named && a == nil:
+		sb.WriteString(reloaded + "it runs no access file: check it")
+	case named && a.Error != "":
+		fmt.Fprintf(&sb, "%sit cannot use its access file (%s): check it", reloaded, a.Error)
+	case named && resolvedPath(a.File) != resolvedPath(c.t.File):
+		fmt.Fprintf(&sb, "%sit runs the access file %s: check it", reloaded, a.File)
+	case named && c.enrolledAs != "" && policyHasPin(a, c.pin):
+		sb.WriteString(reloaded + "it still runs the new policy: check it")
 	default:
 		sb.WriteString(", and the daemon runs them again")
 	}
@@ -1153,6 +1231,8 @@ func (c *CertSetup) inForce() error {
 		return errors.New("reloaded, but the daemon runs no access file")
 	case a.Error != "":
 		return fmt.Errorf("reloaded, but the daemon cannot use its access file: %s", a.Error)
+	case resolvedPath(a.File) != resolvedPath(c.t.File):
+		return fmt.Errorf("reloaded, but the daemon runs the access file %s, not %s", a.File, c.t.File)
 	case !policyHasPin(a, c.pin):
 		return errors.New("reloaded, but the policy the daemon runs does not have your certificate")
 	}
@@ -1316,7 +1396,8 @@ func (c *CertSetup) fixLines() []string {
 	case c.noTLS:
 		return c.withSilentPort([]string{
 			"turn on TLS for the daemon's TCP API (apiserver.usetls: true,",
-			"with certfile and keyfile), then run config add again.",
+			"with certfile and keyfile) and restart the daemon: a reload does",
+			"not make its TCP listener TLS; then run config add again.",
 		})
 	case c.noSocket:
 		return c.withSilentPort([]string{
@@ -1393,24 +1474,42 @@ const fixCmdWidth = textWidth - len("  Fix: ")
 // --daemon-config naming the daemon config. So it reaches this daemon
 // before the CLI config has an entry for it, and whatever root's CLI config
 // calls it (the role word alone reaches the role's default daemon, which
-// may be another). Command lines, indented three spaces, wrapped with a
-// trailing backslash to fixCmdWidth: a word too wide stays whole.
+// may be another), and with no CLI config at all. Command lines, indented
+// three spaces, wrapped with a trailing backslash to fixCmdWidth: an option
+// and its value on one line where they fit; else --daemon-config ends a
+// line and its path stands alone on the next, where only a path wider than
+// a line runs over.
 func (c *CertSetup) daemonCmd(args ...string) []string {
-	words := append([]string{"tdns-ncli", c.role}, args...)
-	words = append(words, "--daemon-config "+shellQuote(c.t.DaemonConfig))
+	return fixCommand(append([]string{"tdns-ncli", c.role}, args...), c.t.DaemonConfig)
+}
+
+// fixCommand is the command words, and --daemon-config daemonCfg, as fix
+// lines (daemonCmd says how they are wrapped).
+func fixCommand(words []string, daemonCfg string) []string {
 	var lines []string
 	line := "   " + words[0]
-	for i, w := range words[1:] {
-		room := fixCmdWidth // the last word needs no " \\" after it
-		if i < len(words)-2 {
-			room -= len(" \\")
+	put := func(w string, last bool) {
+		room := fixCmdWidth
+		if !last {
+			room -= len(" \\") // the continuation after it
 		}
 		if len(line)+len(" ")+len(w) <= room {
 			line += " " + w
-			continue
+			return
 		}
 		lines = append(lines, line+" \\")
 		line = "      " + w
+	}
+	for _, w := range words[1:] {
+		put(w, false)
+	}
+	flag, path := "--daemon-config", shellQuote(daemonCfg)
+	if pair := flag + " " + path; len(line)+len(" ")+len(pair) <= fixCmdWidth || len("      ")+len(pair) <= fixCmdWidth {
+		put(pair, true)
+	} else {
+		put(flag, false)
+		lines = append(lines, line+" \\")
+		line = "      " + path
 	}
 	return append(lines, line)
 }

@@ -328,16 +328,28 @@ func TestClientAddWithoutAccessFileConfigured(t *testing.T) {
 // After a change the daemon is asked to reload, through the entry's client.
 func TestClientEditReloadsTheDaemon(t *testing.T) {
 	var got []string
-	var runs string // the config the fake daemon says it runs
+	var runs string   // the config the fake daemon says it runs
+	var access string // the access file it loads at a reload
+	var policy *tdns.ApiAccessStatus
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var cp tdns.ConfigPost
 		json.NewDecoder(r.Body).Decode(&cp)
 		got = append(got, r.URL.Path+" "+cp.Command)
-		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: runs,
-			Msg: "Config reloaded. Access file reloaded: 1 client(s), keyauth on."})
+		resp := tdns.ConfigResponse{ConfigFile: runs, Access: policy}
+		if cp.Command == "reload" {
+			resp.Msg = "Config reloaded. Access file reloaded: 1 client(s), keyauth on."
+			if af, err := tdns.LoadAccessFile(access); err == nil {
+				policy = &tdns.ApiAccessStatus{File: access, KeyAuth: af.KeyAuthOn()}
+				for _, c := range af.Clients {
+					policy.Clients = append(policy.Clients, tdns.ApiAccessStatusClient{Name: c.Name, Pin: c.Pin, Role: c.Role, Disabled: c.Disabled})
+				}
+			}
+		}
+		json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 	e := newAccessEnv(t, true, srv.URL+"/api/v1")
+	access = e.access
 	apiConfig.ApiServers[0].TLSAuth = "pin"
 	apiConfig.ApiServers[0].Pins = []string{tdns.SPKISHA256(srv.Certificate())}
 	if err := InitApiClients(apiConfig); err != nil {
@@ -356,8 +368,8 @@ func TestClientEditReloadsTheDaemon(t *testing.T) {
 	if err := add("anna"); err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0] != "/api/v1/config status" || got[1] != "/api/v1/config reload" {
-		t.Errorf("daemon saw %v, want a status check, then one config reload", got)
+	if len(got) != 3 || got[0] != "/api/v1/config status" || got[1] != "/api/v1/config reload" || got[2] != "/api/v1/config status" {
+		t.Errorf("daemon saw %v, want a status check, one config reload, and what it runs then", got)
 	}
 
 	// Another daemon answers (one that holds this config's address, say):
@@ -508,7 +520,7 @@ func TestClientEditWedgedDaemon(t *testing.T) {
 		if err == nil || err.Error() != want {
 			t.Errorf("err = %v, want %q", err, want)
 		}
-		r, ok := editTimeoutRefusal(err)
+		r, ok := editTimeoutRefusal(err, "auth", "")
 		if wantFix := []string{daemonWedgedFix + ";", "then run the command again."}; !ok || !reflect.DeepEqual(r.fix, wantFix) {
 			t.Errorf("refusal %+v (%v), want the fix %q", r, ok, wantFix)
 		}
@@ -563,7 +575,7 @@ func TestClientEditWedgedDaemon(t *testing.T) {
 		if strings.Contains(out, "added") {
 			t.Errorf("the change was said as done before the reload failed: %q", out)
 		}
-		r, ok := editTimeoutRefusal(err)
+		r, ok := editTimeoutRefusal(err, "auth", "")
 		if !ok || len(r.fix) == 0 || !strings.Contains(strings.Join(r.fix, " "), "(a restart reads the file written)") {
 			t.Errorf("refusal %+v (%v), want the fix for a written file", r, ok)
 		}
@@ -1770,5 +1782,53 @@ func TestConfigReloadTakesADaemonConfig(t *testing.T) {
 	runCmd(t, "auth", "config", "reload", "--daemon-config", d2)
 	if n := f.reloadCount(); n != 1 {
 		t.Errorf("%d reloads of the daemon of %s, want 1", n, d2)
+	}
+}
+
+// A client edit is done only when the daemon runs the file it wrote, with
+// the change: a reload that loaded another access file (its config naming
+// that one by now) succeeds as well, and is not taken for the edit.
+func TestClientEditChecksTheFileTheDaemonRuns(t *testing.T) {
+	e := newAccessEnv(t, true, "")
+	tg, err := resolveAccessTarget("auth", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(e.dir, "other-access.yaml")
+	writeFile(t, other, "keyauth: true\nclients: []\n")
+	f := serveFakeDaemon(t, tg.Socket, e.daemonCfg, e.access)
+	f.mu.Lock()
+	f.onReload = func() {
+		cfg := readBytes(t, e.daemonCfg)
+		writeFile(t, e.daemonCfg, strings.Replace(cfg, "access-file: "+e.access, "access-file: "+other, 1))
+	}
+	f.mu.Unlock()
+	var err2 error
+	out := captureStdout(t, func() {
+		err2 = editAccessFile(context.Background(), "auth", accessEditOpts{}, true, func(af *tdns.AccessFile) (string, error) {
+			af.Clients = append(af.Clients, tdns.AccessClient{Name: "anna", Pin: pinOf("anna"), Role: "read-only"})
+			return "Added anna.", nil
+		})
+	})
+	if err2 == nil || !strings.Contains(err2.Error(), "runs the access file "+other) {
+		t.Errorf("err = %v; want the edit reported as not in force: the daemon runs %s", err2, other)
+	}
+	if strings.Contains(out, "Added anna") {
+		t.Errorf("the edit was said as done: %q", out)
+	}
+}
+
+// After a reload that did not answer, the fix of an edit that named its
+// daemon config (--daemon-config) shows that daemon's policy, not the
+// role's entry's, which may be another's.
+func TestEditTimeoutFixKeepsTheDaemonConfig(t *testing.T) {
+	te := &daemonTimeoutError{where: "the daemon on /var/run/tdns/auth2.sock", command: "reload", limit: 30 * time.Second, connected: true}
+	err := fmt.Errorf("written, but the reload failed: %w", te)
+	r, ok := editTimeoutRefusal(err, "auth", "/etc/tdns/tdns-auth2.yaml")
+	if fix := oneLine(strings.Join(r.fix, "\n")); !ok || !strings.Contains(fix, "tdns-ncli auth client list --daemon-config /etc/tdns/tdns-auth2.yaml") {
+		t.Errorf("fix %q (%v); want client list with the daemon config", r.fix, ok)
+	}
+	if r, _ := editTimeoutRefusal(err, "auth", ""); strings.Contains(strings.Join(r.fix, " "), "--daemon-config") {
+		t.Errorf("no daemon config named: fix %q", r.fix)
 	}
 }

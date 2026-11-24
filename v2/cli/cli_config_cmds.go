@@ -48,6 +48,21 @@ func IsCliConfigCmd(cmd *cobra.Command) bool {
 	return false
 }
 
+// NoCliConfigNeeded says whether cmd can run without the CLI config at
+// cliConfig, which the binary's PersistentPreRun otherwise loads (and stops
+// without): when it was given --daemon-config (the client commands, config
+// reload), which names the daemon itself, and the file does not exist. That
+// is how a fix config add prints reaches a daemon on a host where root has
+// no CLI config yet. With the file there, it is loaded as always.
+func NoCliConfigNeeded(cmd *cobra.Command, cliConfig string) bool {
+	f := cmd.Flags().Lookup("daemon-config")
+	if f == nil || !f.Changed {
+		return false
+	}
+	_, err := os.Stat(cliConfig)
+	return errors.Is(err, os.ErrNotExist)
+}
+
 // NewCliConfigCmd builds `config`, with `add` and `list`.
 //
 // Not to be confused with `<daemon> config check`, which checks a DAEMON's
@@ -425,7 +440,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	// entry is known to fit in the CLI config).
 	var cert *CertSetup
 	if tcpURL != "" {
-		cert = planCert(o, info)
+		cert = planCert(o, info, false) // a new entry has no key to keep
 		res.Cert = cert
 		if !cert.usable() {
 			return nil, cert.refusal(fmt.Sprintf("not adding %s: a new entry uses your client certificate, and %s",
@@ -775,10 +790,10 @@ func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiD
 		up, repin = pinnedEntry(res, e, info)
 	}
 
-	c := planCert(o, info)
+	isCert := strings.EqualFold(e.AuthMethod, "certificate")
+	c := planCert(o, info, !isCert)
 	res.Cert = c
 	defer c.release() // what apply or confirm keeps locked, once the entry is written
-	isCert := strings.EqualFold(e.AuthMethod, "certificate")
 	toCert := !isCert && c.usable()
 
 	write, err := knownEdit(o, res, e, up, existing, target, entryEdit{repin: repin, toCert: toCert})

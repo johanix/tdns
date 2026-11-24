@@ -481,8 +481,35 @@ func editAccessFile(ctx context.Context, role string, o accessEditOpts, create b
 	if err != nil {
 		return fmt.Errorf("%s %w", t.File, err)
 	}
+	// Its reply says a reload loaded an access file, not which: its config
+	// may name another by now. The policy it runs must be this file's,
+	// with the change.
+	if err := runsEdit(role, t, af); err != nil {
+		return fmt.Errorf("%s written and the daemon reloaded, but %v", t.File, err)
+	}
 	fmt.Println(msg)
 	fmt.Printf("Reloaded: %s\n", reply)
+	return nil
+}
+
+// runsEdit says why the daemon of t, just reloaded, does not run af, the
+// access file t.File as an edit wrote it: no policy, one it cannot use,
+// another file's, or another policy. nil when it runs it.
+func runsEdit(role string, t *accessTarget, af *tdns.AccessFile) error {
+	resp, err := configToDaemon(role, t.Socket, t.DaemonConfig, tdns.ConfigPost{Command: "status"})
+	if err != nil {
+		return fmt.Errorf("what it runs now could not be asked (%v)", err)
+	}
+	switch a := resp.Access; {
+	case a == nil:
+		return errors.New("it runs no access file")
+	case a.Error != "":
+		return fmt.Errorf("it cannot use its access file (%s)", a.Error)
+	case resolvedPath(a.File) != resolvedPath(t.File):
+		return fmt.Errorf("it runs the access file %s, not this one (its config names that one now?)", a.File)
+	case !accessMatchesRunning(af, a):
+		return errors.New("the policy it runs is not the file written")
+	}
 	return nil
 }
 
@@ -698,24 +725,30 @@ func daemonWhere(api *tdns.ApiClient) string {
 // a fix when a daemon did not answer it in time; false for any other error.
 // The fix depends on the request: the check of whose daemon answers comes
 // before the write, so the command can just be run again; the reload comes
-// after it, and a restart reads the file written.
-func editTimeoutRefusal(err error) (addRefusal, bool) {
+// after it, and a restart reads the file written: client list then shows
+// what the daemon runs, of the daemon config the edit named (daemonCfg,
+// --daemon-config) when it named one, as the role's would be another's.
+func editTimeoutRefusal(err error, role, daemonCfg string) (addRefusal, bool) {
 	var te *daemonTimeoutError
 	if !errors.As(err, &te) {
 		return addRefusal{}, false
 	}
 	fix := []string{daemonWedgedFix + ";", "then run the command again."}
-	if te.command == "reload" {
+	switch {
+	case te.command == "reload" && daemonCfg != "":
+		fix = append([]string{daemonWedgedFix, "(a restart reads the file written); then see the policy it runs:"},
+			fixCommand([]string{"tdns-ncli", role, "client", "list"}, daemonCfg)...)
+	case te.command == "reload":
 		fix = []string{daemonWedgedFix, "(a restart reads the file written); then run client list", "to see the policy it runs."}
 	}
 	return addRefusal{why: err.Error(), fix: fix}, true
 }
 
-// dieEdit ends a client command on err from its edit: a daemon that did not
-// answer in time as a refusal with its fix (editTimeoutRefusal), anything
-// else as an error.
-func dieEdit(err error) {
-	if r, ok := editTimeoutRefusal(err); ok {
+// dieEdit ends role's client command on err from its edit (daemonCfg, the
+// daemon config it named, if any): a daemon that did not answer in time as
+// a refusal with its fix (editTimeoutRefusal), anything else as an error.
+func dieEdit(err error, role, daemonCfg string) {
+	if r, ok := editTimeoutRefusal(err, role, daemonCfg); ok {
 		printRefusal(os.Stderr, r)
 		os.Exit(1)
 	}
@@ -1040,7 +1073,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 				return fmt.Sprintf("Added %s (%s).", name, roleName), nil
 			})
 			if err != nil {
-				dieEdit(err)
+				dieEdit(err, role, o.DaemonConfig)
 			}
 		},
 	}
@@ -1064,7 +1097,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 					return fmt.Sprintf("%s: %s.", args[0], map[bool]string{true: "disabled", false: "enabled"}[disabled]), nil
 				})
 				if err != nil {
-					dieEdit(err)
+					dieEdit(err, role, o.DaemonConfig)
 				}
 			},
 		}
@@ -1084,7 +1117,7 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 				return fmt.Sprintf("%s is now %s.", args[0], args[1]), nil
 			})
 			if err != nil {
-				dieEdit(err)
+				dieEdit(err, role, o.DaemonConfig)
 			}
 		},
 	}
@@ -1124,7 +1157,7 @@ depend on it. keyauth on brings the key back.`,
 				return msg, nil
 			})
 			if err != nil {
-				dieEdit(err)
+				dieEdit(err, role, o.DaemonConfig)
 			}
 		},
 	}

@@ -42,6 +42,12 @@ var rootCmd = &cobra.Command{
 			cli.IsCliConfigCmd(cmd) {
 			return
 		}
+		// --daemon-config names the daemon (the client commands, config
+		// reload): on a host where root has no CLI config yet, they run
+		// without one, as the fix config add prints must.
+		if cli.NoCliConfigNeeded(cmd, cliConfigPath()) {
+			return
+		}
 		initConfig()
 		initApi()
 	},
@@ -186,6 +192,15 @@ func init() {
 		false, "show headers")
 	rootCmd.PersistentFlags().BoolVar(&cli.ForceTCP, "tcp", false,
 		"reach daemons over TCP even where their local admin socket can be used")
+}
+
+// cliConfigPath is the CLI config this run reads: --config, else the
+// default.
+func cliConfigPath() string {
+	if cfgFile != "" {
+		return cfgFile
+	}
+	return cli.DefaultCliConfigFile
 }
 
 // initConfig reads in config file and ENV variables if set.
