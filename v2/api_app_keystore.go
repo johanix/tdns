@@ -107,12 +107,28 @@ func appTsigKeyIsOwn(app string, row TsigKeystoreRow) bool {
 // the application table does not open to it. The middleware has already
 // done so; this is the handler's own check on what it decoded, so that a
 // path to the handler that skips the middleware does not skip the table.
+//
+// It also refuses a SIG(0) or DNSSEC command that names a Zone that is not
+// the client's, whatever the subcommand checks. After the commit, the
+// handler republishes the signing keys of, and re-signs, the zone the
+// request names in Zone, while setstate checks the key by Keyname and add
+// by the DNSKEY's owner name: an application could otherwise name its own
+// key and someone else's zone, and have that zone re-signed.
 func appKeystoreGate(app string, kp KeystorePost) error {
-	if app == "" || ApiAppScopeOf("/api/v1/keystore", kp.Command, kp.SubCommand) != AppRefused {
+	if app == "" {
 		return nil
 	}
-	return fmt.Errorf("%s: not available to application clients",
-		apiCommandName("/api/v1/keystore", kp.Command, kp.SubCommand))
+	if ApiAppScopeOf("/api/v1/keystore", kp.Command, kp.SubCommand) == AppRefused {
+		return appRefusal(fmt.Sprintf("%s: not available to application clients",
+			apiCommandName("/api/v1/keystore", kp.Command, kp.SubCommand)), "")
+	}
+	switch kp.Command {
+	case "sig0-mgmt", "dnssec-mgmt":
+		if kp.Zone != "" {
+			return appKeyZoneRefusal(app, kp.Zone)
+		}
+	}
+	return nil
 }
 
 // writeKeystoreRefusal answers a keystore request refused before the

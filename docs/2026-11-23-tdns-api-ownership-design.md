@@ -597,6 +597,11 @@ Part C (keystore for application clients):
   the key ID.
 - The keystore handler also refuses an application client what the table
   refuses, so a path that skips the middleware does not skip the table.
+  It also refuses a SIG(0) or DNSSEC command whose Zone is not the
+  client's, whatever the subcommand checks: after the commit the handler
+  republishes and re-signs the zone named in Zone, while setstate checks
+  the key by Keyname and add by its DNSKEY's owner name (found by the
+  ownership test app, check 7.21).
 - The reference count in an application's TSIG list counts every zone
   that uses the key, others' included: delete's "not in use" rule needs
   the same number.
