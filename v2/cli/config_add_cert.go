@@ -1393,24 +1393,36 @@ const fixCmdWidth = textWidth - len("  Fix: ")
 // --daemon-config naming the daemon config. So it reaches this daemon
 // before the CLI config has an entry for it, and whatever root's CLI config
 // calls it (the role word alone reaches the role's default daemon, which
-// may be another). Command lines, indented three spaces, wrapped with a
-// trailing backslash to fixCmdWidth: a word too wide stays whole.
+// may be another), and with no CLI config at all. Command lines, indented
+// three spaces, wrapped with a trailing backslash to fixCmdWidth: an option
+// and its value on one line where they fit; else --daemon-config ends a
+// line and its path stands alone on the next, where only a path wider than
+// a line runs over.
 func (c *CertSetup) daemonCmd(args ...string) []string {
-	words := append([]string{"tdns-ncli", c.role}, args...)
-	words = append(words, "--daemon-config "+shellQuote(c.t.DaemonConfig))
 	var lines []string
-	line := "   " + words[0]
-	for i, w := range words[1:] {
-		room := fixCmdWidth // the last word needs no " \\" after it
-		if i < len(words)-2 {
-			room -= len(" \\")
+	line := "   tdns-ncli"
+	put := func(w string, last bool) {
+		room := fixCmdWidth
+		if !last {
+			room -= len(" \\") // the continuation after it
 		}
 		if len(line)+len(" ")+len(w) <= room {
 			line += " " + w
-			continue
+			return
 		}
 		lines = append(lines, line+" \\")
 		line = "      " + w
+	}
+	for _, w := range append([]string{c.role}, args...) {
+		put(w, false)
+	}
+	flag, path := "--daemon-config", shellQuote(c.t.DaemonConfig)
+	if pair := flag + " " + path; len(line)+len(" ")+len(pair) <= fixCmdWidth || len("      ")+len(pair) <= fixCmdWidth {
+		put(pair, true)
+	} else {
+		put(flag, false)
+		lines = append(lines, line+" \\")
+		line = "      " + path
 	}
 	return append(lines, line)
 }

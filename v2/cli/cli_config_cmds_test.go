@@ -4402,3 +4402,75 @@ func TestAddFixReachesAnInstanceBeforeItsEntry(t *testing.T) {
 		t.Errorf("config add again: %+v, %v; want the auth2 certificate entry", res, err)
 	}
 }
+
+// A command given --daemon-config (the client commands, config reload)
+// names the daemon itself, so it runs without a CLI config when there is
+// none: the binary's PersistentPreRun asks NoCliConfigNeeded. Without the
+// flag, or with the CLI config there, the CLI config is loaded as always.
+func TestNoCliConfigNeeded(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "tdns-ncli.yaml")
+	present := filepath.Join(t.TempDir(), "tdns-ncli.yaml")
+	writeFile(t, present, "apiservers: []\n")
+	parsed := func(t *testing.T, args ...string) *cobra.Command {
+		t.Helper()
+		cmd, rest, err := daemonTree().Find(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.ParseFlags(rest); err != nil {
+			t.Fatal(err)
+		}
+		return cmd
+	}
+	for _, tc := range []struct {
+		args []string
+		cfg  string
+		want bool
+	}{
+		{[]string{"auth", "client", "add", "x", "--pin", pinOf("x"), "--role", "read-only", "--daemon-config", "/etc/tdns/tdns-auth2.yaml"}, missing, true},
+		{[]string{"auth", "client", "list", "--daemon-config", "/etc/tdns/tdns-auth2.yaml"}, missing, true},
+		{[]string{"auth", "config", "reload", "--daemon-config", "/etc/tdns/tdns-auth2.yaml"}, missing, true},
+		{[]string{"auth", "client", "add", "x", "--pin", pinOf("x"), "--role", "read-only", "--daemon-config", "/etc/tdns/tdns-auth2.yaml"}, present, false},
+		{[]string{"auth", "client", "list"}, missing, false},
+		{[]string{"auth", "config", "reload"}, missing, false},
+	} {
+		if got := NoCliConfigNeeded(parsed(t, tc.args...), tc.cfg); got != tc.want {
+			t.Errorf("%s, CLI config %s: %v, want %v", strings.Join(tc.args, " "), tc.cfg, got, tc.want)
+		}
+	}
+}
+
+// A fix's command fits 72 columns after "  Fix: ": where --daemon-config
+// and a long path do not fit on one line, the flag ends a line and the
+// path stands alone on the next. Only a path wider than a line runs over.
+func TestFixCommandWrapsALongDaemonConfig(t *testing.T) {
+	const d = "/etc/tdns/instances/tdns-auth-secondary-two.yaml"
+	tg := &accessTarget{DaemonConfig: d, File: "/etc/tdns/instances/a.yaml", Configured: true}
+	c := &CertSetup{role: "auth", name: "root-pri", pin: pinOf("p"), state: certCannot, t: tg}
+	fix := c.fixLines()
+	for _, l := range fix {
+		if len("       "+l) > textWidth {
+			t.Errorf("a fix line wider than %d: %q", textWidth, l)
+		}
+	}
+	alone := func(fix []string, path string) bool {
+		for i, l := range fix {
+			if strings.TrimSpace(l) == path {
+				return i > 0 && strings.HasSuffix(fix[i-1], " --daemon-config \\")
+			}
+		}
+		return false
+	}
+	if !alone(fix, d) {
+		t.Errorf("fix:\n%s\nwant --daemon-config ending a line, %s alone on the next", strings.Join(fix, "\n"), d)
+	}
+	if got, want := oneLine(strings.Join(fix, "\n")), "tdns-ncli auth client add root-pri --pin "+pinOf("p")+" --role read-write --daemon-config "+d; !strings.Contains(got, want) {
+		t.Errorf("fix %q, want the command %q", got, want)
+	}
+	// A path that does not fit alone runs over, on its own line.
+	long := "/" + strings.Repeat("x", 70) + "/tdns-auth.yaml"
+	tg.DaemonConfig = long
+	if fix := c.fixLines(); !alone(fix, long) {
+		t.Errorf("a path wider than a line:\n%s", strings.Join(fix, "\n"))
+	}
+}
