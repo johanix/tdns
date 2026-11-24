@@ -149,15 +149,19 @@ var apiAppScopes = map[string]map[string]AppScope{
 	"/api/v1/catalog": {
 		// A catalog zone the caller owns is shown whole: its members are
 		// that zone's data.
-		"zone-list":         AppOwnCatalog,
-		"group-list":        AppOwnCatalog,
-		"notify-list":       AppOwnCatalog,
-		"create":            AppNewZone,
-		"delete":            AppOwnCatalog,
-		"zone-add":          AppMemberAndCatalog,
-		"zone-delete":       AppMemberAndCatalog,
+		"zone-list":   AppOwnCatalog,
+		"group-list":  AppOwnCatalog,
+		"notify-list": AppOwnCatalog,
+		"create":      AppNewZone,
+		"delete":      AppOwnCatalog,
+		"zone-add":    AppMemberAndCatalog,
+		// The catalog zone's owner may remove any member (Johan,
+		// 2026-11-24): the entry is the catalog zone's data, and a member
+		// zone the removal also deletes (catalog-member-auto-delete) is
+		// one this catalog created, which has the catalog zone's owner.
+		"zone-delete":       AppOwnCatalog,
 		"zone-group-add":    AppMemberAndCatalog,
-		"zone-group-delete": AppMemberAndCatalog,
+		"zone-group-delete": AppOwnCatalog,
 		"group-add":         AppOwnCatalog,
 		"group-delete":      AppOwnCatalog,
 		"notify-add":        AppOwnCatalog,
@@ -371,6 +375,18 @@ func (conf *Config) appTsigKeyRefusal(app, zone string, primaries []PeerConf, st
 		return nil
 	}
 	me := ApiOwnerCertPrefix + app
+	// An inline key that exists under another API owner is refused, even
+	// when identical (Johan, 2026-11-24): the add would be a no-op that
+	// keeps the other owner, attach the key to the application's zone,
+	// and then block the owner's own delete of the key ("in use").
+	if staged != nil {
+		if kdb := conf.Internal.KeyDB; kdb != nil {
+			if row, err := getTsigKeystoreByName(kdb, staged.Name); err == nil && tsigKeystoreEffectiveOwner(row) != me {
+				return appRefusal(fmt.Sprintf("zone %s: TSIG key %s exists and is not a key of API owner %s", zone, staged.Name, me),
+					"give the key another name")
+			}
+		}
+	}
 	for _, p := range primaries {
 		if p.Key == "" || p.Key == NOKEY {
 			continue

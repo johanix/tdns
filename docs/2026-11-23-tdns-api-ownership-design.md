@@ -506,9 +506,12 @@ Part B (application clients and zone scope):
 - `catalog create` is scoped like `zone add`: a name that exists is
   refused as before, and the new catalog zone records the caller. `catalog
   group-list`, `zone-list` and `notify-list` name one catalog zone, so the
-  filter is "own catalog zone only". The member commands need the member
-  served here: an application takes a zone out of its catalog before it
-  deletes the zone.
+  filter is "own catalog zone only". Adding a member (`zone-add`,
+  `zone-group-add`) needs the member zone and the catalog zone both its
+  own; the catalog zone's owner may remove any member (`zone-delete`,
+  `zone-group-delete`; Johan, 2026-11-24). A member zone that the removal
+  also deletes (catalog-member-auto-delete) is one the catalog created,
+  which has the catalog zone's owner anyway.
 - One answer for a zone that is not served and a zone of another
   certificate client: "not a zone of API owner cert:<name>". An `api` or
   `config` zone says how an operator hands it over, so it does say that
@@ -522,6 +525,9 @@ Part B (application clients and zone scope):
 - A primary's TSIG key on an application's add or modify must have API
   owner `cert:<name>` or be the inline key of the same request. A key that
   does not exist gets the same answer as someone else's.
+  An inline key that already exists under another API owner is refused,
+  even when identical (Johan, 2026-11-24): the no-op would attach the key
+  to the application's zone and block the owner's own delete of it.
 - `zone update` checks every RR of the built update against the apex for
   an application, after `BuildZoneUpdateActions`, which checks the same for
   every verb today.
