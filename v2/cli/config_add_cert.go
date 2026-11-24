@@ -496,11 +496,25 @@ func (c *CertSetup) askSocket() (sockView, tdns.ConfigResponse, error) {
 }
 
 // ping pings the daemon's TCP API with o's credentials, the daemon verified
-// by the pin of its certificate (daemonTCP). When it cannot be asked so (no
-// TLS TCP API, or a certificate that cannot be pinned, as before a daemon's
-// first start writes it), down still says whether nothing listens on its
-// TCP address: a daemon that is not running.
+// by the pin of its certificate (daemonTCP). A daemon whose TCP API has no
+// TLS (usetls: false) is pinged over plain http with the API key: its entry
+// is that http URL and that key, and sends the key in the clear on every
+// command, so the ping adds nothing to what the entry already exposes;
+// there is no certificate to present over it. When it cannot be asked (a
+// certificate that cannot be pinned, as before a daemon's first start
+// writes it), down still says whether nothing listens on its TCP address:
+// a daemon that is not running.
 func (c *CertSetup) ping(info *DaemonApi, o tdns.ClientOptions) pingReply {
+	if !info.UseTLS && len(info.Addresses) > 0 && o.ClientCert == nil {
+		base, err := apiBaseURL(info.Addresses[0], false)
+		if err != nil {
+			return pingReply{err: err}
+		}
+		o.RootCA = "insecure" // no TLS: nothing to verify, and no CA file read
+		r := pingAs(base, "", o)
+		r.base = base
+		return r
+	}
 	base, pin, err := daemonTCP(info)
 	if err != nil {
 		return pingReply{err: err, down: tcpRefused(info)}
@@ -520,7 +534,7 @@ func (c *CertSetup) unasked(serr error, r pingReply) string {
 	case r.base != "":
 		tcp = "no answer on " + r.base
 	case r.err != nil:
-		tcp = r.err.Error()
+		tcp = fmt.Sprintf("config add could not ask it (%v)", r.err)
 	}
 	return fmt.Sprintf("the daemon cannot be asked: %v, and over TCP, %s", serr, tcp)
 }
@@ -549,8 +563,11 @@ func (c *CertSetup) keyFromFile(relative bool, old []byte, af *tdns.AccessFile, 
 // certificate it presents there: how config add asks it, verified, when it
 // cannot read the daemon's access file.
 func daemonTCP(info *DaemonApi) (string, string, error) {
-	if len(info.Addresses) == 0 || !info.UseTLS {
-		return "", "", errors.New("it has no TLS TCP API")
+	switch {
+	case len(info.Addresses) == 0:
+		return "", "", errors.New("it has no TCP API")
+	case !info.UseTLS:
+		return "", "", errors.New("its TCP API has no TLS, so there is no certificate to pin")
 	}
 	base, err := apiBaseURL(info.Addresses[0], true)
 	if err != nil {
@@ -613,12 +630,14 @@ func (c *CertSetup) pingTimedOut(r pingReply) bool {
 	return true
 }
 
-// pingAs pings the TCP API at base, the daemon verified by pin, with the
-// credentials in o: the client certificate, or the API key. A daemon that
-// does not answer within pingLimit is a *daemonTimeoutError, as for
-// sendBounded.
+// pingAs pings the TCP API at base, the daemon verified by pin (none for a
+// plain http base), with the credentials in o: the client certificate, or
+// the API key. A daemon that does not answer within pingLimit is a
+// *daemonTimeoutError, as for sendBounded.
 func pingAs(base, pin string, o tdns.ClientOptions) pingReply {
-	o.Pins = []string{pin}
+	if pin != "" {
+		o.Pins = []string{pin}
+	}
 	api := tdns.NewClientWithOptions("config add", base, o)
 	body, err := json.Marshal(tdns.PingPost{Msg: "config add", Pings: 1})
 	if err != nil {

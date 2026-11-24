@@ -4120,3 +4120,60 @@ func TestAddRechecksTheApiSettings(t *testing.T) {
 		t.Errorf("fix %q, want to run config add again", fix)
 	}
 }
+
+// A daemon whose TCP API has no TLS (usetls: false) is asked over plain
+// http with the key, as its entry reaches it: the entry sends that key in
+// the clear on every command, so the ping adds nothing. A key it takes is
+// kept, a success (config add cannot set up a certificate for it, and says
+// so); one it refuses is refused. Run as root or with the daemon stopped,
+// the same entry got the same answer before.
+func TestAddAsksAPlainHTTPDaemonWithItsKey(t *testing.T) {
+	setup := func(t *testing.T, keyTaken bool) (*addEnv, string, string) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v1/ping" {
+				http.NotFound(w, r)
+				return
+			}
+			if keyTaken && r.Header.Get("X-API-Key") == "the-key" {
+				json.NewEncoder(w).Encode(tdns.PingResponse{Msg: "pong", Role: "admin", Via: "api key", Identity: "apikey"})
+				return
+			}
+			http.Error(w, "refused", http.StatusForbidden)
+		}))
+		t.Cleanup(srv.Close)
+		env := newAddEnv(t)
+		env.pin(t)
+		addr := strings.TrimPrefix(srv.URL, "http://")
+		d := filepath.Join(env.dir, "tdns-auth.yaml")
+		writeFile(t, d, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+addr+" ]\n   apikey: the-key\n   usetls: false\n   socket: "+env.socket()+"\n")
+		key := "apiservers:\n   - name: tdns-auth\n     baseurl: http://" + addr + "/api/v1\n     apikey: the-key\n     authmethod: X-API-Key\n     config-file: " + d + "\n"
+		writeFile(t, env.cli, key)
+		return env, d, key
+	}
+
+	t.Run("the key taken: kept, a success", func(t *testing.T) {
+		env, d, key := setup(t, true)
+		res, err := env.add(t, d, nil)
+		if err != nil || !res.KeyKept || res.Switched {
+			t.Fatalf("%+v, %v; want the key kept, no refusal", res, err)
+		}
+		if readBytes(t, env.cli) != key {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+		}
+		if out := printed(res, false, env.cli); !strings.Contains(out, "keeps the API key") || !strings.Contains(out, "usetls") {
+			t.Errorf("printed:\n%s", out)
+		}
+	})
+
+	t.Run("the key refused: refused", func(t *testing.T) {
+		env, d, key := setup(t, false)
+		_, err := env.add(t, d, nil)
+		var r addRefusal
+		if !errors.As(err, &r) || !strings.Contains(r.why, "the daemon does not take its API key (asked over TCP, it refuses the key)") {
+			t.Errorf("err = %v; want a refusal: the daemon refuses the key", err)
+		}
+		if readBytes(t, env.cli) != key {
+			t.Errorf("the CLI config changed:\n%s", readBytes(t, env.cli))
+		}
+	})
+}
