@@ -1,0 +1,256 @@
+/*
+ * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
+ *
+ * IMR counters for evaluating large-KSK direct-TCP DNSKEY fetching.
+ */
+
+package imr
+
+import (
+	"fmt"
+	"sort"
+	"sync/atomic"
+
+	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
+	"github.com/miekg/dns"
+)
+
+var (
+	imrDSEncounteredTotal   atomic.Uint64
+	imrDSEncounteredLarge   atomic.Uint64
+	imrDSDLargeRRByAlg      [256]atomic.Uint64
+	imrDNSKEYLookupTotal    atomic.Uint64
+	imrDNSKEYLookupBypassed atomic.Uint64
+)
+
+// LargeKskDSAlgCount holds the number of individual DS RRs seen for one
+// large algorithm (dnssec.large-algorithms).
+type LargeKskDSAlgCount struct {
+	Algorithm uint8
+	Count     uint64
+}
+
+// LargeKskImrMetrics is a snapshot of IMR large-KSK telemetry counters.
+type LargeKskImrMetrics struct {
+	DSEncounteredTotal    uint64
+	DSEncounteredLarge    uint64
+	DSDLargeRRByAlgorithm []LargeKskDSAlgCount
+	DNSKEYLookupTotal     uint64
+	// DNSKEYLookupBypassed counts DNSKEY lookups that bypassed the server's
+	// probabilistic transport selection per the dnskey-query-transport policy.
+	// The transport actually chosen may be do53-tcp OR an encrypted transport
+	// (DoQ/DoT/DoH) depending on the server's advertised capabilities.
+	DNSKEYLookupBypassed uint64
+}
+
+// DNSSECAlgorithmLabel returns a human-readable algorithm name with number.
+func DNSSECAlgorithmLabel(alg uint8) string {
+	if name := dns.AlgorithmToString[alg]; name != "" {
+		return fmt.Sprintf("%s (%d)", name, alg)
+	}
+	return fmt.Sprintf("(%d)", alg)
+}
+
+func LargeKskImrMetricsSnapshot() LargeKskImrMetrics {
+	m := LargeKskImrMetrics{
+		DSEncounteredTotal:   imrDSEncounteredTotal.Load(),
+		DSEncounteredLarge:   imrDSEncounteredLarge.Load(),
+		DNSKEYLookupTotal:    imrDNSKEYLookupTotal.Load(),
+		DNSKEYLookupBypassed: imrDNSKEYLookupBypassed.Load(),
+	}
+	for alg := range imrDSDLargeRRByAlg {
+		if c := imrDSDLargeRRByAlg[alg].Load(); c > 0 {
+			m.DSDLargeRRByAlgorithm = append(m.DSDLargeRRByAlgorithm, LargeKskDSAlgCount{
+				Algorithm: uint8(alg),
+				Count:     c,
+			})
+		}
+	}
+	sort.Slice(m.DSDLargeRRByAlgorithm, func(i, j int) bool {
+		return m.DSDLargeRRByAlgorithm[i].Algorithm < m.DSDLargeRRByAlgorithm[j].Algorithm
+	})
+	return m
+}
+
+// resetLargeKskImrMetricsForTest zeroes all package-global counters. Test-only.
+func resetLargeKskImrMetricsForTest() {
+	imrDSEncounteredTotal.Store(0)
+	imrDSEncounteredLarge.Store(0)
+	imrDNSKEYLookupTotal.Store(0)
+	imrDNSKEYLookupBypassed.Store(0)
+	for i := range imrDSDLargeRRByAlg {
+		imrDSDLargeRRByAlg[i].Store(0)
+	}
+}
+
+func (imr *Imr) noteDSEncountered(dsRRs []dns.RR) {
+	if len(dsRRs) == 0 {
+		return
+	}
+	imrDSEncounteredTotal.Add(1)
+	hasLarge := false
+	for _, rr := range dsRRs {
+		d, ok := rr.(*dns.DS)
+		if !ok || !imr.isLargeAlgorithm(d.Algorithm) {
+			continue
+		}
+		hasLarge = true
+		imrDSDLargeRRByAlg[d.Algorithm].Add(1)
+	}
+	if hasLarge {
+		imrDSEncounteredLarge.Add(1)
+	}
+}
+
+func (imr *Imr) noteDNSKEYLookup(bypassed bool) {
+	imrDNSKEYLookupTotal.Add(1)
+	if bypassed {
+		imrDNSKEYLookupBypassed.Add(1)
+	}
+}
+
+// dnskeyPolicy returns the effective DNSKEY transport policy, treating the
+// empty zero value as the default (use_ds_signal).
+func (imr *Imr) dnskeyPolicy() DNSKEYTransportPolicy {
+	if imr == nil {
+		return DNSKEYTransportUseDSSignal
+	}
+	imr.dnssecPolicyMu.RLock()
+	t := imr.dnskeyTransport
+	imr.dnssecPolicyMu.RUnlock()
+	if t == "" {
+		return DNSKEYTransportUseDSSignal
+	}
+	return t
+}
+
+// dnskeyTransportBypass reports whether this DNSKEY query should bypass the
+// server's probabilistic transport-weight selection and instead use the best
+// available transport (resolved per-server by preferredDNSKEYTransport).
+//
+// DNSKEY queries are ~0.1% of traffic, so forcing them off the probabilistic
+// distribution does not meaningfully disturb a server's load shape.
+//
+//   - force_udp:       never bypass.
+//   - use_ds_signal:   bypass only when the cached parent DS uses a large alg.
+//   - try/force_encrypted: always bypass.
+//
+// Strict privacy suppresses the bypass entirely. preferredDNSKEYTransport
+// resolves against server.Transports alone and falls back to Do53TCP, so on a
+// server whose encrypted transport is known only from TransportWeights the
+// bypass would rewrite an encrypted tuple onto cleartext -- precisely what the
+// client forbade. Nothing is lost by suppressing it: under strict privacy
+// candidateTransports already yields only DoT/DoQ/DoH, every one of them a
+// stream transport, which is the truncation escape the bypass exists to get.
+func (imr *Imr) dnskeyTransportBypass(qname string, qtype uint16, privacy edns0.PrivacyLevel) bool {
+	if imr == nil || qtype != dns.TypeDNSKEY || privacy == edns0.PrivacyStrict {
+		return false
+	}
+	switch imr.dnskeyPolicy() {
+	case DNSKEYTransportForceUDP:
+		return false
+	case DNSKEYTransportTryEncrypted, DNSKEYTransportForceEncrypted:
+		return true
+	case DNSKEYTransportUseDSSignal:
+		return imr.dnskeyDSSignalsLarge(qname)
+	}
+	return false
+}
+
+// dnskeyDSSignalsLarge reports whether a cached parent DS RRset for qname uses
+// a large child KSK algorithm.
+func (imr *Imr) dnskeyDSSignalsLarge(qname string) bool {
+	if imr == nil || imr.Cache == nil {
+		return false
+	}
+	ds := imr.Cache.Get(qname, dns.TypeDS)
+	if ds == nil || ds.RRset == nil {
+		return false
+	}
+	for _, rr := range ds.RRset.RRs {
+		d, ok := rr.(*dns.DS)
+		if !ok || !imr.isLargeAlgorithm(d.Algorithm) {
+			continue
+		}
+		lgDns.Info("large-alg DS observed; will bypass UDP for child DNSKEY",
+			"zone", qname, "alg", d.Algorithm)
+		return true
+	}
+	return false
+}
+
+// preferredDNSKEYTransportHook, when set, stands in for
+// preferredDNSKEYTransport: tests set it to change the preference from one
+// attempt's reading to the next's.
+var preferredDNSKEYTransportHook func(imr *Imr, server *cache.AuthServer) core.Transport
+
+// preferredDNSKEYTransport picks the transport for a DNSKEY query that has been
+// selected to bypass probabilistic transport weights. It honors the server's
+// advertised capabilities (server.Transports, less any signalled at weight 0;
+// see advertisedIn) but not the size of the weights. The preference order
+// is DoQ > DoT > DoH > TCP. The order is checked against one reading of the
+// server's signal: a signal installed while it is checked must not leave it
+// with the DoQ of one signal and the DoT of another, both refused.
+//
+// Returns 0 (no transport) when the policy is force_encrypted and the server
+// advertises no encrypted transport; the caller must fail the query in that
+// case rather than fall back to cleartext.
+func (imr *Imr) preferredDNSKEYTransport(server *cache.AuthServer) core.Transport {
+	if preferredDNSKEYTransportHook != nil {
+		return preferredDNSKEYTransportHook(imr, server)
+	}
+	var transports []core.Transport
+	var weights map[core.Transport]uint8
+	if server != nil {
+		transports, weights = server.GetTransportSignal()
+	}
+	order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH}
+	for _, pref := range order {
+		if advertisedIn(transports, weights, pref) {
+			return pref
+		}
+	}
+
+	if imr.dnskeyPolicy() == DNSKEYTransportForceEncrypted {
+		// No encrypted transport available: signal failure (no fallback).
+		return 0
+	}
+
+	// Non-encrypted fallback: plain TCP, never UDP. This is forced TCP, which
+	// no tcp weight gates (tcp:0 included). tryServer dials it at the tcp
+	// endpoint the signal gave (server.DialAddr with Do53TCP), or at the
+	// nameserver on port 53 when none was given, never at the port of the udp
+	// endpoint: the signal's ports are kept per transport.
+	return core.TransportDo53TCP
+}
+
+// advertisedIn reports whether a server whose signal, read once
+// (cache.AuthServer.GetTransportSignal), holds transports and weights offers
+// transport t: listed in its advertised transports and not signalled at
+// weight 0. Weight 0 means "send none", and the absence defaults put dot, doh
+// and doq at 0 for a signal that leaves them out, so a cleartext-only signal
+// must not send the DNSKEY query to an encrypted endpoint the server never
+// offered. A listed transport with no weight at all is offered.
+func advertisedIn(transports []core.Transport, weights map[core.Transport]uint8, t core.Transport) bool {
+	if w, ok := weights[t]; ok && w == 0 {
+		return false
+	}
+	for _, a := range transports {
+		if a == t {
+			return true
+		}
+	}
+	return false
+}
+
+// LargeAlgDSMetrics returns the total number of individual large-alg DS RRs
+// encountered in referrals. Prefer LargeKskImrMetricsSnapshot.
+func LargeAlgDSMetrics() uint64 {
+	var n uint64
+	for i := range imrDSDLargeRRByAlg {
+		n += imrDSDLargeRRByAlg[i].Load()
+	}
+	return n
+}

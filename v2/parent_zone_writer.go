@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -250,7 +252,7 @@ func (w *ddnsParentZoneWriter) isDelegationPoint(parentZone, name string, action
 // DSYNC service: the _dsync owner and every configured scheme target. The
 // receiver KEY and the bootstrap SVCB live at the UPDATE target.
 func advertisementNames(parentZone string) map[string]bool {
-	names := map[string]bool{core.CanonicalizeName(dsyncOwnerName(parentZone)): true}
+	names := map[string]bool{core.CanonicalizeName(imrcore.DsyncOwnerName(parentZone)): true}
 	dsc := ChildSyncConfig()
 	if dsyncSchemeConfigured(dsc.Schemes, "notify") && dsc.Notify.Target != "" {
 		names[core.CanonicalizeName(expandDsyncTemplate(dsc.Notify.Target, parentZone))] = true

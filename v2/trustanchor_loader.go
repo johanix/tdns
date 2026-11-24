@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	cache "github.com/johanix/tdns/v2/cache"
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
@@ -129,7 +131,7 @@ func imrConfigAnchors(cfgPath string, logf func(format string, args ...any)) ([]
 	// several records here too, one per line. A value with anything in it that
 	// the IMR refuses is ignored whole, as the IMR refuses it whole.
 	if v := strings.TrimSpace(sub.Imrengine.TrustAnchorDNSKEY); v != "" {
-		if k, err := parseInlineDNSKEYAnchors(v); err != nil {
+		if k, err := imrcore.ParseInlineDNSKEYAnchors(v); err != nil {
 			logf("imrConfigAnchors: trust-anchor-dnskey in %s failed to parse (%v); ignoring", cfgPath, err)
 		} else {
 			keys = append(keys, k...)
@@ -138,7 +140,7 @@ func imrConfigAnchors(cfgPath string, logf func(format string, args ...any)) ([]
 	}
 
 	if v := strings.TrimSpace(sub.Imrengine.TrustAnchorDS); v != "" {
-		if d, err := parseInlineDSAnchors(v); err != nil {
+		if d, err := imrcore.ParseInlineDSAnchors(v); err != nil {
 			logf("imrConfigAnchors: trust-anchor-ds in %s failed to parse (%v); ignoring", cfgPath, err)
 		} else {
 			dss = append(dss, d...)

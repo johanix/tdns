@@ -21,12 +21,6 @@ func primingErrorIn(conf *Config) string {
 	return ""
 }
 
-func imrOutboundHookCount() int {
-	globalImrOutboundQueryHooksMutex.RLock()
-	defer globalImrOutboundQueryHooksMutex.RUnlock()
-	return len(globalImrOutboundQueryHooks)
-}
-
 // A failed start is retried, the operator can see the failure while it lasts,
 // and the DEGRADED entry goes away once the resolver is up.
 func TestImrInitIsRetriedUntilItSucceeds(t *testing.T) {
@@ -97,8 +91,8 @@ func TestImrInitRetryDelay(t *testing.T) {
 }
 
 // The retry runs InitImrEngine again after it failed, so that has to work: the
-// second run builds the engine, and does not register a second set of debug
-// hooks (which would log every query once per failed start).
+// second run builds the engine. That it does not register a second set of
+// debug hooks is TestNewImrRegistersItsDebugHooksOnce in the resolver's tests.
 func TestInitImrEngineRunsAgainAfterAFailedPriming(t *testing.T) {
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
@@ -112,7 +106,6 @@ func TestInitImrEngineRunsAgainAfterAFailedPriming(t *testing.T) {
 	conf.Imr.Logging.File = filepath.Join(t.TempDir(), "imr-debug.log")
 	conf.Imr.RootHints = filepath.Join(t.TempDir(), "no-such-hints")
 
-	hooksBefore := imrOutboundHookCount()
 	if err := conf.InitImrEngine(context.Background(), true); err == nil {
 		t.Fatal("InitImrEngine succeeded with no root hints to read")
 	}
@@ -129,8 +122,5 @@ func TestInitImrEngineRunsAgainAfterAFailedPriming(t *testing.T) {
 	}
 	if conf.Internal.ImrEngine == nil {
 		t.Fatal("no engine after the second InitImrEngine")
-	}
-	if got := imrOutboundHookCount() - hooksBefore; got > 1 {
-		t.Errorf("%d debug hooks registered over two starts, want at most one", got)
 	}
 }

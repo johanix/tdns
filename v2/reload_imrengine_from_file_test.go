@@ -142,20 +142,15 @@ func TestReloadImrEngineFromFile_NoBlock(t *testing.T) {
 	}
 }
 
-// runningImr returns a resolver with one forward zone, ".", as if it had
-// booted from bootConf with that forward in it. The forward goes into bootConf
-// too: whether the root is forwarded decides the default trust anchor, and a
-// bootConf without it would differ from a reloaded file that has it.
+// runningImr returns a resolver with one forward zone, ".", booted from boot
+// with that forward in it. The forward goes into the boot config too: whether
+// the root is forwarded decides the default trust anchor, and a boot config
+// without it would differ from a reloaded file that has it. With the root
+// forwarded, NewImr does not prime.
 func runningImr(t *testing.T, boot ImrEngineConf) *Imr {
 	t.Helper()
-	imr := newReloadTestImr(t)
-	root := []ImrForwardConf{fwdConf(".", "192.0.2.1", 0)}
-	boot.Forward = root
-	imr.bootConf = boot
-	if _, err := imr.ReloadZones(nil, root); err != nil {
-		t.Fatalf("seeding the running forward table: %v", err)
-	}
-	return imr
+	boot.Forward = []ImrForwardConf{fwdConf(".", "192.0.2.1", 0)}
+	return newForwardTestImrWith(t, boot, ImrOptions{})
 }
 
 // TestApplyImrEngineReload_RejectsUnknownKey twins the SIGHUP test through the

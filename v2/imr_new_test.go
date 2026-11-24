@@ -7,9 +7,7 @@ import (
 	"context"
 	"path/filepath"
 	"runtime/pprof"
-	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -93,95 +91,5 @@ func TestNewImrReturnsThePrimingError(t *testing.T) {
 	}
 	if Globals.ImrEngine != published {
 		t.Error("a failed NewImr published an Imr")
-	}
-}
-
-// recordingSink is an ErrorSink that is not the daemon's registry.
-type recordingSink struct {
-	mu    sync.Mutex
-	calls []string
-}
-
-func (s *recordingSink) note(c string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.calls = append(s.calls, c)
-}
-func (s *recordingSink) SetImrForwardZoneError(msg string)           { s.note("set-zone " + msg) }
-func (s *recordingSink) ClearImrForwardZoneError()                   { s.note("clear-zone") }
-func (s *recordingSink) SetImrForwardUpstreamError(msg string)       { s.note("set-upstream " + msg) }
-func (s *recordingSink) ClearImrForwardUpstreamError()               { s.note("clear-upstream") }
-func (s *recordingSink) SetImrForwardUpstreamConfigError(msg string) { s.note("set-config " + msg) }
-func (s *recordingSink) ClearImrForwardUpstreamConfigError()         { s.note("clear-config") }
-func (s *recordingSink) List() []ServerError                         { return nil }
-
-// The forward table's quarantine goes to the sink NewImr was given, whatever it
-// is; a nil sink, a typed nil registry and the daemon's registry are all fine.
-func TestNewImrReportsToTheErrorSink(t *testing.T) {
-	restoreProcessWideTuning(t)
-	addr, port, _, stop := startTestUpstream(t)
-	defer stop()
-	ic := ImrEngineConf{Forward: append(rootForward(addr, port),
-		// trust-ad over plaintext: quarantined, not fatal.
-		ImrForwardConf{Zone: "bad.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.9"}}})}
-
-	rec, reg := &recordingSink{}, NewServerErrorRegistry()
-	for _, tc := range []struct {
-		name string
-		sink ErrorSink
-	}{{"recording sink", rec}, {"registry", reg}, {"nil sink", nil}, {"typed nil registry", (*ServerErrorRegistry)(nil)}} {
-		imr, err := NewImr(context.Background(), ic, ImrOptions{Errors: tc.sink, Quiet: true})
-		if err != nil {
-			t.Fatalf("%s: NewImr: %v", tc.name, err)
-		}
-		if imr.errorRegistry == nil {
-			t.Errorf("%s: the Imr has no sink", tc.name)
-		}
-	}
-
-	if !slices.ContainsFunc(rec.calls, func(c string) bool { return strings.HasPrefix(c, "set-zone ") && strings.Contains(c, "bad.example.") }) {
-		t.Errorf("the recording sink was told %q; want the quarantined zone", rec.calls)
-	}
-	var found bool
-	for _, e := range reg.List() {
-		found = found || (e.Subtype == ErrSubImrForwardZone && strings.Contains(e.Message, "bad.example."))
-	}
-	if !found {
-		t.Errorf("the registry holds %+v; want the quarantined zone", reg.List())
-	}
-}
-
-// ImrOptions.PendingOwnZone keeps trust-anchor set-up from asking the network
-// for the keys of a zone this server hosts and has not loaded yet; without it,
-// the keys are fetched.
-func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
-	restoreProcessWideTuning(t)
-	addr, port, logr, stop := startTestUpstream(t)
-	defer stop()
-	const zone = "anchor.fwd.example."
-	ic := ImrEngineConf{
-		Forward:       rootForward(addr, port),
-		TrustAnchorDS: zone + " 3600 IN DS 12345 13 2 " + strings.Repeat("ab", 32),
-	}
-
-	pending := ImrOptions{Quiet: true, PendingOwnZone: func(z string) bool { return z == zone }}
-	imr, err := NewImr(context.Background(), ic, pending)
-	if err != nil {
-		t.Fatalf("NewImr: %v", err)
-	}
-	if err := imr.initializeImrTrustAnchors(context.Background(), imr.bootConf); err != nil {
-		t.Errorf("trust-anchor set-up with %s pending: %v", zone, err)
-	}
-	if n := len(logr.find(zone, dns.TypeDNSKEY)); n != 0 {
-		t.Errorf("trust-anchor set-up asked the upstream for %s DNSKEY %d time(s) though the zone is pending", zone, n)
-	}
-
-	imr, err = NewImr(context.Background(), ic, ImrOptions{Quiet: true})
-	if err != nil {
-		t.Fatalf("NewImr: %v", err)
-	}
-	_ = imr.initializeImrTrustAnchors(context.Background(), imr.bootConf) // the upstream has no such key
-	if len(logr.find(zone, dns.TypeDNSKEY)) == 0 {
-		t.Errorf("trust-anchor set-up did not ask for %s DNSKEY with nothing pending", zone)
 	}
 }
