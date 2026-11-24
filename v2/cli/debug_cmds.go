@@ -300,8 +300,10 @@ func SendDebug(api *tdns.ApiClient, data tdns.DebugPost) tdns.DebugResponse {
 
 	status, buf, err := api.Post("/debug", bytebuf.Bytes())
 	if err != nil {
-		log.Fatalf("error from api post: %v", err)
-
+		// Printed, not logged: a refusal is the daemon's words, verdict
+		// first, not a log line.
+		printDaemonError(api.Name, fmt.Errorf("error from api post: %w", err))
+		os.Exit(1)
 	}
 	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -315,7 +317,7 @@ func SendDebug(api *tdns.ApiClient, data tdns.DebugPost) tdns.DebugResponse {
 	}
 
 	if dr.Error {
-		fmt.Printf("Error from %s: %s\n", dr.AppName, dr.ErrorMsg)
+		printDaemonErrorMsg(api.Name, dr.ErrorMsg)
 	}
 
 	fmt.Printf("Message: %s\n", dr.Msg)

@@ -55,7 +55,7 @@ to print.`,
 			if err != nil {
 				log.Fatalf("Error: %v", err)
 			}
-			showParentSyncStatus(api, "Error from server")
+			showParentSyncStatus(api)
 		},
 	}
 
@@ -76,11 +76,11 @@ to print.`,
 			})
 			PrintUpdateResult(resp.UpdateResult)
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {
@@ -111,11 +111,11 @@ to print.`,
 			})
 			PrintUpdateResult(resp.UpdateResult)
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {
@@ -139,11 +139,11 @@ to print.`,
 			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 		})
 		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
+			printDaemonError(api.Name, err)
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+			printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 			os.Exit(1)
 		}
 		fmt.Printf("KeyState Inquiry for %s\n", dns.Fqdn(tdns.Globals.Zonename))
@@ -182,11 +182,11 @@ to print.`,
 				Zone:    tdns.Globals.Zonename,
 			})
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if dr.Error {
-				fmt.Printf("Error: %s\n", dr.ErrorMsg)
+				printDaemonErrorMsg(api.Name, dr.ErrorMsg)
 				os.Exit(1)
 			}
 			fmt.Printf("%s\n", dr.Msg)
@@ -208,11 +208,11 @@ to print.`,
 				Zone:    tdns.Globals.Zonename,
 			})
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if dr.Error {
-				fmt.Printf("Error: %s\n", dr.ErrorMsg)
+				printDaemonErrorMsg(api.Name, dr.ErrorMsg)
 				os.Exit(1)
 			}
 			fmt.Printf("%s\n", dr.Msg)
@@ -226,19 +226,18 @@ to print.`,
 // showParentSyncStatus asks the daemon for the parentsync status of
 // tdns.Globals.Zonename and prints it. Shared by "zone parentsync status" and
 // the hidden "zone dsync status" aliases, so the old spellings print the same
-// report rather than the table the report replaced. errPrefix names who
-// answered, as each caller always has.
-func showParentSyncStatus(api *tdns.ApiClient, errPrefix string) {
+// report rather than the table the report replaced.
+func showParentSyncStatus(api *tdns.ApiClient) {
 	resp, err := SendParentSyncCommand(api, tdns.ZoneParentSyncPost{
 		Command: "status",
 		Zone:    dns.Fqdn(tdns.Globals.Zonename),
 	})
 	if err != nil {
-		fmt.Printf("Error: %s\n", err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if resp.Error {
-		fmt.Printf("%s: %s\n", errPrefix, resp.ErrorMsg)
+		printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 		os.Exit(1)
 	}
 	if resp.Report == nil {
@@ -469,7 +468,7 @@ func SendParentSyncCommand(api *tdns.ApiClient, data tdns.ZoneParentSyncPost) (t
 			cr.AppName = api.Name
 			return cr, rerr
 		}
-		log.Println("Error from Api Post:", err)
+		// Not logged: the caller prints it (printDaemonError), once.
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
 	if status != 200 && tdns.Globals.Verbose {
@@ -481,7 +480,7 @@ func SendParentSyncCommand(api *tdns.ApiClient, data tdns.ZoneParentSyncPost) (t
 		return cr, fmt.Errorf("error from unmarshal: %v", err)
 	}
 	// cr.Error is NOT turned into a Go error: the callers render it
-	// themselves ("Error from server: ..."), and wrapping it here made that
+	// themselves (printDaemonErrorMsg), and wrapping it here made that
 	// branch unreachable and doubled the prefix on the path that did run.
 	// A non-nil error from this function means the exchange failed.
 	return cr, nil

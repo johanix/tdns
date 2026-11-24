@@ -53,12 +53,12 @@ func newCatalogCreateCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -91,12 +91,12 @@ func newCatalogDeleteCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -139,12 +139,12 @@ func newCatalogZoneAddCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -178,12 +178,12 @@ func newCatalogZoneDeleteCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -216,12 +216,12 @@ func newCatalogZoneListCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -294,12 +294,12 @@ func newCatalogGroupAddCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -333,12 +333,12 @@ func newCatalogGroupDeleteCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -371,12 +371,12 @@ func newCatalogGroupListCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -427,12 +427,12 @@ func newCatalogZoneGroupAddCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -467,12 +467,12 @@ func newCatalogZoneGroupDeleteCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -509,7 +509,7 @@ func SendCatalogCommand(api *tdns.ApiClient, data tdns.CatalogPost) (*tdns.Catal
 
 	if status != 200 {
 		if resp.ErrorMsg != "" {
-			return &resp, fmt.Errorf("%s", resp.ErrorMsg)
+			return &resp, &daemonError{msg: resp.ErrorMsg}
 		}
 		return &resp, fmt.Errorf("status code: %d", status)
 	}
@@ -647,12 +647,12 @@ func newCatalogNotifyAddCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -686,12 +686,12 @@ func newCatalogNotifyRemoveCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -724,12 +724,12 @@ func newCatalogNotifyListCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 

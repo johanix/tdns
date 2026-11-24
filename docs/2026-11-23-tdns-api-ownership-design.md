@@ -536,6 +536,15 @@ Part B (application clients and zone scope):
   the daemon's words wrapped below it (`tdns.ApiRefusal.Report`); the
   senders no longer log it first. `catalog` commands print the daemon's
   error message instead of the raw reply.
+- After the rig run: every command an application can be refused on (zone,
+  catalog, parentsync, childsync, delegation, rollover, config, debug,
+  ddns, dsync-api, command and daemon status) prints a daemon's error
+  through one printer (`printDaemonError` in `v2/cli`, the layout in
+  `tdns.ErrorReport`): one verdict naming the client entry, "Refused by
+  tdns-auth (HTTP 403):" for a plain-text refusal, "Error from tdns-auth:"
+  for a JSON reply's error, then the daemon's words indented two spaces,
+  within 72 characters, a hint line kept as its own indented line. No log
+  line, no second lead; exit codes as before.
 
 Part C (keystore for application clients):
 
@@ -591,8 +600,8 @@ Part C (keystore for application clients):
 - The reference count in an application's TSIG list counts every zone
   that uses the key, others' included: delete's "not in use" rule needs
   the same number.
-- The keystore CLI prints a refusal once, verdict first, in lines of at
-  most 72 characters: the access check's 403 as the daemon worded it, a
-  handler's error after "Error:", with its hint on a line of its own.
+- The keystore CLI prints its errors through the same printer as the
+  other commands (part B): "Refused by <client> (HTTP 403):" or "Error
+  from <client>:", then the daemon's words within 72 characters.
   `bulk-export` without a selector says it exports every key "this client
   may export".

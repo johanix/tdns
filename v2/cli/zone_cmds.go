@@ -421,7 +421,7 @@ func runZoneSimpleCmd(role, command string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -444,7 +444,7 @@ func runZoneShowNsec(role string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -477,7 +477,7 @@ func RunZoneReload(parent string, args []string) {
 	})
 
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -500,7 +500,7 @@ func RunZoneWrite(parent string, args []string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -525,7 +525,7 @@ func RunZoneSetPolicy(parent, policy string) {
 		Policy:  policy,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -554,7 +554,7 @@ func RunZoneResetPolicy(parent string, confirm bool) {
 		Force:   confirm,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -578,7 +578,7 @@ func RunZoneProxyKey(parent string) {
 		Zone:    dns.Fqdn(tdns.Globals.Zonename),
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Error {
@@ -600,7 +600,7 @@ func RunZoneList(parent string, args []string) {
 		Command: "list-zones",
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -636,7 +636,7 @@ func RunZoneDesc(parent string, args []string) {
 		Zone:    zone,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Msg != "" {
@@ -665,7 +665,7 @@ func RunZoneBump(parent string, args []string) {
 	})
 
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -733,7 +733,7 @@ func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey 
 		TransferSrc: transferSrc,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	printZoneWarnings(cr.Warnings)
@@ -767,7 +767,7 @@ func RunZoneDelete(role string, keepKeys bool) {
 	// A delete whose keys could not follow the zone is an error with a
 	// report: the zone is gone, and the report says how to finish.
 	if err != nil && cr.Removal == nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	for _, line := range zoneDeleteLines(cr) {
@@ -850,7 +850,7 @@ func RunZoneModify(role string, primaries []string, primaryKey string, options [
 	}
 	cr, err := SendZoneCommand(api, post)
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	printZoneWarnings(cr.Warnings)
@@ -866,7 +866,7 @@ func RunZoneListDynamic(role string) {
 	}
 	cr, err := SendZoneCommand(api, tdns.ZonePost{Command: "list-dynamic"})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if len(cr.Zones) == 0 {
@@ -943,8 +943,7 @@ func RunZoneSetOwner(role, zone, owner string) {
 		ApiOwner: owner,
 	})
 	if err != nil {
-		// The daemon's refusal is the verdict, and fits a line as it is.
-		fmt.Println(err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	fmt.Print(formatZoneSetOwner(cr))
@@ -970,7 +969,7 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 			cr.AppName = api.Name
 			return cr, rerr
 		}
-		log.Println("Error from Api Post:", err)
+		// Not logged: the caller prints it (printDaemonError), once.
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
 	if tdns.Globals.Verbose {
@@ -983,7 +982,7 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("%s", cr.ErrorMsg)
+		return cr, &daemonError{msg: cr.ErrorMsg}
 	}
 
 	return cr, nil
@@ -1371,7 +1370,7 @@ func RunZoneSync(parent string, args []string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %s: %s\n", parent, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Msg != "" {

@@ -78,7 +78,7 @@ func runZoneZonemd(role, subcmd string) {
 		IgnoreSerial: zonemdIgnoreSerial,
 	})
 	if err != nil {
-		fmt.Printf("Error from %s: %s\n", role, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Error {
