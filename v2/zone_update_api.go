@@ -68,7 +68,8 @@ func (zd *ZoneData) ApiZoneUpdate(ctx context.Context, zp ZonePost) (string, err
 	if len(actions) == 0 {
 		return "", fmt.Errorf("statement produced no changes")
 	}
-	if err := appUpdateRefusal(AppClientOf(ctx), zd.ZoneName, actions); err != nil {
+	app := AppClientOf(ctx)
+	if err := appUpdateRefusal(app, zd.ZoneName, actions); err != nil {
 		return "", err
 	}
 
@@ -82,6 +83,12 @@ func (zd *ZoneData) ApiZoneUpdate(ctx context.Context, zp ZonePost) (string, err
 		Actions:       actions,
 		PreAuthorized: true,
 		Description:   fmt.Sprintf("API %s", zp.UpdateVerb),
+	}
+	if app != "" {
+		// zd is the zone the handler checked the client's ownership on:
+		// the update is applied to it, or not at all, however long it
+		// waits in the queue (appUpdateTargetRefusalLocked).
+		ur.AppClient, ur.AppZone = app, zd
 	}
 	submit := func(ctx context.Context, ur UpdateRequest) (ZoneUpdateResult, error) {
 		return zd.queueApiZoneUpdate(ctx, ur, zp.UpdateVerb)
@@ -124,6 +131,43 @@ func (zd *ZoneData) ApiZoneUpdate(ctx context.Context, zp ZonePost) (string, err
 
 	return fmt.Sprintf("Zone %s: %s applied (%d update record%s)",
 		zd.ZoneName, zp.UpdateVerb, len(actions), plural(len(actions))), nil
+}
+
+// appZoneGone refuses an application client's update whose zone was
+// removed, or replaced by another zone of that name, after the update was
+// authorized: it would otherwise be applied to a zone the client was never
+// authorized for, another application's included.
+func appZoneGone(zone string) error {
+	return appRefusal(fmt.Sprintf("zone %s was removed or replaced while the update waited", zone),
+		"nothing was applied")
+}
+
+// appUpdateTargetRefusalLocked is why an application client's update
+// (ur.AppZone set) may not be applied to zd, or nil: zd must be the zone the
+// update was authorized against and still be the zone served under its
+// name, its removal must not have started, and it must still be the
+// client's. The caller holds zd.mu, and stages and publishes the update in
+// the same hold. RemoveDynamicZone marks the removal (signalPassRetired)
+// under zd.mu before the zone leaves Zones, so such a removal either starts
+// after the apply or is seen here, and a zone of the same name can be added
+// only once it is done. A removal that fails clears the mark again; an
+// update refused meanwhile can be sent again. A modify marks the ZoneData it
+// replaces (zd.removed) under zd.mu too (swapZoneData). The other removals
+// (a config reload, the catalog paths) do not take zd.mu: one that races
+// this check leaves the update applied to the instance it was authorized
+// against, which is then no longer served, never to the zone that replaced
+// it.
+func (zd *ZoneData) appUpdateTargetRefusalLocked(ur UpdateRequest) error {
+	if ur.AppZone == nil {
+		return nil
+	}
+	if ur.AppZone != zd || zd.signalPassRetired || zd.removed.Load() {
+		return appZoneGone(zd.ZoneName)
+	}
+	if cur, ok := Zones.Get(zd.ZoneName); !ok || cur != zd {
+		return appZoneGone(zd.ZoneName)
+	}
+	return appZoneRefusal(ur.AppClient, zd.ZoneName, zd)
 }
 
 // queueApiZoneUpdate hands one update to the ZoneUpdater and waits until it has

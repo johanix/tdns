@@ -469,6 +469,14 @@ Part Z (`zone delete` deletes the zone's keys):
   confirmed, and a conditional warning otherwise.
 - `catalog delete` and `catalog zone-delete` have their own removal path and
   are unchanged.
+- After CodeRabbit (on #1188): a ZoneData that leaves Zones, deleted or
+  replaced by a modify, is marked under `zd.mu` with the Zones change, and
+  a late error change on it no longer puts it back. Nothing makes a key for
+  a zone once its delete has begun: a SIG(0) rollover and the signer's
+  first KSK and ZSK check for the mark under a lock the delete takes. A
+  delete is refused while a SIG(0) key rollover of the zone runs, and a
+  rollover while the zone is being deleted. A rewrite whose only failure is
+  the directory sync after the rename stands, logged as an error.
 
 Part A (owners recorded):
 
@@ -537,7 +545,7 @@ Part B (application clients and zone scope):
   one the access file lacks is a `config check` warning, as are
   `app-clients` without an access file and `app-clients` with `keyauth`
   on. A reload whose access file does not load keeps the running list too,
-  and says so.
+  and says so, also when no access file was in force (the list is empty).
 - The CLI prints a plain-text refusal once, as "refused (HTTP 403):" and
   the daemon's words wrapped below it (`tdns.ApiRefusal.Report`); the
   senders no longer log it first. `catalog` commands print the daemon's
@@ -550,7 +558,21 @@ Part B (application clients and zone scope):
   tdns-auth (HTTP 403):" for a plain-text refusal, "Error from tdns-auth:"
   for a JSON reply's error, then the daemon's words indented two spaces,
   within 72 characters, a hint line kept as its own indented line. No log
-  line, no second lead; exit codes as before.
+  line, no second lead; exit codes as before. The body-returning client
+  calls (`Post`, `Get`, `Put`, `Delete`) try each of the entry's addresses
+  in turn, as `RequestNG` does, so `catalog` kept that fallback.
+- `delegation sync-log`, answered before the handler's zone lookup, is in
+  both tables: admin, as it was by default, and refused to applications.
+  The tables test reads the commands a handler compares before its switch.
+- An application's add checks its TSIG keys again under
+  `templateApplyMu`, where every add and modify commits its inline key:
+  another application may register the same key in between.
+- An application's `zone update` is applied to the zone it was authorized
+  against, or refused. The updater checks under `zd.mu`, in the hold that
+  stages and publishes it, that the zone is still the one served under its
+  name, that its removal has not started, and that it is still the
+  client's. An update whose zone was deleted and re-added while it waited
+  is refused; operators' updates go to the zone of their name, as before.
 
 Part C (keystore for application clients):
 
@@ -577,12 +599,18 @@ Part C (keystore for application clients):
 - The checks are made in the `*KeyMgmt` functions, on the name each
   subcommand acts on; the request carries the application client's name
   in an unexported field that only the handler sets. `sig0-mgmt delete`
-  looks the key up by Zone and deletes by Keyname, so both must be the
-  caller's. `add` takes the zone from the key record's owner name.
+  names its key by one name, Keyname or Zone (two different ones are
+  refused), and that name is checked. `add` takes the zone from the key
+  record's owner name. A key command that names no zone is refused to an
+  application before the name is made fully qualified, where it would be
+  the root; "." names the root. A rollover with no zone is refused to
+  every caller: its keys would be picked from every zone.
 - One answer: a SIG(0) or DNSSEC key command on another's zone, or on a
   zone not served here, gets B's zone refusal before any lookup, whether
-  or not the key exists. A TSIG key of another API owner reads as "not
-  found", like a key that does not exist.
+  or not the key exists. An export goes further: a key of another's zone
+  or of a zone not served reads as "not found", with the status and words
+  of a missing key of the caller's own zone. A TSIG key of another API
+  owner reads as "not found", like a key that does not exist.
 - TSIG add, generate and import record the caller as the API owner,
   whatever the request names. An identical key of another API owner is
   unchanged, keeps its owner, and the answer says so. Another secret
@@ -600,14 +628,42 @@ Part C (keystore for application clients):
   bulk-export hands out is logged at Info, one line per key, for every
   caller (operators and the socket too): client, how it authenticated,
   whether it is an application client, the kind, the zone or key name and
-  the key ID.
+  the key ID. An export whose request fails, its commit included, hands
+  out no key material and logs nothing.
 - The keystore handler also refuses an application client what the table
   refuses, so a path that skips the middleware does not skip the table.
   It also refuses a SIG(0) or DNSSEC command whose Zone is not the
-  client's, whatever the subcommand checks: after the commit the handler
-  republishes and re-signs the zone named in Zone, while setstate checks
-  the key by Keyname and add by its DNSKEY's owner name (found by the
-  ownership test app, check 7.21).
+  client's, whatever the subcommand checks (found by the ownership test
+  app, check 7.21).
+- `dnssec-mgmt setstate` and `add` republish and re-sign the zone the key
+  is written under: Keyname's (Zone's when Keyname is empty), and the
+  DNSKEY's owner name. A Zone that names another zone is refused before
+  anything is written, for every caller; an empty Zone is the written
+  zone's. An add re-signs whatever state it gives the key: re-importing a
+  published key as active changes the signing keys and not the served
+  DNSKEYs. `sig0-mgmt delete` looks up and deletes by one name, and is
+  refused when Zone and Keyname name two.
+- SIG(0) and DNSSEC key rows that the keystore API writes (add,
+  generate, bulk import) are stored under the zone's canonical name, lower
+  case and fully qualified, which the signing reads use. A row stored in
+  another case before this keeps its spelling, with no migration: the
+  commands that name one key (setstate, setparentstate, export, delete)
+  and bulk import find it whatever the case, and it stays out of the
+  signing keys as before. Zone-wide commands (rollover, clear,
+  policy-cleanup, purge, check) use the canonical name only. SIG(0) keys
+  that the daemon generates for itself keep the name they are given.
+  Only zone names are made canonical: purge's "all" (any case) is every
+  zone, and "all." the zone of that name.
+- A DNSSEC key change that commits and whose signing-key republish then
+  fails answers with an error that says the change is committed and the
+  zone does not serve it yet. The re-sign still goes: the failure leaves
+  the zone's signing-keys snapshot unbuilt, so the re-sign reads the keys
+  from the keystore, or fails and stays owed, and never signs with the
+  keys from before.
+- A SIG(0) bulk import mirrors into the TrustStore, for each key it
+  imports or replaces, the record the keystore stored, so an offer of the
+  same key later in the batch that was refused or a conflict is never
+  mirrored.
 - The reference count in an application's TSIG list counts every zone
   that uses the key, others' included: delete's "not in use" rule needs
   the same number.

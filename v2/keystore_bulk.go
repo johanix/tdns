@@ -49,6 +49,10 @@ type BulkKeyDisposition struct {
 	Keyid  uint16 `json:"keyid,omitempty"`
 	Status string `json:"status"`
 	Detail string `json:"detail,omitempty"` // for conflict/replaced: what differed
+	// keyRR is the record an imported or replaced SIG(0) key was written
+	// with, for the import's TrustStore mirror: what the keystore stored,
+	// never another offer of the same key in the batch.
+	keyRR string
 }
 
 // BulkDnssecKey is one DNSSEC key on the wire, key material included. Distinct
@@ -443,14 +447,19 @@ func (kdb *KeyDB) bulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool, app
 
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
-		zone := dns.Fqdn(k.Zone)
-		if why := appBulkKeyRefusal(app, zone); why != "" {
+		// A new row goes in under the zone's canonical name; an existing
+		// row is the one stored under it in any case (storedKeyName).
+		zone := canonicalKeyName(dns.Fqdn(k.Zone))
+		if why := appBulkKeyRefusal(app, k.Zone); why != "" {
 			out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid, Status: BulkStatusRefused, Detail: why})
 			continue
 		}
 		canonRR, err := validateDnssecKeyRR(k)
 		if err != nil {
 			return nil, fmt.Errorf("%s keyid %d: %v", zone, k.Keyid, err)
+		}
+		if zone, err = storedKeyName(tx, "DnssecKeyStore", zone, k.Keyid); err != nil {
+			return nil, err
 		}
 		// Store the canonical record, never the caller's text. Also makes the
 		// diff below compare like with like, so re-importing a .key file that
@@ -573,8 +582,10 @@ func (kdb *KeyDB) bulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool, app str
 
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
-		zone := dns.Fqdn(k.Zone)
-		if why := appBulkKeyRefusal(app, zone); why != "" {
+		// As in bulkImportDnssec: a new row under the canonical name, an
+		// existing one as stored.
+		zone := canonicalKeyName(dns.Fqdn(k.Zone))
+		if why := appBulkKeyRefusal(app, k.Zone); why != "" {
 			out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid, Status: BulkStatusRefused, Detail: why})
 			continue
 		}
@@ -583,6 +594,9 @@ func (kdb *KeyDB) bulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool, app str
 			return nil, fmt.Errorf("%s keyid %d: %v", zone, k.Keyid, err)
 		}
 		k.KeyRR = canonRR
+		if zone, err = storedKeyName(tx, "Sig0KeyStore", zone, k.Keyid); err != nil {
+			return nil, err
+		}
 
 		var (
 			curState, curAlg                          string
@@ -599,7 +613,7 @@ func (kdb *KeyDB) bulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool, app str
 				k.Creator, k.PrivateKey, k.KeyRR, k.Comment, int(k.ParentState)); err != nil {
 				return nil, fmt.Errorf("inserting SIG(0) key %s keyid %d: %v", zone, k.Keyid, err)
 			}
-			out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid, Status: BulkStatusImported})
+			out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid, Status: BulkStatusImported, keyRR: k.KeyRR})
 
 		case scanErr != nil:
 			return nil, fmt.Errorf("reading SIG(0) key %s keyid %d: %v", zone, k.Keyid, scanErr)
@@ -626,7 +640,7 @@ func (kdb *KeyDB) bulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool, app str
 					return nil, fmt.Errorf("replacing SIG(0) key %s keyid %d: %v", zone, k.Keyid, err)
 				}
 				out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid,
-					Status: BulkStatusReplaced, Detail: strings.Join(diffs, ", ")})
+					Status: BulkStatusReplaced, Detail: strings.Join(diffs, ", "), keyRR: k.KeyRR})
 			}
 		}
 	}

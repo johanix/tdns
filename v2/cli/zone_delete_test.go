@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -95,6 +96,29 @@ func TestZoneDeleteLines(t *testing.T) {
 			r:    tdns.ZoneRemoval{Zone: "example.com."},
 			want: []string{"zone example.com. deleted; it had no DNSSEC or SIG(0) keys"},
 		},
+		{
+			name: "removal not on disk",
+			r: tdns.ZoneRemoval{Zone: "example.com.",
+				NotSynced: "the new dynamic config file is in place, but could not be synced to disk: input/output error"},
+			want: []string{
+				"zone example.com. deleted, but a crash could bring it back: the new",
+				"  dynamic config file is in place, but could not be synced to disk:",
+				"  input/output error",
+				"its keys were kept, and must stay until the removal is on disk: the next",
+				"  zone add, modify or delete that succeeds puts it there",
+			},
+		},
+		{
+			name: "removal not on disk, keys kept",
+			r: tdns.ZoneRemoval{Zone: "example.com.", KeepKeys: true,
+				NotSynced: "the new dynamic config file is in place, but could not be synced to disk: input/output error"},
+			want: []string{
+				"zone example.com. deleted, but a crash could bring it back: the new",
+				"  dynamic config file is in place, but could not be synced to disk:",
+				"  input/output error",
+				"its keys were kept, as asked; a re-add takes them back",
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := zoneDeleteOutput(tc.r)
@@ -116,6 +140,7 @@ func TestZoneDeleteLinesWidth(t *testing.T) {
 		{Zone: zone, KeepKeys: true, DnssecKeys: 3, Sig0Keys: 1},
 		{Zone: zone, KeysError: "KeyDB.Begin timed out waiting"},
 		{Zone: zone, KeepKeys: true, KeysError: "count DNSSEC keys: disk I/O error"},
+		{Zone: zone, DnssecKeys: 3, NotSynced: "the new dynamic config file is in place, but could not be synced to disk: input/output error"},
 		{Zone: zone},
 	} {
 		lines := zoneDeleteOutput(r)
@@ -150,5 +175,24 @@ func TestZoneDeleteCommandsStayWhole(t *testing.T) {
 		if !found {
 			t.Errorf("no line %q in:\n%s", want, strings.Join(lines, "\n"))
 		}
+	}
+}
+
+// A delete refused while a SIG(0) key rollover of the zone runs is printed
+// wrapped to 72 characters, saying why and to try again.
+func TestZoneDeleteRefusalWidth(t *testing.T) {
+	zone := "a-rather-long-label.customer-zones.provisioning.example.com."
+	err := fmt.Errorf("zone %s not deleted: a SIG(0) key rollover is in progress; try again when it finishes", zone)
+	// Printed by the shared daemon-error printer (part B), as a JSON
+	// reply's ErrorMsg.
+	lines := strings.Split(daemonErrorText("tdns-auth", &daemonError{msg: err.Error()}), "\n")
+	for _, l := range lines {
+		if len(l) > zoneDeleteLineWidth {
+			t.Errorf("line of %d characters: %q", len(l), l)
+		}
+	}
+	text := strings.Join(strings.Fields(strings.Join(lines, " ")), " ")
+	if want := "zone " + zone + " not deleted: a SIG(0) key rollover is in progress; try again when it finishes"; !strings.Contains(text, want) {
+		t.Errorf("the refusal reads:\n%s", strings.Join(lines, "\n"))
 	}
 }

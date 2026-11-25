@@ -53,6 +53,24 @@ func (conf *Config) removeZoneKeys(zone string, keepKeys bool) *ZoneRemoval {
 	if kdb == nil {
 		return r
 	}
+
+	// A rollover tick that is working on the zone writes the state deleted
+	// here, and a SIG(0) rollover already past its check of zd.removed
+	// commits a new key (generateRolloverSig0Key); either finishes first.
+	// With keepKeys too: the rollover's new key is then one of the kept
+	// ones, and counted here, and a rollover that checks after this finds
+	// the zone removed and makes none. RemoveDynamicZone calls this under
+	// templateApplyMu, with zd.mu released.
+	lock := AcquireRolloverLock(zone)
+	lock.Lock()
+	defer lock.Unlock()
+	// The same for the paths that make keys outside the rollover machinery:
+	// a zone's first keys (EnsureActiveDnssecKeys), standby keys, a policy
+	// reset's. Taken after the rollover lock (acquireZoneKeysLock).
+	keysLock := acquireZoneKeysLock(zone)
+	keysLock.Lock()
+	defer keysLock.Unlock()
+
 	if keepKeys {
 		var err error
 		if r.DnssecKeys, r.Sig0Keys, err = kdb.countZoneKeys(zone); err != nil {
@@ -61,12 +79,6 @@ func (conf *Config) removeZoneKeys(zone string, keepKeys bool) *ZoneRemoval {
 		}
 		return r
 	}
-
-	// A rollover tick that is working on the zone writes the state deleted
-	// here; it finishes first.
-	lock := AcquireRolloverLock(zone)
-	lock.Lock()
-	defer lock.Unlock()
 
 	// Read before the delete, which takes the row it is kept in.
 	r.ParentDS, r.ParentDSAt = parentDSObservation(kdb, zone)
@@ -198,6 +210,18 @@ func (r *ZoneRemoval) Msg() string {
 	nokeys := fmt.Sprintf("zone %s deleted; it had no DNSSEC or SIG(0) keys", r.Zone)
 	counts := fmt.Sprintf("%d DNSSEC, %d SIG(0)", r.DnssecKeys, r.Sig0Keys)
 	switch {
+	case r.NotSynced != "":
+		// No commands to delete the keys: until the removal is on disk a
+		// crash can bring the zone back, and it needs them. Nothing here can
+		// tell when it is; the next rewrite of the dynamic config that is
+		// synced puts it there, as that file does not name the zone either.
+		lines = append(lines, fmt.Sprintf("zone %s deleted, but a crash could bring it back: %s", r.Zone, r.NotSynced))
+		if r.KeepKeys {
+			lines = append(lines, "its keys were kept, as asked; a re-add takes them back")
+			break
+		}
+		lines = append(lines, "its keys were kept, and must stay until the removal is on disk: the next zone add, modify or delete that succeeds puts it there")
+
 	case r.KeepKeys:
 		switch {
 		case r.KeysError != "":
@@ -234,7 +258,7 @@ func (r *ZoneRemoval) Msg() string {
 // until the DS goes (R12). Worded as a fact only when the rollover engine
 // saw the DS; when it does not know, conditionally.
 func (r *ZoneRemoval) Warnings() []string {
-	if r.KeepKeys || r.KeysError != "" || r.DnssecKeys == 0 {
+	if r.KeepKeys || r.KeysError != "" || r.NotSynced != "" || r.DnssecKeys == 0 {
 		return nil
 	}
 	const consequence = "validating resolvers treat the zone as bogus until the DS is removed or replaced"

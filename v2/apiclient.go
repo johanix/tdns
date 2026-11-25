@@ -240,8 +240,69 @@ func verifyServerPin(cs tls.ConnectionState, pins []string) error {
 	return fmt.Errorf("the daemon's certificate has pin %s, which is not one of the %d pinned for this entry (a new key on the daemon, or not the daemon you meant)", got, len(pins))
 }
 
-// request helper function
-func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
+// requestURLs are the URLs a request to endpoint is sent to, in order, as
+// RequestNG tries them: api.BaseUrl with each of api.Addresses as its host,
+// or api.BaseUrl alone when there are none.
+func (api *ApiClient) requestURLs(endpoint string) ([]string, error) {
+	if len(api.Addresses) == 0 {
+		return []string{api.BaseUrl + endpoint}, nil
+	}
+	base, err := url.Parse(api.BaseUrl)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse base URL: %v", err)
+	}
+	urls := make([]string, 0, len(api.Addresses))
+	for _, addr := range api.Addresses {
+		u := *base
+		u.Host = addr // addr:port, as for RequestNG
+		urls = append(urls, u.String()+endpoint)
+	}
+	return urls, nil
+}
+
+// send is the request method endpoint with body (nil for none), sent to each
+// of requestURLs in turn until one answers, as RequestNG does: an address
+// that cannot be reached is skipped, and the first reply, whatever its
+// status, is the answer (requestHelper). When no address answers, the error
+// is the last one's, naming every address tried when there were several.
+func (api *ApiClient) send(method, endpoint string, body []byte) (int, []byte, error) {
+	if api == nil {
+		return 501, nil, fmt.Errorf("api client is nil")
+	}
+	urls, err := api.requestURLs(endpoint)
+	if err != nil {
+		return 0, nil, err
+	}
+	var lastErr error
+	for _, u := range urls {
+		var rd io.Reader
+		if body != nil {
+			rd = bytes.NewReader(body)
+		}
+		req, err := http.NewRequest(method, u, rd)
+		if err != nil {
+			lgApi.Error("http.NewRequest failed", "url", u, "err", err)
+			lastErr = err
+			continue
+		}
+		status, buf, unreached, err := api.requestHelper(req)
+		if !unreached {
+			return status, buf, err
+		}
+		lgApi.Debug("no answer, trying the next address", "url", u, "err", err)
+		lastErr = err
+	}
+	if len(urls) > 1 {
+		return 501, nil, fmt.Errorf("%w (tried %s)", lastErr, strings.Join(api.Addresses, ", "))
+	}
+	return 501, nil, lastErr
+}
+
+// requestHelper sends req and reads the reply. unreached is set when the
+// request got no reply (Client.Do failed), so that send tries the next
+// address; an error with unreached false is the daemon's answer, or a
+// setting of this client that no address would change.
+func (api *ApiClient) requestHelper(req *http.Request) (status int, body []byte, unreached bool, err error) {
 
 	req.Header.Add("Content-Type", "application/json")
 
@@ -249,17 +310,17 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 		// no auth needed
 	} else if api.AuthMethod == "X-API-Key" {
 		if api.apiKey == "" {
-			return 0, nil, fmt.Errorf("X-API-Key auth method requires apiKey to be set")
+			return 0, nil, false, fmt.Errorf("X-API-Key auth method requires apiKey to be set")
 		}
 		req.Header.Add("X-API-Key", api.apiKey)
 	} else if api.AuthMethod == "Authorization" {
 		if api.apiKey == "" {
-			return 0, nil, fmt.Errorf("authorization auth method requires apiKey to be set")
+			return 0, nil, false, fmt.Errorf("authorization auth method requires apiKey to be set")
 		}
 		req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
 	} else {
 		lgApi.Error("unknown auth method", "method", api.AuthMethod)
-		return 501, []byte{}, fmt.Errorf("unknown auth method: %s", api.AuthMethod)
+		return 501, []byte{}, false, fmt.Errorf("unknown auth method: %s", api.AuthMethod)
 	}
 
 	lgApi.Debug("sending request", "authMethod", api.AuthMethod)
@@ -267,7 +328,7 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 	resp, err := api.Client.Do(req)
 
 	if err != nil {
-		return 501, nil, err
+		return 501, nil, true, err
 	}
 
 	defer resp.Body.Close()
@@ -287,10 +348,10 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 	// words instead of a JSON parse error. A non-2xx reply with a JSON body
 	// is a handler's own and goes back as before.
 	if err == nil && (resp.StatusCode < 200 || resp.StatusCode >= 300) && !json.Valid(buf) {
-		return resp.StatusCode, buf, plainHTTPError(resp.StatusCode, buf)
+		return resp.StatusCode, buf, false, plainHTTPError(resp.StatusCode, buf)
 	}
 
-	return resp.StatusCode, buf, err
+	return resp.StatusCode, buf, false, err
 }
 
 // ApiRefusal is a non-2xx reply whose body is plain text: a refusal made
@@ -382,6 +443,9 @@ func plainHTTPError(status int, body []byte) error {
 	return &ApiRefusal{Status: status, Msg: msg}
 }
 
+// Post sends data to endpoint and returns the reply's status and body, a
+// non-2xx one included; a plain-text non-2xx reply is also an ApiRefusal.
+// Like RequestNG it tries each of api.Addresses in turn (send).
 func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {
 	if api == nil {
 		return 501, nil, fmt.Errorf("api client is nil")
@@ -396,13 +460,7 @@ func (api *ApiClient) Post(endpoint string, data []byte) (int, []byte, error) {
 		lgApi.Debug("posting data", "url", api.BaseUrl+endpoint, "bytes", len(data), "data", prettyJSON.String())
 	}
 
-	req, err := http.NewRequest(http.MethodPost, api.BaseUrl+endpoint,
-		bytes.NewBuffer(data))
-	if err != nil {
-		lgApi.Error("http.NewRequest failed", "err", err)
-		os.Exit(1)
-	}
-	return api.requestHelper(req)
+	return api.send(http.MethodPost, endpoint, data)
 }
 
 // api Delete (not tested)
@@ -413,12 +471,7 @@ func (api *ApiClient) Delete(endpoint string) (int, []byte, error) {
 			api.BaseUrl+endpoint)
 	}
 
-	req, err := http.NewRequest(http.MethodDelete, api.BaseUrl+endpoint, nil)
-	if err != nil {
-		lgApi.Error("http.NewRequest failed", "err", err)
-		os.Exit(1)
-	}
-	return api.requestHelper(req)
+	return api.send(http.MethodDelete, endpoint, nil)
 }
 
 // api Get (not tested)
@@ -428,12 +481,7 @@ func (api *ApiClient) Get(endpoint string) (int, []byte, error) {
 		lgApi.Debug("GET request", "url", api.BaseUrl+endpoint)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, api.BaseUrl+endpoint, nil)
-	if err != nil {
-		lgApi.Error("http.NewRequest failed", "err", err)
-		os.Exit(1)
-	}
-	return api.requestHelper(req)
+	return api.send(http.MethodGet, endpoint, nil)
 }
 
 // api Put
@@ -444,13 +492,7 @@ func (api *ApiClient) Put(endpoint string, data []byte) (int, []byte, error) {
 			api.BaseUrl+endpoint, len(data), string(data))
 	}
 
-	req, err := http.NewRequest(http.MethodPut, api.BaseUrl+endpoint,
-		bytes.NewBuffer(data))
-	if err != nil {
-		lgApi.Error("http.NewRequest failed", "err", err)
-		os.Exit(1)
-	}
-	return api.requestHelper(req)
+	return api.send(http.MethodPut, endpoint, data)
 }
 
 func (api *ApiClient) UrlReport(method, endpoint string, data []byte) {

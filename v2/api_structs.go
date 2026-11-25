@@ -68,6 +68,10 @@ type KeystorePost struct {
 	// key or zone they act on. "" (every other caller, and every caller
 	// inside the daemon) is unlimited.
 	appClient string
+	// appID is the request's identity (ApiIdentityFrom), set by APIkeystore
+	// with appClient, for the audit lines the *KeyMgmt functions write
+	// (appKeyExportRefusal), as logKeyExports writes them from the request.
+	appID ApiIdentity
 }
 
 type TsigKeyInfo struct {
@@ -140,6 +144,11 @@ type KeystoreResponse struct {
 	// change the zone's active signing-key set. External-tx callers (APIkeystore)
 	// must call republishSigningKeysForZone after their Commit (R1).
 	NeedsSigningKeysRepublish bool `json:"-"`
+	// keyZone is the zone whose DNSSEC keys DnssecKeyMgmt changed: the
+	// request's Zone, or for add and setstate the zone the key was written
+	// under (keyWriteZone). The external-tx caller republishes and
+	// re-signs this zone, not the one the request names.
+	keyZone string
 	// GeneratedSig0Key is the keypair a sig0-mgmt "generate" made, for an
 	// in-process caller that goes on to use it. Never on the wire: it holds the
 	// private key.
@@ -454,6 +463,14 @@ type ZoneRemoval struct {
 	// KeysError is set when the zone was deleted but its keys could not be
 	// deleted (or, with KeepKeys, counted). The zone stays deleted.
 	KeysError string `json:"keyserror,omitempty"`
+	// NotSynced is set when the zone left Zones and the dynamic config, but
+	// the rewrite of the config could not be synced to disk: a crash could
+	// still bring the zone back, so its keys were kept, as was everything
+	// else such a zone needs. It says why. It overrides the key fields: the
+	// keys were kept whatever KeepKeys says, and they were not counted, so
+	// DnssecKeys and Sig0Keys are zero and tell nothing. A synced removal
+	// leaves NotSynced empty, and the fields mean what they say above.
+	NotSynced string `json:"notsynced,omitempty"`
 }
 
 // ZoneNameReport is what a zone publishes at one owner name.

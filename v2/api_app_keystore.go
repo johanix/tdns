@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -59,26 +61,27 @@ func appTsigOwnerFilter(app string) (string, any) {
 // (design 4.4), so this is B's zone refusal, on the name the keystore
 // command acts on: a zone not served here and another application's get
 // the same answer, whether or not the key exists.
+//
+// An empty name is refused before it is made a name: as a fully qualified
+// name it would be the root, which an application may own, and a command
+// given no zone may act on every zone's keys (a rollover picks its keys
+// with no zone filter). "." still names the root zone.
 func appKeyZoneRefusal(app, zone string) error {
 	if app == "" {
 		return nil
+	}
+	if strings.TrimSpace(zone) == "" {
+		return errAppKeyNoZone
 	}
 	name := core.CanonicalizeName(dns.Fqdn(zone))
 	zd, _ := Zones.Get(name)
 	return appZoneRefusal(app, name, zd)
 }
 
-// appKeyZonesRefusal is appKeyZoneRefusal for a command that names its zone
-// in more than one field: each must be the application's, so that the
-// field the command looks up and the field it writes cannot differ.
-func appKeyZonesRefusal(app string, zones ...string) error {
-	for _, z := range zones {
-		if err := appKeyZoneRefusal(app, z); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+// errAppKeyNoZone refuses an application client's SIG(0) or DNSSEC key
+// command that names no zone.
+var errAppKeyNoZone = appRefusal("no zone named: an application client names the zone of the key",
+	"give the zone (-z)")
 
 // appBulkKeyRefusal is the per-key check of an application client's SIG(0)
 // or DNSSEC bulk import (design 4.6): the reason it may not add a key of
@@ -109,11 +112,12 @@ func appTsigKeyIsOwn(app string, row TsigKeystoreRow) bool {
 // path to the handler that skips the middleware does not skip the table.
 //
 // It also refuses a SIG(0) or DNSSEC command that names a Zone that is not
-// the client's, whatever the subcommand checks. After the commit, the
-// handler republishes the signing keys of, and re-signs, the zone the
-// request names in Zone, while setstate checks the key by Keyname and add
-// by the DNSKEY's owner name: an application could otherwise name its own
-// key and someone else's zone, and have that zone re-signed.
+// the client's, whatever the subcommand checks, so that an application is
+// refused another's zone whichever field names it. The subcommands check
+// the name they act on: setstate the key's (Keyname), add the DNSKEY's
+// owner name. A Zone that names another zone than the one written is
+// refused for everyone (keyWriteZone), and the handler republishes and
+// re-signs the zone written.
 func appKeystoreGate(app string, kp KeystorePost) error {
 	if app == "" {
 		return nil
@@ -124,11 +128,42 @@ func appKeystoreGate(app string, kp KeystorePost) error {
 	}
 	switch kp.Command {
 	case "sig0-mgmt", "dnssec-mgmt":
-		if kp.Zone != "" {
+		// An export answers for itself (appKeyExportRefusal): a key the
+		// client may not have reads there as a key that does not exist.
+		if kp.Zone != "" && kp.SubCommand != "export" {
 			return appKeyZoneRefusal(app, kp.Zone)
 		}
 	}
 	return nil
+}
+
+// appKeyExportRefusal is the answer to an application client's export of a
+// SIG(0) or DNSSEC key (kind "sig0" or "dnssec") of a zone that is not its
+// own, or not served here: the answer an export of a key that does not
+// exist gets (notFound), with the same status, so that another owner's
+// key, a zone not served and a missing key of the client's own zone cannot
+// be told apart. An export that names no zone is refused as such. nil when
+// the zone is the client's.
+//
+// The client is told "not found"; the operator is told what happened. Each
+// refused export is logged at Info, as logKeyExports logs an export, with
+// the client, how it authenticated and whether it is an application client
+// (from the request's identity, kp.appID), the kind, the zone and the key
+// ID (design R9). A missing key of the client's own zone is not a refusal
+// and is not logged here.
+func appKeyExportRefusal(kp KeystorePost, kind string, notFound func() *KeystoreResponse) (*KeystoreResponse, error) {
+	err := appKeyZoneRefusal(kp.appClient, kp.Zone)
+	switch {
+	case err == nil:
+		return nil, nil
+	case err == errAppKeyNoZone:
+		return &KeystoreResponse{Time: time.Now()}, err
+	}
+	id := kp.appID
+	lgApi.Info("keystore: private key export refused, answered not found",
+		"client", id.Name, "via", id.Via, "app", id.App, "kind", kind, "zone", kp.Zone, "keyid", kp.Keyid,
+		"reason", err.Error())
+	return notFound(), nil
 }
 
 // writeKeystoreRefusal answers a keystore request refused before the
@@ -137,6 +172,25 @@ func writeKeystoreRefusal(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
 	json.NewEncoder(w).Encode(&KeystoreResponse{Error: true, ErrorMsg: err.Error()})
+}
+
+// withholdKeyExports takes the private keys and TSIG secrets out of the
+// answer to an export whose request failed: its commit, or a step after the
+// keys were read. Such an answer hands out nothing, and logKeyExports logs
+// nothing for it.
+func withholdKeyExports(kp KeystorePost, resp *KeystoreResponse) {
+	if resp == nil {
+		return
+	}
+	switch kp.SubCommand {
+	case "export", "bulk-export":
+		resp.Sig0keys = nil
+		resp.Dnskeys = nil
+		resp.TsigExport = nil
+		resp.BulkSig0Keys = nil
+		resp.BulkDnssecKeys = nil
+		resp.BulkTsigKeys = nil
+	}
 }
 
 // logKeyExports logs, at Info, every private key and TSIG secret a

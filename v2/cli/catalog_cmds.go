@@ -488,7 +488,8 @@ func SendCatalogCommand(api *tdns.ApiClient, data tdns.CatalogPost) (*tdns.Catal
 	// Post, not RequestNG: the catalog handler answers an error with a
 	// non-2xx status and its JSON body, which RequestNG printed whole (the
 	// URL, the status and the raw JSON) before it exited. Post hands the
-	// body back, so the daemon's ErrorMsg is what the operator reads.
+	// body back, so the daemon's ErrorMsg is what the operator reads, and
+	// tries each of api.Addresses in turn as RequestNG does.
 	body, err := json.Marshal(data)
 	if err != nil {
 		return nil, err

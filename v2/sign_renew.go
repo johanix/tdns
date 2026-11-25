@@ -56,7 +56,9 @@ func (zd *ZoneData) RenewZoneSignatures(ctx context.Context, kdb *KeyDB) (int, e
 	// taken below.
 	dak, err := zd.EnsureActiveDnssecKeys(kdb, false)
 	if err != nil {
-		lgSigner.Error("RenewZoneSignatures: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
+		if !isNoKeysForRemovedZone(err) {
+			lgSigner.Error("RenewZoneSignatures: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
+		}
 		return 0, err
 	}
 

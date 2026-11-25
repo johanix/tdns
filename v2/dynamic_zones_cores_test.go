@@ -2,7 +2,12 @@ package tdns
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // newTestConfigForCores builds a minimal Config with a drained RefreshZoneCh so
@@ -193,5 +198,446 @@ func TestModifyDynamicZone_ReplacesAndBumps(t *testing.T) {
 	Zones.Set("static2.example.", static)
 	if _, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{Name: "static2.example", Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}); err == nil {
 		t.Error("expected refusal to modify a non-API-managed zone")
+	}
+}
+
+// A rewrite of the dynamic config that fails only to sync the directory
+// after the rename has taken effect: the file in place names the new zone
+// and its TSIG key. The add and the modify stand, instead of rolling back
+// the zone, the key and a primary's zone file under a file that names
+// them. A failure before the rename still rolls back.
+func TestAnUnsyncedConfigRewriteKeepsTheAddAndTheModify(t *testing.T) {
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, ch := newTestConfigForCores(t)
+	conf.Internal.TsigKeyStore = NewTsigKeyStore()
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	conf.DynamicZones.Dynamic.Storage = "persistent"
+	withTestTemplates(t, map[string]ZoneConf{"dyn-test": dynPrimaryTestTemplate(dir)})
+	// Every sync the writer asks for is recorded: each add and modify below
+	// reaches the sync, so its failure is the one under test, and a write
+	// that fails before the rename never gets that far.
+	var syncs []string
+	prev := syncDynamicConfigDir
+	syncDynamicConfigDir = func(dir string) error {
+		syncs = append(syncs, dir)
+		return errors.New("sync refused by the test")
+	}
+	t.Cleanup(func() { syncDynamicConfigDir = prev })
+	wantSyncs := func(n int, what string) {
+		t.Helper()
+		if len(syncs) != n {
+			t.Errorf("after %s the directory sync was asked for %d times, want %d", what, len(syncs), n)
+		}
+		for _, d := range syncs {
+			if d != dir {
+				t.Errorf("the directory sync was asked for %q, want the config file's directory %q", d, dir)
+			}
+		}
+	}
+
+	persisted := func(zone string) *ZoneConf {
+		t.Helper()
+		cf, err := conf.loadDynamicConfigFile()
+		if err != nil {
+			t.Fatalf("read the dynamic config: %v", err)
+		}
+		for i := range cf.Zones {
+			if cf.Zones[i].Name == zone {
+				return &cf.Zones[i]
+			}
+		}
+		return nil
+	}
+
+	const sec, key = "unsynced.example.", "unsynced-key."
+	if _, err := conf.ProvisionDynamicZone(context.Background(), DynamicZoneInput{
+		Name: sec, Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
+		TsigName: key, TsigSecret: b64Secret16,
+	}, true); err != nil {
+		t.Fatalf("add with an unsynced rewrite: %v", err)
+	}
+	<-ch
+	added, ok := Zones.Get(sec)
+	if !ok {
+		t.Fatal("the add was rolled back")
+	}
+	if !conf.Internal.TsigKeyStore.Has(key) {
+		t.Error("the add's TSIG key was rolled back")
+	}
+	if persisted(sec) == nil {
+		t.Fatal("the dynamic config does not name the added zone")
+	}
+	wantSyncs(1, "the add")
+
+	if _, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{
+		Name: sec, Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.9:53", Key: key}},
+	}); err != nil {
+		t.Fatalf("modify with an unsynced rewrite: %v", err)
+	}
+	<-ch
+	modified, _ := Zones.Get(sec)
+	if modified == added || firstUpstreamAddr(modified.Upstreams) != "192.0.2.9:53" {
+		t.Errorf("the modify was rolled back: upstream %q", firstUpstreamAddr(modified.Upstreams))
+	}
+	if zc := persisted(sec); zc == nil || len(zc.Primaries) != 1 || zc.Primaries[0].Addr != "192.0.2.9:53" {
+		t.Errorf("the dynamic config does not hold the modify: %+v", zc)
+	}
+	wantSyncs(2, "the modify")
+
+	const prim = "unsynced-primary.example."
+	if _, err := conf.ProvisionDynamicZone(context.Background(), DynamicZoneInput{
+		Name: prim, Type: Primary, Template: "dyn-test",
+	}, true); err != nil {
+		t.Fatalf("primary add with an unsynced rewrite: %v", err)
+	}
+	<-ch
+	if _, ok := Zones.Get(prim); !ok {
+		t.Error("the primary add was rolled back")
+	}
+	if _, err := os.Stat(filepath.Join(dir, prim+"zone")); err != nil {
+		t.Errorf("the primary's zone file was removed: %v", err)
+	}
+	if persisted(prim) == nil {
+		t.Error("the dynamic config does not name the added primary")
+	}
+	wantSyncs(3, "the primary add")
+
+	// Before the rename: the rewrite did not take effect, and the modify
+	// is rolled back as before.
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "missing", "dynamic.yaml")
+	if _, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{
+		Name: sec, Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.10:53", Key: key}},
+	}); err == nil {
+		t.Fatal("a modify whose rewrite failed before the rename succeeded")
+	}
+	if cur, _ := Zones.Get(sec); cur != modified {
+		t.Error("a modify whose rewrite failed before the rename was not rolled back")
+	}
+	wantSyncs(3, "the modify that failed before the rename")
+}
+
+// WriteDynamicConfigFile takes its snapshot of the zones under the lock the
+// write holds. A writer that took its snapshot first and then waited for
+// the lock would write a zone back that a delete had written out of the
+// file in the meantime, and the delete then deletes the zone's keys: a
+// restart would bring the zone back without them.
+func TestADynamicConfigWriteNeverPutsBackAnOlderSnapshot(t *testing.T) {
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, _ := newTestConfigForCores(t)
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	conf.DynamicZones.Dynamic.Storage = "persistent"
+	const name = "snapshot.example."
+	zd := &ZoneData{ZoneName: name, ZoneType: Secondary, ZoneStore: MapZone,
+		Options:       map[ZoneOption]bool{OptApiManagedZone: true},
+		PrimariesConf: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}
+	Zones.Set(name, zd)
+
+	// A delete's write, holding the lock: the zone leaves Zones and the
+	// file. Meanwhile another writer starts, and has to wait. It says when
+	// it is about to take the lock: a writer that took its snapshot before
+	// that point holds one with the zone in it.
+	atLock := make(chan struct{})
+	testHookDynamicConfigWriteLocking = func() { close(atLock) }
+	t.Cleanup(func() { testHookDynamicConfigWriteLocking = nil })
+	dynamicConfigMutex.Lock()
+	done := make(chan error, 1)
+	go func() { done <- conf.WriteDynamicConfigFile() }()
+	<-atLock
+	Zones.Remove(name)
+	err := conf.writeDynamicConfigFileLocked(conf.getDynamicZonesFromZonesMap())
+	dynamicConfigMutex.Unlock()
+	if err != nil {
+		t.Fatalf("the delete's write: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("the waiting writer: %v", err)
+	}
+
+	cf, err := conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, z := range cf.Zones {
+		if z.Name == name {
+			t.Fatal("a writer that waited for the lock put the deleted zone back in the dynamic config")
+		}
+	}
+}
+
+// The tests below are part A's (#1187) for repersistDynamicConfig, with a
+// zone's primary in place of its API owner, which this tree does not have.
+
+// repersistTestConf is a config whose dynamic config file holds one zone,
+// dyn.example., with the primary given; primaryOnDisk reads it back.
+func repersistTestConf(t *testing.T) (conf *Config, write func(extra string), primaryOnDisk func() string) {
+	t.Helper()
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, _ = newTestConfigForCores(t)
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic-zones.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	write = func(extra string) {
+		t.Helper()
+		file := "zones:\n  - name: dyn.example.\n    type: secondary\n    store: map\n    apimanaged: true\n" +
+			"    primaries:\n      - addr: 198.51.100.1:53\n        key: NOKEY\n" + extra
+		if err := os.WriteFile(conf.DynamicZones.ConfigFile, []byte(file), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	primaryOnDisk = func() string {
+		t.Helper()
+		cf, err := conf.loadDynamicConfigFile()
+		if err != nil || len(cf.Zones) != 1 || len(cf.Zones[0].Primaries) != 1 {
+			t.Fatalf("reading the dynamic config: %v, %+v", err, cf)
+		}
+		return cf.Zones[0].Primaries[0].Addr
+	}
+	return conf, write, primaryOnDisk
+}
+
+// withPrimary is zones with the first zone's primary replaced, as a later
+// write of the zone would have it.
+func withPrimary(zones []ZoneConf, addr string) []ZoneConf {
+	out := append([]ZoneConf(nil), zones...)
+	out[0].Primaries = []PeerConf{{Addr: addr, Key: NOKEY}}
+	return out
+}
+
+// The load's one rewrite in canonical form (repersistDynamicConfig) writes
+// the file as it read it. The API serves while the zones load, so a write in
+// between (an add, a modify, a delete) must win: the load's rewrite is
+// skipped, not written over it. Without a write in between, it is written.
+func TestTheLoadsRewriteNeverOverwritesALaterWrite(t *testing.T) {
+	conf, write, primaryOnDisk := repersistTestConf(t)
+	write("")
+
+	read, err := conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conf.writeDynamicConfigFile(withPrimary(read.Zones, "198.51.100.9:53")); err != nil {
+		t.Fatal(err)
+	}
+	if wrote, err := conf.repersistDynamicConfig(read); err != nil || wrote {
+		t.Fatalf("the load's rewrite after a later write: wrote=%v err=%v, want skipped", wrote, err)
+	}
+	if got := primaryOnDisk(); got != "198.51.100.9:53" {
+		t.Errorf("primary on disk %q, want the later write's", got)
+	}
+
+	// Nothing written in between: the rewrite goes ahead.
+	read, err = conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read.Zones = withPrimary(read.Zones, "198.51.100.7:53")
+	if wrote, err := conf.repersistDynamicConfig(read); err != nil || !wrote {
+		t.Fatalf("the load's rewrite with no write in between: wrote=%v err=%v, want written", wrote, err)
+	}
+	if got := primaryOnDisk(); got != "198.51.100.7:53" {
+		t.Errorf("primary on disk %q, want the rewrite's", got)
+	}
+}
+
+// The same under concurrency: a write started after the load read the file
+// races the load's rewrite. Whichever takes the lock first, the file ends
+// with the later write: the rewrite either runs first and is overwritten,
+// or runs second and sees the newer write and skips.
+func TestTheLoadsRewriteRacesALaterWrite(t *testing.T) {
+	conf, write, primaryOnDisk := repersistTestConf(t)
+	for i := range 50 {
+		write("")
+		read, err := conf.loadDynamicConfigFile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		later := withPrimary(read.Zones, "198.51.100.9:53")
+		done := make(chan error, 2)
+		go func() { done <- conf.writeDynamicConfigFile(later) }()
+		go func() { _, err := conf.repersistDynamicConfig(read); done <- err }()
+		for range 2 {
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		}
+		if got := primaryOnDisk(); got != "198.51.100.9:53" {
+			t.Fatalf("round %d: the file ends with primary %q, want the later write's", i, got)
+		}
+	}
+}
+
+// The legacy keys: migration rewrites the file from the load's snapshot
+// too: a write made since wins (it already dropped the keys: block), the
+// keys are still migrated, and a load whose own migration wrote the file
+// can still normalize it afterwards.
+func TestTheTsigMigrationNeverOverwritesALaterWrite(t *testing.T) {
+	conf, write, primaryOnDisk := repersistTestConf(t)
+	conf.Internal.KeyDB = newTestKeyDB(t)
+	conf.Internal.TsigKeyStore = NewTsigKeyStore()
+	keys := "keys:\n  tsig:\n    - name: legacy.\n      algorithm: hmac-sha256\n      secret: " + b64Secret16 + "\n"
+	fileHasKeys := func() bool {
+		t.Helper()
+		data, err := os.ReadFile(conf.DynamicZones.ConfigFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.Contains(string(data), "\nkeys:")
+	}
+
+	write(keys)
+	read, err := conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conf.writeDynamicConfigFile(withPrimary(read.Zones, "198.51.100.9:53")); err != nil {
+		t.Fatal(err)
+	}
+	if err := conf.migrateDynamicConfigTsigKeys(read); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if got := primaryOnDisk(); got != "198.51.100.9:53" || fileHasKeys() {
+		t.Errorf("after a migration that followed a later write: primary %q, keys: block %v", got, fileHasKeys())
+	}
+	if !conf.Internal.TsigKeyStore.Has("legacy.") {
+		t.Error("the legacy key was not migrated")
+	}
+
+	// No write in between: the migration writes, and the load's own
+	// normalization after it still goes ahead.
+	write(keys)
+	read, err = conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conf.migrateDynamicConfigTsigKeys(read); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if fileHasKeys() {
+		t.Error("the migration did not drop the keys: block")
+	}
+	read.Zones = withPrimary(read.Zones, "198.51.100.7:53")
+	if wrote, err := conf.repersistDynamicConfig(read); err != nil || !wrote {
+		t.Fatalf("the load's normalization after its own migration: wrote=%v err=%v, want written", wrote, err)
+	}
+	if got := primaryOnDisk(); got != "198.51.100.7:53" {
+		t.Errorf("primary %q after the normalization, want the normalization's", got)
+	}
+}
+
+// The load's own rewrite renamed into place but not synced still counts as
+// its own write: its normalization after the migration goes ahead. And a
+// write by anyone else that was renamed into place but not synced counts
+// as a write: the load's rewrite is skipped.
+func TestAnUnsyncedWriteCountsForTheLoadsRewrite(t *testing.T) {
+	conf, write, primaryOnDisk := repersistTestConf(t)
+	prev := syncDynamicConfigDir
+	syncDynamicConfigDir = func(string) error { return errors.New("sync refused by the test") }
+	t.Cleanup(func() { syncDynamicConfigDir = prev })
+
+	write("")
+	read, err := conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conf.writeDynamicConfigFile(withPrimary(read.Zones, "198.51.100.9:53")); !errors.Is(err, errDynamicConfigNotSynced) {
+		t.Fatalf("the later write: %v, want it in place but not synced", err)
+	}
+	if wrote, _ := conf.repersistDynamicConfig(read); wrote {
+		t.Error("the load's rewrite went over a later write that was in place but not synced")
+	}
+	if got := primaryOnDisk(); got != "198.51.100.9:53" {
+		t.Errorf("primary on disk %q, want the later write's", got)
+	}
+
+	write("")
+	read, err = conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wrote, err := conf.repersistDynamicConfig(read); !wrote || !errors.Is(err, errDynamicConfigNotSynced) {
+		t.Fatalf("the load's first rewrite: wrote=%v err=%v", wrote, err)
+	}
+	read.Zones = withPrimary(read.Zones, "198.51.100.7:53")
+	if wrote, _ := conf.repersistDynamicConfig(read); !wrote {
+		t.Error("the load's second rewrite was skipped after its own unsynced one")
+	}
+	if got := primaryOnDisk(); got != "198.51.100.7:53" {
+		t.Errorf("primary on disk %q, want the load's second rewrite's", got)
+	}
+}
+
+// CodeRabbit's case: the management API serves while the dynamic zones
+// load, and the load rewrites the file from what it read when it needs
+// to (a legacy store token here). A delete of a zone already loaded that
+// comes before that rewrite has deleted the zone's keys; the rewrite must
+// not put the zone's entry back, or a restart brings it back without them.
+// The load is held at its enqueue of the next zone while the delete runs.
+func TestTheLoadsRewriteDoesNotRestoreAZoneDeletedDuringTheLoad(t *testing.T) {
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, _ := newTestConfigForCores(t)
+	ch := make(chan ZoneRefresher) // unbuffered: each enqueue waits for the test
+	conf.Internal.RefreshZoneCh = ch
+	kdb := newTestKeyDB(t)
+	conf.Internal.KeyDB = kdb
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic-zones.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	conf.DynamicZones.Dynamic.Storage = "persistent"
+	const first, second = "first.load.example.", "second.load.example."
+	entry := func(name string) string {
+		return "  - name: " + name + "\n    type: secondary\n    store: MapZone\n    apimanaged: true\n" +
+			"    primaries:\n      - addr: 198.51.100.1:53\n        key: NOKEY\n"
+	}
+	if err := os.WriteFile(conf.DynamicZones.ConfigFile, []byte("zones:\n"+entry(first)+entry(second)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fixtureActivePair(t, kdb, first)
+
+	loaded := make(chan error, 1)
+	go func() { loaded <- conf.LoadDynamicZoneFiles(context.Background()) }()
+	register := func(zr ZoneRefresher) {
+		Zones.Set(zr.Name, &ZoneData{ZoneName: zr.Name, ZoneType: Secondary, ZoneStore: MapZone, KeyDB: kdb,
+			Options: zr.Options, PrimariesConf: zr.PrimariesConf})
+	}
+	recv := func() ZoneRefresher {
+		t.Helper()
+		select {
+		case zr := <-ch:
+			return zr
+		case <-time.After(10 * time.Second):
+			t.Fatal("the load did not enqueue a zone")
+		}
+		return ZoneRefresher{}
+	}
+
+	// The first zone loads; the load then waits at the second's enqueue.
+	register(recv())
+	if _, err := conf.RemoveDynamicZone(first, false); err != nil {
+		t.Fatalf("delete during the load: %v", err)
+	}
+	if n := dnssecKeyCount(t, kdb, first); n != 0 {
+		t.Fatalf("the delete left %d DNSSEC keys", n)
+	}
+	register(recv())
+	if err := <-loaded; err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	cf, err := conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, z := range cf.Zones {
+		if z.Name == first {
+			t.Fatal("the load's rewrite put back the entry of a zone deleted during the load")
+		}
 	}
 }

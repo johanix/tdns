@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -275,5 +276,66 @@ func TestASignalPassOnAStaleInstanceRecordsNothing(t *testing.T) {
 	}
 	if n := storedSignalRows(t, kdb, z); n != 0 {
 		t.Fatalf("the pass on an instance of the removed zone recorded a stored signal (%d rows)", n)
+	}
+}
+
+// A delete whose rewrite of the dynamic config took effect but could not be
+// synced to disk is a removal a crash could still undo. It is reported as
+// such, not as a failed rewrite ("will reappear on restart"): the zone is
+// out of Zones and out of the file, and a retry would find no zone. The
+// keys are kept until the removal is on disk, and the report offers no
+// command to delete them before that; so is the record of the signals its
+// zone file holds, for the zone a crash would bring back. The configured
+// zone set follows the file, which no longer names the zone.
+func TestADeleteNotSyncedToDiskIsReportedWithItsKeysKept(t *testing.T) {
+	conf, kdb, zd := removalFixture(t)
+	z := zd.ZoneName
+	fixtureActivePair(t, kdb, z)
+	generateSig0Key(t, kdb, z, Sig0StateActive)
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	prev := syncDynamicConfigDir
+	syncDynamicConfigDir = func(string) error { return errors.New("sync refused by the test") }
+	t.Cleanup(func() { syncDynamicConfigDir = prev })
+	signalConfiguredZones.Store(&map[string]bool{z: true})
+	t.Cleanup(func() { signalConfiguredZones.Store(nil) })
+
+	r, err := conf.RemoveDynamicZone(z, false)
+	if err != nil {
+		t.Fatalf("a delete whose removal is not on disk returned an error, not a report: %v", err)
+	}
+	if r == nil || r.NotSynced == "" {
+		t.Fatalf("the report does not say the removal is not on disk: %+v", r)
+	}
+	if _, back := Zones.Get(z); back {
+		t.Error("the zone is still in Zones")
+	}
+	if n := countRows(t, kdb, "DnssecKeyStore", "zonename", z); n != 2 {
+		t.Errorf("%d DNSSEC keys left, want the 2 kept", n)
+	}
+	if n := countRows(t, kdb, "Sig0KeyStore", "zonename", z); n != 1 {
+		t.Errorf("%d SIG(0) keys left, want the 1 kept", n)
+	}
+	if n := storedSignalRows(t, kdb, z); n != 1 {
+		t.Errorf("the zone has %d stored-signal rows, want its record put back", n)
+	}
+	msg := r.Msg()
+	for _, want := range []string{
+		"zone " + z + " deleted, but a crash could bring it back",
+		"must stay until the removal is on disk",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the report lacks %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "keystore ") {
+		t.Errorf("the report offers to delete the keys before the removal is on disk:\n%s", msg)
+	}
+	if strings.Contains(msg, "reappear") || len(r.Warnings()) != 0 {
+		t.Errorf("the report overstates it: %s %q", msg, r.Warnings())
+	}
+	if names := signalConfiguredZones.Load(); names == nil || (*names)[z] {
+		t.Error("the configured zone set still counts the zone the file no longer names")
 	}
 }

@@ -765,3 +765,69 @@ func TestSig0KeyMgmtBulkImportHandsBackTheCacheDelta(t *testing.T) {
 		}
 	})
 }
+
+// A SIG(0) bulk import mirrors into the TrustStore the record its keystore
+// write stored. Two offers of one zone and key ID with different public
+// keys, without force: the first is imported, the second is a conflict,
+// and the TrustStore gets the first, as the keystore does. With force the
+// second replaces the first in both.
+func TestSig0BulkImportMirrorsTheStoredKey(t *testing.T) {
+	const zone = "child.dnslab."
+	seen := map[uint16]BulkSig0Key{}
+	var first, second BulkSig0Key
+	for i := 0; ; i++ {
+		if i == 20000 {
+			t.Skip("no two test keys with the same key tag")
+		}
+		k := testBulkSig0Key(t, zone)
+		if prev, ok := seen[k.Keyid]; ok {
+			first, second = prev, k
+			break
+		}
+		seen[k.Keyid] = k
+	}
+	pub := func(rr string) string {
+		t.Helper()
+		parsed, err := dns.NewRR(rr)
+		if err != nil || parsed == nil {
+			t.Fatalf("parsing %q: %v", rr, err)
+		}
+		return parsed.(*dns.KEY).PublicKey
+	}
+	kdb := newTestKeyDB(t)
+	keystoreKey := func() string {
+		var keyrr string
+		if err := kdb.DB.QueryRow(`SELECT keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`, zone, int(first.Keyid)).Scan(&keyrr); err != nil {
+			t.Fatalf("the keystore row: %v", err)
+		}
+		return pub(keyrr)
+	}
+	trustKey := func() string {
+		got, found := trustStoreEntry(t, kdb, zone, first.Keyid)
+		if !found {
+			t.Fatal("no TrustStore entry")
+		}
+		return pub(got.Keystr)
+	}
+
+	resp, err := kdb.Sig0KeyMgmt(nil, KeystorePost{Command: "sig0-mgmt", SubCommand: "bulk-import",
+		BulkSig0Keys: []BulkSig0Key{first, second}})
+	if err != nil {
+		t.Fatalf("bulk-import: %v", err)
+	}
+	if len(resp.BulkDispositions) != 2 || resp.BulkDispositions[0].Status != BulkStatusImported || resp.BulkDispositions[1].Status != BulkStatusConflict {
+		t.Fatalf("dispositions %+v, want imported then conflict", resp.BulkDispositions)
+	}
+	if ks, ts := keystoreKey(), trustKey(); ks != pub(first.KeyRR) || ts != ks {
+		t.Errorf("without force: keystore has %s, TrustStore %s; want both the first offer's %s", ks, ts, pub(first.KeyRR))
+	}
+
+	resp, err = kdb.Sig0KeyMgmt(nil, KeystorePost{Command: "sig0-mgmt", SubCommand: "bulk-import", Force: true,
+		BulkSig0Keys: []BulkSig0Key{second}})
+	if err != nil || len(resp.BulkDispositions) != 1 || resp.BulkDispositions[0].Status != BulkStatusReplaced {
+		t.Fatalf("forced bulk-import: %v %+v, want replaced", err, resp)
+	}
+	if ks, ts := keystoreKey(), trustKey(); ks != pub(second.KeyRR) || ts != ks {
+		t.Errorf("with force: keystore has %s, TrustStore %s; want both the second offer's %s", ks, ts, pub(second.KeyRR))
+	}
+}

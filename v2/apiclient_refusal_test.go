@@ -2,12 +2,14 @@ package tdns
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -124,5 +126,64 @@ func TestDaemonNotRunning(t *testing.T) {
 
 	if daemonNotRunning(nil) {
 		t.Error("no error counted as not running")
+	}
+}
+
+// Post, Get, Put and Delete try each of api.Addresses in turn, as RequestNG
+// does: an address that does not answer is skipped, and the first reply is
+// the answer, a refusal included (the next address is not asked). With no
+// Addresses the request goes to BaseUrl as it is.
+func TestPostTriesEachAddress(t *testing.T) {
+	var hits atomic.Int32
+	live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Path == "/api/refused" {
+			http.Error(w, adminOnly, http.StatusForbidden)
+			return
+		}
+		json.NewEncoder(w).Encode(CommandResponse{Status: "ok", Msg: r.Method + " " + r.URL.Path})
+	}))
+	defer live.Close()
+	liveAddr := strings.TrimPrefix(live.URL, "http://")
+	gone := httptest.NewServer(http.NotFoundHandler())
+	dead := strings.TrimPrefix(gone.URL, "http://")
+	gone.Close()
+
+	api := &ApiClient{BaseUrl: "http://" + dead + "/api", Addresses: []string{dead, liveAddr}, AuthMethod: "none", Client: &http.Client{}}
+	for _, tc := range []struct {
+		method string
+		call   func() (int, []byte, error)
+	}{
+		{"POST", func() (int, []byte, error) { return api.Post("/catalog", []byte("{}")) }},
+		{"GET", func() (int, []byte, error) { return api.Get("/catalog") }},
+		{"PUT", func() (int, []byte, error) { return api.Put("/catalog", []byte("{}")) }},
+		{"DELETE", func() (int, []byte, error) { return api.Delete("/catalog") }},
+	} {
+		status, buf, err := tc.call()
+		var cr CommandResponse
+		if err != nil || status != http.StatusOK || json.Unmarshal(buf, &cr) != nil || cr.Msg != tc.method+" /api/catalog" {
+			t.Errorf("%s with a dead first address: status %d, err %v, body %q; want the live address's answer", tc.method, status, err, buf)
+		}
+	}
+
+	// A refusal is an answer: the address after it is not asked.
+	hits.Store(0)
+	refusing := &ApiClient{BaseUrl: live.URL + "/api", Addresses: []string{liveAddr, liveAddr}, AuthMethod: "none", Client: &http.Client{}}
+	status, _, err := refusing.Post("/refused", []byte("{}"))
+	var ref *ApiRefusal
+	if status != http.StatusForbidden || !errors.As(err, &ref) || hits.Load() != 1 {
+		t.Errorf("a refusal: status %d, err %v, %d request(s); want one 403 refusal", status, err, hits.Load())
+	}
+
+	// No address answers: the error says so, and which were tried.
+	allDead := &ApiClient{BaseUrl: "http://" + dead + "/api", Addresses: []string{dead, dead}, AuthMethod: "none", Client: &http.Client{}}
+	if _, _, err := allDead.Post("/catalog", []byte("{}")); err == nil || !daemonNotRunning(err) || !strings.Contains(err.Error(), "tried "+dead+", "+dead) {
+		t.Errorf("every address dead: %v, want a refused connection naming both", err)
+	}
+
+	// No Addresses: BaseUrl.
+	plain := &ApiClient{BaseUrl: live.URL + "/api", AuthMethod: "none", Client: &http.Client{}}
+	if status, _, err := plain.Post("/catalog", []byte("{}")); err != nil || status != http.StatusOK {
+		t.Errorf("no Addresses: status %d, err %v", status, err)
 	}
 }

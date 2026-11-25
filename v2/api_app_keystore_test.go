@@ -7,6 +7,8 @@ package tdns
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"go/ast"
 	"log/slog"
 	"net/http"
@@ -250,6 +252,18 @@ func keyZones(resp KeystoreResponse) (sig0, dnssec []string) {
 	return sig0, dnssec
 }
 
+// keyCount is the number of key rows of table (DnssecKeyStore,
+// Sig0KeyStore) stored under zone. A failed read fails the test, so that a
+// count of zero is a count.
+func keyCount(t *testing.T, table, zone string) int {
+	t.Helper()
+	var n int
+	if err := Conf.Internal.KeyDB.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE zonename=?`, zone).Scan(&n); err != nil {
+		t.Fatalf("counting the keys of %s in %s: %v", zone, table, err)
+	}
+	return n
+}
+
 func zoneKeyID(t *testing.T, kind, zone string) uint16 {
 	t.Helper()
 	q := `SELECT keyid FROM DnssecKeyStore WHERE zonename=?`
@@ -337,8 +351,9 @@ func captureApiLog(t *testing.T) *bytes.Buffer {
 // export: the private keys of an application's own zones, DNSSEC included
 // (design 4.6, decision 3), each export logged with the client and the key
 // (R9). Another's key, an operator's, the config's and a key of a zone not
-// served here are refused, and another's key reads like no key at all. A
-// TSIG key of another API owner reads like one that does not exist.
+// served here are not handed out, and read like a key of its own zone that
+// does not exist: one status and one answer, but for the zone and key ID it
+// names. A TSIG key of another API owner reads like one that does not exist.
 func TestAppKeystoreExportsOwnKeysOnly(t *testing.T) {
 	z := keystoreScope(t)
 	logbuf := captureApiLog(t)
@@ -355,18 +370,45 @@ func TestAppKeystoreExportsOwnKeysOnly(t *testing.T) {
 				t.Errorf("%s export of the %s zone's key is not logged with %q:\n%s", kind, zk, want, log)
 			}
 		}
-		for _, zk := range []string{"other", "api", "config", "gone"} {
-			id := zoneKeyID(t, kind, z[zk])
-			resp, body := postKeystore(t, KeystorePost{Command: cmd, SubCommand: "export", Zone: z[zk], Keyid: id}, &appCaller)
-			if !resp.Error || !refusedForApp(resp.ErrorMsg) || strings.Contains(body, "PRIVATE KEY") {
-				t.Errorf("%s export of the %s zone's key: %q, want an API owner refusal", kind, zk, resp.ErrorMsg)
+		// The answer to each, with its zone and key ID taken out.
+		answer := func(zone string, keyid uint16) string {
+			t.Helper()
+			rec := postAs(t, Conf.Internal.KeyDB.APIkeystore(&Conf), http.MethodPost, "/api/v1/keystore",
+				KeystorePost{Command: cmd, SubCommand: "export", Zone: zone, Keyid: keyid}, &appCaller)
+			var resp KeystoreResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decoding response: %v\n%s", err, rec.Body.String())
 			}
+			if !resp.Error || strings.Contains(rec.Body.String(), "PRIVATE KEY") {
+				t.Errorf("%s export of %s keyid %d: %q, want no key handed out", kind, zone, keyid, resp.ErrorMsg)
+			}
+			msg := strings.ReplaceAll(resp.ErrorMsg, zone, "ZONE")
+			msg = strings.ReplaceAll(msg, itoa(int(keyid)), "KEYID")
+			return fmt.Sprintf("%d %s %q", rec.Code, msg, resp.Msg)
 		}
-		other, _ := postKeystore(t, KeystorePost{Command: cmd, SubCommand: "export", Zone: z["other"], Keyid: zoneKeyID(t, kind, z["other"])}, &appCaller)
-		missing, _ := postKeystore(t, KeystorePost{Command: cmd, SubCommand: "export", Zone: z["missing"], Keyid: 4711}, &appCaller)
-		gone, _ := postKeystore(t, KeystorePost{Command: cmd, SubCommand: "export", Zone: z["gone"], Keyid: zoneKeyID(t, kind, z["gone"])}, &appCaller)
-		if !sameModuloName(other.ErrorMsg, z["other"], missing.ErrorMsg, z["missing"]) || !sameModuloName(gone.ErrorMsg, z["gone"], missing.ErrorMsg, z["missing"]) {
-			t.Errorf("%s export: another's key %q, a missing one %q, a kept one %q: an application can tell them apart", kind, other.ErrorMsg, missing.ErrorMsg, gone.ErrorMsg)
+		// The operator's record: one Info line per refused export.
+		const refusedLine = `msg="keystore: private key export refused, answered not found"`
+		logbuf.Reset()
+		want := answer(z["own"], 4711) // no such key in its own zone
+		if !strings.Contains(want, "not found") {
+			t.Errorf("%s export of a missing key of its own zone: %s", kind, want)
+		}
+		if strings.Contains(logbuf.String(), refusedLine) {
+			t.Errorf("%s export of a missing key of its own zone is logged as refused:\n%s", kind, logbuf.String())
+		}
+		for _, zk := range []string{"other", "api", "config", "gone", "missing"} {
+			id := uint16(4711)
+			if zk != "missing" {
+				id = zoneKeyID(t, kind, z[zk])
+			}
+			logbuf.Reset()
+			if got := answer(z[zk], id); got != want {
+				t.Errorf("%s export of the %s zone's key: %s, but a missing key of its own zone: %s", kind, zk, got, want)
+			}
+			fields := "client=" + appCaller.Name + " via=" + appCaller.Via + " app=true kind=" + kind + " zone=" + z[zk] + " keyid=" + itoa(int(id))
+			if log := logbuf.String(); strings.Count(log, refusedLine) != 1 || !strings.Contains(log, fields) {
+				t.Errorf("%s export of the %s zone's key: want one refused line with %q, log:\n%s", kind, zk, fields, log)
+			}
 		}
 		if resp, _ := postKeystore(t, KeystorePost{Command: cmd, SubCommand: "export", Zone: z["other"], Keyid: zoneKeyID(t, kind, z["other"])}, &socketCaller); resp.Error {
 			t.Errorf("%s export on the socket: %s", kind, resp.ErrorMsg)
@@ -445,11 +487,7 @@ func TestAppKeystoreBulkExportReturnsOwnKeysOnly(t *testing.T) {
 // config's or a zone not served, nothing is added.
 func TestAppKeystoreAddsKeysToOwnZonesOnly(t *testing.T) {
 	z := keystoreScope(t)
-	count := func(table, zone string) int {
-		var n int
-		Conf.Internal.KeyDB.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE zonename=?`, zone).Scan(&n)
-		return n
-	}
+	count := func(table, zone string) int { return keyCount(t, table, zone) }
 	for _, kind := range []string{"other", "api", "config", "gone", "missing"} {
 		zone := z[kind]
 		before := count("Sig0KeyStore", zone) + count("DnssecKeyStore", zone)
@@ -496,8 +534,8 @@ func TestAppKeystoreAddsKeysToOwnZonesOnly(t *testing.T) {
 }
 
 // setstate, setparentstate, rollover and delete act on the application's
-// own keys only. A SIG(0) delete names its zone twice (Zone to look the
-// key up, Keyname to delete it): both must be the application's.
+// own keys only. A SIG(0) delete may name its zone twice (Zone and
+// Keyname): both must be the application's.
 func TestAppKeystoreKeyCommandsOnOwnKeysOnly(t *testing.T) {
 	z := keystoreScope(t)
 	sig0 := func(sub, kind string) KeystorePost {
@@ -524,19 +562,22 @@ func TestAppKeystoreKeyCommandsOnOwnKeysOnly(t *testing.T) {
 		}
 	}
 
-	// The key looked up in the own zone, the one deleted in another's.
+	// Zone naming the own zone and Keyname another's: refused, as two
+	// names for one key (keyWriteZone), and neither key goes.
 	split := sig0("delete", "own")
 	split.Keyname = z["other"]
-	if resp, _ := postKeystore(t, split, &appCaller); !resp.Error || !refusedForApp(resp.ErrorMsg) {
+	ownID, otherID := zoneKeyID(t, "sig0", z["own"]), zoneKeyID(t, "sig0", z["other"])
+	if resp, _ := postKeystore(t, split, &appCaller); !resp.Error || !strings.Contains(resp.ErrorMsg, "but the request names zone") {
 		t.Errorf("sig0 delete with Keyname in another's zone: %q, want refused", resp.ErrorMsg)
 	}
-	if zoneKeyID(t, "sig0", z["other"]) == 0 {
-		t.Error("the other zone's SIG(0) key is gone")
+	// zoneKeyID fails the test when the row is gone.
+	if zoneKeyID(t, "sig0", z["own"]) != ownID || zoneKeyID(t, "sig0", z["other"]) != otherID {
+		t.Error("a refused sig0 delete changed a zone's SIG(0) key")
 	}
 
-	// The handler republishes and re-signs the zone a request names in Zone,
-	// while setstate checks the key by Keyname and add by its DNSKEY: an own
-	// key with someone else's Zone is refused, and nothing changes.
+	// setstate checks the key by Keyname and add by its DNSKEY, and the
+	// gate checks Zone: an own key with someone else's Zone is refused, and
+	// nothing changes.
 	for _, kind := range []string{"other", "api", "config", "gone"} {
 		mixed := dnssec("setstate", "own")
 		mixed.Zone = z[kind]
@@ -692,11 +733,29 @@ func TestAppKeystoreBulkImportMixedOwners(t *testing.T) {
 	z := keystoreScope(t)
 	kinds := []string{"own", "granted", "other", "api", "config", "gone", "missing"}
 	want := map[string]string{"own": BulkStatusImported, "granted": BulkStatusImported}
+	// Each offered key with a key tag other than keystoreScope's key in
+	// its zone: one with the same tag would replace that key (force), not
+	// add a second, which TestSig0BulkImportMirrorsTheStoredKey covers.
+	fixtureTag := func(table, zone string) (uint16, bool) {
+		var id int
+		err := Conf.Internal.KeyDB.QueryRow(`SELECT keyid FROM `+table+` WHERE zonename=?`, zone).Scan(&id)
+		return uint16(id), err == nil
+	}
 	var dks []BulkDnssecKey
 	var sks []BulkSig0Key
 	for _, kind := range kinds {
-		dks = append(dks, testDnssecKey(t, z[kind], 256))
-		sks = append(sks, testBulkSig0Key(t, z[kind]))
+		dtag, dok := fixtureTag("DnssecKeyStore", z[kind])
+		dk := testDnssecKey(t, z[kind], 256)
+		for dok && dk.Keyid == dtag {
+			dk = testDnssecKey(t, z[kind], 256)
+		}
+		stag, sok := fixtureTag("Sig0KeyStore", z[kind])
+		sk := testBulkSig0Key(t, z[kind])
+		for sok && sk.Keyid == stag {
+			sk = testBulkSig0Key(t, z[kind])
+		}
+		dks = append(dks, dk)
+		sks = append(sks, sk)
 	}
 	check := func(what string, resp KeystoreResponse) {
 		t.Helper()
@@ -726,8 +785,7 @@ func TestAppKeystoreBulkImportMixedOwners(t *testing.T) {
 	check("sig0 bulk-import", sresp)
 	for _, kind := range kinds {
 		for _, table := range []string{"DnssecKeyStore", "Sig0KeyStore"} {
-			var n int
-			Conf.Internal.KeyDB.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE zonename=?`, z[kind]).Scan(&n)
+			n := keyCount(t, table, z[kind])
 			wantN := 1 // keystoreScope's
 			switch kind {
 			case "own", "granted":
@@ -823,5 +881,560 @@ func TestAppKeystoreOverTheNetwork(t *testing.T) {
 	st, body := e.callSocket(t, "/api/v1/keystore", list)
 	if st != 200 || !strings.Contains(body, `"theirs."`) || !strings.Contains(body, `"ops."`) {
 		t.Errorf("the socket: %d %s, want every key", st, body)
+	}
+}
+
+// An export whose commit fails hands out nothing and logs nothing: the
+// answer is the error, without the private keys or TSIG secrets that were
+// read. One that commits logs each key it hands out, once.
+func TestKeystoreExportWhoseCommitFailsHandsOutNothing(t *testing.T) {
+	z := keystoreScope(t)
+	logbuf := captureApiLog(t)
+	exported := func() int {
+		return strings.Count(logbuf.String(), `msg="keystore: private key exported"`) +
+			strings.Count(logbuf.String(), `msg="keystore: TSIG secret exported"`)
+	}
+	exports := []KeystorePost{
+		{Command: "sig0-mgmt", SubCommand: "export", Zone: z["own"], Keyid: zoneKeyID(t, "sig0", z["own"])},
+		{Command: "dnssec-mgmt", SubCommand: "export", Zone: z["own"], Keyid: zoneKeyID(t, "dnssec", z["own"])},
+		{Command: "tsig-mgmt", SubCommand: "export", TsigKeyname: "mine."},
+		{Command: "sig0-mgmt", SubCommand: "bulk-export"},
+		{Command: "dnssec-mgmt", SubCommand: "bulk-export"},
+		{Command: "tsig-mgmt", SubCommand: "bulk-export"},
+	}
+
+	prev := commitKeystoreTx
+	t.Cleanup(func() { commitKeystoreTx = prev })
+	commitKeystoreTx = func(tx *Tx) error {
+		tx.Rollback()
+		return errors.New("injected commit failure")
+	}
+	for _, id := range []*ApiIdentity{&appCaller, &socketCaller} {
+		for _, kp := range exports {
+			resp, body := postKeystore(t, kp, id)
+			if !resp.Error || !strings.Contains(resp.ErrorMsg, "injected commit failure") {
+				t.Errorf("%s %s as %s, commit failing: %q, want the commit's error", kp.Command, kp.SubCommand, id.Name, resp.ErrorMsg)
+			}
+			if strings.Contains(body, "PRIVATE KEY") || strings.Contains(body, b64Secret16) {
+				t.Errorf("%s %s as %s, commit failing, hands out key material: %s", kp.Command, kp.SubCommand, id.Name, body)
+			}
+		}
+	}
+	if n := exported(); n != 0 {
+		t.Errorf("exports whose commit failed logged %d key(s) as exported:\n%s", n, logbuf.String())
+	}
+
+	commitKeystoreTx = prev
+	for _, kp := range exports {
+		logbuf.Reset()
+		resp, _ := postKeystore(t, kp, &socketCaller)
+		keys := len(resp.Sig0keys) + len(resp.Dnskeys) + len(resp.BulkSig0Keys) + len(resp.BulkDnssecKeys) + len(resp.BulkTsigKeys)
+		if resp.TsigExport != nil {
+			keys++
+		}
+		if resp.Error || keys == 0 || exported() != keys {
+			t.Errorf("%s %s: %q, %d key(s) handed out, %d logged; want one line per key",
+				kp.Command, kp.SubCommand, resp.ErrorMsg, keys, exported())
+		}
+	}
+}
+
+// A DNSSEC add or setstate changes the zone its key is written under (the
+// DNSKEY's owner name; Keyname), and that zone is republished and re-signed
+// after the commit, an add whatever state it gives the key. A request whose Zone names another zone is refused
+// before anything is written, for an operator too. An empty Zone is the
+// written zone's. A SIG(0) delete looks up and deletes one name.
+func TestKeystoreWriteZoneDecidesTheRepublish(t *testing.T) {
+	z := keystoreScope(t)
+	q := make(chan ResignRequest, 16)
+	prevQ := Conf.Internal.ResignQ
+	Conf.Internal.ResignQ = q
+	t.Cleanup(func() { Conf.Internal.ResignQ = prevQ })
+	resigned := func() []string {
+		var out []string
+		for {
+			select {
+			case r := <-q:
+				out = append(out, r.Zd.ZoneName)
+				r.Zd.resignQueued.Store(false)
+			default:
+				sort.Strings(out)
+				return out
+			}
+		}
+	}
+	gens := func() map[string]uint64 {
+		m := map[string]uint64{}
+		for _, kind := range []string{"own", "other", "api"} {
+			zd, _ := Zones.Get(z[kind])
+			m[kind] = zd.signingKeysGen.Load()
+		}
+		return m
+	}
+	republished := func(before map[string]uint64) []string {
+		var out []string
+		for kind, g := range gens() {
+			if g != before[kind] {
+				out = append(out, kind)
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	state := func(zone string) string {
+		var s string
+		Conf.Internal.KeyDB.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zone, zoneKeyID(t, "dnssec", zone)).Scan(&s)
+		return s
+	}
+	count := func(table, zone string) int { return keyCount(t, table, zone) }
+	setstate := func(keyname, zone, st string) KeystorePost {
+		return KeystorePost{Command: "dnssec-mgmt", SubCommand: "setstate", Keyname: keyname, Zone: zone,
+			Keyid: zoneKeyID(t, "dnssec", z["own"]), State: st}
+	}
+	resigned()
+
+	// setstate: the key in one zone, Zone naming another.
+	before := gens()
+	resp, _ := postKeystore(t, setstate(z["own"], z["api"], DnskeyStateRetired), &socketCaller)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "the key is in zone "+z["own"]+", but the request names zone "+z["api"]) {
+		t.Errorf("setstate of an own-zone key naming another zone: %q, want refused", resp.ErrorMsg)
+	}
+	if s := state(z["own"]); s == DnskeyStateRetired {
+		t.Error("the refused setstate changed the key's state")
+	}
+	if r, p := resigned(), republished(before); len(r)+len(p) != 0 {
+		t.Errorf("the refused setstate re-signed %v and republished %v", r, p)
+	}
+
+	// setstate with no Zone, and with Zone as the CLI sends it: the key's
+	// zone is republished and re-signed.
+	for _, zone := range []string{"", z["own"]} {
+		before = gens()
+		st := DnskeyStateRetired
+		if zone != "" {
+			st = DnskeyStateActive
+		}
+		if resp, _ := postKeystore(t, setstate(z["own"], zone, st), &socketCaller); resp.Error {
+			t.Fatalf("setstate with Zone %q: %s", zone, resp.ErrorMsg)
+		}
+		if s := state(z["own"]); s != st {
+			t.Errorf("setstate with Zone %q: the key is %q, want %q", zone, s, st)
+		}
+		if r, p := resigned(), republished(before); strings.Join(r, " ") != z["own"] || strings.Join(p, " ") != "own" {
+			t.Errorf("setstate with Zone %q re-signed %v and republished %v, want the own zone", zone, r, p)
+		}
+	}
+
+	// add: the DNSKEY's owner name is the zone.
+	addOf := func(zone string) KeystorePost {
+		dk := testDnssecKey(t, z["own"], 256)
+		dpkc, err := PrepareKeyCache(dk.PrivateKey, dk.KeyRR)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return KeystorePost{Command: "dnssec-mgmt", SubCommand: "add", Zone: zone, PrivateKeyCache: dpkc, State: DnskeyStateActive}
+	}
+	keys := count("DnssecKeyStore", z["own"])
+	before = gens()
+	resp, _ = postKeystore(t, addOf(z["other"]), &socketCaller)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "the DNSKEY's owner name is "+z["own"]+", but the request names zone "+z["other"]) {
+		t.Errorf("add of an own-zone DNSKEY naming another zone: %q, want refused", resp.ErrorMsg)
+	}
+	if n := count("DnssecKeyStore", z["own"]) + count("DnssecKeyStore", z["other"]); n != keys+1 {
+		t.Errorf("the refused add left %d key(s) in the two zones, had %d", n, keys+1)
+	}
+	if p := republished(before); len(p) != 0 {
+		t.Errorf("the refused add republished %v", p)
+	}
+	if r := resigned(); len(r) != 0 {
+		t.Errorf("the refused add re-signed %v", r)
+	}
+	for _, zone := range []string{"", z["own"]} {
+		before = gens()
+		if resp, _ := postKeystore(t, addOf(zone), &socketCaller); resp.Error {
+			t.Fatalf("add with Zone %q: %s", zone, resp.ErrorMsg)
+		}
+		if r, p := resigned(), republished(before); strings.Join(r, " ") != z["own"] || strings.Join(p, " ") != "own" {
+			t.Errorf("add with Zone %q re-signed %v and republished %v, want the own zone", zone, r, p)
+		}
+	}
+	if n := count("DnssecKeyStore", z["own"]); n != keys+2 {
+		t.Errorf("the own zone has %d DNSSEC keys after two adds, want %d", n, keys+2)
+	}
+
+	// A published key re-imported as active: the served DNSKEYs stay the
+	// same, the signing keys change, and the zone is re-signed.
+	reimport := addOf(z["own"])
+	reimport.State = DnskeyStatePublished
+	if resp, _ := postKeystore(t, reimport, &socketCaller); resp.Error {
+		t.Fatalf("add of a published key: %s", resp.ErrorMsg)
+	}
+	resigned()
+	reimport.State = DnskeyStateActive
+	if resp, _ := postKeystore(t, reimport, &socketCaller); resp.Error {
+		t.Fatalf("re-import of the published key as active: %s", resp.ErrorMsg)
+	}
+	var reState string
+	Conf.Internal.KeyDB.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, z["own"], reimport.PrivateKeyCache.DnskeyRR.KeyTag()).Scan(&reState)
+	if r := resigned(); reState != DnskeyStateActive || strings.Join(r, " ") != z["own"] {
+		t.Errorf("re-import of a published key as active: state %q, re-signed %v; want active and the own zone", reState, r)
+	}
+
+	// An application is refused another's zone whichever field names it.
+	for _, kp := range []KeystorePost{setstate(z["own"], z["other"], DnskeyStateRetired), setstate(z["other"], z["own"], DnskeyStateRetired), addOf(z["other"])} {
+		if resp, _ := postKeystore(t, kp, &appCaller); !resp.Error || !refusedForApp(resp.ErrorMsg) {
+			t.Errorf("an application's %s naming zone %q, key %q: %q, want an API owner refusal", kp.SubCommand, kp.Zone, kp.Keyname, resp.ErrorMsg)
+		}
+	}
+	other := addOf("")
+	other.PrivateKeyCache.DnskeyRR.Hdr.Name = z["other"]
+	if resp, _ := postKeystore(t, other, &appCaller); !resp.Error || !refusedForApp(resp.ErrorMsg) {
+		t.Errorf("an application's add of another zone's DNSKEY: %q, want an API owner refusal", resp.ErrorMsg)
+	}
+
+	// SIG(0) delete: Zone and Keyname naming two zones is refused, and
+	// both keys stay; one name alone deletes that key.
+	split := KeystorePost{Command: "sig0-mgmt", SubCommand: "delete", Zone: z["own"], Keyname: z["api"], Keyid: zoneKeyID(t, "sig0", z["own"])}
+	if resp, _ := postKeystore(t, split, &socketCaller); !resp.Error || !strings.Contains(resp.ErrorMsg, "but the request names zone") {
+		t.Errorf("sig0 delete naming two zones: %q, want refused", resp.ErrorMsg)
+	}
+	if count("Sig0KeyStore", z["own"]) != 1 || count("Sig0KeyStore", z["api"]) != 1 {
+		t.Error("the refused sig0 delete deleted a key")
+	}
+	byZone := KeystorePost{Command: "sig0-mgmt", SubCommand: "delete", Zone: z["own"], Keyid: zoneKeyID(t, "sig0", z["own"])}
+	if resp, _ := postKeystore(t, byZone, &socketCaller); resp.Error || count("Sig0KeyStore", z["own"]) != 0 {
+		t.Errorf("sig0 delete by Zone alone: %q, %d key(s) left", resp.ErrorMsg, count("Sig0KeyStore", z["own"]))
+	}
+}
+
+// An application names the zone of every key command: an empty name is
+// refused before it can become the root, which an application may own (a
+// rollover given no zone would pick keys from every zone). "." still names
+// the root. An operator's rollover with no zone is refused too. A SIG(0)
+// delete may name its key by Zone or by Keyname alone, and that one name is
+// checked.
+func TestAppKeyCommandsNeedAZone(t *testing.T) {
+	z := keystoreScope(t)
+	root := &ZoneData{ZoneName: ".", ZoneType: Primary, Options: map[ZoneOption]bool{}}
+	root.fromStaticConfig.Store(true)
+	root.setApiOwner("cert:provisioner")
+	Zones.Set(".", root)
+
+	states := func() string {
+		rows, err := Conf.Internal.KeyDB.Query(`SELECT zonename, keyid, state FROM DnssecKeyStore ORDER BY zonename, keyid`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var zone, state string
+			var keyid int
+			rows.Scan(&zone, &keyid, &state)
+			out = append(out, fmt.Sprintf("%s/%d/%s", zone, keyid, state))
+		}
+		return strings.Join(out, " ")
+	}
+	before := states()
+	did, sid := zoneKeyID(t, "dnssec", z["own"]), zoneKeyID(t, "sig0", z["own"])
+	for _, kp := range []KeystorePost{
+		{Command: "dnssec-mgmt", SubCommand: "rollover", KeyType: "KSK"},
+		{Command: "dnssec-mgmt", SubCommand: "rollover", KeyType: "ZSK"},
+		{Command: "dnssec-mgmt", SubCommand: "generate", Algorithm: 15, KeyType: "ZSK"},
+		{Command: "dnssec-mgmt", SubCommand: "export", Keyid: did},
+		{Command: "dnssec-mgmt", SubCommand: "delete", Keyid: did},
+		{Command: "dnssec-mgmt", SubCommand: "setstate", Keyid: did, State: DnskeyStateRetired},
+		{Command: "sig0-mgmt", SubCommand: "generate", Algorithm: 15, State: "created"},
+		{Command: "sig0-mgmt", SubCommand: "export", Keyid: sid},
+		{Command: "sig0-mgmt", SubCommand: "setstate", Keyid: sid, State: Sig0StateRetired},
+		{Command: "sig0-mgmt", SubCommand: "setparentstate", Keyid: sid, ParentState: 1},
+		{Command: "sig0-mgmt", SubCommand: "delete", Keyid: sid},
+	} {
+		if resp, _ := postKeystore(t, kp, &appCaller); !resp.Error || !strings.Contains(resp.ErrorMsg, "no zone named") {
+			t.Errorf("%s %s with no zone: %q, want refused for naming no zone", kp.Command, kp.SubCommand, resp.ErrorMsg)
+		}
+	}
+	nozone := testDnssecKey(t, ".", 257)
+	nozone.Zone = ""
+	bulk, _ := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "bulk-import", BulkDnssecKeys: []BulkDnssecKey{nozone}}, &appCaller)
+	if len(bulk.BulkDispositions) != 1 || bulk.BulkDispositions[0].Status != BulkStatusRefused {
+		t.Errorf("an application's bulk import of a key with no zone: %q %+v, want it refused", bulk.ErrorMsg, bulk.BulkDispositions)
+	}
+	if after := states(); after != before {
+		t.Errorf("commands naming no zone changed the keys:\n%s\nwas\n%s", after, before)
+	}
+
+	// "." names the root zone: past the name check (no root keys to roll).
+	if resp, _ := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "rollover", Zone: ".", KeyType: "ZSK"}, &appCaller); !resp.Error ||
+		strings.Contains(resp.ErrorMsg, "no zone named") || refusedForApp(resp.ErrorMsg) {
+		t.Errorf("rollover of the root zone it owns: %q, want past the zone checks", resp.ErrorMsg)
+	}
+	if resp, _ := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "rollover", KeyType: "ZSK"}, &socketCaller); !resp.Error || !strings.Contains(resp.ErrorMsg, "rollover: no zone named") {
+		t.Errorf("an operator's rollover with no zone: %q, want refused", resp.ErrorMsg)
+	}
+
+	// SIG(0) delete by Zone alone, and by Keyname alone.
+	byZone := KeystorePost{Command: "sig0-mgmt", SubCommand: "delete", Zone: z["own"], Keyid: sid}
+	if resp, _ := postKeystore(t, byZone, &appCaller); resp.Error {
+		t.Errorf("an application's sig0 delete by Zone alone: %s", resp.ErrorMsg)
+	}
+	byName := KeystorePost{Command: "sig0-mgmt", SubCommand: "delete", Keyname: z["granted"], Keyid: zoneKeyID(t, "sig0", z["granted"])}
+	if resp, _ := postKeystore(t, byName, &appCaller); resp.Error {
+		t.Errorf("an application's sig0 delete by Keyname alone: %s", resp.ErrorMsg)
+	}
+	if left := keyCount(t, "Sig0KeyStore", z["own"]) + keyCount(t, "Sig0KeyStore", z["granted"]); left != 0 {
+		t.Errorf("%d SIG(0) key(s) left after deleting both", left)
+	}
+	if resp, _ := postKeystore(t, KeystorePost{Command: "sig0-mgmt", SubCommand: "delete", Keyname: z["other"], Keyid: zoneKeyID(t, "sig0", z["other"])}, &appCaller); !resp.Error || !refusedForApp(resp.ErrorMsg) {
+		t.Errorf("an application's sig0 delete of another's key by Keyname alone: %q, want refused", resp.ErrorMsg)
+	}
+}
+
+// Key rows are stored under the zone's canonical name, which the signing
+// reads use: a DNSKEY added in upper case reaches the zone's signing keys,
+// a SIG(0) key added so is stored in lower case, and setstate given the
+// name in upper case finds the key. A row stored in another case before
+// writes were canonical can still be changed, exported and deleted.
+func TestKeystoreStoresCanonicalZoneNames(t *testing.T) {
+	z := keystoreScope(t)
+	own := z["own"]
+	upper := strings.ToUpper(own)
+	zoneOf := func(table string, keyid uint16) string {
+		var zone string
+		Conf.Internal.KeyDB.QueryRow(`SELECT zonename FROM `+table+` WHERE keyid=?`, int(keyid)).Scan(&zone)
+		return zone
+	}
+	stateOf := func(zone string, keyid uint16) string {
+		var state string
+		Conf.Internal.KeyDB.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zone, int(keyid)).Scan(&state)
+		return state
+	}
+
+	dk := testDnssecKey(t, upper, 256)
+	dpkc, err := PrepareKeyCache(dk.PrivateKey, dk.KeyRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "add", Zone: upper, PrivateKeyCache: dpkc, State: DnskeyStateActive}, &socketCaller); resp.Error {
+		t.Fatalf("add of a DNSKEY owned by %s: %s", upper, resp.ErrorMsg)
+	}
+	if got := zoneOf("DnssecKeyStore", dk.Keyid); got != own {
+		t.Errorf("the DNSKEY added as %s is stored under %q, want %s", upper, got, own)
+	}
+	zd, _ := Zones.Get(own)
+	signs := false
+	for _, k := range zd.ActiveDnssecKeys().ZSKs {
+		signs = signs || k.KeyId == dk.Keyid
+	}
+	if !signs {
+		t.Errorf("the DNSKEY added as %s is not among %s's signing keys", upper, own)
+	}
+	if resp, _ := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "setstate", Keyname: upper, Zone: upper, Keyid: dk.Keyid, State: DnskeyStateRetired}, &socketCaller); resp.Error || stateOf(own, dk.Keyid) != DnskeyStateRetired {
+		t.Errorf("setstate naming %s: %q, state %q", upper, resp.ErrorMsg, stateOf(own, dk.Keyid))
+	}
+
+	sk := testBulkSig0Key(t, upper)
+	spkc, err := PrepareKeyCache(sk.PrivateKey, sk.KeyRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := postKeystore(t, KeystorePost{Command: "sig0-mgmt", SubCommand: "add", Zone: upper, PrivateKeyCache: spkc, State: Sig0StateActive}, &socketCaller); resp.Error {
+		t.Fatalf("sig0 add of a KEY owned by %s: %s", upper, resp.ErrorMsg)
+	}
+	if got := zoneOf("Sig0KeyStore", sk.Keyid); got != own {
+		t.Errorf("the SIG(0) key added as %s is stored under %q, want %s", upper, got, own)
+	}
+
+	// A row stored in mixed case, as before writes were canonical.
+	legacyName := "Own.Example."
+	legacy := testDnssecKey(t, legacyName, 256)
+	tx, err := Conf.Internal.KeyDB.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertKeyRowTx(tx, KeyRow{Zone: legacyName, State: DnskeyStatePublished, Keyid: legacy.Keyid, Flags: 256,
+		Algorithm: "ED25519", Creator: "test", PrivateKey: legacy.PrivateKey, KeyRR: legacy.KeyRR}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "setstate", Keyname: own, Keyid: legacy.Keyid, State: DnskeyStateStandby}, &socketCaller); resp.Error || stateOf(legacyName, legacy.Keyid) != DnskeyStateStandby {
+		t.Errorf("setstate of a key stored as %s: %q, state %q", legacyName, resp.ErrorMsg, stateOf(legacyName, legacy.Keyid))
+	}
+	if resp, body := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "export", Zone: own, Keyid: legacy.Keyid}, &socketCaller); resp.Error || !strings.Contains(body, "PRIVATE KEY") {
+		t.Errorf("export of a key stored as %s: %q", legacyName, resp.ErrorMsg)
+	}
+	if resp, _ := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "delete", Zone: own, Keyname: own, Keyid: legacy.Keyid}, &socketCaller); resp.Error || stateOf(legacyName, legacy.Keyid) != DnskeyStateRemoved {
+		t.Errorf("delete of a key stored as %s: %q, state %q", legacyName, resp.ErrorMsg, stateOf(legacyName, legacy.Keyid))
+	}
+}
+
+// The keystore handler makes zone names canonical, never a keyword: dnssec
+// purge's "all" (any case) still purges every zone, and "all." is the zone
+// of that name.
+func TestKeystorePurgeAllIsASelector(t *testing.T) {
+	z := keystoreScope(t)
+	fixture := map[string]uint16{z["own"]: zoneKeyID(t, "dnssec", z["own"]), z["other"]: zoneKeyID(t, "dnssec", z["other"])}
+	tx, err := Conf.Internal.KeyDB.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, zone := range []string{z["own"], z["other"]} {
+		used := map[uint16]bool{fixture[zone]: true}
+		for n := 0; n < 4; {
+			k := testDnssecKey(t, zone, 256)
+			if used[k.Keyid] {
+				continue
+			}
+			used[k.Keyid] = true
+			if err := insertKeyRowTx(tx, KeyRow{Zone: zone, State: DnskeyStateRemoved, Keyid: k.Keyid, Flags: 256,
+				Algorithm: "ED25519", Creator: "test", PrivateKey: k.PrivateKey, KeyRR: k.KeyRR}); err != nil {
+				t.Fatal(err)
+			}
+			n++
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	// A dry run: what would go, one key per zone beyond the three kept.
+	purge := func(zone string) []string {
+		t.Helper()
+		resp, _ := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "purge", Zone: zone}, &socketCaller)
+		if resp.Error {
+			t.Fatalf("purge %q: %s", zone, resp.ErrorMsg)
+		}
+		var zones []string
+		for _, k := range resp.Dnskeys {
+			zones = append(zones, k.Name)
+		}
+		sort.Strings(zones)
+		return zones
+	}
+	both := []string{z["other"], z["own"]}
+	sort.Strings(both)
+	for _, sel := range []string{"all", "ALL", " all "} {
+		if got := purge(sel); strings.Join(got, " ") != strings.Join(both, " ") {
+			t.Errorf("purge %q would purge in %v, want %v", sel, got, both)
+		}
+	}
+	if got := purge("all."); len(got) != 0 {
+		t.Errorf("purge of the zone all. would purge in %v, want nothing", got)
+	}
+	if got := purge(strings.ToUpper(z["own"])); strings.Join(got, " ") != z["own"] {
+		t.Errorf("purge of %s would purge in %v", strings.ToUpper(z["own"]), got)
+	}
+}
+
+// An add whose commit succeeds and whose signing-key republish then fails
+// says so: the row is committed and the answer is an error that says the
+// zone does not serve the change yet. The re-sign still goes, and cannot
+// sign with the keys from before: the failed republish leaves the snapshot
+// unbuilt, so the re-sign reads the keystore, and fails while it cannot.
+func TestKeystoreAddReportsAFailedRepublish(t *testing.T) {
+	z := keystoreScope(t)
+	own := z["own"]
+	q := make(chan ResignRequest, 16)
+	prevQ := Conf.Internal.ResignQ
+	Conf.Internal.ResignQ = q
+	t.Cleanup(func() { Conf.Internal.ResignQ = prevQ })
+
+	broken := breakSigningKeys(t, own)
+
+	keys := keyCount(t, "DnssecKeyStore", own)
+	dk := testDnssecKey(t, own, 256)
+	dpkc, err := PrepareKeyCache(dk.PrivateKey, dk.KeyRR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "add", Zone: own, PrivateKeyCache: dpkc, State: DnskeyStateActive}, &socketCaller)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "the change is committed, but the signing keys of zone "+own+" could not be republished") {
+		t.Errorf("add whose republish fails: %q, want the failure reported", resp.ErrorMsg)
+	}
+	if n := keyCount(t, "DnssecKeyStore", own); n != keys+1 {
+		t.Errorf("the zone has %d key(s) after the add, want %d: the row is committed", n, keys+1)
+	}
+	resigned := false
+	for len(q) > 0 {
+		r := <-q
+		resigned = resigned || r.Zd.ZoneName == own
+		r.Zd.resignQueued.Store(false)
+	}
+	if !resigned {
+		t.Error("the add did not ask for the zone's re-sign")
+	}
+	zd, _ := Zones.Get(own)
+	if zd.SigningKeys().built {
+		t.Error("the failed republish left a built snapshot")
+	}
+	if _, err := zd.activeKeysCAS(Conf.Internal.KeyDB); err == nil {
+		t.Error("the re-sign's keys came from somewhere other than the keystore it cannot read")
+	}
+	if _, err := Conf.Internal.KeyDB.DB.Exec(`DELETE FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, own, int(broken.Keyid)); err != nil {
+		t.Fatal(err)
+	}
+	active, err := zd.activeKeysCAS(Conf.Internal.KeyDB)
+	found := false
+	for _, k := range active.ZSKs {
+		found = found || k.KeyId == dk.Keyid
+	}
+	if err != nil || !found {
+		t.Errorf("once the keystore can be read, the re-sign's keys: %v, the added key among them: %v", err, found)
+	}
+}
+
+// breakSigningKeys adds to zone a signing row with no private key, so that
+// the zone's signing keys cannot be loaded until it is deleted, and returns
+// its key.
+func breakSigningKeys(t *testing.T, zone string) BulkDnssecKey {
+	t.Helper()
+	broken := testDnssecKey(t, zone, 256)
+	tx, err := Conf.Internal.KeyDB.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertKeyRowTx(tx, KeyRow{Zone: zone, State: DnskeyStateActive, Keyid: broken.Keyid, Flags: 256,
+		Algorithm: "ED25519", Creator: "test", KeyRR: broken.KeyRR}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return broken
+}
+
+// A bulk import whose signing-key republish fails for a zone answers as an
+// add does: an error that says the keys are committed and the zone does
+// not serve them yet, with the dispositions of the keys that landed, and
+// the zone's re-sign still asked for.
+func TestKeystoreBulkImportReportsAFailedRepublish(t *testing.T) {
+	z := keystoreScope(t)
+	own := z["own"]
+	q := make(chan ResignRequest, 16)
+	prevQ := Conf.Internal.ResignQ
+	Conf.Internal.ResignQ = q
+	t.Cleanup(func() { Conf.Internal.ResignQ = prevQ })
+	broken := breakSigningKeys(t, own)
+
+	k := testDnssecKey(t, own, 256)
+	for k.Keyid == broken.Keyid || k.Keyid == zoneKeyID(t, "dnssec", own) {
+		k = testDnssecKey(t, own, 256)
+	}
+	resp, _ := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "bulk-import", BulkDnssecKeys: []BulkDnssecKey{k}}, &socketCaller)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "keys were imported and committed, but 1 zone(s) could not be republished and do not serve them yet: "+own) {
+		t.Errorf("bulk import whose republish fails: %q, want the failure reported", resp.ErrorMsg)
+	}
+	if len(resp.BulkDispositions) != 1 || resp.BulkDispositions[0].Status != BulkStatusImported {
+		t.Errorf("dispositions %+v, want the key imported", resp.BulkDispositions)
+	}
+	resigned := false
+	for len(q) > 0 {
+		r := <-q
+		resigned = resigned || r.Zd.ZoneName == own
+		r.Zd.resignQueued.Store(false)
+	}
+	if !resigned {
+		t.Error("the bulk import did not ask for the zone's re-sign")
 	}
 }
