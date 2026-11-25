@@ -74,6 +74,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		var sig0InvalidateZones []string
 		var dnssecStrip *stagedStrip
 		var committed bool
+		var republishErr error
 
 		tx, err := kdb.Begin("APIkeystore")
 
@@ -95,10 +96,19 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						// R1: DnssecKeyMgmt always receives this external tx, so its
 						// localtx republish path never runs. Republish here after
 						// Commit, before triggerResign, so SignZone sees the new set.
+						//
+						// A republish that fails is reported in the answer
+						// below, and the re-sign still goes: the failure marks
+						// the zone's snapshot unbuilt, so the re-sign takes
+						// the signing keys from the keystore (activeKeysCAS),
+						// or fails and stays owed, and never signs with the
+						// keys from before the change (republishSigningKeysForZone
+						// asks for the same re-sign itself).
 						if dnssecRepublishZone != "" {
 							if rerr := republishSigningKeysForZone(kdb, dnssecRepublishZone); rerr != nil {
 								lgApi.Error("APIkeystore: post-commit signing-keys republish failed",
 									"zone", dnssecRepublishZone, "err", rerr)
+								republishErr = rerr
 							}
 						}
 						// The strip clear and policy-cleanup staged goes out
@@ -150,6 +160,14 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						}
 						if dnssecResignZone != "" {
 							triggerResign(conf, dnssecResignZone)
+						}
+						// The change is committed: the answer says so, and
+						// that the zone does not serve it yet.
+						if republishErr != nil && resp != nil && !resp.Error {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("the change is committed, but the signing keys of zone %s "+
+								"could not be republished (%v); the zone serves the keys it had until a re-sign "+
+								"can read them from the keystore", dnssecRepublishZone, republishErr)
 						}
 						// SIG(0) bulk import owns no transaction of its own on
 						// this path, so it cannot drop its own cache entries --
@@ -209,10 +227,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		// them up: the names a request gives are made canonical here. The
 		// commands that manage one key find a row stored in another case
 		// before writes were canonical (storedKeyName).
-		switch kp.Command {
-		case "sig0-mgmt", "dnssec-mgmt":
-			kp.Zone, kp.Keyname = canonicalKeyName(kp.Zone), canonicalKeyName(kp.Keyname)
-		}
+		canonicalKeystoreNames(&kp)
 
 		switch kp.Command {
 		case "sig0-mgmt":

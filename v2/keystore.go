@@ -329,23 +329,27 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		return &resp, err
 
 	case "export":
-		// Before the lookup: a key of someone else's zone and no key at
-		// all get the same answer.
-		if err := appKeyZoneRefusal(app, kp.Zone); err != nil {
+		// Before the lookup: a key of someone else's zone, of a zone not
+		// served here, and no key at all get the same answer.
+		notFound := func() *KeystoreResponse {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("SIG(0) key for zone %q keyid %d not found", kp.Zone, kp.Keyid)
+			return &resp
+		}
+		if out, err := appKeyExportRefusal(app, kp.Zone, notFound); out != nil {
+			return out, err
+		}
+		stored, err := storedKeyName(tx, "Sig0KeyStore", kp.Zone, kp.Keyid)
+		if err != nil {
 			return &resp, err
 		}
-		if kp.Zone, err = storedKeyName(tx, "Sig0KeyStore", kp.Zone, kp.Keyid); err != nil {
-			return &resp, err
-		}
-		row := tx.QueryRow(getSig0KeySql, kp.Zone, kp.Keyid)
+		row := tx.QueryRow(getSig0KeySql, stored, kp.Keyid)
 		var zonename, state, algorithm, creator, privatekey, keyrrstr string
 		var keyid int
-		err := row.Scan(&zonename, &state, &keyid, &algorithm, &creator, &privatekey, &keyrrstr)
+		err = row.Scan(&zonename, &state, &keyid, &algorithm, &creator, &privatekey, &keyrrstr)
 		if err != nil {
 			if err == sql.ErrNoRows {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("SIG(0) key for zone %q keyid %d not found", kp.Zone, kp.Keyid)
-				return &resp, nil
+				return notFound(), nil
 			}
 			return &resp, fmt.Errorf("error from row.Scan(): %v", err)
 		}
@@ -509,6 +513,29 @@ func keyWriteZone(sub, what, written, zone string) (string, error) {
 			sub, what, written, zone)
 	}
 	return canonicalKeyName(written), nil
+}
+
+// purgeAllZones says whether zone is dnssec purge's selector "all" (any
+// case), every zone, rather than a zone name; "all." is the zone.
+func purgeAllZones(zone string) bool {
+	return strings.EqualFold(strings.TrimSpace(zone), "all")
+}
+
+// canonicalKeystoreNames makes the zone names of a SIG(0) or DNSSEC keystore
+// request canonical (canonicalKeyName), as the key rows are stored, and
+// leaves a keyword alone: dnssec purge's Zone "all" is every zone, not the
+// zone "all.". These are the only keywords the two commands take in Zone or
+// Keyname; an empty name stays empty.
+func canonicalKeystoreNames(kp *KeystorePost) {
+	switch kp.Command {
+	case "sig0-mgmt", "dnssec-mgmt":
+	default:
+		return
+	}
+	if !(kp.Command == "dnssec-mgmt" && kp.SubCommand == "purge" && purgeAllZones(kp.Zone)) {
+		kp.Zone = canonicalKeyName(kp.Zone)
+	}
+	kp.Keyname = canonicalKeyName(kp.Keyname)
 }
 
 // canonicalKeyName is name as a key row stores it: lower case and fully
@@ -919,10 +946,15 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	case "export":
 		const getDnskeySql = `
 SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
-		// Before the lookup: a key of someone else's zone and no key at
-		// all get the same answer.
-		if err := appKeyZoneRefusal(app, kp.Zone); err != nil {
-			return &resp, err
+		// Before the lookup: a key of someone else's zone, of a zone not
+		// served here, and no key at all get the same answer.
+		notFound := func() *KeystoreResponse {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("DNSSEC key for zone %q keyid %d not found", kp.Zone, kp.Keyid)
+			return &resp
+		}
+		if out, err := appKeyExportRefusal(app, kp.Zone, notFound); out != nil {
+			return out, err
 		}
 		stored, err := storedKeyName(tx, "DnssecKeyStore", kp.Zone, kp.Keyid)
 		if err != nil {
@@ -934,9 +966,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		err = row.Scan(&zonename, &state, &keyid, &flags, &algorithm, &creator, &privatekey, &keyrrstr)
 		if err != nil {
 			if err == sql.ErrNoRows {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("DNSSEC key for zone %q keyid %d not found", kp.Zone, kp.Keyid)
-				return &resp, nil
+				return notFound(), nil
 			}
 			return &resp, fmt.Errorf("error from row.Scan(): %v", err)
 		}
@@ -1336,7 +1366,7 @@ func (kdb *KeyDB) dnssecKeyPurge(tx *Tx, kp KeystorePost) (*KeystoreResponse, er
 
 	// Resolve target zone list.
 	var zones []string
-	if strings.EqualFold(strings.TrimSpace(kp.Zone), "all") {
+	if purgeAllZones(kp.Zone) {
 		rows, err := tx.Query(
 			`SELECT DISTINCT zonename FROM DnssecKeyStore WHERE state=? ORDER BY zonename`,
 			DnskeyStateRemoved)

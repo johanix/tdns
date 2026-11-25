@@ -607,8 +607,10 @@ Part C (keystore for application clients):
   every caller: its keys would be picked from every zone.
 - One answer: a SIG(0) or DNSSEC key command on another's zone, or on a
   zone not served here, gets B's zone refusal before any lookup, whether
-  or not the key exists. A TSIG key of another API owner reads as "not
-  found", like a key that does not exist.
+  or not the key exists. An export goes further: a key of another's zone
+  or of a zone not served reads as "not found", with the status and words
+  of a missing key of the caller's own zone. A TSIG key of another API
+  owner reads as "not found", like a key that does not exist.
 - TSIG add, generate and import record the caller as the API owner,
   whatever the request names. An identical key of another API owner is
   unchanged, keeps its owner, and the answer says so. Another secret
@@ -650,6 +652,14 @@ Part C (keystore for application clients):
   signing keys as before. Zone-wide commands (rollover, clear,
   policy-cleanup, purge, check) use the canonical name only. SIG(0) keys
   that the daemon generates for itself keep the name they are given.
+  Only zone names are made canonical: purge's "all" (any case) is every
+  zone, and "all." the zone of that name.
+- A DNSSEC key change that commits and whose signing-key republish then
+  fails answers with an error that says the change is committed and the
+  zone does not serve it yet. The re-sign still goes: the failure leaves
+  the zone's signing-keys snapshot unbuilt, so the re-sign reads the keys
+  from the keystore, or fails and stays owed, and never signs with the
+  keys from before.
 - A SIG(0) bulk import mirrors into the TrustStore, for each key it
   imports or replaces, the record the keystore stored, so an offer of the
   same key later in the batch that was refused or a conflict is never

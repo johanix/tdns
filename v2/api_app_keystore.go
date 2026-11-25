@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -127,11 +128,30 @@ func appKeystoreGate(app string, kp KeystorePost) error {
 	}
 	switch kp.Command {
 	case "sig0-mgmt", "dnssec-mgmt":
-		if kp.Zone != "" {
+		// An export answers for itself (appKeyExportRefusal): a key the
+		// client may not have reads there as a key that does not exist.
+		if kp.Zone != "" && kp.SubCommand != "export" {
 			return appKeyZoneRefusal(app, kp.Zone)
 		}
 	}
 	return nil
+}
+
+// appKeyExportRefusal is the answer to an application client's export of a
+// SIG(0) or DNSSEC key (kind) of a zone that is not its own, or not served
+// here: the answer an export of a key that does not exist gets (notFound),
+// with the same status, so that another owner's key, a zone not served and
+// a missing key of the client's own zone cannot be told apart. An export
+// that names no zone is refused as such. nil when the zone is the client's.
+func appKeyExportRefusal(app, zone string, notFound func() *KeystoreResponse) (*KeystoreResponse, error) {
+	err := appKeyZoneRefusal(app, zone)
+	switch {
+	case err == nil:
+		return nil, nil
+	case err == errAppKeyNoZone:
+		return &KeystoreResponse{Time: time.Now()}, err
+	}
+	return notFound(), nil
 }
 
 // writeKeystoreRefusal answers a keystore request refused before the
