@@ -33,7 +33,8 @@ suite_pins() {
 	judge P1d "tlsauth: pkix with the rig's CA: accepted" $? "$o"
 	o=$(out P1-noverify); ncli_remote pins authnoverify ping > "$o" 2>&1
 	if newcli; then
-		[ "$(rc_of "$o")" = 1 ] && grep -q '^Error: not connecting to authnoverify:' "$o" && grep -q 'Fix: tdns-ncli config add\|Fix: tdns-ncli config update authnoverify --repin' "$o" && ! grep -q 'pongs:' "$o"
+		# #1202 names the CLI config in the fix when it is not the default.
+		[ "$(rc_of "$o")" = 1 ] && grep -q '^Error: not connecting to authnoverify:' "$o" && grep -q "Fix: tdns-ncli config add\|Fix: tdns-ncli config update authnoverify --repin\|Fix: tdns-ncli --config $RIG/ncli/pins.yaml config update authnoverify --repin" "$o" && ! grep -q 'pongs:' "$o"
 	else
 		[ "$(rc_of "$o")" != 0 ] && grep -q 'does not verify the daemon' "$o" && ! grep -q 'pongs:' "$o"
 	fi
