@@ -486,6 +486,7 @@ func buildApiClient(e ApiDetails, cc CliClientConf, sock, sockNote string) (*tdn
 				return nil, "", pinRefusal(e, "its entry has tlsauth: pin but no pins:")
 			}
 			o.Pins = e.Pins
+			o.PinFix = pinRefusal(e, "").fix
 		case "pkix":
 			if o.RootCA == "" {
 				o.RootCA = "system"
