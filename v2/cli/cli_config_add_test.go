@@ -31,6 +31,7 @@ type addDaemon struct {
 	refusePing   bool
 	dropAdd      bool              // enrol, then lose the answer
 	stall        bool              // never answer
+	stallAfter   int               // with stall: this status's headers first
 	onAdd        func()            // after an add is enrolled: what happens meanwhile
 	clients      map[string]string // name -> pin
 	posts        []tdns.AccessPost
@@ -81,7 +82,12 @@ func (d *addDaemon) start(t *testing.T) {
 func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	if d.stall {
+		status := d.stallAfter
 		d.mu.Unlock()
+		if status != 0 {
+			w.WriteHeader(status)
+			w.(http.Flusher).Flush()
+		}
 		<-r.Context().Done()
 		return
 	}
@@ -410,6 +416,12 @@ func TestAddAfterTheEnrolmentIsSent(t *testing.T) {
 	accessTimeout = 200 * time.Millisecond
 	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "did not answer on its local socket") || !strings.Contains(err.Error(), d.sock) {
 		t.Errorf("no answer in time: %v", err)
+	}
+	// Headers, even a 404's, then no body: still no answer in time.
+	d = newAddDaemon(t, true)
+	d.stall, d.stallAfter = true, http.StatusNotFound
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "did not answer on its local socket") || !strings.Contains(err.Error(), d.sock) {
+		t.Errorf("a 404's headers, no body in time: %v", err)
 	}
 }
 

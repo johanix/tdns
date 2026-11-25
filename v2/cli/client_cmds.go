@@ -379,10 +379,10 @@ func accessOver(c *tdns.ApiClient, post tdns.AccessPost) (tdns.AccessResponse, e
 	status, buf, err := c.Post("/access", body)
 	var nerr net.Error
 	switch {
+	case errors.As(err, &nerr) && nerr.Timeout(): // headers sent or not
+		return resp, fmt.Errorf("the daemon did not answer on its local socket\n%s within %v", c.Socket, accessTimeout)
 	case status == http.StatusNotFound:
 		return resp, errors.New("the daemon has no /access route: is it older than tdns-ncli?")
-	case errors.As(err, &nerr) && nerr.Timeout():
-		return resp, fmt.Errorf("the daemon did not answer on its local socket\n%s within %v", c.Socket, accessTimeout)
 	case err != nil:
 		return resp, socketError(c.Socket, err)
 	}
