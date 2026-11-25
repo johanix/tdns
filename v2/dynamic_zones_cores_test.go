@@ -339,11 +339,16 @@ func TestADynamicConfigWriteNeverPutsBackAnOlderSnapshot(t *testing.T) {
 	Zones.Set(name, zd)
 
 	// A delete's write, holding the lock: the zone leaves Zones and the
-	// file. Meanwhile another writer starts, and has to wait.
+	// file. Meanwhile another writer starts, and has to wait. It says when
+	// it is about to take the lock: a writer that took its snapshot before
+	// that point holds one with the zone in it.
+	atLock := make(chan struct{})
+	testHookDynamicConfigWriteLocking = func() { close(atLock) }
+	t.Cleanup(func() { testHookDynamicConfigWriteLocking = nil })
 	dynamicConfigMutex.Lock()
 	done := make(chan error, 1)
 	go func() { done <- conf.WriteDynamicConfigFile() }()
-	time.Sleep(100 * time.Millisecond) // the writer is at the lock by now
+	<-atLock
 	Zones.Remove(name)
 	err := conf.writeDynamicConfigFileLocked(conf.getDynamicZonesFromZonesMap())
 	dynamicConfigMutex.Unlock()

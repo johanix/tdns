@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -426,7 +427,7 @@ func TestZoneDeleteThroughTheAPI(t *testing.T) {
 		if !resp.Error || resp.Removal == nil || resp.Removal.NotSynced == "" || resp.ErrorMsg != resp.Msg {
 			t.Fatalf("delete not on disk: error %v (%s), removal %+v", resp.Error, resp.ErrorMsg, resp.Removal)
 		}
-		if !strings.Contains(resp.ErrorMsg, "keystore dnssec clear --zone keys.example. --force") {
+		if !strings.Contains(resp.ErrorMsg, "must stay until the removal is on disk") || strings.Contains(resp.ErrorMsg, "keystore ") {
 			t.Errorf("ErrorMsg = %q", resp.ErrorMsg)
 		}
 		wantAllRows(t, kdb, keysZone, "removal not on disk")
@@ -1060,24 +1061,61 @@ func TestASig0BootstrapOfADeletedZoneMakesAndSendsNothing(t *testing.T) {
 	}
 }
 
-// A bootstrap that has its key, and finds the parent's UPDATE target, sends
-// no KEY UPDATE for a zone deleted meanwhile: the check made before the
-// ceremony goes out. The parent here refuses everything, so a ceremony
-// that went out would come back as a refusal instead.
-func TestASig0BootstrapSendsNothingForAZoneDeletedBeforeTheCeremony(t *testing.T) {
+// countingUpdateResponder is a parent that answers every query with rcode
+// and counts the UPDATEs it is sent; during, if set, runs while the
+// answer to one waits, in the responder's goroutine.
+func countingUpdateResponder(t *testing.T, rcode int, during func()) (addr string, updates *atomic.Int32) {
+	t.Helper()
+	updates = &atomic.Int32{}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	srv := &dns.Server{Listener: ln, Net: "tcp", MsgAcceptFunc: MsgAcceptFunc,
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+			if r.Opcode == dns.OpcodeUpdate {
+				updates.Add(1)
+				if during != nil {
+					during()
+				}
+			}
+			m := new(dns.Msg)
+			m.SetReply(r)
+			m.SetEdns0(4096, false)
+			m.Rcode = rcode
+			_ = w.WriteMsg(m)
+		})}
+	started := make(chan struct{})
+	srv.NotifyStartedFunc = func() { close(started) }
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	<-started
+	return ln.Addr().String(), updates
+}
+
+// bootstrapFixture is an API-managed child zone with an active SIG(0) key,
+// registered for RemoveDynamicZone to delete, whose parent advertises an
+// UPDATE target with at-apex bootstrap at a countingUpdateResponder.
+func bootstrapFixture(t *testing.T, during func()) (*Config, *ZoneData, *KeyDB, *atomic.Int32) {
+	t.Helper()
 	const child, parent = "ceremony.parent.example.", "parent.example."
 	kdb := newTestKeyDB(t)
 	zd := testZone(t, child, child+"\t3600\tIN\tSOA\tns."+child+" hostmaster."+child+" 1 7200 1800 604800 7200\n"+
 		child+"\t3600\tIN\tNS\tns."+child+"\n")
 	zd.KeyDB = kdb
 	zd.SetParent(parent)
+	zd.Options = map[ZoneOption]bool{OptApiManagedZone: true}
 	generateSig0Key(t, kdb, child, Sig0StateActive)
-	refuser := startRcodeResponder(t, dns.RcodeRefused)
-	_, port, err := net.SplitHostPort(refuser)
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	Zones.Set(child, zd)
+	t.Cleanup(func() { Zones.Remove(child) })
+
+	addr, updates := countingUpdateResponder(t, dns.RcodeRefused, during)
+	_, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prev := Globals.ImrEngine
 	imr := cacheOnlyImr(t, map[string][]string{"ceremony._dsync." + parent: {"ANY UPDATE " + port + " upd." + parent}},
 		map[string]string{"upd." + parent: "127.0.0.1"})
 	// The parent advertises at-apex, so the bootstrap gets to its ceremony.
@@ -1088,18 +1126,84 @@ func TestASig0BootstrapSendsNothingForAZoneDeletedBeforeTheCeremony(t *testing.T
 		Context: cache.ContextAnswer,
 		State:   cache.ValidationStateSecure,
 	})
+	prev := Globals.ImrEngine
 	Globals.ImrEngine = imr
 	t.Cleanup(func() { Globals.ImrEngine = prev })
+	return conf, zd, kdb, updates
+}
+
+// A bootstrap that has its key, and finds the parent's UPDATE target, sends
+// no KEY UPDATE for a zone deleted meanwhile: the check made before the
+// ceremony goes out. For a zone still in Zones the ceremony does go out:
+// one UPDATE reaches the parent, which refuses it.
+func TestASig0BootstrapSendsNothingForAZoneDeletedBeforeTheCeremony(t *testing.T) {
+	_, zd, _, updates := bootstrapFixture(t, nil)
 
 	zd.removed.Store(true)
 	if _, _, err := zd.bootstrapSig0KeyWithParent(context.Background(), dns.ED25519, []string{"at-apex"}, false); !errors.Is(err, errNoKeysForRemovedZone) {
 		t.Errorf("the bootstrap of a zone deleted before its ceremony returned %v, want %v", err, errNoKeysForRemovedZone)
 	}
-	// The premise: for a zone still in Zones the ceremony goes out, and the
-	// parent's refusal comes back.
+	if n := updates.Load(); n != 0 {
+		t.Errorf("%d UPDATEs reached the parent for a deleted zone", n)
+	}
+
 	zd.removed.Store(false)
 	if _, _, err := zd.bootstrapSig0KeyWithParent(context.Background(), dns.ED25519, []string{"at-apex"}, false); err == nil || errors.Is(err, errNoKeysForRemovedZone) {
 		t.Errorf("test premise: the bootstrap of a live zone returned %v, want the parent's refusal", err)
+	}
+	if n := updates.Load(); n != 1 {
+		t.Errorf("test premise: %d UPDATEs reached the parent for a live zone, want the ceremony", n)
+	}
+}
+
+// A zone delete that comes while a bootstrap's ceremony is with the parent,
+// after its last check of the zone, is refused: the bootstrap holds the
+// zone's SIG(0) claim until the parent answers, as a rollover does, and the
+// key the ceremony carries stays. Once the bootstrap is done the delete
+// goes through. And a bootstrap that starts during a delete is refused.
+func TestAZoneDeleteIsRefusedDuringASig0Bootstrap(t *testing.T) {
+	var conf *Config
+	var zd *ZoneData
+	var kdb *KeyDB
+	var delErr error
+	var keysDuring int
+	conf, zd, kdb, updates := bootstrapFixture(t, func() {
+		_, delErr = conf.RemoveDynamicZone(zd.ZoneName, false)
+		keysDuring = countRows(t, kdb, "Sig0KeyStore", "zonename", zd.ZoneName)
+	})
+
+	if _, _, err := zd.bootstrapSig0KeyWithParent(context.Background(), dns.ED25519, []string{"at-apex"}, false); err == nil {
+		t.Error("test premise: the parent refuses the ceremony")
+	}
+	if n := updates.Load(); n != 1 {
+		t.Fatalf("test premise: %d UPDATEs reached the parent, want the ceremony", n)
+	}
+	if delErr == nil || !strings.Contains(delErr.Error(), "a SIG(0) key bootstrap is in progress; try again when it finishes") {
+		t.Errorf("a delete during the ceremony returned %v", delErr)
+	}
+	if keysDuring != 1 {
+		t.Errorf("%d SIG(0) keys while the ceremony was with the parent, want its 1", keysDuring)
+	}
+	if cur, live := Zones.Get(zd.ZoneName); !live || cur != zd {
+		t.Error("a refused delete took the zone out of Zones")
+	}
+
+	var bootErr error
+	testHookSignalRecordTaken = func() {
+		_, _, bootErr = zd.bootstrapSig0KeyWithParent(context.Background(), dns.ED25519, []string{"at-apex"}, false)
+	}
+	t.Cleanup(func() { testHookSignalRecordTaken = nil })
+	if _, err := conf.RemoveDynamicZone(zd.ZoneName, false); err != nil {
+		t.Fatalf("the delete after the bootstrap: %v", err)
+	}
+	if !errors.Is(bootErr, errSig0ZoneBusy) || !strings.Contains(bootErr.Error(), "is being deleted; no bootstrap started") {
+		t.Errorf("a bootstrap during the delete returned %v", bootErr)
+	}
+	if n := updates.Load(); n != 1 {
+		t.Errorf("%d UPDATEs reached the parent, want only the first ceremony", n)
+	}
+	if n := countRows(t, kdb, "Sig0KeyStore", "zonename", zd.ZoneName); n != 0 {
+		t.Errorf("%d SIG(0) keys after the delete", n)
 	}
 }
 

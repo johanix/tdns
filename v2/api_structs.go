@@ -462,7 +462,10 @@ type ZoneRemoval struct {
 	// NotSynced is set when the zone left Zones and the dynamic config, but
 	// the rewrite of the config could not be synced to disk: a crash could
 	// still bring the zone back, so its keys were kept, as was everything
-	// else such a zone needs. It says why.
+	// else such a zone needs. It says why. It overrides the key fields: the
+	// keys were kept whatever KeepKeys says, and they were not counted, so
+	// DnssecKeys and Sig0Keys are zero and tell nothing. A synced removal
+	// leaves NotSynced empty, and the fields mean what they say above.
 	NotSynced string `json:"notsynced,omitempty"`
 }
 
