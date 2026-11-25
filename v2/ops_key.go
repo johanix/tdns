@@ -199,6 +199,18 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 }
 
 func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, willing []string, allowGenerate bool) (string, UpdateResult, error) {
+	// The zone's SIG(0) claim, held until the parent has answered: a zone
+	// delete is refused meanwhile instead of taking the key the ceremony
+	// carries, and a bootstrap is refused while a delete runs. Never waited
+	// for, so it takes no place in the lock order.
+	if zd.KeyDB != nil {
+		release, err := zd.KeyDB.beginSig0Bootstrap(zd.ZoneName)
+		if err != nil {
+			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): %v", zd.ZoneName, err), UpdateResult{}, err
+		}
+		defer release()
+	}
+
 	if err := zd.resolveParentZone(); err != nil {
 		return "", UpdateResult{}, fmt.Errorf("BootstrapSig0KeyWithParent(%q): %w", zd.ZoneName, err)
 	}
@@ -384,11 +396,18 @@ var rolloverSendUpdate = SendUpdate
 
 // Who holds a zone's SIG(0) claim (claimZoneSig0).
 const (
-	sig0ClaimRollover = "rollover"
-	sig0ClaimDelete   = "delete"
+	sig0ClaimRollover  = "rollover"
+	sig0ClaimBootstrap = "bootstrap"
+	sig0ClaimDelete    = "delete"
 )
 
-// claimZoneSig0 claims zone for holder, a SIG(0) rollover or a zone delete,
+// errSig0ZoneBusy: a SIG(0) rollover, a SIG(0) bootstrap or a delete holds
+// the zone's SIG(0) claim, and another of them was refused, not queued.
+// The delegation syncher retries a refused setup with its backoff.
+var errSig0ZoneBusy = errors.New("the zone's SIG(0) key is busy")
+
+// claimZoneSig0 claims zone for holder, a SIG(0) rollover or bootstrap or
+// a zone delete,
 // and the func it returns gives the claim back. While the claim is held a
 // second claim is refused, not queued, and the holder is returned instead
 // of the func. sig0RolloverMu is held only in here and in the release, so
@@ -423,8 +442,32 @@ func (kdb *KeyDB) beginSig0Rollover(zone string) (func(), error) {
 		return release, nil
 	case sig0ClaimDelete:
 		return nil, fmt.Errorf("zone %s is being deleted; no rollover started", core.CanonicalizeName(dns.Fqdn(zone)))
+	case sig0ClaimBootstrap:
+		return nil, fmt.Errorf("a SIG(0) key bootstrap for %s is running; no rollover started", core.CanonicalizeName(dns.Fqdn(zone)))
 	}
 	return nil, fmt.Errorf("a SIG(0) rollover for %s is already running", core.CanonicalizeName(dns.Fqdn(zone)))
+}
+
+// beginSig0Bootstrap claims zone for one SIG(0) bootstrap, from its key to
+// the parent's answer, and the func it returns gives the claim back. A
+// zone delete is refused while it holds the claim, as during a rollover:
+// the ceremony carries the zone's key, and a delete that took the key
+// meanwhile could leave the parent trusting a key whose private half is
+// gone. A bootstrap is refused, wrapped in errSig0ZoneBusy, while a delete,
+// a rollover or another bootstrap of the zone holds it: none of them has a
+// use for a ceremony that runs alongside it.
+func (kdb *KeyDB) beginSig0Bootstrap(zone string) (func(), error) {
+	release, heldBy := kdb.claimZoneSig0(zone, sig0ClaimBootstrap)
+	zone = core.CanonicalizeName(dns.Fqdn(zone))
+	switch heldBy {
+	case "":
+		return release, nil
+	case sig0ClaimDelete:
+		return nil, fmt.Errorf("%w: zone %s is being deleted; no bootstrap started", errSig0ZoneBusy, zone)
+	case sig0ClaimRollover:
+		return nil, fmt.Errorf("%w: a SIG(0) rollover for %s is running; no bootstrap started", errSig0ZoneBusy, zone)
+	}
+	return nil, fmt.Errorf("%w: a SIG(0) key bootstrap for %s is already running", errSig0ZoneBusy, zone)
 }
 
 // beginZoneDelete claims zone for a zone delete, so that the delete and a
@@ -441,6 +484,8 @@ func (kdb *KeyDB) beginZoneDelete(zone string) (func(), error) {
 		return release, nil
 	case sig0ClaimRollover:
 		return nil, fmt.Errorf("zone %s not deleted: a SIG(0) key rollover is in progress; try again when it finishes", core.CanonicalizeName(dns.Fqdn(zone)))
+	case sig0ClaimBootstrap:
+		return nil, fmt.Errorf("zone %s not deleted: a SIG(0) key bootstrap is in progress; try again when it finishes", core.CanonicalizeName(dns.Fqdn(zone)))
 	}
 	return nil, fmt.Errorf("zone %s not deleted: another delete of it is in progress", core.CanonicalizeName(dns.Fqdn(zone)))
 }

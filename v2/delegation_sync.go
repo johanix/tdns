@@ -1362,6 +1362,17 @@ func handleDelegationSyncSetupWith(ctx context.Context, conf *Config, delsyncq c
 			"delay", delay, "err", err)
 		return requeueSetupAfter(ctx, delsyncq, next, delay)
 
+	case errors.Is(err, errSig0ZoneBusy):
+		// A rollover, another bootstrap or a delete of the zone held its
+		// SIG(0) claim. Not a verdict on the zone: the same bounded backoff.
+		// After a delete the retry finds the zone gone and ends quietly.
+		if ds.Attempt+1 >= delegationSyncMaxRetries {
+			lgDns.Error("DelegationSyncher: SIG(0) bootstrap setup gave up; the zone's SIG(0) key stayed busy",
+				"zone", ds.ZoneName, "attempts", ds.Attempt+1, "err", err)
+			return nil
+		}
+		return deferSetupRetry(ctx, delsyncq, ds, "the zone's SIG(0) key was busy")
+
 	case isNoKeysForRemovedZone(err):
 		// The zone was deleted or replaced while the setup was queued: no
 		// key is made or sent for it, and noKeysForRemovedZone has said so.
@@ -1468,6 +1479,16 @@ func (zd *ZoneData) finishDelegationSyncSetup(msg string, ur UpdateResult, err e
 		lgDns.Info("DelegationSyncSetup: parent requires manual SIG(0) bootstrap; the apex KEY is published, waiting for the operator",
 			"zone", zd.ZoneName, "msg", msg)
 		return nil
+	}
+	if isNoKeysForRemovedZone(err) {
+		// The zone was deleted or replaced: noKeysForRemovedZone has said so.
+		return err
+	}
+	if errors.Is(err, errSig0ZoneBusy) {
+		// A rollover, another bootstrap or a delete of the zone holds its
+		// SIG(0) claim; the syncher tries again.
+		lgDns.Info("DelegationSyncSetup: the zone's SIG(0) key is busy; the bootstrap waits", "zone", zd.ZoneName, "err", err)
+		return err
 	}
 	if err != nil {
 		lgDns.Error("DelegationSyncSetup: error from BootstrapSig0KeyWithParent", "zone", zd.ZoneName, "err", err)
