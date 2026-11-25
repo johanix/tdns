@@ -216,21 +216,24 @@ func (s *suite) check3ZoneWrites() {
 	// no delegation backend here, so that answer is the daemon's error, not
 	// data. Until #1191 is in the stack, B refuses export to application
 	// clients (AppRefused). After that it is AppOwnZone, and app1 must get
-	// the operator's answer for its own zone.
+	// the operator's answer for its own zone. Whether #1191 is in shows in
+	// how the daemon takes an Outfile: with #1191 it refuses one.
 	name316 := "app1 delegation export of its own " + S1 + " (design 4.5: own zone only)"
+	file := filepath.Join(s.o.Scratch, "s1-delegation.zone")
+	_, probe := s.op.delegation(tdns.DelegationPost{Command: "export", Zone: S1, Outfile: file})
+	os.Remove(file)
+	has1191 := !probe.OK && strings.Contains(probe.Msg, "outfile refused")
 	_, oop := s.op.delegation(tdns.DelegationPost{Command: "export", Zone: S1})
 	opData := exportData(oop)
-	if oop.OK && opData != "" {
-		// Written by the client, as tdns-ncli del export --outfile does.
-		file := filepath.Join(s.o.Scratch, "s1-delegation.zone")
-		if err := os.WriteFile(file, []byte(opData), 0o644); err == nil {
-			os.Remove(file)
-		}
-	}
 	_, o = s.app1.delegation(tdns.DelegationPost{Command: "export", Zone: S1})
 	if !o.OK && strings.Contains(o.Msg, "delegation export: not available to application clients") {
-		s.expect("3.16", name316, true,
-			"refused: "+firstLine(o.Msg)+" (AppRefused until #1191 is in the stack, then AppOwnZone)")
+		if has1191 {
+			s.expect("3.16", name316, false,
+				"refused, but #1191 is in (the daemon refuses an Outfile): B should be AppOwnZone now", o.Msg)
+		} else {
+			s.expect("3.16", name316, true,
+				"refused: "+firstLine(o.Msg)+" (AppRefused until #1191 is in the stack, then AppOwnZone)")
+		}
 	} else {
 		same := o.OK == oop.OK && o.Msg == oop.Msg && exportData(o) == opData
 		s.expect("3.16", name316, same,

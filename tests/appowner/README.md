@@ -101,7 +101,9 @@ Since then (2026-11-25):
   answer is the daemon's error. Until #1191 is in the stack, app1's refusal
   ("not available to application clients") passes. After that, B's table
   makes export own zone only (AppOwnZone), and app1 must get the operator's
-  answer.
+  answer. The check tells whether #1191 is in from the daemon's answer to an
+  Outfile (with #1191 it refuses one). With #1191 in, app1's refusal is a
+  FAIL.
 - **7.10:** an application's export of another owner's key gets the same
   "not found" as a missing key of its own (api-owner-c 344c6e0d), so it
   cannot tell the two apart. The check expects that answer, and the
