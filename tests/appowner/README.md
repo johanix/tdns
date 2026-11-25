@@ -97,10 +97,11 @@ and one FAIL, 3.16, which waits for a ruling.
 Since then (2026-11-25):
 - **3.16:** the export fix is #1191. The daemon returns the data and the
   client writes the file, so the check sends no `Outfile`. The operator's
-  export is the control (it needs #1191). Until #1191 is in the stack, app1's
-  refusal ("not available to application clients") passes. After that, B's
-  table makes export own zone only (AppOwnZone), and app1 must get the
-  operator's data.
+  answer is the control. `s1.test.` has no delegation backend here, so that
+  answer is the daemon's error. Until #1191 is in the stack, app1's refusal
+  ("not available to application clients") passes. After that, B's table
+  makes export own zone only (AppOwnZone), and app1 must get the operator's
+  answer.
 - **7.10:** an application's export of another owner's key gets the same
   "not found" as a missing key of its own (api-owner-c 344c6e0d), so it
   cannot tell the two apart. The check expects that answer, and the

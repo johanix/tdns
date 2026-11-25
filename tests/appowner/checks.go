@@ -212,10 +212,11 @@ func (s *suite) check3ZoneWrites() {
 
 	// delegation export (4.5: "delegation status/export: own zone only").
 	// The daemon returns the data and the client writes it (#1191), so no
-	// Outfile is sent. The operator's export is the control. Until #1191
-	// is in the stack, B refuses export to application clients
-	// (AppRefused). After that it is AppOwnZone, and app1 must get the
-	// operator's data for its own zone.
+	// Outfile is sent. The operator's answer is the control. s1.test. has
+	// no delegation backend here, so that answer is the daemon's error, not
+	// data. Until #1191 is in the stack, B refuses export to application
+	// clients (AppRefused). After that it is AppOwnZone, and app1 must get
+	// the operator's answer for its own zone.
 	name316 := "app1 delegation export of its own " + S1 + " (design 4.5: own zone only)"
 	_, oop := s.op.delegation(tdns.DelegationPost{Command: "export", Zone: S1})
 	opData := exportData(oop)
@@ -227,19 +228,14 @@ func (s *suite) check3ZoneWrites() {
 		}
 	}
 	_, o = s.app1.delegation(tdns.DelegationPost{Command: "export", Zone: S1})
-	switch {
-	case !oop.OK || opData == "":
-		s.expect("3.16", name316, false,
-			fmt.Sprintf("control: op's export of %s returned no data (needs #1191)", S1), oop.Msg)
-	case !o.OK && strings.Contains(o.Msg, "delegation export: not available to application clients"):
+	if !o.OK && strings.Contains(o.Msg, "delegation export: not available to application clients") {
 		s.expect("3.16", name316, true,
 			"refused: "+firstLine(o.Msg)+" (AppRefused until #1191 is in the stack, then AppOwnZone)")
-	case o.OK:
-		got := exportData(o)
-		s.expect("3.16", name316, got == opData,
-			fmt.Sprintf("app1 got %d bytes of zone text, op got %d", len(got), len(opData)))
-	default:
-		s.expect("3.16", name316, false, fmt.Sprintf("refused (HTTP %d) for another reason", o.HTTP), o.Msg)
+	} else {
+		same := o.OK == oop.OK && o.Msg == oop.Msg && exportData(o) == opData
+		s.expect("3.16", name316, same,
+			fmt.Sprintf("app1 got %q (%d bytes of data), op got %q (%d bytes)",
+				firstLine(o.Msg), len(exportData(o)), firstLine(oop.Msg), len(opData)))
 	}
 	_, o = s.app1.delegation(tdns.DelegationPost{Command: "status", Zone: S2})
 	s.refused("3.17", "app1 delegation status of "+S2+" (config's)", o, notOwnConfig)
