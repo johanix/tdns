@@ -204,6 +204,16 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			return
 		}
 
+		// A zone's SIG(0) and DNSSEC key rows are stored under its
+		// canonical name, by which the signing and the other readers look
+		// them up: the names a request gives are made canonical here. The
+		// commands that manage one key find a row stored in another case
+		// before writes were canonical (storedKeyName).
+		switch kp.Command {
+		case "sig0-mgmt", "dnssec-mgmt":
+			kp.Zone, kp.Keyname = canonicalKeyName(kp.Zone), canonicalKeyName(kp.Keyname)
+		}
+
 		switch kp.Command {
 		case "sig0-mgmt":
 			resp, err = kdb.Sig0KeyMgmt(tx, kp)

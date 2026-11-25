@@ -599,8 +599,12 @@ Part C (keystore for application clients):
 - The checks are made in the `*KeyMgmt` functions, on the name each
   subcommand acts on; the request carries the application client's name
   in an unexported field that only the handler sets. `sig0-mgmt delete`
-  may name the key by Zone and by Keyname, so both must be the caller's.
-  `add` takes the zone from the key record's owner name.
+  names its key by one name, Keyname or Zone (two different ones are
+  refused), and that name is checked. `add` takes the zone from the key
+  record's owner name. A key command that names no zone is refused to an
+  application before the name is made fully qualified, where it would be
+  the root; "." names the root. A rollover with no zone is refused to
+  every caller: its keys would be picked from every zone.
 - One answer: a SIG(0) or DNSSEC key command on another's zone, or on a
   zone not served here, gets B's zone refusal before any lookup, whether
   or not the key exists. A TSIG key of another API owner reads as "not
@@ -637,6 +641,19 @@ Part C (keystore for application clients):
   published key as active changes the signing keys and not the served
   DNSKEYs. `sig0-mgmt delete` looks up and deletes by one name, and is
   refused when Zone and Keyname name two.
+- SIG(0) and DNSSEC key rows that the keystore API writes (add,
+  generate, bulk import) are stored under the zone's canonical name, lower
+  case and fully qualified, which the signing reads use. A row stored in
+  another case before this keeps its spelling, with no migration: the
+  commands that name one key (setstate, setparentstate, export, delete)
+  and bulk import find it whatever the case, and it stays out of the
+  signing keys as before. Zone-wide commands (rollover, clear,
+  policy-cleanup, purge, check) use the canonical name only. SIG(0) keys
+  that the daemon generates for itself keep the name they are given.
+- A SIG(0) bulk import mirrors into the TrustStore, for each key it
+  imports or replaces, the record the keystore stored, so an offer of the
+  same key later in the batch that was refused or a conflict is never
+  mirrored.
 - The reference count in an application's TSIG list counts every zone
   that uses the key, others' included: delete's "not in use" rule needs
   the same number.

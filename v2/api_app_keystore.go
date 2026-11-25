@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -59,26 +60,27 @@ func appTsigOwnerFilter(app string) (string, any) {
 // (design 4.4), so this is B's zone refusal, on the name the keystore
 // command acts on: a zone not served here and another application's get
 // the same answer, whether or not the key exists.
+//
+// An empty name is refused before it is made a name: as a fully qualified
+// name it would be the root, which an application may own, and a command
+// given no zone may act on every zone's keys (a rollover picks its keys
+// with no zone filter). "." still names the root zone.
 func appKeyZoneRefusal(app, zone string) error {
 	if app == "" {
 		return nil
+	}
+	if strings.TrimSpace(zone) == "" {
+		return errAppKeyNoZone
 	}
 	name := core.CanonicalizeName(dns.Fqdn(zone))
 	zd, _ := Zones.Get(name)
 	return appZoneRefusal(app, name, zd)
 }
 
-// appKeyZonesRefusal is appKeyZoneRefusal for a command that names its zone
-// in more than one field: each must be the application's, so that the
-// field the command looks up and the field it writes cannot differ.
-func appKeyZonesRefusal(app string, zones ...string) error {
-	for _, z := range zones {
-		if err := appKeyZoneRefusal(app, z); err != nil {
-			return err
-		}
-	}
-	return nil
-}
+// errAppKeyNoZone refuses an application client's SIG(0) or DNSSEC key
+// command that names no zone.
+var errAppKeyNoZone = appRefusal("no zone named: an application client names the zone of the key",
+	"give the zone (-z)")
 
 // appBulkKeyRefusal is the per-key check of an application client's SIG(0)
 // or DNSSEC bulk import (design 4.6): the reason it may not add a key of
