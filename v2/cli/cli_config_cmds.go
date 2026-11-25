@@ -8,20 +8,17 @@ package cli
 
 import (
 	"context"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"reflect"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ryanuber/columnize"
@@ -103,32 +100,34 @@ func newConfigAddCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "add <daemon-config.yaml>",
 		Short: "Add the daemon described by a daemon config file to the CLI config",
-		Long: `Reads a daemon's own config (tdns-auth, tdns-agent or tdns-imr), takes its
-apiserver: block, and adds an apiservers: entry for it to the CLI config.
+		Long: `Reads a daemon's own config (tdns-auth, tdns-agent or tdns-imr) and adds
+one apiservers: entry for that daemon to the CLI config. Run it as root on
+the daemon's host: it asks the daemon over its local admin socket.
 
   tdns-ncli config add /etc/tdns/tdns-auth2.yaml
 
 The daemon type comes from service.name (or, for tdns-imr, from having an
-imrengine: block and no service: block), and failing that from the file name;
---role overrides it. The first daemon of a type is added under its canonical
-name (tdns-auth, tdns-agent, tdns-imr) and is reached as "auth", "agent",
-"imr". Any further one becomes an instance with role: set, named after the
-file (tdns-auth2.yaml -> auth2) unless --name says otherwise, reached as
-"tdns-ncli auth2 ...".
+imrengine: block and no service: block), and failing that from the file
+name; --role overrides it. The first daemon of a type is added under its
+canonical name (tdns-auth, tdns-agent, tdns-imr) and is reached as "auth",
+"agent", "imr". Any further one becomes an instance with role: set, named
+after the file (tdns-auth2.yaml -> auth2) unless --name says otherwise,
+reached as "tdns-ncli auth2 ...".
 
-The entry is the daemon's TCP address, its API key, and the pin of its
-certificate. It also records the daemon config's path as config-file:, so
-"tdns-ncli auth2 config check" checks the right daemon, and so that tdns-ncli,
-run as root, reaches the daemon over its local admin socket instead (admin, no
-key), which it finds in the daemon config: the CLI config does not repeat the
-socket's path. tdns-ncli --tcp uses the TCP address even then. A daemon with no
-TCP address gets an entry with config-file: only, which only root can use.
+A running daemon: your client certificate is made if you have none (as
+client init does), the daemon adds its pin to its access file as
+--client-name (read-write), and one request over TCP checks it. Only then
+is the entry written: the TCP address, the pins of the daemon's
+certificate, authmethod: certificate and config-file:. No API key.
 
-The CLI config is
-created, mode 0600, if it does not exist. Adding a daemon that is already
-there changes nothing, except that an https entry that does not pin the
-daemon's current certificate is given that pin (tlsauth: pin): an entry
-without one is refused, so this is how an old entry is fixed.`,
+A stopped daemon, or one with no TCP address, gets an entry with
+config-file: only, through which root reaches its local admin socket.
+Once a stopped daemon is up, "config update <entry> --cert" gives the
+entry its address and your certificate.
+
+An entry for the daemon that is already there is left alone; "config
+update" changes it. The CLI config is created, mode 0600, if it does not
+exist.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			o.Ctx = cmd.Context()
@@ -146,15 +145,11 @@ without one is refused, so this is how an old entry is fixed.`,
 	}
 	c.Flags().StringVar(&o.Role, "role", "", "daemon type: auth, agent or imr (default: detect from the daemon config)")
 	c.Flags().StringVar(&o.Name, "name", "", "name (and command word) for the entry (default: from the file name)")
-	c.Flags().StringVar(&o.RootCA, "rootca", "", "rootca for the entry (default: none, which the CLI treats as insecure)")
+	c.Flags().StringVar(&o.ClientName, "client-name", "", "your name in the daemon's access file (default: user-host, as client init)")
 	c.Flags().StringVar(&o.TargetFile, "file", "", "file to add the entry to, if the apiservers: list is not in the CLI config itself (an include or cli.localconfig)")
-	c.Flags().BoolVar(&o.DryRun, "dry-run", false, "show what would be added; change nothing")
+	c.Flags().BoolVar(&o.DryRun, "dry-run", false, "show what would be done; enrol nothing, change nothing")
 	return c
 }
-
-// runningAsRoot reports whether this process can open a root-only admin
-// socket. A variable so the tests, which do not run as root, can say yes.
-var runningAsRoot = func() bool { return os.Geteuid() == 0 }
 
 // AddOptions is the input to AddDaemonConfig.
 type AddOptions struct {
@@ -171,9 +166,10 @@ type AddOptions struct {
 	Role string
 	// Name overrides the derived entry name.
 	Name string
-	// RootCA is recorded as the entry's rootca, if non-empty.
-	RootCA string
-	// DryRun computes everything and writes nothing.
+	// ClientName is the operator's name in the daemon's access file; empty
+	// means defaultClientName.
+	ClientName string
+	// DryRun asks the daemon what it runs, and enrols and writes nothing.
 	DryRun bool
 	// CommandWordTaken reports whether a name is already a command of the CLI.
 	// Optional; without it only the names in the config and the registry count.
@@ -190,14 +186,15 @@ type AddResult struct {
 	// AlreadyKnown is the name of the existing entry for this daemon; when set
 	// nothing was added.
 	AlreadyKnown string
-	// Pinned: the entry AlreadyKnown names did not pin the daemon's current
-	// certificate, so it was (or, with DryRun, would be) given tlsauth: pin
-	// and that pin. Entry is the entry as rewritten.
-	Pinned bool
-	// ApiCertCreated is the daemon's default API certificate, which config
-	// add made (the daemon had not started yet, so there was none to pin);
-	// ApiCertWould the one a dry run would make. ApiCertKey is its key.
-	ApiCertCreated, ApiCertWould, ApiCertKey string
+	// Update is the config update command to run: for the entry AlreadyKnown
+	// names, or for a stopped daemon's entry once the daemon is up. "" when
+	// there is none.
+	Update string
+	// Running: the daemon answered on its local admin socket.
+	Running bool
+	// Steps say what was done to set up the client certificate (with
+	// DryRun, what would be).
+	Steps []string
 	// File is the file the entry was (or would be) added to.
 	File string
 	// Created: File did not exist and was created.
@@ -212,14 +209,16 @@ var addableRoles = map[string]bool{"auth": true, "agent": true, "imr": true}
 
 const newCliConfigHeader = "# tdns-ncli configuration.\n# apiservers: lists the daemons (and instances of a daemon) tdns-ncli addresses;\n# `tdns-ncli config add <daemon-config.yaml>` adds to it. It holds API keys.\n\n"
 
-// AddDaemonConfig adds an apiservers: entry for the daemon whose config is
-// o.DaemonConfig to the CLI config.
+// AddDaemonConfig adds one apiservers: entry for the daemon whose config is
+// o.DaemonConfig to the CLI config (design 2026-11-25 section 4). A running
+// daemon gets a certificate entry: the operator's pin enrolled over the
+// local admin socket and checked over TCP before anything is written. A
+// stopped one, or one with no TCP address, gets the config-file:-only
+// entry. An entry already there for the daemon is left alone.
 //
-// It refuses anything it is not sure of rather than guessing: an unknown
-// daemon type, a name that collides with something, a second daemon whose
-// API address another entry already uses. And it checks its own work: after
-// writing, the CLI config is loaded again the way the CLI loads it, and if the
-// effective list is not the old list plus the new entry the change is undone.
+// Each step leaves a state that is valid on its own, so nothing is undone:
+// the one leftover is an enrolled pin with no entry, which the next run
+// reuses. Only the CLI config is locked, and only for its own edit.
 func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	if o.Role != "" && !addableRoles[o.Role] {
 		return nil, fmt.Errorf("--role must be one of auth, agent, imr (got %q)", o.Role)
@@ -228,41 +227,21 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if info.Socket == "" {
+		return nil, fmt.Errorf("%s serves no local admin socket\n(socket: none). config add needs it, run as root on the\ndaemon's host: certificate setup goes through the socket", info.ConfigFile)
+	}
 	res := &AddResult{Notes: append([]string(nil), info.Warnings...)}
-
-	// The daemon's TCP address, if it has one.
 	tcpURL := ""
 	if len(info.Addresses) > 0 {
 		if tcpURL, err = apiBaseURL(info.Addresses[0], info.UseTLS); err != nil {
 			return nil, fmt.Errorf("%s: %w", info.ConfigFile, err)
 		}
 	}
-	// The local admin socket is not written into the entry: tdns-ncli finds it
-	// in the daemon config the entry's config-file: names (usableDaemonSocket),
-	// so the two cannot disagree. socketURL is only for recognising an entry
-	// written as a socket entry before that.
-	socketURL := ""
-	if info.Socket != "" {
-		socketURL = "unix://" + info.Socket
-	}
-	switch {
-	case tcpURL == "" && !runningAsRoot():
-		return nil, fmt.Errorf("%s has only a local admin socket (%s), which only root can open; run config add as root", info.ConfigFile, info.Socket)
-	case tcpURL != "" && info.ApiKey == "":
-		// ReadDaemonApi lets an empty key through when there is a socket.
-		// A TCP entry without one would fail every request.
-		return nil, fmt.Errorf("%s: apiserver.apikey is not set, so the entry would have no key to send over TCP; set it", info.ConfigFile)
-	case info.Socket != "" && tcpURL != "":
-		res.Notes = append(res.Notes, fmt.Sprintf(
-			"run as root, tdns-ncli reaches this daemon over its local admin socket %s (admin, no key), found through config-file:; tdns-ncli --tcp uses the TCP address", info.Socket))
-	}
-	baseURL := tcpURL
 	if len(info.Addresses) > 1 {
 		res.Notes = append(res.Notes, fmt.Sprintf(
 			"apiserver.addresses lists %d addresses (%s); using the first",
 			len(info.Addresses), strings.Join(info.Addresses, ", ")))
 	}
-
 	target := o.TargetFile
 	if target == "" {
 		target = o.CliConfig
@@ -270,226 +249,124 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	if err := danglingSymlink(target); err != nil {
 		return nil, err
 	}
-	// From before the read of what is there to after the last write: an add
-	// that ran in between would otherwise be overwritten (lockCliConfig). The
-	// CLI config is locked as well as the file edited, when they differ: two
-	// adds editing two files that feed one effective list (the main file and
-	// cli.localconfig, say) would otherwise both read the old list and both
-	// succeed, the one list then hiding the other's entry. A dry run writes
-	// nothing and takes no lock.
+
+	// The entry for this daemon, if there is one, and the new one's name,
+	// from what is in the CLI config: before the daemon is asked anything,
+	// and again under the lock before the write.
+	entry := ApiDetails{AuthMethod: "none", ConfigFile: info.ConfigFile}
+	notes := len(res.Notes)
+	plan := func() (existing []ApiDetails, known bool, err error) {
+		existing, missing, err := cliEntries(o.CliConfig)
+		if err != nil {
+			return nil, false, err
+		}
+		res.Notes, res.Canonical, entry.Name, entry.Role = res.Notes[:notes], false, "", ""
+		if known, err = knownEntry(o, res, existing, info, tcpURL); err != nil || known {
+			return nil, known, err
+		}
+		// Compared resolved, as the locks are: --config and --file may name
+		// the one (missing) CLI config through two aliases of its directory.
+		res.Created = missing && resolvedPath(target) == resolvedPath(o.CliConfig)
+		return existing, false, chooseEntryName(&entry, res, info.Role, existing, o)
+	}
+	existing, known, err := plan()
+	if err != nil || known {
+		return res, err
+	}
+
+	// Running? Its socket answers /access list, naming its config.
+	sock, err := socketClientOf(info)
+	if err != nil {
+		return nil, err
+	}
+	list, err := accessOver(sock, tdns.AccessPost{Command: "list"})
+	switch errno := socketErrno(err); {
+	case errno == syscall.ENOENT || errno == syscall.ECONNREFUSED:
+		// Stopped: the config-file:-only entry.
+	case errno != 0:
+		return nil, fmt.Errorf("cannot open the daemon's local admin socket %s\n(%v). config add needs it: run it as root on the\ndaemon's host", info.Socket, errno)
+	case err != nil:
+		return nil, err
+	case list.Error:
+		return nil, errors.New(list.ErrorMsg)
+	default:
+		res.Running = true
+	}
+	cert := res.Running && tcpURL != ""
+	if cert {
+		switch {
+		case list.File == "":
+			return nil, errors.New(list.Msg) // the daemon's advice: no access file
+		case !info.UseTLS:
+			return nil, fmt.Errorf("%s: apiserver.usetls is false, but a client\ncertificate needs TLS on the TCP API; set usetls: true", info.ConfigFile)
+		case len(list.ServerPins) == 0:
+			return nil, fmt.Errorf("the daemon serves no certificate on its TCP API (is it\nlistening on %s?), so there is nothing to pin", info.Addresses[0])
+		}
+		entry.BaseURL, entry.AuthMethod, entry.TLSAuth, entry.Pins = tcpURL, "certificate", "pin", list.ServerPins
+	}
+	cc := ReadCliClientConf(o.CliConfig)
+	certPath, keyPath := clientCertPaths(cc)
+	client := o.ClientName
+	if client == "" {
+		client = defaultClientName()
+	}
+	switch {
+	case o.DryRun && cert:
+		verb := "use"
+		if _, err := os.Stat(certPath); err != nil {
+			verb = "make"
+		}
+		res.Steps = []string{verb + " your client certificate " + certPath,
+			"have the daemon add its pin as " + client + " (read-write)",
+			"check one request over TCP to " + tcpURL}
+	case cert:
+		// Refused before the enrolment, not after: a hidden list, a flow
+		// style.
+		if _, err := renderAdd(o, target, existing, entry, res.Created); err != nil {
+			return nil, err
+		}
+		if err := enrol(sock, certPath, keyPath, client, cc, &entry, res); err != nil {
+			return nil, err
+		}
+	}
 	if !o.DryRun {
 		ctx := o.Ctx
 		if ctx == nil {
 			ctx = context.Background()
 		}
+		// The CLI config is locked as well as the file edited, when they
+		// differ: two adds editing two files that feed one effective list
+		// would otherwise both read the old list.
 		unlock, err := lockCliConfigs(ctx, o.CliConfig, target)
 		if err != nil {
 			return nil, err
 		}
 		defer unlock()
-		// Cancelled while the lock was being taken: edit nothing.
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, err // cancelled while the lock was being taken
+		}
+		if existing, known, err = plan(); err != nil || known {
+			return res, err
 		}
 	}
-
-	// What is there now. A CLI config that exists but does not load cleanly is
-	// not one to edit.
-	var existing []ApiDetails
-	created := false
-	if _, err := os.Stat(o.CliConfig); err != nil {
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-		created = true
-	} else if existing, err = ReadApiServers(o.CliConfig); err != nil {
-		return nil, fmt.Errorf("cannot read the CLI config %s: %w", o.CliConfig, err)
-	}
-
-	// Already there? By config file or by API address, where an address is
-	// either of the daemon's: its TCP address or its socket.
-	sameDaemonAddr := func(u string) bool {
-		if hp := hostPort(u); hp != "" && tcpURL != "" && hp == hostPort(tcpURL) {
-			return true
-		}
-		return socketURL != "" && u == socketURL
-	}
-	for _, e := range existing {
-		// Resolved, so the same daemon config reached through a symlink is
-		// the same daemon, not a second one on the same address. The stored
-		// path stays as written.
-		sameFile := e.ConfigFile != "" && resolvedPath(e.ConfigFile) == resolvedPath(info.ConfigFile)
-		// A daemon with no TCP address has an entry with no baseurl: the
-		// same address, when it is the same file.
-		sameAddr := sameDaemonAddr(e.BaseURL) || (sameFile && e.BaseURL == "" && tcpURL == "")
-		// What the daemon config says an entry of e's kind should hold: a
-		// socket entry sends no key, a TCP entry the apikey over its TCP
-		// address. Compared against baseURL instead, a socket entry would
-		// read as a changed key and scheme whenever this add chose TCP.
-		wantKey, wantURL := info.ApiKey, tcpURL
-		switch {
-		case strings.HasPrefix(e.BaseURL, "unix://"):
-			wantKey, wantURL = "", socketURL
-		case e.BaseURL == "" && sameAddr:
-			wantKey = "" // a socket-only entry: no key
-		}
-		switch {
-		case sameFile && sameAddr:
-			// The same daemon, but it may have changed since: a new key, or
-			// usetls turned on or off on the same port. "Already known" would
-			// then leave the CLI with an entry that no longer works.
-			if diff := changedSettings(e, wantKey, wantURL); diff != "" {
-				return nil, fmt.Errorf("entry %q is this daemon, but its %s no longer match %s; edit that entry by hand (config add changes only an existing entry's pins)",
-					e.Name, diff, info.ConfigFile)
-			}
-			res.AlreadyKnown = e.Name
-			return repinKnownEntry(o, res, e, existing, target, info)
-		case sameFile:
-			return nil, fmt.Errorf("entry %q already points at %s but with a different API address (%s, the config says %s); edit or remove that entry by hand",
-				e.Name, info.ConfigFile, e.BaseURL, baseURL)
-		case sameAddr && e.ConfigFile == "":
-			// Typically the canonical entry written before config-file: existed.
-			res.AlreadyKnown = e.Name
-			res.Notes = append(res.Notes, fmt.Sprintf(
-				"entry %q already uses %s; it has no config-file: -- add \"config-file: %s\" to it if it is this daemon",
-				e.Name, e.BaseURL, info.ConfigFile))
-			if diff := changedSettings(e, wantKey, wantURL); diff != "" {
-				res.Notes = append(res.Notes, fmt.Sprintf(
-					"entry %q: its %s do not match %s; if it is this daemon, edit them by hand",
-					e.Name, diff, info.ConfigFile))
-				return res, nil
-			}
-			// Its key and scheme are this daemon's, on this daemon's address:
-			// pin it as the daemon's own entry would be.
-			return repinKnownEntry(o, res, e, existing, target, info)
-		case sameAddr:
-			return nil, fmt.Errorf("entry %q (config-file %s) already uses the API address %s, which %s also names; two daemons cannot listen on one address",
-				e.Name, e.ConfigFile, e.BaseURL, info.ConfigFile)
-		}
-	}
-
-	entry := ApiDetails{
-		BaseURL:    baseURL,
-		ApiKey:     info.ApiKey,
-		AuthMethod: "X-API-Key", // spelled exactly so: the client matches it case-sensitively
-		RootCA:     o.RootCA,
-		ConfigFile: info.ConfigFile,
-	}
-	if tcpURL == "" {
-		// Only the socket, found through config-file:. No key and no TLS: the
-		// daemon authenticates the socket by file permissions.
-		entry.ApiKey, entry.AuthMethod, entry.RootCA = "", "none", ""
-	}
-	if err := chooseEntryName(&entry, res, info.Role, existing, o); err != nil {
-		return nil, err
-	}
-	// The daemon's default API pair, made for the entry to pin, and written
-	// only once the entry will be.
-	var pending *tdns.DefaultApiCert
-	if strings.HasPrefix(entry.BaseURL, "https://") && entry.RootCA == "" {
-		// The daemon's own certificate, pinned: no CA, no name check, and
-		// nothing for the operator to do. A new entry that cannot be pinned
-		// is not written: tdns-ncli would refuse it (the owner's ruling,
-		// 2026-11-23). A daemon on its default API pair that has not
-		// started yet has none: config add makes it, as the daemon would.
-		var err error
-		if pending, err = defaultApiCert(o, res, info); err != nil {
-			return nil, err
-		}
-		pin := ""
-		switch {
-		case pending != nil:
-			pin = pending.Pin // written once the entry will be (writeApiCert)
-		case res.ApiCertWould == "":
-			if pin, err = daemonCertPin(info); err != nil {
-				return nil, unpinnableRefusal(info, err)
-			}
-		}
-		if pin != "" {
-			entry.TLSAuth, entry.Pins = "pin", []string{pin}
-		}
-	}
-
-	// Compared resolved, as the locks are: --config and --file may name the
-	// one (missing) CLI config through two aliases of its directory.
-	res.Entry, res.File, res.Created = entry, target, created && resolvedPath(target) == resolvedPath(o.CliConfig)
-
-	var src []byte
-	if !res.Created {
-		if src, err = os.ReadFile(target); err != nil {
-			return nil, err
-		}
-	}
-	out, _, err := spliceApiserver(src, entry)
-	if errors.Is(err, errFlowApiservers) && pending != nil {
-		// The entry pins a pair that is not written: given to add by hand,
-		// it would pin a key nobody has.
-		return nil, fmt.Errorf("%s: %w; nothing was written. Make the list block style (or name its file with --file), then run config add again: it creates the daemon's API certificate %s and pins it", target, err, pending.Cert)
-	}
-	if errors.Is(err, errFlowApiservers) {
-		return nil, fmt.Errorf("%s: %w; add this entry by hand:\n\n%s", target, err, renderEntry(maskKey(entry), itemLayout{indent: defItemIndent, gap: defDashGap, valueCol: defValueCol}))
-	}
+	out, err := renderAdd(o, target, existing, entry, res.Created)
 	if err != nil {
 		return nil, err
 	}
-	if res.Created {
-		out = append([]byte(newCliConfigHeader), out...)
-	}
-
-	// The result must load, the way the CLI will read it, as exactly the old
-	// list plus the new entry. The case this exists for: apiservers: is ALSO
-	// defined in an include or in cli.localconfig, which hides this one (lists
-	// are replaced, not merged).
-	want := append(append([]ApiDetails(nil), existing...), entry)
-	hidden := func(gerr error, verb string) string {
-		msg := fmt.Sprintf("after adding the entry to %s the CLI config %s as the old list plus the new entry", target, verb)
-		if gerr != nil {
-			msg += fmt.Sprintf(" (%v)", gerr)
-		}
-		return msg + ". Is apiservers: also defined in an include: file or in cli.localconfig, which hides it? Use --file to name the file that holds the list."
-	}
-
-	// Load it with the edited file laid over the real one, before anything is
-	// written, so the add is refused where it would fail and the preview
-	// (--dry-run) says the same. Only checking after the write meant undoing
-	// it, and an undo cannot always put back what the write changed: with
-	// --file a hard link to the file the CLI reads, the rename detaches the
-	// two names, and writing the old bytes back does not join them again.
-	fs, err := overlayFs(target, out)
-	if err != nil {
-		return nil, err
-	}
-	if got, gerr := readApiServers(o.CliConfig, fs); gerr != nil || !sameEntries(got, want) {
-		return nil, fmt.Errorf("%s Nothing was written.", hidden(gerr, "would not load"))
+	res.Entry, res.File = entry, target
+	if !res.Running && tcpURL != "" {
+		res.Update = fmt.Sprintf("%s config update %s --cert", ncliFor(o.CliConfig), entry.Name)
 	}
 	if o.DryRun {
 		return res, nil
 	}
-
-	// The entry will be written: the pair it pins first.
-	if err := writeApiCert(pending, res, info); err != nil {
+	if err := writeFileAtomic(target, out); err != nil {
+		if cert {
+			return nil, fmt.Errorf("%v.\nThe pin stays enrolled; the next config add reuses it", err)
+		}
 		return nil, err
 	}
-	if err := writeFileAtomic(target, out); err != nil {
-		return nil, fmt.Errorf("%v.%s", err, unwriteApiCert(pending, res))
-	}
 	res.Wrote = true
-
-	// Check the written result, and undo the change if it is not right.
-	got, gerr := ReadApiServers(o.CliConfig)
-	if gerr != nil || !sameEntries(got, want) {
-		var uerr error
-		if res.Created {
-			uerr = os.Remove(target)
-		} else {
-			uerr = writeFileAtomic(target, src)
-		}
-		msg := hidden(gerr, "does not load")
-		if uerr != nil {
-			return nil, fmt.Errorf("%s The change could NOT be undone (%v): restore %s by hand.%s", msg, uerr, target, unwriteApiCert(pending, res))
-		}
-		return nil, fmt.Errorf("%s The change was undone.%s", msg, unwriteApiCert(pending, res))
-	}
 	return res, nil
 }
 
@@ -594,239 +471,141 @@ func sameEntries(a, b []ApiDetails) bool {
 	return reflect.DeepEqual(a, b)
 }
 
-// certFilePin is the SPKI pin of the first certificate in the PEM file path.
-// Only an absolute path: the daemon opens a relative certfile from its own
-// working directory, which is not knowable from here, and pinning some other
-// file of the same name would make an entry that never connects.
-func certFilePin(path string) (string, error) {
-	if path == "" {
-		return "", errors.New("the daemon config has no apiserver.certfile")
-	}
-	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("apiserver.certfile %q is a relative path, which the daemon resolves from its working directory, so it is not known which file it serves", path)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	for {
-		var b *pem.Block
-		b, data = pem.Decode(data)
-		if b == nil {
-			return "", fmt.Errorf("%s holds no certificate", path)
+// cliEntries is the CLI config's apiservers: list, and whether the file is
+// not there yet. One that exists but does not load cleanly is not one to
+// edit.
+func cliEntries(cfg string) (existing []ApiDetails, missing bool, err error) {
+	if _, err := os.Stat(cfg); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, false, err
 		}
-		if b.Type == "CERTIFICATE" {
-			c, err := x509.ParseCertificate(b.Bytes)
-			if err != nil {
-				return "", fmt.Errorf("%s: %w", path, err)
-			}
-			return tdns.SPKISHA256(c), nil
-		}
+		return nil, true, nil
 	}
+	if existing, err = ReadApiServers(cfg); err != nil {
+		return nil, false, fmt.Errorf("cannot read the CLI config %s: %w", cfg, err)
+	}
+	return existing, false, nil
 }
 
-// defaultApiCert makes, in memory, the default API pair of a daemon that
-// names no certfile or keyfile and has not started yet (neither file is
-// there), as the daemon makes it at its first start
-// (tdns.NewDefaultApiCert): the entry pins it, and the caller writes it
-// once the entry will be written (writeApiCert), and not otherwise. With
-// o.DryRun it says it would (res.ApiCertWould) and makes nothing. nil and
-// no error when there is nothing to make. Half a pair is a refusal.
-func defaultApiCert(o AddOptions, res *AddResult, info *DaemonApi) (*tdns.DefaultApiCert, error) {
-	if !info.CertDefault {
-		return nil, nil
-	}
-	cert, key := tdns.ApiCertPaths(info.ConfigFile)
-	_, cerr := os.Stat(cert)
-	_, kerr := os.Stat(key)
-	switch {
-	case cerr == nil && kerr == nil:
-		return nil, nil // there: pinned as any certificate is
-	case cerr == nil || kerr == nil:
-		// Refused from what is there, never through EnsureDefaultApiCert:
-		// if the remaining file went meanwhile, it would write a pair (a dry
-		// run included) and leave no refusal to give.
-		return nil, refuseAdd(info, tdns.HalfApiCertPairError(cert, key, cerr == nil).Error(),
-			"put back the missing file, or remove the other (the daemon then makes a new pair, which config add pins), then run config add again")
-	case !errors.Is(cerr, os.ErrNotExist) || !errors.Is(kerr, os.ErrNotExist):
-		return nil, refuseAdd(info, fmt.Sprintf("the daemon's API certificate %s cannot be looked for (%v)", cert, errors.Join(cerr, kerr)),
-			"run config add as root on the daemon's host")
-	case o.DryRun:
-		res.ApiCertWould, res.ApiCertKey = cert, key
-		return nil, nil
-	}
-	p, err := tdns.NewDefaultApiCert(info.ConfigFile, info.Addresses)
-	if err != nil {
-		return nil, refuseAdd(info, fmt.Sprintf("the daemon's API certificate cannot be made for %s (%v)", cert, err),
-			"run config add as root on the daemon's host")
-	}
-	return p, nil
-}
-
-// writeApiCert writes p, the default API pair defaultApiCert made, for
-// res's entry, which pins it and is about to be written; nil writes
-// nothing. A pair that cannot be written, or that the daemon wrote first
-// (it started meanwhile), is a refusal, and nothing is written.
-func writeApiCert(p *tdns.DefaultApiCert, res *AddResult, info *DaemonApi) error {
-	if p == nil {
-		return nil
-	}
-	if err := p.Write(); err != nil {
-		fix := "run config add as root on the daemon's host"
-		if errors.Is(err, os.ErrExist) {
-			fix = "the daemon wrote its own (it started meanwhile?): run config add again, which pins that"
-		}
-		return refuseAdd(info, fmt.Sprintf("the daemon's API certificate cannot be created at %s (%v); nothing was written", p.Cert, err), fix)
-	}
-	res.ApiCertCreated, res.ApiCertKey = p.Cert, p.Key
-	return nil
-}
-
-// unwriteApiCert takes out p, the pair writeApiCert wrote, for an entry
-// that was not written after all, and says so, as a sentence to add to the
-// error ("" when there was none).
-func unwriteApiCert(p *tdns.DefaultApiCert, res *AddResult) string {
-	if p == nil || res.ApiCertCreated == "" {
-		return ""
-	}
-	res.ApiCertCreated = ""
-	if err := p.Remove(); err != nil {
-		return fmt.Sprintf(" The daemon's API certificate it had created, %s, could NOT be removed (%v): remove it and %s by hand.", p.Cert, err, p.Key)
-	}
-	return fmt.Sprintf(" The daemon's API certificate it had created, %s, is removed again.", p.Cert)
-}
-
-// refuseAdd is config add's refusal of daemon config info: why, and the fix.
-func refuseAdd(info *DaemonApi, why, fix string) error {
-	return fmt.Errorf("not adding %s: %s.\n  Fix: %s", info.ConfigFile, why, fix)
-}
-
-// unpinnableRefusal is the refusal of a new https entry whose daemon
-// certificate config add cannot pin (err, from daemonCertPin): why, and a
-// Fix line that fits. Most often it is the default API pair of a daemon that
-// has not started yet, which writes it at its first start.
-func unpinnableRefusal(info *DaemonApi, err error) error {
-	why := fmt.Sprintf("the daemon's certificate cannot be pinned (%v)", err)
-	var fix string
-	_, serr := os.Stat(info.CertFile)
-	switch {
-	case info.CertDefault && errors.Is(serr, os.ErrNotExist):
-		why = fmt.Sprintf("%s is not there yet: the daemon writes its API certificate there when it first starts", info.CertFile)
-		fix = "start the daemon (it writes its API certificate at first start), then run config add again"
-	case info.CertFile == "":
-		fix = "set apiserver.certfile to the certificate the daemon serves, then run config add again"
-	case !filepath.IsAbs(info.CertFile):
-		fix = "give apiserver.certfile as an absolute path, then run config add again"
-	case errors.Is(serr, os.ErrNotExist):
-		fix = fmt.Sprintf("put the daemon's certificate at %s, or correct apiserver.certfile, then run config add again", info.CertFile)
-	default:
-		fix = fmt.Sprintf("make %s a readable PEM certificate here (run config add as root on the daemon's host), then run config add again", info.CertFile)
-	}
-	return refuseAdd(info, why, fix)
-}
-
-// repinKnownEntry gives e, the existing entry for this daemon, the pin of the
-// daemon's certificate when it does not have it. An https entry with no pin is
-// broken: tdns-ncli refuses it. So is one whose pins are all of an earlier
-// certificate: every connection fails. Running config add again is how either
-// is fixed, the same way a new entry gets its pin.
-//
-// The entry keeps its other lines. tlsauth: becomes pin, and a rootca: line
-// goes (with pins the client does not read it). An entry that already
-// verified by pin keeps its old pins next to the new one, so a certificate
-// replaced on disk but not yet served still connects.
-//
-// The caller holds the CLI config's lock (unless o.DryRun).
-func repinKnownEntry(o AddOptions, res *AddResult, e ApiDetails, existing []ApiDetails, target string, info *DaemonApi) (*AddResult, error) {
-	if !strings.HasPrefix(strings.ToLower(e.BaseURL), "https://") {
-		return res, nil // the socket, or plain http: no certificate to pin
-	}
-	byPin := strings.EqualFold(e.TLSAuth, "pin") && len(e.Pins) > 0
-	pin, err := daemonCertPin(info)
-	if err != nil {
+// knownEntry looks in existing for an entry for the daemon of info: by its
+// config file (resolved, so a symlink to it is the same daemon), or by its
+// TCP address. When there is one it is left alone: res names it and the
+// config update command that would change it, if any. Two daemons that
+// such an entry would confuse are an error.
+func knownEntry(o AddOptions, res *AddResult, existing []ApiDetails, info *DaemonApi, tcpURL string) (bool, error) {
+	for _, e := range existing {
+		sameFile := e.ConfigFile != "" && resolvedPath(e.ConfigFile) == resolvedPath(info.ConfigFile)
+		// No TCP address: the entry reaches the daemon over its socket,
+		// through config-file: (or, written before that, a unix:// baseurl).
+		noTCP := e.BaseURL == "" || isUnixURL(e.BaseURL)
+		sameAddr := tcpURL != "" && hostPort(e.BaseURL) == hostPort(tcpURL)
 		switch {
-		case byPin:
-			res.Notes = append(res.Notes, fmt.Sprintf(
-				"the daemon's certificate could not be read (%v), so entry %q's pins were not checked", err, e.Name))
-		case e.TLSAuth == "" && e.RootCA == "":
-			// The entry tdns-ncli refuses (it verifies nothing).
-			// Over TCP, that is: root may reach the daemon over its local
-			// admin socket, which needs no pin, whatever the entry says --
-			// when the daemon serves one (config add writes config-file:,
-			// so the CLI can find it) and --tcp is not given.
-			res.Notes = append(res.Notes, fmt.Sprintf(
-				"entry %q has no pin, so tdns-ncli refuses it over TCP (root may still reach the daemon over its local admin socket, while the daemon serves one and --tcp is not given), and the daemon's certificate could not be pinned (%v); add tlsauth: pin and its pins: to the entry by hand (tdns-cli cert pin <apiserver.certfile>)", e.Name, err))
+		case sameFile && (sameAddr || noTCP):
+		case sameFile:
+			return false, fmt.Errorf("entry %q already points at %s but with a different API address (%s, the config says %q); edit or remove that entry by hand",
+				e.Name, info.ConfigFile, e.BaseURL, tcpURL)
+		case sameAddr && e.ConfigFile == "":
+			// Typically the canonical entry written before config-file: existed.
+		case sameAddr:
+			return false, fmt.Errorf("entry %q (config-file %s) already uses the API address %s, which %s also names; two daemons cannot listen on one address",
+				e.Name, e.ConfigFile, e.BaseURL, info.ConfigFile)
 		default:
-			// pkix, a rootca: file or rootca: insecure: it connects as it
-			// did, and stays as it is.
-			res.Notes = append(res.Notes, fmt.Sprintf(
-				"entry %q does not pin the daemon's certificate, and config add could not pin it (%v); the entry's verification is unchanged", e.Name, err))
+			continue
 		}
-		return res, nil
+		res.AlreadyKnown = e.Name
+		flag := "--cert" // from the key, or no address yet
+		switch {
+		case noTCP && tcpURL == "":
+			return true, nil // the socket is all there is
+		case e.AuthMethod == "certificate" && !noTCP:
+			flag = "--repin"
+		}
+		if e.ConfigFile == "" {
+			flag += " --daemon-config " + shellQuote(info.ConfigFile)
+		}
+		res.Update = fmt.Sprintf("%s config update %s %s", ncliFor(o.CliConfig), e.Name, flag)
+		return true, nil
 	}
-	if byPin && slices.Contains(e.Pins, pin) {
-		return res, nil
-	}
+	return false, nil
+}
 
-	up := e
-	up.TLSAuth, up.RootCA, up.Pins = "pin", "", []string{pin}
-	if byPin {
-		up.Pins = append(append([]string(nil), e.Pins...), pin)
-		res.Notes = append(res.Notes, fmt.Sprintf(
-			"entry %q pinned an earlier certificate; its old pins stay until the daemon serves the new one -- remove them then", e.Name))
-	}
-	if e.RootCA != "" {
-		res.Notes = append(res.Notes, fmt.Sprintf(
-			"entry %q: its rootca: %s is removed; the pin replaces it", e.Name, e.RootCA))
-	}
-	res.Pinned, res.Entry, res.File, res.Canonical = true, up, target, up.Role == ""
-
-	byHand := func(why error) error {
-		return fmt.Errorf("entry %q does not pin the daemon's certificate, and config add cannot rewrite it in %s (%v). Use --file to name the file that holds it, or give it these lines by hand:\n\n   tlsauth: pin\n   pins:    %s\n",
-			e.Name, target, why, pinsFlow(up.Pins))
-	}
-	src, err := os.ReadFile(target)
+// enrol is steps 1 to 3 of a running daemon's certificate entry: the
+// operator's client pair, made if there is none; its pin added by the
+// daemon over its local admin socket sock; one request over TCP with it and
+// the server pins. A refusal or a failed request stops the add before
+// anything is written. The pin stays enrolled after a failed request; the
+// next run reuses it ("already there").
+func enrol(sock *tdns.ApiClient, certPath, keyPath, client string, cc CliClientConf, entry *ApiDetails, res *AddResult) error {
+	pin, made, err := ensureClientCert(certPath, keyPath, client)
 	if err != nil {
-		return nil, byHand(err)
+		return err
 	}
-	out, err := repinEntryText(src, e.Name, up)
-	if err != nil {
-		return nil, byHand(err)
+	if made {
+		res.Steps = append(res.Steps, "Made your client certificate "+certPath)
 	}
-
-	// The result must load as exactly the old list with this one entry
-	// changed: checked before anything is written, and again after.
-	want := append([]ApiDetails(nil), existing...)
-	for i := range want {
-		if reflect.DeepEqual(want[i], e) {
-			want[i] = up
-			break
+	ans, err := accessOver(sock, tdns.AccessPost{Command: "add", Name: client, Pin: pin,
+		Role: "read-write", Comment: "tdns-ncli config add"})
+	switch {
+	case err != nil:
+		return err
+	case ans.Error:
+		return fmt.Errorf("the daemon did not add your pin; nothing was written:\n%s", ans.ErrorMsg)
+	}
+	res.Steps = append(res.Steps, "The daemon: "+strings.ReplaceAll(ans.Msg, "\n", "\n   "))
+	if len(ans.ServerPins) > 0 {
+		entry.Pins = ans.ServerPins
+	}
+	api, _, err := buildApiClient(*entry, cc, "", "")
+	if err == nil {
+		api.Client.Timeout = 10 * time.Second
+		var pr tdns.PingResponse
+		if pr, err = api.SendPing(1, false); err == nil {
+			res.Steps = append(res.Steps, "TCP check: ok ("+pingHow(api, pr)+")")
+			return nil
 		}
 	}
+	return fmt.Errorf("the daemon added your pin, but a request over TCP to\n%s failed: %v\nNothing was written. The pin stays enrolled: once that is\nfixed, run config add again, which reuses it", entry.BaseURL, err)
+}
+
+// renderAdd is target with entry added, checked to load, the way the CLI
+// will read it, as exactly the old list plus the new entry. Nothing is
+// written: the edited file is laid over the real one (overlayFs). The case
+// this exists for: apiservers: is ALSO defined in an include or in
+// cli.localconfig, which hides this one (lists are replaced, not merged).
+// created: target is the CLI config, and it is not there yet.
+func renderAdd(o AddOptions, target string, existing []ApiDetails, entry ApiDetails, created bool) ([]byte, error) {
+	var src []byte
+	if !created {
+		var err error
+		if src, err = os.ReadFile(target); err != nil {
+			return nil, err
+		}
+	}
+	out, _, err := spliceApiserver(src, entry)
+	if errors.Is(err, errFlowApiservers) {
+		return nil, fmt.Errorf("%s: %w; nothing was written. Make the list block style (or name its file with --file), or add this entry by hand:\n\n%s",
+			target, err, renderEntry(entry, itemLayout{indent: defItemIndent, gap: defDashGap, valueCol: defValueCol}))
+	}
+	if err != nil {
+		return nil, err
+	}
+	if created {
+		out = append([]byte(newCliConfigHeader), out...)
+	}
+	want := append(append([]ApiDetails(nil), existing...), entry)
 	fs, err := overlayFs(target, out)
 	if err != nil {
 		return nil, err
 	}
 	if got, gerr := readApiServers(o.CliConfig, fs); gerr != nil || !sameEntries(got, want) {
-		if gerr == nil {
-			gerr = errors.New("the edited file does not load as that entry pinned")
+		why := ""
+		if gerr != nil {
+			why = fmt.Sprintf(" (%v)", gerr)
 		}
-		return nil, byHand(gerr)
+		return nil, fmt.Errorf("after adding the entry to %s the CLI config would not load as the old list plus the new entry%s. Is apiservers: also defined in an include: file or in cli.localconfig, which hides it? Use --file to name the file that holds the list. Nothing was written.",
+			target, why)
 	}
-	if o.DryRun {
-		return res, nil
-	}
-	if err := writeFileAtomic(target, out); err != nil {
-		return nil, err
-	}
-	res.Wrote = true
-	if got, gerr := ReadApiServers(o.CliConfig); gerr != nil || !sameEntries(got, want) {
-		if uerr := writeFileAtomic(target, src); uerr != nil {
-			return nil, fmt.Errorf("pinning entry %q in %s left a CLI config that does not load as intended, and the change could NOT be undone (%v): restore %s by hand", e.Name, target, uerr, target)
-		}
-		return nil, fmt.Errorf("pinning entry %q in %s left a CLI config that does not load as intended; the change was undone", e.Name, target)
-	}
-	return res, nil
+	return out, nil
 }
 
 // hostPort returns the host:port of a base URL, lower-cased, or "". A URL
@@ -846,31 +625,6 @@ func hostPort(baseURL string) string {
 		}
 	}
 	return strings.ToLower(u.Host)
-}
-
-// changedSettings names the settings in which entry e no longer matches the
-// daemon config it points at -- the API key, and the URL scheme that
-// apiserver.usetls decides -- or returns "". Neither key is printed.
-func changedSettings(e ApiDetails, apiKey, baseURL string) string {
-	var what []string
-	if e.ApiKey != apiKey {
-		what = append(what, "apikey")
-	}
-	if a, b := urlScheme(e.BaseURL), urlScheme(baseURL); a != b {
-		what = append(what, fmt.Sprintf("baseurl scheme (%s; apiserver.usetls now means %s)", a, b))
-	}
-	if len(what) == 0 {
-		return ""
-	}
-	return strings.Join(what, " and ") + " settings"
-}
-
-func urlScheme(baseURL string) string {
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		return ""
-	}
-	return strings.ToLower(u.Scheme)
 }
 
 // overlayFs is the real file system, read-only, with the file at path reading
@@ -947,60 +701,63 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// maskKey returns e with the API key hidden, for anything printed. The key is
-// the one secret in the entry and has no business in terminal scrollback.
-func maskKey(e ApiDetails) ApiDetails {
-	e.ApiKey = "********"
-	return e
-}
-
+// printAddResult says what config add did, verdict first, in lines of at
+// most 72 where it can (a path is as long as it is).
 func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
-	for _, n := range r.Notes {
-		fmt.Fprintf(w, "Note: %s\n", n)
+	if r.AlreadyKnown != "" {
+		fmt.Fprintf(w, "Already known as %q; nothing written.\n", r.AlreadyKnown)
+	} else {
+		kind := "instance of " + r.Entry.Role
+		if r.Canonical {
+			kind = "canonical"
+		}
+		switch {
+		case dryRun && r.Created:
+			fmt.Fprintf(w, "Would create %s with %q (%s):\n\n", r.File, r.Entry.Name, kind)
+		case dryRun:
+			fmt.Fprintf(w, "Would add %q (%s) to %s:\n\n", r.Entry.Name, kind, r.File)
+		case r.Created:
+			fmt.Fprintf(w, "Created %s with %q (%s):\n\n", r.File, r.Entry.Name, kind)
+		default:
+			fmt.Fprintf(w, "Added %q (%s) to %s:\n\n", r.Entry.Name, kind, r.File)
+		}
+		// Unaligned, so that a line of pins fits.
+		fmt.Fprint(w, renderEntry(r.Entry, itemLayout{indent: 3, gap: 1}))
 	}
-	if r.AlreadyKnown != "" && !r.Pinned {
-		fmt.Fprintf(w, "Already known as %q; nothing changed.\n", r.AlreadyKnown)
-		return
-	}
-	kind := "instance of " + r.Entry.Role
-	if r.Canonical {
-		kind = "canonical"
-	}
-	switch {
-	case dryRun && r.Pinned:
-		fmt.Fprintf(w, "Already known as %q (%s); would pin the daemon's certificate in %s:\n\n", r.AlreadyKnown, kind, r.File)
-	case r.Pinned:
-		fmt.Fprintf(w, "Already known as %q (%s); pinned the daemon's certificate in %s:\n\n", r.AlreadyKnown, kind, r.File)
-	case dryRun && r.Created:
-		fmt.Fprintf(w, "Would create %s with %q (%s):\n\n", r.File, r.Entry.Name, kind)
-	case dryRun:
-		fmt.Fprintf(w, "Would add %q (%s) to %s:\n\n", r.Entry.Name, kind, r.File)
-	case r.Created:
-		fmt.Fprintf(w, "Created %s with %q (%s):\n\n", r.File, r.Entry.Name, kind)
-	default:
-		fmt.Fprintf(w, "Added %q (%s) to %s:\n\n", r.Entry.Name, kind, r.File)
-	}
-	fmt.Fprint(w, renderEntry(maskKey(r.Entry), itemLayout{indent: 3, gap: 1, valueCol: defValueCol}))
-	switch {
-	case r.ApiCertCreated != "":
-		fmt.Fprintf(w, "\nCreated the daemon's API certificate %s\n(key %s, mode 0600); the daemon uses it when it starts.\n", r.ApiCertCreated, r.ApiCertKey)
-	case r.ApiCertWould != "":
-		fmt.Fprintf(w, "\nWould create the daemon's API certificate %s\n(key %s, mode 0600) and pin it; the daemon uses it when it starts.\n", r.ApiCertWould, r.ApiCertKey)
-	}
-	if dryRun {
-		return
-	}
-	word := r.Entry.Name
-	if r.Canonical {
-		for role, key := range builtinRoles() {
-			if key == r.Entry.Name {
-				word = role
-			}
+	if len(r.Steps) > 0 {
+		if dryRun {
+			fmt.Fprint(w, "\nFirst it would:\n")
+		} else {
+			fmt.Fprintln(w)
+		}
+		for _, s := range r.Steps {
+			fmt.Fprintf(w, " - %s\n", s)
 		}
 	}
-	// The CLI config the add read, not the --file it edited: --file only
-	// names where in that config the list lives.
-	fmt.Fprintf(w, "\nTry it:  %s %s ping\n", ncliFor(cfg), word)
+	if len(r.Notes) > 0 {
+		fmt.Fprintln(w)
+	}
+	for _, n := range r.Notes {
+		fmt.Fprintf(w, "Note: %s\n", strings.Join(wrapText(n, 66), "\n      "))
+	}
+	switch {
+	case r.AlreadyKnown != "" && r.Update != "":
+		fmt.Fprintf(w, "\nconfig add writes new entries only. To change this one:\n\n   %s\n", r.Update)
+	case r.Update != "":
+		fmt.Fprintf(w, "\nThe daemon is not running. Once it is up, this gives the\nentry its address and your client certificate:\n\n   %s\n", r.Update)
+	case r.Running && !dryRun && r.AlreadyKnown == "":
+		word := r.Entry.Name
+		if r.Canonical {
+			for role, key := range builtinRoles() {
+				if key == r.Entry.Name {
+					word = role
+				}
+			}
+		}
+		// The CLI config the add read, not the --file it edited: --file
+		// only names where in that config the list lives.
+		fmt.Fprintf(w, "\nTry it:  %s %s ping\n", ncliFor(cfg), word)
+	}
 }
 
 // --------------------------------------------------------------- config list
