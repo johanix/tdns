@@ -630,3 +630,82 @@ func TestAnErrorChangeOnAReplacedZoneDoesNotOutliveTheDelete(t *testing.T) {
 		t.Fatalf("the deleted name came back (ZoneData %p; first %p, second %p)", zd, first, second)
 	}
 }
+
+// A --keep-keys delete that comes while a SIG(0) rollover is past its
+// check of zd.removed, with the rollover lock held, waits for the new key:
+// the key is one of the kept ones, and counted. The rollover then finds
+// the zone removed and does not send the key to the parent; a rollover
+// started after the delete makes no key at all. The fake parent fails the
+// test on any UPDATE.
+func TestAKeepKeysDeleteWaitsForARolloverPastItsCheck(t *testing.T) {
+	zd, kdb, fp := newRolloverZone(t)
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	if zd.Options == nil {
+		zd.Options = map[ZoneOption]bool{}
+	}
+	zd.Options[OptApiManagedZone] = true
+	Zones.Set(zd.ZoneName, zd)
+	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
+	before := len(rolloverKeyStates(t, kdb, zd.ZoneName))
+
+	type outcome struct {
+		r   *ZoneRemoval
+		err error
+	}
+	deleted := make(chan outcome, 1)
+	testHookSig0RolloverGenerating = func() {
+		go func() {
+			r, err := conf.RemoveDynamicZone(zd.ZoneName, true)
+			deleted <- outcome{r, err}
+		}()
+		for deadline := time.Now().Add(5 * time.Second); !zd.removed.Load(); time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("the delete did not mark the zone removed")
+			}
+		}
+		// The rest of the delete, up to the count of the kept keys, is
+		// local and quick; given time, it must still be waiting.
+		select {
+		case o := <-deleted:
+			t.Errorf("the --keep-keys delete returned while a rollover past its check held the lock (%+v)", o.r)
+			deleted <- o
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	t.Cleanup(func() { testHookSig0RolloverGenerating = nil })
+
+	_, _, _, _, err := zd.RolloverSig0KeyWithParent(context.Background(), dns.ED25519, "complete")
+	testHookSig0RolloverGenerating = nil
+	if !errors.Is(err, errRolloverZoneGone) {
+		t.Errorf("the rollover the delete came during returned %v, want %v", err, errRolloverZoneGone)
+	}
+	var o outcome
+	select {
+	case o = <-deleted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the --keep-keys delete did not return")
+	}
+	if o.err != nil {
+		t.Fatalf("the --keep-keys delete: %v", o.err)
+	}
+	kept := rolloverKeyStates(t, kdb, zd.ZoneName)
+	if len(kept) != before+1 {
+		t.Errorf("SIG(0) keys after the delete = %v, want the %d there before and the rollover's new one", kept, before)
+	}
+	if o.r.Sig0Keys != len(kept) {
+		t.Errorf("the delete counted %d SIG(0) keys kept, the keystore holds %d", o.r.Sig0Keys, len(kept))
+	}
+
+	_, _, _, _, err = zd.RolloverSig0KeyWithParent(context.Background(), dns.ED25519, "complete")
+	if !errors.Is(err, errRolloverZoneGone) {
+		t.Errorf("a rollover after the delete returned %v, want %v", err, errRolloverZoneGone)
+	}
+	if got := rolloverKeyStates(t, kdb, zd.ZoneName); !maps.Equal(got, kept) {
+		t.Errorf("a rollover after the delete changed the kept keys: %v, want %v", got, kept)
+	}
+	if len(fp.sent) != 0 {
+		t.Errorf("%d UPDATEs sent to the parent for a deleted zone", len(fp.sent))
+	}
+	assertKeystoreFree(t, kdb)
+}
