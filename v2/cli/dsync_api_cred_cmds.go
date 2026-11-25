@@ -331,9 +331,9 @@ func sendDsyncApiCredCommand(role string, data tdns.DsyncApiCredentialPost) tdns
 
 	status, buf, err := api.Post("/dsync-api/credential", bytebuf.Bytes())
 	if err != nil {
-		// The role, not resp.AppName: on a transport error the response is the
-		// zero value and would render the app name as empty.
-		fmt.Printf("Error from %s: %v\n", role, err)
+		// The client's name, not resp.AppName: on a transport error the
+		// response is the zero value and would render the app name as empty.
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if tdns.Globals.Verbose {
@@ -346,7 +346,7 @@ func sendDsyncApiCredCommand(role string, data tdns.DsyncApiCredentialPost) tdns
 		os.Exit(1)
 	}
 	if resp.Error {
-		fmt.Printf("Error from %s: %s\n", role, resp.ErrorMsg)
+		printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 		os.Exit(1)
 	}
 	return resp
@@ -487,7 +487,7 @@ func sendDsyncApiCertCredCommand(role string, data tdns.DsyncApiCertCredentialPo
 
 	status, buf, err := api.Post("/dsync-api/cert-credential", bytebuf.Bytes())
 	if err != nil {
-		fmt.Printf("Error from %s: %v\n", role, err)
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if tdns.Globals.Verbose {
@@ -500,7 +500,7 @@ func sendDsyncApiCertCredCommand(role string, data tdns.DsyncApiCertCredentialPo
 		os.Exit(1)
 	}
 	if resp.Error {
-		fmt.Printf("Error from %s: %s\n", role, resp.ErrorMsg)
+		printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 		os.Exit(1)
 	}
 	return resp

@@ -97,7 +97,7 @@ func runZoneDelegationSyncLog(role string) {
 		Limit:   syncLogLimit,
 	})
 	if err != nil {
-		fmt.Printf("Error from %s: %s\n", role, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if dr.SyncLog == nil {
@@ -155,7 +155,7 @@ func runZoneDelegationGet(role string) {
 		ChildZone: delegationChild,
 	})
 	if err != nil {
-		fmt.Printf("Error from %s: %s\n", role, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Error {

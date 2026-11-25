@@ -97,6 +97,10 @@ var apiRouteRoles = map[string]map[string]ApiRole{
 		"status": RoleReadOnly,
 		"export": RoleReadOnly,
 		"sync":   RoleReadWrite,
+		// The delegation-sync log of every child, answered before the
+		// handler's zone lookup. Admin, as it was by default before it
+		// was listed; whether to open it is a decision of its own.
+		"sync-log": RoleAdmin,
 	},
 	"/api/v1/catalog": {
 		"zone-list":         RoleReadOnly,

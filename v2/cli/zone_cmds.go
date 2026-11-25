@@ -303,7 +303,7 @@ func newZoneDynamicCmds(role string) []*cobra.Command {
 	var dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo string
 	var dzTransferSrc []string
 	var dzZoneType, dzTemplate string
-	var dzClearTemplate bool
+	var dzClearTemplate, dzKeepKeys bool
 	var dzPrimaries, dzOptions []string
 
 	add := &cobra.Command{
@@ -341,12 +341,13 @@ func newZoneDynamicCmds(role string) []*cobra.Command {
 
 	del := &cobra.Command{
 		Use:   "delete",
-		Short: "Delete a dynamic (API-managed) zone",
+		Short: "Delete a dynamic (API-managed) zone, with its DNSSEC and SIG(0) keys",
 		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneDelete(role)
+			RunZoneDelete(role, dzKeepKeys)
 		},
 	}
 	del.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to delete")
+	del.Flags().BoolVar(&dzKeepKeys, "keep-keys", false, "Keep the zone's DNSSEC and SIG(0) keys in the keystore, for a re-add of the zone to take back (default: delete them with the zone)")
 	del.MarkFlagRequired("zone")
 
 	modify := &cobra.Command{
@@ -420,7 +421,7 @@ func runZoneSimpleCmd(role, command string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -443,7 +444,7 @@ func runZoneShowNsec(role string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -476,7 +477,7 @@ func RunZoneReload(parent string, args []string) {
 	})
 
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -499,7 +500,7 @@ func RunZoneWrite(parent string, args []string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -524,7 +525,7 @@ func RunZoneSetPolicy(parent, policy string) {
 		Policy:  policy,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -553,7 +554,7 @@ func RunZoneResetPolicy(parent string, confirm bool) {
 		Force:   confirm,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -577,7 +578,7 @@ func RunZoneProxyKey(parent string) {
 		Zone:    dns.Fqdn(tdns.Globals.Zonename),
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Error {
@@ -599,7 +600,7 @@ func RunZoneList(parent string, args []string) {
 		Command: "list-zones",
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -635,7 +636,7 @@ func RunZoneDesc(parent string, args []string) {
 		Zone:    zone,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Msg != "" {
@@ -664,7 +665,7 @@ func RunZoneBump(parent string, args []string) {
 	})
 
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -732,7 +733,7 @@ func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey 
 		TransferSrc: transferSrc,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	printZoneWarnings(cr.Warnings)
@@ -749,7 +750,7 @@ func printZoneWarnings(warnings []string) {
 	}
 }
 
-func RunZoneDelete(role string) {
+func RunZoneDelete(role string, keepKeys bool) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
 		os.Exit(1)
@@ -759,16 +760,64 @@ func RunZoneDelete(role string) {
 		log.Fatalf("Error getting API client for %s: %v", role, err)
 	}
 	cr, err := SendZoneCommand(api, tdns.ZonePost{
-		Command: "delete",
-		Zone:    dns.Fqdn(tdns.Globals.Zonename),
+		Command:  "delete",
+		Zone:     dns.Fqdn(tdns.Globals.Zonename),
+		KeepKeys: keepKeys,
 	})
-	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+	// A delete whose keys could not follow the zone is an error with a
+	// report: the zone is gone, and the report says how to finish.
+	if err != nil && cr.Removal == nil {
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
-	if cr.Msg != "" {
-		fmt.Printf("%s\n", cr.Msg)
+	for _, line := range zoneDeleteLines(cr) {
+		fmt.Println(line)
 	}
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
+// zoneDeleteLineWidth is the widest line zoneDeleteLines wraps to. A
+// command to copy is never wrapped, so a long zone name can pass it.
+const zoneDeleteLineWidth = 72
+
+// zoneDeleteLines is a zone delete's outcome as printed: the server's
+// message, verdict first, then its warnings.
+func zoneDeleteLines(cr tdns.ZoneResponse) []string {
+	var out []string
+	for _, line := range strings.Split(cr.Msg, "\n") {
+		switch {
+		case line == "":
+		// An indented line is a command to copy (Msg indents only those): a
+		// wrapped one would run without the rest of its arguments.
+		case strings.HasPrefix(line, "  "):
+			out = append(out, line)
+		default:
+			out = append(out, wrapIndented(line, zoneDeleteLineWidth)...)
+		}
+	}
+	for _, w := range cr.Warnings {
+		out = append(out, wrapIndented("WARNING: "+w, zoneDeleteLineWidth)...)
+	}
+	return out
+}
+
+// wrapIndented word-wraps s to width, keeping its leading indent and
+// indenting the continuation lines two more spaces, so that a wrapped
+// sentence reads as one.
+func wrapIndented(s string, width int) []string {
+	text := strings.TrimLeft(s, " ")
+	indent := s[:len(s)-len(text)]
+	lines := wrapText(text, width-len(indent))
+	if len(lines) == 0 {
+		return nil
+	}
+	out := []string{indent + lines[0]}
+	for _, l := range wrapText(strings.Join(lines[1:], " "), width-len(indent)-2) {
+		out = append(out, indent+"  "+l)
+	}
+	return out
 }
 
 func RunZoneModify(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string, transferSrc []string, template string, clearTemplate bool) {
@@ -801,7 +850,7 @@ func RunZoneModify(role string, primaries []string, primaryKey string, options [
 	}
 	cr, err := SendZoneCommand(api, post)
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	printZoneWarnings(cr.Warnings)
@@ -817,7 +866,7 @@ func RunZoneListDynamic(role string) {
 	}
 	cr, err := SendZoneCommand(api, tdns.ZonePost{Command: "list-dynamic"})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if len(cr.Zones) == 0 {
@@ -901,8 +950,7 @@ func RunZoneSetOwner(role, zone, owner string) {
 		ApiOwner: owner,
 	})
 	if err != nil {
-		// The daemon's refusal is the verdict, and fits a line as it is.
-		fmt.Println(err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	fmt.Print(formatZoneSetOwner(cr))
@@ -924,7 +972,11 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 
 	status, buf, err := api.Post("/zone", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
+		if rerr, ok := refusalError(err); ok {
+			cr.AppName = api.Name
+			return cr, rerr
+		}
+		// Not logged: the caller prints it (printDaemonError), once.
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
 	if tdns.Globals.Verbose {
@@ -937,7 +989,7 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("%s", cr.ErrorMsg)
+		return cr, &daemonError{msg: cr.ErrorMsg}
 	}
 
 	return cr, nil
@@ -1325,7 +1377,7 @@ func RunZoneSync(parent string, args []string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %s: %s\n", parent, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Msg != "" {

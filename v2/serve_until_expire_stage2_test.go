@@ -242,7 +242,7 @@ func TestDeletingAZoneDropsItsStamp(t *testing.T) {
 	if err := kdb.SetZoneRefreshState("example.", 7, time.Now().Add(-time.Hour)); err != nil {
 		t.Fatalf("SetZoneRefreshState: %v", err)
 	}
-	if _, err := conf.RemoveDynamicZone("example."); err != nil {
+	if _, err := conf.RemoveDynamicZone("example.", false); err != nil {
 		t.Fatalf("RemoveDynamicZone: %v", err)
 	}
 	if _, ok, _ := kdb.GetZoneRefreshState("example."); ok {

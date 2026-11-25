@@ -845,6 +845,15 @@ type ApiServerConf struct {
 	// The file is read by its own loader (api_access.go), not decoded with
 	// this config, and tdns-ncli manages it.
 	AccessFile string `yaml:"access-file" mapstructure:"access-file"`
+
+	// AppClients names the access-file clients that are application
+	// clients (apiserver.app-clients): over their certificate they see and
+	// manage only what they own (docs/2026-11-23-tdns-api-ownership-design.md
+	// 4.2, 4.5). Here and not in the access file, which tdns-ncli rewrites:
+	// this is the operator's policy. It goes into force with the access
+	// file, as one policy (accessState), so a reload never pairs a new list
+	// with an old file or the reverse.
+	AppClients []string `yaml:"app-clients" mapstructure:"app-clients"`
 }
 
 type ApiServerAppConf struct {
@@ -1454,6 +1463,7 @@ func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	// admin again, from a config that was refused.
 	runningApiServer := conf.ApiServer
 	runningApiServer.Addresses = slices.Clone(conf.ApiServer.Addresses)
+	runningApiServer.AppClients = slices.Clone(conf.ApiServer.AppClients)
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)

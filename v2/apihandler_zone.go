@@ -56,6 +56,18 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			"setowner":     true,
 		}
 		zd, exist := Zones.Get(zp.Zone)
+		// An application client acts only on its own zones (api_app.go),
+		// checked on the zone just resolved, the one the command acts on.
+		// Before the existence check: a zone that is not there and one
+		// that is not the caller's get the same answer.
+		app := AppClientOf(r.Context())
+		if !zoneLookupExempt[zp.Command] {
+			if err := appZoneRefusal(app, zp.Zone, zd); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+		}
 		if !exist && !zoneLookupExempt[zp.Command] {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zp.Zone)
@@ -331,6 +343,11 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			if zp.Zone != "" {
 				zname := dns.Fqdn(zp.Zone)
 				zd, ok := Zones.Get(zname)
+				if err := appZoneRefusal(app, zname, zd); err != nil {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+					return
+				}
 				if !ok || zd == nil {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zname)
@@ -344,6 +361,12 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 			lgApi.Debug("listing zones", "count", len(Zones.Keys()))
 			for item := range Zones.IterBuffered() {
+				// An application client sees its own zones only. A catalog
+				// zone of its own is listed, and so are its members, whose
+				// API owner is that zone's.
+				if !appOwnsZone(app, item.Val) {
+					continue
+				}
 				zones[item.Key] = buildListZoneConf(item.Val, item.Key, kdb)
 			}
 			resp.Zones = zones
@@ -371,6 +394,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				TsigAlgo:    zp.TsigAlgo,
 				TransferSrc: zp.TransferSrc,
 				ApiOwner:    CallerApiOwner(r.Context()),
+				AppClient:   app,
 			}, true)
 			if err != nil {
 				resp.Error = true
@@ -383,13 +407,24 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			resp.Warnings = Conf.zoneDaneWarnings(lgApi, zp.Zone)
 
 		case "delete":
-			msg, err := Conf.RemoveDynamicZone(zp.Zone)
+			removal, err := Conf.RemoveDynamicZoneFor(app, zp.Zone, zp.KeepKeys)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 				return
 			}
-			resp.Msg = msg
+			resp.Zone = removal.Zone
+			resp.Removal = removal
+			resp.Msg = removal.Msg()
+			resp.Warnings = removal.Warnings()
+			// The zone is gone, but keys left behind are a delete that did
+			// not finish: a client that reads only Error must not take it
+			// for a success.
+			// So is a removal a crash could still undo.
+			if (removal.KeysError != "" && !removal.KeepKeys) || removal.NotSynced != "" {
+				resp.Error = true
+				resp.ErrorMsg = resp.Msg
+			}
 
 		case "modify":
 			msg, err := Conf.ModifyDynamicZone(r.Context(), DynamicZoneInput{
@@ -404,6 +439,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				TsigAlgo:      zp.TsigAlgo,
 				TransferSrc:   zp.TransferSrc,
 				ApiOwner:      CallerApiOwner(r.Context()),
+				AppClient:     app,
 			})
 			if err != nil {
 				resp.Error = true
@@ -434,7 +470,11 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			// delete/modify.
 			zones := map[string]ZoneConf{}
 			for _, zc := range Conf.getDynamicZonesFromZonesMap() {
-				if zd, ok := Zones.Get(zc.Name); ok {
+				zd, ok := Zones.Get(zc.Name)
+				if !appOwnsZone(app, zd) {
+					continue
+				}
+				if ok {
 					zc.Provisioning = zoneProvisioning(zd)
 					zc.ApiManaged = zd.Options[OptApiManagedZone]
 					// The effective owner, where the persisted form has the
@@ -1238,6 +1278,11 @@ func APIzoneParentSyncWith(ctx context.Context, app *AppDetails, refreshq chan Z
 		}()
 
 		zd, exist := Zones.Get(req.Zone)
+		if err := appZoneRefusal(AppClientOf(r.Context()), req.Zone, zd); err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return
+		}
 		if !exist {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %q is unknown", req.Zone)
@@ -1374,6 +1419,11 @@ func APIzoneChildSync(ctx context.Context, app *AppDetails) func(w http.Response
 		}()
 
 		zd, exist := Zones.Get(req.Zone)
+		if err := appZoneRefusal(AppClientOf(r.Context()), req.Zone, zd); err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return
+		}
 		if !exist {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %q is unknown", req.Zone)

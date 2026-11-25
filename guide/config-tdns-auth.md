@@ -153,6 +153,28 @@ clients:
   status` shows the running policy. `config check` validates the file with the
   daemon's own code.
 
+### Application clients
+
+```yaml
+apiserver:
+   access-file: /etc/tdns/tdns-auth-access.yaml
+   app-clients: [ provisioner ]
+```
+
+`app-clients` names access-file clients that are **applications** rather than
+operators: over their certificate they see and manage only the zones whose
+API owner they are (`zone list-dynamic` shows it). Lists are filtered to those
+zones, a command on any other zone is refused, a zone they add is theirs, and
+commands that act on the whole server (config, scanner, the resolver, the
+keystore, and others) are refused to them. Their role still applies first. An
+operator hands a zone over with `zone setowner <zone> cert:<name>` (zones made
+over the API), or with `api-owner: cert:<name>` in a config-file zone's config.
+The list is in the daemon config, not the access file, because tdns-ncli
+rewrites the access file; it goes into force with the access file at a reload.
+`config check` warns about a name the access file lacks, and about the API key
+still being accepted, which bypasses every application limit. Design:
+docs/2026-11-23-tdns-api-ownership-design.md.
+
 ## TSIG configuration
 
 TSIG keys may be declared statically in the config file, or added at runtime to

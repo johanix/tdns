@@ -55,12 +55,12 @@ func newDelStatusCmd() *cobra.Command {
 				Zone:    tdns.Globals.Zonename,
 			})
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if dr.Error {
-				fmt.Printf("Error: %s\n", dr.ErrorMsg)
+				printDaemonErrorMsg(api.Name, dr.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -98,12 +98,12 @@ func newDelSyncCmd() *cobra.Command {
 				Zone:    tdns.Globals.Zonename,
 			})
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if dr.Error {
-				fmt.Printf("Error: %s\n", dr.ErrorMsg)
+				printDaemonErrorMsg(api.Name, dr.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -193,7 +193,7 @@ func newDelExportCmd() *cobra.Command {
 				Outfile: outfile,
 			})
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
@@ -253,7 +253,11 @@ func SendDelegationCmd(api *tdns.ApiClient, data tdns.DelegationPost) (tdns.Dele
 
 	status, buf, err := api.Post("/delegation", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
+		if rerr, ok := refusalError(err); ok {
+			dr.AppName = api.Name
+			return dr, rerr
+		}
+		// Not logged: the caller prints it (printDaemonError), once.
 		return dr, fmt.Errorf("error from api post: %v", err)
 	}
 	if tdns.Globals.Verbose {
@@ -266,7 +270,7 @@ func SendDelegationCmd(api *tdns.ApiClient, data tdns.DelegationPost) (tdns.Dele
 	}
 
 	if dr.Error {
-		return dr, fmt.Errorf("%s", dr.ErrorMsg)
+		return dr, &daemonError{msg: dr.ErrorMsg}
 	}
 
 	return dr, nil

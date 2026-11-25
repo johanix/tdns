@@ -48,6 +48,15 @@ func APICatalog(app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
 
 		lgApi.Debug("received /catalog request", "cmd", data.Command, "catalog", data.CatalogZone, "zone", data.Zone, "group", data.Group)
 
+		if err := catalogAppRefusal(AppClientOf(r.Context()), data); err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
 		switch data.Command {
 		case "create":
 			err = handleCatalogCreate(data.CatalogZone, CallerApiOwner(r.Context()), &resp)
@@ -107,6 +116,48 @@ func APICatalog(app *AppDetails) func(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(resp)
 	}
+}
+
+// catalogAppRefusal is why the application client app may not run the
+// catalog command in data, or nil when it may (app "" is no application
+// client). The zones are named as the catalog handlers name them
+// (dns.Fqdn) and looked up as they look them up. An empty name is left to
+// the handler, which refuses it before it does anything.
+func catalogAppRefusal(app string, data CatalogPost) error {
+	if app == "" {
+		return nil
+	}
+	own := func(name string) error {
+		if name == "" {
+			return nil
+		}
+		return appZoneRefusalByName(app, dns.Fqdn(name))
+	}
+	switch ApiAppScopeOf("/api/v1/catalog", data.Command) {
+	case AppNewZone:
+		// catalog create: an existing zone is refused by the handler,
+		// and the new catalog zone records the caller as its owner.
+		return nil
+	case AppOwnCatalog:
+		if err := own(data.CatalogZone); err != nil {
+			return err
+		}
+		// A config-file catalog zone handed to the application is still
+		// not deleted over the API, as zone delete deletes no
+		// config-file zone (design 4.3).
+		if strings.EqualFold(strings.TrimSpace(data.Command), "delete") {
+			if zd, ok := Zones.Get(dns.Fqdn(data.CatalogZone)); ok && zd.fromStaticConfig.Load() {
+				return fmt.Errorf("catalog zone %s is a config-file zone and cannot be deleted over the API", dns.Fqdn(data.CatalogZone))
+			}
+		}
+		return nil
+	case AppMemberAndCatalog:
+		if err := own(data.Zone); err != nil {
+			return err
+		}
+		return own(data.CatalogZone)
+	}
+	return appRefusal(fmt.Sprintf("catalog %s: not available to application clients", data.Command), "")
 }
 
 // handleCatalogCreate creates a catalog zone over the API, recording apiOwner,

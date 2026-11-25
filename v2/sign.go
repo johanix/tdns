@@ -146,7 +146,9 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 		// resignWorkingSetSOAIfSigned, resolves the dak first), so zdLocked=false.
 		dak, err = zd.EnsureActiveDnssecKeys(zd.KeyDB, false)
 		if err != nil {
-			lgSigner.Error("failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
+			if !isNoKeysForRemovedZone(err) {
+				lgSigner.Error("failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
+			}
 			return false, err
 		}
 	}
@@ -484,10 +486,30 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s does not allow signing (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
+	// A ZoneData that has left Zones (deleted, or replaced by a modify) gets
+	// no keys, on every path, the one for complete active roles included:
+	// the keys are looked up by the zone's name, and after a delete and a
+	// re-add of the name they are the new zone's. Every write to the keys
+	// below is made under the zone keys lock with the ZoneData checked
+	// again under it (lockZoneKeys); this check keeps the common case quiet.
+	if zd.removed.Load() {
+		return nil, zd.noKeysForRemovedZone("EnsureActiveDnssecKeys")
+	}
+
+	if testHookEnsureKeys != nil {
+		testHookEnsureKeys("lookup")
+	}
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	if err != nil {
 		lgSigner.Error("failed to get DNSSEC active keys", "zone", zd.ZoneName, "err", err)
 		return nil, err
+	}
+	// Checked again after the lookup, for every path after it, the owned
+	// one included. Keys found by name are a zone's added after this
+	// ZoneData's delete only if that delete was done before the lookup,
+	// and the delete marks this ZoneData first: so the mark is seen here.
+	if zd.removed.Load() {
+		return nil, zd.noKeysForRemovedZone("EnsureActiveDnssecKeys")
 	}
 
 	// A zone whose key lifecycle is owned (KeyLifecycleOwner): the owner
@@ -509,8 +531,19 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 	// boolean return reports only whether non-active leftover keys
 	// (standby/published of a wrong algorithm) were removed, in which case we
 	// re-fetch the active set. On a same-algorithm zone this is an idempotent
-	// no-op, safe on every sign/re-sign.
-	if removed, err := zd.reconcileActiveKeyAlgorithms(kdb, dak); err != nil {
+	// no-op, safe on every sign/re-sign. Under the zone keys lock, and only
+	// for a ZoneData still in Zones: an old one's policy must not remove a
+	// key of a zone added since under the same name.
+	if testHookEnsureKeys != nil {
+		testHookEnsureKeys("reconcile")
+	}
+	unlockKeys, err := zd.lockZoneKeys("EnsureActiveDnssecKeys")
+	if err != nil {
+		return nil, err
+	}
+	removed, err := zd.reconcileActiveKeyAlgorithms(kdb, dak)
+	unlockKeys()
+	if err != nil {
 		return nil, err
 	} else if removed {
 		dak, err = zd.refreshActiveDnssecKeys(kdb, "after algorithm reconcile")
@@ -530,6 +563,11 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 			}
 		}
 		if hasRealZSK {
+			// Nothing written on this path, but the keys were read by name:
+			// a ZoneData removed meanwhile does not sign with them.
+			if zd.removed.Load() {
+				return nil, zd.noKeysForRemovedZone("EnsureActiveDnssecKeys")
+			}
 			return dak, nil
 		}
 		if zd.DnssecPolicy != nil {
@@ -543,7 +581,29 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		// If we only have KSK reused as CSK, we'll generate a real ZSK below
 	}
 
+	// A ZoneData that has left Zones gets no keys: a delete has taken, or
+	// is about to take, the zone's keys, and keys made now would outlive
+	// it. Checked again under the zone keys lock below; this check keeps
+	// the common case quiet.
+	if zd.removed.Load() {
+		return nil, zd.noKeysForRemovedZone("EnsureActiveDnssecKeys")
+	}
+
 	lgSigner.Info("no active DNSSEC keys available, will generate new keys", "zone", zd.ZoneName)
+
+	if testHookEnsureKeys != nil {
+		testHookEnsureKeys("make")
+	}
+	// The promotion and the generation below write the zone's keys: under
+	// the zone keys lock, held until the keys are made, and only for a
+	// ZoneData still in Zones. A zone delete takes the lock to delete the
+	// keys after it has marked the ZoneData, so keys are promoted or made
+	// before the delete takes them, or not at all.
+	unlockKeys, err = zd.lockZoneKeys("EnsureActiveDnssecKeys")
+	if err != nil {
+		return nil, err
+	}
+	defer unlockKeys()
 
 	// Try to promote published keys to active first
 	dpk, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStatePublished)
@@ -618,48 +678,21 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s: %w", zd.ZoneName, ErrDnssecPolicyNotBound)
 	}
 
-	// Generate KSK if still missing. The key is generated ACTIVE, as it
-	// always has been: a zone with no active key cannot sign.
-	if len(dak.KSKs) == 0 {
-		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", nil)
-		if err != nil {
-			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
-		}
-		lgSigner.Info("generated KSK", "msg", msg)
-		// Bootstrap KSK landed straight in active. Register in
-		// RolloverKeyState so rolloverDue and the K-step clamp scheduler
-		// can find an active_at timestamp. No-op for non-rollover zones.
-		if err := RegisterBootstrapActiveKSK(kdb, zd.ZoneName, pkc.KeyId, zd.DnssecPolicy.Rollover.Method, zd.DnssecPolicy.KSKAlgorithm); err != nil {
-			return nil, fmt.Errorf("EnsureActiveDnssecKeys: register bootstrap KSK for zone %s keyid %d: %w", zd.ZoneName, pkc.KeyId, err)
-		}
-		// Invalidate cache and re-fetch active keys after KSK generation
-		dak, err = zd.refreshActiveDnssecKeys(kdb, "after KSK generation")
-		if err != nil {
-			return nil, err
-		}
+	// Generate the KSK and the ZSK that are still missing, still under the
+	// zone keys lock; released before anything takes zd.mu.
+	_, madeZSK, err := zd.makeMissingDnssecKeys(kdb)
+	unlockKeys()
+	if err != nil {
+		return nil, err
 	}
-
-	// Count real ZSKs (flags=256), not KSKs reused as CSK (flags=257)
-	realZSKCount := 0
-	for _, zsk := range dak.ZSKs {
-		if zsk.DnskeyRR.Flags == 256 {
-			realZSKCount++
-		}
-	}
-
-	// Generate ZSK only if we have zero real ZSKs.
-	if realZSKCount == 0 {
-		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", nil)
-		if err != nil {
-			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate ZSK for zone %s: %v", zd.ZoneName, err)
-		}
-		lgSigner.Info("generated ZSK", "msg", msg)
+	if madeZSK {
 		WarnLargeAlgZoneSigningRole(zd, "ZSK", zd.DnssecPolicy.ZSKAlgorithm, Conf.IsLargeAlgorithm, zdLocked)
-		// Invalidate cache and re-fetch active keys after ZSK generation
-		dak, err = zd.refreshActiveDnssecKeys(kdb, "after ZSK generation")
-		if err != nil {
-			return nil, err
-		}
+	}
+	// Invalidate cache and re-fetch active keys after key generation, or
+	// after another caller made them while this one waited for the lock.
+	dak, err = zd.refreshActiveDnssecKeys(kdb, "after key generation")
+	if err != nil {
+		return nil, err
 	}
 
 	if len(dak.KSKs) == 0 {
@@ -686,6 +719,85 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 	}
 
 	return dak, nil
+}
+
+// errNoKeysForRemovedZone: nothing is done to the keys for a ZoneData that
+// has left Zones (zd.removed), deleted or replaced: no key is made, promoted
+// or removed for it, and no SIG(0) key is sent to the parent. The paths
+// that meet it stay quiet: noKeysForRemovedZone has said so.
+var errNoKeysForRemovedZone = errors.New("the zone was deleted or replaced; its keys are left alone")
+
+// isNoKeysForRemovedZone reports whether err is errNoKeysForRemovedZone,
+// which the paths that log a failed signing or policy apply do not log.
+func isNoKeysForRemovedZone(err error) bool {
+	return errors.Is(err, errNoKeysForRemovedZone)
+}
+
+// noKeysForRemovedZone says, in one Info line, that op leaves the keys of a
+// zone that has gone alone, and returns errNoKeysForRemovedZone.
+func (zd *ZoneData) noKeysForRemovedZone(op string) error {
+	lgSigner.Info("keys left alone: the zone was deleted or replaced", "zone", zd.ZoneName, "op", op)
+	return fmt.Errorf("%s: zone %s: %w", op, zd.ZoneName, errNoKeysForRemovedZone)
+}
+
+// testHookEnsureKeys, when set, runs in EnsureActiveDnssecKeys at each
+// stage: "lookup" before it looks up the active keys, "reconcile" before
+// it takes the zone keys lock for the algorithm reconcile, "make" once it
+// has found keys missing, before it takes the lock to promote or make them.
+var testHookEnsureKeys func(stage string)
+
+// makeMissingDnssecKeys generates the zone's active KSK and real ZSK
+// (Flags 256) when the keystore has none, and reports which it made. The
+// caller holds the zone keys lock (lockZoneKeys), which a zone delete takes
+// to delete the zone's keys after it has marked the ZoneData (zd.removed):
+// the keys are either made before the delete takes the lock, and go with
+// the zone, or not made at all. The active keys are read again under the
+// lock, from the keystore: a ZoneData that waited for another caller to
+// make them makes none of its own. Only KeyDB work runs here, with what a
+// keystore commit does after it (the signing-keys republish, the DS
+// engine's mark, a queued re-sign), none of which takes a ZoneData lock.
+func (zd *ZoneData) makeMissingDnssecKeys(kdb *KeyDB) (madeKSK, madeZSK bool, err error) {
+	dak, err := loadSigningKeysFromDB(kdb, zd.ZoneName)
+	if err != nil {
+		return false, false, fmt.Errorf("EnsureActiveDnssecKeys: read active keys of zone %s: %w", zd.ZoneName, err)
+	}
+	// Counted before the KSK is made: a KSK alone is also listed among the
+	// ZSKs (Flags 257, reused as a CSK) and is no ZSK.
+	hasRealZSK := false
+	for _, zsk := range dak.ZSKs {
+		if zsk.DnskeyRR.Flags == 256 {
+			hasRealZSK = true
+			break
+		}
+	}
+
+	// The KSK is generated ACTIVE, as it always has been: a zone with no
+	// active key cannot sign.
+	if len(dak.KSKs) == 0 {
+		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", nil)
+		if err != nil {
+			return false, false, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
+		}
+		madeKSK = true
+		lgSigner.Info("generated KSK", "msg", msg)
+		// Bootstrap KSK landed straight in active. Register in
+		// RolloverKeyState so rolloverDue and the K-step clamp scheduler
+		// can find an active_at timestamp. No-op for non-rollover zones.
+		if err := RegisterBootstrapActiveKSK(kdb, zd.ZoneName, pkc.KeyId, zd.DnssecPolicy.Rollover.Method, zd.DnssecPolicy.KSKAlgorithm); err != nil {
+			return madeKSK, false, fmt.Errorf("EnsureActiveDnssecKeys: register bootstrap KSK for zone %s keyid %d: %w", zd.ZoneName, pkc.KeyId, err)
+		}
+	}
+
+	// Generate ZSK only if we have zero real ZSKs.
+	if !hasRealZSK {
+		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", nil)
+		if err != nil {
+			return madeKSK, false, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate ZSK for zone %s: %v", zd.ZoneName, err)
+		}
+		madeZSK = true
+		lgSigner.Info("generated ZSK", "msg", msg)
+	}
+	return madeKSK, madeZSK, nil
 }
 
 // ResignZone re-signs every RRset in the zone from scratch with the
@@ -721,7 +833,9 @@ func (zd *ZoneData) ResignZone(ctx context.Context, kdb *KeyDB) (int, error) {
 
 	dak, err := zd.EnsureActiveDnssecKeys(kdb, false)
 	if err != nil {
-		lgSigner.Error("ResignZone: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
+		if !isNoKeysForRemovedZone(err) {
+			lgSigner.Error("ResignZone: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
+		}
 		return 0, err
 	}
 
@@ -982,7 +1096,9 @@ func (zd *ZoneData) SignZone(ctx context.Context, kdb *KeyDB, force bool) (int, 
 	// zd.mu below (line ~801), after this call, so zdLocked=false here.
 	dak, err := zd.EnsureActiveDnssecKeys(kdb, false)
 	if err != nil {
-		lgSigner.Error("failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
+		if !isNoKeysForRemovedZone(err) {
+			lgSigner.Error("failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
+		}
 		return 0, err
 	}
 

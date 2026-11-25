@@ -2057,12 +2057,43 @@ func checkApiOwners(cfg *tdns.Config, rep *ccReport) {
 	}
 }
 
+// checkAppClients warns about apiserver.app-clients against the access file
+// it goes into force with (design 4.2, 4.9): a name the file has no client
+// for grants nothing, and while the API key is accepted, anyone with the key
+// is read-write on everything, so the application limits are only as good
+// as the key's secrecy.
+func checkAppClients(apps []string, af *tdns.AccessFile, rep *ccReport) {
+	const g = "API access file"
+	if len(apps) == 0 {
+		return
+	}
+	enrolled := map[string]bool{}
+	for _, c := range af.Clients {
+		enrolled[c.Name] = true
+	}
+	for _, name := range apps {
+		if !enrolled[name] {
+			rep.warn(g, "app-clients", fmt.Sprintf("apiserver.app-clients names %q, which the access file has no client for: it grants nothing", name),
+				"enrol the client (tdns-ncli <daemon> client add), or fix the name")
+		}
+	}
+	if af.KeyAuthOn() {
+		rep.warn(g, "keyauth", "apiserver.app-clients is set and the access file still accepts the API key (keyauth on): the key bypasses every application limit",
+			"once the applications use their certificates: tdns-ncli <daemon> client keyauth off")
+	}
+}
+
 // checkApiAccessFile runs the daemon's own validator over the access file, so
 // a file the daemon would not use is found before the reload rather than by it.
 func checkApiAccessFile(cfg *tdns.Config, rep *ccReport) {
 	const g = "API access file"
 	path := cfg.ApiServer.AccessFile
+	apps := cfg.ApiServer.AppClients
 	if path == "" {
+		if len(apps) > 0 {
+			rep.warn(g, "app-clients", "apiserver.app-clients is set, but there is no access file: without one no client has a certificate, so none is an application client",
+				"set apiserver.access-file and enrol the clients (tdns-ncli <daemon> client add), or drop app-clients")
+		}
 		return
 	}
 	af, err := tdns.LoadAccessFile(path)
@@ -2071,6 +2102,7 @@ func checkApiAccessFile(cfg *tdns.Config, rep *ccReport) {
 			"fix the file (tdns-ncli <daemon> client ... writes only files that pass this check), then reload over the local socket")
 		return
 	}
+	checkAppClients(apps, af, rep)
 	keyauth := "on"
 	if !af.KeyAuthOn() {
 		keyauth = "off"
