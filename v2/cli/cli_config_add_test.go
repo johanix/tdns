@@ -29,6 +29,8 @@ type addDaemon struct {
 	noAccessFile bool
 	refuseAdd    string
 	refusePing   bool
+	dropAdd      bool              // enrol, then lose the answer
+	stall        bool              // never answer
 	onAdd        func()            // after an add is enrolled: what happens meanwhile
 	clients      map[string]string // name -> pin
 	posts        []tdns.AccessPost
@@ -78,6 +80,11 @@ func (d *addDaemon) start(t *testing.T) {
 
 func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
+	if d.stall {
+		d.mu.Unlock()
+		<-r.Context().Done()
+		return
+	}
 	defer d.mu.Unlock()
 	if r.Header.Get(tdns.ExpectConfigFileHeader) != d.cfg {
 		http.Error(w, "this daemon runs "+d.cfg, http.StatusPreconditionFailed)
@@ -102,6 +109,9 @@ func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 		resp.Msg = "Added " + ap.Name + " (read-write)."
 		if d.onAdd != nil {
 			d.onAdd()
+		}
+		if d.dropAdd {
+			panic(http.ErrAbortHandler) // the connection closes, no answer
 		}
 	}
 	json.NewEncoder(w).Encode(resp)
@@ -315,9 +325,10 @@ func TestAddLeavesAnExistingEntryAlone(t *testing.T) {
 		"authmethod: none\n     config-file: @D@":                                                                    "--cert",
 		"baseurl: @U@\n     authmethod: certificate\n     tlsauth: pin\n     pins: [ \"p\" ]\n     config-file: @D@": "--repin",
 		"baseurl: @U@\n     apikey: k\n     authmethod: X-API-Key":                                                   "--cert --daemon-config " + d.cfg,
+		"baseurl: unix://@S@\n     authmethod: none":                                                                 "--cert --daemon-config " + d.cfg,
 	} {
 		body := "client:\n   cert: " + d.certPath + "\napiservers:\n   - name: tdns-auth\n     " +
-			strings.NewReplacer("@U@", d.url, "@D@", d.cfg).Replace(entry) + "\n"
+			strings.NewReplacer("@U@", d.url, "@D@", d.cfg, "@S@", d.sock).Replace(entry) + "\n"
 		writeFile(t, d.cli, body)
 		res, err := d.add(t, nil)
 		if err != nil || res.AlreadyKnown != "tdns-auth" || !strings.HasSuffix(res.Update, "config update tdns-auth "+flag) {
@@ -344,6 +355,62 @@ func TestAddEntryAppearsAfterTheEnrolment(t *testing.T) {
 		t.Errorf("notes %q: want the enrolment named", res.Notes)
 	}
 	d.unchanged(t, body)
+}
+
+// Refused before anything is enrolled, and nothing written: a TCP API
+// without TLS, the daemon stopped or not; an apiservers: list in flow
+// style, with no entry to paste (it would hold a pin not enrolled).
+func TestAddRefusesBeforeTheEnrolment(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		d := newAddDaemon(t, running)
+		raw, _ := os.ReadFile(d.cfg)
+		writeFile(t, d.cfg, string(raw)+"   usetls: false\n")
+		before, _ := os.ReadFile(d.cli)
+		if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "usetls is false") || d.commands() != "" {
+			t.Errorf("usetls false, running %v: %v, asked %q", running, err, d.commands())
+		}
+		d.unchanged(t, string(before))
+	}
+	d := newAddDaemon(t, true)
+	body := "client:\n   cert: " + d.certPath + "\napiservers: []\n"
+	writeFile(t, d.cli, body)
+	_, err := d.add(t, nil)
+	if err == nil || !strings.Contains(err.Error(), "then run config add again") || strings.Contains(err.Error(), "tlsauth") || d.commands() != "list" {
+		t.Errorf("flow style: %v, asked %q", err, d.commands())
+	}
+	d.unchanged(t, body)
+}
+
+// After the pin is sent: no answer (lost, or none in time) says the pin may
+// be enrolled; a client pair changed meanwhile is not the one enrolled.
+// Nothing is written.
+func TestAddAfterTheEnrolmentIsSent(t *testing.T) {
+	d := newAddDaemon(t, true)
+	before, _ := os.ReadFile(d.cli)
+	d.dropAdd = true
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "No answer that the daemon added your pin") {
+		t.Errorf("answer lost: %v", err)
+	}
+	if clients, _ := d.state(); clients["tester"] == "" {
+		t.Errorf("answer lost: enrolled %v", clients)
+	}
+	d.unchanged(t, string(before))
+
+	d = newAddDaemon(t, true)
+	body := "client:\n   cert: " + d.certPath + ".new\n   key: " + d.certPath + ".key.new\n"
+	d.onAdd = func() { writeFile(t, d.cli, body) }
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "changed while config add") {
+		t.Errorf("client pair changed: %v", err)
+	}
+	d.unchanged(t, body)
+
+	d = newAddDaemon(t, true)
+	d.stall = true
+	defer func(was time.Duration) { accessTimeout = was }(accessTimeout)
+	accessTimeout = 200 * time.Millisecond
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "did not answer on its local socket") || !strings.Contains(err.Error(), d.sock) {
+		t.Errorf("no answer in time: %v", err)
+	}
 }
 
 // config add needs the daemon's local admin socket: one it cannot open (not
