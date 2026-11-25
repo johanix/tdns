@@ -484,36 +484,19 @@ func danglingSymlink(path string) error {
 // stays a link; a link to nothing is refused (see danglingSymlink).
 //
 // The new file belongs to whoever runs this, not necessarily to the old file's
-// owner; the CLI config is the invoking operator's own file. A file a daemon
-// reads goes through writeFileAtomicLike instead.
+// owner; the CLI config is the invoking operator's own file. (The daemon
+// writes its own files, keeping their owner: tdns.writeAccessFile.)
 func writeFileAtomic(path string, data []byte) error {
-	return replaceFile(path, data, false, nil)
-}
-
-// writeFileAtomicLike is writeFileAtomic for a file a daemon reads (the access
-// file): the replacement keeps the old file's owner and group, so root editing
-// a file the daemon's user owns does not leave one the daemon cannot read. A
-// new file takes its mode, owner and group from like (the daemon config), or
-// is 0600 and the invoking user's when like is nil.
-func writeFileAtomicLike(path string, data []byte, like os.FileInfo) error {
-	return replaceFile(path, data, true, like)
-}
-
-func replaceFile(path string, data []byte, keepOwner bool, like os.FileInfo) error {
 	if err := danglingSymlink(path); err != nil {
 		return err
 	}
 	mode := os.FileMode(0o600)
 	target := path
-	owner := like
 	if fi, err := os.Stat(path); err == nil {
 		mode = fi.Mode().Perm()
-		owner = fi
 		if real, err := filepath.EvalSymlinks(path); err == nil {
 			target = real
 		}
-	} else if like != nil {
-		mode = like.Mode().Perm()
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".tdns-ncli-*")
 	if err != nil {
@@ -528,31 +511,8 @@ func replaceFile(path string, data []byte, keepOwner bool, like os.FileInfo) err
 		tmp.Close()
 		return err
 	}
-	if keepOwner && owner != nil {
-		if err := chownLike(tmp, owner); err != nil {
-			tmp.Close()
-			return fmt.Errorf("%s: giving the new file its owner and group: %w", path, err)
-		}
-	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), target)
-}
-
-// chownLike gives f the owner and group of like when they differ from f's.
-// Nothing to do where the platform has no owners (fileOwner).
-func chownLike(f *os.File, like os.FileInfo) error {
-	uid, gid, ok := fileOwner(like)
-	if !ok {
-		return nil
-	}
-	fi, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if cu, cg, ok := fileOwner(fi); ok && cu == uid && cg == gid {
-		return nil
-	}
-	return f.Chown(uid, gid)
 }

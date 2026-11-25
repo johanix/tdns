@@ -42,6 +42,12 @@ var rootCmd = &cobra.Command{
 			cli.IsCliConfigCmd(cmd) {
 			return
 		}
+		// --daemon-config names the daemon (the client commands, config
+		// reload): on a host where root has no CLI config yet, they run
+		// without one.
+		if cli.NoCliConfigNeeded(cmd, cliConfigPath()) {
+			return
+		}
 		initConfig()
 		initApi()
 	},
@@ -163,7 +169,8 @@ func init() {
 	rootCmd.AddCommand(cli.NewCliConfigCmd())
 
 	// "client init": the operator's own certificate. And each daemon's
-	// "client ..." subtree, which edits that daemon's access file. Added to
+	// "client ..." subtree, which has the daemon change its access file
+	// (over its local socket). Added to
 	// the canonical trees here, not in the shared cli package, so tdns-cli and
 	// tdns-imr's own shell are unchanged; the instance trees get theirs from
 	// their factories.
@@ -186,6 +193,15 @@ func init() {
 		false, "show headers")
 	rootCmd.PersistentFlags().BoolVar(&cli.ForceTCP, "tcp", false,
 		"reach daemons over TCP even where their local admin socket can be used")
+}
+
+// cliConfigPath is the CLI config this run reads: --config, else the
+// default.
+func cliConfigPath() string {
+	if cfgFile != "" {
+		return cfgFile
+	}
+	return cli.DefaultCliConfigFile
 }
 
 // initConfig reads in config file and ENV variables if set.
