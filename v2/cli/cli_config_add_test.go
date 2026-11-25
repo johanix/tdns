@@ -349,8 +349,14 @@ func TestAddNeedsTheSocket(t *testing.T) {
 		}
 	}
 	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   socket: none\n"))
-	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "serves no local admin socket") {
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "(socket: none)") {
 		t.Errorf("socket: none: %v", err)
+	}
+	// A path the daemon refuses is no socket either, and the refusal says
+	// why, not "socket: none".
+	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   socket: run/d.sock\n"))
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "serves no local admin socket") || strings.Contains(err.Error(), "socket: none") {
+		t.Errorf("a relative socket path: %v", err)
 	}
 	d.unchanged(t, string(before))
 }

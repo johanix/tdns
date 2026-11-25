@@ -228,7 +228,11 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return nil, err
 	}
 	if info.Socket == "" {
-		return nil, fmt.Errorf("%s serves no local admin socket\n(socket: none). config add needs it, run as root on the\ndaemon's host: certificate setup goes through the socket", info.ConfigFile)
+		why := "socket: none"
+		if info.SocketError != "" {
+			why = info.SocketError
+		}
+		return nil, fmt.Errorf("%s serves no local admin socket\n(%s). config add needs it, run as root on the\ndaemon's host: certificate setup goes through the socket", info.ConfigFile, why)
 	}
 	res := &AddResult{Notes: append([]string(nil), info.Warnings...)}
 	tcpURL := ""
