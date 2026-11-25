@@ -156,6 +156,67 @@ func TestAccessRouteWritesTheFile(t *testing.T) {
 	}
 }
 
+// A command that needs no change in the file still loads it: a hand edit
+// not yet reloaded is in force when /access answers success.
+func TestAccessNoChangeLoadsTheFile(t *testing.T) {
+	certs, pins := clientCerts(t, "anna")
+	anna := "clients:\n  - {name: anna, pin: " + pins["anna"] + ", role: read-write"
+	e := newAuthEnv(t, anna+"}\n", certs)
+	running := func() AccessClient { return e.conf.Internal.ApiAccess.load().byPin[pins["anna"]] }
+	if running().Disabled {
+		t.Fatal("anna is disabled at start")
+	}
+	if err := os.WriteFile(e.conf.ApiServer.AccessFile, []byte(anna+", disabled: true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if resp := e.accessCall(t, AccessPost{Command: "disable", Name: "anna"}); resp.Error || !strings.Contains(resp.Msg, "already disabled") {
+		t.Errorf("disable anna: %+v, want already disabled", resp)
+	}
+	if !running().Disabled {
+		t.Error("disable anna answered success, but the running policy has anna enabled")
+	}
+}
+
+// keyauth on with the access file missing writes it, although the policy
+// it holds is the empty one: a named file that is not there cannot load.
+func TestAccessKeyauthOnCreatesMissingFile(t *testing.T) {
+	e := newAuthEnv(t, "clients: []\n", nil)
+	path := e.conf.ApiServer.AccessFile
+	os.Remove(path)
+	if resp := e.accessCall(t, AccessPost{Command: "keyauth", KeyAuth: "on"}); resp.Error {
+		t.Fatalf("keyauth on, file missing: %+v, want it written", resp)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("the access file: %v %v, want it there, 0600", fi, err)
+	}
+}
+
+// A dangling symlink as the access file is refused, not replaced by a
+// file: the link and its missing target stay as they are.
+func TestAccessFileDanglingSymlink(t *testing.T) {
+	_, pins := clientCerts(t, "anna")
+	e := newAuthEnv(t, "clients: []\n", nil)
+	path := e.conf.ApiServer.AccessFile
+	target := filepath.Join(filepath.Dir(path), "policy.yaml")
+	os.Remove(path)
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	resp := e.accessCall(t, AccessPost{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-write"})
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "does not resolve") {
+		t.Errorf("add on a dangling symlink: %+v, want refused", resp)
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link: %v %v, want it kept", fi, err)
+	}
+	if _, err := os.Stat(target); err == nil {
+		t.Error("the link's target was created")
+	}
+	if err := writeAccessFile(path, nil, []byte("clients: []\n")); err == nil {
+		t.Error("writeAccessFile replaced a dangling symlink")
+	}
+}
+
 // A replaced access file, and its .prev, keep the file's group, so a file
 // written for the daemon's user stays readable to it. (Another of the test
 // user's own groups: the one change of owner an unprivileged test can make.)

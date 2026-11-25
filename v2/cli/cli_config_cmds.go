@@ -207,7 +207,7 @@ type AddResult struct {
 
 var addableRoles = map[string]bool{"auth": true, "agent": true, "imr": true}
 
-const newCliConfigHeader = "# tdns-ncli configuration.\n# apiservers: lists the daemons (and instances of a daemon) tdns-ncli addresses;\n# `tdns-ncli config add <daemon-config.yaml>` adds to it. It holds API keys.\n\n"
+const newCliConfigHeader = "# tdns-ncli configuration.\n# apiservers: lists the daemons (and instances of a daemon) tdns-ncli addresses;\n# `tdns-ncli config add <daemon-config.yaml>` adds to it. config add\n# writes no API key, but an entry added by hand may hold one: keep it 0600.\n\n"
 
 // AddDaemonConfig adds one apiservers: entry for the daemon whose config is
 // o.DaemonConfig to the CLI config (design 2026-11-25 section 4). A running
@@ -287,6 +287,15 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	if client == "" {
 		client = defaultClientName()
 	}
+	// After the enrolment every failure says the pin stays enrolled: each
+	// step leaves a valid state, and the next run reuses the pin.
+	enrolled := false
+	keep := func(err error) error {
+		if enrolled && err != nil {
+			return fmt.Errorf("%v.\nThe pin stays enrolled; the next config add reuses it", err)
+		}
+		return err
+	}
 	switch {
 	case o.DryRun && cert:
 		res.Steps = enrolPlan(cc, client, tcpURL)
@@ -299,20 +308,29 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		if err := enrol(sock, cc, client, "config add", &entry, &res.Steps); err != nil {
 			return nil, err
 		}
+		enrolled = true
 	}
 	if !o.DryRun {
 		unlock, err := lockEdit(o.Ctx, o.CliConfig, target)
 		if err != nil {
-			return nil, err
+			return nil, keep(err)
 		}
 		defer unlock()
-		if existing, known, err = plan(); err != nil || known {
-			return res, err
+		existing, known, err = plan()
+		switch {
+		case err != nil:
+			return nil, keep(err)
+		case known && enrolled:
+			res.Notes = append(res.Notes, fmt.Sprintf(
+				"your pin was enrolled as %s just now; the entry that\nappeared meanwhile was left alone", client))
+			return res, nil
+		case known:
+			return res, nil
 		}
 	}
 	out, err := renderAdd(o, target, existing, entry, res.Created)
 	if err != nil {
-		return nil, err
+		return nil, keep(err)
 	}
 	res.Entry, res.File = entry, target
 	if !res.Running && tcpURL != "" {
@@ -322,10 +340,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return res, nil
 	}
 	if err := writeFileAtomic(target, out); err != nil {
-		if cert {
-			return nil, fmt.Errorf("%v.\nThe pin stays enrolled; the next config add reuses it", err)
-		}
-		return nil, err
+		return nil, keep(err)
 	}
 	res.Wrote = true
 	return res, nil

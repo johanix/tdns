@@ -29,6 +29,7 @@ type addDaemon struct {
 	noAccessFile bool
 	refuseAdd    string
 	refusePing   bool
+	onAdd        func()            // after an add is enrolled: what happens meanwhile
 	clients      map[string]string // name -> pin
 	posts        []tdns.AccessPost
 }
@@ -99,6 +100,9 @@ func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 	case ap.Command == "add":
 		d.clients[ap.Name] = ap.Pin
 		resp.Msg = "Added " + ap.Name + " (read-write)."
+		if d.onAdd != nil {
+			d.onAdd()
+		}
 	}
 	json.NewEncoder(w).Encode(resp)
 }
@@ -324,6 +328,22 @@ func TestAddLeavesAnExistingEntryAlone(t *testing.T) {
 	if d.commands() != "" {
 		t.Errorf("the daemon was asked %q", d.commands())
 	}
+}
+
+// An entry for the daemon that appears while the pin is enrolled (another
+// config add) is left alone, and the output says the pin was enrolled.
+func TestAddEntryAppearsAfterTheEnrolment(t *testing.T) {
+	d := newAddDaemon(t, true)
+	body := "client:\n   cert: " + d.certPath + "\napiservers:\n   - name: tdns-auth\n     authmethod: none\n     config-file: " + d.cfg + "\n"
+	d.onAdd = func() { writeFile(t, d.cli, body) }
+	res, err := d.add(t, nil)
+	if err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote {
+		t.Fatalf("%+v, %v; want the entry that appeared left alone", res, err)
+	}
+	if !strings.Contains(strings.Join(res.Notes, "\n"), "enrolled as tester just now") {
+		t.Errorf("notes %q: want the enrolment named", res.Notes)
+	}
+	d.unchanged(t, body)
 }
 
 // config add needs the daemon's local admin socket: one it cannot open (not

@@ -645,9 +645,16 @@ func TestClientCommandsCallTheDaemon(t *testing.T) {
 	apiConfig = nil // root with no CLI config: --daemon-config names the daemon
 
 	d := newFakeDaemon(t, sock, cfg)
+	d.mu.Lock()
 	d.reply = tdns.AccessResponse{Msg: "Added anna (read-write).\nIn force: 1 client(s), keyauth on.", File: filepath.Join(dir, "access.yaml"), KeyAuth: true,
 		Clients:    []tdns.ApiAccessStatusClient{{Name: "anna", Pin: pinOf("anna"), Role: "read-write", Comment: "laptop"}},
 		ServerPins: []string{pinOf("server")}}
+	d.mu.Unlock()
+	count := func() int {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		return len(d.seen)
+	}
 	run := func(t *testing.T, args ...string) string {
 		t.Helper()
 		return captureStdout(t, func() {
@@ -690,9 +697,34 @@ func TestClientCommandsCallTheDaemon(t *testing.T) {
 
 	// Without --daemon-config: the role's entry's config-file:.
 	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", ConfigFile: cfg}}}
+	sent := count()
 	run(t, "enable", "anna")
-	if _, seen := d.last(t); seen != "/api/v1/access "+cfg {
-		t.Errorf("from the entry: sent naming %q, want %s", seen, cfg)
+	if got := count() - sent; got != 1 {
+		t.Fatalf("from the entry: %d requests sent, want one", got)
+	}
+	if ap, seen := d.last(t); ap != (tdns.AccessPost{Command: "enable", Name: "anna"}) || seen != "/api/v1/access "+cfg {
+		t.Errorf("from the entry: sent %+v naming %q, want enable anna naming %s", ap, seen, cfg)
+	}
+
+	// An entry without config-file: names no daemon, unless it is the
+	// default daemon's own socket: refused, nothing sent. --daemon-config
+	// settles it.
+	apiConfig = &CliConf{ApiServers: []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1"}}}
+	sent = count()
+	if err := runAccess("auth", "", tdns.AccessPost{Command: "enable", Name: "anna"}); err == nil || !strings.Contains(err.Error(), "has no config-file:") {
+		t.Errorf("entry without config-file:: %v, want refused", err)
+	} else {
+		for _, l := range strings.Split(err.Error(), "\n") {
+			if len("Error: "+l) > 72 {
+				t.Errorf("refusal line over 72: %q", l)
+			}
+		}
+	}
+	if got := count() - sent; got != 0 {
+		t.Errorf("entry without config-file:: %d requests sent, want none", got)
+	}
+	if err := runAccess("auth", cfg, tdns.AccessPost{Command: "enable", Name: "anna"}); err != nil {
+		t.Errorf("entry without config-file:, --daemon-config: %v", err)
 	}
 
 	// A refusal is the daemon's words; config reload --daemon-config goes
