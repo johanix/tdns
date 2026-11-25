@@ -278,23 +278,39 @@ func daemonSocketClient(role, daemonCfg string) (*tdns.ApiClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot read %s's daemon config %s: %v", role, cfg, err)
 	}
+	return socketClientOf(info)
+}
+
+// socketClientOf is the client for the local admin socket of the daemon of
+// info, naming its config on every request.
+func socketClientOf(info *DaemonApi) (*tdns.ApiClient, error) {
 	if info.Socket == "" {
 		return nil, fmt.Errorf("%s serves no local admin socket\n(socket: none), which this command needs", info.ConfigFile)
 	}
-	return tdns.NewClientWithOptions(role, "unix://"+info.Socket,
+	return tdns.NewClientWithOptions(info.Role, "unix://"+info.Socket,
 		tdns.ClientOptions{AuthMethod: "none", ExpectConfigFile: info.ConfigFile}), nil
 }
 
 // socketError says plainly when the local socket sock cannot be used from
-// here (not ours to open, or no daemon there). Any other err, a daemon's
-// refusal among them, is returned as it is.
+// here (not ours to open, or no daemon there), keeping the errno for
+// errors.As. Any other err, a daemon's refusal among them, is returned as
+// it is.
 func socketError(sock string, err error) error {
+	if errno := socketErrno(err); errno != 0 {
+		return fmt.Errorf("cannot use the daemon's local socket (%w):\n   %s\nThe client commands need the running daemon and its local\nsocket: run them as root on the daemon's host", errno, sock)
+	}
+	return err
+}
+
+// socketErrno is err's errno when it says the socket cannot be used: not
+// ours to open (EACCES, EPERM), or no daemon there (ENOENT, ECONNREFUSED).
+func socketErrno(err error) syscall.Errno {
 	var errno syscall.Errno
 	if errors.As(err, &errno) && (errno == syscall.EACCES || errno == syscall.EPERM ||
 		errno == syscall.ENOENT || errno == syscall.ECONNREFUSED) {
-		return fmt.Errorf("cannot use the daemon's local socket (%v):\n   %s\nThe client commands need the running daemon and its local\nsocket: run them as root on the daemon's host", errno, sock)
+		return errno
 	}
-	return err
+	return 0
 }
 
 // configAtDaemon sends post to the daemon of daemonCfg over its local admin
@@ -314,11 +330,17 @@ func configAtDaemon(role, daemonCfg string, post tdns.ConfigPost) (tdns.ConfigRe
 // accessAtDaemon sends post to role's daemon (see daemonSocketClient), which
 // writes its access file and answers with what is in force.
 func accessAtDaemon(role, daemonCfg string, post tdns.AccessPost) (tdns.AccessResponse, error) {
-	var resp tdns.AccessResponse
 	c, err := daemonSocketClient(role, daemonCfg)
 	if err != nil {
-		return resp, err
+		return tdns.AccessResponse{}, err
 	}
+	return accessOver(c, post)
+}
+
+// accessOver sends post to the daemon on c, its local admin socket. A
+// socket that cannot be used is a socketError.
+func accessOver(c *tdns.ApiClient, post tdns.AccessPost) (tdns.AccessResponse, error) {
+	var resp tdns.AccessResponse
 	body, err := json.Marshal(post)
 	if err != nil {
 		return resp, err
