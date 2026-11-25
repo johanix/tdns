@@ -585,7 +585,7 @@ func TestOriginationRuleAppliesToARegisteredAppType(t *testing.T) {
 	}
 
 	// The registration is the type's alone.
-	for _, other := range []AppType{derivedEditorApp, AppTypeAgent, 0} {
+	for _, other := range []AppType{derivedEditorApp, appTypeUngated, 0} {
 		Globals.App.Type = other
 		if !zoneMayOriginateContent(secondary) {
 			t.Errorf("app type %d did not register and its secondary is gated", other)

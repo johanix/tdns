@@ -69,7 +69,7 @@ func TestZoneOriginationRefusal(t *testing.T) {
 	}
 
 	// §1.1: off tdns-auth nothing is refused.
-	withAppType(t, AppTypeAgent)
+	withAppType(t, appTypeUngated)
 	if got := zoneOriginationRefusal(secondary, "bump"); got != "" {
 		t.Errorf("non-auth app must not be refused, got %q", got)
 	}
