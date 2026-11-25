@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -150,5 +151,22 @@ func TestZoneDeleteCommandsStayWhole(t *testing.T) {
 		if !found {
 			t.Errorf("no line %q in:\n%s", want, strings.Join(lines, "\n"))
 		}
+	}
+}
+
+// A delete refused while a SIG(0) key rollover of the zone runs is printed
+// wrapped to 72 characters, saying why and to try again.
+func TestZoneDeleteRefusalWidth(t *testing.T) {
+	zone := "a-rather-long-label.customer-zones.provisioning.example.com."
+	err := fmt.Errorf("zone %s not deleted: a SIG(0) key rollover is in progress; try again when it finishes", zone)
+	lines := zoneDeleteErrorLines("tdns-auth", err)
+	for _, l := range lines {
+		if len(l) > zoneDeleteLineWidth {
+			t.Errorf("line of %d characters: %q", len(l), l)
+		}
+	}
+	text := strings.Join(strings.Fields(strings.Join(lines, " ")), " ")
+	if want := "zone " + zone + " not deleted: a SIG(0) key rollover is in progress; try again when it finishes"; !strings.Contains(text, want) {
+		t.Errorf("the refusal reads:\n%s", strings.Join(lines, "\n"))
 	}
 }

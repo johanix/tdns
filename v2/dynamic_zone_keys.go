@@ -64,6 +64,12 @@ func (conf *Config) removeZoneKeys(zone string, keepKeys bool) *ZoneRemoval {
 	lock := AcquireRolloverLock(zone)
 	lock.Lock()
 	defer lock.Unlock()
+	// The same for the paths that make keys outside the rollover machinery:
+	// a zone's first keys (EnsureActiveDnssecKeys), standby keys, a policy
+	// reset's. Taken after the rollover lock (acquireZoneKeysLock).
+	keysLock := acquireZoneKeysLock(zone)
+	keysLock.Lock()
+	defer keysLock.Unlock()
 
 	if keepKeys {
 		var err error

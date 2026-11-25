@@ -631,12 +631,13 @@ func TestAnErrorChangeOnAReplacedZoneDoesNotOutliveTheDelete(t *testing.T) {
 	}
 }
 
-// A --keep-keys delete that comes while a SIG(0) rollover is past its
-// check of zd.removed, with the rollover lock held, waits for the new key:
-// the key is one of the kept ones, and counted. The rollover then finds
-// the zone removed and does not send the key to the parent; a rollover
-// started after the delete makes no key at all. The fake parent fails the
-// test on any UPDATE.
+// The defence behind the claim that keeps a delete from starting during a
+// SIG(0) rollover (beginZoneDelete): a --keep-keys removal of the keys that
+// comes while a rollover is past its check of zd.removed, with the rollover
+// lock held, waits for the new key, and the key is one of the kept ones,
+// and counted. The rollover then finds the zone removed and does not send
+// the key to the parent; a rollover started after the delete makes no key
+// at all. The fake parent fails the test on any UPDATE.
 func TestAKeepKeysDeleteWaitsForARolloverPastItsCheck(t *testing.T) {
 	zd, kdb, fp := newRolloverZone(t)
 	conf := &Config{}
@@ -656,8 +657,10 @@ func TestAKeepKeysDeleteWaitsForARolloverPastItsCheck(t *testing.T) {
 	deleted := make(chan outcome, 1)
 	testHookSig0RolloverGenerating = func() {
 		go func() {
-			r, err := conf.RemoveDynamicZone(zd.ZoneName, true)
-			deleted <- outcome{r, err}
+			// RemoveDynamicZone's steps from taking the zone out of Zones
+			// to the keys; its claim would refuse the delete outright.
+			zd.leaveZones(zd.ZoneName)
+			deleted <- outcome{conf.removeZoneKeys(zd.ZoneName, true), nil}
 		}()
 		for deadline := time.Now().Add(5 * time.Second); !zd.removed.Load(); time.Sleep(time.Millisecond) {
 			if time.Now().After(deadline) {
@@ -708,4 +711,182 @@ func TestAKeepKeysDeleteWaitsForARolloverPastItsCheck(t *testing.T) {
 		t.Errorf("%d UPDATEs sent to the parent for a deleted zone", len(fp.sent))
 	}
 	assertKeystoreFree(t, kdb)
+}
+
+// rolloverZoneToDelete is newRolloverZone's zone registered as an
+// API-managed zone that RemoveDynamicZone can delete, with conf over the
+// same keystore.
+func rolloverZoneToDelete(t *testing.T, answers ...rolloverAnswer) (*Config, *ZoneData, *KeyDB, *rolloverParent) {
+	t.Helper()
+	zd, kdb, fp := newRolloverZone(t, answers...)
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	if zd.Options == nil {
+		zd.Options = map[ZoneOption]bool{}
+	}
+	zd.Options[OptApiManagedZone] = true
+	Zones.Set(zd.ZoneName, zd)
+	t.Cleanup(func() { Zones.Remove(zd.ZoneName) })
+	return conf, zd, kdb, fp
+}
+
+const sig0RollingRefusal = "a SIG(0) key rollover is in progress; try again when it finishes"
+
+// A zone delete, with --keep-keys or without, is refused while a SIG(0)
+// rollover of the zone runs, here while its ADD waits for the parent, past
+// both checks of zd.removed: taking the keys then could leave the parent
+// trusting a key whose private half is gone. The zone and its keys are left
+// as they are, and once the rollover is done the delete succeeds.
+func TestAZoneDeleteIsRefusedDuringASig0Rollover(t *testing.T) {
+	ok := rolloverAnswer{rcode: dns.RcodeSuccess}
+	conf, zd, kdb, fp := rolloverZoneToDelete(t, ok, ok)
+	refused := 0
+	fp.during = func(*dns.Msg) {
+		if len(fp.sent) > 0 {
+			return // the REMOVE: once is enough
+		}
+		keys := rolloverKeyStates(t, kdb, zd.ZoneName)
+		for _, keepKeys := range []bool{false, true} {
+			r, err := conf.RemoveDynamicZone(zd.ZoneName, keepKeys)
+			if err == nil || !strings.Contains(err.Error(), sig0RollingRefusal) {
+				t.Errorf("delete (keep-keys %v) during a rollover returned %+v, %v", keepKeys, r, err)
+				continue
+			}
+			refused++
+		}
+		if cur, live := Zones.Get(zd.ZoneName); !live || cur != zd || zd.removed.Load() {
+			t.Error("a refused delete took the zone out of Zones")
+		}
+		if got := rolloverKeyStates(t, kdb, zd.ZoneName); !maps.Equal(got, keys) {
+			t.Errorf("a refused delete changed the keys: %v, want %v", got, keys)
+		}
+	}
+
+	if _, _, _, _, err := zd.RolloverSig0KeyWithParent(context.Background(), dns.ED25519, "complete"); err != nil {
+		t.Fatalf("the rollover the deletes were refused during: %v", err)
+	}
+	if refused != 2 {
+		t.Fatalf("%d of 2 deletes refused during the rollover", refused)
+	}
+	if len(fp.sent) != 2 {
+		t.Errorf("UPDATEs sent = %d, want the ADD and the REMOVE", len(fp.sent))
+	}
+
+	if _, err := conf.RemoveDynamicZone(zd.ZoneName, false); err != nil {
+		t.Fatalf("the delete after the rollover: %v", err)
+	}
+	if got := rolloverKeyStates(t, kdb, zd.ZoneName); len(got) != 0 {
+		t.Errorf("SIG(0) keys after the delete: %v", got)
+	}
+}
+
+// A SIG(0) rollover is refused while the zone is being deleted, and says
+// so: it sends nothing and makes no key, and the delete takes the keys.
+func TestASig0RolloverIsRefusedDuringAZoneDelete(t *testing.T) {
+	conf, zd, kdb, fp := rolloverZoneToDelete(t)
+	var rollErr error
+	testHookSignalRecordTaken = func() {
+		_, _, _, _, rollErr = zd.RolloverSig0KeyWithParent(context.Background(), dns.ED25519, "complete")
+	}
+	t.Cleanup(func() { testHookSignalRecordTaken = nil })
+
+	if _, err := conf.RemoveDynamicZone(zd.ZoneName, false); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if rollErr == nil || !strings.Contains(rollErr.Error(), "zone "+zd.ZoneName+" is being deleted; no rollover started") {
+		t.Errorf("a rollover during the delete returned %v", rollErr)
+	}
+	if len(fp.sent) != 0 {
+		t.Errorf("a rollover during the delete sent %d UPDATEs", len(fp.sent))
+	}
+	if got := rolloverKeyStates(t, kdb, zd.ZoneName); len(got) != 0 {
+		t.Errorf("SIG(0) keys after the delete: %v", got)
+	}
+}
+
+// signingZoneToDelete is an API-managed, online-signed zone with a bound
+// DNSSEC policy and no keys, registered for RemoveDynamicZone to delete.
+func signingZoneToDelete(t *testing.T, name string) (*Config, *ZoneData, *KeyDB) {
+	t.Helper()
+	kdb := newTestKeyDB(t)
+	zd := testZone(t, name, name+"\t3600\tIN\tSOA\tns."+name+" hostmaster."+name+" 1 7200 1800 604800 7200\n"+
+		name+"\t3600\tIN\tNS\tns."+name+"\n")
+	zd.KeyDB = kdb
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true, OptApiManagedZone: true}
+	zd.DnssecPolicy = &DnssecPolicy{Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519}
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	Zones.Set(name, zd)
+	t.Cleanup(func() { Zones.Remove(name) })
+	return conf, zd, kdb
+}
+
+func dnssecKeyCount(t *testing.T, kdb *KeyDB, zone string) int {
+	t.Helper()
+	var n int
+	if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM DnssecKeyStore WHERE zonename=?`, zone).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// A zone deleted after EnsureActiveDnssecKeys found it without keys, and
+// before it made them -- the policy binds after Ready, so a delete right
+// after an add meets the first sign there -- gets none: the delete found no
+// keys to take, and keys made after it would outlive the zone.
+func TestAZoneDeletedBeforeItsFirstKeysGetsNone(t *testing.T) {
+	const name = "firstkeys.example."
+	conf, zd, kdb := signingZoneToDelete(t, name)
+	testHookEnsureKeysGenerating = func() {
+		testHookEnsureKeysGenerating = nil
+		if _, err := conf.RemoveDynamicZone(name, false); err != nil {
+			t.Errorf("delete: %v", err)
+		}
+	}
+	t.Cleanup(func() { testHookEnsureKeysGenerating = nil })
+
+	if _, err := zd.EnsureActiveDnssecKeys(kdb, false); !errors.Is(err, errNoKeysForRemovedZone) {
+		t.Errorf("EnsureActiveDnssecKeys on a zone deleted under it returned %v, want %v", err, errNoKeysForRemovedZone)
+	}
+	if n := dnssecKeyCount(t, kdb, name); n != 0 {
+		t.Errorf("%d DNSSEC keys made for the deleted zone", n)
+	}
+	// And a signing pass that starts after the delete makes none either.
+	if _, err := zd.SignZone(context.Background(), kdb, false); !errors.Is(err, errNoKeysForRemovedZone) {
+		t.Errorf("SignZone on the deleted zone returned %v, want %v", err, errNoKeysForRemovedZone)
+	}
+	if n := dnssecKeyCount(t, kdb, name); n != 0 {
+		t.Errorf("%d DNSSEC keys made for the deleted zone by a signing pass", n)
+	}
+}
+
+// A policy change holds the zone's rollover lock across the re-sign that
+// makes a keyless zone's first keys, and the publish path makes them with
+// zd.mu held. Neither may block: the first keys are made under the zone
+// keys lock, not the rollover lock.
+func TestFirstKeysAreMadeWhileTheRolloverLockIsHeld(t *testing.T) {
+	const name = "lockheld.example."
+	_, zd, kdb := signingZoneToDelete(t, name)
+	lock := AcquireRolloverLock(name)
+	lock.Lock()
+	defer lock.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		zd.mu.Lock()
+		defer zd.mu.Unlock()
+		_, err := zd.EnsureActiveDnssecKeys(kdb, true)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("EnsureActiveDnssecKeys: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("EnsureActiveDnssecKeys blocked on the rollover lock")
+	}
+	if n := dnssecKeyCount(t, kdb, name); n != 2 {
+		t.Errorf("%d DNSSEC keys made, want a KSK and a ZSK", n)
+	}
 }

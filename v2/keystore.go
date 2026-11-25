@@ -1014,6 +1014,16 @@ func (kdb *KeyDB) forceZoneKeysToPolicyRoles(zd *ZoneData, pol *DnssecPolicy, dr
 	}
 	zone := zd.ZoneName
 
+	// Under the zone keys lock, before the transaction (acquireZoneKeysLock):
+	// a zone delete takes the zone's keys under it, and no keys are made for
+	// a zone deleted meanwhile.
+	keysLock := acquireZoneKeysLock(zone)
+	keysLock.Lock()
+	defer keysLock.Unlock()
+	if zd.removed.Load() {
+		return nil, fmt.Errorf("forceZoneKeysToPolicyRoles: %w", errNoKeysForRemovedZone)
+	}
+
 	tx, err := kdb.Begin("forceZoneKeysToPolicyRoles")
 	if err != nil {
 		return nil, err

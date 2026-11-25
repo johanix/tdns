@@ -1340,6 +1340,28 @@ func (conf *Config) RemoveDynamicZone(name string, keepKeys bool) (*ZoneRemoval,
 		return nil, fmt.Errorf("zone %s is not API-managed and cannot be deleted here", name)
 	}
 
+	// No SIG(0) rollover of the zone runs during the delete, and none starts
+	// (beginZoneDelete). A rollover running now refuses the delete before
+	// anything is touched, with --keep-keys too: once it has a new key it
+	// cannot be undone until the parent has answered, and taking the keys
+	// meanwhile could leave the parent trusting a key whose private half is
+	// gone. It is not waited for, as its UPDATEs can take network timeouts.
+	// The claim is never waited for, so it has no place in the lock order:
+	// it is taken under templateApplyMu, before zd.mu and the rollover lock,
+	// and held until the delete returns. Claimed in the keystore a rollover
+	// of the zone claims it in, the ZoneData's (conf's for a dynamic zone).
+	claimKDB := zd.KeyDB
+	if claimKDB == nil {
+		claimKDB = conf.Internal.KeyDB
+	}
+	if claimKDB != nil {
+		release, err := claimKDB.beginZoneDelete(name)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
+
 	// The zone's pass, if one is running, finishes before this (it holds
 	// zd.mu throughout), and one that starts later does nothing.
 	zd.mu.Lock()

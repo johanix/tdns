@@ -748,7 +748,9 @@ func RunZoneDelete(role string, keepKeys bool) {
 	// A delete whose keys could not follow the zone is an error with a
 	// report: the zone is gone, and the report says how to finish.
 	if err != nil && cr.Removal == nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		for _, line := range zoneDeleteErrorLines(cr.AppName, err) {
+			fmt.Println(line)
+		}
 		os.Exit(1)
 	}
 	for _, line := range zoneDeleteLines(cr) {
@@ -762,6 +764,13 @@ func RunZoneDelete(role string, keepKeys bool) {
 // zoneDeleteLineWidth is the widest line zoneDeleteLines wraps to. A
 // command to copy is never wrapped, so a long zone name can pass it.
 const zoneDeleteLineWidth = 72
+
+// zoneDeleteErrorLines is a zone delete that was refused, or failed with
+// nothing deleted, as printed: the server's error, wrapped like the
+// outcome, such as a refusal while a SIG(0) key rollover of the zone runs.
+func zoneDeleteErrorLines(app string, err error) []string {
+	return wrapIndented(fmt.Sprintf("Error from %q: %s", app, err.Error()), zoneDeleteLineWidth)
+}
 
 // zoneDeleteLines is a zone delete's outcome as printed: the server's
 // message, verdict first, then its warnings.
