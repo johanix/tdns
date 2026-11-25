@@ -207,7 +207,7 @@ type AddResult struct {
 
 var addableRoles = map[string]bool{"auth": true, "agent": true, "imr": true}
 
-const newCliConfigHeader = "# tdns-ncli configuration.\n# apiservers: lists the daemons (and instances of a daemon) tdns-ncli addresses;\n# `tdns-ncli config add <daemon-config.yaml>` adds to it. It holds API keys.\n\n"
+const newCliConfigHeader = "# tdns-ncli configuration.\n# apiservers: lists the daemons (and instances of a daemon) tdns-ncli addresses;\n# `tdns-ncli config add <daemon-config.yaml>` adds to it. config add\n# writes no API key, but an entry added by hand may hold one: keep it 0600.\n\n"
 
 // AddDaemonConfig adds one apiservers: entry for the daemon whose config is
 // o.DaemonConfig to the CLI config (design 2026-11-25 section 4). A running
