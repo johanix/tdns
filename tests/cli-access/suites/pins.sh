@@ -46,9 +46,12 @@ suite_pins() {
 	opin=$(sed -n 's/^Pin: *//p' "$o" | head -1)
 	[ "$(rc_of "$o")" = 0 ] && [ -n "$opin" ]
 	judge P2a "client init on the CLI host: a key pair and its pin" $? "$o"
+	# Older builds edit the file and reload the daemon ("... reloaded"); from
+	# #1198 on the daemon writes and loads it itself and answers with the
+	# policy in force ("In force: N client(s), ...").
 	o=$(out P2-add); ncli_root rootacc auth client add operator --pin "$opin" --role read-write > "$o"
-	[ "$(rc_of "$o")" = 0 ] && grep -q 'reloaded' "$o" && grep -q 'operator' "$ACC" && [ -f "$ACC.prev" ]
-	judge P2b "client add as root on the daemon host: written (with .prev) and reloaded over the socket" $? "$o"
+	[ "$(rc_of "$o")" = 0 ] && grep -q 'reloaded\|^In force: ' "$o" && grep -q 'operator' "$ACC" && [ -f "$ACC.prev" ]
+	judge P2b "client add as root on the daemon host: written (with .prev) and in force" $? "$o"
 	o=$(out P2-cert); ncli_remote cert auth ping > "$o" 2>&1
 	if newcli; then grep -q 'pong (TLS, read-write, certificate operator) from' "$o"; else grep -q 'authenticated as operator (read-write) by certificate' "$o"; fi
 	judge P2c "authmethod: certificate: read-write as operator (ping: \"TLS, read-write, certificate operator\")" $? "$o"
