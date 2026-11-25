@@ -377,7 +377,8 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		// pair the client: block names.
 		if enrolled {
 			if c, k := clientCertPaths(ReadCliClientConf(o.CliConfig)); c != certPath || k != keyPath {
-				return nil, fmt.Errorf("the client pair in %s changed while config add\nran (now %s); nothing was written. The pin of\n%s stays enrolled; the next config add enrols the new pair", o.CliConfig, c, certPath)
+				// The daemon refuses a second pin under one name.
+				return nil, fmt.Errorf("the client pair in %s changed while config add\nran (now %s); nothing was written. The pin of\n%s stays enrolled as %s: put that pair back,\nor run config add again with another --client-name", o.CliConfig, c, certPath, client)
 			}
 		}
 	}

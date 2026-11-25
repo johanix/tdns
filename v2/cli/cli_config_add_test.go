@@ -394,7 +394,7 @@ func TestAddAfterTheEnrolmentIsSent(t *testing.T) {
 	d = newAddDaemon(t, true)
 	body := "client:\n   cert: " + d.certPath + ".new\n   key: " + d.certPath + ".key.new\n"
 	d.onAdd = func() { writeFile(t, d.cli, body) }
-	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "changed while config add") {
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "changed while config add") || !strings.Contains(err.Error(), "enrolled as tester") || !strings.Contains(err.Error(), "another --client-name") {
 		t.Errorf("client pair changed: %v", err)
 	}
 	d.unchanged(t, body)
