@@ -277,6 +277,11 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	if err != nil || known {
 		return res, err
 	}
+	// A TCP API without TLS takes no client certificate, running or not:
+	// refused here, not a config-file:-only entry that names --cert.
+	if tcpURL != "" && !info.UseTLS {
+		return nil, fmt.Errorf("%s: apiserver.usetls is false, but a client\ncertificate needs TLS on the TCP API; set usetls: true", info.ConfigFile)
+	}
 
 	// Running? Its socket answers /access list, naming its config.
 	sock, err := socketClientOf(info)
@@ -301,8 +306,6 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		switch {
 		case list.File == "":
 			return nil, errors.New(list.Msg) // the daemon's advice: no access file
-		case !info.UseTLS:
-			return nil, fmt.Errorf("%s: apiserver.usetls is false, but a client\ncertificate needs TLS on the TCP API; set usetls: true", info.ConfigFile)
 		case len(list.ServerPins) == 0:
 			return nil, fmt.Errorf("the daemon serves no certificate on its TCP API (is it\nlistening on %s?), so there is nothing to pin", info.Addresses[0])
 		}
@@ -369,6 +372,13 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			return res, nil
 		case known:
 			return res, nil
+		}
+		// The pin enrolled is this pair's; the entry is used with whatever
+		// pair the client: block names.
+		if enrolled {
+			if c, k := clientCertPaths(ReadCliClientConf(o.CliConfig)); c != certPath || k != keyPath {
+				return nil, fmt.Errorf("the client pair in %s changed while config add\nran (now %s); nothing was written. The pin of\n%s stays enrolled; the next config add enrols the new pair", o.CliConfig, c, certPath)
+			}
 		}
 	}
 	out, err := renderAdd(o, target, existing, entry, res.Created)
@@ -523,8 +533,9 @@ func knownEntry(o AddOptions, res *AddResult, existing []ApiDetails, info *Daemo
 		case sameFile:
 			return false, fmt.Errorf("entry %q already points at %s but with a different API address (%s, the config says %q); edit or remove that entry by hand",
 				e.Name, info.ConfigFile, e.BaseURL, tcpURL)
-		case sameAddr && e.ConfigFile == "":
-			// Typically the canonical entry written before config-file: existed.
+		case e.ConfigFile == "" && (sameAddr || entryIsDaemonSocket(e, info)):
+			// Typically the canonical entry written before config-file:
+			// existed, by its TCP address or its unix:// socket.
 		case sameAddr:
 			return false, fmt.Errorf("entry %q (config-file %s) already uses the API address %s, which %s also names; two daemons cannot listen on one address",
 				e.Name, e.ConfigFile, e.BaseURL, info.ConfigFile)
@@ -566,7 +577,8 @@ func enrol(sock *tdns.ApiClient, certPath, keyPath, client string, cc CliClientC
 		Role: "read-write", Comment: "tdns-ncli config add"})
 	switch {
 	case err != nil:
-		return err
+		// The daemon may have added it and lost the answer.
+		return fmt.Errorf("%v\nNo answer that the daemon added your pin; nothing was\nwritten. Run config add again: a pin added is reused", err)
 	case ans.Error:
 		return fmt.Errorf("the daemon did not add your pin; nothing was written:\n%s", ans.ErrorMsg)
 	}
@@ -601,6 +613,11 @@ func renderAdd(o AddOptions, target string, existing []ApiDetails, entry ApiDeta
 		}
 	}
 	out, _, err := spliceApiserver(src, entry)
+	if errors.Is(err, errFlowApiservers) && entry.AuthMethod == "certificate" {
+		// Checked before the enrolment: an entry pasted now would hold a
+		// pin the daemon does not know.
+		return nil, fmt.Errorf("%s: %w; nothing was written.\nMake the list block style (or name its file with --file),\nthen run config add again", target, err)
+	}
 	if errors.Is(err, errFlowApiservers) {
 		return nil, fmt.Errorf("%s: %w; nothing was written. Make the list block style (or name its file with --file), or add this entry by hand:\n\n%s",
 			target, err, renderEntry(entry, itemLayout{indent: defItemIndent, gap: defDashGap, valueCol: defValueCol}))

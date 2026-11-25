@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -356,6 +357,10 @@ func accessAtDaemon(role, daemonCfg string, post tdns.AccessPost) (tdns.AccessRe
 	return accessOver(c, post)
 }
 
+// accessTimeout bounds one /access request, answer included: the daemon
+// answers from memory, after at most one small file write.
+var accessTimeout = 30 * time.Second
+
 // accessOver sends post to the daemon on c, its local admin socket. A
 // socket that cannot be used is a socketError.
 func accessOver(c *tdns.ApiClient, post tdns.AccessPost) (tdns.AccessResponse, error) {
@@ -364,10 +369,16 @@ func accessOver(c *tdns.ApiClient, post tdns.AccessPost) (tdns.AccessResponse, e
 	if err != nil {
 		return resp, err
 	}
+	if c.Client != nil && c.Client.Timeout == 0 {
+		c.Client.Timeout = accessTimeout
+	}
 	status, buf, err := c.Post("/access", body)
+	var nerr net.Error
 	switch {
 	case status == http.StatusNotFound:
 		return resp, errors.New("the daemon has no /access route: is it older than tdns-ncli?")
+	case errors.As(err, &nerr) && nerr.Timeout():
+		return resp, fmt.Errorf("the daemon did not answer on its local socket\n%s within %v", c.Socket, accessTimeout)
 	case err != nil:
 		return resp, socketError(c.Socket, err)
 	}
