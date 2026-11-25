@@ -59,13 +59,14 @@ func AcquireRolloverLock(zone string) *sync.Mutex {
 	return m
 }
 
-// Per-zone mutex that serializes the paths that make a zone's DNSSEC keys
-// outside the rollover machinery -- EnsureActiveDnssecKeys making a zone's
-// first keys (makeMissingDnssecKeys), the key state worker's standby keys,
-// a policy reset's regenerated ones -- against a zone delete taking the
-// zone's keys (removeZoneKeys). Each checks zd.removed under it, so its keys
-// are either made before the delete takes the lock, and go with the zone,
-// or not made at all.
+// Per-zone mutex that serializes the paths that write a zone's keys
+// outside the rollover machinery -- EnsureActiveDnssecKeys reconciling,
+// promoting and making a zone's first keys, the key state worker's standby
+// keys, a policy reset's regenerated ones, a SIG(0) bootstrap's and its
+// setup's new key -- against a zone delete taking the zone's keys
+// (removeZoneKeys). Each checks zd.removed under it (lockZoneKeys), so its
+// writes are either made before the delete takes the lock, and go with the
+// zone, or not made at all.
 //
 // Not the rollover lock, which a caller of those paths can hold: a policy
 // change holds it across its re-sign, which makes a keyless zone's first
@@ -82,6 +83,25 @@ var (
 	zoneKeysLocks   = make(map[string]*sync.Mutex)
 	zoneKeysLocksMu sync.Mutex
 )
+
+// lockZoneKeys takes the zone keys lock for op to write the zone's keys
+// under, and checks under it that the ZoneData is still the zone's: one
+// that has left Zones (zd.removed) gets errNoKeysForRemovedZone, with the
+// lock released. A zone delete marks the ZoneData before it takes the lock
+// to delete the keys, and a re-add of the name follows a finished delete,
+// so a write made under the lock is either taken by that delete or never
+// made, and never lands on the keys of a zone added since under the same
+// name. The returned unlock may be called more than once.
+func (zd *ZoneData) lockZoneKeys(op string) (unlock func(), err error) {
+	lock := acquireZoneKeysLock(zd.ZoneName)
+	lock.Lock()
+	if zd.removed.Load() {
+		lock.Unlock()
+		return nil, zd.noKeysForRemovedZone(op)
+	}
+	var once sync.Once
+	return func() { once.Do(lock.Unlock) }, nil
+}
 
 // acquireZoneKeysLock returns the per-zone zone keys mutex for zone, keyed
 // as AcquireRolloverLock keys its own. The caller locks and unlocks it.

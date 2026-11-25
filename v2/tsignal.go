@@ -129,6 +129,10 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
 		var err error
 		if dak, err = zd.EnsureActiveDnssecKeys(zd.KeyDB, false); err != nil {
+			if isNoKeysForRemovedZone(err) {
+				// The zone is being removed: no pass, as below.
+				return nil
+			}
 			return err
 		}
 	}

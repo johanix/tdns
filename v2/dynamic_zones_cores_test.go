@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // newTestConfigForCores builds a minimal Config with a drained RefreshZoneCh so
@@ -214,9 +215,27 @@ func TestAnUnsyncedConfigRewriteKeepsTheAddAndTheModify(t *testing.T) {
 	conf.DynamicZones.ZoneDirectory = dir
 	conf.DynamicZones.Dynamic.Storage = "persistent"
 	withTestTemplates(t, map[string]ZoneConf{"dyn-test": dynPrimaryTestTemplate(dir)})
+	// Every sync the writer asks for is recorded: each add and modify below
+	// reaches the sync, so its failure is the one under test, and a write
+	// that fails before the rename never gets that far.
+	var syncs []string
 	prev := syncDynamicConfigDir
-	syncDynamicConfigDir = func(string) error { return errors.New("sync refused by the test") }
+	syncDynamicConfigDir = func(dir string) error {
+		syncs = append(syncs, dir)
+		return errors.New("sync refused by the test")
+	}
 	t.Cleanup(func() { syncDynamicConfigDir = prev })
+	wantSyncs := func(n int, what string) {
+		t.Helper()
+		if len(syncs) != n {
+			t.Errorf("after %s the directory sync was asked for %d times, want %d", what, len(syncs), n)
+		}
+		for _, d := range syncs {
+			if d != dir {
+				t.Errorf("the directory sync was asked for %q, want the config file's directory %q", d, dir)
+			}
+		}
+	}
 
 	persisted := func(zone string) *ZoneConf {
 		t.Helper()
@@ -250,6 +269,7 @@ func TestAnUnsyncedConfigRewriteKeepsTheAddAndTheModify(t *testing.T) {
 	if persisted(sec) == nil {
 		t.Fatal("the dynamic config does not name the added zone")
 	}
+	wantSyncs(1, "the add")
 
 	if _, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{
 		Name: sec, Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.9:53", Key: key}},
@@ -264,6 +284,7 @@ func TestAnUnsyncedConfigRewriteKeepsTheAddAndTheModify(t *testing.T) {
 	if zc := persisted(sec); zc == nil || len(zc.Primaries) != 1 || zc.Primaries[0].Addr != "192.0.2.9:53" {
 		t.Errorf("the dynamic config does not hold the modify: %+v", zc)
 	}
+	wantSyncs(2, "the modify")
 
 	const prim = "unsynced-primary.example."
 	if _, err := conf.ProvisionDynamicZone(context.Background(), DynamicZoneInput{
@@ -281,6 +302,7 @@ func TestAnUnsyncedConfigRewriteKeepsTheAddAndTheModify(t *testing.T) {
 	if persisted(prim) == nil {
 		t.Error("the dynamic config does not name the added primary")
 	}
+	wantSyncs(3, "the primary add")
 
 	// Before the rename: the rewrite did not take effect, and the modify
 	// is rolled back as before.
@@ -292,5 +314,52 @@ func TestAnUnsyncedConfigRewriteKeepsTheAddAndTheModify(t *testing.T) {
 	}
 	if cur, _ := Zones.Get(sec); cur != modified {
 		t.Error("a modify whose rewrite failed before the rename was not rolled back")
+	}
+	wantSyncs(3, "the modify that failed before the rename")
+}
+
+// WriteDynamicConfigFile takes its snapshot of the zones under the lock the
+// write holds. A writer that took its snapshot first and then waited for
+// the lock would write a zone back that a delete had written out of the
+// file in the meantime, and the delete then deletes the zone's keys: a
+// restart would bring the zone back without them.
+func TestADynamicConfigWriteNeverPutsBackAnOlderSnapshot(t *testing.T) {
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, _ := newTestConfigForCores(t)
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	conf.DynamicZones.Dynamic.Storage = "persistent"
+	const name = "snapshot.example."
+	zd := &ZoneData{ZoneName: name, ZoneType: Secondary, ZoneStore: MapZone,
+		Options:       map[ZoneOption]bool{OptApiManagedZone: true},
+		PrimariesConf: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}
+	Zones.Set(name, zd)
+
+	// A delete's write, holding the lock: the zone leaves Zones and the
+	// file. Meanwhile another writer starts, and has to wait.
+	dynamicConfigMutex.Lock()
+	done := make(chan error, 1)
+	go func() { done <- conf.WriteDynamicConfigFile() }()
+	time.Sleep(100 * time.Millisecond) // the writer is at the lock by now
+	Zones.Remove(name)
+	err := conf.writeDynamicConfigFileLocked(conf.getDynamicZonesFromZonesMap())
+	dynamicConfigMutex.Unlock()
+	if err != nil {
+		t.Fatalf("the delete's write: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("the waiting writer: %v", err)
+	}
+
+	cf, err := conf.loadDynamicConfigFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, z := range cf.Zones {
+		if z.Name == name {
+			t.Fatal("a writer that waited for the lock put the deleted zone back in the dynamic config")
+		}
 	}
 }
