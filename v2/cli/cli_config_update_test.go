@@ -154,6 +154,19 @@ func TestUpdateNeedsTheDaemonConfig(t *testing.T) {
 	d.unchanged(t, string(after))
 }
 
+// --cert: a client pair changed while the pin was enrolled is not the one
+// enrolled, and nothing is written.
+func TestUpdateCertClientPairChanged(t *testing.T) {
+	d := newAddDaemon(t, true)
+	d.writeCli(t, keyEntries)
+	changed := strings.Replace(d.cliText(keyEntries), d.certPath, d.certPath+".new", 1)
+	d.onAdd = func() { writeFile(t, d.cli, changed) }
+	if _, err := d.update(t, withCert); err == nil || !strings.Contains(err.Error(), "changed while config update") || !strings.Contains(err.Error(), "stays enrolled") {
+		t.Errorf("client pair changed: %v", err)
+	}
+	d.unchanged(t, changed)
+}
+
 // --cert stops before anything is written: no access file (the daemon's
 // advice, and no client pair made), a refused enrolment, a failed TCP
 // request (the pin stays enrolled).

@@ -236,6 +236,11 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 	if existing, i, err = find(); err == nil && !reflect.DeepEqual(existing[i], e) {
 		err = fmt.Errorf("entry %q changed while config update ran; nothing was\nwritten", e.Name)
 	}
+	if err == nil && o.Cert {
+		if err := samePair(o.CliConfig, cc, cmd); err != nil {
+			return nil, err // says what stays enrolled
+		}
+	}
 	if err == nil {
 		out, err = renderUpdate(o.CliConfig, target, existing, i, up)
 	}
