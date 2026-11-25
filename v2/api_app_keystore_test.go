@@ -1329,20 +1329,7 @@ func TestKeystoreAddReportsAFailedRepublish(t *testing.T) {
 	Conf.Internal.ResignQ = q
 	t.Cleanup(func() { Conf.Internal.ResignQ = prevQ })
 
-	// A signing row with no private key: the zone's signing keys cannot be
-	// loaded until it is fixed.
-	broken := testDnssecKey(t, own, 256)
-	tx, err := Conf.Internal.KeyDB.Begin("test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := insertKeyRowTx(tx, KeyRow{Zone: own, State: DnskeyStateActive, Keyid: broken.Keyid, Flags: 256,
-		Algorithm: "ED25519", Creator: "test", KeyRR: broken.KeyRR}); err != nil {
-		t.Fatal(err)
-	}
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
-	}
+	broken := breakSigningKeys(t, own)
 
 	keys := keyCount(t, "DnssecKeyStore", own)
 	dk := testDnssecKey(t, own, 256)
@@ -1383,5 +1370,60 @@ func TestKeystoreAddReportsAFailedRepublish(t *testing.T) {
 	}
 	if err != nil || !found {
 		t.Errorf("once the keystore can be read, the re-sign's keys: %v, the added key among them: %v", err, found)
+	}
+}
+
+// breakSigningKeys adds to zone a signing row with no private key, so that
+// the zone's signing keys cannot be loaded until it is deleted, and returns
+// its key.
+func breakSigningKeys(t *testing.T, zone string) BulkDnssecKey {
+	t.Helper()
+	broken := testDnssecKey(t, zone, 256)
+	tx, err := Conf.Internal.KeyDB.Begin("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertKeyRowTx(tx, KeyRow{Zone: zone, State: DnskeyStateActive, Keyid: broken.Keyid, Flags: 256,
+		Algorithm: "ED25519", Creator: "test", KeyRR: broken.KeyRR}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return broken
+}
+
+// A bulk import whose signing-key republish fails for a zone answers as an
+// add does: an error that says the keys are committed and the zone does
+// not serve them yet, with the dispositions of the keys that landed, and
+// the zone's re-sign still asked for.
+func TestKeystoreBulkImportReportsAFailedRepublish(t *testing.T) {
+	z := keystoreScope(t)
+	own := z["own"]
+	q := make(chan ResignRequest, 16)
+	prevQ := Conf.Internal.ResignQ
+	Conf.Internal.ResignQ = q
+	t.Cleanup(func() { Conf.Internal.ResignQ = prevQ })
+	broken := breakSigningKeys(t, own)
+
+	k := testDnssecKey(t, own, 256)
+	for k.Keyid == broken.Keyid || k.Keyid == zoneKeyID(t, "dnssec", own) {
+		k = testDnssecKey(t, own, 256)
+	}
+	resp, _ := postKeystore(t, KeystorePost{Command: "dnssec-mgmt", SubCommand: "bulk-import", BulkDnssecKeys: []BulkDnssecKey{k}}, &socketCaller)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "keys were imported and committed, but 1 zone(s) could not be republished and do not serve them yet: "+own) {
+		t.Errorf("bulk import whose republish fails: %q, want the failure reported", resp.ErrorMsg)
+	}
+	if len(resp.BulkDispositions) != 1 || resp.BulkDispositions[0].Status != BulkStatusImported {
+		t.Errorf("dispositions %+v, want the key imported", resp.BulkDispositions)
+	}
+	resigned := false
+	for len(q) > 0 {
+		r := <-q
+		resigned = resigned || r.Zd.ZoneName == own
+		r.Zd.resignQueued.Store(false)
+	}
+	if !resigned {
+		t.Error("the bulk import did not ask for the zone's re-sign")
 	}
 }

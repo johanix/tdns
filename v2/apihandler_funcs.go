@@ -102,8 +102,10 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						// the zone's snapshot unbuilt, so the re-sign takes
 						// the signing keys from the keystore (activeKeysCAS),
 						// or fails and stays owed, and never signs with the
-						// keys from before the change (republishSigningKeysForZone
-						// asks for the same re-sign itself).
+						// keys from before the change. republishSigningKeysForZone
+						// asks for a re-sign itself only for a zone that serves
+						// a signed DNSKEY RRset; this one covers the rest, and
+						// a second request for a queued re-sign is dropped.
 						if dnssecRepublishZone != "" {
 							if rerr := republishSigningKeysForZone(kdb, dnssecRepublishZone); rerr != nil {
 								lgApi.Error("APIkeystore: post-commit signing-keys republish failed",
@@ -123,39 +125,39 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						// re-sign. Without it a forced key replacement would
 						// leave the zone's RRSIGs made by the superseded key
 						// until the resigner's next scheduled pass.
-						// Per zone, and re-sign ONLY where the republish
-						// succeeded. Re-signing after a failed republish is
-						// worse than not re-signing at all: the resigner would
-						// run against the stale in-memory signing-key set and
-						// mint a fresh, correctly-dated set of RRSIGs made by
-						// the superseded key — converting a loud "your import
-						// did not take effect" into a zone that looks freshly
-						// signed and is not. Leaving the old RRSIGs in place
-						// keeps the failure visible until the operator acts.
+						//
+						// As for the single zone above, a zone whose republish
+						// fails is re-signed all the same: the failure leaves
+						// its snapshot unbuilt, so the re-sign reads the
+						// signing keys from the keystore, or fails and stays
+						// owed, and cannot sign with the pre-import keys. The
+						// republish asks for that re-sign itself only for a
+						// zone serving a signed DNSKEY RRset; this request
+						// covers the others.
 						var republishFailed []string
 						for _, z := range dnssecBulkRepublishZones {
 							if rerr := republishSigningKeysForZone(kdb, z); rerr != nil {
 								lgApi.Error("APIkeystore: post-commit signing-keys republish failed after bulk import",
 									"zone", z, "err", rerr,
-									"consequence", "NOT re-signing this zone; it keeps serving the pre-import key set")
+									"consequence", "the zone serves its old signing keys until a re-sign can read the new ones from the keystore")
 								republishFailed = append(republishFailed, z)
-								continue
 							}
 							triggerResign(conf, z)
 						}
 						// Say so on the response, not only in the log. The
 						// transaction committed, so the keys ARE in the
-						// keystore -- but a zone whose republish failed is
-						// still serving the pre-import key set, and reporting
-						// unqualified success lets a restore script tick the
-						// box and move on. The dispositions are deliberately
-						// left in place: the database write did happen, and the
-						// caller needs to know which keys landed.
+						// keystore -- but a zone whose republish failed does
+						// not serve them yet, and reporting unqualified
+						// success lets a restore script tick the box and move
+						// on. The dispositions are deliberately left in place:
+						// the database write did happen, and the caller needs
+						// to know which keys landed.
 						if len(republishFailed) > 0 && resp != nil {
 							resp.Error = true
 							resp.ErrorMsg = fmt.Sprintf(
 								"keys were imported and committed, but %d zone(s) could not be "+
-									"republished and are still serving the pre-import signing keys: %s",
+									"republished and do not serve them yet: %s; each serves the keys "+
+									"it had until a re-sign can read them from the keystore",
 								len(republishFailed), strings.Join(republishFailed, ", "))
 						}
 						if dnssecResignZone != "" {
