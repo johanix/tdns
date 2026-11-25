@@ -18,6 +18,10 @@ import (
 	"github.com/miekg/dns"
 )
 
+// commitKeystoreTx is (*Tx).Commit, a variable so that a test can make the
+// keystore handler's commit fail.
+var commitKeystoreTx = (*Tx).Commit
+
 func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -69,6 +73,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		var dnssecBulkRepublishZones []string
 		var sig0InvalidateZones []string
 		var dnssecStrip *stagedStrip
+		var committed bool
 
 		tx, err := kdb.Begin("APIkeystore")
 
@@ -78,7 +83,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 					tx.Rollback()
 					dnssecStrip.finish(false)
 				} else {
-					if commitErr := tx.Commit(); commitErr != nil {
+					if commitErr := commitKeystoreTx(tx); commitErr != nil {
 						err = commitErr
 						if resp != nil {
 							resp.Error = true
@@ -86,6 +91,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						}
 						dnssecStrip.finish(false)
 					} else {
+						committed = true
 						// R1: DnssecKeyMgmt always receives this external tx, so its
 						// localtx republish path never runs. Republish here after
 						// Commit, before triggerResign, so SignZone sees the new set.
@@ -145,7 +151,6 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						if dnssecResignZone != "" {
 							triggerResign(conf, dnssecResignZone)
 						}
-						logKeyExports(r.Context(), kp, resp)
 						// SIG(0) bulk import owns no transaction of its own on
 						// this path, so it cannot drop its own cache entries --
 						// the commit that makes the new rows visible is the one
@@ -178,6 +183,14 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			if tsigMgmt {
 				confMu.Unlock()
 			}
+			// An export whose request failed (its commit included) hands
+			// out nothing; one that succeeded logs each key it hands out,
+			// once, right before the answer goes (design R9).
+			if resp != nil && resp.Error {
+				withholdKeyExports(kp, resp)
+			} else if committed {
+				logKeyExports(r.Context(), kp, resp)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 		}()
@@ -206,10 +219,17 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 
 		case "dnssec-mgmt":
 			resp, err = kdb.DnssecKeyMgmt(r.Context(), tx, kp)
+			// The zone the keys changed in: for add and setstate the zone
+			// the key was written under, which DnssecKeyMgmt refuses to
+			// let Zone contradict. The republish and re-sign go there.
+			keyZone := kp.Zone
 			// Kept on a failure too, before resp is replaced: the rollback
 			// in the defer puts the strip back after it.
 			if resp != nil {
 				dnssecStrip = resp.stagedStrip
+				if resp.keyZone != "" {
+					keyZone = resp.keyZone
+				}
 			}
 			if err != nil {
 				logKeyMgmtFailure("DnssecKeyMgmt", err)
@@ -218,7 +238,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 					ErrorMsg: err.Error(),
 				}
 			} else if resp != nil && resp.NeedsSigningKeysRepublish {
-				dnssecRepublishZone = kp.Zone
+				dnssecRepublishZone = keyZone
 			}
 			if err == nil && resp != nil && len(resp.BulkRepublishZones) > 0 {
 				dnssecBulkRepublishZones = resp.BulkRepublishZones
@@ -226,7 +246,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			// Re-sign after state-changing ops — deferred until post-commit
 			// (alongside snapshot republish) so the resigner does not race the tx.
 			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear" || kp.SubCommand == "policy-cleanup") {
-				dnssecResignZone = kp.Zone
+				dnssecResignZone = keyZone
 			}
 
 		case "tsig-mgmt":

@@ -591,8 +591,8 @@ Part C (keystore for application clients):
 - The checks are made in the `*KeyMgmt` functions, on the name each
   subcommand acts on; the request carries the application client's name
   in an unexported field that only the handler sets. `sig0-mgmt delete`
-  looks the key up by Zone and deletes by Keyname, so both must be the
-  caller's. `add` takes the zone from the key record's owner name.
+  may name the key by Zone and by Keyname, so both must be the caller's.
+  `add` takes the zone from the key record's owner name.
 - One answer: a SIG(0) or DNSSEC key command on another's zone, or on a
   zone not served here, gets B's zone refusal before any lookup, whether
   or not the key exists. A TSIG key of another API owner reads as "not
@@ -614,14 +614,19 @@ Part C (keystore for application clients):
   bulk-export hands out is logged at Info, one line per key, for every
   caller (operators and the socket too): client, how it authenticated,
   whether it is an application client, the kind, the zone or key name and
-  the key ID.
+  the key ID. An export whose request fails, its commit included, hands
+  out no key material and logs nothing.
 - The keystore handler also refuses an application client what the table
   refuses, so a path that skips the middleware does not skip the table.
   It also refuses a SIG(0) or DNSSEC command whose Zone is not the
-  client's, whatever the subcommand checks: after the commit the handler
-  republishes and re-signs the zone named in Zone, while setstate checks
-  the key by Keyname and add by its DNSKEY's owner name (found by the
-  ownership test app, check 7.21).
+  client's, whatever the subcommand checks (found by the ownership test
+  app, check 7.21).
+- `dnssec-mgmt setstate` and `add` republish and re-sign the zone the key
+  is written under: Keyname's (Zone's when Keyname is empty), and the
+  DNSKEY's owner name. A Zone that names another zone is refused before
+  anything is written, for every caller; an empty Zone is the written
+  zone's. `sig0-mgmt delete` looks up and deletes by one name, and is
+  refused when Zone and Keyname name two.
 - The reference count in an application's TSIG list counts every zone
   that uses the key, others' included: delete's "not in use" rule needs
   the same number.

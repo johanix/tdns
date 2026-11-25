@@ -109,11 +109,12 @@ func appTsigKeyIsOwn(app string, row TsigKeystoreRow) bool {
 // path to the handler that skips the middleware does not skip the table.
 //
 // It also refuses a SIG(0) or DNSSEC command that names a Zone that is not
-// the client's, whatever the subcommand checks. After the commit, the
-// handler republishes the signing keys of, and re-signs, the zone the
-// request names in Zone, while setstate checks the key by Keyname and add
-// by the DNSKEY's owner name: an application could otherwise name its own
-// key and someone else's zone, and have that zone re-signed.
+// the client's, whatever the subcommand checks, so that an application is
+// refused another's zone whichever field names it. The subcommands check
+// the name they act on: setstate the key's (Keyname), add the DNSKEY's
+// owner name. A Zone that names another zone than the one written is
+// refused for everyone (keyWriteZone), and the handler republishes and
+// re-signs the zone written.
 func appKeystoreGate(app string, kp KeystorePost) error {
 	if app == "" {
 		return nil
@@ -137,6 +138,25 @@ func writeKeystoreRefusal(w http.ResponseWriter, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusForbidden)
 	json.NewEncoder(w).Encode(&KeystoreResponse{Error: true, ErrorMsg: err.Error()})
+}
+
+// withholdKeyExports takes the private keys and TSIG secrets out of the
+// answer to an export whose request failed: its commit, or a step after the
+// keys were read. Such an answer hands out nothing, and logKeyExports logs
+// nothing for it.
+func withholdKeyExports(kp KeystorePost, resp *KeystoreResponse) {
+	if resp == nil {
+		return
+	}
+	switch kp.SubCommand {
+	case "export", "bulk-export":
+		resp.Sig0keys = nil
+		resp.Dnskeys = nil
+		resp.TsigExport = nil
+		resp.BulkSig0Keys = nil
+		resp.BulkDnssecKeys = nil
+		resp.BulkTsigKeys = nil
+	}
 }
 
 // logKeyExports logs, at Info, every private key and TSIG secret a

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 )
@@ -398,18 +399,25 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		const getSig0KeySql = `
 SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
 
-		// The key is looked up by Zone and deleted by Keyname, from the
-		// keystore and the TrustStore: both must be the application's.
+		// Both names must be the application's, whichever names the key.
 		if err := appKeyZonesRefusal(app, kp.Zone, kp.Keyname); err != nil {
 			return &resp, err
 		}
+		// The key is looked up and deleted, from the keystore and the
+		// TrustStore, by one name: Zone, or Keyname when Zone is empty. A
+		// request that names two would check one key and delete another.
+		name, err := keyWriteZone("delete", "Keyname is", kp.Keyname, kp.Zone)
+		if err != nil {
+			return &resp, err
+		}
+		kp.Zone, kp.Keyname = name, name
 
 		// 1. Find key, if not --> error
 		row := tx.QueryRow(getSig0KeySql, kp.Zone, kp.Keyid)
 
 		var zone, algorithm, privatekey, keyrr string
 		var keyid int
-		err := row.Scan(&zone, &keyid, &algorithm, &privatekey, &keyrr)
+		err = row.Scan(&zone, &keyid, &algorithm, &privatekey, &keyrr)
 		if err != nil {
 			lgSigner.Error("failed to scan SIG(0) key for delete", "err", err)
 			if err == sql.ErrNoRows {
@@ -458,6 +466,24 @@ SELECT zonename, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zon
 	return &resp, nil
 }
 
+// keyWriteZone is the zone a keystore write goes to: written, the name the
+// key is written under (or deleted from), which the post-commit republish,
+// re-sign and cache drop follow, or zone when written is empty. A request whose Zone names another zone is refused before
+// anything is written ("<sub>: <what> <written>, but the request names
+// zone <zone>"): it would otherwise change one zone's key and act on the
+// other zone. An empty Zone, or one that is written in another case or
+// without the final dot, is no conflict.
+func keyWriteZone(sub, what, written, zone string) (string, error) {
+	if written == "" {
+		return zone, nil
+	}
+	if zone != "" && !core.EqualNames(dns.Fqdn(written), dns.Fqdn(zone)) {
+		return "", fmt.Errorf("%s: %s %s, but the request names zone %s; nothing was changed",
+			sub, what, written, zone)
+	}
+	return written, nil
+}
+
 // appendSig0InvalidateZone adds zone to the post-commit SIG(0) cache drop list
 // once. Zones are compared as stored (callers pass the keystore name/keyname).
 func appendSig0InvalidateZone(zones []string, zone string) []string {
@@ -503,6 +529,9 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	defer func() {
 		if out != nil && needsRepublish && err == nil {
 			out.NeedsSigningKeysRepublish = true
+		}
+		if out != nil {
+			out.keyZone = kp.Zone // add and setstate set it to the zone written
 		}
 		if localtx {
 			if txSuccess {
@@ -606,15 +635,19 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 	case "add": // AKA "import"
 		pkc := kp.PrivateKeyCache
-		if app != "" {
-			if pkc == nil {
-				return &resp, fmt.Errorf("add: no key in the request")
-			}
-			// The DNSKEY's owner name is the zone the row goes in.
-			if err := appKeyZoneRefusal(app, pkc.DnskeyRR.Header().Name); err != nil {
-				return &resp, err
-			}
+		if pkc == nil || pkc.DnskeyRR.Header().Name == "" {
+			return &resp, fmt.Errorf("add: no key in the request")
 		}
+		// The DNSKEY's owner name is the zone the row goes in, and the
+		// zone republished after the commit.
+		if err := appKeyZoneRefusal(app, pkc.DnskeyRR.Header().Name); err != nil {
+			return &resp, err
+		}
+		zone, err := keyWriteZone("add", "the DNSKEY's owner name is", pkc.DnskeyRR.Header().Name, kp.Zone)
+		if err != nil {
+			return &resp, err
+		}
+		kp.Zone = zone
 
 		// Convert private key to PEM format for storage
 		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey
@@ -748,9 +781,20 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		// state write would bypass it. With the columns the write goes
 		// through setKeyRowTx like every other, and any state is the owner's
 		// to name.
+		//
+		// The key is named by Keyname (Zone when Keyname is empty), and
+		// its zone is the one republished and re-signed after the commit.
+		if kp.Keyname == "" {
+			kp.Keyname = kp.Zone
+		}
 		if err := appKeyZoneRefusal(app, kp.Keyname); err != nil {
 			return &resp, err
 		}
+		zone, err := keyWriteZone("setstate", "the key is in zone", kp.Keyname, kp.Zone)
+		if err != nil {
+			return &resp, err
+		}
+		kp.Zone = zone
 		var stateFlags KeyRowFlags
 		zd, owned := zoneOwnedByName(kp.Keyname)
 		if owned && kp.Pub != nil && kp.Sign != nil && kp.DS != nil {

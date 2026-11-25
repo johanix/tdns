@@ -140,6 +140,11 @@ type KeystoreResponse struct {
 	// change the zone's active signing-key set. External-tx callers (APIkeystore)
 	// must call republishSigningKeysForZone after their Commit (R1).
 	NeedsSigningKeysRepublish bool `json:"-"`
+	// keyZone is the zone whose DNSSEC keys DnssecKeyMgmt changed: the
+	// request's Zone, or for add and setstate the zone the key was written
+	// under (keyWriteZone). The external-tx caller republishes and
+	// re-signs this zone, not the one the request names.
+	keyZone string
 	// GeneratedSig0Key is the keypair a sig0-mgmt "generate" made, for an
 	// in-process caller that goes on to use it. Never on the wire: it holds the
 	// private key.
