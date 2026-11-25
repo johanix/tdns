@@ -55,6 +55,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		// *KeyMgmt functions check each key or zone they resolve against
 		// kp.appClient.
 		kp.appClient = AppClientOf(r.Context())
+		kp.appID, _ = ApiIdentityFrom(r.Context())
 		if err := appKeystoreGate(kp.appClient, kp); err != nil {
 			lgApi.Info("keystore request refused: not available to application clients", "client", kp.appClient, "cmd", kp.Command, "subcmd", kp.SubCommand)
 			writeKeystoreRefusal(w, err)

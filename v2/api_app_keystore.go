@@ -146,21 +146,22 @@ func appKeystoreGate(app string, kp KeystorePost) error {
 // the zone is the client's.
 //
 // The client is told "not found"; the operator is told what happened. Each
-// refused export is logged at Info, in the style of logKeyExports' audit
-// line, with the client, how it authenticated (an application client is
-// always a certificate client, AppClientOf), the kind, the zone and the key
+// refused export is logged at Info, as logKeyExports logs an export, with
+// the client, how it authenticated and whether it is an application client
+// (from the request's identity, kp.appID), the kind, the zone and the key
 // ID (design R9). A missing key of the client's own zone is not a refusal
 // and is not logged here.
-func appKeyExportRefusal(app, kind, zone string, keyid uint16, notFound func() *KeystoreResponse) (*KeystoreResponse, error) {
-	err := appKeyZoneRefusal(app, zone)
+func appKeyExportRefusal(kp KeystorePost, kind string, notFound func() *KeystoreResponse) (*KeystoreResponse, error) {
+	err := appKeyZoneRefusal(kp.appClient, kp.Zone)
 	switch {
 	case err == nil:
 		return nil, nil
 	case err == errAppKeyNoZone:
 		return &KeystoreResponse{Time: time.Now()}, err
 	}
+	id := kp.appID
 	lgApi.Info("keystore: private key export refused, answered not found",
-		"client", app, "via", ApiViaCertificate, "app", true, "kind", kind, "zone", zone, "keyid", keyid,
+		"client", id.Name, "via", id.Via, "app", id.App, "kind", kind, "zone", kp.Zone, "keyid", kp.Keyid,
 		"reason", err.Error())
 	return notFound(), nil
 }

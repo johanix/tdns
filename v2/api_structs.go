@@ -68,6 +68,10 @@ type KeystorePost struct {
 	// key or zone they act on. "" (every other caller, and every caller
 	// inside the daemon) is unlimited.
 	appClient string
+	// appID is the request's identity (ApiIdentityFrom), set by APIkeystore
+	// with appClient, for the audit lines the *KeyMgmt functions write
+	// (appKeyExportRefusal), as logKeyExports writes them from the request.
+	appID ApiIdentity
 }
 
 type TsigKeyInfo struct {

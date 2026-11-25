@@ -405,7 +405,7 @@ func TestAppKeystoreExportsOwnKeysOnly(t *testing.T) {
 			if got := answer(z[zk], id); got != want {
 				t.Errorf("%s export of the %s zone's key: %s, but a missing key of its own zone: %s", kind, zk, got, want)
 			}
-			fields := "client=provisioner via=certificate app=true kind=" + kind + " zone=" + z[zk] + " keyid=" + itoa(int(id))
+			fields := "client=" + appCaller.Name + " via=" + appCaller.Via + " app=true kind=" + kind + " zone=" + z[zk] + " keyid=" + itoa(int(id))
 			if log := logbuf.String(); strings.Count(log, refusedLine) != 1 || !strings.Contains(log, fields) {
 				t.Errorf("%s export of the %s zone's key: want one refused line with %q, log:\n%s", kind, zk, fields, log)
 			}
