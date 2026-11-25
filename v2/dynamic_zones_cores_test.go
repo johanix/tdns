@@ -2,6 +2,9 @@ package tdns
 
 import (
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -193,5 +196,101 @@ func TestModifyDynamicZone_ReplacesAndBumps(t *testing.T) {
 	Zones.Set("static2.example.", static)
 	if _, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{Name: "static2.example", Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}); err == nil {
 		t.Error("expected refusal to modify a non-API-managed zone")
+	}
+}
+
+// A rewrite of the dynamic config that fails only to sync the directory
+// after the rename has taken effect: the file in place names the new zone
+// and its TSIG key. The add and the modify stand, instead of rolling back
+// the zone, the key and a primary's zone file under a file that names
+// them. A failure before the rename still rolls back.
+func TestAnUnsyncedConfigRewriteKeepsTheAddAndTheModify(t *testing.T) {
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, ch := newTestConfigForCores(t)
+	conf.Internal.TsigKeyStore = NewTsigKeyStore()
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	conf.DynamicZones.Dynamic.Storage = "persistent"
+	withTestTemplates(t, map[string]ZoneConf{"dyn-test": dynPrimaryTestTemplate(dir)})
+	prev := syncDynamicConfigDir
+	syncDynamicConfigDir = func(string) error { return errors.New("sync refused by the test") }
+	t.Cleanup(func() { syncDynamicConfigDir = prev })
+
+	persisted := func(zone string) *ZoneConf {
+		t.Helper()
+		cf, err := conf.loadDynamicConfigFile()
+		if err != nil {
+			t.Fatalf("read the dynamic config: %v", err)
+		}
+		for i := range cf.Zones {
+			if cf.Zones[i].Name == zone {
+				return &cf.Zones[i]
+			}
+		}
+		return nil
+	}
+
+	const sec, key = "unsynced.example.", "unsynced-key."
+	if _, err := conf.ProvisionDynamicZone(context.Background(), DynamicZoneInput{
+		Name: sec, Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
+		TsigName: key, TsigSecret: b64Secret16,
+	}, true); err != nil {
+		t.Fatalf("add with an unsynced rewrite: %v", err)
+	}
+	<-ch
+	added, ok := Zones.Get(sec)
+	if !ok {
+		t.Fatal("the add was rolled back")
+	}
+	if !conf.Internal.TsigKeyStore.Has(key) {
+		t.Error("the add's TSIG key was rolled back")
+	}
+	if persisted(sec) == nil {
+		t.Fatal("the dynamic config does not name the added zone")
+	}
+
+	if _, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{
+		Name: sec, Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.9:53", Key: key}},
+	}); err != nil {
+		t.Fatalf("modify with an unsynced rewrite: %v", err)
+	}
+	<-ch
+	modified, _ := Zones.Get(sec)
+	if modified == added || firstUpstreamAddr(modified.Upstreams) != "192.0.2.9:53" {
+		t.Errorf("the modify was rolled back: upstream %q", firstUpstreamAddr(modified.Upstreams))
+	}
+	if zc := persisted(sec); zc == nil || len(zc.Primaries) != 1 || zc.Primaries[0].Addr != "192.0.2.9:53" {
+		t.Errorf("the dynamic config does not hold the modify: %+v", zc)
+	}
+
+	const prim = "unsynced-primary.example."
+	if _, err := conf.ProvisionDynamicZone(context.Background(), DynamicZoneInput{
+		Name: prim, Type: Primary, Template: "dyn-test",
+	}, true); err != nil {
+		t.Fatalf("primary add with an unsynced rewrite: %v", err)
+	}
+	<-ch
+	if _, ok := Zones.Get(prim); !ok {
+		t.Error("the primary add was rolled back")
+	}
+	if _, err := os.Stat(filepath.Join(dir, prim+"zone")); err != nil {
+		t.Errorf("the primary's zone file was removed: %v", err)
+	}
+	if persisted(prim) == nil {
+		t.Error("the dynamic config does not name the added primary")
+	}
+
+	// Before the rename: the rewrite did not take effect, and the modify
+	// is rolled back as before.
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "missing", "dynamic.yaml")
+	if _, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{
+		Name: sec, Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.10:53", Key: key}},
+	}); err == nil {
+		t.Fatal("a modify whose rewrite failed before the rename succeeded")
+	}
+	if cur, _ := Zones.Get(sec); cur != modified {
+		t.Error("a modify whose rewrite failed before the rename was not rolled back")
 	}
 }

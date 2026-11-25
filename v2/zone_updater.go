@@ -40,6 +40,17 @@ type UpdateRequest struct {
 	// touches every InternalUpdate site in the tree and that is a separate
 	// change from adding a channel.
 	PreAuthorized bool
+	// AppClient and AppZone are set by the API zone-update handler for an
+	// application client's update (api_app.go): the client, and the zone
+	// instance its ownership was checked on. The updater applies such an
+	// update to that instance only, never to another zone that has its name
+	// by then, and refuses it when the instance is no longer the one served
+	// under its name, its removal has started, or it is no longer the
+	// client's (appUpdateTargetRefusalLocked, under zd.mu, in the hold that
+	// stages and publishes the actions). Any other update leaves them unset
+	// and goes to the zone of its name, as before.
+	AppClient string
+	AppZone   *ZoneData
 	// Authz, when non-nil, is how a DNS UPDATE that did not come through the
 	// SIG(0) path was authorized: today a TSIG key and the zone's grants
 	// (tsig_update_policy.go). The applier's per-type checks ask it, through
@@ -250,6 +261,15 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 		return false
 	}
 	zd, ok := Zones.Get(ur.ZoneName)
+	if ur.AppZone != nil && (!ok || zd != ur.AppZone) {
+		// An application client's update goes to the zone it was
+		// authorized against, never to another one that has its name
+		// now (applyZoneUpdate checks again, under zd.mu).
+		lg.Info("ZoneUpdater: refusing an application client's update: its zone was removed or replaced while it waited",
+			"cmd", ur.Cmd, "zone", ur.ZoneName, "client", ur.AppClient)
+		ur.respond(false, appZoneGone(ur.ZoneName))
+		return false
+	}
 	if !ok {
 		lg.Warn("ZoneUpdater: unknown zone in update request, ignoring", "cmd", ur.Cmd, "zone", ur.ZoneName)
 		lg.Debug("ZoneUpdater: known zones", "zones", Zones.Keys())
@@ -1199,6 +1219,11 @@ func (zd *ZoneData) applyZoneUpdate(ur UpdateRequest, kdb *KeyDB, after func()) 
 	// A defer of its own, so that the lock is released however this ends, a
 	// publish that panics included (#808).
 	defer zd.mu.Unlock()
+	// An application client's update, in the hold that stages and
+	// publishes it: a removal that starts later waits for the publish.
+	if err := zd.appUpdateTargetRefusalLocked(ur); err != nil {
+		return false, false, err
+	}
 	// Refused whole, before anything is staged, and the sender is told: an
 	// update that would leave an SVCB RRset mixing AliasMode and ServiceMode
 	// records (RFC 9460 section 2.4.1), as the zone load refuses such a file.

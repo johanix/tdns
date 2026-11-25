@@ -8,6 +8,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -577,6 +578,11 @@ func (conf *Config) repersistDynamicConfig(cf *DynamicConfigFile) (bool, error) 
 		return false, nil
 	}
 	if err := conf.writeDynamicConfigFileLocked(cf.Zones); err != nil {
+		if errors.Is(err, errDynamicConfigNotSynced) {
+			// In place, only not synced: the load's own write, which
+			// its later normalization may follow.
+			cf.readAfterWrites = dynamicConfigWrites
+		}
 		return true, err
 	}
 	cf.readAfterWrites = dynamicConfigWrites
@@ -803,13 +809,48 @@ func (conf *Config) writeDynamicConfigFileLocked(zones []ZoneConf) error {
 		os.Remove(tempFilePath)
 		return fmt.Errorf("failed to rename temp file to final file: %v", err)
 	}
-	if err := syncZoneDirectory(configDir); err != nil {
-		return fmt.Errorf("syncing %s after renaming %s into place: %v", configDir, conf.DynamicZones.ConfigFile, err)
+	// From here on the new file is in place: a failure is not one of the
+	// rewrite, only of its durability (errDynamicConfigNotSynced). The
+	// rewrite counts as a write either way, so that the load's rewrite
+	// never puts an older snapshot over it (repersistDynamicConfig).
+	dynamicConfigWrites++
+	if err := syncDynamicConfigDir(configDir); err != nil {
+		return fmt.Errorf("%w: syncing %s after renaming %s into place: %v", errDynamicConfigNotSynced, configDir, conf.DynamicZones.ConfigFile, err)
 	}
 
-	dynamicConfigWrites++
 	lg.Info("wrote dynamic config file", "path", conf.DynamicZones.ConfigFile, "zones", len(zones))
 	return nil
+}
+
+// errDynamicConfigNotSynced marks a failure of writeDynamicConfigFile that
+// came after the new file was renamed into place: the rewrite has taken
+// effect, and only whether it survives a crash is in doubt.
+var errDynamicConfigNotSynced = errors.New("the new dynamic config file is in place, but could not be synced to disk")
+
+// syncDynamicConfigDir syncs the dynamic config file's directory after the
+// rename; a test replaces it to make the sync fail.
+var syncDynamicConfigDir = syncZoneDirectory
+
+// dynamicConfigRewriteFailed is what an add or a modify makes of err from
+// its rewrite of the dynamic config: err when the rewrite did not take
+// effect, and the add or modify is rolled back as before; nil when it did,
+// and the add or modify stands. A rewrite that failed only to sync the
+// directory after the rename (errDynamicConfigNotSynced) took effect: the
+// file in place names the new zone and its TSIG key, and rolling them back
+// would leave it naming a zone and a key that are gone. That failure is
+// logged instead. Should a crash lose the rewrite, the zone is gone after
+// the restart, as if the add or modify had failed, and an inline TSIG key
+// it added stays in the keystore, unused.
+//
+// A delete does not use this: a crash before the sync could bring the old
+// entry back, and the delete deletes the zone's keys only once the rewrite
+// is durable (RemoveDynamicZone).
+func dynamicConfigRewriteFailed(op, zone string, err error) error {
+	if errors.Is(err, errDynamicConfigNotSynced) {
+		lg.Error(op+": the dynamic config names the zone, but may not survive a crash", "zone", zone, "error", err)
+		return nil
+	}
+	return err
 }
 
 // getDynamicZonesFromZonesMap collects all dynamic zones from the Zones map
@@ -1181,9 +1222,17 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// it, so the primaries, key and options above stay the caller's. From
 	// the expansion until the zone is in Zones, templateApplyMu keeps a
 	// reload's re-expansion from landing in between.
+	if testHookAddLocking != nil {
+		testHookAddLocking()
+	}
 	templateApplyMu.Lock()
 	defer templateApplyMu.Unlock()
 	if err := conf.appAddRefusal(in.AppClient, name); err != nil {
+		return "", err
+	}
+	// Again under the lock: another application's add may have
+	// registered the inline key since the check above (appTsigKeyRefusal).
+	if err := conf.appTsigKeyRefusal(in.AppClient, name, in.Primaries, staged); err != nil {
 		return "", err
 	}
 	var outbound templateOutbound
@@ -1248,9 +1297,9 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	zd.registerZoneSyncSetup(conf.Internal.DelegationSyncQ)
 
 	Zones.Set(name, zd)
-	if err := conf.AddDynamicZoneToConfig(zd); err != nil {
+	if err := dynamicConfigRewriteFailed("zone add", name, conf.AddDynamicZoneToConfig(zd)); err != nil {
 		zd.stopPublisher()
-		Zones.Remove(name)
+		zd.leaveZones(name)
 		rollbackKey()
 		return "", fmt.Errorf("failed to persist dynamic zone %s: %w", name, err)
 	}
@@ -1309,6 +1358,49 @@ var testHookSignalRecordTaken func()
 // testHookRemovalLocking, when set, runs in RemoveDynamicZone right before it
 // takes templateApplyMu. Tests only.
 var testHookRemovalLocking func()
+
+// testHookAddLocking, when set, runs in a zone add (ProvisionDynamicZone,
+// provisionDynamicPrimary) after its first check of an application's TSIG
+// keys and right before it takes templateApplyMu. Tests only.
+var testHookAddLocking func()
+
+// leaveZones takes zd out of Zones for good (zd.removed): a refresh or
+// anything else that still holds zd and changes its errors later must not
+// put it back (republishLocked). Under zd.mu, which republishLocked holds
+// from reading the flag to its Zones.Set: an error change made before this
+// is undone by the removal, and one made after sees the flag. The caller
+// must not hold zd.mu; Zones takes no ZoneData's lock.
+func (zd *ZoneData) leaveZones(name string) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	Zones.Remove(name)
+	zd.removed.Store(true)
+}
+
+// swapZoneData puts in in Zones under name in place of out, and marks out
+// as gone (zd.removed) and in as not. ModifyDynamicZone swaps its
+// replacement in, and the old ZoneData back in when the rewrite of the
+// dynamic config fails. A refresh that captured out sets or clears an
+// error when it ends, and must not put out back over in: it would then
+// outlive a delete of in (republishLocked).
+//
+// Each mark is made under that ZoneData's zd.mu, which republishLocked
+// holds from reading the mark to its Zones.Set. out's is made with in
+// already in Zones, so a republish of out made before is overwritten here
+// and one made after sees the mark. The two locks are never held together.
+// The caller must hold neither.
+func swapZoneData(name string, out, in *ZoneData) {
+	in.mu.Lock()
+	in.removed.Store(false)
+	in.mu.Unlock()
+
+	out.mu.Lock()
+	defer out.mu.Unlock()
+	// no-refresh-hooks: in carries its hooks already, registered on a
+	// replacement before the swap, or on the ZoneData put back.
+	Zones.Set(name, in)
+	out.removed.Store(true)
+}
 
 // RemoveDynamicZone is the shared *delete* core. It refuses to delete a static
 // or catalog-managed zone (guard on OptApiManagedZone), bumps the zone's
@@ -1397,8 +1489,7 @@ func (conf *Config) RemoveDynamicZoneFor(app, name string, keepKeys bool) (*Zone
 	WithdrawSignalPublicationsForZone(conf.Internal.KeyDB, name)
 
 	stopZonePublisher(name)
-	Zones.Remove(name)
-	zd.removed.Store(true)
+	zd.leaveZones(name)
 	// Bump generation AFTER removing from the map so any refresh goroutine that
 	// snapshotted the old generation fails the pre-persist guard (B5b) and does
 	// not resurrect the files we are about to remove.
@@ -1717,21 +1808,24 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// reload does for a static zone (#1151).
 	newZd.registerZoneSyncSetup(conf.Internal.DelegationSyncQ)
 
-	Zones.Set(name, newZd)
+	// The replacement in, and oldZd marked as replaced: the refresh that
+	// still holds it must not put it back when it ends (swapZoneData).
+	swapZoneData(name, oldZd, newZd)
 
 	// (4) Overwrite the persisted entry. AddDynamicZoneToConfig rewrites the
-	// whole file from the live Zones map, so it MUST run after Zones.Set (so the
+	// whole file from the live Zones map, so it MUST run after the swap (so the
 	// rewrite includes the new params). On failure, fully revert the in-memory
 	// modification: roll back the staged key AND restore the old zone, so the live
 	// zone can't be left referencing a rolled-back key (a partially-applied modify).
-	if err := conf.AddDynamicZoneToConfig(newZd); err != nil {
+	// A rewrite that took effect but was not synced stands, as the file in
+	// place names newZd (dynamicConfigRewriteFailed).
+	if err := dynamicConfigRewriteFailed("zone modify", name, conf.AddDynamicZoneToConfig(newZd)); err != nil {
 		// Restore the old zone BEFORE rolling back the staged key: rollbackKey
 		// deletes via the keystore, which refuses a referenced key, and newZd
-		// (live until this Set) may reference the newly-staged key — otherwise
-		// the key is left orphaned. Mirrors the add path's ordering.
-		// no-refresh-hooks: rollback republishes the PREVIOUS ZoneData, which
-		// already carries its hooks.
-		Zones.Set(name, oldZd)
+		// (live until this swap) may reference the newly-staged key — otherwise
+		// the key is left orphaned. Mirrors the add path's ordering. newZd is
+		// marked as gone, as oldZd was.
+		swapZoneData(name, newZd, oldZd)
 		// Its delegation sync setup may have been passed over while newZd was
 		// in Zones (#1151).
 		oldZd.resumeOwedZoneSyncSetup()

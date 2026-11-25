@@ -10,15 +10,18 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -156,6 +159,20 @@ func TestApiAppTableMatchesTheRoleTable(t *testing.T) {
 	}
 	if got := ApiAppScopeOf("/api/v1/zone", " UPDATE ", ""); got != AppOwnZone {
 		t.Errorf("zone UPDATE: %s, want own zone (case and space do not matter)", got)
+	}
+
+	// Commands a handler answers before its switch are in both tables
+	// (commandsOf sees the comparison): delegation sync-log, which no
+	// zone scopes, is admin and refused to application clients.
+	cmds := commandsOf(funcs["APIdelegation"])
+	if i := sort.SearchStrings(cmds, "sync-log"); i == len(cmds) || cmds[i] != "sync-log" {
+		t.Errorf("APIdelegation commands %v: the scan does not see sync-log", cmds)
+	}
+	if got := RequiredApiRole("/api/v1/delegation", "sync-log", "", false); got != RoleAdmin {
+		t.Errorf("delegation sync-log needs %s, want admin", got)
+	}
+	if got := ApiAppScopeOf("/api/v1/delegation", "sync-log", ""); got != AppRefused {
+		t.Errorf("delegation sync-log for an application client: %s, want refused", got)
 	}
 }
 
@@ -790,18 +807,22 @@ func TestAppClientsSwapWithTheAccessFile(t *testing.T) {
 	}
 
 	// Two policies in turn: anna read-only and an application client, and
-	// anna read-write and an operator. Every request sees one of them.
+	// anna read-write and an operator. Every request sees one of them, and
+	// the requests go on until each policy has been published by the
+	// writer and seen by a request at least twice (seen counts the
+	// changes a request saw), so that the check is not made against the
+	// first policy alone.
 	writeAccess(t, path, pins, false, [2]string{"anna", "read-write"})
 	e.conf.ApiServer.AppClients = nil
 	e.conf.reloadApiAccess()
 	leaf, _ := x509.ParseCertificate(certs["anna"].Certificate[0])
-	req := func() (ApiIdentity, int) {
+	req := func() (ApiIdentity, int, string) {
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/ping", nil)
 		r.TLS = &tls.ConnectionState{Version: tls.VersionTLS13, PeerCertificates: []*x509.Certificate{leaf}}
-		id, status, _ := e.conf.authenticateApiRequest(r, e.key)
-		return id, status
+		return e.conf.authenticateApiRequest(r, e.key)
 	}
 	var stop atomic.Bool
+	var published atomic.Int64
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -815,20 +836,77 @@ func TestAppClientsSwapWithTheAccessFile(t *testing.T) {
 				e.conf.ApiServer.AppClients = nil
 			}
 			e.conf.reloadApiAccess()
+			published.Add(1)
 		}
 	}()
-	for i := 0; i < 2000; i++ {
-		id, status := req()
+	const wantSeen = 4 // read-only, read-write, read-only, read-write
+	deadline := time.Now().Add(20 * time.Second)
+	seen, lastApp := 0, false
+	for i := 0; i < 2000 || seen < wantSeen; i++ {
+		id, status, msg := req()
 		if status != 0 {
-			continue
+			t.Errorf("request %d refused (%d %q): every policy authenticates anna", i, status, msg)
+			break
 		}
 		if id.App != (id.Role == RoleReadOnly) {
 			t.Errorf("a request saw role %s with App=%v: a list and a file of different reloads", id.Role, id.App)
 			break
 		}
+		if id.App != lastApp {
+			seen++
+			lastApp = id.App
+		}
+		if seen < wantSeen && time.Now().After(deadline) {
+			t.Errorf("after %d requests and %d policies published, the requests saw %d policy changes, want %d",
+				i+1, published.Load(), seen, wantSeen)
+			break
+		}
+		if seen < wantSeen && i%100 == 99 {
+			runtime.Gosched() // let the writer publish the next policy
+		}
 	}
 	stop.Store(true)
 	wg.Wait()
+}
+
+// A daemon with no access file in force has no application clients. When a
+// reload brings an access file and app-clients together, and the file does
+// not load, the reply says that app-clients is not applied either, and the
+// running policy (none) stays as it was. The same after a start whose file
+// did not load.
+func TestAppClientsNoteWhenTheFirstAccessFileDoesNotLoad(t *testing.T) {
+	certs, _ := clientCerts(t, "anna")
+	e := newAuthEnv(t, "-", certs)
+	h := e.conf.Internal.ApiAccess
+	e.conf.ApiServer.AccessFile = filepath.Join(t.TempDir(), "absent.yaml")
+	e.conf.ApiServer.AppClients = []string{"anna"}
+	msg := e.conf.reloadApiAccess()
+	if !strings.Contains(msg, AccessFileNotReloaded) || !strings.Contains(msg, "app-clients is NOT applied either") {
+		t.Errorf("a first access file that does not load, with app-clients: %q", msg)
+	}
+	if st := h.load(); st == nil || st.Enabled || len(st.AppClients) != 0 {
+		t.Errorf("the running policy changed: %+v", st)
+	}
+	e.conf.ApiServer.AppClients = nil
+	if msg := e.conf.reloadApiAccess(); strings.Contains(msg, "app-clients") {
+		t.Errorf("no app-clients configured or running, yet the reply says %q", msg)
+	}
+
+	// After a start whose file did not load: in force but closed (503),
+	// with no application clients.
+	broken := filepath.Join(t.TempDir(), "broken.yaml")
+	if err := os.WriteFile(broken, []byte("clients:\n  - {name: anna, pin: x, role: read-only}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e.conf.ApiServer.AccessFile = broken
+	e.conf.initApiAccess()
+	if st := h.load(); st == nil || !st.Enabled || st.Err == nil {
+		t.Fatalf("a start with a broken file: %+v, want the policy closed", st)
+	}
+	e.conf.ApiServer.AppClients = []string{"anna"}
+	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "app-clients is NOT applied either") {
+		t.Errorf("after a failed start, a reload with app-clients: %q", msg)
+	}
 }
 
 // apiserver.app-clients names access-file clients, so a name an API owner
@@ -906,5 +984,189 @@ func TestAppPrimaryAddRefusesAnotherOwnersInlineKey(t *testing.T) {
 	}
 	if _, ok := Zones.Get("p2.example."); ok {
 		t.Error("the refused primary add left its zone")
+	}
+}
+
+// An application's add checks its inline TSIG key again under
+// templateApplyMu: another application's add that registers the same key
+// name and secret after the first check, and before this add takes the
+// lock, makes the key that application's, and this add is refused rather
+// than attached to it (commitStagedTsigKey takes an identical existing key
+// as it is). testHookAddLocking runs that other add in between, on the
+// secondary path and on the primary path.
+func TestAppAddRechecksTheInlineKeyUnderTheLock(t *testing.T) {
+	t.Cleanup(func() { testHookAddLocking = nil })
+
+	ownerTestConf(t)
+	testHookAddLocking = func() {
+		testHookAddLocking = nil
+		theirs := secondaryAdd("theirs.example.")
+		theirs.TsigName, theirs.TsigSecret = "race.", b64Secret16
+		if resp := postZone(t, theirs, &otherApp); resp.Error {
+			t.Fatalf("the other application's add: %s", resp.ErrorMsg)
+		}
+	}
+	mine := secondaryAdd("mine.example.")
+	mine.TsigName, mine.TsigSecret = "race.", b64Secret16
+	resp := postZone(t, mine, &appCaller)
+	if !resp.Error || !strings.Contains(resp.ErrorMsg, "TSIG key race. exists and is not a key of API owner cert:provisioner") {
+		t.Errorf("a secondary add whose inline key another application registered meanwhile: %q, want it refused", resp.ErrorMsg)
+	}
+	if _, ok := Zones.Get("mine.example."); ok {
+		t.Error("the refused secondary add left its zone")
+	}
+	if row, err := getTsigKeystoreByName(Conf.Internal.KeyDB, "race."); err != nil || tsigKeystoreEffectiveOwner(row) != "cert:other" {
+		t.Errorf("the key: %+v, %v; want it the other application's", row, err)
+	}
+
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, _ := newTestConfigForCores(t)
+	conf.Internal.KeyDB = newTestKeyDB(t)
+	conf.Internal.TsigKeyStore = NewTsigKeyStore()
+	withTestTemplates(t, map[string]ZoneConf{"dyn-test": dynPrimaryTestTemplate(t.TempDir())})
+	testHookAddLocking = func() {
+		testHookAddLocking = nil
+		r, err := conf.Internal.KeyDB.TsigKeyMgmt(conf, nil, KeystorePost{SubCommand: "add", TsigKeyname: "race.",
+			TsigAlgorithm: "hmac-sha256", TsigSecret: b64Secret16, Owner: "cert:other", Creator: "inline-zone"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ApplyTsigCacheDelta(conf.Internal.TsigKeyStore, conf.Internal.KeyDB, r.TsigCacheDelta); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := conf.ProvisionDynamicZone(context.Background(), DynamicZoneInput{
+		Name: "p3.example", Type: Primary, Template: "dyn-test",
+		TsigName: "race.", TsigSecret: b64Secret16,
+		AppClient: "provisioner", ApiOwner: "cert:provisioner",
+	}, true)
+	if err == nil || !strings.Contains(err.Error(), "TSIG key race. exists and is not a key of API owner cert:provisioner") {
+		t.Errorf("a primary add whose inline key another application registered meanwhile: %v, want it refused", err)
+	}
+	if _, ok := Zones.Get("p3.example."); ok {
+		t.Error("the refused primary add left its zone")
+	}
+}
+
+// An application client's update is applied to the zone instance it was
+// authorized against, or not at all. While it waits in the update queue its
+// zone may be deleted and another application add a zone of the same name:
+// the update must not reach that zone. Nor a zone whose removal has
+// started, nor one that is no longer the client's. An operator's update
+// still goes to the zone of its name.
+func TestAppUpdateGoesOnlyToTheZoneItWasAuthorizedFor(t *testing.T) {
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	const name = "race.example."
+	const zoneText = `race.example.	3600	IN	SOA	ns1.race.example. hostmaster.race.example. 1 7200 1800 604800 7200
+race.example.	3600	IN	NS	ns1.race.example.
+ns1.race.example.	3600	IN	A	192.0.2.1
+`
+	kdb := newTestKeyDB(t)
+	kdb.UpdateQ = make(chan UpdateRequest, 4)
+	// Each zone of the name at a serial of its own: the journal the KeyDB
+	// keeps under the name must see the second zone's serials advance.
+	serial := 0
+	newZone := func(owner string) *ZoneData {
+		serial += 100
+		zd := testZone(t, name, strings.Replace(zoneText, " 1 7200", fmt.Sprintf(" %d 7200", serial), 1))
+		zd.ZoneType = Primary
+		zd.Options = map[ZoneOption]bool{OptAllowApiUpdates: true}
+		zd.KeyDB = kdb
+		zd.setApiOwner(owner)
+		return zd
+	}
+	hasA := func(zd *ZoneData, ip string) bool {
+		od, err := zd.GetOwner("www." + name)
+		if err != nil || od == nil {
+			return false
+		}
+		for _, rr := range od.RRtypes.GetOnlyRRSet(dns.TypeA).RRs {
+			if a, ok := rr.(*dns.A); ok && a.A.String() == ip {
+				return true
+			}
+		}
+		return false
+	}
+	asApp := context.WithValue(context.Background(), apiIdentityKey{}, appCaller)
+	// update sends one addrr through ApiZoneUpdate on zd, the zone the
+	// handler resolved and checked, as id (nil: an operator), runs between
+	// (the queue wait) once the update is queued, and then applies it.
+	update := func(zd *ZoneData, ctx context.Context, ip string, between func()) error {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() {
+			_, err := zd.ApiZoneUpdate(ctx, ZonePost{Command: "update", Zone: name, UpdateVerb: VerbAddRR,
+				UpdateRRs: []string{"www." + name + " 3600 IN A " + ip}})
+			done <- err
+		}()
+		var ur UpdateRequest
+		select {
+		case ur = <-kdb.UpdateQ:
+		case err := <-done:
+			t.Fatalf("the update was not queued: %v", err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("the update was not queued")
+		}
+		between()
+		kdb.applyUpdate(context.Background(), ur)
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(10 * time.Second):
+			t.Fatal("no answer to the update")
+		}
+		return nil
+	}
+
+	mine := newZone("cert:provisioner")
+	Zones.Set(name, mine)
+	if err := update(mine, asApp, "192.0.2.10", func() {}); err != nil || !hasA(mine, "192.0.2.10") {
+		t.Fatalf("an update of the own zone: %v", err)
+	}
+
+	// Deleted while queued, and re-added by another application.
+	theirs := newZone("cert:other")
+	err := update(mine, asApp, "192.0.2.11", func() { Zones.Set(name, theirs) })
+	if err == nil || !strings.Contains(err.Error(), "was removed or replaced while the update waited") {
+		t.Errorf("an update whose zone another application has re-added: %v, want it refused", err)
+	}
+	if hasA(theirs, "192.0.2.11") || hasA(mine, "192.0.2.11") {
+		t.Error("the refused update was applied")
+	}
+
+	// The same, at the check under zd.mu (applyZoneUpdate), which a
+	// replacement after the updater resolved the zone meets.
+	ur := UpdateRequest{Cmd: "ZONE-UPDATE", ZoneName: name, PreAuthorized: true, AppClient: "provisioner", AppZone: mine,
+		Actions: []dns.RR{withdrawalRR(t, "www."+name+" 3600 IN A 192.0.2.12")}}
+	if _, _, err := mine.applyZoneUpdate(ur, kdb, func() {}); err == nil || !strings.Contains(err.Error(), "was removed or replaced") {
+		t.Errorf("the locked check, with the zone replaced: %v, want it refused", err)
+	}
+
+	// Its removal has started (RemoveDynamicZone marks it under zd.mu).
+	Zones.Set(name, mine)
+	err = update(mine, asApp, "192.0.2.13", func() {
+		mine.mu.Lock()
+		mine.signalPassRetired = true
+		mine.mu.Unlock()
+	})
+	if err == nil || !strings.Contains(err.Error(), "was removed or replaced") || hasA(mine, "192.0.2.13") {
+		t.Errorf("an update of a zone whose removal started: %v, want it refused", err)
+	}
+	mine.mu.Lock()
+	mine.signalPassRetired = false
+	mine.mu.Unlock()
+
+	// Handed to another application meanwhile (zone setowner).
+	err = update(mine, asApp, "192.0.2.14", func() { mine.setApiOwner("cert:other") })
+	if err == nil || !strings.Contains(err.Error(), "not a zone of API owner cert:provisioner") || hasA(mine, "192.0.2.14") {
+		t.Errorf("an update of a zone handed over meanwhile: %v, want it refused", err)
+	}
+
+	// An operator's update goes to the zone of its name, as before.
+	Zones.Set(name, theirs)
+	if err := update(mine, context.Background(), "192.0.2.15", func() {}); err != nil || !hasA(theirs, "192.0.2.15") {
+		t.Errorf("an operator's update: %v, want it applied to the zone served under the name", err)
 	}
 }
