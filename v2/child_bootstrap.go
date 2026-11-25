@@ -143,7 +143,7 @@ func advertisedBootstrapMethods(ctx context.Context, imr *Imr, target *DsyncTarg
 	if imr == nil || target == nil || target.Name == "" {
 		return nil, false, nil
 	}
-	resp, err := imr.ImrQuery(ctx, dns.Fqdn(target.Name), dns.TypeSVCB, dns.ClassINET, nil)
+	resp, err := imr.ImrQuery(ctx, dns.Fqdn(target.Name), dns.TypeSVCB, dns.ClassINET)
 	rrs, lerr := classifyAdvertisementLookup(target.Name, resp, err)
 	if lerr != nil {
 		return nil, false, lerr

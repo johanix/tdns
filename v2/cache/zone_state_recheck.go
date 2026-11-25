@@ -8,7 +8,6 @@ package cache
 
 import (
 	"context"
-	"log"
 	"sync/atomic"
 	"time"
 
@@ -134,11 +133,11 @@ func (rrcache *RRsetCacheT) recheckInsecureZone(ctx context.Context, name string
 	// entry goes.
 	rrcache.RRsets.Remove(rrsetKey(name, dns.TypeDS))
 	if rrcache.Verbose {
-		log.Printf("recheckInsecureZone: zone %q has been insecure for %s; asking its parent for a DS", name, ZoneStateRecheck())
+		rrcache.Logger.Printf("recheckInsecureZone: zone %q has been insecure for %s; asking its parent for a DS", name, ZoneStateRecheck())
 	}
 	entry := rrcache.backfillDS(ctx, name, fetcher)
 	if z, ok := rrcache.ZoneMap.Get(name); ok && z.GetState() == ValidationStateSecure {
-		log.Printf("recheckInsecureZone: zone %q is now secure: its parent publishes a DS that validates", name)
+		rrcache.Logger.Printf("recheckInsecureZone: zone %q is now secure: its parent publishes a DS that validates", name)
 		return
 	}
 	if rrcache.Verbose {
@@ -146,6 +145,6 @@ func (rrcache *RRsetCacheT) recheckInsecureZone(ctx context.Context, name string
 		if len(actualDSRecords(entry)) > 0 {
 			found = "a DS that is " + ValidationStateToString[entry.State]
 		}
-		log.Printf("recheckInsecureZone: zone %q stays insecure (%s); next recheck in %s", name, found, ZoneStateRecheck())
+		rrcache.Logger.Printf("recheckInsecureZone: zone %q stays insecure (%s); next recheck in %s", name, found, ZoneStateRecheck())
 	}
 }

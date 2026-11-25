@@ -18,21 +18,23 @@ import (
 // tdns-agent) is internal by design — its only listener is the loopback
 // listeners.imr-debug-address window.
 type Config struct {
-	Active    *bool  `yaml:"active" mapstructure:"active"`         // If nil or true, IMR is active. Only false explicitly disables it.
+	// Active is the daemon's (tdns's ImrEngine): if nil or true, the IMR is
+	// active, and only false disables it. New does not read it.
+	Active    *bool  `yaml:"active" mapstructure:"active"`
 	RootHints string `yaml:"root-hints" mapstructure:"root-hints"` // Path to root hints file. If empty, uses compiled-in hints.
 	// OutboundAddressFamilies is which address families the resolver sends its
 	// queries to authoritative servers over: ipv4, ipv6, or both (the default).
 	// What it listens on is listeners.addresses. See ParseAddressFamilies.
-	OutboundAddressFamilies []string         `yaml:"outbound-address-families" mapstructure:"outbound-address-families"`
-	Stubs                   []ImrStubConf    `yaml:"stubs"`
-	Forward                 []ImrForwardConf `yaml:"forward" mapstructure:"forward"`
+	OutboundAddressFamilies []string      `yaml:"outbound-address-families" mapstructure:"outbound-address-families"`
+	Stubs                   []StubConf    `yaml:"stubs"`
+	Forward                 []ForwardConf `yaml:"forward" mapstructure:"forward"`
 	// OptionsStrs is the options: list of a daemon's config file, as read.
 	// The resolver does not read it: the daemon turns the strings into
 	// Options (root's parseImrOptions), and an embedder sets Options.
-	// NewImr refuses a Config that has strings but no Options.
+	// New refuses a Config that has strings but no Options.
 	OptionsStrs []string `yaml:"options" mapstructure:"options"`
 	// Options are the resolver's options. Nil or empty: the defaults.
-	Options map[ImrOption]string `yaml:"-" mapstructure:"-"`
+	Options map[Option]string `yaml:"-" mapstructure:"-"`
 	// Trust anchors for recursive validation. Provide either DS or DNSKEY as
 	// full RR text (zonefile format). DS is preferred as it is more convenient.
 	// Both tags are load bearing, because the daemon's Config is decoded by two different
@@ -48,7 +50,7 @@ type Config struct {
 	TrustAnchorFile string `yaml:"trust-anchor-file" mapstructure:"trust-anchor-file"`
 	Verbose         bool
 	Debug           bool
-	Logging         ImrLoggingConf `yaml:"logging" mapstructure:"logging"`
+	Logging         LoggingConf `yaml:"logging" mapstructure:"logging"`
 	// RequireDnssecValidation: when true (default), TLSA and other security-sensitive
 	// records must have a secure DNSSEC validation state. Set to false to allow
 	// indeterminate/insecure records during lab/development when the full DNSSEC
@@ -56,18 +58,18 @@ type Config struct {
 	RequireDnssecValidation *bool `yaml:"require-dnssec-validation" mapstructure:"require-dnssec-validation"`
 	// Tuning holds runtime-tunable behaviour knobs (backoff, RTT,
 	// address-family tracking, discovery state, etc.). All fields
-	// are optional in YAML; LoadImrTuningDefaults fills zero values.
-	Tuning ImrTuningConf `yaml:"tuning" mapstructure:"tuning"`
+	// are optional in YAML; LoadTuningDefaults fills zero values.
+	Tuning TuningConf `yaml:"tuning" mapstructure:"tuning"`
 	// ClientStats: per-client transport counters (imr_client_stats.go).
-	ClientStats ImrClientStatsConf `yaml:"client-stats" mapstructure:"client-stats"`
+	ClientStats ClientStatsConf `yaml:"client-stats" mapstructure:"client-stats"`
 	// Testing holds switches for black-box test harnesses, not for production.
 	// `config check` warns about any that is set. See
 	// docs/2026-09-28-imr-deckard-test-clock-and-switches.md.
-	Testing ImrTestingConf `yaml:"testing" mapstructure:"testing"`
+	Testing TestingConf `yaml:"testing" mapstructure:"testing"`
 }
 
-// ImrTestingConf holds the resolver's test-harness switches.
-type ImrTestingConf struct {
+// TestingConf holds the resolver's test-harness switches.
+type TestingConf struct {
 	// Priming false seeds the cache from the root hints and marks it primed,
 	// without the live ". NS" query. A harness such as Deckard starts its
 	// scripted servers only once the resolver accepts connections, and the
@@ -91,14 +93,14 @@ type ImrTestingConf struct {
 }
 
 // SkipPriming reports whether testing.priming is set to false.
-func (t ImrTestingConf) SkipPriming() bool { return t.Priming != nil && !*t.Priming }
+func (t TestingConf) SkipPriming() bool { return t.Priming != nil && !*t.Priming }
 
 // FaketimeOn reports whether the test clock is configured.
-func (t ImrTestingConf) FaketimeOn() bool { return t.Faketime || t.FaketimeFile != "" }
+func (t TestingConf) FaketimeOn() bool { return t.Faketime || t.FaketimeFile != "" }
 
 // FaketimePath is the timestamp file the test clock reads: faketime-file, or
 // else $FAKETIME_TIMESTAMP_FILE.
-func (t ImrTestingConf) FaketimePath() string {
+func (t TestingConf) FaketimePath() string {
 	if t.FaketimeFile != "" {
 		return t.FaketimeFile
 	}
@@ -107,41 +109,41 @@ func (t ImrTestingConf) FaketimePath() string {
 
 // SkipRootRefresh reports whether the root NS refresh is off: root-refresh is
 // false, or the test clock is on.
-func (t ImrTestingConf) SkipRootRefresh() bool {
+func (t TestingConf) SkipRootRefresh() bool {
 	return t.FaketimeOn() || (t.RootRefresh != nil && !*t.RootRefresh)
 }
 
 // Validate refuses a root refresh asked for beside the test clock, which
 // cannot run it.
-func (t ImrTestingConf) Validate() error {
+func (t TestingConf) Validate() error {
 	if t.FaketimeOn() && t.RootRefresh != nil && *t.RootRefresh {
 		return fmt.Errorf("root-refresh: true cannot be combined with faketime: the refresh waits in real time for an expiry in data time")
 	}
 	return nil
 }
 
-// ImrClientStatsConf switches the per-client transport counters on. They
+// ClientStatsConf switches the per-client transport counters on. They
 // record client addresses, so they are off by default. They are set up with
 // the listeners, at startup: changing Enabled needs a restart, not a reload.
-type ImrClientStatsConf struct {
+type ClientStatsConf struct {
 	Enabled    bool `yaml:"enabled" mapstructure:"enabled"`
-	MaxClients int  `yaml:"max-clients" mapstructure:"max-clients"` // 0: DefaultImrClientStatsMax
+	MaxClients int  `yaml:"max-clients" mapstructure:"max-clients"` // 0: DefaultClientStatsMax
 }
 
 // Validate refuses a negative max-clients rather than taking it for the
 // default: a sign typo should not quietly become 4096.
-func (c ImrClientStatsConf) Validate() error {
+func (c ClientStatsConf) Validate() error {
 	if c.MaxClients < 0 {
-		return fmt.Errorf("imrengine.client-stats.max-clients: %d is negative; use 0 for the default (%d)", c.MaxClients, DefaultImrClientStatsMax)
+		return fmt.Errorf("imrengine.client-stats.max-clients: %d is negative; use 0 for the default (%d)", c.MaxClients, DefaultClientStatsMax)
 	}
 	return nil
 }
 
-// ImrTuningConf holds runtime-tunable behaviour knobs for the IMR.
+// TuningConf holds runtime-tunable behaviour knobs for the IMR.
 // Fields are exposed as YAML / mapstructure for config files;
-// LoadImrTuningDefaults fills zero values with sensible defaults so
-// callers can just embed an empty ImrTuningConf and have it work.
-type ImrTuningConf struct {
+// LoadTuningDefaults fills zero values with sensible defaults so
+// callers can just embed an empty TuningConf and have it work.
+type TuningConf struct {
 	Backoff       BackoffConf       `yaml:"backoff" mapstructure:"backoff"`
 	AddressFamily AddressFamilyConf `yaml:"address-family" mapstructure:"address-family"`
 	Discovery     DiscoveryConf     `yaml:"discovery" mapstructure:"discovery"`
@@ -221,7 +223,7 @@ type DiscoveryConf struct {
 	StrictWait time.Duration `yaml:"strict-wait" mapstructure:"strict-wait"`
 }
 
-// LoadImrTuningDefaults fills missing or invalid fields with sensible
+// LoadTuningDefaults fills missing or invalid fields with sensible
 // defaults. Any non-positive duration, zero/negative integer count,
 // or out-of-range Multiplier / JitterFraction is treated as "unset"
 // and replaced, and an absent NSEC3MaxIterations gets the default. 0 is a
@@ -229,7 +231,7 @@ type DiscoveryConf struct {
 // left nil intentionally —
 // callers check nil-vs-explicit to distinguish "use legacy
 // behaviour" from an explicit toggle. Safe to call repeatedly.
-func LoadImrTuningDefaults(t *ImrTuningConf) {
+func LoadTuningDefaults(t *TuningConf) {
 	if t == nil {
 		return
 	}
@@ -315,38 +317,38 @@ func LoadImrTuningDefaults(t *ImrTuningConf) {
 	}
 }
 
-type ImrLoggingConf struct {
+type LoggingConf struct {
 	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
 	File    string `yaml:"file" mapstructure:"file"`
 }
 
-type ImrStubConf struct {
+type StubConf struct {
 	Zone string `validate:"required"`
 	// Servers []StubServerConf `validate:"required"`
 	Servers []cache.AuthServer `validate:"required"`
 }
 
-// ImrForwardConf declares a forward zone: queries for names at or below Zone
+// ForwardConf declares a forward zone: queries for names at or below Zone
 // are sent as recursive queries (RD=1) to the configured upstream resolvers
 // instead of being resolved iteratively. "zone: ." forwards everything.
 // A configured stub zone that is more specific than the matching forward
 // zone takes precedence for names under it.
-type ImrForwardConf struct {
+type ForwardConf struct {
 	Zone string `yaml:"zone" mapstructure:"zone" validate:"required"`
 	// TrustAD: accept the upstream's AD bit instead of validating the
 	// answer locally. For a trusted, validating upstream — and because a
 	// spoofed AD bit would be cached as Secure, it REQUIRES every upstream
 	// of the zone to be encrypted and verified (dot/doh/doq without
 	// insecure); the daemon refuses to start otherwise.
-	TrustAD   bool              `yaml:"trust-ad" mapstructure:"trust-ad"`
-	Upstreams []ImrUpstreamConf `yaml:"upstreams" mapstructure:"upstreams" validate:"required"`
+	TrustAD   bool           `yaml:"trust-ad" mapstructure:"trust-ad"`
+	Upstreams []UpstreamConf `yaml:"upstreams" mapstructure:"upstreams" validate:"required"`
 }
 
-// ImrUpstreamConf is one upstream resolver of a forward zone. Addr is a bare
+// UpstreamConf is one upstream resolver of a forward zone. Addr is a bare
 // IP literal; Port defaults to the transport's standard port (53/853/443);
 // Transport is one of do53 (UDP with TCP fallback), tcp, dot, doh, doq and
 // defaults to do53.
-type ImrUpstreamConf struct {
+type UpstreamConf struct {
 	Addr      string `yaml:"addr" mapstructure:"addr" validate:"required"`
 	Port      uint16 `yaml:"port" mapstructure:"port"`
 	Transport string `yaml:"transport" mapstructure:"transport"`
@@ -371,11 +373,11 @@ type ImrUpstreamConf struct {
 	CAFile string `yaml:"ca-file" mapstructure:"ca-file"`
 }
 
-// DefaultImrClientStatsMax is imrengine.client-stats.max-clients when unset.
-const DefaultImrClientStatsMax = 4096
+// DefaultClientStatsMax is imrengine.client-stats.max-clients when unset.
+const DefaultClientStatsMax = 4096
 
 // imrTestingEqual reports whether two testing blocks ask for the same thing.
-func imrTestingEqual(a, b ImrTestingConf) bool {
+func imrTestingEqual(a, b TestingConf) bool {
 	sameBool := func(x, y *bool) bool { return (x == nil) == (y == nil) && (x == nil || *x == *y) }
 	return sameBool(a.Priming, b.Priming) && sameBool(a.RootRefresh, b.RootRefresh) &&
 		a.Faketime == b.Faketime && a.FaketimeFile == b.FaketimeFile

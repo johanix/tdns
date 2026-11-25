@@ -42,7 +42,7 @@ func TestADNSKEYTrustAnchorNeedsNoDS(t *testing.T) {
 				fwdSecParent + " DNSKEY": {Answer: ksk.sign(t, dns.Copy(ksk.dnskey), dns.Copy(zsk.dnskey))},
 			}, logr)
 
-			imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+			imr := newForwardTestImr(t, []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}})
 			imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 			imr.DnskeyCache = imr.Cache.DnskeyCache
 			if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {

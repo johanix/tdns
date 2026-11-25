@@ -19,11 +19,10 @@ import (
 // like any other: it installs no signal on the nameserver's servers.
 func TestASignalAnswerInstallsNothingWithSignalsOff(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	if imr.Options == nil {
-		imr.Options = map[ImrOption]string{}
+		imr.Options = map[Option]string{}
 	}
-	imr.Options[ImrOptUseTransportSignals] = "false"
+	imr.Options[OptUseTransportSignals] = "false"
 	server := cache.NewAuthServer(pathNS)
 	imr.Cache.ServerMap.Set(stateZone, map[string]*cache.AuthServer{cache.ServerKey(pathNS): server})
 	rrset := svcbRRset(pathOwner, []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 1 . oots="dot:100"`)})
@@ -43,7 +42,6 @@ func TestASignalKeepsAStubsConfiguredTransports(t *testing.T) {
 	const ns = "ns." + zone
 	owner := transportOwnerForNS(ns)
 	imr := newTestImr(t)
-	imr.Quiet = true
 	if err := imr.Cache.AddStub(zone, []cache.AuthServer{
 		{Name: ns, Addrs: []string{"192.0.2.1"}, TransportSignal: "doq:100"},
 	}); err != nil {
@@ -82,7 +80,6 @@ func TestASignalKeepsAStubsConfiguredTransports(t *testing.T) {
 // answer: only a server that still needs a signal takes the cached one.
 func TestACachedSignalReplayLeavesANewerSignalInPlace(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	cacheSignal(imr, pathOwner, []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 1 . oots="dot:100"`)}, cache.ValidationStateSecure)
 	listed := cache.NewAuthServer(pathNS)
 	installTransportMap(listed, map[string]uint8{"doq": 100}, nil, nil, cache.SignalViaLookup,
@@ -132,7 +129,7 @@ func holdHopLookupUntilWatched(t *testing.T) func() bool {
 	release := make(chan struct{})
 	letGo := sync.OnceFunc(func() { close(release) })
 	watched := false
-	signalAliasHopLookupHook = func(_ context.Context, imr *Imr, target string) (*ImrResponse, error) {
+	signalAliasHopLookupHook = func(_ context.Context, imr *Imr, target string) (*Response, error) {
 		<-release
 		return found(imr, target)
 	}
@@ -220,7 +217,6 @@ func TestAStrictWaitGivesACachedSignalToAStubConfiguredWithNoTransports(t *testi
 	const zone = "stubreplay.example."
 	bare, configured := "ns1."+zone, "ns2."+zone
 	imr := newTestImr(t)
-	imr.Quiet = true
 	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
 	if err := imr.Cache.AddStub(zone, []cache.AuthServer{
 		{Name: bare, Addrs: []string{"192.0.2.1"}},

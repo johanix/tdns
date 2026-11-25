@@ -32,8 +32,8 @@ type LargeKskDSAlgCount struct {
 	Count     uint64
 }
 
-// LargeKskImrMetrics is a snapshot of IMR large-KSK telemetry counters.
-type LargeKskImrMetrics struct {
+// LargeKskMetrics is a snapshot of IMR large-KSK telemetry counters.
+type LargeKskMetrics struct {
 	DSEncounteredTotal    uint64
 	DSEncounteredLarge    uint64
 	DSDLargeRRByAlgorithm []LargeKskDSAlgCount
@@ -53,8 +53,8 @@ func DNSSECAlgorithmLabel(alg uint8) string {
 	return fmt.Sprintf("(%d)", alg)
 }
 
-func LargeKskImrMetricsSnapshot() LargeKskImrMetrics {
-	m := LargeKskImrMetrics{
+func LargeKskMetricsSnapshot() LargeKskMetrics {
+	m := LargeKskMetrics{
 		DSEncounteredTotal:   imrDSEncounteredTotal.Load(),
 		DSEncounteredLarge:   imrDSEncounteredLarge.Load(),
 		DNSKEYLookupTotal:    imrDNSKEYLookupTotal.Load(),
@@ -174,7 +174,7 @@ func (imr *Imr) dnskeyDSSignalsLarge(qname string) bool {
 		if !ok || !imr.isLargeAlgorithm(d.Algorithm) {
 			continue
 		}
-		lgDns.Info("large-alg DS observed; will bypass UDP for child DNSKEY",
+		imr.lgDns().Debug("large-alg DS observed; will bypass UDP for child DNSKEY",
 			"zone", qname, "alg", d.Algorithm)
 		return true
 	}
@@ -246,7 +246,7 @@ func advertisedIn(transports []core.Transport, weights map[core.Transport]uint8,
 }
 
 // LargeAlgDSMetrics returns the total number of individual large-alg DS RRs
-// encountered in referrals. Prefer LargeKskImrMetricsSnapshot.
+// encountered in referrals. Prefer LargeKskMetricsSnapshot.
 func LargeAlgDSMetrics() uint64 {
 	var n uint64
 	for i := range imrDSDLargeRRByAlg {

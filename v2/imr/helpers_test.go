@@ -241,7 +241,7 @@ func signedSet(sign func(string, []dns.RR) dns.RR, zone string, set []dns.RR) []
 	return append(append([]dns.RR{}, set...), sign(zone, set))
 }
 
-// restoreProcessWideTuning puts back what NewImr sets for the whole process.
+// restoreProcessWideTuning puts back what New sets for the whole process.
 func restoreProcessWideTuning(t *testing.T) {
 	t.Helper()
 	policy, limits := cache.GetBackoffPolicy(), cache.GetTTLLimits()
@@ -294,6 +294,10 @@ func (s *testErrorSink) clear(cat ErrorCategory, sub ErrorSubtype) {
 	delete(s.errs, [2]int{int(cat), int(sub)})
 }
 
+func (s *testErrorSink) SetImrPrimingError(msg string) {
+	s.set(ErrCatUpstream, ErrSubImrPriming, msg)
+}
+func (s *testErrorSink) ClearImrPrimingError() { s.clear(ErrCatUpstream, ErrSubImrPriming) }
 func (s *testErrorSink) SetImrForwardZoneError(msg string) {
 	s.set(ErrCatConfig, ErrSubImrForwardZone, msg)
 }

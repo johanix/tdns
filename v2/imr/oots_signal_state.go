@@ -234,7 +234,7 @@ func (imr *Imr) followLookupAlias(set *svcbSignalSet, walk aliasWalk) {
 	if set == nil || !set.alias || len(set.path) == 0 || imr.Cache == nil {
 		return
 	}
-	if imr.Options[ImrOptUseTransportSignals] == "false" {
+	if imr.Options[OptUseTransportSignals] == "false" {
 		return
 	}
 	set.path = set.path[:1]
@@ -403,11 +403,11 @@ func (tr *aliasHopTracker) done(target string, now time.Time) []string {
 	return owners
 }
 
-// signalAliasHopLookupHook, when set, stands in for the ImrQuery of an alias
+// signalAliasHopLookupHook, when set, stands in for the Query of an alias
 // hop: tests set it, so that no lookup leaves the process. It is to leave the
 // answer in the cache, as a lookup does, and ctx is the lookup's
 // (withSignalAliasHopLookup).
-var signalAliasHopLookupHook func(ctx context.Context, imr *Imr, target string) (*ImrResponse, error)
+var signalAliasHopLookupHook func(ctx context.Context, imr *Imr, target string) (*Response, error)
 
 // lookupSignalAliasHop looks up the SVCB RRset at target, a hop on the alias
 // path of the signal at owner, off the query path, and reports what became of
@@ -432,8 +432,8 @@ func (imr *Imr) lookupSignalAliasHop(owner, target string) (hopLookup, <-chan st
 	if joined != hopStarted {
 		return joined, wait
 	}
-	lookup := func(ctx context.Context, imr *Imr, target string) (*ImrResponse, error) {
-		return imr.ImrQuery(ctx, target, dns.TypeSVCB, dns.ClassINET, nil)
+	lookup := func(ctx context.Context, imr *Imr, target string) (*Response, error) {
+		return imr.imrQuery(ctx, target, dns.TypeSVCB, dns.ClassINET, false)
 	}
 	if signalAliasHopLookupHook != nil {
 		lookup = signalAliasHopLookupHook
@@ -445,9 +445,7 @@ func (imr *Imr) lookupSignalAliasHop(owner, target string) (hopLookup, <-chan st
 		defer cancel()
 		resp, err := lookup(withSignalAliasHopLookup(ctx), imr, target)
 		owners := imr.signalAliasHops.done(target, time.Now())
-		if !imr.Quiet {
-			lgDns.Debug("transport signal: alias hop looked up", "target", target, "owners", owners, "err", err)
-		}
+		imr.lgDns().Debug("transport signal: alias hop looked up", "target", target, "owners", owners, "err", err)
 		if !signalAliasHopFound(resp, err) {
 			return
 		}
@@ -529,7 +527,7 @@ func (imr *Imr) refollowAliasOwner(walk aliasWalk, owner string) {
 // them to. Once signalAliasHopRetry has passed, the next query that brings an
 // owner's RRset follows it again, and so does the verify lookup of an owner
 // whose alias the cache holds (launchTransportSignalQuery).
-func signalAliasHopFound(resp *ImrResponse, err error) bool {
+func signalAliasHopFound(resp *Response, err error) bool {
 	return err == nil && resp != nil && resp.RRset != nil && resp.RRset.RRtype == dns.TypeSVCB && len(resp.RRset.RRs) > 0
 }
 

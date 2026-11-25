@@ -22,16 +22,14 @@ const (
 	rootDS38696 = ". IN DS 38696 8 2 683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16"
 )
 
-// captureImrLog sends the slog default, which the subsystem loggers write
-// through, to a buffer for the rest of the test.
+// captureImrLog sends the slog default, which a resolver built without a
+// logger writes through, to a buffer for the rest of the test.
 func captureImrLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
-	prev, prevImr, prevDns := slog.Default(), lgImr, lgDns
-	l := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	slog.SetDefault(l)
-	SetLoggers(l, l)
-	t.Cleanup(func() { slog.SetDefault(prev); SetLoggers(prevImr, prevDns) })
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
 }
 
@@ -46,7 +44,7 @@ func dsKeyTags(dss []*dns.DS) []uint16 {
 
 // No anchor configured and the compiled-in root hints: the resolver gets the
 // compiled-in IANA root anchor, both KSK DS records, and says so once -- both
-// NewImr and Start read the anchors.
+// New and Start read the anchors.
 func TestNoAnchorCompiledInHintsUsesCompiledInRootAnchor(t *testing.T) {
 	logbuf := captureImrLog(t)
 	imr := newForwardTestImr(t, nil)
@@ -94,8 +92,8 @@ func TestNoAnchorNonDefaultRootGetsNoAnchor(t *testing.T) {
 		reason string
 	}{
 		{"root-hints file", Config{RootHints: "/etc/tdns/root.hints"}, "root-hints is set"},
-		{"forwarded root", Config{Forward: []ImrForwardConf{fwdConf(".", "192.0.2.53", 0)}}, "root is forwarded"},
-		{"stubbed root", Config{Stubs: []ImrStubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}, "root is a stub zone"},
+		{"forwarded root", Config{Forward: []ForwardConf{fwdConf(".", "192.0.2.53", 0)}}, "root is forwarded"},
+		{"stubbed root", Config{Stubs: []StubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}, "root is a stub zone"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logbuf := captureImrLog(t)
@@ -125,8 +123,8 @@ func TestNoAnchorNonDefaultRootGetsNoAnchor(t *testing.T) {
 
 	// A forward or stub below the root leaves the IANA root in place.
 	ic := Config{
-		Forward: []ImrForwardConf{fwdConf("fwd.example.", "192.0.2.53", 0)},
-		Stubs:   []ImrStubConf{stubConf("stub.example.", "ns.stub.example.", "192.0.2.1")},
+		Forward: []ForwardConf{fwdConf("fwd.example.", "192.0.2.53", 0)},
+		Stubs:   []StubConf{stubConf("stub.example.", "ns.stub.example.", "192.0.2.1")},
 	}
 	if use, why := ic.RootAnchorFallback(); !use {
 		t.Errorf("a forward and a stub below the root turned the compiled-in anchor off: %s", why)
@@ -260,9 +258,9 @@ func TestRestartRequiredWhenTheDefaultRootAnchorChanges(t *testing.T) {
 		return slices.ContainsFunc(keys, func(k string) bool { return strings.HasPrefix(k, key) })
 	}
 	plain := Config{}
-	fwdRoot := Config{Forward: []ImrForwardConf{fwdConf(".", "192.0.2.53", 0)}}
-	stubRoot := Config{Stubs: []ImrStubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}
-	fwdBelow := Config{Forward: []ImrForwardConf{fwdConf("fwd.example.", "192.0.2.53", 0)}}
+	fwdRoot := Config{Forward: []ForwardConf{fwdConf(".", "192.0.2.53", 0)}}
+	stubRoot := Config{Stubs: []StubConf{stubConf(".", "a.root.test.", "192.0.2.1")}}
+	fwdBelow := Config{Forward: []ForwardConf{fwdConf("fwd.example.", "192.0.2.53", 0)}}
 
 	if keys := imrRestartRequiredKeys(plain, fwdRoot); !hasKey(keys) {
 		t.Errorf("adding a . forward: restart-required keys %v, want %q", keys, key)

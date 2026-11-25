@@ -571,8 +571,8 @@ func newTestImr(t *testing.T) *Imr {
 // loopbackTestOptions sets allow-loopback-nameservers: the test doubles listen
 // on 127.0.0.1 and ::1, and many are reached through glue or an address lookup
 // rather than a stub. imr_loopback_ns_test.go tests the default.
-func loopbackTestOptions() map[ImrOption]string {
-	return map[ImrOption]string{ImrOptAllowLoopbackNameservers: "true"}
+func loopbackTestOptions() map[Option]string {
+	return map[Option]string{OptAllowLoopbackNameservers: "true"}
 }
 
 // Opportunistic privacy is a preference, not a filter: the encrypted

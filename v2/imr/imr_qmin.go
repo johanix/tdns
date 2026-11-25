@@ -25,7 +25,7 @@ const (
 // validateQminTuning rejects a minimisation plan that cannot spread the
 // hidden labels over the rounds that are left. Called after the defaults
 // are filled in, so a nil pointer is a bug in that filling.
-func validateQminTuning(t *ImrTuningConf) error {
+func validateQminTuning(t *TuningConf) error {
 	if t == nil || t.QminMaxIterations == nil || t.QminOneLabel == nil {
 		return fmt.Errorf("imrengine.tuning.qmin-max-iterations: not set")
 	}
@@ -41,8 +41,8 @@ func validateQminTuning(t *ImrTuningConf) error {
 
 // ValidateQmin is the check the resolver makes of t's qmin settings at
 // start (validateQminTuning), for a daemon's config check to make too.
-// Fill in the defaults first (LoadImrTuningDefaults).
-func (t *ImrTuningConf) ValidateQmin() error {
+// Fill in the defaults first (LoadTuningDefaults).
+func (t *TuningConf) ValidateQmin() error {
 	return validateQminTuning(t)
 }
 
@@ -88,7 +88,7 @@ type qminCounters struct {
 type qminCtxKey struct{}
 
 func (imr *Imr) qminOn() bool {
-	return imr != nil && imr.Options != nil && imr.Options[ImrOptQnameMinimisation] == "true"
+	return imr != nil && imr.Options != nil && imr.Options[OptQnameMinimisation] == "true"
 }
 
 func (imr *Imr) qminLimits() (maxIter, oneLabel int) {

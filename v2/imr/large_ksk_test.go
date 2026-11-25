@@ -14,7 +14,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func TestLargeKskImrMetrics(t *testing.T) {
+func TestLargeKskMetrics(t *testing.T) {
 	resetLargeKskImrMetricsForTest()
 	t.Cleanup(resetLargeKskImrMetricsForTest)
 
@@ -35,7 +35,7 @@ func TestLargeKskImrMetrics(t *testing.T) {
 	imr.noteDNSKEYLookup(false)
 	imr.noteDNSKEYLookup(true)
 
-	m := LargeKskImrMetricsSnapshot()
+	m := LargeKskMetricsSnapshot()
 	if m.DSEncounteredTotal != 2 || m.DSEncounteredLarge != 1 {
 		t.Fatalf("DS metrics = %+v, want total=2 large RRsets=1", m)
 	}

@@ -23,11 +23,13 @@
  *     clear a DEGRADED that is still true, which teaches operators to
  *     distrust the flag.
  */
+
 package imr
 
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"sort"
@@ -46,7 +48,7 @@ import (
 // actually applied to the cache — which is what lets the next reload tell an
 // edited stub from an untouched one.
 type imrZoneTable struct {
-	forwards []*ForwardZone    // most-specific first (BuildImrForwards sorts)
+	forwards []*ForwardZone    // most-specific first (BuildForwards sorts)
 	stubs    []string          // canonical FQDNs, config order
 	stubFP   map[string]string // stub zone -> fingerprint of the applied config
 	// loadedAt is when this table was published. Reported by config status,
@@ -113,9 +115,9 @@ func (imr *Imr) setZoneTable(forwards []*ForwardZone, stubs []string, stubFP map
 	})
 }
 
-// ImrZoneReloadResult reports what an imrengine: reload actually changed, so
+// ZoneReloadResult reports what an imrengine: reload actually changed, so
 // the operator sees the effect rather than a bare "reloaded".
-type ImrZoneReloadResult struct {
+type ZoneReloadResult struct {
 	ForwardsAdded   []string `json:"forwards_added,omitempty"`
 	ForwardsRemoved []string `json:"forwards_removed,omitempty"`
 	ForwardsChanged []string `json:"forwards_changed,omitempty"`
@@ -130,14 +132,14 @@ type ImrZoneReloadResult struct {
 }
 
 // Changed reports whether the reload altered the running zone routing.
-func (r ImrZoneReloadResult) Changed() bool {
+func (r ZoneReloadResult) Changed() bool {
 	return len(r.ForwardsAdded)+len(r.ForwardsRemoved)+len(r.ForwardsChanged)+
 		len(r.StubsAdded)+len(r.StubsRemoved)+len(r.StubsChanged) > 0
 }
 
 // Summary renders the result as one operator-facing line, or "" when nothing
 // changed and nothing needs a restart.
-func (r ImrZoneReloadResult) Summary() string {
+func (r ZoneReloadResult) Summary() string {
 	var parts []string
 	add := func(label string, zones []string) {
 		if len(zones) > 0 {
@@ -161,15 +163,15 @@ func (r ImrZoneReloadResult) Summary() string {
 // supplied config, and reports the diff.
 //
 // Atomic on failure: the new forward table is built and validated before
-// anything live is touched, so a config that BuildImrForwards rejects (an
+// anything live is touched, so a config that BuildForwards rejects (an
 // unparseable upstream, trust-ad over a plaintext upstream) leaves the
 // running resolver exactly as it was — the same "refuse whole, change
 // nothing" contract as the DNSSEC policy guardrail on the zone-reload path.
 //
 // Nil-safe: an application with no resolver reloads nothing and reports no
 // error.
-func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (ImrZoneReloadResult, error) {
-	var res ImrZoneReloadResult
+func (imr *Imr) ReloadZones(stubconf []StubConf, fwdconf []ForwardConf) (ZoneReloadResult, error) {
+	var res ZoneReloadResult
 	if imr == nil {
 		return res, nil
 	}
@@ -179,19 +181,18 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 	// a config that would quarantine anything changes nothing at all. At
 	// startup there is no such state, so the same input quarantines and the
 	// daemon serves what is left.
-	newForwards, diags := BuildImrForwards(fwdconf)
+	if imr.Cache == nil {
+		return res, fmt.Errorf("IMR has no cache; cannot reload stub and forward zones")
+	}
+	newForwards, diags := buildImrForwards(fwdconf, imr.Cache.DebugLog())
 	if err := forwardDiagsError(diags); err != nil {
 		return res, fmt.Errorf("imrengine.forward: %v", err)
 	}
-	newStubs, newFP, newServers := canonicalStubs(stubconf)
+	newStubs, newFP, newServers := canonicalStubs(imr.lgImr(), stubconf)
 
 	// One reload at a time: two concurrent reloads would each diff against
 	// the table the other is replacing, and the loser's cache-side stub work
 	// would outlive the table that describes it.
-	if imr.Cache == nil {
-		return res, fmt.Errorf("IMR has no cache; cannot reload stub and forward zones")
-	}
-
 	imr.reloadMu.Lock()
 	defer imr.reloadMu.Unlock()
 
@@ -211,7 +212,7 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 		if err := imr.Cache.AddStub(zone, newServers[zone]); err != nil {
 			// A rejected stub is not a reason to abandon the rest of the
 			// reload; report it and leave that zone's old servers in place.
-			lgImr.Error("stub zone reload failed, keeping previous servers", "zone", zone, "err", err)
+			imr.lgImr().Error("stub zone reload failed, keeping previous servers", "zone", zone, "err", err)
 			appliedFP[zone] = old.stubFP[zone]
 			continue
 		}
@@ -250,7 +251,7 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 			// The root's server map is the priming state, not a delegation
 			// the resolver can re-learn: removing it leaves a resolver that
 			// cannot start a walk.
-			lgImr.Warn("stub zone for the root removed from config; keeping its server map (re-priming needs a restart)")
+			imr.lgImr().Warn("stub zone for the root removed from config; keeping its server map (re-priming needs a restart)")
 			continue
 		}
 		imr.Cache.RemoveStub(zone)
@@ -280,14 +281,14 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 				// A zone a later reload has removed is no longer there to
 				// probe, which is not a failure of this one.
 				if _, err := imr.ProbeForwardUpstreamsReport(ctx, zone); err != nil {
-					lgImr.Warn("probing a reloaded forward zone failed", "zone", zone, "err", err)
+					imr.lgImr().Warn("probing a reloaded forward zone failed", "zone", zone, "err", err)
 				}
 			}
 		}(probeCtx, probeZones)
 	}
 
 	if res.Changed() {
-		lgImr.Info("imrengine zones reloaded", "summary", res.Summary())
+		imr.lgImr().Info("imrengine zones reloaded", "summary", res.Summary())
 	}
 	return res, nil
 }
@@ -296,25 +297,25 @@ func (imr *Imr) ReloadZones(stubconf []ImrStubConf, fwdconf []ImrForwardConf) (I
 // each one's server list. Lenient by design — the same config that booted
 // must keep booting — so a duplicate zone (last wins) or an empty server list
 // is a WARN, not an error.
-func canonicalStubs(stubs []ImrStubConf) ([]string, map[string]string, map[string][]cache.AuthServer) {
+func canonicalStubs(lg *slog.Logger, stubs []StubConf) ([]string, map[string]string, map[string][]cache.AuthServer) {
 	zones := make([]string, 0, len(stubs))
 	fps := make(map[string]string, len(stubs))
 	servers := make(map[string][]cache.AuthServer, len(stubs))
 	for _, sc := range stubs {
 		if sc.Zone == "" {
-			lgImr.Warn("stub zone without a zone name, ignored")
+			lg.Warn("stub zone without a zone name, ignored")
 			continue
 		}
 		zone := dns.Fqdn(core.CanonicalizeName(sc.Zone))
 		if _, ok := dns.IsDomainName(zone); !ok {
-			lgImr.Warn("stub zone is not a valid domain name, ignored", "zone", sc.Zone)
+			lg.Warn("stub zone is not a valid domain name, ignored", "zone", sc.Zone)
 			continue
 		}
 		if len(sc.Servers) == 0 {
-			lgImr.Warn("stub zone has no servers; it will resolve nothing", "zone", zone)
+			lg.Warn("stub zone has no servers; it will resolve nothing", "zone", zone)
 		}
 		if _, dup := fps[zone]; dup {
-			lgImr.Warn("stub zone is configured more than once; the last entry wins", "zone", zone)
+			lg.Warn("stub zone is configured more than once; the last entry wins", "zone", zone)
 			zones = dropZone(zones, zone)
 		}
 		zones = append(zones, zone)
@@ -339,7 +340,7 @@ func dropZone(zones []string, zone string) []string {
 // stubFingerprint renders a stub zone's configured servers as a stable
 // string. Only CONFIG fields go in: the point is to answer "did the operator
 // edit this stub", not "has its runtime state moved".
-func stubFingerprint(sc ImrStubConf) string {
+func stubFingerprint(sc StubConf) string {
 	parts := make([]string, 0, len(sc.Servers))
 	for i := range sc.Servers {
 		s := &sc.Servers[i]
@@ -387,7 +388,7 @@ func forwardZoneSignature(fz *ForwardZone) string {
 }
 
 // diffForwardZones records which forward zones were added, removed or edited.
-func diffForwardZones(old, new []*ForwardZone, res *ImrZoneReloadResult) {
+func diffForwardZones(old, new []*ForwardZone, res *ZoneReloadResult) {
 	oldSig := make(map[string]string, len(old))
 	for _, fz := range old {
 		oldSig[fz.Zone] = forwardZoneSignature(fz)
@@ -482,11 +483,11 @@ func imrRestartRequiredKeys(boot, current Config) []string {
 	// defaults in before it snapshots bootConf, while the reload decodes the
 	// file raw, so an absent or partial tuning: block differed from the
 	// snapshot on every defaulted knob and every reload asked for a restart.
-	// t is a copy. Of its pointers, LoadImrTuningDefaults leaves
+	// t is a copy. Of its pointers, LoadTuningDefaults leaves
 	// UpgradeIndirectCacheHits alone, and replaces a nil NSEC3MaxIterations
 	// with a new one.
-	effective := func(t ImrTuningConf) ImrTuningConf {
-		LoadImrTuningDefaults(&t)
+	effective := func(t TuningConf) TuningConf {
+		LoadTuningDefaults(&t)
 		return t
 	}
 	check("active", bothNil(boot.Active, current.Active))
@@ -531,9 +532,9 @@ func sameOptions(boot, current Config) bool {
 }
 
 // imrTuningEqual compares two tuning blocks by value. Written out rather than
-// reflect.DeepEqual'd so that adding a knob to ImrTuningConf without teaching
+// reflect.DeepEqual'd so that adding a knob to TuningConf without teaching
 // this function about it is a compile error, not a silently missed report.
-func imrTuningEqual(a, b ImrTuningConf) bool {
+func imrTuningEqual(a, b TuningConf) bool {
 	if a.Backoff != b.Backoff || a.AddressFamily != b.AddressFamily ||
 		a.Discovery != b.Discovery || a.QueryBudget != b.QueryBudget ||
 		a.CacheMaxTTL != b.CacheMaxTTL || a.CacheMinTTL != b.CacheMinTTL ||

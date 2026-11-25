@@ -121,9 +121,9 @@ func TestAWithdrawnDSMakesTheChildInsecure(t *testing.T) {
 		}
 		return cache.ValidationStateToString[z.GetState()]
 	}
-	ask := func(when string) *ImrResponse {
+	ask := func(when string) *Response {
 		t.Helper()
-		resp, err := imr.ImrQuery(context.Background(), owner, dns.TypeTXT, dns.ClassINET, nil)
+		resp, err := imr.Query(context.Background(), owner, dns.TypeTXT, dns.ClassINET)
 		if err != nil {
 			t.Fatalf("%s: ImrQuery: %v (asked %v)", when, err, srv.questions())
 		}

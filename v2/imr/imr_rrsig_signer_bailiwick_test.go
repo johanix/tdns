@@ -121,7 +121,7 @@ func TestResponderRefusesAnOutOfBailiwickSigner(t *testing.T) {
 
 			r, opts := verdictQuery{do: true}.msgFor(qname, dns.TypeA)
 			cw := &captureWriter{}
-			imr.ImrResponder(context.Background(), cw, r, qname, dns.TypeA, opts)
+			imr.Responder(context.Background(), cw, r, qname, dns.TypeA, opts)
 			if cw.got == nil {
 				t.Fatal("responder wrote no response")
 			}

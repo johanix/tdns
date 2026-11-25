@@ -17,11 +17,11 @@ import (
 //	if err != nil {
 //	    log
 //	} else if resp == nil {
-//	    resp = &ImrResponse{...}
+//	    resp = &Response{...}
 //	}
 //	sendResp(*resp)
 //
-// When err != nil AND resp == nil (the common case — ImrQuery returns
+// When err != nil AND resp == nil (the common case — Query returns
 // (nil, ctxErr) when its context is canceled mid-walk), the else-if is
 // skipped and *resp dereferences nil → panic → process crash (no recover()
 // upstream). buildImrResponse handles both branches independently so the
@@ -38,7 +38,7 @@ func TestBuildImrResponse_NilResponseAndError(t *testing.T) {
 }
 
 // TestBuildImrResponse_NilResponseAndNoError handles the rare
-// "ImrQuery returned (nil, nil)" path that the old code did handle.
+// "Query returned (nil, nil)" path that the old code did handle.
 func TestBuildImrResponse_NilResponseAndNoError(t *testing.T) {
 	got := buildImrResponse(nil, nil)
 	if !got.Error {
@@ -52,7 +52,7 @@ func TestBuildImrResponse_NilResponseAndNoError(t *testing.T) {
 // TestBuildImrResponse_NonNilResponseIsPassedThrough confirms the happy
 // path: a real response is dereferenced and returned as-is.
 func TestBuildImrResponse_NonNilResponseIsPassedThrough(t *testing.T) {
-	in := &ImrResponse{Msg: "hello"}
+	in := &Response{Msg: "hello"}
 	got := buildImrResponse(in, nil)
 	if got.Error {
 		t.Error("expected Error=false on happy path")
@@ -63,10 +63,10 @@ func TestBuildImrResponse_NonNilResponseIsPassedThrough(t *testing.T) {
 }
 
 // TestBuildImrResponse_ErrTakesPrecedenceOverResponse: if both a response
-// and an error are returned, the error path wins. (Defensive — ImrQuery
+// and an error are returned, the error path wins. (Defensive — Query
 // shouldn't return both, but we shouldn't trust callers either.)
 func TestBuildImrResponse_ErrTakesPrecedenceOverResponse(t *testing.T) {
-	in := &ImrResponse{Msg: "stale"}
+	in := &Response{Msg: "stale"}
 	got := buildImrResponse(in, errors.New("boom"))
 	if !got.Error {
 		t.Error("expected Error=true when both response and error are set")

@@ -74,7 +74,7 @@ func rqImr(t *testing.T, servers map[string]dns.HandlerFunc) *Imr {
 		stub = append(stub, cache.AuthServer{Name: "ns" + strconv.Itoa(len(stub)) + "." + rqZone, Addrs: []string{ip}, Alpn: []string{"do53"}})
 	}
 	imr := verdictImr(t, false)
-	if imr.Options[ImrOptUseTransportSignals] == "false" {
+	if imr.Options[OptUseTransportSignals] == "false" {
 		t.Fatal("precondition: transport signals are off")
 	}
 	p := strconv.Itoa(port)
@@ -210,8 +210,8 @@ func TestForwardedReplyMustAnswerTheQuestion(t *testing.T) {
 			goodAddr, goodPort, _, stop := startTestUpstream(t)
 			defer stop()
 
-			imr := newForwardTestImr(t, []ImrForwardConf{
-				{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+			imr := newForwardTestImr(t, []ForwardConf{
+				{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 					{Addr: badAddr, Port: badPort},
 					{Addr: goodAddr, Port: goodPort},
 				}},
@@ -239,8 +239,8 @@ func TestForwardedReplyMustAnswerTheQuestion(t *testing.T) {
 			}
 
 			// With that upstream alone, the query fails and nothing is cached.
-			alone := newForwardTestImr(t, []ImrForwardConf{
-				{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: badAddr, Port: badPort}}},
+			alone := newForwardTestImr(t, []ForwardConf{
+				{Zone: "fwd.example.", Upstreams: []UpstreamConf{{Addr: badAddr, Port: badPort}}},
 			})
 			if _, rcode, _, _, err := alone.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA,
 				map[string]*cache.AuthServer{}, false, edns0.PrivacyNone); err == nil || rcode != dns.RcodeServerFailure {

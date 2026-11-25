@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
+
 package imr
 
 import (
@@ -265,7 +266,7 @@ func (imr *Imr) serveCachedPositive(ctx context.Context, w dns.ResponseWriter, r
 	}
 	disp, ede := imr.dispositionFor(state, edeCode, signed, msgoptions)
 	if disp == answerServfail {
-		lgImr.Debug("ImrResponder: returning SERVFAIL for cached data that did not validate",
+		imr.lgImr().Debug("ImrResponder: returning SERVFAIL for cached data that did not validate",
 			"qname", qname, "qtype", dns.TypeToString[qtype], "edeCode", ede,
 			"state", cache.ValidationStateToString[state], "context", cache.CacheContextToString[crrset.Context])
 		m.Answer = nil
@@ -286,7 +287,7 @@ func (imr *Imr) serveCachedPositive(ctx context.Context, w dns.ResponseWriter, r
 	appendWildcardProof(m, crrset, msgoptions)
 	attachAnswerEDE(m, r, state, edeCode, edeText, msgoptions)
 	m.AuthenticatedData = disp == answerServeSecure && adWanted(r, msgoptions)
-	setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
+	imr.setPrivacyStatus(m, msgoptions, edns0.PrivacyCached)
 	w.WriteMsg(m)
 }
 

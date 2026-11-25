@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2024 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
+
 package imr
 
 import (
@@ -51,7 +52,7 @@ func (imr *Imr) TransportSignalRRType() uint16 {
 	if imr == nil {
 		return dns.TypeSVCB
 	}
-	if val, ok := imr.Options[ImrOptTransportSignalType]; ok {
+	if val, ok := imr.Options[OptTransportSignalType]; ok {
 		switch strings.ToLower(val) {
 		case "tsync":
 			return core.TypeTSYNC
@@ -108,11 +109,11 @@ func (imr *Imr) cachedTransportSignal(owner string) (signal *cache.CachedRRset, 
 // The tracker forgets the owner, so the first query after the denial expires
 // looks again at once. A denial with TTL 0 is not cached at all, and the next
 // query looks again straight away. Recording a denial as a success was
-// terminal (ImrQuery used to hand back a cached denial's SOA as the answer,
+// terminal (Query used to hand back a cached denial's SOA as the answer,
 // #698), and as a failure it added the backoff meant for servers that do not
 // answer; either way the verdict outlived the denial. Anything else is a
 // failure, retried after the backoff.
-func (imr *Imr) settleTransportSignalLookup(owner string, resp *ImrResponse, err error) {
+func (imr *Imr) settleTransportSignalLookup(owner string, resp *Response, err error) {
 	switch {
 	case err == nil && resp != nil && resp.RRset != nil &&
 		resp.RRset.RRtype == imr.TransportSignalRRType() && len(resp.RRset.RRs) > 0:
@@ -130,18 +131,18 @@ func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, rea
 	}
 	// With transport signals turned off, a signal would not be used, so
 	// none is looked up, whatever the discovery options say.
-	if imr.Options[ImrOptUseTransportSignals] == "false" {
+	if imr.Options[OptUseTransportSignals] == "false" {
 		return
 	}
 	switch reason {
 	case transportQueryReasonObservation:
 		// Proceed if either option is enabled
-		if imr.Options[ImrOptQueryForTransport] == "true" || imr.Options[ImrOptAlwaysQueryForTransport] == "true" {
+		if imr.Options[OptQueryForTransport] == "true" || imr.Options[OptAlwaysQueryForTransport] == "true" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	case transportQueryReasonNewServer:
 		// Only proceed if always-query option is enabled
-		if imr.Options[ImrOptAlwaysQueryForTransport] == "true" {
+		if imr.Options[OptAlwaysQueryForTransport] == "true" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	case transportQueryReasonVerify:
@@ -149,7 +150,7 @@ func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, rea
 		// Additional section could not tell, this lookup can, whether or not
 		// the options ask for discovery. Only use-transport-signals: false
 		// turns it off.
-		if imr.Options[ImrOptUseTransportSignals] != "false" {
+		if imr.Options[OptUseTransportSignals] != "false" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	case transportQueryReasonStrictPrivacy, transportQueryReasonNoUsableTransport:
@@ -158,12 +159,12 @@ func (imr *Imr) maybeQueryTransportSignal(ctx context.Context, owner string, rea
 		// server's Do53 in backoff, say), so they look the transports up
 		// whether or not the options ask for discovery. Only
 		// use-transport-signals: false turns signals off.
-		if imr.Options[ImrOptUseTransportSignals] != "false" {
+		if imr.Options[OptUseTransportSignals] != "false" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	default:
 		// Proceed if either option is enabled
-		if imr.Options[ImrOptQueryForTransport] == "true" || imr.Options[ImrOptAlwaysQueryForTransport] == "true" {
+		if imr.Options[OptQueryForTransport] == "true" || imr.Options[OptAlwaysQueryForTransport] == "true" {
 			imr.launchTransportSignalQuery(ctx, owner, reason)
 		}
 	}
@@ -195,7 +196,7 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 		if imr.Cache.Debug {
 			imr.Cache.Logger.Printf("Transport signal query (%s): querying %s %s", reason, owner, dns.TypeToString[rrtype])
 		}
-		resp, err := imr.ImrQuery(queryCtx, owner, rrtype, dns.ClassINET, nil)
+		resp, err := imr.imrQuery(queryCtx, owner, rrtype, dns.ClassINET, false)
 		if imr.Cache.Debug && (err != nil || resp == nil || resp.RRset == nil || resp.RRset.RRtype != rrtype) {
 			imr.Cache.Logger.Printf("Transport signal query (%s) found no signal for %s %s: %v", reason, owner, dns.TypeToString[rrtype], err)
 		}
@@ -264,7 +265,7 @@ type cachedSignal struct {
 // follows a cached alias through the cache only, as it does the one in an
 // answer.
 func (imr *Imr) applyCachedTransportSignal(walk aliasWalk, owner string, servers ...*cache.AuthServer) cachedSignal {
-	if imr.Options[ImrOptUseTransportSignals] == "false" {
+	if imr.Options[OptUseTransportSignals] == "false" {
 		return cachedSignal{}
 	}
 	cached, denied := imr.cachedTransportSignal(owner)
@@ -328,9 +329,9 @@ func (imr *Imr) awaitTransportSignals(ctx context.Context, qname string, serverM
 //
 // A transport-signal lookup, and what it asks on the way, never waits here:
 // it could be waiting for itself, or for a lookup that waits for it. Strict
-// queries could not anyway: ImrQuery never asks for privacy.
+// queries could not anyway: Query never asks for privacy.
 func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[string]*cache.AuthServer, reason string, ready func() bool) bool {
-	if imr.Cache == nil || imr.Options[ImrOptUseTransportSignals] == "false" || inTransportSignalLookup(ctx) {
+	if imr.Cache == nil || imr.Options[OptUseTransportSignals] == "false" || inTransportSignalLookup(ctx) {
 		return ready()
 	}
 	// lookup is one lookup waited for: of a server's signal at owner, or of
@@ -463,7 +464,7 @@ func (imr *Imr) awaitTransportSignalsUntil(ctx context.Context, serverMap map[st
 }
 
 func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
-	if imr.Cache == nil || ctx == nil || imr.Options[ImrOptQueryForTransportTLSA] != "true" {
+	if imr.Cache == nil || ctx == nil || imr.Options[OptQueryForTransportTLSA] != "true" {
 		return
 	}
 	base = dns.Fqdn(strings.TrimSpace(base))
@@ -481,7 +482,7 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 		go func(owner string) {
 			queryCtx, cancel := detachedContext(5 * time.Second)
 			defer cancel()
-			resp, err := imr.ImrQuery(queryCtx, owner, dns.TypeTLSA, dns.ClassINET, nil)
+			resp, err := imr.imrQuery(queryCtx, owner, dns.TypeTLSA, dns.ClassINET, false)
 			if err != nil || resp == nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 				imr.TLSADiscovery.Fail(owner, err)
 				return
@@ -491,7 +492,7 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 			if len(rr.RRSIGs) > 0 {
 				vstate, err = imr.Cache.ValidateRRsetWithParentZone(queryCtx, rr, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 				if err != nil {
-					lgImr.Warn("maybeQueryTLSA: failed to validate TLSA RRset", "err", err)
+					imr.lgImr().Warn("maybeQueryTLSA: failed to validate TLSA RRset", "err", err)
 					imr.TLSADiscovery.Fail(owner, err)
 					return
 				}

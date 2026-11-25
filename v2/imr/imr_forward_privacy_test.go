@@ -71,7 +71,7 @@ func TestForwardUpstreamsForPrivacy(t *testing.T) {
 
 // Strict privacy on a forward zone with no encrypted upstream must fail with
 // the sentinel the responder matches on, not with a message that happens to
-// contain the right words: ImrResponder attaches the privacy-unavailable EDE
+// contain the right words: Responder attaches the privacy-unavailable EDE
 // on errors.Is and nothing else.
 func TestForwardStrictPrivacyReturnsSentinel(t *testing.T) {
 	fz := &ForwardZone{
@@ -157,8 +157,8 @@ func TestForwardStrictPrivacyExhaustionWrapsSentinel(t *testing.T) {
 	addr, port, stop := startSilentUpstreamDoT(t, cert)
 	defer stop()
 
-	imr := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	imr := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: addr, Port: port, Transport: "dot", TLSServerName: "dns.test.example"},
 		}},
 	})

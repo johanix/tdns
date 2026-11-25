@@ -27,21 +27,20 @@ func newReloadTestImr(t *testing.T) *Imr {
 	lg := log.New(os.Stderr, "test", log.LstdFlags)
 	imr := &Imr{
 		Cache: cache.NewRRsetCache(lg, false, false),
-		Quiet: true,
 	}
 	imr.setZoneTable(nil, nil, map[string]string{})
 	return imr
 }
 
-func fwdConf(zone, addr string, port uint16) ImrForwardConf {
-	return ImrForwardConf{
+func fwdConf(zone, addr string, port uint16) ForwardConf {
+	return ForwardConf{
 		Zone:      zone,
-		Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}},
+		Upstreams: []UpstreamConf{{Addr: addr, Port: port}},
 	}
 }
 
-func stubConf(zone, ns, addr string) ImrStubConf {
-	return ImrStubConf{
+func stubConf(zone, ns, addr string) StubConf {
+	return StubConf{
 		Zone:    zone,
 		Servers: []cache.AuthServer{{Name: ns, Addrs: []string{addr}, Alpn: []string{"do53"}}},
 	}
@@ -60,7 +59,7 @@ func findZone(imr *Imr, zone string) *ForwardZone {
 // other, and the diff must name what actually changed.
 func TestReloadZonesForwardDiff(t *testing.T) {
 	imr := newReloadTestImr(t)
-	if _, err := imr.ReloadZones(nil, []ImrForwardConf{
+	if _, err := imr.ReloadZones(nil, []ForwardConf{
 		fwdConf("a.example.", "192.0.2.1", 0),
 		fwdConf("b.example.", "192.0.2.2", 0),
 	}); err != nil {
@@ -71,7 +70,7 @@ func TestReloadZonesForwardDiff(t *testing.T) {
 	before := findZone(imr, "a.example.").Upstreams[0]
 	before.recordSuccess()
 
-	res, err := imr.ReloadZones(nil, []ImrForwardConf{
+	res, err := imr.ReloadZones(nil, []ForwardConf{
 		fwdConf("a.example.", "192.0.2.1", 0),    // untouched
 		fwdConf("b.example.", "192.0.2.2", 5353), // edited: different port
 		fwdConf("c.example.", "192.0.2.3", 0),    // added
@@ -105,7 +104,7 @@ func TestReloadZonesForwardDiff(t *testing.T) {
 	}
 
 	// Removal.
-	res, err = imr.ReloadZones(nil, []ImrForwardConf{fwdConf("a.example.", "192.0.2.1", 0)})
+	res, err = imr.ReloadZones(nil, []ForwardConf{fwdConf("a.example.", "192.0.2.1", 0)})
 	if err != nil {
 		t.Fatalf("ReloadZones (removal): %v", err)
 	}
@@ -121,15 +120,15 @@ func TestReloadZonesForwardDiff(t *testing.T) {
 // validation must leave the running one exactly as it was.
 func TestReloadZonesRejectedConfigChangesNothing(t *testing.T) {
 	imr := newReloadTestImr(t)
-	if _, err := imr.ReloadZones(nil, []ImrForwardConf{fwdConf("a.example.", "192.0.2.1", 0)}); err != nil {
+	if _, err := imr.ReloadZones(nil, []ForwardConf{fwdConf("a.example.", "192.0.2.1", 0)}); err != nil {
 		t.Fatalf("initial ReloadZones: %v", err)
 	}
 	before := imr.ForwardZones()
 
-	// trust-ad over a plaintext upstream: refused by BuildImrForwards.
-	_, err := imr.ReloadZones(nil, []ImrForwardConf{
+	// trust-ad over a plaintext upstream: refused by BuildForwards.
+	_, err := imr.ReloadZones(nil, []ForwardConf{
 		fwdConf("a.example.", "192.0.2.1", 0),
-		{Zone: "bad.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.9"}}},
+		{Zone: "bad.example.", TrustAD: true, Upstreams: []UpstreamConf{{Addr: "192.0.2.9"}}},
 	})
 	if err == nil {
 		t.Fatalf("ReloadZones accepted trust-ad over a plaintext upstream")
@@ -143,7 +142,7 @@ func TestReloadZonesRejectedConfigChangesNothing(t *testing.T) {
 // each does to the cache's server map.
 func TestReloadZonesStubs(t *testing.T) {
 	imr := newReloadTestImr(t)
-	res, err := imr.ReloadZones([]ImrStubConf{
+	res, err := imr.ReloadZones([]StubConf{
 		stubConf("keep.example.", "ns.keep.example.", "192.0.2.1"),
 		stubConf("edit.example.", "ns.edit.example.", "192.0.2.2"),
 		stubConf("drop.example.", "ns.drop.example.", "192.0.2.3"),
@@ -166,7 +165,7 @@ func TestReloadZonesStubs(t *testing.T) {
 	}
 	keepServer.IncrementTransportCounter(core.TransportDo53)
 
-	res, err = imr.ReloadZones([]ImrStubConf{
+	res, err = imr.ReloadZones([]StubConf{
 		stubConf("keep.example.", "ns.keep.example.", "192.0.2.1"),
 		stubConf("edit.example.", "ns.edit.example.", "192.0.2.99"), // new address
 		stubConf("new.example.", "ns.new.example.", "192.0.2.4"),
@@ -209,15 +208,15 @@ func TestReloadZonesStubs(t *testing.T) {
 // forward decision, not just the status output.
 func TestReloadZonesStubBeatsForward(t *testing.T) {
 	imr := newReloadTestImr(t)
-	if _, err := imr.ReloadZones(nil, []ImrForwardConf{fwdConf(".", "192.0.2.1", 0)}); err != nil {
+	if _, err := imr.ReloadZones(nil, []ForwardConf{fwdConf(".", "192.0.2.1", 0)}); err != nil {
 		t.Fatalf("ReloadZones: %v", err)
 	}
 	if fz := imr.forwardZoneFor("host.internal.example."); fz == nil {
 		t.Fatalf("root forward did not catch host.internal.example.")
 	}
 	if _, err := imr.ReloadZones(
-		[]ImrStubConf{stubConf("internal.example.", "ns.internal.example.", "192.0.2.5")},
-		[]ImrForwardConf{fwdConf(".", "192.0.2.1", 0)},
+		[]StubConf{stubConf("internal.example.", "ns.internal.example.", "192.0.2.5")},
+		[]ForwardConf{fwdConf(".", "192.0.2.1", 0)},
 	); err != nil {
 		t.Fatalf("ReloadZones: %v", err)
 	}
@@ -232,13 +231,13 @@ func TestImrRestartRequiredKeys(t *testing.T) {
 	boot := Config{
 		RootHints:       "/etc/tdns/root.hints",
 		TrustAnchorFile: "/etc/tdns/anchors",
-		Tuning:          ImrTuningConf{QueryBudget: 10 * time.Second},
+		Tuning:          TuningConf{QueryBudget: 10 * time.Second},
 	}
 
 	// Stubs and forwards are reloadable: changing them requires no restart.
 	reloadable := boot
-	reloadable.Stubs = []ImrStubConf{stubConf("a.example.", "ns.a.example.", "192.0.2.1")}
-	reloadable.Forward = []ImrForwardConf{fwdConf("b.example.", "192.0.2.2", 0)}
+	reloadable.Stubs = []StubConf{stubConf("a.example.", "ns.a.example.", "192.0.2.1")}
+	reloadable.Forward = []ForwardConf{fwdConf("b.example.", "192.0.2.2", 0)}
 	if keys := imrRestartRequiredKeys(boot, reloadable); len(keys) != 0 {
 		t.Errorf("stub/forward edits reported as needing a restart: %v", keys)
 	}
@@ -262,19 +261,19 @@ func TestImrRestartRequiredKeys(t *testing.T) {
 // or the strings while either config is a daemon's block read raw from its
 // file, which has no Options yet.
 func TestImrRestartRequiredKeysOptions(t *testing.T) {
-	on := map[ImrOption]string{ImrOptQnameMinimisation: "true"}
+	on := map[Option]string{OptQnameMinimisation: "true"}
 	for _, tc := range []struct {
 		name      string
 		boot, cur Config
 		restart   bool
 	}{
-		{"embedder, option turned off", Config{Options: on}, Config{Options: map[ImrOption]string{}}, true},
-		{"embedder, option value changed", Config{Options: on}, Config{Options: map[ImrOption]string{ImrOptQnameMinimisation: "false"}}, true},
-		{"embedder, same options", Config{Options: on}, Config{Options: map[ImrOption]string{ImrOptQnameMinimisation: "true"}}, false},
+		{"embedder, option turned off", Config{Options: on}, Config{Options: map[Option]string{}}, true},
+		{"embedder, option value changed", Config{Options: on}, Config{Options: map[Option]string{OptQnameMinimisation: "false"}}, true},
+		{"embedder, same options", Config{Options: on}, Config{Options: map[Option]string{OptQnameMinimisation: "true"}}, false},
 		{"daemon, parsed at start, raw on reload, same strings",
 			Config{OptionsStrs: []string{"qname-minimisation"}, Options: on}, Config{OptionsStrs: []string{"qname-minimisation"}}, false},
 		{"daemon, raw strings changed", Config{OptionsStrs: []string{"qname-minimisation"}}, Config{OptionsStrs: []string{"revalidate-ns"}}, true},
-		{"no options on either side", Config{Options: map[ImrOption]string{}}, Config{}, false},
+		{"no options on either side", Config{Options: map[Option]string{}}, Config{}, false},
 	} {
 		if got := slices.Contains(imrRestartRequiredKeys(tc.boot, tc.cur), "imrengine.options"); got != tc.restart {
 			t.Errorf("%s: options need a restart %v, want %v", tc.name, got, tc.restart)
@@ -288,7 +287,7 @@ func TestImrRestartRequiredKeysOptions(t *testing.T) {
 // Meaningful under -race.
 func TestReloadZonesConcurrentWithReaders(t *testing.T) {
 	imr := newReloadTestImr(t)
-	if _, err := imr.ReloadZones(nil, []ImrForwardConf{fwdConf(".", "192.0.2.1", 0)}); err != nil {
+	if _, err := imr.ReloadZones(nil, []ForwardConf{fwdConf(".", "192.0.2.1", 0)}); err != nil {
 		t.Fatalf("initial ReloadZones: %v", err)
 	}
 
@@ -314,11 +313,11 @@ func TestReloadZonesConcurrentWithReaders(t *testing.T) {
 	}
 
 	for i := 0; i < 50; i++ {
-		stubs := []ImrStubConf{stubConf("internal.example.", "ns.internal.example.", "192.0.2.5")}
+		stubs := []StubConf{stubConf("internal.example.", "ns.internal.example.", "192.0.2.5")}
 		if i%2 == 0 {
 			stubs = nil
 		}
-		if _, err := imr.ReloadZones(stubs, []ImrForwardConf{
+		if _, err := imr.ReloadZones(stubs, []ForwardConf{
 			fwdConf(".", "192.0.2.1", uint16(1000+i)),
 		}); err != nil {
 			t.Errorf("ReloadZones: %v", err)
@@ -341,11 +340,11 @@ func TestReloadZonesConcurrentWithReaders(t *testing.T) {
 // stub could still do was break forwarding.
 func TestStubZoneWithoutTrailingDot(t *testing.T) {
 	imr := newReloadTestImr(t)
-	relative := ImrStubConf{
+	relative := StubConf{
 		Zone:    "internal.example", // no trailing dot, as a config file may well say
 		Servers: []cache.AuthServer{{Name: "ns.internal.example.", Addrs: []string{"192.0.2.5"}, Alpn: []string{"do53"}}},
 	}
-	if _, err := imr.ReloadZones([]ImrStubConf{relative}, nil); err != nil {
+	if _, err := imr.ReloadZones([]StubConf{relative}, nil); err != nil {
 		t.Fatalf("ReloadZones: %v", err)
 	}
 	sm, ok := imr.Cache.ServerMapCopy("internal.example.")
@@ -376,14 +375,14 @@ func TestReloadProbesTheZonesItAddedOrChanged(t *testing.T) {
 		defer stopNew()
 
 		imr := newReloadTestImr(t)
-		if _, err := imr.ReloadZones(nil, []ImrForwardConf{fwdConf("fwd.example.", oldAddr, oldPort)}); err != nil {
+		if _, err := imr.ReloadZones(nil, []ForwardConf{fwdConf("fwd.example.", oldAddr, oldPort)}); err != nil {
 			t.Fatalf("first reload: %v", err)
 		}
 		waitFor(t, 2*time.Second, "the first zone probed", func() bool {
 			return probedSOA(t, oldLog, "fwd.example.")
 		})
 
-		res, err := imr.ReloadZones(nil, []ImrForwardConf{
+		res, err := imr.ReloadZones(nil, []ForwardConf{
 			fwdConf("fwd.example.", oldAddr, oldPort), // untouched
 			fwdConf("other.example.", newAddr, newPort),
 		})
@@ -408,10 +407,10 @@ func TestReloadProbesTheZonesItAddedOrChanged(t *testing.T) {
 		defer stopNew()
 
 		imr := newReloadTestImr(t)
-		if _, err := imr.ReloadZones(nil, []ImrForwardConf{fwdConf("fwd.example.", oldAddr, oldPort)}); err != nil {
+		if _, err := imr.ReloadZones(nil, []ForwardConf{fwdConf("fwd.example.", oldAddr, oldPort)}); err != nil {
 			t.Fatalf("first reload: %v", err)
 		}
-		res, err := imr.ReloadZones(nil, []ImrForwardConf{fwdConf("fwd.example.", newAddr, newPort)})
+		res, err := imr.ReloadZones(nil, []ForwardConf{fwdConf("fwd.example.", newAddr, newPort)})
 		if err != nil {
 			t.Fatalf("second reload: %v", err)
 		}
@@ -422,4 +421,12 @@ func TestReloadProbesTheZonesItAddedOrChanged(t *testing.T) {
 			return probedSOA(t, newLog, "fwd.example.")
 		})
 	})
+}
+
+// A resolver with no cache refuses a reload with its error, before anything
+// reads the cache.
+func TestReloadZonesWithoutACache(t *testing.T) {
+	if _, err := (&Imr{}).ReloadZones(nil, nil); err == nil {
+		t.Error("ReloadZones without a cache: no error")
+	}
 }

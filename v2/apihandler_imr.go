@@ -405,7 +405,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			// answered as dig is: a DS or DNSKEY question at a CNAME owner
 			// follows the CNAME (#875). It is counted as client traffic too,
 			// with no PRIVACY level.
-			ir, err := imr.ImrQuery(imrcore.AsClientQuery(r.Context()), qname, qtype, dns.ClassINET, nil)
+			ir, err := imr.ImrQuery(imrcore.AsClientQuery(r.Context()), qname, qtype, dns.ClassINET)
 			data := map[string]interface{}{"qname": qname, "qtype": dns.TypeToString[qtype]}
 			if ir != nil {
 				data["state"] = cache.ValidationStateToString[ir.ValidationState]

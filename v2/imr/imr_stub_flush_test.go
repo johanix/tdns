@@ -59,7 +59,7 @@ func TestReloadAddingAStubRacesAFlush(t *testing.T) {
 			}
 		}()
 		<-running
-		_, err := imr.ReloadZones([]ImrStubConf{stubConf(stubFlushChild, "ns."+stubFlushChild, "192.0.2.53")}, nil)
+		_, err := imr.ReloadZones([]StubConf{stubConf(stubFlushChild, "ns."+stubFlushChild, "192.0.2.53")}, nil)
 		close(stop)
 		wg.Wait()
 		if err != nil {

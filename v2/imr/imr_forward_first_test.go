@@ -26,8 +26,8 @@ import (
 // gone for a while. Nothing is primed, and no hints are seeded.
 
 // rootForward is a forward of "." to the upstream at addr:port.
-func rootForward(addr string, port uint16) []ImrForwardConf {
-	return []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}}
+func rootForward(addr string, port uint16) []ForwardConf {
+	return []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}}
 }
 
 // requireNoRootServerMap fails the test unless the resolver holds no server
@@ -114,7 +114,7 @@ func TestImrQueryForwardsWithoutARootServerMap(t *testing.T) {
 	imr := newForwardTestImr(t, rootForward(addr, port))
 	requireNoRootServerMap(t, imr)
 
-	resp, err := imr.ImrQuery(context.Background(), "www.fwd.example.", dns.TypeA, dns.ClassINET, nil)
+	resp, err := imr.Query(context.Background(), "www.fwd.example.", dns.TypeA, dns.ClassINET)
 	if err != nil {
 		t.Fatalf("ImrQuery: %v", err)
 	}
@@ -124,9 +124,9 @@ func TestImrQueryForwardsWithoutARootServerMap(t *testing.T) {
 	requireAsked(t, logr, "www.fwd.example.", dns.TypeA)
 }
 
-// Gate: ImrResponder. The same path as imrQuery's, and the client got a
+// Gate: Responder. The same path as imrQuery's, and the client got a
 // SERVFAIL.
-func TestImrResponderForwardsWithoutARootServerMap(t *testing.T) {
+func TestResponderForwardsWithoutARootServerMap(t *testing.T) {
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
@@ -136,7 +136,7 @@ func TestImrResponderForwardsWithoutARootServerMap(t *testing.T) {
 	r := new(dns.Msg)
 	r.SetQuestion("www.fwd.example.", dns.TypeA)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, "www.fwd.example.", dns.TypeA, &edns0.MsgOptions{RD: true})
+	imr.Responder(context.Background(), cw, r, "www.fwd.example.", dns.TypeA, &edns0.MsgOptions{RD: true})
 	if cw.got == nil {
 		t.Fatal("nothing written")
 	}
@@ -310,8 +310,8 @@ func TestCacheForwardedHookFollowsTheZoneTable(t *testing.T) {
 
 	// Only fwd.example. forwarded, and nothing cached: its names go out with
 	// no servers, and every other name is iterated, with no servers to ask.
-	sub := newForwardTestImr(t, []ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
+	sub := newForwardTestImr(t, []ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{{Addr: "192.0.2.53", Port: 53}}},
 	})
 	if !sub.Cache.Forwarded("www.fwd.example.", dns.TypeA) {
 		t.Error("a name under the forward zone is not forwarded")
@@ -350,7 +350,7 @@ func TestAQuestionWhoseForwardWasRemovedIsIterated(t *testing.T) {
 		{"the fetchers (ServersFor)", func(imr *Imr) (map[string]*cache.AuthServer, bool) {
 			return imr.Cache.ServersFor(qname, dns.TypeA)
 		}},
-		{"imrQuery and ImrResponder (serversForQuestion)", func(imr *Imr) (map[string]*cache.AuthServer, bool) {
+		{"imrQuery and Responder (serversForQuestion)", func(imr *Imr) (map[string]*cache.AuthServer, bool) {
 			_, servers, forwarded, _ := imr.serversForQuestion(qname, dns.TypeA)
 			return servers, forwarded
 		}},

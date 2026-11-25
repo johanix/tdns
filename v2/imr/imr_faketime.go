@@ -1,11 +1,13 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
+
 package imr
 
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
@@ -19,7 +21,7 @@ const faketimeBannerInterval = time.Hour
 // and every hour after, until ctx ends. Without faketime it does nothing, and
 // data time is real time. A retried start keeps the clock it started.
 // docs/2026-09-28-imr-deckard-test-clock-and-switches.md §3.3.
-func startDataClock(ctx context.Context, t ImrTestingConf) error {
+func startDataClock(ctx context.Context, lg *slog.Logger, t TestingConf) error {
 	if err := t.Validate(); err != nil {
 		return err
 	}
@@ -40,7 +42,7 @@ func startDataClock(ctx context.Context, t ImrTestingConf) error {
 	cache.SetDataClock(c)
 
 	warn := func() {
-		lgImr.Warn("imrengine.testing.faketime: data time is a TEST CLOCK; a test-harness setting, not for production",
+		lg.Warn("imrengine.testing.faketime: data time is a TEST CLOCK; a test-harness setting, not for production",
 			"file", path, "data_time", c.Now().Format(time.RFC3339))
 	}
 	warn()

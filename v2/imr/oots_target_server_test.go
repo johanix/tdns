@@ -226,7 +226,6 @@ func TestATargetKeepsItsInstanceAcrossRefreshes(t *testing.T) {
 // kept. Both used to be dropped, and the target retried after 30 s.
 func TestATargetsAddressFamiliesRunOutApart(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	put := func(rr dns.RR, ttl time.Duration) {
 		name := rr.Header().Name
 		imr.Cache.Set(name, rr.Header().Rrtype, &cache.CachedRRset{Name: name, RRtype: rr.Header().Rrtype,
@@ -291,7 +290,6 @@ func TestSelectionChecksTheFamilyOfTheAddressDialed(t *testing.T) {
 // endpoint, never through a redirected one.
 func TestAGluelessLookupInATargetLookupKeepsTheDefaultEndpoints(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	imr.Tuning.QueryBudget = 2 * time.Second
 	server := imr.Cache.GetOrCreateAuthServer("ns.example.")
 	server.AddAddr("192.0.2.1")
@@ -311,7 +309,7 @@ func TestAGluelessLookupInATargetLookupKeepsTheDefaultEndpoints(t *testing.T) {
 		globalImrOutboundQueryHooks = saved
 		globalImrOutboundQueryHooksMutex.Unlock()
 	})
-	if err := RegisterImrOutboundQueryHook(func(ctx context.Context, qname string, _ uint16, _, _ string, _ core.Transport) error {
+	if err := RegisterOutboundQueryHook(func(ctx context.Context, qname string, _ uint16, _, _ string, _ core.Transport) error {
 		if !core.EqualNames(qname, nsname) {
 			return nil
 		}
@@ -510,7 +508,6 @@ func TestATriedDefaultEndpointStillWaitsForTheTarget(t *testing.T) {
 // back Bogus; the AAAA held stays live beside the new A.
 func TestAFamilyWhoseRefreshFailsKeepsItsAddresses(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	put := func(rr dns.RR, state cache.ValidationState) {
 		name := rr.Header().Name
 		imr.Cache.Set(name, rr.Header().Rrtype, &cache.CachedRRset{Name: name, RRtype: rr.Header().Rrtype,
@@ -1086,7 +1083,7 @@ func TestADueFamilyIsNotHeldBackByItsSiblingsDenial(t *testing.T) {
 // with allow-loopback-nameservers not set.
 func TestAPassDoesNotWaitForATargetOnlyAnExcludedNameserverReaches(t *testing.T) {
 	imr, _, _, _, _ := endpointTestRig(t)
-	imr.Options[ImrOptAllowLoopbackNameservers] = "false"
+	imr.Options[OptAllowLoopbackNameservers] = "false"
 	imr.Tuning.Discovery.StrictWait = 300 * time.Millisecond
 	loop := redirectedServerTo("ns9.example.", "127.0.0.9", core.TransportDoT, dotTarget)
 	release := make(chan struct{})

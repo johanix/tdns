@@ -126,7 +126,6 @@ func assertCombinedPorts(t *testing.T, server *cache.AuthServer) {
 
 func TestAdditionalOOTSPortsAreCombined(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	server := cache.NewAuthServer("ns.example.")
 	r := new(dns.Msg)
 	r.SetQuestion("example.", dns.TypeA)
@@ -156,7 +155,6 @@ func TestAdditionalOOTSPortsAreCombined(t *testing.T) {
 
 func TestReferralOOTSPortsAreCombined(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	const zone = "kid.p.test."
 	const ns = "ns.kid.p.test."
 	r := new(dns.Msg)
@@ -177,7 +175,6 @@ func TestReferralOOTSPortsAreCombined(t *testing.T) {
 
 func TestAnswerOOTSPortsAreCombined(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	server := cache.NewAuthServer("ns.example.")
 	imr.Cache.ServerMap.Set("example.", map[string]*cache.AuthServer{
 		cache.ServerKey("ns.example."): server,
@@ -234,7 +231,6 @@ func TestDo53PortIsNotDialed(t *testing.T) {
 // the ALPN list is not applied.
 func TestAlpnPortIsApplied(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	server := cache.NewAuthServer("ns.example.")
 	r := new(dns.Msg)
 	r.SetQuestion("example.", dns.TypeA)
@@ -264,7 +260,6 @@ func TestAlpnPortIsApplied(t *testing.T) {
 
 func TestTryServerDialsSignalPort(t *testing.T) {
 	imr := newTestImr(t)
-	imr.Quiet = true
 	q := new(dns.Msg)
 	q.SetQuestion("example.", dns.TypeA)
 	reply := new(dns.Msg)
@@ -340,7 +335,6 @@ func addrsOf(qs []core.FakeQuery) []string {
 func TestProbeStubServersDialsSignalPort(t *testing.T) {
 	const zone = "stubport.example."
 	imr := newTestImr(t)
-	imr.Quiet = true
 	q := new(dns.Msg)
 	q.SetQuestion(zone, dns.TypeSOA)
 	reply := new(dns.Msg)
@@ -373,7 +367,7 @@ func TestProbeStubServersDialsSignalPort(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeStubServers: %v", err)
 	}
-	var probed []ImrStubProbeResult
+	var probed []StubProbeResult
 	for _, res := range results {
 		if res.Transport == "dot" {
 			probed = append(probed, res)

@@ -69,7 +69,7 @@ func dsRig(t *testing.T, ds func(kid *fwdSecKey) []dns.RR, anchor func(parent *f
 		fwdSecKid + " DS":              {Answer: parent.sign(t, ds(kid)...)},
 		fwdSecParent + " DNSKEY":       {Answer: parent.sign(t, dns.Copy(parent.dnskey))},
 	})
-	imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+	imr := newForwardTestImr(t, []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}})
 	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 	imr.DnskeyCache = imr.Cache.DnskeyCache
 	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
@@ -99,7 +99,7 @@ func outcome(t *testing.T, imr *Imr, qname string, qtype uint16) string {
 	r.SetQuestion(qname, qtype)
 	r.SetEdns0(4096, true)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, qname, qtype, &edns0.MsgOptions{RD: true, DO: true})
+	imr.Responder(context.Background(), cw, r, qname, qtype, &edns0.MsgOptions{RD: true, DO: true})
 	if cw.got == nil {
 		t.Fatalf("%s %s: nothing written", qname, dns.TypeToString[qtype])
 	}

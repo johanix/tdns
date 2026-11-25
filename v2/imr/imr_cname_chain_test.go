@@ -159,7 +159,7 @@ func askChain(t *testing.T, imr *Imr, qname string, qtype uint16) (*dns.Msg, tim
 	r, opts := verdictQuery{do: true}.msgFor(qname, qtype)
 	cw := &captureWriter{}
 	start := time.Now()
-	imr.ImrResponder(context.Background(), cw, r, qname, qtype, opts)
+	imr.Responder(context.Background(), cw, r, qname, qtype, opts)
 	took := time.Since(start)
 	if cw.got == nil {
 		t.Fatalf("%s %s: responder wrote nothing", qname, dns.TypeToString[qtype])

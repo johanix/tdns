@@ -37,11 +37,11 @@ func TestImrResponseExpirationOfAnAnswer(t *testing.T) {
 	want := time.Now().Add(300 * time.Second)
 	asks := []struct {
 		name string
-		ask  func() (*ImrResponse, error)
+		ask  func() (*Response, error)
 	}{
-		{"fresh", func() (*ImrResponse, error) { return imr.ImrQuery(ctx, qname, dns.TypeTXT, dns.ClassINET, nil) }},
-		{"cached", func() (*ImrResponse, error) { return imr.ImrQuery(ctx, qname, dns.TypeTXT, dns.ClassINET, nil) }},
-		{"past the cache", func() (*ImrResponse, error) { return imr.ImrQueryFresh(ctx, qname, dns.TypeTXT, dns.ClassINET) }},
+		{"fresh", func() (*Response, error) { return imr.Query(ctx, qname, dns.TypeTXT, dns.ClassINET) }},
+		{"cached", func() (*Response, error) { return imr.Query(ctx, qname, dns.TypeTXT, dns.ClassINET) }},
+		{"past the cache", func() (*Response, error) { return imr.QueryFresh(ctx, qname, dns.TypeTXT, dns.ClassINET) }},
 	}
 	var first time.Time
 	for i, a := range asks {
@@ -77,7 +77,7 @@ func TestImrResponseExpirationOfADenial(t *testing.T) {
 			defer cancel()
 			want := time.Now().Add(60 * time.Second)
 			for _, ask := range []string{"fresh", "cached"} {
-				resp, err := imr.ImrQuery(ctx, tc.qname, dns.TypeTXT, dns.ClassINET, nil)
+				resp, err := imr.Query(ctx, tc.qname, dns.TypeTXT, dns.ClassINET)
 				if err != nil || resp == nil || resp.Error || resp.Denial == 0 {
 					t.Fatalf("%s: err=%v resp=%+v", ask, err, resp)
 				}
@@ -106,7 +106,7 @@ func TestImrResponseExpirationOfASecureAnswerFollowsItsSignatures(t *testing.T) 
 		Transport: core.TransportDo53,
 	})
 
-	resp, err := imr.ImrQuery(context.Background(), qname, dns.TypeTXT, dns.ClassINET, nil)
+	resp, err := imr.Query(context.Background(), qname, dns.TypeTXT, dns.ClassINET)
 	if err != nil || resp == nil || resp.Error || !resp.Validated {
 		t.Fatalf("err=%v resp=%+v", err, resp)
 	}
@@ -124,18 +124,18 @@ func TestImrResponseExpiresWith(t *testing.T) {
 	nodata := &cache.CachedRRset{RRset: rrset, Context: cache.ContextNoErrNoAns, Expiration: exp}
 	for _, tc := range []struct {
 		name  string
-		resp  ImrResponse
+		resp  Response
 		entry *cache.CachedRRset
 		want  bool
 	}{
-		{"answer, answer entry", ImrResponse{RRset: rrset}, answer, true},
-		{"answer, denial entry", ImrResponse{RRset: rrset}, nodata, false},
-		{"denial, same kind", ImrResponse{Denial: cache.ContextNoErrNoAns}, nodata, true},
-		{"denial, other kind", ImrResponse{Denial: cache.ContextNXDOMAIN}, nodata, false},
-		{"denial, answer entry", ImrResponse{Denial: cache.ContextNoErrNoAns}, answer, false},
-		{"error", ImrResponse{RRset: rrset, Error: true}, answer, false},
-		{"no entry", ImrResponse{RRset: rrset}, nil, false},
-		{"nothing", ImrResponse{}, answer, false},
+		{"answer, answer entry", Response{RRset: rrset}, answer, true},
+		{"answer, denial entry", Response{RRset: rrset}, nodata, false},
+		{"denial, same kind", Response{Denial: cache.ContextNoErrNoAns}, nodata, true},
+		{"denial, other kind", Response{Denial: cache.ContextNXDOMAIN}, nodata, false},
+		{"denial, answer entry", Response{Denial: cache.ContextNoErrNoAns}, answer, false},
+		{"error", Response{RRset: rrset, Error: true}, answer, false},
+		{"no entry", Response{RRset: rrset}, nil, false},
+		{"nothing", Response{}, answer, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resp := tc.resp

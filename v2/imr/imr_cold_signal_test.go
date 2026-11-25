@@ -209,7 +209,7 @@ func TestQueryWithDo53AndNoLookupDoesNotWait(t *testing.T) {
 // goes over Do53.
 func TestQueryStartsTheSignalLookupWithAlwaysQuery(t *testing.T) {
 	imr, _, serverMap := newStrictTestImr(t, 5*time.Second)
-	imr.Options[ImrOptAlwaysQueryForTransport] = "true"
+	imr.Options[OptAlwaysQueryForTransport] = "true"
 
 	elapsed, err := coldQuery(context.Background(), imr, serverMap)
 	if elapsed >= 5*time.Second {
@@ -286,7 +286,7 @@ func TestColdQueryDoesNotWaitForAServerWithoutAddresses(t *testing.T) {
 // With transport signals turned off there is nothing to look up.
 func TestColdQueryOffWhenSignalsAreOff(t *testing.T) {
 	imr, _, serverMap := newColdTestImr(t, 5*time.Second)
-	imr.Options[ImrOptUseTransportSignals] = "false"
+	imr.Options[OptUseTransportSignals] = "false"
 
 	if _, err := coldQuery(context.Background(), imr, serverMap); err == nil || !strings.Contains(err.Error(), coldNoTuples) {
 		t.Errorf("got %v, want no attempt", err)
@@ -540,7 +540,7 @@ func startSignalAuthDouble(t *testing.T) *oobAuthDouble {
 // gluelessLookup runs the background address lookup a referral to oobZone
 // starts for its nameserver without glue, and returns the nameserver's
 // transport weights as soon as it has any, or after wait.
-func gluelessLookup(t *testing.T, opts map[ImrOption]string, wait time.Duration) (*Imr, map[core.Transport]uint8) {
+func gluelessLookup(t *testing.T, opts map[Option]string, wait time.Duration) (*Imr, map[core.Transport]uint8) {
 	t.Helper()
 	d := startSignalAuthDouble(t)
 	imr := newOOBTestImr(t, d)
@@ -572,7 +572,7 @@ func gluelessLookup(t *testing.T, opts map[ImrOption]string, wait time.Duration)
 // looked up beside its address, and the server it is stored as carries the
 // signal. Only servers created from glue used to be looked up.
 func TestGluelessNameserverSignalIsLookedUp(t *testing.T) {
-	_, weights := gluelessLookup(t, map[ImrOption]string{ImrOptAlwaysQueryForTransport: "true"}, 3*time.Second)
+	_, weights := gluelessLookup(t, map[Option]string{OptAlwaysQueryForTransport: "true"}, 3*time.Second)
 	if weights[core.TransportDoT] != 50 {
 		t.Errorf("got weights %v, want the signal's dot:50", weights)
 	}
@@ -592,9 +592,9 @@ func TestGluelessNameserverSignalNeedsTheOption(t *testing.T) {
 // With transport signals turned off, always-query-for-transport starts no
 // signal lookup: the signal would not be used.
 func TestGluelessNameserverSignalOffWhenSignalsAreOff(t *testing.T) {
-	imr, weights := gluelessLookup(t, map[ImrOption]string{
-		ImrOptAlwaysQueryForTransport: "true",
-		ImrOptUseTransportSignals:     "false",
+	imr, weights := gluelessLookup(t, map[Option]string{
+		OptAlwaysQueryForTransport: "true",
+		OptUseTransportSignals:     "false",
 	}, 300*time.Millisecond)
 	if len(weights) != 0 {
 		t.Errorf("got weights %v, want none: transport signals are off", weights)
@@ -653,7 +653,7 @@ func TestNsLookupAppliesNoCachedSignalWhenSignalsAreOff(t *testing.T) {
 	d := startSignalAuthDouble(t)
 	imr := newOOBTestImr(t, d)
 	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
-	imr.Options[ImrOptUseTransportSignals] = "false"
+	imr.Options[OptUseTransportSignals] = "false"
 	cacheDelegation(imr.Cache, oobZone)
 	owner := transportOwnerForNS(oobNSName)
 	rr, err := dns.NewRR(owner + ` 3600 IN SVCB 1 . oots="do53:100,dot:50"`)

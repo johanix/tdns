@@ -26,6 +26,10 @@ func (s *recordingSink) note(c string) {
 	s.calls = append(s.calls, c)
 }
 
+func (s *recordingSink) SetImrPrimingError(msg string) { s.note("set-priming " + msg) }
+
+func (s *recordingSink) ClearImrPrimingError() { s.note("clear-priming") }
+
 func (s *recordingSink) SetImrForwardZoneError(msg string) { s.note("set-zone " + msg) }
 
 func (s *recordingSink) ClearImrForwardZoneError() { s.note("clear-zone") }
@@ -40,24 +44,24 @@ func (s *recordingSink) ClearImrForwardUpstreamConfigError() { s.note("clear-con
 
 func (s *recordingSink) List() []ServerError { return nil }
 
-// The forward table's quarantine goes to the sink NewImr was given, whatever it
+// The forward table's quarantine goes to the sink New was given, whatever it
 // is; a nil sink, a typed nil registry and the daemon's registry are all fine.
-func TestNewImrReportsToTheErrorSink(t *testing.T) {
+func TestNewReportsToTheErrorSink(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
 	ic := Config{Forward: append(rootForward(addr, port),
 		// trust-ad over plaintext: quarantined, not fatal.
-		ImrForwardConf{Zone: "bad.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.9"}}})}
+		ForwardConf{Zone: "bad.example.", TrustAD: true, Upstreams: []UpstreamConf{{Addr: "192.0.2.9"}}})}
 
 	rec, reg := &recordingSink{}, newTestErrorSink()
 	for _, tc := range []struct {
 		name string
 		sink ErrorSink
 	}{{"recording sink", rec}, {"registry", reg}, {"nil sink", nil}, {"typed nil registry", (*testErrorSink)(nil)}} {
-		imr, err := NewImr(context.Background(), ic, ImrOptions{Errors: tc.sink, Quiet: true})
+		imr, err := New(context.Background(), ic, Options{Errors: tc.sink})
 		if err != nil {
-			t.Fatalf("%s: NewImr: %v", tc.name, err)
+			t.Fatalf("%s: New: %v", tc.name, err)
 		}
 		if imr.errorRegistry == nil {
 			t.Errorf("%s: the Imr has no sink", tc.name)
@@ -76,10 +80,10 @@ func TestNewImrReportsToTheErrorSink(t *testing.T) {
 	}
 }
 
-// ImrOptions.PendingOwnZone keeps trust-anchor set-up from asking the network
+// Options.PendingOwnZone keeps trust-anchor set-up from asking the network
 // for the keys of a zone this server hosts and has not loaded yet; without it,
 // the keys are fetched.
-func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
+func TestNewPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
@@ -89,10 +93,10 @@ func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 		TrustAnchorDS: zone + " 3600 IN DS 12345 13 2 " + strings.Repeat("ab", 32),
 	}
 
-	pending := ImrOptions{Quiet: true, PendingOwnZone: func(z string) bool { return z == zone }}
-	imr, err := NewImr(context.Background(), ic, pending)
+	pending := Options{PendingOwnZone: func(z string) bool { return z == zone }}
+	imr, err := New(context.Background(), ic, pending)
 	if err != nil {
-		t.Fatalf("NewImr: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	if err := imr.initializeImrTrustAnchors(context.Background(), imr.bootConf); err != nil {
 		t.Errorf("trust-anchor set-up with %s pending: %v", zone, err)
@@ -101,9 +105,9 @@ func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 		t.Errorf("trust-anchor set-up asked the upstream for %s DNSKEY %d time(s) though the zone is pending", zone, n)
 	}
 
-	imr, err = NewImr(context.Background(), ic, ImrOptions{Quiet: true})
+	imr, err = New(context.Background(), ic, Options{})
 	if err != nil {
-		t.Fatalf("NewImr: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	_ = imr.initializeImrTrustAnchors(context.Background(), imr.bootConf) // the upstream has no such key
 	if len(logr.find(zone, dns.TypeDNSKEY)) == 0 {
@@ -111,10 +115,9 @@ func TestNewImrPendingOwnZoneKeepsTrustAnchorSetupOffTheNetwork(t *testing.T) {
 	}
 }
 
-// A start that fails and the one that follows it, as the daemon's init retry
-// runs them, register one set of debug hooks between them, not one each (which
-// would log every query once per failed start).
-func TestNewImrRegistersItsDebugHooksOnce(t *testing.T) {
+// Two resolvers in one process register one set of debug hooks between them,
+// not one each (which would log every query once per resolver).
+func TestNewRegistersItsDebugHooksOnce(t *testing.T) {
 	restoreProcessWideTuning(t)
 	addr, port, _, stop := startTestUpstream(t)
 	defer stop()
@@ -124,31 +127,25 @@ func TestNewImrRegistersItsDebugHooksOnce(t *testing.T) {
 		return len(globalImrOutboundQueryHooks)
 	}
 
-	ic := Config{RootHints: filepath.Join(t.TempDir(), "no-such-hints")}
+	ic := Config{Forward: rootForward(addr, port)}
 	ic.Logging.Enabled = true
 	ic.Logging.File = filepath.Join(t.TempDir(), "imr-debug.log")
 	before := hooks()
-	if imr, err := NewImr(context.Background(), ic, ImrOptions{Quiet: true}); err == nil || imr != nil {
-		t.Fatalf("NewImr with no root hints to read: %v, %v; want no Imr and an error", imr, err)
-	}
-	ic.RootHints = ""
-	ic.Forward = rootForward(addr, port)
-	if _, err := NewImr(context.Background(), ic, ImrOptions{Quiet: true}); err != nil {
-		t.Fatalf("second NewImr: %v", err)
+	for i := 0; i < 2; i++ {
+		if _, err := New(context.Background(), ic, Options{}); err != nil {
+			t.Fatalf("New %d: %v", i+1, err)
+		}
 	}
 	if got := hooks() - before; got > 1 {
-		t.Errorf("%d debug hooks registered over two starts, want at most one", got)
+		t.Errorf("%d debug hooks registered by two resolvers, want at most one", got)
 	}
 }
 
 // The resolver reads Options, not the daemon's option strings: a Config
-// with strings and no Options is refused, before anything is started (the
-// context is already cancelled).
-func TestNewImrRefusesOptionStringsWithoutOptions(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := NewImr(ctx, Config{OptionsStrs: []string{"qname-minimisation"}}, ImrOptions{})
+// with strings and no Options is refused.
+func TestNewRefusesOptionStringsWithoutOptions(t *testing.T) {
+	_, err := New(context.Background(), Config{OptionsStrs: []string{"qname-minimisation"}}, Options{})
 	if err == nil || !strings.Contains(err.Error(), "OptionsStrs") {
-		t.Fatalf("NewImr = %v, want the option strings refused", err)
+		t.Fatalf("New = %v, want the option strings refused", err)
 	}
 }

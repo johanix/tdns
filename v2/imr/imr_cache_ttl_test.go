@@ -77,7 +77,7 @@ func TestResponderServesRemainingTTLNotStoredTTL(t *testing.T) {
 	r := new(dns.Msg)
 	r.SetQuestion("example.", dns.TypeSOA)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, "example.", dns.TypeSOA, &edns0.MsgOptions{RD: true})
+	imr.Responder(context.Background(), cw, r, "example.", dns.TypeSOA, &edns0.MsgOptions{RD: true})
 
 	if cw.got == nil {
 		t.Fatal("responder wrote no response")
@@ -102,7 +102,7 @@ func TestRepeatedHitsKeepCountingDown(t *testing.T) {
 		r := new(dns.Msg)
 		r.SetQuestion("host.example.", dns.TypeA)
 		cw := &captureWriter{}
-		imr.ImrResponder(context.Background(), cw, r, "host.example.", dns.TypeA, &edns0.MsgOptions{RD: true})
+		imr.Responder(context.Background(), cw, r, "host.example.", dns.TypeA, &edns0.MsgOptions{RD: true})
 		if cw.got == nil || len(cw.got.Answer) != 1 {
 			t.Fatal("responder did not serve the cached answer")
 		}
@@ -135,7 +135,7 @@ func TestNegativeProofIsServedWithRemainingTTL(t *testing.T) {
 	r := new(dns.Msg)
 	r.SetQuestion("ns1.example.", dns.TypeSOA)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, "ns1.example.", dns.TypeSOA, &edns0.MsgOptions{RD: true})
+	imr.Responder(context.Background(), cw, r, "ns1.example.", dns.TypeSOA, &edns0.MsgOptions{RD: true})
 
 	if cw.got == nil {
 		t.Fatal("responder wrote no response")

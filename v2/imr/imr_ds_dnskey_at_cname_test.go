@@ -226,13 +226,13 @@ func TestALinkSignedByItsOwnOwnerTerminates(t *testing.T) {
 	}
 }
 
-// ImrQuery, as the embedded users ask it, asks as the resolver does: a DS or
+// Query, as the embedded users ask it, asks as the resolver does: a DS or
 // DNSKEY at a CNAME owner is "none there", with the CNAME's verdict.
 func TestImrQueryAtACNAMEOwnerIsNoData(t *testing.T) {
 	for _, qtype := range []uint16{dns.TypeDS, dns.TypeDNSKEY} {
 		t.Run(dns.TypeToString[qtype], func(t *testing.T) {
 			imr, _ := sigChainImr(t)
-			resp, err := imr.ImrQuery(context.Background(), "s1."+sigChainZone, qtype, dns.ClassINET, nil)
+			resp, err := imr.Query(context.Background(), "s1."+sigChainZone, qtype, dns.ClassINET)
 			if err != nil || resp == nil {
 				t.Fatalf("ImrQuery: %v, %v", resp, err)
 			}
@@ -282,9 +282,9 @@ func TestFollowsCNAMEByOrigin(t *testing.T) {
 	}
 }
 
-// What ImrQuery's lookups run as. A caller that marked its context
+// What Query's lookups run as. A caller that marked its context
 // AsClientQuery (the API's "imr query") gets a client's lookup, counted as
-// client traffic; any other caller the resolver's own. An ImrQuery nested
+// client traffic; any other caller the resolver's own. An Query nested
 // inside the first is the resolver's own again.
 func TestImrQueryContextByCaller(t *testing.T) {
 	bg := context.Background()

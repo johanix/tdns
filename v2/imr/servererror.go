@@ -9,6 +9,7 @@
  * greppable and located with the code that owns the condition. The generic
  * set/clear are unexported.
  */
+
 package imr
 
 import (

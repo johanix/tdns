@@ -50,8 +50,8 @@ func TestQminLabelPlan(t *testing.T) {
 }
 
 func TestQminTuning(t *testing.T) {
-	var fresh ImrTuningConf
-	LoadImrTuningDefaults(&fresh)
+	var fresh TuningConf
+	LoadTuningDefaults(&fresh)
 	if err := validateQminTuning(&fresh); err != nil {
 		t.Fatalf("absent keys: %v", err)
 	}
@@ -60,8 +60,8 @@ func TestQminTuning(t *testing.T) {
 	}
 
 	zero := 0
-	kept := ImrTuningConf{QminMaxIterations: &zero, QminOneLabel: &zero}
-	LoadImrTuningDefaults(&kept)
+	kept := TuningConf{QminMaxIterations: &zero, QminOneLabel: &zero}
+	LoadTuningDefaults(&kept)
 	if *kept.QminMaxIterations != 0 || *kept.QminOneLabel != 0 {
 		t.Fatal("an explicit 0 was replaced with the default")
 	}
@@ -70,15 +70,15 @@ func TestQminTuning(t *testing.T) {
 	}
 
 	neg := -1
-	negConf := ImrTuningConf{QminMaxIterations: &neg, QminOneLabel: &zero}
-	LoadImrTuningDefaults(&negConf)
+	negConf := TuningConf{QminMaxIterations: &neg, QminOneLabel: &zero}
+	LoadTuningDefaults(&negConf)
 	if err := validateQminTuning(&negConf); err == nil {
 		t.Fatal("a negative maximum was accepted")
 	}
 
 	ten, also := 10, 10
-	eq := ImrTuningConf{QminMaxIterations: &ten, QminOneLabel: &also}
-	LoadImrTuningDefaults(&eq)
+	eq := TuningConf{QminMaxIterations: &ten, QminOneLabel: &also}
+	LoadTuningDefaults(&eq)
 	if err := validateQminTuning(&eq); err == nil || !strings.Contains(err.Error(), "qmin-one-label") {
 		t.Fatalf("one-label equal to the maximum: %v", err)
 	}
@@ -127,9 +127,9 @@ func (a *asked) list() []string {
 
 func enableQmin(imr *Imr) {
 	if imr.Options == nil {
-		imr.Options = map[ImrOption]string{}
+		imr.Options = map[Option]string{}
 	}
-	imr.Options[ImrOptQnameMinimisation] = "true"
+	imr.Options[OptQnameMinimisation] = "true"
 }
 
 func qminClients(imr *Imr, port int) {
@@ -907,7 +907,7 @@ func TestQminRequestCapStopsLaterWalks(t *testing.T) {
 
 func TestQminOffSendsTheOriginalQuery(t *testing.T) {
 	g := newQminRig(t)
-	delete(g.imr.Options, ImrOptQnameMinimisation)
+	delete(g.imr.Options, OptQnameMinimisation)
 	log := g.listen(t, net.ParseIP("127.0.0.1"), func(w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
 		m.SetReply(r)
@@ -934,9 +934,9 @@ func TestQminForwardAndOwnZoneSendTheFullNameForwardHalf(t *testing.T) {
 		m.Answer = []dns.RR{mustRR(t, "www.fwd.example. 300 IN A 192.0.2.9")}
 		_ = w.WriteMsg(m)
 	})
-	imr := newForwardTestImr(t, []ImrForwardConf{{
+	imr := newForwardTestImr(t, []ForwardConf{{
 		Zone:      "fwd.example.",
-		Upstreams: []ImrUpstreamConf{{Addr: "127.0.0.1", Port: uint16(port)}},
+		Upstreams: []UpstreamConf{{Addr: "127.0.0.1", Port: uint16(port)}},
 	}})
 	enableQmin(imr)
 	rrset, rcode, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, nil, false, edns0.PrivacyNone)
@@ -1184,7 +1184,7 @@ func TestQminChildSignedAnswerAsksTheApexOnce(t *testing.T) {
 	run := func(qmin bool) (apex, dnskey int) {
 		c := newChildSignedRig(t, true)
 		if !qmin {
-			delete(c.g.imr.Options, ImrOptQnameMinimisation)
+			delete(c.g.imr.Options, OptQnameMinimisation)
 		}
 		rrset := c.query(t)
 		if rrset == nil || len(rrset.RRs) != 1 || rrset.RRs[0].(*dns.A).A.String() != "192.0.2.80" {
@@ -1256,14 +1256,14 @@ func qminGluelessProbes(t *testing.T, entry string) int {
 	done := make(chan bool, 1)
 	go func() {
 		switch entry {
-		case "ImrQuery":
-			resp, err := g.imr.ImrQuery(context.Background(), qminGluelessQname, dns.TypeMX, dns.ClassINET, nil)
+		case "Query":
+			resp, err := g.imr.Query(context.Background(), qminGluelessQname, dns.TypeMX, dns.ClassINET)
 			done <- err == nil && resp != nil && resp.RRset != nil && len(resp.RRset.RRs) == 1 &&
 				resp.RRset.RRs[0].Header().Rrtype == dns.TypeMX
 		default:
 			r, opts := verdictQuery{}.msgFor(qminGluelessQname, dns.TypeMX)
 			cw := &captureWriter{}
-			g.imr.ImrResponder(context.Background(), cw, r, qminGluelessQname, dns.TypeMX, opts)
+			g.imr.Responder(context.Background(), cw, r, qminGluelessQname, dns.TypeMX, opts)
 			done <- cw.got != nil && answerHas(cw.got, qminGluelessQname, dns.TypeMX)
 		}
 	}()
@@ -1292,7 +1292,7 @@ func qminGluelessProbes(t *testing.T, entry string) int {
 // also when the walk goes back to the public entry point and starts again:
 // both entry points keep one set of counters for the request.
 func TestQminPublicEntryKeepsOneCountPerRequest(t *testing.T) {
-	for _, entry := range []string{"ImrQuery", "ImrResponder"} {
+	for _, entry := range []string{"Query", "Responder"} {
 		t.Run(entry, func(t *testing.T) {
 			if probes := qminGluelessProbes(t, entry); probes > 2 {
 				t.Errorf("%d probes for %s MX, want at most 2 (qmin-max-iterations)", probes, qminGluelessQname)
@@ -1308,7 +1308,7 @@ func TestQminPublicEntryKeepsOneCountPerRequest(t *testing.T) {
 // Uses newColdTestImr and startSignalLookup of the signal tests.
 func TestQminWaitsForSignalsWithinOneBudget(t *testing.T) {
 	imr, server, serverMap := newColdTestImr(t, 300*time.Millisecond)
-	imr.Options[ImrOptQnameMinimisation] = "true"
+	imr.Options[OptQnameMinimisation] = "true"
 	startSignalLookup(t, imr, server)
 
 	// Two labels below the servers' zone: a probe for www.child.example. A,

@@ -75,7 +75,7 @@ func TestMayQueryAddr(t *testing.T) {
 // way is not queried: only the configured ones are exempt.
 func TestLoopbackGlueOnAStubServerIsNotQueried(t *testing.T) {
 	imr := newTestImr(t)
-	delete(imr.Options, ImrOptAllowLoopbackNameservers)
+	delete(imr.Options, OptAllowLoopbackNameservers)
 	const zone = "stub831.test."
 	if err := imr.Cache.AddStub(zone, []cache.AuthServer{
 		{Name: "ns." + zone, Addrs: []string{"127.0.0.1"}, Alpn: []string{"do53"}},
@@ -174,7 +174,7 @@ func loopbackImr(t *testing.T, allow bool) (imr *Imr, parentQueries, kidQueries 
 
 	imr = verdictImr(t, false)
 	if !allow {
-		delete(imr.Options, ImrOptAllowLoopbackNameservers)
+		delete(imr.Options, OptAllowLoopbackNameservers)
 	}
 	p := strconv.Itoa(port)
 	imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, p, nil)

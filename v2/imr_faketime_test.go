@@ -20,7 +20,7 @@ func TestFaketimeActivation(t *testing.T) {
 
 	conf := &Config{}
 	conf.Imr.Testing.Faketime = true
-	if err := conf.InitImrEngine(ctx, true); err == nil || !strings.Contains(err.Error(), "faketime") {
+	if err := conf.InitImrEngine(ctx); err == nil || !strings.Contains(err.Error(), "faketime") {
 		t.Errorf("InitImrEngine with faketime and no file: %v; want a faketime error", err)
 	}
 }

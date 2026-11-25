@@ -330,7 +330,7 @@ func TestReceivedALPNSignalIgnoresOtherTokens(t *testing.T) {
 func TestOOTSWithoutSignalTokenIgnoresALPN(t *testing.T) {
 	ctx := context.Background()
 	newImr := func() *Imr {
-		return &Imr{Cache: cache.NewRRsetCache(log.New(os.Stderr, "test ", 0), false, false), Quiet: true}
+		return &Imr{Cache: cache.NewRRsetCache(log.New(os.Stderr, "test ", 0), false, false)}
 	}
 	paths := []struct {
 		name  string

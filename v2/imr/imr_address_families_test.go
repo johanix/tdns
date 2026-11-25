@@ -256,7 +256,7 @@ func TestGlueRevalidationAsksOnlyTheFamiliesInUse(t *testing.T) {
 		_ = w.WriteMsg(m)
 	})
 	imr := verdictImr(t, false)
-	imr.Options[ImrOptRevalidateNS] = "true"
+	imr.Options[OptRevalidateNS] = "true"
 	imr.Cache.SetAddressFamilies(true, false)
 	p := strconv.Itoa(port)
 	imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, p, nil)

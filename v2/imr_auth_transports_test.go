@@ -182,7 +182,7 @@ func TestImrAuthTransportsCountsARealQuery(t *testing.T) {
 	imr := denialTestImr(t, zone, port)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if resp, err := imr.ImrQuery(ctx, "www."+zone, dns.TypeTXT, dns.ClassINET, nil); err != nil || resp == nil || resp.Error {
+	if resp, err := imr.ImrQuery(ctx, "www."+zone, dns.TypeTXT, dns.ClassINET); err != nil || resp == nil || resp.Error {
 		t.Fatalf("query: err=%v resp=%+v", err, resp)
 	}
 

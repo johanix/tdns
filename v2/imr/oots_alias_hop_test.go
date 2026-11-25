@@ -23,7 +23,6 @@ import (
 func aliasHopImr(t *testing.T) (*Imr, []dns.RR, *cache.AuthServer) {
 	t.Helper()
 	imr := newTestImr(t)
-	imr.Quiet = true
 	imr.TransportSignalDiscovery = cache.NewDiscoveryTracker(time.Minute, 3)
 	alias := []dns.RR{mustRR(t, pathOwner+` 3600 IN SVCB 0 `+providerOwner)}
 	cacheSignal(imr, pathOwner, alias, cache.ValidationStateSecure)
@@ -39,11 +38,11 @@ func svcbRRset(owner string, rrs []dns.RR) *core.RRset {
 
 // foundProvider is the hook answer of a hop lookup that finds the provider's
 // signal at target.
-func foundProvider(t *testing.T) func(imr *Imr, target string) (*ImrResponse, error) {
+func foundProvider(t *testing.T) func(imr *Imr, target string) (*Response, error) {
 	recs := providerRecords(t)
-	return func(imr *Imr, target string) (*ImrResponse, error) {
+	return func(imr *Imr, target string) (*Response, error) {
 		cacheSignal(imr, target, recs, cache.ValidationStateSecure)
-		return &ImrResponse{RRset: imr.Cache.Get(target, dns.TypeSVCB).RRset, ValidationState: cache.ValidationStateSecure}, nil
+		return &Response{RRset: imr.Cache.Get(target, dns.TypeSVCB).RRset, ValidationState: cache.ValidationStateSecure}, nil
 	}
 }
 
@@ -69,7 +68,7 @@ func waitAliasHopsEnded(t *testing.T, imr *Imr) {
 // through it, and no hop is looked up.
 func TestOOTSAliasOptOutFollowsNothing(t *testing.T) {
 	imr, alias, server := aliasHopImr(t)
-	imr.Options[ImrOptUseTransportSignals] = "false"
+	imr.Options[OptUseTransportSignals] = "false"
 	calls := hookAliasHop(t, foundProvider(t))
 
 	cacheSignal(imr, providerOwner, providerRecords(t), cache.ValidationStateSecure)
@@ -93,7 +92,7 @@ func TestOOTSAliasOptOutFollowsNothing(t *testing.T) {
 // so it is read from the cache once more, and nothing is looked up again.
 func TestOOTSAliasHopFoundBetweenMissAndJoin(t *testing.T) {
 	imr, alias, server := aliasHopImr(t)
-	calls := hookAliasHop(t, func(*Imr, string) (*ImrResponse, error) {
+	calls := hookAliasHop(t, func(*Imr, string) (*Response, error) {
 		t.Error("the hop was looked up again")
 		return nil, nil
 	})
@@ -158,10 +157,10 @@ func TestOOTSAliasExpiredHopReadOnlyAfterItsLookup(t *testing.T) {
 	t.Run("the walk after the hop's lookup, through a CNAME with TTL 0", func(t *testing.T) {
 		imr, alias, server := aliasHopImr(t)
 		recs := terminal(t, elsewhere, "0")
-		hookAliasHop(t, func(imr *Imr, target string) (*ImrResponse, error) {
+		hookAliasHop(t, func(imr *Imr, target string) (*Response, error) {
 			setLink(t, imr, target)
 			cacheSignal(imr, elsewhere, recs, cache.ValidationStateSecure)
-			return &ImrResponse{RRset: svcbRRset(elsewhere, recs), ValidationState: cache.ValidationStateSecure}, nil
+			return &Response{RRset: svcbRRset(elsewhere, recs), ValidationState: cache.ValidationStateSecure}, nil
 		})
 		imr.applyTransportRRsetFromAnswer(pathOwner, svcbRRset(pathOwner, alias), cache.ValidationStateSecure)
 		waitRedirect(t, server, "the hop's lookup through a CNAME with TTL 0")
@@ -170,9 +169,9 @@ func TestOOTSAliasExpiredHopReadOnlyAfterItsLookup(t *testing.T) {
 	t.Run("the walk after the hop's lookup, TTL 0", func(t *testing.T) {
 		imr, alias, server := aliasHopImr(t)
 		recs := terminal(t, providerOwner, "0")
-		hookAliasHop(t, func(imr *Imr, target string) (*ImrResponse, error) {
+		hookAliasHop(t, func(imr *Imr, target string) (*Response, error) {
 			cacheSignal(imr, target, recs, cache.ValidationStateSecure)
-			return &ImrResponse{RRset: svcbRRset(target, recs), ValidationState: cache.ValidationStateSecure}, nil
+			return &Response{RRset: svcbRRset(target, recs), ValidationState: cache.ValidationStateSecure}, nil
 		})
 		imr.applyTransportRRsetFromAnswer(pathOwner, svcbRRset(pathOwner, alias), cache.ValidationStateSecure)
 		waitRedirect(t, server, "the hop's lookup with TTL 0")
@@ -198,7 +197,7 @@ func TestOOTSAliasChainLookupsStayCapped(t *testing.T) {
 	var mu sync.Mutex
 	var looked []string
 	saved := signalAliasHopLookupHook
-	signalAliasHopLookupHook = func(ctx context.Context, imr *Imr, target string) (*ImrResponse, error) {
+	signalAliasHopLookupHook = func(ctx context.Context, imr *Imr, target string) (*Response, error) {
 		mu.Lock()
 		looked = append(looked, target)
 		mu.Unlock()
@@ -210,7 +209,7 @@ func TestOOTSAliasChainLookupsStayCapped(t *testing.T) {
 		rrset := imr.Cache.Get(target, dns.TypeSVCB).RRset
 		// The answer to the lookup is applied as handleAnswer applies it.
 		imr.applyTransportRRsetWalk(aliasWalkFor(ctx), target, rrset, cache.ValidationStateSecure)
-		return &ImrResponse{RRset: rrset, ValidationState: cache.ValidationStateSecure}, nil
+		return &Response{RRset: rrset, ValidationState: cache.ValidationStateSecure}, nil
 	}
 	t.Cleanup(func() { signalAliasHopLookupHook = saved })
 
@@ -332,7 +331,7 @@ func TestOOTSAliasVerifyLooksFailedHopUpAgain(t *testing.T) {
 	var mu sync.Mutex
 	fail := true
 	found := foundProvider(t)
-	calls := hookAliasHop(t, func(imr *Imr, target string) (*ImrResponse, error) {
+	calls := hookAliasHop(t, func(imr *Imr, target string) (*Response, error) {
 		mu.Lock()
 		f := fail
 		mu.Unlock()

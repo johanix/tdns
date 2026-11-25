@@ -89,7 +89,7 @@ func startDSAuthDouble(t *testing.T, ip net.IP, port int, zone string, ds dns.RR
 // The resolver knows both sides of the cut: the parent on 127.0.0.1, the child
 // on ::1 -- the same port, because the cache's clients use one port for every
 // server. The child refuses DS queries, as tdns-auth did and a child-only
-// server may. Asked for the child's DS, both the responder and ImrQuery must go
+// server may. Asked for the child's DS, both the responder and Query must go
 // to the parent: before the fix they went to the child and the client got
 // SERVFAIL, while the validator's own DS fetch (backfillDS) went to the parent
 // and succeeded, for the same zone in the same daemon.
@@ -140,7 +140,7 @@ func TestClientDSQueryGoesToTheParent(t *testing.T) {
 		r := new(dns.Msg)
 		r.SetQuestion(child, dns.TypeDS)
 		cw := &captureWriter{}
-		imr.ImrResponder(context.Background(), cw, r, child, dns.TypeDS, &edns0.MsgOptions{RD: true})
+		imr.Responder(context.Background(), cw, r, child, dns.TypeDS, &edns0.MsgOptions{RD: true})
 		if cw.got == nil {
 			t.Fatal("responder wrote no response")
 		}
@@ -158,7 +158,7 @@ func TestClientDSQueryGoesToTheParent(t *testing.T) {
 
 	t.Run("ImrQuery", func(t *testing.T) {
 		imr, atParent, atChild := setup(t)
-		resp, err := imr.ImrQuery(context.Background(), child, dns.TypeDS, dns.ClassINET, nil)
+		resp, err := imr.Query(context.Background(), child, dns.TypeDS, dns.ClassINET)
 		if err != nil {
 			t.Fatalf("ImrQuery: %v", err)
 		}

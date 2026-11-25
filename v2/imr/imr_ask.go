@@ -41,7 +41,7 @@ func (imr *Imr) askServers(ctx context.Context, qname string, qtype uint16, serv
 	var rrset core.RRset
 	var rcode int
 
-	withOOTS := imr.Options[ImrOptUseTransportSignals] != "false"
+	withOOTS := imr.Options[OptUseTransportSignals] != "false"
 	m, err := buildQuery(qname, qtype, withOOTS)
 	if err != nil {
 		lg.Printf("IterativeDNSQuery: Error building query: %v", err)
@@ -309,7 +309,7 @@ func (imr *Imr) dispatchClientQuery(ctx context.Context, qname string, qtype uin
 		if len(nsRRs.RRs) > 0 && referralLeavesZone(zonename, serversZone) {
 			serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRs, zonename, serversZone, nsMap, r)
 			if err != nil {
-				lgDns.Error("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional",
+				imr.lgDns().Error("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional",
 					"collectnsaddressesfromadditional", err)
 				return replyDone(nil, rcode, cache.ContextFailure, wire, err)
 			}
@@ -327,7 +327,7 @@ func (imr *Imr) dispatchClientQuery(ctx context.Context, qname string, qtype uin
 	// (#830); anything else without an authority section falls through as before.
 	if len(r.Ns) != 0 || (r.Authoritative && (rcode == dns.RcodeNameError || rcode == dns.RcodeSuccess)) {
 		kind := classifyResponse(qname, qtype, r)
-		lgDns.Debug("IterativeDNSQuery: classified response",
+		imr.lgDns().Debug("IterativeDNSQuery: classified response",
 			"qname", qname, "qtype", dns.TypeToString[qtype],
 			"kind", responseKindToString(kind), "rcode", dns.RcodeToString[rcode],
 			"answerCount", len(r.Answer), "authorityCount", len(r.Ns))
@@ -339,7 +339,7 @@ func (imr *Imr) dispatchClientQuery(ctx context.Context, qname string, qtype uin
 			}
 			// If not handled, fall through to try the next server.
 			if rcode == dns.RcodeNameError {
-				lgDns.Debug("IterativeDNSQuery: NXDOMAIN response lacked usable SOA",
+				imr.lgDns().Debug("IterativeDNSQuery: NXDOMAIN response lacked usable SOA",
 					"qname", qname, "qtype", dns.TypeToString[qtype])
 			}
 			return replyNext()
@@ -361,7 +361,7 @@ func (imr *Imr) dispatchClientQuery(ctx context.Context, qname string, qtype uin
 				}
 				// Otherwise the server is lame for the zone: try the next one.
 				// The fallback below still resolves the zone's glue-less nameservers.
-				lgDns.Debug("IterativeDNSQuery: NS RRset does not lead below the zone being queried;"+
+				imr.lgDns().Debug("IterativeDNSQuery: NS RRset does not lead below the zone being queried;"+
 					" treating the server as lame and trying the next one",
 					"qname", qname, "qtype", dns.TypeToString[qtype],
 					"zone", serversZone, "ns_owner", refZone, "server", nsname, "addr", addr,
@@ -371,17 +371,17 @@ func (imr *Imr) dispatchClientQuery(ctx context.Context, qname string, qtype uin
 			rrset, rcode, cacheCtx, transport, err := imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, serversZone, wire, privacy, nil)
 			return replyDone(rrset, rcode, cacheCtx, transport, err)
 		case responseKindError:
-			lgDns.Debug("IterativeDNSQuery: treating response as error",
+			imr.lgDns().Debug("IterativeDNSQuery: treating response as error",
 				"qname", qname, "qtype", dns.TypeToString[qtype],
 				"rcode", dns.RcodeToString[rcode])
 			return replyNext()
 		case responseKindUnknown:
-			lgDns.Debug("IterativeDNSQuery: responseKindUnknown, trying next server",
+			imr.lgDns().Debug("IterativeDNSQuery: responseKindUnknown, trying next server",
 				"qname", qname, "qtype", dns.TypeToString[qtype])
 			return replyNext()
 		default:
 			// Should not reach here, but be defensive.
-			lgDns.Debug("IterativeDNSQuery: unexpected response kind, trying next server",
+			imr.lgDns().Debug("IterativeDNSQuery: unexpected response kind, trying next server",
 				"kind", kind, "qname", qname, "qtype", dns.TypeToString[qtype])
 			return replyNext()
 		}

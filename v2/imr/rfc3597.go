@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2024 Johan Stenstam, johani@johani.org
  */
+
 package imr
 
 import (
@@ -20,9 +21,9 @@ func (imr *Imr) ParentZone(z string) (string, error) {
 	} else if len(labels) > 1 {
 		upone := dns.Fqdn(strings.Join(labels[1:], "."))
 
-		// Query for SOA at the potential parent zone name using ImrQuery
+		// Query for SOA at the potential parent zone name using Query
 		ctx := context.Background()
-		resp, err := imr.ImrQuery(ctx, upone, dns.TypeSOA, dns.ClassINET, nil)
+		resp, err := imr.imrQuery(ctx, upone, dns.TypeSOA, dns.ClassINET, false)
 		if err != nil {
 			return "", err
 		}
@@ -37,7 +38,7 @@ func (imr *Imr) ParentZone(z string) (string, error) {
 				}
 			}
 			// If we got an answer but no SOA, the response is broken
-			lgImr.Error("received answer for SOA query but no SOA record found", "zone", upone)
+			imr.lgImr().Error("received answer for SOA query but no SOA record found", "zone", upone)
 			return "", fmt.Errorf("received answer for '%s' SOA query but no SOA record found", upone)
 		}
 
@@ -69,9 +70,9 @@ func (imr *Imr) ParentZone(z string) (string, error) {
 			}
 		}
 
-		lgImr.Error("failed to locate parent via Answer and Authority, guessing", "zone", z)
+		imr.lgImr().Error("failed to locate parent via Answer and Authority, guessing", "zone", z)
 		return upone, fmt.Errorf("failed to locate parent of '%s' via Answer and Authority", z)
 	}
-	lgImr.Error("had difficulties splitting zone", "zone", z)
+	imr.lgImr().Error("had difficulties splitting zone", "zone", z)
 	return z, fmt.Errorf("failed to split zone name '%s' into labels", z)
 }

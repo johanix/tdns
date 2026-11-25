@@ -36,7 +36,6 @@ const (
 func epLameZoneImr(t *testing.T) (*Imr, *cache.AuthServer, *cache.Zone, map[string]*cache.AuthServer) {
 	t.Helper()
 	imr := newTestImr(t)
-	imr.Quiet = true
 	server := imr.Cache.GetOrCreateAuthServer(epLameNS)
 	server.AddAddr(epLameNSAddr)
 	serverMap := map[string]*cache.AuthServer{cache.ServerKey(epLameNS): server}
@@ -354,7 +353,6 @@ func TestDNSKEYAttemptDialsTheEndpointItWasCheckedBy(t *testing.T) {
 	const ns = "ns.dnskey.example."
 	const addr = "192.0.2.53"
 	imr := newTestImr(t)
-	imr.Quiet = true
 	imr.dnskeyTransport = DNSKEYTransportTryEncrypted
 	server := imr.Cache.GetOrCreateAuthServer(ns)
 	server.AddAddr(addr)

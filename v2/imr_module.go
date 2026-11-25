@@ -10,6 +10,7 @@ import (
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	imrcore "github.com/johanix/tdns/v2/imr"
 	"github.com/miekg/dns"
 )
@@ -28,24 +29,27 @@ type Imr struct {
 	ClientStats *ImrClientStats
 }
 
-// NewImr is imrcore.NewImr, returning the daemon's Imr.
+// NewImr is imrcore.New, returning the daemon's Imr. Unless opts says
+// otherwise, the resolver logs through the daemon's engine subsystem logger,
+// and its lookups through the dns one.
 func NewImr(ctx context.Context, ic ImrEngineConf, opts ImrOptions) (*Imr, error) {
-	r, err := imrcore.NewImr(ctx, ic, opts)
+	if opts.Logger == nil {
+		opts.Logger = lgImr
+	}
+	if opts.LookupLogger == nil {
+		opts.LookupLogger = lgDns
+	}
+	r, err := imrcore.New(ctx, ic, opts)
 	if err != nil {
 		return nil, err
 	}
 	return &Imr{Imr: r}, nil
 }
 
-// The resolver logs through the daemon's engine and dns subsystem loggers.
 var (
 	lgImr = Logger("engine")
 	lgDns = Logger("dns")
 )
-
-func init() {
-	imrcore.SetLoggers(lgImr, lgDns)
-}
 
 // core is the module's Imr, nil for a nil imr.
 func (imr *Imr) core() *imrcore.Imr {
@@ -89,6 +93,22 @@ func (imr *Imr) TransportSignalCached(owner string) bool {
 	return imr.core().TransportSignalCached(owner)
 }
 
+// ImrQuery and ImrQueryFresh are the module's Query and QueryFresh, under the
+// names they have here.
+
+func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16) (*ImrResponse, error) {
+	return imr.Imr.Query(ctx, qname, qtype, qclass)
+}
+
+func (imr *Imr) ImrQueryFresh(ctx context.Context, qname string, qtype uint16, qclass uint16) (*ImrResponse, error) {
+	return imr.Imr.QueryFresh(ctx, qname, qtype, qclass)
+}
+
+// ImrResponder is the module's Responder, under the name it has here.
+func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname string, qtype uint16, msgoptions *edns0.MsgOptions) {
+	imr.Imr.Responder(ctx, w, r, qname, qtype, msgoptions)
+}
+
 func (imr *Imr) ForwardZones() []*ForwardZone { return imr.core().ForwardZones() }
 
 func (imr *Imr) StubZones() []string { return imr.core().StubZones() }
@@ -114,33 +134,33 @@ type (
 	ForwardDiag              = imrcore.ForwardDiag
 	ForwardUpstream          = imrcore.ForwardUpstream
 	ForwardZone              = imrcore.ForwardZone
-	ImrClientStatsConf       = imrcore.ImrClientStatsConf
-	ImrForwardConf           = imrcore.ImrForwardConf
-	ImrForwardProbeResult    = imrcore.ImrForwardProbeResult
-	ImrForwardUpstreamInfo   = imrcore.ImrForwardUpstreamInfo
-	ImrForwardZoneInfo       = imrcore.ImrForwardZoneInfo
-	ImrForwardZoneStatus     = imrcore.ImrForwardZoneStatus
-	ImrLoggingConf           = imrcore.ImrLoggingConf
-	ImrOption                = imrcore.ImrOption
-	ImrOptions               = imrcore.ImrOptions
-	ImrOutboundQueryHookFunc = imrcore.ImrOutboundQueryHookFunc
-	ImrRequest               = imrcore.ImrRequest
-	ImrResponse              = imrcore.ImrResponse
-	ImrResponseHookFunc      = imrcore.ImrResponseHookFunc
-	ImrStatus                = imrcore.ImrStatus
-	ImrStubConf              = imrcore.ImrStubConf
-	ImrStubProbeResult       = imrcore.ImrStubProbeResult
-	ImrStubServerInfo        = imrcore.ImrStubServerInfo
-	ImrStubServerStatus      = imrcore.ImrStubServerStatus
-	ImrStubZoneInfo          = imrcore.ImrStubZoneInfo
-	ImrStubZoneStatus        = imrcore.ImrStubZoneStatus
-	ImrTestingConf           = imrcore.ImrTestingConf
-	ImrTuningConf            = imrcore.ImrTuningConf
-	ImrUpstreamConf          = imrcore.ImrUpstreamConf
-	ImrUpstreamStatus        = imrcore.ImrUpstreamStatus
-	ImrZoneReloadResult      = imrcore.ImrZoneReloadResult
+	ImrClientStatsConf       = imrcore.ClientStatsConf
+	ImrForwardConf           = imrcore.ForwardConf
+	ImrForwardProbeResult    = imrcore.ForwardProbeResult
+	ImrForwardUpstreamInfo   = imrcore.ForwardUpstreamInfo
+	ImrForwardZoneInfo       = imrcore.ForwardZoneInfo
+	ImrForwardZoneStatus     = imrcore.ForwardZoneStatus
+	ImrLoggingConf           = imrcore.LoggingConf
+	ImrOption                = imrcore.Option
+	ImrOptions               = imrcore.Options
+	ImrOutboundQueryHookFunc = imrcore.OutboundQueryHookFunc
+	ImrRequest               = imrcore.Request
+	ImrResponse              = imrcore.Response
+	ImrResponseHookFunc      = imrcore.ResponseHookFunc
+	ImrStatus                = imrcore.Status
+	ImrStubConf              = imrcore.StubConf
+	ImrStubProbeResult       = imrcore.StubProbeResult
+	ImrStubServerInfo        = imrcore.StubServerInfo
+	ImrStubServerStatus      = imrcore.StubServerStatus
+	ImrStubZoneInfo          = imrcore.StubZoneInfo
+	ImrStubZoneStatus        = imrcore.StubZoneStatus
+	ImrTestingConf           = imrcore.TestingConf
+	ImrTuningConf            = imrcore.TuningConf
+	ImrUpstreamConf          = imrcore.UpstreamConf
+	ImrUpstreamStatus        = imrcore.UpstreamStatus
+	ImrZoneReloadResult      = imrcore.ZoneReloadResult
 	LargeKskDSAlgCount       = imrcore.LargeKskDSAlgCount
-	LargeKskImrMetrics       = imrcore.LargeKskImrMetrics
+	LargeKskImrMetrics       = imrcore.LargeKskMetrics
 	OwnZone                  = imrcore.OwnZone
 	OwnZones                 = imrcore.OwnZones
 	PrivacyUnavailableError  = imrcore.PrivacyUnavailableError
@@ -154,7 +174,7 @@ const (
 	DNSKEYTransportTryEncrypted    = imrcore.DNSKEYTransportTryEncrypted
 	DNSKEYTransportUseDSSignal     = imrcore.DNSKEYTransportUseDSSignal
 	DefaultCacheMaxTTL             = imrcore.DefaultCacheMaxTTL
-	DefaultImrClientStatsMax       = imrcore.DefaultImrClientStatsMax
+	DefaultImrClientStatsMax       = imrcore.DefaultClientStatsMax
 	ErrCatConfig                   = imrcore.ErrCatConfig
 	ErrCatOther                    = imrcore.ErrCatOther
 	ErrCatTransport                = imrcore.ErrCatTransport
@@ -168,14 +188,14 @@ const (
 	ErrSubImrForwardZone           = imrcore.ErrSubImrForwardZone
 	ErrSubImrPriming               = imrcore.ErrSubImrPriming
 	ErrSubPort                     = imrcore.ErrSubPort
-	ImrOptAllowLoopbackNameservers = imrcore.ImrOptAllowLoopbackNameservers
-	ImrOptQnameMinimisation        = imrcore.ImrOptQnameMinimisation
-	ImrOptAlwaysQueryForTransport  = imrcore.ImrOptAlwaysQueryForTransport
-	ImrOptQueryForTransport        = imrcore.ImrOptQueryForTransport
-	ImrOptQueryForTransportTLSA    = imrcore.ImrOptQueryForTransportTLSA
-	ImrOptRevalidateNS             = imrcore.ImrOptRevalidateNS
-	ImrOptTransportSignalType      = imrcore.ImrOptTransportSignalType
-	ImrOptUseTransportSignals      = imrcore.ImrOptUseTransportSignals
+	ImrOptAllowLoopbackNameservers = imrcore.OptAllowLoopbackNameservers
+	ImrOptQnameMinimisation        = imrcore.OptQnameMinimisation
+	ImrOptAlwaysQueryForTransport  = imrcore.OptAlwaysQueryForTransport
+	ImrOptQueryForTransport        = imrcore.OptQueryForTransport
+	ImrOptQueryForTransportTLSA    = imrcore.OptQueryForTransportTLSA
+	ImrOptRevalidateNS             = imrcore.OptRevalidateNS
+	ImrOptTransportSignalType      = imrcore.OptTransportSignalType
+	ImrOptUseTransportSignals      = imrcore.OptUseTransportSignals
 	SvcbTLSAKey                    = imrcore.SvcbTLSAKey
 	TimeLayout                     = imrcore.TimeLayout
 )
@@ -190,7 +210,7 @@ func AuthDNSQuery(qname string, lg *log.Logger, nameservers []string, rrtype uin
 }
 
 func BuildImrForwards(conf []ImrForwardConf) ([]*ForwardZone, []ForwardDiag) {
-	return imrcore.BuildImrForwards(conf)
+	return imrcore.BuildForwards(conf)
 }
 
 func DNSSECAlgorithmLabel(alg uint8) string {
@@ -210,7 +230,7 @@ func GetTransportParamRaw(svcb *dns.SVCB) (map[string]uint8, bool, error) {
 }
 
 func LargeKskImrMetricsSnapshot() LargeKskImrMetrics {
-	return imrcore.LargeKskImrMetricsSnapshot()
+	return imrcore.LargeKskMetricsSnapshot()
 }
 
 func LargeAlgDSMetrics() uint64 {
@@ -218,7 +238,7 @@ func LargeAlgDSMetrics() uint64 {
 }
 
 func LoadImrTuningDefaults(t *ImrTuningConf) {
-	imrcore.LoadImrTuningDefaults(t)
+	imrcore.LoadTuningDefaults(t)
 }
 
 func MarshalTransport(transports map[string]uint8) string {
@@ -242,11 +262,11 @@ func PrintMsgSection(header string, section []dns.RR, width int) string {
 }
 
 func RegisterImrOutboundQueryHook(hook ImrOutboundQueryHookFunc) error {
-	return imrcore.RegisterImrOutboundQueryHook(hook)
+	return imrcore.RegisterOutboundQueryHook(hook)
 }
 
 func RegisterImrResponseHook(hook ImrResponseHookFunc) error {
-	return imrcore.RegisterImrResponseHook(hook)
+	return imrcore.RegisterResponseHook(hook)
 }
 
 func ValidateExplicitServerSVCB(svcb *dns.SVCB) error {

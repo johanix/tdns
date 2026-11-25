@@ -56,11 +56,9 @@ func (imr *Imr) honouredRecords(server *cache.AuthServer, set *svcbSignalSet, re
 			continue
 		}
 		ignored++
-		if !imr.Quiet {
-			lgDns.Debug("transport signal: a redirect ignored for want of validation",
-				"servername", server.Name, "target", rec.target, "port", rec.port, "transports", MarshalTransport(rec.raw),
-				"state", cache.SignalStateString(state), "via", set.via, "path", cache.FormatSignalPath(set.path))
-		}
+		imr.lgDns().Debug("transport signal: a redirect ignored for want of validation",
+			"servername", server.Name, "target", rec.target, "port", rec.port, "transports", MarshalTransport(rec.raw),
+			"state", cache.SignalStateString(state), "via", set.via, "path", cache.FormatSignalPath(set.path))
 	}
 	if ignored > 0 {
 		server.AddIgnoredRedirects(ignored)
@@ -752,9 +750,7 @@ func (imr *Imr) startEndpointLookup(target string) {
 	go func() {
 		results := lookup(imr, target, fams)
 		imr.endpointAddrs.finishLookup(target, results, time.Now(), imr.Cache.NewTargetAuthServer)
-		if !imr.Quiet {
-			lgDns.Debug("transport signal: endpoint addresses", "target", target, "results", fmt.Sprint(results))
-		}
+		imr.lgDns().Debug("transport signal: endpoint addresses", "target", target, "results", fmt.Sprint(results))
 	}()
 }
 
@@ -781,7 +777,7 @@ func (imr *Imr) lookupEndpointAddrs(target string, fams []cache.AddressFamily) [
 		if !slices.Contains(fams, r.family) {
 			continue
 		}
-		resp, err := imr.ImrQuery(ctx, target, qtype, dns.ClassINET, nil)
+		resp, err := imr.imrQuery(ctx, target, qtype, dns.ClassINET, false)
 		switch {
 		case err != nil || resp == nil || resp.ValidationState == cache.ValidationStateBogus:
 			r.failed = true
@@ -801,7 +797,7 @@ func (imr *Imr) lookupEndpointAddrs(target string, fams []cache.AddressFamily) [
 // or not known, as for an answer reached through a CNAME chain the lookup
 // carried no expiry for: an address is kept only while every record that led
 // to it is.
-func (imr *Imr) endpointAddrsOf(target string, qtype uint16, resp *ImrResponse, now time.Time) ([]string, time.Time) {
+func (imr *Imr) endpointAddrsOf(target string, qtype uint16, resp *Response, now time.Time) ([]string, time.Time) {
 	var addrs []string
 	for _, rr := range resp.RRset.RRs {
 		switch a := rr.(type) {
@@ -824,7 +820,7 @@ func (imr *Imr) endpointAddrsOf(target string, qtype uint16, resp *ImrResponse, 
 // addrsExpiry is when the addresses resp carries for <target, qtype> run out:
 // the expiration of the cache entry that holds them, or their TTL from now
 // when that is not known, and, when a CNAME chain led to them, no later than
-// its first link to run out (ImrResponse.ChainExpiration): a link that changes
+// its first link to run out (Response.ChainExpiration): a link that changes
 // may lead elsewhere. The lookup carries the chain's expiry with its answer,
 // so a link that changed or left the cache since does not count. The zero
 // time when the chain's expiry is not known.
@@ -833,7 +829,7 @@ func (imr *Imr) endpointAddrsOf(target string, qtype uint16, resp *ImrResponse, 
 // not cached under the question. Their entry is read under the chain's last
 // name instead, and counts only while it holds the RRset resp carries, as
 // lookupEntry judges an entry; one stored since is another lookup's.
-func (imr *Imr) addrsExpiry(target string, qtype uint16, resp *ImrResponse) time.Time {
+func (imr *Imr) addrsExpiry(target string, qtype uint16, resp *Response) time.Time {
 	chained := !core.EqualNames(resp.RRset.Name, target)
 	exp := resp.Expiration
 	if exp.IsZero() && chained {

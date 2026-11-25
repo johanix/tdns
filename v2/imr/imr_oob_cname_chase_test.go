@@ -103,7 +103,6 @@ func TestCNAMEChaseInsideOutOfBailiwickZone(t *testing.T) {
 	c.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, port, nil)
 	imr := &Imr{
 		Cache:   c,
-		Quiet:   true,
 		Options: loopbackTestOptions(),
 		FamilyTracker: cache.NewFamilyTracker(
 			10*time.Minute, 10*time.Minute, 30*time.Second, 5),

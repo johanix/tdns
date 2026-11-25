@@ -178,7 +178,7 @@ func TestReferralIntoALoopbackStubLeavesItQueryable(t *testing.T) {
 		}
 		_ = w.WriteMsg(m)
 	})
-	delete(imr.Options, ImrOptAllowLoopbackNameservers)
+	delete(imr.Options, OptAllowLoopbackNameservers)
 	configured := configuredStubServer(t, imr)
 
 	if _, rcode, _, _, err := imr.handleReferral(context.Background(), sgWWW, dns.TypeA, sgReferral(t),

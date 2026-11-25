@@ -109,8 +109,8 @@ func TestAReferralWithADSMakesAnInsecureZoneSecure(t *testing.T) {
 }
 
 func TestZoneStateRecheckTuningDefault(t *testing.T) {
-	var tc ImrTuningConf
-	LoadImrTuningDefaults(&tc)
+	var tc TuningConf
+	LoadTuningDefaults(&tc)
 	if tc.ZoneStateRecheck != cache.DefaultZoneStateRecheck {
 		t.Errorf("default zone-state-recheck is %s, want %s", tc.ZoneStateRecheck, cache.DefaultZoneStateRecheck)
 	}

@@ -115,7 +115,7 @@ func TestChildCopyIsAnsweredFromWithoutTheOption(t *testing.T) {
 			t.Errorf("%s %s: own zone %v, want the copy", ownChild, dns.TypeToString[qtype], zd)
 		}
 	}
-	resp, err := rig.imr.ImrQuery(context.Background(), "www."+ownChild, dns.TypeA, dns.ClassINET, nil)
+	resp, err := rig.imr.ImrQuery(context.Background(), "www."+ownChild, dns.TypeA, dns.ClassINET)
 	if err != nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 || rdataOf(resp.RRset.RRs[0]) != "192.0.2.99" {
 		t.Errorf("www.%s A: %+v (err %v), want the copy's 192.0.2.99", ownChild, resp, err)
 	}
@@ -136,10 +136,10 @@ func TestModifiedDownstreamTakesEffectOnReload(t *testing.T) {
 	t.Cleanup(func() { Globals.ImrEngine = prev })
 
 	// Answered from the copy: no DNSKEY, the copy's address.
-	if resp, err := rig.imr.ImrQuery(ctx, ownChild, dns.TypeDNSKEY, dns.ClassINET, nil); err != nil || resp.RRset != nil {
+	if resp, err := rig.imr.ImrQuery(ctx, ownChild, dns.TypeDNSKEY, dns.ClassINET); err != nil || resp.RRset != nil {
 		t.Fatalf("%s DNSKEY from the copy: %+v (err %v), want NODATA", ownChild, resp, err)
 	}
-	if resp, err := rig.imr.ImrQuery(ctx, "www."+ownChild, dns.TypeA, dns.ClassINET, nil); err != nil || resp.RRset == nil {
+	if resp, err := rig.imr.ImrQuery(ctx, "www."+ownChild, dns.TypeA, dns.ClassINET); err != nil || resp.RRset == nil {
 		t.Fatalf("www.%s A from the copy: %+v (err %v)", ownChild, resp, err)
 	}
 
@@ -154,11 +154,11 @@ func TestModifiedDownstreamTakesEffectOnReload(t *testing.T) {
 			child.modifiedDownstream(), child.servesQueries())
 	}
 
-	resp, err := rig.imr.ImrQuery(ctx, ownChild, dns.TypeDNSKEY, dns.ClassINET, nil)
+	resp, err := rig.imr.ImrQuery(ctx, ownChild, dns.TypeDNSKEY, dns.ClassINET)
 	if err != nil || resp.RRset == nil || !resp.Validated {
 		t.Errorf("%s DNSKEY after the reload: %+v (err %v), want the published keys, validated", ownChild, resp, err)
 	}
-	resp, err = rig.imr.ImrQuery(ctx, "www."+ownChild, dns.TypeA, dns.ClassINET, nil)
+	resp, err = rig.imr.ImrQuery(ctx, "www."+ownChild, dns.TypeA, dns.ClassINET)
 	if err != nil || resp.RRset == nil || rdataOf(resp.RRset.RRs[0]) != "192.0.2.55" || !resp.Validated {
 		t.Errorf("www.%s A after the reload: %+v (err %v), want the published 192.0.2.55, validated", ownChild, resp, err)
 	}

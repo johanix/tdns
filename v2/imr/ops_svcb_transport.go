@@ -1,6 +1,7 @@
 /*
  * Copyright (c) 2024 Johan Stenstam
  */
+
 package imr
 
 import (

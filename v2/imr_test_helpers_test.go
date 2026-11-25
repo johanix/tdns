@@ -961,7 +961,6 @@ func signalOnEachPath(t *testing.T, texts []string) map[string]*cache.AuthServer
 	out := map[string]*cache.AuthServer{}
 
 	imr := newTestImr(t)
-	imr.Quiet = true
 	server := cache.NewAuthServer(pathNS)
 	r := new(dns.Msg)
 	r.SetQuestion("www.kid.p.test.", dns.TypeA)
@@ -970,7 +969,6 @@ func signalOnEachPath(t *testing.T, texts []string) map[string]*cache.AuthServer
 	out["additional"] = server
 
 	imr = newTestImr(t)
-	imr.Quiet = true
 	ref := new(dns.Msg)
 	ref.SetQuestion("www.kid.p.test.", dns.TypeA)
 	ref.Response = true
@@ -984,7 +982,6 @@ func signalOnEachPath(t *testing.T, texts []string) map[string]*cache.AuthServer
 	out["referral"] = imr.Cache.GetOrCreateAuthServer(pathNS)
 
 	imr = newTestImr(t)
-	imr.Quiet = true
 	server = cache.NewAuthServer(pathNS)
 	imr.Cache.ServerMap.Set("kid.p.test.", map[string]*cache.AuthServer{cache.ServerKey(pathNS): server})
 	imr.TransportSignalFromAnswer(pathOwner, &core.RRset{Name: pathOwner, RRtype: dns.TypeSVCB, RRs: rrs()},

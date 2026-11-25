@@ -24,8 +24,8 @@ import (
 // the proof that nothing dialled: forwardQuery would panic if it tried.
 func TestForwardQuarantinedZoneServfailsWithoutDialling(t *testing.T) {
 	imr := newReloadTestImr(t)
-	forwards, diags := BuildImrForwards([]ImrForwardConf{
-		{Zone: "bad.example.", Upstreams: []ImrUpstreamConf{{Addr: "not-an-ip.example.com"}}},
+	forwards, diags := BuildForwards([]ForwardConf{
+		{Zone: "bad.example.", Upstreams: []UpstreamConf{{Addr: "not-an-ip.example.com"}}},
 	})
 	if len(diags) == 0 {
 		t.Fatal("unparseable upstream accepted silently")
@@ -49,8 +49,8 @@ func TestForwardQuarantinedZoneServfailsWithoutDialling(t *testing.T) {
 // Reduced redundancy: when one upstream of a trust-ad zone authenticates and
 // another does not, the zone keeps serving on the one that does.
 func TestForwardQuarantineKeepsTheAuthenticatedUpstream(t *testing.T) {
-	forwards, diags := BuildImrForwards([]ImrForwardConf{
-		{Zone: "mix.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{
+	forwards, diags := BuildForwards([]ForwardConf{
+		{Zone: "mix.example.", TrustAD: true, Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot"},
 			{Addr: "192.0.2.2"}, // plaintext: quarantined
 		}},
@@ -79,21 +79,21 @@ func TestForwardQuarantineKeepsTheAuthenticatedUpstream(t *testing.T) {
 // zone stays dead after the operator fixed it.
 func TestForwardQuarantineNotCarriedAcrossTrustADRemoval(t *testing.T) {
 	imr := newReloadTestImr(t)
-	withTrustAD := []ImrForwardConf{{
+	withTrustAD := []ForwardConf{{
 		Zone: "a.example.", TrustAD: true,
-		Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}},
+		Upstreams: []UpstreamConf{{Addr: "192.0.2.1"}},
 	}}
 	// Startup-shaped: build and publish directly, since ReloadZones refuses
 	// this config whole (that asymmetry is TestReloadZonesRejectedConfig...).
-	forwards, diags := BuildImrForwards(withTrustAD)
+	forwards, diags := BuildForwards(withTrustAD)
 	if len(diags) != 1 || !forwards[0].isQuarantined() {
 		t.Fatalf("setup: want a quarantined zone, got diags=%v", diags)
 	}
 	imr.setZoneTable(forwards, nil, map[string]string{})
 
 	// The operator drops `trust-ad:` and reloads. Same upstream, same key.
-	if _, err := imr.ReloadZones(nil, []ImrForwardConf{
-		{Zone: "a.example.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
+	if _, err := imr.ReloadZones(nil, []ForwardConf{
+		{Zone: "a.example.", Upstreams: []UpstreamConf{{Addr: "192.0.2.1"}}},
 	}); err != nil {
 		t.Fatalf("ReloadZones of a fixed config: %v", err)
 	}
@@ -116,8 +116,8 @@ func TestForwardQuarantineNotCarriedAcrossTrustADRemoval(t *testing.T) {
 func TestForwardQuarantinedUpstreamIsNotAlsoUnreachable(t *testing.T) {
 	imr := newReloadTestImr(t)
 	imr.errorRegistry = newTestErrorSink()
-	forwards, _ := BuildImrForwards([]ImrForwardConf{
-		{Zone: "mix.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{
+	forwards, _ := BuildForwards([]ForwardConf{
+		{Zone: "mix.example.", TrustAD: true, Upstreams: []UpstreamConf{
 			{Addr: "192.0.2.1", Transport: "dot"},
 			{Addr: "192.0.2.2"},
 		}},
@@ -152,16 +152,16 @@ func TestForwardQuarantinedUpstreamIsNotAlsoUnreachable(t *testing.T) {
 func TestForwardQuarantineAggregateClears(t *testing.T) {
 	imr := newReloadTestImr(t)
 	imr.errorRegistry = newTestErrorSink()
-	forwards, _ := BuildImrForwards([]ImrForwardConf{
-		{Zone: "a.example.", TrustAD: true, Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
+	forwards, _ := BuildForwards([]ForwardConf{
+		{Zone: "a.example.", TrustAD: true, Upstreams: []UpstreamConf{{Addr: "192.0.2.1"}}},
 	})
 	imr.setZoneTable(forwards, nil, map[string]string{})
 	imr.updateForwardQuarantineError()
 	if len(imr.errorRegistry.List()) == 0 {
 		t.Fatal("setup: no aggregate for a quarantined zone")
 	}
-	if _, err := imr.ReloadZones(nil, []ImrForwardConf{
-		{Zone: "a.example.", Upstreams: []ImrUpstreamConf{{Addr: "192.0.2.1"}}},
+	if _, err := imr.ReloadZones(nil, []ForwardConf{
+		{Zone: "a.example.", Upstreams: []UpstreamConf{{Addr: "192.0.2.1"}}},
 	}); err != nil {
 		t.Fatalf("ReloadZones: %v", err)
 	}
@@ -174,8 +174,8 @@ func TestForwardQuarantineAggregateClears(t *testing.T) {
 // it. Without the guard this panics: a placeholder upstream has no client.
 func TestForwardProbeReportsQuarantinedWithoutDialling(t *testing.T) {
 	imr := newReloadTestImr(t)
-	forwards, _ := BuildImrForwards([]ImrForwardConf{
-		{Zone: "bad.example.", Upstreams: []ImrUpstreamConf{
+	forwards, _ := BuildForwards([]ForwardConf{
+		{Zone: "bad.example.", Upstreams: []UpstreamConf{
 			{Addr: "not-an-ip.example.com", Transport: "dot"},
 		}},
 	})
@@ -202,10 +202,10 @@ func TestForwardProbeReportsQuarantinedWithoutDialling(t *testing.T) {
 // strength of an upstream it will never dial, and a placeholder's nil Client
 // can reach the query loop.
 func TestForwardQuarantineExcludedFromPrivacySelection(t *testing.T) {
-	forwards, diags := BuildImrForwards([]ImrForwardConf{
+	forwards, diags := BuildForwards([]ForwardConf{
 		// The only ENCRYPTED upstream is unbuildable; the plaintext one is
 		// fine. A zone like this can serve, but never privately.
-		{Zone: "half.example.", Upstreams: []ImrUpstreamConf{
+		{Zone: "half.example.", Upstreams: []UpstreamConf{
 			{Addr: "not-an-ip.example.com", Transport: "dot"},
 			{Addr: "192.0.2.2"},
 		}},
@@ -232,7 +232,7 @@ func TestForwardQuarantineExcludedFromPrivacySelection(t *testing.T) {
 // placeholderUpstream is quarantined at construction, not by its caller:
 // an unquarantined placeholder is a nil client on the query path.
 func TestPlaceholderUpstreamIsBornQuarantined(t *testing.T) {
-	up := placeholderUpstream(ImrUpstreamConf{Addr: "nope.example.com", Transport: "dot"}, "unbuildable")
+	up := placeholderUpstream(UpstreamConf{Addr: "nope.example.com", Transport: "dot"}, "unbuildable")
 	q, why := up.quarantineState()
 	if !q || why != "unbuildable" {
 		t.Errorf("placeholder not quarantined at construction: q=%v why=%q", q, why)
@@ -260,8 +260,8 @@ func TestForwardQueryNeverDialsAQuarantinedUpstream(t *testing.T) {
 	addr, port, logr, stop := startTestUpstream(t)
 	defer stop()
 
-	forwards, diags := BuildImrForwards([]ImrForwardConf{
-		{Zone: "fwd.example.", Upstreams: []ImrUpstreamConf{
+	forwards, diags := BuildForwards([]ForwardConf{
+		{Zone: "fwd.example.", Upstreams: []UpstreamConf{
 			{Addr: "not-an-ip.example.com"}, // unbuildable: placeholder, nil Client
 			{Addr: addr, Port: port},        // usable
 		}},

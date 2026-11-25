@@ -75,7 +75,7 @@ func newLifetimeImr(t *testing.T) (*Imr, *upstreamLog) {
 	}
 	logr := &upstreamLog{}
 	addr, port := startLoggedSignedForwardUpstream(t, answers, logr)
-	imr := newForwardTestImr(t, []ImrForwardConf{{Zone: ".", Upstreams: []ImrUpstreamConf{{Addr: addr, Port: port}}}})
+	imr := newForwardTestImr(t, []ForwardConf{{Zone: ".", Upstreams: []UpstreamConf{{Addr: addr, Port: port}}}})
 	imr.Cache.DnskeyCache = cache.NewDnskeyCache() // not the process-wide one
 	if err := imr.Cache.PrimeFromHintsOnly(""); err != nil {
 		t.Fatalf("PrimeFromHintsOnly: %v", err)
@@ -97,7 +97,7 @@ func askLifetime(t *testing.T, imr *Imr, qname string, qtype uint16) *dns.Msg {
 	r.SetQuestion(qname, qtype)
 	r.SetEdns0(4096, true)
 	cw := &captureWriter{}
-	imr.ImrResponder(context.Background(), cw, r, qname, qtype, &edns0.MsgOptions{RD: true, DO: true})
+	imr.Responder(context.Background(), cw, r, qname, qtype, &edns0.MsgOptions{RD: true, DO: true})
 	if cw.got == nil {
 		t.Fatalf("%s %s: nothing written", qname, dns.TypeToString[qtype])
 	}

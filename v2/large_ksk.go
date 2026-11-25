@@ -109,6 +109,16 @@ func parseDNSKEYTransportPolicy(s string) (DNSKEYTransportPolicy, error) {
 	}
 }
 
+// imrLargeAlgorithms is dnssec.large-algorithms as the resolver takes it: an
+// empty set, not nil, when none are listed. The resolver reads nil as its
+// default set, and the daemon has always meant "none" by an empty list.
+func (conf *Config) imrLargeAlgorithms() map[uint8]bool {
+	if conf.Internal.LargeAlgorithms == nil {
+		return map[uint8]bool{}
+	}
+	return conf.Internal.LargeAlgorithms
+}
+
 // IsLargeAlgorithm reports whether alg is listed in dnssec.large-algorithms.
 func (conf *Config) IsLargeAlgorithm(alg uint8) bool {
 	if conf == nil || conf.Internal.LargeAlgorithms == nil {

@@ -142,7 +142,6 @@ func newOOBTestImr(t *testing.T, d *oobAuthDouble) *Imr {
 	}
 	return &Imr{
 		Cache:   c,
-		Quiet:   true,
 		Options: loopbackTestOptions(),
 		FamilyTracker: cache.NewFamilyTracker(
 			10*time.Minute, 10*time.Minute, 30*time.Second, 5),
