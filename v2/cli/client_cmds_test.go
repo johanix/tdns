@@ -107,7 +107,7 @@ func TestNewApiClientForVerification(t *testing.T) {
 		wantWarn bool
 	}{
 		{name: "https verifying nothing", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1"}, wantErr: "no pin of the daemon's certificate"},
-		{name: "the refusal says how to pin", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", ConfigFile: "/etc/tdns/tdns-imr.yaml"}, wantErr: "fix: tdns-ncli config add /etc/tdns/tdns-imr.yaml"},
+		{name: "the refusal says how to pin", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", ConfigFile: "/etc/tdns/tdns-imr.yaml"}, wantErr: "fix: tdns-ncli config update a --repin"},
 		{name: "insecure said out loud", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", RootCA: "insecure"}, wantWarn: true},
 		{name: "pinned", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin", Pins: []string{pinOf("d")}}},
 		{name: "pin without pins", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin"}, wantErr: "no pins"},
@@ -344,11 +344,14 @@ func TestPingHow(t *testing.T) {
 func TestPinRefusal(t *testing.T) {
 	err := fmt.Errorf("wrapped: %w", pinRefusal(ApiDetails{Name: "tdns-auth", ConfigFile: "/etc/tdns/tdns-auth.yaml"}, "its entry has no pin"))
 	var r clientRefusal
-	if !errors.As(err, &r) || r.entry != "tdns-auth" || r.fix != "tdns-ncli config add /etc/tdns/tdns-auth.yaml" {
+	if !errors.As(err, &r) || r.entry != "tdns-auth" || r.fix != "tdns-ncli config update tdns-auth --repin" {
 		t.Errorf("refusal = %+v from %v", r, err)
 	}
-	if !strings.Contains(err.Error(), "not connecting to tdns-auth: its entry has no pin; fix: tdns-ncli config add") {
+	if !strings.Contains(err.Error(), "not connecting to tdns-auth: its entry has no pin; fix: tdns-ncli config update") {
 		t.Errorf("one-line form: %v", err)
+	}
+	if r := pinRefusal(ApiDetails{Name: "old"}, "x"); r.fix != "tdns-ncli config update old --repin --daemon-config <the daemon's config file>" {
+		t.Errorf("no config-file: fix = %q", r.fix)
 	}
 }
 

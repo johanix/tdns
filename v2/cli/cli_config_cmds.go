@@ -1,7 +1,7 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  *
- * `tdns-ncli config add|list`: maintaining the CLI's own list of daemons
+ * `tdns-ncli config add|update|list`: maintaining the CLI's own list of daemons
  * (apiservers:) from the daemons' config files.
  */
 package cli
@@ -61,7 +61,7 @@ func NoCliConfigNeeded(cmd *cobra.Command, cliConfig string) bool {
 	return errors.Is(err, os.ErrNotExist)
 }
 
-// NewCliConfigCmd builds `config`, with `add` and `list`.
+// NewCliConfigCmd builds `config`, with `add`, `update` and `list`.
 //
 // Not to be confused with `<daemon> config check`, which checks a DAEMON's
 // config. This is about the CLI's own: which daemons it addresses.
@@ -75,7 +75,7 @@ func NewCliConfigCmd() *cobra.Command {
 This is not "<daemon> config check", which checks a daemon's config.`,
 		Annotations: map[string]string{cliConfigAnnotation: "1"},
 	}
-	c.AddCommand(newConfigAddCmd(), newConfigListCmd())
+	c.AddCommand(newConfigAddCmd(), newConfigUpdateCmd(), newConfigListCmd())
 	return c
 }
 

@@ -336,14 +336,14 @@ func (r clientRefusal) Error() string {
 }
 
 // pinRefusal refuses entry e for want of a pin. Pinning is how tdns-ncli
-// verifies a daemon, and config add is how an entry gets its pin, a known
-// one included.
+// verifies a daemon, and config update --repin is how an existing entry
+// gets the pins its daemon serves.
 func pinRefusal(e ApiDetails, why string) clientRefusal {
-	daemon := "<the daemon's config file>"
-	if e.ConfigFile != "" {
-		daemon = shellQuote(e.ConfigFile)
+	fix := "tdns-ncli config update " + shellQuote(e.Name) + " --repin"
+	if e.ConfigFile == "" {
+		fix += " --daemon-config <the daemon's config file>"
 	}
-	return clientRefusal{entry: e.Name, why: why, fix: "tdns-ncli config add " + daemon}
+	return clientRefusal{entry: e.Name, why: why, fix: fix}
 }
 
 // dieOn ends the process on err, which GetApiClient could not get past. A

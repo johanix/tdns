@@ -19,7 +19,8 @@ import (
 
 // addDaemon is a daemon for config add: /access on its local admin socket
 // (an access file in memory), and /ping on a TLS listener that knows a
-// client by the pin of its certificate, as the daemon's access check does.
+// client by the pin of its certificate, as the daemon's access check does,
+// or by its key (k).
 type addDaemon struct {
 	cfg, cli, sock, certPath string
 	srvPin, url              string
@@ -42,7 +43,7 @@ func newAddDaemon(t *testing.T, running bool) *addDaemon {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	d := &addDaemon{clients: map[string]string{}}
 	tcp := httptest.NewUnstartedServer(http.HandlerFunc(d.ping))
-	tcp.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert}
+	tcp.TLS = &tls.Config{ClientAuth: tls.RequestClientCert}
 	tcp.StartTLS()
 	t.Cleanup(tcp.Close)
 	d.srvPin, d.url = tdns.SPKISHA256(tcp.Certificate()), tcp.URL+"/api/v1"
@@ -57,15 +58,21 @@ func newAddDaemon(t *testing.T, running bool) *addDaemon {
 	d.cli = filepath.Join(dir, "tdns-ncli.yaml")
 	writeFile(t, d.cli, "client:\n   cert: "+d.certPath+"\n   key: "+filepath.Join(dir, "certs", "me.key")+"\n")
 	if running {
-		ln, err := net.Listen("unix", d.sock)
-		if err != nil {
-			t.Fatal(err)
-		}
-		srv := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(d.access)}
-		go srv.Serve(ln)
-		t.Cleanup(func() { srv.Close() })
+		d.start(t)
 	}
 	return d
+}
+
+// start serves the local admin socket: the daemon is up.
+func (d *addDaemon) start(t *testing.T) {
+	t.Helper()
+	ln, err := net.Listen("unix", d.sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(d.access)}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
 }
 
 func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
@@ -99,6 +106,10 @@ func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 func (d *addDaemon) ping(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if r.Header.Get("X-API-Key") == "k" && !d.refusePing {
+		json.NewEncoder(w).Encode(tdns.PingResponse{Msg: "pong", Role: "read-write", Via: "key"})
+		return
+	}
 	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 && !d.refusePing {
 		pin := tdns.SPKISHA256(r.TLS.PeerCertificates[0])
 		for name, p := range d.clients {
