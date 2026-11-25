@@ -59,8 +59,8 @@ func parseNetworkRole(s string) (ApiRole, error) {
 	return RoleNone, fmt.Errorf("unknown role %q (read-only or read-write)", s)
 }
 
-// AccessFile is the access file as written: what tdns-ncli writes and a
-// person may edit.
+// AccessFile is the access file as written: what the daemon writes when
+// tdns-ncli asks (/access), and a person may edit.
 type AccessFile struct {
 	// KeyAuth says whether the API key is still accepted. Absent means true.
 	KeyAuth *bool          `yaml:"keyauth,omitempty"`
@@ -96,8 +96,8 @@ func ParseAccessFile(data []byte) (*AccessFile, error) {
 }
 
 // ValidateAccessFile checks an access file. It is the one validator: the
-// daemon runs it at start and reload, the offline `config check` runs it, and
-// tdns-ncli runs it on every file it is about to write, so the three cannot
+// daemon runs it at start and reload and on every file it is about to write
+// (/access), and the offline `config check` runs it, so they cannot
 // disagree.
 func ValidateAccessFile(af *AccessFile) error {
 	var errs []string

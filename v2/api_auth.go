@@ -260,17 +260,18 @@ func (conf *Config) initApiAccess() {
 	lgApi.Info("management API: access file loaded", "file", path, "clients", len(af.Clients), "keyauth", af.KeyAuthOn())
 }
 
+// AccessFileNotReloaded begins the part of a reload's reply that says the
+// access file did not load and the running policy is unchanged. The reload as
+// a whole still succeeds, so this is how its reply says so.
+const AccessFileNotReloaded = "Access file NOT reloaded"
+
 // reloadApiAccess re-reads the access file after a successful config reload
 // and returns a line for the reload's reply. A file that does not load leaves
 // the running policy as it was (still closed, after a failed start) and says
 // so; like a refused forward table it does not fail the rest of the reload.
-// AccessFileNotReloaded begins the part of a reload's reply that says the
-// access file did not load and the running policy is unchanged. The reload as
-// a whole still succeeds, so a client that edited the file (tdns-ncli's
-// client commands) looks for this to know its change was not applied.
-const AccessFileNotReloaded = "Access file NOT reloaded"
-
 func (conf *Config) reloadApiAccess() string {
+	accessMu.Lock() // not while /access writes the file and loads it
+	defer accessMu.Unlock()
 	h := conf.Internal.ApiAccess
 	if h == nil {
 		return "" // this daemon built no management API router
@@ -293,31 +294,42 @@ func (conf *Config) reloadApiAccess() string {
 		}
 		return ""
 	}
-	af, err := LoadAccessFile(path)
+	af, addrs, err := conf.loadAccessPolicy(path)
 	if err != nil {
-		lgApi.Error("management API: access file NOT reloaded; the running policy is unchanged", "file", path, "err", err)
-		conf.Internal.ServerErrors.set(ErrCatConfig, ErrSubApiAccess, fmt.Sprintf("access file %s: %v", path, err))
 		return fmt.Sprintf(" %s (the running policy is unchanged): %v", AccessFileNotReloaded, err)
 	}
-	conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
-	// Before the policy goes in force: a plaintext TCP listener started
-	// without an access file cannot take up TLS, and while it listens,
-	// clients send their API key to it in clear. Close it until a restart.
-	// Closed and the policy stored under one lock, which APIdispatcher also
-	// holds while it registers and starts its servers (activateApiAccess).
 	stopped := ""
-	if addrs := activateApiAccess(path, func() { h.p.Store(newAccessState(path, af)) }); len(addrs) > 0 {
-		lgApi.Error("management API: plaintext TCP listeners STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served)",
-			"addresses", addrs, "file", path)
+	if len(addrs) > 0 {
 		stopped = fmt.Sprintf(" The plaintext TCP listeners %v are STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served).", addrs)
 	}
-	keyauth := "on"
-	if !af.KeyAuthOn() {
-		keyauth = "off"
+	return fmt.Sprintf(" Access file reloaded: %d client(s), keyauth %s.%s", len(af.Clients), onOff(af.KeyAuthOn()), stopped)
+}
+
+// loadAccessPolicy loads the access file at path and puts it in force: a
+// reload's way, and /access's after it writes the file. A file that does not
+// load leaves the running policy as it was. Before the policy goes in force,
+// the plaintext TCP listeners close (a listener started without an access
+// file cannot take up TLS, and while it listens, clients send their API key
+// to it in clear), until a restart: closed and the policy stored under one
+// lock, which APIdispatcher also holds while it registers and starts its
+// servers (activateApiAccess). stopped are the listeners it closed.
+func (conf *Config) loadAccessPolicy(path string) (af *AccessFile, stopped []string, err error) {
+	af, err = LoadAccessFile(path)
+	if err != nil {
+		lgApi.Error("management API: access file NOT loaded; the running policy is unchanged", "file", path, "err", err)
+		conf.Internal.ServerErrors.set(ErrCatConfig, ErrSubApiAccess, fmt.Sprintf("access file %s: %v", path, err))
+		return nil, nil, err
+	}
+	conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
+	h := conf.Internal.ApiAccess
+	stopped = activateApiAccess(path, func() { h.p.Store(newAccessState(path, af)) })
+	if len(stopped) > 0 {
+		lgApi.Error("management API: plaintext TCP listeners STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served)",
+			"addresses", stopped, "file", path)
 	}
 	// Logged as well as returned: after a SIGHUP nobody reads the message.
-	lgApi.Info("management API: access file reloaded", "file", path, "clients", len(af.Clients), "keyauth", keyauth)
-	return fmt.Sprintf(" Access file reloaded: %d client(s), keyauth %s.%s", len(af.Clients), keyauth, stopped)
+	lgApi.Info("management API: access file loaded", "file", path, "clients", len(af.Clients), "keyauth", onOff(af.KeyAuthOn()))
+	return af, stopped, nil
 }
 
 // ApiAccessStatus is the running access policy as `config status` reports it.
@@ -337,7 +349,8 @@ type ApiAccessStatusClient struct {
 	Name     string
 	Pin      string
 	Role     string
-	Disabled bool `json:",omitempty"`
+	Disabled bool   `json:",omitempty"`
+	Comment  string `json:",omitempty"`
 }
 
 // apiAccessStatus is the running policy for `config status`, or nil when no
@@ -352,7 +365,7 @@ func (conf *Config) apiAccessStatus() *ApiAccessStatus {
 		out.Error = st.Err.Error()
 	}
 	for _, c := range st.Clients {
-		out.Clients = append(out.Clients, ApiAccessStatusClient{Name: c.Name, Pin: c.Pin, Role: c.Role, Disabled: c.Disabled})
+		out.Clients = append(out.Clients, ApiAccessStatusClient{Name: c.Name, Pin: c.Pin, Role: c.Role, Disabled: c.Disabled, Comment: c.Comment})
 	}
 	return out
 }
