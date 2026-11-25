@@ -4,7 +4,6 @@
 # daemon, so it runs only on a build that has both.
 . "$SRC/suites/roles.sh"
 
-pinof() { awk -v n="$1" '$1==n{print $2}' "$CERTS/pins.txt"; }
 
 suite_pins() {
 	daemon_stop auth; daemon_stop imr
@@ -34,11 +33,11 @@ suite_pins() {
 	judge P1d "tlsauth: pkix with the rig's CA: accepted" $? "$o"
 	o=$(out P1-noverify); ncli_remote pins authnoverify ping > "$o" 2>&1
 	if newcli; then
-		[ "$(rc_of "$o")" = 1 ] && grep -q '^Error: not connecting to authnoverify:' "$o" && grep -q 'Fix: tdns-ncli config add' "$o" && ! grep -q 'pongs:' "$o"
+		[ "$(rc_of "$o")" = 1 ] && grep -q '^Error: not connecting to authnoverify:' "$o" && grep -q 'Fix: tdns-ncli config add\|Fix: tdns-ncli config update authnoverify --repin' "$o" && ! grep -q 'pongs:' "$o"
 	else
 		[ "$(rc_of "$o")" != 0 ] && grep -q 'does not verify the daemon' "$o" && ! grep -q 'pongs:' "$o"
 	fi
-	judge P1e "an https entry that verifies nothing: tdns-ncli refuses it (an error, with config add as the fix)" $? "$o"
+	judge P1e "an https entry that verifies nothing: tdns-ncli refuses it (an error, with config add or, #1202, config update --repin as the fix)" $? "$o"
 
 	# ---- the operator's client certificate ----------------------------------------------
 	o=$(out P2-init)
@@ -150,23 +149,42 @@ default_cert() {
 	f=$RIG/ncli/add-defcert.yaml; addfile "$f"
 	o=$(out P11b-add); ncli_root add-defcert config add "$V" > "$o" 2>&1
 	cat "$f" >> "$o" 2>/dev/null; ls -l "$crt" "$key" >> "$o" 2>&1
-	dpin=$(pin_of_cert "$crt")
-	[ "$(rc_of "$o")" = 0 ] && [ -n "$dpin" ] && grep -q "$dpin" "$f" \
-		&& [ "$(ls -l "$key" 2>/dev/null | awk '{print substr($1,1,10), $3}')" = "-rw------- root" ]
-	judge P11b "...config add before the first start: makes the pair (key 0600 root's) and pins it" $? "$o"
+	if certadd; then
+		# #1200: tdns-ncli never makes the daemon's pair; a stopped daemon gets
+		# the config-file: entry, and the daemon writes its pair at its first start.
+		[ "$(rc_of "$o")" = 0 ] && [ ! -e "$crt" ] && [ ! -e "$key" ] && grep -q "config-file: *$V" "$f" \
+			&& ! grep -q 'baseurl' "$f" && grep -q 'config update tdns-auth --cert' "$o"
+		judge P11b "...config add before the first start (#1200): the config-file: entry only, no pair made" $? "$o"
+	else
+		dpin=$(pin_of_cert "$crt")
+		[ "$(rc_of "$o")" = 0 ] && [ -n "$dpin" ] && grep -q "$dpin" "$f" \
+			&& [ "$(ls -l "$key" 2>/dev/null | awk '{print substr($1,1,10), $3}')" = "-rw------- root" ]
+		judge P11b "...config add before the first start: makes the pair (key 0600 root's) and pins it" $? "$o"
+	fi
 	sum1=$(cksum < "$crt" 2>/dev/null)
 	o=$(out P11c-start)
 	if daemon_start auth "$V"; then
 		ls -l "$crt" "$key" > "$o" 2>&1; grep 'self-signed' "$LOG/tdns-auth.log" >> "$o"
-		[ -n "$sum1" ] && [ "$(cksum < "$crt")" = "$sum1" ] && ! grep -q 'wrote a self-signed API certificate' "$LOG/tdns-auth.log"; r=$?
+		if certadd; then
+			[ "$(ls -l "$key" 2>/dev/null | awk '{print substr($1,1,10), $3}')" = "-rw------- root" ] \
+				&& grep -q 'wrote a self-signed API certificate' "$LOG/tdns-auth.log"; r=$?
+			sum1=$(cksum < "$crt" 2>/dev/null)
+		else
+			[ -n "$sum1" ] && [ "$(cksum < "$crt")" = "$sum1" ] && ! grep -q 'wrote a self-signed API certificate' "$LOG/tdns-auth.log"; r=$?
+		fi
 	else
 		sed -n '/=== .* start .*v-defcert/,$p' "$LOG/tdns-auth.stdout" > "$o"; r=1
 	fi
-	judge P11c "...the first start uses that pair and writes none" $r "$o"
-	o2=$(out P11d-ping); ncli_root add-defcert --tcp auth ping > "$o2"
-	if certadd; then want='pong (TLS, read-write, certificate '; else want='pong (TLS, admin) from'; fi
-	[ "$(rc_of "$o2")" = 0 ] && grep -q "$want" "$o2"
-	judge P11d "...and the pinned entry reaches the daemon over TLS" $? "$o2"
+	judge P11c "...the first start uses that pair and writes none (#1200: writes its pair, key 0600)" $r "$o"
+	if certadd; then
+		o2=$(out P11d-ping); ncli_root add-defcert auth ping > "$o2"
+		[ "$(rc_of "$o2")" = 0 ] && grep -q "pong ($AUTH_SOCK) from" "$o2"
+		judge P11d "...and the config-file: entry reaches the daemon (as root, over the socket)" $? "$o2"
+	else
+		o2=$(out P11d-ping); ncli_root add-defcert --tcp auth ping > "$o2"
+		[ "$(rc_of "$o2")" = 0 ] && grep -q 'pong (TLS, admin) from' "$o2"
+		judge P11d "...and the pinned entry reaches the daemon over TLS" $? "$o2"
+	fi
 	daemon_stop auth
 	o=$(out P11e-restart)
 	daemon_start auth "$V" > "$o" 2>&1; ls -l "$crt" >> "$o" 2>&1
@@ -187,9 +205,15 @@ default_cert() {
 	sed "s|^   certfile: .*|   certfile:   $RIG/certs/not-there.crt|" "$RIG/auth/tdns-auth.yaml" > "$V2"; chmod 0644 "$V2"
 	f2=$RIG/ncli/add-certgone.yaml; addfile "$f2"
 	o=$(out P11g-gone); ncli_root add-certgone config add "$V2" > "$o" 2>&1
-	[ "$(rc_of "$o")" != 0 ] && grep -q '^Error: not adding' "$o" && ! grep -q 'apiservers' "$f2" 2>/dev/null \
-		&& [ ! -e "$RIG/certs/not-there.crt" ] && [ ! -e "$RIG/auth/v-certgone-access.yaml" ]
-	judge P11g "a certfile: the config names that is missing: config add refuses, writes nothing, makes no pair" $? "$o"
+	if certadd; then
+		cat "$f2" >> "$o" 2>/dev/null
+		[ "$(rc_of "$o")" = 0 ] && grep -q "config-file: *$V2" "$f2" && ! grep -q 'baseurl' "$f2" && [ ! -e "$RIG/certs/not-there.crt" ]
+		judge P11g "a certfile: the config names that is missing (#1200, daemon stopped): the config-file: entry only, no pair made" $? "$o"
+	else
+		[ "$(rc_of "$o")" != 0 ] && grep -q '^Error: not adding' "$o" && ! grep -q 'apiservers' "$f2" 2>/dev/null \
+			&& [ ! -e "$RIG/certs/not-there.crt" ] && [ ! -e "$RIG/auth/v-certgone-access.yaml" ]
+		judge P11g "a certfile: the config names that is missing: config add refuses, writes nothing, makes no pair" $? "$o"
+	fi
 	rm -f "$crt" "$key" "$f" "$f2" "$V" "$V2" "$RIG/auth/v-defcert-access.yaml" "$RIG/auth/v-defcert-access.yaml.prev" "$RIG/auth/v-defcert.yaml.prev"
 }
 
@@ -223,7 +247,7 @@ routing() {
 	o3=$(out P8b-tsig); ncli_root add-route --tcp auth config reload-tsig > "$o3"
 	if certadd; then want='pong (TLS, read-write, certificate '; else want='pong (TLS, read-write) from'; fi
 	[ "$(rc_of "$o2")" = 0 ] && grep -q "$want" "$o2" && [ "$(rc_of "$o3")" != 0 ] && grep -q 'needs admin' "$o3"
-	judge P8b "...with --tcp: over TCP with the key, read-write (reload-tsig 403, needs admin)" $? "$o2" "$o3"
+	judge P8b "...with --tcp: over TCP (the key; #1200: the certificate), read-write (reload-tsig 403, needs admin)" $? "$o2" "$o3"
 	o=$(out P8b-unix); ncli_root rootacc --tcp auth ping > "$o"
 	[ "$(rc_of "$o")" != 0 ] && grep -q 'no TCP address for --tcp' "$o"
 	judge P8c "--tcp on a unix:// entry: refused, it has no TCP address" $? "$o"
@@ -253,19 +277,32 @@ routing() {
 	chown "$RIGUSER" "$f"; chmod 0600 "$f"; cp "$f" "$RUNDIR/repin-before.yaml"
 	o=$(out P9a-repin); ncli_user home/repin config add "$RIG/auth/v-access.yaml" > "$o" 2>&1
 	diff "$RUNDIR/repin-before.yaml" "$f" >> "$o"
-	[ "$(rc_of "$o")" = 0 ] && grep -q 'pinned the daemon' "$o" && grep -q 'tlsauth: *pin' "$f" && grep -q "$(pinof daemon)" "$f" \
-		&& ! grep -q 'rootca:' "$f" && [ "$(diff "$RUNDIR/repin-before.yaml" "$f" | grep -c '^[<>]')" = 3 ]
-	judge P9a "config add on a known entry with no pin (rootca:): pins it, drops rootca:, changes nothing else" $? "$o"
+	if certadd; then
+		# #1200: config add writes new entries only; a known one is left alone.
+		[ "$(rc_of "$o")" = 0 ] && grep -q 'nothing written' "$o" && grep -q 'config update tdns-auth --cert' "$o" \
+			&& cmp -s "$RUNDIR/repin-before.yaml" "$f"
+		judge P9a "config add on a known entry (#1200): left alone, nothing written, config update --cert named" $? "$o"
+	else
+		[ "$(rc_of "$o")" = 0 ] && grep -q 'pinned the daemon' "$o" && grep -q 'tlsauth: *pin' "$f" && grep -q "$(pinof daemon)" "$f" \
+			&& ! grep -q 'rootca:' "$f" && [ "$(diff "$RUNDIR/repin-before.yaml" "$f" | grep -c '^[<>]')" = 3 ]
+		judge P9a "config add on a known entry with no pin (rootca:): pins it, drops rootca:, changes nothing else" $? "$o"
+	fi
 	o=$(out P9b-again); ncli_user home/repin config add "$RIG/auth/v-access.yaml" > "$o" 2>&1
 	o2=$(out P9b-ping); ncli_user home/repin auth ping > "$o2"
-	if certadd; then want='keeps the API key'; else want='nothing changed'; fi
+	if certadd; then want='nothing written'; else want='nothing changed'; fi
 	[ "$(rc_of "$o")" = 0 ] && flat "$o" | grep -q "$want" && grep -q 'pong (TLS, read-write) from' "$o2"
-	judge P9b "...run again: nothing changed (#1184: the entry keeps the key, the user cannot enrol); and the re-pinned entry works" $? "$o" "$o2"
+	judge P9b "...run again: nothing changed; and the entry works (#1200: as it was, with rootca:)" $? "$o" "$o2"
 	rm -f "$f"
 
 	# A socket by default, named after the config path; socket: none.
 	daemon_stop auth
-	sed '/^   socket:/d' "$RIG/auth/tdns-auth.yaml" > "$RIG/auth/v-default.yaml"
+	if certadd; then
+		# #1200: config add needs an access file.
+		sed -e '/^   socket:/d' -e "s|^#  access-file: .*|   access-file: $RIG/auth/v-default-access.yaml|" "$RIG/auth/tdns-auth.yaml" > "$RIG/auth/v-default.yaml"
+		printf 'keyauth: true\nclients: []\n' > "$RIG/auth/v-default-access.yaml"; chmod 0600 "$RIG/auth/v-default-access.yaml"
+	else
+		sed '/^   socket:/d' "$RIG/auth/tdns-auth.yaml" > "$RIG/auth/v-default.yaml"
+	fi
 	sed 's|^   socket: .*|   socket:     none|' "$RIG/auth/tdns-auth.yaml" > "$RIG/auth/v-none.yaml"
 	chmod 0644 "$RIG/auth/v-default.yaml" "$RIG/auth/v-none.yaml"
 	ds=$(default_sock "$RIG/auth/v-default.yaml")

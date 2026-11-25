@@ -91,13 +91,27 @@ status_of() { sed -n 's/^STATUS //p' "$1" | head -1; }
 newcli() { "$BIN/tdns-ncli" --help 2>&1 | grep -q -- '--tcp'; }
 # defcert: the build has #1182's default API certificate: with neither
 # apiserver.certfile nor keyfile, the daemon writes {confdir}/certs/{config
-# name}-api.{crt,key} at its first start. certadd: the build has #1184's
-# config add, which sets up the operator's client certificate (enrolls its pin
-# in the daemon's access file, creating that file and the access-file: line
-# when need be) and writes certificate entries, not key entries. Both are
-# asked of tdns-ncli's own messages.
+# name}-api.{crt,key} at its first start. certadd: the build has #1200's
+# config add (the cert setup design, section 4): run as root on the daemon's
+# host, for a running daemon it makes the operator's client pair, has the
+# daemon enrol its pin over the local socket, checks it over TCP and writes
+# one certificate entry (pins, config-file:, no key); a stopped daemon gets an
+# entry with config-file: only; an entry already there is left alone. It needs
+# the socket and an access file. Both are asked of tdns-ncli's own messages.
+# (#1184's earlier config add, closed unmerged, is no longer recognised.)
 defcert() { grep -q 'the daemon writes a self-signed pair' "$BIN/tdns-ncli"; }
-certadd() { grep -q 'which a client certificate needs' "$BIN/tdns-ncli"; }
+certadd() { grep -q 'config update <entry> --cert' "$BIN/tdns-ncli"; }
+# certupdate: the build has #1202's config update <entry> (--cert | --repin)
+# (the design, section 5): root, daemon running; --cert turns an entry into a
+# certificate entry in place, --repin replaces its pins with the served ones.
+certupdate() { grep -q 'update <entry> (--cert | --repin)' "$BIN/tdns-ncli"; }
+# ncli_bare OUT ARGS...: tdns-ncli as root with no CLI config (from a directory
+# without one), its output and an RC= line in OUT.
+ncli_bare() { _o=$1; shift; { (cd /var/tmp && "$BIN/tdns-ncli" "$@"); echo "RC=$?"; } > "$_o" 2>&1; }
+# The pin of one of the rig's certificates, by name (setup.sh's pins.txt).
+# Here, not in a suite, since run.sh sources each suite just before it runs:
+# the socket suite runs before pins.
+pinof() { awk -v n="$1" '$1==n{print $2}' "$CERTS/pins.txt"; }
 # The SPKI pin of a certificate file, as the rig computes it (setup.sh).
 pin_of_cert() { "$BIN/tdns-cli" cert pin "$1" 2>/dev/null | tail -1; }
 # client_block FILE CERT KEY: a CLI config holding only a client: block. On a

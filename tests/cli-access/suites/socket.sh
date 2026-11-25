@@ -222,8 +222,14 @@ suite_socket() {
 	judge S10a "a relative socket path: refused (\"not an absolute path\"), daemon keeps serving" $? "$o" "$o2"
 	f=$RIG/ncli/add-rel.yaml; addfile "$f"
 	o=$(out S10-rel-add); ncli_root add-rel config add "$RIG/auth/v-rel.yaml" > "$o"; cat "$f" >> "$o" 2>/dev/null
-	grep -qi 'not an absolute path' "$o" && ! grep -q 'unix://' "$f"
-	judge S10b "config add as root on that config: warns, writes no socket entry" $? "$o"
+	if certadd; then
+		# #1200: config add needs the socket, which that config cannot have.
+		[ "$(rc_of "$o")" != 0 ] && grep -q 'serves no local admin socket' "$o" && ! grep -q 'apiservers' "$f"
+		judge S10b "config add as root on that config: refused (no local admin socket), nothing written" $? "$o"
+	else
+		grep -qi 'not an absolute path' "$o" && ! grep -q 'unix://' "$f"
+		judge S10b "config add as root on that config: warns, writes no socket entry" $? "$o"
+	fi
 
 	daemon_stop auth
 	long="$VDIR/ok/$(printf '%0100d' 0).sock"
@@ -252,7 +258,7 @@ suite_socket() {
 	judge S11b "...and nothing listens on TCP" $? "$o"
 	addfile "$RIG/home/add-user2.yaml" user
 	o=$(out S11-add-user); ncli_user home/add-user2 config add "$RIG/auth/v-noaddr.yaml" > "$o" 2>&1
-	[ "$(rc_of "$o")" != 0 ] && grep -qi 'only a local admin socket' "$o"
+	[ "$(rc_of "$o")" != 0 ] && grep -qi 'only a local admin socket\|run it as root' "$o"
 	judge S11c "...config add as non-root: refused, saying only root can use it" $? "$o"
 	# The same for tdns-imr, whose config validation and router builder differ.
 	daemon_stop imr
@@ -332,21 +338,21 @@ suite_socket() {
 	# ---- config add refuses a TCP entry with no key to send ---------------------------
 	variant nokey '/^   apikey: /d'
 	if certadd; then
-		# #1184: the daemon itself requires apiserver.apikey, so config add
-		# still refuses such a config, also for a certificate entry. Every
-		# file starts as a client: block, so nothing else may be in it.
+		# #1200: the daemon is stopped, so config add writes the entry with
+		# config-file: only, and no key plays a part; non-root is refused.
 		f=$RIG/ncli/add-nokey.yaml; addfile "$f"
-		o=$(out S15-nokey-root); ncli_root add-nokey config add "$RIG/auth/v-nokey.yaml" > "$o" 2>&1
-		[ "$(rc_of "$o")" != 0 ] && grep -qi 'apikey is not set' "$o" && ! grep -q 'apiservers' "$f" && [ ! -e "$RIG/auth/v-nokey-access.yaml" ]
-		judge S15a "config add as root, daemon config with no apikey: refused, naming apiserver.apikey, nothing written" $? "$o"
+		o=$(out S15-nokey-root); ncli_root add-nokey config add "$RIG/auth/v-nokey.yaml" > "$o" 2>&1; cat "$f" >> "$o" 2>/dev/null
+		[ "$(rc_of "$o")" = 0 ] && grep -q "config-file: *$RIG/auth/v-nokey.yaml" "$f" && ! grep -q 'baseurl' "$f" \
+			&& ! grep -qi 'apikey' "$f" && grep -q 'config update tdns-auth --cert' "$o"
+		judge S15a "config add as root, daemon stopped, config with no apikey (#1200): the config-file: entry only" $? "$o"
 		f=$RIG/ncli/add-nokey-tcp.yaml; addfile "$f"
-		o=$(out S15-nokey-tcp); ncli_root add-nokey-tcp config add --tcp "$RIG/auth/v-nokey.yaml" > "$o" 2>&1
-		[ "$(rc_of "$o")" != 0 ] && grep -qi 'apikey is not set' "$o" && ! grep -q 'apiservers' "$f"
-		judge S15b "...with --tcp: refused, naming apiserver.apikey, nothing written" $? "$o"
+		o=$(out S15-nokey-tcp); ncli_root add-nokey-tcp config add --tcp "$RIG/auth/v-nokey.yaml" > "$o" 2>&1; cat "$f" >> "$o" 2>/dev/null
+		[ "$(rc_of "$o")" = 0 ] && grep -q "config-file: *$RIG/auth/v-nokey.yaml" "$f" && ! grep -q 'baseurl' "$f"
+		judge S15b "...with --tcp: the same entry" $? "$o"
 		f=$RIG/home/add-nokey.yaml; addfile "$f" user
 		o=$(out S15-nokey-user); ncli_user home/add-nokey config add "$RIG/auth/v-nokey.yaml" > "$o" 2>&1
-		[ "$(rc_of "$o")" != 0 ] && grep -qi 'apikey is not set' "$o" && ! grep -q 'apiservers' "$f"
-		judge S15c "...as a non-root user: refused, naming apiserver.apikey, nothing written" $? "$o"
+		[ "$(rc_of "$o")" != 0 ] && grep -q 'run it as root' "$o" && ! grep -q 'apiservers' "$f"
+		judge S15c "...as a non-root user: refused (run it as root), nothing written" $? "$o"
 		rm -f "$RIG/auth/v-nokey-access.yaml" "$RIG/auth/v-nokey-access.yaml.prev" "$RIG/auth/v-nokey.yaml.prev"
 	else
 		f=$RIG/ncli/add-nokey.yaml; rm -f "$f"
@@ -396,52 +402,123 @@ suite_socket() {
 	rm -rf "$VDIR"
 }
 
-# config_add_cert: S7 on a certadd build (#1184), where config add sets up the
-# operator's client certificate: it enrolls the pin in the daemon's access
-# file, making that file and its access-file: line when the config names none,
-# and reloads. It edits the seeded daemon config, which is put back after.
+# config_add_cert: S7 on a certadd build (#1200, the cert setup design,
+# section 4). The seeded daemon config names no access file, so config add is
+# first refused with the line to add; the rig then turns the access file on
+# as an operator would (the line, an empty file, a reload), and config add
+# sets up root's client certificate. The seeded config is put back after.
 config_add_cert() {
 	cp "$RIG/auth/tdns-auth.yaml" "$RUNDIR/tdns-auth.yaml.seeded"
-	A=$RIG/auth/tdns-auth-access.yaml
-	f=$RIG/ncli/add-root.yaml; addfile "$f"
+	A=$RIG/auth/tdns-auth-access.yaml; rm -f "$A" "$A.prev"
+	f=$RIG/ncli/add-root.yaml; addfile "$f"; cp "$f" "$RUNDIR/add-root.before"
+	o=$(out S7-add-noacc); ncli_root add-root config add "$RIG/auth/tdns-auth.yaml" > "$o" 2>&1
+	[ "$(rc_of "$o")" != 0 ] && grep -q "access-file: $A" "$o" && grep -q 'config reload' "$o" \
+		&& cmp -s "$f" "$RUNDIR/add-root.before" && cmp -s "$RIG/auth/tdns-auth.yaml" "$RUNDIR/tdns-auth.yaml.seeded"
+	judge S7h "config add as root, no access file named: refused with the access-file: line and the reload to run, nothing written" $? "$o"
+	sed "s|^#  access-file: .*|   access-file: $A|" "$RUNDIR/tdns-auth.yaml.seeded" > "$RIG/auth/tdns-auth.yaml"
+	printf 'keyauth: true\nclients: []\n' > "$A"; chmod 0600 "$A"
+	o=$(out S7-reload); ncli_bare "$o" auth config reload --daemon-config "$RIG/auth/tdns-auth.yaml"
+	[ "$(rc_of "$o")" = 0 ] || fail S7z "the reload that turns the access file on" "$o"
 	o=$(out S7-add-root); ncli_root add-root config add "$RIG/auth/tdns-auth.yaml" > "$o" 2>&1
 	o3=$(out S7g-add-root-imr); ncli_root add-root config add "$RIG/imr/tdns-imr.yaml" > "$o3" 2>&1
-	cat "$f" >> "$o" 2>/dev/null; diff "$RUNDIR/tdns-auth.yaml.seeded" "$RIG/auth/tdns-auth.yaml" >> "$o"
+	cat "$f" >> "$o" 2>/dev/null
 	cpin=$(pin_of_cert "$RIG/ncli/root-client.crt")
-	grep -q "baseurl: *https://127.0.0.1:$AUTH_API" "$f" && grep -q 'authmethod: *certificate' "$f" && ! grep -qi 'apikey' "$f" \
-		&& grep -q 'config-file:' "$f" && grep -q "$(pinof daemon)" "$f" && [ -n "$cpin" ] && grep -q "$cpin" "$A" \
-		&& [ "$(diff "$RUNDIR/tdns-auth.yaml.seeded" "$RIG/auth/tdns-auth.yaml" | grep -c '^[<>]')" = 1 ] \
-		&& grep -q "^>    access-file: $A\$" "$o" && grep -q 'Reloaded' "$o"
-	judge S7a "config add as root (#1184): a certificate entry (no key), its pin enrolled in a new access file, one access-file: line added, reloaded" $? "$o"
-	[ "$(rc_of "$o3")" != 0 ] && grep -q 'usetls: false' "$o3" && ! grep -q ":$IMR_API" "$f"
-	judge S7g "...tdns-imr (usetls: false): a new entry is refused, saying a certificate needs TLS" $? "$o3"
+	[ "$(rc_of "$o")" = 0 ] && grep -q "baseurl: *https://127.0.0.1:$AUTH_API" "$f" && grep -q 'authmethod: *certificate' "$f" \
+		&& ! grep -qi 'apikey' "$f" && grep -q 'tlsauth: *pin' "$f" && grep -q "$(pinof daemon)" "$f" \
+		&& grep -q "config-file: *$RIG/auth/tdns-auth.yaml" "$f" && [ -n "$cpin" ] && grep -q "$cpin" "$A"
+	judge S7a "config add as root (#1200): one certificate entry (pins, config-file:, no key), its pin enrolled by the daemon" $? "$o"
+	[ "$(rc_of "$o3")" != 0 ] && ! grep -q ":$IMR_API" "$f"
+	judge S7g "...tdns-imr (usetls: false, no access file): refused, no entry" $? "$o3"
 	o2=$(out S7-add-root-use); ncli_root add-root auth ping > "$o2"
 	[ "$(rc_of "$o2")" = 0 ] && grep -q "pong ($AUTH_SOCK) from" "$o2"
 	judge S7b "...and the entry it wrote works (as root, over the socket)" $? "$o2"
 	o2=$(out S7f-add-root-tcp); ncli_root add-root --tcp auth ping > "$o2"
 	[ "$(rc_of "$o2")" = 0 ] && grep -q 'pong (TLS, read-write, certificate ' "$o2"
 	judge S7f "...tdns-ncli --tcp: over TCP with the client certificate, read-write" $? "$o2"
-	f=$RIG/ncli/add-tcp.yaml; addfile "$f"
-	o=$(out S7-add-tcp); ncli_root add-tcp config add --tcp "$RIG/auth/tdns-auth.yaml" > "$o" 2>&1; cat "$f" >> "$o" 2>/dev/null
-	grep -q 'authmethod: *certificate' "$f" && grep -q 'lists your certificate' "$o" && [ "$(grep -c 'pin:' "$A")" = 1 ]
-	judge S7c "config add again with the same pair: the pin is already listed and is not added twice" $? "$o"
-	# The user cannot write the daemon's side: a new entry is refused, with the
-	# client add command as the fix. Root runs that command; config add then
-	# works. The command may span lines, each but the last ending in a
-	# backslash (#1184 from 62c74645 on: --daemon-config): they are joined.
-	f=$RIG/home/add-user.yaml; addfile "$f" user
+	cp "$f" "$RUNDIR/add-root.after"
+	o=$(out S7-add-again); ncli_root add-root config add "$RIG/auth/tdns-auth.yaml" > "$o" 2>&1
+	cmp -s "$f" "$RUNDIR/add-root.after" && grep -q 'config update tdns-auth --repin' "$o" && [ "$(grep -c "$cpin" "$A")" = 1 ]
+	judge S7c "config add again: the certificate entry is left alone, config update --repin named, the pin not enrolled twice" $? "$o"
+	f2=$RIG/ncli/add-tcp.yaml; addfile "$f2"
+	o=$(out S7-add-tcp); ncli_root add-tcp config add "$RIG/auth/tdns-auth.yaml" > "$o" 2>&1; cat "$f2" >> "$o" 2>/dev/null
+	[ "$(rc_of "$o")" = 0 ] && grep -q 'authmethod: *certificate' "$f2" && [ "$(grep -c "$cpin" "$A")" = 1 ]
+	judge S7i "a second CLI config with the same client pair: its own entry, the pin reused (listed once)" $? "$o"
+	f3=$RIG/home/add-user.yaml; addfile "$f3" user
 	o=$(out S7-add-user); ncli_user home/add-user config add "$RIG/auth/tdns-auth.yaml" > "$o" 2>&1
-	fix=$(awk '/tdns-ncli auth client add / {f = 1} f {sub(/^ */, ""); s = s (s == "" ? "" : " ") $0; if ($0 !~ /\\$/) exit}
-		END {gsub(/ *\\ +/, " ", s); sub(/ *\\$/, "", s); print s}' "$o")
-	case "$fix" in *" --role read-write"*) ;; *) fix="" ;; esac
-	[ "$(rc_of "$o")" != 0 ] && [ -n "$fix" ] && ! grep -q 'apiservers' "$f"
-	judge S7d "config add as a non-root user: refused (cannot write the daemon's side), the client add line as the fix, no entry written" $? "$o"
-	o2=$(out S7-add-user-use)
-	{ echo "root runs: $fix"; ncli_root root auth ${fix#tdns-ncli auth }
-	  ncli_user home/add-user config add "$RIG/auth/tdns-auth.yaml"; cat "$f"; ncli_user home/add-user auth ping; } > "$o2" 2>&1
-	grep -q 'authmethod: *certificate' "$f" && [ "$(rc_of "$o2")" = 0 ] && grep -q 'pong (TLS, read-write, certificate ' "$o2"
-	judge S7e "...root runs that line; config add again gives the user a certificate entry that works" $? "$o2"
+	[ "$(rc_of "$o")" != 0 ] && grep -q 'run it as root' "$o" && ! grep -q 'apiservers' "$f3"
+	judge S7d "config add as a non-root user: refused (run it as root on the daemon's host), nothing written" $? "$o"
+	# A stopped daemon: the entry with config-file: only; it reaches the socket
+	# once the daemon runs.
+	daemon_stop auth
+	f4=$RIG/ncli/add-stopped.yaml; addfile "$f4"
+	o=$(out S7-add-stopped); ncli_root add-stopped config add "$RIG/auth/tdns-auth.yaml" > "$o" 2>&1; cat "$f4" >> "$o" 2>/dev/null
+	[ "$(rc_of "$o")" = 0 ] && grep -q "config-file: *$RIG/auth/tdns-auth.yaml" "$f4" && ! grep -q 'baseurl' "$f4" \
+		&& ! grep -qi 'apikey' "$f4" && grep -q 'config update tdns-auth --cert' "$o"
+	judge S7s "config add as root, daemon stopped: the config-file: entry only (no address, no key), config update --cert named" $? "$o"
+	daemon_start auth || fail S7z "tdns-auth starts on the access-file config" "$LOG/tdns-auth.stdout"
+	o2=$(out S7-add-stopped-use); ncli_root add-stopped auth ping > "$o2"
+	[ "$(rc_of "$o2")" = 0 ] && grep -q "pong ($AUTH_SOCK) from" "$o2"
+	judge S7t "...once the daemon runs, that entry reaches it (as root, over the socket)" $? "$o2"
+	certupdate && config_update_cases
 	daemon_stop auth
 	cp "$RUNDIR/tdns-auth.yaml.seeded" "$RIG/auth/tdns-auth.yaml"; rm -f "$A" "$A.prev" "$RIG/auth/tdns-auth.yaml.prev"
 	daemon_start auth || fail S7z "tdns-auth starts again on the seeded config" "$LOG/tdns-auth.stdout"
+}
+
+# config_update_cases: U1-U7 on a build with #1202's config update (the cert
+# setup design, section 5), from config_add_cert while tdns-auth runs the
+# access-file config ($A) and root's client pin is enrolled. $f is root's
+# certificate entry from S7a, $f4 the stopped daemon's config-file: entry.
+config_update_cases() {
+	fk=$RIG/ncli/upd-key.yaml
+	{ printf 'client:\n   cert:          %s\n   key:           %s\n' "$RIG/ncli/root-client.crt" "$RIG/ncli/root-client.key"
+	  printf '# a comment config update keeps\napiservers:\n   - name:        tdns-auth\n     baseurl:     https://127.0.0.1:%s/api/v1\n     apikey:      cli-access-rig-test-key\n     authmethod:  X-API-Key\n     rootca:      %s\n     config-file: %s\n' \
+		$AUTH_API "$CERTS/ca.crt" "$RIG/auth/tdns-auth.yaml"; } > "$fk"
+	chmod 0600 "$fk"; cp "$fk" "$RUNDIR/upd-key.before"
+	o=$(out U1-cert); ncli_root upd-key config update tdns-auth --cert > "$o" 2>&1; diff "$RUNDIR/upd-key.before" "$fk" >> "$o"
+	o2=$(out U1-ping); ncli_root upd-key --tcp auth ping > "$o2"
+	[ "$(rc_of "$o")" = 0 ] && grep -q 'authmethod: *certificate' "$fk" && grep -q 'tlsauth: *pin' "$fk" && grep -q "$(pinof daemon)" "$fk" \
+		&& ! grep -qi 'apikey' "$fk" && ! grep -q 'rootca' "$fk" && grep -q '^# a comment config update keeps$' "$fk" \
+		&& grep -q "config-file: *$RIG/auth/tdns-auth.yaml" "$fk" && grep -q 'pong (TLS, read-write, certificate ' "$o2"
+	judge U1 "config update --cert on a key entry (rootca:): a certificate entry in place (pins, no key, no rootca:), the comment kept; it works over TCP" $? "$o" "$o2"
+	o=$(out U2-cert); ncli_root add-stopped config update tdns-auth --cert > "$o" 2>&1; cat "$f4" >> "$o" 2>/dev/null
+	o2=$(out U2-ping); ncli_root add-stopped --tcp auth ping > "$o2"
+	[ "$(rc_of "$o")" = 0 ] && grep -q "baseurl: *https://127.0.0.1:$AUTH_API" "$f4" && grep -q 'authmethod: *certificate' "$f4" \
+		&& grep -q "$(pinof daemon)" "$f4" && grep -q 'pong (TLS, read-write, certificate ' "$o2"
+	judge U2 "config update --cert on the stopped daemon's config-file: entry, once it runs: address, pins and certificate filled in; works over TCP" $? "$o" "$o2"
+	cp "$f" "$RUNDIR/add-root.u3"
+	o=$(out U3-again); ncli_root add-root config update tdns-auth --cert > "$o" 2>&1
+	[ "$(rc_of "$o")" != 0 ] && cmp -s "$f" "$RUNDIR/add-root.u3"
+	judge U3 "config update --cert on an entry already on a certificate: refused, the entry unchanged" $? "$o"
+	fd=$RIG/ncli/upd-dry.yaml; cp "$RUNDIR/upd-key.before" "$fd"; chmod 0600 "$fd"
+	o=$(out U4-dry); ncli_root upd-dry config update tdns-auth --cert --dry-run > "$o" 2>&1
+	[ "$(rc_of "$o")" = 0 ] && cmp -s "$fd" "$RUNDIR/upd-key.before"
+	judge U4 "config update --cert --dry-run: nothing written" $? "$o"
+	fn=$RIG/ncli/upd-nocf.yaml; grep -v 'config-file:' "$RUNDIR/upd-key.before" > "$fn"; chmod 0600 "$fn"; cp "$fn" "$RUNDIR/upd-nocf.before"
+	o=$(out U5-nocf); ncli_root upd-nocf config update tdns-auth --cert > "$o" 2>&1
+	[ "$(rc_of "$o")" != 0 ] && cmp -s "$fn" "$RUNDIR/upd-nocf.before"; r1=$?
+	o2=$(out U5-dc); ncli_root upd-nocf config update tdns-auth --cert --daemon-config "$RIG/auth/tdns-auth.yaml" > "$o2" 2>&1; cat "$fn" >> "$o2"
+	[ "$(rc_of "$o2")" = 0 ] && grep -q "config-file: *$RIG/auth/tdns-auth.yaml" "$fn" && grep -q 'authmethod: *certificate' "$fn"; r2=$?
+	[ $r1 = 0 ] && [ $r2 = 0 ]
+	judge U5 "config update on an entry with no config-file:: refused; with --daemon-config: done, and the config-file: line written" $? "$o" "$o2"
+	fu=$RIG/home/upd-user.yaml; cp "$RUNDIR/upd-key.before" "$fu"; chown "$RIGUSER" "$fu"; chmod 0600 "$fu"
+	o=$(out U6-user); ncli_user home/upd-user config update tdns-auth --cert > "$o" 2>&1
+	[ "$(rc_of "$o")" != 0 ] && cmp -s "$fu" "$RUNDIR/upd-key.before"
+	judge U6 "config update as a non-root user: refused, the entry unchanged" $? "$o"
+	# The daemon's pair rotates (the rig's "other" server certificate).
+	daemon_stop auth
+	sed -e "s|^   certfile: .*|   certfile:   $CERTS/other.crt|" -e "s|^   keyfile: .*|   keyfile:    $CERTS/other.key|" "$RIG/auth/tdns-auth.yaml" > "$RUNDIR/rot.yaml"
+	cat "$RUNDIR/rot.yaml" > "$RIG/auth/tdns-auth.yaml"
+	daemon_start auth || fail U7z "tdns-auth starts on the other server certificate" "$LOG/tdns-auth.stdout"
+	o=$(out U7-stale); ncli_root add-root --tcp auth ping > "$o" 2>&1
+	[ "$(rc_of "$o")" != 0 ] && grep -q 'which is not one of the 1 pinned for this entry' "$o" && ! grep -q 'pongs:' "$o"
+	judge U7a "the daemon's pair rotated: a TCP request with the old pin is refused (not one of the entry's pins)" $? "$o"
+	o=$(out U7-repin); ncli_root add-root config update tdns-auth --repin > "$o" 2>&1; cat "$f" >> "$o" 2>/dev/null
+	o2=$(out U7-ping); ncli_root add-root --tcp auth ping > "$o2"
+	[ "$(rc_of "$o")" = 0 ] && grep -q "$(pinof other)" "$f" && ! grep -q "$(pinof daemon)" "$f" && grep -q 'pong (TLS, read-write, certificate ' "$o2"
+	judge U7b "...config update --repin replaces the pins (the old one dropped); the entry works over TCP" $? "$o" "$o2"
+	cp "$f" "$RUNDIR/add-root.u7"
+	o=$(out U7-again); ncli_root add-root config update tdns-auth --repin > "$o" 2>&1
+	[ "$(rc_of "$o")" = 0 ] && grep -q 'already current' "$o" && cmp -s "$f" "$RUNDIR/add-root.u7"
+	judge U7c "...--repin again: already current, nothing written" $? "$o"
 }
