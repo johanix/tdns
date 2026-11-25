@@ -125,7 +125,13 @@ func (imr *Imr) setZoneTable(forwards []*ForwardZone, stubs []string, stubFP map
 // hints replace the servers under ".", and the stub is what the configuration
 // says they are. Priming itself still asks the hints' servers, as it did when
 // the stubs were installed after it.
+//
+// Under reloadMu: a reload that changes the "." stub gives the cache the new
+// servers and then publishes the table that names them, and reading the
+// table between the two would put the old stub back over the new one.
 func (imr *Imr) keepRootStub() {
+	imr.reloadMu.Lock()
+	defer imr.reloadMu.Unlock()
 	servers := imr.zoneTable().rootStub
 	if len(servers) == 0 {
 		return

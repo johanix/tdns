@@ -65,9 +65,10 @@ type Imr struct {
 	// must see one consistent table for its whole walk, and the reload
 	// path relies on nothing else holding a mutable reference.
 	zones atomic.Pointer[imrZoneTable]
-	// reloadMu serializes ReloadZones with itself: the diff against the
-	// running table and the cache-side stub work must not interleave with
-	// another reload doing the same.
+	// reloadMu serializes ReloadZones with itself and with keepRootStub: the
+	// diff against the running table and the cache-side stub work must not
+	// interleave with another reload doing the same, nor with putting the
+	// root stub back from the table a reload is replacing.
 	reloadMu sync.Mutex
 	// bootConf is the imrengine: config this Imr was BUILT from. Kept so a
 	// reload can report which edited keys are not reloadable and need a
