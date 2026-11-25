@@ -367,10 +367,25 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	if serr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, serr)
 	}
+	// An application client's inline key must not be another owner's
+	// (appTsigKeyRefusal; a primary has no primaries, so only that).
+	if err := conf.appTsigKeyRefusal(in.AppClient, name, in.Primaries, staged); err != nil {
+		return "", err
+	}
 
 	// From the expansion until the zone is in Zones: see templateApplyMu.
+	if testHookAddLocking != nil {
+		testHookAddLocking()
+	}
 	templateApplyMu.Lock()
 	defer templateApplyMu.Unlock()
+	if err := conf.appAddRefusal(in.AppClient, name); err != nil {
+		return "", err
+	}
+	// Again under the lock (appTsigKeyRefusal).
+	if err := conf.appTsigKeyRefusal(in.AppClient, name, in.Primaries, staged); err != nil {
+		return "", err
+	}
 	spec, perr := conf.prepareDynamicPrimary(ZoneConf{Name: name, Template: in.Template}, staged, fromAPI)
 	if perr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, perr)
@@ -442,6 +457,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		publishCadence:    spec.PublishCadence,
 	}
 	zd.notifyRetries, zd.notifyRetryInterval = zoneNotifyRetrySettings(zd.ZoneName, &spec.Zconf)
+	zd.setApiOwner(inputApiOwner(in.ApiOwner))
 
 	// First-load callbacks, mirroring what ParseZones registers for static
 	// zones (the engine's stub branch drains OnFirstLoad post-Ready).
@@ -454,7 +470,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	// the keystore holds it when the zone goes live), then register and
 	// persist. On persist failure roll back registration, key, and a
 	// freshly-synthesized bootstrap file — a failed add leaves nothing behind.
-	rollbackKey, cerr := conf.commitStagedTsigKey(staged)
+	rollbackKey, cerr := conf.commitStagedTsigKey(staged, in.ApiOwner)
 	if cerr != nil {
 		cleanupFile()
 		return "", fmt.Errorf("zone %s: %w", name, cerr)
@@ -466,9 +482,9 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	zd.registerStandardRefreshHooks(conf.Internal.DelegationSyncQ)
 
 	Zones.Set(name, zd)
-	if err := conf.AddDynamicZoneToConfig(zd); err != nil {
+	if err := dynamicConfigRewriteFailed("zone add", name, conf.AddDynamicZoneToConfig(zd)); err != nil {
 		zd.stopPublisher()
-		Zones.Remove(name)
+		zd.leaveZones(name)
 		rollbackKey()
 		cleanupFile()
 		return "", fmt.Errorf("failed to persist dynamic zone %s: %w", name, err)

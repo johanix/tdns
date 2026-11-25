@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -45,7 +46,7 @@ func storedSignalRows(t *testing.T, kdb *KeyDB, zone string) int {
 // refresh confirmation.
 func TestADeleteInAnotherCaseDropsTheZoneRecords(t *testing.T) {
 	conf, kdb, zd := removalFixture(t)
-	if _, err := conf.RemoveDynamicZone(strings.ToUpper(zd.ZoneName)); err != nil {
+	if _, err := conf.RemoveDynamicZone(strings.ToUpper(zd.ZoneName), false); err != nil {
 		t.Fatalf("RemoveDynamicZone: %v", err)
 	}
 	if n := storedSignalRows(t, kdb, zd.ZoneName); n != 0 {
@@ -67,8 +68,8 @@ func TestADeleteWhoseStoredSignalDeleteFailsRemovesNothing(t *testing.T) {
 BEGIN SELECT RAISE(ABORT, 'delete refused by the test'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if msg, err := conf.RemoveDynamicZone(zd.ZoneName); err == nil {
-		t.Fatalf("the delete succeeded (%q) with the stored-signal record left in the KeyDB", msg)
+	if removal, err := conf.RemoveDynamicZone(zd.ZoneName, false); err == nil {
+		t.Fatalf("the delete succeeded (%q) with the stored-signal record left in the KeyDB", removal.Msg())
 	}
 	if cur, ok := Zones.Get(zd.ZoneName); !ok || cur != zd {
 		t.Fatal("the failed delete removed the zone")
@@ -86,7 +87,7 @@ BEGIN SELECT RAISE(ABORT, 'delete refused by the test'); END`); err != nil {
 	if _, err := kdb.DB.Exec(`DROP TRIGGER refuse_delete`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conf.RemoveDynamicZone(zd.ZoneName); err != nil {
+	if _, err := conf.RemoveDynamicZone(zd.ZoneName, false); err != nil {
 		t.Fatalf("the delete run again: %v", err)
 	}
 	if n := storedSignalRows(t, kdb, zd.ZoneName); n != 0 {
@@ -113,7 +114,7 @@ func TestADeleteWhoseConfigRewriteFailsKeepsTheSignalRecord(t *testing.T) {
 	// A directory that does not exist: the rewrite cannot create its file.
 	conf.DynamicZones.ConfigFile = filepath.Join(t.TempDir(), "missing", "dynamic.yaml")
 
-	if _, err := conf.RemoveDynamicZone(z); err == nil || !strings.Contains(err.Error(), "will reappear on restart") {
+	if _, err := conf.RemoveDynamicZone(z, false); err == nil || !strings.Contains(err.Error(), "will reappear on restart") {
 		t.Fatalf("the delete with a failed config rewrite returned %v", err)
 	}
 	for owner, digests := range want {
@@ -152,7 +153,7 @@ func TestAReleaseDuringARemovalIsRefused(t *testing.T) {
 	var releaseErr error
 	testHookSignalRecordTaken = func() { released, releaseErr = zd.releaseSignal(owner) }
 	t.Cleanup(func() { testHookSignalRecordTaken = nil })
-	if _, err := conf.RemoveDynamicZone(z); err == nil || !strings.Contains(err.Error(), "will reappear on restart") {
+	if _, err := conf.RemoveDynamicZone(z, false); err == nil || !strings.Contains(err.Error(), "will reappear on restart") {
 		t.Fatalf("the delete with a failed config rewrite returned %v", err)
 	}
 	if released || releaseErr == nil {
@@ -172,7 +173,7 @@ func TestADeleteWhoseRecordCannotBePutBackSaysSo(t *testing.T) {
 BEGIN SELECT RAISE(ABORT, 'insert refused by the test'); END`); err != nil {
 		t.Fatal(err)
 	}
-	_, err := conf.RemoveDynamicZone(zd.ZoneName)
+	_, err := conf.RemoveDynamicZone(zd.ZoneName, false)
 	if err == nil || !strings.Contains(err.Error(), "will reappear on restart") || !strings.Contains(err.Error(), "could not be put back") {
 		t.Fatalf("the delete whose record could not be put back returned %v", err)
 	}
@@ -183,7 +184,7 @@ BEGIN SELECT RAISE(ABORT, 'insert refused by the test'); END`); err != nil {
 // delete would outlive the zone.
 func TestARemovedZonesSignalPassRecordsNothing(t *testing.T) {
 	conf, kdb, zd := removalFixture(t)
-	if _, err := conf.RemoveDynamicZone(zd.ZoneName); err != nil {
+	if _, err := conf.RemoveDynamicZone(zd.ZoneName, false); err != nil {
 		t.Fatalf("RemoveDynamicZone: %v", err)
 	}
 	sconf := &Config{}
@@ -223,7 +224,7 @@ func TestADeleteHoldsOffAnAddOfTheSameName(t *testing.T) {
 	templateApplyMu.Lock()
 	done := make(chan error, 1)
 	go func() {
-		_, err := conf.RemoveDynamicZone(zd.ZoneName)
+		_, err := conf.RemoveDynamicZone(zd.ZoneName, false)
 		done <- err
 	}()
 	<-reached
@@ -267,7 +268,7 @@ func TestASignalPassOnAStaleInstanceRecordsNothing(t *testing.T) {
 	}
 
 	// And once the zone is gone.
-	if _, err := conf.RemoveDynamicZone(zd.ZoneName); err != nil {
+	if _, err := conf.RemoveDynamicZone(zd.ZoneName, false); err != nil {
 		t.Fatalf("RemoveDynamicZone: %v", err)
 	}
 	if err := stale.CreateTransportSignalRRs(sconf); err != nil {
@@ -275,5 +276,66 @@ func TestASignalPassOnAStaleInstanceRecordsNothing(t *testing.T) {
 	}
 	if n := storedSignalRows(t, kdb, z); n != 0 {
 		t.Fatalf("the pass on an instance of the removed zone recorded a stored signal (%d rows)", n)
+	}
+}
+
+// A delete whose rewrite of the dynamic config took effect but could not be
+// synced to disk is a removal a crash could still undo. It is reported as
+// such, not as a failed rewrite ("will reappear on restart"): the zone is
+// out of Zones and out of the file, and a retry would find no zone. The
+// keys are kept until the removal is on disk, and the report offers no
+// command to delete them before that; so is the record of the signals its
+// zone file holds, for the zone a crash would bring back. The configured
+// zone set follows the file, which no longer names the zone.
+func TestADeleteNotSyncedToDiskIsReportedWithItsKeysKept(t *testing.T) {
+	conf, kdb, zd := removalFixture(t)
+	z := zd.ZoneName
+	fixtureActivePair(t, kdb, z)
+	generateSig0Key(t, kdb, z, Sig0StateActive)
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "dynamic.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	prev := syncDynamicConfigDir
+	syncDynamicConfigDir = func(string) error { return errors.New("sync refused by the test") }
+	t.Cleanup(func() { syncDynamicConfigDir = prev })
+	signalConfiguredZones.Store(&map[string]bool{z: true})
+	t.Cleanup(func() { signalConfiguredZones.Store(nil) })
+
+	r, err := conf.RemoveDynamicZone(z, false)
+	if err != nil {
+		t.Fatalf("a delete whose removal is not on disk returned an error, not a report: %v", err)
+	}
+	if r == nil || r.NotSynced == "" {
+		t.Fatalf("the report does not say the removal is not on disk: %+v", r)
+	}
+	if _, back := Zones.Get(z); back {
+		t.Error("the zone is still in Zones")
+	}
+	if n := countRows(t, kdb, "DnssecKeyStore", "zonename", z); n != 2 {
+		t.Errorf("%d DNSSEC keys left, want the 2 kept", n)
+	}
+	if n := countRows(t, kdb, "Sig0KeyStore", "zonename", z); n != 1 {
+		t.Errorf("%d SIG(0) keys left, want the 1 kept", n)
+	}
+	if n := storedSignalRows(t, kdb, z); n != 1 {
+		t.Errorf("the zone has %d stored-signal rows, want its record put back", n)
+	}
+	msg := r.Msg()
+	for _, want := range []string{
+		"zone " + z + " deleted, but a crash could bring it back",
+		"must stay until the removal is on disk",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the report lacks %q:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "keystore ") {
+		t.Errorf("the report offers to delete the keys before the removal is on disk:\n%s", msg)
+	}
+	if strings.Contains(msg, "reappear") || len(r.Warnings()) != 0 {
+		t.Errorf("the report overstates it: %s %q", msg, r.Warnings())
+	}
+	if names := signalConfiguredZones.Load(); names == nil || (*names)[z] {
+		t.Error("the configured zone set still counts the zone the file no longer names")
 	}
 }

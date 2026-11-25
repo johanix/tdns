@@ -65,7 +65,7 @@ func TestStageInlineTsigKey(t *testing.T) {
 	}
 
 	// Commit installs it; the returned rollback removes a newly-added key.
-	rollback, err := conf.commitStagedTsigKey(staged)
+	rollback, err := conf.commitStagedTsigKey(staged, "")
 	if err != nil {
 		t.Fatalf("commitStagedTsigKey: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestStageInlineTsigKey(t *testing.T) {
 	}
 	if _, err := conf.commitStagedTsigKey(&TsigDetails{
 		Name: "pre", Algorithm: "hmac-sha256", Secret: "YWJjZGVmZ2hpamtsbW5vcA==",
-	}); err == nil {
+	}, ""); err == nil {
 		t.Fatal("expected error committing conflicting inline key")
 	}
 	if d, _ := conf.Internal.TsigKeyStore.Get("pre"); d.Secret != b64Secret16 {

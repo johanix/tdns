@@ -422,6 +422,7 @@ func TestKeyWritersAreOwnershipChecked(t *testing.T) {
 		"SpawnKskAlgRollover":                     "refuses an owned zone (alg-rollover)",
 		"ZoneData.EnsureActiveDnssecKeys":         "returns an owned zone's active set untouched",
 		"ZoneData.reconcileActiveKeyAlgorithms":   "reached from EnsureActiveDnssecKeys only",
+		"ZoneData.makeMissingDnssecKeys":          "reached from EnsureActiveDnssecKeys only, after it has returned an owned zone's set",
 		"advanceCreatedKeysInRangeTx":             "reached from the tick's confirm only",
 		"capStandbyZsksByCount":                   "reached from maintainStandbyKeys, which skips an owned zone",
 		"freezeNonActiveSEPKeysTx":                "reached from SpawnKskAlgRollover only",

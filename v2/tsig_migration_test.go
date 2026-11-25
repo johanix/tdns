@@ -19,7 +19,9 @@ func TestMigrateDynamicConfigTsigKeys(t *testing.T) {
 	conf.Internal.TsigKeyStore = NewTsigKeyStore()
 
 	cf := &DynamicConfigFile{
-		Zones: []ZoneConf{{Name: "z.", Type: "secondary"}},
+		// As loadDynamicConfigFile would have read it now.
+		readAfterWrites: dynamicConfigWrites,
+		Zones:           []ZoneConf{{Name: "z.", Type: "secondary"}},
 		Keys: &KeyConf{Tsig: []TsigDetails{
 			{Name: "dyn.", Algorithm: "hmac-sha256", Secret: b64Secret16},
 		}},
@@ -75,6 +77,8 @@ func TestMigrateDynamicConfigTsigKeys_SkipsExisting(t *testing.T) {
 	}
 
 	cf := &DynamicConfigFile{
+		// As loadDynamicConfigFile would have read it now.
+		readAfterWrites: dynamicConfigWrites,
 		Keys: &KeyConf{Tsig: []TsigDetails{
 			// Same name AND same secret as the seeded key => idempotent skip.
 			{Name: "shared.", Algorithm: "hmac-sha256", Secret: b64Secret16},
@@ -121,6 +125,8 @@ func TestMigrateDynamicConfigTsigKeys_ConflictRejected(t *testing.T) {
 	}
 
 	cf := &DynamicConfigFile{
+		// As loadDynamicConfigFile would have read it now.
+		readAfterWrites: dynamicConfigWrites,
 		Keys: &KeyConf{Tsig: []TsigDetails{
 			{Name: "shared.", Algorithm: "hmac-sha256", Secret: "YWJjZGVmZ2hpamtsbW5vcA=="}, // different secret
 			{Name: "new.", Algorithm: "hmac-sha256", Secret: b64Secret16},

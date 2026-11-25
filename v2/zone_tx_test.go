@@ -808,7 +808,7 @@ func TestACatalogZonesFirstSnapshotHasItsVersionRecord(t *testing.T) {
 		forgetCatalogMembership(zone)
 	})
 
-	if err := handleCatalogCreate(zone, &CatalogResponse{}); err != nil {
+	if err := handleCatalogCreate(zone, "", &CatalogResponse{}); err != nil {
 		t.Fatalf("handleCatalogCreate: %v", err)
 	}
 	zd, ok := Zones.Get(zone)
@@ -863,7 +863,7 @@ func TestACatalogCreateKeepsAMembershipMadeBeforeIt(t *testing.T) {
 	if err := early.AddMemberZone("member.example."); err != nil {
 		t.Fatalf("AddMemberZone: %v", err)
 	}
-	if err := handleCatalogCreate(zone, &CatalogResponse{}); err != nil {
+	if err := handleCatalogCreate(zone, "", &CatalogResponse{}); err != nil {
 		t.Fatalf("handleCatalogCreate: %v", err)
 	}
 	cm := catalogMembershipOf(zone)

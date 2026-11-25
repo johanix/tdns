@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -302,7 +303,7 @@ func newZoneDynamicCmds(role string) []*cobra.Command {
 	var dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo string
 	var dzTransferSrc []string
 	var dzZoneType, dzTemplate string
-	var dzClearTemplate bool
+	var dzClearTemplate, dzKeepKeys bool
 	var dzPrimaries, dzOptions []string
 
 	add := &cobra.Command{
@@ -340,12 +341,13 @@ func newZoneDynamicCmds(role string) []*cobra.Command {
 
 	del := &cobra.Command{
 		Use:   "delete",
-		Short: "Delete a dynamic (API-managed) zone",
+		Short: "Delete a dynamic (API-managed) zone, with its DNSSEC and SIG(0) keys",
 		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneDelete(role)
+			RunZoneDelete(role, dzKeepKeys)
 		},
 	}
 	del.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to delete")
+	del.Flags().BoolVar(&dzKeepKeys, "keep-keys", false, "Keep the zone's DNSSEC and SIG(0) keys in the keystore, for a re-add of the zone to take back (default: delete them with the zone)")
 	del.MarkFlagRequired("zone")
 
 	modify := &cobra.Command{
@@ -382,7 +384,25 @@ func newZoneDynamicCmds(role string) []*cobra.Command {
 		},
 	}
 
-	return []*cobra.Command{add, del, modify, listDynamic}
+	setOwner := &cobra.Command{
+		Use:   "setowner <zone> <api-owner>",
+		Short: "Set the API owner of a zone created over the API (admin)",
+		Long: `Hand a zone created over the API (zone add, catalog create) to a
+certificate client of the access file, or back to the operators:
+
+  zone setowner example.com. cert:provisioner
+  zone setowner example.com. api
+
+A zone in the config file has its API owner set with api-owner: in
+its config, and a catalog member has its catalog zone's. Admin only:
+run it over the daemon's local socket.`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneSetOwner(role, args[0], args[1])
+		},
+	}
+
+	return []*cobra.Command{add, del, modify, listDynamic, setOwner}
 }
 
 // runZoneSimpleCmd runs a ZonePost command after PrepArgs("childzone")
@@ -401,7 +421,7 @@ func runZoneSimpleCmd(role, command string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -424,7 +444,7 @@ func runZoneShowNsec(role string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -457,7 +477,7 @@ func RunZoneReload(parent string, args []string) {
 	})
 
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -480,7 +500,7 @@ func RunZoneWrite(parent string, args []string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -505,7 +525,7 @@ func RunZoneSetPolicy(parent, policy string) {
 		Policy:  policy,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -534,7 +554,7 @@ func RunZoneResetPolicy(parent string, confirm bool) {
 		Force:   confirm,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -558,7 +578,7 @@ func RunZoneProxyKey(parent string) {
 		Zone:    dns.Fqdn(tdns.Globals.Zonename),
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Error {
@@ -580,7 +600,7 @@ func RunZoneList(parent string, args []string) {
 		Command: "list-zones",
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -616,7 +636,7 @@ func RunZoneDesc(parent string, args []string) {
 		Zone:    zone,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Msg != "" {
@@ -645,7 +665,7 @@ func RunZoneBump(parent string, args []string) {
 	})
 
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 
@@ -713,7 +733,7 @@ func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey 
 		TransferSrc: transferSrc,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	printZoneWarnings(cr.Warnings)
@@ -730,7 +750,7 @@ func printZoneWarnings(warnings []string) {
 	}
 }
 
-func RunZoneDelete(role string) {
+func RunZoneDelete(role string, keepKeys bool) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
 		os.Exit(1)
@@ -740,16 +760,64 @@ func RunZoneDelete(role string) {
 		log.Fatalf("Error getting API client for %s: %v", role, err)
 	}
 	cr, err := SendZoneCommand(api, tdns.ZonePost{
-		Command: "delete",
-		Zone:    dns.Fqdn(tdns.Globals.Zonename),
+		Command:  "delete",
+		Zone:     dns.Fqdn(tdns.Globals.Zonename),
+		KeepKeys: keepKeys,
 	})
-	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+	// A delete whose keys could not follow the zone is an error with a
+	// report: the zone is gone, and the report says how to finish.
+	if err != nil && cr.Removal == nil {
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
-	if cr.Msg != "" {
-		fmt.Printf("%s\n", cr.Msg)
+	for _, line := range zoneDeleteLines(cr) {
+		fmt.Println(line)
 	}
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
+// zoneDeleteLineWidth is the widest line zoneDeleteLines wraps to. A
+// command to copy is never wrapped, so a long zone name can pass it.
+const zoneDeleteLineWidth = 72
+
+// zoneDeleteLines is a zone delete's outcome as printed: the server's
+// message, verdict first, then its warnings.
+func zoneDeleteLines(cr tdns.ZoneResponse) []string {
+	var out []string
+	for _, line := range strings.Split(cr.Msg, "\n") {
+		switch {
+		case line == "":
+		// An indented line is a command to copy (Msg indents only those): a
+		// wrapped one would run without the rest of its arguments.
+		case strings.HasPrefix(line, "  "):
+			out = append(out, line)
+		default:
+			out = append(out, wrapIndented(line, zoneDeleteLineWidth)...)
+		}
+	}
+	for _, w := range cr.Warnings {
+		out = append(out, wrapIndented("WARNING: "+w, zoneDeleteLineWidth)...)
+	}
+	return out
+}
+
+// wrapIndented word-wraps s to width, keeping its leading indent and
+// indenting the continuation lines two more spaces, so that a wrapped
+// sentence reads as one.
+func wrapIndented(s string, width int) []string {
+	text := strings.TrimLeft(s, " ")
+	indent := s[:len(s)-len(text)]
+	lines := wrapText(text, width-len(indent))
+	if len(lines) == 0 {
+		return nil
+	}
+	out := []string{indent + lines[0]}
+	for _, l := range wrapText(strings.Join(lines[1:], " "), width-len(indent)-2) {
+		out = append(out, indent+"  "+l)
+	}
+	return out
 }
 
 func RunZoneModify(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string, transferSrc []string, template string, clearTemplate bool) {
@@ -782,7 +850,7 @@ func RunZoneModify(role string, primaries []string, primaryKey string, options [
 	}
 	cr, err := SendZoneCommand(api, post)
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	printZoneWarnings(cr.Warnings)
@@ -798,37 +866,103 @@ func RunZoneListDynamic(role string) {
 	}
 	cr, err := SendZoneCommand(api, tdns.ZonePost{Command: "list-dynamic"})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if len(cr.Zones) == 0 {
 		fmt.Println("No dynamic zones.")
 		return
 	}
-	names := make([]string, 0, len(cr.Zones))
-	for name := range cr.Zones {
+	fmt.Print(formatZoneListDynamic(cr.Zones))
+}
+
+// formatZoneListDynamic renders `zone list-dynamic`: a row per zone, with
+// the columns that keep it within 72 characters for usual names, and under
+// it, indented, what the row has no room for: the catalog a member came
+// from (a zone without one was added over the API), the template, and the
+// zone's error. The NOTIFY targets are in `zone list -N`.
+func formatZoneListDynamic(zones map[string]tdns.ZoneConf) string {
+	names := make([]string, 0, len(zones))
+	for name := range zones {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	out := []string{"Zone|Type|Provisioning|Managed|Primary|Template|Notify|Error"}
-	for _, name := range names {
-		zc := cr.Zones[name]
-		managed := "catalog"
-		if zc.ApiManaged {
-			managed = "api"
+	rows := []string{"Zone|Type|State|API owner|Primary"}
+	details := make([][]string, len(names))
+	catalogZone := tdns.ZoneOptionToString[tdns.OptCatalogZone]
+	for i, name := range names {
+		zc := zones[name]
+		rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%s", name, zc.Type, zoneStateOrUnknown(zc),
+			dashIfEmpty(zc.ApiOwner), dashIfEmpty(peerConfAddrsString(zc.Primaries))))
+		var notes []string
+		switch {
+		case zc.SourceCatalog != "":
+			notes = append(notes, "from catalog "+zc.SourceCatalog)
+		case slices.Contains(zc.OptionsStrs, catalogZone):
+			notes = append(notes, "catalog zone")
 		}
-		errStr := ""
+		if zc.Template != "" {
+			notes = append(notes, "template "+zc.Template)
+		}
+		if len(notes) > 0 {
+			details[i] = append(details[i], strings.Join(notes, ", "))
+		}
 		if zc.Error {
-			errStr = zc.ErrorMsg
+			details[i] = append(details[i], fmt.Sprintf("%s: %s", tdns.ErrorTypeToString[zc.ErrorType], zc.ErrorMsg))
 		}
-		tmpl := zc.Template
-		if tmpl == "" {
-			tmpl = "-"
-		}
-		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s",
-			name, zc.Type, zc.Provisioning, managed, peerConfAddrsString(zc.Primaries), tmpl, peerConfAddrsString(zc.Notify), errStr))
 	}
-	fmt.Println(columnize.SimpleFormat(out))
+	table := strings.Split(strings.TrimRight(columnize.SimpleFormat(rows), "\n"), "\n")
+	var b strings.Builder
+	b.WriteString(table[0] + "\n")
+	for i := range names {
+		b.WriteString(table[i+1] + "\n")
+		// A detail (a zone's error, say) wraps within 72 characters; its
+		// continuation lines are indented two more.
+		for _, d := range details[i] {
+			for j, l := range wrapText(d, 72-4-2) {
+				if j > 0 {
+					l = "  " + l
+				}
+				b.WriteString("    " + l + "\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// RunZoneSetOwner hands a zone created over the API to a certificate
+// client, or back to the operators ("api"): the verdict, then any warning.
+func RunZoneSetOwner(role, zone, owner string) {
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command:  "setowner",
+		Zone:     dns.Fqdn(zone),
+		ApiOwner: owner,
+	})
+	if err != nil {
+		printDaemonError(api.Name, err)
+		os.Exit(1)
+	}
+	fmt.Print(formatZoneSetOwner(cr))
+}
+
+func formatZoneSetOwner(cr tdns.ZoneResponse) string {
+	var b strings.Builder
+	b.WriteString(cr.Msg + "\n")
+	for _, w := range cr.Warnings {
+		b.WriteString("warning: " + w + "\n")
+	}
+	return b.String()
 }
 
 func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse, error) {
@@ -838,7 +972,11 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 
 	status, buf, err := api.Post("/zone", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
+		if rerr, ok := refusalError(err); ok {
+			cr.AppName = api.Name
+			return cr, rerr
+		}
+		// Not logged: the caller prints it (printDaemonError), once.
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
 	if tdns.Globals.Verbose {
@@ -851,7 +989,7 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("%s", cr.ErrorMsg)
+		return cr, &daemonError{msg: cr.ErrorMsg}
 	}
 
 	return cr, nil
@@ -1054,6 +1192,12 @@ func zoneBaseDetail(name string, zconf tdns.ZoneConf) string {
 	}
 
 	fmt.Fprintf(&b, "\tFrozen: %t\tDirty: %t\t%s\n", zconf.Frozen, zconf.Dirty, configInfo)
+	// Who may manage the zone over the management API. Every listing the
+	// daemon sends carries it; a ZoneConf without it prints nothing, as the
+	// serials above.
+	if zconf.ApiOwner != "" {
+		fmt.Fprintf(&b, "\tAPI owner: %s\n", zconf.ApiOwner)
+	}
 	return b.String()
 }
 
@@ -1233,7 +1377,7 @@ func RunZoneSync(parent string, args []string) {
 		Force:   force,
 	})
 	if err != nil {
-		fmt.Printf("Error from %s: %s\n", parent, err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Msg != "" {

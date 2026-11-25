@@ -14,7 +14,9 @@ import (
 // TestApiRoleTableMatchesTheHandlers holds apiRouteRoles to the code. It parses
 // this package, finds every route the two router builders register and the
 // handler each one calls, and collects the command strings each handler
-// switches on (switch x.Command). Then:
+// switches on (switch x.Command) or compares the command with (x.Command ==
+// "sync-log", strings.EqualFold(x.Command, ...)), so that a command answered
+// in an early branch, before the switch, is held to the table too. Then:
 //
 //   - every registered route must have an entry in the table;
 //   - every command a handler knows must be listed for its route, unless the
@@ -24,6 +26,52 @@ import (
 //     switch at all (it then means "this route");
 //   - every command listed must still exist in its handler.
 func TestApiRoleTableMatchesTheHandlers(t *testing.T) {
+	routes, funcs := parseApiRoutes(t)
+
+	for route, handler := range routes {
+		table, ok := apiRouteRoles[route]
+		if !ok {
+			t.Errorf("route %s (%s) has no entry in apiRouteRoles: decide its roles", route, handler)
+			continue
+		}
+		fd := funcs[handler]
+		if fd == nil {
+			t.Errorf("route %s: handler %s not found", route, handler)
+			continue
+		}
+		cmds := commandsOf(fd)
+		star, hasStar := table["*"]
+		allAdmin := hasStar && star == RoleAdmin
+		if hasStar && !allAdmin && len(cmds) > 0 {
+			t.Errorf("route %s: a non-admin \"*\" on a handler with commands %v; list them instead", route, cmds)
+		}
+		for _, c := range cmds {
+			if _, ok := table[c]; !ok && !allAdmin {
+				t.Errorf("route %s: command %q (in %s) is not in apiRouteRoles; decide its role", route, c, handler)
+			}
+		}
+		known := map[string]bool{}
+		for _, c := range cmds {
+			known[c] = true
+		}
+		for c := range table {
+			if c != "" && c != "*" && !known[c] {
+				t.Errorf("route %s: apiRouteRoles lists %q, which %s no longer has", route, c, handler)
+			}
+		}
+	}
+	for route := range apiRouteRoles {
+		if _, ok := routes[route]; !ok {
+			t.Errorf("apiRouteRoles has %s, which no router builder registers", route)
+		}
+	}
+}
+
+// parseApiRoutes parses this package and returns every route the two router
+// builders register with the name of the handler each one calls, and the
+// package's functions by name.
+func parseApiRoutes(t *testing.T) (map[string]string, map[string]*ast.FuncDecl) {
+	t.Helper()
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
 		return !strings.HasSuffix(fi.Name(), "_test.go")
@@ -80,64 +128,59 @@ func TestApiRoleTableMatchesTheHandlers(t *testing.T) {
 		t.Fatalf("found only %d routes; the parse is broken: %v", len(routes), routes)
 	}
 
-	for route, handler := range routes {
-		table, ok := apiRouteRoles[route]
-		if !ok {
-			t.Errorf("route %s (%s) has no entry in apiRouteRoles: decide its roles", route, handler)
-			continue
-		}
-		fd := funcs[handler]
-		if fd == nil {
-			t.Errorf("route %s: handler %s not found", route, handler)
-			continue
-		}
-		cmds := commandsOf(fd)
-		star, hasStar := table["*"]
-		allAdmin := hasStar && star == RoleAdmin
-		if hasStar && !allAdmin && len(cmds) > 0 {
-			t.Errorf("route %s: a non-admin \"*\" on a handler with commands %v; list them instead", route, cmds)
-		}
-		for _, c := range cmds {
-			if _, ok := table[c]; !ok && !allAdmin {
-				t.Errorf("route %s: command %q (in %s) is not in apiRouteRoles; decide its role", route, c, handler)
-			}
-		}
-		known := map[string]bool{}
-		for _, c := range cmds {
-			known[c] = true
-		}
-		for c := range table {
-			if c != "" && c != "*" && !known[c] {
-				t.Errorf("route %s: apiRouteRoles lists %q, which %s no longer has", route, c, handler)
-			}
-		}
-	}
-	for route := range apiRouteRoles {
-		if _, ok := routes[route]; !ok {
-			t.Errorf("apiRouteRoles has %s, which no router builder registers", route)
-		}
-	}
+	return routes, funcs
 }
 
-// commandsOf collects the string cases of every switch in fd whose tag reads a
-// field named Command, lower-cased and trimmed as RequiredApiRole does.
+// commandsOf collects the commands fd knows, lower-cased and trimmed as
+// RequiredApiRole does: the string cases of every switch whose tag reads a
+// field named Command, and every string that such a field is compared with
+// (== or !=, or strings.EqualFold), as a handler does for a command it
+// answers before its switch.
 func commandsOf(fd *ast.FuncDecl) []string {
+	return switchCases(fd, "Command")
+}
+
+// switchCases collects what fd compares a field named field (Command,
+// SubCommand) with, lower-cased and trimmed: the string cases of every
+// switch whose tag reads it, and every string it is compared with (== or
+// !=, or strings.EqualFold).
+func switchCases(fd *ast.FuncDecl, field string) []string {
 	seen := map[string]bool{}
-	ast.Inspect(fd, func(n ast.Node) bool {
-		sw, ok := n.(*ast.SwitchStmt)
-		if !ok || sw.Tag == nil || !readsCommand(sw.Tag) {
-			return true
+	add := func(e ast.Expr) {
+		if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			s, _ := strconv.Unquote(lit.Value)
+			seen[strings.ToLower(strings.TrimSpace(s))] = true
 		}
-		for _, st := range sw.Body.List {
-			cc, ok := st.(*ast.CaseClause)
-			if !ok {
-				continue
+	}
+	// compared adds b when a reads field, and a when b does.
+	compared := func(a, b ast.Expr) {
+		if readsField(a, field) {
+			add(b)
+		}
+		if readsField(b, field) {
+			add(a)
+		}
+	}
+	ast.Inspect(fd, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.SwitchStmt:
+			if x.Tag == nil || !readsField(x.Tag, field) {
+				return true
 			}
-			for _, e := range cc.List {
-				if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-					s, _ := strconv.Unquote(lit.Value)
-					seen[strings.ToLower(strings.TrimSpace(s))] = true
+			for _, st := range x.Body.List {
+				if cc, ok := st.(*ast.CaseClause); ok {
+					for _, e := range cc.List {
+						add(e)
+					}
 				}
+			}
+		case *ast.BinaryExpr:
+			if x.Op == token.EQL || x.Op == token.NEQ {
+				compared(x.X, x.Y)
+			}
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "EqualFold" && len(x.Args) == 2 {
+				compared(x.Args[0], x.Args[1])
 			}
 		}
 		return true
@@ -150,10 +193,23 @@ func commandsOf(fd *ast.FuncDecl) []string {
 	return out
 }
 
-func readsCommand(e ast.Expr) bool {
+// caseStrings is the string constants of one case clause, lower-cased and
+// trimmed.
+func caseStrings(cc *ast.CaseClause) []string {
+	var out []string
+	for _, e := range cc.List {
+		if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			s, _ := strconv.Unquote(lit.Value)
+			out = append(out, strings.ToLower(strings.TrimSpace(s)))
+		}
+	}
+	return out
+}
+
+func readsField(e ast.Expr, field string) bool {
 	found := false
 	ast.Inspect(e, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Command" {
+		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == field {
 			found = true
 		}
 		return !found

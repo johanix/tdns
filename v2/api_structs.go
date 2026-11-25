@@ -60,6 +60,14 @@ type KeystorePost struct {
 	BulkDnssecKeys []BulkDnssecKey `json:"bulkdnsseckeys,omitempty"`
 	BulkSig0Keys   []BulkSig0Key   `json:"bulksig0keys,omitempty"`
 	BulkTsigKeys   []BulkTsigKey   `json:"bulktsigkeys,omitempty"`
+
+	// appClient is the application client the request runs for
+	// (AppClientOf), set by APIkeystore from the request's identity and
+	// never from the body: unexported, so JSON cannot reach it. The
+	// *KeyMgmt functions limit it to its own keys where they resolve the
+	// key or zone they act on. "" (every other caller, and every caller
+	// inside the daemon) is unlimited.
+	appClient string
 }
 
 type TsigKeyInfo struct {
@@ -74,8 +82,14 @@ type TsigKeyInfo struct {
 // TsigKeyDisposition reports per-key outcome for import (and similar batch ops).
 type TsigKeyDisposition struct {
 	Name   string `json:"name"`
-	Status string `json:"status"` // imported | unchanged | conflict
+	Status string `json:"status"`           // imported | unchanged | conflict | refused
+	Detail string `json:"detail,omitempty"` // why, for refused
 }
+
+// TsigImportRefused is the import disposition of a key an application client
+// may not write: another API owner's key with another secret or algorithm.
+// Unlike a conflict, neither force nor --interactive overwrites it.
+const TsigImportRefused = "refused"
 
 // TsigCacheDelta records in-memory cache patches to apply after a successful DB
 // commit (§4). Not echoed on the API wire.
@@ -126,6 +140,11 @@ type KeystoreResponse struct {
 	// change the zone's active signing-key set. External-tx callers (APIkeystore)
 	// must call republishSigningKeysForZone after their Commit (R1).
 	NeedsSigningKeysRepublish bool `json:"-"`
+	// keyZone is the zone whose DNSSEC keys DnssecKeyMgmt changed: the
+	// request's Zone, or for add and setstate the zone the key was written
+	// under (keyWriteZone). The external-tx caller republishes and
+	// re-signs this zone, not the one the request names.
+	keyZone string
 	// GeneratedSig0Key is the keypair a sig0-mgmt "generate" made, for an
 	// in-process caller that goes on to use it. Never on the wire: it holds the
 	// private key.
@@ -377,6 +396,12 @@ type ZonePost struct {
 	// On modify, a nil slice leaves the current value alone; an explicitly
 	// empty one clears it. See ModifyDynamicZone.
 	TransferSrc []string
+	// ApiOwner is the new API owner for "setowner": api or cert:<name>.
+	ApiOwner string `json:"apiowner,omitempty"`
+	// KeepKeys (delete only) leaves the zone's DNSSEC and SIG(0) keys in the
+	// keystore, for a re-add of the zone to take back. By default they are
+	// deleted with the zone.
+	KeepKeys bool `json:"keepkeys,omitempty"`
 }
 
 type ZoneResponse struct {
@@ -411,6 +436,37 @@ type ZoneResponse struct {
 	Delegation *ChildDelegationReport `json:"delegation,omitempty"`
 	// Name carries the report for "get-name".
 	Name *ZoneNameReport `json:"name,omitempty"`
+	// Removal carries what "delete" did with the zone's keys. Msg and
+	// Warnings say the same in words.
+	Removal *ZoneRemoval `json:"removal,omitempty"`
+}
+
+// ZoneRemoval is what a zone delete did with the zone's DNSSEC and SIG(0)
+// keys. TSIG keys are never deleted with a zone.
+type ZoneRemoval struct {
+	Zone string `json:"zone"`
+	// KeepKeys: the keys were left in the keystore, and the counts below
+	// are of the keys kept rather than deleted.
+	KeepKeys   bool `json:"keepkeys,omitempty"`
+	DnssecKeys int  `json:"dnsseckeys"`
+	Sig0Keys   int  `json:"sig0keys"`
+	// ParentDS is what the KSK rollover engine saw of a DS for the zone at
+	// the parent at its last poll (ParentDSSeen, ParentDSNone), and
+	// ParentDSAt when; empty when that tells nothing. Read only when the
+	// keys are deleted.
+	ParentDS   string `json:"parentds,omitempty"`
+	ParentDSAt string `json:"parentdsat,omitempty"`
+	// KeysError is set when the zone was deleted but its keys could not be
+	// deleted (or, with KeepKeys, counted). The zone stays deleted.
+	KeysError string `json:"keyserror,omitempty"`
+	// NotSynced is set when the zone left Zones and the dynamic config, but
+	// the rewrite of the config could not be synced to disk: a crash could
+	// still bring the zone back, so its keys were kept, as was everything
+	// else such a zone needs. It says why. It overrides the key fields: the
+	// keys were kept whatever KeepKeys says, and they were not counted, so
+	// DnssecKeys and Sig0Keys are zero and tell nothing. A synced removal
+	// leaves NotSynced empty, and the fields mean what they say above.
+	NotSynced string `json:"notsynced,omitempty"`
 }
 
 // ZoneNameReport is what a zone publishes at one owner name.

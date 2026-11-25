@@ -271,9 +271,9 @@ func runZoneUpdateViaApi(role, zone string, spec tdns.ZoneUpdateSpec) {
 	})
 	if err != nil {
 		// cr is the zero value on a transport error, so cr.AppName would render
-		// as an empty name -- `Error from "":`. The role is what the operator
-		// actually asked for and is always known.
-		fmt.Printf("Error from %s: %s\n", role, err.Error())
+		// as an empty name -- `Error from "":`. The client's name is always
+		// known.
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if cr.Msg != "" {

@@ -37,11 +37,11 @@ func newZoneChildSyncCmd(role string) *cobra.Command {
 				Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			})
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {
@@ -64,11 +64,11 @@ func newZoneChildSyncCmd(role string) *cobra.Command {
 				Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			})
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {
@@ -94,11 +94,11 @@ func newZoneChildSyncCmd(role string) *cobra.Command {
 					Zone:    dns.Fqdn(tdns.Globals.Zonename),
 				})
 				if err != nil {
-					fmt.Printf("Error: %s\n", err.Error())
+					printDaemonError(api.Name, err)
 					os.Exit(1)
 				}
 				if resp.Error {
-					fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+					printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 					os.Exit(1)
 				}
 				if resp.Msg != "" {
@@ -168,7 +168,11 @@ func SendChildSyncCommand(api *tdns.ApiClient, data tdns.ZoneChildSyncPost) (tdn
 
 	status, buf, err := api.Post("/zone/childsync", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
+		if rerr, ok := refusalError(err); ok {
+			cr.AppName = api.Name
+			return cr, rerr
+		}
+		// Not logged: the caller prints it (printDaemonError), once.
 		return cr, fmt.Errorf("error from api post: %v", err)
 	}
 	if status != 200 && tdns.Globals.Verbose {
@@ -180,7 +184,7 @@ func SendChildSyncCommand(api *tdns.ApiClient, data tdns.ZoneChildSyncPost) (tdn
 		return cr, fmt.Errorf("error from unmarshal: %v", err)
 	}
 	// cr.Error is NOT turned into a Go error: the callers render it
-	// themselves ("Error from server: ..."), and wrapping it here made that
+	// themselves (printDaemonErrorMsg), and wrapping it here made that
 	// branch unreachable and doubled the prefix on the path that did run.
 	// A non-nil error from this function means the exchange failed.
 	return cr, nil
