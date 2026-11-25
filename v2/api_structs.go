@@ -817,7 +817,11 @@ type DelegationPost struct {
 	Scheme  uint8  // 1=notify | 2=update
 	Zone    string
 	Force   bool
-	Outfile string `json:"outfile,omitempty"` // for "export": destination file path
+	// Outfile is refused. "export" returns the data and the client writes
+	// the file; the daemon once wrote it here, at a path any caller chose.
+	// Kept only so that a request that still sets it is refused rather
+	// than silently ignored.
+	Outfile string `json:"outfile,omitempty"`
 
 	// For "sync-log". Zone, when set, selects the parent.
 	Child string `json:"child,omitempty"`
@@ -831,6 +835,7 @@ type DelegationResponse struct {
 	Zone       string
 	SyncStatus DelegationSyncStatus
 	SyncLog    *SyncLogReport `json:",omitempty"` // for "sync-log"
+	Export     string         `json:",omitempty"` // for "export": the delegation data, zone file text
 	Msg        string
 	Error      bool
 	ErrorMsg   string
