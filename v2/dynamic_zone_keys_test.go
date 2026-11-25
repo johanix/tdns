@@ -860,16 +860,16 @@ func dnssecKeyCount(t *testing.T, kdb *KeyDB, zone string) int {
 func TestAZoneDeletedBeforeItsFirstKeysGetsNone(t *testing.T) {
 	const name = "firstkeys.example."
 	conf, zd, kdb := signingZoneToDelete(t, name)
-	testHookEnsureKeysLocking = func(stage string) {
+	testHookEnsureKeys = func(stage string) {
 		if stage != "make" {
 			return
 		}
-		testHookEnsureKeysLocking = nil
+		testHookEnsureKeys = nil
 		if _, err := conf.RemoveDynamicZone(name, false); err != nil {
 			t.Errorf("delete: %v", err)
 		}
 	}
-	t.Cleanup(func() { testHookEnsureKeysLocking = nil })
+	t.Cleanup(func() { testHookEnsureKeys = nil })
 
 	if _, err := zd.EnsureActiveDnssecKeys(kdb, false); !errors.Is(err, errNoKeysForRemovedZone) {
 		t.Errorf("EnsureActiveDnssecKeys on a zone deleted under it returned %v, want %v", err, errNoKeysForRemovedZone)
@@ -961,12 +961,12 @@ func TestAnOldZoneDataDoesNotReconcileANewZonesKeys(t *testing.T) {
 	fixtureActivePair(t, kdb, name)
 	standby := fixtureStaged(t, kdb, name, "KSK", DnskeyStateStandby)
 
-	testHookEnsureKeysLocking = func(stage string) {
+	testHookEnsureKeys = func(stage string) {
 		if stage == "reconcile" {
 			old.removed.Store(true)
 		}
 	}
-	t.Cleanup(func() { testHookEnsureKeysLocking = nil })
+	t.Cleanup(func() { testHookEnsureKeys = nil })
 	if _, err := old.EnsureActiveDnssecKeys(kdb, false); !errors.Is(err, errNoKeysForRemovedZone) {
 		t.Errorf("EnsureActiveDnssecKeys on the old ZoneData returned %v, want %v", err, errNoKeysForRemovedZone)
 	}
@@ -975,7 +975,7 @@ func TestAnOldZoneDataDoesNotReconcileANewZonesKeys(t *testing.T) {
 	}
 
 	// The premise: the same pass on a ZoneData still in Zones removes it.
-	testHookEnsureKeysLocking = nil
+	testHookEnsureKeys = nil
 	old.removed.Store(false)
 	if _, err := old.EnsureActiveDnssecKeys(kdb, false); err != nil {
 		t.Fatalf("EnsureActiveDnssecKeys: %v", err)
@@ -993,12 +993,12 @@ func TestAnOldZoneDataDoesNotPromoteANewZonesKeys(t *testing.T) {
 	ksk := fixtureStaged(t, kdb, name, "KSK")
 	zsk := fixtureStaged(t, kdb, name, "ZSK")
 
-	testHookEnsureKeysLocking = func(stage string) {
+	testHookEnsureKeys = func(stage string) {
 		if stage == "make" {
 			old.removed.Store(true)
 		}
 	}
-	t.Cleanup(func() { testHookEnsureKeysLocking = nil })
+	t.Cleanup(func() { testHookEnsureKeys = nil })
 	if _, err := old.EnsureActiveDnssecKeys(kdb, false); !errors.Is(err, errNoKeysForRemovedZone) {
 		t.Errorf("EnsureActiveDnssecKeys on the old ZoneData returned %v, want %v", err, errNoKeysForRemovedZone)
 	}
@@ -1012,7 +1012,7 @@ func TestAnOldZoneDataDoesNotPromoteANewZonesKeys(t *testing.T) {
 	}
 
 	// The premise: the same pass on a ZoneData still in Zones promotes them.
-	testHookEnsureKeysLocking = nil
+	testHookEnsureKeys = nil
 	old.removed.Store(false)
 	if _, err := old.EnsureActiveDnssecKeys(kdb, false); err != nil {
 		t.Fatalf("EnsureActiveDnssecKeys: %v", err)
@@ -1100,5 +1100,34 @@ func TestASig0BootstrapSendsNothingForAZoneDeletedBeforeTheCeremony(t *testing.T
 	zd.removed.Store(false)
 	if _, _, err := zd.bootstrapSig0KeyWithParent(context.Background(), dns.ED25519, []string{"at-apex"}, false); err == nil || errors.Is(err, errNoKeysForRemovedZone) {
 		t.Errorf("test premise: the bootstrap of a live zone returned %v, want the parent's refusal", err)
+	}
+}
+
+// A zone whose key lifecycle an owner runs only reads its keys here. An
+// old ZoneData of such a zone, deleted and the name re-added after its
+// first check, gets none of the new zone's keys, which the lookup by name
+// finds: the check after the lookup sees the mark the delete made first.
+func TestAnOldOwnedZoneDataGetsNoneOfANewZonesKeys(t *testing.T) {
+	const name = "owned.samename.example."
+	old, kdb := sameNameZones(t, name, &DnssecPolicy{Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519})
+	installOwner(t, &testOwner{owns: map[string]bool{name: true}})
+	old.Options[OptMultiProvider] = true
+	fixtureActivePair(t, kdb, name)
+
+	testHookEnsureKeys = func(stage string) {
+		if stage == "lookup" {
+			old.removed.Store(true)
+		}
+	}
+	t.Cleanup(func() { testHookEnsureKeys = nil })
+	if dak, err := old.EnsureActiveDnssecKeys(kdb, false); !errors.Is(err, errNoKeysForRemovedZone) {
+		t.Errorf("an old owned ZoneData got %+v, %v; want %v", dak, err, errNoKeysForRemovedZone)
+	}
+
+	// The premise: a ZoneData still in Zones gets the owner's keys.
+	testHookEnsureKeys = nil
+	old.removed.Store(false)
+	if dak, err := old.EnsureActiveDnssecKeys(kdb, false); err != nil || len(dak.KSKs) == 0 || len(dak.ZSKs) == 0 {
+		t.Errorf("test premise: an owned zone's keys: %+v, %v", dak, err)
 	}
 }

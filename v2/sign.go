@@ -496,10 +496,20 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		return nil, zd.noKeysForRemovedZone("EnsureActiveDnssecKeys")
 	}
 
+	if testHookEnsureKeys != nil {
+		testHookEnsureKeys("lookup")
+	}
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	if err != nil {
 		lgSigner.Error("failed to get DNSSEC active keys", "zone", zd.ZoneName, "err", err)
 		return nil, err
+	}
+	// Checked again after the lookup, for every path after it, the owned
+	// one included. Keys found by name are a zone's added after this
+	// ZoneData's delete only if that delete was done before the lookup,
+	// and the delete marks this ZoneData first: so the mark is seen here.
+	if zd.removed.Load() {
+		return nil, zd.noKeysForRemovedZone("EnsureActiveDnssecKeys")
 	}
 
 	// A zone whose key lifecycle is owned (KeyLifecycleOwner): the owner
@@ -524,8 +534,8 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 	// no-op, safe on every sign/re-sign. Under the zone keys lock, and only
 	// for a ZoneData still in Zones: an old one's policy must not remove a
 	// key of a zone added since under the same name.
-	if testHookEnsureKeysLocking != nil {
-		testHookEnsureKeysLocking("reconcile")
+	if testHookEnsureKeys != nil {
+		testHookEnsureKeys("reconcile")
 	}
 	unlockKeys, err := zd.lockZoneKeys("EnsureActiveDnssecKeys")
 	if err != nil {
@@ -581,8 +591,8 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 
 	lgSigner.Info("no active DNSSEC keys available, will generate new keys", "zone", zd.ZoneName)
 
-	if testHookEnsureKeysLocking != nil {
-		testHookEnsureKeysLocking("make")
+	if testHookEnsureKeys != nil {
+		testHookEnsureKeys("make")
 	}
 	// The promotion and the generation below write the zone's keys: under
 	// the zone keys lock, held until the keys are made, and only for a
@@ -730,11 +740,11 @@ func (zd *ZoneData) noKeysForRemovedZone(op string) error {
 	return fmt.Errorf("%s: zone %s: %w", op, zd.ZoneName, errNoKeysForRemovedZone)
 }
 
-// testHookEnsureKeysLocking, when set, runs in EnsureActiveDnssecKeys just
-// before it takes the zone keys lock: stage "reconcile" before the
-// algorithm reconcile, "make" once it has found keys missing, before it
-// promotes or makes them.
-var testHookEnsureKeysLocking func(stage string)
+// testHookEnsureKeys, when set, runs in EnsureActiveDnssecKeys at each
+// stage: "lookup" before it looks up the active keys, "reconcile" before
+// it takes the zone keys lock for the algorithm reconcile, "make" once it
+// has found keys missing, before it takes the lock to promote or make them.
+var testHookEnsureKeys func(stage string)
 
 // makeMissingDnssecKeys generates the zone's active KSK and real ZSK
 // (Flags 256) when the keystore has none, and reports which it made. The
