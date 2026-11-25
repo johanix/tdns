@@ -509,7 +509,11 @@ func knownEntry(o AddOptions, res *AddResult, existing []ApiDetails, info *Daemo
 // (config add, config update) sets up certificates through it.
 func needSocket(info *DaemonApi, cmd string) error {
 	if info.Socket == "" {
-		return fmt.Errorf("%s serves no local admin socket\n(socket: none). %s needs it, run as root on the\ndaemon's host: certificate setup goes through the socket", info.ConfigFile, cmd)
+		why := "socket: none"
+		if info.SocketError != "" {
+			why = info.SocketError
+		}
+		return fmt.Errorf("%s serves no local admin socket\n(%s). %s needs it, run as root on the\ndaemon's host: certificate setup goes through the socket", info.ConfigFile, why, cmd)
 	}
 	return nil
 }
