@@ -343,7 +343,7 @@ func TestInlineTsigKeyTakesTheCallersApiOwner(t *testing.T) {
 // config-file zone, a catalog member and a bad value are refused; an owner
 // the access file has no client for is set, with a warning.
 func TestZoneSetOwner(t *testing.T) {
-	if got := RequiredApiRole("/api/v1/zone", "setowner"); got != RoleAdmin {
+	if got := RequiredApiRole("/api/v1/zone", "setowner", "", false); got != RoleAdmin {
 		t.Errorf("zone setowner needs %v, want admin", got)
 	}
 	ownerTestConf(t)

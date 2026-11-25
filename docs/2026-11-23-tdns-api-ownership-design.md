@@ -1,10 +1,10 @@
 # Owners for zones and keys: scoped API access for applications
 
 Date: 2026-11-23
-Status: r2, decided (section 8). Implementation in progress, as four PRs
-(section 6): Z (`zone delete` deletes the zone's keys), A (owners recorded),
-B (application clients and zone scope), C (keystore for application
-clients). Builds on 2026-11-20-api-pinning-mtls-roles-design.md (pinned
+Status: r2, decided (section 8). Implemented as four PRs (section 6), not
+all merged yet: Z (`zone delete` deletes the zone's keys), A (owners
+recorded), B (application clients and zone scope), C (keystore for
+application clients). Decisions taken while building them: section 10. Builds on 2026-11-20-api-pinning-mtls-roles-design.md (pinned
 certificates, the access file, the three roles, admin on the local socket
 only).
 
@@ -573,3 +573,102 @@ Part B (application clients and zone scope):
   name, that its removal has not started, and that it is still the
   client's. An update whose zone was deleted and re-added while it waited
   is refused; operators' updates go to the zone of their name, as before.
+
+Part C (keystore for application clients):
+
+- For an application client, what the application table opens on the
+  keystore needs read-write, lists and exports included: a read-only
+  application client gets no keystore. What it does not open needs admin,
+  so the refusal is "needs admin" and names the subcommand
+  (`/api/v1/keystore tsig-mgmt purge needs admin ...`). Every other caller
+  needs admin for all of it, as before.
+- The application table marks the keystore "by subcommand" and splits it
+  by Command and SubCommand in a second table (`apiAppSubScopes`). A test
+  holds it to the handler's commands and to the subcommands of the
+  `*KeyMgmt` function each command calls. The middleware reads SubCommand
+  in the same single read of the body; one that is not a string needs
+  admin.
+- `list-dnskey` stays admin, unlike table 4.6 says. It is a truststore
+  command (section 3 counted it with the keystore by mistake) and lists
+  the DNSKEYs the server has cached for its children, not keys an
+  application owns.
+- The own-key filters are in the SQL: TSIG by `owner`, SIG(0) and DNSSEC
+  by the zone name folded to lower case, against the served zones whose
+  API owner is the caller, passed as one JSON array (`json_each`), so the
+  number of zones does not run into SQL variable limits.
+- The checks are made in the `*KeyMgmt` functions, on the name each
+  subcommand acts on; the request carries the application client's name
+  in an unexported field that only the handler sets. `sig0-mgmt delete`
+  names its key by one name, Keyname or Zone (two different ones are
+  refused), and that name is checked. `add` takes the zone from the key
+  record's owner name. A key command that names no zone is refused to an
+  application before the name is made fully qualified, where it would be
+  the root; "." names the root. A rollover with no zone is refused to
+  every caller: its keys would be picked from every zone.
+- One answer: a SIG(0) or DNSSEC key command on another's zone, or on a
+  zone not served here, gets B's zone refusal before any lookup, whether
+  or not the key exists. An export goes further: a key of another's zone
+  or of a zone not served reads as "not found", with the status and words
+  of a missing key of the caller's own zone. A TSIG key of another API
+  owner reads as "not found", like a key that does not exist.
+- TSIG add, generate and import record the caller as the API owner,
+  whatever the request names. An identical key of another API owner is
+  unchanged, keeps its owner, and the answer says so. Another secret
+  under another owner's name, the config's included, is refused, force or
+  not. On its own keys force works as before. The bind/nsd import reports
+  such a key as `refused`, with the reason, which `--interactive` does not
+  offer to overwrite.
+- Bulk import has a new disposition, `refused`, with the reason in
+  Detail. A refused key is skipped before it is validated, so the import
+  says nothing about others' keys, and the rest are imported. The summary
+  counts them; the CLI prints the reason under the key and exits 2, as
+  for a conflict. A TSIG bulk import by an application client records it
+  as the owner, with origin api.
+- Every private key and TSIG secret that a successful export or
+  bulk-export hands out is logged at Info, one line per key, for every
+  caller (operators and the socket too): client, how it authenticated,
+  whether it is an application client, the kind, the zone or key name and
+  the key ID. An export whose request fails, its commit included, hands
+  out no key material and logs nothing.
+- The keystore handler also refuses an application client what the table
+  refuses, so a path that skips the middleware does not skip the table.
+  It also refuses a SIG(0) or DNSSEC command whose Zone is not the
+  client's, whatever the subcommand checks (found by the ownership test
+  app, check 7.21).
+- `dnssec-mgmt setstate` and `add` republish and re-sign the zone the key
+  is written under: Keyname's (Zone's when Keyname is empty), and the
+  DNSKEY's owner name. A Zone that names another zone is refused before
+  anything is written, for every caller; an empty Zone is the written
+  zone's. An add re-signs whatever state it gives the key: re-importing a
+  published key as active changes the signing keys and not the served
+  DNSKEYs. `sig0-mgmt delete` looks up and deletes by one name, and is
+  refused when Zone and Keyname name two.
+- SIG(0) and DNSSEC key rows that the keystore API writes (add,
+  generate, bulk import) are stored under the zone's canonical name, lower
+  case and fully qualified, which the signing reads use. A row stored in
+  another case before this keeps its spelling, with no migration: the
+  commands that name one key (setstate, setparentstate, export, delete)
+  and bulk import find it whatever the case, and it stays out of the
+  signing keys as before. Zone-wide commands (rollover, clear,
+  policy-cleanup, purge, check) use the canonical name only. SIG(0) keys
+  that the daemon generates for itself keep the name they are given.
+  Only zone names are made canonical: purge's "all" (any case) is every
+  zone, and "all." the zone of that name.
+- A DNSSEC key change that commits and whose signing-key republish then
+  fails answers with an error that says the change is committed and the
+  zone does not serve it yet. The re-sign still goes: the failure leaves
+  the zone's signing-keys snapshot unbuilt, so the re-sign reads the keys
+  from the keystore, or fails and stays owed, and never signs with the
+  keys from before.
+- A SIG(0) bulk import mirrors into the TrustStore, for each key it
+  imports or replaces, the record the keystore stored, so an offer of the
+  same key later in the batch that was refused or a conflict is never
+  mirrored.
+- The reference count in an application's TSIG list counts every zone
+  that uses the key, others' included: delete's "not in use" rule needs
+  the same number.
+- The keystore CLI prints its errors through the same printer as the
+  other commands (part B): "Refused by <client> (HTTP 403):" or "Error
+  from <client>:", then the daemon's words within 72 characters.
+  `bulk-export` without a selector says it exports every key "this client
+  may export".

@@ -137,6 +137,14 @@ func parseApiRoutes(t *testing.T) (map[string]string, map[string]*ast.FuncDecl) 
 // (== or !=, or strings.EqualFold), as a handler does for a command it
 // answers before its switch.
 func commandsOf(fd *ast.FuncDecl) []string {
+	return switchCases(fd, "Command")
+}
+
+// switchCases collects what fd compares a field named field (Command,
+// SubCommand) with, lower-cased and trimmed: the string cases of every
+// switch whose tag reads it, and every string it is compared with (== or
+// !=, or strings.EqualFold).
+func switchCases(fd *ast.FuncDecl, field string) []string {
 	seen := map[string]bool{}
 	add := func(e ast.Expr) {
 		if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
@@ -144,19 +152,19 @@ func commandsOf(fd *ast.FuncDecl) []string {
 			seen[strings.ToLower(strings.TrimSpace(s))] = true
 		}
 	}
-	// compared adds b when a reads Command, and a when b does.
+	// compared adds b when a reads field, and a when b does.
 	compared := func(a, b ast.Expr) {
-		if readsCommand(a) {
+		if readsField(a, field) {
 			add(b)
 		}
-		if readsCommand(b) {
+		if readsField(b, field) {
 			add(a)
 		}
 	}
 	ast.Inspect(fd, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.SwitchStmt:
-			if x.Tag == nil || !readsCommand(x.Tag) {
+			if x.Tag == nil || !readsField(x.Tag, field) {
 				return true
 			}
 			for _, st := range x.Body.List {
@@ -185,10 +193,23 @@ func commandsOf(fd *ast.FuncDecl) []string {
 	return out
 }
 
-func readsCommand(e ast.Expr) bool {
+// caseStrings is the string constants of one case clause, lower-cased and
+// trimmed.
+func caseStrings(cc *ast.CaseClause) []string {
+	var out []string
+	for _, e := range cc.List {
+		if lit, ok := e.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+			s, _ := strconv.Unquote(lit.Value)
+			out = append(out, strings.ToLower(strings.TrimSpace(s)))
+		}
+	}
+	return out
+}
+
+func readsField(e ast.Expr, field string) bool {
 	found := false
 	ast.Inspect(e, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Command" {
+		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == field {
 			found = true
 		}
 		return !found

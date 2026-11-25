@@ -53,9 +53,27 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (resp *Keys
 		return conf.tsigKeyZoneRefCount(name)
 	}
 
+	// An application client's own keys only (design 4.6): a key of another
+	// API owner and a key that does not exist get the same answer.
+	app := kp.appClient
+	ownKey := func(name string) (TsigKeystoreRow, error) {
+		row, err := getTsigKeystoreByName(tx, name)
+		if err == nil && !appTsigKeyIsOwn(app, row) {
+			return TsigKeystoreRow{}, sql.ErrNoRows
+		}
+		return row, err
+	}
+
 	switch kp.SubCommand {
 	case "list":
-		rows, err := listTsigKeystore(tx)
+		var rows []TsigKeystoreRow
+		var err error
+		if app != "" {
+			where, arg := appTsigOwnerFilter(app)
+			rows, err = listTsigKeystoreWhere(tx, where, arg)
+		} else {
+			rows, err = listTsigKeystore(tx)
+		}
 		if err != nil {
 			return resp, err
 		}
@@ -78,7 +96,7 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (resp *Keys
 		if serr != nil {
 			return resp, serr
 		}
-		keys, err := kdb.BulkExportTsig(tx, sel)
+		keys, err := kdb.bulkExportTsig(tx, sel, app)
 		if err != nil {
 			return resp, err
 		}
@@ -91,6 +109,7 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (resp *Keys
 		// tsigKeyDeclaredInConfig for why those are not the same question.
 		dispositions, err := kdb.BulkImportTsig(tx, kp.BulkTsigKeys, kp.Force, TsigBulkPolicy{
 			StillInConfig: conf.tsigKeyDeclaredInConfig,
+			AppClient:     app,
 		})
 		if err != nil {
 			return resp, err
@@ -155,7 +174,7 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (resp *Keys
 		if name == "" {
 			name = kp.Keyname
 		}
-		existing, err := getTsigKeystoreByName(tx, name)
+		existing, err := ownKey(name)
 		if err == sql.ErrNoRows {
 			return resp, fmt.Errorf("TSIG key %q not found", name)
 		}
@@ -192,7 +211,7 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (resp *Keys
 		if name == "" {
 			return resp, fmt.Errorf("export requires a TSIG key name")
 		}
-		row, err := getTsigKeystoreByName(tx, name)
+		row, err := ownKey(name)
 		if err == sql.ErrNoRows {
 			return resp, fmt.Errorf("TSIG key %q not found", name)
 		}
@@ -242,8 +261,22 @@ func (kdb *KeyDB) tsigKeyMgmtAdd(_ *Config, tx *Tx, kp KeystorePost, resp *Keyst
 	if err == nil {
 		if tsigDetailsMatchRow(TsigDetails{Name: row.Keyname, Algorithm: row.Algorithm, Secret: row.Secret}, existing) {
 			resp.Msg = fmt.Sprintf("TSIG key %q unchanged", row.Keyname)
+			// An application client that offers an identical key of
+			// another API owner learns that it is the same key, and no
+			// more; the key keeps its owner (design 4.7), so it is told
+			// it did not get it.
+			if !appTsigKeyIsOwn(kp.appClient, existing) {
+				resp.Msg += fmt.Sprintf(": an identical key exists, and its API owner stays as it was, not %s%s",
+					ApiOwnerCertPrefix, kp.appClient)
+			}
 			resp.TsigCacheDelta = nil
 			return nil
+		}
+		// Another API owner's key, the config's included, is not the
+		// application's to overwrite, whatever force says.
+		if !appTsigKeyIsOwn(kp.appClient, existing) {
+			return appRefusal(fmt.Sprintf("TSIG key %q exists with another secret or algorithm, and is not a key of API owner %s%s",
+				row.Keyname, ApiOwnerCertPrefix, kp.appClient), "choose another name")
 		}
 		if existing.Origin == "config" {
 			return fmt.Errorf("TSIG key %q is config-managed (origin=config); change it in keys.tsig, not via the keystore", row.Keyname)
@@ -299,7 +332,7 @@ func (kdb *KeyDB) tsigKeyMgmtImport(conf *Config, tx *Tx, kp KeystorePost, resp 
 		creator = "api-request"
 	}
 
-	var imported, unchanged, conflicts int
+	var imported, unchanged, conflicts, refused int
 	resp.TsigImport = make([]TsigKeyDisposition, 0, len(keys))
 	for _, t := range keys {
 		disp := TsigKeyDisposition{Name: t.Name}
@@ -320,6 +353,12 @@ func (kdb *KeyDB) tsigKeyMgmtImport(conf *Config, tx *Tx, kp KeystorePost, resp 
 		} else if tsigDetailsMatchRow(t, existing) {
 			disp.Status = "unchanged"
 			unchanged++
+		} else if !appTsigKeyIsOwn(kp.appClient, existing) {
+			// Not a conflict that force or --interactive could settle:
+			// another API owner's key is not the application's to write.
+			disp.Status = TsigImportRefused
+			disp.Detail = appTsigTaken(kp.appClient)
+			refused++
 		} else if existing.Origin == "config" {
 			disp.Status = "conflict"
 			conflicts++
@@ -342,9 +381,19 @@ func (kdb *KeyDB) tsigKeyMgmtImport(conf *Config, tx *Tx, kp KeystorePost, resp 
 	}
 
 	resp.Msg = fmt.Sprintf("import: %d imported, %d unchanged, %d conflict(s)", imported, unchanged, conflicts)
-	if conflicts > 0 {
+	if refused > 0 {
+		resp.Msg += fmt.Sprintf(", %d refused", refused)
+	}
+	switch {
+	case conflicts > 0:
 		resp.Error = true
 		resp.ErrorMsg = fmt.Sprintf("%d key(s) withheld due to secret/algorithm conflict (use --force or --interactive)", conflicts)
+		if refused > 0 {
+			resp.ErrorMsg += fmt.Sprintf("; %d refused: not keys of API owner %s%s", refused, ApiOwnerCertPrefix, kp.appClient)
+		}
+	case refused > 0:
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("%d key(s) refused: not keys of API owner %s%s", refused, ApiOwnerCertPrefix, kp.appClient)
 	}
 	return nil
 }

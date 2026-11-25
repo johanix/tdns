@@ -60,6 +60,18 @@ type KeystorePost struct {
 	BulkDnssecKeys []BulkDnssecKey `json:"bulkdnsseckeys,omitempty"`
 	BulkSig0Keys   []BulkSig0Key   `json:"bulksig0keys,omitempty"`
 	BulkTsigKeys   []BulkTsigKey   `json:"bulktsigkeys,omitempty"`
+
+	// appClient is the application client the request runs for
+	// (AppClientOf), set by APIkeystore from the request's identity and
+	// never from the body: unexported, so JSON cannot reach it. The
+	// *KeyMgmt functions limit it to its own keys where they resolve the
+	// key or zone they act on. "" (every other caller, and every caller
+	// inside the daemon) is unlimited.
+	appClient string
+	// appID is the request's identity (ApiIdentityFrom), set by APIkeystore
+	// with appClient, for the audit lines the *KeyMgmt functions write
+	// (appKeyExportRefusal), as logKeyExports writes them from the request.
+	appID ApiIdentity
 }
 
 type TsigKeyInfo struct {
@@ -74,8 +86,14 @@ type TsigKeyInfo struct {
 // TsigKeyDisposition reports per-key outcome for import (and similar batch ops).
 type TsigKeyDisposition struct {
 	Name   string `json:"name"`
-	Status string `json:"status"` // imported | unchanged | conflict
+	Status string `json:"status"`           // imported | unchanged | conflict | refused
+	Detail string `json:"detail,omitempty"` // why, for refused
 }
+
+// TsigImportRefused is the import disposition of a key an application client
+// may not write: another API owner's key with another secret or algorithm.
+// Unlike a conflict, neither force nor --interactive overwrites it.
+const TsigImportRefused = "refused"
 
 // TsigCacheDelta records in-memory cache patches to apply after a successful DB
 // commit (§4). Not echoed on the API wire.
@@ -126,6 +144,11 @@ type KeystoreResponse struct {
 	// change the zone's active signing-key set. External-tx callers (APIkeystore)
 	// must call republishSigningKeysForZone after their Commit (R1).
 	NeedsSigningKeysRepublish bool `json:"-"`
+	// keyZone is the zone whose DNSSEC keys DnssecKeyMgmt changed: the
+	// request's Zone, or for add and setstate the zone the key was written
+	// under (keyWriteZone). The external-tx caller republishes and
+	// re-signs this zone, not the one the request names.
+	keyZone string
 	// GeneratedSig0Key is the keypair a sig0-mgmt "generate" made, for an
 	// in-process caller that goes on to use it. Never on the wire: it holds the
 	// private key.
