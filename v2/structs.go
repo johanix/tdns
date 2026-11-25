@@ -209,10 +209,17 @@ type ZoneData struct {
 	// setowner` on a live zone. Readers hold no lock, so it is atomic. Nil
 	// or empty for a catalog member, which follows its catalog zone.
 	apiOwner atomic.Pointer[string]
-	// removed is set by RemoveDynamicZone when the zone leaves Zones, before
-	// the zone's keys and rollover state are deleted under its rollover lock.
-	// A KSK rollover tick that got the zone before that, and takes the lock
-	// after, would otherwise write that state back for a zone that is gone.
+	// removed is set when this ZoneData leaves Zones for good: by
+	// RemoveDynamicZone when the zone is deleted, before its keys and
+	// rollover state are deleted under its rollover lock, by a dynamic add
+	// that rolls the zone back, and by ModifyDynamicZone on the ZoneData it
+	// replaces (cleared again if a failed modify puts it back, swapZoneData).
+	// Set under zd.mu together with the Zones change, which republishLocked
+	// relies on. Whatever still holds the ZoneData then writes nothing for
+	// the zone: an error change does not put it back in Zones
+	// (republishLocked), a KSK rollover tick that takes the rollover lock
+	// after the delete does not write the deleted state back, and a SIG(0)
+	// rollover makes no new key (generateRolloverSig0Key).
 	removed atomic.Bool
 	// catalogWriteMu serializes a configured catalog's write-backs to its own
 	// zone file (writeBackCatalogZone). Never taken with zd.mu held: WriteZone

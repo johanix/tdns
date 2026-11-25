@@ -151,11 +151,12 @@ func appZoneGone(zone string) error {
 // under zd.mu before the zone leaves Zones, so such a removal either starts
 // after the apply or is seen here, and a zone of the same name can be added
 // only once it is done. A removal that fails clears the mark again; an
-// update refused meanwhile can be sent again. The other removals (a config
-// reload, the catalog paths) and modify's replacement do not take zd.mu:
-// one that races this check leaves the update applied to the instance it
-// was authorized against, which is then no longer served, never to the zone
-// that replaced it.
+// update refused meanwhile can be sent again. A modify marks the ZoneData it
+// replaces (zd.removed) under zd.mu too (swapZoneData). The other removals
+// (a config reload, the catalog paths) do not take zd.mu: one that races
+// this check leaves the update applied to the instance it was authorized
+// against, which is then no longer served, never to the zone that replaced
+// it.
 func (zd *ZoneData) appUpdateTargetRefusalLocked(ur UpdateRequest) error {
 	if ur.AppZone == nil {
 		return nil
