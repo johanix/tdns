@@ -370,6 +370,18 @@ func (conf *Config) apiAccessStatus() *ApiAccessStatus {
 	return out
 }
 
+// withoutComments is st without the clients' comments. config status
+// answers read-only callers too, and a comment is the operator's note;
+// the admin /access list keeps them.
+func (st *ApiAccessStatus) withoutComments() *ApiAccessStatus {
+	if st != nil {
+		for i := range st.Clients {
+			st.Clients[i].Comment = ""
+		}
+	}
+	return st
+}
+
 // absConfigFile is cfg made absolute from this daemon's working directory.
 func absConfigFile(cfg string) string {
 	if abs, err := filepath.Abs(cfg); err == nil {

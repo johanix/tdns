@@ -281,7 +281,11 @@ func daemonSocketClient(role, daemonCfg string) (*tdns.ApiClient, error) {
 	// only the default daemon's own socket says it is that daemon.
 	if ad := apiDetailsForRole(role); daemonCfg == "" && ad != nil && ad.ConfigFile == "" &&
 		(err != nil || !entryIsDaemonSocket(*ad, info)) {
-		return nil, fmt.Errorf("the entry %s has no config-file:, so nothing says\nwhich daemon it is. Give --daemon-config <file>, or add\nconfig-file: to the entry", ad.Name)
+		why := ""
+		if err != nil {
+			why = "\nReading the default daemon config failed:\n" + err.Error()
+		}
+		return nil, fmt.Errorf("the entry %s has no config-file:, so nothing says\nwhich daemon it is. Give --daemon-config <file>, or add\nconfig-file: to the entry%s", ad.Name, why)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("cannot read %s's daemon config %s: %v", role, cfg, err)
