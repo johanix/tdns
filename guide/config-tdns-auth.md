@@ -102,9 +102,13 @@ when `apiserver.addresses` is empty, and a socket the daemon cannot serve is
 reported as a server error (`config status` shows the daemon as degraded)
 rather than stopping it.
 
-`tdns-ncli config add` writes a socket entry (`baseurl:
-unix:///var/run/tdns/tdns-auth.sock`, `authmethod: none`) when run as root, so
-the CLI config on the daemon's own host needs no API key.
+`tdns-ncli config add` needs the socket: run as root on the daemon's host,
+it asks the running daemon to add your client certificate's pin to its
+access file (below), checks one request over TCP, and writes one entry
+with `authmethod: certificate`, the daemon's pins and `config-file:`, and no
+API key. A stopped daemon gets an entry with `config-file:` only, through
+which root reaches the socket once the daemon runs; `tdns-ncli config update
+<entry> --cert` completes it then. See `guide/multi-instance-cli.md`.
 
 ## Network clients and roles: the access file
 
