@@ -104,11 +104,8 @@ func TestZoneDeleteLines(t *testing.T) {
 				"zone example.com. deleted, but a crash could bring it back: the new",
 				"  dynamic config file is in place, but could not be synced to disk:",
 				"  input/output error",
-				"its keys were kept, for the zone a crash would bring back; once the disk",
-				"  is fine, delete them by hand; \"keystore sig0 list\" shows the SIG(0)",
-				"  key IDs:",
-				"  keystore dnssec clear --zone example.com. --force",
-				"  keystore sig0 delete --zone example.com. --keyid <keyid>",
+				"its keys were kept, and must stay until the removal is on disk: the next",
+				"  zone add, modify or delete that succeeds puts it there",
 			},
 		},
 		{

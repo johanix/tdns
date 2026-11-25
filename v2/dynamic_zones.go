@@ -875,10 +875,17 @@ func (conf *Config) WriteDynamicConfigFile() error {
 	// delete that persisted in between, and then deleted the zone's keys,
 	// would see the zone come back on restart without them). Collecting
 	// it takes no zone lock.
+	if testHookDynamicConfigWriteLocking != nil {
+		testHookDynamicConfigWriteLocking()
+	}
 	dynamicConfigMutex.Lock()
 	defer dynamicConfigMutex.Unlock()
 	return conf.writeDynamicConfigFileLocked(conf.getDynamicZonesFromZonesMap())
 }
+
+// testHookDynamicConfigWriteLocking, when set, runs in WriteDynamicConfigFile
+// just before it takes dynamicConfigMutex.
+var testHookDynamicConfigWriteLocking func()
 
 // AddDynamicZoneToConfig adds or updates a zone in the dynamic config file
 func (conf *Config) AddDynamicZoneToConfig(zd *ZoneData) error {
@@ -1469,6 +1476,12 @@ func (conf *Config) RemoveDynamicZone(name string, keepKeys bool) (*ZoneRemoval,
 		// it is needs it as much, and one that writes a new file finds only
 		// the signals the pass would store there itself.
 		if errors.Is(err, errDynamicConfigNotSynced) {
+			// The file in place no longer names the zone, so the signal-name
+			// orphan sweep must stop counting it as configured, as below.
+			confMu.RLock()
+			staticZoneNames := conf.staticZoneNames()
+			confMu.RUnlock()
+			conf.refreshConfiguredZoneNames(staticZoneNames)
 			lg.Error("zone delete: the zone is out of the dynamic config, but the removal is not on disk; its keys were kept",
 				"zone", name, "error", err)
 			r := &ZoneRemoval{Zone: name, KeepKeys: keepKeys, NotSynced: err.Error()}
