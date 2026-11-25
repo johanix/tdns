@@ -394,7 +394,8 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			// The zone is gone, but keys left behind are a delete that did
 			// not finish: a client that reads only Error must not take it
 			// for a success.
-			if removal.KeysError != "" && !removal.KeepKeys {
+			// So is a removal a crash could still undo.
+			if (removal.KeysError != "" && !removal.KeepKeys) || removal.NotSynced != "" {
 				resp.Error = true
 				resp.ErrorMsg = resp.Msg
 			}

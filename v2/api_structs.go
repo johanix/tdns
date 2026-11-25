@@ -438,6 +438,11 @@ type ZoneRemoval struct {
 	// KeysError is set when the zone was deleted but its keys could not be
 	// deleted (or, with KeepKeys, counted). The zone stays deleted.
 	KeysError string `json:"keyserror,omitempty"`
+	// NotSynced is set when the zone left Zones and the dynamic config, but
+	// the rewrite of the config could not be synced to disk: a crash could
+	// still bring the zone back, so its keys were kept, as was everything
+	// else such a zone needs. It says why.
+	NotSynced string `json:"notsynced,omitempty"`
 }
 
 // ZoneNameReport is what a zone publishes at one owner name.

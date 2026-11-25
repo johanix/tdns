@@ -409,6 +409,26 @@ func TestZoneDeleteThroughTheAPI(t *testing.T) {
 		}
 	})
 
+	// A removal a crash could still undo is not a success either: the
+	// report, with its keys kept and the commands to finish, as the error.
+	t.Run("removal not on disk", func(t *testing.T) {
+		_, kdb := keysFixture(t)
+		Conf.Internal.KeyDB = kdb
+		Conf.DynamicZones.ConfigFile = filepath.Join(t.TempDir(), "dynamic.yaml")
+		t.Cleanup(func() { Conf.DynamicZones.ConfigFile = "" })
+		prev := syncDynamicConfigDir
+		syncDynamicConfigDir = func(string) error { return errors.New("sync refused by the test") }
+		t.Cleanup(func() { syncDynamicConfigDir = prev })
+		resp := post(t, `{"Command":"delete","Zone":"keys.example."}`)
+		if !resp.Error || resp.Removal == nil || resp.Removal.NotSynced == "" || resp.ErrorMsg != resp.Msg {
+			t.Fatalf("delete not on disk: error %v (%s), removal %+v", resp.Error, resp.ErrorMsg, resp.Removal)
+		}
+		if !strings.Contains(resp.ErrorMsg, "keystore dnssec clear --zone keys.example. --force") {
+			t.Errorf("ErrorMsg = %q", resp.ErrorMsg)
+		}
+		wantAllRows(t, kdb, keysZone, "removal not on disk")
+	})
+
 	t.Run("keys not deleted", func(t *testing.T) {
 		_, kdb := keysFixture(t)
 		Conf.Internal.KeyDB = kdb
