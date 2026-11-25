@@ -4,12 +4,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // A zone delete takes the zone's DNSSEC and SIG(0) keys along, unless told
@@ -476,5 +481,152 @@ func TestAnErrorChangeDoesNotResurrectADeletedZone(t *testing.T) {
 	fz.SetError(ConfigError, "built in error state")
 	if cur, ok := Zones.Get(fresh); !ok || cur != fz {
 		t.Error("SetError no longer registers a zone that is not in Zones yet")
+	}
+}
+
+// A SIG(0) rollover makes no key for a zone deleted while it ran. Here the
+// delete runs during the lookup of the parent's DSYNC target. With
+// --keep-keys the zone's active key is still there afterwards, and the
+// zone's removal alone stops the rollover before it makes a key or asks
+// the parent; without, the delete has taken every key of the zone, and
+// none comes back. The fake parent fails the test on any UPDATE.
+func TestASig0RolloverMakesNoKeyForADeletedZone(t *testing.T) {
+	for _, keepKeys := range []bool{true, false} {
+		t.Run(fmt.Sprintf("keep-keys=%v", keepKeys), func(t *testing.T) {
+			zd, kdb, fp := newRolloverZone(t)
+			conf := &Config{}
+			conf.Internal.KeyDB = kdb
+			before := rolloverKeyStates(t, kdb, zd.ZoneName)
+			rolloverLookupDSYNCTarget = func(ctx context.Context, zone string) (*DsyncTarget, error) {
+				// RemoveDynamicZone's steps, from taking the zone out of Zones
+				// to the keys.
+				zd.leaveZones(zd.ZoneName)
+				conf.removeZoneKeys(zone, keepKeys)
+				return &DsyncTarget{Name: "updates.example.", Addresses: []string{"192.0.2.53:53"}}, nil
+			}
+
+			_, _, _, _, err := zd.RolloverSig0KeyWithParent(context.Background(), dns.ED25519, "complete")
+			if err == nil {
+				t.Fatal("the rollover of a deleted zone succeeded")
+			}
+			if keepKeys && !errors.Is(err, errRolloverZoneGone) {
+				t.Errorf("the rollover of a zone deleted with its keys kept returned %v, want %v", err, errRolloverZoneGone)
+			}
+			want := map[uint16]string{}
+			if keepKeys {
+				want = before
+			}
+			if got := rolloverKeyStates(t, kdb, zd.ZoneName); !maps.Equal(got, want) {
+				t.Errorf("keys after the rollover = %v, want %v", got, want)
+			}
+			if len(fp.sent) != 0 {
+				t.Errorf("the rollover of a deleted zone sent %d UPDATEs", len(fp.sent))
+			}
+			assertKeystoreFree(t, kdb)
+		})
+	}
+}
+
+// A SIG(0) rollover makes its new key under the zone's rollover lock, the
+// lock a zone delete deletes the zone's keys under, so the key is either
+// there for the delete to take or not made. It does not hold the lock
+// across the exchanges with the parent.
+func TestASig0RolloverMakesItsKeyUnderTheRolloverLock(t *testing.T) {
+	ok := rolloverAnswer{rcode: dns.RcodeSuccess}
+	zd, _, fp := newRolloverZone(t, ok, ok)
+	lock := AcquireRolloverLock(zd.ZoneName)
+	heldAtGenerate := false
+	testHookSig0RolloverGenerating = func() {
+		if lock.TryLock() {
+			lock.Unlock()
+			return
+		}
+		heldAtGenerate = true
+	}
+	t.Cleanup(func() { testHookSig0RolloverGenerating = nil })
+	heldAtUpdate := false
+	fp.during = func(*dns.Msg) {
+		if lock.TryLock() {
+			lock.Unlock()
+			return
+		}
+		heldAtUpdate = true
+	}
+
+	if _, _, _, _, err := zd.RolloverSig0KeyWithParent(context.Background(), dns.ED25519, "complete"); err != nil {
+		t.Fatalf("RolloverSig0KeyWithParent: %v", err)
+	}
+	if !heldAtGenerate {
+		t.Error("the new key was made without the zone's rollover lock")
+	}
+	if heldAtUpdate {
+		t.Error("the rollover lock was held across an UPDATE to the parent")
+	}
+}
+
+// A modify replaces the zone's ZoneData, and the refresh that still holds
+// the old one sets or clears an error when it ends. That must not put the
+// old ZoneData back over its replacement: a delete of the replacement then
+// left the old one in Zones, and the deleted name came back. A modify
+// whose config rewrite fails puts the old ZoneData back, live again.
+func TestAnErrorChangeOnAReplacedZoneDoesNotOutliveTheDelete(t *testing.T) {
+	resetZonesForTest()
+	t.Cleanup(resetZonesForTest)
+	conf, ch := newTestConfigForCores(t)
+	const name = "replaced.example."
+	upstream := func(addr string) []PeerConf { return []PeerConf{{Addr: addr, Key: NOKEY}} }
+	live := func() *ZoneData {
+		zd, _ := Zones.Get(name)
+		return zd
+	}
+
+	if _, err := conf.ProvisionDynamicZone(context.Background(),
+		DynamicZoneInput{Name: name, Type: Secondary, Primaries: upstream("192.0.2.1:53")}, true); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	<-ch
+	first := live()
+	if _, err := conf.ModifyDynamicZone(context.Background(),
+		DynamicZoneInput{Name: name, Type: Secondary, Primaries: upstream("192.0.2.9:53")}); err != nil {
+		t.Fatalf("modify: %v", err)
+	}
+	<-ch
+	second := live()
+	if second == first {
+		t.Fatal("the modify did not replace the ZoneData")
+	}
+	first.SetError(RefreshError, "the refresh of the replaced ZoneData failed")
+	first.ClearError(RefreshError)
+	if live() != second {
+		t.Fatal("an error change on the replaced ZoneData put it back over its replacement")
+	}
+
+	// A modify whose config rewrite fails (its directory does not exist)
+	// puts second back, and its error changes republish it again.
+	dir := t.TempDir()
+	conf.DynamicZones.ConfigFile = filepath.Join(dir, "missing", "dynamic.yaml")
+	conf.DynamicZones.ZoneDirectory = dir
+	conf.DynamicZones.Dynamic.Storage = "persistent"
+	if _, err := conf.ModifyDynamicZone(context.Background(),
+		DynamicZoneInput{Name: name, Type: Secondary, Primaries: upstream("192.0.2.10:53")}); err == nil {
+		t.Fatal("a modify whose config rewrite fails succeeded")
+	}
+	if live() != second {
+		t.Fatal("the failed modify did not put the previous ZoneData back")
+	}
+	second.SetError(RefreshError, "an error on the zone put back")
+	if live() != second || !second.HasError(RefreshError) {
+		t.Error("an error change on the ZoneData put back did not republish it")
+	}
+	second.ClearError(RefreshError)
+	conf.DynamicZones.ConfigFile = ""
+
+	if _, err := conf.RemoveDynamicZone(name, false); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	first.SetError(RefreshError, "the refresh of the replaced ZoneData failed, after the delete")
+	second.SetError(RefreshError, "the refresh of the deleted ZoneData failed")
+	if zd, back := Zones.Get(name); back {
+		t.Fatalf("the deleted name came back (ZoneData %p; first %p, second %p)", zd, first, second)
 	}
 }
