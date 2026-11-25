@@ -310,7 +310,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		if _, err := renderAdd(o, target, existing, entry, res.Created); err != nil {
 			return nil, err
 		}
-		if err := enrol(sock, cc, client, "config add", &entry, &res.Steps); err != nil {
+		if err := enrol(sock, cc, client, "config add", retryAdd(o, client), &entry, &res.Steps); err != nil {
 			return nil, err
 		}
 		enrolled = true
@@ -333,7 +333,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			return res, nil
 		}
 		if enrolled {
-			if err := samePair(o.CliConfig, cc, client, "config add"); err != nil {
+			if err := samePair(o.CliConfig, cc, client, "config add", retryAdd(o, client)); err != nil {
 				return nil, err
 			}
 		}
@@ -602,13 +602,29 @@ func enrolPlan(cc CliClientConf, client, url string) []string {
 		"check one request over TCP to " + url}
 }
 
+// retryAdd is o's config add, enrolling as client, as the command line to
+// run it again: a refusal after the enrolment gives it to copy.
+func retryAdd(o AddOptions, client string) string {
+	c := ncliFor(o.CliConfig) + " config add"
+	if o.Role != "" {
+		c += " --role " + shellQuote(o.Role)
+	}
+	if o.Name != "" {
+		c += " --name " + shellQuote(o.Name)
+	}
+	if o.TargetFile != "" {
+		c += " --file " + shellQuote(o.TargetFile)
+	}
+	return c + " --client-name " + shellQuote(client) + " " + shellQuote(o.DaemonConfig)
+}
+
 // enrol is steps 1 to 3 of a running daemon's certificate entry: the
 // operator's client pair, made if there is none; its pin added by the
 // daemon over its local admin socket sock; one request over TCP with it and
 // the server pins. A refusal or a failed request stops cmd before anything
 // is written. The pin stays enrolled after a failed request; the next run
 // reuses it ("already there").
-func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd string, entry *ApiDetails, steps *[]string) error {
+func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd, retry string, entry *ApiDetails, steps *[]string) error {
 	certPath, keyPath := clientCertPaths(cc)
 	pin, made, err := ensureClientCert(certPath, keyPath, client)
 	if err != nil {
@@ -622,10 +638,10 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd string, entry *Ap
 	switch {
 	case err != nil:
 		// The daemon may have added it and lost the answer.
-		return fmt.Errorf("%v\nNo answer that the daemon added your pin; nothing was\nwritten. Run %s again: a pin added is reused", err, cmd)
+		return fmt.Errorf("%v\nNo answer that the daemon added your pin; nothing was\nwritten. Run it again, which reuses a pin added:\n  %s", err, retry)
 	case ans.Error:
 		// A refusal, or a pin written to the access file but not loaded.
-		return fmt.Errorf("the daemon refused or did not load your pin; nothing was written:\n%s\nIf it says the file was written, run %s again with\nthe same --client-name once that is fixed: it reuses the pin", ans.ErrorMsg, cmd)
+		return fmt.Errorf("the daemon refused or did not load your pin; nothing was written:\n%s\nIf it says the file was written, fix that and run this again,\nwhich reuses the pin:\n  %s", ans.ErrorMsg, retry)
 	}
 	*steps = append(*steps, "The daemon: "+strings.ReplaceAll(ans.Msg, "\n", "\n   "))
 	if len(ans.ServerPins) > 0 {
@@ -633,7 +649,7 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd string, entry *Ap
 	}
 	ok, err := tcpCheck(*entry, cc)
 	if err != nil {
-		return fmt.Errorf("the daemon added your pin, but a request over TCP to\n%s failed: %v\nNothing was written. The pin stays enrolled: once that is\nfixed, run %s again, which reuses it", entry.BaseURL, err, cmd)
+		return fmt.Errorf("the daemon added your pin, but a request over TCP to\n%s failed: %v\nNothing was written. The pin stays enrolled: once that is\nfixed, run this again, which reuses it:\n  %s", entry.BaseURL, err, retry)
 	}
 	*steps = append(*steps, ok)
 	return nil
@@ -643,10 +659,10 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd string, entry *Ap
 // than cc did when its pin was enrolled as client: the entry is used with
 // the pair named now, which the daemon does not know. The daemon refuses a
 // second pin under one name, so a rerun needs the old pair or a new name.
-func samePair(cfg string, cc CliClientConf, client, cmd string) error {
+func samePair(cfg string, cc CliClientConf, client, cmd, retry string) error {
 	was, wasKey := clientCertPaths(cc)
 	if now, key := clientCertPaths(ReadCliClientConf(cfg)); now != was || key != wasKey {
-		return fmt.Errorf("the client pair in %s changed while %s\nran (now %s); nothing was written. The pin of\n%s stays enrolled as %s: put that pair back,\nor run %s again with another --client-name", cfg, cmd, now, was, client, cmd)
+		return fmt.Errorf("the client pair in %s changed while %s\nran (now %s); nothing was written. The pin of\n%s stays enrolled as %s: put that pair back and run\n  %s\nor run that with another --client-name", cfg, cmd, now, was, client, retry)
 	}
 	return nil
 }

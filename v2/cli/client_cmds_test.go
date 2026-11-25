@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -366,7 +367,13 @@ func TestPinRefusal(t *testing.T) {
 func TestInitApiClientsRefusalNamesTheCliConfig(t *testing.T) {
 	withCleanRoleRegistry(t)
 	RegisterRole("auth", "tdns-auth")
-	defer func(was *CliConf) { apiConfig = was }(apiConfig)
+	// InitApiClients changes the client tables: as they were afterwards.
+	errs, warns, pending := maps.Clone(apiClientErrors), maps.Clone(apiClientWarnings), maps.Clone(socketPending)
+	clients, api, was := maps.Clone(tdns.Globals.ApiClients), tdns.Globals.Api, apiConfig
+	t.Cleanup(func() {
+		apiClientErrors, apiClientWarnings, socketPending = errs, warns, pending
+		tdns.Globals.ApiClients, tdns.Globals.Api, apiConfig = clients, api, was
+	})
 	apiConfig = &CliConf{File: "/x/old.yaml"}
 	conf := &CliConf{File: "/x/my cli.yaml", ApiServers: []ApiDetails{
 		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", AuthMethod: "certificate", TLSAuth: "pin"},

@@ -210,7 +210,7 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 	case o.DryRun:
 		res.Steps = []string{"check one request over TCP to " + up.BaseURL + " with these pins"}
 	case o.Cert:
-		if err := enrol(sock, cc, client, cmd, &up, &res.Steps); err != nil {
+		if err := enrol(sock, cc, client, cmd, retryUpdate(o, client), &up, &res.Steps); err != nil {
 			return nil, err
 		}
 	default:
@@ -240,7 +240,7 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 		err = fmt.Errorf("entry %q changed while config update ran; nothing was\nwritten", e.Name)
 	}
 	if err == nil && o.Cert {
-		if err := samePair(o.CliConfig, cc, client, cmd); err != nil {
+		if err := samePair(o.CliConfig, cc, client, cmd, retryUpdate(o, client)); err != nil {
 			return nil, err // says what stays enrolled
 		}
 	}
@@ -255,6 +255,24 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 	}
 	res.Wrote = true
 	return res, nil
+}
+
+// retryUpdate is o's config update, enrolling as client (--cert), as the
+// command line to run it again: a refusal after the enrolment gives it.
+func retryUpdate(o UpdateOptions, client string) string {
+	c := ncliFor(o.CliConfig) + " config update " + shellQuote(o.Entry)
+	if o.Cert {
+		c += " --cert --client-name " + shellQuote(client)
+	} else {
+		c += " --repin"
+	}
+	if o.DaemonConfig != "" {
+		c += " --daemon-config " + shellQuote(o.DaemonConfig)
+	}
+	if o.TargetFile != "" {
+		c += " --file " + shellQuote(o.TargetFile)
+	}
+	return c
 }
 
 // renderUpdate is target with entry i of existing rewritten as up, checked

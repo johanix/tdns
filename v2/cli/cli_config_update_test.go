@@ -161,7 +161,7 @@ func TestUpdateCertClientPairChanged(t *testing.T) {
 	d.writeCli(t, keyEntries)
 	changed := strings.Replace(d.cliText(keyEntries), d.certPath, d.certPath+".new", 1)
 	d.onAdd = func() { writeFile(t, d.cli, changed) }
-	if _, err := d.update(t, withCert); err == nil || !strings.Contains(err.Error(), "changed while config update") || !strings.Contains(err.Error(), "enrolled as tester") || !strings.Contains(err.Error(), "config update again with another --client-name") {
+	if _, err := d.update(t, withCert); err == nil || !strings.Contains(err.Error(), "changed while config update") || !strings.Contains(err.Error(), "enrolled as tester") || !strings.Contains(err.Error(), "\n  "+ncliFor(d.cli)+" config update tdns-auth --cert --client-name tester\nor run that with another --client-name") {
 		t.Errorf("client pair changed: %v", err)
 	}
 	d.unchanged(t, changed)
@@ -193,7 +193,7 @@ func TestUpdateCertStopsWhenTheDaemonRefuses(t *testing.T) {
 	d.mu.Lock()
 	d.refuseAdd, d.refusePing = "", true
 	d.mu.Unlock()
-	if _, err := d.update(t, withCert); err == nil || !strings.Contains(err.Error(), "HTTP 403") || !strings.Contains(err.Error(), "run config update again") {
+	if _, err := d.update(t, withCert); err == nil || !strings.Contains(err.Error(), "HTTP 403") || !strings.Contains(err.Error(), "reuses it:\n  "+ncliFor(d.cli)+" config update tdns-auth --cert --client-name tester") {
 		t.Errorf("TCP check fails: %v", err)
 	}
 	d.unchanged(t, body)

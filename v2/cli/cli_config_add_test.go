@@ -245,7 +245,7 @@ func TestAddStopsWhenTheDaemonRefuses(t *testing.T) {
 	d.mu.Lock()
 	d.noAccessFile, d.refuseAdd = false, "\"tester\" is already there with another pin"
 	d.mu.Unlock()
-	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), d.refuseAdd) || !strings.Contains(err.Error(), "nothing was written") || !strings.Contains(err.Error(), "the same --client-name") {
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), d.refuseAdd) || !strings.Contains(err.Error(), "nothing was written") || !strings.Contains(err.Error(), "\n  "+ncliFor(d.cli)+" config add --client-name tester "+d.cfg) {
 		t.Errorf("refused add: %v", err)
 	}
 	d.unchanged(t, string(before))
@@ -259,7 +259,7 @@ func TestAddTCPCheckFailsThenARerunReusesThePin(t *testing.T) {
 	before, _ := os.ReadFile(d.cli)
 	d.refusePing = true
 	_, err := d.add(t, nil)
-	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || !strings.Contains(err.Error(), "Nothing was written") || !strings.Contains(err.Error(), "reuses it") {
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || !strings.Contains(err.Error(), "Nothing was written") || !strings.Contains(err.Error(), "reuses it:\n  "+ncliFor(d.cli)+" config add --client-name tester "+d.cfg) {
 		t.Fatalf("err = %v", err)
 	}
 	d.unchanged(t, string(before))
