@@ -77,10 +77,11 @@ type RRsetCacheT struct {
 	// INVARIANT: the inner map stored under a zone is IMMUTABLE once
 	// published. Changing a zone's servers means building a new map (or
 	// copying the stored one) and Set-ing it — never writing into the map a
-	// Get handed back. AddStub and AddServers are the two writers, and both
-	// do exactly that, holding serverMapMu: AddServers copies, adds and
-	// stores, and two writers for one zone interleaving those steps would
-	// each store a map without the other's servers (#682).
+	// Get handed back. AddStub, AddServers and seeding the root from the
+	// hints are the writers, and all do exactly that, holding serverMapMu:
+	// AddServers copies, adds and stores, and two writers for one zone
+	// interleaving those steps would each store a map without the other's
+	// servers (#682).
 	//
 	// The invariant exists because IterativeDNSQuery writes into the server
 	// map it is given (adding servers resolved from glue, pruning expired
@@ -92,9 +93,10 @@ type RRsetCacheT struct {
 	ServerMap *core.NameMap[map[string]*AuthServer]
 	// stubZones names the zones whose server map AddStub stored. That map is
 	// configuration, where every other zone's is learned from referrals: a
-	// flush and the expiry of the zone's NS RRset leave it in place
-	// (keepsServerMap). Dropping it lost the stub for good, while the stub
-	// still kept its names from any forward above it (#832). AddStub records a
+	// flush, the expiry of the zone's NS RRset and, for ".", seeding from the
+	// root hints leave it in place (keepsServerMap). Dropping it lost the stub
+	// for good, while the stub still kept its names from any forward above it
+	// (#832). AddStub records a
 	// zone here in the same step as it stores the map, and RemoveStub forgets
 	// both, holding serverMapMu. The flushes check and delete under it too, so
 	// none of them can delete a stub stored after its check.

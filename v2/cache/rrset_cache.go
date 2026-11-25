@@ -1010,8 +1010,8 @@ func (rrcache *RRsetCacheT) IsPrimed() bool {
 
 // seedFromHints parses the root hints (file or compiled-in) and seeds the
 // cache: the ". NS" hint RRset, per-server glue, and the root ServerMap
-// entry. Offline — no queries are sent. Returns the root server map for the
-// caller's optional priming fetch.
+// entry unless "." is a configured stub. Offline — no queries are sent.
+// Returns the hints' root server map for the caller's optional priming fetch.
 func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthServer, error) {
 	var data []byte
 	var err error
@@ -1158,7 +1158,15 @@ func (rrcache *RRsetCacheT) seedFromHints(hintsfile string) (map[string]*AuthSer
 		// cache.Data[name] = ownerData
 	}
 
-	rrcache.ServerMap.Set(".", authMap)
+	// A configured "." stub keeps its servers (keepsServerMap): they are the
+	// root's, and the hints are only where priming starts. The hint RRsets
+	// above are seeded all the same, and a priming fetch still asks the
+	// hints' servers (authMap).
+	rrcache.serverMapMu.Lock()
+	if !rrcache.keepsServerMap(".") {
+		rrcache.ServerMap.Set(".", authMap)
+	}
+	rrcache.serverMapMu.Unlock()
 	rrcache.Servers.Set(".", servers)
 
 	if rrcache.Debug {
