@@ -524,7 +524,7 @@ func needSocket(info *DaemonApi, cmd string) error {
 		if info.SocketError != "" {
 			why = info.SocketError
 		}
-		return fmt.Errorf("%s serves no local admin socket\n(%s). %s needs it, run as root on the\ndaemon's host: certificate setup goes through the socket", info.ConfigFile, why, cmd)
+		return fmt.Errorf("%s serves no local admin socket:\n%s.\n%s needs it, run as root on the daemon's host:\ncertificate setup goes through the socket", info.ConfigFile, why, cmd)
 	}
 	return nil
 }
@@ -624,7 +624,8 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd string, entry *Ap
 		// The daemon may have added it and lost the answer.
 		return fmt.Errorf("%v\nNo answer that the daemon added your pin; nothing was\nwritten. Run %s again: a pin added is reused", err, cmd)
 	case ans.Error:
-		return fmt.Errorf("the daemon did not add your pin; nothing was written:\n%s", ans.ErrorMsg)
+		// A refusal, or a pin written to the access file but not loaded.
+		return fmt.Errorf("the daemon refused or did not load your pin; nothing was written:\n%s\nIf it says the file was written, run %s again with\nthe same --client-name once that is fixed: it reuses the pin", ans.ErrorMsg, cmd)
 	}
 	*steps = append(*steps, "The daemon: "+strings.ReplaceAll(ans.Msg, "\n", "\n   "))
 	if len(ans.ServerPins) > 0 {

@@ -88,6 +88,10 @@ func TestAccessRouteWritesTheFile(t *testing.T) {
 	if len(resp.Clients) != 1 || resp.Clients[0].Comment != "laptop" || !resp.KeyAuth {
 		t.Errorf("in force after the add: %+v", resp)
 	}
+	// config status answers read-only callers too: no comments there.
+	if st := e.conf.apiAccessStatus().withoutComments(); st == nil || len(st.Clients) != 1 || st.Clients[0].Name != "anna" || st.Clients[0].Comment != "" {
+		t.Errorf("config status: %+v, want anna without her comment", st)
+	}
 	if c, found := running().byPin[pins["anna"]]; !found || c.Role != "read-write" {
 		t.Errorf("anna not in the running policy: %+v", running())
 	}
@@ -98,7 +102,7 @@ func TestAccessRouteWritesTheFile(t *testing.T) {
 	if read() != before {
 		t.Error("an add of what is there rewrote the file")
 	}
-	refused(AccessPost{Command: "add", Name: "anna", Pin: pins["bob"], Role: "read-write"}, "another pin")
+	refused(AccessPost{Command: "add", Name: "anna", Pin: pins["bob"], Role: "read-write"}, "another pin:\nuse another name")
 	refused(AccessPost{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-only"}, "set-role")
 	refused(AccessPost{Command: "add", Name: "an na", Pin: pins["bob"], Role: "read-only"}, "no spaces")
 	refused(AccessPost{Command: "add", Name: "bob", Pin: pins["anna"], Role: "read-only"}, "also \"anna\"'s")
