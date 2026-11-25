@@ -170,6 +170,30 @@ var errBootstrapNoActiveKey = errors.New("no active SIG(0) key to bootstrap")
 // failed. A poll counts such a bootstrap as sent (pollParentKeyState).
 var errBootstrapAfterSend = errors.New("SIG(0) bootstrap UPDATE accepted, but the local key state was not updated")
 
+// generateBootstrapSig0Key makes the zone's active SIG(0) key for a
+// bootstrap that found none, under the zone keys lock (lockZoneKeys), and
+// none for a ZoneData that has left Zones. A key another caller made while
+// this one waited is left as the one to bootstrap: resp is then nil.
+func (zd *ZoneData) generateBootstrapSig0Key(alg uint8) (*KeystoreResponse, error) {
+	unlock, err := zd.lockZoneKeys("BootstrapSig0KeyWithParent")
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive); err == nil && len(sak.Keys) > 0 {
+		return nil, nil
+	}
+	return zd.KeyDB.Sig0KeyMgmt(nil, KeystorePost{
+		Command:     "sig0-mgmt",
+		SubCommand:  "generate",
+		Zone:        zd.ZoneName,
+		Algorithm:   alg,
+		State:       Sig0StateActive,
+		ParentState: 255, // XXX: FIXME johani 20250930
+		Creator:     "bootstrap-sig0",
+	})
+}
+
 func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (string, UpdateResult, error) {
 	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods(), true)
 }
@@ -191,20 +215,18 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 				UpdateResult{}, fmt.Errorf("%w for zone %q", errBootstrapNoActiveKey, zd.ZoneName)
 		}
 
-		kp := KeystorePost{
-			Command:     "sig0-mgmt",
-			SubCommand:  "generate",
-			Zone:        zd.ZoneName,
-			Algorithm:   alg,
-			State:       Sig0StateActive,
-			ParentState: 255, // XXX: FIXME johani 20250930
-			Creator:     "bootstrap-sig0",
-		}
-		resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
+		// Made under the zone keys lock, and only for a ZoneData still in
+		// Zones (lockZoneKeys): a setup queued before a zone delete, or a
+		// bootstrap that was running, makes no key for a zone that is gone.
+		// Read again under the lock: a key another caller made meanwhile is
+		// the one to bootstrap.
+		resp, err := zd.generateBootstrapSig0Key(alg)
 		if err != nil {
 			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to generate keypair: %v", zd.ZoneName, err), UpdateResult{}, err
 		}
-		zd.Logger.Printf("%s", resp.Msg)
+		if resp != nil {
+			zd.Logger.Printf("%s", resp.Msg)
+		}
 
 		sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 		if err != nil {
@@ -249,6 +271,14 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 		// that run on every zone load log this at Info, not Error.
 		msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): parent requires manual SIG(0) bootstrap; not sending KEY UPDATE", zd.ZoneName)
 		return msg, UpdateResult{}, fmt.Errorf("%w for %s", errBootstrapManual, zd.ZoneName)
+	}
+	// A zone deleted while the parent was looked up sends nothing: the
+	// parent would be asked to trust a key that the delete takes. The same
+	// check as a rollover's once its key is made; a delete after it finds
+	// the ceremony with the parent.
+	if zd.removed.Load() {
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): the zone was deleted or replaced; no KEY UPDATE sent", zd.ZoneName),
+			UpdateResult{}, zd.noKeysForRemovedZone("BootstrapSig0KeyWithParent")
 	}
 	if method == "at-ns" {
 		// The parent will look for this KEY at _sig0key.<child>._signal.<ns>
