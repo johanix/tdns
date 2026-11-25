@@ -526,10 +526,12 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 	// config that was broken at startup. A failure here is non-fatal: the zones
 	// loaded fine; only the on-disk normalization didn't happen this pass.
 	if needsRepersist {
-		if err := conf.writeDynamicConfigFile(cf.Zones); err != nil {
+		if wrote, err := conf.repersistDynamicConfig(cf); err != nil {
 			lg.Warn("could not re-persist dynamic config in canonical form; will retry on next load or zone change", "err", err)
-		} else {
+		} else if wrote {
 			lg.Info("re-persisted dynamic config in canonical form (normalized legacy store tokens and/or stripped migrated keys: block)")
+		} else {
+			lg.Info("dynamic config not re-persisted at load: a later write already put it in canonical form")
 		}
 	}
 	return nil
@@ -540,6 +542,36 @@ type DynamicConfigFile struct {
 	Zones []ZoneConf `yaml:"zones"`
 	// Keys is read for one-shot migration only (§13); new writes omit the block.
 	Keys *KeyConf `yaml:"keys,omitempty"`
+	// readAfterWrites is dynamicConfigWrites when the file was read
+	// (loadDynamicConfigFile); repersistDynamicConfig compares it.
+	readAfterWrites uint64
+}
+
+// repersistDynamicConfig writes cf, the dynamic config as the load read it
+// (normalized, the legacy keys: block migrated out), back in canonical
+// form, unless the file was written by anyone else since it was read. The
+// API serves while the zones load, so a zone add, delete or setowner can
+// write the file in between; writing cf would put back what that write
+// replaced. A write from the live zones is canonical and has no keys:
+// block, so skipping loses nothing. A write it makes itself moves cf's
+// mark on, so the load's next rewrite of cf (normalization after the
+// migration) still goes ahead. It reports whether it wrote.
+func (conf *Config) repersistDynamicConfig(cf *DynamicConfigFile) (bool, error) {
+	dynamicConfigMutex.Lock()
+	defer dynamicConfigMutex.Unlock()
+	if dynamicConfigWrites != cf.readAfterWrites {
+		return false, nil
+	}
+	if err := conf.writeDynamicConfigFileLocked(cf.Zones); err != nil {
+		if errors.Is(err, errDynamicConfigNotSynced) {
+			// In place, only not synced: the load's own write, which
+			// its later normalization may follow.
+			cf.readAfterWrites = dynamicConfigWrites
+		}
+		return true, err
+	}
+	cf.readAfterWrites = dynamicConfigWrites
+	return true, nil
 }
 
 var (
@@ -547,6 +579,10 @@ var (
 	// Used by both loadDynamicConfigFile() and writeDynamicConfigFile() to prevent
 	// race conditions and ensure consistency between read/write operations
 	dynamicConfigMutex sync.Mutex
+	// dynamicConfigWrites counts the writes of the dynamic config file
+	// (under dynamicConfigMutex), so that a write prepared from an earlier
+	// read can tell that the file has moved on (repersistDynamicConfig).
+	dynamicConfigWrites uint64
 	// dynamicConfigBroken is set (under dynamicConfigMutex) when the dynamic config
 	// file could not be parsed at startup. While set, writeDynamicConfigFile refuses
 	// to write, so an unreadable file is never overwritten with the (incomplete)
@@ -652,7 +688,7 @@ func (conf *Config) loadDynamicConfigFile() (*DynamicConfigFile, error) {
 	// Check if file exists
 	if _, err := os.Stat(conf.DynamicZones.ConfigFile); os.IsNotExist(err) {
 		lg.Debug("dynamic config file does not exist, starting with empty config", "path", conf.DynamicZones.ConfigFile)
-		return &DynamicConfigFile{}, nil
+		return &DynamicConfigFile{readAfterWrites: dynamicConfigWrites}, nil
 	}
 
 	// Read file
@@ -672,6 +708,7 @@ func (conf *Config) loadDynamicConfigFile() (*DynamicConfigFile, error) {
 	}
 
 	lg.Info("loaded zones from dynamic config file", "count", len(configFile.Zones), "path", conf.DynamicZones.ConfigFile)
+	configFile.readAfterWrites = dynamicConfigWrites
 	return &configFile, nil
 }
 
@@ -755,7 +792,10 @@ func (conf *Config) writeDynamicConfigFileLocked(zones []ZoneConf) error {
 		return fmt.Errorf("failed to rename temp file to final file: %v", err)
 	}
 	// From here on the new file is in place: a failure is not one of the
-	// rewrite, only of its durability (errDynamicConfigNotSynced).
+	// rewrite, only of its durability (errDynamicConfigNotSynced). The
+	// rewrite counts as a write either way, so that the load's rewrite
+	// never puts an older snapshot over it (repersistDynamicConfig).
+	dynamicConfigWrites++
 	if err := syncDynamicConfigDir(configDir); err != nil {
 		return fmt.Errorf("%w: syncing %s after renaming %s into place: %v", errDynamicConfigNotSynced, configDir, conf.DynamicZones.ConfigFile, err)
 	}
