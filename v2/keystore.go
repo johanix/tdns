@@ -336,7 +336,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 			resp.ErrorMsg = fmt.Sprintf("SIG(0) key for zone %q keyid %d not found", kp.Zone, kp.Keyid)
 			return &resp
 		}
-		if out, err := appKeyExportRefusal(app, kp.Zone, notFound); out != nil {
+		if out, err := appKeyExportRefusal(app, "sig0", kp.Zone, kp.Keyid, notFound); out != nil {
 			return out, err
 		}
 		stored, err := storedKeyName(tx, "Sig0KeyStore", kp.Zone, kp.Keyid)
@@ -953,7 +953,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			resp.ErrorMsg = fmt.Sprintf("DNSSEC key for zone %q keyid %d not found", kp.Zone, kp.Keyid)
 			return &resp
 		}
-		if out, err := appKeyExportRefusal(app, kp.Zone, notFound); out != nil {
+		if out, err := appKeyExportRefusal(app, "dnssec", kp.Zone, kp.Keyid, notFound); out != nil {
 			return out, err
 		}
 		stored, err := storedKeyName(tx, "DnssecKeyStore", kp.Zone, kp.Keyid)

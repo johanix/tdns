@@ -386,17 +386,28 @@ func TestAppKeystoreExportsOwnKeysOnly(t *testing.T) {
 			msg = strings.ReplaceAll(msg, itoa(int(keyid)), "KEYID")
 			return fmt.Sprintf("%d %s %q", rec.Code, msg, resp.Msg)
 		}
+		// The operator's record: one Info line per refused export.
+		const refusedLine = `msg="keystore: private key export refused, answered not found"`
+		logbuf.Reset()
 		want := answer(z["own"], 4711) // no such key in its own zone
 		if !strings.Contains(want, "not found") {
 			t.Errorf("%s export of a missing key of its own zone: %s", kind, want)
+		}
+		if strings.Contains(logbuf.String(), refusedLine) {
+			t.Errorf("%s export of a missing key of its own zone is logged as refused:\n%s", kind, logbuf.String())
 		}
 		for _, zk := range []string{"other", "api", "config", "gone", "missing"} {
 			id := uint16(4711)
 			if zk != "missing" {
 				id = zoneKeyID(t, kind, z[zk])
 			}
+			logbuf.Reset()
 			if got := answer(z[zk], id); got != want {
 				t.Errorf("%s export of the %s zone's key: %s, but a missing key of its own zone: %s", kind, zk, got, want)
+			}
+			fields := "client=provisioner via=certificate app=true kind=" + kind + " zone=" + z[zk] + " keyid=" + itoa(int(id))
+			if log := logbuf.String(); strings.Count(log, refusedLine) != 1 || !strings.Contains(log, fields) {
+				t.Errorf("%s export of the %s zone's key: want one refused line with %q, log:\n%s", kind, zk, fields, log)
 			}
 		}
 		if resp, _ := postKeystore(t, KeystorePost{Command: cmd, SubCommand: "export", Zone: z["other"], Keyid: zoneKeyID(t, kind, z["other"])}, &socketCaller); resp.Error {

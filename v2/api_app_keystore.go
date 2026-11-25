@@ -138,12 +138,20 @@ func appKeystoreGate(app string, kp KeystorePost) error {
 }
 
 // appKeyExportRefusal is the answer to an application client's export of a
-// SIG(0) or DNSSEC key (kind) of a zone that is not its own, or not served
-// here: the answer an export of a key that does not exist gets (notFound),
-// with the same status, so that another owner's key, a zone not served and
-// a missing key of the client's own zone cannot be told apart. An export
-// that names no zone is refused as such. nil when the zone is the client's.
-func appKeyExportRefusal(app, zone string, notFound func() *KeystoreResponse) (*KeystoreResponse, error) {
+// SIG(0) or DNSSEC key (kind "sig0" or "dnssec") of a zone that is not its
+// own, or not served here: the answer an export of a key that does not
+// exist gets (notFound), with the same status, so that another owner's
+// key, a zone not served and a missing key of the client's own zone cannot
+// be told apart. An export that names no zone is refused as such. nil when
+// the zone is the client's.
+//
+// The client is told "not found"; the operator is told what happened. Each
+// refused export is logged at Info, in the style of logKeyExports' audit
+// line, with the client, how it authenticated (an application client is
+// always a certificate client, AppClientOf), the kind, the zone and the key
+// ID (design R9). A missing key of the client's own zone is not a refusal
+// and is not logged here.
+func appKeyExportRefusal(app, kind, zone string, keyid uint16, notFound func() *KeystoreResponse) (*KeystoreResponse, error) {
 	err := appKeyZoneRefusal(app, zone)
 	switch {
 	case err == nil:
@@ -151,6 +159,9 @@ func appKeyExportRefusal(app, zone string, notFound func() *KeystoreResponse) (*
 	case err == errAppKeyNoZone:
 		return &KeystoreResponse{Time: time.Now()}, err
 	}
+	lgApi.Info("keystore: private key export refused, answered not found",
+		"client", app, "via", ApiViaCertificate, "app", true, "kind", kind, "zone", zone, "keyid", keyid,
+		"reason", err.Error())
 	return notFound(), nil
 }
 
