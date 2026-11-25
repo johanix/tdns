@@ -238,6 +238,17 @@ func TestUpdateRepin(t *testing.T) {
 	}
 	d.unchanged(t, want)
 
+	// Current pins but no config-file:: --daemon-config writes the line.
+	noCfg := "apiservers:\n   - name: tdns-auth\n     baseurl: @U@\n     apikey: k\n     authmethod: X-API-Key\n     tlsauth: pin\n     pins: [ \"@P@\" ]\n"
+	d.writeCli(t, noCfg)
+	res, err = d.update(t, func(o *UpdateOptions) { o.Repin, o.DaemonConfig = true, d.cfg })
+	if err != nil || !res.Wrote || res.Current || res.Entry.ConfigFile != d.cfg {
+		t.Errorf("current pins, no config-file: %+v, %v", res, err)
+	}
+	if got := mustEntries(t, d.cli); len(got) != 1 || got[0].ConfigFile != d.cfg {
+		t.Errorf("current pins, no config-file: entries %+v", got)
+	}
+
 	body := d.writeCli(t, old)
 	d.refusePing = true
 	if _, err := d.update(t, withRepin); err == nil || !strings.Contains(err.Error(), "with the daemon's\npins failed") {

@@ -353,6 +353,12 @@ func TestPinRefusal(t *testing.T) {
 	if r := pinRefusal(ApiDetails{Name: "old"}, "x"); r.fix != "tdns-ncli config update old --repin --daemon-config <the daemon's config file>" {
 		t.Errorf("no config-file: fix = %q", r.fix)
 	}
+	// Read from another CLI config, the fix names it.
+	defer func(was *CliConf) { apiConfig = was }(apiConfig)
+	apiConfig = &CliConf{File: "/x/my cli.yaml"}
+	if r := pinRefusal(ApiDetails{Name: "a", ConfigFile: "/x/d.yaml"}, "x"); r.fix != "tdns-ncli --config '/x/my cli.yaml' config update a --repin" {
+		t.Errorf("another CLI config: fix = %q", r.fix)
+	}
 }
 
 // With pins, the client ignores rootca, so a rootca: file that is gone does

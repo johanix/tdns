@@ -270,6 +270,7 @@ func initConfig() {
 	if err := viper.Unmarshal(&cconf); err != nil {
 		log.Fatalf("FATAL: viper.Unmarshal failed to parse config: %v", err)
 	}
+	cconf.File = cliConfigPath()
 }
 
 var cconf cli.CliConf

@@ -68,6 +68,9 @@ type CliConf struct {
 	// authmethod: certificate. Unset, the default location is used
 	// (DefaultClientCertPaths).
 	Client CliClientConf
+	// File is the CLI config this run read, named in the commands a
+	// refusal advises. Set by the root, never from the config itself.
+	File string `mapstructure:"-"`
 }
 
 // CliClientConf is the CLI config's client: block.
@@ -337,9 +340,13 @@ func (r clientRefusal) Error() string {
 
 // pinRefusal refuses entry e for want of a pin. Pinning is how tdns-ncli
 // verifies a daemon, and config update --repin is how an existing entry
-// gets the pins its daemon serves.
+// gets the pins its daemon serves: in the CLI config this run read.
 func pinRefusal(e ApiDetails, why string) clientRefusal {
-	fix := "tdns-ncli config update " + shellQuote(e.Name) + " --repin"
+	cfg := ""
+	if apiConfig != nil {
+		cfg = apiConfig.File
+	}
+	fix := ncliFor(cfg) + " config update " + shellQuote(e.Name) + " --repin"
 	if e.ConfigFile == "" {
 		fix += " --daemon-config <the daemon's config file>"
 	}

@@ -188,8 +188,11 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 		up.AuthMethod, up.ApiKey = "certificate", ""
 	}
 	if o.Repin && strings.EqualFold(e.TLSAuth, "pin") && samePins(e.Pins, up.Pins) {
-		res.Entry, res.File, res.Current = e, target, true
-		return res, nil
+		if up.ConfigFile == e.ConfigFile {
+			res.Entry, res.File, res.Current = e, target, true
+			return res, nil
+		}
+		res.Notes = append(res.Notes, "the pins were current; config-file: is the change")
 	}
 	// Refused before anything is enrolled: an entry the editor cannot change.
 	out, err := renderUpdate(o.CliConfig, target, existing, i, up)
