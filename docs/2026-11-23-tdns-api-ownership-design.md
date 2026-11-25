@@ -537,7 +537,7 @@ Part B (application clients and zone scope):
   one the access file lacks is a `config check` warning, as are
   `app-clients` without an access file and `app-clients` with `keyauth`
   on. A reload whose access file does not load keeps the running list too,
-  and says so.
+  and says so, also when no access file was in force (the list is empty).
 - The CLI prints a plain-text refusal once, as "refused (HTTP 403):" and
   the daemon's words wrapped below it (`tdns.ApiRefusal.Report`); the
   senders no longer log it first. `catalog` commands print the daemon's
@@ -550,4 +550,18 @@ Part B (application clients and zone scope):
   tdns-auth (HTTP 403):" for a plain-text refusal, "Error from tdns-auth:"
   for a JSON reply's error, then the daemon's words indented two spaces,
   within 72 characters, a hint line kept as its own indented line. No log
-  line, no second lead; exit codes as before.
+  line, no second lead; exit codes as before. The body-returning client
+  calls (`Post`, `Get`, `Put`, `Delete`) try each of the entry's addresses
+  in turn, as `RequestNG` does, so `catalog` kept that fallback.
+- `delegation sync-log`, answered before the handler's zone lookup, is in
+  both tables: admin, as it was by default, and refused to applications.
+  The tables test reads the commands a handler compares before its switch.
+- An application's add checks its TSIG keys again under
+  `templateApplyMu`, where every add and modify commits its inline key:
+  another application may register the same key in between.
+- An application's `zone update` is applied to the zone it was authorized
+  against, or refused. The updater checks under `zd.mu`, in the hold that
+  stages and publishes it, that the zone is still the one served under its
+  name, that its removal has not started, and that it is still the
+  client's. An update whose zone was deleted and re-added while it waited
+  is refused; operators' updates go to the zone of their name, as before.

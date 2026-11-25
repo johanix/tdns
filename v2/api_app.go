@@ -145,6 +145,9 @@ var apiAppScopes = map[string]map[string]AppScope{
 		// not an application's to do, whatever the zone.
 		"export": AppRefused,
 		"sync":   AppOwnZone,
+		// The log of every child's delegation syncs, answered before the
+		// handler resolves a zone: it is not scoped to the caller's zones.
+		"sync-log": AppRefused,
 	},
 	"/api/v1/catalog": {
 		// A catalog zone the caller owns is shown whole: its members are
@@ -370,6 +373,13 @@ func (conf *Config) appAddRefusal(app, name string) error {
 // or the inline key of the same request (whose secret the caller has just
 // shown it knows). Otherwise the server would transfer with someone else's
 // secret on the application's behalf.
+//
+// An add checks twice: once before it takes templateApplyMu, so that a key
+// it does not own gets one answer whether or not the key exists, and again
+// under the lock, where every add and modify commits its inline key
+// (commitStagedTsigKey). Another application's add may register the same
+// key name and secret in between, and commitStagedTsigKey takes an
+// identical existing key as it is, whoever owns it.
 func (conf *Config) appTsigKeyRefusal(app, zone string, primaries []PeerConf, staged *TsigDetails) error {
 	if app == "" {
 		return nil

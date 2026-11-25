@@ -1181,9 +1181,17 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// it, so the primaries, key and options above stay the caller's. From
 	// the expansion until the zone is in Zones, templateApplyMu keeps a
 	// reload's re-expansion from landing in between.
+	if testHookAddLocking != nil {
+		testHookAddLocking()
+	}
 	templateApplyMu.Lock()
 	defer templateApplyMu.Unlock()
 	if err := conf.appAddRefusal(in.AppClient, name); err != nil {
+		return "", err
+	}
+	// Again under the lock: another application's add may have
+	// registered the inline key since the check above (appTsigKeyRefusal).
+	if err := conf.appTsigKeyRefusal(in.AppClient, name, in.Primaries, staged); err != nil {
 		return "", err
 	}
 	var outbound templateOutbound
@@ -1309,6 +1317,11 @@ var testHookSignalRecordTaken func()
 // testHookRemovalLocking, when set, runs in RemoveDynamicZone right before it
 // takes templateApplyMu. Tests only.
 var testHookRemovalLocking func()
+
+// testHookAddLocking, when set, runs in a zone add (ProvisionDynamicZone,
+// provisionDynamicPrimary) after its first check of an application's TSIG
+// keys and right before it takes templateApplyMu. Tests only.
+var testHookAddLocking func()
 
 // RemoveDynamicZone is the shared *delete* core. It refuses to delete a static
 // or catalog-managed zone (guard on OptApiManagedZone), bumps the zone's

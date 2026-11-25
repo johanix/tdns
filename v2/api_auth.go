@@ -337,8 +337,16 @@ func (conf *Config) reloadApiAccess() string {
 		// The application clients go into force with the file, never
 		// without it: a new list against the old file could make a
 		// client an application client that the new file does not have.
+		// Compared with the running policy's list, which is empty when no
+		// access file is in force (none was configured, or it never
+		// loaded): an operator who adds a file and app-clients together
+		// is told that neither is in force.
+		var running []string
+		if st := h.load(); st != nil && st.Enabled {
+			running = st.AppClients
+		}
 		appNote := ""
-		if st := h.load(); st != nil && st.Enabled && !slices.Equal(st.AppClients, conf.ApiServer.AppClients) {
+		if !slices.Equal(running, conf.ApiServer.AppClients) {
 			appNote = ". apiserver.app-clients is NOT applied either: it goes into force with the access file"
 		}
 		return fmt.Sprintf(" %s (the running policy is unchanged): %v%s", AccessFileNotReloaded, err, appNote)
