@@ -293,7 +293,11 @@ func daemonSocketClient(role, daemonCfg string) (*tdns.ApiClient, error) {
 // info, naming its config on every request.
 func socketClientOf(info *DaemonApi) (*tdns.ApiClient, error) {
 	if info.Socket == "" {
-		return nil, fmt.Errorf("%s serves no local admin socket\n(socket: none), which this command needs", info.ConfigFile)
+		why := "socket: none"
+		if info.SocketError != "" {
+			why = info.SocketError
+		}
+		return nil, fmt.Errorf("%s serves no local admin socket\n(%s), which this command needs", info.ConfigFile, why)
 	}
 	return tdns.NewClientWithOptions(info.Role, "unix://"+info.Socket,
 		tdns.ClientOptions{AuthMethod: "none", ExpectConfigFile: info.ConfigFile}), nil
