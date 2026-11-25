@@ -333,7 +333,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			return res, nil
 		}
 		if enrolled {
-			if err := samePair(o.CliConfig, cc, "config add"); err != nil {
+			if err := samePair(o.CliConfig, cc, client, "config add"); err != nil {
 				return nil, err
 			}
 		}
@@ -639,12 +639,13 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd string, entry *Ap
 }
 
 // samePair refuses the write when the CLI config names another client pair
-// than cc did when its pin was enrolled: the entry is used with the pair
-// named now, which the daemon does not know.
-func samePair(cfg string, cc CliClientConf, cmd string) error {
+// than cc did when its pin was enrolled as client: the entry is used with
+// the pair named now, which the daemon does not know. The daemon refuses a
+// second pin under one name, so a rerun needs the old pair or a new name.
+func samePair(cfg string, cc CliClientConf, client, cmd string) error {
 	was, wasKey := clientCertPaths(cc)
 	if now, key := clientCertPaths(ReadCliClientConf(cfg)); now != was || key != wasKey {
-		return fmt.Errorf("the client pair in %s changed while %s\nran (now %s); nothing was written. The pin of\n%s stays enrolled; the next %s enrols the new pair", cfg, cmd, now, was, cmd)
+		return fmt.Errorf("the client pair in %s changed while %s\nran (now %s); nothing was written. The pin of\n%s stays enrolled as %s: put that pair back,\nor run %s again with another --client-name", cfg, cmd, now, was, client, cmd)
 	}
 	return nil
 }

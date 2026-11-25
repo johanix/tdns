@@ -237,7 +237,7 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 		err = fmt.Errorf("entry %q changed while config update ran; nothing was\nwritten", e.Name)
 	}
 	if err == nil && o.Cert {
-		if err := samePair(o.CliConfig, cc, cmd); err != nil {
+		if err := samePair(o.CliConfig, cc, client, cmd); err != nil {
 			return nil, err // says what stays enrolled
 		}
 	}
