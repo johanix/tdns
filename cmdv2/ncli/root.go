@@ -206,12 +206,8 @@ func cliConfigPath() string {
 
 // initConfig reads in config file and ENV variables if set.
 func initConfig() {
-	if cfgFile != "" {
-		// Use config file from the flag.
-		viper.SetConfigFile(cfgFile)
-	} else {
-		viper.SetConfigFile(cli.DefaultCliConfigFile)
-	}
+	// The file the pre-run check looked at, so the two cannot differ.
+	viper.SetConfigFile(cliConfigPath())
 
 	viper.AutomaticEnv() // read in environment variables that match
 

@@ -108,28 +108,37 @@ func (conf *Config) runAccessCommand(ap AccessPost) (resp AccessResponse) {
 	if err != nil {
 		return refuse("%v", err)
 	}
-	if !changed {
+	done := path + " written"
+	// A missing file (old nil) is written even when the policy it would
+	// hold is the empty one (keyauth on, no clients): a file the config
+	// names but that is not there cannot be loaded.
+	if changed || old == nil {
+		if err := ValidateAccessFile(af); err != nil {
+			return refuse("not writing %s: %v", path, err)
+		}
+		out, err := renderAccessFile(af, absConfigFile(conf.Internal.CfgFile))
+		if err != nil {
+			return refuse("%v", err)
+		}
+		if ap.DryRun {
+			return AccessResponse{Msg: msg + "\nDry run: would write " + path + ":", Rendered: string(out)}
+		}
+		if err := writeAccessFile(path, old, out); err != nil {
+			return refuse("not written: %v", err)
+		}
+	} else if ap.DryRun {
 		return AccessResponse{Msg: msg}
-	}
-	if err := ValidateAccessFile(af); err != nil {
-		return refuse("not writing %s: %v", path, err)
-	}
-	out, err := renderAccessFile(af, absConfigFile(conf.Internal.CfgFile))
-	if err != nil {
-		return refuse("%v", err)
-	}
-	if ap.DryRun {
-		return AccessResponse{Msg: msg + "\nDry run: would write " + path + ":", Rendered: string(out)}
-	}
-	if err := writeAccessFile(path, old, out); err != nil {
-		return refuse("not written: %v", err)
+	} else {
+		// Loaded all the same: a hand edit not yet reloaded, or a write
+		// whose load failed, is then in force when this answers success.
+		done = path + " needs no change"
 	}
 	if conf.Internal.ApiAccess == nil {
-		return refuse("%s written, but NOT loaded: this daemon has no management API policy to load it into", path)
+		return refuse("%s, but NOT loaded: this daemon has no management API policy to load it into", done)
 	}
 	_, stopped, err := conf.loadAccessPolicy(path)
 	if err != nil {
-		return refuse("%s written, but NOT loaded (the running policy is unchanged): %v", path, err)
+		return refuse("%s, but NOT loaded (the running policy is unchanged): %v", done, err)
 	}
 	msg += "\n" + conf.accessInForceLine()
 	if len(stopped) > 0 {
@@ -266,12 +275,31 @@ func readAccessFileForEdit(path string, create bool) (*AccessFile, []byte, error
 			return nil, nil, fmt.Errorf("%s does not parse (%v); fix it by hand first", path, perr)
 		}
 		return af, old, nil
-	case errors.Is(err, fs.ErrNotExist) && create:
-		return &AccessFile{}, nil, nil
 	case errors.Is(err, fs.ErrNotExist):
+		if derr := danglingSymlink(path); derr != nil {
+			return nil, nil, derr
+		}
+		if create {
+			return &AccessFile{}, nil, nil
+		}
 		return nil, nil, fmt.Errorf("%s does not exist yet; client add creates it", path)
 	}
 	return nil, nil, err
+}
+
+// danglingSymlink refuses path when it is a symlink whose target does not
+// resolve: a write would replace the link with a file, not create its
+// target. nil for anything else, a missing path among them.
+func danglingSymlink(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+		return nil
+	}
+	if _, err := filepath.EvalSymlinks(path); err != nil {
+		dest, _ := os.Readlink(path)
+		return fmt.Errorf("%s is a symlink to %s, which does not resolve;\nnot replacing the link: create its target, or remove the link", path, dest)
+	}
+	return nil
 }
 
 // renderAccessFile is the file as the daemon writes it: a header, keyauth
@@ -306,6 +334,8 @@ func writeAccessFile(path string, old, data []byte) error {
 	target := path
 	if real, err := filepath.EvalSymlinks(path); err == nil {
 		target = real
+	} else if derr := danglingSymlink(path); derr != nil {
+		return derr
 	}
 	var like os.FileInfo
 	if old != nil {
