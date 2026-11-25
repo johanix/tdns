@@ -49,6 +49,11 @@ func TestConfigCheckWarnsAboutAppClients(t *testing.T) {
 			checkApiAccessFile(cfg, rep)
 			var warned []string
 			for _, r := range rep.byGroup["API access file"] {
+				// Every file here is valid: a FAIL is a check gone wrong,
+				// whatever it warns about.
+				if r.level == ccFAIL {
+					t.Errorf("unexpected FAIL %s: %s", r.check, r.msg)
+				}
 				if r.level == ccWARN {
 					warned = append(warned, r.check)
 					if r.check == "app-clients" && tc.access != "" && !strings.Contains(r.msg, `"ghost"`) {
@@ -111,13 +116,21 @@ func TestARefusalPrintsOnceAndReadably(t *testing.T) {
 	defer srv.Close()
 	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: srv.URL, AuthMethod: "none", Client: srv.Client()}
 
-	check := func(what string, err error, want string) {
+	// The sender and the printer run inside one capture, so that the
+	// exact-output check also catches a sender that prints the error
+	// itself before the printer prints it again.
+	check := func(what string, send func() error, want string) {
 		t.Helper()
+		var err error
+		printed := captureStdout(t, func() {
+			if err = send(); err != nil {
+				printDaemonError(api.Name, err)
+			}
+		})
 		if err == nil {
 			t.Errorf("%s: no error", what)
 			return
 		}
-		printed := captureStdout(t, func() { printDaemonError(api.Name, err) })
 		if printed != want {
 			t.Errorf("%s: printed\n%s\nwant\n%s", what, printed, want)
 		}
@@ -130,19 +143,48 @@ func TestARefusalPrintsOnceAndReadably(t *testing.T) {
 	refused := "Refused by tdns-auth (HTTP 403):\n  " + refusal + "\n"
 	errorFrom := "Error from tdns-auth:\n  " + notOwn + "\n"
 
-	_, err := SendZoneCommand(api, tdns.ZonePost{Command: "bump", Zone: "own.example."})
-	check("zone bump", err, refused)
-	_, err = SendZoneCommand(api, tdns.ZonePost{Command: "freeze", Zone: "other.example."})
-	check("zone freeze", err, errorFrom)
-	_, err = SendParentSyncCommand(api, tdns.ZoneParentSyncPost{Command: "status", Zone: "own.example."})
-	check("parentsync", err, refused)
-	resp, err := SendCatalogCommand(api, tdns.CatalogPost{Command: "zone-list", CatalogZone: "other.example."})
-	check("catalog", err, errorFrom)
+	check("zone bump", func() error {
+		_, err := SendZoneCommand(api, tdns.ZonePost{Command: "bump", Zone: "own.example."})
+		return err
+	}, refused)
+	check("zone freeze", func() error {
+		_, err := SendZoneCommand(api, tdns.ZonePost{Command: "freeze", Zone: "other.example."})
+		return err
+	}, errorFrom)
+	check("parentsync", func() error {
+		_, err := SendParentSyncCommand(api, tdns.ZoneParentSyncPost{Command: "status", Zone: "own.example."})
+		return err
+	}, refused)
+	var resp *tdns.CatalogResponse
+	var err error
+	check("catalog", func() error {
+		resp, err = SendCatalogCommand(api, tdns.CatalogPost{Command: "zone-list", CatalogZone: "other.example."})
+		return err
+	}, errorFrom)
 	if resp == nil {
 		t.Error("catalog: no response")
 	}
 	// What a caller that prints err.Error() itself reads is unchanged.
 	if err == nil || err.Error() != notOwn {
 		t.Errorf("catalog: %v, want the daemon's message", err)
+	}
+}
+
+// The catalog commands reach the daemon through each of the client's
+// addresses in turn, as they did through RequestNG: a first address that
+// does not answer is skipped.
+func TestCatalogCommandTriesEachAddress(t *testing.T) {
+	live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tdns.CatalogResponse{Msg: "listed"})
+	}))
+	defer live.Close()
+	gone := httptest.NewServer(http.NotFoundHandler())
+	dead := strings.TrimPrefix(gone.URL, "http://")
+	gone.Close()
+	api := &tdns.ApiClient{Name: "tdns-auth", BaseUrl: "http://" + dead, AuthMethod: "none", Client: &http.Client{},
+		Addresses: []string{dead, strings.TrimPrefix(live.URL, "http://")}}
+	resp, err := SendCatalogCommand(api, tdns.CatalogPost{Command: "zone-list", CatalogZone: "cat.example."})
+	if err != nil || resp == nil || resp.Msg != "listed" {
+		t.Errorf("catalog zone-list with a dead first address: %+v, %v; want the live address's answer", resp, err)
 	}
 }
