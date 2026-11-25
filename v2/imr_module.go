@@ -48,9 +48,7 @@ func NewImr(ctx context.Context, ic ImrEngineConf, opts ImrOptions) (*Imr, error
 }
 
 var (
-	lgImr = Logger("engine")
-	lgDns = Logger("dns")
-
+	lgDns             = Logger("dns")
 	lgResolver        = Logger("imr")
 	lgResolverLookups = Logger("imr-lookups")
 )
