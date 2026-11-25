@@ -94,6 +94,19 @@ application's key command acts only on a `Zone` it owns) and 8.12 by
 the rulings below (api-owner-c 67cbfccb) the run has 146 checks, 145 PASS
 and one FAIL, 3.16, which waits for a ruling.
 
+Since then (2026-11-25):
+- **3.16:** the export fix is #1191. The daemon returns the data and the
+  client writes the file, so the check sends no `Outfile`. The operator's
+  export is the control (it needs #1191). Until #1191 is in the stack, app1's
+  refusal ("not available to application clients") passes. After that, B's
+  table makes export own zone only (AppOwnZone), and app1 must get the
+  operator's data.
+- **7.10:** an application's export of another owner's key gets the same
+  "not found" as a missing key of its own (api-owner-c 344c6e0d), so it
+  cannot tell the two apart. The check expects that answer, and the
+  operator's Info line `private key export refused, answered not found`
+  with the client, kind, zone and key ID (api-owner-c c85fa491).
+
 ## Rulings (Johan, 2026-11-24)
 
 - **Q3, "catalog owner may remove any member":** an application that owns a
@@ -117,4 +130,5 @@ and one FAIL, 3.16, which waits for a ruling.
   delegate (no NS at the cut, as `sub.s2.test.` inside `s2.test.` here) be
   refused? It answers for those names instead of the operator's records
   (NOTE Q2).
-- **3.16:** delegation export, above.
+- **3.16:** settled by #1191 (above). Open until #1191 is merged into the
+  stack.

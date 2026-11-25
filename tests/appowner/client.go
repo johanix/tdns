@@ -115,6 +115,17 @@ func (c *client) postRaw(endpoint string, req any) outcome {
 	return judge(r, false, "", oneLine(string(r.Body), 120))
 }
 
+// exportData is the zone text a delegation export returned (#1191's
+// DelegationResponse.Export). It is read from the raw reply, so this file
+// also builds against a tree without #1191.
+func exportData(o outcome) string {
+	var r struct{ Export string }
+	if json.Unmarshal(o.Raw, &r) != nil {
+		return ""
+	}
+	return r.Export
+}
+
 // judge makes an outcome of a reply and the JSON verdict the handler gave.
 func judge(r reply, isErr bool, errMsg, msg string) outcome {
 	if r.Err != nil {

@@ -210,15 +210,37 @@ func (s *suite) check3ZoneWrites() {
 	_, o = s.app1.zone(tdns.ZonePost{Command: "delete", Zone: Z8})
 	s.ok("3.15", "app1 zone delete of its own "+Z8, o, s.zoneAbsent(Z8))
 
-	// delegation export (4.5: "delegation status/export: own zone only"). On
-	// its own zone an application should get the operator's answer.
-	file := filepath.Join(s.o.Scratch, "s1-delegation.zone")
-	_, oop := s.op.delegation(tdns.DelegationPost{Command: "export", Zone: S1, Outfile: file})
-	os.Remove(file)
-	_, o = s.app1.delegation(tdns.DelegationPost{Command: "export", Zone: S1, Outfile: file})
-	os.Remove(file)
-	s.expect("3.16", "app1 delegation export of its own "+S1+" (design 4.5: own zone only)", o.Msg == oop.Msg && o.OK == oop.OK,
-		fmt.Sprintf("app1 got %q, op got %q", firstLine(o.Msg), firstLine(oop.Msg)))
+	// delegation export (4.5: "delegation status/export: own zone only").
+	// The daemon returns the data and the client writes it (#1191), so no
+	// Outfile is sent. The operator's export is the control. Until #1191
+	// is in the stack, B refuses export to application clients
+	// (AppRefused). After that it is AppOwnZone, and app1 must get the
+	// operator's data for its own zone.
+	name316 := "app1 delegation export of its own " + S1 + " (design 4.5: own zone only)"
+	_, oop := s.op.delegation(tdns.DelegationPost{Command: "export", Zone: S1})
+	opData := exportData(oop)
+	if oop.OK && opData != "" {
+		// Written by the client, as tdns-ncli del export --outfile does.
+		file := filepath.Join(s.o.Scratch, "s1-delegation.zone")
+		if err := os.WriteFile(file, []byte(opData), 0o644); err == nil {
+			os.Remove(file)
+		}
+	}
+	_, o = s.app1.delegation(tdns.DelegationPost{Command: "export", Zone: S1})
+	switch {
+	case !oop.OK || opData == "":
+		s.expect("3.16", name316, false,
+			fmt.Sprintf("control: op's export of %s returned no data (needs #1191)", S1), oop.Msg)
+	case !o.OK && strings.Contains(o.Msg, "delegation export: not available to application clients"):
+		s.expect("3.16", name316, true,
+			"refused: "+firstLine(o.Msg)+" (AppRefused until #1191 is in the stack, then AppOwnZone)")
+	case o.OK:
+		got := exportData(o)
+		s.expect("3.16", name316, got == opData,
+			fmt.Sprintf("app1 got %d bytes of zone text, op got %d", len(got), len(opData)))
+	default:
+		s.expect("3.16", name316, false, fmt.Sprintf("refused (HTTP %d) for another reason", o.HTTP), o.Msg)
+	}
 	_, o = s.app1.delegation(tdns.DelegationPost{Command: "status", Zone: S2})
 	s.refused("3.17", "app1 delegation status of "+S2+" (config's)", o, notOwnConfig)
 
@@ -458,8 +480,14 @@ func (s *suite) check7Dnssec() {
 
 	all, err := s.au.dnssec()
 	if err == nil && len(all[P2]) == 1 {
-		_, o = s.app1.keystore(tdns.KeystorePost{Command: "dnssec-mgmt", SubCommand: "export", Zone: P2, Keyid: uint16(all[P2][0])})
-		s.refused("7.10", "app1 dnssec export of "+P2+"'s key (app2's)", o, notOwnCert)
+		// Answered as an export of a missing key of its own zone, so that
+		// app1 cannot tell another owner's key from no key (C 344c6e0d).
+		// The operator's log says what happened (C c85fa491).
+		keyid := all[P2][0]
+		_, o = s.app1.keystore(tdns.KeystorePost{Command: "dnssec-mgmt", SubCommand: "export", Zone: P2, Keyid: uint16(keyid)})
+		s.refused("7.10", "app1 dnssec export of "+P2+"'s key (app2's): answered not found", o,
+			[]string{fmt.Sprintf("DNSSEC key for zone %q keyid %d not found", P2, keyid)},
+			s.loggedRefusal("dnssec", P2, keyid))
 		_, o = s.app1.keystore(tdns.KeystorePost{Command: "dnssec-mgmt", SubCommand: "setstate", Keyname: P2, Zone: P2,
 			Keyid: uint16(all[P2][0]), State: "retired"})
 		s.refused("7.11", "app1 dnssec setstate of "+P2+"'s key (app2's)", o, notOwnCert, s.dnssecStateIs(P2, all[P2][0], "active"))
@@ -545,6 +573,40 @@ func (s *suite) setstateNamesAnotherZone(p1key int) {
 	s.expect(id, name+": no action on "+SIG, n2 == n1,
 		fmt.Sprintf("request %s; %q in the daemon log: %d after the operator's control, %d after app1's request",
 			orMsg("accepted", o), marker, n1, n2))
+}
+
+// loggedRefusal: the daemon logged, for the operator, app1's refused
+// export of a key of the given kind, zone and key ID (design R9; C
+// c85fa491).
+func (s *suite) loggedRefusal(kind, zone string, keyid int) state {
+	parts := []string{"private key export refused", "client=app1", "kind=" + kind, "zone=" + zone, fmt.Sprintf("keyid=%d", keyid)}
+	return func() string {
+		if waitFor(func() bool { return s.logLineWith(parts...) }) {
+			return ""
+		}
+		return "no line in the daemon log with " + strings.Join(parts, ", ")
+	}
+}
+
+// logLineWith: one line of the daemon log contains every part.
+func (s *suite) logLineWith(parts ...string) bool {
+	b, err := os.ReadFile(s.o.DaemonLog)
+	if err != nil {
+		return false
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		all := true
+		for _, p := range parts {
+			if !strings.Contains(l, p) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return true
+		}
+	}
+	return false
 }
 
 // logCount is how many lines of the daemon log contain s.
