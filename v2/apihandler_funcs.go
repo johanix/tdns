@@ -245,7 +245,11 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			}
 			// Re-sign after state-changing ops — deferred until post-commit
 			// (alongside snapshot republish) so the resigner does not race the tx.
-			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear" || kp.SubCommand == "policy-cleanup") {
+			// add too, whatever state it gives the key: re-importing a
+			// published key as active, or overwriting an active key with
+			// another state, changes the signing keys while the served
+			// DNSKEYs stay the same, which the republish does not see.
+			if err == nil && (kp.SubCommand == "add" || kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear" || kp.SubCommand == "policy-cleanup") {
 				dnssecResignZone = keyZone
 			}
 

@@ -633,7 +633,9 @@ Part C (keystore for application clients):
   is written under: Keyname's (Zone's when Keyname is empty), and the
   DNSKEY's owner name. A Zone that names another zone is refused before
   anything is written, for every caller; an empty Zone is the written
-  zone's. `sig0-mgmt delete` looks up and deletes by one name, and is
+  zone's. An add re-signs whatever state it gives the key: re-importing a
+  published key as active changes the signing keys and not the served
+  DNSKEYs. `sig0-mgmt delete` looks up and deletes by one name, and is
   refused when Zone and Keyname name two.
 - The reference count in an application's TSIG list counts every zone
   that uses the key, others' included: delete's "not in use" rule needs

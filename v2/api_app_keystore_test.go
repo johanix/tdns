@@ -884,7 +884,7 @@ func TestKeystoreExportWhoseCommitFailsHandsOutNothing(t *testing.T) {
 
 // A DNSSEC add or setstate changes the zone its key is written under (the
 // DNSKEY's owner name; Keyname), and that zone is republished and re-signed
-// after the commit. A request whose Zone names another zone is refused
+// after the commit, an add whatever state it gives the key. A request whose Zone names another zone is refused
 // before anything is written, for an operator too. An empty Zone is the
 // written zone's. A SIG(0) delete looks up and deletes one name.
 func TestKeystoreWriteZoneDecidesTheRepublish(t *testing.T) {
@@ -993,17 +993,38 @@ func TestKeystoreWriteZoneDecidesTheRepublish(t *testing.T) {
 	if p := republished(before); len(p) != 0 {
 		t.Errorf("the refused add republished %v", p)
 	}
+	if r := resigned(); len(r) != 0 {
+		t.Errorf("the refused add re-signed %v", r)
+	}
 	for _, zone := range []string{"", z["own"]} {
 		before = gens()
 		if resp, _ := postKeystore(t, addOf(zone), &socketCaller); resp.Error {
 			t.Fatalf("add with Zone %q: %s", zone, resp.ErrorMsg)
 		}
-		if p := republished(before); strings.Join(p, " ") != "own" {
-			t.Errorf("add with Zone %q republished %v, want the own zone", zone, p)
+		if r, p := resigned(), republished(before); strings.Join(r, " ") != z["own"] || strings.Join(p, " ") != "own" {
+			t.Errorf("add with Zone %q re-signed %v and republished %v, want the own zone", zone, r, p)
 		}
 	}
 	if n := count("DnssecKeyStore", z["own"]); n != keys+2 {
 		t.Errorf("the own zone has %d DNSSEC keys after two adds, want %d", n, keys+2)
+	}
+
+	// A published key re-imported as active: the served DNSKEYs stay the
+	// same, the signing keys change, and the zone is re-signed.
+	reimport := addOf(z["own"])
+	reimport.State = DnskeyStatePublished
+	if resp, _ := postKeystore(t, reimport, &socketCaller); resp.Error {
+		t.Fatalf("add of a published key: %s", resp.ErrorMsg)
+	}
+	resigned()
+	reimport.State = DnskeyStateActive
+	if resp, _ := postKeystore(t, reimport, &socketCaller); resp.Error {
+		t.Fatalf("re-import of the published key as active: %s", resp.ErrorMsg)
+	}
+	var reState string
+	Conf.Internal.KeyDB.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, z["own"], reimport.PrivateKeyCache.DnskeyRR.KeyTag()).Scan(&reState)
+	if r := resigned(); reState != DnskeyStateActive || strings.Join(r, " ") != z["own"] {
+		t.Errorf("re-import of a published key as active: state %q, re-signed %v; want active and the own zone", reState, r)
 	}
 
 	// An application is refused another's zone whichever field names it.
