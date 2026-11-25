@@ -148,6 +148,40 @@ adds at once take turns.
 A second daemon of any of the three types becomes an instance: `auth`,
 `agent` and `imr` all have instance trees.
 
+### Changing an entry: `config update`
+
+`config add` never changes an entry that is there. `config update` changes
+one, named by its `name:`, in one of two ways:
+
+```bash
+tdns-ncli config update tdns-auth --cert     # from the API key to your certificate
+tdns-ncli config update auth2 --repin        # after the daemon's certificate changed
+```
+
+**`--cert`** switches an entry from the API key to your client certificate,
+or completes a `config-file:`-only entry once its daemon is up. It takes
+steps 1 to 3 of `config add` (your certificate, its pin added by the daemon
+as `--client-name`, one request over TCP), then rewrites the entry where it
+stands: the daemon's TCP address if the entry had none, `authmethod:
+certificate`, `tlsauth: pin` and the daemon's pins. The `apikey:` and
+`rootca:` lines go.
+
+**`--repin`** takes the pins of the certificate the daemon serves now, for
+example after its API certificate was renewed. One request over TCP with
+the new pins, as the entry authenticates (key or certificate), and the
+entry's pins are replaced; the old ones go. An entry that has the
+daemon's pins already is left as it is. tdns-ncli names this command when
+it refuses an entry for want of a pin.
+
+Both run as root on the daemon's host, with the daemon running: they ask
+it over its local admin socket. The daemon is the entry's `config-file:`;
+an older entry without one needs `--daemon-config <file>`, and the line is
+written. The daemon is never guessed from the entry's address. If anything
+before the write fails, the entry is left as it was. Every other line of
+the file, comments included, stays as it is, and the file is checked to
+load with only that entry changed before it is written. `--dry-run` asks
+the daemon what it serves and shows the entry as it would become.
+
 ### Listing: `config list`
 
 ```console
