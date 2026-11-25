@@ -361,6 +361,25 @@ func TestPinRefusal(t *testing.T) {
 	}
 }
 
+// A refusal made while InitApiClients builds the clients names the CLI
+// config of this run, not one from before.
+func TestInitApiClientsRefusalNamesTheCliConfig(t *testing.T) {
+	withCleanRoleRegistry(t)
+	RegisterRole("auth", "tdns-auth")
+	defer func(was *CliConf) { apiConfig = was }(apiConfig)
+	apiConfig = &CliConf{File: "/x/old.yaml"}
+	conf := &CliConf{File: "/x/my cli.yaml", ApiServers: []ApiDetails{
+		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", AuthMethod: "certificate", TLSAuth: "pin"},
+	}}
+	if err := InitApiClients(conf); err != nil {
+		t.Fatal(err)
+	}
+	var r clientRefusal
+	if err := apiClientErrors["tdns-auth"]; !errors.As(err, &r) || !strings.HasPrefix(r.fix, "tdns-ncli --config '/x/my cli.yaml' config update tdns-auth --repin") {
+		t.Errorf("refusal = %+v (%v), want this run's CLI config named", r, err)
+	}
+}
+
 // With pins, the client ignores rootca, so a rootca: file that is gone does
 // not fail an entry that verifies by pin.
 func TestPinnedEntryIgnoresRootCA(t *testing.T) {

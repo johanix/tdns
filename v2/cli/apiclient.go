@@ -162,6 +162,14 @@ func InitApiClients(c *CliConf) error {
 	// (see clientEntries); the wiring has already warned about the others.
 	servers := clientEntries(c.ApiServers)
 
+	// The config lookups by client name (config-file:, the daemon command)
+	// must find the entry whose client was built, not a left-out instance
+	// that happens to come first. Set before the clients are built: a
+	// refusal made while building one names this run's CLI config.
+	cc := *c
+	cc.ApiServers = servers
+	apiConfig = &cc
+
 	if tdns.Globals.Debug {
 		fmt.Printf("InitApiClients: setting up API clients for:")
 	}
@@ -209,13 +217,6 @@ func InitApiClients(c *CliConf) error {
 	if authClient, ok := tdns.Globals.ApiClients["tdns-auth"]; ok {
 		tdns.Globals.Api = authClient
 	}
-
-	// The config lookups by client name (config-file:, the daemon command)
-	// must find the entry whose client was built, not a left-out instance
-	// that happens to come first.
-	cc := *c
-	cc.ApiServers = servers
-	apiConfig = &cc
 
 	numtsigs, _ := tdns.ParseTsigKeys(&c.Keys)
 	if tdns.Globals.Debug {
