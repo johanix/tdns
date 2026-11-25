@@ -234,7 +234,7 @@ func TestAddStopsWhenTheDaemonRefuses(t *testing.T) {
 	d.mu.Lock()
 	d.noAccessFile, d.refuseAdd = false, "\"tester\" is already there with another pin"
 	d.mu.Unlock()
-	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), d.refuseAdd) || !strings.Contains(err.Error(), "nothing was written") {
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), d.refuseAdd) || !strings.Contains(err.Error(), "nothing was written") || !strings.Contains(err.Error(), "the same --client-name") {
 		t.Errorf("refused add: %v", err)
 	}
 	d.unchanged(t, string(before))
@@ -428,7 +428,7 @@ func TestAddNeedsTheSocket(t *testing.T) {
 		}
 	}
 	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   socket: none\n"))
-	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "(socket: none)") {
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "\nsocket: none.") {
 		t.Errorf("socket: none: %v", err)
 	}
 	// A path the daemon refuses is no socket either, and the refusal says
@@ -436,6 +436,12 @@ func TestAddNeedsTheSocket(t *testing.T) {
 	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   socket: run/d.sock\n"))
 	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "serves no local admin socket") || strings.Contains(err.Error(), "socket: none") {
 		t.Errorf("a relative socket path: %v", err)
+	} else {
+		for _, l := range strings.Split(err.Error(), "\n")[1:] { // the first names the config
+			if len("Error: "+l) > 72 {
+				t.Errorf("a relative socket path: line over 72: %q", l)
+			}
+		}
 	}
 	d.unchanged(t, string(before))
 }
