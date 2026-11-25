@@ -91,7 +91,8 @@ func runDaemonResolver(t *testing.T) {
 func TestDaemonResolverLogsUnderItsOwnSubsystems(t *testing.T) {
 	// The resolver's messages: InitImrEngine's, which it always logs at Info,
 	// and those the first subtest sees under imr and imr-lookups.
-	resolverMsgs := map[string]bool{`"InitImrEngine: IMR initialized"`: true}
+	const initMsg = `"InitImrEngine: IMR initialized"`
+	resolverMsgs := map[string]bool{initMsg: true}
 
 	t.Run("imr and imr-lookups at Debug, engine and dns at Warn", func(t *testing.T) {
 		buf := captureSubsystemLogs(t, map[string]slog.Level{
@@ -105,7 +106,7 @@ func TestDaemonResolverLogsUnderItsOwnSubsystems(t *testing.T) {
 		for _, l := range subsystemLines(buf.String()) {
 			seen[l.subsystem]++
 			if l.subsystem == "imr" || l.subsystem == "imr-lookups" {
-				initUnderImr = initUnderImr || (l.subsystem == "imr" && resolverMsgs[l.msg])
+				initUnderImr = initUnderImr || (l.subsystem == "imr" && l.msg == initMsg)
 				resolverMsgs[l.msg] = true
 			}
 		}
