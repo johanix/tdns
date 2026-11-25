@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -267,14 +268,21 @@ func pemCertPin(data []byte) (string, error) {
 
 // daemonSocketClient is a client for the local admin socket of role's
 // daemon: the daemon of daemonCfg (--daemon-config) when it is set, else of
-// the role's daemon config. Every request names that config, so another
-// daemon on the socket refuses it (412) before it acts on it.
+// the role's daemon config (its entry's config-file:, else the default).
+// Every request names that config, so another daemon on the socket refuses
+// it (412) before it acts on it.
 func daemonSocketClient(role, daemonCfg string) (*tdns.ApiClient, error) {
 	cfg := daemonCfg
 	if cfg == "" {
 		cfg = defaultCfgFileForRole(role)
 	}
 	info, err := ReadDaemonApi(cfg, effectiveRole(role))
+	// An entry without config-file: may reach another daemon altogether;
+	// only the default daemon's own socket says it is that daemon.
+	if ad := apiDetailsForRole(role); daemonCfg == "" && ad != nil && ad.ConfigFile == "" &&
+		(err != nil || !entryIsDaemonSocket(*ad, info)) {
+		return nil, fmt.Errorf("the entry %s has no config-file:, so nothing says\nwhich daemon it is. Give --daemon-config <file>, or add\nconfig-file: to the entry", ad.Name)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cannot read %s's daemon config %s: %v", role, cfg, err)
 	}
@@ -283,6 +291,17 @@ func daemonSocketClient(role, daemonCfg string) (*tdns.ApiClient, error) {
 	}
 	return tdns.NewClientWithOptions(role, "unix://"+info.Socket,
 		tdns.ClientOptions{AuthMethod: "none", ExpectConfigFile: info.ConfigFile}), nil
+}
+
+// entryIsDaemonSocket says whether entry e is the local socket of the daemon
+// whose API is info. The socket is the daemon's own: it creates it, in a
+// directory only it may use. A TCP address identifies no daemon by itself.
+func entryIsDaemonSocket(e ApiDetails, info *DaemonApi) bool {
+	u, err := url.Parse(e.BaseURL)
+	if err != nil || !strings.EqualFold(u.Scheme, "unix") {
+		return false
+	}
+	return info.Socket != "" && u.Path == info.Socket
 }
 
 // socketError says plainly when the local socket sock cannot be used from
