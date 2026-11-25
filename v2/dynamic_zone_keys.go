@@ -53,6 +53,18 @@ func (conf *Config) removeZoneKeys(zone string, keepKeys bool) *ZoneRemoval {
 	if kdb == nil {
 		return r
 	}
+
+	// A rollover tick that is working on the zone writes the state deleted
+	// here, and a SIG(0) rollover already past its check of zd.removed
+	// commits a new key (generateRolloverSig0Key); either finishes first.
+	// With keepKeys too: the rollover's new key is then one of the kept
+	// ones, and counted here, and a rollover that checks after this finds
+	// the zone removed and makes none. RemoveDynamicZone calls this under
+	// templateApplyMu, with zd.mu released.
+	lock := AcquireRolloverLock(zone)
+	lock.Lock()
+	defer lock.Unlock()
+
 	if keepKeys {
 		var err error
 		if r.DnssecKeys, r.Sig0Keys, err = kdb.countZoneKeys(zone); err != nil {
@@ -61,12 +73,6 @@ func (conf *Config) removeZoneKeys(zone string, keepKeys bool) *ZoneRemoval {
 		}
 		return r
 	}
-
-	// A rollover tick that is working on the zone writes the state deleted
-	// here; it finishes first.
-	lock := AcquireRolloverLock(zone)
-	lock.Lock()
-	defer lock.Unlock()
 
 	// Read before the delete, which takes the row it is kept in.
 	r.ParentDS, r.ParentDSAt = parentDSObservation(kdb, zone)

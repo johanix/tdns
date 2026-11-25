@@ -415,7 +415,7 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	// for created keys can find an older one.
 	kpresp, err := zd.generateRolloverSig0Key(alg)
 	if errors.Is(err, errRolloverZoneGone) {
-		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): %w", zd.ZoneName, err)
+		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): %w; no new key was made", zd.ZoneName, err)
 	}
 	if err != nil {
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to generate keypair: %v", zd.ZoneName, err)
@@ -425,6 +425,16 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): key generation returned no key", zd.ZoneName)
 	}
 	zd.Logger.Printf("%s", kpresp.Msg)
+	// A delete that marked the zone while the key was being made waited
+	// for it (removeZoneKeys): the key went with the zone's keys, or was
+	// kept and counted with them. The parent is not asked to trust it, and
+	// the key is left as it is, since a delete with --keep-keys has
+	// reported it among the kept ones. A delete that comes later finds the
+	// rollover with the parent, as before.
+	if zd.removed.Load() {
+		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): %w; its new key %d was not sent",
+			zd.ZoneName, errRolloverZoneGone, pkc.KeyRR.KeyTag())
+	}
 
 	oldkeyid := oldkey.KeyRR.KeyTag()
 	newkeyid := pkc.KeyRR.KeyTag()
@@ -543,11 +553,13 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 }
 
 // errRolloverZoneGone: the ZoneData a SIG(0) rollover started on left Zones
-// before the rollover made its new key (generateRolloverSig0Key).
-var errRolloverZoneGone = errors.New("the zone was deleted or modified while the rollover ran; no new key was made and the parent was not asked")
+// before the rollover asked the parent to trust its new key
+// (generateRolloverSig0Key).
+var errRolloverZoneGone = errors.New("the zone was deleted or modified while the rollover ran; the parent was not asked")
 
 // testHookSig0RolloverGenerating, when set, runs in generateRolloverSig0Key
-// with the zone's rollover lock held, before the zone is checked.
+// with the zone's rollover lock held, after the zone is checked and before
+// the key is made.
 var testHookSig0RolloverGenerating func()
 
 // generateRolloverSig0Key makes a SIG(0) rollover's new key, in state
@@ -557,9 +569,11 @@ var testHookSig0RolloverGenerating func()
 // takes the lock, and goes with the zone's other keys, or not made at all.
 // A ZoneData that has left Zones (zd.removed: deleted, or replaced by a
 // modify) gets no new key, and the rollover stops before it asks the
-// parent to trust one. A delete with --keep-keys deletes no keys and does
-// not take the lock: the check alone keeps a rollover from adding a key to
-// the ones kept.
+// parent to trust one. A delete with --keep-keys takes the lock too, to
+// count the kept keys: a key committed first is counted with them, and
+// none is made after. A delete that marks the zone while this holds the
+// lock waits for it, and the rollover finds the mark when it checks again
+// after this returns, before the parent is asked.
 //
 // Lock order: the per-zone rollover lock, then the KeyDB transaction that
 // Sig0KeyMgmt begins, as in removeZoneKeys and the rollover ticks. The
@@ -571,11 +585,11 @@ func (zd *ZoneData) generateRolloverSig0Key(alg uint8) (*KeystoreResponse, error
 	lock := AcquireRolloverLock(zd.ZoneName)
 	lock.Lock()
 	defer lock.Unlock()
-	if testHookSig0RolloverGenerating != nil {
-		testHookSig0RolloverGenerating()
-	}
 	if zd.removed.Load() {
 		return nil, errRolloverZoneGone
+	}
+	if testHookSig0RolloverGenerating != nil {
+		testHookSig0RolloverGenerating()
 	}
 	// With a nil tx Sig0KeyMgmt commits the key in a short transaction of
 	// its own, before it returns.

@@ -219,7 +219,8 @@ type ZoneData struct {
 	// the zone: an error change does not put it back in Zones
 	// (republishLocked), a KSK rollover tick that takes the rollover lock
 	// after the delete does not write the deleted state back, and a SIG(0)
-	// rollover makes no new key (generateRolloverSig0Key).
+	// rollover neither makes a new key nor sends one to the parent
+	// (generateRolloverSig0Key).
 	removed atomic.Bool
 	// catalogWriteMu serializes a configured catalog's write-backs to its own
 	// zone file (writeBackCatalogZone). Never taken with zd.mu held: WriteZone
