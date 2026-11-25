@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -407,6 +410,26 @@ func TestZoneDeleteThroughTheAPI(t *testing.T) {
 		if len(resp.Warnings) != 0 {
 			t.Errorf("delete --keep-keys: warnings %q", resp.Warnings)
 		}
+	})
+
+	// A removal a crash could still undo is not a success either: the
+	// report, with its keys kept and the commands to finish, as the error.
+	t.Run("removal not on disk", func(t *testing.T) {
+		_, kdb := keysFixture(t)
+		Conf.Internal.KeyDB = kdb
+		Conf.DynamicZones.ConfigFile = filepath.Join(t.TempDir(), "dynamic.yaml")
+		t.Cleanup(func() { Conf.DynamicZones.ConfigFile = "" })
+		prev := syncDynamicConfigDir
+		syncDynamicConfigDir = func(string) error { return errors.New("sync refused by the test") }
+		t.Cleanup(func() { syncDynamicConfigDir = prev })
+		resp := post(t, `{"Command":"delete","Zone":"keys.example."}`)
+		if !resp.Error || resp.Removal == nil || resp.Removal.NotSynced == "" || resp.ErrorMsg != resp.Msg {
+			t.Fatalf("delete not on disk: error %v (%s), removal %+v", resp.Error, resp.ErrorMsg, resp.Removal)
+		}
+		if !strings.Contains(resp.ErrorMsg, "keystore dnssec clear --zone keys.example. --force") {
+			t.Errorf("ErrorMsg = %q", resp.ErrorMsg)
+		}
+		wantAllRows(t, kdb, keysZone, "removal not on disk")
 	})
 
 	t.Run("keys not deleted", func(t *testing.T) {
@@ -837,13 +860,16 @@ func dnssecKeyCount(t *testing.T, kdb *KeyDB, zone string) int {
 func TestAZoneDeletedBeforeItsFirstKeysGetsNone(t *testing.T) {
 	const name = "firstkeys.example."
 	conf, zd, kdb := signingZoneToDelete(t, name)
-	testHookEnsureKeysGenerating = func() {
-		testHookEnsureKeysGenerating = nil
+	testHookEnsureKeysLocking = func(stage string) {
+		if stage != "make" {
+			return
+		}
+		testHookEnsureKeysLocking = nil
 		if _, err := conf.RemoveDynamicZone(name, false); err != nil {
 			t.Errorf("delete: %v", err)
 		}
 	}
-	t.Cleanup(func() { testHookEnsureKeysGenerating = nil })
+	t.Cleanup(func() { testHookEnsureKeysLocking = nil })
 
 	if _, err := zd.EnsureActiveDnssecKeys(kdb, false); !errors.Is(err, errNoKeysForRemovedZone) {
 		t.Errorf("EnsureActiveDnssecKeys on a zone deleted under it returned %v, want %v", err, errNoKeysForRemovedZone)
@@ -888,5 +914,191 @@ func TestFirstKeysAreMadeWhileTheRolloverLockIsHeld(t *testing.T) {
 	}
 	if n := dnssecKeyCount(t, kdb, name); n != 2 {
 		t.Errorf("%d DNSSEC keys made, want a KSK and a ZSK", n)
+	}
+}
+
+func dnssecKeyState(t *testing.T, kdb *KeyDB, zone string, keyid uint16) string {
+	t.Helper()
+	var state string
+	if err := kdb.DB.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zone, int(keyid)).Scan(&state); err != nil {
+		t.Fatalf("state of key %d: %v", keyid, err)
+	}
+	return state
+}
+
+// sameNameZones is a zone served under name with a bound policy and an old
+// ZoneData of the same name, deleted or replaced since, that a signing pass
+// still holds. The keys under name are the served zone's; the old one has
+// a policy of its own.
+func sameNameZones(t *testing.T, name string, oldPol *DnssecPolicy) (old *ZoneData, kdb *KeyDB) {
+	t.Helper()
+	kdb = newTestKeyDB(t)
+	soa := name + "\t3600\tIN\tSOA\tns." + name + " hostmaster." + name + " 1 7200 1800 604800 7200\n" +
+		name + "\t3600\tIN\tNS\tns." + name + "\n"
+	served := testZone(t, name, soa)
+	served.KeyDB = kdb
+	served.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	served.DnssecPolicy = &DnssecPolicy{Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519}
+	Zones.Set(name, served)
+	t.Cleanup(func() { Zones.Remove(name) })
+	old = testZone(t, name, soa)
+	old.KeyDB = kdb
+	old.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	old.DnssecPolicy = oldPol
+	return old, kdb
+}
+
+// A signing pass on an old ZoneData, removed after it looked up the keys
+// by the zone's name -- a delete and a re-add of the name came in between
+// -- makes no algorithm-reconcile write to the keys it found, which are
+// the new zone's: its old policy would remove the new zone's standby KSK.
+// The check is the one made under the zone keys lock, not the earlier one.
+func TestAnOldZoneDataDoesNotReconcileANewZonesKeys(t *testing.T) {
+	const name = "samename.example."
+	oldPol := &DnssecPolicy{Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ECDSAP256SHA256, ZSKAlgorithm: dns.ED25519}
+	oldPol.Rollover.Method = RolloverMethodMultiDS
+	old, kdb := sameNameZones(t, name, oldPol)
+	fixtureActivePair(t, kdb, name)
+	standby := fixtureStaged(t, kdb, name, "KSK", DnskeyStateStandby)
+
+	testHookEnsureKeysLocking = func(stage string) {
+		if stage == "reconcile" {
+			old.removed.Store(true)
+		}
+	}
+	t.Cleanup(func() { testHookEnsureKeysLocking = nil })
+	if _, err := old.EnsureActiveDnssecKeys(kdb, false); !errors.Is(err, errNoKeysForRemovedZone) {
+		t.Errorf("EnsureActiveDnssecKeys on the old ZoneData returned %v, want %v", err, errNoKeysForRemovedZone)
+	}
+	if st := dnssecKeyState(t, kdb, name, standby); st != DnskeyStateStandby {
+		t.Errorf("the new zone's standby KSK is %s after a pass on the old ZoneData", st)
+	}
+
+	// The premise: the same pass on a ZoneData still in Zones removes it.
+	testHookEnsureKeysLocking = nil
+	old.removed.Store(false)
+	if _, err := old.EnsureActiveDnssecKeys(kdb, false); err != nil {
+		t.Fatalf("EnsureActiveDnssecKeys: %v", err)
+	}
+	if st := dnssecKeyState(t, kdb, name, standby); st != DnskeyStateRemoved {
+		t.Errorf("test premise: the old policy's reconcile left the standby KSK %s", st)
+	}
+}
+
+// Nor does it promote the new zone's published keys, when it found no
+// active ones: removed after it found them missing, it writes nothing.
+func TestAnOldZoneDataDoesNotPromoteANewZonesKeys(t *testing.T) {
+	const name = "samename2.example."
+	old, kdb := sameNameZones(t, name, &DnssecPolicy{Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519})
+	ksk := fixtureStaged(t, kdb, name, "KSK")
+	zsk := fixtureStaged(t, kdb, name, "ZSK")
+
+	testHookEnsureKeysLocking = func(stage string) {
+		if stage == "make" {
+			old.removed.Store(true)
+		}
+	}
+	t.Cleanup(func() { testHookEnsureKeysLocking = nil })
+	if _, err := old.EnsureActiveDnssecKeys(kdb, false); !errors.Is(err, errNoKeysForRemovedZone) {
+		t.Errorf("EnsureActiveDnssecKeys on the old ZoneData returned %v, want %v", err, errNoKeysForRemovedZone)
+	}
+	for _, k := range []uint16{ksk, zsk} {
+		if st := dnssecKeyState(t, kdb, name, k); st != DnskeyStatePublished {
+			t.Errorf("the new zone's published key %d is %s after a pass on the old ZoneData", k, st)
+		}
+	}
+	if n := dnssecKeyCount(t, kdb, name); n != 2 {
+		t.Errorf("%d DNSSEC keys under the name, want the new zone's 2", n)
+	}
+
+	// The premise: the same pass on a ZoneData still in Zones promotes them.
+	testHookEnsureKeysLocking = nil
+	old.removed.Store(false)
+	if _, err := old.EnsureActiveDnssecKeys(kdb, false); err != nil {
+		t.Fatalf("EnsureActiveDnssecKeys: %v", err)
+	}
+	if st := dnssecKeyState(t, kdb, name, ksk); st != DnskeyStateActive {
+		t.Errorf("test premise: the published KSK is %s after a pass, not active", st)
+	}
+}
+
+// A SIG(0) bootstrap of a zone deleted after it found no key, or after it
+// looked up the parent, makes no key and sends nothing. The fake parent's
+// UPDATE path is not even set up: an UPDATE would go nowhere.
+func TestASig0BootstrapOfADeletedZoneMakesAndSendsNothing(t *testing.T) {
+	const name = "bootstrap.example."
+	kdb := newTestKeyDB(t)
+	zd := testZone(t, name, name+"\t3600\tIN\tSOA\tns."+name+" hostmaster."+name+" 1 7200 1800 604800 7200\n"+
+		name+"\t3600\tIN\tNS\tns."+name+"\n")
+	zd.KeyDB = kdb
+	zd.SetParent("example.")
+
+	// Removed before the key is made: the check under the zone keys lock.
+	zd.removed.Store(true)
+	resp, err := zd.generateBootstrapSig0Key(dns.ED25519)
+	if resp != nil || !errors.Is(err, errNoKeysForRemovedZone) {
+		t.Errorf("a bootstrap key for a deleted zone: %+v, %v", resp, err)
+	}
+	if n := countRows(t, kdb, "Sig0KeyStore", "zonename", name); n != 0 {
+		t.Errorf("%d SIG(0) keys made for a deleted zone", n)
+	}
+	if _, _, err := zd.bootstrapSig0KeyWithParent(context.Background(), dns.ED25519, nil, true); !errors.Is(err, errNoKeysForRemovedZone) {
+		t.Errorf("the bootstrap of a deleted zone returned %v, want %v", err, errNoKeysForRemovedZone)
+	}
+
+	// For a zone still in Zones the key is made, once, and a second call
+	// leaves it as the one to bootstrap.
+	zd.removed.Store(false)
+	if resp, err := zd.generateBootstrapSig0Key(dns.ED25519); err != nil || resp == nil {
+		t.Fatalf("a bootstrap key for a live zone: %+v, %v", resp, err)
+	}
+	if resp, err := zd.generateBootstrapSig0Key(dns.ED25519); err != nil || resp != nil {
+		t.Errorf("a second bootstrap key: %+v, %v", resp, err)
+	}
+	if n := countRows(t, kdb, "Sig0KeyStore", "zonename", name); n != 1 {
+		t.Errorf("%d SIG(0) keys, want 1", n)
+	}
+}
+
+// A bootstrap that has its key, and finds the parent's UPDATE target, sends
+// no KEY UPDATE for a zone deleted meanwhile: the check made before the
+// ceremony goes out. The parent here refuses everything, so a ceremony
+// that went out would come back as a refusal instead.
+func TestASig0BootstrapSendsNothingForAZoneDeletedBeforeTheCeremony(t *testing.T) {
+	const child, parent = "ceremony.parent.example.", "parent.example."
+	kdb := newTestKeyDB(t)
+	zd := testZone(t, child, child+"\t3600\tIN\tSOA\tns."+child+" hostmaster."+child+" 1 7200 1800 604800 7200\n"+
+		child+"\t3600\tIN\tNS\tns."+child+"\n")
+	zd.KeyDB = kdb
+	zd.SetParent(parent)
+	generateSig0Key(t, kdb, child, Sig0StateActive)
+	refuser := startRcodeResponder(t, dns.RcodeRefused)
+	_, port, err := net.SplitHostPort(refuser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := Globals.ImrEngine
+	imr := cacheOnlyImr(t, map[string][]string{"ceremony._dsync." + parent: {"ANY UPDATE " + port + " upd." + parent}},
+		map[string]string{"upd." + parent: "127.0.0.1"})
+	// The parent advertises at-apex, so the bootstrap gets to its ceremony.
+	target := "upd." + parent
+	imr.Cache.Set(target, dns.TypeSVCB, &cache.CachedRRset{
+		Name: target, RRtype: dns.TypeSVCB,
+		RRset:   &core.RRset{Name: target, RRtype: dns.TypeSVCB, RRs: []dns.RR{newBootstrapSVCB(target, "at-apex", 300)}},
+		Context: cache.ContextAnswer,
+		State:   cache.ValidationStateSecure,
+	})
+	Globals.ImrEngine = imr
+	t.Cleanup(func() { Globals.ImrEngine = prev })
+
+	zd.removed.Store(true)
+	if _, _, err := zd.bootstrapSig0KeyWithParent(context.Background(), dns.ED25519, []string{"at-apex"}, false); !errors.Is(err, errNoKeysForRemovedZone) {
+		t.Errorf("the bootstrap of a zone deleted before its ceremony returned %v, want %v", err, errNoKeysForRemovedZone)
+	}
+	// The premise: for a zone still in Zones the ceremony goes out, and the
+	// parent's refusal comes back.
+	zd.removed.Store(false)
+	if _, _, err := zd.bootstrapSig0KeyWithParent(context.Background(), dns.ED25519, []string{"at-apex"}, false); err == nil || errors.Is(err, errNoKeysForRemovedZone) {
+		t.Errorf("test premise: the bootstrap of a live zone returned %v, want the parent's refusal", err)
 	}
 }

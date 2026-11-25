@@ -210,6 +210,18 @@ func (r *ZoneRemoval) Msg() string {
 	nokeys := fmt.Sprintf("zone %s deleted; it had no DNSSEC or SIG(0) keys", r.Zone)
 	counts := fmt.Sprintf("%d DNSSEC, %d SIG(0)", r.DnssecKeys, r.Sig0Keys)
 	switch {
+	case r.NotSynced != "":
+		lines = append(lines, fmt.Sprintf("zone %s deleted, but a crash could bring it back: %s", r.Zone, r.NotSynced))
+		if r.KeepKeys {
+			lines = append(lines, "its keys were kept, as asked; a re-add takes them back")
+			break
+		}
+		// The commands on lines of their own, indented, to copy.
+		lines = append(lines,
+			"its keys were kept, for the zone a crash would bring back; once the disk is fine, delete them by hand; \"keystore sig0 list\" shows the SIG(0) key IDs:",
+			fmt.Sprintf("  keystore dnssec clear --zone %s --force", r.Zone),
+			fmt.Sprintf("  keystore sig0 delete --zone %s --keyid <keyid>", r.Zone))
+
 	case r.KeepKeys:
 		switch {
 		case r.KeysError != "":
@@ -246,7 +258,7 @@ func (r *ZoneRemoval) Msg() string {
 // until the DS goes (R12). Worded as a fact only when the rollover engine
 // saw the DS; when it does not know, conditionally.
 func (r *ZoneRemoval) Warnings() []string {
-	if r.KeepKeys || r.KeysError != "" || r.DnssecKeys == 0 {
+	if r.KeepKeys || r.KeysError != "" || r.NotSynced != "" || r.DnssecKeys == 0 {
 		return nil
 	}
 	const consequence = "validating resolvers treat the zone as bogus until the DS is removed or replaced"

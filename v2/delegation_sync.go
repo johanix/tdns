@@ -385,20 +385,35 @@ func (zd *ZoneData) Sig0KeyPreparation(name string, alg uint8, kdb *KeyDB) error
 		if len(sak.Keys) == 0 {
 			lgDns.Info("Sig0KeyPreparation: no active SIG(0) key found, will generate new key", "name", name)
 
-			kp := KeystorePost{
-				Command:    "sig0-mgmt",
-				SubCommand: "generate",
-				Zone:       zd.ZoneName,
-				Keyname:    name,
-				Algorithm:  alg,
-				State:      Sig0StateActive,
-				Creator:    "del-sync-setup",
-			}
-			resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
+			// Under the zone keys lock, and only for a ZoneData still in Zones
+			// (lockZoneKeys): a setup queued before a zone delete makes no key
+			// for a zone that is gone. Read again under the lock: a key
+			// another caller made meanwhile is the one to publish.
+			resp, err := func() (*KeystoreResponse, error) {
+				unlock, err := zd.lockZoneKeys("Sig0KeyPreparation")
+				if err != nil {
+					return nil, err
+				}
+				defer unlock()
+				if again, err := kdb.GetSig0Keys(name, Sig0StateActive); err == nil && len(again.Keys) > 0 {
+					return nil, nil
+				}
+				return zd.KeyDB.Sig0KeyMgmt(nil, KeystorePost{
+					Command:    "sig0-mgmt",
+					SubCommand: "generate",
+					Zone:       zd.ZoneName,
+					Keyname:    name,
+					Algorithm:  alg,
+					State:      Sig0StateActive,
+					Creator:    "del-sync-setup",
+				})
+			}()
 			if err != nil {
 				return fmt.Errorf("Sig0KeyPreparation(%s) failed to generate keypair: %w", name, err)
 			}
-			lgDns.Info("Sig0KeyPreparation: key generated", "msg", resp.Msg)
+			if resp != nil {
+				lgDns.Info("Sig0KeyPreparation: key generated", "msg", resp.Msg)
+			}
 
 			sak, err = zd.KeyDB.GetSig0Keys(name, Sig0StateActive)
 			if err != nil {
@@ -1346,6 +1361,11 @@ func handleDelegationSyncSetupWith(ctx context.Context, conf *Config, delsyncq c
 			"zone", ds.ZoneName, "round", next.ReBootstrapRound, "of", childReBootstrapRounds,
 			"delay", delay, "err", err)
 		return requeueSetupAfter(ctx, delsyncq, next, delay)
+
+	case isNoKeysForRemovedZone(err):
+		// The zone was deleted or replaced while the setup was queued: no
+		// key is made or sent for it, and noKeysForRemovedZone has said so.
+		return nil
 
 	default:
 		lgDns.Error("DelegationSyncher: error from DelegationSyncSetup, ignoring sync request",

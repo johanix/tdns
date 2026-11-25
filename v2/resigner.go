@@ -304,6 +304,11 @@ func (zd *ZoneData) replaceSignaturesNow(ctx context.Context) {
 	zd.takeResignPending()
 	lgSigner.Debug("resigner: replacing signatures after a key-state change", "zone", zd.ZoneName)
 	newrrsigs, err := zd.ResignZone(ctx, zd.KeyDB)
+	if isNoKeysForRemovedZone(err) {
+		// The zone was deleted or replaced since the request was queued:
+		// nothing is owed, and noKeysForRemovedZone has said so.
+		return
+	}
 	if err != nil {
 		// Put it back. A failed replace leaves the zone serving signatures by
 		// keys that are no longer active, and the renewal pass will not find

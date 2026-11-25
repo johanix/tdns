@@ -890,7 +890,9 @@ func (conf *Config) WriteDynamicConfigFile() error {
 
 	// The snapshot is taken under the lock the write holds, so a write can
 	// never put back a snapshot older than one already written (a zone
-	// setowner that persisted in between would be lost on disk). Collecting
+	// setowner that persisted in between would be lost on disk, and a zone
+	// delete that persisted in between, and then deleted the zone's keys,
+	// would see the zone come back on restart without them). Collecting
 	// it takes no zone lock.
 	dynamicConfigMutex.Lock()
 	defer dynamicConfigMutex.Unlock()
@@ -1430,7 +1432,9 @@ func swapZoneData(name string, out, in *ZoneData) {
 // zone that comes back on restart needs them, and still under
 // templateApplyMu, so an add of the same name cannot mint keys that this
 // delete then takes. A failure there leaves the zone deleted and is
-// reported in the returned ZoneRemoval, not as an error.
+// reported in the returned ZoneRemoval, not as an error. So is a rewrite
+// that took effect but could not be synced to disk (NotSynced): the keys
+// are then kept, since a crash could still bring the zone back.
 func (conf *Config) RemoveDynamicZone(name string, keepKeys bool) (*ZoneRemoval, error) {
 	return conf.RemoveDynamicZoneFor("", name, keepKeys)
 }
@@ -1523,7 +1527,28 @@ func (conf *Config) RemoveDynamicZoneFor(app, name string, keepKeys bool) (*Zone
 	// zone is gone from memory but the stale config entry would resurrect it on
 	// restart — that's a failed delete, not a success.
 	if err := conf.RemoveDynamicZoneFromConfig(name); err != nil {
-		if rerr := conf.Internal.KeyDB.RestoreTransportSignalStored(name, signalRecord); rerr != nil {
+		rerr := conf.Internal.KeyDB.RestoreTransportSignalStored(name, signalRecord)
+		// The rewrite took effect, and only a crash before its sync could
+		// bring the old file back (errDynamicConfigNotSynced). The zone is
+		// out of Zones and out of the file, so a retry finds no zone to
+		// delete: it is reported as a removal, with how to finish once the
+		// disk is fine. Kept until the removal is on disk, as for a failed
+		// rewrite, is what the zone a crash brings back needs: its keys, its
+		// zone file, and the record of what the transport signal pass stored
+		// in that file. The record describes that file and nothing else, so
+		// it stays with it: a later add of the name that loads the file as
+		// it is needs it as much, and one that writes a new file finds only
+		// the signals the pass would store there itself.
+		if errors.Is(err, errDynamicConfigNotSynced) {
+			lg.Error("zone delete: the zone is out of the dynamic config, but the removal is not on disk; its keys were kept",
+				"zone", name, "error", err)
+			r := &ZoneRemoval{Zone: name, KeepKeys: keepKeys, NotSynced: err.Error()}
+			if rerr != nil {
+				r.NotSynced += "; the record of the transport signals its zone file holds could not be put back either: " + rerr.Error()
+			}
+			return r, nil
+		}
+		if rerr != nil {
 			return nil, fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w; the record of what the transport signal pass stored could not be put back either, so after the restart the pass takes a signal it stored in the zone file for the operator's: %v", name, err, rerr)
 		}
 		return nil, fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w", name, err)

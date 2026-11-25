@@ -96,6 +96,32 @@ func TestZoneDeleteLines(t *testing.T) {
 			r:    tdns.ZoneRemoval{Zone: "example.com."},
 			want: []string{"zone example.com. deleted; it had no DNSSEC or SIG(0) keys"},
 		},
+		{
+			name: "removal not on disk",
+			r: tdns.ZoneRemoval{Zone: "example.com.",
+				NotSynced: "the new dynamic config file is in place, but could not be synced to disk: input/output error"},
+			want: []string{
+				"zone example.com. deleted, but a crash could bring it back: the new",
+				"  dynamic config file is in place, but could not be synced to disk:",
+				"  input/output error",
+				"its keys were kept, for the zone a crash would bring back; once the disk",
+				"  is fine, delete them by hand; \"keystore sig0 list\" shows the SIG(0)",
+				"  key IDs:",
+				"  keystore dnssec clear --zone example.com. --force",
+				"  keystore sig0 delete --zone example.com. --keyid <keyid>",
+			},
+		},
+		{
+			name: "removal not on disk, keys kept",
+			r: tdns.ZoneRemoval{Zone: "example.com.", KeepKeys: true,
+				NotSynced: "the new dynamic config file is in place, but could not be synced to disk: input/output error"},
+			want: []string{
+				"zone example.com. deleted, but a crash could bring it back: the new",
+				"  dynamic config file is in place, but could not be synced to disk:",
+				"  input/output error",
+				"its keys were kept, as asked; a re-add takes them back",
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := zoneDeleteOutput(tc.r)
@@ -117,6 +143,7 @@ func TestZoneDeleteLinesWidth(t *testing.T) {
 		{Zone: zone, KeepKeys: true, DnssecKeys: 3, Sig0Keys: 1},
 		{Zone: zone, KeysError: "KeyDB.Begin timed out waiting"},
 		{Zone: zone, KeepKeys: true, KeysError: "count DNSSEC keys: disk I/O error"},
+		{Zone: zone, DnssecKeys: 3, NotSynced: "the new dynamic config file is in place, but could not be synced to disk: input/output error"},
 		{Zone: zone},
 	} {
 		lines := zoneDeleteOutput(r)
