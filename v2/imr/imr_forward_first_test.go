@@ -292,7 +292,7 @@ func TestCacheForwardedHookFollowsTheZoneTable(t *testing.T) {
 	if err := imr.Cache.AddStub("stub.example.", []cache.AuthServer{{Name: "ns.stub.example.", Addrs: []string{"192.0.2.54"}}}); err != nil {
 		t.Fatalf("AddStub: %v", err)
 	}
-	imr.setZoneTable(imr.ForwardZones(), []string{"stub.example."}, nil, nil)
+	imr.setZoneTable(imr.ForwardZones(), []string{"stub.example."}, nil)
 	for _, c := range []struct {
 		qname string
 		qtype uint16
@@ -374,7 +374,7 @@ func TestAQuestionWhoseForwardWasRemovedIsIterated(t *testing.T) {
 			if !forwarded || len(servers) != 0 {
 				t.Fatalf("test setup: before the reload, %d servers and forwarded %v; want none, forwarded", len(servers), forwarded)
 			}
-			imr.setZoneTable(nil, nil, nil, nil) // the reload: no forward zones
+			imr.setZoneTable(nil, nil, nil) // the reload: no forward zones
 
 			rrset, _, _, _, err := imr.IterativeDNSQuery(context.Background(), qname, dns.TypeA, servers, false, edns0.PrivacyNone)
 			if err != nil {

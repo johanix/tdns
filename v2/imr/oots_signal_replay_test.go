@@ -47,7 +47,7 @@ func TestASignalKeepsAStubsConfiguredTransports(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddStub: %v", err)
 	}
-	imr.setZoneTable(nil, []string{zone}, nil, nil)
+	imr.setZoneTable(nil, []string{zone}, nil)
 	stubs := imr.stubServers(zone)
 	if len(stubs) != 1 {
 		t.Fatalf("stub servers %v", stubs)
@@ -224,7 +224,7 @@ func TestAStrictWaitGivesACachedSignalToAStubConfiguredWithNoTransports(t *testi
 	}); err != nil {
 		t.Fatalf("AddStub: %v", err)
 	}
-	imr.setZoneTable(nil, []string{zone}, nil, nil)
+	imr.setZoneTable(nil, []string{zone}, nil)
 	serverMap := map[string]*cache.AuthServer{}
 	for _, s := range imr.stubServers(zone) {
 		serverMap[cache.ServerKey(s.Name)] = s

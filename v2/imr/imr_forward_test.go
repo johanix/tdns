@@ -194,7 +194,7 @@ func TestForwardZoneFor(t *testing.T) {
 	// specificity means the forward wins — a stub overrides only when it is
 	// strictly more specific.
 	imr := &Imr{}
-	imr.setZoneTable(forwards, []string{"internal.example.", "deep.sub.foo.bar.", "foo.bar."}, nil, nil)
+	imr.setZoneTable(forwards, []string{"internal.example.", "deep.sub.foo.bar.", "foo.bar."}, nil)
 
 	cases := []struct {
 		qname string
@@ -572,7 +572,7 @@ func newForwardTestImr(t *testing.T, conf []ForwardConf) *Imr {
 		Cache: cache.NewRRsetCache(lg, false, false),
 	}
 	imr.attachCacheHooks()
-	imr.setZoneTable(forwards, nil, nil, nil)
+	imr.setZoneTable(forwards, nil, nil)
 	return imr
 }
 
@@ -904,7 +904,7 @@ func TestProbeForwardUpstreams(t *testing.T) {
 		TrustAD:   published.TrustAD,
 		Upstreams: []*ForwardUpstream{live}, // the dead one is dropped
 	}
-	imr.setZoneTable([]*ForwardZone{recovered}, nil, nil, nil)
+	imr.setZoneTable([]*ForwardZone{recovered}, nil, nil)
 	imr.updateForwardUpstreamError()
 
 	if _, _, _, _, err := imr.IterativeDNSQuery(context.Background(), "www.fwd.example.", dns.TypeA, map[string]*cache.AuthServer{}, true, edns0.PrivacyNone); err != nil {

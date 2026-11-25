@@ -324,7 +324,7 @@ func TestExpandCountsServerThatAlreadyHasAddresses(t *testing.T) {
 func TestFallbackLeavesConfiguredStubServers(t *testing.T) {
 	d := startOOBAuthDouble(t, 0)
 	imr := newOOBTestImr(t, d)
-	imr.setZoneTable(nil, []string{oobStubZone}, nil, nil)
+	imr.setZoneTable(nil, []string{oobStubZone}, nil)
 	cacheNSAddress(imr.Cache, d.host)
 	cacheDelegation(imr.Cache, oobStubZone)
 	if err := imr.Cache.AddStub(oobStubZone, []cache.AuthServer{

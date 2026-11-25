@@ -65,10 +65,9 @@ type Imr struct {
 	// must see one consistent table for its whole walk, and the reload
 	// path relies on nothing else holding a mutable reference.
 	zones atomic.Pointer[imrZoneTable]
-	// reloadMu serializes ReloadZones with itself and with keepRootStub: the
-	// diff against the running table and the cache-side stub work must not
-	// interleave with another reload doing the same, nor with putting the
-	// root stub back from the table a reload is replacing.
+	// reloadMu serializes ReloadZones with itself: the diff against the
+	// running table and the cache-side stub work must not interleave with
+	// another reload doing the same.
 	reloadMu sync.Mutex
 	// bootConf is the imrengine: config this Imr was BUILT from. Kept so a
 	// reload can report which edited keys are not reloadable and need a
@@ -413,11 +412,11 @@ func New(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 		}
 		lg.Error("forward config quarantined", "problem", d.String())
 	}
-	stubZones, stubFP, stubServers := canonicalStubs(lg, ic.Stubs)
+	stubZones, stubFP, _ := canonicalStubs(lg, ic.Stubs)
 	// Published before priming: PrimeWithHints resolves through the
 	// iterative path, and forwardZoneFor below has to see the table.
 	// stubFP is filled in as the stubs are actually applied, further down.
-	imr.setZoneTable(forwards, stubZones, map[string]string{}, nil)
+	imr.setZoneTable(forwards, stubZones, map[string]string{})
 	imr.bootConf = ic
 	imr.errorRegistry = errs
 	// After errorRegistry is set, or the aggregate has nowhere to go.
@@ -494,13 +493,8 @@ func New(ctx context.Context, ic Config, opts Options) (*Imr, error) {
 			applied[zone] = stubFP[zone]
 		}
 		// Record what was actually applied, so the first reload can tell an
-		// untouched stub from an edited one, and the root stub's servers, so
-		// that priming at Start keeps them (keepRootStub).
-		var rootStub []cache.AuthServer
-		if _, ok := applied["."]; ok {
-			rootStub = stubServers["."]
-		}
-		imr.setZoneTable(forwards, stubZones, applied, rootStub)
+		// untouched stub from an edited one.
+		imr.setZoneTable(forwards, stubZones, applied)
 	}
 
 	return imr, nil
@@ -646,7 +640,6 @@ func (imr *Imr) primeFromHints(ctx context.Context) error {
 	if err := imr.Cache.PrimeWithHints(ctx, imr.bootConf.RootHints, imr.IterativeDNSQueryFetcher()); err != nil {
 		return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
 	}
-	imr.keepRootStub()
 	imr.PrimedVia = "hints+fetch"
 	imr.PrimedAt = time.Now()
 	return nil

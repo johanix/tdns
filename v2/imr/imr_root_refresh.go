@@ -126,7 +126,6 @@ func (imr *Imr) primeRoot(ctx context.Context, hintsfile string,
 		imr.lgImr().Error("RefreshRoot: priming from hints failed", "err", err)
 		return
 	}
-	imr.keepRootStub()
 	imr.PrimedVia = "hints (the root forward was removed)"
 	imr.PrimedAt = time.Now()
 	servers, _ := imr.Cache.ServerMapCopy(".")
@@ -170,7 +169,6 @@ func (imr *Imr) rootRefreshPass(ctx context.Context, hintsfile string,
 			imr.lgImr().Error("RefreshRoot: re-priming from hints failed", "err", err)
 			return rootRefreshRetry
 		}
-		imr.keepRootStub()
 		imr.PrimedVia = "hints (re-primed after expiry)"
 		imr.PrimedAt = time.Now()
 		imr.lgImr().Info("RefreshRoot: re-primed from hints; the next refresh" +

@@ -355,7 +355,7 @@ func TestProbeStubServersDialsSignalPort(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("AddStub: %v", err)
 	}
-	imr.setZoneTable(nil, []string{zone}, nil, nil)
+	imr.setZoneTable(nil, []string{zone}, nil)
 	servers := imr.stubServers(zone)
 	if len(servers) != 1 {
 		t.Fatalf("stub servers %v", servers)

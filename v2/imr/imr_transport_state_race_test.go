@@ -112,7 +112,7 @@ func TestTransportSignalWhileStubStatusIsRead(t *testing.T) {
 		t.Fatalf("AddStub: %v", err)
 	}
 	imr := &Imr{Cache: c}
-	imr.setZoneTable(nil, []string{zone}, nil, nil)
+	imr.setZoneTable(nil, []string{zone}, nil)
 	servers := imr.stubServers(zone)
 	if len(servers) != 1 {
 		t.Fatalf("stubServers(%s) = %d servers, want 1", zone, len(servers))
