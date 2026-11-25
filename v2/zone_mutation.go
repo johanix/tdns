@@ -1497,6 +1497,10 @@ func (zd *ZoneData) resolveSigningMaterialLocked() (*signingMaterial, error) {
 	switch {
 	case errors.Is(err, ErrDnssecPolicyNotBound):
 		return nil, nil
+	case isNoKeysForRemovedZone(err):
+		// A ZoneData that has left Zones (deleted or replaced) gets no
+		// keys, and is served by nobody: publish unsigned, quietly.
+		return nil, nil
 	case errors.Is(err, ErrKeyGenerationDeferred) && !zd.Ready:
 		// The zone's key lifecycle owner (KeyLifecycleOwner) has not released
 		// a signing key of every role, and tdns mints none beside its keys.

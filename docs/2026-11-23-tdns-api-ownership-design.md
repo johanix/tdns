@@ -469,6 +469,14 @@ Part Z (`zone delete` deletes the zone's keys):
   confirmed, and a conditional warning otherwise.
 - `catalog delete` and `catalog zone-delete` have their own removal path and
   are unchanged.
+- After CodeRabbit (on #1188): a ZoneData that leaves Zones, deleted or
+  replaced by a modify, is marked under `zd.mu` with the Zones change, and
+  a late error change on it no longer puts it back. Nothing makes a key for
+  a zone once its delete has begun: a SIG(0) rollover and the signer's
+  first KSK and ZSK check for the mark under a lock the delete takes. A
+  delete is refused while a SIG(0) key rollover of the zone runs, and a
+  rollover while the zone is being deleted. A rewrite whose only failure is
+  the directory sync after the rename stands, logged as an error.
 
 Part A (owners recorded):
 
