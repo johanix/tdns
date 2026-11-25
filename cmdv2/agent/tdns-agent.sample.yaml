@@ -293,6 +293,8 @@ log:
    #    transport:	debug
    #    engine:		debug
    #    agent:		info
+   #    imr:		warn		# the internal resolver
+   #    imr-lookups:	warn		# the internal resolver's lookups
 
 common:
    servername:		tdns-agent

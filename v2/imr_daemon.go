@@ -60,7 +60,7 @@ func (conf *Config) InitImrEngine(ctx context.Context) error {
 	// Idempotency guard: IMR is a process singleton. Subsequent calls are
 	// no-ops; first-init wins.
 	if conf.Internal.ImrEngine != nil {
-		lgImr.Debug("InitImrEngine: already initialized, returning existing instance")
+		lgResolver.Debug("InitImrEngine: already initialized, returning existing instance")
 		return nil
 	}
 
@@ -97,7 +97,7 @@ func (conf *Config) InitImrEngine(ctx context.Context) error {
 	// ImrEngine announces it once it is primed (startImr, publishImr).
 	conf.Internal.ImrEngine = imr
 	Globals.ImrEngine = imr
-	lgImr.Info("InitImrEngine: IMR initialized")
+	lgResolver.Info("InitImrEngine: IMR initialized")
 	return nil
 }
 
@@ -123,22 +123,22 @@ func (conf *Config) ImrEngine(ctx context.Context) error {
 	isActive := conf.Imr.Active == nil || *conf.Imr.Active
 
 	if !isActive {
-		lgImr.Warn("ImrEngine is NOT active (imrengine.active explicitly set to false)")
+		lgResolver.Warn("ImrEngine is NOT active (imrengine.active explicitly set to false)")
 		for {
 			select {
 			case <-ctx.Done():
-				lgImr.Info("terminating (inactive mode, context cancelled)")
+				lgResolver.Info("terminating (inactive mode, context cancelled)")
 				return nil
 			case rrq, ok := <-recursorch:
 				if !ok {
 					return nil
 				}
-				lgImr.Warn("not active but got a request", "qname", rrq.Qname)
+				lgResolver.Warn("not active but got a request", "qname", rrq.Qname)
 				continue // ensure that we keep reading to keep the channel open
 			}
 		}
 	} else {
-		lgImr.Info("ImrEngine starting")
+		lgResolver.Info("ImrEngine starting")
 	}
 
 	// Initialize the Imr if not already done (e.g. by a prior InitImrEngine
@@ -156,13 +156,13 @@ func (conf *Config) ImrEngine(ctx context.Context) error {
 		// The recursive nameserver responding to queries with RD bit set.
 		imr.StartImrEngineListeners(ctx, conf)
 	}) {
-		lgImr.Info("terminating (active mode, context cancelled)")
+		lgResolver.Info("terminating (active mode, context cancelled)")
 		return nil
 	}
 
 	imr.Serve(ctx, recursorch)
 	if ctx.Err() != nil {
-		lgImr.Info("terminating (active mode, context cancelled)")
+		lgResolver.Info("terminating (active mode, context cancelled)")
 	}
 	return nil
 }
@@ -233,17 +233,17 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	if Globals.App.Type != AppTypeImr {
 		if dbg := conf.Listeners.ImrDebugAddress; dbg != "" {
 			if _, err := imr.startImrDebugListener(ctx, dbg, conf); err != nil {
-				lgImr.Error("imr debug listener not started", "err", err)
+				lgResolver.Error("imr debug listener not started", "err", err)
 			}
 		} else {
-			lgImr.Debug("embedded resolver: internal only (set listeners.imr-debug-address for a loopback debug window)")
+			lgResolver.Debug("embedded resolver: internal only (set listeners.imr-debug-address for a loopback debug window)")
 		}
 		return nil
 	}
 
 	addresses := conf.Listeners.Addresses
 	if len(addresses) == 0 {
-		lgImr.Info("no addresses provided, will only be an internal recursive resolver")
+		lgResolver.Info("no addresses provided, will only be an internal recursive resolver")
 		return nil
 	}
 
@@ -254,7 +254,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	// ImrHandler itself, exactly as before.
 	if conf.Imr.ClientStats.Enabled {
 		imr.ClientStats = newImrClientStats(conf.Imr.ClientStats.MaxClients)
-		lgImr.Info("per-client transport counters are on", "max-clients", imr.ClientStats.max)
+		lgResolver.Info("per-client transport counters are on", "max-clients", imr.ClientStats.max)
 	}
 	handlers := listenerHandlers(ImrHandler, imr.ClientStats)
 
@@ -271,7 +271,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	}
 
 	if CaseFoldContains(conf.Listeners.Transports, "do53") {
-		lgImr.Info("starting Do53 listeners", "addresses", addresses)
+		lgResolver.Info("starting Do53 listeners", "addresses", addresses)
 		servers := make([]*dns.Server, 0, len(addresses)*2)
 
 		for _, addr := range addresses {
@@ -288,14 +288,14 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 				}
 				servers = append(servers, server)
 				go func(s *dns.Server, addr, net string) {
-					lgImr.Info("serving", "addr", addr, "net", net)
+					lgResolver.Info("serving", "addr", addr, "net", net)
 					// Must bump the buffer size of incoming UDP msgs, as updates
 					// may be much larger then queries
 					// s.UDPSize = dns.DefaultMsgSize // 4096
 					if err := s.ListenAndServe(); err != nil {
-						lgImr.Error("failed to setup server", "net", net, "err", err)
+						lgResolver.Error("failed to setup server", "net", net, "err", err)
 					} else {
-						lgImr.Info("listening", "addr", addr, "net", net)
+						lgResolver.Info("listening", "addr", addr, "net", net)
 					}
 				}(server, addr, net)
 			}
@@ -303,25 +303,25 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		// Graceful shutdown of Do53 servers
 		go func() {
 			<-ctx.Done()
-			lgImr.Info("shutting down Do53 servers", "count", len(servers))
+			lgResolver.Info("shutting down Do53 servers", "count", len(servers))
 			for _, s := range servers {
 				done := make(chan struct{})
 				go func(s *dns.Server) {
 					defer close(done)
 					if err := s.Shutdown(); err != nil {
-						lgImr.Error("error shutting down Do53 server", "addr", s.Addr, "net", s.Net, "err", err)
+						lgResolver.Error("error shutting down Do53 server", "addr", s.Addr, "net", s.Net, "err", err)
 					}
 				}(s)
 				select {
 				case <-done:
 					// ok
 				case <-time.After(5 * time.Second):
-					lgImr.Warn("timeout waiting for Do53 server shutdown", "addr", s.Addr, "net", s.Net)
+					lgResolver.Warn("timeout waiting for Do53 server shutdown", "addr", s.Addr, "net", s.Net)
 				}
 			}
 		}()
 	} else {
-		lgImr.Info("not serving on transport Do53")
+		lgResolver.Info("not serving on transport Do53")
 	}
 
 	// Encrypted listeners. Nothing below applies to a do53-only resolver, so
@@ -334,13 +334,13 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 	keyFile := conf.Listeners.KeyFile
 	if !anyEncryptedTransport(conf.Listeners.Transports) {
 		if certFile != "" || keyFile != "" {
-			lgImr.Info("certfile/keyfile configured but no encrypted transport is; not starting DoT/DoH/DoQ")
+			lgResolver.Info("certfile/keyfile configured but no encrypted transport is; not starting DoT/DoH/DoQ")
 		}
 		return nil
 	}
 	cert, certReason, certKey := loadImrListenerCert(certFile, keyFile)
 	if !certKey {
-		lgImr.Warn("not starting the DoT/DoH/DoQ listeners", "reason", certReason)
+		lgResolver.Warn("not starting the DoT/DoH/DoQ listeners", "reason", certReason)
 		conf.Internal.ServerErrors.SetTransportCertError("imr: " + certReason)
 	}
 
@@ -350,7 +350,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		for i, addr := range addresses {
 			host, _, err := net.SplitHostPort(addr)
 			if err != nil {
-				lgImr.Warn("failed to parse address", "addr", addr, "err", err)
+				lgResolver.Warn("failed to parse address", "addr", addr, "err", err)
 				tmp[i] = addr // Keep original if parsing fails
 			} else {
 				tmp[i] = host
@@ -361,28 +361,28 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		if CaseFoldContains(conf.Listeners.Transports, "dot") {
 			err := DnsDoTEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoT), &cert, handlers.dot, false)
 			if err != nil {
-				lgImr.Error("failed to setup DoT server", "err", err)
+				lgResolver.Error("failed to setup DoT server", "err", err)
 			}
 		} else {
-			lgImr.Info("not serving on transport DoT")
+			lgResolver.Info("not serving on transport DoT")
 		}
 
 		if CaseFoldContains(conf.Listeners.Transports, "doh") {
 			err := DnsDoHEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoH), conf.Listeners.DoHPath, certFile, keyFile, handlers.doh)
 			if err != nil {
-				lgImr.Error("failed to setup DoH server", "err", err)
+				lgResolver.Error("failed to setup DoH server", "err", err)
 			}
 		} else {
-			lgImr.Info("not serving on transport DoH")
+			lgResolver.Info("not serving on transport DoH")
 		}
 
 		if CaseFoldContains(conf.Listeners.Transports, "doq") {
 			err := DnsDoQEngine(ctx, conf, addresses, portStrings(conf.Listeners.Ports.DoQ), &cert, handlers.doq)
 			if err != nil {
-				lgImr.Error("failed to setup DoQ server", "err", err)
+				lgResolver.Error("failed to setup DoQ server", "err", err)
 			}
 		} else {
-			lgImr.Info("not serving on transport DoQ")
+			lgResolver.Info("not serving on transport DoQ")
 		}
 	}
 	return nil
@@ -409,11 +409,11 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 		// var dnssec_ok bool
 		msgoptions, err := edns0.ExtractFlagsAndEDNS0Options(r)
 		if err != nil {
-			lgImr.Error("error extracting EDNS0 options", "err", err)
+			lgResolver.Error("error extracting EDNS0 options", "err", err)
 		}
 
 		qtype := r.Question[0].Qtype
-		lgImr.Debug("received query", "qname", qname, "qtype", dns.TypeToString[qtype], "from", w.RemoteAddr(), "opcode", dns.OpcodeToString[r.Opcode])
+		lgResolver.Debug("received query", "qname", qname, "qtype", dns.TypeToString[qtype], "from", w.RemoteAddr(), "opcode", dns.OpcodeToString[r.Opcode])
 
 		switch r.Opcode {
 		case dns.OpcodeNotify, dns.OpcodeUpdate:
@@ -424,7 +424,7 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 			return
 
 		case dns.OpcodeQuery:
-			lgImr.Debug("lookup request", "qname", qname, "qtype", dns.TypeToString[qtype], "RD", msgoptions.RD, "DO", msgoptions.DO, "from", w.RemoteAddr())
+			lgResolver.Debug("lookup request", "qname", qname, "qtype", dns.TypeToString[qtype], "RD", msgoptions.RD, "DO", msgoptions.DO, "from", w.RemoteAddr())
 
 			qname = core.CanonicalizeName(qname)
 			if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
@@ -441,7 +441,7 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 			// CHAOS is server-local metadata; there is nothing to recurse for.
 			// The names this server does answer are handled above.
 			if r.Question[0].Qclass == dns.ClassCHAOS {
-				lgImr.Debug("refusing CHAOS query for a name this server does not serve", "qname", qname, "qtype", dns.TypeToString[qtype])
+				lgResolver.Debug("refusing CHAOS query for a name this server does not serve", "qname", qname, "qtype", dns.TypeToString[qtype])
 				m := new(dns.Msg)
 				m.SetRcode(r, dns.RcodeRefused)
 				edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
@@ -465,7 +465,7 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 			return
 
 		default:
-			lgImr.Error("unable to handle message type", "opcode", dns.OpcodeToString[r.Opcode])
+			lgResolver.Error("unable to handle message type", "opcode", dns.OpcodeToString[r.Opcode])
 		}
 	}
 }
@@ -476,7 +476,7 @@ func DotServerQnameResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 	edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
 	qname = core.CanonicalizeName(qname)
 	// if strings.HasSuffix(qname, ".server.") && r.Question[0].Qclass == dns.ClassCHAOS {
-	lgImr.Debug("query for .server CH TLD", "qname", qname)
+	lgResolver.Debug("query for .server CH TLD", "qname", qname)
 	switch qname {
 	case "id.server.":
 		m.SetRcode(r, dns.RcodeSuccess)

@@ -30,14 +30,15 @@ type Imr struct {
 }
 
 // NewImr is imrcore.New, returning the daemon's Imr. Unless opts says
-// otherwise, the resolver logs through the daemon's engine subsystem logger,
-// and its lookups through the dns one.
+// otherwise, the resolver logs through the daemon's imr subsystem logger, and
+// its lookups through the imr-lookups one, so log.subsystems sets the
+// resolver's level apart from engine and dns.
 func NewImr(ctx context.Context, ic ImrEngineConf, opts ImrOptions) (*Imr, error) {
 	if opts.Logger == nil {
-		opts.Logger = lgImr
+		opts.Logger = lgResolver
 	}
 	if opts.LookupLogger == nil {
-		opts.LookupLogger = lgDns
+		opts.LookupLogger = lgResolverLookups
 	}
 	r, err := imrcore.New(ctx, ic, opts)
 	if err != nil {
@@ -49,6 +50,9 @@ func NewImr(ctx context.Context, ic ImrEngineConf, opts ImrOptions) (*Imr, error
 var (
 	lgImr = Logger("engine")
 	lgDns = Logger("dns")
+
+	lgResolver        = Logger("imr")
+	lgResolverLookups = Logger("imr-lookups")
 )
 
 // core is the module's Imr, nil for a nil imr.
