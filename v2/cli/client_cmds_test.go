@@ -711,6 +711,10 @@ func TestClientCommandsCallTheDaemon(t *testing.T) {
 	if err := runAccess("auth", "", tdns.AccessPost{Command: "enable", Name: "anna"}); err == nil || !strings.Contains(err.Error(), "has no config-file:") {
 		t.Errorf("entry without config-file:: %v, want refused", err)
 	} else {
+		// A default daemon config that cannot be read says why, too.
+		if _, serr := os.Stat(tdns.DefaultAuthCfgFile); serr != nil && !strings.Contains(err.Error(), "Reading the default daemon config failed:") {
+			t.Errorf("entry without config-file:, no default config: %v, want the read error", err)
+		}
 		for _, l := range strings.Split(err.Error(), "\n") {
 			if len("Error: "+l) > 72 {
 				t.Errorf("refusal line over 72: %q", l)

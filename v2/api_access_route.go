@@ -202,7 +202,9 @@ func applyAccessChange(af *AccessFile, ap AccessPost) (msg string, changed bool,
 		if c, err := find(); err == nil {
 			switch {
 			case c.Pin != ap.Pin:
-				return "", false, fmt.Errorf("%q is already there with another pin:\ndisable it first, or use another name", ap.Name)
+				// Disabled or not, the name is taken, and no command
+				// changes a client's pin.
+				return "", false, fmt.Errorf("%q is already there with another pin:\nuse another name", ap.Name)
 			case c.Role != ap.Role:
 				return "", false, fmt.Errorf("%q is already there as %s; change its role\nwith set-role", ap.Name, c.Role)
 			case c.Disabled:
