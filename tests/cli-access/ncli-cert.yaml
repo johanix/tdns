@@ -1,0 +1,19 @@
+# tdns-ncli on the CLI host, for the pins suite (#1168): the operator's own
+# client certificate (made by "client init" during the suite), presented by
+# the entry that asks for it and by no other.
+client:
+   cert:          /var/tmp/cli-access/home/operator.crt
+   key:           /var/tmp/cli-access/home/operator.key
+apiservers:
+   - name:        tdns-auth
+     baseurl:     https://@DAEMON@:8991/api/v1
+     authmethod:  certificate
+     tlsauth:     pin
+     pins:        [ "@PIN_DAEMON@" ]
+   - name:        authkey              # the same daemon by key: must NOT present the cert
+     role:        auth
+     baseurl:     https://@DAEMON@:8991/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
+     tlsauth:     pin
+     pins:        [ "@PIN_DAEMON@" ]

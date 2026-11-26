@@ -1,0 +1,18 @@
+# tdns-ncli on the CLI host, pins suite: two DIFFERENT daemons (other
+# ports) that pin the same key. "config list" must warn: a pin that cannot
+# tell two daemons apart is the shared-key hazard again. Nothing listens on
+# 8993; config list without --check does not connect.
+apiservers:
+   - name:        tdns-auth
+     baseurl:     https://@DAEMON@:8991/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
+     tlsauth:     pin
+     pins:        [ "@PIN_DAEMON@" ]
+   - name:        authtwin
+     role:        auth
+     baseurl:     https://@DAEMON@:8993/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
+     tlsauth:     pin
+     pins:        [ "@PIN_DAEMON@" ]

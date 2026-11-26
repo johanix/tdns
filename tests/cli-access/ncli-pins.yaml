@@ -1,0 +1,33 @@
+# tdns-ncli on the CLI host, for the pins suite (#1168): how the CLI
+# verifies the daemon. @PIN_DAEMON@ is the pin of the daemon's certificate,
+# @PIN_OTHER@ that of a certificate the daemon does not have.
+apiservers:
+   - name:        tdns-auth            # the right pin
+     baseurl:     https://@DAEMON@:8991/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
+     tlsauth:     pin
+     pins:        [ "@PIN_DAEMON@" ]
+   - name:        authbadpin           # a wrong pin: must be refused
+     role:        auth
+     baseurl:     https://@DAEMON@:8991/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
+     tlsauth:     pin
+     pins:        [ "@PIN_OTHER@" ]
+   - name:        authpkix             # the rig's CA
+     role:        auth
+     baseurl:     https://@DAEMON@:8991/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
+     tlsauth:     pkix
+     rootca:      /var/tmp/cli-access/certs/ca.crt
+   - name:        authnoverify         # verifies nothing: tdns-ncli refuses it
+     role:        auth
+     baseurl:     https://@DAEMON@:8991/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
+   - name:        tdns-imr             # plain http to a non-loopback host
+     baseurl:     http://@DAEMON@:8992/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key

@@ -1,0 +1,27 @@
+# The daemon host's tdns-imr. Run as root by run.sh, from /var/tmp/cli-access/imr.
+#
+# It builds its router with SetupSimpleAPIRouter, not SetupAPIRouter as
+# tdns-auth does, so the socket and the key check are checked on both
+# builders. Its API is plain http on purpose: it is the daemon the pins suite
+# uses for tdns-ncli's warning about http:// to a non-loopback host.
+# No service: block: with an imrengine: block, that is how tdns-ncli config
+# add knows a tdns-imr config.
+
+log:
+   file:       /var/tmp/cli-access/log/tdns-imr.log
+   level:      debug
+
+listeners:
+   addresses:  [ 127.0.0.1:5392 ]
+   transports: [ do53 ]
+
+imrengine:
+   active:     true       # compiled-in root hints; it need not reach them
+
+apiserver:
+   addresses:  [ 127.0.0.1:8992, "@DAEMON@:8992" ]
+   apikey:     cli-access-rig-test-key
+   usetls:     false
+   certfile:   /var/tmp/cli-access/certs/daemon.crt
+   keyfile:    /var/tmp/cli-access/certs/daemon.key
+   socket:     /var/run/tdns/tdns-imr.sock
