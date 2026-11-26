@@ -491,8 +491,9 @@ func TestAddRefusesANonSocketAtTheSocketPath(t *testing.T) {
 	d := newAddDaemon(t, false)
 	writeFile(t, d.sock, "not a socket\n")
 	before, _ := os.ReadFile(d.cli)
-	if _, err := d.add(t, nil); err == nil {
-		t.Fatal("a regular file at the socket path: want a refusal")
+	// ENOTSOCK on the BSDs, ECONNREFUSED on Linux: the same refusal.
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "is there but is\nnot a socket:\n   "+d.sock+"\n") {
+		t.Fatalf("a regular file at the socket path: %v, want the plain refusal", err)
 	}
 	d.unchanged(t, string(before))
 	if socketOrMissing(d.sock) || !socketOrMissing(d.sock+".none") {

@@ -36,10 +36,10 @@ type AccessPost struct {
 // AccessResponse is the answer to every /access request: what it did, and
 // what is in force after it.
 type AccessResponse struct {
-	Msg        string
-	Error      bool
-	ErrorMsg   string
-	File       string // the access file in force; "" when none
+	Msg      string
+	Error    bool
+	ErrorMsg string
+	File     string // the access file in force; "" when none
 	// Configured is the access file the running config names, in force or
 	// not: a reload that cannot load it keeps the path, and /access add
 	// creates it there. "" when the config names none.

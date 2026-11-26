@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -784,5 +785,20 @@ func TestEntryIsDaemonSocketRawPath(t *testing.T) {
 	}
 	if entryIsDaemonSocket(ApiDetails{BaseURL: "unix://"}, &DaemonApi{}) {
 		t.Error("no socket: want false")
+	}
+}
+
+// A file that is not a socket at the socket path is a socket that cannot be
+// used, as the BSDs say it (ENOTSOCK) and as Linux does (ECONNREFUSED): a
+// plain refusal, not Go's raw dial error.
+func TestSocketErrnoNotASocket(t *testing.T) {
+	for _, e := range []syscall.Errno{syscall.ENOTSOCK, syscall.ECONNREFUSED} {
+		err := fmt.Errorf("Post: %w", &net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", e)})
+		if got := socketErrno(err); got != e {
+			t.Errorf("%v: socketErrno = %v", e, got)
+		}
+		if msg := socketError("/x.sock", err).Error(); !strings.HasPrefix(msg, "cannot use the daemon's local socket") {
+			t.Errorf("%v: %q, want the plain refusal", e, msg)
+		}
 	}
 }

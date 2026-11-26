@@ -291,9 +291,10 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	}
 	list, err := accessOver(sock, tdns.AccessPost{Command: "list"})
 	switch errno := socketErrno(err); {
-	case errno == syscall.ECONNREFUSED && !socketOrMissing(info.Socket):
-		// Linux refuses a dial to a file that is not a socket: no daemon
-		// can serve its socket there, so this is not a stopped daemon.
+	case errno == syscall.ENOTSOCK || errno == syscall.ECONNREFUSED && !socketOrMissing(info.Socket):
+		// A file that is not a socket: the BSDs say ENOTSOCK, Linux
+		// ECONNREFUSED. No daemon can serve its socket there, so this is
+		// not a stopped daemon.
 		return nil, fmt.Errorf("the daemon's local admin socket path is there but is\nnot a socket:\n   %s\nThe daemon cannot serve its socket there. Remove that\nfile, start the daemon, and run config add again", info.Socket)
 	case errno == syscall.ENOENT || errno == syscall.ECONNREFUSED:
 		// Stopped: the config-file:-only entry.

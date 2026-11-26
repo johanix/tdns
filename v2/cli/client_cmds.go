@@ -324,11 +324,13 @@ func socketError(sock string, err error) error {
 }
 
 // socketErrno is err's errno when it says the socket cannot be used: not
-// ours to open (EACCES, EPERM), or no daemon there (ENOENT, ECONNREFUSED).
+// ours to open (EACCES, EPERM), no daemon there (ENOENT, ECONNREFUSED), or a
+// file there that is not a socket (ENOTSOCK on the BSDs; Linux says
+// ECONNREFUSED).
 func socketErrno(err error) syscall.Errno {
 	var errno syscall.Errno
 	if errors.As(err, &errno) && (errno == syscall.EACCES || errno == syscall.EPERM ||
-		errno == syscall.ENOENT || errno == syscall.ECONNREFUSED) {
+		errno == syscall.ENOENT || errno == syscall.ECONNREFUSED || errno == syscall.ENOTSOCK) {
 		return errno
 	}
 	return 0

@@ -735,3 +735,24 @@ func TestRequestForAnotherConfigIsRefused(t *testing.T) {
 		t.Errorf("no expected config: %d %q, want 200", st, body)
 	}
 }
+
+// A reload that finds the access file the config names not there yet (the
+// first enrolment) says the first client add creates it, in lines of at
+// most 72 apart from the path's; the running policy is unchanged.
+func TestReloadAccessFileNotThereYet(t *testing.T) {
+	e := newAuthEnv(t, "clients: []\n", nil)
+	path := e.conf.ApiServer.AccessFile
+	os.Remove(path)
+	msg := e.conf.reloadApiAccess()
+	if !strings.Contains(msg, "\nAccess file not there yet (the running policy is unchanged):\n   "+path+"\nThe first client add (or config add) creates it.") {
+		t.Errorf("reload message = %q", msg)
+	}
+	for _, l := range strings.Split(msg, "\n") {
+		if len(l) > 72 && !strings.Contains(l, path) {
+			t.Errorf("line over 72 columns: %q", l)
+		}
+	}
+	if st := e.conf.apiAccessStatus(); st == nil || st.File != path {
+		t.Errorf("running policy after the reload: %+v, want the one before", st)
+	}
+}
