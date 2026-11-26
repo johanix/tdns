@@ -68,9 +68,12 @@ const (
 	OptAllowApiUpdates
 	// OptOnConflictDBWins / OptOnConflictZonefileWins select who wins when the
 	// zone file has been replaced behind the server and its content contests a
-	// record the delta journal changed. Exactly one is always set: the parser
-	// materialises db-wins when neither is given (see zoneConflictPolicyFromOptions),
-	// so no code downstream has to carry a default of its own.
+	// record the delta journal changed. On a zone that can change itself
+	// exactly one is always set: the parser materialises db-wins when neither is
+	// given (see activateUpdatePolicy), so no code downstream has to carry a
+	// default of its own. A secondary that makes no changes of its own has
+	// neither (a tdns-auth one that may not originate content, a tdns-agent one
+	// with no origination option): it has nothing to contest a file with.
 	//
 	// Appended at the end for the same reason allow-api-updates was: ZoneOption
 	// values are positional, so inserting mid-list renumbers everything after.
@@ -258,18 +261,6 @@ var deprecatedZoneOptionNames = map[string]string{
 	"delegation-sync-proxy":  "parentsync-proxy",
 }
 
-type ImrOption uint8
-
-const (
-	ImrOptRevalidateNS ImrOption = iota + 1
-	ImrOptQueryForTransport
-	ImrOptAlwaysQueryForTransport
-	ImrOptTransportSignalType
-	ImrOptQueryForTransportTLSA
-	ImrOptUseTransportSignals
-	ImrOptAllowLoopbackNameservers
-)
-
 var ImrOptionToString = map[ImrOption]string{
 	ImrOptRevalidateNS:             "revalidate-ns",
 	ImrOptQueryForTransport:        "query-for-transport",
@@ -278,6 +269,7 @@ var ImrOptionToString = map[ImrOption]string{
 	ImrOptQueryForTransportTLSA:    "query-for-transport-tlsa",
 	ImrOptUseTransportSignals:      "use-transport-signals",
 	ImrOptAllowLoopbackNameservers: "allow-loopback-nameservers",
+	ImrOptQnameMinimisation:        "qname-minimisation",
 }
 
 var StringToImrOption = map[string]ImrOption{
@@ -288,6 +280,7 @@ var StringToImrOption = map[string]ImrOption{
 	"query-for-transport-tlsa":   ImrOptQueryForTransportTLSA,
 	"use-transport-signals":      ImrOptUseTransportSignals,
 	"allow-loopback-nameservers": ImrOptAllowLoopbackNameservers,
+	"qname-minimisation":         ImrOptQnameMinimisation,
 }
 
 type AuthOption uint8

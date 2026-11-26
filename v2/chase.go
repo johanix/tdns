@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -166,7 +168,7 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 
 	// Each name of the CNAME chain is walked in turn, with the zone cuts
 	// decided for the names before it, up to the resolver's limit on the
-	// length of a chain (maxCNAMEChain).
+	// length of a chain (imrcore.MaxCNAMEChain).
 	type hop struct {
 		links []*ChainLink
 		leaf  ChainLeaf
@@ -184,8 +186,8 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 		switch {
 		case seen[core.CanonicalizeName(target)]:
 			end = fmt.Sprintf("CNAME loop: %s is earlier in the chain", target)
-		case len(hops) > maxCNAMEChain:
-			end = fmt.Sprintf("CNAME chain longer than %d", maxCNAMEChain)
+		case len(hops) > imrcore.MaxCNAMEChain:
+			end = fmt.Sprintf("CNAME chain longer than %d", imrcore.MaxCNAMEChain)
 		}
 		if end != "" {
 			hops = append(hops, hop{leaf: ChainLeaf{Qname: target, Qtype: qtype, Status: ChainStatusIndeterminate, Notes: []string{end}}})
@@ -477,7 +479,7 @@ func (w *chainWalk) verifiedProof(authority []dns.RR, above *ChainLink) ([]*dns.
 	if len(above.DNSKEY) == 0 {
 		return nil, nil
 	}
-	for _, set := range authorityRRsets(authority) {
+	for _, set := range imrcore.AuthorityRRsets(authority) {
 		if set.RRtype != dns.TypeNSEC && set.RRtype != dns.TypeNSEC3 {
 			continue
 		}
@@ -753,7 +755,7 @@ func (w *chainWalk) judgeLeaf(name string, qtype uint16, ans chaseAnswer, chain 
 //     the proof is missing or does not hold.
 func (w *chainWalk) denialOwn(leaf *ChainLeaf, ans chaseAnswer, deepest *ChainLink) ChainStatus {
 	kind := negativeKind(ans.rcode)
-	sets := authorityRRsets(ans.authority)
+	sets := imrcore.AuthorityRRsets(ans.authority)
 	signed := false
 	for _, set := range sets {
 		if set.RRtype == dns.TypeSOA && !core.EqualNames(set.Name, deepest.Zone) {
@@ -886,7 +888,7 @@ func (w *chainWalk) answerOwn(leaf *ChainLeaf, authority []dns.RR, deepest *Chai
 func (w *chainWalk) wildcardOwn(leaf *ChainLeaf, sig *dns.RRSIG, authority []dns.RR, deepest *ChainLink) ChainStatus {
 	wildcard := wildcardOf(sig, leaf.Qname)
 	var sets []*core.RRset
-	for _, set := range authorityRRsets(authority) {
+	for _, set := range imrcore.AuthorityRRsets(authority) {
 		if set.RRtype == dns.TypeNSEC || set.RRtype == dns.TypeNSEC3 {
 			sets = append(sets, set)
 		}

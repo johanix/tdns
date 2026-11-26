@@ -98,6 +98,17 @@ apiserver:
    apikey:     REPLACE-ME-with-a-key-that-is-not-the-auth-servers
    certfile:   /etc/tdns/certs/servers/signer.crt
    keyfile:    /etc/tdns/certs/servers/signer.key
+   # Local admin socket: the management API without TLS or a key, for root
+   # on this host (whoever can open the socket is admin). The directory is
+   # created 0700 if missing; one that group or others can enter is refused.
+   # tdns-ncli config add uses it when run as root.
+   socket:     /var/run/tdns/tdns-signer.sock
+   # Network clients by certificate, with roles (read-only, read-write); with
+   # it the API key is read-write and admin is the socket's alone. Requires
+   # socket:. Managed with `tdns-ncli <daemon> client ...`; see
+   # guide/config-tdns-auth.md. A configured file that cannot be used closes
+   # the TCP API (503), so create it before enabling this line.
+   # access-file: /etc/tdns/tdns-signer-access.yaml
 
 # TSIG keys for the transfers in and out. The key names used here are
 # referenced from signer-zones.sample.yaml.
@@ -172,6 +183,7 @@ log:
    #   signer    DNSSEC signing and the key-state worker
    #   engine    the refresh engine
    #   rollover  key rollover
+   # The internal resolver has its own: imr, and imr-lookups for its lookups.
    # subsystems:
    #   zones:  debug
    #   signer: debug

@@ -37,7 +37,7 @@ func TestCacheTTLLimitsReachTheWire(t *testing.T) {
 	}
 	conf.Imr.Tuning.CacheMaxTTL = 120
 	conf.Imr.Tuning.CacheMinTTL = 90
-	if err := conf.InitImrEngine(context.Background(), true); err != nil {
+	if err := conf.InitImrEngine(context.Background()); err != nil {
 		t.Fatalf("InitImrEngine: %v", err)
 	}
 	imr := conf.Internal.ImrEngine

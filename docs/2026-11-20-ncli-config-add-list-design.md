@@ -1,0 +1,211 @@
+# tdns-ncli: `config add`, `config list`, and its own config file
+
+**Date:** 2026-11-20
+**Status:** implemented on `feature/ncli-config-add-list` (PR 1 of 3). PR 2
+(agent instance trees) and PR 3 (imr instance trees) are separate; see the end.
+
+Builds on `docs/2026-09-07-cli-multi-instance-design.md`.
+
+## Problem
+
+Addressing a second `tdns-auth` from `tdns-ncli` meant hand-writing an
+`apiservers:` entry (`name`, `role: auth`, `baseurl`, `apikey`, `authmethod`,
+`config-file`) whose every value is already in the daemon's own config, in
+`apiserver:` and in the file's path. Copying them is the error source the
+multi-instance work exists to remove: a wrong port or a mistyped key gives a
+command that reaches nothing, or the wrong daemon.
+
+## Decisions
+
+Made by the maintainer when this was evaluated, 2026-11-20:
+
+1. **tdns-ncli reads its own config, `/etc/tdns/tdns-ncli.yaml`**, not
+   `tdns-cli.yaml`. Only tdns-ncli understands `role:`. (The shared `ApiDetails`
+   does carry the field and `tdns-cli` ignores unknown keys, so a shared file
+   would have worked; a separate one is the cleaner cut for the day tdns-ncli
+   replaces tdns-cli, when the binary name and the config name both change.)
+2. **`config add <daemon-config.yaml>` and `config list [--check]`.** No
+   `config remove` for now.
+3. Three PRs: this one, then agent instances, then imr instances.
+4. tdns-mp daemons are out of scope: they have their own CLI.
+
+## `config add`
+
+`tdns-ncli config add /etc/tdns/tdns-auth2.yaml` reads the daemon config and
+adds one `apiservers:` entry.
+
+**What it reads.** `apiserver.addresses` (first one), `apiserver.apikey`,
+`apiserver.usetls`, through the daemon's own loader (`LoadRawConfigMap`), so an
+`apiserver:` block in an included file is found, however deep the `include:`
+chain (CodeRabbit round 1: the CLI's viper shim followed one level only). If
+the includes do not load, the main file alone is read and a warning says so.
+`usetls` defaults to true when
+absent, exactly as the daemon applies it (`v2/parseconfig.go`). A wildcard
+listen address (`0.0.0.0`, `::`, no host) becomes loopback: it is where the
+daemon listens, not where the CLI connects. `authmethod` is written `X-API-Key`,
+spelled exactly, since the client matches it case-sensitively.
+
+**Which daemon.** Nothing in a daemon config states its type; the binary
+decides. Evidence, strongest first: `service.name` (`TDNS-AUTH`, `TDNS-AGENT`,
+trailing digits ignored, whole words only); no `service:` block but an
+`imrengine:` block (tdns-imr); the file name. Undecidable gives an error asking
+for `--role`, never a guess: a daemon filed under the wrong role gets the wrong
+command tree pointed at it. `TDNS-MPAGENT` and its relatives are refused. The
+tdns-mp check follows the same order: a tdns-mp `service.name` is refused
+whatever the file is called, but "mp" in a file name counts only when the file
+name is what decides, so `service.name: TDNS-AUTH` in `west-mp-auth.yaml` is a
+tdns-auth, with a warning.
+
+**Canonical or instance.** If the CLI config has no entry named for the role's
+built-in client (`tdns-auth`, `tdns-agent`, `tdns-imr`) the new entry is that
+canonical entry, reached as `auth`, `agent`, `imr`. Otherwise it is an instance
+with `role:` set, named after the file (`tdns-auth2.yaml` is `auth2`;
+`tdns-auth.yaml` in another directory is `auth` taken, so `auth2`). `--name`
+overrides and is refused when it collides with a role, an entry, a command or a
+reserved word. An instance of a role with no instance tree is refused; today
+that is every role but `auth`.
+
+**Idempotence and clashes.** An entry with the same `config-file:` and the same
+API address means "already known", and nothing changes -- unless the entry's
+API key or URL scheme no longer matches the daemon config (a rotated key,
+`usetls` turned off on the same port). That is an error naming which setting,
+without printing either key: `config add` does not change an existing entry.
+The same file with a different address (the daemon was reconfigured), or a
+different file naming an address another entry already uses (two daemons
+cannot listen on one address), is an error that says which entry.
+
+**One at a time.** An add takes an exclusive `flock` on `.<file>.lock` beside
+the file it edits, and beside the CLI config when that is another file, before
+it reads the current list, and holds them through the write, the reload and any
+undo. Two adds that both read the old list would otherwise both succeed while
+the second one's file drops the first one's entry -- or, editing the main file
+and `cli.localconfig`, while one list hides the other's entry. The locks are
+taken in one order, so two adds cannot deadlock. The lock files stay (removing
+one would race a waiting writer); a dry run takes no lock. On a platform with
+no `flock` (none tdns builds for) the lock is a no-op.
+
+**Editing the file.** As text, not through viper's `WriteConfig` (which writes
+the *merged* config, folding includes and `cli.localconfig` into the main file
+and dropping comments) and not through a YAML library round trip (which
+normalises the layout of every line). The entry is spliced at the end of the
+existing `apiservers:` list in the style of the entries there: indent, dash
+gap, value column, blank-line separation, plain or column-0 dashes. A missing
+`apiservers:` key is appended; a file that does not exist is created, mode
+0600, with a short header. An inline `apiservers: [...]` is not edited: the error
+prints the entry to add by hand. The write is atomic (temp file in the same
+directory, rename), keeps the mode, and follows a symlink so the link stays a
+link; a symlink to a file that does not exist is refused rather than replaced.
+A value is written plain only if YAML reads the plain form back as the same
+string; anything else is single-quoted (an API key `001234` plain is the octal
+integer 668).
+
+**Checking its own work.** After writing, the CLI config is loaded the way the
+CLI loads it (`ReadApiServers`: main file, includes, then `cli.localconfig`,
+with viper's `AutomaticEnv` as `initConfig` has it; a `cli.localconfig` that is
+there but cannot be checked is an error, as it is at start-up). If the
+effective list is not exactly the old list plus the new entry, the file is
+restored (or removed, if it was created) and the error says why. The case this
+exists for is `apiservers:` also defined in an include or in
+`cli.localconfig`: lists are replaced, not merged, so an entry added to the
+main file would be invisible. `--file` names the file that holds the list.
+`--dry-run` makes the same check without writing: it loads the real files with
+the edited one laid over them in memory, so the preview fails where the add
+would. The overlay answers for the edited file under any name that resolves
+to the path the add's rename replaces -- through a symlink at `--file` (the add
+writes through it), or a symlink to it named in `cli.localconfig`. A hard link
+is another name: the rename leaves it reading the old file, so the add fails
+there, and the preview does too. The lock files are named by the same resolved
+path (through the parent directory for a file not created yet), so two aliases
+of one directory take one lock.
+
+**Output.** The entry is printed with the API key masked. The key is the one
+secret in it and has no place in terminal scrollback.
+
+## `config list [--check]`
+
+One row per entry: name, command word, kind (built-in role or instance of a
+role), API URL, daemon config (the compiled-in default, marked `(default)`, for
+a canonical entry with no `config-file:`), and status. Status uses the same
+function WireInstanceTrees uses (`checkInstanceEntries`), so what the list says
+is what the wiring does; an ignored entry says why. The list judges the entries
+against the CLI as it was before instances were wired (`builtinRoles()` and a
+stand-in root), since by the time `list` runs the instance trees are on the
+real root and would look like collisions with themselves.
+
+`--check` pings every API concurrently (default 5 s each) and exits non-zero if
+any fails or could not be checked (`rootca: tlsa`): it succeeds only when every
+API answered. It sets up its own clients, so it works on a config that
+`initConfig` would refuse, and it does not exit the process on a `rootca` it
+cannot use (missing, a directory, no certificate in it) the way `NewClient`
+does: that entry says `FAIL: rootca` and the rest are still checked.
+
+`config` is a root-level command with an annotation; the root's
+`PersistentPreRun` skips config and API loading for it (`IsCliConfigCmd`),
+because these commands read and edit that file themselves and `config add` is
+how it comes to exist. It is attached in `init()`, before instance wiring, so an
+instance named `config` is refused.
+
+## A hole found on the way
+
+`WireInstanceTrees` compared an instance's name against role names (`auth`) and
+against earlier instances, but not against API *client* names (`tdns-auth`).
+`name: tdns-auth, role: auth` passed every check. `InitApiClients` keys
+`tdns.Globals.ApiClients` by entry name, so it and the canonical `tdns-auth`
+entry were one client, the later replacing the earlier: a command meant for one
+daemon reached the other, with no message. Instance names are now also checked
+against the built-in roles' clients and every canonical entry.
+`TestInstanceNameMayNotShareAnApiClient` fails without the check.
+
+Refusing the tree was only half of it (CodeRabbit round 1): `InitApiClients`
+still built a client for every entry, so the refused instance still replaced
+the canonical client. It now leaves out an instance entry whose name a
+built-in client, a canonical entry or an earlier instance already holds
+(`clientEntries`, the same rules), and the config lookups by client name see
+the same list. `TestCollidingInstanceGetsNoClient`.
+
+## Plumbing
+
+- `tdns.DefaultNcliCfgFile` (`/etc/tdns/tdns-ncli.yaml`).
+- `cli.DefaultCliConfigFile`, a variable initialised to `tdns.DefaultCliCfgFile`
+  so tdns-cli is unchanged; tdns-ncli's `init()` sets it. Read by
+  `ConfigPathFromArgs`, the three fallbacks in `ksk_rollover_cli.go`, and the
+  ncli root.
+- `cli.ReadApiServers` (the strict form of `EarlyApiServers`, which now wraps
+  it) returns the effective list with errors.
+- A missing tdns-ncli config now says how to create it instead of a bare open
+  error, with `--config` in the advice when one was given.
+
+## CodeRabbit round 2 (2026-11-21)
+
+- **Checked before written.** The edited config is loaded with the edit laid
+  over the real file before anything is written, for a real add as for
+  `--dry-run`. A failing add is refused untouched ("Nothing was written");
+  checking only after the write meant undoing it, and the undo cannot rejoin a
+  `--file` that was a hard link to the file the CLI reads. The check after the
+  write stays, with its undo.
+- **Ctrl-C ends the wait for another add's lock** (`LOCK_NB` polled against
+  the command's context), and a cancelled add edits nothing.
+- **Clients follow the wiring.** `WireInstanceTrees` records the entries it
+  gives a tree, and `clientEntries` builds clients for those and the canonical
+  entries only (round 3: deciding again without the command tree accepted an
+  entry named `config`, and a client for it exits the CLI on a bad rootca). A
+  duplicated name's client is the wired entry's; a binary that wires no
+  instances (tdns-cli) gets canonical clients only.
+- **Only a role-less row is the canonical entry.** A `tdns-auth` row with a
+  `role:` is ignored by the CLI, and an add that would become the canonical
+  entry now says so instead of filing the daemon as an extra instance.
+- The same daemon config reached through a symlink is "already known"; a
+  service.name or file name naming two roles asks for `--role`; an IPv6 zone
+  in a listen address is escaped in the URL; printed advice keeps `--config`;
+  a list written with bare `-` lines gets new items at its indentation; a
+  value with a line break is written double-quoted.
+
+## Not done here
+
+- **Agent instances** (PR 2) and **imr instances** (PR 3): `knownInstanceRoles`
+  has only `auth`. `config add` already works for the first agent or imr (the
+  canonical entry) and picks up a second one as soon as the role has a tree.
+- `config remove`, and `config list` comparing an entry to its daemon config
+  (drift), were not asked for.
+- Ownership of an edited file is not preserved on rename; the CLI config is the
+  invoking operator's own file.

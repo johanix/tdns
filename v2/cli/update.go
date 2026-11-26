@@ -141,30 +141,6 @@ func init() {
 // session (for example "child" or "zone") and does not affect the format of the DNS UPDATE
 // messages produced.
 func CreateUpdate(role, updateType string) {
-	dbFile := viper.GetString("db.file")
-	if dbFile == "" {
-		// Local viper has no db.file (typical when the CLI's config does
-		// not duplicate the server's keystore path). Fall back to the
-		// configured server's reported DBFile via /config status.
-		api, err := GetApiClient(role, false)
-		if err == nil {
-			resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"})
-			if err == nil && resp.DBFile != "" {
-				dbFile = resp.DBFile
-				if tdns.Globals.Verbose {
-					fmt.Printf("Using DB file from %s server config: %s\n", role, dbFile)
-				}
-			}
-		}
-	}
-	kdb, err := tdns.NewKeyDB(dbFile, false, nil)
-	if err != nil {
-		fmt.Printf("Error from NewKeyDB(): %v\n", err)
-		fmt.Printf("Hint: set 'db: file: <path>' in the CLI config, or ensure the configured\n")
-		fmt.Printf("      %s server's /config status returns a non-empty DBFile.\n", role)
-		os.Exit(1)
-	}
-
 	// Single ordered list of update actions. RFC 2136 processes the
 	// Update section in order on the receiver, so we must preserve the
 	// exact entry sequence — separate add/del/del-rrset slices would
@@ -212,6 +188,12 @@ func CreateUpdate(role, updateType string) {
 	var sak *tdns.Sig0ActiveKeys
 	var signing bool = false
 
+	// The key database is opened only without --key: the keyfile path never
+	// reads it, so a database that cannot be opened must not stop an update
+	// signed with a keyfile. kdb is read below only when keyfile is empty.
+	var kdb *tdns.KeyDB
+	var err error
+
 	if keyfile != "" {
 		pkc, err := tdns.ReadPrivateKey(keyfile)
 		switch {
@@ -233,6 +215,7 @@ func CreateUpdate(role, updateType string) {
 			fmt.Printf("Warning: no SIG(0) signing of update messages possible.\n")
 		}
 	} else {
+		kdb = openUpdateKeyDB(role)
 		sak, err = kdb.GetSig0Keys(signer, tdns.Sig0StateActive)
 		if err != nil {
 			fmt.Printf("Error fetching active SIG(0) key for zone %s: %v\n", signer, err)
@@ -296,6 +279,7 @@ func CreateUpdate(role, updateType string) {
 			}
 			if len(sak.Keys) == 0 {
 				fmt.Printf("No SIG(0) private key for zone %s found in keystore. Signing not possible.\n", signer)
+				return nil, fmt.Errorf("no SIG(0) private key for zone %s found in keystore. Signing not possible", signer)
 			}
 			// if tdns.Globals.Verbose {
 			fmt.Printf("Will sign update with SIG(0) key for %s with keyid %d\n",
@@ -548,4 +532,63 @@ cmdloop:
 		}
 	}
 
+}
+
+// openUpdateKeyDB opens the key database `zone update create` signs from
+// (updateKeyDB picks it), and exits if it cannot be opened.
+func openUpdateKeyDB(role string) *tdns.KeyDB {
+	reported := func() string {
+		api, err := GetApiClient(role, false)
+		if err != nil {
+			return ""
+		}
+		resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"})
+		if err != nil {
+			return ""
+		}
+		return resp.DBFile
+	}
+	dbFile, note := updateKeyDB(role, viper.GetString("db.file"), isInstanceRole(role), reported)
+	if note != "" && (tdns.Globals.Verbose || strings.HasPrefix(note, "Warning")) {
+		fmt.Println(note)
+	}
+	kdb, err := tdns.NewKeyDB(dbFile, false, nil)
+	if err != nil {
+		fmt.Printf("Error from NewKeyDB(): %v\n", err)
+		fmt.Printf("Hint: set 'db: file: <path>' in the CLI config, or ensure the configured\n")
+		fmt.Printf("      %s server's /config status returns a non-empty DBFile.\n", role)
+		fmt.Printf("      Or sign with a keyfile (--key), which needs no database.\n")
+		os.Exit(1)
+	}
+	return kdb
+}
+
+// updateKeyDB picks the key database `zone update create` signs from, and a
+// line to print about the choice ("Warning..." lines are always printed).
+//
+// The CLI config's db.file is one path for the whole CLI, so it can only be
+// one daemon's database: the canonical daemon's. For the canonical role it
+// wins, as it always has, and the server's reported DBFile is the fallback.
+// For a named instance (agent2) the instance's own reported DBFile comes
+// first: db.file would sign agent2's update with another daemon's keys. Only
+// when the instance cannot report one is db.file used, with a warning.
+func updateKeyDB(role, shared string, instance bool, reported func() string) (string, string) {
+	if shared != "" && !instance {
+		return shared, ""
+	}
+	if f := reported(); f != "" {
+		return f, fmt.Sprintf("Using DB file from %s server config: %s", role, f)
+	}
+	if instance && shared != "" {
+		return shared, fmt.Sprintf("Warning: %s did not report its DB file; using db.file from the CLI config (%s), which may be another daemon's", role, shared)
+	}
+	return shared, ""
+}
+
+// isInstanceRole reports whether role is a named instance's tree (an
+// apiservers entry with a role:, wired under its own name) rather than a
+// built-in one.
+func isInstanceRole(role string) bool {
+	d := getApiDetailsByClientKey(getClientKeyFromParent(role))
+	return d != nil && d.Role != "" && d.Name == role
 }

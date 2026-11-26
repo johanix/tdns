@@ -344,7 +344,7 @@ func TestImrQueryFreshSkipsTheCachedAnswer(t *testing.T) {
 	defer cancel()
 
 	// The plain query serves the cached NXDOMAIN.
-	if resp, err := imr.ImrQuery(ctx, qname, dns.TypeKEY, dns.ClassINET, nil); err != nil || resp.Error {
+	if resp, err := imr.ImrQuery(ctx, qname, dns.TypeKEY, dns.ClassINET); err != nil || resp.Error {
 		t.Fatalf("fixture: the cached NXDOMAIN was not served (err=%v resp=%+v)", err, resp)
 	}
 	// The fresh one goes to the network. This cache knows no servers, so it

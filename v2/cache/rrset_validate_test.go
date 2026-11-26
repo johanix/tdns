@@ -453,3 +453,14 @@ func TestValidateDNSKEYs_DSDenialProofs(t *testing.T) {
 		})
 	}
 }
+
+// A nil cache answers its error; the guard that says so does not reach into
+// the cache it found missing.
+func TestValidateRRsetOnANilCache(t *testing.T) {
+	var rrcache *RRsetCacheT
+	rrset := &core.RRset{Name: "example.", Class: dns.ClassINET, RRtype: dns.TypeA}
+	state, err := rrcache.ValidateRRsetWithParentZone(context.Background(), rrset, nil, nil)
+	if err == nil || state != ValidationStateNone {
+		t.Errorf("ValidateRRsetWithParentZone on a nil cache = %v, %v; want None and an error", state, err)
+	}
+}

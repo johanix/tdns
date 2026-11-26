@@ -18,10 +18,10 @@ import (
 //   - the IMR, when its config names no trust anchor (none of
 //     trust-anchor-ds, trust-anchor-dnskey, trust-anchor-file) and the
 //     root it reaches is the IANA root: at once with the compiled-in root
-//     hints and the root neither forwarded nor stubbed (ImrEngineConf.
-//     RootAnchorFallback in the tdns package). With a root-hints file or a
+//     hints and the root neither forwarded nor stubbed (Config.
+//     RootAnchorFallback in the imr package). With a root-hints file or a
 //     "." forward or stub the root may be a private one, and the IMR asks
-//     it for its DNSKEY RRset (ImrEngineConf.RootAnchorProbe). It uses the
+//     it for its DNSKEY RRset (Config.RootAnchorProbe). It uses the
 //     anchor only if a key in the set hashes to one of these DS records
 //     and an RRSIG by that key over the set verifies. A matching key whose
 //     signature does not verify, or no matching key, is another root: no

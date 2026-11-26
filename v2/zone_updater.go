@@ -138,8 +138,20 @@ func apexRetainedOnDelname(rrtype uint16) bool {
 // originate — gating it would break SIG(0) key management on secondaries.
 // DEFERRED-UPDATE is rejected by the loop as a wrong-queue error, and PING is
 // handled before the zone is even resolved.
-func updaterCmdMutatesZoneContent(cmd string) bool {
-	return cmd == "ZONE-UPDATE" || cmd == "CHILD-UPDATE"
+//
+// A CHILD-UPDATE on a childsync-proxy zone does not write the zone either: the
+// proxy's delegation backend cannot store into the served zone (config
+// validation refuses store direct for it), so the update goes to the parent
+// primary. Such a zone does not originate content (childUpdatesLeaveTheZone),
+// and gating its child updates would stop the proxy doing its job.
+func updaterCmdMutatesZoneContent(zd *ZoneData, cmd string) bool {
+	switch cmd {
+	case "ZONE-UPDATE":
+		return true
+	case "CHILD-UPDATE":
+		return !zd.Options[OptChildSyncProxy]
+	}
+	return false
 }
 
 func SprintUpdates(actions []dns.RR) string {
@@ -280,7 +292,7 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 	// system -- a code bug worth shouting about. Deliberately not
 	// recorded in the zone's error registry, so it cannot collide with
 	// the operator-facing config warning.
-	if updaterCmdMutatesZoneContent(ur.Cmd) && !zoneMayOriginateContent(zd) {
+	if updaterCmdMutatesZoneContent(zd, ur.Cmd) && !zoneMayOriginateContent(zd) {
 		lg.Error("ZoneUpdater: refusing zone mutation on a secondary that may not originate content (invariant violation)",
 			"cmd", ur.Cmd, "zone", ur.ZoneName, "internal", ur.InternalUpdate,
 			"description", ur.Description, "actions", len(ur.Actions))
@@ -436,7 +448,7 @@ func (kdb *KeyDB) applyUpdate(ctx context.Context, ur UpdateRequest) (stop bool)
 			// content (the mirror of the CHILD-UPDATE 'direct' backend
 			// persist); internal updates are included, since they change
 			// zone data too but never set OptDirty, so they need force.
-			// Then the delegation sync, cancellable: the only reader of that
+			// Then the delegation sync, cancellable: the syncher reading that
 			// queue exits on the same cancellation, so a plain send at
 			// shutdown would block this engine forever; dropping it costs a
 			// round of parent sync, not correctness. The operator's signal

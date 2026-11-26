@@ -27,8 +27,7 @@ import (
 
 const (
 	year68            = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits
-	TimeLayout        = "2006-01-02 15:04:05"
-	safeMessageSize   = 64000 // ~1.5 KB headroom for per-envelope question + TSIG
+	safeMessageSize   = 64000   // ~1.5 KB headroom for per-envelope question + TSIG
 	dnsMaxMessageSize = 65535
 )
 
@@ -1129,9 +1128,16 @@ func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error)
 		}
 	}()
 
-	wrote, err := zd.WriteZoneToFile(tmp)
+	// The signals of the pass's this write puts in the file stay in the
+	// record until noteZoneFileWritten has followed it (holdSignalsWritten).
+	snap, release := zd.holdSignalsWritten()
+	defer release()
+	wrote, err := zd.writeSnapshotToFile(tmp, snap)
 	if err != nil {
 		return fname, 0, err
+	}
+	if testHookZoneFileWriting != nil {
+		testHookZoneFileWriting()
 	}
 	if err := tmp.Sync(); err != nil {
 		return fname, 0, fmt.Errorf("syncing %s: %v", tmpname, err)
@@ -1150,10 +1156,25 @@ func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error)
 		return fname, 0, fmt.Errorf("setting mode on %s: %v", tmpname, err)
 	}
 
+	// The file holds what was written from here on, whether or not the sync
+	// below succeeds: the record of what the transport signal pass stored
+	// keeps the signal now in it, and until the rename is on disk the one
+	// the file it replaced held too (noteZoneFileWritten). zoneFileMu keeps
+	// that in the order of the renames.
+	zd.zoneFileMu.Lock()
 	if err := os.Rename(tmpname, fname); err != nil {
+		zd.zoneFileMu.Unlock()
 		return fname, 0, fmt.Errorf("renaming %s to %s: %v", tmpname, fname, err)
 	}
 	committed = true
+	durable := false
+	defer func() {
+		zd.noteZoneFileWritten(snap, durable)
+		zd.zoneFileMu.Unlock()
+	}()
+	if testHookZoneFileRenamed != nil {
+		testHookZoneFileRenamed()
+	}
 
 	// Persist the rename itself, and FAIL if that cannot be done.
 	//
@@ -1175,6 +1196,7 @@ func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error)
 		return fname, 0, fmt.Errorf("closing %s after syncing: %v", dir, cerr)
 	}
 
+	durable = true
 	return fname, wrote, nil
 }
 
@@ -1183,13 +1205,30 @@ func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error)
 // journalled change whose ToSerial is not newer than it is, by definition,
 // already in this file.
 func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
+	return zd.writeSnapshotToFile(f, zd.publishedSnapshot())
+}
+
+// testHookZoneFileWriting, when set, runs in a write of the zone's own file
+// after the snapshot is written to the temporary file and before it is
+// renamed into place. Tests only.
+var testHookZoneFileWriting func()
+
+// testHookZoneFileRenamed, when set, runs in a write of the zone's own file
+// after the file is renamed into place and before noteZoneFileWritten
+// follows it. Tests only.
+var testHookZoneFileRenamed func()
+
+// writeSnapshotToFile is WriteZoneToFile for snap, a published snapshot. A
+// caller that writes the zone's own file takes it from holdSignalsWritten,
+// to tell the transport signal pass what the file now holds
+// (noteZoneFileWritten) once the file is in place.
+func (zd *ZoneData) writeSnapshotToFile(f *os.File, snap *zoneSnapshot) (uint32, error) {
 	var err error
 	var bytes, totalbytes int
 	zonedata := ""
 
 	writer := bufio.NewWriter(f)
 
-	snap := zd.publishedSnapshot()
 	apex := getOwnerFrom(snap, zd.ZoneName)
 	if apex == nil {
 		lgDns.Error("WriteZoneToFile: failed to get zone apex", "zone", zd.ZoneName)
@@ -1273,7 +1312,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 	// 		if rrcount%1000 == 0 {
 	// 			bytes, err = writer.WriteString(zonedata)
 	// 			if err != nil {
-	// 				return 0, err
+	// 				return 0, nil, err
 	// 			}
 	// 			totalbytes += bytes
 	// 			bytes = 0

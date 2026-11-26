@@ -6,7 +6,6 @@ package cache
 import (
 	"context"
 	"fmt"
-	"log"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -70,7 +69,7 @@ func (rrcache *RRsetCacheT) keptProof(rrset *core.RRset) []*core.RRset {
 	if c == nil || c.RRset == nil || len(c.WildcardProof) == 0 {
 		return nil
 	}
-	if differ, _, _ := c.RRset.RRsetDiffer(rrset, log.Default(), false, false); differ || c.RRset.RRSIGsDiffer(rrset) {
+	if differ, _, _ := c.RRset.RRsetDiffer(rrset, rrcache.DebugLog(), false, false); differ || c.RRset.RRSIGsDiffer(rrset) {
 		return nil
 	}
 	return c.WildcardProof
@@ -91,7 +90,7 @@ func (rrcache *RRsetCacheT) validateExpansion(ctx context.Context, rrset *core.R
 	own, exp := splitExpansionSignatures(rrset)
 	v := AnswerVerdict{Proof: wildcardProofSets(authority, signersOf(exp))}
 	if rrcache.Verbose {
-		log.Printf("ValidateAnswer: %s %s carries %d expansion signature(s); %d proof RRset(s) in the authority section",
+		rrcache.Logger.Printf("ValidateAnswer: %s %s carries %d expansion signature(s); %d proof RRset(s) in the authority section",
 			owner, dns.TypeToString[rrset.RRtype], len(exp), len(v.Proof))
 	}
 	state, sig, err := rrcache.validateSignatures(ctx, rrset, append(own, exp...), rrcache.DnskeyCache, fetcher)
@@ -111,7 +110,7 @@ func (rrcache *RRsetCacheT) validateExpansion(ctx context.Context, rrset *core.R
 		v.EDEText = fmt.Sprintf("NSEC3 iterations above the limit of %d", NSEC3MaxIterations())
 	}
 	if rrcache.Verbose {
-		log.Printf("ValidateAnswer: %s %s synthesized from *.%s in %s: %s",
+		rrcache.Logger.Printf("ValidateAnswer: %s %s synthesized from *.%s in %s: %s",
 			owner, dns.TypeToString[rrset.RRtype], lastLabels(dns.SplitDomainName(owner), int(sig.Labels)),
 			sig.SignerName, ValidationStateToString[v.State])
 	}

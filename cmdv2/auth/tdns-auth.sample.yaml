@@ -169,8 +169,22 @@ imrengine:
 apiserver:
    addresses:  [ 127.0.0.1:8989 ]
    apikey:     winter-is-coming-santa-stuck-in-chimney
+   # The API's TLS pair. Leave both out to get certs/tdns-auth-api.crt and
+   # .key next to this file, which the daemon writes (self-signed) at its
+   # first start; clients verify it by pin (tdns-ncli config add writes it).
    certfile:   /etc/tdns/certs/servers/localhost..crt
    keyfile:    /etc/tdns/certs/servers/localhost..key
+   # Local admin socket: the management API without TLS or a key, for root
+   # on this host (whoever can open the socket is admin). The directory is
+   # created 0700 if missing; one that group or others can enter is refused.
+   # tdns-ncli config add uses it when run as root.
+   socket:     /var/run/tdns/tdns-auth.sock
+   # Network clients by certificate, with roles (read-only, read-write); with
+   # it the API key is read-write and admin is the socket's alone. Requires
+   # socket:. Managed with `tdns-ncli <daemon> client ...`; see
+   # guide/config-tdns-auth.md. A configured file that cannot be used closes
+   # the TCP API (503), so create it before enabling this line.
+   # access-file: /etc/tdns/tdns-auth-access.yaml
 
 # Statically declared TSIG keys.
 #
@@ -830,7 +844,9 @@ log:
    #   config     config-file parsing and reload
    #   zones      zone load, dynamic zones, AXFR/IXFR (in and out)
    #   dns        DNS query / lookup / resolution
-   #   engine     refresh engine + internal resolver (IMR) engine
+   #   engine     refresh engine
+   #   imr        internal resolver (IMR): priming, cache, its listeners
+   #   imr-lookups  the internal resolver's lookups
    #   handler    DNS request handlers
    #   api        HTTP management API
    #   signer     DNSSEC signing and the key-state worker
@@ -840,6 +856,10 @@ log:
    #   CDS, CSYNC, DNSKEY, GENERIC   inbound NOTIFY handling, per RR type
    # Other subsystems (present, used by specific features / app types):
    #   agent, combiner, gossip, transport, elect, provider-group, signal-republish
+   #
+   # The internal resolver logs as imr, and its lookups as imr-lookups, apart
+   # from engine and dns. Its level is set on its own: engine: debug does not
+   # turn up the resolver, and imr: warn quiets it without quieting the rest.
    #
    # subsystems:
    #   dns:        debug

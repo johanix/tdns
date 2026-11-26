@@ -55,6 +55,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -517,7 +518,7 @@ func resolveDsyncTarget(ctx context.Context, imr *Imr, rr *core.DSYNC) (*DsyncTa
 	target := dns.Fqdn(rr.Target)
 	var addrs []string
 	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		resp, qerr := imr.ImrQuery(ctx, target, qtype, dns.ClassINET, nil)
+		resp, qerr := imr.ImrQuery(ctx, target, qtype, dns.ClassINET)
 		if qerr != nil {
 			continue
 		}
@@ -561,24 +562,45 @@ func resolveDsyncTarget(ctx context.Context, imr *Imr, rr *core.DSYNC) (*DsyncTa
 // expected to work.
 func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest,
 	imr *Imr, plan *ParentSyncPlan, analysis *ProxyDelegationAnalysis, updateSync *DelegationSyncStatus) (string, error) {
+	msg, _, err := zd.syncWithParentVia(ctx, kdb, notifyq, imr, plan, analysis, updateSync)
+	return msg, err
+}
+
+// syncWithParentVia is SyncWithParent that also returns the scheme that
+// carried the change: "" when nothing was forwarded. Only an UPDATE or API
+// success says the parent applied it; a NOTIFY's says the notifier took it.
+func (zd *ZoneData) syncWithParentVia(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest,
+	imr *Imr, plan *ParentSyncPlan, analysis *ProxyDelegationAnalysis, updateSync *DelegationSyncStatus) (string, string, error) {
 
 	if !plan.Usable() {
 		lgDns.Info("parentsync-proxy: nothing forwarded", "zone", zd.ZoneName,
 			"parent", plan.Parent, "plan", plan.Summary())
-		return "no usable sync scheme; nothing forwarded (" + plan.Summary() + ")", nil
+		return "no usable sync scheme; nothing forwarded (" + plan.Summary() + ")", "", nil
 	}
 
-	return zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
+	var scheme string
+	msg, err := zd.walkSyncPlan(ctx, plan, func(cand SyncCandidate) (string, error) {
+		var m string
+		var e error
 		switch cand.Scheme {
 		case "UPDATE":
-			return zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target, updateSync, analysis)
+			m, e = zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target, updateSync, analysis)
 		case "API":
-			return zd.ProxyApiParent(ctx, imr, cand.Target, analysis)
+			m, e = zd.ProxyApiParent(ctx, imr, cand.Target, analysis)
 		case "NOTIFY":
-			return zd.ProxyNotifyParent(ctx, notifyq, analysis, cand.Target)
+			m, e = zd.ProxyNotifyParent(ctx, notifyq, analysis, cand.Target)
+		default:
+			return "", fmt.Errorf("unknown scheme %q in plan", cand.Scheme)
 		}
-		return "", fmt.Errorf("unknown scheme %q in plan", cand.Scheme)
+		if e == nil {
+			scheme = cand.Scheme
+		}
+		return m, e
 	})
+	if err != nil {
+		scheme = ""
+	}
+	return msg, scheme, err
 }
 
 // walkSyncPlan tries each candidate via send, returning the first success.
@@ -594,6 +616,13 @@ func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan
 //
 // All failures are returned together. A caller shown only the last one cannot
 // tell which transport was even expected to work.
+//
+// One error does end the walk: errDelegationNotAllRead, from an analysis that
+// could not read all of the parent's delegation. That is not a transport
+// failing. What the parent lacks is not known, and the next transport would
+// know no more. A NOTIFY sent after it counted as forwarded, so the proxy sync
+// scheduled no compare to look again. The walk returns the error instead, and
+// the caller retries the compare.
 func (zd *ZoneData) walkSyncPlan(ctx context.Context, plan *ParentSyncPlan,
 	send func(SyncCandidate) (string, error)) (string, error) {
 
@@ -618,6 +647,13 @@ func (zd *ZoneData) walkSyncPlan(ctx context.Context, plan *ParentSyncPlan,
 				return fmt.Sprintf("%s (after %s)", msg, strings.Join(failures, "; ")), nil
 			}
 			return msg, nil
+		}
+		if errors.Is(err, errDelegationNotAllRead) {
+			if len(failures) > 0 {
+				return "", fmt.Errorf("zone %s: sync stopped at %s (after %s): %w",
+					zd.ZoneName, cand.Scheme, strings.Join(failures, "; "), err)
+			}
+			return "", fmt.Errorf("zone %s: sync stopped at %s: %w", zd.ZoneName, cand.Scheme, err)
 		}
 		lgDns.Warn("delegation sync: scheme failed, trying the next one",
 			"zone", zd.ZoneName, "scheme", cand.Scheme, "err", err)

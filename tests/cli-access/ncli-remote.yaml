@@ -1,0 +1,28 @@
+# tdns-ncli on the CLI host, for the socket and roles suites: entries that
+# every build of the stack understands. TLS is verified against the rig's CA
+# (rootca:), which needs nothing from #1168. @DAEMON@ is filled in by setup.sh.
+apiservers:
+   - name:        tdns-auth            # "auth": the key
+     baseurl:     https://@DAEMON@:8991/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
+     rootca:      /var/tmp/cli-access/certs/ca.crt
+   - name:        authnokey            # the same daemon, no key at all
+     role:        auth
+     baseurl:     https://@DAEMON@:8991/api/v1
+     authmethod:  none
+     rootca:      /var/tmp/cli-access/certs/ca.crt
+   - name:        authbadkey           # the same daemon, a wrong key
+     role:        auth
+     baseurl:     https://@DAEMON@:8991/api/v1
+     apikey:      not-the-rig-key
+     authmethod:  X-API-Key
+     rootca:      /var/tmp/cli-access/certs/ca.crt
+   - name:        tdns-imr             # "imr": plain http, the key
+     baseurl:     http://@DAEMON@:8992/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
+   - name:        imrnokey
+     role:        imr
+     baseurl:     http://@DAEMON@:8992/api/v1
+     authmethod:  none

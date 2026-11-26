@@ -390,8 +390,25 @@ func TestNotifyDrivenFirstLoadBindsTheRegisteredPolicy(t *testing.T) {
 // one before the engine's restore looked, so a combiner came back from a
 // restart at a lower serial and its signer ignored its NOTIFYs.
 func TestFirstLoadRestoresThePersistedSerialForAnOriginatingSecondary(t *testing.T) {
+	firstLoadWithPersistedSerial(t, appTypeUngated, 1001,
+		"the persisted 1000 restored over the upstream's 7, one past it")
+}
+
+// The same first load in tdns-agent (#1157): a secondary that writes nothing
+// into the zone serves what it received, at the upstream's serial, whatever
+// serial it served before the restart.
+func TestFirstLoadAgentSecondaryServesTheUpstreamSerial(t *testing.T) {
+	firstLoadWithPersistedSerial(t, AppTypeAgent, 7,
+		"the upstream's 7: an agent secondary with no option that writes content relays")
+}
+
+// firstLoadWithPersistedSerial loads a secondary of example. from a primary
+// at serial 7, as app type app, with outbound-soa-serial=persist and a saved
+// outgoing serial of 1000, and waits for it to serve want.
+func firstLoadWithPersistedSerial(t *testing.T, app AppType, want uint32, why string) {
+	t.Helper()
 	authApp(t)
-	Globals.App.Type = AppTypeAgent // any originating role but tdns-auth
+	Globals.App.Type = app
 	kdb := Conf.Internal.KeyDB
 	if err := applyOutboundSoaSerial(kdb, OutboundSoaSerialPersist); err != nil {
 		t.Fatalf("persist mode: %v", err)
@@ -437,16 +454,16 @@ func TestFirstLoadRestoresThePersistedSerialForAnOriginatingSecondary(t *testing
 		zd.mu.Lock()
 		ready, cur := zd.Ready, zd.CurrentSerial
 		zd.mu.Unlock()
-		if ready && cur == 1001 {
+		if ready && cur == want {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("after the first load: Ready=%v CurrentSerial=%d, want 1001: the persisted 1000 restored over the upstream's 7, one past it", ready, cur)
+			t.Fatalf("after the first load: Ready=%v CurrentSerial=%d, want %d: %s", ready, cur, want, why)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if snap := zd.publishedSnapshot(); snap == nil || snap.Serial != 1001 {
-		t.Fatalf("the served snapshot is not at 1001: %+v", snap)
+	if snap := zd.publishedSnapshot(); snap == nil || snap.Serial != want {
+		t.Fatalf("the served snapshot is not at %d: %+v", want, snap)
 	}
 }
 
@@ -590,4 +607,225 @@ func TestFirstLoadFailsWhenThePersistedSerialCannotBeRead(t *testing.T) {
 	}
 	conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: "example.", ZoneStore: MapZone} // a retry, as the ticker sends
 	waitServing(t, zd, 1001)
+}
+
+// An agent upgraded from before #1157 holds a zone copy on disk at a serial it
+// counted itself (100), ahead of the upstream's (40). DoTransfer's serialNewer
+// test asks for no transfer, so the relay served 100, and missed every upstream
+// change until the upstream's serial passed it. The relay replaces such a copy
+// at the first upstream answer: at first bind, or at a later refresh when the
+// upstream was down at first bind. tdns-auth is unchanged: its secondary keeps
+// the copy, as the serial comparison says.
+//
+// The copy's serial names none of the upstream's versions, so no serial
+// comparison may stand in for the transfer. An upstream newer than the copy
+// must not be asked for a delta from the copy's serial: the copy stays out of
+// IXFR until a transfer replaces it. An upstream at the copy's own serial must
+// still replace it, and so must a fallback upstream at that serial when the
+// first upstream's transfer fails, rather than be discarded as unchanged.
+func TestAgentRelayReplacesAPersistedCopyAheadOfTheUpstream(t *testing.T) {
+	const ahead = `example.	3600	IN	SOA	ns.example. hostmaster.example. 100 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+stale.example.	3600	IN	A	10.0.0.100
+`
+	upstreamAt := func(serial uint32) string {
+		return fmt.Sprintf(`example.	3600	IN	SOA	ns.example. hostmaster.example. %d 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+fresh.example.	3600	IN	A	10.0.0.40
+`, serial)
+	}
+	for _, tc := range []struct {
+		name      string
+		app       AppType
+		upstream  uint32
+		firstDown bool
+		soaOnly   uint32 // a first upstream that answers this SOA serial, but no transfer
+		want      uint32
+		replaced  bool
+	}{
+		{"agent, upstream up at first bind", AppTypeAgent, 40, false, 0, 40, true},
+		{"agent, upstream down at first bind", AppTypeAgent, 40, true, 0, 40, true},
+		{"agent, upstream newer than the copy", AppTypeAgent, 150, true, 0, 150, true},
+		{"agent, upstream at the copy's serial", AppTypeAgent, 100, false, 0, 100, true},
+		{"agent, fallback upstream at the copy's serial", AppTypeAgent, 100, false, 150, 100, true},
+		{"auth keeps its copy", AppTypeAuth, 40, false, 0, 100, false},
+		// Confirmed (tdns-auth never marks a copy): an unchanged transfer is
+		// still discarded, so the copy at that serial stays.
+		{"auth, fallback upstream at the copy's serial", AppTypeAuth, 100, false, 150, 100, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kdb := newTestKeyDB(t)
+			conf, dir := persistentConf(t, kdb)
+			withAppType(t, tc.app)
+
+			addr, stop := startTestPrimary(t, upstreamAt(tc.upstream))
+			defer stop()
+			if err := os.WriteFile(filepath.Join(dir, "example.zone"), []byte(ahead), 0644); err != nil {
+				t.Fatalf("write zone file: %v", err)
+			}
+			first := addr
+			if tc.firstDown {
+				first = "127.0.0.1:1" // nothing listening
+			}
+			upstreams := []PeerConf{{Addr: first}}
+			if tc.soaOnly != 0 {
+				// UDP only: its SOA starts the transfer, its AXFR (TCP) fails,
+				// and the transfer falls back to the primary behind it.
+				soaAddr, stopSOA := startTestSOAServer(t, "example.", tc.soaOnly, dns.RcodeSuccess)
+				defer stopSOA()
+				upstreams = []PeerConf{{Addr: soaAddr}, {Addr: addr}}
+			}
+			zd := &ZoneData{
+				ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
+				Logger: discardLogger(), KeyDB: kdb,
+				Options:   map[ZoneOption]bool{OptApiManagedZone: true},
+				Upstreams: upstreams,
+			}
+			registerZones(t, zd)
+			t.Cleanup(zd.stopPublisher)
+			if zoneMayOriginateContent(zd) {
+				t.Fatal("setup: the zone should relay")
+			}
+
+			_, err := zd.Refresh(context.Background(), false, false, false, conf)
+			if tc.firstDown {
+				if err == nil {
+					t.Fatal("expected the refresh against a dead primary to fail")
+				}
+				if zd.IncomingSerial != 100 {
+					t.Fatalf("IncomingSerial = %d, want 100: the adopted copy serves while the upstream is down", zd.IncomingSerial)
+				}
+				if zd.shouldRequestIxfr(false) {
+					t.Fatal("an unconfirmed relay copy is IXFR-eligible: a delta from its serial would apply to the wrong base")
+				}
+				zd.Upstreams = []PeerConf{{Addr: addr}}
+				_, err = zd.Refresh(context.Background(), false, false, false, conf)
+			}
+			if err != nil {
+				t.Fatalf("Refresh: %v", err)
+			}
+
+			if zd.IncomingSerial != tc.want || zd.CurrentSerial != tc.want {
+				t.Fatalf("IncomingSerial %d, CurrentSerial %d, want %d", zd.IncomingSerial, zd.CurrentSerial, tc.want)
+			}
+			fresh, _ := zd.GetOwner("fresh.example.")
+			stale, _ := zd.GetOwner("stale.example.")
+			if tc.replaced && (fresh == nil || stale != nil) {
+				t.Errorf("the upstream's copy is not the one served (fresh %v, stale %v)", fresh != nil, stale != nil)
+			}
+			if !tc.replaced && (fresh != nil || stale == nil) {
+				t.Errorf("the copy was replaced (fresh %v, stale %v)", fresh != nil, stale != nil)
+			}
+			if zd.relayCopyUnconfirmed.Load() {
+				t.Error("the copy is still unconfirmed after the refresh")
+			}
+			if !zd.shouldRequestIxfr(false) {
+				t.Error("a confirmed copy is not IXFR-eligible")
+			}
+		})
+	}
+}
+
+// A primary that answers without a usable SOA (every one REFUSED) gives
+// DoTransfer's placeholder serial 0, which is no serial: it must neither force
+// a transfer of an unconfirmed relay copy nor confirm it.
+func TestAgentRelayCopyIsLeftAloneWithoutAUsableSOA(t *testing.T) {
+	const ahead = `example.	3600	IN	SOA	ns.example. hostmaster.example. 100 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+`
+	kdb := newTestKeyDB(t)
+	conf, dir := persistentConf(t, kdb)
+	withAppType(t, AppTypeAgent)
+
+	addr, stop := startTestSOAServer(t, "example.", 0, dns.RcodeRefused)
+	defer stop()
+	if err := os.WriteFile(filepath.Join(dir, "example.zone"), []byte(ahead), 0644); err != nil {
+		t.Fatalf("write zone file: %v", err)
+	}
+	zd := &ZoneData{
+		ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
+		Logger: discardLogger(), KeyDB: kdb,
+		Options:   map[ZoneOption]bool{OptApiManagedZone: true},
+		Upstreams: []PeerConf{{Addr: addr}},
+	}
+	registerZones(t, zd)
+	t.Cleanup(zd.stopPublisher)
+
+	if _, err := zd.Refresh(context.Background(), false, false, false, conf); err != nil {
+		t.Fatalf("Refresh: %v (a refused probe backs off quietly; it must not force a transfer)", err)
+	}
+	if zd.IncomingSerial != 100 {
+		t.Errorf("IncomingSerial = %d, want 100: the adopted copy stands", zd.IncomingSerial)
+	}
+	if !zd.relayCopyUnconfirmed.Load() {
+		t.Error("the copy was confirmed with no usable SOA")
+	}
+}
+
+// A transfer whose publish is dropped leaves the zone serving the copy it
+// adopted, so it must not confirm that copy: the next refresh forces a full
+// transfer again, and the copy stays out of IXFR.
+func TestAgentRelayCopyStaysUnconfirmedWhenThePublishIsDropped(t *testing.T) {
+	const ahead = `example.	3600	IN	SOA	ns.example. hostmaster.example. 100 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+stale.example.	3600	IN	A	10.0.0.100
+`
+	const upstream = `example.	3600	IN	SOA	ns.example. hostmaster.example. 40 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+fresh.example.	3600	IN	A	10.0.0.40
+`
+	kdb := newTestKeyDB(t)
+	conf, dir := persistentConf(t, kdb)
+	withAppType(t, AppTypeAgent)
+
+	addr, stop := startTestPrimary(t, upstream)
+	defer stop()
+	if err := os.WriteFile(filepath.Join(dir, "example.zone"), []byte(ahead), 0644); err != nil {
+		t.Fatalf("write zone file: %v", err)
+	}
+	zd := &ZoneData{
+		ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
+		Logger: discardLogger(), KeyDB: kdb,
+		Options:   map[ZoneOption]bool{OptApiManagedZone: true},
+		Upstreams: []PeerConf{{Addr: "127.0.0.1:1"}}, // nothing listening
+	}
+	registerZones(t, zd)
+	t.Cleanup(zd.stopPublisher)
+
+	if _, err := zd.Refresh(context.Background(), false, false, false, conf); err == nil {
+		t.Fatal("expected the refresh against a dead primary to fail")
+	}
+	if !zd.relayCopyUnconfirmed.Load() {
+		t.Fatal("setup: the adopted copy should be unconfirmed")
+	}
+
+	// Another ZoneData now holds the name, so this one's publish drops the
+	// transferred working set.
+	Zones.Set(zd.ZoneName, &ZoneData{ZoneName: zd.ZoneName})
+	zd.Upstreams = []PeerConf{{Addr: addr}}
+	// The transfer must get as far as the publish: the pre-refresh hooks run
+	// after it and before the publish, and a dropped publish returns nil.
+	analysed := false
+	zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(_, _ *ZoneData) { analysed = true })
+	if _, err := zd.Refresh(context.Background(), false, false, false, conf); err != nil {
+		t.Fatalf("refresh with the publish dropped: %v", err)
+	}
+	if !analysed {
+		t.Fatal("setup: the refresh returned before the transfer reached the publish")
+	}
+
+	if stale, _ := zd.GetOwner("stale.example."); stale == nil {
+		t.Fatal("setup: the dropped publish should leave the adopted copy served")
+	}
+	if !zd.relayCopyUnconfirmed.Load() {
+		t.Error("a dropped publish confirmed the relay copy")
+	}
+	if zd.shouldRequestIxfr(false) {
+		t.Error("the unconfirmed copy is IXFR-eligible after a dropped publish")
+	}
 }

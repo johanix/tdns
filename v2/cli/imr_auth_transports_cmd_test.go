@@ -4,6 +4,8 @@
 package cli
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -220,4 +222,207 @@ func TestFormatAuthTransportsSort(t *testing.T) {
 	if strings.Index(out, "ns1.example.net.") > strings.Index(out, "ns2.example.net.") {
 		t.Errorf("sort by last: ns1 (11:23:47) should come before ns2 (10:23:47):\n%s", out)
 	}
+}
+
+// sortTestRows is auth servers in no order: the root and gtld servers a
+// resolver always has, a stub whose name is a single label (a TLD of its own),
+// and a provider's servers one label deeper. Those that give a signal: all
+// kinds of it (a weighted one, ALPN only, an operator's override, one that
+// names no transport).
+func sortTestRows() []tdns.ImrAuthTransportsRow {
+	rows := []tdns.ImrAuthTransportsRow{
+		{Server: "ns1.ts.example.net.", Shared: true, Total: 5},
+		{Server: "ns1.prov-b.ts.example.net.", Shared: true, Total: 9,
+			Signal: map[string]uint8{"dot": 20, "doq": 40}, SignalSource: "oots"},
+		{Server: "a.root-servers.net.", Shared: true, Total: 7},
+		{Server: "h.root-servers-net.", Src: "stub", Total: 1},
+		{Server: "a.gtld-servers.net.", Shared: true, Total: 7},
+		{Server: "b.root-servers.net.", Shared: true, Total: 3,
+			Signal: map[string]uint8{"dot": 50}, SignalSource: "operator"},
+		{Server: "b.gtld-servers.net.", Shared: true, Total: 2, SignalSource: "oots"},
+		{Server: "ns2.ts.example.net.", Shared: true, Total: 4,
+			Signal: map[string]uint8{"udp": 100, "doq": 100}, SignalSource: "alpn"},
+	}
+	for i := range rows {
+		n := rows[i].Total
+		rows[i].Counts = map[string]uint64{"do53/udp": n}
+		// Split by privacy level, so that --privacy shows the rows and not a
+		// note that the resolver does not split them; some servers have two.
+		rows[i].ByPrivacy = map[string]map[string]uint64{"none": {"do53/udp": n}}
+		if i%2 == 0 {
+			rows[i].ByPrivacy["internal"] = map[string]uint64{"do53/udp": 1}
+		}
+	}
+	return rows
+}
+
+// tableServers is the servers of a formatted table, in the order of its rows:
+// the first word of each line from the header to the TOTAL row, which must be
+// the last. The lines under a server (--privacy) have an empty first cell.
+func tableServers(t *testing.T, out string) []string {
+	t.Helper()
+	var names []string
+	inTable, total := false, false
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 0:
+		case strings.HasPrefix(line, " "):
+		case total:
+			t.Errorf("line %q follows the TOTAL row:\n%s", line, out)
+		case f[0] == "AUTH" && len(f) > 1 && f[1] == "SERVER":
+			inTable = true
+		case !inTable:
+		case f[0] == "TOTAL":
+			total = true
+		default:
+			names = append(names, f[0])
+		}
+	}
+	if !total {
+		t.Errorf("no TOTAL row:\n%s", out)
+	}
+	return names
+}
+
+func TestFormatAuthTransportsSortOrders(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		sortBy string
+		want   []string
+	}{
+		// From the TLD down: every *.example.net. server together, the gtld
+		// servers, the root servers; within a domain by the labels to the
+		// left. The stub's name has a TLD of its own, root-servers-net., which
+		// sorts after net. like any other.
+		{"label", "label", []string{
+			"ns1.ts.example.net.", "ns2.ts.example.net.", "ns1.prov-b.ts.example.net.",
+			"a.gtld-servers.net.", "b.gtld-servers.net.",
+			"a.root-servers.net.", "b.root-servers.net.",
+			"h.root-servers-net.",
+		}},
+		// The servers that gave a signal first, whatever its kind and even if
+		// it names no transport; label order within both groups.
+		{"oots", "oots", []string{
+			"ns2.ts.example.net.", "ns1.prov-b.ts.example.net.",
+			"b.gtld-servers.net.", "b.root-servers.net.",
+			"ns1.ts.example.net.", "a.gtld-servers.net.", "a.root-servers.net.",
+			"h.root-servers-net.",
+		}},
+		{"name", "name", []string{
+			"a.gtld-servers.net.", "a.root-servers.net.",
+			"b.gtld-servers.net.", "b.root-servers.net.",
+			"h.root-servers-net.",
+			"ns1.prov-b.ts.example.net.", "ns1.ts.example.net.", "ns2.ts.example.net.",
+		}},
+		// The busiest first; a.gtld and a.root, 7 each, by name.
+		{"total", "total", []string{
+			"ns1.prov-b.ts.example.net.",
+			"a.gtld-servers.net.", "a.root-servers.net.",
+			"ns1.ts.example.net.", "ns2.ts.example.net.",
+			"b.root-servers.net.", "b.gtld-servers.net.",
+			"h.root-servers-net.",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rep := tdns.ImrAuthTransportsReport{Servers: len(sortTestRows()), Rows: sortTestRows()}
+			got := tableServers(t, formatAuthTransports(rep, tc.sortBy, false, false))
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("--sort %s:\n got %v\nwant %v", tc.sortBy, got, tc.want)
+			}
+			// The order the rows arrive in does not matter.
+			rev := slices.Clone(sortTestRows())
+			slices.Reverse(rev)
+			rep.Rows = rev
+			if again := tableServers(t, formatAuthTransports(rep, tc.sortBy, false, false)); !slices.Equal(again, tc.want) {
+				t.Errorf("--sort %s on the rows reversed:\n got %v\nwant %v", tc.sortBy, again, tc.want)
+			}
+			// Nor does --privacy, which adds rows under a server.
+			rep.Rows = sortTestRows()
+			if priv := tableServers(t, formatAuthTransports(rep, tc.sortBy, false, true)); !slices.Equal(priv, tc.want) {
+				t.Errorf("--sort %s --privacy:\n got %v\nwant %v", tc.sortBy, priv, tc.want)
+			}
+		})
+	}
+}
+
+// The stub row is marked and sorts by its name; a name found by resolution and
+// the same name in a stub zone are two rows, the shared one first, in any mode.
+func TestFormatAuthTransportsSortStubAndCase(t *testing.T) {
+	rep := tdns.ImrAuthTransportsReport{Rows: []tdns.ImrAuthTransportsRow{
+		{Server: "h.root-servers-net.", Src: "stub"},
+		{Server: "ns.example.net.", Src: "stub"},
+		{Server: "ns.example.net.", Shared: true},
+		{Server: "b.example.net.", Shared: true},
+		{Server: "A.example.net.", Shared: true},
+	}}
+	out := formatAuthTransports(rep, "label", false, false)
+	// Case is folded in label order: A sorts with a, before b.
+	if got, want := tableServers(t, out), []string{
+		"A.example.net.", "b.example.net.", "ns.example.net.", "ns.example.net.", "h.root-servers-net.",
+	}; !slices.Equal(got, want) {
+		t.Errorf("label order %v, want %v", got, want)
+	}
+	lines := strings.Split(out, "\n")
+	var ns []string
+	for _, l := range lines {
+		if strings.HasPrefix(l, "ns.example.net.") {
+			ns = append(ns, l)
+		}
+	}
+	if len(ns) != 2 || strings.Contains(ns[0], "(stub)") || !strings.Contains(ns[1], "(stub)") {
+		t.Errorf("want the shared ns.example.net. row, then the stub's:\n%s", out)
+	}
+	if !strings.Contains(out, "h.root-servers-net. (stub)") {
+		t.Errorf("the stub row is not marked (stub):\n%s", out)
+	}
+	// Case is folded: B sorts between a and C, not before a.
+	rows := []tdns.ImrAuthTransportsRow{{Server: "B.example."}, {Server: "a.example."}, {Server: "C.example."}}
+	sortAuthTransportRows(rows, "label")
+	if got := []string{rows[0].Server, rows[1].Server, rows[2].Server}; !slices.Equal(got, []string{"a.example.", "B.example.", "C.example."}) {
+		t.Errorf("label order with mixed case %v, want a, B, C", got)
+	}
+}
+
+// advertisesOOTS is the OOTS column's "none", seen from the row.
+func TestAdvertisesOOTSMatchesTheColumn(t *testing.T) {
+	for _, r := range sortTestRows() {
+		col := formatOOTSSignal(r.Signal, r.SignalPorts, r.SignalSource)
+		if got, want := advertisesOOTS(r), col != "none"; got != want {
+			t.Errorf("%s: advertisesOOTS = %v, but the OOTS column says %q", r.Server, got, col)
+		}
+	}
+}
+
+func TestCheckAuthTransportsSort(t *testing.T) {
+	for _, tc := range []struct {
+		value   string
+		wantErr bool
+	}{
+		{"label", false}, {"oots", false}, {"name", false}, {"total", false}, {"last", false},
+		{"", true}, {"Label", true}, {"lable", true}, {"labels", true}, {"addr", true},
+	} {
+		err := checkAuthTransportsSort(tc.value)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("--sort %q: error %v, want error: %v", tc.value, err, tc.wantErr)
+			continue
+		}
+		if err == nil {
+			continue
+		}
+		// The error names the value, and every value there is.
+		for _, want := range []string{fmt.Sprintf("%q", tc.value), "label", "oots", "name", "total", "last"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("--sort %q: error %q lacks %s", tc.value, err, want)
+			}
+		}
+	}
+	if got := authTransportsSortFlagDefault(); got != "label" {
+		t.Errorf("--sort defaults to %q, want label", got)
+	}
+}
+
+// authTransportsSortFlagDefault is --sort's default as the command declares it.
+func authTransportsSortFlagDefault() string {
+	return imrStatsAuthTransportsCmd.Flags().Lookup("sort").DefValue
 }

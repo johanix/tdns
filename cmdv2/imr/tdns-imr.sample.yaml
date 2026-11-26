@@ -59,6 +59,10 @@ imrengine:
    # - always-query-for-transport: Always query for new auth servers
    # - query-for-transport-tlsa: Query for TLSA records for encrypted transports
    # - transport-signal-type: Specify "svcb" (default) or "tsync"
+   # - qname-minimisation: Hide the full query name from servers above the
+   #   zone that holds it (RFC 9156). Off when absent. For a standalone
+   #   tdns-imr; leave it off in a copied config so the query stream matches
+   #   the resolver tests.
    # - allow-loopback-nameservers: Also query nameserver addresses on this host
    #   (127.0.0.0/8, ::1, 0.0.0.0, ::) that come from referrals, glue or address
    #   lookups. Off by default: a delegation cannot point the resolver at
@@ -184,6 +188,8 @@ imrengine:
    #    cache-min-ttl:            0  # seconds, as in Unbound; floor (0 = none)
    #    zone-state-recheck:     30s  # how long an insecure or indeterminate zone verdict stands
    #    nsec3-max-iterations:    10  # NSEC3 proofs above this are not judged (RFC 9276)
+   #    qmin-max-iterations:     10  # probe rounds for one name (RFC 9156); at least 1
+   #    qmin-one-label:           4  # of those rounds, how many add a single label; 0 up to the maximum-1
 
 # DNSSEC algorithms whose DNSKEY/RRSIG payloads are large for UDP. When a
 # referral DS RRset uses one, the IMR fetches the child zone's DNSKEY over TCP
@@ -219,12 +225,27 @@ dnssec:
 apiserver:
    apikey:     "REPLACE-ME-with-a-long-random-string"
    addresses:  [ 127.0.0.1:8080 ]
-   # usetls defaults to TRUE when not set. With usetls true you must also give
-   # certfile/keyfile, or the API listener fails to start (the resolver itself
-   # keeps running). Set it false for a plaintext API on loopback.
+   # usetls defaults to TRUE when not set. The certificate is certfile/keyfile
+   # below, or, with neither set, certs/tdns-imr-api.crt and .key next to this
+   # file, which the daemon writes (self-signed) at its first start; clients
+   # verify it by pin (tdns-ncli config add writes the pin). Set usetls false
+   # for a plaintext API on loopback.
    usetls:     false
-   # certfile:   /etc/tdns/certs/api.crt
-   # keyfile:    /etc/tdns/certs/api.key
+   # Local admin socket: the management API without TLS or a key, for root
+   # on this host (whoever can open the socket is admin). The directory is
+   # created 0700 if missing; one that group or others can enter is refused.
+   # tdns-ncli config add uses it when run as root.
+   socket:     /var/run/tdns/tdns-imr.sock
+   # Network clients by certificate, with roles (read-only, read-write); with
+   # it the API key is read-write and admin is the socket's alone. Requires
+   # socket:. Managed with `tdns-ncli <daemon> client ...`; see
+   # guide/config-tdns-auth.md. A configured file that cannot be used closes
+   # the TCP API (503), so create it before enabling this line.
+   # access-file: /etc/tdns/tdns-imr-access.yaml
+   # Only to use a pair of your own; one per daemon (a key two daemons share
+   # lets a client pinned to one accept the other).
+   # certfile:   /etc/tdns/certs/tdns-imr-api.crt
+   # keyfile:    /etc/tdns/certs/tdns-imr-api.key
 
 log:
    file:                /var/log/tdns/tdns-imr.log
@@ -232,6 +253,9 @@ log:
    # max-size:          20      # MB before the file is rotated (default 20)
    # max-backups:       3       # rotated files kept (default 3)
    # max-age:           14      # days a rotated file is kept (default 14)
+   # subsystems:                # per-subsystem level overrides
+   #    imr:            debug   # the resolver: priming, cache, listeners
+   #    imr-lookups:    debug   # the resolver's lookups
 
 # Optional second config file, merged on top of this one. This is the only
 # `imr.`-prefixed key; it is read directly and is not part of `imrengine:`.

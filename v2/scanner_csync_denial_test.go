@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -68,7 +70,7 @@ func TestAuthorityRRsetsGroupsTheProof(t *testing.T) {
 		mustRR(t, ns1+" 300 IN NSEC ns2."+zone+" AAAA RRSIG NSEC"),
 		mustRR(t, zone+" 300 IN RRSIG SOA 13 2 300 20300101000000 20200101000000 12345 "+zone+" AAAA"),
 	}
-	got := authorityRRsets(in)
+	got := imrcore.AuthorityRRsets(in)
 	if len(got) != 2 {
 		t.Fatalf("got %d RRsets, want 2: %v", len(got), got)
 	}
@@ -332,7 +334,7 @@ func TestProveAbsentWithTheImrValidator(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := sc.proveAbsent(ctx, zone, ns1, dns.TypeA, authorityRRsets(signed)); err != nil {
+	if err := sc.proveAbsent(ctx, zone, ns1, dns.TypeA, imrcore.AuthorityRRsets(signed)); err != nil {
 		t.Errorf("A, absent from a signed NSEC at %s: %v; want it proven", ns1, err)
 	}
 	for _, tc := range []struct {
@@ -340,8 +342,8 @@ func TestProveAbsentWithTheImrValidator(t *testing.T) {
 		qtype uint16
 		proof []*core.RRset
 	}{
-		{"a type the NSEC lists", dns.TypeAAAA, authorityRRsets(signed)},
-		{"the NSEC without its signature", dns.TypeA, authorityRRsets(unsigned)},
+		{"a type the NSEC lists", dns.TypeAAAA, imrcore.AuthorityRRsets(signed)},
+		{"the NSEC without its signature", dns.TypeA, imrcore.AuthorityRRsets(unsigned)},
 		{"no proof", dns.TypeA, nil},
 	} {
 		if err := sc.proveAbsent(ctx, zone, ns1, tc.qtype, tc.proof); !isAbsenceNotProven(err) {
@@ -375,7 +377,7 @@ func TestProveAbsentRefusesTheParentsCutNSEC(t *testing.T) {
 	// the denial is Bogus. It used to call it Secure, and childNodataProof was
 	// the only guard; it stays, as a second one.
 	state, _, verr := imr.Cache.ValidateNegativeResponse(ctx, ns1, dns.TypeA, dns.RcodeSuccess,
-		authorityRRsets(parentProof), imr.IterativeDNSQueryFetcher())
+		imrcore.AuthorityRRsets(parentProof), imr.IterativeDNSQueryFetcher())
 	if state != cache.ValidationStateBogus {
 		t.Errorf("the validator reads the parent's cut NSEC as a %s denial of %s A (err %v), want bogus: the names below the cut are the child's",
 			cache.ValidationStateToString[state], ns1, verr)
@@ -388,7 +390,7 @@ func TestProveAbsentRefusesTheParentsCutNSEC(t *testing.T) {
 		{"the parent's SOA and cut NSEC", parentProof},
 		{"the same, with an unsigned NSEC at the nameserver name", planted},
 	} {
-		if err := sc.proveAbsent(ctx, child, ns1, dns.TypeA, authorityRRsets(tc.proof)); !isAbsenceNotProven(err) {
+		if err := sc.proveAbsent(ctx, child, ns1, dns.TypeA, imrcore.AuthorityRRsets(tc.proof)); !isAbsenceNotProven(err) {
 			t.Errorf("%s: %v; want the absence not proven", tc.name, err)
 		}
 	}

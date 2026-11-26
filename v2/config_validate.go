@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
@@ -23,7 +24,28 @@ func NewCustomValidator() (*CustomValidator, error) {
 	if err := v.RegisterValidation("certkey", ValidateCertAndKeyFiles); err != nil {
 		return nil, fmt.Errorf("NewCustomValidator: error registering certkey validation: %v", err)
 	}
+	if err := v.RegisterValidation("required_with_listener", requiredWithListener); err != nil {
+		return nil, fmt.Errorf("NewCustomValidator: error registering required_with_listener validation: %v", err)
+	}
 	return &CustomValidator{v}, nil
+}
+
+// requiredWithListener requires the field when the struct it is in has at
+// least one entry in Addresses, i.e. when there is a TCP listener. The
+// built-in required_with=Addresses is not that: an explicit `addresses: []`
+// is a non-nil slice, so it would demand a certificate no listener uses.
+//
+// A default API certificate the daemon has not written yet (CertPending) is
+// not missing: the daemon writes it when it starts.
+func requiredWithListener(fl validator.FieldLevel) bool {
+	addrs := fl.Parent().FieldByName("Addresses")
+	if !addrs.IsValid() || addrs.Len() == 0 {
+		return true
+	}
+	if p := fl.Parent().FieldByName("CertPending"); p.IsValid() && p.Kind() == reflect.Bool && p.Bool() {
+		return true
+	}
+	return !fl.Field().IsZero()
 }
 
 // validateZonePeersAndAcls checks the per-zone peer lists and ACLs the daemon
@@ -135,6 +157,9 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	if err := config.DynamicZones.Validate(); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
+	if err := config.ApiServer.validateAccessSettings(); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
 	if err := config.DynamicZones.ValidateDefaultTemplates(config.Templates); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
@@ -162,6 +187,16 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 
 	// The same refusal of a negative max-clients the daemon applies at load.
 	if err := config.Imr.ClientStats.Validate(); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
+	}
+
+	// The qmin tuning NewImr refuses at start, refused here too, so that
+	// config check and the daemon's load fail on it instead of the resolver
+	// failing to start. The defaults first, on a copy, so that absent keys
+	// get them, as NewImr would give them.
+	qminTuning := config.Imr.Tuning
+	LoadImrTuningDefaults(&qminTuning)
+	if err := qminTuning.ValidateQmin(); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 

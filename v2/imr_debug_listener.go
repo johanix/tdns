@@ -56,7 +56,7 @@ func validateImrDebugAddress(addr string) error {
 // may ignore it.
 func (imr *Imr) startImrDebugListener(ctx context.Context, addr string, conf *Config) (<-chan struct{}, error) {
 	if err := validateImrDebugAddress(addr); err != nil {
-		lgImr.Error("refusing to start the imr debug listener", "err", err)
+		lgResolver.Error("refusing to start the imr debug listener", "err", err)
 		return nil, err
 	}
 	mux := newImrDo53Mux(imr.createImrDebugHandler(ctx, conf))
@@ -85,9 +85,9 @@ func (imr *Imr) startImrDebugListener(ctx context.Context, addr string, conf *Co
 		wg.Add(1)
 		go func(s *dns.Server) {
 			defer wg.Done()
-			lgImr.Info("imr debug listener serving", "addr", addr)
+			lgResolver.Info("imr debug listener serving", "addr", addr)
 			if err := s.ActivateAndServe(); err != nil {
-				lgImr.Error("imr debug listener failed", "addr", addr, "err", err)
+				lgResolver.Error("imr debug listener failed", "addr", addr, "err", err)
 			}
 		}(server)
 		// The watchdog must not fire ShutdownContext before the server has
@@ -114,7 +114,7 @@ func (imr *Imr) startImrDebugListener(ctx context.Context, addr string, conf *Co
 			sdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := s.ShutdownContext(sdCtx); err != nil {
-				lgImr.Warn("imr debug listener shutdown", "addr", addr, "err", err)
+				lgResolver.Warn("imr debug listener shutdown", "addr", addr, "err", err)
 			}
 		}(ctx, server, started)
 	}

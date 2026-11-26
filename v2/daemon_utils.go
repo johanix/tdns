@@ -14,28 +14,44 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/viper"
 )
 
-func (api *ApiClient) StopDaemon() {
+// daemonNotRunning says whether err, from a request to the daemon, means that
+// nothing is running there: the connection was refused (TCP, or a stale
+// socket), or the local admin socket does not exist. A socket that is there
+// but not ours to open (EACCES) is not this.
+func daemonNotRunning(err error) bool {
+	return err != nil && (strings.Contains(strings.ToLower(err.Error()), "connection refused") ||
+		errors.Is(err, syscall.ENOENT))
+}
+
+// StopDaemon asks the daemon to stop. It returns nil when the daemon is
+// winding down or was not running (stop is then a no-op), and an error when
+// the daemon is running and did not agree to stop, for instance a 403
+// because stop needs admin. The outcome is printed here, once; callers only
+// decide on the exit status.
+func (api *ApiClient) StopDaemon() error {
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "stop"}, false)
 	if err != nil {
-		fmt.Printf("Error from stop command: %v\n", err.Error())
-		if err.Error() == "Connection refused" {
+		if daemonNotRunning(err) {
 			fmt.Printf("Daemon seems to not be running.\n")
-		} else {
-			fmt.Printf("there is some other problem: %v\n", err)
+			return nil
 		}
-	} else { // we got a response, so deamon appears to be running
-		if resp.Status == "stopping" {
-			fmt.Printf("Daemon acknowledged stop command and is winding down.\n")
-		} else {
-			fmt.Printf("Daemon is running, but status is strange. Status: %v. Message: %v\n",
-				resp.Status, resp.Msg)
-		}
+		fmt.Printf("Stop failed: %v\n", err)
+		return err
 	}
+	// We got a response, so the daemon appears to be running.
+	if resp.Status == "stopping" {
+		fmt.Printf("Daemon acknowledged stop command and is winding down.\n")
+		return nil
+	}
+	fmt.Printf("Daemon is running, but status is strange. Status: %v. Message: %v\n",
+		resp.Status, resp.Msg)
+	return fmt.Errorf("daemon did not acknowledge stop (status %q)", resp.Status)
 }
 
 // slurp means that we'll connect to stdout and stderr on the underlying
@@ -57,7 +73,7 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string, daemo
 
 	_, resp, err := api.UpdateDaemon(CommandPost{Command: "status"}, false) // don't die
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
+		if daemonNotRunning(err) {
 			fmt.Printf("Daemon not responding. Starting new daemon (timeout: %d seconds)\n", maxwait)
 
 			daemonbinary := command
@@ -68,6 +84,10 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string, daemo
 			if daemonname == "" {
 				fmt.Printf("Name of server process not set (see api name in apiservers block in tdns-cli.yaml)\n")
 				daemonname = "undefined-server"
+			}
+			if daemonbinary == "" {
+				fmt.Printf("Error: no daemon binary to start: give the entry command: <path to the binary> (or set common.command)\n")
+				os.Exit(1)
 			}
 			fi, err := os.Stat(daemonbinary)
 			if err != nil {
@@ -141,9 +161,11 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string, daemo
 							r.Status, r.Msg)
 						os.Exit(0)
 					} else {
-						if strings.Contains(strings.ToLower(err.Error()), "connection refused") {
+						// Until the daemon has created its socket, the
+						// socket file is missing: not up yet, keep waiting.
+						if daemonNotRunning(err) {
 							if Globals.Verbose {
-								fmt.Printf("Status: connection refused, but not yet giving up\n")
+								fmt.Printf("Status: not answering yet (%v), but not yet giving up\n", err)
 							}
 							continue // with the for loop
 						} else {
@@ -173,8 +195,11 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string, daemo
 			}
 
 		} else {
-			// there is some error, but not "connection refused"
+			// Something answers, or fails, that is not "nothing running":
+			// a socket that is not ours to open, say. No daemon was started,
+			// so this is a failure.
 			fmt.Printf("StartDaemon: Error: there is some other problem: %v\n", err)
+			os.Exit(1)
 		}
 	} else { // we got a response, so daemon appears to be running
 		if resp.Status == "ok" {

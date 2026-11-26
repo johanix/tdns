@@ -1,0 +1,11 @@
+# As ncli-cert.yaml, with a client certificate the daemon does not know
+# (minted by setup.sh, listed in no access file).
+client:
+   cert:          /var/tmp/cli-access/certs/unknown.crt
+   key:           /var/tmp/cli-access/certs/unknown.key
+apiservers:
+   - name:        tdns-auth
+     baseurl:     https://@DAEMON@:8991/api/v1
+     authmethod:  certificate
+     tlsauth:     pin
+     pins:        [ "@PIN_DAEMON@" ]

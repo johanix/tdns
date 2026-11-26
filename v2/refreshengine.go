@@ -937,6 +937,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// notify addresses, upstream, zonefile, zone store, options, update policy, DNSSEC policy, etc.
 						// Only update fields that are actually set in ZoneRefresher (non-zero/non-empty values)
 						zd.mu.Lock()
+						// Before the options and the type change: a tdns-agent zone
+						// whose origination this update ends must not keep serving
+						// what it wrote itself (markRelayCopyIfOriginationEnded). A
+						// config reload has swapped the options already, in
+						// ParseZones, and marked the copy there.
+						wasOriginating := zoneMayOriginateContent(zd)
 						// Notify + ACLs. For a config-bearing refresher (reload),
 						// assign even when nil/empty so a config that REMOVES a notify
 						// list or an ACL actually clears it (empty downstreams => deny,
@@ -1035,6 +1041,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								lgEngine.Warn("MultiSigner config not found, keeping existing", "multisigner", zr.MultiSigner, "zone", zone)
 							}
 						}
+						zd.markRelayCopyIfOriginationEnded(wasOriginating)
 						zd.mu.Unlock()
 
 						// Policy sync only on config-bearing refreshers (same gate

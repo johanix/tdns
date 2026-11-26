@@ -67,7 +67,7 @@ func imrReceiverKeyFetcher(imr *Imr) receiverKeyFetcher {
 		if imr == nil {
 			return nil, 0, errors.New("no IMR engine available")
 		}
-		resp, err := imr.ImrQuery(ctx, dns.Fqdn(name), dns.TypeKEY, dns.ClassINET, nil)
+		resp, err := imr.ImrQuery(ctx, dns.Fqdn(name), dns.TypeKEY, dns.ClassINET)
 		if err != nil {
 			return nil, 0, fmt.Errorf("IMR query for %s KEY failed: %v", name, err)
 		}

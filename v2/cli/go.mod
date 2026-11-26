@@ -8,6 +8,7 @@ replace (
 	github.com/johanix/tdns/v2/cache => ../cache
 	github.com/johanix/tdns/v2/core => ../core
 	github.com/johanix/tdns/v2/edns0 => ../edns0
+	github.com/johanix/tdns/v2/imr => ../imr
 )
 
 require (
@@ -40,6 +41,7 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/johanix/dnssec-algorithms v0.0.0-20261111143226-7198849ded4b // indirect
+	github.com/johanix/tdns/v2/imr v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect

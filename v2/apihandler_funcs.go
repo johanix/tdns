@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -513,13 +514,15 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.AuthEngine = conf.AuthEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.transportSignalConfig().Service.Identities
-			resp.DBFile = conf.Db.File
+			resp.DBFile = reportedDBFile(openedDBFile(conf))
 			resp.ServerErrors = conf.Internal.ServerErrors.List()
 			resp.Do53QueriesRefused = conf.Internal.do53QueriesRefused.Load()
 			// Every daemon that carries an IMR — tdns-imr itself or the
 			// embedded resolver in tdns-auth/tdns-agent — reports its state.
 			resp.Imr = Globals.ImrEngine.StatusReport()
 			resp.Proc = CollectProcStatus()
+			resp.Access = conf.apiAccessStatus()
+			fillApiTCPStatus(&resp)
 			health := "Configuration is ok"
 			if len(resp.ServerErrors) > 0 {
 				health = fmt.Sprintf("DEGRADED: %d active error(s)", len(resp.ServerErrors))
@@ -527,9 +530,23 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Msg = fmt.Sprintf("%s: %s, boot time: %s, last config reload: %s",
 				Globals.App.Name, health, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
 
+		case "identity":
+			// Which daemon this is: the ConfigFile every reply carries, and
+			// nothing else to compute. tdns-ncli asks before it uses a local
+			// admin socket, which another daemon could hold.
+			resp.Msg = Globals.App.Name
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown config command: %s", cp.Command)
 			resp.Error = true
+		}
+
+		// Every reply says which daemon gave it: its config file, absolute
+		// from its own working directory. A client on its host checks that
+		// the daemon it reached (for a reload, the one that reloaded) is the
+		// one whose config it means.
+		if cfg := conf.Internal.CfgFile; cfg != "" {
+			resp.ConfigFile = absConfigFile(cfg)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -1115,4 +1132,36 @@ func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	}
+}
+
+// openedDBFile is the path the keystore was opened from, as NewKeyDB
+// recorded it: db.file after the trimming and cleaning InitializeKeyDB does
+// (" agent2.db " opens agent2.db), not as written. "" when no keystore file
+// is open (none configured, or one in memory).
+func openedDBFile(conf *Config) string {
+	if conf.Internal.KeyDB == nil {
+		return ""
+	}
+	return conf.Internal.KeyDB.DBFile
+}
+
+// reportedDBFile is the keystore path `config status` reports: absolute, as
+// the daemon resolved it. A relative db.file (agent2.db) is relative to the
+// daemon's working directory, and a CLI that opens the reported path to sign
+// an update (zone update create) would resolve it against its own. Empty
+// stays empty: filepath.Abs("") is the working directory, not "no keystore".
+//
+// A relative path the daemon cannot resolve (filepath.Abs fails when there is
+// no working directory to read) is reported as none, not as written: the CLI
+// would resolve it against its own directory. With none reported, a named
+// instance's CLI falls back to its own db.file, with a warning.
+func reportedDBFile(f string) string {
+	if f == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(f)
+	if err != nil {
+		return ""
+	}
+	return abs
 }

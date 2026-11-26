@@ -5,7 +5,6 @@ package cache
 
 import (
 	"context"
-	"log"
 	"slices"
 	"time"
 
@@ -40,7 +39,7 @@ func (rrcache *RRsetCacheT) unsignedRRsetState(ctx context.Context, rrset *core.
 		// No zone found - return indeterminate without flagging an error
 		// This can happen during priming before zone state is established
 		if rrcache.Verbose {
-			log.Printf("ValidateRRset: no zone found for %s %s; returning indeterminate", rrset.Name, dns.TypeToString[rrset.RRtype])
+			rrcache.Logger.Printf("ValidateRRset: no zone found for %s %s; returning indeterminate", rrset.Name, dns.TypeToString[rrset.RRtype])
 		}
 		return ValidationStateIndeterminate
 	}
@@ -112,7 +111,7 @@ func (rrcache *RRsetCacheT) belowSecureZone(ctx context.Context, zoneName, name,
 		case evidenceInsecureCut:
 			rrcache.markZoneInsecure(n)
 			if rrcache.Verbose {
-				log.Printf("ValidateRRset: %q is an insecure delegation; %s is insecure", n, what)
+				rrcache.Logger.Printf("ValidateRRset: %q is an insecure delegation; %s is insecure", n, what)
 			}
 			return ValidationStateInsecure
 		case evidenceUnjudged:
@@ -121,13 +120,13 @@ func (rrcache *RRsetCacheT) belowSecureZone(ctx context.Context, zoneName, name,
 			return ValidationStateIndeterminate
 		}
 		if rrcache.Verbose {
-			log.Printf("ValidateRRset: %s is unsigned below secure zone %q, and the DS question at %q got %s; bogus",
+			rrcache.Logger.Printf("ValidateRRset: %s is unsigned below secure zone %q, and the DS question at %q got %s; bogus",
 				what, zoneName, n, evidenceToString[ev])
 		}
 		return ValidationStateBogus
 	}
 	if rrcache.Verbose {
-		log.Printf("ValidateRRset: %s is unsigned in secure zone %q; bogus", what, zoneName)
+		rrcache.Logger.Printf("ValidateRRset: %s is unsigned in secure zone %q; bogus", what, zoneName)
 	}
 	return ValidationStateBogus
 }
@@ -315,7 +314,7 @@ func (rrcache *RRsetCacheT) delegationEvidence(ctx context.Context, name string,
 		// A forwarded DS is fetched without servers (ServersFor).
 		if servers, ok := rrcache.ServersFor(name, dns.TypeDS); ok {
 			if _, err := fetcher(ctx, name, dns.TypeDS, servers); err != nil && rrcache.Verbose {
-				log.Printf("ValidateRRset: DS query for %q failed: %v", name, err)
+				rrcache.Logger.Printf("ValidateRRset: DS query for %q failed: %v", name, err)
 			}
 			crr = rrcache.Get(name, dns.TypeDS)
 			if crr == nil {

@@ -1,0 +1,261 @@
+package tdns
+
+import (
+	"context"
+	"sync/atomic"
+	"testing"
+)
+
+// A tdns-agent zone that originates serves a serial of its own. When a config
+// update takes its last origination option away it is a relay, and it must
+// serve the upstream's copy although the upstream has not moved. The update
+// here is not forced, like a reload whose forced refresh was skipped or
+// failed: only the mark the update sets brings the transfer.
+func TestAgentZoneThatStopsOriginatingServesTheUpstreamsCopy(t *testing.T) {
+	kdb := asDerivedApp(t, AppTypeAgent)
+	var transfers atomic.Int32
+	count := func(zd *ZoneData) {
+		zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(_, _ *ZoneData) { transfers.Add(1) })
+	}
+	up := startRelayUpstream(t, 40)
+	z := startRelayedZone(t, kdb, up, map[ZoneOption]bool{OptChildSync: true}, count)
+	if !zoneMayOriginateContent(z.zd) {
+		t.Fatal("setup: the childsync zone should originate")
+	}
+	up.publish(t, 50)
+	z.notified(t)
+	if got := z.served(t); got == 50 {
+		t.Fatal("setup: the originating zone serves the upstream's 50, want a serial of its own")
+	}
+
+	z.opts = nil
+	before := transfers.Load()
+	z.run(t, z.configRefresher())
+	if transfers.Load() == before {
+		t.Fatal("the update that ended the zone's origination brought no transfer")
+	}
+	z.wantServed(t, 50, "after the update that ended its origination")
+	if z.zd.relayCopyUnconfirmed.Load() {
+		t.Error("the copy is still unconfirmed after the transfer")
+	}
+
+	// An update that ends nothing marks nothing: no transfer follows.
+	before = transfers.Load()
+	z.run(t, z.configRefresher())
+	if got := transfers.Load(); got != before {
+		t.Errorf("an update that left the relay a relay brought %d transfers, want none", got-before)
+	}
+	z.wantServed(t, 50, "after an update that changed nothing")
+}
+
+// The mark is set only on the change from originating to relaying, only for
+// tdns-agent, and only on a zone that has published.
+func TestMarkRelayCopyOnlyWhenOriginationEnds(t *testing.T) {
+	childsync := map[ZoneOption]bool{OptChildSync: true}
+	for _, tc := range []struct {
+		name           string
+		app            AppType
+		wasOriginating bool
+		opts           map[ZoneOption]bool
+		published      bool
+		want           bool
+	}{
+		{"agent, originating to relay", AppTypeAgent, true, nil, true, true},
+		{"agent, relay stays relay", AppTypeAgent, false, nil, true, false},
+		{"agent, originating stays originating", AppTypeAgent, true, childsync, true, false},
+		{"agent, relay to originating", AppTypeAgent, false, childsync, true, false},
+		{"agent, never published", AppTypeAgent, true, nil, false, false},
+		{"auth, originating to secondary", AppTypeAuth, true, nil, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withAppType(t, tc.app)
+			zd := &ZoneData{ZoneName: ovZone}
+			if tc.published {
+				zd = testSnapshotZone(t, ovZone, ovUpstreamZone(40))
+			}
+			zd.ZoneType, zd.Options = Secondary, tc.opts
+			zd.markRelayCopyIfOriginationEnded(tc.wasOriginating)
+			if got := zd.relayCopyUnconfirmed.Load(); got != tc.want {
+				t.Errorf("marked = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A config reload swaps a zone's options in ParseZones, before it queues the
+// refresher, so the refresh engine never sees the change: the mark is made
+// there.
+func TestAReloadThatEndsAnAgentZonesOriginationMarksItsCopy(t *testing.T) {
+	withAppType(t, AppTypeAgent)
+	for _, tc := range []struct {
+		name  string
+		after []string
+		want  bool
+	}{
+		{"option removed", nil, true},
+		{"option kept", []string{"allow-api-updates"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := testSnapshotZone(t, ovZone, ovUpstreamZone(40))
+			zd.ZoneType = Secondary
+			zd.Options = map[ZoneOption]bool{OptAllowApiUpdates: true}
+			if !zoneMayOriginateContent(zd) {
+				t.Fatal("setup: the allow-api-updates zone should originate")
+			}
+			conf := &Config{Zones: []ZoneConf{{Name: ovZone, Type: "secondary", Store: "map",
+				Primaries: []PeerConf{{Addr: "127.0.0.1:53", Key: "NOKEY"}}, OptionsStrs: tc.after}}}
+			conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+			if _, _, err := conf.ParseZones(context.Background(), true); err != nil {
+				t.Fatalf("reload: %v", err)
+			}
+			zd.mu.Lock()
+			api := zd.Options[OptAllowApiUpdates]
+			zd.mu.Unlock()
+			if api != (len(tc.after) > 0) {
+				t.Fatalf("setup: the reload did not apply the configured options (allow-api-updates %v)", api)
+			}
+			if got := zd.relayCopyUnconfirmed.Load(); got != tc.want {
+				t.Errorf("marked = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// The daemon switching an origination option off at run time ends origination
+// the same way.
+func TestARuntimeOptionThatEndsOriginationMarksTheCopy(t *testing.T) {
+	withAppType(t, AppTypeAgent)
+	zd := testSnapshotZone(t, ovZone, ovUpstreamZone(40))
+	zd.ZoneType = Secondary
+	zd.Options = map[ZoneOption]bool{OptChildSync: true}
+	zd.SetRuntimeOption(OptChildSync, false)
+	if !zd.relayCopyUnconfirmed.Load() {
+		t.Error("switching the last origination option off did not mark the copy")
+	}
+}
+
+// A mark made while a refresh is under way, after it began and before its
+// publish, must outlive that refresh: it may have applied an IXFR to the
+// zone's own copy, or restored dynamic records collected under the options
+// that ended. The next refresh, which began after the mark, replaces the copy
+// with a full transfer and clears it.
+func TestAMarkMadeDuringARefreshOutlivesItsInstall(t *testing.T) {
+	const upstream = `example.	3600	IN	SOA	ns.example. hostmaster.example. 40 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	10.0.0.1
+`
+	kdb := newTestKeyDB(t)
+	conf, _ := persistentConf(t, kdb)
+	withAppType(t, AppTypeAgent)
+	addr, stop := startTestPrimary(t, upstream)
+	defer stop()
+	zd := &ZoneData{
+		ZoneName: "example.", ZoneStore: MapZone, ZoneType: Secondary,
+		Logger: discardLogger(), KeyDB: kdb,
+		Options:   map[ZoneOption]bool{OptApiManagedZone: true},
+		Upstreams: []PeerConf{{Addr: addr}},
+	}
+	registerZones(t, zd)
+	t.Cleanup(zd.stopPublisher)
+	if _, err := zd.Refresh(context.Background(), false, false, false, conf); err != nil {
+		t.Fatalf("first refresh: %v", err)
+	}
+	if zd.relayCopyUnconfirmed.Load() {
+		t.Fatal("setup: the first load should leave a confirmed copy")
+	}
+
+	marked := false
+	zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(served, _ *ZoneData) {
+		if marked {
+			return
+		}
+		marked = true
+		served.mu.Lock()
+		served.markRelayCopyUnconfirmedLocked()
+		served.mu.Unlock()
+	})
+	before := zd.publishedSnapshot()
+	if _, err := zd.Refresh(context.Background(), false, false, true, conf); err != nil {
+		t.Fatalf("refresh during which the mark is made: %v", err)
+	}
+	if !marked || zd.publishedSnapshot() == before {
+		t.Fatalf("setup: the forced refresh should run its hooks and install (hooks %v)", marked)
+	}
+	if !zd.relayCopyUnconfirmed.Load() {
+		t.Error("a refresh that began before the mark cleared it")
+	}
+
+	if _, err := zd.Refresh(context.Background(), false, false, false, conf); err != nil {
+		t.Fatalf("refresh after the mark: %v", err)
+	}
+	if zd.relayCopyUnconfirmed.Load() {
+		t.Error("the refresh that began after the mark did not clear it")
+	}
+}
+
+// The IXFR case of the test above, end to end. The agent's copy holds a record
+// it wrote itself while allow-api-updates made it originate. A refresh chooses
+// IXFR and applies the upstream's delta to that copy; before its publish, a
+// reload ends the zone's origination. That install keeps the zone's own
+// record, so it must not confirm the copy. The next refresh forces a full
+// transfer, which removes the record and confirms the copy.
+func TestAnIxfrBegunBeforeOriginationEndedDoesNotConfirmTheCopy(t *testing.T) {
+	asDerivedApp(t, AppTypeAgent)
+	pzd, addr, stop := ixfrTestPrimary(t, ixApplyZone)
+	defer stop()
+	base := pzd.publishedSnapshot().Serial
+	// Registered only while the primary builds its chain: see
+	// TestIxfrInConvergesViaDelta.
+	Zones.Set("example.", pzd)
+	t.Cleanup(func() { Zones.Remove("example.") })
+	stageAndPublish(t, pzd, stageAddA(t, pzd, "one.example.", "10.1.0.1"))
+	Zones.Remove("example.")
+
+	own := ixApplyZone + "own.example.\t3600\tIN\tA\t10.9.9.9\n"
+	zd := ixfrTestSecondary(t, own, addr, map[ZoneOption]bool{OptAllowApiUpdates: true})
+	zd.IncomingSerial, zd.CurrentSerial = base, base
+	if !zoneMayOriginateContent(zd) {
+		t.Fatal("setup: the allow-api-updates zone should originate")
+	}
+
+	ended, viaIxfr := false, false
+	zd.OnZonePreRefresh = append(zd.OnZonePreRefresh, func(served, incoming *ZoneData) {
+		if ended {
+			return
+		}
+		ended, viaIxfr = true, incoming.ixfrDerived
+		served.mu.Lock()
+		was := zoneMayOriginateContent(served)
+		served.Options = map[ZoneOption]bool{}
+		served.markRelayCopyIfOriginationEnded(was)
+		served.mu.Unlock()
+	})
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
+		t.Fatalf("refresh during which origination ends: %v", err)
+	}
+	if !ended || !viaIxfr {
+		t.Fatalf("setup: the refresh should apply an IXFR (hooks ran %v, ixfr %v)", ended, viaIxfr)
+	}
+	if o, _ := zd.GetOwner("own.example."); o == nil {
+		t.Fatal("setup: the delta should apply to the zone's own copy, keeping own.example.")
+	}
+	if !zd.relayCopyUnconfirmed.Load() {
+		t.Fatal("the IXFR begun before origination ended confirmed the copy with the zone's own record in it")
+	}
+
+	if _, err := zd.Refresh(context.Background(), false, false, false, &Config{}); err != nil {
+		t.Fatalf("refresh after origination ended: %v", err)
+	}
+	if o, _ := zd.GetOwner("own.example."); o != nil {
+		t.Error("the full transfer kept the record the zone wrote itself")
+	}
+	if o, _ := zd.GetOwner("one.example."); o == nil {
+		t.Error("the upstream's one.example. is missing")
+	}
+	if zd.relayCopyUnconfirmed.Load() {
+		t.Error("the full transfer after origination ended did not confirm the copy")
+	}
+	if got, want := zd.IncomingSerial, pzd.publishedSnapshot().Serial; got != want {
+		t.Errorf("serial %d, want the upstream's %d", got, want)
+	}
+}

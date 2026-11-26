@@ -1,0 +1,491 @@
+/*
+ * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
+ *
+ * The /imr API payloads and Imr methods behind `tdns-cli {imr,auth,agent}
+ * imr {forward,stub} {list,status,probe}`.
+ *
+ * The two probes deliberately differ in side effects. The forward probe is
+ * the same exchange as live traffic and RECORDS into the per-upstream
+ * reachability state (counters, unreachable flag, the Upstream/ImrForward
+ * aggregate), so an operator can confirm a recovery — or refresh a stale
+ * DEGRADED — by probing. The stub probe is strictly REPORT-ONLY: recording a
+ * probe failure into the AuthServer backoff machinery would let a diagnostic
+ * poison resolution, which is exactly the failure mode of the 2026-08-11
+ * stub outage (a stray query booking a backoff on the stub's only server).
+ */
+
+package imr
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"sync"
+	"time"
+
+	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
+)
+
+// --- forward zones ---------------------------------------------------------
+
+// ForwardUpstreamInfo is the config view of one forward upstream.
+type ForwardUpstreamInfo struct {
+	Upstream      string `json:"upstream"` // "addr:port/transport"
+	TLSServerName string `json:"tls_server_name,omitempty"`
+	Insecure      bool   `json:"insecure,omitempty"`
+	// Quarantined: unusable as configured and never dialled (#475).
+	Quarantined      bool   `json:"quarantined,omitempty"`
+	QuarantineReason string `json:"quarantine_reason,omitempty"`
+}
+
+// ForwardZoneInfo is the config view of one forward zone (imr-forward-list).
+type ForwardZoneInfo struct {
+	Zone             string                `json:"zone"`
+	TrustAD          bool                  `json:"trust_ad,omitempty"`
+	Upstreams        []ForwardUpstreamInfo `json:"upstreams"`
+	Quarantined      bool                  `json:"quarantined,omitempty"`
+	QuarantineReason string                `json:"quarantine_reason,omitempty"`
+}
+
+// ForwardProbeResult is one upstream's outcome of imr-forward-probe.
+type ForwardProbeResult struct {
+	Zone     string `json:"zone"`
+	Upstream string `json:"upstream"`
+	OK       bool   `json:"ok"`
+	RTT      string `json:"rtt"`
+	Error    string `json:"error,omitempty"`
+}
+
+// ForwardZoneList returns the configured forward table (config view).
+func (imr *Imr) ForwardZoneList() []ForwardZoneInfo {
+	if imr == nil {
+		return nil
+	}
+	var out []ForwardZoneInfo
+	for _, fz := range imr.ForwardZones() {
+		info := ForwardZoneInfo{Zone: fz.Zone, TrustAD: fz.TrustAD}
+		info.Quarantined, info.QuarantineReason = fz.quarantineState()
+		for _, up := range fz.Upstreams {
+			q, why := up.quarantineState()
+			info.Upstreams = append(info.Upstreams, ForwardUpstreamInfo{
+				Upstream:         up.Label,
+				TLSServerName:    up.TLSServerName,
+				Insecure:         up.Insecure,
+				Quarantined:      q,
+				QuarantineReason: why,
+			})
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
+// forwardZonesMatching returns the forward zones selected by zoneFilter
+// ("" = all), or an error naming the filter when nothing matches.
+func (imr *Imr) forwardZonesMatching(zoneFilter string) ([]*ForwardZone, error) {
+	forwards := imr.ForwardZones()
+	if zoneFilter == "" {
+		return forwards, nil
+	}
+	zf := dns.Fqdn(core.CanonicalizeName(zoneFilter))
+	for _, fz := range forwards {
+		if fz.Zone == zf {
+			return []*ForwardZone{fz}, nil
+		}
+	}
+	return nil, fmt.Errorf("no forward zone %q is configured", zf)
+}
+
+// probeForwardUpstream is one startup/on-demand probe: a recursive SOA query
+// for the FORWARD ZONE itself, through the upstream's own client — not
+// ". NS", which an upstream serving only that zone may legitimately refuse
+// to resolve (a timeout there would DEGRADE a healthy zone-scoped forward).
+// Records into the upstream's reachability state; the caller updates the
+// aggregate error afterwards.
+//
+// A cancelled ctx skips the exchange and records NOTHING — shutdown is not
+// evidence about the upstream. A cancel DURING the exchange interrupts it
+// (#435) and is likewise not recorded: the ctx.Err() check below runs before
+// recordFailure, so an abandoned probe cannot mark a healthy upstream
+// unreachable.
+func (imr *Imr) probeForwardUpstream(ctx context.Context, zone string, up *ForwardUpstream) (time.Duration, error) {
+	// An upstream that failed to build has no client at all. Note the
+	// converse does NOT hold: a trust-ad quarantine is a fully built upstream
+	// with a live client, so "no Client" is not the definition of
+	// quarantined. Callers filter quarantined upstreams out; this only keeps
+	// a missed placeholder an error rather than a nil deref.
+	if up.Client == nil {
+		return 0, fmt.Errorf("upstream %s is not usable as configured", up.Label)
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	m := new(dns.Msg)
+	m.SetQuestion(zone, dns.TypeSOA) // RD=1 via SetQuestion
+	m.SetEdns0(4096, true)
+	start := time.Now()
+	r, _, err := core.ExchangeCtx(ctx, up.Client, m, up.Addr, false)
+	rtt := time.Since(start)
+	if err == nil && r == nil {
+		err = fmt.Errorf("nil response")
+	}
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			// Abandoned, not failed: report the cancellation and record
+			// nothing.
+			return rtt, cerr
+		}
+		up.recordFailure(start, err)
+		imr.lgImr().Warn("forward upstream unreachable", "zone", zone, "upstream", up.Label, "err", err)
+		return rtt, err
+	}
+	up.recordSuccess()
+	imr.lgImr().Debug("forward upstream probe ok", "zone", zone, "upstream", up.Label, "rtt", rtt)
+	return rtt, nil
+}
+
+// ProbeForwardUpstreamsReport probes the selected forward zones' upstreams
+// (zoneFilter "" = all) in parallel and returns the per-upstream outcome.
+// Same recording semantics as the startup probe. ctx cancellation stops
+// probes that have not started their exchange yet (see probeForwardUpstream).
+func (imr *Imr) ProbeForwardUpstreamsReport(ctx context.Context, zoneFilter string) ([]ForwardProbeResult, error) {
+	zones, err := imr.forwardZonesMatching(zoneFilter)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		results []ForwardProbeResult
+	)
+	for _, fz := range zones {
+		for _, up := range fz.Upstreams {
+			// Reported, not probed, and NOT silently skipped: the operator
+			// asked about every upstream of the zone, and a quarantined one
+			// missing from the output reads as an upstream that is fine.
+			// This check, not the nil-Client backstop below it, is what keeps
+			// a quarantined-but-fully-built upstream from being dialled.
+			if q, why := up.quarantineState(); q {
+				results = append(results, ForwardProbeResult{
+					Zone: fz.Zone, Upstream: up.Label, OK: false,
+					RTT: time.Duration(0).String(), Error: "quarantined: " + why,
+				})
+				continue
+			}
+			wg.Add(1)
+			go func(zone string, up *ForwardUpstream) {
+				defer wg.Done()
+				rtt, err := imr.probeForwardUpstream(ctx, zone, up)
+				res := ForwardProbeResult{
+					Zone:     zone,
+					Upstream: up.Label,
+					OK:       err == nil,
+					RTT:      rtt.Truncate(time.Millisecond).String(),
+				}
+				if err != nil {
+					res.Error = err.Error()
+				}
+				mu.Lock()
+				results = append(results, res)
+				mu.Unlock()
+			}(fz.Zone, up)
+		}
+	}
+	wg.Wait()
+	imr.updateForwardUpstreamError()
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Zone != results[j].Zone {
+			return results[i].Zone < results[j].Zone
+		}
+		return results[i].Upstream < results[j].Upstream
+	})
+	return results, nil
+}
+
+// --- stub zones ------------------------------------------------------------
+
+// StubServerInfo is the config view of one stub server.
+type StubServerInfo struct {
+	Name  string   `json:"name"`
+	Addrs []string `json:"addrs"`
+	Alpn  []string `json:"alpn,omitempty"`
+}
+
+// StubZoneInfo is the config view of one stub zone (imr-stub-list).
+type StubZoneInfo struct {
+	Zone    string           `json:"zone"`
+	Servers []StubServerInfo `json:"servers"`
+}
+
+// StubServerStatus is the live view of one stub server: the per-transport
+// counters the resolver has accumulated against it, and any active
+// (address, transport) backoffs — the state that silently disabled stubs in
+// the 2026-08-11 outage, now inspectable.
+type StubServerStatus struct {
+	Name       string            `json:"name"`
+	Addrs      []string          `json:"addrs"`
+	Transports []string          `json:"transports"`
+	Attempted  map[string]uint64 `json:"attempted,omitempty"`
+	Used       map[string]uint64 `json:"used,omitempty"`
+	Failed     map[string]uint64 `json:"failed,omitempty"`
+	Truncated  uint64            `json:"truncated,omitempty"`
+	Backoffs   []string          `json:"backoffs,omitempty"` // "addr/transport: until <t> (N failures)"
+}
+
+// StubZoneStatus is the live view of one stub zone (imr-stub-status).
+type StubZoneStatus struct {
+	Zone    string             `json:"zone"`
+	Servers []StubServerStatus `json:"servers"`
+}
+
+// StubProbeResult is one (server, address, transport) outcome of
+// imr-stub-probe: an RD=0 SOA query for the stub zone, reporting whether the
+// server answers authoritatively.
+type StubProbeResult struct {
+	Zone      string `json:"zone"`
+	Server    string `json:"server"`
+	Addr      string `json:"addr"` // as dialed: with the port a signal assigned, if any
+	Transport string `json:"transport"`
+	OK        bool   `json:"ok"` // response received, NOERROR, AA set
+	Rcode     string `json:"rcode,omitempty"`
+	AA        bool   `json:"aa,omitempty"`
+	RTT       string `json:"rtt"`
+	Error     string `json:"error,omitempty"`
+}
+
+// stubZonesMatching returns the configured stub zones selected by zoneFilter
+// ("" = all), or an error naming the filter when nothing matches.
+func (imr *Imr) stubZonesMatching(zoneFilter string) ([]string, error) {
+	stubs := imr.StubZones()
+	if zoneFilter == "" {
+		return stubs, nil
+	}
+	zf := dns.Fqdn(core.CanonicalizeName(zoneFilter))
+	for _, sz := range stubs {
+		if sz == zf {
+			return []string{sz}, nil
+		}
+	}
+	return nil, fmt.Errorf("no stub zone %q is configured", zf)
+}
+
+// stubServers returns the (private, stub-specific) AuthServer instances for
+// one stub zone, sorted by name for stable output.
+func (imr *Imr) stubServers(zone string) []*cache.AuthServer {
+	if imr.Cache == nil {
+		return nil
+	}
+	m, ok := imr.Cache.ServerMapCopy(zone)
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	servers := make([]*cache.AuthServer, 0, len(names))
+	for _, name := range names {
+		servers = append(servers, m[name])
+	}
+	return servers
+}
+
+// StubZoneList returns the configured stub table (config view).
+func (imr *Imr) StubZoneList() []StubZoneInfo {
+	if imr == nil {
+		return nil
+	}
+	var out []StubZoneInfo
+	for _, zone := range imr.StubZones() {
+		info := StubZoneInfo{Zone: zone}
+		for _, server := range imr.stubServers(zone) {
+			info.Servers = append(info.Servers, StubServerInfo{
+				Name:  server.Name,
+				Addrs: server.GetAddrs(),
+				Alpn:  server.GetAlpn(),
+			})
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
+// StubZoneStatus returns the live view of the configured stub zones:
+// per-server transport counters and active backoffs.
+func (imr *Imr) StubZoneStatus() []StubZoneStatus {
+	if imr == nil {
+		return nil
+	}
+	now := time.Now()
+	var out []StubZoneStatus
+	for _, zone := range imr.StubZones() {
+		zs := StubZoneStatus{Zone: zone}
+		for _, server := range imr.stubServers(zone) {
+			ts := server.SnapshotTransportStats()
+			ss := StubServerStatus{
+				Name:      server.Name,
+				Addrs:     server.GetAddrs(),
+				Attempted: TransportCountsToStrings(ts.Attempted),
+				Used:      TransportCountsToStrings(ts.Used),
+				Failed:    TransportCountsToStrings(ts.Failed),
+				Truncated: ts.Truncated,
+			}
+			for _, t := range server.GetTransports() {
+				ss.Transports = append(ss.Transports, core.TransportToString[t])
+			}
+			backoffs := server.SnapshotAddressBackoffs(now)
+			keys := make([]cache.AddrXport, 0, len(backoffs))
+			for k := range backoffs {
+				keys = append(keys, k)
+			}
+			sort.Slice(keys, func(i, j int) bool {
+				if keys[i].Addr != keys[j].Addr {
+					return keys[i].Addr < keys[j].Addr
+				}
+				if keys[i].Port != keys[j].Port {
+					return keys[i].Port < keys[j].Port
+				}
+				return keys[i].Transport < keys[j].Transport
+			})
+			for _, k := range keys {
+				b := backoffs[k]
+				ss.Backoffs = append(ss.Backoffs, fmt.Sprintf("%s/%s: until %s (%d failure(s))",
+					k.HostPort(), core.TransportToString[k.Transport],
+					b.NextTry.Format(TimeLayout), b.FailureCount))
+			}
+			zs.Servers = append(zs.Servers, ss)
+		}
+		out = append(out, zs)
+	}
+	return out
+}
+
+// ProbeStubServers sends an RD=0 SOA query for the stub zone to every
+// (server, address, advertised transport) tuple of the selected stub zones,
+// in parallel, and reports the outcome. STRICTLY report-only: nothing is
+// recorded into the AuthServer state (see the file comment). A cancelled ctx
+// skips tuples whose exchange has not started and interrupts those already
+// on the wire (#435).
+func (imr *Imr) ProbeStubServers(ctx context.Context, zoneFilter string) ([]StubProbeResult, error) {
+	zones, err := imr.stubZonesMatching(zoneFilter)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		results []StubProbeResult
+	)
+	for _, zone := range zones {
+		for _, server := range imr.stubServers(zone) {
+			transports := server.GetTransports()
+			if len(transports) == 0 {
+				transports = []core.Transport{core.TransportDo53}
+			}
+			for _, addr := range server.GetAddrs() {
+				for _, transport := range transports {
+					client, ok := imr.Cache.DNSClient[transport]
+					if !ok {
+						continue
+					}
+					wg.Add(1)
+					// The probe dials what a query would (endpointFor): a
+					// port the server's signal assigned to this transport,
+					// or an address of the target it sent the transport
+					// to, once those are known. It starts no lookup.
+					dialAddr, dialErr := addr, ""
+					if ep, err := imr.resolveEndpoint(server, nil, addr, transport, false); err != nil {
+						dialErr = err.Error()
+					} else {
+						dialAddr = cache.JoinDialAddr(ep.addr, ep.port)
+					}
+					go func(zone, serverName, dialAddr, dialErr string, transport core.Transport, client core.DNSClienter) {
+						defer wg.Done()
+						if ctx.Err() != nil {
+							return
+						}
+						if dialErr != "" {
+							mu.Lock()
+							results = append(results, StubProbeResult{Zone: zone, Server: serverName, Addr: dialAddr,
+								Transport: core.TransportToString[transport], Error: dialErr})
+							mu.Unlock()
+							return
+						}
+						m := new(dns.Msg)
+						m.SetQuestion(zone, dns.TypeSOA)
+						m.RecursionDesired = false // authoritative probe, not a recursive query
+						m.SetEdns0(4096, true)
+						start := time.Now()
+						r, _, err := core.ExchangeCtx(ctx, client, m, dialAddr, false)
+						rtt := time.Since(start)
+						res := StubProbeResult{
+							Zone:      zone,
+							Server:    serverName,
+							Addr:      dialAddr,
+							Transport: core.TransportToString[transport],
+							RTT:       rtt.Truncate(time.Millisecond).String(),
+						}
+						if err == nil && r == nil {
+							err = fmt.Errorf("nil response")
+						}
+						if err != nil {
+							res.Error = err.Error()
+						} else {
+							res.Rcode = dns.RcodeToString[r.MsgHdr.Rcode]
+							res.AA = r.MsgHdr.Authoritative
+							res.OK = r.MsgHdr.Rcode == dns.RcodeSuccess && r.MsgHdr.Authoritative
+						}
+						mu.Lock()
+						results = append(results, res)
+						mu.Unlock()
+					}(zone, server.Name, dialAddr, dialErr, transport, client)
+				}
+			}
+		}
+	}
+	wg.Wait()
+	sort.Slice(results, func(i, j int) bool {
+		a, b := results[i], results[j]
+		if a.Zone != b.Zone {
+			return a.Zone < b.Zone
+		}
+		if a.Server != b.Server {
+			return a.Server < b.Server
+		}
+		if a.Addr != b.Addr {
+			return a.Addr < b.Addr
+		}
+		return a.Transport < b.Transport
+	})
+	return results, nil
+}
+
+// TransportName returns the string name for t, with a stable fallback so an
+// unregistered transport (a future enum value missing from TransportToString)
+// never produces an empty-string map key in the API JSON.
+func TransportName(t core.Transport) string {
+	if name, ok := core.TransportToString[t]; ok {
+		return name
+	}
+	return fmt.Sprintf("unknown-%d", t)
+}
+
+// TransportCountsToStrings converts a transport-keyed counter map to a
+// name-keyed one for JSON transport over the API.
+func TransportCountsToStrings(m map[core.Transport]uint64) map[string]uint64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]uint64, len(m))
+	for t, c := range m {
+		out[TransportName(t)] = c
+	}
+	return out
+}
+
+const (
+	TimeLayout = "2006-01-02 15:04:05"
+)
