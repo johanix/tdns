@@ -368,13 +368,23 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 			conn, err = dns.DialTimeout(fam.Network("tcp"), upstream, xfrDialTimeout)
 		}
 		if err != nil {
-			fmt.Printf("Error from transfer.In: %v\n", err)
+			// Not "from transfer.In": In has not been called, and the same
+			// sentence below must keep meaning that In failed.
+			fmt.Printf("Error: cannot connect to %s (%s): %v\n", upstream, fam.Network("tcp"), err)
 			return err
 		}
 		transfer.Conn = conn
 	}
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
+		// In closes the connection only from the goroutine it starts after the
+		// request is written, so a failure before that (the write itself)
+		// leaves open the connection dialled above, or In's own. A closed
+		// peer is the usual cause; dog exits next, but a library caller would
+		// keep the descriptor.
+		if transfer.Conn != nil {
+			_ = transfer.Conn.Close()
+		}
 		fmt.Printf("Error from transfer.In: %v\n", err)
 		return err
 	}
