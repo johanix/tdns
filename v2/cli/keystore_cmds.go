@@ -5,6 +5,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -86,7 +87,7 @@ for keys created here; config keys are managed via keys.tsig.`,
 	add.Flags().StringVar(&tsigAlgo, "algorithm", "hmac-sha256", "HMAC algorithm")
 	add.Flags().StringVar(&tsigSecretFile, "secret-file", "", "File containing the base64 TSIG secret; preferred over --secret")
 	add.Flags().StringVar(&tsigSecret, "secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --secret-file")
-	add.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label (default api)")
+	add.Flags().StringVar(&tsigOwner, "owner", "", "API owner of the key (default: yours; api over the socket)")
 	add.Flags().BoolVar(&tsigForce, "force", false, "Overwrite on secret/algorithm conflict")
 	add.MarkFlagRequired("name")
 
@@ -99,7 +100,7 @@ for keys created here; config keys are managed via keys.tsig.`,
 	}
 	generate.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
 	generate.Flags().StringVar(&tsigAlgo, "algorithm", "hmac-sha256", "HMAC algorithm")
-	generate.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label (default api)")
+	generate.Flags().StringVar(&tsigOwner, "owner", "", "API owner of the key (default: yours; api over the socket)")
 	generate.MarkFlagRequired("name")
 
 	importCmd := &cobra.Command{
@@ -114,7 +115,7 @@ Default: import new keys and skip conflicts. --force overwrites all conflicts;
 	}
 	importCmd.Flags().StringVarP(&tsigImportFile, "file", "f", "", "File containing TSIG key declarations")
 	importCmd.Flags().StringVar(&tsigImportFormat, "format", "bind", "Key syntax: bind or nsd")
-	importCmd.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label for imported keys")
+	importCmd.Flags().StringVar(&tsigOwner, "owner", "", "API owner of the new keys (default: yours; api over the socket)")
 	importCmd.Flags().BoolVar(&tsigForce, "force", false, "Overwrite all secret/algorithm conflicts")
 	importCmd.Flags().BoolVar(&tsigInteractive, "interactive", false, "Prompt per conflict before overwriting")
 	importCmd.Flags().BoolVarP(&tsigVerbose, "verbose", "v", false, "List per-key disposition")
@@ -136,13 +137,13 @@ candidates, or --interactive to prompt per key.`,
 
 	setowner := &cobra.Command{
 		Use:   "setowner",
-		Short: "Change owner on an api-origin TSIG key",
+		Short: "Change the API owner of an api-origin TSIG key",
 		Run: func(cmd *cobra.Command, args []string) {
 			tsigKeyMgmt(role, "setowner", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
 		},
 	}
 	setowner.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
-	setowner.Flags().StringVar(&tsigOwner, "owner", "", "New owner label")
+	setowner.Flags().StringVar(&tsigOwner, "owner", "", "New API owner")
 	setowner.MarkFlagRequired("name")
 	setowner.MarkFlagRequired("owner")
 
@@ -210,19 +211,14 @@ func tsigKeyMgmt(role, subcmd, name, algo, secret, owner string, force bool) {
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	if tr.Error {
-		fmt.Printf("Error from server: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
 	switch subcmd {
 	case "list":
 		var out, rows []string
 		if tdns.Globals.ShowHeaders {
-			out = append(out, "Name|Algorithm|Origin|Owner|Refs|Created")
+			out = append(out, "Name|Algorithm|Origin|API owner|Refs|Created")
 		}
 		for _, k := range tr.TsigKeys {
 			rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%d|%s",
@@ -261,11 +257,8 @@ func tsigKeyExport(role, name string, asBind, asNsd bool) {
 		Creator:     "tdns-cli",
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	if tr.Error {
-		fmt.Fprintf(os.Stderr, "Error from server: %s\n", tr.ErrorMsg)
+		// stderr: stdout carries the secret alone.
+		fmt.Fprintln(os.Stderr, keystoreErrorText(err))
 		os.Exit(1)
 	}
 	if tr.TsigExport == nil {
@@ -313,12 +306,11 @@ func tsigKeyImport(role, file, format, owner string, force, interactive, verbose
 			return
 		}
 		if tsigImportConflictCount(probe.TsigImport) == 0 {
-			if probe.ErrorMsg != "" {
-				fmt.Printf("Error: %s\n", probe.ErrorMsg)
-			} else {
-				fmt.Printf("Error: %v\n", err)
+			if !probe.Error {
+				dieKeystore(err) // refused, or no answer
 			}
-			os.Exit(1)
+			printTsigImportResult(probe, verbose) // and exits
+			return
 		}
 		var overwrite []string
 		for _, d := range probe.TsigImport {
@@ -339,12 +331,8 @@ func tsigKeyImport(role, file, format, owner string, force, interactive, verbose
 		post.TsigOverwrite = overwrite
 	}
 	tr, err := tsigKeystorePost(role, post)
-	if err != nil {
-		if tr.Error || len(tr.TsigImport) > 0 || tr.Msg != "" {
-			printTsigImportResult(tr, verbose)
-		}
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
+	if err != nil && !tr.Error {
+		dieKeystore(err) // refused, or no answer: nothing was imported
 	}
 	printTsigImportResult(tr, verbose)
 }
@@ -363,20 +351,34 @@ func tsigForceInteractiveConflict(force, interactive bool) bool {
 	return force && interactive
 }
 
+// printTsigImportResult prints an import's outcome, verdict first: the
+// daemon's error, if any, then the keys (every key under verbose, else only
+// those refused, which need the caller's attention), then its summary.
 func printTsigImportResult(tr tdns.KeystoreResponse, verbose bool) {
 	if tr.Error {
-		fmt.Printf("Error from server: %s\n", tr.ErrorMsg)
+		fmt.Println(daemonErrorText(tr.AppName, &daemonError{msg: tr.ErrorMsg}))
 	}
-	if verbose {
-		for _, d := range tr.TsigImport {
-			fmt.Printf("%s: %s\n", d.Name, d.Status)
-		}
-	}
+	printTsigImportDispositions(tr.TsigImport, verbose)
 	if tr.Msg != "" {
 		fmt.Println(tr.Msg)
 	}
 	if tr.Error {
 		os.Exit(1)
+	}
+}
+
+// printTsigImportDispositions prints one line per key, verdict first (all
+// of them under verbose, else the refused ones), and the reason for a
+// refusal on the lines below it.
+func printTsigImportDispositions(ds []tdns.TsigKeyDisposition, verbose bool) {
+	for _, d := range ds {
+		if !verbose && d.Status != tdns.TsigImportRefused {
+			continue
+		}
+		fmt.Printf("  %-9s %s\n", d.Status, d.Name)
+		if d.Detail != "" {
+			fmt.Println(indentedLines(d.Detail, 12, 72))
+		}
 	}
 }
 
@@ -394,8 +396,7 @@ func tsigKeyPurge(role string, force, interactive, yes bool) {
 		requireInteractiveTTY()
 		probe, err := tsigKeystorePost(role, post)
 		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
+			dieKeystore(err)
 		}
 		if len(probe.TsigKeys) == 0 {
 			fmt.Println(probe.Msg)
@@ -428,17 +429,12 @@ func tsigKeyPurge(role string, force, interactive, yes bool) {
 	}
 	tr, err := tsigKeystorePost(role, post)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	if tr.Error {
-		fmt.Printf("Error from server: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 	if len(tr.TsigKeys) > 0 && !force && len(post.TsigOverwrite) == 0 {
 		var out, rows []string
 		if tdns.Globals.ShowHeaders {
-			out = append(out, "Name|Algorithm|Origin|Owner|Created")
+			out = append(out, "Name|Algorithm|Origin|API owner|Created")
 		}
 		for _, k := range tr.TsigKeys {
 			rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%s", k.Name, k.Algorithm, k.Origin, k.Owner, k.Created))
@@ -907,26 +903,20 @@ func sig0KeyMgmt(role, cmd string) {
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if tr.Error {
-		fmt.Printf("Error from the daemon: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
 	switch cmd {
 	case "list":
 		var out, tmplist []string
 		if tdns.Globals.ShowHeaders {
-			out = append(out, "Signer|State|KeyID|Algorithm|KEY Record")
+			out = append(out, "Signer|API owner|State|KeyID|Algorithm|KEY Record")
 		}
 		if len(tr.Sig0keys) > 0 {
 			for k, v := range tr.Sig0keys {
 				tmp := strings.Split(k, "::")
-				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%s|%v|%.50s...\n",
-					tmp[0], v.State, tmp[1], v.Algorithm, v.Keystr))
+				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%s|%s|%v|%.50s...\n",
+					tmp[0], dashIfEmpty(v.ApiOwner), v.State, tmp[1], v.Algorithm, v.Keystr))
 			}
 			sort.Strings(tmplist)
 			out = append(out, tmplist...)
@@ -1099,13 +1089,7 @@ func dnssecKeyMgmt(role, cmd string) {
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	if tr.Error {
-		fmt.Printf("Error from the daemon: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
 	switch cmd {
@@ -1184,12 +1168,7 @@ func dnssecKeyPurgeCmd(role string, cmd *cobra.Command) {
 		Force:      force,
 	})
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	if tr.Error {
-		fmt.Printf("Error from the daemon: %s\n", tr.ErrorMsg)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
 	if len(tr.Dnskeys) > 0 {
@@ -1251,11 +1230,7 @@ func dnssecGenDS(role string) {
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
-		log.Fatalf("Error listing DNSSEC keys: %v", err)
-	}
-
-	if tr.Error {
-		log.Fatalf("Error from keystore: %s", tr.ErrorMsg)
+		dieKeystore(err)
 	}
 
 	if len(tr.Dnskeys) == 0 {
@@ -1364,6 +1339,44 @@ func dnssecGenDS(role string) {
 
 }
 
+// keystoreError is a keystore command's failed exchange with the daemon
+// called daemon (the API client's name): the access check's refusal, the
+// handler's error, or a failure to talk to it. keystoreErrorText prints it
+// through the printer every other command uses (daemonErrorText).
+type keystoreError struct {
+	daemon string
+	err    error
+}
+
+func (e keystoreError) Error() string { return e.err.Error() }
+func (e keystoreError) Unwrap() error { return e.err }
+
+// keystoreErrorText is err as a keystore command prints it: verdict first,
+// once, in lines of at most 72 characters (daemonErrorText).
+func keystoreErrorText(err error) string {
+	var ke keystoreError
+	if errors.As(err, &ke) {
+		return daemonErrorText(ke.daemon, ke.err)
+	}
+	return daemonErrorText("", err)
+}
+
+// dieKeystore prints err as keystoreErrorText does and exits 1.
+func dieKeystore(err error) {
+	fmt.Println(keystoreErrorText(err))
+	os.Exit(1)
+}
+
+// indentedLines wraps s into lines of at most width characters, each
+// indented by indent spaces.
+func indentedLines(s string, indent, width int) string {
+	lines := wrapText(s, width-indent)
+	for i := range lines {
+		lines[i] = strings.Repeat(" ", indent) + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
 func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.KeystoreResponse, error) {
 
 	// fmt.Printf("Sending keystore command: %v\n", data)
@@ -1375,8 +1388,8 @@ func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.Keystore
 
 	status, buf, err := api.Post("/keystore", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
-		return kr, fmt.Errorf("error from api post: %v", err)
+		kr.AppName = api.Name
+		return kr, keystoreError{api.Name, err}
 	}
 	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -1384,19 +1397,20 @@ func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.Keystore
 
 	err = json.Unmarshal(buf, &kr)
 	if err != nil {
-		return kr, fmt.Errorf("error from unmarshal: %v", err)
+		return kr, keystoreError{api.Name, fmt.Errorf("error from unmarshal: %v", err)}
 	}
 
 	if kr.Error {
-		return kr, fmt.Errorf("%s", kr.ErrorMsg)
+		return kr, keystoreError{api.Name, &daemonError{msg: kr.ErrorMsg}}
 	}
 
 	return kr, nil
 }
 
 // formatDnssecKeyList renders "keystore dnssec list": one line per key,
-// sorted by zone, state and keyid, with the mechanism columns pub, sign and
-// ds beside the state; ds is "-" while unknown. A state is shown as the
+// sorted by zone, state and keyid, with the zone's API owner ("-" when the
+// zone is not served here) and the mechanism columns pub, sign and ds beside
+// the state; ds is "-" while unknown. A state is shown as the
 // daemon reports it, an owner's states included: the columns say what the
 // key does, whatever its state is called.
 func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) string {
@@ -1404,7 +1418,7 @@ func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) strin
 		return "No DNSSEC key pairs found\n"
 	}
 	type entry struct {
-		zone, state, keyid         string
+		zone, owner, state, keyid  string
 		flags                      uint16
 		alg, pub, sign, ds, keystr string
 	}
@@ -1412,7 +1426,7 @@ func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) strin
 	for k, v := range keys {
 		tmp := strings.Split(k, "::")
 		entries = append(entries, entry{
-			zone: tmp[0], state: v.State, keyid: tmp[1],
+			zone: tmp[0], owner: dashIfEmpty(v.ApiOwner), state: v.State, keyid: tmp[1],
 			flags: v.Flags, alg: v.Algorithm, keystr: v.Keystr,
 			pub: flagColumn(v.Pub), sign: flagColumn(v.Sign), ds: dsColumn(v.DS),
 		})
@@ -1434,11 +1448,11 @@ func formatDnssecKeyList(keys map[string]tdns.DnssecKey, showHeaders bool) strin
 	})
 	var out []string
 	for _, e := range entries {
-		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%s|%.50s...\n",
-			e.zone, e.state, e.pub, e.sign, e.ds, e.keyid, e.flags, e.alg, e.keystr))
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%s|%.50s...\n",
+			e.zone, e.owner, e.state, e.pub, e.sign, e.ds, e.keyid, e.flags, e.alg, e.keystr))
 	}
 	if showHeaders {
-		out = append([]string{"Signer|State|Pub|Sign|DS|KeyID|Flags|Algorithm|DNSKEY Record"}, out...)
+		out = append([]string{"Signer|API owner|State|Pub|Sign|DS|KeyID|Flags|Algorithm|DNSKEY Record"}, out...)
 	}
 	return "Known DNSSEC key pairs:\n" + columnize.SimpleFormat(out) + "\n"
 }

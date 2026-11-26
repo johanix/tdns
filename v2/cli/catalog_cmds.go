@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -54,12 +53,12 @@ func newCatalogCreateCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -92,12 +91,12 @@ func newCatalogDeleteCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -140,12 +139,12 @@ func newCatalogZoneAddCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -179,12 +178,12 @@ func newCatalogZoneDeleteCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -217,12 +216,12 @@ func newCatalogZoneListCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -295,12 +294,12 @@ func newCatalogGroupAddCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -334,12 +333,12 @@ func newCatalogGroupDeleteCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -372,12 +371,12 @@ func newCatalogGroupListCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -428,12 +427,12 @@ func newCatalogZoneGroupAddCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -468,12 +467,12 @@ func newCatalogZoneGroupDeleteCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -486,8 +485,20 @@ func newCatalogZoneGroupDeleteCmd() *cobra.Command {
 
 // SendCatalogCommand sends a catalog command to the API
 func SendCatalogCommand(api *tdns.ApiClient, data tdns.CatalogPost) (*tdns.CatalogResponse, error) {
-	status, buf, err := api.RequestNG(http.MethodPost, "/catalog", data, true)
+	// Post, not RequestNG: the catalog handler answers an error with a
+	// non-2xx status and its JSON body, which RequestNG printed whole (the
+	// URL, the status and the raw JSON) before it exited. Post hands the
+	// body back, so the daemon's ErrorMsg is what the operator reads, and
+	// tries each of api.Addresses in turn as RequestNG does.
+	body, err := json.Marshal(data)
 	if err != nil {
+		return nil, err
+	}
+	status, buf, err := api.Post("/catalog", body)
+	if err != nil {
+		if rerr, ok := refusalError(err); ok {
+			return &tdns.CatalogResponse{}, rerr
+		}
 		return nil, fmt.Errorf("error from API request: %v", err)
 	}
 
@@ -499,7 +510,7 @@ func SendCatalogCommand(api *tdns.ApiClient, data tdns.CatalogPost) (*tdns.Catal
 
 	if status != 200 {
 		if resp.ErrorMsg != "" {
-			return &resp, fmt.Errorf("%s", resp.ErrorMsg)
+			return &resp, &daemonError{msg: resp.ErrorMsg}
 		}
 		return &resp, fmt.Errorf("status code: %d", status)
 	}
@@ -637,12 +648,12 @@ func newCatalogNotifyAddCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -676,12 +687,12 @@ func newCatalogNotifyRemoveCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 
@@ -714,12 +725,12 @@ func newCatalogNotifyListCmd() *cobra.Command {
 			})
 
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 
 			if resp.Error {
-				fmt.Printf("Error: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 

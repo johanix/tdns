@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"sort"
 	"strconv"
@@ -144,8 +143,7 @@ func sig0TombstoneMgmt(role, subcommand string) {
 		Keyid:      keyid,
 	})
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
 	if subcommand == "tombstone-list" {
@@ -180,8 +178,7 @@ func sig0TrustMgmt(role, subcommand string) {
 	})
 
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 
 	tsp := tdns.TruststorePost{
@@ -262,8 +259,7 @@ func sig0TrustMgmt(role, subcommand string) {
 	tr, err = SendTruststore(api, tsp)
 
 	if err != nil {
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
+		dieKeystore(err)
 	}
 	if tr.Error {
 		fmt.Printf("Error: %s\n", tr.ErrorMsg)
@@ -281,8 +277,8 @@ func SendTruststore(api *tdns.ApiClient, data tdns.TruststorePost) (tdns.Trustst
 
 	status, buf, err := api.Post("/truststore", bytebuf.Bytes())
 	if err != nil {
-		log.Println("Error from Api Post:", err)
-		return tr, fmt.Errorf("error from api post: %v", err)
+		tr.AppName = api.Name
+		return tr, keystoreError{api.Name, err}
 	}
 	if tdns.Globals.Verbose {
 		fmt.Printf("Status: %d\n", status)
@@ -290,11 +286,11 @@ func SendTruststore(api *tdns.ApiClient, data tdns.TruststorePost) (tdns.Trustst
 
 	err = json.Unmarshal(buf, &tr)
 	if err != nil {
-		return tr, fmt.Errorf("error from unmarshal: %v", err)
+		return tr, keystoreError{api.Name, fmt.Errorf("error from unmarshal: %v", err)}
 	}
 
 	if tr.Error {
-		return tr, fmt.Errorf("error from %s: %s", tr.AppName, tr.ErrorMsg)
+		return tr, keystoreError{api.Name, &daemonError{msg: tr.ErrorMsg}}
 	}
 
 	return tr, nil

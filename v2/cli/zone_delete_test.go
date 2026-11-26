@@ -193,7 +193,9 @@ func TestZoneDeleteCommandsStayWhole(t *testing.T) {
 func TestZoneDeleteRefusalWidth(t *testing.T) {
 	zone := "a-rather-long-label.customer-zones.provisioning.example.com."
 	err := fmt.Errorf("zone %s not deleted: a SIG(0) key rollover is in progress; try again when it finishes", zone)
-	lines := zoneDeleteErrorLines("tdns-auth", err)
+	// Printed by the shared daemon-error printer (part B), as a JSON
+	// reply's ErrorMsg.
+	lines := strings.Split(daemonErrorText("tdns-auth", &daemonError{msg: err.Error()}), "\n")
 	for _, l := range lines {
 		if len(l) > zoneDeleteLineWidth {
 			t.Errorf("line of %d characters: %q", len(l), l)

@@ -232,7 +232,7 @@ func runReloadTsigCmd(role string, force, interactive bool) {
 		requireInteractiveTTY()
 		probe, err := SendConfigCommand(api, tdns.ConfigPost{Command: "reload-tsig"})
 		if err != nil && len(probe.TsigConflicts) == 0 {
-			fmt.Printf("Error: %s\n", err.Error())
+			printDaemonError(api.Name, err)
 			os.Exit(1)
 		}
 		if len(probe.TsigConflicts) == 0 {
@@ -269,11 +269,11 @@ func runReloadTsigCmd(role string, force, interactive bool) {
 		if reloadTsigWithheld(resp) {
 			os.Exit(1)
 		}
-		fmt.Printf("Error: %s\n", err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if resp.Error {
-		fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
+		printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 		os.Exit(1)
 	}
 	if resp.Msg != "" {
@@ -311,7 +311,7 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 	// refusal renders; only bail here on a transport-level error (err set, resp not
 	// populated by the daemon).
 	if err != nil && !resp.Error {
-		fmt.Printf("Error: %s\n", err.Error())
+		printDaemonError(api.Name, err)
 		os.Exit(1)
 	}
 	if resp.Error {
@@ -319,7 +319,7 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 			renderReloadGuardrail(resp)
 			os.Exit(1)
 		}
-		fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
+		printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 		os.Exit(1)
 	}
 
@@ -483,7 +483,7 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	if cr.Error {
 		// Generic: this helper is shared by every role (auth/agent/imr), so it
 		// must not name a specific daemon.
-		return cr, fmt.Errorf("error from the daemon: %s", cr.ErrorMsg)
+		return cr, &daemonError{lead: "error from the daemon: ", msg: cr.ErrorMsg}
 	}
 
 	return cr, nil
@@ -577,11 +577,28 @@ func printAccessStatus(a *tdns.ApiAccessStatus) {
 		keyauth = "the API key is off"
 	}
 	fmt.Printf("Access file: %s; %s; %d client(s)\n", a.File, keyauth, len(a.Clients))
+	app := map[string]bool{}
+	for _, name := range a.AppClients {
+		app[name] = true
+	}
+	enrolled := map[string]bool{}
 	for _, c := range a.Clients {
+		enrolled[c.Name] = true
 		state := ""
+		if app[c.Name] {
+			state = ", application client"
+		}
 		if c.Disabled {
-			state = ", disabled"
+			state += ", disabled"
 		}
 		fmt.Printf("   %s (%s%s)\n", c.Name, c.Role, state)
+	}
+	// apiserver.app-clients as running: the names above marked application
+	// client, and any the access file has no client for (they grant
+	// nothing), on lines of their own.
+	for _, name := range a.AppClients {
+		if !enrolled[name] {
+			fmt.Printf("   %s (in app-clients; not in the access file)\n", name)
+		}
 	}
 }

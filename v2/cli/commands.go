@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 
 	"github.com/johanix/tdns/v2"
 	"github.com/spf13/cobra"
@@ -36,7 +37,8 @@ func NewStopCmd(role string) *cobra.Command {
 				Zone:    ".",
 			})
 			if err != nil {
-				log.Fatalf("Error: %v", err)
+				printDaemonError(api.Name, err)
+				os.Exit(1)
 			}
 			if resp.Msg != "" {
 				fmt.Printf("%s\n", resp.Msg)
@@ -54,7 +56,7 @@ func SendCommandNG(api *tdns.ApiClient, data tdns.CommandPost) (tdns.CommandResp
 	// a daemon's refusal twice.
 	status, buf, err := api.Post("/command", bytebuf.Bytes())
 	if err != nil {
-		return cr, fmt.Errorf("error from api post: %v", err)
+		return cr, fmt.Errorf("error from api post: %w", err)
 	}
 	// Only print status if it's not 200 (success) - useful for debugging errors
 	if status != 200 && tdns.Globals.Verbose {
@@ -67,7 +69,7 @@ func SendCommandNG(api *tdns.ApiClient, data tdns.CommandPost) (tdns.CommandResp
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("error from %s: %s", cr.AppName, cr.ErrorMsg)
+		return cr, &daemonError{lead: "error from " + cr.AppName + ": ", msg: cr.ErrorMsg}
 	}
 
 	return cr, nil

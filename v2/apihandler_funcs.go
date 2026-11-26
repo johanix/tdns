@@ -18,6 +18,10 @@ import (
 	"github.com/miekg/dns"
 )
 
+// commitKeystoreTx is (*Tx).Commit, a variable so that a test can make the
+// keystore handler's commit fail.
+var commitKeystoreTx = (*Tx).Commit
+
 func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -47,6 +51,17 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 
 		lgApi.Debug("received /keystore request", "cmd", kp.Command, "subcmd", kp.SubCommand, "from", r.RemoteAddr)
 
+		// An application client gets its own keys only (design 4.6): the
+		// *KeyMgmt functions check each key or zone they resolve against
+		// kp.appClient.
+		kp.appClient = AppClientOf(r.Context())
+		kp.appID, _ = ApiIdentityFrom(r.Context())
+		if err := appKeystoreGate(kp.appClient, kp); err != nil {
+			lgApi.Info("keystore request refused: not available to application clients", "client", kp.appClient, "cmd", kp.Command, "subcmd", kp.SubCommand)
+			writeKeystoreRefusal(w, err)
+			return
+		}
+
 		var resp *KeystoreResponse
 		var tsigCacheDelta *TsigCacheDelta
 		tsigMgmt := kp.Command == "tsig-mgmt"
@@ -59,6 +74,8 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		var dnssecBulkRepublishZones []string
 		var sig0InvalidateZones []string
 		var dnssecStrip *stagedStrip
+		var committed bool
+		var republishErr error
 
 		tx, err := kdb.Begin("APIkeystore")
 
@@ -68,7 +85,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 					tx.Rollback()
 					dnssecStrip.finish(false)
 				} else {
-					if commitErr := tx.Commit(); commitErr != nil {
+					if commitErr := commitKeystoreTx(tx); commitErr != nil {
 						err = commitErr
 						if resp != nil {
 							resp.Error = true
@@ -76,13 +93,25 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						}
 						dnssecStrip.finish(false)
 					} else {
+						committed = true
 						// R1: DnssecKeyMgmt always receives this external tx, so its
 						// localtx republish path never runs. Republish here after
 						// Commit, before triggerResign, so SignZone sees the new set.
+						//
+						// A republish that fails is reported in the answer
+						// below, and the re-sign still goes: the failure marks
+						// the zone's snapshot unbuilt, so the re-sign takes
+						// the signing keys from the keystore (activeKeysCAS),
+						// or fails and stays owed, and never signs with the
+						// keys from before the change. republishSigningKeysForZone
+						// asks for a re-sign itself only for a zone that serves
+						// a signed DNSKEY RRset; this one covers the rest, and
+						// a second request for a queued re-sign is dropped.
 						if dnssecRepublishZone != "" {
 							if rerr := republishSigningKeysForZone(kdb, dnssecRepublishZone); rerr != nil {
 								lgApi.Error("APIkeystore: post-commit signing-keys republish failed",
 									"zone", dnssecRepublishZone, "err", rerr)
+								republishErr = rerr
 							}
 						}
 						// The strip clear and policy-cleanup staged goes out
@@ -97,43 +126,51 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						// re-sign. Without it a forced key replacement would
 						// leave the zone's RRSIGs made by the superseded key
 						// until the resigner's next scheduled pass.
-						// Per zone, and re-sign ONLY where the republish
-						// succeeded. Re-signing after a failed republish is
-						// worse than not re-signing at all: the resigner would
-						// run against the stale in-memory signing-key set and
-						// mint a fresh, correctly-dated set of RRSIGs made by
-						// the superseded key — converting a loud "your import
-						// did not take effect" into a zone that looks freshly
-						// signed and is not. Leaving the old RRSIGs in place
-						// keeps the failure visible until the operator acts.
+						//
+						// As for the single zone above, a zone whose republish
+						// fails is re-signed all the same: the failure leaves
+						// its snapshot unbuilt, so the re-sign reads the
+						// signing keys from the keystore, or fails and stays
+						// owed, and cannot sign with the pre-import keys. The
+						// republish asks for that re-sign itself only for a
+						// zone serving a signed DNSKEY RRset; this request
+						// covers the others.
 						var republishFailed []string
 						for _, z := range dnssecBulkRepublishZones {
 							if rerr := republishSigningKeysForZone(kdb, z); rerr != nil {
 								lgApi.Error("APIkeystore: post-commit signing-keys republish failed after bulk import",
 									"zone", z, "err", rerr,
-									"consequence", "NOT re-signing this zone; it keeps serving the pre-import key set")
+									"consequence", "the zone serves its old signing keys until a re-sign can read the new ones from the keystore")
 								republishFailed = append(republishFailed, z)
-								continue
 							}
 							triggerResign(conf, z)
 						}
 						// Say so on the response, not only in the log. The
 						// transaction committed, so the keys ARE in the
-						// keystore -- but a zone whose republish failed is
-						// still serving the pre-import key set, and reporting
-						// unqualified success lets a restore script tick the
-						// box and move on. The dispositions are deliberately
-						// left in place: the database write did happen, and the
-						// caller needs to know which keys landed.
+						// keystore -- but a zone whose republish failed does
+						// not serve them yet, and reporting unqualified
+						// success lets a restore script tick the box and move
+						// on. The dispositions are deliberately left in place:
+						// the database write did happen, and the caller needs
+						// to know which keys landed.
 						if len(republishFailed) > 0 && resp != nil {
 							resp.Error = true
 							resp.ErrorMsg = fmt.Sprintf(
 								"keys were imported and committed, but %d zone(s) could not be "+
-									"republished and are still serving the pre-import signing keys: %s",
+									"republished and do not serve them yet: %s; each serves the keys "+
+									"it had until a re-sign can read them from the keystore",
 								len(republishFailed), strings.Join(republishFailed, ", "))
 						}
 						if dnssecResignZone != "" {
 							triggerResign(conf, dnssecResignZone)
+						}
+						// The change is committed: the answer says so, and
+						// that the zone does not serve it yet.
+						if republishErr != nil && resp != nil && !resp.Error {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("the change is committed, but the signing keys of zone %s "+
+								"could not be republished (%v); the zone serves the keys it had until a re-sign "+
+								"can read them from the keystore", dnssecRepublishZone, republishErr)
 						}
 						// SIG(0) bulk import owns no transaction of its own on
 						// this path, so it cannot drop its own cache entries --
@@ -167,6 +204,14 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			if tsigMgmt {
 				confMu.Unlock()
 			}
+			// An export whose request failed (its commit included) hands
+			// out nothing; one that succeeded logs each key it hands out,
+			// once, right before the answer goes (design R9).
+			if resp != nil && resp.Error {
+				withholdKeyExports(kp, resp)
+			} else if committed {
+				logKeyExports(r.Context(), kp, resp)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
 		}()
@@ -180,11 +225,18 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			return
 		}
 
+		// A zone's SIG(0) and DNSSEC key rows are stored under its
+		// canonical name, by which the signing and the other readers look
+		// them up: the names a request gives are made canonical here. The
+		// commands that manage one key find a row stored in another case
+		// before writes were canonical (storedKeyName).
+		canonicalKeystoreNames(&kp)
+
 		switch kp.Command {
 		case "sig0-mgmt":
 			resp, err = kdb.Sig0KeyMgmt(tx, kp)
 			if err != nil {
-				lgApi.Error("Sig0Mgmt failed", "err", err)
+				logKeyMgmtFailure("Sig0Mgmt", err)
 				resp = &KeystoreResponse{
 					Error:    true,
 					ErrorMsg: err.Error(),
@@ -195,30 +247,51 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 
 		case "dnssec-mgmt":
 			resp, err = kdb.DnssecKeyMgmt(r.Context(), tx, kp)
+			// The zone the keys changed in: for add and setstate the zone
+			// the key was written under, which DnssecKeyMgmt refuses to
+			// let Zone contradict. The republish and re-sign go there.
+			keyZone := kp.Zone
 			// Kept on a failure too, before resp is replaced: the rollback
 			// in the defer puts the strip back after it.
 			if resp != nil {
 				dnssecStrip = resp.stagedStrip
+				if resp.keyZone != "" {
+					keyZone = resp.keyZone
+				}
 			}
 			if err != nil {
-				lgApi.Error("DnssecKeyMgmt failed", "err", err)
+				logKeyMgmtFailure("DnssecKeyMgmt", err)
 				resp = &KeystoreResponse{
 					Error:    true,
 					ErrorMsg: err.Error(),
 				}
 			} else if resp != nil && resp.NeedsSigningKeysRepublish {
-				dnssecRepublishZone = kp.Zone
+				dnssecRepublishZone = keyZone
 			}
 			if err == nil && resp != nil && len(resp.BulkRepublishZones) > 0 {
 				dnssecBulkRepublishZones = resp.BulkRepublishZones
 			}
 			// Re-sign after state-changing ops — deferred until post-commit
 			// (alongside snapshot republish) so the resigner does not race the tx.
-			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear" || kp.SubCommand == "policy-cleanup") {
-				dnssecResignZone = kp.Zone
+			// add too, whatever state it gives the key: re-importing a
+			// published key as active, or overwriting an active key with
+			// another state, changes the signing keys while the served
+			// DNSKEYs stay the same, which the republish does not see.
+			if err == nil && (kp.SubCommand == "add" || kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear" || kp.SubCommand == "policy-cleanup") {
+				dnssecResignZone = keyZone
 			}
 
 		case "tsig-mgmt":
+			// A new key is the caller's unless the request names its owner
+			// (an admin may; an application client may not, whatever it
+			// names: design 4.6). Inside TsigKeyMgmt the default is "api",
+			// for the callers in the daemon, which have no request.
+			switch kp.SubCommand {
+			case "add", "import", "generate":
+				if kp.Owner == "" || kp.appClient != "" {
+					kp.Owner = CallerApiOwner(r.Context())
+				}
+			}
 			resp, err = kdb.TsigKeyMgmt(conf, tx, kp)
 			if err != nil {
 				if resp == nil {
@@ -590,7 +663,13 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 
 		var zd *ZoneData
 		var exist bool
-		if zd, exist = Zones.Get(dp.Zone); !exist {
+		zd, exist = Zones.Get(dp.Zone)
+		if err := appZoneRefusal(AppClientOf(r.Context()), dp.Zone, zd); err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return
+		}
+		if !exist {
 			msg := fmt.Sprintf("Zone \"%s\" is unknown.", dp.Zone)
 			lgApi.Warn("unknown zone", "zone", dp.Zone)
 			resp.Error = true

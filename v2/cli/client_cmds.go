@@ -655,8 +655,8 @@ Roles are read-only and read-write. Admin is the local socket's alone.`, role),
 			if roleName == "" {
 				fatalf("--role read-only|read-write is required")
 			}
-			if strings.ContainsAny(name, " \t") {
-				fatalf("a client name has no spaces")
+			if err := tdns.CheckAccessClientName(name); err != nil {
+				fatalf("%v", err)
 			}
 			err := editAccessFile(cmd.Context(), role, o, true, func(af *tdns.AccessFile) (string, error) {
 				if findClient(af, name) != nil {

@@ -100,7 +100,7 @@ The zone to update is mandatory to specify on the command line with the --zone f
 			if err != nil {
 				log.Fatalf("Error getting API client: %v", err)
 			}
-			showParentSyncStatus(api, "Error from agent")
+			showParentSyncStatus(api)
 		},
 	}
 
@@ -125,11 +125,11 @@ The zone to update is mandatory to specify on the command line with the --zone f
 			})
 			PrintUpdateResult(resp.UpdateResult)
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {
@@ -163,11 +163,11 @@ The zone to update is mandatory to specify on the command line with the --zone f
 			})
 			PrintUpdateResult(resp.UpdateResult)
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {
@@ -194,11 +194,11 @@ The zone to update is mandatory to specify on the command line with the --zone f
 				Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			})
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {
@@ -225,11 +225,11 @@ The zone to update is mandatory to specify on the command line with the --zone f
 				Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			})
 			if err != nil {
-				fmt.Printf("Error: %s\n", err.Error())
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Error {
-				fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
+				printDaemonErrorMsg(api.Name, resp.ErrorMsg)
 				os.Exit(1)
 			}
 			if resp.Msg != "" {

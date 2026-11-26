@@ -37,6 +37,10 @@ const (
 	BulkStatusUnchanged = "unchanged" // present and identical, left alone
 	BulkStatusConflict  = "conflict"  // present and different, SKIPPED (needs force)
 	BulkStatusReplaced  = "replaced"  // present and different, overwritten under force
+	// Not the caller's to add (an application client: a key of a zone it
+	// does not own, a TSIG key of another API owner); SKIPPED, whatever
+	// force says. Detail says why.
+	BulkStatusRefused = "refused"
 )
 
 // BulkKeyDisposition reports the outcome for one offered key.
@@ -45,6 +49,10 @@ type BulkKeyDisposition struct {
 	Keyid  uint16 `json:"keyid,omitempty"`
 	Status string `json:"status"`
 	Detail string `json:"detail,omitempty"` // for conflict/replaced: what differed
+	// keyRR is the record an imported or replaced SIG(0) key was written
+	// with, for the import's TrustStore mirror: what the keystore stored,
+	// never another offer of the same key in the batch.
+	keyRR string
 }
 
 // BulkDnssecKey is one DNSSEC key on the wire, key material included. Distinct
@@ -190,7 +198,20 @@ FROM TsigKeystore`
 // neither — and it leaves one line in the audit log instead of N. Anyone
 // weighing where to expose the management API should price that in.
 func (kdb *KeyDB) BulkExportDnssec(tx *Tx, sel KeySelector) ([]BulkDnssecKey, error) {
-	rows, err := bulkQuery(kdb, tx, bulkGetDnssecSql)
+	return kdb.bulkExportDnssec(tx, sel, "")
+}
+
+// bulkExportDnssec is BulkExportDnssec for the application client app, when
+// app is not "": the keys of its own zones only, filtered in the query
+// (design R4), so that a selector that matches other zones' keys never
+// sees them.
+func (kdb *KeyDB) bulkExportDnssec(tx *Tx, sel KeySelector, app string) ([]BulkDnssecKey, error) {
+	q, args := bulkGetDnssecSql, []any(nil)
+	if app != "" {
+		where, arg := appOwnZonesFilter(app)
+		q, args = q+" WHERE "+where, []any{arg}
+	}
+	rows, err := bulkQuery(kdb, tx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +258,18 @@ func (kdb *KeyDB) BulkExportDnssec(tx *Tx, sel KeySelector) ([]BulkDnssecKey, er
 
 // BulkExportSig0 returns every SIG(0) key matching sel.
 func (kdb *KeyDB) BulkExportSig0(tx *Tx, sel KeySelector) ([]BulkSig0Key, error) {
-	rows, err := bulkQuery(kdb, tx, bulkGetSig0Sql)
+	return kdb.bulkExportSig0(tx, sel, "")
+}
+
+// bulkExportSig0 is BulkExportSig0 limited, when app is not "", to the
+// application client's own zones, in the query, as bulkExportDnssec is.
+func (kdb *KeyDB) bulkExportSig0(tx *Tx, sel KeySelector, app string) ([]BulkSig0Key, error) {
+	q, args := bulkGetSig0Sql, []any(nil)
+	if app != "" {
+		where, arg := appOwnZonesFilter(app)
+		q, args = q+" WHERE "+where, []any{arg}
+	}
+	rows, err := bulkQuery(kdb, tx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +307,18 @@ func (kdb *KeyDB) BulkExportSig0(tx *Tx, sel KeySelector) ([]BulkSig0Key, error)
 // BulkExportTsig returns every TSIG key matching sel. TSIG key names are DNS
 // names, so the same exact/subtree selection applies.
 func (kdb *KeyDB) BulkExportTsig(tx *Tx, sel KeySelector) ([]BulkTsigKey, error) {
-	rows, err := bulkQuery(kdb, tx, bulkGetTsigSql)
+	return kdb.bulkExportTsig(tx, sel, "")
+}
+
+// bulkExportTsig is BulkExportTsig limited, when app is not "", to the TSIG
+// keys of API owner cert:<app>, in the query.
+func (kdb *KeyDB) bulkExportTsig(tx *Tx, sel KeySelector, app string) ([]BulkTsigKey, error) {
+	q, args := bulkGetTsigSql, []any(nil)
+	if app != "" {
+		where, arg := appTsigOwnerFilter(app)
+		q, args = q+" WHERE "+where, []any{arg}
+	}
+	rows, err := bulkQuery(kdb, tx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -311,15 +354,15 @@ func (kdb *KeyDB) BulkExportTsig(tx *Tx, sel KeySelector) ([]BulkTsigKey, error)
 // bulkQuery runs a read against the transaction when there is one, else
 // against the DB directly. Export is read-only, so it does not need a
 // transaction of its own.
-func bulkQuery(kdb *KeyDB, tx *Tx, q string) (*sql.Rows, error) {
+func bulkQuery(kdb *KeyDB, tx *Tx, q string, args ...any) (*sql.Rows, error) {
 	if tx != nil {
-		rows, err := tx.Query(q)
+		rows, err := tx.Query(q, args...)
 		if err != nil {
 			return nil, fmt.Errorf("query: %v", err)
 		}
 		return rows, nil
 	}
-	rows, err := kdb.Query(q)
+	rows, err := kdb.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query: %v", err)
 	}
@@ -380,6 +423,14 @@ UPDATE TsigKeystore SET algorithm=?, secret=?, origin=?, owner=?, creator=?, cre
 // IS parsed, because that is a cheap, crypto-free way to catch a manifest that
 // disagrees with its own files.
 func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (dispositions []BulkKeyDisposition, err error) {
+	return kdb.bulkImportDnssec(tx, keys, force, "")
+}
+
+// bulkImportDnssec is BulkImportDnssec for the application client app, when
+// app is not "": a key for a zone that is not its own is refused, with the
+// reason in its disposition, before anything about it is looked at, and the
+// rest are imported (design 4.6).
+func (kdb *KeyDB) bulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool, app string) (dispositions []BulkKeyDisposition, err error) {
 	tx, done, err := kdb.bulkTx(tx, "BulkImportDnssec")
 	if err != nil {
 		return nil, err
@@ -396,10 +447,19 @@ func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (di
 
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
-		zone := dns.Fqdn(k.Zone)
+		// A new row goes in under the zone's canonical name; an existing
+		// row is the one stored under it in any case (storedKeyName).
+		zone := canonicalKeyName(dns.Fqdn(k.Zone))
+		if why := appBulkKeyRefusal(app, k.Zone); why != "" {
+			out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid, Status: BulkStatusRefused, Detail: why})
+			continue
+		}
 		canonRR, err := validateDnssecKeyRR(k)
 		if err != nil {
 			return nil, fmt.Errorf("%s keyid %d: %v", zone, k.Keyid, err)
+		}
+		if zone, err = storedKeyName(tx, "DnssecKeyStore", zone, k.Keyid); err != nil {
+			return nil, err
 		}
 		// Store the canonical record, never the caller's text. Also makes the
 		// diff below compare like with like, so re-importing a .key file that
@@ -484,6 +544,13 @@ func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (di
 // matters only on the live API path.) Invalidation goes through
 // invalidateSig0Cache, which holds sig0CacheMu.
 func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispositions []BulkKeyDisposition, err error) {
+	return kdb.bulkImportSig0(tx, keys, force, "")
+}
+
+// bulkImportSig0 is BulkImportSig0 for the application client app, when app
+// is not "": a key for a zone that is not its own is refused, as in
+// bulkImportDnssec.
+func (kdb *KeyDB) bulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool, app string) (dispositions []BulkKeyDisposition, err error) {
 	// Whether WE own the transaction decides who invalidates the SIG(0) cache.
 	// If we do, we can only safely do it after our own commit (below). If the
 	// caller does, the commit happens after we return, so the caller must do it
@@ -515,12 +582,21 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispos
 
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
-		zone := dns.Fqdn(k.Zone)
+		// As in bulkImportDnssec: a new row under the canonical name, an
+		// existing one as stored.
+		zone := canonicalKeyName(dns.Fqdn(k.Zone))
+		if why := appBulkKeyRefusal(app, k.Zone); why != "" {
+			out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid, Status: BulkStatusRefused, Detail: why})
+			continue
+		}
 		canonRR, err := validateSig0KeyRR(k)
 		if err != nil {
 			return nil, fmt.Errorf("%s keyid %d: %v", zone, k.Keyid, err)
 		}
 		k.KeyRR = canonRR
+		if zone, err = storedKeyName(tx, "Sig0KeyStore", zone, k.Keyid); err != nil {
+			return nil, err
+		}
 
 		var (
 			curState, curAlg                          string
@@ -537,7 +613,7 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispos
 				k.Creator, k.PrivateKey, k.KeyRR, k.Comment, int(k.ParentState)); err != nil {
 				return nil, fmt.Errorf("inserting SIG(0) key %s keyid %d: %v", zone, k.Keyid, err)
 			}
-			out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid, Status: BulkStatusImported})
+			out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid, Status: BulkStatusImported, keyRR: k.KeyRR})
 
 		case scanErr != nil:
 			return nil, fmt.Errorf("reading SIG(0) key %s keyid %d: %v", zone, k.Keyid, scanErr)
@@ -564,7 +640,7 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispos
 					return nil, fmt.Errorf("replacing SIG(0) key %s keyid %d: %v", zone, k.Keyid, err)
 				}
 				out = append(out, BulkKeyDisposition{Name: zone, Keyid: k.Keyid,
-					Status: BulkStatusReplaced, Detail: strings.Join(diffs, ", ")})
+					Status: BulkStatusReplaced, Detail: strings.Join(diffs, ", "), keyRR: k.KeyRR})
 			}
 		}
 	}
@@ -611,6 +687,13 @@ type TsigBulkPolicy struct {
 	// forcing each restored key to origin=api, so it cannot mint a config row by
 	// any route.
 	StillInConfig func(name string) bool
+
+	// AppClient, when set, is the application client the import runs for
+	// (design 4.6, 4.7): every key it adds or replaces gets API owner
+	// cert:<AppClient> and origin api, whatever the payload says, and a
+	// key of another API owner is never written: one with the same secret
+	// and algorithm is unchanged and keeps its owner, any other is refused.
+	AppClient string
 }
 
 // BulkImportTsig is the TSIG counterpart. Callers that hold the live TSIG cache
@@ -663,7 +746,11 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool, policy 
 		if err := validateTsigKeySpec(k.Keyname, k.Algorithm, k.Secret); err != nil {
 			return nil, fmt.Errorf("TSIG key %s: %v", name, err)
 		}
+		owner := k.Owner
 		origin := k.Origin
+		if policy.AppClient != "" {
+			owner, origin = ApiOwnerCertPrefix+policy.AppClient, "api"
+		}
 		if origin == "" {
 			// "api", not "import". Only config and api are accepted origins:
 			// TsigKeyMgmt setowner/delete refuse anything else, so a key stored
@@ -689,6 +776,21 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool, policy 
 		// refusal.
 		if scanErr != nil && scanErr != sql.ErrNoRows {
 			return nil, fmt.Errorf("reading TSIG key %s: %v", name, scanErr)
+		}
+
+		// Another API owner's key, the config's included, is not the
+		// application's to write, and whether it is the same key is all it
+		// learns about it: identical (4.7: a no-op that keeps its owner),
+		// or refused, whatever force says.
+		if scanErr == nil && policy.AppClient != "" && !appTsigKeyIsOwn(policy.AppClient,
+			TsigKeystoreRow{Owner: curOwner.String, Origin: curOrigin}) {
+			if curSecret == k.Secret && tsigKeyKey(curAlg) == algo {
+				out = append(out, BulkKeyDisposition{Name: name, Status: BulkStatusUnchanged})
+			} else {
+				out = append(out, BulkKeyDisposition{Name: name, Status: BulkStatusRefused,
+					Detail: appTsigTaken(policy.AppClient)})
+			}
+			continue
 		}
 
 		if policy.StillInConfig != nil {
@@ -717,7 +819,7 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool, policy 
 		switch {
 		case scanErr == sql.ErrNoRows:
 			if _, err := tx.Exec(bulkInsertTsigSql, name, algo, k.Secret, origin,
-				k.Owner, k.Creator, k.CreatedAt, k.Comment); err != nil {
+				owner, k.Creator, k.CreatedAt, k.Comment); err != nil {
 				return nil, fmt.Errorf("inserting TSIG key %s: %v", name, err)
 			}
 			out = append(out, BulkKeyDisposition{Name: name, Status: BulkStatusImported})
@@ -735,7 +837,7 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool, policy 
 				field{"algorithm", tsigKeyKey(curAlg), algo},
 				field{"secret", curSecret, k.Secret},
 				field{"origin", curOrigin, origin},
-				field{"owner", curOwner.String, k.Owner},
+				field{"owner", curOwner.String, owner},
 				field{"creator", curCreator.String, k.Creator},
 				field{"created_at", curCreated.String, k.CreatedAt},
 				field{"comment", curC.String, k.Comment},
@@ -747,7 +849,7 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool, policy 
 				out = append(out, BulkKeyDisposition{Name: name, Status: BulkStatusConflict,
 					Detail: strings.Join(diffs, ", ")})
 			default:
-				if _, err := tx.Exec(bulkUpdateTsigSql, algo, k.Secret, origin, k.Owner,
+				if _, err := tx.Exec(bulkUpdateTsigSql, algo, k.Secret, origin, owner,
 					k.Creator, k.CreatedAt, k.Comment, name); err != nil {
 					return nil, fmt.Errorf("replacing TSIG key %s: %v", name, err)
 				}
@@ -802,7 +904,7 @@ func (kdb *KeyDB) bulkTx(tx *Tx, who string) (*Tx, func(bool) error, error) {
 // conflict means "your file is not what is running" — the one outcome that is
 // easy to skim past and expensive to miss.
 func summarizeDispositions(ds []BulkKeyDisposition, force bool) string {
-	var imported, unchanged, conflicts, replaced int
+	var imported, unchanged, conflicts, replaced, refused int
 	for _, d := range ds {
 		switch d.Status {
 		case BulkStatusImported:
@@ -813,6 +915,8 @@ func summarizeDispositions(ds []BulkKeyDisposition, force bool) string {
 			conflicts++
 		case BulkStatusReplaced:
 			replaced++
+		case BulkStatusRefused:
+			refused++
 		}
 	}
 	msg := fmt.Sprintf("%d key(s) offered: %d imported, %d unchanged", len(ds), imported, unchanged)
@@ -821,6 +925,10 @@ func summarizeDispositions(ds []BulkKeyDisposition, force bool) string {
 	}
 	if conflicts > 0 {
 		msg += fmt.Sprintf(", %d SKIPPED as conflicting (already in the keystore with different content; --force to overwrite)", conflicts)
+	}
+	// Each refused key's line says why; the summary stays within one line.
+	if refused > 0 {
+		msg += fmt.Sprintf(", %d REFUSED", refused)
 	}
 	return msg
 }

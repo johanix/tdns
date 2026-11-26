@@ -58,7 +58,7 @@ differing), nothing there, or no zone served there holds the name.`,
 			}
 			resp, err := SendConfigCommand(api, post)
 			if err != nil {
-				fmt.Printf("Error: %v\n", err)
+				printDaemonError(api.Name, err)
 				os.Exit(1)
 			}
 			if resp.Msg != "" && release != "" {
