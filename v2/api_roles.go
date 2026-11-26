@@ -76,6 +76,9 @@ var apiRouteRoles = map[string]map[string]ApiRole{
 		"add":             RoleReadWrite,
 		"delete":          RoleReadWrite,
 		"modify":          RoleReadWrite,
+		// Hands a zone to an application or takes it back: the operator
+		// decides that (docs/2026-11-23-tdns-api-ownership-design.md 4.8).
+		"setowner": RoleAdmin,
 	},
 	"/api/v1/zone/parentsync": {
 		"status":    RoleReadOnly,

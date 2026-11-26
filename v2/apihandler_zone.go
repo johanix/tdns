@@ -53,6 +53,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			"delete":       true,
 			"modify":       true,
 			"list-dynamic": true,
+			"setowner":     true,
 		}
 		zd, exist := Zones.Get(zp.Zone)
 		if !exist && !zoneLookupExempt[zp.Command] {
@@ -369,6 +370,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				TsigSecret:  zp.TsigSecret,
 				TsigAlgo:    zp.TsigAlgo,
 				TransferSrc: zp.TransferSrc,
+				ApiOwner:    CallerApiOwner(r.Context()),
 			}, true)
 			if err != nil {
 				resp.Error = true
@@ -401,6 +403,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				TsigSecret:    zp.TsigSecret,
 				TsigAlgo:      zp.TsigAlgo,
 				TransferSrc:   zp.TransferSrc,
+				ApiOwner:      CallerApiOwner(r.Context()),
 			})
 			if err != nil {
 				resp.Error = true
@@ -410,6 +413,19 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			resp.Status = "accepted"
 			resp.Msg = msg
 			resp.Warnings = Conf.zoneDaneWarnings(lgApi, zp.Zone)
+
+		// Admin only (api_roles.go): handing a zone to an application, or
+		// taking it back, is the operator's decision (design 4.8).
+		case "setowner":
+			msg, warnings, err := Conf.SetZoneApiOwner(zp.Zone, zp.ApiOwner)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Zone = dns.Fqdn(zp.Zone)
+			resp.Msg = msg
+			resp.Warnings = warnings
 
 		case "list-dynamic":
 			// The persistable dynamic subset (catalog members + API-managed),
@@ -421,6 +437,9 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				if zd, ok := Zones.Get(zc.Name); ok {
 					zc.Provisioning = zoneProvisioning(zd)
 					zc.ApiManaged = zd.Options[OptApiManagedZone]
+					// The effective owner, where the persisted form has the
+					// recorded one (none for a catalog member).
+					zc.ApiOwner = zd.EffectiveApiOwner()
 					// Surface the zone's error/warning state (e.g. ConfigWarning
 					// for a partially-resolved primary set) — zoneDataToZoneConf
 					// deliberately omits runtime error fields.
@@ -558,6 +577,7 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 		RefreshCount:           zd.RefreshCount,
 		SourceCatalog:          zd.SourceCatalog,
 		ApiManaged:             zd.Options[OptApiManagedZone],
+		ApiOwner:               zd.EffectiveApiOwner(),
 		Provisioning:           zoneProvisioning(zd),
 		Zonefile:               zd.Zonefile,
 		Primaries:              primaries,

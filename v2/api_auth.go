@@ -26,12 +26,20 @@ import (
 type ApiIdentity struct {
 	Name string  // the access-file client, "apikey", or "local"
 	Role ApiRole // what it may do
-	Via  string  // "local socket", "certificate" or "api key"
+	Via  string  // ApiViaSocket, ApiViaCertificate or ApiViaKey
 }
+
+// How a caller was authenticated (ApiIdentity.Via). Only a certificate
+// names its caller: Name is then an access-file client.
+const (
+	ApiViaSocket      = "local socket"
+	ApiViaCertificate = "certificate"
+	ApiViaKey         = "api key"
+)
 
 // Describe is the sentence `ping` answers with.
 func (id ApiIdentity) Describe() string {
-	if id.Via == "local socket" {
+	if id.Via == ApiViaSocket {
 		return fmt.Sprintf("on the local socket (%s)", id.Role)
 	}
 	return fmt.Sprintf("authenticated as %s (%s) by %s", id.Name, id.Role, id.Via)
@@ -129,7 +137,7 @@ func peekCommand(r *http.Request) (cmd string, tooLarge bool) {
 // authenticate decides who r is. A non-zero status means refuse it.
 func (conf *Config) authenticateApiRequest(r *http.Request, apikey string) (ApiIdentity, int, string) {
 	if FromLocalSocket(r.Context()) {
-		return ApiIdentity{Name: "local", Role: RoleAdmin, Via: "local socket"}, 0, ""
+		return ApiIdentity{Name: "local", Role: RoleAdmin, Via: ApiViaSocket}, 0, ""
 	}
 	keyOK := func() bool {
 		k := r.Header.Get("X-API-Key")
@@ -140,7 +148,7 @@ func (conf *Config) authenticateApiRequest(r *http.Request, apikey string) (ApiI
 	if st == nil || !st.Enabled {
 		// No access file: the key, as admin, exactly as before.
 		if keyOK() {
-			return ApiIdentity{Name: "apikey", Role: RoleAdmin, Via: "api key"}, 0, ""
+			return ApiIdentity{Name: "apikey", Role: RoleAdmin, Via: ApiViaKey}, 0, ""
 		}
 		return ApiIdentity{}, http.StatusForbidden, "Forbidden"
 	}
@@ -163,14 +171,14 @@ func (conf *Config) authenticateApiRequest(r *http.Request, apikey string) (ApiI
 		pin := SPKISHA256(r.TLS.PeerCertificates[0])
 		if c, ok := st.byPin[pin]; ok && !c.Disabled {
 			role, _ := parseNetworkRole(c.Role) // validated when loaded
-			return ApiIdentity{Name: c.Name, Role: role, Via: "certificate"}, 0, ""
+			return ApiIdentity{Name: c.Name, Role: role, Via: ApiViaCertificate}, 0, ""
 		}
 		// An unknown or disabled certificate does not fall through to the key:
 		// a client that presents a certificate is that certificate.
 		return ApiIdentity{}, http.StatusForbidden, "Forbidden"
 	}
 	if st.KeyAuth && keyOK() {
-		return ApiIdentity{Name: "apikey", Role: RoleReadWrite, Via: "api key"}, 0, ""
+		return ApiIdentity{Name: "apikey", Role: RoleReadWrite, Via: ApiViaKey}, 0, ""
 	}
 	return ApiIdentity{}, http.StatusForbidden, "Forbidden"
 }

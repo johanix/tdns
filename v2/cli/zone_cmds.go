@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -382,7 +383,25 @@ func newZoneDynamicCmds(role string) []*cobra.Command {
 		},
 	}
 
-	return []*cobra.Command{add, del, modify, listDynamic}
+	setOwner := &cobra.Command{
+		Use:   "setowner <zone> <api-owner>",
+		Short: "Set the API owner of a zone created over the API (admin)",
+		Long: `Hand a zone created over the API (zone add, catalog create) to a
+certificate client of the access file, or back to the operators:
+
+  zone setowner example.com. cert:provisioner
+  zone setowner example.com. api
+
+A zone in the config file has its API owner set with api-owner: in
+its config, and a catalog member has its catalog zone's. Admin only:
+run it over the daemon's local socket.`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneSetOwner(role, args[0], args[1])
+		},
+	}
+
+	return []*cobra.Command{add, del, modify, listDynamic, setOwner}
 }
 
 // runZoneSimpleCmd runs a ZonePost command after PrepArgs("childzone")
@@ -805,30 +824,97 @@ func RunZoneListDynamic(role string) {
 		fmt.Println("No dynamic zones.")
 		return
 	}
-	names := make([]string, 0, len(cr.Zones))
-	for name := range cr.Zones {
+	fmt.Print(formatZoneListDynamic(cr.Zones))
+}
+
+// formatZoneListDynamic renders `zone list-dynamic`: a row per zone, with
+// the columns that keep it within 72 characters for usual names, and under
+// it, indented, what the row has no room for: the catalog a member came
+// from (a zone without one was added over the API), the template, and the
+// zone's error. The NOTIFY targets are in `zone list -N`.
+func formatZoneListDynamic(zones map[string]tdns.ZoneConf) string {
+	names := make([]string, 0, len(zones))
+	for name := range zones {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	out := []string{"Zone|Type|Provisioning|Managed|Primary|Template|Notify|Error"}
-	for _, name := range names {
-		zc := cr.Zones[name]
-		managed := "catalog"
-		if zc.ApiManaged {
-			managed = "api"
+	rows := []string{"Zone|Type|State|API owner|Primary"}
+	details := make([][]string, len(names))
+	catalogZone := tdns.ZoneOptionToString[tdns.OptCatalogZone]
+	for i, name := range names {
+		zc := zones[name]
+		rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%s", name, zc.Type, zoneStateOrUnknown(zc),
+			dashIfEmpty(zc.ApiOwner), dashIfEmpty(peerConfAddrsString(zc.Primaries))))
+		var notes []string
+		switch {
+		case zc.SourceCatalog != "":
+			notes = append(notes, "from catalog "+zc.SourceCatalog)
+		case slices.Contains(zc.OptionsStrs, catalogZone):
+			notes = append(notes, "catalog zone")
 		}
-		errStr := ""
+		if zc.Template != "" {
+			notes = append(notes, "template "+zc.Template)
+		}
+		if len(notes) > 0 {
+			details[i] = append(details[i], strings.Join(notes, ", "))
+		}
 		if zc.Error {
-			errStr = zc.ErrorMsg
+			details[i] = append(details[i], fmt.Sprintf("%s: %s", tdns.ErrorTypeToString[zc.ErrorType], zc.ErrorMsg))
 		}
-		tmpl := zc.Template
-		if tmpl == "" {
-			tmpl = "-"
-		}
-		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s",
-			name, zc.Type, zc.Provisioning, managed, peerConfAddrsString(zc.Primaries), tmpl, peerConfAddrsString(zc.Notify), errStr))
 	}
-	fmt.Println(columnize.SimpleFormat(out))
+	table := strings.Split(strings.TrimRight(columnize.SimpleFormat(rows), "\n"), "\n")
+	var b strings.Builder
+	b.WriteString(table[0] + "\n")
+	for i := range names {
+		b.WriteString(table[i+1] + "\n")
+		// A detail (a zone's error, say) wraps within 72 characters; its
+		// continuation lines are indented two more.
+		for _, d := range details[i] {
+			for j, l := range wrapText(d, 72-4-2) {
+				if j > 0 {
+					l = "  " + l
+				}
+				b.WriteString("    " + l + "\n")
+			}
+		}
+	}
+	return b.String()
+}
+
+func dashIfEmpty(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// RunZoneSetOwner hands a zone created over the API to a certificate
+// client, or back to the operators ("api"): the verdict, then any warning.
+func RunZoneSetOwner(role, zone, owner string) {
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command:  "setowner",
+		Zone:     dns.Fqdn(zone),
+		ApiOwner: owner,
+	})
+	if err != nil {
+		// The daemon's refusal is the verdict, and fits a line as it is.
+		fmt.Println(err.Error())
+		os.Exit(1)
+	}
+	fmt.Print(formatZoneSetOwner(cr))
+}
+
+func formatZoneSetOwner(cr tdns.ZoneResponse) string {
+	var b strings.Builder
+	b.WriteString(cr.Msg + "\n")
+	for _, w := range cr.Warnings {
+		b.WriteString("warning: " + w + "\n")
+	}
+	return b.String()
 }
 
 func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse, error) {
@@ -1054,6 +1140,12 @@ func zoneBaseDetail(name string, zconf tdns.ZoneConf) string {
 	}
 
 	fmt.Fprintf(&b, "\tFrozen: %t\tDirty: %t\t%s\n", zconf.Frozen, zconf.Dirty, configInfo)
+	// Who may manage the zone over the management API. Every listing the
+	// daemon sends carries it; a ZoneConf without it prints nothing, as the
+	// serials above.
+	if zconf.ApiOwner != "" {
+		fmt.Fprintf(&b, "\tAPI owner: %s\n", zconf.ApiOwner)
+	}
 	return b.String()
 }
 

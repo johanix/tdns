@@ -442,6 +442,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		publishCadence:    spec.PublishCadence,
 	}
 	zd.notifyRetries, zd.notifyRetryInterval = zoneNotifyRetrySettings(zd.ZoneName, &spec.Zconf)
+	zd.setApiOwner(inputApiOwner(in.ApiOwner))
 
 	// First-load callbacks, mirroring what ParseZones registers for static
 	// zones (the engine's stub branch drains OnFirstLoad post-Ready).
@@ -454,7 +455,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	// the keystore holds it when the zone goes live), then register and
 	// persist. On persist failure roll back registration, key, and a
 	// freshly-synthesized bootstrap file — a failed add leaves nothing behind.
-	rollbackKey, cerr := conf.commitStagedTsigKey(staged)
+	rollbackKey, cerr := conf.commitStagedTsigKey(staged, in.ApiOwner)
 	if cerr != nil {
 		cleanupFile()
 		return "", fmt.Errorf("zone %s: %w", name, cerr)

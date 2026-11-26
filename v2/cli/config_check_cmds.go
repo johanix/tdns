@@ -446,6 +446,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	checkApiServer(&cfg, cfgPath, rep)
 	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
+	checkApiOwners(&cfg, rep)
 	checkDelegationSync(&cfg, rep)
 	checkDuplicateTemplates(&cfg, rep)
 	checkPeers(&cfg, rep)
@@ -2019,6 +2020,46 @@ func checkDuplicateTemplates(cfg *tdns.Config, rep *ccReport) {
 	if dups == 0 {
 		rep.pass("Zones", "duplicate template",
 			fmt.Sprintf("no duplicate names among %d template(s)", len(cfg.Templates)))
+	}
+}
+
+// checkApiOwners runs the daemon's own check (StaticApiOwner) over each
+// zone's api-owner:, which ParseZones quarantines a zone over. It warns about
+// a grant to a client the access file does not have, and about api-owner: on
+// a template, which no zone takes from it.
+func checkApiOwners(cfg *tdns.Config, rep *ccReport) {
+	const g = "Zones"
+	var clients map[string]bool
+	// A file that does not load is checkApiAccessFile's FAIL; no warning
+	// about its clients here.
+	if path := cfg.ApiServer.AccessFile; path != "" {
+		if af, err := tdns.LoadAccessFile(path); err == nil {
+			clients = map[string]bool{}
+			for _, c := range af.Clients {
+				clients[c.Name] = true
+			}
+		}
+	}
+	for _, z := range cfg.Zones {
+		if z.Name == "" || z.ApiOwner == "" {
+			continue
+		}
+		owner, err := tdns.StaticApiOwner(z.ApiOwner)
+		if err != nil {
+			rep.fail(g, z.Name, fmt.Sprintf("%v — the zone will be quarantined", err),
+				"leave api-owner: out (the zone is the config's), or set cert:<name> to hand it to that certificate client")
+			continue
+		}
+		if name, ok := tdns.ApiOwnerClient(owner); ok && clients != nil && !clients[name] {
+			rep.warn(g, z.Name, fmt.Sprintf("api-owner: %s: the access file has no client %q", owner, name),
+				"enrol the client (client add), or fix the name")
+		}
+	}
+	for _, t := range cfg.Templates {
+		if t.ApiOwner != "" {
+			rep.warn(g, "template "+t.Name, fmt.Sprintf("api-owner: %s on a template is ignored", t.ApiOwner),
+				"set api-owner: on each zone that is to be handed over")
+		}
 	}
 }
 

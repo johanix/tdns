@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -127,6 +128,23 @@ func ValidateAccessFile(af *AccessFile) error {
 	}
 	if len(errs) > 0 {
 		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// CheckAccessClientName checks a client name as an access file and an API
+// owner ("cert:<name>") spell it: not empty, and no white space or control
+// characters, since names are typed on command lines and printed in columns.
+// ValidateAccessFile asks only for a name: a file written by hand before
+// this rule must keep loading.
+func CheckAccessClientName(name string) error {
+	if name == "" {
+		return errors.New("the client name is empty")
+	}
+	for _, r := range name {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("client name %q has white space or a control character", name)
+		}
 	}
 	return nil
 }

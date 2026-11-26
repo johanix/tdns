@@ -282,6 +282,15 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		if zconf.ApiManaged {
 			options[OptApiManagedZone] = true
 		}
+		// The API owner the entry records. A catalog member records none:
+		// it follows its catalog zone, whatever its entry says.
+		apiOwner := ""
+		if zconf.SourceCatalog == "" {
+			var oerr error
+			if apiOwner, oerr = dynamicApiOwner(zconf.ApiOwner); oerr != nil {
+				lg.Error("dynamic zone: invalid api-owner, read as api", "zone", zoneName, "err", oerr)
+			}
+		}
 
 		// Dynamic PRIMARY with a template: re-expand the template and
 		// re-activate the update policy through the same shared helper the
@@ -321,6 +330,9 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 					zd.DownstreamAuth = zconf.DownstreamAuth
 					zd.keepPersistedOutbound = true
 				}
+				// Kept, so that the next rewrite of the dynamic config does
+				// not lose it.
+				zd.setApiOwner(apiOwner)
 				// no-refresh-hooks: an error-state shell registered only to
 				// carry the ConfigError. It never refreshes, so a hook would
 				// have nothing to run on.
@@ -357,6 +369,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				Zonefile:         spec.Zconf.Zonefile,
 				Template:         zconf.Template,
 				InlineTsigKey:    spec.InlineTsigKey,
+				ApiOwner:         apiOwner,
 				PublishCadence:   spec.PublishCadence,
 				Notify:           spec.Zconf.Notify,
 				AllowNotify:      spec.Zconf.AllowNotify,
@@ -497,6 +510,8 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 
 			Template:        zconf.Template,
 			TemplateWarning: templateWarning,
+			ApiOwner:        apiOwner,
+			SourceCatalog:   zconf.SourceCatalog,
 		}
 
 		// Blocking send, exactly like the static-zone enqueue in ParseZones.
@@ -525,10 +540,12 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 	// config that was broken at startup. A failure here is non-fatal: the zones
 	// loaded fine; only the on-disk normalization didn't happen this pass.
 	if needsRepersist {
-		if err := conf.writeDynamicConfigFile(cf.Zones); err != nil {
+		if wrote, err := conf.repersistDynamicConfig(cf); err != nil {
 			lg.Warn("could not re-persist dynamic config in canonical form; will retry on next load or zone change", "err", err)
-		} else {
+		} else if wrote {
 			lg.Info("re-persisted dynamic config in canonical form (normalized legacy store tokens and/or stripped migrated keys: block)")
+		} else {
+			lg.Info("dynamic config not re-persisted at load: a later write already put it in canonical form")
 		}
 	}
 	return nil
@@ -539,6 +556,31 @@ type DynamicConfigFile struct {
 	Zones []ZoneConf `yaml:"zones"`
 	// Keys is read for one-shot migration only (§13); new writes omit the block.
 	Keys *KeyConf `yaml:"keys,omitempty"`
+	// readAfterWrites is dynamicConfigWrites when the file was read
+	// (loadDynamicConfigFile); repersistDynamicConfig compares it.
+	readAfterWrites uint64
+}
+
+// repersistDynamicConfig writes cf, the dynamic config as the load read it
+// (normalized, the legacy keys: block migrated out), back in canonical
+// form, unless the file was written by anyone else since it was read. The
+// API serves while the zones load, so a zone add, delete or setowner can
+// write the file in between; writing cf would put back what that write
+// replaced. A write from the live zones is canonical and has no keys:
+// block, so skipping loses nothing. A write it makes itself moves cf's
+// mark on, so the load's next rewrite of cf (normalization after the
+// migration) still goes ahead. It reports whether it wrote.
+func (conf *Config) repersistDynamicConfig(cf *DynamicConfigFile) (bool, error) {
+	dynamicConfigMutex.Lock()
+	defer dynamicConfigMutex.Unlock()
+	if dynamicConfigWrites != cf.readAfterWrites {
+		return false, nil
+	}
+	if err := conf.writeDynamicConfigFileLocked(cf.Zones); err != nil {
+		return true, err
+	}
+	cf.readAfterWrites = dynamicConfigWrites
+	return true, nil
 }
 
 var (
@@ -546,6 +588,10 @@ var (
 	// Used by both loadDynamicConfigFile() and writeDynamicConfigFile() to prevent
 	// race conditions and ensure consistency between read/write operations
 	dynamicConfigMutex sync.Mutex
+	// dynamicConfigWrites counts the writes of the dynamic config file
+	// (under dynamicConfigMutex), so that a write prepared from an earlier
+	// read can tell that the file has moved on (repersistDynamicConfig).
+	dynamicConfigWrites uint64
 	// dynamicConfigBroken is set (under dynamicConfigMutex) when the dynamic config
 	// file could not be parsed at startup. While set, writeDynamicConfigFile refuses
 	// to write, so an unreadable file is never overwritten with the (incomplete)
@@ -614,6 +660,9 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		Template:          zd.Template,
 		SourceCatalog:     zd.SourceCatalog,
 		ApiManaged:        zd.Options[OptApiManagedZone],
+		// The owner the zone records, not its effective one: a catalog
+		// member records none, so that it follows its catalog zone.
+		ApiOwner: zd.recordedApiOwner(),
 		// Note: We don't serialize Frozen, Dirty, Error, ErrorType, ErrorMsg, RefreshCount
 		// as these are runtime state, not configuration
 	}
@@ -651,7 +700,7 @@ func (conf *Config) loadDynamicConfigFile() (*DynamicConfigFile, error) {
 	// Check if file exists
 	if _, err := os.Stat(conf.DynamicZones.ConfigFile); os.IsNotExist(err) {
 		lg.Debug("dynamic config file does not exist, starting with empty config", "path", conf.DynamicZones.ConfigFile)
-		return &DynamicConfigFile{}, nil
+		return &DynamicConfigFile{readAfterWrites: dynamicConfigWrites}, nil
 	}
 
 	// Read file
@@ -671,17 +720,23 @@ func (conf *Config) loadDynamicConfigFile() (*DynamicConfigFile, error) {
 	}
 
 	lg.Info("loaded zones from dynamic config file", "count", len(configFile.Zones), "path", conf.DynamicZones.ConfigFile)
+	configFile.readAfterWrites = dynamicConfigWrites
 	return &configFile, nil
 }
 
 // writeDynamicConfigFile writes the dynamic config file with atomic writes.
 func (conf *Config) writeDynamicConfigFile(zones []ZoneConf) error {
+	dynamicConfigMutex.Lock()
+	defer dynamicConfigMutex.Unlock()
+	return conf.writeDynamicConfigFileLocked(zones)
+}
+
+// writeDynamicConfigFileLocked is writeDynamicConfigFile for a caller that
+// holds dynamicConfigMutex.
+func (conf *Config) writeDynamicConfigFileLocked(zones []ZoneConf) error {
 	if conf.DynamicZones.ConfigFile == "" {
 		return fmt.Errorf("dynamic config file path not configured")
 	}
-
-	dynamicConfigMutex.Lock()
-	defer dynamicConfigMutex.Unlock()
 
 	// Refuse to write if the file was unreadable at startup: the in-memory state is
 	// incomplete (it never loaded the persisted zones/keys), so writing now would
@@ -740,6 +795,7 @@ func (conf *Config) writeDynamicConfigFile(zones []ZoneConf) error {
 		return fmt.Errorf("failed to rename temp file to final file: %v", err)
 	}
 
+	dynamicConfigWrites++
 	lg.Info("wrote dynamic config file", "path", conf.DynamicZones.ConfigFile, "zones", len(zones))
 	return nil
 }
@@ -779,8 +835,13 @@ func (conf *Config) WriteDynamicConfigFile() error {
 		return nil // No config file configured, nothing to write
 	}
 
-	dynamicZones := conf.getDynamicZonesFromZonesMap()
-	return conf.writeDynamicConfigFile(dynamicZones)
+	// The snapshot is taken under the lock the write holds, so a write can
+	// never put back a snapshot older than one already written (a zone
+	// setowner that persisted in between would be lost on disk). Collecting
+	// it takes no zone lock.
+	dynamicConfigMutex.Lock()
+	defer dynamicConfigMutex.Unlock()
+	return conf.writeDynamicConfigFileLocked(conf.getDynamicZonesFromZonesMap())
 }
 
 // AddDynamicZoneToConfig adds or updates a zone in the dynamic config file
@@ -875,6 +936,11 @@ type DynamicZoneInput struct {
 	// because the caller built this struct, so the distinction is honest here
 	// in a way a JSON round-trip alone would not be.
 	TransferSrc []string
+	// ApiOwner is the caller's API owner (CallerApiOwner): the owner an
+	// add gives the zone, and the owner of an inline TSIG key that an add
+	// or a modify puts into the keystore. A modify never changes the zone's
+	// owner; `zone setowner` does. Empty is "api".
+	ApiOwner string
 }
 
 // stageInlineTsigKey validates an inline TSIG key supplied with an add/modify
@@ -910,7 +976,9 @@ func (conf *Config) stageInlineTsigKey(in *DynamicZoneInput) (*TsigDetails, erro
 // commitStagedTsigKey adds a staged inline key via the keystore when absent, or
 // no-ops when an identical key already exists. A differing secret/algorithm is
 // rejected (create-if-absent; §7). Returns rollback to undo a newly inserted key.
-func (conf *Config) commitStagedTsigKey(staged *TsigDetails) (rollback func(), err error) {
+// A new key gets owner, the caller's API owner; an identical existing key keeps
+// the owner it has, so that a caller cannot take over a key by naming it.
+func (conf *Config) commitStagedTsigKey(staged *TsigDetails, owner string) (rollback func(), err error) {
 	if staged == nil {
 		return func() {}, nil
 	}
@@ -931,7 +999,7 @@ func (conf *Config) commitStagedTsigKey(staged *TsigDetails) (rollback func(), e
 		TsigKeyname:   staged.Name,
 		TsigAlgorithm: staged.Algorithm,
 		TsigSecret:    staged.Secret,
-		Owner:         "api",
+		Owner:         inputApiOwner(owner),
 		Creator:       "inline-zone",
 	})
 	if err != nil {
@@ -1127,6 +1195,8 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 
 		SuppressedOptions: suppressedOptions,
 	}
+	// Before Zones.Set and the persist below, which writes it.
+	zd.setApiOwner(inputApiOwner(in.ApiOwner))
 	zd.setOutboundLocked(outbound) // zd is still private to this goroutine
 	if normMsg != "" {
 		lg.Warn("zone option normalization", "zone", name, "detail", normMsg)
@@ -1137,7 +1207,7 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// persisted keys: block includes it), then register and persist. On persist
 	// failure, roll back BOTH the registration and the key so a failed add leaves
 	// no live-but-unpersisted zone and no orphaned live key.
-	rollbackKey, cerr := conf.commitStagedTsigKey(staged)
+	rollbackKey, cerr := conf.commitStagedTsigKey(staged, in.ApiOwner)
 	if cerr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, cerr)
 	}
@@ -1570,9 +1640,11 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		notifyRetries:       notifyRetries,
 		notifyRetryInterval: notifyRetryInterval,
 	}
+	// The zone keeps its owner across a modify, whoever modifies it.
+	newZd.apiOwner.Store(oldZd.apiOwner.Load())
 	// Commit the staged inline key just before persistence so the rewritten file
 	// includes it; roll it back if persistence fails.
-	rollbackKey, cerr := conf.commitStagedTsigKey(staged)
+	rollbackKey, cerr := conf.commitStagedTsigKey(staged, in.ApiOwner)
 	if cerr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, cerr)
 	}

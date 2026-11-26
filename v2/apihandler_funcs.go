@@ -219,6 +219,15 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			}
 
 		case "tsig-mgmt":
+			// A new key is the caller's unless the request names its owner
+			// (an admin may). Inside TsigKeyMgmt the default is "api", for
+			// the callers in the daemon, which have no request.
+			switch kp.SubCommand {
+			case "add", "import", "generate":
+				if kp.Owner == "" {
+					kp.Owner = CallerApiOwner(r.Context())
+				}
+			}
 			resp, err = kdb.TsigKeyMgmt(conf, tx, kp)
 			if err != nil {
 				if resp == nil {

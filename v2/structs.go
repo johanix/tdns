@@ -204,6 +204,11 @@ type ZoneData struct {
 	// own zone file (regenerateCatalogZone). Atomic: ParseZones sets it on a
 	// live zone when the config takes one over, and readers hold no lock.
 	fromStaticConfig atomic.Bool
+	// apiOwner is the API owner the zone records (api_owner.go): set where
+	// the zone is created, by ParseZones on every parse, and by `zone
+	// setowner` on a live zone. Readers hold no lock, so it is atomic. Nil
+	// or empty for a catalog member, which follows its catalog zone.
+	apiOwner atomic.Pointer[string]
 	// catalogWriteMu serializes a configured catalog's write-backs to its own
 	// zone file (writeBackCatalogZone). Never taken with zd.mu held: WriteZone
 	// takes zd.mu itself.
@@ -828,6 +833,14 @@ type ZoneConf struct {
 	ErrorMsg      string    // reason for the error (if known)
 	RefreshCount  int       // times initialLoadZone loaded the zone (0 or 1); NOT a have-data test, see ZoneData.RefreshCount
 	SourceCatalog string    // if auto-configured, which catalog zone created this zone
+	// ApiOwner is the zone's API owner: who may manage it over the
+	// management API (api_owner.go). In the config file, a zone's own
+	// setting: unset is "config", and "cert:<name>" hands the zone to that
+	// certificate client; never copied from a template. In the dynamic
+	// config, written by the daemon: the caller that created the zone, and
+	// unset reads as "api". A catalog member records none and follows its
+	// catalog zone. In listings, the zone's effective API owner.
+	ApiOwner string `yaml:"api-owner,omitempty" mapstructure:"api-owner"`
 	// ApiManaged marks a zone created/managed via the dynamic-zones API (zone
 	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
 	// reload — a dedicated bool, not a SourceCatalog="api" sentinel.
@@ -1404,6 +1417,14 @@ type ZoneRefresher struct {
 	// InlineTsigKey propagates a template-driven dynamic primary's inline
 	// TSIG key name to the ZoneData built by the RefreshEngine.
 	InlineTsigKey string
+	// ApiOwner and SourceCatalog carry a persisted dynamic zone's API owner
+	// and, for a catalog member, the catalog zone that created it, to the
+	// ZoneData the RefreshEngine builds. Without SourceCatalog there, the
+	// next rewrite of the dynamic config would drop the member's catalog,
+	// and the restart after that would load it as neither a member nor an
+	// API zone.
+	ApiOwner      string
+	SourceCatalog string
 	// TemplateWarning, when set, is recorded on the zone the RefreshEngine
 	// builds as a TemplateWarning: a persisted template-driven zone whose
 	// template could not be expanded at boot still loads (without the
@@ -1485,6 +1506,9 @@ type Sig0Key struct {
 	// carries the last reason for the operator and the KeyState EXTRA-TEXT.
 	ValidationFailed bool
 	ValidationError  string
+	// ApiOwner is set in keystore listings only: the API owner of the zone
+	// the key belongs to, or "-" when that zone is not served here.
+	ApiOwner string `json:",omitempty"`
 }
 
 type DnssecKey struct {
@@ -1503,6 +1527,8 @@ type DnssecKey struct {
 	Pub  bool
 	Sign bool
 	DS   *bool
+	// ApiOwner is set in keystore listings only, as for Sig0Key.
+	ApiOwner string `json:",omitempty"`
 }
 
 type DelegationSyncRequest struct {
