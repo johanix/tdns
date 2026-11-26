@@ -127,7 +127,7 @@ func forgetResolverSource(zone string) {
 		return
 	}
 	if n, err := imr.Cache.FlushDomain(zone, false); err == nil {
-		lgImr.Info("modified-downstream changed; dropped what the resolver held about the zone",
+		lgResolver.Info("modified-downstream changed; dropped what the resolver held about the zone",
 			"zone", zone, "entries", n)
 	}
 }

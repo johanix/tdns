@@ -73,7 +73,7 @@ func (conf *Config) applyImrEngineReload() (ImrZoneReloadResult, error) {
 	// config with itself and never report anything.
 	res.RestartRequired = imr.RestartRequiredKeys(*block)
 	if len(res.RestartRequired) > 0 {
-		lgImr.Warn("imrengine keys changed but are not reloadable; the resolver keeps running on the values it started with",
+		lgResolver.Warn("imrengine keys changed but are not reloadable; the resolver keeps running on the values it started with",
 			"keys", strings.Join(res.RestartRequired, ", "))
 	}
 	return res, nil
