@@ -2,9 +2,14 @@ package cli
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
+
+	tdns "github.com/johanix/tdns/v2"
 )
 
 func (d *addDaemon) update(t *testing.T, mod func(*UpdateOptions)) (*UpdateResult, error) {
@@ -313,5 +318,57 @@ func TestUpdateCertFirstEnrolment(t *testing.T) {
 	res, err := d.update(t, withCert)
 	if err != nil || !res.Wrote || d.commands() != "list add" {
 		t.Fatalf("%+v, %v (asked %q); want the entry switched", res, err, d.commands())
+	}
+}
+
+// A tdns-cli run (#1205): the pin refusal names tdns-ncli with --config
+// <the file this run read>, not tdns-ncli's own config, and that command,
+// run as printed, re-pins the entry in the tdns-cli config.
+func TestPinRefusalWorksForATdnsCliConfig(t *testing.T) {
+	d := newAddDaemon(t, true)
+	// As tdns-cli has it: its own sections, a key entry, a stale pin.
+	cfg := filepath.Join(filepath.Dir(d.cli), "tdns-cli.yaml")
+	writeFile(t, cfg, strings.NewReplacer("@U@", d.url, "@D@", d.cfg).Replace(`algorithms:
+   costsfile: /etc/tdns/algorithm-costs.yaml
+apiservers:
+   - name:              tdns-auth
+     baseurl:           @U@
+     apikey:            k
+     authmethod:        X-API-Key
+     tlsauth:           pin
+     pins:              [ "b2xk" ]
+     config-file:       @D@
+`))
+	savedCfg, savedDef := apiConfig, DefaultCliConfigFile
+	t.Cleanup(func() { apiConfig, DefaultCliConfigFile = savedCfg, savedDef })
+	DefaultCliConfigFile = tdns.DefaultCliCfgFile // as tdns-cli runs
+
+	e := mustEntries(t, cfg)[0]
+	apiConfig = nil // the file not known: tdns-cli's default
+	if fix := pinRefusal(e, "").fix; fix != "tdns-ncli --config "+tdns.DefaultCliCfgFile+" config update tdns-auth --repin" {
+		t.Errorf("no file known: fix = %q", fix)
+	}
+	apiConfig = &CliConf{File: cfg} // as tdns-cli's root sets it
+	fix := pinRefusal(e, "").fix
+	if want := "tdns-ncli --config " + cfg + " config update tdns-auth --repin"; fix != want {
+		t.Fatalf("fix = %q, want %q", fix, want)
+	}
+
+	// Run as printed: tdns-ncli's root flag --config, then config update.
+	words := strings.Fields(fix) // cfg is one shell word (a temp dir)
+	root := &cobra.Command{Use: words[0]}
+	root.PersistentFlags().String("config", "", "")
+	config := &cobra.Command{Use: "config"}
+	config.AddCommand(newConfigUpdateCmd())
+	root.AddCommand(config)
+	root.SetArgs(words[1:])
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustEntries(t, cfg); len(got) != 1 || !reflect.DeepEqual(got[0].Pins, []string{d.srvPin}) {
+		t.Errorf("after the fix: %+v, want the daemon's pin", got)
+	}
+	if raw, _ := os.ReadFile(cfg); !strings.HasPrefix(string(raw), "algorithms:\n   costsfile: /etc/tdns/algorithm-costs.yaml\n") {
+		t.Errorf("tdns-cli's own section changed:\n%s", raw)
 	}
 }

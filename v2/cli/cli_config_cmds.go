@@ -682,12 +682,12 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd, retry string, en
 // needs the old pair or a new name.
 func samePair(cfg, target string, out []byte, cc CliClientConf, client, cmd, retry string) error {
 	was, wasKey := clientCertPaths(cc)
-	now, key := "", ""
 	pc, err := prospectiveClientConf(cfg, target, out)
-	if err == nil {
-		now, key = clientCertPaths(pc)
+	if err != nil {
+		// Not a pair that changed: say what failed.
+		return fmt.Errorf("cannot read the client pair of the config to be\nwritten (%v); nothing was written. The pin of %s\nstays enrolled as %s; run this again, which reuses it:\n  %s", err, was, client, retry)
 	}
-	if err != nil || now != was || key != wasKey {
+	if now, key := clientCertPaths(pc); now != was || key != wasKey {
 		return fmt.Errorf("the client pair in %s changed while %s\nran (now %s); nothing was written. The pin of\n%s stays enrolled as %s: put that pair back and run\n  %s\nor run that with another --client-name", cfg, cmd, now, was, client, retry)
 	}
 	return nil
@@ -868,11 +868,16 @@ func ConfigAddHint(cfg string) string {
 	return ncliFor(cfg) + " config add"
 }
 
-// ncliFor is "tdns-ncli", with --config cfg when cfg is not the default: the
-// start of any command line printed as advice, so that it reads the CLI
-// config the command that printed it read.
+// ncliFor is "tdns-ncli", with --config cfg when cfg is not the file
+// tdns-ncli reads without it: the start of any command line printed as
+// advice, so that it reads the CLI config the command that printed it read.
+// The tool running may be another (tdns-cli, tdns-debug), whose own default
+// tdns-ncli does not read (#1205); "" is the running tool's default.
 func ncliFor(cfg string) string {
-	if cfg == "" || cfg == DefaultCliConfigFile {
+	if cfg == "" {
+		cfg = DefaultCliConfigFile
+	}
+	if cfg == tdns.DefaultNcliCfgFile {
 		return "tdns-ncli"
 	}
 	return "tdns-ncli --config " + shellQuote(cfg)

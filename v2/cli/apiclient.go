@@ -339,15 +339,22 @@ func (r clientRefusal) Error() string {
 	return fmt.Sprintf("not connecting to %s: %s; fix: %s", r.entry, r.why, r.fix)
 }
 
-// pinRefusal refuses entry e for want of a pin. Pinning is how tdns-ncli
-// verifies a daemon, and config update --repin is how an existing entry
-// gets the pins its daemon serves: in the CLI config this run read.
-func pinRefusal(e ApiDetails, why string) clientRefusal {
+// ncliForThisRun is the tdns-ncli command for the CLI config this run read,
+// whichever tool is running: a tdns-cli or tdns-debug run gets tdns-ncli
+// with --config <its file>, which tdns-ncli edits as well (#1205).
+func ncliForThisRun() string {
 	cfg := ""
 	if apiConfig != nil {
 		cfg = apiConfig.File
 	}
-	fix := ncliFor(cfg) + " config update " + shellQuote(e.Name) + " --repin"
+	return ncliFor(cfg)
+}
+
+// pinRefusal refuses entry e for want of a pin. Pinning is how tdns-ncli
+// verifies a daemon, and config update --repin is how an existing entry
+// gets the pins its daemon serves: in the CLI config this run read.
+func pinRefusal(e ApiDetails, why string) clientRefusal {
+	fix := ncliForThisRun() + " config update " + shellQuote(e.Name) + " --repin"
 	if e.ConfigFile == "" {
 		fix += " --daemon-config <the daemon's config file>"
 	}
@@ -519,8 +526,8 @@ func buildApiClient(e ApiDetails, cc CliClientConf, sock, sockNote string) (*tdn
 		// Plain http verifies nothing and sends the key in clear. On
 		// loopback neither leaves the host; elsewhere, say so.
 		if RequireServerVerification && strings.HasPrefix(strings.ToLower(e.BaseURL), "http://") && !loopbackURL(e.BaseURL) {
-			warn = fmt.Sprintf("%s: plain http to %s: the daemon is not verified, and an API key goes in clear; use https with pins: (tdns-ncli config add writes them)",
-				e.Name, e.BaseURL)
+			warn = fmt.Sprintf("%s: plain http to %s: the daemon is not verified, and an API key goes in clear; use https with pins: (%s config add writes them)",
+				e.Name, e.BaseURL, ncliForThisRun())
 		}
 	}
 	// The local socket has no TLS, and the client sends no credentials on

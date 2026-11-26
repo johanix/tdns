@@ -101,6 +101,7 @@ func TestNewApiClientForVerification(t *testing.T) {
 	saved := RequireServerVerification
 	t.Cleanup(func() { RequireServerVerification = saved })
 	RequireServerVerification = true
+	asNcli(t)
 
 	for _, tc := range []struct {
 		name     string
@@ -343,7 +344,17 @@ func TestPingHow(t *testing.T) {
 
 // A refusal is an error with its fix, found as such through the wrapping
 // GetApiClient may add.
+// asNcli makes this a tdns-ncli run for the test: its default CLI config is
+// tdns-ncli's own, as its root sets it.
+func asNcli(t *testing.T) {
+	t.Helper()
+	saved := DefaultCliConfigFile
+	t.Cleanup(func() { DefaultCliConfigFile = saved })
+	DefaultCliConfigFile = tdns.DefaultNcliCfgFile
+}
+
 func TestPinRefusal(t *testing.T) {
+	asNcli(t)
 	err := fmt.Errorf("wrapped: %w", pinRefusal(ApiDetails{Name: "tdns-auth", ConfigFile: "/etc/tdns/tdns-auth.yaml"}, "its entry has no pin"))
 	var r clientRefusal
 	if !errors.As(err, &r) || r.entry != "tdns-auth" || r.fix != "tdns-ncli config update tdns-auth --repin" {
