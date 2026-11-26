@@ -1,8 +1,8 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  *
- * Adding one entry to the apiservers: list of a CLI config file, by editing
- * the file's text.
+ * Adding one entry to the apiservers: list of a CLI config file, or changing
+ * one, by editing the file's text.
  */
 package cli
 
@@ -145,14 +145,55 @@ func findApiserversKey(lines []string) (int, error) {
 // reKeyLine is a "key: rest" line of a mapping, the indentation removed.
 var reKeyLine = regexp.MustCompile(`^([A-Za-z_-]+):(.*)$`)
 
-// repinEntryText returns src with the apiservers: item named name verifying
-// by pin: its tlsauth:, pins: and rootca: lines removed, each with any lines
-// of its value below it, and "tlsauth: pin" and up's pins added at the end of
-// the item, aligned like the list's first item. Nothing else in the file
-// changes, comments and alignment included. An item it cannot edit with
-// confidence (tabs, one of those keys on the item's first line) it refuses.
-// The caller checks the result by loading it.
-func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
+// splitValue splits the rest of a "key: rest" line into the space before
+// the value, the value, and a comment after it (a '#' after a space, with
+// the space before it).
+func splitValue(rest string) (pad, val, comment string) {
+	val = strings.TrimLeft(rest, " \t")
+	pad = rest[:len(rest)-len(val)]
+	for i := 0; i < len(val); i++ {
+		if val[i] == '#' && (i == 0 || val[i-1] == ' ' || val[i-1] == '\t') {
+			j := len(strings.TrimRight(val[:i], " \t"))
+			return pad, val[:j], val[j:]
+		}
+	}
+	return pad, val, ""
+}
+
+// keyVal is one key of an entry and its value, already YAML.
+type keyVal struct{ k, v string }
+
+// entryEdits is what changes from entry e to up, as editEntryText takes it:
+// the keys up gives a new value, and the keys it has no value for.
+func entryEdits(e, up ApiDetails) (set []keyVal, drop []string) {
+	edit := func(k, old, new, yamlNew string) {
+		switch {
+		case old == new:
+		case new == "":
+			drop = append(drop, k)
+		default:
+			set = append(set, keyVal{k, yamlNew})
+		}
+	}
+	edit("baseurl", e.BaseURL, up.BaseURL, yamlScalar(up.BaseURL))
+	edit("apikey", e.ApiKey, up.ApiKey, yamlScalar(up.ApiKey))
+	edit("authmethod", e.AuthMethod, up.AuthMethod, yamlScalar(up.AuthMethod))
+	edit("tlsauth", e.TLSAuth, up.TLSAuth, yamlScalar(up.TLSAuth))
+	edit("pins", strings.Join(e.Pins, "\n"), strings.Join(up.Pins, "\n"), pinsFlow(up.Pins))
+	edit("rootca", e.RootCA, up.RootCA, yamlScalar(up.RootCA))
+	edit("config-file", e.ConfigFile, up.ConfigFile, yamlScalar(up.ConfigFile))
+	return set, drop
+}
+
+// editEntryText returns src with the apiservers: item named name changed:
+// each key of set given its value where it stands (its spacing and any
+// comment kept), or added at the end of the item, aligned like the list's
+// first item, if the item has none; each key of drop removed. The lines of
+// a key's old value below it go with it. Nothing else in the file changes,
+// comments and alignment included. An item it cannot edit with confidence
+// (tabs, a key to change on its first line) it refuses. The caller checks
+// the result by loading it.
+func editEntryText(src []byte, name string, set []keyVal, drop []string) ([]byte, error) {
 	lines := strings.Split(string(src), "\n")
 	start, err := findApiserversKey(lines)
 	if err != nil {
@@ -170,21 +211,20 @@ func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
 	listIndent := -1
 	for j := start + 1; j <= last; j++ {
 		l := strings.TrimRight(lines[j], "\r")
-		var ind string
-		if m := reItemStart.FindStringSubmatch(l); m != nil {
-			ind = m[1]
-		} else if b := reBareDash.FindStringSubmatch(l); b != nil {
-			ind = b[1]
-		} else {
+		m := reItemStart.FindStringSubmatch(l)
+		if m == nil {
+			m = reBareDash.FindStringSubmatch(l)
+		}
+		if m == nil {
 			continue
 		}
-		if strings.Contains(ind, "\t") {
+		if strings.Contains(m[1], "\t") {
 			return nil, errors.New("the apiservers: list is indented with tabs")
 		}
 		if listIndent < 0 {
-			listIndent = len(ind)
+			listIndent = len(m[1])
 		}
-		if len(ind) != listIndent {
+		if len(m[1]) != listIndent {
 			continue
 		}
 		if n := len(items); n > 0 {
@@ -192,14 +232,13 @@ func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
 		}
 		items = append(items, item{from: j, to: last + 1})
 	}
-
 	found := -1
 	for k, it := range items {
 		var v []map[string]interface{}
-		if err := yaml.Unmarshal([]byte(dedentLines(lines[it.from:it.to], listIndent)), &v); err != nil || len(v) != 1 {
+		if yaml.Unmarshal([]byte(dedentLines(lines[it.from:it.to], listIndent)), &v) != nil || len(v) != 1 {
 			continue
 		}
-		if n, ok := v[0]["name"].(string); ok && n == name {
+		if n, _ := v[0]["name"].(string); n == name {
 			if found >= 0 {
 				return nil, fmt.Errorf("two entries in it are named %q", name)
 			}
@@ -211,23 +250,29 @@ func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
 	}
 	it := items[found]
 
-	// The item's keys start in keyCol: after "- " on its first line, or, for a
-	// "-" alone on its line, where its first key below starts.
+	sets, drops := map[string]string{}, map[string]bool{}
+	for _, kv := range set {
+		sets[kv.k] = kv.v
+	}
+	for _, k := range drop {
+		drops[k] = true
+	}
+	// The item's keys start in keyCol: after "- " on its first line, or, for
+	// a "-" alone on its line, where its first key below starts.
 	keyCol := -1
 	if m := reItemStart.FindStringSubmatch(strings.TrimRight(lines[it.from], "\r")); m != nil {
 		if strings.Contains(m[2], "\t") {
 			return nil, errors.New("the entry is indented with tabs")
 		}
-		switch strings.ToLower(m[3]) {
-		case "tlsauth", "pins", "rootca":
+		if k := strings.ToLower(m[3]); drops[k] || sets[k] != "" {
 			return nil, fmt.Errorf("its %s: is on its first line", m[3])
 		}
 		keyCol = len(m[1]) + 1 + len(m[2])
 	}
-
 	kept := []string{lines[it.from]}
 	lastContent := 0 // index in kept of the item's last line of content
 	dropping := false
+	done := map[string]bool{}
 	for j := it.from + 1; j < it.to; j++ {
 		l := strings.TrimRight(lines[j], "\r")
 		body := strings.TrimLeft(l, " ")
@@ -246,19 +291,33 @@ func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
 			keyCol = ind
 		}
 		// Lines deeper than the keys, or a "-" at their column, after a
-		// removed key are its value: they go with it.
+		// changed key are its old value: they go with it.
 		if dropping && (ind > keyCol || (ind == keyCol && strings.HasPrefix(body, "-"))) {
 			continue
 		}
 		dropping = false
+		line := lines[j]
 		if m := reKeyLine.FindStringSubmatch(body); m != nil && ind == keyCol {
-			switch strings.ToLower(m[1]) {
-			case "tlsauth", "pins", "rootca":
+			k := strings.ToLower(m[1])
+			if drops[k] {
 				dropping = true
 				continue
 			}
+			if v, ok := sets[k]; ok {
+				// The new value where the old one was. With none on the
+				// line (a block value below it), any comment follows it.
+				pad, old, comment := splitValue(m[2])
+				if old == "" && comment != "" {
+					comment = pad + comment
+				}
+				if old == "" || pad == "" {
+					pad = " "
+				}
+				line = l[:ind] + m[1] + ":" + pad + v + comment + strings.TrimPrefix(lines[j], l)
+				done[k], dropping = true, true
+			}
 		}
-		kept = append(kept, lines[j])
+		kept = append(kept, line)
 		lastContent = len(kept) - 1
 	}
 	if keyCol < 0 {
@@ -266,18 +325,17 @@ func repinEntryText(src []byte, name string, up ApiDetails) ([]byte, error) {
 	}
 
 	valueCol := detectLayout(lines[start+1 : last+1]).valueCol
-	add := []string{
-		kvLine(keyCol, valueCol, "tlsauth", "pin"),
-		kvLine(keyCol, valueCol, "pins", pinsFlow(up.Pins)),
+	var add []string
+	for _, kv := range set {
+		if !done[kv.k] {
+			add = append(add, kvLine(keyCol, valueCol, kv.k, kv.v))
+		}
 	}
-	edited := make([]string, 0, len(kept)+len(add))
-	edited = append(edited, kept[:lastContent+1]...)
-	edited = append(edited, add...)
-	edited = append(edited, kept[lastContent+1:]...)
-
 	out := make([]string, 0, len(lines)+len(add))
 	out = append(out, lines[:it.from]...)
-	out = append(out, edited...)
+	out = append(out, kept[:lastContent+1]...)
+	out = append(out, add...)
+	out = append(out, kept[lastContent+1:]...)
 	out = append(out, lines[it.to:]...)
 	return []byte(strings.Join(out, "\n")), nil
 }
@@ -484,36 +542,19 @@ func danglingSymlink(path string) error {
 // stays a link; a link to nothing is refused (see danglingSymlink).
 //
 // The new file belongs to whoever runs this, not necessarily to the old file's
-// owner; the CLI config is the invoking operator's own file. A file a daemon
-// reads goes through writeFileAtomicLike instead.
+// owner; the CLI config is the invoking operator's own file. (The daemon
+// writes its own files, keeping their owner: tdns.writeAccessFile.)
 func writeFileAtomic(path string, data []byte) error {
-	return replaceFile(path, data, false, nil)
-}
-
-// writeFileAtomicLike is writeFileAtomic for a file a daemon reads (the access
-// file): the replacement keeps the old file's owner and group, so root editing
-// a file the daemon's user owns does not leave one the daemon cannot read. A
-// new file takes its mode, owner and group from like (the daemon config), or
-// is 0600 and the invoking user's when like is nil.
-func writeFileAtomicLike(path string, data []byte, like os.FileInfo) error {
-	return replaceFile(path, data, true, like)
-}
-
-func replaceFile(path string, data []byte, keepOwner bool, like os.FileInfo) error {
 	if err := danglingSymlink(path); err != nil {
 		return err
 	}
 	mode := os.FileMode(0o600)
 	target := path
-	owner := like
 	if fi, err := os.Stat(path); err == nil {
 		mode = fi.Mode().Perm()
-		owner = fi
 		if real, err := filepath.EvalSymlinks(path); err == nil {
 			target = real
 		}
-	} else if like != nil {
-		mode = like.Mode().Perm()
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(target), ".tdns-ncli-*")
 	if err != nil {
@@ -528,31 +569,8 @@ func replaceFile(path string, data []byte, keepOwner bool, like os.FileInfo) err
 		tmp.Close()
 		return err
 	}
-	if keepOwner && owner != nil {
-		if err := chownLike(tmp, owner); err != nil {
-			tmp.Close()
-			return fmt.Errorf("%s: giving the new file its owner and group: %w", path, err)
-		}
-	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), target)
-}
-
-// chownLike gives f the owner and group of like when they differ from f's.
-// Nothing to do where the platform has no owners (fileOwner).
-func chownLike(f *os.File, like os.FileInfo) error {
-	uid, gid, ok := fileOwner(like)
-	if !ok {
-		return nil
-	}
-	fi, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if cu, cg, ok := fileOwner(fi); ok && cu == uid && cg == gid {
-		return nil
-	}
-	return f.Chown(uid, gid)
 }

@@ -228,6 +228,8 @@ var apiAppScopes = map[string]map[string]AppScope{
 	"/api/v1/truststore":                {"*": AppRefused, "": AppRefused},
 	"/api/v1/dsync-api/credential":      {"*": AppRefused, "": AppRefused},
 	"/api/v1/dsync-api/cert-credential": {"*": AppRefused, "": AppRefused},
+	// The access file: credentials, admin on the local socket alone.
+	"/api/v1/access": {"*": AppRefused, "": AppRefused},
 }
 
 // apiAppSubScopes splits the commands that apiAppScopes marks

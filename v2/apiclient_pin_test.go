@@ -36,6 +36,14 @@ func TestClientPinsAndCertificate(t *testing.T) {
 	if _, _, err := api.Post("/t-rw", nil); err == nil || !strings.Contains(err.Error(), "not one of") {
 		t.Errorf("wrong pin: err = %v, want a pin mismatch", err)
 	}
+	// With PinFix, the refusal names how to take the daemon's new pins.
+	api = NewClientWithOptions("bob", e.srv.URL+"/api/v1", ClientOptions{
+		AuthMethod: "certificate", Pins: []string{testPin("not-the-daemon")}, ClientCert: &bob,
+		PinFix: "tdns-ncli config update bob --repin",
+	})
+	if _, _, err := api.Post("/t-rw", nil); err == nil || !strings.Contains(err.Error(), "fix: tdns-ncli config update bob --repin") {
+		t.Errorf("wrong pin with PinFix: err = %v, want the fix named", err)
+	}
 
 	// No certificate configured for a certificate entry: the daemon sees no
 	// credentials at all.

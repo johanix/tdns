@@ -3,7 +3,7 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  */
-package cli
+package tdns
 
 import (
 	"os"

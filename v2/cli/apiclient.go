@@ -68,6 +68,9 @@ type CliConf struct {
 	// authmethod: certificate. Unset, the default location is used
 	// (DefaultClientCertPaths).
 	Client CliClientConf
+	// File is the CLI config this run read, named in the commands a
+	// refusal advises. Set by the root, never from the config itself.
+	File string `mapstructure:"-"`
 }
 
 // CliClientConf is the CLI config's client: block.
@@ -159,6 +162,14 @@ func InitApiClients(c *CliConf) error {
 	// (see clientEntries); the wiring has already warned about the others.
 	servers := clientEntries(c.ApiServers)
 
+	// The config lookups by client name (config-file:, the daemon command)
+	// must find the entry whose client was built, not a left-out instance
+	// that happens to come first. Set before the clients are built: a
+	// refusal made while building one names this run's CLI config.
+	cc := *c
+	cc.ApiServers = servers
+	apiConfig = &cc
+
 	if tdns.Globals.Debug {
 		fmt.Printf("InitApiClients: setting up API clients for:")
 	}
@@ -206,13 +217,6 @@ func InitApiClients(c *CliConf) error {
 	if authClient, ok := tdns.Globals.ApiClients["tdns-auth"]; ok {
 		tdns.Globals.Api = authClient
 	}
-
-	// The config lookups by client name (config-file:, the daemon command)
-	// must find the entry whose client was built, not a left-out instance
-	// that happens to come first.
-	cc := *c
-	cc.ApiServers = servers
-	apiConfig = &cc
 
 	numtsigs, _ := tdns.ParseTsigKeys(&c.Keys)
 	if tdns.Globals.Debug {
@@ -335,15 +339,26 @@ func (r clientRefusal) Error() string {
 	return fmt.Sprintf("not connecting to %s: %s; fix: %s", r.entry, r.why, r.fix)
 }
 
-// pinRefusal refuses entry e for want of a pin. Pinning is how tdns-ncli
-// verifies a daemon, and config add is how an entry gets its pin, a known
-// one included.
-func pinRefusal(e ApiDetails, why string) clientRefusal {
-	daemon := "<the daemon's config file>"
-	if e.ConfigFile != "" {
-		daemon = shellQuote(e.ConfigFile)
+// ncliForThisRun is the tdns-ncli command for the CLI config this run read,
+// whichever tool is running: a tdns-cli or tdns-debug run gets tdns-ncli
+// with --config <its file>, which tdns-ncli edits as well (#1205).
+func ncliForThisRun() string {
+	cfg := ""
+	if apiConfig != nil {
+		cfg = apiConfig.File
 	}
-	return clientRefusal{entry: e.Name, why: why, fix: "tdns-ncli config add " + daemon}
+	return ncliFor(cfg)
+}
+
+// pinRefusal refuses entry e for want of a pin. Pinning is how tdns-ncli
+// verifies a daemon, and config update --repin is how an existing entry
+// gets the pins its daemon serves: in the CLI config this run read.
+func pinRefusal(e ApiDetails, why string) clientRefusal {
+	fix := ncliForThisRun() + " config update " + shellQuote(e.Name) + " --repin"
+	if e.ConfigFile == "" {
+		fix += " --daemon-config <the daemon's config file>"
+	}
+	return clientRefusal{entry: e.Name, why: why, fix: fix}
 }
 
 // dieOn ends the process on err, which GetApiClient could not get past. A
@@ -486,6 +501,7 @@ func buildApiClient(e ApiDetails, cc CliClientConf, sock, sockNote string) (*tdn
 				return nil, "", pinRefusal(e, "its entry has tlsauth: pin but no pins:")
 			}
 			o.Pins = e.Pins
+			o.PinFix = pinRefusal(e, "").fix
 		case "pkix":
 			if o.RootCA == "" {
 				o.RootCA = "system"
@@ -510,8 +526,8 @@ func buildApiClient(e ApiDetails, cc CliClientConf, sock, sockNote string) (*tdn
 		// Plain http verifies nothing and sends the key in clear. On
 		// loopback neither leaves the host; elsewhere, say so.
 		if RequireServerVerification && strings.HasPrefix(strings.ToLower(e.BaseURL), "http://") && !loopbackURL(e.BaseURL) {
-			warn = fmt.Sprintf("%s: plain http to %s: the daemon is not verified, and an API key goes in clear; use https with pins: (tdns-ncli config add writes them)",
-				e.Name, e.BaseURL)
+			warn = fmt.Sprintf("%s: plain http to %s: the daemon is not verified, and an API key goes in clear; use https with pins: (%s config add writes them)",
+				e.Name, e.BaseURL, ncliForThisRun())
 		}
 	}
 	// The local socket has no TLS, and the client sends no credentials on

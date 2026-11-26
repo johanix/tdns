@@ -144,8 +144,8 @@ func TestApiCertSANs(t *testing.T) {
 	}
 }
 
-// EnsureDefaultApiCert is the one way the default pair is made (the daemon
-// at its first start, tdns-ncli config add before it): the certs directory
+// EnsureDefaultApiCert is how the daemon makes its default pair at its
+// first start (tdns-ncli never makes it): the certs directory
 // made 0755, the key 0600, the certificate 0644, the pin returned; a pair
 // that is there left alone; half a pair refused, its file not touched.
 func TestEnsureDefaultApiCert(t *testing.T) {

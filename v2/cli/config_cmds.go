@@ -37,15 +37,18 @@ func NewConfigCmdFor(role, flavour string) *cobra.Command {
 	}
 
 	var reloadConfirm bool
+	var reloadDaemonCfg string
 	reload := &cobra.Command{
 		Use:   "reload",
 		Short: "Send config reload command to tdns-" + role,
 		Run: func(cmd *cobra.Command, args []string) {
-			runConfigCmd(role, "reload", false, reloadConfirm)
+			runConfigCmdAt(role, reloadDaemonCfg, "reload", false, reloadConfirm)
 		},
 	}
 	reload.Flags().BoolVar(&reloadConfirm, "confirm", false,
 		"apply even if the reload would strand a signed zone by a same-name DNSSEC policy algorithm change")
+	reload.Flags().StringVar(&reloadDaemonCfg, "daemon-config", "",
+		"reload the daemon of this config file, over its local admin socket (default: the role's entry's daemon)")
 
 	var reloadZonesConfirm bool
 	reloadZones := &cobra.Command{
@@ -298,20 +301,37 @@ func reloadTsigWithheld(resp tdns.ConfigResponse) bool {
 // response. showVerboseStatus expands the verbose dump used by the
 // "status" subcommand.
 func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
-	api, err := GetApiClient(role, true)
-	if err != nil {
-		fmt.Printf("Error creating API client: %v\n", err)
-		os.Exit(1)
-	}
+	runConfigCmdAt(role, "", command, showVerboseStatus, confirm)
+}
 
-	resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: command, Confirm: confirm})
+// runConfigCmdAt is runConfigCmd for the daemon of daemonCfg when it is set
+// (--daemon-config), reached over its local admin socket (configAtDaemon):
+// a daemon the CLI config has no entry for yet, or one under another name.
+func runConfigCmdAt(role, daemonCfg, command string, showVerboseStatus, confirm bool) {
+	post := tdns.ConfigPost{Command: command, Confirm: confirm}
+	var resp tdns.ConfigResponse
+	var err error
+	// The daemon's name in error output: configAtDaemon's client is named
+	// after the role; an entry's client after the entry.
+	name := role
+	if daemonCfg != "" {
+		resp, err = configAtDaemon(role, daemonCfg, post)
+	} else {
+		api, aerr := GetApiClient(role, true)
+		if aerr != nil {
+			fmt.Printf("Error creating API client: %v\n", aerr)
+			os.Exit(1)
+		}
+		name = api.Name
+		resp, err = SendConfigCommand(api, post)
+	}
 	// A daemon-side error is carried structurally on resp (resp.Error, and for a
 	// guardrail refusal resp.GuardrailBlocked) *and* returned as a non-nil err by
 	// SendConfigCommand. Let the resp.Error block below handle those so the guardrail
 	// refusal renders; only bail here on a transport-level error (err set, resp not
 	// populated by the daemon).
 	if err != nil && !resp.Error {
-		printDaemonError(api.Name, err)
+		printDaemonError(name, err)
 		os.Exit(1)
 	}
 	if resp.Error {
@@ -319,7 +339,7 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 			renderReloadGuardrail(resp)
 			os.Exit(1)
 		}
-		printDaemonErrorMsg(api.Name, resp.ErrorMsg)
+		printDaemonErrorMsg(name, resp.ErrorMsg)
 		os.Exit(1)
 	}
 

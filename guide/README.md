@@ -144,7 +144,7 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   addressing each as its own command word with `tdns-ncli`
   (a PROTOTYPE shipped alongside `tdns-cli`, which remains
   the management tool)
-  (`tdns-ncli sectdns zone list`): `config add` / `config list`
+  (`tdns-ncli sectdns zone list`): `config add` / `config update` / `config list`
   and tdns-ncli's own config file, the `role:` key in
   `apiservers`, keeping both daemon configs in `/etc/tdns`,
   what `config check` reads, reserved instance names, the

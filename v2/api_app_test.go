@@ -881,7 +881,7 @@ func TestAppClientsNoteWhenTheFirstAccessFileDoesNotLoad(t *testing.T) {
 	e.conf.ApiServer.AccessFile = filepath.Join(t.TempDir(), "absent.yaml")
 	e.conf.ApiServer.AppClients = []string{"anna"}
 	msg := e.conf.reloadApiAccess()
-	if !strings.Contains(msg, AccessFileNotReloaded) || !strings.Contains(msg, "app-clients is NOT applied either") {
+	if !strings.Contains(msg, "(the running policy is unchanged)") || !strings.Contains(msg, "app-clients is NOT applied either") {
 		t.Errorf("a first access file that does not load, with app-clients: %q", msg)
 	}
 	if st := h.load(); st == nil || st.Enabled || len(st.AppClients) != 0 {
