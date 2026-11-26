@@ -30,9 +30,10 @@ import (
 // the three are also how the IANA root is reached by hand (a stub for "." that
 // names b.root-servers.net), and the config cannot tell the two apart. So
 // with any of the three and no anchor configured, the resolver asks the root:
-// it fetches its DNSKEY RRset and uses the compiled-in anchor if the keys
-// match it (imr_root_anchor_probe.go). A root that does not match gets no
-// anchor, as before, and a warning that nothing will validate.
+// it fetches its DNSKEY RRset and uses the compiled-in anchor if a key in it
+// matches the anchor and signs the set (imr_root_anchor_probe.go). A root that
+// does not match gets no anchor, as before, and a warning that nothing will
+// validate.
 
 // AnchorConfigured reports whether the config names a trust anchor of its own,
 // in any of the three forms.
@@ -108,8 +109,10 @@ func (ic *Config) rootServers() string {
 // RootAnchorProbe reports whether the compiled-in IANA root anchor is up to the
 // root's keys: the config names no anchor, and the root may not be the IANA
 // root (NonDefaultRoot says how it is reached). The resolver then fetches the
-// root's DNSKEY RRset and uses the anchor if the keys match
-// (rootAnchorByProbe).
+// root's DNSKEY RRset (rootAnchorByProbe) and uses the anchor only if a key in
+// it hashes to one of the anchor's DS records and an RRSIG by that key over the
+// set verifies. A set where either fails is another root; a signature outside
+// its validity period decides nothing, and the check is repeated.
 func (ic *Config) RootAnchorProbe() (probe bool, why string) {
 	if ic.AnchorConfigured() {
 		return false, ""
