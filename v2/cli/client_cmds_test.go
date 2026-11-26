@@ -866,3 +866,22 @@ func TestSocketErrnoNotASocket(t *testing.T) {
 		}
 	}
 }
+
+// The plain-http warning of an entry already in the CLI config names the
+// command that switches it to https with pins, config update --cert (config
+// add writes new entries only), with --daemon-config when the entry has no
+// config-file:.
+func TestPlainHttpWarningNamesConfigUpdate(t *testing.T) {
+	saved := RequireServerVerification
+	t.Cleanup(func() { RequireServerVerification = saved })
+	RequireServerVerification = true
+	asNcli(t)
+	e := ApiDetails{Name: "remote", BaseURL: "http://192.0.2.1:8989/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", ConfigFile: "/etc/tdns/tdns-auth.yaml"}
+	if _, warn, err := buildApiClient(e, CliClientConf{}, "", ""); err != nil || !strings.HasSuffix(warn, "use https with pins: tdns-ncli config update remote --cert") {
+		t.Errorf("warning %q, %v", warn, err)
+	}
+	e.ConfigFile = ""
+	if _, warn, _ := buildApiClient(e, CliClientConf{}, "", ""); !strings.HasSuffix(warn, "config update remote --cert --daemon-config <the daemon's config file>") {
+		t.Errorf("no config-file: warning %q", warn)
+	}
+}

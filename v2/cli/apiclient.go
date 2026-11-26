@@ -526,8 +526,15 @@ func buildApiClient(e ApiDetails, cc CliClientConf, sock, sockNote string) (*tdn
 		// Plain http verifies nothing and sends the key in clear. On
 		// loopback neither leaves the host; elsewhere, say so.
 		if RequireServerVerification && strings.HasPrefix(strings.ToLower(e.BaseURL), "http://") && !loopbackURL(e.BaseURL) {
-			warn = fmt.Sprintf("%s: plain http to %s: the daemon is not verified, and an API key goes in clear; use https with pins: (%s config add writes them)",
-				e.Name, e.BaseURL, ncliForThisRun())
+			// The entry is there already: config update --cert switches it
+			// to https, its pins and the client certificate (config add
+			// writes new entries only).
+			fix := ncliForThisRun() + " config update " + shellQuote(e.Name) + " --cert"
+			if e.ConfigFile == "" {
+				fix += " --daemon-config <the daemon's config file>"
+			}
+			warn = fmt.Sprintf("%s: plain http to %s: the daemon is not verified, and an API key goes in clear; use https with pins: %s",
+				e.Name, e.BaseURL, fix)
 		}
 	}
 	// The local socket has no TLS, and the client sends no credentials on
