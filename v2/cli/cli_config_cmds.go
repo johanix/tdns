@@ -565,9 +565,10 @@ func askAccess(info *DaemonApi, cmd string) (sock *tdns.ApiClient, list tdns.Acc
 	}
 	list, err = accessOver(sock, tdns.AccessPost{Command: "list"})
 	switch errno := socketErrno(err); {
-	case errno == syscall.ECONNREFUSED && !socketOrMissing(info.Socket):
-		// Linux refuses a dial to a file that is not a socket: no daemon
-		// can serve its socket there, so this is not a stopped daemon.
+	case errno == syscall.ENOTSOCK || errno == syscall.ECONNREFUSED && !socketOrMissing(info.Socket):
+		// A file that is not a socket: the BSDs say ENOTSOCK, Linux
+		// ECONNREFUSED. No daemon can serve its socket there, so this is
+		// not a stopped daemon.
 		return nil, list, false, fmt.Errorf("the daemon's local admin socket path is there but is\nnot a socket:\n   %s\nThe daemon cannot serve its socket there. Remove that\nfile, start the daemon, and run %s again", info.Socket, cmd)
 	case errno == syscall.ENOENT || errno == syscall.ECONNREFUSED:
 		return sock, list, false, nil

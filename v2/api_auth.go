@@ -12,8 +12,10 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -295,8 +297,13 @@ func (conf *Config) reloadApiAccess() string {
 		return ""
 	}
 	af, addrs, err := conf.loadAccessPolicy(path)
-	if err != nil {
-		return fmt.Sprintf(" %s (the running policy is unchanged): %v", AccessFileNotReloaded, err)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// The first enrolment: the access-file: line is new and the file
+		// is not there yet. Lines of at most 72, after the path.
+		return fmt.Sprintf("\nAccess file not there yet (the running policy is unchanged):\n   %s\nThe first client add (or config add) creates it.", path)
+	case err != nil:
+		return fmt.Sprintf("\n%s (the running policy is unchanged):\n   %v", AccessFileNotReloaded, err)
 	}
 	stopped := ""
 	if len(addrs) > 0 {
