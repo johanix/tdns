@@ -290,8 +290,12 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		return nil, err
 	}
 	list, err := accessOver(sock, tdns.AccessPost{Command: "list"})
-	switch errno := socketErrno(err); {
-	case errno == syscall.ENOTSOCK || errno == syscall.ECONNREFUSED && !socketOrMissing(info.Socket):
+	errno := socketErrno(err)
+	stopped, lerr := refusedSocketStopped(errno, info.Socket)
+	switch {
+	case lerr != nil:
+		return nil, fmt.Errorf("cannot look at the daemon's local admin socket\n   %s\n(%v). config add needs it: run it as root on the\ndaemon's host", info.Socket, pathCause(lerr))
+	case errno == syscall.ENOTSOCK || errno == syscall.ECONNREFUSED && !stopped:
 		// A file that is not a socket: the BSDs say ENOTSOCK, Linux
 		// ECONNREFUSED. No daemon can serve its socket there, so this is
 		// not a stopped daemon.
@@ -632,11 +636,33 @@ func enrol(sock *tdns.ApiClient, certPath, keyPath, client string, cc CliClientC
 	return fmt.Errorf("%s\nbut a request over TCP to\n%s failed: %v\nNothing was written. The pin stays enrolled: once that is\nfixed, run config add again, which reuses it", said, entry.BaseURL, err)
 }
 
-// socketOrMissing reports whether path is a socket, or not there to look at:
-// anything else at a socket path is not a stopped daemon's stale socket.
-func socketOrMissing(path string) bool {
+// pathCause is err without the operation and path a *fs.PathError adds: the
+// path is named on its own line where this is used.
+func pathCause(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
+}
+
+// refusedSocketStopped says whether a dial to the socket path that failed
+// with errno is a stopped daemon's: for ECONNREFUSED, nothing at the path or
+// a stale socket is (true), a file that is not a socket is not (false), and
+// an error that keeps the path from being looked at (EACCES) is the error,
+// not a stopped daemon. Any other errno is left to the caller (true, nil).
+func refusedSocketStopped(errno syscall.Errno, path string) (bool, error) {
+	if errno != syscall.ECONNREFUSED {
+		return true, nil
+	}
 	fi, err := os.Lstat(path)
-	return err != nil || fi.Mode()&fs.ModeSocket != 0
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return true, nil
+	case err != nil:
+		return false, err
+	}
+	return fi.Mode()&fs.ModeSocket != 0, nil
 }
 
 // prospectiveClientConf is the client: block the CLI will load from cfg

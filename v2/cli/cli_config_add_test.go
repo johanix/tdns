@@ -3,6 +3,9 @@ package cli
 import (
 	"crypto/tls"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -502,8 +506,39 @@ func TestAddRefusesANonSocketAtTheSocketPath(t *testing.T) {
 		t.Fatalf("a regular file at the socket path: %v, want the plain refusal", err)
 	}
 	d.unchanged(t, string(before))
-	if socketOrMissing(d.sock) || !socketOrMissing(d.sock+".none") {
-		t.Error("socketOrMissing: want false for a file, true for nothing there")
+	if stopped, err := refusedSocketStopped(syscall.ECONNREFUSED, d.sock); stopped || err != nil {
+		t.Errorf("a file: %v, %v; want not stopped", stopped, err)
+	}
+	if stopped, err := refusedSocketStopped(syscall.ECONNREFUSED, d.sock+".none"); !stopped || err != nil {
+		t.Errorf("nothing there: %v, %v; want stopped", stopped, err)
+	}
+}
+
+// A socket path that cannot be looked at (EACCES) is no stopped daemon: the
+// error, not a config-file:-only entry or "no daemon answers there".
+func TestRefusedSocketStoppedCannotLook(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root looks at anything")
+	}
+	dir := filepath.Join(t.TempDir(), "run")
+	os.Mkdir(dir, 0o700)
+	ln, err := net.Listen("unix", filepath.Join(dir, "s"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.Close() // a stale socket: stopped
+	if stopped, err := refusedSocketStopped(syscall.ECONNREFUSED, filepath.Join(dir, "s")); !stopped || err != nil {
+		t.Errorf("a stale socket: %v, %v; want stopped", stopped, err)
+	}
+	os.Chmod(dir, 0)
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	sock := filepath.Join(dir, "s")
+	if stopped, err := refusedSocketStopped(syscall.ECONNREFUSED, sock); stopped || !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("a path not ours to look at: %v, %v; want the error", stopped, err)
+	}
+	refused := fmt.Errorf("Post: %w", &net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)})
+	if msg := socketError(sock, refused).Error(); !strings.Contains(msg, "(connection refused): the path cannot be looked at\n(permission denied)") || strings.Contains(msg, "no daemon answers") {
+		t.Errorf("socketError: %q, want the path's error", msg)
 	}
 }
 

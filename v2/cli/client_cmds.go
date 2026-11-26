@@ -319,11 +319,15 @@ func entryIsDaemonSocket(e ApiDetails, info *DaemonApi) bool {
 // apart from the socket's.
 func socketError(sock string, err error) error {
 	errno := socketErrno(err)
+	if errno == 0 {
+		return err
+	}
+	stopped, lerr := refusedSocketStopped(errno, sock)
 	var why string
 	switch {
-	case errno == 0:
-		return err
-	case errno == syscall.ENOTSOCK || errno == syscall.ECONNREFUSED && !socketOrMissing(sock):
+	case lerr != nil:
+		why = fmt.Sprintf("the path cannot be looked at\n(%v). Run the client commands as root on the daemon's\nhost", pathCause(lerr))
+	case errno == syscall.ENOTSOCK || errno == syscall.ECONNREFUSED && !stopped:
 		why = "a file that is not a socket is\nthere, so the daemon cannot serve its socket. Remove that\nfile, then start the daemon"
 	case errno == syscall.EACCES || errno == syscall.EPERM:
 		why = "not yours to open. Run the client\ncommands as root on the daemon's host"
