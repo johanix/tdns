@@ -1,6 +1,7 @@
 # A pure signer: tdns-signer with one way in
 
-**Written 2026-09-23.** Scoping analysis, for review. Nothing is implemented.
+**Written 2026-09-23.** Amended 2026-11-24: `/delegation export` (§3).
+Scoping analysis, for review. Nothing is implemented.
 Line references are to main at `e223451b`. Builds on #558, which records how to
 give `tdns-signer` an app type of its own; this document answers the question
 that comes after it: what the signer should stop doing, where each of those
@@ -162,6 +163,13 @@ The signer's decisions:
 | `/delegation export` (`apihandler_funcs.go:582`) | **refuse** | parent side; writes a file at a client-chosen server path |
 | `/scanner/poll` (`apirouters.go:128`) | **drop route** | scanner |
 | everything else | keep | key management, `/zone/parentsync` (child side), `/delegation status|sync`, rollover, `bump`, `sign-zone`, `resign-zone`, policy commands, `reload`, `write-zone`, journal, `/config`, `/command`, `/debug`, `/imr`, `/keystore`, `/truststore` |
+
+**Amendment 2026-11-24.** `/delegation export` no longer writes a file. The
+daemon returns the delegation data in the reply, and the CLI writes it
+(`--outfile`, on the CLI's host) or prints it. A request that names an outfile
+is refused. So the second reason in the row above, and its listing under
+"content edits over the API" in §1, no longer hold. The first reason (export is
+parent side) still does.
 
 Route removal is Tier S: a `SetupSignerAPIRouter` that registers only the kept
 routes. The command refusals inside `/zone` and `/delegation` are Tier G,

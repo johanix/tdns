@@ -1,6 +1,13 @@
 ## tdns-cli auth del export
 
-Export delegation data from a parent zone's backend to a zone file
+Export a parent zone's delegation data as zone file text
+
+### Synopsis
+
+Export a parent zone's delegation data as zone file text.
+
+The daemon returns the data. With --outfile it is written to that file
+on this host, with your permissions; without it, it goes to stdout.
 
 ```
 tdns-cli auth del export [flags]
@@ -10,7 +17,7 @@ tdns-cli auth del export [flags]
 
 ```
   -h, --help             help for export
-      --outfile string   Destination file path (required)
+      --outfile string   Write the data to this file on this host (default: stdout)
 ```
 
 ### Options inherited from parent commands

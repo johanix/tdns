@@ -7,12 +7,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
+	"math/rand/v2"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -162,44 +168,101 @@ func newDdnsUploadCmd() *cobra.Command {
 	}
 }
 
+// The daemon sends the delegation data back and this command writes it, as
+// the user who runs it: to --outfile, or to stdout. The daemon writes no file.
 func newDelExportCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "export",
-		Short: "Export delegation data from a parent zone's backend to a zone file",
+		Short: "Export a parent zone's delegation data as zone file text",
+		Long: `Export a parent zone's delegation data as zone file text.
+
+The daemon returns the data. With --outfile it is written to that file
+on this host, with your permissions; without it, it goes to stdout.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			PrepArgs("zonename")
-			outfile, _ := cmd.Flags().GetString("outfile")
-			if outfile == "" {
-				fmt.Println("Error: --outfile is required")
+			// Not PrepArgs: it reports a missing zone on stdout, where
+			// the export's data goes.
+			zone, err := delExportZone(tdns.Globals.Zonename)
+			if err == nil {
+				outfile, _ := cmd.Flags().GetString("outfile")
+				err = runDelExport(cmd, zone, outfile)
+			}
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
 				os.Exit(1)
 			}
-
-			if schemestr != "" {
-				val, err := strconv.ParseUint(schemestr, 10, 8)
-				if err != nil {
-					fmt.Printf("Error: invalid scheme value %q: %s\n", schemestr, err)
-					return
-				}
-				scheme = uint8(val)
-			}
-
-			api, err := GetApiClientForCmd(cmd, true)
-			if err != nil {
-				log.Fatalf("Error: %v", err)
-			}
-			dr, err := SendDelegationCmd(api, tdns.DelegationPost{
-				Command: "export",
-				Zone:    tdns.Globals.Zonename,
-				Outfile: outfile,
-			})
-			if err != nil {
-				printDaemonError(api.Name, err)
-				os.Exit(1)
-			}
-
-			fmt.Println(dr.Msg)
 		},
 	}
+}
+
+// delExportZone is the zone del export exports: the --zone value, fully
+// qualified, or an error when none was given.
+func delExportZone(zone string) (string, error) {
+	if zone == "" {
+		return "", errors.New("zone name not specified using --zone flag")
+	}
+	return dns.Fqdn(zone), nil
+}
+
+func runDelExport(cmd *cobra.Command, zone, outfile string) error {
+	api, err := GetApiClientForCmd(cmd, false)
+	if err != nil {
+		return err
+	}
+	dr, err := SendDelegationCmd(api, tdns.DelegationPost{
+		Command: "export",
+		Zone:    zone,
+	})
+	if err != nil {
+		return err
+	}
+	if outfile == "" {
+		_, err := io.WriteString(cmd.OutOrStdout(), dr.Export)
+		return err
+	}
+	if err := writeExportFile(outfile, []byte(dr.Export)); err != nil {
+		return err
+	}
+	msg := fmt.Sprintf("%s: delegation data written to %s", zone, outfile)
+	if len(msg) > 72 {
+		msg = fmt.Sprintf("%s: delegation data written to\n  %s", zone, outfile)
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), msg)
+	return nil
+}
+
+// writeExportFile writes data to a new file next to path and renames it over
+// path, so that a reader sees the old file or the whole new one. The file is
+// created 0644 less the umask, like os.WriteFile; os.CreateTemp would make it
+// 0600 and a chmod would ignore the umask.
+func writeExportFile(path string, data []byte) error {
+	dir, base := filepath.Split(path)
+	var f *os.File
+	var tmp string
+	for i := 0; ; i++ {
+		tmp = filepath.Join(dir, fmt.Sprintf(".%s.tmp%08x", base, rand.Uint32()))
+		var err error
+		f, err = os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, fs.ErrExist) || i == 9 {
+			return err
+		}
+	}
+	_, err := f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
 }
 
 // NewDdnsCmd and NewDelCmd build the ddns and del subtrees for one daemon
@@ -233,7 +296,7 @@ func NewDelCmd(role string) *cobra.Command {
 	sync.Flags().StringVarP(&schemestr, "scheme", "S", "", "Scheme to use for synchronization of delegation")
 	sync.MarkFlagRequired("zone")
 
-	export.Flags().String("outfile", "", "Destination file path (required)")
+	export.Flags().String("outfile", "", "Write the data to this file on this host (default: stdout)")
 
 	return del
 }
@@ -261,7 +324,8 @@ func SendDelegationCmd(api *tdns.ApiClient, data tdns.DelegationPost) (tdns.Dele
 		return dr, fmt.Errorf("error from api post: %v", err)
 	}
 	if tdns.Globals.Verbose {
-		fmt.Printf("Status: %d\n", status)
+		// stderr: del export's data goes to stdout.
+		fmt.Fprintf(os.Stderr, "Status: %d\n", status)
 	}
 
 	err = json.Unmarshal(buf, &dr)
