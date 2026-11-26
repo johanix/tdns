@@ -74,6 +74,12 @@ func (h *apiAccessHolder) load() *accessState {
 	return h.p.Load()
 }
 
+// failedAtStart reports whether st is the policy of a start-up whose access
+// file could not be used: the TCP API answers 503 until a file loads.
+func (st *accessState) failedAtStart() bool {
+	return st != nil && st.Err != nil
+}
+
 // newAccessState builds the running policy from a validated file.
 func newAccessState(path string, af *AccessFile) *accessState {
 	st := &accessState{Enabled: true, File: path, KeyAuth: af.KeyAuthOn(),
@@ -298,6 +304,8 @@ func (conf *Config) reloadApiAccess() string {
 	}
 	af, addrs, err := conf.loadAccessPolicy(path)
 	switch {
+	case errors.Is(err, fs.ErrNotExist) && h.load().failedAtStart():
+		return fmt.Sprintf("\nAccess file not there yet:\n   %s\nThe TCP API still answers 503 (since start-up) until it is:\nthe first client add (or config add) creates it.", path)
 	case errors.Is(err, fs.ErrNotExist):
 		// The first enrolment: the access-file: line is new and the file
 		// is not there yet. Lines of at most 72, after the path.
@@ -323,11 +331,19 @@ func (conf *Config) reloadApiAccess() string {
 func (conf *Config) loadAccessPolicy(path string) (af *AccessFile, stopped []string, err error) {
 	af, err = LoadAccessFile(path)
 	switch {
+	case errors.Is(err, fs.ErrNotExist) && conf.Internal.ApiAccess.load().failedAtStart():
+		// Still the start-up failure: the TCP API answers 503 until a file
+		// loads, so the error stays (initApiAccess).
+		lgApi.Error("management API: the access file is still not there; the TCP API answers 503 until it loads (the first client add creates it)", "file", path)
+		conf.Internal.ServerErrors.set(ErrCatConfig, ErrSubApiAccess, fmt.Sprintf("access file %s: %v", path, err))
+		return nil, nil, err
 	case errors.Is(err, fs.ErrNotExist):
 		// The first enrolment: the access-file: line is new and the file
 		// is not there yet; /access add creates it. Nothing is wrong, so
-		// no server error is recorded (config status would show one).
+		// no server error is recorded (config status would show one), and
+		// one left from a file that failed to load before goes.
 		lgApi.Info("management API: the access file is not there yet; the running policy is unchanged, and the first client add creates it", "file", path)
+		conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
 		return nil, nil, err
 	case err != nil:
 		lgApi.Error("management API: access file NOT loaded; the running policy is unchanged", "file", path, "err", err)
