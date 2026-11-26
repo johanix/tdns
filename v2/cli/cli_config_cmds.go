@@ -543,12 +543,21 @@ func cliEntries(cfg string) (existing []ApiDetails, missing bool, err error) {
 // config update command that would change it, if any. Two daemons that
 // such an entry would confuse are an error.
 func knownEntry(o AddOptions, res *AddResult, existing []ApiDetails, info *DaemonApi, tcpURL string) (bool, error) {
+	// Every address the daemon listens on identifies it, not only the
+	// first, which a new entry uses.
+	addrs := map[string]bool{}
+	for _, a := range info.Addresses {
+		if u, err := apiBaseURL(a, info.UseTLS); err == nil {
+			addrs[hostPort(u)] = true
+		}
+	}
 	for _, e := range existing {
 		sameFile := e.ConfigFile != "" && resolvedPath(e.ConfigFile) == resolvedPath(info.ConfigFile)
 		// No TCP address: the entry reaches the daemon over its socket,
 		// through config-file: (or, written before that, a unix:// baseurl).
 		noTCP := e.BaseURL == "" || isUnixURL(e.BaseURL)
-		sameAddr := tcpURL != "" && hostPort(e.BaseURL) == hostPort(tcpURL)
+		hp := hostPort(e.BaseURL)
+		sameAddr := hp != "" && addrs[hp]
 		switch {
 		case sameFile && (sameAddr || noTCP):
 		case sameFile:
@@ -632,13 +641,15 @@ func socketOrMissing(path string) bool {
 
 // prospectiveClientConf is the client: block the CLI will load from cfg
 // once target holds out: the whole merged view (include: files,
-// cli.localconfig) with the edited file laid over the real one.
+// cli.localconfig) with the edited file laid over the real one. A config
+// that does not load, or a client: block that does not decode, is an error:
+// the default pair would be enrolled in its place.
 func prospectiveClientConf(cfg, target string, out []byte) (CliClientConf, error) {
 	ofs, err := overlayFs(target, out)
 	if err != nil {
 		return CliClientConf{}, err
 	}
-	return readCliClientConf(cfg, ofs), nil
+	return readCliClientConf(cfg, ofs)
 }
 
 // renderAdd is target with entry added, checked to load, the way the CLI
