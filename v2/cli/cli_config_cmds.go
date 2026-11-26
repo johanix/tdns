@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -290,6 +291,10 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	}
 	list, err := accessOver(sock, tdns.AccessPost{Command: "list"})
 	switch errno := socketErrno(err); {
+	case errno == syscall.ECONNREFUSED && !socketOrMissing(info.Socket):
+		// Linux refuses a dial to a file that is not a socket: no daemon
+		// can serve its socket there, so this is not a stopped daemon.
+		return nil, fmt.Errorf("the daemon's local admin socket path is there but is\nnot a socket:\n   %s\nThe daemon cannot serve its socket there. Remove that\nfile, start the daemon, and run config add again", info.Socket)
 	case errno == syscall.ENOENT || errno == syscall.ECONNREFUSED:
 		// Stopped: the config-file:-only entry.
 	case errno != 0:
@@ -304,14 +309,28 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	cert := res.Running && tcpURL != ""
 	if cert {
 		switch {
-		case list.File == "":
+		// A file the config names but that is not there yet is no
+		// refusal: the add below creates it (the first enrolment).
+		case list.File == "" && list.Configured == "":
 			return nil, errors.New(list.Msg) // the daemon's advice: no access file
 		case len(list.ServerPins) == 0:
 			return nil, fmt.Errorf("the daemon serves no certificate on its TCP API (is it\nlistening on %s?), so there is nothing to pin", info.Addresses[0])
 		}
 		entry.BaseURL, entry.AuthMethod, entry.TLSAuth, entry.Pins = tcpURL, "certificate", "pin", list.ServerPins
 	}
-	cc := ReadCliClientConf(o.CliConfig)
+	// The pair is the one the CLI config will name once written: a
+	// cli.localconfig with its own client: block counts, also when the
+	// CLI config is not there yet (prospectiveClientConf).
+	var cc CliClientConf
+	if cert {
+		out, err := renderAdd(o, target, existing, entry, res.Created)
+		if err != nil {
+			return nil, err // refused before the enrolment: a hidden list, a flow style
+		}
+		if cc, err = prospectiveClientConf(o.CliConfig, target, out); err != nil {
+			return nil, err
+		}
+	}
 	certPath, keyPath := clientCertPaths(cc)
 	client := o.ClientName
 	if client == "" {
@@ -336,11 +355,6 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 			"have the daemon add its pin as " + client + " (read-write)",
 			"check one request over TCP to " + tcpURL}
 	case cert:
-		// Refused before the enrolment, not after: a hidden list, a flow
-		// style.
-		if _, err := renderAdd(o, target, existing, entry, res.Created); err != nil {
-			return nil, err
-		}
 		if err := enrol(sock, certPath, keyPath, client, cc, &entry, res); err != nil {
 			return nil, err
 		}
@@ -373,18 +387,23 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		case known:
 			return res, nil
 		}
-		// The pin enrolled is this pair's; the entry is used with whatever
-		// pair the client: block names.
-		if enrolled {
-			if c, k := clientCertPaths(ReadCliClientConf(o.CliConfig)); c != certPath || k != keyPath {
-				// The daemon refuses a second pin under one name.
-				return nil, fmt.Errorf("the client pair in %s changed while config add\nran (now %s); nothing was written. The pin of\n%s stays enrolled as %s: put that pair back,\nor run config add again with another --client-name", o.CliConfig, c, certPath, client)
-			}
-		}
 	}
 	out, err := renderAdd(o, target, existing, entry, res.Created)
 	if err != nil {
 		return nil, keep(err)
+	}
+	// The pin enrolled is this pair's; the entry is used with whatever pair
+	// the config written names: checked on that config, under the lock.
+	if enrolled {
+		c, k := "", ""
+		pc, err := prospectiveClientConf(o.CliConfig, target, out)
+		if err == nil {
+			c, k = clientCertPaths(pc)
+		}
+		if err != nil || c != certPath || k != keyPath {
+			// The daemon refuses a second pin under one name.
+			return nil, fmt.Errorf("the client pair in %s changed while config add\nran (now %s); nothing was written. The pin of\n%s stays enrolled as %s: put that pair back,\nor run config add again with another --client-name", o.CliConfig, c, certPath, client)
+		}
 	}
 	res.Entry, res.File = entry, target
 	if !res.Running && tcpURL != "" {
@@ -584,7 +603,8 @@ func enrol(sock *tdns.ApiClient, certPath, keyPath, client string, cc CliClientC
 		// A refusal, or a pin written to the access file but not loaded.
 		return fmt.Errorf("the daemon refused or did not load your pin; nothing was written:\n%s\nIf it says the file was written, run config add again with\nthe same --client-name once that is fixed: it reuses the pin", ans.ErrorMsg)
 	}
-	res.Steps = append(res.Steps, "The daemon: "+strings.ReplaceAll(ans.Msg, "\n", "\n   "))
+	said := "The daemon: " + strings.ReplaceAll(ans.Msg, "\n", "\n   ")
+	res.Steps = append(res.Steps, said)
 	if len(ans.ServerPins) > 0 {
 		entry.Pins = ans.ServerPins
 	}
@@ -597,7 +617,27 @@ func enrol(sock *tdns.ApiClient, certPath, keyPath, client string, cc CliClientC
 			return nil
 		}
 	}
-	return fmt.Errorf("the daemon added your pin, but a request over TCP to\n%s failed: %v\nNothing was written. The pin stays enrolled: once that is\nfixed, run config add again, which reuses it", entry.BaseURL, err)
+	// What the daemon said stays: a pin there already but disabled is
+	// refused over TCP, and only its answer says to enable it.
+	return fmt.Errorf("%s\nbut a request over TCP to\n%s failed: %v\nNothing was written. The pin stays enrolled: once that is\nfixed, run config add again, which reuses it", said, entry.BaseURL, err)
+}
+
+// socketOrMissing reports whether path is a socket, or not there to look at:
+// anything else at a socket path is not a stopped daemon's stale socket.
+func socketOrMissing(path string) bool {
+	fi, err := os.Lstat(path)
+	return err != nil || fi.Mode()&fs.ModeSocket != 0
+}
+
+// prospectiveClientConf is the client: block the CLI will load from cfg
+// once target holds out: the whole merged view (include: files,
+// cli.localconfig) with the edited file laid over the real one.
+func prospectiveClientConf(cfg, target string, out []byte) (CliClientConf, error) {
+	ofs, err := overlayFs(target, out)
+	if err != nil {
+		return CliClientConf{}, err
+	}
+	return readCliClientConf(cfg, ofs), nil
 }
 
 // renderAdd is target with entry added, checked to load, the way the CLI

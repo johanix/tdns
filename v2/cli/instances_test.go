@@ -398,3 +398,14 @@ func TestDuplicateInstanceNameIsReportedAsADuplicate(t *testing.T) {
 		t.Errorf("sectdns role maps to %q after the duplicate was refused, want \"sectdns\"", got)
 	}
 }
+
+// The client: pair is read as the CLI's full load decodes it: an
+// environment leaf override (CLIENT.CERT) wins over the file, as there.
+func TestReadCliClientConfTakesTheEnvironment(t *testing.T) {
+	cfg := filepath.Join(t.TempDir(), "tdns-ncli.yaml")
+	writeFile(t, cfg, "client:\n   cert: /a/me.crt\n   key: /a/me.key\n")
+	t.Setenv("CLIENT.CERT", "/b/me.crt")
+	if cc := ReadCliClientConf(cfg); cc.Cert != "/b/me.crt" || cc.Key != "/a/me.key" {
+		t.Errorf("%+v; want the environment's cert and the file's key", cc)
+	}
+}
