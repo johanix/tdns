@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -35,29 +37,6 @@ type ImrServerTransportStats struct {
 	Truncated uint64            `json:"truncated"`
 }
 
-// transportName returns the string name for t, with a stable fallback so an
-// unregistered transport (a future enum value missing from TransportToString)
-// never produces an empty-string map key in the API JSON.
-func transportName(t core.Transport) string {
-	if name, ok := core.TransportToString[t]; ok {
-		return name
-	}
-	return fmt.Sprintf("unknown-%d", t)
-}
-
-// transportCountsToStrings converts a transport-keyed counter map to a
-// name-keyed one for JSON transport over the API.
-func transportCountsToStrings(m map[core.Transport]uint64) map[string]uint64 {
-	if len(m) == 0 {
-		return nil
-	}
-	out := make(map[string]uint64, len(m))
-	for t, c := range m {
-		out[transportName(t)] = c
-	}
-	return out
-}
-
 // transportWeightsToStrings converts a transport-keyed weight map to a
 // name-keyed one for JSON transport over the API.
 func transportWeightsToStrings(m map[core.Transport]uint8) map[string]uint8 {
@@ -66,7 +45,7 @@ func transportWeightsToStrings(m map[core.Transport]uint8) map[string]uint8 {
 	}
 	out := make(map[string]uint8, len(m))
 	for t, w := range m {
-		out[transportName(t)] = w
+		out[imrcore.TransportName(t)] = w
 	}
 	return out
 }
@@ -422,11 +401,11 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				resp.ErrorMsg = fmt.Sprintf("unknown RR type: %s", qtypeStr)
 				return
 			}
-			// Asked as a DNS client asks (asClientQuery), so that it is
+			// Asked as a DNS client asks (imrcore.AsClientQuery), so that it is
 			// answered as dig is: a DS or DNSKEY question at a CNAME owner
 			// follows the CNAME (#875). It is counted as client traffic too,
 			// with no PRIVACY level.
-			ir, err := imr.ImrQuery(asClientQuery(r.Context()), qname, qtype, dns.ClassINET, nil)
+			ir, err := imr.ImrQuery(imrcore.AsClientQuery(r.Context()), qname, qtype, dns.ClassINET)
 			data := map[string]interface{}{"qname": qname, "qtype": dns.TypeToString[qtype]}
 			if ir != nil {
 				data["state"] = cache.ValidationStateToString[ir.ValidationState]
@@ -547,9 +526,9 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 						Zone:      item.Key,
 						Server:    name,
 						Weights:   transportWeightsToStrings(server.GetTransportWeights()),
-						Attempted: transportCountsToStrings(ts.Attempted),
-						Used:      transportCountsToStrings(ts.Used),
-						Failed:    transportCountsToStrings(ts.Failed),
+						Attempted: imrcore.TransportCountsToStrings(ts.Attempted),
+						Used:      imrcore.TransportCountsToStrings(ts.Used),
+						Failed:    imrcore.TransportCountsToStrings(ts.Failed),
 						Truncated: ts.Truncated,
 					})
 				}

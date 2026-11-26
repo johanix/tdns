@@ -44,7 +44,7 @@ const coFlagBit = uint32(1 << 14)
 // Answers OK EDNS header flag and, for nonexistent names, will additionally
 // set the response code field to NXDOMAIN". Two acts, and this is only the
 // first. tdns sets it on every response to a query that carried CO; see
-// QueryResponder and ImrResponder.
+// QueryResponder and (*imr.Imr).Responder.
 func SetCO(m *dns.Msg) {
 	if m == nil {
 		return

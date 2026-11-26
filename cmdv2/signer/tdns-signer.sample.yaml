@@ -183,6 +183,7 @@ log:
    #   signer    DNSSEC signing and the key-state worker
    #   engine    the refresh engine
    #   rollover  key rollover
+   # The internal resolver has its own: imr, and imr-lookups for its lookups.
    # subsystems:
    #   zones:  debug
    #   signer: debug

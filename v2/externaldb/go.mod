@@ -8,6 +8,7 @@ replace (
 	github.com/johanix/tdns/v2/cache => ../cache
 	github.com/johanix/tdns/v2/core => ../core
 	github.com/johanix/tdns/v2/edns0 => ../edns0
+	github.com/johanix/tdns/v2/imr => ../imr
 )
 
 replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.6
@@ -35,6 +36,7 @@ require (
 	github.com/johanix/tdns/v2/cache v0.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/core v0.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
+	github.com/johanix/tdns/v2/imr v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-sqlite3 v1.14.52 // indirect

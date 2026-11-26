@@ -67,10 +67,10 @@ func TestASignalDuringAFailedStopStillExitsWithAFailureStatus(t *testing.T) {
 }
 
 // After a failed stop, MainLoop waits for the engines only up to
-// failedStopDrainLimit: one that never finishes does not keep the daemon up.
+// stopDrainLimit: one that never finishes does not keep the daemon up.
 func TestAFailedStopDoesNotWaitForAStuckEngine(t *testing.T) {
 	if os.Getenv(shutdownerProbeEnv) == "stuck" {
-		failedStopDrainLimit = 300 * time.Millisecond
+		stopDrainLimit = 300 * time.Millisecond
 		engineWg.Add(1) // an engine that never finishes
 		conf := &Config{}
 		conf.Internal.APIStopCh = make(chan struct{})
@@ -84,11 +84,75 @@ func TestAFailedStopDoesNotWaitForAStuckEngine(t *testing.T) {
 	// it waited for the stuck engine all the same.
 	start := time.Now()
 	code, out := runShutdownerProbe(t, "TestAFailedStopDoesNotWaitForAStuckEngine", "stuck")
-	if elapsed := time.Since(start); elapsed >= failedStopDrainLimit {
-		t.Fatalf("a failed stop with a stuck engine took %v, want less than %v\n%s", elapsed, failedStopDrainLimit, out)
+	if elapsed := time.Since(start); elapsed >= stopDrainLimit {
+		t.Fatalf("a failed stop with a stuck engine took %v, want less than %v\n%s", elapsed, stopDrainLimit, out)
 	}
 	if code != 1 {
 		t.Fatalf("a failed stop with a stuck engine exited %d, want 1\n%s", code, out)
+	}
+	if !strings.Contains(out, "exiting anyway") {
+		t.Fatalf("no log line about the engines still running\n%s", out)
+	}
+}
+
+// A stop by signal or by the API's stop command lets the engines finish before
+// MainLoop returns. main exits when MainLoop returns, and an engine's last line,
+// such as ImrEngine's "terminating", was lost when the exit came first.
+func TestAStopWaitsForTheEngines(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(conf *Config, cancel context.CancelFunc)
+	}{
+		{"signal", func(conf *Config, cancel context.CancelFunc) { cancel() }},
+		{"stop command", func(conf *Config, cancel context.CancelFunc) { close(conf.Internal.APIStopCh) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf := &Config{}
+			conf.Internal.APIStopCh = make(chan struct{})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			finished := make(chan struct{})
+			StartEngineNoError(&Globals.App, "test engine", func() {
+				<-ctx.Done()
+				// A pause before it finishes, so that a MainLoop that does
+				// not wait returns first.
+				time.Sleep(50 * time.Millisecond)
+				close(finished)
+			})
+			tc.stop(conf, cancel)
+			conf.MainLoop(ctx, cancel)
+			select {
+			case <-finished:
+			default:
+				t.Fatal("MainLoop returned before the engine finished")
+			}
+		})
+	}
+}
+
+// After a stop by signal, MainLoop waits for the engines only up to
+// stopDrainLimit: one that never finishes does not keep the daemon up.
+func TestAStopDoesNotWaitForAStuckEngine(t *testing.T) {
+	if os.Getenv(shutdownerProbeEnv) == "stuck-signal" {
+		stopDrainLimit = 300 * time.Millisecond
+		engineWg.Add(1) // an engine that never finishes
+		conf := &Config{}
+		conf.Internal.APIStopCh = make(chan struct{})
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // the signal
+		conf.MainLoop(ctx, cancel)
+		os.Exit(0) // as when main returns after MainLoop
+	}
+
+	// The child shortens the limit. Taking the default limit or longer means
+	// it waited for the stuck engine all the same.
+	start := time.Now()
+	code, out := runShutdownerProbe(t, "TestAStopDoesNotWaitForAStuckEngine", "stuck-signal")
+	if elapsed := time.Since(start); elapsed >= stopDrainLimit {
+		t.Fatalf("a stop with a stuck engine took %v, want less than %v\n%s", elapsed, stopDrainLimit, out)
+	}
+	if code != 0 {
+		t.Fatalf("a stop with a stuck engine exited %d, want 0\n%s", code, out)
 	}
 	if !strings.Contains(out, "exiting anyway") {
 		t.Fatalf("no log line about the engines still running\n%s", out)

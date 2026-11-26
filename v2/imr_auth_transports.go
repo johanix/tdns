@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	"github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
@@ -166,7 +168,7 @@ func authTransportsRow(s cache.AuthServerStats) ImrAuthTransportsRow {
 		row.Redirected[authTransportColumn(t)] += c
 	}
 	for _, level := range []edns0.PrivacyLevel{edns0.PrivacyNone, edns0.PrivacyOpportunistic, edns0.PrivacyStrict} {
-		if shares := expectedShares(s.Transports, s.Weights, level); shares != nil {
+		if shares := imrcore.ExpectedShares(s.Transports, s.Weights, level); shares != nil {
 			row.Expected[level.String()] = transportWeightsToStrings(shares)
 		}
 	}
@@ -218,17 +220,17 @@ func authTransportColumn(t core.Transport) string {
 	case core.TransportDoH:
 		return ImrClientTransports[ctDoH]
 	}
-	return transportName(t)
+	return imrcore.TransportName(t)
 }
 
 // signalTokenName names a transport by its oots token (udp, tcp, dot, doq,
 // doh), so that a signal reads as it is written and udp and tcp are told
-// apart. A transport without one falls back to transportName.
+// apart. A transport without one falls back to imrcore.TransportName.
 func signalTokenName(t core.Transport) string {
 	if name, ok := core.TransportToSignalToken[t]; ok {
 		return name
 	}
-	return transportName(t)
+	return imrcore.TransportName(t)
 }
 
 // signalWeightsToTokens converts a received signal's weights to a map keyed

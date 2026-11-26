@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -159,7 +161,7 @@ func (zd *ZoneData) BuildDsyncPublication() (*DsyncPublication, error) {
 	//
 	// So: whatever is already published stays exactly as it is, and only
 	// schemes with no DSYNC record of their own are synthesized.
-	owner, err := zd.GetOwner(dsyncOwnerName(zd.ZoneName))
+	owner, err := zd.GetOwner(imrcore.DsyncOwnerName(zd.ZoneName))
 	if err != nil {
 		return nil, fmt.Errorf("BuildDsyncPublication: error fetching _dsync owner for zone %s: %v", zd.ZoneName, err)
 	}
@@ -230,7 +232,7 @@ func (zd *ZoneData) BuildDsyncPublication() (*DsyncPublication, error) {
 				return nil, fmt.Errorf("zone %s: no notify types found, config broken", zd.ZoneName)
 			}
 			for _, t := range notifyTypes {
-				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", dsyncOwnerName(zd.ZoneName), ttl, t, s, port, target)
+				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", imrcore.DsyncOwnerName(zd.ZoneName), ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
@@ -266,7 +268,7 @@ func (zd *ZoneData) BuildDsyncPublication() (*DsyncPublication, error) {
 				return nil, fmt.Errorf("zone %s: no update types found, config broken", zd.ZoneName)
 			}
 			for _, t := range updateTypes {
-				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", dsyncOwnerName(zd.ZoneName), ttl, t, s, port, target)
+				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", imrcore.DsyncOwnerName(zd.ZoneName), ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
@@ -307,7 +309,7 @@ func (zd *ZoneData) BuildDsyncPublication() (*DsyncPublication, error) {
 			}
 
 			for _, t := range apiconf.Types {
-				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", dsyncOwnerName(zd.ZoneName), ttl, t, s, apiconf.Port, target)
+				foo := fmt.Sprintf("%s %d IN DSYNC %s %s %d %s", imrcore.DsyncOwnerName(zd.ZoneName), ttl, t, s, apiconf.Port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
 					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
@@ -436,27 +438,6 @@ func (zd *ZoneData) PublishDsyncRRs(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// dsyncOwnerName is the owner of a zone's DSYNC RRset, and
-// dsyncPerChildLookupName a child's own name under it: _dsync.<zone> and
-// <child>._dsync.<zone>, and at the root _dsync. and <tld>._dsync. (RFC 9859).
-//
-// The root's used to be _dsync.root. and <tld>._dsync.root. That was a clean
-// switch (#757): nothing publishes or looks up the old names.
-func dsyncOwnerName(zonename string) string {
-	return dsyncNameUnder("_dsync", zonename)
-}
-
-func dsyncPerChildLookupName(childLabel, parent string) string {
-	return dsyncNameUnder(childLabel+"._dsync", parent)
-}
-
-func dsyncNameUnder(prefix, zonename string) string {
-	if zonename = dns.Fqdn(zonename); zonename == "." {
-		return prefix + "."
-	}
-	return prefix + "." + zonename
 }
 
 // expandDsyncTemplate fills {ZONENAME} in a target template. A target is any
@@ -618,7 +599,7 @@ func (zd *ZoneData) UnpublishDsyncRRs(ctx context.Context) error {
 	// (see core/rr_dsync.go). The previous form omitted the leading type field
 	// and quoted the scheme, so dns.NewRR failed on every zone and unpublish
 	// could never do anything at all.
-	dsync_str := fmt.Sprintf("%s 0 IN DSYNC CDS NOTIFY 53 .", dsyncOwnerName(zd.ZoneName))
+	dsync_str := fmt.Sprintf("%s 0 IN DSYNC CDS NOTIFY 53 .", imrcore.DsyncOwnerName(zd.ZoneName))
 
 	anti_dsync, err := dns.NewRR(dsync_str)
 	if err != nil {

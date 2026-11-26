@@ -431,7 +431,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 // Returns: (zoneName, nsRRset, error)
 func (imr *Imr) findEnclosingZoneNS(ctx context.Context, qname string, lg *log.Logger) (string, *core.RRset, error) {
 	// Step 1: Determine if the name is a zone by querying for SOA
-	soaResp, err := imr.ImrQuery(ctx, qname, dns.TypeSOA, dns.ClassINET, nil)
+	soaResp, err := imr.ImrQuery(ctx, qname, dns.TypeSOA, dns.ClassINET)
 	if err != nil {
 		return "", nil, fmt.Errorf("error querying SOA for %s: %v", qname, err)
 	}
@@ -445,7 +445,7 @@ func (imr *Imr) findEnclosingZoneNS(ctx context.Context, qname string, lg *log.L
 			lg.Printf("findEnclosingZoneNS: %s is a zone (SOA found), querying for NS RRset", qname)
 		}
 		zoneName = qname
-		nsResp, err := imr.ImrQuery(ctx, qname, dns.TypeNS, dns.ClassINET, nil)
+		nsResp, err := imr.ImrQuery(ctx, qname, dns.TypeNS, dns.ClassINET)
 		if err != nil {
 			return "", nil, fmt.Errorf("error querying NS for zone %s: %v", qname, err)
 		}
@@ -466,7 +466,7 @@ func (imr *Imr) findEnclosingZoneNS(ctx context.Context, qname string, lg *log.L
 		if lg != nil {
 			lg.Printf("findEnclosingZoneNS: parent zone for %s is %s, querying for NS RRset", qname, parentZone)
 		}
-		nsResp, err := imr.ImrQuery(ctx, parentZone, dns.TypeNS, dns.ClassINET, nil)
+		nsResp, err := imr.ImrQuery(ctx, parentZone, dns.TypeNS, dns.ClassINET)
 		if err != nil {
 			return "", nil, fmt.Errorf("error querying NS for parent zone %s: %v", parentZone, err)
 		}
@@ -580,7 +580,7 @@ func (scanner *Scanner) queryAllNS(ctx context.Context, qname string, qtype uint
 			if haveGlue {
 				break
 			}
-			addrResp, err := imr.ImrQuery(ctx, nsName, rrtype, dns.ClassINET, nil)
+			addrResp, err := imr.ImrQuery(ctx, nsName, rrtype, dns.ClassINET)
 			if err != nil {
 				if scanner.Verbose && lg != nil {
 					lg.Printf("queryAllNSAndCompare: error querying %s for NS %s: %v", dns.TypeToString[rrtype], nsName, err)
@@ -796,7 +796,7 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 
 	if !checkAllNS {
 		// Simple case: just query for CDS and compare to CurrentData
-		resp, err := imr.ImrQuery(ctx, zone, dns.TypeCDS, dns.ClassINET, nil)
+		resp, err := imr.ImrQuery(ctx, zone, dns.TypeCDS, dns.ClassINET)
 		if err != nil {
 			scanLog.Printf("CheckCDS: Zone %s: error from ImrQuery: %v", zone, err)
 			response.Error = true
@@ -1499,7 +1499,7 @@ func (scanner *Scanner) queryCDSAtSignalingNames(ctx context.Context, childZone 
 				return nil, false, fmt.Errorf("IMR engine required for RFC 9615 signaling queries")
 			}
 		}
-		resp, err := imr.ImrQuery(ctx, signalingName, dns.TypeCDS, dns.ClassINET, nil)
+		resp, err := imr.ImrQuery(ctx, signalingName, dns.TypeCDS, dns.ClassINET)
 		if err != nil {
 			scanLog.Printf("queryCDSAtSignalingNames: %s: error querying %s: %v", childZone, signalingName, err)
 			return nil, false, fmt.Errorf("signaling query to %s failed: %v", signalingName, err)

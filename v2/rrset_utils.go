@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -231,7 +233,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 						lg.Warn("AuthQueryEngine: answer is not expected RR type", "expectedRrtype", dns.TypeToString[req.rrtype], "rr", rr.String())
 					}
 				}
-				req.response <- &AuthQueryResponse{rrset: &rrset, authority: authorityRRsets(res.Ns)}
+				req.response <- &AuthQueryResponse{rrset: &rrset, authority: imrcore.AuthorityRRsets(res.Ns)}
 				continue
 			}
 
@@ -273,7 +275,7 @@ func AuthQueryEngine(ctx context.Context, requests chan AuthQueryRequest) {
 				// proof of it: the SOA, and in a signed zone the NSEC or
 				// NSEC3 records and their RRSIGs. Kept, so that a scan that
 				// must see an absence proven can validate it (#779).
-				resp.authority = authorityRRsets(res.Ns)
+				resp.authority = imrcore.AuthorityRRsets(res.Ns)
 			}
 			req.response <- resp
 		}
@@ -286,7 +288,7 @@ func (scanner *Scanner) AuthQueryNG(qname, ns string, rrtype uint16, transport s
 }
 
 // authQueryWithDenial is AuthQueryNG, and the authority section of an
-// authoritative answer, grouped into RRsets (authorityRRsets): with no records
+// authoritative answer, grouped into RRsets (imrcore.AuthorityRRsets): with no records
 // of the type, the proof that there are none; with records synthesized from a
 // wildcard, the proof that goes with them.
 func (scanner *Scanner) authQueryWithDenial(qname, ns string, rrtype uint16, transport string) (*core.RRset, []*core.RRset, error) {

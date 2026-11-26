@@ -19,53 +19,12 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net/netip"
-	"os"
 	"strings"
-	"sync"
-	"time"
+
+	imrcore "github.com/johanix/tdns/v2/imr"
 
 	"github.com/miekg/dns"
 )
-
-// caPoolCache memoizes parsed trust-anchor pools per ca-file, invalidated by
-// the file's modification time — so a busy primary does not re-read and
-// re-parse the same ca-file on every transfer-time PKIX verification.
-var (
-	caPoolMu    sync.Mutex
-	caPoolCache = map[string]caPoolEntry{}
-)
-
-type caPoolEntry struct {
-	modTime time.Time
-	pool    *x509.CertPool
-}
-
-// loadCAPool returns the trust-anchor pool for caFile, reusing a cached parse
-// when the file is unchanged (by mtime) and re-parsing when it has been
-// modified. Errors mirror the previous inline behavior.
-func loadCAPool(caFile string) (*x509.CertPool, error) {
-	fi, err := os.Stat(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("reading ca-file: %v", err)
-	}
-	mt := fi.ModTime()
-
-	caPoolMu.Lock()
-	defer caPoolMu.Unlock()
-	if e, ok := caPoolCache[caFile]; ok && e.modTime.Equal(mt) {
-		return e.pool, nil
-	}
-	data, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("reading ca-file: %v", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(data) {
-		return nil, fmt.Errorf("no usable certificates in ca-file %s", caFile)
-	}
-	caPoolCache[caFile] = caPoolEntry{modTime: mt, pool: pool}
-	return pool, nil
-}
 
 // Transfer-auth mechanism classes, weakest to strongest. Each tls-* class
 // escalates ON TOP of the matched entry's address/TSIG requirements — it
@@ -240,7 +199,7 @@ func pinMatches(leaf *x509.Certificate, pins []string) bool {
 // identity. The listener used RequestClientCert, so nothing was verified
 // during the handshake; this is the verification.
 func verifyClientCertPKIX(leaf *x509.Certificate, presented []*x509.Certificate, caFile, name string) error {
-	roots, err := loadCAPool(caFile)
+	roots, err := imrcore.LoadCAPool(caFile)
 	if err != nil {
 		return err
 	}

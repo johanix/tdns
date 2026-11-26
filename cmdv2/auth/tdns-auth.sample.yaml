@@ -843,7 +843,9 @@ log:
    #   config     config-file parsing and reload
    #   zones      zone load, dynamic zones, AXFR/IXFR (in and out)
    #   dns        DNS query / lookup / resolution
-   #   engine     refresh engine + internal resolver (IMR) engine
+   #   engine     refresh engine
+   #   imr        internal resolver (IMR): priming, cache, its listeners
+   #   imr-lookups  the internal resolver's lookups
    #   handler    DNS request handlers
    #   api        HTTP management API
    #   signer     DNSSEC signing and the key-state worker
@@ -853,6 +855,10 @@ log:
    #   CDS, CSYNC, DNSKEY, GENERIC   inbound NOTIFY handling, per RR type
    # Other subsystems (present, used by specific features / app types):
    #   agent, combiner, gossip, transport, elect, provider-group, signal-republish
+   #
+   # The internal resolver logs as imr, and its lookups as imr-lookups, apart
+   # from engine and dns. Its level is set on its own: engine: debug does not
+   # turn up the resolver, and imr: warn quiets it without quieting the rest.
    #
    # subsystems:
    #   dns:        debug

@@ -32,7 +32,7 @@ func StartImrForCli(rootHints string) (context.Context, context.CancelFunc, *tdn
 	// Pass quiet=true to suppress startup logging
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		err := Conf.ImrEngine(ctx, true)
+		err := Conf.ImrEngine(ctx)
 		if err != nil {
 			cancel()
 			log.Fatalf("Error: %v", err)

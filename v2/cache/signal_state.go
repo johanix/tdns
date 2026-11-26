@@ -5,7 +5,6 @@
 package cache
 
 import (
-	"log"
 	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -149,6 +148,6 @@ func (rrcache *RRsetCacheT) equalToSecureCopy(rrset *core.RRset) bool {
 	if cached == nil || cached.State != ValidationStateSecure || cached.RRset == nil || len(cached.RRset.RRs) == 0 {
 		return false
 	}
-	differ, _, _ := cached.RRset.RRsetDiffer(rrset, log.Default(), false, false)
+	differ, _, _ := cached.RRset.RRsetDiffer(rrset, rrcache.DebugLog(), false, false)
 	return !differ
 }

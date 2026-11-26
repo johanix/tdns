@@ -125,11 +125,36 @@ func (zd *ZoneData) adoptPersistedCopyAtFirstBind(ctx context.Context, verbose, 
 	}
 	lg.Info("adopted persisted zone copy at first bind",
 		"zone", zd.ZoneName, "file", fname, "serial", zd.IncomingSerial)
+	zd.relayCopyUnconfirmed.Store(Globals.App.Type == AppTypeAgent && !zoneMayOriginateContent(zd))
 
 	// The copy is in memory, so its serial is known and the recorded
 	// confirmation can be matched against it. Only on this path: a copy that
 	// arrives by transfer is stamped fresh by DoTransfer instead.
 	zd.restoreRefreshStateAtFirstBind()
+}
+
+// relayCopyNeedsTransfer reports whether a tdns-agent relay still serves a
+// copy no installed transfer has replaced: the one it adopted from disk at
+// first bind, or the one it wrote itself before a change ended its origination
+// (markRelayCopyIfOriginationEnded). Such a copy is replaced by a forced
+// transfer at the first usable SOA, whatever the serials say, and only a
+// transfer whose publish installed it confirms the copy.
+//
+// A relay serves what it received at the serial it received it with (#1157),
+// but a copy written by an agent from before #1157 carries a serial the agent
+// counted itself, which names none of the upstream's versions. Compared with
+// the upstream's serial it misleads every way. Ahead, DoTransfer never asks
+// for a transfer, and the relay misses every upstream change until the
+// upstream's serial passes it. Behind, an IXFR from it applies a delta to the
+// wrong base. Equal, the copy looks current, and a transfer at that serial is
+// discarded as unchanged. A forced transfer is a full one, never discarded.
+//
+// The cost is one full transfer per relayed zone after each start, also for a
+// copy that did carry the upstream's serial: nothing in a copy says which
+// agent wrote it. The caller asks only after a usable SOA: the placeholder 0
+// that comes without one is no serial, and forces nothing.
+func (zd *ZoneData) relayCopyNeedsTransfer() bool {
+	return zd.relayCopyUnconfirmed.Load()
 }
 
 func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, conf *Config) (bool, error) {
@@ -141,6 +166,10 @@ func (zd *ZoneData) Refresh(ctx context.Context, verbose, debug, force bool, con
 // than around this call.
 func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, conf *Config, gate *transferGate) (bool, error) {
 	var updated bool
+
+	// Before anything this refresh reads: a relay-copy mark made after this
+	// point must outlive the refresh (relayCopyMarks).
+	marks := zd.relayCopyMarks.Load()
 
 	// Collect dynamic RRs before refresh (they will be lost during refresh)
 	dynamicRRs := zd.CollectDynamicRRs(conf)
@@ -186,9 +215,14 @@ func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, con
 				lg.Warn("zone refresh: no primary resolved this cycle, will retry next refresh", "zone", zd.ZoneName, "unresolved", res.Unresolved)
 			}
 		}
-		do_transfer, upstream_serial, err := zd.DoTransfer(ctx, conf)
+		do_transfer, upstream_serial, usableSOA, err := zd.doTransfer(ctx, conf)
 		if err != nil {
 			return false, err
+		}
+		if usableSOA && !force && zd.relayCopyNeedsTransfer() {
+			lg.Info("relayed zone: replacing an unconfirmed copy with a full transfer",
+				"zone", zd.ZoneName, "incoming_serial", zd.IncomingSerial, "upstream_serial", upstream_serial)
+			force = true
 		}
 
 		if do_transfer || force {
@@ -197,7 +231,7 @@ func (zd *ZoneData) refresh(ctx context.Context, verbose, debug, force bool, con
 			} else if force {
 				lg.Debug("forced retransfer regardless of SOA serial", "zone", zd.ZoneName)
 			}
-			updated, err = zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, gate)
+			updated, err = zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, gate, marks)
 			if err != nil {
 				// DEBUG: the caller's noteRefreshFailure logs the one ERROR
 				// for this refresh, with every upstream and its error.
@@ -368,12 +402,21 @@ func setUpstreamFailure(failures []upstreamFailure, f upstreamFailure) []upstrea
 // probeRetryPolicy). It comes after the whole first pass, so a quiet upstream
 // never holds up a healthy sibling.
 func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32, error) {
+	transfer, serial, _, err := zd.doTransfer(ctx, conf)
+	return transfer, serial, err
+}
+
+// doTransfer is DoTransfer that also reports whether a primary gave a usable
+// SOA. Without one the serial is a placeholder 0, not a serial: every primary
+// answering with an unusable rcode returns (false, 0, false, nil), and a
+// genuine SOA can carry serial 0.
+func (zd *ZoneData) doTransfer(ctx context.Context, conf *Config) (bool, uint32, bool, error) {
 	if zd == nil {
 		panic("DoTransfer: zd == nil")
 	}
 
 	if len(zd.Upstreams) == 0 {
-		return false, 0, fmt.Errorf("DoTransfer: zone %s has no upstreams configured", zd.ZoneName)
+		return false, 0, false, fmt.Errorf("DoTransfer: zone %s has no upstreams configured", zd.ZoneName)
 	}
 
 	// zd.Upstreams is mutated in place under zd.mu by the refresh engine, so
@@ -488,7 +531,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 			}
 			// Nobody is waiting for this result any more; stop walking upstreams.
 			if cerr := ctx.Err(); cerr != nil {
-				return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
+				return false, 0, false, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
 			}
 
 			// Fresh message per attempt: TSIG signing adds an RR with a per-attempt
@@ -552,7 +595,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 				// the walk. Testing errors.Is(err, DeadlineExceeded) here would
 				// abandon every remaining sibling the moment one primary went quiet.
 				if cerr := ctx.Err(); cerr != nil {
-					return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
+					return false, 0, false, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, cerr)
 				}
 				// Transport failure (or a TSIG response-verify failure) — try the next sibling.
 				lg.Warn("DoTransfer: SOA probe failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
@@ -591,10 +634,10 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 					// helper; this one did not.
 					if !serialNewer(soa.Serial, zd.IncomingSerial) {
 						zd.noteSuccessfulRefresh(zd.IncomingSerial)
-						return false, soa.Serial, nil
+						return false, soa.Serial, true, nil
 					}
 					zd.noteSuccessfulRefresh(zd.IncomingSerial)
-					return true, soa.Serial, nil
+					return true, soa.Serial, true, nil
 				}
 				// NOERROR but the first answer is not a SOA — try the next sibling.
 				continue
@@ -619,7 +662,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 		case <-timer.C:
 		case <-ctx.Done():
 			timer.Stop()
-			return false, 0, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, ctx.Err())
+			return false, 0, false, fmt.Errorf("DoTransfer %s: %w", zd.ZoneName, ctx.Err())
 		}
 		pending = unanswered
 	}
@@ -627,7 +670,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	if sawResponse {
 		// At least one primary answered, but none gave a usable SOA (e.g. all
 		// REFUSED). Back off quietly — no transfer this cycle, not an error.
-		return false, 0, nil
+		return false, 0, false, nil
 	}
 	// No primary was even reachable.
 	//
@@ -640,7 +683,7 @@ func (zd *ZoneData) DoTransfer(ctx context.Context, conf *Config) (bool, uint32,
 	// refresh, and it names every upstream with its own error.
 	lg.Debug("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName,
 		"count", len(upstreams), "upstreams", strings.Join(tried, ", "), "err", lastErr)
-	return false, 0, &upstreamsFailedError{stage: refreshStageProbe, failures: failures,
+	return false, 0, false, &upstreamsFailedError{stage: refreshStageProbe, failures: failures,
 		err: fmt.Errorf("SOA probe of %s failed: no response from any of %d upstream(s) [%s]: %w",
 			zd.ZoneName, len(upstreams), strings.Join(tried, ", "), lastErr)}
 }
@@ -1097,10 +1140,15 @@ func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force 
 // deployment this is for. The delta's signatures are not adopted because the
 // apply never succeeds when they appear, not because a later pass discards
 // them.
+//
+// Nor from a relay copy that is still unconfirmed (relayCopyNeedsTransfer):
+// its serial need not name its content, and a delta from that serial would be
+// applied to the wrong base. A full transfer replaces it instead.
 func (zd *ZoneData) shouldRequestIxfr(force bool) bool {
 	return zd.requestIxfr() &&
 		zd.IncomingSerial != 0 &&
 		zd.publishedSnapshot() != nil &&
+		!zd.relayCopyUnconfirmed.Load() &&
 		!force
 }
 
@@ -1211,11 +1259,12 @@ func (zd *ZoneData) gateZonemdUnlessAlreadyGated(ctx context.Context, newZd *Zon
 // from our own serial would answer with a single SOA rather than the zone the
 // operator asked for.
 func (zd *ZoneData) FetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
-	return zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, nil)
+	return zd.fetchFromUpstream(ctx, verbose, debug, force, dynamicRRs, conf, nil, zd.relayCopyMarks.Load())
 }
 
-// fetchFromUpstream is FetchFromUpstream with the pool's transfer gate.
-func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config, gate *transferGate) (bool, error) {
+// fetchFromUpstream is FetchFromUpstream with the pool's transfer gate. marks
+// is relayCopyMarks when the caller's refresh began.
+func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config, gate *transferGate, marks uint64) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {
 		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
@@ -1386,6 +1435,7 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 	// Publish replacement: working set from transferred data + dynamic RRs.
 	zd.mu.Lock()
 	firstLoad := zd.FirstZoneLoad
+	before := zd.snapshot.Load()
 	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad, false); err != nil {
 		zd.mu.Unlock()
 		// Nothing was published: the zone serves what it did before, so its
@@ -1398,6 +1448,16 @@ func (zd *ZoneData) fetchFromUpstream(ctx context.Context, verbose, debug, force
 			lg.Error("could not apply the refreshed zone; nothing was published", "zone", zd.ZoneName, "err", err)
 		}
 		return false, err
+	}
+	// A nil return does not mean the transfer is served: the publish can drop
+	// the replacement (the zone is no longer live) or refuse it, and the zone
+	// then serves its previous copy. Only an installed snapshot confirms a
+	// relay copy (relayCopyNeedsTransfer); until then every refresh forces a
+	// full transfer again. Nor does a refresh that began before the last mark:
+	// it may have applied an IXFR to the zone's own copy, or restored dynamic
+	// records collected under the options that ended (relayCopyMarks).
+	if zd.snapshot.Load() != before && zd.relayCopyMarks.Load() == marks {
+		zd.relayCopyUnconfirmed.Store(false)
 	}
 	if firstLoad {
 		zd.postRefreshOwed = true
@@ -2109,11 +2169,11 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		zd.seedDelegationStore()
 
 		// A childsync-proxy publishes nothing into its OWN copy of the zone.
-		// That copy is replaced by the next transfer, and
-		// zoneMayOriginateContent is true for tdns-agent by design, so no
-		// gate below would stop the update: it would be applied and silently
-		// lost (design §3.1). The advertisement, receiver key included,
-		// reaches the parent primary through the proxy reconciler (§5.3).
+		// That copy is replaced by the next transfer, so an update applied
+		// here would be silently lost (design §3.1); and such a zone does not
+		// originate content (childUpdatesLeaveTheZone), so the updater would
+		// refuse it. The advertisement, receiver key included, reaches the
+		// parent primary through the proxy reconciler (§5.3).
 		if zd.Options[OptChildSyncProxy] {
 			lg.Debug("SetupZoneSync: childsync-proxy zone; the advertisement is reconciled towards the parent primary, not published here",
 				"zone", zd.ZoneName)

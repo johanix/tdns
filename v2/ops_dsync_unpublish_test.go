@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	"github.com/miekg/dns"
 )
 
@@ -17,7 +19,7 @@ import (
 // This test pins the parse, not the values.
 func TestUnpublishDsyncPlaceholderParses(t *testing.T) {
 	for _, zone := range []string{".", "example.", "child.example.", "sub.child.example."} {
-		owner := dsyncOwnerName(zone)
+		owner := imrcore.DsyncOwnerName(zone)
 		dsyncStr := fmt.Sprintf("%s 0 IN DSYNC CDS NOTIFY 53 .", owner)
 		rr, err := dns.NewRR(dsyncStr)
 		if err != nil {

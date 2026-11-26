@@ -58,6 +58,7 @@ func (conf *Config) MainLoop(ctx context.Context, cancel context.CancelFunc) {
 			if conf.Internal.stopFailed.Load() {
 				exitAfterFailedStop()
 			}
+			waitForEngines()
 			return
 		case <-conf.Internal.APIStopCh:
 			lgConfig.Info("mainloop: stop command received, cleaning up")
@@ -67,22 +68,19 @@ func (conf *Config) MainLoop(ctx context.Context, cancel context.CancelFunc) {
 			if conf.Internal.stopFailed.Load() {
 				exitAfterFailedStop()
 			}
+			waitForEngines()
 			return
 		}
 	}
 }
 
-// failedStopDrainLimit bounds how long MainLoop waits for the engines when
-// the daemon stops because it failed. A variable so a test can shorten it.
-var failedStopDrainLimit = 10 * time.Second
+// stopDrainLimit bounds how long MainLoop waits for the engines when the
+// daemon stops. A variable so a test can shorten it.
+var stopDrainLimit = 10 * time.Second
 
-// exitAfterFailedStop ends a daemon that Shutdowner stopped while MainLoop was
-// running, such as a stop decided on after a zone reload. Returning from
-// MainLoop would let main return, and the process exit 0, before Shutdowner on
-// its own goroutine reached os.Exit(1) (#977). So MainLoop exits 1 here, once
-// the engines have finished, or after failedStopDrainLimit if one of them is
-// stuck: a daemon that has already failed should not hang on it.
-func exitAfterFailedStop() {
+// drainEngines waits for the engines to finish, up to stopDrainLimit, and
+// reports whether they did.
+func drainEngines() bool {
 	drained := make(chan struct{})
 	go func() {
 		engineWg.Wait()
@@ -90,10 +88,37 @@ func exitAfterFailedStop() {
 	}()
 	select {
 	case <-drained:
+		return true
+	case <-time.After(stopDrainLimit):
+		return false
+	}
+}
+
+// waitForEngines ends a stop by signal or by the API's stop command. main
+// exits when MainLoop returns, so MainLoop returns once the engines have
+// finished: each logs its last line, such as ImrEngine's "terminating", and
+// closes what it holds, such as the DSYNC API listeners. Before, the exit could
+// come first and cut them off. An engine that is stuck does not keep the
+// daemon up beyond stopDrainLimit.
+func waitForEngines() {
+	if !drainEngines() {
+		lgConfig.Warn("mainloop: engines still running after the stop; exiting anyway",
+			"app", Globals.App.Name, "waited", stopDrainLimit)
+	}
+}
+
+// exitAfterFailedStop ends a daemon that Shutdowner stopped while MainLoop was
+// running, such as a stop decided on after a zone reload. Returning from
+// MainLoop would let main return, and the process exit 0, before Shutdowner on
+// its own goroutine reached os.Exit(1) (#977). So MainLoop exits 1 here, once
+// the engines have finished, or after stopDrainLimit if one of them is
+// stuck: a daemon that has already failed should not hang on it.
+func exitAfterFailedStop() {
+	if drainEngines() {
 		lgConfig.Info("mainloop: all engines finished after a failed stop", "app", Globals.App.Name)
-	case <-time.After(failedStopDrainLimit):
+	} else {
 		lgConfig.Warn("mainloop: engines still running after a failed stop; exiting anyway",
-			"app", Globals.App.Name, "waited", failedStopDrainLimit)
+			"app", Globals.App.Name, "waited", stopDrainLimit)
 	}
 	os.Exit(1)
 }
@@ -314,7 +339,7 @@ func (conf *Config) loadDynamicZonesIfConfigured(ctx context.Context) {
 func (conf *Config) StartImr(ctx context.Context, apirouter *mux.Router) error {
 	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	StartEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
-	StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, false) })
+	StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx) })
 	return nil
 }
 
@@ -326,7 +351,7 @@ func (conf *Config) StartScanner(ctx context.Context, apirouter *mux.Router) err
 	// without this engine the first such query blocks its scan for good.
 	StartEngineNoError(&Globals.App, "AuthQueryEngine", func() { AuthQueryEngine(ctx, conf.Internal.AuthQueryQ) })
 	StartEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
-	StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, false) })
+	StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx) })
 	return nil
 }
 
@@ -347,7 +372,7 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	// In tdns-auth, IMR is active by default unless explicitly set to false
 	imrActive := conf.Imr.Active == nil || *conf.Imr.Active
 	if imrActive {
-		StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, true) })
+		StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx) })
 	} else {
 		lgConfig.Info("NOT starting imrengine (explicitly set to false)", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 	}
@@ -397,7 +422,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	// In tdns-agent, IMR is active by default unless explicitly set to false
 	imrActive := conf.Imr.Active == nil || *conf.Imr.Active
 	if imrActive {
-		StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, true) })
+		StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx) })
 	} else {
 		lgConfig.Info("NOT starting imrengine (explicitly set to false)", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 	}

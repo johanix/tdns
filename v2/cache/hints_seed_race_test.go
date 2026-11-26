@@ -24,7 +24,6 @@ import (
 // more.
 func TestHintSeedingWhileRootServersChange(t *testing.T) {
 	rrcache := NewRRsetCache(log.New(os.Stderr, "test ", log.LstdFlags), false, false)
-	rrcache.Quiet = true
 	if err := rrcache.PrimeFromHintsOnly(""); err != nil {
 		t.Fatalf("PrimeFromHintsOnly: %v", err)
 	}

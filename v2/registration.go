@@ -13,7 +13,6 @@ import (
 	"sync"
 
 	"github.com/gorilla/mux"
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
@@ -435,29 +434,9 @@ type ImrClientQueryHookFunc func(ctx context.Context, w dns.ResponseWriter,
 	r *dns.Msg, qname string, qtype uint16,
 	msgoptions *edns0.MsgOptions) (context.Context, *dns.Msg)
 
-// ImrOutboundQueryHookFunc is called before the IMR sends an iterative query
-// to an authoritative server.
-// Return nil to proceed with the query.
-// Return a non-nil error to skip this server (behaves as if the server didn't respond).
-type ImrOutboundQueryHookFunc func(ctx context.Context, qname string,
-	qtype uint16, serverName string, serverAddr string,
-	transport core.Transport) error
-
-// ImrResponseHookFunc is called after the IMR receives a response from an
-// authoritative server. Observe-only — return value is ignored.
-type ImrResponseHookFunc func(ctx context.Context, qname string, qtype uint16,
-	serverName string, serverAddr string, transport core.Transport,
-	response *dns.Msg, rcode int)
-
 var (
 	globalImrClientQueryHooks      []ImrClientQueryHookFunc
 	globalImrClientQueryHooksMutex sync.RWMutex
-
-	globalImrOutboundQueryHooks      []ImrOutboundQueryHookFunc
-	globalImrOutboundQueryHooksMutex sync.RWMutex
-
-	globalImrResponseHooks      []ImrResponseHookFunc
-	globalImrResponseHooksMutex sync.RWMutex
 )
 
 // RegisterImrClientQueryHook registers a hook that is called when an external
@@ -474,53 +453,11 @@ func RegisterImrClientQueryHook(hook ImrClientQueryHookFunc) error {
 	return nil
 }
 
-// RegisterImrOutboundQueryHook registers a hook that is called before the IMR
-// sends an iterative query to an authoritative server. Multiple hooks can be
-// registered and are called in registration order.
-func RegisterImrOutboundQueryHook(hook ImrOutboundQueryHookFunc) error {
-	if hook == nil {
-		return fmt.Errorf("hook cannot be nil")
-	}
-	globalImrOutboundQueryHooksMutex.Lock()
-	globalImrOutboundQueryHooks = append(globalImrOutboundQueryHooks, hook)
-	globalImrOutboundQueryHooksMutex.Unlock()
-	lg.Debug("RegisterImrOutboundQueryHook: registered hook")
-	return nil
-}
-
-// RegisterImrResponseHook registers a hook that is called after the IMR
-// receives a response from an authoritative server. Multiple hooks can be
-// registered and are called in registration order.
-func RegisterImrResponseHook(hook ImrResponseHookFunc) error {
-	if hook == nil {
-		return fmt.Errorf("hook cannot be nil")
-	}
-	globalImrResponseHooksMutex.Lock()
-	globalImrResponseHooks = append(globalImrResponseHooks, hook)
-	globalImrResponseHooksMutex.Unlock()
-	lg.Debug("RegisterImrResponseHook: registered hook")
-	return nil
-}
-
 // getImrClientQueryHooks returns all registered client query hooks.
 func getImrClientQueryHooks() []ImrClientQueryHookFunc {
 	globalImrClientQueryHooksMutex.RLock()
 	defer globalImrClientQueryHooksMutex.RUnlock()
 	return globalImrClientQueryHooks
-}
-
-// getImrOutboundQueryHooks returns all registered outbound query hooks.
-func getImrOutboundQueryHooks() []ImrOutboundQueryHookFunc {
-	globalImrOutboundQueryHooksMutex.RLock()
-	defer globalImrOutboundQueryHooksMutex.RUnlock()
-	return globalImrOutboundQueryHooks
-}
-
-// getImrResponseHooks returns all registered response hooks.
-func getImrResponseHooks() []ImrResponseHookFunc {
-	globalImrResponseHooksMutex.RLock()
-	defer globalImrResponseHooksMutex.RUnlock()
-	return globalImrResponseHooks
 }
 
 // StartRegisteredEngines starts all registered engines as goroutines.

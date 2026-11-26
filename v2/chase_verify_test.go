@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	"github.com/miekg/dns"
 )
 
@@ -739,13 +741,13 @@ func TestChaseCNAME(t *testing.T) {
 	t.Run("longer than the limit", func(t *testing.T) {
 		tr := cnameTree(t)
 		z := tr.zones["sec.example."]
-		for i := 0; i <= maxCNAMEChain; i++ {
+		for i := 0; i <= imrcore.MaxCNAMEChain; i++ {
 			z.add(fmt.Sprintf("c%d.sec.example. 300 IN CNAME c%d.sec.example.", i, i+1))
 		}
-		z.add(fmt.Sprintf("c%d.sec.example. 300 IN A 192.0.2.70", maxCNAMEChain+1))
+		z.add(fmt.Sprintf("c%d.sec.example. 300 IN A 192.0.2.70", imrcore.MaxCNAMEChain+1))
 		res := tr.chase("c0.sec.example.", dns.TypeA)
 		wantStatus(t, "result", res.Status, ChainStatusIndeterminate)
-		if !hasNote(res.Leaf.Notes, fmt.Sprintf("CNAME chain longer than %d", maxCNAMEChain)) {
+		if !hasNote(res.Leaf.Notes, fmt.Sprintf("CNAME chain longer than %d", imrcore.MaxCNAMEChain)) {
 			t.Errorf("final leaf %s, notes %q", res.Leaf.Qname, res.Leaf.Notes)
 		}
 

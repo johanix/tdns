@@ -5,7 +5,6 @@ package cache
 
 import (
 	"context"
-	"log"
 	"slices"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -113,7 +112,7 @@ func (rrcache *RRsetCacheT) ReferralChildState(ctx context.Context, child string
 			return ValidationStateIndeterminate, true
 		default:
 			if rrcache.Verbose {
-				log.Printf("ReferralChildState: the DS question at %q below secure zone %q got %s; %q not entered",
+				rrcache.Logger.Printf("ReferralChildState: the DS question at %q below secure zone %q got %s; %q not entered",
 					n, parentName, evidenceToString[ev], child)
 			}
 		}

@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"strings"
 
+	imrcore "github.com/johanix/tdns/v2/imr"
+
 	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -57,7 +59,7 @@ func do53QueryLetThrough(q dns.Question) bool {
 	case dns.TypeDNSKEY:
 		return true
 	case dns.TypeSVCB:
-		return strings.HasPrefix(core.CanonicalizeName(dns.Fqdn(q.Name)), oobTransportPrefix)
+		return strings.HasPrefix(core.CanonicalizeName(dns.Fqdn(q.Name)), imrcore.OOBTransportPrefix)
 	}
 	return false
 }

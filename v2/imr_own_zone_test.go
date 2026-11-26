@@ -52,6 +52,9 @@ type ownZoneRig struct {
 	childDS  *dns.DS
 	upLog    *upstreamLog // the forward's upstream
 	childLog *upstreamLog // the child's server
+	// pending is ImrOptions.PendingOwnZone, as InitImrEngine binds it; nil
+	// until a test sets it.
+	pending func(zone string) bool
 }
 
 func newOwnZoneRig(t *testing.T) *ownZoneRig {
@@ -72,22 +75,24 @@ func newOwnZoneRig(t *testing.T) *ownZoneRig {
 		"www." + ownChild + " A": {Answer: childKey.sign(t, fwdSecRR(t, "www."+ownChild+" 300 IN A 192.0.2.55"))},
 	}, childLog)
 
-	imr := newForwardTestImr(t, rootForward(upAddr, upPort))
-	imr.DnskeyCache = imr.Cache.DnskeyCache // as InitImrEngine wires it
+	rig := &ownZoneRig{parent: parent, childDS: childDS, upLog: upLog, childLog: childLog}
+	imr := newForwardTestImrWith(t, ImrEngineConf{
+		Forward: rootForward(upAddr, upPort),
+		Stubs: []ImrStubConf{{Zone: ownChild, Servers: []cache.AuthServer{
+			{Name: "ns." + ownChild, Addrs: []string{childAddr}, Alpn: []string{"do53"}},
+		}}},
+	}, ImrOptions{
+		OwnZones:       hostedZones{},
+		PendingOwnZone: func(zone string) bool { return rig.pending != nil && rig.pending(zone) },
+	})
 	imr.FamilyTracker = cache.NewFamilyTracker(10*time.Minute, 10*time.Minute, 30*time.Second, 5)
 	// The stub's server is reached through the cache's shared per-transport
 	// clients (fixed port); the forward has its own client.
 	port := strconv.Itoa(int(childPort))
 	imr.Cache.DNSClient[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, port, nil)
 	imr.Cache.DNSClient[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, port, nil)
-	if err := imr.Cache.AddStub(ownChild, []cache.AuthServer{
-		{Name: "ns." + ownChild, Addrs: []string{childAddr}, Alpn: []string{"do53"}},
-	}); err != nil {
-		t.Fatalf("AddStub: %v", err)
-	}
-	imr.setZoneTable(imr.ForwardZones(), []string{ownChild}, nil)
-
-	return &ownZoneRig{imr: imr, parent: parent, childDS: childDS, upLog: upLog, childLog: childLog}
+	rig.imr = imr
+	return rig
 }
 
 // kskDS is the DS of a signed zone's KSK, as a trust anchor names it.
@@ -131,7 +136,7 @@ func TestOwnZoneTrustAnchorComesFromTheZone(t *testing.T) {
 
 	conf := &Config{}
 	conf.Imr.TrustAnchorDS = kskDS(t, rig.parent).String()
-	if err := rig.imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
+	if err := rig.imr.SetUpTrustAnchors(context.Background(), conf.Imr); err != nil {
 		t.Fatalf("trust anchor initialization for the server's own zone: %v", err)
 	}
 	if c := rig.imr.Cache.Get(ownParent, dns.TypeDNSKEY); c == nil || c.State != cache.ValidationStateSecure {
@@ -152,14 +157,14 @@ func TestOwnZoneTrustAnchorBeforeTheZoneLoads(t *testing.T) {
 	conf := &Config{}
 	conf.Imr.TrustAnchorDS = ds.String()
 	conf.Internal.AllZones = []string{ownParent}
-	rig.imr.pendingOwnZone = func(zone string) bool { return rig.imr.ownZonePending(conf, zone) } // as InitImrEngine binds it
-	if err := rig.imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
+	rig.pending = func(zone string) bool { return ownZonePending(conf, zone) } // as InitImrEngine binds it
+	if err := rig.imr.SetUpTrustAnchors(context.Background(), conf.Imr); err != nil {
 		t.Fatalf("trust anchor initialization before the server's own zone has loaded: %v", err)
 	}
 	requireUpstreamNotAsked(t, rig.upLog, ownParent)
 
 	Zones.Set(ownParent, rig.parent) // loaded
-	resp, err := rig.imr.ImrQuery(context.Background(), ownParent, dns.TypeDNSKEY, dns.ClassINET, nil)
+	resp, err := rig.imr.ImrQuery(context.Background(), ownParent, dns.TypeDNSKEY, dns.ClassINET)
 	if err != nil || resp.RRset == nil || !resp.Validated {
 		t.Fatalf("%s DNSKEY once the zone has loaded: %+v (err %v), want it from the zone, secure", ownParent, resp, err)
 	}
@@ -171,12 +176,12 @@ func TestOwnZoneTrustAnchorBeforeTheZoneLoads(t *testing.T) {
 // for parent.example. to fetch DNSKEY".
 func TestOwnZoneTrustAnchorNeedsNoServers(t *testing.T) {
 	parent, _ := signedTestZone(t, ownParent, ownParentZone, false)
-	imr := newForwardTestImr(t, nil)
-	imr.DnskeyCache = imr.Cache.DnskeyCache // as InitImrEngine wires it
+	imr := newForwardTestImrWith(t, ImrEngineConf{Testing: ImrTestingConf{Priming: noPriming()}},
+		ImrOptions{OwnZones: hostedZones{}})
 
 	conf := &Config{}
 	conf.Imr.TrustAnchorDS = kskDS(t, parent).String()
-	if err := imr.initializeImrTrustAnchors(context.Background(), conf.Imr); err != nil {
+	if err := imr.SetUpTrustAnchors(context.Background(), conf.Imr); err != nil {
 		t.Fatalf("trust anchor initialization for the server's own zone: %v", err)
 	}
 	// Not forwarded, so the anchor zone's NS RRset is validated too.
@@ -209,7 +214,7 @@ func TestOwnZoneQuestionsAreAnsweredFromTheZone(t *testing.T) {
 	}
 	for _, c := range cases {
 		what := c.qname + " " + dns.TypeToString[c.qtype]
-		resp, err := rig.imr.ImrQuery(ctx, c.qname, c.qtype, dns.ClassINET, nil)
+		resp, err := rig.imr.ImrQuery(ctx, c.qname, c.qtype, dns.ClassINET)
 		if err != nil {
 			t.Errorf("%s: %v", what, err)
 			continue
@@ -243,7 +248,7 @@ func TestOwnZoneQuestionsAreAnsweredFromTheZone(t *testing.T) {
 
 	// Below the cut: the child's data, which the parent would answer with a
 	// referral. It goes to the child's server.
-	resp, err := rig.imr.ImrQuery(ctx, "www."+ownChild, dns.TypeA, dns.ClassINET, nil)
+	resp, err := rig.imr.ImrQuery(ctx, "www."+ownChild, dns.TypeA, dns.ClassINET)
 	if err != nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 || rdataOf(resp.RRset.RRs[0]) != "192.0.2.55" {
 		t.Errorf("www.%s A: %+v (err %v), want the child server's 192.0.2.55", ownChild, resp, err)
 	}
@@ -261,7 +266,7 @@ func resolverDnskeyFetcher(imr *Imr) dnskeyFetcher {
 	return func(child string, _ childServers) ([]dnskeyCopy, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		resp, err := imr.ImrQuery(ctx, dns.Fqdn(child), dns.TypeDNSKEY, dns.ClassINET, nil)
+		resp, err := imr.ImrQuery(ctx, dns.Fqdn(child), dns.TypeDNSKEY, dns.ClassINET)
 		if err != nil {
 			return nil, err
 		}
@@ -317,14 +322,14 @@ func TestOwnZoneForQuestion(t *testing.T) {
 		{ownParent, dns.TypeANY, false},
 	}
 	for _, c := range cases {
-		if got := rig.imr.ownZoneForQuestion(c.qname, c.qtype) != nil; got != c.own {
+		if got := ownZoneForQuestion(c.qname, c.qtype) != nil; got != c.own {
 			t.Errorf("ownZoneForQuestion(%s %s) = %v, want %v", c.qname, dns.TypeToString[c.qtype], got, c.own)
 		}
 	}
 
 	rig.parent.SetError(ConfigError, "test: a service-impacting error")
 	defer rig.parent.SetError(NoError, "")
-	if rig.imr.ownZoneForQuestion("www."+ownParent, dns.TypeA) != nil {
+	if ownZoneForQuestion("www."+ownParent, dns.TypeA) != nil {
 		t.Error("a zone the query handler would SERVFAIL for is still answered from")
 	}
 }
@@ -340,17 +345,17 @@ www.plain.example.	3600	IN	A	192.0.2.9
 `)
 	upLog := &upstreamLog{}
 	upAddr, upPort := startLoggedSignedForwardUpstream(t, nil, upLog)
-	imr := newForwardTestImr(t, rootForward(upAddr, upPort))
+	imr := newForwardTestImrWith(t, ImrEngineConf{Forward: rootForward(upAddr, upPort)}, ImrOptions{OwnZones: hostedZones{}})
 	ctx := context.Background()
 
-	resp, err := imr.ImrQuery(ctx, "www."+plain, dns.TypeA, dns.ClassINET, nil)
+	resp, err := imr.ImrQuery(ctx, "www."+plain, dns.TypeA, dns.ClassINET)
 	if err != nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 || rdataOf(resp.RRset.RRs[0]) != "192.0.2.9" {
 		t.Fatalf("www.%s A: %+v (err %v), want 192.0.2.9 from the zone", plain, resp, err)
 	}
 	if resp.Validated || resp.ValidationState != cache.ValidationStateInsecure {
 		t.Errorf("www.%s A: validation state %s, want insecure", plain, cache.ValidationStateToString[resp.ValidationState])
 	}
-	resp, err = imr.ImrQuery(ctx, "nosuch."+plain, dns.TypeA, dns.ClassINET, nil)
+	resp, err = imr.ImrQuery(ctx, "nosuch."+plain, dns.TypeA, dns.ClassINET)
 	if err != nil || resp.Denial != cache.ContextNXDOMAIN {
 		t.Errorf("nosuch.%s A: %+v (err %v), want NXDOMAIN from the zone", plain, resp, err)
 	} else if resp.Validated {

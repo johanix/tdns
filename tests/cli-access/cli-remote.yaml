@@ -1,0 +1,13 @@
+# tdns-cli (not tdns-ncli) on the CLI host, for the pins suite: the old
+# kind of entry, with no rootca: and no pins. tdns-cli's behaviour must not
+# change with #1168: it connects (unverified, as it always has) and does not
+# warn. tdns-ncli refuses the same entry (ncli-pins.yaml's authnoverify).
+apiservers:
+   - name:        tdns-auth
+     baseurl:     https://@DAEMON@:8991/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key
+   - name:        tdns-imr
+     baseurl:     http://@DAEMON@:8992/api/v1
+     apikey:      cli-access-rig-test-key
+     authmethod:  X-API-Key

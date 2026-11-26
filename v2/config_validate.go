@@ -196,7 +196,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	// get them, as NewImr would give them.
 	qminTuning := config.Imr.Tuning
 	LoadImrTuningDefaults(&qminTuning)
-	if err := validateQminTuning(&qminTuning); err != nil {
+	if err := qminTuning.ValidateQmin(); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 
