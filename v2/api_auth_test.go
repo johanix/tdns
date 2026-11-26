@@ -764,4 +764,49 @@ func TestReloadAccessFileNotThereYet(t *testing.T) {
 	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, AccessFileNotReloaded) || len(e.conf.Internal.ServerErrors.List()) != 1 {
 		t.Errorf("a file that does not parse: %q, %+v; want NOT reloaded and one error", msg, e.conf.Internal.ServerErrors.List())
 	}
+	// That file removed: the error it left goes; the policy running
+	// (loaded at start) is unchanged.
+	os.Remove(path)
+	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "(the running policy is unchanged)") || len(e.conf.Internal.ServerErrors.List()) != 0 {
+		t.Errorf("the broken file removed: %q, %+v; want no error left", msg, e.conf.Internal.ServerErrors.List())
+	}
+	if st, _ := e.call(t, "/api/v1/t-ro", "", true, ""); st != 200 {
+		t.Errorf("the key after those reloads: %d, want 200 (the policy loaded at start)", st)
+	}
+}
+
+// Start-up with the access file the config names not there: fail closed, as
+// for a broken one (503 on TCP, the error recorded). A reload while it is
+// still not there says so and keeps the error; the first client add creates
+// the file and ends both.
+func TestStartupAccessFileNotThere(t *testing.T) {
+	_, pins := clientCerts(t, "anna")
+	e := newAuthEnv(t, "clients: []\n", nil)
+	path := e.conf.ApiServer.AccessFile
+	os.Remove(path)
+	e.conf.initApiAccess() // as a start-up with the file not there
+	check := func(when string, wantStatus, wantErrs int) {
+		t.Helper()
+		if st, body := e.call(t, "/api/v1/t-ro", "", true, ""); st != wantStatus {
+			t.Errorf("%s: TCP %d %q, want %d", when, st, body, wantStatus)
+		}
+		if errs := e.conf.Internal.ServerErrors.List(); len(errs) != wantErrs {
+			t.Errorf("%s: server errors %+v, want %d", when, errs, wantErrs)
+		}
+	}
+	check("at start-up", 503, 1)
+	msg := e.conf.reloadApiAccess()
+	if !strings.Contains(msg, "\nAccess file not there yet:\n   "+path+"\nThe TCP API still answers 503 (since start-up) until it is:\n") {
+		t.Errorf("reload message = %q", msg)
+	}
+	for _, l := range strings.Split(msg, "\n") {
+		if len(l) > 72 && !strings.Contains(l, path) {
+			t.Errorf("line over 72 columns: %q", l)
+		}
+	}
+	check("after a reload, still not there", 503, 1)
+	if resp := e.accessCall(t, AccessPost{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-write"}); resp.Error || resp.File != path {
+		t.Fatalf("the first client add: %+v, want the file written and in force", resp)
+	}
+	check("after the first client add", 200, 0)
 }
