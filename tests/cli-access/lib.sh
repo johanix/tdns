@@ -105,6 +105,10 @@ certadd() { grep -q 'config update <entry> --cert' "$BIN/tdns-ncli"; }
 # (the design, section 5): root, daemon running; --cert turns an entry into a
 # certificate entry in place, --repin replaces its pins with the served ones.
 certupdate() { grep -q 'update <entry> (--cert | --repin)' "$BIN/tdns-ncli"; }
+# firstenrol: the daemon knows the first enrolment (from #1198 ee2d40b6): its
+# config names an access file that is not there yet, and the list says so
+# and that client add creates it (config add goes on to that add).
+firstenrol() { grep -q 'which does not exist yet: client add creates it' "$BIN/tdns-auth"; }
 # ncli_bare OUT ARGS...: tdns-ncli as root with no CLI config (from a directory
 # without one), its output and an RC= line in OUT.
 ncli_bare() { _o=$1; shift; { (cd /var/tmp && "$BIN/tdns-ncli" "$@"); echo "RC=$?"; } > "$_o" 2>&1; }

@@ -168,6 +168,7 @@ suite_socket() {
 		[ "$(rc_of "$o2")" = 0 ] && grep -q 'pongs:' "$o2"
 		judge S7e "...and the user's entry works" $? "$o2"
 	fi
+	firstenrol && first_enrolment
 
 	# ---- a stale socket is replaced at start ------------------------------------------
 	daemon_stop auth KILL
@@ -463,6 +464,72 @@ config_add_cert() {
 	daemon_stop auth
 	cp "$RUNDIR/tdns-auth.yaml.seeded" "$RIG/auth/tdns-auth.yaml"; rm -f "$A" "$A.prev" "$RIG/auth/tdns-auth.yaml.prev"
 	daemon_start auth || fail S7z "tdns-auth starts again on the seeded config" "$LOG/tdns-auth.stdout"
+}
+
+# first_on CASE: the operator's first step towards an access file: the
+# access-file: line in the seeded config ($FIRST), naming $A, which is not
+# there, and the reload. True when the reload is done and made no file.
+first_on() {
+	sed "s|^#  access-file: .*|   access-file: $A|" "$FIRST" > "$RIG/auth/tdns-auth.yaml"
+	_f=$(out "$1-reload"); ncli_bare "$_f" auth config reload --daemon-config "$RIG/auth/tdns-auth.yaml"
+	[ "$(rc_of "$_f")" = 0 ] && grep -q "access-file: $A" "$RIG/auth/tdns-auth.yaml" && [ ! -e "$A" ]
+}
+# amode: the access file's mode and owner, as ls -l shows them.
+amode() { ls -l "$A" 2>/dev/null | awk '{print $1, $3}'; }
+
+# first_enrolment: E1-E4 on a firstenrol build (the cert setup design,
+# section 4: the first enrolment). tdns-auth runs the seeded config, which
+# names no access file; the operator adds the line, naming a file that is not
+# there yet, and reloads. The list says so, and the first add creates the
+# file (0600, root's): config add on a certadd build, client add before it.
+# On a certupdate build, from the same state, config update --cert on a key
+# entry does it too. The seeded config is put back after.
+first_enrolment() {
+	FIRST=$RUNDIR/tdns-auth.yaml.first; cp "$RIG/auth/tdns-auth.yaml" "$FIRST"
+	A=$RIG/auth/tdns-auth-access.yaml; rm -f "$A" "$A.prev"
+	first_on E1
+	judge E1 "first enrolment: access-file: added, naming a file not there yet; config reload: done, no file made" $? "$(out E1-reload)"
+	o=$(out E2-list); ncli_bare "$o" auth client list --daemon-config "$RIG/auth/tdns-auth.yaml"
+	[ "$(rc_of "$o")" = 0 ] && grep -q "^   $A\$" "$o" && grep -q 'which does not exist yet: client add creates it' "$o"
+	judge E2 "...client list: names the file, which does not exist yet, and says client add creates it" $? "$o"
+	if certadd; then
+		f=$RIG/ncli/first.yaml; rm -f "$RIG/ncli/first-client.crt" "$RIG/ncli/first-client.key"
+		client_block "$f" "$RIG/ncli/first-client.crt" "$RIG/ncli/first-client.key"
+		o=$(out E3-add); ncli_root first config add --client-name first "$RIG/auth/tdns-auth.yaml" > "$o" 2>&1
+		{ amode; cat "$f"; } >> "$o" 2>&1
+		o2=$(out E3-ping); ncli_root first --tcp auth ping > "$o2"
+		cpin=$(pin_of_cert "$RIG/ncli/first-client.crt")
+		[ "$(rc_of "$o")" = 0 ] && [ "$(amode)" = "-rw------- root" ] && [ -n "$cpin" ] && grep -q "$cpin" "$A" \
+			&& grep -q 'authmethod: *certificate' "$f" && grep -q "$(pinof daemon)" "$f" \
+			&& grep -q "config-file: *$RIG/auth/tdns-auth.yaml" "$f" && grep -q 'pong (TLS, read-write, certificate first)' "$o2"
+		judge E3 "...config add (#1200): enrols, creating the access file (0600, root's), and writes the certificate entry; it works over TCP" $? "$o" "$o2"
+	else
+		o=$(out E3-add); ncli_bare "$o" auth client add first --pin "$(pinof rw)" --role read-only --daemon-config "$RIG/auth/tdns-auth.yaml"
+		amode >> "$o"
+		[ "$(rc_of "$o")" = 0 ] && [ "$(amode)" = "-rw------- root" ] && grep -q 'name: *first$' "$A"
+		judge E3 "...client add: creates the access file (0600, root's) with the client" $? "$o"
+	fi
+	if certupdate; then
+		daemon_stop auth; cp "$FIRST" "$RIG/auth/tdns-auth.yaml"; rm -f "$A" "$A.prev"
+		daemon_start auth || fail E4z "tdns-auth starts again on the seeded config" "$LOG/tdns-auth.stdout"
+		first_on E4 || fail E4z "the line and the reload, for the second first enrolment" "$(out E4-reload)"
+		fk=$RIG/ncli/first-key.yaml; rm -f "$RIG/ncli/first-key-client.crt" "$RIG/ncli/first-key-client.key"
+		{ printf 'client:\n   cert:          %s\n   key:           %s\n' "$RIG/ncli/first-key-client.crt" "$RIG/ncli/first-key-client.key"
+		  printf 'apiservers:\n   - name:        tdns-auth\n     baseurl:     https://127.0.0.1:%s/api/v1\n     apikey:      cli-access-rig-test-key\n     authmethod:  X-API-Key\n     rootca:      %s\n     config-file: %s\n' \
+			$AUTH_API "$CERTS/ca.crt" "$RIG/auth/tdns-auth.yaml"; } > "$fk"
+		chmod 0600 "$fk"
+		o=$(out E4-cert); ncli_root first-key config update tdns-auth --cert --client-name first-key > "$o" 2>&1
+		{ amode; cat "$fk"; } >> "$o" 2>&1
+		o2=$(out E4-ping); ncli_root first-key --tcp auth ping > "$o2"
+		cpin=$(pin_of_cert "$RIG/ncli/first-key-client.crt")
+		[ "$(rc_of "$o")" = 0 ] && [ "$(amode)" = "-rw------- root" ] && [ -n "$cpin" ] && grep -q "$cpin" "$A" \
+			&& grep -q 'authmethod: *certificate' "$fk" && ! grep -qi 'apikey' "$fk" && grep -q "$(pinof daemon)" "$fk" \
+			&& grep -q 'pong (TLS, read-write, certificate first-key)' "$o2"
+		judge E4 "...from the same first state, config update --cert on a key entry (#1202): enrols, creating the access file (0600, root's); it works over TCP" $? "$o" "$o2"
+	fi
+	daemon_stop auth
+	cp "$FIRST" "$RIG/auth/tdns-auth.yaml"; rm -f "$A" "$A.prev" "$RIG/auth/tdns-auth.yaml.prev"
+	daemon_start auth || fail E0z "tdns-auth starts again on the seeded config" "$LOG/tdns-auth.stdout"
 }
 
 # config_update_cases: U1-U7 on a build with #1202's config update (the cert
