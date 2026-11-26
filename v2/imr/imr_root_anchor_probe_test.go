@@ -294,6 +294,53 @@ func TestRootProbeRetriesAnUnreachableRoot(t *testing.T) {
 	}
 }
 
+// An attempt that fails with a routing error holds the root's addresses back
+// for an hour, and server selection skips them until then. The next attempt of
+// the probe starts with that forgotten, as a priming attempt does; without it a
+// root that has come back is not asked until the hour is up, and nothing
+// validates meanwhile.
+func TestRootProbeForgetsTheRootServersBackoffBetweenAttempts(t *testing.T) {
+	root := newTestRoot(t, time.Now())
+	useTestRootAnchor(t, root)
+	prev := rootProbeRetry
+	rootProbeRetry = []time.Duration{time.Millisecond}
+	t.Cleanup(func() { rootProbeRetry = prev })
+
+	imr := newAnchorTestImr(t)
+	const addr = "192.0.2.1"
+	// The cache's shared instance of the server: AddServers merges any other
+	// into it, and a failure is recorded on the shared one.
+	rootServer := imr.Cache.GetOrCreateAuthServer("a.root.test.")
+	rootServer.AddAddr(addr)
+	if err := imr.Cache.AddServers(".", map[string]*cache.AuthServer{"a.root.test.": rootServer}); err != nil {
+		t.Fatalf("AddServers: %v", err)
+	}
+
+	var n atomic.Int32
+	heldAtStart := make([]int, 3) // addresses in backoff when each of the probe's attempts begins
+	imr.anchorKeysFetch = func(context.Context, string) (*core.RRset, map[string]*cache.AuthServer, string, error) {
+		attempt := int(n.Add(1))
+		if attempt <= len(heldAtStart) {
+			heldAtStart[attempt-1] = len(rootServer.SnapshotAddressBackoffs(time.Now()))
+		}
+		if attempt <= 2 {
+			// What the dial of the failed attempt records.
+			rootServer.RecordAddressFailure(addr, core.TransportDo53,
+				errors.New("dial udp "+addr+":53: connect: no route to host"))
+			return nil, nil, "", errors.New("no route to the root")
+		}
+		return root.rrset, nil, "", nil
+	}
+	if dss := imr.rootAnchorByProbe(t.Context(), "stub zone \".\""); len(dss) == 0 {
+		t.Fatal("the probe did not choose the anchor once the root answered")
+	}
+	for i, held := range heldAtStart {
+		if held != 0 {
+			t.Errorf("attempt %d began with %d of the root's addresses held back, want none", i+1, held)
+		}
+	}
+}
+
 // A root that answers and has no DNSKEY RRset (a private root that is not
 // signed) is another root, not an unreachable one: no anchor, one warning, and
 // no second attempt.

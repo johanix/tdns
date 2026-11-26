@@ -155,6 +155,10 @@ func (imr *Imr) rootAnchorByProbe(ctx context.Context, why string) []*dns.DS {
 		return nil
 	}
 	for attempt := 0; ; attempt++ {
+		// As primeFromHints does before each attempt: a routing error from the
+		// last one holds the root servers back for an hour, and this retry
+		// would skip a root that has since come back.
+		imr.forgetRootServerFailures()
 		rrset, _, _, err := imr.fetchAnchorKeys(ctx, ".")
 		var unsigned noAnchorKeysError
 		// retry says why this attempt did not decide, and how to word the wait.

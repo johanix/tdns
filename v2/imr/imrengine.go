@@ -629,6 +629,19 @@ func (imr *Imr) primeRetrying(ctx context.Context, prime func(context.Context) e
 	}
 }
 
+// forgetRootServerFailures clears the backoff of every address of the root
+// servers, so that the next attempt to reach the root starts as the first did.
+// A routing error ("no route to host", "network is unreachable") holds an
+// address back for an hour (BackoffConf.RoutingFailure), and server selection
+// skips it until then, so an attempt that is made again because the network was
+// not up yet would otherwise never ask the root.
+func (imr *Imr) forgetRootServerFailures() {
+	servers, _ := imr.Cache.ServerMapCopy(".")
+	for _, server := range servers {
+		server.ForgetAddressFailures()
+	}
+}
+
 // primeFromHints is one priming attempt: the root hints, then a live ". NS".
 // What an earlier attempt taught the root servers' backoff is forgotten first,
 // so that every attempt starts as the first did: an attempt made while the
@@ -636,10 +649,7 @@ func (imr *Imr) primeRetrying(ctx context.Context, prime func(context.Context) e
 // hour (BackoffConf.RoutingFailure), and the attempts are retried for exactly
 // that case.
 func (imr *Imr) primeFromHints(ctx context.Context) error {
-	servers, _ := imr.Cache.ServerMapCopy(".")
-	for _, server := range servers {
-		server.ForgetAddressFailures()
-	}
+	imr.forgetRootServerFailures()
 	if err := imr.Cache.PrimeWithHints(ctx, imr.bootConf.RootHints, imr.IterativeDNSQueryFetcher()); err != nil {
 		return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
 	}
