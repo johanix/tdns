@@ -396,12 +396,12 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	// The pin enrolled is this pair's; the entry is used with whatever pair
 	// the config written names: checked on that config, under the lock.
 	if enrolled {
-		c, k := "", ""
 		pc, err := prospectiveClientConf(o.CliConfig, target, out)
-		if err == nil {
-			c, k = clientCertPaths(pc)
+		if err != nil {
+			// Not a pair that changed: say what failed.
+			return nil, keep(fmt.Errorf("cannot read the client pair of the config to be\nwritten (%v); nothing was written", err))
 		}
-		if err != nil || c != certPath || k != keyPath {
+		if c, k := clientCertPaths(pc); c != certPath || k != keyPath {
 			// The daemon refuses a second pin under one name.
 			return nil, fmt.Errorf("the client pair in %s changed while config add\nran (now %s); nothing was written. The pin of\n%s stays enrolled as %s: put that pair back,\nor run config add again with another --client-name", o.CliConfig, c, certPath, client)
 		}
