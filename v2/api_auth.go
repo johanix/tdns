@@ -322,7 +322,14 @@ func (conf *Config) reloadApiAccess() string {
 // servers (activateApiAccess). stopped are the listeners it closed.
 func (conf *Config) loadAccessPolicy(path string) (af *AccessFile, stopped []string, err error) {
 	af, err = LoadAccessFile(path)
-	if err != nil {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// The first enrolment: the access-file: line is new and the file
+		// is not there yet; /access add creates it. Nothing is wrong, so
+		// no server error is recorded (config status would show one).
+		lgApi.Info("management API: the access file is not there yet; the running policy is unchanged, and the first client add creates it", "file", path)
+		return nil, nil, err
+	case err != nil:
 		lgApi.Error("management API: access file NOT loaded; the running policy is unchanged", "file", path, "err", err)
 		conf.Internal.ServerErrors.set(ErrCatConfig, ErrSubApiAccess, fmt.Sprintf("access file %s: %v", path, err))
 		return nil, nil, err

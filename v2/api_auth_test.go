@@ -755,4 +755,13 @@ func TestReloadAccessFileNotThereYet(t *testing.T) {
 	if st := e.conf.apiAccessStatus(); st == nil || st.File != path {
 		t.Errorf("running policy after the reload: %+v, want the one before", st)
 	}
+	// Nothing is wrong: config status shows no access-file error.
+	if errs := e.conf.Internal.ServerErrors.List(); len(errs) != 0 {
+		t.Errorf("server errors after the reload: %+v, want none", errs)
+	}
+	// A file that is there but does not load is an error, as before.
+	os.WriteFile(path, []byte("clients: [\n"), 0o600)
+	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, AccessFileNotReloaded) || len(e.conf.Internal.ServerErrors.List()) != 1 {
+		t.Errorf("a file that does not parse: %q, %+v; want NOT reloaded and one error", msg, e.conf.Internal.ServerErrors.List())
+	}
 }

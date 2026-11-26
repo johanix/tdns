@@ -312,15 +312,25 @@ func entryIsDaemonSocket(e ApiDetails, info *DaemonApi) bool {
 	return info.Socket != "" && isUnixURL(e.BaseURL) && e.BaseURL[len("unix://"):] == info.Socket
 }
 
-// socketError says plainly when the local socket sock cannot be used from
-// here (not ours to open, or no daemon there), keeping the errno for
-// errors.As. Any other err, a daemon's refusal among them, is returned as
-// it is.
+// socketError says plainly why the local socket sock cannot be used from
+// here, and what to do: not ours to open, no daemon there, or a file there
+// that is not a socket. It keeps the errno for errors.As. Any other err, a
+// daemon's refusal among them, is returned as it is. Lines of at most 72,
+// apart from the socket's.
 func socketError(sock string, err error) error {
-	if errno := socketErrno(err); errno != 0 {
-		return fmt.Errorf("cannot use the daemon's local socket (%w):\n   %s\nThe client commands need the running daemon and its local\nsocket: run them as root on the daemon's host", errno, sock)
+	errno := socketErrno(err)
+	var why string
+	switch {
+	case errno == 0:
+		return err
+	case errno == syscall.ENOTSOCK || errno == syscall.ECONNREFUSED && !socketOrMissing(sock):
+		why = "a file that is not a socket is\nthere, so the daemon cannot serve its socket. Remove that\nfile, then start the daemon"
+	case errno == syscall.EACCES || errno == syscall.EPERM:
+		why = "not yours to open. Run the client\ncommands as root on the daemon's host"
+	default: // ENOENT, ECONNREFUSED
+		why = "no daemon answers there. The\nclient commands need the running daemon"
 	}
-	return err
+	return fmt.Errorf("cannot use the daemon's local socket\n   %s\n(%w): %s", sock, errno, why)
 }
 
 // socketErrno is err's errno when it says the socket cannot be used: not

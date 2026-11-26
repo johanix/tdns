@@ -756,7 +756,7 @@ func TestClientCommandsCallTheDaemon(t *testing.T) {
 	}
 	other := filepath.Join(dir, "tdns-auth2.yaml")
 	writeFile(t, other, daemonYAML("TDNS-AUTH", "127.0.0.1:8990", "k", "   socket: "+filepath.Join(dir, "absent.sock")+"\n"))
-	if err := runAccess("auth", other, tdns.AccessPost{Command: "list"}); err == nil || !strings.Contains(err.Error(), "run them as root on the daemon's host") {
+	if err := runAccess("auth", other, tdns.AccessPost{Command: "list"}); err == nil || !strings.Contains(err.Error(), "no daemon answers there") {
 		t.Errorf("no daemon on the socket: %v", err)
 	}
 	writeFile(t, other, daemonYAML("TDNS-AUTH", "127.0.0.1:8990", "k", "   socket: none\n"))
@@ -792,13 +792,31 @@ func TestEntryIsDaemonSocketRawPath(t *testing.T) {
 // used, as the BSDs say it (ENOTSOCK) and as Linux does (ECONNREFUSED): a
 // plain refusal, not Go's raw dial error.
 func TestSocketErrnoNotASocket(t *testing.T) {
-	for _, e := range []syscall.Errno{syscall.ENOTSOCK, syscall.ECONNREFUSED} {
-		err := fmt.Errorf("Post: %w", &net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", e)})
-		if got := socketErrno(err); got != e {
-			t.Errorf("%v: socketErrno = %v", e, got)
+	file := filepath.Join(t.TempDir(), "d.sock")
+	writeFile(t, file, "not a socket\n")
+	for _, c := range []struct {
+		errno syscall.Errno
+		sock  string
+		want  string
+	}{
+		{syscall.ENOTSOCK, file, "Remove that\nfile, then start the daemon"},     // the BSDs
+		{syscall.ECONNREFUSED, file, "Remove that\nfile, then start the daemon"}, // Linux
+		{syscall.ECONNREFUSED, file + ".none", "no daemon answers there"},
+		{syscall.ENOENT, file + ".none", "no daemon answers there"},
+		{syscall.EACCES, file, "as root on the daemon's host"},
+	} {
+		err := fmt.Errorf("Post: %w", &net.OpError{Op: "dial", Net: "unix", Err: os.NewSyscallError("connect", c.errno)})
+		if got := socketErrno(err); got != c.errno {
+			t.Errorf("%v: socketErrno = %v", c.errno, got)
 		}
-		if msg := socketError("/x.sock", err).Error(); !strings.HasPrefix(msg, "cannot use the daemon's local socket") {
-			t.Errorf("%v: %q, want the plain refusal", e, msg)
+		msg := socketError(c.sock, err).Error()
+		if !strings.HasPrefix(msg, "cannot use the daemon's local socket\n   "+c.sock+"\n") || !strings.Contains(msg, c.want) {
+			t.Errorf("%v at %s: %q, want %q", c.errno, c.sock, msg, c.want)
+		}
+		for _, l := range strings.Split(msg, "\n") {
+			if len(l) > 72 && !strings.Contains(l, c.sock) {
+				t.Errorf("%v: line over 72 columns: %q", c.errno, l)
+			}
 		}
 	}
 }
