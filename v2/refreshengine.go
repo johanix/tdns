@@ -150,8 +150,10 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		// recorded.
 		if zd.publishedSnapshot() != nil {
 			if cerr := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); cerr != nil {
-				lgEngine.Error("policy sync after adopting a persisted copy failed",
-					"zone", zone, "error", cerr)
+				if !isNoKeysForRemovedZone(cerr) {
+					lgEngine.Error("policy sync after adopting a persisted copy failed",
+						"zone", zone, "error", cerr)
+				}
 				zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", cerr)
 				zd.LatestError = time.Now()
 			}
@@ -390,7 +392,9 @@ func firstLoadPolicyName(zd *ZoneData, zr ZoneRefresher) string {
 
 func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) error {
 	if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, configPolicyName); err != nil {
-		lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
+		if !isNoKeysForRemovedZone(err) {
+			lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
+		}
 		return err
 	}
 	// Before the drain. OnFirstLoad is RETAINED on a failure here, exactly as
@@ -449,8 +453,10 @@ func signOnceAfterPolicyBind(ctx context.Context, zd *ZoneData) error {
 	}
 	newrrsigs, err := zd.SignZone(ctx, zd.KeyDB, false)
 	if err != nil {
-		lgEngine.Error("signing after the DNSSEC policy bound failed",
-			"zone", zd.ZoneName, "err", err)
+		if !isNoKeysForRemovedZone(err) {
+			lgEngine.Error("signing after the DNSSEC policy bound failed",
+				"zone", zd.ZoneName, "err", err)
+		}
 		return fmt.Errorf("signing %s after its DNSSEC policy bound: %w", zd.ZoneName, err)
 	}
 	lgEngine.Info("zone signed after its DNSSEC policy bound",
@@ -482,7 +488,9 @@ func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Con
 	// retained for a later retry, exactly as finishFirstLoadPolicy does -- and
 	// the deltas are left unreplayed rather than replayed with a nil policy.
 	if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, configPolicyName); err != nil {
-		lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
+		if !isNoKeysForRemovedZone(err) {
+			lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
+		}
 		return err
 	}
 
@@ -894,7 +902,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							continue
 						}
 						if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, firstLoadPolicyName(zd, zr)); err != nil {
-							lgEngine.Error("zone policy sync after first load failed", "zone", zone, "error", err)
+							if !isNoKeysForRemovedZone(err) {
+								lgEngine.Error("zone policy sync after first load failed", "zone", zone, "error", err)
+							}
 							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 							zd.LatestError = time.Now()
 							if _, exists := refreshCounters.Get(zone); !exists {
@@ -1257,7 +1267,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// the helper was extracted to prevent on the static-zone path;
 					// the dynamic path kept its own copy and kept the bug.
 					if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, firstLoadPolicyName(zd, zr)); err != nil {
-						lgEngine.Warn("DNSSEC policy sync for dynamic zone failed", "zone", zone, "err", err)
+						if !isNoKeysForRemovedZone(err) {
+							lgEngine.Warn("DNSSEC policy sync for dynamic zone failed", "zone", zone, "err", err)
+						}
 						zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 						zd.LatestError = time.Now()
 						// OnFirstLoad retained — ticker completion retry will finish.
@@ -1347,7 +1359,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						noteRefreshFailure(zd, zone, err, "initial load retry failed")
 					} else {
 						if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
-							lgEngine.Error("initial load retry: policy sync failed", "zone", zone, "error", err)
+							if !isNoKeysForRemovedZone(err) {
+								lgEngine.Error("initial load retry: policy sync failed", "zone", zone, "error", err)
+							}
 							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 							zd.LatestError = time.Now()
 							// The LIVE counter, not the one collected by the
@@ -1370,7 +1384,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 				// re-Refresh, no re-InstallInitialSnapshot.
 				if hasPendingOnFirstLoad(zd) {
 					if err := finishFirstLoadPolicy(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
-						lgEngine.Warn("first-load policy completion retry failed", "zone", zone, "err", err)
+						if !isNoKeysForRemovedZone(err) {
+							lgEngine.Warn("first-load policy completion retry failed", "zone", zone, "err", err)
+						}
 						zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 						zd.LatestError = time.Now()
 						rc.CurRefresh = 30

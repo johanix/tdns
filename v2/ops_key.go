@@ -170,11 +170,47 @@ var errBootstrapNoActiveKey = errors.New("no active SIG(0) key to bootstrap")
 // failed. A poll counts such a bootstrap as sent (pollParentKeyState).
 var errBootstrapAfterSend = errors.New("SIG(0) bootstrap UPDATE accepted, but the local key state was not updated")
 
+// generateBootstrapSig0Key makes the zone's active SIG(0) key for a
+// bootstrap that found none, under the zone keys lock (lockZoneKeys), and
+// none for a ZoneData that has left Zones. A key another caller made while
+// this one waited is left as the one to bootstrap: resp is then nil.
+func (zd *ZoneData) generateBootstrapSig0Key(alg uint8) (*KeystoreResponse, error) {
+	unlock, err := zd.lockZoneKeys("BootstrapSig0KeyWithParent")
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if sak, err := zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive); err == nil && len(sak.Keys) > 0 {
+		return nil, nil
+	}
+	return zd.KeyDB.Sig0KeyMgmt(nil, KeystorePost{
+		Command:     "sig0-mgmt",
+		SubCommand:  "generate",
+		Zone:        zd.ZoneName,
+		Algorithm:   alg,
+		State:       Sig0StateActive,
+		ParentState: 255, // XXX: FIXME johani 20250930
+		Creator:     "bootstrap-sig0",
+	})
+}
+
 func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (string, UpdateResult, error) {
 	return zd.bootstrapSig0KeyWithParent(ctx, alg, zd.zoneChildBootstrapMethods(), true)
 }
 
 func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, willing []string, allowGenerate bool) (string, UpdateResult, error) {
+	// The zone's SIG(0) claim, held until the parent has answered: a zone
+	// delete is refused meanwhile instead of taking the key the ceremony
+	// carries, and a bootstrap is refused while a delete runs. Never waited
+	// for, so it takes no place in the lock order.
+	if zd.KeyDB != nil {
+		release, err := zd.KeyDB.beginSig0Bootstrap(zd.ZoneName)
+		if err != nil {
+			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): %v", zd.ZoneName, err), UpdateResult{}, err
+		}
+		defer release()
+	}
+
 	if err := zd.resolveParentZone(); err != nil {
 		return "", UpdateResult{}, fmt.Errorf("BootstrapSig0KeyWithParent(%q): %w", zd.ZoneName, err)
 	}
@@ -191,20 +227,18 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 				UpdateResult{}, fmt.Errorf("%w for zone %q", errBootstrapNoActiveKey, zd.ZoneName)
 		}
 
-		kp := KeystorePost{
-			Command:     "sig0-mgmt",
-			SubCommand:  "generate",
-			Zone:        zd.ZoneName,
-			Algorithm:   alg,
-			State:       Sig0StateActive,
-			ParentState: 255, // XXX: FIXME johani 20250930
-			Creator:     "bootstrap-sig0",
-		}
-		resp, err := zd.KeyDB.Sig0KeyMgmt(nil, kp)
+		// Made under the zone keys lock, and only for a ZoneData still in
+		// Zones (lockZoneKeys): a setup queued before a zone delete, or a
+		// bootstrap that was running, makes no key for a zone that is gone.
+		// Read again under the lock: a key another caller made meanwhile is
+		// the one to bootstrap.
+		resp, err := zd.generateBootstrapSig0Key(alg)
 		if err != nil {
 			return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to generate keypair: %v", zd.ZoneName, err), UpdateResult{}, err
 		}
-		zd.Logger.Printf("%s", resp.Msg)
+		if resp != nil {
+			zd.Logger.Printf("%s", resp.Msg)
+		}
 
 		sak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 		if err != nil {
@@ -249,6 +283,14 @@ func (zd *ZoneData) bootstrapSig0KeyWithParent(ctx context.Context, alg uint8, w
 		// that run on every zone load log this at Info, not Error.
 		msg := fmt.Sprintf("BootstrapSig0KeyWithParent(%q): parent requires manual SIG(0) bootstrap; not sending KEY UPDATE", zd.ZoneName)
 		return msg, UpdateResult{}, fmt.Errorf("%w for %s", errBootstrapManual, zd.ZoneName)
+	}
+	// A zone deleted while the parent was looked up sends nothing: the
+	// parent would be asked to trust a key that the delete takes. The same
+	// check as a rollover's once its key is made; a delete after it finds
+	// the ceremony with the parent.
+	if zd.removed.Load() {
+		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q): the zone was deleted or replaced; no KEY UPDATE sent", zd.ZoneName),
+			UpdateResult{}, zd.noKeysForRemovedZone("BootstrapSig0KeyWithParent")
 	}
 	if method == "at-ns" {
 		// The parent will look for this KEY at _sig0key.<child>._signal.<ns>
@@ -352,26 +394,100 @@ var rolloverLookupDSYNCTarget = func(ctx context.Context, zone string) (*DsyncTa
 }
 var rolloverSendUpdate = SendUpdate
 
-// beginSig0Rollover claims zone for one SIG(0) rollover, and the func it
-// returns gives the claim back. A second claim while one is held is refused,
-// not queued: two rollovers of one zone would each get a new key accepted by
-// the parent and each make its own key active.
-func (kdb *KeyDB) beginSig0Rollover(zone string) (func(), error) {
+// Who holds a zone's SIG(0) claim (claimZoneSig0).
+const (
+	sig0ClaimRollover  = "rollover"
+	sig0ClaimBootstrap = "bootstrap"
+	sig0ClaimDelete    = "delete"
+)
+
+// errSig0ZoneBusy: a SIG(0) rollover, a SIG(0) bootstrap or a delete holds
+// the zone's SIG(0) claim, and another of them was refused, not queued.
+// The delegation syncher retries a refused setup with its backoff.
+var errSig0ZoneBusy = errors.New("the zone's SIG(0) key is busy")
+
+// claimZoneSig0 claims zone for holder, a SIG(0) rollover or bootstrap or
+// a zone delete,
+// and the func it returns gives the claim back. While the claim is held a
+// second claim is refused, not queued, and the holder is returned instead
+// of the func. sig0RolloverMu is held only in here and in the release, so
+// the claim is never waited for and takes no place in any lock order.
+func (kdb *KeyDB) claimZoneSig0(zone, holder string) (release func(), heldBy string) {
 	zone = core.CanonicalizeName(dns.Fqdn(zone))
 	kdb.sig0RolloverMu.Lock()
 	defer kdb.sig0RolloverMu.Unlock()
-	if kdb.sig0Rollovers[zone] {
-		return nil, fmt.Errorf("a SIG(0) rollover for %s is already running", zone)
+	if h := kdb.sig0Rollovers[zone]; h != "" {
+		return nil, h
 	}
 	if kdb.sig0Rollovers == nil {
-		kdb.sig0Rollovers = map[string]bool{}
+		kdb.sig0Rollovers = map[string]string{}
 	}
-	kdb.sig0Rollovers[zone] = true
+	kdb.sig0Rollovers[zone] = holder
 	return func() {
 		kdb.sig0RolloverMu.Lock()
 		delete(kdb.sig0Rollovers, zone)
 		kdb.sig0RolloverMu.Unlock()
-	}, nil
+	}, ""
+}
+
+// beginSig0Rollover claims zone for one SIG(0) rollover, and the func it
+// returns gives the claim back. Refused while another rollover of the zone
+// runs: two rollovers of one zone would each get a new key accepted by the
+// parent and each make its own key active. Refused too while the zone is
+// being deleted (beginZoneDelete).
+func (kdb *KeyDB) beginSig0Rollover(zone string) (func(), error) {
+	release, heldBy := kdb.claimZoneSig0(zone, sig0ClaimRollover)
+	switch heldBy {
+	case "":
+		return release, nil
+	case sig0ClaimDelete:
+		return nil, fmt.Errorf("zone %s is being deleted; no rollover started", core.CanonicalizeName(dns.Fqdn(zone)))
+	case sig0ClaimBootstrap:
+		return nil, fmt.Errorf("a SIG(0) key bootstrap for %s is running; no rollover started", core.CanonicalizeName(dns.Fqdn(zone)))
+	}
+	return nil, fmt.Errorf("a SIG(0) rollover for %s is already running", core.CanonicalizeName(dns.Fqdn(zone)))
+}
+
+// beginSig0Bootstrap claims zone for one SIG(0) bootstrap, from its key to
+// the parent's answer, and the func it returns gives the claim back. A
+// zone delete is refused while it holds the claim, as during a rollover:
+// the ceremony carries the zone's key, and a delete that took the key
+// meanwhile could leave the parent trusting a key whose private half is
+// gone. A bootstrap is refused, wrapped in errSig0ZoneBusy, while a delete,
+// a rollover or another bootstrap of the zone holds it: none of them has a
+// use for a ceremony that runs alongside it.
+func (kdb *KeyDB) beginSig0Bootstrap(zone string) (func(), error) {
+	release, heldBy := kdb.claimZoneSig0(zone, sig0ClaimBootstrap)
+	zone = core.CanonicalizeName(dns.Fqdn(zone))
+	switch heldBy {
+	case "":
+		return release, nil
+	case sig0ClaimDelete:
+		return nil, fmt.Errorf("%w: zone %s is being deleted; no bootstrap started", errSig0ZoneBusy, zone)
+	case sig0ClaimRollover:
+		return nil, fmt.Errorf("%w: a SIG(0) rollover for %s is running; no bootstrap started", errSig0ZoneBusy, zone)
+	}
+	return nil, fmt.Errorf("%w: a SIG(0) key bootstrap for %s is already running", errSig0ZoneBusy, zone)
+}
+
+// beginZoneDelete claims zone for a zone delete, so that the delete and a
+// SIG(0) rollover of the zone never overlap, and the func it returns gives
+// the claim back. Refused while a rollover holds the claim: from its new
+// key to the parent's answers a rollover cannot be undone, and a delete
+// that took the keys meanwhile could leave the parent trusting a key whose
+// private half is gone. Not waited for either: the rollover's UPDATEs can
+// take network timeouts, and the delete holds templateApplyMu.
+func (kdb *KeyDB) beginZoneDelete(zone string) (func(), error) {
+	release, heldBy := kdb.claimZoneSig0(zone, sig0ClaimDelete)
+	switch heldBy {
+	case "":
+		return release, nil
+	case sig0ClaimRollover:
+		return nil, fmt.Errorf("zone %s not deleted: a SIG(0) key rollover is in progress; try again when it finishes", core.CanonicalizeName(dns.Fqdn(zone)))
+	case sig0ClaimBootstrap:
+		return nil, fmt.Errorf("zone %s not deleted: a SIG(0) key bootstrap is in progress; try again when it finishes", core.CanonicalizeName(dns.Fqdn(zone)))
+	}
+	return nil, fmt.Errorf("zone %s not deleted: another delete of it is in progress", core.CanonicalizeName(dns.Fqdn(zone)))
 }
 
 // Returns msg, old keyid, new keyid, error, UpdateResult
@@ -380,7 +496,8 @@ func (kdb *KeyDB) beginSig0Rollover(zone string) (func(), error) {
 // other keystore writer would wait for the parent. The new key is committed
 // before the parent is asked to trust it, and the local state changes are a
 // second short transaction once the parent has accepted the roll. One
-// rollover per zone at a time (beginSig0Rollover).
+// rollover per zone at a time, and none while the zone is being deleted,
+// nor a delete while it runs (beginSig0Rollover, beginZoneDelete).
 func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, action string) (string, uint16, uint16, UpdateResult, error) {
 	release, err := zd.KeyDB.beginSig0Rollover(zd.ZoneName)
 	if err != nil {
@@ -410,17 +527,13 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	}
 	oldkey := sak.Keys[0]
 
-	// 3. Generate a new key. With a nil tx Sig0KeyMgmt commits it in a short
-	// transaction of its own. The key is taken from the result: a query for
-	// created keys can find an older one.
-	kpresp, err := zd.KeyDB.Sig0KeyMgmt(nil, KeystorePost{
-		Command:    "sig0-mgmt",
-		SubCommand: "generate",
-		Zone:       zd.ZoneName,
-		Algorithm:  alg,
-		State:      Sig0StateCreated,
-		Creator:    "rollover-sig0",
-	})
+	// 3. Generate a new key, unless the zone has gone meanwhile
+	// (generateRolloverSig0Key). The key is taken from the result: a query
+	// for created keys can find an older one.
+	kpresp, err := zd.generateRolloverSig0Key(alg)
+	if errors.Is(err, errRolloverZoneGone) {
+		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): %w; no new key was made", zd.ZoneName, err)
+	}
 	if err != nil {
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q) failed to generate keypair: %v", zd.ZoneName, err)
 	}
@@ -429,6 +542,16 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): key generation returned no key", zd.ZoneName)
 	}
 	zd.Logger.Printf("%s", kpresp.Msg)
+	// A delete that marked the zone while the key was being made waited
+	// for it (removeZoneKeys): the key went with the zone's keys, or was
+	// kept and counted with them. The parent is not asked to trust it, and
+	// the key is left as it is, since a delete with --keep-keys has
+	// reported it among the kept ones. A delete that comes later finds the
+	// rollover with the parent, as before.
+	if zd.removed.Load() {
+		return "", 0, 0, UpdateResult{}, fmt.Errorf("RolloverSig0KeyWithParent(%q): %w; its new key %d was not sent",
+			zd.ZoneName, errRolloverZoneGone, pkc.KeyRR.KeyTag())
+	}
 
 	oldkeyid := oldkey.KeyRR.KeyTag()
 	newkeyid := pkc.KeyRR.KeyTag()
@@ -544,6 +667,59 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 
 	return fmt.Sprintf("RolloverSig0KeyWithParent(%q) successfully rolled from SIG(0) key %d to SIG(0) key %d",
 		zd.ZoneName, oldkeyid, newkeyid), oldkeyid, newkeyid, ur, nil
+}
+
+// errRolloverZoneGone: the ZoneData a SIG(0) rollover started on left Zones
+// before the rollover asked the parent to trust its new key
+// (generateRolloverSig0Key).
+var errRolloverZoneGone = errors.New("the zone was deleted or modified while the rollover ran; the parent was not asked")
+
+// testHookSig0RolloverGenerating, when set, runs in generateRolloverSig0Key
+// with the zone's rollover lock held, after the zone is checked and before
+// the key is made.
+var testHookSig0RolloverGenerating func()
+
+// generateRolloverSig0Key makes a SIG(0) rollover's new key, in state
+// created, and commits it, under the zone's rollover lock. A zone delete
+// sets zd.removed and then deletes the zone's keys under that lock
+// (removeZoneKeys), so the new key is either committed before the delete
+// takes the lock, and goes with the zone's other keys, or not made at all.
+// A ZoneData that has left Zones (zd.removed: deleted, or replaced by a
+// modify) gets no new key, and the rollover stops before it asks the
+// parent to trust one. A delete with --keep-keys takes the lock too, to
+// count the kept keys: a key committed first is counted with them, and
+// none is made after. A delete that marks the zone while this holds the
+// lock waits for it, and the rollover finds the mark when it checks again
+// after this returns, before the parent is asked.
+//
+// Lock order: the per-zone rollover lock, then the KeyDB transaction that
+// Sig0KeyMgmt begins, as in removeZoneKeys and the rollover ticks. The
+// rollover's claim (beginSig0Rollover) is not a lock: sig0RolloverMu is
+// held only inside claimZoneSig0 and its release, never across this. With
+// the claim a zone delete is refused for the whole rollover; the checks of
+// zd.removed here and after the key is made are the defence behind it.
+// Neither templateApplyMu nor zd.mu is taken under the rollover lock here,
+// and the lock is not held across the exchanges with the parent.
+func (zd *ZoneData) generateRolloverSig0Key(alg uint8) (*KeystoreResponse, error) {
+	lock := AcquireRolloverLock(zd.ZoneName)
+	lock.Lock()
+	defer lock.Unlock()
+	if zd.removed.Load() {
+		return nil, errRolloverZoneGone
+	}
+	if testHookSig0RolloverGenerating != nil {
+		testHookSig0RolloverGenerating()
+	}
+	// With a nil tx Sig0KeyMgmt commits the key in a short transaction of
+	// its own, before it returns.
+	return zd.KeyDB.Sig0KeyMgmt(nil, KeystorePost{
+		Command:    "sig0-mgmt",
+		SubCommand: "generate",
+		Zone:       zd.ZoneName,
+		Algorithm:  alg,
+		State:      Sig0StateCreated,
+		Creator:    "rollover-sig0",
+	})
 }
 
 // sig0SetstateRecovery names the CLI commands that finish a SIG(0) roll by

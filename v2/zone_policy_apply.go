@@ -450,8 +450,10 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 			return nil
 		}
 		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
-			lgEngine.Warn("first config apply of DNSSEC policy failed; binding reverted",
-				"zone", zd.ZoneName, "policy", intentName, "err", aerr)
+			if !isNoKeysForRemovedZone(aerr) {
+				lgEngine.Warn("first config apply of DNSSEC policy failed; binding reverted",
+					"zone", zd.ZoneName, "policy", intentName, "err", aerr)
+			}
 			return aerr
 		}
 		return nil
@@ -474,8 +476,10 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 		}
 		// First-bind: no healthy binding to keep — proceed toward intent.
 		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
-			lgEngine.Warn("config apply toward intent after unavailable applied policy failed",
-				"zone", zd.ZoneName, "policy", intentName, "err", aerr)
+			if !isNoKeysForRemovedZone(aerr) {
+				lgEngine.Warn("config apply toward intent after unavailable applied policy failed",
+					"zone", zd.ZoneName, "policy", intentName, "err", aerr)
+			}
 			return aerr
 		}
 		return nil
@@ -544,8 +548,10 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 	switch class {
 	case PolicyChangeCompatibleName:
 		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
-			lgEngine.Warn("compatible DNSSEC policy rename apply failed; binding reverted",
-				"zone", zd.ZoneName, "from", appliedName, "to", intentName, "err", aerr)
+			if !isNoKeysForRemovedZone(aerr) {
+				lgEngine.Warn("compatible DNSSEC policy rename apply failed; binding reverted",
+					"zone", zd.ZoneName, "from", appliedName, "to", intentName, "err", aerr)
+			}
 			return aerr
 		}
 		zd.ClearError(DnssecPolicyWarning)
@@ -559,8 +565,10 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 			// mismatch) and the engine spawns the algorithm roll on its
 			// next tick. Same outcome as `zone dnssec policy-change`.
 			if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
-				lgEngine.Warn("KSK algorithm-change policy apply failed; binding reverted",
-					"zone", zd.ZoneName, "from", appliedName, "to", intentName, "err", aerr)
+				if !isNoKeysForRemovedZone(aerr) {
+					lgEngine.Warn("KSK algorithm-change policy apply failed; binding reverted",
+						"zone", zd.ZoneName, "from", appliedName, "to", intentName, "err", aerr)
+				}
 				return aerr
 			}
 			lgEngine.Info("bound a KSK algorithm change from config; the rollover engine will spawn the algorithm roll",
