@@ -42,6 +42,12 @@ type addDaemon struct {
 func newAddDaemon(t *testing.T, running bool) *addDaemon {
 	t.Helper()
 	withCleanRoleRegistry(t)
+	// The fixture's own pair, whatever the caller's environment says: an
+	// empty value is no override (viper). A test of an override sets it
+	// after this.
+	for _, k := range []string{"CLIENT.CERT", "CLIENT.KEY", "CLI.LOCALCONFIG"} {
+		t.Setenv(k, "")
+	}
 	dir, err := os.MkdirTemp("/tmp", "ncli") // short: a socket path has a limit
 	if err != nil {
 		t.Fatal(err)
@@ -537,4 +543,35 @@ func TestAddUsesTheClientPairOfTheConfigWritten(t *testing.T) {
 	if err != nil || made || clients["tester"] != pin {
 		t.Errorf("enrolled %v; want the local config's pair %s (pin %s, made %v, %v)", clients, lcert, pin, made, err)
 	}
+}
+
+// A client: block that does not decode is refused before the enrolment: the
+// default pair would be enrolled in its place. Nothing is written.
+func TestAddRefusesAClientBlockThatDoesNotDecode(t *testing.T) {
+	d := newAddDaemon(t, true)
+	body := "client:\n   cert: { path: /etc/tdns/client.crt }\n"
+	writeFile(t, d.cli, body)
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "client:") {
+		t.Errorf("a client: block that does not decode: %v, want a refusal", err)
+	}
+	if c := d.commands(); strings.Contains(c, "add") {
+		t.Errorf("the daemon was asked %q, want no add", c)
+	}
+	d.unchanged(t, body)
+}
+
+// An entry written before config-file: by the daemon's second API address
+// is the daemon's entry too: left alone, not a second entry.
+func TestAddKnowsAnEntryByAnyAddress(t *testing.T) {
+	d := newAddDaemon(t, true)
+	raw, _ := os.ReadFile(d.cfg)
+	second := "127.0.0.1:1"
+	writeFile(t, d.cfg, strings.Replace(string(raw), " ]\n   apikey:", ", "+second+" ]\n   apikey:", 1))
+	body := "client:\n   cert: " + d.certPath + "\napiservers:\n   - name: old\n     role: auth\n     baseurl: https://" + second + "/api/v1\n     apikey: k\n     authmethod: X-API-Key\n"
+	writeFile(t, d.cli, body)
+	res, err := d.add(t, nil)
+	if err != nil || res.AlreadyKnown != "old" || res.Wrote {
+		t.Fatalf("%+v, %v; want the entry by the second address left alone", res, err)
+	}
+	d.unchanged(t, body)
 }

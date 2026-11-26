@@ -108,6 +108,15 @@ func (conf *Config) runAccessCommand(ap AccessPost) (resp AccessResponse) {
 	if err != nil {
 		return refuse("%v", err)
 	}
+	// A missing file while a policy loaded from a file is in force: a new
+	// file would hold only this change, and the clients in force (and a
+	// keyauth off) would go. A new file is made when that loses nothing:
+	// the first enrolment (no policy in force), a start-up whose file could
+	// not be used, or a policy with no clients and keyauth on.
+	if st := conf.Internal.ApiAccess.load(); old == nil && st != nil && st.Enabled && st.Err == nil && (len(st.Clients) > 0 || !st.KeyAuth) {
+		return refuse("the access file is not there:\n   %s\nbut the policy loaded from\n   %s\nis in force (%d client(s), keyauth %s). A new file would\nhold only this change: put that file back (a .prev next to\nit is the one before the last write), then run this again",
+			path, st.File, len(st.Clients), onOff(st.KeyAuth))
+	}
 	msg, changed, err := applyAccessChange(af, ap)
 	if err != nil {
 		return refuse("%v", err)

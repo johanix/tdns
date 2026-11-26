@@ -405,6 +405,7 @@ func TestReadCliClientConfTakesTheEnvironment(t *testing.T) {
 	cfg := filepath.Join(t.TempDir(), "tdns-ncli.yaml")
 	writeFile(t, cfg, "client:\n   cert: /a/me.crt\n   key: /a/me.key\n")
 	t.Setenv("CLIENT.CERT", "/b/me.crt")
+	t.Setenv("CLIENT.KEY", "") // the file's key, whatever the caller's environment says
 	if cc := ReadCliClientConf(cfg); cc.Cert != "/b/me.crt" || cc.Key != "/a/me.key" {
 		t.Errorf("%+v; want the environment's cert and the file's key", cc)
 	}
