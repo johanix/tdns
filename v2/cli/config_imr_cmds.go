@@ -312,7 +312,7 @@ func checkImrTrustAnchors(cfg *tdns.Config, rep *ccReport) {
 			" as the root hints are the compiled-in ones and the root is neither forwarded nor stubbed")
 	case !requireValidation:
 		rep.info(g, "anchor", fmt.Sprintf("no trust anchor, and the root may not be the IANA root (%s): the compiled-in"+
-			" root anchor is used if the keys the root serves match it, which is checked at start;"+
+			" root anchor is used if the root serves a key that matches it and signs its DNSKEY RRset, which is checked at start;"+
 			" require-dnssec-validation is false (lab mode), so lookups that require validation do without it"+
 			" if they do not", why))
 	default:

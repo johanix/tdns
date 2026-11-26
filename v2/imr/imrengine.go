@@ -2144,11 +2144,12 @@ func (imr *Imr) parseTrustAnchorsFromConfig(ic Config) (map[string][]*dns.DS, ma
 			// Not decided here: whether the root is the IANA root is a fact
 			// about the keys it serves, not about how the config reaches it.
 			// initializeImrTrustAnchors fetches them and uses the compiled-in
-			// anchor if they match it (rootAnchorByProbe).
+			// anchor if a key among them matches it and signs the set
+			// (rootAnchorByProbe).
 			imr.anchorNotice.Do(func() {
 				imr.lgImr().Info("no trust anchor configured, and the root may not be the IANA root:"+
-					" the compiled-in IANA root anchor is used if the keys the root serves match it,"+
-					" which is checked once the root has been fetched", "reason", why)
+					" the compiled-in IANA root anchor is used if the root serves a key that matches it"+
+					" and signs its DNSKEY RRset, which is checked once the root has been fetched", "reason", why)
 			})
 			return dsByName, dnskeysByName, nil
 		}
@@ -2644,7 +2645,8 @@ func (imr *Imr) processTrustAnchorZone(ctx context.Context, anchorName string, d
 //   - trust-anchor-file (multiple lines)
 //   - with none of those, the compiled-in IANA root anchor, if the root is the
 //     IANA root (RootAnchorFallback), or, where the config may lead to another
-//     root, if the keys the root serves match it (rootAnchorByProbe)
+//     root, if the root serves a key that matches it and signs the DNSKEY
+//     RRset (rootAnchorByProbe)
 //
 // For each anchored name, it loads direct DNSKEY TAs (trusted), matches DS→DNSKEY(s),
 // validates the anchored DNSKEY RRset and then validates the NS RRset for that name.
