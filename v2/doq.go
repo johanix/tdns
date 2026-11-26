@@ -169,9 +169,16 @@ func handleDoQStream(ctx context.Context, stream *quic.Stream, conn *quic.Conn, 
 	lgDns.Debug("DoQ: finished handling stream", "stream", stream.StreamID(), "remote", conn.RemoteAddr())
 }
 
+// doqReadStream is what readExactWithContext needs of a stream: a *quic.Stream,
+// or a scripted one in a test that has to control what a Read returns.
+type doqReadStream interface {
+	Read(p []byte) (int, error)
+	SetReadDeadline(t time.Time) error
+}
+
 // readExactWithContext reads exactly len(buf) bytes from the stream,
 // periodically setting a short read deadline to allow checking ctx.Done().
-func readExactWithContext(ctx context.Context, s *quic.Stream, buf []byte) error {
+func readExactWithContext(ctx context.Context, s doqReadStream, buf []byte) error {
 	const sliceReadDeadline = 200 * time.Millisecond
 	defer func() {
 		// clear any deadline

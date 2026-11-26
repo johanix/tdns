@@ -17,6 +17,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -227,5 +228,88 @@ func TestReadExactWithContextEmptyStreamIsEOF(t *testing.T) {
 	_, err := readFromDoQStream(t, nil, 2)
 	if !errors.Is(err, io.EOF) {
 		t.Fatalf("a stream that ended before any byte: got %v, want io.EOF", err)
+	}
+}
+
+// A real stream returns (n, io.EOF) from one Read when the FIN has arrived with
+// the last bytes, but whether it does depends on timing: the tests above can
+// pass without that Read ever happening. A scripted stream makes it happen.
+type scriptedRead struct {
+	data string
+	err  error // returned with the last of data, or with no data at all
+}
+
+type scriptedStream struct {
+	script       []scriptedRead
+	lastDeadline time.Time
+}
+
+func (s *scriptedStream) Read(p []byte) (int, error) {
+	if len(s.script) == 0 {
+		return 0, errors.New("scriptedStream: Read past the end of the script")
+	}
+	step := &s.script[0]
+	n := copy(p, step.data)
+	step.data = step.data[n:]
+	if len(step.data) > 0 { // p was too small: the error comes with the rest
+		return n, nil
+	}
+	s.script = s.script[1:]
+	return n, step.err
+}
+
+func (s *scriptedStream) SetReadDeadline(t time.Time) error {
+	s.lastDeadline = t
+	return nil
+}
+
+func TestReadExactWithContextScripted(t *testing.T) {
+	errReset := errors.New("stream reset")
+	tests := []struct {
+		name   string
+		script []scriptedRead
+		size   int
+		want   error // nil: the buffer holds wantData
+		data   string
+	}{
+		{"all the bytes arrive with the FIN", []scriptedRead{{"0123456789", io.EOF}}, 10, nil, "0123456789"},
+		{"the last bytes arrive with the FIN", []scriptedRead{{"0123", nil}, {"456789", io.EOF}}, 10, nil, "0123456789"},
+		{"all the bytes, no FIN yet", []scriptedRead{{"0123456789", nil}}, 10, nil, "0123456789"},
+		{"a timeout, then the bytes with the FIN", []scriptedRead{{"", os.ErrDeadlineExceeded}, {"0123456789", io.EOF}}, 10, nil, "0123456789"},
+		{"the stream ends with the FIN, short", []scriptedRead{{"012", io.EOF}}, 5, io.ErrUnexpectedEOF, ""},
+		{"the FIN comes after some bytes", []scriptedRead{{"012", nil}, {"", io.EOF}}, 5, io.ErrUnexpectedEOF, ""},
+		{"the FIN comes before any byte", []scriptedRead{{"", io.EOF}}, 2, io.EOF, ""},
+		{"another error is returned as it is", []scriptedRead{{"012", errReset}}, 5, errReset, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &scriptedStream{script: tc.script}
+			buf := make([]byte, tc.size)
+			err := readExactWithContext(context.Background(), s, buf)
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("got %v, want no error", err)
+				}
+				if string(buf) != tc.data {
+					t.Fatalf("read %q, want %q", buf, tc.data)
+				}
+			} else if !errors.Is(err, tc.want) {
+				t.Fatalf("got %v, want %v", err, tc.want)
+			}
+			if !s.lastDeadline.IsZero() {
+				t.Errorf("the read deadline was left at %v", s.lastDeadline)
+			}
+		})
+	}
+}
+
+// A read deadline that expires while the context is done ends the read with the
+// context's error; without it the read goes on.
+func TestReadExactWithContextEndsWithTheContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := &scriptedStream{script: []scriptedRead{{"", os.ErrDeadlineExceeded}}}
+	if err := readExactWithContext(ctx, s, make([]byte, 2)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context.Canceled", err)
 	}
 }
