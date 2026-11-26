@@ -280,8 +280,39 @@ func TestAccessRouteWithoutAccessFile(t *testing.T) {
 		}
 	}
 	resp = e.accessCall(t, AccessPost{Command: "list"})
-	if resp.Error || !strings.HasPrefix(resp.Msg, "No access file: the API key is admin") || !resp.KeyAuth || resp.File != "" {
+	if resp.Error || !strings.HasPrefix(resp.Msg, "No access file: the API key is admin") || !resp.KeyAuth || resp.File != "" || resp.Configured != "" {
 		t.Errorf("list without an access file: %+v", resp)
+	}
+}
+
+// The first enrolment: the config names an access file that is not there
+// yet, which a reload kept without loading it. list names that file, and add
+// creates it and puts it in force.
+func TestAccessConfiguredFileNotThereYet(t *testing.T) {
+	_, pins := clientCerts(t, "anna")
+	e := newAuthEnv(t, "clients: []\n", nil)
+	path := e.conf.ApiServer.AccessFile
+	os.Remove(path)
+	e.conf.Internal.ApiAccess.p.Store(&accessState{}) // as after that reload
+	resp := e.accessCall(t, AccessPost{Command: "list"})
+	if resp.Error || resp.File != "" || resp.Configured != path ||
+		!strings.Contains(resp.Msg, path+"\nwhich does not exist yet: client add creates it.") {
+		t.Fatalf("list, the configured file not there: %+v", resp)
+	}
+	for _, l := range strings.Split(resp.Msg, "\n") {
+		if len(l) > 72 {
+			t.Errorf("line over 72 columns: %q", l)
+		}
+	}
+	resp = e.accessCall(t, AccessPost{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-write"})
+	if resp.Error || resp.File != path || resp.Configured != path || len(resp.Clients) != 1 {
+		t.Fatalf("add, the configured file not there: %+v, want it written and in force", resp)
+	}
+	// There but not loaded: a file that does not parse.
+	os.WriteFile(path, []byte("clients: [\n"), 0o600)
+	e.conf.Internal.ApiAccess.p.Store(&accessState{})
+	if resp = e.accessCall(t, AccessPost{Command: "list"}); !strings.Contains(resp.Msg, "but it is not loaded: config reload says why.") {
+		t.Errorf("list, the configured file not loaded: %q", resp.Msg)
 	}
 }
 

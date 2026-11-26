@@ -40,6 +40,10 @@ type AccessResponse struct {
 	Error      bool
 	ErrorMsg   string
 	File       string // the access file in force; "" when none
+	// Configured is the access file the running config names, in force or
+	// not: a reload that cannot load it keeps the path, and /access add
+	// creates it there. "" when the config names none.
+	Configured string
 	KeyAuth    bool
 	Clients    []ApiAccessStatusClient
 	ServerPins []string // SPKI pins of the certificate the TCP API serves
@@ -155,6 +159,7 @@ func (conf *Config) fillAccessInForce(resp *AccessResponse) {
 	if st := conf.apiAccessStatus(); st != nil {
 		resp.File, resp.KeyAuth, resp.Clients = st.File, st.KeyAuth, st.Clients
 	}
+	resp.Configured = conf.ApiServer.AccessFile
 	resp.ServerPins = apiServedPins()
 	if cfg := conf.Internal.CfgFile; cfg != "" {
 		resp.ConfigFile = absConfigFile(cfg)
@@ -165,6 +170,8 @@ func (conf *Config) fillAccessInForce(resp *AccessResponse) {
 func (conf *Config) accessInForceLine() string {
 	st := conf.apiAccessStatus()
 	switch {
+	case st == nil && conf.ApiServer.AccessFile != "":
+		return accessNotLoadedLine(conf.ApiServer.AccessFile)
 	case st == nil:
 		return "In force: no access file."
 	case st.Error != "":
@@ -401,6 +408,17 @@ func chownLike(f *os.File, like os.FileInfo) error {
 		}
 	}
 	return f.Chown(uid, gid)
+}
+
+// accessNotLoadedLine is what runs when the config names an access file but
+// none is in force: a reload could not load path, and kept it (and the policy
+// before it). A path not there yet is the first enrolment's case.
+func accessNotLoadedLine(path string) string {
+	head := "In force: no access file. The config names\n   " + path + "\n"
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return head + "which does not exist yet: client add creates it."
+	}
+	return head + "but it is not loaded: config reload says why."
 }
 
 // noAccessFileAdvice is the answer to /access on a daemon whose config names
