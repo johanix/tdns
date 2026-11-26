@@ -763,3 +763,26 @@ func TestClientCommandsCallTheDaemon(t *testing.T) {
 		t.Errorf("socket: none: %v", err)
 	}
 }
+
+// The socket of an entry is its raw path, as the client dials it: not
+// URL-decoded, and the scheme in any case.
+func TestEntryIsDaemonSocketRawPath(t *testing.T) {
+	info := &DaemonApi{Socket: "/var/run/tdns/auth%5Fwest.sock"}
+	for _, c := range []struct {
+		url  string
+		want bool
+	}{
+		{"unix:///var/run/tdns/auth%5Fwest.sock", true},
+		{"UNIX:///var/run/tdns/auth%5Fwest.sock", true},
+		{"unix:///var/run/tdns/auth_west.sock", false},
+		{"https://127.0.0.1:8989/api/v1", false},
+		{"unix://", false},
+	} {
+		if got := entryIsDaemonSocket(ApiDetails{BaseURL: c.url}, info); got != c.want {
+			t.Errorf("%s: %v, want %v", c.url, got, c.want)
+		}
+	}
+	if entryIsDaemonSocket(ApiDetails{BaseURL: "unix://"}, &DaemonApi{}) {
+		t.Error("no socket: want false")
+	}
+}
