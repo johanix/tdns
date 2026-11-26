@@ -178,6 +178,9 @@ type DNSClient struct {
 	DNSClientTLS    *dns.Client
 	DisableFallback bool
 	ForceTCP        bool
+	// AddrFamily restricts the IP family used to reach the server
+	// (WithAddrFamily); FamilyAny, the zero value, is dual-stack.
+	AddrFamily AddrFamily
 	// logger is where the client logs (WithLogger); nil is the log package's.
 	logger *log.Logger
 }
@@ -531,6 +534,52 @@ func (c *DNSClient) exchangeDoH(ctx context.Context, msg *dns.Msg, server string
 	return response, 0, nil
 }
 
+// dialQUIC connects to server (host:port) over QUIC. The returned func releases
+// whatever the dial opened beyond the connection itself, and is always safe to
+// call once the error is nil.
+//
+// With no address family it is quic.DialAddr, exactly as before. quic.DialAddr
+// cannot be told which family to use: it binds a dual-stack socket and resolves
+// the name with "udp", so a restricted dial builds the socket and resolves the
+// address itself, and then does what DialAddr does with them. One of those
+// things is the TLS server name, which DialAddr infers from the host:port it is
+// given and Transport.Dial, handed only an address, infers as the resolved IP;
+// so it is set here, or a restricted query to a name would send no SNI and an
+// unrestricted one would.
+func (c *DNSClient) dialQUIC(ctx context.Context, server string) (*quic.Conn, func(), error) {
+	if c.AddrFamily == FamilyAny {
+		conn, err := quic.DialAddr(ctx, server, c.TLSConfig, c.QUICConfig)
+		return conn, func() {}, err
+	}
+	network := c.AddrFamily.Network("udp")
+	raddr, err := net.ResolveUDPAddr(network, server)
+	if err != nil {
+		return nil, nil, err
+	}
+	udpConn, err := net.ListenUDP(network, &net.UDPAddr{})
+	if err != nil {
+		return nil, nil, err
+	}
+	tr := &quic.Transport{Conn: udpConn}
+	closeAll := func() {
+		_ = tr.Close()
+		// A Transport closes only a socket it created itself.
+		_ = udpConn.Close()
+	}
+	tlsConf := c.TLSConfig.Clone()
+	if tlsConf.ServerName == "" {
+		if host, _, herr := net.SplitHostPort(server); herr == nil {
+			tlsConf.ServerName = host
+		}
+	}
+	conn, err := tr.Dial(ctx, raddr, tlsConf, c.QUICConfig)
+	if err != nil {
+		closeAll()
+		return nil, nil, err
+	}
+	return conn, closeAll, nil
+}
+
 // exchangeDoQ handles DNS over QUIC. The dial and stream-open honour ctx
 // directly; the stream reads below do not, so a cancel -- or the timeout --
 // closes the QUIC connection out from under them, the same trick
@@ -558,11 +607,14 @@ func (c *DNSClient) exchangeDoQ(ctx context.Context, msg *dns.Msg, server string
 	}
 
 	// Connect to the QUIC server
-	conn, err := quic.DialAddr(ctx, server, c.TLSConfig, c.QUICConfig)
+	conn, closeTransport, err := c.dialQUIC(ctx, server)
 	if err != nil {
 		logFailure("*** DoQ failed to connect to QUIC server: %v", err)
 		return nil, 0, fmt.Errorf("failed to connect to QUIC server: %v", err)
 	}
+	// Registered first so it runs last: the connection is closed before the
+	// socket under it.
+	defer closeTransport()
 	defer conn.CloseWithError(0, "")
 
 	// Watch the DERIVED ctx, so this covers the timeout as well as a cancel.
