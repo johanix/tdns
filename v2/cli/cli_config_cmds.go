@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -287,7 +288,19 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		}
 		entry.BaseURL, entry.AuthMethod, entry.TLSAuth, entry.Pins = tcpURL, "certificate", "pin", list.ServerPins
 	}
-	cc := ReadCliClientConf(o.CliConfig)
+	// The pair is the one the CLI config will name once written: a
+	// cli.localconfig with its own client: block counts, also when the
+	// CLI config is not there yet (prospectiveClientConf).
+	var cc CliClientConf
+	if cert {
+		out, err := renderAdd(o, target, existing, entry, res.Created)
+		if err != nil {
+			return nil, err // refused before the enrolment: a hidden list, a flow style
+		}
+		if cc, err = prospectiveClientConf(o.CliConfig, target, out); err != nil {
+			return nil, err
+		}
+	}
 	client := o.ClientName
 	if client == "" {
 		client = defaultClientName()
@@ -305,11 +318,6 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	case o.DryRun && cert:
 		res.Steps = enrolPlan(cc, client, tcpURL)
 	case cert:
-		// Refused before the enrolment, not after: a hidden list, a flow
-		// style.
-		if _, err := renderAdd(o, target, existing, entry, res.Created); err != nil {
-			return nil, err
-		}
 		if err := enrol(sock, cc, client, "config add", retryAdd(o, client), &entry, &res.Steps); err != nil {
 			return nil, err
 		}
@@ -332,15 +340,17 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 		case known:
 			return res, nil
 		}
-		if enrolled {
-			if err := samePair(o.CliConfig, cc, client, "config add", retryAdd(o, client)); err != nil {
-				return nil, err
-			}
-		}
 	}
 	out, err := renderAdd(o, target, existing, entry, res.Created)
 	if err != nil {
 		return nil, keep(err)
+	}
+	// The pin enrolled is this pair's; the entry is used with whatever pair
+	// the config written names: checked on that config, under the lock.
+	if enrolled {
+		if err := samePair(o.CliConfig, target, out, cc, client, "config add", retryAdd(o, client)); err != nil {
+			return nil, err
+		}
 	}
 	res.Entry, res.File = entry, target
 	if !res.Running && tcpURL != "" {
@@ -555,6 +565,10 @@ func askAccess(info *DaemonApi, cmd string) (sock *tdns.ApiClient, list tdns.Acc
 	}
 	list, err = accessOver(sock, tdns.AccessPost{Command: "list"})
 	switch errno := socketErrno(err); {
+	case errno == syscall.ECONNREFUSED && !socketOrMissing(info.Socket):
+		// Linux refuses a dial to a file that is not a socket: no daemon
+		// can serve its socket there, so this is not a stopped daemon.
+		return nil, list, false, fmt.Errorf("the daemon's local admin socket path is there but is\nnot a socket:\n   %s\nThe daemon cannot serve its socket there. Remove that\nfile, start the daemon, and run %s again", info.Socket, cmd)
 	case errno == syscall.ENOENT || errno == syscall.ECONNREFUSED:
 		return sock, list, false, nil
 	case errno != 0:
@@ -572,7 +586,9 @@ func askAccess(info *DaemonApi, cmd string) (sock *tdns.ApiClient, list tdns.Acc
 // one with no access file (the daemon's advice) or no TLS.
 func daemonReady(info *DaemonApi, list tdns.AccessResponse, tcpURL string, cert bool) error {
 	switch {
-	case cert && list.File == "":
+	// A file the config names but that is not there yet is no refusal:
+	// the add creates it (the first enrolment).
+	case cert && list.File == "" && list.Configured == "":
 		return errors.New(list.Msg) // the daemon's advice: no access file
 	case tcpURL == "":
 		return fmt.Errorf("%s lists no apiserver.addresses: the\ndaemon has no TCP API to reach with pins", info.ConfigFile)
@@ -643,25 +659,34 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd, retry string, en
 		// A refusal, or a pin written to the access file but not loaded.
 		return fmt.Errorf("the daemon refused or did not load your pin; nothing was written:\n%s\nIf it says the file was written, fix that and run this again,\nwhich reuses the pin:\n  %s", ans.ErrorMsg, retry)
 	}
-	*steps = append(*steps, "The daemon: "+strings.ReplaceAll(ans.Msg, "\n", "\n   "))
+	said := "The daemon: " + strings.ReplaceAll(ans.Msg, "\n", "\n   ")
+	*steps = append(*steps, said)
 	if len(ans.ServerPins) > 0 {
 		entry.Pins = ans.ServerPins
 	}
 	ok, err := tcpCheck(*entry, cc)
 	if err != nil {
-		return fmt.Errorf("the daemon added your pin, but a request over TCP to\n%s failed: %v\nNothing was written. The pin stays enrolled: once that is\nfixed, run this again, which reuses it:\n  %s", entry.BaseURL, err, retry)
+		// What the daemon said stays: a pin there already but disabled is
+		// refused over TCP, and only its answer says to enable it.
+		return fmt.Errorf("%s\nbut a request over TCP to\n%s failed: %v\nNothing was written. The pin stays enrolled: once that is\nfixed, run this again, which reuses it:\n  %s", said, entry.BaseURL, err, retry)
 	}
 	*steps = append(*steps, ok)
 	return nil
 }
 
-// samePair refuses the write when the CLI config names another client pair
-// than cc did when its pin was enrolled as client: the entry is used with
-// the pair named now, which the daemon does not know. The daemon refuses a
-// second pin under one name, so a rerun needs the old pair or a new name.
-func samePair(cfg string, cc CliClientConf, client, cmd, retry string) error {
+// samePair refuses the write when the CLI config cfg, as it will be once
+// target holds out, names another client pair than cc did when its pin was
+// enrolled as client: the entry is used with that pair, which the daemon
+// does not know. The daemon refuses a second pin under one name, so a rerun
+// needs the old pair or a new name.
+func samePair(cfg, target string, out []byte, cc CliClientConf, client, cmd, retry string) error {
 	was, wasKey := clientCertPaths(cc)
-	if now, key := clientCertPaths(ReadCliClientConf(cfg)); now != was || key != wasKey {
+	now, key := "", ""
+	pc, err := prospectiveClientConf(cfg, target, out)
+	if err == nil {
+		now, key = clientCertPaths(pc)
+	}
+	if err != nil || now != was || key != wasKey {
 		return fmt.Errorf("the client pair in %s changed while %s\nran (now %s); nothing was written. The pin of\n%s stays enrolled as %s: put that pair back and run\n  %s\nor run that with another --client-name", cfg, cmd, now, was, client, retry)
 	}
 	return nil
@@ -699,6 +724,24 @@ func lockEdit(ctx context.Context, cfg, target string) (func(), error) {
 		return nil, err // cancelled while the lock was being taken
 	}
 	return unlock, nil
+}
+
+// socketOrMissing reports whether path is a socket, or not there to look at:
+// anything else at a socket path is not a stopped daemon's stale socket.
+func socketOrMissing(path string) bool {
+	fi, err := os.Lstat(path)
+	return err != nil || fi.Mode()&fs.ModeSocket != 0
+}
+
+// prospectiveClientConf is the client: block the CLI will load from cfg
+// once target holds out: the whole merged view (include: files,
+// cli.localconfig) with the edited file laid over the real one.
+func prospectiveClientConf(cfg, target string, out []byte) (CliClientConf, error) {
+	ofs, err := overlayFs(target, out)
+	if err != nil {
+		return CliClientConf{}, err
+	}
+	return readCliClientConf(cfg, ofs), nil
 }
 
 // renderAdd is target with entry added, checked to load, the way the CLI

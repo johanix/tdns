@@ -13,7 +13,9 @@ func (d *addDaemon) update(t *testing.T, mod func(*UpdateOptions)) (*UpdateResul
 	if mod != nil {
 		mod(&o)
 	}
-	return UpdateEntry(o)
+	res, err := UpdateEntry(o)
+	d.checkHook(t)
+	return res, err
 }
 
 // cliText is d's CLI config: the client: block, then body, with @U@ the
@@ -160,7 +162,7 @@ func TestUpdateCertClientPairChanged(t *testing.T) {
 	d := newAddDaemon(t, true)
 	d.writeCli(t, keyEntries)
 	changed := strings.Replace(d.cliText(keyEntries), d.certPath, d.certPath+".new", 1)
-	d.onAdd = func() { writeFile(t, d.cli, changed) }
+	d.onAdd = func() error { return os.WriteFile(d.cli, []byte(changed), 0o600) }
 	if _, err := d.update(t, withCert); err == nil || !strings.Contains(err.Error(), "changed while config update") || !strings.Contains(err.Error(), "enrolled as tester") || !strings.Contains(err.Error(), "\n  "+ncliFor(d.cli)+" config update tdns-auth --cert --client-name tester\nor run that with another --client-name") {
 		t.Errorf("client pair changed: %v", err)
 	}
@@ -298,5 +300,18 @@ func TestUpdateRefusalsAndDryRun(t *testing.T) {
 	printUpdateResult(&sb, res, UpdateOptions{Cert: true, DryRun: true})
 	if out := sb.String(); !strings.HasPrefix(out, `Would change "tdns-auth" in `) || !strings.Contains(out, "First it would:\n - make your client certificate") {
 		t.Errorf("dry run printed:\n%s", out)
+	}
+}
+
+// The first enrolment over config update: the daemon's config names an
+// access file that is not there yet. --cert goes on to the add, which
+// creates it, and switches the entry.
+func TestUpdateCertFirstEnrolment(t *testing.T) {
+	d := newAddDaemon(t, true)
+	d.writeCli(t, keyEntries)
+	d.notThereYet = true
+	res, err := d.update(t, withCert)
+	if err != nil || !res.Wrote || d.commands() != "list add" {
+		t.Fatalf("%+v, %v (asked %q); want the entry switched", res, err, d.commands())
 	}
 }

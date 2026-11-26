@@ -24,7 +24,6 @@ import (
 	"math/big"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -311,12 +310,10 @@ func socketClientOf(info *DaemonApi) (*tdns.ApiClient, error) {
 // entryIsDaemonSocket says whether entry e is the local socket of the daemon
 // whose API is info. The socket is the daemon's own: it creates it, in a
 // directory only it may use. A TCP address identifies no daemon by itself.
+// Compared raw, as the client dials it: the path after unix:// is not
+// URL-decoded (a %5F in it is three characters).
 func entryIsDaemonSocket(e ApiDetails, info *DaemonApi) bool {
-	u, err := url.Parse(e.BaseURL)
-	if err != nil || !strings.EqualFold(u.Scheme, "unix") {
-		return false
-	}
-	return info.Socket != "" && u.Path == info.Socket
+	return info.Socket != "" && isUnixURL(e.BaseURL) && e.BaseURL[len("unix://"):] == info.Socket
 }
 
 // socketError says plainly when the local socket sock cannot be used from

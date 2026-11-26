@@ -199,7 +199,11 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	cc := ReadCliClientConf(o.CliConfig)
+	// The pair the CLI config will name once written (see config add).
+	cc, err := prospectiveClientConf(o.CliConfig, target, out)
+	if err != nil {
+		return nil, err
+	}
 	client := o.ClientName
 	if client == "" {
 		client = defaultClientName()
@@ -239,13 +243,13 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 	if existing, i, err = find(); err == nil && !reflect.DeepEqual(existing[i], e) {
 		err = fmt.Errorf("entry %q changed while config update ran; nothing was\nwritten", e.Name)
 	}
-	if err == nil && o.Cert {
-		if err := samePair(o.CliConfig, cc, client, cmd, retryUpdate(o, client)); err != nil {
-			return nil, err // says what stays enrolled
-		}
-	}
 	if err == nil {
 		out, err = renderUpdate(o.CliConfig, target, existing, i, up)
+	}
+	if err == nil && o.Cert {
+		if err := samePair(o.CliConfig, target, out, cc, client, cmd, retryUpdate(o, client)); err != nil {
+			return nil, err // says what stays enrolled
+		}
 	}
 	if err == nil {
 		err = writeFileAtomic(target, out)

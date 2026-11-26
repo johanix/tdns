@@ -32,7 +32,9 @@ type addDaemon struct {
 	dropAdd      bool              // enrol, then lose the answer
 	stall        bool              // never answer
 	stallAfter   int               // with stall: this status's headers first
-	onAdd        func()            // after an add is enrolled: what happens meanwhile
+	onAdd        func() error      // after an add is enrolled: what happens meanwhile
+	hookErr      error             // onAdd's, checked on the test goroutine (add)
+	notThereYet  bool              // the access file the config names is not there yet
 	clients      map[string]string // name -> pin
 	posts        []tdns.AccessPost
 }
@@ -99,13 +101,16 @@ func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 	var ap tdns.AccessPost
 	json.NewDecoder(r.Body).Decode(&ap)
 	d.posts = append(d.posts, ap)
-	resp := tdns.AccessResponse{File: "/etc/tdns/access.yaml", ServerPins: []string{d.srvPin}, ConfigFile: d.cfg}
+	resp := tdns.AccessResponse{File: "/etc/tdns/access.yaml", Configured: "/etc/tdns/access.yaml",
+		ServerPins: []string{d.srvPin}, ConfigFile: d.cfg}
 	switch {
 	case d.noAccessFile:
-		resp.File, resp.Msg = "", "No access file: add access-file: under apiserver:"
+		resp.File, resp.Configured, resp.Msg = "", "", "No access file: add access-file: under apiserver:"
 		if ap.Command != "list" {
 			resp.Error, resp.ErrorMsg = true, resp.Msg
 		}
+	case d.notThereYet && ap.Command == "list":
+		resp.File, resp.Msg = "", "In force: no access file. The config names\n   /etc/tdns/access.yaml\nwhich does not exist yet: client add creates it."
 	case ap.Command == "add" && d.refuseAdd != "":
 		resp.Error, resp.ErrorMsg = true, d.refuseAdd
 	case ap.Command == "add" && d.clients[ap.Name] == ap.Pin:
@@ -113,8 +118,10 @@ func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 	case ap.Command == "add":
 		d.clients[ap.Name] = ap.Pin
 		resp.Msg = "Added " + ap.Name + " (read-write)."
+		d.notThereYet = false // the add created it
 		if d.onAdd != nil {
-			d.onAdd()
+			// Synchronous, before the answer; its error is the test's.
+			d.hookErr = d.onAdd()
 		}
 		if d.dropAdd {
 			panic(http.ErrAbortHandler) // the connection closes, no answer
@@ -148,7 +155,20 @@ func (d *addDaemon) add(t *testing.T, mod func(*AddOptions)) (*AddResult, error)
 	if mod != nil {
 		mod(&o)
 	}
-	return AddDaemonConfig(o)
+	res, err := AddDaemonConfig(o)
+	d.checkHook(t)
+	return res, err
+}
+
+// checkHook fails the test, on its own goroutine, when onAdd failed.
+func (d *addDaemon) checkHook(t *testing.T) {
+	t.Helper()
+	d.mu.Lock()
+	herr := d.hookErr
+	d.mu.Unlock()
+	if herr != nil {
+		t.Fatalf("the daemon's onAdd: %v", herr)
+	}
 }
 
 // state is what the daemon has enrolled, and was asked.
@@ -262,6 +282,10 @@ func TestAddTCPCheckFailsThenARerunReusesThePin(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || !strings.Contains(err.Error(), "Nothing was written") || !strings.Contains(err.Error(), "reuses it:\n  "+ncliFor(d.cli)+" config add --client-name tester "+d.cfg) {
 		t.Fatalf("err = %v", err)
 	}
+	// What the daemon said stays (a disabled pin: "enable it").
+	if !strings.HasPrefix(err.Error(), "The daemon: Added tester (read-write).\nbut a request over TCP") {
+		t.Errorf("the daemon's answer is lost: %v", err)
+	}
 	d.unchanged(t, string(before))
 	clients, _ := d.state()
 	enrolled := clients["tester"]
@@ -352,7 +376,7 @@ func TestAddLeavesAnExistingEntryAlone(t *testing.T) {
 func TestAddEntryAppearsAfterTheEnrolment(t *testing.T) {
 	d := newAddDaemon(t, true)
 	body := "client:\n   cert: " + d.certPath + "\napiservers:\n   - name: tdns-auth\n     authmethod: none\n     config-file: " + d.cfg + "\n"
-	d.onAdd = func() { writeFile(t, d.cli, body) }
+	d.onAdd = func() error { return os.WriteFile(d.cli, []byte(body), 0o600) }
 	res, err := d.add(t, nil)
 	if err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote {
 		t.Fatalf("%+v, %v; want the entry that appeared left alone", res, err)
@@ -404,7 +428,7 @@ func TestAddAfterTheEnrolmentIsSent(t *testing.T) {
 
 	d = newAddDaemon(t, true)
 	body := "client:\n   cert: " + d.certPath + ".new\n   key: " + d.certPath + ".key.new\n"
-	d.onAdd = func() { writeFile(t, d.cli, body) }
+	d.onAdd = func() error { return os.WriteFile(d.cli, []byte(body), 0o600) }
 	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "changed while config add") || !strings.Contains(err.Error(), "enrolled as tester") || !strings.Contains(err.Error(), "another --client-name") {
 		t.Errorf("client pair changed: %v", err)
 	}
@@ -464,4 +488,52 @@ func mustEntries(t *testing.T, cli string) []ApiDetails {
 		t.Fatal(err)
 	}
 	return got
+}
+
+// The first enrolment: the daemon config names an access file that is not
+// there yet (a reload kept the path, unloaded). config add goes on to the
+// add, which creates it, and writes the entry.
+func TestAddFirstEnrolmentCreatesTheAccessFile(t *testing.T) {
+	d := newAddDaemon(t, true)
+	d.notThereYet = true
+	res, err := d.add(t, nil)
+	if err != nil || !res.Wrote || d.commands() != "list add" {
+		t.Fatalf("%+v, %v (asked %q); want the entry written", res, err, d.commands())
+	}
+}
+
+// A file that is not a socket at the socket path is no stopped daemon: no
+// daemon could serve its socket there. Refused; nothing is written.
+func TestAddRefusesANonSocketAtTheSocketPath(t *testing.T) {
+	d := newAddDaemon(t, false)
+	writeFile(t, d.sock, "not a socket\n")
+	before, _ := os.ReadFile(d.cli)
+	if _, err := d.add(t, nil); err == nil {
+		t.Fatal("a regular file at the socket path: want a refusal")
+	}
+	d.unchanged(t, string(before))
+	if socketOrMissing(d.sock) || !socketOrMissing(d.sock+".none") {
+		t.Error("socketOrMissing: want false for a file, true for nothing there")
+	}
+}
+
+// No CLI config yet, and a cli.localconfig with its own client: block: the
+// pair enrolled is the local config's, the one the CLI will use.
+func TestAddUsesTheClientPairOfTheConfigWritten(t *testing.T) {
+	d := newAddDaemon(t, true)
+	os.Remove(d.cli)
+	dir := filepath.Dir(d.cli)
+	local := filepath.Join(dir, "local.yaml")
+	lcert, lkey := filepath.Join(dir, "certs", "local.crt"), filepath.Join(dir, "certs", "local.key")
+	writeFile(t, local, "client:\n   cert: "+lcert+"\n   key: "+lkey+"\n")
+	t.Setenv("CLI.LOCALCONFIG", local)
+	res, err := d.add(t, nil)
+	if err != nil || !res.Wrote || !res.Created {
+		t.Fatalf("%+v, %v; want the CLI config made", res, err)
+	}
+	pin, made, err := ensureClientCert(lcert, lkey, "x")
+	clients, _ := d.state()
+	if err != nil || made || clients["tester"] != pin {
+		t.Errorf("enrolled %v; want the local config's pair %s (pin %s, made %v, %v)", clients, lcert, pin, made, err)
+	}
 }
