@@ -105,7 +105,11 @@ func TestZoneDeleteLines(t *testing.T) {
 				"  dynamic config file is in place, but could not be synced to disk:",
 				"  input/output error",
 				"its keys were kept, and must stay until the removal is on disk: the next",
-				"  zone add, modify or delete that succeeds puts it there",
+				"  zone add, modify or delete that succeeds puts it there, but does not",
+				"  delete them",
+				"after that, delete them; \"keystore sig0 list\" shows the SIG(0) key IDs:",
+				"  keystore dnssec clear --zone example.com. --force",
+				"  keystore sig0 delete --zone example.com. --keyid <keyid>",
 			},
 		},
 		{
@@ -157,23 +161,29 @@ func TestZoneDeleteLinesWidth(t *testing.T) {
 	}
 }
 
-// The commands that finish a failed key delete are printed whole, however
-// long the zone's name: a wrapped one would run without its zone.
+// The commands that finish a key delete by hand, after a failed one or
+// after an unsynced removal, are printed whole, however long the zone's
+// name: a wrapped one would run without its zone.
 func TestZoneDeleteCommandsStayWhole(t *testing.T) {
 	zone := "a-rather-long-label.customer-zones.provisioning.example.com."
-	lines := zoneDeleteOutput(tdns.ZoneRemoval{Zone: zone, KeysError: "KeyDB.Begin timed out waiting"})
-	for _, want := range []string{
-		"  keystore dnssec clear --zone " + zone + " --force",
-		"  keystore sig0 delete --zone " + zone + " --keyid <keyid>",
+	for _, r := range []tdns.ZoneRemoval{
+		{Zone: zone, KeysError: "KeyDB.Begin timed out waiting"},
+		{Zone: zone, DnssecKeys: 3, NotSynced: "the new dynamic config file is in place, but could not be synced to disk: input/output error"},
 	} {
-		found := false
-		for _, l := range lines {
-			if l == want {
-				found = true
+		lines := zoneDeleteOutput(r)
+		for _, want := range []string{
+			"  keystore dnssec clear --zone " + zone + " --force",
+			"  keystore sig0 delete --zone " + zone + " --keyid <keyid>",
+		} {
+			found := false
+			for _, l := range lines {
+				if l == want {
+					found = true
+				}
 			}
-		}
-		if !found {
-			t.Errorf("no line %q in:\n%s", want, strings.Join(lines, "\n"))
+			if !found {
+				t.Errorf("%+v: no line %q in:\n%s", r, want, strings.Join(lines, "\n"))
+			}
 		}
 	}
 }

@@ -283,10 +283,10 @@ func TestASignalPassOnAStaleInstanceRecordsNothing(t *testing.T) {
 // synced to disk is a removal a crash could still undo. It is reported as
 // such, not as a failed rewrite ("will reappear on restart"): the zone is
 // out of Zones and out of the file, and a retry would find no zone. The
-// keys are kept until the removal is on disk, and the report offers no
-// command to delete them before that; so is the record of the signals its
-// zone file holds, for the zone a crash would bring back. The configured
-// zone set follows the file, which no longer names the zone.
+// keys are kept until the removal is on disk, and so is the record of the
+// signals its zone file holds, for the zone a crash would bring back; the
+// report offers the commands to delete the keys only for after that. The
+// configured zone set follows the file, which no longer names the zone.
 func TestADeleteNotSyncedToDiskIsReportedWithItsKeysKept(t *testing.T) {
 	conf, kdb, zd := removalFixture(t)
 	z := zd.ZoneName
@@ -329,8 +329,11 @@ func TestADeleteNotSyncedToDiskIsReportedWithItsKeysKept(t *testing.T) {
 			t.Errorf("the report lacks %q:\n%s", want, msg)
 		}
 	}
-	if strings.Contains(msg, "keystore ") {
-		t.Errorf("the report offers to delete the keys before the removal is on disk:\n%s", msg)
+	// The later rewrite does not delete the keys, so the report gives the
+	// commands, after the step they must wait for.
+	after := strings.Index(msg, "after that, delete them;")
+	if cmd := strings.Index(msg, "  keystore dnssec clear --zone "+z+" --force"); after < 0 || cmd < after {
+		t.Errorf("the report lacks the commands to delete the keys once the removal is on disk, or offers them before that:\n%s", msg)
 	}
 	if strings.Contains(msg, "reappear") || len(r.Warnings()) != 0 {
 		t.Errorf("the report overstates it: %s %q", msg, r.Warnings())

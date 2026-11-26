@@ -211,16 +211,20 @@ func (r *ZoneRemoval) Msg() string {
 	counts := fmt.Sprintf("%d DNSSEC, %d SIG(0)", r.DnssecKeys, r.Sig0Keys)
 	switch {
 	case r.NotSynced != "":
-		// No commands to delete the keys: until the removal is on disk a
-		// crash can bring the zone back, and it needs them. Nothing here can
-		// tell when it is; the next rewrite of the dynamic config that is
-		// synced puts it there, as that file does not name the zone either.
+		// Until the removal is on disk a crash can bring the zone back, and
+		// it needs its keys. Nothing here can tell when it is; the next
+		// rewrite of the dynamic config that is synced puts it there, as that
+		// file does not name the zone either. That rewrite does not delete
+		// the keys, so the commands come with the step they must wait for.
 		lines = append(lines, fmt.Sprintf("zone %s deleted, but a crash could bring it back: %s", r.Zone, r.NotSynced))
 		if r.KeepKeys {
 			lines = append(lines, "its keys were kept, as asked; a re-add takes them back")
 			break
 		}
-		lines = append(lines, "its keys were kept, and must stay until the removal is on disk: the next zone add, modify or delete that succeeds puts it there")
+		lines = append(lines,
+			"its keys were kept, and must stay until the removal is on disk: the next zone add, modify or delete that succeeds puts it there, but does not delete them",
+			"after that, delete them; \"keystore sig0 list\" shows the SIG(0) key IDs:")
+		lines = append(lines, r.keyDeleteCommands()...)
 
 	case r.KeepKeys:
 		switch {
@@ -237,9 +241,8 @@ func (r *ZoneRemoval) Msg() string {
 		// The commands on lines of their own, indented, to copy.
 		lines = append(lines,
 			fmt.Sprintf("zone %s deleted, but its keys were not: %s", r.Zone, r.KeysError),
-			"delete them by hand; \"keystore sig0 list\" shows the SIG(0) key IDs:",
-			fmt.Sprintf("  keystore dnssec clear --zone %s --force", r.Zone),
-			fmt.Sprintf("  keystore sig0 delete --zone %s --keyid <keyid>", r.Zone))
+			"delete them by hand; \"keystore sig0 list\" shows the SIG(0) key IDs:")
+		lines = append(lines, r.keyDeleteCommands()...)
 
 	case r.DnssecKeys+r.Sig0Keys == 0:
 		return nokeys
@@ -251,6 +254,15 @@ func (r *ZoneRemoval) Msg() string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// keyDeleteCommands are the commands that delete the zone's keys by hand,
+// indented, one per line, to copy whole.
+func (r *ZoneRemoval) keyDeleteCommands() []string {
+	return []string{
+		fmt.Sprintf("  keystore dnssec clear --zone %s --force", r.Zone),
+		fmt.Sprintf("  keystore sig0 delete --zone %s --keyid <keyid>", r.Zone),
+	}
 }
 
 // Warnings says what the operator must not overlook. A DS at the parent

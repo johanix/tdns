@@ -427,7 +427,9 @@ func TestZoneDeleteThroughTheAPI(t *testing.T) {
 		if !resp.Error || resp.Removal == nil || resp.Removal.NotSynced == "" || resp.ErrorMsg != resp.Msg {
 			t.Fatalf("delete not on disk: error %v (%s), removal %+v", resp.Error, resp.ErrorMsg, resp.Removal)
 		}
-		if !strings.Contains(resp.ErrorMsg, "must stay until the removal is on disk") || strings.Contains(resp.ErrorMsg, "keystore ") {
+		after := strings.Index(resp.ErrorMsg, "after that, delete them;")
+		cmd := strings.Index(resp.ErrorMsg, "  keystore dnssec clear --zone keys.example. --force")
+		if !strings.Contains(resp.ErrorMsg, "must stay until the removal is on disk") || after < 0 || cmd < after {
 			t.Errorf("ErrorMsg = %q", resp.ErrorMsg)
 		}
 		wantAllRows(t, kdb, keysZone, "removal not on disk")
