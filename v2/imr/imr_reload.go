@@ -498,16 +498,30 @@ func imrRestartRequiredKeys(boot, current Config) []string {
 	check("trust-anchor-dnskey", boot.TrustAnchorDNSKEY == current.TrustAnchorDNSKEY)
 	check("trust-anchor-file", boot.TrustAnchorFile == current.TrustAnchorFile)
 	// The anchors are loaded once, and an anchorless config's depends on the
-	// root: the compiled-in IANA anchor only while no root-hints file, "."
-	// forward or "." stub may lead elsewhere (RootAnchorFallback). Forwards
-	// and stubs are reloadable, and a reload that adds or drops one for "."
-	// does not load or unload the anchor.
+	// root: the compiled-in IANA anchor at once while no root-hints file, "."
+	// forward or "." stub may lead elsewhere (RootAnchorFallback), and from the
+	// keys that root serves once one may (RootAnchorProbe). Forwards and stubs
+	// are reloadable, and a reload that adds or drops one for "." does not
+	// load, unload or re-choose the anchor.
 	bootDefault, _ := boot.RootAnchorFallback()
 	curDefault, _ := current.RootAnchorFallback()
 	if bootDefault != curDefault {
-		inUse := map[bool]string{true: "in use", false: "not in use"}
+		inUse := map[bool]string{true: "in use", false: "decided from the root's keys"}
 		keys = append(keys, fmt.Sprintf("the compiled-in root trust anchor (%s at start, %s for this config)",
 			inUse[bootDefault], inUse[curDefault]))
+	}
+	// Where the anchor was chosen from the root's keys, the choice was about the
+	// root that the servers named for "." led to at start. A reload applies a
+	// changed stub or forward for "." at once, and the choice would stay: an
+	// anchor kept for a root that has become a private one, or none kept for
+	// one that has become the IANA root. Naming other servers for "." is
+	// therefore a restart, which asks the new root again. Transports, weights
+	// and names are not: they leave the root where it was.
+	if bootProbe, _ := boot.RootAnchorProbe(); bootProbe {
+		if curProbe, _ := current.RootAnchorProbe(); curProbe && boot.rootServers() != current.rootServers() {
+			keys = append(keys, fmt.Sprintf("the root the compiled-in trust anchor was checked against (servers for \".\": %s at start, %s for this config)",
+				boot.rootServers(), current.rootServers()))
+		}
 	}
 	check("require-dnssec-validation", bothNil(boot.RequireDnssecValidation, current.RequireDnssecValidation))
 	check("verbose", boot.Verbose == current.Verbose)

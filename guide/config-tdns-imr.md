@@ -43,18 +43,25 @@ does not listen, while the resolver runs normally. If you do set it, note that
 `keyfile`; otherwise the API listener fails to start (the resolver keeps
 running).
 
-**With no trust anchor configured, the compiled-in IANA root anchor is used —
-but only with the compiled-in root hints.** DNSSEC validation is on —
+**With no trust anchor configured, the compiled-in IANA root anchor is used
+when the root is the IANA root.** DNSSEC validation is on —
 `require-dnssec-validation` defaults to true. When none of the three anchor
 settings below is set, `imrengine.root-hints` is unset and the root is neither
 forwarded nor a stub zone, the resolver validates against the IANA root DS
 records compiled into the binary (KSK-2017, key tag 20326, and KSK-2024, key
-tag 38696), and logs that it does. A root-hints file, a `zone: .` forward or a
-stub for `.` may lead to a private root, and there the IANA anchor would make
-every signed answer bogus; with any of them and no anchor configured, the
-resolver uses no anchor at all, validates nothing (every signed answer is
-indeterminate), and logs a warning saying so. Configure the anchor for the root
-you use. See below.
+tag 38696), and logs that it does.
+
+A root-hints file, a `zone: .` forward or a stub for `.` may lead to the IANA
+root (a stub for `.` that names `b.root-servers.net`) or to a private one, and
+the config cannot tell which. So with any of them and no anchor configured, the
+resolver asks the root: it fetches the root's DNSKEY RRset and uses the
+compiled-in anchor if a key in it matches one of the compiled-in DS records and
+signs the set. The choice is logged. Until it is made, answers are indeterminate,
+and while the root cannot be reached the fetch is repeated. A private root does
+not match, and the resolver then uses no anchor at all, validates nothing (every
+signed answer is indeterminate), and logs a warning saying so: the IANA anchor
+would make every signed answer bogus. Configure the anchor for a private root.
+See below.
 
 ## Trust anchors
 
@@ -213,8 +220,9 @@ The rest of `imrengine:` is not reloadable — trust anchors, tuning, options,
 root hints and logging are consumed once at startup. Editing one of those and
 reloading reports it (`restart required for imrengine.tuning`) rather than
 silently ignoring it. So does a reload that adds or removes a forward or stub
-for `.` on a resolver with no anchor configured: it changes whether the
-compiled-in root anchor applies, and the anchor is loaded once, at startup.
+for `.` on a resolver with no anchor configured: it changes how the
+compiled-in root anchor is chosen (at once, or from the root's keys), and the
+anchor is loaded once, at startup.
 
 Startup behaviour: when a forward zone covers the root, the live `. NS`
 priming fetch is skipped — the hints are seeded offline and the cache is

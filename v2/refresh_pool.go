@@ -208,6 +208,11 @@ func transferConcurrency() int {
 	return defaultTransferConcurrency
 }
 
+// refreshInProgressMsg starts the answer dispatchRefresh gives a refresher
+// for a zone that already has a refresh in flight. A test that may race the
+// previous refresh's outcome matches on it, so the two cannot drift apart.
+const refreshInProgressMsg = "refresh already in progress for zone "
+
 // dispatchRefresh hands a zone to the pool, or answers the operator if it
 // cannot.
 //
@@ -238,7 +243,7 @@ func dispatchRefresh(pool *refreshPool, inflight *core.NameMap[struct{}], job re
 		lgEngine.Debug("refresh already in progress, not dispatching again", "zone", job.zone)
 		respondToRefresher(job.zr, RefresherResponse{
 			Error:    true,
-			ErrorMsg: "refresh already in progress for zone " + job.zone,
+			ErrorMsg: refreshInProgressMsg + job.zone,
 		})
 		return
 	}
