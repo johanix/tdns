@@ -35,8 +35,9 @@ var rootCmd = &cobra.Command{
 		// show-cmds (pure introspection of the in-memory command tree) and
 		// the cert PKI subtree (offline provisioning; cert init reads the
 		// server config via its own --serverconfig flag) do not need
-		// config or API. Neither does "config add|list": they read and edit
-		// the CLI config themselves, and "config add" is how it gets created.
+		// config or API. Neither does "config add|update|list": they read and
+		// edit the CLI config themselves, and "config add" is how it gets
+		// created.
 		if isRootKeysCommand(cmd) || cmd.Name() == "gen-docs" ||
 			cmd.Name() == cli.ShowCmdsName || isCertCommand(cmd) ||
 			cli.IsCliConfigCmd(cmd) {
@@ -163,9 +164,9 @@ func init() {
 	// auth-daemon concern (RFC 9432 catalog zones served by tdns-auth).
 	cli.AuthCmd.AddCommand(cli.CatalogCmd)
 
-	// "config add|list": maintain the CLI config's apiservers: list. Attached
-	// here, before wireInstances runs, so an instance named "config" is
-	// refused as the collision it is.
+	// "config add|update|list": maintain the CLI config's apiservers:
+	// list. Attached here, before wireInstances runs, so an instance named
+	// "config" is refused as the collision it is.
 	rootCmd.AddCommand(cli.NewCliConfigCmd())
 
 	// "client init": the operator's own certificate. And each daemon's
@@ -269,6 +270,7 @@ func initConfig() {
 	if err := viper.Unmarshal(&cconf); err != nil {
 		log.Fatalf("FATAL: viper.Unmarshal failed to parse config: %v", err)
 	}
+	cconf.File = cliConfigPath()
 }
 
 var cconf cli.CliConf

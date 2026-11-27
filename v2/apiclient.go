@@ -44,6 +44,9 @@ type ClientOptions struct {
 	// certificate's SPKI SHA-256 must be one of these (no name, no expiry
 	// check; the pin is the trust anchor).
 	Pins []string
+	// PinFix, when set, is added to the refusal of a daemon whose pin is
+	// not one of Pins: how the caller's user takes the daemon's new pins.
+	PinFix string
 	// ClientCert is presented on the TLS connection when AuthMethod is
 	// "certificate".
 	ClientCert *tls.Certificate
@@ -124,10 +127,14 @@ func NewClientWithOptions(name, baseurl string, o ClientOptions) *ApiClient {
 		// Pinning replaces chain building: InsecureSkipVerify turns off the
 		// default verification and VerifyConnection, which still runs (on
 		// resumed connections too), is the gate.
-		pins := append([]string(nil), o.Pins...)
+		pins, fix := append([]string(nil), o.Pins...), o.PinFix
 		tlsconfig.InsecureSkipVerify = true
 		tlsconfig.VerifyConnection = func(cs tls.ConnectionState) error {
-			return verifyServerPin(cs, pins)
+			err := verifyServerPin(cs, pins)
+			if err != nil && fix != "" {
+				err = fmt.Errorf("%w; fix: %s", err, fix)
+			}
+			return err
 		}
 	} else if rootcafile == "system" {
 		// tlsauth: pkix with no rootca: the system roots (RootCAs nil).

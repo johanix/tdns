@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -100,6 +101,7 @@ func TestNewApiClientForVerification(t *testing.T) {
 	saved := RequireServerVerification
 	t.Cleanup(func() { RequireServerVerification = saved })
 	RequireServerVerification = true
+	asNcli(t)
 
 	for _, tc := range []struct {
 		name     string
@@ -108,7 +110,7 @@ func TestNewApiClientForVerification(t *testing.T) {
 		wantWarn bool
 	}{
 		{name: "https verifying nothing", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1"}, wantErr: "no pin of the daemon's certificate"},
-		{name: "the refusal says how to pin", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", ConfigFile: "/etc/tdns/tdns-imr.yaml"}, wantErr: "fix: tdns-ncli config add /etc/tdns/tdns-imr.yaml"},
+		{name: "the refusal says how to pin", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", ConfigFile: "/etc/tdns/tdns-imr.yaml"}, wantErr: "fix: tdns-ncli config update a --repin"},
 		{name: "insecure said out loud", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", RootCA: "insecure"}, wantWarn: true},
 		{name: "pinned", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin", Pins: []string{pinOf("d")}}},
 		{name: "pin without pins", e: ApiDetails{Name: "a", BaseURL: "https://127.0.0.1:1/api/v1", TLSAuth: "pin"}, wantErr: "no pins"},
@@ -342,14 +344,58 @@ func TestPingHow(t *testing.T) {
 
 // A refusal is an error with its fix, found as such through the wrapping
 // GetApiClient may add.
+// asNcli makes this a tdns-ncli run for the test: its default CLI config is
+// tdns-ncli's own, as its root sets it.
+func asNcli(t *testing.T) {
+	t.Helper()
+	saved := DefaultCliConfigFile
+	t.Cleanup(func() { DefaultCliConfigFile = saved })
+	DefaultCliConfigFile = tdns.DefaultNcliCfgFile
+}
+
 func TestPinRefusal(t *testing.T) {
+	asNcli(t)
 	err := fmt.Errorf("wrapped: %w", pinRefusal(ApiDetails{Name: "tdns-auth", ConfigFile: "/etc/tdns/tdns-auth.yaml"}, "its entry has no pin"))
 	var r clientRefusal
-	if !errors.As(err, &r) || r.entry != "tdns-auth" || r.fix != "tdns-ncli config add /etc/tdns/tdns-auth.yaml" {
+	if !errors.As(err, &r) || r.entry != "tdns-auth" || r.fix != "tdns-ncli config update tdns-auth --repin" {
 		t.Errorf("refusal = %+v from %v", r, err)
 	}
-	if !strings.Contains(err.Error(), "not connecting to tdns-auth: its entry has no pin; fix: tdns-ncli config add") {
+	if !strings.Contains(err.Error(), "not connecting to tdns-auth: its entry has no pin; fix: tdns-ncli config update") {
 		t.Errorf("one-line form: %v", err)
+	}
+	if r := pinRefusal(ApiDetails{Name: "old"}, "x"); r.fix != "tdns-ncli config update old --repin --daemon-config <the daemon's config file>" {
+		t.Errorf("no config-file: fix = %q", r.fix)
+	}
+	// Read from another CLI config, the fix names it.
+	defer func(was *CliConf) { apiConfig = was }(apiConfig)
+	apiConfig = &CliConf{File: "/x/my cli.yaml"}
+	if r := pinRefusal(ApiDetails{Name: "a", ConfigFile: "/x/d.yaml"}, "x"); r.fix != "tdns-ncli --config '/x/my cli.yaml' config update a --repin" {
+		t.Errorf("another CLI config: fix = %q", r.fix)
+	}
+}
+
+// A refusal made while InitApiClients builds the clients names the CLI
+// config of this run, not one from before.
+func TestInitApiClientsRefusalNamesTheCliConfig(t *testing.T) {
+	withCleanRoleRegistry(t)
+	RegisterRole("auth", "tdns-auth")
+	// InitApiClients changes the client tables: as they were afterwards.
+	errs, warns, pending := maps.Clone(apiClientErrors), maps.Clone(apiClientWarnings), maps.Clone(socketPending)
+	clients, api, was := maps.Clone(tdns.Globals.ApiClients), tdns.Globals.Api, apiConfig
+	t.Cleanup(func() {
+		apiClientErrors, apiClientWarnings, socketPending = errs, warns, pending
+		tdns.Globals.ApiClients, tdns.Globals.Api, apiConfig = clients, api, was
+	})
+	apiConfig = &CliConf{File: "/x/old.yaml"}
+	conf := &CliConf{File: "/x/my cli.yaml", ApiServers: []ApiDetails{
+		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:1/api/v1", AuthMethod: "certificate", TLSAuth: "pin"},
+	}}
+	if err := InitApiClients(conf); err != nil {
+		t.Fatal(err)
+	}
+	var r clientRefusal
+	if err := apiClientErrors["tdns-auth"]; !errors.As(err, &r) || !strings.HasPrefix(r.fix, "tdns-ncli --config '/x/my cli.yaml' config update tdns-auth --repin") {
+		t.Errorf("refusal = %+v (%v), want this run's CLI config named", r, err)
 	}
 }
 
@@ -818,5 +864,24 @@ func TestSocketErrnoNotASocket(t *testing.T) {
 				t.Errorf("%v: line over 72 columns: %q", c.errno, l)
 			}
 		}
+	}
+}
+
+// The plain-http warning of an entry already in the CLI config names the
+// command that switches it to https with pins, config update --cert (config
+// add writes new entries only), with --daemon-config when the entry has no
+// config-file:.
+func TestPlainHttpWarningNamesConfigUpdate(t *testing.T) {
+	saved := RequireServerVerification
+	t.Cleanup(func() { RequireServerVerification = saved })
+	RequireServerVerification = true
+	asNcli(t)
+	e := ApiDetails{Name: "remote", BaseURL: "http://192.0.2.1:8989/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", ConfigFile: "/etc/tdns/tdns-auth.yaml"}
+	if _, warn, err := buildApiClient(e, CliClientConf{}, "", ""); err != nil || !strings.HasSuffix(warn, "use https with pins: tdns-ncli config update remote --cert") {
+		t.Errorf("warning %q, %v", warn, err)
+	}
+	e.ConfigFile = ""
+	if _, warn, _ := buildApiClient(e, CliClientConf{}, "", ""); !strings.HasSuffix(warn, "config update remote --cert --daemon-config <the daemon's config file>") {
+		t.Errorf("no config-file: warning %q", warn)
 	}
 }

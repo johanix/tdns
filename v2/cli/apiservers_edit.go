@@ -1,8 +1,8 @@
 /*
  * Copyright (c) Johan Stenstam, johani@johani.org
  *
- * Adding one entry to the apiservers: list of a CLI config file, by editing
- * the file's text.
+ * Adding one entry to the apiservers: list of a CLI config file, or changing
+ * one, by editing the file's text.
  */
 package cli
 
@@ -140,6 +140,230 @@ func findApiserversKey(lines []string) (int, error) {
 		}
 	}
 	return -1, nil
+}
+
+// reKeyLine is a "key: rest" line of a mapping, the indentation removed.
+var reKeyLine = regexp.MustCompile(`^([A-Za-z_-]+):(.*)$`)
+
+// splitValue splits the rest of a "key: rest" line into the space before
+// the value, the value, and a comment after it (a '#' after a space, with
+// the space before it).
+func splitValue(rest string) (pad, val, comment string) {
+	val = strings.TrimLeft(rest, " \t")
+	pad = rest[:len(rest)-len(val)]
+	for i := 0; i < len(val); i++ {
+		if val[i] == '#' && (i == 0 || val[i-1] == ' ' || val[i-1] == '\t') {
+			j := len(strings.TrimRight(val[:i], " \t"))
+			return pad, val[:j], val[j:]
+		}
+	}
+	return pad, val, ""
+}
+
+// keyVal is one key of an entry and its value, already YAML.
+type keyVal struct{ k, v string }
+
+// entryEdits is what changes from entry e to up, as editEntryText takes it:
+// the keys up gives a new value, and the keys it has no value for.
+func entryEdits(e, up ApiDetails) (set []keyVal, drop []string) {
+	edit := func(k, old, new, yamlNew string) {
+		switch {
+		case old == new:
+		case new == "":
+			drop = append(drop, k)
+		default:
+			set = append(set, keyVal{k, yamlNew})
+		}
+	}
+	edit("baseurl", e.BaseURL, up.BaseURL, yamlScalar(up.BaseURL))
+	edit("apikey", e.ApiKey, up.ApiKey, yamlScalar(up.ApiKey))
+	edit("authmethod", e.AuthMethod, up.AuthMethod, yamlScalar(up.AuthMethod))
+	edit("tlsauth", e.TLSAuth, up.TLSAuth, yamlScalar(up.TLSAuth))
+	edit("pins", strings.Join(e.Pins, "\n"), strings.Join(up.Pins, "\n"), pinsFlow(up.Pins))
+	edit("rootca", e.RootCA, up.RootCA, yamlScalar(up.RootCA))
+	edit("config-file", e.ConfigFile, up.ConfigFile, yamlScalar(up.ConfigFile))
+	return set, drop
+}
+
+// editEntryText returns src with the apiservers: item named name changed:
+// each key of set given its value where it stands (its spacing and any
+// comment kept), or added at the end of the item, aligned like the list's
+// first item, if the item has none; each key of drop removed. The lines of
+// a key's old value below it go with it. Nothing else in the file changes,
+// comments and alignment included. An item it cannot edit with confidence
+// (tabs, a key to change on its first line) it refuses. The caller checks
+// the result by loading it.
+func editEntryText(src []byte, name string, set []keyVal, drop []string) ([]byte, error) {
+	lines := strings.Split(string(src), "\n")
+	start, err := findApiserversKey(lines)
+	if err != nil {
+		return nil, err
+	}
+	if start < 0 {
+		return nil, errors.New("it has no apiservers: list")
+	}
+	last := apiserversBlockEnd(lines, start)
+
+	// The items: each from its "-" line at the list's indentation to the
+	// next one. A "-" deeper in starts a nested list, not an item.
+	type item struct{ from, to int }
+	var items []item
+	listIndent := -1
+	for j := start + 1; j <= last; j++ {
+		l := strings.TrimRight(lines[j], "\r")
+		m := reItemStart.FindStringSubmatch(l)
+		if m == nil {
+			m = reBareDash.FindStringSubmatch(l)
+		}
+		if m == nil {
+			continue
+		}
+		if strings.Contains(m[1], "\t") {
+			return nil, errors.New("the apiservers: list is indented with tabs")
+		}
+		if listIndent < 0 {
+			listIndent = len(m[1])
+		}
+		if len(m[1]) != listIndent {
+			continue
+		}
+		if n := len(items); n > 0 {
+			items[n-1].to = j
+		}
+		items = append(items, item{from: j, to: last + 1})
+	}
+	found := -1
+	for k, it := range items {
+		var v []map[string]interface{}
+		if yaml.Unmarshal([]byte(dedentLines(lines[it.from:it.to], listIndent)), &v) != nil || len(v) != 1 {
+			continue
+		}
+		if n, _ := v[0]["name"].(string); n == name {
+			if found >= 0 {
+				return nil, fmt.Errorf("two entries in it are named %q", name)
+			}
+			found = k
+		}
+	}
+	if found < 0 {
+		return nil, fmt.Errorf("no entry named %q is in it", name)
+	}
+	it := items[found]
+
+	sets, drops := map[string]string{}, map[string]bool{}
+	for _, kv := range set {
+		sets[kv.k] = kv.v
+	}
+	for _, k := range drop {
+		drops[k] = true
+	}
+	// The item's keys start in keyCol: after "- " on its first line, or, for
+	// a "-" alone on its line, where its first key below starts.
+	keyCol := -1
+	if m := reItemStart.FindStringSubmatch(strings.TrimRight(lines[it.from], "\r")); m != nil {
+		if strings.Contains(m[2], "\t") {
+			return nil, errors.New("the entry is indented with tabs")
+		}
+		if k := strings.ToLower(m[3]); drops[k] || sets[k] != "" {
+			return nil, fmt.Errorf("its %s: is on its first line", m[3])
+		}
+		keyCol = len(m[1]) + 1 + len(m[2])
+	}
+	kept := []string{lines[it.from]}
+	lastContent := 0 // index in kept of the item's last line of content
+	dropping := false
+	done := map[string]bool{}
+	for j := it.from + 1; j < it.to; j++ {
+		l := strings.TrimRight(lines[j], "\r")
+		body := strings.TrimLeft(l, " ")
+		ind := len(l) - len(body)
+		if strings.TrimSpace(l) == "" || strings.HasPrefix(body, "#") {
+			kept = append(kept, lines[j]) // blank lines and comments stay
+			if ind > listIndent && strings.TrimSpace(l) != "" {
+				lastContent = len(kept) - 1
+			}
+			continue
+		}
+		if strings.HasPrefix(body, "\t") {
+			return nil, errors.New("the entry is indented with tabs")
+		}
+		if keyCol < 0 {
+			keyCol = ind
+		}
+		// Lines deeper than the keys, or a "-" at their column, after a
+		// changed key are its old value: they go with it.
+		if dropping && (ind > keyCol || (ind == keyCol && strings.HasPrefix(body, "-"))) {
+			continue
+		}
+		dropping = false
+		line := lines[j]
+		if m := reKeyLine.FindStringSubmatch(body); m != nil && ind == keyCol {
+			k := strings.ToLower(m[1])
+			if drops[k] {
+				dropping = true
+				continue
+			}
+			if v, ok := sets[k]; ok {
+				// The new value where the old one was. With none on the
+				// line (a block value below it), any comment follows it.
+				pad, old, comment := splitValue(m[2])
+				if old == "" && comment != "" {
+					comment = pad + comment
+				}
+				if old == "" || pad == "" {
+					pad = " "
+				}
+				line = l[:ind] + m[1] + ":" + pad + v + comment + strings.TrimPrefix(lines[j], l)
+				done[k], dropping = true, true
+			}
+		}
+		kept = append(kept, line)
+		lastContent = len(kept) - 1
+	}
+	if keyCol < 0 {
+		return nil, errors.New("the entry has no keys")
+	}
+
+	valueCol := detectLayout(lines[start+1 : last+1]).valueCol
+	var add []string
+	for _, kv := range set {
+		if !done[kv.k] {
+			add = append(add, kvLine(keyCol, valueCol, kv.k, kv.v))
+		}
+	}
+	out := make([]string, 0, len(lines)+len(add))
+	out = append(out, lines[:it.from]...)
+	out = append(out, kept[:lastContent+1]...)
+	out = append(out, add...)
+	out = append(out, kept[lastContent+1:]...)
+	out = append(out, lines[it.to:]...)
+	return []byte(strings.Join(out, "\n")), nil
+}
+
+// dedentLines joins lines, each with up to n leading spaces removed.
+func dedentLines(lines []string, n int) string {
+	var sb strings.Builder
+	for _, l := range lines {
+		l = strings.TrimRight(l, "\r")
+		k := 0
+		for k < n && k < len(l) && l[k] == ' ' {
+			k++
+		}
+		sb.WriteString(l[k:] + "\n")
+	}
+	return sb.String()
+}
+
+// kvLine is one "key: value" line with the key in column col and, when
+// valueCol says so, the value aligned (valueCol counts from the key's start;
+// 0 is one space after the colon). The value is written as it stands.
+func kvLine(col, valueCol int, key, val string) string {
+	key += ":"
+	pad := 1
+	if valueCol > len(key) {
+		pad = valueCol - len(key)
+	}
+	return strings.Repeat(" ", col) + key + strings.Repeat(" ", pad) + val
 }
 
 // pinsFlow writes pins as a YAML flow list, each double-quoted: base64, so a

@@ -188,6 +188,9 @@ func initConfig() {
 	if err := viper.Unmarshal(&cconf); err != nil {
 		log.Fatalf("FATAL: viper.Unmarshal failed to parse config: %v", err)
 	}
+	// The file read (before cli.localconfig was merged): the advice the
+	// shared client prints names it, for tdns-ncli --config (#1205).
+	cconf.File = cfgFileUsed
 }
 
 var cconf cli.CliConf

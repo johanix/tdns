@@ -108,7 +108,10 @@ access file (below), checks one request over TCP, and writes one entry
 with `authmethod: certificate`, the daemon's pins and `config-file:`, and no
 API key. A stopped daemon gets an entry with `config-file:` only, through
 which root reaches the socket once the daemon runs; `tdns-ncli config update
-<entry> --cert` completes it then. See `guide/multi-instance-cli.md`.
+<entry> --cert` completes it then, and switches an entry that uses the API
+key to the certificate. After the daemon's API certificate changes,
+`tdns-ncli config update <entry> --repin` takes its new pins. See
+`guide/multi-instance-cli.md`.
 
 ## Network clients and roles: the access file
 
