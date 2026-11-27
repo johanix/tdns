@@ -321,9 +321,9 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	}
 	switch {
 	case o.DryRun && cert:
-		res.Steps = enrolPlan(cc, client, tcpURL)
+		res.Steps = enrolPlan(cc, client, tcpURL, list.Clients)
 	case cert:
-		if err := enrol(sock, cc, client, "config add", retryAdd(o, client), &entry, &res.Steps); err != nil {
+		if err := enrol(sock, cc, client, "config add", retryAdd(o, client), &entry, &res.Steps, list, info); err != nil {
 			return nil, err
 		}
 		enrolled = true
@@ -661,16 +661,35 @@ func usesCert(e ApiDetails) bool {
 	return len(e.Pins) > 0 && strings.HasPrefix(strings.ToLower(e.BaseURL), "https://")
 }
 
-// enrolPlan is what enrol would do, for a dry run.
-func enrolPlan(cc CliClientConf, client, url string) []string {
+// enrolPlan is what enrol would do, for a dry run: inForce are the clients
+// the daemon runs, which may have the certificate already.
+func enrolPlan(cc CliClientConf, client, url string, inForce []tdns.ApiAccessStatusClient) []string {
 	certPath, _ := clientCertPaths(cc)
-	verb := "use"
-	if _, err := os.Stat(certPath); err != nil {
-		verb = "make"
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		return []string{"make your client certificate " + certPath,
+			"have the daemon add its pin as " + client + " (read-write)",
+			"check one request over TCP to " + url}
 	}
-	return []string{verb + " your client certificate " + certPath,
-		"have the daemon add its pin as " + client + " (read-write)",
-		"check one request over TCP to " + url}
+	steps := []string{"use your client certificate " + certPath}
+	if pin, err := pemCertPin(data); err == nil {
+		if c := enrolledAs(inForce, pin); c != nil {
+			return append(steps, "it is enrolled already, as "+c.Name+" ("+c.Role+")",
+				"check one request over TCP to "+url)
+		}
+	}
+	return append(steps, "have the daemon add its pin as "+client+" (read-write)",
+		"check one request over TCP to "+url)
+}
+
+// enrolledAs is the client of inForce whose pin is pin, or nil.
+func enrolledAs(inForce []tdns.ApiAccessStatusClient, pin string) *tdns.ApiAccessStatusClient {
+	for i := range inForce {
+		if inForce[i].Pin == pin {
+			return &inForce[i]
+		}
+	}
+	return nil
 }
 
 // retryAdd is o's config add, enrolling as client (if set), as the command
@@ -694,11 +713,13 @@ func retryAdd(o AddOptions, client string) string {
 
 // enrol is steps 1 to 3 of a running daemon's certificate entry: the
 // operator's client pair, made if there is none; its pin added by the
-// daemon over its local admin socket sock; one request over TCP with it and
-// the server pins. A refusal or a failed request stops cmd before anything
-// is written. The pin stays enrolled after a failed request; the next run
-// reuses it ("already there").
-func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd, retry string, entry *ApiDetails, steps *[]string) error {
+// daemon over its local admin socket sock, unless the access file has it
+// already, under whatever name (list, what the daemon runs); one request
+// over TCP with it and the server pins. A refusal or a failed request stops
+// cmd before anything is written. The pin stays enrolled after a failed
+// request; the next run reuses it. info is the daemon, for the command that
+// enables a disabled client.
+func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd, retry string, entry *ApiDetails, steps *[]string, list tdns.AccessResponse, info *DaemonApi) error {
 	certPath, keyPath := clientCertPaths(cc)
 	pin, made, err := ensureClientCert(certPath, keyPath, client)
 	if err != nil {
@@ -707,6 +728,21 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd, retry string, en
 	if made {
 		*steps = append(*steps, "Made your client certificate "+certPath)
 	}
+	if c := enrolledAs(list.Clients, pin); c != nil {
+		if c.Disabled {
+			enable := ncliForThisRun() + " " + info.Role + " client enable " + shellQuote(c.Name) + " --daemon-config " + shellQuote(info.ConfigFile)
+			return fmt.Errorf("your client certificate is in the daemon's access file as %q,\nbut disabled; nothing was written. Enable it, then run this again:\n%s\n%s",
+				c.Name, commandLines(enable, 3), commandLines(retry, 3))
+		}
+		*steps = append(*steps, "Your client certificate is enrolled already, as "+c.Name+" ("+c.Role+")")
+		ok, err := tcpCheck(*entry, cc)
+		if err != nil {
+			return fmt.Errorf("your client certificate is enrolled as %q, but a request over TCP to\n%s failed: %v\nNothing was written. Once that is fixed, run this again:\n%s",
+				c.Name, entry.BaseURL, err, commandLines(retry, 3))
+		}
+		*steps = append(*steps, ok)
+		return nil
+	}
 	ans, err := accessOver(sock, tdns.AccessPost{Command: "add", Name: client, Pin: pin,
 		Role: "read-write", Comment: "tdns-ncli " + cmd})
 	switch {
@@ -714,8 +750,9 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd, retry string, en
 		// The daemon may have added it and lost the answer.
 		return fmt.Errorf("%v\nNo answer that the daemon added your pin; nothing was\nwritten. Run it again, which reuses a pin added:\n%s", err, commandLines(retry, 3))
 	case ans.Error:
-		// A refusal, or a pin written to the access file but not loaded.
-		return fmt.Errorf("the daemon refused or did not load your pin; nothing was written:\n%s\nIf it says the file was written, fix that and run this again,\nwhich reuses the pin:\n%s", ans.ErrorMsg, commandLines(retry, 3))
+		// A refusal, or a pin written to the access file but not loaded
+		// (the next run finds it there and reuses it).
+		return fmt.Errorf("the daemon did not add your client certificate; nothing was written:\n%s\nOnce that is fixed, run this again:\n%s", ans.ErrorMsg, commandLines(retry, 3))
 	}
 	said := "The daemon: " + strings.ReplaceAll(ans.Msg, "\n", "\n   ")
 	*steps = append(*steps, said)

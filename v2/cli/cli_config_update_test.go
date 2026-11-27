@@ -96,12 +96,12 @@ func TestUpdateCertSwitchesAKeyEntry(t *testing.T) {
 		t.Errorf("printed:\n%s", out)
 	}
 
-	if res, err := d.update(t, withCert); err != nil || !res.Wrote {
-		t.Errorf("--cert again: %+v, %v; want it enrolled again (already there) and written", res, err)
+	if res, err := d.update(t, withCert); err != nil || !res.Wrote || !strings.Contains(strings.Join(res.Steps, "\n"), "enrolled already, as tester") {
+		t.Errorf("--cert again: %+v, %v; want the enrolled certificate reused and the entry written", res, err)
 	}
 	d.unchanged(t, want)
 	res, err = d.update(t, withRepin)
-	if err != nil || !res.Current || res.Wrote || d.commands() != "list add list add list" {
+	if err != nil || !res.Current || res.Wrote || d.commands() != "list add list list" {
 		t.Errorf("--repin: %+v, %v, asked %q", res, err, d.commands())
 	}
 	d.unchanged(t, want)

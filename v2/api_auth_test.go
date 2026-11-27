@@ -525,3 +525,28 @@ func TestRequestForAnotherConfigIsRefused(t *testing.T) {
 		t.Errorf("no expected config: %d %q, want 200", st, body)
 	}
 }
+
+// Every TCP request checks the access file: one removed, created or
+// rewritten is in force at the next request, with no reload and no client
+// command.
+func TestApiAuthSeesTheFileChange(t *testing.T) {
+	certs, pins := clientCerts(t, "anna", "bob")
+	e := newAuthEnv(t, "clients:\n  - {name: anna, pin: "+pins["anna"]+", role: read-only}\n", certs)
+	path := e.conf.ApiServer.AccessFile
+	if st, _ := e.call(t, "/api/v1/t-ro", "anna", ""); st != 200 {
+		t.Fatalf("anna at start: %d", st)
+	}
+	os.Remove(path)
+	if st, body := e.call(t, "/api/v1/t-ro", "anna", ""); st != 403 || !strings.Contains(body, "is missing") {
+		t.Errorf("anna once the file is gone: %d %q, want 403 with the touch line", st, body)
+	}
+	if err := os.WriteFile(path, []byte("clients:\n  - {name: bob, pin: "+pins["bob"]+", role: read-only}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if st, body := e.call(t, "/api/v1/t-ro", "bob", ""); st != 200 {
+		t.Errorf("bob once the file names him: %d %q, want 200", st, body)
+	}
+	if st, _ := e.call(t, "/api/v1/t-ro", "anna", ""); st != 403 {
+		t.Errorf("anna, whom the new file does not name: %d, want 403", st)
+	}
+}

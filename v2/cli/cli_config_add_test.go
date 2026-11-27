@@ -40,6 +40,7 @@ type addDaemon struct {
 	onAdd        func() error      // after an add is enrolled: what happens meanwhile
 	hookErr      error             // onAdd's, checked on the test goroutine (add)
 	clients      map[string]string // name -> pin
+	disabled     map[string]bool   // names of disabled clients
 	posts        []tdns.AccessPost
 }
 
@@ -113,6 +114,9 @@ func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 	d.posts = append(d.posts, ap)
 	resp := tdns.AccessResponse{File: "/etc/tdns/tdns-auth-access.yaml",
 		ServerPins: []string{d.srvPin}, ConfigFile: d.cfg}
+	for name, pin := range d.clients {
+		resp.Clients = append(resp.Clients, tdns.ApiAccessStatusClient{Name: name, Pin: pin, Role: "read-write", Disabled: d.disabled[name]})
+	}
 	switch {
 	case d.noAccessFile:
 		resp.Missing, resp.Msg = true, "No access file, so no remote clients."
@@ -289,7 +293,7 @@ func TestAddStopsWhenTheDaemonRefuses(t *testing.T) {
 }
 
 // The TCP request fails: nothing is written, and the pin stays enrolled.
-// The next run reuses it (the daemon says "already there") and writes the
+// The next run finds it in the daemon's list, reuses it and writes the
 // entry.
 func TestAddTCPCheckFailsThenARerunReusesThePin(t *testing.T) {
 	d := newAddDaemon(t, true)
@@ -304,8 +308,8 @@ func TestAddTCPCheckFailsThenARerunReusesThePin(t *testing.T) {
 		t.Errorf("the daemon's answer is lost: %v", err)
 	}
 	d.unchanged(t, string(before))
-	clients, _ := d.state()
-	enrolled := clients["tester"]
+	first, _ := d.state()
+	enrolled := first["tester"]
 
 	d.mu.Lock()
 	d.refusePing = false
@@ -314,11 +318,12 @@ func TestAddTCPCheckFailsThenARerunReusesThePin(t *testing.T) {
 	if err != nil || !res.Wrote {
 		t.Fatalf("rerun: %+v, %v", res, err)
 	}
-	clients, posts := d.state()
-	if len(clients) != 1 || clients["tester"] != enrolled || posts[3].Pin != enrolled {
-		t.Errorf("rerun enrolled %v, sent %q; want the first pin reused", clients, posts[3].Pin)
+	// The daemon's list has the pin: no second add is sent.
+	clients, _ := d.state()
+	if len(clients) != 1 || clients["tester"] != enrolled || d.commands() != "list add list" {
+		t.Errorf("rerun enrolled %v, asked %q; want the first pin reused, no add sent", clients, d.commands())
 	}
-	if !strings.Contains(strings.Join(res.Steps, "\n"), "tester is already there") {
+	if !strings.Contains(strings.Join(res.Steps, "\n"), "enrolled already, as tester") {
 		t.Errorf("steps = %q", res.Steps)
 	}
 }
@@ -610,4 +615,42 @@ func TestAddKnowsAnEntryByAnyAddress(t *testing.T) {
 // command whole, however long the temporary paths in it make it.
 func unwrapCommands(s string) string {
 	return regexp.MustCompile(` \\\n +`).ReplaceAllString(s, " ")
+}
+
+// The access file has your certificate already, under another name (an
+// operator enrolled by hand, or from another CLI config): config add reuses
+// it, and does not try to add it again under the default name, which the
+// daemon would refuse (one certificate, one client). A disabled one is
+// refused, with the command that enables it.
+func TestAddReusesAnEnrolledCertificate(t *testing.T) {
+	d := newAddDaemon(t, true)
+	pin, _, err := ensureClientCert(d.certPath, strings.TrimSuffix(d.certPath, ".crt")+".key", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	d.clients["johani"] = pin
+	d.disabled = map[string]bool{"johani": true}
+	d.mu.Unlock()
+	before, _ := os.ReadFile(d.cli)
+	_, err = d.add(t, nil)
+	if err == nil || !strings.Contains(err.Error(), `access file as "johani",`+"\nbut disabled") ||
+		!strings.Contains(unwrapCommands(err.Error()), "auth client enable johani --daemon-config "+d.cfg) || d.commands() != "list" {
+		t.Fatalf("disabled: %v (asked %q), want the enable command and nothing sent", err, d.commands())
+	}
+	d.unchanged(t, string(before))
+
+	d.mu.Lock()
+	d.disabled = nil
+	d.mu.Unlock()
+	res, err := d.add(t, nil)
+	if err != nil || !res.Wrote || d.commands() != "list list" {
+		t.Fatalf("%+v, %v (asked %q); want the entry written and no add sent", res, err, d.commands())
+	}
+	if steps := strings.Join(res.Steps, "\n"); !strings.Contains(steps, "enrolled already, as johani (read-write)") || !strings.Contains(steps, "TCP check: ok") {
+		t.Errorf("steps %q", res.Steps)
+	}
+	if clients, _ := d.state(); len(clients) != 1 {
+		t.Errorf("clients %v, want johani alone", clients)
+	}
 }

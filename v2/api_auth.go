@@ -15,6 +15,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -64,8 +65,55 @@ type accessState struct {
 }
 
 // apiAccessHolder holds the running policy. A pointer in InternalConf, so a
-// Config may be copied without copying the atomic.
-type apiAccessHolder struct{ p atomic.Pointer[accessState] }
+// Config may be copied without copying the atomic. stamp is what the access
+// file looked like at the last load (refreshApiAccess).
+type apiAccessHolder struct {
+	p     atomic.Pointer[accessState]
+	stamp atomic.Pointer[accessStamp]
+}
+
+// accessStamp is the access file as the last load found it: its path, and
+// its file info, nil when it was not there.
+type accessStamp struct {
+	path string
+	fi   os.FileInfo
+}
+
+// unchanged says whether fi (err from the stat) is still the file of s: not
+// there then and now, or the same file with the same size, time and mode.
+func (s *accessStamp) unchanged(fi os.FileInfo, err error) bool {
+	switch {
+	case s.fi == nil:
+		return err != nil
+	case err != nil:
+		return false
+	}
+	return os.SameFile(s.fi, fi) && s.fi.Size() == fi.Size() && s.fi.ModTime().Equal(fi.ModTime()) && s.fi.Mode() == fi.Mode()
+}
+
+// refreshApiAccess loads the access file again when it changed since the
+// last load: created, edited, chmodded or removed. Every TCP request calls
+// it, so what the file says is in force at the next request, with no
+// reload; it costs a stat when nothing changed.
+func (conf *Config) refreshApiAccess() {
+	h := conf.Internal.ApiAccess
+	if h == nil {
+		return
+	}
+	s := h.stamp.Load()
+	if s == nil {
+		return // never loaded: no policy from a file to keep current
+	}
+	if fi, err := os.Stat(s.path); s.unchanged(fi, err) {
+		return
+	}
+	accessMu.Lock()
+	defer accessMu.Unlock()
+	if h.stamp.Load() != s {
+		return // loaded meanwhile, by another request, /access or a reload
+	}
+	conf.loadAccessPolicy(s.path)
+}
 
 func (h *apiAccessHolder) load() *accessState {
 	if h == nil {
@@ -135,6 +183,7 @@ func (conf *Config) authenticateApiRequest(r *http.Request) (ApiIdentity, int, s
 	if FromLocalSocket(r.Context()) {
 		return ApiIdentity{Name: "local", Role: RoleAdmin, Via: "local socket"}, 0, ""
 	}
+	conf.refreshApiAccess()
 	st := conf.Internal.ApiAccess.load()
 	switch {
 	case st == nil:
@@ -279,6 +328,13 @@ func (conf *Config) reloadApiAccess() string {
 // the TCP API answers 503 until a load succeeds.
 func (conf *Config) loadAccessPolicy(path string) (*AccessFile, error) {
 	h := conf.Internal.ApiAccess
+	// The stamp first: a change after it, even during the read, makes the
+	// next request load again (refreshApiAccess).
+	fi, serr := os.Stat(path)
+	if serr != nil {
+		fi = nil
+	}
+	h.stamp.Store(&accessStamp{path: path, fi: fi})
 	af, err := LoadAccessFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):

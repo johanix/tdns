@@ -133,11 +133,12 @@ To take remote clients, create the file once; empty is fine:
 touch /etc/tdns/tdns-auth-access.yaml
 ```
 
-No reload is needed: the daemon reads the file at every `client` command and
-at `config add`, and at every reload. Neither the daemon nor tdns-ncli ever
+No reload is needed: every TCP request checks the file (a `stat`), and a
+file created, edited or removed since the last load is loaded again, so it
+is in force at the next request. Neither the daemon nor tdns-ncli ever
 creates it, or changes the daemon config; the daemon only writes what is in
 it, when `tdns-ncli <daemon> client ...` or `config add` asks. Removing the
-file takes remote access away again.
+file takes remote access away at the next request.
 
 ```yaml
 clients:

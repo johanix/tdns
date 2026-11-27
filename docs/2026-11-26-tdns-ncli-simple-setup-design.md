@@ -277,9 +277,13 @@ changed in the PR.
   config, and keeps ERROR sweeps clean.
 - **An access file with `keyauth:` still loads.** The line is ignored (a
   WARNING says so), and the daemon's next write of the file drops it.
-- **Removing the access file takes remote access away** at the next load (a
-  reload, or any `/access` call). A missing file is logged at INFO once, not
-  on every load.
+- **Every TCP request checks the access file** (a `stat`): one created,
+  edited, chmodded or removed since the last load is loaded again, so it is
+  in force at the next request, and removing it takes remote access away
+  then. A missing file is logged at INFO once, not on every load.
+- **`config add` and `config update --cert` reuse a certificate the access
+  file has already**, under any name: they enrol it only when it is not
+  there. A disabled one is refused with the `client enable` command.
 - **The file check:** owner the daemon's user or root, and not writable by
   group or others. The refusal gives `chmod go-w <file>` or `chown <user>
   <file>`.

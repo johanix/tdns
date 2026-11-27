@@ -248,11 +248,11 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 	}
 	switch {
 	case o.DryRun && o.Cert:
-		res.Steps = enrolPlan(cc, client, up.BaseURL)
+		res.Steps = enrolPlan(cc, client, up.BaseURL, list.Clients)
 	case o.DryRun:
 		res.Steps = []string{"check one request over TCP to " + up.BaseURL + " with these pins"}
 	case o.Cert:
-		if err := enrol(sock, cc, client, cmd, retryUpdate(o, client), &up, &res.Steps); err != nil {
+		if err := enrol(sock, cc, client, cmd, retryUpdate(o, client), &up, &res.Steps, list, info); err != nil {
 			return nil, err
 		}
 	default:
