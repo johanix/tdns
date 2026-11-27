@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -453,13 +452,16 @@ func newDelegationWriter(spec DelegationBackendSpec, store DelegationStore, zd *
 	return nil, fmt.Errorf("delegation backend %q: unknown writer %q", spec.Name, spec.Writer)
 }
 
-// ExportDelegationData writes all delegation data for a parent zone to a file
-// in DNS zone file format. Called from the /delegation API handler.
+// ExportDelegationData returns all delegation data for a parent zone as text
+// in DNS zone file format. The /delegation "export" command sends it back to
+// the caller, which writes it wherever it wants: the daemon writes no file.
+// (It used to write one, as its own user, at a path the API caller chose.)
+//
 // defaultTTL is applied to any RR with TTL=0.
-func ExportDelegationData(backend DelegationBackend, parentZone, outfile string, defaultTTL uint32) error {
+func ExportDelegationData(backend DelegationBackend, parentZone string, defaultTTL uint32) (string, error) {
 	children, err := backend.ListChildren(parentZone)
 	if err != nil {
-		return fmt.Errorf("ListChildren: %w", err)
+		return "", fmt.Errorf("ListChildren: %w", err)
 	}
 
 	sort.Strings(children)
@@ -511,16 +513,6 @@ func ExportDelegationData(backend DelegationBackend, parentZone, outfile string,
 		}
 	}
 
-	// Atomic write
-	tmpfile := outfile + ".tmp"
-	if err := os.WriteFile(tmpfile, []byte(buf.String()), 0644); err != nil {
-		return fmt.Errorf("write temp file: %w", err)
-	}
-	if err := os.Rename(tmpfile, outfile); err != nil {
-		os.Remove(tmpfile)
-		return fmt.Errorf("rename: %w", err)
-	}
-
-	lg.Info("ExportDelegationData: wrote file", "zone", parentZone, "file", outfile, "children", len(children))
-	return nil
+	lg.Info("delegation data exported", "zone", parentZone, "children", len(children))
+	return buf.String(), nil
 }

@@ -1,6 +1,7 @@
 # A pure signer: tdns-signer with one way in
 
-**Written 2026-09-23.** Scoping analysis, for review. Nothing is implemented.
+**Written 2026-09-23.** Amended 2026-11-24: `/delegation export` (§1, §3).
+Scoping analysis, for review. Nothing is implemented.
 Line references are to main at `e223451b`. Builds on #558, which records how to
 give `tdns-signer` an app type of its own; this document answers the question
 that comes after it: what the signer should stop doing, where each of those
@@ -59,7 +60,7 @@ Everything else goes:
 | Remove | What it is today |
 |---|---|
 | DNS UPDATE | the whole inbound path: ZONE-UPDATE (`allow-updates`), CHILD-UPDATE (`allow-child-updates`), TRUSTSTORE-UPDATE (child SIG(0) key upload) |
-| content edits over the API | `/zone update`, catalog authoring, `delegation export` |
+| content edits over the API | `/zone update`, catalog authoring, ~~`delegation export`~~ (refused as parent side instead: see the 2026-11-24 amendment in §3) |
 | primary zones | static `type: primary`, `/zone add` of a primary, persisted dynamic primaries, `/catalog create` |
 | DSYNC publication | the `childsync` option: DSYNC, SVCB, URI, TXT and the receiver KEY published into the zone; KeyState answering |
 | DSYNC receivers | UPDATE (above), the DSYNC API listener, NOTIFY(CDS/CSYNC) acting as a parent |
@@ -159,9 +160,16 @@ The signer's decisions:
 | `/zone/childsync` (route, `apirouters.go:103`) | **drop route** | parent-side DSYNC publication |
 | `/dsync-api/credential`, `/dsync-api/cert-credential` (`apirouters.go:110-111`) | **drop routes** | credentials for the DSYNC API receiver |
 | `/catalog` (route, `apirouters.go:96`) | **drop route** | catalog *authoring*; consuming a catalog is not an API function (§9 Q2) |
-| `/delegation export` (`apihandler_funcs.go:582`) | **refuse** | parent side; writes a file at a client-chosen server path |
+| `/delegation export` (`apihandler_funcs.go:582`) | **refuse** | parent side; ~~writes a file at a client-chosen server path~~ (no longer: see the amendment below) |
 | `/scanner/poll` (`apirouters.go:128`) | **drop route** | scanner |
 | everything else | keep | key management, `/zone/parentsync` (child side), `/delegation status|sync`, rollover, `bump`, `sign-zone`, `resign-zone`, policy commands, `reload`, `write-zone`, journal, `/config`, `/command`, `/debug`, `/imr`, `/keystore`, `/truststore` |
+
+**Amendment 2026-11-24.** `/delegation export` no longer writes a file. The
+daemon returns the delegation data in the reply, and the CLI writes it
+(`--outfile`, on the CLI's host) or prints it. A request that names an outfile
+is refused. So the second reason in the row above, and its listing under
+"content edits over the API" in §1, no longer hold. The first reason (export is
+parent side) still does.
 
 Route removal is Tier S: a `SetupSignerAPIRouter` that registers only the kept
 routes. The command refusals inside `/zone` and `/delegation` are Tier G,
