@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -39,7 +40,7 @@ func (zd *ZoneData) sendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 		return "", 0, UpdateResult{}, err
 	}
 
-	smsg, err := zd.signDelegationUpdate(kdb, m)
+	smsg, sak, err := zd.signDelegationUpdate(kdb, m)
 	if err != nil {
 		return "", 0, UpdateResult{}, err
 	}
@@ -52,6 +53,9 @@ func (zd *ZoneData) sendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 	if err != nil {
 		return "", 0, ur, err
 	}
+	if rcode == dns.RcodeSuccess {
+		recordUpdateAccepted(kdb, zd.ZoneName, sak)
+	}
 	msg := fmt.Sprintf("SendUpdate(%s) returned rcode %s", parent, dns.RcodeToString[rcode])
 	lgDns.Info("SendDelegationUpdate: update sent",
 		"zone", zd.ZoneName, "parent", parent, "mode", mode, "rcode", dns.RcodeToString[rcode])
@@ -60,23 +64,59 @@ func (zd *ZoneData) sendDelegationUpdate(ctx context.Context, kdb *KeyDB,
 
 // signDelegationUpdate signs an UPDATE for the parent with the zone's active
 // SIG(0) key: the one signing step for every UPDATE the child sends, the
-// delegation sync's and the DS delivery's alike.
-func (zd *ZoneData) signDelegationUpdate(kdb *KeyDB, m *dns.Msg) (*dns.Msg, error) {
+// delegation sync's and the DS delivery's alike. It returns the keys it
+// signed with, for recordUpdateAccepted.
+func (zd *ZoneData) signDelegationUpdate(kdb *KeyDB, m *dns.Msg) (*dns.Msg, *Sig0ActiveKeys, error) {
 	sak, err := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 	if err != nil {
-		return nil, fmt.Errorf("keystore lookup for %s: %w", zd.ZoneName, err)
+		return nil, nil, fmt.Errorf("keystore lookup for %s: %w", zd.ZoneName, err)
 	}
 	if sak == nil || len(sak.Keys) == 0 {
-		return nil, fmt.Errorf("no active SIG(0) key for %s", zd.ZoneName)
+		return nil, nil, fmt.Errorf("no active SIG(0) key for %s", zd.ZoneName)
 	}
 	smsg, err := SignMsg(*m, zd.ZoneName, sak)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if smsg == nil {
-		return nil, fmt.Errorf("signing UPDATE for %s produced no message and no error", zd.ZoneName)
+		return nil, nil, fmt.Errorf("signing UPDATE for %s produced no message and no error", zd.ZoneName)
 	}
-	return smsg, nil
+	return smsg, sak, nil
+}
+
+// recordUpdateAccepted records the zone's SIG(0) key as trusted by the parent
+// (parent_state KeyStateTrusted): the parent answered NOERROR to an UPDATE
+// signed with it. That is proof the parent trusts the key whether or not it
+// speaks KeyState (tdns-mp #404); a KeyState answer (UpdateParentState) is
+// the other proof. An UPDATE signed with more than one key records nothing,
+// since which signature the parent checked is not known. A failure to record
+// is logged and the UPDATE stands: the next accepted one records it.
+func recordUpdateAccepted(kdb *KeyDB, zone string, sak *Sig0ActiveKeys) {
+	if kdb == nil || sak == nil || len(sak.Keys) != 1 {
+		return
+	}
+	keyid := sak.Keys[0].KeyRR.KeyTag()
+	const setTrustedSql = `
+UPDATE Sig0KeyStore SET parent_state=? WHERE zonename=? AND keyid=? AND IFNULL(parent_state, 0) != ?`
+	tx, err := kdb.Begin("recordUpdateAccepted")
+	if err != nil {
+		lgDns.Error("recordUpdateAccepted: failed to begin transaction", "zone", zone, "keyid", keyid, "err", err)
+		return
+	}
+	res, err := tx.Exec(setTrustedSql, edns0.KeyStateTrusted, zone, keyid, edns0.KeyStateTrusted)
+	if err != nil {
+		tx.Rollback()
+		lgDns.Error("recordUpdateAccepted: failed to record the parent's trust in the key", "zone", zone, "keyid", keyid, "err", err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		lgDns.Error("recordUpdateAccepted: failed to commit", "zone", zone, "keyid", keyid, "err", err)
+		return
+	}
+	if rows, _ := res.RowsAffected(); rows > 0 {
+		lgDns.Info("the parent accepted an UPDATE signed with our SIG(0) key: recorded the key as trusted",
+			"zone", zone, "keyid", keyid)
+	}
 }
 
 // BuildChildWholeDSUpdate builds a DNS UPDATE for the parent zone that
