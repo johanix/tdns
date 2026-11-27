@@ -583,7 +583,7 @@ imrengine:
    # the resolver validates against the compiled-in IANA root anchor. To name
    # the anchor yourself (needed only for a private root; with a root-hints
    # file, a forward or a stub for ".", the compiled-in anchor is used if the
-   # root serves the IANA root keys):
+   # root serves a key that matches it and signs its DNSKEY RRset):
    #   trust-anchor-file:          /etc/tdns/root.key
    # or paste the root DS records inline, one per line:
    #   trust-anchor-ds: |

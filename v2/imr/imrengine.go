@@ -2657,9 +2657,10 @@ func (imr *Imr) initializeImrTrustAnchors(ctx context.Context, ic Config) error 
 		return err
 	}
 	// No anchor configured and a root that may not be the IANA root: the
-	// compiled-in anchor is used if that root serves the IANA root's keys. A
-	// stub or a forward for "." that leads to a real root is still the real
-	// root, and its keys are validated by the anchor like any other.
+	// compiled-in anchor is used if that root serves a key that matches it and
+	// signs its DNSKEY RRset. A stub or a forward for "." that leads to a real
+	// root is still the real root, and its keys are validated by the anchor
+	// like any other.
 	if len(dsByName) == 0 && len(dnskeysByName) == 0 {
 		if probe, why := ic.RootAnchorProbe(); probe {
 			for _, ds := range imr.rootAnchorByProbe(ctx, why) {
