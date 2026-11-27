@@ -399,3 +399,59 @@ func TestCommandLinesKeepsQuotedWords(t *testing.T) {
 		t.Errorf("the quoted path was broken:\n%s", out)
 	}
 }
+
+// daemon start, stop and restart need no API client: an entry without one
+// (no baseurl, its daemon not running yet) gets its daemon's local admin
+// socket. Not for an entry whose TCP address its daemon config does not
+// list: that may be another host's daemon.
+func TestLifecycleFallsBackToTheSocket(t *testing.T) {
+	dir := shortSockDir(t)
+	cfg := filepath.Join(dir, "tdns-auth2.yaml")
+	sock := filepath.Join(dir, "a2.sock")
+	writeFile(t, cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8995", "   socket: "+sock+"\n"))
+	noClient := errors.New("no client")
+
+	c, err := lifecycleSocketClient("auth", &ApiDetails{Name: "auth2", Role: "auth", ConfigFile: cfg}, noClient)
+	if err != nil || c == nil || c.BaseUrl != "http://localhost/api/v1" {
+		t.Fatalf("socket entry: %v, %+v", err, c)
+	}
+	same := &ApiDetails{Name: "auth2", Role: "auth", ConfigFile: cfg, BaseURL: "https://127.0.0.1:8995/api/v1"}
+	if c, err := lifecycleSocketClient("auth", same, noClient); err != nil || c == nil {
+		t.Errorf("entry with its daemon's address: %v", err)
+	}
+	other := &ApiDetails{Name: "auth2", Role: "auth", ConfigFile: cfg, BaseURL: "https://192.0.2.1:8995/api/v1"}
+	if _, err := lifecycleSocketClient("auth", other, noClient); err != noClient {
+		t.Errorf("entry with another address: %v", err)
+	}
+}
+
+// An entry kept off this host's socket by its address says so, with the
+// fix that takes the daemon's own address and pins.
+func TestTCPRefusalNamesTheAddress(t *testing.T) {
+	asNcli(t)
+	dir := shortSockDir(t)
+	cfg := filepath.Join(dir, "tdns-auth.yaml")
+	writeFile(t, cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "   socket: "+filepath.Join(dir, "a.sock")+"\n"))
+
+	_, _, err := buildApiClient(ApiDetails{Name: "auth", Role: "auth", ConfigFile: cfg, BaseURL: "https://192.0.2.1:8989/api/v1"}, CliClientConf{}, "", "")
+	var r clientRefusal
+	if !errors.As(err, &r) || !strings.Contains(r.why, "192.0.2.1:8989 is not one") || r.fix != "tdns-ncli config update auth --cert" {
+		t.Errorf("refusal = %+v (%v)", r, err)
+	}
+	_, _, err = buildApiClient(ApiDetails{Name: "auth", Role: "auth", ConfigFile: cfg, BaseURL: "https://127.0.0.1:8989/api/v1"}, CliClientConf{}, "", "")
+	if !errors.As(err, &r) || strings.Contains(r.why, "is not one") {
+		t.Errorf("its own address: %+v (%v)", r, err)
+	}
+}
+
+// shortSockDir is a temporary directory with a short path: a socket path
+// has a limit.
+func shortSockDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "ncli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}

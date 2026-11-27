@@ -354,6 +354,26 @@ func socketCandidate(e ApiDetails) bool {
 	return !ForceTCP && e.ConfigFile != "" && !isUnixURL(e.BaseURL)
 }
 
+// tcpRefusal is r, unless e's TCP address is what keeps it off this host's
+// admin socket (usableDaemonSocket uses the socket only for an address its
+// daemon config lists): then that is why, and config update --cert is the
+// fix. It takes the daemon's own address and pins, and makes the client
+// certificate if there is none.
+func tcpRefusal(e ApiDetails, r clientRefusal) clientRefusal {
+	if !socketCandidate(e) || e.BaseURL == "" {
+		return r
+	}
+	sock, addrs := daemonSocket(e.ConfigFile)
+	hp := hostPort(e.BaseURL)
+	if sock == "" || len(addrs) == 0 || hp == "" || slices.Contains(addrs, hp) {
+		return r
+	}
+	return clientRefusal{entry: e.Name,
+		why: fmt.Sprintf("its address %s is not one %s listens on (%s), so this host's admin socket is not used for it",
+			hp, e.ConfigFile, strings.Join(addrs, ", ")),
+		fix: updateFix(e, "--cert")}
+}
+
 // clientRefusal is an entry tdns-ncli will not connect through: why, and the
 // command that fixes it. GetApiClient prints it as a refusal, the command on
 // a line of its own; Error() is the one-line form, for config list.
@@ -548,19 +568,19 @@ func buildApiClient(e ApiDetails, cc CliClientConf, sock, sockNote string) (*tdn
 		}
 	case strings.HasPrefix(lower, "https://"):
 		if len(e.Pins) == 0 {
-			return nil, "", pinRefusal(e, "its entry has no pin of the daemon's certificate,\nso the daemon cannot be verified")
+			return nil, "", tcpRefusal(e, pinRefusal(e, "its entry has no pin of the daemon's certificate,\nso the daemon cannot be verified"))
 		}
 		o.Pins = e.Pins
 		o.PinFix = updateFix(e, "--repin")
 		cert, err := loadClientCert(cc)
 		if err != nil {
-			return nil, "", clientRefusal{entry: e.Name, why: err.Error(), fix: ncliForThisRun() + " client init"}
+			return nil, "", tcpRefusal(e, clientRefusal{entry: e.Name, why: err.Error(), fix: ncliForThisRun() + " client init"})
 		}
 		o.ClientCert = cert
 	case strings.HasPrefix(lower, "http://"):
-		return nil, "", clientRefusal{entry: e.Name,
+		return nil, "", tcpRefusal(e, clientRefusal{entry: e.Name,
 			why: fmt.Sprintf("its baseurl %s is plain http, and the\nmanagement API is TLS only", e.BaseURL),
-			fix: updateFix(e, "--cert")}
+			fix: updateFix(e, "--cert")})
 	default:
 		return nil, "", fmt.Errorf("entry %q: baseurl %s is neither https:// nor unix://", e.Name, e.BaseURL)
 	}

@@ -248,6 +248,48 @@ func mustDaemonCommandLine(command string, flags []string) (string, []string) {
 }
 
 // mustDaemonStartFlags is daemonStartFlags, exiting on its refusal.
+// lifecycleClient is the client daemon start, stop and restart use. They
+// ask the daemon whether it runs, and need no API beyond that: starting
+// needs only the command. So it is the entry's client when that can be
+// built, else the daemon's local admin socket from its config, which is
+// not there until the daemon runs (start then starts it, stop has nothing
+// to stop). With neither, the entry's own refusal.
+func lifecycleClient(role string, ad *ApiDetails) *tdns.ApiClient {
+	api, err := GetApiClient(role, false)
+	if err == nil {
+		return api
+	}
+	sc, err := lifecycleSocketClient(role, ad, err)
+	if err != nil {
+		dieOn(err)
+	}
+	return sc
+}
+
+// lifecycleSocketClient is lifecycleClient's fallback when the entry ad has
+// no client (err says why): its daemon's local admin socket, or err.
+func lifecycleSocketClient(role string, ad *ApiDetails, err error) (*tdns.ApiClient, error) {
+	cfg := ""
+	if ad != nil {
+		cfg = ad.ConfigFile
+	}
+	// Only this host's daemon: an entry with a TCP address its daemon config
+	// does not list may be another host's (as in usableDaemonSocket).
+	if ad != nil && ad.BaseURL != "" && !isUnixURL(ad.BaseURL) {
+		path := cfg
+		if path == "" {
+			path = defaultCfgFileForRole(role)
+		}
+		if _, addrs := daemonSocket(path); !slices.Contains(addrs, hostPort(ad.BaseURL)) {
+			return nil, err
+		}
+	}
+	if sc, serr := daemonSocketClient(role, cfg); serr == nil {
+		return sc, nil
+	}
+	return nil, err
+}
+
 func mustDaemonStartFlags(cmd *cobra.Command, ad *ApiDetails) []string {
 	flags, err := daemonStartFlags(cmd, ad)
 	if err != nil {
@@ -298,8 +340,6 @@ Right now this doesn't do much, but later on various services will be able to re
 		Short: "Start the tdns-" + role + " daemon",
 		Long:  `Start the tdns-` + role + ` daemon. If it was already running, then this is a no-op.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			api, _ := GetApiClient(role, true)
-
 			maxwait := viper.GetInt("cli.maxwait")
 			if maxwait < MaxWait {
 				maxwait = MaxWait
@@ -326,7 +366,7 @@ Right now this doesn't do much, but later on various services will be able to re
 			// command: may carry arguments of its own, --config among them.
 			daemonBinary, daemonArgs := mustDaemonCommandLine(daemonCommand, daemonFlags)
 
-			api.StartDaemon(maxwait, tdns.Globals.Slurp, daemonBinary, daemonArgs)
+			lifecycleClient(role, ad).StartDaemon(maxwait, tdns.Globals.Slurp, daemonBinary, daemonArgs)
 		},
 	}
 	start.Flags().BoolVarP(&tdns.Globals.Slurp, "slurp", "", false,
@@ -339,8 +379,8 @@ Right now this doesn't do much, but later on various services will be able to re
 		Short: "Stop the management daemon",
 		Long:  `Stop the management daemon. If it was not running, then this is a no-op.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			api, _ := GetApiClient(role, true)
-			if err := api.StopDaemon(); err != nil {
+			clientKey := getClientKeyFromParent(role)
+			if err := lifecycleClient(role, getApiDetailsByClientKey(clientKey)).StopDaemon(); err != nil {
 				os.Exit(1)
 			}
 		},
@@ -350,13 +390,12 @@ Right now this doesn't do much, but later on various services will be able to re
 		Use:   "restart",
 		Short: "Stop and then start the management daemon",
 		Run: func(cmd *cobra.Command, args []string) {
-			api, _ := GetApiClient(role, true)
-
 			clientKey := getClientKeyFromParent(role)
 			if clientKey == "" {
 				clientKey = "auth" // fallback for unknown roles
 			}
 			ad := getApiDetailsByClientKey(clientKey)
+			api := lifecycleClient(role, ad)
 
 			// The flags as for start, worked out before the stop, so that a
 			// refusal (a named instance with no config-file:) leaves the

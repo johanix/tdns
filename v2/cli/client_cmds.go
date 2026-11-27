@@ -98,8 +98,9 @@ P-256) and its key (mode 0600). The default location is ~/.config/tdns/certs/
 overwritten; its pin is printed again.
 
 The pin is public. Give it to whoever runs the daemon (or run the printed line
-on the daemon's host yourself), then set authmethod: certificate on that
-daemon's entry in your CLI config.`,
+on the daemon's host yourself). On the daemon's host, config update <entry>
+--cert does both: it adds the pin, and gives the entry the daemon's address
+and pins.`,
 		Annotations: map[string]string{cliConfigAnnotation: "1"}, // needs no CLI config: it may be the first thing run
 		Args:        cobra.NoArgs,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -125,7 +126,7 @@ daemon's entry in your CLI config.`,
 			fmt.Printf("\nPin: %s\n\n", pin)
 			fmt.Printf("To let a daemon know you, run on its host (as root):\n\n")
 			fmt.Printf("   tdns-ncli <daemon> client add %s --pin %s --role read-write\n\n", name, pin)
-			fmt.Printf("Then give that daemon's entry in your CLI config:\n\n   authmethod: certificate\n")
+			fmt.Printf("On the daemon's host, this does that and gives the entry\nthe daemon's address and pins:\n\n   tdns-ncli config update <entry> --cert\n")
 			// The client loads the default pair unless client: names
 			// another, so a pair made elsewhere needs saying where.
 			if certPath != defCert || keyPath != defKey {
