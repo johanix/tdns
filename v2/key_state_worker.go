@@ -338,44 +338,56 @@ func maintainStandbyKeys(ctx context.Context, kdb *KeyDB, propagationDelay time.
 			continue
 		}
 
-		zskCount := standbyKeyCount(zd.DnssecPolicy, false, standbyZskCount)
-		kskCount := standbyKeyCount(zd.DnssecPolicy, true, standbyKskCount)
+		// Under the zone keys lock, which a zone delete takes to delete the
+		// zone's keys after marking the ZoneData (acquireZoneKeysLock): no
+		// standby key is made for a zone deleted meanwhile.
+		func() {
+			lock := acquireZoneKeysLock(zoneName)
+			lock.Lock()
+			defer lock.Unlock()
+			if zd.removed.Load() {
+				return
+			}
 
-		// RELAXED completeness counts standby ZSKs by ROLE only (algorithm-
-		// agnostic): N old-alg standbys satisfy the count, so an algorithm
-		// change generates nothing eagerly — the gradual FIFO roll mints the
-		// new algorithm only when the count actually drops (a standby was
-		// promoted). STRICT keeps per-(role,algorithm) counting (the maintained
-		// double-signature shape). See the algorithm-rollover plan §8.3 / D5.
-		relaxed := Conf.Internal.Completeness == CompletenessRelaxed
-		// A policy that keeps no standby ZSK still rolls: the replacement
-		// is minted once the roll comes within the propagation window
-		// (propagation-delay plus the served DNSKEY TTL: what published
-		// takes to reach standby), so it is standby when the roll fires, as
-		// a kept standby would be; the roll promotes it and the count is
-		// zero again. A manual request has no lead: the key is minted at
-		// the request, and the roll waits out the window.
-		if zskCount == 0 && zskReplacementDue(kdb, zoneName, zd.DnssecPolicy, time.Now(), propagationDelay) {
-			zskCount = 1
-		}
-		maintainStandbyKeysForType(ctx, kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, zskCount, relaxed)
+			zskCount := standbyKeyCount(zd.DnssecPolicy, false, standbyZskCount)
+			kskCount := standbyKeyCount(zd.DnssecPolicy, true, standbyKskCount)
 
-		// In relaxed mode, cap the standby-ZSK TOTAL (any algorithm) at
-		// zskCount: with the algorithm-based deletion skipped, an
-		// asap-faster-than-drain or stray extra could otherwise bloat the
-		// DNSKEY RRset. Keep the oldest zskCount (FIFO, by published_at),
-		// delete the youngest surplus, NEVER by algorithm. Shares the same
-		// role-total count as the maintainer above so the two never oscillate.
-		if relaxed {
-			capStandbyZsksByCount(kdb, zoneName, zskCount)
-		}
+			// RELAXED completeness counts standby ZSKs by ROLE only (algorithm-
+			// agnostic): N old-alg standbys satisfy the count, so an algorithm
+			// change generates nothing eagerly — the gradual FIFO roll mints the
+			// new algorithm only when the count actually drops (a standby was
+			// promoted). STRICT keeps per-(role,algorithm) counting (the maintained
+			// double-signature shape). See the algorithm-rollover plan §8.3 / D5.
+			relaxed := Conf.Internal.Completeness == CompletenessRelaxed
+			// A policy that keeps no standby ZSK still rolls: the replacement
+			// is minted once the roll comes within the propagation window
+			// (propagation-delay plus the served DNSKEY TTL: what published
+			// takes to reach standby), so it is standby when the roll fires, as
+			// a kept standby would be; the roll promotes it and the count is
+			// zero again. A manual request has no lead: the key is minted at
+			// the request, and the roll waits out the window.
+			if zskCount == 0 && zskReplacementDue(kdb, zoneName, zd.DnssecPolicy, time.Now(), propagationDelay) {
+				zskCount = 1
+			}
+			maintainStandbyKeysForType(ctx, kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, zskCount, relaxed)
 
-		if kskCount > 0 && (zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method == RolloverMethodNone) {
-			// KSK is always per-(role,algorithm): relaxed mode's role-only
-			// discipline is a ZSK-roll property (the ZSK signs the whole zone);
-			// a KSK algorithm change is refused, not gradually rolled, here.
-			maintainStandbyKeysForType(ctx, kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, kskCount, false)
-		}
+			// In relaxed mode, cap the standby-ZSK TOTAL (any algorithm) at
+			// zskCount: with the algorithm-based deletion skipped, an
+			// asap-faster-than-drain or stray extra could otherwise bloat the
+			// DNSKEY RRset. Keep the oldest zskCount (FIFO, by published_at),
+			// delete the youngest surplus, NEVER by algorithm. Shares the same
+			// role-total count as the maintainer above so the two never oscillate.
+			if relaxed {
+				capStandbyZsksByCount(kdb, zoneName, zskCount)
+			}
+
+			if kskCount > 0 && (zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method == RolloverMethodNone) {
+				// KSK is always per-(role,algorithm): relaxed mode's role-only
+				// discipline is a ZSK-roll property (the ZSK signs the whole zone);
+				// a KSK algorithm change is refused, not gradually rolled, here.
+				maintainStandbyKeysForType(ctx, kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, kskCount, false)
+			}
+		}()
 	}
 }
 

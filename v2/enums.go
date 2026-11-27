@@ -603,8 +603,7 @@ func (zd *ZoneData) setErrorLocked(errtype ErrorType, errmsg string, args ...int
 		zd.Errors[errtype] = ZoneError{Type: errtype, Msg: fmt.Sprintf(errmsg, args...)}
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
-	// no-refresh-hooks: republishes an existing ZoneData.
-	Zones.Set(zd.ZoneName, zd)
+	zd.republishLocked()
 }
 
 // snapshotErrorsLocked copies the current entries for the given categories, for
@@ -654,6 +653,30 @@ func (zd *ZoneData) clearErrorLocked(errtype ErrorType) {
 		}
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
+	zd.republishLocked()
+}
+
+// republishLocked puts zd back in Zones after an error change, as SetError
+// and ClearError always have, except for a ZoneData that has left Zones for
+// good (zd.removed): a deleted zone, or one a modify replaced. A refresh of
+// a zone deleted while it ran clears or sets an error when it ends;
+// republishing then brought the zone back, without its keys, and the next
+// rewrite of the dynamic config persisted it. A refresh of a replaced
+// ZoneData put the old one back over its replacement, and a later delete
+// of the replacement left the old one in Zones.
+//
+// The flag is read and Zones changed under zd.mu, and whoever sets the flag
+// takes zd.mu around its own Zones change too (leaveZones, swapZoneData),
+// so neither lands between the other's two steps. Lock order: zd.mu, then
+// Zones.
+//
+// Otherwise unchanged: callers that build a zone in error state rely on the
+// registration, and some replace a live entry of the same name through it.
+// The caller MUST hold zd.mu.
+func (zd *ZoneData) republishLocked() {
+	if zd.removed.Load() {
+		return
+	}
 	// no-refresh-hooks: republishes an existing ZoneData.
 	Zones.Set(zd.ZoneName, zd)
 }

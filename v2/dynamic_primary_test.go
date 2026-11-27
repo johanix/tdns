@@ -369,7 +369,7 @@ func TestRemoveDynamicZone_RemovesTemplatePathZonefile(t *testing.T) {
 		Options: map[ZoneOption]bool{OptApiManagedZone: true}}
 	Zones.Set("del.example.", zd)
 
-	if _, err := conf.RemoveDynamicZone("del.example"); err != nil {
+	if _, err := conf.RemoveDynamicZone("del.example", false); err != nil {
 		t.Fatalf("delete failed: %v", err)
 	}
 	if _, err := os.Stat(zonefile); !os.IsNotExist(err) {
