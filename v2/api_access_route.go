@@ -172,7 +172,7 @@ func (conf *Config) accessInForceLine() string {
 	case st == nil:
 		return "In force: nothing (no management API policy)."
 	case st.Missing:
-		return fmt.Sprintf("No access file, so no remote clients. To take them:\n   touch %s", st.File)
+		return fmt.Sprintf("No access file, so no remote clients. To take them:\n   touch %s", shellWord(st.File))
 	case st.Error != "":
 		return "In force: none. The access file does not load, so the TCP\nAPI answers 503: " + st.Error
 	}

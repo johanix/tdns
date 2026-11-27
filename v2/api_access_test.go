@@ -3,6 +3,8 @@ package tdns
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -122,5 +124,30 @@ func TestCheckSpkiPinIsCanonical(t *testing.T) {
 		if err := checkSpkiPin(s); err == nil {
 			t.Errorf("%s variant %q accepted", name, s)
 		}
+	}
+}
+
+// A command printed for the operator runs as pasted: a path with a space in
+// it is quoted, in the touch line and in the chmod a refusal gives.
+func TestAccessHintsQuoteThePath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "my tdns")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "tdns-auth-access.yaml")
+	if msg := accessFileMissing(path); !strings.Contains(msg, "\n   touch '"+path+"'") {
+		t.Errorf("missing-file refusal:\n%s\nwant the path quoted in the touch line", msg)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckAccessFileMode(path); err == nil || !strings.Contains(err.Error(), "\n   chmod go-w '"+path+"'") {
+		t.Errorf("writable file: %v, want the path quoted in the chmod line", err)
+	}
+	if got := shellWord("it's"); got != `'it'\''s'` {
+		t.Errorf("shellWord(it's) = %s", got)
 	}
 }

@@ -1993,7 +1993,7 @@ func checkApiAccessFile(cfg *tdns.Config, rep *ccReport) {
 	af, err := tdns.LoadAccessFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		rep.info(g, "access-file", fmt.Sprintf("%s is missing, so the daemon takes no remote clients (the local socket works). To take them: touch %s", path, path))
+		rep.info(g, "access-file", fmt.Sprintf("%s is missing, so the daemon takes no remote clients (the local socket works). To take them: touch %s", path, shellQuote(path)))
 		return
 	case err != nil:
 		rep.fail(g, "access-file", err.Error(),

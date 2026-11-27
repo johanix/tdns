@@ -243,3 +243,13 @@ func TestConfigTreesCoverTheServedCommands(t *testing.T) {
 		}
 	}
 }
+
+// The touch line of a missing-file refusal quotes the path, so that it runs
+// as pasted (a path with a space in it).
+func TestAccessFileMissingQuotesThePath(t *testing.T) {
+	const path = "/etc/my tdns/tdns-auth-access.yaml"
+	msg := accessFileMissing(path, "tdns-auth", "tdns-ncli config add /etc/tdns/tdns-auth.yaml").Error()
+	if !strings.Contains(msg, "\n   touch '"+path+"'\nthen run this again:\n") {
+		t.Errorf("refusal:\n%s\nwant the path quoted in the touch line", msg)
+	}
+}

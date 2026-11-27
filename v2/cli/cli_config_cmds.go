@@ -624,8 +624,8 @@ func daemonReady(info *DaemonApi, list tdns.AccessResponse, tcpURL string, cert 
 // accessFileMissing is the refusal for a daemon without its access file:
 // the file, how to create it, and retry, the command to run again then.
 func accessFileMissing(path, daemon, retry string) error {
-	return fmt.Errorf("access file %s is missing, so\n%s takes no remote clients. Create it (empty is fine):\n   touch %s\nthen run this again:\n%s",
-		path, daemon, path, commandLines(retry, 3))
+	return fmt.Errorf("access file %s is missing, so\n%s takes no remote clients. Create it (empty is fine):\n%s\nthen run this again:\n%s",
+		path, daemon, commandLines("touch "+shellQuote(path), 3), commandLines(retry, 3))
 }
 
 // commandLines is cmd as printed for the operator to run, indented by

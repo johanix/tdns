@@ -172,7 +172,7 @@ func accessFileMissing(path string) string {
 		name = "the daemon"
 	}
 	return fmt.Sprintf("access file %s is missing, so\n%s takes no remote clients. Create it (empty is fine):\n   touch %s",
-		path, name, path)
+		path, name, shellWord(path))
 }
 
 // apiAuthMiddleware authenticates every request on the router it is installed
@@ -264,7 +264,7 @@ func (conf *Config) reloadApiAccess() string {
 	af, err := conf.loadAccessPolicy(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return fmt.Sprintf("\nNo access file, so no remote clients. To take them:\n   touch %s", path)
+		return fmt.Sprintf("\nNo access file, so no remote clients. To take them:\n   touch %s", shellWord(path))
 	case err != nil:
 		return fmt.Sprintf("\n%s (the running policy is unchanged):\n   %v", AccessFileNotReloaded, err)
 	}

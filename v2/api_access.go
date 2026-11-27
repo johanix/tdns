@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -208,12 +209,27 @@ func CheckAccessFileMode(path string) error {
 	me := os.Geteuid()
 	if uid != me && uid != 0 {
 		return fmt.Errorf("access file %s is owned by uid %d, not by\n%s, the daemon's user: whoever owns it can grant\nthemselves access. Fix:\n   chown %s %s",
-			path, uid, userName(me), userName(me), path)
+			path, uid, userName(me), shellWord(userName(me)), shellWord(path))
 	}
 	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
-		return fmt.Errorf("access file %s is writable by group or others\n(mode %04o): whoever can write it can grant themselves\naccess. Fix:\n   chmod go-w %s", path, perm, path)
+		return fmt.Errorf("access file %s is writable by group or others\n(mode %04o): whoever can write it can grant themselves\naccess. Fix:\n   chmod go-w %s", path, perm, shellWord(path))
 	}
 	return nil
+}
+
+// reShellWord matches a word a POSIX shell takes as it stands: no
+// expansion, no splitting, no operator.
+var reShellWord = regexp.MustCompile(`^[A-Za-z0-9_./:@%+=,-]+$`)
+
+// shellWord is s as one shell word, for a command printed for the operator
+// to run: as it stands when that is safe, single-quoted otherwise, so that
+// a path with a space in it runs as pasted. (The CLI's shellQuote is the
+// same rule.)
+func shellWord(s string) string {
+	if reShellWord.MatchString(s) {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // userName is uid's user name, or the number when it has none.
