@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -441,6 +444,58 @@ func TestTCPRefusalNamesTheAddress(t *testing.T) {
 	_, _, err = buildApiClient(ApiDetails{Name: "auth", Role: "auth", ConfigFile: cfg, BaseURL: "https://127.0.0.1:8989/api/v1"}, CliClientConf{}, "", "")
 	if !errors.As(err, &r) || strings.Contains(r.why, "is not one") {
 		t.Errorf("its own address: %+v (%v)", r, err)
+	}
+	// What ping says when the entry's address refuses the connection.
+	hp, addrs := addressNotListed(ApiDetails{Name: "imr", ConfigFile: cfg, BaseURL: "https://127.0.0.1:8075/api/v1"})
+	if hp != "127.0.0.1:8075" || len(addrs) != 1 || addrs[0] != "127.0.0.1:8989" {
+		t.Errorf("addressNotListed = %q, %q", hp, addrs)
+	}
+	if hp, _ := addressNotListed(ApiDetails{Name: "auth", ConfigFile: cfg, BaseURL: "https://127.0.0.1:8989/api/v1"}); hp != "" {
+		t.Errorf("its own address reported as not listed: %q", hp)
+	}
+}
+
+// An entry whose address is on this host but not one its daemon config
+// lists (a stale address) reaches the daemon over its local admin socket,
+// with a warning that gives the fix. One on another host does not.
+func TestStaleLocalAddressUsesTheSocket(t *testing.T) {
+	asNcli(t)
+	saved := ForceTCP
+	t.Cleanup(func() { ForceTCP = saved })
+	ForceTCP = false
+	dir := shortSockDir(t)
+	cfg, sock := filepath.Join(dir, "tdns-imr.yaml"), filepath.Join(dir, "i.sock")
+	writeFile(t, cfg, daemonYAML("", "127.0.0.1:8084", "   socket: "+sock+"\n"))
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(tdns.ConfigResponse{ConfigFile: cfg})
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+
+	got, note := usableDaemonSocket(ApiDetails{Name: "imr", Role: "imr", ConfigFile: cfg, BaseURL: "https://127.0.0.1:8075/api/v1"})
+	if got != sock || !strings.Contains(note, "127.0.0.1:8075 is not one") || !strings.Contains(note, "tdns-ncli config update imr --cert") {
+		t.Errorf("stale local address: %q, note %q", got, note)
+	}
+	if got, note := usableDaemonSocket(ApiDetails{Name: "imr", Role: "imr", ConfigFile: cfg, BaseURL: "https://127.0.0.1:8084/api/v1"}); got != sock || note != "" {
+		t.Errorf("its own address: %q, note %q", got, note)
+	}
+	if got, _ := usableDaemonSocket(ApiDetails{Name: "imr", Role: "imr", ConfigFile: cfg, BaseURL: "https://192.0.2.1:8084/api/v1"}); got != "" {
+		t.Errorf("another host's address used this host's socket %q", got)
+	}
+}
+
+func TestOnThisHost(t *testing.T) {
+	for hp, want := range map[string]bool{
+		"127.0.0.1:8075": true, "[::1]:8075": true, "localhost:8075": true,
+		"192.0.2.1:8075": false, "example.net:8075": false, "nonsense": false,
+	} {
+		if got := onThisHost(hp); got != want {
+			t.Errorf("onThisHost(%q) = %v", hp, got)
+		}
 	}
 }
 

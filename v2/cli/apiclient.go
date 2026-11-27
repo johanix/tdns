@@ -360,18 +360,30 @@ func socketCandidate(e ApiDetails) bool {
 // fix. It takes the daemon's own address and pins, and makes the client
 // certificate if there is none.
 func tcpRefusal(e ApiDetails, r clientRefusal) clientRefusal {
-	if !socketCandidate(e) || e.BaseURL == "" {
-		return r
-	}
-	sock, addrs := daemonSocket(e.ConfigFile)
-	hp := hostPort(e.BaseURL)
-	if sock == "" || len(addrs) == 0 || hp == "" || slices.Contains(addrs, hp) {
+	hp, addrs := addressNotListed(e)
+	if hp == "" {
 		return r
 	}
 	return clientRefusal{entry: e.Name,
 		why: fmt.Sprintf("its address %s is not one %s listens on (%s), so this host's admin socket is not used for it",
 			hp, e.ConfigFile, strings.Join(addrs, ", ")),
 		fix: updateFix(e, "--cert")}
+}
+
+// addressNotListed is e's TCP address and the addresses its daemon config
+// lists, when that config (on this host) does not list e's: the entry then
+// stays off this host's admin socket and dials an address the daemon may
+// not be on. "" and nil otherwise.
+func addressNotListed(e ApiDetails) (string, []string) {
+	if !socketCandidate(e) || e.BaseURL == "" {
+		return "", nil
+	}
+	sock, addrs := daemonSocket(e.ConfigFile)
+	hp := hostPort(e.BaseURL)
+	if sock == "" || len(addrs) == 0 || hp == "" || slices.Contains(addrs, hp) {
+		return "", nil
+	}
+	return hp, addrs
 }
 
 // clientRefusal is an entry tdns-ncli will not connect through: why, and the
@@ -455,14 +467,15 @@ var ForceTCP bool
 // is 0600 in a 0700 directory) and a running daemon; anything less leaves the
 // TCP address.
 //
-// Only when the entry's TCP address is one that daemon config lists, or the
-// entry has none: the same config-file: path exists on every host
-// (/etc/tdns/tdns-auth.yaml), so an entry for a daemon on another host would
-// otherwise reach the daemon on this one. And only when the daemon that
-// answers on the socket says it runs that config file: the path comes from
-// the config, but another daemon may hold it (one whose socket: names it),
-// and a command for one daemon must not run, as admin, on another. note says
-// why a socket that answered was not used.
+// Only when the entry's TCP address is one that daemon config lists, is on
+// this host (a stale address of this host's daemon: note then warns, with
+// the fix), or the entry has none: the same config-file: path exists on
+// every host (/etc/tdns/tdns-auth.yaml), so an entry for a daemon on another
+// host would otherwise reach the daemon on this one. And only when the
+// daemon that answers on the socket says it runs that config file: the path
+// comes from the config, but another daemon may hold it (one whose socket:
+// names it), and a command for one daemon must not run, as admin, on
+// another. Otherwise note says why a socket that answered was not used.
 func usableDaemonSocket(e ApiDetails) (sock, note string) {
 	if !socketCandidate(e) {
 		return "", ""
@@ -471,8 +484,18 @@ func usableDaemonSocket(e ApiDetails) (sock, note string) {
 	if sock == "" {
 		return "", ""
 	}
-	if e.BaseURL != "" && !slices.Contains(addrs, hostPort(e.BaseURL)) {
-		return "", ""
+	stale := ""
+	if hp := hostPort(e.BaseURL); e.BaseURL != "" && !slices.Contains(addrs, hp) {
+		// An address on another host: the same config path is on every
+		// host, so this host's daemon may not be the one meant. One on this
+		// host (loopback, or an address of its own) is a stale address of
+		// this host's daemon: the socket is the way to it, with a warning.
+		if !onThisHost(hp) {
+			return "", ""
+		}
+		lead := fmt.Sprintf("%s: its address %s is not one %s lists (%s), so the local admin socket is used. This fixes the entry:",
+			e.Name, hp, e.ConfigFile, strings.Join(addrs, ", "))
+		stale = strings.Join(wrapText(lead, 63), "\n") + "\n" + commandLines(updateFix(e, "--cert"), 3)
 	}
 	c, err := net.DialTimeout("unix", sock, time.Second)
 	if err != nil {
@@ -490,7 +513,36 @@ func usableDaemonSocket(e ApiDetails) (sock, note string) {
 	case resolvedPath(resp.ConfigFile) != resolvedPath(e.ConfigFile):
 		return "", fmt.Sprintf("%s: the daemon on %s runs %s, not %s; not using its socket", e.Name, sock, resp.ConfigFile, e.ConfigFile)
 	}
-	return sock, ""
+	return sock, stale
+}
+
+// onThisHost says whether the host of hp (host:port) is this host: localhost,
+// a loopback address, or an address of one of its interfaces.
+func onThisHost(hp string) bool {
+	host, _, err := net.SplitHostPort(hp)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // askIdentity asks the daemon on probe which config it runs. Quietly: it is

@@ -315,10 +315,15 @@ changed in the PR.
   daemon not running yet, or no client certificate) uses its daemon's local
   admin socket to see whether it runs. Not when the entry's TCP address is
   one its daemon config does not list: that may be another host's daemon.
-- **An entry whose TCP address its daemon config does not list** is kept
-  off this host's admin socket, as before. When its TCP path then refuses
-  (no pins, no client certificate), the refusal says that, with
-  `config update <entry> --cert` as the fix.
+- **An entry whose TCP address its daemon config does not list:** when
+  the address is on this host (loopback, or one of its own addresses), it
+  is a stale address of this host's daemon. The entry then uses the local
+  admin socket (the daemon there must still say it runs the entry's
+  `config-file:`), with a warning that gives `config update <entry>
+  --cert`. An address on another host keeps the entry off this host's
+  socket, as before. When its TCP path then refuses (no pins, no client
+  certificate), or `ping` finds nothing at the address, the error says the
+  address is not the daemon's, with the same fix.
 - **An entry without `config-file:`** gets a fix command with the daemon
   config it most likely is: the role's default for a role's entry
   (`/etc/tdns/tdns-auth.yaml`), else `/etc/tdns/tdns-<name>.yaml`.

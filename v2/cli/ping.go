@@ -44,6 +44,16 @@ func runPing(role string, cmd *cobra.Command, args []string) {
 	pr, err := api.SendPing(tdns.Globals.PingCount, false)
 	if err != nil {
 		if strings.Contains(err.Error(), "connection refused") {
+			// Refused at an address its daemon config does not list: the
+			// daemon may well run, elsewhere; say so, with the fix.
+			if e := apiDetailsForRole(role); e != nil {
+				if hp, addrs := addressNotListed(*e); hp != "" {
+					lead := fmt.Sprintf("Error: nothing answers at %s, the address of the entry %q; %s has the daemon on %s.",
+						hp, e.Name, e.ConfigFile, strings.Join(addrs, ", "))
+					fmt.Fprintf(os.Stderr, "%s\nFix:\n%s\n", strings.Join(wrapText(lead, 72), "\n"), commandLines(updateFix(*e, "--cert"), 3))
+					os.Exit(1)
+				}
+			}
 			fmt.Printf("Error: connection refused. Most likely the daemon is not running\n")
 			os.Exit(1)
 		} else {
