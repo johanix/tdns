@@ -80,15 +80,19 @@ func TestUpdatesSignUnderTheMaxServedCeiling(t *testing.T) {
 	})
 
 	// An RRset the zone already serves clamped: its own TTL is the one an
-	// update compares and replaces, not the TTL it is served at. Through the
+	// update compares and raises, not the TTL it is served at. Through the
 	// API, whose updates keep the TTL they carry (PreAuthorized).
 	t.Run("zone update of a clamped RRset", func(t *testing.T) {
 		zd, kdb := setup(t)
 		const fileDS = "child.cut.example. 3600 IN DS 12345 15 2 " +
 			"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
-		apply := func(rr string) bool {
+		atTTL := func(ttl string) string {
+			return "child.cut.example. " + ttl + " IN DS 12345 15 2 " +
+				"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+		}
+		apply := func(verb, rr string) bool {
 			t.Helper()
-			actions, err := BuildZoneUpdateActions(zd.ZoneName, ZoneUpdateSpec{Verb: VerbAddRR, RRs: []string{rr}})
+			actions, err := BuildZoneUpdateActions(zd.ZoneName, ZoneUpdateSpec{Verb: verb, RRs: []string{rr}})
 			if err != nil {
 				t.Fatalf("building the update of %s: %v", rr, err)
 			}
@@ -100,15 +104,26 @@ func TestUpdatesSignUnderTheMaxServedCeiling(t *testing.T) {
 			}
 			return updated
 		}
-		if apply(fileDS) {
+		if apply(VerbAddRR, fileDS) {
 			t.Error("re-adding the DS at the TTL it has changed the zone")
 		}
 		assertServedTTL(t, zd, "re-added at its TTL", "child.cut.example.", dns.TypeDS, 300)
-		if !apply("child.cut.example. 60 IN DS 12345 15 2 " +
-			"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20") {
-			t.Error("lowering the DS's TTL to 60 changed nothing")
+		// The largest TTL wins (#996): an add below the RRset's own TTL, if
+		// above the clamp, leaves it where it is.
+		if apply(VerbAddRR, atTTL("600")) {
+			t.Error("adding the DS at a lower TTL changed the zone")
 		}
-		assertServedTTL(t, zd, "lowered to 60", "child.cut.example.", dns.TypeDS, 60)
+		assertServedTTL(t, zd, "added at 600", "child.cut.example.", dns.TypeDS, 300)
+		// One above it raises the RRset's own TTL, still served at the clamp.
+		if !apply(VerbAddRR, atTTL("7200")) {
+			t.Error("raising the DS's TTL to 7200 changed nothing")
+		}
+		assertServedTTL(t, zd, "raised to 7200", "child.cut.example.", dns.TypeDS, 300)
+		// Lowering it takes a replacement.
+		if !apply(VerbReplaceRRset, atTTL("60")) {
+			t.Error("replacing the DS at TTL 60 changed nothing")
+		}
+		assertServedTTL(t, zd, "replaced at 60", "child.cut.example.", dns.TypeDS, 60)
 	})
 
 	// A child's DS replaced through the direct delegation backend, as a DSYNC
