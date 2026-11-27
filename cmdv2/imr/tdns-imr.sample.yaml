@@ -76,11 +76,14 @@ imrengine:
    # DNSSEC trust anchors, in any of the three forms below (they add up).
    #
    # If none is set, the daemon uses the IANA root anchor compiled into the
-   # binary (KSK-2017 20326 and KSK-2024 38696), but ONLY with the compiled-in
-   # root hints (root-hints unset) and the root neither forwarded nor a stub
-   # zone. With a root-hints file, a "zone: ." forward or a stub for "." the
-   # root may be a private one: the daemon then uses no anchor at all,
-   # validates nothing, and warns at start. Set the anchor for the root you use.
+   # binary (KSK-2017 20326 and KSK-2024 38696). With the compiled-in root
+   # hints (root-hints unset) and the root neither forwarded nor a stub zone it
+   # does so at once. With a root-hints file, a "zone: ." forward or a stub for
+   # "." the root may be a private one, so at start the daemon asks the root for
+   # its DNSKEY RRset and uses the compiled-in anchor only if the root serves a
+   # key that matches it and signs the set. A private root does not match: the
+   # daemon then uses no anchor at all, validates nothing, and warns. Set the
+   # anchor for the root you use.
    # Validation is on by default — require-dnssec-validation defaults to true.
    #
    # trust-anchor-ds and trust-anchor-dnskey take one record, or several, one
