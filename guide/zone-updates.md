@@ -533,6 +533,30 @@ actually changed.
 It means the deltas are in the database but *not* in what the
 zone is currently answering with.
 
+A secondary whose content came by transfer shows `transferred:
+serial N` in place of the `zone file` line, and the chain must
+start at that serial instead. When it does not, `will replay` says
+`NO`, and a full transfer discards the journal rather than refusing
+it: a full transfer does not keep a secondary's local changes, so
+what the journal recorded is gone with the content it was recorded
+against. At a restart that is the case when the upstream has moved
+on since the journal was recorded; a journal that still chains from
+the serial received is replayed. A full transfer while the server
+runs discards the whole journal, whatever it chains from: the zone
+no longer serves those changes, and a journal that stayed would
+bring them back at the next restart. After it the next local
+change is journalled from the serial received, publishing past it
+if the zone's own serial count is behind, and is still there after
+a restart with an upstream that has not moved. An applied IXFR is
+not a full transfer and leaves the journal alone. The discarded
+instructions go to `{zonefile}.{serial}.purged` when the zone has
+a file, and to the log when it has none. No warning is recorded,
+since nothing needs fixing. If the journal could not be discarded
+there is one, and the next discard that is done takes it away. An
+inline-signing secondary on tdns-auth is different: its own CDS,
+CDNSKEY and CSYNC are applied to every full transfer, and `status`
+says so.
+
 ### list
 
 The deltas and the records in them. `--instructions` prints the
