@@ -8,22 +8,18 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math/big"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/mux"
-	"gopkg.in/yaml.v3"
 )
 
 // testClientCert makes a self-signed client certificate and returns it with
@@ -60,23 +56,21 @@ type authEnv struct {
 	conf  *Config
 	rtr   *mux.Router
 	srv   *httptest.Server
-	key   string
 	sock  string
 	certs map[string]tls.Certificate
 }
 
-// newAuthEnv builds a router with the access file accessYAML (none if
-// accessYAML is "-"), serves it over TLS as the daemon would and on a socket,
-// and adds three test routes that echo who they were reached as.
+// newAuthEnv builds a router whose access file holds accessYAML (is not
+// there if accessYAML is "-"), serves it over TLS as the daemon would and on
+// a socket, and adds three test routes that echo who they were reached as.
 func newAuthEnv(t *testing.T, accessYAML string, certs map[string]tls.Certificate) *authEnv {
 	t.Helper()
 	dir := shortTempDir(t)
-	e := &authEnv{conf: &Config{}, key: "the-api-key", sock: filepath.Join(dir, "admin.sock"), certs: certs}
-	e.conf.ApiServer.ApiKey = SensitiveString(e.key)
+	e := &authEnv{conf: &Config{}, sock: filepath.Join(dir, "admin.sock"), certs: certs}
 	e.conf.ApiServer.Socket = e.sock
+	e.conf.ApiServer.AccessFile = filepath.Join(dir, "access.yaml")
 	e.conf.Internal.ServerErrors = NewServerErrorRegistry()
 	if accessYAML != "-" {
-		e.conf.ApiServer.AccessFile = filepath.Join(dir, "access.yaml")
 		if err := os.WriteFile(e.conf.ApiServer.AccessFile, []byte(accessYAML), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -96,7 +90,7 @@ func newAuthEnv(t *testing.T, accessYAML string, certs map[string]tls.Certificat
 	e.rtr = rtr
 
 	e.srv = httptest.NewUnstartedServer(rtr)
-	e.srv.TLS = apiServerTLSConfig(e.conf, e.conf.ApiServer.AccessFile != "")
+	e.srv.TLS = apiServerTLSConfig()
 	e.srv.StartTLS()
 	t.Cleanup(e.srv.Close)
 
@@ -109,8 +103,8 @@ func newAuthEnv(t *testing.T, accessYAML string, certs map[string]tls.Certificat
 }
 
 // call posts body to path over TCP, presenting the named client certificate
-// ("" for none) and the API key if sendKey.
-func (e *authEnv) call(t *testing.T, path, cert string, sendKey bool, body string) (int, string) {
+// ("" for none).
+func (e *authEnv) call(t *testing.T, path, cert string, body string) (int, string) {
 	t.Helper()
 	tc := &tls.Config{InsecureSkipVerify: true}
 	if cert != "" {
@@ -118,9 +112,6 @@ func (e *authEnv) call(t *testing.T, path, cert string, sendKey bool, body strin
 	}
 	cl := &http.Client{Transport: &http.Transport{TLSClientConfig: tc}}
 	req, _ := http.NewRequest(http.MethodPost, e.srv.URL+path, strings.NewReader(body))
-	if sendKey {
-		req.Header.Set("X-API-Key", e.key)
-	}
 	resp, err := cl.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +123,7 @@ func (e *authEnv) call(t *testing.T, path, cert string, sendKey bool, body strin
 
 func (e *authEnv) callSocket(t *testing.T, path, body string) (int, string) {
 	t.Helper()
-	status, b, err := NewClient("local", "unix://"+e.sock, "", "none", "").Post(strings.TrimPrefix(path, "/api/v1"), []byte(body))
+	status, b, err := NewClientWithOptions("local", "unix://"+e.sock, ClientOptions{}).Post(strings.TrimPrefix(path, "/api/v1"), []byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,14 +138,67 @@ func clientCerts(t *testing.T, names ...string) (map[string]tls.Certificate, map
 	return certs, pins
 }
 
-// Without an access file nothing changes: the key, as admin, over TCP.
+// Without an access file the daemon takes no TLS clients: every TCP
+// request is refused, saying which file to create and how. The socket is
+// admin. A missing file is a normal state, not a server error.
 func TestApiAuthWithoutAccessFile(t *testing.T) {
-	e := newAuthEnv(t, "-", nil)
-	if st, body := e.call(t, "/api/v1/t-admin", "", true, ""); st != 200 || !strings.Contains(body, "apikey (admin) by api key") {
-		t.Errorf("key without an access file: %d %q, want 200 as admin", st, body)
+	certs, _ := clientCerts(t, "anna")
+	e := newAuthEnv(t, "-", certs)
+	path := e.conf.ApiServer.AccessFile
+	st, body := e.call(t, "/api/v1/t-ro", "anna", "")
+	if st != 403 || !strings.Contains(body, "access file "+path+" is missing") || !strings.Contains(body, "   touch "+path) {
+		t.Errorf("TCP without an access file: %d %q, want 403 with the touch line", st, body)
 	}
-	if st, _ := e.call(t, "/api/v1/t-ro", "", false, ""); st != 403 {
-		t.Errorf("no key: %d, want 403", st)
+	if st, body := e.callSocket(t, "/api/v1/t-admin", ""); st != 200 || !strings.Contains(body, "on the local socket (admin)") {
+		t.Errorf("socket: %d %q, want 200 as admin", st, body)
+	}
+	if errs := e.conf.Internal.ServerErrors.List(); len(errs) != 0 {
+		t.Errorf("server errors = %+v, want none", errs)
+	}
+	if a := e.conf.apiAccessStatus(); a == nil || !a.Missing || a.File != path {
+		t.Errorf("config status access = %+v, want the file reported missing", a)
+	}
+}
+
+// touch is all it takes: an empty file is an empty policy, which the next
+// load (a reload, or any /access call) puts in force with no restart.
+func TestApiAuthTouchedAccessFile(t *testing.T) {
+	e := newAuthEnv(t, "-", nil)
+	path := e.conf.ApiServer.AccessFile
+	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "No access file") || !strings.Contains(msg, "touch "+path) {
+		t.Errorf("reload without the file: %q, want the touch line", msg)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "reloaded: 0 client(s)") {
+		t.Errorf("reload after touch: %q", msg)
+	}
+	if st, body := e.call(t, "/api/v1/t-ro", "", ""); st != 403 || !strings.Contains(body, "no client certificate") {
+		t.Errorf("no certificate after touch: %d %q, want 403 asking for one", st, body)
+	}
+}
+
+// Anyone who can write the access file can grant themselves access, so one
+// that group or others may write is refused, with the command that fixes it.
+func TestApiAuthAccessFileWritableByOthers(t *testing.T) {
+	e := newAuthEnv(t, "clients: []\n", nil)
+	path := e.conf.ApiServer.AccessFile
+	if err := os.Chmod(path, 0o664); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadAccessFile(path)
+	if err == nil || !strings.Contains(err.Error(), "writable by group or others") || !strings.Contains(err.Error(), "   chmod go-w "+path) {
+		t.Fatalf("a group-writable access file: %v, want refused with the chmod line", err)
+	}
+	e.conf.Internal.ApiAccess = &apiAccessHolder{}
+	e.conf.initApiAccess() // as a start-up
+	if st, _ := e.call(t, "/api/v1/t-ro", "", ""); st != 503 {
+		t.Errorf("TCP with a group-writable access file: %d, want 503", st)
+	}
+	os.Chmod(path, 0o644)
+	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "reloaded") {
+		t.Errorf("after chmod go-w: %q", msg)
 	}
 }
 
@@ -170,24 +214,19 @@ func TestApiAuthRoles(t *testing.T) {
 		name     string
 		path     string
 		cert     string
-		key      bool
 		want     int
 		wantBody string
 	}{
-		{"read-only client, read-only route", "/api/v1/t-ro", "anna", false, 200, "authenticated as anna (read-only) by certificate"},
-		{"read-only client, read-write route", "/api/v1/t-rw", "anna", false, 403, "needs read-write"},
-		{"read-write client, read-write route", "/api/v1/t-rw", "bob", false, 200, "authenticated as bob (read-write) by certificate"},
-		{"read-write client, admin route", "/api/v1/t-admin", "bob", false, 403, "local admin socket"},
-		{"disabled client", "/api/v1/t-ro", "carol", false, 403, ""},
-		// A certificate is the identity: an unknown one does not fall back
-		// to the key it was sent with.
-		{"unknown certificate with the key", "/api/v1/t-ro", "mallory", true, 403, ""},
-		{"key alone is read-write", "/api/v1/t-rw", "", true, 200, "apikey (read-write) by api key"},
-		{"key alone is not admin", "/api/v1/t-admin", "", true, 403, "local admin socket"},
-		{"nothing", "/api/v1/t-ro", "", false, 403, ""},
+		{"read-only client, read-only route", "/api/v1/t-ro", "anna", 200, "authenticated as anna (read-only) by certificate"},
+		{"read-only client, read-write route", "/api/v1/t-rw", "anna", 403, "needs read-write"},
+		{"read-write client, read-write route", "/api/v1/t-rw", "bob", 200, "authenticated as bob (read-write) by certificate"},
+		{"read-write client, admin route", "/api/v1/t-admin", "bob", 403, "local admin socket"},
+		{"disabled client", "/api/v1/t-ro", "carol", 403, "not an\nenabled client"},
+		{"unknown certificate", "/api/v1/t-ro", "mallory", 403, "not an\nenabled client"},
+		{"no certificate", "/api/v1/t-ro", "", 403, "no client certificate"},
 		// Real routes go through the same table.
-		{"config status is read-only", "/api/v1/config", "anna", false, 200, ""},
-		{"reload-tsig is admin", "/api/v1/config", "bob", false, 403, "local admin socket"},
+		{"config status is read-only", "/api/v1/config", "anna", 200, ""},
+		{"reload-tsig is admin", "/api/v1/config", "bob", 403, "local admin socket"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := ""
@@ -197,7 +236,7 @@ func TestApiAuthRoles(t *testing.T) {
 					body = `{"Command":"reload-tsig"}`
 				}
 			}
-			st, got := e.call(t, tc.path, tc.cert, tc.key, body)
+			st, got := e.call(t, tc.path, tc.cert, body)
 			if st != tc.want || !strings.Contains(got, tc.wantBody) {
 				t.Errorf("%s: %d %q, want %d containing %q", tc.path, st, got, tc.want, tc.wantBody)
 			}
@@ -210,22 +249,11 @@ func TestApiAuthRoles(t *testing.T) {
 	}
 }
 
-func TestApiAuthKeyOff(t *testing.T) {
-	certs, pins := clientCerts(t, "bob")
-	e := newAuthEnv(t, "keyauth: false\nclients:\n  - {name: bob, pin: "+pins["bob"]+", role: read-write}\n", certs)
-	if st, _ := e.call(t, "/api/v1/t-ro", "", true, ""); st != 403 {
-		t.Errorf("key with keyauth off: %d, want 403", st)
-	}
-	if st, _ := e.call(t, "/api/v1/t-rw", "bob", false, ""); st != 200 {
-		t.Errorf("certificate with keyauth off: %d, want 200", st)
-	}
-}
-
-// A file that cannot be used at start-up closes the TCP API rather than
-// falling back to the key; DNS and the socket are unaffected.
+// A file that cannot be used at start-up closes the TCP API; DNS and the
+// socket are unaffected.
 func TestApiAuthBrokenAccessFileAtStart(t *testing.T) {
 	e := newAuthEnv(t, "clients:\n  - {name: anna, pin: x, role: read-only}\n", nil)
-	if st, body := e.call(t, "/api/v1/t-ro", "", true, ""); st != 503 || !strings.Contains(body, "local socket") {
+	if st, body := e.call(t, "/api/v1/t-ro", "", ""); st != 503 || !strings.Contains(body, "local admin socket") {
 		t.Errorf("TCP with a broken access file: %d %q, want 503", st, body)
 	}
 	if st, _ := e.callSocket(t, "/api/v1/t-admin", ""); st != 200 {
@@ -255,7 +283,7 @@ func TestApiAccessReload(t *testing.T) {
 	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "reloaded: 1 client") {
 		t.Errorf("reload message = %q", msg)
 	}
-	if st, _ := e.call(t, "/api/v1/t-ro", "bob", false, ""); st != 403 {
+	if st, _ := e.call(t, "/api/v1/t-ro", "bob", ""); st != 403 {
 		t.Errorf("bob after being removed: %d, want 403", st)
 	}
 
@@ -264,17 +292,43 @@ func TestApiAccessReload(t *testing.T) {
 	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "NOT reloaded") {
 		t.Errorf("reload message = %q, want NOT reloaded", msg)
 	}
-	if st, _ := e.call(t, "/api/v1/t-ro", "anna", false, ""); st != 200 {
+	if st, _ := e.call(t, "/api/v1/t-ro", "anna", ""); st != 200 {
 		t.Errorf("anna after a refused reload: %d, want 200 (the old policy)", st)
 	}
 
-	// Taking the access file out of the config goes back to key-as-admin.
-	e.conf.ApiServer.AccessFile = ""
-	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "no longer configured") {
+	// Removing the file takes TLS access away.
+	os.Remove(e.conf.ApiServer.AccessFile)
+	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "No access file, so no TLS clients") {
 		t.Errorf("reload message = %q", msg)
 	}
-	if st, _ := e.call(t, "/api/v1/t-admin", "", true, ""); st != 200 {
-		t.Errorf("key after the access file is gone: %d, want 200", st)
+	if st, _ := e.call(t, "/api/v1/t-ro", "anna", ""); st != 403 {
+		t.Errorf("anna after the access file is gone: %d, want 403", st)
+	}
+	if errs := e.conf.Internal.ServerErrors.List(); len(errs) != 0 {
+		t.Errorf("server errors after the file went: %+v, want none (the refused reload's goes)", errs)
+	}
+}
+
+// An access file written before API keys went may say keyauth:. It loads
+// (the line is ignored), so the daemon's policy does not close over a line
+// that no longer means anything.
+func TestAccessFileObsoleteKeyauthLoads(t *testing.T) {
+	certs, pins := clientCerts(t, "bob")
+	e := newAuthEnv(t, "keyauth: false\nclients:\n  - {name: bob, pin: "+pins["bob"]+", role: read-write}\n", certs)
+	if st, body := e.call(t, "/api/v1/t-rw", "bob", ""); st != 200 {
+		t.Errorf("bob with an obsolete keyauth: line: %d %q, want 200", st, body)
+	}
+}
+
+// The TCP API is TLS 1.3 only: an older client is turned away at the
+// handshake.
+func TestTCPApiIsTLS13Only(t *testing.T) {
+	e := newAuthEnv(t, "clients: []\n", nil)
+	cl := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MaxVersion: tls.VersionTLS12}}}
+	resp, err := cl.Post(e.srv.URL+"/api/v1/ping", "application/json", nil)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("a TLS 1.2 client got HTTP %d, want the handshake refused", resp.StatusCode)
 	}
 }
 
@@ -287,13 +341,13 @@ func TestPeekCommandKeepsTheBody(t *testing.T) {
 	// No Command: the route's "" entry (read-write) applies. A command the
 	// route does not declare would need admin, by default deny.
 	small := `{"Pad":"` + strings.Repeat("x", 1000) + `"}`
-	if st, body := e.call(t, "/api/v1/t-rw", "bob", false, small); st != 200 || !strings.Contains(body, fmt.Sprintf("body %d bytes", len(small))) {
+	if st, body := e.call(t, "/api/v1/t-rw", "bob", small); st != 200 || !strings.Contains(body, fmt.Sprintf("body %d bytes", len(small))) {
 		t.Errorf("small body: %d %q, want all %d bytes passed on", st, body, len(small))
 	}
 
 	// A large write (over the old 1 MiB cap) is judged like any other.
 	large := `{"Pad":"` + strings.Repeat("x", 2<<20) + `"}`
-	if st, body := e.call(t, "/api/v1/t-rw", "bob", false, large); st != 200 || !strings.Contains(body, fmt.Sprintf("body %d bytes", len(large))) {
+	if st, body := e.call(t, "/api/v1/t-rw", "bob", large); st != 200 || !strings.Contains(body, fmt.Sprintf("body %d bytes", len(large))) {
 		t.Errorf("2 MiB body as read-write: %d %.80q, want all %d bytes passed on", st, body, len(large))
 	}
 
@@ -303,7 +357,7 @@ func TestPeekCommandKeepsTheBody(t *testing.T) {
 	t.Cleanup(func() { maxPeekBody = saved })
 	maxPeekBody = 4096
 	big := `{"Pad":"` + strings.Repeat("x", maxPeekBody) + `"}`
-	if st, body := e.call(t, "/api/v1/t-rw", "bob", false, big); st != http.StatusRequestEntityTooLarge || !strings.Contains(body, "local admin socket") {
+	if st, body := e.call(t, "/api/v1/t-rw", "bob", big); st != http.StatusRequestEntityTooLarge || !strings.Contains(body, "local admin socket") {
 		t.Errorf("oversized body as read-write: %d %q, want 413 naming the socket", st, body)
 	}
 	if st, body := e.callSocket(t, "/api/v1/t-rw", big); st != 200 || !strings.Contains(body, fmt.Sprintf("body %d bytes", len(big))) {
@@ -353,265 +407,11 @@ func TestPeekCommandMalformedBody(t *testing.T) {
 	}
 }
 
-// With an access file in force, a request over TLS older than 1.3 is
-// refused, whatever the listener let through: a reload can add the access
-// file to a listener started without the TLS 1.3 minimum.
-func TestAccessFileRequiresTLS13(t *testing.T) {
-	af, err := ParseAccessFile([]byte("clients: []\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	conf := &Config{}
-	conf.Internal.ApiAccess = &apiAccessHolder{}
-	conf.Internal.ApiAccess.p.Store(newAccessState("/etc/tdns/access.yaml", af))
-	for _, tc := range []struct {
-		name string
-		tls  *tls.ConnectionState
-		want int
-	}{
-		{"TLS 1.2", &tls.ConnectionState{Version: tls.VersionTLS12}, http.StatusForbidden},
-		{"TLS 1.3", &tls.ConnectionState{Version: tls.VersionTLS13}, 0},
-		{"no TLS", nil, http.StatusForbidden},
-	} {
-		r := httptest.NewRequest(http.MethodPost, "/api/v1/ping", nil)
-		r.TLS = tc.tls
-		r.Header.Set("X-API-Key", "the-key")
-		_, status, msg := conf.authenticateApiRequest(r, "the-key")
-		if status != tc.want {
-			t.Errorf("%s: status %d (%s), want %d", tc.name, status, msg, tc.want)
-		}
-	}
-}
-
-// A listener started plaintext with no access file (usetls: false then), and
-// a reload that adds an access file (and usetls: true, which the running
-// listener cannot take up): the reload closes that listener before the policy
-// is in force, so no client can send its key to it in clear any more; refusing
-// the requests would still have had the key sent. config status says so. A
-// TLS listener is left alone.
-func TestReloadedAccessFileStopsAPlaintextListener(t *testing.T) {
-	t.Cleanup(func() {
-		apiTCPServers.Lock()
-		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped, apiTCPServers.stoppedBy = nil, false, nil, ""
-		apiTCPServers.Unlock()
-	})
-	conf := &Config{}
-	conf.Internal.ApiAccess = &apiAccessHolder{}
-	conf.Internal.ApiAccess.p.Store(&accessState{}) // no access file at start
-	conf.Internal.ServerErrors = NewServerErrorRegistry()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := &http.Server{Addr: ln.Addr().String(), Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, status, msg := conf.authenticateApiRequest(r, "the-key"); status != 0 {
-			http.Error(w, msg, status)
-		}
-	})}
-	go srv.Serve(ln)
-	registerApiTCPServers([]apiTCPServer{{srv: srv, ln: ln}}, true)
-	client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
-	call := func() (int, error) {
-		req, _ := http.NewRequest(http.MethodPost, "http://"+srv.Addr+"/api/v1/ping", nil)
-		req.Header.Set("X-API-Key", "the-key")
-		resp, err := client.Do(req)
-		if err != nil {
-			return 0, err
-		}
-		resp.Body.Close()
-		return resp.StatusCode, nil
-	}
-	if st, err := call(); err != nil || st != http.StatusOK {
-		t.Fatalf("plaintext key request before the access file: %d, %v", st, err)
-	}
-
-	path := filepath.Join(t.TempDir(), "access.yaml")
-	if err := os.WriteFile(path, []byte("clients: []\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	conf.ApiServer.AccessFile = path
-	conf.ApiServer.UseTLS = true // the new config says TLS; the listener does not
-	msg := conf.reloadApiAccess()
-	if !strings.Contains(msg, "Access file reloaded") || !strings.Contains(msg, "STOPPED") || !strings.Contains(msg, srv.Addr) {
-		t.Fatalf("reload: %q, want it to say the plaintext listener is stopped", msg)
-	}
-	if st, err := call(); err == nil {
-		t.Errorf("the plaintext listener still answered after the reload (%d): the key was sent in clear", st)
-	}
-	if got := stoppedPlaintextApiListeners(); len(got) != 1 || got[0] != srv.Addr {
-		t.Errorf("stopped listeners = %v, want [%s]", got, srv.Addr)
-	}
-
-	// A TLS listener is not touched by an access file coming into force.
-	tlsSrv := &http.Server{Addr: "127.0.0.1:1"}
-	registerApiTCPServers([]apiTCPServer{{srv: tlsSrv}}, false)
-	if addrs := stopPlaintextApiListeners(); addrs != nil {
-		t.Errorf("TLS listeners stopped: %v", addrs)
-	}
-}
-
-// Removing the access file again does not reopen the plaintext listener it
-// closed: the reload that removes it says the listener stays stopped until a
-// restart, and config status (here over the socket, as tdns-cli asks) still
-// reports it, now with no access policy beside it.
-func TestStoppedListenerOutlivesTheAccessFile(t *testing.T) {
-	t.Cleanup(func() {
-		apiTCPServers.Lock()
-		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped, apiTCPServers.stoppedBy = nil, false, nil, ""
-		apiTCPServers.Unlock()
-	})
-	e := newAuthEnv(t, "-", nil)
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := &http.Server{Addr: ln.Addr().String(), Handler: e.rtr}
-	go srv.Serve(ln)
-	registerApiTCPServers([]apiTCPServer{{srv: srv, ln: ln}}, true)
-	status := func(when string) *ConfigResponse {
-		t.Helper()
-		st, body := e.callSocket(t, "/api/v1/config", `{"Command":"status"}`)
-		var cr ConfigResponse
-		if err := json.Unmarshal([]byte(body), &cr); st != http.StatusOK || err != nil {
-			t.Fatalf("%s: config status: %d %v %q", when, st, err, body)
-		}
-		return &cr
-	}
-
-	if cr := status("before the access file"); !slices.Equal(cr.ApiTCPListening, []string{srv.Addr}) || len(cr.ApiTCPStopped) != 0 {
-		t.Errorf("before the access file: status listening %v, stopped %v; want [%s] and none", cr.ApiTCPListening, cr.ApiTCPStopped, srv.Addr)
-	}
-
-	path := filepath.Join(t.TempDir(), "access.yaml")
-	if err := os.WriteFile(path, []byte("clients: []\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	e.conf.ApiServer.AccessFile = path
-	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "STOPPED") || !strings.Contains(msg, srv.Addr) {
-		t.Fatalf("reload with the access file: %q, want %s stopped", msg, srv.Addr)
-	}
-	if cr := status("access file in force"); cr.Access == nil || !slices.Equal(cr.ApiTCPStopped, []string{srv.Addr}) || cr.ApiTCPStoppedBy != path {
-		t.Errorf("access file in force: status access %+v, stopped %v by %q; want a policy and [%s] by %s", cr.Access, cr.ApiTCPStopped, cr.ApiTCPStoppedBy, srv.Addr, path)
-	} else if len(cr.ApiTCPListening) != 0 {
-		t.Errorf("access file in force: status listening %v, want none (it was stopped)", cr.ApiTCPListening)
-	}
-
-	e.conf.ApiServer.AccessFile = ""
-	msg := e.conf.reloadApiAccess()
-	if !strings.Contains(msg, "no longer configured") || !strings.Contains(msg, srv.Addr) ||
-		!strings.Contains(msg, "stay stopped until the daemon restarts") {
-		t.Errorf("reload without the access file: %q, want it to say %s stays stopped until a restart", msg, srv.Addr)
-	}
-	if cr := status("access file removed"); cr.Access != nil || !slices.Equal(cr.ApiTCPStopped, []string{srv.Addr}) || cr.ApiTCPStoppedBy != path {
-		t.Errorf("access file removed: status access %+v, stopped %v by %q; want no policy and [%s] by %s", cr.Access, cr.ApiTCPStopped, cr.ApiTCPStoppedBy, srv.Addr, path)
-	}
-	if listening(srv.Addr) {
-		t.Errorf("the plaintext listener on %s answers again after the access file was removed", srv.Addr)
-	}
-
-	// With nothing stopped, removing the file says nothing about listeners.
-	apiTCPServers.Lock()
-	apiTCPServers.stopped = nil
-	apiTCPServers.Unlock()
-	e.conf.ApiServer.AccessFile = path
-	e.conf.reloadApiAccess()
-	e.conf.ApiServer.AccessFile = ""
-	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "no longer configured") || strings.Contains(msg, "STOPPED") {
-		t.Errorf("reload without the access file, nothing stopped: %q", msg)
-	}
-}
-
-// A listener started without an access file, which a reload then adds: from
-// the reload on, a client that cannot do TLS 1.3 fails the handshake itself,
-// before it can send a request. A TLS 1.3 client still gets through.
-func TestReloadedAccessFileRequiresTLS13AtTheHandshake(t *testing.T) {
-	conf := &Config{}
-	conf.Internal.ApiAccess = &apiAccessHolder{} // no access file at start
-	conf.Internal.ServerErrors = NewServerErrorRegistry()
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	srv.TLS = apiServerTLSConfig(conf, conf.ApiServer.AccessFile != "")
-	srv.StartTLS()
-	defer srv.Close()
-
-	handshake := func(maxVersion uint16) error {
-		c, err := tls.Dial("tcp", srv.Listener.Addr().String(),
-			&tls.Config{InsecureSkipVerify: true, MaxVersion: maxVersion})
-		if err != nil {
-			return err
-		}
-		defer c.Close()
-		return c.Handshake()
-	}
-	if err := handshake(tls.VersionTLS12); err != nil {
-		t.Fatalf("TLS 1.2 before any access file: %v", err)
-	}
-
-	path := filepath.Join(t.TempDir(), "access.yaml")
-	if err := os.WriteFile(path, []byte("clients: []\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	conf.ApiServer.AccessFile = path
-	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "Access file reloaded") {
-		t.Fatalf("reload: %q", msg)
-	}
-	// Refused the way a listener started with the access file refuses it:
-	// protocol_version, not internal_error.
-	if err := handshake(tls.VersionTLS12); err == nil || !strings.Contains(err.Error(), "protocol version") {
-		t.Errorf("TLS 1.2 handshake after a reload added the access file: %v, want a protocol version alert", err)
-	}
-	if err := handshake(tls.VersionTLS13); err != nil {
-		t.Errorf("TLS 1.3 after the reload: %v", err)
-	}
-}
-
-// A reload decodes the file into the running Config, and mapstructure keeps a
-// key the new file leaves out. apiserver: is reset before the decode, so
-// taking the access-file: line out takes the access file out (rig F5): the
-// reload says so and the policy goes back to key-as-admin.
-func TestReloadForgetsARemovedAccessFile(t *testing.T) {
-	access := filepath.Join(t.TempDir(), "access.yaml")
-	if err := os.WriteFile(access, []byte("clients: []\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	conf := &Config{}
-	conf.Internal.ApiAccess = &apiAccessHolder{}
-	conf.Internal.ServerErrors = NewServerErrorRegistry()
-	decode := func(doc string) {
-		t.Helper()
-		var raw map[string]interface{}
-		if err := yaml.Unmarshal([]byte(doc), &raw); err != nil {
-			t.Fatal(err)
-		}
-		if err := decodeConfigMap(raw, conf, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	decode("apiserver:\n   apikey: k\n   socket: /var/run/tdns/tdns-auth.sock\n   access-file: " + access + "\n")
-	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "Access file reloaded") {
-		t.Fatalf("first reload: %q", msg)
-	}
-
-	decode("apiserver:\n   apikey: k\n") // access-file: and socket: taken out
-	if conf.ApiServer.AccessFile != "" || conf.ApiServer.Socket != "" {
-		t.Errorf("after the reload: access-file %q, socket %q; want both gone", conf.ApiServer.AccessFile, conf.ApiServer.Socket)
-	}
-	if !conf.ApiServer.UseTLS {
-		t.Error("the usetls default was lost in the reset")
-	}
-	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "no longer configured") {
-		t.Errorf("reload without access-file: %q, want it to say the access file is gone", msg)
-	}
-	if st := conf.Internal.ApiAccess.load(); st == nil || st.Enabled {
-		t.Errorf("running policy after the reload: %+v, want no access file", st)
-	}
-}
-
 // A refused full reload puts the running apiserver: block back. The decode
 // resets the block first, so a refused file without an access-file: line
-// would otherwise leave AccessFile empty, and the next SIGHUP (which reloads
-// the access file from conf.ApiServer.AccessFile) would drop the policy and
-// make the key admin again, from a config that was refused.
+// would otherwise leave AccessFile at another path, and the next SIGHUP
+// (which reloads the access file from conf.ApiServer.AccessFile) would load
+// another policy, from a config that was refused.
 func TestARefusedReloadKeepsTheAccessFile(t *testing.T) {
 	keepLiveConfig(t)
 	access := filepath.Join(t.TempDir(), "access.yaml")
@@ -622,7 +422,7 @@ func TestARefusedReloadKeepsTheAccessFile(t *testing.T) {
 	conf.Internal.KeyDB = newTestKeyDB(t)
 	conf.Internal.ApiAccess = &apiAccessHolder{}
 	conf.Internal.ServerErrors = NewServerErrorRegistry()
-	conf.ApiServer = ApiServerConf{ApiKey: "k", Socket: "/var/run/tdns/tdns-auth.sock", AccessFile: access, UseTLS: true}
+	conf.ApiServer = ApiServerConf{Socket: "/var/run/tdns/tdns-auth.sock", AccessFile: access}
 	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "Access file reloaded") {
 		t.Fatalf("access file at start: %q", msg)
 	}
@@ -630,7 +430,7 @@ func TestARefusedReloadKeepsTheAccessFile(t *testing.T) {
 	// No access-file: line, and a debug address that is refused (it must be
 	// loopback) after the decode.
 	conf.Internal.CfgFile = writeCfg(t, `apiserver:
-   apikey: k
+   socket: /var/run/tdns/tdns-auth.sock
 listeners:
    imr-debug-address: "192.0.2.1:5353"
 `)
@@ -644,7 +444,7 @@ listeners:
 	if msg := conf.reloadApiAccess(); !strings.Contains(msg, "Access file reloaded") {
 		t.Errorf("SIGHUP after the refused reload: %q, want the access file still in force", msg)
 	}
-	if st := conf.Internal.ApiAccess.load(); st == nil || !st.Enabled {
+	if st := conf.Internal.ApiAccess.load(); st == nil || st.Missing || st.Err != nil {
 		t.Errorf("running policy after the refused reload and a SIGHUP: %+v", st)
 	}
 }
@@ -658,15 +458,13 @@ func TestApiListenerReloadNote(t *testing.T) {
 	conf := &Config{}
 	conf.ApiServer.Addresses = []string{"127.0.0.1:8989"}
 	conf.ApiServer.Socket = "/var/run/tdns/tdns-auth.sock"
-	conf.ApiServer.UseTLS = true
 	apiListenersStarted.Store(listenerSettingsOf(conf.ApiServer))
 	if note := conf.apiListenerReloadNote(); note != "" {
 		t.Errorf("nothing changed, note = %q", note)
 	}
 	conf.ApiServer.Socket = "/var/run/tdns/other.sock"
-	conf.ApiServer.UseTLS = false
 	note := conf.apiListenerReloadNote()
-	for _, want := range []string{"NOT applied", "apiserver.socket", "apiserver.usetls", "restart"} {
+	for _, want := range []string{"NOT applied", "apiserver.socket", "restart"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("note %q does not say %q", note, want)
 		}
@@ -674,20 +472,12 @@ func TestApiListenerReloadNote(t *testing.T) {
 	if strings.Contains(note, "apiserver.addresses") {
 		t.Errorf("note %q names addresses, which did not change", note)
 	}
-
-	// Started with an access file: the listeners are TLS 1.3 only until a
-	// restart, so a reload that takes the access file out says so. Adding
-	// one needs no note: the handshake check applies it at once.
+	// A changed access file needs no restart: the reload loads it.
 	conf.ApiServer.AccessFile = "/etc/tdns/access.yaml"
 	apiListenersStarted.Store(listenerSettingsOf(conf.ApiServer))
-	conf.ApiServer.AccessFile = ""
-	if note := conf.apiListenerReloadNote(); !strings.Contains(note, "access-file") || !strings.Contains(note, "TLS 1.3") {
-		t.Errorf("access file removed: note %q, want it to say the listeners stay TLS 1.3 only", note)
-	}
-	apiListenersStarted.Store(listenerSettingsOf(conf.ApiServer))
-	conf.ApiServer.AccessFile = "/etc/tdns/access.yaml"
+	conf.ApiServer.AccessFile = "/etc/tdns/other-access.yaml"
 	if note := conf.apiListenerReloadNote(); note != "" {
-		t.Errorf("access file added: note %q, want none", note)
+		t.Errorf("access file moved: note %q, want none", note)
 	}
 }
 
@@ -703,7 +493,7 @@ func TestRequestForAnotherConfigIsRefused(t *testing.T) {
 	}
 	e.conf.Internal.CfgFile = cfg
 	post := func(expect string) (int, string) {
-		c := NewClientWithOptions("local", "unix://"+e.sock, ClientOptions{AuthMethod: "none", ExpectConfigFile: expect})
+		c := NewClientWithOptions("local", "unix://"+e.sock, ClientOptions{ExpectConfigFile: expect})
 		status, b, err := c.Post("/t-admin", nil)
 		if err != nil && status == 0 {
 			t.Fatal(err)
@@ -736,77 +526,27 @@ func TestRequestForAnotherConfigIsRefused(t *testing.T) {
 	}
 }
 
-// A reload that finds the access file the config names not there yet (the
-// first enrolment) says the first client add creates it, in lines of at
-// most 72 apart from the path's; the running policy is unchanged.
-func TestReloadAccessFileNotThereYet(t *testing.T) {
-	e := newAuthEnv(t, "clients: []\n", nil)
+// Every TCP request checks the access file: one removed, created or
+// rewritten is in force at the next request, with no reload and no client
+// command.
+func TestApiAuthSeesTheFileChange(t *testing.T) {
+	certs, pins := clientCerts(t, "anna", "bob")
+	e := newAuthEnv(t, "clients:\n  - {name: anna, pin: "+pins["anna"]+", role: read-only}\n", certs)
 	path := e.conf.ApiServer.AccessFile
+	if st, _ := e.call(t, "/api/v1/t-ro", "anna", ""); st != 200 {
+		t.Fatalf("anna at start: %d", st)
+	}
 	os.Remove(path)
-	msg := e.conf.reloadApiAccess()
-	if !strings.Contains(msg, "\nAccess file not there yet (the running policy is unchanged):\n   "+path+"\nThe first client add (or config add) creates it.") {
-		t.Errorf("reload message = %q", msg)
+	if st, body := e.call(t, "/api/v1/t-ro", "anna", ""); st != 403 || !strings.Contains(body, "is missing") {
+		t.Errorf("anna once the file is gone: %d %q, want 403 with the touch line", st, body)
 	}
-	for _, l := range strings.Split(msg, "\n") {
-		if len(l) > 72 && !strings.Contains(l, path) {
-			t.Errorf("line over 72 columns: %q", l)
-		}
+	if err := os.WriteFile(path, []byte("clients:\n  - {name: bob, pin: "+pins["bob"]+", role: read-only}\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if st := e.conf.apiAccessStatus(); st == nil || st.File != path {
-		t.Errorf("running policy after the reload: %+v, want the one before", st)
+	if st, body := e.call(t, "/api/v1/t-ro", "bob", ""); st != 200 {
+		t.Errorf("bob once the file names him: %d %q, want 200", st, body)
 	}
-	// Nothing is wrong: config status shows no access-file error.
-	if errs := e.conf.Internal.ServerErrors.List(); len(errs) != 0 {
-		t.Errorf("server errors after the reload: %+v, want none", errs)
+	if st, _ := e.call(t, "/api/v1/t-ro", "anna", ""); st != 403 {
+		t.Errorf("anna, whom the new file does not name: %d, want 403", st)
 	}
-	// A file that is there but does not load is an error, as before.
-	os.WriteFile(path, []byte("clients: [\n"), 0o600)
-	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, AccessFileNotReloaded) || len(e.conf.Internal.ServerErrors.List()) != 1 {
-		t.Errorf("a file that does not parse: %q, %+v; want NOT reloaded and one error", msg, e.conf.Internal.ServerErrors.List())
-	}
-	// That file removed: the error it left goes; the policy running
-	// (loaded at start) is unchanged.
-	os.Remove(path)
-	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "(the running policy is unchanged)") || len(e.conf.Internal.ServerErrors.List()) != 0 {
-		t.Errorf("the broken file removed: %q, %+v; want no error left", msg, e.conf.Internal.ServerErrors.List())
-	}
-	if st, _ := e.call(t, "/api/v1/t-ro", "", true, ""); st != 200 {
-		t.Errorf("the key after those reloads: %d, want 200 (the policy loaded at start)", st)
-	}
-}
-
-// Start-up with the access file the config names not there: fail closed, as
-// for a broken one (503 on TCP, the error recorded). A reload while it is
-// still not there says so and keeps the error; the first client add creates
-// the file and ends both.
-func TestStartupAccessFileNotThere(t *testing.T) {
-	_, pins := clientCerts(t, "anna")
-	e := newAuthEnv(t, "clients: []\n", nil)
-	path := e.conf.ApiServer.AccessFile
-	os.Remove(path)
-	e.conf.initApiAccess() // as a start-up with the file not there
-	check := func(when string, wantStatus, wantErrs int) {
-		t.Helper()
-		if st, body := e.call(t, "/api/v1/t-ro", "", true, ""); st != wantStatus {
-			t.Errorf("%s: TCP %d %q, want %d", when, st, body, wantStatus)
-		}
-		if errs := e.conf.Internal.ServerErrors.List(); len(errs) != wantErrs {
-			t.Errorf("%s: server errors %+v, want %d", when, errs, wantErrs)
-		}
-	}
-	check("at start-up", 503, 1)
-	msg := e.conf.reloadApiAccess()
-	if !strings.Contains(msg, "\nAccess file not there yet:\n   "+path+"\nThe TCP API still answers 503 (since start-up) until it is:\n") {
-		t.Errorf("reload message = %q", msg)
-	}
-	for _, l := range strings.Split(msg, "\n") {
-		if len(l) > 72 && !strings.Contains(l, path) {
-			t.Errorf("line over 72 columns: %q", l)
-		}
-	}
-	check("after a reload, still not there", 503, 1)
-	if resp := e.accessCall(t, AccessPost{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-write"}); resp.Error || resp.File != path {
-		t.Fatalf("the first client add: %+v, want the file written and in force", resp)
-	}
-	check("after the first client add", 200, 0)
 }

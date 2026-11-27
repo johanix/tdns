@@ -24,12 +24,11 @@ import (
 
 // AccessPost is an /access request.
 type AccessPost struct {
-	Command string // list | add | disable | enable | set-role | keyauth
+	Command string // list | add | disable | enable | set-role
 	Name    string // the client (add, disable, enable, set-role)
 	Pin     string // add
 	Role    string // add, set-role: read-only or read-write
 	Comment string // add
-	KeyAuth string // keyauth: "on" or "off"
 	DryRun  bool   // validate and render; write nothing
 }
 
@@ -39,12 +38,11 @@ type AccessResponse struct {
 	Msg      string
 	Error    bool
 	ErrorMsg string
-	File     string // the access file in force; "" when none
-	// Configured is the access file the running config names, in force or
-	// not: a reload that cannot load it keeps the path, and /access add
-	// creates it there. "" when the config names none.
-	Configured string
-	KeyAuth    bool
+	// File is the daemon's access file, there or not (Missing).
+	File string
+	// Missing: there is no access file, so the daemon takes no TLS
+	// clients. The operator creates it (touch); the daemon never does.
+	Missing    bool `json:",omitempty"`
 	Clients    []ApiAccessStatusClient
 	ServerPins []string // SPKI pins of the certificate the TCP API serves
 	ConfigFile string   // the config file this daemon runs, absolute
@@ -69,10 +67,13 @@ func APIaccess(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// runAccessCommand runs one /access command. A write reads the file the
-// running config names, applies the change, validates it with the daemon's
-// own validator, writes it atomically (keeping .prev) and loads it as a
-// reload would. A refused change writes nothing.
+// runAccessCommand runs one /access command. Every command first loads the
+// access file into force, so a file created or edited by hand since the
+// last load counts, with no reload. A write then applies the change,
+// validates it with the daemon's own validator, writes it atomically
+// (keeping .prev) and loads it. The daemon never creates the file: with no
+// file every write is refused, saying how to create it. A refused change
+// writes nothing.
 func (conf *Config) runAccessCommand(ap AccessPost) (resp AccessResponse) {
 	// confMu: the running config's apiserver: block, which a reload replaces
 	// (and then takes accessMu in reloadApiAccess: the same order).
@@ -87,45 +88,46 @@ func (conf *Config) runAccessCommand(ap AccessPost) (resp AccessResponse) {
 
 	ap.Command = strings.ToLower(strings.TrimSpace(ap.Command))
 	switch ap.Command {
-	case "list", "add", "disable", "enable", "set-role", "keyauth":
+	case "list", "add", "disable", "enable", "set-role":
+	case "keyauth":
+		return refuse("keyauth is gone: there is no API key any more, and the\nTCP API takes client certificates only")
 	default:
 		return refuse("unknown /access command %q", ap.Command)
 	}
 	path := conf.ApiServer.AccessFile
-	if path == "" {
-		advice := noAccessFileAdvice(conf.Internal.CfgFile)
-		if ap.Command == "list" {
-			return AccessResponse{Msg: "No access file: the API key is admin on the TCP API.\n\n" + advice}
-		}
-		return refuse("%s", advice)
+	switch {
+	case path == "":
+		return refuse("this daemon runs no config file, so it has no access file")
+	case conf.Internal.ApiAccess == nil:
+		return refuse("this daemon has no management API policy to load an access file into")
 	}
-	if ap.Command == "list" {
+	_, lerr := conf.loadAccessPolicy(path)
+	missing := errors.Is(lerr, fs.ErrNotExist)
+	switch {
+	case ap.Command == "list" && (missing || lerr == nil):
 		return AccessResponse{Msg: conf.accessInForceLine()}
+	case ap.Command == "list":
+		return AccessResponse{Msg: fmt.Sprintf("%s\nThe access file does not load (the policy above is unchanged):\n   %v", conf.accessInForceLine(), lerr)}
+	case missing:
+		if derr := danglingSymlink(path); derr != nil {
+			return refuse("%v", derr)
+		}
+		return refuse("%s", accessFileMissing(path))
 	}
 
-	create := ap.Command == "add" || ap.Command == "keyauth"
-	af, old, err := readAccessFileForEdit(path, create)
+	af, old, err := readAccessFileForEdit(path)
 	if err != nil {
 		return refuse("%v", err)
-	}
-	// A missing file while a policy loaded from a file is in force: a new
-	// file would hold only this change, and the clients in force (and a
-	// keyauth off) would go. A new file is made when that loses nothing:
-	// the first enrolment (no policy in force), a start-up whose file could
-	// not be used, or a policy with no clients and keyauth on.
-	if st := conf.Internal.ApiAccess.load(); old == nil && st != nil && st.Enabled && st.Err == nil && (len(st.Clients) > 0 || !st.KeyAuth) {
-		return refuse("the access file is not there:\n   %s\nbut the policy loaded from\n   %s\nis in force (%d client(s), keyauth %s). A new file would\nhold only this change: put that file back (a .prev next to\nit is the one before the last write), then run this again",
-			path, st.File, len(st.Clients), onOff(st.KeyAuth))
 	}
 	msg, changed, err := applyAccessChange(af, ap)
 	if err != nil {
 		return refuse("%v", err)
 	}
 	done := path + " written"
-	// A missing file (old nil) is written even when the policy it would
-	// hold is the empty one (keyauth on, no clients): a file the config
-	// names but that is not there cannot be loaded.
-	if changed || old == nil {
+	// A file that still has the obsolete keyauth: line is written even with
+	// no other change, so the line goes.
+	if changed || af.KeyAuth != nil {
+		af.KeyAuth = nil
 		if err := ValidateAccessFile(af); err != nil {
 			return refuse("not writing %s: %v", path, err)
 		}
@@ -142,58 +144,39 @@ func (conf *Config) runAccessCommand(ap AccessPost) (resp AccessResponse) {
 	} else if ap.DryRun {
 		return AccessResponse{Msg: msg}
 	} else {
-		// Loaded all the same: a hand edit not yet reloaded, or a write
-		// whose load failed, is then in force when this answers success.
 		done = path + " needs no change"
 	}
-	if conf.Internal.ApiAccess == nil {
-		return refuse("%s, but NOT loaded: this daemon has no management API policy to load it into", done)
-	}
-	_, stopped, err := conf.loadAccessPolicy(path)
-	if err != nil {
+	if _, err := conf.loadAccessPolicy(path); err != nil {
 		return refuse("%s, but NOT loaded (the running policy is unchanged): %v", done, err)
 	}
-	msg += "\n" + conf.accessInForceLine()
-	if len(stopped) > 0 {
-		msg += fmt.Sprintf("\nTCP API STOPPED on %s: it was plaintext, and the access\nfile requires TLS. Restart the daemon with usetls: true.",
-			strings.Join(stopped, ", "))
-	}
-	return AccessResponse{Msg: msg}
+	return AccessResponse{Msg: msg + "\n" + conf.accessInForceLine()}
 }
 
-// fillAccessInForce puts what is in force in resp: the running policy, the
-// served certificate's pins and the config file.
+// fillAccessInForce puts what is in force in resp: the access file and the
+// running policy, the served certificate's pins and the config file.
 func (conf *Config) fillAccessInForce(resp *AccessResponse) {
-	resp.KeyAuth = true // no access file: the key works, as admin
+	resp.File = conf.ApiServer.AccessFile
 	if st := conf.apiAccessStatus(); st != nil {
-		resp.File, resp.KeyAuth, resp.Clients = st.File, st.KeyAuth, st.Clients
+		resp.Missing, resp.Clients = st.Missing, st.Clients
 	}
-	resp.Configured = conf.ApiServer.AccessFile
 	resp.ServerPins = apiServedPins()
 	if cfg := conf.Internal.CfgFile; cfg != "" {
 		resp.ConfigFile = absConfigFile(cfg)
 	}
 }
 
-// accessInForceLine says in one line what policy runs.
+// accessInForceLine says what policy runs, verdict first.
 func (conf *Config) accessInForceLine() string {
 	st := conf.apiAccessStatus()
 	switch {
-	case st == nil && conf.ApiServer.AccessFile != "":
-		return accessNotLoadedLine(conf.ApiServer.AccessFile)
 	case st == nil:
-		return "In force: no access file."
+		return "In force: nothing (no management API policy)."
+	case st.Missing:
+		return fmt.Sprintf("No access file, so no TLS clients. To take them:\n   touch %s", shellWord(st.File))
 	case st.Error != "":
-		return "In force: none. The access file could not be used at start-up,\nso the TCP API answers 503: " + st.Error
+		return "In force: none. The access file does not load, so the TCP\nAPI answers 503: " + st.Error
 	}
-	return fmt.Sprintf("In force: %d client(s), keyauth %s.", len(st.Clients), onOff(st.KeyAuth))
-}
-
-func onOff(b bool) string {
-	if b {
-		return "on"
-	}
-	return "off"
+	return fmt.Sprintf("In force: %d client(s).", len(st.Clients))
 }
 
 // applyAccessChange applies ap to af. changed is false when af already is
@@ -250,59 +233,23 @@ func applyAccessChange(af *AccessFile, ap AccessPost) (msg string, changed bool,
 		}
 		c.Role = ap.Role
 		return fmt.Sprintf("%s is now %s.", ap.Name, ap.Role), true, nil
-	case "keyauth":
-		var on bool
-		switch ap.KeyAuth {
-		case "on":
-			on = true
-		case "off":
-		default:
-			return "", false, fmt.Errorf("keyauth on or off, not %q", ap.KeyAuth)
-		}
-		if af.KeyAuthOn() == on {
-			return "keyauth is already " + ap.KeyAuth + ".", false, nil
-		}
-		af.KeyAuth = &on
-		if on {
-			return "keyauth on: the API key works on the TCP API (read-write).", true, nil
-		}
-		msg := "keyauth off: the TCP API needs a client certificate now.\nThe local socket is unaffected."
-		enabled := 0
-		for _, c := range af.Clients {
-			if !c.Disabled {
-				enabled++
-			}
-		}
-		if enabled == 0 {
-			msg += "\nNo client is enabled: the TCP API is closed to all but the socket."
-		}
-		return msg, true, nil
 	}
 	return "", false, fmt.Errorf("unknown /access command %q", ap.Command)
 }
 
 // readAccessFileForEdit reads and parses the access file at path, returning
-// its bytes too (nil when it does not exist). A missing file is an empty
-// policy when create is set, and an error otherwise.
-func readAccessFileForEdit(path string, create bool) (*AccessFile, []byte, error) {
-	old, err := os.ReadFile(path)
-	switch {
-	case err == nil:
-		af, perr := ParseAccessFile(old)
-		if perr != nil {
-			return nil, nil, fmt.Errorf("%s does not parse (%v); fix it by hand first", path, perr)
-		}
-		return af, old, nil
-	case errors.Is(err, fs.ErrNotExist):
-		if derr := danglingSymlink(path); derr != nil {
-			return nil, nil, derr
-		}
-		if create {
-			return &AccessFile{}, nil, nil
-		}
-		return nil, nil, fmt.Errorf("%s does not exist yet; client add creates it", path)
+// its bytes too. The file must be there (the daemon never creates it), and
+// it must pass CheckAccessFileMode: a write keeps the file's mode.
+func readAccessFileForEdit(path string) (*AccessFile, []byte, error) {
+	old, err := readCheckedAccessFile(path)
+	if err != nil {
+		return nil, nil, err
 	}
-	return nil, nil, err
+	af, perr := ParseAccessFile(old)
+	if perr != nil {
+		return nil, nil, fmt.Errorf("%s does not parse (%v); fix it by hand first", path, perr)
+	}
+	return af, old, nil
 }
 
 // danglingSymlink refuses path when it is a symlink whose target does not
@@ -320,12 +267,11 @@ func danglingSymlink(path string) error {
 	return nil
 }
 
-// renderAccessFile is the file as the daemon writes it: a header, keyauth
-// spelled out, and the clients. Comments a person adds are not kept; notes go
-// in a client's comment:.
+// renderAccessFile is the file as the daemon writes it: a header and the
+// clients. Comments a person adds are not kept; notes go in a client's
+// comment:.
 func renderAccessFile(af *AccessFile, daemonConfig string) ([]byte, error) {
-	keyauth := af.KeyAuthOn()
-	out := AccessFile{KeyAuth: &keyauth, Clients: af.Clients}
+	out := AccessFile{Clients: af.Clients}
 	if out.Clients == nil {
 		out.Clients = []AccessClient{}
 	}
@@ -334,7 +280,6 @@ func renderAccessFile(af *AccessFile, daemonConfig string) ([]byte, error) {
 	fmt.Fprintf(&buf, "# Written by the daemon (tdns-ncli <daemon> client ...). Hand edits\n")
 	fmt.Fprintf(&buf, "# work, but comments are not kept: put notes in a client's comment:.\n")
 	fmt.Fprintf(&buf, "# Roles: read-only, read-write (admin is the local socket's alone).\n")
-	fmt.Fprintf(&buf, "# keyauth: false turns the API key off.\n")
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(3)
 	if err := enc.Encode(out); err != nil {
@@ -346,8 +291,9 @@ func renderAccessFile(af *AccessFile, daemonConfig string) ([]byte, error) {
 
 // writeAccessFile replaces the access file at path (following a symlink)
 // with data, after saving old, its previous content, as path.prev; both
-// atomically. The file keeps its mode, owner and group; a new one (old nil)
-// is 0600 and the daemon's own.
+// atomically. The file keeps its mode, owner and group; with old nil (no
+// file before; /access never asks for that) it would be 0600 and the
+// daemon's own.
 func writeAccessFile(path string, old, data []byte) error {
 	target := path
 	if real, err := filepath.EvalSymlinks(path); err == nil {
@@ -417,46 +363,4 @@ func chownLike(f *os.File, like os.FileInfo) error {
 		}
 	}
 	return f.Chown(uid, gid)
-}
-
-// accessNotLoadedLine is what runs when the config names an access file but
-// none is in force: a reload could not load path, and kept it (and the policy
-// before it). A path not there yet is the first enrolment's case.
-func accessNotLoadedLine(path string) string {
-	head := "In force: no access file. The config names\n   " + path + "\n"
-	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
-		return head + "which does not exist yet: client add creates it."
-	}
-	return head + "but it is not loaded: config reload says why."
-}
-
-// noAccessFileAdvice is the answer to /access on a daemon whose config names
-// no access file (design section 4, Q2): the line to add, what it changes,
-// and the reload that makes the daemon read it. Lines of at most 72.
-func noAccessFileAdvice(cfg string) string {
-	suggested := "<config dir>/<config name>-access.yaml"
-	if cfg != "" {
-		cfg = absConfigFile(cfg)
-		base := strings.TrimSuffix(filepath.Base(cfg), filepath.Ext(cfg))
-		suggested = filepath.Join(filepath.Dir(cfg), base+"-access.yaml")
-	} else {
-		cfg = "<config>"
-	}
-	role := AppTypeToString[Globals.App.Type]
-	if role == "" {
-		role = "<daemon>"
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "No access file: the daemon config names none:\n   %s\n", cfg)
-	fmt.Fprintf(&b, "To turn one on, add under apiserver: in that file:\n\n")
-	fmt.Fprintf(&b, "   access-file: %s\n\n", suggested)
-	fmt.Fprintf(&b, "That changes three things on the TCP API:\n")
-	fmt.Fprintf(&b, " - the API key drops from admin to read-write;\n")
-	fmt.Fprintf(&b, " - TLS is required (with usetls: false the TCP listeners\n")
-	fmt.Fprintf(&b, "   stay off);\n")
-	fmt.Fprintf(&b, " - it takes TLS 1.3 only.\n")
-	fmt.Fprintf(&b, "Then make the daemon read it (no restart needed):\n\n")
-	fmt.Fprintf(&b, "   tdns-ncli %s config reload \\\n      --daemon-config %s\n\n", role, cfg)
-	fmt.Fprintf(&b, "and run this command again.")
-	return b.String()
 }

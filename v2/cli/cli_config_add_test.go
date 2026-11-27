@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -38,8 +39,8 @@ type addDaemon struct {
 	stallAfter   int               // with stall: this status's headers first
 	onAdd        func() error      // after an add is enrolled: what happens meanwhile
 	hookErr      error             // onAdd's, checked on the test goroutine (add)
-	notThereYet  bool              // the access file the config names is not there yet
 	clients      map[string]string // name -> pin
+	disabled     map[string]bool   // names of disabled clients
 	posts        []tdns.AccessPost
 }
 
@@ -67,7 +68,7 @@ func newAddDaemon(t *testing.T, running bool) *addDaemon {
 	os.Mkdir(filepath.Join(dir, "run"), 0o700)
 	d.sock = filepath.Join(dir, "run", "d.sock")
 	d.cfg = filepath.Join(dir, "tdns-auth.yaml")
-	writeFile(t, d.cfg, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+tcp.Listener.Addr().String()+" ]\n   apikey: k\n   socket: "+d.sock+"\n")
+	writeFile(t, d.cfg, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ "+tcp.Listener.Addr().String()+" ]\n   socket: "+d.sock+"\n")
 	// The operator's pair goes where the CLI config's client: block says,
 	// never into the home directory of whoever runs the tests.
 	d.certPath = filepath.Join(dir, "certs", "me.crt")
@@ -111,16 +112,17 @@ func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 	var ap tdns.AccessPost
 	json.NewDecoder(r.Body).Decode(&ap)
 	d.posts = append(d.posts, ap)
-	resp := tdns.AccessResponse{File: "/etc/tdns/access.yaml", Configured: "/etc/tdns/access.yaml",
+	resp := tdns.AccessResponse{File: "/etc/tdns/tdns-auth-access.yaml",
 		ServerPins: []string{d.srvPin}, ConfigFile: d.cfg}
+	for name, pin := range d.clients {
+		resp.Clients = append(resp.Clients, tdns.ApiAccessStatusClient{Name: name, Pin: pin, Role: "read-write", Disabled: d.disabled[name]})
+	}
 	switch {
 	case d.noAccessFile:
-		resp.File, resp.Configured, resp.Msg = "", "", "No access file: add access-file: under apiserver:"
+		resp.Missing, resp.Msg = true, "No access file, so no TLS clients."
 		if ap.Command != "list" {
-			resp.Error, resp.ErrorMsg = true, resp.Msg
+			resp.Error, resp.ErrorMsg = true, "access file /etc/tdns/tdns-auth-access.yaml is missing"
 		}
-	case d.notThereYet && ap.Command == "list":
-		resp.File, resp.Msg = "", "In force: no access file. The config names\n   /etc/tdns/access.yaml\nwhich does not exist yet: client add creates it."
 	case ap.Command == "add" && d.refuseAdd != "":
 		resp.Error, resp.ErrorMsg = true, d.refuseAdd
 	case ap.Command == "add" && d.clients[ap.Name] == ap.Pin:
@@ -128,7 +130,6 @@ func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 	case ap.Command == "add":
 		d.clients[ap.Name] = ap.Pin
 		resp.Msg = "Added " + ap.Name + " (read-write)."
-		d.notThereYet = false // the add created it
 		if d.onAdd != nil {
 			// Synchronous, before the answer; its error is the test's.
 			d.hookErr = d.onAdd()
@@ -143,10 +144,7 @@ func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 func (d *addDaemon) ping(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if r.Header.Get("X-API-Key") == "k" && !d.refusePing {
-		json.NewEncoder(w).Encode(tdns.PingResponse{Msg: "pong", Role: "read-write", Via: "key"})
-		return
-	}
+	// Certificate only, as the daemon is: no key passes.
 	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 && !d.refusePing {
 		pin := tdns.SPKISHA256(r.TLS.PeerCertificates[0])
 		for name, p := range d.clients {
@@ -220,8 +218,7 @@ func TestAddRunningDaemonWritesACertEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := ApiDetails{Name: "tdns-auth", BaseURL: d.url, AuthMethod: "certificate",
-		TLSAuth: "pin", Pins: []string{d.srvPin}, ConfigFile: d.cfg}
+	want := ApiDetails{Name: "auth", Role: "auth", BaseURL: d.url, Pins: []string{d.srvPin}, ConfigFile: d.cfg}
 	if got := mustEntries(t, d.cli); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 		t.Errorf("entries = %+v\nwant      [%+v]", got, want)
 	}
@@ -233,22 +230,30 @@ func TestAddRunningDaemonWritesACertEntry(t *testing.T) {
 	if err != nil || clients["tester"] != pin || posts[1].Role != "read-write" || d.commands() != "list add" {
 		t.Errorf("the daemon was asked %q, enrolled %v (pin %s, %v)", d.commands(), clients, pin, err)
 	}
+	// The verdict and the command to try it, and the certificate made;
+	// the entry and the other steps only with -v.
 	var sb strings.Builder
 	printAddResult(&sb, res, false, d.cli)
 	out := sb.String()
-	for _, w := range []string{"Made your client certificate " + d.certPath, "The daemon: Added tester (read-write).",
-		"TCP check: ok (TLS, read-write, certificate tester)", "Try it:"} {
-		if !strings.Contains(out, w) {
-			t.Errorf("output lacks %q:\n%s", w, out)
-		}
+	verdict := "Added the new entry \"auth\" to " + d.cli + ".\nVerify with:  " + ncliFor(d.cli) + " auth ping\n"
+	if !strings.HasPrefix(out, verdict) || !strings.Contains(out, "Made your client certificate "+d.certPath) ||
+		strings.Contains(out, "TCP check") || strings.Contains(out, "pins:") {
+		t.Errorf("printed:\n%s\nwant it to start with\n%s", out, verdict)
 	}
-	if !strings.HasPrefix(out, "Added \"tdns-auth\" (canonical) to "+d.cli+":") {
-		t.Errorf("verdict not first:\n%s", out)
+	saved := tdns.Globals.Verbose
+	tdns.Globals.Verbose = true
+	sb.Reset()
+	printAddResult(&sb, res, false, d.cli)
+	tdns.Globals.Verbose = saved
+	for _, w := range []string{"pins:", "The daemon: Added tester (read-write).", "TCP check: ok (TLS, read-write, certificate tester)"} {
+		if !strings.Contains(sb.String(), w) {
+			t.Errorf("-v output lacks %q:\n%s", w, sb.String())
+		}
 	}
 
 	before, _ := os.ReadFile(d.cli)
 	res, err = d.add(t, nil)
-	if err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote || !strings.HasSuffix(res.Update, "config update tdns-auth --repin") {
+	if err != nil || res.AlreadyKnown != "auth" || res.Wrote || !strings.HasSuffix(res.Update, "config update auth --repin") {
 		t.Errorf("again: %+v, %v; want it left alone, --repin named", res, err)
 	}
 	if d.commands() != "list add" {
@@ -264,8 +269,11 @@ func TestAddStopsWhenTheDaemonRefuses(t *testing.T) {
 	d := newAddDaemon(t, true)
 	before, _ := os.ReadFile(d.cli)
 	d.noAccessFile = true
-	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "add access-file: under apiserver:") {
-		t.Errorf("no access file: %v, want the daemon's advice", err)
+	_, err := d.add(t, nil)
+	if err == nil || !strings.Contains(err.Error(), "access file /etc/tdns/tdns-auth-access.yaml is missing, so\ntdns-auth takes no TLS clients") ||
+		!strings.Contains(err.Error(), "\n   touch /etc/tdns/tdns-auth-access.yaml\nthen run this again:\n") ||
+		!strings.Contains(unwrapCommands(err.Error()), "\n   "+ncliFor(d.cli)+" config add --client-name tester "+d.cfg) {
+		t.Errorf("no access file: %v, want the touch line and the command to run again", err)
 	}
 	if _, err := os.Stat(d.certPath); err == nil || d.commands() != "list" {
 		t.Errorf("no access file: asked %q, client pair made: %v", d.commands(), err == nil)
@@ -275,21 +283,21 @@ func TestAddStopsWhenTheDaemonRefuses(t *testing.T) {
 	d.mu.Lock()
 	d.noAccessFile, d.refuseAdd = false, "\"tester\" is already there with another pin"
 	d.mu.Unlock()
-	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), d.refuseAdd) || !strings.Contains(err.Error(), "nothing was written") || !strings.Contains(err.Error(), "\n  "+ncliFor(d.cli)+" config add --client-name tester "+d.cfg) {
+	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), d.refuseAdd) || !strings.Contains(err.Error(), "nothing was written") || !strings.Contains(unwrapCommands(err.Error()), "\n   "+ncliFor(d.cli)+" config add --client-name tester "+d.cfg) {
 		t.Errorf("refused add: %v", err)
 	}
 	d.unchanged(t, string(before))
 }
 
 // The TCP request fails: nothing is written, and the pin stays enrolled.
-// The next run reuses it (the daemon says "already there") and writes the
+// The next run finds it in the daemon's list, reuses it and writes the
 // entry.
 func TestAddTCPCheckFailsThenARerunReusesThePin(t *testing.T) {
 	d := newAddDaemon(t, true)
 	before, _ := os.ReadFile(d.cli)
 	d.refusePing = true
 	_, err := d.add(t, nil)
-	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || !strings.Contains(err.Error(), "Nothing was written") || !strings.Contains(err.Error(), "reuses it:\n  "+ncliFor(d.cli)+" config add --client-name tester "+d.cfg) {
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || !strings.Contains(err.Error(), "Nothing was written") || !strings.Contains(unwrapCommands(err.Error()), "reuses it:\n   "+ncliFor(d.cli)+" config add --client-name tester "+d.cfg) {
 		t.Fatalf("err = %v", err)
 	}
 	// What the daemon said stays (a disabled pin: "enable it").
@@ -297,8 +305,8 @@ func TestAddTCPCheckFailsThenARerunReusesThePin(t *testing.T) {
 		t.Errorf("the daemon's answer is lost: %v", err)
 	}
 	d.unchanged(t, string(before))
-	clients, _ := d.state()
-	enrolled := clients["tester"]
+	first, _ := d.state()
+	enrolled := first["tester"]
 
 	d.mu.Lock()
 	d.refusePing = false
@@ -307,11 +315,12 @@ func TestAddTCPCheckFailsThenARerunReusesThePin(t *testing.T) {
 	if err != nil || !res.Wrote {
 		t.Fatalf("rerun: %+v, %v", res, err)
 	}
-	clients, posts := d.state()
-	if len(clients) != 1 || clients["tester"] != enrolled || posts[3].Pin != enrolled {
-		t.Errorf("rerun enrolled %v, sent %q; want the first pin reused", clients, posts[3].Pin)
+	// The daemon's list has the pin: no second add is sent.
+	clients, _ := d.state()
+	if len(clients) != 1 || clients["tester"] != enrolled || d.commands() != "list add list" {
+		t.Errorf("rerun enrolled %v, asked %q; want the first pin reused, no add sent", clients, d.commands())
 	}
-	if !strings.Contains(strings.Join(res.Steps, "\n"), "tester is already there") {
+	if !strings.Contains(strings.Join(res.Steps, "\n"), "enrolled already, as tester") {
 		t.Errorf("steps = %q", res.Steps)
 	}
 }
@@ -325,13 +334,13 @@ func TestAddStoppedDaemonAndDryRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := ApiDetails{Name: "tdns-auth", AuthMethod: "none", ConfigFile: d.cfg}
+	want := ApiDetails{Name: "auth", Role: "auth", ConfigFile: d.cfg}
 	if got := mustEntries(t, d.cli); len(got) != 1 || !reflect.DeepEqual(got[0], want) || res.Running {
 		t.Errorf("entries = %+v, running %v; want [%+v]", got, res.Running, want)
 	}
 	var sb strings.Builder
 	printAddResult(&sb, res, false, d.cli)
-	if hint := ncliFor(d.cli) + " config update tdns-auth --cert"; res.Update != hint || !strings.Contains(sb.String(), "not running") || strings.Contains(sb.String(), "Try it") {
+	if hint := ncliFor(d.cli) + " config update auth --cert"; res.Update != hint || !strings.Contains(sb.String(), "not running") || strings.Contains(sb.String(), "Try it") {
 		t.Errorf("update %q, printed:\n%s", res.Update, sb.String())
 	}
 	if _, err := os.Stat(d.certPath); err == nil {
@@ -355,24 +364,27 @@ func TestAddStoppedDaemonAndDryRun(t *testing.T) {
 	}
 }
 
-// An entry for the daemon is left alone, and the daemon not asked: a key
-// entry, or one with no address, is switched with --cert; a certificate
-// entry is re-pinned with --repin; one without config-file: needs it named.
+// An entry for the daemon is left alone, and the daemon not asked: one
+// without pins, or with no address, gets them with --cert; one with pins is
+// re-pinned with --repin; one without config-file: needs it named; one with
+// an old name is renamed too.
 func TestAddLeavesAnExistingEntryAlone(t *testing.T) {
 	d := newAddDaemon(t, true)
-	for entry, flag := range map[string]string{
-		"baseurl: @U@\n     apikey: k\n     authmethod: X-API-Key\n     config-file: @D@":                            "--cert",
-		"authmethod: none\n     config-file: @D@":                                                                    "--cert",
-		"baseurl: @U@\n     authmethod: certificate\n     tlsauth: pin\n     pins: [ \"p\" ]\n     config-file: @D@": "--repin",
-		"baseurl: @U@\n     apikey: k\n     authmethod: X-API-Key":                                                   "--cert --daemon-config " + d.cfg,
-		"baseurl: unix://@S@\n     authmethod: none":                                                                 "--cert --daemon-config " + d.cfg,
+	for _, tc := range []struct{ name, entry, flag string }{
+		{"auth", "baseurl: @U@\n     apikey: k\n     authmethod: X-API-Key\n     config-file: @D@", "--cert"},
+		{"auth", "config-file: @D@", "--cert"},
+		{"auth", "baseurl: @U@\n     pins: [ \"p\" ]\n     config-file: @D@", "--repin"},
+		{"auth", "baseurl: @U@\n     apikey: k\n     authmethod: X-API-Key", "--cert --daemon-config " + d.cfg},
+		{"auth", "baseurl: unix://@S@", "--cert --daemon-config " + d.cfg},
+		{"tdns-auth", "baseurl: @U@\n     pins: [ \"p\" ]\n     config-file: @D@", "--rename auth --repin"},
+		{"tdns-auth", "config-file: @D@", "--rename auth --cert"},
 	} {
-		body := "client:\n   cert: " + d.certPath + "\napiservers:\n   - name: tdns-auth\n     " +
-			strings.NewReplacer("@U@", d.url, "@D@", d.cfg, "@S@", d.sock).Replace(entry) + "\n"
+		body := "client:\n   cert: " + d.certPath + "\napiservers:\n   - name: " + tc.name + "\n     " +
+			strings.NewReplacer("@U@", d.url, "@D@", d.cfg, "@S@", d.sock).Replace(tc.entry) + "\n"
 		writeFile(t, d.cli, body)
 		res, err := d.add(t, nil)
-		if err != nil || res.AlreadyKnown != "tdns-auth" || !strings.HasSuffix(res.Update, "config update tdns-auth "+flag) {
-			t.Errorf("%s: %+v, %v; want %s named", flag, res, err, flag)
+		if err != nil || res.AlreadyKnown != tc.name || !strings.HasSuffix(res.Update, "config update "+tc.name+" "+tc.flag) {
+			t.Errorf("%s %s: %+v, %v; want %s named", tc.name, tc.flag, res, err, tc.flag)
 		}
 		d.unchanged(t, body)
 	}
@@ -385,10 +397,10 @@ func TestAddLeavesAnExistingEntryAlone(t *testing.T) {
 // config add) is left alone, and the output says the pin was enrolled.
 func TestAddEntryAppearsAfterTheEnrolment(t *testing.T) {
 	d := newAddDaemon(t, true)
-	body := "client:\n   cert: " + d.certPath + "\napiservers:\n   - name: tdns-auth\n     authmethod: none\n     config-file: " + d.cfg + "\n"
+	body := "client:\n   cert: " + d.certPath + "\napiservers:\n   - name: auth\n     config-file: " + d.cfg + "\n"
 	d.onAdd = func() error { return os.WriteFile(d.cli, []byte(body), 0o600) }
 	res, err := d.add(t, nil)
-	if err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote {
+	if err != nil || res.AlreadyKnown != "auth" || res.Wrote {
 		t.Fatalf("%+v, %v; want the entry that appeared left alone", res, err)
 	}
 	if !strings.Contains(strings.Join(res.Notes, "\n"), "enrolled as tester just now") {
@@ -401,16 +413,6 @@ func TestAddEntryAppearsAfterTheEnrolment(t *testing.T) {
 // without TLS, the daemon stopped or not; an apiservers: list in flow
 // style, with no entry to paste (it would hold a pin not enrolled).
 func TestAddRefusesBeforeTheEnrolment(t *testing.T) {
-	for _, running := range []bool{false, true} {
-		d := newAddDaemon(t, running)
-		raw, _ := os.ReadFile(d.cfg)
-		writeFile(t, d.cfg, string(raw)+"   usetls: false\n")
-		before, _ := os.ReadFile(d.cli)
-		if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "usetls is false") || d.commands() != "" {
-			t.Errorf("usetls false, running %v: %v, asked %q", running, err, d.commands())
-		}
-		d.unchanged(t, string(before))
-	}
 	d := newAddDaemon(t, true)
 	body := "client:\n   cert: " + d.certPath + "\napiservers: []\n"
 	writeFile(t, d.cli, body)
@@ -472,13 +474,13 @@ func TestAddNeedsTheSocket(t *testing.T) {
 			t.Errorf("a socket not ours: %v", err)
 		}
 	}
-	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   socket: none\n"))
+	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "   socket: none\n"))
 	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "\nsocket: none.") {
 		t.Errorf("socket: none: %v", err)
 	}
 	// A path the daemon refuses is no socket either, and the refusal says
 	// why, not "socket: none".
-	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   socket: run/d.sock\n"))
+	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "   socket: run/d.sock\n"))
 	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "serves no local admin socket") || strings.Contains(err.Error(), "socket: none") {
 		t.Errorf("a relative socket path: %v", err)
 	} else {
@@ -498,18 +500,6 @@ func mustEntries(t *testing.T, cli string) []ApiDetails {
 		t.Fatal(err)
 	}
 	return got
-}
-
-// The first enrolment: the daemon config names an access file that is not
-// there yet (a reload kept the path, unloaded). config add goes on to the
-// add, which creates it, and writes the entry.
-func TestAddFirstEnrolmentCreatesTheAccessFile(t *testing.T) {
-	d := newAddDaemon(t, true)
-	d.notThereYet = true
-	res, err := d.add(t, nil)
-	if err != nil || !res.Wrote || d.commands() != "list add" {
-		t.Fatalf("%+v, %v (asked %q); want the entry written", res, err, d.commands())
-	}
 }
 
 // A file that is not a socket at the socket path is no stopped daemon: no
@@ -543,7 +533,13 @@ func TestRefusedSocketStoppedCannotLook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln.Close() // a stale socket: stopped
+	// A stale socket: its file stays when the listener closes (Go removes
+	// it by default).
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	ln.Close()
+	if _, err := os.Lstat(filepath.Join(dir, "s")); err != nil {
+		t.Fatalf("the stale socket is gone: %v", err)
+	}
 	if stopped, err := refusedSocketStopped(syscall.ECONNREFUSED, filepath.Join(dir, "s")); !stopped || err != nil {
 		t.Errorf("a stale socket: %v, %v; want stopped", stopped, err)
 	}
@@ -601,7 +597,7 @@ func TestAddKnowsAnEntryByAnyAddress(t *testing.T) {
 	d := newAddDaemon(t, true)
 	raw, _ := os.ReadFile(d.cfg)
 	second := "127.0.0.1:1"
-	writeFile(t, d.cfg, strings.Replace(string(raw), " ]\n   apikey:", ", "+second+" ]\n   apikey:", 1))
+	writeFile(t, d.cfg, strings.Replace(string(raw), " ]\n   socket:", ", "+second+" ]\n   socket:", 1))
 	body := "client:\n   cert: " + d.certPath + "\napiservers:\n   - name: old\n     role: auth\n     baseurl: https://" + second + "/api/v1\n     apikey: k\n     authmethod: X-API-Key\n"
 	writeFile(t, d.cli, body)
 	res, err := d.add(t, nil)
@@ -609,4 +605,49 @@ func TestAddKnowsAnEntryByAnyAddress(t *testing.T) {
 		t.Fatalf("%+v, %v; want the entry by the second address left alone", res, err)
 	}
 	d.unchanged(t, body)
+}
+
+// unwrapCommands joins the lines of a command broken between flags (a
+// trailing backslash, then the indented rest), so a test can look for the
+// command whole, however long the temporary paths in it make it.
+func unwrapCommands(s string) string {
+	return regexp.MustCompile(` \\\n +`).ReplaceAllString(s, " ")
+}
+
+// The access file has your certificate already, under another name (an
+// operator enrolled by hand, or from another CLI config): config add reuses
+// it, and does not try to add it again under the default name, which the
+// daemon would refuse (one certificate, one client). A disabled one is
+// refused, with the command that enables it.
+func TestAddReusesAnEnrolledCertificate(t *testing.T) {
+	d := newAddDaemon(t, true)
+	pin, _, err := ensureClientCert(d.certPath, strings.TrimSuffix(d.certPath, ".crt")+".key", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	d.clients["johani"] = pin
+	d.disabled = map[string]bool{"johani": true}
+	d.mu.Unlock()
+	before, _ := os.ReadFile(d.cli)
+	_, err = d.add(t, nil)
+	if err == nil || !strings.Contains(err.Error(), `access file as "johani",`+"\nbut disabled") ||
+		!strings.Contains(unwrapCommands(err.Error()), "auth client enable johani --daemon-config "+d.cfg) || d.commands() != "list" {
+		t.Fatalf("disabled: %v (asked %q), want the enable command and nothing sent", err, d.commands())
+	}
+	d.unchanged(t, string(before))
+
+	d.mu.Lock()
+	d.disabled = nil
+	d.mu.Unlock()
+	res, err := d.add(t, nil)
+	if err != nil || !res.Wrote || d.commands() != "list list" {
+		t.Fatalf("%+v, %v (asked %q); want the entry written and no add sent", res, err, d.commands())
+	}
+	if steps := strings.Join(res.Steps, "\n"); !strings.Contains(steps, "enrolled already, as johani (read-write)") || !strings.Contains(steps, "TCP check: ok") {
+		t.Errorf("steps %q", res.Steps)
+	}
+	if clients, _ := d.state(); len(clients) != 1 {
+		t.Errorf("clients %v, want johani alone", clients)
+	}
 }

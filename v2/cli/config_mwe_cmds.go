@@ -15,7 +15,6 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/base64"
 	"encoding/pem"
 	"fmt"
 	"math/big"
@@ -26,6 +25,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	tdns "github.com/johanix/tdns/v2"
 )
 
 // newConfigMweCmd builds the `config mwe` subcommand for the given role.
@@ -112,12 +113,6 @@ func runConfigMwe(role, dir string) {
 		cliFatalf("could not generate certificate: %v", err)
 	}
 
-	// Random API key.
-	apiKey, err := randomAPIKey()
-	if err != nil {
-		cliFatalf("could not generate api key: %v", err)
-	}
-
 	// Example zones: two primaries (different templates), one secondary
 	// (third template, emitted commented-out below).
 	zones := []mweZone{
@@ -139,7 +134,7 @@ func runConfigMwe(role, dir string) {
 
 	apiPort := "8989"
 	dnsPort := "5354"
-	content := renderMweConfig(role, dir, zonesDir, certFile, keyFile, apiKey, apiPort, dnsPort)
+	content := renderMweConfig(role, dir, zonesDir, certFile, keyFile, apiPort, dnsPort)
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		cliFatalf("could not write config %s: %v", cfgPath, err)
 	}
@@ -159,29 +154,36 @@ func runConfigMwe(role, dir string) {
 		fmt.Printf("Kept zone file:    %s\n", zf)
 	}
 
-	fmt.Printf("\nTo let `tdns-cli %s ...` reach this server, add to your tdns-cli.yaml:\n\n", role)
-	fmt.Printf("  apiservers:\n")
-	fmt.Printf("     - name:       tdns-%s\n", role)
-	fmt.Printf("       baseurl:    https://127.0.0.1:%s/api/v1\n", apiPort)
-	fmt.Printf("       apikey:     %s\n", apiKey)
-	fmt.Printf("       authmethod: X-API-Key\n")
-	fmt.Printf("\nNext steps:\n")
-	fmt.Printf("  tdns-%s --config %s        # start the server\n", role, cfgPath)
-	fmt.Printf("  tdns-cli %s config check --serverconfig %s   # validate\n", role, cfgPath)
+	printMweNextSteps(role, role, cfgPath)
+	fmt.Println(commandLines("tdns-ncli "+role+" config check --serverconfig "+shellQuote(cfgPath), 3))
+}
+
+// printMweNextSteps says how to start the MWE daemon of the given type
+// whose config is cfgPath, let it take TLS clients, and give tdns-ncli
+// an entry for it named name.
+func printMweNextSteps(daemonType, name, cfgPath string) {
+	access := tdns.ApiAccessFilePath("", cfgPath)
+	add := "tdns-ncli config add " + shellQuote(cfgPath)
+	if name != daemonType {
+		add = "tdns-ncli config add --name " + shellQuote(name) + " " + shellQuote(cfgPath)
+	}
+	fmt.Printf("\nNext steps: start the daemon,\n%s\n", commandLines("tdns-"+daemonType+" --config "+shellQuote(cfgPath), 3))
+	fmt.Printf("create its access file, so that it takes TLS clients,\n%s\n", commandLines("touch "+shellQuote(access), 3))
+	fmt.Printf("and, as root, give tdns-ncli an entry for it:\n%s\n", commandLines(add, 3))
+	fmt.Printf("Validate the config any time with:\n")
 }
 
 // ---------------------------------------------------------------------------
 // Config rendering
 // ---------------------------------------------------------------------------
 
-func renderMweConfig(role, dir, zonesDir, certFile, keyFile, apiKey, apiPort, dnsPort string) string {
+func renderMweConfig(role, dir, zonesDir, certFile, keyFile, apiPort, dnsPort string) string {
 	r := strings.NewReplacer(
 		"{{ROLE}}", role,
 		"{{DIR}}", dir,
 		"{{ZONESDIR}}", zonesDir,
 		"{{CERT}}", certFile,
 		"{{KEY}}", keyFile,
-		"{{APIKEY}}", apiKey,
 		"{{APIPORT}}", apiPort,
 		"{{DNSPORT}}", dnsPort,
 	)
@@ -219,10 +221,8 @@ listeners:
 
 apiserver:
    addresses:  [ 127.0.0.1:{{APIPORT}} ]
-   apikey:     {{APIKEY}}
    certfile:   {{CERT}}
    keyfile:    {{KEY}}
-   usetls:     true
 
 db:
    file:  {{DIR}}/tdns-{{ROLE}}.db
@@ -419,13 +419,4 @@ func ensureSelfSignedCert(certFile, keyFile string) (bool, error) {
 		return false, err
 	}
 	return true, nil
-}
-
-// randomAPIKey returns a URL-safe base64 random string (32 bytes of entropy).
-func randomAPIKey() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }

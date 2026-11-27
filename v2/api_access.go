@@ -2,8 +2,9 @@
  * Copyright (c) Johan Stenstam, johani@johani.org
  *
  * The access file of the network management API: who may connect over TCP,
- * with which role, and whether the API key still works. Design:
- * docs/2026-11-20-api-pinning-mtls-roles-design.md sections 3.3 and 4.
+ * by certificate pin, with which role. Designs:
+ * docs/2026-11-20-api-pinning-mtls-roles-design.md sections 3.3 and 4, and
+ * docs/2026-11-26-tdns-ncli-simple-setup-design.md (always on, no API key).
  */
 package tdns
 
@@ -14,7 +15,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -62,7 +66,10 @@ func parseNetworkRole(s string) (ApiRole, error) {
 // AccessFile is the access file as written: what the daemon writes when
 // tdns-ncli asks (/access), and a person may edit.
 type AccessFile struct {
-	// KeyAuth says whether the API key is still accepted. Absent means true.
+	// KeyAuth is obsolete: it said whether the API key was still accepted,
+	// and there is no API key any more. A file that still has the line
+	// loads (the line is ignored, and the daemon says so), and the daemon's
+	// next write of the file drops it.
 	KeyAuth *bool          `yaml:"keyauth,omitempty"`
 	Clients []AccessClient `yaml:"clients"`
 }
@@ -75,9 +82,6 @@ type AccessClient struct {
 	Comment  string `yaml:"comment,omitempty"`
 	Disabled bool   `yaml:"disabled,omitempty"`
 }
-
-// KeyAuthOn is KeyAuth with its default applied.
-func (af *AccessFile) KeyAuthOn() bool { return af.KeyAuth == nil || *af.KeyAuth }
 
 // ParseAccessFile decodes an access file strictly: an unknown key is an error,
 // not something silently ignored, because a misspelt "disabled" would leave a
@@ -117,7 +121,7 @@ func ValidateAccessFile(af *AccessFile) error {
 		if err := checkSpkiPin(c.Pin); err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", where, err))
 		} else if other, ok := pins[c.Pin]; ok {
-			errs = append(errs, fmt.Sprintf("%s: the pin is also %q's; one key, one client", where, other))
+			errs = append(errs, fmt.Sprintf("%s: the pin is also %q's; one certificate, one client", where, other))
 		} else {
 			pins[c.Pin] = c.Name
 		}
@@ -148,9 +152,28 @@ func checkSpkiPin(s string) error {
 	return nil
 }
 
-// LoadAccessFile reads, decodes and validates the access file at path.
+// ApiAccessFilePath is the access file of the daemon whose config file is
+// cfgfile: configured (apiserver.access-file) when that is set, else
+// <config dir>/<config name>-access.yaml, so /etc/tdns/tdns-auth.yaml has
+// /etc/tdns/tdns-auth-access.yaml. "" only when neither is known.
+func ApiAccessFilePath(configured, cfgfile string) string {
+	if configured != "" || cfgfile == "" {
+		return configured
+	}
+	abs, err := filepath.Abs(cfgfile)
+	if err != nil {
+		return ""
+	}
+	base := strings.TrimSuffix(filepath.Base(abs), filepath.Ext(abs))
+	return filepath.Join(filepath.Dir(abs), base+"-access.yaml")
+}
+
+// LoadAccessFile reads, decodes and validates the access file at path. A
+// file that group or others may write is refused (CheckAccessFileMode). A
+// missing file is an error that errors.Is(err, fs.ErrNotExist) recognizes:
+// the caller decides that it means no TLS clients.
 func LoadAccessFile(path string) (*AccessFile, error) {
-	data, err := os.ReadFile(path)
+	data, err := readCheckedAccessFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -164,25 +187,86 @@ func LoadAccessFile(path string) (*AccessFile, error) {
 	return af, nil
 }
 
-// validateAccessSettings checks the apiserver: keys that go with the access
-// file. With an access file the API key is capped at read-write and admin
-// exists only on the local socket, so an access file without a socket would
-// leave nothing able to do admin work.
-func (a ApiServerConf) validateAccessSettings() error {
-	if a.AccessFile != "" && a.Socket == "" {
-		return fmt.Errorf("apiserver.access-file %s requires the local admin socket, which apiserver.socket: none turns off: with an access file, admin is available only on the local socket", a.AccessFile)
+// CheckAccessFileMode refuses an access file that someone other than the
+// daemon's user (or root) may change: anyone who can write it can grant
+// themselves access. It must be owned by the daemon's user or by root, and
+// group and others must not be able to write it. The refusal gives the
+// command that fixes it. Pins and roles are not secrets, so reading is
+// anyone's: touch under umask 022 makes 0644, which passes. Nothing is
+// checked where the platform has no owners.
+func CheckAccessFileMode(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
 	}
+	return checkAccessFileInfo(path, fi)
+}
+
+// readCheckedAccessFile reads the access file at path through one open
+// file: the mode check (checkAccessFileInfo) is of the file read, so a file
+// swapped in between a check by name and the read cannot pass as the
+// daemon's.
+func readCheckedAccessFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err := checkAccessFileInfo(path, fi); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(f)
+}
+
+// checkAccessFileInfo is CheckAccessFileMode of the file fi describes.
+func checkAccessFileInfo(path string, fi os.FileInfo) error {
+	uid, _, ok := fileOwner(fi)
+	if !ok {
+		return nil
+	}
+	me := os.Geteuid()
+	if uid != me && uid != 0 {
+		return fmt.Errorf("access file %s is owned by uid %d, not by\n%s, the daemon's user: whoever owns it can grant\nthemselves access. Fix:\n   chown %s %s",
+			path, uid, userName(me), shellWord(userName(me)), shellWord(path))
+	}
+	if perm := fi.Mode().Perm(); perm&0o022 != 0 {
+		return fmt.Errorf("access file %s is writable by group or others\n(mode %04o): whoever can write it can grant themselves\naccess. Fix:\n   chmod go-w %s", path, perm, shellWord(path))
+	}
+	return nil
+}
+
+// reShellWord matches a word a POSIX shell takes as it stands: no
+// expansion, no splitting, no operator.
+var reShellWord = regexp.MustCompile(`^[A-Za-z0-9_./:@%+=,-]+$`)
+
+// shellWord is s as one shell word, for a command printed for the operator
+// to run: as it stands when that is safe, single-quoted otherwise, so that
+// a path with a space in it runs as pasted. (The CLI's shellQuote is the
+// same rule.)
+func shellWord(s string) string {
+	if reShellWord.MatchString(s) {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// userName is uid's user name, or the number when it has none.
+func userName(uid int) string {
+	if u, err := user.LookupId(strconv.Itoa(uid)); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return strconv.Itoa(uid)
+}
+
+// validateAccessSettings checks apiserver.access-file: an explicit path
+// must be absolute (the default is made absolute from the config file).
+func (a ApiServerConf) validateAccessSettings() error {
 	if a.AccessFile != "" && !filepath.IsAbs(a.AccessFile) {
 		return fmt.Errorf("apiserver.access-file %q is not an absolute path", a.AccessFile)
-	}
-	// No plaintext network API with an access file: its certificate clients
-	// could not authenticate, and the API key would cross the network in
-	// clear. usetls: false was the way in when the TLS setup was broken; the
-	// local admin socket is that way in now. (Loopback too: the rule is
-	// simpler without an exception, and the socket covers the local case.)
-	if a.AccessFile != "" && len(a.Addresses) > 0 && !a.UseTLS {
-		return fmt.Errorf("apiserver.access-file %s requires TLS on the TCP API, and apiserver.usetls is false: certificate clients could not authenticate, and the API key would cross the network in clear. When TLS is broken, use the local admin socket; for a daemon without TCP, leave out apiserver.addresses",
-			a.AccessFile)
 	}
 	return nil
 }

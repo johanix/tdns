@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 
 	"github.com/spf13/afero"
@@ -188,13 +189,32 @@ func loadCliViper(cfgFile string, fs afero.Fs) (v *viper.Viper, localErr error, 
 // instanceVerdict is the outcome of checking one apiservers entry for wiring.
 type instanceVerdict struct {
 	Entry ApiDetails
-	// Canonical: the entry has no role:, so it is the canonical target of a
-	// built-in tree (or of no tree at all) and is not an instance.
+	// Canonical: the entry is not an instance. Either it is a role's entry
+	// (RoleEntry), reached through the role's built-in tree, or it has no
+	// role: and no tree reaches it.
 	Canonical bool
+	// RoleEntry is the role whose entry this is (its name is the role's
+	// entry name), or "".
+	RoleEntry string
+	// Rename is the name an entry with an old name must have now; such an
+	// entry is not used.
+	Rename string
 	// Wire: an instance tree would be wired for this entry.
 	Wire bool
-	// Why is the warning text for an instance entry that will not be wired.
+	// Why is the warning text for an entry that will not be used.
 	Why string
+}
+
+// roleEntryOf is the role whose entry e is, judged against registry (role ->
+// clientKey): e's name is that role's clientKey, and e's role: is that role
+// or left out. "" when e is no role's entry.
+func roleEntryOf(e ApiDetails, registry map[string]string) string {
+	for role, key := range registry {
+		if key == e.Name && (e.Role == "" || e.Role == role) {
+			return role
+		}
+	}
+	return ""
 }
 
 // checkInstanceEntries decides, without changing anything, which entries
@@ -202,25 +222,22 @@ type instanceVerdict struct {
 // the answer; `config list` shows it. One function for both, so what the list
 // reports is what the wiring does.
 //
-// registry is the role -> clientKey map to judge names against: the live one
-// (roleToClientKey) at wiring time, or builtinRoles() when `config list`
-// looks back at the situation before any instance was wired.
+// registry is the role -> clientKey map to judge names against: the built-in
+// roles (builtinRoles), without the instances the wiring registers.
 func checkInstanceEntries(root *cobra.Command, entries []ApiDetails, registry map[string]string) []instanceVerdict {
 	// The API-client names that are already spoken for: the built-in roles'
-	// clients (tdns-auth, tdns-imr, ...) and every canonical entry. An
-	// instance sharing one of these would be the SAME client as that entry:
+	// entries (auth, imr, ...) and every role-less entry. An instance
+	// sharing one of these would be the SAME client as that entry:
 	// InitApiClients keys tdns.Globals.ApiClients by entry name, so the later
 	// of the two silently replaces the earlier and a command meant for one
-	// daemon reaches the other. The role-name check below does not see this,
-	// because it compares against role names (auth), not client names
-	// (tdns-auth).
+	// daemon reaches the other.
 	clientNames := map[string]bool{}
 	for _, ck := range registry {
 		clientNames[ck] = true
 	}
 	canonical := map[string]bool{}
 	for _, e := range entries {
-		if e.Role == "" {
+		if e.Role == "" && renamedTo(e) == "" {
 			canonical[e.Name] = true
 		}
 	}
@@ -228,19 +245,33 @@ func checkInstanceEntries(root *cobra.Command, entries []ApiDetails, registry ma
 	// Instance names accepted by THIS call, so a duplicate can be reported as
 	// the duplicate it is rather than as a built-in-role collision.
 	claimed := map[string]bool{}
+	// Names of the entries that are not instances, as met: a later entry
+	// with one of them would be the same client, so the first one wins.
+	seen := map[string]bool{}
 
 	out := make([]instanceVerdict, 0, len(entries))
 	for _, e := range entries {
 		v := instanceVerdict{Entry: e}
-		if e.Role == "" {
-			v.Canonical = true // reached through its built-in tree
-			out = append(out, v)
-			continue
-		}
-		v.Why = instanceRefusal(root, e, registry, clientNames, canonical, claimed)
-		if v.Why == "" {
-			v.Wire = true
-			claimed[e.Name] = true
+		notInstance := e.Role == "" || roleEntryOf(e, registry) != ""
+		switch {
+		case renamedTo(e) != "":
+			v.Rename = renamedTo(e)
+			v.Why = fmt.Sprintf("apiservers entry %q: the old name of the %s entry -- entry ignored (rename it to %s)",
+				e.Name, v.Rename, v.Rename)
+		case notInstance && seen[e.Name]:
+			v.Why = fmt.Sprintf("apiservers entry %q: an earlier apiservers entry has the same name -- entry ignored (choose another name)", e.Name)
+		case roleEntryOf(e, registry) != "":
+			v.Canonical, v.RoleEntry = true, roleEntryOf(e, registry)
+			seen[e.Name] = true
+		case e.Role == "":
+			v.Canonical = true // no role: and no tree's entry
+			seen[e.Name] = true
+		default:
+			v.Why = instanceRefusal(root, e, registry, clientNames, canonical, claimed)
+			if v.Why == "" {
+				v.Wire = true
+				claimed[e.Name] = true
+			}
 		}
 		out = append(out, v)
 	}
@@ -258,8 +289,8 @@ func instanceRefusal(root *cobra.Command, e ApiDetails, registry map[string]stri
 	if e.Name == "" {
 		return "apiservers entry with role but no name -- entry ignored"
 	}
-	// A name that shadows a built-in role would silently retarget the
-	// canonical tree, which is the exact failure this feature exists to
+	// A name that shadows a built-in role would silently retarget that
+	// role's tree, which is the exact failure this feature exists to
 	// prevent. Refuse it.
 	if _, taken := registry[e.Name]; taken || claimed[e.Name] {
 		// Two different collisions land here and the operator needs to be
@@ -307,16 +338,24 @@ func instanceRefusal(root *cobra.Command, e ApiDetails, registry map[string]stri
 }
 
 // WireInstanceTrees adds one command tree per apiservers entry carrying a
-// role:, and registers each entry's name as its own clientKey.
+// role: and a name of its own, and registers each entry's name as its own
+// clientKey.
 //
 // Returns the problems it declined to act on, for the caller to print. They
 // are warnings rather than fatal errors on purpose: a typo in one apiservers
 // entry should cost that entry's subcommand, not the whole CLI.
 func WireInstanceTrees(root *cobra.Command, entries []ApiDetails) []string {
 	var warnings []string
-	for _, v := range checkInstanceEntries(root, entries, roleToClientKey) {
+	for _, v := range checkInstanceEntries(root, entries, builtinRoles()) {
 		if v.Canonical {
-			continue // reached through its built-in tree
+			continue // reached through its built-in tree, or no tree
+		}
+		if v.Rename != "" {
+			// The command, for the CLI config this run reads (its root
+			// read --config the same way, to wire the trees at all).
+			warnings = append(warnings, fmt.Sprintf("apiservers entry %q is the old name of the %s\nentry, and is ignored. Rename it:\n%s",
+				v.Entry.Name, v.Rename, commandLines(ncliFor(ConfigPathFromArgs(os.Args[1:]))+" config update "+shellQuote(v.Entry.Name)+" --rename "+shellQuote(v.Rename), 3)))
+			continue
 		}
 		if !v.Wire {
 			warnings = append(warnings, v.Why)
@@ -333,30 +372,38 @@ func WireInstanceTrees(root *cobra.Command, entries []ApiDetails) []string {
 }
 
 // wiredInstances holds the instance entries WireInstanceTrees gave a command
-// tree, by name. They and the canonical entries are the only entries
-// InitApiClients builds clients for.
+// tree, by name. They and the entries that are not instances are the only
+// entries InitApiClients builds clients for.
 var wiredInstances = map[string]ApiDetails{}
 
-// clientEntries returns the entries to build API clients for: every canonical
-// entry, and each instance entry the wiring gave a command tree, once.
+// clientEntries returns the entries to build API clients for: every entry
+// that is not an instance (a role's entry, or one with no role:), and each
+// instance entry the wiring gave a command tree, once. An entry with an old
+// name gets none: commands that need it say to rename it.
 //
 // tdns.Globals.ApiClients is keyed by entry name, so a client built for an
 // instance the wiring refused can replace the one the name already stands
 // for (`tdns-ncli auth ...` then reaching the instance's daemon), or stand in
 // for the entry the wiring did accept under that name (two auth2 entries,
-// the first refused and the second wired). And a client for a refused entry
-// is not merely unused: tdns.NewClient exits on a rootca it cannot read, so an
-// ignored entry named "config" with a bad rootca would stop every command.
-// Only the wiring knows all of its decisions (a command collision needs the
-// command tree), so this takes them from it rather than deciding again. A
-// binary that wires no instance trees (tdns-cli) gets clients for its
-// canonical entries only: nothing in it reaches an instance.
+// the first refused and the second wired). Only the wiring knows all of its
+// decisions (a command collision needs the command tree), so this takes them
+// from it rather than deciding again. A binary that wires no instance trees
+// (tdns-cli) gets clients for the other entries only: nothing in it reaches
+// an instance.
 func clientEntries(entries []ApiDetails) []ApiDetails {
 	out := make([]ApiDetails, 0, len(entries))
 	taken := map[string]bool{}
+	builtin := builtinRoles()
 	for _, e := range entries {
-		if e.Role == "" {
-			out = append(out, e)
+		switch {
+		case renamedTo(e) != "":
+			continue
+		case e.Role == "" || roleEntryOf(e, builtin) != "":
+			// The first entry of a name wins, as in the wiring.
+			if !taken[e.Name] {
+				taken[e.Name] = true
+				out = append(out, e)
+			}
 			continue
 		}
 		if w, ok := wiredInstances[e.Name]; ok && !taken[e.Name] && reflect.DeepEqual(w, e) {
@@ -368,13 +415,11 @@ func clientEntries(entries []ApiDetails) []ApiDetails {
 }
 
 // builtinRoles returns the role -> clientKey registrations that are not
-// instances. WireInstanceTrees registers each instance as RegisterRole(n, n),
-// the one shape no built-in role has (auth -> tdns-auth), which is how the two
-// are told apart.
+// instances: those WireInstanceTrees did not make.
 func builtinRoles() map[string]string {
 	out := make(map[string]string, len(roleToClientKey))
 	for role, key := range roleToClientKey {
-		if role != key {
+		if _, inst := wiredInstances[role]; !inst {
 			out[role] = key
 		}
 	}
@@ -397,5 +442,6 @@ func knownRoleList() string {
 	for r := range knownInstanceRoles {
 		names = append(names, r)
 	}
+	slices.Sort(names)
 	return strings.Join(names, ", ")
 }

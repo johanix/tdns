@@ -36,16 +36,17 @@ in exactly one respect, and it is the important one:
 
 | | RFC 2136 UPDATE (`--via ddns`) | Management API (`--via api`) |
 |---|---|---|
-| Credential | SIG(0) key, per message | `apiserver.apikey`, per connection |
-| Authorization | the zone's `updatepolicy` | none beyond holding the key |
+| Credential | SIG(0) key, per message | a client certificate in the access file, per connection (or the local socket) |
+| Authorization | the zone's `updatepolicy` | none beyond a read-write role |
 | Zone option | `allow-updates` | `allow-api-updates` |
 | Who it is for | a zone's own operator, remotely | the operator of the *server* |
 
-The API channel is a **trusted-operator** surface. Holding
-`apiserver.apikey` is the authorization: requests are marked
-`PreAuthorized` and `updatepolicy` is not consulted. That is
-deliberate — it is the same key that can add and remove zones —
-but it means the API key must be treated as what it is.
+The API channel is a **trusted-operator** surface. A read-write
+client of the management API (or root on its socket) is the
+authorization: requests are marked `PreAuthorized` and
+`updatepolicy` is not consulted. That is deliberate — the same
+role can add and remove zones — but it means read-write access
+must be granted as what it is.
 
 The DDNS channel enforces `updatepolicy` on every record, and a
 SIG(0) key names a principal, so it is the channel for delegating

@@ -29,8 +29,9 @@ import (
 //     frozen would silently strand them the next time the file is read.
 //
 // Only after all three does the request get PreAuthorized, which is what tells
-// the ZoneUpdater that authorization was settled here (the API key is the
-// credential) and that update-policy does not apply. Nothing on the DNS path
+// the ZoneUpdater that authorization was settled here (a read-write client
+// of the management API, or its local socket) and that update-policy does
+// not apply. Nothing on the DNS path
 // sets that flag.
 func (zd *ZoneData) ApiZoneUpdate(ctx context.Context, zp ZonePost) (string, error) {
 	if zd == nil {

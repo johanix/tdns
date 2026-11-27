@@ -81,7 +81,7 @@ func TestLockCliConfigsThroughADirectoryAlias(t *testing.T) {
 func TestAddToAnotherFileWaitsForTheCliConfigLock(t *testing.T) {
 	env := newAddEnv(t)
 	local := filepath.Join(env.dir, "local.yaml")
-	writeFile(t, local, "apiservers:\n   - name: tdns-auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     apikey: k\n     authmethod: X-API-Key\n")
+	writeFile(t, local, "apiservers:\n   - name: auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     apikey: k\n     authmethod: X-API-Key\n")
 	writeFile(t, env.cli, "cli:\n   localconfig: "+local+"\n")
 	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
 
@@ -179,7 +179,7 @@ func TestAddCreatesTheCliConfigNamedThroughADirectoryAlias(t *testing.T) {
 	if !res.Created {
 		t.Errorf("not reported as created: %+v", res)
 	}
-	if got := env.entries(t); len(got) != 1 || got[0].Name != "tdns-auth" {
+	if got := env.entries(t); len(got) != 1 || got[0].Name != "auth" {
 		t.Errorf("entries: %+v", got)
 	}
 }

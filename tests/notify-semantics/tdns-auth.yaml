@@ -35,7 +35,6 @@ listeners:
 
 apiserver:
    addresses:  [ 127.0.0.1:8331 ]
-   apikey:     notify-semantics-test-key
    certfile:   /var/tmp/notifysem/certs/localhost.crt
    keyfile:    /var/tmp/notifysem/certs/localhost.key
 

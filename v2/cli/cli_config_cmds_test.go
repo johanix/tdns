@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,29 +21,27 @@ import (
 
 func TestApiBaseURL(t *testing.T) {
 	for _, tc := range []struct {
-		addr   string
-		useTLS bool
-		want   string
-		err    bool
+		addr string
+		want string
+		err  bool
 	}{
-		{"127.0.0.1:8989", true, "https://127.0.0.1:8989/api/v1", false},
-		{"127.0.0.1:8989", false, "http://127.0.0.1:8989/api/v1", false},
-		{"0.0.0.0:8990", true, "https://127.0.0.1:8990/api/v1", false}, // wildcard: where it listens, not where we connect
-		{":8990", true, "https://127.0.0.1:8990/api/v1", false},
-		{"[::]:8990", true, "https://[::1]:8990/api/v1", false},
-		{"[2001:db8::1]:8989", true, "https://[2001:db8::1]:8989/api/v1", false},
-		{"ns1.example.net:8989", true, "https://ns1.example.net:8989/api/v1", false},
-		{"[fe80::1%eth0]:8990", true, "https://[fe80::1%25eth0]:8990/api/v1", false}, // a zone's % escaped, so the URL parses
-		{"127.0.0.1", true, "", true},                                                // no port
-		{"", true, "", true},
+		{"127.0.0.1:8989", "https://127.0.0.1:8989/api/v1", false},
+		{"0.0.0.0:8990", "https://127.0.0.1:8990/api/v1", false}, // wildcard: where it listens, not where we connect
+		{":8990", "https://127.0.0.1:8990/api/v1", false},
+		{"[::]:8990", "https://[::1]:8990/api/v1", false},
+		{"[2001:db8::1]:8989", "https://[2001:db8::1]:8989/api/v1", false},
+		{"ns1.example.net:8989", "https://ns1.example.net:8989/api/v1", false},
+		{"[fe80::1%eth0]:8990", "https://[fe80::1%25eth0]:8990/api/v1", false}, // a zone's % escaped, so the URL parses
+		{"127.0.0.1", "", true}, // no port
+		{"", "", true},
 	} {
-		got, err := apiBaseURL(tc.addr, tc.useTLS)
+		got, err := apiBaseURL(tc.addr)
 		if (err != nil) != tc.err {
 			t.Errorf("apiBaseURL(%q): err=%v, want error=%v", tc.addr, err, tc.err)
 			continue
 		}
 		if got != tc.want {
-			t.Errorf("apiBaseURL(%q, %v) = %q, want %q", tc.addr, tc.useTLS, got, tc.want)
+			t.Errorf("apiBaseURL(%q) = %q, want %q", tc.addr, got, tc.want)
 		}
 		if got != "" {
 			if _, err := url.Parse(got); err != nil {
@@ -87,7 +86,7 @@ func TestFreeName(t *testing.T) {
 // invalid --name, not written.
 func TestDerivedNameIsValidated(t *testing.T) {
 	long := strings.Repeat("a", 32) // valid, and the most a name may be
-	existing := []ApiDetails{{Name: "tdns-auth"}, {Name: long, Role: "auth"}}
+	existing := []ApiDetails{{Name: "auth"}, {Name: long, Role: "auth"}}
 	var entry ApiDetails
 	var res AddResult
 	err := chooseEntryName(&entry, &res, "auth", existing, AddOptions{DaemonConfig: "/etc/tdns/tdns-" + long + ".yaml"})
@@ -158,12 +157,12 @@ func TestDetectDaemonRole(t *testing.T) {
 
 const sampleCli = `# CLI config
 apiservers:
-   - name:              tdns-auth
+   - name:              auth
      baseurl:           https://127.0.0.1:8989/api/v1
      apikey:            key-one
      authmethod:        X-API-Key
 
-   - name:              tdns-agent
+   - name:              agent
      baseurl:           https://127.0.0.1:8987/api/v1
      apikey:            key-two
      authmethod:        X-API-Key
@@ -177,7 +176,7 @@ keys:
 func newEntry() ApiDetails {
 	return ApiDetails{
 		Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1",
-		ApiKey: "key-three", AuthMethod: "X-API-Key", ConfigFile: "/etc/tdns/tdns-auth2.yaml",
+		Pins: []string{"cGluLXRocmVlLXBpbi10aHJlZS1waW4tdGhyZWUtcGk="}, ConfigFile: "/etc/tdns/tdns-auth2.yaml",
 	}
 }
 
@@ -350,18 +349,18 @@ func TestYamlScalar(t *testing.T) {
 	}
 }
 
-// An API key YAML would read as something other than a string -- a number,
-// mostly -- must come back through the CLI's own reader exactly as written,
-// or the add would undo itself.
-func TestNumericLookingKeysReadBackAsWritten(t *testing.T) {
+// A name or path YAML would read as something other than a string -- a
+// number, mostly -- must come back through the CLI's own reader exactly as
+// written, or the add would undo itself.
+func TestNumericLookingValuesReadBackAsWritten(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "tdns-ncli.yaml")
-	for _, key := range []string{"001234", "0x1F", "0o17", "1e3", "12", "1.50", "1_000", ".inf", "~", "null"} {
+	for _, v := range []string{"001234", "0x1F", "0o17", "1e3", "12", "1.50", "1_000", ".inf", "~", "null"} {
 		e := newEntry()
-		e.ApiKey = key
+		e.ConfigFile = v
 		writeFile(t, p, "apiservers:\n"+renderEntry(e, itemLayout{indent: 3, gap: 1, valueCol: defValueCol}))
 		got, err := ReadApiServers(p)
-		if err != nil || len(got) != 1 || got[0].ApiKey != key {
-			t.Errorf("key %q read back as %+v, %v", key, got, err)
+		if err != nil || len(got) != 1 || got[0].ConfigFile != v {
+			t.Errorf("config-file %q read back as %+v, %v", v, got, err)
 		}
 	}
 }
@@ -428,35 +427,36 @@ func writeFile(t *testing.T, path, content string) {
 }
 
 // daemonYAML is a daemon config with an apiserver: block.
-func daemonYAML(service, addr, key string, extra string) string {
+func daemonYAML(service, addr, extra string) string {
 	s := ""
 	if service != "" {
 		s += "service:\n   name: " + service + "\n"
 	}
-	return s + "apiserver:\n   addresses: [ " + addr + " ]\n   apikey: " + key + "\n" + extra
+	return s + "apiserver:\n   addresses: [ " + addr + " ]\n" + extra
 }
 
 func TestReadDaemonApi(t *testing.T) {
 	dir := t.TempDir()
 
 	p := filepath.Join(dir, "tdns-auth2.yaml")
-	writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8990", "k2", ""))
+	writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8990", ""))
 	got, err := ReadDaemonApi(p, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Role != "auth" || got.ApiKey != "k2" || !got.UseTLS || got.ConfigFile != p {
+	if got.Role != "auth" || got.ConfigFile != p || got.AccessFile != filepath.Join(dir, "tdns-auth2-access.yaml") {
 		t.Errorf("got %+v", got)
 	}
 
-	// usetls false is honoured; absent means true, as in the daemon.
+	// An imrengine: block and no service: is tdns-imr; access-file: moves
+	// the access file.
 	p2 := filepath.Join(dir, "tdns-imr.yaml")
-	writeFile(t, p2, "imrengine:\n   x: 1\n"+daemonYAML("", "127.0.0.1:8080", "ik", "   usetls: false\n"))
+	writeFile(t, p2, "imrengine:\n   x: 1\n"+daemonYAML("", "127.0.0.1:8080", "   access-file: /srv/imr-access.yaml\n"))
 	got, err = ReadDaemonApi(p2, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Role != "imr" || got.UseTLS {
+	if got.Role != "imr" || got.AccessFile != "/srv/imr-access.yaml" {
 		t.Errorf("imr: %+v", got)
 	}
 
@@ -502,9 +502,10 @@ func TestReadDaemonApi(t *testing.T) {
 	if _, err = ReadDaemonApi(p4, ""); err == nil || !strings.Contains(err.Error(), "apiserver.addresses") {
 		t.Errorf("no addresses: err = %v", err)
 	}
+	// No API key is needed: an address is enough.
 	writeFile(t, p4, "service:\n   name: TDNS-AUTH\napiserver:\n   addresses: [ 127.0.0.1:1 ]\n")
-	if _, err = ReadDaemonApi(p4, ""); err == nil || !strings.Contains(err.Error(), "apikey") {
-		t.Errorf("no apikey: err = %v", err)
+	if _, err = ReadDaemonApi(p4, ""); err != nil {
+		t.Errorf("no apikey: err = %v, want none", err)
 	}
 }
 
@@ -533,7 +534,7 @@ func newAddEnv(t *testing.T) *addEnv {
 func (e *addEnv) daemon(t *testing.T, file, service, addr string) string {
 	t.Helper()
 	p := filepath.Join(e.dir, file)
-	writeFile(t, p, daemonYAML(service, addr, "key-"+file, ""))
+	writeFile(t, p, daemonYAML(service, addr, ""))
 	return p
 }
 
@@ -568,7 +569,7 @@ func TestAddTwoAuthDaemons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Created || !res.Canonical || res.Entry.Name != "tdns-auth" || res.Entry.Role != "" {
+	if !res.Created || !res.Canonical || res.Entry.Name != "auth" || res.Entry.Role != "auth" {
 		t.Errorf("first add: %+v", res)
 	}
 	if fi, err := os.Stat(env.cli); err != nil || fi.Mode().Perm() != 0o600 {
@@ -588,7 +589,7 @@ func TestAddTwoAuthDaemons(t *testing.T) {
 		t.Fatalf("%d entries: %+v", len(got), got)
 	}
 	// Not running: config-file: only, and the command that completes it.
-	want := ApiDetails{Name: "auth2", Role: "auth", AuthMethod: "none", ConfigFile: second}
+	want := ApiDetails{Name: "auth2", Role: "auth", ConfigFile: second}
 	if !reflect.DeepEqual(got[1], want) {
 		t.Errorf("entry = %+v\nwant    %+v", got[1], want)
 	}
@@ -660,7 +661,7 @@ func TestAddNaming(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := filepath.Join(sub, "tdns-auth.yaml")
-	writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8991", "k", ""))
+	writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8991", ""))
 	res, err := env.add(t, p, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -680,7 +681,7 @@ func TestAddNaming(t *testing.T) {
 		"9lives":    "must start with a letter",
 	} {
 		q := filepath.Join(env.dir, "q.yaml")
-		writeFile(t, q, daemonYAML("TDNS-AUTH", "127.0.0.1:8999", "k", ""))
+		writeFile(t, q, daemonYAML("TDNS-AUTH", "127.0.0.1:8999", ""))
 		_, err := env.add(t, q, func(o *AddOptions) {
 			o.Name = name
 			o.CommandWordTaken = func(n string) bool { return n == "config" }
@@ -704,7 +705,7 @@ func TestAddNaming(t *testing.T) {
 func TestAddRefusesClashes(t *testing.T) {
 	env := newAddEnv(t)
 	first := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
-	writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     config-file: "+first+"\n")
+	writeFile(t, env.cli, "apiservers:\n   - name: auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     config-file: "+first+"\n")
 
 	// A different daemon config naming the same API address.
 	clash := env.daemon(t, "tdns-auth9.yaml", "TDNS-AUTH", "127.0.0.1:8989")
@@ -713,7 +714,7 @@ func TestAddRefusesClashes(t *testing.T) {
 	}
 
 	// The same file, but its API address has since moved.
-	writeFile(t, first, daemonYAML("TDNS-AUTH", "127.0.0.1:7777", "k", ""))
+	writeFile(t, first, daemonYAML("TDNS-AUTH", "127.0.0.1:7777", ""))
 	if _, err := env.add(t, first, nil); err == nil || !strings.Contains(err.Error(), "different API address") {
 		t.Errorf("moved address: err = %v", err)
 	}
@@ -756,7 +757,8 @@ func TestAddDryRunChangesNothing(t *testing.T) {
 	var sb strings.Builder
 	printAddResult(&sb, res, true, env.cli)
 	out := sb.String()
-	if !strings.HasPrefix(out, "Would add \"auth2\"") || strings.Contains(out, "apikey") || !strings.Contains(out, "config update auth2 --cert") {
+	if !strings.HasPrefix(out, "Would add the new entry \"auth2\"") || strings.Contains(out, "apikey") || !strings.Contains(unwrapCommands(out), "config update auth2 --cert") ||
+		!strings.Contains(out, "\n   touch "+shellQuote(filepath.Join(env.dir, "tdns-auth2-access.yaml"))+"\n") {
 		t.Errorf("printed:\n%s", out)
 	}
 }
@@ -767,8 +769,8 @@ func TestAddDryRunChangesNothing(t *testing.T) {
 func TestAddRefusesWhenAnOverlayHidesTheEntry(t *testing.T) {
 	env := newAddEnv(t)
 	local := filepath.Join(env.dir, "local.yaml")
-	writeFile(t, local, "apiservers:\n   - name: tdns-auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     apikey: k\n     authmethod: X-API-Key\n")
-	mainCfg := "cli:\n   localconfig: " + local + "\napiservers:\n   - name: tdns-imr\n     baseurl: http://127.0.0.1:8080/api/v1\n     apikey: k\n     authmethod: X-API-Key\n"
+	writeFile(t, local, "apiservers:\n   - name: auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     apikey: k\n     authmethod: X-API-Key\n")
+	mainCfg := "cli:\n   localconfig: " + local + "\napiservers:\n   - name: imr\n     baseurl: http://127.0.0.1:8080/api/v1\n     apikey: k\n     authmethod: X-API-Key\n"
 	writeFile(t, env.cli, mainCfg)
 	d := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
 
@@ -893,29 +895,44 @@ func TestAddFlowStyleTellsYouWhatToAdd(t *testing.T) {
 
 // ---------------------------------------------------- instance-name hardening
 
-// The collision the role-name check could not see: an instance named like the
-// canonical entry's API CLIENT (tdns-auth), not like its role (auth). Both
-// would be one client in tdns.Globals.ApiClients, the later silently winning.
+// An instance named like another entry's API client is refused: both would
+// be one client in tdns.Globals.ApiClients, the later silently winning. The
+// client of a downstream role may have another name than the role (a
+// package registers it), and a role-less entry is a client of its own.
 func TestInstanceNameMayNotShareAnApiClient(t *testing.T) {
-	for name, entries := range map[string][]ApiDetails{
-		"canonical entry present": {
-			{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1"},
-			{Name: "tdns-auth", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1"},
-		},
-		"canonical entry absent": {
-			{Name: "tdns-imr", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1"},
-		},
+	for name, tc := range map[string]struct {
+		register [2]string
+		entries  []ApiDetails
+		want     string
+	}{
+		"a downstream role's client name": {register: [2]string{"signer", "tdns-mpsigner"},
+			entries: []ApiDetails{{Name: "tdns-mpsigner", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1"}},
+			want:    "API-client name"},
 		"an entry for a daemon with no tree": {
-			{Name: "tdns-reporter", BaseURL: "https://127.0.0.1:8991/api/v1"},
-			{Name: "tdns-reporter", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1"},
-		},
+			entries: []ApiDetails{
+				{Name: "tdns-reporter", BaseURL: "https://127.0.0.1:8991/api/v1"},
+				{Name: "tdns-reporter", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1"},
+			},
+			want: "API-client name"},
+		"a built-in role's name": {
+			entries: []ApiDetails{{Name: "imr", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1"}},
+			want:    "collides with a built-in role"},
+		"a role entry twice": {
+			entries: []ApiDetails{
+				{Name: "auth", BaseURL: "https://127.0.0.1:8989/api/v1"},
+				{Name: "auth", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1"},
+			},
+			want: "an earlier apiservers entry has the same name"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			withCleanRoleRegistry(t)
+			if tc.register[0] != "" {
+				RegisterRole(tc.register[0], tc.register[1])
+			}
 			root := &cobra.Command{Use: "tdns-ncli"}
-			w := WireInstanceTrees(root, entries)
-			if len(w) != 1 || !strings.Contains(w[0], "API-client name") {
-				t.Fatalf("warnings = %v", w)
+			w := WireInstanceTrees(root, tc.entries)
+			if len(w) != 1 || !strings.Contains(w[0], tc.want) {
+				t.Fatalf("warnings = %v, want one with %q", w, tc.want)
 			}
 			if len(root.Commands()) != 0 {
 				t.Error("the colliding instance was wired anyway")
@@ -933,20 +950,19 @@ func TestCollidingInstanceGetsNoClient(t *testing.T) {
 	t.Cleanup(func() { tdns.Globals.ApiClients, tdns.Globals.Api, apiConfig = savedClients, savedApi, savedConf })
 	tdns.Globals.ApiClients = map[string]*tdns.ApiClient{}
 
-	c := &CliConf{ApiServers: []ApiDetails{
-		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1", ConfigFile: "/etc/tdns/tdns-auth.yaml"},
-		{Name: "tdns-auth", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1", ConfigFile: "/etc/tdns/other.yaml"},
-		{Name: "tdns-imr", Role: "auth", BaseURL: "https://127.0.0.1:8991/api/v1"},
-		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8992/api/v1"},
-		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8993/api/v1"},
+	p := []string{pinOf("d")}
+	c := &CliConf{Client: testClientPair(t), ApiServers: []ApiDetails{
+		{Name: "auth", BaseURL: "https://127.0.0.1:8989/api/v1", Pins: p, ConfigFile: "/etc/tdns/tdns-auth.yaml"},
+		{Name: "auth", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1", Pins: p, ConfigFile: "/etc/tdns/other.yaml"},
+		{Name: "imr", Role: "auth", BaseURL: "https://127.0.0.1:8991/api/v1", Pins: p},
+		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8992/api/v1", Pins: p},
+		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8993/api/v1", Pins: p},
 		// The wiring refuses the first auth3 (no tree for its role) and wires
 		// the second: the client must be the second's.
-		{Name: "auth3", Role: "nosuch", BaseURL: "https://127.0.0.1:8994/api/v1"},
-		{Name: "auth3", Role: "auth", BaseURL: "https://127.0.0.1:8995/api/v1"},
-		// Refused for its name (a command), and its rootca does not exist:
-		// a client for it would make tdns.NewClient exit, stopping every
-		// command, not just this entry.
-		{Name: "config", Role: "auth", BaseURL: "https://127.0.0.1:8996/api/v1", RootCA: "/nonexistent/ca.pem"},
+		{Name: "auth3", Role: "nosuch", BaseURL: "https://127.0.0.1:8994/api/v1", Pins: p},
+		{Name: "auth3", Role: "auth", BaseURL: "https://127.0.0.1:8995/api/v1", Pins: p},
+		// Refused for its name (a command).
+		{Name: "config", Role: "auth", BaseURL: "https://127.0.0.1:8996/api/v1", Pins: p},
 	}}
 	root := &cobra.Command{Use: "tdns-ncli"}
 	root.AddCommand(&cobra.Command{Use: "config"})
@@ -957,11 +973,11 @@ func TestCollidingInstanceGetsNoClient(t *testing.T) {
 	if ac, ok := tdns.Globals.ApiClients["config"]; ok {
 		t.Errorf("an entry the wiring refused got a client: %+v", ac)
 	}
-	if ac := tdns.Globals.ApiClients["tdns-auth"]; ac == nil || ac.BaseUrl != "https://127.0.0.1:8989/api/v1" {
-		t.Errorf("tdns-auth client: %+v", ac)
+	if ac := tdns.Globals.ApiClients["auth"]; ac == nil || ac.BaseUrl != "https://127.0.0.1:8989/api/v1" {
+		t.Errorf("auth client (the first auth wins): %+v", ac)
 	}
-	if ac, ok := tdns.Globals.ApiClients["tdns-imr"]; ok {
-		t.Errorf("an auth instance named tdns-imr got the imr client: %+v", ac)
+	if ac, ok := tdns.Globals.ApiClients["imr"]; ok {
+		t.Errorf("an auth instance named imr got the imr client: %+v", ac)
 	}
 	if ac := tdns.Globals.ApiClients["auth2"]; ac == nil || ac.BaseUrl != "https://127.0.0.1:8992/api/v1" {
 		t.Errorf("auth2 client (the first auth2 wins, as in the wiring): %+v", ac)
@@ -969,8 +985,8 @@ func TestCollidingInstanceGetsNoClient(t *testing.T) {
 	if ac := tdns.Globals.ApiClients["auth3"]; ac == nil || ac.BaseUrl != "https://127.0.0.1:8995/api/v1" {
 		t.Errorf("auth3 client (the entry the wiring accepts, not the refused one before it): %+v", ac)
 	}
-	if d := getApiDetailsByClientKey("tdns-auth"); d == nil || d.ConfigFile != "/etc/tdns/tdns-auth.yaml" {
-		t.Errorf("config lookup for tdns-auth: %+v", d)
+	if d := getApiDetailsByClientKey("auth"); d == nil || d.ConfigFile != "/etc/tdns/tdns-auth.yaml" {
+		t.Errorf("config lookup for auth: %+v", d)
 	}
 }
 
@@ -981,7 +997,7 @@ func TestBuildListRows(t *testing.T) {
 	root := &cobra.Command{Use: "tdns-ncli"}
 	root.AddCommand(&cobra.Command{Use: "version"}, NewCliConfigCmd())
 	entries := []ApiDetails{
-		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1"},
+		{Name: "auth", BaseURL: "https://127.0.0.1:8989/api/v1"},
 		{Name: "tdns-reporter", BaseURL: "https://127.0.0.1:8991/api/v1"},
 		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1", ConfigFile: "/etc/tdns/tdns-auth2.yaml"},
 		{Name: "config", Role: "auth", BaseURL: "https://127.0.0.1:8992/api/v1"},
@@ -1003,7 +1019,7 @@ func TestBuildListRows(t *testing.T) {
 		byName[r.Name] = r
 	}
 
-	if r := byName["tdns-auth"]; r.Command != "auth" || r.Status != "ok" || !strings.HasSuffix(r.ConfigFile, "(default)") || !strings.Contains(r.ConfigFile, tdns.DefaultAuthCfgFile) {
+	if r := byName["auth"]; r.Command != "auth" || r.Status != "ok" || !strings.HasSuffix(r.ConfigFile, "(default)") || !strings.Contains(r.ConfigFile, tdns.DefaultAuthCfgFile) {
 		t.Errorf("canonical: %+v", r)
 	}
 	if r := byName["tdns-reporter"]; r.Command != "-" || !strings.Contains(r.Status, "no command tree") {
@@ -1030,42 +1046,38 @@ func TestBuildListRows(t *testing.T) {
 func TestCheckEntriesPingsEachAPI(t *testing.T) {
 	// The handler hands over what it saw on a channel: the HTTP answer is no
 	// synchronisation edge between the handler's goroutine and this one.
-	gotKey := make(chan string, 8)
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	gotCert := make(chan bool, 8)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v1/ping" {
 			http.NotFound(w, r)
 			return
 		}
-		gotKey <- r.Header.Get("X-API-Key")
+		gotCert <- r.TLS != nil && len(r.TLS.PeerCertificates) == 1
 		json.NewEncoder(w).Encode(tdns.PingResponse{
 			Msg: "pong", Version: "v-test", BootTime: time.Now().Add(-90 * time.Minute), Pings: 1, Pongs: 1,
 		})
 	}))
+	srv.TLS = &tls.Config{ClientAuth: tls.RequestClientCert, MinVersion: tls.VersionTLS13}
+	srv.StartTLS()
 	defer srv.Close()
-
-	// A directory passes a stat but is no CA file; tdns.NewClient would end
-	// the process on it. So would a file with no certificate in it.
-	caDir := t.TempDir()
-	notPEM := filepath.Join(caDir, "not.pem")
-	writeFile(t, notPEM, "not a certificate\n")
+	pin := tdns.SPKISHA256(srv.Certificate())
 
 	entries := []ApiDetails{
-		{Name: "up", BaseURL: srv.URL + "/api/v1", ApiKey: "sekret", AuthMethod: "X-API-Key"},
-		{Name: "down", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key"},
-		{Name: "badca", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "/nonexistent/ca.pem"},
-		{Name: "tlsa", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "tlsa"},
-		{Name: "cadir", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: caDir},
-		{Name: "notpem", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: notPEM},
+		{Name: "up", BaseURL: srv.URL + "/api/v1", Pins: []string{pin}},
+		{Name: "down", BaseURL: "https://127.0.0.1:1/api/v1", Pins: []string{pin}},
+		{Name: "wrongpin", BaseURL: srv.URL + "/api/v1", Pins: []string{pinOf("other")}},
+		{Name: "nopins", BaseURL: srv.URL + "/api/v1"},
+		{Name: "plain", BaseURL: "http://127.0.0.1:1/api/v1"},
 	}
-	res := CheckEntries(entries, CliClientConf{}, 5*time.Second)
+	res := CheckEntries(entries, testClientPair(t), 5*time.Second)
 
 	if !strings.HasPrefix(res[0], "ok") || !strings.Contains(res[0], "v-test") || !strings.Contains(res[0], "up 1h30m") {
 		t.Errorf("up: %q", res[0])
 	}
 	select {
-	case k := <-gotKey:
-		if k != "sekret" {
-			t.Errorf("server saw X-API-Key %q", k)
+	case ok := <-gotCert:
+		if !ok {
+			t.Error("the server saw no client certificate")
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("the server saw no ping")
@@ -1073,36 +1085,14 @@ func TestCheckEntriesPingsEachAPI(t *testing.T) {
 	if !strings.HasPrefix(res[1], "FAIL") {
 		t.Errorf("down: %q", res[1])
 	}
-	if !strings.HasPrefix(res[2], "FAIL") || !strings.Contains(res[2], "rootca") {
-		t.Errorf("badca: %q", res[2])
+	if !strings.HasPrefix(res[2], "FAIL") || !strings.Contains(res[2], "--repin") {
+		t.Errorf("wrongpin: %q, want FAIL naming --repin", res[2])
 	}
-	if !strings.HasPrefix(res[3], "not checked") {
-		t.Errorf("tlsa: %q", res[3])
+	if !strings.HasPrefix(res[3], "FAIL") || !strings.Contains(res[3], "--cert") {
+		t.Errorf("nopins: %q, want FAIL naming --cert", res[3])
 	}
-	// newApiClientFor reads and parses the CA file, so a directory or a file
-	// with no certificate in it fails this entry, not the process.
-	if !strings.HasPrefix(res[4], "FAIL") || !strings.Contains(res[4], "rootca") {
-		t.Errorf("cadir: %q", res[4])
-	}
-	if !strings.HasPrefix(res[5], "FAIL") || !strings.Contains(res[5], "no PEM certificate") {
-		t.Errorf("notpem: %q", res[5])
-	}
-
-	// The warning every other command would give for an entry (here: an
-	// unverified daemon) is in the check's result too, after the verdict, so
-	// the leading ok or FAIL that sets the exit status stays first.
-	saved := RequireServerVerification
-	t.Cleanup(func() { RequireServerVerification = saved })
-	RequireServerVerification = true
-	warned := CheckEntries([]ApiDetails{
-		{Name: "insecure", BaseURL: srv.URL + "/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"},
-		{Name: "insecuredown", BaseURL: "https://127.0.0.1:1/api/v1", ApiKey: "k", AuthMethod: "X-API-Key", RootCA: "insecure"},
-	}, CliClientConf{}, 5*time.Second)
-	if !strings.HasPrefix(warned[0], "ok") || !strings.Contains(warned[0], "warning:") || !strings.Contains(warned[0], "not verified") {
-		t.Errorf("insecure entry that answers: %q, want ok with the warning", warned[0])
-	}
-	if !strings.HasPrefix(warned[1], "FAIL") || !strings.Contains(warned[1], "warning:") {
-		t.Errorf("insecure entry that does not answer: %q, want FAIL with the warning", warned[1])
+	if !strings.HasPrefix(res[4], "FAIL") || !strings.Contains(res[4], "TLS only") {
+		t.Errorf("plain: %q, want FAIL: TLS only", res[4])
 	}
 }
 
@@ -1151,18 +1141,17 @@ func statOf(t *testing.T, p string) os.FileInfo {
 	return fi
 }
 
-// A row named tdns-auth that carries a role: is an instance using a reserved
-// name, which the CLI ignores. It is not the canonical entry: an add that
-// would become the canonical tdns-auth says so instead of filing the daemon
-// as an extra instance (which left `tdns-ncli auth` with no client), and an
-// add under a name of its own is not blocked by it.
-func TestRoleCarryingCanonicalNameIsNotTheCanonicalEntry(t *testing.T) {
-	existing := []ApiDetails{{Name: "tdns-auth", Role: "auth", BaseURL: "https://127.0.0.1:8989/api/v1"}}
+// An entry with the old name (tdns-auth) holds the auth entry until it is
+// renamed: an add that would become the auth entry says to rename it, with
+// the command, and an add under a name of its own is not blocked by it.
+func TestOldNameEntryHoldsTheRoleEntry(t *testing.T) {
+	asNcli(t)
+	existing := []ApiDetails{{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1"}}
 	var entry ApiDetails
 	var res AddResult
 	err := chooseEntryName(&entry, &res, "auth", existing, AddOptions{DaemonConfig: "/etc/tdns/tdns-auth.yaml"})
-	if err == nil || !strings.Contains(err.Error(), "role: auth") {
-		t.Fatalf("err = %v, entry = %+v; want the ignored tdns-auth row named", err, entry)
+	if err == nil || !strings.Contains(err.Error(), "\n   tdns-ncli config update tdns-auth --rename auth") {
+		t.Fatalf("err = %v, entry = %+v; want the rename named", err, entry)
 	}
 	entry, res = ApiDetails{}, AddResult{}
 	if err := chooseEntryName(&entry, &res, "auth", existing, AddOptions{DaemonConfig: "/etc/tdns/x.yaml", Name: "auth3"}); err != nil || entry.Name != "auth3" {
@@ -1183,7 +1172,7 @@ func TestSameDaemonThroughASymlinkIsAlreadyKnown(t *testing.T) {
 		t.Skip("no symlinks here")
 	}
 	res, err := env.add(t, link, nil)
-	if err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote {
+	if err != nil || res.AlreadyKnown != "auth" || res.Wrote {
 		t.Fatalf("re-add through a symlink: %+v, %v; want it already known", res, err)
 	}
 }
@@ -1199,7 +1188,7 @@ func TestPrintedAdviceKeepsTheCliConfig(t *testing.T) {
 	var sb strings.Builder
 	res := &AddResult{Entry: ApiDetails{Name: "auth2", Role: "auth"}, File: "/tmp/local.yaml", Running: true}
 	printAddResult(&sb, res, false, cfg)
-	if want := "Try it:  tdns-ncli --config '/tmp/lab config.yaml' auth2 ping"; !strings.Contains(sb.String(), want) {
+	if want := "Verify with:  tdns-ncli --config '/tmp/lab config.yaml' auth2 ping"; !strings.Contains(sb.String(), want) {
 		t.Errorf("missing %q in:\n%s", want, sb.String())
 	}
 	sb.Reset()
@@ -1209,7 +1198,9 @@ func TestPrintedAdviceKeepsTheCliConfig(t *testing.T) {
 	}
 	sb.Reset()
 	printAddResult(&sb, res, false, DefaultCliConfigFile)
-	if want := "Try it:  tdns-ncli auth2 ping"; !strings.Contains(sb.String(), want) {
+	// The whole output: the verdict, and the command to try it on a line of
+	// its own when the one line would pass 72 columns.
+	if want := "Added the new entry \"auth2\" to /tmp/local.yaml.\nVerify with:  tdns-ncli auth2 ping\n"; sb.String() != want {
 		t.Errorf("missing %q in:\n%s", want, sb.String())
 	}
 }
@@ -1222,15 +1213,15 @@ func TestNoWiringNoInstanceClients(t *testing.T) {
 	t.Cleanup(func() { tdns.Globals.ApiClients, tdns.Globals.Api, apiConfig = savedClients, savedApi, savedConf })
 	tdns.Globals.ApiClients = map[string]*tdns.ApiClient{}
 
-	c := &CliConf{ApiServers: []ApiDetails{
-		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1"},
-		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1", RootCA: "/nonexistent/ca.pem"},
+	c := &CliConf{Client: testClientPair(t), ApiServers: []ApiDetails{
+		{Name: "auth", BaseURL: "https://127.0.0.1:8989/api/v1", Pins: []string{pinOf("a")}},
+		{Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1", Pins: []string{pinOf("b")}},
 	}}
 	if err := InitApiClients(c); err != nil {
 		t.Fatal(err)
 	}
-	if tdns.Globals.ApiClients["tdns-auth"] == nil {
-		t.Error("no client for the canonical entry")
+	if tdns.Globals.ApiClients["auth"] == nil {
+		t.Error("no client for the auth entry")
 	}
 	if ac, ok := tdns.Globals.ApiClients["auth2"]; ok {
 		t.Errorf("an instance nothing wired got a client: %+v", ac)

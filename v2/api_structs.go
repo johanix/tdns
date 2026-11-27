@@ -703,15 +703,8 @@ type ConfigResponse struct {
 	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`     // per-zone would-strand findings (with GuardrailBlocked)
 	Imr                  *ImrStatus            `json:"imr,omitempty"`                // IMR priming + stub/forward state, when this daemon carries one
 	Proc                 *ProcStatus           `json:"proc,omitempty"`               // process resources (open fds, goroutines), for leak visibility (#443)
-	Access               *ApiAccessStatus      `json:"access,omitempty"`             // the network API's access policy as running, when apiserver.access-file is set
+	Access               *ApiAccessStatus      `json:"access,omitempty"`             // the network API's access policy as running: the access file, and its clients or why there are none
 	ConfigFile           string                `json:"configfile,omitempty"`         // the config file this daemon runs, absolute (every /config reply)
-	// ApiTCPStopped are the plaintext TCP API listeners an access file
-	// closed (it requires TLS). They stay closed until a restart, also once
-	// the access file is removed, so they are reported whether Access is
-	// set or not.
-	ApiTCPStopped []string `json:"apitcpstopped,omitempty"`
-	// ApiTCPStoppedBy is the access file that stopped them.
-	ApiTCPStoppedBy string `json:"apitcpstoppedby,omitempty"`
 	// ApiTCPNotStarted are the TCP API listeners the daemon did not start
 	// because it had no API certificate (it could not write the default
 	// pair), as its dispatcher decided at start; ApiTCPNoCert is that
@@ -719,8 +712,8 @@ type ConfigResponse struct {
 	ApiTCPNotStarted []string `json:"apitcpnotstarted,omitempty"`
 	ApiTCPNoCert     string   `json:"apitcpnocert,omitempty"`
 	// ApiTCPListening are the TCP API addresses that listen now: those the
-	// dispatcher bound and serves, less any an access file stopped or that
-	// stopped serving with an error since. The ApiServer line prints these.
+	// dispatcher bound and serves, less any that stopped serving with an
+	// error since. The ApiServer line prints these.
 	ApiTCPListening []string `json:"apitcplistening,omitempty"`
 	// ApiTCPFailed are the TCP API addresses the daemon could not listen on,
 	// each with why: the bind failed at start, or the server stopped with an
@@ -808,15 +801,12 @@ type DebugResponse struct {
 }
 
 type ApiClient struct {
-	Name       string
-	Client     *http.Client
-	BaseUrl    string
-	Addresses  []string // if non-empty, replace the host part of the BaseUrl with each of these
-	apiKey     string
-	AuthMethod string
-	UseTLS     bool
-	Verbose    bool
-	Debug      bool
+	Name      string
+	Client    *http.Client
+	BaseUrl   string
+	Addresses []string // if non-empty, replace the host part of the BaseUrl with each of these
+	Verbose   bool
+	Debug     bool
 
 	// deSEC stuff (from MUSIC)
 	Email    string

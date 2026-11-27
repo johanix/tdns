@@ -30,7 +30,7 @@ func TestPlainTextRefusalIsAnError(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	api := &ApiClient{BaseUrl: srv.URL, AuthMethod: "none", Client: srv.Client()}
+	api := &ApiClient{BaseUrl: srv.URL, Client: srv.Client()}
 
 	status, _, err := api.Post("/refused", []byte("{}"))
 	if err == nil || status != http.StatusForbidden {
@@ -57,7 +57,7 @@ func TestStopDaemonReportsARefusal(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, adminOnly, http.StatusForbidden)
 	}))
-	refusing := &ApiClient{BaseUrl: srv.URL, AuthMethod: "none", Client: srv.Client()}
+	refusing := &ApiClient{BaseUrl: srv.URL, Client: srv.Client()}
 	if err := refusing.StopDaemon(); err == nil {
 		t.Error("StopDaemon on a refusal returned nil")
 	}
@@ -66,14 +66,14 @@ func TestStopDaemonReportsARefusal(t *testing.T) {
 		json.NewEncoder(w).Encode(CommandResponse{Status: "stopping"})
 	}))
 	defer stopping.Close()
-	ok := &ApiClient{BaseUrl: stopping.URL, AuthMethod: "none", Client: stopping.Client()}
+	ok := &ApiClient{BaseUrl: stopping.URL, Client: stopping.Client()}
 	if err := ok.StopDaemon(); err != nil {
 		t.Errorf("StopDaemon on an acknowledged stop: %v", err)
 	}
 
 	gone := srv.URL
 	srv.Close()
-	notRunning := &ApiClient{BaseUrl: gone, AuthMethod: "none", Client: &http.Client{}}
+	notRunning := &ApiClient{BaseUrl: gone, Client: &http.Client{}}
 	if err := notRunning.StopDaemon(); err != nil {
 		t.Errorf("StopDaemon with no daemon running: %v (want nil: stop is a no-op)", err)
 	}
@@ -81,7 +81,7 @@ func TestStopDaemonReportsARefusal(t *testing.T) {
 	// The local socket of a daemon that is not running: no socket file.
 	// (StartDaemon asks the same daemonNotRunning before it starts one, and
 	// while it waits for the new one to answer; see TestDaemonNotRunning.)
-	noSocket := NewClient("local", "unix://"+filepath.Join(shortTempDir(t), "absent.sock"), "", "none", "")
+	noSocket := NewClientWithOptions("local", "unix://"+filepath.Join(shortTempDir(t), "absent.sock"), ClientOptions{})
 	if err := noSocket.StopDaemon(); err != nil {
 		t.Errorf("StopDaemon with no socket file: %v (want nil: stop is a no-op)", err)
 	}
@@ -93,7 +93,7 @@ func TestStopDaemonReportsARefusal(t *testing.T) {
 func TestDaemonNotRunning(t *testing.T) {
 	dir := shortTempDir(t)
 	status := func(baseurl string) error {
-		_, _, err := NewClient("local", baseurl, "", "none", "").UpdateDaemon(CommandPost{Command: "status"}, false)
+		_, _, err := NewClientWithOptions("local", baseurl, ClientOptions{}).UpdateDaemon(CommandPost{Command: "status"}, false)
 		return err
 	}
 
@@ -104,7 +104,7 @@ func TestDaemonNotRunning(t *testing.T) {
 	gone := httptest.NewServer(http.NotFoundHandler())
 	url := gone.URL
 	gone.Close()
-	notRunning := &ApiClient{BaseUrl: url, AuthMethod: "none", Client: &http.Client{}}
+	notRunning := &ApiClient{BaseUrl: url, Client: &http.Client{}}
 	if _, _, err := notRunning.UpdateDaemon(CommandPost{Command: "status"}, false); !daemonNotRunning(err) {
 		t.Errorf("refused TCP: %v, want not running", err)
 	}

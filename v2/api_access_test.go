@@ -3,6 +3,8 @@ package tdns
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -27,7 +29,7 @@ func TestParseAndValidateAccessFile(t *testing.T) {
 		{name: "unknown role", yaml: "clients:\n  - {name: anna, pin: " + pa + ", role: operator}\n", wantErr: "unknown role"},
 		{name: "name required", yaml: "clients:\n  - {pin: " + pa + ", role: read-only}\n", wantErr: "name is required"},
 		{name: "name twice", yaml: "clients:\n  - {name: anna, pin: " + pa + ", role: read-only}\n  - {name: anna, pin: " + pb + ", role: read-only}\n", wantErr: "used twice"},
-		{name: "pin twice", yaml: "clients:\n  - {name: anna, pin: " + pa + ", role: read-only}\n  - {name: bob, pin: " + pa + ", role: read-only}\n", wantErr: "one key, one client"},
+		{name: "pin twice", yaml: "clients:\n  - {name: anna, pin: " + pa + ", role: read-only}\n  - {name: bob, pin: " + pa + ", role: read-only}\n", wantErr: "one certificate, one client"},
 		{name: "malformed pin", yaml: "clients:\n  - {name: anna, pin: not-a-pin, role: read-only}\n", wantErr: "not a SPKI SHA-256 pin"},
 		{name: "pin required", yaml: "clients:\n  - {name: anna, role: read-only}\n", wantErr: "pin is required"},
 		// A misspelt key must not be ignored: "disable" for "disabled" would
@@ -53,21 +55,33 @@ func TestParseAndValidateAccessFile(t *testing.T) {
 	}
 }
 
-func TestAccessFileKeyAuth(t *testing.T) {
-	for in, want := range map[string]bool{"": true, "keyauth: true\n": true, "keyauth: false\n": false} {
+// An access file with the obsolete keyauth: line still parses: the line is
+// ignored (and dropped at the daemon's next write).
+func TestAccessFileObsoleteKeyAuthParses(t *testing.T) {
+	for _, in := range []string{"keyauth: true\n", "keyauth: false\nclients: []\n"} {
 		af, err := ParseAccessFile([]byte(in))
-		if err != nil {
-			t.Fatal(err)
+		if err != nil || af.KeyAuth == nil {
+			t.Errorf("%q: %+v %v, want it parsed with KeyAuth set", in, af, err)
 		}
-		if af.KeyAuthOn() != want {
-			t.Errorf("%q: KeyAuthOn = %v, want %v", in, af.KeyAuthOn(), want)
-		}
+	}
+}
+
+// The access file is always on: next to the config file unless
+// apiserver.access-file moves it, which must then be absolute.
+func TestApiAccessFilePath(t *testing.T) {
+	if got := ApiAccessFilePath("", "/etc/tdns/tdns-auth.yaml"); got != "/etc/tdns/tdns-auth-access.yaml" {
+		t.Errorf("default = %q", got)
+	}
+	if got := ApiAccessFilePath("/srv/a.yaml", "/etc/tdns/tdns-auth.yaml"); got != "/srv/a.yaml" {
+		t.Errorf("configured = %q", got)
+	}
+	if got := ApiAccessFilePath("", ""); got != "" {
+		t.Errorf("no config file = %q", got)
 	}
 }
 
 func TestValidateAccessSettings(t *testing.T) {
 	const access, sock = "/etc/tdns/tdns-auth-access.yaml", "/var/run/tdns/tdns-auth.sock"
-	tcp := []string{"127.0.0.1:8989"}
 	for _, tc := range []struct {
 		name    string
 		conf    ApiServerConf
@@ -75,15 +89,9 @@ func TestValidateAccessSettings(t *testing.T) {
 	}{
 		{name: "nothing", conf: ApiServerConf{}},
 		{name: "access file and socket", conf: ApiServerConf{AccessFile: access, Socket: sock}},
-		{name: "access file, no socket", conf: ApiServerConf{AccessFile: access}, wantErr: "requires the local admin socket"},
+		// No socket: no admin anywhere, which is the operator's choice.
+		{name: "access file, no socket", conf: ApiServerConf{AccessFile: access}},
 		{name: "relative access file", conf: ApiServerConf{AccessFile: "access.yaml", Socket: sock}, wantErr: "absolute"},
-		{name: "socket only", conf: ApiServerConf{Socket: sock}},
-		// An access file requires TLS on TCP, loopback included: the
-		// socket, not plaintext, is the way in when TLS is broken.
-		{name: "access file, TCP with TLS", conf: ApiServerConf{AccessFile: access, Socket: sock, Addresses: tcp, UseTLS: true}},
-		{name: "access file, TCP without TLS", conf: ApiServerConf{AccessFile: access, Socket: sock, Addresses: tcp}, wantErr: "requires TLS"},
-		{name: "access file, no TCP, usetls false", conf: ApiServerConf{AccessFile: access, Socket: sock}},
-		{name: "no access file, TCP without TLS", conf: ApiServerConf{Socket: sock, Addresses: tcp}},
 	} {
 		err := tc.conf.validateAccessSettings()
 		if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
@@ -116,5 +124,30 @@ func TestCheckSpkiPinIsCanonical(t *testing.T) {
 		if err := checkSpkiPin(s); err == nil {
 			t.Errorf("%s variant %q accepted", name, s)
 		}
+	}
+}
+
+// A command printed for the operator runs as pasted: a path with a space in
+// it is quoted, in the touch line and in the chmod a refusal gives.
+func TestAccessHintsQuoteThePath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "my tdns")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "tdns-auth-access.yaml")
+	if msg := accessFileMissing(path); !strings.Contains(msg, "\n   touch '"+path+"'") {
+		t.Errorf("missing-file refusal:\n%s\nwant the path quoted in the touch line", msg)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckAccessFileMode(path); err == nil || !strings.Contains(err.Error(), "\n   chmod go-w '"+path+"'") {
+		t.Errorf("writable file: %v, want the path quoted in the chmod line", err)
+	}
+	if got := shellWord("it's"); got != `'it'\''s'` {
+		t.Errorf("shellWord(it's) = %s", got)
 	}
 }

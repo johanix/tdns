@@ -49,7 +49,7 @@ var rootCmd = &cobra.Command{
 		if cli.NoCliConfigNeeded(cmd, cliConfigPath()) {
 			return
 		}
-		initConfig()
+		initConfig(cmd)
 		initApi()
 	},
 	// tdns-cli has no default action; with no subcommand it prints help.
@@ -85,7 +85,14 @@ func wireInstances() {
 	rootCmd.InitDefaultCompletionCmd()
 
 	cfgPath := cli.ConfigPathFromArgs(os.Args[1:])
-	for _, w := range cli.WireInstanceTrees(rootCmd, cli.EarlyApiServers(cfgPath)) {
+	warnings := cli.WireInstanceTrees(rootCmd, cli.EarlyApiServers(cfgPath))
+	// The CLI config commands (config add|update|list|check) report on the
+	// entries themselves, each problem once: the wiring's warnings would say
+	// it twice.
+	if c, _, err := rootCmd.Find(os.Args[1:]); err == nil && cli.IsCliConfigCmd(c) {
+		return
+	}
+	for _, w := range warnings {
 		fmt.Fprintf(os.Stderr, "tdns-ncli: %s\n", w)
 	}
 }
@@ -154,9 +161,9 @@ func init() {
 	// understands the role: key. Set before anything reads the default (the
 	// flag help below, ConfigPathFromArgs, initConfig).
 	cli.DefaultCliConfigFile = tdns.DefaultNcliCfgFile
-	// An https entry must verify the daemon (pins, a rootca, or rootca:
-	// insecure said out loud); tdns-cli keeps its old default of not checking.
-	cli.RequireServerVerification = true
+	// One "Error:" per error: cobra would print a command's error itself,
+	// and cobra.CheckErr in Execute prints it again.
+	rootCmd.SilenceErrors = true
 
 	// Config/API init moved to rootCmd.PersistentPreRun (skipped for root-level "keys")
 
@@ -164,7 +171,7 @@ func init() {
 	// auth-daemon concern (RFC 9432 catalog zones served by tdns-auth).
 	cli.AuthCmd.AddCommand(cli.CatalogCmd)
 
-	// "config add|update|list": maintain the CLI config's apiservers:
+	// "config add|update|list|check": maintain the CLI config's apiservers:
 	// list. Attached here, before wireInstances runs, so an instance named
 	// "config" is refused as the collision it is.
 	rootCmd.AddCommand(cli.NewCliConfigCmd())
@@ -206,7 +213,7 @@ func cliConfigPath() string {
 }
 
 // initConfig reads in config file and ENV variables if set.
-func initConfig() {
+func initConfig(cmd *cobra.Command) {
 	// The file the pre-run check looked at, so the two cannot differ.
 	viper.SetConfigFile(cliConfigPath())
 
@@ -221,13 +228,15 @@ func initConfig() {
 	} else {
 		if os.IsNotExist(err) {
 			// tdns-ncli's config is its own file, so on a host that has only
-			// ever run tdns-cli it does not exist yet. Say how to make it.
-			// With --config if one was given: the advice has to create the
-			// file that is missing, not the default.
-			log.Fatalf("No CLI config %s. Create it from the daemons' own configs with:\n    %s /etc/tdns/tdns-auth.yaml",
-				viper.ConfigFileUsed(), cli.ConfigAddHint(cfgFile))
+			// ever run tdns-cli it does not exist yet. Say how to make it,
+			// for the daemon the command is for, and with --config if one
+			// was given: the advice has to create the file that is missing.
+			// A refusal, not a log line.
+			fmt.Fprintf(os.Stderr, "Error: %s\n", cli.MissingCliConfig(cmd, cliConfigPath()))
+			os.Exit(1)
 		}
-		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
+		fmt.Fprintf(os.Stderr, "Error: cannot load the CLI config %s: %v\n", viper.ConfigFileUsed(), err)
+		os.Exit(1)
 	}
 
 	// Expand any top-level "include:" directives. viper has no native

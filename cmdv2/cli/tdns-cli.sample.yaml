@@ -12,38 +12,44 @@
 #    # Which architecture's costs to show. Defaults to this host's arch.
 #    # costarch: amd64
 
+# apiservers: the daemons this CLI addresses. An entry's name is the command
+# word that reaches it: "auth" is reached as `tdns-cli auth ...`. As root on
+# the daemon's host,
+#
+#    tdns-ncli config add /etc/tdns/tdns-auth.yaml
+#
+# writes the entry for a daemon: config-file:, through which root reaches the
+# daemon's local admin socket, and for a running daemon whose access file is
+# there, its TCP address and the pins of its certificate (having enrolled
+# your client certificate). tdns-ncli edits this file too:
+# `tdns-ncli --config /etc/tdns/tdns-cli.yaml config add ...`.
+#
+# Over TCP the CLI verifies the daemon by its pins, and nothing else, and
+# presents your client certificate (client: below, or the default that
+# `tdns-ncli client init` makes), whose pin the daemon has in its access
+# file. There are no API keys. An entry with only config-file: works for
+# root on the daemon's host, over the socket.
 apiservers:
-   - name:              tdns-server
-     baseurl:           https://127.0.0.1:8989/api/v1
-     apikey:            winter-is-coming-santa-stuck-in-chimney
-     authmethod:        X-API-Key
+   - name:              auth
+     role:              auth
+     config-file:       /etc/tdns/tdns-auth.yaml
+     # Written by config add for a running daemon:
+     # baseurl:         https://127.0.0.1:8989/api/v1
+     # pins:            [ <the SPKI pin of the daemon's API certificate> ]
 
-   - name:              tdns-agent
-     baseurl:           https://127.0.0.1:8987/api/v1
-     apikey:            winter-is-coming-santa-stuck-in-chimney
-     authmethod:        X-API-Key
-     # config-file:     /etc/tdns/tdns-agent.yaml   # optional; for tdns-cli agent keys generate/show
+   - name:              agent
+     role:              agent
+     config-file:       /etc/tdns/tdns-agent.yaml
 
-   - name:              tdns-reporter
-     baseurl:           https://127.0.0.1:8991/api/v1
-     apikey:            winter-is-coming-santa-stuck-in-chimney
-     authmethod:        X-API-Key
+   - name:              imr
+     role:              imr
+     config-file:       /etc/tdns/tdns-imr.yaml
 
-   - name:              tdns-scanner
-     baseurl:           https://127.0.0.1:8082/api/v1
-     apikey:            you-have-stolen-my-frotzblinger
-     authmethod:        X-API-Key
-
-   - name:              tdns-imr
-     baseurl:           https://127.0.0.1:8084/api/v1
-     apikey:            you-have-stolen-my-frotzblinger
-     authmethod:        X-API-Key
-
-   - name:              tdns-combiner
-     baseurl:           https://127.0.0.1:8085/api/v1
-     apikey:            you-have-stolen-my-frotzblinger
-     authmethod:        X-API-Key
-     # config-file:     /etc/tdns/tdns-combiner.yaml # optional; for tdns-cli combiner keys generate/show
+# The client certificate presented over TCP. Unset, the default pair is used
+# (tdns-ncli client init makes it and prints its pin).
+# client:
+#    cert:              /etc/tdns/certs/tdns-ncli-client.crt
+#    key:               /etc/tdns/certs/tdns-ncli-client.key
 
 keys:
    tsig:

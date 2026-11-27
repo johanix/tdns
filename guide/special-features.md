@@ -574,8 +574,8 @@ RRset is removed and republished.
 
 #### Authentication: `<username, key>`, not a shared key
 
-Requests authenticate with HTTP Basic over TLS. Not the
-management API's single `apiserver.apikey`, and the reason
+Requests authenticate with HTTP Basic over TLS. Not with a
+single shared key, as the management API once did, and the reason
 is authorization rather than authentication strength: a
 shared key names nobody, and a policy that cannot name the
 principal cannot be granular.

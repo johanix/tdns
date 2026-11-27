@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // A SensitiveString is redacted in JSON as it is in logs: anything that sends a
@@ -37,15 +39,19 @@ func TestSensitiveStringMarshalJSON(t *testing.T) {
 	}
 }
 
-// `config status` is what used to hand the key out: the reply carries the whole
-// apiserver: block. Drive the real handler and look at the bytes it writes.
-func TestConfigStatusDoesNotReturnTheApiKey(t *testing.T) {
+// `config status` carries the whole apiserver: block; an API key in a config
+// written before keys went is not decoded at all, so it cannot be in the
+// reply. Drive the real handler and look at the bytes it writes.
+func TestConfigStatusCarriesNoApiKey(t *testing.T) {
 	const secret = "s3cret-api-key-value"
+	var raw map[string]interface{}
+	if err := yaml.Unmarshal([]byte("apiserver:\n   addresses: [ 127.0.0.1:8989 ]\n   apikey: "+secret+"\n"), &raw); err != nil {
+		t.Fatal(err)
+	}
 	conf := &Config{}
-	conf.ApiServer.Addresses = []string{"127.0.0.1:8989"}
-	conf.ApiServer.ApiKey = secret
-	conf.ApiServer.Server.ApiKey = secret + "-server"
-	conf.ApiServer.Agent.ApiKey = secret + "-agent"
+	if err := decodeConfigMap(raw, conf, nil); err != nil {
+		t.Fatal(err)
+	}
 
 	body, _ := json.Marshal(ConfigPost{Command: "status"})
 	rec := httptest.NewRecorder()
@@ -60,9 +66,6 @@ func TestConfigStatusDoesNotReturnTheApiKey(t *testing.T) {
 	var resp ConfigResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
-	}
-	if resp.ApiServer.ApiKey.Value() == "" {
-		t.Error("the reply should still say that a key is set")
 	}
 	if len(resp.ApiServer.Addresses) != 1 {
 		t.Errorf("addresses lost: %+v", resp.ApiServer)

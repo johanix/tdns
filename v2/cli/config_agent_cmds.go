@@ -222,14 +222,9 @@ func runAgentConfigMwe(role, dir string) {
 		cliFatalf("could not generate certificate: %v", err)
 	}
 
-	apiKey, err := randomAPIKey()
-	if err != nil {
-		cliFatalf("could not generate api key: %v", err)
-	}
-
 	apiPort := "8987"
 	dnsPort := "5356"
-	content := renderAgentMweConfig(role, dir, certFile, keyFile, apiKey, apiPort, dnsPort)
+	content := renderAgentMweConfig(role, dir, certFile, keyFile, apiPort, dnsPort)
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		cliFatalf("could not write config %s: %v", cfgPath, err)
 	}
@@ -242,24 +237,16 @@ func runAgentConfigMwe(role, dir string) {
 		fmt.Printf("Reused cert/key:   %s , %s\n", certFile, keyFile)
 	}
 
-	fmt.Printf("\nTo let `tdns-cli %s ...` reach this server, add to your tdns-cli.yaml:\n\n", role)
-	fmt.Printf("  apiservers:\n")
-	fmt.Printf("     - name:       tdns-%s\n", role)
-	fmt.Printf("       baseurl:    https://127.0.0.1:%s/api/v1\n", apiPort)
-	fmt.Printf("       apikey:     %s\n", apiKey)
-	fmt.Printf("       authmethod: X-API-Key\n")
-	fmt.Printf("\nNext steps:\n")
-	fmt.Printf("  tdns-%s --config %s        # start the server\n", role, cfgPath)
-	fmt.Printf("  tdns-cli %s config check --serverconfig %s   # validate\n", role, cfgPath)
+	printMweNextSteps(role, role, cfgPath)
+	fmt.Println(commandLines("tdns-ncli "+role+" config check --serverconfig "+shellQuote(cfgPath), 3))
 }
 
-func renderAgentMweConfig(role, dir, certFile, keyFile, apiKey, apiPort, dnsPort string) string {
+func renderAgentMweConfig(role, dir, certFile, keyFile, apiPort, dnsPort string) string {
 	r := strings.NewReplacer(
 		"{{ROLE}}", role,
 		"{{DIR}}", dir,
 		"{{CERT}}", certFile,
 		"{{KEY}}", keyFile,
-		"{{APIKEY}}", apiKey,
 		"{{APIPORT}}", apiPort,
 		"{{DNSPORT}}", dnsPort,
 	)
@@ -305,10 +292,8 @@ listeners:
 
 apiserver:
    addresses:  [ 127.0.0.1:{{APIPORT}} ]
-   apikey:     {{APIKEY}}
    certfile:   {{CERT}}
    keyfile:    {{KEY}}
-   usetls:     true
 
 db:
    file:  {{DIR}}/tdns-{{ROLE}}.db

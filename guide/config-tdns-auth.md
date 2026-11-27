@@ -35,11 +35,7 @@ listeners:
    transports:  [ do53 ]                           # required
 
 apiserver:
-   addresses:  [ 127.0.0.1:8080 ]                  # required
-   apikey:     "a-long-random-string"              # required
-   certfile:   /etc/tdns/certs/api.crt             # required, must exist
-   keyfile:    /etc/tdns/certs/api.key             # required, must exist
-   usetls:     false
+   addresses:  [ 127.0.0.1:8080 ]                  # or a socket only
 
 db:
    file:  /var/lib/tdns/tdns-auth.db               # required; created on first run
@@ -61,12 +57,13 @@ zones:
 
 Three things about this are easy to get wrong.
 
-**`apiserver.certfile` and `apiserver.keyfile` are required even when
-`usetls: false`.** They are validated as an existing, matching certificate/key
-pair regardless of whether TLS is switched on, so a server with no API TLS
-still needs a cert on disk. `apiserver.addresses` and `apiserver.apikey` are
-likewise required — there is no way to run tdns-auth without its management API
-being configured, though you may point it at loopback.
+**The TCP management API is TLS 1.3, with no API key.** Leave out
+`apiserver.certfile` and `keyfile` and the daemon writes its own self-signed
+pair, `certs/tdns-auth-api.crt` and `.key` next to its config, at its first
+start; clients verify it by its certificate pin. TLS clients authenticate
+with a certificate of their own, whose pin is in the daemon's access file
+(below). A config with `apikey:` or `usetls:` from before still starts: the
+daemon warns that the line is no longer used.
 
 **`transports: [ do53 ]` needs no certificate, but `dot`, `doh` and `doq` all
 need `listeners.certfile`/`keyfile`.** If those are missing, the encrypted
@@ -102,30 +99,48 @@ when `apiserver.addresses` is empty, and a socket the daemon cannot serve is
 reported as a server error (`config status` shows the daemon as degraded)
 rather than stopping it.
 
+The socket is on by default, at a path named after the config file under
+`/var/run/tdns`; `apiserver.socket` moves it, and `socket: none` turns it off
+(and with it the only way to be admin).
+
 `tdns-ncli config add` needs the socket: run as root on the daemon's host,
 it asks the running daemon to add your client certificate's pin to its
 access file (below), checks one request over TCP, and writes one entry
-with `authmethod: certificate`, the daemon's pins and `config-file:`, and no
-API key. A stopped daemon gets an entry with `config-file:` only, through
-which root reaches the socket once the daemon runs; `tdns-ncli config update
-<entry> --cert` completes it then, and switches an entry that uses the API
-key to the certificate. After the daemon's API certificate changes,
+with the daemon's address, its pins and `config-file:`. A stopped daemon
+gets an entry with `config-file:` only, through which root reaches the
+socket once the daemon runs; `tdns-ncli config update <entry> --cert`
+completes it then. After the daemon's API certificate changes,
 `tdns-ncli config update <entry> --repin` takes its new pins. See
 `guide/multi-instance-cli.md`.
 
 ## Network clients and roles: the access file
 
+The access file is always on. It is `<config dir>/<config name>-access.yaml`,
+so `/etc/tdns/tdns-auth.yaml` has `/etc/tdns/tdns-auth-access.yaml`;
+`apiserver.access-file` only moves it:
+
 ```yaml
 apiserver:
-   socket:      /var/run/tdns/tdns-auth.sock
-   access-file: /etc/tdns/tdns-auth-access.yaml
+   access-file: /srv/tdns/auth-access.yaml   # only to move it
 ```
 
-Without `access-file` the TCP management API works as it always has: the API
-key, with full access. With it, the TCP API follows the access file:
+**Without the file the daemon takes no TLS clients**: every TCP request
+is refused, saying which file to create, and the local socket (root on the
+daemon's host) is the only way in. This is a normal state, logged at INFO.
+To take TLS clients, create the file once; empty is fine:
+
+```
+touch /etc/tdns/tdns-auth-access.yaml
+```
+
+No reload is needed: every TCP request checks the file (a `stat`), and a
+file created, edited or removed since the last load is loaded again, so it
+is in force at the next request. Neither the daemon nor tdns-ncli ever
+creates it, or changes the daemon config; the daemon only writes what is in
+it, when `tdns-ncli <daemon> client ...` or `config add` asks. Removing the
+file takes TLS access away at the next request.
 
 ```yaml
-keyauth: true            # false: the API key is no longer accepted
 clients:
    - name: anna
      pin: "<base64 SHA-256 of the client certificate's public key>"
@@ -138,8 +153,10 @@ clients:
 ```
 
 - A client is a certificate, identified by its pin (the value `tdns-cli cert
-  pin` prints). It presents the certificate on the TLS connection; the daemon
-  asks for one on every TCP API connection.
+  pin` prints). The pin covers the certificate's public key, so a renewed
+  certificate with the same key keeps its pin. The client presents the
+  certificate on the TLS connection; the daemon asks for one on every TCP API
+  connection, and refuses a request without one.
 - There are three roles, a ladder. **read-only** may do everything that only
   reports. **read-write** may also operate: zones, reloads, syncs, catalog,
   the resolver's flush and forwarders, and the key lifecycle as the zone
@@ -147,18 +164,19 @@ clients:
   including reading or changing stored key material, the truststore,
   credentials and `stop`, and **exists only on the local socket**. An access
   file entry with `role: admin` is refused.
-- With an access file the API key is **read-write**, not admin, and
-  `keyauth: false` turns it off.
 - Anything the daemon does not know a role for needs admin. The role of every
   command is in `v2/api_roles.go`.
-- `access-file` requires `socket`, so admin always has a way in. A file that
-  cannot be used at start-up leaves DNS and the socket running and closes the
-  TCP API (503) until it is fixed and reloaded over the socket. It never falls
-  back to the key. A file that does not load at a reload leaves the running
-  policy as it was.
+- The file must be owned by the daemon's user (or root) and not be writable
+  by group or others: whoever can write it can grant themselves access. The
+  daemon refuses one that is, with the `chmod` or `chown` that fixes it.
+  `touch` under umask 022 makes 0644, which passes: pins and roles are not
+  secrets.
+- A file that is there but cannot be used at start-up leaves DNS and the
+  socket running and closes the TCP API (503) until it is fixed. A file that
+  does not load at a reload leaves the running policy as it was.
 - `tdns-ncli <daemon> ping` says who the daemon took you for, and `config
-  status` shows the running policy. `config check` validates the file with the
-  daemon's own code.
+  status` shows the running policy, or the touch line when there is no file.
+  `config check` validates the file with the daemon's own code.
 
 ## TSIG configuration
 

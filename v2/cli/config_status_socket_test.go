@@ -103,32 +103,27 @@ func TestConfigCheckAcceptsASocketOnlyApiServer(t *testing.T) {
 	}
 }
 
-// tdns-imr builds its API router, and stops if that fails, whatever the
-// addresses say: the key is needed for a socket-only resolver too. A socket
-// path the daemon refuses is not reported as served.
+// A socket-only resolver is served on its socket, and needs no API key (there
+// is none). A socket path the daemon refuses is not reported as served.
 func TestImrConfigCheckSocketOnly(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		socket     string
-		key        string
-		keyFail    bool
 		sockWarn   bool
 		servedInfo bool
 	}{
-		{name: "socket and key", socket: "/var/run/tdns/tdns-imr.sock", key: "k", servedInfo: true},
-		{name: "socket, no key", socket: "/var/run/tdns/tdns-imr.sock", keyFail: true, servedInfo: true},
-		{name: "relative socket", socket: "imr.sock", key: "k", sockWarn: true},
+		{name: "socket", socket: "/var/run/tdns/tdns-imr.sock", servedInfo: true},
+		{name: "relative socket", socket: "imr.sock", sockWarn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &tdns.Config{}
 			cfg.ApiServer.Socket = tc.socket
-			cfg.ApiServer.ApiKey = tdns.SensitiveString(tc.key)
 			rep := newCCReport()
 			checkImrApiServer(cfg, viper.New(), rep)
 			var keyFail, sockWarn, servedInfo bool
 			for _, r := range rep.byGroup["API server"] {
 				switch {
-				case r.check == "apikey" && r.level == ccFAIL:
+				case r.check == "apikey":
 					keyFail = true
 				case r.check == "socket" && r.level == ccWARN:
 					sockWarn = true
@@ -136,115 +131,65 @@ func TestImrConfigCheckSocketOnly(t *testing.T) {
 					servedInfo = true
 				}
 			}
-			if keyFail != tc.keyFail || sockWarn != tc.sockWarn || servedInfo != tc.servedInfo {
-				t.Errorf("key fail %v, socket warning %v, served on the socket %v; want %v, %v, %v",
-					keyFail, sockWarn, servedInfo, tc.keyFail, tc.sockWarn, tc.servedInfo)
+			if keyFail || sockWarn != tc.sockWarn || servedInfo != tc.servedInfo {
+				t.Errorf("key checked %v, socket warning %v, served on the socket %v; want false, %v, %v",
+					keyFail, sockWarn, servedInfo, tc.sockWarn, tc.servedInfo)
 			}
 		})
 	}
 }
 
-// config check decodes with viper, which does not apply the daemon's own
-// default usetls: true. Without applyDaemonDefaults an access-file config with
-// no usetls: line was reported as plaintext while the daemon served TLS. An
-// explicit usetls: false with an access file is a failure: the daemon refuses
-// it.
-func TestConfigCheckUseTLSDefault(t *testing.T) {
+// config check names the lines of the API key era, which the daemon ignores
+// (with a warning), and says a missing access file is no TLS clients,
+// with the touch line: info, not a failure.
+func TestConfigCheckObsoleteKeysAndMissingAccessFile(t *testing.T) {
 	dir := t.TempDir()
-	access := filepath.Join(dir, "access.yaml")
-	if err := os.WriteFile(access, []byte("clients: []\n"), 0o600); err != nil {
+	cfgPath := filepath.Join(dir, "tdns-auth.yaml")
+	v := viper.New()
+	v.SetConfigType("yaml")
+	doc := "apiserver:\n   addresses: [ 127.0.0.1:8989 ]\n   apikey: k\n   usetls: false\n"
+	if err := v.ReadConfig(strings.NewReader(doc)); err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		name, usetls string
-		fail         bool
-	}{
-		{"no usetls line", "", false},
-		{"usetls: true", "   usetls: true\n", false},
-		{"usetls: false", "   usetls: false\n", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			v := viper.New()
-			v.SetConfigType("yaml")
-			doc := "apiserver:\n   addresses: [ 127.0.0.1:8989 ]\n   socket: /var/run/tdns/tdns-auth.sock\n   access-file: " + access + "\n" + tc.usetls
-			if err := v.ReadConfig(strings.NewReader(doc)); err != nil {
-				t.Fatal(err)
-			}
-			var cfg tdns.Config
-			if err := v.Unmarshal(&cfg); err != nil {
-				t.Fatal(err)
-			}
-			applyDaemonDefaults(v, &cfg, "")
-			rep := newCCReport()
-			checkApiAccessFile(&cfg, rep)
-			var failed bool
-			for _, r := range rep.byGroup["API access file"] {
-				if r.check == "usetls" && r.level == ccFAIL {
-					failed = true
-				}
-			}
-			if failed != tc.fail {
-				t.Errorf("usetls failure = %v, want %v (UseTLS decoded as %v)", failed, tc.fail, cfg.ApiServer.UseTLS)
-			}
-		})
+	var cfg tdns.Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		t.Fatal(err)
 	}
-}
-
-// `config status` reports the plaintext TCP listeners an access file closed
-// whether the daemon still runs a policy or not (removing the file does not
-// reopen them), and says which of the two it is.
-func TestConfigStatusReportsStoppedListeners(t *testing.T) {
-	stopped := []string{"192.0.2.1:8080"}
-	if out := captureStdout(t, func() { printApiTCPStopped(nil, "", true) }); out != "" {
-		t.Errorf("nothing stopped: printed %q", out)
+	applyDaemonDefaults(v, &cfg, cfgPath)
+	if want := filepath.Join(dir, "tdns-auth-access.yaml"); cfg.ApiServer.AccessFile != want {
+		t.Fatalf("access file %q, want the default %s", cfg.ApiServer.AccessFile, want)
 	}
-	const file = "/etc/tdns/tdns-auth-access.yaml"
-	for _, tc := range []struct {
-		name   string
-		by     string
-		policy bool
-		want   string
-	}{
-		{"policy in force", file, true, "access file requires TLS:\n    " + file + "\n"},
-		{"access file removed", file, false, "came into force:\n    " + file + "\n  no access file is set now"},
-		{"a daemon that does not name the file", "", true, "access file requires TLS;"},
-		{"removed, file not named", "", false, "no access\n  file is set now"},
-	} {
-		out := captureStdout(t, func() { printApiTCPStopped(stopped, tc.by, tc.policy) })
-		if !strings.HasPrefix(out, "TCP API STOPPED on 192.0.2.1:8080:\n") || !strings.Contains(out, tc.want) {
-			t.Errorf("%s: printed %q, want it to contain %q", tc.name, out, tc.want)
-		}
-		for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
-			if len(line) > 72 {
-				t.Errorf("%s: line over 72 characters: %q", tc.name, line)
-			}
+	rep := newCCReport()
+	checkObsoleteApiKeys(v, rep)
+	checkApiAccessFile(&cfg, rep)
+	warned := map[string]bool{}
+	for _, r := range rep.byGroup["API server"] {
+		if r.level == ccWARN {
+			warned[r.check] = true
 		}
 	}
-}
-
-// tdns-imr has its own `config status` printer, which must report the TCP
-// API an access file stopped too, with the file, with the policy in force and
-// after the file is removed.
-func TestImrConfigStatusReportsStoppedListeners(t *testing.T) {
-	const file = "/etc/tdns/tdns-imr-access.yaml"
-	base := tdns.ConfigResponse{Msg: "tdns-imr: Configuration is ok", ApiTCPStopped: []string{"192.0.2.1:8080"}, ApiTCPStoppedBy: file}
-	withPolicy := base
-	withPolicy.Access = &tdns.ApiAccessStatus{File: file, KeyAuth: true}
-	for _, tc := range []struct {
-		name string
-		resp tdns.ConfigResponse
-		want string
-	}{
-		{"policy in force", withPolicy, "access file requires TLS:\n    " + file + "\n"},
-		{"access file removed", base, "came into force:\n    " + file + "\n  no access file is set now"},
-	} {
-		out := captureStdout(t, func() { printImrConfigStatus(tc.resp) })
-		if !strings.Contains(out, "TCP API STOPPED on 192.0.2.1:8080:\n") || !strings.Contains(out, tc.want) {
-			t.Errorf("%s: printed %q, want the stopped listener and %q", tc.name, out, tc.want)
-		}
+	if !warned["apikey"] || !warned["usetls"] {
+		t.Errorf("warnings %v, want apikey and usetls", warned)
 	}
-	if out := captureStdout(t, func() { printImrConfigStatus(tdns.ConfigResponse{Msg: "ok"}) }); strings.Contains(out, "STOPPED") {
-		t.Errorf("nothing stopped: printed %q", out)
+	var info string
+	for _, r := range rep.byGroup["API access file"] {
+		if r.level == ccFAIL {
+			t.Errorf("a missing access file failed the check: %s", r.msg)
+		}
+		info += r.msg
+	}
+	if !strings.Contains(info, "touch "+cfg.ApiServer.AccessFile) {
+		t.Errorf("access file report %q, want the touch line", info)
+	}
+	// A file that others may write fails, with the fix.
+	if err := os.WriteFile(cfg.ApiServer.AccessFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(cfg.ApiServer.AccessFile, 0o666)
+	rep = newCCReport()
+	checkApiAccessFile(&cfg, rep)
+	if r := rep.byGroup["API access file"]; len(r) != 1 || r[0].level != ccFAIL || !strings.Contains(r[0].msg, "chmod go-w") {
+		t.Errorf("a world-writable access file: %+v, want a failure with chmod", r)
 	}
 }
 
@@ -343,10 +288,6 @@ func TestConfigStatusListeningLine(t *testing.T) {
 			"ApiServer: listening on [127.0.0.1:8991 10.6.0.4:8991]"},
 		{"no certificate", tdns.ConfigResponse{ApiServer: conf, ApiTCPNotStarted: addrs},
 			"ApiServer: NOT listening on any TCP address (see TCP API below)"},
-		{"stopped by an access file", tdns.ConfigResponse{ApiServer: conf, ApiTCPStopped: addrs},
-			"ApiServer: NOT listening on any TCP address (see TCP API below)"},
-		{"one stopped", tdns.ConfigResponse{ApiServer: conf, ApiTCPListening: addrs[:1], ApiTCPStopped: addrs[1:]},
-			"ApiServer: listening on [127.0.0.1:8991]"},
 		{"one failed to bind", tdns.ConfigResponse{ApiServer: conf, ApiTCPListening: addrs[:1], ApiTCPFailed: failed},
 			"ApiServer: listening on [127.0.0.1:8991]"},
 		{"none listening, one failed", tdns.ConfigResponse{ApiServer: conf, ApiTCPFailed: failed},

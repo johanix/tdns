@@ -262,9 +262,9 @@ func newFlushRunner(keepStructural bool) func(cmd *cobra.Command, args []string)
 		// not holding a cache we could flush directly. Anything else falls
 		// through to the in-process path, which is the behaviour that works
 		// today. The daemon must never be sent down the API branch -- it would
-		// be a TLS loopback call to itself, needing client config and an
-		// apikey a daemon has no reason to carry, to reach a cache it already
-		// holds a pointer to.
+		// be a TLS loopback call to itself, needing client config and a
+		// client certificate a daemon has no reason to carry, to reach a
+		// cache it already holds a pointer to.
 		if flushViaApiWanted() {
 			flushViaApi(cmd, args, keepStructural)
 			return

@@ -26,7 +26,6 @@ listeners:
 
 apiserver:
    addresses:  [ 127.0.0.1:8322 ]
-   apikey:     ixfr-interop-test-key
    certfile:   /var/tmp/ixfrinterop/certs/localhost.crt
    keyfile:    /var/tmp/ixfrinterop/certs/localhost.key
 

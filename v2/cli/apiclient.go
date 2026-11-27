@@ -7,13 +7,12 @@
 package cli
 
 import (
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
-	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -23,22 +22,20 @@ import (
 
 // ApiDetails is one entry in the apiservers list of a CLI config file.
 type ApiDetails struct {
-	Name       string `validate:"required" yaml:"name"`
-	BaseURL    string `validate:"required" yaml:"baseurl"`
-	ApiKey     string `validate:"required" yaml:"apikey"`
-	AuthMethod string `validate:"required" yaml:"authmethod"`
-	RootCA     string `yaml:"rootca"`
-	Command    string `yaml:"command,omitempty"`
-	// Role names the command tree this entry is reachable through, for a
-	// SECOND (third, ...) instance of a daemon this CLI already knows how to
-	// drive. `role: auth` on an entry named "sectdns" builds the whole auth
-	// command tree a second time, targeting this entry, reachable as
-	// `tdns-ncli sectdns ...`. (tdns-cli ignores the field entirely; only
-	// tdns-ncli wires instance trees.)
-	//
-	// Empty is the normal case and means "this entry is the canonical target
-	// for whichever role RegisterRole maps to its Name" -- i.e. every config
-	// written before this field existed keeps working unchanged.
+	// Name is the entry's name, and the command word that reaches it: the
+	// first daemon of a role is named after the role (auth, imr, agent),
+	// any further one after its config file or --name (auth2).
+	Name string `validate:"required" yaml:"name"`
+	// BaseURL is the daemon's TCP API (https://host:port/api/v1), or "" for
+	// an entry that reaches its daemon only through the local admin socket
+	// its config-file: names.
+	BaseURL string `yaml:"baseurl"`
+	Command string `yaml:"command,omitempty"`
+	// Role is the daemon type: auth, agent, imr. An entry named after its
+	// role is that role's entry, reached through the role's command tree
+	// (tdns-ncli auth ...). Any other name with a role: gets a command tree
+	// of its own (tdns-ncli auth2 ...). An entry named after its role may
+	// leave role: out.
 	//
 	// mapstructure as well as yaml, for the same reason ConfigFile below
 	// carries one: the CLI roots decode with viper.Unmarshal, which never
@@ -48,13 +45,10 @@ type ApiDetails struct {
 	// viper.Unmarshal, which never consults yaml tags. "config-file" does not
 	// match the field name, so without this tag it decodes to "" in silence.
 	ConfigFile string `yaml:"config-file,omitempty" mapstructure:"config-file"`
-	// TLSAuth says how the CLI verifies the daemon over TLS: "pin" (Pins),
-	// "pkix" (RootCA, or the system roots), or "" for the old behaviour
-	// (RootCA if set, else no verification). tdns-ncli refuses an https entry
-	// that verifies nothing unless it says rootca: insecure.
-	TLSAuth string `yaml:"tlsauth,omitempty" mapstructure:"tlsauth"`
-	// Pins are the daemon's SPKI SHA-256 pins for tlsauth: pin: its current
-	// key, and the next one during a key change.
+	// Pins are the SPKI SHA-256 pins of the daemon's API certificate: its
+	// current one, and the next one during a change. Over TCP the CLI
+	// verifies the daemon by them and nothing else, and presents the client
+	// certificate (CliConf.Client).
 	Pins []string `yaml:"pins,omitempty" mapstructure:"pins"`
 }
 
@@ -64,8 +58,8 @@ type ApiDetails struct {
 type CliConf struct {
 	ApiServers []ApiDetails
 	Keys       tdns.KeyConf
-	// Client names the operator's own certificate, presented by entries with
-	// authmethod: certificate. Unset, the default location is used
+	// Client names the operator's own certificate, presented on every TCP
+	// connection. Unset, the default location is used
 	// (DefaultClientCertPaths).
 	Client CliClientConf
 	// File is the CLI config this run read, named in the commands a
@@ -78,12 +72,6 @@ type CliClientConf struct {
 	Cert string `yaml:"cert" mapstructure:"cert"`
 	Key  string `yaml:"key" mapstructure:"key"`
 }
-
-// RequireServerVerification makes an https entry that verifies nothing about
-// the daemon an error rather than an unverified connection. tdns-ncli sets it
-// in its init(); tdns-cli leaves it false and keeps its long-standing
-// default (no rootca: no verification).
-var RequireServerVerification bool
 
 // apiClientErrors records why an entry has no client; GetApiClient reports it
 // when that entry is used, so one bad entry does not stop the others.
@@ -104,9 +92,9 @@ type pendingClient struct {
 	cc CliClientConf
 }
 
-// roleToClientKey maps Cobra-tree role names (e.g. "agent", "signer")
-// to the clientKey used to look up the ApiClient in
-// tdns.Globals.ApiClients (e.g. "tdns-agent", "tdns-mpsigner").
+// roleToClientKey maps Cobra-tree role names (e.g. "auth", "signer") to
+// the clientKey used to look up the ApiClient in tdns.Globals.ApiClients:
+// the name of the role's entry, which is the role itself (auth -> auth).
 //
 // Each CLI package owns the roles for the daemons it interacts with
 // and registers them via RegisterRole in its own init(). Downstream
@@ -116,8 +104,8 @@ type pendingClient struct {
 var roleToClientKey = map[string]string{}
 
 // RegisterRole associates role with clientKey. Later calls for the
-// same role override earlier ones — this is how tdns-mp overrides the
-// "agent" → "tdns-agent" default with "agent" → "tdns-mpagent".
+// same role override earlier ones — this is how a downstream package
+// points a role at its own daemon's entry.
 //
 // The map is not concurrency-safe, so this must be called before any
 // goroutine can read it. Two callers qualify: package init() (init ordering
@@ -133,16 +121,50 @@ func init() {
 	// tdns-owned roles. Downstream cli packages register their own
 	// daemons' roles (signer/combiner/agent→mpagent in tdns-mp,
 	// scanner in tdns-apps, kdc/krs in tdns-nm, …).
-	RegisterRole("auth", "tdns-auth")
-	RegisterRole("imr", "tdns-imr")
-	RegisterRole("agent", "tdns-agent")
+	// An entry's name is its command word (design 2026-11-26, change 3).
+	RegisterRole("auth", "auth")
+	RegisterRole("imr", "imr")
+	RegisterRole("agent", "agent")
+	RegisterOldEntryName("tdns-auth", "auth")
+	RegisterOldEntryName("tdns-imr", "imr")
+	RegisterOldEntryName("tdns-agent", "agent")
 }
 
-// apiConfig is the most recent CliConf passed to InitApiClients. Used
-// by getApiDetailsByClientKey to look up per-server config (command
-// path for "daemon start", config-file for "keys generate", etc.)
-// without reaching back into viper.
+// oldEntryNames maps an entry name of the past (the program's name, before
+// an entry's name was its command word) to the name it has now. An entry
+// with an old name is not used: every command that would need it says to
+// rename it (config update <old> --rename <new>), and config check fails on
+// it. There is no compatibility.
+var oldEntryNames = map[string]string{}
+
+// RegisterOldEntryName records that entries once named old are now named
+// new. As RegisterRole, only from init() or before Execute.
+func RegisterOldEntryName(old, new string) {
+	oldEntryNames[old] = new
+}
+
+// renamedTo is the name entry e must have now, when its name is an old one
+// (oldEntryNames), else "".
+func renamedTo(e ApiDetails) string {
+	n := oldEntryNames[e.Name]
+	if n == "" || e.Role == "" {
+		return n
+	}
+	// An explicit role decides: tdns-auth with role: agent is the agent's
+	// entry under an old name, so it becomes agent (which checkRename takes).
+	if key := roleToClientKey[e.Role]; key != "" {
+		return key
+	}
+	return n
+}
+
+// apiConfig is the most recent CliConf passed to InitApiClients, with the
+// entries that got a client. Used by getApiDetailsByClientKey to look up
+// per-server config (command path for "daemon start", config-file for
+// "keys generate", etc.) without reaching back into viper. allEntries are
+// all of its entries, for the refusal that names an entry with an old name.
 var apiConfig *CliConf
+var allEntries []ApiDetails
 
 // InitApiClients creates a tdns.ApiClient for every entry in
 // c.ApiServers and stashes them in tdns.Globals.ApiClients. Also
@@ -150,7 +172,7 @@ var apiConfig *CliConf
 // lookups.
 //
 // Unlike the previous per-binary implementations, this does *not*
-// require a client named "tdns-auth". Callers resolve their ApiClient
+// require a client for any one role. Callers resolve their ApiClient
 // via GetApiClient(role, …) and get a use-time failure if the role
 // they need isn't configured.
 func InitApiClients(c *CliConf) error {
@@ -169,6 +191,7 @@ func InitApiClients(c *CliConf) error {
 	cc := *c
 	cc.ApiServers = servers
 	apiConfig = &cc
+	allEntries = append([]ApiDetails(nil), c.ApiServers...)
 
 	if tdns.Globals.Debug {
 		fmt.Printf("InitApiClients: setting up API clients for:")
@@ -210,11 +233,11 @@ func InitApiClients(c *CliConf) error {
 	}
 
 	// Shim: tdns.Globals.Api is still used by external packages
-	// (tdns-es, tdns-nm, tdns/music). Point it at the tdns-auth client
+	// (tdns-es, tdns-nm, tdns/music). Point it at the auth client
 	// when available so those keep working. Nothing inside tdns/v2/cli
 	// reads it any more; the shim can go away once the external
 	// consumers migrate to GetApiClient(role, …).
-	if authClient, ok := tdns.Globals.ApiClients["tdns-auth"]; ok {
+	if authClient, ok := tdns.Globals.ApiClients[roleToClientKey["auth"]]; ok {
 		tdns.Globals.Api = authClient
 	}
 
@@ -248,14 +271,11 @@ func GetApiClient(role string, dieOnError bool) (*tdns.ApiClient, error) {
 			}
 			return nil, err
 		}
+		err := missingEntry(role, clientKey)
 		if dieOnError {
-			keys := make([]string, 0, len(tdns.Globals.ApiClients))
-			for k := range tdns.Globals.ApiClients {
-				keys = append(keys, k)
-			}
-			fatalf("no API client found for %s (have clients for: %v)", clientKey, keys)
+			dieOn(err)
 		}
-		return nil, fmt.Errorf("no API client found for %s", clientKey)
+		return nil, err
 	}
 
 	if w := apiClientWarnings[clientKey]; w != "" {
@@ -289,9 +309,29 @@ func resolvePending(name string) {
 		apiClientWarnings[name] = warn
 	}
 	tdns.Globals.ApiClients[name] = ac
-	if name == "tdns-auth" {
+	if name == roleToClientKey["auth"] {
 		tdns.Globals.Api = ac
 	}
+}
+
+// missingEntry is the refusal for a role whose entry (clientKey) the CLI
+// config does not have: an entry with the old name says to rename it, else
+// config add names the role's default daemon config.
+func missingEntry(role, clientKey string) error {
+	cfg := DefaultCliConfigFile
+	if apiConfig != nil && apiConfig.File != "" {
+		cfg = apiConfig.File
+	}
+	for _, e := range allEntries {
+		if renamedTo(e) == clientKey {
+			return clientRefusal{entry: clientKey,
+				why: fmt.Sprintf("the CLI config %s names it %q, the old\nname; an entry's name is now its command word", cfg, e.Name),
+				fix: ncliFor(cfg) + " config update " + shellQuote(e.Name) + " --rename " + shellQuote(clientKey)}
+		}
+	}
+	return clientRefusal{entry: clientKey,
+		why: fmt.Sprintf("the CLI config %s has no entry\nnamed %q", cfg, clientKey),
+		fix: ncliFor(cfg) + " config add " + shellQuote(defaultDaemonConfig(role))}
 }
 
 // ApiClientByName is the client of the apiservers entry called name, its
@@ -314,29 +354,46 @@ func socketCandidate(e ApiDetails) bool {
 	return !ForceTCP && e.ConfigFile != "" && !isUnixURL(e.BaseURL)
 }
 
-// loopbackURL says whether rawURL's host is localhost or a loopback address.
-func loopbackURL(rawURL string) bool {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return false
+// tcpRefusal is r, unless e's TCP address is on this host but not one its
+// daemon config lists (a stale address) and the socket could not be used:
+// then that is why, and config update --repin is the fix. It takes the
+// daemon's own address and pins, and enrols nothing.
+func tcpRefusal(e ApiDetails, r clientRefusal) clientRefusal {
+	hp, addrs := addressNotListed(e)
+	if hp == "" {
+		return r
 	}
-	h := u.Hostname()
-	if strings.EqualFold(h, "localhost") {
-		return true
+	return clientRefusal{entry: e.Name,
+		why: fmt.Sprintf("its address %s is not one %s listens on (%s)",
+			hp, e.ConfigFile, strings.Join(addrs, ", ")),
+		fix: updateFix(e, "--repin")}
+}
+
+// addressNotListed is e's TCP address and the addresses its daemon config
+// lists, when e's is on this host but not one that config lists: a stale
+// address of this host's daemon. "" and nil otherwise, an address on
+// another host among them (that config may not be the daemon's there).
+func addressNotListed(e ApiDetails) (string, []string) {
+	if !socketCandidate(e) || e.BaseURL == "" {
+		return "", nil
 	}
-	ip := net.ParseIP(h)
-	return ip != nil && ip.IsLoopback()
+	sock, addrs := daemonSocket(e.ConfigFile)
+	hp := hostPort(e.BaseURL)
+	if sock == "" || len(addrs) == 0 || hp == "" || slices.Contains(addrs, hp) || !onThisHost(hp) {
+		return "", nil
+	}
+	return hp, addrs
 }
 
 // clientRefusal is an entry tdns-ncli will not connect through: why, and the
-// command that fixes it. GetApiClient prints it as a refusal, on lines of its
-// own; Error() is the one-line form, for config list.
+// command that fixes it. GetApiClient prints it as a refusal, the command on
+// a line of its own; Error() is the one-line form, for config list.
 type clientRefusal struct {
 	entry, why, fix string
 }
 
 func (r clientRefusal) Error() string {
-	return fmt.Sprintf("not connecting to %s: %s; fix: %s", r.entry, r.why, r.fix)
+	return fmt.Sprintf("not connecting to %s: %s; fix: %s", r.entry, strings.ReplaceAll(r.why, "\n", " "), r.fix)
 }
 
 // ncliForThisRun is the tdns-ncli command for the CLI config this run read,
@@ -350,25 +407,49 @@ func ncliForThisRun() string {
 	return ncliFor(cfg)
 }
 
-// pinRefusal refuses entry e for want of a pin. Pinning is how tdns-ncli
-// verifies a daemon, and config update --repin is how an existing entry
-// gets the pins its daemon serves: in the CLI config this run read.
-func pinRefusal(e ApiDetails, why string) clientRefusal {
-	fix := ncliForThisRun() + " config update " + shellQuote(e.Name) + " --repin"
+// updateFix is the config update command that fixes entry e, in the CLI
+// config this run read: flag is --cert (your certificate enrolled, the
+// daemon's address and pins taken) or --repin (its new pins taken). An entry
+// without config-file: needs the daemon config named: the one it most
+// likely is (likelyDaemonConfig), so that the command runs as printed.
+func updateFix(e ApiDetails, flag string) string {
+	fix := ncliForThisRun() + " config update " + shellQuote(e.Name) + " " + flag
 	if e.ConfigFile == "" {
-		fix += " --daemon-config <the daemon's config file>"
+		fix += " --daemon-config " + shellQuote(likelyDaemonConfig(e))
 	}
-	return clientRefusal{entry: e.Name, why: why, fix: fix}
+	return fix
+}
+
+// likelyDaemonConfig is the daemon config of an entry that names none, as a
+// command printed for the operator guesses it: a role's entry's default
+// (/etc/tdns/tdns-auth.yaml), else one named after the entry, as config add
+// names an instance after its file (auth2: /etc/tdns/tdns-auth2.yaml).
+func likelyDaemonConfig(e ApiDetails) string {
+	if role := roleEntryOf(e, builtinRoles()); role != "" {
+		return defaultDaemonConfig(role)
+	}
+	if n := renamedTo(e); n != "" {
+		return defaultDaemonConfig(entryRole(e))
+	}
+	return filepath.Join(filepath.Dir(tdns.DefaultAuthCfgFile), "tdns-"+e.Name+".yaml")
+}
+
+// pinRefusal refuses entry e for want of a pin: config update --cert gives
+// it the pins of the certificate its daemon serves, with the client
+// certificate enrolled.
+func pinRefusal(e ApiDetails, why string) clientRefusal {
+	return clientRefusal{entry: e.Name, why: why, fix: updateFix(e, "--cert")}
 }
 
 // dieOn ends the process on err, which GetApiClient could not get past. A
-// refusal says so plainly, with its fix on a line of its own; anything else
-// is an error. Neither goes through the log: it is the answer to the
-// command, not a log line.
+// refusal says so plainly, with the command that fixes it on a line of its
+// own; anything else is an error. Neither goes through the log: it is the
+// answer to the command, not a log line.
 func dieOn(err error) {
 	var r clientRefusal
 	if errors.As(err, &r) {
-		fmt.Fprintf(os.Stderr, "Error: not connecting to %s:\n  %s.\n  Fix: %s\n", r.entry, r.why, r.fix)
+		lead := "Error: not connecting to " + r.entry + ": " + strings.ReplaceAll(r.why, "\n", " ") + "."
+		fmt.Fprintf(os.Stderr, "%s\nFix:\n%s\n", strings.Join(wrapText(lead, 72), "\n"), commandLines(r.fix, 3))
 		os.Exit(1)
 	}
 	fatalf("%v", err)
@@ -385,14 +466,15 @@ var ForceTCP bool
 // is 0600 in a 0700 directory) and a running daemon; anything less leaves the
 // TCP address.
 //
-// Only when the entry's TCP address is one that daemon config lists, or the
-// entry has none: the same config-file: path exists on every host
-// (/etc/tdns/tdns-auth.yaml), so an entry for a daemon on another host would
-// otherwise reach the daemon on this one. And only when the daemon that
-// answers on the socket says it runs that config file: the path comes from
-// the config, but another daemon may hold it (one whose socket: names it),
-// and a command for one daemon must not run, as admin, on another. note says
-// why a socket that answered was not used.
+// Only when the entry's TCP address is one that daemon config lists, is on
+// this host (a stale address of this host's daemon: note then warns, with
+// the fix), or the entry has none: the same config-file: path exists on
+// every host (/etc/tdns/tdns-auth.yaml), so an entry for a daemon on another
+// host would otherwise reach the daemon on this one. And only when the
+// daemon that answers on the socket says it runs that config file: the path
+// comes from the config, but another daemon may hold it (one whose socket:
+// names it), and a command for one daemon must not run, as admin, on
+// another. Otherwise note says why a socket that answered was not used.
 func usableDaemonSocket(e ApiDetails) (sock, note string) {
 	if !socketCandidate(e) {
 		return "", ""
@@ -401,15 +483,25 @@ func usableDaemonSocket(e ApiDetails) (sock, note string) {
 	if sock == "" {
 		return "", ""
 	}
-	if e.BaseURL != "" && !slices.Contains(addrs, hostPort(e.BaseURL)) {
-		return "", ""
+	stale := ""
+	if hp := hostPort(e.BaseURL); e.BaseURL != "" && !slices.Contains(addrs, hp) {
+		// An address on another host: the same config path is on every
+		// host, so this host's daemon may not be the one meant. One on this
+		// host (loopback, or an address of its own) is a stale address of
+		// this host's daemon: the socket is the way to it, with a warning.
+		if !onThisHost(hp) {
+			return "", ""
+		}
+		lead := fmt.Sprintf("%s: its address %s is not one %s lists (%s), so the local admin socket is used. This fixes the entry:",
+			e.Name, hp, e.ConfigFile, strings.Join(addrs, ", "))
+		stale = strings.Join(wrapText(lead, 63), "\n") + "\n" + commandLines(updateFix(e, "--repin"), 3)
 	}
 	c, err := net.DialTimeout("unix", sock, time.Second)
 	if err != nil {
 		return "", ""
 	}
 	c.Close()
-	probe := tdns.NewClientWithOptions(e.Name, "unix://"+sock, tdns.ClientOptions{AuthMethod: "none"})
+	probe := tdns.NewClientWithOptions(e.Name, "unix://"+sock, tdns.ClientOptions{})
 	probe.Client.Timeout = 5 * time.Second
 	resp, err := askIdentity(probe)
 	switch {
@@ -420,7 +512,36 @@ func usableDaemonSocket(e ApiDetails) (sock, note string) {
 	case resolvedPath(resp.ConfigFile) != resolvedPath(e.ConfigFile):
 		return "", fmt.Sprintf("%s: the daemon on %s runs %s, not %s; not using its socket", e.Name, sock, resp.ConfigFile, e.ConfigFile)
 	}
-	return sock, ""
+	return sock, stale
+}
+
+// onThisHost says whether the host of hp (host:port) is this host: localhost,
+// a loopback address, or an address of one of its interfaces.
+func onThisHost(hp string) bool {
+	host, _, err := net.SplitHostPort(hp)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // askIdentity asks the daemon on probe which config it runs. Quietly: it is
@@ -445,28 +566,29 @@ func askIdentity(probe *tdns.ApiClient) (tdns.ConfigResponse, error) {
 	return cr, nil
 }
 
-// newApiClientFor builds the client for one apiservers entry: how it verifies
-// the daemon (pins, roots, or, said out loud, nothing) and how it
-// authenticates itself (key, certificate, or nothing on the local socket).
-// The warning, if any, is for the operator when the entry is used.
+// newApiClientFor builds the client for one apiservers entry: over the
+// daemon's local admin socket when the entry names the daemon's config and
+// the socket answers (admin, no TLS), else over TCP with the daemon's pins
+// and the client certificate. The warning, if any, is for the operator when
+// the entry is used.
 func newApiClientFor(e ApiDetails, cc CliClientConf) (*tdns.ApiClient, string, error) {
 	// The client recognises the socket scheme only as "unix://"; spelled
-	// any other way it would be taken for TCP (and its rootca read, or the
-	// process ended on it). The scheme is case-insensitive, the path is not.
+	// any other way it would be taken for TCP. The scheme is
+	// case-insensitive, the path is not.
 	if isUnixURL(e.BaseURL) {
 		e.BaseURL = "unix://" + e.BaseURL[7:]
 	}
-	// The daemon's local admin socket, when the entry names the daemon's
-	// config and the socket answers: admin, no key, no TLS. Its path is in the
-	// daemon config (tdns.ApiSocketPath), not in the CLI config, so the two
-	// cannot disagree. Otherwise the entry's TCP address.
+	// The daemon's local admin socket path is in the daemon config
+	// (tdns.ApiSocketPath), not in the CLI config, so the two cannot
+	// disagree.
 	sock, sockNote := usableDaemonSocket(e)
 	return buildApiClient(e, cc, sock, sockNote)
 }
 
 // buildApiClient builds e's client, over sock when that is set (the daemon's
 // local admin socket, checked by usableDaemonSocket), else over e's own
-// baseurl. sockNote says why a socket that answered was not used.
+// baseurl: https, with the entry's pins and the client certificate. sockNote
+// says why a socket that answered was not used.
 func buildApiClient(e ApiDetails, cc CliClientConf, sock, sockNote string) (*tdns.ApiClient, string, error) {
 	if isUnixURL(e.BaseURL) {
 		e.BaseURL = "unix://" + e.BaseURL[7:]
@@ -475,111 +597,45 @@ func buildApiClient(e ApiDetails, cc CliClientConf, sock, sockNote string) (*tdn
 		if tdns.Globals.Debug {
 			fmt.Printf("%s: using the daemon's local admin socket %s\n", e.Name, sock)
 		}
-		e.BaseURL, e.ApiKey, e.AuthMethod = "unix://"+sock, "", "none"
+		e.BaseURL = "unix://" + sock
 	}
 	switch {
 	case e.BaseURL == "" && sockNote != "":
 		return nil, "", errors.New(sockNote)
 	case e.BaseURL == "":
-		return nil, "", fmt.Errorf("entry %q has no baseurl, and the local admin socket of its daemon (config-file: %s) cannot be used: only root can open it, and the daemon must be running", e.Name, e.ConfigFile)
+		return nil, "", fmt.Errorf("entry %q has no baseurl, and the local admin socket of its daemon\n(config-file: %s) cannot be used: only root can open it, and\nthe daemon must be running", e.Name, e.ConfigFile)
 	case ForceTCP && strings.HasPrefix(e.BaseURL, "unix://"):
 		// An entry written as a socket entry has no TCP address to use.
 		return nil, "", fmt.Errorf("entry %q is a local socket entry (baseurl %s), so it has no TCP address for --tcp", e.Name, e.BaseURL)
 	}
-	o := tdns.ClientOptions{ApiKey: e.ApiKey, AuthMethod: e.AuthMethod, RootCA: e.RootCA}
-	if sock != "" {
+	var o tdns.ClientOptions
+	switch lower := strings.ToLower(e.BaseURL); {
+	case strings.HasPrefix(lower, "unix://"):
 		// Checked above, and on every request too: the daemon refuses one
 		// meant for another config, so a daemon that took the socket after
 		// the check cannot run the command.
-		o.ExpectConfigFile = e.ConfigFile
-	}
-	warn := ""
-	if strings.HasPrefix(strings.ToLower(e.BaseURL), "https://") {
-		switch strings.ToLower(e.TLSAuth) {
-		case "pin":
-			if len(e.Pins) == 0 {
-				return nil, "", pinRefusal(e, "its entry has tlsauth: pin but no pins:")
-			}
-			o.Pins = e.Pins
-			o.PinFix = pinRefusal(e, "").fix
-		case "pkix":
-			if o.RootCA == "" {
-				o.RootCA = "system"
-			}
-		case "":
-			if o.RootCA == "" {
-				if RequireServerVerification {
-					return nil, "", pinRefusal(e, "its entry has no pin of the daemon's certificate, so the daemon cannot be verified")
-				}
-				o.RootCA = "insecure" // tdns-cli's long-standing default
-			}
-		default:
-			return nil, "", fmt.Errorf("entry %q: unknown tlsauth %q (pin or pkix)", e.Name, e.TLSAuth)
+		if sock != "" {
+			o.ExpectConfigFile = e.ConfigFile
 		}
-		if o.RootCA == "insecure" && len(o.Pins) == 0 && RequireServerVerification {
-			warn = fmt.Sprintf("%s: the daemon's TLS certificate is not verified (rootca: insecure)", e.Name)
+	case strings.HasPrefix(lower, "https://"):
+		if len(e.Pins) == 0 {
+			return nil, "", tcpRefusal(e, pinRefusal(e, "its entry has no pin of the daemon's certificate,\nso the daemon cannot be verified"))
 		}
-	} else {
-		if o.RootCA == "" {
-			o.RootCA = "insecure" // plain http or the local socket: there is no certificate
-		}
-		// Plain http verifies nothing and sends the key in clear. On
-		// loopback neither leaves the host; elsewhere, say so.
-		if RequireServerVerification && strings.HasPrefix(strings.ToLower(e.BaseURL), "http://") && !loopbackURL(e.BaseURL) {
-			// The entry is there already: config update --cert switches it
-			// to https, its pins and the client certificate (config add
-			// writes new entries only).
-			fix := ncliForThisRun() + " config update " + shellQuote(e.Name) + " --cert"
-			if e.ConfigFile == "" {
-				fix += " --daemon-config <the daemon's config file>"
-			}
-			warn = fmt.Sprintf("%s: plain http to %s: the daemon is not verified, and an API key goes in clear; use https with pins: %s",
-				e.Name, e.BaseURL, fix)
-		}
-	}
-	// The local socket has no TLS, and the client sends no credentials on
-	// it (NewClientWithOptions): a leftover rootca: or authmethod:
-	// certificate must not stop the entry before it is built.
-	socket := strings.HasPrefix(e.BaseURL, "unix://")
-	switch {
-	case socket:
-	case len(o.Pins) > 0:
-		// tlsauth: pin. The pins replace the roots, and the client ignores
-		// rootca, so a rootca: line left over from before must not be read
-		// (a file that is gone would fail an entry that verifies fine).
-	case o.RootCA == "", o.RootCA == "insecure", o.RootCA == "tlsa", o.RootCA == "system":
-	default:
-		// NewClientWithOptions exits the process on a CA file it cannot read
-		// -- and a directory passes a stat -- which would take every other
-		// entry down with this one (config list --check stops printing).
-		// Read and parse it here, return the error instead, and hand the
-		// client the parsed roots so it does not read the file a second time.
-		data, err := os.ReadFile(o.RootCA)
-		if err != nil {
-			return nil, "", fmt.Errorf("entry %q: rootca: %w", e.Name, err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(data) {
-			return nil, "", fmt.Errorf("entry %q: rootca: %s holds no PEM certificate", e.Name, o.RootCA)
-		}
-		o.RootCAs = pool
-	}
-	if e.AuthMethod == "certificate" && !socket {
+		o.Pins = e.Pins
+		o.PinFix = updateFix(e, "--repin")
 		cert, err := loadClientCert(cc)
 		if err != nil {
-			return nil, "", fmt.Errorf("entry %q has authmethod: certificate, but %w (tdns-ncli client init makes one)", e.Name, err)
+			return nil, "", tcpRefusal(e, clientRefusal{entry: e.Name, why: err.Error(), fix: ncliForThisRun() + " client init"})
 		}
 		o.ClientCert = cert
+	case strings.HasPrefix(lower, "http://"):
+		return nil, "", tcpRefusal(e, clientRefusal{entry: e.Name,
+			why: fmt.Sprintf("its baseurl %s is plain http, and the\nmanagement API is TLS only", e.BaseURL),
+			fix: updateFix(e, "--cert")})
+	default:
+		return nil, "", fmt.Errorf("entry %q: baseurl %s is neither https:// nor unix://", e.Name, e.BaseURL)
 	}
-	// A socket that answered for another daemon: said, after any warning
-	// about the route taken instead.
-	if sockNote != "" {
-		if warn != "" {
-			warn += "; "
-		}
-		warn += sockNote
-	}
-	return tdns.NewClientWithOptions(e.Name, e.BaseURL, o), warn, nil
+	return tdns.NewClientWithOptions(e.Name, e.BaseURL, o), sockNote, nil
 }
 
 func getClientKeyFromParent(role string) string {

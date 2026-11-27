@@ -16,7 +16,6 @@ listeners:
    transports: [ do53 ]
 apiserver:
    addresses:  [ 127.0.0.1:8312 ]
-   apikey:     zonemd-test-key
    certfile:   /var/tmp/zonemd/certs/localhost.crt
    keyfile:    /var/tmp/zonemd/certs/localhost.key
 
