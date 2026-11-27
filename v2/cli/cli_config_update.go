@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	tdns "github.com/johanix/tdns/v2"
 )
 
 func newConfigUpdateCmd() *cobra.Command {
@@ -459,13 +461,15 @@ func samePins(a, b []string) bool {
 	return slices.Equal(a, b)
 }
 
-// printUpdateResult says what config update did, verdict first, in lines of
-// at most 72 where it can.
+// printUpdateResult says what config update did, verdict first, and the
+// command that tries the entry. The entry and the steps taken are printed
+// with -v, and with --dry-run, which is for seeing them.
 func printUpdateResult(w io.Writer, r *UpdateResult, o UpdateOptions) {
 	renamed := ""
 	if r.Was != r.Entry.Name {
 		renamed = fmt.Sprintf(" (was %q)", r.Was)
 	}
+	var lead string
 	switch {
 	case r.Current:
 		fmt.Fprintf(w, "The pins of %q are already current; nothing written.\n", r.Entry.Name)
@@ -473,15 +477,36 @@ func printUpdateResult(w io.Writer, r *UpdateResult, o UpdateOptions) {
 	case o.DryRun:
 		fmt.Fprintf(w, "Would change %q in %s to:\n\n", r.Was, r.File)
 	case o.Cert:
-		fmt.Fprintf(w, "%q%s now uses your client certificate, in %s:\n\n", r.Entry.Name, renamed, r.File)
+		lead = fmt.Sprintf("%q%s now uses your client certificate, in %s.", r.Entry.Name, renamed, r.File)
 	case o.Repin:
-		fmt.Fprintf(w, "Re-pinned %q%s in %s:\n\n", r.Entry.Name, renamed, r.File)
+		lead = fmt.Sprintf("Re-pinned %q%s in %s.", r.Entry.Name, renamed, r.File)
 	default:
-		fmt.Fprintf(w, "Renamed %q to %q in %s:\n\n", r.Was, r.Entry.Name, r.File)
+		lead = fmt.Sprintf("Renamed %q to %q in %s.", r.Was, r.Entry.Name, r.File)
 	}
-	fmt.Fprint(w, renderEntry(r.Entry, itemLayout{indent: 3, gap: 1}))
-	printStepsNotes(w, r.Steps, r.Notes, o.DryRun)
-	if r.Wrote {
-		fmt.Fprintf(w, "\nTry it:  %s %s ping\n", ncliFor(o.CliConfig), commandWord(r.Entry))
+	if lead != "" {
+		if r.Wrote {
+			verify := ncliFor(o.CliConfig) + " " + commandWord(r.Entry) + " ping"
+			if line := lead + " Verify with:  " + verify; len(line) <= 72 {
+				lead = line
+			} else {
+				lead += "\nVerify with:  " + verify
+			}
+		}
+		fmt.Fprintln(w, lead)
 	}
+	steps := r.Steps
+	if o.DryRun || tdns.Globals.Verbose {
+		if !o.DryRun {
+			fmt.Fprintln(w)
+		}
+		fmt.Fprint(w, renderEntry(r.Entry, itemLayout{indent: 3, gap: 1}))
+	} else {
+		steps = nil
+		for _, st := range r.Steps {
+			if strings.HasPrefix(st, "Made your client certificate") {
+				steps = append(steps, st)
+			}
+		}
+	}
+	printStepsNotes(w, steps, r.Notes, o.DryRun)
 }

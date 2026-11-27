@@ -91,8 +91,8 @@ func TestUpdateCertSwitchesAKeyEntry(t *testing.T) {
 	var sb strings.Builder
 	printUpdateResult(&sb, res, UpdateOptions{Cert: true, CliConfig: d.cli})
 	out := sb.String()
-	if !strings.HasPrefix(out, `"auth" now uses your client certificate, in `+d.cli+":") ||
-		!strings.Contains(out, "TCP check: ok (TLS, read-write, certificate tester)") || !strings.Contains(out, "Try it:") {
+	if !strings.HasPrefix(out, `"auth" now uses your client certificate, in `+d.cli+".") ||
+		!strings.Contains(out, "Verify with:  "+ncliFor(d.cli)+" auth ping") || strings.Contains(out, "TCP check") {
 		t.Errorf("printed:\n%s", out)
 	}
 

@@ -758,7 +758,7 @@ func TestAddDryRunChangesNothing(t *testing.T) {
 	var sb strings.Builder
 	printAddResult(&sb, res, true, env.cli)
 	out := sb.String()
-	if !strings.HasPrefix(out, "Would add \"auth2\"") || strings.Contains(out, "apikey") || !strings.Contains(unwrapCommands(out), "config update auth2 --cert") ||
+	if !strings.HasPrefix(out, "Would add the new entry \"auth2\"") || strings.Contains(out, "apikey") || !strings.Contains(unwrapCommands(out), "config update auth2 --cert") ||
 		!strings.Contains(out, "\n   touch "+filepath.Join(env.dir, "tdns-auth2-access.yaml")+"\n") {
 		t.Errorf("printed:\n%s", out)
 	}
@@ -1189,7 +1189,7 @@ func TestPrintedAdviceKeepsTheCliConfig(t *testing.T) {
 	var sb strings.Builder
 	res := &AddResult{Entry: ApiDetails{Name: "auth2", Role: "auth"}, File: "/tmp/local.yaml", Running: true}
 	printAddResult(&sb, res, false, cfg)
-	if want := "Try it:  tdns-ncli --config '/tmp/lab config.yaml' auth2 ping"; !strings.Contains(sb.String(), want) {
+	if want := "Verify with:  tdns-ncli --config '/tmp/lab config.yaml' auth2 ping"; !strings.Contains(sb.String(), want) {
 		t.Errorf("missing %q in:\n%s", want, sb.String())
 	}
 	sb.Reset()
@@ -1199,7 +1199,9 @@ func TestPrintedAdviceKeepsTheCliConfig(t *testing.T) {
 	}
 	sb.Reset()
 	printAddResult(&sb, res, false, DefaultCliConfigFile)
-	if want := "Try it:  tdns-ncli auth2 ping"; !strings.Contains(sb.String(), want) {
+	// The whole output: the verdict, and the command to try it on a line of
+	// its own when the one line would pass 72 columns.
+	if want := "Added the new entry \"auth2\" to /tmp/local.yaml.\nVerify with:  tdns-ncli auth2 ping\n"; sb.String() != want {
 		t.Errorf("missing %q in:\n%s", want, sb.String())
 	}
 }

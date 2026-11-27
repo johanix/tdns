@@ -229,17 +229,25 @@ func TestAddRunningDaemonWritesACertEntry(t *testing.T) {
 	if err != nil || clients["tester"] != pin || posts[1].Role != "read-write" || d.commands() != "list add" {
 		t.Errorf("the daemon was asked %q, enrolled %v (pin %s, %v)", d.commands(), clients, pin, err)
 	}
+	// The verdict and the command to try it, and the certificate made;
+	// the entry and the other steps only with -v.
 	var sb strings.Builder
 	printAddResult(&sb, res, false, d.cli)
 	out := sb.String()
-	for _, w := range []string{"Made your client certificate " + d.certPath, "The daemon: Added tester (read-write).",
-		"TCP check: ok (TLS, read-write, certificate tester)", "Try it:"} {
-		if !strings.Contains(out, w) {
-			t.Errorf("output lacks %q:\n%s", w, out)
-		}
+	verdict := "Added the new entry \"auth\" to " + d.cli + ".\nVerify with:  " + ncliFor(d.cli) + " auth ping\n"
+	if !strings.HasPrefix(out, verdict) || !strings.Contains(out, "Made your client certificate "+d.certPath) ||
+		strings.Contains(out, "TCP check") || strings.Contains(out, "pins:") {
+		t.Errorf("printed:\n%s\nwant it to start with\n%s", out, verdict)
 	}
-	if !strings.HasPrefix(out, "Added \"auth\" (the auth entry) to "+d.cli+":") {
-		t.Errorf("verdict not first:\n%s", out)
+	saved := tdns.Globals.Verbose
+	tdns.Globals.Verbose = true
+	sb.Reset()
+	printAddResult(&sb, res, false, d.cli)
+	tdns.Globals.Verbose = saved
+	for _, w := range []string{"pins:", "The daemon: Added tester (read-write).", "TCP check: ok (TLS, read-write, certificate tester)"} {
+		if !strings.Contains(sb.String(), w) {
+			t.Errorf("-v output lacks %q:\n%s", w, sb.String())
+		}
 	}
 
 	before, _ := os.ReadFile(d.cli)

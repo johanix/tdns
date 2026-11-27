@@ -253,3 +253,30 @@ func TestAccessFileMissingQuotesThePath(t *testing.T) {
 		t.Errorf("refusal:\n%s\nwant the path quoted in the touch line", msg)
 	}
 }
+
+// A command that needs the CLI config, which is not there, says how to
+// create it for the daemon the command is for: imr ping names tdns-imr's
+// config, not tdns-auth's.
+func TestMissingCliConfigNamesTheCommandsDaemon(t *testing.T) {
+	asNcli(t)
+	root := ncliTree()
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"imr", "ping"}, tdns.DefaultImrCfgFile},
+		{[]string{"agent", "zone", "list"}, tdns.DefaultAgentCfgFile},
+		{[]string{"auth", "ping"}, tdns.DefaultAuthCfgFile},
+		{[]string{"client", "init"}, tdns.DefaultAuthCfgFile},
+	} {
+		cmd, _, err := root.Find(tc.args)
+		if err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		got := MissingCliConfig(cmd, tdns.DefaultNcliCfgFile)
+		want := "no CLI config " + tdns.DefaultNcliCfgFile + ". Create it with:\n   tdns-ncli config add " + tc.want
+		if got != want {
+			t.Errorf("%v:\n%s\nwant\n%s", tc.args, got, want)
+		}
+	}
+}

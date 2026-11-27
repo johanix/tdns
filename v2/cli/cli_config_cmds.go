@@ -414,9 +414,6 @@ func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []
 	asRoleEntry := func() {
 		entry.Name, entry.Role = roleName, role
 		res.Canonical = true
-		res.Notes = append(res.Notes, fmt.Sprintf(
-			"there was no %s entry yet, so this daemon is it (tdns-ncli %s ...); --name adds it as an extra instance instead",
-			roleName, roleName))
 	}
 	asInstance := func(name string) error {
 		if _, ok := knownInstanceRoles[role]; !ok {
@@ -945,6 +942,22 @@ func (o *fileOverlay) OpenFile(name string, flag int, perm os.FileMode) (afero.F
 	return o.Fs.OpenFile(name, flag, perm)
 }
 
+// MissingCliConfig is the refusal for cmd, which needs the CLI config cfg,
+// when cfg is not there: the config add that creates it, for the daemon cmd
+// is for (the role of its top-level command; auth when it names none).
+func MissingCliConfig(cmd *cobra.Command, cfg string) string {
+	role := "auth"
+	for c := cmd; c != nil && c.HasParent(); c = c.Parent() {
+		if !c.Parent().HasParent() {
+			if _, ok := builtinRoles()[c.Name()]; ok {
+				role = c.Name()
+			}
+		}
+	}
+	return fmt.Sprintf("no CLI config %s. Create it with:\n%s", cfg,
+		commandLines(ConfigAddHint(cfg)+" "+shellQuote(defaultDaemonConfig(role)), 3))
+}
+
 // ConfigAddHint is the `config add` command line that writes cfg, the CLI
 // config the caller found missing: with --config when cfg is not the default,
 // so that following the advice creates the file that was missing.
@@ -980,42 +993,59 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// printAddResult says what config add did, verdict first, in lines of at
-// most 72 where it can (a path is as long as it is).
+// printAddResult says what config add did, verdict first: the entry added
+// and the command that tries it, in a line or two. The entry and the steps
+// taken are printed with -v, and with --dry-run, which is for seeing them.
+// What the operator must know stays: a certificate made, the notes, and
+// what a stopped daemon still needs.
 func printAddResult(w io.Writer, r *AddResult, dryRun bool, cfg string) {
-	if r.AlreadyKnown != "" {
+	verify := ncliFor(cfg) + " " + commandWord(r.Entry) + " ping"
+	switch {
+	case r.AlreadyKnown != "":
 		fmt.Fprintf(w, "Already known as %q; nothing written.\n", r.AlreadyKnown)
-	} else {
-		kind := "instance of " + r.Entry.Role
-		if r.Canonical {
-			kind = "the " + r.Entry.Role + " entry"
+	case dryRun && r.Created:
+		fmt.Fprintf(w, "Would create %s with the new entry %q:\n\n", r.File, r.Entry.Name)
+	case dryRun:
+		fmt.Fprintf(w, "Would add the new entry %q to %s:\n\n", r.Entry.Name, r.File)
+	default:
+		lead := fmt.Sprintf("Added the new entry %q to %s.", r.Entry.Name, r.File)
+		if r.Created {
+			lead = fmt.Sprintf("Created %s with the new entry %q.", r.File, r.Entry.Name)
 		}
-		switch {
-		case dryRun && r.Created:
-			fmt.Fprintf(w, "Would create %s with %q (%s):\n\n", r.File, r.Entry.Name, kind)
-		case dryRun:
-			fmt.Fprintf(w, "Would add %q (%s) to %s:\n\n", r.Entry.Name, kind, r.File)
-		case r.Created:
-			fmt.Fprintf(w, "Created %s with %q (%s):\n\n", r.File, r.Entry.Name, kind)
-		default:
-			fmt.Fprintf(w, "Added %q (%s) to %s:\n\n", r.Entry.Name, kind, r.File)
+		if r.Running && r.Update == "" {
+			if line := lead + " Verify with:  " + verify; len(line) <= 72 {
+				lead = line
+			} else {
+				lead += "\nVerify with:  " + verify
+			}
+		}
+		fmt.Fprintln(w, lead)
+	}
+	steps := r.Steps
+	if r.AlreadyKnown == "" && (dryRun || tdns.Globals.Verbose) {
+		if !dryRun {
+			fmt.Fprintln(w)
 		}
 		// Unaligned, so that a line of pins fits.
 		fmt.Fprint(w, renderEntry(r.Entry, itemLayout{indent: 3, gap: 1}))
+	} else {
+		// Without -v only a certificate made, which is a new key file.
+		steps = nil
+		for _, st := range r.Steps {
+			if strings.HasPrefix(st, "Made your client certificate") {
+				steps = append(steps, st)
+			}
+		}
 	}
-	printStepsNotes(w, r.Steps, r.Notes, dryRun)
+	printStepsNotes(w, steps, r.Notes, dryRun)
 	switch {
 	case r.AlreadyKnown != "" && r.Update != "":
-		fmt.Fprintf(w, "\nconfig add writes new entries only. To change this one:\n\n%s\n", commandLines(r.Update, 3))
+		fmt.Fprintf(w, "To change it:\n%s\n", commandLines(r.Update, 3))
 	case r.Update != "":
 		if r.AccessMissing != "" {
 			fmt.Fprintf(w, "\nThe daemon's access file is missing, so it takes no remote\nclients. Create it (empty is fine):\n%s\n", commandLines("touch "+shellQuote(r.AccessMissing), 3))
 		}
-		fmt.Fprintf(w, "\nThe daemon is not running. Once it is up, this gives the\nentry its address and your client certificate:\n\n%s\n", commandLines(r.Update, 3))
-	case r.Running && !dryRun && r.AlreadyKnown == "":
-		// The CLI config the add read, not the --file it edited: --file
-		// only names where in that config the list lives.
-		fmt.Fprintf(w, "\nTry it:  %s %s ping\n", ncliFor(cfg), commandWord(r.Entry))
+		fmt.Fprintf(w, "\nThe daemon is not running. Once it is up, this gives the\nentry its address and your client certificate:\n%s\n", commandLines(r.Update, 3))
 	}
 }
 
@@ -1025,7 +1055,7 @@ func printStepsNotes(w io.Writer, steps, notes []string, dryRun bool) {
 	if len(steps) > 0 {
 		if dryRun {
 			fmt.Fprint(w, "\nFirst it would:\n")
-		} else {
+		} else if tdns.Globals.Verbose {
 			fmt.Fprintln(w)
 		}
 		for _, s := range steps {

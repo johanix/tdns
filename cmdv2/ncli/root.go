@@ -49,7 +49,7 @@ var rootCmd = &cobra.Command{
 		if cli.NoCliConfigNeeded(cmd, cliConfigPath()) {
 			return
 		}
-		initConfig()
+		initConfig(cmd)
 		initApi()
 	},
 	// tdns-cli has no default action; with no subcommand it prints help.
@@ -213,7 +213,7 @@ func cliConfigPath() string {
 }
 
 // initConfig reads in config file and ENV variables if set.
-func initConfig() {
+func initConfig(cmd *cobra.Command) {
 	// The file the pre-run check looked at, so the two cannot differ.
 	viper.SetConfigFile(cliConfigPath())
 
@@ -228,13 +228,15 @@ func initConfig() {
 	} else {
 		if os.IsNotExist(err) {
 			// tdns-ncli's config is its own file, so on a host that has only
-			// ever run tdns-cli it does not exist yet. Say how to make it.
-			// With --config if one was given: the advice has to create the
-			// file that is missing, not the default.
-			log.Fatalf("No CLI config %s. Create it from the daemons' own configs with:\n    %s /etc/tdns/tdns-auth.yaml",
-				viper.ConfigFileUsed(), cli.ConfigAddHint(cfgFile))
+			// ever run tdns-cli it does not exist yet. Say how to make it,
+			// for the daemon the command is for, and with --config if one
+			// was given: the advice has to create the file that is missing.
+			// A refusal, not a log line.
+			fmt.Fprintf(os.Stderr, "Error: %s\n", cli.MissingCliConfig(cmd, cliConfigPath()))
+			os.Exit(1)
 		}
-		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
+		fmt.Fprintf(os.Stderr, "Error: cannot load the CLI config %s: %v\n", viper.ConfigFileUsed(), err)
+		os.Exit(1)
 	}
 
 	// Expand any top-level "include:" directives. viper has no native
