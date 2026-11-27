@@ -36,7 +36,7 @@ Everything else defaults. Two caveats:
 not listen on TCP, while the resolver runs normally and root on the host
 reaches it over the local admin socket. If you do set it, the TCP API is
 TLS 1.3, with `certfile`/`keyfile` or, with neither, a self-signed pair the
-daemon writes at its first start; remote clients need a certificate in its
+daemon writes at its first start; TLS clients need a certificate in its
 access file (`<config dir>/tdns-imr-access.yaml`, which you create; see
 [the access file](config-tdns-auth.md#network-clients-and-roles-the-access-file)).
 

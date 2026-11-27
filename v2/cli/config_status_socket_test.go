@@ -140,7 +140,7 @@ func TestImrConfigCheckSocketOnly(t *testing.T) {
 }
 
 // config check names the lines of the API key era, which the daemon ignores
-// (with a warning), and says a missing access file is no remote clients,
+// (with a warning), and says a missing access file is no TLS clients,
 // with the touch line: info, not a failure.
 func TestConfigCheckObsoleteKeysAndMissingAccessFile(t *testing.T) {
 	dir := t.TempDir()

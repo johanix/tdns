@@ -171,7 +171,7 @@ func ApiAccessFilePath(configured, cfgfile string) string {
 // LoadAccessFile reads, decodes and validates the access file at path. A
 // file that group or others may write is refused (CheckAccessFileMode). A
 // missing file is an error that errors.Is(err, fs.ErrNotExist) recognizes:
-// the caller decides that it means no remote clients.
+// the caller decides that it means no TLS clients.
 func LoadAccessFile(path string) (*AccessFile, error) {
 	data, err := readCheckedAccessFile(path)
 	if err != nil {

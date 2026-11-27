@@ -52,7 +52,7 @@ func ApiIdentityFrom(ctx context.Context) (ApiIdentity, bool) {
 type accessState struct {
 	// File is the access file, whether it is there or not.
 	File string
-	// Missing: the file is not there, so there are no remote clients. A
+	// Missing: the file is not there, so there are no TLS clients. A
 	// normal state, not an error: the operator creates the file (touch) to
 	// take them.
 	Missing bool
@@ -178,7 +178,7 @@ func peekCommand(r *http.Request) (cmd string, tooLarge bool) {
 // authenticateApiRequest decides who r is. A non-zero status means refuse
 // it. The local socket is admin. Over TCP the only credential is a client
 // certificate whose pin is an enabled client in the access file; with no
-// access file there are no remote clients.
+// access file there are no TLS clients.
 func (conf *Config) authenticateApiRequest(r *http.Request) (ApiIdentity, int, string) {
 	if FromLocalSocket(r.Context()) {
 		return ApiIdentity{Name: "local", Role: RoleAdmin, Via: "local socket"}, 0, ""
@@ -220,7 +220,7 @@ func accessFileMissing(path string) string {
 	if name == "" {
 		name = "the daemon"
 	}
-	return fmt.Sprintf("access file %s is missing, so\n%s takes no remote clients. Create it (empty is fine):\n   touch %s",
+	return fmt.Sprintf("access file %s is missing, so\n%s takes no TLS clients. Create it (empty is fine):\n   touch %s",
 		path, name, shellWord(path))
 }
 
@@ -283,7 +283,7 @@ func (conf *Config) apiAuthMiddleware() mux.MiddlewareFunc {
 // initApiAccess loads the access file into the running policy. The router
 // builders call it, once, at start-up.
 //
-// No file is no remote clients, logged at INFO: a normal state. A file that
+// No file is no TLS clients, logged at INFO: a normal state. A file that
 // cannot be used closes the TCP API (503). DNS and the local socket are
 // unaffected either way, and a reload, or a client add over the socket,
 // loads the file once it is there and right.
@@ -313,7 +313,7 @@ func (conf *Config) reloadApiAccess() string {
 	af, err := conf.loadAccessPolicy(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		return fmt.Sprintf("\nNo access file, so no remote clients. To take them:\n   touch %s", shellWord(path))
+		return fmt.Sprintf("\nNo access file, so no TLS clients. To take them:\n   touch %s", shellWord(path))
 	case err != nil:
 		return fmt.Sprintf("\n%s (the running policy is unchanged):\n   %v", AccessFileNotReloaded, err)
 	}
@@ -322,7 +322,7 @@ func (conf *Config) reloadApiAccess() string {
 
 // loadAccessPolicy loads the access file at path and puts it in force: at
 // start-up, at a reload, and in /access. A file that is not there is no
-// remote clients, which is put in force too: removing the file takes remote
+// TLS clients, which is put in force too: removing the file takes TLS
 // access away. A file that is there but does not load leaves a policy
 // loaded from a file as it was; with none (start-up, or no file before),
 // the TCP API answers 503 until a load succeeds.
@@ -339,7 +339,7 @@ func (conf *Config) loadAccessPolicy(path string) (*AccessFile, error) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if st := h.load(); st == nil || !st.Missing || st.File != path {
-			lgApi.Info("management API: no access file, so no remote clients (the local socket works); create it to take them",
+			lgApi.Info("management API: no access file, so no TLS clients (the local socket works); create it to take them",
 				"file", path)
 		}
 		conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
@@ -372,7 +372,7 @@ func (conf *Config) loadAccessPolicy(path string) (*AccessFile, error) {
 // Pins are public (a hash of a public key); there is no secret in here.
 type ApiAccessStatus struct {
 	File string
-	// Missing: there is no access file, so no remote clients.
+	// Missing: there is no access file, so no TLS clients.
 	Missing bool   `json:",omitempty"`
 	Error   string `json:",omitempty"` // the file does not load, and no policy from one runs: the TCP API answers 503
 	Clients []ApiAccessStatusClient

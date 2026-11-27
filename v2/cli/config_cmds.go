@@ -555,7 +555,7 @@ func printAccessStatus(a *tdns.ApiAccessStatus) {
 	case a == nil:
 		return
 	case a.Missing:
-		fmt.Printf("Access file: none, so no remote clients. To take them:\n   touch %s\n", shellQuote(a.File))
+		fmt.Printf("Access file: none, so no TLS clients. To take them:\n   touch %s\n", shellQuote(a.File))
 		return
 	case a.Error != "":
 		fmt.Printf("Access file: %s CANNOT BE USED, so the TCP API answers 503 (the local socket works): %s\n", a.File, a.Error)

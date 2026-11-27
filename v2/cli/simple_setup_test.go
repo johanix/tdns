@@ -516,3 +516,31 @@ func shortSockDir(t *testing.T) string {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	return dir
 }
+
+// An entry is named after its daemon's file, whichever order the daemons are
+// added in: tdns-auth.yaml is auth even when tdns-auth2.yaml came first (or
+// its own add was refused).
+func TestEntryNamedAfterItsFile(t *testing.T) {
+	withCleanRoleRegistry(t)
+	RegisterRole("auth", "auth")
+	RegisterRole("imr", "imr")
+	for _, c := range []struct {
+		role, file string
+		existing   []ApiDetails
+		want       string
+		canonical  bool
+	}{
+		{"auth", "/etc/tdns/tdns-auth2.yaml", nil, "auth2", false},
+		{"auth", "/etc/tdns/tdns-auth.yaml", []ApiDetails{{Name: "auth2", Role: "auth"}}, "auth", true},
+		{"auth", "/etc/tdns/tdns-auth3.yaml", []ApiDetails{{Name: "auth2", Role: "auth"}}, "auth3", false},
+		{"auth", "/etc/tdns-enc/tdns-auth.yaml", []ApiDetails{{Name: "auth", Role: "auth"}}, "auth2", false},
+		{"imr", "/etc/tdns/tdns-imr.yaml", nil, "imr", true},
+		{"imr", "/etc/tdns/tdns-imr2.yaml", nil, "imr2", false},
+	} {
+		var e ApiDetails
+		var res AddResult
+		if err := chooseEntryName(&e, &res, c.role, c.existing, AddOptions{DaemonConfig: c.file}); err != nil || e.Name != c.want || e.Role != c.role || res.Canonical != c.canonical {
+			t.Errorf("%s after %v: %q (role %q, canonical %v), %v", c.file, c.existing, e.Name, e.Role, res.Canonical, err)
+		}
+	}
+}

@@ -119,7 +119,7 @@ func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case d.noAccessFile:
-		resp.Missing, resp.Msg = true, "No access file, so no remote clients."
+		resp.Missing, resp.Msg = true, "No access file, so no TLS clients."
 		if ap.Command != "list" {
 			resp.Error, resp.ErrorMsg = true, "access file /etc/tdns/tdns-auth-access.yaml is missing"
 		}
@@ -270,7 +270,7 @@ func TestAddStopsWhenTheDaemonRefuses(t *testing.T) {
 	before, _ := os.ReadFile(d.cli)
 	d.noAccessFile = true
 	_, err := d.add(t, nil)
-	if err == nil || !strings.Contains(err.Error(), "access file /etc/tdns/tdns-auth-access.yaml is missing, so\ntdns-auth takes no remote clients") ||
+	if err == nil || !strings.Contains(err.Error(), "access file /etc/tdns/tdns-auth-access.yaml is missing, so\ntdns-auth takes no TLS clients") ||
 		!strings.Contains(err.Error(), "\n   touch /etc/tdns/tdns-auth-access.yaml\nthen run this again:\n") ||
 		!strings.Contains(unwrapCommands(err.Error()), "\n   "+ncliFor(d.cli)+" config add --client-name tester "+d.cfg) {
 		t.Errorf("no access file: %v, want the touch line and the command to run again", err)

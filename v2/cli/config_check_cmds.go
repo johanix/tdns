@@ -1983,7 +1983,7 @@ func checkDuplicateTemplates(cfg *tdns.Config, rep *ccReport) {
 
 // checkApiAccessFile runs the daemon's own loader over the access file, so a
 // file the daemon would not use is found before the reload rather than by
-// it. A missing file is no remote clients: said, with how to create it.
+// it. A missing file is no TLS clients: said, with how to create it.
 func checkApiAccessFile(cfg *tdns.Config, rep *ccReport) {
 	const g = "API access file"
 	path := cfg.ApiServer.AccessFile
@@ -1993,7 +1993,7 @@ func checkApiAccessFile(cfg *tdns.Config, rep *ccReport) {
 	af, err := tdns.LoadAccessFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		rep.info(g, "access-file", fmt.Sprintf("%s is missing, so the daemon takes no remote clients (the local socket works). To take them: touch %s", path, shellQuote(path)))
+		rep.info(g, "access-file", fmt.Sprintf("%s is missing, so the daemon takes no TLS clients (the local socket works). To take them: touch %s", path, shellQuote(path)))
 		return
 	case err != nil:
 		rep.fail(g, "access-file", err.Error(),

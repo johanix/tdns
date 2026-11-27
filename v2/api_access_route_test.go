@@ -264,7 +264,7 @@ func TestAccessRouteWithoutAccessFile(t *testing.T) {
 	if !resp.Error || !resp.Missing || resp.File != path {
 		t.Fatalf("add without an access file: %+v, want a refusal naming the missing file", resp)
 	}
-	for _, want := range []string{"access file " + path + " is missing", "takes no remote clients", "\n   touch " + path} {
+	for _, want := range []string{"access file " + path + " is missing", "takes no TLS clients", "\n   touch " + path} {
 		if !strings.Contains(resp.ErrorMsg, want) {
 			t.Errorf("refusal lacks %q:\n%s", want, resp.ErrorMsg)
 		}
@@ -278,7 +278,7 @@ func TestAccessRouteWithoutAccessFile(t *testing.T) {
 		t.Fatal("the daemon created the access file")
 	}
 	resp = e.accessCall(t, AccessPost{Command: "list"})
-	if resp.Error || !resp.Missing || !strings.Contains(resp.Msg, "No access file, so no remote clients") || !strings.Contains(resp.Msg, "touch "+path) {
+	if resp.Error || !resp.Missing || !strings.Contains(resp.Msg, "No access file, so no TLS clients") || !strings.Contains(resp.Msg, "touch "+path) {
 		t.Errorf("list without an access file: %+v", resp)
 	}
 

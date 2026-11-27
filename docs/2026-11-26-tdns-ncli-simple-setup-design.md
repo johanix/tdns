@@ -337,6 +337,13 @@ changed in the PR.
   (`/etc/tdns/tdns-auth.yaml`), else `/etc/tdns/tdns-<name>.yaml`.
 - **Two entries of one name:** the first counts, the later is ignored and
   `config list` says why.
+- **`config add` names an entry after its daemon's file**, whichever order
+  the daemons are added in: tdns-auth.yaml is `auth`, tdns-auth2.yaml
+  `auth2`. (The design gave the role's name to the first daemon of a role;
+  with an add refused, or done out of order, that put `auth` on
+  tdns-auth2.yaml.) It is a guess; `--name` overrides it. A second
+  tdns-auth.yaml elsewhere (/etc/tdns-enc/) becomes `auth2` when `auth` is
+  taken.
 - **The daemon's /config commands per type** are listed in the code
   (`ConfigOperatorCommands`), and a test checks that each tree has them;
   tdns-imr's tree got `config reload`.

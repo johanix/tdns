@@ -138,7 +138,7 @@ func clientCerts(t *testing.T, names ...string) (map[string]tls.Certificate, map
 	return certs, pins
 }
 
-// Without an access file the daemon takes no remote clients: every TCP
+// Without an access file the daemon takes no TLS clients: every TCP
 // request is refused, saying which file to create and how. The socket is
 // admin. A missing file is a normal state, not a server error.
 func TestApiAuthWithoutAccessFile(t *testing.T) {
@@ -296,9 +296,9 @@ func TestApiAccessReload(t *testing.T) {
 		t.Errorf("anna after a refused reload: %d, want 200 (the old policy)", st)
 	}
 
-	// Removing the file takes remote access away.
+	// Removing the file takes TLS access away.
 	os.Remove(e.conf.ApiServer.AccessFile)
-	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "No access file, so no remote clients") {
+	if msg := e.conf.reloadApiAccess(); !strings.Contains(msg, "No access file, so no TLS clients") {
 		t.Errorf("reload message = %q", msg)
 	}
 	if st, _ := e.call(t, "/api/v1/t-ro", "anna", ""); st != 403 {

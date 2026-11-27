@@ -159,7 +159,7 @@ func runConfigMwe(role, dir string) {
 }
 
 // printMweNextSteps says how to start the MWE daemon of the given type
-// whose config is cfgPath, let it take remote clients, and give tdns-ncli
+// whose config is cfgPath, let it take TLS clients, and give tdns-ncli
 // an entry for it named name.
 func printMweNextSteps(daemonType, name, cfgPath string) {
 	access := tdns.ApiAccessFilePath("", cfgPath)
@@ -168,7 +168,7 @@ func printMweNextSteps(daemonType, name, cfgPath string) {
 		add = "tdns-ncli config add --name " + shellQuote(name) + " " + shellQuote(cfgPath)
 	}
 	fmt.Printf("\nNext steps: start the daemon,\n%s\n", commandLines("tdns-"+daemonType+" --config "+shellQuote(cfgPath), 3))
-	fmt.Printf("create its access file, so that it takes remote clients,\n%s\n", commandLines("touch "+shellQuote(access), 3))
+	fmt.Printf("create its access file, so that it takes TLS clients,\n%s\n", commandLines("touch "+shellQuote(access), 3))
 	fmt.Printf("and, as root, give tdns-ncli an entry for it:\n%s\n", commandLines(add, 3))
 	fmt.Printf("Validate the config any time with:\n")
 }

@@ -504,7 +504,7 @@ type ApiServerConf struct {
 	// certificate pin, with their roles. It is always on: unset in the
 	// config, it is <config dir>/<config name>-access.yaml (ApiAccessFilePath,
 	// which ParseConfig applies), and apiserver.access-file only moves it.
-	// A file that is not there means no remote clients: the TCP API refuses
+	// A file that is not there means no TLS clients: the TCP API refuses
 	// every request, and the local socket is the only way in. The operator
 	// creates the file (touch is enough); the daemon then writes what is in
 	// it when tdns-ncli asks (/access), and never creates it. It is read by

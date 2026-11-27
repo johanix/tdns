@@ -115,7 +115,7 @@ reaches it. The first daemon of a type is named after the type ("auth",
 file (tdns-auth2.yaml -> auth2) unless --name says otherwise, reached as
 "tdns-ncli auth2 ...".
 
-A running daemon takes remote clients once its access file is there:
+A running daemon takes TLS clients once its access file is there:
 <config dir>/<config name>-access.yaml, or apiserver.access-file. The
 daemon never creates it; if it is missing, config add says how (touch).
 Your client certificate is made if you have none (as client init does),
@@ -371,9 +371,11 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	return res, nil
 }
 
-// chooseEntryName fills in entry.Name and entry.Role. The first daemon of
-// a role is named after the role (its clientKey: auth); any further one
-// after its config file, or --name.
+// chooseEntryName fills in entry.Name and entry.Role: after the daemon's
+// config file (deriveInstanceName), or --name. The file whose name gives the
+// role's name (tdns-auth.yaml: auth) has the role's entry, whichever order
+// the daemons are added in; tdns-auth2.yaml is auth2. A role with no
+// instance tree has its one entry whatever the file is called.
 func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []ApiDetails, o AddOptions) error {
 	roleName := roleToClientKey[role] // auth, agent, imr
 	if roleName == "" {
@@ -424,13 +426,19 @@ func chooseEntryName(entry *ApiDetails, res *AddResult, role string, existing []
 		return nil
 	}
 
+	_, hasInstances := knownInstanceRoles[role]
+	derived := deriveInstanceName(o.DaemonConfig)
+	// The add would be the role's entry: named so, or by its file, or the
+	// role's only possible entry.
+	roleEntry := o.Name == roleName ||
+		(o.Name == "" && (derived == roleName || !hasInstances))
 	switch {
-	case (o.Name == "" || o.Name == roleName) && !used[roleName] && oldHolder != "":
+	case roleEntry && !used[roleName] && oldHolder != "":
 		return oldNameRefusal()
-	case o.Name == "" && !used[roleName]:
+	case o.Name == "" && roleEntry && !used[roleName]:
 		asRoleEntry()
 	case o.Name == "":
-		base := deriveInstanceName(o.DaemonConfig)
+		base := derived
 		if base == "" || base == roleName {
 			base = role
 		}
@@ -623,7 +631,7 @@ func daemonReady(info *DaemonApi, list tdns.AccessResponse, tcpURL string, cert 
 // accessFileMissing is the refusal for a daemon without its access file:
 // the file, how to create it, and retry, the command to run again then.
 func accessFileMissing(path, daemon, retry string) error {
-	return fmt.Errorf("access file %s is missing, so\n%s takes no remote clients. Create it (empty is fine):\n%s\nthen run this again:\n%s",
+	return fmt.Errorf("access file %s is missing, so\n%s takes no TLS clients. Create it (empty is fine):\n%s\nthen run this again:\n%s",
 		path, daemon, commandLines("touch "+shellQuote(path), 3), commandLines(retry, 3))
 }
 

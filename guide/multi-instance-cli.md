@@ -83,14 +83,14 @@ For each file it:
   `role:`;
 - asks the daemon over its local admin socket whether it is running.
 
-**A running daemon** takes remote clients once its **access file** is there:
+**A running daemon** takes TLS clients once its **access file** is there:
 `<config dir>/<config name>-access.yaml`, or what `apiserver.access-file`
 says. The daemon never creates it, and neither does tdns-ncli; without it
 `config add` stops before it does anything, naming the file:
 
 ```
 Error: access file /etc/tdns/tdns-auth-access.yaml is missing, so
-tdns-auth takes no remote clients. Create it (empty is fine):
+tdns-auth takes no TLS clients. Create it (empty is fine):
    touch /etc/tdns/tdns-auth-access.yaml
 then run this again:
    tdns-ncli config add /etc/tdns/tdns-auth.yaml

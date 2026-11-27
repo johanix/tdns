@@ -233,7 +233,7 @@ apiserver:
    # Network clients, by certificate pin, with roles (read-only,
    # read-write): the access file. It is always read, at
    # <config dir>/<config name>-access.yaml, here /etc/tdns/tdns-imr-access.yaml. Without it the
-   # daemon takes no remote clients and the socket is the only way in.
+   # daemon takes no TLS clients and the socket is the only way in.
    # Create it to take them (touch is enough; it must not be writable by
    # group or others), then add clients with tdns-ncli <daemon> client ...
    # or tdns-ncli config add. The daemon writes what is in it and never

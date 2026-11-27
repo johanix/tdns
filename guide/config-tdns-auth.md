@@ -60,7 +60,7 @@ Three things about this are easy to get wrong.
 **The TCP management API is TLS 1.3, with no API key.** Leave out
 `apiserver.certfile` and `keyfile` and the daemon writes its own self-signed
 pair, `certs/tdns-auth-api.crt` and `.key` next to its config, at its first
-start; clients verify it by its certificate pin. Remote clients authenticate
+start; clients verify it by its certificate pin. TLS clients authenticate
 with a certificate of their own, whose pin is in the daemon's access file
 (below). A config with `apikey:` or `usetls:` from before still starts: the
 daemon warns that the line is no longer used.
@@ -124,10 +124,10 @@ apiserver:
    access-file: /srv/tdns/auth-access.yaml   # only to move it
 ```
 
-**Without the file the daemon takes no remote clients**: every TCP request
+**Without the file the daemon takes no TLS clients**: every TCP request
 is refused, saying which file to create, and the local socket (root on the
 daemon's host) is the only way in. This is a normal state, logged at INFO.
-To take remote clients, create the file once; empty is fine:
+To take TLS clients, create the file once; empty is fine:
 
 ```
 touch /etc/tdns/tdns-auth-access.yaml
@@ -138,7 +138,7 @@ file created, edited or removed since the last load is loaded again, so it
 is in force at the next request. Neither the daemon nor tdns-ncli ever
 creates it, or changes the daemon config; the daemon only writes what is in
 it, when `tdns-ncli <daemon> client ...` or `config add` asks. Removing the
-file takes remote access away at the next request.
+file takes TLS access away at the next request.
 
 ```yaml
 clients:
