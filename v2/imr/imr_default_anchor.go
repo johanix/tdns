@@ -7,6 +7,7 @@ package imr
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	cache "github.com/johanix/tdns/v2/cache"
@@ -20,14 +21,19 @@ import (
 // trust-anchor-file used to load no anchor at all, and so validated nothing:
 // every answer Indeterminate, the root's own included, and nothing said so.
 // It now uses the IANA root anchor compiled into the binary
-// (cache.CompiledInRootTrustAnchor), as dog already did -- but only where the
-// root it reaches is the IANA root, as far as the config can tell.
+// (cache.CompiledInRootTrustAnchor), as dog already did -- where the root it
+// reaches is the IANA root.
 //
 // A private root (test labs run their own) is reached through a root-hints
 // file, a forward for "." or a stub for ".". Against such a root the IANA
-// anchor makes every signed answer Bogus instead of Indeterminate, so with any
-// of the three and no anchor configured the resolver keeps the old behaviour,
-// and says that nothing will validate.
+// anchor would make every signed answer Bogus instead of Indeterminate. But
+// the three are also how the IANA root is reached by hand (a stub for "." that
+// names b.root-servers.net), and the config cannot tell the two apart. So
+// with any of the three and no anchor configured, the resolver asks the root:
+// it fetches its DNSKEY RRset and uses the compiled-in anchor if a key in it
+// matches the anchor and signs the set (imr_root_anchor_probe.go). A root that
+// does not match gets no anchor, as before, and a warning that nothing will
+// validate.
 
 // AnchorConfigured reports whether the config names a trust anchor of its own,
 // in any of the three forms.
@@ -50,27 +56,76 @@ func (ic *Config) NonDefaultRoot() string {
 	if hints := strings.TrimSpace(ic.RootHints); hints != "" {
 		return fmt.Sprintf("root-hints is set (%s)", hints)
 	}
-	isRoot := func(zone string) bool {
-		zone = strings.TrimSpace(zone)
-		return zone != "" && dns.Fqdn(core.CanonicalizeName(zone)) == "."
-	}
 	for _, fc := range ic.Forward {
-		if isRoot(fc.Zone) {
+		if isRootZone(fc.Zone) {
 			return `the root is forwarded (forward zone ".")`
 		}
 	}
 	for _, sc := range ic.Stubs {
-		if isRoot(sc.Zone) {
+		if isRootZone(sc.Zone) {
 			return `the root is a stub zone (stub zone ".")`
 		}
 	}
 	return ""
 }
 
+// isRootZone reports whether a configured zone name is the root.
+func isRootZone(zone string) bool {
+	zone = strings.TrimSpace(zone)
+	return zone != "" && dns.Fqdn(core.CanonicalizeName(zone)) == "."
+}
+
+// rootServers names the servers the config reaches "." through: the addresses
+// of every stub for "." and the address and port of every upstream of a forward
+// for ".", sorted, so that two configs that ask the same servers give the same
+// string. It is what the root probe's choice of anchor was made about
+// (RootAnchorProbe): the choice stands only while the root is asked of the same
+// servers. A server's name, its transports and their weights are left out, as
+// they do not change which root it is, and a reload applies them.
+func (ic *Config) rootServers() string {
+	var servers []string
+	for _, fc := range ic.Forward {
+		if !isRootZone(fc.Zone) {
+			continue
+		}
+		for _, u := range fc.Upstreams {
+			servers = append(servers, fmt.Sprintf("forward %s port %d", strings.TrimSpace(u.Addr), u.Port))
+		}
+	}
+	for _, sc := range ic.Stubs {
+		if !isRootZone(sc.Zone) {
+			continue
+		}
+		for i := range sc.Servers {
+			for _, addr := range sc.Servers[i].Addrs {
+				servers = append(servers, "stub "+strings.TrimSpace(addr))
+			}
+		}
+	}
+	sort.Strings(servers)
+	return strings.Join(servers, ", ")
+}
+
+// RootAnchorProbe reports whether the compiled-in IANA root anchor is up to the
+// root's keys: the config names no anchor, and the root may not be the IANA
+// root (NonDefaultRoot says how it is reached). The resolver then fetches the
+// root's DNSKEY RRset (rootAnchorByProbe) and uses the anchor only if a key in
+// it hashes to one of the anchor's DS records and an RRSIG by that key over the
+// set verifies. A set where either fails is another root; a signature outside
+// its validity period decides nothing, and the check is repeated.
+func (ic *Config) RootAnchorProbe() (probe bool, why string) {
+	if ic.AnchorConfigured() {
+		return false, ""
+	}
+	why = ic.NonDefaultRoot()
+	return why != "", why
+}
+
 // RootAnchorFallback reports whether the resolver uses the compiled-in IANA
-// root anchor: when the config names no anchor, and the root is the IANA root
-// (NonDefaultRoot is ""). When the config names no anchor and the root may be
-// a private one, why says how; the resolver then has no anchor at all.
+// root anchor without asking the root: when the config names no anchor, and
+// the root is the IANA root as far as the config can tell (NonDefaultRoot is
+// ""). When the config names no anchor and the root may be another one, why
+// says how it is reached, and the choice is the root's (RootAnchorProbe).
 func (ic *Config) RootAnchorFallback() (use bool, why string) {
 	if ic.AnchorConfigured() {
 		return false, ""
