@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,26 +31,52 @@ func ncliTree() *cobra.Command {
 // flags is joined first.
 func checkPrintedCommand(t *testing.T, line string) {
 	t.Helper()
+	if err := printedCommandError(line); err != nil {
+		t.Error(err)
+	}
+}
+
+// printedCommandError is checkPrintedCommand's verdict on line.
+func printedCommandError(line string) error {
 	root := ncliTree()
 	line = strings.TrimSpace(unwrapCommands(line))
 	words, err := splitCommandLine(line)
 	if err != nil || len(words) == 0 || words[0] != "tdns-ncli" {
-		t.Errorf("%q: not a tdns-ncli command line (%v)", line, err)
-		return
+		return fmt.Errorf("%q: not a tdns-ncli command line (%v)", line, err)
 	}
 	cmd, rest, err := root.Find(words[1:])
-	if err != nil || cmd == root {
-		t.Errorf("%q: no such command (%v)", line, err)
-		return
+	// A group (config) is found for "config reload" too, with "reload" left
+	// over: only a command that runs is one.
+	if err != nil || cmd == root || !cmd.Runnable() {
+		return fmt.Errorf("%q: no such command (%v)", line, err)
 	}
 	if err := cmd.ParseFlags(rest); err != nil {
-		t.Errorf("%q: %v", line, err)
-		return
+		return fmt.Errorf("%q: %v", line, err)
 	}
 	if cmd.Args != nil {
 		if err := cmd.Args(cmd, cmd.Flags().Args()); err != nil {
-			t.Errorf("%q: %v", line, err)
+			return fmt.Errorf("%q: %v", line, err)
 		}
+	}
+	return nil
+}
+
+// TestPrintedCommandCheckRefuses is the checker's negative control: a
+// command that does not exist must not pass, a group with a word left over
+// among them.
+func TestPrintedCommandCheckRefuses(t *testing.T) {
+	for _, line := range []string{
+		"tdns-ncli config reload",
+		"tdns-ncli config",
+		"tdns-ncli nosuch",
+		"tdns-ncli config update auth --nosuchflag",
+	} {
+		if printedCommandError(line) == nil {
+			t.Errorf("%q passed", line)
+		}
+	}
+	if err := printedCommandError("tdns-ncli config update auth --rename auth2"); err != nil {
+		t.Errorf("a real command was refused: %v", err)
 	}
 }
 
@@ -278,5 +305,97 @@ func TestMissingCliConfigNamesTheCommandsDaemon(t *testing.T) {
 		if got != want {
 			t.Errorf("%v:\n%s\nwant\n%s", tc.args, got, want)
 		}
+	}
+}
+
+// A dry run's refusal gives a retry that is a dry run too, for config add
+// and config update both.
+func TestRetriesKeepDryRun(t *testing.T) {
+	asNcli(t)
+	add := retryAdd(AddOptions{DaemonConfig: "/etc/tdns/tdns-auth2.yaml", DryRun: true}, "")
+	up := retryUpdate(UpdateOptions{Entry: "auth2", Cert: true, DryRun: true}, "")
+	for _, c := range []string{add, up} {
+		if !strings.Contains(c+" ", " --dry-run ") {
+			t.Errorf("%q: no --dry-run", c)
+		}
+		checkPrintedCommand(t, c)
+	}
+	if c := retryAdd(AddOptions{DaemonConfig: "/etc/tdns/tdns-auth2.yaml"}, ""); strings.Contains(c, "--dry-run") {
+		t.Errorf("%q: --dry-run without a dry run", c)
+	}
+}
+
+// A role's own entry without config-file: (as config update --rename
+// writes it, with role:) starts on the role's default config; an instance
+// without one is refused.
+func TestRoleEntryStartsWithoutConfigFile(t *testing.T) {
+	cmd := &cobra.Command{Use: "start"}
+	if _, err := daemonStartFlags(cmd, &ApiDetails{Name: "auth", Role: "auth"}); err != nil {
+		t.Errorf("auth refused: %v", err)
+	}
+	if _, err := daemonStartFlags(cmd, &ApiDetails{Name: "auth2", Role: "auth"}); err == nil {
+		t.Error("auth2 without config-file: was not refused")
+	}
+}
+
+// --rename refuses a command word, as wiring would, but takes the role's
+// own name.
+func TestRenameRefusesACommandWord(t *testing.T) {
+	root := ncliTree()
+	taken := func(n string) bool { return findChild(root, n) != nil }
+	e := ApiDetails{Name: "auth2", Role: "auth"}
+	err := checkRename(UpdateOptions{Rename: "config", CommandWordTaken: taken}, []ApiDetails{e}, e)
+	if err == nil || !strings.Contains(err.Error(), "a command of the CLI") {
+		t.Errorf("--rename config: %v", err)
+	}
+	old := ApiDetails{Name: "tdns-auth"}
+	if err := checkRename(UpdateOptions{Rename: "auth", CommandWordTaken: taken}, []ApiDetails{old}, old); err != nil {
+		t.Errorf("--rename auth: %v", err)
+	}
+}
+
+// An entry with an old name and an explicit role is renamed after its
+// role, which checkRename takes.
+func TestRenamedToFollowsAnExplicitRole(t *testing.T) {
+	if n := renamedTo(ApiDetails{Name: "tdns-auth"}); n != "auth" {
+		t.Errorf("tdns-auth: %q", n)
+	}
+	e := ApiDetails{Name: "tdns-auth", Role: "agent"}
+	if n := renamedTo(e); n != "agent" {
+		t.Errorf("tdns-auth, role agent: %q", n)
+	}
+	if err := checkRename(UpdateOptions{Rename: renamedTo(e)}, []ApiDetails{e}, e); err != nil {
+		t.Errorf("the rename it gives is refused: %v", err)
+	}
+}
+
+// config check reports a baseurl the client refuses, not just http://.
+func TestCheckCliConfigRefusesOtherSchemes(t *testing.T) {
+	asNcli(t)
+	cfg := filepath.Join(t.TempDir(), "tdns-ncli.yaml")
+	if err := os.WriteFile(cfg, []byte("apiservers:\n   - name: auth\n     role: auth\n     baseurl: ftp://localhost/api/v1\n     config-file: /etc/tdns/tdns-auth.yaml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := ReadApiServers(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	if n := CheckCliConfig(&sb, ncliTree(), cfg, entries, nil); n != 1 || !strings.Contains(sb.String(), "neither https:// nor unix://") {
+		t.Errorf("%d problems:\n%s", n, sb.String())
+	}
+}
+
+// commandLines breaks only between shell words: a " --" inside a quoted
+// path stays in it.
+func TestCommandLinesKeepsQuotedWords(t *testing.T) {
+	path := "/srv/a --b/" + strings.Repeat("x", 60) + "/tdns-auth.yaml"
+	cmd := "tdns-ncli config update auth --daemon-config " + shellQuote(path) + " --cert"
+	if parts := splitAtFlags(cmd); len(parts) != 3 {
+		t.Errorf("split into %d: %q", len(parts), parts)
+	}
+	out := commandLines(cmd, 3)
+	if !strings.Contains(out, shellQuote(path)) {
+		t.Errorf("the quoted path was broken:\n%s", out)
 	}
 }

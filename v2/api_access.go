@@ -173,11 +173,8 @@ func ApiAccessFilePath(configured, cfgfile string) string {
 // missing file is an error that errors.Is(err, fs.ErrNotExist) recognizes:
 // the caller decides that it means no remote clients.
 func LoadAccessFile(path string) (*AccessFile, error) {
-	data, err := os.ReadFile(path)
+	data, err := readCheckedAccessFile(path)
 	if err != nil {
-		return nil, err
-	}
-	if err := CheckAccessFileMode(path); err != nil {
 		return nil, err
 	}
 	af, err := ParseAccessFile(data)
@@ -202,6 +199,31 @@ func CheckAccessFileMode(path string) error {
 	if err != nil {
 		return err
 	}
+	return checkAccessFileInfo(path, fi)
+}
+
+// readCheckedAccessFile reads the access file at path through one open
+// file: the mode check (checkAccessFileInfo) is of the file read, so a file
+// swapped in between a check by name and the read cannot pass as the
+// daemon's.
+func readCheckedAccessFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err := checkAccessFileInfo(path, fi); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(f)
+}
+
+// checkAccessFileInfo is CheckAccessFileMode of the file fi describes.
+func checkAccessFileInfo(path string, fi os.FileInfo) error {
 	uid, _, ok := fileOwner(fi)
 	if !ok {
 		return nil

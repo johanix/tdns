@@ -164,7 +164,7 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 	tdns.DefaultApiSocketDir = dir
 
 	cfg := filepath.Join(dir, "tdns-imr.yaml")
-	writeFile(t, cfg, daemonYAML("", "127.0.0.1:8085", "k", "")) // no socket: line
+	writeFile(t, cfg, daemonYAML("", "127.0.0.1:8085", "")) // no socket: line
 	// Outside /etc/tdns the default is named after the whole path.
 	sock := tdns.ApiSocketPath("", cfg)
 	if filepath.Dir(sock) != dir || !strings.HasSuffix(sock, "_tdns-imr.yaml.sock") {
@@ -276,7 +276,7 @@ func TestEntryUsesTheDaemonSocket(t *testing.T) {
 		t.Errorf("no config-file: socket %q, want TCP", s)
 	}
 
-	writeFile(t, cfg, daemonYAML("", "127.0.0.1:8085", "k", "   socket: none\n"))
+	writeFile(t, cfg, daemonYAML("", "127.0.0.1:8085", "   socket: none\n"))
 	if s := socketOf(t, e); s != "" {
 		t.Errorf("socket: none: socket %q, want TCP", s)
 	}
@@ -465,10 +465,10 @@ func TestUnixSchemeAnyCase(t *testing.T) {
 
 func TestDuplicatePins(t *testing.T) {
 	a, b := pinOf("a"), pinOf("b")
-	if w := duplicatePins([]ApiDetails{{Name: "x", Pins: []string{a}}, {Name: "y", Pins: []string{b}}}); len(w) != 0 {
+	if w := duplicatePins("", []ApiDetails{{Name: "x", Pins: []string{a}}, {Name: "y", Pins: []string{b}}}); len(w) != 0 {
 		t.Errorf("distinct pins warned: %v", w)
 	}
-	w := duplicatePins([]ApiDetails{{Name: "x", Pins: []string{a}}, {Name: "y", Pins: []string{b, a}}})
+	w := duplicatePins("", []ApiDetails{{Name: "x", Pins: []string{a}}, {Name: "y", Pins: []string{b, a}}})
 	if len(w) != 1 || !strings.Contains(w[0], "x and y have the same certificate pin") || strings.Contains(w[0], "key") {
 		t.Errorf("shared pin: %v", w)
 	}
@@ -479,12 +479,12 @@ func TestDuplicatePins(t *testing.T) {
 		{Name: "auth", BaseURL: "https://192.0.2.1:8989/api/v1", Pins: []string{a}},
 		{Name: "authtoo", BaseURL: "https://192.0.2.1:8989/api/v1", Pins: []string{a}},
 	}
-	if w := duplicatePins(one); len(w) != 0 {
+	if w := duplicatePins("", one); len(w) != 0 {
 		t.Errorf("two entries of one daemon warned: %v", w)
 	}
 	// A third entry for another daemon with the same pin still warns, and
 	// names each daemon once.
-	w = duplicatePins(append(one, ApiDetails{Name: "other", BaseURL: "https://192.0.2.2:8989/api/v1", Pins: []string{a}}))
+	w = duplicatePins("", append(one, ApiDetails{Name: "other", BaseURL: "https://192.0.2.2:8989/api/v1", Pins: []string{a}}))
 	if len(w) != 1 || !strings.Contains(w[0], "auth and other") {
 		t.Errorf("two daemons sharing a certificate: %v", w)
 	}
@@ -512,7 +512,7 @@ func TestSocketCheckedOnFirstUse(t *testing.T) {
 	var mu sync.Mutex
 	asked := map[string]int{}
 	serve := func(cfg, addr string) {
-		writeFile(t, cfg, daemonYAML("", addr, "k", ""))
+		writeFile(t, cfg, daemonYAML("", addr, ""))
 		ln, err := net.Listen("unix", tdns.ApiSocketPath("", cfg))
 		if err != nil {
 			t.Fatal(err)
@@ -656,7 +656,7 @@ func TestClientCommandsCallTheDaemon(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	sock := filepath.Join(dir, "auth.sock")
 	cfg := filepath.Join(dir, "tdns-auth.yaml")
-	writeFile(t, cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   socket: "+sock+"\n"))
+	writeFile(t, cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "   socket: "+sock+"\n"))
 	withCleanRoleRegistry(t)
 	RegisterRole("auth", "auth")
 	saved := apiConfig
@@ -775,11 +775,11 @@ func TestClientCommandsCallTheDaemon(t *testing.T) {
 		t.Errorf("another daemon on the socket: %v (handled: %v), want its 412, the request not handled", err, handled)
 	}
 	other := filepath.Join(dir, "tdns-auth2.yaml")
-	writeFile(t, other, daemonYAML("TDNS-AUTH", "127.0.0.1:8990", "k", "   socket: "+filepath.Join(dir, "absent.sock")+"\n"))
+	writeFile(t, other, daemonYAML("TDNS-AUTH", "127.0.0.1:8990", "   socket: "+filepath.Join(dir, "absent.sock")+"\n"))
 	if err := runAccess("auth", other, tdns.AccessPost{Command: "list"}); err == nil || !strings.Contains(err.Error(), "no daemon answers there") {
 		t.Errorf("no daemon on the socket: %v", err)
 	}
-	writeFile(t, other, daemonYAML("TDNS-AUTH", "127.0.0.1:8990", "k", "   socket: none\n"))
+	writeFile(t, other, daemonYAML("TDNS-AUTH", "127.0.0.1:8990", "   socket: none\n"))
 	if err := runAccess("auth", other, tdns.AccessPost{Command: "list"}); err == nil || !strings.Contains(err.Error(), "serves no local admin socket") {
 		t.Errorf("socket: none: %v", err)
 	}

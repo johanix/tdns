@@ -241,11 +241,8 @@ func applyAccessChange(af *AccessFile, ap AccessPost) (msg string, changed bool,
 // its bytes too. The file must be there (the daemon never creates it), and
 // it must pass CheckAccessFileMode: a write keeps the file's mode.
 func readAccessFileForEdit(path string) (*AccessFile, []byte, error) {
-	old, err := os.ReadFile(path)
+	old, err := readCheckedAccessFile(path)
 	if err != nil {
-		return nil, nil, err
-	}
-	if err := CheckAccessFileMode(path); err != nil {
 		return nil, nil, err
 	}
 	af, perr := ParseAccessFile(old)

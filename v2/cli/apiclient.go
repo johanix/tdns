@@ -146,7 +146,16 @@ func RegisterOldEntryName(old, new string) {
 // renamedTo is the name entry e must have now, when its name is an old one
 // (oldEntryNames), else "".
 func renamedTo(e ApiDetails) string {
-	return oldEntryNames[e.Name]
+	n := oldEntryNames[e.Name]
+	if n == "" || e.Role == "" {
+		return n
+	}
+	// An explicit role decides: tdns-auth with role: agent is the agent's
+	// entry under an old name, so it becomes agent (which checkRename takes).
+	if key := roleToClientKey[e.Role]; key != "" {
+		return key
+	}
+	return n
 }
 
 // apiConfig is the most recent CliConf passed to InitApiClients, with the

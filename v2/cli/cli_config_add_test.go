@@ -144,10 +144,7 @@ func (d *addDaemon) access(w http.ResponseWriter, r *http.Request) {
 func (d *addDaemon) ping(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if r.Header.Get("X-API-Key") == "k" && !d.refusePing {
-		json.NewEncoder(w).Encode(tdns.PingResponse{Msg: "pong", Role: "read-write", Via: "key"})
-		return
-	}
+	// Certificate only, as the daemon is: no key passes.
 	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 && !d.refusePing {
 		pin := tdns.SPKISHA256(r.TLS.PeerCertificates[0])
 		for name, p := range d.clients {
@@ -477,13 +474,13 @@ func TestAddNeedsTheSocket(t *testing.T) {
 			t.Errorf("a socket not ours: %v", err)
 		}
 	}
-	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   socket: none\n"))
+	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "   socket: none\n"))
 	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "\nsocket: none.") {
 		t.Errorf("socket: none: %v", err)
 	}
 	// A path the daemon refuses is no socket either, and the refusal says
 	// why, not "socket: none".
-	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "k", "   socket: run/d.sock\n"))
+	writeFile(t, d.cfg, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "   socket: run/d.sock\n"))
 	if _, err := d.add(t, nil); err == nil || !strings.Contains(err.Error(), "serves no local admin socket") || strings.Contains(err.Error(), "socket: none") {
 		t.Errorf("a relative socket path: %v", err)
 	} else {

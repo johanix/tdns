@@ -66,6 +66,10 @@ func CheckCliConfig(w io.Writer, root *cobra.Command, cfg string, entries []ApiD
 			problems = append(problems, problem{trimEntryPrefixKeep(v.Why), ""})
 		case strings.HasPrefix(lower, "http://"):
 			problems = append(problems, problem{fmt.Sprintf("%s: plain http, and the management API is TLS only.\nAs root on the daemon's host:", e.Name), fix})
+		case lower != "" && !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(lower, "unix://"):
+			// What buildApiClient refuses: neither https:// nor the local
+			// socket (empty, or unix://).
+			problems = append(problems, problem{fmt.Sprintf("%s: baseurl %s is neither https:// nor unix://,\nso the CLI refuses it. As root on the daemon's host:", e.Name, e.BaseURL), fix})
 		case strings.HasPrefix(lower, "https://") && len(e.Pins) == 0:
 			problems = append(problems, problem{fmt.Sprintf("%s: no pin of its daemon's certificate. As root on\nthe daemon's host:", e.Name), fix})
 		case v.Canonical && v.RoleEntry == "" && e.Role == "":
@@ -92,7 +96,7 @@ func CheckCliConfig(w io.Writer, root *cobra.Command, cfg string, entries []ApiD
 	for _, n := range notes {
 		fmt.Fprintf(w, "\nNote: %s\n", strings.Join(wrapText(n, 66), "\n      "))
 	}
-	for _, d := range duplicatePins(entries) {
+	for _, d := range duplicatePins(cfg, entries) {
 		fmt.Fprintf(w, "\nWarning: %s\n", d)
 	}
 	return len(problems)

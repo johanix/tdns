@@ -323,7 +323,7 @@ func AddDaemonConfig(o AddOptions) (*AddResult, error) {
 	case o.DryRun && cert:
 		res.Steps = enrolPlan(cc, client, tcpURL, list.Clients)
 	case cert:
-		if err := enrol(sock, cc, client, "config add", retryAdd(o, client), &entry, &res.Steps, list, info); err != nil {
+		if err := enrol(sock, o.CliConfig, cc, client, "config add", retryAdd(o, client), &entry, &res.Steps, list, info); err != nil {
 			return nil, err
 		}
 		enrolled = true
@@ -529,7 +529,9 @@ func knownEntry(o AddOptions, res *AddResult, existing []ApiDetails, info *Daemo
 		if n := renamedTo(e); n != "" {
 			flag = strings.TrimSpace("--rename " + shellQuote(n) + " " + flag)
 		}
-		if e.ConfigFile == "" && flag != "" && !strings.HasPrefix(flag, "--rename") {
+		// --daemon-config with any certificate step (--cert, --repin), with
+		// or without --rename; a rename alone needs no daemon.
+		if e.ConfigFile == "" && (strings.Contains(flag, "--cert") || strings.Contains(flag, "--repin")) {
 			flag += " --daemon-config " + shellQuote(info.ConfigFile)
 		}
 		res.Update = fmt.Sprintf("%s config update %s %s", ncliFor(o.CliConfig), shellQuote(e.Name), flag)
@@ -634,7 +636,7 @@ func commandLines(cmd string, indent int) string {
 	if indent+len(cmd) <= 72 {
 		return pad + cmd
 	}
-	parts := strings.Split(cmd, " --")
+	parts := splitAtFlags(cmd)
 	// The first flag stays with the program: a line of the program's name
 	// alone says nothing.
 	if len(parts) > 1 {
@@ -653,6 +655,28 @@ func commandLines(cmd string, indent int) string {
 		lines = append(lines, cont+w)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// splitAtFlags is strings.Split(cmd, " --") at the breaks between shell
+// words only: a " --" inside a single-quoted word (shellQuote) is part of
+// that word, and a break there would put the line's backslash, newline and
+// indent into it.
+func splitAtFlags(cmd string) []string {
+	var parts []string
+	start, quoted := 0, false
+	for i := 0; i < len(cmd); i++ {
+		switch {
+		case cmd[i] == '\\' && !quoted:
+			i++ // the next byte is literal
+		case cmd[i] == '\'':
+			quoted = !quoted
+		case !quoted && strings.HasPrefix(cmd[i:], " --"):
+			parts = append(parts, cmd[start:i])
+			start = i + 3
+			i += 2
+		}
+	}
+	return append(parts, cmd[start:])
 }
 
 // usesCert says whether e reaches its daemon over https with pins: config
@@ -708,6 +732,10 @@ func retryAdd(o AddOptions, client string) string {
 	if client != "" {
 		c += " --client-name " + shellQuote(client)
 	}
+	if o.DryRun {
+		// A dry run's retry stays a dry run: it must not enrol or write.
+		c += " --dry-run"
+	}
 	return c + " " + shellQuote(o.DaemonConfig)
 }
 
@@ -718,8 +746,8 @@ func retryAdd(o AddOptions, client string) string {
 // over TCP with it and the server pins. A refusal or a failed request stops
 // cmd before anything is written. The pin stays enrolled after a failed
 // request; the next run reuses it. info is the daemon, for the command that
-// enables a disabled client.
-func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd, retry string, entry *ApiDetails, steps *[]string, list tdns.AccessResponse, info *DaemonApi) error {
+// enables a disabled client; cfg is the CLI config the printed commands name.
+func enrol(sock *tdns.ApiClient, cfg string, cc CliClientConf, client, cmd, retry string, entry *ApiDetails, steps *[]string, list tdns.AccessResponse, info *DaemonApi) error {
 	certPath, keyPath := clientCertPaths(cc)
 	pin, made, err := ensureClientCert(certPath, keyPath, client)
 	if err != nil {
@@ -730,7 +758,7 @@ func enrol(sock *tdns.ApiClient, cc CliClientConf, client, cmd, retry string, en
 	}
 	if c := enrolledAs(list.Clients, pin); c != nil {
 		if c.Disabled {
-			enable := ncliForThisRun() + " " + info.Role + " client enable " + shellQuote(c.Name) + " --daemon-config " + shellQuote(info.ConfigFile)
+			enable := ncliFor(cfg) + " " + info.Role + " client enable " + shellQuote(c.Name) + " --daemon-config " + shellQuote(info.ConfigFile)
 			return fmt.Errorf("your client certificate is in the daemon's access file as %q,\nbut disabled; nothing was written. Enable it, then run this again:\n%s\n%s",
 				c.Name, commandLines(enable, 3), commandLines(retry, 3))
 		}
@@ -1173,7 +1201,7 @@ of them does not answer.`,
 			}
 			fmt.Printf("CLI config: %s\n\n", cfg)
 			printListRows(os.Stdout, rows, check, cfg)
-			for _, w := range duplicatePins(entries) {
+			for _, w := range duplicatePins(cfg, entries) {
 				fmt.Printf("\nWarning: %s\n", w)
 			}
 			if failed {
@@ -1372,7 +1400,7 @@ func shortDuration(d time.Duration) string {
 // meant for one is accepted by the other. Where both entries name their
 // daemon config, the warning names the certificate and how to give the
 // second daemon its own (its default pair, which it writes at its start).
-func duplicatePins(entries []ApiDetails) []string {
+func duplicatePins(cfg string, entries []ApiDetails) []string {
 	by := map[string][]ApiDetails{}
 	// Entries of one daemon (the same baseurl) have its pin as a matter of
 	// course; only distinct daemons sharing one are worth a warning.
@@ -1403,7 +1431,7 @@ func duplicatePins(entries []ApiDetails) []string {
 		for i, e := range es {
 			names[i] = e.Name
 		}
-		out = append(out, samePinWarning(names, es, p))
+		out = append(out, samePinWarning(cfg, names, es, p))
 	}
 	return out
 }
@@ -1412,7 +1440,7 @@ func duplicatePins(entries []ApiDetails) []string {
 // which all have pin. With the daemon configs of the first two, and the
 // second naming its certificate under apiserver:, it says which file and
 // what to change; else it names the pin.
-func samePinWarning(names []string, es []ApiDetails, pin string) string {
+func samePinWarning(cfg string, names []string, es []ApiDetails, pin string) string {
 	who := strings.Join(names, " and ")
 	generic := fmt.Sprintf("%s have the same certificate pin (%s): the CLI cannot tell them apart, so a command meant for one is accepted by the other. Each daemon should have a certificate of its own.",
 		who, pin)
@@ -1427,7 +1455,7 @@ func samePinWarning(names []string, es []ApiDetails, pin string) string {
 	own, _ := tdns.ApiCertPaths(second.ConfigFile)
 	msg := fmt.Sprintf("%s use the same API certificate (%s): the CLI cannot tell them apart, so a command meant for one is accepted by the other. To give %s its own, remove certfile: and keyfile: under apiserver: in %s and restart it (at start it writes %s). Then run:",
 		who, cert, second.Name, second.ConfigFile, own)
-	return warningText(msg) + "\n" + commandLines(ncliForThisRun()+" config update "+shellQuote(second.Name)+" --repin", 3)
+	return warningText(msg) + "\n" + commandLines(ncliFor(cfg)+" config update "+shellQuote(second.Name)+" --repin", 3)
 }
 
 // warningText is msg wrapped in lines of at most 72, the first of them with

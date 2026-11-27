@@ -192,10 +192,9 @@ func runImrConfigCheck(role, explicitPath string, offline bool) {
 		rep.warn("Config file", "decode",
 			fmt.Sprintf("could not fully decode config into structs: %v", err), "")
 	}
-	// The socket the daemon serves, and its API certificate (looked for, not
-	// written), as ParseConfig fills them in.
-	cfg.ApiServer.Socket = tdns.ApiSocketPath(cfg.ApiServer.Socket, cfgPath)
-	cfg.ApiServer.LookupCertDefaults(cfgPath)
+	// The access file, the socket the daemon serves and its API certificate
+	// (looked for, not written), as ParseConfig fills them in.
+	applyDaemonDefaults(v, &cfg, cfgPath)
 
 	checkImrEngine(&cfg, rep)
 	checkImrTrustAnchors(&cfg, rep)
@@ -493,7 +492,7 @@ func runImrConfigMwe(role, cfgPath string) {
 	// An instance is checked through its own entry: `imr config check` would
 	// compare the file with the first resolver's port.
 	printMweNextSteps("imr", role, cfgPath)
-	fmt.Printf("  tdns-ncli %s config check --serverconfig %s\n", role, cfgPath)
+	fmt.Println(commandLines("tdns-ncli "+role+" config check --serverconfig "+shellQuote(cfgPath), 3))
 }
 
 func renderImrMweConfig(dir, certFile, keyFile, apiPort, dnsPort string) string {

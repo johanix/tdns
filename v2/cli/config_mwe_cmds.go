@@ -155,7 +155,7 @@ func runConfigMwe(role, dir string) {
 	}
 
 	printMweNextSteps(role, role, cfgPath)
-	fmt.Printf("  tdns-ncli %s config check --serverconfig %s\n", role, cfgPath)
+	fmt.Println(commandLines("tdns-ncli "+role+" config check --serverconfig "+shellQuote(cfgPath), 3))
 }
 
 // printMweNextSteps says how to start the MWE daemon of the given type

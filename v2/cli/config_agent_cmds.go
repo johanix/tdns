@@ -238,7 +238,7 @@ func runAgentConfigMwe(role, dir string) {
 	}
 
 	printMweNextSteps(role, role, cfgPath)
-	fmt.Printf("  tdns-ncli %s config check --serverconfig %s\n", role, cfgPath)
+	fmt.Println(commandLines("tdns-ncli "+role+" config check --serverconfig "+shellQuote(cfgPath), 3))
 }
 
 func renderAgentMweConfig(role, dir, certFile, keyFile, apiPort, dnsPort string) string {

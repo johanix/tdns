@@ -57,6 +57,8 @@ included, stays as it is.`,
 		Args: cobra.ArbitraryArgs,
 		Run: func(cmd *cobra.Command, args []string) {
 			o.Ctx, o.CliConfig = cmd.Context(), cliConfigPath(cmd)
+			root := cmd.Root()
+			o.CommandWordTaken = func(n string) bool { return findChild(root, n) != nil }
 			o.Args = args
 			if len(args) == 1 {
 				o.Entry = args[0]
@@ -102,6 +104,9 @@ type UpdateOptions struct {
 	ClientName string
 	// DryRun asks the daemon what it serves, and enrols and writes nothing.
 	DryRun bool
+	// CommandWordTaken reports whether a name is already a command of the
+	// CLI (as for config add): --rename refuses one, which wiring would.
+	CommandWordTaken func(name string) bool
 }
 
 // UpdateResult describes what UpdateEntry did.
@@ -252,7 +257,7 @@ func UpdateEntry(o UpdateOptions) (*UpdateResult, error) {
 	case o.DryRun:
 		res.Steps = []string{"check one request over TCP to " + up.BaseURL + " with these pins"}
 	case o.Cert:
-		if err := enrol(sock, cc, client, cmd, retryUpdate(o, client), &up, &res.Steps, list, info); err != nil {
+		if err := enrol(sock, o.CliConfig, cc, client, cmd, retryUpdate(o, client), &up, &res.Steps, list, info); err != nil {
 			return nil, err
 		}
 	default:
@@ -329,6 +334,13 @@ func checkRename(o UpdateOptions, existing []ApiDetails, e ApiDetails) error {
 		return fmt.Errorf("--rename %q: an entry has that name already; nothing\nwas written", n)
 	case oldEntryNames[n] != "":
 		return fmt.Errorf("--rename %q: that is an old name, which the CLI does not use;\nnothing was written", n)
+	}
+	// A role's entry is named after its command tree; any other command word
+	// is refused, as config add and wiring refuse it.
+	isRoleName := roleEntryOf(ApiDetails{Name: n}, builtinRoles()) != ""
+	if !isRoleName && (n == ShowCmdsName || n == "help" || n == "completion" ||
+		(o.CommandWordTaken != nil && o.CommandWordTaken(n))) {
+		return fmt.Errorf("--rename %q: that is a command of the CLI already; nothing\nwas written", n)
 	}
 	if other := roleEntryOf(ApiDetails{Name: n}, builtinRoles()); other != "" && other != role {
 		return fmt.Errorf("--rename %q: that is the %s entry's name, and this entry is\n%s; nothing was written", n, other, roleOrUnknown(role))
@@ -428,6 +440,10 @@ func retryUpdate(o UpdateOptions, client string) string {
 	}
 	if o.TargetFile != "" {
 		c += " --file " + shellQuote(o.TargetFile)
+	}
+	if o.DryRun {
+		// A dry run's retry stays a dry run: it must not enrol or write.
+		c += " --dry-run"
 	}
 	return c
 }

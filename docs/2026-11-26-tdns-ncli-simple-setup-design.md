@@ -10,7 +10,9 @@ PR, #1210 (branch `claude/simple-setup`, open, not merged), after Johan's
 go of 2026-11-27. tdns-mp's CLI and deployment scripts outside this repo need
 companion changes (see "What breaks"); those are not made yet. The choices
 the implementation had to make that this design left open are in "As
-built" at the end.
+built" at the end. CodeRabbit's first round (on a7b7825e, 22 findings) is
+answered: 3 were fixed already, 2 declined, and the other 17 fixed in the
+commit after 15aadff3.
 It follows the cert-setup stack (#1198, #1200, #1202) and is meant to come
 right after that stack merges.
 
@@ -286,16 +288,22 @@ changed in the PR.
   there. A disabled one is refused with the `client enable` command.
 - **The file check:** owner the daemon's user or root, and not writable by
   group or others. The refusal gives `chmod go-w <file>` or `chown <user>
-  <file>`.
+  <file>`. The check is of the file read (one open file for both), so a
+  file swapped in between cannot pass.
+- **The client library sends https only** over TCP: an `http://` base URL,
+  or a redirect to one, fails before anything is sent.
 - **`socket: none` with an access file is allowed**: no admin anywhere is
   the operator's choice. (Before, an access file required the socket.)
 - **The CLI config has a `config check` of its own** (`tdns-ncli config
   check`): Q4's "config check fails on an old entry" needed a command that
-  checks the CLI config. It fails on an old name, plain `http://` and an
-  https entry without pins, each with its fix; leftover key lines are notes.
+  checks the CLI config. It fails on an old name, plain `http://` (or any
+  scheme but `https://` and `unix://`) and an https entry without pins, each
+  with its fix; leftover key lines are notes.
 - **`config update <entry> --rename <name>`** makes the rename a complete
   command, as Change 2 asks. It needs no daemon, and combines with `--cert`
-  or `--repin`.
+  or `--repin`. A name that is a command of the CLI (`config`) is refused,
+  as `config add` refuses it. A role's own entry renamed this way (`auth`)
+  starts and restarts without `config-file:`, on the role's default config.
 - **`--cert` works on an entry that has pins already**: it enrols the client
   certificate again ("already there") and takes the pins. It is the one
   command that makes an entry work; `--repin` takes new pins only.

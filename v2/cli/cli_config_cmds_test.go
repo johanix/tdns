@@ -427,12 +427,11 @@ func writeFile(t *testing.T, path, content string) {
 }
 
 // daemonYAML is a daemon config with an apiserver: block.
-func daemonYAML(service, addr, key string, extra string) string {
+func daemonYAML(service, addr, extra string) string {
 	s := ""
 	if service != "" {
 		s += "service:\n   name: " + service + "\n"
 	}
-	_ = key // daemons have no API key; kept so call sites read as before
 	return s + "apiserver:\n   addresses: [ " + addr + " ]\n" + extra
 }
 
@@ -440,7 +439,7 @@ func TestReadDaemonApi(t *testing.T) {
 	dir := t.TempDir()
 
 	p := filepath.Join(dir, "tdns-auth2.yaml")
-	writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8990", "k2", ""))
+	writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8990", ""))
 	got, err := ReadDaemonApi(p, "")
 	if err != nil {
 		t.Fatal(err)
@@ -452,7 +451,7 @@ func TestReadDaemonApi(t *testing.T) {
 	// An imrengine: block and no service: is tdns-imr; access-file: moves
 	// the access file.
 	p2 := filepath.Join(dir, "tdns-imr.yaml")
-	writeFile(t, p2, "imrengine:\n   x: 1\n"+daemonYAML("", "127.0.0.1:8080", "ik", "   access-file: /srv/imr-access.yaml\n"))
+	writeFile(t, p2, "imrengine:\n   x: 1\n"+daemonYAML("", "127.0.0.1:8080", "   access-file: /srv/imr-access.yaml\n"))
 	got, err = ReadDaemonApi(p2, "")
 	if err != nil {
 		t.Fatal(err)
@@ -535,7 +534,7 @@ func newAddEnv(t *testing.T) *addEnv {
 func (e *addEnv) daemon(t *testing.T, file, service, addr string) string {
 	t.Helper()
 	p := filepath.Join(e.dir, file)
-	writeFile(t, p, daemonYAML(service, addr, "key-"+file, ""))
+	writeFile(t, p, daemonYAML(service, addr, ""))
 	return p
 }
 
@@ -662,7 +661,7 @@ func TestAddNaming(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := filepath.Join(sub, "tdns-auth.yaml")
-	writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8991", "k", ""))
+	writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8991", ""))
 	res, err := env.add(t, p, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -682,7 +681,7 @@ func TestAddNaming(t *testing.T) {
 		"9lives":    "must start with a letter",
 	} {
 		q := filepath.Join(env.dir, "q.yaml")
-		writeFile(t, q, daemonYAML("TDNS-AUTH", "127.0.0.1:8999", "k", ""))
+		writeFile(t, q, daemonYAML("TDNS-AUTH", "127.0.0.1:8999", ""))
 		_, err := env.add(t, q, func(o *AddOptions) {
 			o.Name = name
 			o.CommandWordTaken = func(n string) bool { return n == "config" }
@@ -715,7 +714,7 @@ func TestAddRefusesClashes(t *testing.T) {
 	}
 
 	// The same file, but its API address has since moved.
-	writeFile(t, first, daemonYAML("TDNS-AUTH", "127.0.0.1:7777", "k", ""))
+	writeFile(t, first, daemonYAML("TDNS-AUTH", "127.0.0.1:7777", ""))
 	if _, err := env.add(t, first, nil); err == nil || !strings.Contains(err.Error(), "different API address") {
 		t.Errorf("moved address: err = %v", err)
 	}
@@ -759,7 +758,7 @@ func TestAddDryRunChangesNothing(t *testing.T) {
 	printAddResult(&sb, res, true, env.cli)
 	out := sb.String()
 	if !strings.HasPrefix(out, "Would add the new entry \"auth2\"") || strings.Contains(out, "apikey") || !strings.Contains(unwrapCommands(out), "config update auth2 --cert") ||
-		!strings.Contains(out, "\n   touch "+filepath.Join(env.dir, "tdns-auth2-access.yaml")+"\n") {
+		!strings.Contains(out, "\n   touch "+shellQuote(filepath.Join(env.dir, "tdns-auth2-access.yaml"))+"\n") {
 		t.Errorf("printed:\n%s", out)
 	}
 }

@@ -119,11 +119,23 @@ func NewClientWithOptions(name, baseurl string, o ClientOptions) *ApiClient {
 		tlsconfig.Certificates = []tls.Certificate{*o.ClientCert}
 	}
 	api.Client = &http.Client{
-		Transport: &http.Transport{
+		Transport: httpsOnly{&http.Transport{
 			TLSClientConfig: tlsconfig,
-		},
+		}},
 	}
 	return &api
+}
+
+// httpsOnly refuses every request that is not https before it is sent: an
+// http:// base URL, or a redirect to one, would go out in plaintext with no
+// pin checked (VerifyConnection runs only in a TLS handshake).
+type httpsOnly struct{ base http.RoundTripper }
+
+func (t httpsOnly) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Scheme != "https" {
+		return nil, fmt.Errorf("%s: the management API is https only", r.URL.Redacted())
+	}
+	return t.base.RoundTrip(r)
 }
 
 // unixSocketPath returns the socket path of a unix:///path base URL.

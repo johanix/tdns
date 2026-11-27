@@ -81,7 +81,10 @@ func daemonStartFlags(cmd *cobra.Command, ad *ApiDetails) ([]string, error) {
 	switch {
 	case ad != nil && ad.ConfigFile != "":
 		return append([]string{"--config", ad.ConfigFile}, daemonFlagsFrom(cmd, false)...), nil
-	case ad != nil && ad.Role != "":
+	case ad != nil && ad.Role != "" && roleEntryOf(*ad, builtinRoles()) == "":
+		// An instance (auth2). A role's own entry (auth, as config update
+		// --rename writes it, role: and all) starts on the role's default
+		// config, as it did without role:.
 		return nil, fmt.Errorf("apiservers entry %q has no config-file:, so its daemon would start on the "+
 			"canonical daemon's config. Add config-file: <its daemon config> to the entry", ad.Name)
 	}
