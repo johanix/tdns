@@ -132,6 +132,19 @@ func noteRefreshFailure(zd *ZoneData, zone string, err error, msg string) bool {
 func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefresher, conf *Config,
 	refreshCounters *core.NameMap[*RefreshCounter]) (bool, error) {
 
+	// A config-bearing refresher is the config as it stands, so the policy name
+	// the first bind goes by is its, not what an earlier attempt stored: a zone
+	// whose first load is still pending when a reload reaches it keeps the merge
+	// of the first refresher (the merge runs only while ZoneType is 0), and the
+	// name a reload has dropped or changed would be looked up in the reload's
+	// policies, where it is not. Stored, so that the ticker's retries, which
+	// carry no refresher, go on with the name the config has now.
+	if zr.ConfigUpdate {
+		zd.mu.Lock()
+		zd.DnssecPolicyName = zr.DnssecPolicy
+		zd.mu.Unlock()
+	}
+
 	seen := zd.refreshRun.confirmations.Load()
 	updated, err := zd.Refresh(ctx, Globals.Verbose, Globals.Debug, zr.Force, conf)
 	if err != nil {
@@ -149,7 +162,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		// refresh DID fail, the ticker must retry, and RefreshError must be
 		// recorded.
 		if zd.publishedSnapshot() != nil {
-			if cerr := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); cerr != nil {
+			if cerr := completeFirstZonePolicyAndLoadIn(ctx, zd, conf, zd.DnssecPolicyName, zr.DnssecPolicies); cerr != nil {
 				lgEngine.Error("policy sync after adopting a persisted copy failed",
 					"zone", zone, "error", cerr)
 				zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", cerr)
@@ -476,12 +489,24 @@ func signOnceAfterPolicyBind(ctx context.Context, zd *ZoneData) error {
 // publication, delegation-sync setup) see the zone's actual content rather than
 // the pre-replay file.
 func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) error {
+	return completeFirstZonePolicyAndLoadIn(ctx, zd, conf, configPolicyName, nil)
+}
+
+// completeFirstZonePolicyAndLoadIn is completeFirstZonePolicyAndLoad resolving
+// the zone's policy against pols, the policies of the config being applied, for
+// a first load that has the refresher the config produced
+// (ZoneRefresher.DnssecPolicies). The runtime snapshot is published after a
+// reload has queued its refreshers, so a zone the reload adds, and the policy
+// the same reload defines for it, can reach the engine while the snapshot has
+// neither, and the zone would be quarantined for a policy that does not exist.
+// Nil: the snapshot, as for a retry that has no refresher.
+func completeFirstZonePolicyAndLoadIn(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string, pols map[string]DnssecPolicy) error {
 	zd.InstallInitialSnapshot()
 
 	// Bind the policy BEFORE replay signs anything. On failure OnFirstLoad is
 	// retained for a later retry, exactly as finishFirstLoadPolicy does -- and
 	// the deltas are left unreplayed rather than replayed with a nil policy.
-	if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, configPolicyName); err != nil {
+	if err := syncZoneDnssecPolicyFromConfigIn(ctx, zd, conf.Internal.KeyDB, conf, configPolicyName, pols); err != nil {
 		lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
 		return err
 	}
@@ -805,11 +830,116 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 			}
 			// log.Printf("***** RefreshEngine: zonerefch: zone %s", zr.Name)
 			zone = zr.Name
+			// Handled from here, whatever becomes of it. The ticker's retries of a
+			// first load run on this goroutine, so none runs while the refresher is
+			// applied; what they have to wait for is one that is still queued
+			// (refresherOwed, the ticker below).
+			if zr.Registered != nil {
+				zr.Registered.noteRefresherHandled(zr.ParseSeq)
+			}
 			resp := RefresherResponse{
 				Zone: zr.Name,
 			}
+			// THE ORDERING INVARIANT between a queued refresher and the zone it meets.
+			//
+			// A refresher is one zone's config as one parse of the config produced
+			// it, and it waits in a buffered queue: queueing does not wait for the
+			// engine, so by the time it is dequeued later reloads may have removed
+			// the zone, or registered it again. What it may assume depends on who
+			// queued it.
+			//
+			// A refresher that names the registration it was queued for
+			// (ZoneRefresher.Registered: ParseZones, which registers the zone and
+			// names that ZoneData) is for that registration only:
+			//
+			//	Zones holds ...           the refresher is ...
+			//	no zone                   dropped, no zone created: a later reload
+			//	                          removed it
+			//	the same ZoneData         applied, unless a newer parse of the config
+			//	                          has produced a refresher for it (its
+			//	                          ParseSeq is below the zone's
+			//	                          latestParseSeq, set when that parse
+			//	                          succeeded, before it queues anything, and
+			//	                          given back if its refreshers are not
+			//	                          delivered):
+			//	                          then dropped, and the newest config is
+			//	                          the one that lands, once, as the zone's
+			//	                          first bind if it has none yet. One that
+			//	                          was applied before the newer parse (the
+			//	                          zone has keys under its algorithm) leaves
+			//	                          the newest config's algorithm change as
+			//	                          the algorithm change it is: refused
+			//	                          without a rollover engine, as for any
+			//	                          signed zone
+			//	another ZoneData          dropped: a later reload removed the zone
+			//	                          and registered it again, and that
+			//	                          registration's own refresher, queued after
+			//	                          this one, applies the config that
+			//	                          registered it. Applying this one would bind
+			//	                          an older reload's config, its policies
+			//	                          among it, to the newer zone
+			//
+			// A refresher that names none (a dynamic zone, a catalog member, a
+			// NOTIFY, the CLI, the ticker) has no registration to compare against:
+			//
+			//	no zone                   config-bearing with a zone type: creates
+			//	                          the zone, which is its first appearance;
+			//	                          any other: dropped (#970)
+			//	a zone                    applied
+			//
+			// The identity is the *ZoneData. ParseZones reads it from Zones as it
+			// registers or finds the zone and carries it by value, and it is
+			// compared here with what Zones.Get returns when the refresher is
+			// dequeued. Nothing writes it after the refresher exists, so the compare
+			// takes no lock. A removal that follows the compare is the case of a
+			// captured ZoneData, which the generation taken at dispatch covers (B5b).
+			//
+			// The same removal can come while the engine, or anything else, holds
+			// the zone: it was dequeued, and the first load, the merge, the policy
+			// sync or a refresh is in the middle of it. A removal bumps the zone's
+			// generation (the reload's, an API delete's, a replacement's), and what
+			// can write the zone afterwards does this to it:
+			//
+			//	the engine's merge, sync, first    go on, on the zone they hold. It is
+			//	load and refresh                   detached; nothing they write registers
+			//	                                   it, and the persist steps stop at the
+			//	                                   generation (B5b)
+			//	SetError, ClearError, SetStatus    write the zone's own state and nothing
+			//	and the *Locked forms              in Zones: they used to end with a
+			//	                                   Zones.Set, which put a removed zone
+			//	                                   back, or put a stale pointer over the
+			//	                                   registration that replaced it
+			//	recordPolicyOfNonSigningZone       writes no registry entry
+			//	the resigner                       walks the live registry: a removed zone
+			//	                                   is not renewed
+			//	a refresher queued before the      creates no zone, or is dropped (above)
+			//	removal
+			//
+			// A zone is put into Zones where it is created, by an explicit Zones.Set
+			// (ParseZones, the engine's creation of a dynamic zone, the dynamic and
+			// catalog paths), and nowhere else on these paths. What is in the keystore
+			// under the zone's name (its keys, its last-applied policy) is not the
+			// registration's, and outlives it.
 			if zone != "" {
 				if zd, exist := Zones.Get(zone); exist {
+					if zr.Registered != nil && zr.Registered != zd {
+						lgEngine.Info("refresher of a registration a later reload replaced; dropped", "zone", zone)
+						if zr.Response != nil {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("refresher for zone %s superseded: the zone was registered again after it was queued", zone)
+							zr.Response <- resp
+						}
+						continue
+					}
+					if zr.Registered != nil && zr.ParseSeq < zd.latestParseSeq.Load() {
+						lgEngine.Info("refresher overtaken by a newer reload of the zone; dropped", "zone", zone)
+						if zr.Response != nil {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("refresher for zone %s superseded: a newer reload of the zone is queued behind it", zone)
+							zr.Response <- resp
+						}
+						continue
+					}
 					if zd.FirstZoneLoad {
 						// PRE-REGISTERED STUB: zone was pre-registered with
 						// OnFirstLoad callbacks but not yet loaded. Merge config
@@ -893,7 +1023,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							continue
 						}
-						if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, firstLoadPolicyName(zd, zr)); err != nil {
+						if err := completeFirstZonePolicyAndLoadIn(ctx, zd, conf, firstLoadPolicyName(zd, zr), zr.DnssecPolicies); err != nil {
 							lgEngine.Error("zone policy sync after first load failed", "zone", zone, "error", err)
 							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 							zd.LatestError = time.Now()
@@ -926,6 +1056,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has changes that only memory holds"+
 								" (the delta journal is not recording them), reload not possible", zone)
 							lgEngine.Warn("zone has unjournalled modifications, reload not possible", "zone", zone)
+							// The content is what the refusal protects. The policy a
+							// zone that does not sign records changes none of it, and
+							// without the record a reload that gave the zone its first
+							// policy leaves it naming none, so that it cannot start
+							// signing until a reload is accepted or the daemon
+							// restarts (#1000). A zone that signs is not handled by
+							// this call, and its policy waits with its content.
+							if zr.ConfigUpdate {
+								zd.recordPolicyOfNonSigningZone(zr.DnssecPolicy, zr.DnssecPolicies)
+							}
 							if zr.Response != nil {
 								zr.Response <- resp
 							}
@@ -1034,6 +1174,17 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// Lookup MultiSigner from config. DNSSEC policy sync runs
 						// AFTER unlock via syncZoneDnssecPolicyFromConfig (applied
 						// vs intent; replaces applyReloadedPolicyLocked).
+						//
+						// By name, in the live snapshot, which is not what the
+						// policies do: those travel on the refresher
+						// (ZoneRefresher.DnssecPolicies). ParseZones names no
+						// multi-signer on its refreshers, so for a zone of the config
+						// file this block does not run, and the stub merge above and
+						// the creation of a dynamic zone below look up the empty name.
+						// A producer that sets ZoneRefresher.MultiSigner reads the map
+						// of whatever reload published last, which may be a later one
+						// than its own: it has to carry the map as ParseZones carries
+						// the policies.
 						if zr.MultiSigner != "" {
 							if msc, exists := ConfLive().MultiSigner[zr.MultiSigner]; exists {
 								zd.MultiSigner = &msc
@@ -1049,8 +1200,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// resolve→backfill→classify→apply. First-load OnFirstLoad
 						// completion retries on the ticker (hasPendingOnFirstLoad),
 						// not here.
-						if zr.ConfigUpdate && (zr.DnssecPolicy != "" || zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
-							if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, zr.DnssecPolicy); err != nil {
+						//
+						// A zone that does not sign has no sync to run, but its
+						// reload still records the policy the config now names
+						// (added, changed or removed) for a signing role learned
+						// later (#1000).
+						if zr.ConfigUpdate && !zd.recordPolicyOfNonSigningZone(zr.DnssecPolicy, zr.DnssecPolicies) {
+							if err := syncZoneDnssecPolicyFromConfigIn(ctx, zd, conf.Internal.KeyDB, conf, zr.DnssecPolicy, zr.DnssecPolicies); err != nil {
 								lgEngine.Warn("DNSSEC policy sync on reload failed", "zone", zone, "err", err)
 								if zr.Response != nil {
 									resp.Error = true
@@ -1118,7 +1274,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zr:    &zrCopy,
 						})
 					}
-				} else if !zr.ConfigUpdate || zr.ZoneType == 0 {
+				} else if !zr.ConfigUpdate || zr.ZoneType == 0 || zr.Registered != nil {
 					// A refresh of a name Zones does not hold, with nothing to
 					// build a zone from: a NOTIFY or a reload that raced the
 					// zone's removal, or a caller asking for a zone this server
@@ -1127,7 +1283,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// and answering queries from no data (#970). Only a
 					// config-bearing refresher with a zone type (the dynamic
 					// zones LoadDynamicZoneFiles enqueues) creates a zone here.
-					if zr.ConfigUpdate {
+					//
+					// Not one that ParseZones queued: it registers every zone it
+					// queues a refresher for, so a zone it finds missing was
+					// removed by a later reload while the refresher waited, and
+					// building it from that refresher would register the removed
+					// zone again, with the config and the policies of a reload
+					// that has been superseded.
+					if zr.Registered != nil {
+						lgEngine.Info("refresh of a zone a later reload removed; no zone created", "zone", zone)
+					} else if zr.ConfigUpdate {
 						lgEngine.Error("config-bearing refresh without a zone type; no zone created", "zone", zone)
 					} else {
 						lgEngine.Debug("refresh of a zone this server does not hold; no zone created", "zone", zone)
@@ -1256,7 +1421,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// on the normal path renews. That is the exact ordering bug
 					// the helper was extracted to prevent on the static-zone path;
 					// the dynamic path kept its own copy and kept the bug.
-					if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, firstLoadPolicyName(zd, zr)); err != nil {
+					if err := completeFirstZonePolicyAndLoadIn(ctx, zd, conf, firstLoadPolicyName(zd, zr), zr.DnssecPolicies); err != nil {
 						lgEngine.Warn("DNSSEC policy sync for dynamic zone failed", "zone", zone, "err", err)
 						zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 						zd.LatestError = time.Now()
@@ -1332,6 +1497,21 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// tick, so a zone in a persistent error state is walked and
 					// logged once a second until it clears.
 					rc.CurRefresh = refreshCounterRetry(rc)
+					continue
+				}
+
+				// A first load, or the policy sync that completes it, resolves the
+				// policy name the zone has stored, and a ticker retry carries no
+				// refresher to say otherwise. A reload publishes its snapshot before
+				// the engine dequeues its refreshers, and a name the reload replaced
+				// is not in that snapshot: resolved there, it quarantines the zone
+				// (DnssecError) for a policy that the queued refresher is about to
+				// replace, and the engine then skips that refresher, as it does for
+				// any zone in that state. The refresher does the first load itself,
+				// with its own name and policies, so the retry leaves it to it. The
+				// counter is not touched: the zone is due again on the next tick.
+				if (zd.FirstZoneLoad || hasPendingOnFirstLoad(zd)) && zd.refresherOwed() {
+					lgEngine.Debug("ticker: a config refresher for the zone is queued, its first-load retry waits for it", "zone", zone)
 					continue
 				}
 

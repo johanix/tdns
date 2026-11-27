@@ -130,6 +130,16 @@ type ZoneData struct {
 	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map". An xfr zone only supports xfr related ops
 	ZoneType   ZoneType
 	ApexLen    int
+	// latestParseSeq is the number of the newest successful parse of the config
+	// that produced a refresher for this zone (ZoneRefresher.ParseSeq). A refresher
+	// of an older one is dropped by the engine, as the newer one carries the zone's
+	// whole config.
+	latestParseSeq atomic.Uint64
+	// handledParseSeq is the newest ParseSeq of a refresher for this registration
+	// that the engine has dequeued, whether it applied it or dropped it. While
+	// latestParseSeq is above it, a refresher of the newest parse is owed to the
+	// engine: it is queued, or about to be (refresherOwed).
+	handledParseSeq atomic.Uint64
 	//	RRs            RRArray
 	Data *core.NameMap[OwnerData]
 	// 20260415 johani: MP    *ZoneMPExtension // Multi-provider state; nil for non-MP zones
@@ -1390,6 +1400,25 @@ type ZoneRefresher struct {
 	// downstreams => deny, empty allow-notify => primaries) instead of keeping
 	// stale permissions.
 	ConfigUpdate bool
+	// Registered is the ZoneData that the producer of the refresher registered
+	// in Zones, or found there, before it queued the refresher: ParseZones sets it
+	// for every zone of the zones: block. The refresher is for that registration
+	// only: the engine creates no zone for it if Zones holds none, and drops it if
+	// Zones holds another. A config-bearing refresher without it (a dynamic zone, a
+	// catalog member) is the zone's first appearance, and creates it. The rules, and
+	// why, are at the head of RefreshEngine's dispatch.
+	Registered *ZoneData
+	// ParseSeq numbers the parse that produced the refresher (ParseZones sets it;
+	// 0 for a refresher of no parse). The zone records the newest parse that
+	// succeeded for it (ZoneData.latestParseSeq), and the engine drops a refresher
+	// that a newer parse of the same registration has overtaken: the latest
+	// reload's config wins.
+	ParseSeq uint64
+	// supersedes is the zone's latestParseSeq as it was before the parse that
+	// produced the refresher took it (ParseZones sets it). A delivery that fails
+	// gives it back (abandonRefreshers), so that a refresher the engine never gets
+	// does not overtake the one an earlier parse queued.
+	supersedes uint64
 	// UpdatePolicySet marks a refresher whose UpdatePolicy is the zone's
 	// activated policy (ParseZones, a persisted dynamic primary), which then
 	// replaces the zone's even when it is empty. ConfigUpdate cannot mean
@@ -1418,6 +1447,12 @@ type ZoneRefresher struct {
 	UpdatePolicy     UpdatePolicy
 	DelegationPolicy *DelegationPolicy
 	DnssecPolicy     string
+	// DnssecPolicies are the DNSSEC policies of the config being applied
+	// (ParseZones; one copy, shared by the refreshers of a parse, never
+	// written). The runtime-config snapshot a refresher is resolved against is
+	// published after ParseZones has queued it, so for a reload it may still
+	// hold the previous config's policies. Nil: resolve through the snapshot.
+	DnssecPolicies map[string]DnssecPolicy
 	// OutboundSoaSerial carries the per-zone outbound serial mode to the
 	// RefreshEngine (copied to zd.OutboundSoaSerial on merge). Empty means
 	// "inherit the server-global setting" and is a valid, self-consistent

@@ -49,6 +49,9 @@ const (
 	// separate "benign internals" class. Finding A: resolvePolicyPair resolves
 	// applied and intent from the SAME ConfLive() snapshot by NAME, so a
 	// "same name, changed internals" delta is unreachable at classify time.
+	// A same-name change of ALGORITHMS is reachable on a reload, through the
+	// definition the zone is bound to (definitionBoundUnder), and classifies as
+	// PolicyChangeIncompatibleAlg.
 	PolicyChangeNone PolicyChangeClass = iota
 	// PolicyChangeCompatibleName: different name, same KSK+ZSK algorithms —
 	// apply transactionally.
@@ -120,6 +123,19 @@ func resolvePolicyPair(kdb *KeyDB, zone, configPolicyName string) (
 	appliedName string, appliedPol *DnssecPolicy, appliedOK bool,
 	err error,
 ) {
+	return resolvePolicyPairIn(kdb, zone, configPolicyName, nil)
+}
+
+// resolvePolicyPairIn is resolvePolicyPair resolving both names, the override's
+// among them, against pols instead of the runtime snapshot. pols is the policies
+// of the config a reload is applying (ZoneRefresher.DnssecPolicies): a reload
+// publishes its snapshot after it has queued its refreshers, so the engine can
+// resolve against the previous config's policies. Nil: the snapshot.
+func resolvePolicyPairIn(kdb *KeyDB, zone, configPolicyName string, pols map[string]DnssecPolicy) (
+	intentName string, intentPol *DnssecPolicy,
+	appliedName string, appliedPol *DnssecPolicy, appliedOK bool,
+	err error,
+) {
 	intentName, _, err = EffectiveDnssecPolicyName(kdb, zone, configPolicyName)
 	if err != nil {
 		// EffectiveDnssecPolicyName still returns a usable config-base name on a
@@ -132,15 +148,17 @@ func resolvePolicyPair(kdb *KeyDB, zone, configPolicyName string) (
 	}
 	appliedName, appliedOK = an, ok
 
-	live := ConfLive()
+	if pols == nil {
+		pols = ConfLive().DnssecPolicies
+	}
 	if intentName != "" {
-		if p, exists := live.DnssecPolicies[intentName]; exists {
+		if p, exists := pols[intentName]; exists {
 			ip := p
 			intentPol = &ip
 		}
 	}
 	if appliedOK && appliedName != "" {
-		if p, exists := live.DnssecPolicies[appliedName]; exists {
+		if p, exists := pols[appliedName]; exists {
 			ap := p
 			appliedPol = &ap
 		}
@@ -381,6 +399,21 @@ func keepBindingOrQuarantineForBadIntent(zd *ZoneData, intentName, keepMsg, quar
 	zd.mu.Unlock()
 }
 
+// policySyncStage names a point in syncZoneDnssecPolicyFromConfigIn that a test
+// can observe.
+type policySyncStage int
+
+const (
+	policySyncRead       policySyncStage = iota // the lock is taken, nothing is read yet
+	policySyncClassified                        // the change is classified, nothing is done with it yet
+	policySyncActing                            // the checks are passed: the next step binds, applies or refuses
+)
+
+// policySyncProbe is nil, and is set by a test that has to see, or land
+// something at, a point between the policy sync's reads and what it does with
+// them. It is called with the zone and the stage the sync has reached.
+var policySyncProbe func(zd *ZoneData, stage policySyncStage)
+
 // syncZoneDnssecPolicyFromConfig is the refresh-engine policy path (plan §6.2):
 // resolve applied vs intent → Branch 0 backfill/first-apply → classify →
 // cheap rebind / skip-in-flight / transactional apply / refuse. Config source
@@ -394,6 +427,17 @@ func keepBindingOrQuarantineForBadIntent(zd *ZoneData, intentName, keepMsg, quar
 // keep an existing in-memory binding + DnssecPolicyWarning; on first-bind with
 // no binding yet, proceed toward intent when resolvable, else quarantine.
 func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyDB, conf *Config, configPolicyName string) error {
+	return syncZoneDnssecPolicyFromConfigIn(ctx, zd, kdb, conf, configPolicyName, nil)
+}
+
+// syncZoneDnssecPolicyFromConfigIn is syncZoneDnssecPolicyFromConfig resolving
+// the zone's policies against pols, the policies of the config being applied,
+// where the caller has them (a reload's refresher carries them); see
+// resolvePolicyPairIn. Nil: the runtime snapshot.
+//
+// For a zone that signs it takes zd.policyApplyMu, so the caller MUST NOT hold
+// it.
+func syncZoneDnssecPolicyFromConfigIn(ctx context.Context, zd *ZoneData, kdb *KeyDB, conf *Config, configPolicyName string, pols map[string]DnssecPolicy) error {
 	if zd == nil || kdb == nil {
 		return fmt.Errorf("syncZoneDnssecPolicyFromConfig: nil zone or keydb")
 	}
@@ -401,7 +445,22 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 		return nil
 	}
 
-	intentName, intentPol, appliedName, appliedPol, appliedOK, err := resolvePolicyPair(kdb, zd.ZoneName, configPolicyName)
+	// Held from the reads below to the end: the sync reads the last-applied
+	// record and the bound definition, classifies, and then acts on what it read
+	// -- binds, applies, or refuses by putting the applied policy back. A
+	// command-source apply (policy-change, policy-set) that completed in
+	// between had bound and persisted another policy, and the refusal restored
+	// the pre-command one in memory while the command's override stayed in the
+	// keystore. The command's apply holds this lock for its whole span, so it
+	// now waits for the sync and lands after it. The apply branches therefore
+	// call applyZonePolicyTransactionalLocked.
+	zd.policyApplyMu.Lock()
+	defer zd.policyApplyMu.Unlock()
+	if policySyncProbe != nil {
+		policySyncProbe(zd, policySyncRead)
+	}
+
+	intentName, intentPol, appliedName, appliedPol, appliedOK, err := resolvePolicyPairIn(kdb, zd.ZoneName, configPolicyName, pols)
 	if err != nil {
 		return fmt.Errorf("resolve DNSSEC policy pair for zone %s: %w", zd.ZoneName, err)
 	}
@@ -449,7 +508,7 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 				"zone", zd.ZoneName, "policy", intentName)
 			return nil
 		}
-		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+		if _, aerr := applyZonePolicyTransactionalLocked(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
 			lgEngine.Warn("first config apply of DNSSEC policy failed; binding reverted",
 				"zone", zd.ZoneName, "policy", intentName, "err", aerr)
 			return aerr
@@ -473,7 +532,7 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 			return nil
 		}
 		// First-bind: no healthy binding to keep — proceed toward intent.
-		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+		if _, aerr := applyZonePolicyTransactionalLocked(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
 			lgEngine.Warn("config apply toward intent after unavailable applied policy failed",
 				"zone", zd.ZoneName, "policy", intentName, "err", aerr)
 			return aerr
@@ -481,7 +540,12 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 		return nil
 	}
 
+	appliedPol = definitionBoundUnder(zd, appliedName, appliedPol)
+
 	class := classifyPolicyChange(appliedPol, appliedName, intentPol, intentName)
+	if policySyncProbe != nil {
+		policySyncProbe(zd, policySyncClassified)
+	}
 
 	// Branch 1 — same name, same algs (incl. internals-only edits).
 	if intentName == appliedName && class == PolicyChangeNone {
@@ -541,9 +605,12 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 		return nil
 	}
 
+	if policySyncProbe != nil {
+		policySyncProbe(zd, policySyncActing)
+	}
 	switch class {
 	case PolicyChangeCompatibleName:
-		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+		if _, aerr := applyZonePolicyTransactionalLocked(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
 			lgEngine.Warn("compatible DNSSEC policy rename apply failed; binding reverted",
 				"zone", zd.ZoneName, "from", appliedName, "to", intentName, "err", aerr)
 			return aerr
@@ -558,7 +625,7 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 			// can carry: bind transactionally (the reconcile no-ops on the
 			// mismatch) and the engine spawns the algorithm roll on its
 			// next tick. Same outcome as `zone dnssec policy-change`.
-			if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+			if _, aerr := applyZonePolicyTransactionalLocked(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
 				lgEngine.Warn("KSK algorithm-change policy apply failed; binding reverted",
 					"zone", zd.ZoneName, "from", appliedName, "to", intentName, "err", aerr)
 				return aerr
@@ -574,11 +641,49 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 
 	default:
 		// Defensive: treat unknown as compatible apply.
-		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+		if _, aerr := applyZonePolicyTransactionalLocked(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
 			return aerr
 		}
 		return nil
 	}
+}
+
+// definitionBoundUnder is the definition of the applied policy appliedName that
+// the zone's keys were made under, for the classifier to compare against intent.
+// byName is the definition the applied name resolves to now.
+//
+// They are one and the same until a config edit changes the algorithms of the
+// policy under its own name: then the applied name and the intent name are the
+// same, and both resolve to the edited definition, so the classifier finds
+// nothing changed and Branch 1 rebinds the zone to algorithms it has no keys of.
+// The definition the zone is bound to is the only record left of the old
+// algorithms, and it is the one the keys, and the algorithm-roll checks below,
+// follow. So when the zone is bound under the applied name to a definition of
+// other KSK or ZSK algorithms, that definition is the applied one, and the change
+// is classified, refused or carried like a change to any other policy.
+//
+// The binding is used for the definition only, and only under the applied name.
+// It is never what decides that the policy changed (blocking ①): on a restart
+// the binding is the config's already, and the name comparison stays what finds
+// a change then. An edit that keeps the algorithms leaves byName as it was, and
+// stays Branch 1's.
+func definitionBoundUnder(zd *ZoneData, appliedName string, byName *DnssecPolicy) *DnssecPolicy {
+	zd.mu.Lock()
+	bound := zd.DnssecPolicy
+	boundName := zd.DnssecPolicyName
+	zd.mu.Unlock()
+	if bound == nil || boundName != appliedName || bound.Error != "" || byName == nil {
+		return byName
+	}
+	if bound.KSKAlgorithm == byName.KSKAlgorithm && bound.ZSKAlgorithm == byName.ZSKAlgorithm {
+		return byName
+	}
+	lgEngine.Debug("applied DNSSEC policy was redefined with other algorithms; comparing against the definition the zone is bound to",
+		"zone", zd.ZoneName, "policy", appliedName,
+		"bound_ksk_alg", dns.AlgorithmToString[bound.KSKAlgorithm], "bound_zsk_alg", dns.AlgorithmToString[bound.ZSKAlgorithm],
+		"defined_ksk_alg", dns.AlgorithmToString[byName.KSKAlgorithm], "defined_zsk_alg", dns.AlgorithmToString[byName.ZSKAlgorithm])
+	cp := *bound
+	return &cp
 }
 
 // kskOnlyAlgChangeWithEngine reports whether the applied→intent change is
