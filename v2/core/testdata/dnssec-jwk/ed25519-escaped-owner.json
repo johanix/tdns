@@ -1,0 +1,14 @@
+{
+  "kid": "uJYXQ0ZhGzTiAt0jgXgPDWKExUB3cls1NXInBRsqYU0",
+  "kty": "OKP",
+  "crv": "Ed25519",
+  "x": "w_VxpL9dTguTG_ivgqZFa9lkjiPkR-g15ktPAhuTIt8",
+  "d": "NQ4G7dnYiYJMO2UYGqG82Rn2zsX24P6lfiteOBR78PA",
+  "dnskey": {
+    "name": "b\\000rken.example.com.",
+    "flags": 256,
+    "protocol": 3,
+    "algorithm": 15,
+    "keytag": 17078
+  }
+}
