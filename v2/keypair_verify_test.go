@@ -5,6 +5,10 @@
 package tdns
 
 import (
+	"crypto/x509/pkix"
+	"encoding/asn1"
+	"encoding/pem"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -135,6 +139,43 @@ func TestVerifyStoredKeyPairReportsWhenItCannotCheck(t *testing.T) {
 				t.Errorf("an uncheckable key must not be reported as WRONG: %v", err)
 			}
 		})
+	}
+}
+
+// An ECDSA key in PKCS#8 whose curve parameters the standard library cannot
+// decode (here, an empty SEQUENCE where the named curve belongs) is a corrupt
+// key for a linked algorithm. It must be refused, not stored as "unverified":
+// a key this binary cannot decode can never sign, and it would break export of
+// every key in the zone.
+func TestVerifyStoredKeyPairRefusesLinkedAlgorithmThatDoesNotParse(t *testing.T) {
+	k, _ := genDnskey(t, "pq.dnslab.", 257, dns.ECDSAP256SHA256)
+
+	der, err := asn1.Marshal(struct {
+		Version    int
+		Algo       pkix.AlgorithmIdentifier
+		PrivateKey []byte
+	}{
+		Version: 0,
+		Algo: pkix.AlgorithmIdentifier{
+			Algorithm:  asn1.ObjectIdentifier{1, 2, 840, 10045, 2, 1}, // id-ecPublicKey
+			Parameters: asn1.RawValue{FullBytes: []byte{0x30, 0x00}},
+		},
+		PrivateKey: []byte{0x30, 0x03, 0x02, 0x01, 0x01},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	privPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+
+	checked, err := VerifyStoredKeyPair(privPEM, k)
+	if err == nil {
+		t.Fatalf("a PKCS#8 key for a linked algorithm that does not parse must be refused by bulk import, got checked=%v err=nil", checked)
+	}
+	if !checked {
+		t.Fatal("a PKCS#8 key for a linked algorithm that does not parse must be marked checked")
+	}
+	if !strings.Contains(err.Error(), "asn1: syntax error") {
+		t.Fatalf("refusal error must include the PKCS#8 parse failure, got %v", err)
 	}
 }
 
