@@ -6,8 +6,8 @@ commands, no error twice, Change 4 and the table of optional knobs. Every
 question is decided (below).
 
 **Status (2026-11-27):** implemented, with the removal of API keys, in one
-PR on branch `claude/simple-setup` (open, not merged), after Johan's go of
-2026-11-27. tdns-mp's CLI and deployment scripts outside this repo need
+PR, #1210 (branch `claude/simple-setup`, open, not merged), after Johan's
+go of 2026-11-27. tdns-mp's CLI and deployment scripts outside this repo need
 companion changes (see "What breaks"); those are not made yet. The choices
 the implementation had to make that this design left open are in "As
 built" at the end.
