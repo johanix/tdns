@@ -83,6 +83,14 @@ resignerengine:
    # How often to re-sign for signature freshness, independent of whether new
    # zone content arrived. Clamped to 60..3600.
    interval:  3600
+   # How many zones are renewed at the same time. Optional, default 3, accepted
+   # range 1..64 (more is clamped to 64 and a negative value is ignored, each
+   # with a warning at startup). A slow zone keeps one worker: N workers
+   # tolerate N-1 slow zones, and N at once make every other zone wait. More
+   # workers queue on the one keystore handle, so the useful number depends on
+   # how much of a renewal is signing. Read when the daemon starts; a change
+   # needs a restart, not a reload.
+   # workers:  3
 
 imrengine:
    # A signer that resolves nothing needs no recursor. Turning it off drops a

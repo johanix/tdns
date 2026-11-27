@@ -34,6 +34,7 @@ type RuntimeConfig struct {
 	ProbeTimeout     int  // service.probetimeout (seconds)
 	TransferTimeout  int  // service.transfertimeout (seconds)
 	ResignerInterval int  // resignerengine.interval
+	ResignerWorkers  int  // resignerengine.workers; read once, when the resigner starts
 	ServiceDebug     bool // service.debug
 
 	// The scanner's poll settings, read by ScannerEngine on every tick
@@ -116,6 +117,7 @@ func (conf *Config) buildRuntimeConfig() *RuntimeConfig {
 		ProbeTimeout:     viper.GetInt("service.probetimeout"),
 		TransferTimeout:  viper.GetInt("service.transfertimeout"),
 		ResignerInterval: viper.GetInt("resignerengine.interval"),
+		ResignerWorkers:  viper.GetInt("resignerengine.workers"),
 		ServiceDebug:     viper.GetBool("service.debug"),
 
 		ScannerPollEnabled:     viper.GetBool("scanner.poll.enabled"),

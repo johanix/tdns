@@ -93,22 +93,6 @@ func resignCandidates(zones map[string]*ZoneData) map[string]*ZoneData {
 	return out
 }
 
-// resignPass renews every zone in zones, one after another, stopping between
-// zones when ctx is done.
-func resignPass(ctx context.Context, zones map[string]*ZoneData) {
-	for _, zd := range zones {
-		// Shutdown latency here is one pass per zone, not one pass, so the
-		// check belongs between zones: a stop during a sweep of several hundred
-		// should not wait out the whole sweep. Inside a pass there is nothing
-		// useful to abandon -- it holds zd.mu and signs only what is due, and
-		// SignZone and ResignZone bound themselves the same way.
-		if ctx.Err() != nil {
-			return
-		}
-		resignSweepZone(ctx, zd)
-	}
-}
-
 // nextResignWake returns how long the resigner may sleep before its next pass:
 // until the earliest renewal any watched zone reports, bounded at both ends.
 //
@@ -121,6 +105,15 @@ func resignPass(ctx context.Context, zones map[string]*ZoneData) {
 //
 // A zone that does not know when it is next due pulls the whole wake down to the
 // floor. Sleeping through an unknown is the one thing this must not do.
+//
+// The caller leaves out the zones the pool has in flight (resignPool.notInFlight).
+// A zone being worked on has no estimate worth sleeping on: it has none yet, or
+// the one it has is about to be replaced by what the work records. Counted, it
+// would pull every wake down to the floor for as long as the work ran, for
+// something that is already owed to a worker and cannot be started a second time
+// -- the engine spinning on a slow zone. The sleep-through is closed the other
+// way: when a zone's work ends the engine is told (resignPool.ended) and runs
+// this over the zones that ended, with the estimate the work has just recorded.
 func nextResignWake(zones map[string]*ZoneData, floor time.Duration) time.Duration {
 	var earliest time.Time
 	for _, zd := range zones {
@@ -157,17 +150,51 @@ func nextResignWake(zones map[string]*ZoneData, floor time.Duration) time.Durati
 	}
 }
 
+// resignerSettings is what the resigner is started with. Read once, when the
+// engine starts, from the runtime-config snapshot: a config reload publishes a
+// new snapshot but does not reach an engine that is running, so a change to
+// either value needs a restart.
+type resignerSettings struct {
+	interval    int // resignerengine.interval, seconds, clamped to 60..3600
+	workers     int // resignerengine.workers, see resignWorkersFor
+	workersNote string
+}
+
+func readResignerSettings() resignerSettings {
+	live := ConfLive()
+	st := resignerSettings{interval: live.ResignerInterval}
+	if st.interval < 60 {
+		st.interval = 60
+	}
+	if st.interval > 3600 {
+		st.interval = 3600
+	}
+	st.workers, st.workersNote = resignWorkersFor(live.ResignerWorkers)
+	return st
+}
+
+// ResignerEngine runs the resigner: a timer that decides when the zones on the
+// watchlist are looked at, a pool of workers that looks at them, and the
+// ResignQ.
+//
+// THE ENGINE GOROUTINE NEVER DOES A ZONE'S WORK, so nothing it waits for is a
+// zone. On a tick it hands every zone that is owed a look to the pool and goes
+// straight back to its select; a key-state request is handed over the same way.
+// A zone that is slow -- large, an expensive algorithm, behind a zd.mu a long
+// refresh holds -- is held by a worker and nothing else, and the other zones are
+// handed over on the next tick regardless, and renewed, while it is still in
+// there. Which pass a zone belongs to does not matter: a pass is only the set of
+// zones one tick handed over, and it is never waited for (#1034).
+//
+// The pool is bounded (resignerengine.workers, 3 unless set) and owns a zone for as long as it works
+// on it, so a zone that is still in flight when the next tick comes is skipped,
+// not handed to a second worker. See resignPool.
 func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 
 	//	var zoneresignch = conf.Internal.ResignZoneCh
 
-	interval := ConfLive().ResignerInterval
-	if interval < 60 {
-		interval = 60
-	}
-	if interval > 3600 {
-		interval = 3600
-	}
+	st := readResignerSettings()
+	interval := st.interval
 
 	// The periodic pass is unconditional. It used to be gated on
 	// service.resign, and there is no deployment that wants signatures to
@@ -181,7 +208,10 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 	// the same reason found the hard way: with service.resign unset the engine
 	// drained triggerResign requests and dropped them, so a rollover left the
 	// DNSKEY RRset signed by a retired key. This is the rest of that fix.
-	lgSigner.Info("ResignerEngine starting", "interval_sec", interval)
+	lgSigner.Info("ResignerEngine starting", "interval_sec", interval, "workers", st.workers)
+	if st.workersNote != "" {
+		lgSigner.Warn("resignerengine.workers: " + st.workersNote)
+	}
 
 	// A config that has stopped meaning what it says is its own trap, so an
 	// explicit setting is called out rather than ignored in silence.
@@ -204,6 +234,29 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 	// a missed one.
 	floor := time.Duration(interval) * time.Second
 
+	runResigner(ctx, zoneresignch, floor, st.workers, liveResignWork())
+}
+
+// runResigner is ResignerEngine's loop, with the floor, the number of workers and
+// the zones' work handed in so that a test can run it at a pace and on work of
+// its own.
+func runResigner(ctx context.Context, zoneresignch chan ResignRequest, floor time.Duration,
+	workers int, work resignWork) {
+
+	pool := newResignPool(workers, work)
+	// A stop waits for the workers, as it always waited for the sweep: the engine
+	// is what the daemon's shutdown waits on, and a worker left running would
+	// touch zones and the keystore after the daemon has torn them down. A worker
+	// inside a zone cannot be interrupted -- zd.mu is a plain mutex -- so this is
+	// the zones in flight, no more: no worker takes another once ctx is done, and
+	// the zones still queued are dropped.
+	defer func() {
+		if n := pool.inFlight(); n > 0 {
+			lgSigner.Info("ResignerEngine waiting for zones in flight", "zones", n)
+		}
+		pool.wait()
+	}()
+
 	// Go 1.23 and later discard a stopped timer's pending send, so Stop
 	// followed by Reset needs no drain.
 	timer := time.NewTimer(floor)
@@ -212,14 +265,18 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 	// this EARLIER; see earlierResignWake.
 	nextWake := time.Now().Add(floor)
 
+	setWake := func(at time.Time) {
+		timer.Stop()
+		timer.Reset(time.Until(at))
+		nextWake = at
+	}
+
 	// Whatever the engine is currently sleeping through was computed without
 	// the zone that just arrived, which has no estimate of its own yet -- so it
 	// may need an earlier wake. Never a later one.
 	wakeSooner := func() {
 		if at, sooner := earlierResignWake(nextWake, time.Now(), floor); sooner {
-			timer.Stop()
-			timer.Reset(time.Until(at))
-			nextWake = at
+			setWake(at)
 		}
 	}
 
@@ -242,13 +299,16 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 			}
 
 			// A key-state change cannot wait for the ticker: the zone is
-			// serving signatures by keys that are no longer active.
+			// serving signatures by keys that are no longer active. It does not
+			// wait for the zones in flight either, but it does wait for its own
+			// zone's worker, if it has one: the pool runs it on that worker,
+			// after the work in hand (resignPool.submit).
 			switch req.Reason {
 			case ResignKeyStateChanged:
-				// Before the pass reads the keystore: a trigger from here
-				// on is for a change this pass may not see.
+				// Before the worker reads the keystore: a trigger from here
+				// on is for a change it may not see.
 				zd.resignQueued.Store(false)
-				zd.replaceSignaturesNow(ctx)
+				pool.submit(ctx, zd, resignJobReplace)
 			default:
 				lgSigner.Warn("ResignerEngine: unknown resign reason, registering only",
 					"zone", zd.ZoneName, "reason", uint8(req.Reason))
@@ -259,19 +319,37 @@ func ResignerEngine(ctx context.Context, zoneresignch chan ResignRequest) {
 			zd.KeepRenewed()
 			wakeSooner()
 
-		case <-timer.C:
-			zones := resignCandidates(Zones.Items())
-			resignPass(ctx, zones)
-			if ctx.Err() != nil {
-				lgSigner.Info("ResignerEngine terminating during a renewal sweep")
-				return
+		case <-pool.ended:
+			// A worker has finished a zone. The wake the last tick worked out
+			// left that zone out, being in flight, and it has now recorded when
+			// it is next due (or that it does not know, or that it is still
+			// owed a replace). Bring the wake forward to that, and never back:
+			// postponing the tick for every zone that finishes is how the
+			// timer used to be starved (earlierResignWake).
+			ended := pool.notInFlight(pool.takeEnded())
+			if len(ended) > 0 {
+				if at := time.Now().Add(nextResignWake(ended, floor)); at.Before(nextWake) {
+					setWake(at)
+				}
 			}
 
-			wake := nextResignWake(zones, floor)
-			nextWake = time.Now().Add(wake)
+		case <-timer.C:
+			zones := resignCandidates(Zones.Items())
+			started := 0
+			for _, zd := range zones {
+				if pool.submit(ctx, zd, resignJobRenew) {
+					started++
+				}
+			}
+
+			// Without the zones in flight: see nextResignWake. That includes the
+			// ones this tick just handed over; they bring the wake forward when
+			// they end.
+			wake := nextResignWake(pool.notInFlight(zones), floor)
+			setWake(time.Now().Add(wake))
 			lgSigner.Debug("ResignerEngine sleeping until the next renewal is due",
-				"zones", len(zones), "sleep", wake.String())
-			timer.Reset(wake)
+				"zones", len(zones), "started", started,
+				"in_flight", pool.inFlight(), "sleep", wake.String())
 		}
 	}
 }
