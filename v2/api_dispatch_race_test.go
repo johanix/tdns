@@ -46,7 +46,7 @@ func resetApiDispatch(t *testing.T) {
 		apiTCPServers.Lock()
 		apiTCPServers.srvs, apiTCPServers.plaintext, apiTCPServers.stopped, apiTCPServers.stoppedBy = nil, false, nil, ""
 		apiTCPServers.noCert, apiTCPServers.noCertFile = nil, ""
-		apiTCPServers.failed = nil
+		apiTCPServers.failed, apiTCPServers.pins = nil, nil
 		apiTCPServers.Unlock()
 		apiListenersStarted.Store(nil)
 		apiDispatchBeforeLockHook, apiDispatchLockedHook, apiActivateBeforeLockHook, apiServeHook = nil, nil, nil, nil
@@ -237,6 +237,7 @@ func TestDispatcherReadsTheAccessFileOnce(t *testing.T) {
 	addr := freeTCPAddr(t)
 	conf := plaintextApiConf(addr)
 	conf.ApiServer.UseTLS = true
+	conf.ApiServer.CertFile, conf.ApiServer.KeyFile, _ = testApiCertFiles(t)
 	apiServeHook = func(string, func()) {} // nothing served: this is about the setup
 	apiDispatchLockedHook = func() {
 		conf.ApiServer.AccessFile = dispatchTestAccessFile(t) // the reload over the socket
@@ -366,9 +367,9 @@ func TestBindFailureLeavesTheOtherListeners(t *testing.T) {
 	}
 }
 
-// A TLS listener whose certificate does not load is bound, but ServeTLS
-// returns at once: config status does not list it as listening, reports it
-// failed with the error, and nothing answers there any more.
+// A TLS listener whose certificate does not load is not started: config
+// status does not list it as listening, reports it failed with the error,
+// and nothing answers there.
 func TestServeFailureIsNotReportedAsListening(t *testing.T) {
 	resetApiDispatch(t)
 	e := newAuthEnv(t, "-", nil)
@@ -380,13 +381,7 @@ func TestServeFailureIsNotReportedAsListening(t *testing.T) {
 	conf.ApiServer.KeyFile = filepath.Join(dir, "missing.key")
 	startDispatcher(t, conf)
 
-	// ServeTLS fails in the server's goroutine, after APIdispatcher returned.
-	var cr ConfigResponse
-	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		if cr = configStatusOverSocket(t, e); len(cr.ApiTCPFailed) > 0 || time.Now().After(deadline) {
-			break
-		}
-	}
+	cr := configStatusOverSocket(t, e) // decided before APIdispatcher returned
 	if len(cr.ApiTCPListening) != 0 {
 		t.Errorf("status: listening %v, want none", cr.ApiTCPListening)
 	}

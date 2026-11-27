@@ -48,6 +48,22 @@ func IsCliConfigCmd(cmd *cobra.Command) bool {
 	return false
 }
 
+// NoCliConfigNeeded says whether cmd can run without the CLI config at
+// cliConfig, which the binary's PersistentPreRun otherwise loads (and stops
+// without): when it was given --daemon-config (the client commands, config
+// reload), which names the daemon itself, and the file does not exist. That
+// is how root reaches a daemon on a host where it has no CLI config yet.
+// With the file there, it is loaded as always. An empty --daemon-config (an
+// unset shell variable) names no daemon: it is as if not given.
+func NoCliConfigNeeded(cmd *cobra.Command, cliConfig string) bool {
+	f := cmd.Flags().Lookup("daemon-config")
+	if f == nil || !f.Changed || f.Value.String() == "" {
+		return false
+	}
+	_, err := os.Stat(cliConfig)
+	return errors.Is(err, os.ErrNotExist)
+}
+
 // NewCliConfigCmd builds `config`, with `add` and `list`.
 //
 // Not to be confused with `<daemon> config check`, which checks a DAEMON's

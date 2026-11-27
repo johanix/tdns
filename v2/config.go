@@ -507,7 +507,7 @@ type ApiServerConf struct {
 	// key still works. Unset, the network API works as before: the API key,
 	// as admin. Set, it requires Socket, because admin then exists only there.
 	// The file is read by its own loader (api_access.go), not decoded with
-	// this config, and tdns-ncli manages it.
+	// this config, and the daemon writes it when tdns-ncli asks (/access).
 	AccessFile string `yaml:"access-file" mapstructure:"access-file"`
 }
 

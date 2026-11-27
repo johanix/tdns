@@ -374,24 +374,28 @@ block (`cert:`, `key:`) names other files. Only such entries present it: a
 daemon that does not know your certificate refuses it even with a valid key,
 so an entry that should keep using the key must not offer the certificate.
 
-**On the daemon's host**, `tdns-ncli <daemon> client ...` manages the daemon's
-access file:
+**On the daemon's host**, as root, `tdns-ncli <daemon> client ...` has the
+daemon change its access file:
 
 ```bash
 tdns-ncli auth client add anna --pin <pin> --role read-write
-tdns-ncli auth client list            # the file, and whether the daemon runs it
+tdns-ncli auth client list            # what the daemon runs, and its server pins
 tdns-ncli auth client disable anna    # revoked, entry kept
 tdns-ncli auth client set-role anna read-only
 tdns-ncli auth client keyauth off     # the TCP API now needs a certificate
 ```
 
-Every change is checked with the daemon's own validator (a file the daemon
-would refuse is not written), written atomically with the previous file kept
-as `.prev`, and followed by a reload (`--no-reload` skips it, `--dry-run`
-shows the result). The commands edit files on the daemon's host and refuse an
-entry whose daemon config is not there. If the daemon config does not name an
-access file yet, `client add` creates one next to it and prints the
-`access-file:` (and `socket:`) lines to add; until then the daemon ignores it.
+The daemon writes the file, so the commands need it running: each one goes
+to its local admin socket, found through its daemon config (`--daemon-config
+<file>`, else the role's entry's `config-file:`). The daemon checks every
+change with its own validator (a file it would refuse is not written),
+writes it atomically with the previous file kept as `.prev`, and puts it in
+force at once (`--dry-run` shows the result and changes nothing;
+`--no-reload` is ignored). With `--daemon-config` they need no CLI config. If
+the daemon config names no access file, the commands stop with the
+`access-file:` line to add, what it changes, and the `config reload` that
+makes the daemon read it. A stopped daemon's file can still be edited by hand
+and checked with `config check`.
 Roles and the rules behind them: `guide/config-tdns-auth.md`, "Network clients
 and roles".
 
