@@ -20,16 +20,24 @@ func TestSetupLoggingPropagatesDefaultLevelToExistingSubsystems(t *testing.T) {
 	engine := Logger("engine")
 	connRetry := Logger("conn-retry")
 
-	// Restore the global logging state this test changes, so other
-	// tests in the package keep the levels they started with.
+	// Snapshot the level of every subsystem logger registered so far,
+	// so the cleanup below restores exactly the levels this test found.
+	// Restoring only engine and conn-retry would leave any other
+	// subsystem, for example one starting at Error, at the level
+	// SetupLogging propagated to it.
+	prevLevels := make(map[string]slog.Level)
+	subsystemMu.RLock()
+	for name, lv := range subsystemLevels {
+		prevLevels[name] = lv.Level()
+	}
+	subsystemMu.RUnlock()
 	prevDefault := defaultLevel.Level()
-	prevEngine := getOrCreateLevel("engine").Level()
-	prevConnRetry := getOrCreateLevel("conn-retry").Level()
 	prevHandler := slog.Default().Handler()
 	t.Cleanup(func() {
 		defaultLevel.Set(prevDefault)
-		getOrCreateLevel("engine").Set(prevEngine)
-		getOrCreateLevel("conn-retry").Set(prevConnRetry)
+		for name, level := range prevLevels {
+			getOrCreateLevel(name).Set(level)
+		}
 		slog.SetDefault(slog.New(prevHandler))
 	})
 
