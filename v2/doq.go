@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"time"
 
@@ -168,9 +169,16 @@ func handleDoQStream(ctx context.Context, stream *quic.Stream, conn *quic.Conn, 
 	lgDns.Debug("DoQ: finished handling stream", "stream", stream.StreamID(), "remote", conn.RemoteAddr())
 }
 
+// doqReadStream is what readExactWithContext needs of a stream: a *quic.Stream,
+// or a scripted one in a test that has to control what a Read returns.
+type doqReadStream interface {
+	Read(p []byte) (int, error)
+	SetReadDeadline(t time.Time) error
+}
+
 // readExactWithContext reads exactly len(buf) bytes from the stream,
 // periodically setting a short read deadline to allow checking ctx.Done().
-func readExactWithContext(ctx context.Context, s *quic.Stream, buf []byte) error {
+func readExactWithContext(ctx context.Context, s doqReadStream, buf []byte) error {
 	const sliceReadDeadline = 200 * time.Millisecond
 	defer func() {
 		// clear any deadline
@@ -184,6 +192,13 @@ func readExactWithContext(ctx context.Context, s *quic.Stream, buf []byte) error
 		if n > 0 {
 			total += n
 		}
+		// A Read that returns the last bytes of the stream returns them
+		// together with io.EOF: the client's STREAM FIN (RFC 9250 4.2) arrives
+		// with, or before, the end of the query. The buffer is full, so the read
+		// has succeeded; returning the error would drop a complete query.
+		if total == len(buf) {
+			return nil
+		}
 		if err != nil {
 			// handle deadline expiry to check ctx.Done()
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
@@ -194,6 +209,11 @@ func readExactWithContext(ctx context.Context, s *quic.Stream, buf []byte) error
 					// continue reading
 					continue
 				}
+			}
+			// As io.ReadFull: a stream that ends after some of the bytes but
+			// before all of them is an unexpected end, not a clean one.
+			if err == io.EOF && total > 0 {
+				return io.ErrUnexpectedEOF
 			}
 			return err
 		}
