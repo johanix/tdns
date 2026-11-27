@@ -290,8 +290,9 @@ func checkImrEngine(cfg *tdns.Config, rep *ccReport) {
 // checkImrTrustAnchors says which trust anchor the resolver will use. With
 // none configured it uses the compiled-in IANA root anchor: at once with the
 // compiled-in root hints and the root neither forwarded nor stubbed, and with
-// anything else (a hints file, a forward or a stub for ".") if the keys the
-// root serves match it, which the resolver finds out at start. A private root
+// anything else (a hints file, a forward or a stub for ".") if the root serves
+// a key that matches it and signs its DNSKEY RRset, which the resolver finds
+// out at start. A private root
 // does not match, and the resolver then has no anchor and validates nothing
 // (every answer Indeterminate). A check cannot tell which root it is, so it
 // warns: validation is on by default.
@@ -314,11 +315,11 @@ func checkImrTrustAnchors(cfg *tdns.Config, rep *ccReport) {
 		rep.info(g, "anchor", fmt.Sprintf("no trust anchor, and the root may not be the IANA root (%s): the compiled-in"+
 			" root anchor is used if the root serves a key that matches it and signs its DNSKEY RRset, which is checked at start;"+
 			" require-dnssec-validation is false (lab mode), so lookups that require validation do without it"+
-			" if they do not", why))
+			" if that check fails", why))
 	default:
 		rep.warn(g, "anchor",
 			fmt.Sprintf("no trust anchor configured, and the root may not be the IANA root (%s): at start the"+
-				" resolver fetches the root's DNSKEY RRset and uses the compiled-in IANA root anchor if the keys match it."+
+				" resolver fetches the root's DNSKEY RRset and uses the compiled-in IANA root anchor if the root serves a key that matches it and signs the set."+
 				" If it is a private root, nothing validates, every answer is Indeterminate,"+
 				" and lookups that require validation fail", why),
 			"if the root is a private one, set imrengine.trust-anchor-file or trust-anchor-ds for it, or set"+
