@@ -134,6 +134,19 @@ func SetupLogging(cfgfile string) (LogConf, error) {
 
 	// Parse default level from config (default: info)
 	defaultLevel.Set(ParseLogLevel(logConf.Level))
+	// Propagate the configured default level to subsystem loggers
+	// created before SetupLogging ran. getOrCreateLevel snapshots
+	// the default level at creation, so without this they would keep
+	// the previous Info default even when log.level says otherwise.
+	// Subsystems listed in log.subsystems keep their configured level:
+	// they are applied below, after the conn-retry default.
+	subsystemMu.RLock()
+	for name, lv := range subsystemLevels {
+		if _, listed := logConf.Subsystems[name]; !listed {
+			lv.Set(defaultLevel.Level())
+			}
+		}
+	subsystemMu.RUnlock()
 
 	// Create the plain-format handler with source info
 	handler := newPlainHandler(logWriter, defaultLevel, true)
