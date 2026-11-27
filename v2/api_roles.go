@@ -154,8 +154,7 @@ var apiRouteRoles = map[string]map[string]ApiRole{
 	"/api/v1/dsync-api/credential":      {"*": RoleAdmin, "": RoleAdmin},
 	"/api/v1/dsync-api/cert-credential": {"*": RoleAdmin, "": RoleAdmin},
 	// The access file, which the daemon writes: admin for every command,
-	// list included. With an access file in force only the local socket has
-	// admin; with none, the API key is admin too (authenticateApiRequest).
+	// list included, so the local socket only (authenticateApiRequest).
 	"/api/v1/access": {"*": RoleAdmin, "": RoleAdmin},
 }
 

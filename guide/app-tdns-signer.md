@@ -72,11 +72,14 @@ so the signer's CLI config gives that name the signer's API:
 ```yaml
 # /etc/tdns/tdns-signer-cli.yaml
 apiservers:
-   - name:       tdns-auth
-     baseurl:    https://127.0.0.1:8990/api/v1   # the SIGNER's API
-     apikey:     ...
-     authmethod: X-API-Key
+   - name:        auth
+     config-file: /etc/tdns/tdns-signer.yaml   # the SIGNER: its socket, as root
 ```
+
+As root on the signer's host, `tdns-ncli --config
+/etc/tdns/tdns-signer-cli.yaml config add --role auth
+/etc/tdns/tdns-signer.yaml` writes such an entry, with the signer's TCP
+address and pins when it runs and its access file is there.
 
 ```bash
 tdns-cli --config /etc/tdns/tdns-signer-cli.yaml auth zone list
@@ -173,13 +176,14 @@ Everything that cannot be shared must differ between the two configs:
 
 ```
 db.file                 apiserver.addresses      listeners.addresses
-log.file                apiserver.apikey         include: targets
+log.file                apiserver.certfile       include: targets
 dynamiczones.configfile / .zonedirectory
 ```
 
 Sharing `db.file` would mean sharing the keystore, and so every private key.
-Sharing `apiserver.apikey` removes the only thing that stops a command aimed
-at one daemon from being accepted by the other.
+Sharing an API certificate removes the only thing that stops a command aimed
+at one daemon from being accepted by the other: the CLI tells daemons apart by
+their certificate pins.
 
 **One collision does not fail loudly.** If both daemons set
 `listeners.udp-sockets` greater than 1 and listen on the same address, on a

@@ -84,7 +84,7 @@ func (a *ApiServerConf) applyCertDefaults(cfgfile string, write bool) {
 		return
 	}
 	if created {
-		lgApi.Info("management API: wrote a self-signed API certificate (clients pin its key; tdns-ncli config add writes the pin)",
+		lgApi.Info("management API: wrote a self-signed API certificate (clients verify it by its certificate pin, which tdns-ncli config add writes)",
 			"cert", cert, "key", key, "pin", pin)
 	}
 	a.CertFile, a.KeyFile = cert, key

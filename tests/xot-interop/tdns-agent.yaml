@@ -20,7 +20,6 @@ listeners:
 
 apiserver:
    addresses:  [ 127.0.0.1:8302 ]
-   apikey:     xot-interop-test-key
    certfile:   /var/tmp/xotinterop/certs/ns-tdnsagent.xot.test.crt
    keyfile:    /var/tmp/xotinterop/certs/ns-tdnsagent.xot.test.key
 

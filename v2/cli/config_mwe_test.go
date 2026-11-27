@@ -28,7 +28,7 @@ func TestMweConfigsUseCurrentDelegationSyncSchema(t *testing.T) {
 	}{
 		{
 			role: "auth",
-			body: renderMweConfig("auth", dir, filepath.Join(dir, "zones"), cert, key, "apikey", "8990", "5354"),
+			body: renderMweConfig("auth", dir, filepath.Join(dir, "zones"), cert, key, "8990", "5354"),
 			check: func(t *testing.T, cfg *tdns.Config) {
 				if len(cfg.ChildSync.Schemes) == 0 {
 					t.Error("childsync.schemes decoded empty")
@@ -40,7 +40,7 @@ func TestMweConfigsUseCurrentDelegationSyncSchema(t *testing.T) {
 		},
 		{
 			role: "agent",
-			body: renderAgentMweConfig("agent", dir, cert, key, "apikey", "8990", "5354"),
+			body: renderAgentMweConfig("agent", dir, cert, key, "8990", "5354"),
 			check: func(t *testing.T, cfg *tdns.Config) {
 				if len(cfg.ParentSync.Schemes) == 0 {
 					t.Error("parentsync.schemes decoded empty")

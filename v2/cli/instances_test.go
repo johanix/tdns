@@ -134,7 +134,7 @@ func TestWireInstanceTreesRefusesBadEntries(t *testing.T) {
 		entry ApiDetails
 		want  string
 	}{
-		{"shadows a built-in role", ApiDetails{Name: "auth", Role: "auth"}, "collides with a built-in role"},
+		{"shadows a built-in role", ApiDetails{Name: "imr", Role: "auth"}, "collides with a built-in role"},
 		{"shadows an existing command", ApiDetails{Name: "version", Role: "auth"}, "collides with the existing"},
 		{"unknown role", ApiDetails{Name: "x", Role: "combiner"}, "has no command tree"},
 		{"no name", ApiDetails{Name: "", Role: "auth"}, "no name"},
@@ -165,7 +165,7 @@ func TestWireInstanceTreesIgnoresCanonicalEntries(t *testing.T) {
 	withCleanRoleRegistry(t)
 	root := &cobra.Command{Use: "tdns-ncli"}
 	warnings := WireInstanceTrees(root, []ApiDetails{
-		{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1"},
+		{Name: "auth", BaseURL: "https://127.0.0.1:8989/api/v1"},
 	})
 	if len(warnings) != 0 {
 		t.Errorf("canonical entry warned: %v", warnings)
@@ -236,7 +236,7 @@ func TestEarlyApiServersIsBestEffort(t *testing.T) {
 	good := filepath.Join(dir, "good.yaml")
 	if err := os.WriteFile(good, []byte(`
 apiservers:
-   - name: tdns-auth
+   - name: auth
      baseurl: https://127.0.0.1:8989/api/v1
      apikey: k
      authmethod: X-API-Key
@@ -294,7 +294,13 @@ func TestReservedNamesAreAllRefused(t *testing.T) {
 			root.InitDefaultCompletionCmd()
 
 			before := len(root.Commands())
-			warnings := WireInstanceTrees(root, []ApiDetails{{Name: name, Role: "auth"}})
+			// An entry named after its own role is that role's entry,
+			// not an instance: try each name as an instance of another.
+			role := "auth"
+			if name == "auth" {
+				role = "agent"
+			}
+			warnings := WireInstanceTrees(root, []ApiDetails{{Name: name, Role: role}})
 
 			if len(warnings) != 1 {
 				t.Fatalf("%q was accepted (warnings: %v) -- it would shadow or fight "+
@@ -350,7 +356,7 @@ apiservers:
 cli:
    localconfig: `+filepath.Join(dir, "does-not-exist.yaml")+`
 apiservers:
-   - name: tdns-auth
+   - name: auth
      baseurl: https://127.0.0.1:8989/api/v1
      apikey: k
      authmethod: X-API-Key
@@ -374,7 +380,7 @@ func TestDuplicateInstanceNameIsReportedAsADuplicate(t *testing.T) {
 	warnings := WireInstanceTrees(root, []ApiDetails{
 		{Name: "sectdns", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1"},
 		{Name: "sectdns", Role: "auth", BaseURL: "https://127.0.0.1:8991/api/v1"}, // duplicate
-		{Name: "auth", Role: "auth", BaseURL: "https://127.0.0.1:8992/api/v1"},    // built-in
+		{Name: "imr", Role: "auth", BaseURL: "https://127.0.0.1:8992/api/v1"},     // built-in
 	})
 
 	if len(warnings) != 2 {
@@ -406,6 +412,9 @@ func TestReadCliClientConfTakesTheEnvironment(t *testing.T) {
 	writeFile(t, cfg, "client:\n   cert: /a/me.crt\n   key: /a/me.key\n")
 	t.Setenv("CLIENT.CERT", "/b/me.crt")
 	t.Setenv("CLIENT.KEY", "") // the file's key, whatever the caller's environment says
+	// No local config from the caller's environment, whose client: block
+	// would be merged over the file's.
+	t.Setenv("CLI.LOCALCONFIG", "")
 	if cc := ReadCliClientConf(cfg); cc.Cert != "/b/me.crt" || cc.Key != "/a/me.key" {
 		t.Errorf("%+v; want the environment's cert and the file's key", cc)
 	}

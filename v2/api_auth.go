@@ -9,8 +9,6 @@ package tdns
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,9 +24,9 @@ import (
 
 // ApiIdentity is who a management API request was authenticated as.
 type ApiIdentity struct {
-	Name string  // the access-file client, "apikey", or "local"
+	Name string  // the access-file client, or "local"
 	Role ApiRole // what it may do
-	Via  string  // "local socket", "certificate" or "api key"
+	Via  string  // "local socket" or "certificate"
 }
 
 // Describe is the sentence `ping` answers with.
@@ -51,14 +49,16 @@ func ApiIdentityFrom(ctx context.Context) (ApiIdentity, bool) {
 // (a new pointer) and read whole, so a request sees one policy, never half of
 // a reload.
 type accessState struct {
-	// Enabled: apiserver.access-file is set. Not enabled is the network API
-	// as before the access file existed: the API key, as admin.
-	Enabled bool
-	File    string
-	// Err is why the file could not be used when there was no previous policy
-	// to keep (start-up). Until a reload succeeds the TCP API answers 503.
+	// File is the access file, whether it is there or not.
+	File string
+	// Missing: the file is not there, so there are no remote clients. A
+	// normal state, not an error: the operator creates the file (touch) to
+	// take them.
+	Missing bool
+	// Err is why the file could not be used when there was no policy to
+	// keep (start-up, or no file before). Until a load succeeds the TCP API
+	// answers 503.
 	Err     error
-	KeyAuth bool
 	byPin   map[string]AccessClient
 	Clients []AccessClient
 }
@@ -74,16 +74,9 @@ func (h *apiAccessHolder) load() *accessState {
 	return h.p.Load()
 }
 
-// failedAtStart reports whether st is the policy of a start-up whose access
-// file could not be used: the TCP API answers 503 until a file loads.
-func (st *accessState) failedAtStart() bool {
-	return st != nil && st.Err != nil
-}
-
 // newAccessState builds the running policy from a validated file.
 func newAccessState(path string, af *AccessFile) *accessState {
-	st := &accessState{Enabled: true, File: path, KeyAuth: af.KeyAuthOn(),
-		byPin: map[string]AccessClient{}, Clients: append([]AccessClient(nil), af.Clients...)}
+	st := &accessState{File: path, byPin: map[string]AccessClient{}, Clients: append([]AccessClient(nil), af.Clients...)}
 	for _, c := range af.Clients {
 		st.byPin[c.Pin] = c
 	}
@@ -134,63 +127,62 @@ func peekCommand(r *http.Request) (cmd string, tooLarge bool) {
 	return c.Command, false
 }
 
-// authenticate decides who r is. A non-zero status means refuse it.
-func (conf *Config) authenticateApiRequest(r *http.Request, apikey string) (ApiIdentity, int, string) {
+// authenticateApiRequest decides who r is. A non-zero status means refuse
+// it. The local socket is admin. Over TCP the only credential is a client
+// certificate whose pin is an enabled client in the access file; with no
+// access file there are no remote clients.
+func (conf *Config) authenticateApiRequest(r *http.Request) (ApiIdentity, int, string) {
 	if FromLocalSocket(r.Context()) {
 		return ApiIdentity{Name: "local", Role: RoleAdmin, Via: "local socket"}, 0, ""
 	}
-	keyOK := func() bool {
-		k := r.Header.Get("X-API-Key")
-		return apikey != "" && subtle.ConstantTimeCompare([]byte(k), []byte(apikey)) == 1
-	}
-
 	st := conf.Internal.ApiAccess.load()
-	if st == nil || !st.Enabled {
-		// No access file: the key, as admin, exactly as before.
-		if keyOK() {
-			return ApiIdentity{Name: "apikey", Role: RoleAdmin, Via: "api key"}, 0, ""
-		}
+	switch {
+	case st == nil:
 		return ApiIdentity{}, http.StatusForbidden, "Forbidden"
-	}
-	if st.Err != nil {
+	case st.Err != nil:
 		return ApiIdentity{}, http.StatusServiceUnavailable,
-			"management API disabled by a configuration error; see the daemon log, or use the local socket"
+			fmt.Sprintf("the access file %s does not load, so the TCP API is closed\n(the daemon log says why); the local admin socket still works", st.File)
+	case st.Missing:
+		return ApiIdentity{}, http.StatusForbidden, accessFileMissing(st.File)
 	}
-	// An access file means TLS 1.3 on TCP. What a listener speaks is fixed
-	// when it starts, and a reload can put an access file in force on a
-	// listener started without one: plaintext (usetls: false then), or a TLS
-	// minimum below 1.3. Refuse such requests here, whatever the listener let
-	// through. (The local socket returned above.)
+	// The listeners speak TLS 1.3 only (apiServerTLSConfig); this is the
+	// guard for a router served some other way.
 	if r.TLS == nil {
-		return ApiIdentity{}, http.StatusForbidden, "the access file requires TLS on the management API; this listener is plaintext (restart the daemon with usetls: true, or use the local admin socket)"
+		return ApiIdentity{}, http.StatusForbidden, "the management API takes TLS only"
 	}
-	if r.TLS.Version < tls.VersionTLS13 {
-		return ApiIdentity{}, http.StatusForbidden, "the access file requires TLS 1.3 on the management API"
+	if len(r.TLS.PeerCertificates) == 0 {
+		return ApiIdentity{}, http.StatusForbidden,
+			"no client certificate: the management API takes a client\ncertificate whose pin is in the daemon's access file"
 	}
-	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-		pin := SPKISHA256(r.TLS.PeerCertificates[0])
-		if c, ok := st.byPin[pin]; ok && !c.Disabled {
-			role, _ := parseNetworkRole(c.Role) // validated when loaded
-			return ApiIdentity{Name: c.Name, Role: role, Via: "certificate"}, 0, ""
-		}
-		// An unknown or disabled certificate does not fall through to the key:
-		// a client that presents a certificate is that certificate.
-		return ApiIdentity{}, http.StatusForbidden, "Forbidden"
+	pin := SPKISHA256(r.TLS.PeerCertificates[0])
+	if c, ok := st.byPin[pin]; ok && !c.Disabled {
+		role, _ := parseNetworkRole(c.Role) // validated when loaded
+		return ApiIdentity{Name: c.Name, Role: role, Via: "certificate"}, 0, ""
 	}
-	if st.KeyAuth && keyOK() {
-		return ApiIdentity{Name: "apikey", Role: RoleReadWrite, Via: "api key"}, 0, ""
+	return ApiIdentity{}, http.StatusForbidden,
+		fmt.Sprintf("Forbidden: the client certificate's pin %s is not an\nenabled client in the daemon's access file", pin)
+}
+
+// accessFileMissing says that the access file path is not there, and how to
+// create it. Lines of at most 72 after the path; a client adds the command
+// to run again.
+func accessFileMissing(path string) string {
+	name := Globals.App.Name
+	if name == "" {
+		name = "the daemon"
 	}
-	return ApiIdentity{}, http.StatusForbidden, "Forbidden"
+	return fmt.Sprintf("access file %s is missing, so\n%s takes no remote clients. Create it (empty is fine):\n   touch %s",
+		path, name, path)
 }
 
 // apiAuthMiddleware authenticates every request on the router it is installed
 // on (the ROOT router, so routes added later are covered too), checks the role
 // the route and command need, logs the decision and hands the identity to the
 // handler.
-func (conf *Config) apiAuthMiddleware(apikey string) mux.MiddlewareFunc {
+func (conf *Config) apiAuthMiddleware() mux.MiddlewareFunc {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			id, status, msg := conf.authenticateApiRequest(r, apikey)
+			id, status, msg := conf.authenticateApiRequest(r)
 			if status != 0 {
 				lgApi.Info("api request refused", "from", r.RemoteAddr, "path", r.URL.Path, "status", status)
 				http.Error(w, msg, status)
@@ -242,30 +234,15 @@ func (conf *Config) apiAuthMiddleware(apikey string) mux.MiddlewareFunc {
 // initApiAccess loads the access file into the running policy. The router
 // builders call it, once, at start-up.
 //
-// A file that cannot be used closes the TCP API (503) rather than falling back
-// to the API key: that fallback would be a security downgrade at exactly the
-// moment something has gone wrong. DNS and the local socket are unaffected,
-// and a reload over the socket brings the TCP API back once the file is fixed.
+// No file is no remote clients, logged at INFO: a normal state. A file that
+// cannot be used closes the TCP API (503). DNS and the local socket are
+// unaffected either way, and a reload, or a client add over the socket,
+// loads the file once it is there and right.
 func (conf *Config) initApiAccess() {
 	if conf.Internal.ApiAccess == nil {
 		conf.Internal.ApiAccess = &apiAccessHolder{}
 	}
-	path := conf.ApiServer.AccessFile
-	if path == "" {
-		conf.Internal.ApiAccess.p.Store(&accessState{})
-		return
-	}
-	af, err := LoadAccessFile(path)
-	if err != nil {
-		lgApi.Error("management API: the access file cannot be used; the TCP API answers 503 until a reload succeeds (the local socket still works)",
-			"file", path, "err", err)
-		conf.Internal.ServerErrors.set(ErrCatConfig, ErrSubApiAccess, fmt.Sprintf("access file %s: %v", path, err))
-		conf.Internal.ApiAccess.p.Store(&accessState{Enabled: true, File: path, Err: err})
-		return
-	}
-	conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
-	conf.Internal.ApiAccess.p.Store(newAccessState(path, af))
-	lgApi.Info("management API: access file loaded", "file", path, "clients", len(af.Clients), "keyauth", af.KeyAuthOn())
+	conf.loadAccessPolicy(conf.ApiServer.AccessFile)
 }
 
 // AccessFileNotReloaded begins the part of a reload's reply that says the
@@ -275,103 +252,74 @@ const AccessFileNotReloaded = "Access file NOT reloaded"
 
 // reloadApiAccess re-reads the access file after a successful config reload
 // and returns a line for the reload's reply. A file that does not load leaves
-// the running policy as it was (still closed, after a failed start) and says
-// so; like a refused forward table it does not fail the rest of the reload.
+// a running policy as it was and says so; like a refused forward table it
+// does not fail the rest of the reload.
 func (conf *Config) reloadApiAccess() string {
 	accessMu.Lock() // not while /access writes the file and loads it
 	defer accessMu.Unlock()
-	h := conf.Internal.ApiAccess
-	if h == nil {
+	if conf.Internal.ApiAccess == nil {
 		return "" // this daemon built no management API router
 	}
 	path := conf.ApiServer.AccessFile
-	if path == "" {
-		if st := h.load(); st != nil && st.Enabled {
-			h.p.Store(&accessState{})
-			conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
-			msg := " The access file is no longer configured: the API key is admin on the TCP API again."
-			// Removing the file does not reopen what it closed: a closed
-			// listener is not started again until a restart.
-			if addrs := stoppedPlaintextApiListeners(); len(addrs) > 0 {
-				lgApi.Info("management API: the access file is no longer configured; the API key is admin on the TCP API again, but the plaintext TCP listeners an access file STOPPED stay stopped until a restart (the local admin socket is still served)",
-					"addresses", addrs)
-				return msg + fmt.Sprintf(" The plaintext TCP listeners %v that an access file STOPPED stay stopped until the daemon restarts (the local admin socket is still served).", addrs)
-			}
-			lgApi.Info("management API: the access file is no longer configured; the API key is admin on the TCP API again")
-			return msg
-		}
-		return ""
-	}
-	af, addrs, err := conf.loadAccessPolicy(path)
+	af, err := conf.loadAccessPolicy(path)
 	switch {
-	case errors.Is(err, fs.ErrNotExist) && h.load().failedAtStart():
-		return fmt.Sprintf("\nAccess file not there yet:\n   %s\nThe TCP API still answers 503 (since start-up) until it is:\nthe first client add (or config add) creates it.", path)
 	case errors.Is(err, fs.ErrNotExist):
-		// The first enrolment: the access-file: line is new and the file
-		// is not there yet. Lines of at most 72, after the path.
-		return fmt.Sprintf("\nAccess file not there yet (the running policy is unchanged):\n   %s\nThe first client add (or config add) creates it.", path)
+		return fmt.Sprintf("\nNo access file, so no remote clients. To take them:\n   touch %s", path)
 	case err != nil:
 		return fmt.Sprintf("\n%s (the running policy is unchanged):\n   %v", AccessFileNotReloaded, err)
 	}
-	stopped := ""
-	if len(addrs) > 0 {
-		stopped = fmt.Sprintf(" The plaintext TCP listeners %v are STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served).", addrs)
-	}
-	return fmt.Sprintf(" Access file reloaded: %d client(s), keyauth %s.%s", len(af.Clients), onOff(af.KeyAuthOn()), stopped)
+	return fmt.Sprintf(" Access file reloaded: %d client(s).", len(af.Clients))
 }
 
-// loadAccessPolicy loads the access file at path and puts it in force: a
-// reload's way, and /access's after it writes the file. A file that does not
-// load leaves the running policy as it was. Before the policy goes in force,
-// the plaintext TCP listeners close (a listener started without an access
-// file cannot take up TLS, and while it listens, clients send their API key
-// to it in clear), until a restart: closed and the policy stored under one
-// lock, which APIdispatcher also holds while it registers and starts its
-// servers (activateApiAccess). stopped are the listeners it closed.
-func (conf *Config) loadAccessPolicy(path string) (af *AccessFile, stopped []string, err error) {
-	af, err = LoadAccessFile(path)
+// loadAccessPolicy loads the access file at path and puts it in force: at
+// start-up, at a reload, and in /access. A file that is not there is no
+// remote clients, which is put in force too: removing the file takes remote
+// access away. A file that is there but does not load leaves a policy
+// loaded from a file as it was; with none (start-up, or no file before),
+// the TCP API answers 503 until a load succeeds.
+func (conf *Config) loadAccessPolicy(path string) (*AccessFile, error) {
+	h := conf.Internal.ApiAccess
+	af, err := LoadAccessFile(path)
 	switch {
-	case errors.Is(err, fs.ErrNotExist) && conf.Internal.ApiAccess.load().failedAtStart():
-		// Still the start-up failure: the TCP API answers 503 until a file
-		// loads, so the error stays (initApiAccess).
-		lgApi.Error("management API: the access file is still not there; the TCP API answers 503 until it loads (the first client add creates it)", "file", path)
-		conf.Internal.ServerErrors.set(ErrCatConfig, ErrSubApiAccess, fmt.Sprintf("access file %s: %v", path, err))
-		return nil, nil, err
 	case errors.Is(err, fs.ErrNotExist):
-		// The first enrolment: the access-file: line is new and the file
-		// is not there yet; /access add creates it. Nothing is wrong, so
-		// no server error is recorded (config status would show one), and
-		// one left from a file that failed to load before goes.
-		lgApi.Info("management API: the access file is not there yet; the running policy is unchanged, and the first client add creates it", "file", path)
+		if st := h.load(); st == nil || !st.Missing || st.File != path {
+			lgApi.Info("management API: no access file, so no remote clients (the local socket works); create it to take them",
+				"file", path)
+		}
 		conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
-		return nil, nil, err
+		h.p.Store(&accessState{File: path, Missing: true})
+		return nil, err
 	case err != nil:
-		lgApi.Error("management API: access file NOT loaded; the running policy is unchanged", "file", path, "err", err)
+		st := h.load()
+		if st == nil || st.Missing || st.Err != nil {
+			lgApi.Error("management API: the access file cannot be used; the TCP API answers 503 until it loads (the local socket still works)",
+				"file", path, "err", err)
+			h.p.Store(&accessState{File: path, Err: err})
+		} else {
+			lgApi.Error("management API: access file NOT loaded; the running policy is unchanged", "file", path, "err", err)
+		}
 		conf.Internal.ServerErrors.set(ErrCatConfig, ErrSubApiAccess, fmt.Sprintf("access file %s: %v", path, err))
-		return nil, nil, err
+		return nil, err
 	}
 	conf.Internal.ServerErrors.clear(ErrCatConfig, ErrSubApiAccess)
-	h := conf.Internal.ApiAccess
-	stopped = activateApiAccess(path, func() { h.p.Store(newAccessState(path, af)) })
-	if len(stopped) > 0 {
-		lgApi.Error("management API: plaintext TCP listeners STOPPED: the access file requires TLS; restart the daemon with usetls: true to serve TCP again (the local admin socket is still served)",
-			"addresses", stopped, "file", path)
-	}
+	h.p.Store(newAccessState(path, af))
 	// Logged as well as returned: after a SIGHUP nobody reads the message.
-	lgApi.Info("management API: access file loaded", "file", path, "clients", len(af.Clients), "keyauth", onOff(af.KeyAuthOn()))
-	return af, stopped, nil
+	lgApi.Info("management API: access file loaded", "file", path, "clients", len(af.Clients))
+	if af.KeyAuth != nil {
+		lgApi.Warn("management API: keyauth: in the access file is obsolete (there is no API key); it is ignored, and the daemon's next write of the file drops it",
+			"file", path)
+	}
+	return af, nil
 }
 
 // ApiAccessStatus is the running access policy as `config status` reports it.
 // Pins are public (a hash of a public key); there is no secret in here.
 type ApiAccessStatus struct {
-	File    string
-	Error   string `json:",omitempty"` // set when the file could not be used at start-up: the TCP API answers 503
-	KeyAuth bool
+	File string
+	// Missing: there is no access file, so no remote clients.
+	Missing bool   `json:",omitempty"`
+	Error   string `json:",omitempty"` // the file does not load, and no policy from one runs: the TCP API answers 503
 	Clients []ApiAccessStatusClient
-	// The plaintext TCP listeners an access file closed are not here but in
-	// ConfigResponse.ApiTCPStopped: they stay closed after the access file
-	// is removed, when there is no policy to report.
 }
 
 // ApiAccessStatusClient is one client of the running policy.
@@ -383,14 +331,14 @@ type ApiAccessStatusClient struct {
 	Comment  string `json:",omitempty"`
 }
 
-// apiAccessStatus is the running policy for `config status`, or nil when no
-// access file is configured.
+// apiAccessStatus is the running policy for `config status`, or nil when
+// this daemon built no management API router.
 func (conf *Config) apiAccessStatus() *ApiAccessStatus {
 	st := conf.Internal.ApiAccess.load()
-	if st == nil || !st.Enabled {
+	if st == nil {
 		return nil
 	}
-	out := &ApiAccessStatus{File: st.File, KeyAuth: st.KeyAuth}
+	out := &ApiAccessStatus{File: st.File, Missing: st.Missing}
 	if st.Err != nil {
 		out.Error = st.Err.Error()
 	}

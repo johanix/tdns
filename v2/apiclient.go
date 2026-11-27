@@ -10,7 +10,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"io"
 	"net"
@@ -22,33 +21,20 @@ import (
 	"net/url"
 )
 
-func NewClient(name, baseurl, apikey, authmethod, rootcafile string) *ApiClient {
-	return NewClientWithOptions(name, baseurl, ClientOptions{ApiKey: apikey, AuthMethod: authmethod, RootCA: rootcafile})
-}
-
-// ClientOptions is how a management API client authenticates the daemon and
-// itself. NewClient covers the key-and-rootca case; this adds pinning and a
-// client certificate.
+// ClientOptions is how a management API client verifies the daemon and
+// authenticates itself. Over TCP that is TLS with the daemon's certificate
+// pins (Pins) and the operator's client certificate (ClientCert); on the
+// daemon's local admin socket (a unix:///path base URL) it is nothing: the
+// socket's file permissions are the authentication. There is no API key.
 type ClientOptions struct {
-	ApiKey string
-	// AuthMethod is "X-API-Key", "Authorization", "none" (the local socket)
-	// or "certificate" (ClientCert, and no key).
-	AuthMethod string
-	// RootCA is as for NewClient: "insecure", "tlsa", or a PEM file of roots.
-	RootCA string
-	// RootCAs, when set, are the roots of the PEM file RootCA names, already
-	// read and parsed by a caller that wants the errors returned: the file is
-	// then not read again (a read failure here exits the process).
-	RootCAs *x509.CertPool
-	// Pins, when set, replace PKIX verification of the daemon: its leaf
-	// certificate's SPKI SHA-256 must be one of these (no name, no expiry
-	// check; the pin is the trust anchor).
+	// Pins are the daemon's SPKI SHA-256 pins: its leaf certificate's must
+	// be one of these (no name, no expiry check; the pin is the trust
+	// anchor). An https client without pins refuses every connection.
 	Pins []string
 	// PinFix, when set, is added to the refusal of a daemon whose pin is
 	// not one of Pins: how the caller's user takes the daemon's new pins.
 	PinFix string
-	// ClientCert is presented on the TLS connection when AuthMethod is
-	// "certificate".
+	// ClientCert is presented on the TLS connection.
 	ClientCert *tls.Certificate
 	// ExpectConfigFile, for a local socket client, is the config file the
 	// daemon must run. Every request carries it (ExpectConfigFileHeader), and
@@ -77,29 +63,21 @@ func (t expectConfigTransport) RoundTrip(r *http.Request) (*http.Response, error
 
 // NewClientWithOptions builds a management API client for baseurl.
 func NewClientWithOptions(name, baseurl string, o ClientOptions) *ApiClient {
-	apikey, authmethod, rootcafile := o.ApiKey, o.AuthMethod, o.RootCA
 	api := ApiClient{
-		Name:       name,
-		BaseUrl:    baseurl,
-		apiKey:     apikey,
-		AuthMethod: authmethod,
+		Name:    name,
+		BaseUrl: baseurl,
 	}
 
 	// unix:///path is the daemon's local admin socket. Every request is
 	// dialled to that socket whatever the URL's host says, so the URL the rest
-	// of this client builds is plain http on a fixed host. No TLS, and no key
-	// is needed: the daemon authenticates the socket by file permissions.
+	// of this client builds is plain http on a fixed host. No TLS, and no
+	// credential: the daemon authenticates the socket by file permissions.
 	// A unix:// URL whose path is not absolute is still a socket URL: it must
 	// not fall through to the TCP client, so every request fails, saying why.
 	if strings.HasPrefix(baseurl, "unix://") {
 		path, ok := unixSocketPath(baseurl)
 		api.Socket = path
 		api.BaseUrl = "http://localhost/api/v1"
-		// Whatever the entry says, a socket request carries no key: none is
-		// needed, and an entry with authmethod X-API-Key and no key would
-		// otherwise fail every request before dialling.
-		api.AuthMethod = "none"
-		api.apiKey = ""
 		var tr http.RoundTripper = &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				if !ok {
@@ -118,104 +96,33 @@ func NewClientWithOptions(name, baseurl string, o ClientOptions) *ApiClient {
 		return &api
 	}
 
-	tlsconfig := &tls.Config{}
-	if authmethod == "certificate" && o.ClientCert != nil {
-		tlsconfig.Certificates = []tls.Certificate{*o.ClientCert}
-	}
-
-	if len(o.Pins) > 0 {
-		// Pinning replaces chain building: InsecureSkipVerify turns off the
-		// default verification and VerifyConnection, which still runs (on
-		// resumed connections too), is the gate.
-		pins, fix := append([]string(nil), o.Pins...), o.PinFix
-		tlsconfig.InsecureSkipVerify = true
-		tlsconfig.VerifyConnection = func(cs tls.ConnectionState) error {
+	// TLS 1.3, as the daemon serves it. Pinning replaces chain building:
+	// InsecureSkipVerify turns off the default verification and
+	// VerifyConnection, which still runs (on resumed connections too), is
+	// the gate. With no pins it refuses every daemon.
+	pins, fix := append([]string(nil), o.Pins...), o.PinFix
+	tlsconfig := &tls.Config{
+		MinVersion:         tls.VersionTLS13,
+		InsecureSkipVerify: true,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(pins) == 0 {
+				return fmt.Errorf("no certificate pin for the daemon, so it cannot be verified")
+			}
 			err := verifyServerPin(cs, pins)
 			if err != nil && fix != "" {
 				err = fmt.Errorf("%w; fix: %s", err, fix)
 			}
 			return err
-		}
-	} else if rootcafile == "system" {
-		// tlsauth: pkix with no rootca: the system roots (RootCAs nil).
-	} else if rootcafile == "insecure" {
-		tlsconfig.InsecureSkipVerify = true
-	} else if rootcafile == "tlsa" {
-
-		// In the TLSA case, do nothing here, the TLSConfig will be filled in from the Agent side afterwards.
-
-		// use TLSA RR for verification
-		//		tlsconfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-		//			for _, rawCert := range rawCerts {
-		//				cert, err := x509.ParseCertificate(rawCert)
-		//				if err != nil {
-		//					return fmt.Errorf("failed to parse certificate: %v", err)
-		//				}
-		//				if cert.Subject.CommonName != sc.Identity {
-		//					return fmt.Errorf("unexpected certificate common name (should have been %s)", sc.Identity)
-		//				}
-		//
-		//				err = tdns.VerifyCertAgainstTlsaRR(sc.Details[tdns.MsignerMethodDNS].TlsaRR, rawCert)
-		//				if err != nil {
-		//					return fmt.Errorf("failed to verify certificate against TLSA record: %v", err)
-		//				}
-		//			}
-		//			return nil
-		//		}
-	} else if o.RootCAs != nil {
-		// The caller read and parsed rootcafile already, and handled its
-		// errors; reading it again here could only find a changed file.
-		tlsconfig.RootCAs = o.RootCAs
-	} else {
-		rootCAPool := x509.NewCertPool()
-		// rootCA, err := os.ReadFile(viper.GetString("musicd.rootCApem"))
-		rootCA, err := os.ReadFile(rootcafile)
-		if err != nil {
-			lgApi.Error("reading cert failed", "err", err)
-			os.Exit(1)
-		}
-		lgApi.Debug("creating API client with root CAs", "name", name, "rootcafile", rootcafile)
-
-		rootCAPool.AppendCertsFromPEM(rootCA)
-		tlsconfig.RootCAs = rootCAPool
+		},
 	}
-
-	//	} else {
-	//		rootCAPool := x509.NewCertPool()
-	//		// rootCA, err := os.ReadFile(viper.GetString("musicd.rootCApem"))
-	//		rootCA, err := os.ReadFile(rootcafile)
-	//		if err != nil {
-	//			log.Fatalf("reading cert failed : %v", err)
-	//		}
-	//		if debug {
-	//			log.Printf("NewClient: Creating '%s' API client based on root CAs in file '%s'\n", name, rootcafile)
-	//		}
-	//
-	//		rootCAPool.AppendCertsFromPEM(rootCA)
-
-	//		api.Client = &http.Client{
-	//			Transport: &http.Transport{
-	//				TLSClientConfig: &tls.Config{
-	//					RootCAs: rootCAPool,
-	//				},
-	//			},
-	//		}
-	//	}
+	if o.ClientCert != nil {
+		tlsconfig.Certificates = []tls.Certificate{*o.ClientCert}
+	}
 	api.Client = &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: tlsconfig,
 		},
 	}
-	// api.Debug = Globals.Debug
-	//api.Verbose = Globals.Verbose
-	// log.Printf("client is a: %T\n", api.Client)
-
-	//	if Globals.Debug {
-	//		log.Printf("Setting up %s API client:\n", name)
-	//		log.Printf("* baseurl is: %s \n* apikey is: %s \n* authmethod is: %s \n",
-	//			api.BaseUrl, api.apiKey, api.AuthMethod)
-	//	}
-
 	return &api
 }
 
@@ -244,32 +151,13 @@ func verifyServerPin(cs tls.ConnectionState, pins []string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("the daemon's certificate has pin %s, which is not one of the %d pinned for this entry (a new key on the daemon, or not the daemon you meant)", got, len(pins))
+	return fmt.Errorf("the daemon's certificate has pin %s, which is not one of the %d pinned for this entry (the daemon's certificate changed, or this is not the daemon you meant)", got, len(pins))
 }
 
 // request helper function
 func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 
 	req.Header.Add("Content-Type", "application/json")
-
-	if api.AuthMethod == "" || api.AuthMethod == "none" || api.AuthMethod == "certificate" {
-		// no auth needed
-	} else if api.AuthMethod == "X-API-Key" {
-		if api.apiKey == "" {
-			return 0, nil, fmt.Errorf("X-API-Key auth method requires apiKey to be set")
-		}
-		req.Header.Add("X-API-Key", api.apiKey)
-	} else if api.AuthMethod == "Authorization" {
-		if api.apiKey == "" {
-			return 0, nil, fmt.Errorf("authorization auth method requires apiKey to be set")
-		}
-		req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
-	} else {
-		lgApi.Error("unknown auth method", "method", api.AuthMethod)
-		return 501, []byte{}, fmt.Errorf("unknown auth method: %s", api.AuthMethod)
-	}
-
-	lgApi.Debug("sending request", "authMethod", api.AuthMethod)
 
 	resp, err := api.Client.Do(req)
 
@@ -385,11 +273,7 @@ func (api *ApiClient) UrlReport(method, endpoint string, data []byte) {
 		return
 	}
 
-	if api.UseTLS {
-		fmt.Printf("API%s: apiurl: %s (using TLS)\n", method, api.BaseUrl+endpoint)
-	} else {
-		fmt.Printf("API%s: apiurl: %s (not using TLS)\n", method, api.BaseUrl+endpoint)
-	}
+	fmt.Printf("API%s: apiurl: %s\n", method, api.BaseUrl+endpoint)
 
 	if (method == http.MethodPost) || (method == http.MethodPut) {
 		var prettyJSON bytes.Buffer
@@ -407,11 +291,7 @@ func (api *ApiClient) UrlReportNG(method, fullurl string, data []byte) {
 		return
 	}
 
-	if api.UseTLS {
-		fmt.Printf("API%s: apiurl: %s (using TLS)\n", method, fullurl)
-	} else {
-		fmt.Printf("API%s: apiurl: %s (not using TLS)\n", method, fullurl)
-	}
+	fmt.Printf("API%s: apiurl: %s\n", method, fullurl)
 
 	if (method == http.MethodPost) || (method == http.MethodPut) {
 		var prettyJSON bytes.Buffer
@@ -487,13 +367,6 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 			continue // Try next address
 		}
 		req.Header.Add("Content-Type", "application/json")
-		if api.AuthMethod == "X-API-Key" {
-			req.Header.Add("X-API-Key", api.apiKey)
-		} else if api.AuthMethod == "Authorization" {
-			req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
-		} else if api.AuthMethod == "none" {
-			// do not add any authentication header at all
-		}
 		resp, err = api.Client.Do(req)
 
 		if err != nil {
@@ -649,13 +522,6 @@ func (api *ApiClient) RequestNGWithContext(ctx context.Context, method, endpoint
 		// }
 
 		req.Header.Add("Content-Type", "application/json")
-		if api.AuthMethod == "X-API-Key" {
-			req.Header.Add("X-API-Key", api.apiKey)
-		} else if api.AuthMethod == "Authorization" {
-			req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
-		} else if api.AuthMethod == "none" {
-			// do not add any authentication header at all
-		}
 		resp, err = api.Client.Do(req)
 
 		if err != nil {

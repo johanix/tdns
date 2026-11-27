@@ -112,7 +112,7 @@ do_setup() {
 	ZDIR="$WORK/infra/zones"
 	{ y_service infra "a.root.test."; y_listeners 127.0.0.2; y_common infra 127.0.0.2
 	  y_zones; y_primary . online-signing; } > "$WORK/infra/tdns-auth.yaml"
-	cli_conf infra 127.0.0.2 tdns-auth
+	cli_conf infra 127.0.0.2 auth
 	infra_up
 	wait_for 30 answers 127.0.0.2 . DNSKEY || die "the rig root is not signed"
 	dogq 127.0.0.2 . DNSKEY | awk '$1 == "." && $0 ~ /DNSKEY[ \t]+257[ \t]/' > "$WORK/infra/root.ta"

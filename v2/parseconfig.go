@@ -68,8 +68,8 @@ func LoadRawConfigMap(file string) (map[string]interface{}, []string, error) {
 }
 
 // decodeConfigFile turns a config FILE into a Config exactly as the daemon
-// does: include processing, transfer-alias normalisation, the apiserver.usetls
-// default, then a STRICT mapstructure decode.
+// does: include processing, transfer-alias normalisation, then a STRICT
+// mapstructure decode.
 //
 // Shared by ParseConfig and ValidateConfig so that `config check` cannot pass a
 // file the daemon would refuse to start on. The checker used to decode through
@@ -91,9 +91,11 @@ func decodeConfigFile(cfgfile string, conf *Config) (mapstructure.Metadata, []st
 	if err := decodeConfigMap(configMap, conf, &md); err != nil {
 		return md, includedFiles, aliasConflicts, err
 	}
-	// As ParseConfig does: the socket a daemon on this file serves, and its
-	// API certificate (only looked for here, never written).
+	// As ParseConfig does: the socket a daemon on this file serves, its
+	// access file, and its API certificate (only looked for here, never
+	// written).
 	conf.ApiServer.Socket = ApiSocketPath(conf.ApiServer.Socket, cfgfile)
+	conf.ApiServer.AccessFile = ApiAccessFilePath(conf.ApiServer.AccessFile, cfgfile)
 	conf.ApiServer.applyCertDefaults(cfgfile, false)
 	return md, includedFiles, aliasConflicts, nil
 }
@@ -167,14 +169,6 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 		return fmt.Errorf("error creating decoder: %v", derr)
 	}
 
-	// apiserver.usetls defaults to true, applied to the raw map so an absent
-	// key and an explicit `usetls: true` decode identically.
-	if apiserverMap, ok := configMap["apiserver"].(map[string]interface{}); ok {
-		if _, explicitlySet := apiserverMap["usetls"]; !explicitlySet {
-			apiserverMap["usetls"] = true
-		}
-	}
-
 	// Reset raw fields that derive an internal default when omitted, so a
 	// reload after the operator removes the YAML key reverts to the default
 	// instead of preserving the previously-decoded value (mapstructure leaves
@@ -186,7 +180,7 @@ func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstru
 	// apiserver: as a whole, for the same reason: an access-file: or socket:
 	// line the operator took out would otherwise stay set, so a reload
 	// would go on enforcing an access file the config no longer names, and
-	// say "reloaded". The usetls default is already in configMap above. What
+	// say "reloaded". What
 	// the running listeners use was fixed when they started (APIdispatcher);
 	// a reload that changes it says so (apiListenerReloadNote).
 	conf.ApiServer = ApiServerConf{}
@@ -351,6 +345,10 @@ type deprecatedConfigKey struct {
 	exact  bool
 	advice string
 	key    string // populated per-occurrence by classifyUnusedConfigKeys (the actual offending path)
+	// warn: the key is dead but harmless (nothing breaks without it), so it
+	// is logged as a warning, not an error, and log sweeps for ERROR stay
+	// clean on configs that old and new binaries share.
+	warn bool
 }
 
 // deprecatedConfigKeys is the registry of config keys removed or moved by
@@ -372,6 +370,13 @@ type deprecatedConfigKey struct {
 // Keep advice concrete: name the new location and, ideally, the change date
 // or doc so an operator can find the migration.
 var deprecatedConfigKeys = append([]deprecatedConfigKey{
+	// API keys and the plaintext TCP API are gone (2026-11-27): the TCP API
+	// is TLS 1.3, and clients authenticate with a certificate pinned in the
+	// access file.
+	{match: "apiserver.apikey", exact: true, warn: true,
+		advice: "apiserver.apikey is no longer used: API keys are gone, and clients authenticate with a certificate in the access file. Delete the line"},
+	{match: "apiserver.usetls", exact: true, warn: true,
+		advice: "apiserver.usetls is no longer used: the TCP API is always TLS 1.3. Delete the line"},
 	// Config restructure 2026-06-16 (per-role KSK/ZSK algorithms + nesting):
 	// the DNSSEC config moved under a single top-level `dnssec:` block.
 	{match: "dnssecpolicies", exact: true,
@@ -568,7 +573,7 @@ func classifyUnusedConfigKeys(unused []string) (deprecated []deprecatedConfigKey
 		if hit != nil {
 			// Carry the actual key in a per-occurrence copy so the log line
 			// names the offending path, not just the pattern.
-			deprecated = append(deprecated, deprecatedConfigKey{key: key, advice: hit.advice})
+			deprecated = append(deprecated, deprecatedConfigKey{key: key, advice: hit.advice, warn: hit.warn})
 		} else {
 			unknown = append(unknown, key)
 		}
@@ -608,6 +613,9 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// The local admin socket: apiserver.socket, none for no socket, or by
 	// default one named after this config file (ApiSocketPath).
 	conf.ApiServer.Socket = ApiSocketPath(conf.ApiServer.Socket, cfgfile)
+	// The access file: always on, at apiserver.access-file or by default
+	// next to the config file (ApiAccessFilePath).
+	conf.ApiServer.AccessFile = ApiAccessFilePath(conf.ApiServer.AccessFile, cfgfile)
 	// The API certificate: certfile/keyfile, or the config file's default
 	// pair, written self-signed at the daemon's first start (not on a
 	// reload: the running listeners keep the key they started with).
@@ -661,6 +669,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 		// its own rather than being buried in the generic list.
 		deprecated, unknown := classifyUnusedConfigKeys(md.Unused)
 		for _, d := range deprecated {
+			if d.warn {
+				lgConfig.Warn("obsolete config key ignored — "+d.advice, "key", d.key)
+				continue
+			}
 			lgConfig.Error("deprecated config key (config lags the code) — "+d.advice,
 				"key", d.key)
 		}

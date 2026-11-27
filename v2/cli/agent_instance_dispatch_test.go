@@ -63,14 +63,14 @@ func (d *recordingDaemon) take() []string {
 // and nothing reaches the other.
 func TestAgentInstanceCommandsRunAgainstTheirOwnDaemon(t *testing.T) {
 	withCleanRoleRegistry(t)
-	RegisterRole("agent", "tdns-agent")
+	RegisterRole("agent", "agent")
 	RegisterRole("sectagent", "sectagent")
 
 	canonD, instD := newRecordingDaemon(t), newRecordingDaemon(t)
 	savedClients := tdns.Globals.ApiClients
 	tdns.Globals.ApiClients = map[string]*tdns.ApiClient{
-		"tdns-agent": tdns.NewClient("tdns-agent", canonD.URL+"/api/v1", "k1", "X-API-Key", "insecure"),
-		"sectagent":  tdns.NewClient("sectagent", instD.URL+"/api/v1", "k2", "X-API-Key", "insecure"),
+		"agent":     tdns.NewClientWithOptions("agent", canonD.URL+"/api/v1", tdns.ClientOptions{Pins: []string{tdns.SPKISHA256(canonD.Certificate())}}),
+		"sectagent": tdns.NewClientWithOptions("sectagent", instD.URL+"/api/v1", tdns.ClientOptions{Pins: []string{tdns.SPKISHA256(instD.Certificate())}}),
 	}
 	t.Cleanup(func() { tdns.Globals.ApiClients = savedClients })
 
@@ -151,12 +151,12 @@ func TestUpdateKeyDBPrefersTheInstancesOwn(t *testing.T) {
 // instance. A canonical entry, and a role whose entry is missing, are not.
 func TestIsInstanceRole(t *testing.T) {
 	withCleanRoleRegistry(t)
-	RegisterRole("agent", "tdns-agent")
+	RegisterRole("agent", "agent")
 	RegisterRole("agent2", "agent2")
 
 	saved := apiConfig
 	apiConfig = &CliConf{ApiServers: []ApiDetails{
-		{Name: "tdns-agent"},
+		{Name: "agent"},
 		{Name: "agent2", Role: "agent"},
 	}}
 	t.Cleanup(func() { apiConfig = saved })

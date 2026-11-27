@@ -3,8 +3,10 @@
 # operator normally runs -- so `zone update` reaches the wrong server and
 # reports the rig's zones as unknown. --server does not override this for the
 # API transport.
+#
+# The primary is reached over its local admin socket, found through its config
+# file, so the rig's CLI runs as root. (There are no API keys; over TCP the CLI
+# would need a client certificate in the daemon's access file.)
 apiservers:
-   - name:        tdns-auth
-     baseurl:     https://127.0.0.1:8321/api/v1
-     authmethod:  X-API-Key
-     apikey:      ixfr-interop-test-key
+   - name:        auth
+     config-file: /var/tmp/ixfrinterop/tdns-auth-p/tdns-auth-p.yaml

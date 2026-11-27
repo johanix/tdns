@@ -25,9 +25,9 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 )
 
-// NewImrConfigCmd builds the `imr config` command group. tdns-imr has no
-// zone/tsig/keystore state, so this group carries check, mwe and status
-// (unlike auth's config group, which also has reload*).
+// NewImrConfigCmd builds the `imr config` command group: check, mwe, reload
+// and status. tdns-imr has no zone or TSIG state, so it has no reload-zones
+// or reload-tsig.
 func NewImrConfigCmd() *cobra.Command {
 	return NewImrConfigCmdFor("imr")
 }
@@ -43,6 +43,7 @@ func NewImrConfigCmdFor(role string) *cobra.Command {
 	}
 	c.AddCommand(newImrConfigCheckCmd(role))
 	c.AddCommand(newImrConfigMweCmd(role))
+	c.AddCommand(newConfigReloadCmd(role))
 	c.AddCommand(newImrConfigStatusCmd(role))
 	return c
 }
@@ -87,12 +88,10 @@ func printImrConfigStatus(resp tdns.ConfigResponse) {
 	if line := apiSocketStatusLine(resp); line != "" {
 		fmt.Println(line)
 	}
-	// As in the auth printer: a TCP API an access file stopped stays
-	// stopped after the file is removed, so this does not depend on Access.
-	// Listeners not started for want of a certificate, and those that
-	// failed (not bound, or the server stopped), are reported as well.
+	// As in the auth printer: listeners not started for want of a
+	// certificate, and those that failed (not bound, or the server
+	// stopped).
 	printApiTCPNotStarted(resp.ApiTCPNotStarted, resp.ApiTCPNoCert)
-	printApiTCPStopped(resp.ApiTCPStopped, resp.ApiTCPStoppedBy, resp.Access != nil)
 	printApiTCPFailed(resp.ApiTCPFailed)
 	// Proc renders BEFORE the nil-Imr return: a daemon whose IMR
 	// init failed (the Upstream/ImrPriming husk) is precisely a
@@ -204,7 +203,7 @@ func runImrConfigCheck(role, explicitPath string, offline bool) {
 	checkApiServerCorrelation(role, &cfg, rep)
 
 	if online {
-		correlateImrApiServer(&cfg, status, acceptedApiKey(role), rep)
+		correlateImrApiServer(&cfg, status, rep)
 	}
 
 	finishCheckconf(rep)
@@ -328,14 +327,8 @@ func checkImrTrustAnchors(cfg *tdns.Config, rep *ccReport) {
 
 func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 	const g = "API server"
-	// tdns-imr builds its API router whatever the addresses say, and stops
-	// at startup if that fails, so the key is checked first, for every case.
-	if cfg.ApiServer.ApiKey.Value() == "" {
-		rep.fail(g, "apikey", "apiserver.apikey is empty — the imr API router refuses to start without it",
-			"set a long random apiserver.apikey")
-	} else {
-		rep.pass(g, "apikey", "apiserver.apikey is set")
-	}
+	checkObsoleteApiKeys(v, rep)
+	checkApiAccessFile(cfg, rep)
 	sock := cfg.ApiServer.Socket
 	var sockErr error
 	if sock != "" {
@@ -353,23 +346,14 @@ func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 	}
 	rep.pass(g, "addresses", fmt.Sprintf("listening on %v", cfg.ApiServer.Addresses))
 
-	// usetls defaults TRUE for imr unless explicitly set false.
-	usetls := true
-	if v.IsSet("apiserver.usetls") {
-		usetls = v.GetBool("apiserver.usetls")
-	}
-	if usetls {
-		if cfg.ApiServer.CertPending {
-			rep.info(g, "cert", "no apiserver.certfile/keyfile: the daemon writes a self-signed pair (certs/<config name>-api.crt and .key, next to its config) when it first starts")
-		} else if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
-			rep.fail(g, "cert", "apiserver.usetls is true (the imr default) but certfile/keyfile are not set — the API listener fails to start",
-				"set apiserver.certfile/keyfile (see `tdns-cli imr config mwe`) or set usetls: false")
-		} else {
-			checkFileExists(rep, g, "certfile", cfg.ApiServer.CertFile)
-			checkFileExists(rep, g, "keyfile", cfg.ApiServer.KeyFile)
-		}
+	if cfg.ApiServer.CertPending {
+		rep.info(g, "cert", "no apiserver.certfile/keyfile: the daemon writes a self-signed pair (certs/<config name>-api.crt and .key, next to its config) when it first starts")
+	} else if cfg.ApiServer.CertFile == "" || cfg.ApiServer.KeyFile == "" {
+		rep.fail(g, "cert", "apiserver.certfile and keyfile go together: set both, or neither for the default pair",
+			"set both apiserver.certfile and keyfile, or remove both")
 	} else {
-		rep.info(g, "usetls", "apiserver.usetls is false — plaintext management API")
+		checkFileExists(rep, g, "certfile", cfg.ApiServer.CertFile)
+		checkFileExists(rep, g, "keyfile", cfg.ApiServer.KeyFile)
 	}
 }
 
@@ -390,12 +374,9 @@ func fetchImrStatus(role string) (tdns.ConfigResponse, error) {
 }
 
 // correlateImrApiServer compares the file's apiserver block with the running
-// resolver's. acceptedKey is the API key the status request was sent with:
-// the reply came back, so the resolver accepted it. The reply itself no
-// longer carries the key (it is redacted).
-func correlateImrApiServer(cfg *tdns.Config, status tdns.ConfigResponse, acceptedKey string, rep *ccReport) {
+// resolver's.
+func correlateImrApiServer(cfg *tdns.Config, status tdns.ConfigResponse, rep *ccReport) {
 	const g = "Running-config drift"
-	warnApiKeyDrift(cfg, acceptedKey, rep, g)
 	if len(status.ApiServer.Addresses) > 0 && len(cfg.ApiServer.Addresses) > 0 &&
 		!sameStringSet(cfg.ApiServer.Addresses, status.ApiServer.Addresses) {
 		rep.warn(g, "apiserver-addresses",
@@ -488,14 +469,9 @@ func runImrConfigMwe(role, cfgPath string) {
 		cliFatalf("could not generate certificate: %v", err)
 	}
 
-	apiKey, err := randomAPIKey()
-	if err != nil {
-		cliFatalf("could not generate api key: %v", err)
-	}
-
 	apiPort := "8080"
 	dnsPort := "5353"
-	content := renderImrMweConfig(dir, certFile, keyFile, apiKey, apiPort, dnsPort)
+	content := renderImrMweConfig(dir, certFile, keyFile, apiPort, dnsPort)
 	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
 		cliFatalf("could not write config %s: %v", cfgPath, err)
 	}
@@ -508,24 +484,6 @@ func runImrConfigMwe(role, cfgPath string) {
 		fmt.Printf("Reused cert/key:   %s , %s\n", certFile, keyFile)
 	}
 
-	if role == "imr" {
-		fmt.Printf("\nTo let `tdns-cli imr ...` reach this server, add to your tdns-cli.yaml:\n\n")
-		fmt.Printf("  apiservers:\n")
-		fmt.Printf("     - name:       tdns-imr\n")
-	} else {
-		// An extra instance lives in tdns-ncli's own config, where its entry
-		// already exists; say what it should hold.
-		// config-file: is the file the start command below uses, so a later
-		// `config check` reads the config this key and port came from. An
-		// existing file (with its own key and port) is left alone.
-		fmt.Printf("\nThe CLI entry for %s should read:\n\n", role)
-		fmt.Printf("     - name:        %s\n", role)
-		fmt.Printf("       role:        imr\n")
-		fmt.Printf("       config-file: %s\n", cfgPath)
-	}
-	fmt.Printf("       baseurl:    https://127.0.0.1:%s/api/v1\n", apiPort)
-	fmt.Printf("       apikey:     %s\n", apiKey)
-	fmt.Printf("       authmethod: X-API-Key\n")
 	if role != "imr" {
 		fmt.Printf("\nThe MWE uses API port %s and DNS port %s. A second resolver on the same\nhost needs ports of its own: change them before starting it.\n", apiPort, dnsPort)
 	}
@@ -533,22 +491,16 @@ func runImrConfigMwe(role, cfgPath string) {
 		fmt.Printf("\n%s is left as it was. If you move the MWE over it, use that path instead.\n", existing)
 	}
 	// An instance is checked through its own entry: `imr config check` would
-	// compare the file with the canonical resolver's port and key.
-	check := "tdns-cli imr config check"
-	if role != "imr" {
-		check = "tdns-ncli " + role + " config check"
-	}
-	fmt.Printf("\nNext steps:\n")
-	fmt.Printf("  tdns-imr --config %s        # start the resolver\n", cfgPath)
-	fmt.Printf("  %s --serverconfig %s   # validate\n", check, cfgPath)
+	// compare the file with the first resolver's port.
+	printMweNextSteps("imr", role, cfgPath)
+	fmt.Printf("  tdns-ncli %s config check --serverconfig %s\n", role, cfgPath)
 }
 
-func renderImrMweConfig(dir, certFile, keyFile, apiKey, apiPort, dnsPort string) string {
+func renderImrMweConfig(dir, certFile, keyFile, apiPort, dnsPort string) string {
 	r := strings.NewReplacer(
 		"{{DIR}}", dir,
 		"{{CERT}}", certFile,
 		"{{KEY}}", keyFile,
-		"{{APIKEY}}", apiKey,
 		"{{APIPORT}}", apiPort,
 		"{{DNSPORT}}", dnsPort,
 	)
@@ -595,10 +547,8 @@ imrengine:
 
 apiserver:
    addresses:  [ 127.0.0.1:{{APIPORT}} ]
-   apikey:     {{APIKEY}}
    certfile:   {{CERT}}
    keyfile:    {{KEY}}
-   usetls:     true
 
 log:
    file:   {{DIR}}/tdns-imr.log

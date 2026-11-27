@@ -17,18 +17,13 @@ certfile/keyfile` are hard startup errors naming their new homes.
 ## Minimal working example
 
 Three keys are validated as required (`listeners.addresses`,
-`listeners.transports`, `log.file`), and one more is required in practice:
-`apiserver.apikey`. The API router refuses to build without an API key, and
-that error aborts startup — even though the resolver would otherwise not need
-the API at all.
+`listeners.transports`, `log.file`). The management API needs nothing: its
+local admin socket is on by default, and there is no API key.
 
 ```yaml
 listeners:
    addresses:   [ 127.0.0.1:53, '[::1]:53' ]   # required
    transports:  [ do53 ]                       # required
-
-apiserver:
-   apikey:  "a-long-random-string"             # required in practice
 
 log:
    file:   /var/log/tdns/tdns-imr.log          # required
@@ -37,11 +32,13 @@ log:
 
 Everything else defaults. Two caveats:
 
-**`apiserver.addresses` is optional.** Omit it and the management API simply
-does not listen, while the resolver runs normally. If you do set it, note that
-`apiserver.usetls` defaults to **true**, which then requires `certfile` and
-`keyfile`; otherwise the API listener fails to start (the resolver keeps
-running).
+**`apiserver.addresses` is optional.** Omit it and the management API does
+not listen on TCP, while the resolver runs normally and root on the host
+reaches it over the local admin socket. If you do set it, the TCP API is
+TLS 1.3, with `certfile`/`keyfile` or, with neither, a self-signed pair the
+daemon writes at its first start; remote clients need a certificate in its
+access file (`<config dir>/tdns-imr-access.yaml`, which you create; see
+[the access file](config-tdns-auth.md#network-clients-and-roles-the-access-file)).
 
 **With no trust anchor configured, the compiled-in IANA root anchor is used
 when the root is the IANA root.** DNSSEC validation is on —

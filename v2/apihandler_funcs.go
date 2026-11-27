@@ -439,6 +439,17 @@ func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *ht
 	}
 }
 
+// ConfigOperatorCommands are the /config commands an operator runs, per
+// daemon type ("identity" is the CLI's own). Every one has a command of the
+// same name under `config` in that daemon's CLI tree (design 2026-11-26,
+// change 4; a test in v2/cli checks it). transport-signal-release is
+// `config transport-signal --release`.
+var ConfigOperatorCommands = map[AppType][]string{
+	AppTypeAuth:  {"reload", "reload-zones", "reload-tsig", "status", "transport-signal"},
+	AppTypeAgent: {"reload", "reload-zones", "reload-tsig", "status"},
+	AppTypeImr:   {"reload", "status"},
+}
+
 func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 

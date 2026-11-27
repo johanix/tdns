@@ -178,7 +178,7 @@ func TestImrInstanceIsWired(t *testing.T) {
 	withCleanRoleRegistry(t)
 	root := &cobra.Command{Use: "tdns-ncli"}
 	w := WireInstanceTrees(root, []ApiDetails{
-		{Name: "tdns-imr", BaseURL: "http://127.0.0.1:8080/api/v1"},
+		{Name: "imr", BaseURL: "http://127.0.0.1:8080/api/v1"},
 		{Name: "imr2", Role: "imr", BaseURL: "http://127.0.0.1:8081/api/v1"},
 	})
 	if len(w) != 0 || findChild(root, "imr2") == nil {
@@ -234,8 +234,8 @@ func TestImrInstanceCommandsReachTheirOwnDaemon(t *testing.T) {
 
 	savedClients, savedType := tdns.Globals.ApiClients, tdns.Globals.App.Type
 	tdns.Globals.ApiClients = map[string]*tdns.ApiClient{
-		"tdns-imr": tdns.NewClient("tdns-imr", sCanon.URL+"/api/v1", "k1", "X-API-Key", "insecure"),
-		"imr2":     tdns.NewClient("imr2", sInst.URL+"/api/v1", "k2", "X-API-Key", "insecure"),
+		"imr":  tdns.NewClientWithOptions("imr", sCanon.URL+"/api/v1", tdns.ClientOptions{Pins: []string{tdns.SPKISHA256(sCanon.Certificate())}}),
+		"imr2": tdns.NewClientWithOptions("imr2", sInst.URL+"/api/v1", tdns.ClientOptions{Pins: []string{tdns.SPKISHA256(sInst.Certificate())}}),
 	}
 	tdns.Globals.App.Type = tdns.AppTypeCli // so the commands take their API path
 	t.Cleanup(func() { tdns.Globals.ApiClients, tdns.Globals.App.Type = savedClients, savedType })
@@ -292,7 +292,7 @@ func TestImrInstanceConfigCheckUsesItsOwnConfigFile(t *testing.T) {
 	withCleanRoleRegistry(t)
 	RegisterRole("imr2", "imr2")
 	apiConfig = &CliConf{ApiServers: []ApiDetails{
-		{Name: "tdns-imr", BaseURL: "http://127.0.0.1:8080/api/v1"},
+		{Name: "imr", BaseURL: "http://127.0.0.1:8080/api/v1"},
 		{Name: "imr2", Role: "imr", BaseURL: "http://127.0.0.1:8081/api/v1", ConfigFile: "/etc/tdns/tdns-imr2.yaml"},
 	}}
 	if got := defaultCfgFileForRole("imr2"); got != "/etc/tdns/tdns-imr2.yaml" {
@@ -314,7 +314,7 @@ func TestImrConfigMwePathPerInstance(t *testing.T) {
 	apiConfig = &CliConf{ApiServers: []ApiDetails{
 		// The canonical resolver's config-file: does not move its MWE: it
 		// stays tdns-imr.yaml, as tdns-cli has always written it.
-		{Name: "tdns-imr", BaseURL: "http://127.0.0.1:8080/api/v1", ConfigFile: "/srv/imr/custom.yaml"},
+		{Name: "imr", BaseURL: "http://127.0.0.1:8080/api/v1", ConfigFile: "/srv/imr/custom.yaml"},
 		{Name: "imr2", Role: "imr", BaseURL: "http://127.0.0.1:8081/api/v1", ConfigFile: "/etc/tdns/tdns-imr2.yaml"},
 		{Name: "imr3", Role: "imr", BaseURL: "http://127.0.0.1:8082/api/v1"},
 	}}

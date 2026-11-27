@@ -83,7 +83,7 @@ func TestCorrelateStatusDoHPath(t *testing.T) {
 			var resp tdns.ConfigResponse
 			resp.Listeners.DoHPath = tc.running
 			rep := newCCReport()
-			correlateStatus(cfg, resp, "", rep, "Running server")
+			correlateStatus(cfg, resp, rep, "Running server")
 			if got := hasLevel(rep, "Running server", "listeners-doh-path", ccWARN); got != tc.wantDifferent {
 				t.Fatalf("warned = %v, want %v; report %+v", got, tc.wantDifferent, rep.byGroup["Running server"])
 			}
@@ -139,7 +139,7 @@ func TestConfigCheckDo53QueriesRefusedDrift(t *testing.T) {
 			}
 			resp := tdns.ConfigResponse{Do53QueriesRefused: tc.running}
 			rep := newCCReport()
-			correlateStatus(cfg, resp, "", rep, "Running server")
+			correlateStatus(cfg, resp, rep, "Running server")
 			if got := hasLevel(rep, "Running server", "debug-do53-queries-refused", ccWARN); got != tc.warn {
 				t.Fatalf("warned = %v, want %v; report %+v", got, tc.warn, rep.byGroup["Running server"])
 			}

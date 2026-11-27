@@ -239,9 +239,12 @@ y_common() { # name api-address
 	cat <<EOF
 apiserver:
    addresses:  [ $2:8080 ]
+   # Ignored, with a warning, by builds from 2026-11-27 (no API keys); an
+   # older build needs it. The rig's own CLI uses the socket.
    apikey:     $APIKEY
    certfile:   $WORK/certs/rig.crt
    keyfile:    $WORK/certs/rig.key
+   socket:     $WORK/$1/run/api.sock
 
 imrengine:
    active:     false
@@ -307,10 +310,18 @@ y_secondary() { # zone primary-addr
 	echo "          key:    NOKEY"
 }
 
-cli_conf() { # name api-address role
+cli_conf() { # name api-address role (auth or imr; tdns-auth is read as auth)
+	_role=${3#tdns-}
 	cat > "$WORK/$1/tdns-cli.yaml" <<EOF
 apiservers:
-   - name:        $3
+   # A build from 2026-11-27 on: the daemon's local admin socket, found
+   # through its config (there are no API keys; inside the rig's namespace
+   # the CLI is root).
+   - name:        $_role
+     config-file: $WORK/$1/tdns-$_role.yaml
+   # An older build reaches its daemon with the key. A newer CLI ignores
+   # this entry (its name is the old one).
+   - name:        tdns-$_role
      baseurl:     https://$2:8080/api/v1
      authmethod:  X-API-Key
      apikey:      $APIKEY
@@ -339,7 +350,7 @@ zonefile() { # zone "nsname=addr ..." [ttl]
 auth_up() { # name binary address zone
 	mkdir -p "$WORK/$1"
 	cat > "$WORK/$1/tdns-auth.yaml"
-	cli_conf "$1" "$3" tdns-auth
+	cli_conf "$1" "$3" auth
 	start_daemon "$1" "$2" "$WORK/$1/tdns-auth.yaml"
 	if ! wait_for 20 answers "$3" "$4" SOA; then
 		echo "rig: $1 did not answer $4 SOA at $3; its log:" >&2
@@ -368,12 +379,13 @@ apiserver:
    apikey:     $APIKEY
    certfile:   $WORK/certs/rig.crt
    keyfile:    $WORK/certs/rig.key
+   socket:     $WORK/q/run/api.sock
 
 log:
    file:       $WORK/q/tdns-imr.log
    level:      ${LOGLEVEL:-info}
 EOF
-	cli_conf q 127.0.0.100 tdns-imr
+	cli_conf q 127.0.0.100 imr
 	start_daemon q "$IMR" "$WORK/q/tdns-imr.yaml"
 	if ! wait_for 20 answers 127.0.0.100 . SOA; then
 		echo "rig: the resolver does not answer; its log:" >&2

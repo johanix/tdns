@@ -175,15 +175,22 @@ func entryEdits(e, up ApiDetails) (set []keyVal, drop []string) {
 			set = append(set, keyVal{k, yamlNew})
 		}
 	}
+	edit("name", e.Name, up.Name, yamlScalar(up.Name))
+	edit("role", e.Role, up.Role, yamlScalar(up.Role))
 	edit("baseurl", e.BaseURL, up.BaseURL, yamlScalar(up.BaseURL))
-	edit("apikey", e.ApiKey, up.ApiKey, yamlScalar(up.ApiKey))
-	edit("authmethod", e.AuthMethod, up.AuthMethod, yamlScalar(up.AuthMethod))
-	edit("tlsauth", e.TLSAuth, up.TLSAuth, yamlScalar(up.TLSAuth))
 	edit("pins", strings.Join(e.Pins, "\n"), strings.Join(up.Pins, "\n"), pinsFlow(up.Pins))
-	edit("rootca", e.RootCA, up.RootCA, yamlScalar(up.RootCA))
 	edit("config-file", e.ConfigFile, up.ConfigFile, yamlScalar(up.ConfigFile))
+	// The lines of the API key era go whenever an entry is edited: the
+	// CLI no longer reads them (ObsoleteEntryKeys).
+	drop = append(drop, ObsoleteEntryKeys...)
 	return set, drop
 }
+
+// ObsoleteEntryKeys are apiservers: entry keys of the API key era, which the
+// CLI no longer reads: an entry authenticates with the client certificate,
+// and verifies its daemon by pins. config update removes them from the entry
+// it edits; config check names them.
+var ObsoleteEntryKeys = []string{"apikey", "authmethod", "tlsauth", "rootca"}
 
 // editEntryText returns src with the apiservers: item named name changed:
 // each key of set given its value where it stands (its spacing and any
@@ -260,19 +267,32 @@ func editEntryText(src []byte, name string, set []keyVal, drop []string) ([]byte
 	// The item's keys start in keyCol: after "- " on its first line, or, for
 	// a "-" alone on its line, where its first key below starts.
 	keyCol := -1
+	done := map[string]bool{}
 	if m := reItemStart.FindStringSubmatch(strings.TrimRight(lines[it.from], "\r")); m != nil {
 		if strings.Contains(m[2], "\t") {
 			return nil, errors.New("the entry is indented with tabs")
 		}
 		if k := strings.ToLower(m[3]); drops[k] || sets[k] != "" {
-			return nil, fmt.Errorf("its %s: is on its first line", m[3])
+			// A rename: name: on the "-" line gets its new value where it
+			// stands, its spacing and any comment kept. Any other key there
+			// is refused.
+			if k != "name" || drops[k] {
+				return nil, fmt.Errorf("its %s: is on its first line", m[3])
+			}
+			l := strings.TrimRight(lines[it.from], "\r")
+			head := m[1] + "-" + m[2] + m[3] + ":"
+			pad, _, comment := splitValue(l[len(head):])
+			if pad == "" {
+				pad = " "
+			}
+			lines[it.from] = head + pad + sets[k] + comment + strings.TrimPrefix(lines[it.from], l)
+			done[k] = true
 		}
 		keyCol = len(m[1]) + 1 + len(m[2])
 	}
 	kept := []string{lines[it.from]}
 	lastContent := 0 // index in kept of the item's last line of content
 	dropping := false
-	done := map[string]bool{}
 	for j := it.from + 1; j < it.to; j++ {
 		l := strings.TrimRight(lines[j], "\r")
 		body := strings.TrimLeft(l, " ")
@@ -439,20 +459,8 @@ func renderEntry(e ApiDetails, lay itemLayout) string {
 	if e.BaseURL != "" {
 		kvs = append(kvs, kv{k: "baseurl", v: e.BaseURL})
 	}
-	// A socket entry has no key: the daemon authenticates the socket by file
-	// permissions. An empty apikey: line would only invite filling it in.
-	if e.ApiKey != "" {
-		kvs = append(kvs, kv{k: "apikey", v: e.ApiKey})
-	}
-	kvs = append(kvs, kv{k: "authmethod", v: e.AuthMethod})
-	if e.TLSAuth != "" {
-		kvs = append(kvs, kv{k: "tlsauth", v: e.TLSAuth})
-	}
 	if len(e.Pins) > 0 {
 		kvs = append(kvs, kv{k: "pins", v: pinsFlow(e.Pins), raw: true})
-	}
-	if e.RootCA != "" {
-		kvs = append(kvs, kv{k: "rootca", v: e.RootCA})
 	}
 	if e.ConfigFile != "" {
 		kvs = append(kvs, kv{k: "config-file", v: e.ConfigFile})
@@ -480,8 +488,8 @@ func renderEntry(e ApiDetails, lay itemLayout) string {
 }
 
 // reSafeScalar matches values that are plain scalars in YAML as they stand:
-// paths, URLs, host names and ordinary tokens. Anything else (an API key with
-// a space or a '#' or a leading '*', say) is single-quoted.
+// paths, URLs, host names and ordinary tokens. Anything else (a path with a
+// space or a '#' or a leading '*', say) is single-quoted.
 var reSafeScalar = regexp.MustCompile(`^[A-Za-z0-9_/.][A-Za-z0-9_/.:@+=\[\]-]*$`)
 
 // yamlScalar writes s as a YAML value that reads back as the string s.
@@ -489,7 +497,7 @@ var reSafeScalar = regexp.MustCompile(`^[A-Za-z0-9_/.][A-Za-z0-9_/.:@+=\[\]-]*$`
 // Plain when that is safe, single-quoted otherwise. Safe means the right
 // characters AND that YAML reads the plain form as that same string: plain
 // 001234 is the octal integer 668, 1e3 is a float and true a boolean, and
-// viper hands any of them back as a different string (an API key of 001234
+// viper hands any of them back as a different string (a value of 001234
 // would come back as "668", and the add would undo itself). The decoder asked
 // is the one viper reads the CLI config with, so the two cannot disagree.
 func yamlScalar(s string) string {
@@ -537,7 +545,8 @@ func danglingSymlink(path string) error {
 }
 
 // writeFileAtomic replaces path with data without a window in which the file
-// is half-written, keeping its mode (0600 for a new file: it holds API keys).
+// is half-written, keeping its mode (0600 for a new file: a CLI config of
+// before may hold API keys, and the client: block names a private key).
 // A symlink is followed, so the file it points at is replaced and the link
 // stays a link; a link to nothing is refused (see danglingSymlink).
 //

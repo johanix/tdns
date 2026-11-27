@@ -48,15 +48,15 @@ tdns-cli agent keystore <class> <command>         # tdns-agent's keystore
 ```
 
 The secrets are stored in cleartext. The SQLite file is a convenience store,
-not an HSM: the API key and the file's permissions are the trust boundary, not
-encryption at rest. Treat `db.file` exactly as you would treat a directory of
-private keys.
+not an HSM: admin access to the management API and the file's permissions are
+the trust boundary, not encryption at rest. Treat `db.file` exactly as you
+would treat a directory of private keys.
 
-The same goes for the API key itself. It has always been able to read private
+The same goes for admin access itself, which is the local admin socket's
+alone (root on the daemon's host). It has always been able to read private
 keys one at a time (`keystore <class> export`), but `bulk-export` reads the
 whole keystore in a single call that needs no prior knowledge of what is in
-there. That is not new authority, but it is a much shorter path — worth
-weighing before exposing the management API beyond localhost.
+there. That is not new authority, but it is a much shorter path.
 
 ### Not the keystore: the truststore
 
