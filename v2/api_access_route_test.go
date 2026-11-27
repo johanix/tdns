@@ -347,3 +347,34 @@ func TestAccessReportsTheServedPins(t *testing.T) {
 		t.Errorf("plaintext TCP API: ServerPins %v, want none", got)
 	}
 }
+
+// The file of the policy in force deleted (the config still names it): an
+// add or keyauth is refused, not a new file that holds only that change and
+// drops the clients in force and keyauth off. Nothing is written; the policy
+// stays.
+func TestAccessRefusesToReplaceThePolicyInForce(t *testing.T) {
+	_, pins := clientCerts(t, "anna", "bob")
+	e := newAuthEnv(t, "keyauth: false\nclients:\n  - {name: bob, pin: "+pins["bob"]+", role: read-write}\n", nil)
+	path := e.conf.ApiServer.AccessFile
+	os.Remove(path)
+	for _, ap := range []AccessPost{
+		{Command: "add", Name: "anna", Pin: pins["anna"], Role: "read-write"},
+		{Command: "keyauth", KeyAuth: "on"},
+	} {
+		resp := e.accessCall(t, ap)
+		if !resp.Error || !strings.Contains(resp.ErrorMsg, "is in force (1 client(s), keyauth off)") || !strings.Contains(resp.ErrorMsg, "put that file back") {
+			t.Errorf("%s with the file in force gone: %+v, want a refusal", ap.Command, resp)
+		}
+		for _, l := range strings.Split(resp.ErrorMsg, "\n") {
+			if len(l) > 72 && !strings.Contains(l, path) {
+				t.Errorf("line over 72 columns: %q", l)
+			}
+		}
+		if _, err := os.Stat(path); err == nil {
+			t.Fatalf("%s wrote %s", ap.Command, path)
+		}
+		if st := e.conf.apiAccessStatus(); st == nil || len(st.Clients) != 1 || st.KeyAuth {
+			t.Errorf("%s: policy in force %+v, want bob and keyauth off", ap.Command, st)
+		}
+	}
+}

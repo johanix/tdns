@@ -2,7 +2,6 @@ package cli
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -428,20 +427,8 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-// daemonYAML is a daemon config with an apiserver: block. It presents
-// testDaemonCert, so config add can pin it, unless extra names a certfile:
-// or keyfile: of its own.
+// daemonYAML is a daemon config with an apiserver: block.
 func daemonYAML(service, addr, key string, extra string) string {
-	if !strings.Contains(extra, "certfile:") && !strings.Contains(extra, "keyfile:") {
-		extra = "   certfile: " + testDaemonCert + "\n" + extra
-	}
-	return daemonYAMLDefaultCert(service, addr, key, extra)
-}
-
-// daemonYAMLDefaultCert is daemonYAML without a certfile: the daemon then
-// serves its default API pair (tdns.ApiCertPaths), written at its first
-// start.
-func daemonYAMLDefaultCert(service, addr, key string, extra string) string {
 	s := ""
 	if service != "" {
 		s += "service:\n   name: " + service + "\n"
@@ -527,9 +514,18 @@ type addEnv struct {
 	dir, cli string
 }
 
+// newAddEnv is a CLI config to add to, and daemons that are not running:
+// each has its default local admin socket, with nothing on it.
 func newAddEnv(t *testing.T) *addEnv {
 	t.Helper()
 	withCleanRoleRegistry(t)
+	sockDir, err := os.MkdirTemp("/tmp", "ncli") // short: a socket path has a limit
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := tdns.DefaultApiSocketDir
+	t.Cleanup(func() { tdns.DefaultApiSocketDir = saved; os.RemoveAll(sockDir) })
+	tdns.DefaultApiSocketDir = sockDir
 	dir := t.TempDir()
 	return &addEnv{dir: dir, cli: filepath.Join(dir, "tdns-ncli.yaml")}
 }
@@ -566,8 +562,8 @@ func TestAddTwoAuthDaemons(t *testing.T) {
 	first := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
 	second := env.daemon(t, "tdns-auth2.yaml", "TDNS-AUTH", "127.0.0.1:8990")
 
-	// The CLI config does not exist yet: the first add creates it, 0600 (it
-	// holds API keys), as the canonical tdns-auth.
+	// The CLI config does not exist yet: the first add creates it, 0600, as
+	// the canonical tdns-auth.
 	res, err := env.add(t, first, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -591,23 +587,23 @@ func TestAddTwoAuthDaemons(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("%d entries: %+v", len(got), got)
 	}
-	want := ApiDetails{
-		Name: "auth2", Role: "auth", BaseURL: "https://127.0.0.1:8990/api/v1",
-		ApiKey: "key-tdns-auth2.yaml", AuthMethod: "X-API-Key", ConfigFile: second,
-		TLSAuth: "pin", Pins: []string{testDaemonPin},
-	}
+	// Not running: config-file: only, and the command that completes it.
+	want := ApiDetails{Name: "auth2", Role: "auth", AuthMethod: "none", ConfigFile: second}
 	if !reflect.DeepEqual(got[1], want) {
 		t.Errorf("entry = %+v\nwant    %+v", got[1], want)
 	}
 	if got[0].ConfigFile != first {
 		t.Errorf("canonical entry lost its config-file: %+v", got[0])
 	}
+	if want := "config update auth2 --cert"; !strings.HasSuffix(res.Update, want) {
+		t.Errorf("update = %q, want %q", res.Update, want)
+	}
 
 	// Adding either again changes nothing.
 	before, _ := os.ReadFile(env.cli)
 	for _, d := range []string{first, second} {
 		res, err = env.add(t, d, nil)
-		if err != nil || res.AlreadyKnown == "" || res.Wrote {
+		if err != nil || res.AlreadyKnown == "" || res.Wrote || !strings.HasSuffix(res.Update, " --cert") {
 			t.Errorf("re-add %s: %+v, %v", d, res, err)
 		}
 	}
@@ -708,9 +704,7 @@ func TestAddNaming(t *testing.T) {
 func TestAddRefusesClashes(t *testing.T) {
 	env := newAddEnv(t)
 	first := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
-	if _, err := env.add(t, first, nil); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     apikey: k\n     authmethod: X-API-Key\n     config-file: "+first+"\n")
 
 	// A different daemon config naming the same API address.
 	clash := env.daemon(t, "tdns-auth9.yaml", "TDNS-AUTH", "127.0.0.1:8989")
@@ -758,21 +752,19 @@ func TestAddDryRunChangesNothing(t *testing.T) {
 	if b, _ := os.ReadFile(env.cli); string(b) != sampleCli {
 		t.Error("dry run changed the file")
 	}
-	// And what it would print does not carry the key.
+	// What it prints: the entry, no key, and what completes it.
 	var sb strings.Builder
 	printAddResult(&sb, res, true, env.cli)
-	if strings.Contains(sb.String(), "key-tdns-auth2.yaml") {
-		t.Errorf("the API key was printed:\n%s", sb.String())
-	}
-	if !strings.Contains(sb.String(), "********") {
-		t.Errorf("expected a masked key:\n%s", sb.String())
+	out := sb.String()
+	if !strings.HasPrefix(out, "Would add \"auth2\"") || strings.Contains(out, "apikey") || !strings.Contains(out, "config update auth2 --cert") {
+		t.Errorf("printed:\n%s", out)
 	}
 }
 
 // apiservers: defined in cli.localconfig REPLACES the main file's list, so an
-// entry added to the main file is invisible to the CLI. The add must notice,
-// undo itself, and say how to do it right.
-func TestAddUndoesWhenAnOverlayHidesTheEntry(t *testing.T) {
+// entry added to the main file is invisible to the CLI. The add must notice
+// before it writes, and say how to do it right.
+func TestAddRefusesWhenAnOverlayHidesTheEntry(t *testing.T) {
 	env := newAddEnv(t)
 	local := filepath.Join(env.dir, "local.yaml")
 	writeFile(t, local, "apiservers:\n   - name: tdns-auth\n     baseurl: https://127.0.0.1:8989/api/v1\n     apikey: k\n     authmethod: X-API-Key\n")
@@ -889,36 +881,6 @@ func TestAddRefusesADanglingSymlink(t *testing.T) {
 	}
 }
 
-// The same daemon, changed since it was added: a rotated key, or usetls
-// turned off on the same port. "Already known" would leave a dead entry.
-func TestAddSaysWhenTheDaemonChanged(t *testing.T) {
-	env := newAddEnv(t)
-	d := env.daemon(t, "tdns-auth.yaml", "TDNS-AUTH", "127.0.0.1:8989")
-	if _, err := env.add(t, d, nil); err != nil {
-		t.Fatal(err)
-	}
-	before, _ := os.ReadFile(env.cli)
-
-	writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "rotated-key", ""))
-	_, err := env.add(t, d, nil)
-	if err == nil || !strings.Contains(err.Error(), "apikey") || !strings.Contains(err.Error(), "by hand") {
-		t.Errorf("rotated key: err = %v", err)
-	}
-	if err != nil && (strings.Contains(err.Error(), "rotated-key") || strings.Contains(err.Error(), "key-tdns-auth.yaml")) {
-		t.Errorf("a key is in the error text: %v", err)
-	}
-
-	writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "key-tdns-auth.yaml", "   usetls: false\n"))
-	_, err = env.add(t, d, nil)
-	if err == nil || !strings.Contains(err.Error(), "scheme") || strings.Contains(err.Error(), "apikey") {
-		t.Errorf("usetls off: err = %v", err)
-	}
-
-	if after, _ := os.ReadFile(env.cli); string(after) != string(before) {
-		t.Errorf("the refused adds changed the file:\n%s", after)
-	}
-}
-
 func TestAddFlowStyleTellsYouWhatToAdd(t *testing.T) {
 	env := newAddEnv(t)
 	writeFile(t, env.cli, "apiservers: []\n")
@@ -926,9 +888,6 @@ func TestAddFlowStyleTellsYouWhatToAdd(t *testing.T) {
 	_, err := env.add(t, d, nil)
 	if err == nil || !strings.Contains(err.Error(), "by hand") || !strings.Contains(err.Error(), "- name:") {
 		t.Fatalf("err = %v", err)
-	}
-	if strings.Contains(err.Error(), "key-tdns-auth2.yaml") {
-		t.Errorf("the API key is in the error text: %v", err)
 	}
 }
 
@@ -1183,136 +1142,6 @@ func TestIsCliConfigCmd(t *testing.T) {
 	}
 }
 
-// config add writes the daemon's TCP entry with config-file:, whoever runs it
-// and whether or not the daemon has a local admin socket: tdns-ncli finds the
-// socket through config-file: when it runs (usableDaemonSocket), so the CLI
-// config never holds its path. A daemon with only the socket gets an entry
-// with config-file: alone, which root adds.
-func TestAddWritesTheTCPEntryWithConfigFile(t *testing.T) {
-	const sock = "/var/run/tdns/tdns-auth.sock"
-	setRoot := func(t *testing.T, root bool) {
-		saved := runningAsRoot
-		t.Cleanup(func() { runningAsRoot = saved })
-		runningAsRoot = func() bool { return root }
-	}
-	withSocket := func(env *addEnv, t *testing.T, file, addr string) string {
-		p := filepath.Join(env.dir, file)
-		writeFile(t, p, daemonYAML("TDNS-AUTH", addr, "key-"+file, "   socket: "+sock+"\n"))
-		return p
-	}
-
-	for _, root := range []bool{true, false} {
-		t.Run(fmt.Sprintf("root=%v gets the TCP entry", root), func(t *testing.T) {
-			setRoot(t, root)
-			env := newAddEnv(t)
-			d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
-			res, err := env.add(t, d, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := ApiDetails{Name: "tdns-auth", BaseURL: "https://127.0.0.1:8989/api/v1",
-				ApiKey: "key-tdns-auth.yaml", AuthMethod: "X-API-Key", ConfigFile: d,
-				TLSAuth: "pin", Pins: []string{testDaemonPin}}
-			if got := env.entries(t); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
-				t.Errorf("entries = %+v\nwant      [%+v]", got, want)
-			}
-			if raw, _ := os.ReadFile(env.cli); strings.Contains(string(raw), sock) {
-				t.Errorf("the CLI config repeats the socket's path:\n%s", raw)
-			}
-			if !strings.Contains(strings.Join(res.Notes, " "), sock) {
-				t.Errorf("notes = %q, want one saying root reaches the daemon over %s", res.Notes, sock)
-			}
-		})
-	}
-
-	t.Run("a TCP entry needs the key", func(t *testing.T) {
-		for _, root := range []bool{true, false} {
-			setRoot(t, root)
-			env := newAddEnv(t)
-			p := filepath.Join(env.dir, "tdns-auth.yaml")
-			writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "", "   socket: "+sock+"\n"))
-			if _, err := env.add(t, p, nil); err == nil || !strings.Contains(err.Error(), "apiserver.apikey is not set") {
-				t.Errorf("root=%v: err = %v, want one naming apiserver.apikey", root, err)
-			}
-		}
-	})
-
-	t.Run("a socket-only daemon: root adds config-file: alone", func(t *testing.T) {
-		setRoot(t, true)
-		env := newAddEnv(t)
-		p := filepath.Join(env.dir, "tdns-auth.yaml")
-		writeFile(t, p, "service:\n   name: TDNS-AUTH\napiserver:\n   apikey: k\n   socket: "+sock+"\n")
-		if _, err := env.add(t, p, nil); err != nil {
-			t.Fatal(err)
-		}
-		want := ApiDetails{Name: "tdns-auth", AuthMethod: "none", ConfigFile: p}
-		if got := env.entries(t); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
-			t.Errorf("entries = %+v\nwant      [%+v]", got, want)
-		}
-		raw, _ := os.ReadFile(env.cli)
-		if s := string(raw); strings.Contains(s, "baseurl") || strings.Contains(s, "apikey") {
-			t.Errorf("a socket-only entry has no baseurl or apikey line:\n%s", raw)
-		}
-		if res, err := env.add(t, p, nil); err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote {
-			t.Errorf("re-add: %+v, %v; want it already known", res, err)
-		}
-
-		setRoot(t, false)
-		env2 := newAddEnv(t)
-		if _, err := env2.add(t, p, nil); err == nil || !strings.Contains(err.Error(), "only root") {
-			t.Errorf("not root: err = %v, want one saying only root can use the socket", err)
-		}
-	})
-
-	t.Run("a socket entry written before is the same daemon", func(t *testing.T) {
-		setRoot(t, true)
-		env := newAddEnv(t)
-		d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
-		writeFile(t, env.cli, "apiservers:\n   - name: tdns-auth\n     baseurl: unix://"+sock+"\n     authmethod: none\n     config-file: "+d+"\n")
-		res, err := env.add(t, d, nil)
-		if err != nil || res.AlreadyKnown != "tdns-auth" || res.Wrote {
-			t.Errorf("%+v, %v; want it already known", res, err)
-		}
-	})
-
-	t.Run("a rotated key: the TCP entry is stale", func(t *testing.T) {
-		setRoot(t, true)
-		env := newAddEnv(t)
-		d := withSocket(env, t, "tdns-auth.yaml", "127.0.0.1:8989")
-		if _, err := env.add(t, d, nil); err != nil {
-			t.Fatal(err)
-		}
-		writeFile(t, d, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "rotated-key", "   socket: "+sock+"\n"))
-		if _, err := env.add(t, d, nil); err == nil || !strings.Contains(err.Error(), "apikey") || strings.Contains(err.Error(), "scheme") {
-			t.Errorf("err = %v, want the apikey named, and only it", err)
-		}
-	})
-
-	t.Run("a relative socket path is not used", func(t *testing.T) {
-		setRoot(t, true)
-		env := newAddEnv(t)
-		p := filepath.Join(env.dir, "tdns-auth.yaml")
-		writeFile(t, p, daemonYAML("TDNS-AUTH", "127.0.0.1:8989", "the-key", "   socket: run/tdns-auth.sock\n"))
-		res, err := env.add(t, p, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.Entry.BaseURL != "https://127.0.0.1:8989/api/v1" {
-			t.Errorf("entry = %+v, want the TCP one", res.Entry)
-		}
-		if !strings.Contains(strings.Join(res.Notes, " "), "not an absolute path") {
-			t.Errorf("notes = %q, want one saying the socket path is not absolute", res.Notes)
-		}
-
-		// With no TCP address there is nothing to add.
-		writeFile(t, p, "service:\n   name: TDNS-AUTH\napiserver:\n   socket: run/tdns-auth.sock\n")
-		env2 := newAddEnv(t)
-		if _, err := env2.add(t, p, nil); err == nil || !strings.Contains(err.Error(), "neither apiserver.addresses nor apiserver.socket") {
-			t.Errorf("err = %v, want one saying there is no management API to address", err)
-		}
-	})
-}
-
 func statOf(t *testing.T, p string) os.FileInfo {
 	t.Helper()
 	fi, err := os.Stat(p)
@@ -1368,7 +1197,7 @@ func TestPrintedAdviceKeepsTheCliConfig(t *testing.T) {
 	cfg := "/tmp/lab config.yaml"
 
 	var sb strings.Builder
-	res := &AddResult{Entry: ApiDetails{Name: "auth2", Role: "auth"}, File: "/tmp/local.yaml"}
+	res := &AddResult{Entry: ApiDetails{Name: "auth2", Role: "auth"}, File: "/tmp/local.yaml", Running: true}
 	printAddResult(&sb, res, false, cfg)
 	if want := "Try it:  tdns-ncli --config '/tmp/lab config.yaml' auth2 ping"; !strings.Contains(sb.String(), want) {
 		t.Errorf("missing %q in:\n%s", want, sb.String())

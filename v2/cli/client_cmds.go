@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/user"
@@ -289,10 +290,16 @@ func daemonSocketClient(role, daemonCfg string) (*tdns.ApiClient, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot read %s's daemon config %s: %v", role, cfg, err)
 	}
+	return socketClientOf(info)
+}
+
+// socketClientOf is the client for the local admin socket of the daemon of
+// info, naming its config on every request.
+func socketClientOf(info *DaemonApi) (*tdns.ApiClient, error) {
 	if info.Socket == "" {
 		return nil, fmt.Errorf("%s serves no local admin socket\n(socket: none), which this command needs", info.ConfigFile)
 	}
-	return tdns.NewClientWithOptions(role, "unix://"+info.Socket,
+	return tdns.NewClientWithOptions(info.Role, "unix://"+info.Socket,
 		tdns.ClientOptions{AuthMethod: "none", ExpectConfigFile: info.ConfigFile}), nil
 }
 
@@ -305,16 +312,42 @@ func entryIsDaemonSocket(e ApiDetails, info *DaemonApi) bool {
 	return info.Socket != "" && isUnixURL(e.BaseURL) && e.BaseURL[len("unix://"):] == info.Socket
 }
 
-// socketError says plainly when the local socket sock cannot be used from
-// here (not ours to open, or no daemon there). Any other err, a daemon's
-// refusal among them, is returned as it is.
+// socketError says plainly why the local socket sock cannot be used from
+// here, and what to do: not ours to open, no daemon there, or a file there
+// that is not a socket. It keeps the errno for errors.As. Any other err, a
+// daemon's refusal among them, is returned as it is. Lines of at most 72,
+// apart from the socket's.
 func socketError(sock string, err error) error {
+	errno := socketErrno(err)
+	if errno == 0 {
+		return err
+	}
+	stopped, lerr := refusedSocketStopped(errno, sock)
+	var why string
+	switch {
+	case lerr != nil:
+		why = fmt.Sprintf("the path cannot be looked at\n(%v). Run the client commands as root on the daemon's\nhost", pathCause(lerr))
+	case errno == syscall.ENOTSOCK || errno == syscall.ECONNREFUSED && !stopped:
+		why = "a file that is not a socket is\nthere, so the daemon cannot serve its socket. Remove that\nfile, then start the daemon"
+	case errno == syscall.EACCES || errno == syscall.EPERM:
+		why = "not yours to open. Run the client\ncommands as root on the daemon's host"
+	default: // ENOENT, ECONNREFUSED
+		why = "no daemon answers there. The\nclient commands need the running daemon"
+	}
+	return fmt.Errorf("cannot use the daemon's local socket\n   %s\n(%w): %s", sock, errno, why)
+}
+
+// socketErrno is err's errno when it says the socket cannot be used: not
+// ours to open (EACCES, EPERM), no daemon there (ENOENT, ECONNREFUSED), or a
+// file there that is not a socket (ENOTSOCK on the BSDs; Linux says
+// ECONNREFUSED).
+func socketErrno(err error) syscall.Errno {
 	var errno syscall.Errno
 	if errors.As(err, &errno) && (errno == syscall.EACCES || errno == syscall.EPERM ||
-		errno == syscall.ENOENT || errno == syscall.ECONNREFUSED) {
-		return fmt.Errorf("cannot use the daemon's local socket (%v):\n   %s\nThe client commands need the running daemon and its local\nsocket: run them as root on the daemon's host", errno, sock)
+		errno == syscall.ENOENT || errno == syscall.ECONNREFUSED || errno == syscall.ENOTSOCK) {
+		return errno
 	}
-	return err
+	return 0
 }
 
 // configAtDaemon sends post to the daemon of daemonCfg over its local admin
@@ -334,17 +367,33 @@ func configAtDaemon(role, daemonCfg string, post tdns.ConfigPost) (tdns.ConfigRe
 // accessAtDaemon sends post to role's daemon (see daemonSocketClient), which
 // writes its access file and answers with what is in force.
 func accessAtDaemon(role, daemonCfg string, post tdns.AccessPost) (tdns.AccessResponse, error) {
-	var resp tdns.AccessResponse
 	c, err := daemonSocketClient(role, daemonCfg)
 	if err != nil {
-		return resp, err
+		return tdns.AccessResponse{}, err
 	}
+	return accessOver(c, post)
+}
+
+// accessTimeout bounds one /access request, answer included: the daemon
+// answers from memory, after at most one small file write.
+var accessTimeout = 30 * time.Second
+
+// accessOver sends post to the daemon on c, its local admin socket. A
+// socket that cannot be used is a socketError.
+func accessOver(c *tdns.ApiClient, post tdns.AccessPost) (tdns.AccessResponse, error) {
+	var resp tdns.AccessResponse
 	body, err := json.Marshal(post)
 	if err != nil {
 		return resp, err
 	}
+	if c.Client != nil && c.Client.Timeout == 0 {
+		c.Client.Timeout = accessTimeout
+	}
 	status, buf, err := c.Post("/access", body)
+	var nerr net.Error
 	switch {
+	case errors.As(err, &nerr) && nerr.Timeout(): // headers sent or not
+		return resp, fmt.Errorf("the daemon did not answer on its local socket\n%s within %v", c.Socket, accessTimeout)
 	case status == http.StatusNotFound:
 		return resp, errors.New("the daemon has no /access route: is it older than tdns-ncli?")
 	case err != nil:

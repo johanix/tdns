@@ -98,13 +98,32 @@ func ReadApiServers(cfgFile string) ([]ApiDetails, error) {
 // be read (the defaults then apply). A client.cert set only in an include or
 // the local config is the one the CLI uses, so it is the one checked.
 func ReadCliClientConf(cfgFile string) CliClientConf {
-	var cc CliClientConf
-	v, _, err := loadCliViper(cfgFile, nil)
-	if err != nil {
-		return cc
-	}
-	_ = v.UnmarshalKey("client", &cc)
+	cc, _ := readCliClientConf(cfgFile, nil)
 	return cc
+}
+
+// readCliClientConf is ReadCliClientConf reading through fs; nil is the real
+// file system. It decodes the whole config, as the CLI's own load does
+// (viper.Unmarshal in initConfig), not the client: key alone: only that
+// applies the environment's leaf overrides (CLIENT.CERT, CLIENT.KEY). A
+// config that does not load, a cli.localconfig that does not merge, or a
+// client: block that does not decode is an error, with the zero value; a
+// config with no client: block is the zero value (the defaults).
+func readCliClientConf(cfgFile string, fs afero.Fs) (CliClientConf, error) {
+	v, localErr, err := loadCliViper(cfgFile, fs)
+	switch {
+	case err != nil:
+		return CliClientConf{}, err
+	case localErr != nil:
+		return CliClientConf{}, localErr
+	}
+	var c struct {
+		Client CliClientConf `mapstructure:"client"`
+	}
+	if err := v.Unmarshal(&c); err != nil {
+		return CliClientConf{}, fmt.Errorf("%s: client: %w", cfgFile, err)
+	}
+	return c.Client, nil
 }
 
 // readApiServers is ReadApiServers reading through fs; nil is the real file

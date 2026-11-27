@@ -4,12 +4,11 @@
  * The management API's TLS certificate when the config names none: a path
  * per config file, and a self-signed pair the daemon writes at its first
  * start. Clients verify the daemon by the pin of its key (tdns-ncli config
- * add writes the pin), so no CA is involved.
+ * add writes the pin, as the daemon serves it), so no CA is involved.
  */
 package tdns
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -93,11 +92,10 @@ func (a *ApiServerConf) applyCertDefaults(cfgfile string, write bool) {
 
 // EnsureDefaultApiCert writes the default API certificate and key of the
 // daemon whose config file is cfgfile (ApiCertPaths) when neither is there,
-// as the daemon does at its first start, and returns the key's pin when it
-// wrote them. addresses are the API's listen addresses, which the
-// certificate names (apiCertSANs). The one way the pair is made: the daemon
-// (applyCertDefaults) and tdns-ncli config add, which pins a daemon that has
-// not started yet, both call it.
+// as the daemon does at its first start (applyCertDefaults), and returns
+// the key's pin when it wrote them. addresses are the API's listen
+// addresses, which the certificate names (apiCertSANs). The daemon is the
+// only writer of its pair: tdns-ncli never makes it.
 //
 // A pair that is there is left as it is (created false). One file without
 // the other is an error, as the validator refuses it: something removed half
@@ -120,88 +118,30 @@ func EnsureDefaultApiCert(cfgfile string, addresses []string) (pin string, creat
 	case !errors.Is(kerr, os.ErrNotExist):
 		return "", false, kerr
 	}
-	p, err := NewDefaultApiCert(cfgfile, addresses)
-	if err != nil {
-		return "", false, err
-	}
-	if err := p.Write(); err != nil {
-		return "", false, err
-	}
-	return p.Pin, true, nil
-}
-
-// DefaultApiCert is a default API pair made in memory (NewDefaultApiCert)
-// and not yet written: its pin is known before anything is on disk, so a
-// caller can pin it first and write it only once the rest of its work will
-// succeed (tdns-ncli config add, which writes no pair for an entry it does
-// not write).
-type DefaultApiCert struct {
-	Cert, Key string // where it goes (ApiCertPaths)
-	Pin       string // its key's pin
-	leaf      *PKICert
-}
-
-// NewDefaultApiCert makes the default API pair of the daemon whose config
-// file is cfgfile, its certificate naming addresses (apiCertSANs), in
-// memory. Nothing is written; whether the files are there is not looked
-// at (EnsureDefaultApiCert does that).
-func NewDefaultApiCert(cfgfile string, addresses []string) (*DefaultApiCert, error) {
-	cert, key := ApiCertPaths(cfgfile)
-	if cert == "" {
-		return nil, errors.New("no config file to name the default API certificate after")
-	}
 	leaf, err := apiCertLeaf(cert, addresses)
 	if err != nil {
-		return nil, err
+		return "", false, err
 	}
-	return &DefaultApiCert{Cert: cert, Key: key, Pin: SPKISHA256(leaf.Cert), leaf: leaf}, nil
-}
-
-// Write writes the pair: the key (mode 0600) and then the certificate, each
-// only if it is not there (one made meanwhile, by the daemon's first start
-// say, is an error wrapping os.ErrExist, and nothing of this pair is left).
-func (p *DefaultApiCert) Write() error {
-	if err := os.MkdirAll(filepath.Dir(p.Cert), 0o755); err != nil {
-		return err
+	// The key (mode 0600) and then the certificate, each only if it is not
+	// there: one made meanwhile is an error, and nothing of this pair is
+	// left.
+	if err := os.MkdirAll(filepath.Dir(cert), 0o755); err != nil {
+		return "", false, err
 	}
-	if err := writeNewFile(p.Key, p.leaf.KeyPEM, 0o600); err != nil {
-		return err
+	if err := writeNewFile(key, leaf.KeyPEM, 0o600); err != nil {
+		return "", false, err
 	}
-	if err := writeNewFile(p.Cert, p.leaf.CertPEM, 0o644); err != nil {
-		os.Remove(p.Key)
-		return err
+	if err := writeNewFile(cert, leaf.CertPEM, 0o644); err != nil {
+		os.Remove(key)
+		return "", false, err
 	}
-	return nil
-}
-
-// Remove takes out the pair Write wrote, each file only while it still
-// holds what Write wrote into it, for a caller whose work failed after it.
-func (p *DefaultApiCert) Remove() error {
-	var errs []error
-	for _, f := range []struct {
-		path string
-		data []byte
-	}{{p.Cert, p.leaf.CertPEM}, {p.Key, p.leaf.KeyPEM}} {
-		cur, err := os.ReadFile(f.path)
-		switch {
-		case errors.Is(err, os.ErrNotExist):
-		case err != nil:
-			errs = append(errs, err)
-		case bytes.Equal(cur, f.data):
-			if err := os.Remove(f.path); err != nil {
-				errs = append(errs, err)
-			}
-		}
-	}
-	return errors.Join(errs...)
+	return SPKISHA256(leaf.Cert), true, nil
 }
 
 // HalfApiCertPairError is the refusal of one file of the default API pair
 // cert and key without the other: the certificate without its key when
 // certThere, else the key without its certificate. EnsureDefaultApiCert
-// returns it, and tdns-ncli config add, which must not call
-// EnsureDefaultApiCert for it (it writes a pair if the remaining file went
-// meanwhile), says the same.
+// returns it.
 func HalfApiCertPairError(cert, key string, certThere bool) error {
 	if certThere {
 		return fmt.Errorf("%s is there without its key %s: one file of the default API pair, which the daemon refuses", cert, key)
