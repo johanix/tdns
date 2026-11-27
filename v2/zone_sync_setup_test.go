@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -82,17 +83,33 @@ func waitLoaded(t *testing.T, zone string) *ZoneData {
 }
 
 // refreshAndWait runs the refresh a NOTIFY starts and waits for its answer.
+//
+// It asks again while the engine answers that a refresh is already in
+// progress. A zone added through the API first loads through the refresh
+// pool, and the test sees that load finish (published, post-refresh callbacks
+// run) before the worker has handed its outcome back and the engine has
+// cleared the zone's in-flight entry. A refresh sent in that window is
+// refused, as dispatchRefresh means it to be. Any other error fails the test.
 func refreshAndWait(t *testing.T, conf *Config, zone string) {
 	t.Helper()
-	resp := make(chan RefresherResponse, 1)
-	conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: zone, ZoneStore: MapZone, Wait: true, Response: resp}
-	select {
-	case r := <-resp:
-		if r.Error {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		resp := make(chan RefresherResponse, 1)
+		conf.Internal.RefreshZoneCh <- ZoneRefresher{Name: zone, ZoneStore: MapZone, Wait: true, Response: resp}
+		var r RefresherResponse
+		select {
+		case r = <-resp:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the refresh was not answered")
+		}
+		if !r.Error {
+			return
+		}
+		if !strings.HasPrefix(r.ErrorMsg, refreshInProgressMsg) || time.Now().After(deadline) {
 			t.Fatalf("refresh: %s", r.ErrorMsg)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the refresh was not answered")
+		t.Logf("refresh refused while the previous one was in flight; asking again")
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
