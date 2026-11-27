@@ -144,8 +144,8 @@ func SetupLogging(cfgfile string) (LogConf, error) {
 	for name, lv := range subsystemLevels {
 		if _, listed := logConf.Subsystems[name]; !listed {
 			lv.Set(defaultLevel.Level())
-			}
 		}
+	}
 	subsystemMu.RUnlock()
 
 	// Create the plain-format handler with source info
